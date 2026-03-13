@@ -43,6 +43,10 @@ def parse_args() -> argparse.Namespace:
         '--verbose', '-v', action='store_true',
         help='Enable verbose output (debug logging + detailed scan output)'
     )
+    parser.add_argument(
+        '--test-cycle', action='store_true',
+        help='Run one premarket + one intraday cycle with real data, then exit'
+    )
     return parser.parse_args()
 
 
@@ -106,12 +110,46 @@ def run_scan(config, verbose: bool = False) -> None:
     scanner.run()
 
 
+def run_test_cycle(config) -> None:
+    """Run a single test cycle (premarket + intraday) against real API."""
+    logger.info("Starting test cycle...")
+
+    alpaca = AlpacaClient(config.alpaca_api_key, config.alpaca_api_secret)
+    if not alpaca.test_connection():
+        logger.error("Alpaca API connection failed. Aborting test.")
+        sys.exit(1)
+
+    news_provider = NewsProvider(alpaca, NewsAnalyzer())
+    db = get_database(config.db_path)
+
+    criteria = ScannerCriteria(
+        price_min=config.price_min,
+        price_max=config.price_max,
+        float_max=config.float_max,
+        gap_pct_min=config.gap_pct_min,
+        intraday_change_pct_min=config.intraday_change_pct_min,
+        relative_volume_min=config.relative_volume_min,
+    )
+
+    scanner = RealtimeScanner(
+        alpaca_client=alpaca,
+        news_provider=news_provider,
+        db=db,
+        criteria=criteria,
+        poll_interval=60,
+        verbose=True,
+    )
+
+    summary = scanner.run_test_cycle()
+    logger.info(f"Test cycle complete: {summary}")
+
+
 def main() -> None:
     """Main entry point."""
     args = parse_args()
 
-    if not args.batch and not args.scan:
-        print("Error: specify --batch or --scan (or both)")
+    if not args.batch and not args.scan and not args.test_cycle:
+        print("Error: specify --batch, --scan, or --test-cycle")
         print("Run 'python main.py --help' for usage")
         sys.exit(1)
 
@@ -128,6 +166,9 @@ def main() -> None:
 
     if args.scan:
         run_scan(config, verbose=args.verbose)
+
+    if args.test_cycle:
+        run_test_cycle(config)
 
 
 if __name__ == "__main__":

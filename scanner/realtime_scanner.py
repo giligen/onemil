@@ -97,6 +97,65 @@ class RealtimeScanner:
                 logger.info("Market closed (after 16:00 ET). Scanner complete.")
                 break
 
+    def run_test_cycle(self) -> Dict:
+        """
+        Run a single premarket + intraday cycle for testing.
+
+        Runs against real API data, no time-gating or sleep.
+        Returns a summary dict for verification.
+        """
+        self._load_universe()
+
+        if not self._universe:
+            logger.error("No stocks in universe. Run --batch first.")
+            return {'error': 'empty universe'}
+
+        symbols = [s['symbol'] for s in self._universe]
+        logger.info(f"TEST CYCLE: {len(self._universe)} stocks, "
+                     f"{len(self._volume_profiles)} with volume profiles")
+
+        # --- Pre-market gap scan (uses latest trade vs prev close) ---
+        logger.info("=" * 60)
+        logger.info("TEST: Running pre-market gap scan...")
+        self._run_premarket_cycle()
+
+        premarket_results = self.db.get_scan_results(self._today, phase='premarket')
+        logger.info(f"Pre-market: {len(premarket_results)} gap-up candidates found")
+
+        # --- Intraday scan ---
+        logger.info("=" * 60)
+        logger.info("TEST: Running intraday scan cycle...")
+        self._run_intraday_cycle()
+
+        intraday_results = self.db.get_scan_results(self._today, phase='intraday')
+        logger.info(f"Intraday: {len(intraday_results)} qualified stocks found")
+
+        # --- Summary stats ---
+        logger.info("=" * 60)
+        logger.info("TEST CYCLE SUMMARY")
+        logger.info(f"  Universe: {len(self._universe)} stocks")
+        logger.info(f"  Volume profiles loaded: {len(self._volume_profiles)}")
+        logger.info(f"  Pre-market gap-ups (>=2%): {len(premarket_results)}")
+        for r in premarket_results:
+            logger.info(f"    {r['symbol']}: gap {r['gap_pct']:.1f}%, "
+                        f"price ${r['current_price']:.2f}, news: {r['news_headline']}")
+        logger.info(f"  Intraday qualified: {len(intraday_results)}")
+        for r in intraday_results:
+            logger.info(f"    {r['symbol']}: {r['intraday_change_pct']:+.1f}%, "
+                        f"relVol {r['relative_volume']:.1f}x, "
+                        f"price ${r['current_price']:.2f}, "
+                        f"bucket {r['time_bucket']}")
+        logger.info("=" * 60)
+
+        return {
+            'universe_size': len(self._universe),
+            'volume_profiles': len(self._volume_profiles),
+            'premarket_candidates': len(premarket_results),
+            'intraday_qualified': len(intraday_results),
+            'premarket_results': premarket_results,
+            'intraday_results': intraday_results,
+        }
+
     def _load_universe(self) -> None:
         """Load universe and volume profiles from DB."""
         self._universe = self.db.get_active_universe()
@@ -203,6 +262,7 @@ class RealtimeScanner:
 
         qualified = []
         close_calls = []
+        hot_stocks = []  # 5x vol + 10% move (pre-news filter)
         vol_5x_count = 0
         move_10pct_count = 0
         news_count = 0
@@ -243,6 +303,21 @@ class RealtimeScanner:
                 has_news, headline = self.news.has_interesting_news(symbol)
                 if has_news:
                     news_count += 1
+
+                # Track hot stocks for verbose output (regardless of news)
+                hot_stocks.append({
+                    'symbol': symbol,
+                    'company_name': stock.get('company_name', ''),
+                    'prev_close': prev_close,
+                    'current_price': current_price,
+                    'change_pct': intraday_change_pct,
+                    'relative_volume': relative_volume,
+                    'current_volume': current_volume,
+                    'avg_volume': avg_vol,
+                    'float_shares': stock.get('float_shares', 0),
+                    'has_news': has_news,
+                    'headline': headline,
+                })
 
             candidate = ScanCandidate(
                 symbol=symbol,
@@ -287,7 +362,7 @@ class RealtimeScanner:
 
         # Output
         self._print_intraday_output(bucket, symbols, vol_5x_count, move_10pct_count,
-                                     news_count, qualified, close_calls)
+                                     news_count, qualified, close_calls, hot_stocks)
 
     def _print_intraday_output(
         self,
@@ -298,26 +373,40 @@ class RealtimeScanner:
         news: int,
         qualified: List[ScanCandidate],
         close_calls: List[ScanCandidate],
+        hot_stocks: Optional[List[Dict]] = None,
     ) -> None:
         """Print intraday scan results to console."""
+        summary_line = (
+            f"Scan {bucket} ET | Universe: {len(symbols)} | "
+            f"5x Vol: {vol_5x} | 10%+ Move: {move_10pct} | "
+            f"News: {news} | QUALIFIED: {len(qualified)}"
+        )
+
         if qualified:
             print(f"\n{'=' * 70}")
-            print(
-                f"SCAN {bucket} ET | Universe: {len(symbols)} | "
-                f"5x Vol: {vol_5x} | 10%+ Move: {move_10pct} | "
-                f"News: {news} | QUALIFIED: {len(qualified)}"
-            )
+            print(summary_line)
             print(f"{'=' * 70}")
             for c in sorted(qualified, key=lambda x: x.intraday_change_pct, reverse=True):
                 print(self.criteria.format_candidate(c, 'intraday'))
+        elif self.verbose:
+            print(summary_line)
 
         if self.verbose:
-            if not qualified:
-                print(
-                    f"Scan {bucket} ET | Universe: {len(symbols)} | "
-                    f"5x Vol: {vol_5x} | 10%+ Move: {move_10pct} | "
-                    f"News: {news} | QUALIFIED: 0"
-                )
+            # Show hot stocks: passed 5x vol + 10% move (before news filter)
+            if hot_stocks:
+                print(f"  Hot stocks (5x vol + 10%+ move): {len(hot_stocks)}")
+                for h in sorted(hot_stocks, key=lambda x: x['change_pct'], reverse=True):
+                    news_status = f'"{h["headline"]}"' if h['has_news'] else 'NO NEWS'
+                    print(
+                        f"    {h['symbol']:<6} "
+                        f"${h['prev_close']:.2f} -> ${h['current_price']:.2f} "
+                        f"({h['change_pct']:+.1f}%)  "
+                        f"RelVol: {h['relative_volume']:.1f}x "
+                        f"(vol: {h['current_volume']:,} / avg: {h['avg_volume']:,})  "
+                        f"Float: {h['float_shares'] / 1_000_000:.1f}M  "
+                        f"News: {news_status}"
+                    )
+
             if close_calls:
                 print(f"  Close calls ({len(close_calls)}):")
                 for c in close_calls:
