@@ -1,10 +1,14 @@
 # Dependencies
 node_modules/
 vendor/
+__pycache__/
+*.pyc
+*.pyo
 
 # Environment
 .env
 .env.*
+!.env.example
 
 # IDE
 .vscode/
@@ -23,6 +27,20 @@ build/
 *.dll
 *.so
 *.dylib
+*.egg-info/
 
 # Logs
 *.log
+logs/
+
+# Data
+data/
+*.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Claude
+.claude/

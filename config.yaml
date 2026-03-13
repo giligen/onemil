@@ -1,0 +1,47 @@
+# OneMil Scanner Configuration
+
+# Logging
+log_level: INFO
+
+# Scanner thresholds
+scanner:
+  # Price range filter
+  price_min: 2.0
+  price_max: 20.0
+
+  # Float filter (shares)
+  float_max: 10_000_000
+
+  # Pre-market gap threshold
+  gap_pct_min: 2.0
+
+  # Intraday move threshold
+  intraday_change_pct_min: 10.0
+
+  # Relative volume threshold (bucket vol / avg bucket vol)
+  relative_volume_min: 5.0
+
+  # Volume profile lookback days
+  volume_profile_days: 50
+
+# Timing
+timing:
+  # Pre-market polling interval (seconds)
+  premarket_poll_interval: 60
+
+  # Intraday scan interval (minutes) - aligned to 15-min buckets
+  intraday_scan_interval: 15
+
+  # Market hours (Eastern Time)
+  premarket_start: "04:00"
+  market_open: "09:30"
+  market_close: "16:00"
+
+# Database
+database:
+  path: data/onemil.db
+
+# Float caching
+float_cache:
+  # Refresh float data if older than N days
+  refresh_days: 7
