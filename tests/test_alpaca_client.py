@@ -36,18 +36,23 @@ from data_sources.alpaca_client import (
 
 @pytest.fixture
 def mock_sdk_clients():
-    """Patch both Alpaca SDK client constructors so no real connection is made."""
+    """Patch all Alpaca SDK client constructors so no real connection is made."""
     with patch("data_sources.alpaca_client.StockHistoricalDataClient") as mock_data_cls, \
-         patch("data_sources.alpaca_client.TradingClient") as mock_trading_cls:
+         patch("data_sources.alpaca_client.TradingClient") as mock_trading_cls, \
+         patch("data_sources.alpaca_client.NewsClient") as mock_news_cls:
         mock_data_inst = MagicMock()
         mock_trading_inst = MagicMock()
+        mock_news_inst = MagicMock()
         mock_data_cls.return_value = mock_data_inst
         mock_trading_cls.return_value = mock_trading_inst
+        mock_news_cls.return_value = mock_news_inst
         yield {
             "data_cls": mock_data_cls,
             "trading_cls": mock_trading_cls,
+            "news_cls": mock_news_cls,
             "data_client": mock_data_inst,
             "trading_client": mock_trading_inst,
+            "news_client": mock_news_inst,
         }
 
 
@@ -190,13 +195,22 @@ class TestGetAllTradeableAssets:
         assert "AAPL" in symbols
         assert "DELISTED" not in symbols
 
-    def test_filters_fractionable_none(self, client, mock_sdk_clients):
-        """Excludes assets where fractionable is None."""
-        asset = _make_asset("ODD", tradable=True, fractionable=None)
-        mock_sdk_clients["trading_client"].get_all_assets.return_value = [asset]
+    def test_filters_warrants_and_preferred(self, client, mock_sdk_clients):
+        """Excludes warrants, preferred shares, and rights from results."""
+        assets = [
+            _make_asset("AAPL", name="Apple Inc", tradable=True),
+            _make_asset("ARBEW", name="Arbe Robotics Ltd. Warrant", tradable=True),
+            _make_asset("BAC.PRE", name="Bank of America Preferred E", tradable=True),
+            _make_asset("BIORR", name="Biora Therapeutics Rights", tradable=True),
+        ]
+        mock_sdk_clients["trading_client"].get_all_assets.return_value = assets
 
         result = client.get_all_tradeable_assets()
-        assert len(result) == 0
+        symbols = [a["symbol"] for a in result]
+        assert "AAPL" in symbols
+        assert "ARBEW" not in symbols, "Warrants should be excluded"
+        assert "BAC.PRE" not in symbols, "Preferred shares should be excluded"
+        assert "BIORR" not in symbols, "Rights should be excluded"
 
     def test_handles_missing_name(self, client, mock_sdk_clients):
         """Handles asset with name=None gracefully."""
@@ -431,18 +445,17 @@ class TestGetNews:
     """Tests for AlpacaClient.get_news."""
 
     def test_returns_articles(self, client, mock_sdk_clients):
-        """Returns list of article dicts parsed from API response."""
-        mock_sdk_clients["trading_client"]._get.return_value = {
-            "news": [
-                {
-                    "headline": "AAPL hits new high",
-                    "summary": "Apple stock surges",
-                    "source": "Reuters",
-                    "created_at": "2026-03-13T10:00:00Z",
-                    "url": "https://example.com/article",
-                },
-            ]
-        }
+        """Returns list of article dicts parsed from NewsClient response."""
+        mock_article = MagicMock()
+        mock_article.headline = "AAPL hits new high"
+        mock_article.summary = "Apple stock surges"
+        mock_article.source = "Reuters"
+        mock_article.created_at = "2026-03-13T10:00:00Z"
+        mock_article.url = "https://example.com/article"
+
+        mock_news_set = MagicMock()
+        mock_news_set.data = {"news": [mock_article]}
+        mock_sdk_clients["news_client"].get_news.return_value = mock_news_set
 
         result = client.get_news("AAPL", limit=5)
 
@@ -451,24 +464,27 @@ class TestGetNews:
         assert result[0]["source"] == "Reuters"
 
     def test_empty_response_returns_empty(self, client, mock_sdk_clients):
-        """Non-dict response returns empty list."""
-        mock_sdk_clients["trading_client"]._get.return_value = {}
+        """Empty news list returns empty list."""
+        mock_news_set = MagicMock()
+        mock_news_set.data = {"news": []}
+        mock_sdk_clients["news_client"].get_news.return_value = mock_news_set
 
         result = client.get_news("AAPL")
         assert result == []
 
     def test_api_error_returns_empty_with_warning(self, client, mock_sdk_clients):
         """API failure returns empty list (news is non-critical)."""
-        mock_sdk_clients["trading_client"]._get.side_effect = RuntimeError("news api down")
+        mock_sdk_clients["news_client"].get_news.side_effect = RuntimeError("news api down")
 
         result = client.get_news("AAPL")
         assert result == []
 
     def test_missing_fields_default_to_empty(self, client, mock_sdk_clients):
-        """Missing article fields default to empty string."""
-        mock_sdk_clients["trading_client"]._get.return_value = {
-            "news": [{}]
-        }
+        """Missing article attributes default to empty string via getattr."""
+        mock_article = MagicMock(spec=[])  # Empty spec = no attributes
+        mock_news_set = MagicMock()
+        mock_news_set.data = {"news": [mock_article]}
+        mock_sdk_clients["news_client"].get_news.return_value = mock_news_set
 
         result = client.get_news("AAPL")
         assert result[0]["headline"] == ""

@@ -19,12 +19,14 @@ from typing import Dict, Optional, List, Callable, TypeVar
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.historical.news import NewsClient
 from alpaca.data.requests import (
     StockLatestTradeRequest,
     StockBarsRequest,
     StockLatestBarRequest,
+    NewsRequest,
 )
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.data.enums import DataFeed
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import GetAssetsRequest
@@ -77,6 +79,7 @@ class AlpacaClient:
 
         self.data_client = StockHistoricalDataClient(api_key, api_secret)
         self.trading_client = TradingClient(api_key, api_secret, paper=True)
+        self.news_client = NewsClient(api_key, api_secret)
         self._api_timeout = DEFAULT_API_TIMEOUT
 
         logger.info("AlpacaClient initialized")
@@ -128,16 +131,65 @@ class AlpacaClient:
             raise AlpacaAPIError(f"API call failed: {operation}") from last_exception
         raise AlpacaAPIError(f"API call failed unexpectedly: {operation}")
 
+    @staticmethod
+    def _to_dict(response) -> dict:
+        """
+        Normalize alpaca-py SDK response to a plain dict.
+
+        The SDK's BarSet/TradeSet/QuoteSet objects have a broken __contains__
+        that doesn't match __getitem__. Using .data gives us a real dict.
+        """
+        if hasattr(response, 'data'):
+            return response.data
+        if isinstance(response, dict):
+            return response
+        logger.warning(f"Unexpected response type: {type(response)}, returning as-is")
+        return response
+
     # =========================================================================
     # Assets
     # =========================================================================
 
+    # Non-common-stock keywords in asset names
+    _EXCLUDED_NAME_KEYWORDS = [
+        'Warrant', 'Rights', 'Preferred',
+    ]
+
+    # Non-common-stock patterns in symbols
+    _EXCLUDED_SYMBOL_PATTERNS = ['.PR']
+
+    @classmethod
+    def _is_common_stock(cls, symbol: str, name: str) -> bool:
+        """
+        Filter out warrants, units, preferred shares, rights, and SPACs.
+
+        Only keeps common stocks suitable for momentum day trading.
+        """
+        name_upper = (name or '').upper()
+
+        # Preferred shares: symbol contains .PR (e.g., BAC.PRE)
+        if '.PR' in symbol:
+            return False
+
+        # Check name for non-stock keywords
+        for keyword in cls._EXCLUDED_NAME_KEYWORDS:
+            if keyword.upper() in name_upper:
+                return False
+
+        # Units: symbol ends with 'U' AND name ends with 'Unit' or 'Units'
+        if symbol.endswith('U') and (name_upper.endswith('UNIT') or name_upper.endswith('UNITS')):
+            return False
+
+        return True
+
     def get_all_tradeable_assets(self) -> List[Dict]:
         """
-        Get all tradeable US equity assets.
+        Get all tradeable US common stock assets.
+
+        Filters out warrants, units, preferred shares, and rights.
 
         Returns:
-            List of dicts with symbol, name, exchange, tradable info
+            List of dicts with symbol, name, exchange info
 
         Raises:
             AlpacaAPIError: If API call fails
@@ -151,15 +203,31 @@ class AlpacaClient:
                 lambda: self.trading_client.get_all_assets(request),
                 "get_all_tradeable_assets"
             )
+
+            total_tradeable = 0
             tradeable = []
+            excluded_count = 0
+
             for asset in assets:
-                if asset.tradable and asset.fractionable is not None:
-                    tradeable.append({
-                        'symbol': asset.symbol,
-                        'company_name': asset.name or '',
-                        'exchange': asset.exchange.value if asset.exchange else '',
-                    })
-            logger.info(f"Fetched {len(tradeable)} tradeable US stocks")
+                if not asset.tradable:
+                    continue
+                total_tradeable += 1
+
+                if not self._is_common_stock(asset.symbol, asset.name or ''):
+                    excluded_count += 1
+                    continue
+
+                tradeable.append({
+                    'symbol': asset.symbol,
+                    'company_name': asset.name or '',
+                    'exchange': asset.exchange.value if asset.exchange else '',
+                })
+
+            logger.info(
+                f"Fetched {len(tradeable)} common stocks "
+                f"(excluded {excluded_count} warrants/preferred/units/rights "
+                f"from {total_tradeable} tradeable)"
+            )
             return tradeable
         except AlpacaAPIError:
             raise
@@ -202,10 +270,11 @@ class AlpacaClient:
                     start=start,
                     feed=DataFeed.SIP
                 )
-                bars = self._call_with_timeout(
+                bars_raw = self._call_with_timeout(
                     lambda req=request: self.data_client.get_stock_bars(req),
                     f"get_daily_bars(chunk {i // chunk_size + 1})"
                 )
+                bars = self._to_dict(bars_raw)
 
                 for symbol in chunk:
                     if symbol in bars and len(bars[symbol]) > 0:
@@ -250,14 +319,15 @@ class AlpacaClient:
             start = datetime.now(timezone.utc) - timedelta(days=days * 2)  # Buffer for weekends
             request = StockBarsRequest(
                 symbol_or_symbols=symbol,
-                timeframe=TimeFrame(15, 'Min'),
+                timeframe=TimeFrame(15, TimeFrameUnit.Minute),
                 start=start,
                 feed=DataFeed.SIP
             )
-            bars = self._call_with_timeout(
+            bars_raw = self._call_with_timeout(
                 lambda: self.data_client.get_stock_bars(request),
                 f"get_intraday_bars({symbol})"
             )
+            bars = self._to_dict(bars_raw)
 
             if symbol not in bars or len(bars[symbol]) == 0:
                 logger.warning(f"No intraday bars returned for {symbol}")
@@ -309,10 +379,11 @@ class AlpacaClient:
             for i in range(0, len(symbols), chunk_size):
                 chunk = symbols[i:i + chunk_size]
                 request = StockLatestTradeRequest(symbol_or_symbols=chunk, feed=feed)
-                trades = self._call_with_timeout(
+                trades_raw = self._call_with_timeout(
                     lambda req=request: self.data_client.get_stock_latest_trade(req),
                     f"get_latest_trades(chunk {i // chunk_size + 1})"
                 )
+                trades = self._to_dict(trades_raw)
                 for symbol in chunk:
                     if symbol in trades:
                         trade = trades[symbol]
@@ -354,10 +425,11 @@ class AlpacaClient:
             for i in range(0, len(symbols), chunk_size):
                 chunk = symbols[i:i + chunk_size]
                 request = StockLatestBarRequest(symbol_or_symbols=chunk, feed=feed)
-                bars = self._call_with_timeout(
+                bars_raw = self._call_with_timeout(
                     lambda req=request: self.data_client.get_stock_latest_bar(req),
                     f"get_current_bars(chunk {i // chunk_size + 1})"
                 )
+                bars = self._to_dict(bars_raw)
                 for symbol in chunk:
                     if symbol in bars:
                         bar = bars[symbol]
@@ -398,24 +470,26 @@ class AlpacaClient:
             AlpacaAPIError: If API call fails
         """
         try:
-            news = self._call_with_timeout(
-                lambda: self.trading_client._get(  # Using internal method for news endpoint
-                    f"/v1beta1/news",
-                    {"symbols": symbol, "limit": limit, "sort": "desc"}
-                ),
+            request = NewsRequest(symbols=symbol, limit=limit, sort='desc')
+            news_set = self._call_with_timeout(
+                lambda: self.news_client.get_news(request),
                 f"get_news({symbol})"
             )
 
             articles = []
-            if isinstance(news, dict) and 'news' in news:
-                for article in news['news']:
-                    articles.append({
-                        'headline': article.get('headline', ''),
-                        'summary': article.get('summary', ''),
-                        'source': article.get('source', ''),
-                        'created_at': article.get('created_at', ''),
-                        'url': article.get('url', ''),
-                    })
+            # NewsSet.data contains the list of news articles keyed by 'news'
+            news_data = news_set.data if hasattr(news_set, 'data') else {}
+            news_list = news_data.get('news', []) if isinstance(news_data, dict) else []
+
+            for article in news_list:
+                articles.append({
+                    'headline': getattr(article, 'headline', ''),
+                    'summary': getattr(article, 'summary', ''),
+                    'source': getattr(article, 'source', ''),
+                    'created_at': str(getattr(article, 'created_at', '')),
+                    'url': getattr(article, 'url', ''),
+                })
+
             logger.debug(f"Fetched {len(articles)} news articles for {symbol}")
             return articles
 
