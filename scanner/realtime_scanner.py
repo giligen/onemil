@@ -292,7 +292,7 @@ class RealtimeScanner:
 
             if relative_volume >= self.criteria.relative_volume_min:
                 vol_5x_count += 1
-            if abs(intraday_change_pct) >= self.criteria.intraday_change_pct_min:
+            if intraday_change_pct >= self.criteria.intraday_change_pct_min:
                 move_10pct_count += 1
 
             # Only check news for stocks that pass volume + price criteria
