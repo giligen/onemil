@@ -79,6 +79,14 @@ class UniverseBuilder:
         """
         Run the full universe build pipeline.
 
+        Pipeline (optimized to minimize expensive API calls):
+        1. Fetch all tradeable common stock assets
+        2. Get previous close prices (daily bars)
+        3. Price filter $2-$20 (cuts ~11K to ~3K)
+        4. Fetch float for price-filtered only (~3K, not 11K)
+        5. Float filter <=10M (cuts to ~hundreds)
+        6. Fetch 50-day 15-min volume profiles (only final universe)
+
         Returns:
             Summary dict with counts and changes
         """
@@ -91,23 +99,25 @@ class UniverseBuilder:
             s['symbol'] for s in self.db.get_active_universe()
         )
 
-        # Step 1: Fetch all tradeable assets
+        # Step 1: Fetch all tradeable common stock assets
         assets = self.alpaca.get_all_tradeable_assets()
-        logger.info(f"Step 1: Fetched {len(assets)} tradeable US stocks")
+        asset_map = {a['symbol']: a for a in assets}
+        logger.info(f"Step 1: Fetched {len(assets)} tradeable US common stocks")
 
         # Step 2: Get previous close prices
         symbols = [a['symbol'] for a in assets]
         daily_bars = self.alpaca.get_daily_bars(symbols)
-        logger.info(f"Step 2: Got daily bars for {len(daily_bars)} stocks")
+        logger.info(f"Step 2: Got daily bars for {len(daily_bars)}/{len(symbols)} stocks")
 
-        # Step 3: Filter by price
+        # Step 3: Filter by price ($2-$20)
         price_filtered = self._filter_by_price(assets, daily_bars)
+        price_filtered_syms = set(s['symbol'] for s in price_filtered)
         logger.info(
             f"Step 3: Price filter ${self.price_min}-${self.price_max}: "
-            f"{len(price_filtered)} passed out of {len(assets)}"
+            f"{len(price_filtered)} passed out of {len(daily_bars)}"
         )
 
-        # Step 4: Store price-filtered stocks, then get float
+        # Step 4: Persist price-filtered to DB, then fetch float
         now = datetime.now(timezone.utc)
         for stock in price_filtered:
             symbol = stock['symbol']
@@ -116,7 +126,7 @@ class UniverseBuilder:
                 'symbol': symbol,
                 'company_name': stock.get('company_name', ''),
                 'exchange': stock.get('exchange', ''),
-                'sector': None,  # Updated during float fetch
+                'sector': None,
                 'country': None,
                 'price_close': bar.get('close', 0),
                 'float_shares': None,
@@ -125,26 +135,26 @@ class UniverseBuilder:
                 'last_updated': now,
                 'active': 1,
             })
+        logger.info(f"Step 4: Stored {len(price_filtered)} price-filtered stocks in DB")
 
-        # Get symbols needing float update
+        # Step 5: Fetch float + sector/country (only for price-filtered, skip fresh cache)
         symbols_need_float = self.db.get_symbols_needing_float_update(
             max_age_days=self.float_cache_refresh_days
         )
-        # Only fetch for price-filtered symbols
-        price_filtered_syms = set(s['symbol'] for s in price_filtered)
         symbols_need_float = [s for s in symbols_need_float if s in price_filtered_syms]
-
-        logger.info(f"Step 4: {len(symbols_need_float)} symbols need float update (of {len(price_filtered)} price-filtered)")
+        logger.info(
+            f"Step 5: {len(symbols_need_float)} need float update "
+            f"(of {len(price_filtered)} price-filtered)"
+        )
 
         if symbols_need_float:
-            float_data = self.float_provider.get_float_batch(symbols_need_float)
-            for symbol, float_shares in float_data.items():
-                if float_shares is not None:
-                    self.db.update_float(symbol, float_shares)
+            # Single pass: fetch float + sector + country together
+            stock_info_batch = self.float_provider.get_stock_info_batch(symbols_need_float)
+            for symbol, info in stock_info_batch.items():
+                float_shares = info.get('float_shares')
+                # Always update float_updated_at (even for None) to prevent re-fetching
+                self.db.update_float(symbol, float_shares)
 
-            # Also fetch sector/country info for new symbols
-            for symbol in symbols_need_float:
-                info = self.float_provider.get_stock_info(symbol)
                 if info.get('sector') or info.get('country'):
                     stock = self.db.get_universe_stock(symbol)
                     if stock:
@@ -153,26 +163,21 @@ class UniverseBuilder:
                         stock['last_updated'] = now
                         self.db.upsert_universe_stock(stock)
 
-        # Step 5: Filter by float
+        # Step 6: Filter by float
         float_passed = self._filter_by_float()
+        current_symbols = set(s['symbol'] for s in float_passed)
         logger.info(
-            f"Step 5: Float filter <= {self.float_max / 1_000_000:.0f}M: "
+            f"Step 6: Float filter <= {self.float_max / 1_000_000:.0f}M: "
             f"{len(float_passed)} passed"
         )
 
         # Deactivate stocks that no longer qualify
-        current_symbols = set(s['symbol'] for s in float_passed)
-        to_deactivate = previous_symbols - current_symbols
+        to_deactivate = (previous_symbols | price_filtered_syms) - current_symbols
         if to_deactivate:
             self.db.deactivate_stocks(list(to_deactivate))
             logger.info(f"Deactivated {len(to_deactivate)} stocks no longer qualifying")
 
-        # Also deactivate price-filtered stocks that didn't pass float
-        price_not_float = price_filtered_syms - current_symbols
-        if price_not_float:
-            self.db.deactivate_stocks(list(price_not_float))
-
-        # Step 6: Cache volume profiles
+        # Step 7: Cache volume profiles (only for final universe - smallest set)
         self._cache_volume_profiles(float_passed)
 
         # Summary

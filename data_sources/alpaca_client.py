@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar('T')
 
-DEFAULT_API_TIMEOUT = 30
+DEFAULT_API_TIMEOUT = 60
 MAX_RATE_LIMIT_RETRIES = 5
 INITIAL_BACKOFF_SECONDS = 1.0
 
@@ -285,8 +285,7 @@ class AlpacaClient:
                             'timestamp': latest.timestamp
                         }
 
-                if i + chunk_size < len(symbols):
-                    logger.debug(f"Daily bars progress: {min(i + chunk_size, len(symbols))}/{len(symbols)}")
+                logger.info(f"Daily bars progress: {min(i + chunk_size, len(symbols))}/{len(symbols)}")
 
             logger.info(f"Fetched daily bars for {len(results)}/{len(symbols)} symbols")
             return results

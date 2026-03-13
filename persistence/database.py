@@ -260,8 +260,13 @@ class Database:
         """, (cutoff,))
         return [row['symbol'] for row in cursor.fetchall()]
 
-    def update_float(self, symbol: str, float_shares: int) -> None:
-        """Update float data for a symbol."""
+    def update_float(self, symbol: str, float_shares: Optional[int]) -> None:
+        """
+        Update float data for a symbol.
+
+        Also updates float_updated_at to mark it as recently checked,
+        even when float_shares is None (prevents re-fetching unavailable data).
+        """
         now = datetime.now(timezone.utc)
         self.conn.execute("""
             UPDATE universe SET float_shares = ?, float_updated_at = ?, last_updated = ?

@@ -133,14 +133,11 @@ class TestUniverseBuildToScanFlow:
                     })
         mock_alpaca.get_intraday_bars.return_value = pd.DataFrame(intraday_records)
 
-        # Float provider returns low float for AAA/BBB, high float for CCC
-        mock_float_provider.get_float_batch.return_value = {
-            'AAA': 2_000_000,
-            'BBB': 5_000_000,
-            'CCC': 50_000_000,  # Over 10M threshold
-        }
-        mock_float_provider.get_stock_info.return_value = {
-            'sector': 'Technology', 'country': 'US', 'float_shares': None
+        # Float provider returns float + sector/country in single pass
+        mock_float_provider.get_stock_info_batch.return_value = {
+            'AAA': {'float_shares': 2_000_000, 'sector': 'Technology', 'country': 'US'},
+            'BBB': {'float_shares': 5_000_000, 'sector': 'Healthcare', 'country': 'US'},
+            'CCC': {'float_shares': 50_000_000, 'sector': 'Finance', 'country': 'US'},
         }
 
         # --- Act ---
@@ -459,6 +456,28 @@ class TestFloatCacheSkipFresh:
         needing_update = db.get_symbols_needing_float_update(max_age_days=7)
         assert 'BOUNDARY' in needing_update, "Stock at boundary should need update"
 
+    def test_null_float_with_recent_check_skipped(self, db):
+        """
+        Stocks where float is None but float_updated_at is recent should be skipped.
+
+        This prevents re-fetching ETFs/CEFs that will never have float data.
+        """
+        now = datetime.now(timezone.utc)
+        recent = now - timedelta(days=2)
+
+        _seed_universe(db, [
+            # Checked 2 days ago, no float available — should be SKIPPED
+            {'symbol': 'NOFLOAT_RECENT', 'float_shares': None, 'float_updated_at': recent},
+            # Never checked — should need update
+            {'symbol': 'NOFLOAT_NEVER', 'float_shares': None, 'float_updated_at': None},
+        ])
+
+        needing_update = db.get_symbols_needing_float_update(max_age_days=7)
+        assert 'NOFLOAT_RECENT' not in needing_update, \
+            "Recently checked null-float should be skipped"
+        assert 'NOFLOAT_NEVER' in needing_update, \
+            "Never-checked null-float should need update"
+
 
 # =============================================================================
 # 6. Deactivation on rebuild
@@ -488,13 +507,10 @@ class TestDeactivationOnRebuild:
         }
         mock_alpaca.get_intraday_bars.return_value = pd.DataFrame()  # Skip vol profiles
 
-        mock_float_provider.get_float_batch.return_value = {
-            'AAAA': 2_000_000,
-            'BBBB': 3_000_000,
-            'CCCC': 4_000_000,
-        }
-        mock_float_provider.get_stock_info.return_value = {
-            'sector': 'Tech', 'country': 'US', 'float_shares': None
+        mock_float_provider.get_stock_info_batch.return_value = {
+            'AAAA': {'float_shares': 2_000_000, 'sector': 'Tech', 'country': 'US'},
+            'BBBB': {'float_shares': 3_000_000, 'sector': 'Tech', 'country': 'US'},
+            'CCCC': {'float_shares': 4_000_000, 'sector': 'Tech', 'country': 'US'},
         }
 
         builder = UniverseBuilder(
@@ -525,8 +541,8 @@ class TestDeactivationOnRebuild:
         }
 
         # On second build, CCCC's float is now 20M (secondary offering dilution)
-        mock_float_provider.get_float_batch.return_value = {
-            'CCCC': 20_000_000,
+        mock_float_provider.get_stock_info_batch.return_value = {
+            'CCCC': {'float_shares': 20_000_000, 'sector': 'Tech', 'country': 'US'},
         }
 
         result_v2 = builder.build()

@@ -247,16 +247,11 @@ class TestBuild:
             'EXPENSIVE': {'close': 50.0, 'volume': 500000},  # Filtered by price
         }
 
-        # Step 4: Float update
+        # Step 4: Float update (single pass: float + sector + country)
         mock_db.get_symbols_needing_float_update.return_value = ['GOOD', 'BIGFLOAT']
-        mock_float_provider.get_float_batch.return_value = {
-            'GOOD': 2_000_000,
-            'BIGFLOAT': 50_000_000,
-        }
-        mock_float_provider.get_stock_info.return_value = {
-            'sector': 'Technology',
-            'country': 'US',
-            'float_shares': None,
+        mock_float_provider.get_stock_info_batch.return_value = {
+            'GOOD': {'float_shares': 2_000_000, 'sector': 'Technology', 'country': 'US'},
+            'BIGFLOAT': {'float_shares': 50_000_000, 'sector': 'Finance', 'country': 'US'},
         }
 
         # Step 6: Volume profiles
@@ -268,7 +263,7 @@ class TestBuild:
         # Verify pipeline was called
         mock_alpaca.get_all_tradeable_assets.assert_called_once()
         mock_alpaca.get_daily_bars.assert_called_once()
-        mock_float_provider.get_float_batch.assert_called_once()
+        mock_float_provider.get_stock_info_batch.assert_called_once()
 
         # GOOD passes float filter (2M <= 10M), BIGFLOAT does not (50M > 10M)
         assert result['total_stocks'] >= 1

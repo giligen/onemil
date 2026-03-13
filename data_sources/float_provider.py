@@ -93,23 +93,55 @@ class FloatProvider:
         Returns:
             Float shares count, or None if unavailable
         """
-        def _fetch():
-            ticker = yf.Ticker(symbol)
-            info = ticker.info
-            float_shares = info.get('floatShares')
+        info = self.get_stock_info(symbol)
+        return info.get('float_shares')
 
-            if float_shares is not None:
-                float_shares = int(float_shares)
-                logger.debug(f"{symbol}: float = {float_shares:,}")
-                return {'float_shares': float_shares}
+    def get_stock_info_batch(
+        self, symbols: list, progress_interval: int = 50
+    ) -> Dict[str, Dict]:
+        """
+        Get float + sector + country for multiple symbols in a single pass.
+
+        Makes ONE yfinance call per symbol (not two separate passes).
+
+        Args:
+            symbols: List of stock symbols
+            progress_interval: Log progress every N symbols
+
+        Returns:
+            Dict mapping symbol -> {float_shares, sector, country}
+        """
+        results = {}
+        total = len(symbols)
+        success_count = 0
+        fail_count = 0
+
+        logger.info(f"Fetching stock info (float/sector/country) for {total} symbols...")
+
+        for i, symbol in enumerate(symbols):
+            info = self.get_stock_info(symbol)
+            results[symbol] = info
+
+            if info.get('float_shares') is not None:
+                success_count += 1
             else:
-                logger.warning(f"{symbol}: floatShares not available from Yahoo Finance")
-                return {'float_shares': None}
+                fail_count += 1
 
-        result = self._fetch_with_retry(symbol, _fetch)
-        if result is None:
-            return None
-        return result.get('float_shares')
+            if (i + 1) % progress_interval == 0 or (i + 1) == total:
+                logger.info(
+                    f"Fetching stock info: {i + 1}/{total} complete "
+                    f"(float success: {success_count}, failed: {fail_count})"
+                )
+
+            # Throttle requests to avoid rate limits
+            if i < total - 1 and self.request_delay > 0:
+                time.sleep(self.request_delay)
+
+        logger.info(
+            f"Stock info fetch complete: {success_count}/{total} with float, "
+            f"{fail_count} without float"
+        )
+        return results
 
     def get_float_batch(self, symbols: list, progress_interval: int = 50) -> Dict[str, Optional[int]]:
         """
@@ -122,37 +154,8 @@ class FloatProvider:
         Returns:
             Dict mapping symbol -> float_shares (None if unavailable)
         """
-        results = {}
-        total = len(symbols)
-        success_count = 0
-        fail_count = 0
-
-        logger.info(f"Fetching float data for {total} symbols...")
-
-        for i, symbol in enumerate(symbols):
-            float_shares = self.get_float(symbol)
-            results[symbol] = float_shares
-
-            if float_shares is not None:
-                success_count += 1
-            else:
-                fail_count += 1
-
-            if (i + 1) % progress_interval == 0 or (i + 1) == total:
-                logger.info(
-                    f"Fetching float: {i + 1}/{total} complete "
-                    f"(success: {success_count}, failed: {fail_count})"
-                )
-
-            # Throttle requests to avoid rate limits
-            if i < total - 1 and self.request_delay > 0:
-                time.sleep(self.request_delay)
-
-        logger.info(
-            f"Float fetch complete: {success_count}/{total} successful, "
-            f"{fail_count} failed/unavailable"
-        )
-        return results
+        batch = self.get_stock_info_batch(symbols, progress_interval)
+        return {sym: info.get('float_shares') for sym, info in batch.items()}
 
     def get_stock_info(self, symbol: str) -> Dict:
         """
