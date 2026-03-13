@@ -81,6 +81,7 @@ class Database:
         self.conn.row_factory = sqlite3.Row
 
         self._create_tables()
+        self._migrate()
         logger.info(f"Database initialized: {self.db_path}")
 
     def _create_tables(self) -> None:
@@ -134,9 +135,85 @@ class Database:
                 ON scan_results(symbol, scan_date);
             CREATE INDEX IF NOT EXISTS idx_volume_profiles_symbol
                 ON volume_profiles(symbol);
+
+            CREATE TABLE IF NOT EXISTS trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_date DATE NOT NULL,
+                symbol VARCHAR(10) NOT NULL,
+                side VARCHAR(4) NOT NULL,
+                entry_price REAL NOT NULL,
+                stop_loss_price REAL NOT NULL,
+                take_profit_price REAL NOT NULL,
+                shares INTEGER NOT NULL,
+                risk_per_share REAL NOT NULL,
+                total_risk REAL NOT NULL,
+                risk_reward_ratio REAL NOT NULL,
+                order_id VARCHAR(64),
+                order_status VARCHAR(20),
+                fill_price REAL,
+                filled_at TIMESTAMP,
+                exit_price REAL,
+                exit_reason VARCHAR(20),
+                exited_at TIMESTAMP,
+                pnl REAL,
+                pnl_pct REAL,
+                pattern_data TEXT,
+                created_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMP NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS daily_trading_summary (
+                trade_date DATE PRIMARY KEY,
+                total_trades INTEGER DEFAULT 0,
+                winning_trades INTEGER DEFAULT 0,
+                losing_trades INTEGER DEFAULT 0,
+                gross_pnl REAL DEFAULT 0.0,
+                patterns_detected INTEGER DEFAULT 0,
+                patterns_traded INTEGER DEFAULT 0
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_trades_date
+                ON trades(trade_date);
+            CREATE INDEX IF NOT EXISTS idx_trades_symbol
+                ON trades(symbol, trade_date);
+            CREATE INDEX IF NOT EXISTS idx_trades_order_id
+                ON trades(order_id);
         """)
         self.conn.commit()
         logger.debug("Database tables verified/created")
+
+    def _migrate(self) -> None:
+        """Run database migrations for schema changes on existing DBs."""
+        # Migration: Add unique index on scan_results to prevent duplicate rows.
+        # Must deduplicate existing data first (keep latest detected_at per group).
+        try:
+            self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_scan_results_unique'"
+            )
+            if self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_scan_results_unique'"
+            ).fetchone():
+                return  # Already migrated
+
+            # Remove duplicates: keep the row with the latest detected_at per group
+            self.conn.execute("""
+                DELETE FROM scan_results WHERE id NOT IN (
+                    SELECT MAX(id) FROM scan_results
+                    GROUP BY scan_date, symbol, phase, COALESCE(time_bucket, '')
+                )
+            """)
+            deleted = self.conn.execute("SELECT changes()").fetchone()[0]
+            if deleted > 0:
+                logger.info(f"Migration: removed {deleted} duplicate scan_results rows")
+
+            self.conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_results_unique
+                    ON scan_results(scan_date, symbol, phase, COALESCE(time_bucket, ''))
+            """)
+            self.conn.commit()
+            logger.info("Migration: added unique index on scan_results")
+        except Exception as e:
+            logger.warning(f"Migration check failed (non-fatal): {e}")
 
     # =========================================================================
     # Universe operations
@@ -352,7 +429,7 @@ class Database:
             ID of the inserted row
         """
         cursor = self.conn.execute("""
-            INSERT INTO scan_results (scan_date, symbol, detected_at, phase,
+            INSERT OR REPLACE INTO scan_results (scan_date, symbol, detected_at, phase,
                                       prev_close, current_price, gap_pct,
                                       intraday_change_pct, relative_volume,
                                       current_volume, time_bucket, float_shares,
@@ -397,6 +474,151 @@ class Database:
             ORDER BY symbol
         """, (scan_date,))
         return [row['symbol'] for row in cursor.fetchall()]
+
+    # =========================================================================
+    # Trade operations
+    # =========================================================================
+
+    def save_trade(self, trade: Dict[str, Any]) -> int:
+        """
+        Save a trade record.
+
+        Args:
+            trade: Dict with trade data matching trades table columns
+
+        Returns:
+            ID of the inserted row
+        """
+        now = datetime.now(timezone.utc)
+        trade.setdefault('created_at', now)
+        trade.setdefault('updated_at', now)
+        cursor = self.conn.execute("""
+            INSERT INTO trades (trade_date, symbol, side, entry_price,
+                               stop_loss_price, take_profit_price, shares,
+                               risk_per_share, total_risk, risk_reward_ratio,
+                               order_id, order_status, fill_price, filled_at,
+                               exit_price, exit_reason, exited_at,
+                               pnl, pnl_pct, pattern_data,
+                               created_at, updated_at)
+            VALUES (:trade_date, :symbol, :side, :entry_price,
+                    :stop_loss_price, :take_profit_price, :shares,
+                    :risk_per_share, :total_risk, :risk_reward_ratio,
+                    :order_id, :order_status, :fill_price, :filled_at,
+                    :exit_price, :exit_reason, :exited_at,
+                    :pnl, :pnl_pct, :pattern_data,
+                    :created_at, :updated_at)
+        """, trade)
+        self.conn.commit()
+        logger.info(f"Saved trade: {trade['symbol']} {trade['side']} "
+                     f"{trade['shares']} shares @ ${trade['entry_price']:.2f}")
+        return cursor.lastrowid
+
+    def update_trade(self, trade_id: int, updates: Dict[str, Any]) -> None:
+        """
+        Update a trade record.
+
+        Args:
+            trade_id: ID of the trade to update
+            updates: Dict of column->value pairs to update
+        """
+        updates['updated_at'] = datetime.now(timezone.utc)
+        set_clause = ', '.join(f"{k} = :{k}" for k in updates)
+        updates['id'] = trade_id
+        self.conn.execute(
+            f"UPDATE trades SET {set_clause} WHERE id = :id", updates
+        )
+        self.conn.commit()
+        logger.debug(f"Updated trade {trade_id}: {list(updates.keys())}")
+
+    def get_trade_by_order_id(self, order_id: str) -> Optional[Dict[str, Any]]:
+        """Get a trade by its Alpaca order ID."""
+        cursor = self.conn.execute(
+            "SELECT * FROM trades WHERE order_id = ?", (order_id,)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def get_trades_by_date(self, trade_date: str) -> List[Dict[str, Any]]:
+        """
+        Get all trades for a given date.
+
+        Args:
+            trade_date: Date string (YYYY-MM-DD)
+
+        Returns:
+            List of trade dicts
+        """
+        cursor = self.conn.execute(
+            "SELECT * FROM trades WHERE trade_date = ? ORDER BY created_at",
+            (trade_date,)
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_open_trades(self, trade_date: str) -> List[Dict[str, Any]]:
+        """
+        Get trades that are still open (no exit) for a given date.
+
+        Args:
+            trade_date: Date string (YYYY-MM-DD)
+
+        Returns:
+            List of open trade dicts
+        """
+        cursor = self.conn.execute(
+            "SELECT * FROM trades WHERE trade_date = ? AND exit_price IS NULL ORDER BY created_at",
+            (trade_date,)
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_daily_pnl(self, trade_date: str) -> float:
+        """
+        Get total realized P&L for a given date.
+
+        Args:
+            trade_date: Date string (YYYY-MM-DD)
+
+        Returns:
+            Total P&L in dollars
+        """
+        cursor = self.conn.execute(
+            "SELECT COALESCE(SUM(pnl), 0.0) FROM trades WHERE trade_date = ? AND pnl IS NOT NULL",
+            (trade_date,)
+        )
+        return float(cursor.fetchone()[0])
+
+    def save_daily_summary(self, summary: Dict[str, Any]) -> None:
+        """
+        Save or update daily trading summary.
+
+        Args:
+            summary: Dict with trade_date and summary stats
+        """
+        self.conn.execute("""
+            INSERT INTO daily_trading_summary
+                (trade_date, total_trades, winning_trades, losing_trades,
+                 gross_pnl, patterns_detected, patterns_traded)
+            VALUES (:trade_date, :total_trades, :winning_trades, :losing_trades,
+                    :gross_pnl, :patterns_detected, :patterns_traded)
+            ON CONFLICT(trade_date) DO UPDATE SET
+                total_trades = excluded.total_trades,
+                winning_trades = excluded.winning_trades,
+                losing_trades = excluded.losing_trades,
+                gross_pnl = excluded.gross_pnl,
+                patterns_detected = excluded.patterns_detected,
+                patterns_traded = excluded.patterns_traded
+        """, summary)
+        self.conn.commit()
+        logger.info(f"Saved daily summary for {summary['trade_date']}: "
+                     f"{summary['total_trades']} trades, P&L: ${summary['gross_pnl']:.2f}")
+
+    def get_daily_summary(self, trade_date: str) -> Optional[Dict[str, Any]]:
+        """Get daily trading summary for a date."""
+        cursor = self.conn.execute(
+            "SELECT * FROM daily_trading_summary WHERE trade_date = ?",
+            (trade_date,)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
 
     # =========================================================================
     # Utility

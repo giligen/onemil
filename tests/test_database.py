@@ -366,6 +366,29 @@ class TestPremarketGapSymbols:
         symbols = db.get_premarket_gap_symbols("2026-03-13")
         assert symbols.count("DUP") == 1
 
+    def test_upsert_updates_existing_row(self, db):
+        """INSERT OR REPLACE updates the row instead of creating duplicates."""
+        db.save_scan_result(_make_scan_result("UPD", phase="premarket", gap_pct=3.0))
+        db.save_scan_result(_make_scan_result("UPD", phase="premarket", gap_pct=7.0))
+
+        results = db.get_scan_results("2026-03-13", phase="premarket")
+        upd_rows = [r for r in results if r["symbol"] == "UPD"]
+        assert len(upd_rows) == 1, "Should have exactly 1 row after upsert"
+        assert upd_rows[0]["gap_pct"] == 7.0, "Should have the latest gap_pct"
+
+    def test_different_buckets_are_separate_rows(self, db):
+        """Same symbol in different time buckets creates separate rows."""
+        r1 = _make_scan_result("MULTI", phase="intraday")
+        r1["time_bucket"] = "09:30"
+        r2 = _make_scan_result("MULTI", phase="intraday")
+        r2["time_bucket"] = "09:45"
+        db.save_scan_result(r1)
+        db.save_scan_result(r2)
+
+        results = db.get_scan_results("2026-03-13", phase="intraday")
+        multi_rows = [r for r in results if r["symbol"] == "MULTI"]
+        assert len(multi_rows) == 2, "Different buckets should create separate rows"
+
 
 # ---------------------------------------------------------------------------
 # Counts / Utility

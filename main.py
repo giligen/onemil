@@ -12,16 +12,24 @@ Requires .env with ALPACA_API_KEY and ALPACA_API_SECRET.
 import argparse
 import sys
 import logging
+from typing import Optional
 
 from config import get_config
 from monitoring.logger import setup_logging
 from persistence.database import get_database
 from data_sources.alpaca_client import AlpacaClient
 from data_sources.float_provider import FloatProvider
-from data_sources.news_provider import NewsProvider, NewsAnalyzer
+from data_sources.news_provider import NewsProvider, NewsAnalyzer, LLMNewsAnalyzer
 from batch.universe_builder import UniverseBuilder
 from scanner.criteria import ScannerCriteria
 from scanner.realtime_scanner import RealtimeScanner
+from trading.pattern_detector import BullFlagDetector
+from trading.trade_planner import TradePlanner
+from trading.order_executor import OrderExecutor
+from trading.position_manager import PositionManager
+from trading.trading_engine import TradingEngine
+from notifications.telegram_notifier import TelegramNotifier
+from monitoring.telegram_error_handler import TelegramErrorHandler
 
 logger = logging.getLogger(__name__)
 
@@ -44,10 +52,33 @@ def parse_args() -> argparse.Namespace:
         help='Enable verbose output (debug logging + detailed scan output)'
     )
     parser.add_argument(
+        '--trade', action='store_true',
+        help='Enable automated paper trading (requires --scan or --test-cycle)'
+    )
+    parser.add_argument(
         '--test-cycle', action='store_true',
         help='Run one premarket + one intraday cycle with real data, then exit'
     )
     return parser.parse_args()
+
+
+def _create_news_analyzer(config) -> NewsAnalyzer:
+    """
+    Create the appropriate NewsAnalyzer based on available API keys.
+
+    Returns LLMNewsAnalyzer if ANTHROPIC_API_KEY is set, else V1 stub.
+    """
+    if config.anthropic_api_key:
+        import anthropic
+        client = anthropic.Anthropic(api_key=config.anthropic_api_key)
+        model = config.news_analyzer_model
+        logger.info(f"News analysis: LLM (model={model})")
+        return LLMNewsAnalyzer(client, model=model)
+    else:
+        logger.warning(
+            "ANTHROPIC_API_KEY not set — using V1 stub (all news = True)"
+        )
+        return NewsAnalyzer()
 
 
 def run_batch(config) -> None:
@@ -77,7 +108,83 @@ def run_batch(config) -> None:
     logger.info(f"Batch complete: {summary}")
 
 
-def run_scan(config, verbose: bool = False) -> None:
+def _create_notifier(config) -> Optional[TelegramNotifier]:
+    """Create Telegram notifier if configured."""
+    if not config.telegram_enabled:
+        logger.info("Telegram notifications disabled")
+        return None
+
+    if not config.telegram_bot_token or not config.telegram_chat_id:
+        logger.warning("Telegram enabled but token/chat_id missing in .env")
+        return None
+
+    notifier = TelegramNotifier(
+        bot_token=config.telegram_bot_token,
+        chat_id=config.telegram_chat_id,
+        enabled=True,
+    )
+    logger.info("Telegram notifier created")
+    return notifier
+
+
+def _setup_telegram_error_handler(config) -> None:
+    """Add Telegram error handler to root logger if configured."""
+    if not config.telegram_enabled or not config.telegram_bot_token:
+        return
+
+    handler = TelegramErrorHandler(
+        bot_token=config.telegram_bot_token,
+        chat_id=config.telegram_chat_id,
+    )
+    logging.getLogger().addHandler(handler)
+    logger.info("Telegram error handler attached to root logger")
+
+
+def _create_trading_engine(config, alpaca, db, notifier=None) -> TradingEngine:
+    """Create the trading engine with all components wired up."""
+    detector = BullFlagDetector(
+        min_pole_candles=config.min_pole_candles,
+        min_pole_gain_pct=config.min_pole_gain_pct,
+        max_retracement_pct=config.max_retracement_pct,
+        max_pullback_candles=config.max_pullback_candles,
+        min_breakout_volume_ratio=config.min_breakout_volume_ratio,
+    )
+    planner = TradePlanner(
+        position_size_dollars=config.position_size_dollars,
+        max_shares=config.max_shares,
+        max_risk_per_share=config.max_risk_per_share,
+        min_risk_reward=config.min_risk_reward,
+    )
+    position_manager = PositionManager(
+        alpaca_client=alpaca,
+        db=db,
+        max_positions=config.max_positions,
+        daily_loss_limit=config.daily_loss_limit,
+        stop_trading_before_close_min=config.stop_trading_before_close_min,
+    )
+    executor = OrderExecutor(alpaca_client=alpaca, db=db)
+
+    engine = TradingEngine(
+        alpaca_client=alpaca,
+        db=db,
+        detector=detector,
+        planner=planner,
+        executor=executor,
+        position_manager=position_manager,
+        pattern_poll_interval=config.pattern_poll_interval,
+        enabled=config.trading_enabled,
+        notifier=notifier,
+    )
+
+    logger.info(
+        f"Trading engine created — enabled: {config.trading_enabled}, "
+        f"position_size: ${config.position_size_dollars}, "
+        f"max_positions: {config.max_positions}"
+    )
+    return engine
+
+
+def run_scan(config, verbose: bool = False, trade: bool = False) -> None:
     """Run the real-time scanner."""
     logger.info("Starting real-time scanner...")
 
@@ -86,8 +193,10 @@ def run_scan(config, verbose: bool = False) -> None:
         logger.error("Alpaca API connection failed. Aborting scan.")
         sys.exit(1)
 
-    news_provider = NewsProvider(alpaca, NewsAnalyzer())
+    analyzer = _create_news_analyzer(config)
+    news_provider = NewsProvider(alpaca, analyzer)
     db = get_database(config.db_path)
+    notifier = _create_notifier(config)
 
     criteria = ScannerCriteria(
         price_min=config.price_min,
@@ -97,6 +206,12 @@ def run_scan(config, verbose: bool = False) -> None:
         intraday_change_pct_min=config.intraday_change_pct_min,
         relative_volume_min=config.relative_volume_min,
     )
+
+    trading_engine = None
+    if trade:
+        trading_engine = _create_trading_engine(config, alpaca, db, notifier=notifier)
+        trading_engine.enabled = True
+        logger.info("Trading mode ACTIVE — paper trading enabled")
 
     scanner = RealtimeScanner(
         alpaca_client=alpaca,
@@ -105,12 +220,30 @@ def run_scan(config, verbose: bool = False) -> None:
         criteria=criteria,
         poll_interval=config.premarket_poll_interval,
         verbose=verbose,
+        trading_engine=trading_engine,
+        notifier=notifier,
     )
+
+    # Notify startup
+    if notifier:
+        notifier.notify_scanner_started(
+            universe_size=len(scanner._universe) if scanner._universe else 0,
+            trading_enabled=trade,
+        )
 
     scanner.run()
 
+    # End-of-day report + summary
+    if trading_engine:
+        trading_engine.send_daily_report(
+            premarket_gaps=scanner._premarket_gap_data,
+            qualified_stocks=scanner._qualified_stock_data,
+            universe_size=len(scanner._universe),
+        )
+        trading_engine.save_daily_summary()
 
-def run_test_cycle(config) -> None:
+
+def run_test_cycle(config, trade: bool = False) -> None:
     """Run a single test cycle (premarket + intraday) against real API."""
     logger.info("Starting test cycle...")
 
@@ -119,8 +252,10 @@ def run_test_cycle(config) -> None:
         logger.error("Alpaca API connection failed. Aborting test.")
         sys.exit(1)
 
-    news_provider = NewsProvider(alpaca, NewsAnalyzer())
+    analyzer = _create_news_analyzer(config)
+    news_provider = NewsProvider(alpaca, analyzer)
     db = get_database(config.db_path)
+    notifier = _create_notifier(config)
 
     criteria = ScannerCriteria(
         price_min=config.price_min,
@@ -131,6 +266,12 @@ def run_test_cycle(config) -> None:
         relative_volume_min=config.relative_volume_min,
     )
 
+    trading_engine = None
+    if trade:
+        trading_engine = _create_trading_engine(config, alpaca, db, notifier=notifier)
+        trading_engine.enabled = True
+        logger.info("Trading mode ACTIVE for test cycle — paper trading enabled")
+
     scanner = RealtimeScanner(
         alpaca_client=alpaca,
         news_provider=news_provider,
@@ -138,10 +279,23 @@ def run_test_cycle(config) -> None:
         criteria=criteria,
         poll_interval=60,
         verbose=True,
+        trading_engine=trading_engine,
+        notifier=notifier,
     )
 
     summary = scanner.run_test_cycle()
     logger.info(f"Test cycle complete: {summary}")
+
+    if trading_engine:
+        trading_engine.run_pattern_check()
+        stats = trading_engine.get_daily_stats()
+        logger.info(f"Trading stats: {stats}")
+        trading_engine.send_daily_report(
+            premarket_gaps=scanner._premarket_gap_data,
+            qualified_stocks=scanner._qualified_stock_data,
+            universe_size=len(scanner._universe),
+        )
+        trading_engine.save_daily_summary()
 
 
 def main() -> None:
@@ -158,6 +312,7 @@ def main() -> None:
         log_level=config.log_level,
         verbose=args.verbose,
     )
+    _setup_telegram_error_handler(config)
 
     logger.info("OneMil Scanner starting...")
 
@@ -165,10 +320,10 @@ def main() -> None:
         run_batch(config)
 
     if args.scan:
-        run_scan(config, verbose=args.verbose)
+        run_scan(config, verbose=args.verbose, trade=args.trade)
 
     if args.test_cycle:
-        run_test_cycle(config)
+        run_test_cycle(config, trade=args.trade)
 
 
 if __name__ == "__main__":

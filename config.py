@@ -102,6 +102,16 @@ class Config:
         """Alpaca API base URL."""
         return os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets/v2")
 
+    @property
+    def anthropic_api_key(self) -> str:
+        """Anthropic API key (optional — enables LLM news analysis)."""
+        return os.getenv("ANTHROPIC_API_KEY", "")
+
+    @property
+    def news_analyzer_model(self) -> str:
+        """Model ID for LLM news analyzer."""
+        return self._get_yaml("news_analyzer", "model", default="claude-haiku-4-5-20251001")
+
     # =========================================================================
     # Logging
     # =========================================================================
@@ -196,6 +206,129 @@ class Config:
     def float_cache_refresh_days(self) -> int:
         """Days before float data is considered stale."""
         return int(self._get_yaml("float_cache", "refresh_days", default=7))
+
+    # =========================================================================
+    # Telegram Notifications
+    # =========================================================================
+
+    @property
+    def telegram_bot_token(self) -> str:
+        """Telegram bot token from .env."""
+        return os.getenv("TELEGRAM_BOT_TOKEN", "")
+
+    @property
+    def telegram_chat_id(self) -> str:
+        """Telegram chat ID from .env."""
+        return os.getenv("TELEGRAM_CHAT_ID", "")
+
+    @property
+    def telegram_enabled(self) -> bool:
+        """Whether Telegram notifications are enabled."""
+        return bool(self._get_yaml("notifications", "telegram", "enabled", default=True))
+
+    @property
+    def telegram_send_on_startup(self) -> bool:
+        """Send notification on scanner startup."""
+        return bool(self._get_yaml("notifications", "telegram", "send_on_startup", default=True))
+
+    @property
+    def telegram_send_on_qualified(self) -> bool:
+        """Send notification when stock qualifies."""
+        return bool(self._get_yaml("notifications", "telegram", "send_on_qualified", default=True))
+
+    @property
+    def telegram_send_on_pattern(self) -> bool:
+        """Send notification when pattern detected."""
+        return bool(self._get_yaml("notifications", "telegram", "send_on_pattern", default=True))
+
+    @property
+    def telegram_send_on_trade(self) -> bool:
+        """Send notification when trade submitted."""
+        return bool(self._get_yaml("notifications", "telegram", "send_on_trade", default=True))
+
+    @property
+    def telegram_send_on_close(self) -> bool:
+        """Send notification when position closed."""
+        return bool(self._get_yaml("notifications", "telegram", "send_on_close", default=True))
+
+    @property
+    def telegram_send_daily_report(self) -> bool:
+        """Send end-of-day report."""
+        return bool(self._get_yaml("notifications", "telegram", "send_daily_report", default=True))
+
+    # =========================================================================
+    # Trading
+    # =========================================================================
+
+    @property
+    def trading_enabled(self) -> bool:
+        """Master kill switch for automated trading."""
+        return bool(self._get_yaml("trading", "enabled", default=False))
+
+    @property
+    def position_size_dollars(self) -> float:
+        """Dollar amount per position."""
+        return float(self._get_yaml("trading", "position_size_dollars", default=500))
+
+    @property
+    def max_shares(self) -> int:
+        """Maximum shares per position."""
+        return int(self._get_yaml("trading", "max_shares", default=1000))
+
+    @property
+    def max_positions(self) -> int:
+        """Maximum concurrent positions."""
+        return int(self._get_yaml("trading", "max_positions", default=3))
+
+    @property
+    def daily_loss_limit(self) -> float:
+        """Daily loss limit in dollars (negative value)."""
+        return float(self._get_yaml("trading", "daily_loss_limit", default=-100.0))
+
+    @property
+    def max_risk_per_share(self) -> float:
+        """Maximum risk per share in dollars (Ross's 20-cent rule)."""
+        return float(self._get_yaml("trading", "max_risk_per_share", default=0.20))
+
+    @property
+    def min_risk_reward(self) -> float:
+        """Minimum risk/reward ratio."""
+        return float(self._get_yaml("trading", "min_risk_reward", default=2.0))
+
+    @property
+    def pattern_poll_interval(self) -> int:
+        """Pattern detection polling interval in seconds."""
+        return int(self._get_yaml("trading", "pattern_poll_interval", default=60))
+
+    @property
+    def stop_trading_before_close_min(self) -> int:
+        """Minutes before close to stop opening new positions."""
+        return int(self._get_yaml("trading", "stop_trading_before_close_min", default=15))
+
+    @property
+    def min_pole_candles(self) -> int:
+        """Minimum consecutive green candles for bull flag pole."""
+        return int(self._get_yaml("trading", "bull_flag", "min_pole_candles", default=3))
+
+    @property
+    def min_pole_gain_pct(self) -> float:
+        """Minimum pole gain percentage."""
+        return float(self._get_yaml("trading", "bull_flag", "min_pole_gain_pct", default=3.0))
+
+    @property
+    def max_retracement_pct(self) -> float:
+        """Maximum pullback retracement as percentage of pole height."""
+        return float(self._get_yaml("trading", "bull_flag", "max_retracement_pct", default=50.0))
+
+    @property
+    def max_pullback_candles(self) -> int:
+        """Maximum pullback candles before pattern is rejected."""
+        return int(self._get_yaml("trading", "bull_flag", "max_pullback_candles", default=5))
+
+    @property
+    def min_breakout_volume_ratio(self) -> float:
+        """Minimum breakout volume relative to pullback average."""
+        return float(self._get_yaml("trading", "bull_flag", "min_breakout_volume_ratio", default=1.5))
 
 
 def get_config(env_path: Optional[str] = None, yaml_path: Optional[str] = None) -> Config:

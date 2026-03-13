@@ -29,8 +29,12 @@ from alpaca.data.requests import (
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.data.enums import DataFeed
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import GetAssetsRequest
-from alpaca.trading.enums import AssetClass, AssetStatus
+from alpaca.trading.requests import (
+    GetAssetsRequest,
+    MarketOrderRequest,
+    LimitOrderRequest,
+)
+from alpaca.trading.enums import AssetClass, AssetStatus, OrderSide, TimeInForce, OrderClass, OrderType
 from alpaca.common.exceptions import APIError
 import pandas as pd
 
@@ -403,7 +407,10 @@ class AlpacaClient:
 
     def get_current_bars(self, symbols: List[str], feed: DataFeed = DataFeed.SIP) -> Dict[str, Dict]:
         """
-        Get latest 15-min bar for multiple symbols (current intraday bucket).
+        Get current 15-min bar for multiple symbols.
+
+        Fetches the most recent 15-min bar (aligned to bucket boundaries).
+        This is the actual 15-min bucket volume needed for relative volume calculation.
 
         Args:
             symbols: List of stock symbols
@@ -419,19 +426,26 @@ class AlpacaClient:
             return {}
 
         try:
+            # Fetch last 30 min of 15-min bars to ensure we get the current bucket
+            start = datetime.now(timezone.utc) - timedelta(minutes=30)
             results = {}
             chunk_size = 200
             for i in range(0, len(symbols), chunk_size):
                 chunk = symbols[i:i + chunk_size]
-                request = StockLatestBarRequest(symbol_or_symbols=chunk, feed=feed)
+                request = StockBarsRequest(
+                    symbol_or_symbols=chunk,
+                    timeframe=TimeFrame(15, TimeFrameUnit.Minute),
+                    start=start,
+                    feed=feed,
+                )
                 bars_raw = self._call_with_timeout(
-                    lambda req=request: self.data_client.get_stock_latest_bar(req),
+                    lambda req=request: self.data_client.get_stock_bars(req),
                     f"get_current_bars(chunk {i // chunk_size + 1})"
                 )
                 bars = self._to_dict(bars_raw)
                 for symbol in chunk:
-                    if symbol in bars:
-                        bar = bars[symbol]
+                    if symbol in bars and len(bars[symbol]) > 0:
+                        bar = bars[symbol][-1]  # Most recent 15-min bar
                         results[symbol] = {
                             'open': float(bar.open),
                             'high': float(bar.high),
@@ -441,7 +455,7 @@ class AlpacaClient:
                             'timestamp': bar.timestamp
                         }
 
-            logger.debug(f"Fetched current bars for {len(results)}/{len(symbols)} symbols")
+            logger.debug(f"Fetched current 15-min bars for {len(results)}/{len(symbols)} symbols")
             return results
 
         except AlpacaAPIError:
@@ -474,7 +488,13 @@ class AlpacaClient:
                 lambda: self.news_client.get_news(request),
                 f"get_news({symbol})"
             )
+        except AlpacaAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"News API call failed for {symbol}: {e}")
+            raise AlpacaAPIError(f"News API call failed for {symbol}: {e}")
 
+        try:
             articles = []
             # NewsSet.data contains the list of news articles keyed by 'news'
             news_data = news_set.data if hasattr(news_set, 'data') else {}
@@ -493,8 +513,268 @@ class AlpacaClient:
             return articles
 
         except Exception as e:
-            logger.warning(f"Failed to fetch news for {symbol}: {e}")
+            logger.warning(f"Failed to parse news response for {symbol}: {e}")
             return []
+
+    # =========================================================================
+    # 1-Minute Bars (for pattern detection)
+    # =========================================================================
+
+    def get_1min_bars(self, symbol: str, lookback_minutes: int = 30) -> pd.DataFrame:
+        """
+        Get 1-minute bars for pattern detection.
+
+        Returns completed bars only — the caller (BullFlagDetector) handles
+        dropping the current in-progress bar.
+
+        Args:
+            symbol: Stock symbol
+            lookback_minutes: Number of minutes to look back
+
+        Returns:
+            DataFrame with columns: timestamp, open, high, low, close, volume
+
+        Raises:
+            AlpacaAPIError: If API call fails
+        """
+        try:
+            start = datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes + 5)
+            request = StockBarsRequest(
+                symbol_or_symbols=symbol,
+                timeframe=TimeFrame(1, TimeFrameUnit.Minute),
+                start=start,
+                feed=DataFeed.SIP,
+            )
+            bars_raw = self._call_with_timeout(
+                lambda: self.data_client.get_stock_bars(request),
+                f"get_1min_bars({symbol})"
+            )
+            bars = self._to_dict(bars_raw)
+
+            if symbol not in bars or len(bars[symbol]) == 0:
+                logger.warning(f"No 1-min bars returned for {symbol}")
+                return pd.DataFrame()
+
+            records = []
+            for bar in bars[symbol]:
+                records.append({
+                    'timestamp': bar.timestamp,
+                    'open': float(bar.open),
+                    'high': float(bar.high),
+                    'low': float(bar.low),
+                    'close': float(bar.close),
+                    'volume': int(bar.volume),
+                })
+
+            logger.debug(f"Fetched {len(records)} 1-min bars for {symbol}")
+            return pd.DataFrame(records)
+
+        except AlpacaAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to get 1-min bars for {symbol}: {e}")
+            raise AlpacaAPIError(f"Failed to get 1-min bars for {symbol}: {e}")
+
+    # =========================================================================
+    # Trading Operations
+    # =========================================================================
+
+    def submit_bracket_order(
+        self,
+        symbol: str,
+        qty: int,
+        side: str,
+        limit_price: float,
+        tp_price: float,
+        sl_price: float,
+    ) -> Dict:
+        """
+        Submit a bracket order (entry + stop loss + take profit).
+
+        Args:
+            symbol: Stock symbol
+            qty: Number of shares
+            side: 'buy' or 'sell'
+            limit_price: Entry limit price
+            tp_price: Take profit price
+            sl_price: Stop loss price
+
+        Returns:
+            Dict with order details (id, status, etc.)
+
+        Raises:
+            AlpacaAPIError: If order submission fails
+        """
+        try:
+            order_side = OrderSide.BUY if side == 'buy' else OrderSide.SELL
+
+            request = LimitOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=order_side,
+                type=OrderType.LIMIT,
+                time_in_force=TimeInForce.DAY,
+                limit_price=round(limit_price, 2),
+                order_class=OrderClass.BRACKET,
+                take_profit={'limit_price': round(tp_price, 2)},
+                stop_loss={'stop_price': round(sl_price, 2)},
+            )
+
+            order = self._call_with_timeout(
+                lambda: self.trading_client.submit_order(request),
+                f"submit_bracket_order({symbol})"
+            )
+
+            result = {
+                'id': str(order.id) if hasattr(order, 'id') else '',
+                'status': str(order.status.value) if hasattr(order, 'status') else 'unknown',
+                'symbol': symbol,
+                'qty': qty,
+                'side': side,
+                'limit_price': limit_price,
+            }
+
+            logger.info(
+                f"Bracket order submitted: {symbol} {side} {qty} "
+                f"@ ${limit_price:.2f}, TP ${tp_price:.2f}, SL ${sl_price:.2f} "
+                f"— ID: {result['id']}, status: {result['status']}"
+            )
+            return result
+
+        except AlpacaAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to submit bracket order for {symbol}: {e}")
+            raise AlpacaAPIError(f"Failed to submit bracket order for {symbol}: {e}")
+
+    def get_open_positions(self) -> List[Dict]:
+        """
+        Get all current open positions from Alpaca.
+
+        Returns:
+            List of position dicts with symbol, qty, avg_entry, market_value, pnl
+
+        Raises:
+            AlpacaAPIError: If API call fails
+        """
+        try:
+            positions = self._call_with_timeout(
+                lambda: self.trading_client.get_all_positions(),
+                "get_open_positions"
+            )
+
+            result = []
+            for pos in positions:
+                result.append({
+                    'symbol': pos.symbol,
+                    'qty': int(pos.qty),
+                    'side': pos.side,
+                    'avg_entry_price': float(pos.avg_entry_price),
+                    'market_value': float(pos.market_value),
+                    'unrealized_pl': float(pos.unrealized_pl),
+                    'unrealized_plpc': float(pos.unrealized_plpc),
+                })
+
+            logger.debug(f"Open positions: {len(result)}")
+            return result
+
+        except AlpacaAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to get open positions: {e}")
+            raise AlpacaAPIError(f"Failed to get open positions: {e}")
+
+    def get_account_info(self) -> Dict:
+        """
+        Get account information (equity, buying power, day trades).
+
+        Returns:
+            Dict with account details
+
+        Raises:
+            AlpacaAPIError: If API call fails
+        """
+        try:
+            account = self._call_with_timeout(
+                lambda: self.trading_client.get_account(),
+                "get_account_info"
+            )
+
+            return {
+                'equity': float(account.equity),
+                'buying_power': float(account.buying_power),
+                'cash': float(account.cash),
+                'daytrade_count': int(account.daytrade_count),
+                'pattern_day_trader': account.pattern_day_trader,
+            }
+
+        except AlpacaAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to get account info: {e}")
+            raise AlpacaAPIError(f"Failed to get account info: {e}")
+
+    def cancel_order(self, order_id: str) -> bool:
+        """
+        Cancel an open order.
+
+        Args:
+            order_id: Alpaca order ID
+
+        Returns:
+            True if cancelled successfully
+
+        Raises:
+            AlpacaAPIError: If cancellation fails
+        """
+        try:
+            self._call_with_timeout(
+                lambda: self.trading_client.cancel_order_by_id(order_id),
+                f"cancel_order({order_id})"
+            )
+            logger.info(f"Order cancelled: {order_id}")
+            return True
+        except AlpacaAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to cancel order {order_id}: {e}")
+            raise AlpacaAPIError(f"Failed to cancel order {order_id}: {e}")
+
+    def get_order(self, order_id: str) -> Dict:
+        """
+        Get order status by ID.
+
+        Args:
+            order_id: Alpaca order ID
+
+        Returns:
+            Dict with order details
+
+        Raises:
+            AlpacaAPIError: If query fails
+        """
+        try:
+            order = self._call_with_timeout(
+                lambda: self.trading_client.get_order_by_id(order_id),
+                f"get_order({order_id})"
+            )
+
+            return {
+                'id': str(order.id),
+                'status': str(order.status.value) if hasattr(order, 'status') else 'unknown',
+                'symbol': order.symbol,
+                'qty': int(order.qty) if order.qty else 0,
+                'filled_qty': int(order.filled_qty) if order.filled_qty else 0,
+                'filled_avg_price': float(order.filled_avg_price) if order.filled_avg_price else None,
+                'side': str(order.side.value) if hasattr(order, 'side') else '',
+                'type': str(order.type.value) if hasattr(order, 'type') else '',
+            }
+
+        except AlpacaAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to get order {order_id}: {e}")
+            raise AlpacaAPIError(f"Failed to get order {order_id}: {e}")
 
     # =========================================================================
     # Connection Test

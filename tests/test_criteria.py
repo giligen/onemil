@@ -55,7 +55,7 @@ class TestScanCandidate:
         assert candidate.company_name == ''
         assert candidate.prev_close == 0.0
         assert candidate.current_price == 0.0
-        assert candidate.float_shares == 0
+        assert candidate.float_shares is None
         assert candidate.gap_pct == 0.0
         assert candidate.has_news is False
         assert candidate.news_headline is None
@@ -67,65 +67,38 @@ class TestScanCandidate:
 # =============================================================================
 
 class TestEvaluatePremarket:
-    """Tests for ScannerCriteria.evaluate_premarket."""
+    """Tests for ScannerCriteria.evaluate_premarket.
+
+    Premarket is pure quantitative (gap only). No news check —
+    news/LLM is deferred to intraday as the last step.
+    """
 
     def setup_method(self):
         """Create criteria with default thresholds."""
         self.criteria = ScannerCriteria()
 
-    def test_qualified_gap_and_news(self):
-        """Stock with gap >= 2% and news qualifies in premarket."""
-        candidate = ScanCandidate(
-            symbol="AAPL",
-            gap_pct=5.0,
-            has_news=True,
-            news_headline="Big announcement",
-        )
+    def test_qualified_gap(self):
+        """Stock with gap >= 2% qualifies as gap-up candidate."""
+        candidate = ScanCandidate(symbol="AAPL", gap_pct=5.0)
         assert self.criteria.evaluate_premarket(candidate) is True
         assert candidate.criteria_met['gap'] is True
-        assert candidate.criteria_met['has_news'] is True
 
     def test_not_qualified_no_gap(self):
-        """Stock with gap < 2% does not qualify even with news."""
-        candidate = ScanCandidate(
-            symbol="AAPL",
-            gap_pct=1.0,
-            has_news=True,
-            news_headline="Some news",
-        )
+        """Stock with gap < 2% does not qualify."""
+        candidate = ScanCandidate(symbol="AAPL", gap_pct=1.0)
         assert self.criteria.evaluate_premarket(candidate) is False
         assert candidate.criteria_met['gap'] is False
-        assert candidate.criteria_met['has_news'] is True
-
-    def test_not_qualified_no_news(self):
-        """Stock with gap >= 2% but no news does not qualify."""
-        candidate = ScanCandidate(
-            symbol="AAPL",
-            gap_pct=5.0,
-            has_news=False,
-        )
-        assert self.criteria.evaluate_premarket(candidate) is False
-        assert candidate.criteria_met['gap'] is True
-        assert candidate.criteria_met['has_news'] is False
-
-    def test_not_qualified_neither(self):
-        """Stock with no gap and no news does not qualify."""
-        candidate = ScanCandidate(
-            symbol="AAPL",
-            gap_pct=0.5,
-            has_news=False,
-        )
-        assert self.criteria.evaluate_premarket(candidate) is False
 
     def test_gap_at_exact_threshold(self):
         """Stock with gap exactly at threshold qualifies (>=)."""
-        candidate = ScanCandidate(
-            symbol="AAPL",
-            gap_pct=2.0,
-            has_news=True,
-            news_headline="News",
-        )
+        candidate = ScanCandidate(symbol="AAPL", gap_pct=2.0)
         assert self.criteria.evaluate_premarket(candidate) is True
+
+    def test_no_news_check_in_premarket(self):
+        """Premarket does NOT check news — only gap matters."""
+        candidate = ScanCandidate(symbol="AAPL", gap_pct=5.0, has_news=False)
+        assert self.criteria.evaluate_premarket(candidate) is True
+        assert 'has_news' not in candidate.criteria_met
 
 
 # =============================================================================

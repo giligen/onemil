@@ -107,25 +107,29 @@ class TestLoadUniverse:
 # =============================================================================
 
 class TestRunPremarketCycle:
-    """Tests for RealtimeScanner._run_premarket_cycle."""
+    """Tests for RealtimeScanner._run_premarket_cycle.
+
+    Premarket is pure gap detection — no news/LLM calls.
+    """
 
     def test_detects_gap_ups(self, scanner, mock_alpaca, mock_news, mock_db):
-        """Premarket cycle detects stocks gapping up with news."""
+        """Premarket cycle detects stocks gapping up (no news check)."""
         scanner._universe = [
             {'symbol': 'GAP', 'price_close': 5.0, 'company_name': 'Gap Co', 'float_shares': 1_000_000},
         ]
         mock_alpaca.get_latest_trades.return_value = {
             'GAP': {'price': 5.50},  # 10% gap
         }
-        mock_news.has_interesting_news.return_value = (True, "Big catalyst")
 
         scanner._run_premarket_cycle()
 
         assert 'GAP' in scanner._premarket_gap_symbols
+        mock_news.has_interesting_news.assert_not_called()
         mock_db.save_scan_result.assert_called_once()
         saved = mock_db.save_scan_result.call_args[0][0]
         assert saved['symbol'] == 'GAP'
         assert saved['phase'] == 'premarket'
+        assert saved['has_news'] == 0
         assert saved['qualified'] == 1
 
     def test_skips_non_gappers(self, scanner, mock_alpaca, mock_news, mock_db):
@@ -360,3 +364,78 @@ class TestPrintIntradayOutput:
         assert "Close calls" in captured.out
         assert "ALMOST" in captured.out
         assert "has_news" in captured.out
+
+
+# =============================================================================
+# Trading Engine Integration
+# =============================================================================
+
+class TestTradingEngineHandoff:
+    """Tests for scanner → trading engine handoff."""
+
+    def test_scanner_accepts_trading_engine(self, mock_alpaca, mock_news, mock_db, criteria):
+        """Scanner can be created with trading_engine parameter."""
+        mock_engine = MagicMock()
+        scanner = RealtimeScanner(
+            alpaca_client=mock_alpaca,
+            news_provider=mock_news,
+            db=mock_db,
+            criteria=criteria,
+            trading_engine=mock_engine,
+        )
+        assert scanner.trading_engine is mock_engine
+
+    def test_scanner_works_without_trading_engine(self, scanner):
+        """Scanner works normally without trading_engine."""
+        assert scanner.trading_engine is None
+
+    @patch('scanner.realtime_scanner.datetime')
+    def test_qualified_stock_handed_to_trading_engine(
+        self, mock_dt, mock_alpaca, mock_news, mock_db, criteria
+    ):
+        """When a stock qualifies, on_stock_qualified is called on trading engine."""
+        import pytz
+        from datetime import datetime as real_datetime
+
+        # Mock datetime.now(ET) to return 10:00 ET
+        ET = pytz.timezone('US/Eastern')
+        fake_now = real_datetime(2026, 3, 13, 10, 0, 0, tzinfo=ET)
+        mock_dt.now.return_value = fake_now
+        mock_dt.side_effect = lambda *a, **kw: real_datetime(*a, **kw)
+
+        mock_engine = MagicMock()
+        scanner = RealtimeScanner(
+            alpaca_client=mock_alpaca,
+            news_provider=mock_news,
+            db=mock_db,
+            criteria=criteria,
+            trading_engine=mock_engine,
+            verbose=False,
+        )
+
+        # Setup universe with a stock that will qualify
+        scanner._universe = [{
+            'symbol': 'HOT',
+            'price_close': 5.0,
+            'company_name': 'Hot Inc.',
+            'float_shares': 2_000_000,
+        }]
+        # Use bucket matching mocked time: 10:00
+        scanner._volume_profiles = {'HOT': {'10:00': 10000}}
+
+        # Mock API responses so stock qualifies
+        mock_alpaca.get_current_bars.return_value = {
+            'HOT': {'open': 5.0, 'high': 6.5, 'low': 5.0, 'close': 6.0, 'volume': 100000,
+                     'timestamp': '2026-03-13T14:30:00Z'},
+        }
+        mock_alpaca.get_latest_trades.return_value = {
+            'HOT': {'price': 6.0, 'size': 100, 'timestamp': '2026-03-13T14:30:00Z'},
+        }
+        # News check returns True (qualifies)
+        mock_news.has_interesting_news.return_value = (True, "Big catalyst news")
+        mock_db.save_scan_result.return_value = 1
+
+        scanner._run_intraday_cycle()
+
+        # Verify trading engine was notified
+        mock_engine.on_stock_qualified.assert_called_once_with('HOT')

@@ -45,3 +45,36 @@ database:
 float_cache:
   # Refresh float data if older than N days
   refresh_days: 7
+
+# News analyzer (optional - requires ANTHROPIC_API_KEY in .env)
+news_analyzer:
+  model: claude-haiku-4-5-20251001
+
+# Telegram notifications
+notifications:
+  telegram:
+    enabled: true
+    send_on_startup: true
+    send_on_qualified: true
+    send_on_pattern: true
+    send_on_trade: true
+    send_on_close: true
+    send_daily_report: true
+
+# Trading (Phase 2 - automated paper trading)
+trading:
+  enabled: false
+  position_size_dollars: 500
+  max_shares: 1000
+  max_positions: 3
+  daily_loss_limit: -100.0
+  max_risk_per_share: 0.20
+  min_risk_reward: 2.0
+  pattern_poll_interval: 60
+  stop_trading_before_close_min: 15
+  bull_flag:
+    min_pole_candles: 3
+    min_pole_gain_pct: 3.0
+    max_retracement_pct: 50.0
+    max_pullback_candles: 5
+    min_breakout_volume_ratio: 1.5

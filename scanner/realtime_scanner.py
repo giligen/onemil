@@ -41,6 +41,8 @@ class RealtimeScanner:
         criteria: ScannerCriteria,
         poll_interval: int = 60,
         verbose: bool = False,
+        trading_engine=None,
+        notifier=None,
     ):
         """
         Initialize RealtimeScanner.
@@ -52,6 +54,8 @@ class RealtimeScanner:
             criteria: Scanner criteria engine
             poll_interval: Pre-market polling interval in seconds
             verbose: Enable verbose output
+            trading_engine: Optional TradingEngine for automated trading
+            notifier: Optional TelegramNotifier for alerts
         """
         self.alpaca = alpaca_client
         self.news = news_provider
@@ -59,18 +63,27 @@ class RealtimeScanner:
         self.criteria = criteria
         self.poll_interval = poll_interval
         self.verbose = verbose
+        self.trading_engine = trading_engine
+        self.notifier = notifier
 
         self._universe: List[Dict] = []
         self._volume_profiles: Dict[str, Dict[str, int]] = {}
         self._premarket_gap_symbols: Set[str] = set()
-        self._today = date.today().isoformat()
+        self._premarket_gap_data: List[Dict] = []
+        self._qualified_stock_data: List[Dict] = []
+
+    @property
+    def _today(self) -> str:
+        """Current date as ISO string. Always fresh, never stale."""
+        return date.today().isoformat()
 
     def run(self) -> None:
         """
         Run the scanner (main loop).
 
-        Determines current phase based on Eastern Time
-        and runs the appropriate scanning loop.
+        1. Wait until market open (09:30 ET)
+        2. Run ONE gap-up scan (current price vs previous close)
+        3. Run intraday cycles every 15 min until market close (16:00 ET)
         """
         self._load_universe()
 
@@ -80,22 +93,39 @@ class RealtimeScanner:
 
         logger.info(f"Scanner starting with {len(self._universe)} universe stocks")
 
+        now_et = datetime.now(ET)
+        current_time = now_et.strftime("%H:%M")
+
+        if current_time >= "16:00":
+            logger.info("Market closed (after 16:00 ET). Nothing to do.")
+            return
+
+        # Wait until market open if we're early
+        if current_time < "09:30":
+            logger.info("Waiting for market open (09:30 ET)...")
+            self._sleep_until("09:30")
+
+        # Run gap scan ONCE at open
+        if not self._premarket_gap_symbols:
+            logger.info("Running opening gap scan...")
+            self._run_premarket_cycle()
+
+        # Intraday loop until close
         while True:
             now_et = datetime.now(ET)
             current_time = now_et.strftime("%H:%M")
 
-            if current_time < "04:00":
-                logger.info("Before pre-market (04:00 ET). Waiting...")
-                self._sleep_until("04:00")
-            elif current_time < "09:30":
-                self._run_premarket_cycle()
-                time_mod.sleep(self.poll_interval)
-            elif current_time < "16:00":
-                self._run_intraday_cycle()
-                self._sleep_until_next_bucket()
-            else:
-                logger.info("Market closed (after 16:00 ET). Scanner complete.")
+            if current_time >= "16:00":
+                logger.info("Market closed (16:00 ET). Scanner complete.")
                 break
+
+            self._run_intraday_cycle()
+
+            # Run trading engine pattern check between scanner cycles
+            if self.trading_engine is not None and self.trading_engine.enabled:
+                self.trading_engine.run_pattern_check()
+
+            self._sleep_until_next_bucket()
 
     def run_test_cycle(self) -> Dict:
         """
@@ -170,7 +200,11 @@ class RealtimeScanner:
     # =========================================================================
 
     def _run_premarket_cycle(self) -> None:
-        """Run one pre-market scan cycle."""
+        """Run one pre-market gap scan. Pure quantitative — no LLM calls.
+
+        Finds stocks gapping >= threshold from previous close.
+        News/LLM classification happens later in intraday, as the LAST step.
+        """
         symbols = [s['symbol'] for s in self._universe]
 
         # Get latest trades (SIP for pre-market data)
@@ -193,9 +227,6 @@ class RealtimeScanner:
             if gap_pct < self.criteria.gap_pct_min:
                 continue
 
-            # Check news for gap candidates
-            has_news, headline = self.news.has_interesting_news(symbol)
-
             candidate = ScanCandidate(
                 symbol=symbol,
                 company_name=stock.get('company_name', ''),
@@ -203,33 +234,44 @@ class RealtimeScanner:
                 current_price=current_price,
                 float_shares=stock.get('float_shares', 0),
                 gap_pct=gap_pct,
-                has_news=has_news,
-                news_headline=headline,
             )
+            candidates.append(candidate)
+            self._premarket_gap_symbols.add(symbol)
+            self._premarket_gap_data.append({
+                'symbol': symbol,
+                'prev_close': prev_close,
+                'current_price': current_price,
+                'gap_pct': gap_pct,
+            })
 
-            qualified = self.criteria.evaluate_premarket(candidate)
-            if qualified:
-                candidates.append(candidate)
-                self._premarket_gap_symbols.add(symbol)
+            # Save to DB
+            self.db.save_scan_result({
+                'scan_date': self._today,
+                'symbol': symbol,
+                'detected_at': datetime.now(timezone.utc),
+                'phase': 'premarket',
+                'prev_close': prev_close,
+                'current_price': current_price,
+                'gap_pct': gap_pct,
+                'intraday_change_pct': gap_pct,
+                'relative_volume': None,
+                'current_volume': None,
+                'time_bucket': None,
+                'float_shares': stock.get('float_shares', 0),
+                'has_news': 0,
+                'news_headline': None,
+                'qualified': 1,
+            })
 
-                # Save to DB
-                self.db.save_scan_result({
-                    'scan_date': self._today,
-                    'symbol': symbol,
-                    'detected_at': datetime.now(timezone.utc),
-                    'phase': 'premarket',
-                    'prev_close': prev_close,
-                    'current_price': current_price,
-                    'gap_pct': gap_pct,
-                    'intraday_change_pct': gap_pct,
-                    'relative_volume': None,
-                    'current_volume': None,
-                    'time_bucket': None,
-                    'float_shares': stock.get('float_shares', 0),
-                    'has_news': 1 if has_news else 0,
-                    'news_headline': headline,
-                    'qualified': 1,
-                })
+        candidates.sort(key=lambda x: x.gap_pct, reverse=True)
+        logger.info(
+            f"Pre-market gap scan: {len(candidates)} stocks >={self.criteria.gap_pct_min}% gap "
+            f"(out of {len(symbols)} universe)"
+        )
+
+        # Telegram notification for gap-ups
+        if candidates and self.notifier:
+            self.notifier.notify_premarket_gaps(self._premarket_gap_data)
 
         # Output
         now_et = datetime.now(ET).strftime("%H:%M")
@@ -338,6 +380,30 @@ class RealtimeScanner:
 
             if is_qualified:
                 qualified.append(candidate)
+
+                # Track for daily report
+                self._qualified_stock_data.append({
+                    'symbol': symbol,
+                    'current_price': current_price,
+                    'intraday_change_pct': intraday_change_pct,
+                    'relative_volume': relative_volume,
+                    'news_headline': headline,
+                    'time_bucket': bucket,
+                })
+
+                # Notify via Telegram
+                if self.notifier:
+                    self.notifier.notify_stock_qualified(
+                        symbol=symbol,
+                        price=current_price,
+                        change_pct=intraday_change_pct,
+                        relative_volume=relative_volume,
+                        headline=headline,
+                    )
+
+                # Hand off to trading engine if available
+                if self.trading_engine is not None:
+                    self.trading_engine.on_stock_qualified(symbol)
 
                 # Save qualified result to DB
                 self.db.save_scan_result({

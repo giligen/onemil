@@ -19,7 +19,7 @@ class ScanCandidate:
     company_name: str = ''
     prev_close: float = 0.0
     current_price: float = 0.0
-    float_shares: int = 0
+    float_shares: Optional[int] = None
     gap_pct: float = 0.0
     intraday_change_pct: float = 0.0
     relative_volume: float = 0.0
@@ -84,12 +84,12 @@ class ScannerCriteria:
 
     def evaluate_premarket(self, candidate: ScanCandidate) -> bool:
         """
-        Evaluate pre-market gap criteria.
+        Evaluate pre-market gap criteria. Pure quantitative — no news check.
 
-        A stock qualifies in pre-market if:
+        A stock qualifies as a gap-up candidate if:
         - Gap >= threshold
-        - Has interesting news
 
+        News/LLM classification is deferred to intraday (last step).
         Price and float are already filtered by universe.
 
         Args:
@@ -99,18 +99,13 @@ class ScannerCriteria:
             True if candidate qualifies as pre-market gap-up
         """
         candidate.criteria_met['gap'] = candidate.gap_pct >= self.gap_pct_min
-        candidate.criteria_met['has_news'] = candidate.has_news
 
-        qualified = all([
-            candidate.criteria_met['gap'],
-            candidate.criteria_met['has_news'],
-        ])
+        qualified = candidate.criteria_met['gap']
 
         if qualified:
             logger.debug(
-                f"PREMARKET QUALIFIED: {candidate.symbol} | "
-                f"Gap: {candidate.gap_pct:.1f}% | "
-                f"News: {candidate.news_headline}"
+                f"PREMARKET GAP-UP: {candidate.symbol} | "
+                f"Gap: {candidate.gap_pct:.1f}%"
             )
 
         return qualified
@@ -136,7 +131,11 @@ class ScannerCriteria:
         candidate.criteria_met['price_range'] = (
             self.price_min <= candidate.current_price <= self.price_max
         )
-        candidate.criteria_met['float'] = candidate.float_shares <= self.float_max
+        candidate.criteria_met['float'] = (
+            candidate.float_shares is not None
+            and candidate.float_shares > 0
+            and candidate.float_shares <= self.float_max
+        )
         candidate.criteria_met['gap'] = candidate.gap_pct >= self.gap_pct_min
         candidate.criteria_met['relative_volume'] = (
             candidate.relative_volume >= self.relative_volume_min

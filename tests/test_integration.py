@@ -178,12 +178,10 @@ class TestUniverseBuildToScanFlow:
                 current_price=stock['price_close'] * 1.05,  # Simulate 5% gap
                 float_shares=stock['float_shares'],
                 gap_pct=5.0,
-                has_news=True,
-                news_headline="Big catalyst",
             )
             qualified = criteria.evaluate_premarket(candidate)
             assert qualified is True, (
-                f"{stock['symbol']} should qualify premarket with 5% gap and news"
+                f"{stock['symbol']} should qualify premarket with 5% gap"
             )
 
 
@@ -259,12 +257,15 @@ class TestVolumeProfileCalculationAndStorage:
 
 
 class TestPremarketScanSavesToDb:
-    """Integration: universe in DB -> mocked trades/news -> premarket cycle -> DB results."""
+    """Integration: universe in DB -> mocked trades -> premarket gap scan -> DB results.
+
+    Premarket is pure quantitative (gap detection). No news/LLM calls.
+    """
 
     def test_premarket_scan_saves_to_db(self, db, mock_alpaca, criteria):
         """
         Set up universe in real DB, mock Alpaca latest trades for gap-up prices,
-        mock news provider, run one premarket cycle, verify scan_results in DB.
+        run one premarket cycle, verify gap-up scan_results saved in DB.
         """
         # Seed universe with two stocks
         _seed_universe(db, [
@@ -280,12 +281,6 @@ class TestPremarketScanSavesToDb:
             'FLAT': {'price': 8.00, 'size': 50, 'timestamp': None},    # 0%
         }
 
-        # Mock news: all symbols have news (V1 analyzer returns True for any article)
-        mock_alpaca.get_news.return_value = [
-            {'headline': 'Big news about the stock', 'summary': 'Details here',
-             'source': 'Reuters', 'created_at': '2026-03-13T08:00:00Z', 'url': 'http://example.com'}
-        ]
-
         news_provider = NewsProvider(alpaca_client=mock_alpaca)
 
         scanner = RealtimeScanner(
@@ -294,28 +289,27 @@ class TestPremarketScanSavesToDb:
             db=db,
             criteria=criteria,
         )
-        # Manually load universe (avoid the run() loop)
         scanner._load_universe()
-        scanner._today = date.today().isoformat()
 
         # --- Act ---
         scanner._run_premarket_cycle()
 
         # --- Assert ---
-        results = db.get_scan_results(scanner._today, phase='premarket')
+        today = date.today().isoformat()
+        results = db.get_scan_results(today, phase='premarket')
         result_symbols = {r['symbol'] for r in results}
 
-        assert 'GAP1' in result_symbols, "GAP1 (10% gap + news) should be saved"
-        assert 'GAP2' in result_symbols, "GAP2 (5% gap + news) should be saved"
+        assert 'GAP1' in result_symbols, "GAP1 (10% gap) should be saved"
+        assert 'GAP2' in result_symbols, "GAP2 (5% gap) should be saved"
         assert 'FLAT' not in result_symbols, "FLAT (0% gap) should NOT be saved"
 
-        # Verify data integrity of saved result
+        # Verify data integrity — no news in premarket phase
         gap1_result = next(r for r in results if r['symbol'] == 'GAP1')
         assert gap1_result['phase'] == 'premarket'
         assert gap1_result['prev_close'] == 5.00
         assert gap1_result['current_price'] == 5.50
         assert abs(gap1_result['gap_pct'] - 10.0) < 0.1
-        assert gap1_result['has_news'] == 1
+        assert gap1_result['has_news'] == 0, "Premarket does not check news"
         assert gap1_result['qualified'] == 1
 
 
@@ -377,7 +371,6 @@ class TestIntradayScanQualificationFlow:
             criteria=criteria,
         )
         scanner._load_universe()
-        scanner._today = date.today().isoformat()
 
         # Patch ET time so bucket = "10:00"
         with patch('scanner.realtime_scanner.datetime') as mock_dt:
@@ -390,7 +383,8 @@ class TestIntradayScanQualificationFlow:
             scanner._run_intraday_cycle()
 
         # --- Assert ---
-        results = db.get_scan_results(scanner._today, phase='intraday')
+        today = date.today().isoformat()
+        results = db.get_scan_results(today, phase='intraday')
         result_symbols = {r['symbol'] for r in results}
 
         # HOT: 20% move, 6x relVol, news => QUALIFIED
@@ -560,3 +554,53 @@ class TestDeactivationOnRebuild:
         cccc = db.get_universe_stock('CCCC')
         assert cccc is not None, "CCCC record should still exist in DB"
         assert cccc['active'] == 0, "CCCC should be marked inactive"
+
+
+# =============================================================================
+# 7. LLM News Analyzer integration (real Anthropic API)
+# =============================================================================
+
+
+@pytest.mark.integration
+class TestLLMNewsAnalyzerIntegration:
+    """Integration tests for LLMNewsAnalyzer using real Anthropic API.
+
+    Requires ANTHROPIC_API_KEY in environment.
+    Run with: pytest -m integration tests/test_integration.py -v
+    """
+
+    @pytest.fixture(autouse=True)
+    def _require_api_key(self):
+        """Skip if ANTHROPIC_API_KEY is not set."""
+        from dotenv import load_dotenv
+        load_dotenv()
+        api_key = os.getenv("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            pytest.skip("ANTHROPIC_API_KEY not set — skipping LLM integration tests")
+        import anthropic
+        self.client = anthropic.Anthropic(api_key=api_key)
+
+    def test_real_catalyst_classified_true(self):
+        """Known catalyst headline should be classified as True."""
+        from data_sources.news_provider import LLMNewsAnalyzer
+
+        analyzer = LLMNewsAnalyzer(self.client)
+        article = {
+            'headline': 'XYZ Pharma Receives FDA Approval for Cancer Drug',
+            'summary': 'XYZ Pharma announced today that the FDA has granted '
+                       'full approval for its novel cancer treatment drug.',
+        }
+        result = analyzer.is_interesting(article, symbol='XYZ')
+        assert result is True, "FDA approval should be classified as a real catalyst"
+
+    def test_listicle_classified_false(self):
+        """Known listicle/noise headline should be classified as False."""
+        from data_sources.news_provider import LLMNewsAnalyzer
+
+        analyzer = LLMNewsAnalyzer(self.client)
+        article = {
+            'headline': '12 Stocks Moving In Thursday\'s Pre-Market Session',
+            'summary': 'Here are the stocks making moves in pre-market trading today.',
+        }
+        result = analyzer.is_interesting(article, symbol='RAND')
+        assert result is False, "Generic listicle should be classified as noise"

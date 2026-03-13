@@ -402,12 +402,14 @@ class TestGetLatestTrades:
 # ===================================================================
 
 class TestGetCurrentBars:
-    """Tests for AlpacaClient.get_current_bars."""
+    """Tests for AlpacaClient.get_current_bars (uses 15-min StockBarsRequest)."""
 
     def test_returns_bar_data(self, client, mock_sdk_clients):
         """Returns dict with OHLCV and timestamp for each symbol."""
         bar = _make_bar(open=9.0, high=12.0, low=8.5, close=11.0, volume=200_000)
-        mock_sdk_clients["data_client"].get_stock_latest_bar.return_value = {"TSLA": bar}
+        mock_response = MagicMock()
+        mock_response.data = {"TSLA": [bar]}
+        mock_sdk_clients["data_client"].get_stock_bars.return_value = mock_response
 
         result = client.get_current_bars(["TSLA"])
 
@@ -424,14 +426,29 @@ class TestGetCurrentBars:
 
     def test_missing_symbol_omitted(self, client, mock_sdk_clients):
         """Symbols not in response are omitted from result."""
-        mock_sdk_clients["data_client"].get_stock_latest_bar.return_value = {}
+        mock_response = MagicMock()
+        mock_response.data = {}
+        mock_sdk_clients["data_client"].get_stock_bars.return_value = mock_response
 
         result = client.get_current_bars(["MISSING"])
         assert result == {}
 
+    def test_uses_latest_bar_from_multiple(self, client, mock_sdk_clients):
+        """When multiple 15-min bars returned, uses the most recent one."""
+        bar_old = _make_bar(open=8.0, high=9.0, low=7.5, close=8.5, volume=100_000)
+        bar_new = _make_bar(open=9.0, high=12.0, low=8.5, close=11.0, volume=200_000)
+        mock_response = MagicMock()
+        mock_response.data = {"TSLA": [bar_old, bar_new]}
+        mock_sdk_clients["data_client"].get_stock_bars.return_value = mock_response
+
+        result = client.get_current_bars(["TSLA"])
+
+        assert result["TSLA"]["close"] == 11.0
+        assert result["TSLA"]["volume"] == 200_000
+
     def test_api_error_propagates(self, client, mock_sdk_clients):
         """RuntimeError is wrapped in AlpacaAPIError."""
-        mock_sdk_clients["data_client"].get_stock_latest_bar.side_effect = RuntimeError("fail")
+        mock_sdk_clients["data_client"].get_stock_bars.side_effect = RuntimeError("fail")
 
         with pytest.raises(AlpacaAPIError, match="Failed to get current bars"):
             client.get_current_bars(["AAPL"])
@@ -472,9 +489,19 @@ class TestGetNews:
         result = client.get_news("AAPL")
         assert result == []
 
-    def test_api_error_returns_empty_with_warning(self, client, mock_sdk_clients):
-        """API failure returns empty list (news is non-critical)."""
+    def test_api_error_raises_alpaca_error(self, client, mock_sdk_clients):
+        """API failure raises AlpacaAPIError (not silently swallowed)."""
         mock_sdk_clients["news_client"].get_news.side_effect = RuntimeError("news api down")
+
+        with pytest.raises(AlpacaAPIError, match="News API call failed"):
+            client.get_news("AAPL")
+
+    def test_parse_error_returns_empty_with_warning(self, client, mock_sdk_clients):
+        """Response parsing failure returns empty list (non-critical)."""
+        mock_news_set = MagicMock()
+        # .data is a property that raises when accessed during parsing
+        type(mock_news_set).data = property(lambda self: (_ for _ in ()).throw(ValueError("bad data")))
+        mock_sdk_clients["news_client"].get_news.return_value = mock_news_set
 
         result = client.get_news("AAPL")
         assert result == []
@@ -581,3 +608,220 @@ class TestCallWithTimeout:
 
         result = client._call_with_timeout(once_tmr, "op")
         assert result == "done"
+
+
+# ===================================================================
+# get_1min_bars (Phase 2)
+# ===================================================================
+
+class TestGet1MinBars:
+    """Tests for AlpacaClient.get_1min_bars."""
+
+    def test_returns_dataframe(self, client, mock_sdk_clients):
+        """Returns DataFrame with OHLCV columns."""
+        bar = _make_bar(open=4.0, high=4.1, low=3.9, close=4.05, volume=100_000)
+        mock_response = MagicMock()
+        mock_response.data = {"AAPL": [bar]}
+        mock_sdk_clients["data_client"].get_stock_bars.return_value = mock_response
+
+        result = client.get_1min_bars("AAPL", lookback_minutes=30)
+
+        assert isinstance(result, pd.DataFrame)
+        assert len(result) == 1
+        assert result.iloc[0]["open"] == 4.0
+        assert result.iloc[0]["close"] == 4.05
+        assert result.iloc[0]["volume"] == 100_000
+
+    def test_empty_response_returns_empty_df(self, client, mock_sdk_clients):
+        """Empty response returns empty DataFrame."""
+        mock_response = MagicMock()
+        mock_response.data = {}
+        mock_sdk_clients["data_client"].get_stock_bars.return_value = mock_response
+
+        result = client.get_1min_bars("AAPL")
+        assert isinstance(result, pd.DataFrame)
+        assert result.empty
+
+    def test_api_error_propagates(self, client, mock_sdk_clients):
+        """API error is wrapped in AlpacaAPIError."""
+        mock_sdk_clients["data_client"].get_stock_bars.side_effect = RuntimeError("fail")
+
+        with pytest.raises(AlpacaAPIError, match="Failed to get 1-min bars"):
+            client.get_1min_bars("AAPL")
+
+    def test_multiple_bars_returned(self, client, mock_sdk_clients):
+        """Multiple bars are returned in DataFrame."""
+        bars = [
+            _make_bar(open=4.0, close=4.05, volume=100_000),
+            _make_bar(open=4.05, close=4.10, volume=120_000),
+            _make_bar(open=4.10, close=4.15, volume=90_000),
+        ]
+        mock_response = MagicMock()
+        mock_response.data = {"AAPL": bars}
+        mock_sdk_clients["data_client"].get_stock_bars.return_value = mock_response
+
+        result = client.get_1min_bars("AAPL")
+        assert len(result) == 3
+
+
+# ===================================================================
+# submit_bracket_order (Phase 2)
+# ===================================================================
+
+class TestSubmitBracketOrder:
+    """Tests for AlpacaClient.submit_bracket_order."""
+
+    def test_submits_order_successfully(self, client, mock_sdk_clients):
+        """Successful bracket order returns dict with id and status."""
+        mock_order = MagicMock()
+        mock_order.id = "order-123"
+        mock_order.status = MagicMock()
+        mock_order.status.value = "accepted"
+        mock_sdk_clients["trading_client"].submit_order.return_value = mock_order
+
+        result = client.submit_bracket_order(
+            symbol="AAPL", qty=100, side="buy",
+            limit_price=4.40, tp_price=4.90, sl_price=4.20,
+        )
+
+        assert result["id"] == "order-123"
+        assert result["status"] == "accepted"
+        assert result["symbol"] == "AAPL"
+
+    def test_api_error_propagates(self, client, mock_sdk_clients):
+        """API error raises AlpacaAPIError."""
+        mock_sdk_clients["trading_client"].submit_order.side_effect = RuntimeError("rejected")
+
+        with pytest.raises(AlpacaAPIError, match="Failed to submit bracket order"):
+            client.submit_bracket_order("AAPL", 100, "buy", 4.40, 4.90, 4.20)
+
+
+# ===================================================================
+# get_open_positions (Phase 2)
+# ===================================================================
+
+class TestGetOpenPositions:
+    """Tests for AlpacaClient.get_open_positions."""
+
+    def test_returns_positions(self, client, mock_sdk_clients):
+        """Returns list of position dicts."""
+        mock_pos = MagicMock()
+        mock_pos.symbol = "AAPL"
+        mock_pos.qty = "100"
+        mock_pos.side = "long"
+        mock_pos.avg_entry_price = "4.40"
+        mock_pos.market_value = "450.00"
+        mock_pos.unrealized_pl = "10.00"
+        mock_pos.unrealized_plpc = "0.0227"
+        mock_sdk_clients["trading_client"].get_all_positions.return_value = [mock_pos]
+
+        result = client.get_open_positions()
+
+        assert len(result) == 1
+        assert result[0]["symbol"] == "AAPL"
+        assert result[0]["qty"] == 100
+
+    def test_empty_positions(self, client, mock_sdk_clients):
+        """Empty positions returns empty list."""
+        mock_sdk_clients["trading_client"].get_all_positions.return_value = []
+
+        result = client.get_open_positions()
+        assert result == []
+
+    def test_api_error_propagates(self, client, mock_sdk_clients):
+        """API error raises AlpacaAPIError."""
+        mock_sdk_clients["trading_client"].get_all_positions.side_effect = RuntimeError("fail")
+
+        with pytest.raises(AlpacaAPIError, match="Failed to get open positions"):
+            client.get_open_positions()
+
+
+# ===================================================================
+# get_account_info (Phase 2)
+# ===================================================================
+
+class TestGetAccountInfo:
+    """Tests for AlpacaClient.get_account_info."""
+
+    def test_returns_account_data(self, client, mock_sdk_clients):
+        """Returns dict with account equity, buying power, etc."""
+        mock_account = MagicMock()
+        mock_account.equity = "25000.00"
+        mock_account.buying_power = "50000.00"
+        mock_account.cash = "25000.00"
+        mock_account.daytrade_count = "2"
+        mock_account.pattern_day_trader = False
+        mock_sdk_clients["trading_client"].get_account.return_value = mock_account
+
+        result = client.get_account_info()
+
+        assert result["equity"] == 25000.0
+        assert result["buying_power"] == 50000.0
+        assert result["daytrade_count"] == 2
+
+    def test_api_error_propagates(self, client, mock_sdk_clients):
+        """API error raises AlpacaAPIError."""
+        mock_sdk_clients["trading_client"].get_account.side_effect = RuntimeError("fail")
+
+        with pytest.raises(AlpacaAPIError, match="Failed to get account info"):
+            client.get_account_info()
+
+
+# ===================================================================
+# cancel_order (Phase 2)
+# ===================================================================
+
+class TestCancelOrder:
+    """Tests for AlpacaClient.cancel_order."""
+
+    def test_cancels_successfully(self, client, mock_sdk_clients):
+        """Successful cancellation returns True."""
+        mock_sdk_clients["trading_client"].cancel_order_by_id.return_value = None
+
+        result = client.cancel_order("order-123")
+        assert result is True
+
+    def test_api_error_propagates(self, client, mock_sdk_clients):
+        """API error raises AlpacaAPIError."""
+        mock_sdk_clients["trading_client"].cancel_order_by_id.side_effect = RuntimeError("fail")
+
+        with pytest.raises(AlpacaAPIError, match="Failed to cancel order"):
+            client.cancel_order("order-123")
+
+
+# ===================================================================
+# get_order (Phase 2)
+# ===================================================================
+
+class TestGetOrder:
+    """Tests for AlpacaClient.get_order."""
+
+    def test_returns_order_data(self, client, mock_sdk_clients):
+        """Returns dict with order details."""
+        mock_order = MagicMock()
+        mock_order.id = "order-123"
+        mock_order.status = MagicMock()
+        mock_order.status.value = "filled"
+        mock_order.symbol = "AAPL"
+        mock_order.qty = "100"
+        mock_order.filled_qty = "100"
+        mock_order.filled_avg_price = "4.40"
+        mock_order.side = MagicMock()
+        mock_order.side.value = "buy"
+        mock_order.type = MagicMock()
+        mock_order.type.value = "limit"
+        mock_sdk_clients["trading_client"].get_order_by_id.return_value = mock_order
+
+        result = client.get_order("order-123")
+
+        assert result["id"] == "order-123"
+        assert result["status"] == "filled"
+        assert result["symbol"] == "AAPL"
+        assert result["filled_avg_price"] == 4.40
+
+    def test_api_error_propagates(self, client, mock_sdk_clients):
+        """API error raises AlpacaAPIError."""
+        mock_sdk_clients["trading_client"].get_order_by_id.side_effect = RuntimeError("fail")
+
+        with pytest.raises(AlpacaAPIError, match="Failed to get order"):
+            client.get_order("order-123")

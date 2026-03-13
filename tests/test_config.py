@@ -120,6 +120,31 @@ class TestConfigLoading:
         assert cfg.db_path == "data/onemil.db"
         assert cfg.float_cache_refresh_days == 7
 
+        # Trading defaults
+        assert cfg.trading_enabled is False
+        assert cfg.position_size_dollars == 500
+        assert cfg.max_shares == 1000
+        assert cfg.max_positions == 3
+        assert cfg.daily_loss_limit == -100.0
+        assert cfg.max_risk_per_share == 0.20
+        assert cfg.min_risk_reward == 2.0
+        assert cfg.pattern_poll_interval == 60
+        assert cfg.stop_trading_before_close_min == 15
+        assert cfg.min_pole_candles == 3
+        assert cfg.min_pole_gain_pct == 3.0
+        assert cfg.max_retracement_pct == 50.0
+        assert cfg.max_pullback_candles == 5
+        assert cfg.min_breakout_volume_ratio == 1.5
+
+        # Telegram defaults
+        assert cfg.telegram_enabled is True
+        assert cfg.telegram_send_on_startup is True
+        assert cfg.telegram_send_on_qualified is True
+        assert cfg.telegram_send_on_pattern is True
+        assert cfg.telegram_send_on_trade is True
+        assert cfg.telegram_send_on_close is True
+        assert cfg.telegram_send_daily_report is True
+
 
 # ---------------------------------------------------------------------------
 # Property types / values

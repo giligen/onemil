@@ -20,3 +20,9 @@ pyyaml>=6.0
 
 # Timezone handling
 pytz>=2023.3
+
+# LLM news analysis (optional - falls back to V1 stub without API key)
+anthropic>=0.42.0
+
+# Telegram notifications
+aiohttp>=3.9.0
