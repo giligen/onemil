@@ -6,6 +6,7 @@ Enforces:
 - Daily loss limit (-$100)
 - No duplicate symbols
 - No new positions within 15 min of market close
+- No new positions during midday dead zone (11:30-14:00 ET)
 - Syncs with Alpaca actual positions
 """
 
@@ -28,11 +29,16 @@ class PositionManager:
     Manages trading positions and enforces risk limits.
 
     Checks before each trade:
-    1. Max concurrent positions not exceeded
-    2. Daily loss limit not breached
-    3. No duplicate symbol positions
-    4. Not too close to market close
+    1. Not in midday dead zone (11:30-14:00 ET)
+    2. Max concurrent positions not exceeded
+    3. Daily loss limit not breached
+    4. No duplicate symbol positions
+    5. Not too close to market close
     """
+
+    # Midday dead zone: 11:30-14:00 ET has 37.5% WR vs 62.5% outside
+    MIDDAY_START_MINUTES = 11 * 60 + 30   # 11:30 ET
+    MIDDAY_END_MINUTES = 14 * 60          # 14:00 ET
 
     def __init__(
         self,
@@ -41,6 +47,7 @@ class PositionManager:
         max_positions: int = 3,
         daily_loss_limit: float = -100.0,
         stop_trading_before_close_min: int = 15,
+        skip_midday: bool = True,
     ):
         """
         Initialize PositionManager.
@@ -51,12 +58,14 @@ class PositionManager:
             max_positions: Maximum concurrent open positions
             daily_loss_limit: Stop trading if daily P&L hits this (negative $)
             stop_trading_before_close_min: Minutes before close to stop new positions
+            skip_midday: Skip 11:30-14:00 ET entries (backtest-proven dead zone)
         """
         self.alpaca = alpaca_client
         self.db = db
         self.max_positions = max_positions
         self.daily_loss_limit = daily_loss_limit
         self.stop_trading_before_close_min = stop_trading_before_close_min
+        self.skip_midday = skip_midday
         self._traded_symbols: Set[str] = set()
 
     def can_open_position(self, symbol: str) -> bool:
@@ -64,10 +73,11 @@ class PositionManager:
         Check if a new position can be opened for the given symbol.
 
         Validates all risk limits:
-        1. Max positions not exceeded
-        2. Daily loss limit not breached
-        3. Symbol not already traded today
-        4. Not too close to market close
+        1. Not in midday dead zone (11:30-14:00 ET)
+        2. Max positions not exceeded
+        3. Daily loss limit not breached
+        4. Symbol not already traded today
+        5. Not too close to market close
 
         Args:
             symbol: Stock symbol to check
@@ -75,6 +85,14 @@ class PositionManager:
         Returns:
             True if position can be opened, False otherwise
         """
+        # Check midday dead zone
+        if self.skip_midday and self._is_midday():
+            logger.info(
+                f"{symbol}: Skipping — midday dead zone (11:30-14:00 ET), "
+                f"backtest shows 37.5% WR in this window"
+            )
+            return False
+
         # Check close proximity
         if self._is_near_close():
             logger.warning(
@@ -149,6 +167,12 @@ class PositionManager:
         """Reset daily state (called at start of each trading day)."""
         self._traded_symbols.clear()
         logger.info("Position manager: daily state reset")
+
+    def _is_midday(self) -> bool:
+        """Check if current time is in the 11:30-14:00 ET dead zone."""
+        now_et = datetime.now(ET)
+        current_minutes = now_et.hour * 60 + now_et.minute
+        return self.MIDDAY_START_MINUTES <= current_minutes < self.MIDDAY_END_MINUTES
 
     def _is_near_close(self) -> bool:
         """Check if current time is within stop_trading_before_close_min of market close."""

@@ -535,7 +535,7 @@ class TestCallWithTimeout:
         """FuturesTimeoutError is converted to AlpacaAPITimeoutError."""
         def slow_func():
             import time
-            time.sleep(60)
+            time.sleep(1)
 
         client._api_timeout = 0.1
 

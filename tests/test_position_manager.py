@@ -6,6 +6,7 @@ Tests cover:
 - Daily loss limit
 - Duplicate symbol prevention
 - Market close proximity check
+- Midday dead zone filter (11:30-14:00 ET)
 """
 
 import pytest
@@ -227,3 +228,111 @@ class TestGetOpenPositions:
         mock_alpaca.get_open_positions.side_effect = Exception("API down")
         positions = manager.get_open_positions()
         assert positions == []
+
+
+class TestMiddayFilter:
+    """Tests for midday dead zone filter (11:30-14:00 ET)."""
+
+    @patch('trading.position_manager.datetime')
+    def test_rejects_during_midday(self, mock_dt, mock_alpaca, db):
+        """Rejects position during 11:30-14:00 ET dead zone."""
+        manager = PositionManager(
+            alpaca_client=mock_alpaca, db=db, skip_midday=True
+        )
+        mock_now = MagicMock()
+        mock_now.hour = 12
+        mock_now.minute = 30
+        mock_dt.now.return_value = mock_now
+
+        assert manager.can_open_position("AAPL") is False
+
+    @patch('trading.position_manager.datetime')
+    def test_allows_before_midday(self, mock_dt, mock_alpaca, db):
+        """Allows position at 11:29 (just before dead zone)."""
+        manager = PositionManager(
+            alpaca_client=mock_alpaca, db=db, skip_midday=True
+        )
+        mock_now = MagicMock()
+        mock_now.hour = 11
+        mock_now.minute = 29
+        mock_dt.now.return_value = mock_now
+
+        assert manager.can_open_position("AAPL") is True
+
+    @patch('trading.position_manager.datetime')
+    def test_allows_after_midday(self, mock_dt, mock_alpaca, db):
+        """Allows position at 14:00 (end of dead zone)."""
+        manager = PositionManager(
+            alpaca_client=mock_alpaca, db=db, skip_midday=True
+        )
+        mock_now = MagicMock()
+        mock_now.hour = 14
+        mock_now.minute = 0
+        mock_dt.now.return_value = mock_now
+
+        assert manager.can_open_position("AAPL") is True
+
+    @patch('trading.position_manager.datetime')
+    def test_rejects_at_midday_start_boundary(self, mock_dt, mock_alpaca, db):
+        """Rejects at exactly 11:30 ET (start of dead zone)."""
+        manager = PositionManager(
+            alpaca_client=mock_alpaca, db=db, skip_midday=True
+        )
+        mock_now = MagicMock()
+        mock_now.hour = 11
+        mock_now.minute = 30
+        mock_dt.now.return_value = mock_now
+
+        assert manager.can_open_position("AAPL") is False
+
+    @patch('trading.position_manager.datetime')
+    def test_rejects_at_1359(self, mock_dt, mock_alpaca, db):
+        """Rejects at 13:59 ET (last minute of dead zone)."""
+        manager = PositionManager(
+            alpaca_client=mock_alpaca, db=db, skip_midday=True
+        )
+        mock_now = MagicMock()
+        mock_now.hour = 13
+        mock_now.minute = 59
+        mock_dt.now.return_value = mock_now
+
+        assert manager.can_open_position("AAPL") is False
+
+    @patch('trading.position_manager.datetime')
+    def test_allows_midday_when_disabled(self, mock_dt, mock_alpaca, db):
+        """Allows midday position when skip_midday=False."""
+        manager = PositionManager(
+            alpaca_client=mock_alpaca, db=db, skip_midday=False
+        )
+        mock_now = MagicMock()
+        mock_now.hour = 12
+        mock_now.minute = 30
+        mock_dt.now.return_value = mock_now
+
+        assert manager.can_open_position("AAPL") is True
+
+    @patch('trading.position_manager.datetime')
+    def test_morning_trading_allowed(self, mock_dt, mock_alpaca, db):
+        """Morning hours (9:30-11:30 ET) are fully open."""
+        manager = PositionManager(
+            alpaca_client=mock_alpaca, db=db, skip_midday=True
+        )
+        mock_now = MagicMock()
+        mock_now.hour = 10
+        mock_now.minute = 15
+        mock_dt.now.return_value = mock_now
+
+        assert manager.can_open_position("AAPL") is True
+
+    @patch('trading.position_manager.datetime')
+    def test_afternoon_trading_allowed(self, mock_dt, mock_alpaca, db):
+        """Afternoon hours (14:00-15:45 ET) are fully open."""
+        manager = PositionManager(
+            alpaca_client=mock_alpaca, db=db, skip_midday=True
+        )
+        mock_now = MagicMock()
+        mock_now.hour = 15
+        mock_now.minute = 0
+        mock_dt.now.return_value = mock_now
+
+        assert manager.can_open_position("AAPL") is True
