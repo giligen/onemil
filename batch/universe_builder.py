@@ -49,7 +49,7 @@ class UniverseBuilder:
         db: Database,
         price_min: float = 2.0,
         price_max: float = 20.0,
-        float_max: int = 20_000_000,
+        float_max: int = 10_000_000,
         volume_profile_days: int = 50,
         float_cache_refresh_days: int = 7,
     ):
