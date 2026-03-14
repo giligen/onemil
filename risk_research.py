@@ -29,6 +29,7 @@ from batch_backtest import (
 )
 from data_sources.alpaca_client import AlpacaClient
 from persistence.database import get_database
+from trading.pattern_detector import BullFlagDetector
 from trading.trade_planner import TradePlanner
 
 logger = logging.getLogger(__name__)
@@ -170,6 +171,18 @@ HYPOTHESES: Dict[str, Dict] = {
         "max_risk_pct": 0.05,
         "min_risk_reward": 2.5,
     },
+    "H10": {
+        "description": "H9b + MACD positive filter",
+        "position_size_dollars": 50000,
+        "sizing_mode": "fixed_risk",
+        "risk_per_trade": 1000,
+        "min_risk_per_share": 0.05,
+        "max_risk_per_share": 0.20,
+        "min_risk_pct": 0.01,
+        "max_risk_pct": 0.05,
+        "min_risk_reward": 2.5,
+        "require_macd_positive": True,
+    },
 }
 
 
@@ -294,9 +307,16 @@ def run_hypothesis(
     params = HYPOTHESES[hypothesis_id]
     planner = build_planner(hypothesis_id)
 
+    # Build detector with optional MACD filter
+    detector_kwargs = {}
+    if params.get("require_macd_positive"):
+        detector_kwargs["require_macd_positive"] = True
+    detector = BullFlagDetector(**detector_kwargs) if detector_kwargs else None
+
     mode_label = "realistic" if realistic else "fantasy"
     runner = BacktestRunner(
         planner=planner,
+        detector=detector,
         realistic=realistic,
         min_price=2.0 if realistic else 0.0,
     )

@@ -12,7 +12,9 @@ Uses synthetic bar data via _make_bars() helper for readable, reproducible tests
 
 import pytest
 import pandas as pd
+import numpy as np
 from datetime import datetime, timezone, timedelta
+from unittest.mock import patch
 
 from trading.pattern_detector import BullFlagDetector, BullFlagPattern, BullFlagSetup
 
@@ -1044,3 +1046,182 @@ class TestDetectSetup:
 
         assert setup is not None
         assert setup.breakout_level == setup.flag_high
+
+
+# ===========================================================================
+# MACD FILTER TESTS
+# ===========================================================================
+
+class TestMACDFilter:
+    """Tests for MACD momentum filter in pattern detection."""
+
+    def _make_uptrend_with_flag(self):
+        """Build 45+ bars: steady uptrend → pole → flag → current bar.
+
+        The sustained uptrend ensures MACD stays positive through the flag.
+        """
+        candles = []
+        # 30 bars of steady uptrend (MACD will be solidly positive)
+        price = 3.00
+        for i in range(30):
+            o = price
+            c = price + 0.03
+            h = c + 0.01
+            l = o - 0.01
+            candles.append((o, h, l, c, 100000))
+            price = c
+
+        # Pole: 3 green candles accelerating
+        for _ in range(3):
+            o = price
+            c = price + 0.12
+            h = c + 0.02
+            l = o - 0.02
+            candles.append((o, h, l, c, 200000))
+            price = c
+
+        # Flag: 2 red candles, small retrace
+        pole_high = price + 0.02  # approximate
+        for _ in range(2):
+            o = price
+            c = price - 0.04
+            h = o + 0.02
+            l = c - 0.02
+            candles.append((o, h, l, c, 40000))
+            price = c
+
+        # Current bar (dropped by detect_setup)
+        candles.append((price, price + 0.02, price - 0.01, price + 0.01, 30000))
+        return candles
+
+    def _make_enough_bars_with_flag(self):
+        """Build 40+ bars with a valid pole+flag pattern for MACD testing.
+
+        Starts with a long uptrend so there are enough bars for MACD calculation,
+        then forms pole + flag. Used with mocked MACD to test rejection logic.
+        """
+        candles = []
+        # 30 bars of uptrend (enough bars for MACD)
+        price = 3.00
+        for i in range(30):
+            o = price
+            c = price + 0.02
+            h = c + 0.01
+            l = o - 0.01
+            candles.append((o, h, l, c, 100000))
+            price = c
+
+        # Pole: 3 green
+        for _ in range(3):
+            o = price
+            c = price + 0.12
+            h = c + 0.02
+            l = o - 0.02
+            candles.append((o, h, l, c, 200000))
+            price = c
+
+        # Flag: 2 red
+        for _ in range(2):
+            o = price
+            c = price - 0.04
+            h = o + 0.02
+            l = c - 0.02
+            candles.append((o, h, l, c, 40000))
+            price = c
+
+        # Current bar
+        candles.append((price, price + 0.02, price - 0.01, price + 0.01, 30000))
+        return candles
+
+    def test_macd_disabled_by_default(self):
+        """Default detector (require_macd_positive=False) ignores MACD."""
+        detector = BullFlagDetector()
+        bars = _make_bars(self._make_enough_bars_with_flag())
+        # Even with negative MACD, setup should be found when filter is off
+        setup = detector.detect_setup("TEST", bars)
+        # May or may not find setup based on other criteria, but MACD won't block it
+        # The key assertion is it doesn't crash and doesn't filter on MACD
+        assert detector.require_macd_positive is False
+
+    @patch('trading.indicators.macd_histogram')
+    def test_macd_rejects_negative_histogram(self, mock_macd):
+        """Setup with negative MACD histogram is rejected when filter is on."""
+        detector = BullFlagDetector(require_macd_positive=True)
+        bars = _make_bars(self._make_enough_bars_with_flag())
+        # Mock MACD to return negative histogram — momentum fading
+        n_bars = len(bars)
+        mock_macd.return_value = pd.Series([-0.05] * n_bars)
+        setup = detector.detect_setup("TEST", bars)
+        assert setup is None
+        mock_macd.assert_called_once()
+
+    def test_macd_passes_positive_histogram(self):
+        """Setup with positive MACD histogram is accepted when filter is on."""
+        detector = BullFlagDetector(require_macd_positive=True)
+        bars = _make_bars(self._make_uptrend_with_flag())
+        setup = detector.detect_setup("TEST", bars)
+        assert setup is not None
+        assert setup.macd_histogram_value is not None
+        assert setup.macd_histogram_value > 0
+
+    def test_macd_insufficient_bars(self):
+        """Rejects setup when not enough bars for meaningful MACD (< slow + signal)."""
+        detector = BullFlagDetector(require_macd_positive=True)
+        # Only 7 bars — not enough for MACD(12,26,9) which needs 35
+        candles = [
+            (4.00, 4.15, 3.98, 4.13, 200000),
+            (4.13, 4.30, 4.11, 4.28, 180000),
+            (4.28, 4.52, 4.26, 4.50, 160000),
+            (4.50, 4.52, 4.38, 4.40, 50000),
+            (4.40, 4.42, 4.33, 4.35, 30000),
+            (4.35, 4.38, 4.32, 4.34, 25000),
+        ]
+        bars = _make_bars(candles)
+        setup = detector.detect_setup("TEST", bars)
+        assert setup is None
+
+    @patch('trading.indicators.macd_histogram')
+    def test_macd_works_with_detect_too(self, mock_macd):
+        """detect() also respects MACD filter (both use _scan_pole_and_flag)."""
+        detector = BullFlagDetector(require_macd_positive=True)
+        # Build valid breakout pattern with enough bars
+        candles = list(self._make_enough_bars_with_flag())
+        # Replace last 2 entries with breakout + current instead of flag + current
+        candles[-2] = (candles[-3][3], candles[-3][3] + 0.30,
+                       candles[-3][3] - 0.01, candles[-3][3] + 0.25, 250000)
+        candles[-1] = (candles[-2][3], candles[-2][3] + 0.02,
+                       candles[-2][3] - 0.01, candles[-2][3] + 0.01, 80000)
+        bars = _make_bars(candles)
+        # Mock MACD to return negative — should block detect() too
+        n_bars = len(bars)
+        mock_macd.return_value = pd.Series([-0.05] * n_bars)
+        pattern = detector.detect("TEST", bars)
+        assert pattern is None  # MACD negative should block detect() too
+
+    def test_macd_custom_parameters(self):
+        """Custom MACD periods are used correctly."""
+        detector = BullFlagDetector(
+            require_macd_positive=True,
+            macd_fast=8, macd_slow=17, macd_signal=9,
+        )
+        # Faster MACD needs fewer bars — use uptrend bars
+        bars = _make_bars(self._make_uptrend_with_flag())
+        setup = detector.detect_setup("TEST", bars)
+        assert setup is not None
+
+    def test_macd_value_stored_on_pattern(self):
+        """MACD histogram value is stored on the returned pattern."""
+        detector = BullFlagDetector(require_macd_positive=True)
+        bars = _make_bars(self._make_uptrend_with_flag())
+        setup = detector.detect_setup("TEST", bars)
+        assert setup is not None
+        assert isinstance(setup.macd_histogram_value, float)
+        assert setup.macd_histogram_value > 0
+
+    def test_macd_none_when_filter_disabled(self):
+        """MACD value is None when filter is disabled."""
+        detector = BullFlagDetector(require_macd_positive=False)
+        bars = _make_bars(self._make_uptrend_with_flag())
+        setup = detector.detect_setup("TEST", bars)
+        if setup is not None:
+            assert setup.macd_histogram_value is None

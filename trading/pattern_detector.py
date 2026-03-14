@@ -40,6 +40,7 @@ class BullFlagPattern:
     avg_pole_volume: float
     avg_flag_volume: float
     breakout_level: float
+    macd_histogram_value: Optional[float] = None
     detected_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -68,6 +69,10 @@ class BullFlagDetector:
         max_retracement_pct: float = 50.0,
         max_pullback_candles: int = 5,
         min_breakout_volume_ratio: float = 1.5,
+        require_macd_positive: bool = False,
+        macd_fast: int = 12,
+        macd_slow: int = 26,
+        macd_signal: int = 9,
     ):
         """
         Initialize BullFlagDetector with configurable thresholds.
@@ -78,12 +83,20 @@ class BullFlagDetector:
             max_retracement_pct: Maximum pullback retracement percentage
             max_pullback_candles: Maximum pullback candles (reject if more)
             min_breakout_volume_ratio: Min breakout vol / avg pullback vol
+            require_macd_positive: If True, reject setups where MACD histogram <= 0
+            macd_fast: MACD fast EMA period (default 12)
+            macd_slow: MACD slow EMA period (default 26)
+            macd_signal: MACD signal EMA period (default 9)
         """
         self.min_pole_candles = min_pole_candles
         self.min_pole_gain_pct = min_pole_gain_pct
         self.max_retracement_pct = max_retracement_pct
         self.max_pullback_candles = max_pullback_candles
         self.min_breakout_volume_ratio = min_breakout_volume_ratio
+        self.require_macd_positive = require_macd_positive
+        self.macd_fast = macd_fast
+        self.macd_slow = macd_slow
+        self.macd_signal = macd_signal
 
     def _scan_pole_and_flag(
         self, symbol: str, completed: pd.DataFrame, scan_from_idx: int
@@ -184,6 +197,30 @@ class BullFlagDetector:
                 logger.debug(f"{symbol}: Flag volume ({avg_flag_volume:.0f}) >= pole volume ({avg_pole_volume:.0f})")
                 return None
 
+        # MACD momentum filter — reject if momentum has faded
+        macd_hist_value = None
+        if self.require_macd_positive:
+            from trading.indicators import macd_histogram
+
+            closes = completed['close'].iloc[:scan_from_idx + 1]
+            min_bars_for_macd = self.macd_slow + self.macd_signal
+            if len(closes) < min_bars_for_macd:
+                logger.debug(
+                    f"{symbol}: Not enough bars ({len(closes)}) for MACD "
+                    f"(need {min_bars_for_macd}), skipping setup"
+                )
+                return None
+
+            hist = macd_histogram(closes, self.macd_fast, self.macd_slow, self.macd_signal)
+            macd_hist_value = float(hist.iloc[-1])
+            if macd_hist_value <= 0:
+                logger.debug(
+                    f"{symbol}: MACD histogram negative ({macd_hist_value:.6f}) "
+                    f"— momentum faded, rejecting setup"
+                )
+                return None
+            logger.debug(f"{symbol}: MACD histogram positive ({macd_hist_value:.6f})")
+
         return {
             'pole_start_idx': pole_start_idx,
             'pole_end_idx': pole_end_idx,
@@ -200,6 +237,7 @@ class BullFlagDetector:
             'avg_pole_volume': avg_pole_volume,
             'avg_flag_volume': avg_flag_volume,
             'pole_candle_count': pole_candle_count,
+            'macd_histogram_value': macd_hist_value,
         }
 
     def detect(
@@ -286,6 +324,7 @@ class BullFlagDetector:
             avg_pole_volume=scan['avg_pole_volume'],
             avg_flag_volume=scan['avg_flag_volume'],
             breakout_level=breakout_level,
+            macd_histogram_value=scan.get('macd_histogram_value'),
         )
 
         logger.info(
@@ -359,6 +398,7 @@ class BullFlagDetector:
             avg_pole_volume=scan['avg_pole_volume'],
             avg_flag_volume=scan['avg_flag_volume'],
             breakout_level=breakout_level,
+            macd_histogram_value=scan.get('macd_histogram_value'),
         )
 
         logger.info(

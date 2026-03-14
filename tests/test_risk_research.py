@@ -95,8 +95,8 @@ class TestHypothesisRegistry:
     """Tests for the hypothesis registry and planner builder."""
 
     def test_all_hypotheses_exist(self):
-        """Registry contains H0-H9 plus H9a and H9b."""
-        expected = {f"H{i}" for i in range(10)} | {"H9a", "H9b"}
+        """Registry contains H0-H9 plus H9a, H9b, and H10."""
+        expected = {f"H{i}" for i in range(11)} | {"H9a", "H9b"}
         assert set(HYPOTHESES.keys()) == expected
 
     def test_all_hypotheses_create_valid_planners(self):
