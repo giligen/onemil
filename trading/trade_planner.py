@@ -3,9 +3,9 @@ Trade planner for bull flag patterns.
 
 Converts a detected BullFlagPattern into a TradePlan with:
 - Entry at breakout level
-- Stop loss below flag low (max 20 cents from entry per Ross's rule)
-- Target at 2:1 R:R (conservative)
-- Position sizing based on dollar amount and share cap
+- Stop loss below flag low (capped by max_risk_per_share or max_risk_pct)
+- Target at configurable R:R ratio
+- Position sizing: fixed_investment (dollars/price) or fixed_risk (risk_budget/risk_per_share)
 """
 
 import logging
@@ -38,13 +38,12 @@ class TradePlanner:
     """
     Creates trade plans from detected bull flag patterns.
 
-    Applies Ross Cameron's risk management rules:
-    - Stop below flag low, capped at 20 cents from entry
-    - Target = 2:1 R:R (conservative)
-    - Position size = floor(dollars / entry), capped at max shares
-    - Rejects if natural stop > 50 cents (pattern too volatile)
-    - Rejects if natural risk < 5 cents (noise stop, too tight)
-    - Rejects if R:R < 2.0
+    Supports two sizing modes:
+    - fixed_investment: shares = floor(dollars / entry_price) [original behavior]
+    - fixed_risk: shares = floor(risk_per_trade / risk_per_share) [normalized risk]
+
+    Stop thresholds can be flat dollar amounts or percentage of entry price.
+    Target is configurable via min_risk_reward ratio.
     """
 
     def __init__(
@@ -54,22 +53,37 @@ class TradePlanner:
         max_risk_per_share: float = 0.20,
         min_risk_per_share: float = 0.05,
         min_risk_reward: float = 2.0,
+        sizing_mode: str = "fixed_investment",
+        risk_per_trade: float = 500.0,
+        min_risk_pct: Optional[float] = None,
+        max_risk_pct: Optional[float] = None,
     ):
         """
         Initialize TradePlanner.
 
         Args:
-            position_size_dollars: Dollar amount per position
+            position_size_dollars: Dollar amount per position (fixed_investment mode)
             max_shares: Maximum shares per position
-            max_risk_per_share: Max risk per share (Ross's 20-cent rule)
-            min_risk_per_share: Min risk per share — rejects noise stops
-            min_risk_reward: Minimum acceptable risk/reward ratio
+            max_risk_per_share: Max risk per share flat dollar (Ross's 20-cent rule)
+            min_risk_per_share: Min risk per share flat dollar — rejects noise stops
+            min_risk_reward: Minimum acceptable risk/reward ratio (also used for target calc)
+            sizing_mode: "fixed_investment" or "fixed_risk"
+            risk_per_trade: Dollar risk budget per trade (fixed_risk mode)
+            min_risk_pct: Min risk as fraction of entry price (e.g., 0.01 = 1%); overrides min_risk_per_share
+            max_risk_pct: Max risk as fraction of entry price (e.g., 0.05 = 5%); overrides max_risk_per_share
         """
+        if sizing_mode not in ("fixed_investment", "fixed_risk"):
+            raise ValueError(f"sizing_mode must be 'fixed_investment' or 'fixed_risk', got '{sizing_mode}'")
+
         self.position_size_dollars = position_size_dollars
         self.max_shares = max_shares
         self.max_risk_per_share = max_risk_per_share
         self.min_risk_per_share = min_risk_per_share
         self.min_risk_reward = min_risk_reward
+        self.sizing_mode = sizing_mode
+        self.risk_per_trade = risk_per_trade
+        self.min_risk_pct = min_risk_pct
+        self.max_risk_pct = max_risk_pct
 
     def create_plan(self, pattern: BullFlagPattern) -> Optional[TradePlan]:
         """
@@ -95,36 +109,49 @@ class TradePlanner:
             logger.debug(f"{pattern.symbol}: Stop ({natural_stop:.2f}) >= entry ({entry_price:.2f}), rejecting")
             return None
 
-        # Reject if natural stop is too far away (pattern too volatile for safe trading)
-        if natural_risk > 0.50:
+        # Compute effective min/max risk thresholds (pct-based or flat)
+        effective_min_risk = (
+            entry_price * self.min_risk_pct
+            if self.min_risk_pct is not None
+            else self.min_risk_per_share
+        )
+        effective_max_risk = (
+            entry_price * self.max_risk_pct
+            if self.max_risk_pct is not None
+            else self.max_risk_per_share
+        )
+
+        # Hard rejection threshold: 2.5x max risk (replaces hardcoded $0.50)
+        hard_reject = entry_price * self.max_risk_pct * 2.5 if self.max_risk_pct is not None else 0.50
+        if natural_risk > hard_reject:
             logger.debug(
-                f"{pattern.symbol}: Natural risk ${natural_risk:.2f} > $0.50, "
-                f"pattern too volatile, rejecting"
+                f"{pattern.symbol}: Natural risk ${natural_risk:.2f} > "
+                f"hard reject ${hard_reject:.2f}, pattern too volatile, rejecting"
             )
             return None
 
         # Reject if stop is too tight — will get stopped out on noise
-        if natural_risk < self.min_risk_per_share:
+        if natural_risk < effective_min_risk:
             logger.debug(
                 f"{pattern.symbol}: Natural risk ${natural_risk:.2f} < "
-                f"${self.min_risk_per_share:.2f}, noise stop, rejecting"
+                f"min ${effective_min_risk:.2f}, noise stop, rejecting"
             )
             return None
 
-        # Cap risk at max_risk_per_share (Ross's 20-cent rule)
-        if natural_risk > self.max_risk_per_share:
-            stop_loss_price = entry_price - self.max_risk_per_share
-            risk_per_share = self.max_risk_per_share
+        # Cap risk at effective max
+        if natural_risk > effective_max_risk:
+            stop_loss_price = entry_price - effective_max_risk
+            risk_per_share = effective_max_risk
             logger.debug(
                 f"{pattern.symbol}: Capped stop from {natural_stop:.2f} "
-                f"to {stop_loss_price:.2f} (20¢ rule)"
+                f"to {stop_loss_price:.2f} (max risk ${effective_max_risk:.2f})"
             )
         else:
             stop_loss_price = natural_stop
             risk_per_share = natural_risk
 
-        # Target = 2:1 R:R (conservative; pole height projection saved for future use)
-        take_profit_price = entry_price + (2 * risk_per_share)
+        # Target = R:R * risk (uses min_risk_reward as target multiplier)
+        take_profit_price = entry_price + (self.min_risk_reward * risk_per_share)
 
         reward_per_share = take_profit_price - entry_price
         risk_reward_ratio = reward_per_share / risk_per_share if risk_per_share > 0 else 0
@@ -136,7 +163,15 @@ class TradePlanner:
             return None
 
         # Position sizing
-        shares = math.floor(self.position_size_dollars / entry_price)
+        if self.sizing_mode == "fixed_risk":
+            shares = math.floor(self.risk_per_trade / risk_per_share)
+            if shares > self.max_shares:
+                logger.warning(
+                    f"{pattern.symbol}: fixed_risk shares {shares} exceeds "
+                    f"max_shares {self.max_shares}, capping (risk budget distorted)"
+                )
+        else:
+            shares = math.floor(self.position_size_dollars / entry_price)
         shares = min(shares, self.max_shares)
 
         if shares <= 0:
