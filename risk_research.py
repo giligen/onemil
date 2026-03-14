@@ -148,6 +148,28 @@ HYPOTHESES: Dict[str, Dict] = {
         "max_risk_pct": 0.05,
         "min_risk_reward": 2.5,
     },
+    "H9a": {
+        "description": "H9 + $750 risk budget (1.5%)",
+        "position_size_dollars": 50000,
+        "sizing_mode": "fixed_risk",
+        "risk_per_trade": 750,
+        "min_risk_per_share": 0.05,
+        "max_risk_per_share": 0.20,
+        "min_risk_pct": 0.01,
+        "max_risk_pct": 0.05,
+        "min_risk_reward": 2.5,
+    },
+    "H9b": {
+        "description": "H9 + $1000 risk budget (2%)",
+        "position_size_dollars": 50000,
+        "sizing_mode": "fixed_risk",
+        "risk_per_trade": 1000,
+        "min_risk_per_share": 0.05,
+        "max_risk_per_share": 0.20,
+        "min_risk_pct": 0.01,
+        "max_risk_pct": 0.05,
+        "min_risk_reward": 2.5,
+    },
 }
 
 
@@ -254,6 +276,7 @@ def run_hypothesis(
     movers: List[Tuple[str, date]],
     client: AlpacaClient,
     db,
+    realistic: bool = False,
 ) -> Tuple[Dict, List[SimulatedTrade]]:
     """
     Run a single hypothesis through the backtest engine.
@@ -263,16 +286,23 @@ def run_hypothesis(
         movers: List of (symbol, date) pairs to backtest
         client: AlpacaClient for fetching bars
         db: Database for caching
+        realistic: Use realistic buy-stop entries instead of fantasy breakout entries
 
     Returns:
         Tuple of (metrics_dict, list_of_trades)
     """
     params = HYPOTHESES[hypothesis_id]
     planner = build_planner(hypothesis_id)
-    runner = BacktestRunner(planner=planner)
+
+    mode_label = "realistic" if realistic else "fantasy"
+    runner = BacktestRunner(
+        planner=planner,
+        realistic=realistic,
+        min_price=2.0 if realistic else 0.0,
+    )
 
     logger.info(
-        f"--- Running {hypothesis_id}: {params['description']} "
+        f"--- Running {hypothesis_id}: {params['description']} [{mode_label}] "
         f"(sizing={params['sizing_mode']}, risk=${params['risk_per_trade']}, "
         f"R:R={params['min_risk_reward']}) ---"
     )
@@ -285,7 +315,7 @@ def run_hypothesis(
     metrics["description"] = params["description"]
 
     logger.info(
-        f"{hypothesis_id} complete: {metrics['trade_count']} trades, "
+        f"{hypothesis_id} [{mode_label}] complete: {metrics['trade_count']} trades, "
         f"{metrics['win_rate']:.1f}% WR, ${metrics['total_pnl']:+.2f} P&L, "
         f"R:R {metrics['actual_rr']:.2f}:1"
     )
@@ -436,6 +466,7 @@ def write_trades_csv(
     output_path = os.path.join(output_dir, f"{hypothesis_id}_trades.csv")
     headers = [
         "hypothesis", "symbol", "entry_time", "entry_price",
+        "planned_entry", "entry_gap",
         "stop_loss", "target", "shares", "exit_time", "exit_price",
         "exit_reason", "pnl", "pnl_pct",
         "sizing_mode", "risk_budget", "risk_per_share",
@@ -448,11 +479,14 @@ def write_trades_csv(
         for t in trades:
             risk_per_share = t.entry_price - t.stop_loss if t.stop_loss else 0
             position_value = t.entry_price * t.shares
+            planned = t.planned_entry if t.planned_entry is not None else t.entry_price
             writer.writerow([
                 hypothesis_id,
                 t.symbol,
                 t.entry_time,
                 f"{t.entry_price:.2f}",
+                f"{planned:.2f}",
+                f"{t.entry_gap:.4f}",
                 f"{t.stop_loss:.2f}",
                 f"{t.take_profit:.2f}",
                 t.shares,
@@ -501,6 +535,10 @@ def main():
     parser.add_argument(
         "--output-dir", type=str, default="results",
         help="Output directory for CSVs (default: results)"
+    )
+    parser.add_argument(
+        "--realistic", action="store_true",
+        help="Use realistic buy-stop entries (detect_setup + pending order simulation)"
     )
     parser.add_argument(
         "--verbose", "-v", action="store_true",
@@ -574,8 +612,13 @@ def main():
     all_results = {}
     all_trades = {}
 
+    if args.realistic:
+        logger.info("REALISTIC MODE: Using detect_setup() + pending buy-stop simulation")
+
     for h_id in hypothesis_ids:
-        metrics, trades = run_hypothesis(h_id, movers, client, db)
+        metrics, trades = run_hypothesis(
+            h_id, movers, client, db, realistic=args.realistic
+        )
         all_results[h_id] = metrics
         all_trades[h_id] = trades
 

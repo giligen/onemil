@@ -908,6 +908,120 @@ class AlpacaClient:
             logger.error(f"Failed to get order {order_id}: {e}")
             raise AlpacaAPIError(f"Failed to get order {order_id}: {e}")
 
+    def submit_stop_bracket_order(
+        self,
+        symbol: str,
+        qty: int,
+        side: str,
+        stop_price: float,
+        limit_price: float,
+        tp_price: float,
+        sl_price: float,
+    ) -> Dict:
+        """
+        Submit a stop-limit bracket order (buy-stop entry + stop loss + take profit).
+
+        The order triggers when price hits stop_price, then fills at limit_price.
+        Used for pre-placing buy-stop orders at breakout levels.
+
+        Args:
+            symbol: Stock symbol
+            qty: Number of shares
+            side: 'buy' or 'sell'
+            stop_price: Trigger price (breakout_level)
+            limit_price: Max fill price (breakout_level + slippage buffer)
+            tp_price: Take profit price
+            sl_price: Stop loss price
+
+        Returns:
+            Dict with order details (id, status, etc.)
+
+        Raises:
+            AlpacaAPIError: If order submission fails
+        """
+        try:
+            from alpaca.trading.requests import StopLimitOrderRequest
+
+            order_side = OrderSide.BUY if side == 'buy' else OrderSide.SELL
+
+            request = StopLimitOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=order_side,
+                type=OrderType.STOP_LIMIT,
+                time_in_force=TimeInForce.DAY,
+                stop_price=round(stop_price, 2),
+                limit_price=round(limit_price, 2),
+                order_class=OrderClass.BRACKET,
+                take_profit={'limit_price': round(tp_price, 2)},
+                stop_loss={'stop_price': round(sl_price, 2)},
+            )
+
+            order = self._call_with_timeout(
+                lambda: self.trading_client.submit_order(request),
+                f"submit_stop_bracket_order({symbol})"
+            )
+
+            result = {
+                'id': str(order.id) if hasattr(order, 'id') else '',
+                'status': str(order.status.value) if hasattr(order, 'status') else 'unknown',
+                'symbol': symbol,
+                'qty': qty,
+                'side': side,
+                'stop_price': stop_price,
+                'limit_price': limit_price,
+            }
+
+            logger.info(
+                f"Stop-bracket order submitted: {symbol} {side} {qty} "
+                f"stop @ ${stop_price:.2f}, limit ${limit_price:.2f}, "
+                f"TP ${tp_price:.2f}, SL ${sl_price:.2f} "
+                f"— ID: {result['id']}, status: {result['status']}"
+            )
+            return result
+
+        except AlpacaAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to submit stop-bracket order for {symbol}: {e}")
+            raise AlpacaAPIError(f"Failed to submit stop-bracket order for {symbol}: {e}")
+
+    def close_position(self, symbol: str) -> Dict:
+        """
+        Close a position by submitting a market sell order.
+
+        Used for force-close at end of day or setup invalidation.
+
+        Args:
+            symbol: Stock symbol to close
+
+        Returns:
+            Dict with order details
+
+        Raises:
+            AlpacaAPIError: If close fails
+        """
+        try:
+            order = self._call_with_timeout(
+                lambda: self.trading_client.close_position(symbol),
+                f"close_position({symbol})"
+            )
+
+            result = {
+                'id': str(order.id) if hasattr(order, 'id') else '',
+                'status': str(order.status.value) if hasattr(order, 'status') else 'unknown',
+                'symbol': symbol,
+            }
+
+            logger.info(f"Position closed: {symbol} — ID: {result['id']}")
+            return result
+
+        except AlpacaAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to close position for {symbol}: {e}")
+            raise AlpacaAPIError(f"Failed to close position for {symbol}: {e}")
+
     # =========================================================================
     # Connection Test
     # =========================================================================

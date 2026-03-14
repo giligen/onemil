@@ -43,6 +43,11 @@ class BullFlagPattern:
     detected_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+# BullFlagSetup is the same structure as BullFlagPattern — detected BEFORE
+# breakout so we can pre-place a buy-stop order at breakout_level.
+BullFlagSetup = BullFlagPattern
+
+
 class BullFlagDetector:
     """
     Detects bull flag patterns on 1-minute bar data.
@@ -80,54 +85,28 @@ class BullFlagDetector:
         self.max_pullback_candles = max_pullback_candles
         self.min_breakout_volume_ratio = min_breakout_volume_ratio
 
-    def detect(
-        self, symbol: str, bars: pd.DataFrame, end_idx: Optional[int] = None
-    ) -> Optional[BullFlagPattern]:
+    def _scan_pole_and_flag(
+        self, symbol: str, completed: pd.DataFrame, scan_from_idx: int
+    ) -> Optional[dict]:
         """
-        Detect a bull flag pattern in 1-minute bar data.
+        Scan for pole + flag structure ending at scan_from_idx.
+
+        Shared logic between detect() (where scan_from_idx = breakout_idx - 1)
+        and detect_setup() (where scan_from_idx = last completed bar index).
 
         Args:
-            symbol: Stock ticker symbol
-            bars: DataFrame with columns: open, high, low, close, volume
-                  Must be sorted chronologically (oldest first).
-            end_idx: If provided, use bars.iloc[:end_idx] as completed bars
-                     instead of dropping the last bar. This avoids expensive
-                     DataFrame copies in the backtest sliding window.
+            symbol: Stock ticker symbol (for logging)
+            completed: Completed bars DataFrame
+            scan_from_idx: Index to start pullback scan backwards from
 
         Returns:
-            BullFlagPattern if detected, None otherwise
+            Dict with pole/flag indices and metrics, or None if invalid
         """
-        if bars is None or bars.empty:
-            logger.debug(f"{symbol}: No bars provided")
+        if scan_from_idx < 0:
+            logger.debug(f"{symbol}: No room for pullback")
             return None
 
-        if len(bars) < 2:
-            logger.debug(f"{symbol}: Only {len(bars)} bar(s), need at least 7 (6 completed + 1 dropped)")
-            return None
-
-        # When end_idx is provided (backtest mode), use it as the slice boundary.
-        # Otherwise, drop the last bar (live mode — it's the current minute, still forming).
-        if end_idx is not None:
-            completed = bars.iloc[:end_idx]
-        else:
-            completed = bars.iloc[:-1]
-
-        min_required = self.min_pole_candles + 2 + 1  # pole + min pullback + breakout
-        if len(completed) < min_required:
-            logger.debug(f"{symbol}: Only {len(completed)} completed bars, need >= {min_required}")
-            return None
-
-        # The breakout candle is the last completed bar
-        breakout_idx = len(completed) - 1
-        breakout_bar = completed.iloc[breakout_idx]
-
-        # Scan backwards from breakout to find pullback (red candles)
-        pullback_end_idx = breakout_idx - 1
-        if pullback_end_idx < 0:
-            logger.debug(f"{symbol}: No room for pullback before breakout")
-            return None
-
-        pullback_indices = self._find_pullback(completed, pullback_end_idx)
+        pullback_indices = self._find_pullback(completed, scan_from_idx)
 
         if pullback_indices is None:
             logger.debug(f"{symbol}: No valid pullback found")
@@ -145,12 +124,12 @@ class BullFlagDetector:
             return None
 
         # Find the pole (green candles before the pullback)
-        pole_end_idx = flag_start_idx - 1
-        if pole_end_idx < 0:
+        pole_end_candidate = flag_start_idx - 1
+        if pole_end_candidate < 0:
             logger.debug(f"{symbol}: No room for pole before pullback")
             return None
 
-        pole_indices = self._find_pole(completed, pole_end_idx)
+        pole_indices = self._find_pole(completed, pole_end_candidate)
 
         if pole_indices is None:
             logger.debug(f"{symbol}: No valid pole found")
@@ -205,16 +184,84 @@ class BullFlagDetector:
                 logger.debug(f"{symbol}: Flag volume ({avg_flag_volume:.0f}) >= pole volume ({avg_pole_volume:.0f})")
                 return None
 
+        return {
+            'pole_start_idx': pole_start_idx,
+            'pole_end_idx': pole_end_idx,
+            'flag_start_idx': flag_start_idx,
+            'flag_end_idx': flag_end_idx,
+            'pole_low': pole_low,
+            'pole_high': pole_high,
+            'pole_height': pole_height,
+            'pole_gain_pct': pole_gain_pct,
+            'flag_low': flag_low,
+            'flag_high': flag_high,
+            'retracement_pct': retracement_pct,
+            'pullback_count': pullback_count,
+            'avg_pole_volume': avg_pole_volume,
+            'avg_flag_volume': avg_flag_volume,
+            'pole_candle_count': pole_candle_count,
+        }
+
+    def detect(
+        self, symbol: str, bars: pd.DataFrame, end_idx: Optional[int] = None
+    ) -> Optional[BullFlagPattern]:
+        """
+        Detect a bull flag pattern in 1-minute bar data.
+
+        This fires AFTER the breakout candle has completed. The last completed
+        bar is treated as the breakout bar and must close above flag_high with
+        volume expansion.
+
+        Args:
+            symbol: Stock ticker symbol
+            bars: DataFrame with columns: open, high, low, close, volume
+                  Must be sorted chronologically (oldest first).
+            end_idx: If provided, use bars.iloc[:end_idx] as completed bars
+                     instead of dropping the last bar. This avoids expensive
+                     DataFrame copies in the backtest sliding window.
+
+        Returns:
+            BullFlagPattern if detected, None otherwise
+        """
+        if bars is None or bars.empty:
+            logger.debug(f"{symbol}: No bars provided")
+            return None
+
+        if len(bars) < 2:
+            logger.debug(f"{symbol}: Only {len(bars)} bar(s), need at least 7 (6 completed + 1 dropped)")
+            return None
+
+        # When end_idx is provided (backtest mode), use it as the slice boundary.
+        # Otherwise, drop the last bar (live mode — it's the current minute, still forming).
+        if end_idx is not None:
+            completed = bars.iloc[:end_idx]
+        else:
+            completed = bars.iloc[:-1]
+
+        min_required = self.min_pole_candles + 2 + 1  # pole + min pullback + breakout
+        if len(completed) < min_required:
+            logger.debug(f"{symbol}: Only {len(completed)} completed bars, need >= {min_required}")
+            return None
+
+        # The breakout candle is the last completed bar
+        breakout_idx = len(completed) - 1
+        breakout_bar = completed.iloc[breakout_idx]
+
+        # Scan for pole + flag ending one bar before breakout
+        scan = self._scan_pole_and_flag(symbol, completed, breakout_idx - 1)
+        if scan is None:
+            return None
+
         # Breakout validation: price must break above flag high
-        breakout_level = flag_high
+        breakout_level = scan['flag_high']
         if breakout_bar['close'] <= breakout_level:
             logger.debug(f"{symbol}: No breakout — close {breakout_bar['close']:.2f} <= flag high {breakout_level:.2f}")
             return None
 
         # Breakout volume expansion
         breakout_volume = breakout_bar['volume']
-        if avg_flag_volume > 0:
-            volume_ratio = breakout_volume / avg_flag_volume
+        if scan['avg_flag_volume'] > 0:
+            volume_ratio = breakout_volume / scan['avg_flag_volume']
             if volume_ratio < self.min_breakout_volume_ratio:
                 logger.debug(
                     f"{symbol}: Breakout volume ratio {volume_ratio:.1f}x "
@@ -224,30 +271,103 @@ class BullFlagDetector:
 
         pattern = BullFlagPattern(
             symbol=symbol,
-            pole_start_idx=pole_start_idx,
-            pole_end_idx=pole_end_idx,
-            flag_start_idx=flag_start_idx,
-            flag_end_idx=flag_end_idx,
-            pole_low=pole_low,
-            pole_high=pole_high,
-            pole_height=pole_height,
-            pole_gain_pct=pole_gain_pct,
-            flag_low=flag_low,
-            flag_high=flag_high,
-            retracement_pct=retracement_pct,
-            pullback_candle_count=pullback_count,
-            avg_pole_volume=avg_pole_volume,
-            avg_flag_volume=avg_flag_volume,
+            pole_start_idx=scan['pole_start_idx'],
+            pole_end_idx=scan['pole_end_idx'],
+            flag_start_idx=scan['flag_start_idx'],
+            flag_end_idx=scan['flag_end_idx'],
+            pole_low=scan['pole_low'],
+            pole_high=scan['pole_high'],
+            pole_height=scan['pole_height'],
+            pole_gain_pct=scan['pole_gain_pct'],
+            flag_low=scan['flag_low'],
+            flag_high=scan['flag_high'],
+            retracement_pct=scan['retracement_pct'],
+            pullback_candle_count=scan['pullback_count'],
+            avg_pole_volume=scan['avg_pole_volume'],
+            avg_flag_volume=scan['avg_flag_volume'],
             breakout_level=breakout_level,
         )
 
         logger.info(
             f"{symbol}: BULL FLAG DETECTED — "
-            f"pole {pole_candle_count} candles (+{pole_gain_pct:.1f}%), "
-            f"pullback {pullback_count} candles ({retracement_pct:.0f}% retrace), "
+            f"pole {scan['pole_candle_count']} candles (+{scan['pole_gain_pct']:.1f}%), "
+            f"pullback {scan['pullback_count']} candles ({scan['retracement_pct']:.0f}% retrace), "
             f"breakout @ {breakout_level:.2f}"
         )
         return pattern
+
+    def detect_setup(
+        self, symbol: str, bars: pd.DataFrame, end_idx: Optional[int] = None
+    ) -> Optional[BullFlagSetup]:
+        """
+        Detect a bull flag setup BEFORE breakout — for pre-placing buy-stop orders.
+
+        Unlike detect(), this does NOT require a breakout candle. The last
+        completed bar is treated as the last flag bar, and the setup's
+        breakout_level = flag_high. A buy-stop order can then be placed at
+        breakout_level to get filled when the breakout actually occurs.
+
+        Args:
+            symbol: Stock ticker symbol
+            bars: DataFrame with columns: open, high, low, close, volume
+            end_idx: If provided, use bars.iloc[:end_idx] as completed bars
+
+        Returns:
+            BullFlagSetup if a valid pole+flag is found, None otherwise
+        """
+        if bars is None or bars.empty:
+            logger.debug(f"{symbol}: No bars provided")
+            return None
+
+        if len(bars) < 2:
+            logger.debug(f"{symbol}: Only {len(bars)} bar(s), insufficient")
+            return None
+
+        if end_idx is not None:
+            completed = bars.iloc[:end_idx]
+        else:
+            completed = bars.iloc[:-1]
+
+        # Setup needs pole + pullback only (no breakout bar)
+        min_required = self.min_pole_candles + 2  # pole + min pullback
+        if len(completed) < min_required:
+            logger.debug(f"{symbol}: Only {len(completed)} completed bars, need >= {min_required}")
+            return None
+
+        # Scan for pole + flag ending at the last completed bar
+        last_idx = len(completed) - 1
+        scan = self._scan_pole_and_flag(symbol, completed, last_idx)
+        if scan is None:
+            return None
+
+        breakout_level = scan['flag_high']
+
+        setup = BullFlagSetup(
+            symbol=symbol,
+            pole_start_idx=scan['pole_start_idx'],
+            pole_end_idx=scan['pole_end_idx'],
+            flag_start_idx=scan['flag_start_idx'],
+            flag_end_idx=scan['flag_end_idx'],
+            pole_low=scan['pole_low'],
+            pole_high=scan['pole_high'],
+            pole_height=scan['pole_height'],
+            pole_gain_pct=scan['pole_gain_pct'],
+            flag_low=scan['flag_low'],
+            flag_high=scan['flag_high'],
+            retracement_pct=scan['retracement_pct'],
+            pullback_candle_count=scan['pullback_count'],
+            avg_pole_volume=scan['avg_pole_volume'],
+            avg_flag_volume=scan['avg_flag_volume'],
+            breakout_level=breakout_level,
+        )
+
+        logger.info(
+            f"{symbol}: BULL FLAG SETUP — "
+            f"pole {scan['pole_candle_count']} candles (+{scan['pole_gain_pct']:.1f}%), "
+            f"pullback {scan['pullback_count']} candles ({scan['retracement_pct']:.0f}% retrace), "
+            f"buy-stop @ {breakout_level:.2f}"
+        )
+        return setup
 
     def _find_pullback(
         self, bars: pd.DataFrame, end_idx: int

@@ -41,7 +41,7 @@ def mock_alpaca():
 
 
 def _make_bull_flag_bars():
-    """Create synthetic 1-min bars with a valid bull flag pattern."""
+    """Create synthetic 1-min bars with a valid bull flag pattern (includes breakout)."""
     base_time = datetime.now(timezone.utc) - timedelta(minutes=10)
     records = []
     candles = [
@@ -56,6 +56,35 @@ def _make_bull_flag_bars():
         (4.30, 4.55, 4.29, 4.50, 200000),
         # Current bar (will be dropped by detector)
         (4.50, 4.55, 4.48, 4.52, 100000),
+    ]
+    for i, (o, h, l, c, v) in enumerate(candles):
+        records.append({
+            'timestamp': base_time + timedelta(minutes=i),
+            'open': float(o), 'high': float(h),
+            'low': float(l), 'close': float(c),
+            'volume': int(v),
+        })
+    return pd.DataFrame(records)
+
+
+def _make_bull_flag_setup_bars():
+    """Create bars for detect_setup() — pole + flag, NO breakout yet.
+
+    detect_setup() drops the last bar as 'current', so completed bars
+    end at the last flag bar. This lets it find the setup before breakout.
+    """
+    base_time = datetime.now(timezone.utc) - timedelta(minutes=10)
+    records = []
+    candles = [
+        # Pole: 3 green candles, ~10% gain
+        (4.00, 4.12, 3.98, 4.10, 200000),
+        (4.10, 4.24, 4.08, 4.22, 180000),
+        (4.22, 4.42, 4.20, 4.40, 160000),
+        # Flag: 2 red candles, ~35% retrace
+        (4.40, 4.42, 4.30, 4.32, 50000),
+        (4.32, 4.34, 4.28, 4.30, 30000),
+        # Current bar (will be dropped by detect_setup) — still in flag
+        (4.30, 4.35, 4.28, 4.31, 25000),
     ]
     for i, (o, h, l, c, v) in enumerate(candles):
         records.append({
@@ -82,7 +111,7 @@ class TestFullTradingPipeline:
         planner = TradePlanner(position_size_dollars=500, max_shares=1000, min_risk_per_share=0.05)
         executor = OrderExecutor(alpaca_client=mock_alpaca, db=db)
 
-        # Mock Alpaca order submission
+        # Mock Alpaca order submission (submit_bracket_order used directly here)
         mock_alpaca.submit_bracket_order.return_value = {
             'id': 'bracket-order-123',
             'status': 'accepted',
@@ -123,9 +152,10 @@ class TestFullTradingPipeline:
         assert pattern_data['pole_height'] == pattern.pole_height
         assert pattern_data['breakout_level'] == pattern.breakout_level
 
+    @patch('trading.trading_engine.TradingEngine._is_past_last_entry_time', return_value=False)
     @patch('trading.position_manager.datetime')
-    def test_full_engine_cycle(self, mock_dt, mock_alpaca, db):
-        """Full TradingEngine cycle: qualify → check → trade."""
+    def test_full_engine_cycle(self, mock_dt, _mock_time, mock_alpaca, db):
+        """Full TradingEngine cycle: qualify → detect_setup → buy-stop → pending order."""
         # Mock time to mid-day
         mock_now = MagicMock()
         mock_now.hour = 10
@@ -148,9 +178,9 @@ class TestFullTradingPipeline:
             enabled=True,
         )
 
-        # Mock Alpaca responses
-        mock_alpaca.get_1min_bars.return_value = _make_bull_flag_bars()
-        mock_alpaca.submit_bracket_order.return_value = {
+        # Mock Alpaca responses — setup bars (no breakout yet)
+        mock_alpaca.get_1min_bars.return_value = _make_bull_flag_setup_bars()
+        mock_alpaca.submit_stop_bracket_order.return_value = {
             'id': 'engine-order-456', 'status': 'accepted',
         }
 
@@ -158,22 +188,25 @@ class TestFullTradingPipeline:
         engine.on_stock_qualified("AAPL")
         result = engine.run_pattern_check()
 
-        # Verify trade executed
+        # Verify buy-stop order placed (goes to pending_orders)
         assert result is not None
         assert result['symbol'] == 'AAPL'
+        assert result['order_type'] == 'stop_bracket'
+        assert 'AAPL' in engine._pending_orders
 
-        # Verify stats
+        # patterns_detected increments on detection, patterns_traded on fill
         stats = engine.get_daily_stats()
         assert stats['patterns_detected'] >= 1
-        assert stats['patterns_traded'] >= 1
+        assert stats['patterns_traded'] == 0  # not filled yet
 
-        # Verify DB
+        # Verify DB trade record
         trades = db.get_trades_by_date(date.today().isoformat())
         assert len(trades) == 1
         assert trades[0]['order_id'] == 'engine-order-456'
 
+    @patch('trading.trading_engine.TradingEngine._is_past_last_entry_time', return_value=False)
     @patch('trading.position_manager.datetime')
-    def test_position_limits_enforced(self, mock_dt, mock_alpaca, db):
+    def test_position_limits_enforced(self, mock_dt, _mock_time, mock_alpaca, db):
         """Position manager correctly blocks when limits reached."""
         mock_now = MagicMock()
         mock_now.hour = 10
@@ -195,19 +228,19 @@ class TestFullTradingPipeline:
             enabled=True,
         )
 
-        mock_alpaca.get_1min_bars.return_value = _make_bull_flag_bars()
-        mock_alpaca.submit_bracket_order.return_value = {
+        mock_alpaca.get_1min_bars.return_value = _make_bull_flag_setup_bars()
+        mock_alpaca.submit_stop_bracket_order.return_value = {
             'id': 'order-1', 'status': 'accepted',
         }
 
-        # First trade should succeed
+        # First trade should succeed (buy-stop placed)
         engine.on_stock_qualified("AAPL")
         result1 = engine.run_pattern_check()
         assert result1 is not None
 
-        # Second trade should be blocked (max_positions=1, first trade is open)
+        # Second trade should be blocked (max_positions=1, AAPL already marked traded)
         engine.on_stock_qualified("TSLA")
-        mock_alpaca.get_1min_bars.return_value = _make_bull_flag_bars()
+        mock_alpaca.get_1min_bars.return_value = _make_bull_flag_setup_bars()
         result2 = engine.run_pattern_check()
         assert result2 is None
 

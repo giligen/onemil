@@ -14,7 +14,7 @@ import pytest
 import pandas as pd
 from datetime import datetime, timezone, timedelta
 
-from trading.pattern_detector import BullFlagDetector, BullFlagPattern
+from trading.pattern_detector import BullFlagDetector, BullFlagPattern, BullFlagSetup
 
 
 # ---------------------------------------------------------------------------
@@ -910,3 +910,137 @@ class TestRealWorldPatterns:
         bars = _make_bars(candles)
         pattern = detector.detect("TEST", bars)
         assert pattern is None
+
+
+# ===========================================================================
+# DETECT_SETUP TESTS — Setup detection BEFORE breakout
+# ===========================================================================
+
+class TestDetectSetup:
+    """Tests for detect_setup() — finds pole+flag before breakout happens."""
+
+    def test_setup_found_before_breakout(self, detector):
+        """detect_setup() finds pole+flag when last bar is still in flag."""
+        candles = [
+            # Pole: 3 green
+            (4.00, 4.15, 3.98, 4.13, 200000),
+            (4.13, 4.30, 4.11, 4.28, 180000),
+            (4.28, 4.52, 4.26, 4.50, 160000),
+            # Flag: 2 red
+            (4.50, 4.52, 4.38, 4.40, 50000),
+            (4.40, 4.42, 4.33, 4.35, 30000),
+            # Current bar (dropped by detector)
+            (4.35, 4.38, 4.32, 4.34, 25000),
+        ]
+        bars = _make_bars(candles)
+        setup = detector.detect_setup("TEST", bars)
+
+        assert setup is not None
+        assert isinstance(setup, BullFlagSetup)
+        assert setup.symbol == "TEST"
+        assert setup.breakout_level == setup.flag_high
+        assert setup.pole_gain_pct >= 3.0
+        assert setup.retracement_pct <= 50.0
+
+    def test_setup_breakout_level_equals_flag_high(self, detector):
+        """Setup breakout_level should equal flag_high."""
+        candles = [
+            (4.00, 4.15, 3.98, 4.13, 200000),
+            (4.13, 4.30, 4.11, 4.28, 180000),
+            (4.28, 4.52, 4.26, 4.50, 160000),
+            (4.50, 4.52, 4.38, 4.40, 50000),
+            (4.40, 4.42, 4.33, 4.35, 30000),
+            (4.35, 4.38, 4.32, 4.34, 25000),
+        ]
+        bars = _make_bars(candles)
+        setup = detector.detect_setup("TEST", bars)
+
+        assert setup is not None
+        assert setup.breakout_level == setup.flag_high
+
+    def test_setup_returns_none_for_short_pole(self, detector):
+        """detect_setup() rejects short pole (< 3 candles)."""
+        candles = [
+            (4.00, 4.15, 3.98, 4.12, 200000),
+            (4.12, 4.28, 4.10, 4.25, 180000),
+            (4.25, 4.27, 4.18, 4.20, 50000),
+            (4.20, 4.22, 4.15, 4.17, 30000),
+            (4.17, 4.20, 4.15, 4.18, 25000),
+        ]
+        bars = _make_bars(candles)
+        setup = detector.detect_setup("TEST", bars)
+        assert setup is None
+
+    def test_setup_returns_none_for_deep_retracement(self, detector):
+        """detect_setup() rejects retracement > 50%."""
+        candles = [
+            (4.00, 4.15, 3.98, 4.13, 200000),
+            (4.13, 4.30, 4.11, 4.28, 180000),
+            (4.28, 4.52, 4.26, 4.50, 160000),
+            # Deep pullback: 60%+ retrace
+            (4.50, 4.51, 4.22, 4.25, 50000),
+            (4.25, 4.27, 4.18, 4.20, 30000),
+            (4.20, 4.22, 4.16, 4.18, 25000),
+        ]
+        bars = _make_bars(candles)
+        setup = detector.detect_setup("TEST", bars)
+        assert setup is None
+
+    def test_setup_returns_none_insufficient_data(self, detector):
+        """detect_setup() returns None with too few bars."""
+        candles = [
+            (4.00, 4.10, 3.98, 4.08, 200000),
+            (4.08, 4.15, 4.06, 4.12, 180000),
+            (4.12, 4.18, 4.10, 4.15, 160000),
+        ]
+        bars = _make_bars(candles)
+        setup = detector.detect_setup("TEST", bars)
+        assert setup is None
+
+    def test_setup_returns_none_for_none_input(self, detector):
+        """detect_setup() handles None input gracefully."""
+        setup = detector.detect_setup("TEST", None)
+        assert setup is None
+
+    def test_setup_returns_none_for_empty_bars(self, detector):
+        """detect_setup() handles empty DataFrame gracefully."""
+        setup = detector.detect_setup("TEST", pd.DataFrame())
+        assert setup is None
+
+    def test_detect_still_works_identically(self, detector):
+        """detect() backward compatibility — same results as before refactor."""
+        candles = [
+            (4.00, 4.10, 3.98, 4.15, 200000),
+            (4.15, 4.30, 4.12, 4.30, 180000),
+            (4.30, 4.55, 4.28, 4.50, 150000),
+            (4.50, 4.52, 4.38, 4.40, 50000),
+            (4.40, 4.42, 4.33, 4.35, 30000),
+            (4.35, 4.60, 4.34, 4.55, 250000),
+            (4.55, 4.60, 4.50, 4.58, 100000),
+        ]
+        bars = _make_bars(candles)
+        pattern = detector.detect("TEST", bars)
+
+        assert pattern is not None
+        assert pattern.symbol == "TEST"
+        assert pattern.pullback_candle_count == 2
+        assert pattern.pole_gain_pct >= 3.0
+
+    def test_setup_with_end_idx(self, detector):
+        """detect_setup() works with end_idx parameter (backtest mode)."""
+        candles = [
+            (4.00, 4.15, 3.98, 4.13, 200000),
+            (4.13, 4.30, 4.11, 4.28, 180000),
+            (4.28, 4.52, 4.26, 4.50, 160000),
+            (4.50, 4.52, 4.38, 4.40, 50000),
+            (4.40, 4.42, 4.33, 4.35, 30000),
+            # Extra bars that would be "future" in sliding window
+            (4.35, 4.60, 4.34, 4.55, 250000),
+            (4.55, 4.60, 4.50, 4.58, 100000),
+        ]
+        bars = _make_bars(candles)
+        # Use end_idx=5 to only see bars 0-4 as completed
+        setup = detector.detect_setup("TEST", bars, end_idx=5)
+
+        assert setup is not None
+        assert setup.breakout_level == setup.flag_high

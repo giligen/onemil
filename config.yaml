@@ -64,14 +64,21 @@ notifications:
 # Trading (Phase 2 - automated paper trading)
 trading:
   enabled: false
-  position_size_dollars: 10000
+  sizing_mode: fixed_risk
+  risk_per_trade: 1000
+  position_size_dollars: 50000
   max_shares: 10000
   max_positions: 3
-  daily_loss_limit: -100.0
-  max_risk_per_share: 0.20
-  min_risk_reward: 2.0
+  daily_loss_limit: -2000.0
+  min_risk_pct: 0.01
+  max_risk_pct: 0.05
+  min_risk_reward: 2.5
+  min_price: 2.00
+  last_entry_time: "15:00"      # ET — no new entries after this
+  force_close_time: "15:45"     # ET — close all positions
+  setup_expiry_bars: 10         # cancel pending buy-stop after N bars
   pattern_poll_interval: 60
-  stop_trading_before_close_min: 15
+  skip_midday: true
   bull_flag:
     min_pole_candles: 3
     min_pole_gain_pct: 3.0

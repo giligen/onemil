@@ -16,11 +16,12 @@ from backtest import (
     SimulatedTrade,
     BacktestResult,
     PatternDetection,
+    PendingBuyStop,
     TradeSimulator,
     BacktestRunner,
     print_report,
 )
-from trading.pattern_detector import BullFlagDetector, BullFlagPattern
+from trading.pattern_detector import BullFlagDetector, BullFlagPattern, BullFlagSetup
 from trading.trade_planner import TradePlanner, TradePlan
 
 
@@ -615,3 +616,220 @@ class TestGetHistorical1MinBars:
         end = _ts(30)
         with pytest.raises(AlpacaAPIError, match="Failed to get historical"):
             client.get_historical_1min_bars("TEST", start, end)
+
+
+# ===========================================================================
+# TradeSimulator Force Close Tests
+# ===========================================================================
+
+
+class TestTradeSimulatorForceClose:
+    """Test force_close_time_utc exits trades at configured time."""
+
+    def test_force_close_exits_at_bar_open(self):
+        """Force close exits at bar open when timestamp >= force_close_time."""
+        simulator = TradeSimulator(force_close_time_utc=14.25)  # 14:15 UTC
+        plan = _make_plan(entry_price=5.50, stop_loss_price=5.30, take_profit_price=5.90)
+
+        bars = _make_bars([
+            (5.50, 5.55, 5.45, 5.50, 1000),   # bar 0 at 14:00 — entry
+            (5.52, 5.58, 5.48, 5.55, 1000),   # bar 1 at 14:01 — hold
+        ], start_minute=0)
+
+        # Add a bar at 14:15 (minute 15) that triggers force close
+        force_close_bar = {
+            'timestamp': _ts(15),
+            'open': 5.55, 'high': 5.58, 'low': 5.52, 'close': 5.56, 'volume': 1000,
+        }
+        bars_with_fc = pd.concat([bars, pd.DataFrame([force_close_bar])], ignore_index=True)
+
+        trade = simulator.simulate(plan, bars_with_fc, entry_bar_idx=0)
+
+        assert trade.exit_reason == 'force_close'
+        assert trade.exit_price == 5.55  # bar open
+
+    def test_no_force_close_when_disabled(self):
+        """Without force_close_time, trade runs until stop/target/eod."""
+        simulator = TradeSimulator(force_close_time_utc=None)
+        plan = _make_plan(entry_price=5.50, stop_loss_price=5.30, take_profit_price=5.90)
+
+        bars = _make_bars([
+            (5.50, 5.55, 5.45, 5.50, 1000),
+            (5.52, 5.58, 5.48, 5.55, 1000),
+            (5.55, 5.60, 5.52, 5.58, 1000),
+        ])
+
+        trade = simulator.simulate(plan, bars, entry_bar_idx=0)
+        assert trade.exit_reason == 'eod'  # Not force_close
+
+
+class TestTradeSimulatorEntryOverride:
+    """Test entry_price_override for realistic buy-stop fills."""
+
+    def test_entry_override_uses_custom_price(self):
+        """When entry_price_override is set, trade uses that price."""
+        simulator = TradeSimulator()
+        plan = _make_plan(entry_price=5.50, stop_loss_price=5.30, take_profit_price=5.90)
+
+        bars = _make_bars([
+            (5.55, 5.60, 5.45, 5.58, 1000),   # entry bar
+            (5.58, 5.95, 5.55, 5.88, 2000),   # target hit
+        ])
+
+        trade = simulator.simulate(plan, bars, entry_bar_idx=0, entry_price_override=5.55)
+
+        assert trade.entry_price == 5.55
+        assert trade.planned_entry == 5.50
+        assert trade.entry_gap == pytest.approx(0.05, abs=0.001)
+        assert trade.pnl == pytest.approx((5.90 - 5.55) * 90, abs=0.01)
+
+    def test_no_override_uses_plan_price(self):
+        """Without override, trade uses plan.entry_price."""
+        simulator = TradeSimulator()
+        plan = _make_plan(entry_price=5.50, stop_loss_price=5.30, take_profit_price=5.90)
+
+        bars = _make_bars([
+            (5.50, 5.55, 5.45, 5.52, 1000),
+            (5.52, 5.95, 5.50, 5.88, 2000),
+        ])
+
+        trade = simulator.simulate(plan, bars, entry_bar_idx=0)
+
+        assert trade.entry_price == 5.50
+        assert trade.planned_entry == 5.50
+        assert trade.entry_gap == 0.0
+
+
+# ===========================================================================
+# BacktestRunner Realistic Mode Tests
+# ===========================================================================
+
+
+class TestBacktestRunnerRealistic:
+    """Test BacktestRunner in realistic mode with pending buy-stops."""
+
+    def test_pending_buystop_triggers_on_breakout(self):
+        """Pending buy-stop triggers when bar reaches breakout_level."""
+        candles = [
+            # Pole: 3 green
+            (4.00, 4.15, 3.98, 4.13, 200000),
+            (4.13, 4.30, 4.11, 4.28, 180000),
+            (4.28, 4.52, 4.26, 4.50, 160000),
+            # Flag: 2 red
+            (4.50, 4.52, 4.38, 4.40, 50000),
+            (4.40, 4.42, 4.33, 4.35, 30000),
+            # Calm bar (setup detectable after this)
+            (4.35, 4.38, 4.32, 4.34, 25000),
+            # Breakout bar
+            (4.38, 4.60, 4.36, 4.55, 250000),
+            # Post-breakout
+            (4.55, 4.65, 4.52, 4.62, 120000),
+            (4.62, 4.72, 4.58, 4.70, 110000),
+            (4.70, 4.85, 4.68, 4.82, 100000),
+            (4.82, 4.95, 4.78, 4.92, 95000),
+            (4.92, 5.10, 4.90, 5.05, 90000),
+            # Dummy
+            (5.05, 5.10, 5.00, 5.08, 50000),
+        ]
+        bars = _make_bars(candles)
+
+        runner = BacktestRunner(
+            planner=TradePlanner(min_risk_per_share=0.01),
+            realistic=True,
+            min_price=0.0,
+        )
+        result = runner.run("TEST", bars, "2026-03-13")
+
+        assert len(result.trades_simulated) >= 1
+        if result.trades_simulated:
+            trade = result.trades_simulated[0]
+            assert trade.planned_entry is not None
+            assert trade.entry_gap >= 0
+
+    def test_realistic_entry_is_max_open_breakout(self):
+        """Realistic entry = max(bar_open, breakout_level)."""
+        # When bar opens above breakout_level, fill at open
+        candles = [
+            (4.00, 4.15, 3.98, 4.13, 200000),
+            (4.13, 4.30, 4.11, 4.28, 180000),
+            (4.28, 4.52, 4.26, 4.50, 160000),
+            (4.50, 4.52, 4.38, 4.40, 50000),
+            (4.40, 4.42, 4.33, 4.35, 30000),
+            (4.35, 4.38, 4.32, 4.34, 25000),
+            # Gap-over breakout: opens at 4.60, above flag_high (~4.52)
+            (4.60, 4.75, 4.58, 4.72, 300000),
+            (4.72, 4.85, 4.70, 4.82, 120000),
+            (4.82, 4.95, 4.80, 4.92, 110000),
+            (4.92, 5.10, 4.90, 5.05, 100000),
+            (5.05, 5.20, 5.00, 5.15, 90000),
+            # Dummy
+            (5.15, 5.20, 5.10, 5.18, 50000),
+        ]
+        bars = _make_bars(candles)
+
+        runner = BacktestRunner(
+            planner=TradePlanner(min_risk_per_share=0.01),
+            realistic=True,
+            min_price=0.0,
+        )
+        result = runner.run("TEST", bars, "2026-03-13")
+
+        if result.trades_simulated:
+            trade = result.trades_simulated[0]
+            # Entry should be at bar open (4.60), not breakout_level
+            assert trade.entry_price >= 4.55
+            assert trade.entry_gap > 0
+
+    def test_min_price_default_is_2(self):
+        """Default min_price is now $2.00."""
+        runner = BacktestRunner()
+        assert runner.min_price == 2.0
+
+    def test_pending_buystop_dataclass(self):
+        """PendingBuyStop dataclass stores correct fields."""
+        setup = BullFlagSetup(
+            symbol="TEST", pole_start_idx=0, pole_end_idx=2,
+            flag_start_idx=3, flag_end_idx=4,
+            pole_low=4.00, pole_high=4.50, pole_height=0.50,
+            pole_gain_pct=12.5, flag_low=4.33, flag_high=4.42,
+            retracement_pct=30.0, pullback_candle_count=2,
+            avg_pole_volume=180000, avg_flag_volume=40000,
+            breakout_level=4.42,
+        )
+        plan = _make_plan()
+        pending = PendingBuyStop(
+            setup=setup, plan=plan,
+            placed_at_bar_idx=5, breakout_level=4.42,
+        )
+
+        assert pending.breakout_level == 4.42
+        assert pending.placed_at_bar_idx == 5
+        assert pending.setup.symbol == "TEST"
+
+    def test_simulated_trade_new_fields(self):
+        """SimulatedTrade has planned_entry and entry_gap fields."""
+        trade = SimulatedTrade(
+            symbol="TEST",
+            entry_time=_ts(0),
+            entry_price=5.55,
+            stop_loss=5.30,
+            take_profit=5.90,
+            shares=100,
+            planned_entry=5.50,
+            entry_gap=0.05,
+        )
+        assert trade.planned_entry == 5.50
+        assert trade.entry_gap == 0.05
+
+    def test_simulated_trade_default_new_fields(self):
+        """New fields default to None/0.0 for backward compat."""
+        trade = SimulatedTrade(
+            symbol="TEST",
+            entry_time=_ts(0),
+            entry_price=5.50,
+            stop_loss=5.30,
+            take_profit=5.90,
+            shares=100,
+        )
+        assert trade.planned_entry is None
+        assert trade.entry_gap == 0.0

@@ -157,17 +157,17 @@ class TestRunPatternCheck:
 
     def test_full_successful_trade_flow(self, engine, mock_alpaca, mock_detector,
                                         mock_planner, mock_executor, mock_position_manager):
-        """Complete flow: qualify → detect → plan → check → execute."""
+        """Complete flow: qualify → detect_setup → plan → submit buy-stop."""
         # Setup
         bars = pd.DataFrame({
             'open': [4.0], 'high': [4.1], 'low': [3.9],
             'close': [4.05], 'volume': [100000],
         })
         mock_alpaca.get_1min_bars.return_value = bars
-        mock_detector.detect.return_value = _make_pattern("AAPL")
+        mock_detector.detect_setup.return_value = _make_pattern("AAPL")
         mock_planner.create_plan.return_value = _make_plan("AAPL")
         mock_position_manager.can_open_position.return_value = True
-        mock_executor.submit_bracket_order.return_value = {
+        mock_executor.submit_buy_stop_bracket_order.return_value = {
             'order_id': 'order-123', 'status': 'accepted',
             'symbol': 'AAPL', 'shares': 113,
         }
@@ -177,7 +177,8 @@ class TestRunPatternCheck:
 
         assert result is not None
         assert result['symbol'] == 'AAPL'
-        assert "AAPL" in engine._traded_symbols
+        # Symbol should be in pending_orders (not traded until filled)
+        assert "AAPL" in engine._pending_orders
         mock_position_manager.mark_traded.assert_called_with("AAPL")
 
     def test_no_trade_when_no_pattern(self, engine, mock_alpaca, mock_detector):
@@ -185,7 +186,7 @@ class TestRunPatternCheck:
         bars = pd.DataFrame({'open': [4.0], 'high': [4.1], 'low': [3.9],
                             'close': [4.05], 'volume': [100000]})
         mock_alpaca.get_1min_bars.return_value = bars
-        mock_detector.detect.return_value = None
+        mock_detector.detect_setup.return_value = None
 
         engine.on_stock_qualified("AAPL")
         result = engine.run_pattern_check()
@@ -196,7 +197,7 @@ class TestRunPatternCheck:
         bars = pd.DataFrame({'open': [4.0], 'high': [4.1], 'low': [3.9],
                             'close': [4.05], 'volume': [100000]})
         mock_alpaca.get_1min_bars.return_value = bars
-        mock_detector.detect.return_value = _make_pattern("AAPL")
+        mock_detector.detect_setup.return_value = _make_pattern("AAPL")
         mock_planner.create_plan.return_value = None
 
         engine.on_stock_qualified("AAPL")
@@ -209,7 +210,7 @@ class TestRunPatternCheck:
         bars = pd.DataFrame({'open': [4.0], 'high': [4.1], 'low': [3.9],
                             'close': [4.05], 'volume': [100000]})
         mock_alpaca.get_1min_bars.return_value = bars
-        mock_detector.detect.return_value = _make_pattern("AAPL")
+        mock_detector.detect_setup.return_value = _make_pattern("AAPL")
         mock_planner.create_plan.return_value = _make_plan("AAPL")
         mock_position_manager.can_open_position.return_value = False
 
@@ -250,10 +251,10 @@ class TestDailyStats:
         bars = pd.DataFrame({'open': [4.0], 'high': [4.1], 'low': [3.9],
                             'close': [4.05], 'volume': [100000]})
         mock_alpaca.get_1min_bars.return_value = bars
-        mock_detector.detect.return_value = _make_pattern("AAPL")
+        mock_detector.detect_setup.return_value = _make_pattern("AAPL")
         mock_planner.create_plan.return_value = _make_plan("AAPL")
         mock_position_manager.can_open_position.return_value = True
-        mock_executor.submit_bracket_order.return_value = {
+        mock_executor.submit_buy_stop_bracket_order.return_value = {
             'order_id': 'x', 'status': 'accepted', 'symbol': 'AAPL', 'shares': 100
         }
 
@@ -262,18 +263,20 @@ class TestDailyStats:
 
         stats = engine.get_daily_stats()
         assert stats['patterns_detected'] == 1
-        assert stats['patterns_traded'] == 1
+        # patterns_traded increments on fill, not on order placement
+        assert stats['patterns_traded'] == 0
 
 
 class TestResetDaily:
     """Tests for daily state reset."""
 
     def test_reset_clears_all_state(self, engine, mock_position_manager):
-        """Reset clears qualified, traded, and counters."""
+        """Reset clears qualified, traded, pending, and counters."""
         engine._qualified_symbols.add("AAPL")
         engine._traded_symbols.add("TSLA")
         engine._patterns_detected = 5
         engine._patterns_traded = 2
+        engine._pending_orders['AAPL'] = {'order_id': 'x'}
 
         engine.reset_daily()
 
@@ -281,6 +284,7 @@ class TestResetDaily:
         assert len(engine._traded_symbols) == 0
         assert engine._patterns_detected == 0
         assert engine._patterns_traded == 0
+        assert len(engine._pending_orders) == 0
         mock_position_manager.reset_daily.assert_called_once()
         assert engine._pattern_details == []
 
@@ -317,7 +321,7 @@ class TestNotifierIntegration:
         bars = pd.DataFrame({'open': [4.0], 'high': [4.1], 'low': [3.9],
                             'close': [4.05], 'volume': [100000]})
         mock_alpaca.get_1min_bars.return_value = bars
-        mock_detector.detect.return_value = _make_pattern("AAPL")
+        mock_detector.detect_setup.return_value = _make_pattern("AAPL")
         mock_planner.create_plan.return_value = None  # Plan rejected
 
         engine.on_stock_qualified("AAPL")
@@ -338,10 +342,10 @@ class TestNotifierIntegration:
         bars = pd.DataFrame({'open': [4.0], 'high': [4.1], 'low': [3.9],
                             'close': [4.05], 'volume': [100000]})
         mock_alpaca.get_1min_bars.return_value = bars
-        mock_detector.detect.return_value = _make_pattern("AAPL")
+        mock_detector.detect_setup.return_value = _make_pattern("AAPL")
         mock_planner.create_plan.return_value = _make_plan("AAPL")
         mock_position_manager.can_open_position.return_value = True
-        mock_executor.submit_bracket_order.return_value = {
+        mock_executor.submit_buy_stop_bracket_order.return_value = {
             'order_id': 'ord-1', 'status': 'accepted', 'symbol': 'AAPL', 'shares': 113
         }
 

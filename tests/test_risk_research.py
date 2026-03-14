@@ -94,9 +94,9 @@ def _make_trade(symbol="TEST", entry_price=10.0, stop_loss=9.80, take_profit=10.
 class TestHypothesisRegistry:
     """Tests for the hypothesis registry and planner builder."""
 
-    def test_all_10_hypotheses_exist(self):
-        """Registry contains exactly H0-H9."""
-        expected = {f"H{i}" for i in range(10)}
+    def test_all_hypotheses_exist(self):
+        """Registry contains H0-H9 plus H9a and H9b."""
+        expected = {f"H{i}" for i in range(10)} | {"H9a", "H9b"}
         assert set(HYPOTHESES.keys()) == expected
 
     def test_all_hypotheses_create_valid_planners(self):

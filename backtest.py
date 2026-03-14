@@ -22,7 +22,7 @@ import pandas as pd
 from dotenv import load_dotenv
 
 from data_sources.alpaca_client import AlpacaClient
-from trading.pattern_detector import BullFlagDetector, BullFlagPattern
+from trading.pattern_detector import BullFlagDetector, BullFlagPattern, BullFlagSetup
 from trading.trade_planner import TradePlanner, TradePlan
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ class SimulatedTrade:
     shares: int
     exit_time: Optional[datetime] = None
     exit_price: Optional[float] = None
-    exit_reason: Optional[str] = None  # 'target', 'stop', 'eod'
+    exit_reason: Optional[str] = None  # 'target', 'stop', 'eod', 'force_close'
     pnl: float = 0.0
     pnl_pct: float = 0.0
     bars_held: int = 0
@@ -55,6 +55,9 @@ class SimulatedTrade:
     entry_bar_low: Optional[float] = None
     entry_bar_close: Optional[float] = None
     entry_bar_volume: Optional[int] = None
+    # Realistic entry tracking (buy-stop mode)
+    planned_entry: Optional[float] = None  # the breakout_level we targeted
+    entry_gap: float = 0.0  # realistic_entry - breakout_level (slippage)
 
 
 @dataclass
@@ -64,6 +67,16 @@ class PatternDetection:
     bar_index: int
     timestamp: datetime
     pattern: BullFlagPattern
+
+
+@dataclass
+class PendingBuyStop:
+    """A pending buy-stop order waiting for breakout to trigger fill."""
+
+    setup: BullFlagSetup
+    plan: TradePlan
+    placed_at_bar_idx: int
+    breakout_level: float
 
 
 @dataclass
@@ -93,13 +106,27 @@ class TradeSimulator:
     Simulates a trade by walking forward through bars from entry.
 
     Rules:
-    - Entry at plan.entry_price (breakout level)
-    - Each bar: check stop then target (conservative on ambiguity)
+    - Entry at plan.entry_price (or override price for realistic buy-stop fills)
+    - Each bar: check force_close, then stop, then target (conservative on ambiguity)
     - End of day: exit at last bar's close
     """
 
+    def __init__(self, force_close_time_utc: Optional[float] = None):
+        """
+        Initialize TradeSimulator.
+
+        Args:
+            force_close_time_utc: UTC hour (e.g. 19.75 = 15:45 ET) to force
+                close all positions. None disables force-close.
+        """
+        self.force_close_time_utc = force_close_time_utc
+
     def simulate(
-        self, plan: TradePlan, bars: pd.DataFrame, entry_bar_idx: int
+        self,
+        plan: TradePlan,
+        bars: pd.DataFrame,
+        entry_bar_idx: int,
+        entry_price_override: Optional[float] = None,
     ) -> SimulatedTrade:
         """
         Simulate a trade from entry_bar_idx through remaining bars.
@@ -108,15 +135,20 @@ class TradeSimulator:
             plan: The trade plan with entry/stop/target
             bars: Full day's bars DataFrame
             entry_bar_idx: Index of the bar where entry occurs
+            entry_price_override: If set, use this as actual entry price instead
+                of plan.entry_price (for realistic buy-stop fills at
+                max(bar_open, breakout_level))
 
         Returns:
             SimulatedTrade with fill details and P&L
         """
         entry_bar = bars.iloc[entry_bar_idx]
+        actual_entry = entry_price_override if entry_price_override is not None else plan.entry_price
+
         trade = SimulatedTrade(
             symbol=plan.symbol,
             entry_time=entry_bar['timestamp'],
-            entry_price=plan.entry_price,
+            entry_price=actual_entry,
             stop_loss=plan.stop_loss_price,
             take_profit=plan.take_profit_price,
             shares=plan.shares,
@@ -126,12 +158,26 @@ class TradeSimulator:
             entry_bar_low=float(entry_bar['low']),
             entry_bar_close=float(entry_bar['close']),
             entry_bar_volume=int(entry_bar['volume']),
+            planned_entry=plan.entry_price,
+            entry_gap=actual_entry - plan.entry_price,
         )
 
         last_bar_idx = len(bars) - 1
 
         for i in range(entry_bar_idx + 1, len(bars)):
             bar = bars.iloc[i]
+
+            # Force close check
+            if self.force_close_time_utc is not None:
+                bar_ts = bar['timestamp']
+                bar_hour = bar_ts.hour if hasattr(bar_ts, 'hour') else 0
+                bar_minute = bar_ts.minute if hasattr(bar_ts, 'minute') else 0
+                bar_time_utc = bar_hour + bar_minute / 60.0
+                if bar_time_utc >= self.force_close_time_utc:
+                    self._exit_trade(trade, bar, 'force_close', bar['open'])
+                    logger.debug(f"  Bar {i}: force close at ${bar['open']:.2f}")
+                    return trade
+
             bar_low = bar['low']
             bar_high = bar['high']
 
@@ -192,17 +238,18 @@ class BacktestRunner:
     """
     Runs a backtest over a day's 1-minute bars.
 
-    Sliding window from bar 7 to N-2 (minimum bars for detection).
-    Takes only the first valid trade (one trade per symbol per day).
-    Tracks all pattern detections for analysis.
+    Two modes:
+    - Fantasy (realistic=False, default): Uses detect() — enters at breakout_level
+      after breakout candle closes. Original behavior, backward compatible.
+    - Realistic (realistic=True): Uses detect_setup() — detects pole+flag before
+      breakout, places a pending buy-stop at flag_high, fills at
+      max(bar_open, breakout_level) when breakout happens.
     """
 
     MIN_BARS_FOR_DETECTION = 7  # 3 pole + 2 pullback + 1 breakout + 1 dropped
+    MIN_BARS_FOR_SETUP = 6      # 3 pole + 2 pullback + 1 dropped
 
-    # Default filters based on Feb+Mar 2026 backtest analysis (48 trades):
-    # - Midday skip alone: 32 trades, 62.5% WR, $4,241 PnL (best PnL retention)
-    # - No price filter: sub-$5 trades have big avg wins ($502) despite lower WR
-    DEFAULT_MIN_PRICE = 0.0
+    DEFAULT_MIN_PRICE = 2.0
     DEFAULT_SKIP_MIDDAY = True
     MIDDAY_START_UTC = 15  # 11:30 ET = 15:30 UTC (hour boundary)
     MIDDAY_END_UTC = 18    # 14:00 ET = 18:00 UTC
@@ -215,6 +262,10 @@ class BacktestRunner:
         min_price: Optional[float] = None,
         skip_midday: Optional[bool] = None,
         early_exit_after_trade: bool = True,
+        realistic: bool = False,
+        last_entry_time_utc: float = 19.0,
+        force_close_time_utc: Optional[float] = None,
+        setup_expiry_bars: int = 10,
     ):
         """
         Initialize BacktestRunner.
@@ -223,21 +274,55 @@ class BacktestRunner:
             detector: BullFlagDetector instance (uses defaults if None)
             planner: TradePlanner instance (uses defaults if None)
             simulator: TradeSimulator instance (uses defaults if None)
-            min_price: Minimum entry price filter (default 5.0)
+            min_price: Minimum entry price filter (default 2.0)
             skip_midday: Skip 11:30-14:00 ET entries (default True)
-            early_exit_after_trade: Stop scanning after first trade (default True).
-                Set to False to count all pattern detections for analysis.
+            early_exit_after_trade: Stop scanning after first trade (default True)
+            realistic: Use detect_setup() + pending buy-stop simulation
+            last_entry_time_utc: No new entries after this UTC hour (default 19.0 = 15:00 ET)
+            force_close_time_utc: Force close at this UTC hour (default None;
+                in realistic mode defaults to 19.75 = 15:45 ET)
+            setup_expiry_bars: Cancel pending buy-stop after N bars (default 10)
         """
         self.detector = detector or BullFlagDetector()
         self.planner = planner or TradePlanner()
-        self.simulator = simulator or TradeSimulator()
         self.min_price = min_price if min_price is not None else self.DEFAULT_MIN_PRICE
         self.skip_midday = skip_midday if skip_midday is not None else self.DEFAULT_SKIP_MIDDAY
         self.early_exit_after_trade = early_exit_after_trade
+        self.realistic = realistic
+        self.last_entry_time_utc = last_entry_time_utc
+        self.setup_expiry_bars = setup_expiry_bars
+
+        # In realistic mode, default force_close to 15:45 ET = 19.75 UTC
+        if force_close_time_utc is not None:
+            self.force_close_time_utc = force_close_time_utc
+        elif realistic:
+            self.force_close_time_utc = 19.75
+        else:
+            self.force_close_time_utc = None
+
+        # Wire force_close into the simulator
+        if simulator is not None:
+            self.simulator = simulator
+        else:
+            self.simulator = TradeSimulator(
+                force_close_time_utc=self.force_close_time_utc
+            )
+
+    def _get_bar_time_utc(self, bar_ts) -> float:
+        """Extract UTC fractional hour from a bar timestamp."""
+        bar_hour = bar_ts.hour if hasattr(bar_ts, 'hour') else 0
+        bar_minute = bar_ts.minute if hasattr(bar_ts, 'minute') else 0
+        return bar_hour + bar_minute / 60.0
+
+    def _is_midday(self, bar_time_utc: float) -> bool:
+        """Check if bar time falls in midday dead zone (11:30-14:00 ET)."""
+        return self.MIDDAY_START_UTC + 0.5 <= bar_time_utc < self.MIDDAY_END_UTC
 
     def run(self, symbol: str, bars: pd.DataFrame, trade_date: str) -> BacktestResult:
         """
         Run backtest for a symbol over a day's bars.
+
+        Delegates to _run_fantasy() or _run_realistic() based on self.realistic.
 
         Args:
             symbol: Stock ticker symbol
@@ -246,6 +331,16 @@ class BacktestRunner:
 
         Returns:
             BacktestResult with trades, patterns, and P&L
+        """
+        if self.realistic:
+            return self._run_realistic(symbol, bars, trade_date)
+        return self._run_fantasy(symbol, bars, trade_date)
+
+    def _run_fantasy(self, symbol: str, bars: pd.DataFrame, trade_date: str) -> BacktestResult:
+        """
+        Original backtest mode: detect() fires after breakout candle, enters at breakout_level.
+
+        Kept for backward compatibility and as a baseline comparison.
         """
         result = BacktestResult(
             symbol=symbol,
@@ -262,20 +357,16 @@ class BacktestRunner:
             return result
 
         trade_taken = False
-        last_end = len(bars) - 1  # Leave room — detector drops last bar
+        last_end = len(bars) - 1
 
-        logger.info(f"{symbol}: Scanning {len(bars)} bars for patterns...")
+        logger.info(f"{symbol}: Scanning {len(bars)} bars for patterns (fantasy mode)...")
 
         for i in range(self.MIN_BARS_FOR_DETECTION - 1, last_end):
-            # Pass full DataFrame + end_idx to avoid O(N^2) DataFrame copies.
-            # end_idx=i means completed = bars[:i], which matches the old behavior
-            # of passing bars[:i+1] and then having detect() drop the last bar.
             pattern = self.detector.detect(symbol, bars, end_idx=i)
 
             if pattern is None:
                 continue
 
-            # Record detection
             detection = PatternDetection(
                 bar_index=i,
                 timestamp=bars.iloc[i]['timestamp'],
@@ -300,7 +391,6 @@ class BacktestRunner:
                 logger.debug(f"  Plan rejected at bar {i}")
                 continue
 
-            # Price filter: skip sub-min_price stocks
             if self.min_price > 0 and plan.entry_price < self.min_price:
                 logger.debug(
                     f"  Skipping — entry ${plan.entry_price:.2f} below "
@@ -308,20 +398,15 @@ class BacktestRunner:
                 )
                 continue
 
-            # Midday filter: skip 11:30-14:00 ET (15:30-18:00 UTC)
             if self.skip_midday:
-                bar_ts = bars.iloc[i]['timestamp']
-                bar_hour = bar_ts.hour if hasattr(bar_ts, 'hour') else 0
-                bar_minute = bar_ts.minute if hasattr(bar_ts, 'minute') else 0
-                bar_time_utc = bar_hour + bar_minute / 60.0
-                if self.MIDDAY_START_UTC + 0.5 <= bar_time_utc < self.MIDDAY_END_UTC:
+                bar_time_utc = self._get_bar_time_utc(bars.iloc[i]['timestamp'])
+                if self._is_midday(bar_time_utc):
                     logger.debug(
-                        f"  Skipping — midday entry at {bar_ts} "
+                        f"  Skipping — midday entry at {bars.iloc[i]['timestamp']} "
                         f"(11:30-14:00 ET filter)"
                     )
                     continue
 
-            # Simulate the trade
             logger.info(
                 f"  TRADE ENTRY at bar {i}: "
                 f"${plan.entry_price:.2f} entry, "
@@ -347,6 +432,159 @@ class BacktestRunner:
         logger.info(
             f"{symbol}: Scan complete — "
             f"{result.patterns_detected} patterns, "
+            f"{len(result.trades_simulated)} trades, "
+            f"P&L ${result.summary_pnl:.2f}"
+        )
+
+        return result
+
+    def _run_realistic(self, symbol: str, bars: pd.DataFrame, trade_date: str) -> BacktestResult:
+        """
+        Realistic backtest: detect_setup() fires before breakout, places pending
+        buy-stop at flag_high, fills at max(bar_open, breakout_level).
+
+        Loop:
+        1. Check pending buy-stop against current bar
+        2. If no trade and no pending order, scan for new setup
+        3. Apply filters (min_price, midday, last_entry_time)
+        """
+        result = BacktestResult(
+            symbol=symbol,
+            trade_date=trade_date,
+            total_bars=len(bars),
+            patterns_detected=0,
+        )
+
+        if len(bars) < self.MIN_BARS_FOR_SETUP:
+            logger.warning(
+                f"{symbol}: Only {len(bars)} bars, need at least "
+                f"{self.MIN_BARS_FOR_SETUP} for setup detection"
+            )
+            return result
+
+        trade_taken = False
+        pending_order: Optional[PendingBuyStop] = None
+        last_end = len(bars) - 1
+
+        logger.info(f"{symbol}: Scanning {len(bars)} bars for setups (realistic mode)...")
+
+        for i in range(self.MIN_BARS_FOR_SETUP - 1, last_end):
+            bar = bars.iloc[i]
+            bar_time_utc = self._get_bar_time_utc(bar['timestamp'])
+
+            # --- Step 1: Check pending buy-stop ---
+            if pending_order is not None and not trade_taken:
+                bar_high = bar['high']
+                bar_low = bar['low']
+                bar_open = bar['open']
+
+                # Check if setup invalidated (price dropped below flag_low)
+                if bar_low < pending_order.setup.flag_low:
+                    logger.debug(
+                        f"  Bar {i}: buy-stop INVALIDATED — "
+                        f"low ${bar_low:.2f} < flag_low ${pending_order.setup.flag_low:.2f}"
+                    )
+                    pending_order = None
+
+                # Check expiry
+                elif i - pending_order.placed_at_bar_idx > self.setup_expiry_bars:
+                    logger.debug(
+                        f"  Bar {i}: buy-stop EXPIRED after {self.setup_expiry_bars} bars"
+                    )
+                    pending_order = None
+
+                # Check if triggered
+                elif bar_high >= pending_order.breakout_level:
+                    # Fill at max(bar_open, breakout_level) — realistic fill price
+                    fill_price = max(bar_open, pending_order.breakout_level)
+                    plan = pending_order.plan
+
+                    logger.info(
+                        f"  BUY-STOP TRIGGERED at bar {i}: "
+                        f"planned ${pending_order.breakout_level:.2f}, "
+                        f"fill ${fill_price:.2f} (gap +${fill_price - pending_order.breakout_level:.2f}), "
+                        f"{plan.shares} shares"
+                    )
+
+                    trade = self.simulator.simulate(
+                        plan, bars, i, entry_price_override=fill_price
+                    )
+                    result.trades_simulated.append(trade)
+                    trade_taken = True
+                    pending_order = None
+
+                    logger.info(
+                        f"  TRADE EXIT ({trade.exit_reason}): "
+                        f"${trade.exit_price:.2f}, "
+                        f"P&L ${trade.pnl:.2f} ({trade.pnl_pct:+.1f}%)"
+                    )
+
+                    if self.early_exit_after_trade:
+                        break
+
+            # --- Step 2: Scan for new setup ---
+            if not trade_taken and pending_order is None:
+                # Last entry time check
+                if bar_time_utc >= self.last_entry_time_utc:
+                    continue
+
+                setup = self.detector.detect_setup(symbol, bars, end_idx=i)
+
+                if setup is None:
+                    continue
+
+                result.patterns_detected += 1
+                detection = PatternDetection(
+                    bar_index=i,
+                    timestamp=bar['timestamp'],
+                    pattern=setup,
+                )
+                result.pattern_details.append(detection)
+
+                logger.info(
+                    f"  Setup #{result.patterns_detected} at bar {i} "
+                    f"({bar['timestamp']}): "
+                    f"pole {setup.pole_gain_pct:.1f}% gain, "
+                    f"retracement {setup.retracement_pct:.1f}%, "
+                    f"buy-stop @ ${setup.breakout_level:.2f}"
+                )
+
+                plan = self.planner.create_plan(setup)
+                if plan is None:
+                    logger.debug(f"  Plan rejected at bar {i}")
+                    continue
+
+                # Price filter
+                if self.min_price > 0 and plan.entry_price < self.min_price:
+                    logger.debug(
+                        f"  Skipping — entry ${plan.entry_price:.2f} below "
+                        f"min price ${self.min_price:.2f}"
+                    )
+                    continue
+
+                # Midday filter
+                if self.skip_midday and self._is_midday(bar_time_utc):
+                    logger.debug(
+                        f"  Skipping — midday setup at {bar['timestamp']} "
+                        f"(11:30-14:00 ET filter)"
+                    )
+                    continue
+
+                pending_order = PendingBuyStop(
+                    setup=setup,
+                    plan=plan,
+                    placed_at_bar_idx=i,
+                    breakout_level=setup.breakout_level,
+                )
+                logger.info(
+                    f"  PENDING BUY-STOP placed at bar {i}: "
+                    f"${setup.breakout_level:.2f}, "
+                    f"expires in {self.setup_expiry_bars} bars"
+                )
+
+        logger.info(
+            f"{symbol}: Scan complete — "
+            f"{result.patterns_detected} setups, "
             f"{len(result.trades_simulated)} trades, "
             f"P&L ${result.summary_pnl:.2f}"
         )
