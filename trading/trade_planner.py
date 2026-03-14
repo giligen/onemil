@@ -51,11 +51,11 @@ class TradePlanner:
         position_size_dollars: float = 10000,
         max_shares: int = 10000,
         max_risk_per_share: float = 0.20,
-        min_risk_per_share: float = 0.05,
+        min_risk_per_share: float = 0.02,
         min_risk_reward: float = 2.0,
         sizing_mode: str = "fixed_investment",
         risk_per_trade: float = 500.0,
-        min_risk_pct: Optional[float] = None,
+        min_risk_pct: Optional[float] = 0.005,
         max_risk_pct: Optional[float] = None,
     ):
         """
@@ -109,12 +109,13 @@ class TradePlanner:
             logger.debug(f"{pattern.symbol}: Stop ({natural_stop:.2f}) >= entry ({entry_price:.2f}), rejecting")
             return None
 
-        # Compute effective min/max risk thresholds (pct-based or flat)
-        effective_min_risk = (
-            entry_price * self.min_risk_pct
-            if self.min_risk_pct is not None
-            else self.min_risk_per_share
-        )
+        # Compute effective min risk: max(absolute_floor, pct_of_price)
+        # This scales with price — tight stops are ok on cheap stocks,
+        # but noise on expensive ones.
+        if self.min_risk_pct is not None:
+            effective_min_risk = max(self.min_risk_per_share, entry_price * self.min_risk_pct)
+        else:
+            effective_min_risk = self.min_risk_per_share
         effective_max_risk = (
             entry_price * self.max_risk_pct
             if self.max_risk_pct is not None

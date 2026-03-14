@@ -526,11 +526,12 @@ class TestBackwardCompatibility:
         assert plan.shares == 113
         assert plan.risk_reward_ratio == pytest.approx(2.0, abs=0.1)
 
-    def test_new_params_default_to_none(self):
-        """New params (min_risk_pct, max_risk_pct) default to None (inactive)."""
+    def test_new_params_defaults(self):
+        """New params: min_risk_pct=0.5% (scales with price), max_risk_pct=None."""
         planner = TradePlanner()
-        assert planner.min_risk_pct is None
+        assert planner.min_risk_pct == 0.005  # 0.5% of entry price
         assert planner.max_risk_pct is None
+        assert planner.min_risk_per_share == 0.02  # absolute floor
         assert planner.sizing_mode == "fixed_investment"
 
     def test_50_cent_hard_reject_still_works_with_defaults(self):
