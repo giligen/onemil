@@ -834,6 +834,76 @@ class TestBacktestRunnerRealistic:
         assert trade.planned_entry is None
         assert trade.entry_gap == 0.0
 
+    def test_gap_fill_adjusts_stop_loss(self):
+        """When entry gaps above breakout, stop moves up to maintain planned risk."""
+        # Pattern: pole 3 green, flag 2 red, then gap-over breakout
+        candles = [
+            (4.00, 4.15, 3.98, 4.13, 200000),  # pole
+            (4.13, 4.30, 4.11, 4.28, 180000),
+            (4.28, 4.52, 4.26, 4.50, 160000),
+            (4.50, 4.52, 4.38, 4.40, 50000),    # flag
+            (4.40, 4.42, 4.33, 4.35, 30000),
+            (4.35, 4.38, 4.32, 4.34, 25000),    # calm (setup detected)
+            # Gap-over: opens at 4.70, breakout was ~4.42 (flag_high)
+            # Gap = $0.28. Planned risk ~$0.09 (4.42-4.33).
+            # Without fix: stop stays at 4.33, risk = 4.70-4.33 = $0.37/sh
+            # With fix: stop = 4.70-0.09 = 4.61, risk = $0.09/sh (same as planned)
+            (4.70, 4.75, 4.58, 4.72, 300000),
+            # Reversal hits new tighter stop but not old stop
+            (4.72, 4.73, 4.59, 4.60, 120000),
+            # Dummy trailing bars
+            (4.60, 4.62, 4.55, 4.58, 100000),
+        ]
+        bars = _make_bars(candles)
+
+        runner = BacktestRunner(
+            planner=TradePlanner(min_risk_per_share=0.01),
+            realistic=True,
+            min_price=0.0,
+        )
+        result = runner.run("TEST", bars, "2026-03-13")
+
+        if result.trades_simulated:
+            trade = result.trades_simulated[0]
+            # Entry should be at gap open (~4.70)
+            assert trade.entry_price >= 4.65
+            assert trade.entry_gap > 0.2  # Significant gap
+            # Stop should have been adjusted UP, not at original flag_low (4.33)
+            assert trade.stop_loss > 4.40, (
+                f"Stop should be adjusted up for gap fill, got {trade.stop_loss}"
+            )
+
+    def test_no_gap_no_stop_adjustment(self):
+        """When entry is at breakout level (no gap), stop stays at flag_low."""
+        candles = [
+            (4.00, 4.15, 3.98, 4.13, 200000),
+            (4.13, 4.30, 4.11, 4.28, 180000),
+            (4.28, 4.52, 4.26, 4.50, 160000),
+            (4.50, 4.52, 4.38, 4.40, 50000),
+            (4.40, 4.42, 4.33, 4.35, 30000),
+            (4.35, 4.38, 4.32, 4.34, 25000),
+            # Clean breakout at flag_high, no gap
+            (4.42, 4.60, 4.40, 4.55, 250000),
+            (4.55, 4.65, 4.52, 4.62, 120000),
+            (4.62, 4.75, 4.58, 4.70, 110000),
+            (4.70, 4.85, 4.68, 4.82, 100000),
+            (4.82, 4.95, 4.78, 4.92, 95000),
+            (4.92, 5.10, 4.90, 5.05, 90000),
+        ]
+        bars = _make_bars(candles)
+
+        runner = BacktestRunner(
+            planner=TradePlanner(min_risk_per_share=0.01),
+            realistic=True,
+            min_price=0.0,
+        )
+        result = runner.run("TEST", bars, "2026-03-13")
+
+        if result.trades_simulated:
+            trade = result.trades_simulated[0]
+            # No gap → stop stays at original flag_low area
+            assert trade.entry_gap < 0.01 or trade.stop_loss <= 4.40
+
 
 # ===========================================================================
 # TradeSimulator Partial Profit Tests

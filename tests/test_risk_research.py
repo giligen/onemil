@@ -168,16 +168,18 @@ class TestHypothesisRegistry:
             assert planner.min_risk_pct is not None, f"{h_id} should have min_risk_pct"
             assert planner.max_risk_pct is not None, f"{h_id} should have max_risk_pct"
 
-    def test_h12_no_macd(self):
-        """H12 is H10a without MACD — same params, no require_macd_positive."""
+    def test_h12_no_macd_relaxed_min_risk(self):
+        """H12 is H10a without MACD + relaxed min_risk (0.02/0.5%)."""
         h12 = HYPOTHESES["H12"]
         h10a = HYPOTHESES["H10a"]
-        # Same risk params
+        # Same core params
         assert h12["sizing_mode"] == h10a["sizing_mode"]
         assert h12["risk_per_trade"] == h10a["risk_per_trade"]
         assert h12["min_risk_reward"] == h10a["min_risk_reward"]
-        assert h12["min_risk_pct"] == h10a["min_risk_pct"]
         assert h12["max_risk_pct"] == h10a["max_risk_pct"]
+        # Relaxed min_risk (from remote finding: old 0.05/1% rejected 96% of patterns)
+        assert h12["min_risk_per_share"] == 0.02
+        assert h12["min_risk_pct"] == 0.005
         # No MACD
         assert "require_macd_positive" not in h12
 

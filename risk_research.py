@@ -220,13 +220,13 @@ HYPOTHESES: Dict[str, Dict] = {
         "require_macd_positive": True,
     },
     "H12": {
-        "description": "H10a without MACD filter",
+        "description": "H10a without MACD + relaxed min_risk",
         "position_size_dollars": 50000,
         "sizing_mode": "fixed_risk",
         "risk_per_trade": 2000,
-        "min_risk_per_share": 0.05,
+        "min_risk_per_share": 0.02,
         "max_risk_per_share": 0.20,
-        "min_risk_pct": 0.01,
+        "min_risk_pct": 0.005,
         "max_risk_pct": 0.05,
         "min_risk_reward": 2.5,
     },
@@ -303,10 +303,13 @@ def compute_metrics(trades: List[SimulatedTrade]) -> Dict:
     actual_rr = abs(avg_win / avg_loss) if avg_loss != 0 else float('inf')
 
     # Max drawdown: largest peak-to-trough in cumulative P&L
+    # Sort by entry time so drawdown reflects the real chronological sequence,
+    # not the alphabetical symbol order from batch processing.
+    sorted_trades = sorted(trades, key=lambda t: t.entry_time)
     cumulative = 0.0
     peak = 0.0
     max_dd = 0.0
-    for t in trades:
+    for t in sorted_trades:
         cumulative += t.pnl
         if cumulative > peak:
             peak = cumulative

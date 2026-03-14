@@ -701,11 +701,36 @@ class BacktestRunner:
                     # Fill at max(bar_open, breakout_level) — realistic fill price
                     fill_price = max(bar_open, pending_order.breakout_level)
                     plan = pending_order.plan
+                    entry_gap = fill_price - pending_order.breakout_level
+
+                    # Adjust stop loss for entry gap: maintain planned risk_per_share
+                    # so dollar risk stays at the budgeted amount.
+                    # Without this, a $0.78 gap on a $0.34 planned risk turns
+                    # a $2K risk trade into a $6.6K risk trade.
+                    if entry_gap > 0:
+                        adjusted_stop = fill_price - plan.risk_per_share
+                        logger.info(
+                            f"  Entry gap +${entry_gap:.2f}: "
+                            f"stop adjusted ${plan.stop_loss_price:.2f} → "
+                            f"${adjusted_stop:.2f} (maintain ${plan.risk_per_share:.2f}/sh risk)"
+                        )
+                        plan = TradePlan(
+                            symbol=plan.symbol,
+                            entry_price=plan.entry_price,
+                            stop_loss_price=adjusted_stop,
+                            take_profit_price=plan.take_profit_price,
+                            risk_per_share=plan.risk_per_share,
+                            reward_per_share=plan.reward_per_share,
+                            risk_reward_ratio=plan.risk_reward_ratio,
+                            shares=plan.shares,
+                            total_risk=plan.total_risk,
+                            pattern=plan.pattern,
+                        )
 
                     logger.info(
                         f"  BUY-STOP TRIGGERED at bar {i}: "
                         f"planned ${pending_order.breakout_level:.2f}, "
-                        f"fill ${fill_price:.2f} (gap +${fill_price - pending_order.breakout_level:.2f}), "
+                        f"fill ${fill_price:.2f} (gap +${entry_gap:.2f}), "
                         f"{plan.shares} shares"
                     )
 
