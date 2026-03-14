@@ -183,6 +183,53 @@ HYPOTHESES: Dict[str, Dict] = {
         "min_risk_reward": 2.5,
         "require_macd_positive": True,
     },
+    "H10a": {
+        "description": "H10 + $2000 risk budget",
+        "position_size_dollars": 50000,
+        "sizing_mode": "fixed_risk",
+        "risk_per_trade": 2000,
+        "min_risk_per_share": 0.05,
+        "max_risk_per_share": 0.20,
+        "min_risk_pct": 0.01,
+        "max_risk_pct": 0.05,
+        "min_risk_reward": 2.5,
+        "require_macd_positive": True,
+    },
+    "H11": {
+        "description": "H10a + 1.5R target",
+        "position_size_dollars": 50000,
+        "sizing_mode": "fixed_risk",
+        "risk_per_trade": 2000,
+        "min_risk_per_share": 0.05,
+        "max_risk_per_share": 0.20,
+        "min_risk_pct": 0.01,
+        "max_risk_pct": 0.05,
+        "min_risk_reward": 1.5,
+        "require_macd_positive": True,
+    },
+    "H11a": {
+        "description": "H10a + 2.0R target",
+        "position_size_dollars": 50000,
+        "sizing_mode": "fixed_risk",
+        "risk_per_trade": 2000,
+        "min_risk_per_share": 0.05,
+        "max_risk_per_share": 0.20,
+        "min_risk_pct": 0.01,
+        "max_risk_pct": 0.05,
+        "min_risk_reward": 2.0,
+        "require_macd_positive": True,
+    },
+    "H12": {
+        "description": "H10a without MACD filter",
+        "position_size_dollars": 50000,
+        "sizing_mode": "fixed_risk",
+        "risk_per_trade": 2000,
+        "min_risk_per_share": 0.05,
+        "max_risk_per_share": 0.20,
+        "min_risk_pct": 0.01,
+        "max_risk_pct": 0.05,
+        "min_risk_reward": 2.5,
+    },
 }
 
 
@@ -313,12 +360,20 @@ def run_hypothesis(
         detector_kwargs["require_macd_positive"] = True
     detector = BullFlagDetector(**detector_kwargs) if detector_kwargs else None
 
+    # Partial profit config from hypothesis
+    partial_profit_enabled = params.get("partial_profit_enabled", False)
+    partial_profit_r_multiple = params.get("partial_profit_r_multiple", 1.0)
+    partial_profit_fraction = params.get("partial_profit_fraction", 0.5)
+
     mode_label = "realistic" if realistic else "fantasy"
     runner = BacktestRunner(
         planner=planner,
         detector=detector,
         realistic=realistic,
         min_price=2.0 if realistic else 0.0,
+        partial_profit_enabled=partial_profit_enabled,
+        partial_profit_r_multiple=partial_profit_r_multiple,
+        partial_profit_fraction=partial_profit_fraction,
     )
 
     logger.info(
@@ -491,6 +546,7 @@ def write_trades_csv(
         "exit_reason", "pnl", "pnl_pct",
         "sizing_mode", "risk_budget", "risk_per_share",
         "dollar_risk_per_trade", "position_value",
+        "partial_taken", "partial_price", "partial_shares", "partial_pnl",
     ]
 
     with open(output_path, 'w', newline='', encoding='utf-8') as f:
@@ -520,6 +576,10 @@ def write_trades_csv(
                 f"{risk_per_share:.4f}",
                 f"{risk_per_share * t.shares:.2f}",
                 f"{position_value:.2f}",
+                t.partial_exit_taken,
+                f"{t.partial_exit_price:.2f}" if t.partial_exit_price else "",
+                t.partial_shares,
+                f"{t.partial_pnl:.2f}",
             ])
 
     logger.info(f"{hypothesis_id}: {len(trades)} trades written to {output_path}")

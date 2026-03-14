@@ -833,3 +833,270 @@ class TestBacktestRunnerRealistic:
         )
         assert trade.planned_entry is None
         assert trade.entry_gap == 0.0
+
+
+# ===========================================================================
+# TradeSimulator Partial Profit Tests
+# ===========================================================================
+
+
+@pytest.fixture
+def partial_simulator():
+    """TradeSimulator with partial profit enabled."""
+    return TradeSimulator(partial_profit_enabled=True)
+
+
+class TestTradeSimulatorPartialProfit:
+    """Test partial profit exit strategy (sell half at +1R, move stop to breakeven)."""
+
+    def test_partial_disabled_by_default(self, simulator):
+        """Default simulator does not take partial profits."""
+        plan = _make_plan(entry_price=5.00, stop_loss_price=4.90, take_profit_price=5.25, shares=100)
+        bars = _make_bars([
+            (5.00, 5.05, 4.95, 5.00, 1000),  # entry bar
+            (5.00, 5.12, 4.98, 5.10, 1000),   # +1R hit (5.10) but not target
+            (5.10, 5.30, 5.08, 5.28, 1000),   # target hit
+        ])
+        trade = simulator.simulate(plan, bars, entry_bar_idx=0)
+
+        assert trade.partial_exit_taken is False
+        assert trade.exit_reason == 'target'
+        assert trade.pnl == pytest.approx((5.25 - 5.00) * 100, abs=0.01)
+
+    def test_partial_then_breakeven_stop(self, partial_simulator):
+        """Price hits +1R, sells half, then reverses to breakeven stop."""
+        # entry=5.00, stop=4.90, risk=0.10, partial_target=5.10, target=5.25
+        plan = _make_plan(entry_price=5.00, stop_loss_price=4.90, take_profit_price=5.25, shares=100)
+        bars = _make_bars([
+            (5.00, 5.05, 4.95, 5.02, 1000),   # bar 0: entry
+            (5.02, 5.12, 5.00, 5.10, 1000),    # bar 1: +1R hit (5.10)
+            (5.10, 5.12, 5.05, 5.08, 1000),    # bar 2: drifts down
+            (5.08, 5.09, 4.98, 5.00, 1000),    # bar 3: hits breakeven stop (5.00)
+        ])
+        trade = partial_simulator.simulate(plan, bars, entry_bar_idx=0)
+
+        assert trade.partial_exit_taken is True
+        assert trade.partial_shares == 50
+        assert trade.partial_exit_price == pytest.approx(5.10, abs=0.01)
+        assert trade.partial_pnl == pytest.approx((5.10 - 5.00) * 50, abs=0.01)
+        assert trade.breakeven_stop_active is True
+        assert trade.exit_reason == 'partial+breakeven'
+        # Remaining 50 shares exit at breakeven (5.00), P&L = 0
+        # Total P&L = partial_pnl + 0 = 5.00
+        assert trade.pnl == pytest.approx(5.00, abs=0.01)
+
+    def test_partial_then_target(self, partial_simulator):
+        """Price hits +1R, sells half, then hits full target."""
+        plan = _make_plan(entry_price=5.00, stop_loss_price=4.90, take_profit_price=5.25, shares=100)
+        bars = _make_bars([
+            (5.00, 5.05, 4.95, 5.02, 1000),   # entry
+            (5.02, 5.12, 5.00, 5.10, 1000),    # +1R hit
+            (5.10, 5.20, 5.08, 5.18, 1000),    # approaching target
+            (5.18, 5.30, 5.16, 5.28, 1000),    # target hit (5.25)
+        ])
+        trade = partial_simulator.simulate(plan, bars, entry_bar_idx=0)
+
+        assert trade.partial_exit_taken is True
+        assert trade.exit_reason == 'partial+target'
+        # 50 shares at +1R (5.10): pnl = 50 * 0.10 = 5.00
+        # 50 shares at target (5.25): pnl = 50 * 0.25 = 12.50
+        # Total = 17.50
+        assert trade.pnl == pytest.approx(17.50, abs=0.01)
+
+    def test_straight_to_stop_no_partial(self, partial_simulator):
+        """Price goes straight to stop without hitting +1R."""
+        plan = _make_plan(entry_price=5.00, stop_loss_price=4.90, take_profit_price=5.25, shares=100)
+        bars = _make_bars([
+            (5.00, 5.05, 4.95, 5.00, 1000),   # entry
+            (5.00, 5.02, 4.88, 4.90, 1000),    # stop hit
+        ])
+        trade = partial_simulator.simulate(plan, bars, entry_bar_idx=0)
+
+        assert trade.partial_exit_taken is False
+        assert trade.exit_reason == 'stop'
+        assert trade.pnl == pytest.approx((4.90 - 5.00) * 100, abs=0.01)
+
+    def test_partial_then_eod(self, partial_simulator):
+        """Price hits +1R, sells half, then EOD exit."""
+        plan = _make_plan(entry_price=5.00, stop_loss_price=4.90, take_profit_price=5.25, shares=100)
+        bars = _make_bars([
+            (5.00, 5.05, 4.95, 5.02, 1000),   # entry
+            (5.02, 5.12, 5.00, 5.10, 1000),    # +1R hit
+            (5.10, 5.15, 5.05, 5.12, 1000),    # last bar — EOD
+        ])
+        trade = partial_simulator.simulate(plan, bars, entry_bar_idx=0)
+
+        assert trade.partial_exit_taken is True
+        assert trade.exit_reason == 'partial+eod'
+        # 50 shares at 5.10: pnl = 5.00
+        # 50 shares at 5.12 (EOD close): pnl = 50 * 0.12 = 6.00
+        # Total = 11.00
+        assert trade.pnl == pytest.approx(11.00, abs=0.01)
+
+    def test_partial_then_force_close(self):
+        """Price hits +1R, sells half, then force close triggers."""
+        sim = TradeSimulator(
+            force_close_time_utc=14.25,  # 14:15 UTC
+            partial_profit_enabled=True,
+        )
+        plan = _make_plan(entry_price=5.00, stop_loss_price=4.90, take_profit_price=5.25, shares=100)
+
+        # Bar at 14:00 (entry), 14:01 (+1R), 14:15 (force close)
+        bars = _make_bars([
+            (5.00, 5.05, 4.95, 5.02, 1000),   # bar 0 at 14:00 — entry
+            (5.02, 5.12, 5.00, 5.10, 1000),    # bar 1 at 14:01 — +1R hit
+        ], start_minute=0)
+        # Add a bar at 14:15
+        fc_bar = {
+            'timestamp': _ts(15),
+            'open': 5.08, 'high': 5.10, 'low': 5.05, 'close': 5.07, 'volume': 1000,
+        }
+        bars_with_fc = pd.concat([bars, pd.DataFrame([fc_bar])], ignore_index=True)
+
+        trade = sim.simulate(plan, bars_with_fc, entry_bar_idx=0)
+
+        assert trade.partial_exit_taken is True
+        assert trade.exit_reason == 'partial+force_close'
+        # 50 shares at 5.10: pnl = 5.00
+        # 50 shares at 5.08 (force close open): pnl = 50 * 0.08 = 4.00
+        # Total = 9.00
+        assert trade.pnl == pytest.approx(9.00, abs=0.01)
+
+    def test_partial_and_target_same_bar(self, partial_simulator):
+        """Same bar hits both +1R and full target."""
+        plan = _make_plan(entry_price=5.00, stop_loss_price=4.90, take_profit_price=5.25, shares=100)
+        bars = _make_bars([
+            (5.00, 5.05, 4.95, 5.02, 1000),   # entry
+            (5.02, 5.30, 5.00, 5.28, 2000),    # both +1R (5.10) and target (5.25) hit
+        ])
+        trade = partial_simulator.simulate(plan, bars, entry_bar_idx=0)
+
+        assert trade.partial_exit_taken is True
+        assert trade.exit_reason == 'partial+target'
+        # 50 shares at 5.10: pnl = 5.00
+        # 50 shares at 5.25: pnl = 50 * 0.25 = 12.50
+        # Total = 17.50
+        assert trade.pnl == pytest.approx(17.50, abs=0.01)
+
+    def test_stop_and_partial_same_bar(self, partial_simulator):
+        """Same bar touches both stop and +1R — conservative: stop wins."""
+        plan = _make_plan(entry_price=5.00, stop_loss_price=4.90, take_profit_price=5.25, shares=100)
+        bars = _make_bars([
+            (5.00, 5.05, 4.95, 5.02, 1000),   # entry
+            (5.00, 5.12, 4.88, 4.95, 2000),    # both stop (4.90) and +1R (5.10)
+        ])
+        trade = partial_simulator.simulate(plan, bars, entry_bar_idx=0)
+
+        assert trade.partial_exit_taken is False
+        assert trade.exit_reason == 'stop'
+        assert trade.pnl == pytest.approx((4.90 - 5.00) * 100, abs=0.01)
+
+    def test_partial_shares_rounding(self, partial_simulator):
+        """Odd share count rounds down for partial, remaining gets the extra."""
+        plan = _make_plan(entry_price=5.00, stop_loss_price=4.90, take_profit_price=5.25, shares=91)
+        bars = _make_bars([
+            (5.00, 5.05, 4.95, 5.02, 1000),   # entry
+            (5.02, 5.12, 5.00, 5.10, 1000),    # +1R hit
+            (5.10, 5.30, 5.08, 5.28, 1000),    # target hit
+        ])
+        trade = partial_simulator.simulate(plan, bars, entry_bar_idx=0)
+
+        assert trade.partial_shares == 45  # 91 // 2
+        assert trade.remaining_shares == 46  # 91 - 45
+        assert trade.exit_reason == 'partial+target'
+
+    def test_pnl_pct_on_full_position(self, partial_simulator):
+        """P&L percent is calculated relative to total entry cost, not remaining."""
+        plan = _make_plan(entry_price=5.00, stop_loss_price=4.90, take_profit_price=5.25, shares=100)
+        bars = _make_bars([
+            (5.00, 5.05, 4.95, 5.02, 1000),   # entry
+            (5.02, 5.12, 5.00, 5.10, 1000),    # +1R hit
+            (5.10, 5.12, 4.98, 5.00, 1000),    # breakeven stop hit
+        ])
+        trade = partial_simulator.simulate(plan, bars, entry_bar_idx=0)
+
+        # Total position value = 5.00 * 100 = 500
+        # Total P&L = 5.00 (from partial)
+        # P&L % = 5.00 / 500 * 100 = 1.0%
+        assert trade.pnl_pct == pytest.approx(1.0, abs=0.01)
+
+
+# ===========================================================================
+# TradeSimulator Breakeven-Stop-Only Tests (fraction=0.0)
+# ===========================================================================
+
+
+@pytest.fixture
+def breakeven_simulator():
+    """TradeSimulator with breakeven stop at +1R, no partial sell."""
+    return TradeSimulator(
+        partial_profit_enabled=True,
+        partial_profit_fraction=0.0,
+    )
+
+
+class TestTradeSimulatorBreakevenStopOnly:
+    """Test breakeven stop move without selling any shares (fraction=0)."""
+
+    def test_breakeven_then_stop_at_entry(self, breakeven_simulator):
+        """Price hits +1R, stop moves to breakeven, then reverses to entry → $0 P&L."""
+        plan = _make_plan(entry_price=5.00, stop_loss_price=4.90, take_profit_price=5.25, shares=100)
+        bars = _make_bars([
+            (5.00, 5.05, 4.95, 5.02, 1000),   # entry
+            (5.02, 5.12, 5.00, 5.10, 1000),    # +1R hit → stop moves to 5.00
+            (5.10, 5.12, 5.05, 5.08, 1000),    # drifts
+            (5.08, 5.09, 4.98, 5.00, 1000),    # hits breakeven stop
+        ])
+        trade = breakeven_simulator.simulate(plan, bars, entry_bar_idx=0)
+
+        assert trade.partial_exit_taken is True
+        assert trade.partial_shares == 0  # No shares sold at partial
+        assert trade.partial_pnl == 0.0
+        assert trade.remaining_shares == 100  # All shares remain
+        assert trade.breakeven_stop_active is True
+        assert trade.exit_reason == 'partial+breakeven'
+        assert trade.pnl == pytest.approx(0.0, abs=0.01)  # Breakeven!
+        assert trade.exit_price == 5.00
+
+    def test_breakeven_then_target_full_profit(self, breakeven_simulator):
+        """Price hits +1R, then hits target → full profit on all shares."""
+        plan = _make_plan(entry_price=5.00, stop_loss_price=4.90, take_profit_price=5.25, shares=100)
+        bars = _make_bars([
+            (5.00, 5.05, 4.95, 5.02, 1000),   # entry
+            (5.02, 5.12, 5.00, 5.10, 1000),    # +1R hit
+            (5.10, 5.30, 5.08, 5.28, 1000),    # target hit
+        ])
+        trade = breakeven_simulator.simulate(plan, bars, entry_bar_idx=0)
+
+        assert trade.exit_reason == 'partial+target'
+        # Full 100 shares at target: (5.25 - 5.00) * 100 = 25.00
+        assert trade.pnl == pytest.approx(25.00, abs=0.01)
+
+    def test_straight_to_stop_unchanged(self, breakeven_simulator):
+        """Price never reaches +1R, hits original stop → same as no-partial."""
+        plan = _make_plan(entry_price=5.00, stop_loss_price=4.90, take_profit_price=5.25, shares=100)
+        bars = _make_bars([
+            (5.00, 5.05, 4.95, 5.00, 1000),   # entry
+            (5.00, 5.03, 4.88, 4.90, 1000),    # stop hit
+        ])
+        trade = breakeven_simulator.simulate(plan, bars, entry_bar_idx=0)
+
+        assert trade.partial_exit_taken is False
+        assert trade.exit_reason == 'stop'
+        assert trade.pnl == pytest.approx(-10.00, abs=0.01)  # Same as H10a
+
+    def test_breakeven_preserves_all_shares_for_target(self, breakeven_simulator):
+        """Verify no shares are sold at +1R — full position hits target."""
+        plan = _make_plan(entry_price=5.00, stop_loss_price=4.90, take_profit_price=5.25, shares=200)
+        bars = _make_bars([
+            (5.00, 5.05, 4.95, 5.02, 1000),   # entry
+            (5.02, 5.12, 5.00, 5.10, 1000),    # +1R hit
+            (5.10, 5.15, 5.08, 5.12, 1000),    # hold
+            (5.12, 5.30, 5.10, 5.28, 1000),    # target hit
+        ])
+        trade = breakeven_simulator.simulate(plan, bars, entry_bar_idx=0)
+
+        assert trade.partial_shares == 0
+        assert trade.remaining_shares == 200
+        # Full 200 shares at target
+        assert trade.pnl == pytest.approx((5.25 - 5.00) * 200, abs=0.01)

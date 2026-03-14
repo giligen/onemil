@@ -95,8 +95,8 @@ class TestHypothesisRegistry:
     """Tests for the hypothesis registry and planner builder."""
 
     def test_all_hypotheses_exist(self):
-        """Registry contains H0-H9 plus H9a, H9b, and H10."""
-        expected = {f"H{i}" for i in range(11)} | {"H9a", "H9b"}
+        """Registry contains H0-H11 plus H9a, H9b, H10a, and H11a."""
+        expected = {f"H{i}" for i in range(13)} | {"H9a", "H9b", "H10a", "H11a"}
         assert set(HYPOTHESES.keys()) == expected
 
     def test_all_hypotheses_create_valid_planners(self):
@@ -167,6 +167,19 @@ class TestHypothesisRegistry:
             planner = build_planner(h_id)
             assert planner.min_risk_pct is not None, f"{h_id} should have min_risk_pct"
             assert planner.max_risk_pct is not None, f"{h_id} should have max_risk_pct"
+
+    def test_h12_no_macd(self):
+        """H12 is H10a without MACD — same params, no require_macd_positive."""
+        h12 = HYPOTHESES["H12"]
+        h10a = HYPOTHESES["H10a"]
+        # Same risk params
+        assert h12["sizing_mode"] == h10a["sizing_mode"]
+        assert h12["risk_per_trade"] == h10a["risk_per_trade"]
+        assert h12["min_risk_reward"] == h10a["min_risk_reward"]
+        assert h12["min_risk_pct"] == h10a["min_risk_pct"]
+        assert h12["max_risk_pct"] == h10a["max_risk_pct"]
+        # No MACD
+        assert "require_macd_positive" not in h12
 
 
 # ===========================================================================

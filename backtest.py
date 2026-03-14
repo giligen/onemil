@@ -58,6 +58,14 @@ class SimulatedTrade:
     # Realistic entry tracking (buy-stop mode)
     planned_entry: Optional[float] = None  # the breakout_level we targeted
     entry_gap: float = 0.0  # realistic_entry - breakout_level (slippage)
+    # Partial profit tracking (Ross Cameron exit strategy)
+    partial_exit_taken: bool = False
+    partial_exit_time: Optional[datetime] = None
+    partial_exit_price: Optional[float] = None
+    partial_shares: int = 0
+    partial_pnl: float = 0.0
+    remaining_shares: int = 0
+    breakeven_stop_active: bool = False
 
 
 @dataclass
@@ -111,15 +119,30 @@ class TradeSimulator:
     - End of day: exit at last bar's close
     """
 
-    def __init__(self, force_close_time_utc: Optional[float] = None):
+    def __init__(
+        self,
+        force_close_time_utc: Optional[float] = None,
+        partial_profit_enabled: bool = False,
+        partial_profit_r_multiple: float = 1.0,
+        partial_profit_fraction: float = 0.5,
+    ):
         """
         Initialize TradeSimulator.
 
         Args:
             force_close_time_utc: UTC hour (e.g. 19.75 = 15:45 ET) to force
                 close all positions. None disables force-close.
+            partial_profit_enabled: Enable partial profit exit at +NR, then
+                move stop to breakeven on remaining shares.
+            partial_profit_r_multiple: Take partial profit at this R multiple
+                (default 1.0 = +1R).
+            partial_profit_fraction: Fraction of shares to sell at partial
+                target (default 0.5 = half).
         """
         self.force_close_time_utc = force_close_time_utc
+        self.partial_profit_enabled = partial_profit_enabled
+        self.partial_profit_r_multiple = partial_profit_r_multiple
+        self.partial_profit_fraction = partial_profit_fraction
 
     def simulate(
         self,
@@ -163,6 +186,9 @@ class TradeSimulator:
         )
 
         last_bar_idx = len(bars) - 1
+
+        if self.partial_profit_enabled:
+            return self._simulate_with_partial(trade, plan, bars, entry_bar_idx, actual_entry)
 
         for i in range(entry_bar_idx + 1, len(bars)):
             bar = bars.iloc[i]
@@ -209,19 +235,187 @@ class TradeSimulator:
         logger.debug(f"  EOD exit at ${last_bar['close']:.2f}")
         return trade
 
+    def _simulate_with_partial(
+        self,
+        trade: SimulatedTrade,
+        plan: TradePlan,
+        bars: pd.DataFrame,
+        entry_bar_idx: int,
+        actual_entry: float,
+    ) -> SimulatedTrade:
+        """
+        Simulate a trade with breakeven stop / partial profit exit strategy.
+
+        When fraction > 0: sells a fraction of shares at +NR, moves stop to
+        breakeven on the remainder, then trails for the full target.
+        When fraction == 0: just moves stop to breakeven at +NR (no partial sell).
+
+        Args:
+            trade: The SimulatedTrade being filled
+            plan: The trade plan
+            bars: Full day's bars DataFrame
+            entry_bar_idx: Index of entry bar
+            actual_entry: Actual entry price used
+
+        Returns:
+            SimulatedTrade with partial profit fields populated
+        """
+        last_bar_idx = len(bars) - 1
+        partial_taken = False
+        current_stop = trade.stop_loss
+        active_shares = trade.shares
+        # Use actual risk from fill price to stop, not plan risk (which uses
+        # breakout_level, not realistic fill price — slippage makes plan risk
+        # too small, triggering breakeven too early)
+        actual_risk = actual_entry - plan.stop_loss_price
+        partial_target = actual_entry + actual_risk * self.partial_profit_r_multiple
+
+        for i in range(entry_bar_idx + 1, len(bars)):
+            bar = bars.iloc[i]
+
+            # 1. Force close check
+            if self.force_close_time_utc is not None:
+                bar_ts = bar['timestamp']
+                bar_hour = bar_ts.hour if hasattr(bar_ts, 'hour') else 0
+                bar_minute = bar_ts.minute if hasattr(bar_ts, 'minute') else 0
+                bar_time_utc = bar_hour + bar_minute / 60.0
+                if bar_time_utc >= self.force_close_time_utc:
+                    reason = 'partial+force_close' if partial_taken else 'force_close'
+                    self._exit_trade(
+                        trade, bar, reason, bar['open'], active_shares=active_shares
+                    )
+                    logger.debug(f"  Bar {i}: force close at ${bar['open']:.2f} ({reason})")
+                    return trade
+
+            bar_low = bar['low']
+            bar_high = bar['high']
+
+            hit_stop = bar_low <= current_stop
+            hit_partial = not partial_taken and bar_high >= partial_target
+            hit_target = bar_high >= trade.take_profit
+
+            # 2. Stop hit check (uses current_stop which may be breakeven)
+            if hit_stop and not hit_partial:
+                if partial_taken:
+                    # Stop is at breakeven after partial
+                    if abs(current_stop - trade.entry_price) < 0.001:
+                        reason = 'partial+breakeven'
+                    else:
+                        reason = 'partial+stop'
+                else:
+                    reason = 'stop'
+                self._exit_trade(
+                    trade, bar, reason, current_stop, active_shares=active_shares
+                )
+                logger.debug(f"  Bar {i}: {reason} at ${current_stop:.2f}")
+                return trade
+
+            # On same-bar stop+partial ambiguity: conservative = stop wins
+            if hit_stop and hit_partial:
+                self._exit_trade(
+                    trade, bar, 'stop', current_stop, active_shares=active_shares
+                )
+                logger.debug(
+                    f"  Bar {i}: ambiguous (stop & partial) → stopped out "
+                    f"at ${current_stop:.2f}"
+                )
+                return trade
+
+            # 3. Partial target hit
+            if hit_partial:
+                partial_shares = int(active_shares * self.partial_profit_fraction)
+                remaining = active_shares - partial_shares
+
+                trade.partial_exit_taken = True
+                trade.partial_exit_time = bar['timestamp']
+                trade.partial_exit_price = partial_target
+                trade.partial_shares = partial_shares
+                trade.partial_pnl = (partial_target - actual_entry) * partial_shares
+                trade.remaining_shares = remaining
+                trade.breakeven_stop_active = True
+
+                active_shares = remaining
+                current_stop = trade.entry_price  # Move to breakeven
+                partial_taken = True
+
+                logger.debug(
+                    f"  Bar {i}: partial exit {partial_shares} shares at "
+                    f"${partial_target:.2f}, P&L ${trade.partial_pnl:.2f}, "
+                    f"remaining {active_shares} shares, stop → breakeven"
+                )
+
+                # Check if target also hit on same bar
+                if hit_target:
+                    self._exit_trade(
+                        trade, bar, 'partial+target', trade.take_profit,
+                        active_shares=active_shares,
+                    )
+                    logger.debug(
+                        f"  Bar {i}: target also hit at ${trade.take_profit:.2f}"
+                    )
+                    return trade
+
+                continue
+
+            # 4. Final target hit
+            if hit_target:
+                reason = 'partial+target' if partial_taken else 'target'
+                self._exit_trade(
+                    trade, bar, reason, trade.take_profit,
+                    active_shares=active_shares,
+                )
+                logger.debug(f"  Bar {i}: {reason} at ${trade.take_profit:.2f}")
+                return trade
+
+        # 5. End of day — exit remaining at last bar's close
+        last_bar = bars.iloc[last_bar_idx]
+        reason = 'partial+eod' if partial_taken else 'eod'
+        self._exit_trade(
+            trade, last_bar, reason, last_bar['close'],
+            active_shares=active_shares,
+        )
+        logger.debug(f"  {reason} exit at ${last_bar['close']:.2f}")
+        return trade
+
     def _exit_trade(
-        self, trade: SimulatedTrade, bar: pd.Series, reason: str, price: float
+        self,
+        trade: SimulatedTrade,
+        bar: pd.Series,
+        reason: str,
+        price: float,
+        active_shares: Optional[int] = None,
     ) -> None:
-        """Fill in exit details on the trade."""
+        """
+        Fill in exit details on the trade.
+
+        Args:
+            trade: SimulatedTrade to update
+            bar: The bar where exit occurs
+            reason: Exit reason string
+            price: Exit price
+            active_shares: Number of shares being exited (None = trade.shares,
+                used when partial profit has reduced the position)
+        """
         trade.exit_time = bar['timestamp']
         trade.exit_price = price
         trade.exit_reason = reason
-        trade.pnl = (price - trade.entry_price) * trade.shares
-        trade.pnl_pct = (
-            (price - trade.entry_price) / trade.entry_price * 100
-            if trade.entry_price > 0
-            else 0.0
-        )
+
+        if active_shares is not None and self.partial_profit_enabled:
+            # Combined P&L: partial profit + remaining shares exit
+            final_pnl = (price - trade.entry_price) * active_shares
+            trade.pnl = trade.partial_pnl + final_pnl
+            total_position = trade.entry_price * trade.shares
+            trade.pnl_pct = (
+                (trade.pnl / total_position * 100) if total_position > 0 else 0.0
+            )
+        else:
+            trade.pnl = (price - trade.entry_price) * trade.shares
+            trade.pnl_pct = (
+                (price - trade.entry_price) / trade.entry_price * 100
+                if trade.entry_price > 0
+                else 0.0
+            )
+
         trade.bars_held = (
             bar.name - trade.plan.pattern.flag_end_idx
             if hasattr(bar, 'name')
@@ -266,6 +460,9 @@ class BacktestRunner:
         last_entry_time_utc: float = 19.0,
         force_close_time_utc: Optional[float] = None,
         setup_expiry_bars: int = 10,
+        partial_profit_enabled: bool = False,
+        partial_profit_r_multiple: float = 1.0,
+        partial_profit_fraction: float = 0.5,
     ):
         """
         Initialize BacktestRunner.
@@ -282,6 +479,9 @@ class BacktestRunner:
             force_close_time_utc: Force close at this UTC hour (default None;
                 in realistic mode defaults to 19.75 = 15:45 ET)
             setup_expiry_bars: Cancel pending buy-stop after N bars (default 10)
+            partial_profit_enabled: Enable partial profit exit strategy
+            partial_profit_r_multiple: Take partial at this R multiple (default 1.0)
+            partial_profit_fraction: Fraction of shares for partial exit (default 0.5)
         """
         self.detector = detector or BullFlagDetector()
         self.planner = planner or TradePlanner()
@@ -300,12 +500,15 @@ class BacktestRunner:
         else:
             self.force_close_time_utc = None
 
-        # Wire force_close into the simulator
+        # Wire force_close and partial profit into the simulator
         if simulator is not None:
             self.simulator = simulator
         else:
             self.simulator = TradeSimulator(
-                force_close_time_utc=self.force_close_time_utc
+                force_close_time_utc=self.force_close_time_utc,
+                partial_profit_enabled=partial_profit_enabled,
+                partial_profit_r_multiple=partial_profit_r_multiple,
+                partial_profit_fraction=partial_profit_fraction,
             )
 
     def _get_bar_time_utc(self, bar_ts) -> float:

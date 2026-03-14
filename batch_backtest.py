@@ -41,6 +41,7 @@ CSV_HEADERS = [
     "symbol", "date", "entry_time_et", "entry_price", "stop_loss",
     "target", "shares", "exit_time_et", "exit_price", "exit_reason",
     "pnl", "pnl_pct",
+    "partial_taken", "partial_price", "partial_shares", "partial_pnl",
 ]
 
 
@@ -528,6 +529,10 @@ def write_csv_report(results: List[BacktestResult], output_path: str) -> int:
                     trade.exit_reason or "",
                     f"{trade.pnl:.2f}",
                     f"{trade.pnl_pct:.2f}",
+                    trade.partial_exit_taken,
+                    f"{trade.partial_exit_price:.2f}" if trade.partial_exit_price else "",
+                    trade.partial_shares,
+                    f"{trade.partial_pnl:.2f}",
                 ])
                 trade_count += 1
 
