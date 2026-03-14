@@ -900,6 +900,17 @@ class AlpacaClient:
                 'filled_avg_price': float(order.filled_avg_price) if order.filled_avg_price else None,
                 'side': str(order.side.value) if hasattr(order, 'side') else '',
                 'type': str(order.type.value) if hasattr(order, 'type') else '',
+                'legs': [
+                    {
+                        'id': str(leg.id),
+                        'side': str(leg.side.value) if hasattr(leg, 'side') and leg.side else '',
+                        'type': str(leg.type.value) if hasattr(leg, 'type') and leg.type else '',
+                        'stop_price': float(leg.stop_price) if leg.stop_price else None,
+                        'limit_price': float(leg.limit_price) if leg.limit_price else None,
+                        'status': str(leg.status.value) if hasattr(leg, 'status') and leg.status else 'unknown',
+                    }
+                    for leg in (order.legs or [])
+                ],
             }
 
         except AlpacaAPIError:
@@ -907,6 +918,35 @@ class AlpacaClient:
         except Exception as e:
             logger.error(f"Failed to get order {order_id}: {e}")
             raise AlpacaAPIError(f"Failed to get order {order_id}: {e}")
+
+    def replace_order_stop_price(self, order_id: str, new_stop_price: float) -> Dict:
+        """
+        Replace a child stop-loss order's stop price (for gap-fill adjustment).
+
+        Args:
+            order_id: Alpaca order ID of the SL leg
+            new_stop_price: New stop price
+
+        Returns:
+            Dict with order id and status
+
+        Raises:
+            AlpacaAPIError: If replacement fails
+        """
+        try:
+            from alpaca.trading.requests import ReplaceOrderRequest
+            request = ReplaceOrderRequest(stop_price=round(new_stop_price, 2))
+            order = self._call_with_timeout(
+                lambda: self.trading_client.replace_order_by_id(order_id, request),
+                f"replace_order_stop_price({order_id}, ${new_stop_price:.2f})"
+            )
+            logger.info(f"Order {order_id} stop replaced to ${new_stop_price:.2f}")
+            return {'id': str(order.id), 'status': str(order.status.value)}
+        except AlpacaAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to replace order stop price {order_id}: {e}")
+            raise AlpacaAPIError(f"Failed to replace order stop price {order_id}: {e}")
 
     def submit_stop_bracket_order(
         self,

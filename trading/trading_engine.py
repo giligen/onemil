@@ -13,7 +13,7 @@ Flow:
 
 import logging
 import time as time_mod
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Set, Optional, Dict, Any, List
 
 import pytz
@@ -52,6 +52,7 @@ class TradingEngine:
         notifier: Optional['TelegramNotifier'] = None,
         last_entry_time_et: str = "15:00",
         force_close_time_et: str = "15:45",
+        setup_expiry_seconds: int = 600,
     ):
         """
         Initialize TradingEngine.
@@ -68,6 +69,7 @@ class TradingEngine:
             notifier: Optional Telegram notifier for trading alerts
             last_entry_time_et: No new entries after this ET time (HH:MM)
             force_close_time_et: Force close all positions at this ET time (HH:MM)
+            setup_expiry_seconds: Cancel pending buy-stop after this many seconds
         """
         self.alpaca = alpaca_client
         self.db = db
@@ -87,12 +89,14 @@ class TradingEngine:
         self.force_close_hour = int(fc_h)
         self.force_close_minute = int(fc_m)
 
+        self.setup_expiry_seconds = setup_expiry_seconds
+
         self._qualified_symbols: Set[str] = set()
         self._traded_symbols: Set[str] = set()
         self._patterns_detected: int = 0
         self._patterns_traded: int = 0
         self._pattern_details: list = []
-        self._pending_orders: Dict[str, Dict] = {}  # symbol -> {order_id, plan, setup}
+        self._pending_orders: Dict[str, Dict] = {}  # symbol -> {order_id, plan, setup, placed_at}
 
     def on_stock_qualified(self, symbol: str) -> None:
         """
@@ -165,8 +169,49 @@ class TradingEngine:
                 self._patterns_traded += 1
                 symbols_to_remove.append(symbol)
 
+                # Phase 2: Update trade record with fill data
+                trade_record = self.db.get_trade_by_order_id(order_id)
+                if trade_record:
+                    self.db.update_trade(trade_record['id'], {
+                        'order_status': 'filled',
+                        'fill_price': fill_price,
+                        'filled_at': datetime.now(timezone.utc),
+                    })
+                    logger.info(f"{symbol}: Trade DB updated — fill ${fill_price}")
+                else:
+                    logger.error(f"{symbol}: No trade record for order {order_id}")
+
+                # Phase 3: Gap-fill stop adjustment
+                plan = pending['plan']
+                setup = pending.get('setup')
+                if fill_price and setup and fill_price > setup.breakout_level:
+                    entry_gap = fill_price - setup.breakout_level
+                    adjusted_stop = round(fill_price - plan.risk_per_share, 2)
+                    logger.info(
+                        f"{symbol}: Gap fill +${entry_gap:.2f} — adjusting stop "
+                        f"${plan.stop_loss_price:.2f} → ${adjusted_stop:.2f}"
+                    )
+                    try:
+                        order_detail = self.alpaca.get_order(order_id)
+                        sl_leg = None
+                        for leg in order_detail.get('legs', []):
+                            if leg.get('side') == 'sell' and leg.get('stop_price') is not None:
+                                sl_leg = leg
+                                break
+
+                        if sl_leg:
+                            self.alpaca.replace_order_stop_price(sl_leg['id'], adjusted_stop)
+                            if trade_record:
+                                self.db.update_trade(trade_record['id'], {
+                                    'stop_loss_price': adjusted_stop,
+                                })
+                            logger.info(f"{symbol}: Stop adjusted to ${adjusted_stop:.2f}")
+                        else:
+                            logger.error(f"{symbol}: No SL leg found in bracket order")
+                    except Exception as e:
+                        logger.error(f"{symbol}: Failed to adjust stop after gap fill: {e}")
+
                 if self.notifier:
-                    plan = pending['plan']
                     self.notifier.notify_order_submitted(
                         symbol=symbol,
                         order_id=order_id,
@@ -186,6 +231,19 @@ class TradingEngine:
                 symbols_to_remove.append(symbol)
 
             else:
+                # Phase 5: Setup expiry — cancel stale buy-stops
+                placed_at = pending.get('placed_at')
+                if placed_at:
+                    age = (datetime.now(timezone.utc) - placed_at).total_seconds()
+                    if age > self.setup_expiry_seconds:
+                        logger.info(f"{symbol}: Buy-stop EXPIRED after {age:.0f}s, cancelling")
+                        try:
+                            self.alpaca.cancel_order(order_id)
+                        except Exception as e:
+                            logger.error(f"{symbol}: Failed to cancel expired order: {e}")
+                        symbols_to_remove.append(symbol)
+                        continue
+
                 # Still pending — check if setup invalidated
                 setup = pending.get('setup')
                 if setup:
@@ -209,23 +267,78 @@ class TradingEngine:
 
         return None
 
+    def _sync_closed_positions(self) -> None:
+        """Detect bracket exits (SL/TP hit) and update DB + circuit breaker."""
+        today = date.today().isoformat()
+        open_trades = self.db.get_open_trades(today)
+        if not open_trades:
+            return
+
+        try:
+            alpaca_positions = {p['symbol'] for p in self.alpaca.get_open_positions()}
+        except Exception as e:
+            logger.error(f"Failed to sync positions: {e}")
+            return
+
+        for trade in open_trades:
+            symbol = trade['symbol']
+            if symbol not in alpaca_positions and trade.get('fill_price'):
+                try:
+                    order_id = trade.get('order_id')
+                    exit_price = None
+                    exit_reason = None
+                    if order_id:
+                        order_detail = self.alpaca.get_order(order_id)
+                        for leg in order_detail.get('legs', []):
+                            if leg.get('status') == 'filled':
+                                if leg.get('stop_price'):
+                                    exit_price = leg.get('stop_price')
+                                    exit_reason = 'stop_loss'
+                                elif leg.get('limit_price'):
+                                    exit_price = leg.get('limit_price')
+                                    exit_reason = 'take_profit'
+
+                    if exit_price:
+                        pnl = (exit_price - trade['fill_price']) * trade['shares']
+                        pnl_pct = (exit_price / trade['fill_price'] - 1) * 100
+                        self.db.update_trade(trade['id'], {
+                            'exit_price': exit_price,
+                            'exit_reason': exit_reason,
+                            'exited_at': datetime.now(timezone.utc),
+                            'pnl': pnl,
+                            'pnl_pct': pnl_pct,
+                        })
+                        self.position_manager.record_trade_pnl(pnl)
+                        logger.info(
+                            f"{symbol}: {exit_reason} — exit ${exit_price:.2f}, "
+                            f"P&L ${pnl:+,.2f} ({pnl_pct:+.1f}%)"
+                        )
+                    else:
+                        logger.warning(f"{symbol}: Position closed but exit price unknown")
+                except Exception as e:
+                    logger.error(f"{symbol}: Failed to process closed position: {e}")
+
     def run_pattern_check(self) -> Optional[Dict[str, Any]]:
         """
         Run one pattern detection cycle on all qualified symbols.
 
         Flow:
-        1. Manage pending buy-stop orders (check fills, invalidations)
-        2. For each qualified symbol without a pending/filled order:
+        1. Sync closed positions (detect bracket exits)
+        2. Manage pending buy-stop orders (check fills, invalidations)
+        3. For each qualified symbol without a pending/filled order:
            a. Fetch 1-min bars
            b. Run bull flag setup detection
            c. If setup found, create plan and submit buy-stop bracket order
-        3. If past last_entry_time, skip new order placement
+        4. If past last_entry_time, skip new order placement
 
         Returns:
             Dict with order details if a trade was executed, None otherwise
         """
         if not self.enabled:
             return None
+
+        # Step 0: Sync closed positions (detect bracket exits for circuit breaker)
+        self._sync_closed_positions()
 
         # Step 1: Manage existing pending orders
         fill_result = self._manage_pending_orders()
@@ -332,6 +445,7 @@ class TradingEngine:
                 'order_id': result['order_id'],
                 'plan': plan,
                 'setup': setup,
+                'placed_at': datetime.now(timezone.utc),
             }
             logger.info(f"{symbol}: BUY-STOP ORDER PLACED — {result}")
 

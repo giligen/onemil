@@ -79,9 +79,12 @@ trading:
   setup_expiry_bars: 10         # cancel pending buy-stop after N bars
   pattern_poll_interval: 60
   skip_midday: true
+  circuit_breaker_dd: 3000.0
+  circuit_breaker_pause: 2
   bull_flag:
     min_pole_candles: 3
     min_pole_gain_pct: 3.0
     max_retracement_pct: 50.0
     max_pullback_candles: 5
     min_breakout_volume_ratio: 1.5
+    require_macd_positive: false

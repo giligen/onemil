@@ -293,7 +293,7 @@ class Config:
     @property
     def min_risk_per_share(self) -> float:
         """Minimum risk per share in dollars — rejects noise stops."""
-        return float(self._get_yaml("trading", "min_risk_per_share", default=0.05))
+        return float(self._get_yaml("trading", "min_risk_per_share", default=0.02))
 
     @property
     def min_risk_reward(self) -> float:
@@ -334,6 +334,48 @@ class Config:
     def min_breakout_volume_ratio(self) -> float:
         """Minimum breakout volume relative to pullback average."""
         return float(self._get_yaml("trading", "bull_flag", "min_breakout_volume_ratio", default=1.5))
+
+    @property
+    def sizing_mode(self) -> str:
+        """Position sizing mode: 'fixed_investment' or 'fixed_risk'."""
+        return str(self._get_yaml("trading", "sizing_mode", default="fixed_investment"))
+
+    @property
+    def risk_per_trade(self) -> float:
+        """Dollar risk budget per trade (fixed_risk mode)."""
+        return float(self._get_yaml("trading", "risk_per_trade", default=500.0))
+
+    @property
+    def min_risk_pct(self) -> Optional[float]:
+        """Min risk as fraction of entry price (e.g., 0.01 = 1%)."""
+        val = self._get_yaml("trading", "min_risk_pct", default=None)
+        return float(val) if val is not None else None
+
+    @property
+    def max_risk_pct(self) -> Optional[float]:
+        """Max risk as fraction of entry price (e.g., 0.05 = 5%)."""
+        val = self._get_yaml("trading", "max_risk_pct", default=None)
+        return float(val) if val is not None else None
+
+    @property
+    def require_macd_positive(self) -> bool:
+        """Whether bull flag detector requires positive MACD."""
+        return bool(self._get_yaml("trading", "bull_flag", "require_macd_positive", default=False))
+
+    @property
+    def circuit_breaker_dd(self) -> float:
+        """Drawdown threshold to trigger circuit breaker (dollars)."""
+        return float(self._get_yaml("trading", "circuit_breaker_dd", default=3000.0))
+
+    @property
+    def circuit_breaker_pause(self) -> int:
+        """Number of trades to skip when circuit breaker triggers."""
+        return int(self._get_yaml("trading", "circuit_breaker_pause", default=2))
+
+    @property
+    def setup_expiry_bars(self) -> int:
+        """Cancel pending buy-stop after this many bars."""
+        return int(self._get_yaml("trading", "setup_expiry_bars", default=10))
 
 
 def get_config(env_path: Optional[str] = None, yaml_path: Optional[str] = None) -> Config:

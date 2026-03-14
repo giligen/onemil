@@ -826,6 +826,108 @@ class TestGetOrder:
         with pytest.raises(AlpacaAPIError, match="Failed to get order"):
             client.get_order("order-123")
 
+    def test_returns_legs(self, client, mock_sdk_clients):
+        """get_order returns bracket child order legs."""
+        mock_sl_leg = MagicMock()
+        mock_sl_leg.id = "sl-leg-123"
+        mock_sl_leg.side = MagicMock()
+        mock_sl_leg.side.value = "sell"
+        mock_sl_leg.type = MagicMock()
+        mock_sl_leg.type.value = "stop"
+        mock_sl_leg.stop_price = 4.20
+        mock_sl_leg.limit_price = None
+        mock_sl_leg.status = MagicMock()
+        mock_sl_leg.status.value = "new"
+
+        mock_tp_leg = MagicMock()
+        mock_tp_leg.id = "tp-leg-456"
+        mock_tp_leg.side = MagicMock()
+        mock_tp_leg.side.value = "sell"
+        mock_tp_leg.type = MagicMock()
+        mock_tp_leg.type.value = "limit"
+        mock_tp_leg.stop_price = None
+        mock_tp_leg.limit_price = 5.50
+        mock_tp_leg.status = MagicMock()
+        mock_tp_leg.status.value = "new"
+
+        mock_order = MagicMock()
+        mock_order.id = "order-123"
+        mock_order.status = MagicMock()
+        mock_order.status.value = "filled"
+        mock_order.symbol = "AAPL"
+        mock_order.qty = "100"
+        mock_order.filled_qty = "100"
+        mock_order.filled_avg_price = "4.40"
+        mock_order.side = MagicMock()
+        mock_order.side.value = "buy"
+        mock_order.type = MagicMock()
+        mock_order.type.value = "stop_limit"
+        mock_order.legs = [mock_sl_leg, mock_tp_leg]
+
+        mock_sdk_clients["trading_client"].get_order_by_id.return_value = mock_order
+
+        result = client.get_order("order-123")
+
+        assert len(result['legs']) == 2
+        sl = result['legs'][0]
+        assert sl['id'] == "sl-leg-123"
+        assert sl['side'] == "sell"
+        assert sl['stop_price'] == 4.20
+        assert sl['limit_price'] is None
+        tp = result['legs'][1]
+        assert tp['limit_price'] == 5.50
+        assert tp['stop_price'] is None
+
+    def test_no_legs_returns_empty_list(self, client, mock_sdk_clients):
+        """get_order returns empty legs list when order has no legs."""
+        mock_order = MagicMock()
+        mock_order.id = "order-123"
+        mock_order.status = MagicMock()
+        mock_order.status.value = "filled"
+        mock_order.symbol = "AAPL"
+        mock_order.qty = "100"
+        mock_order.filled_qty = "100"
+        mock_order.filled_avg_price = "4.40"
+        mock_order.side = MagicMock()
+        mock_order.side.value = "buy"
+        mock_order.type = MagicMock()
+        mock_order.type.value = "limit"
+        mock_order.legs = None
+
+        mock_sdk_clients["trading_client"].get_order_by_id.return_value = mock_order
+
+        result = client.get_order("order-123")
+        assert result['legs'] == []
+
+
+# ===================================================================
+# replace_order_stop_price (Phase 3)
+# ===================================================================
+
+class TestReplaceOrderStopPrice:
+    """Tests for AlpacaClient.replace_order_stop_price."""
+
+    def test_replaces_stop_successfully(self, client, mock_sdk_clients):
+        """Successful stop replacement returns id and status."""
+        mock_order = MagicMock()
+        mock_order.id = "sl-leg-123"
+        mock_order.status = MagicMock()
+        mock_order.status.value = "replaced"
+        mock_sdk_clients["trading_client"].replace_order_by_id.return_value = mock_order
+
+        result = client.replace_order_stop_price("sl-leg-123", 4.35)
+
+        assert result['id'] == "sl-leg-123"
+        assert result['status'] == "replaced"
+        mock_sdk_clients["trading_client"].replace_order_by_id.assert_called_once()
+
+    def test_api_error_propagates(self, client, mock_sdk_clients):
+        """API error raises AlpacaAPIError."""
+        mock_sdk_clients["trading_client"].replace_order_by_id.side_effect = RuntimeError("fail")
+
+        with pytest.raises(AlpacaAPIError, match="Failed to replace order stop price"):
+            client.replace_order_stop_price("sl-leg-123", 4.35)
+
 
 class TestMarketCalendar:
     """Tests for calendar methods: get_market_calendar, is_trading_day, is_short_trading_day."""

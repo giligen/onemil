@@ -148,6 +148,7 @@ def _create_trading_engine(config, alpaca, db, notifier=None) -> TradingEngine:
         max_retracement_pct=config.max_retracement_pct,
         max_pullback_candles=config.max_pullback_candles,
         min_breakout_volume_ratio=config.min_breakout_volume_ratio,
+        require_macd_positive=config.require_macd_positive,
     )
     planner = TradePlanner(
         position_size_dollars=config.position_size_dollars,
@@ -155,6 +156,10 @@ def _create_trading_engine(config, alpaca, db, notifier=None) -> TradingEngine:
         max_risk_per_share=config.max_risk_per_share,
         min_risk_per_share=config.min_risk_per_share,
         min_risk_reward=config.min_risk_reward,
+        sizing_mode=config.sizing_mode,
+        risk_per_trade=config.risk_per_trade,
+        min_risk_pct=config.min_risk_pct,
+        max_risk_pct=config.max_risk_pct,
     )
     position_manager = PositionManager(
         alpaca_client=alpaca,
@@ -162,6 +167,8 @@ def _create_trading_engine(config, alpaca, db, notifier=None) -> TradingEngine:
         max_positions=config.max_positions,
         daily_loss_limit=config.daily_loss_limit,
         stop_trading_before_close_min=config.stop_trading_before_close_min,
+        circuit_breaker_dd=config.circuit_breaker_dd,
+        circuit_breaker_pause=config.circuit_breaker_pause,
     )
     executor = OrderExecutor(alpaca_client=alpaca, db=db)
 
@@ -175,6 +182,7 @@ def _create_trading_engine(config, alpaca, db, notifier=None) -> TradingEngine:
         pattern_poll_interval=config.pattern_poll_interval,
         enabled=config.trading_enabled,
         notifier=notifier,
+        setup_expiry_seconds=config.setup_expiry_bars * config.pattern_poll_interval,
     )
 
     logger.info(

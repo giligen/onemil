@@ -336,3 +336,71 @@ class TestMiddayFilter:
         mock_dt.now.return_value = mock_now
 
         assert manager.can_open_position("AAPL") is True
+
+
+class TestCircuitBreaker:
+    """Tests for circuit breaker based on drawdown from peak P&L."""
+
+    def test_record_trade_pnl_triggers_cb(self, mock_alpaca, db):
+        """3 losses totaling >$3K drawdown triggers circuit breaker."""
+        manager = PositionManager(
+            alpaca_client=mock_alpaca, db=db,
+            circuit_breaker_dd=3000.0, circuit_breaker_pause=2,
+        )
+        # Simulate losses: -1000, -1000, -1500 = -3500 total
+        manager.record_trade_pnl(-1000.0)
+        assert manager._cb_skips_remaining == 0  # Not yet triggered (dd=1000)
+        manager.record_trade_pnl(-1000.0)
+        assert manager._cb_skips_remaining == 0  # dd=2000, still under
+        manager.record_trade_pnl(-1500.0)
+        assert manager._cb_skips_remaining == 2  # dd=3500, triggered
+
+    def test_record_trade_pnl_peak_tracking(self, mock_alpaca, db):
+        """Peak tracks cumulative high, dd measured from peak."""
+        manager = PositionManager(
+            alpaca_client=mock_alpaca, db=db,
+            circuit_breaker_dd=3000.0, circuit_breaker_pause=2,
+        )
+        # Win, then lose from peak
+        manager.record_trade_pnl(2000.0)  # cum=2000, peak=2000
+        assert manager._peak_pnl == 2000.0
+        manager.record_trade_pnl(-2000.0)  # cum=0, dd=2000
+        assert manager._cb_skips_remaining == 0  # Under threshold
+        manager.record_trade_pnl(-1500.0)  # cum=-1500, dd=3500
+        assert manager._cb_skips_remaining == 2  # Triggered
+
+    @patch('trading.position_manager.datetime')
+    def test_cb_blocks_trades(self, mock_dt, mock_alpaca, db):
+        """When skips > 0, can_open_position returns False and decrements."""
+        manager = PositionManager(
+            alpaca_client=mock_alpaca, db=db,
+            circuit_breaker_dd=3000.0, circuit_breaker_pause=2,
+        )
+        mock_now = MagicMock()
+        mock_now.hour = 10
+        mock_now.minute = 30
+        mock_dt.now.return_value = mock_now
+
+        manager._cb_skips_remaining = 2
+        assert manager.can_open_position("AAPL") is False
+        assert manager._cb_skips_remaining == 1
+        assert manager.can_open_position("TSLA") is False
+        assert manager._cb_skips_remaining == 0
+        # Now should allow (all other limits OK)
+        assert manager.can_open_position("GOOG") is True
+
+    def test_cb_resets_daily(self, mock_alpaca, db):
+        """reset_daily clears all CB state."""
+        manager = PositionManager(
+            alpaca_client=mock_alpaca, db=db,
+            circuit_breaker_dd=3000.0, circuit_breaker_pause=2,
+        )
+        manager._cumulative_pnl = -5000.0
+        manager._peak_pnl = 1000.0
+        manager._cb_skips_remaining = 2
+
+        manager.reset_daily()
+
+        assert manager._cumulative_pnl == 0.0
+        assert manager._peak_pnl == 0.0
+        assert manager._cb_skips_remaining == 0

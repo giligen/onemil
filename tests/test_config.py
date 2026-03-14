@@ -135,6 +135,17 @@ class TestConfigLoading:
         assert cfg.max_retracement_pct == 50.0
         assert cfg.max_pullback_candles == 5
         assert cfg.min_breakout_volume_ratio == 1.5
+        assert cfg.min_risk_per_share == 0.02
+
+        # New Phase 1 config defaults
+        assert cfg.sizing_mode == "fixed_investment"
+        assert cfg.risk_per_trade == 500.0
+        assert cfg.min_risk_pct is None
+        assert cfg.max_risk_pct is None
+        assert cfg.require_macd_positive is False
+        assert cfg.circuit_breaker_dd == 3000.0
+        assert cfg.circuit_breaker_pause == 2
+        assert cfg.setup_expiry_bars == 10
 
         # Telegram defaults
         assert cfg.telegram_enabled is True
@@ -259,3 +270,84 @@ class TestGetYamlHelper:
         cfg = Config(env_path=env_file, yaml_path="/nonexistent.yaml")
         cfg._yaml = {"scanner": "not_a_dict"}
         assert cfg._get_yaml("scanner", "price_min", default=99) == 99
+
+
+# ---------------------------------------------------------------------------
+# New config properties (Phase 1)
+# ---------------------------------------------------------------------------
+
+class TestNewConfigProperties:
+    """Tests for config properties added in the live trader alignment."""
+
+    def test_sizing_mode_from_yaml(self, env_file, tmp_path):
+        """sizing_mode reads from YAML."""
+        import yaml
+        cfg_data = {"trading": {"sizing_mode": "fixed_risk"}}
+        yaml_path = tmp_path / "config.yaml"
+        with open(yaml_path, "w") as f:
+            yaml.dump(cfg_data, f)
+        cfg = Config(env_path=env_file, yaml_path=str(yaml_path))
+        assert cfg.sizing_mode == "fixed_risk"
+
+    def test_risk_per_trade_from_yaml(self, env_file, tmp_path):
+        """risk_per_trade reads from YAML."""
+        import yaml
+        cfg_data = {"trading": {"risk_per_trade": 1000}}
+        yaml_path = tmp_path / "config.yaml"
+        with open(yaml_path, "w") as f:
+            yaml.dump(cfg_data, f)
+        cfg = Config(env_path=env_file, yaml_path=str(yaml_path))
+        assert cfg.risk_per_trade == 1000.0
+
+    def test_min_max_risk_pct_from_yaml(self, env_file, tmp_path):
+        """min_risk_pct and max_risk_pct read from YAML."""
+        import yaml
+        cfg_data = {"trading": {"min_risk_pct": 0.01, "max_risk_pct": 0.05}}
+        yaml_path = tmp_path / "config.yaml"
+        with open(yaml_path, "w") as f:
+            yaml.dump(cfg_data, f)
+        cfg = Config(env_path=env_file, yaml_path=str(yaml_path))
+        assert cfg.min_risk_pct == 0.01
+        assert cfg.max_risk_pct == 0.05
+
+    def test_require_macd_positive_from_yaml(self, env_file, tmp_path):
+        """require_macd_positive reads from YAML bull_flag section."""
+        import yaml
+        cfg_data = {"trading": {"bull_flag": {"require_macd_positive": True}}}
+        yaml_path = tmp_path / "config.yaml"
+        with open(yaml_path, "w") as f:
+            yaml.dump(cfg_data, f)
+        cfg = Config(env_path=env_file, yaml_path=str(yaml_path))
+        assert cfg.require_macd_positive is True
+
+    def test_circuit_breaker_from_yaml(self, env_file, tmp_path):
+        """circuit_breaker_dd and circuit_breaker_pause read from YAML."""
+        import yaml
+        cfg_data = {"trading": {"circuit_breaker_dd": 5000.0, "circuit_breaker_pause": 3}}
+        yaml_path = tmp_path / "config.yaml"
+        with open(yaml_path, "w") as f:
+            yaml.dump(cfg_data, f)
+        cfg = Config(env_path=env_file, yaml_path=str(yaml_path))
+        assert cfg.circuit_breaker_dd == 5000.0
+        assert cfg.circuit_breaker_pause == 3
+
+    def test_setup_expiry_bars_from_yaml(self, env_file, tmp_path):
+        """setup_expiry_bars reads from YAML."""
+        import yaml
+        cfg_data = {"trading": {"setup_expiry_bars": 15}}
+        yaml_path = tmp_path / "config.yaml"
+        with open(yaml_path, "w") as f:
+            yaml.dump(cfg_data, f)
+        cfg = Config(env_path=env_file, yaml_path=str(yaml_path))
+        assert cfg.setup_expiry_bars == 15
+
+    def test_all_new_properties_types(self, env_file, tmp_path):
+        """All new properties return correct types."""
+        missing_yaml = str(tmp_path / "no_such.yaml")
+        cfg = Config(env_path=env_file, yaml_path=missing_yaml)
+        assert isinstance(cfg.sizing_mode, str)
+        assert isinstance(cfg.risk_per_trade, float)
+        assert isinstance(cfg.require_macd_positive, bool)
+        assert isinstance(cfg.circuit_breaker_dd, float)
+        assert isinstance(cfg.circuit_breaker_pause, int)
+        assert isinstance(cfg.setup_expiry_bars, int)

@@ -48,6 +48,8 @@ class PositionManager:
         daily_loss_limit: float = -100.0,
         stop_trading_before_close_min: int = 15,
         skip_midday: bool = True,
+        circuit_breaker_dd: float = 3000.0,
+        circuit_breaker_pause: int = 2,
     ):
         """
         Initialize PositionManager.
@@ -59,6 +61,8 @@ class PositionManager:
             daily_loss_limit: Stop trading if daily P&L hits this (negative $)
             stop_trading_before_close_min: Minutes before close to stop new positions
             skip_midday: Skip 11:30-14:00 ET entries (backtest-proven dead zone)
+            circuit_breaker_dd: Drawdown from peak to trigger circuit breaker (dollars)
+            circuit_breaker_pause: Number of trades to skip when CB triggers
         """
         self.alpaca = alpaca_client
         self.db = db
@@ -66,13 +70,32 @@ class PositionManager:
         self.daily_loss_limit = daily_loss_limit
         self.stop_trading_before_close_min = stop_trading_before_close_min
         self.skip_midday = skip_midday
+        self.circuit_breaker_dd = circuit_breaker_dd
+        self.circuit_breaker_pause = circuit_breaker_pause
         self._traded_symbols: Set[str] = set()
+        self._cumulative_pnl: float = 0.0
+        self._peak_pnl: float = 0.0
+        self._cb_skips_remaining: int = 0
+
+    def record_trade_pnl(self, pnl: float) -> None:
+        """Record completed trade P&L for circuit breaker tracking."""
+        self._cumulative_pnl += pnl
+        if self._cumulative_pnl > self._peak_pnl:
+            self._peak_pnl = self._cumulative_pnl
+        dd = self._peak_pnl - self._cumulative_pnl
+        if dd >= self.circuit_breaker_dd:
+            self._cb_skips_remaining = self.circuit_breaker_pause
+            logger.warning(
+                f"CIRCUIT BREAKER: DD ${dd:,.0f} >= ${self.circuit_breaker_dd:,.0f} "
+                f"— skipping next {self.circuit_breaker_pause} trades"
+            )
 
     def can_open_position(self, symbol: str) -> bool:
         """
         Check if a new position can be opened for the given symbol.
 
         Validates all risk limits:
+        0. Circuit breaker not active
         1. Not in midday dead zone (11:30-14:00 ET)
         2. Max positions not exceeded
         3. Daily loss limit not breached
@@ -85,6 +108,12 @@ class PositionManager:
         Returns:
             True if position can be opened, False otherwise
         """
+        # Check circuit breaker
+        if self._cb_skips_remaining > 0:
+            self._cb_skips_remaining -= 1
+            logger.warning(f"{symbol}: Circuit breaker — skip ({self._cb_skips_remaining} remaining)")
+            return False
+
         # Check midday dead zone
         if self.skip_midday and self._is_midday():
             logger.info(
@@ -166,6 +195,9 @@ class PositionManager:
     def reset_daily(self) -> None:
         """Reset daily state (called at start of each trading day)."""
         self._traded_symbols.clear()
+        self._cumulative_pnl = 0.0
+        self._peak_pnl = 0.0
+        self._cb_skips_remaining = 0
         logger.info("Position manager: daily state reset")
 
     def _is_midday(self) -> bool:

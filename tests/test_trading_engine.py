@@ -11,7 +11,7 @@ Tests cover:
 
 import pytest
 import pandas as pd
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from unittest.mock import MagicMock, patch, PropertyMock
 
 from data_sources.alpaca_client import AlpacaClient
@@ -389,3 +389,376 @@ class TestNotifierIntegration:
     def test_send_daily_report_without_notifier(self, engine):
         """send_daily_report is a no-op without notifier."""
         engine.send_daily_report(universe_size=100)  # Should not crash
+
+
+# ===========================================================================
+# Phase 2: DB Update on Fill
+# ===========================================================================
+
+class TestDBUpdateOnFill:
+    """Tests for updating trade DB record when buy-stop order fills."""
+
+    def test_fill_updates_db(self, engine, mock_alpaca, db):
+        """Filled order updates trade record with fill_price and filled_at."""
+        # Save a trade to DB
+        from datetime import timezone
+        now = datetime.now(timezone.utc)
+        db.save_trade({
+            'trade_date': date.today().isoformat(),
+            'symbol': 'TEST',
+            'side': 'buy',
+            'entry_price': 5.00,
+            'stop_loss_price': 4.80,
+            'take_profit_price': 5.40,
+            'shares': 100,
+            'risk_per_share': 0.20,
+            'total_risk': 20.0,
+            'risk_reward_ratio': 2.0,
+            'order_id': 'order-fill-test',
+            'order_status': 'accepted',
+            'fill_price': None,
+            'filled_at': None,
+            'exit_price': None,
+            'exit_reason': None,
+            'exited_at': None,
+            'pnl': None,
+            'pnl_pct': None,
+            'pattern_data': '{}',
+            'created_at': now,
+            'updated_at': now,
+        })
+
+        # Set up pending order
+        plan = _make_plan("TEST")
+        setup = _make_pattern("TEST")
+        engine._pending_orders['TEST'] = {
+            'order_id': 'order-fill-test',
+            'plan': plan,
+            'setup': setup,
+            'placed_at': now,
+        }
+
+        # Mock Alpaca returning filled status
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled',
+            'filled_avg_price': 4.45,
+            'legs': [],
+        }
+
+        result = engine._manage_pending_orders()
+
+        assert result is not None
+        assert result['fill_price'] == 4.45
+
+        # Verify DB was updated
+        trade = db.get_trade_by_order_id('order-fill-test')
+        assert trade['fill_price'] == 4.45
+        assert trade['order_status'] == 'filled'
+        assert trade['filled_at'] is not None
+
+    def test_fill_no_trade_record_logs_error(self, engine, mock_alpaca, db):
+        """Logs error when no DB trade record exists for filled order."""
+        plan = _make_plan("TEST")
+        engine._pending_orders['TEST'] = {
+            'order_id': 'nonexistent-order',
+            'plan': plan,
+            'setup': _make_pattern("TEST"),
+            'placed_at': datetime.now(timezone.utc),
+        }
+
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled',
+            'filled_avg_price': 4.45,
+            'legs': [],
+        }
+
+        # Should not raise, just log error
+        result = engine._manage_pending_orders()
+        assert result is not None
+
+
+# ===========================================================================
+# Phase 3: Gap-Fill Stop Adjustment
+# ===========================================================================
+
+class TestGapFillStopAdjustment:
+    """Tests for adjusting stop price when buy-stop fills above breakout level."""
+
+    def _setup_filled_order(self, engine, mock_alpaca, db, fill_price, breakout_level=4.40):
+        """Helper: set up a pending order that will return as filled."""
+        from datetime import timezone
+        now = datetime.now(timezone.utc)
+        db.save_trade({
+            'trade_date': date.today().isoformat(),
+            'symbol': 'GAP',
+            'side': 'buy',
+            'entry_price': breakout_level,
+            'stop_loss_price': 4.29,
+            'take_profit_price': 4.90,
+            'shares': 100,
+            'risk_per_share': 0.11,
+            'total_risk': 11.0,
+            'risk_reward_ratio': 4.5,
+            'order_id': 'order-gap',
+            'order_status': 'accepted',
+            'fill_price': None,
+            'filled_at': None,
+            'exit_price': None,
+            'exit_reason': None,
+            'exited_at': None,
+            'pnl': None,
+            'pnl_pct': None,
+            'pattern_data': '{}',
+            'created_at': now,
+            'updated_at': now,
+        })
+
+        plan = _make_plan("GAP")
+        setup = _make_pattern("GAP")
+        engine._pending_orders['GAP'] = {
+            'order_id': 'order-gap',
+            'plan': plan,
+            'setup': setup,
+            'placed_at': now,
+        }
+
+        return plan, setup
+
+    def test_gap_fill_adjusts_stop(self, engine, mock_alpaca, db):
+        """Fill above breakout triggers stop replacement."""
+        plan, setup = self._setup_filled_order(engine, mock_alpaca, db, fill_price=4.55)
+
+        # First get_order call returns filled status
+        mock_alpaca.get_order.side_effect = [
+            {
+                'status': 'filled',
+                'filled_avg_price': 4.55,
+                'legs': [],
+            },
+            # Second get_order call (for gap-fill) returns legs
+            {
+                'legs': [
+                    {'id': 'sl-leg-1', 'side': 'sell', 'stop_price': 4.29,
+                     'limit_price': None, 'status': 'new'},
+                    {'id': 'tp-leg-1', 'side': 'sell', 'stop_price': None,
+                     'limit_price': 4.90, 'status': 'new'},
+                ],
+            },
+        ]
+        mock_alpaca.replace_order_stop_price.return_value = {'id': 'sl-leg-1', 'status': 'replaced'}
+
+        engine._manage_pending_orders()
+
+        # Verify replace was called with adjusted stop
+        expected_stop = round(4.55 - plan.risk_per_share, 2)
+        mock_alpaca.replace_order_stop_price.assert_called_once_with('sl-leg-1', expected_stop)
+
+        # Verify DB was also updated
+        trade = db.get_trade_by_order_id('order-gap')
+        assert trade['stop_loss_price'] == expected_stop
+
+    def test_no_gap_no_stop_adjustment(self, engine, mock_alpaca, db):
+        """Fill at breakout level does NOT trigger stop replacement."""
+        self._setup_filled_order(engine, mock_alpaca, db, fill_price=4.40)
+
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled',
+            'filled_avg_price': 4.40,
+            'legs': [],
+        }
+
+        engine._manage_pending_orders()
+
+        mock_alpaca.replace_order_stop_price.assert_not_called()
+
+    def test_gap_fill_no_legs_logs_error(self, engine, mock_alpaca, db):
+        """No SL leg found logs error but doesn't crash."""
+        self._setup_filled_order(engine, mock_alpaca, db, fill_price=4.55)
+
+        mock_alpaca.get_order.side_effect = [
+            {'status': 'filled', 'filled_avg_price': 4.55, 'legs': []},
+            {'legs': []},  # No legs
+        ]
+
+        # Should not raise
+        engine._manage_pending_orders()
+        mock_alpaca.replace_order_stop_price.assert_not_called()
+
+    def test_gap_fill_replace_fails_logs_error(self, engine, mock_alpaca, db):
+        """Replace exception is caught and logged, trade continues."""
+        self._setup_filled_order(engine, mock_alpaca, db, fill_price=4.55)
+
+        mock_alpaca.get_order.side_effect = [
+            {'status': 'filled', 'filled_avg_price': 4.55, 'legs': []},
+            {
+                'legs': [
+                    {'id': 'sl-leg-1', 'side': 'sell', 'stop_price': 4.29,
+                     'limit_price': None, 'status': 'new'},
+                ],
+            },
+        ]
+        mock_alpaca.replace_order_stop_price.side_effect = Exception("API error")
+
+        # Should not raise
+        result = engine._manage_pending_orders()
+        assert result is not None  # Fill still processed
+
+
+# ===========================================================================
+# Phase 4: Sync Closed Positions
+# ===========================================================================
+
+class TestSyncClosedPositions:
+    """Tests for _sync_closed_positions detecting bracket exits."""
+
+    def test_sync_closed_updates_db(self, engine, mock_alpaca, db, mock_position_manager):
+        """Closed position detected → DB updated + circuit breaker fed."""
+        from datetime import timezone
+        now = datetime.now(timezone.utc)
+
+        db.save_trade({
+            'trade_date': date.today().isoformat(),
+            'symbol': 'CLOSED',
+            'side': 'buy',
+            'entry_price': 5.00,
+            'stop_loss_price': 4.80,
+            'take_profit_price': 5.40,
+            'shares': 100,
+            'risk_per_share': 0.20,
+            'total_risk': 20.0,
+            'risk_reward_ratio': 2.0,
+            'order_id': 'order-closed',
+            'order_status': 'filled',
+            'fill_price': 5.00,
+            'filled_at': now,
+            'exit_price': None,
+            'exit_reason': None,
+            'exited_at': None,
+            'pnl': None,
+            'pnl_pct': None,
+            'pattern_data': '{}',
+            'created_at': now,
+            'updated_at': now,
+        })
+
+        # Alpaca says no open positions (meaning bracket closed)
+        mock_alpaca.get_open_positions.return_value = []
+        mock_alpaca.get_order.return_value = {
+            'legs': [
+                {'id': 'sl-1', 'side': 'sell', 'stop_price': 4.80,
+                 'limit_price': None, 'status': 'filled'},
+            ],
+        }
+
+        engine._sync_closed_positions()
+
+        trade = db.get_trade_by_order_id('order-closed')
+        assert trade['exit_price'] == 4.80
+        assert trade['exit_reason'] == 'stop_loss'
+        assert trade['pnl'] == pytest.approx(-20.0, abs=0.01)
+        mock_position_manager.record_trade_pnl.assert_called_once()
+        assert mock_position_manager.record_trade_pnl.call_args[0][0] == pytest.approx(-20.0, abs=0.01)
+
+    def test_sync_no_open_trades(self, engine, mock_alpaca, db):
+        """No open trades means no Alpaca calls."""
+        engine._sync_closed_positions()
+        mock_alpaca.get_open_positions.assert_not_called()
+
+    def test_sync_take_profit_exit(self, engine, mock_alpaca, db, mock_position_manager):
+        """Take profit exit detected correctly."""
+        from datetime import timezone
+        now = datetime.now(timezone.utc)
+
+        db.save_trade({
+            'trade_date': date.today().isoformat(),
+            'symbol': 'WINNER',
+            'side': 'buy',
+            'entry_price': 5.00,
+            'stop_loss_price': 4.80,
+            'take_profit_price': 5.40,
+            'shares': 100,
+            'risk_per_share': 0.20,
+            'total_risk': 20.0,
+            'risk_reward_ratio': 2.0,
+            'order_id': 'order-winner',
+            'order_status': 'filled',
+            'fill_price': 5.00,
+            'filled_at': now,
+            'exit_price': None,
+            'exit_reason': None,
+            'exited_at': None,
+            'pnl': None,
+            'pnl_pct': None,
+            'pattern_data': '{}',
+            'created_at': now,
+            'updated_at': now,
+        })
+
+        mock_alpaca.get_open_positions.return_value = []
+        mock_alpaca.get_order.return_value = {
+            'legs': [
+                {'id': 'tp-1', 'side': 'sell', 'stop_price': None,
+                 'limit_price': 5.40, 'status': 'filled'},
+            ],
+        }
+
+        engine._sync_closed_positions()
+
+        trade = db.get_trade_by_order_id('order-winner')
+        assert trade['exit_reason'] == 'take_profit'
+        assert trade['pnl'] == pytest.approx(40.0, abs=0.01)
+        mock_position_manager.record_trade_pnl.assert_called_once()
+        assert mock_position_manager.record_trade_pnl.call_args[0][0] == pytest.approx(40.0, abs=0.01)
+
+
+# ===========================================================================
+# Phase 5: Setup Expiry
+# ===========================================================================
+
+class TestSetupExpiry:
+    """Tests for cancelling expired pending buy-stop orders."""
+
+    def test_expired_order_cancelled(self, engine, mock_alpaca):
+        """Order older than expiry is cancelled."""
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=700)
+        engine.setup_expiry_seconds = 600
+
+        engine._pending_orders['STALE'] = {
+            'order_id': 'order-stale',
+            'plan': _make_plan("STALE"),
+            'setup': _make_pattern("STALE"),
+            'placed_at': old_time,
+        }
+
+        mock_alpaca.get_order.return_value = {
+            'status': 'new',
+            'filled_avg_price': None,
+        }
+        mock_alpaca.cancel_order.return_value = True
+
+        engine._manage_pending_orders()
+
+        mock_alpaca.cancel_order.assert_called_once_with('order-stale')
+        assert 'STALE' not in engine._pending_orders
+
+    def test_non_expired_order_continues(self, engine, mock_alpaca):
+        """Order within expiry window is NOT cancelled."""
+        recent_time = datetime.now(timezone.utc) - timedelta(seconds=60)
+        engine.setup_expiry_seconds = 600
+
+        engine._pending_orders['FRESH'] = {
+            'order_id': 'order-fresh',
+            'plan': _make_plan("FRESH"),
+            'setup': _make_pattern("FRESH"),
+            'placed_at': recent_time,
+        }
+
+        mock_alpaca.get_order.return_value = {
+            'status': 'new',
+            'filled_avg_price': None,
+        }
+
+        engine._manage_pending_orders()
+
+        mock_alpaca.cancel_order.assert_not_called()
+        assert 'FRESH' in engine._pending_orders
