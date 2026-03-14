@@ -602,12 +602,12 @@ def main():
     )
     parser.add_argument(
         "--workers", type=int, default=2,
-        help="Number of parallel month workers for --monthly mode (default: 2)"
+        help="Number of parallel month workers (default: 2)"
     )
     parser.add_argument(
-        "--scan-workers", type=int, default=1,
+        "--scan-workers", type=int, default=4,
         help="Number of parallel processes for scanning movers within each month. "
-             ">1 uses multiprocessing — best for cached re-runs (default: 1)"
+             "Uses multiprocessing — scales with CPU cores (default: 4)"
     )
     parser.add_argument(
         "--verbose", "-v", action="store_true",
