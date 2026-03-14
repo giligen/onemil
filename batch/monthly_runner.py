@@ -394,7 +394,7 @@ class MonthlyBacktestRunner:
             csv_path = os.path.join(output_dir, csv_filename)
             write_rich_csv_report(results, csv_path, daily_bars, universe_dict)
 
-            # Compute stats
+            # Compute stats and print month summary
             all_trades = [t for r in results for t in r.trades_simulated]
             total_pnl = sum(t.pnl for t in all_trades)
             elapsed = time.time() - t0
@@ -403,6 +403,8 @@ class MonthlyBacktestRunner:
                 f"{progress} {month_label}: {len(movers)} movers, "
                 f"{len(all_trades)} trades, P&L ${total_pnl:+.2f} ({elapsed:.0f}s)"
             )
+
+            self._print_month_summary(month_label, all_trades, len(movers), elapsed)
 
             return MonthResult(
                 month_label=month_label,
@@ -477,6 +479,11 @@ class MonthlyBacktestRunner:
             f"Monthly backtest: {start} to {end} "
             f"({total_months} month chunks, {self.max_workers} workers)"
         )
+        logger.warning(
+            "NOTE: Using today's universe for all months. "
+            "Stocks that were delisted, IPO'd, or moved out of price range "
+            "are not accounted for — results have survivorship bias."
+        )
 
         month_results: List[MonthResult] = []
         csv_paths: List[str] = []
@@ -523,6 +530,35 @@ class MonthlyBacktestRunner:
         self._print_summary(month_results, total_rows, master_path)
 
         return master_path
+
+    @staticmethod
+    def _print_month_summary(
+        month_label: str, trades: list, num_movers: int, elapsed: float
+    ) -> None:
+        """Print a compact results summary after each month completes."""
+        if not trades:
+            print(f"\n  [{month_label}] {num_movers} movers | 0 trades | ({elapsed:.0f}s)")
+            return
+
+        wins = [t for t in trades if t.pnl > 0]
+        losses = [t for t in trades if t.pnl <= 0]
+        total_pnl = sum(t.pnl for t in trades)
+        win_rate = len(wins) / len(trades) * 100
+
+        print(f"\n  [{month_label}] {num_movers} movers | {len(trades)} trades | "
+              f"WR {win_rate:.0f}% | P&L ${total_pnl:+,.2f} | ({elapsed:.0f}s)")
+
+        # Show individual trades
+        for t in trades:
+            pnl_marker = "W" if t.pnl > 0 else "L"
+            exit_info = t.exit_reason or "?"
+            entry_et = ""
+            if t.entry_time:
+                et = t.entry_time.replace(tzinfo=None) - timedelta(hours=4)
+                entry_et = et.strftime("%H:%M")
+            print(f"    {pnl_marker} {t.symbol:<6} ${t.pnl:+8.2f}  "
+                  f"entry ${t.entry_price:.2f} @ {entry_et}  "
+                  f"exit ${t.exit_price:.2f} ({exit_info})")
 
     def _print_summary(
         self,
