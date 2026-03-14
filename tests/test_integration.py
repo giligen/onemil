@@ -571,7 +571,7 @@ class TestLLMNewsAnalyzerIntegration:
 
     @pytest.fixture(autouse=True)
     def _require_api_key(self):
-        """Skip if ANTHROPIC_API_KEY is not set."""
+        """Skip if ANTHROPIC_API_KEY is not set or invalid."""
         from dotenv import load_dotenv
         load_dotenv()
         api_key = os.getenv("ANTHROPIC_API_KEY", "")
@@ -579,6 +579,15 @@ class TestLLMNewsAnalyzerIntegration:
             pytest.skip("ANTHROPIC_API_KEY not set — skipping LLM integration tests")
         import anthropic
         self.client = anthropic.Anthropic(api_key=api_key)
+        # Validate key with a quick API call
+        try:
+            self.client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1,
+                messages=[{"role": "user", "content": "hi"}],
+            )
+        except anthropic.AuthenticationError:
+            pytest.skip("ANTHROPIC_API_KEY is invalid — skipping LLM integration tests")
 
     def test_real_catalyst_classified_true(self):
         """Known catalyst headline should be classified as True."""

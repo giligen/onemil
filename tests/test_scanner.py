@@ -439,3 +439,38 @@ class TestTradingEngineHandoff:
 
         # Verify trading engine was notified
         mock_engine.on_stock_qualified.assert_called_once_with('HOT')
+
+
+class TestIsTradingDay:
+    """Tests for _is_trading_day — calendar-based guard."""
+
+    def test_skips_non_trading_day(self, scanner, mock_alpaca):
+        """Returns False on weekends/holidays."""
+        mock_alpaca.is_trading_day.return_value = False
+        assert scanner._is_trading_day() is False
+
+    def test_skips_short_trading_day(self, scanner, mock_alpaca):
+        """Returns False on short days (e.g., Black Friday)."""
+        mock_alpaca.is_trading_day.return_value = True
+        mock_alpaca.is_short_trading_day.return_value = True
+        assert scanner._is_trading_day() is False
+
+    def test_allows_normal_trading_day(self, scanner, mock_alpaca):
+        """Returns True on a normal full trading day."""
+        mock_alpaca.is_trading_day.return_value = True
+        mock_alpaca.is_short_trading_day.return_value = False
+        assert scanner._is_trading_day() is True
+
+    def test_allows_on_calendar_api_error(self, scanner, mock_alpaca):
+        """Returns True (proceed cautiously) if calendar API fails."""
+        mock_alpaca.is_trading_day.side_effect = Exception("API down")
+        assert scanner._is_trading_day() is True
+
+    def test_run_exits_early_on_non_trading_day(self, scanner, mock_alpaca):
+        """Scanner.run() returns immediately on non-trading day."""
+        mock_alpaca.is_trading_day.return_value = False
+        # _load_universe should NOT be called
+        scanner.run()
+        mock_alpaca.is_trading_day.assert_called_once()
+        # Universe should be empty (never loaded)
+        assert scanner._universe == []

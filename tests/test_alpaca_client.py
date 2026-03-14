@@ -825,3 +825,71 @@ class TestGetOrder:
 
         with pytest.raises(AlpacaAPIError, match="Failed to get order"):
             client.get_order("order-123")
+
+
+class TestMarketCalendar:
+    """Tests for calendar methods: get_market_calendar, is_trading_day, is_short_trading_day."""
+
+    def test_get_market_calendar_returns_days(self, client, mock_sdk_clients):
+        """Returns list of trading day dicts."""
+        from datetime import date as date_cls
+
+        mock_day = MagicMock()
+        mock_day.date = date_cls(2026, 3, 13)
+        mock_day.open = MagicMock(hour=9, minute=30)
+        mock_day.close = MagicMock(hour=16, minute=0)
+
+        mock_sdk_clients["trading_client"].get_calendar.return_value = [mock_day]
+
+        result = client.get_market_calendar(date_cls(2026, 3, 13), date_cls(2026, 3, 13))
+        assert len(result) == 1
+        assert result[0]['date'] == date_cls(2026, 3, 13)
+
+    def test_get_market_calendar_api_error(self, client, mock_sdk_clients):
+        """API error raises AlpacaAPIError."""
+        from datetime import date as date_cls
+        mock_sdk_clients["trading_client"].get_calendar.side_effect = RuntimeError("fail")
+
+        with pytest.raises(AlpacaAPIError, match="Failed to get market calendar"):
+            client.get_market_calendar(date_cls(2026, 3, 13), date_cls(2026, 3, 13))
+
+    def test_is_trading_day_true(self, client, mock_sdk_clients):
+        """Returns True when calendar has an entry for the date."""
+        mock_day = MagicMock()
+        mock_sdk_clients["trading_client"].get_calendar.return_value = [mock_day]
+
+        assert client.is_trading_day() is True
+
+    def test_is_trading_day_false_on_weekend(self, client, mock_sdk_clients):
+        """Returns False when calendar is empty (weekend/holiday)."""
+        mock_sdk_clients["trading_client"].get_calendar.return_value = []
+
+        assert client.is_trading_day() is False
+
+    def test_is_short_trading_day_true(self, client, mock_sdk_clients):
+        """Returns True when close is before 16:00."""
+        mock_day = MagicMock()
+        mock_day.date = MagicMock()
+        mock_day.open = MagicMock(hour=9, minute=30)
+        mock_day.close = MagicMock(hour=13, minute=0)  # 1pm close = short day
+
+        mock_sdk_clients["trading_client"].get_calendar.return_value = [mock_day]
+
+        assert client.is_short_trading_day() is True
+
+    def test_is_short_trading_day_false_normal(self, client, mock_sdk_clients):
+        """Returns False on normal day (closes at 16:00)."""
+        mock_day = MagicMock()
+        mock_day.date = MagicMock()
+        mock_day.open = MagicMock(hour=9, minute=30)
+        mock_day.close = MagicMock(hour=16, minute=0)
+
+        mock_sdk_clients["trading_client"].get_calendar.return_value = [mock_day]
+
+        assert client.is_short_trading_day() is False
+
+    def test_is_short_trading_day_not_trading_day(self, client, mock_sdk_clients):
+        """Returns False when not a trading day at all."""
+        mock_sdk_clients["trading_client"].get_calendar.return_value = []
+
+        assert client.is_short_trading_day() is False

@@ -81,10 +81,15 @@ class RealtimeScanner:
         """
         Run the scanner (main loop).
 
+        0. Check if today is a trading day (skip weekends/holidays/short days)
         1. Wait until market open (09:30 ET)
         2. Run ONE gap-up scan (current price vs previous close)
         3. Run intraday cycles every 15 min until market close (16:00 ET)
         """
+        # Check if today is a trading day
+        if not self._is_trading_day():
+            return
+
         self._load_universe()
 
         if not self._universe:
@@ -513,3 +518,40 @@ class RealtimeScanner:
         if sleep_secs > 0:
             logger.debug(f"Sleeping {sleep_secs}s until next 15-min bucket")
             time_mod.sleep(sleep_secs)
+
+    def _is_trading_day(self) -> bool:
+        """
+        Check if today is a full trading day via Alpaca calendar API.
+
+        Skips:
+        - Weekends and market holidays (not a trading day)
+        - Short trading days (closes before 16:00 ET, e.g. Black Friday)
+
+        Returns:
+            True if today is a normal full trading day
+        """
+        try:
+            if not self.alpaca.is_trading_day():
+                now_et = datetime.now(ET)
+                logger.info(
+                    f"Not a trading day ({now_et.strftime('%A %Y-%m-%d')}). "
+                    f"Skipping scanner."
+                )
+                return False
+
+            if self.alpaca.is_short_trading_day():
+                logger.warning(
+                    "Short trading day detected — insufficient hours for "
+                    "momentum strategy. Skipping."
+                )
+                return False
+
+            return True
+        except Exception as e:
+            logger.error(
+                f"Failed to check trading calendar: {e}. "
+                f"Proceeding with caution."
+            )
+            # If we can't check, let the scanner run —
+            # it will just get no data on non-trading days
+            return True

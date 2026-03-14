@@ -31,6 +31,7 @@ from alpaca.data.enums import DataFeed
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
     GetAssetsRequest,
+    GetCalendarRequest,
     MarketOrderRequest,
     LimitOrderRequest,
 )
@@ -910,6 +911,100 @@ class AlpacaClient:
     # =========================================================================
     # Connection Test
     # =========================================================================
+
+    # ------------------------------------------------------------------
+    # Market Calendar
+    # ------------------------------------------------------------------
+
+    def get_market_calendar(
+        self, start_date: date, end_date: date
+    ) -> List[Dict]:
+        """
+        Get market calendar for a date range.
+
+        Args:
+            start_date: Start date
+            end_date: End date
+
+        Returns:
+            List of trading day dicts with 'date', 'open', 'close' keys
+
+        Raises:
+            AlpacaAPIError: If API call fails
+        """
+        logger.debug(f"Getting market calendar: {start_date} to {end_date}")
+
+        try:
+            request = GetCalendarRequest(
+                start=start_date,
+                end=end_date,
+            )
+            calendar = self._call_with_timeout(
+                lambda: self.trading_client.get_calendar(request),
+                "get_market_calendar"
+            )
+            result = [
+                {
+                    'date': day.date,
+                    'open': day.open,
+                    'close': day.close,
+                }
+                for day in calendar
+            ]
+            logger.debug(f"Found {len(result)} trading days")
+            return result
+        except Exception as e:
+            logger.error(f"Failed to get market calendar: {e}")
+            raise AlpacaAPIError(f"Failed to get market calendar: {e}")
+
+    def is_trading_day(self, check_date: Optional[date] = None) -> bool:
+        """
+        Check if a date is a trading day (not weekend/holiday).
+
+        Args:
+            check_date: Date to check (defaults to today)
+
+        Returns:
+            True if it's a trading day
+        """
+        if check_date is None:
+            check_date = date.today()
+        calendar = self.get_market_calendar(check_date, check_date)
+        return len(calendar) > 0
+
+    def is_short_trading_day(self, check_date: Optional[date] = None) -> bool:
+        """
+        Check if a date is a short trading day (closes before 16:00 ET).
+
+        Short days: day before Independence Day, Black Friday,
+        Christmas Eve, etc.
+
+        Args:
+            check_date: Date to check (defaults to today)
+
+        Returns:
+            True if it's a short trading day
+        """
+        if check_date is None:
+            check_date = date.today()
+
+        calendar = self.get_market_calendar(check_date, check_date)
+        if not calendar:
+            return False
+
+        close_time = calendar[0]['close']
+        close_hour = (
+            close_time.hour
+            if hasattr(close_time, 'hour')
+            else int(str(close_time).split(':')[0])
+        )
+        is_short = close_hour < 16
+
+        if is_short:
+            logger.info(
+                f"Short trading day: {check_date} closes at {close_time}"
+            )
+        return is_short
 
     def test_connection(self) -> bool:
         """
