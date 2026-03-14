@@ -907,6 +907,7 @@ class AlpacaClient:
                         'type': str(leg.type.value) if hasattr(leg, 'type') and leg.type else '',
                         'stop_price': float(leg.stop_price) if leg.stop_price else None,
                         'limit_price': float(leg.limit_price) if leg.limit_price else None,
+                        'filled_avg_price': float(leg.filled_avg_price) if leg.filled_avg_price else None,
                         'status': str(leg.status.value) if hasattr(leg, 'status') and leg.status else 'unknown',
                     }
                     for leg in (order.legs or [])

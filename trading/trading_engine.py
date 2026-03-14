@@ -303,11 +303,14 @@ class TradingEngine:
                         order_detail = self.alpaca.get_order(order_id)
                         for leg in order_detail.get('legs', []):
                             if leg.get('status') == 'filled':
+                                # Use actual fill price (accounts for slippage),
+                                # fall back to order price if fill not available
+                                fill = leg.get('filled_avg_price')
                                 if leg.get('stop_price'):
-                                    exit_price = leg.get('stop_price')
+                                    exit_price = fill or leg['stop_price']
                                     exit_reason = 'stop_loss'
                                 elif leg.get('limit_price'):
-                                    exit_price = leg.get('limit_price')
+                                    exit_price = fill or leg['limit_price']
                                     exit_reason = 'take_profit'
 
                     if exit_price:
@@ -487,14 +490,50 @@ class TradingEngine:
                 logger.error(f"{symbol}: Failed to cancel pending order: {e}")
         self._pending_orders.clear()
 
-        # Close open positions
+        # Close open positions and update DB
         try:
             positions = self.alpaca.get_open_positions()
+            today = date.today().isoformat()
+            open_trades = self.db.get_open_trades(today)
+            # Index open trades by symbol for fast lookup
+            trades_by_symbol = {}
+            for t in open_trades:
+                trades_by_symbol[t['symbol']] = t
+
             for pos in positions:
                 symbol = pos['symbol']
                 try:
                     self.alpaca.close_position(symbol)
-                    logger.info(f"{symbol}: Force-close — position closed")
+                    exit_price = pos.get('avg_entry_price', 0)
+                    # Use current market value to compute actual exit price
+                    qty = pos.get('qty', 0)
+                    if qty > 0 and pos.get('market_value'):
+                        exit_price = float(pos['market_value']) / qty
+
+                    logger.info(f"{symbol}: Force-close — position closed at ~${exit_price:.2f}")
+
+                    # Update DB trade record with exit details
+                    trade = trades_by_symbol.get(symbol)
+                    if trade and trade.get('fill_price'):
+                        pnl = (exit_price - trade['fill_price']) * trade['shares']
+                        pnl_pct = (exit_price / trade['fill_price'] - 1) * 100
+                        self.db.update_trade(trade['id'], {
+                            'exit_price': exit_price,
+                            'exit_reason': 'force_close',
+                            'exited_at': datetime.now(timezone.utc),
+                            'pnl': pnl,
+                            'pnl_pct': pnl_pct,
+                        })
+                        self.position_manager.record_trade_pnl(pnl)
+                        logger.info(
+                            f"{symbol}: Force-close DB updated — "
+                            f"P&L ${pnl:+,.2f} ({pnl_pct:+.1f}%)"
+                        )
+                    elif trade:
+                        logger.warning(
+                            f"{symbol}: Force-close — trade has no fill_price, "
+                            f"cannot compute P&L"
+                        )
 
                     if self.notifier:
                         self.notifier.notify_position_closed(

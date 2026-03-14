@@ -415,6 +415,10 @@ class MonthlyBacktestRunner:
                 if uncached:
                     logger.info(f"{progress} Pre-fetched {uncached} uncached 1-min bar sets")
 
+            # Load volume profiles for bucket rvol check
+            volume_profiles = db.get_all_volume_profiles()
+            logger.info(f"{progress} Volume profiles loaded for {len(volume_profiles)} symbols")
+
             # Run backtests — use multiprocessing if scan_workers > 1
             if self.scan_workers > 1:
                 results = run_batch_backtest_parallel(
@@ -422,7 +426,9 @@ class MonthlyBacktestRunner:
                 )
             else:
                 runner = BacktestRunner()  # uses from_config() for all settings
-                results = run_batch_backtest(movers, client, runner, db=db, universe_dict=universe_dict)
+                results = run_batch_backtest(movers, client, runner, db=db,
+                                            universe_dict=universe_dict,
+                                            volume_profiles=volume_profiles)
 
             # Write rich CSV for this month
             csv_filename = f"backtest_{month_start.year}_{month_start.month:02d}.csv"

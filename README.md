@@ -96,17 +96,68 @@ python batch_backtest.py --output my_results.csv --verbose      # custom output 
 - **Sub-$5 stocks**: 36.8% WR but avg win is $502 (high risk, high reward)
 - **Default**: Skip midday only — retains 96% of PnL while boosting WR from 54% to 63%
 
+### Relative Volume (rvol) Analysis — 15-Month Comparison (Jan 2025 - Mar 2026)
+
+Three rvol approaches were compared across 764 stock-day pairs:
+
+| Metric | no_rvol (disabled) | cumulative 5x (Ross) | bucket 5x (fixed) |
+|--------|-------------------|-----------------------|-------------------|
+| **Trades** | 764 | 586 | 331 |
+| **Total P&L** | **$247,088** | $170,066 | $103,717 |
+| **P&L/trade** | $323 | $290 | $313 |
+| **Win Rate** | 39.4% | 39.2% | 39.3% |
+| **Profit Factor** | **14.08** | 8.10 | 5.60 |
+| **Sharpe (monthly)** | **3.72** | 2.89 | 2.01 |
+| **Winning Months** | 12/15 | 13/15 | 9/15 |
+| **Max Drawdown** | $18,888 | $23,956 | $15,331 |
+
+**Key findings:**
+- **rvol filtering hurts performance** — both rvol modes cut profitable trades without improving win rate (~39% across all modes)
+- **no_rvol dominates** on Sharpe (3.72), total P&L ($247K), and profit factor (14.08)
+- **bucket rvol is worst** — only 9/15 winning months, a timezone mismatch bug in the scanner made this effectively disabled in production anyway
+- **Decision**: rvol filter disabled in production (`relative_volume_min: 0` in config.yaml)
+
+Month-by-month breakdown:
+
+| Month | no_rvol | cumulative | bucket |
+|-------|---------|-----------|--------|
+| 2025-01 | 32 trades +$17,091 | 24 trades +$9,442 | 12 trades -$526 |
+| 2025-02 | 33 trades +$28,241 | 30 trades +$28,177 | 11 trades +$10,724 |
+| 2025-03 | 27 trades -$5,437 | 20 trades -$7,007 | 13 trades -$5,007 |
+| 2025-04 | 47 trades -$8,793 | 38 trades -$16,949 | 23 trades -$8,516 |
+| 2025-05 | 48 trades -$4,657 | 35 trades +$159 | 19 trades -$1,807 |
+| 2025-06 | 69 trades +$41,001 | 58 trades +$39,059 | 40 trades +$31,292 |
+| 2025-07 | 62 trades +$37,293 | 55 trades +$22,148 | 41 trades +$27,614 |
+| 2025-08 | 47 trades +$10,420 | 35 trades +$6,993 | 27 trades +$2,857 |
+| 2025-09 | 55 trades +$17,353 | 44 trades +$3,866 | 25 trades +$4,371 |
+| 2025-10 | 85 trades +$42,307 | 63 trades +$26,576 | 52 trades +$24,232 |
+| 2025-11 | 42 trades +$20,838 | 32 trades +$14,376 | 12 trades -$128 |
+| 2025-12 | 51 trades +$15,078 | 41 trades +$12,813 | 16 trades +$12,595 |
+| 2026-01 | 73 trades +$11,197 | 63 trades +$10,681 | 22 trades -$6,570 |
+| 2026-02 | 44 trades +$13,090 | 23 trades +$7,730 | 4 trades +$4,798 |
+| 2026-03 | 49 trades +$12,067 | 25 trades +$12,002 | 14 trades +$7,788 |
+
 ### BacktestRunner Parameters
 
-| Parameter     | Default | Description                                |
-|---------------|---------|--------------------------------------------|
-| `min_price`   | 0.0     | Minimum entry price filter                 |
-| `skip_midday` | True    | Skip 11:30-14:00 ET entries (dead zone)    |
+| Parameter     | Default      | Description                                |
+|---------------|-------------|---------------------------------------------|
+| `min_price`   | 0.0         | Minimum entry price filter                  |
+| `skip_midday` | True        | Skip 11:30-14:00 ET entries (dead zone)     |
+| `rvol_mode`   | 'cumulative'| Rvol approach: 'cumulative' or 'bucket'     |
 
 ```python
 # Override defaults:
 runner = BacktestRunner(min_price=5.0, skip_midday=True)  # conservative
 runner = BacktestRunner(min_price=0.0, skip_midday=False) # no filters
+runner = BacktestRunner(rvol_mode='bucket')                # bucket rvol mode
+```
+
+### Rvol Comparison Script
+
+Runs the full 3-way rvol comparison across 15 months:
+
+```bash
+python compare_rvol_modes.py    # takes ~40 minutes
 ```
 
 ## Configuration
@@ -123,4 +174,4 @@ pytest tests/ -q          # quick summary
 ## Future Tasks
 
 - **Target strategy optimization**: Currently using fixed 2:1 R:R target. Evaluate pole height projection as an alternative or combined target strategy (e.g., partial exit at 2:1, trail remainder toward pole projection). Backtesting showed pole height targets ($7.12) can be too greedy — missing exits that 2:1 ($6.98) would have captured profitably.
-- **Midday filter in production**: Add `_is_midday()` check to `PositionManager.can_open_position()` — see design below.
+- **Partial profit exit**: Sell half position at +1R, trail remainder with breakeven stop. Requires position splitting + order replacement — deferred for separate implementation.

@@ -16,9 +16,10 @@ import os
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import pandas as pd
+import pytz
 from dotenv import load_dotenv
 
 from data_sources.alpaca_client import AlpacaClient
@@ -463,6 +464,7 @@ class BacktestRunner:
         partial_profit_enabled: bool = False,
         partial_profit_r_multiple: float = 1.0,
         partial_profit_fraction: float = 0.5,
+        rvol_mode: str = 'cumulative',
     ):
         """
         Initialize BacktestRunner.
@@ -482,6 +484,8 @@ class BacktestRunner:
             partial_profit_enabled: Enable partial profit exit strategy
             partial_profit_r_multiple: Take partial at this R multiple (default 1.0)
             partial_profit_fraction: Fraction of shares for partial exit (default 0.5)
+            rvol_mode: 'cumulative' (Ross's definition: total vol vs expected by time)
+                or 'bucket' (scanner's impl: 15-min bucket vol vs profile avg)
         """
         self.detector = detector or BullFlagDetector.from_config()
         self.planner = planner or TradePlanner.from_config()
@@ -497,6 +501,8 @@ class BacktestRunner:
         )
         # Total trading minutes per day (9:30-16:00 ET = 390 min)
         self.TRADING_MINUTES = 390
+        self.rvol_mode = rvol_mode
+        self._ET = pytz.timezone('US/Eastern')
         self.early_exit_after_trade = early_exit_after_trade
         self.realistic = realistic
         self.last_entry_time_utc = last_entry_time_utc
@@ -534,6 +540,7 @@ class BacktestRunner:
     def run(
         self, symbol: str, bars: pd.DataFrame, trade_date: str,
         avg_daily_volume: Optional[int] = None,
+        volume_profile: Optional[Dict[str, int]] = None,
     ) -> BacktestResult:
         """
         Run backtest for a symbol over a day's bars.
@@ -546,12 +553,15 @@ class BacktestRunner:
             trade_date: Date string for reporting (e.g., '2026-03-13')
             avg_daily_volume: Average daily volume for cumulative rvol check
                 (from universe table; None = skip rvol filter)
+            volume_profile: Dict mapping time_bucket ('09:30', etc.) to avg 15-min
+                volume (from DB volume_profiles table; None = skip bucket rvol)
 
         Returns:
             BacktestResult with trades, patterns, and P&L
         """
         if self.realistic:
-            return self._run_realistic(symbol, bars, trade_date, avg_daily_volume)
+            return self._run_realistic(symbol, bars, trade_date,
+                                       avg_daily_volume, volume_profile)
         return self._run_fantasy(symbol, bars, trade_date)
 
     def _run_fantasy(self, symbol: str, bars: pd.DataFrame, trade_date: str) -> BacktestResult:
@@ -656,9 +666,70 @@ class BacktestRunner:
 
         return result
 
+    def _get_bucket_rvol(
+        self, bars: pd.DataFrame, bar_idx: int,
+        volume_profile: Dict[str, int],
+    ) -> float:
+        """
+        Compute bucket-based rvol matching the live scanner's approach.
+
+        Sums 1-min bar volumes within the current 15-min ET bucket,
+        divides by the volume profile's avg volume for that bucket.
+
+        Args:
+            bars: Full day's 1-min bars
+            bar_idx: Current bar index
+            volume_profile: {bucket_key: avg_volume} from DB
+
+        Returns:
+            Bucket-based relative volume ratio
+        """
+        bar_ts = bars.iloc[bar_idx]['timestamp']
+        # Volume profiles are stored with UTC hour keys (from Alpaca SDK timestamps).
+        # Use UTC hours directly to match the profile bucket keys.
+        if bar_ts.tzinfo is not None:
+            bar_utc = bar_ts.astimezone(pytz.utc)
+        else:
+            bar_utc = bar_ts  # Assume already UTC
+        bar_et = bar_utc  # Use UTC for bucket key (profiles are UTC-keyed)
+
+        bucket_minute = (bar_et.minute // 15) * 15
+        bucket_key = f"{bar_et.hour:02d}:{bucket_minute:02d}"
+
+        # Sum volume in current 15-min bucket up to and including bar_idx
+        bucket_vol = 0
+        bars_in_bucket = 0
+        for j in range(max(0, bar_idx - 14), bar_idx + 1):
+            j_ts = bars.iloc[j]['timestamp']
+            if j_ts.tzinfo is not None:
+                j_et = j_ts.astimezone(pytz.utc)
+            else:
+                j_et = j_ts  # Assume already UTC
+
+            j_bucket_min = (j_et.minute // 15) * 15
+            j_key = f"{j_et.hour:02d}:{j_bucket_min:02d}"
+            if j_key == bucket_key:
+                bucket_vol += bars.iloc[j]['volume']
+                bars_in_bucket += 1
+
+        avg_vol = volume_profile.get(bucket_key, 0)
+        if avg_vol <= 0:
+            return 0.0
+
+        # Scale expected volume by fraction of bucket elapsed (1-15 bars)
+        # to avoid penalizing partial buckets — matches scanner behavior
+        # where partial 15-min bars have proportionally less volume
+        if bars_in_bucket < 15:
+            scaled_avg = avg_vol * (bars_in_bucket / 15.0)
+        else:
+            scaled_avg = avg_vol
+
+        return bucket_vol / scaled_avg if scaled_avg > 0 else 0.0
+
     def _run_realistic(
         self, symbol: str, bars: pd.DataFrame, trade_date: str,
         avg_daily_volume: Optional[int] = None,
+        volume_profile: Optional[Dict[str, int]] = None,
     ) -> BacktestResult:
         """
         Realistic backtest: detect_setup() fires before breakout, places pending
@@ -818,21 +889,32 @@ class BacktestRunner:
                     )
                     continue
 
-                # Cumulative rvol check at entry time
-                # Compares volume accumulated so far vs expected volume by this
-                # time of day (linear approximation of avg_daily_volume).
-                if (self.relative_volume_min > 0 and avg_daily_volume
-                        and avg_daily_volume > 0):
-                    cumulative_vol = bars.iloc[:i + 1]['volume'].sum()
-                    # Minutes from market open (9:30 ET = 13:30 UTC)
-                    minutes_elapsed = max(1, (i + 1))  # 1-min bars, i is 0-based
-                    expected_vol = avg_daily_volume * (minutes_elapsed / self.TRADING_MINUTES)
-                    rvol = cumulative_vol / expected_vol if expected_vol > 0 else 0
+                # Relative volume check at entry time
+                if self.relative_volume_min > 0:
+                    rvol = 0.0
+                    rvol_label = ""
+
+                    if self.rvol_mode == 'bucket' and volume_profile:
+                        # Bucket mode: 15-min bucket vol vs profile avg
+                        # Matches the live scanner's actual implementation
+                        rvol = self._get_bucket_rvol(bars, i, volume_profile)
+                        rvol_label = "bucket"
+                    elif self.rvol_mode == 'cumulative' and avg_daily_volume and avg_daily_volume > 0:
+                        # Cumulative mode: total vol so far vs expected by time
+                        # Ross Cameron's stated definition of relative volume
+                        cumulative_vol = bars.iloc[:i + 1]['volume'].sum()
+                        minutes_elapsed = max(1, (i + 1))
+                        expected_vol = avg_daily_volume * (minutes_elapsed / self.TRADING_MINUTES)
+                        rvol = cumulative_vol / expected_vol if expected_vol > 0 else 0
+                        rvol_label = "cumulative"
+                    else:
+                        # No volume data available — skip filter
+                        rvol = float('inf')
+
                     if rvol < self.relative_volume_min:
                         logger.debug(
-                            f"  Skipping — cumulative rvol {rvol:.1f}x "
-                            f"< {self.relative_volume_min:.1f}x at bar {i} "
-                            f"(vol {cumulative_vol:,} vs expected {expected_vol:,.0f})"
+                            f"  Skipping — {rvol_label} rvol {rvol:.1f}x "
+                            f"< {self.relative_volume_min:.1f}x at bar {i}"
                         )
                         continue
 

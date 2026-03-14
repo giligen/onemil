@@ -241,6 +241,7 @@ def run_batch_backtest(
     runner: BacktestRunner,
     db: Optional[Database] = None,
     universe_dict: Optional[Dict] = None,
+    volume_profiles: Optional[Dict[str, Dict[str, int]]] = None,
 ) -> List[BacktestResult]:
     """
     Run backtests on all qualifying (symbol, date) pairs.
@@ -253,6 +254,8 @@ def run_batch_backtest(
         client: AlpacaClient for fetching historical bars
         runner: BacktestRunner instance
         db: Database for 1-min bar caching (optional, fetches without caching if None)
+        universe_dict: Dict mapping symbol -> universe record
+        volume_profiles: Dict mapping symbol -> {bucket: avg_volume} for bucket rvol
 
     Returns:
         List of BacktestResult objects (one per successful run)
@@ -281,7 +284,10 @@ def run_batch_backtest(
                 uni = universe_dict.get(symbol, {})
                 avg_vol = uni.get('avg_daily_volume') or uni.get('avg_volume_daily')
 
-            result = runner.run(symbol, bars, date_str, avg_daily_volume=avg_vol)
+            vol_profile = volume_profiles.get(symbol) if volume_profiles else None
+            result = runner.run(symbol, bars, date_str,
+                                avg_daily_volume=avg_vol,
+                                volume_profile=vol_profile)
             results.append(result)
 
             # Verbose progress line
@@ -340,8 +346,13 @@ def _backtest_worker(args: Tuple) -> Optional[dict]:
             uni = db.get_universe_stock(symbol)
             avg_vol = uni.get('avg_volume_daily') if uni else None
 
+            # Look up volume profile for bucket rvol check
+            vol_profile = db.get_volume_profile(symbol)
+
             runner = BacktestRunner()  # uses from_config() for all settings
-            result = runner.run(symbol, bars, trade_date_iso, avg_daily_volume=avg_vol)
+            result = runner.run(symbol, bars, trade_date_iso,
+                                avg_daily_volume=avg_vol,
+                                volume_profile=vol_profile)
 
             # Serialize to dict for pickling across processes
             trades = []

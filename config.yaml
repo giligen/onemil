@@ -18,8 +18,10 @@ scanner:
   # Intraday move threshold
   intraday_change_pct_min: 10.0
 
-  # Relative volume threshold (bucket vol / avg bucket vol)
-  relative_volume_min: 5.0
+  # Relative volume threshold (0 = disabled)
+  # 15-month backtest showed rvol filtering HURTS performance:
+  #   no_rvol: $247K, Sharpe 3.72 | cumulative 5x: $170K, Sharpe 2.89 | bucket 5x: $104K, Sharpe 2.01
+  relative_volume_min: 0
 
   # Volume profile lookback days
   volume_profile_days: 50

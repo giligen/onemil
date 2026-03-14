@@ -155,7 +155,8 @@ class TestRunPatternCheck:
         """Returns None when no qualified symbols."""
         assert engine.run_pattern_check() is None
 
-    def test_full_successful_trade_flow(self, engine, mock_alpaca, mock_detector,
+    @patch.object(TradingEngine, '_is_past_last_entry_time', return_value=False)
+    def test_full_successful_trade_flow(self, _mock_time, engine, mock_alpaca, mock_detector,
                                         mock_planner, mock_executor, mock_position_manager):
         """Complete flow: qualify → detect_setup → plan → submit buy-stop."""
         # Setup
@@ -245,7 +246,8 @@ class TestDailyStats:
         assert stats['total_trades'] == 0
         assert stats['gross_pnl'] == 0.0
 
-    def test_patterns_detected_counter(self, engine, mock_alpaca, mock_detector,
+    @patch.object(TradingEngine, '_is_past_last_entry_time', return_value=False)
+    def test_patterns_detected_counter(self, _mock_time, engine, mock_alpaca, mock_detector,
                                         mock_planner, mock_position_manager, mock_executor):
         """Patterns detected counter increments on detection."""
         bars = pd.DataFrame({'open': [4.0], 'high': [4.1], 'low': [3.9],
@@ -308,7 +310,8 @@ class TestNotifierIntegration:
         """Engine works without notifier."""
         assert engine.notifier is None
 
-    def test_pattern_detected_notifies(self, mock_alpaca, db, mock_detector,
+    @patch.object(TradingEngine, '_is_past_last_entry_time', return_value=False)
+    def test_pattern_detected_notifies(self, _mock_time, mock_alpaca, db, mock_detector,
                                         mock_planner, mock_executor, mock_position_manager):
         """Pattern detection triggers notifier.notify_pattern_detected."""
         mock_notifier = MagicMock(spec=TelegramNotifier)
@@ -329,7 +332,8 @@ class TestNotifierIntegration:
 
         mock_notifier.notify_pattern_detected.assert_called_once()
 
-    def test_trade_executed_notifies_order(self, mock_alpaca, db, mock_detector,
+    @patch.object(TradingEngine, '_is_past_last_entry_time', return_value=False)
+    def test_trade_executed_notifies_order(self, _mock_time, mock_alpaca, db, mock_detector,
                                             mock_planner, mock_executor, mock_position_manager):
         """Successful trade triggers notifier.notify_order_submitted."""
         mock_notifier = MagicMock(spec=TelegramNotifier)
@@ -769,3 +773,206 @@ class TestSetupExpiry:
 
         mock_alpaca.cancel_order.assert_not_called()
         assert 'FRESH' in engine._pending_orders
+
+
+# ===========================================================================
+# GAP 1: Force-Close DB Update
+# ===========================================================================
+
+class TestForceCloseDBUpdate:
+    """Tests for _force_close_all updating trade records in DB."""
+
+    def test_force_close_updates_db_with_exit(self, engine, mock_alpaca, db, mock_position_manager):
+        """Force-close writes exit_price, exit_reason, and P&L to DB."""
+        now = datetime.now(timezone.utc)
+        db.save_trade({
+            'trade_date': date.today().isoformat(),
+            'symbol': 'FC',
+            'side': 'buy',
+            'entry_price': 5.00,
+            'stop_loss_price': 4.80,
+            'take_profit_price': 5.40,
+            'shares': 100,
+            'risk_per_share': 0.20,
+            'total_risk': 20.0,
+            'risk_reward_ratio': 2.0,
+            'order_id': 'order-fc',
+            'order_status': 'filled',
+            'fill_price': 5.00,
+            'filled_at': now,
+            'exit_price': None,
+            'exit_reason': None,
+            'exited_at': None,
+            'pnl': None,
+            'pnl_pct': None,
+            'pattern_data': '{}',
+            'created_at': now,
+            'updated_at': now,
+        })
+
+        # Alpaca returns position with market value
+        mock_alpaca.get_open_positions.return_value = [
+            {'symbol': 'FC', 'qty': 100, 'avg_entry_price': 5.00,
+             'market_value': 520.0, 'unrealized_pl': 20.0, 'unrealized_plpc': 0.04},
+        ]
+        mock_alpaca.close_position.return_value = {'id': 'close-order-1'}
+
+        engine._force_close_all()
+
+        # Verify DB updated
+        trade = db.get_trade_by_order_id('order-fc')
+        assert trade['exit_reason'] == 'force_close'
+        assert trade['exit_price'] == pytest.approx(5.20, abs=0.01)
+        assert trade['pnl'] == pytest.approx(20.0, abs=0.01)
+        assert trade['exited_at'] is not None
+
+        # Verify circuit breaker was fed
+        mock_position_manager.record_trade_pnl.assert_called_once()
+        assert mock_position_manager.record_trade_pnl.call_args[0][0] == pytest.approx(20.0, abs=0.01)
+
+    def test_force_close_cancels_pending(self, engine, mock_alpaca):
+        """Force-close cancels pending buy-stop orders."""
+        engine._pending_orders['PEND'] = {
+            'order_id': 'order-pend',
+            'plan': _make_plan("PEND"),
+        }
+        mock_alpaca.get_open_positions.return_value = []
+
+        engine._force_close_all()
+
+        mock_alpaca.cancel_order.assert_called_once_with('order-pend')
+        assert len(engine._pending_orders) == 0
+
+    def test_force_close_no_fill_price_logs_warning(self, engine, mock_alpaca, db):
+        """Force-close with no fill_price skips P&L update and warns."""
+        now = datetime.now(timezone.utc)
+        db.save_trade({
+            'trade_date': date.today().isoformat(),
+            'symbol': 'NOFILL',
+            'side': 'buy',
+            'entry_price': 5.00,
+            'stop_loss_price': 4.80,
+            'take_profit_price': 5.40,
+            'shares': 100,
+            'risk_per_share': 0.20,
+            'total_risk': 20.0,
+            'risk_reward_ratio': 2.0,
+            'order_id': 'order-nofill',
+            'order_status': 'accepted',
+            'fill_price': None,
+            'filled_at': None,
+            'exit_price': None,
+            'exit_reason': None,
+            'exited_at': None,
+            'pnl': None,
+            'pnl_pct': None,
+            'pattern_data': '{}',
+            'created_at': now,
+            'updated_at': now,
+        })
+
+        mock_alpaca.get_open_positions.return_value = [
+            {'symbol': 'NOFILL', 'qty': 100, 'avg_entry_price': 5.00,
+             'market_value': 480.0, 'unrealized_pl': -20.0, 'unrealized_plpc': -0.04},
+        ]
+        mock_alpaca.close_position.return_value = {'id': 'close-order-2'}
+
+        engine._force_close_all()
+
+        # DB should NOT be updated with exit (no fill_price to compute from)
+        trade = db.get_trade_by_order_id('order-nofill')
+        assert trade['exit_price'] is None
+
+
+# ===========================================================================
+# GAP 2: Sync uses filled_avg_price for legs
+# ===========================================================================
+
+class TestSyncUsesFilledAvgPrice:
+    """Tests for _sync_closed_positions using actual fill price from legs."""
+
+    def test_sync_uses_filled_avg_price_over_stop_price(self, engine, mock_alpaca, db, mock_position_manager):
+        """When leg has filled_avg_price, use it instead of stop_price."""
+        now = datetime.now(timezone.utc)
+        db.save_trade({
+            'trade_date': date.today().isoformat(),
+            'symbol': 'SLIP',
+            'side': 'buy',
+            'entry_price': 5.00,
+            'stop_loss_price': 4.80,
+            'take_profit_price': 5.40,
+            'shares': 100,
+            'risk_per_share': 0.20,
+            'total_risk': 20.0,
+            'risk_reward_ratio': 2.0,
+            'order_id': 'order-slip',
+            'order_status': 'filled',
+            'fill_price': 5.00,
+            'filled_at': now,
+            'exit_price': None,
+            'exit_reason': None,
+            'exited_at': None,
+            'pnl': None,
+            'pnl_pct': None,
+            'pattern_data': '{}',
+            'created_at': now,
+            'updated_at': now,
+        })
+
+        mock_alpaca.get_open_positions.return_value = []
+        # Stop triggered at 4.80 but filled at 4.75 (slippage)
+        mock_alpaca.get_order.return_value = {
+            'legs': [
+                {'id': 'sl-slip', 'side': 'sell', 'stop_price': 4.80,
+                 'limit_price': None, 'filled_avg_price': 4.75, 'status': 'filled'},
+            ],
+        }
+
+        engine._sync_closed_positions()
+
+        trade = db.get_trade_by_order_id('order-slip')
+        assert trade['exit_price'] == pytest.approx(4.75, abs=0.01)
+        assert trade['exit_reason'] == 'stop_loss'
+        # P&L should use actual fill (4.75), not trigger (4.80)
+        assert trade['pnl'] == pytest.approx(-25.0, abs=0.01)
+
+    def test_sync_falls_back_to_stop_price(self, engine, mock_alpaca, db, mock_position_manager):
+        """When leg has no filled_avg_price, falls back to stop_price."""
+        now = datetime.now(timezone.utc)
+        db.save_trade({
+            'trade_date': date.today().isoformat(),
+            'symbol': 'NOSLIP',
+            'side': 'buy',
+            'entry_price': 5.00,
+            'stop_loss_price': 4.80,
+            'take_profit_price': 5.40,
+            'shares': 100,
+            'risk_per_share': 0.20,
+            'total_risk': 20.0,
+            'risk_reward_ratio': 2.0,
+            'order_id': 'order-noslip',
+            'order_status': 'filled',
+            'fill_price': 5.00,
+            'filled_at': now,
+            'exit_price': None,
+            'exit_reason': None,
+            'exited_at': None,
+            'pnl': None,
+            'pnl_pct': None,
+            'pattern_data': '{}',
+            'created_at': now,
+            'updated_at': now,
+        })
+
+        mock_alpaca.get_open_positions.return_value = []
+        mock_alpaca.get_order.return_value = {
+            'legs': [
+                {'id': 'sl-ns', 'side': 'sell', 'stop_price': 4.80,
+                 'limit_price': None, 'filled_avg_price': None, 'status': 'filled'},
+            ],
+        }
+
+        engine._sync_closed_positions()
+
+        trade = db.get_trade_by_order_id('order-noslip')
+        assert trade['exit_price'] == pytest.approx(4.80, abs=0.01)
