@@ -392,6 +392,19 @@ class MonthlyBacktestRunner:
                     elapsed_seconds=time.time() - t0, results=[],
                 )
 
+            # Pre-fetch any uncached 1-min bars before parallel scan.
+            # The parallel workers only read from cache (no API access),
+            # so all bars must be cached first.
+            if self.scan_workers > 1:
+                uncached = 0
+                for sym, d in movers:
+                    cached = db.get_intraday_bars_cached(sym, d.isoformat())
+                    if not cached:
+                        uncached += 1
+                        get_1min_bars_cached(sym, d, client, db)
+                if uncached:
+                    logger.info(f"{progress} Pre-fetched {uncached} uncached 1-min bar sets")
+
             # Run backtests — use multiprocessing if scan_workers > 1
             if self.scan_workers > 1:
                 results = run_batch_backtest_parallel(
