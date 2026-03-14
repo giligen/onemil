@@ -300,6 +300,82 @@ class AlpacaClient:
             logger.error(f"Failed to get daily bars: {e}")
             raise AlpacaAPIError(f"Failed to get daily bars: {e}")
 
+    def get_daily_bars_range(
+        self, symbols: List[str], start: date, end: date
+    ) -> Dict[str, List[Dict]]:
+        """
+        Get daily bars for multiple symbols over a date range.
+
+        Fetches daily OHLCV bars chunked by 200 symbols (same pattern
+        as get_daily_bars). Used for batch scanning of intraday movers.
+
+        Args:
+            symbols: List of stock symbols
+            start: Start date (inclusive)
+            end: End date (inclusive)
+
+        Returns:
+            Dict mapping symbol -> list of bar dicts
+            [{date, open, high, low, close, volume}, ...]
+
+        Raises:
+            AlpacaAPIError: If API call fails
+        """
+        if not symbols:
+            return {}
+
+        try:
+            start_dt = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
+            end_dt = datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=timezone.utc)
+            results: Dict[str, List[Dict]] = {}
+
+            chunk_size = 200
+            for i in range(0, len(symbols), chunk_size):
+                chunk = symbols[i:i + chunk_size]
+                request = StockBarsRequest(
+                    symbol_or_symbols=chunk,
+                    timeframe=TimeFrame.Day,
+                    start=start_dt,
+                    end=end_dt,
+                    feed=DataFeed.SIP,
+                )
+                bars_raw = self._call_with_timeout(
+                    lambda req=request: self.data_client.get_stock_bars(req),
+                    f"get_daily_bars_range(chunk {i // chunk_size + 1})"
+                )
+                bars = self._to_dict(bars_raw)
+
+                for symbol in chunk:
+                    if symbol in bars and len(bars[symbol]) > 0:
+                        symbol_bars = []
+                        for bar in bars[symbol]:
+                            symbol_bars.append({
+                                'date': bar.timestamp.date() if hasattr(bar.timestamp, 'date') else bar.timestamp,
+                                'open': float(bar.open),
+                                'high': float(bar.high),
+                                'low': float(bar.low),
+                                'close': float(bar.close),
+                                'volume': int(bar.volume),
+                            })
+                        results[symbol] = symbol_bars
+
+                logger.info(
+                    f"Daily bars range progress: "
+                    f"{min(i + chunk_size, len(symbols))}/{len(symbols)} symbols"
+                )
+
+            logger.info(
+                f"Fetched daily bars range for {len(results)}/{len(symbols)} symbols "
+                f"({start} to {end})"
+            )
+            return results
+
+        except AlpacaAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to get daily bars range: {e}")
+            raise AlpacaAPIError(f"Failed to get daily bars range: {e}")
+
     # =========================================================================
     # Intraday Bars (15-min for volume profiles)
     # =========================================================================
@@ -574,6 +650,61 @@ class AlpacaClient:
         except Exception as e:
             logger.error(f"Failed to get 1-min bars for {symbol}: {e}")
             raise AlpacaAPIError(f"Failed to get 1-min bars for {symbol}: {e}")
+
+    def get_historical_1min_bars(self, symbol: str, start: datetime, end: datetime) -> pd.DataFrame:
+        """
+        Get historical 1-minute bars for a specific time range.
+
+        Used by the backtesting engine to fetch a full day's worth of bars.
+
+        Args:
+            symbol: Stock symbol
+            start: UTC start datetime (inclusive)
+            end: UTC end datetime (inclusive)
+
+        Returns:
+            DataFrame with columns: timestamp, open, high, low, close, volume
+
+        Raises:
+            AlpacaAPIError: If API call fails
+        """
+        try:
+            request = StockBarsRequest(
+                symbol_or_symbols=symbol,
+                timeframe=TimeFrame(1, TimeFrameUnit.Minute),
+                start=start,
+                end=end,
+                feed=DataFeed.SIP,
+            )
+            bars_raw = self._call_with_timeout(
+                lambda: self.data_client.get_stock_bars(request),
+                f"get_historical_1min_bars({symbol})"
+            )
+            bars = self._to_dict(bars_raw)
+
+            if symbol not in bars or len(bars[symbol]) == 0:
+                logger.warning(f"No historical 1-min bars returned for {symbol} ({start} to {end})")
+                return pd.DataFrame()
+
+            records = []
+            for bar in bars[symbol]:
+                records.append({
+                    'timestamp': bar.timestamp,
+                    'open': float(bar.open),
+                    'high': float(bar.high),
+                    'low': float(bar.low),
+                    'close': float(bar.close),
+                    'volume': int(bar.volume),
+                })
+
+            logger.info(f"Fetched {len(records)} historical 1-min bars for {symbol} ({start} to {end})")
+            return pd.DataFrame(records)
+
+        except AlpacaAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to get historical 1-min bars for {symbol}: {e}")
+            raise AlpacaAPIError(f"Failed to get historical 1-min bars for {symbol}: {e}")
 
     # =========================================================================
     # Trading Operations

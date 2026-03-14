@@ -79,7 +79,7 @@ class TestFullTradingPipeline:
         """Full pipeline: detect pattern → create plan → execute → persist to DB."""
         # Setup real components
         detector = BullFlagDetector()
-        planner = TradePlanner(position_size_dollars=500, max_shares=1000)
+        planner = TradePlanner(position_size_dollars=500, max_shares=1000, min_risk_per_share=0.05)
         executor = OrderExecutor(alpaca_client=mock_alpaca, db=db)
 
         # Mock Alpaca order submission
@@ -134,7 +134,7 @@ class TestFullTradingPipeline:
 
         # Setup real components
         detector = BullFlagDetector()
-        planner = TradePlanner(position_size_dollars=500, max_shares=1000)
+        planner = TradePlanner(position_size_dollars=500, max_shares=1000, min_risk_per_share=0.05)
         executor = OrderExecutor(alpaca_client=mock_alpaca, db=db)
         position_manager = PositionManager(
             alpaca_client=mock_alpaca, db=db,
@@ -181,7 +181,7 @@ class TestFullTradingPipeline:
         mock_dt.now.return_value = mock_now
 
         detector = BullFlagDetector()
-        planner = TradePlanner(position_size_dollars=500, max_shares=1000)
+        planner = TradePlanner(position_size_dollars=500, max_shares=1000, min_risk_per_share=0.05)
         executor = OrderExecutor(alpaca_client=mock_alpaca, db=db)
         position_manager = PositionManager(
             alpaca_client=mock_alpaca, db=db,
@@ -308,7 +308,7 @@ class TestFullTradingPipeline:
     def test_pattern_detector_to_planner_data_integrity(self, db):
         """Verify data flows correctly from detector to planner."""
         detector = BullFlagDetector()
-        planner = TradePlanner(position_size_dollars=500)
+        planner = TradePlanner(position_size_dollars=500, min_risk_per_share=0.05)
 
         bars = _make_bull_flag_bars()
         pattern = detector.detect("TEST", bars)

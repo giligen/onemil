@@ -4,7 +4,7 @@ Trade planner for bull flag patterns.
 Converts a detected BullFlagPattern into a TradePlan with:
 - Entry at breakout level
 - Stop loss below flag low (max 20 cents from entry per Ross's rule)
-- Target at 2:1 R:R or pole height projection (whichever is larger)
+- Target at 2:1 R:R (conservative)
 - Position sizing based on dollar amount and share cap
 """
 
@@ -40,17 +40,19 @@ class TradePlanner:
 
     Applies Ross Cameron's risk management rules:
     - Stop below flag low, capped at 20 cents from entry
-    - Target = max(2:1 R:R, pole height projection)
+    - Target = 2:1 R:R (conservative)
     - Position size = floor(dollars / entry), capped at max shares
     - Rejects if natural stop > 50 cents (pattern too volatile)
+    - Rejects if natural risk < 5 cents (noise stop, too tight)
     - Rejects if R:R < 2.0
     """
 
     def __init__(
         self,
-        position_size_dollars: float = 500,
-        max_shares: int = 1000,
+        position_size_dollars: float = 10000,
+        max_shares: int = 10000,
         max_risk_per_share: float = 0.20,
+        min_risk_per_share: float = 0.05,
         min_risk_reward: float = 2.0,
     ):
         """
@@ -60,11 +62,13 @@ class TradePlanner:
             position_size_dollars: Dollar amount per position
             max_shares: Maximum shares per position
             max_risk_per_share: Max risk per share (Ross's 20-cent rule)
+            min_risk_per_share: Min risk per share — rejects noise stops
             min_risk_reward: Minimum acceptable risk/reward ratio
         """
         self.position_size_dollars = position_size_dollars
         self.max_shares = max_shares
         self.max_risk_per_share = max_risk_per_share
+        self.min_risk_per_share = min_risk_per_share
         self.min_risk_reward = min_risk_reward
 
     def create_plan(self, pattern: BullFlagPattern) -> Optional[TradePlan]:
@@ -99,6 +103,14 @@ class TradePlanner:
             )
             return None
 
+        # Reject if stop is too tight — will get stopped out on noise
+        if natural_risk < self.min_risk_per_share:
+            logger.debug(
+                f"{pattern.symbol}: Natural risk ${natural_risk:.2f} < "
+                f"${self.min_risk_per_share:.2f}, noise stop, rejecting"
+            )
+            return None
+
         # Cap risk at max_risk_per_share (Ross's 20-cent rule)
         if natural_risk > self.max_risk_per_share:
             stop_loss_price = entry_price - self.max_risk_per_share
@@ -111,10 +123,8 @@ class TradePlanner:
             stop_loss_price = natural_stop
             risk_per_share = natural_risk
 
-        # Target = max(2:1 R:R, pole height projection)
-        target_2_to_1 = entry_price + (2 * risk_per_share)
-        target_pole = entry_price + pattern.pole_height
-        take_profit_price = max(target_2_to_1, target_pole)
+        # Target = 2:1 R:R (conservative; pole height projection saved for future use)
+        take_profit_price = entry_price + (2 * risk_per_share)
 
         reward_per_share = take_profit_price - entry_price
         risk_reward_ratio = reward_per_share / risk_per_share if risk_per_share > 0 else 0

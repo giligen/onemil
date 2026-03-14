@@ -153,6 +153,7 @@ def _create_trading_engine(config, alpaca, db, notifier=None) -> TradingEngine:
         position_size_dollars=config.position_size_dollars,
         max_shares=config.max_shares,
         max_risk_per_share=config.max_risk_per_share,
+        min_risk_per_share=config.min_risk_per_share,
         min_risk_reward=config.min_risk_reward,
     )
     position_manager = PositionManager(

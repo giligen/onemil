@@ -178,6 +178,36 @@ class Database:
                 ON trades(symbol, trade_date);
             CREATE INDEX IF NOT EXISTS idx_trades_order_id
                 ON trades(order_id);
+
+            CREATE TABLE IF NOT EXISTS daily_bars (
+                symbol VARCHAR(10) NOT NULL,
+                bar_date DATE NOT NULL,
+                open REAL NOT NULL,
+                high REAL NOT NULL,
+                low REAL NOT NULL,
+                close REAL NOT NULL,
+                volume INTEGER NOT NULL,
+                fetched_at TIMESTAMP NOT NULL,
+                PRIMARY KEY (symbol, bar_date)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_daily_bars_date
+                ON daily_bars(bar_date);
+
+            CREATE TABLE IF NOT EXISTS intraday_bars_1min (
+                symbol VARCHAR(10) NOT NULL,
+                bar_date DATE NOT NULL,
+                timestamp TIMESTAMP NOT NULL,
+                open REAL NOT NULL,
+                high REAL NOT NULL,
+                low REAL NOT NULL,
+                close REAL NOT NULL,
+                volume INTEGER NOT NULL,
+                PRIMARY KEY (symbol, timestamp)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_intraday_bars_symbol_date
+                ON intraday_bars_1min(symbol, bar_date);
         """)
         self.conn.commit()
         logger.debug("Database tables verified/created")
@@ -633,6 +663,174 @@ class Database:
         """Get count of unique symbols with volume profiles."""
         cursor = self.conn.execute("SELECT COUNT(DISTINCT symbol) FROM volume_profiles")
         return cursor.fetchone()[0]
+
+    # =========================================================================
+    # Daily bars cache
+    # =========================================================================
+
+    def save_daily_bars(self, bars: List[Dict[str, Any]]) -> int:
+        """
+        Cache daily bars to avoid re-fetching from API.
+
+        Args:
+            bars: List of dicts with keys: symbol, date, open, high, low, close, volume
+
+        Returns:
+            Number of bars saved
+        """
+        if not bars:
+            return 0
+
+        now = datetime.now(timezone.utc)
+        self.conn.executemany("""
+            INSERT OR REPLACE INTO daily_bars
+                (symbol, bar_date, open, high, low, close, volume, fetched_at)
+            VALUES (:symbol, :date, :open, :high, :low, :close, :volume, :fetched_at)
+        """, [{**b, 'fetched_at': now} for b in bars])
+        self.conn.commit()
+        logger.info(f"Cached {len(bars)} daily bars")
+        return len(bars)
+
+    def get_daily_bars_cached(
+        self, symbols: List[str], start_date: str, end_date: str
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Retrieve cached daily bars for symbols in a date range.
+
+        Args:
+            symbols: List of stock symbols
+            start_date: Start date string (YYYY-MM-DD)
+            end_date: End date string (YYYY-MM-DD)
+
+        Returns:
+            Dict mapping symbol -> list of bar dicts {date, open, high, low, close, volume}
+        """
+        if not symbols:
+            return {}
+
+        results: Dict[str, List[Dict[str, Any]]] = {}
+        chunk_size = 500  # SQLite parameter limit
+        for i in range(0, len(symbols), chunk_size):
+            chunk = symbols[i:i + chunk_size]
+            placeholders = ','.join('?' * len(chunk))
+            cursor = self.conn.execute(f"""
+                SELECT symbol, bar_date, open, high, low, close, volume
+                FROM daily_bars
+                WHERE symbol IN ({placeholders})
+                  AND bar_date >= ? AND bar_date <= ?
+                ORDER BY symbol, bar_date
+            """, chunk + [start_date, end_date])
+
+            for row in cursor.fetchall():
+                row_dict = dict(row)
+                symbol = row_dict['symbol']
+                bar = {
+                    'date': row_dict['bar_date'],
+                    'open': row_dict['open'],
+                    'high': row_dict['high'],
+                    'low': row_dict['low'],
+                    'close': row_dict['close'],
+                    'volume': row_dict['volume'],
+                }
+                if symbol not in results:
+                    results[symbol] = []
+                results[symbol].append(bar)
+
+        if results:
+            logger.info(
+                f"Cache hit: {len(results)} symbols with daily bars "
+                f"({start_date} to {end_date})"
+            )
+        return results
+
+    def get_cached_daily_bar_symbols(self, start_date: str, end_date: str) -> set:
+        """
+        Get set of symbols that have cached daily bars in the date range.
+
+        Args:
+            start_date: Start date string (YYYY-MM-DD)
+            end_date: End date string (YYYY-MM-DD)
+
+        Returns:
+            Set of symbol strings with cached data
+        """
+        cursor = self.conn.execute("""
+            SELECT DISTINCT symbol FROM daily_bars
+            WHERE bar_date >= ? AND bar_date <= ?
+        """, (start_date, end_date))
+        return {row['symbol'] for row in cursor.fetchall()}
+
+    # =========================================================================
+    # Intraday 1-min bars cache
+    # =========================================================================
+
+    def save_intraday_bars(self, symbol: str, bar_date: str, bars: List[Dict]) -> int:
+        """
+        Cache 1-min intraday bars for a symbol/date.
+
+        Args:
+            symbol: Stock symbol
+            bar_date: Date string (YYYY-MM-DD)
+            bars: List of dicts with keys: timestamp, open, high, low, close, volume
+
+        Returns:
+            Number of bars saved
+        """
+        if not bars:
+            return 0
+
+        rows = []
+        for b in bars:
+            ts = b['timestamp']
+            # Convert pandas Timestamp to Python datetime if needed
+            if hasattr(ts, 'to_pydatetime'):
+                ts = ts.to_pydatetime()
+            rows.append({
+                'symbol': symbol,
+                'bar_date': bar_date,
+                'timestamp': ts,
+                'open': float(b['open']),
+                'high': float(b['high']),
+                'low': float(b['low']),
+                'close': float(b['close']),
+                'volume': int(b['volume']),
+            })
+
+        self.conn.executemany("""
+            INSERT OR REPLACE INTO intraday_bars_1min
+                (symbol, bar_date, timestamp, open, high, low, close, volume)
+            VALUES (:symbol, :bar_date, :timestamp, :open, :high, :low, :close, :volume)
+        """, rows)
+        self.conn.commit()
+        logger.debug(f"Cached {len(rows)} intraday 1-min bars for {symbol} on {bar_date}")
+        return len(rows)
+
+    def get_intraday_bars_cached(self, symbol: str, bar_date: str) -> List[Dict]:
+        """
+        Retrieve cached 1-min intraday bars for a symbol/date.
+
+        Args:
+            symbol: Stock symbol
+            bar_date: Date string (YYYY-MM-DD)
+
+        Returns:
+            List of bar dicts with keys: timestamp, open, high, low, close, volume
+            Empty list if no cached data
+        """
+        cursor = self.conn.execute("""
+            SELECT timestamp, open, high, low, close, volume
+            FROM intraday_bars_1min
+            WHERE symbol = ? AND bar_date = ?
+            ORDER BY timestamp
+        """, (symbol, bar_date))
+
+        rows = cursor.fetchall()
+        if not rows:
+            return []
+
+        bars = [dict(row) for row in rows]
+        logger.debug(f"Cache hit: {len(bars)} intraday bars for {symbol} on {bar_date}")
+        return bars
 
     def close(self) -> None:
         """Close the database connection."""

@@ -128,6 +128,25 @@ mock_order = MagicMock()  # Alpaca Order object, OK without spec
 ### 4. Use conftest.py Fixtures
 Pre-configure fixtures with spec= in `tests/conftest.py`.
 
+# Running Backtests
+
+## Single symbol
+```bash
+python backtest.py PLYX 2026-03-13 --verbose
+```
+
+## Batch backtest (all movers in a date range)
+```bash
+python batch_backtest.py --start 2026-02-01 --end 2026-03-13 --verbose
+```
+- Data is cached in SQLite (daily bars + 1-min bars) — first run fetches from Alpaca API, subsequent runs are instant
+- Output: CSV file with trade-level results
+- Default filters: skip midday (11:30-14:00 ET) entries
+
+## Backtest defaults
+- `BacktestRunner(min_price=0.0, skip_midday=True)` — skip midday is the only default filter
+- To override: pass `min_price=5.0` or `skip_midday=False` to `BacktestRunner`
+
 # Interactive Sessions
 * I'm here for you to answer questions and clarify ambiguous points/logic
 * **Bug Prevention Protocol**:

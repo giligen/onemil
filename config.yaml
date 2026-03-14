@@ -64,8 +64,8 @@ notifications:
 # Trading (Phase 2 - automated paper trading)
 trading:
   enabled: false
-  position_size_dollars: 500
-  max_shares: 1000
+  position_size_dollars: 10000
+  max_shares: 10000
   max_positions: 3
   daily_loss_limit: -100.0
   max_risk_per_share: 0.20

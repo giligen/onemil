@@ -291,6 +291,11 @@ class Config:
         return float(self._get_yaml("trading", "max_risk_per_share", default=0.20))
 
     @property
+    def min_risk_per_share(self) -> float:
+        """Minimum risk per share in dollars — rejects noise stops."""
+        return float(self._get_yaml("trading", "min_risk_per_share", default=0.05))
+
+    @property
     def min_risk_reward(self) -> float:
         """Minimum risk/reward ratio."""
         return float(self._get_yaml("trading", "min_risk_reward", default=2.0))
