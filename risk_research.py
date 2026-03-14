@@ -220,7 +220,7 @@ HYPOTHESES: Dict[str, Dict] = {
         "require_macd_positive": True,
     },
     "H12": {
-        "description": "H10a without MACD + relaxed min_risk",
+        "description": "H10a no MACD + relaxed risk + circuit breaker",
         "position_size_dollars": 50000,
         "sizing_mode": "fixed_risk",
         "risk_per_trade": 2000,
@@ -229,6 +229,8 @@ HYPOTHESES: Dict[str, Dict] = {
         "min_risk_pct": 0.005,
         "max_risk_pct": 0.05,
         "min_risk_reward": 2.5,
+        "circuit_breaker_dd": 3000,
+        "circuit_breaker_pause": 2,
     },
 }
 
@@ -261,6 +263,72 @@ def build_planner(hypothesis_id: str) -> TradePlanner:
         min_risk_pct=params["min_risk_pct"],
         max_risk_pct=params["max_risk_pct"],
     )
+
+
+# ---------------------------------------------------------------------------
+# Circuit Breaker (Drawdown Management)
+# ---------------------------------------------------------------------------
+
+
+def apply_circuit_breaker(
+    trades: List[SimulatedTrade],
+    dd_threshold: float = 3000.0,
+    pause_trades: int = 2,
+) -> List[SimulatedTrade]:
+    """
+    Apply trailing-drawdown circuit breaker to a chronological list of trades.
+
+    When cumulative P&L drops more than dd_threshold from its peak, the next
+    pause_trades trades are skipped. This reduces max drawdown by sitting out
+    during losing streaks.
+
+    Args:
+        trades: List of SimulatedTrade objects (will be sorted by entry_time)
+        dd_threshold: Dollar drawdown from peak that triggers the pause
+        pause_trades: Number of trades to skip after trigger
+
+    Returns:
+        Filtered list of trades (skipped trades removed)
+    """
+    if not trades:
+        return []
+
+    sorted_trades = sorted(trades, key=lambda t: t.entry_time)
+
+    kept = []
+    cumulative = 0.0
+    peak = 0.0
+    skip_remaining = 0
+
+    for t in sorted_trades:
+        if skip_remaining > 0:
+            skip_remaining -= 1
+            logger.debug(
+                f"  Circuit breaker: skipping {t.symbol} "
+                f"({skip_remaining} skips remaining)"
+            )
+            continue
+
+        kept.append(t)
+        cumulative += t.pnl
+        if cumulative > peak:
+            peak = cumulative
+
+        dd = peak - cumulative
+        if dd >= dd_threshold:
+            skip_remaining = pause_trades
+            logger.info(
+                f"  Circuit breaker TRIGGERED: DD ${dd:,.0f} >= ${dd_threshold:,.0f} "
+                f"after {t.symbol} — skipping next {pause_trades} trade(s)"
+            )
+
+    skipped = len(sorted_trades) - len(kept)
+    if skipped > 0:
+        logger.info(
+            f"  Circuit breaker: {len(kept)} trades kept, {skipped} skipped"
+        )
+
+    return kept
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +456,20 @@ def run_hypothesis(
     results = run_batch_backtest(movers, client, runner, db=db)
 
     all_trades = [t for r in results for t in r.trades_simulated]
+
+    # Apply circuit breaker if configured
+    cb_dd = params.get("circuit_breaker_dd")
+    cb_pause = params.get("circuit_breaker_pause")
+    if cb_dd is not None and cb_pause is not None:
+        pre_count = len(all_trades)
+        all_trades = apply_circuit_breaker(
+            all_trades, dd_threshold=cb_dd, pause_trades=cb_pause
+        )
+        logger.info(
+            f"{hypothesis_id}: circuit breaker DD>${cb_dd:,} skip {cb_pause} — "
+            f"{pre_count} → {len(all_trades)} trades"
+        )
+
     metrics = compute_metrics(all_trades)
     metrics["hypothesis"] = hypothesis_id
     metrics["description"] = params["description"]

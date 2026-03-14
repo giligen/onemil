@@ -20,6 +20,7 @@ import pytest
 from backtest import SimulatedTrade
 from risk_research import (
     HYPOTHESES,
+    apply_circuit_breaker,
     build_planner,
     compute_metrics,
     compute_price_bucket_metrics,
@@ -168,8 +169,8 @@ class TestHypothesisRegistry:
             assert planner.min_risk_pct is not None, f"{h_id} should have min_risk_pct"
             assert planner.max_risk_pct is not None, f"{h_id} should have max_risk_pct"
 
-    def test_h12_no_macd_relaxed_min_risk(self):
-        """H12 is H10a without MACD + relaxed min_risk (0.02/0.5%)."""
+    def test_h12_no_macd_relaxed_min_risk_circuit_breaker(self):
+        """H12 is H10a without MACD + relaxed min_risk + circuit breaker."""
         h12 = HYPOTHESES["H12"]
         h10a = HYPOTHESES["H10a"]
         # Same core params
@@ -177,11 +178,14 @@ class TestHypothesisRegistry:
         assert h12["risk_per_trade"] == h10a["risk_per_trade"]
         assert h12["min_risk_reward"] == h10a["min_risk_reward"]
         assert h12["max_risk_pct"] == h10a["max_risk_pct"]
-        # Relaxed min_risk (from remote finding: old 0.05/1% rejected 96% of patterns)
+        # Relaxed min_risk
         assert h12["min_risk_per_share"] == 0.02
         assert h12["min_risk_pct"] == 0.005
         # No MACD
         assert "require_macd_positive" not in h12
+        # Circuit breaker
+        assert h12["circuit_breaker_dd"] == 3000
+        assert h12["circuit_breaker_pause"] == 2
 
 
 # ===========================================================================
@@ -250,6 +254,87 @@ class TestComputeMetrics:
         ]
         metrics = compute_metrics(trades)
         assert metrics["max_drawdown"] == pytest.approx(-500, abs=0.01)
+
+
+# ===========================================================================
+# CIRCUIT BREAKER TESTS
+# ===========================================================================
+
+class TestCircuitBreaker:
+    """Tests for apply_circuit_breaker drawdown management."""
+
+    def test_no_trigger_keeps_all(self):
+        """When drawdown never exceeds threshold, all trades kept."""
+        trades = [
+            _make_trade(pnl=100, exit_price=10.20),
+            _make_trade(pnl=200, exit_price=10.40),
+            _make_trade(pnl=-50, exit_price=9.90, exit_reason="stop"),
+        ]
+        result = apply_circuit_breaker(trades, dd_threshold=3000, pause_trades=2)
+        assert len(result) == 3
+
+    def test_trigger_skips_trades(self):
+        """When drawdown exceeds threshold, next N trades are skipped."""
+        trades = [
+            _make_trade(pnl=500, exit_price=10.50),      # cum=500, peak=500
+            _make_trade(pnl=-2000, exit_price=8.00, exit_reason="stop"),  # cum=-1500, dd=2000
+            _make_trade(pnl=-2000, exit_price=8.00, exit_reason="stop"),  # cum=-3500, dd=4000 → trigger!
+            _make_trade(pnl=1000, exit_price=11.00),      # skipped (1 of 2)
+            _make_trade(pnl=1000, exit_price=11.00),      # skipped (2 of 2)
+            _make_trade(pnl=500, exit_price=10.50),        # taken again
+        ]
+        result = apply_circuit_breaker(trades, dd_threshold=3000, pause_trades=2)
+        assert len(result) == 4  # 6 - 2 skipped
+        # The two $1000 wins were skipped
+        total = sum(t.pnl for t in result)
+        assert total == pytest.approx(-3000, abs=0.01)  # 500 - 2000 - 2000 + 500
+
+    def test_empty_trades(self):
+        """Empty list returns empty."""
+        result = apply_circuit_breaker([], dd_threshold=3000, pause_trades=2)
+        assert result == []
+
+    def test_multiple_triggers(self):
+        """Circuit breaker can trigger multiple times."""
+        trades = [
+            _make_trade(pnl=-2000, exit_price=8.00, exit_reason="stop"),
+            _make_trade(pnl=-2000, exit_price=8.00, exit_reason="stop"),  # dd=4000 → trigger
+            _make_trade(pnl=100, exit_price=10.20),    # skip 1
+            _make_trade(pnl=100, exit_price=10.20),    # skip 2
+            _make_trade(pnl=5000, exit_price=15.00),   # taken, cum=1000, peak=1000
+            _make_trade(pnl=-2000, exit_price=8.00, exit_reason="stop"),
+            _make_trade(pnl=-2000, exit_price=8.00, exit_reason="stop"),  # dd=4000 → trigger again
+            _make_trade(pnl=100, exit_price=10.20),    # skip 1
+            _make_trade(pnl=100, exit_price=10.20),    # skip 2
+            _make_trade(pnl=500, exit_price=10.50),    # taken
+        ]
+        result = apply_circuit_breaker(trades, dd_threshold=3000, pause_trades=2)
+        assert len(result) == 6  # 10 - 4 skipped
+
+    def test_sorts_by_entry_time(self):
+        """Trades are sorted by entry_time before applying circuit breaker."""
+        # Create trades with different times but out of order
+        t1 = _make_trade(pnl=500, exit_price=10.50)
+        t2 = _make_trade(pnl=-4000, exit_price=6.00, exit_reason="stop")
+        t3 = _make_trade(pnl=100, exit_price=10.20)  # should be skipped
+
+        # Give them ordered times
+        t1.entry_time = datetime(2026, 3, 1, 14, 0, tzinfo=timezone.utc)
+        t2.entry_time = datetime(2026, 3, 2, 14, 0, tzinfo=timezone.utc)
+        t3.entry_time = datetime(2026, 3, 3, 14, 0, tzinfo=timezone.utc)
+
+        # Pass in reverse order — should still sort correctly
+        result = apply_circuit_breaker([t3, t1, t2], dd_threshold=3000, pause_trades=1)
+        assert len(result) == 2  # t3 skipped
+
+    def test_pause_zero_skips_nothing(self):
+        """pause_trades=0 means trigger is detected but no trades skipped."""
+        trades = [
+            _make_trade(pnl=-5000, exit_price=5.00, exit_reason="stop"),
+            _make_trade(pnl=100, exit_price=10.20),
+        ]
+        result = apply_circuit_breaker(trades, dd_threshold=3000, pause_trades=0)
+        assert len(result) == 2
 
 
 # ===========================================================================
