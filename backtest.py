@@ -49,6 +49,12 @@ class SimulatedTrade:
     pnl_pct: float = 0.0
     bars_held: int = 0
     plan: Optional[TradePlan] = None
+    # Entry bar OHLCV — the actual 1-min bar where entry was triggered
+    entry_bar_open: Optional[float] = None
+    entry_bar_high: Optional[float] = None
+    entry_bar_low: Optional[float] = None
+    entry_bar_close: Optional[float] = None
+    entry_bar_volume: Optional[int] = None
 
 
 @dataclass
@@ -106,14 +112,20 @@ class TradeSimulator:
         Returns:
             SimulatedTrade with fill details and P&L
         """
+        entry_bar = bars.iloc[entry_bar_idx]
         trade = SimulatedTrade(
             symbol=plan.symbol,
-            entry_time=bars.iloc[entry_bar_idx]['timestamp'],
+            entry_time=entry_bar['timestamp'],
             entry_price=plan.entry_price,
             stop_loss=plan.stop_loss_price,
             take_profit=plan.take_profit_price,
             shares=plan.shares,
             plan=plan,
+            entry_bar_open=float(entry_bar['open']),
+            entry_bar_high=float(entry_bar['high']),
+            entry_bar_low=float(entry_bar['low']),
+            entry_bar_close=float(entry_bar['close']),
+            entry_bar_volume=int(entry_bar['volume']),
         )
 
         last_bar_idx = len(bars) - 1

@@ -98,6 +98,11 @@ def _make_trade(plan=None, **kwargs) -> SimulatedTrade:
         pnl_pct=7.27,
         bars_held=15,
         plan=plan,
+        entry_bar_open=5.45,
+        entry_bar_high=5.60,
+        entry_bar_low=5.42,
+        entry_bar_close=5.55,
+        entry_bar_volume=250000,
     )
     defaults.update(kwargs)
     return SimulatedTrade(**defaults)
@@ -220,16 +225,33 @@ class TestBuildRichRow:
         row = build_rich_row(trade, result, daily_bars, universe)
 
         assert len(row) == len(RICH_CSV_HEADERS)
-        assert row[0] == "TEST"  # symbol
-        assert row[1] == "2026-03-05"  # date
-        assert row[3] == "5.50"  # entry_price
-        assert row[10] == "36.00"  # pnl
-        assert row[12] == 15  # bars_held
-        assert row[17] == "10.00"  # pole_gain_pct
-        assert row[25] == "5.00"  # day_open
-        assert row[31] == "Technology"  # sector
-        assert row[34] == 60  # entry_minutes_from_open (14:30 - 13:30 = 60 min)
-        assert row[35] == 2  # patterns_detected_that_day
+
+        # Build a dict for readable assertions
+        row_dict = dict(zip(RICH_CSV_HEADERS, row))
+        assert row_dict["symbol"] == "TEST"
+        assert row_dict["date"] == "2026-03-05"
+        assert row_dict["entry_price"] == "5.50"
+        assert row_dict["pnl"] == "36.00"
+        assert row_dict["bars_held"] == 15
+        assert row_dict["pole_gain_pct"] == "10.00"
+        # Entry bar OHLCV
+        assert row_dict["entry_bar_open"] == "5.45"
+        assert row_dict["entry_bar_high"] == "5.60"
+        assert row_dict["entry_bar_low"] == "5.42"
+        assert row_dict["entry_bar_close"] == "5.55"
+        assert row_dict["entry_bar_volume"] == 250000
+        # Daily bar context
+        assert row_dict["day_open"] == "5.00"
+        assert row_dict["day_volume"] == 500000
+        # Volume analysis
+        assert row_dict["avg_volume_daily"] == 200000
+        assert row_dict["relative_volume"] == "2.50"  # 500000 / 200000
+        # Universe
+        assert row_dict["sector"] == "Technology"
+        assert row_dict["float_shares"] == 1000000
+        # Derived
+        assert row_dict["entry_minutes_from_open"] == 60  # 14:30 - 13:30
+        assert row_dict["patterns_detected_that_day"] == 2
 
     def test_row_with_missing_daily_bars(self):
         """Row handles missing daily bar data gracefully."""
@@ -239,9 +261,13 @@ class TestBuildRichRow:
         row = build_rich_row(trade, result, {}, {})
 
         assert len(row) == len(RICH_CSV_HEADERS)
-        assert row[25] == ""  # day_open
-        assert row[30] == ""  # intraday_move_pct
-        assert row[31] == ""  # sector
+        row_dict = dict(zip(RICH_CSV_HEADERS, row))
+        assert row_dict["day_open"] == ""
+        assert row_dict["intraday_move_pct"] == ""
+        assert row_dict["sector"] == ""
+        assert row_dict["relative_volume"] == ""
+        # Entry bar should still be populated (comes from trade, not daily)
+        assert row_dict["entry_bar_open"] == "5.45"
 
     def test_row_with_no_plan(self):
         """Row handles trade without plan."""
@@ -258,8 +284,11 @@ class TestBuildRichRow:
 
         row = build_rich_row(trade, result, {}, {})
 
-        assert row[13] == ""  # risk_per_share
-        assert row[17] == ""  # pole_gain_pct
+        row_dict = dict(zip(RICH_CSV_HEADERS, row))
+        assert row_dict["risk_per_share"] == ""
+        assert row_dict["pole_gain_pct"] == ""
+        # Entry bar fields should be empty (no bar data on planless trade)
+        assert row_dict["entry_bar_open"] == ""
 
 
 # ===========================================================================

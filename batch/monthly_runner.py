@@ -55,11 +55,16 @@ RICH_CSV_HEADERS = [
     "pole_gain_pct", "retracement_pct", "pullback_candles",
     "avg_pole_volume", "avg_flag_volume", "pole_height",
     "flag_low", "flag_high",
+    # Entry bar OHLCV — the actual 1-min bar where entry was triggered
+    "entry_bar_open", "entry_bar_high", "entry_bar_low",
+    "entry_bar_close", "entry_bar_volume",
     # Daily bar context
     "day_open", "day_high", "day_low", "day_close", "day_volume",
     "intraday_move_pct",
+    # Volume analysis
+    "avg_volume_daily", "relative_volume",
     # Universe metadata
-    "sector", "float_shares", "avg_volume_daily",
+    "sector", "float_shares",
     # Derived
     "entry_minutes_from_open", "patterns_detected_that_day",
 ]
@@ -118,6 +123,11 @@ def build_rich_row(
     float_shares = uni.get('float_shares', '')
     avg_volume_daily = uni.get('avg_volume_daily', '')
 
+    # Relative volume: day_volume / avg_volume_daily
+    relative_volume = ''
+    if isinstance(day_volume, (int, float)) and day_volume > 0 and isinstance(avg_volume_daily, (int, float)) and avg_volume_daily > 0:
+        relative_volume = f"{day_volume / avg_volume_daily:.2f}"
+
     # Entry minutes from open (9:30 ET = 13:30 UTC)
     entry_minutes = ''
     if trade.entry_time:
@@ -155,6 +165,12 @@ def build_rich_row(
         f"{pattern.pole_height:.4f}" if pattern else "",
         f"{pattern.flag_low:.2f}" if pattern else "",
         f"{pattern.flag_high:.2f}" if pattern else "",
+        # Entry bar OHLCV
+        f"{trade.entry_bar_open:.2f}" if trade.entry_bar_open is not None else "",
+        f"{trade.entry_bar_high:.2f}" if trade.entry_bar_high is not None else "",
+        f"{trade.entry_bar_low:.2f}" if trade.entry_bar_low is not None else "",
+        f"{trade.entry_bar_close:.2f}" if trade.entry_bar_close is not None else "",
+        trade.entry_bar_volume if trade.entry_bar_volume is not None else "",
         # Daily bar context
         f"{day_open:.2f}" if isinstance(day_open, (int, float)) else day_open,
         f"{day_high:.2f}" if isinstance(day_high, (int, float)) else day_high,
@@ -162,10 +178,12 @@ def build_rich_row(
         f"{day_close:.2f}" if isinstance(day_close, (int, float)) else day_close,
         day_volume,
         intraday_move_pct,
+        # Volume analysis
+        avg_volume_daily,
+        relative_volume,
         # Universe metadata
         sector,
         float_shares,
-        avg_volume_daily,
         # Derived
         entry_minutes,
         result.patterns_detected,
