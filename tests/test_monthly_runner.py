@@ -456,7 +456,7 @@ class TestAggregateCsvs:
 class TestRunMonth:
     """Tests for single month processing with mocked dependencies."""
 
-    @patch("batch.monthly_runner.get_database")
+    @patch("batch.monthly_runner.Database")
     @patch("batch.monthly_runner.AlpacaClient")
     @patch("batch.monthly_runner.run_batch_backtest")
     @patch("batch.monthly_runner.find_big_movers")
@@ -499,7 +499,7 @@ class TestRunMonth:
         assert month_result.csv_path.endswith("backtest_2025_01.csv")
         assert os.path.exists(month_result.csv_path)
 
-    @patch("batch.monthly_runner.get_database")
+    @patch("batch.monthly_runner.Database")
     @patch("batch.monthly_runner.AlpacaClient")
     @patch("batch.monthly_runner.find_big_movers")
     @patch("batch.monthly_runner.fetch_daily_bars_cached")
@@ -535,7 +535,7 @@ class TestRunMonth:
 class TestMonthlyRunnerEndToEnd:
     """Integration test for the full monthly pipeline with mocked APIs."""
 
-    @patch("batch.monthly_runner.get_database")
+    @patch("batch.monthly_runner.Database")
     @patch("batch.monthly_runner.AlpacaClient")
     @patch("batch.monthly_runner.run_batch_backtest")
     @patch("batch.monthly_runner.find_big_movers")
@@ -581,7 +581,7 @@ class TestMonthlyRunnerEndToEnd:
         # Header + 2 months of data (each month has 1 trade)
         assert len(all_rows) >= 2  # at least header + 1 trade
 
-    @patch("batch.monthly_runner.get_database")
+    @patch("batch.monthly_runner.Database")
     @patch("batch.monthly_runner.AlpacaClient")
     @patch("batch.monthly_runner.run_batch_backtest")
     @patch("batch.monthly_runner.find_big_movers")

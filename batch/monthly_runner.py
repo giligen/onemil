@@ -34,7 +34,7 @@ from batch_backtest import (
     write_csv_report,
 )
 from data_sources.alpaca_client import AlpacaClient
-from persistence.database import Database, get_database
+from persistence.database import Database
 
 logger = logging.getLogger(__name__)
 
@@ -355,7 +355,9 @@ class MonthlyBacktestRunner:
             )
 
         client = AlpacaClient(api_key=api_key, api_secret=api_secret)
-        db = get_database()
+        # Each thread gets its own Database connection — never use the singleton
+        # get_database() here, as it shares a single connection across threads.
+        db = Database()
 
         try:
             # Load universe
