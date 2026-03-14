@@ -483,8 +483,8 @@ class BacktestRunner:
             partial_profit_r_multiple: Take partial at this R multiple (default 1.0)
             partial_profit_fraction: Fraction of shares for partial exit (default 0.5)
         """
-        self.detector = detector or BullFlagDetector()
-        self.planner = planner or TradePlanner()
+        self.detector = detector or BullFlagDetector.from_config()
+        self.planner = planner or TradePlanner.from_config()
         self.min_price = min_price if min_price is not None else self.DEFAULT_MIN_PRICE
         self.skip_midday = skip_midday if skip_midday is not None else self.DEFAULT_SKIP_MIDDAY
         self.early_exit_after_trade = early_exit_after_trade

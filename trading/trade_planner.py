@@ -85,6 +85,30 @@ class TradePlanner:
         self.min_risk_pct = min_risk_pct
         self.max_risk_pct = max_risk_pct
 
+    @classmethod
+    def from_config(cls) -> 'TradePlanner':
+        """Create a TradePlanner with parameters from config.yaml."""
+        try:
+            from config import Config
+            cfg = Config._load_yaml_only()
+            trading = cfg.get("trading", {})
+            min_risk_pct = trading.get("min_risk_pct")
+            max_risk_pct = trading.get("max_risk_pct")
+            return cls(
+                position_size_dollars=float(trading.get("position_size_dollars", 10000)),
+                max_shares=int(trading.get("max_shares", 10000)),
+                max_risk_per_share=float(trading.get("max_risk_per_share", 0.20)),
+                min_risk_per_share=float(trading.get("min_risk_per_share", 0.02)),
+                min_risk_reward=float(trading.get("min_risk_reward", 2.0)),
+                sizing_mode=str(trading.get("sizing_mode", "fixed_investment")),
+                risk_per_trade=float(trading.get("risk_per_trade", 500.0)),
+                min_risk_pct=float(min_risk_pct) if min_risk_pct is not None else None,
+                max_risk_pct=float(max_risk_pct) if max_risk_pct is not None else None,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to load config.yaml, using defaults: {e}")
+            return cls()
+
     def create_plan(self, pattern: BullFlagPattern) -> Optional[TradePlan]:
         """
         Create a trade plan from a detected bull flag pattern.

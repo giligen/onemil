@@ -98,6 +98,24 @@ class BullFlagDetector:
         self.macd_slow = macd_slow
         self.macd_signal = macd_signal
 
+    @classmethod
+    def from_config(cls) -> 'BullFlagDetector':
+        """Create a BullFlagDetector with parameters from config.yaml."""
+        try:
+            from config import Config
+            cfg = Config._load_yaml_only()
+            return cls(
+                min_pole_candles=int(cfg.get("trading", {}).get("bull_flag", {}).get("min_pole_candles", 3)),
+                min_pole_gain_pct=float(cfg.get("trading", {}).get("bull_flag", {}).get("min_pole_gain_pct", 3.0)),
+                max_retracement_pct=float(cfg.get("trading", {}).get("bull_flag", {}).get("max_retracement_pct", 50.0)),
+                max_pullback_candles=int(cfg.get("trading", {}).get("bull_flag", {}).get("max_pullback_candles", 5)),
+                min_breakout_volume_ratio=float(cfg.get("trading", {}).get("bull_flag", {}).get("min_breakout_volume_ratio", 1.5)),
+                require_macd_positive=bool(cfg.get("trading", {}).get("bull_flag", {}).get("require_macd_positive", False)),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to load config.yaml, using defaults: {e}")
+            return cls()
+
     def _scan_pole_and_flag(
         self, symbol: str, completed: pd.DataFrame, scan_from_idx: int
     ) -> Optional[dict]:

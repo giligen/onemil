@@ -74,6 +74,16 @@ class Config:
             logger.error(f"Missing required environment variables: {missing}")
             raise ValueError(f"Missing required environment variables: {missing}")
 
+    @staticmethod
+    def _load_yaml_only() -> dict:
+        """Load config.yaml without .env (for backtest use — avoids env pollution)."""
+        project_root = Path(__file__).parent
+        yaml_path = project_root / "config.yaml"
+        if yaml_path.exists():
+            with open(yaml_path, 'r') as f:
+                return yaml.safe_load(f) or {}
+        return {}
+
     def _get_yaml(self, *keys, default=None):
         """Traverse nested YAML keys, returning default if any key is missing."""
         node = self._yaml
