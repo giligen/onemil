@@ -81,8 +81,11 @@ trading:
   setup_expiry_bars: 10         # cancel pending buy-stop after N bars
   pattern_poll_interval: 60
   skip_midday: true
-  circuit_breaker_dd: 3000.0
-  circuit_breaker_pause: 2
+  circuit_breaker_dd: 1500.0
+  circuit_breaker_pause: 1
+  market_regime:
+    enabled: true
+    spy_5d_return_min: -2.0    # skip trading when SPY 5d return below this %
   bull_flag:
     min_pole_candles: 3
     min_pole_gain_pct: 3.0

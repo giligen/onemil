@@ -375,12 +375,22 @@ class Config:
     @property
     def circuit_breaker_dd(self) -> float:
         """Drawdown threshold to trigger circuit breaker (dollars)."""
-        return float(self._get_yaml("trading", "circuit_breaker_dd", default=3000.0))
+        return float(self._get_yaml("trading", "circuit_breaker_dd", default=1500.0))
 
     @property
     def circuit_breaker_pause(self) -> int:
         """Number of trades to skip when circuit breaker triggers."""
-        return int(self._get_yaml("trading", "circuit_breaker_pause", default=2))
+        return int(self._get_yaml("trading", "circuit_breaker_pause", default=1))
+
+    @property
+    def market_regime_enabled(self) -> bool:
+        """Whether the SPY market regime filter is active."""
+        return bool(self._get_yaml("trading", "market_regime", "enabled", default=True))
+
+    @property
+    def market_regime_spy_5d_return_min(self) -> float:
+        """Minimum SPY 5-day return percentage to allow trading."""
+        return float(self._get_yaml("trading", "market_regime", "spy_5d_return_min", default=-2.0))
 
     @property
     def setup_expiry_bars(self) -> int:

@@ -16,6 +16,7 @@ import csv
 import logging
 import os
 import sys
+from collections import defaultdict
 from datetime import datetime, timezone, date, timedelta
 from typing import List, Tuple, Dict, Optional
 
@@ -242,12 +243,19 @@ def run_batch_backtest(
     db: Optional[Database] = None,
     universe_dict: Optional[Dict] = None,
     volume_profiles: Optional[Dict[str, Dict[str, int]]] = None,
+    market_regime: Optional['MarketRegimeFilter'] = None,
+    circuit_breaker_dd: float = 0,
+    circuit_breaker_pause: int = 1,
 ) -> List[BacktestResult]:
     """
     Run backtests on all qualifying (symbol, date) pairs.
 
     Fetches 1-min bars (cached) for each pair, runs the backtest, collects results.
     API errors are logged and skipped (never abort the batch).
+
+    When market_regime is provided, entire dates are skipped if SPY regime is bearish.
+    When circuit_breaker_dd > 0, tracks intraday drawdown per date and skips
+    trades after drawdown threshold is hit.
 
     Args:
         movers: List of (symbol, date) pairs to backtest
@@ -256,55 +264,115 @@ def run_batch_backtest(
         db: Database for 1-min bar caching (optional, fetches without caching if None)
         universe_dict: Dict mapping symbol -> universe record
         volume_profiles: Dict mapping symbol -> {bucket: avg_volume} for bucket rvol
+        market_regime: Optional MarketRegimeFilter for SPY regime check
+        circuit_breaker_dd: Drawdown threshold in dollars (0 = disabled)
+        circuit_breaker_pause: Number of trades to skip when CB triggers
 
     Returns:
         List of BacktestResult objects (one per successful run)
     """
+    from trading.market_regime import MarketRegimeFilter  # avoid circular at module level
+
     results = []
     total = len(movers)
 
-    for idx, (symbol, trade_date) in enumerate(movers, 1):
-        date_str = trade_date.isoformat()
+    # Group movers by date for regime check and circuit breaker tracking
+    movers_by_date: Dict[date, List[Tuple[str, date]]] = defaultdict(list)
+    for sym, d in movers:
+        movers_by_date[d].append((sym, d))
 
-        try:
-            if db:
-                bars = get_1min_bars_cached(symbol, trade_date, client, db)
-            else:
-                dt = datetime(trade_date.year, trade_date.month, trade_date.day)
-                market_open = dt.replace(hour=13, minute=30, second=0, tzinfo=timezone.utc)
-                market_close = dt.replace(hour=20, minute=0, second=0, tzinfo=timezone.utc)
-                bars = client.get_historical_1min_bars(symbol, market_open, market_close)
+    idx = 0
+    regime_skipped = 0
+    cb_skipped = 0
 
-            if bars.empty:
-                logger.warning(f"[{idx}/{total}] {symbol} {date_str} — no bars, skipping")
+    for trade_date in sorted(movers_by_date.keys()):
+        # --- Market regime filter ---
+        if market_regime and not market_regime.is_regime_ok(trade_date):
+            spy_ret = market_regime.get_spy_5d_return(trade_date)
+            spy_ret_str = f"{spy_ret:.1f}%" if spy_ret is not None else "N/A"
+            n_skip = len(movers_by_date[trade_date])
+            regime_skipped += n_skip
+            idx += n_skip
+            logger.warning(
+                f"REGIME SKIP {trade_date}: SPY 5d return {spy_ret_str} "
+                f"< {market_regime.spy_5d_return_min}% — skipping {n_skip} symbols"
+            )
+            continue
+
+        # --- Circuit breaker state (reset per date) ---
+        cb_cum_pnl = 0.0
+        cb_peak = 0.0
+        cb_skips = 0
+
+        for symbol, _ in movers_by_date[trade_date]:
+            idx += 1
+            date_str = trade_date.isoformat()
+
+            # Circuit breaker skip
+            if cb_skips > 0:
+                cb_skips -= 1
+                cb_skipped += 1
+                logger.info(f"[{idx}/{total}] {symbol} {date_str} — CB skip (remaining: {cb_skips})")
                 continue
 
-            avg_vol = None
-            if universe_dict:
-                uni = universe_dict.get(symbol, {})
-                avg_vol = uni.get('avg_daily_volume') or uni.get('avg_volume_daily')
+            try:
+                if db:
+                    bars = get_1min_bars_cached(symbol, trade_date, client, db)
+                else:
+                    dt = datetime(trade_date.year, trade_date.month, trade_date.day)
+                    market_open = dt.replace(hour=13, minute=30, second=0, tzinfo=timezone.utc)
+                    market_close = dt.replace(hour=20, minute=0, second=0, tzinfo=timezone.utc)
+                    bars = client.get_historical_1min_bars(symbol, market_open, market_close)
 
-            vol_profile = volume_profiles.get(symbol) if volume_profiles else None
-            result = runner.run(symbol, bars, date_str,
-                                avg_daily_volume=avg_vol,
-                                volume_profile=vol_profile)
-            results.append(result)
+                if bars.empty:
+                    logger.warning(f"[{idx}/{total}] {symbol} {date_str} — no bars, skipping")
+                    continue
 
-            # Verbose progress line
-            n_patterns = result.patterns_detected
-            n_trades = len(result.trades_simulated)
-            pnl = result.summary_pnl
-            logger.info(
-                f"[{idx}/{total}] {symbol} {date_str} — "
-                f"{n_patterns} patterns, {n_trades} trade(s), "
-                f"P&L ${pnl:+.2f}"
-            )
+                avg_vol = None
+                if universe_dict:
+                    uni = universe_dict.get(symbol, {})
+                    avg_vol = uni.get('avg_daily_volume') or uni.get('avg_volume_daily')
 
-        except AlpacaAPIError as e:
-            logger.error(f"[{idx}/{total}] {symbol} {date_str} — API error: {e}, skipping")
-        except Exception as e:
-            logger.error(f"[{idx}/{total}] {symbol} {date_str} — unexpected error: {e}, skipping")
+                vol_profile = volume_profiles.get(symbol) if volume_profiles else None
+                result = runner.run(symbol, bars, date_str,
+                                    avg_daily_volume=avg_vol,
+                                    volume_profile=vol_profile)
+                results.append(result)
 
+                # Verbose progress line
+                n_patterns = result.patterns_detected
+                n_trades = len(result.trades_simulated)
+                pnl = result.summary_pnl
+                logger.info(
+                    f"[{idx}/{total}] {symbol} {date_str} — "
+                    f"{n_patterns} patterns, {n_trades} trade(s), "
+                    f"P&L ${pnl:+.2f}"
+                )
+
+                # --- Circuit breaker tracking ---
+                if circuit_breaker_dd > 0:
+                    for trade in result.trades_simulated:
+                        cb_cum_pnl += trade.pnl
+                        if cb_cum_pnl > cb_peak:
+                            cb_peak = cb_cum_pnl
+                        if cb_peak - cb_cum_pnl >= circuit_breaker_dd:
+                            cb_skips = circuit_breaker_pause
+                            cb_peak = cb_cum_pnl  # reset peak after trigger
+                            logger.warning(
+                                f"CB TRIGGERED on {date_str}: drawdown "
+                                f"${cb_peak - cb_cum_pnl + circuit_breaker_dd:.0f} — "
+                                f"skipping next {cb_skips} trade(s)"
+                            )
+
+            except AlpacaAPIError as e:
+                logger.error(f"[{idx}/{total}] {symbol} {date_str} — API error: {e}, skipping")
+            except Exception as e:
+                logger.error(f"[{idx}/{total}] {symbol} {date_str} — unexpected error: {e}, skipping")
+
+    if regime_skipped > 0:
+        logger.info(f"Regime filter skipped {regime_skipped} symbol/date pairs")
+    if cb_skipped > 0:
+        logger.info(f"Circuit breaker skipped {cb_skipped} symbol/date pairs")
     logger.info(f"Batch backtest complete: {len(results)}/{total} runs succeeded")
     return results
 

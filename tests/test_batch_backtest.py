@@ -736,3 +736,119 @@ class TestGet1minBarsCached:
         # Verify it was cached
         cached = db.get_intraday_bars_cached("PLYX", "2026-03-05")
         assert len(cached) == 1
+
+
+# ---------------------------------------------------------------------------
+# Market Regime + Circuit Breaker in Batch Backtest
+# ---------------------------------------------------------------------------
+
+
+class TestBatchBacktestRegimeAndCB:
+    """Tests for market regime filter and circuit breaker in run_batch_backtest."""
+
+    def test_regime_skips_bad_dates(self):
+        """run_batch_backtest skips entire dates when regime is bearish."""
+        from trading.market_regime import MarketRegimeFilter
+
+        # Create regime that blocks Mar 5 but allows Mar 6
+        regime = MarketRegimeFilter(enabled=True, spy_5d_return_min=-2.0)
+        spy_bars = [
+            # For Mar 5: prior 6 = [Feb25..Mar4], T-1=Mar4=480, T-6=Feb25=500 → -4%
+            {'date': date(2026, 2, 25), 'close': 500.0},
+            {'date': date(2026, 2, 26), 'close': 498.0},
+            {'date': date(2026, 2, 27), 'close': 496.0},
+            {'date': date(2026, 2, 28), 'close': 494.0},
+            {'date': date(2026, 3, 3), 'close': 490.0},
+            {'date': date(2026, 3, 4), 'close': 480.0},  # T-1 for Mar 5: -4%
+            # For Mar 6: prior 6 = [Feb26..Mar5], T-1=Mar5=510, T-6=Feb26=498 → +2.4%
+            {'date': date(2026, 3, 5), 'close': 510.0},
+        ]
+        regime.load_spy_bars(spy_bars)
+
+        movers = [
+            ("PLYX", date(2026, 3, 5)),  # Should be skipped (regime blocks)
+            ("SVCO", date(2026, 3, 5)),  # Should be skipped (same date)
+            ("AAPL", date(2026, 3, 6)),  # Should be allowed (regime OK)
+        ]
+
+        # Mock client and runner
+        client = MagicMock(spec=AlpacaClient)
+        runner = MagicMock(spec=BacktestRunner)
+
+        # Create a result for AAPL
+        aapl_result = BacktestResult(
+            symbol="AAPL", trade_date="2026-03-06",
+            total_bars=100, patterns_detected=1,
+            trades_simulated=[],
+        )
+        runner.run.return_value = aapl_result
+
+        # Mock 1-min bars
+        bars_df = pd.DataFrame({
+            'timestamp': [datetime(2026, 3, 6, 14, 0, tzinfo=timezone.utc)],
+            'open': [5.0], 'high': [5.5], 'low': [4.8],
+            'close': [5.3], 'volume': [100000],
+        })
+        client.get_historical_1min_bars.return_value = bars_df
+
+        results = run_batch_backtest(
+            movers, client, runner,
+            market_regime=regime,
+        )
+
+        # Only AAPL should have been backtested (Mar 6 is allowed)
+        assert len(results) == 1
+        assert results[0].symbol == "AAPL"
+        # Runner should have been called only once (for AAPL)
+        assert runner.run.call_count == 1
+
+    def test_cb_skips_after_drawdown(self):
+        """Circuit breaker skips trades after drawdown threshold is hit."""
+        movers = [
+            ("SYM1", date(2026, 3, 5)),
+            ("SYM2", date(2026, 3, 5)),
+            ("SYM3", date(2026, 3, 5)),
+        ]
+
+        client = MagicMock(spec=AlpacaClient)
+        runner = MagicMock(spec=BacktestRunner)
+
+        # SYM1 loses $2000 (triggers CB at $1500 DD)
+        trade1 = MagicMock()
+        trade1.pnl = -2000.0
+        result1 = BacktestResult(
+            symbol="SYM1", trade_date="2026-03-05",
+            total_bars=100, patterns_detected=1,
+            trades_simulated=[trade1],
+        )
+
+        # SYM3 would be a winning trade but should not be reached if CB pause=1
+        trade3 = MagicMock()
+        trade3.pnl = 500.0
+        result3 = BacktestResult(
+            symbol="SYM3", trade_date="2026-03-05",
+            total_bars=100, patterns_detected=1,
+            trades_simulated=[trade3],
+        )
+
+        # Runner returns different results for each call
+        runner.run.side_effect = [result1, result3]
+
+        bars_df = pd.DataFrame({
+            'timestamp': [datetime(2026, 3, 5, 14, 0, tzinfo=timezone.utc)],
+            'open': [5.0], 'high': [5.5], 'low': [4.8],
+            'close': [5.3], 'volume': [100000],
+        })
+        client.get_historical_1min_bars.return_value = bars_df
+
+        results = run_batch_backtest(
+            movers, client, runner,
+            circuit_breaker_dd=1500.0,
+            circuit_breaker_pause=1,
+        )
+
+        # SYM1 runs (loses $2000, triggers CB), SYM2 is skipped (CB), SYM3 runs
+        assert len(results) == 2
+        assert results[0].symbol == "SYM1"
+        assert results[1].symbol == "SYM3"
+        assert runner.run.call_count == 2  # SYM1 and SYM3, not SYM2

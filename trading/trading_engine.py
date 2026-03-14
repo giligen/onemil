@@ -13,7 +13,7 @@ Flow:
 
 import logging
 import time as time_mod
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Set, Optional, Dict, Any, List
 
 import pytz
@@ -53,6 +53,7 @@ class TradingEngine:
         last_entry_time_et: str = "15:00",
         force_close_time_et: str = "15:45",
         setup_expiry_seconds: int = 600,
+        market_regime: Optional['MarketRegimeFilter'] = None,
     ):
         """
         Initialize TradingEngine.
@@ -70,6 +71,7 @@ class TradingEngine:
             last_entry_time_et: No new entries after this ET time (HH:MM)
             force_close_time_et: Force close all positions at this ET time (HH:MM)
             setup_expiry_seconds: Cancel pending buy-stop after this many seconds
+            market_regime: Optional MarketRegimeFilter for SPY regime check
         """
         self.alpaca = alpaca_client
         self.db = db
@@ -91,6 +93,8 @@ class TradingEngine:
 
         self.setup_expiry_seconds = setup_expiry_seconds
 
+        self.market_regime = market_regime
+
         self._qualified_symbols: Set[str] = set()
         self._traded_symbols: Set[str] = set()
         self._patterns_detected: int = 0
@@ -98,6 +102,24 @@ class TradingEngine:
         self._pattern_details: list = []
         self._pending_orders: Dict[str, Dict] = {}  # symbol -> {order_id, plan, setup, placed_at}
         self.shutdown_event = None  # Set by caller for graceful shutdown
+
+    def _refresh_spy_data(self) -> None:
+        """Fetch recent SPY daily bars for regime filter."""
+        if not self.market_regime:
+            return
+        try:
+            end = date.today()
+            start = end - timedelta(days=14)  # 14 calendar days -> ~10 trading days
+            bars = self.alpaca.get_daily_bars_range(['SPY'], start, end)
+            spy_bars = bars.get('SPY', [])
+            self.market_regime.load_spy_bars(spy_bars)
+            ret = self.market_regime.get_spy_5d_return(end)
+            if ret is not None:
+                logger.info(f"SPY regime refreshed: {len(spy_bars)} bars, 5d return: {ret:.1f}%")
+            else:
+                logger.info(f"SPY regime refreshed: {len(spy_bars)} bars, insufficient data")
+        except Exception as e:
+            logger.error(f"Failed to refresh SPY regime data: {e}")
 
     def on_stock_qualified(self, symbol: str) -> None:
         """
@@ -455,6 +477,16 @@ class TradingEngine:
             Dict with order details if a trade was executed, None otherwise
         """
         if not self.enabled:
+            return None
+
+        # Market regime filter
+        if self.market_regime and not self.market_regime.is_regime_ok(date.today()):
+            ret = self.market_regime.get_spy_5d_return(date.today())
+            ret_str = f"{ret:.1f}%" if ret is not None else "N/A"
+            logger.warning(
+                f"REGIME FILTER: SPY 5d return {ret_str} "
+                f"< {self.market_regime.spy_5d_return_min}% — skipping all trades"
+            )
             return None
 
         # Step 0: Sync closed positions (detect bracket exits for circuit breaker)
@@ -820,4 +852,5 @@ class TradingEngine:
         self._pattern_details.clear()
         self._pending_orders.clear()
         self.position_manager.reset_daily()
+        self._refresh_spy_data()
         logger.info("Trading engine: daily state reset")

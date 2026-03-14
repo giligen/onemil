@@ -57,6 +57,9 @@ MONTHS = [
 def run_month_with_mode(
     month_start, month_end, client, db, universe_dict, volume_profiles,
     rvol_mode, rvol_min,
+    market_regime=None,
+    circuit_breaker_dd=0,
+    circuit_breaker_pause=1,
 ):
     """Run backtest for one month with a specific rvol mode."""
     cfg = Config._load_yaml_only()
@@ -85,6 +88,9 @@ def run_month_with_mode(
         movers, client, runner, db=db,
         universe_dict=universe_dict,
         volume_profiles=volume_profiles,
+        market_regime=market_regime,
+        circuit_breaker_dd=circuit_breaker_dd,
+        circuit_breaker_pause=circuit_breaker_pause,
     )
 
     trades = []
@@ -130,6 +136,22 @@ def main():
     # Collect results per mode per month
     all_results = {name: [] for name, _, _ in modes}
 
+    # Market regime filter — fetch SPY bars for full range
+    from trading.market_regime import MarketRegimeFilter
+    from datetime import timedelta
+    spy_start = MONTHS[0][0] - timedelta(days=14)
+    spy_end = MONTHS[-1][1]
+    spy_bars_raw = fetch_daily_bars_cached(['SPY'], spy_start, spy_end, client, db)
+    spy_bars = spy_bars_raw.get('SPY', [])
+    market_regime = MarketRegimeFilter(enabled=True, spy_5d_return_min=-2.0)
+    market_regime.load_spy_bars(spy_bars)
+
+    cfg_yaml = Config._load_yaml_only()
+    trading_cfg = cfg_yaml.get("trading", {})
+    cb_dd = float(trading_cfg.get("circuit_breaker_dd", 1500.0))
+    cb_pause = int(trading_cfg.get("circuit_breaker_pause", 1))
+    print(f"Regime filter: {len(spy_bars)} SPY bars, CB dd=${cb_dd}, pause={cb_pause}")
+
     for month_start, month_end in MONTHS:
         label = f"{month_start.year}-{month_start.month:02d}"
         month_pnls = {}
@@ -140,6 +162,9 @@ def main():
                 month_start, month_end, client, db,
                 universe_dict, volume_profiles,
                 rvol_mode, rvol_min,
+                market_regime=market_regime,
+                circuit_breaker_dd=cb_dd,
+                circuit_breaker_pause=cb_pause,
             )
             elapsed = time.time() - t0
 

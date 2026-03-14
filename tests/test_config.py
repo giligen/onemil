@@ -143,9 +143,11 @@ class TestConfigLoading:
         assert cfg.min_risk_pct is None
         assert cfg.max_risk_pct is None
         assert cfg.require_macd_positive is False
-        assert cfg.circuit_breaker_dd == 3000.0
-        assert cfg.circuit_breaker_pause == 2
+        assert cfg.circuit_breaker_dd == 1500.0
+        assert cfg.circuit_breaker_pause == 1
         assert cfg.setup_expiry_bars == 10
+        assert cfg.market_regime_enabled is True
+        assert cfg.market_regime_spy_5d_return_min == -2.0
 
         # Telegram defaults
         assert cfg.telegram_enabled is True
@@ -330,6 +332,24 @@ class TestNewConfigProperties:
         cfg = Config(env_path=env_file, yaml_path=str(yaml_path))
         assert cfg.circuit_breaker_dd == 5000.0
         assert cfg.circuit_breaker_pause == 3
+
+    def test_market_regime_defaults(self, env_file, tmp_path):
+        """market_regime_enabled and spy_5d_return_min use correct defaults."""
+        missing_yaml = str(tmp_path / "no_such.yaml")
+        cfg = Config(env_path=env_file, yaml_path=missing_yaml)
+        assert cfg.market_regime_enabled is True
+        assert cfg.market_regime_spy_5d_return_min == -2.0
+
+    def test_market_regime_from_yaml(self, env_file, tmp_path):
+        """market_regime properties read from YAML."""
+        import yaml
+        cfg_data = {"trading": {"market_regime": {"enabled": False, "spy_5d_return_min": -3.5}}}
+        yaml_path = tmp_path / "config.yaml"
+        with open(yaml_path, "w") as f:
+            yaml.dump(cfg_data, f)
+        cfg = Config(env_path=env_file, yaml_path=str(yaml_path))
+        assert cfg.market_regime_enabled is False
+        assert cfg.market_regime_spy_5d_return_min == -3.5
 
     def test_setup_expiry_bars_from_yaml(self, env_file, tmp_path):
         """setup_expiry_bars reads from YAML."""

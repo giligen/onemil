@@ -144,6 +144,13 @@ def _setup_telegram_error_handler(config) -> None:
 
 def _create_trading_engine(config, alpaca, db, notifier=None) -> TradingEngine:
     """Create the trading engine with all components wired up."""
+    from trading.market_regime import MarketRegimeFilter
+
+    market_regime = MarketRegimeFilter(
+        enabled=config.market_regime_enabled,
+        spy_5d_return_min=config.market_regime_spy_5d_return_min,
+    )
+
     detector = BullFlagDetector(
         min_pole_candles=config.min_pole_candles,
         min_pole_gain_pct=config.min_pole_gain_pct,
@@ -185,12 +192,17 @@ def _create_trading_engine(config, alpaca, db, notifier=None) -> TradingEngine:
         enabled=config.trading_enabled,
         notifier=notifier,
         setup_expiry_seconds=config.setup_expiry_bars * config.pattern_poll_interval,
+        market_regime=market_regime,
     )
+
+    # Load SPY data immediately so regime is ready if service starts mid-day
+    engine._refresh_spy_data()
 
     logger.info(
         f"Trading engine created — enabled: {config.trading_enabled}, "
         f"position_size: ${config.position_size_dollars}, "
-        f"max_positions: {config.max_positions}"
+        f"max_positions: {config.max_positions}, "
+        f"regime_filter: {config.market_regime_enabled}"
     )
     return engine
 

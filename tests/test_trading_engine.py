@@ -985,6 +985,7 @@ class TestSyncUsesFilledAvgPrice:
         assert trade['exit_price'] == pytest.approx(4.80, abs=0.01)
 
 
+
 # ===========================================================================
 # Fix 1: Fill Data Missing Fallback
 # ===========================================================================
@@ -1526,3 +1527,104 @@ class TestFilledQtyMigration:
         db.update_trade(trade_id, {'filled_qty': 75})
         trade = db.get_trade_by_order_id('order-migr')
         assert trade['filled_qty'] == 75
+
+
+# ---------------------------------------------------------------------------
+# Market Regime Filter Integration
+# ---------------------------------------------------------------------------
+
+class TestMarketRegimeInEngine:
+    """Tests for market regime filter in TradingEngine."""
+
+    def test_regime_blocks_pattern_check(self, mock_alpaca, db, mock_detector,
+                                          mock_planner, mock_executor, mock_position_manager):
+        """run_pattern_check returns None when regime filter blocks."""
+        from trading.market_regime import MarketRegimeFilter
+
+        # Create a regime filter that blocks
+        regime = MarketRegimeFilter(enabled=True, spy_5d_return_min=-2.0)
+        bars = [
+            {'date': date(2025, 3, 3), 'close': 500.0},
+            {'date': date(2025, 3, 4), 'close': 498.0},
+            {'date': date(2025, 3, 5), 'close': 496.0},
+            {'date': date(2025, 3, 6), 'close': 494.0},
+            {'date': date(2025, 3, 7), 'close': 490.0},
+            {'date': date(2025, 3, 10), 'close': 480.0},  # -4%
+        ]
+        regime.load_spy_bars(bars)
+
+        engine = TradingEngine(
+            alpaca_client=mock_alpaca, db=db, detector=mock_detector,
+            planner=mock_planner, executor=mock_executor,
+            position_manager=mock_position_manager,
+            enabled=True, market_regime=regime,
+        )
+        engine.on_stock_qualified("AAPL")
+
+        # Patch date.today() to return a date that will be blocked
+        with patch('trading.trading_engine.date') as mock_date:
+            mock_date.today.return_value = date(2025, 3, 11)
+            mock_date.side_effect = lambda *a, **k: date(*a, **k)
+            result = engine.run_pattern_check()
+
+        assert result is None
+        # Detector should NOT have been called — regime blocked before that
+        mock_detector.detect_setup.assert_not_called()
+
+    def test_regime_allows_when_ok(self, mock_alpaca, db, mock_detector,
+                                    mock_planner, mock_executor, mock_position_manager):
+        """run_pattern_check proceeds when regime filter allows."""
+        from trading.market_regime import MarketRegimeFilter
+
+        regime = MarketRegimeFilter(enabled=True, spy_5d_return_min=-2.0)
+        bars = [
+            {'date': date(2025, 3, 3), 'close': 500.0},
+            {'date': date(2025, 3, 4), 'close': 501.0},
+            {'date': date(2025, 3, 5), 'close': 502.0},
+            {'date': date(2025, 3, 6), 'close': 503.0},
+            {'date': date(2025, 3, 7), 'close': 504.0},
+            {'date': date(2025, 3, 10), 'close': 510.0},  # +2%
+        ]
+        regime.load_spy_bars(bars)
+
+        engine = TradingEngine(
+            alpaca_client=mock_alpaca, db=db, detector=mock_detector,
+            planner=mock_planner, executor=mock_executor,
+            position_manager=mock_position_manager,
+            enabled=True, market_regime=regime,
+        )
+        engine.on_stock_qualified("AAPL")
+
+        with patch('trading.trading_engine.date') as mock_date:
+            mock_date.today.return_value = date(2025, 3, 11)
+            mock_date.side_effect = lambda *a, **k: date(*a, **k)
+            with patch.object(TradingEngine, '_is_past_last_entry_time', return_value=False):
+                mock_alpaca.get_1min_bars.return_value = pd.DataFrame()
+                engine.run_pattern_check()
+
+        # Should have proceeded past regime check
+        # (may not find patterns on empty bars, but detector should be reachable)
+
+    def test_reset_daily_refreshes_spy(self, mock_alpaca, db, mock_detector,
+                                        mock_planner, mock_executor, mock_position_manager):
+        """reset_daily calls _refresh_spy_data."""
+        from trading.market_regime import MarketRegimeFilter
+
+        regime = MarketRegimeFilter(enabled=True)
+        engine = TradingEngine(
+            alpaca_client=mock_alpaca, db=db, detector=mock_detector,
+            planner=mock_planner, executor=mock_executor,
+            position_manager=mock_position_manager,
+            enabled=True, market_regime=regime,
+        )
+
+        mock_alpaca.get_daily_bars_range.return_value = {'SPY': [
+            {'date': date(2025, 3, 10), 'close': 510.0},
+        ]}
+
+        engine.reset_daily()
+
+        # Should have called get_daily_bars_range for SPY
+        mock_alpaca.get_daily_bars_range.assert_called_once()
+        call_args = mock_alpaca.get_daily_bars_range.call_args
+        assert call_args[0][0] == ['SPY']

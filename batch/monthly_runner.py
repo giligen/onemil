@@ -419,6 +419,29 @@ class MonthlyBacktestRunner:
             volume_profiles = db.get_all_volume_profiles()
             logger.info(f"{progress} Volume profiles loaded for {len(volume_profiles)} symbols")
 
+            # Market regime filter — fetch SPY daily bars
+            from trading.market_regime import MarketRegimeFilter
+            from config import Config as _Cfg
+            _cfg_yaml = _Cfg._load_yaml_only()
+            _trading_cfg = _cfg_yaml.get("trading", {})
+            _regime_cfg = _trading_cfg.get("market_regime", {})
+
+            spy_start = month_start - timedelta(days=14)
+            spy_bars_raw = fetch_daily_bars_cached(['SPY'], spy_start, month_end, client, db)
+            spy_bars = spy_bars_raw.get('SPY', [])
+            market_regime = MarketRegimeFilter(
+                enabled=bool(_regime_cfg.get("enabled", True)),
+                spy_5d_return_min=float(_regime_cfg.get("spy_5d_return_min", -2.0)),
+            )
+            market_regime.load_spy_bars(spy_bars)
+
+            cb_dd = float(_trading_cfg.get("circuit_breaker_dd", 1500.0))
+            cb_pause = int(_trading_cfg.get("circuit_breaker_pause", 1))
+            logger.info(
+                f"{progress} Regime filter: enabled={market_regime.enabled}, "
+                f"SPY bars={len(spy_bars)}, CB dd=${cb_dd}, CB pause={cb_pause}"
+            )
+
             # Run backtests — use multiprocessing if scan_workers > 1
             if self.scan_workers > 1:
                 results = run_batch_backtest_parallel(
@@ -428,7 +451,10 @@ class MonthlyBacktestRunner:
                 runner = BacktestRunner()  # uses from_config() for all settings
                 results = run_batch_backtest(movers, client, runner, db=db,
                                             universe_dict=universe_dict,
-                                            volume_profiles=volume_profiles)
+                                            volume_profiles=volume_profiles,
+                                            market_regime=market_regime,
+                                            circuit_breaker_dd=cb_dd,
+                                            circuit_breaker_pause=cb_pause)
 
             # Write rich CSV for this month
             csv_filename = f"backtest_{month_start.year}_{month_start.month:02d}.csv"
