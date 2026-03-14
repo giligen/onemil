@@ -291,7 +291,7 @@ def _backtest_worker(args: Tuple) -> Optional[dict]:
             if bars.empty:
                 return None
 
-            runner = BacktestRunner()
+            runner = BacktestRunner(realistic=True)
             result = runner.run(symbol, bars, trade_date_iso)
 
             # Serialize to dict for pickling across processes
@@ -677,7 +677,7 @@ def main():
         return
 
     # Step 3: Run backtests (1-min bars also cached)
-    runner = BacktestRunner()
+    runner = BacktestRunner(realistic=True)
     results = run_batch_backtest(movers, client, runner, db=db)
 
     # Step 4: Write CSV + print summary

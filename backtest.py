@@ -456,7 +456,7 @@ class BacktestRunner:
         min_price: Optional[float] = None,
         skip_midday: Optional[bool] = None,
         early_exit_after_trade: bool = True,
-        realistic: bool = False,
+        realistic: bool = True,
         last_entry_time_utc: float = 19.0,
         force_close_time_utc: Optional[float] = None,
         setup_expiry_bars: int = 10,

@@ -411,7 +411,7 @@ class MonthlyBacktestRunner:
                     movers, db_path=str(db.db_path), max_workers=self.scan_workers
                 )
             else:
-                runner = BacktestRunner()
+                runner = BacktestRunner(realistic=True)
                 results = run_batch_backtest(movers, client, runner, db=db)
 
             # Write rich CSV for this month

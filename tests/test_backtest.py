@@ -357,9 +357,11 @@ class TestBacktestRunnerEdgeCases:
         mock_simulator.simulate.return_value = trade
 
         # Disable early exit to test that patterns are still counted after trade
+        # Use fantasy mode since we're mocking detect(), not detect_setup()
         runner = BacktestRunner(
             detector=mock_detector, planner=mock_planner, simulator=mock_simulator,
             early_exit_after_trade=False,
+            realistic=False,
         )
         bars = _make_bars([(5.0, 5.1, 4.9, 5.0, 1000)] * 20)
         result = runner.run("TEST", bars, "2026-03-13")
@@ -382,7 +384,7 @@ class TestBacktestRunnerWithMocks:
         mock_detector.detect.return_value = pattern
         mock_planner.create_plan.return_value = None  # Rejected
 
-        runner = BacktestRunner(detector=mock_detector, planner=mock_planner)
+        runner = BacktestRunner(detector=mock_detector, planner=mock_planner, realistic=False)
         bars = _make_bars([(5.0, 5.1, 4.9, 5.0, 1000)] * 20)
         result = runner.run("TEST", bars, "2026-03-13")
 
@@ -394,7 +396,7 @@ class TestBacktestRunnerWithMocks:
         mock_detector = MagicMock(spec=BullFlagDetector)
         mock_detector.detect.return_value = None
 
-        runner = BacktestRunner(detector=mock_detector)
+        runner = BacktestRunner(detector=mock_detector, realistic=False)
         bars = _make_bars([(5.0, 5.1, 4.9, 5.0, 1000)] * 20)
         result = runner.run("TEST", bars, "2026-03-13")
 
