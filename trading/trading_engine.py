@@ -181,35 +181,47 @@ class TradingEngine:
                 else:
                     logger.error(f"{symbol}: No trade record for order {order_id}")
 
-                # Phase 3: Gap-fill stop adjustment
+                # Phase 3: Gap-fill stop + target adjustment
                 plan = pending['plan']
                 setup = pending.get('setup')
                 if fill_price and setup and fill_price > setup.breakout_level:
                     entry_gap = fill_price - setup.breakout_level
                     adjusted_stop = round(fill_price - plan.risk_per_share, 2)
+                    adjusted_target = round(fill_price + plan.risk_per_share * plan.risk_reward_ratio, 2)
                     logger.info(
-                        f"{symbol}: Gap fill +${entry_gap:.2f} — adjusting stop "
-                        f"${plan.stop_loss_price:.2f} → ${adjusted_stop:.2f}"
+                        f"{symbol}: Gap fill +${entry_gap:.2f} — "
+                        f"stop ${plan.stop_loss_price:.2f} → ${adjusted_stop:.2f}, "
+                        f"target ${plan.take_profit_price:.2f} → ${adjusted_target:.2f}"
                     )
                     try:
                         order_detail = self.alpaca.get_order(order_id)
                         sl_leg = None
+                        tp_leg = None
                         for leg in order_detail.get('legs', []):
                             if leg.get('side') == 'sell' and leg.get('stop_price') is not None:
                                 sl_leg = leg
-                                break
+                            elif leg.get('side') == 'sell' and leg.get('limit_price') is not None:
+                                tp_leg = leg
 
                         if sl_leg:
                             self.alpaca.replace_order_stop_price(sl_leg['id'], adjusted_stop)
-                            if trade_record:
-                                self.db.update_trade(trade_record['id'], {
-                                    'stop_loss_price': adjusted_stop,
-                                })
                             logger.info(f"{symbol}: Stop adjusted to ${adjusted_stop:.2f}")
                         else:
                             logger.error(f"{symbol}: No SL leg found in bracket order")
+
+                        if tp_leg:
+                            self.alpaca.replace_order_limit_price(tp_leg['id'], adjusted_target)
+                            logger.info(f"{symbol}: Target adjusted to ${adjusted_target:.2f}")
+                        else:
+                            logger.error(f"{symbol}: No TP leg found in bracket order")
+
+                        if trade_record:
+                            self.db.update_trade(trade_record['id'], {
+                                'stop_loss_price': adjusted_stop,
+                                'take_profit_price': adjusted_target,
+                            })
                     except Exception as e:
-                        logger.error(f"{symbol}: Failed to adjust stop after gap fill: {e}")
+                        logger.error(f"{symbol}: Failed to adjust orders after gap fill: {e}")
 
                 if self.notifier:
                     self.notifier.notify_order_submitted(

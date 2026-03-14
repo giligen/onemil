@@ -874,6 +874,11 @@ class TestBacktestRunnerRealistic:
             assert trade.stop_loss > 4.40, (
                 f"Stop should be adjusted up for gap fill, got {trade.stop_loss}"
             )
+            # Target must also be adjusted above entry price
+            assert trade.take_profit > trade.entry_price, (
+                f"Target ${trade.take_profit:.2f} must be above entry "
+                f"${trade.entry_price:.2f} after gap-fill adjustment"
+            )
 
     def test_no_gap_no_stop_adjustment(self):
         """When entry is at breakout level (no gap), stop stays at flag_low."""

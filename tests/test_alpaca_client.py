@@ -929,6 +929,35 @@ class TestReplaceOrderStopPrice:
             client.replace_order_stop_price("sl-leg-123", 4.35)
 
 
+# ===================================================================
+# replace_order_limit_price (gap-fill target adjustment)
+# ===================================================================
+
+class TestReplaceOrderLimitPrice:
+    """Tests for AlpacaClient.replace_order_limit_price."""
+
+    def test_replaces_limit_successfully(self, client, mock_sdk_clients):
+        """Successful limit replacement returns id and status."""
+        mock_order = MagicMock()
+        mock_order.id = "tp-leg-456"
+        mock_order.status = MagicMock()
+        mock_order.status.value = "replaced"
+        mock_sdk_clients["trading_client"].replace_order_by_id.return_value = mock_order
+
+        result = client.replace_order_limit_price("tp-leg-456", 5.05)
+
+        assert result['id'] == "tp-leg-456"
+        assert result['status'] == "replaced"
+        mock_sdk_clients["trading_client"].replace_order_by_id.assert_called_once()
+
+    def test_api_error_propagates(self, client, mock_sdk_clients):
+        """API error raises AlpacaAPIError."""
+        mock_sdk_clients["trading_client"].replace_order_by_id.side_effect = RuntimeError("fail")
+
+        with pytest.raises(AlpacaAPIError, match="Failed to replace order limit price"):
+            client.replace_order_limit_price("tp-leg-456", 5.05)
+
+
 class TestMarketCalendar:
     """Tests for calendar methods: get_market_calendar, is_trading_day, is_short_trading_day."""
 

@@ -378,11 +378,22 @@ class MonthlyBacktestRunner:
                     elapsed_seconds=time.time() - t0, results=[],
                 )
 
-            # Fetch daily bars and find movers
+            # Fetch daily bars and find movers (with scanner filters from config.yaml)
             daily_bars = fetch_daily_bars_cached(
                 symbols, month_start, month_end, client, db
             )
-            movers = find_big_movers(daily_bars)
+
+            from config import Config
+            cfg = Config._load_yaml_only()
+            scanner_cfg = cfg.get("scanner", {})
+            movers = find_big_movers(
+                daily_bars,
+                universe_dict=universe_dict,
+                price_min=float(scanner_cfg.get("price_min", 2.0)),
+                price_max=float(scanner_cfg.get("price_max", 20.0)),
+                float_max=int(scanner_cfg.get("float_max", 10_000_000)),
+                relative_volume_min=float(scanner_cfg.get("relative_volume_min", 5.0)),
+            )
 
             if not movers:
                 logger.info(f"{progress} {month_label}: 0 movers, skipping")

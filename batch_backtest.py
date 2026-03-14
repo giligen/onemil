@@ -51,37 +51,88 @@ CSV_HEADERS = [
 
 
 def find_big_movers(
-    daily_bars: Dict[str, List[Dict]], threshold: float = INTRADAY_MOVE_THRESHOLD
+    daily_bars: Dict[str, List[Dict]],
+    threshold: float = INTRADAY_MOVE_THRESHOLD,
+    universe_dict: Optional[Dict] = None,
+    price_min: float = 0.0,
+    price_max: float = 0.0,
+    float_max: int = 0,
+    relative_volume_min: float = 0.0,
 ) -> List[Tuple[str, date]]:
     """
-    Filter daily bars for (symbol, date) pairs with intraday move >= threshold.
+    Filter daily bars for (symbol, date) pairs matching scanner criteria.
 
-    Intraday move = (high - low) / low.
+    Applies the same filters as the live scanner to ensure backtest
+    results reflect what the live system would actually trade.
 
     Args:
         daily_bars: Dict mapping symbol -> list of daily bar dicts
         threshold: Minimum (high-low)/low ratio (default 0.10 = 10%)
+        universe_dict: Dict mapping symbol -> universe record (for float, avg_volume)
+        price_min: Minimum price filter (0 = disabled)
+        price_max: Maximum price filter (0 = disabled)
+        float_max: Maximum float shares (0 = disabled)
+        relative_volume_min: Minimum daily relative volume (0 = disabled)
 
     Returns:
         Sorted list of (symbol, date) tuples qualifying for backtest
     """
+    universe_dict = universe_dict or {}
     movers = []
+    skipped_price = 0
+    skipped_float = 0
+    skipped_rvol = 0
+
     for symbol, bars in daily_bars.items():
+        uni = universe_dict.get(symbol, {})
+        sym_float = uni.get('float_shares')
+        sym_avg_vol = uni.get('avg_volume_daily')
+
+        # Float filter (applied once per symbol)
+        if float_max > 0 and sym_float and sym_float > float_max:
+            skipped_float += len([b for b in bars if (b['high'] - b['low']) / b['low'] >= threshold if b['low'] > 0])
+            continue
+
         for bar in bars:
             low = bar['low']
             high = bar['high']
             if low <= 0:
                 continue
             move = (high - low) / low
-            if move >= threshold:
-                bar_date = bar['date'] if isinstance(bar['date'], date) else bar['date']
-                movers.append((symbol, bar_date))
-                logger.debug(
-                    f"  {symbol} {bar_date}: move {move:.1%} "
-                    f"(low=${low:.2f}, high=${high:.2f})"
-                )
+            if move < threshold:
+                continue
+
+            # Price filter: use closing price as proxy for tradeable range
+            bar_close = bar.get('close', 0)
+            if price_min > 0 and bar_close < price_min:
+                skipped_price += 1
+                continue
+            if price_max > 0 and bar_close > price_max:
+                skipped_price += 1
+                continue
+
+            # Relative volume: day_volume / avg_volume_daily
+            if relative_volume_min > 0 and sym_avg_vol and sym_avg_vol > 0:
+                day_vol = bar.get('volume', 0)
+                rvol = day_vol / sym_avg_vol
+                if rvol < relative_volume_min:
+                    skipped_rvol += 1
+                    continue
+
+            bar_date = bar['date'] if isinstance(bar['date'], date) else bar['date']
+            movers.append((symbol, bar_date))
+            logger.debug(
+                f"  {symbol} {bar_date}: move {move:.1%} "
+                f"(low=${low:.2f}, high=${high:.2f})"
+            )
+
     movers.sort(key=lambda x: (x[1], x[0]))
-    logger.info(f"Found {len(movers)} symbol/date pairs with {threshold:.0%}+ intraday move")
+    total_skipped = skipped_price + skipped_float + skipped_rvol
+    logger.info(
+        f"Found {len(movers)} symbol/date pairs with {threshold:.0%}+ intraday move "
+        f"(filtered out {total_skipped}: {skipped_price} price, "
+        f"{skipped_float} float, {skipped_rvol} rvol)"
+    )
     return movers
 
 
@@ -665,11 +716,23 @@ def main():
         logger.error("No active symbols in universe — run universe builder first")
         sys.exit(1)
 
-    # Step 2: Fetch daily bars (cached) and find 10%+ movers
+    # Step 2: Fetch daily bars (cached) and find 10%+ movers with scanner filters
     client = AlpacaClient(api_key=api_key, api_secret=api_secret)
     logger.info("Fetching daily bars for date range (cache-first)...")
     daily_bars = fetch_daily_bars_cached(symbols, start_date, end_date, client, db)
-    movers = find_big_movers(daily_bars)
+    universe_dict = {s['symbol']: s for s in universe}
+
+    from config import Config
+    cfg = Config._load_yaml_only()
+    scanner_cfg = cfg.get("scanner", {})
+    movers = find_big_movers(
+        daily_bars,
+        universe_dict=universe_dict,
+        price_min=float(scanner_cfg.get("price_min", 2.0)),
+        price_max=float(scanner_cfg.get("price_max", 20.0)),
+        float_max=int(scanner_cfg.get("float_max", 10_000_000)),
+        relative_volume_min=float(scanner_cfg.get("relative_volume_min", 5.0)),
+    )
 
     if not movers:
         logger.warning("No symbols with 10%+ intraday move found — nothing to backtest")

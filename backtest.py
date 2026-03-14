@@ -709,16 +709,18 @@ class BacktestRunner:
                     # a $2K risk trade into a $6.6K risk trade.
                     if entry_gap > 0:
                         adjusted_stop = fill_price - plan.risk_per_share
+                        adjusted_target = fill_price + plan.risk_per_share * plan.risk_reward_ratio
                         logger.info(
                             f"  Entry gap +${entry_gap:.2f}: "
-                            f"stop adjusted ${plan.stop_loss_price:.2f} → "
-                            f"${adjusted_stop:.2f} (maintain ${plan.risk_per_share:.2f}/sh risk)"
+                            f"stop ${plan.stop_loss_price:.2f} → ${adjusted_stop:.2f}, "
+                            f"target ${plan.take_profit_price:.2f} → ${adjusted_target:.2f} "
+                            f"(maintain ${plan.risk_per_share:.2f}/sh risk)"
                         )
                         plan = TradePlan(
                             symbol=plan.symbol,
                             entry_price=plan.entry_price,
                             stop_loss_price=adjusted_stop,
-                            take_profit_price=plan.take_profit_price,
+                            take_profit_price=adjusted_target,
                             risk_per_share=plan.risk_per_share,
                             reward_per_share=plan.reward_per_share,
                             risk_reward_ratio=plan.risk_reward_ratio,
