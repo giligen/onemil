@@ -30,6 +30,7 @@ from batch_backtest import (
     find_big_movers,
     get_1min_bars_cached,
     run_batch_backtest,
+    run_batch_backtest_parallel,
     utc_to_et_str,
     write_csv_report,
 )
@@ -303,15 +304,19 @@ class MonthlyBacktestRunner:
     with busy_timeout for write contention.
     """
 
-    def __init__(self, max_workers: int = 2, verbose: bool = False):
+    def __init__(self, max_workers: int = 2, scan_workers: int = 1, verbose: bool = False):
         """
         Initialize MonthlyBacktestRunner.
 
         Args:
-            max_workers: Number of parallel threads (default 2)
+            max_workers: Number of parallel month threads (default 2)
+            scan_workers: Number of parallel processes for scanning movers
+                within each month. >1 uses multiprocessing (best for cached
+                re-runs where all data is in SQLite). Default 1 (sequential).
             verbose: Enable verbose/debug logging
         """
         self.max_workers = max_workers
+        self.scan_workers = scan_workers
         self.verbose = verbose
 
     def run_month(
@@ -387,9 +392,14 @@ class MonthlyBacktestRunner:
                     elapsed_seconds=time.time() - t0, results=[],
                 )
 
-            # Run backtests
-            runner = BacktestRunner()
-            results = run_batch_backtest(movers, client, runner, db=db)
+            # Run backtests — use multiprocessing if scan_workers > 1
+            if self.scan_workers > 1:
+                results = run_batch_backtest_parallel(
+                    movers, db_path=str(db.db_path), max_workers=self.scan_workers
+                )
+            else:
+                runner = BacktestRunner()
+                results = run_batch_backtest(movers, client, runner, db=db)
 
             # Write rich CSV for this month
             csv_filename = f"backtest_{month_start.year}_{month_start.month:02d}.csv"

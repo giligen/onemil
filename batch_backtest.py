@@ -258,6 +258,231 @@ def run_batch_backtest(
 
 
 # ---------------------------------------------------------------------------
+# Step 2b: Parallel batch backtest (multiprocessing for cached re-runs)
+# ---------------------------------------------------------------------------
+
+
+def _backtest_worker(args: Tuple) -> Optional[dict]:
+    """
+    Worker function for parallel backtest processing.
+
+    Each worker creates its own Database connection (processes don't share state).
+    Returns a serializable dict instead of BacktestResult (for pickling).
+
+    Args:
+        args: Tuple of (symbol, trade_date_iso, db_path)
+
+    Returns:
+        Serializable dict with backtest results, or None on error
+    """
+    symbol, trade_date_iso, db_path = args
+    try:
+        from persistence.database import Database
+        from backtest import BacktestRunner
+
+        db = Database(db_path=db_path)
+        try:
+            cached = db.get_intraday_bars_cached(symbol, trade_date_iso)
+            if not cached:
+                return None
+
+            bars = pd.DataFrame(cached)
+            if bars.empty:
+                return None
+
+            runner = BacktestRunner()
+            result = runner.run(symbol, bars, trade_date_iso)
+
+            # Serialize to dict for pickling across processes
+            trades = []
+            for t in result.trades_simulated:
+                trade_dict = {
+                    'symbol': t.symbol,
+                    'entry_time': t.entry_time,
+                    'entry_price': t.entry_price,
+                    'stop_loss': t.stop_loss,
+                    'take_profit': t.take_profit,
+                    'shares': t.shares,
+                    'exit_time': t.exit_time,
+                    'exit_price': t.exit_price,
+                    'exit_reason': t.exit_reason,
+                    'pnl': t.pnl,
+                    'pnl_pct': t.pnl_pct,
+                    'bars_held': t.bars_held,
+                    'entry_bar_open': t.entry_bar_open,
+                    'entry_bar_high': t.entry_bar_high,
+                    'entry_bar_low': t.entry_bar_low,
+                    'entry_bar_close': t.entry_bar_close,
+                    'entry_bar_volume': t.entry_bar_volume,
+                }
+                # Serialize plan and pattern
+                if t.plan:
+                    trade_dict['plan'] = {
+                        'risk_per_share': t.plan.risk_per_share,
+                        'reward_per_share': t.plan.reward_per_share,
+                        'risk_reward_ratio': t.plan.risk_reward_ratio,
+                        'total_risk': t.plan.total_risk,
+                    }
+                    if t.plan.pattern:
+                        p = t.plan.pattern
+                        trade_dict['pattern'] = {
+                            'pole_gain_pct': p.pole_gain_pct,
+                            'retracement_pct': p.retracement_pct,
+                            'pullback_candle_count': p.pullback_candle_count,
+                            'avg_pole_volume': p.avg_pole_volume,
+                            'avg_flag_volume': p.avg_flag_volume,
+                            'pole_height': p.pole_height,
+                            'flag_low': p.flag_low,
+                            'flag_high': p.flag_high,
+                            'breakout_level': p.breakout_level,
+                            'pole_start_idx': p.pole_start_idx,
+                            'pole_end_idx': p.pole_end_idx,
+                            'flag_start_idx': p.flag_start_idx,
+                            'flag_end_idx': p.flag_end_idx,
+                            'pole_low': p.pole_low,
+                            'pole_high': p.pole_high,
+                        }
+
+                trades.append(trade_dict)
+
+            return {
+                'symbol': result.symbol,
+                'trade_date': result.trade_date,
+                'total_bars': result.total_bars,
+                'patterns_detected': result.patterns_detected,
+                'trades': trades,
+            }
+        finally:
+            db.close()
+
+    except Exception as e:
+        # Log but don't crash the worker pool
+        return None
+
+
+def _reconstruct_result(result_dict: dict) -> BacktestResult:
+    """
+    Reconstruct a BacktestResult from a serialized dict.
+
+    Args:
+        result_dict: Dict from _backtest_worker
+
+    Returns:
+        BacktestResult with full object graph
+    """
+    from backtest import SimulatedTrade, BacktestResult
+    from trading.pattern_detector import BullFlagPattern
+    from trading.trade_planner import TradePlan
+
+    trades = []
+    for td in result_dict['trades']:
+        pattern = None
+        plan = None
+
+        if 'pattern' in td:
+            pd_data = td['pattern']
+            pattern = BullFlagPattern(
+                symbol=td['symbol'],
+                **pd_data,
+            )
+
+        if 'plan' in td:
+            plan = TradePlan(
+                symbol=td['symbol'],
+                entry_price=td['entry_price'],
+                stop_loss_price=td['stop_loss'],
+                take_profit_price=td['take_profit'],
+                shares=td['shares'],
+                pattern=pattern,
+                **td['plan'],
+            )
+
+        trade = SimulatedTrade(
+            symbol=td['symbol'],
+            entry_time=td['entry_time'],
+            entry_price=td['entry_price'],
+            stop_loss=td['stop_loss'],
+            take_profit=td['take_profit'],
+            shares=td['shares'],
+            exit_time=td['exit_time'],
+            exit_price=td['exit_price'],
+            exit_reason=td['exit_reason'],
+            pnl=td['pnl'],
+            pnl_pct=td['pnl_pct'],
+            bars_held=td['bars_held'],
+            plan=plan,
+            entry_bar_open=td.get('entry_bar_open'),
+            entry_bar_high=td.get('entry_bar_high'),
+            entry_bar_low=td.get('entry_bar_low'),
+            entry_bar_close=td.get('entry_bar_close'),
+            entry_bar_volume=td.get('entry_bar_volume'),
+        )
+        trades.append(trade)
+
+    result = BacktestResult(
+        symbol=result_dict['symbol'],
+        trade_date=result_dict['trade_date'],
+        total_bars=result_dict['total_bars'],
+        patterns_detected=result_dict['patterns_detected'],
+        trades_simulated=trades,
+    )
+    return result
+
+
+def run_batch_backtest_parallel(
+    movers: List[Tuple[str, date]],
+    db_path: str = "data/onemil.db",
+    max_workers: int = 4,
+) -> List[BacktestResult]:
+    """
+    Run backtests in parallel using multiprocessing.
+
+    Best for cached re-runs where all data is in SQLite (no API calls).
+    Each worker process creates its own Database connection.
+
+    Args:
+        movers: List of (symbol, date) pairs to backtest
+        db_path: Path to SQLite database
+        max_workers: Number of parallel processes (default 4)
+
+    Returns:
+        List of BacktestResult objects
+    """
+    from concurrent.futures import ProcessPoolExecutor
+
+    total = len(movers)
+    logger.info(f"Parallel batch backtest: {total} movers, {max_workers} workers")
+
+    # Build worker args
+    work_items = [
+        (symbol, trade_date.isoformat(), db_path)
+        for symbol, trade_date in movers
+    ]
+
+    results = []
+    completed = 0
+
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        for result_dict in executor.map(_backtest_worker, work_items, chunksize=50):
+            completed += 1
+            if result_dict is None:
+                continue
+
+            result = _reconstruct_result(result_dict)
+            results.append(result)
+
+            if completed % 500 == 0 or completed == total:
+                n_trades = sum(len(r.trades_simulated) for r in results)
+                logger.info(
+                    f"[{completed}/{total}] {len(results)} with results, "
+                    f"{n_trades} trades so far"
+                )
+
+    logger.info(f"Parallel batch complete: {len(results)}/{total} runs succeeded")
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Step 3: CSV report + console summary
 # ---------------------------------------------------------------------------
 
@@ -377,7 +602,12 @@ def main():
     )
     parser.add_argument(
         "--workers", type=int, default=2,
-        help="Number of parallel workers for --monthly mode (default: 2)"
+        help="Number of parallel month workers for --monthly mode (default: 2)"
+    )
+    parser.add_argument(
+        "--scan-workers", type=int, default=1,
+        help="Number of parallel processes for scanning movers within each month. "
+             ">1 uses multiprocessing — best for cached re-runs (default: 1)"
     )
     parser.add_argument(
         "--verbose", "-v", action="store_true",
@@ -411,7 +641,9 @@ def main():
         from batch.monthly_runner import MonthlyBacktestRunner
 
         runner = MonthlyBacktestRunner(
-            max_workers=args.workers, verbose=args.verbose
+            max_workers=args.workers,
+            scan_workers=args.scan_workers,
+            verbose=args.verbose,
         )
         master_csv = runner.run_all(start_date, end_date, output_dir="backtest_results")
         logger.info(f"Monthly backtest complete: {master_csv}")
