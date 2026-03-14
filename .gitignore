@@ -33,9 +33,12 @@ build/
 *.log
 logs/
 
-# Data
+# Data (cached API responses — large binary, use rsync between machines)
 data/
 *.db
+
+# Backtest results — DO track (small CSVs, ground truth reference)
+!backtest_results/
 
 # Testing
 .pytest_cache/
