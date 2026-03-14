@@ -80,7 +80,9 @@ class BullFlagDetector:
         self.max_pullback_candles = max_pullback_candles
         self.min_breakout_volume_ratio = min_breakout_volume_ratio
 
-    def detect(self, symbol: str, bars: pd.DataFrame) -> Optional[BullFlagPattern]:
+    def detect(
+        self, symbol: str, bars: pd.DataFrame, end_idx: Optional[int] = None
+    ) -> Optional[BullFlagPattern]:
         """
         Detect a bull flag pattern in 1-minute bar data.
 
@@ -88,6 +90,9 @@ class BullFlagDetector:
             symbol: Stock ticker symbol
             bars: DataFrame with columns: open, high, low, close, volume
                   Must be sorted chronologically (oldest first).
+            end_idx: If provided, use bars.iloc[:end_idx] as completed bars
+                     instead of dropping the last bar. This avoids expensive
+                     DataFrame copies in the backtest sliding window.
 
         Returns:
             BullFlagPattern if detected, None otherwise
@@ -100,8 +105,12 @@ class BullFlagDetector:
             logger.debug(f"{symbol}: Only {len(bars)} bar(s), need at least 7 (6 completed + 1 dropped)")
             return None
 
-        # CRITICAL: Drop the last bar — it's the current minute (still forming)
-        completed = bars.iloc[:-1].reset_index(drop=True)
+        # When end_idx is provided (backtest mode), use it as the slice boundary.
+        # Otherwise, drop the last bar (live mode — it's the current minute, still forming).
+        if end_idx is not None:
+            completed = bars.iloc[:end_idx]
+        else:
+            completed = bars.iloc[:-1]
 
         min_required = self.min_pole_candles + 2 + 1  # pole + min pullback + breakout
         if len(completed) < min_required:
@@ -154,14 +163,10 @@ class BullFlagDetector:
             logger.debug(f"{symbol}: Pole too short ({pole_candle_count} candles, need {self.min_pole_candles}+)")
             return None
 
-        # Calculate pole metrics
-        pole_low = completed.iloc[pole_start_idx]['low']
-        pole_high = completed.iloc[pole_end_idx]['high']
-
-        # Find the actual lowest low in the pole and highest high
-        for i in range(pole_start_idx, pole_end_idx + 1):
-            pole_low = min(pole_low, completed.iloc[i]['low'])
-            pole_high = max(pole_high, completed.iloc[i]['high'])
+        # Calculate pole metrics using vectorized pandas operations
+        pole_slice = completed.iloc[pole_start_idx:pole_end_idx + 1]
+        pole_low = pole_slice['low'].min()
+        pole_high = pole_slice['high'].max()
 
         pole_height = pole_high - pole_low
         if pole_low <= 0:
@@ -174,8 +179,9 @@ class BullFlagDetector:
             logger.debug(f"{symbol}: Pole gain {pole_gain_pct:.1f}% < {self.min_pole_gain_pct}% minimum")
             return None
 
-        # Calculate pullback metrics
-        flag_low = min(completed.iloc[i]['low'] for i in range(flag_start_idx, flag_end_idx + 1))
+        # Calculate pullback metrics using vectorized operations
+        flag_slice = completed.iloc[flag_start_idx:flag_end_idx + 1]
+        flag_low = flag_slice['low'].min()
         flag_high = completed.iloc[flag_end_idx]['high']
 
         if pole_height <= 0:
@@ -189,14 +195,9 @@ class BullFlagDetector:
             logger.debug(f"{symbol}: Retracement {retracement_pct:.1f}% > {self.max_retracement_pct}% max")
             return None
 
-        # Volume analysis
-        avg_pole_volume = sum(
-            completed.iloc[i]['volume'] for i in range(pole_start_idx, pole_end_idx + 1)
-        ) / pole_candle_count
-
-        avg_flag_volume = sum(
-            completed.iloc[i]['volume'] for i in range(flag_start_idx, flag_end_idx + 1)
-        ) / pullback_count
+        # Volume analysis using vectorized operations
+        avg_pole_volume = pole_slice['volume'].mean()
+        avg_flag_volume = flag_slice['volume'].mean()
 
         # Volume should decrease during pullback
         if avg_flag_volume > 0 and avg_pole_volume > 0:
@@ -257,6 +258,8 @@ class BullFlagDetector:
         A red candle is one where close < open.
         Doji candles (close == open) are treated as neutral and included in pullback.
 
+        Uses numpy arrays for fast comparison instead of per-row iloc access.
+
         Args:
             bars: Completed bars DataFrame
             end_idx: Index to start scanning backwards from
@@ -264,14 +267,16 @@ class BullFlagDetector:
         Returns:
             Tuple of (start_idx, end_idx) for pullback, or None
         """
+        opens = bars['open'].values
+        closes = bars['close'].values
+
         flag_end_idx = None
         flag_start_idx = None
 
         i = end_idx
         while i >= 0:
-            bar = bars.iloc[i]
-            is_red = bar['close'] < bar['open']
-            is_doji = bar['close'] == bar['open']
+            is_red = closes[i] < opens[i]
+            is_doji = closes[i] == opens[i]
 
             if is_red or is_doji:
                 if flag_end_idx is None:
@@ -299,6 +304,8 @@ class BullFlagDetector:
 
         A green candle is one where close > open.
 
+        Uses numpy arrays for fast comparison instead of per-row iloc access.
+
         Args:
             bars: Completed bars DataFrame
             end_idx: Index to start scanning backwards from
@@ -306,13 +313,15 @@ class BullFlagDetector:
         Returns:
             Tuple of (start_idx, end_idx) for pole, or None
         """
+        opens = bars['open'].values
+        closes = bars['close'].values
+
         pole_end_idx = None
         pole_start_idx = None
 
         i = end_idx
         while i >= 0:
-            bar = bars.iloc[i]
-            is_green = bar['close'] > bar['open']
+            is_green = closes[i] > opens[i]
 
             if is_green:
                 if pole_end_idx is None:

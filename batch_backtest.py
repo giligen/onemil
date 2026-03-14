@@ -372,6 +372,14 @@ def main():
         help=f"CSV output path (default: {CSV_OUTPUT})"
     )
     parser.add_argument(
+        "--monthly", action="store_true",
+        help="Run in monthly-chunked mode with parallel processing and rich CSV output"
+    )
+    parser.add_argument(
+        "--workers", type=int, default=2,
+        help="Number of parallel workers for --monthly mode (default: 2)"
+    )
+    parser.add_argument(
         "--verbose", "-v", action="store_true",
         help="Enable verbose/debug logging"
     )
@@ -398,6 +406,18 @@ def main():
 
     logger.info(f"Batch backtest: {start_date} to {end_date}")
 
+    # Monthly mode: use MonthlyBacktestRunner for parallel, chunked processing
+    if args.monthly:
+        from batch.monthly_runner import MonthlyBacktestRunner
+
+        runner = MonthlyBacktestRunner(
+            max_workers=args.workers, verbose=args.verbose
+        )
+        master_csv = runner.run_all(start_date, end_date, output_dir="backtest_results")
+        logger.info(f"Monthly backtest complete: {master_csv}")
+        return
+
+    # Standard (non-monthly) mode
     # Step 1: Load universe
     db = get_database()
     universe = db.get_active_universe()

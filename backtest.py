@@ -202,6 +202,7 @@ class BacktestRunner:
         simulator: Optional[TradeSimulator] = None,
         min_price: Optional[float] = None,
         skip_midday: Optional[bool] = None,
+        early_exit_after_trade: bool = True,
     ):
         """
         Initialize BacktestRunner.
@@ -212,12 +213,15 @@ class BacktestRunner:
             simulator: TradeSimulator instance (uses defaults if None)
             min_price: Minimum entry price filter (default 5.0)
             skip_midday: Skip 11:30-14:00 ET entries (default True)
+            early_exit_after_trade: Stop scanning after first trade (default True).
+                Set to False to count all pattern detections for analysis.
         """
         self.detector = detector or BullFlagDetector()
         self.planner = planner or TradePlanner()
         self.simulator = simulator or TradeSimulator()
         self.min_price = min_price if min_price is not None else self.DEFAULT_MIN_PRICE
         self.skip_midday = skip_midday if skip_midday is not None else self.DEFAULT_SKIP_MIDDAY
+        self.early_exit_after_trade = early_exit_after_trade
 
     def run(self, symbol: str, bars: pd.DataFrame, trade_date: str) -> BacktestResult:
         """
@@ -251,8 +255,10 @@ class BacktestRunner:
         logger.info(f"{symbol}: Scanning {len(bars)} bars for patterns...")
 
         for i in range(self.MIN_BARS_FOR_DETECTION - 1, last_end):
-            window = bars.iloc[0: i + 1].copy().reset_index(drop=True)
-            pattern = self.detector.detect(symbol, window)
+            # Pass full DataFrame + end_idx to avoid O(N^2) DataFrame copies.
+            # end_idx=i means completed = bars[:i], which matches the old behavior
+            # of passing bars[:i+1] and then having detect() drop the last bar.
+            pattern = self.detector.detect(symbol, bars, end_idx=i)
 
             if pattern is None:
                 continue
@@ -321,6 +327,10 @@ class BacktestRunner:
                 f"${trade.exit_price:.2f}, "
                 f"P&L ${trade.pnl:.2f} ({trade.pnl_pct:+.1f}%)"
             )
+
+            if self.early_exit_after_trade:
+                logger.debug("  Early exit — skipping remaining bars after trade")
+                break
 
         logger.info(
             f"{symbol}: Scan complete — "

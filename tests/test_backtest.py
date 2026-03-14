@@ -355,8 +355,10 @@ class TestBacktestRunnerEdgeCases:
         mock_planner.create_plan.return_value = plan
         mock_simulator.simulate.return_value = trade
 
+        # Disable early exit to test that patterns are still counted after trade
         runner = BacktestRunner(
-            detector=mock_detector, planner=mock_planner, simulator=mock_simulator
+            detector=mock_detector, planner=mock_planner, simulator=mock_simulator,
+            early_exit_after_trade=False,
         )
         bars = _make_bars([(5.0, 5.1, 4.9, 5.0, 1000)] * 20)
         result = runner.run("TEST", bars, "2026-03-13")
