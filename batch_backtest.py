@@ -57,22 +57,21 @@ def find_big_movers(
     price_min: float = 0.0,
     price_max: float = 0.0,
     float_max: int = 0,
-    relative_volume_min: float = 0.0,
 ) -> List[Tuple[str, date]]:
     """
     Filter daily bars for (symbol, date) pairs matching scanner criteria.
 
-    Applies the same filters as the live scanner to ensure backtest
-    results reflect what the live system would actually trade.
+    Applies price and float filters at the daily level. Relative volume
+    is NOT filtered here — it's checked at entry time inside BacktestRunner
+    using cumulative volume (matching how the live scanner works).
 
     Args:
         daily_bars: Dict mapping symbol -> list of daily bar dicts
         threshold: Minimum (high-low)/low ratio (default 0.10 = 10%)
-        universe_dict: Dict mapping symbol -> universe record (for float, avg_volume)
+        universe_dict: Dict mapping symbol -> universe record (for float)
         price_min: Minimum price filter (0 = disabled)
         price_max: Maximum price filter (0 = disabled)
         float_max: Maximum float shares (0 = disabled)
-        relative_volume_min: Minimum daily relative volume (0 = disabled)
 
     Returns:
         Sorted list of (symbol, date) tuples qualifying for backtest
@@ -81,16 +80,14 @@ def find_big_movers(
     movers = []
     skipped_price = 0
     skipped_float = 0
-    skipped_rvol = 0
 
     for symbol, bars in daily_bars.items():
         uni = universe_dict.get(symbol, {})
         sym_float = uni.get('float_shares')
-        sym_avg_vol = uni.get('avg_volume_daily')
 
         # Float filter (applied once per symbol)
         if float_max > 0 and sym_float and sym_float > float_max:
-            skipped_float += len([b for b in bars if (b['high'] - b['low']) / b['low'] >= threshold if b['low'] > 0])
+            skipped_float += len([b for b in bars if b['low'] > 0 and (b['high'] - b['low']) / b['low'] >= threshold])
             continue
 
         for bar in bars:
@@ -111,14 +108,6 @@ def find_big_movers(
                 skipped_price += 1
                 continue
 
-            # Relative volume: day_volume / avg_volume_daily
-            if relative_volume_min > 0 and sym_avg_vol and sym_avg_vol > 0:
-                day_vol = bar.get('volume', 0)
-                rvol = day_vol / sym_avg_vol
-                if rvol < relative_volume_min:
-                    skipped_rvol += 1
-                    continue
-
             bar_date = bar['date'] if isinstance(bar['date'], date) else bar['date']
             movers.append((symbol, bar_date))
             logger.debug(
@@ -127,11 +116,10 @@ def find_big_movers(
             )
 
     movers.sort(key=lambda x: (x[1], x[0]))
-    total_skipped = skipped_price + skipped_float + skipped_rvol
     logger.info(
         f"Found {len(movers)} symbol/date pairs with {threshold:.0%}+ intraday move "
-        f"(filtered out {total_skipped}: {skipped_price} price, "
-        f"{skipped_float} float, {skipped_rvol} rvol)"
+        f"(filtered out {skipped_price + skipped_float}: "
+        f"{skipped_price} price, {skipped_float} float)"
     )
     return movers
 
@@ -252,6 +240,7 @@ def run_batch_backtest(
     client: AlpacaClient,
     runner: BacktestRunner,
     db: Optional[Database] = None,
+    universe_dict: Optional[Dict] = None,
 ) -> List[BacktestResult]:
     """
     Run backtests on all qualifying (symbol, date) pairs.
@@ -287,7 +276,12 @@ def run_batch_backtest(
                 logger.warning(f"[{idx}/{total}] {symbol} {date_str} — no bars, skipping")
                 continue
 
-            result = runner.run(symbol, bars, date_str)
+            avg_vol = None
+            if universe_dict:
+                uni = universe_dict.get(symbol, {})
+                avg_vol = uni.get('avg_daily_volume') or uni.get('avg_volume_daily')
+
+            result = runner.run(symbol, bars, date_str, avg_daily_volume=avg_vol)
             results.append(result)
 
             # Verbose progress line
@@ -342,8 +336,12 @@ def _backtest_worker(args: Tuple) -> Optional[dict]:
             if bars.empty:
                 return None
 
+            # Look up avg_daily_volume for cumulative rvol check
+            uni = db.get_universe_stock(symbol)
+            avg_vol = uni.get('avg_volume_daily') if uni else None
+
             runner = BacktestRunner()  # uses from_config() for all settings
-            result = runner.run(symbol, bars, trade_date_iso)
+            result = runner.run(symbol, bars, trade_date_iso, avg_daily_volume=avg_vol)
 
             # Serialize to dict for pickling across processes
             trades = []
@@ -731,7 +729,6 @@ def main():
         price_min=float(scanner_cfg.get("price_min", 2.0)),
         price_max=float(scanner_cfg.get("price_max", 20.0)),
         float_max=int(scanner_cfg.get("float_max", 10_000_000)),
-        relative_volume_min=float(scanner_cfg.get("relative_volume_min", 5.0)),
     )
 
     if not movers:
@@ -741,7 +738,7 @@ def main():
 
     # Step 3: Run backtests (1-min bars also cached)
     runner = BacktestRunner()  # uses from_config() for all settings
-    results = run_batch_backtest(movers, client, runner, db=db)
+    results = run_batch_backtest(movers, client, runner, db=db, universe_dict=universe_dict)
 
     # Step 4: Write CSV + print summary
     write_csv_report(results, args.output)

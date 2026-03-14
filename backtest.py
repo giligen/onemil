@@ -487,6 +487,16 @@ class BacktestRunner:
         self.planner = planner or TradePlanner.from_config()
         self.min_price = min_price if min_price is not None else self.DEFAULT_MIN_PRICE
         self.skip_midday = skip_midday if skip_midday is not None else self.DEFAULT_SKIP_MIDDAY
+
+        # Cumulative rvol check at entry time (Ross's 5x filter)
+        # Loaded from config.yaml scanner.relative_volume_min
+        from config import Config
+        cfg = Config._load_yaml_only()
+        self.relative_volume_min = float(
+            cfg.get("scanner", {}).get("relative_volume_min", 5.0)
+        )
+        # Total trading minutes per day (9:30-16:00 ET = 390 min)
+        self.TRADING_MINUTES = 390
         self.early_exit_after_trade = early_exit_after_trade
         self.realistic = realistic
         self.last_entry_time_utc = last_entry_time_utc
@@ -521,7 +531,10 @@ class BacktestRunner:
         """Check if bar time falls in midday dead zone (11:30-14:00 ET)."""
         return self.MIDDAY_START_UTC + 0.5 <= bar_time_utc < self.MIDDAY_END_UTC
 
-    def run(self, symbol: str, bars: pd.DataFrame, trade_date: str) -> BacktestResult:
+    def run(
+        self, symbol: str, bars: pd.DataFrame, trade_date: str,
+        avg_daily_volume: Optional[int] = None,
+    ) -> BacktestResult:
         """
         Run backtest for a symbol over a day's bars.
 
@@ -531,12 +544,14 @@ class BacktestRunner:
             symbol: Stock ticker symbol
             bars: DataFrame with 1-min bars (timestamp, OHLCV)
             trade_date: Date string for reporting (e.g., '2026-03-13')
+            avg_daily_volume: Average daily volume for cumulative rvol check
+                (from universe table; None = skip rvol filter)
 
         Returns:
             BacktestResult with trades, patterns, and P&L
         """
         if self.realistic:
-            return self._run_realistic(symbol, bars, trade_date)
+            return self._run_realistic(symbol, bars, trade_date, avg_daily_volume)
         return self._run_fantasy(symbol, bars, trade_date)
 
     def _run_fantasy(self, symbol: str, bars: pd.DataFrame, trade_date: str) -> BacktestResult:
@@ -641,7 +656,10 @@ class BacktestRunner:
 
         return result
 
-    def _run_realistic(self, symbol: str, bars: pd.DataFrame, trade_date: str) -> BacktestResult:
+    def _run_realistic(
+        self, symbol: str, bars: pd.DataFrame, trade_date: str,
+        avg_daily_volume: Optional[int] = None,
+    ) -> BacktestResult:
         """
         Realistic backtest: detect_setup() fires before breakout, places pending
         buy-stop at flag_high, fills at max(bar_open, breakout_level).
@@ -799,6 +817,24 @@ class BacktestRunner:
                         f"(11:30-14:00 ET filter)"
                     )
                     continue
+
+                # Cumulative rvol check at entry time
+                # Compares volume accumulated so far vs expected volume by this
+                # time of day (linear approximation of avg_daily_volume).
+                if (self.relative_volume_min > 0 and avg_daily_volume
+                        and avg_daily_volume > 0):
+                    cumulative_vol = bars.iloc[:i + 1]['volume'].sum()
+                    # Minutes from market open (9:30 ET = 13:30 UTC)
+                    minutes_elapsed = max(1, (i + 1))  # 1-min bars, i is 0-based
+                    expected_vol = avg_daily_volume * (minutes_elapsed / self.TRADING_MINUTES)
+                    rvol = cumulative_vol / expected_vol if expected_vol > 0 else 0
+                    if rvol < self.relative_volume_min:
+                        logger.debug(
+                            f"  Skipping — cumulative rvol {rvol:.1f}x "
+                            f"< {self.relative_volume_min:.1f}x at bar {i} "
+                            f"(vol {cumulative_vol:,} vs expected {expected_vol:,.0f})"
+                        )
+                        continue
 
                 pending_order = PendingBuyStop(
                     setup=setup,

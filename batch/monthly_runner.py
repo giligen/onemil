@@ -392,7 +392,6 @@ class MonthlyBacktestRunner:
                 price_min=float(scanner_cfg.get("price_min", 2.0)),
                 price_max=float(scanner_cfg.get("price_max", 20.0)),
                 float_max=int(scanner_cfg.get("float_max", 10_000_000)),
-                relative_volume_min=float(scanner_cfg.get("relative_volume_min", 5.0)),
             )
 
             if not movers:
@@ -423,7 +422,7 @@ class MonthlyBacktestRunner:
                 )
             else:
                 runner = BacktestRunner()  # uses from_config() for all settings
-                results = run_batch_backtest(movers, client, runner, db=db)
+                results = run_batch_backtest(movers, client, runner, db=db, universe_dict=universe_dict)
 
             # Write rich CSV for this month
             csv_filename = f"backtest_{month_start.year}_{month_start.month:02d}.csv"
