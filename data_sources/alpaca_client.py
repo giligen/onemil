@@ -32,6 +32,7 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
     GetAssetsRequest,
     GetCalendarRequest,
+    GetOrderByIdRequest,
     MarketOrderRequest,
     LimitOrderRequest,
 )
@@ -850,14 +851,17 @@ class AlpacaClient:
         """
         Cancel an open order.
 
+        Handles 404 (already cancelled/not found) and 422 (already filled)
+        gracefully by returning False instead of raising.
+
         Args:
             order_id: Alpaca order ID
 
         Returns:
-            True if cancelled successfully
+            True if cancelled successfully, False if already cancelled/filled
 
         Raises:
-            AlpacaAPIError: If cancellation fails
+            AlpacaAPIError: If cancellation fails for unexpected reasons
         """
         try:
             self._call_with_timeout(
@@ -866,9 +870,17 @@ class AlpacaClient:
             )
             logger.info(f"Order cancelled: {order_id}")
             return True
-        except AlpacaAPIError:
-            raise
-        except Exception as e:
+        except (AlpacaAPIError, APIError, Exception) as e:
+            error_str = str(e).lower()
+            status_code = getattr(e, 'status_code', None)
+            # 404: order not found (already cancelled or never existed)
+            if status_code == 404 or '404' in str(e) or 'not found' in error_str:
+                logger.warning(f"Order {order_id} not found (already cancelled)")
+                return False
+            # 422: not cancelable (already filled)
+            if status_code == 422 or '422' in str(e) or 'not cancelable' in error_str:
+                logger.warning(f"Order {order_id} not cancelable (may be filled)")
+                return False
             logger.error(f"Failed to cancel order {order_id}: {e}")
             raise AlpacaAPIError(f"Failed to cancel order {order_id}: {e}")
 
@@ -887,7 +899,10 @@ class AlpacaClient:
         """
         try:
             order = self._call_with_timeout(
-                lambda: self.trading_client.get_order_by_id(order_id),
+                lambda: self.trading_client.get_order_by_id(
+                    order_id,
+                    filter=GetOrderByIdRequest(nested=True)
+                ),
                 f"get_order({order_id})"
             )
 

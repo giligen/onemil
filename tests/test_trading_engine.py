@@ -7,12 +7,19 @@ Tests cover:
 - Trade execution flow
 - Daily stats and summary
 - Enable/disable behavior
+- Fill data fallback and retry
+- Partial fill detection
+- Force close retry with backoff
+- Graceful shutdown
+- Bracket leg identification
+- Race condition on cancel
 """
 
 import pytest
+import threading
 import pandas as pd
 from datetime import date, datetime, timezone, timedelta
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch, PropertyMock, call
 
 from data_sources.alpaca_client import AlpacaClient
 from persistence.database import Database
@@ -976,3 +983,546 @@ class TestSyncUsesFilledAvgPrice:
 
         trade = db.get_trade_by_order_id('order-noslip')
         assert trade['exit_price'] == pytest.approx(4.80, abs=0.01)
+
+
+# ===========================================================================
+# Fix 1: Fill Data Missing Fallback
+# ===========================================================================
+
+class TestFillDataFallback:
+    """Tests for retry + position fallback when fill_price is None."""
+
+    def _setup_pending(self, engine, db, order_id='order-retry'):
+        """Helper: create a pending order with DB record."""
+        now = datetime.now(timezone.utc)
+        db.save_trade({
+            'trade_date': date.today().isoformat(),
+            'symbol': 'RETRY',
+            'side': 'buy',
+            'entry_price': 5.00,
+            'stop_loss_price': 4.80,
+            'take_profit_price': 5.40,
+            'shares': 100,
+            'risk_per_share': 0.20,
+            'total_risk': 20.0,
+            'risk_reward_ratio': 2.0,
+            'order_id': order_id,
+            'order_status': 'accepted',
+            'fill_price': None,
+            'filled_at': None,
+            'exit_price': None,
+            'exit_reason': None,
+            'exited_at': None,
+            'pnl': None,
+            'pnl_pct': None,
+            'pattern_data': '{}',
+            'created_at': now,
+            'updated_at': now,
+        })
+        plan = _make_plan("RETRY")
+        engine._pending_orders['RETRY'] = {
+            'order_id': order_id,
+            'plan': plan,
+            'setup': _make_pattern("RETRY"),
+            'placed_at': now,
+        }
+        return plan
+
+    @patch('trading.trading_engine.time_mod.sleep')
+    def test_retry_resolves_fill_price(self, mock_sleep, engine, mock_alpaca, db):
+        """Fill price resolved on retry after initial None."""
+        self._setup_pending(engine, db)
+
+        # First call: filled but no price. Second call (retry): price present.
+        mock_alpaca.get_order.side_effect = [
+            {'status': 'filled', 'filled_avg_price': None, 'filled_qty': 0, 'legs': []},
+            {'filled_avg_price': 5.10, 'filled_qty': 100},
+        ]
+
+        result = engine._manage_pending_orders()
+
+        assert result is not None
+        assert result['fill_price'] == 5.10
+        trade = db.get_trade_by_order_id('order-retry')
+        assert trade['fill_price'] == 5.10
+
+    @patch('trading.trading_engine.time_mod.sleep')
+    def test_position_fallback_when_retries_fail(self, mock_sleep, engine, mock_alpaca, db):
+        """Falls back to position data when all retries return None."""
+        self._setup_pending(engine, db)
+
+        # All get_order calls return None for fill_price
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled', 'filled_avg_price': None, 'filled_qty': 0, 'legs': [],
+        }
+        mock_alpaca.get_open_positions.return_value = [
+            {'symbol': 'RETRY', 'avg_entry_price': '5.05', 'qty': '100'},
+        ]
+
+        result = engine._manage_pending_orders()
+
+        assert result is not None
+        assert result['fill_price'] == 5.05
+
+    @patch('trading.trading_engine.time_mod.sleep')
+    def test_skip_when_all_fallbacks_fail(self, mock_sleep, engine, mock_alpaca, db):
+        """Skips trade when fill price unavailable after all retries and fallbacks."""
+        self._setup_pending(engine, db)
+
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled', 'filled_avg_price': None, 'filled_qty': 0, 'legs': [],
+        }
+        mock_alpaca.get_open_positions.return_value = []  # No matching position
+
+        result = engine._manage_pending_orders()
+
+        # Should return None (skipped) and symbol still in pending
+        assert result is None
+
+
+# ===========================================================================
+# Fix 2: Partial Fill Detection
+# ===========================================================================
+
+class TestPartialFillDetection:
+    """Tests for partial fill detection and filled_qty tracking."""
+
+    def test_partial_fill_logged_and_tracked(self, engine, mock_alpaca, db):
+        """Partial fill records actual filled_qty, not requested shares."""
+        now = datetime.now(timezone.utc)
+        db.save_trade({
+            'trade_date': date.today().isoformat(),
+            'symbol': 'PART',
+            'side': 'buy',
+            'entry_price': 5.00,
+            'stop_loss_price': 4.80,
+            'take_profit_price': 5.40,
+            'shares': 100,
+            'risk_per_share': 0.20,
+            'total_risk': 20.0,
+            'risk_reward_ratio': 2.0,
+            'order_id': 'order-partial',
+            'order_status': 'accepted',
+            'fill_price': None,
+            'filled_at': None,
+            'exit_price': None,
+            'exit_reason': None,
+            'exited_at': None,
+            'pnl': None,
+            'pnl_pct': None,
+            'pattern_data': '{}',
+            'created_at': now,
+            'updated_at': now,
+        })
+
+        plan = _make_plan("PART")
+        engine._pending_orders['PART'] = {
+            'order_id': 'order-partial',
+            'plan': plan,
+            'setup': _make_pattern("PART"),
+            'placed_at': now,
+        }
+
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled',
+            'filled_avg_price': 5.00,
+            'filled_qty': 50,
+            'legs': [],
+        }
+
+        result = engine._manage_pending_orders()
+
+        assert result is not None
+        assert result['filled_qty'] == 50
+        trade = db.get_trade_by_order_id('order-partial')
+        assert trade['filled_qty'] == 50
+
+    def test_full_fill_uses_requested_qty(self, engine, mock_alpaca, db):
+        """Full fill uses requested quantity when filled_qty matches or is 0."""
+        now = datetime.now(timezone.utc)
+        db.save_trade({
+            'trade_date': date.today().isoformat(),
+            'symbol': 'FULL',
+            'side': 'buy',
+            'entry_price': 5.00,
+            'stop_loss_price': 4.80,
+            'take_profit_price': 5.40,
+            'shares': 100,
+            'risk_per_share': 0.20,
+            'total_risk': 20.0,
+            'risk_reward_ratio': 2.0,
+            'order_id': 'order-full',
+            'order_status': 'accepted',
+            'fill_price': None,
+            'filled_at': None,
+            'exit_price': None,
+            'exit_reason': None,
+            'exited_at': None,
+            'pnl': None,
+            'pnl_pct': None,
+            'pattern_data': '{}',
+            'created_at': now,
+            'updated_at': now,
+        })
+
+        plan = _make_plan("FULL")
+        engine._pending_orders['FULL'] = {
+            'order_id': 'order-full',
+            'plan': plan,
+            'setup': _make_pattern("FULL"),
+            'placed_at': now,
+        }
+
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled',
+            'filled_avg_price': 5.00,
+            'filled_qty': 0,
+            'legs': [],
+        }
+
+        result = engine._manage_pending_orders()
+
+        assert result is not None
+        # When filled_qty=0, should use requested (plan.shares = 113)
+        assert result['filled_qty'] == plan.shares
+
+    def test_sync_closed_uses_filled_qty_for_pnl(self, engine, mock_alpaca, db, mock_position_manager):
+        """P&L calculation uses filled_qty when available."""
+        now = datetime.now(timezone.utc)
+        db.save_trade({
+            'trade_date': date.today().isoformat(),
+            'symbol': 'PQTY',
+            'side': 'buy',
+            'entry_price': 5.00,
+            'stop_loss_price': 4.80,
+            'take_profit_price': 5.40,
+            'shares': 100,
+            'risk_per_share': 0.20,
+            'total_risk': 20.0,
+            'risk_reward_ratio': 2.0,
+            'order_id': 'order-pqty',
+            'order_status': 'filled',
+            'fill_price': 5.00,
+            'filled_at': now,
+            'exit_price': None,
+            'exit_reason': None,
+            'exited_at': None,
+            'pnl': None,
+            'pnl_pct': None,
+            'pattern_data': '{}',
+            'created_at': now,
+            'updated_at': now,
+        })
+        # Manually set filled_qty to 50 (partial fill)
+        db.update_trade(1, {'filled_qty': 50})
+
+        mock_alpaca.get_open_positions.return_value = []
+        mock_alpaca.get_order.return_value = {
+            'legs': [
+                {'id': 'sl-1', 'side': 'sell', 'stop_price': 4.80,
+                 'limit_price': None, 'filled_avg_price': 4.80, 'status': 'filled'},
+            ],
+        }
+
+        engine._sync_closed_positions()
+
+        trade = db.get_trade_by_order_id('order-pqty')
+        # P&L should be (4.80 - 5.00) * 50 = -10.0
+        assert trade['pnl'] == pytest.approx(-10.0, abs=0.01)
+
+
+# ===========================================================================
+# Fix 3: Force Close Retry
+# ===========================================================================
+
+class TestForceCloseRetry:
+    """Tests for force close retry with backoff."""
+
+    @patch('trading.trading_engine.time_mod.sleep')
+    def test_retry_succeeds_on_second_attempt(self, mock_sleep, engine, mock_alpaca, db, mock_position_manager):
+        """Force close succeeds on retry after first attempt fails."""
+        now = datetime.now(timezone.utc)
+        db.save_trade({
+            'trade_date': date.today().isoformat(),
+            'symbol': 'RETRY',
+            'side': 'buy',
+            'entry_price': 5.00,
+            'stop_loss_price': 4.80,
+            'take_profit_price': 5.40,
+            'shares': 100,
+            'risk_per_share': 0.20,
+            'total_risk': 20.0,
+            'risk_reward_ratio': 2.0,
+            'order_id': 'order-retry-fc',
+            'order_status': 'filled',
+            'fill_price': 5.00,
+            'filled_at': now,
+            'exit_price': None,
+            'exit_reason': None,
+            'exited_at': None,
+            'pnl': None,
+            'pnl_pct': None,
+            'pattern_data': '{}',
+            'created_at': now,
+            'updated_at': now,
+        })
+
+        mock_alpaca.get_open_positions.return_value = [
+            {'symbol': 'RETRY', 'qty': 100, 'avg_entry_price': 5.00,
+             'market_value': 520.0},
+        ]
+        # First attempt fails, second succeeds
+        mock_alpaca.close_position.side_effect = [
+            Exception("API timeout"),
+            {'id': 'close-1'},
+        ]
+
+        engine._force_close_all()
+
+        assert mock_alpaca.close_position.call_count == 2
+        trade = db.get_trade_by_order_id('order-retry-fc')
+        assert trade['exit_reason'] == 'force_close'
+        # Verify backoff sleep was called
+        mock_sleep.assert_called_with(2)
+
+    @patch('trading.trading_engine.time_mod.sleep')
+    def test_all_retries_fail_notifies(self, mock_sleep, engine, mock_alpaca, db):
+        """All retries fail triggers error notification."""
+        mock_notifier = MagicMock(spec=TelegramNotifier)
+        engine.notifier = mock_notifier
+
+        mock_alpaca.get_open_positions.return_value = [
+            {'symbol': 'STUCK', 'qty': 100, 'avg_entry_price': 5.00,
+             'market_value': 520.0},
+        ]
+        mock_alpaca.close_position.side_effect = Exception("persistent error")
+
+        engine._force_close_all()
+
+        assert mock_alpaca.close_position.call_count == 3
+        mock_notifier.notify_error.assert_called_once()
+        assert 'MANUAL INTERVENTION' in mock_notifier.notify_error.call_args[0][0]
+
+
+# ===========================================================================
+# Fix 4: Graceful Shutdown
+# ===========================================================================
+
+class TestGracefulShutdown:
+    """Tests for shutdown_event integration in monitoring loop."""
+
+    def test_shutdown_event_stops_loop(self, engine, mock_alpaca, db):
+        """Setting shutdown_event stops the monitoring loop."""
+        shutdown_event = threading.Event()
+        engine.shutdown_event = shutdown_event
+
+        # Set shutdown immediately
+        shutdown_event.set()
+
+        mock_alpaca.get_open_positions.return_value = []
+
+        # Should exit immediately and call force_close_all
+        engine.run_monitoring_loop()
+
+        # Verify graceful shutdown happened
+        mock_alpaca.get_open_positions.assert_called()
+
+    def test_loop_without_shutdown_event(self, engine):
+        """Loop works normally without shutdown_event set."""
+        engine.shutdown_event = None
+        # With market closed (16:00+), loop exits naturally
+        with patch('trading.trading_engine.datetime') as mock_dt:
+            mock_now = MagicMock()
+            mock_now.hour = 16
+            mock_now.minute = 0
+            mock_dt.now.return_value = mock_now
+            mock_dt.side_effect = lambda *args, **kw: datetime(*args, **kw)
+            # This will just exit because hour >= 16
+            engine.run_monitoring_loop()
+
+
+# ===========================================================================
+# Fix 6: Bracket Leg Identification
+# ===========================================================================
+
+class TestIdentifyBracketLegs:
+    """Tests for _identify_bracket_legs helper."""
+
+    def test_identifies_sl_and_tp(self, engine):
+        """Correctly identifies SL (stop_price only) and TP (limit_price only)."""
+        legs = [
+            {'side': 'sell', 'stop_price': 4.80, 'limit_price': None},
+            {'side': 'sell', 'stop_price': None, 'limit_price': 5.40},
+        ]
+        sl, tp = engine._identify_bracket_legs(legs)
+        assert sl['stop_price'] == 4.80
+        assert tp['limit_price'] == 5.40
+
+    def test_ignores_buy_legs(self, engine):
+        """Buy-side legs are ignored."""
+        legs = [
+            {'side': 'buy', 'stop_price': 4.80, 'limit_price': None},
+            {'side': 'sell', 'stop_price': None, 'limit_price': 5.40},
+        ]
+        sl, tp = engine._identify_bracket_legs(legs)
+        assert sl is None
+        assert tp['limit_price'] == 5.40
+
+    def test_empty_legs(self, engine):
+        """Empty legs list returns (None, None)."""
+        sl, tp = engine._identify_bracket_legs([])
+        assert sl is None
+        assert tp is None
+
+    def test_both_stop_and_limit_disambiguated_by_expected_sl(self, engine):
+        """Leg with both stop_price and limit_price is disambiguated by expected_sl."""
+        legs = [
+            {'side': 'sell', 'stop_price': 4.80, 'limit_price': 4.75},
+        ]
+        # stop_price (4.80) is closer to expected_sl (4.80) than limit_price (4.75)
+        sl, tp = engine._identify_bracket_legs(legs, expected_sl=4.80)
+        assert sl is not None
+        assert sl['stop_price'] == 4.80
+
+    def test_both_stop_and_limit_disambiguated_as_tp(self, engine):
+        """Leg with both prices assigned to TP when limit is closer to expected_sl."""
+        legs = [
+            {'side': 'sell', 'stop_price': 5.40, 'limit_price': 4.82},
+        ]
+        # limit_price (4.82) is closer to expected_sl (4.80) than stop_price (5.40)
+        # So abs(stop-sl)=0.60 > abs(limit-sl)=0.02 → assigned to tp_leg
+        sl, tp = engine._identify_bracket_legs(legs, expected_sl=4.80)
+        assert sl is None
+        assert tp is not None
+
+
+# ===========================================================================
+# Fix 7: Race Condition — Check Status Before Cancel
+# ===========================================================================
+
+class TestRaceConditionOnCancel:
+    """Tests for checking order status before cancellation."""
+
+    def test_expiry_detects_filled_order(self, engine, mock_alpaca):
+        """Expired order that filled in the interim is not cancelled."""
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=700)
+        engine.setup_expiry_seconds = 600
+
+        engine._pending_orders['RACE'] = {
+            'order_id': 'order-race',
+            'plan': _make_plan("RACE"),
+            'setup': _make_pattern("RACE"),
+            'placed_at': old_time,
+        }
+
+        # First get_order: status is new (triggers expiry path)
+        # Second get_order (refresh): status is filled
+        mock_alpaca.get_order.side_effect = [
+            {'status': 'new', 'filled_avg_price': None},
+            {'status': 'filled'},
+        ]
+
+        engine._manage_pending_orders()
+
+        # Should NOT cancel — order filled
+        mock_alpaca.cancel_order.assert_not_called()
+        # Symbol stays in pending (will be processed as fill next cycle)
+        assert 'RACE' in engine._pending_orders
+
+    def test_expiry_detects_already_cancelled(self, engine, mock_alpaca):
+        """Expired order that is already cancelled is cleaned up without cancel call."""
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=700)
+        engine.setup_expiry_seconds = 600
+
+        engine._pending_orders['GONE'] = {
+            'order_id': 'order-gone',
+            'plan': _make_plan("GONE"),
+            'setup': _make_pattern("GONE"),
+            'placed_at': old_time,
+        }
+
+        mock_alpaca.get_order.side_effect = [
+            {'status': 'new', 'filled_avg_price': None},
+            {'status': 'cancelled'},
+        ]
+
+        engine._manage_pending_orders()
+
+        mock_alpaca.cancel_order.assert_not_called()
+        assert 'GONE' not in engine._pending_orders
+
+    def test_invalidation_detects_filled_order(self, engine, mock_alpaca):
+        """Invalidated order that filled is not cancelled."""
+        recent_time = datetime.now(timezone.utc) - timedelta(seconds=30)
+        engine.setup_expiry_seconds = 600
+
+        setup = _make_pattern("INVAL")
+        engine._pending_orders['INVAL'] = {
+            'order_id': 'order-inval',
+            'plan': _make_plan("INVAL"),
+            'setup': setup,
+            'placed_at': recent_time,
+        }
+
+        # Create bars below flag_low to trigger invalidation
+        bars = pd.DataFrame({
+            'open': [4.0], 'high': [4.1], 'low': [3.0],
+            'close': [3.5], 'volume': [100000],
+        })
+        mock_alpaca.get_1min_bars.return_value = bars
+
+        # First get_order: pending (to enter invalidation check)
+        # Second get_order (refresh before cancel): filled!
+        mock_alpaca.get_order.side_effect = [
+            {'status': 'new', 'filled_avg_price': None},
+            {'status': 'filled'},
+        ]
+
+        engine._manage_pending_orders()
+
+        mock_alpaca.cancel_order.assert_not_called()
+        assert 'INVAL' in engine._pending_orders
+
+
+# ===========================================================================
+# DB Migration: filled_qty column
+# ===========================================================================
+
+class TestFilledQtyMigration:
+    """Tests for filled_qty column migration."""
+
+    def test_filled_qty_column_exists(self, db):
+        """Database has filled_qty column after migration."""
+        columns = [row[1] for row in db.conn.execute("PRAGMA table_info(trades)").fetchall()]
+        assert 'filled_qty' in columns
+
+    def test_filled_qty_stored_and_retrieved(self, db):
+        """filled_qty can be saved and retrieved from trades."""
+        now = datetime.now(timezone.utc)
+        trade_id = db.save_trade({
+            'trade_date': date.today().isoformat(),
+            'symbol': 'MIGR',
+            'side': 'buy',
+            'entry_price': 5.00,
+            'stop_loss_price': 4.80,
+            'take_profit_price': 5.40,
+            'shares': 100,
+            'risk_per_share': 0.20,
+            'total_risk': 20.0,
+            'risk_reward_ratio': 2.0,
+            'order_id': 'order-migr',
+            'order_status': 'accepted',
+            'fill_price': None,
+            'filled_at': None,
+            'exit_price': None,
+            'exit_reason': None,
+            'exited_at': None,
+            'pnl': None,
+            'pnl_pct': None,
+            'pattern_data': '{}',
+            'created_at': now,
+            'updated_at': now,
+        })
+        db.update_trade(trade_id, {'filled_qty': 75})
+        trade = db.get_trade_by_order_id('order-migr')
+        assert trade['filled_qty'] == 75

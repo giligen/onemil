@@ -1,0 +1,22 @@
+[Unit]
+Description=OneMil Day Trading Scanner + Paper Trader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+Group=ec2-user
+WorkingDirectory=/home/ec2-user/onemil
+ExecStart=/usr/bin/python3 main.py --scan --trade --verbose
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=120
+MemoryMax=2G
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=onemil-trader
+EnvironmentFile=/home/ec2-user/onemil/.env
+
+[Install]
+WantedBy=multi-user.target

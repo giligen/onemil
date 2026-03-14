@@ -97,6 +97,7 @@ class TradingEngine:
         self._patterns_traded: int = 0
         self._pattern_details: list = []
         self._pending_orders: Dict[str, Dict] = {}  # symbol -> {order_id, plan, setup, placed_at}
+        self.shutdown_event = None  # Set by caller for graceful shutdown
 
     def on_stock_qualified(self, symbol: str) -> None:
         """
@@ -131,6 +132,39 @@ class TradingEngine:
         return (now_et.hour > self.force_close_hour or
                 (now_et.hour == self.force_close_hour and now_et.minute >= self.force_close_minute))
 
+    def _identify_bracket_legs(
+        self, legs: List[Dict], expected_sl: float = None, expected_tp: float = None
+    ) -> tuple:
+        """
+        Identify stop-loss and take-profit legs from bracket order legs.
+
+        Args:
+            legs: List of leg dicts from Alpaca order
+            expected_sl: Expected stop loss price (for disambiguation)
+            expected_tp: Expected take profit price (for disambiguation)
+
+        Returns:
+            Tuple of (sl_leg, tp_leg) — either may be None if not found
+        """
+        sl_leg = None
+        tp_leg = None
+        for leg in legs:
+            if leg.get('side') != 'sell':
+                continue
+            has_stop = leg.get('stop_price') is not None
+            has_limit = leg.get('limit_price') is not None
+            if has_stop and not has_limit:
+                sl_leg = leg
+            elif has_limit and not has_stop:
+                tp_leg = leg
+            elif has_stop and has_limit:
+                # Both present — match by proximity to expected prices
+                if expected_sl and abs(leg['stop_price'] - expected_sl) < abs(leg['limit_price'] - expected_sl):
+                    sl_leg = leg
+                else:
+                    tp_leg = leg
+        return sl_leg, tp_leg
+
     def _manage_pending_orders(self) -> Optional[Dict[str, Any]]:
         """
         Check status of all pending buy-stop orders.
@@ -161,9 +195,51 @@ class TradingEngine:
 
             if status == 'filled':
                 fill_price = order_status.get('filled_avg_price')
+                filled_qty = order_status.get('filled_qty', 0)
+
+                # Fix 1: Retry if fill data missing (Alpaca can lag on fill price)
+                if fill_price is None:
+                    for attempt in range(5):
+                        time_mod.sleep(0.5)
+                        try:
+                            refreshed = self.alpaca.get_order(order_id)
+                            fill_price = refreshed.get('filled_avg_price')
+                            filled_qty = refreshed.get('filled_qty', filled_qty)
+                            if fill_price is not None:
+                                logger.info(f"{symbol}: Fill price resolved on retry {attempt + 1}")
+                                break
+                        except Exception:
+                            pass
+
+                    # Position fallback
+                    if fill_price is None:
+                        try:
+                            positions = self.alpaca.get_open_positions()
+                            for pos in positions:
+                                if pos['symbol'] == symbol:
+                                    fill_price = float(pos['avg_entry_price'])
+                                    filled_qty = int(pos['qty'])
+                                    logger.warning(f"{symbol}: Using position fallback — ${fill_price}")
+                                    break
+                        except Exception as e:
+                            logger.error(f"{symbol}: Position fallback failed: {e}")
+
+                    if fill_price is None:
+                        logger.error(f"{symbol}: Fill price unavailable after retries — skipping")
+                        continue
+
+                # Fix 2: Partial fill detection
+                plan = pending['plan']
+                requested_qty = plan.shares
+                if filled_qty and filled_qty < requested_qty:
+                    logger.warning(
+                        f"{symbol}: PARTIAL FILL — {filled_qty}/{requested_qty} shares @ ${fill_price}"
+                    )
+                actual_qty = filled_qty if filled_qty and filled_qty > 0 else requested_qty
+
                 logger.info(
                     f"{symbol}: Buy-stop order FILLED at ${fill_price} — "
-                    f"ID: {order_id}"
+                    f"{actual_qty} shares, ID: {order_id}"
                 )
                 self._traded_symbols.add(symbol)
                 self._patterns_traded += 1
@@ -175,14 +251,14 @@ class TradingEngine:
                     self.db.update_trade(trade_record['id'], {
                         'order_status': 'filled',
                         'fill_price': fill_price,
+                        'filled_qty': actual_qty,
                         'filled_at': datetime.now(timezone.utc),
                     })
-                    logger.info(f"{symbol}: Trade DB updated — fill ${fill_price}")
+                    logger.info(f"{symbol}: Trade DB updated — fill ${fill_price}, qty {actual_qty}")
                 else:
                     logger.error(f"{symbol}: No trade record for order {order_id}")
 
                 # Phase 3: Gap-fill stop + target adjustment
-                plan = pending['plan']
                 setup = pending.get('setup')
                 if fill_price and setup and fill_price > setup.breakout_level:
                     entry_gap = fill_price - setup.breakout_level
@@ -195,13 +271,11 @@ class TradingEngine:
                     )
                     try:
                         order_detail = self.alpaca.get_order(order_id)
-                        sl_leg = None
-                        tp_leg = None
-                        for leg in order_detail.get('legs', []):
-                            if leg.get('side') == 'sell' and leg.get('stop_price') is not None:
-                                sl_leg = leg
-                            elif leg.get('side') == 'sell' and leg.get('limit_price') is not None:
-                                tp_leg = leg
+                        sl_leg, tp_leg = self._identify_bracket_legs(
+                            order_detail.get('legs', []),
+                            expected_sl=plan.stop_loss_price,
+                            expected_tp=plan.take_profit_price,
+                        )
 
                         if sl_leg:
                             self.alpaca.replace_order_stop_price(sl_leg['id'], adjusted_stop)
@@ -227,7 +301,7 @@ class TradingEngine:
                     self.notifier.notify_order_submitted(
                         symbol=symbol,
                         order_id=order_id,
-                        shares=plan.shares,
+                        shares=actual_qty,
                         entry=fill_price or plan.entry_price,
                     )
 
@@ -236,6 +310,7 @@ class TradingEngine:
                     'status': 'filled',
                     'symbol': symbol,
                     'fill_price': fill_price,
+                    'filled_qty': actual_qty,
                 }
 
             elif status in ('cancelled', 'expired', 'rejected'):
@@ -249,6 +324,18 @@ class TradingEngine:
                     age = (datetime.now(timezone.utc) - placed_at).total_seconds()
                     if age > self.setup_expiry_seconds:
                         logger.info(f"{symbol}: Buy-stop EXPIRED after {age:.0f}s, cancelling")
+                        # Fix 7: Refresh status before cancel — order may have filled
+                        try:
+                            refreshed = self.alpaca.get_order(order_id)
+                            if refreshed.get('status') == 'filled':
+                                logger.info(f"{symbol}: Order filled while checking expiry — handling next cycle")
+                                continue
+                            elif refreshed.get('status') in ('cancelled', 'expired'):
+                                logger.info(f"{symbol}: Order already {refreshed['status']}")
+                                symbols_to_remove.append(symbol)
+                                continue
+                        except Exception:
+                            pass  # proceed with cancel attempt
                         try:
                             self.alpaca.cancel_order(order_id)
                         except Exception as e:
@@ -269,6 +356,18 @@ class TradingEngine:
                                     f"low ${latest_low:.2f} < flag_low ${setup.flag_low:.2f}, "
                                     f"cancelling order {order_id}"
                                 )
+                                # Fix 7: Refresh status before cancel
+                                try:
+                                    refreshed = self.alpaca.get_order(order_id)
+                                    if refreshed.get('status') == 'filled':
+                                        logger.info(f"{symbol}: Order filled while checking invalidation — handling next cycle")
+                                        continue
+                                    elif refreshed.get('status') in ('cancelled', 'expired'):
+                                        logger.info(f"{symbol}: Order already {refreshed['status']}")
+                                        symbols_to_remove.append(symbol)
+                                        continue
+                                except Exception:
+                                    pass  # proceed with cancel attempt
                                 self.alpaca.cancel_order(order_id)
                                 symbols_to_remove.append(symbol)
                     except Exception as e:
@@ -301,20 +400,26 @@ class TradingEngine:
                     exit_reason = None
                     if order_id:
                         order_detail = self.alpaca.get_order(order_id)
-                        for leg in order_detail.get('legs', []):
-                            if leg.get('status') == 'filled':
-                                # Use actual fill price (accounts for slippage),
-                                # fall back to order price if fill not available
-                                fill = leg.get('filled_avg_price')
-                                if leg.get('stop_price'):
-                                    exit_price = fill or leg['stop_price']
-                                    exit_reason = 'stop_loss'
-                                elif leg.get('limit_price'):
-                                    exit_price = fill or leg['limit_price']
-                                    exit_reason = 'take_profit'
+                        sl_leg, tp_leg = self._identify_bracket_legs(
+                            order_detail.get('legs', []),
+                            expected_sl=trade.get('stop_loss_price'),
+                            expected_tp=trade.get('take_profit_price'),
+                        )
+                        # Check SL leg
+                        if sl_leg and sl_leg.get('status') == 'filled':
+                            fill = sl_leg.get('filled_avg_price')
+                            exit_price = fill or sl_leg['stop_price']
+                            exit_reason = 'stop_loss'
+                        # Check TP leg
+                        elif tp_leg and tp_leg.get('status') == 'filled':
+                            fill = tp_leg.get('filled_avg_price')
+                            exit_price = fill or tp_leg['limit_price']
+                            exit_reason = 'take_profit'
 
                     if exit_price:
-                        pnl = (exit_price - trade['fill_price']) * trade['shares']
+                        # Use filled_qty if available, fall back to shares
+                        qty_for_pnl = trade.get('filled_qty') or trade['shares']
+                        pnl = (exit_price - trade['fill_price']) * qty_for_pnl
                         pnl_pct = (exit_price / trade['fill_price'] - 1) * 100
                         self.db.update_trade(trade['id'], {
                             'exit_price': exit_price,
@@ -500,48 +605,74 @@ class TradingEngine:
             for t in open_trades:
                 trades_by_symbol[t['symbol']] = t
 
+            FORCE_CLOSE_RETRIES = 3
+            FORCE_CLOSE_BACKOFF = [2, 5, 10]
+
             for pos in positions:
                 symbol = pos['symbol']
-                try:
-                    self.alpaca.close_position(symbol)
-                    exit_price = pos.get('avg_entry_price', 0)
-                    # Use current market value to compute actual exit price
-                    qty = pos.get('qty', 0)
-                    if qty > 0 and pos.get('market_value'):
-                        exit_price = float(pos['market_value']) / qty
+                close_succeeded = False
 
-                    logger.info(f"{symbol}: Force-close — position closed at ~${exit_price:.2f}")
+                for attempt in range(FORCE_CLOSE_RETRIES):
+                    try:
+                        self.alpaca.close_position(symbol)
+                        close_succeeded = True
+                        break
+                    except Exception as e:
+                        if attempt < FORCE_CLOSE_RETRIES - 1:
+                            wait = FORCE_CLOSE_BACKOFF[attempt]
+                            logger.warning(
+                                f"{symbol}: Force close attempt {attempt + 1} failed: {e}, "
+                                f"retry in {wait}s"
+                            )
+                            time_mod.sleep(wait)
+                        else:
+                            logger.error(f"{symbol}: ALL force close attempts failed: {e}")
+                            if self.notifier:
+                                self.notifier.notify_error(
+                                    f"MANUAL INTERVENTION: {symbol} force close failed "
+                                    f"after {FORCE_CLOSE_RETRIES} attempts"
+                                )
 
-                    # Update DB trade record with exit details
-                    trade = trades_by_symbol.get(symbol)
-                    if trade and trade.get('fill_price'):
-                        pnl = (exit_price - trade['fill_price']) * trade['shares']
-                        pnl_pct = (exit_price / trade['fill_price'] - 1) * 100
-                        self.db.update_trade(trade['id'], {
-                            'exit_price': exit_price,
-                            'exit_reason': 'force_close',
-                            'exited_at': datetime.now(timezone.utc),
-                            'pnl': pnl,
-                            'pnl_pct': pnl_pct,
-                        })
-                        self.position_manager.record_trade_pnl(pnl)
-                        logger.info(
-                            f"{symbol}: Force-close DB updated — "
-                            f"P&L ${pnl:+,.2f} ({pnl_pct:+.1f}%)"
-                        )
-                    elif trade:
-                        logger.warning(
-                            f"{symbol}: Force-close — trade has no fill_price, "
-                            f"cannot compute P&L"
-                        )
+                if not close_succeeded:
+                    continue
 
-                    if self.notifier:
-                        self.notifier.notify_position_closed(
-                            symbol=symbol,
-                            exit_reason='force_close',
-                        )
-                except Exception as e:
-                    logger.error(f"{symbol}: Failed to close position: {e}")
+                exit_price = pos.get('avg_entry_price', 0)
+                # Use current market value to compute actual exit price
+                qty = pos.get('qty', 0)
+                if qty > 0 and pos.get('market_value'):
+                    exit_price = float(pos['market_value']) / qty
+
+                logger.info(f"{symbol}: Force-close — position closed at ~${exit_price:.2f}")
+
+                # Update DB trade record with exit details
+                trade = trades_by_symbol.get(symbol)
+                if trade and trade.get('fill_price'):
+                    qty_for_pnl = trade.get('filled_qty') or trade['shares']
+                    pnl = (exit_price - trade['fill_price']) * qty_for_pnl
+                    pnl_pct = (exit_price / trade['fill_price'] - 1) * 100
+                    self.db.update_trade(trade['id'], {
+                        'exit_price': exit_price,
+                        'exit_reason': 'force_close',
+                        'exited_at': datetime.now(timezone.utc),
+                        'pnl': pnl,
+                        'pnl_pct': pnl_pct,
+                    })
+                    self.position_manager.record_trade_pnl(pnl)
+                    logger.info(
+                        f"{symbol}: Force-close DB updated — "
+                        f"P&L ${pnl:+,.2f} ({pnl_pct:+.1f}%)"
+                    )
+                elif trade:
+                    logger.warning(
+                        f"{symbol}: Force-close — trade has no fill_price, "
+                        f"cannot compute P&L"
+                    )
+
+                if self.notifier:
+                    self.notifier.notify_position_closed(
+                        symbol=symbol,
+                        exit_reason='force_close',
+                    )
         except Exception as e:
             logger.error(f"Failed to get open positions for force-close: {e}")
 
@@ -568,7 +699,7 @@ class TradingEngine:
 
         force_closed = False
 
-        while True:
+        while not (self.shutdown_event and self.shutdown_event.is_set()):
             now_et = datetime.now(ET)
             if now_et.hour >= 16:
                 logger.info("Market closed, stopping monitoring loop")
@@ -583,7 +714,18 @@ class TradingEngine:
             if not force_closed:
                 self.run_pattern_check()
 
-            time_mod.sleep(self.pattern_poll_interval)
+            # Use shutdown_event.wait() instead of time.sleep() for interruptible sleep
+            if self.shutdown_event:
+                self.shutdown_event.wait(self.pattern_poll_interval)
+            else:
+                time_mod.sleep(self.pattern_poll_interval)
+
+        # Graceful shutdown: force-close all positions
+        if self.shutdown_event and self.shutdown_event.is_set():
+            logger.info("Shutdown signal received — force-closing all positions...")
+            self._force_close_all()
+            self.save_daily_summary()
+            logger.info("Graceful shutdown complete")
 
     def get_daily_stats(self) -> Dict[str, Any]:
         """Get daily trading statistics."""

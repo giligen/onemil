@@ -214,36 +214,40 @@ class Database:
 
     def _migrate(self) -> None:
         """Run database migrations for schema changes on existing DBs."""
-        # Migration: Add unique index on scan_results to prevent duplicate rows.
-        # Must deduplicate existing data first (keep latest detected_at per group).
+        # Migration 1: Add unique index on scan_results to prevent duplicate rows.
         try:
-            self.conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_scan_results_unique'"
-            )
-            if self.conn.execute(
+            if not self.conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_scan_results_unique'"
             ).fetchone():
-                return  # Already migrated
+                # Remove duplicates: keep the row with the latest detected_at per group
+                self.conn.execute("""
+                    DELETE FROM scan_results WHERE id NOT IN (
+                        SELECT MAX(id) FROM scan_results
+                        GROUP BY scan_date, symbol, phase, COALESCE(time_bucket, '')
+                    )
+                """)
+                deleted = self.conn.execute("SELECT changes()").fetchone()[0]
+                if deleted > 0:
+                    logger.info(f"Migration: removed {deleted} duplicate scan_results rows")
 
-            # Remove duplicates: keep the row with the latest detected_at per group
-            self.conn.execute("""
-                DELETE FROM scan_results WHERE id NOT IN (
-                    SELECT MAX(id) FROM scan_results
-                    GROUP BY scan_date, symbol, phase, COALESCE(time_bucket, '')
-                )
-            """)
-            deleted = self.conn.execute("SELECT changes()").fetchone()[0]
-            if deleted > 0:
-                logger.info(f"Migration: removed {deleted} duplicate scan_results rows")
-
-            self.conn.execute("""
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_results_unique
-                    ON scan_results(scan_date, symbol, phase, COALESCE(time_bucket, ''))
-            """)
-            self.conn.commit()
-            logger.info("Migration: added unique index on scan_results")
+                self.conn.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_results_unique
+                        ON scan_results(scan_date, symbol, phase, COALESCE(time_bucket, ''))
+                """)
+                self.conn.commit()
+                logger.info("Migration: added unique index on scan_results")
         except Exception as e:
-            logger.warning(f"Migration check failed (non-fatal): {e}")
+            logger.warning(f"Migration 1 (scan_results unique index) failed (non-fatal): {e}")
+
+        # Migration 2: Add filled_qty column to trades table for partial fill tracking.
+        try:
+            columns = [row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()]
+            if 'filled_qty' not in columns:
+                self.conn.execute("ALTER TABLE trades ADD COLUMN filled_qty INTEGER")
+                self.conn.commit()
+                logger.info("Migration: added filled_qty column to trades table")
+        except Exception as e:
+            logger.warning(f"Migration 2 (filled_qty column) failed (non-fatal): {e}")
 
     # =========================================================================
     # Universe operations

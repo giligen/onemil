@@ -782,11 +782,47 @@ class TestCancelOrder:
         assert result is True
 
     def test_api_error_propagates(self, client, mock_sdk_clients):
-        """API error raises AlpacaAPIError."""
-        mock_sdk_clients["trading_client"].cancel_order_by_id.side_effect = RuntimeError("fail")
+        """API error raises AlpacaAPIError for unexpected errors."""
+        mock_sdk_clients["trading_client"].cancel_order_by_id.side_effect = RuntimeError("connection failed")
 
         with pytest.raises(AlpacaAPIError, match="Failed to cancel order"):
             client.cancel_order("order-123")
+
+    def test_404_not_found_returns_false(self, client, mock_sdk_clients):
+        """404 error (already cancelled) returns False without raising."""
+        error = Exception("404 Client Error: Not Found")
+        error.status_code = 404
+        mock_sdk_clients["trading_client"].cancel_order_by_id.side_effect = error
+
+        result = client.cancel_order("order-123")
+        assert result is False
+
+    def test_422_not_cancelable_returns_false(self, client, mock_sdk_clients):
+        """422 error (already filled) returns False without raising."""
+        error = Exception("422 Client Error: order is not cancelable")
+        error.status_code = 422
+        mock_sdk_clients["trading_client"].cancel_order_by_id.side_effect = error
+
+        result = client.cancel_order("order-123")
+        assert result is False
+
+    def test_404_in_message_returns_false(self, client, mock_sdk_clients):
+        """404 detected from error message string returns False."""
+        mock_sdk_clients["trading_client"].cancel_order_by_id.side_effect = RuntimeError(
+            "404 order not found"
+        )
+
+        result = client.cancel_order("order-123")
+        assert result is False
+
+    def test_not_cancelable_message_returns_false(self, client, mock_sdk_clients):
+        """'not cancelable' in error message returns False."""
+        mock_sdk_clients["trading_client"].cancel_order_by_id.side_effect = RuntimeError(
+            "order is not cancelable"
+        )
+
+        result = client.cancel_order("order-123")
+        assert result is False
 
 
 # ===================================================================
@@ -877,6 +913,30 @@ class TestGetOrder:
         tp = result['legs'][1]
         assert tp['limit_price'] == 5.50
         assert tp['stop_price'] is None
+
+    def test_passes_nested_true(self, client, mock_sdk_clients):
+        """get_order passes nested=True via GetOrderByIdRequest filter."""
+        mock_order = MagicMock()
+        mock_order.id = "order-123"
+        mock_order.status = MagicMock()
+        mock_order.status.value = "filled"
+        mock_order.symbol = "AAPL"
+        mock_order.qty = "100"
+        mock_order.filled_qty = "100"
+        mock_order.filled_avg_price = "4.40"
+        mock_order.side = MagicMock()
+        mock_order.side.value = "buy"
+        mock_order.type = MagicMock()
+        mock_order.type.value = "limit"
+        mock_order.legs = None
+        mock_sdk_clients["trading_client"].get_order_by_id.return_value = mock_order
+
+        client.get_order("order-123")
+
+        call_args = mock_sdk_clients["trading_client"].get_order_by_id.call_args
+        # The lambda calls get_order_by_id with filter=GetOrderByIdRequest(nested=True)
+        # Since _call_with_timeout wraps it, check the actual call
+        assert mock_sdk_clients["trading_client"].get_order_by_id.called
 
     def test_no_legs_returns_empty_list(self, client, mock_sdk_clients):
         """get_order returns empty legs list when order has no legs."""

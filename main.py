@@ -10,8 +10,10 @@ Requires .env with ALPACA_API_KEY and ALPACA_API_SECRET.
 """
 
 import argparse
+import signal
 import sys
 import logging
+import threading
 from typing import Optional
 
 from config import get_config
@@ -202,6 +204,29 @@ def run_scan(config, verbose: bool = False, trade: bool = False) -> None:
         logger.error("Alpaca API connection failed. Aborting scan.")
         sys.exit(1)
 
+    # Fix 10: Pre-start validation
+    if trade:
+        try:
+            account = alpaca.get_account_info()
+            # Verify paper mode — refuse to start on live account
+            if not account.get('paper', True):
+                logger.error("REFUSING TO START: Alpaca account is LIVE, not paper!")
+                sys.exit(1)
+            # Warn on low buying power
+            buying_power = float(account.get('buying_power', 0))
+            if buying_power < config.position_size_dollars:
+                logger.warning(
+                    f"Low buying power: ${buying_power:,.0f} < "
+                    f"position size ${config.position_size_dollars:,.0f}"
+                )
+            logger.info(
+                f"Account validated — paper mode, "
+                f"buying power: ${buying_power:,.0f}"
+            )
+        except Exception as e:
+            logger.error(f"Pre-start account validation failed: {e}")
+            sys.exit(1)
+
     analyzer = _create_news_analyzer(config)
     news_provider = NewsProvider(alpaca, analyzer)
     db = get_database(config.db_path)
@@ -221,6 +246,21 @@ def run_scan(config, verbose: bool = False, trade: bool = False) -> None:
         trading_engine = _create_trading_engine(config, alpaca, db, notifier=notifier)
         trading_engine.enabled = True
         logger.info("Trading mode ACTIVE — paper trading enabled")
+
+    # Fix 4: Graceful shutdown via SIGTERM/SIGINT
+    shutdown_event = threading.Event()
+
+    def handle_shutdown(signum, frame):
+        """Handle shutdown signals for graceful position close."""
+        sig_name = signal.Signals(signum).name
+        logger.warning(f"Received {sig_name}, initiating graceful shutdown...")
+        shutdown_event.set()
+
+    signal.signal(signal.SIGTERM, handle_shutdown)
+    signal.signal(signal.SIGINT, handle_shutdown)
+
+    if trading_engine:
+        trading_engine.shutdown_event = shutdown_event
 
     scanner = RealtimeScanner(
         alpaca_client=alpaca,
