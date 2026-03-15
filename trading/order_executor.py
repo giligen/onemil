@@ -144,7 +144,7 @@ class OrderExecutor:
         }
 
     def submit_buy_stop_bracket_order(
-        self, plan: TradePlan, slippage_pct: float = 0.005
+        self, plan: TradePlan, slippage_pct: float = 0.02
     ) -> Optional[Dict[str, Any]]:
         """
         Submit a buy-stop bracket order for a trade plan.
@@ -152,9 +152,19 @@ class OrderExecutor:
         Places a stop-limit order that triggers at breakout_level and fills
         at breakout_level * (1 + slippage_pct) maximum.
 
+        Slippage limit set to 2% based on 15-month backtest analysis (636 trades,
+        Jan 2025 — Mar 2026). Gap-over trades where entry > breakout_level:
+          - 0-0.5% gap: 109 trades, 42% win, +$475 avg → profitable
+          - 0.5-1% gap:  82 trades, 39% win, +$318 avg → profitable
+          - 1-2% gap:    98 trades, 41% win, +$314 avg → profitable
+          - 2-5% gap:    43 trades, 23% win, -$134 avg → NET LOSERS
+          - >5% gap:      7 trades, 14% win, -$281 avg → garbage
+        At 2% cap: $254K total PnL (peak). At 0.5% cap: $198K (-$56K left on table).
+        Gap-fill adjustment maintains planned dollar risk regardless of entry gap.
+
         Args:
             plan: TradePlan with entry (breakout_level), stop, target, sizing
-            slippage_pct: Maximum slippage above stop_price (default 0.5%)
+            slippage_pct: Maximum slippage above stop_price (default 2.0%)
 
         Returns:
             Dict with order details if successful, None on failure

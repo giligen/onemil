@@ -809,6 +809,22 @@ class BacktestRunner:
                     plan = pending_order.plan
                     entry_gap = fill_price - pending_order.breakout_level
 
+                    # Reject gap-overs beyond 2% — matches live buy-stop limit.
+                    # 15-month data: 0-2% gap trades are profitable (+$314/avg),
+                    # >2% gap trades are net losers (23% win rate, -$134/avg).
+                    max_gap_pct = 0.02
+                    if pending_order.breakout_level > 0:
+                        gap_pct = entry_gap / pending_order.breakout_level
+                        if gap_pct > max_gap_pct:
+                            logger.info(
+                                f"  Bar {i}: breakout REJECTED (gap-over) — "
+                                f"fill ${fill_price:.2f} is {gap_pct:.1%} above "
+                                f"breakout ${pending_order.breakout_level:.2f} "
+                                f"(max {max_gap_pct:.0%})"
+                            )
+                            pending_order = None
+                            continue
+
                     # Adjust stop loss for entry gap: maintain planned risk_per_share
                     # so dollar risk stays at the budgeted amount.
                     # Without this, a $0.78 gap on a $0.34 planned risk turns
