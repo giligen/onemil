@@ -441,6 +441,91 @@ class TestTradingEngineHandoff:
         mock_engine.on_stock_qualified.assert_called_once_with('HOT')
 
 
+# =============================================================================
+# reset_daily wiring
+# =============================================================================
+
+class TestResetDailyWiring:
+    """Tests that scanner calls trading_engine.reset_daily() at startup."""
+
+    def test_run_calls_reset_daily_on_trading_engine(self, mock_alpaca, mock_news, mock_db, criteria):
+        """run() calls reset_daily() on trading engine after loading universe."""
+        from trading.trading_engine import TradingEngine
+
+        mock_engine = MagicMock(spec=TradingEngine)
+        scanner = RealtimeScanner(
+            alpaca_client=mock_alpaca,
+            news_provider=mock_news,
+            db=mock_db,
+            criteria=criteria,
+            trading_engine=mock_engine,
+        )
+        mock_db.get_active_universe.return_value = [
+            {'symbol': 'AAA', 'price_close': 5.0, 'float_shares': 1_000_000},
+        ]
+        mock_db.get_all_volume_profiles.return_value = {}
+        mock_alpaca.is_trading_day.return_value = True
+        mock_alpaca.is_short_trading_day.return_value = False
+
+        # Patch datetime so we get "after market close" and run() exits early
+        with patch('scanner.realtime_scanner.datetime') as mock_dt:
+            import pytz
+            from datetime import datetime as real_datetime
+            ET = pytz.timezone('US/Eastern')
+            fake_now = real_datetime(2026, 3, 13, 16, 30, 0, tzinfo=ET)
+            mock_dt.now.return_value = fake_now
+            mock_dt.side_effect = lambda *a, **kw: real_datetime(*a, **kw)
+
+            scanner.run()
+
+        mock_engine.reset_daily.assert_called_once()
+
+    def test_run_no_error_without_trading_engine(self, scanner, mock_alpaca, mock_db):
+        """run() works fine when trading_engine is None (no crash)."""
+        mock_db.get_active_universe.return_value = [
+            {'symbol': 'AAA', 'price_close': 5.0, 'float_shares': 1_000_000},
+        ]
+        mock_db.get_all_volume_profiles.return_value = {}
+        mock_alpaca.is_trading_day.return_value = True
+        mock_alpaca.is_short_trading_day.return_value = False
+
+        with patch('scanner.realtime_scanner.datetime') as mock_dt:
+            import pytz
+            from datetime import datetime as real_datetime
+            ET = pytz.timezone('US/Eastern')
+            fake_now = real_datetime(2026, 3, 13, 16, 30, 0, tzinfo=ET)
+            mock_dt.now.return_value = fake_now
+            mock_dt.side_effect = lambda *a, **kw: real_datetime(*a, **kw)
+
+            scanner.run()  # Should not raise
+
+    def test_run_test_cycle_calls_reset_daily(self, mock_alpaca, mock_news, mock_db, criteria):
+        """run_test_cycle() calls reset_daily() on trading engine."""
+        from trading.trading_engine import TradingEngine
+
+        mock_engine = MagicMock(spec=TradingEngine)
+        scanner = RealtimeScanner(
+            alpaca_client=mock_alpaca,
+            news_provider=mock_news,
+            db=mock_db,
+            criteria=criteria,
+            trading_engine=mock_engine,
+        )
+        mock_db.get_active_universe.return_value = [
+            {'symbol': 'AAA', 'price_close': 5.0, 'float_shares': 1_000_000},
+        ]
+        mock_db.get_all_volume_profiles.return_value = {}
+
+        # Mock API calls used by run_test_cycle
+        mock_alpaca.get_latest_trades.return_value = {}
+        mock_alpaca.get_current_bars.return_value = {}
+        mock_db.get_scan_results.return_value = []
+
+        scanner.run_test_cycle()
+
+        mock_engine.reset_daily.assert_called_once()
+
+
 class TestIsTradingDay:
     """Tests for _is_trading_day — calendar-based guard."""
 

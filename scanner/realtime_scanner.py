@@ -96,6 +96,10 @@ class RealtimeScanner:
             logger.error("No stocks in universe. Run --batch first.")
             return
 
+        if self.trading_engine is not None:
+            self.trading_engine.reset_daily()
+            logger.info("Trading engine daily state reset at scanner startup")
+
         logger.info(f"Scanner starting with {len(self._universe)} universe stocks")
 
         now_et = datetime.now(ET)
@@ -144,6 +148,10 @@ class RealtimeScanner:
         if not self._universe:
             logger.error("No stocks in universe. Run --batch first.")
             return {'error': 'empty universe'}
+
+        if self.trading_engine is not None:
+            self.trading_engine.reset_daily()
+            logger.info("Trading engine daily state reset at scanner startup")
 
         symbols = [s['symbol'] for s in self._universe]
         logger.info(f"TEST CYCLE: {len(self._universe)} stocks, "

@@ -336,7 +336,7 @@ class TestNewConfigProperties:
         assert cfg.circuit_breaker_pause == 3
 
     def test_market_regime_defaults(self, env_file, tmp_path):
-        """market_regime_enabled and spy_5d_return_min use correct defaults."""
+        """market_regime_enabled, vol_threshold, sma_period, max_trades_per_day defaults."""
         missing_yaml = str(tmp_path / "no_such.yaml")
         cfg = Config(env_path=env_file, yaml_path=missing_yaml)
         assert cfg.market_regime_enabled is True

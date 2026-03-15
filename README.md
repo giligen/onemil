@@ -30,6 +30,7 @@ trading/
   trading_engine.py             Main trading orchestration
   order_executor.py             Order submission/management
   position_manager.py           Position tracking
+  market_regime.py              SPY volatility + trend regime filter
 
 persistence/
   database.py                   SQLite database layer
@@ -60,6 +61,26 @@ Bull flag momentum pattern on 1-minute bars:
 - **Target**: 2:1 R:R
 - **Position size**: floor($500 / entry), max 1000 shares
 - **One trade per symbol per day**
+
+### Market Regime Filter
+
+Blocks all new entries when SPY indicates a hostile regime (high volatility + downtrend):
+
+- **Vol check**: SPY 5-day rolling stdev of daily returns > 1.5%
+- **Trend check**: SPY close below SMA(50)
+- **Blocking**: Both conditions must be true simultaneously to block trading
+- **Max trades/day**: 5 (hard cap regardless of regime)
+
+This filter prevented $21K of drawdown during Mar-May 2025 turbulence while preserving virtually all upside.
+
+**Lookahead prevention**: All indicators use data strictly *before* trade date (`dates < trade_date`). Live system uses `date.today()` at 9:30 AM, so T-1 = yesterday's settled close.
+
+| Config Parameter | Default | Description |
+|-----------------|---------|-------------|
+| `market_regime_enabled` | `true` | Enable/disable regime filter |
+| `market_regime_vol_threshold` | `1.5` | SPY vol threshold (%) |
+| `market_regime_sma_period` | `50` | SMA lookback period |
+| `max_trades_per_day` | `5` | Max entries per day |
 
 ## Backtesting
 
@@ -136,6 +157,39 @@ Month-by-month breakdown:
 | 2026-01 | 73 trades +$11,197 | 63 trades +$10,681 | 22 trades -$6,570 |
 | 2026-02 | 44 trades +$13,090 | 23 trades +$7,730 | 4 trades +$4,798 |
 | 2026-03 | 49 trades +$12,067 | 25 trades +$12,002 | 14 trades +$7,788 |
+
+### Regime Filter Impact — 15-Month Comparison (Jan 2025 - Mar 2026)
+
+| Metric | Without Regime | With Regime | Change |
+|--------|---------------|-------------|--------|
+| Trades | 764 | 636 | -17% |
+| Total P&L | $247,088 | $247,126 | +$38 |
+| Win Rate | 39.4% | 40.6% | +1.2pp |
+| Max Drawdown | ~$28,800 | $19,080 | **-34%** |
+| Mar-May DD | ~$28,000 | $7,023 | **-76%** |
+| Sharpe | 3.72 | 4.57 | +23% |
+
+Monthly breakdown (with regime filter):
+
+| Month | Trades | WR | P&L | Cum P&L |
+|-------|--------|----|-----|---------|
+| 2025-01 | 31 | 38.7% | +$17,891 | $17,891 |
+| 2025-02 | 33 | 48.5% | +$28,241 | $46,132 |
+| 2025-03 | 4 | 25.0% | -$252 | $45,879 |
+| 2025-04 | 0 | — | $0 | $45,879 |
+| 2025-05 | 41 | 39.0% | -$417 | $45,462 |
+| 2025-06 | 63 | 54.0% | +$38,885 | $84,347 |
+| 2025-07 | 60 | 46.7% | +$32,546 | $116,893 |
+| 2025-08 | 47 | 34.0% | +$10,420 | $127,313 |
+| 2025-09 | 55 | 41.8% | +$17,353 | $144,666 |
+| 2025-10 | 79 | 43.0% | +$42,778 | $187,444 |
+| 2025-11 | 31 | 35.5% | +$14,122 | $201,567 |
+| 2025-12 | 48 | 35.4% | +$12,738 | $214,305 |
+| 2026-01 | 69 | 39.1% | +$15,347 | $229,652 |
+| 2026-02 | 38 | 28.9% | +$6,302 | $235,954 |
+| 2026-03 | 37 | 32.4% | +$11,172 | $247,126 |
+
+MaxDD: $19,080 from Dec 17 2025 → Jan 8 2026 (holiday low-liquidity chop), recovered in 14 calendar days.
 
 ### BacktestRunner Parameters
 
