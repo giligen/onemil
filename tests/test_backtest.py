@@ -1180,3 +1180,111 @@ class TestTradeSimulatorBreakevenStopOnly:
         assert trade.remaining_shares == 200
         # Full 200 shares at target
         assert trade.pnl == pytest.approx((5.25 - 5.00) * 200, abs=0.01)
+
+
+# ===========================================================================
+# Slippage Model Tests
+# ===========================================================================
+
+class TestSlippageModel:
+    """Tests for entry and exit slippage in backtest."""
+
+    def test_exit_slippage_on_stop(self):
+        """Stop-loss exit is worsened by exit_slippage."""
+        sim = TradeSimulator(exit_slippage=0.02)
+        plan = _make_plan(entry_price=5.50, stop_loss_price=5.30, take_profit_price=5.90)
+
+        bars = _make_bars([
+            (5.50, 5.55, 5.45, 5.52, 1000),   # entry bar
+            (5.40, 5.42, 5.28, 5.30, 1000),   # stop hit (low <= 5.30)
+        ])
+        trade = sim.simulate(plan, bars, entry_bar_idx=0)
+
+        assert trade.exit_reason == 'stop'
+        # Exit at stop_loss - slippage = 5.30 - 0.02 = 5.28
+        assert trade.exit_price == pytest.approx(5.28, abs=0.001)
+        # P&L: (5.28 - 5.50) * 90 = -19.80
+        assert trade.pnl == pytest.approx((5.28 - 5.50) * 90, abs=0.01)
+
+    def test_no_exit_slippage_on_target(self):
+        """Take-profit (limit order) has no exit slippage."""
+        sim = TradeSimulator(exit_slippage=0.02)
+        plan = _make_plan(entry_price=5.50, stop_loss_price=5.30, take_profit_price=5.90)
+
+        bars = _make_bars([
+            (5.50, 5.55, 5.45, 5.52, 1000),   # entry bar
+            (5.60, 5.92, 5.58, 5.88, 1000),   # target hit
+        ])
+        trade = sim.simulate(plan, bars, entry_bar_idx=0)
+
+        assert trade.exit_reason == 'target'
+        # Target fills at exact limit price — no slippage
+        assert trade.exit_price == pytest.approx(5.90, abs=0.001)
+
+    def test_no_exit_slippage_on_eod(self):
+        """EOD exit has no exit slippage (market on close)."""
+        sim = TradeSimulator(exit_slippage=0.05)
+        plan = _make_plan(entry_price=5.50, stop_loss_price=5.30, take_profit_price=5.90)
+
+        bars = _make_bars([
+            (5.50, 5.55, 5.45, 5.52, 1000),   # entry bar
+            (5.52, 5.60, 5.48, 5.55, 1000),   # no stop or target
+        ])
+        trade = sim.simulate(plan, bars, entry_bar_idx=0)
+
+        assert trade.exit_reason == 'eod'
+        assert trade.exit_price == pytest.approx(5.55, abs=0.001)
+
+    def test_zero_slippage_unchanged(self):
+        """Zero slippage preserves original behavior."""
+        sim = TradeSimulator(exit_slippage=0.0)
+        plan = _make_plan(entry_price=5.50, stop_loss_price=5.30, take_profit_price=5.90)
+
+        bars = _make_bars([
+            (5.50, 5.55, 5.45, 5.52, 1000),
+            (5.40, 5.42, 5.28, 5.30, 1000),
+        ])
+        trade = sim.simulate(plan, bars, entry_bar_idx=0)
+
+        assert trade.exit_price == pytest.approx(5.30, abs=0.001)
+
+    def test_entry_slippage_in_runner(self):
+        """BacktestRunner applies entry_slippage to buy-stop fill."""
+        runner = BacktestRunner(
+            entry_slippage=0.05,
+            exit_slippage=0.0,
+            realistic=True,
+        )
+        assert runner.entry_slippage == 0.05
+
+    def test_exit_slippage_wired_to_simulator(self):
+        """BacktestRunner passes exit_slippage to TradeSimulator."""
+        runner = BacktestRunner(
+            entry_slippage=0.0,
+            exit_slippage=0.03,
+            realistic=True,
+        )
+        assert runner.simulator.exit_slippage == 0.03
+
+    def test_exit_slippage_on_partial_stop(self):
+        """Exit slippage applied to stop in partial profit mode."""
+        sim = TradeSimulator(
+            exit_slippage=0.02,
+            partial_profit_enabled=True,
+            partial_profit_r_multiple=1.0,
+            partial_profit_fraction=0.5,
+        )
+        plan = _make_plan(
+            entry_price=5.00, stop_loss_price=4.90,
+            take_profit_price=5.25, shares=200,
+        )
+
+        bars = _make_bars([
+            (5.00, 5.05, 4.95, 5.02, 1000),  # entry bar
+            (5.02, 5.04, 4.88, 4.90, 1000),  # stop hit before partial
+        ])
+        trade = sim.simulate(plan, bars, entry_bar_idx=0)
+
+        assert trade.exit_reason == 'stop'
+        # Stop at 4.90 - 0.02 = 4.88
+        assert trade.exit_price == pytest.approx(4.88, abs=0.001)
