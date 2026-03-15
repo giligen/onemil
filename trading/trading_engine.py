@@ -670,8 +670,12 @@ class TradingEngine:
         """
         Check if the breakout bar had sufficient volume on a thin-liquidity day.
 
-        Fetches recent 1-min bars, finds the first bar where high >= breakout_level,
-        and computes BVR (breakout volume ratio) = bar_volume / avg_flag_volume.
+        Lookback window is computed from order placement time to now (the buy-stop
+        could have filled anytime in that window), ensuring the breakout bar is
+        captured even if fill detection is delayed by the poll interval.
+
+        Finds the first bar where high >= breakout_level and computes
+        BVR (breakout volume ratio) = bar_volume / avg_flag_volume.
 
         Fails open: returns True if bars unavailable or no breakout bar found.
         Fails safe: returns False if avg_flag_volume <= 0.
@@ -686,9 +690,20 @@ class TradingEngine:
         setup = pending['setup']
         min_bvr = pending.get('min_breakout_vol_ratio', 2.0)
 
+        # Lookback must cover from order placement to now (fill could happen anytime)
+        # Add 2-min buffer for bar completion lag and poll delay
+        placed_at = pending.get('placed_at')
+        if placed_at:
+            elapsed_minutes = (datetime.now(timezone.utc) - placed_at).total_seconds() / 60.0
+            lookback = int(elapsed_minutes) + 2
+        else:
+            lookback = 15  # fallback: conservative wide window
+        lookback = max(lookback, 5)  # minimum 5 minutes
+        lookback = min(lookback, 30)  # cap at 30 minutes (same as detection window)
+
         # Fetch recent 1-min bars
         try:
-            bars = self.alpaca.get_1min_bars(symbol, lookback_minutes=5)
+            bars = self.alpaca.get_1min_bars(symbol, lookback_minutes=lookback)
         except Exception as e:
             logger.warning(
                 f"{symbol}: Failed to fetch bars for breakout volume check: {e} — "

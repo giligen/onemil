@@ -2059,6 +2059,7 @@ class TestThinLiquidityPostFillCheck:
         pending = {
             'setup': setup,
             'min_breakout_vol_ratio': 2.0,
+            'placed_at': datetime.now(timezone.utc) - timedelta(seconds=120),
         }
 
         # No bars available
@@ -2072,6 +2073,69 @@ class TestThinLiquidityPostFillCheck:
         # Exception fetching bars
         mock_alpaca.get_1min_bars.side_effect = Exception("API error")
         assert engine._check_breakout_volume("AAPL", pending) is True
+
+    def test_check_breakout_volume_dynamic_lookback(
+        self, mock_alpaca, db, mock_detector, mock_planner,
+        mock_executor, mock_position_manager
+    ):
+        """Lookback window covers from placed_at to now, not a hardcoded value."""
+        regime = self._make_thin_regime()
+        engine = self._make_engine(
+            mock_alpaca, db, mock_detector, mock_planner,
+            mock_executor, mock_position_manager, regime,
+        )
+
+        setup = _make_pattern("AAPL")
+
+        # Order placed 7 minutes ago — lookback should be >= 9 (7 + 2 buffer)
+        pending = {
+            'setup': setup,
+            'min_breakout_vol_ratio': 2.0,
+            'placed_at': datetime.now(timezone.utc) - timedelta(minutes=7),
+        }
+
+        # Strong volume so test doesn't reject
+        bars = pd.DataFrame([
+            {'high': 4.45, 'low': 4.35, 'close': 4.42, 'volume': 100000},
+        ])
+        mock_alpaca.get_1min_bars.return_value = bars
+
+        engine._check_breakout_volume("AAPL", pending)
+
+        # Verify lookback_minutes passed to get_1min_bars is >= 9 (7 elapsed + 2 buffer)
+        call_args = mock_alpaca.get_1min_bars.call_args
+        lookback_used = call_args[1].get('lookback_minutes', call_args[0][1] if len(call_args[0]) > 1 else None)
+        assert lookback_used >= 9, f"Expected lookback >= 9, got {lookback_used}"
+        assert lookback_used <= 30, f"Expected lookback <= 30, got {lookback_used}"
+
+    def test_check_breakout_volume_no_placed_at_uses_wide_window(
+        self, mock_alpaca, db, mock_detector, mock_planner,
+        mock_executor, mock_position_manager
+    ):
+        """Missing placed_at → uses 15-min fallback window."""
+        regime = self._make_thin_regime()
+        engine = self._make_engine(
+            mock_alpaca, db, mock_detector, mock_planner,
+            mock_executor, mock_position_manager, regime,
+        )
+
+        setup = _make_pattern("AAPL")
+        pending = {
+            'setup': setup,
+            'min_breakout_vol_ratio': 2.0,
+            # No placed_at
+        }
+
+        bars = pd.DataFrame([
+            {'high': 4.45, 'low': 4.35, 'close': 4.42, 'volume': 100000},
+        ])
+        mock_alpaca.get_1min_bars.return_value = bars
+
+        engine._check_breakout_volume("AAPL", pending)
+
+        call_args = mock_alpaca.get_1min_bars.call_args
+        lookback_used = call_args[1].get('lookback_minutes', call_args[0][1] if len(call_args[0]) > 1 else None)
+        assert lookback_used == 15, f"Expected fallback lookback 15, got {lookback_used}"
 
     @patch('trading.trading_engine.time_mod')
     def test_reject_updates_db_with_exit(
