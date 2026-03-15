@@ -559,3 +559,222 @@ class TestIsTradingDay:
         mock_alpaca.is_trading_day.assert_called_once()
         # Universe should be empty (never loaded)
         assert scanner._universe == []
+
+
+# =============================================================================
+# Main Loop Behavior (Bug #1, #2, #3 fixes)
+# =============================================================================
+
+class TestMainLoopBehavior:
+    """Tests for the rewritten run() loop — force close, 60s ticks, shutdown."""
+
+    def _make_scanner_with_engine(self, mock_alpaca, mock_news, mock_db, criteria,
+                                   shutdown_event=None):
+        """Create scanner with a mock trading engine and shutdown event."""
+        from trading.trading_engine import TradingEngine
+        mock_engine = MagicMock(spec=TradingEngine)
+        mock_engine.enabled = True
+        scanner = RealtimeScanner(
+            alpaca_client=mock_alpaca,
+            news_provider=mock_news,
+            db=mock_db,
+            criteria=criteria,
+            trading_engine=mock_engine,
+            shutdown_event=shutdown_event,
+        )
+        return scanner, mock_engine
+
+    @patch('scanner.realtime_scanner.datetime')
+    def test_force_close_called_at_force_close_time(
+        self, mock_dt, mock_alpaca, mock_news, mock_db, criteria
+    ):
+        """Engine _force_close_all() called when past 15:45 ET."""
+        import pytz
+        from datetime import datetime as real_datetime
+        import threading
+
+        shutdown = threading.Event()
+        scanner, mock_engine = self._make_scanner_with_engine(
+            mock_alpaca, mock_news, mock_db, criteria, shutdown_event=shutdown)
+
+        ET = pytz.timezone('US/Eastern')
+
+        # Setup: universe loaded, trading day
+        mock_db.get_active_universe.return_value = [
+            {'symbol': 'AAA', 'price_close': 5.0, 'float_shares': 1_000_000},
+        ]
+        mock_db.get_all_volume_profiles.return_value = {}
+        mock_alpaca.is_trading_day.return_value = True
+        mock_alpaca.is_short_trading_day.return_value = False
+        mock_alpaca.get_latest_trades.return_value = {}
+        mock_alpaca.get_current_bars.return_value = {}
+
+        # Time sequence: 15:46 (past force close) → 16:00 (market close)
+        call_count = [0]
+        def fake_now(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] <= 4:
+                return real_datetime(2026, 3, 16, 15, 46, 0, tzinfo=ET)
+            return real_datetime(2026, 3, 16, 16, 0, 0, tzinfo=ET)
+        mock_dt.now.side_effect = fake_now
+        mock_dt.side_effect = lambda *a, **kw: real_datetime(*a, **kw)
+
+        mock_engine._is_past_force_close_time.return_value = True
+
+        # Trigger shutdown on sleep to avoid infinite loop
+        def trigger_close(timeout):
+            shutdown.set()
+            return True
+        scanner._interruptible_sleep = MagicMock(side_effect=trigger_close)
+
+        scanner.run()
+
+        mock_engine._force_close_all.assert_called()
+
+    @patch('scanner.realtime_scanner.datetime')
+    def test_pattern_check_called_every_tick(
+        self, mock_dt, mock_alpaca, mock_news, mock_db, criteria
+    ):
+        """run_pattern_check() called multiple times within one 15-min bucket."""
+        import pytz
+        from datetime import datetime as real_datetime
+        import threading
+
+        shutdown = threading.Event()
+        scanner, mock_engine = self._make_scanner_with_engine(
+            mock_alpaca, mock_news, mock_db, criteria, shutdown_event=shutdown)
+
+        ET = pytz.timezone('US/Eastern')
+
+        mock_db.get_active_universe.return_value = [
+            {'symbol': 'AAA', 'price_close': 5.0, 'float_shares': 1_000_000},
+        ]
+        mock_db.get_all_volume_profiles.return_value = {}
+        mock_alpaca.is_trading_day.return_value = True
+        mock_alpaca.is_short_trading_day.return_value = False
+        mock_alpaca.get_latest_trades.return_value = {}
+        mock_alpaca.get_current_bars.return_value = {}
+
+        mock_engine._is_past_force_close_time.return_value = False
+
+        # Stay in same bucket (10:00-10:14) for 3 ticks, then close market
+        tick = [0]
+        def fake_now(*args, **kwargs):
+            tick[0] += 1
+            if tick[0] <= 6:
+                # Vary minutes within the same 15-min bucket
+                minute = min(tick[0], 14)
+                return real_datetime(2026, 3, 16, 10, minute, 0, tzinfo=ET)
+            return real_datetime(2026, 3, 16, 16, 0, 0, tzinfo=ET)
+        mock_dt.now.side_effect = fake_now
+        mock_dt.side_effect = lambda *a, **kw: real_datetime(*a, **kw)
+
+        # Let sleep pass without blocking
+        scanner._interruptible_sleep = MagicMock(return_value=False)
+
+        scanner.run()
+
+        # Pattern check should be called on every tick (not just bucket changes)
+        assert mock_engine.run_pattern_check.call_count >= 2
+
+    def test_shutdown_event_breaks_loop(self, mock_alpaca, mock_news, mock_db, criteria):
+        """Setting shutdown event causes run() to exit + force-close."""
+        import threading
+
+        shutdown = threading.Event()
+        scanner, mock_engine = self._make_scanner_with_engine(
+            mock_alpaca, mock_news, mock_db, criteria, shutdown_event=shutdown)
+
+        mock_db.get_active_universe.return_value = [
+            {'symbol': 'AAA', 'price_close': 5.0, 'float_shares': 1_000_000},
+        ]
+        mock_db.get_all_volume_profiles.return_value = {}
+        mock_alpaca.is_trading_day.return_value = True
+        mock_alpaca.is_short_trading_day.return_value = False
+        mock_alpaca.get_latest_trades.return_value = {}
+        mock_alpaca.get_current_bars.return_value = {}
+
+        # Set shutdown before first iteration
+        shutdown.set()
+
+        with patch('scanner.realtime_scanner.datetime') as mock_dt:
+            import pytz
+            from datetime import datetime as real_datetime
+            ET = pytz.timezone('US/Eastern')
+            fake_now = real_datetime(2026, 3, 16, 10, 0, 0, tzinfo=ET)
+            mock_dt.now.return_value = fake_now
+            mock_dt.side_effect = lambda *a, **kw: real_datetime(*a, **kw)
+
+            scanner.run()
+
+        # Post-loop safety net should force close
+        mock_engine._force_close_all.assert_called()
+
+    def test_interruptible_sleep_returns_true_on_shutdown(
+        self, mock_alpaca, mock_news, mock_db, criteria
+    ):
+        """_interruptible_sleep returns True when event is set."""
+        import threading
+
+        shutdown = threading.Event()
+        scanner = RealtimeScanner(
+            alpaca_client=mock_alpaca,
+            news_provider=mock_news,
+            db=mock_db,
+            criteria=criteria,
+            shutdown_event=shutdown,
+        )
+
+        shutdown.set()
+        assert scanner._interruptible_sleep(60) is True
+
+    @patch('scanner.realtime_scanner.time_mod')
+    def test_interruptible_sleep_without_event_uses_time_sleep(
+        self, mock_time, mock_alpaca, mock_news, mock_db, criteria
+    ):
+        """Falls back to time_mod.sleep when no shutdown event."""
+        scanner = RealtimeScanner(
+            alpaca_client=mock_alpaca,
+            news_provider=mock_news,
+            db=mock_db,
+            criteria=criteria,
+            shutdown_event=None,
+        )
+
+        result = scanner._interruptible_sleep(30)
+        assert result is False
+        mock_time.sleep.assert_called_once_with(30)
+
+    def test_premarket_wait_interruptible(self, mock_alpaca, mock_news, mock_db, criteria):
+        """Shutdown during pre-market _sleep_until causes early return."""
+        import threading
+
+        shutdown = threading.Event()
+        scanner, mock_engine = self._make_scanner_with_engine(
+            mock_alpaca, mock_news, mock_db, criteria, shutdown_event=shutdown)
+
+        mock_db.get_active_universe.return_value = [
+            {'symbol': 'AAA', 'price_close': 5.0, 'float_shares': 1_000_000},
+        ]
+        mock_db.get_all_volume_profiles.return_value = {}
+        mock_alpaca.is_trading_day.return_value = True
+        mock_alpaca.is_short_trading_day.return_value = False
+
+        # Time is 08:00 — needs to wait for 09:30
+        with patch('scanner.realtime_scanner.datetime') as mock_dt:
+            import pytz
+            from datetime import datetime as real_datetime
+            ET = pytz.timezone('US/Eastern')
+            fake_now = real_datetime(2026, 3, 16, 8, 0, 0, tzinfo=ET)
+            mock_dt.now.return_value = fake_now
+            mock_dt.side_effect = lambda *a, **kw: real_datetime(*a, **kw)
+
+            # Set shutdown so _interruptible_sleep returns True immediately
+            shutdown.set()
+
+            scanner.run()
+
+        # Should have returned early — no gap scan or intraday cycle
+        mock_alpaca.get_latest_trades.assert_not_called()
+        # No force close since we returned before the loop
+        mock_engine._force_close_all.assert_not_called()

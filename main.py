@@ -287,6 +287,7 @@ def run_scan(config, verbose: bool = False, trade: bool = False) -> None:
         verbose=verbose,
         trading_engine=trading_engine,
         notifier=notifier,
+        shutdown_event=shutdown_event,
     )
 
     # Notify startup

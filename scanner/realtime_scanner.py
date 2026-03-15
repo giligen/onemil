@@ -43,6 +43,7 @@ class RealtimeScanner:
         verbose: bool = False,
         trading_engine=None,
         notifier=None,
+        shutdown_event=None,
     ):
         """
         Initialize RealtimeScanner.
@@ -56,6 +57,7 @@ class RealtimeScanner:
             verbose: Enable verbose output
             trading_engine: Optional TradingEngine for automated trading
             notifier: Optional TelegramNotifier for alerts
+            shutdown_event: Optional threading.Event for graceful shutdown
         """
         self.alpaca = alpaca_client
         self.news = news_provider
@@ -65,6 +67,7 @@ class RealtimeScanner:
         self.verbose = verbose
         self.trading_engine = trading_engine
         self.notifier = notifier
+        self.shutdown_event = shutdown_event
 
         self._universe: List[Dict] = []
         self._volume_profiles: Dict[str, Dict[str, int]] = {}
@@ -109,18 +112,28 @@ class RealtimeScanner:
             logger.info("Market closed (after 16:00 ET). Nothing to do.")
             return
 
-        # Wait until market open if we're early
+        # Pre-market wait (interruptible)
         if current_time < "09:30":
             logger.info("Waiting for market open (09:30 ET)...")
-            self._sleep_until("09:30")
+            if self._sleep_until("09:30"):
+                logger.warning("Shutdown during pre-market wait — exiting")
+                return
 
-        # Run gap scan ONCE at open
+        # Gap scan once at open
         if not self._premarket_gap_symbols:
             logger.info("Running opening gap scan...")
             self._run_premarket_cycle()
 
-        # Intraday loop until close
+        # Intraday loop: scanner cycles every 15 min, engine ticks every 60s
+        force_closed = False
+        last_bucket = None
+
         while True:
+            # Check shutdown
+            if self.shutdown_event and self.shutdown_event.is_set():
+                logger.warning("Shutdown signal received in scanner loop")
+                break
+
             now_et = datetime.now(ET)
             current_time = now_et.strftime("%H:%M")
 
@@ -128,13 +141,37 @@ class RealtimeScanner:
                 logger.info("Market closed (16:00 ET). Scanner complete.")
                 break
 
-            self._run_intraday_cycle()
+            engine = self.trading_engine
 
-            # Run trading engine pattern check between scanner cycles
-            if self.trading_engine is not None and self.trading_engine.enabled:
-                self.trading_engine.run_pattern_check()
+            # Force close check (Bug #1 fix)
+            if engine is not None and engine.enabled and not force_closed:
+                if engine._is_past_force_close_time():
+                    logger.info("Force close time reached — closing all positions")
+                    engine._force_close_all()
+                    force_closed = True
 
-            self._sleep_until_next_bucket()
+            # Scanner intraday cycle at 15-min bucket boundaries
+            current_bucket = f"{now_et.hour:02d}:{(now_et.minute // 15) * 15:02d}"
+            if current_bucket != last_bucket:
+                if engine is not None:
+                    engine.clear_qualified_symbols()   # Bug #4 fix
+                self._run_intraday_cycle()
+                last_bucket = current_bucket
+
+            # Engine pattern check every tick ~60s (Bug #2 fix)
+            if engine is not None and engine.enabled and not force_closed:
+                engine.run_pattern_check()
+
+            # Interruptible 60s sleep (Bug #3 fix)
+            if self._interruptible_sleep(60):
+                logger.warning("Shutdown signal received during sleep")
+                break
+
+        # Post-loop safety net: force close (Bug #1 fix)
+        if self.trading_engine is not None and self.trading_engine.enabled:
+            if not force_closed:
+                logger.info("End-of-day safety net — force-closing all positions")
+                self.trading_engine._force_close_all()
 
     def run_test_cycle(self) -> Dict:
         """
@@ -501,31 +538,31 @@ class RealtimeScanner:
     # Timing Helpers
     # =========================================================================
 
-    def _sleep_until(self, target_time: str) -> None:
-        """Sleep until a target Eastern Time (HH:MM)."""
+    def _interruptible_sleep(self, seconds: float) -> bool:
+        """Sleep for up to `seconds`, returning True if shutdown requested."""
+        if self.shutdown_event is not None:
+            triggered = self.shutdown_event.wait(timeout=seconds)
+            if triggered:
+                logger.info("Sleep interrupted by shutdown signal")
+            return triggered
+        else:
+            time_mod.sleep(seconds)
+            return False
+
+    def _sleep_until(self, target_time: str) -> bool:
+        """Sleep until a target Eastern Time (HH:MM).
+
+        Returns:
+            True if shutdown was requested during sleep, False otherwise.
+        """
         now_et = datetime.now(ET)
         target_h, target_m = map(int, target_time.split(':'))
         target = now_et.replace(hour=target_h, minute=target_m, second=0, microsecond=0)
         if target <= now_et:
-            return
+            return False
         sleep_secs = (target - now_et).total_seconds()
         logger.info(f"Sleeping {sleep_secs:.0f}s until {target_time} ET")
-        time_mod.sleep(sleep_secs)
-
-    def _sleep_until_next_bucket(self) -> None:
-        """Sleep until the next 15-min bucket boundary."""
-        now_et = datetime.now(ET)
-        # Next bucket: round up to next 15-min mark
-        minutes_past = now_et.minute % 15
-        if minutes_past == 0:
-            # We're at a boundary, sleep until the next one
-            sleep_mins = 15
-        else:
-            sleep_mins = 15 - minutes_past
-        sleep_secs = sleep_mins * 60 - now_et.second
-        if sleep_secs > 0:
-            logger.debug(f"Sleeping {sleep_secs}s until next 15-min bucket")
-            time_mod.sleep(sleep_secs)
+        return self._interruptible_sleep(sleep_secs)
 
     def _is_trading_day(self) -> bool:
         """

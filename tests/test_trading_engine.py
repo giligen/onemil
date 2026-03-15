@@ -2256,3 +2256,157 @@ class TestThinLiquidityPostFillCheck:
         mock_position_manager.record_trade_pnl.assert_called_once()
         actual_pnl = mock_position_manager.record_trade_pnl.call_args[0][0]
         assert abs(actual_pnl - expected_pnl) < 0.01
+
+
+# ===========================================================================
+# Bug #4: clear_qualified_symbols
+# ===========================================================================
+
+class TestClearQualifiedSymbols:
+    """Tests for clear_qualified_symbols() — Bug #4 fix."""
+
+    def test_clear_qualified_clears_set(self, engine):
+        """clear_qualified_symbols() empties the qualified set."""
+        engine._qualified_symbols = {'AAPL', 'TSLA', 'MSFT'}
+        engine.clear_qualified_symbols()
+        assert len(engine._qualified_symbols) == 0
+
+    def test_clear_qualified_preserves_traded_and_pending(self, engine):
+        """Clearing qualified does not affect traded symbols or pending orders."""
+        engine._qualified_symbols = {'AAPL', 'TSLA'}
+        engine._traded_symbols = {'GOOG'}
+        engine._pending_orders = {'AMZN': {'order_id': 'test-1'}}
+
+        engine.clear_qualified_symbols()
+
+        assert len(engine._qualified_symbols) == 0
+        assert 'GOOG' in engine._traded_symbols
+        assert 'AMZN' in engine._pending_orders
+
+
+# ===========================================================================
+# Bug #5: _daily_trade_count only on successful fill
+# ===========================================================================
+
+class TestDailyTradeCountFix:
+    """Tests that _daily_trade_count only increments after rejection checks pass."""
+
+    def _setup_filled_order(self, engine, mock_alpaca, db, symbol='TEST',
+                            thin_liquidity=False):
+        """Set up a pending order that will be filled."""
+        setup = _make_pattern(symbol)
+        plan = _make_plan(symbol)
+
+        from datetime import date as date_cls
+        db.save_trade({
+            'trade_date': date_cls.today().isoformat(), 'symbol': symbol,
+            'side': 'buy', 'entry_price': 4.40, 'stop_loss_price': 4.29,
+            'take_profit_price': 4.90, 'shares': 113, 'risk_per_share': 0.11,
+            'total_risk': 12.43, 'risk_reward_ratio': 4.5,
+            'order_id': f'order-{symbol}', 'order_status': 'accepted',
+            'fill_price': None, 'filled_at': None, 'exit_price': None,
+            'exit_reason': None, 'exited_at': None, 'pnl': None, 'pnl_pct': None,
+            'pattern_data': '{}', 'created_at': datetime.now(timezone.utc),
+            'updated_at': datetime.now(timezone.utc),
+        })
+
+        pending = {
+            'order_id': f'order-{symbol}',
+            'plan': plan,
+            'setup': setup,
+            'placed_at': datetime.now(timezone.utc),
+        }
+        if thin_liquidity:
+            pending['thin_liquidity'] = True
+            pending['min_breakout_vol_ratio'] = 2.0
+        engine._pending_orders[symbol] = pending
+
+    @patch('trading.trading_engine.time_mod')
+    def test_rejected_thin_liquidity_no_daily_count_increment(
+        self, mock_time, mock_alpaca, db, mock_detector, mock_planner,
+        mock_executor, mock_position_manager
+    ):
+        """_daily_trade_count stays 0 on thin-liquidity rejection."""
+        from trading.market_regime import MarketRegimeFilter
+        regime = MagicMock(spec=MarketRegimeFilter)
+        regime.is_thin_liquidity.return_value = True
+        regime.max_trades_per_day = 5
+        regime.sma_period = 50
+
+        engine = TradingEngine(
+            alpaca_client=mock_alpaca, db=db, detector=mock_detector,
+            planner=mock_planner, executor=mock_executor,
+            position_manager=mock_position_manager,
+            enabled=True, market_regime=regime,
+        )
+
+        self._setup_filled_order(engine, mock_alpaca, db, 'AAPL', thin_liquidity=True)
+
+        # Order fills but breakout volume is weak
+        mock_alpaca.get_order.side_effect = [
+            {'status': 'filled', 'filled_avg_price': 4.42, 'filled_qty': 113},
+            {'status': 'filled', 'filled_avg_price': 4.40},  # close order
+        ]
+        mock_alpaca.close_position.return_value = {'id': 'close-1', 'status': 'accepted'}
+
+        # Weak volume
+        bars = pd.DataFrame([
+            {'high': 4.45, 'low': 4.35, 'close': 4.42, 'volume': 50000},
+        ])
+        mock_alpaca.get_1min_bars.return_value = bars
+
+        engine._manage_pending_orders()
+
+        assert engine._daily_trade_count == 0
+
+    @patch('trading.trading_engine.time_mod')
+    def test_gap_fill_failure_no_daily_count_increment(
+        self, mock_time, mock_alpaca, db, mock_detector, mock_planner,
+        mock_executor, mock_position_manager
+    ):
+        """_daily_trade_count stays 0 on gap-fill adjustment failure."""
+        engine = TradingEngine(
+            alpaca_client=mock_alpaca, db=db, detector=mock_detector,
+            planner=mock_planner, executor=mock_executor,
+            position_manager=mock_position_manager,
+            enabled=True,
+        )
+
+        self._setup_filled_order(engine, mock_alpaca, db, 'AAPL')
+
+        # Fill above breakout (gap fill needed), but leg replacement fails
+        mock_alpaca.get_order.side_effect = [
+            {'status': 'filled', 'filled_avg_price': 4.50, 'filled_qty': 113},
+            {'legs': []},  # No legs found
+            {'status': 'filled', 'filled_avg_price': 4.48},  # close order
+        ]
+        mock_alpaca.close_position.return_value = {'id': 'close-gap', 'status': 'accepted'}
+
+        engine._manage_pending_orders()
+
+        assert engine._daily_trade_count == 0
+
+    @patch('trading.trading_engine.time_mod')
+    def test_successful_fill_increments_daily_count(
+        self, mock_time, mock_alpaca, db, mock_detector, mock_planner,
+        mock_executor, mock_position_manager
+    ):
+        """_daily_trade_count = 1 on successful fill (no rejection)."""
+        engine = TradingEngine(
+            alpaca_client=mock_alpaca, db=db, detector=mock_detector,
+            planner=mock_planner, executor=mock_executor,
+            position_manager=mock_position_manager,
+            enabled=True,
+        )
+
+        self._setup_filled_order(engine, mock_alpaca, db, 'AAPL')
+
+        # Fill at breakout level (no gap, no thin liquidity)
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled', 'filled_avg_price': 4.40, 'filled_qty': 113,
+        }
+
+        engine._manage_pending_orders()
+
+        assert engine._daily_trade_count == 1
+        assert engine._patterns_traded == 1

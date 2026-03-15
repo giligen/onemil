@@ -150,6 +150,18 @@ class TradingEngine:
             self._qualified_symbols.add(symbol)
             logger.info(f"{symbol}: Added to qualified symbols for pattern monitoring")
 
+    def clear_qualified_symbols(self) -> None:
+        """Clear qualified symbols for fresh scanner cycle.
+
+        Called by scanner before each 15-min intraday cycle so stale
+        symbols don't accumulate. Pending orders and traded symbols
+        are tracked separately and unaffected.
+        """
+        count = len(self._qualified_symbols)
+        self._qualified_symbols.clear()
+        if count > 0:
+            logger.debug(f"Cleared {count} qualified symbols before fresh scan")
+
     def _is_past_last_entry_time(self) -> bool:
         """Check if current ET time is past last_entry_time."""
         now_et = datetime.now(ET)
@@ -289,7 +301,6 @@ class TradingEngine:
                     f"{actual_qty} shares, ID: {order_id}"
                 )
                 self._traded_symbols.add(symbol)
-                self._daily_trade_count += 1
                 self.position_manager.mark_traded(symbol)
                 symbols_to_remove.append(symbol)
 
@@ -322,8 +333,6 @@ class TradingEngine:
                             'reason': 'weak_breakout_volume',
                         }
                         continue
-
-                self._patterns_traded += 1
 
                 # Phase 3: Gap-fill stop + target adjustment
                 # If stop replacement fails, risk is unbounded (e.g. $0.51/sh
@@ -393,6 +402,9 @@ class TradingEngine:
                             'reason': 'leg_replacement_failed',
                         }
                         continue
+
+                self._daily_trade_count += 1
+                self._patterns_traded += 1
 
                 if self.notifier:
                     self.notifier.notify_order_submitted(

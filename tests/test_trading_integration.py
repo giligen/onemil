@@ -703,3 +703,254 @@ class TestThinLiquidityIntegration:
         assert abs(trade['pnl'] - expected_pnl) < 0.01
         expected_pnl_pct = (4.38 / 4.42 - 1) * 100
         assert abs(trade['pnl_pct'] - expected_pnl_pct) < 0.01
+
+
+# ===========================================================================
+# SCANNER → ENGINE LOOP INTEGRATION TESTS (Bug #1, #2, #3, #4 fixes)
+# ===========================================================================
+
+@pytest.mark.integration
+class TestScannerEngineLoopIntegration:
+    """Integration tests for the scanner's main loop driving the trading engine."""
+
+    def _make_engine(self, mock_alpaca, db):
+        """Create a real TradingEngine with mocked Alpaca."""
+        from trading.market_regime import MarketRegimeFilter
+
+        detector = BullFlagDetector()
+        planner = TradePlanner(position_size_dollars=500, max_shares=1000, min_risk_per_share=0.05)
+        executor = OrderExecutor(alpaca_client=mock_alpaca, db=db)
+        position_manager = PositionManager(
+            alpaca_client=mock_alpaca, db=db,
+            max_positions=3, daily_loss_limit=-100.0,
+        )
+        regime = MagicMock(spec=MarketRegimeFilter)
+        regime.is_regime_ok.return_value = True
+        regime.is_thin_liquidity.return_value = False
+        regime.max_trades_per_day = 5
+        regime.sma_period = 50
+
+        engine = TradingEngine(
+            alpaca_client=mock_alpaca, db=db,
+            detector=detector, planner=planner,
+            executor=executor, position_manager=position_manager,
+            enabled=True, market_regime=regime,
+            force_close_time_et="15:45",
+        )
+        return engine
+
+    @patch('scanner.realtime_scanner.datetime')
+    @patch('trading.trading_engine.time_mod')
+    def test_scanner_forces_close_at_configured_time(
+        self, mock_time, mock_dt, mock_alpaca, db
+    ):
+        """Full flow: scanner loop → force close at 15:45 → positions closed."""
+        import pytz
+        import threading
+        from datetime import datetime as real_datetime
+        from scanner.criteria import ScannerCriteria
+        from scanner.realtime_scanner import RealtimeScanner
+        from data_sources.news_provider import NewsProvider
+
+        ET = pytz.timezone('US/Eastern')
+        shutdown = threading.Event()
+
+        engine = self._make_engine(mock_alpaca, db)
+        mock_news = MagicMock(spec=NewsProvider)
+
+        scanner = RealtimeScanner(
+            alpaca_client=mock_alpaca,
+            news_provider=mock_news,
+            db=db,
+            criteria=ScannerCriteria(),
+            trading_engine=engine,
+            shutdown_event=shutdown,
+        )
+
+        # Setup universe
+        mock_alpaca.is_trading_day.return_value = True
+        mock_alpaca.is_short_trading_day.return_value = False
+        scanner._universe = [{'symbol': 'AAA', 'price_close': 5.0, 'float_shares': 1_000_000}]
+        scanner._premarket_gap_symbols = {'AAA'}  # Skip gap scan
+
+        # Time: 15:46 → force close fires, then 16:00 → exit
+        tick = [0]
+        def fake_now(*args, **kwargs):
+            tick[0] += 1
+            if tick[0] <= 4:
+                return real_datetime(2026, 3, 16, 15, 46, 0, tzinfo=ET)
+            return real_datetime(2026, 3, 16, 16, 0, 0, tzinfo=ET)
+        mock_dt.now.side_effect = fake_now
+        mock_dt.side_effect = lambda *a, **kw: real_datetime(*a, **kw)
+
+        mock_alpaca.get_open_positions.return_value = []
+        mock_alpaca.get_latest_trades.return_value = {}
+        mock_alpaca.get_current_bars.return_value = {}
+
+        scanner._interruptible_sleep = MagicMock(return_value=False)
+
+        # Bypass _is_trading_day and _load_universe
+        with patch.object(scanner, '_is_trading_day', return_value=True), \
+             patch.object(scanner, '_load_universe'):
+            scanner.run()
+
+        # Verify force close was triggered (via _force_close_all)
+        # The engine should have attempted force close
+        assert mock_alpaca.get_open_positions.called
+
+    @patch('scanner.realtime_scanner.datetime')
+    def test_shutdown_triggers_force_close(self, mock_dt, mock_alpaca, db):
+        """Shutdown event → force close → positions closed."""
+        import pytz
+        import threading
+        from datetime import datetime as real_datetime
+        from scanner.criteria import ScannerCriteria
+        from scanner.realtime_scanner import RealtimeScanner
+        from data_sources.news_provider import NewsProvider
+
+        ET = pytz.timezone('US/Eastern')
+        shutdown = threading.Event()
+
+        engine = self._make_engine(mock_alpaca, db)
+        mock_news = MagicMock(spec=NewsProvider)
+
+        scanner = RealtimeScanner(
+            alpaca_client=mock_alpaca,
+            news_provider=mock_news,
+            db=db,
+            criteria=ScannerCriteria(),
+            trading_engine=engine,
+            shutdown_event=shutdown,
+        )
+
+        mock_alpaca.is_trading_day.return_value = True
+        mock_alpaca.is_short_trading_day.return_value = False
+        scanner._universe = [{'symbol': 'AAA', 'price_close': 5.0, 'float_shares': 1_000_000}]
+        scanner._premarket_gap_symbols = {'AAA'}
+
+        fake_now = real_datetime(2026, 3, 16, 10, 0, 0, tzinfo=ET)
+        mock_dt.now.return_value = fake_now
+        mock_dt.side_effect = lambda *a, **kw: real_datetime(*a, **kw)
+
+        mock_alpaca.get_open_positions.return_value = []
+
+        # Set shutdown before first iteration
+        shutdown.set()
+
+        with patch.object(scanner, '_is_trading_day', return_value=True), \
+             patch.object(scanner, '_load_universe'):
+            scanner.run()
+
+        # Post-loop safety net should call _force_close_all
+        mock_alpaca.get_open_positions.assert_called()
+
+    @patch('scanner.realtime_scanner.datetime')
+    def test_qualified_symbols_cleared_each_cycle(self, mock_dt, mock_alpaca, db):
+        """Stale symbols purged at bucket boundary."""
+        import pytz
+        import threading
+        from datetime import datetime as real_datetime
+        from scanner.criteria import ScannerCriteria
+        from scanner.realtime_scanner import RealtimeScanner
+        from data_sources.news_provider import NewsProvider
+
+        ET = pytz.timezone('US/Eastern')
+        shutdown = threading.Event()
+
+        engine = self._make_engine(mock_alpaca, db)
+        mock_news = MagicMock(spec=NewsProvider)
+
+        scanner = RealtimeScanner(
+            alpaca_client=mock_alpaca,
+            news_provider=mock_news,
+            db=db,
+            criteria=ScannerCriteria(),
+            trading_engine=engine,
+            shutdown_event=shutdown,
+        )
+
+        mock_alpaca.is_trading_day.return_value = True
+        mock_alpaca.is_short_trading_day.return_value = False
+        scanner._universe = [{'symbol': 'AAA', 'price_close': 5.0, 'float_shares': 1_000_000}]
+        scanner._premarket_gap_symbols = {'AAA'}
+
+        mock_alpaca.get_latest_trades.return_value = {}
+        mock_alpaca.get_current_bars.return_value = {}
+        mock_alpaca.get_open_positions.return_value = []
+
+        # Pre-populate stale symbols
+        engine._qualified_symbols = {'STALE1', 'STALE2'}
+
+        # One tick at 10:00, then 16:00 to exit
+        tick = [0]
+        def fake_now(*args, **kwargs):
+            tick[0] += 1
+            if tick[0] <= 3:
+                return real_datetime(2026, 3, 16, 10, 0, 0, tzinfo=ET)
+            return real_datetime(2026, 3, 16, 16, 0, 0, tzinfo=ET)
+        mock_dt.now.side_effect = fake_now
+        mock_dt.side_effect = lambda *a, **kw: real_datetime(*a, **kw)
+
+        scanner._interruptible_sleep = MagicMock(return_value=False)
+
+        with patch.object(scanner, '_is_trading_day', return_value=True), \
+             patch.object(scanner, '_load_universe'):
+            scanner.run()
+
+        # Qualified symbols should have been cleared before intraday cycle
+        # After the cycle, only newly qualified symbols should be present (none in this case)
+        assert 'STALE1' not in engine._qualified_symbols
+        assert 'STALE2' not in engine._qualified_symbols
+
+    @patch('scanner.realtime_scanner.datetime')
+    def test_end_of_day_safety_net_forces_close(self, mock_dt, mock_alpaca, db):
+        """16:00 exit → post-loop force close fires."""
+        import pytz
+        import threading
+        from datetime import datetime as real_datetime
+        from scanner.criteria import ScannerCriteria
+        from scanner.realtime_scanner import RealtimeScanner
+        from data_sources.news_provider import NewsProvider
+
+        ET = pytz.timezone('US/Eastern')
+        shutdown = threading.Event()
+
+        engine = self._make_engine(mock_alpaca, db)
+        mock_news = MagicMock(spec=NewsProvider)
+
+        scanner = RealtimeScanner(
+            alpaca_client=mock_alpaca,
+            news_provider=mock_news,
+            db=db,
+            criteria=ScannerCriteria(),
+            trading_engine=engine,
+            shutdown_event=shutdown,
+        )
+
+        mock_alpaca.is_trading_day.return_value = True
+        mock_alpaca.is_short_trading_day.return_value = False
+        scanner._universe = [{'symbol': 'AAA', 'price_close': 5.0, 'float_shares': 1_000_000}]
+        scanner._premarket_gap_symbols = {'AAA'}
+
+        mock_alpaca.get_open_positions.return_value = []
+        mock_alpaca.get_latest_trades.return_value = {}
+        mock_alpaca.get_current_bars.return_value = {}
+
+        # First call at 15:59 (enters loop), second call at 16:00 (exits loop)
+        tick = [0]
+        def fake_now(*args, **kwargs):
+            tick[0] += 1
+            if tick[0] <= 2:
+                return real_datetime(2026, 3, 16, 15, 59, 0, tzinfo=ET)
+            return real_datetime(2026, 3, 16, 16, 0, 0, tzinfo=ET)
+        mock_dt.now.side_effect = fake_now
+        mock_dt.side_effect = lambda *a, **kw: real_datetime(*a, **kw)
+
+        scanner._interruptible_sleep = MagicMock(return_value=False)
+
+        with patch.object(scanner, '_is_trading_day', return_value=True), \
+             patch.object(scanner, '_load_universe'):
+            scanner.run()
+
+        # Post-loop safety net should have called _force_close_all
+        mock_alpaca.get_open_positions.assert_called()
