@@ -502,6 +502,7 @@ class BacktestRunner:
         # Total trading minutes per day (9:30-16:00 ET = 390 min)
         self.TRADING_MINUTES = 390
         self.rvol_mode = rvol_mode
+        self._min_breakout_vol_override = 0  # 0 = disabled; set per-date by batch_backtest
         self._ET = pytz.timezone('US/Eastern')
         self.early_exit_after_trade = early_exit_after_trade
         self.realistic = realistic
@@ -787,6 +788,22 @@ class BacktestRunner:
 
                 # Check if triggered
                 elif bar_high >= pending_order.breakout_level:
+                    # Breakout volume check on thin liquidity days (H5 OR filter)
+                    # Only applied when min_breakout_vol_override is set (> base 1.5)
+                    if self._min_breakout_vol_override > 0:
+                        breakout_bar_volume = bar['volume']
+                        avg_flag_vol = pending_order.setup.avg_flag_volume
+                        if avg_flag_vol > 0:
+                            bvr = breakout_bar_volume / avg_flag_vol
+                            if bvr < self._min_breakout_vol_override:
+                                logger.info(
+                                    f"  Bar {i}: breakout REJECTED (thin liquidity) — "
+                                    f"volume ratio {bvr:.1f}x "
+                                    f"< {self._min_breakout_vol_override:.1f}x min"
+                                )
+                                pending_order = None
+                                continue
+
                     # Fill at max(bar_open, breakout_level) — realistic fill price
                     fill_price = max(bar_open, pending_order.breakout_level)
                     plan = pending_order.plan

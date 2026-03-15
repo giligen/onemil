@@ -292,19 +292,29 @@ def run_batch_backtest(
     if effective_max_trades <= 0 and market_regime:
         effective_max_trades = getattr(market_regime, 'max_trades_per_day', 0)
 
+
     for trade_date in sorted(movers_by_date.keys()):
         # --- Market regime filter ---
         if market_regime and not market_regime.is_regime_ok(trade_date):
             info = market_regime.get_regime_info(trade_date)
             vol_str = f"{info['vol_5d']:.2f}%" if info['vol_5d'] is not None else "N/A"
+            svr_str = f"{info['spy_volume_ratio']:.2f}" if info.get('spy_volume_ratio') is not None else "N/A"
             n_skip = len(movers_by_date[trade_date])
             regime_skipped += n_skip
             idx += n_skip
             logger.warning(
-                f"REGIME SKIP {trade_date}: vol_5d={vol_str} > {market_regime.vol_threshold}% "
-                f"AND below SMA{market_regime.sma_period} — skipping {n_skip} symbols"
+                f"REGIME SKIP {trade_date}: vol_5d={vol_str}, SPY_vol_ratio={svr_str} "
+                f"— skipping {n_skip} symbols"
             )
             continue
+
+        # --- Thin liquidity: tighten breakout volume requirement (H5 OR filter) ---
+        if market_regime and market_regime.is_thin_liquidity(trade_date):
+            runner._min_breakout_vol_override = market_regime.get_min_breakout_volume_ratio(
+                trade_date, default=0
+            )
+        else:
+            runner._min_breakout_vol_override = 0  # disabled on normal days
 
         # --- Circuit breaker state (reset per date) ---
         cb_cum_pnl = 0.0
@@ -819,6 +829,8 @@ def main():
     universe_dict = {s['symbol']: s for s in universe}
 
     from config import Config
+    from trading.market_regime import MarketRegimeFilter
+
     cfg = Config._load_yaml_only()
     scanner_cfg = cfg.get("scanner", {})
     movers = find_big_movers(
@@ -834,9 +846,41 @@ def main():
         print_summary(len(symbols), movers, [])
         return
 
-    # Step 3: Run backtests (1-min bars also cached)
+    # Step 3: Build market regime filter
+    trading_cfg = cfg.get("trading", {})
+    regime_cfg = trading_cfg.get("market_regime", {})
+    sma_period = int(regime_cfg.get("sma_period", 50))
+    spy_lookback_days = int(sma_period * 1.5) + 14
+    spy_start = start_date - timedelta(days=spy_lookback_days)
+    spy_bars_raw = fetch_daily_bars_cached(['SPY'], spy_start, end_date, client, db)
+    spy_bars = spy_bars_raw.get('SPY', [])
+    max_trades_per_day = int(trading_cfg.get("max_trades_per_day", 5))
+    market_regime = MarketRegimeFilter(
+        enabled=bool(regime_cfg.get("enabled", True)),
+        vol_threshold=float(regime_cfg.get("vol_threshold", 1.5)),
+        sma_period=sma_period,
+        max_trades_per_day=max_trades_per_day,
+        min_spy_volume_ratio=float(regime_cfg.get("min_spy_volume_ratio", 0.70)),
+        thin_liquidity_breakout_vol_ratio=float(regime_cfg.get("thin_liquidity_breakout_vol_ratio", 2.0)),
+    )
+    market_regime.load_spy_bars(spy_bars)
+    cb_dd = float(trading_cfg.get("circuit_breaker_dd", 1500.0))
+    cb_pause = int(trading_cfg.get("circuit_breaker_pause", 1))
+    logger.info(
+        f"Regime filter: enabled={market_regime.enabled}, "
+        f"vol_threshold={market_regime.vol_threshold}%, sma_period={sma_period}, "
+        f"min_spy_vol_ratio={market_regime.min_spy_volume_ratio}, "
+        f"SPY bars={len(spy_bars)}, max_trades/day={max_trades_per_day}, "
+        f"CB dd=${cb_dd}, pause={cb_pause}"
+    )
+
+    # Step 4: Run backtests (1-min bars also cached)
     runner = BacktestRunner()  # uses from_config() for all settings
-    results = run_batch_backtest(movers, client, runner, db=db, universe_dict=universe_dict)
+    results = run_batch_backtest(
+        movers, client, runner, db=db, universe_dict=universe_dict,
+        market_regime=market_regime,
+        circuit_breaker_dd=cb_dd, circuit_breaker_pause=cb_pause,
+    )
 
     # Step 4: Write CSV + print summary
     write_csv_report(results, args.output)

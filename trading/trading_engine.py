@@ -497,6 +497,19 @@ class TradingEngine:
             )
             return None
 
+        # Thin liquidity: log warning for awareness (H5 OR filter)
+        # Production enforcement happens via breakout volume check at fill time
+        if self.market_regime and self.market_regime.is_thin_liquidity(date.today()):
+            info = self.market_regime.get_regime_info(date.today())
+            svr = info.get('spy_volume_ratio')
+            svr_str = f"{svr:.2f}" if svr is not None else "N/A"
+            logger.warning(
+                f"THIN LIQUIDITY: SPY vol ratio {svr_str} "
+                f"< {self.market_regime.min_spy_volume_ratio} — "
+                f"breakout vol threshold raised to "
+                f"{self.market_regime.thin_liquidity_breakout_vol_ratio:.1f}x"
+            )
+
         # Max trades per day
         if self.market_regime and self._daily_trade_count >= self.market_regime.max_trades_per_day:
             logger.warning(

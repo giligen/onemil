@@ -52,7 +52,9 @@ def mock_alpaca():
 @pytest.fixture
 def mock_detector():
     """Mocked BullFlagDetector."""
-    return MagicMock(spec=BullFlagDetector)
+    detector = MagicMock(spec=BullFlagDetector)
+    detector.min_breakout_volume_ratio = 1.5  # default from config
+    return detector
 
 
 @pytest.fixture

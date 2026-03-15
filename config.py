@@ -398,6 +398,16 @@ class Config:
         return int(self._get_yaml("trading", "market_regime", "sma_period", default=50))
 
     @property
+    def market_regime_min_spy_volume_ratio(self) -> float:
+        """SPY volume ratio threshold — below this = thin liquidity day."""
+        return float(self._get_yaml("trading", "market_regime", "min_spy_volume_ratio", default=0.70))
+
+    @property
+    def market_regime_thin_liquidity_breakout_vol_ratio(self) -> float:
+        """Stricter breakout volume ratio required on thin liquidity days."""
+        return float(self._get_yaml("trading", "market_regime", "thin_liquidity_breakout_vol_ratio", default=2.0))
+
+    @property
     def max_trades_per_day(self) -> int:
         """Maximum trades allowed per day."""
         return int(self._get_yaml("trading", "max_trades_per_day", default=5))

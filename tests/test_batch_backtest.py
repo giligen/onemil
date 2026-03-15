@@ -319,6 +319,8 @@ class TestRunBatchBacktest:
         })
 
         runner = MagicMock(spec=BacktestRunner)
+        runner.detector = MagicMock()
+        runner.detector.min_breakout_volume_ratio = 1.5
         runner.run.return_value = BacktestResult(
             symbol="TEST", trade_date="2026-03-05", total_bars=20, patterns_detected=0,
         )
@@ -349,6 +351,8 @@ class TestRunBatchBacktest:
             return bars_df
 
         runner = MagicMock(spec=BacktestRunner)
+        runner.detector = MagicMock()
+        runner.detector.min_breakout_volume_ratio = 1.5
         runner.run.return_value = BacktestResult(
             symbol="OK", trade_date="2026-03-05", total_bars=20, patterns_detected=0,
         )
@@ -364,6 +368,8 @@ class TestRunBatchBacktest:
         movers = [("NODATA", date(2026, 3, 5))]
 
         runner = MagicMock(spec=BacktestRunner)
+        runner.detector = MagicMock()
+        runner.detector.min_breakout_volume_ratio = 1.5
         with patch.object(client, 'get_historical_1min_bars', return_value=pd.DataFrame()):
             results = run_batch_backtest(movers, client, runner)
 
@@ -373,6 +379,8 @@ class TestRunBatchBacktest:
     def test_empty_movers_list(self, client, mock_sdk_clients):
         """Empty movers list should return empty results."""
         runner = MagicMock(spec=BacktestRunner)
+        runner.detector = MagicMock()
+        runner.detector.min_breakout_volume_ratio = 1.5
         results = run_batch_backtest([], client, runner)
         assert results == []
 
@@ -774,6 +782,8 @@ class TestBatchBacktestRegimeAndCB:
 
         client = MagicMock(spec=AlpacaClient)
         runner = MagicMock(spec=BacktestRunner)
+        runner.detector = MagicMock()
+        runner.detector.min_breakout_volume_ratio = 1.5
         aapl_result = BacktestResult(
             symbol="AAPL", trade_date="2026-03-06",
             total_bars=100, patterns_detected=1, trades_simulated=[],
@@ -804,6 +814,8 @@ class TestBatchBacktestRegimeAndCB:
 
         client = MagicMock(spec=AlpacaClient)
         runner = MagicMock(spec=BacktestRunner)
+        runner.detector = MagicMock()
+        runner.detector.min_breakout_volume_ratio = 1.5
 
         # Each run returns 1 trade
         def make_result(symbol):
@@ -844,6 +856,8 @@ class TestBatchBacktestRegimeAndCB:
 
         client = MagicMock(spec=AlpacaClient)
         runner = MagicMock(spec=BacktestRunner)
+        runner.detector = MagicMock()
+        runner.detector.min_breakout_volume_ratio = 1.5
 
         trade1 = MagicMock()
         trade1.pnl = -2000.0

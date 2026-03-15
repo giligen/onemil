@@ -88,6 +88,8 @@ trading:
     enabled: true
     vol_threshold: 1.5         # 5-day avg daily range % — high volatility signal
     sma_period: 50             # SPY below SMA(50) — downtrend signal
+    min_spy_volume_ratio: 0.70 # SPY T-1 volume / SMA20 — thin liquidity threshold
+    thin_liquidity_breakout_vol_ratio: 2.0  # Stricter breakout vol ratio on thin days
   bull_flag:
     min_pole_candles: 3
     min_pole_gain_pct: 3.0

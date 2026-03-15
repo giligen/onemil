@@ -11,6 +11,7 @@ Tests cover:
 - No lookahead — bars on trade_date are NOT used
 - Mathematical accuracy of vol_5d and SMA calculations
 - max_trades_per_day property
+- SPY volume ratio (thin liquidity filter)
 """
 
 import pytest
@@ -24,11 +25,19 @@ from trading.market_regime import MarketRegimeFilter
 # ---------------------------------------------------------------------------
 
 def _make_ohlc_bars(dates_and_data):
-    """Build SPY bar list from (date, open, high, low, close) tuples."""
-    return [
-        {'date': d, 'open': o, 'high': h, 'low': lo, 'close': c}
-        for d, o, h, lo, c in dates_and_data
-    ]
+    """Build SPY bar list from (date, open, high, low, close) tuples.
+
+    Also accepts (date, open, high, low, close, volume) tuples.
+    """
+    bars = []
+    for item in dates_and_data:
+        if len(item) == 6:
+            d, o, h, lo, c, v = item
+            bars.append({'date': d, 'open': o, 'high': h, 'low': lo, 'close': c, 'volume': v})
+        else:
+            d, o, h, lo, c = item
+            bars.append({'date': d, 'open': o, 'high': h, 'low': lo, 'close': c})
+    return bars
 
 
 def _make_close_only_bars(dates_and_closes):
@@ -291,6 +300,8 @@ class TestMarketRegimeFilter:
         assert 'vol_5d' in info
         assert 'sma' in info
         assert 'is_below_sma' in info
+        assert 'spy_volume_ratio' in info
+        assert 'is_thin_liquidity' in info
         assert 'is_ok' in info
         assert isinstance(info['is_ok'], bool)
 
@@ -320,3 +331,226 @@ class TestMarketRegimeFilter:
         mrf = MarketRegimeFilter(enabled=True)
         mrf.load_spy_bars(bars)
         assert len(mrf._sorted_dates) == 2
+
+
+class TestSpyVolumeRatio:
+    """Tests for thin liquidity filter (SPY volume ratio / H5 OR)."""
+
+    def _build_volume_bars(self, n=25, base_volume=100_000_000):
+        """Build 25 bars with constant volume for predictable SMA20."""
+        from datetime import timedelta
+        bars = []
+        d = date(2025, 1, 1)
+        for i in range(n):
+            while d.weekday() >= 5:
+                d += timedelta(days=1)
+            bars.append({
+                'date': d,
+                'open': 500, 'high': 505, 'low': 495, 'close': 500,
+                'volume': base_volume,
+            })
+            d += timedelta(days=1)
+        return bars
+
+    def test_volume_ratio_normal(self):
+        """Normal volume day — ratio ~1.0, not thin liquidity."""
+        bars = self._build_volume_bars(25, base_volume=100_000_000)
+        mrf = MarketRegimeFilter(enabled=True, min_spy_volume_ratio=0.70)
+        mrf.load_spy_bars(bars)
+
+        from datetime import timedelta
+        trade_date = bars[-1]['date'] + timedelta(days=1)
+        while trade_date.weekday() >= 5:
+            trade_date += timedelta(days=1)
+
+        ratio = mrf.get_spy_volume_ratio(trade_date)
+        assert ratio is not None
+        assert ratio == pytest.approx(1.0, abs=0.01)
+        assert mrf.is_thin_liquidity(trade_date) is False
+        assert mrf.is_regime_ok(trade_date) is True
+
+    def test_thin_liquidity_does_not_block_regime(self):
+        """Thin volume does NOT block via is_regime_ok — it tightens breakout vol instead."""
+        bars = self._build_volume_bars(25, base_volume=100_000_000)
+        bars[-1]['volume'] = 50_000_000  # 50% of normal
+
+        mrf = MarketRegimeFilter(enabled=True, min_spy_volume_ratio=0.70)
+        mrf.load_spy_bars(bars)
+
+        from datetime import timedelta
+        trade_date = bars[-1]['date'] + timedelta(days=1)
+        while trade_date.weekday() >= 5:
+            trade_date += timedelta(days=1)
+
+        # is_regime_ok should STILL return True (thin liquidity doesn't block)
+        assert mrf.is_regime_ok(trade_date) is True
+        # But is_thin_liquidity should be True
+        assert mrf.is_thin_liquidity(trade_date) is True
+
+    def test_thin_liquidity_tightens_breakout_vol(self):
+        """On thin days, get_min_breakout_volume_ratio returns stricter threshold."""
+        bars = self._build_volume_bars(25, base_volume=100_000_000)
+        bars[-1]['volume'] = 50_000_000  # 50% — well below 0.70 threshold
+
+        mrf = MarketRegimeFilter(
+            enabled=True, min_spy_volume_ratio=0.70,
+            thin_liquidity_breakout_vol_ratio=2.0,
+        )
+        mrf.load_spy_bars(bars)
+
+        from datetime import timedelta
+        trade_date = bars[-1]['date'] + timedelta(days=1)
+        while trade_date.weekday() >= 5:
+            trade_date += timedelta(days=1)
+
+        # Should return stricter ratio (2.0) instead of default (1.5)
+        effective = mrf.get_min_breakout_volume_ratio(trade_date, default=1.5)
+        assert effective == 2.0
+
+    def test_normal_day_returns_default_breakout_vol(self):
+        """On normal days, get_min_breakout_volume_ratio returns default."""
+        bars = self._build_volume_bars(25, base_volume=100_000_000)
+
+        mrf = MarketRegimeFilter(
+            enabled=True, min_spy_volume_ratio=0.70,
+            thin_liquidity_breakout_vol_ratio=2.0,
+        )
+        mrf.load_spy_bars(bars)
+
+        from datetime import timedelta
+        trade_date = bars[-1]['date'] + timedelta(days=1)
+        while trade_date.weekday() >= 5:
+            trade_date += timedelta(days=1)
+
+        effective = mrf.get_min_breakout_volume_ratio(trade_date, default=1.5)
+        assert effective == 1.5
+
+    def test_volume_ratio_disabled_not_thin(self):
+        """Disabled filter — is_thin_liquidity always False."""
+        bars = self._build_volume_bars(25, base_volume=100_000_000)
+        bars[-1]['volume'] = 30_000_000  # Very thin
+
+        mrf = MarketRegimeFilter(enabled=False, min_spy_volume_ratio=0.70)
+        mrf.load_spy_bars(bars)
+
+        from datetime import timedelta
+        trade_date = bars[-1]['date'] + timedelta(days=1)
+        while trade_date.weekday() >= 5:
+            trade_date += timedelta(days=1)
+
+        assert mrf.is_thin_liquidity(trade_date) is False
+        assert mrf.is_regime_ok(trade_date) is True
+
+    def test_volume_ratio_insufficient_data(self):
+        """Fewer than 20 bars — not thin, trading allowed."""
+        bars = self._build_volume_bars(10, base_volume=100_000_000)
+        mrf = MarketRegimeFilter(enabled=True, min_spy_volume_ratio=0.70)
+        mrf.load_spy_bars(bars)
+
+        from datetime import timedelta
+        trade_date = bars[-1]['date'] + timedelta(days=1)
+        while trade_date.weekday() >= 5:
+            trade_date += timedelta(days=1)
+
+        assert mrf.get_spy_volume_ratio(trade_date) is None
+        assert mrf.is_thin_liquidity(trade_date) is False
+        assert mrf.is_regime_ok(trade_date) is True
+
+    def test_volume_ratio_no_lookahead(self):
+        """Volume ratio uses T-1, not trade_date itself."""
+        bars = self._build_volume_bars(25, base_volume=100_000_000)
+
+        from datetime import timedelta
+        trade_date = bars[-1]['date'] + timedelta(days=1)
+        while trade_date.weekday() >= 5:
+            trade_date += timedelta(days=1)
+
+        # Add a bar ON trade_date with very thin volume
+        bars.append({
+            'date': trade_date,
+            'open': 500, 'high': 505, 'low': 495, 'close': 500,
+            'volume': 10_000_000,  # 10% of normal
+        })
+
+        mrf = MarketRegimeFilter(enabled=True, min_spy_volume_ratio=0.70)
+        mrf.load_spy_bars(bars)
+
+        # Should use T-1 (normal volume), not trade_date (thin volume)
+        assert mrf.is_thin_liquidity(trade_date) is False
+
+    def test_volume_ratio_calculation(self):
+        """Verify exact volume ratio math: T-1 volume / SMA20(volume)."""
+        bars = self._build_volume_bars(25, base_volume=100_000_000)
+        # Set T-1 volume to 75M (75% of 100M)
+        bars[-1]['volume'] = 75_000_000
+
+        mrf = MarketRegimeFilter(enabled=True, min_spy_volume_ratio=0.70)
+        mrf.load_spy_bars(bars)
+
+        from datetime import timedelta
+        trade_date = bars[-1]['date'] + timedelta(days=1)
+        while trade_date.weekday() >= 5:
+            trade_date += timedelta(days=1)
+
+        ratio = mrf.get_spy_volume_ratio(trade_date)
+        # SMA20 includes bars[-1] which has 75M, so:
+        # SMA20 = (19 * 100M + 75M) / 20 = 98.75M
+        # ratio = 75M / 98.75M ≈ 0.7595
+        expected_sma20 = (19 * 100_000_000 + 75_000_000) / 20
+        expected_ratio = 75_000_000 / expected_sma20
+        assert ratio == pytest.approx(expected_ratio, abs=0.001)
+
+    def test_regime_info_includes_thin_liquidity(self):
+        """get_regime_info includes spy_volume_ratio and is_thin_liquidity."""
+        bars = self._build_volume_bars(25, base_volume=100_000_000)
+        mrf = MarketRegimeFilter(enabled=True, min_spy_volume_ratio=0.70)
+        mrf.load_spy_bars(bars)
+
+        from datetime import timedelta
+        trade_date = bars[-1]['date'] + timedelta(days=1)
+        while trade_date.weekday() >= 5:
+            trade_date += timedelta(days=1)
+
+        info = mrf.get_regime_info(trade_date)
+        assert 'spy_volume_ratio' in info
+        assert 'is_thin_liquidity' in info
+        assert info['spy_volume_ratio'] is not None
+        assert info['is_thin_liquidity'] is False
+
+    def test_volume_ratio_backwards_compat_no_volume(self):
+        """Bars without 'volume' key — volume defaults to 0, not thin."""
+        bars = _make_ohlc_bars([
+            (date(2025, 3, d), 500, 505, 495, 500) for d in range(3, 28)
+            if date(2025, 3, d).weekday() < 5
+        ])
+        mrf = MarketRegimeFilter(enabled=True, min_spy_volume_ratio=0.70)
+        mrf.load_spy_bars(bars)
+
+        assert mrf.get_spy_volume_ratio(date(2025, 3, 28)) is None
+        assert mrf.is_thin_liquidity(date(2025, 3, 28)) is False
+        assert mrf.is_regime_ok(date(2025, 3, 28)) is True
+
+    def test_defaults(self):
+        """Default values: min_spy_volume_ratio=0.70, thin_liquidity_breakout_vol_ratio=2.0."""
+        mrf = MarketRegimeFilter()
+        assert mrf.min_spy_volume_ratio == 0.70
+        assert mrf.thin_liquidity_breakout_vol_ratio == 2.0
+
+    def test_custom_thin_liquidity_breakout_ratio(self):
+        """Custom thin_liquidity_breakout_vol_ratio is respected."""
+        bars = self._build_volume_bars(25, base_volume=100_000_000)
+        bars[-1]['volume'] = 50_000_000  # Thin
+
+        mrf = MarketRegimeFilter(
+            enabled=True, min_spy_volume_ratio=0.70,
+            thin_liquidity_breakout_vol_ratio=3.0,  # Custom stricter value
+        )
+        mrf.load_spy_bars(bars)
+
+        from datetime import timedelta
+        trade_date = bars[-1]['date'] + timedelta(days=1)
+        while trade_date.weekday() >= 5:
+            trade_date += timedelta(days=1)
+
+        effective = mrf.get_min_breakout_volume_ratio(trade_date, default=1.5)
+        assert effective == 3.0

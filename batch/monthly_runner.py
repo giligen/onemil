@@ -437,6 +437,8 @@ class MonthlyBacktestRunner:
                 vol_threshold=float(_regime_cfg.get("vol_threshold", 1.5)),
                 sma_period=sma_period,
                 max_trades_per_day=max_trades_per_day,
+                min_spy_volume_ratio=float(_regime_cfg.get("min_spy_volume_ratio", 0.70)),
+                thin_liquidity_breakout_vol_ratio=float(_regime_cfg.get("thin_liquidity_breakout_vol_ratio", 2.0)),
             )
             market_regime.load_spy_bars(spy_bars)
 

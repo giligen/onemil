@@ -64,14 +64,14 @@ Bull flag momentum pattern on 1-minute bars:
 
 ### Market Regime Filter
 
-Blocks all new entries when SPY indicates a hostile regime (high volatility + downtrend):
+Blocks or tightens entries when SPY indicates a hostile regime. Two independent signals:
 
-- **Vol check**: SPY 5-day rolling stdev of daily returns > 1.5%
-- **Trend check**: SPY close below SMA(50)
-- **Blocking**: Both conditions must be true simultaneously to block trading
+1. **High volatility + downtrend**: SPY 5-day avg daily range > 1.5% AND close below SMA(50) → **blocks all entries**
+2. **Thin liquidity (H5 OR filter)**: SPY T-1 volume / SMA20(volume) < 0.70 → **tightens breakout volume requirement** from 1.5x to 2.0x. Trades are only blocked when BOTH the market is thin AND the breakout bar volume is weak.
+
 - **Max trades/day**: 5 (hard cap regardless of regime)
 
-This filter prevented $21K of drawdown during Mar-May 2025 turbulence while preserving virtually all upside.
+The vol+trend filter prevented $21K of drawdown during Mar-May 2025 turbulence. The H5 OR thin liquidity filter removes 36 trades (5.7%) that were net losers, reducing MaxDD by $6,326 (from $19,080 to $12,754) while *increasing* PnL by $7,336. Selectivity ratio: 2.20x (removes holiday trades at 2.2x the rate of non-holiday trades).
 
 **Lookahead prevention**: All indicators use data strictly *before* trade date (`dates < trade_date`). Live system uses `date.today()` at 9:30 AM, so T-1 = yesterday's settled close.
 
@@ -80,6 +80,8 @@ This filter prevented $21K of drawdown during Mar-May 2025 turbulence while pres
 | `market_regime_enabled` | `true` | Enable/disable regime filter |
 | `market_regime_vol_threshold` | `1.5` | SPY vol threshold (%) |
 | `market_regime_sma_period` | `50` | SMA lookback period |
+| `market_regime_min_spy_volume_ratio` | `0.70` | Min SPY volume ratio (T-1 vol / SMA20) — thin liquidity threshold |
+| `market_regime_thin_liquidity_breakout_vol_ratio` | `2.0` | Min breakout volume ratio on thin liquidity days |
 | `max_trades_per_day` | `5` | Max entries per day |
 
 ## Backtesting
@@ -189,7 +191,19 @@ Monthly breakdown (with regime filter):
 | 2026-02 | 38 | 28.9% | +$6,302 | $235,954 |
 | 2026-03 | 37 | 32.4% | +$11,172 | $247,126 |
 
-MaxDD: $19,080 from Dec 17 2025 → Jan 8 2026 (holiday low-liquidity chop), recovered in 14 calendar days.
+### H5 OR Thin Liquidity Filter Impact (added on top of regime filter)
+
+| Metric | Regime Only | + H5 OR Filter | Change |
+|--------|------------|-----------------|--------|
+| Trades | 636 | 600 | -36 (5.7%) |
+| Total P&L | $247,126 | $254,462 | **+$7,336** |
+| Win Rate | 40.6% | 41.5% | +0.9pp |
+| Max Drawdown | $19,080 | $12,754 | **-$6,326 (-33%)** |
+| Sharpe | 4.57 | 4.80 | +5% |
+
+The H5 OR filter uses a conditional approach: on thin-liquidity days (SPY vol ratio < 0.70), the breakout volume requirement is tightened from 1.5x to 2.0x. A trade is only removed when BOTH conditions are weak — thin market AND weak breakout. Selectivity ratio: 2.20x (removes holiday trades at 2.2x the rate of non-holiday trades).
+
+MaxDD: $12,754 from Dec 17 2025 → Jan 8 2026 (holiday low-liquidity chop).
 
 ### BacktestRunner Parameters
 
