@@ -590,22 +590,31 @@ class TestGapFillStopAdjustment:
 
         mock_alpaca.replace_order_stop_price.assert_not_called()
 
-    def test_gap_fill_no_legs_logs_error(self, engine, mock_alpaca, db):
-        """No SL/TP legs found logs error but doesn't crash."""
+    @patch('trading.trading_engine.time_mod')
+    def test_gap_fill_no_legs_triggers_emergency_close(self, mock_time, engine, mock_alpaca, db):
+        """No SL leg found on gap-fill triggers emergency close."""
         self._setup_filled_order(engine, mock_alpaca, db, fill_price=4.55)
 
         mock_alpaca.get_order.side_effect = [
             {'status': 'filled', 'filled_avg_price': 4.55, 'legs': []},
-            {'legs': []},  # No legs
+            {'legs': []},  # No legs — gap_adjust_failed
+            # get_order for close poll
+            {'status': 'filled', 'filled_avg_price': 4.50},
         ]
+        mock_alpaca.close_position.return_value = {'id': 'close-gap', 'status': 'accepted'}
 
-        # Should not raise
-        engine._manage_pending_orders()
-        mock_alpaca.replace_order_stop_price.assert_not_called()
-        mock_alpaca.replace_order_limit_price.assert_not_called()
+        result = engine._manage_pending_orders()
+        assert result is not None
+        assert result['status'] == 'gap_adjust_failed'
+        mock_alpaca.close_position.assert_called_once_with('GAP')
 
-    def test_gap_fill_replace_fails_logs_error(self, engine, mock_alpaca, db):
-        """Replace exception is caught and logged, trade continues."""
+        # Verify DB has exit with gap_adjust_failed reason
+        trade = db.get_trade_by_order_id('order-gap')
+        assert trade['exit_reason'] == 'gap_adjust_failed'
+
+    @patch('trading.trading_engine.time_mod')
+    def test_gap_fill_replace_fails_triggers_emergency_close(self, mock_time, engine, mock_alpaca, db):
+        """Replace exception on gap-fill triggers emergency close."""
         self._setup_filled_order(engine, mock_alpaca, db, fill_price=4.55)
 
         mock_alpaca.get_order.side_effect = [
@@ -616,12 +625,16 @@ class TestGapFillStopAdjustment:
                      'limit_price': None, 'status': 'new'},
                 ],
             },
+            # get_order for close poll
+            {'status': 'filled', 'filled_avg_price': 4.48},
         ]
         mock_alpaca.replace_order_stop_price.side_effect = Exception("API error")
+        mock_alpaca.close_position.return_value = {'id': 'close-gap', 'status': 'accepted'}
 
-        # Should not raise
         result = engine._manage_pending_orders()
-        assert result is not None  # Fill still processed
+        assert result is not None
+        assert result['status'] == 'gap_adjust_failed'
+        mock_alpaca.close_position.assert_called_once_with('GAP')
 
 
 # ===========================================================================
@@ -1097,13 +1110,13 @@ class TestPartialFillDetection:
             'trade_date': date.today().isoformat(),
             'symbol': 'PART',
             'side': 'buy',
-            'entry_price': 5.00,
-            'stop_loss_price': 4.80,
-            'take_profit_price': 5.40,
-            'shares': 100,
-            'risk_per_share': 0.20,
-            'total_risk': 20.0,
-            'risk_reward_ratio': 2.0,
+            'entry_price': 4.40,
+            'stop_loss_price': 4.29,
+            'take_profit_price': 4.90,
+            'shares': 113,
+            'risk_per_share': 0.11,
+            'total_risk': 12.43,
+            'risk_reward_ratio': 4.5,
             'order_id': 'order-partial',
             'order_status': 'accepted',
             'fill_price': None,
@@ -1126,11 +1139,11 @@ class TestPartialFillDetection:
             'placed_at': now,
         }
 
+        # Fill at breakout_level (4.40) to avoid gap-fill path
         mock_alpaca.get_order.return_value = {
             'status': 'filled',
-            'filled_avg_price': 5.00,
+            'filled_avg_price': 4.40,
             'filled_qty': 50,
-            'legs': [],
         }
 
         result = engine._manage_pending_orders()
@@ -1147,13 +1160,13 @@ class TestPartialFillDetection:
             'trade_date': date.today().isoformat(),
             'symbol': 'FULL',
             'side': 'buy',
-            'entry_price': 5.00,
-            'stop_loss_price': 4.80,
-            'take_profit_price': 5.40,
-            'shares': 100,
-            'risk_per_share': 0.20,
-            'total_risk': 20.0,
-            'risk_reward_ratio': 2.0,
+            'entry_price': 4.40,
+            'stop_loss_price': 4.29,
+            'take_profit_price': 4.90,
+            'shares': 113,
+            'risk_per_share': 0.11,
+            'total_risk': 12.43,
+            'risk_reward_ratio': 4.5,
             'order_id': 'order-full',
             'order_status': 'accepted',
             'fill_price': None,
@@ -1176,11 +1189,11 @@ class TestPartialFillDetection:
             'placed_at': now,
         }
 
+        # Fill at breakout_level (4.40) to avoid gap-fill path
         mock_alpaca.get_order.return_value = {
             'status': 'filled',
-            'filled_avg_price': 5.00,
+            'filled_avg_price': 4.40,
             'filled_qty': 0,
-            'legs': [],
         }
 
         result = engine._manage_pending_orders()
@@ -1862,7 +1875,7 @@ class TestThinLiquidityPostFillCheck:
         }
 
         mock_alpaca.get_order.return_value = {
-            'status': 'filled', 'filled_avg_price': 4.42, 'filled_qty': 113,
+            'status': 'filled', 'filled_avg_price': 4.40, 'filled_qty': 113,
         }
         mock_alpaca.get_open_positions.return_value = []
 
@@ -1874,7 +1887,7 @@ class TestThinLiquidityPostFillCheck:
 
         result = engine._manage_pending_orders()
 
-        # Should be kept (filled), not rejected
+        # Should be kept (filled at breakout_level, no gap), not rejected
         assert result is not None
         assert result['status'] == 'filled'
         assert engine._patterns_traded == 1
@@ -1916,11 +1929,18 @@ class TestThinLiquidityPostFillCheck:
             'min_breakout_vol_ratio': 2.0,
         }
 
-        # First call: order status (filled). Subsequent: for gap-fill adjustment
-        mock_alpaca.get_order.return_value = {
-            'status': 'filled', 'filled_avg_price': 4.42, 'filled_qty': 113,
-            'legs': [],
-        }
+        # First call: order status (filled). Second: gap-fill leg lookup
+        mock_alpaca.get_order.side_effect = [
+            {'status': 'filled', 'filled_avg_price': 4.42, 'filled_qty': 113},
+            {'legs': [
+                {'id': 'sl-1', 'side': 'sell', 'stop_price': 4.29,
+                 'limit_price': None, 'status': 'new'},
+                {'id': 'tp-1', 'side': 'sell', 'stop_price': None,
+                 'limit_price': 4.90, 'status': 'new'},
+            ]},
+        ]
+        mock_alpaca.replace_order_stop_price.return_value = {'id': 'sl-1'}
+        mock_alpaca.replace_order_limit_price.return_value = {'id': 'tp-1'}
         mock_alpaca.get_open_positions.return_value = []
 
         # Strong volume bars
@@ -2032,8 +2052,7 @@ class TestThinLiquidityPostFillCheck:
         }
 
         mock_alpaca.get_order.return_value = {
-            'status': 'filled', 'filled_avg_price': 4.42, 'filled_qty': 113,
-            'legs': [],
+            'status': 'filled', 'filled_avg_price': 4.40, 'filled_qty': 113,
         }
         mock_alpaca.get_open_positions.return_value = []
 
@@ -2041,7 +2060,7 @@ class TestThinLiquidityPostFillCheck:
 
         assert result['status'] == 'filled'
         assert engine._patterns_traded == 1
-        # close_position should NOT have been called
+        # close_position should NOT have been called (no thin check, no gap)
         mock_alpaca.close_position.assert_not_called()
 
     def test_check_breakout_volume_fails_open_on_no_bars(
@@ -2170,7 +2189,7 @@ class TestThinLiquidityPostFillCheck:
             'status': 'filled', 'filled_avg_price': 4.38,
         }
 
-        engine._reject_thin_liquidity_trade('AAPL', 'order-db-1', 4.42, 113, trade_record)
+        engine._emergency_close_position('AAPL', 'order-db-1', 4.42, 113, trade_record)
 
         # Verify DB updated
         updated = db.get_trade_by_order_id('order-db-1')
@@ -2214,7 +2233,7 @@ class TestThinLiquidityPostFillCheck:
             'status': 'filled', 'filled_avg_price': 4.39,
         }
 
-        engine._reject_thin_liquidity_trade('AAPL', 'order-cb-1', 4.42, 113, trade_record)
+        engine._emergency_close_position('AAPL', 'order-cb-1', 4.42, 113, trade_record)
 
         expected_pnl = (4.39 - 4.42) * 113
         mock_position_manager.record_trade_pnl.assert_called_once()

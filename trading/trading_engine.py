@@ -218,7 +218,10 @@ class TradingEngine:
             try:
                 order_status = self.alpaca.get_order(order_id)
             except Exception as e:
-                logger.error(f"{symbol}: Failed to get order status: {e}")
+                error_msg = f"{symbol}: Failed to get order status: {e}"
+                logger.error(error_msg)
+                if self.notifier:
+                    self.notifier.notify_error(error_msg, component="OrderTracking")
                 continue
 
             status = order_status.get('status', 'unknown')
@@ -252,10 +255,19 @@ class TradingEngine:
                                     logger.warning(f"{symbol}: Using position fallback — ${fill_price}")
                                     break
                         except Exception as e:
-                            logger.error(f"{symbol}: Position fallback failed: {e}")
+                            error_msg = f"{symbol}: Position fallback failed: {e}"
+                            logger.error(error_msg)
+                            if self.notifier:
+                                self.notifier.notify_error(error_msg, component="FillTracking")
 
                     if fill_price is None:
-                        logger.error(f"{symbol}: Fill price unavailable after retries — skipping")
+                        error_msg = (
+                            f"{symbol}: Fill price unavailable after retries — "
+                            f"UNTRACKED FILLED POSITION (order {order_id})"
+                        )
+                        logger.error(error_msg)
+                        if self.notifier:
+                            self.notifier.notify_error(error_msg, component="FillTracking")
                         continue
 
                 # Fix 2: Partial fill detection
@@ -285,12 +297,15 @@ class TradingEngine:
                     })
                     logger.info(f"{symbol}: Trade DB updated — fill ${fill_price}, qty {actual_qty}")
                 else:
-                    logger.error(f"{symbol}: No trade record for order {order_id}")
+                    error_msg = f"{symbol}: No trade record for order {order_id} — DB integrity issue"
+                    logger.error(error_msg)
+                    if self.notifier:
+                        self.notifier.notify_error(error_msg, component="DBIntegrity")
 
                 # H5 OR: check breakout volume on thin-liquidity days
                 if pending.get('thin_liquidity', False):
                     if not self._check_breakout_volume(symbol, pending):
-                        self._reject_thin_liquidity_trade(
+                        self._emergency_close_position(
                             symbol, order_id, fill_price, actual_qty, trade_record
                         )
                         return {
@@ -303,6 +318,8 @@ class TradingEngine:
                 self._patterns_traded += 1
 
                 # Phase 3: Gap-fill stop + target adjustment
+                # If stop replacement fails, risk is unbounded (e.g. $0.51/sh
+                # instead of planned $0.11/sh on a $0.40 gap). Must close position.
                 setup = pending.get('setup')
                 if fill_price and setup and fill_price > setup.breakout_level:
                     entry_gap = fill_price - setup.breakout_level
@@ -313,6 +330,7 @@ class TradingEngine:
                         f"stop ${plan.stop_loss_price:.2f} → ${adjusted_stop:.2f}, "
                         f"target ${plan.take_profit_price:.2f} → ${adjusted_target:.2f}"
                     )
+                    gap_adjust_failed = False
                     try:
                         order_detail = self.alpaca.get_order(order_id)
                         sl_leg, tp_leg = self._identify_bracket_legs(
@@ -321,25 +339,51 @@ class TradingEngine:
                             expected_tp=plan.take_profit_price,
                         )
 
+                        # Stop leg is CRITICAL — wrong stop = unbounded risk
                         if sl_leg:
                             self.alpaca.replace_order_stop_price(sl_leg['id'], adjusted_stop)
                             logger.info(f"{symbol}: Stop adjusted to ${adjusted_stop:.2f}")
                         else:
-                            logger.error(f"{symbol}: No SL leg found in bracket order")
+                            logger.error(f"{symbol}: No SL leg found — cannot set correct stop")
+                            gap_adjust_failed = True
 
-                        if tp_leg:
-                            self.alpaca.replace_order_limit_price(tp_leg['id'], adjusted_target)
-                            logger.info(f"{symbol}: Target adjusted to ${adjusted_target:.2f}")
-                        else:
-                            logger.error(f"{symbol}: No TP leg found in bracket order")
+                        if not gap_adjust_failed:
+                            if tp_leg:
+                                self.alpaca.replace_order_limit_price(tp_leg['id'], adjusted_target)
+                                logger.info(f"{symbol}: Target adjusted to ${adjusted_target:.2f}")
+                            else:
+                                logger.error(f"{symbol}: No TP leg found — cannot set correct target")
+                                gap_adjust_failed = True
 
-                        if trade_record:
+                        if not gap_adjust_failed and trade_record:
                             self.db.update_trade(trade_record['id'], {
                                 'stop_loss_price': adjusted_stop,
                                 'take_profit_price': adjusted_target,
                             })
                     except Exception as e:
                         logger.error(f"{symbol}: Failed to adjust orders after gap fill: {e}")
+                        gap_adjust_failed = True
+
+                    if gap_adjust_failed:
+                        error_msg = (
+                            f"{symbol}: GAP FILL ADJUSTMENT FAILED — "
+                            f"entry gap +${entry_gap:.2f}, risk would be "
+                            f"${fill_price - plan.stop_loss_price:.2f}/sh instead of "
+                            f"${plan.risk_per_share:.2f}/sh. Closing position."
+                        )
+                        logger.error(error_msg)
+                        if self.notifier:
+                            self.notifier.notify_error(error_msg, component="GapFill")
+                        self._emergency_close_position(
+                            symbol, order_id, fill_price, actual_qty, trade_record,
+                            exit_reason='gap_adjust_failed',
+                        )
+                        return {
+                            'status': 'gap_adjust_failed',
+                            'symbol': symbol,
+                            'fill_price': fill_price,
+                            'reason': 'leg_replacement_failed',
+                        }
 
                 if self.notifier:
                     self.notifier.notify_order_submitted(
@@ -432,7 +476,10 @@ class TradingEngine:
         try:
             alpaca_positions = {p['symbol'] for p in self.alpaca.get_open_positions()}
         except Exception as e:
-            logger.error(f"Failed to sync positions: {e}")
+            error_msg = f"Failed to sync positions: {e}"
+            logger.error(error_msg)
+            if self.notifier:
+                self.notifier.notify_error(error_msg, component="PositionSync")
             return
 
         for trade in open_trades:
@@ -480,7 +527,10 @@ class TradingEngine:
                     else:
                         logger.warning(f"{symbol}: Position closed but exit price unknown")
                 except Exception as e:
-                    logger.error(f"{symbol}: Failed to process closed position: {e}")
+                    error_msg = f"{symbol}: Failed to process closed position: {e}"
+                    logger.error(error_msg)
+                    if self.notifier:
+                        self.notifier.notify_error(error_msg, component="PositionSync")
 
     def run_pattern_check(self) -> Optional[Dict[str, Any]]:
         """
@@ -756,15 +806,19 @@ class TradingEngine:
             )
             return False
 
-    def _reject_thin_liquidity_trade(
+    def _emergency_close_position(
         self, symbol: str, order_id: str, fill_price: float,
-        actual_qty: int, trade_record: dict
+        actual_qty: int, trade_record: dict,
+        exit_reason: str = 'thin_liquidity_reject'
     ) -> None:
         """
-        Close a position immediately after fill due to weak breakout volume.
+        Close a position immediately after fill.
+
+        Used when a post-fill check fails: weak breakout volume on thin days,
+        gap-fill leg replacement failure, etc.
 
         Handles the full lifecycle: close position, poll for exit price,
-        compute PnL, update DB, record in circuit breaker, notify.
+        compute PnL, update DB, record in circuit breaker, notify via Telegram.
 
         Note: _sync_closed_positions() filters by exit_price IS NULL,
         so once we set exit_price here, it won't double-process.
@@ -775,10 +829,11 @@ class TradingEngine:
             fill_price: Entry fill price
             actual_qty: Number of shares filled
             trade_record: DB trade record dict (may be None)
+            exit_reason: Reason string for DB (e.g. 'thin_liquidity_reject',
+                'gap_adjust_failed')
         """
         logger.info(
-            f"{symbol}: THIN LIQUIDITY REJECT — closing position immediately "
-            f"(weak breakout volume)"
+            f"{symbol}: EMERGENCY CLOSE ({exit_reason}) — closing position immediately"
         )
 
         # Close the position
@@ -788,7 +843,10 @@ class TradingEngine:
             close_order_id = close_result.get('id', '')
             logger.info(f"{symbol}: Close order submitted — ID: {close_order_id}")
         except Exception as e:
-            logger.error(f"{symbol}: Failed to close position for thin-liquidity reject: {e}")
+            error_msg = f"{symbol}: Failed to close position ({exit_reason}): {e}"
+            logger.error(error_msg)
+            if self.notifier:
+                self.notifier.notify_error(error_msg, component="EmergencyClose")
             return
 
         # Poll for exit price (reuse fill-price retry pattern)
@@ -811,7 +869,7 @@ class TradingEngine:
 
         if exit_price is None:
             logger.warning(
-                f"{symbol}: Could not get exit price for thin-liquidity reject — "
+                f"{symbol}: Could not get exit price for {exit_reason} — "
                 f"using fill_price as estimate"
             )
             exit_price = fill_price
@@ -824,18 +882,18 @@ class TradingEngine:
         if trade_record:
             self.db.update_trade(trade_record['id'], {
                 'exit_price': exit_price,
-                'exit_reason': 'thin_liquidity_reject',
+                'exit_reason': exit_reason,
                 'exited_at': datetime.now(timezone.utc),
                 'pnl': pnl,
                 'pnl_pct': pnl_pct,
             })
             logger.info(
-                f"{symbol}: Thin-liquidity reject DB updated — "
+                f"{symbol}: {exit_reason} DB updated — "
                 f"exit ${exit_price:.2f}, P&L ${pnl:+,.2f} ({pnl_pct:+.1f}%)"
             )
         else:
             logger.error(
-                f"{symbol}: No trade record to update for thin-liquidity reject"
+                f"{symbol}: No trade record to update for {exit_reason}"
             )
 
         # Circuit breaker
@@ -845,7 +903,11 @@ class TradingEngine:
         if self.notifier:
             self.notifier.notify_position_closed(
                 symbol=symbol,
-                exit_reason='thin_liquidity_reject',
+                entry_price=fill_price,
+                exit_price=exit_price,
+                shares=actual_qty,
+                pnl=pnl,
+                exit_reason=exit_reason,
             )
 
     def _force_close_all(self) -> None:
@@ -860,7 +922,10 @@ class TradingEngine:
                 self.alpaca.cancel_order(pending['order_id'])
                 logger.info(f"{symbol}: Force-close — cancelled pending order {pending['order_id']}")
             except Exception as e:
-                logger.error(f"{symbol}: Failed to cancel pending order: {e}")
+                error_msg = f"{symbol}: Failed to cancel pending order during force-close: {e}"
+                logger.error(error_msg)
+                if self.notifier:
+                    self.notifier.notify_error(error_msg, component="ForceClose")
         self._pending_orders.clear()
 
         # Close open positions and update DB
@@ -898,7 +963,8 @@ class TradingEngine:
                             if self.notifier:
                                 self.notifier.notify_error(
                                     f"MANUAL INTERVENTION: {symbol} force close failed "
-                                    f"after {FORCE_CLOSE_RETRIES} attempts"
+                                    f"after {FORCE_CLOSE_RETRIES} attempts",
+                                    component="ForceClose",
                                 )
 
                 if not close_succeeded:
@@ -937,12 +1003,22 @@ class TradingEngine:
                     )
 
                 if self.notifier:
+                    entry = trade['fill_price'] if trade and trade.get('fill_price') else 0
+                    fc_shares = trade.get('filled_qty') or trade.get('shares', 0) if trade else 0
+                    fc_pnl = pnl if trade and trade.get('fill_price') else 0
                     self.notifier.notify_position_closed(
                         symbol=symbol,
+                        entry_price=entry,
+                        exit_price=exit_price,
+                        shares=fc_shares,
+                        pnl=fc_pnl,
                         exit_reason='force_close',
                     )
         except Exception as e:
-            logger.error(f"Failed to get open positions for force-close: {e}")
+            error_msg = f"Failed to get open positions for force-close: {e}"
+            logger.error(error_msg)
+            if self.notifier:
+                self.notifier.notify_error(error_msg, component="ForceClose")
 
     def run_monitoring_loop(self) -> None:
         """

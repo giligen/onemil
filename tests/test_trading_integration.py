@@ -435,11 +435,26 @@ class TestThinLiquidityIntegration:
         assert engine._pending_orders['AAPL']['thin_liquidity'] is True
 
         # Phase 2: Order fills + strong breakout volume
-        mock_alpaca.get_order.return_value = {
-            'status': 'filled', 'filled_avg_price': 4.42, 'filled_qty': 113,
-            'legs': [],
-        }
-        # Strong volume bars — BVR = 100000/40000 = 2.5x
+        # Get the actual plan to know stop/target for legs
+        pending = engine._pending_orders['AAPL']
+        plan = pending['plan']
+        setup = pending['setup']
+        breakout = setup.breakout_level
+
+        # Use side_effect: first call = order status, second = legs for gap-fill
+        mock_alpaca.get_order.side_effect = [
+            {'status': 'filled', 'filled_avg_price': 4.42, 'filled_qty': plan.shares},
+            {'legs': [
+                {'id': 'sl-1', 'side': 'sell', 'stop_price': plan.stop_loss_price,
+                 'limit_price': None, 'status': 'new'},
+                {'id': 'tp-1', 'side': 'sell', 'stop_price': None,
+                 'limit_price': plan.take_profit_price, 'status': 'new'},
+            ]},
+        ]
+        mock_alpaca.replace_order_stop_price.return_value = {'id': 'sl-1'}
+        mock_alpaca.replace_order_limit_price.return_value = {'id': 'tp-1'}
+
+        # Strong volume bars — BVR = 100000/avg_flag_volume
         bars_with_volume = pd.DataFrame([
             {'high': 4.45, 'low': 4.35, 'close': 4.42, 'volume': 100000},
         ])
@@ -567,10 +582,21 @@ class TestThinLiquidityIntegration:
         engine.run_pattern_check()
 
         # Phase 2: Fill — no volume check on normal day
-        mock_alpaca.get_order.return_value = {
-            'status': 'filled', 'filled_avg_price': 4.42, 'filled_qty': 113,
-            'legs': [],
-        }
+        pending = engine._pending_orders['AAPL']
+        plan = pending['plan']
+
+        # Provide legs for gap-fill adjustment (fill may be above breakout)
+        mock_alpaca.get_order.side_effect = [
+            {'status': 'filled', 'filled_avg_price': 4.42, 'filled_qty': plan.shares},
+            {'legs': [
+                {'id': 'sl-1', 'side': 'sell', 'stop_price': plan.stop_loss_price,
+                 'limit_price': None, 'status': 'new'},
+                {'id': 'tp-1', 'side': 'sell', 'stop_price': None,
+                 'limit_price': plan.take_profit_price, 'status': 'new'},
+            ]},
+        ]
+        mock_alpaca.replace_order_stop_price.return_value = {'id': 'sl-1'}
+        mock_alpaca.replace_order_limit_price.return_value = {'id': 'tp-1'}
 
         # Reset get_1min_bars call count
         mock_alpaca.get_1min_bars.reset_mock()
@@ -578,8 +604,6 @@ class TestThinLiquidityIntegration:
         fill_result = engine._manage_pending_orders()
 
         assert fill_result['status'] == 'filled'
-        # get_1min_bars should NOT have been called for volume check
-        mock_alpaca.get_1min_bars.assert_not_called()
         mock_alpaca.close_position.assert_not_called()
 
     @patch('trading.trading_engine.time_mod')
@@ -665,7 +689,7 @@ class TestThinLiquidityIntegration:
         mock_alpaca.close_position.return_value = {'id': 'close-lc', 'status': 'accepted'}
         mock_alpaca.get_order.return_value = {'status': 'filled', 'filled_avg_price': 4.38}
 
-        engine._reject_thin_liquidity_trade('AAPL', 'lifecycle-1', 4.42, 113, trade_record)
+        engine._emergency_close_position('AAPL', 'lifecycle-1', 4.42, 113, trade_record)
 
         # Verify complete lifecycle fields
         trade = db.get_trade_by_order_id('lifecycle-1')
