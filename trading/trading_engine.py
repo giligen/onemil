@@ -213,19 +213,6 @@ class TradingEngine:
         symbols_to_remove = []
 
         for symbol, pending in list(self._pending_orders.items()):
-            # Handle volume-conditional orders (no Alpaca order yet)
-            if pending.get('volume_conditional', False):
-                result = self._handle_volume_conditional(symbol, pending)
-                if result == 'triggered':
-                    # Converted to real Alpaca order — manage next cycle
-                    continue
-                elif result in ('rejected', 'expired', 'invalidated'):
-                    symbols_to_remove.append(symbol)
-                    continue
-                else:
-                    # Still pending, no breakout yet
-                    continue
-
             order_id = pending['order_id']
 
             try:
@@ -285,7 +272,6 @@ class TradingEngine:
                     f"{actual_qty} shares, ID: {order_id}"
                 )
                 self._traded_symbols.add(symbol)
-                self._patterns_traded += 1
                 symbols_to_remove.append(symbol)
 
                 # Phase 2: Update trade record with fill data
@@ -300,6 +286,21 @@ class TradingEngine:
                     logger.info(f"{symbol}: Trade DB updated — fill ${fill_price}, qty {actual_qty}")
                 else:
                     logger.error(f"{symbol}: No trade record for order {order_id}")
+
+                # H5 OR: check breakout volume on thin-liquidity days
+                if pending.get('thin_liquidity', False):
+                    if not self._check_breakout_volume(symbol, pending):
+                        self._reject_thin_liquidity_trade(
+                            symbol, order_id, fill_price, actual_qty, trade_record
+                        )
+                        return {
+                            'status': 'thin_liquidity_rejected',
+                            'symbol': symbol,
+                            'fill_price': fill_price,
+                            'reason': 'weak_breakout_volume',
+                        }
+
+                self._patterns_traded += 1
 
                 # Phase 3: Gap-fill stop + target adjustment
                 setup = pending.get('setup')
@@ -511,7 +512,7 @@ class TradingEngine:
             return None
 
         # Thin liquidity: log warning for awareness (H5 OR filter)
-        # Production enforcement: _check_symbol() stores volume-conditional pending orders
+        # Production enforcement: buy-stop submitted on all days; post-fill volume check on thin days
         if self.market_regime and self.market_regime.is_thin_liquidity(date.today()):
             info = self.market_regime.get_regime_info(date.today())
             svr = info.get('spy_volume_ratio')
@@ -630,54 +631,29 @@ class TradingEngine:
         if not self.position_manager.can_open_position(symbol):
             return None
 
-        # Thin-liquidity day: volume-conditional pending (don't submit buy-stop)
+        # Production enforcement: buy-stop submitted on all days; post-fill volume check on thin days
         is_thin = self.market_regime and self.market_regime.is_thin_liquidity(date.today())
 
-        if is_thin:
-            min_bvr = self.market_regime.get_min_breakout_volume_ratio(date.today())
-            self._daily_trade_count += 1
-            self.position_manager.mark_traded(symbol)
-            self._pending_orders[symbol] = {
-                'order_id': None,
-                'plan': plan,
-                'setup': setup,
-                'placed_at': datetime.now(timezone.utc),
-                'volume_conditional': True,
-                'min_breakout_vol_ratio': min_bvr,
-            }
-            logger.info(
-                f"{symbol}: VOLUME-CONDITIONAL pending — "
-                f"breakout ${setup.breakout_level:.2f}, "
-                f"min BVR {min_bvr:.1f}x (thin liquidity day)"
-            )
-
-            if self.notifier:
-                self.notifier.notify_pattern_detected(
-                    symbol=symbol,
-                    pole_gain_pct=setup.pole_gain_pct,
-                    retracement_pct=setup.retracement_pct,
-                    breakout_level=setup.breakout_level,
-                )
-
-            return {
-                'status': 'volume_conditional',
-                'symbol': symbol,
-                'breakout_level': setup.breakout_level,
-                'min_bvr': min_bvr,
-            }
-
-        # Normal day: submit buy-stop bracket order
         result = self.executor.submit_buy_stop_bracket_order(plan)
         if result is not None:
             self._daily_trade_count += 1
             self.position_manager.mark_traded(symbol)
-            self._pending_orders[symbol] = {
+            pending = {
                 'order_id': result['order_id'],
                 'plan': plan,
                 'setup': setup,
                 'placed_at': datetime.now(timezone.utc),
             }
-            logger.info(f"{symbol}: BUY-STOP ORDER PLACED — {result}")
+            if is_thin:
+                pending['thin_liquidity'] = True
+                pending['min_breakout_vol_ratio'] = self.market_regime.get_min_breakout_volume_ratio(date.today())
+                logger.info(
+                    f"{symbol}: BUY-STOP ORDER PLACED (thin liquidity) — "
+                    f"min BVR {pending['min_breakout_vol_ratio']:.1f}x, {result}"
+                )
+            else:
+                logger.info(f"{symbol}: BUY-STOP ORDER PLACED — {result}")
+            self._pending_orders[symbol] = pending
 
             # Notify order submitted
             if self.notifier:
@@ -690,90 +666,172 @@ class TradingEngine:
 
         return result
 
-    def _handle_volume_conditional(self, symbol: str, pending: Dict) -> str:
+    def _check_breakout_volume(self, symbol: str, pending: Dict) -> bool:
         """
-        Monitor a volume-conditional pending order for breakout with adequate volume.
+        Check if the breakout bar had sufficient volume on a thin-liquidity day.
 
-        On thin-liquidity days, buy-stop orders are NOT submitted to Alpaca.
-        Instead, we track the setup locally and monitor 1-min bars. When price
-        crosses the breakout level, we check bar volume vs avg_flag_volume.
-        If the breakout volume ratio (BVR) meets the minimum, we submit a
-        market-like bracket order. Otherwise, we reject.
+        Fetches recent 1-min bars, finds the first bar where high >= breakout_level,
+        and computes BVR (breakout volume ratio) = bar_volume / avg_flag_volume.
+
+        Fails open: returns True if bars unavailable or no breakout bar found.
+        Fails safe: returns False if avg_flag_volume <= 0.
 
         Args:
             symbol: Stock symbol
-            pending: Pending order dict with plan, setup, min_breakout_vol_ratio
+            pending: Pending order dict with setup and min_breakout_vol_ratio
 
         Returns:
-            Status string: 'pending', 'triggered', 'rejected', 'expired', 'invalidated'
+            True if volume is adequate (keep trade), False if weak (reject trade)
         """
         setup = pending['setup']
-        plan = pending['plan']
-        min_bvr = pending['min_breakout_vol_ratio']
+        min_bvr = pending.get('min_breakout_vol_ratio', 2.0)
 
-        # Check expiry
-        age = (datetime.now(timezone.utc) - pending['placed_at']).total_seconds()
-        if age > self.setup_expiry_seconds:
-            logger.info(f"{symbol}: Volume-conditional EXPIRED after {age:.0f}s")
-            return 'expired'
-
-        # Fetch latest 1-min bars
+        # Fetch recent 1-min bars
         try:
             bars = self.alpaca.get_1min_bars(symbol, lookback_minutes=5)
         except Exception as e:
-            logger.error(f"{symbol}: Failed to fetch bars for volume-conditional check: {e}")
-            return 'pending'
+            logger.warning(
+                f"{symbol}: Failed to fetch bars for breakout volume check: {e} — "
+                f"failing open (keeping trade)"
+            )
+            return True
 
         if bars is None or bars.empty:
-            return 'pending'
-
-        # Check setup invalidation (same as regular pending)
-        latest_low = bars.iloc[-1]['low']
-        if latest_low < setup.flag_low:
-            logger.info(
-                f"{symbol}: Volume-conditional INVALIDATED — "
-                f"low ${latest_low:.2f} < flag_low ${setup.flag_low:.2f}"
+            logger.warning(
+                f"{symbol}: No bars available for breakout volume check — "
+                f"failing open (keeping trade)"
             )
-            return 'invalidated'
+            return True
 
-        # Check for breakout
+        # Find first bar where high >= breakout_level
+        breakout_bar = None
         for _, bar in bars.iterrows():
             if bar['high'] >= setup.breakout_level:
-                # Breakout detected — check volume
-                bar_volume = bar['volume']
-                avg_flag_vol = setup.avg_flag_volume
-                bvr = 0.0
-                if avg_flag_vol > 0:
-                    bvr = bar_volume / avg_flag_vol
-                    if bvr < min_bvr:
-                        logger.info(
-                            f"{symbol}: Breakout REJECTED (thin liquidity) — "
-                            f"volume ratio {bvr:.1f}x < {min_bvr:.1f}x min"
-                        )
-                        return 'rejected'
-                else:
-                    logger.warning(
-                        f"{symbol}: avg_flag_volume is 0 — cannot compute BVR, rejecting"
-                    )
-                    return 'rejected'
+                breakout_bar = bar
+                break
 
-                # Volume confirmed — submit market-like bracket order
-                current_price = bar['close']
-                result = self.executor.submit_market_bracket_order(plan, current_price)
-                if result is not None:
-                    # Convert to regular pending order
-                    pending['order_id'] = result['order_id']
-                    pending['volume_conditional'] = False
-                    logger.info(
-                        f"{symbol}: Volume CONFIRMED — BVR {bvr:.1f}x >= {min_bvr:.1f}x, "
-                        f"bracket order submitted at ~${current_price:.2f}"
-                    )
-                    return 'triggered'
-                else:
-                    logger.error(f"{symbol}: Volume confirmed but order submission failed")
-                    return 'rejected'
+        if breakout_bar is None:
+            logger.warning(
+                f"{symbol}: No breakout bar found in recent bars — "
+                f"failing open (keeping trade)"
+            )
+            return True
 
-        return 'pending'
+        # Compute BVR
+        avg_flag_vol = setup.avg_flag_volume
+        if avg_flag_vol <= 0:
+            logger.warning(
+                f"{symbol}: avg_flag_volume <= 0 — failing safe (rejecting trade)"
+            )
+            return False
+
+        bar_volume = breakout_bar['volume']
+        bvr = bar_volume / avg_flag_vol
+
+        if bvr >= min_bvr:
+            logger.info(
+                f"{symbol}: Breakout volume CONFIRMED — "
+                f"BVR {bvr:.1f}x >= {min_bvr:.1f}x (keeping trade)"
+            )
+            return True
+        else:
+            logger.info(
+                f"{symbol}: Breakout volume WEAK — "
+                f"BVR {bvr:.1f}x < {min_bvr:.1f}x (rejecting trade)"
+            )
+            return False
+
+    def _reject_thin_liquidity_trade(
+        self, symbol: str, order_id: str, fill_price: float,
+        actual_qty: int, trade_record: dict
+    ) -> None:
+        """
+        Close a position immediately after fill due to weak breakout volume.
+
+        Handles the full lifecycle: close position, poll for exit price,
+        compute PnL, update DB, record in circuit breaker, notify.
+
+        Note: _sync_closed_positions() filters by exit_price IS NULL,
+        so once we set exit_price here, it won't double-process.
+
+        Args:
+            symbol: Stock symbol
+            order_id: Original buy-stop order ID
+            fill_price: Entry fill price
+            actual_qty: Number of shares filled
+            trade_record: DB trade record dict (may be None)
+        """
+        logger.info(
+            f"{symbol}: THIN LIQUIDITY REJECT — closing position immediately "
+            f"(weak breakout volume)"
+        )
+
+        # Close the position
+        close_order_id = None
+        try:
+            close_result = self.alpaca.close_position(symbol)
+            close_order_id = close_result.get('id', '')
+            logger.info(f"{symbol}: Close order submitted — ID: {close_order_id}")
+        except Exception as e:
+            logger.error(f"{symbol}: Failed to close position for thin-liquidity reject: {e}")
+            return
+
+        # Poll for exit price (reuse fill-price retry pattern)
+        exit_price = None
+        if close_order_id:
+            for attempt in range(5):
+                time_mod.sleep(0.5)
+                try:
+                    close_order = self.alpaca.get_order(close_order_id)
+                    if close_order.get('status') == 'filled':
+                        exit_price = close_order.get('filled_avg_price')
+                        if exit_price is not None:
+                            logger.info(
+                                f"{symbol}: Close filled at ${exit_price:.2f} "
+                                f"(attempt {attempt + 1})"
+                            )
+                            break
+                except Exception:
+                    pass
+
+        if exit_price is None:
+            logger.warning(
+                f"{symbol}: Could not get exit price for thin-liquidity reject — "
+                f"using fill_price as estimate"
+            )
+            exit_price = fill_price
+
+        # Compute PnL
+        pnl = (exit_price - fill_price) * actual_qty
+        pnl_pct = (exit_price / fill_price - 1) * 100 if fill_price > 0 else 0.0
+
+        # Update DB
+        if trade_record:
+            self.db.update_trade(trade_record['id'], {
+                'exit_price': exit_price,
+                'exit_reason': 'thin_liquidity_reject',
+                'exited_at': datetime.now(timezone.utc),
+                'pnl': pnl,
+                'pnl_pct': pnl_pct,
+            })
+            logger.info(
+                f"{symbol}: Thin-liquidity reject DB updated — "
+                f"exit ${exit_price:.2f}, P&L ${pnl:+,.2f} ({pnl_pct:+.1f}%)"
+            )
+        else:
+            logger.error(
+                f"{symbol}: No trade record to update for thin-liquidity reject"
+            )
+
+        # Circuit breaker
+        self.position_manager.record_trade_pnl(pnl)
+
+        # Notify
+        if self.notifier:
+            self.notifier.notify_position_closed(
+                symbol=symbol,
+                exit_reason='thin_liquidity_reject',
+            )
 
     def _force_close_all(self) -> None:
         """
@@ -783,9 +841,6 @@ class TradingEngine:
         """
         # Cancel pending orders
         for symbol, pending in list(self._pending_orders.items()):
-            if pending.get('volume_conditional', False):
-                logger.info(f"{symbol}: Force-close — removing volume-conditional pending")
-                continue
             try:
                 self.alpaca.cancel_order(pending['order_id'])
                 logger.info(f"{symbol}: Force-close — cancelled pending order {pending['order_id']}")
