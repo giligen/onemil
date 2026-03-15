@@ -84,11 +84,17 @@ class AlpacaClient:
             raise AlpacaAPIError("ALPACA_API_SECRET required")
 
         self.data_client = StockHistoricalDataClient(api_key, api_secret)
-        self.trading_client = TradingClient(api_key, api_secret, paper=True)
+        self._paper = True
+        self.trading_client = TradingClient(api_key, api_secret, paper=self._paper)
         self.news_client = NewsClient(api_key, api_secret)
         self._api_timeout = DEFAULT_API_TIMEOUT
 
-        logger.info("AlpacaClient initialized")
+        logger.info(f"AlpacaClient initialized (paper={self._paper})")
+
+    @property
+    def is_paper(self) -> bool:
+        """Whether this client is connected to Alpaca paper trading."""
+        return self._paper
 
     def _call_with_timeout(self, func: Callable[[], T], operation: str) -> T:
         """

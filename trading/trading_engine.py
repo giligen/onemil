@@ -199,18 +199,23 @@ class TradingEngine:
         """
         Check status of all pending buy-stop orders.
 
+        Processes ALL pending orders each cycle (does not return early on
+        first fill). This ensures no fills are missed when multiple orders
+        fill simultaneously.
+
         For each pending order:
         - If filled → mark traded, send notification
         - If price dropped below flag_low → cancel order (setup invalidated)
         - If cancelled/expired → remove from tracking
 
         Returns:
-            Dict with fill details if an order was filled, None otherwise
+            Dict with last fill details if any order was filled, None otherwise
         """
         if not self._pending_orders:
             return None
 
         symbols_to_remove = []
+        last_fill_result = None
 
         for symbol, pending in list(self._pending_orders.items()):
             order_id = pending['order_id']
@@ -284,6 +289,8 @@ class TradingEngine:
                     f"{actual_qty} shares, ID: {order_id}"
                 )
                 self._traded_symbols.add(symbol)
+                self._daily_trade_count += 1
+                self.position_manager.mark_traded(symbol)
                 symbols_to_remove.append(symbol)
 
                 # Phase 2: Update trade record with fill data
@@ -308,12 +315,13 @@ class TradingEngine:
                         self._emergency_close_position(
                             symbol, order_id, fill_price, actual_qty, trade_record
                         )
-                        return {
+                        last_fill_result = {
                             'status': 'thin_liquidity_rejected',
                             'symbol': symbol,
                             'fill_price': fill_price,
                             'reason': 'weak_breakout_volume',
                         }
+                        continue
 
                 self._patterns_traded += 1
 
@@ -378,12 +386,13 @@ class TradingEngine:
                             symbol, order_id, fill_price, actual_qty, trade_record,
                             exit_reason='gap_adjust_failed',
                         )
-                        return {
+                        last_fill_result = {
                             'status': 'gap_adjust_failed',
                             'symbol': symbol,
                             'fill_price': fill_price,
                             'reason': 'leg_replacement_failed',
                         }
+                        continue
 
                 if self.notifier:
                     self.notifier.notify_order_submitted(
@@ -393,7 +402,7 @@ class TradingEngine:
                         entry=fill_price or plan.entry_price,
                     )
 
-                return {
+                last_fill_result = {
                     'order_id': order_id,
                     'status': 'filled',
                     'symbol': symbol,
@@ -464,7 +473,7 @@ class TradingEngine:
         for symbol in symbols_to_remove:
             self._pending_orders.pop(symbol, None)
 
-        return None
+        return last_fill_result
 
     def _sync_closed_positions(self) -> None:
         """Detect bracket exits (SL/TP hit) and update DB + circuit breaker."""
@@ -525,7 +534,24 @@ class TradingEngine:
                             f"P&L ${pnl:+,.2f} ({pnl_pct:+.1f}%)"
                         )
                     else:
-                        logger.warning(f"{symbol}: Position closed but exit price unknown")
+                        # Use fill_price as fallback exit to prevent infinite re-check
+                        # (exit_price IS NULL keeps this trade in get_open_trades forever)
+                        fallback_exit = trade['fill_price']
+                        pnl_est = 0.0  # Assume breakeven if unknown
+                        error_msg = (
+                            f"{symbol}: Position closed but exit price unknown — "
+                            f"using fill_price ${fallback_exit:.2f} as estimate"
+                        )
+                        logger.warning(error_msg)
+                        if self.notifier:
+                            self.notifier.notify_error(error_msg, component="PositionSync")
+                        self.db.update_trade(trade['id'], {
+                            'exit_price': fallback_exit,
+                            'exit_reason': 'unknown_exit',
+                            'exited_at': datetime.now(timezone.utc),
+                            'pnl': pnl_est,
+                            'pnl_pct': 0.0,
+                        })
                 except Exception as e:
                     error_msg = f"{symbol}: Failed to process closed position: {e}"
                     logger.error(error_msg)
@@ -584,19 +610,17 @@ class TradingEngine:
         # Step 0: Sync closed positions (detect bracket exits for circuit breaker)
         self._sync_closed_positions()
 
-        # Step 1: Manage existing pending orders
+        # Step 1: Manage existing pending orders (processes ALL pending, not just first)
         fill_result = self._manage_pending_orders()
-        if fill_result is not None:
-            return fill_result
 
         if not self._qualified_symbols:
             logger.debug("No qualified symbols to check")
-            return None
+            return fill_result
 
         # Skip new orders after last_entry_time
         if self._is_past_last_entry_time():
             logger.debug("Past last entry time, not placing new orders")
-            return None
+            return fill_result
 
         symbols_to_check = (
             self._qualified_symbols - self._traded_symbols
@@ -604,16 +628,17 @@ class TradingEngine:
         )
         if not symbols_to_check:
             logger.debug("All qualified symbols already traded or have pending orders")
-            return None
+            return fill_result
 
         logger.info(f"Pattern check: {len(symbols_to_check)} symbols — {sorted(symbols_to_check)}")
 
+        last_order_result = None
         for symbol in sorted(symbols_to_check):
             result = self._check_symbol(symbol)
             if result is not None:
-                return result
+                last_order_result = result
 
-        return None
+        return fill_result or last_order_result
 
     def _check_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
         """
@@ -630,7 +655,7 @@ class TradingEngine:
         """
         # Fetch 1-min bars
         try:
-            bars = self.alpaca.get_1min_bars(symbol, lookback_minutes=30)
+            bars = self.alpaca.get_1min_bars(symbol, lookback_minutes=90)
         except Exception as e:
             logger.error(f"{symbol}: Failed to fetch 1-min bars: {e}")
             return None
@@ -686,8 +711,9 @@ class TradingEngine:
 
         result = self.executor.submit_buy_stop_bracket_order(plan)
         if result is not None:
-            self._daily_trade_count += 1
-            self.position_manager.mark_traded(symbol)
+            # NOTE: _daily_trade_count and mark_traded are deferred to fill
+            # time (_manage_pending_orders status=='filled'). This allows
+            # re-entry after cancel/expire and accurate trade counting.
             pending = {
                 'order_id': result['order_id'],
                 'plan': plan,
@@ -945,9 +971,11 @@ class TradingEngine:
                 symbol = pos['symbol']
                 close_succeeded = False
 
+                close_order_id = None
                 for attempt in range(FORCE_CLOSE_RETRIES):
                     try:
-                        self.alpaca.close_position(symbol)
+                        close_result = self.alpaca.close_position(symbol)
+                        close_order_id = close_result.get('id', '') if close_result else ''
                         close_succeeded = True
                         break
                     except Exception as e:
@@ -970,13 +998,33 @@ class TradingEngine:
                 if not close_succeeded:
                     continue
 
-                exit_price = pos.get('avg_entry_price', 0)
-                # Use current market value to compute actual exit price
-                qty = pos.get('qty', 0)
-                if qty > 0 and pos.get('market_value'):
-                    exit_price = float(pos['market_value']) / qty
+                # Poll for actual fill price (don't use stale position snapshot)
+                exit_price = None
+                if close_order_id:
+                    for poll in range(5):
+                        time_mod.sleep(0.5)
+                        try:
+                            close_order = self.alpaca.get_order(close_order_id)
+                            if close_order.get('status') == 'filled':
+                                exit_price = close_order.get('filled_avg_price')
+                                if exit_price is not None:
+                                    break
+                        except Exception:
+                            pass
 
-                logger.info(f"{symbol}: Force-close — position closed at ~${exit_price:.2f}")
+                # Fallback to position snapshot if poll fails
+                if exit_price is None:
+                    qty = pos.get('qty', 0)
+                    if qty > 0 and pos.get('market_value'):
+                        exit_price = float(pos['market_value']) / qty
+                    else:
+                        exit_price = pos.get('avg_entry_price', 0)
+                    logger.warning(
+                        f"{symbol}: Force-close fill price unavailable, "
+                        f"using snapshot ${exit_price:.2f}"
+                    )
+
+                logger.info(f"{symbol}: Force-close — position closed at ${exit_price:.2f}")
 
                 # Update DB trade record with exit details
                 trade = trades_by_symbol.get(symbol)

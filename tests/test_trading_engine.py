@@ -189,7 +189,9 @@ class TestRunPatternCheck:
         assert result['symbol'] == 'AAPL'
         # Symbol should be in pending_orders (not traded until filled)
         assert "AAPL" in engine._pending_orders
-        mock_position_manager.mark_traded.assert_called_with("AAPL")
+        # mark_traded and _daily_trade_count are deferred to fill time
+        mock_position_manager.mark_traded.assert_not_called()
+        assert engine._daily_trade_count == 0
 
     def test_no_trade_when_no_pattern(self, engine, mock_alpaca, mock_detector):
         """No trade when pattern not detected."""
@@ -804,7 +806,8 @@ class TestSetupExpiry:
 class TestForceCloseDBUpdate:
     """Tests for _force_close_all updating trade records in DB."""
 
-    def test_force_close_updates_db_with_exit(self, engine, mock_alpaca, db, mock_position_manager):
+    @patch('trading.trading_engine.time_mod')
+    def test_force_close_updates_db_with_exit(self, mock_time, engine, mock_alpaca, db, mock_position_manager):
         """Force-close writes exit_price, exit_reason, and P&L to DB."""
         now = datetime.now(timezone.utc)
         db.save_trade({
@@ -838,19 +841,24 @@ class TestForceCloseDBUpdate:
              'market_value': 520.0, 'unrealized_pl': 20.0, 'unrealized_plpc': 0.04},
         ]
         mock_alpaca.close_position.return_value = {'id': 'close-order-1'}
+        # Poll returns actual fill price
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled', 'filled_avg_price': 5.18,
+        }
 
         engine._force_close_all()
 
-        # Verify DB updated
+        # Verify DB updated with polled fill price
         trade = db.get_trade_by_order_id('order-fc')
         assert trade['exit_reason'] == 'force_close'
-        assert trade['exit_price'] == pytest.approx(5.20, abs=0.01)
-        assert trade['pnl'] == pytest.approx(20.0, abs=0.01)
+        assert trade['exit_price'] == pytest.approx(5.18, abs=0.01)
+        expected_pnl = (5.18 - 5.00) * 100
+        assert trade['pnl'] == pytest.approx(expected_pnl, abs=0.01)
         assert trade['exited_at'] is not None
 
         # Verify circuit breaker was fed
         mock_position_manager.record_trade_pnl.assert_called_once()
-        assert mock_position_manager.record_trade_pnl.call_args[0][0] == pytest.approx(20.0, abs=0.01)
+        assert mock_position_manager.record_trade_pnl.call_args[0][0] == pytest.approx(expected_pnl, abs=0.01)
 
     def test_force_close_cancels_pending(self, engine, mock_alpaca):
         """Force-close cancels pending buy-stop orders."""
@@ -865,7 +873,8 @@ class TestForceCloseDBUpdate:
         mock_alpaca.cancel_order.assert_called_once_with('order-pend')
         assert len(engine._pending_orders) == 0
 
-    def test_force_close_no_fill_price_logs_warning(self, engine, mock_alpaca, db):
+    @patch('trading.trading_engine.time_mod')
+    def test_force_close_no_fill_price_logs_warning(self, mock_time, engine, mock_alpaca, db):
         """Force-close with no fill_price skips P&L update and warns."""
         now = datetime.now(timezone.utc)
         db.save_trade({
@@ -898,6 +907,9 @@ class TestForceCloseDBUpdate:
              'market_value': 480.0, 'unrealized_pl': -20.0, 'unrealized_plpc': -0.04},
         ]
         mock_alpaca.close_position.return_value = {'id': 'close-order-2'}
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled', 'filled_avg_price': 4.80,
+        }
 
         engine._force_close_all()
 
@@ -1292,14 +1304,19 @@ class TestForceCloseRetry:
             Exception("API timeout"),
             {'id': 'close-1'},
         ]
+        # Poll for close fill price
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled', 'filled_avg_price': 5.20,
+        }
 
         engine._force_close_all()
 
         assert mock_alpaca.close_position.call_count == 2
         trade = db.get_trade_by_order_id('order-retry-fc')
         assert trade['exit_reason'] == 'force_close'
-        # Verify backoff sleep was called
-        mock_sleep.assert_called_with(2)
+        assert trade['exit_price'] == pytest.approx(5.20, abs=0.01)
+        # Verify backoff sleep was called (among fill-poll sleeps)
+        mock_sleep.assert_any_call(2)
 
     @patch('trading.trading_engine.time_mod.sleep')
     def test_all_retries_fail_notifies(self, mock_sleep, engine, mock_alpaca, db):
