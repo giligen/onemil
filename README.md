@@ -68,6 +68,8 @@ Blocks or tightens entries when SPY indicates a hostile regime. Two independent 
 
 1. **High volatility + downtrend**: SPY 5-day avg daily range > 1.5% AND close below SMA(50) → **blocks all entries**
 2. **Thin liquidity (H5 OR filter)**: SPY T-1 volume / SMA20(volume) < 0.70 → **tightens breakout volume requirement** from 1.5x to 2.0x. Trades are only blocked when BOTH the market is thin AND the breakout bar volume is weak.
+   - **Backtest**: `BacktestRunner._min_breakout_vol_override` checks breakout bar volume at simulated fill
+   - **Live trading**: Volume-conditional pending orders — buy-stop is NOT submitted to Alpaca. Instead, the engine monitors 1-min bars locally. When price crosses breakout level, bar volume is checked against the tightened threshold (BVR >= 2.0x → submit market bracket order, BVR < 2.0x → reject). Normal days use standard buy-stop bracket orders unchanged.
 
 - **Max trades/day**: 5 (hard cap regardless of regime)
 

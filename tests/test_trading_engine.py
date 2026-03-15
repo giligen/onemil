@@ -1683,3 +1683,275 @@ class TestMarketRegimeInEngine:
         mock_alpaca.get_daily_bars_range.assert_called_once()
         call_args = mock_alpaca.get_daily_bars_range.call_args
         assert call_args[0][0] == ['SPY']
+
+
+# ===========================================================================
+# Volume-Conditional Pending Orders (H5 OR filter in live trading)
+# ===========================================================================
+
+class TestVolumeConditionalOrders:
+    """Tests for thin-liquidity volume-conditional order flow."""
+
+    def _make_engine(self, mock_alpaca, db, mock_detector, mock_planner,
+                     mock_executor, mock_position_manager, market_regime):
+        """Create TradingEngine with market_regime."""
+        return TradingEngine(
+            alpaca_client=mock_alpaca, db=db, detector=mock_detector,
+            planner=mock_planner, executor=mock_executor,
+            position_manager=mock_position_manager,
+            enabled=True, market_regime=market_regime,
+        )
+
+    def _make_thin_regime(self):
+        """Create a mock MarketRegimeFilter that reports thin liquidity."""
+        from trading.market_regime import MarketRegimeFilter
+        regime = MagicMock(spec=MarketRegimeFilter)
+        regime.is_regime_ok.return_value = True
+        regime.is_thin_liquidity.return_value = True
+        regime.get_min_breakout_volume_ratio.return_value = 2.0
+        regime.get_regime_info.return_value = {
+            'vol_5d': 1.0, 'sma': 500.0, 'is_below_sma': False,
+            'is_ok': True, 'spy_volume_ratio': 0.55,
+        }
+        regime.max_trades_per_day = 5
+        regime.min_spy_volume_ratio = 0.70
+        regime.thin_liquidity_breakout_vol_ratio = 2.0
+        regime.sma_period = 50
+        return regime
+
+    def _make_normal_regime(self):
+        """Create a mock MarketRegimeFilter that reports normal liquidity."""
+        from trading.market_regime import MarketRegimeFilter
+        regime = MagicMock(spec=MarketRegimeFilter)
+        regime.is_regime_ok.return_value = True
+        regime.is_thin_liquidity.return_value = False
+        regime.max_trades_per_day = 5
+        regime.sma_period = 50
+        return regime
+
+    def test_thin_liquidity_creates_volume_conditional_pending(
+        self, mock_alpaca, db, mock_detector, mock_planner,
+        mock_executor, mock_position_manager
+    ):
+        """On thin day, _check_symbol() stores volume_conditional=True, no Alpaca order."""
+        regime = self._make_thin_regime()
+        engine = self._make_engine(
+            mock_alpaca, db, mock_detector, mock_planner,
+            mock_executor, mock_position_manager, regime,
+        )
+
+        setup = _make_pattern("AAPL")
+        plan = _make_plan("AAPL")
+        mock_detector.detect_setup.return_value = setup
+        mock_planner.create_plan.return_value = plan
+        mock_position_manager.can_open_position.return_value = True
+        mock_alpaca.get_1min_bars.return_value = pd.DataFrame({'close': [4.35]})
+        mock_alpaca.get_open_positions.return_value = []
+
+        engine.on_stock_qualified("AAPL")
+        result = engine.run_pattern_check()
+
+        assert result is not None
+        assert result['status'] == 'volume_conditional'
+        assert result['symbol'] == 'AAPL'
+        assert 'AAPL' in engine._pending_orders
+        assert engine._pending_orders['AAPL']['volume_conditional'] is True
+        assert engine._pending_orders['AAPL']['order_id'] is None
+        assert engine._pending_orders['AAPL']['min_breakout_vol_ratio'] == 2.0
+        # No Alpaca order submitted
+        mock_executor.submit_buy_stop_bracket_order.assert_not_called()
+
+    def test_normal_day_unchanged(
+        self, mock_alpaca, db, mock_detector, mock_planner,
+        mock_executor, mock_position_manager
+    ):
+        """Non-thin day submits buy-stop as before."""
+        regime = self._make_normal_regime()
+        engine = self._make_engine(
+            mock_alpaca, db, mock_detector, mock_planner,
+            mock_executor, mock_position_manager, regime,
+        )
+
+        setup = _make_pattern("AAPL")
+        plan = _make_plan("AAPL")
+        mock_detector.detect_setup.return_value = setup
+        mock_planner.create_plan.return_value = plan
+        mock_position_manager.can_open_position.return_value = True
+        mock_alpaca.get_1min_bars.return_value = pd.DataFrame({'close': [4.35]})
+        mock_alpaca.get_open_positions.return_value = []
+        mock_executor.submit_buy_stop_bracket_order.return_value = {
+            'order_id': 'order-123', 'status': 'accepted',
+            'symbol': 'AAPL', 'shares': 113,
+        }
+
+        engine.on_stock_qualified("AAPL")
+        result = engine.run_pattern_check()
+
+        assert result is not None
+        assert result['status'] == 'accepted'
+        mock_executor.submit_buy_stop_bracket_order.assert_called_once()
+
+    def test_volume_conditional_confirms_breakout_with_volume(
+        self, mock_alpaca, db, mock_detector, mock_planner,
+        mock_executor, mock_position_manager
+    ):
+        """When bar crosses breakout with BVR >= 2.0x, market bracket order submitted."""
+        regime = self._make_thin_regime()
+        engine = self._make_engine(
+            mock_alpaca, db, mock_detector, mock_planner,
+            mock_executor, mock_position_manager, regime,
+        )
+
+        setup = _make_pattern("AAPL")
+        plan = _make_plan("AAPL")
+
+        engine._pending_orders['AAPL'] = {
+            'order_id': None,
+            'plan': plan,
+            'setup': setup,
+            'placed_at': datetime.now(timezone.utc),
+            'volume_conditional': True,
+            'min_breakout_vol_ratio': 2.0,
+        }
+
+        # Bar with high >= breakout_level (4.40) and volume = 100000 (avg_flag=40000, BVR=2.5)
+        bars = pd.DataFrame([
+            {'high': 4.45, 'low': 4.35, 'close': 4.42, 'volume': 100000},
+        ])
+        mock_alpaca.get_1min_bars.return_value = bars
+        mock_executor.submit_market_bracket_order.return_value = {
+            'order_id': 'mkt-order-1', 'status': 'accepted',
+        }
+
+        result = engine._manage_pending_orders()
+
+        mock_executor.submit_market_bracket_order.assert_called_once_with(plan, 4.42)
+        assert engine._pending_orders['AAPL']['volume_conditional'] is False
+        assert engine._pending_orders['AAPL']['order_id'] == 'mkt-order-1'
+
+    def test_volume_conditional_rejects_weak_breakout(
+        self, mock_alpaca, db, mock_detector, mock_planner,
+        mock_executor, mock_position_manager
+    ):
+        """When bar crosses breakout with BVR < 2.0x, order rejected."""
+        regime = self._make_thin_regime()
+        engine = self._make_engine(
+            mock_alpaca, db, mock_detector, mock_planner,
+            mock_executor, mock_position_manager, regime,
+        )
+
+        setup = _make_pattern("AAPL")
+        plan = _make_plan("AAPL")
+
+        engine._pending_orders['AAPL'] = {
+            'order_id': None,
+            'plan': plan,
+            'setup': setup,
+            'placed_at': datetime.now(timezone.utc),
+            'volume_conditional': True,
+            'min_breakout_vol_ratio': 2.0,
+        }
+
+        # Bar with high >= breakout_level but volume only 60000 (avg_flag=40000, BVR=1.5 < 2.0)
+        bars = pd.DataFrame([
+            {'high': 4.45, 'low': 4.35, 'close': 4.42, 'volume': 60000},
+        ])
+        mock_alpaca.get_1min_bars.return_value = bars
+
+        result = engine._manage_pending_orders()
+
+        mock_executor.submit_market_bracket_order.assert_not_called()
+        assert 'AAPL' not in engine._pending_orders
+
+    def test_volume_conditional_invalidation(
+        self, mock_alpaca, db, mock_detector, mock_planner,
+        mock_executor, mock_position_manager
+    ):
+        """Low drops below flag_low → volume-conditional removed."""
+        regime = self._make_thin_regime()
+        engine = self._make_engine(
+            mock_alpaca, db, mock_detector, mock_planner,
+            mock_executor, mock_position_manager, regime,
+        )
+
+        setup = _make_pattern("AAPL")  # flag_low = 4.30
+        plan = _make_plan("AAPL")
+
+        engine._pending_orders['AAPL'] = {
+            'order_id': None,
+            'plan': plan,
+            'setup': setup,
+            'placed_at': datetime.now(timezone.utc),
+            'volume_conditional': True,
+            'min_breakout_vol_ratio': 2.0,
+        }
+
+        # Latest bar low is 4.25 < flag_low 4.30
+        bars = pd.DataFrame([
+            {'high': 4.32, 'low': 4.25, 'close': 4.28, 'volume': 30000},
+        ])
+        mock_alpaca.get_1min_bars.return_value = bars
+
+        result = engine._manage_pending_orders()
+
+        assert 'AAPL' not in engine._pending_orders
+        mock_executor.submit_market_bracket_order.assert_not_called()
+
+    def test_volume_conditional_expiry(
+        self, mock_alpaca, db, mock_detector, mock_planner,
+        mock_executor, mock_position_manager
+    ):
+        """Age > setup_expiry_seconds → volume-conditional removed."""
+        regime = self._make_thin_regime()
+        engine = self._make_engine(
+            mock_alpaca, db, mock_detector, mock_planner,
+            mock_executor, mock_position_manager, regime,
+        )
+
+        setup = _make_pattern("AAPL")
+        plan = _make_plan("AAPL")
+
+        engine._pending_orders['AAPL'] = {
+            'order_id': None,
+            'plan': plan,
+            'setup': setup,
+            'placed_at': datetime.now(timezone.utc) - timedelta(seconds=700),
+            'volume_conditional': True,
+            'min_breakout_vol_ratio': 2.0,
+        }
+
+        result = engine._manage_pending_orders()
+
+        assert 'AAPL' not in engine._pending_orders
+
+    def test_force_close_handles_volume_conditional(
+        self, mock_alpaca, db, mock_detector, mock_planner,
+        mock_executor, mock_position_manager
+    ):
+        """Force-close removes volume-conditional pending without calling cancel_order."""
+        regime = self._make_thin_regime()
+        engine = self._make_engine(
+            mock_alpaca, db, mock_detector, mock_planner,
+            mock_executor, mock_position_manager, regime,
+        )
+
+        setup = _make_pattern("AAPL")
+        plan = _make_plan("AAPL")
+
+        engine._pending_orders['AAPL'] = {
+            'order_id': None,
+            'plan': plan,
+            'setup': setup,
+            'placed_at': datetime.now(timezone.utc),
+            'volume_conditional': True,
+            'min_breakout_vol_ratio': 2.0,
+        }
+
+        mock_alpaca.get_open_positions.return_value = []
+
+        engine._force_close_all()
+
+        # Should not crash and pending orders should be cleared
+        assert len(engine._pending_orders) == 0
+        # cancel_order should NOT have been called for volume-conditional
+        mock_alpaca.cancel_order.assert_not_called()

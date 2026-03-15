@@ -257,3 +257,118 @@ class OrderExecutor:
             'take_profit_price': plan.take_profit_price,
             'order_type': 'stop_bracket',
         }
+
+    def submit_market_bracket_order(
+        self, plan: TradePlan, current_price: float, slippage_pct: float = 0.005
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Submit a market-like bracket order for immediate fill.
+
+        Used on thin-liquidity days when a volume-conditional pending order
+        detects breakout with adequate volume. Sets limit_price slightly above
+        current_price to ensure immediate fill.
+
+        Args:
+            plan: TradePlan with stop, target, sizing
+            current_price: Current price at time of submission
+            slippage_pct: Maximum slippage above current_price (default 0.5%)
+
+        Returns:
+            Dict with order details if successful, None on failure
+        """
+        limit_price = round(current_price * (1 + slippage_pct), 2)
+
+        logger.info(
+            f"{plan.symbol}: Submitting market bracket order — "
+            f"BUY {plan.shares} limit @ ${limit_price:.2f} "
+            f"(current ${current_price:.2f}), "
+            f"SL ${plan.stop_loss_price:.2f}, TP ${plan.take_profit_price:.2f}"
+        )
+
+        try:
+            order = self.alpaca.submit_bracket_order(
+                symbol=plan.symbol,
+                qty=plan.shares,
+                side='buy',
+                limit_price=limit_price,
+                tp_price=plan.take_profit_price,
+                sl_price=plan.stop_loss_price,
+            )
+        except Exception as e:
+            logger.error(f"{plan.symbol}: Market bracket order submission failed: {e}")
+            return None
+
+        if order is None:
+            logger.error(f"{plan.symbol}: Market bracket order returned None")
+            return None
+
+        order_id = order.get('id', '')
+        order_status = order.get('status', 'unknown')
+
+        logger.info(
+            f"{plan.symbol}: Market bracket order submitted — "
+            f"ID: {order_id}, status: {order_status}"
+        )
+
+        # Save trade record to database (same pattern as other order types)
+        pattern_data = json.dumps({
+            'pole_start_idx': plan.pattern.pole_start_idx,
+            'pole_end_idx': plan.pattern.pole_end_idx,
+            'flag_start_idx': plan.pattern.flag_start_idx,
+            'flag_end_idx': plan.pattern.flag_end_idx,
+            'pole_low': plan.pattern.pole_low,
+            'pole_high': plan.pattern.pole_high,
+            'pole_height': plan.pattern.pole_height,
+            'pole_gain_pct': plan.pattern.pole_gain_pct,
+            'flag_low': plan.pattern.flag_low,
+            'flag_high': plan.pattern.flag_high,
+            'retracement_pct': plan.pattern.retracement_pct,
+            'pullback_candle_count': plan.pattern.pullback_candle_count,
+            'avg_pole_volume': plan.pattern.avg_pole_volume,
+            'avg_flag_volume': plan.pattern.avg_flag_volume,
+            'breakout_level': plan.pattern.breakout_level,
+        })
+
+        now = datetime.now(timezone.utc)
+        trade_record = {
+            'trade_date': date.today().isoformat(),
+            'symbol': plan.symbol,
+            'side': 'buy',
+            'entry_price': current_price,
+            'stop_loss_price': plan.stop_loss_price,
+            'take_profit_price': plan.take_profit_price,
+            'shares': plan.shares,
+            'risk_per_share': plan.risk_per_share,
+            'total_risk': plan.total_risk,
+            'risk_reward_ratio': plan.risk_reward_ratio,
+            'order_id': order_id,
+            'order_status': order_status,
+            'fill_price': None,
+            'filled_at': None,
+            'exit_price': None,
+            'exit_reason': None,
+            'exited_at': None,
+            'pnl': None,
+            'pnl_pct': None,
+            'pattern_data': pattern_data,
+            'created_at': now,
+            'updated_at': now,
+        }
+
+        try:
+            trade_id = self.db.save_trade(trade_record)
+            logger.info(f"{plan.symbol}: Trade record saved (id={trade_id})")
+        except Exception as e:
+            logger.error(f"{plan.symbol}: Failed to save trade record: {e}")
+
+        return {
+            'order_id': order_id,
+            'status': order_status,
+            'symbol': plan.symbol,
+            'shares': plan.shares,
+            'limit_price': limit_price,
+            'current_price': current_price,
+            'stop_loss_price': plan.stop_loss_price,
+            'take_profit_price': plan.take_profit_price,
+            'order_type': 'market_bracket',
+        }
