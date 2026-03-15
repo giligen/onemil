@@ -388,9 +388,19 @@ class Config:
         return bool(self._get_yaml("trading", "market_regime", "enabled", default=True))
 
     @property
-    def market_regime_spy_5d_return_min(self) -> float:
-        """Minimum SPY 5-day return percentage to allow trading."""
-        return float(self._get_yaml("trading", "market_regime", "spy_5d_return_min", default=-2.0))
+    def market_regime_vol_threshold(self) -> float:
+        """5-day avg daily range % threshold for volatility regime filter."""
+        return float(self._get_yaml("trading", "market_regime", "vol_threshold", default=1.5))
+
+    @property
+    def market_regime_sma_period(self) -> int:
+        """SMA period for trend detection in regime filter."""
+        return int(self._get_yaml("trading", "market_regime", "sma_period", default=50))
+
+    @property
+    def max_trades_per_day(self) -> int:
+        """Maximum trades allowed per day."""
+        return int(self._get_yaml("trading", "max_trades_per_day", default=5))
 
     @property
     def setup_expiry_bars(self) -> int:

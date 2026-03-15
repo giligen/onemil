@@ -83,9 +83,11 @@ trading:
   skip_midday: true
   circuit_breaker_dd: 1500.0
   circuit_breaker_pause: 1
+  max_trades_per_day: 5
   market_regime:
     enabled: true
-    spy_5d_return_min: -2.0    # skip trading when SPY 5d return below this %
+    vol_threshold: 1.5         # 5-day avg daily range % — high volatility signal
+    sma_period: 50             # SPY below SMA(50) — downtrend signal
   bull_flag:
     min_pole_candles: 3
     min_pole_gain_pct: 3.0

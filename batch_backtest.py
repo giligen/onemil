@@ -246,6 +246,7 @@ def run_batch_backtest(
     market_regime: Optional['MarketRegimeFilter'] = None,
     circuit_breaker_dd: float = 0,
     circuit_breaker_pause: int = 1,
+    max_trades_per_day: int = 0,
 ) -> List[BacktestResult]:
     """
     Run backtests on all qualifying (symbol, date) pairs.
@@ -284,18 +285,24 @@ def run_batch_backtest(
     idx = 0
     regime_skipped = 0
     cb_skipped = 0
+    max_trades_skipped = 0
+
+    # Resolve max_trades_per_day: explicit param > regime attr > 0 (disabled)
+    effective_max_trades = max_trades_per_day
+    if effective_max_trades <= 0 and market_regime:
+        effective_max_trades = getattr(market_regime, 'max_trades_per_day', 0)
 
     for trade_date in sorted(movers_by_date.keys()):
         # --- Market regime filter ---
         if market_regime and not market_regime.is_regime_ok(trade_date):
-            spy_ret = market_regime.get_spy_5d_return(trade_date)
-            spy_ret_str = f"{spy_ret:.1f}%" if spy_ret is not None else "N/A"
+            info = market_regime.get_regime_info(trade_date)
+            vol_str = f"{info['vol_5d']:.2f}%" if info['vol_5d'] is not None else "N/A"
             n_skip = len(movers_by_date[trade_date])
             regime_skipped += n_skip
             idx += n_skip
             logger.warning(
-                f"REGIME SKIP {trade_date}: SPY 5d return {spy_ret_str} "
-                f"< {market_regime.spy_5d_return_min}% — skipping {n_skip} symbols"
+                f"REGIME SKIP {trade_date}: vol_5d={vol_str} > {market_regime.vol_threshold}% "
+                f"AND below SMA{market_regime.sma_period} — skipping {n_skip} symbols"
             )
             continue
 
@@ -303,6 +310,7 @@ def run_batch_backtest(
         cb_cum_pnl = 0.0
         cb_peak = 0.0
         cb_skips = 0
+        date_trade_count = 0
 
         for symbol, _ in movers_by_date[trade_date]:
             idx += 1
@@ -313,6 +321,12 @@ def run_batch_backtest(
                 cb_skips -= 1
                 cb_skipped += 1
                 logger.info(f"[{idx}/{total}] {symbol} {date_str} — CB skip (remaining: {cb_skips})")
+                continue
+
+            # Max trades per day cap
+            if effective_max_trades > 0 and date_trade_count >= effective_max_trades:
+                max_trades_skipped += 1
+                logger.info(f"[{idx}/{total}] {symbol} {date_str} — max trades/day ({effective_max_trades}) reached, skipping")
                 continue
 
             try:
@@ -338,6 +352,9 @@ def run_batch_backtest(
                                     avg_daily_volume=avg_vol,
                                     volume_profile=vol_profile)
                 results.append(result)
+
+                # Track trades for max trades per day cap
+                date_trade_count += len(result.trades_simulated)
 
                 # Verbose progress line
                 n_patterns = result.patterns_detected
@@ -373,6 +390,8 @@ def run_batch_backtest(
         logger.info(f"Regime filter skipped {regime_skipped} symbol/date pairs")
     if cb_skipped > 0:
         logger.info(f"Circuit breaker skipped {cb_skipped} symbol/date pairs")
+    if max_trades_skipped > 0:
+        logger.info(f"Max trades/day skipped {max_trades_skipped} symbol/date pairs")
     logger.info(f"Batch backtest complete: {len(results)}/{total} runs succeeded")
     return results
 

@@ -426,12 +426,17 @@ class MonthlyBacktestRunner:
             _trading_cfg = _cfg_yaml.get("trading", {})
             _regime_cfg = _trading_cfg.get("market_regime", {})
 
-            spy_start = month_start - timedelta(days=14)
+            sma_period = int(_regime_cfg.get("sma_period", 50))
+            spy_lookback_days = int(sma_period * 1.5) + 14
+            spy_start = month_start - timedelta(days=spy_lookback_days)
             spy_bars_raw = fetch_daily_bars_cached(['SPY'], spy_start, month_end, client, db)
             spy_bars = spy_bars_raw.get('SPY', [])
+            max_trades_per_day = int(_trading_cfg.get("max_trades_per_day", 5))
             market_regime = MarketRegimeFilter(
                 enabled=bool(_regime_cfg.get("enabled", True)),
-                spy_5d_return_min=float(_regime_cfg.get("spy_5d_return_min", -2.0)),
+                vol_threshold=float(_regime_cfg.get("vol_threshold", 1.5)),
+                sma_period=sma_period,
+                max_trades_per_day=max_trades_per_day,
             )
             market_regime.load_spy_bars(spy_bars)
 
@@ -439,7 +444,10 @@ class MonthlyBacktestRunner:
             cb_pause = int(_trading_cfg.get("circuit_breaker_pause", 1))
             logger.info(
                 f"{progress} Regime filter: enabled={market_regime.enabled}, "
-                f"SPY bars={len(spy_bars)}, CB dd=${cb_dd}, CB pause={cb_pause}"
+                f"vol_threshold={market_regime.vol_threshold}%, "
+                f"sma_period={sma_period}, "
+                f"SPY bars={len(spy_bars)}, max_trades/day={max_trades_per_day}, "
+                f"CB dd=${cb_dd}, CB pause={cb_pause}"
             )
 
             # Run backtests — use multiprocessing if scan_workers > 1

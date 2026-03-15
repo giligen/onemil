@@ -744,46 +744,42 @@ class TestGet1minBarsCached:
 
 
 class TestBatchBacktestRegimeAndCB:
-    """Tests for market regime filter and circuit breaker in run_batch_backtest."""
+    """Tests for market regime filter, circuit breaker, and max trades in run_batch_backtest."""
 
     def test_regime_skips_bad_dates(self):
-        """run_batch_backtest skips entire dates when regime is bearish."""
+        """run_batch_backtest skips entire dates when regime is volatile+downtrend."""
         from trading.market_regime import MarketRegimeFilter
 
-        # Create regime that blocks Mar 5 but allows Mar 6
-        regime = MarketRegimeFilter(enabled=True, spy_5d_return_min=-2.0)
-        spy_bars = [
-            # For Mar 5: prior 6 = [Feb25..Mar4], T-1=Mar4=480, T-6=Feb25=500 → -4%
-            {'date': date(2026, 2, 25), 'close': 500.0},
-            {'date': date(2026, 2, 26), 'close': 498.0},
-            {'date': date(2026, 2, 27), 'close': 496.0},
-            {'date': date(2026, 2, 28), 'close': 494.0},
-            {'date': date(2026, 3, 3), 'close': 490.0},
-            {'date': date(2026, 3, 4), 'close': 480.0},  # T-1 for Mar 5: -4%
-            # For Mar 6: prior 6 = [Feb26..Mar5], T-1=Mar5=510, T-6=Feb26=498 → +2.4%
-            {'date': date(2026, 3, 5), 'close': 510.0},
-        ]
-        regime.load_spy_bars(spy_bars)
+        # Use a mock regime for simplicity — test the wiring, not the math
+        regime = MagicMock(spec=MarketRegimeFilter)
+        regime.enabled = True
+        regime.vol_threshold = 1.5
+        regime.sma_period = 50
+        regime.max_trades_per_day = 0
+
+        # Mar 5 is blocked, Mar 6 is allowed
+        def mock_is_ok(trade_date):
+            return trade_date != date(2026, 3, 5)
+
+        regime.is_regime_ok.side_effect = mock_is_ok
+        regime.get_regime_info.return_value = {
+            'vol_5d': 3.0, 'sma': 490.0, 'is_below_sma': True, 'is_ok': False,
+        }
 
         movers = [
-            ("PLYX", date(2026, 3, 5)),  # Should be skipped (regime blocks)
-            ("SVCO", date(2026, 3, 5)),  # Should be skipped (same date)
-            ("AAPL", date(2026, 3, 6)),  # Should be allowed (regime OK)
+            ("PLYX", date(2026, 3, 5)),  # Should be skipped
+            ("SVCO", date(2026, 3, 5)),  # Should be skipped
+            ("AAPL", date(2026, 3, 6)),  # Should be allowed
         ]
 
-        # Mock client and runner
         client = MagicMock(spec=AlpacaClient)
         runner = MagicMock(spec=BacktestRunner)
-
-        # Create a result for AAPL
         aapl_result = BacktestResult(
             symbol="AAPL", trade_date="2026-03-06",
-            total_bars=100, patterns_detected=1,
-            trades_simulated=[],
+            total_bars=100, patterns_detected=1, trades_simulated=[],
         )
         runner.run.return_value = aapl_result
 
-        # Mock 1-min bars
         bars_df = pd.DataFrame({
             'timestamp': [datetime(2026, 3, 6, 14, 0, tzinfo=timezone.utc)],
             'open': [5.0], 'high': [5.5], 'low': [4.8],
@@ -791,16 +787,52 @@ class TestBatchBacktestRegimeAndCB:
         })
         client.get_historical_1min_bars.return_value = bars_df
 
-        results = run_batch_backtest(
-            movers, client, runner,
-            market_regime=regime,
-        )
+        results = run_batch_backtest(movers, client, runner, market_regime=regime)
 
-        # Only AAPL should have been backtested (Mar 6 is allowed)
         assert len(results) == 1
         assert results[0].symbol == "AAPL"
-        # Runner should have been called only once (for AAPL)
         assert runner.run.call_count == 1
+
+    def test_max_trades_per_day_caps_symbols(self):
+        """Max trades per day should cap how many symbols are backtested per date."""
+        movers = [
+            ("SYM1", date(2026, 3, 5)),
+            ("SYM2", date(2026, 3, 5)),
+            ("SYM3", date(2026, 3, 5)),
+            ("SYM4", date(2026, 3, 5)),
+        ]
+
+        client = MagicMock(spec=AlpacaClient)
+        runner = MagicMock(spec=BacktestRunner)
+
+        # Each run returns 1 trade
+        def make_result(symbol):
+            trade = MagicMock()
+            trade.pnl = 100.0
+            return BacktestResult(
+                symbol=symbol, trade_date="2026-03-05",
+                total_bars=100, patterns_detected=1,
+                trades_simulated=[trade],
+            )
+
+        runner.run.side_effect = [make_result("SYM1"), make_result("SYM2")]
+
+        bars_df = pd.DataFrame({
+            'timestamp': [datetime(2026, 3, 5, 14, 0, tzinfo=timezone.utc)],
+            'open': [5.0], 'high': [5.5], 'low': [4.8],
+            'close': [5.3], 'volume': [100000],
+        })
+        client.get_historical_1min_bars.return_value = bars_df
+
+        results = run_batch_backtest(
+            movers, client, runner,
+            max_trades_per_day=2,
+        )
+
+        # Only 2 symbols should have been run (SYM1 and SYM2)
+        # SYM3 and SYM4 skipped because 2 trades already produced
+        assert runner.run.call_count == 2
+        assert len(results) == 2
 
     def test_cb_skips_after_drawdown(self):
         """Circuit breaker skips trades after drawdown threshold is hit."""
@@ -813,7 +845,6 @@ class TestBatchBacktestRegimeAndCB:
         client = MagicMock(spec=AlpacaClient)
         runner = MagicMock(spec=BacktestRunner)
 
-        # SYM1 loses $2000 (triggers CB at $1500 DD)
         trade1 = MagicMock()
         trade1.pnl = -2000.0
         result1 = BacktestResult(
@@ -822,7 +853,6 @@ class TestBatchBacktestRegimeAndCB:
             trades_simulated=[trade1],
         )
 
-        # SYM3 would be a winning trade but should not be reached if CB pause=1
         trade3 = MagicMock()
         trade3.pnl = 500.0
         result3 = BacktestResult(
@@ -831,7 +861,6 @@ class TestBatchBacktestRegimeAndCB:
             trades_simulated=[trade3],
         )
 
-        # Runner returns different results for each call
         runner.run.side_effect = [result1, result3]
 
         bars_df = pd.DataFrame({
@@ -847,8 +876,7 @@ class TestBatchBacktestRegimeAndCB:
             circuit_breaker_pause=1,
         )
 
-        # SYM1 runs (loses $2000, triggers CB), SYM2 is skipped (CB), SYM3 runs
         assert len(results) == 2
         assert results[0].symbol == "SYM1"
         assert results[1].symbol == "SYM3"
-        assert runner.run.call_count == 2  # SYM1 and SYM3, not SYM2
+        assert runner.run.call_count == 2

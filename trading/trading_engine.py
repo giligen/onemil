@@ -101,6 +101,7 @@ class TradingEngine:
         self._patterns_traded: int = 0
         self._pattern_details: list = []
         self._pending_orders: Dict[str, Dict] = {}  # symbol -> {order_id, plan, setup, placed_at}
+        self._daily_trade_count: int = 0
         self.shutdown_event = None  # Set by caller for graceful shutdown
 
     def _refresh_spy_data(self) -> None:
@@ -109,15 +110,22 @@ class TradingEngine:
             return
         try:
             end = date.today()
-            start = end - timedelta(days=14)  # 14 calendar days -> ~10 trading days
+            # Need enough history for SMA period + buffer
+            sma_period = getattr(self.market_regime, 'sma_period', 50)
+            lookback_days = int(sma_period * 1.5) + 14  # trading days -> calendar days
+            start = end - timedelta(days=lookback_days)
             bars = self.alpaca.get_daily_bars_range(['SPY'], start, end)
             spy_bars = bars.get('SPY', [])
             self.market_regime.load_spy_bars(spy_bars)
-            ret = self.market_regime.get_spy_5d_return(end)
-            if ret is not None:
-                logger.info(f"SPY regime refreshed: {len(spy_bars)} bars, 5d return: {ret:.1f}%")
-            else:
-                logger.info(f"SPY regime refreshed: {len(spy_bars)} bars, insufficient data")
+            info = self.market_regime.get_regime_info(end)
+            vol_str = f"{info['vol_5d']:.2f}%" if info['vol_5d'] is not None else "N/A"
+            sma_str = f"{info['sma']:.2f}" if info['sma'] is not None else "N/A"
+            below_str = info['is_below_sma']
+            logger.info(
+                f"SPY regime refreshed: {len(spy_bars)} bars, "
+                f"vol_5d={vol_str}, SMA={sma_str}, below_SMA={below_str}, "
+                f"regime_ok={info['is_ok']}"
+            )
         except Exception as e:
             logger.error(f"Failed to refresh SPY regime data: {e}")
 
@@ -481,11 +489,18 @@ class TradingEngine:
 
         # Market regime filter
         if self.market_regime and not self.market_regime.is_regime_ok(date.today()):
-            ret = self.market_regime.get_spy_5d_return(date.today())
-            ret_str = f"{ret:.1f}%" if ret is not None else "N/A"
+            info = self.market_regime.get_regime_info(date.today())
+            vol_str = f"{info['vol_5d']:.2f}%" if info['vol_5d'] is not None else "N/A"
             logger.warning(
-                f"REGIME FILTER: SPY 5d return {ret_str} "
-                f"< {self.market_regime.spy_5d_return_min}% — skipping all trades"
+                f"REGIME FILTER: vol_5d={vol_str} > {self.market_regime.vol_threshold}% "
+                f"AND below SMA{self.market_regime.sma_period} — skipping all trades"
+            )
+            return None
+
+        # Max trades per day
+        if self.market_regime and self._daily_trade_count >= self.market_regime.max_trades_per_day:
+            logger.warning(
+                f"MAX TRADES PER DAY reached ({self._daily_trade_count}) — skipping"
             )
             return None
 
@@ -592,6 +607,7 @@ class TradingEngine:
         # Submit buy-stop bracket order
         result = self.executor.submit_buy_stop_bracket_order(plan)
         if result is not None:
+            self._daily_trade_count += 1
             self.position_manager.mark_traded(symbol)
             self._pending_orders[symbol] = {
                 'order_id': result['order_id'],
@@ -851,6 +867,7 @@ class TradingEngine:
         self._patterns_traded = 0
         self._pattern_details.clear()
         self._pending_orders.clear()
+        self._daily_trade_count = 0
         self.position_manager.reset_daily()
         self._refresh_spy_data()
         logger.info("Trading engine: daily state reset")

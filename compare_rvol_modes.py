@@ -139,18 +139,27 @@ def main():
     # Market regime filter — fetch SPY bars for full range
     from trading.market_regime import MarketRegimeFilter
     from datetime import timedelta
-    spy_start = MONTHS[0][0] - timedelta(days=14)
+    cfg_yaml = Config._load_yaml_only()
+    trading_cfg = cfg_yaml.get("trading", {})
+    regime_cfg = trading_cfg.get("market_regime", {})
+    sma_period = int(regime_cfg.get("sma_period", 50))
+    spy_lookback_days = int(sma_period * 1.5) + 14
+    spy_start = MONTHS[0][0] - timedelta(days=spy_lookback_days)
     spy_end = MONTHS[-1][1]
     spy_bars_raw = fetch_daily_bars_cached(['SPY'], spy_start, spy_end, client, db)
     spy_bars = spy_bars_raw.get('SPY', [])
-    market_regime = MarketRegimeFilter(enabled=True, spy_5d_return_min=-2.0)
+    max_trades_per_day = int(trading_cfg.get("max_trades_per_day", 5))
+    market_regime = MarketRegimeFilter(
+        enabled=True,
+        vol_threshold=float(regime_cfg.get("vol_threshold", 1.5)),
+        sma_period=sma_period,
+        max_trades_per_day=max_trades_per_day,
+    )
     market_regime.load_spy_bars(spy_bars)
 
-    cfg_yaml = Config._load_yaml_only()
-    trading_cfg = cfg_yaml.get("trading", {})
     cb_dd = float(trading_cfg.get("circuit_breaker_dd", 1500.0))
     cb_pause = int(trading_cfg.get("circuit_breaker_pause", 1))
-    print(f"Regime filter: {len(spy_bars)} SPY bars, CB dd=${cb_dd}, pause={cb_pause}")
+    print(f"Regime filter: {len(spy_bars)} SPY bars, max_trades/day={max_trades_per_day}, CB dd=${cb_dd}, pause={cb_pause}")
 
     for month_start, month_end in MONTHS:
         label = f"{month_start.year}-{month_start.month:02d}"

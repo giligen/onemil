@@ -1536,22 +1536,44 @@ class TestFilledQtyMigration:
 class TestMarketRegimeInEngine:
     """Tests for market regime filter in TradingEngine."""
 
+    @staticmethod
+    def _build_regime_bars(last_5_volatile_below_sma=True, num_bars=55):
+        """Build SPY OHLC bars for regime testing. Needs 50+ for SMA."""
+        bars = []
+        d = date(2025, 1, 1)
+        for i in range(num_bars):
+            while d.weekday() >= 5:
+                d += timedelta(days=1)
+            bars.append({
+                'date': d,
+                'open': 500.0,
+                'high': 502.0,
+                'low': 498.0,
+                'close': 500.0,
+            })
+            d += timedelta(days=1)
+
+        if last_5_volatile_below_sma:
+            # Make last 5 bars volatile AND below SMA(50) ~500
+            for i in range(-5, 0):
+                bars[i]['close'] = 480.0
+                bars[i]['high'] = 495.0
+                bars[i]['low'] = 470.0  # (495-470)/480 = 5.2%
+        return bars
+
     def test_regime_blocks_pattern_check(self, mock_alpaca, db, mock_detector,
                                           mock_planner, mock_executor, mock_position_manager):
         """run_pattern_check returns None when regime filter blocks."""
         from trading.market_regime import MarketRegimeFilter
 
-        # Create a regime filter that blocks
-        regime = MarketRegimeFilter(enabled=True, spy_5d_return_min=-2.0)
-        bars = [
-            {'date': date(2025, 3, 3), 'close': 500.0},
-            {'date': date(2025, 3, 4), 'close': 498.0},
-            {'date': date(2025, 3, 5), 'close': 496.0},
-            {'date': date(2025, 3, 6), 'close': 494.0},
-            {'date': date(2025, 3, 7), 'close': 490.0},
-            {'date': date(2025, 3, 10), 'close': 480.0},  # -4%
-        ]
+        bars = self._build_regime_bars(last_5_volatile_below_sma=True)
+        regime = MarketRegimeFilter(enabled=True, vol_threshold=1.5, sma_period=50)
         regime.load_spy_bars(bars)
+
+        # Find trade_date = day after last bar
+        trade_date = bars[-1]['date'] + timedelta(days=1)
+        while trade_date.weekday() >= 5:
+            trade_date += timedelta(days=1)
 
         engine = TradingEngine(
             alpaca_client=mock_alpaca, db=db, detector=mock_detector,
@@ -1561,14 +1583,12 @@ class TestMarketRegimeInEngine:
         )
         engine.on_stock_qualified("AAPL")
 
-        # Patch date.today() to return a date that will be blocked
         with patch('trading.trading_engine.date') as mock_date:
-            mock_date.today.return_value = date(2025, 3, 11)
+            mock_date.today.return_value = trade_date
             mock_date.side_effect = lambda *a, **k: date(*a, **k)
             result = engine.run_pattern_check()
 
         assert result is None
-        # Detector should NOT have been called — regime blocked before that
         mock_detector.detect_setup.assert_not_called()
 
     def test_regime_allows_when_ok(self, mock_alpaca, db, mock_detector,
@@ -1576,16 +1596,13 @@ class TestMarketRegimeInEngine:
         """run_pattern_check proceeds when regime filter allows."""
         from trading.market_regime import MarketRegimeFilter
 
-        regime = MarketRegimeFilter(enabled=True, spy_5d_return_min=-2.0)
-        bars = [
-            {'date': date(2025, 3, 3), 'close': 500.0},
-            {'date': date(2025, 3, 4), 'close': 501.0},
-            {'date': date(2025, 3, 5), 'close': 502.0},
-            {'date': date(2025, 3, 6), 'close': 503.0},
-            {'date': date(2025, 3, 7), 'close': 504.0},
-            {'date': date(2025, 3, 10), 'close': 510.0},  # +2%
-        ]
+        bars = self._build_regime_bars(last_5_volatile_below_sma=False)
+        regime = MarketRegimeFilter(enabled=True, vol_threshold=1.5, sma_period=50)
         regime.load_spy_bars(bars)
+
+        trade_date = bars[-1]['date'] + timedelta(days=1)
+        while trade_date.weekday() >= 5:
+            trade_date += timedelta(days=1)
 
         engine = TradingEngine(
             alpaca_client=mock_alpaca, db=db, detector=mock_detector,
@@ -1596,14 +1613,51 @@ class TestMarketRegimeInEngine:
         engine.on_stock_qualified("AAPL")
 
         with patch('trading.trading_engine.date') as mock_date:
-            mock_date.today.return_value = date(2025, 3, 11)
+            mock_date.today.return_value = trade_date
             mock_date.side_effect = lambda *a, **k: date(*a, **k)
             with patch.object(TradingEngine, '_is_past_last_entry_time', return_value=False):
                 mock_alpaca.get_1min_bars.return_value = pd.DataFrame()
                 engine.run_pattern_check()
 
         # Should have proceeded past regime check
-        # (may not find patterns on empty bars, but detector should be reachable)
+
+    def test_max_trades_per_day_blocks(self, mock_alpaca, db, mock_detector,
+                                        mock_planner, mock_executor, mock_position_manager):
+        """run_pattern_check blocks when max trades per day reached."""
+        from trading.market_regime import MarketRegimeFilter
+
+        regime = MarketRegimeFilter(enabled=True, max_trades_per_day=2)
+        engine = TradingEngine(
+            alpaca_client=mock_alpaca, db=db, detector=mock_detector,
+            planner=mock_planner, executor=mock_executor,
+            position_manager=mock_position_manager,
+            enabled=True, market_regime=regime,
+        )
+        engine._daily_trade_count = 2  # Already at max
+
+        result = engine.run_pattern_check()
+        assert result is None
+
+    def test_reset_daily_resets_trade_count(self, mock_alpaca, db, mock_detector,
+                                             mock_planner, mock_executor, mock_position_manager):
+        """reset_daily resets _daily_trade_count to 0."""
+        from trading.market_regime import MarketRegimeFilter
+
+        regime = MarketRegimeFilter(enabled=True)
+        engine = TradingEngine(
+            alpaca_client=mock_alpaca, db=db, detector=mock_detector,
+            planner=mock_planner, executor=mock_executor,
+            position_manager=mock_position_manager,
+            enabled=True, market_regime=regime,
+        )
+        engine._daily_trade_count = 5
+
+        mock_alpaca.get_daily_bars_range.return_value = {'SPY': [
+            {'date': date(2025, 3, 10), 'close': 510.0},
+        ]}
+
+        engine.reset_daily()
+        assert engine._daily_trade_count == 0
 
     def test_reset_daily_refreshes_spy(self, mock_alpaca, db, mock_detector,
                                         mock_planner, mock_executor, mock_position_manager):
@@ -1624,7 +1678,6 @@ class TestMarketRegimeInEngine:
 
         engine.reset_daily()
 
-        # Should have called get_daily_bars_range for SPY
         mock_alpaca.get_daily_bars_range.assert_called_once()
         call_args = mock_alpaca.get_daily_bars_range.call_args
         assert call_args[0][0] == ['SPY']

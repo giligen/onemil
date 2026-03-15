@@ -148,7 +148,9 @@ def _create_trading_engine(config, alpaca, db, notifier=None) -> TradingEngine:
 
     market_regime = MarketRegimeFilter(
         enabled=config.market_regime_enabled,
-        spy_5d_return_min=config.market_regime_spy_5d_return_min,
+        vol_threshold=config.market_regime_vol_threshold,
+        sma_period=config.market_regime_sma_period,
+        max_trades_per_day=config.max_trades_per_day,
     )
 
     detector = BullFlagDetector(
