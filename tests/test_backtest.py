@@ -626,19 +626,21 @@ class TestGetHistorical1MinBars:
 
 
 class TestTradeSimulatorForceClose:
-    """Test force_close_time_utc exits trades at configured time."""
+    """Test force_close_time_et exits trades at configured time."""
 
     def test_force_close_exits_at_bar_open(self):
         """Force close exits at bar open when timestamp >= force_close_time."""
-        simulator = TradeSimulator(force_close_time_utc=14.25)  # 14:15 UTC
+        # BASE_TIME=14:00 UTC on 2026-03-13 (EDT) = 10:00 ET
+        # Force close at 10:15 ET
+        simulator = TradeSimulator(force_close_time_et=(10, 15))
         plan = _make_plan(entry_price=5.50, stop_loss_price=5.30, take_profit_price=5.90)
 
         bars = _make_bars([
-            (5.50, 5.55, 5.45, 5.50, 1000),   # bar 0 at 14:00 — entry
-            (5.52, 5.58, 5.48, 5.55, 1000),   # bar 1 at 14:01 — hold
+            (5.50, 5.55, 5.45, 5.50, 1000),   # bar 0 at 10:00 ET — entry
+            (5.52, 5.58, 5.48, 5.55, 1000),   # bar 1 at 10:01 ET — hold
         ], start_minute=0)
 
-        # Add a bar at 14:15 (minute 15) that triggers force close
+        # Add a bar at 10:15 ET (minute 15) that triggers force close
         force_close_bar = {
             'timestamp': _ts(15),
             'open': 5.55, 'high': 5.58, 'low': 5.52, 'close': 5.56, 'volume': 1000,
@@ -652,7 +654,7 @@ class TestTradeSimulatorForceClose:
 
     def test_no_force_close_when_disabled(self):
         """Without force_close_time, trade runs until stop/target/eod."""
-        simulator = TradeSimulator(force_close_time_utc=None)
+        simulator = TradeSimulator(force_close_time_et=None)
         plan = _make_plan(entry_price=5.50, stop_loss_price=5.30, take_profit_price=5.90)
 
         bars = _make_bars([
@@ -1012,13 +1014,14 @@ class TestTradeSimulatorPartialProfit:
 
     def test_partial_then_force_close(self):
         """Price hits +1R, sells half, then force close triggers."""
+        # BASE_TIME=14:00 UTC = 10:00 ET (EDT), force close at 10:15 ET
         sim = TradeSimulator(
-            force_close_time_utc=14.25,  # 14:15 UTC
+            force_close_time_et=(10, 15),
             partial_profit_enabled=True,
         )
         plan = _make_plan(entry_price=5.00, stop_loss_price=4.90, take_profit_price=5.25, shares=100)
 
-        # Bar at 14:00 (entry), 14:01 (+1R), 14:15 (force close)
+        # Bar at 10:00 ET (entry), 10:01 ET (+1R), 10:15 ET (force close)
         bars = _make_bars([
             (5.00, 5.05, 4.95, 5.02, 1000),   # bar 0 at 14:00 — entry
             (5.02, 5.12, 5.00, 5.10, 1000),    # bar 1 at 14:01 — +1R hit

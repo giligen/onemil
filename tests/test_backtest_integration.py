@@ -288,10 +288,10 @@ class TestForceCloseIntegration:
     """Integration tests for force-close time control."""
 
     def test_force_close_exits_at_configured_time(self):
-        """Trade is force-closed when bar timestamp >= force_close_time_utc."""
+        """Trade is force-closed when bar timestamp >= force_close_time_et."""
         # Build bars that get a trade, then hit force_close time
-        # Start at 14:00 UTC (10:00 ET), force close at 19.75 UTC (15:45 ET)
-        # Need bars that span to 19:45 UTC
+        # Start at 14:00 UTC (10:00 ET during EDT), force close at 15:45 ET
+        # Need bars that span to 15:45 ET = 19:45 UTC = minute offset 345
 
         # Create setup + breakout bars starting at 14:00 UTC
         candles = [
@@ -304,7 +304,7 @@ class TestForceCloseIntegration:
             (4.38, 4.60, 4.36, 4.55, 250000),
         ]
 
-        # Add bars up to 19:45 UTC = minute offset 345 from 14:00
+        # Add bars up to 15:45 ET = 19:45 UTC = minute offset 345 from 14:00 UTC
         # Fill with neutral bars that don't hit stop or target
         for i in range(7, 350):
             candles.append((4.55, 4.58, 4.52, 4.55, 20000))
@@ -317,7 +317,7 @@ class TestForceCloseIntegration:
             planner=TradePlanner(min_risk_per_share=0.01),
             realistic=True,
             min_price=0.0,
-            force_close_time_utc=19.75,
+            force_close_time_et=(15, 45),
         )
 
         result = runner.run("TEST", bars, "2026-03-13")
@@ -372,8 +372,8 @@ class TestLastEntryTime:
     """Integration tests for last_entry_time cutoff in realistic mode."""
 
     def test_no_new_setups_after_last_entry_time(self):
-        """No new setups are scanned after last_entry_time_utc."""
-        # Build bars starting at 18:55 UTC (14:55 ET), after last_entry_time
+        """No new setups are scanned after last_entry_time_et."""
+        # Build bars starting at 18:55 UTC (14:55 ET during EDT)
         start_time = datetime(2026, 3, 13, 18, 55, 0, tzinfo=timezone.utc)
         candles = [
             (4.00, 4.15, 3.98, 4.13, 200000),
@@ -398,11 +398,11 @@ class TestLastEntryTime:
             planner=TradePlanner(min_risk_per_share=0.01),
             realistic=True,
             min_price=0.0,
-            last_entry_time_utc=19.0,  # 15:00 ET = 19:00 UTC
+            last_entry_time_et=(15, 0),
         )
 
         result = runner.run("TEST", bars, "2026-03-13")
 
-        # All bars are after 18:55 UTC, last_entry_time is 19:00 UTC
-        # Most setups should be detected after 19:00, so no trades
+        # All bars are after 14:55 ET, last_entry_time is 15:00 ET
+        # Most setups should be detected after 15:00, so no trades
         assert len(result.trades_simulated) == 0

@@ -120,9 +120,23 @@ class TradeSimulator:
     - End of day: exit at last bar's close
     """
 
+    _ET = pytz.timezone('US/Eastern')
+
+    @classmethod
+    def _get_bar_time_et(cls, bar_ts) -> tuple:
+        """Convert bar timestamp to ET (hour, minute), handling DST."""
+        if hasattr(bar_ts, 'tzinfo') and bar_ts.tzinfo is not None:
+            et_time = bar_ts.astimezone(cls._ET)
+        elif hasattr(bar_ts, 'hour'):
+            from datetime import timezone as tz
+            et_time = bar_ts.replace(tzinfo=tz.utc).astimezone(cls._ET)
+        else:
+            return (0, 0)
+        return (et_time.hour, et_time.minute)
+
     def __init__(
         self,
-        force_close_time_utc: Optional[float] = None,
+        force_close_time_et: Optional[tuple] = None,
         partial_profit_enabled: bool = False,
         partial_profit_r_multiple: float = 1.0,
         partial_profit_fraction: float = 0.5,
@@ -131,8 +145,8 @@ class TradeSimulator:
         Initialize TradeSimulator.
 
         Args:
-            force_close_time_utc: UTC hour (e.g. 19.75 = 15:45 ET) to force
-                close all positions. None disables force-close.
+            force_close_time_et: ET time tuple (hour, minute) to force close.
+                e.g. (15, 45) = 15:45 ET. None disables force-close.
             partial_profit_enabled: Enable partial profit exit at +NR, then
                 move stop to breakeven on remaining shares.
             partial_profit_r_multiple: Take partial profit at this R multiple
@@ -140,7 +154,7 @@ class TradeSimulator:
             partial_profit_fraction: Fraction of shares to sell at partial
                 target (default 0.5 = half).
         """
-        self.force_close_time_utc = force_close_time_utc
+        self.force_close_time_et = force_close_time_et
         self.partial_profit_enabled = partial_profit_enabled
         self.partial_profit_r_multiple = partial_profit_r_multiple
         self.partial_profit_fraction = partial_profit_fraction
@@ -195,12 +209,9 @@ class TradeSimulator:
             bar = bars.iloc[i]
 
             # Force close check
-            if self.force_close_time_utc is not None:
-                bar_ts = bar['timestamp']
-                bar_hour = bar_ts.hour if hasattr(bar_ts, 'hour') else 0
-                bar_minute = bar_ts.minute if hasattr(bar_ts, 'minute') else 0
-                bar_time_utc = bar_hour + bar_minute / 60.0
-                if bar_time_utc >= self.force_close_time_utc:
+            if self.force_close_time_et is not None:
+                bar_et = self._get_bar_time_et(bar['timestamp'])
+                if bar_et >= self.force_close_time_et:
                     self._exit_trade(trade, bar, 'force_close', bar['open'])
                     logger.debug(f"  Bar {i}: force close at ${bar['open']:.2f}")
                     return trade
@@ -275,12 +286,9 @@ class TradeSimulator:
             bar = bars.iloc[i]
 
             # 1. Force close check
-            if self.force_close_time_utc is not None:
-                bar_ts = bar['timestamp']
-                bar_hour = bar_ts.hour if hasattr(bar_ts, 'hour') else 0
-                bar_minute = bar_ts.minute if hasattr(bar_ts, 'minute') else 0
-                bar_time_utc = bar_hour + bar_minute / 60.0
-                if bar_time_utc >= self.force_close_time_utc:
+            if self.force_close_time_et is not None:
+                bar_et = self._get_bar_time_et(bar['timestamp'])
+                if bar_et >= self.force_close_time_et:
                     reason = 'partial+force_close' if partial_taken else 'force_close'
                     self._exit_trade(
                         trade, bar, reason, bar['open'], active_shares=active_shares
@@ -446,8 +454,8 @@ class BacktestRunner:
 
     DEFAULT_MIN_PRICE = 2.0
     DEFAULT_SKIP_MIDDAY = True
-    MIDDAY_START_UTC = 15  # 11:30 ET = 15:30 UTC (hour boundary)
-    MIDDAY_END_UTC = 18    # 14:00 ET = 18:00 UTC
+    MIDDAY_START_ET = (11, 30)  # 11:30 ET
+    MIDDAY_END_ET = (14, 0)    # 14:00 ET
 
     def __init__(
         self,
@@ -458,8 +466,8 @@ class BacktestRunner:
         skip_midday: Optional[bool] = None,
         early_exit_after_trade: bool = True,
         realistic: bool = True,
-        last_entry_time_utc: float = 19.0,
-        force_close_time_utc: Optional[float] = None,
+        last_entry_time_et: tuple = (15, 0),
+        force_close_time_et: Optional[tuple] = None,
         setup_expiry_bars: int = 10,
         partial_profit_enabled: bool = False,
         partial_profit_r_multiple: float = 1.0,
@@ -477,9 +485,9 @@ class BacktestRunner:
             skip_midday: Skip 11:30-14:00 ET entries (default True)
             early_exit_after_trade: Stop scanning after first trade (default True)
             realistic: Use detect_setup() + pending buy-stop simulation
-            last_entry_time_utc: No new entries after this UTC hour (default 19.0 = 15:00 ET)
-            force_close_time_utc: Force close at this UTC hour (default None;
-                in realistic mode defaults to 19.75 = 15:45 ET)
+            last_entry_time_et: No new entries after this ET time (default (15, 0) = 15:00 ET)
+            force_close_time_et: Force close at this ET time (default None;
+                in realistic mode defaults to (15, 45) = 15:45 ET)
             setup_expiry_bars: Cancel pending buy-stop after N bars (default 10)
             partial_profit_enabled: Enable partial profit exit strategy
             partial_profit_r_multiple: Take partial at this R multiple (default 1.0)
@@ -503,40 +511,46 @@ class BacktestRunner:
         self.TRADING_MINUTES = 390
         self.rvol_mode = rvol_mode
         self._min_breakout_vol_override = 0  # 0 = disabled; set per-date by batch_backtest
-        self._ET = pytz.timezone('US/Eastern')
         self.early_exit_after_trade = early_exit_after_trade
         self.realistic = realistic
-        self.last_entry_time_utc = last_entry_time_utc
+        self.last_entry_time_et = last_entry_time_et
         self.setup_expiry_bars = setup_expiry_bars
 
-        # In realistic mode, default force_close to 15:45 ET = 19.75 UTC
-        if force_close_time_utc is not None:
-            self.force_close_time_utc = force_close_time_utc
+        # In realistic mode, default force_close to 15:45 ET
+        if force_close_time_et is not None:
+            self.force_close_time_et = force_close_time_et
         elif realistic:
-            self.force_close_time_utc = 19.75
+            self.force_close_time_et = (15, 45)
         else:
-            self.force_close_time_utc = None
+            self.force_close_time_et = None
 
         # Wire force_close and partial profit into the simulator
         if simulator is not None:
             self.simulator = simulator
         else:
             self.simulator = TradeSimulator(
-                force_close_time_utc=self.force_close_time_utc,
+                force_close_time_et=self.force_close_time_et,
                 partial_profit_enabled=partial_profit_enabled,
                 partial_profit_r_multiple=partial_profit_r_multiple,
                 partial_profit_fraction=partial_profit_fraction,
             )
 
-    def _get_bar_time_utc(self, bar_ts) -> float:
-        """Extract UTC fractional hour from a bar timestamp."""
-        bar_hour = bar_ts.hour if hasattr(bar_ts, 'hour') else 0
-        bar_minute = bar_ts.minute if hasattr(bar_ts, 'minute') else 0
-        return bar_hour + bar_minute / 60.0
+    _ET = pytz.timezone('US/Eastern')
 
-    def _is_midday(self, bar_time_utc: float) -> bool:
+    def _get_bar_time_et(self, bar_ts) -> tuple:
+        """Convert bar timestamp to ET (hour, minute), handling DST correctly."""
+        if hasattr(bar_ts, 'tzinfo') and bar_ts.tzinfo is not None:
+            et_time = bar_ts.astimezone(self._ET)
+        elif hasattr(bar_ts, 'hour'):
+            # Assume UTC if no timezone info
+            et_time = bar_ts.replace(tzinfo=timezone.utc).astimezone(self._ET)
+        else:
+            return (0, 0)
+        return (et_time.hour, et_time.minute)
+
+    def _is_midday(self, bar_time_et: tuple) -> bool:
         """Check if bar time falls in midday dead zone (11:30-14:00 ET)."""
-        return self.MIDDAY_START_UTC + 0.5 <= bar_time_utc < self.MIDDAY_END_UTC
+        return self.MIDDAY_START_ET <= bar_time_et < self.MIDDAY_END_ET
 
     def run(
         self, symbol: str, bars: pd.DataFrame, trade_date: str,
@@ -628,8 +642,8 @@ class BacktestRunner:
                 continue
 
             if self.skip_midday:
-                bar_time_utc = self._get_bar_time_utc(bars.iloc[i]['timestamp'])
-                if self._is_midday(bar_time_utc):
+                bar_time_et = self._get_bar_time_et(bars.iloc[i]['timestamp'])
+                if self._is_midday(bar_time_et):
                     logger.debug(
                         f"  Skipping — midday entry at {bars.iloc[i]['timestamp']} "
                         f"(11:30-14:00 ET filter)"
@@ -763,7 +777,7 @@ class BacktestRunner:
 
         for i in range(self.MIN_BARS_FOR_SETUP - 1, last_end):
             bar = bars.iloc[i]
-            bar_time_utc = self._get_bar_time_utc(bar['timestamp'])
+            bar_time_et = self._get_bar_time_et(bar['timestamp'])
 
             # --- Step 1: Check pending buy-stop ---
             if pending_order is not None and not trade_taken:
@@ -877,7 +891,7 @@ class BacktestRunner:
             # --- Step 2: Scan for new setup ---
             if not trade_taken and pending_order is None:
                 # Last entry time check
-                if bar_time_utc >= self.last_entry_time_utc:
+                if bar_time_et >= self.last_entry_time_et:
                     continue
 
                 setup = self.detector.detect_setup(symbol, bars, end_idx=i)
@@ -915,7 +929,7 @@ class BacktestRunner:
                     continue
 
                 # Midday filter
-                if self.skip_midday and self._is_midday(bar_time_utc):
+                if self.skip_midday and self._is_midday(bar_time_et):
                     logger.debug(
                         f"  Skipping — midday setup at {bar['timestamp']} "
                         f"(11:30-14:00 ET filter)"

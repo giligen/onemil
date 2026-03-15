@@ -232,8 +232,8 @@ def backtest_morning_with_trades(db, morning_movers):
             realistic=True,
             min_price=2.0,
             skip_midday=False,  # We're ONLY running morning bars
-            last_entry_time_utc=14.5,  # Only enter before 10:30 ET
-            force_close_time_utc=19.75,
+            last_entry_time_et=(10, 30),  # Only enter before 10:30 ET
+            force_close_time_et=(15, 45),
         )
 
         all_trades = []
@@ -308,7 +308,7 @@ def analyze_all_movers_backtest(db, movers):
             realistic=True,
             min_price=2.0,
             skip_midday=True,
-            force_close_time_utc=19.75,
+            force_close_time_et=(15, 45),
         )
 
         all_trades = []
