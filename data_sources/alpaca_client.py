@@ -615,8 +615,9 @@ class AlpacaClient:
         """
         Get 1-minute bars for pattern detection.
 
-        Returns completed bars only — the caller (BullFlagDetector) handles
-        dropping the current in-progress bar.
+        Returns all bars from the API, including the current in-progress bar.
+        The caller (BullFlagDetector) is responsible for dropping the last
+        (in-progress) bar via bars.iloc[:-1].
 
         Args:
             symbol: Stock symbol

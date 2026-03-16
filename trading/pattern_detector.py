@@ -487,9 +487,7 @@ class BullFlagDetector:
         # A green candle at the pole-side boundary of the pullback is ambiguous —
         # it could be the last pole candle rather than an inside bar. Only keep
         # green bars that are sandwiched between reds (truly inside the flag).
-        opens_arr = bars['open'].values
-        closes_arr = bars['close'].values
-        while flag_start_idx < flag_end_idx and closes_arr[flag_start_idx] > opens_arr[flag_start_idx]:
+        while flag_start_idx < flag_end_idx and closes[flag_start_idx] > opens[flag_start_idx]:
             flag_start_idx += 1
 
         return (flag_start_idx, flag_end_idx)
