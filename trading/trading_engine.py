@@ -589,15 +589,21 @@ class TradingEngine:
         if not self.enabled:
             return None
 
-        # Market regime filter
+        # ALWAYS sync positions and manage pending orders — these must run
+        # regardless of regime filter or max trades. Skipping them means
+        # SL/TP exits go unrecorded, PnL is wrong, and circuit breaker is deaf.
+        self._sync_closed_positions()
+        fill_result = self._manage_pending_orders()
+
+        # Market regime filter — blocks NEW order placement only
         if self.market_regime and not self.market_regime.is_regime_ok(date.today()):
             info = self.market_regime.get_regime_info(date.today())
             vol_str = f"{info['vol_5d']:.2f}%" if info['vol_5d'] is not None else "N/A"
             logger.warning(
                 f"REGIME FILTER: vol_5d={vol_str} > {self.market_regime.vol_threshold}% "
-                f"AND below SMA{self.market_regime.sma_period} — skipping all trades"
+                f"AND below SMA{self.market_regime.sma_period} — skipping new trades"
             )
-            return None
+            return fill_result
 
         # Thin liquidity: log warning for awareness (H5 OR filter)
         # Production enforcement: buy-stop submitted on all days; post-fill volume check on thin days
@@ -612,18 +618,12 @@ class TradingEngine:
                 f"{self.market_regime.thin_liquidity_breakout_vol_ratio:.1f}x"
             )
 
-        # Max trades per day
+        # Max trades per day — blocks NEW order placement only
         if self.market_regime and self._daily_trade_count >= self.market_regime.max_trades_per_day:
             logger.warning(
-                f"MAX TRADES PER DAY reached ({self._daily_trade_count}) — skipping"
+                f"MAX TRADES PER DAY reached ({self._daily_trade_count}) — skipping new trades"
             )
-            return None
-
-        # Step 0: Sync closed positions (detect bracket exits for circuit breaker)
-        self._sync_closed_positions()
-
-        # Step 1: Manage existing pending orders (processes ALL pending, not just first)
-        fill_result = self._manage_pending_orders()
+            return fill_result
 
         if not self._qualified_symbols:
             logger.debug("No qualified symbols to check")
@@ -1216,7 +1216,13 @@ class TradingEngine:
         logger.info(f"Daily summary saved: {stats}")
 
     def reset_daily(self) -> None:
-        """Reset daily state for a new trading day."""
+        """Reset daily state for a new trading day, then sync from DB/Alpaca.
+
+        After clearing in-memory state, rebuilds _traded_symbols,
+        _pending_orders, and _daily_trade_count from today's DB trades
+        and Alpaca open orders. This ensures crash recovery doesn't
+        orphan live positions or allow double-entry.
+        """
         self._qualified_symbols.clear()
         self._traded_symbols.clear()
         self._patterns_detected = 0
@@ -1226,4 +1232,54 @@ class TradingEngine:
         self._daily_trade_count = 0
         self.position_manager.reset_daily()
         self._refresh_spy_data()
+        self._sync_startup_state()
         logger.info("Trading engine: daily state reset")
+
+    def _sync_startup_state(self) -> None:
+        """Rebuild in-memory state from DB trades and Alpaca for today.
+
+        Prevents crash recovery from:
+        - Allowing double-entry on symbols already traded today
+        - Losing track of pending buy-stop orders still live on Alpaca
+        - Miscounting daily trades
+        """
+        today = date.today().isoformat()
+        try:
+            trades_today = self.db.get_trades_by_date(today)
+        except Exception as e:
+            logger.error(f"Startup sync: failed to load today's trades: {e}")
+            return
+
+        if not trades_today:
+            logger.debug("Startup sync: no trades today, nothing to rebuild")
+            return
+
+        # Rebuild _traded_symbols and _daily_trade_count from DB
+        filled_count = 0
+        for trade in trades_today:
+            symbol = trade['symbol']
+            self._traded_symbols.add(symbol)
+            self.position_manager.mark_traded(symbol)
+            if trade.get('fill_price') is not None:
+                filled_count += 1
+
+        self._daily_trade_count = filled_count
+
+        # Rebuild _pending_orders from DB trades that have order_id but no fill
+        for trade in trades_today:
+            symbol = trade['symbol']
+            order_id = trade.get('order_id')
+            if order_id and trade.get('fill_price') is None and trade.get('exit_price') is None:
+                self._pending_orders[symbol] = {
+                    'order_id': order_id,
+                    'plan': None,  # Plan not recoverable from DB, but order is tracked
+                    'setup': None,
+                    'placed_at': trade.get('created_at', datetime.now(timezone.utc)),
+                }
+                logger.info(f"{symbol}: Recovered pending order {order_id} from DB")
+
+        logger.info(
+            f"Startup sync: {len(self._traded_symbols)} traded symbols, "
+            f"{self._daily_trade_count} filled trades, "
+            f"{len(self._pending_orders)} pending orders recovered"
+        )

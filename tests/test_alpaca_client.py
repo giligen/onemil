@@ -433,18 +433,32 @@ class TestGetCurrentBars:
         result = client.get_current_bars(["MISSING"])
         assert result == {}
 
-    def test_uses_latest_bar_from_multiple(self, client, mock_sdk_clients):
-        """When multiple 15-min bars returned, uses the most recent one."""
+    def test_uses_completed_bar_from_multiple(self, client, mock_sdk_clients):
+        """When 3+ bars returned, uses second-to-last (latest completed) bar."""
         bar_old = _make_bar(open=8.0, high=9.0, low=7.5, close=8.5, volume=100_000)
-        bar_new = _make_bar(open=9.0, high=12.0, low=8.5, close=11.0, volume=200_000)
+        bar_completed = _make_bar(open=9.0, high=12.0, low=8.5, close=11.0, volume=200_000)
+        bar_current = _make_bar(open=11.0, high=11.5, low=10.8, close=11.2, volume=50_000)
         mock_response = MagicMock()
-        mock_response.data = {"TSLA": [bar_old, bar_new]}
+        mock_response.data = {"TSLA": [bar_old, bar_completed, bar_current]}
         mock_sdk_clients["data_client"].get_stock_bars.return_value = mock_response
 
         result = client.get_current_bars(["TSLA"])
 
+        # Should use bar_completed (second-to-last), not bar_current (last/incomplete)
         assert result["TSLA"]["close"] == 11.0
         assert result["TSLA"]["volume"] == 200_000
+
+    def test_fallback_to_single_bar(self, client, mock_sdk_clients):
+        """When only 1 bar returned (market open), uses that bar."""
+        bar_only = _make_bar(open=9.0, high=9.5, low=8.8, close=9.2, volume=150_000)
+        mock_response = MagicMock()
+        mock_response.data = {"TSLA": [bar_only]}
+        mock_sdk_clients["data_client"].get_stock_bars.return_value = mock_response
+
+        result = client.get_current_bars(["TSLA"])
+
+        assert result["TSLA"]["close"] == 9.2
+        assert result["TSLA"]["volume"] == 150_000
 
     def test_api_error_propagates(self, client, mock_sdk_clients):
         """RuntimeError is wrapped in AlpacaAPIError."""

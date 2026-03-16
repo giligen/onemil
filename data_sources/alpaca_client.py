@@ -491,10 +491,12 @@ class AlpacaClient:
 
     def get_current_bars(self, symbols: List[str], feed: DataFeed = DataFeed.SIP) -> Dict[str, Dict]:
         """
-        Get current 15-min bar for multiple symbols.
+        Get the most recent COMPLETED 15-min bar for multiple symbols.
 
-        Fetches the most recent 15-min bar (aligned to bucket boundaries).
-        This is the actual 15-min bucket volume needed for relative volume calculation.
+        Returns the second-to-last bar (the latest fully completed 15-min
+        bucket) so that volume is representative of the full period. Falls
+        back to the latest bar if only one bar is available (e.g. at market
+        open).
 
         Args:
             symbols: List of stock symbols
@@ -510,8 +512,8 @@ class AlpacaClient:
             return {}
 
         try:
-            # Fetch last 30 min of 15-min bars to ensure we get the current bucket
-            start = datetime.now(timezone.utc) - timedelta(minutes=30)
+            # Fetch last 45 min of 15-min bars to ensure we get 2+ bars
+            start = datetime.now(timezone.utc) - timedelta(minutes=45)
             results = {}
             chunk_size = 200
             for i in range(0, len(symbols), chunk_size):
@@ -529,7 +531,12 @@ class AlpacaClient:
                 bars = self._to_dict(bars_raw)
                 for symbol in chunk:
                     if symbol in bars and len(bars[symbol]) > 0:
-                        bar = bars[symbol][-1]  # Most recent 15-min bar
+                        # Use second-to-last bar (latest completed) if available,
+                        # fall back to last bar at market open when only 1 exists
+                        if len(bars[symbol]) >= 2:
+                            bar = bars[symbol][-2]
+                        else:
+                            bar = bars[symbol][-1]
                         results[symbol] = {
                             'open': float(bar.open),
                             'high': float(bar.high),

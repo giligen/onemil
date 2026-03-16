@@ -96,6 +96,24 @@ def _make_bull_flag_setup_bars():
     return pd.DataFrame(records)
 
 
+def _make_trade_record(**overrides):
+    """Create a complete trade dict with all DB columns, applying overrides."""
+    record = {
+        'trade_date': date.today().isoformat(),
+        'symbol': 'TEST', 'side': 'buy',
+        'entry_price': 10.0, 'stop_loss_price': 9.5,
+        'take_profit_price': 11.0, 'shares': 100,
+        'risk_per_share': 0.5, 'total_risk': 50.0,
+        'risk_reward_ratio': 2.0,
+        'order_id': None, 'order_status': None,
+        'fill_price': None, 'filled_at': None,
+        'exit_price': None, 'exit_reason': None, 'exited_at': None,
+        'pnl': None, 'pnl_pct': None, 'pattern_data': None,
+    }
+    record.update(overrides)
+    return record
+
+
 # ===========================================================================
 # INTEGRATION TESTS
 # ===========================================================================
@@ -954,3 +972,137 @@ class TestScannerEngineLoopIntegration:
 
         # Post-loop safety net should have called _force_close_all
         mock_alpaca.get_open_positions.assert_called()
+
+
+# ===========================================================================
+# Bug A: Position management not blocked by regime/max-trades guards
+# ===========================================================================
+
+@pytest.mark.integration
+class TestPositionSyncUnderGuards:
+    """Verify that SL/TP exits are recorded even when regime filter or
+    max-trades guard blocks new order placement."""
+
+    def test_sl_exit_recorded_under_regime_filter(self, db, mock_alpaca):
+        """A stop-loss exit is detected and recorded even when regime blocks trading."""
+        from trading.market_regime import MarketRegimeFilter
+
+        detector = BullFlagDetector()
+        planner = TradePlanner()
+        executor = OrderExecutor(mock_alpaca, db)
+        pm = PositionManager(mock_alpaca, db)
+
+        regime = MagicMock(spec=MarketRegimeFilter)
+        regime.is_regime_ok.return_value = False
+        regime.get_regime_info.return_value = {
+            'vol_5d': 3.0, 'sma': 400.0, 'is_below_sma': True,
+            'is_ok': False, 'spy_volume_ratio': 1.0,
+        }
+        regime.vol_threshold = 2.0
+        regime.sma_period = 50
+
+        engine = TradingEngine(
+            alpaca_client=mock_alpaca, db=db, detector=detector,
+            planner=planner, executor=executor, position_manager=pm,
+            enabled=True, market_regime=regime,
+        )
+
+        # Pre-existing filled trade in DB
+        today = date.today().isoformat()
+        trade_id = db.save_trade(_make_trade_record(
+            trade_date=today, symbol='AAPL', order_id='ord-1',
+            order_status='filled', fill_price=10.0,
+        ))
+
+        # Alpaca: position is GONE (SL hit)
+        mock_alpaca.get_open_positions.return_value = []
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled', 'filled_avg_price': 10.0, 'filled_qty': 100,
+            'legs': [
+                {'side': 'sell', 'stop_price': 9.5, 'status': 'filled',
+                 'filled_avg_price': 9.5},
+                {'side': 'sell', 'limit_price': 11.0, 'status': 'canceled'},
+            ],
+        }
+
+        engine.run_pattern_check()
+
+        # Exit should be recorded despite regime blocking new trades
+        trade = db.get_trades_by_date(today)[0]
+        assert trade['exit_price'] == 9.5
+        assert trade['exit_reason'] == 'stop_loss'
+        assert trade['pnl'] == pytest.approx(-50.0)
+
+
+# ===========================================================================
+# Bug C: Startup sync rebuilds state after crash
+# ===========================================================================
+
+@pytest.mark.integration
+class TestStartupSyncIntegration:
+    """Verify reset_daily rebuilds traded_symbols, pending_orders, and
+    daily_trade_count from real DB state — prevents crash recovery issues."""
+
+    def test_crash_recovery_prevents_double_entry(self, db, mock_alpaca):
+        """After crash + restart, engine won't re-trade a symbol it already traded."""
+        detector = BullFlagDetector()
+        planner = TradePlanner()
+        executor = OrderExecutor(mock_alpaca, db)
+        pm = PositionManager(mock_alpaca, db)
+
+        engine = TradingEngine(
+            alpaca_client=mock_alpaca, db=db, detector=detector,
+            planner=planner, executor=executor, position_manager=pm,
+            enabled=True,
+        )
+
+        # Simulate: previous run traded AAPL, then crashed
+        today = date.today().isoformat()
+        db.save_trade(_make_trade_record(
+            trade_date=today, symbol='AAPL', order_id='ord-1',
+            order_status='filled', fill_price=10.0,
+        ))
+
+        # Mock SPY data for regime refresh
+        mock_alpaca.get_daily_bars_range.return_value = {}
+
+        # Simulate restart: reset_daily should rebuild state
+        engine.reset_daily()
+
+        # AAPL should be in traded_symbols — engine won't try it again
+        assert 'AAPL' in engine._traded_symbols
+        assert engine._daily_trade_count == 1
+
+        # Try to qualify AAPL — should be rejected
+        engine.on_stock_qualified('AAPL')
+        assert 'AAPL' not in engine._qualified_symbols
+
+    def test_pending_order_recovered_after_crash(self, db, mock_alpaca):
+        """After crash, a pending buy-stop still live on Alpaca is tracked."""
+        detector = BullFlagDetector()
+        planner = TradePlanner()
+        executor = OrderExecutor(mock_alpaca, db)
+        pm = PositionManager(mock_alpaca, db)
+
+        engine = TradingEngine(
+            alpaca_client=mock_alpaca, db=db, detector=detector,
+            planner=planner, executor=executor, position_manager=pm,
+            enabled=True,
+        )
+
+        today = date.today().isoformat()
+        db.save_trade(_make_trade_record(
+            trade_date=today, symbol='TSLA', entry_price=15.0,
+            stop_loss_price=14.5, take_profit_price=16.0, shares=200,
+            order_id='ord-pending', order_status='accepted',
+        ))
+
+        mock_alpaca.get_daily_bars_range.return_value = {}
+
+        engine.reset_daily()
+
+        # Pending order should be recovered
+        assert 'TSLA' in engine._pending_orders
+        assert engine._pending_orders['TSLA']['order_id'] == 'ord-pending'
+        # Not counted as filled
+        assert engine._daily_trade_count == 0

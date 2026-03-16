@@ -340,11 +340,12 @@ class RealtimeScanner:
 
     def _run_intraday_cycle(self) -> None:
         """Run one intraday scan cycle (every 15 min)."""
-        now_et = datetime.now(ET)
-        bucket = f"{now_et.hour:02d}:{(now_et.minute // 15) * 15:02d}"
-
         symbols = [s['symbol'] for s in self._universe]
         universe_map = {s['symbol']: s for s in self._universe}
+
+        # Default bucket from wall clock (overridden per-stock from bar timestamp)
+        now_et = datetime.now(ET)
+        bucket = f"{now_et.hour:02d}:{(now_et.minute // 15) * 15:02d}"
 
         # Get current bars for volume check
         bars = self.alpaca.get_current_bars(symbols)
@@ -372,6 +373,22 @@ class RealtimeScanner:
 
             current_price = trade['price']
             current_volume = bar['volume']
+
+            # Compute volume bucket from the bar's timestamp (not wall clock)
+            # so it matches the completed bar returned by get_current_bars()
+            bar_ts = bar.get('timestamp')
+            if bar_ts is not None:
+                if isinstance(bar_ts, str):
+                    bar_ts = datetime.fromisoformat(bar_ts.replace('Z', '+00:00'))
+                if bar_ts.tzinfo is None:
+                    bar_ts = bar_ts.replace(tzinfo=pytz.utc)
+                bar_et = bar_ts.astimezone(ET)
+            else:
+                # Fallback: use wall clock if bar has no timestamp
+                bar_et = datetime.now(ET)
+                logger.warning(f"{symbol}: Bar has no timestamp, using wall clock for bucket")
+
+            bucket = f"{bar_et.hour:02d}:{(bar_et.minute // 15) * 15:02d}"
 
             # Calculate metrics
             gap_pct = ((current_price - prev_close) / prev_close) * 100

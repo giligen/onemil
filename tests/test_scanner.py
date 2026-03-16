@@ -196,6 +196,9 @@ class TestRunIntradayCycle:
                         price_close=4.0, trade_price=5.0, bar_volume=100_000,
                         avg_volume=10_000, has_news=True, headline="Catalyst"):
         """Set up universe, trades, bars, volume profiles, and news for intraday test."""
+        from datetime import datetime
+        import pytz
+
         scanner._universe = [
             {'symbol': symbol, 'price_close': price_close,
              'company_name': 'Momo Co', 'float_shares': 2_000_000},
@@ -203,16 +206,16 @@ class TestRunIntradayCycle:
         mock_alpaca.get_latest_trades.return_value = {
             symbol: {'price': trade_price},
         }
-        mock_alpaca.get_current_bars.return_value = {
-            symbol: {'volume': bar_volume},
-        }
-        # Volume profile keyed by current bucket
-        scanner._volume_profiles = {symbol: {}}
-        # Dynamically compute bucket for "now" in ET
-        from datetime import datetime
-        import pytz
+        # Compute a bar timestamp in the current 15-min bucket (ET)
         now_et = datetime.now(pytz.timezone('US/Eastern'))
         bucket = f"{now_et.hour:02d}:{(now_et.minute // 15) * 15:02d}"
+        bar_ts = now_et.replace(minute=(now_et.minute // 15) * 15, second=0, microsecond=0)
+
+        mock_alpaca.get_current_bars.return_value = {
+            symbol: {'volume': bar_volume, 'timestamp': bar_ts},
+        }
+        # Volume profile keyed by bucket derived from bar timestamp
+        scanner._volume_profiles = {symbol: {}}
         scanner._volume_profiles[symbol][bucket] = avg_volume
 
         mock_news.has_interesting_news.return_value = (has_news, headline)
@@ -236,8 +239,10 @@ class TestRunIntradayCycle:
         mock_alpaca.get_latest_trades.return_value = {
             'MOMO': {'price': 5.0},  # 25% change
         }
+        fake_bar_ts = real_datetime(2026, 3, 13, 10, 0, 0,
+                                    tzinfo=pytz.timezone('US/Eastern'))
         mock_alpaca.get_current_bars.return_value = {
-            'MOMO': {'volume': 100_000},
+            'MOMO': {'volume': 100_000, 'timestamp': fake_bar_ts},
         }
         scanner._volume_profiles = {'MOMO': {'10:00': 10_000}}
         mock_news.has_interesting_news.return_value = (True, "Big news")
@@ -270,8 +275,10 @@ class TestRunIntradayCycle:
         mock_alpaca.get_latest_trades.return_value = {
             'NEAR': {'price': 5.0},  # 25% change
         }
+        fake_bar_ts = real_datetime(2026, 3, 13, 10, 0, 0,
+                                    tzinfo=pytz.timezone('US/Eastern'))
         mock_alpaca.get_current_bars.return_value = {
-            'NEAR': {'volume': 100_000},
+            'NEAR': {'volume': 100_000, 'timestamp': fake_bar_ts},
         }
         verbose_scanner._volume_profiles = {'NEAR': {'10:00': 10_000}}
         mock_news.has_interesting_news.return_value = (False, None)
@@ -420,13 +427,15 @@ class TestTradingEngineHandoff:
             'company_name': 'Hot Inc.',
             'float_shares': 2_000_000,
         }]
-        # Use bucket matching mocked time: 10:00
+        # Use bucket matching bar timestamp: 10:00 ET
         scanner._volume_profiles = {'HOT': {'10:00': 10000}}
 
         # Mock API responses so stock qualifies
+        # Bar timestamp = 10:00 ET (matching volume profile bucket)
+        bar_ts = real_datetime(2026, 3, 13, 10, 0, 0, tzinfo=ET)
         mock_alpaca.get_current_bars.return_value = {
             'HOT': {'open': 5.0, 'high': 6.5, 'low': 5.0, 'close': 6.0, 'volume': 100000,
-                     'timestamp': '2026-03-13T14:30:00Z'},
+                     'timestamp': bar_ts},
         }
         mock_alpaca.get_latest_trades.return_value = {
             'HOT': {'price': 6.0, 'size': 100, 'timestamp': '2026-03-13T14:30:00Z'},
@@ -778,3 +787,91 @@ class TestMainLoopBehavior:
         mock_alpaca.get_latest_trades.assert_not_called()
         # No force close since we returned before the loop
         mock_engine._force_close_all.assert_not_called()
+
+
+# ===========================================================================
+# Bug B: Volume bucket computed from bar timestamp, not wall clock
+# ===========================================================================
+
+class TestVolumeBucketFromBarTimestamp:
+    """Verify _run_intraday_cycle computes the volume bucket from the bar's
+    timestamp rather than datetime.now(), so the bucket key matches the
+    completed bar returned by get_current_bars()."""
+
+    @patch('scanner.realtime_scanner.datetime')
+    def test_bucket_from_bar_timestamp_not_now(
+        self, mock_dt, scanner, mock_alpaca, mock_news, mock_db
+    ):
+        """When wall clock is 10:16 but bar timestamp is 10:00, bucket = 10:00."""
+        import pytz
+        from datetime import datetime as real_datetime
+
+        # Wall clock: 10:16 ET (just past the bucket boundary)
+        fake_now = real_datetime(2026, 3, 13, 10, 16, 0,
+                                 tzinfo=pytz.timezone('US/Eastern'))
+        mock_dt.now.return_value = fake_now
+        mock_dt.side_effect = lambda *a, **kw: real_datetime(*a, **kw)
+
+        # Bar timestamp: 10:00 ET (the completed bar)
+        bar_ts = real_datetime(2026, 3, 13, 10, 0, 0,
+                               tzinfo=pytz.timezone('US/Eastern'))
+
+        scanner._universe = [
+            {'symbol': 'MOMO', 'price_close': 4.0,
+             'company_name': 'Momo Co', 'float_shares': 2_000_000},
+        ]
+        mock_alpaca.get_latest_trades.return_value = {
+            'MOMO': {'price': 5.0},
+        }
+        mock_alpaca.get_current_bars.return_value = {
+            'MOMO': {'volume': 100_000, 'timestamp': bar_ts},
+        }
+        # Profile has 10:00 bucket (matching bar) but NOT 10:15 (wall clock bucket)
+        scanner._volume_profiles = {'MOMO': {'10:00': 10_000}}
+        mock_news.has_interesting_news.return_value = (True, "Big news")
+
+        scanner._run_intraday_cycle()
+
+        # Should qualify (rvol = 100k/10k = 10x) using 10:00 bucket
+        mock_db.save_scan_result.assert_called_once()
+        saved = mock_db.save_scan_result.call_args[0][0]
+        assert saved['symbol'] == 'MOMO'
+        assert saved['qualified'] == 1
+
+    @patch('scanner.realtime_scanner.datetime')
+    def test_wrong_bucket_misses_qualification(
+        self, mock_dt, scanner, mock_alpaca, mock_news, mock_db
+    ):
+        """If bucket were computed from wall clock, volume profile lookup would
+        miss and relative_volume would be 0 — stock would NOT qualify."""
+        import pytz
+        from datetime import datetime as real_datetime
+
+        fake_now = real_datetime(2026, 3, 13, 10, 16, 0,
+                                 tzinfo=pytz.timezone('US/Eastern'))
+        mock_dt.now.return_value = fake_now
+        mock_dt.side_effect = lambda *a, **kw: real_datetime(*a, **kw)
+
+        bar_ts = real_datetime(2026, 3, 13, 10, 0, 0,
+                               tzinfo=pytz.timezone('US/Eastern'))
+
+        scanner._universe = [
+            {'symbol': 'MOMO', 'price_close': 4.0,
+             'company_name': 'Momo Co', 'float_shares': 2_000_000},
+        ]
+        mock_alpaca.get_latest_trades.return_value = {
+            'MOMO': {'price': 5.0},
+        }
+        mock_alpaca.get_current_bars.return_value = {
+            'MOMO': {'volume': 100_000, 'timestamp': bar_ts},
+        }
+        # Only 10:15 bucket exists — bar is from 10:00, so it should NOT match
+        # This test proves that if we used wall clock (10:15), it would find
+        # the profile and qualify, but with bar timestamp (10:00) it misses.
+        scanner._volume_profiles = {'MOMO': {'10:15': 10_000}}
+        mock_news.has_interesting_news.return_value = (True, "Big news")
+
+        scanner._run_intraday_cycle()
+
+        # avg_vol = 0 for bucket 10:00, so relative_volume = 0 → not qualified
+        mock_db.save_scan_result.assert_not_called()

@@ -2410,3 +2410,213 @@ class TestDailyTradeCountFix:
 
         assert engine._daily_trade_count == 1
         assert engine._patterns_traded == 1
+
+
+# ===========================================================================
+# Bug A: Position management not blocked by regime/max-trades guards
+# ===========================================================================
+
+def _make_trade_record(**overrides):
+    """Create a complete trade dict with all DB columns, applying overrides."""
+    record = {
+        'trade_date': date.today().isoformat(),
+        'symbol': 'TEST', 'side': 'buy',
+        'entry_price': 10.0, 'stop_loss_price': 9.5,
+        'take_profit_price': 11.0, 'shares': 100,
+        'risk_per_share': 0.5, 'total_risk': 50.0,
+        'risk_reward_ratio': 2.0,
+        'order_id': None, 'order_status': None,
+        'fill_price': None, 'filled_at': None,
+        'exit_price': None, 'exit_reason': None, 'exited_at': None,
+        'pnl': None, 'pnl_pct': None, 'pattern_data': None,
+    }
+    record.update(overrides)
+    return record
+
+
+class TestPositionManagementNotBlockedByGuards:
+    """Verify _sync_closed_positions and _manage_pending_orders run even when
+    regime filter or max-trades guard would block new order placement."""
+
+    def test_sync_runs_when_regime_blocks(self, engine, mock_alpaca, db, mock_position_manager):
+        """_sync_closed_positions runs even when regime filter is active."""
+        from trading.market_regime import MarketRegimeFilter
+        regime = MagicMock(spec=MarketRegimeFilter)
+        regime.is_regime_ok.return_value = False
+        regime.get_regime_info.return_value = {
+            'vol_5d': 3.0, 'sma': 400.0, 'is_below_sma': True, 'is_ok': False,
+            'spy_volume_ratio': 1.0,
+        }
+        regime.vol_threshold = 2.0
+        regime.sma_period = 50
+        engine.market_regime = regime
+
+        # Create an open trade in DB
+        today = date.today().isoformat()
+        db.save_trade(_make_trade_record(
+            trade_date=today, symbol='AAPL', order_id='ord-1',
+            order_status='filled', fill_price=10.0,
+        ))
+
+        # Alpaca says no open position (SL was hit)
+        mock_alpaca.get_open_positions.return_value = []
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled', 'filled_avg_price': 10.0, 'filled_qty': 100,
+            'legs': [
+                {'side': 'sell', 'stop_price': 9.5, 'status': 'filled',
+                 'filled_avg_price': 9.5},
+                {'side': 'sell', 'limit_price': 11.0, 'status': 'canceled'},
+            ],
+        }
+
+        result = engine.run_pattern_check()
+
+        # Sync should have detected the closed position and updated DB
+        trade = db.get_trades_by_date(today)[0]
+        assert trade['exit_price'] is not None
+        assert trade['exit_reason'] == 'stop_loss'
+
+    def test_manage_pending_runs_when_max_trades_reached(
+        self, engine, mock_alpaca, db, mock_position_manager
+    ):
+        """_manage_pending_orders runs even when max_trades_per_day reached."""
+        from trading.market_regime import MarketRegimeFilter
+        regime = MagicMock(spec=MarketRegimeFilter)
+        regime.is_regime_ok.return_value = True
+        regime.is_thin_liquidity.return_value = False
+        regime.max_trades_per_day = 2
+        engine.market_regime = regime
+        engine._daily_trade_count = 2  # At max
+
+        # Set up a pending order
+        engine._pending_orders['TSLA'] = {
+            'order_id': 'ord-99',
+            'plan': _make_plan('TSLA'),
+            'setup': _make_pattern('TSLA'),
+            'placed_at': datetime.now(timezone.utc) - timedelta(seconds=30),
+        }
+
+        # Order expired (cancelled — Alpaca uses British spelling)
+        mock_alpaca.get_order.return_value = {
+            'status': 'cancelled', 'filled_avg_price': None, 'filled_qty': 0,
+        }
+
+        result = engine.run_pattern_check()
+
+        # Pending order should have been cleaned up even at max trades
+        assert 'TSLA' not in engine._pending_orders
+
+    def test_guards_return_fill_result(self, engine, mock_alpaca, db, mock_position_manager):
+        """Guards return fill_result from _manage_pending_orders, not None."""
+        from trading.market_regime import MarketRegimeFilter
+        regime = MagicMock(spec=MarketRegimeFilter)
+        regime.is_regime_ok.return_value = False
+        regime.get_regime_info.return_value = {
+            'vol_5d': 3.0, 'sma': 400.0, 'is_below_sma': True, 'is_ok': False,
+            'spy_volume_ratio': 1.0,
+        }
+        regime.vol_threshold = 2.0
+        regime.sma_period = 50
+        engine.market_regime = regime
+
+        # No pending orders, no open trades — fill_result should be None
+        mock_alpaca.get_open_positions.return_value = []
+        result = engine.run_pattern_check()
+
+        # With regime blocking and no pending fills, result is None (fill_result)
+        assert result is None
+
+
+# ===========================================================================
+# Bug C: Startup sync rebuilds state after crash recovery
+# ===========================================================================
+
+class TestStartupSync:
+    """Verify _sync_startup_state rebuilds traded_symbols, pending_orders,
+    and daily_trade_count from DB after reset_daily."""
+
+    def test_traded_symbols_rebuilt_from_db(self, engine, db, mock_alpaca, mock_position_manager):
+        """Traded symbols are rebuilt from today's DB trades."""
+        today = date.today().isoformat()
+        db.save_trade(_make_trade_record(
+            trade_date=today, symbol='AAPL', order_id='ord-1',
+            order_status='filled', fill_price=10.0,
+        ))
+        db.save_trade(_make_trade_record(
+            trade_date=today, symbol='TSLA', entry_price=20.0,
+            stop_loss_price=19.0, take_profit_price=22.0, shares=50,
+            order_id='ord-2', order_status='filled', fill_price=20.0,
+        ))
+
+        # Mock SPY refresh so reset_daily doesn't fail
+        mock_alpaca.get_daily_bars_range.return_value = {}
+
+        engine.reset_daily()
+
+        assert 'AAPL' in engine._traded_symbols
+        assert 'TSLA' in engine._traded_symbols
+        assert engine._daily_trade_count == 2
+
+    def test_pending_orders_rebuilt_from_db(self, engine, db, mock_alpaca, mock_position_manager):
+        """Pending (unfilled) orders are rebuilt from DB."""
+        today = date.today().isoformat()
+        db.save_trade(_make_trade_record(
+            trade_date=today, symbol='PLTR', entry_price=15.0,
+            stop_loss_price=14.5, take_profit_price=16.0, shares=200,
+            order_id='ord-pending', order_status='accepted',
+        ))
+
+        mock_alpaca.get_daily_bars_range.return_value = {}
+
+        engine.reset_daily()
+
+        assert 'PLTR' in engine._pending_orders
+        assert engine._pending_orders['PLTR']['order_id'] == 'ord-pending'
+        assert 'PLTR' in engine._traded_symbols  # Prevents re-entry
+        assert engine._daily_trade_count == 0  # Not filled, so not counted
+
+    def test_filled_not_in_pending(self, engine, db, mock_alpaca, mock_position_manager):
+        """Filled trades are NOT added to _pending_orders."""
+        today = date.today().isoformat()
+        db.save_trade(_make_trade_record(
+            trade_date=today, symbol='AAPL', order_id='ord-filled',
+            order_status='filled', fill_price=10.05,
+        ))
+
+        mock_alpaca.get_daily_bars_range.return_value = {}
+
+        engine.reset_daily()
+
+        assert 'AAPL' not in engine._pending_orders
+        assert 'AAPL' in engine._traded_symbols
+        assert engine._daily_trade_count == 1
+
+    def test_exited_trades_not_in_pending(self, engine, db, mock_alpaca, mock_position_manager):
+        """Exited trades (with exit_price) are NOT added to _pending_orders."""
+        today = date.today().isoformat()
+        trade_id = db.save_trade(_make_trade_record(
+            trade_date=today, symbol='NVDA', order_id='ord-exited',
+            order_status='filled', fill_price=10.0,
+        ))
+        db.update_trade(trade_id, {
+            'exit_price': 11.0, 'exit_reason': 'take_profit',
+            'pnl': 100.0, 'pnl_pct': 10.0,
+        })
+
+        mock_alpaca.get_daily_bars_range.return_value = {}
+
+        engine.reset_daily()
+
+        assert 'NVDA' not in engine._pending_orders
+        assert 'NVDA' in engine._traded_symbols
+        assert engine._daily_trade_count == 1
+
+    def test_no_trades_today_skips_gracefully(self, engine, db, mock_alpaca, mock_position_manager):
+        """No trades today — sync completes without error."""
+        mock_alpaca.get_daily_bars_range.return_value = {}
+
+        engine.reset_daily()
+
+        assert len(engine._traded_symbols) == 0
+        assert len(engine._pending_orders) == 0
+        assert engine._daily_trade_count == 0

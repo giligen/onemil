@@ -343,10 +343,13 @@ class TestIntradayScanQualificationFlow:
         ])
 
         # Mock current bars: HOT has 60K volume (6x), WARM 30K (3x), COLD 5K (0.5x)
+        # Bar timestamp = 10:00 ET (matching volume profile bucket)
+        import pytz
+        bar_ts = pytz.timezone('US/Eastern').localize(datetime(2026, 3, 13, 10, 0, 0))
         mock_alpaca.get_current_bars.return_value = {
-            'HOT':  {'open': 5.5, 'high': 6.0, 'low': 5.4, 'close': 5.8, 'volume': 60_000, 'timestamp': now},
-            'WARM': {'open': 8.5, 'high': 9.0, 'low': 8.4, 'close': 8.8, 'volume': 30_000, 'timestamp': now},
-            'COLD': {'open': 6.0, 'high': 6.1, 'low': 5.9, 'close': 6.0, 'volume': 5_000, 'timestamp': now},
+            'HOT':  {'open': 5.5, 'high': 6.0, 'low': 5.4, 'close': 5.8, 'volume': 60_000, 'timestamp': bar_ts},
+            'WARM': {'open': 8.5, 'high': 9.0, 'low': 8.4, 'close': 8.8, 'volume': 30_000, 'timestamp': bar_ts},
+            'COLD': {'open': 6.0, 'high': 6.1, 'low': 5.9, 'close': 6.0, 'volume': 5_000, 'timestamp': bar_ts},
         }
 
         # Mock latest trades: HOT up 20%, WARM up 12%, COLD up 1%
