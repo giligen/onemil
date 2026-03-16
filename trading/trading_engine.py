@@ -95,6 +95,11 @@ class TradingEngine:
 
         self.market_regime = market_regime
 
+        # Load skip_fridays from config
+        from config import Config
+        _cfg = Config._load_yaml_only()
+        self.skip_fridays = bool(_cfg.get("trading", {}).get("skip_fridays", False))
+
         self._qualified_symbols: Set[str] = set()
         self._traded_symbols: Set[str] = set()
         self._patterns_detected: int = 0
@@ -602,6 +607,11 @@ class TradingEngine:
         # SL/TP exits go unrecorded, PnL is wrong, and circuit breaker is deaf.
         self._sync_closed_positions()
         fill_result = self._manage_pending_orders()
+
+        # Friday filter — blocks NEW order placement only
+        if self.skip_fridays and date.today().weekday() == 4:
+            logger.info("FRIDAY FILTER: skipping new trades (30% WR on Fridays)")
+            return fill_result
 
         # Market regime filter — blocks NEW order placement only
         if self.market_regime and not self.market_regime.is_regime_ok(date.today()):

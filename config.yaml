@@ -73,7 +73,7 @@ trading:
   max_positions: 3
   daily_loss_limit: -2000.0
   min_risk_pct: 0.01           # 1% min risk — filters degenerate thin-risk setups
-  max_risk_pct: 0.05
+  max_risk_pct: 0.04           # 4% max risk — sloppy wide patterns have 30% WR
   min_risk_reward: 2.5
   min_price: 2.00
   last_entry_time: "15:00"      # ET — no new entries after this
@@ -81,6 +81,7 @@ trading:
   setup_expiry_bars: 10         # cancel pending buy-stop after N bars
   pattern_poll_interval: 60
   skip_midday: true
+  skip_fridays: true            # 30% WR on Fridays — traders close before weekend
   circuit_breaker_dd: 1500.0
   circuit_breaker_pause: 1
   max_trades_per_day: 5

@@ -777,7 +777,7 @@ class TestBatchBacktestRegimeAndCB:
         movers = [
             ("PLYX", date(2026, 3, 5)),  # Should be skipped
             ("SVCO", date(2026, 3, 5)),  # Should be skipped
-            ("AAPL", date(2026, 3, 6)),  # Should be allowed
+            ("AAPL", date(2026, 3, 9)),  # Should be allowed (Monday)
         ]
 
         client = MagicMock(spec=AlpacaClient)
@@ -785,13 +785,13 @@ class TestBatchBacktestRegimeAndCB:
         runner.detector = MagicMock()
         runner.detector.min_breakout_volume_ratio = 1.5
         aapl_result = BacktestResult(
-            symbol="AAPL", trade_date="2026-03-06",
+            symbol="AAPL", trade_date="2026-03-09",
             total_bars=100, patterns_detected=1, trades_simulated=[],
         )
         runner.run.return_value = aapl_result
 
         bars_df = pd.DataFrame({
-            'timestamp': [datetime(2026, 3, 6, 14, 0, tzinfo=timezone.utc)],
+            'timestamp': [datetime(2026, 3, 9, 14, 0, tzinfo=timezone.utc)],
             'open': [5.0], 'high': [5.5], 'low': [4.8],
             'close': [5.3], 'volume': [100000],
         })

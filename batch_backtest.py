@@ -303,6 +303,12 @@ def run_batch_backtest(
     regime_skipped = 0
     cb_skipped = 0
     max_trades_skipped = 0
+    friday_skipped = 0
+
+    # Load skip_fridays from config
+    from config import Config
+    _cfg = Config._load_yaml_only()
+    skip_fridays = bool(_cfg.get("trading", {}).get("skip_fridays", False))
 
     # Resolve max_trades_per_day: explicit param > regime attr > 0 (disabled)
     effective_max_trades = max_trades_per_day
@@ -311,6 +317,14 @@ def run_batch_backtest(
 
 
     for trade_date in sorted(movers_by_date.keys()):
+        # --- Friday filter ---
+        if skip_fridays and trade_date.weekday() == 4:
+            n_skip = len(movers_by_date[trade_date])
+            friday_skipped += n_skip
+            idx += n_skip
+            logger.info(f"FRIDAY SKIP {trade_date}: skipping {n_skip} symbols")
+            continue
+
         # --- Market regime filter ---
         if market_regime and not market_regime.is_regime_ok(trade_date):
             info = market_regime.get_regime_info(trade_date)
@@ -411,6 +425,8 @@ def run_batch_backtest(
             except Exception as e:
                 logger.error(f"[{idx}/{total}] {symbol} {date_str} — unexpected error: {e}, skipping")
 
+    if friday_skipped > 0:
+        logger.info(f"Friday filter skipped {friday_skipped} symbol/date pairs")
     if regime_skipped > 0:
         logger.info(f"Regime filter skipped {regime_skipped} symbol/date pairs")
     if cb_skipped > 0:
