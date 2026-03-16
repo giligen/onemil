@@ -21,6 +21,7 @@ from datetime import datetime, timezone, date, timedelta
 from typing import List, Tuple, Dict, Optional
 
 import pandas as pd
+import pytz
 from dotenv import load_dotenv
 
 from backtest import BacktestRunner, BacktestResult
@@ -34,6 +35,24 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 INTRADAY_MOVE_THRESHOLD = 0.10  # 10% (high - low) / low
+ET = pytz.timezone('US/Eastern')
+
+
+def _market_hours_utc(trade_date: date) -> tuple:
+    """
+    Convert 09:30-16:00 ET market hours to UTC for a given date.
+
+    Handles EDT/EST automatically via pytz — no hardcoded UTC offsets.
+
+    Args:
+        trade_date: The trading date
+
+    Returns:
+        Tuple of (market_open_utc, market_close_utc) as datetime objects
+    """
+    open_et = ET.localize(datetime(trade_date.year, trade_date.month, trade_date.day, 9, 30))
+    close_et = ET.localize(datetime(trade_date.year, trade_date.month, trade_date.day, 16, 0))
+    return open_et.astimezone(timezone.utc), close_et.astimezone(timezone.utc)
 DEFAULT_START = "2026-03-01"
 DEFAULT_END = "2026-03-13"
 CSV_OUTPUT = "backtest_results_march_2026.csv"
@@ -220,10 +239,8 @@ def get_1min_bars_cached(
         logger.debug(f"Cache hit: {len(cached)} 1-min bars for {symbol} on {date_str}")
         return pd.DataFrame(cached)
 
-    # Fetch from API
-    dt = datetime(trade_date.year, trade_date.month, trade_date.day)
-    market_open = dt.replace(hour=13, minute=30, second=0, tzinfo=timezone.utc)
-    market_close = dt.replace(hour=20, minute=0, second=0, tzinfo=timezone.utc)
+    # Fetch from API — use DST-safe ET→UTC conversion
+    market_open, market_close = _market_hours_utc(trade_date)
 
     bars = client.get_historical_1min_bars(symbol, market_open, market_close)
 
@@ -343,9 +360,7 @@ def run_batch_backtest(
                 if db:
                     bars = get_1min_bars_cached(symbol, trade_date, client, db)
                 else:
-                    dt = datetime(trade_date.year, trade_date.month, trade_date.day)
-                    market_open = dt.replace(hour=13, minute=30, second=0, tzinfo=timezone.utc)
-                    market_close = dt.replace(hour=20, minute=0, second=0, tzinfo=timezone.utc)
+                    market_open, market_close = _market_hours_utc(trade_date)
                     bars = client.get_historical_1min_bars(symbol, market_open, market_close)
 
                 if bars.empty:

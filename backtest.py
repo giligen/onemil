@@ -1098,9 +1098,13 @@ def main():
         sys.exit(1)
 
     # Parse date and build UTC time range for market hours (9:30 - 16:00 ET)
+    # Uses pytz for DST-safe conversion (EDT: -4h, EST: -5h)
     trade_date = datetime.strptime(args.date, "%Y-%m-%d")
-    market_open = trade_date.replace(hour=13, minute=30, second=0, tzinfo=timezone.utc)
-    market_close = trade_date.replace(hour=20, minute=0, second=0, tzinfo=timezone.utc)
+    _ET = pytz.timezone('US/Eastern')
+    market_open_et = _ET.localize(trade_date.replace(hour=9, minute=30, second=0))
+    market_close_et = _ET.localize(trade_date.replace(hour=16, minute=0, second=0))
+    market_open = market_open_et.astimezone(timezone.utc)
+    market_close = market_close_et.astimezone(timezone.utc)
 
     symbol = args.symbol.upper()
 
