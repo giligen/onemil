@@ -421,6 +421,20 @@ class TradingEngine:
                 symbols_to_remove.append(symbol)
 
             else:
+                # Cancel pending orders in midday dead zone.
+                # If breakout didn't happen in the morning session,
+                # momentum has faded and a midday fill is likely a false breakout.
+                now_et = datetime.now(ET)
+                current_minutes = now_et.hour * 60 + now_et.minute
+                if 11 * 60 + 30 <= current_minutes < 14 * 60:
+                    logger.info(f"{symbol}: Cancelling pending buy-stop — midday dead zone")
+                    try:
+                        self.alpaca.cancel_order(order_id)
+                    except Exception as e:
+                        logger.error(f"{symbol}: Failed to cancel midday order: {e}")
+                    symbols_to_remove.append(symbol)
+                    continue
+
                 # Phase 5: Setup expiry — cancel stale buy-stops
                 placed_at = pending.get('placed_at')
                 if placed_at:
