@@ -276,6 +276,11 @@ class Config:
         return bool(self._get_yaml("trading", "enabled", default=False))
 
     @property
+    def capital(self) -> float:
+        """Trading capital allocation (reference value for scaling)."""
+        return float(self._get_yaml("trading", "capital", default=50000))
+
+    @property
     def position_size_dollars(self) -> float:
         """Dollar amount per position."""
         return float(self._get_yaml("trading", "position_size_dollars", default=500))
