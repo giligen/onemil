@@ -426,12 +426,12 @@ class TradingEngine:
                 symbols_to_remove.append(symbol)
 
             else:
-                # Cancel pending orders in midday dead zone.
-                # If breakout didn't happen in the morning session,
-                # momentum has faded and a midday fill is likely a false breakout.
+                # Cancel pending orders in deep midday (12:00-14:00 ET).
+                # 11:30-11:59 still has decent WR (38.9%) — only the lunch
+                # hour 12:00-13:59 (23% WR) is truly dead.
                 now_et = datetime.now(ET)
                 current_minutes = now_et.hour * 60 + now_et.minute
-                if 11 * 60 + 30 <= current_minutes < 14 * 60:
+                if 12 * 60 <= current_minutes < 14 * 60:
                     logger.info(f"{symbol}: Cancelling pending buy-stop — midday dead zone")
                     try:
                         self.alpaca.cancel_order(order_id)

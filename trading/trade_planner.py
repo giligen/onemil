@@ -181,7 +181,7 @@ class TradePlanner:
         reward_per_share = take_profit_price - entry_price
         risk_reward_ratio = reward_per_share / risk_per_share if risk_per_share > 0 else 0
 
-        if risk_reward_ratio < self.min_risk_reward:
+        if risk_reward_ratio < self.min_risk_reward - 0.01:  # tolerance for float precision
             logger.debug(
                 f"{pattern.symbol}: R:R {risk_reward_ratio:.1f} < {self.min_risk_reward}, rejecting"
             )

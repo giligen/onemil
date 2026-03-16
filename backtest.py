@@ -818,12 +818,12 @@ class BacktestRunner:
                 bar_low = bar['low']
                 bar_open = bar['open']
 
-                # Cancel pending orders in midday dead zone — Ross Cameron
-                # doesn't hold buy-stops through lunch. If breakout didn't
-                # happen in the morning, momentum has faded.
-                if self.skip_midday and self._is_midday(bar_time_et):
+                # Cancel pending orders in deep midday (12:00-14:00 ET).
+                # 11:30-11:59 still has decent WR (38.9%) — only the lunch
+                # hour 12:00-13:59 (23% WR) is truly dead.
+                if self.skip_midday and bar_time_et >= (12, 0) and bar_time_et < (14, 0):
                     logger.debug(
-                        f"  Bar {i}: buy-stop CANCELLED — entered midday dead zone"
+                        f"  Bar {i}: buy-stop CANCELLED — entered deep midday (12-14 ET)"
                     )
                     pending_order = None
 
@@ -835,20 +835,8 @@ class BacktestRunner:
                     )
                     pending_order = None
 
-                # Check expiry using wall clock, not bar index.
-                # Thin stocks can have 30+ minute gaps between bars,
-                # making bar-index expiry unreliable.
-                elif hasattr(bar['timestamp'], 'timestamp'):
-                    placed_ts = bars.iloc[pending_order.placed_at_bar_idx]['timestamp']
-                    elapsed_sec = (bar['timestamp'] - placed_ts).total_seconds()
-                    if elapsed_sec > self.setup_expiry_bars * 60:
-                        logger.debug(
-                            f"  Bar {i}: buy-stop EXPIRED after {elapsed_sec:.0f}s "
-                            f"(limit {self.setup_expiry_bars * 60}s)"
-                        )
-                        pending_order = None
+                # Check expiry
                 elif i - pending_order.placed_at_bar_idx > self.setup_expiry_bars:
-                    # Fallback for bars without proper timestamps
                     logger.debug(
                         f"  Bar {i}: buy-stop EXPIRED after {self.setup_expiry_bars} bars"
                     )
