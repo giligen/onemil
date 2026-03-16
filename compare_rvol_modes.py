@@ -2,10 +2,12 @@
 Compare rvol filtering approaches across the 15-month backtest.
 
 Runs three variants:
-1. no_rvol: No relative volume filter (what production scanner actually does
-   due to timezone mismatch bug in bucket rvol)
+1. no_rvol: No relative volume filter
 2. cumulative: Cumulative rvol at entry time (Ross Cameron's definition)
-3. bucket: Fixed bucket rvol using correct UTC-keyed volume profiles
+3. bucket: Bucket rvol using ET-keyed volume profiles (matching live scanner)
+
+NOTE: Volume profiles must be rebuilt with ET bucket keys before running.
+      See universe_builder._calculate_volume_profile() for the fix.
 
 Usage:
     python compare_rvol_modes.py
@@ -286,8 +288,8 @@ def main():
     print("RECOMMENDATION:")
     best = max(modes, key=lambda m: totals[m[0]]['sharpe'])
     print(f"  Best risk-adjusted: {best[0]} (Sharpe {totals[best[0]]['sharpe']:.2f})")
-    print(f"  Production scanner bug: rvol bucket keys are UTC but scanner uses ET hours")
-    print(f"  Fix the scanner OR switch to cumulative rvol — whichever backtests better")
+    print(f"  Bucket rvol timezone bug has been fixed — profiles and scanner both use ET keys now")
+    print(f"  Re-run after rebuilding volume profiles to compare correctly")
     print("=" * 90)
 
 

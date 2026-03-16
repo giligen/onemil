@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from typing import List, Dict, Optional
 
 import pandas as pd
+import pytz
 
 from data_sources.alpaca_client import AlpacaClient
 from data_sources.float_provider import FloatProvider
@@ -24,7 +25,10 @@ from persistence.database import Database
 
 logger = logging.getLogger(__name__)
 
-# Time buckets for volume profiles (09:30 to 15:45, 15-min intervals)
+ET = pytz.timezone('US/Eastern')
+
+# Time buckets for volume profiles — ET market hours (09:30 to 15:45, 15-min intervals).
+# All bucket keys throughout the system use ET hours, matching the scanner and TIME_BUCKETS.
 TIME_BUCKETS = [
     f"{h:02d}:{m:02d}"
     for h in range(9, 16)
@@ -277,9 +281,13 @@ class UniverseBuilder:
             logger.warning(f"{symbol}: no intraday data for volume profile")
             return []
 
-        # Extract time bucket from timestamp
+        # Convert UTC timestamps to ET before computing bucket keys.
+        # Alpaca returns UTC; bucket keys must be ET to match the scanner
+        # and TIME_BUCKETS (09:30-15:45 ET market hours).
         df['time_bucket'] = df['timestamp'].apply(
-            lambda ts: f"{ts.hour:02d}:{(ts.minute // 15) * 15:02d}"
+            lambda ts: (
+                lambda et: f"{et.hour:02d}:{(et.minute // 15) * 15:02d}"
+            )(ts.astimezone(ET) if ts.tzinfo is not None else ET.localize(ts))
         )
 
         # Filter to market hours only

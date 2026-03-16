@@ -201,20 +201,28 @@ class TestVolumeProfileCalculationAndStorage:
         # Seed universe so foreign-key-like expectations are met
         _seed_universe(db, [{'symbol': 'VTEST', 'price_close': 7.0, 'float_shares': 1_000_000}])
 
-        # Build realistic intraday data: 10 trading days, varying volume by bucket
+        # Build realistic intraday data: 10 trading days, varying volume by bucket.
+        # Timestamps are UTC; profile builder converts to ET for bucket keys.
+        # EDT: 09:30 ET = 13:30 UTC, 16:00 ET = 20:00 UTC
         records = []
         base_date = datetime(2026, 2, 20, tzinfo=timezone.utc)
         for day_offset in range(10):
             day = base_date + timedelta(days=day_offset)
             if day.weekday() >= 5:
                 continue
-            for h in range(9, 16):
+            for h in range(13, 20):  # 13:00-19:45 UTC covers 09:00-15:45 ET (EST)
                 for m in (0, 15, 30, 45):
-                    if (h == 9 and m < 30) or h >= 16:
+                    # Filter to market hours: 09:30-15:45 ET = 14:30-20:45 EST
+                    # Feb is EST (UTC-5): 09:30 ET = 14:30 UTC
+                    if (h == 14 and m < 30) or (h < 14):
+                        continue
+                    if h >= 20:
                         continue
                     ts = day.replace(hour=h, minute=m, second=0)
+                    # ET hour = UTC hour - 5 (EST in Feb)
+                    et_hour = h - 5
                     # Morning volume higher than afternoon
-                    volume = 50_000 if h < 12 else 20_000
+                    volume = 50_000 if et_hour < 12 else 20_000
                     records.append({
                         'timestamp': ts,
                         'open': 7.0, 'high': 7.2, 'low': 6.9,

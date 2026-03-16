@@ -730,13 +730,13 @@ class BacktestRunner:
             Bucket-based relative volume ratio
         """
         bar_ts = bars.iloc[bar_idx]['timestamp']
-        # Volume profiles are stored with UTC hour keys (from Alpaca SDK timestamps).
-        # Use UTC hours directly to match the profile bucket keys.
+        # Volume profiles are stored with ET hour keys (matching the live scanner).
+        # Convert UTC timestamps to ET before computing bucket keys.
+        ET = pytz.timezone('US/Eastern')
         if bar_ts.tzinfo is not None:
-            bar_utc = bar_ts.astimezone(pytz.utc)
+            bar_et = bar_ts.astimezone(ET)
         else:
-            bar_utc = bar_ts  # Assume already UTC
-        bar_et = bar_utc  # Use UTC for bucket key (profiles are UTC-keyed)
+            bar_et = pytz.utc.localize(bar_ts).astimezone(ET)
 
         bucket_minute = (bar_et.minute // 15) * 15
         bucket_key = f"{bar_et.hour:02d}:{bucket_minute:02d}"
@@ -747,9 +747,9 @@ class BacktestRunner:
         for j in range(max(0, bar_idx - 14), bar_idx + 1):
             j_ts = bars.iloc[j]['timestamp']
             if j_ts.tzinfo is not None:
-                j_et = j_ts.astimezone(pytz.utc)
+                j_et = j_ts.astimezone(ET)
             else:
-                j_et = j_ts  # Assume already UTC
+                j_et = pytz.utc.localize(j_ts).astimezone(ET)
 
             j_bucket_min = (j_et.minute // 15) * 15
             j_key = f"{j_et.hour:02d}:{j_bucket_min:02d}"

@@ -158,10 +158,10 @@ class TestCalculateVolumeProfile:
 
     def test_calculates_averages(self, builder, mock_alpaca):
         """Calculates average volume per 15-min bucket from intraday bars."""
-        # Create 2 days of data for the 09:30 bucket
+        # Create 2 days of data for the 09:30 ET bucket (= 13:30 UTC during EDT)
         timestamps = [
-            datetime(2026, 3, 11, 9, 30, tzinfo=timezone.utc),
-            datetime(2026, 3, 12, 9, 30, tzinfo=timezone.utc),
+            datetime(2026, 3, 11, 13, 30, tzinfo=timezone.utc),
+            datetime(2026, 3, 12, 13, 30, tzinfo=timezone.utc),
         ]
         df = pd.DataFrame({
             'timestamp': timestamps,
@@ -189,11 +189,11 @@ class TestCalculateVolumeProfile:
         assert result == []
 
     def test_filters_non_market_hours(self, builder, mock_alpaca):
-        """Filters out bars outside market hours (before 09:30 or after 15:45)."""
+        """Filters out bars outside market hours (before 09:30 ET or after 15:45 ET)."""
         timestamps = [
-            datetime(2026, 3, 11, 8, 0, tzinfo=timezone.utc),   # Pre-market
-            datetime(2026, 3, 11, 10, 0, tzinfo=timezone.utc),  # Market hours
-            datetime(2026, 3, 11, 16, 15, tzinfo=timezone.utc), # After hours
+            datetime(2026, 3, 11, 12, 0, tzinfo=timezone.utc),  # 8:00 ET = pre-market
+            datetime(2026, 3, 11, 14, 0, tzinfo=timezone.utc),  # 10:00 ET = market hours
+            datetime(2026, 3, 11, 20, 15, tzinfo=timezone.utc), # 16:15 ET = after hours
         ]
         df = pd.DataFrame({
             'timestamp': timestamps,
@@ -207,10 +207,70 @@ class TestCalculateVolumeProfile:
 
         result = builder._calculate_volume_profile("FILTERED")
 
-        # Only 10:00 bucket should remain
+        # Only 10:00 ET bucket should remain
         assert len(result) == 1
         assert result[0]['time_bucket'] == '10:00'
         assert result[0]['avg_volume'] == 5000
+
+    def test_utc_timestamps_produce_et_bucket_keys(self, builder, mock_alpaca):
+        """UTC timestamps are converted to ET before computing bucket keys.
+
+        14:00 UTC = 10:00 ET (during EDT). The bucket key must be '10:00',
+        NOT '14:00'. This is critical for scanner lookup which uses ET keys.
+        """
+        timestamps = [
+            datetime(2026, 3, 11, 14, 0, tzinfo=timezone.utc),   # 10:00 ET
+            datetime(2026, 3, 11, 17, 30, tzinfo=timezone.utc),  # 13:30 ET
+            datetime(2026, 3, 11, 19, 45, tzinfo=timezone.utc),  # 15:45 ET
+        ]
+        df = pd.DataFrame({
+            'timestamp': timestamps,
+            'open': [5.0, 5.1, 5.2],
+            'high': [5.2, 5.3, 5.4],
+            'low': [4.9, 5.0, 5.1],
+            'close': [5.1, 5.2, 5.3],
+            'volume': [10000, 20000, 30000],
+        })
+        mock_alpaca.get_intraday_bars.return_value = df
+
+        result = builder._calculate_volume_profile("TZ_TEST")
+        buckets = {r['time_bucket']: r['avg_volume'] for r in result}
+
+        assert '10:00' in buckets, "14:00 UTC should map to 10:00 ET bucket"
+        assert '13:30' in buckets, "17:30 UTC should map to 13:30 ET bucket"
+        assert '15:45' in buckets, "19:45 UTC should map to 15:45 ET bucket"
+        # UTC hour keys must NOT appear
+        assert '14:00' not in buckets, "UTC bucket key 14:00 must not be stored"
+        assert '17:30' not in buckets, "UTC bucket key 17:30 must not be stored"
+        assert '19:45' not in buckets, "UTC bucket key 19:45 must not be stored"
+
+    def test_full_market_day_coverage(self, builder, mock_alpaca):
+        """All 26 market-hours buckets (09:30-15:45 ET) are captured from UTC timestamps."""
+        # Generate one bar per 15-min bucket across market hours
+        # EDT: 09:30 ET = 13:30 UTC through 15:45 ET = 19:45 UTC
+        timestamps = []
+        for utc_hour in range(13, 20):
+            for minute in (0, 15, 30, 45):
+                timestamps.append(datetime(2026, 3, 11, utc_hour, minute, tzinfo=timezone.utc))
+
+        df = pd.DataFrame({
+            'timestamp': timestamps,
+            'open': [5.0] * len(timestamps),
+            'high': [5.2] * len(timestamps),
+            'low': [4.9] * len(timestamps),
+            'close': [5.1] * len(timestamps),
+            'volume': [10000] * len(timestamps),
+        })
+        mock_alpaca.get_intraday_bars.return_value = df
+
+        result = builder._calculate_volume_profile("FULL_DAY")
+        buckets = sorted(r['time_bucket'] for r in result)
+
+        # Should have exactly the 26 ET market-hours buckets
+        from batch.universe_builder import TIME_BUCKETS
+        assert buckets == TIME_BUCKETS, (
+            f"Expected {len(TIME_BUCKETS)} ET buckets, got {len(buckets)}: {buckets}"
+        )
 
 
 # =============================================================================
