@@ -140,7 +140,7 @@ class TradeSimulator:
         partial_profit_enabled: bool = False,
         partial_profit_r_multiple: float = 1.0,
         partial_profit_fraction: float = 0.5,
-        exit_slippage: float = 0.0,
+        exit_slippage_pct: float = 0.0,
     ):
         """
         Initialize TradeSimulator.
@@ -154,15 +154,15 @@ class TradeSimulator:
                 (default 1.0 = +1R).
             partial_profit_fraction: Fraction of shares to sell at partial
                 target (default 0.5 = half).
-            exit_slippage: Slippage in $/share subtracted from stop-loss fills.
-                Simulates selling into the bid on a stop trigger. Not applied
-                to limit (take-profit) or EOD exits. Default 0.0 (no slippage).
+            exit_slippage_pct: Slippage as fraction of stop price, subtracted
+                from stop-loss fills. E.g., 0.001 = 0.1%. Not applied to
+                limit (take-profit) or EOD exits. Default 0.0 (no slippage).
         """
         self.force_close_time_et = force_close_time_et
         self.partial_profit_enabled = partial_profit_enabled
         self.partial_profit_r_multiple = partial_profit_r_multiple
         self.partial_profit_fraction = partial_profit_fraction
-        self.exit_slippage = exit_slippage
+        self.exit_slippage_pct = exit_slippage_pct
 
     def simulate(
         self,
@@ -229,7 +229,7 @@ class TradeSimulator:
 
             if hit_stop and hit_target:
                 # Same-bar ambiguity: conservative = assume stop hit first
-                stop_fill = trade.stop_loss - self.exit_slippage
+                stop_fill = trade.stop_loss * (1 - self.exit_slippage_pct)
                 self._exit_trade(trade, bar, 'stop', stop_fill)
                 logger.debug(
                     f"  Bar {i}: ambiguous (stop & target) → stopped out "
@@ -238,7 +238,7 @@ class TradeSimulator:
                 return trade
 
             if hit_stop:
-                stop_fill = trade.stop_loss - self.exit_slippage
+                stop_fill = trade.stop_loss * (1 - self.exit_slippage_pct)
                 self._exit_trade(trade, bar, 'stop', stop_fill)
                 logger.debug(f"  Bar {i}: stopped out at ${stop_fill:.2f}")
                 return trade
@@ -320,7 +320,7 @@ class TradeSimulator:
                         reason = 'partial+stop'
                 else:
                     reason = 'stop'
-                stop_fill = current_stop - self.exit_slippage
+                stop_fill = current_stop * (1 - self.exit_slippage_pct)
                 self._exit_trade(
                     trade, bar, reason, stop_fill, active_shares=active_shares
                 )
@@ -329,7 +329,7 @@ class TradeSimulator:
 
             # On same-bar stop+partial ambiguity: conservative = stop wins
             if hit_stop and hit_partial:
-                stop_fill = current_stop - self.exit_slippage
+                stop_fill = current_stop * (1 - self.exit_slippage_pct)
                 self._exit_trade(
                     trade, bar, 'stop', stop_fill, active_shares=active_shares
                 )
@@ -529,20 +529,23 @@ class BacktestRunner:
         self.last_entry_time_et = last_entry_time_et
         self.setup_expiry_bars = setup_expiry_bars
 
-        # Slippage model: load from config if not explicitly provided
+        # Slippage model: percentage-based (of stock price).
+        # Entry: buy-stop fills at price * (1 + pct) — lifting the ask.
+        # Exit: stop-market fills at price * (1 - pct) — selling into bid.
+        # Percentage scales naturally with stock price ($0.005 on $5, $0.02 on $20).
         trading_cfg = cfg.get("trading", {})
-        self.entry_slippage = entry_slippage if entry_slippage is not None else float(
-            trading_cfg.get("entry_slippage", 0.0)
+        self.entry_slippage_pct = entry_slippage if entry_slippage is not None else float(
+            trading_cfg.get("entry_slippage_pct", 0.0)
         )
-        resolved_exit_slippage = exit_slippage if exit_slippage is not None else float(
-            trading_cfg.get("exit_slippage", 0.0)
+        resolved_exit_slippage_pct = exit_slippage if exit_slippage is not None else float(
+            trading_cfg.get("exit_slippage_pct", 0.0)
         )
-        self.exit_slippage = resolved_exit_slippage
+        self.exit_slippage_pct = resolved_exit_slippage_pct
 
-        if self.entry_slippage > 0 or resolved_exit_slippage > 0:
+        if self.entry_slippage_pct > 0 or resolved_exit_slippage_pct > 0:
             logger.info(
-                f"Slippage model: entry +${self.entry_slippage:.3f}/sh, "
-                f"exit -${resolved_exit_slippage:.3f}/sh (stop only)"
+                f"Slippage model: entry +{self.entry_slippage_pct:.2%}, "
+                f"exit -{resolved_exit_slippage_pct:.2%} (stop only)"
             )
 
         # In realistic mode, default force_close to 15:45 ET
@@ -562,7 +565,7 @@ class BacktestRunner:
                 partial_profit_enabled=partial_profit_enabled,
                 partial_profit_r_multiple=partial_profit_r_multiple,
                 partial_profit_fraction=partial_profit_fraction,
-                exit_slippage=resolved_exit_slippage,
+                exit_slippage_pct=resolved_exit_slippage_pct,
             )
 
     _ET = pytz.timezone('US/Eastern')
@@ -848,8 +851,9 @@ class BacktestRunner:
                                 pending_order = None
                                 continue
 
-                    # Fill at max(bar_open, breakout_level) + entry_slippage
-                    fill_price = max(bar_open, pending_order.breakout_level) + self.entry_slippage
+                    # Fill at max(bar_open, breakout_level) * (1 + entry_slippage_pct)
+                    raw_fill = max(bar_open, pending_order.breakout_level)
+                    fill_price = raw_fill * (1 + self.entry_slippage_pct)
                     plan = pending_order.plan
                     entry_gap = fill_price - pending_order.breakout_level
 

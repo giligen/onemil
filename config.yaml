@@ -90,9 +90,9 @@ trading:
     sma_period: 50             # SPY below SMA(50) — downtrend signal
     min_spy_volume_ratio: 0.70 # SPY T-1 volume / SMA20 — thin liquidity threshold
     thin_liquidity_breakout_vol_ratio: 2.0  # Stricter breakout vol ratio on thin days
-  # Slippage model (cents per share, applied in backtest)
-  entry_slippage: 0.03       # added to buy-stop fill price (lifting the ask)
-  exit_slippage: 0.02        # subtracted from stop-loss fill (selling into bid)
+  # Slippage model (percentage of price, applied in backtest)
+  entry_slippage_pct: 0.001  # 0.10% — added to buy-stop fill price (lifting the ask)
+  exit_slippage_pct: 0.001   # 0.10% — subtracted from stop-loss fill (selling into bid)
   bull_flag:
     min_pole_candles: 3
     min_pole_gain_pct: 3.0
