@@ -539,8 +539,8 @@ class TestGapFillStopAdjustment:
 
         return plan, setup
 
-    def test_gap_fill_adjusts_stop_and_target(self, engine, mock_alpaca, db):
-        """Fill above breakout triggers stop and target replacement."""
+    def test_gap_fill_adjusts_target_keeps_stop(self, engine, mock_alpaca, db):
+        """Fill above breakout adjusts target UP but keeps stop at technical level."""
         plan, setup = self._setup_filled_order(engine, mock_alpaca, db, fill_price=4.55)
 
         # First get_order call returns filled status
@@ -560,22 +560,20 @@ class TestGapFillStopAdjustment:
                 ],
             },
         ]
-        mock_alpaca.replace_order_stop_price.return_value = {'id': 'sl-leg-1', 'status': 'replaced'}
         mock_alpaca.replace_order_limit_price.return_value = {'id': 'tp-leg-1', 'status': 'replaced'}
 
         engine._manage_pending_orders()
 
-        # Verify stop replacement
-        expected_stop = round(4.55 - plan.risk_per_share, 2)
-        mock_alpaca.replace_order_stop_price.assert_called_once_with('sl-leg-1', expected_stop)
+        # Stop NOT replaced — stays at technical level
+        mock_alpaca.replace_order_stop_price.assert_not_called()
 
-        # Verify target replacement
+        # Target adjusted up
         expected_target = round(4.55 + plan.risk_per_share * plan.risk_reward_ratio, 2)
         mock_alpaca.replace_order_limit_price.assert_called_once_with('tp-leg-1', expected_target)
 
-        # Verify DB was updated with both
+        # DB: stop unchanged, only target updated
         trade = db.get_trade_by_order_id('order-gap')
-        assert trade['stop_loss_price'] == expected_stop
+        assert trade['stop_loss_price'] == plan.stop_loss_price  # original
         assert trade['take_profit_price'] == expected_target
 
     def test_no_gap_no_stop_adjustment(self, engine, mock_alpaca, db):

@@ -334,18 +334,21 @@ class TradingEngine:
                         }
                         continue
 
-                # Phase 3: Gap-fill stop + target adjustment
-                # If stop replacement fails, risk is unbounded (e.g. $0.51/sh
-                # instead of planned $0.11/sh on a $0.40 gap). Must close position.
+                # Phase 3: Gap-fill TARGET adjustment only.
+                # Stop stays at the original technical level (flag low region).
+                # Moving stop above the technical level puts it in no-man's land
+                # where normal price noise triggers it. Dollar risk increases
+                # but the stop is at a price that has structural meaning.
                 setup = pending.get('setup')
                 if fill_price and plan and setup and fill_price > setup.breakout_level:
                     entry_gap = fill_price - setup.breakout_level
-                    adjusted_stop = round(fill_price - plan.risk_per_share, 2)
+                    actual_risk = round(fill_price - plan.stop_loss_price, 2)
                     adjusted_target = round(fill_price + plan.risk_per_share * plan.risk_reward_ratio, 2)
                     logger.info(
                         f"{symbol}: Gap fill +${entry_gap:.2f} — "
-                        f"stop ${plan.stop_loss_price:.2f} → ${adjusted_stop:.2f}, "
-                        f"target ${plan.take_profit_price:.2f} → ${adjusted_target:.2f}"
+                        f"stop KEPT at ${plan.stop_loss_price:.2f} (technical level), "
+                        f"target ${plan.take_profit_price:.2f} → ${adjusted_target:.2f}, "
+                        f"risk ${plan.risk_per_share:.2f} → ${actual_risk:.2f}/sh"
                     )
                     gap_adjust_failed = False
                     try:
@@ -356,37 +359,28 @@ class TradingEngine:
                             expected_tp=plan.take_profit_price,
                         )
 
-                        # Stop leg is CRITICAL — wrong stop = unbounded risk
-                        if sl_leg:
-                            self.alpaca.replace_order_stop_price(sl_leg['id'], adjusted_stop)
-                            logger.info(f"{symbol}: Stop adjusted to ${adjusted_stop:.2f}")
+                        # Stop stays at original — no replacement needed
+                        # Only adjust target upward
+                        if tp_leg:
+                            self.alpaca.replace_order_limit_price(tp_leg['id'], adjusted_target)
+                            logger.info(f"{symbol}: Target adjusted to ${adjusted_target:.2f}")
                         else:
-                            logger.error(f"{symbol}: No SL leg found — cannot set correct stop")
+                            logger.error(f"{symbol}: No TP leg found — cannot adjust target")
                             gap_adjust_failed = True
-
-                        if not gap_adjust_failed:
-                            if tp_leg:
-                                self.alpaca.replace_order_limit_price(tp_leg['id'], adjusted_target)
-                                logger.info(f"{symbol}: Target adjusted to ${adjusted_target:.2f}")
-                            else:
-                                logger.error(f"{symbol}: No TP leg found — cannot set correct target")
-                                gap_adjust_failed = True
 
                         if not gap_adjust_failed and trade_record:
                             self.db.update_trade(trade_record['id'], {
-                                'stop_loss_price': adjusted_stop,
                                 'take_profit_price': adjusted_target,
                             })
                     except Exception as e:
-                        logger.error(f"{symbol}: Failed to adjust orders after gap fill: {e}")
+                        logger.error(f"{symbol}: Failed to adjust target after gap fill: {e}")
                         gap_adjust_failed = True
 
                     if gap_adjust_failed:
                         error_msg = (
-                            f"{symbol}: GAP FILL ADJUSTMENT FAILED — "
-                            f"entry gap +${entry_gap:.2f}, risk would be "
-                            f"${fill_price - plan.stop_loss_price:.2f}/sh instead of "
-                            f"${plan.risk_per_share:.2f}/sh. Closing position."
+                            f"{symbol}: GAP FILL TARGET ADJUSTMENT FAILED — "
+                            f"entry gap +${entry_gap:.2f}, actual risk "
+                            f"${actual_risk:.2f}/sh. Target not updated."
                         )
                         logger.error(error_msg)
                         if self.notifier:

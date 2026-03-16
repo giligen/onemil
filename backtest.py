@@ -869,29 +869,30 @@ class BacktestRunner:
                             pending_order = None
                             continue
 
-                    # Adjust stop loss for entry gap: maintain planned risk_per_share
-                    # so dollar risk stays at the budgeted amount.
-                    # Without this, a $0.78 gap on a $0.34 planned risk turns
-                    # a $2K risk trade into a $6.6K risk trade.
+                    # Gap-fill adjustment: keep stop at TECHNICAL level (flag low),
+                    # only shift target up by entry gap. The original stop is where
+                    # the pattern actually fails — moving it above that level puts
+                    # the stop in no-man's land where normal price noise triggers it.
+                    # Dollar risk increases but the stop is meaningful.
                     if entry_gap > 0:
-                        adjusted_stop = fill_price - plan.risk_per_share
                         adjusted_target = fill_price + plan.risk_per_share * plan.risk_reward_ratio
+                        actual_risk = fill_price - plan.stop_loss_price
                         logger.info(
                             f"  Entry gap +${entry_gap:.2f}: "
-                            f"stop ${plan.stop_loss_price:.2f} → ${adjusted_stop:.2f}, "
-                            f"target ${plan.take_profit_price:.2f} → ${adjusted_target:.2f} "
-                            f"(maintain ${plan.risk_per_share:.2f}/sh risk)"
+                            f"stop KEPT at ${plan.stop_loss_price:.2f} (technical level), "
+                            f"target ${plan.take_profit_price:.2f} → ${adjusted_target:.2f}, "
+                            f"risk ${plan.risk_per_share:.2f} → ${actual_risk:.2f}/sh"
                         )
                         plan = TradePlan(
                             symbol=plan.symbol,
                             entry_price=plan.entry_price,
-                            stop_loss_price=adjusted_stop,
+                            stop_loss_price=plan.stop_loss_price,  # UNCHANGED — technical level
                             take_profit_price=adjusted_target,
-                            risk_per_share=plan.risk_per_share,
-                            reward_per_share=plan.reward_per_share,
+                            risk_per_share=actual_risk,
+                            reward_per_share=adjusted_target - fill_price,
                             risk_reward_ratio=plan.risk_reward_ratio,
                             shares=plan.shares,
-                            total_risk=plan.total_risk,
+                            total_risk=actual_risk * plan.shares,
                             pattern=plan.pattern,
                         )
 
