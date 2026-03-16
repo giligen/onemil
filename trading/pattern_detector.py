@@ -73,6 +73,7 @@ class BullFlagDetector:
         macd_fast: int = 12,
         macd_slow: int = 26,
         macd_signal: int = 9,
+        max_green_in_flag: int = 1,
     ):
         """
         Initialize BullFlagDetector with configurable thresholds.
@@ -87,6 +88,7 @@ class BullFlagDetector:
             macd_fast: MACD fast EMA period (default 12)
             macd_slow: MACD slow EMA period (default 26)
             macd_signal: MACD signal EMA period (default 9)
+            max_green_in_flag: Max green candles tolerated inside pullback (default 1)
         """
         self.min_pole_candles = min_pole_candles
         self.min_pole_gain_pct = min_pole_gain_pct
@@ -97,6 +99,7 @@ class BullFlagDetector:
         self.macd_fast = macd_fast
         self.macd_slow = macd_slow
         self.macd_signal = macd_signal
+        self.max_green_in_flag = max_green_in_flag
 
     @classmethod
     def from_config(cls) -> 'BullFlagDetector':
@@ -111,6 +114,7 @@ class BullFlagDetector:
                 max_pullback_candles=int(cfg.get("trading", {}).get("bull_flag", {}).get("max_pullback_candles", 5)),
                 min_breakout_volume_ratio=float(cfg.get("trading", {}).get("bull_flag", {}).get("min_breakout_volume_ratio", 1.5)),
                 require_macd_positive=bool(cfg.get("trading", {}).get("bull_flag", {}).get("require_macd_positive", False)),
+                max_green_in_flag=int(cfg.get("trading", {}).get("bull_flag", {}).get("max_green_in_flag", 1)),
             )
         except Exception as e:
             logger.warning(f"Failed to load config.yaml, using defaults: {e}")
@@ -192,7 +196,7 @@ class BullFlagDetector:
         # Calculate pullback metrics using vectorized operations
         flag_slice = completed.iloc[flag_start_idx:flag_end_idx + 1]
         flag_low = flag_slice['low'].min()
-        flag_high = completed.iloc[flag_end_idx]['high']
+        flag_high = flag_slice['high'].max()
 
         if pole_height <= 0:
             logger.debug(f"{symbol}: Zero pole height")
@@ -435,6 +439,8 @@ class BullFlagDetector:
 
         A red candle is one where close < open.
         Doji candles (close == open) are treated as neutral and included in pullback.
+        Up to max_green_in_flag small green candles are tolerated within the
+        pullback (common "inside bar" bounces during consolidation).
 
         Uses numpy arrays for fast comparison instead of per-row iloc access.
 
@@ -450,6 +456,7 @@ class BullFlagDetector:
 
         flag_end_idx = None
         flag_start_idx = None
+        green_count = 0
 
         i = end_idx
         while i >= 0:
@@ -461,9 +468,14 @@ class BullFlagDetector:
                     flag_end_idx = i
                 flag_start_idx = i
             else:
-                # Green candle — end of pullback
+                # Green candle
                 if flag_end_idx is not None:
-                    break
+                    # Already in pullback — allow limited green bars inside
+                    if green_count < self.max_green_in_flag:
+                        green_count += 1
+                        flag_start_idx = i  # Include this green in the flag
+                    else:
+                        break  # Too many green candles, pullback ends
                 else:
                     # No red candle found yet, this isn't a pullback
                     return None
@@ -471,6 +483,14 @@ class BullFlagDetector:
 
         if flag_end_idx is None or flag_start_idx is None:
             return None
+
+        # A green candle at the pole-side boundary of the pullback is ambiguous —
+        # it could be the last pole candle rather than an inside bar. Only keep
+        # green bars that are sandwiched between reds (truly inside the flag).
+        opens_arr = bars['open'].values
+        closes_arr = bars['close'].values
+        while flag_start_idx < flag_end_idx and closes_arr[flag_start_idx] > opens_arr[flag_start_idx]:
+            flag_start_idx += 1
 
         return (flag_start_idx, flag_end_idx)
 

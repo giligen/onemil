@@ -630,6 +630,22 @@ class AlpacaClient:
         """
         try:
             start = datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes + 5)
+
+            # Clamp to today's market open (09:30 ET) to exclude premarket bars.
+            # Premarket candles have unreliable volume and price levels that
+            # contaminate pattern detection, especially in the first 10 minutes.
+            import pytz
+            et_tz = pytz.timezone('US/Eastern')
+            now_utc = datetime.now(timezone.utc)
+            market_open_et = now_utc.astimezone(et_tz).replace(
+                hour=9, minute=30, second=0, microsecond=0)
+            market_open_utc = market_open_et.astimezone(timezone.utc)
+            if start < market_open_utc:
+                start = market_open_utc
+                logger.debug(
+                    f"Clamped 1-min bar start to market open {market_open_utc.isoformat()}"
+                )
+
             request = StockBarsRequest(
                 symbol_or_symbols=symbol,
                 timeframe=TimeFrame(1, TimeFrameUnit.Minute),

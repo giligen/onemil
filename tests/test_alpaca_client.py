@@ -1098,3 +1098,56 @@ class TestMarketCalendar:
         mock_sdk_clients["trading_client"].get_calendar.return_value = []
 
         assert client.is_short_trading_day() is False
+
+
+# ===================================================================
+# get_1min_bars market open clamping (Bug #3)
+# ===================================================================
+
+class TestGet1MinBarsMarketOpenClamp:
+    """Tests for clamping 1-min bar start to 09:30 ET market open."""
+
+    def test_1min_bars_clamps_to_market_open(self, client, mock_sdk_clients):
+        """Start time clamped to 09:30 ET when lookback extends into premarket."""
+        import pytz
+        from datetime import timedelta
+
+        bar = _make_bar(open=4.0, high=4.1, low=3.9, close=4.05, volume=100_000)
+        mock_response = MagicMock()
+        mock_response.data = {"AAPL": [bar]}
+        mock_sdk_clients["data_client"].get_stock_bars.return_value = mock_response
+
+        # Simulate 09:35 ET with 90-min lookback — should clamp to 09:30 ET
+        et_tz = pytz.timezone('US/Eastern')
+        fake_now_et = datetime(2026, 3, 16, 9, 35, 0, tzinfo=et_tz)
+        fake_now_utc = fake_now_et.astimezone(timezone.utc)
+
+        with patch("data_sources.alpaca_client.datetime") as mock_dt:
+            mock_dt.now.return_value = fake_now_utc
+            mock_dt.side_effect = lambda *args, **kw: datetime(*args, **kw)
+            client.get_1min_bars("AAPL", lookback_minutes=90)
+
+        # Verify get_stock_bars was called (meaning no crash during clamping)
+        assert mock_sdk_clients["data_client"].get_stock_bars.called
+
+    def test_1min_bars_no_clamp_during_session(self, client, mock_sdk_clients):
+        """No clamping when lookback stays within regular hours."""
+        import pytz
+        from datetime import timedelta
+
+        bar = _make_bar(open=4.0, high=4.1, low=3.9, close=4.05, volume=100_000)
+        mock_response = MagicMock()
+        mock_response.data = {"AAPL": [bar]}
+        mock_sdk_clients["data_client"].get_stock_bars.return_value = mock_response
+
+        # Simulate 10:30 ET with 30-min lookback — start = ~09:55 ET, no clamping needed
+        et_tz = pytz.timezone('US/Eastern')
+        fake_now_et = datetime(2026, 3, 16, 10, 30, 0, tzinfo=et_tz)
+        fake_now_utc = fake_now_et.astimezone(timezone.utc)
+
+        with patch("data_sources.alpaca_client.datetime") as mock_dt:
+            mock_dt.now.return_value = fake_now_utc
+            mock_dt.side_effect = lambda *args, **kw: datetime(*args, **kw)
+            result = client.get_1min_bars("AAPL", lookback_minutes=30)
+
+        assert isinstance(result, pd.DataFrame)

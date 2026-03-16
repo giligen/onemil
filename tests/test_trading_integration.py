@@ -1101,8 +1101,267 @@ class TestStartupSyncIntegration:
 
         engine.reset_daily()
 
-        # Pending order should be recovered
+        # Pending order should be recovered with reconstructed plan
         assert 'TSLA' in engine._pending_orders
         assert engine._pending_orders['TSLA']['order_id'] == 'ord-pending'
+        assert engine._pending_orders['TSLA']['plan'] is not None
+        assert engine._pending_orders['TSLA']['plan'].shares == 200
+        assert engine._pending_orders['TSLA']['plan'].entry_price == 15.0
         # Not counted as filled
         assert engine._daily_trade_count == 0
+
+
+# ===========================================================================
+# Bug #1 + #2: Crash Recovery Integration
+# ===========================================================================
+
+@pytest.mark.integration
+class TestCrashRecoveryIntegration:
+    """Full crash recovery cycle: save → crash → reset → fill → DB correct."""
+
+    @patch('trading.trading_engine.time_mod.sleep')
+    def test_full_crash_recovery_cycle(self, mock_sleep, db, mock_alpaca):
+        """Save trade → crash (clear in-memory) → reset → pending fills → DB updated."""
+        import json
+
+        detector = BullFlagDetector()
+        planner = TradePlanner()
+        executor = OrderExecutor(mock_alpaca, db)
+        pm = PositionManager(mock_alpaca, db)
+
+        engine = TradingEngine(
+            alpaca_client=mock_alpaca, db=db, detector=detector,
+            planner=planner, executor=executor, position_manager=pm,
+            enabled=True,
+        )
+
+        today = date.today().isoformat()
+        pattern_data = json.dumps({
+            'breakout_level': 10.0, 'flag_low': 9.5,
+            'avg_flag_volume': 50000,
+            'pole_start_idx': 0, 'pole_end_idx': 2,
+            'flag_start_idx': 3, 'flag_end_idx': 4,
+        })
+        db.save_trade(_make_trade_record(
+            trade_date=today, symbol='CRASH', entry_price=10.0,
+            stop_loss_price=9.5, take_profit_price=11.0, shares=100,
+            risk_per_share=0.5, risk_reward_ratio=2.0,
+            order_id='ord-crash', order_status='accepted',
+            pattern_data=pattern_data,
+        ))
+
+        # Simulate crash: clear all in-memory state
+        mock_alpaca.get_daily_bars_range.return_value = {}
+        engine.reset_daily()
+
+        # Verify recovery
+        assert 'CRASH' in engine._pending_orders
+        pending = engine._pending_orders['CRASH']
+        assert pending['plan'] is not None
+        assert pending['plan'].shares == 100
+        assert pending['setup'] is not None
+        assert pending['setup'].breakout_level == 10.0
+
+        # Now simulate the order filling
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled', 'filled_avg_price': 10.05, 'filled_qty': 100,
+            'legs': [],
+        }
+
+        result = engine._manage_pending_orders()
+
+        # Verify DB updated correctly
+        assert 'CRASH' in engine._traded_symbols
+        trade = db.get_trade_by_order_id('ord-crash')
+        assert trade['fill_price'] == pytest.approx(10.05, abs=0.01)
+        assert trade['order_status'] == 'filled'
+        assert trade['filled_qty'] == 100
+
+    @patch('trading.trading_engine.time_mod.sleep')
+    def test_force_close_after_sl_exit(self, mock_sleep, db, mock_alpaca):
+        """SL fills → force_close_all → SL exit recorded with correct reason."""
+        detector = BullFlagDetector()
+        planner = TradePlanner()
+        executor = OrderExecutor(mock_alpaca, db)
+        pm = PositionManager(mock_alpaca, db)
+
+        engine = TradingEngine(
+            alpaca_client=mock_alpaca, db=db, detector=detector,
+            planner=planner, executor=executor, position_manager=pm,
+            enabled=True,
+        )
+
+        today = date.today().isoformat()
+        db.save_trade(_make_trade_record(
+            trade_date=today, symbol='SLFC', entry_price=10.0,
+            stop_loss_price=9.5, take_profit_price=11.0, shares=100,
+            risk_per_share=0.5, risk_reward_ratio=2.0,
+            order_id='ord-slfc', order_status='filled', fill_price=10.0,
+        ))
+
+        # SL was hit — Alpaca shows no open position
+        mock_alpaca.get_open_positions.return_value = []
+        # Bracket order shows SL leg filled
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled', 'filled_avg_price': 10.0, 'filled_qty': 100,
+            'legs': [
+                {'side': 'sell', 'stop_price': 9.5, 'limit_price': None,
+                 'status': 'filled', 'filled_avg_price': 9.50},
+                {'side': 'sell', 'stop_price': None, 'limit_price': 11.0,
+                 'status': 'canceled', 'filled_avg_price': None},
+            ],
+        }
+
+        # Force close — should sync first, detect SL exit, then find nothing to close
+        engine._force_close_all()
+
+        trade = db.get_trade_by_order_id('ord-slfc')
+        assert trade['exit_reason'] == 'stop_loss'
+        assert trade['exit_price'] == pytest.approx(9.50, abs=0.01)
+
+    @patch('trading.trading_engine.time_mod.sleep')
+    def test_late_fill_before_force_close_has_pnl(self, mock_sleep, db, mock_alpaca):
+        """Pending order fills at 15:44, force-close at 15:45 — P&L computed correctly."""
+        detector = BullFlagDetector()
+        planner = TradePlanner()
+        executor = OrderExecutor(mock_alpaca, db)
+        pm = PositionManager(mock_alpaca, db)
+
+        engine = TradingEngine(
+            alpaca_client=mock_alpaca, db=db, detector=detector,
+            planner=planner, executor=executor, position_manager=pm,
+            enabled=True,
+        )
+
+        today = date.today().isoformat()
+        pattern_data = json.dumps({'breakout_level': 5.0, 'flag_low': 4.5})
+        db.save_trade(_make_trade_record(
+            trade_date=today, symbol='LATE', entry_price=5.0,
+            stop_loss_price=4.50, take_profit_price=6.0, shares=200,
+            risk_per_share=0.50, risk_reward_ratio=2.0,
+            order_id='ord-late', order_status='accepted',
+            pattern_data=pattern_data,
+        ))
+
+        # Simulate crash recovery to rebuild pending orders
+        mock_alpaca.get_daily_bars_range.return_value = {}
+        mock_alpaca.get_open_positions.return_value = []
+        engine.reset_daily()
+
+        assert 'LATE' in engine._pending_orders
+
+        # Now the order fills at breakout_level (no gap → no gap-fill adjustment)
+        call_count = [0]
+        def get_order_side_effect(order_id):
+            call_count[0] += 1
+            if order_id == 'ord-late':
+                return {
+                    'status': 'filled', 'filled_avg_price': 5.00,
+                    'filled_qty': 200, 'legs': [],
+                }
+            # For close order polling
+            return {'status': 'filled', 'filled_avg_price': 5.20}
+
+        mock_alpaca.get_order.side_effect = get_order_side_effect
+
+        # Alpaca shows the position after fill
+        mock_alpaca.get_open_positions.return_value = [
+            {'symbol': 'LATE', 'qty': 200, 'avg_entry_price': 5.00,
+             'market_value': 1000.0},
+        ]
+        mock_alpaca.close_position.return_value = {'id': 'close-late'}
+        mock_alpaca.cancel_order.side_effect = Exception("order already filled")
+
+        # Force close — should process fill FIRST, then close
+        engine._force_close_all()
+
+        trade = db.get_trade_by_order_id('ord-late')
+        # fill_price must be set (from _manage_pending_orders)
+        assert trade['fill_price'] == pytest.approx(5.00, abs=0.01)
+        # P&L must be computed (force_close used fill_price)
+        assert trade['exit_reason'] == 'force_close'
+        assert trade['pnl'] is not None
+
+
+@pytest.mark.integration
+class TestOrphanPositionIntegration:
+    """Integration test: orphan positions from prior days are detected and closed."""
+
+    @patch('trading.trading_engine.time_mod.sleep')
+    def test_orphan_detected_on_startup(self, mock_sleep, db, mock_alpaca):
+        """Orphan position from prior day is auto-closed on startup."""
+        detector = BullFlagDetector()
+        planner = TradePlanner()
+        executor = OrderExecutor(mock_alpaca, db)
+        pm = PositionManager(mock_alpaca, db)
+
+        engine = TradingEngine(
+            alpaca_client=mock_alpaca, db=db, detector=detector,
+            planner=planner, executor=executor, position_manager=pm,
+            enabled=True,
+        )
+
+        # No trades today in DB
+        mock_alpaca.get_daily_bars_range.return_value = {}
+        # But Alpaca has a position from yesterday
+        mock_alpaca.get_open_positions.return_value = [
+            {'symbol': 'YEST', 'qty': 100, 'avg_entry_price': 8.00,
+             'market_value': 780.0},
+        ]
+        mock_alpaca.close_position.return_value = {'id': 'close-yest'}
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled', 'filled_avg_price': 7.80,
+        }
+
+        engine.reset_daily()
+
+        # Orphan closed
+        mock_alpaca.close_position.assert_called_once_with('YEST')
+        # Marked traded to prevent re-entry
+        assert 'YEST' in engine._traded_symbols
+        assert engine._daily_trade_count == 0  # Orphan is not counted as today's trade
+
+
+class TestFlagHighMaxFlowThrough:
+    """Integration: max flag high flows through detector → planner → entry_price."""
+
+    def test_flag_high_max_flows_through_to_entry_price(self, db, mock_alpaca):
+        """pattern.breakout_level (max flag high) → plan.entry_price."""
+        detector = BullFlagDetector()
+        planner = TradePlanner()
+
+        # Build bars where flag bar highs are descending: 4.55, 4.45, 4.42
+        # Max flag high = 4.55
+        base_time = datetime.now(timezone.utc) - timedelta(minutes=10)
+        candles = [
+            # Pole: 3 green candles, ~10% gain
+            (4.00, 4.15, 3.98, 4.13, 200000),
+            (4.13, 4.30, 4.11, 4.28, 180000),
+            (4.28, 4.52, 4.26, 4.50, 160000),
+            # Flag: descending highs — first bar has highest high
+            (4.50, 4.55, 4.38, 4.40, 50000),
+            (4.40, 4.45, 4.33, 4.35, 30000),
+            (4.35, 4.42, 4.32, 4.34, 25000),
+            # Current bar (dropped by detect_setup)
+            (4.34, 4.38, 4.32, 4.33, 20000),
+        ]
+        records = []
+        for i, (o, h, l, c, v) in enumerate(candles):
+            records.append({
+                'timestamp': base_time + timedelta(minutes=i),
+                'open': float(o), 'high': float(h),
+                'low': float(l), 'close': float(c),
+                'volume': int(v),
+            })
+        bars = pd.DataFrame(records)
+
+        # Detect setup
+        setup = detector.detect_setup("TEST", bars)
+        assert setup is not None
+        assert setup.flag_high == 4.55  # Max of all flag bar highs
+        assert setup.breakout_level == 4.55
+
+        # Create trade plan
+        plan = planner.create_plan(setup)
+        assert plan is not None
+        assert plan.entry_price == 4.55  # Flows through from breakout_level

@@ -1225,3 +1225,171 @@ class TestMACDFilter:
         setup = detector.detect_setup("TEST", bars)
         if setup is not None:
             assert setup.macd_histogram_value is None
+
+
+# ---------------------------------------------------------------------------
+# Bug #1: flag_high uses max of all flag bar highs
+# ---------------------------------------------------------------------------
+
+class TestFlagHighUsesMax:
+    """Verify flag_high = max(all flag bar highs), not just last bar's high."""
+
+    def test_flag_high_uses_max_not_last_bar(self):
+        """flag_high should be the max high across ALL flag bars, not just the last."""
+        detector = BullFlagDetector()
+        candles = [
+            # Pole: 3 green candles
+            (4.00, 4.15, 3.98, 4.13, 200000),
+            (4.13, 4.30, 4.11, 4.28, 180000),
+            (4.28, 4.52, 4.26, 4.50, 160000),
+            # Flag: 2 red candles — first has HIGHER high than second
+            (4.50, 4.55, 4.38, 4.40, 50000),   # high = 4.55 (the max)
+            (4.40, 4.42, 4.33, 4.35, 30000),   # high = 4.42
+            # Current bar (dropped by detect_setup)
+            (4.35, 4.38, 4.32, 4.34, 25000),
+        ]
+        bars = _make_bars(candles)
+        setup = detector.detect_setup("TEST", bars)
+
+        assert setup is not None
+        # flag_high must be 4.55 (max), not 4.42 (last bar)
+        assert setup.flag_high == 4.55
+
+    def test_breakout_must_exceed_max_flag_high(self):
+        """Breakout bar must close above max flag high, not just last bar's high."""
+        detector = BullFlagDetector()
+        candles = [
+            # Pole: 3 green
+            (4.00, 4.15, 3.98, 4.13, 200000),
+            (4.13, 4.30, 4.11, 4.28, 180000),
+            (4.28, 4.52, 4.26, 4.50, 160000),
+            # Flag: first bar has high 4.55, second has high 4.42
+            (4.50, 4.55, 4.38, 4.40, 50000),
+            (4.40, 4.42, 4.33, 4.35, 30000),
+            # "Breakout" closes at 4.50 — above 4.42 (old logic) but below 4.55 (new)
+            (4.35, 4.52, 4.34, 4.50, 250000),
+            # Current (dropped)
+            (4.50, 4.55, 4.48, 4.52, 100000),
+        ]
+        bars = _make_bars(candles)
+        pattern = detector.detect("TEST", bars)
+
+        # Should NOT detect — breakout close (4.50) < max flag high (4.55)
+        assert pattern is None
+
+    def test_setup_breakout_level_is_max_flag_high(self):
+        """Setup's breakout_level should equal max flag high."""
+        detector = BullFlagDetector()
+        candles = [
+            # Pole: 3 green
+            (4.00, 4.15, 3.98, 4.13, 200000),
+            (4.13, 4.30, 4.11, 4.28, 180000),
+            (4.28, 4.52, 4.26, 4.50, 160000),
+            # Flag: descending highs 4.55, 4.45, 4.42
+            (4.50, 4.55, 4.38, 4.40, 50000),
+            (4.40, 4.45, 4.33, 4.35, 30000),
+            (4.35, 4.42, 4.32, 4.34, 25000),
+            # Current (dropped)
+            (4.34, 4.38, 4.32, 4.33, 20000),
+        ]
+        bars = _make_bars(candles)
+        setup = detector.detect_setup("TEST", bars)
+
+        assert setup is not None
+        assert setup.breakout_level == 4.55
+        assert setup.flag_high == 4.55
+
+
+# ---------------------------------------------------------------------------
+# Bug #2: Pullback allows limited green candles inside flag
+# ---------------------------------------------------------------------------
+
+class TestPullbackGreenTolerance:
+    """Verify pullback detection tolerates up to max_green_in_flag green bars."""
+
+    def test_pullback_with_one_green_inside_bar(self):
+        """Flag [red, green, red] detected as 3-bar pullback with default tolerance."""
+        detector = BullFlagDetector()
+        candles = [
+            # Pole: 3 green
+            (4.00, 4.15, 3.98, 4.13, 200000),
+            (4.13, 4.30, 4.11, 4.28, 180000),
+            (4.28, 4.52, 4.26, 4.50, 160000),
+            # Flag: red, green inside bar, red
+            (4.50, 4.52, 4.38, 4.40, 50000),    # red
+            (4.40, 4.43, 4.38, 4.42, 35000),    # green (inside bar bounce)
+            (4.42, 4.44, 4.35, 4.36, 30000),    # red
+            # Current (dropped)
+            (4.36, 4.40, 4.34, 4.38, 25000),
+        ]
+        bars = _make_bars(candles)
+        setup = detector.detect_setup("TEST", bars)
+
+        assert setup is not None
+        assert setup.pullback_candle_count == 3
+
+    def test_pullback_with_two_green_rejects(self):
+        """Flag [red, green, green, red] rejected — exceeds default tolerance of 1."""
+        detector = BullFlagDetector(max_green_in_flag=1)
+        candles = [
+            # Pole: 3 green
+            (4.00, 4.15, 3.98, 4.13, 200000),
+            (4.13, 4.30, 4.11, 4.28, 180000),
+            (4.28, 4.52, 4.26, 4.50, 160000),
+            # Flag: red, green, green, red — too many green bars
+            (4.50, 4.52, 4.38, 4.40, 50000),    # red
+            (4.40, 4.43, 4.38, 4.42, 35000),    # green
+            (4.42, 4.45, 4.40, 4.44, 30000),    # green (2nd — over limit)
+            (4.44, 4.46, 4.35, 4.36, 25000),    # red
+            # Current (dropped)
+            (4.36, 4.40, 4.34, 4.38, 20000),
+        ]
+        bars = _make_bars(candles)
+        setup = detector.detect_setup("TEST", bars)
+
+        # The pullback scanner should stop at the 2nd green, yielding only
+        # a 1-bar pullback (the final red) which is < 2 minimum — rejected.
+        assert setup is None
+
+    def test_pullback_starting_with_green_rejects(self):
+        """Last bar green → no pullback detected (unchanged behavior)."""
+        detector = BullFlagDetector()
+        candles = [
+            # Pole: 3 green
+            (4.00, 4.15, 3.98, 4.13, 200000),
+            (4.13, 4.30, 4.11, 4.28, 180000),
+            (4.28, 4.52, 4.26, 4.50, 160000),
+            # Flag: red then green at end
+            (4.50, 4.52, 4.38, 4.40, 50000),    # red
+            (4.40, 4.48, 4.38, 4.46, 30000),    # green — pullback scan starts here, no pullback
+            # Current (dropped)
+            (4.46, 4.50, 4.44, 4.48, 25000),
+        ]
+        bars = _make_bars(candles)
+        setup = detector.detect_setup("TEST", bars)
+
+        assert setup is None
+
+    def test_setup_with_green_inside_flag_full_detection(self):
+        """Full setup detection with 1 green bar inside flag produces valid pattern."""
+        detector = BullFlagDetector()
+        candles = [
+            # Pole: 3 green
+            (4.00, 4.15, 3.98, 4.13, 200000),
+            (4.13, 4.30, 4.11, 4.28, 180000),
+            (4.28, 4.52, 4.26, 4.50, 160000),
+            # Flag: red, green inside bar, red
+            (4.50, 4.52, 4.38, 4.40, 50000),
+            (4.40, 4.43, 4.38, 4.42, 35000),    # green inside bar
+            (4.42, 4.44, 4.35, 4.36, 30000),
+            # Breakout above max flag high (4.52)
+            (4.36, 4.60, 4.35, 4.55, 250000),
+            # Current (dropped)
+            (4.55, 4.60, 4.52, 4.58, 100000),
+        ]
+        bars = _make_bars(candles)
+        pattern = detector.detect("TEST", bars)
+
+        assert pattern is not None
+        assert pattern.pullback_candle_count == 3
+        assert pattern.flag_high == 4.52
