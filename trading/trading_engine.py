@@ -21,7 +21,7 @@ import pytz
 from data_sources.alpaca_client import AlpacaClient
 from persistence.database import Database
 from trading.pattern_detector import BullFlagDetector
-from trading.trade_planner import TradePlanner
+from trading.trade_planner import TradePlanner, TradePlan
 from trading.order_executor import OrderExecutor
 from trading.position_manager import PositionManager
 from notifications.telegram_notifier import TelegramNotifier
@@ -289,8 +289,8 @@ class TradingEngine:
 
                 # Fix 2: Partial fill detection
                 plan = pending['plan']
-                requested_qty = plan.shares
-                if filled_qty and filled_qty < requested_qty:
+                requested_qty = plan.shares if plan else 0
+                if filled_qty and requested_qty and filled_qty < requested_qty:
                     logger.warning(
                         f"{symbol}: PARTIAL FILL — {filled_qty}/{requested_qty} shares @ ${fill_price}"
                     )
@@ -338,7 +338,7 @@ class TradingEngine:
                 # If stop replacement fails, risk is unbounded (e.g. $0.51/sh
                 # instead of planned $0.11/sh on a $0.40 gap). Must close position.
                 setup = pending.get('setup')
-                if fill_price and setup and fill_price > setup.breakout_level:
+                if fill_price and plan and setup and fill_price > setup.breakout_level:
                     entry_gap = fill_price - setup.breakout_level
                     adjusted_stop = round(fill_price - plan.risk_per_share, 2)
                     adjusted_target = round(fill_price + plan.risk_per_share * plan.risk_reward_ratio, 2)
@@ -411,7 +411,7 @@ class TradingEngine:
                         symbol=symbol,
                         order_id=order_id,
                         shares=actual_qty,
-                        entry=fill_price or plan.entry_price,
+                        entry=fill_price or (plan.entry_price if plan else 0),
                     )
 
                 last_fill_result = {
@@ -953,7 +953,14 @@ class TradingEngine:
         Cancel all pending orders and close all open positions.
 
         Called at force_close_time to ensure we're flat before market close.
+        Syncs closed positions first so any SL/TP exits that already happened
+        are recorded before we attempt to close remaining positions.
         """
+        # Sync first — record any SL/TP exits that happened before force close
+        self._sync_closed_positions()
+        # Process any pending order fills (e.g., late fills just before force close)
+        self._manage_pending_orders()
+
         # Cancel pending orders
         for symbol, pending in list(self._pending_orders.items()):
             try:
@@ -1242,16 +1249,13 @@ class TradingEngine:
         - Allowing double-entry on symbols already traded today
         - Losing track of pending buy-stop orders still live on Alpaca
         - Miscounting daily trades
+        - Leaving orphan positions from prior days open
         """
         today = date.today().isoformat()
         try:
             trades_today = self.db.get_trades_by_date(today)
         except Exception as e:
             logger.error(f"Startup sync: failed to load today's trades: {e}")
-            return
-
-        if not trades_today:
-            logger.debug("Startup sync: no trades today, nothing to rebuild")
             return
 
         # Rebuild _traded_symbols and _daily_trade_count from DB
@@ -1270,16 +1274,137 @@ class TradingEngine:
             symbol = trade['symbol']
             order_id = trade.get('order_id')
             if order_id and trade.get('fill_price') is None and trade.get('exit_price') is None:
+                plan = self._reconstruct_plan(trade)
+                setup = self._reconstruct_setup(trade)
                 self._pending_orders[symbol] = {
                     'order_id': order_id,
-                    'plan': None,  # Plan not recoverable from DB, but order is tracked
-                    'setup': None,
+                    'plan': plan,
+                    'setup': setup,
                     'placed_at': trade.get('created_at', datetime.now(timezone.utc)),
                 }
-                logger.info(f"{symbol}: Recovered pending order {order_id} from DB")
+                logger.info(f"{symbol}: Recovered pending order {order_id} from DB (plan={'yes' if plan else 'no'})")
+
+        # Detect orphan positions from prior days
+        self._close_orphan_positions(trades_today)
 
         logger.info(
             f"Startup sync: {len(self._traded_symbols)} traded symbols, "
             f"{self._daily_trade_count} filled trades, "
             f"{len(self._pending_orders)} pending orders recovered"
         )
+
+    def _reconstruct_plan(self, trade: Dict[str, Any]) -> Optional['TradePlan']:
+        """Reconstruct a TradePlan from DB trade fields.
+
+        Args:
+            trade: Trade dict from database
+
+        Returns:
+            TradePlan if enough data exists, None otherwise
+        """
+        try:
+            entry = trade.get('entry_price')
+            sl = trade.get('stop_loss_price')
+            tp = trade.get('take_profit_price')
+            shares = trade.get('shares')
+            if not all([entry, sl, tp, shares]):
+                return None
+
+            risk = trade.get('risk_per_share', entry - sl)
+            reward = tp - entry
+            rr = trade.get('risk_reward_ratio', reward / risk if risk > 0 else 0)
+
+            return TradePlan(
+                symbol=trade['symbol'],
+                entry_price=entry,
+                stop_loss_price=sl,
+                take_profit_price=tp,
+                risk_per_share=risk,
+                reward_per_share=reward,
+                risk_reward_ratio=rr,
+                shares=shares,
+                total_risk=trade.get('total_risk', risk * shares),
+                pattern=None,
+            )
+        except Exception as e:
+            logger.warning(f"{trade.get('symbol')}: Failed to reconstruct plan: {e}")
+            return None
+
+    def _reconstruct_setup(self, trade: Dict[str, Any]) -> Optional[Any]:
+        """Reconstruct a BullFlagSetup from trade's pattern_data JSON.
+
+        Args:
+            trade: Trade dict from database (with pattern_data JSON field)
+
+        Returns:
+            BullFlagSetup if pattern_data is parseable, None otherwise
+        """
+        import json
+        from trading.pattern_detector import BullFlagSetup
+
+        pattern_data = trade.get('pattern_data')
+        if not pattern_data:
+            return None
+
+        try:
+            data = json.loads(pattern_data) if isinstance(pattern_data, str) else pattern_data
+            if not data or not isinstance(data, dict):
+                return None
+
+            breakout = data.get('breakout_level')
+            if breakout is None:
+                return None
+
+            return BullFlagSetup(
+                symbol=trade['symbol'],
+                pole_start_idx=data.get('pole_start_idx', 0),
+                pole_end_idx=data.get('pole_end_idx', 0),
+                flag_start_idx=data.get('flag_start_idx', 0),
+                flag_end_idx=data.get('flag_end_idx', 0),
+                pole_low=data.get('pole_low', 0),
+                pole_high=data.get('pole_high', 0),
+                pole_height=data.get('pole_height', 0),
+                pole_gain_pct=data.get('pole_gain_pct', 0),
+                flag_low=data.get('flag_low', 0),
+                flag_high=data.get('flag_high', 0),
+                retracement_pct=data.get('retracement_pct', 0),
+                pullback_candle_count=data.get('pullback_candle_count', 0),
+                avg_pole_volume=data.get('avg_pole_volume', 0),
+                avg_flag_volume=data.get('avg_flag_volume', 0),
+                breakout_level=breakout,
+            )
+        except Exception as e:
+            logger.warning(f"{trade.get('symbol')}: Failed to reconstruct setup: {e}")
+            return None
+
+    def _close_orphan_positions(self, trades_today: List[Dict]) -> None:
+        """Detect and close positions from prior days still open on Alpaca.
+
+        An orphan is an Alpaca position with no matching trade in today's DB.
+        This handles the case where the service crashed after market close
+        without running force_close.
+
+        Args:
+            trades_today: Today's trades from DB (already fetched)
+        """
+        try:
+            positions = self.alpaca.get_open_positions()
+        except Exception as e:
+            logger.error(f"Startup sync: failed to get Alpaca positions: {e}")
+            return
+
+        if not positions:
+            return
+
+        today_symbols = {t['symbol'] for t in trades_today}
+
+        for pos in positions:
+            symbol = pos['symbol']
+            if symbol not in today_symbols:
+                logger.warning(f"{symbol}: Orphan position from prior day — closing")
+                try:
+                    self.alpaca.close_position(symbol)
+                    self._traded_symbols.add(symbol)
+                    logger.info(f"{symbol}: Orphan position closed")
+                except Exception as e:
+                    logger.error(f"{symbol}: Failed to close orphan position: {e}")
