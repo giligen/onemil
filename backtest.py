@@ -818,10 +818,9 @@ class BacktestRunner:
                 bar_low = bar['low']
                 bar_open = bar['open']
 
-                # Cancel pending orders in deep midday (12:00-14:00 ET).
-                # 11:30-11:59 still has decent WR (38.9%) — only the lunch
-                # hour 12:00-13:59 (23% WR) is truly dead.
-                if self.skip_midday and bar_time_et >= (12, 0) and bar_time_et < (14, 0):
+                # Cancel pending orders in midday (11:30-14:00 ET).
+                # Matches production position_manager.can_open_position() check.
+                if self.skip_midday and self._is_midday(bar_time_et):
                     logger.debug(
                         f"  Bar {i}: buy-stop CANCELLED — entered deep midday (12-14 ET)"
                     )
