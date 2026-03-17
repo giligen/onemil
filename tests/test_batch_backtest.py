@@ -162,9 +162,10 @@ class TestFindBigMovers:
 
     def test_custom_threshold(self, sample_daily_bars):
         """Custom threshold should change which pairs qualify."""
-        # 5% threshold should also include PLYX on 3/6 (5.6%)
+        # 5% threshold: PLYX 3/5 (20% range, up from no prev), SVCO 3/5 (20% range, up from no prev)
+        # PLYX 3/6 has 5.6% range but high (5.7) is BELOW prev close (5.8) — direction filter blocks it
         movers = find_big_movers(sample_daily_bars, threshold=0.05)
-        assert len(movers) == 3  # PLYX 3/5, PLYX 3/6, SVCO 3/5
+        assert len(movers) == 2  # PLYX 3/5, SVCO 3/5
 
     def test_sorted_by_date_then_symbol(self):
         """Results should be sorted by (date, symbol)."""

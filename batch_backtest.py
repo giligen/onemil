@@ -101,6 +101,8 @@ def find_big_movers(
     skipped_price = 0
     skipped_float = 0
 
+    skipped_direction = 0
+
     for symbol, bars in daily_bars.items():
         uni = universe_dict.get(symbol, {})
         sym_float = uni.get('float_shares')
@@ -110,6 +112,12 @@ def find_big_movers(
             skipped_float += len([b for b in bars if b['low'] > 0 and (b['high'] - b['low']) / b['low'] >= threshold])
             continue
 
+        # Need prev close for direction check — build lookup from consecutive bars
+        prev_close_map = {}
+        sorted_bars = sorted(bars, key=lambda b: str(b['date']))
+        for j in range(1, len(sorted_bars)):
+            prev_close_map[str(sorted_bars[j]['date'])] = sorted_bars[j - 1]['close']
+
         for bar in bars:
             low = bar['low']
             high = bar['high']
@@ -118,6 +126,16 @@ def find_big_movers(
             move = (high - low) / low
             if move < threshold:
                 continue
+
+            # Direction filter: high must be 10%+ above prev close (gap UP).
+            # Matches live scanner: (current_price - prev_close) / prev_close >= 10%.
+            # Without this, crashing stocks with wide ranges qualify as "movers".
+            prev_close = prev_close_map.get(str(bar['date']))
+            if prev_close and prev_close > 0:
+                upside = (high - prev_close) / prev_close
+                if upside < threshold:
+                    skipped_direction += 1
+                    continue
 
             # Price filter: use closing price as proxy for tradeable range
             bar_close = bar.get('close', 0)
@@ -137,9 +155,9 @@ def find_big_movers(
 
     movers.sort(key=lambda x: (x[1], x[0]))
     logger.info(
-        f"Found {len(movers)} symbol/date pairs with {threshold:.0%}+ intraday move "
-        f"(filtered out {skipped_price + skipped_float}: "
-        f"{skipped_price} price, {skipped_float} float)"
+        f"Found {len(movers)} symbol/date pairs with {threshold:.0%}+ upside move "
+        f"(filtered out {skipped_price + skipped_float + skipped_direction}: "
+        f"{skipped_price} price, {skipped_float} float, {skipped_direction} direction)"
     )
     return movers
 
