@@ -496,7 +496,17 @@ class TradingEngine:
                         logger.error(f"{symbol}: Failed to check invalidation: {e}")
 
         for symbol in symbols_to_remove:
-            self._pending_orders.pop(symbol, None)
+            pending = self._pending_orders.pop(symbol, None)
+            # Update DB record so cancelled orders don't show as "open positions"
+            if pending:
+                order_id = pending.get('order_id')
+                if order_id:
+                    trade_record = self.db.get_trade_by_order_id(order_id)
+                    if trade_record and trade_record.get('fill_price') is None:
+                        self.db.update_trade(trade_record['id'], {
+                            'order_status': 'cancelled',
+                        })
+                        logger.debug(f"{symbol}: DB trade record marked cancelled")
 
         return last_fill_result
 
