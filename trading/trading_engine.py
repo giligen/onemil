@@ -107,6 +107,7 @@ class TradingEngine:
         self._pattern_details: list = []
         self._pending_orders: Dict[str, Dict] = {}  # symbol -> {order_id, plan, setup, placed_at}
         self._daily_trade_count: int = 0
+        self._notified_setups: Dict[str, float] = {}  # symbol -> breakout_level (dedup Telegram)
         self.shutdown_event = None  # Set by caller for graceful shutdown
 
     def _refresh_spy_data(self) -> None:
@@ -706,22 +707,32 @@ class TradingEngine:
             'breakout_level': setup.breakout_level,
         })
 
-        # Notify pattern detected
-        if self.notifier:
-            self.notifier.notify_pattern_detected(
-                symbol=symbol,
-                pole_gain_pct=setup.pole_gain_pct,
-                retracement_pct=setup.retracement_pct,
-                breakout_level=setup.breakout_level,
-            )
+        # Deduplicate notifications — don't spam Telegram with the same
+        # setup every 60s when position manager blocks (e.g., midday).
+        # Only notify if breakout_level changed (new setup) or first time.
+        already_notified = (
+            self._notified_setups.get(symbol) == setup.breakout_level
+        )
+
+        if not already_notified:
+            self._notified_setups[symbol] = setup.breakout_level
+
+            # Notify pattern detected
+            if self.notifier:
+                self.notifier.notify_pattern_detected(
+                    symbol=symbol,
+                    pole_gain_pct=setup.pole_gain_pct,
+                    retracement_pct=setup.retracement_pct,
+                    breakout_level=setup.breakout_level,
+                )
 
         # Create trade plan
         plan = self.planner.create_plan(setup)
         if plan is None:
             return None
 
-        # Notify trade planned
-        if self.notifier:
+        # Notify trade planned (only if new setup)
+        if not already_notified and self.notifier:
             self.notifier.notify_trade_planned(
                 symbol=symbol,
                 entry=plan.entry_price,
@@ -1254,6 +1265,7 @@ class TradingEngine:
         self._pattern_details.clear()
         self._pending_orders.clear()
         self._daily_trade_count = 0
+        self._notified_setups.clear()
         self.position_manager.reset_daily()
         self._refresh_spy_data()
         self._sync_startup_state()

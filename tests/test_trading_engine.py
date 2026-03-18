@@ -751,9 +751,19 @@ class TestSyncClosedPositions:
 class TestSetupExpiry:
     """Tests for cancelling expired pending buy-stop orders."""
 
+    MORNING_UTC = datetime(2026, 3, 16, 14, 0, 0, tzinfo=timezone.utc)  # 10:00 ET
+
+    @pytest.fixture(autouse=True)
+    def _mock_morning_time(self):
+        """Force 10:00 ET so midday cancellation doesn't interfere."""
+        with patch('trading.trading_engine.datetime') as mock_dt:
+            mock_dt.now.return_value = self.MORNING_UTC
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            yield
+
     def test_expired_order_cancelled(self, engine, mock_alpaca):
         """Order older than expiry is cancelled."""
-        old_time = datetime.now(timezone.utc) - timedelta(seconds=700)
+        old_time = self.MORNING_UTC - timedelta(seconds=700)
         engine.setup_expiry_seconds = 600
 
         engine._pending_orders['STALE'] = {
@@ -776,7 +786,7 @@ class TestSetupExpiry:
 
     def test_non_expired_order_continues(self, engine, mock_alpaca):
         """Order within expiry window is NOT cancelled."""
-        recent_time = datetime.now(timezone.utc) - timedelta(seconds=60)
+        recent_time = self.MORNING_UTC - timedelta(seconds=60)
         engine.setup_expiry_seconds = 600
 
         engine._pending_orders['FRESH'] = {
@@ -1434,9 +1444,19 @@ class TestIdentifyBracketLegs:
 class TestRaceConditionOnCancel:
     """Tests for checking order status before cancellation."""
 
+    MORNING_UTC = datetime(2026, 3, 16, 14, 0, 0, tzinfo=timezone.utc)  # 10:00 ET
+
+    @pytest.fixture(autouse=True)
+    def _mock_morning_time(self):
+        """Force 10:00 ET so midday cancellation doesn't interfere."""
+        with patch('trading.trading_engine.datetime') as mock_dt:
+            mock_dt.now.return_value = self.MORNING_UTC
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            yield
+
     def test_expiry_detects_filled_order(self, engine, mock_alpaca):
         """Expired order that filled in the interim is not cancelled."""
-        old_time = datetime.now(timezone.utc) - timedelta(seconds=700)
+        old_time = self.MORNING_UTC - timedelta(seconds=700)
         engine.setup_expiry_seconds = 600
 
         engine._pending_orders['RACE'] = {
@@ -1462,7 +1482,7 @@ class TestRaceConditionOnCancel:
 
     def test_expiry_detects_already_cancelled(self, engine, mock_alpaca):
         """Expired order that is already cancelled is cleaned up without cancel call."""
-        old_time = datetime.now(timezone.utc) - timedelta(seconds=700)
+        old_time = self.MORNING_UTC - timedelta(seconds=700)
         engine.setup_expiry_seconds = 600
 
         engine._pending_orders['GONE'] = {
@@ -1484,7 +1504,7 @@ class TestRaceConditionOnCancel:
 
     def test_invalidation_detects_filled_order(self, engine, mock_alpaca):
         """Invalidated order that filled is not cancelled."""
-        recent_time = datetime.now(timezone.utc) - timedelta(seconds=30)
+        recent_time = self.MORNING_UTC - timedelta(seconds=30)
         engine.setup_expiry_seconds = 600
 
         setup = _make_pattern("INVAL")
