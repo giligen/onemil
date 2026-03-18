@@ -243,13 +243,54 @@ class RealtimeScanner:
         }
 
     def _load_universe(self) -> None:
-        """Load universe and volume profiles from DB."""
+        """Load universe, volume profiles, and fresh prev closes from Alpaca."""
         self._universe = self.db.get_active_universe()
         self._volume_profiles = self.db.get_all_volume_profiles()
+
+        # Fetch yesterday's actual close for all symbols from Alpaca.
+        # The universe price_close can be weeks stale — using it for gap
+        # calculation causes stocks with recent price changes to be missed
+        # or incorrectly qualified.
+        self._refresh_prev_closes()
+
         logger.info(
             f"Loaded universe: {len(self._universe)} stocks, "
             f"{len(self._volume_profiles)} with volume profiles"
         )
+
+    def _refresh_prev_closes(self) -> None:
+        """Fetch yesterday's close from Alpaca and update universe records in memory."""
+        from datetime import timedelta
+        symbols = [s['symbol'] for s in self._universe]
+        if not symbols:
+            return
+
+        today = date.today()
+        # Fetch last 7 calendar days to find the most recent trading day
+        start = today - timedelta(days=7)
+        try:
+            daily_bars = self.alpaca.get_daily_bars_range(symbols, start, today)
+        except Exception as e:
+            logger.error(f"Failed to fetch prev closes from Alpaca: {e}")
+            return
+
+        updated = 0
+        for stock in self._universe:
+            sym = stock['symbol']
+            bars = daily_bars.get(sym, [])
+            if not bars:
+                continue
+            # Use the most recent bar's close as prev_close
+            # Sort by date descending, take the first that's before today
+            sorted_bars = sorted(bars, key=lambda b: str(b['date']), reverse=True)
+            for bar in sorted_bars:
+                bar_date = bar['date'] if isinstance(bar['date'], date) else date.fromisoformat(str(bar['date']))
+                if bar_date < today:
+                    stock['price_close'] = bar['close']
+                    updated += 1
+                    break
+
+        logger.info(f"Refreshed prev closes from Alpaca: {updated}/{len(symbols)} symbols")
 
     # =========================================================================
     # Pre-Market Phase
