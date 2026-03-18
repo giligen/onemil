@@ -69,6 +69,12 @@ class RealtimeScanner:
         self.notifier = notifier
         self.shutdown_event = shutdown_event
 
+        # Load notification preferences from config
+        from config import Config
+        _cfg = Config._load_yaml_only()
+        notif_cfg = _cfg.get("notifications", {}).get("telegram", {})
+        self._send_on_qualified = bool(notif_cfg.get("send_on_qualified", True))
+
         self._universe: List[Dict] = []
         self._volume_profiles: Dict[str, Dict[str, int]] = {}
         self._premarket_gap_symbols: Set[str] = set()
@@ -458,8 +464,8 @@ class RealtimeScanner:
                     'time_bucket': bucket,
                 })
 
-                # Notify via Telegram
-                if self.notifier:
+                # Notify via Telegram (if send_on_qualified enabled)
+                if self.notifier and self._send_on_qualified:
                     self.notifier.notify_stock_qualified(
                         symbol=symbol,
                         price=current_price,
