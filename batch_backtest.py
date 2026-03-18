@@ -77,6 +77,8 @@ def find_big_movers(
     price_min: float = 0.0,
     price_max: float = 0.0,
     float_max: int = 0,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
 ) -> List[Tuple[str, date]]:
     """
     Filter daily bars for (symbol, date) pairs matching scanner criteria.
@@ -146,7 +148,13 @@ def find_big_movers(
                 skipped_price += 1
                 continue
 
-            bar_date = bar['date'] if isinstance(bar['date'], date) else bar['date']
+            bar_date = bar['date'] if isinstance(bar['date'], date) else date.fromisoformat(str(bar['date']))
+            # Only include movers within the requested date range
+            # (daily_bars may include lookback days for prev_close computation)
+            if start_date and bar_date < start_date:
+                continue
+            if end_date and bar_date > end_date:
+                continue
             movers.append((symbol, bar_date))
             logger.debug(
                 f"  {symbol} {bar_date}: move {move:.1%} "
@@ -872,9 +880,11 @@ def main():
         sys.exit(1)
 
     # Step 2: Fetch daily bars (cached) and find 10%+ movers with scanner filters
+    # Fetch from 7 days before start_date so the direction filter has prev_close
+    # (need trading day before start, not calendar day — 7 days covers weekends/holidays)
     client = AlpacaClient(api_key=api_key, api_secret=api_secret)
     logger.info("Fetching daily bars for date range (cache-first)...")
-    daily_bars = fetch_daily_bars_cached(symbols, start_date, end_date, client, db)
+    daily_bars = fetch_daily_bars_cached(symbols, start_date - timedelta(days=7), end_date, client, db)
     universe_dict = {s['symbol']: s for s in universe}
 
     from config import Config
@@ -888,6 +898,8 @@ def main():
         price_min=float(scanner_cfg.get("price_min", 2.0)),
         price_max=float(scanner_cfg.get("price_max", 20.0)),
         float_max=int(scanner_cfg.get("float_max", 10_000_000)),
+        start_date=start_date,
+        end_date=end_date,
     )
 
     if not movers:
