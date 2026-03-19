@@ -143,8 +143,8 @@ class TestConfigLoading:
         assert cfg.min_risk_pct is None
         assert cfg.max_risk_pct is None
         assert cfg.require_macd_positive is False
-        assert cfg.circuit_breaker_dd == 1500.0
-        assert cfg.circuit_breaker_pause == 1
+        assert cfg.max_consecutive_losses == 2
+        assert True  # removed old CB
         assert cfg.setup_expiry_bars == 10
         assert cfg.market_regime_enabled is True
         assert cfg.market_regime_vol_threshold == 1.5
@@ -325,15 +325,15 @@ class TestNewConfigProperties:
         assert cfg.require_macd_positive is True
 
     def test_circuit_breaker_from_yaml(self, env_file, tmp_path):
-        """circuit_breaker_dd and circuit_breaker_pause read from YAML."""
+        """max_consecutive_losses and max_consecutive_losses read from YAML."""
         import yaml
-        cfg_data = {"trading": {"circuit_breaker_dd": 5000.0, "circuit_breaker_pause": 3}}
+        cfg_data = {"trading": {"max_consecutive_losses": 3, "max_consecutive_losses": 3}}
         yaml_path = tmp_path / "config.yaml"
         with open(yaml_path, "w") as f:
             yaml.dump(cfg_data, f)
         cfg = Config(env_path=env_file, yaml_path=str(yaml_path))
-        assert cfg.circuit_breaker_dd == 5000.0
-        assert cfg.circuit_breaker_pause == 3
+        assert cfg.max_consecutive_losses == 3
+        assert cfg.max_consecutive_losses == 3
 
     def test_market_regime_defaults(self, env_file, tmp_path):
         """market_regime_enabled, vol_threshold, sma_period, max_trades_per_day defaults."""
@@ -377,6 +377,5 @@ class TestNewConfigProperties:
         assert isinstance(cfg.sizing_mode, str)
         assert isinstance(cfg.risk_per_trade, float)
         assert isinstance(cfg.require_macd_positive, bool)
-        assert isinstance(cfg.circuit_breaker_dd, float)
-        assert isinstance(cfg.circuit_breaker_pause, int)
+        assert isinstance(cfg.max_consecutive_losses, int)
         assert isinstance(cfg.setup_expiry_bars, int)

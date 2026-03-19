@@ -338,69 +338,57 @@ class TestMiddayFilter:
         assert manager.can_open_position("AAPL") is True
 
 
-class TestCircuitBreaker:
-    """Tests for circuit breaker based on drawdown from peak P&L."""
+class TestConsecutiveLossLimit:
+    """Tests for stop-after-N-consecutive-losses."""
 
-    def test_record_trade_pnl_triggers_cb(self, mock_alpaca, db):
-        """3 losses totaling >$3K drawdown triggers circuit breaker."""
+    def test_consecutive_losses_triggers_stop(self, mock_alpaca, db):
+        """2 consecutive losses stops trading for the day."""
         manager = PositionManager(
             alpaca_client=mock_alpaca, db=db,
-            circuit_breaker_dd=3000.0, circuit_breaker_pause=2,
+            max_consecutive_losses=2,
         )
-        # Simulate losses: -1000, -1000, -1500 = -3500 total
         manager.record_trade_pnl(-1000.0)
-        assert manager._cb_skips_remaining == 0  # Not yet triggered (dd=1000)
+        assert not manager._stopped_for_day
         manager.record_trade_pnl(-1000.0)
-        assert manager._cb_skips_remaining == 0  # dd=2000, still under
-        manager.record_trade_pnl(-1500.0)
-        assert manager._cb_skips_remaining == 2  # dd=3500, triggered
+        assert manager._stopped_for_day
 
-    def test_record_trade_pnl_peak_tracking(self, mock_alpaca, db):
-        """Peak tracks cumulative high, dd measured from peak."""
+    def test_win_resets_streak(self, mock_alpaca, db):
+        """A win resets the consecutive loss counter."""
         manager = PositionManager(
             alpaca_client=mock_alpaca, db=db,
-            circuit_breaker_dd=3000.0, circuit_breaker_pause=2,
+            max_consecutive_losses=2,
         )
-        # Win, then lose from peak
-        manager.record_trade_pnl(2000.0)  # cum=2000, peak=2000
-        assert manager._peak_pnl == 2000.0
-        manager.record_trade_pnl(-2000.0)  # cum=0, dd=2000
-        assert manager._cb_skips_remaining == 0  # Under threshold
-        manager.record_trade_pnl(-1500.0)  # cum=-1500, dd=3500
-        assert manager._cb_skips_remaining == 2  # Triggered
+        manager.record_trade_pnl(-1000.0)
+        manager.record_trade_pnl(500.0)  # win resets
+        assert manager._consecutive_losses == 0
+        manager.record_trade_pnl(-1000.0)
+        assert not manager._stopped_for_day  # only 1 loss after reset
 
     @patch('trading.position_manager.datetime')
-    def test_cb_blocks_trades(self, mock_dt, mock_alpaca, db):
-        """When skips > 0, can_open_position returns False and decrements."""
+    def test_stopped_blocks_trades(self, mock_dt, mock_alpaca, db):
+        """When stopped_for_day, can_open_position returns False."""
         manager = PositionManager(
             alpaca_client=mock_alpaca, db=db,
-            circuit_breaker_dd=3000.0, circuit_breaker_pause=2,
+            max_consecutive_losses=2,
         )
         mock_now = MagicMock()
         mock_now.hour = 10
         mock_now.minute = 30
         mock_dt.now.return_value = mock_now
 
-        manager._cb_skips_remaining = 2
+        manager._stopped_for_day = True
         assert manager.can_open_position("AAPL") is False
-        assert manager._cb_skips_remaining == 1
-        assert manager.can_open_position("TSLA") is False
-        assert manager._cb_skips_remaining == 0
-        # Now should allow (all other limits OK)
-        assert manager.can_open_position("GOOG") is True
 
-    def test_cb_resets_daily(self, mock_alpaca, db):
-        """reset_daily clears all CB state."""
+    def test_resets_daily(self, mock_alpaca, db):
+        """reset_daily clears consecutive loss state."""
         manager = PositionManager(
             alpaca_client=mock_alpaca, db=db,
-            circuit_breaker_dd=3000.0, circuit_breaker_pause=2,
+            max_consecutive_losses=2,
         )
-        manager._cumulative_pnl = -5000.0
-        manager._peak_pnl = 1000.0
-        manager._cb_skips_remaining = 2
+        manager._consecutive_losses = 2
+        manager._stopped_for_day = True
 
         manager.reset_daily()
 
-        assert manager._cumulative_pnl == 0.0
-        assert manager._peak_pnl == 0.0
-        assert manager._cb_skips_remaining == 0
+        assert manager._consecutive_losses == 0
+        assert manager._stopped_for_day is False

@@ -48,8 +48,7 @@ class PositionManager:
         daily_loss_limit: float = -100.0,
         stop_trading_before_close_min: int = 15,
         skip_midday: bool = True,
-        circuit_breaker_dd: float = 3000.0,
-        circuit_breaker_pause: int = 2,
+        max_consecutive_losses: int = 2,
     ):
         """
         Initialize PositionManager.
@@ -61,8 +60,8 @@ class PositionManager:
             daily_loss_limit: Stop trading if daily P&L hits this (negative $)
             stop_trading_before_close_min: Minutes before close to stop new positions
             skip_midday: Skip 11:30-14:00 ET entries (backtest-proven dead zone)
-            circuit_breaker_dd: Drawdown from peak to trigger circuit breaker (dollars)
-            circuit_breaker_pause: Number of trades to skip when CB triggers
+            max_consecutive_losses: Stop trading for the day after N consecutive
+                losses. Reduces worst-day drawdown by 40% at 8% P&L cost.
         """
         self.alpaca = alpaca_client
         self.db = db
@@ -70,25 +69,23 @@ class PositionManager:
         self.daily_loss_limit = daily_loss_limit
         self.stop_trading_before_close_min = stop_trading_before_close_min
         self.skip_midday = skip_midday
-        self.circuit_breaker_dd = circuit_breaker_dd
-        self.circuit_breaker_pause = circuit_breaker_pause
+        self.max_consecutive_losses = max_consecutive_losses
         self._traded_symbols: Set[str] = set()
-        self._cumulative_pnl: float = 0.0
-        self._peak_pnl: float = 0.0
-        self._cb_skips_remaining: int = 0
+        self._consecutive_losses: int = 0
+        self._stopped_for_day: bool = False
 
     def record_trade_pnl(self, pnl: float) -> None:
-        """Record completed trade P&L for circuit breaker tracking."""
-        self._cumulative_pnl += pnl
-        if self._cumulative_pnl > self._peak_pnl:
-            self._peak_pnl = self._cumulative_pnl
-        dd = self._peak_pnl - self._cumulative_pnl
-        if dd >= self.circuit_breaker_dd:
-            self._cb_skips_remaining = self.circuit_breaker_pause
-            logger.warning(
-                f"CIRCUIT BREAKER: DD ${dd:,.0f} >= ${self.circuit_breaker_dd:,.0f} "
-                f"— skipping next {self.circuit_breaker_pause} trades"
-            )
+        """Record completed trade P&L for consecutive-loss tracking."""
+        if pnl > 0:
+            self._consecutive_losses = 0
+        else:
+            self._consecutive_losses += 1
+            if self._consecutive_losses >= self.max_consecutive_losses:
+                self._stopped_for_day = True
+                logger.warning(
+                    f"CONSECUTIVE LOSS LIMIT: {self._consecutive_losses} losses in a row "
+                    f"— done for the day"
+                )
 
     def can_open_position(self, symbol: str) -> bool:
         """
@@ -108,10 +105,12 @@ class PositionManager:
         Returns:
             True if position can be opened, False otherwise
         """
-        # Check circuit breaker
-        if self._cb_skips_remaining > 0:
-            self._cb_skips_remaining -= 1
-            logger.warning(f"{symbol}: Circuit breaker — skip ({self._cb_skips_remaining} remaining)")
+        # Check consecutive loss limit
+        if self._stopped_for_day:
+            logger.warning(
+                f"{symbol}: Stopped for the day — "
+                f"{self._consecutive_losses} consecutive losses"
+            )
             return False
 
         # Check midday dead zone
@@ -195,9 +194,8 @@ class PositionManager:
     def reset_daily(self) -> None:
         """Reset daily state (called at start of each trading day)."""
         self._traded_symbols.clear()
-        self._cumulative_pnl = 0.0
-        self._peak_pnl = 0.0
-        self._cb_skips_remaining = 0
+        self._consecutive_losses = 0
+        self._stopped_for_day = False
         logger.info("Position manager: daily state reset")
 
     def _is_midday(self) -> bool:

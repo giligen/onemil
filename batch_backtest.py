@@ -287,8 +287,7 @@ def run_batch_backtest(
     universe_dict: Optional[Dict] = None,
     volume_profiles: Optional[Dict[str, Dict[str, int]]] = None,
     market_regime: Optional['MarketRegimeFilter'] = None,
-    circuit_breaker_dd: float = 0,
-    circuit_breaker_pause: int = 1,
+    max_consecutive_losses: int = 0,
     max_trades_per_day: int = 0,
 ) -> List[BacktestResult]:
     """
@@ -373,21 +372,18 @@ def run_batch_backtest(
         else:
             runner._min_breakout_vol_override = 0  # disabled on normal days
 
-        # --- Circuit breaker state (reset per date) ---
-        cb_cum_pnl = 0.0
-        cb_peak = 0.0
-        cb_skips = 0
+        # --- Consecutive loss tracking (reset per date) ---
+        consec_losses = 0
+        stopped_for_day = False
         date_trade_count = 0
 
         for symbol, _ in movers_by_date[trade_date]:
             idx += 1
             date_str = trade_date.isoformat()
 
-            # Circuit breaker skip
-            if cb_skips > 0:
-                cb_skips -= 1
+            # Consecutive loss limit
+            if stopped_for_day:
                 cb_skipped += 1
-                logger.info(f"[{idx}/{total}] {symbol} {date_str} — CB skip (remaining: {cb_skips})")
                 continue
 
             # Max trades per day cap
@@ -431,20 +427,19 @@ def run_batch_backtest(
                     f"P&L ${pnl:+.2f}"
                 )
 
-                # --- Circuit breaker tracking ---
-                if circuit_breaker_dd > 0:
+                # --- Consecutive loss tracking ---
+                if max_consecutive_losses > 0:
                     for trade in result.trades_simulated:
-                        cb_cum_pnl += trade.pnl
-                        if cb_cum_pnl > cb_peak:
-                            cb_peak = cb_cum_pnl
-                        if cb_peak - cb_cum_pnl >= circuit_breaker_dd:
-                            cb_skips = circuit_breaker_pause
-                            cb_peak = cb_cum_pnl  # reset peak after trigger
-                            logger.warning(
-                                f"CB TRIGGERED on {date_str}: drawdown "
-                                f"${cb_peak - cb_cum_pnl + circuit_breaker_dd:.0f} — "
-                                f"skipping next {cb_skips} trade(s)"
-                            )
+                        if trade.pnl > 0:
+                            consec_losses = 0
+                        else:
+                            consec_losses += 1
+                            if consec_losses >= max_consecutive_losses:
+                                stopped_for_day = True
+                                logger.warning(
+                                    f"CONSECUTIVE LOSS LIMIT on {date_str}: "
+                                    f"{consec_losses} losses in a row — done for day"
+                                )
 
             except AlpacaAPIError as e:
                 logger.error(f"[{idx}/{total}] {symbol} {date_str} — API error: {e}, skipping")
@@ -925,22 +920,21 @@ def main():
         thin_liquidity_breakout_vol_ratio=float(regime_cfg.get("thin_liquidity_breakout_vol_ratio", 2.0)),
     )
     market_regime.load_spy_bars(spy_bars)
-    cb_dd = float(trading_cfg.get("circuit_breaker_dd", 1500.0))
-    cb_pause = int(trading_cfg.get("circuit_breaker_pause", 1))
     logger.info(
         f"Regime filter: enabled={market_regime.enabled}, "
         f"vol_threshold={market_regime.vol_threshold}%, sma_period={sma_period}, "
         f"min_spy_vol_ratio={market_regime.min_spy_volume_ratio}, "
         f"SPY bars={len(spy_bars)}, max_trades/day={max_trades_per_day}, "
-        f"CB dd=${cb_dd}, pause={cb_pause}"
+        f"max_consec_losses={max_consec}"
     )
 
     # Step 4: Run backtests (1-min bars also cached)
     runner = BacktestRunner()  # uses from_config() for all settings
+    max_consec = int(trading_cfg.get("max_consecutive_losses", 2))
     results = run_batch_backtest(
         movers, client, runner, db=db, universe_dict=universe_dict,
         market_regime=market_regime,
-        circuit_breaker_dd=cb_dd, circuit_breaker_pause=cb_pause,
+        max_consecutive_losses=max_consec,
     )
 
     # Step 4: Write CSV + print summary

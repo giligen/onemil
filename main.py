@@ -180,8 +180,7 @@ def _create_trading_engine(config, alpaca, db, notifier=None) -> TradingEngine:
         max_positions=config.max_positions,
         daily_loss_limit=config.daily_loss_limit,
         stop_trading_before_close_min=config.stop_trading_before_close_min,
-        circuit_breaker_dd=config.circuit_breaker_dd,
-        circuit_breaker_pause=config.circuit_breaker_pause,
+        max_consecutive_losses=config.max_consecutive_losses,
     )
     executor = OrderExecutor(alpaca_client=alpaca, db=db)
 

@@ -847,12 +847,12 @@ class TestBatchBacktestRegimeAndCB:
         assert runner.run.call_count == 2
         assert len(results) == 2
 
-    def test_cb_skips_after_drawdown(self):
-        """Circuit breaker skips trades after drawdown threshold is hit."""
+    def test_consecutive_losses_stops_day(self):
+        """2 consecutive losses stops trading for the rest of the day."""
         movers = [
-            ("SYM1", date(2026, 3, 5)),
-            ("SYM2", date(2026, 3, 5)),
-            ("SYM3", date(2026, 3, 5)),
+            ("SYM1", date(2026, 3, 9)),
+            ("SYM2", date(2026, 3, 9)),
+            ("SYM3", date(2026, 3, 9)),
         ]
 
         client = MagicMock(spec=AlpacaClient)
@@ -861,25 +861,25 @@ class TestBatchBacktestRegimeAndCB:
         runner.detector.min_breakout_volume_ratio = 1.5
 
         trade1 = MagicMock()
-        trade1.pnl = -2000.0
+        trade1.pnl = -1000.0
         result1 = BacktestResult(
-            symbol="SYM1", trade_date="2026-03-05",
+            symbol="SYM1", trade_date="2026-03-09",
             total_bars=100, patterns_detected=1,
             trades_simulated=[trade1],
         )
 
-        trade3 = MagicMock()
-        trade3.pnl = 500.0
-        result3 = BacktestResult(
-            symbol="SYM3", trade_date="2026-03-05",
+        trade2 = MagicMock()
+        trade2.pnl = -1000.0
+        result2 = BacktestResult(
+            symbol="SYM2", trade_date="2026-03-09",
             total_bars=100, patterns_detected=1,
-            trades_simulated=[trade3],
+            trades_simulated=[trade2],
         )
 
-        runner.run.side_effect = [result1, result3]
+        runner.run.side_effect = [result1, result2]
 
         bars_df = pd.DataFrame({
-            'timestamp': [datetime(2026, 3, 5, 14, 0, tzinfo=timezone.utc)],
+            'timestamp': [datetime(2026, 3, 9, 14, 0, tzinfo=timezone.utc)],
             'open': [5.0], 'high': [5.5], 'low': [4.8],
             'close': [5.3], 'volume': [100000],
         })
@@ -887,11 +887,9 @@ class TestBatchBacktestRegimeAndCB:
 
         results = run_batch_backtest(
             movers, client, runner,
-            circuit_breaker_dd=1500.0,
-            circuit_breaker_pause=1,
+            max_consecutive_losses=2,
         )
 
+        # SYM1 and SYM2 ran (2 losses), SYM3 skipped
         assert len(results) == 2
-        assert results[0].symbol == "SYM1"
-        assert results[1].symbol == "SYM3"
         assert runner.run.call_count == 2

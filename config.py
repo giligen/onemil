@@ -378,14 +378,9 @@ class Config:
         return bool(self._get_yaml("trading", "bull_flag", "require_macd_positive", default=False))
 
     @property
-    def circuit_breaker_dd(self) -> float:
-        """Drawdown threshold to trigger circuit breaker (dollars)."""
-        return float(self._get_yaml("trading", "circuit_breaker_dd", default=1500.0))
-
-    @property
-    def circuit_breaker_pause(self) -> int:
-        """Number of trades to skip when circuit breaker triggers."""
-        return int(self._get_yaml("trading", "circuit_breaker_pause", default=1))
+    def max_consecutive_losses(self) -> int:
+        """Stop trading for the day after N consecutive losses."""
+        return int(self._get_yaml("trading", "max_consecutive_losses", default=2))
 
     @property
     def market_regime_enabled(self) -> bool:
