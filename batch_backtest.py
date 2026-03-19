@@ -920,6 +920,7 @@ def main():
         thin_liquidity_breakout_vol_ratio=float(regime_cfg.get("thin_liquidity_breakout_vol_ratio", 2.0)),
     )
     market_regime.load_spy_bars(spy_bars)
+    max_consec = int(trading_cfg.get("max_consecutive_losses", 2))
     logger.info(
         f"Regime filter: enabled={market_regime.enabled}, "
         f"vol_threshold={market_regime.vol_threshold}%, sma_period={sma_period}, "
@@ -930,7 +931,6 @@ def main():
 
     # Step 4: Run backtests (1-min bars also cached)
     runner = BacktestRunner()  # uses from_config() for all settings
-    max_consec = int(trading_cfg.get("max_consecutive_losses", 2))
     results = run_batch_backtest(
         movers, client, runner, db=db, universe_dict=universe_dict,
         market_regime=market_regime,
