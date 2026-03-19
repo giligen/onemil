@@ -5,9 +5,10 @@ log_level: INFO
 
 # Scanner thresholds
 scanner:
-  # Price range filter
-  price_min: 2.0
-  price_max: 20.0
+  # Price range filter (universe watchlist — wider to catch stocks drifting in/out)
+  # Trade-time min_price ($2) in trading section still prevents entries below $2
+  price_min: 1.0
+  price_max: 30.0
 
   # Float filter (shares)
   float_max: 10_000_000
@@ -57,7 +58,7 @@ notifications:
   telegram:
     enabled: true
     send_on_startup: true
-    send_on_qualified: true
+    send_on_qualified: false
     send_on_pattern: true
     send_on_trade: true
     send_on_close: true
@@ -84,8 +85,7 @@ trading:
   pattern_poll_interval: 60
   skip_midday: true
   skip_fridays: true            # 30% WR on Fridays — traders close before weekend
-  circuit_breaker_dd: 1500.0
-  circuit_breaker_pause: 1
+  max_consecutive_losses: 2     # Stop trading for the day after 2 losses in a row
   max_trades_per_day: 5
   market_regime:
     enabled: true
