@@ -456,14 +456,23 @@ class TradingEngine:
                         if trail_r > 0 and tp_leg_id:
                             try:
                                 self.alpaca.cancel_order(tp_leg_id)
+                                # Clear TP leg in watch so _execute_stop_exit
+                                # doesn't try to cancel it again
+                                with self.stop_monitor._watch_lock:
+                                    w = self.stop_monitor._watches.get(symbol)
+                                    if w:
+                                        w.tp_leg_id = ''
                                 logger.info(
                                     f"{symbol}: Cancelled TP leg — "
                                     f"trailing stop ({trail_r:.1f}R, +{activate_r:.1f}R) "
                                     f"replaces fixed TP"
                                 )
                             except Exception as e:
+                                # TP leg still active — if it fills before trail,
+                                # _sync_closed_positions will detect it. Not fatal.
                                 logger.warning(
-                                    f"{symbol}: TP leg cancel failed (may be done): {e}"
+                                    f"{symbol}: TP leg cancel failed: {e} — "
+                                    f"TP may still fill before trail activates"
                                 )
 
                         logger.info(

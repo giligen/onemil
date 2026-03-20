@@ -231,6 +231,9 @@ class TelegramNotifier:
         reason_map = {
             'take_profit': '🎯 Take Profit',
             'stop_loss': '🛑 Stop Loss',
+            'trail_stop': '📈 Trailing Stop',
+            'stop_loss_fallback': '🛑 Stop (Fallback)',
+            'force_close': '🕐 Force Close',
             'eod_close': '🕐 End of Day',
         }
         reason_label = reason_map.get(exit_reason, exit_reason)
