@@ -49,6 +49,13 @@ class WatchEntry:
     tp_leg_id: str
     sl_leg_id: str
     trade_db_id: Optional[int] = None
+    # Trailing stop fields (all default to 0/False = disabled)
+    entry_price: float = 0.0
+    risk_per_share: float = 0.0
+    trail_r: float = 0.0
+    activate_at_r: float = 0.0
+    highest_since_entry: float = 0.0
+    trailing_active: bool = False
 
 
 @dataclass
@@ -157,6 +164,10 @@ class StopMonitor:
         tp_leg_id: str,
         sl_leg_id: str,
         trade_db_id: Optional[int] = None,
+        entry_price: float = 0.0,
+        risk_per_share: float = 0.0,
+        trail_r: float = 0.0,
+        activate_at_r: float = 0.0,
     ) -> None:
         """
         Register a symbol for stop-price monitoring.
@@ -170,6 +181,10 @@ class StopMonitor:
             tp_leg_id: Alpaca order ID of the take-profit leg
             sl_leg_id: Alpaca order ID of the safety-net stop-loss leg
             trade_db_id: Database trade record ID
+            entry_price: Fill price (needed for trailing stop R calculation)
+            risk_per_share: entry_price - original_stop (= 1R, for trail distance)
+            trail_r: Trail distance in R units below highest high (0 = disabled)
+            activate_at_r: Activate trail after price reaches +NR from entry
         """
         entry = WatchEntry(
             symbol=symbol,
@@ -178,6 +193,11 @@ class StopMonitor:
             tp_leg_id=tp_leg_id,
             sl_leg_id=sl_leg_id,
             trade_db_id=trade_db_id,
+            entry_price=entry_price,
+            risk_per_share=risk_per_share,
+            trail_r=trail_r,
+            activate_at_r=activate_at_r,
+            highest_since_entry=entry_price,
         )
         with self._watch_lock:
             self._watches[symbol] = entry
@@ -188,9 +208,12 @@ class StopMonitor:
                 self._subscribe_symbol(symbol), self._loop
             )
 
+        trail_msg = ""
+        if trail_r > 0:
+            trail_msg = f", trail={trail_r:.1f}R (activates +{activate_at_r:.1f}R)"
         logger.info(
             f"StopMonitor: watching {symbol} — "
-            f"stop=${stop_price:.2f}, shares={shares}"
+            f"stop=${stop_price:.2f}, shares={shares}{trail_msg}"
         )
 
     def remove_watch(self, symbol: str) -> None:
@@ -233,6 +256,29 @@ class StopMonitor:
             except queue.Empty:
                 break
         return events
+
+    def update_stop(self, symbol: str, new_stop_price: float) -> bool:
+        """
+        Update the stop price for a watched symbol. Only moves stop UP.
+
+        Args:
+            symbol: Stock symbol
+            new_stop_price: New stop price (ignored if lower than current)
+
+        Returns:
+            True if stop was updated, False if not found or not higher
+        """
+        with self._watch_lock:
+            watch = self._watches.get(symbol)
+            if watch and new_stop_price > watch.stop_price:
+                old = watch.stop_price
+                watch.stop_price = new_stop_price
+                logger.info(
+                    f"StopMonitor: {symbol} stop updated "
+                    f"${old:.2f} → ${new_stop_price:.2f}"
+                )
+                return True
+        return False
 
     @property
     def watched_symbols(self) -> List[str]:
@@ -341,7 +387,14 @@ class StopMonitor:
 
     async def _on_trade(self, trade) -> None:
         """
-        WebSocket trade callback — check if price breaches any stop level.
+        WebSocket trade callback — check price against stop level,
+        with optional trailing stop that ratchets up as price climbs.
+
+        Trailing stop logic (when trail_r > 0):
+        1. Track highest high since entry on every tick
+        2. When gain reaches activate_at_r, trailing becomes active
+        3. Ratchet stop up to (highest - risk * trail_r), never down
+        4. Exit reason becomes 'trail_stop' when trailing is active
 
         Args:
             trade: Alpaca trade object with .symbol and .price
@@ -355,15 +408,44 @@ class StopMonitor:
         if watch is None:
             return
 
+        # Trailing stop: update highest high and ratchet stop
+        if watch.trail_r > 0 and watch.risk_per_share > 0:
+            if price > watch.highest_since_entry:
+                watch.highest_since_entry = price
+
+            if not watch.trailing_active:
+                r_gain = (watch.highest_since_entry - watch.entry_price) / watch.risk_per_share
+                if r_gain >= watch.activate_at_r:
+                    watch.trailing_active = True
+                    logger.info(
+                        f"StopMonitor: {symbol} trailing stop ACTIVATED — "
+                        f"high=${watch.highest_since_entry:.2f}, "
+                        f"+{r_gain:.1f}R from entry ${watch.entry_price:.2f}"
+                    )
+
+            if watch.trailing_active:
+                new_stop = watch.highest_since_entry - watch.risk_per_share * watch.trail_r
+                if new_stop > watch.stop_price:
+                    old_stop = watch.stop_price
+                    watch.stop_price = new_stop
+                    logger.debug(
+                        f"StopMonitor: {symbol} trail ratchet "
+                        f"${old_stop:.2f} → ${new_stop:.2f} "
+                        f"(high=${watch.highest_since_entry:.2f})"
+                    )
+
+        # Check stop level (works for both fixed and trailing stops)
         if price <= watch.stop_price:
+            exit_reason = 'trail_stop' if (watch.trail_r > 0 and watch.trailing_active) else 'stop_loss'
             logger.info(
                 f"StopMonitor: {symbol} price ${price:.2f} "
-                f"<= stop ${watch.stop_price:.2f} — triggering exit"
+                f"<= stop ${watch.stop_price:.2f} — triggering {exit_reason}"
             )
-            await self._execute_stop_exit(symbol, price, watch)
+            await self._execute_stop_exit(symbol, price, watch, exit_reason=exit_reason)
 
     async def _execute_stop_exit(
-        self, symbol: str, trigger_price: float, watch: WatchEntry
+        self, symbol: str, trigger_price: float, watch: WatchEntry,
+        exit_reason: str = "stop_loss",
     ) -> None:
         """
         Execute a stop exit: cancel bracket legs, submit marketable limit sell.
@@ -377,6 +459,7 @@ class StopMonitor:
             symbol: Stock symbol
             trigger_price: Price that triggered the stop
             watch: WatchEntry with position details
+            exit_reason: 'stop_loss', 'trail_stop', or 'stop_loss_fallback'
         """
         with self._exit_lock:
             if self._exit_in_progress.get(symbol, False):
@@ -389,7 +472,6 @@ class StopMonitor:
         loop = asyncio.get_event_loop()
         exit_price = 0.0
         order_id = ""
-        exit_reason = "stop_loss"
 
         try:
             # Cancel the bracket legs (TP and safety-net SL)

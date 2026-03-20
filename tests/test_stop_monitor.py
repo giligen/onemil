@@ -513,6 +513,163 @@ class TestStopExitEvent:
 
 
 # ---------------------------------------------------------------------------
+# Trailing stop
+# ---------------------------------------------------------------------------
+
+class TestTrailingStop:
+    """Test trailing stop logic in StopMonitor._on_trade."""
+
+    @pytest.fixture
+    def trail_monitor(self, mock_alpaca):
+        """StopMonitor with a trailing stop watch."""
+        mon = StopMonitor(
+            api_key='k', api_secret='s', alpaca_client=mock_alpaca,
+            marketable_limit_offset=0.03, marketable_limit_offset_pct=0.005,
+        )
+        mon.add_watch(
+            'PLYX', stop_price=4.29, shares=500,
+            tp_leg_id='tp-1', sl_leg_id='sl-1',
+            entry_price=4.40, risk_per_share=0.11,
+            trail_r=1.0, activate_at_r=2.0,
+        )
+        return mon
+
+    def test_watch_stores_trailing_fields(self, trail_monitor):
+        """add_watch stores trailing stop params in WatchEntry."""
+        with trail_monitor._watch_lock:
+            w = trail_monitor._watches['PLYX']
+        assert w.entry_price == 4.40
+        assert w.risk_per_share == 0.11
+        assert w.trail_r == 1.0
+        assert w.activate_at_r == 2.0
+        assert w.highest_since_entry == 4.40
+        assert w.trailing_active is False
+
+    @pytest.mark.asyncio
+    async def test_trail_not_active_before_threshold(self, trail_monitor):
+        """Trail doesn't activate before +2R."""
+        # +1R = 4.40 + 0.11 = 4.51 — not enough
+        trade = MagicMock()
+        trade.symbol = 'PLYX'
+        trade.price = 4.51
+        await trail_monitor._on_trade(trade)
+
+        with trail_monitor._watch_lock:
+            w = trail_monitor._watches['PLYX']
+        assert w.trailing_active is False
+        assert w.stop_price == 4.29  # unchanged
+
+    @pytest.mark.asyncio
+    async def test_trail_activates_at_threshold(self, trail_monitor):
+        """Trail activates at +2R."""
+        # +2R = 4.40 + 0.22 = 4.62, use 4.63 to clear float precision
+        trade = MagicMock()
+        trade.symbol = 'PLYX'
+        trade.price = 4.63
+        await trail_monitor._on_trade(trade)
+
+        with trail_monitor._watch_lock:
+            w = trail_monitor._watches['PLYX']
+        assert w.trailing_active is True
+        # New stop = 4.62 - 0.11 * 1.0 = 4.51
+        assert w.stop_price == pytest.approx(4.51, abs=0.01)
+
+    @pytest.mark.asyncio
+    async def test_trail_ratchets_up(self, trail_monitor):
+        """Trail ratchets stop up as price climbs."""
+        # Activate at +2R
+        t1 = MagicMock(); t1.symbol = 'PLYX'; t1.price = 4.62
+        await trail_monitor._on_trade(t1)
+
+        # Price climbs to 4.80 — stop should follow
+        t2 = MagicMock(); t2.symbol = 'PLYX'; t2.price = 4.80
+        await trail_monitor._on_trade(t2)
+
+        with trail_monitor._watch_lock:
+            w = trail_monitor._watches['PLYX']
+        # New stop = 4.80 - 0.11 = 4.69
+        assert w.stop_price == pytest.approx(4.69, abs=0.01)
+        assert w.highest_since_entry == 4.80
+
+    @pytest.mark.asyncio
+    async def test_trail_never_ratchets_down(self, trail_monitor):
+        """Trail stop never moves down when price drops."""
+        # Activate and ratchet up
+        t1 = MagicMock(); t1.symbol = 'PLYX'; t1.price = 4.80
+        await trail_monitor._on_trade(t1)
+
+        with trail_monitor._watch_lock:
+            stop_after_up = trail_monitor._watches['PLYX'].stop_price
+
+        # Price drops — stop should NOT move down
+        t2 = MagicMock(); t2.symbol = 'PLYX'; t2.price = 4.72
+        await trail_monitor._on_trade(t2)
+
+        with trail_monitor._watch_lock:
+            w = trail_monitor._watches['PLYX']
+        assert w.stop_price == stop_after_up  # unchanged
+
+    @pytest.mark.asyncio
+    async def test_trail_exit_reason_is_trail_stop(self, trail_monitor, mock_alpaca):
+        """Exit reason is 'trail_stop' when trailing is active."""
+        # Activate trailing
+        t1 = MagicMock(); t1.symbol = 'PLYX'; t1.price = 4.80
+        await trail_monitor._on_trade(t1)
+
+        # Price drops below trail stop level (4.80 - 0.11 = ~4.69)
+        t2 = MagicMock(); t2.symbol = 'PLYX'; t2.price = 4.68
+        await trail_monitor._on_trade(t2)
+
+        events = trail_monitor.drain_exit_events()
+        assert len(events) == 1
+        assert events[0].exit_reason == 'trail_stop'
+
+    @pytest.mark.asyncio
+    async def test_fixed_stop_exit_reason_without_trail(self, monitor, mock_alpaca):
+        """Without trailing, exit reason is 'stop_loss'."""
+        monitor.add_watch('PLYX', 4.29, 500, 'tp-1', 'sl-1')
+        trade = MagicMock(); trade.symbol = 'PLYX'; trade.price = 4.20
+        await monitor._on_trade(trade)
+
+        events = monitor.drain_exit_events()
+        assert len(events) == 1
+        assert events[0].exit_reason == 'stop_loss'
+
+    @pytest.mark.asyncio
+    async def test_trail_disabled_when_trail_r_zero(self, mock_alpaca):
+        """trail_r=0 means no trailing, behaves as fixed stop."""
+        mon = StopMonitor(
+            api_key='k', api_secret='s', alpaca_client=mock_alpaca,
+        )
+        mon.add_watch(
+            'PLYX', stop_price=4.29, shares=500,
+            tp_leg_id='tp-1', sl_leg_id='sl-1',
+            entry_price=4.40, risk_per_share=0.11,
+            trail_r=0.0, activate_at_r=0.0,
+        )
+        # Price goes way up — stop should NOT change
+        t1 = MagicMock(); t1.symbol = 'PLYX'; t1.price = 5.00
+        await mon._on_trade(t1)
+
+        with mon._watch_lock:
+            assert mon._watches['PLYX'].stop_price == 4.29
+
+    def test_update_stop_moves_up(self, trail_monitor):
+        """update_stop moves stop up."""
+        result = trail_monitor.update_stop('PLYX', 4.50)
+        assert result is True
+        with trail_monitor._watch_lock:
+            assert trail_monitor._watches['PLYX'].stop_price == 4.50
+
+    def test_update_stop_rejects_lower(self, trail_monitor):
+        """update_stop rejects lower stop price."""
+        result = trail_monitor.update_stop('PLYX', 4.00)
+        assert result is False
+        with trail_monitor._watch_lock:
+            assert trail_monitor._watches['PLYX'].stop_price == 4.29
+
+
+# ---------------------------------------------------------------------------
 # Backtest slippage cap integration
 # ---------------------------------------------------------------------------
 

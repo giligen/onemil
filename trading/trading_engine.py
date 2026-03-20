@@ -104,10 +104,14 @@ class TradingEngine:
         self.stop_monitor = stop_monitor
         self.safety_net_sl_pct = safety_net_sl_pct
 
-        # Load skip_fridays from config
+        # Load trailing stop + skip_fridays from config
         from config import Config
         _cfg = Config._load_yaml_only()
         self.skip_fridays = bool(_cfg.get("trading", {}).get("skip_fridays", False))
+        trail_cfg = _cfg.get("trading", {}).get("trailing_stop", {})
+        self.trailing_stop_enabled = bool(trail_cfg.get("enabled", False))
+        self.trailing_stop_r = float(trail_cfg.get("trail_r", 1.0))
+        self.trailing_activate_at_r = float(trail_cfg.get("activate_at_r", 2.0))
 
         self._qualified_symbols: Set[str] = set()
         self._traded_symbols: Set[str] = set()
@@ -431,6 +435,10 @@ class TradingEngine:
                                 'real_stop_loss_price': real_stop,
                             })
 
+                        # Trailing stop params (0 = disabled)
+                        trail_r = self.trailing_stop_r if self.trailing_stop_enabled else 0.0
+                        activate_r = self.trailing_activate_at_r if self.trailing_stop_enabled else 0.0
+
                         self.stop_monitor.add_watch(
                             symbol=symbol,
                             stop_price=real_stop,
@@ -438,11 +446,31 @@ class TradingEngine:
                             tp_leg_id=tp_leg_id,
                             sl_leg_id=sl_leg_id,
                             trade_db_id=trade_record['id'] if trade_record else None,
+                            entry_price=fill_price,
+                            risk_per_share=fill_price - real_stop,
+                            trail_r=trail_r,
+                            activate_at_r=activate_r,
                         )
+
+                        # Cancel TP leg when trailing stop is active — trail replaces fixed TP
+                        if trail_r > 0 and tp_leg_id:
+                            try:
+                                self.alpaca.cancel_order(tp_leg_id)
+                                logger.info(
+                                    f"{symbol}: Cancelled TP leg — "
+                                    f"trailing stop ({trail_r:.1f}R, +{activate_r:.1f}R) "
+                                    f"replaces fixed TP"
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"{symbol}: TP leg cancel failed (may be done): {e}"
+                                )
+
                         logger.info(
                             f"{symbol}: StopMonitor watching — "
                             f"real stop ${real_stop:.2f}, "
                             f"TP leg {tp_leg_id}, SL leg {sl_leg_id}"
+                            f"{f', trail={trail_r:.1f}R' if trail_r > 0 else ''}"
                         )
                     except Exception as e:
                         error_msg = (
@@ -1521,17 +1549,26 @@ class TradingEngine:
                         )
                         tp_leg_id = tp_leg['id'] if tp_leg else ''
                         sl_leg_id = sl_leg['id'] if sl_leg else ''
+                        trail_r = self.trailing_stop_r if self.trailing_stop_enabled else 0.0
+                        activate_r = self.trailing_activate_at_r if self.trailing_stop_enabled else 0.0
+                        fill = trade['fill_price']
+                        real_sl = trade['real_stop_loss_price']
                         self.stop_monitor.add_watch(
                             symbol=symbol,
-                            stop_price=trade['real_stop_loss_price'],
+                            stop_price=real_sl,
                             shares=trade.get('filled_qty') or trade['shares'],
                             tp_leg_id=tp_leg_id,
                             sl_leg_id=sl_leg_id,
                             trade_db_id=trade['id'],
+                            entry_price=fill,
+                            risk_per_share=fill - real_sl,
+                            trail_r=trail_r,
+                            activate_at_r=activate_r,
                         )
                         logger.info(
                             f"{symbol}: Crash recovery — re-registered StopMonitor watch "
-                            f"stop=${trade['real_stop_loss_price']:.2f}"
+                            f"stop=${real_sl:.2f}"
+                            f"{f', trail={trail_r:.1f}R' if trail_r > 0 else ''}"
                         )
                     except Exception as e:
                         logger.error(
