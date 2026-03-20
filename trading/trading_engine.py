@@ -880,9 +880,16 @@ class TradingEngine:
         Returns:
             Dict with order details if buy-stop placed, None otherwise
         """
-        # Fetch 1-min bars
+        # Fetch 1-min bars from market open (not a fixed window).
+        # Fixed 90-min window misses setups that formed earlier in the day —
+        # the backtest sees all bars from open, so live must too.
+        import pytz as _pytz
+        _et = _pytz.timezone('US/Eastern')
+        _now_et = datetime.now(_et)
+        _market_open = _now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        _minutes_since_open = max(int((_now_et - _market_open).total_seconds() / 60), 30)
         try:
-            bars = self.alpaca.get_1min_bars(symbol, lookback_minutes=90)
+            bars = self.alpaca.get_1min_bars(symbol, lookback_minutes=_minutes_since_open)
         except Exception as e:
             logger.error(f"{symbol}: Failed to fetch 1-min bars: {e}")
             return None
