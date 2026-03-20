@@ -827,6 +827,14 @@ def main():
         "--verbose", "-v", action="store_true",
         help="Enable verbose/debug logging"
     )
+    parser.add_argument(
+        "--trailing-stop-r", type=float, default=0.0,
+        help="Replace fixed TP with trailing stop N×R below high (0 = disabled)"
+    )
+    parser.add_argument(
+        "--trailing-activate-r", type=float, default=0.0,
+        help="Activate trailing stop after +NR from entry (e.g., 2.0)"
+    )
     args = parser.parse_args()
 
     # Configure logging

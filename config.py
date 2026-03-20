@@ -441,6 +441,25 @@ class Config:
         """Percentage offset below price for marketable limit sell."""
         return float(self._get_yaml("trading", "self_managed_stops", "marketable_limit_offset_pct", default=0.005))
 
+    # =========================================================================
+    # Trailing Stop
+    # =========================================================================
+
+    @property
+    def trailing_stop_enabled(self) -> bool:
+        """Whether trailing stop replaces fixed TP."""
+        return bool(self._get_yaml("trading", "trailing_stop", "enabled", default=False))
+
+    @property
+    def trailing_stop_r(self) -> float:
+        """Trail distance in R units below highest high since entry."""
+        return float(self._get_yaml("trading", "trailing_stop", "trail_r", default=1.0))
+
+    @property
+    def trailing_activate_at_r(self) -> float:
+        """Activate trailing stop after price reaches +NR from entry."""
+        return float(self._get_yaml("trading", "trailing_stop", "activate_at_r", default=2.0))
+
 
 def get_config(env_path: Optional[str] = None, yaml_path: Optional[str] = None) -> Config:
     """

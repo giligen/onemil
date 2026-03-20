@@ -143,6 +143,8 @@ class TradeSimulator:
         exit_slippage_pct: float = 0.0,
         marketable_limit_offset: float = 0.0,
         marketable_limit_offset_pct: float = 0.0,
+        trailing_stop_r: float = 0.0,
+        trailing_activate_at_r: float = 0.0,
     ):
         """
         Initialize TradeSimulator.
@@ -164,6 +166,15 @@ class TradeSimulator:
                 sells instead of stop-market orders).
             marketable_limit_offset_pct: When > 0, cap stop exit slippage at
                 this percentage of stop price (whichever cap is larger is used).
+            trailing_stop_r: When > 0, replace fixed TP with a trailing stop
+                that trails by this many R units below the highest high since
+                entry. E.g., 1.0 = trail 1R below high. 0 = disabled (use
+                fixed TP). The initial stop is unchanged until trailing activates.
+            trailing_activate_at_r: Activate the trailing stop only after price
+                has moved this many R in our favor. E.g., 2.0 = trail activates
+                after +2R. Before activation, the original SL is used and there
+                is NO fixed TP ceiling — the trade runs until trail activates
+                and then catches the reversal.
         """
         self.force_close_time_et = force_close_time_et
         self.partial_profit_enabled = partial_profit_enabled
@@ -172,6 +183,8 @@ class TradeSimulator:
         self.exit_slippage_pct = exit_slippage_pct
         self.marketable_limit_offset = marketable_limit_offset
         self.marketable_limit_offset_pct = marketable_limit_offset_pct
+        self.trailing_stop_r = trailing_stop_r
+        self.trailing_activate_at_r = trailing_activate_at_r
 
     def _compute_stop_fill(self, stop_price: float) -> float:
         """
@@ -243,6 +256,13 @@ class TradeSimulator:
         if self.partial_profit_enabled:
             return self._simulate_with_partial(trade, plan, bars, entry_bar_idx, actual_entry)
 
+        # Trailing stop state
+        use_trail = self.trailing_stop_r > 0
+        trailing_active = False
+        highest_since_entry = actual_entry
+        current_stop = trade.stop_loss
+        risk = actual_entry - plan.stop_loss_price
+
         for i in range(entry_bar_idx + 1, len(bars)):
             bar = bars.iloc[i]
 
@@ -257,29 +277,55 @@ class TradeSimulator:
             bar_low = bar['low']
             bar_high = bar['high']
 
-            hit_stop = bar_low <= trade.stop_loss
-            hit_target = bar_high >= trade.take_profit
+            # Update highest high for trailing stop
+            if use_trail and bar_high > highest_since_entry:
+                highest_since_entry = bar_high
 
-            if hit_stop and hit_target:
-                # Same-bar ambiguity: conservative = assume stop hit first
-                stop_fill = self._compute_stop_fill(trade.stop_loss)
-                self._exit_trade(trade, bar, 'stop', stop_fill)
-                logger.debug(
-                    f"  Bar {i}: ambiguous (stop & target) → stopped out "
-                    f"at ${stop_fill:.2f}"
-                )
-                return trade
+            hit_stop = bar_low <= current_stop
 
-            if hit_stop:
-                stop_fill = self._compute_stop_fill(trade.stop_loss)
-                self._exit_trade(trade, bar, 'stop', stop_fill)
-                logger.debug(f"  Bar {i}: stopped out at ${stop_fill:.2f}")
-                return trade
+            if use_trail:
+                # With trailing stop: no fixed TP, trail replaces it
+                if hit_stop:
+                    stop_fill = self._compute_stop_fill(current_stop)
+                    reason = 'trail_stop' if trailing_active else 'stop'
+                    self._exit_trade(trade, bar, reason, stop_fill)
+                    logger.debug(f"  Bar {i}: {reason} at ${stop_fill:.2f}")
+                    return trade
 
-            if hit_target:
-                self._exit_trade(trade, bar, 'target', trade.take_profit)
-                logger.debug(f"  Bar {i}: target hit at ${trade.take_profit:.2f}")
-                return trade
+                # Activate trailing after +NR
+                if risk > 0:
+                    r_gain = (highest_since_entry - actual_entry) / risk
+                    if r_gain >= self.trailing_activate_at_r:
+                        trailing_active = True
+
+                # Ratchet stop up
+                if trailing_active and risk > 0:
+                    new_stop = highest_since_entry - risk * self.trailing_stop_r
+                    if new_stop > current_stop:
+                        current_stop = new_stop
+            else:
+                # Original fixed TP logic (unchanged)
+                hit_target = bar_high >= trade.take_profit
+
+                if hit_stop and hit_target:
+                    stop_fill = self._compute_stop_fill(trade.stop_loss)
+                    self._exit_trade(trade, bar, 'stop', stop_fill)
+                    logger.debug(
+                        f"  Bar {i}: ambiguous (stop & target) → stopped out "
+                        f"at ${stop_fill:.2f}"
+                    )
+                    return trade
+
+                if hit_stop:
+                    stop_fill = self._compute_stop_fill(trade.stop_loss)
+                    self._exit_trade(trade, bar, 'stop', stop_fill)
+                    logger.debug(f"  Bar {i}: stopped out at ${stop_fill:.2f}")
+                    return trade
+
+                if hit_target:
+                    self._exit_trade(trade, bar, 'target', trade.take_profit)
+                    logger.debug(f"  Bar {i}: target hit at ${trade.take_profit:.2f}")
+                    return trade
 
         # End of day — exit at last bar's close
         last_bar = bars.iloc[last_bar_idx]
@@ -517,6 +563,8 @@ class BacktestRunner:
         rvol_mode: str = 'cumulative',
         entry_slippage: Optional[float] = None,
         exit_slippage: Optional[float] = None,
+        trailing_stop_r: float = 0.0,
+        trailing_activate_at_r: float = 0.0,
     ):
         """
         Initialize BacktestRunner.
@@ -540,6 +588,10 @@ class BacktestRunner:
                 or 'bucket' (scanner's impl: 15-min bucket vol vs profile avg)
             entry_slippage: $/share added to buy-stop fill price (default from config)
             exit_slippage: $/share subtracted from stop-loss fill (default from config)
+            trailing_stop_r: Replace fixed TP with trailing stop N×R below high
+                (0 = disabled, use fixed TP). E.g., 1.0 = trail 1R below high.
+            trailing_activate_at_r: Activate trail after price reaches +NR
+                from entry. E.g., 2.0 = trail starts after +2R.
         """
         self.detector = detector or BullFlagDetector.from_config()
         self.planner = planner or TradePlanner.from_config()
@@ -604,8 +656,17 @@ class BacktestRunner:
         else:
             self.force_close_time_et = None
 
-        # Wire force_close, partial profit, exit slippage, and marketable
-        # limit offset into the simulator
+        # Trailing stop: load from config if not explicitly passed
+        trail_cfg = trading_cfg.get("trailing_stop", {})
+        trail_enabled = bool(trail_cfg.get("enabled", False))
+        resolved_trail_r = trailing_stop_r
+        resolved_trail_activate = trailing_activate_at_r
+        if resolved_trail_r == 0.0 and trail_enabled:
+            resolved_trail_r = float(trail_cfg.get("trail_r", 1.0))
+            resolved_trail_activate = float(trail_cfg.get("activate_at_r", 2.0))
+
+        # Wire force_close, partial profit, exit slippage, marketable
+        # limit offset, and trailing stop into the simulator
         if simulator is not None:
             self.simulator = simulator
         else:
@@ -619,7 +680,14 @@ class BacktestRunner:
                 exit_slippage_pct=resolved_exit_slippage_pct,
                 marketable_limit_offset=ml_offset,
                 marketable_limit_offset_pct=ml_offset_pct,
+                trailing_stop_r=resolved_trail_r,
+                trailing_activate_at_r=resolved_trail_activate,
             )
+            if resolved_trail_r > 0:
+                logger.info(
+                    f"Trailing stop: {resolved_trail_r:.1f}R below high, "
+                    f"activates at +{resolved_trail_activate:.1f}R (replaces fixed TP)"
+                )
 
     _ET = pytz.timezone('US/Eastern')
 

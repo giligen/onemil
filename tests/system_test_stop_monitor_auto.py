@@ -103,77 +103,98 @@ def get_current_price(client, symbol):
 
 def buy_market_order(client, symbol, qty):
     """
-    Buy shares via a simple bracket order.
+    Buy shares via market order, then place separate TP/SL sell orders.
 
-    Uses a bracket with:
-    - Entry: limit at current price + 1% (to fill immediately like a market order)
-    - TP: +10% (far away, won't trigger)
-    - SL: -10% (safety net, far away)
+    Two-step approach guarantees fill (market order always fills) instead
+    of a limit bracket that can hang as 'new' forever.
 
     Returns:
         Tuple of (fill_price, parent_order_id, tp_leg_id, sl_leg_id)
     """
+    from alpaca.trading.requests import MarketOrderRequest
+    from alpaca.trading.enums import OrderSide, TimeInForce
+
     price = get_current_price(client, symbol)
-    entry_limit = round(price * 1.01, 2)   # 1% above to fill fast
-    tp_price = round(price * 1.10, 2)      # 10% above
+    tp_price = round(price * 1.10, 2)      # 10% above (won't trigger)
     sl_price = round(price * 0.90, 2)      # 10% below (safety net)
 
-    logger.info(
-        f"Submitting bracket: BUY {qty} {symbol} "
-        f"limit=${entry_limit:.2f}, TP=${tp_price:.2f}, SL=${sl_price:.2f}"
-    )
+    # Step 1: Market buy — guaranteed fill
+    logger.info(f"Submitting MARKET BUY {qty} {symbol} (~${price:.2f})")
 
-    result = client.submit_bracket_order(
+    request = MarketOrderRequest(
         symbol=symbol,
         qty=qty,
-        side='buy',
-        limit_price=entry_limit,
-        tp_price=tp_price,
-        sl_price=sl_price,
+        side=OrderSide.BUY,
+        time_in_force=TimeInForce.DAY,
     )
-    parent_id = result['id']
-    logger.info(f"Order submitted — ID: {parent_id}")
+    order = client._call_with_timeout(
+        lambda: client.trading_client.submit_order(request),
+        f"market_buy({symbol})"
+    )
+    parent_id = str(order.id)
+    logger.info(f"Market buy submitted — ID: {parent_id}")
 
-    # Wait for fill
+    # Wait for fill (market orders fill almost instantly)
     fill_price = None
     for attempt in range(ORDER_FILL_TIMEOUT):
-        time.sleep(1)
-        order = client.get_order(parent_id)
-        status = order.get('status', 'unknown')
+        time.sleep(0.5)
+        order_detail = client.get_order(parent_id)
+        status = order_detail.get('status', 'unknown')
         if status == 'filled':
-            fill_price = order.get('filled_avg_price')
-            logger.info(f"FILLED at ${fill_price:.2f} after {attempt + 1}s")
-            break
+            fill_price = order_detail.get('filled_avg_price')
+            if fill_price:
+                logger.info(f"FILLED at ${fill_price:.2f} after {(attempt+1)*0.5:.1f}s")
+                break
         elif status in ('cancelled', 'expired', 'rejected'):
-            raise RuntimeError(f"Order {status}")
-        if attempt % 10 == 9:
-            logger.info(f"  Waiting for fill... status={status}")
+            raise RuntimeError(f"Market buy {status}")
 
     if fill_price is None:
-        raise RuntimeError(f"Order not filled after {ORDER_FILL_TIMEOUT}s")
+        raise RuntimeError(f"Market buy not filled after {ORDER_FILL_TIMEOUT}s")
 
-    # Identify bracket legs
-    order_detail = client.get_order(parent_id)
-    legs = order_detail.get('legs', [])
+    # Step 2: Place TP and SL sell orders as separate simple orders
+    # These simulate the bracket legs that StopMonitor will cancel
     tp_leg_id = ''
     sl_leg_id = ''
-    for leg in legs:
-        if leg.get('side') != 'sell':
-            continue
-        has_stop = leg.get('stop_price') is not None
-        has_limit = leg.get('limit_price') is not None
-        if has_stop and not has_limit:
-            sl_leg_id = leg['id']
-        elif has_limit and not has_stop:
-            tp_leg_id = leg['id']
 
-    logger.info(f"Bracket legs — TP: {tp_leg_id[:12]}, SL: {sl_leg_id[:12]}")
+    try:
+        tp_result = client.submit_limit_sell_order(
+            symbol=symbol, qty=qty, limit_price=tp_price,
+        )
+        tp_leg_id = tp_result.get('id', '')
+        logger.info(f"TP sell order placed — ${tp_price:.2f}, ID: {tp_leg_id[:12]}")
+    except Exception as e:
+        logger.warning(f"Failed to place TP order: {e}")
+
+    try:
+        from alpaca.trading.requests import StopOrderRequest
+        sl_request = StopOrderRequest(
+            symbol=symbol,
+            qty=qty,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+            stop_price=round(sl_price, 2),
+        )
+        sl_order = client._call_with_timeout(
+            lambda: client.trading_client.submit_order(sl_request),
+            f"stop_sell({symbol})"
+        )
+        sl_leg_id = str(sl_order.id)
+        logger.info(f"SL sell order placed — ${sl_price:.2f}, ID: {sl_leg_id[:12]}")
+    except Exception as e:
+        logger.warning(f"Failed to place SL order: {e}")
+
+    logger.info(f"Position open: {qty} shares @ ${fill_price:.2f}, TP={tp_leg_id[:12]}, SL={sl_leg_id[:12]}")
     return fill_price, parent_id, tp_leg_id, sl_leg_id
 
 
 def close_position(client, symbol):
-    """Close any open position in the symbol."""
+    """Close any open position — cancel orders first to free held shares."""
     try:
+        # Must cancel orders FIRST — shares held by open sell orders
+        # can't be closed until those orders are cancelled
+        cancel_all_orders(client, symbol)
+        time.sleep(1)
+
         positions = client.get_open_positions()
         for pos in positions:
             if pos['symbol'] == symbol:
@@ -289,11 +310,8 @@ def run_attempt(client, monitor, attempt_num):
         )
         # Remove watch and close position for retry
         monitor.remove_watch(SYMBOL)
-        # Need to cancel bracket legs and close position
-        cancel_all_orders(client, SYMBOL)
-        time.sleep(1)
+        # close_position cancels orders first, then closes
         close_position(client, SYMBOL)
-        time.sleep(1)
         return False
 
 

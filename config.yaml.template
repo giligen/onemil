@@ -100,6 +100,11 @@ trading:
     safety_net_sl_pct: 0.05             # 5% wide SL on Alpaca (crash protection)
     marketable_limit_offset: 0.03       # $0.03 min offset below price
     marketable_limit_offset_pct: 0.005  # 0.5% offset (whichever is larger)
+  # Trailing stop: replace fixed TP with trailing stop that lets winners run
+  trailing_stop:
+    enabled: false                      # flip to true after paper testing
+    trail_r: 1.0                        # trail distance in R units below high
+    activate_at_r: 2.0                  # activate trail after +2R gain
   # Slippage model (percentage of price, applied in backtest)
   entry_slippage_pct: 0.001  # 0.10% — added to buy-stop fill price (lifting the ask)
   exit_slippage_pct: 0.001   # 0.10% — subtracted from stop-loss fill (selling into bid)
