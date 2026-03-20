@@ -162,6 +162,7 @@ def _create_trading_engine(config, alpaca, db, notifier=None) -> TradingEngine:
         max_pullback_candles=config.max_pullback_candles,
         min_breakout_volume_ratio=config.min_breakout_volume_ratio,
         require_macd_positive=config.require_macd_positive,
+        max_green_in_flag=config.max_green_in_flag,
     )
     planner = TradePlanner(
         position_size_dollars=config.position_size_dollars,

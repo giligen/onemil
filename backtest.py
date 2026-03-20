@@ -941,6 +941,7 @@ class BacktestRunner:
         trade_taken = False
         pending_order: Optional[PendingBuyStop] = None
         last_end = len(bars) - 1
+        resume_after_bar = 0  # For multi-trade: skip bars until trade exits
 
         # Real-time qualification gate: simulate the scanner's qualification step.
         # Without prev_close, all bars are scanned (backward compatible).
@@ -972,6 +973,10 @@ class BacktestRunner:
                     )
                 else:
                     continue  # Not qualified yet — skip all scanning
+            # Multi-trade: skip bars while previous trade is still active
+            if i < resume_after_bar:
+                continue
+
             bar = bars.iloc[i]
             bar_time_et = self._get_bar_time_et(bar['timestamp'])
 
@@ -1082,7 +1087,6 @@ class BacktestRunner:
                         plan, bars, i, entry_price_override=fill_price
                     )
                     result.trades_simulated.append(trade)
-                    trade_taken = True
                     pending_order = None
 
                     logger.info(
@@ -1092,7 +1096,18 @@ class BacktestRunner:
                     )
 
                     if self.early_exit_after_trade:
+                        trade_taken = True
                         break
+                    else:
+                        # Multi-trade: mark the bar where scanning can resume.
+                        # Can't modify loop variable i, so use resume_after gate.
+                        trade_taken = False
+                        pending_order = None
+                        if trade.exit_time is not None:
+                            for skip_idx in range(i + 1, len(bars)):
+                                if bars.iloc[skip_idx]['timestamp'] >= trade.exit_time:
+                                    resume_after_bar = skip_idx
+                                    break
 
             # --- Step 2: Scan for new setup ---
             if not trade_taken and pending_order is None:

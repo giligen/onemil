@@ -373,6 +373,11 @@ class Config:
         return float(val) if val is not None else None
 
     @property
+    def max_green_in_flag(self) -> int:
+        """Max green candles tolerated inside bull flag pullback."""
+        return int(self._get_yaml("trading", "bull_flag", "max_green_in_flag", default=1))
+
+    @property
     def require_macd_positive(self) -> bool:
         """Whether bull flag detector requires positive MACD."""
         return bool(self._get_yaml("trading", "bull_flag", "require_macd_positive", default=False))

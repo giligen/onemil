@@ -115,3 +115,4 @@ trading:
     max_pullback_candles: 5
     min_breakout_volume_ratio: 1.5
     require_macd_positive: false
+    max_green_in_flag: 2

@@ -227,21 +227,23 @@ class BullFlagDetector:
             closes = completed['close'].iloc[:scan_from_idx + 1]
             min_bars_for_macd = self.macd_slow + self.macd_signal
             if len(closes) < min_bars_for_macd:
+                # Not enough bars for reliable MACD — allow setup without filter.
+                # Early-morning setups (first ~35 min) shouldn't be rejected
+                # just because the EMA hasn't warmed up yet.
                 logger.debug(
-                    f"{symbol}: Not enough bars ({len(closes)}) for MACD "
-                    f"(need {min_bars_for_macd}), skipping setup"
+                    f"{symbol}: MACD warm-up ({len(closes)}/{min_bars_for_macd} bars) "
+                    f"— allowing setup without MACD filter"
                 )
-                return None
-
-            hist = macd_histogram(closes, self.macd_fast, self.macd_slow, self.macd_signal)
-            macd_hist_value = float(hist.iloc[-1])
-            if macd_hist_value <= 0:
-                logger.debug(
-                    f"{symbol}: MACD histogram negative ({macd_hist_value:.6f}) "
-                    f"— momentum faded, rejecting setup"
-                )
-                return None
-            logger.debug(f"{symbol}: MACD histogram positive ({macd_hist_value:.6f})")
+            else:
+                hist = macd_histogram(closes, self.macd_fast, self.macd_slow, self.macd_signal)
+                macd_hist_value = float(hist.iloc[-1])
+                if macd_hist_value <= 0:
+                    logger.debug(
+                        f"{symbol}: MACD histogram negative ({macd_hist_value:.6f}) "
+                        f"— momentum faded, rejecting setup"
+                    )
+                    return None
+                logger.debug(f"{symbol}: MACD histogram positive ({macd_hist_value:.6f})")
 
         return {
             'pole_start_idx': pole_start_idx,

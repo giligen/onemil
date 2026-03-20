@@ -1838,7 +1838,7 @@ class TestThinLiquidityPostFillCheck:
         engine.on_stock_qualified("AAPL")
         engine.run_pattern_check()
 
-        mock_executor.submit_buy_stop_bracket_order.assert_called_once_with(plan)
+        mock_executor.submit_buy_stop_bracket_order.assert_called_once_with(plan, sl_override=None)
 
     @patch('trading.trading_engine.TradingEngine._is_past_last_entry_time', return_value=False)
     def test_normal_day_no_thin_tag(
