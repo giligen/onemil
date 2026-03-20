@@ -417,6 +417,30 @@ class Config:
         """Cancel pending buy-stop after this many bars."""
         return int(self._get_yaml("trading", "setup_expiry_bars", default=10))
 
+    # =========================================================================
+    # Self-Managed Stops
+    # =========================================================================
+
+    @property
+    def self_managed_stops_enabled(self) -> bool:
+        """Whether self-managed stop monitoring is active."""
+        return bool(self._get_yaml("trading", "self_managed_stops", "enabled", default=False))
+
+    @property
+    def safety_net_sl_pct(self) -> float:
+        """Safety-net stop-loss percentage (wide SL on Alpaca for crash protection)."""
+        return float(self._get_yaml("trading", "self_managed_stops", "safety_net_sl_pct", default=0.05))
+
+    @property
+    def marketable_limit_offset(self) -> float:
+        """Minimum dollar offset below price for marketable limit sell."""
+        return float(self._get_yaml("trading", "self_managed_stops", "marketable_limit_offset", default=0.03))
+
+    @property
+    def marketable_limit_offset_pct(self) -> float:
+        """Percentage offset below price for marketable limit sell."""
+        return float(self._get_yaml("trading", "self_managed_stops", "marketable_limit_offset_pct", default=0.005))
+
 
 def get_config(env_path: Optional[str] = None, yaml_path: Optional[str] = None) -> Config:
     """

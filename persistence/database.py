@@ -249,6 +249,18 @@ class Database:
         except Exception as e:
             logger.warning(f"Migration 2 (filled_qty column) failed (non-fatal): {e}")
 
+        # Migration 3: Add real_stop_loss_price column for self-managed stops.
+        # Stores the actual stop level monitored by StopMonitor (flag_low region),
+        # distinct from the safety-net SL on the Alpaca bracket (entry * 0.95).
+        try:
+            columns = [row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()]
+            if 'real_stop_loss_price' not in columns:
+                self.conn.execute("ALTER TABLE trades ADD COLUMN real_stop_loss_price REAL")
+                self.conn.commit()
+                logger.info("Migration: added real_stop_loss_price column to trades table")
+        except Exception as e:
+            logger.warning(f"Migration 3 (real_stop_loss_price column) failed (non-fatal): {e}")
+
     # =========================================================================
     # Universe operations
     # =========================================================================

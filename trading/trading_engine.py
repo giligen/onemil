@@ -54,6 +54,8 @@ class TradingEngine:
         force_close_time_et: str = "15:45",
         setup_expiry_seconds: int = 600,
         market_regime: Optional['MarketRegimeFilter'] = None,
+        stop_monitor: Optional[Any] = None,
+        safety_net_sl_pct: float = 0.05,
     ):
         """
         Initialize TradingEngine.
@@ -72,6 +74,9 @@ class TradingEngine:
             force_close_time_et: Force close all positions at this ET time (HH:MM)
             setup_expiry_seconds: Cancel pending buy-stop after this many seconds
             market_regime: Optional MarketRegimeFilter for SPY regime check
+            stop_monitor: Optional StopMonitor for self-managed stops
+            safety_net_sl_pct: Safety-net SL percentage for bracket when
+                using self-managed stops (default 5%)
         """
         self.alpaca = alpaca_client
         self.db = db
@@ -94,6 +99,10 @@ class TradingEngine:
         self.setup_expiry_seconds = setup_expiry_seconds
 
         self.market_regime = market_regime
+
+        # Self-managed stops
+        self.stop_monitor = stop_monitor
+        self.safety_net_sl_pct = safety_net_sl_pct
 
         # Load skip_fridays from config
         from config import Config
@@ -403,6 +412,47 @@ class TradingEngine:
                         }
                         continue
 
+                # Register with StopMonitor for real-time stop watching
+                if self.stop_monitor and pending.get('real_stop_level'):
+                    real_stop = pending['real_stop_level']
+                    try:
+                        order_detail = self.alpaca.get_order(order_id)
+                        sl_leg, tp_leg = self._identify_bracket_legs(
+                            order_detail.get('legs', []),
+                            expected_sl=plan.entry_price * (1 - self.safety_net_sl_pct) if plan else None,
+                            expected_tp=plan.take_profit_price if plan else None,
+                        )
+                        tp_leg_id = tp_leg['id'] if tp_leg else ''
+                        sl_leg_id = sl_leg['id'] if sl_leg else ''
+
+                        # Save real_stop_loss_price to DB
+                        if trade_record:
+                            self.db.update_trade(trade_record['id'], {
+                                'real_stop_loss_price': real_stop,
+                            })
+
+                        self.stop_monitor.add_watch(
+                            symbol=symbol,
+                            stop_price=real_stop,
+                            shares=actual_qty,
+                            tp_leg_id=tp_leg_id,
+                            sl_leg_id=sl_leg_id,
+                            trade_db_id=trade_record['id'] if trade_record else None,
+                        )
+                        logger.info(
+                            f"{symbol}: StopMonitor watching — "
+                            f"real stop ${real_stop:.2f}, "
+                            f"TP leg {tp_leg_id}, SL leg {sl_leg_id}"
+                        )
+                    except Exception as e:
+                        error_msg = (
+                            f"{symbol}: Failed to register with StopMonitor: {e} — "
+                            f"safety-net SL on Alpaca is active"
+                        )
+                        logger.error(error_msg)
+                        if self.notifier:
+                            self.notifier.notify_error(error_msg, component="StopMonitor")
+
                 self._daily_trade_count += 1
                 self._patterns_traded += 1
 
@@ -510,8 +560,71 @@ class TradingEngine:
 
         return last_fill_result
 
+    def _process_stop_monitor_exits(self) -> None:
+        """Drain and process exit events from StopMonitor."""
+        if not self.stop_monitor:
+            return
+
+        events = self.stop_monitor.drain_exit_events()
+        for event in events:
+            logger.info(
+                f"{event.symbol}: StopMonitor exit — "
+                f"stop=${event.stop_price:.2f}, exit=${event.exit_price:.2f}, "
+                f"reason={event.exit_reason}, order={event.order_id}"
+            )
+
+            # Update DB trade record
+            if event.trade_db_id:
+                try:
+                    # Look up trade by ID in today's open trades
+                    trades_today = self.db.get_open_trades(date.today().isoformat())
+                    trade_record = None
+                    for t in trades_today:
+                        if t['id'] == event.trade_db_id:
+                            trade_record = t
+                            break
+
+                    if trade_record and trade_record.get('fill_price'):
+                        qty_for_pnl = trade_record.get('filled_qty') or trade_record['shares']
+                        pnl = (event.exit_price - trade_record['fill_price']) * qty_for_pnl
+                        pnl_pct = (event.exit_price / trade_record['fill_price'] - 1) * 100
+                        self.db.update_trade(event.trade_db_id, {
+                            'exit_price': event.exit_price,
+                            'exit_reason': event.exit_reason,
+                            'exited_at': datetime.now(timezone.utc),
+                            'pnl': pnl,
+                            'pnl_pct': pnl_pct,
+                        })
+                        self.position_manager.record_trade_pnl(pnl)
+                        logger.info(
+                            f"{event.symbol}: StopMonitor exit DB updated — "
+                            f"P&L ${pnl:+,.2f} ({pnl_pct:+.1f}%)"
+                        )
+
+                        if self.notifier:
+                            self.notifier.notify_position_closed(
+                                symbol=event.symbol,
+                                entry_price=trade_record['fill_price'],
+                                exit_price=event.exit_price,
+                                shares=qty_for_pnl,
+                                pnl=pnl,
+                                exit_reason=event.exit_reason,
+                            )
+                    else:
+                        logger.warning(
+                            f"{event.symbol}: StopMonitor exit — "
+                            f"no matching open trade for DB id {event.trade_db_id}"
+                        )
+                except Exception as e:
+                    logger.error(
+                        f"{event.symbol}: Failed to process StopMonitor exit: {e}"
+                    )
+
     def _sync_closed_positions(self) -> None:
         """Detect bracket exits (SL/TP hit) and update DB + circuit breaker."""
+        # Process StopMonitor exits first — these are higher priority
+        self._process_stop_monitor_exits()
+
         today = date.today().isoformat()
         open_trades = self.db.get_open_trades(today)
         if not open_trades:
@@ -759,7 +872,24 @@ class TradingEngine:
         # Production enforcement: buy-stop submitted on all days; post-fill volume check on thin days
         is_thin = self.market_regime and self.market_regime.is_thin_liquidity(date.today())
 
+        # Self-managed stops: widen bracket SL to safety-net level,
+        # real stop is monitored by StopMonitor via WebSocket
+        real_stop_level = plan.stop_loss_price
+        if self.stop_monitor:
+            safety_net_sl = round(plan.entry_price * (1 - self.safety_net_sl_pct), 2)
+            logger.info(
+                f"{symbol}: Self-managed stops — real stop ${real_stop_level:.2f}, "
+                f"safety-net SL ${safety_net_sl:.2f} ({self.safety_net_sl_pct:.0%})"
+            )
+            # Temporarily set plan SL to safety-net for bracket submission
+            plan.stop_loss_price = safety_net_sl
+
         result = self.executor.submit_buy_stop_bracket_order(plan)
+
+        # Restore real stop on plan after submission
+        if self.stop_monitor:
+            plan.stop_loss_price = real_stop_level
+
         if result is not None:
             # NOTE: _daily_trade_count and mark_traded are deferred to fill
             # time (_manage_pending_orders status=='filled'). This allows
@@ -770,6 +900,9 @@ class TradingEngine:
                 'setup': setup,
                 'placed_at': datetime.now(timezone.utc),
             }
+            # Store real stop for StopMonitor registration on fill
+            if self.stop_monitor:
+                pending['real_stop_level'] = real_stop_level
             if is_thin:
                 pending['thin_liquidity'] = True
                 pending['min_breakout_vol_ratio'] = self.market_regime.get_min_breakout_volume_ratio(date.today())
@@ -994,6 +1127,13 @@ class TradingEngine:
         Syncs closed positions first so any SL/TP exits that already happened
         are recorded before we attempt to close remaining positions.
         """
+        # Stop StopMonitor before force-closing — prevents race conditions
+        # where monitor tries to exit while we're also closing
+        if self.stop_monitor:
+            for symbol in list(self.stop_monitor.watched_symbols):
+                self.stop_monitor.remove_watch(symbol)
+            self._process_stop_monitor_exits()
+
         # Sync first — record any SL/TP exits that happened before force close
         self._sync_closed_positions()
         # Process any pending order fills (e.g., late fills just before force close)
@@ -1138,12 +1278,18 @@ class TradingEngine:
             logger.info("Trading engine disabled, skipping monitoring loop")
             return
 
+        # Start StopMonitor WebSocket thread if configured
+        if self.stop_monitor:
+            self.stop_monitor.start()
+            logger.info("StopMonitor started for self-managed stops")
+
         logger.info(
             f"Trading engine monitoring loop started — "
             f"interval: {self.pattern_poll_interval}s, "
             f"symbols: {len(self._qualified_symbols)}, "
             f"last entry: {self.last_entry_hour}:{self.last_entry_minute:02d} ET, "
-            f"force close: {self.force_close_hour}:{self.force_close_minute:02d} ET"
+            f"force close: {self.force_close_hour}:{self.force_close_minute:02d} ET, "
+            f"self_managed_stops: {self.stop_monitor is not None}"
         )
 
         force_closed = False
@@ -1174,6 +1320,8 @@ class TradingEngine:
             logger.info("Shutdown signal received — force-closing all positions...")
             self._force_close_all()
             self.save_daily_summary()
+            if self.stop_monitor:
+                self.stop_monitor.stop()
             logger.info("Graceful shutdown complete")
 
     def get_daily_stats(self) -> Dict[str, Any]:

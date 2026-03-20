@@ -184,6 +184,24 @@ def _create_trading_engine(config, alpaca, db, notifier=None) -> TradingEngine:
     )
     executor = OrderExecutor(alpaca_client=alpaca, db=db)
 
+    # Self-managed stops: WebSocket price monitoring + marketable limit exits
+    stop_monitor = None
+    if config.self_managed_stops_enabled:
+        from trading.stop_monitor import StopMonitor
+        stop_monitor = StopMonitor(
+            api_key=config.alpaca_api_key,
+            api_secret=config.alpaca_api_secret,
+            alpaca_client=alpaca,
+            marketable_limit_offset=config.marketable_limit_offset,
+            marketable_limit_offset_pct=config.marketable_limit_offset_pct,
+            notifier=notifier,
+        )
+        logger.info(
+            f"StopMonitor created — safety_net={config.safety_net_sl_pct:.0%}, "
+            f"offset=${config.marketable_limit_offset}, "
+            f"offset_pct={config.marketable_limit_offset_pct:.1%}"
+        )
+
     engine = TradingEngine(
         alpaca_client=alpaca,
         db=db,
@@ -196,6 +214,8 @@ def _create_trading_engine(config, alpaca, db, notifier=None) -> TradingEngine:
         notifier=notifier,
         setup_expiry_seconds=config.setup_expiry_bars * config.pattern_poll_interval,
         market_regime=market_regime,
+        stop_monitor=stop_monitor,
+        safety_net_sl_pct=config.safety_net_sl_pct,
     )
 
     # Load SPY data immediately so regime is ready if service starts mid-day

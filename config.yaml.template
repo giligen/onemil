@@ -93,6 +93,13 @@ trading:
     sma_period: 50             # SPY below SMA(50) — downtrend signal
     min_spy_volume_ratio: 0.70 # SPY T-1 volume / SMA20 — thin liquidity threshold
     thin_liquidity_breakout_vol_ratio: 2.0  # Stricter breakout vol ratio on thin days
+  # Self-managed stops: WebSocket price monitoring + marketable limit sell exits
+  # Replaces bracket stop-market with real-time monitoring to cap exit slippage
+  self_managed_stops:
+    enabled: false                      # flip to true after paper testing
+    safety_net_sl_pct: 0.05             # 5% wide SL on Alpaca (crash protection)
+    marketable_limit_offset: 0.03       # $0.03 min offset below price
+    marketable_limit_offset_pct: 0.005  # 0.5% offset (whichever is larger)
   # Slippage model (percentage of price, applied in backtest)
   entry_slippage_pct: 0.001  # 0.10% — added to buy-stop fill price (lifting the ask)
   exit_slippage_pct: 0.001   # 0.10% — subtracted from stop-loss fill (selling into bid)

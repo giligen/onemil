@@ -1101,6 +1101,64 @@ class AlpacaClient:
             logger.error(f"Failed to submit stop-bracket order for {symbol}: {e}")
             raise AlpacaAPIError(f"Failed to submit stop-bracket order for {symbol}: {e}")
 
+    def submit_limit_sell_order(
+        self, symbol: str, qty: int, limit_price: float
+    ) -> Dict:
+        """
+        Submit a plain limit sell order (no bracket).
+
+        Used by StopMonitor for marketable limit exits — the limit price
+        is set just below the current market price to fill immediately
+        while capping worst-case slippage.
+
+        Args:
+            symbol: Stock symbol
+            qty: Number of shares to sell
+            limit_price: Limit price (marketable = just below current price)
+
+        Returns:
+            Dict with order details (id, status, symbol)
+
+        Raises:
+            AlpacaAPIError: If order submission fails
+        """
+        try:
+            request = LimitOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=OrderSide.SELL,
+                type=OrderType.LIMIT,
+                time_in_force=TimeInForce.DAY,
+                limit_price=round(limit_price, 2),
+                order_class=OrderClass.SIMPLE,
+            )
+
+            order = self._call_with_timeout(
+                lambda: self.trading_client.submit_order(request),
+                f"submit_limit_sell_order({symbol})"
+            )
+
+            result = {
+                'id': str(order.id) if hasattr(order, 'id') else '',
+                'status': str(order.status.value) if hasattr(order, 'status') else 'unknown',
+                'symbol': symbol,
+                'qty': qty,
+                'limit_price': limit_price,
+            }
+
+            logger.info(
+                f"Limit sell order submitted: {symbol} SELL {qty} "
+                f"@ ${limit_price:.2f} — ID: {result['id']}, "
+                f"status: {result['status']}"
+            )
+            return result
+
+        except AlpacaAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to submit limit sell order for {symbol}: {e}")
+            raise AlpacaAPIError(f"Failed to submit limit sell order for {symbol}: {e}")
+
     def close_position(self, symbol: str) -> Dict:
         """
         Close a position by submitting a market sell order.

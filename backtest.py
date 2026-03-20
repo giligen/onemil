@@ -141,6 +141,8 @@ class TradeSimulator:
         partial_profit_r_multiple: float = 1.0,
         partial_profit_fraction: float = 0.5,
         exit_slippage_pct: float = 0.0,
+        marketable_limit_offset: float = 0.0,
+        marketable_limit_offset_pct: float = 0.0,
     ):
         """
         Initialize TradeSimulator.
@@ -157,12 +159,43 @@ class TradeSimulator:
             exit_slippage_pct: Slippage as fraction of stop price, subtracted
                 from stop-loss fills. E.g., 0.001 = 0.1%. Not applied to
                 limit (take-profit) or EOD exits. Default 0.0 (no slippage).
+            marketable_limit_offset: When > 0, cap stop exit slippage at this
+                dollar offset (models self-managed stops with marketable limit
+                sells instead of stop-market orders).
+            marketable_limit_offset_pct: When > 0, cap stop exit slippage at
+                this percentage of stop price (whichever cap is larger is used).
         """
         self.force_close_time_et = force_close_time_et
         self.partial_profit_enabled = partial_profit_enabled
         self.partial_profit_r_multiple = partial_profit_r_multiple
         self.partial_profit_fraction = partial_profit_fraction
         self.exit_slippage_pct = exit_slippage_pct
+        self.marketable_limit_offset = marketable_limit_offset
+        self.marketable_limit_offset_pct = marketable_limit_offset_pct
+
+    def _compute_stop_fill(self, stop_price: float) -> float:
+        """
+        Compute stop-loss fill price with slippage, optionally capped by
+        marketable limit offset (models self-managed stops).
+
+        Without cap: stop_fill = stop_price * (1 - exit_slippage_pct)
+        With cap:    slippage is min(raw_slippage, max(fixed_offset, pct_offset))
+
+        Args:
+            stop_price: The stop-loss trigger price
+
+        Returns:
+            Simulated fill price after slippage
+        """
+        raw_slip = stop_price * self.exit_slippage_pct
+
+        if self.marketable_limit_offset > 0 or self.marketable_limit_offset_pct > 0:
+            fixed_cap = self.marketable_limit_offset
+            pct_cap = stop_price * self.marketable_limit_offset_pct
+            cap = max(fixed_cap, pct_cap)
+            raw_slip = min(raw_slip, cap)
+
+        return stop_price - raw_slip
 
     def simulate(
         self,
@@ -229,7 +262,7 @@ class TradeSimulator:
 
             if hit_stop and hit_target:
                 # Same-bar ambiguity: conservative = assume stop hit first
-                stop_fill = trade.stop_loss * (1 - self.exit_slippage_pct)
+                stop_fill = self._compute_stop_fill(trade.stop_loss)
                 self._exit_trade(trade, bar, 'stop', stop_fill)
                 logger.debug(
                     f"  Bar {i}: ambiguous (stop & target) → stopped out "
@@ -238,7 +271,7 @@ class TradeSimulator:
                 return trade
 
             if hit_stop:
-                stop_fill = trade.stop_loss * (1 - self.exit_slippage_pct)
+                stop_fill = self._compute_stop_fill(trade.stop_loss)
                 self._exit_trade(trade, bar, 'stop', stop_fill)
                 logger.debug(f"  Bar {i}: stopped out at ${stop_fill:.2f}")
                 return trade
@@ -320,7 +353,7 @@ class TradeSimulator:
                         reason = 'partial+stop'
                 else:
                     reason = 'stop'
-                stop_fill = current_stop * (1 - self.exit_slippage_pct)
+                stop_fill = self._compute_stop_fill(current_stop)
                 self._exit_trade(
                     trade, bar, reason, stop_fill, active_shares=active_shares
                 )
@@ -329,7 +362,7 @@ class TradeSimulator:
 
             # On same-bar stop+partial ambiguity: conservative = stop wins
             if hit_stop and hit_partial:
-                stop_fill = current_stop * (1 - self.exit_slippage_pct)
+                stop_fill = self._compute_stop_fill(current_stop)
                 self._exit_trade(
                     trade, bar, 'stop', stop_fill, active_shares=active_shares
                 )
@@ -542,11 +575,26 @@ class BacktestRunner:
         )
         self.exit_slippage_pct = resolved_exit_slippage_pct
 
+        # Marketable limit offset: caps stop exit slippage when self-managed
+        # stops are configured. Models the real-time WebSocket + limit sell
+        # strategy instead of uncapped stop-market fills.
+        sms_cfg = trading_cfg.get("self_managed_stops", {})
+        self.marketable_limit_offset = float(sms_cfg.get("marketable_limit_offset", 0.0))
+        self.marketable_limit_offset_pct = float(sms_cfg.get("marketable_limit_offset_pct", 0.0))
+        sms_enabled = bool(sms_cfg.get("enabled", False))
+
         if self.entry_slippage_pct > 0 or resolved_exit_slippage_pct > 0:
-            logger.info(
+            slip_msg = (
                 f"Slippage model: entry +{self.entry_slippage_pct:.2%}, "
                 f"exit -{resolved_exit_slippage_pct:.2%} (stop only)"
             )
+            if sms_enabled and (self.marketable_limit_offset > 0 or self.marketable_limit_offset_pct > 0):
+                slip_msg += (
+                    f", capped by marketable limit offset "
+                    f"${self.marketable_limit_offset}/"
+                    f"{self.marketable_limit_offset_pct:.1%}"
+                )
+            logger.info(slip_msg)
 
         # In realistic mode, default force_close to 15:45 ET
         if force_close_time_et is not None:
@@ -556,16 +604,21 @@ class BacktestRunner:
         else:
             self.force_close_time_et = None
 
-        # Wire force_close, partial profit, and exit slippage into the simulator
+        # Wire force_close, partial profit, exit slippage, and marketable
+        # limit offset into the simulator
         if simulator is not None:
             self.simulator = simulator
         else:
+            ml_offset = self.marketable_limit_offset if sms_enabled else 0.0
+            ml_offset_pct = self.marketable_limit_offset_pct if sms_enabled else 0.0
             self.simulator = TradeSimulator(
                 force_close_time_et=self.force_close_time_et,
                 partial_profit_enabled=partial_profit_enabled,
                 partial_profit_r_multiple=partial_profit_r_multiple,
                 partial_profit_fraction=partial_profit_fraction,
                 exit_slippage_pct=resolved_exit_slippage_pct,
+                marketable_limit_offset=ml_offset,
+                marketable_limit_offset_pct=ml_offset_pct,
             )
 
     _ET = pytz.timezone('US/Eastern')
