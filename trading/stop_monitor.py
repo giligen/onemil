@@ -362,6 +362,9 @@ class StopMonitor:
         Execute a stop exit: cancel bracket legs, submit marketable limit sell.
 
         Uses _exit_in_progress flag to prevent double-fire from rapid ticks.
+        All synchronous API calls are dispatched via run_in_executor to avoid
+        blocking the WebSocket event loop (which would delay processing of
+        other symbols' price ticks).
 
         Args:
             symbol: Stock symbol
@@ -376,19 +379,23 @@ class StopMonitor:
                 return
             self._exit_in_progress[symbol] = True
 
+        loop = asyncio.get_event_loop()
         exit_price = 0.0
         order_id = ""
         exit_reason = "stop_loss"
 
         try:
             # Cancel the bracket legs (TP and safety-net SL)
+            # Run in executor to avoid blocking the event loop
             for leg_id, leg_name in [
                 (watch.tp_leg_id, "TP"),
                 (watch.sl_leg_id, "SL"),
             ]:
                 if leg_id:
                     try:
-                        self._alpaca.cancel_order(leg_id)
+                        await loop.run_in_executor(
+                            None, self._alpaca.cancel_order, leg_id
+                        )
                         logger.info(
                             f"StopMonitor: {symbol} cancelled {leg_name} leg {leg_id}"
                         )
@@ -399,13 +406,16 @@ class StopMonitor:
                             f"(may be filled): {e}"
                         )
 
-            # Submit marketable limit sell
+            # Submit marketable limit sell (in executor)
             limit_price = self.compute_limit_price(trigger_price)
             try:
-                result = self._alpaca.submit_limit_sell_order(
-                    symbol=symbol,
-                    qty=watch.shares,
-                    limit_price=limit_price,
+                result = await loop.run_in_executor(
+                    None,
+                    lambda: self._alpaca.submit_limit_sell_order(
+                        symbol=symbol,
+                        qty=watch.shares,
+                        limit_price=limit_price,
+                    ),
                 )
                 order_id = result.get("id", "")
                 exit_price = limit_price
@@ -419,9 +429,11 @@ class StopMonitor:
                     f"StopMonitor: {symbol} limit sell failed: {e} — "
                     f"falling back to close_position()"
                 )
-                # Fallback: market close
+                # Fallback: market close (in executor)
                 try:
-                    fallback = self._alpaca.close_position(symbol)
+                    fallback = await loop.run_in_executor(
+                        None, self._alpaca.close_position, symbol
+                    )
                     order_id = fallback.get("id", "")
                     exit_price = trigger_price
                     exit_reason = "stop_loss_fallback"

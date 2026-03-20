@@ -144,7 +144,8 @@ class OrderExecutor:
         }
 
     def submit_buy_stop_bracket_order(
-        self, plan: TradePlan, slippage_pct: float = 0.02
+        self, plan: TradePlan, slippage_pct: float = 0.02,
+        sl_override: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Submit a buy-stop bracket order for a trade plan.
@@ -165,18 +166,24 @@ class OrderExecutor:
         Args:
             plan: TradePlan with entry (breakout_level), stop, target, sizing
             slippage_pct: Maximum slippage above stop_price (default 2.0%)
+            sl_override: If set, use this SL price on the bracket instead of
+                plan.stop_loss_price. Used by self-managed stops to place a
+                wide safety-net SL while keeping plan.stop_loss_price (and
+                risk_per_share/total_risk) at the real stop level.
 
         Returns:
             Dict with order details if successful, None on failure
         """
         stop_price = plan.entry_price
         limit_price = round(stop_price * (1 + slippage_pct), 2)
+        bracket_sl = sl_override if sl_override is not None else plan.stop_loss_price
 
         logger.info(
             f"{plan.symbol}: Submitting buy-stop bracket order — "
             f"BUY {plan.shares} stop @ ${stop_price:.2f}, "
             f"limit ${limit_price:.2f}, "
-            f"SL ${plan.stop_loss_price:.2f}, TP ${plan.take_profit_price:.2f}"
+            f"SL ${bracket_sl:.2f}, TP ${plan.take_profit_price:.2f}"
+            f"{' (safety-net SL)' if sl_override else ''}"
         )
 
         try:
@@ -187,7 +194,7 @@ class OrderExecutor:
                 stop_price=stop_price,
                 limit_price=limit_price,
                 tp_price=plan.take_profit_price,
-                sl_price=plan.stop_loss_price,
+                sl_price=bracket_sl,
             )
         except Exception as e:
             logger.error(f"{plan.symbol}: Buy-stop order submission failed: {e}")

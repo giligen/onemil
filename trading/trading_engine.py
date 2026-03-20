@@ -573,6 +573,31 @@ class TradingEngine:
                 f"reason={event.exit_reason}, order={event.order_id}"
             )
 
+            # Poll exit order for ACTUAL fill price (event.exit_price is the
+            # limit price, but the fill is typically better on a marketable limit)
+            actual_exit_price = event.exit_price
+            if event.order_id:
+                for poll_attempt in range(5):
+                    time_mod.sleep(0.5)
+                    try:
+                        exit_order = self.alpaca.get_order(event.order_id)
+                        if exit_order.get('status') == 'filled':
+                            fill = exit_order.get('filled_avg_price')
+                            if fill is not None:
+                                actual_exit_price = fill
+                                logger.info(
+                                    f"{event.symbol}: StopMonitor exit filled at "
+                                    f"${fill:.2f} (limit was ${event.exit_price:.2f})"
+                                )
+                                break
+                    except Exception:
+                        pass
+                else:
+                    logger.warning(
+                        f"{event.symbol}: StopMonitor exit order fill price unavailable "
+                        f"after 5 polls — using limit ${event.exit_price:.2f}"
+                    )
+
             # Update DB trade record
             if event.trade_db_id:
                 try:
@@ -586,10 +611,10 @@ class TradingEngine:
 
                     if trade_record and trade_record.get('fill_price'):
                         qty_for_pnl = trade_record.get('filled_qty') or trade_record['shares']
-                        pnl = (event.exit_price - trade_record['fill_price']) * qty_for_pnl
-                        pnl_pct = (event.exit_price / trade_record['fill_price'] - 1) * 100
+                        pnl = (actual_exit_price - trade_record['fill_price']) * qty_for_pnl
+                        pnl_pct = (actual_exit_price / trade_record['fill_price'] - 1) * 100
                         self.db.update_trade(event.trade_db_id, {
-                            'exit_price': event.exit_price,
+                            'exit_price': actual_exit_price,
                             'exit_reason': event.exit_reason,
                             'exited_at': datetime.now(timezone.utc),
                             'pnl': pnl,
@@ -605,7 +630,7 @@ class TradingEngine:
                             self.notifier.notify_position_closed(
                                 symbol=event.symbol,
                                 entry_price=trade_record['fill_price'],
-                                exit_price=event.exit_price,
+                                exit_price=actual_exit_price,
                                 shares=qty_for_pnl,
                                 pnl=pnl,
                                 exit_reason=event.exit_reason,
@@ -622,7 +647,9 @@ class TradingEngine:
 
     def _sync_closed_positions(self) -> None:
         """Detect bracket exits (SL/TP hit) and update DB + circuit breaker."""
-        # Process StopMonitor exits first — these are higher priority
+        # Process StopMonitor exits first — updates DB with exit_price.
+        # Must happen BEFORE we fetch open_trades, otherwise trades just
+        # closed by StopMonitor still appear as "open" and get double-processed.
         self._process_stop_monitor_exits()
 
         today = date.today().isoformat()
@@ -873,22 +900,21 @@ class TradingEngine:
         is_thin = self.market_regime and self.market_regime.is_thin_liquidity(date.today())
 
         # Self-managed stops: widen bracket SL to safety-net level,
-        # real stop is monitored by StopMonitor via WebSocket
+        # real stop is monitored by StopMonitor via WebSocket.
+        # Pass safety-net SL as override — DON'T mutate plan, so DB records
+        # correct risk_per_share and stop_loss_price.
         real_stop_level = plan.stop_loss_price
+        sl_override = None
         if self.stop_monitor:
-            safety_net_sl = round(plan.entry_price * (1 - self.safety_net_sl_pct), 2)
+            sl_override = round(plan.entry_price * (1 - self.safety_net_sl_pct), 2)
             logger.info(
                 f"{symbol}: Self-managed stops — real stop ${real_stop_level:.2f}, "
-                f"safety-net SL ${safety_net_sl:.2f} ({self.safety_net_sl_pct:.0%})"
+                f"safety-net SL ${sl_override:.2f} ({self.safety_net_sl_pct:.0%})"
             )
-            # Temporarily set plan SL to safety-net for bracket submission
-            plan.stop_loss_price = safety_net_sl
 
-        result = self.executor.submit_buy_stop_bracket_order(plan)
-
-        # Restore real stop on plan after submission
-        if self.stop_monitor:
-            plan.stop_loss_price = real_stop_level
+        result = self.executor.submit_buy_stop_bracket_order(
+            plan, sl_override=sl_override
+        )
 
         if result is not None:
             # NOTE: _daily_trade_count and mark_traded are deferred to fill
