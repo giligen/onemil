@@ -1345,13 +1345,15 @@ class TradingEngine:
             else:
                 time_mod.sleep(self.pattern_poll_interval)
 
+        # Stop StopMonitor regardless of exit reason (market close or SIGTERM)
+        if self.stop_monitor:
+            self.stop_monitor.stop()
+
         # Graceful shutdown: force-close all positions
         if self.shutdown_event and self.shutdown_event.is_set():
             logger.info("Shutdown signal received — force-closing all positions...")
             self._force_close_all()
             self.save_daily_summary()
-            if self.stop_monitor:
-                self.stop_monitor.stop()
             logger.info("Graceful shutdown complete")
 
     def get_daily_stats(self) -> Dict[str, Any]:
