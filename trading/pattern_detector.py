@@ -457,6 +457,13 @@ class BullFlagDetector:
         flag_end_idx = None
         flag_start_idx = None
         green_count = 0
+        # Skip up to 2 green bars at the end — these are the start of the
+        # new move after the pullback. Without this, setups are only detected
+        # on the LAST red bar of the flag, not on the bounce that follows.
+        # The backtest catches these because it scans at every bar including
+        # the red ones; the live scanner often sees the green bounce bar.
+        initial_green_skip = 0
+        max_initial_green_skip = 2
 
         i = end_idx
         while i >= 0:
@@ -477,8 +484,16 @@ class BullFlagDetector:
                     else:
                         break  # Too many green candles, pullback ends
                 else:
-                    # No red candle found yet, this isn't a pullback
-                    return None
+                    # No red candle found yet — skip initial green bars
+                    # (we may be looking at the bounce after a pullback)
+                    if initial_green_skip < max_initial_green_skip:
+                        initial_green_skip += 1
+                    else:
+                        logger.debug(
+                            f"{bars.iloc[end_idx].get('symbol', '?')}: "
+                            f"No valid pullback found"
+                        )
+                        return None
             i -= 1
 
         if flag_end_idx is None or flag_start_idx is None:
