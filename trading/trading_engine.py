@@ -358,7 +358,9 @@ class TradingEngine:
                 # Moving stop above the technical level puts it in no-man's land
                 # where normal price noise triggers it. Dollar risk increases
                 # but the stop is at a price that has structural meaning.
+                # When trailing stop is enabled, skip TP adjustment — trail handles exits.
                 setup = pending.get('setup')
+                trail_active = self.trailing_stop_enabled and self.stop_monitor
                 if fill_price and plan and setup and fill_price > setup.breakout_level:
                     entry_gap = fill_price - setup.breakout_level
                     actual_risk = round(fill_price - plan.stop_loss_price, 2)
@@ -366,55 +368,59 @@ class TradingEngine:
                     logger.info(
                         f"{symbol}: Gap fill +${entry_gap:.2f} — "
                         f"stop KEPT at ${plan.stop_loss_price:.2f} (technical level), "
-                        f"target ${plan.take_profit_price:.2f} → ${adjusted_target:.2f}, "
                         f"risk ${plan.risk_per_share:.2f} → ${actual_risk:.2f}/sh"
+                        f"{' (trail handles TP)' if trail_active else f', target ${plan.take_profit_price:.2f} → ${adjusted_target:.2f}'}"
                     )
-                    gap_adjust_failed = False
-                    try:
-                        order_detail = self.alpaca.get_order(order_id)
-                        sl_leg, tp_leg = self._identify_bracket_legs(
-                            order_detail.get('legs', []),
-                            expected_sl=plan.stop_loss_price,
-                            expected_tp=plan.take_profit_price,
-                        )
 
-                        # Stop stays at original — no replacement needed
-                        # Only adjust target upward
-                        if tp_leg:
-                            self.alpaca.replace_order_limit_price(tp_leg['id'], adjusted_target)
-                            logger.info(f"{symbol}: Target adjusted to ${adjusted_target:.2f}")
-                        else:
-                            logger.error(f"{symbol}: No TP leg found — cannot adjust target")
+                    # When trailing stop is active, skip TP adjustment — trail handles exits.
+                    # The TP leg will be cancelled after StopMonitor registration below.
+                    if not trail_active:
+                        gap_adjust_failed = False
+                        try:
+                            order_detail = self.alpaca.get_order(order_id)
+                            sl_leg, tp_leg = self._identify_bracket_legs(
+                                order_detail.get('legs', []),
+                                expected_sl=plan.stop_loss_price,
+                                expected_tp=plan.take_profit_price,
+                            )
+
+                            # Stop stays at original — no replacement needed
+                            # Only adjust target upward
+                            if tp_leg:
+                                self.alpaca.replace_order_limit_price(tp_leg['id'], adjusted_target)
+                                logger.info(f"{symbol}: Target adjusted to ${adjusted_target:.2f}")
+                            else:
+                                logger.error(f"{symbol}: No TP leg found — cannot adjust target")
+                                gap_adjust_failed = True
+
+                            if not gap_adjust_failed and trade_record:
+                                self.db.update_trade(trade_record['id'], {
+                                    'take_profit_price': adjusted_target,
+                                })
+                        except Exception as e:
+                            logger.error(f"{symbol}: Failed to adjust target after gap fill: {e}")
                             gap_adjust_failed = True
 
-                        if not gap_adjust_failed and trade_record:
-                            self.db.update_trade(trade_record['id'], {
-                                'take_profit_price': adjusted_target,
-                            })
-                    except Exception as e:
-                        logger.error(f"{symbol}: Failed to adjust target after gap fill: {e}")
-                        gap_adjust_failed = True
-
-                    if gap_adjust_failed:
-                        error_msg = (
-                            f"{symbol}: GAP FILL TARGET ADJUSTMENT FAILED — "
-                            f"entry gap +${entry_gap:.2f}, actual risk "
-                            f"${actual_risk:.2f}/sh. Target not updated."
-                        )
-                        logger.error(error_msg)
-                        if self.notifier:
-                            self.notifier.notify_error(error_msg, component="GapFill")
-                        self._emergency_close_position(
-                            symbol, order_id, fill_price, actual_qty, trade_record,
-                            exit_reason='gap_adjust_failed',
-                        )
-                        last_fill_result = {
-                            'status': 'gap_adjust_failed',
-                            'symbol': symbol,
-                            'fill_price': fill_price,
-                            'reason': 'leg_replacement_failed',
-                        }
-                        continue
+                        if gap_adjust_failed:
+                            error_msg = (
+                                f"{symbol}: GAP FILL TARGET ADJUSTMENT FAILED — "
+                                f"entry gap +${entry_gap:.2f}, actual risk "
+                                f"${actual_risk:.2f}/sh. Target not updated."
+                            )
+                            logger.error(error_msg)
+                            if self.notifier:
+                                self.notifier.notify_error(error_msg, component="GapFill")
+                            self._emergency_close_position(
+                                symbol, order_id, fill_price, actual_qty, trade_record,
+                                exit_reason='gap_adjust_failed',
+                            )
+                            last_fill_result = {
+                                'status': 'gap_adjust_failed',
+                                'symbol': symbol,
+                                'fill_price': fill_price,
+                                'reason': 'leg_replacement_failed',
+                            }
+                            continue
 
                 # Register with StopMonitor for real-time stop watching
                 if self.stop_monitor and pending.get('real_stop_level'):
