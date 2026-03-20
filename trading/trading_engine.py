@@ -1241,6 +1241,25 @@ class TradingEngine:
                 symbol = pos['symbol']
                 close_succeeded = False
 
+                # Cancel any open sell orders (TP/SL legs) holding shares
+                # before attempting close_position — otherwise Alpaca rejects
+                # with "insufficient qty available" (shares held by orders).
+                try:
+                    from alpaca.trading.requests import GetOrdersRequest
+                    from alpaca.trading.enums import QueryOrderStatus
+                    open_orders = self.alpaca.trading_client.get_orders(
+                        GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol])
+                    )
+                    for oo in open_orders:
+                        try:
+                            self.alpaca.cancel_order(str(oo.id))
+                        except Exception:
+                            pass
+                    if open_orders:
+                        time_mod.sleep(1)  # Let cancels settle
+                except Exception as e:
+                    logger.warning(f"{symbol}: Failed to cancel open orders before force-close: {e}")
+
                 close_order_id = None
                 for attempt in range(FORCE_CLOSE_RETRIES):
                     try:
