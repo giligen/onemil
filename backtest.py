@@ -710,6 +710,7 @@ class BacktestRunner:
         self, symbol: str, bars: pd.DataFrame, trade_date: str,
         avg_daily_volume: Optional[int] = None,
         volume_profile: Optional[Dict[str, int]] = None,
+        prev_close: Optional[float] = None,
     ) -> BacktestResult:
         """
         Run backtest for a symbol over a day's bars.
@@ -724,13 +725,19 @@ class BacktestRunner:
                 (from universe table; None = skip rvol filter)
             volume_profile: Dict mapping time_bucket ('09:30', etc.) to avg 15-min
                 volume (from DB volume_profiles table; None = skip bucket rvol)
+            prev_close: Previous day's close price. When provided, simulates
+                real-time qualification: pattern scanning only starts after the
+                bar where (bar_high - prev_close) / prev_close >= qualification_pct.
+                This eliminates look-ahead bias where the backtest scans from bar 0
+                knowing the stock WILL move 10%+ (from the daily bar pre-filter).
 
         Returns:
             BacktestResult with trades, patterns, and P&L
         """
         if self.realistic:
             return self._run_realistic(symbol, bars, trade_date,
-                                       avg_daily_volume, volume_profile)
+                                       avg_daily_volume, volume_profile,
+                                       prev_close=prev_close)
         return self._run_fantasy(symbol, bars, trade_date)
 
     def _run_fantasy(self, symbol: str, bars: pd.DataFrame, trade_date: str) -> BacktestResult:
@@ -899,15 +906,23 @@ class BacktestRunner:
         self, symbol: str, bars: pd.DataFrame, trade_date: str,
         avg_daily_volume: Optional[int] = None,
         volume_profile: Optional[Dict[str, int]] = None,
+        prev_close: Optional[float] = None,
     ) -> BacktestResult:
         """
         Realistic backtest: detect_setup() fires before breakout, places pending
         buy-stop at flag_high, fills at max(bar_open, breakout_level).
 
+        When prev_close is provided, simulates real-time qualification:
+        pattern scanning only starts after the bar where the stock's high
+        exceeds prev_close * (1 + intraday_change_pct_min). This matches
+        production where the scanner must qualify a stock before the trading
+        engine sees it.
+
         Loop:
-        1. Check pending buy-stop against current bar
-        2. If no trade and no pending order, scan for new setup
-        3. Apply filters (min_price, midday, last_entry_time)
+        1. Check if stock has qualified (real-time simulation)
+        2. Check pending buy-stop against current bar
+        3. If no trade and no pending order, scan for new setup
+        4. Apply filters (min_price, midday, last_entry_time)
         """
         result = BacktestResult(
             symbol=symbol,
@@ -927,9 +942,36 @@ class BacktestRunner:
         pending_order: Optional[PendingBuyStop] = None
         last_end = len(bars) - 1
 
-        logger.info(f"{symbol}: Scanning {len(bars)} bars for setups (realistic mode)...")
+        # Real-time qualification gate: simulate the scanner's qualification step.
+        # Without prev_close, all bars are scanned (backward compatible).
+        # With prev_close, scanning starts only after the stock hits the threshold.
+        from config import Config
+        _cfg = Config._load_yaml_only()
+        qualification_pct = float(
+            _cfg.get("scanner", {}).get("intraday_change_pct_min", 10.0)
+        ) / 100.0  # Convert 10.0 → 0.10
+        qualified = prev_close is None or prev_close <= 0
+        qualification_bar = 0
+
+        logger.info(
+            f"{symbol}: Scanning {len(bars)} bars for setups (realistic mode)"
+            f"{f', qualification at +{qualification_pct:.0%} from ${prev_close:.2f}' if not qualified else ''}..."
+        )
 
         for i in range(self.MIN_BARS_FOR_SETUP - 1, last_end):
+            # Real-time qualification check
+            if not qualified:
+                bar_high = bars.iloc[i]['high']
+                move = (bar_high - prev_close) / prev_close
+                if move >= qualification_pct:
+                    qualified = True
+                    qualification_bar = i
+                    logger.info(
+                        f"  Bar {i}: QUALIFIED at +{move:.1%} "
+                        f"(high=${bar_high:.2f} vs prev_close=${prev_close:.2f})"
+                    )
+                else:
+                    continue  # Not qualified yet — skip all scanning
             bar = bars.iloc[i]
             bar_time_et = self._get_bar_time_et(bar['timestamp'])
 

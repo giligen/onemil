@@ -155,7 +155,7 @@ def find_big_movers(
                 continue
             if end_date and bar_date > end_date:
                 continue
-            movers.append((symbol, bar_date))
+            movers.append((symbol, bar_date, prev_close or 0.0))
             logger.debug(
                 f"  {symbol} {bar_date}: move {move:.1%} "
                 f"(low=${low:.2f}, high=${high:.2f})"
@@ -320,9 +320,12 @@ def run_batch_backtest(
     total = len(movers)
 
     # Group movers by date for regime check and circuit breaker tracking
-    movers_by_date: Dict[date, List[Tuple[str, date]]] = defaultdict(list)
-    for sym, d in movers:
-        movers_by_date[d].append((sym, d))
+    # Movers are (symbol, date, prev_close) tuples
+    movers_by_date: Dict[date, List[tuple]] = defaultdict(list)
+    for mover in movers:
+        sym, d = mover[0], mover[1]
+        prev_close = mover[2] if len(mover) > 2 else 0.0
+        movers_by_date[d].append((sym, d, prev_close))
 
     idx = 0
     regime_skipped = 0
@@ -377,7 +380,9 @@ def run_batch_backtest(
         stopped_for_day = False
         date_trade_count = 0
 
-        for symbol, _ in movers_by_date[trade_date]:
+        for mover_tuple in movers_by_date[trade_date]:
+            symbol = mover_tuple[0]
+            prev_close = mover_tuple[2] if len(mover_tuple) > 2 else 0.0
             idx += 1
             date_str = trade_date.isoformat()
 
@@ -411,7 +416,8 @@ def run_batch_backtest(
                 vol_profile = volume_profiles.get(symbol) if volume_profiles else None
                 result = runner.run(symbol, bars, date_str,
                                     avg_daily_volume=avg_vol,
-                                    volume_profile=vol_profile)
+                                    volume_profile=vol_profile,
+                                    prev_close=prev_close if prev_close > 0 else None)
                 results.append(result)
 
                 # Track trades for max trades per day cap

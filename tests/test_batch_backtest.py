@@ -175,7 +175,8 @@ class TestFindBigMovers:
             "MMM": [{"date": date(2026, 3, 2), "open": 5, "high": 6, "low": 5, "close": 5.5, "volume": 100}],
         }
         movers = find_big_movers(bars)
-        assert movers == [
+        # Movers are (symbol, date, prev_close) tuples — check symbol and date
+        assert [(m[0], m[1]) for m in movers] == [
             ("AAA", date(2026, 3, 1)),
             ("ZZZ", date(2026, 3, 1)),
             ("MMM", date(2026, 3, 2)),
