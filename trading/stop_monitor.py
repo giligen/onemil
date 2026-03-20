@@ -292,10 +292,17 @@ class StopMonitor:
                 self._stream = StockDataStream(
                     self._api_key, self._api_secret
                 )
-                self._stream.subscribe_trades(
-                    self._on_trade, *self._get_watched_symbols()
-                )
-                logger.info("StopMonitor: WebSocket connecting...")
+                # Subscribe to all currently watched symbols.
+                # If empty, subscribe_trades with no symbols is a no-op;
+                # add_watch will subscribe dynamically via _subscribe_symbol.
+                watched = self._get_watched_symbols()
+                if watched:
+                    self._stream.subscribe_trades(
+                        self._on_trade, *watched
+                    )
+                    logger.info(f"StopMonitor: WebSocket connecting with {len(watched)} symbols...")
+                else:
+                    logger.info("StopMonitor: WebSocket connecting (no symbols yet)...")
                 await self._stream._run_forever()
 
             except Exception as e:
@@ -446,6 +453,10 @@ class StopMonitor:
                         f"StopMonitor: {symbol} fallback close also failed: {e2} — "
                         f"safety-net SL is the last line of defense"
                     )
+                    # Remove watch to prevent infinite retry on every tick
+                    # (likely TP already filled — no position to sell)
+                    with self._watch_lock:
+                        self._watches.pop(symbol, None)
                     with self._exit_lock:
                         self._exit_in_progress[symbol] = False
                     return

@@ -704,6 +704,10 @@ class TradingEngine:
                             'pnl_pct': pnl_pct,
                         })
                         self.position_manager.record_trade_pnl(pnl)
+                        # Remove StopMonitor watch — position is gone (TP or
+                        # safety-net SL filled on Alpaca side)
+                        if self.stop_monitor:
+                            self.stop_monitor.remove_watch(symbol)
                         logger.info(
                             f"{symbol}: {exit_reason} — exit ${exit_price:.2f}, "
                             f"P&L ${pnl:+,.2f} ({pnl_pct:+.1f}%)"
@@ -1496,6 +1500,42 @@ class TradingEngine:
                     'placed_at': trade.get('created_at', datetime.now(timezone.utc)),
                 }
                 logger.info(f"{symbol}: Recovered pending order {order_id} from DB (plan={'yes' if plan else 'no'})")
+
+        # Re-register filled-but-open positions with StopMonitor
+        # (crash recovery: service restarted with live positions)
+        if self.stop_monitor:
+            for trade in trades_today:
+                symbol = trade['symbol']
+                if (trade.get('fill_price') is not None
+                        and trade.get('exit_price') is None
+                        and trade.get('real_stop_loss_price') is not None):
+                    order_id = trade.get('order_id')
+                    try:
+                        order_detail = self.alpaca.get_order(order_id)
+                        sl_leg, tp_leg = self._identify_bracket_legs(
+                            order_detail.get('legs', []),
+                            expected_sl=trade.get('entry_price', 0) * (1 - self.safety_net_sl_pct),
+                            expected_tp=trade.get('take_profit_price'),
+                        )
+                        tp_leg_id = tp_leg['id'] if tp_leg else ''
+                        sl_leg_id = sl_leg['id'] if sl_leg else ''
+                        self.stop_monitor.add_watch(
+                            symbol=symbol,
+                            stop_price=trade['real_stop_loss_price'],
+                            shares=trade.get('filled_qty') or trade['shares'],
+                            tp_leg_id=tp_leg_id,
+                            sl_leg_id=sl_leg_id,
+                            trade_db_id=trade['id'],
+                        )
+                        logger.info(
+                            f"{symbol}: Crash recovery — re-registered StopMonitor watch "
+                            f"stop=${trade['real_stop_loss_price']:.2f}"
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"{symbol}: Crash recovery — failed to re-register "
+                            f"StopMonitor watch: {e} (safety-net SL active)"
+                        )
 
         # Detect orphan positions from prior days
         self._close_orphan_positions(trades_today)
