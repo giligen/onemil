@@ -1173,29 +1173,6 @@ class BacktestRunner:
                             pattern=plan.pattern,
                         )
 
-                    # MACD zone filter: skip or scale risk based on MACD histogram
-                    if self.macd_zones_enabled:
-                        zone_mult = self._get_macd_zone_multiplier(
-                            symbol, bars, i, fill_price
-                        )
-                        if zone_mult == 0.0:
-                            pending_order = None
-                            continue
-                        elif zone_mult != 1.0:
-                            scaled_shares = max(1, int(plan.shares * zone_mult))
-                            plan = TradePlan(
-                                symbol=plan.symbol,
-                                entry_price=plan.entry_price,
-                                stop_loss_price=plan.stop_loss_price,
-                                take_profit_price=plan.take_profit_price,
-                                risk_per_share=plan.risk_per_share,
-                                reward_per_share=plan.reward_per_share,
-                                risk_reward_ratio=plan.risk_reward_ratio,
-                                shares=scaled_shares,
-                                total_risk=plan.risk_per_share * scaled_shares,
-                                pattern=plan.pattern,
-                            )
-
                     logger.info(
                         f"  BUY-STOP TRIGGERED at bar {i}: "
                         f"planned ${pending_order.breakout_level:.2f}, "
@@ -1305,6 +1282,29 @@ class BacktestRunner:
                             f"< {self.relative_volume_min:.1f}x at bar {i}"
                         )
                         continue
+
+                # MACD zone filter: skip dead zone, scale risk on strong zones
+                # Checked at setup time (matches production — decide before placing order)
+                if self.macd_zones_enabled:
+                    zone_mult = self._get_macd_zone_multiplier(
+                        symbol, bars, i, plan.entry_price
+                    )
+                    if zone_mult == 0.0:
+                        continue  # dead zone — don't place order
+                    elif zone_mult != 1.0:
+                        scaled_shares = max(1, int(plan.shares * zone_mult))
+                        plan = TradePlan(
+                            symbol=plan.symbol,
+                            entry_price=plan.entry_price,
+                            stop_loss_price=plan.stop_loss_price,
+                            take_profit_price=plan.take_profit_price,
+                            risk_per_share=plan.risk_per_share,
+                            reward_per_share=plan.reward_per_share,
+                            risk_reward_ratio=plan.risk_reward_ratio,
+                            shares=scaled_shares,
+                            total_risk=plan.risk_per_share * scaled_shares,
+                            pattern=plan.pattern,
+                        )
 
                 pending_order = PendingBuyStop(
                     setup=setup,
