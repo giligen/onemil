@@ -126,6 +126,6 @@ trading:
     dead_zone_min_pct: -0.2           # skip trades with MACD% in [-0.2%, +0.1%]
     dead_zone_max_pct: 0.1
     strong_neg_threshold_pct: -0.5    # MACD% below this = deep pullback (loaded spring)
-    strong_neg_multiplier: 1.25       # 1.25x risk on deep pullbacks
+    strong_neg_multiplier: 1.5         # 1.5x risk on deep pullbacks (best Sharpe)
     strong_pos_threshold_pct: 0.5     # MACD% above this = strong momentum
-    strong_pos_multiplier: 1.5        # 1.5x risk on strong momentum
+    strong_pos_multiplier: 1.25       # 1.25x risk on strong momentum
