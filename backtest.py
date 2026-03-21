@@ -693,7 +693,6 @@ class BacktestRunner:
 
         self.early_exit_after_trade = early_exit_after_trade
         self.realistic = realistic
-        self.last_entry_time_et = last_entry_time_et
         self.setup_expiry_bars = setup_expiry_bars
 
         # Slippage model: percentage-based (of stock price).
@@ -701,6 +700,14 @@ class BacktestRunner:
         # Exit: stop-market fills at price * (1 - pct) — selling into bid.
         # Percentage scales naturally with stock price ($0.005 on $5, $0.02 on $20).
         trading_cfg = cfg.get("trading", {})
+
+        # Load last_entry_time from config (override default if set)
+        if last_entry_time_et == (15, 0):  # default — check config
+            let_str = trading_cfg.get("last_entry_time", "15:00")
+            _h, _m = let_str.split(':')
+            self.last_entry_time_et = (int(_h), int(_m))
+        else:
+            self.last_entry_time_et = last_entry_time_et
         self.entry_slippage_pct = entry_slippage if entry_slippage is not None else float(
             trading_cfg.get("entry_slippage_pct", 0.0)
         )
