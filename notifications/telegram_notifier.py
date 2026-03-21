@@ -235,6 +235,10 @@ class TelegramNotifier:
             'stop_loss_fallback': '🛑 Stop (Fallback)',
             'force_close': '🕐 Force Close',
             'eod_close': '🕐 End of Day',
+            'exhaustion_partial': '⚡ Exhaustion Partial',
+            'exhaust+trail_stop': '⚡📈 Exhaust + Trail',
+            'exhaust+stop_loss': '⚡🛑 Exhaust + Stop',
+            'exhaust+force_close': '⚡🕐 Exhaust + Close',
         }
         reason_label = reason_map.get(exit_reason, exit_reason)
 

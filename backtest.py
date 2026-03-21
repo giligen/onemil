@@ -25,6 +25,13 @@ from dotenv import load_dotenv
 from data_sources.alpaca_client import AlpacaClient
 from trading.pattern_detector import BullFlagDetector, BullFlagPattern, BullFlagSetup
 from trading.trade_planner import TradePlanner, TradePlan
+from trading.exhaustion_signals import (
+    check_exhaustion,
+    sig_volume_divergence,
+    sig_climax_candle,
+    sig_shrinking_bodies,
+    sig_shooting_star,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -201,87 +208,12 @@ class TradeSimulator:
         }
 
     # ------------------------------------------------------------------
-    # Exhaustion signal detectors
+    # Exhaustion signal detectors (delegated to shared module)
     # ------------------------------------------------------------------
 
     def _check_exhaustion(self, bars: pd.DataFrame, idx: int) -> bool:
         """Check if any enabled exhaustion signal fires at bar idx."""
-        sigs = self.exhaustion_signals
-        if sigs.get('volume_divergence') and self._sig_volume_divergence(bars, idx):
-            return True
-        if sigs.get('climax_candle') and self._sig_climax_candle(bars, idx):
-            return True
-        if sigs.get('shrinking_bodies') and self._sig_shrinking_bodies(bars, idx):
-            return True
-        if sigs.get('shooting_star') and self._sig_shooting_star(bars, idx):
-            return True
-        return False
-
-    @staticmethod
-    def _sig_volume_divergence(bars: pd.DataFrame, idx: int, lookback: int = 3) -> bool:
-        """Volume declining over lookback bars while price makes higher highs."""
-        if idx < lookback:
-            return False
-        for j in range(1, lookback + 1):
-            curr = idx - lookback + j
-            prev = curr - 1
-            if prev < 0:
-                return False
-            if bars.iloc[curr]['volume'] >= bars.iloc[prev]['volume']:
-                return False
-            if bars.iloc[curr]['high'] < bars.iloc[prev]['high'] - 0.01:
-                return False
-        return True
-
-    @staticmethod
-    def _sig_climax_candle(bars: pd.DataFrame, idx: int,
-                           lookback: int = 5, body_mult: float = 2.0,
-                           vol_mult: float = 2.0) -> bool:
-        """Body AND volume both > mult × average of previous lookback bars."""
-        if idx < lookback:
-            return False
-        curr_body = abs(bars.iloc[idx]['close'] - bars.iloc[idx]['open'])
-        curr_vol = bars.iloc[idx]['volume']
-        avg_body = sum(
-            abs(bars.iloc[idx - j]['close'] - bars.iloc[idx - j]['open'])
-            for j in range(1, lookback + 1)
-        ) / lookback
-        avg_vol = sum(bars.iloc[idx - j]['volume'] for j in range(1, lookback + 1)) / lookback
-        if avg_body <= 0 or avg_vol <= 0:
-            return False
-        return curr_body >= avg_body * body_mult and curr_vol >= avg_vol * vol_mult
-
-    @staticmethod
-    def _sig_shrinking_bodies(bars: pd.DataFrame, idx: int,
-                              lookback: int = 3, shrink_ratio: float = 0.5) -> bool:
-        """Current body < shrink_ratio × body from lookback bars ago, price still near highs."""
-        if idx < lookback:
-            return False
-        curr_body = abs(bars.iloc[idx]['close'] - bars.iloc[idx]['open'])
-        prev_body = abs(bars.iloc[idx - lookback]['close'] - bars.iloc[idx - lookback]['open'])
-        if prev_body <= 0:
-            return False
-        if curr_body >= prev_body * shrink_ratio:
-            return False
-        if bars.iloc[idx]['close'] < bars.iloc[idx - lookback]['close']:
-            return False
-        return True
-
-    @staticmethod
-    def _sig_shooting_star(bars: pd.DataFrame, idx: int, wick_ratio: float = 2.0) -> bool:
-        """Long upper wick (> wick_ratio × body) with close near the low."""
-        bar = bars.iloc[idx]
-        body = abs(bar['close'] - bar['open'])
-        upper_wick = bar['high'] - max(bar['open'], bar['close'])
-        if body <= 0.001:
-            return False
-        if upper_wick < body * wick_ratio:
-            return False
-        bar_range = bar['high'] - bar['low']
-        if bar_range <= 0:
-            return False
-        close_position = (bar['close'] - bar['low']) / bar_range
-        return close_position <= 0.4
+        return check_exhaustion(bars, idx, self.exhaustion_signals)
 
     def _compute_stop_fill(self, stop_price: float) -> float:
         """

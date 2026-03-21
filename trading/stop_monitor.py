@@ -56,6 +56,8 @@ class WatchEntry:
     activate_at_r: float = 0.0
     highest_since_entry: float = 0.0
     trailing_active: bool = False
+    # Exhaustion exit: set True after partial sell into strength
+    exhaustion_partial_taken: bool = False
 
 
 @dataclass
@@ -285,6 +287,155 @@ class StopMonitor:
         """Return list of currently watched symbols."""
         with self._watch_lock:
             return list(self._watches.keys())
+
+    def get_watch_snapshot(self, symbol: str) -> Optional[Dict]:
+        """
+        Return a thread-safe dict copy of a WatchEntry's fields.
+
+        Called from main thread (TradingEngine) to check R-gain and
+        whether exhaustion partial was already taken.
+
+        Args:
+            symbol: Stock symbol
+
+        Returns:
+            Dict with watch fields, or None if not watched
+        """
+        with self._watch_lock:
+            w = self._watches.get(symbol)
+            if not w:
+                return None
+            return {
+                'entry_price': w.entry_price,
+                'risk_per_share': w.risk_per_share,
+                'highest_since_entry': w.highest_since_entry,
+                'shares': w.shares,
+                'exhaustion_partial_taken': w.exhaustion_partial_taken,
+                'trade_db_id': w.trade_db_id,
+                'stop_price': w.stop_price,
+                'trail_r': w.trail_r,
+                'trailing_active': w.trailing_active,
+            }
+
+    def execute_partial_exit(
+        self,
+        symbol: str,
+        fraction: float,
+        tighter_trail_r: float,
+    ) -> Optional['StopExitEvent']:
+        """
+        Execute a partial exhaustion exit: sell fraction of shares, tighten trail.
+
+        Thread-safe: reads watch under lock, releases for API call,
+        re-acquires to update state.
+
+        Called from main thread (TradingEngine._check_exhaustion_exits).
+
+        Args:
+            symbol: Stock symbol
+            fraction: Fraction of shares to sell (e.g. 0.5)
+            tighter_trail_r: New trail distance in R units for remainder
+
+        Returns:
+            StopExitEvent for the partial sell, or None on failure
+        """
+        # Step 1: Read watch state under lock
+        with self._watch_lock:
+            watch = self._watches.get(symbol)
+            if not watch:
+                logger.warning(
+                    f"StopMonitor: execute_partial_exit({symbol}) — not watched"
+                )
+                return None
+            if watch.exhaustion_partial_taken:
+                logger.debug(
+                    f"StopMonitor: {symbol} exhaustion partial already taken"
+                )
+                return None
+            sell_shares = int(watch.shares * fraction)
+            if sell_shares < 1:
+                logger.warning(
+                    f"StopMonitor: {symbol} partial shares < 1 "
+                    f"({watch.shares} × {fraction})"
+                )
+                return None
+            entry_price = watch.entry_price
+            risk_per_share = watch.risk_per_share
+            highest = watch.highest_since_entry
+            trade_db_id = watch.trade_db_id
+
+        # Step 2: API call outside lock — get latest price and submit sell
+        exit_price = 0.0
+        order_id = ""
+        try:
+            # Use latest snapshot price for limit
+            bars = self._alpaca.get_1min_bars(symbol, lookback_minutes=2)
+            if bars is not None and not bars.empty:
+                latest_price = float(bars.iloc[-1]['close'])
+            else:
+                logger.warning(
+                    f"StopMonitor: {symbol} no bars for partial exit price, "
+                    f"using highest_since_entry"
+                )
+                latest_price = highest
+
+            limit_price = self.compute_limit_price(latest_price)
+            result = self._alpaca.submit_limit_sell_order(
+                symbol=symbol,
+                qty=sell_shares,
+                limit_price=limit_price,
+            )
+            order_id = result.get("id", "")
+            exit_price = limit_price
+            logger.info(
+                f"StopMonitor: {symbol} EXHAUSTION partial sell — "
+                f"{sell_shares}sh @ limit ${limit_price:.2f}, "
+                f"order={order_id}"
+            )
+        except Exception as e:
+            logger.error(
+                f"StopMonitor: {symbol} exhaustion partial sell FAILED: {e}"
+            )
+            return None
+
+        # Step 3: Re-acquire lock and update watch state
+        with self._watch_lock:
+            watch = self._watches.get(symbol)
+            if not watch:
+                logger.warning(
+                    f"StopMonitor: {symbol} removed during partial exit API call"
+                )
+                return None
+
+            remaining = watch.shares - sell_shares
+            watch.shares = remaining
+            watch.exhaustion_partial_taken = True
+            watch.trail_r = tighter_trail_r
+
+            # Ratchet stop with tighter trail
+            if risk_per_share > 0:
+                new_stop = highest - risk_per_share * tighter_trail_r
+                if new_stop > watch.stop_price:
+                    old_stop = watch.stop_price
+                    watch.stop_price = new_stop
+                    logger.info(
+                        f"StopMonitor: {symbol} trail tightened "
+                        f"{tighter_trail_r}R — stop ${old_stop:.2f} → "
+                        f"${new_stop:.2f}, remaining {remaining}sh"
+                    )
+
+        # Step 4: Emit exit event
+        event = StopExitEvent(
+            symbol=symbol,
+            stop_price=0.0,  # Not a stop exit — exhaustion partial
+            exit_price=exit_price,
+            shares=sell_shares,
+            order_id=order_id,
+            exit_reason='exhaustion_partial',
+            trade_db_id=trade_db_id,
+        )
+        self._exit_events.put(event)
+        return event
 
     def compute_limit_price(self, current_price: float) -> float:
         """

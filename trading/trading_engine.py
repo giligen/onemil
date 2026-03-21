@@ -114,6 +114,19 @@ class TradingEngine:
         self.trailing_stop_r = float(trail_cfg.get("trail_r", 1.0))
         self.trailing_activate_at_r = float(trail_cfg.get("activate_at_r", 2.0))
 
+        # Exhaustion exit config
+        exhaust_cfg = _cfg.get("trading", {}).get("exhaustion_exit", {})
+        self.exhaustion_exit_enabled = bool(exhaust_cfg.get("enabled", False))
+        self.exhaustion_partial_fraction = float(exhaust_cfg.get("partial_fraction", 0.5))
+        self.exhaustion_tighter_trail_r = float(exhaust_cfg.get("tighter_trail_r", 0.5))
+        self.exhaustion_min_profit_r = float(exhaust_cfg.get("min_profit_r", 3.0))
+        self.exhaustion_signals = exhaust_cfg.get("signals", {
+            'volume_divergence': False,
+            'climax_candle': True,
+            'shrinking_bodies': False,
+            'shooting_star': True,
+        })
+
         self._qualified_symbols: Set[str] = set()
         self._traded_symbols: Set[str] = set()
         self._patterns_detected: int = 0
@@ -751,12 +764,24 @@ class TradingEngine:
                             break
 
                     if trade_record and trade_record.get('fill_price'):
-                        qty_for_pnl = trade_record.get('filled_qty') or trade_record['shares']
-                        pnl = (actual_exit_price - trade_record['fill_price']) * qty_for_pnl
-                        pnl_pct = (actual_exit_price / trade_record['fill_price'] - 1) * 100
+                        # Remainder P&L: shares in this exit × price diff
+                        remainder_pnl = (actual_exit_price - trade_record['fill_price']) * event.shares
+
+                        # Combine with partial exit P&L if exhaustion partial was taken
+                        partial_pnl = trade_record.get('partial_exit_pnl') or 0.0
+                        pnl = remainder_pnl + partial_pnl
+
+                        # Weighted average exit for pnl_pct
+                        total_shares = trade_record.get('filled_qty') or trade_record['shares']
+                        pnl_pct = (pnl / (trade_record['fill_price'] * total_shares)) * 100
+
+                        exit_reason = event.exit_reason
+                        if partial_pnl != 0.0:
+                            exit_reason = f"exhaust+{event.exit_reason}"
+
                         self.db.update_trade(event.trade_db_id, {
                             'exit_price': actual_exit_price,
-                            'exit_reason': event.exit_reason,
+                            'exit_reason': exit_reason,
                             'exited_at': datetime.now(timezone.utc),
                             'pnl': pnl,
                             'pnl_pct': pnl_pct,
@@ -765,6 +790,7 @@ class TradingEngine:
                         logger.info(
                             f"{event.symbol}: StopMonitor exit DB updated — "
                             f"P&L ${pnl:+,.2f} ({pnl_pct:+.1f}%)"
+                            f"{f' (partial ${partial_pnl:+,.2f} + remainder ${remainder_pnl:+,.2f})' if partial_pnl != 0 else ''}"
                         )
 
                         if self.notifier:
@@ -786,12 +812,166 @@ class TradingEngine:
                         f"{event.symbol}: Failed to process StopMonitor exit: {e}"
                     )
 
+    def _check_exhaustion_exits(self) -> None:
+        """
+        Check active positions for exhaustion exit signals.
+
+        Called every 60s from run_pattern_check(). For each watched symbol:
+        1. Get snapshot → skip if partial already taken
+        2. Compute current R from latest bar close
+        3. Skip if current_r < min_profit_r (3.0)
+        4. Fetch last 10 bars, drop last (in-progress)
+        5. Run check_exhaustion() on the completed bar
+        6. If fired: execute_partial_exit() via StopMonitor
+        7. Process partial exit event (poll fill, update DB, notify)
+        """
+        if not self.exhaustion_exit_enabled or not self.stop_monitor:
+            return
+
+        from trading.exhaustion_signals import check_exhaustion
+
+        watched = self.stop_monitor.watched_symbols
+        if not watched:
+            return
+
+        for symbol in watched:
+            snapshot = self.stop_monitor.get_watch_snapshot(symbol)
+            if not snapshot:
+                continue
+
+            if snapshot['exhaustion_partial_taken']:
+                continue
+
+            entry_price = snapshot['entry_price']
+            risk = snapshot['risk_per_share']
+            if risk <= 0 or entry_price <= 0:
+                continue
+
+            # Fetch recent bars
+            try:
+                bars = self.alpaca.get_1min_bars(symbol, lookback_minutes=10)
+            except Exception as e:
+                logger.error(f"{symbol}: exhaustion check — bar fetch failed: {e}")
+                continue
+
+            if bars is None or len(bars) < 3:
+                continue
+
+            # Drop last bar (in-progress, incomplete)
+            bars = bars.iloc[:-1]
+            if bars.empty:
+                continue
+
+            # Compute R from latest completed bar close
+            latest_close = float(bars.iloc[-1]['close'])
+            current_r = (latest_close - entry_price) / risk
+
+            if current_r < self.exhaustion_min_profit_r:
+                continue
+
+            # Run signal detection on last completed bar
+            check_idx = len(bars) - 1
+            if check_exhaustion(bars, check_idx, self.exhaustion_signals):
+                logger.info(
+                    f"{symbol}: EXHAUSTION signal at +{current_r:.1f}R "
+                    f"(close=${latest_close:.2f}) — executing partial exit"
+                )
+                event = self.stop_monitor.execute_partial_exit(
+                    symbol=symbol,
+                    fraction=self.exhaustion_partial_fraction,
+                    tighter_trail_r=self.exhaustion_tighter_trail_r,
+                )
+                if event:
+                    self._process_exhaustion_partial_event(event)
+
+    def _process_exhaustion_partial_event(self, event) -> None:
+        """
+        Process an exhaustion partial exit event: poll fill, update DB, notify.
+
+        Args:
+            event: StopExitEvent from execute_partial_exit()
+        """
+        # Poll for actual fill price
+        actual_exit_price = event.exit_price
+        if event.order_id:
+            for poll_attempt in range(5):
+                time_mod.sleep(0.5)
+                try:
+                    exit_order = self.alpaca.get_order(event.order_id)
+                    if exit_order.get('status') == 'filled':
+                        fill = exit_order.get('filled_avg_price')
+                        if fill is not None:
+                            actual_exit_price = fill
+                            logger.info(
+                                f"{event.symbol}: exhaustion partial filled "
+                                f"at ${fill:.2f} (limit was ${event.exit_price:.2f})"
+                            )
+                            break
+                except Exception:
+                    pass
+            else:
+                logger.warning(
+                    f"{event.symbol}: exhaustion partial fill price unavailable "
+                    f"after 5 polls — using limit ${event.exit_price:.2f}"
+                )
+
+        # Update DB with partial exit details
+        if event.trade_db_id:
+            try:
+                trade_record = None
+                trades_today = self.db.get_open_trades(date.today().isoformat())
+                for t in trades_today:
+                    if t['id'] == event.trade_db_id:
+                        trade_record = t
+                        break
+
+                if trade_record and trade_record.get('fill_price'):
+                    partial_pnl = (
+                        (actual_exit_price - trade_record['fill_price'])
+                        * event.shares
+                    )
+                    self.db.update_trade(event.trade_db_id, {
+                        'partial_exit_price': actual_exit_price,
+                        'partial_exit_shares': event.shares,
+                        'partial_exit_pnl': partial_pnl,
+                        'partial_exit_reason': 'exhaustion',
+                        'partial_exited_at': datetime.now(timezone.utc),
+                    })
+                    logger.info(
+                        f"{event.symbol}: exhaustion partial DB updated — "
+                        f"{event.shares}sh @ ${actual_exit_price:.2f}, "
+                        f"partial P&L ${partial_pnl:+,.2f}"
+                    )
+
+                    # Telegram notification
+                    if self.notifier:
+                        self.notifier.notify_position_closed(
+                            symbol=event.symbol,
+                            entry_price=trade_record['fill_price'],
+                            exit_price=actual_exit_price,
+                            shares=event.shares,
+                            pnl=partial_pnl,
+                            exit_reason='exhaustion_partial',
+                        )
+                else:
+                    logger.warning(
+                        f"{event.symbol}: exhaustion partial — "
+                        f"no matching open trade for DB id {event.trade_db_id}"
+                    )
+            except Exception as e:
+                logger.error(
+                    f"{event.symbol}: Failed to process exhaustion partial: {e}"
+                )
+
     def _sync_closed_positions(self) -> None:
         """Detect bracket exits (SL/TP hit) and update DB + circuit breaker."""
         # Process StopMonitor exits first — updates DB with exit_price.
         # Must happen BEFORE we fetch open_trades, otherwise trades just
         # closed by StopMonitor still appear as "open" and get double-processed.
         self._process_stop_monitor_exits()
+
+        # Check exhaustion exit signals on active positions (every 60s cycle)
+        self._check_exhaustion_exits()
 
         today = date.today().isoformat()
         open_trades = self.db.get_open_trades(today)
@@ -833,10 +1013,20 @@ class TradingEngine:
                             exit_reason = 'take_profit'
 
                     if exit_price:
-                        # Use filled_qty if available, fall back to shares
-                        qty_for_pnl = trade.get('filled_qty') or trade['shares']
-                        pnl = (exit_price - trade['fill_price']) * qty_for_pnl
-                        pnl_pct = (exit_price / trade['fill_price'] - 1) * 100
+                        # Remaining shares after any partial exit
+                        total_shares = trade.get('filled_qty') or trade['shares']
+                        partial_shares = trade.get('partial_exit_shares') or 0
+                        remainder_shares = total_shares - partial_shares if partial_shares else total_shares
+                        remainder_pnl = (exit_price - trade['fill_price']) * remainder_shares
+
+                        # Combine with partial P&L
+                        partial_pnl = trade.get('partial_exit_pnl') or 0.0
+                        pnl = remainder_pnl + partial_pnl
+                        pnl_pct = (pnl / (trade['fill_price'] * total_shares)) * 100
+
+                        if partial_pnl != 0.0:
+                            exit_reason = f"exhaust+{exit_reason}"
+
                         self.db.update_trade(trade['id'], {
                             'exit_price': exit_price,
                             'exit_reason': exit_reason,

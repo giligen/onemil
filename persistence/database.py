@@ -261,6 +261,28 @@ class Database:
         except Exception as e:
             logger.warning(f"Migration 3 (real_stop_loss_price column) failed (non-fatal): {e}")
 
+        # Migration 4: Add partial exit columns for exhaustion exits.
+        # Tracks partial sell into strength before final trail stop exit.
+        partial_cols = {
+            'partial_exit_price': 'REAL',
+            'partial_exit_shares': 'INTEGER',
+            'partial_exit_pnl': 'REAL',
+            'partial_exit_reason': 'VARCHAR(20)',
+            'partial_exited_at': 'TIMESTAMP',
+        }
+        try:
+            columns = [row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()]
+            added = []
+            for col_name, col_type in partial_cols.items():
+                if col_name not in columns:
+                    self.conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+                    added.append(col_name)
+            if added:
+                self.conn.commit()
+                logger.info(f"Migration 4: added partial exit columns to trades: {added}")
+        except Exception as e:
+            logger.warning(f"Migration 4 (partial exit columns) failed (non-fatal): {e}")
+
     # =========================================================================
     # Universe operations
     # =========================================================================

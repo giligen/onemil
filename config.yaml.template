@@ -109,7 +109,7 @@ trading:
     activate_at_r: 2.0                  # activate trail after +2R gain
   # Exhaustion exit: sell partial into strength on exhaustion signals
   # Reduces slippage by selling while buyers are still aggressive
-  # NOTE: backtest only — not yet implemented in live trading engine
+  # Production: polls 1-min bars every 60s, matches backtest signal logic
   exhaustion_exit:
     enabled: true                      # validated: +$19K P&L, +0.18 Sharpe vs baseline
     partial_fraction: 0.5              # sell 50% on signal
