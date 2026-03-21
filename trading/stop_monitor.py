@@ -383,22 +383,18 @@ class StopMonitor:
             risk_per_share = watch.risk_per_share
             highest = watch.highest_since_entry
             trade_db_id = watch.trade_db_id
-            sl_leg_id_for_cancel = watch.sl_leg_id
 
-        # Step 1b: Cancel safety-net SL BEFORE submitting partial sell.
-        # CRITICAL: If SL fires while partial is pending, both fill → SHORT.
-        # Cancel SL first, then restore with reduced qty after fill confirmation.
-        if sl_leg_id_for_cancel:
-            try:
-                self._alpaca.cancel_order(sl_leg_id_for_cancel)
-                logger.info(
-                    f"StopMonitor: {symbol} cancelled SL leg before partial "
-                    f"(will restore with reduced qty after fill)"
-                )
-            except Exception as e:
-                logger.warning(
-                    f"StopMonitor: {symbol} SL cancel failed before partial: {e}"
-                )
+        # NOTE: We intentionally keep the safety-net SL ALIVE during partial sell.
+        # The SL is at 5% below entry (~$4.75 on $5) while exhaustion fires at +3R
+        # (~$6.50). Zero overlap risk in normal conditions.
+        #
+        # In a flash crash during the 30s wait:
+        # - Partial sell limit (near $6.50) won't fill → we cancel it → no state change
+        # - SL fires for full qty → closes everything → position safe
+        # - If partial DID fill first (500), SL fires for remaining (Alpaca caps at position)
+        #
+        # After confirmed fill: replace SL qty to match remaining shares.
+        # This eliminates the 30s naked window and SL-restore-on-cancelled-ID bugs.
 
         # Step 2: API call outside lock — get quote and submit sell
         exit_price = 0.0
