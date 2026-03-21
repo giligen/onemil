@@ -285,10 +285,17 @@ class TestWriteCsvReport:
 class TestUtcToEtStr:
     """Tests for UTC to ET time conversion."""
 
-    def test_converts_utc_to_et(self):
-        """UTC 14:30 should become ET 10:30 (EDT, -4h)."""
-        ts = datetime(2026, 3, 5, 14, 30, 0, tzinfo=timezone.utc)
+    def test_converts_utc_to_edt(self):
+        """UTC 14:30 in EDT (after DST) should become 10:30 ET."""
+        # March 15 is after DST switch (March 8) → EDT = UTC-4
+        ts = datetime(2026, 3, 15, 14, 30, 0, tzinfo=timezone.utc)
         assert utc_to_et_str(ts) == "10:30:00"
+
+    def test_converts_utc_to_est(self):
+        """UTC 14:30 in EST (before DST) should become 09:30 ET."""
+        # January = EST = UTC-5
+        ts = datetime(2026, 1, 15, 14, 30, 0, tzinfo=timezone.utc)
+        assert utc_to_et_str(ts) == "09:30:00"
 
     def test_none_returns_empty(self):
         """None timestamp should return empty string."""

@@ -1273,10 +1273,16 @@ def _apply_consecutive_loss_filter(
 
 
 def utc_to_et_str(ts: datetime) -> str:
-    """Convert UTC datetime to ET string (UTC-4 for EDT March 2026)."""
+    """Convert UTC datetime to ET string, handling EST/EDT correctly."""
     if ts is None:
         return ""
-    et = ts.replace(tzinfo=None) - __import__('datetime').timedelta(hours=4)
+    import pytz as _pytz
+    _et_tz = _pytz.timezone('US/Eastern')
+    if hasattr(ts, 'tzinfo') and ts.tzinfo is not None:
+        et = ts.astimezone(_et_tz)
+    else:
+        from datetime import timezone as _tz
+        et = ts.replace(tzinfo=_tz.utc).astimezone(_et_tz)
     return et.strftime("%H:%M:%S")
 
 
