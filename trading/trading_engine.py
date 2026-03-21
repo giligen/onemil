@@ -123,7 +123,59 @@ class TradingEngine:
         self._daily_trade_count: int = 0
         self._notified_setups: Dict[str, float] = {}  # symbol -> breakout_level (dedup Telegram)
         self._macd_warmup_cache: Dict[str, Optional[pd.Series]] = {}  # symbol -> prev-day closes
+
+        # MACD zone filter config
+        macd_zones_cfg = _cfg.get("trading", {}).get("macd_zones", {})
+        self.macd_zones_enabled = bool(macd_zones_cfg.get("enabled", False))
+        self.macd_dead_zone_min = float(macd_zones_cfg.get("dead_zone_min_pct", -0.2))
+        self.macd_dead_zone_max = float(macd_zones_cfg.get("dead_zone_max_pct", 0.1))
+        self.macd_strong_neg_threshold = float(macd_zones_cfg.get("strong_neg_threshold_pct", -0.5))
+        self.macd_strong_neg_multiplier = float(macd_zones_cfg.get("strong_neg_multiplier", 1.5))
+        self.macd_strong_pos_threshold = float(macd_zones_cfg.get("strong_pos_threshold_pct", 0.5))
+        self.macd_strong_pos_multiplier = float(macd_zones_cfg.get("strong_pos_multiplier", 1.5))
+
         self.shutdown_event = None  # Set by caller for graceful shutdown
+
+    def _get_macd_zone_multiplier(self, symbol: str, bars: pd.DataFrame, entry_price: float) -> float:
+        """
+        Compute MACD zone risk multiplier for live trading.
+
+        Uses warmed-up MACD histogram to determine zone.
+
+        Args:
+            symbol: Stock symbol
+            bars: Current day's 1-min bars (from market open)
+            entry_price: Planned entry price
+
+        Returns:
+            0.0 = skip (dead zone), 1.0 = normal, >1.0 = boosted
+        """
+        from trading.indicators import macd_histogram
+
+        closes = bars['close'].copy()
+
+        # Prepend warm-up from previous day
+        if symbol in self._macd_warmup_cache and self._macd_warmup_cache[symbol] is not None:
+            closes = pd.concat([self._macd_warmup_cache[symbol], closes], ignore_index=True)
+
+        if len(closes) < 35:
+            return 1.0
+
+        hist = macd_histogram(closes)
+        hist_val = float(hist.iloc[-1])
+        macd_pct = (hist_val / entry_price) * 100
+
+        if self.macd_dead_zone_min <= macd_pct <= self.macd_dead_zone_max:
+            logger.info(f"{symbol}: MACD zone dead ({macd_pct:.2f}%)")
+            return 0.0
+        elif macd_pct < self.macd_strong_neg_threshold:
+            logger.info(f"{symbol}: MACD zone strong neg ({macd_pct:.2f}%) → {self.macd_strong_neg_multiplier}x")
+            return self.macd_strong_neg_multiplier
+        elif macd_pct > self.macd_strong_pos_threshold:
+            logger.info(f"{symbol}: MACD zone strong pos ({macd_pct:.2f}%) → {self.macd_strong_pos_multiplier}x")
+            return self.macd_strong_pos_multiplier
+        else:
+            return 1.0
 
     def _fetch_macd_warmup(self, symbol: str) -> None:
         """
@@ -944,11 +996,14 @@ class TradingEngine:
             return None
 
         # MACD warm-up: fetch previous trading day's bars (once per symbol per day)
-        if getattr(self.detector, 'require_macd_positive', False):
+        # Needed for both require_macd_positive detector filter AND macd_zones risk scaling
+        need_warmup = getattr(self.detector, 'require_macd_positive', False) or self.macd_zones_enabled
+        if need_warmup:
             if symbol not in self._macd_warmup_cache:
                 self._fetch_macd_warmup(symbol)
             warmup = self._macd_warmup_cache.get(symbol)
-            self.detector.set_macd_warmup(warmup)
+            if hasattr(self.detector, 'set_macd_warmup'):
+                self.detector.set_macd_warmup(warmup)
 
         # Detect setup (before breakout)
         setup = self.detector.detect_setup(symbol, bars)
@@ -1001,6 +1056,28 @@ class TradingEngine:
         # Check position limits
         if not self.position_manager.can_open_position(symbol):
             return None
+
+        # MACD zone filter: skip dead zone, scale risk on strong zones
+        if self.macd_zones_enabled:
+            zone_mult = self._get_macd_zone_multiplier(symbol, bars, plan.entry_price)
+            if zone_mult == 0.0:
+                logger.info(f"{symbol}: MACD zone SKIP (dead zone)")
+                return None
+            elif zone_mult != 1.0:
+                scaled_shares = max(1, int(plan.shares * zone_mult))
+                logger.info(f"{symbol}: MACD zone {zone_mult}x → shares {plan.shares} → {scaled_shares}")
+                plan = TradePlan(
+                    symbol=plan.symbol,
+                    entry_price=plan.entry_price,
+                    stop_loss_price=plan.stop_loss_price,
+                    take_profit_price=plan.take_profit_price,
+                    risk_per_share=plan.risk_per_share,
+                    reward_per_share=plan.reward_per_share,
+                    risk_reward_ratio=plan.risk_reward_ratio,
+                    shares=scaled_shares,
+                    total_risk=plan.risk_per_share * scaled_shares,
+                    pattern=plan.pattern,
+                )
 
         # Production enforcement: buy-stop submitted on all days; post-fill volume check on thin days
         is_thin = self.market_regime and self.market_regime.is_thin_liquidity(date.today())

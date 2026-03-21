@@ -819,11 +819,12 @@ class BacktestRunner:
         Returns:
             BacktestResult with trades, patterns, and P&L
         """
-        # Store prev-day bars for MACD warm-up (used by detector and zone filter)
+        # Store prev-day bars for MACD zone filter
         self._prev_day_bars = prev_day_bars
 
-        # Set MACD warm-up on detector (no-op when MACD filter is disabled)
-        if getattr(self.detector, 'require_macd_positive', False):
+        # Set MACD warm-up on detector — always clear to prevent stale state
+        # from previous symbol leaking into current one
+        if hasattr(self.detector, 'set_macd_warmup'):
             if prev_day_bars is not None and not prev_day_bars.empty:
                 warmup_closes = prev_day_bars['close'].tail(60).reset_index(drop=True)
                 self.detector.set_macd_warmup(warmup_closes)

@@ -434,9 +434,9 @@ def run_batch_backtest(
 
                 vol_profile = volume_profiles.get(symbol) if volume_profiles else None
 
-                # Fetch previous day bars for MACD warm-up (only when enabled)
+                # Fetch previous day bars for MACD warm-up (MACD filter or zone filter)
                 prev_day_bars = None
-                if runner.detector.require_macd_positive and db:
+                if (runner.detector.require_macd_positive or runner.macd_zones_enabled) and db:
                     prev_date = _get_previous_trading_date(trade_date, movers_by_date)
                     if prev_date:
                         prev_day_bars = get_1min_bars_cached(symbol, prev_date, client, db)
@@ -930,21 +930,60 @@ def run_batch_backtest_fast(
         # Create runner early to check if MACD warm-up is needed
         runner = BacktestRunner()
 
-        # Pre-load previous day bars for MACD warm-up (only when enabled)
+        # Pre-load previous day bars for MACD warm-up (needed for MACD filter OR zone filter)
+        # First pass: identify needed prev-day pairs and fetch any uncached from API
         all_prev_bars: Dict[tuple, pd.DataFrame] = {}
-        if runner.detector.require_macd_positive:
+        need_prev_bars = runner.detector.require_macd_positive or runner.macd_zones_enabled
+        if need_prev_bars:
             prev_symbol_dates = set()
             for trade_date in filtered_dates:
                 prev_date = _get_previous_trading_date(trade_date)
                 if prev_date:
                     for sym, d, _ in movers_by_date[trade_date]:
                         prev_symbol_dates.add((sym, prev_date.isoformat()))
+
             if prev_symbol_dates:
-                logger.info(f"Pre-loading {len(prev_symbol_dates)} prev-day bar sets for MACD warm-up...")
+                # Check which prev-day bars are already cached
                 prev_bulk = db.get_intraday_bars_bulk(list(prev_symbol_dates))
+                cached_keys = set(prev_bulk.keys())
+                uncached = [sd for sd in prev_symbol_dates if sd not in cached_keys]
+
+                if uncached:
+                    # Need AlpacaClient to fetch missing bars
+                    import os
+                    from dotenv import load_dotenv
+                    load_dotenv()
+                    api_key = os.getenv("ALPACA_API_KEY")
+                    api_secret = os.getenv("ALPACA_API_SECRET")
+                    if api_key and api_secret:
+                        fetch_client = AlpacaClient(api_key, api_secret)
+                        logger.info(
+                            f"Fetching {len(uncached)} uncached prev-day bar sets "
+                            f"for MACD warm-up (one-time)..."
+                        )
+                        fetched = 0
+                        for sym, date_str in uncached:
+                            try:
+                                td = date.fromisoformat(date_str)
+                                market_open, market_close = _market_hours_utc(td)
+                                bars_fetched = fetch_client.get_historical_1min_bars(
+                                    sym, market_open, market_close
+                                )
+                                if not bars_fetched.empty:
+                                    bar_records = bars_fetched.to_dict('records')
+                                    db.save_intraday_bars(sym, date_str, bar_records)
+                                    prev_bulk[(sym, date_str)] = bar_records
+                                fetched += 1
+                                if fetched % 100 == 0:
+                                    logger.info(f"  Fetched {fetched}/{len(uncached)} prev-day bar sets...")
+                            except Exception as e:
+                                logger.debug(f"  {sym} {date_str}: fetch failed: {e}")
+                        logger.info(f"  Cached {fetched} prev-day bar sets for future runs")
+
                 all_prev_bars = {
                     key: pd.DataFrame(bars) for key, bars in prev_bulk.items()
                 }
+                logger.info(f"MACD warm-up: {len(all_prev_bars)} prev-day bar sets available")
 
         preload_elapsed = time.time() - t_preload
         logger.info(
@@ -1002,8 +1041,8 @@ def run_batch_backtest_fast(
                                 consec_losses += 1
                                 if consec_losses >= max_consecutive_losses:
                                     stopped_for_day = True
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"{sym} {date_str}: backtest error: {e}")
 
                 if completed % 2000 == 0:
                     elapsed = time.time() - t0
