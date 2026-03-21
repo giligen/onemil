@@ -848,6 +848,73 @@ class Database:
         logger.debug(f"Cache hit: {len(bars)} intraday bars for {symbol} on {bar_date}")
         return bars
 
+    def get_intraday_bars_bulk(self, symbol_dates: list) -> Dict[tuple, List[Dict]]:
+        """
+        Bulk-load 1-min bars for multiple (symbol, date) pairs.
+
+        Uses a single full-table scan with date range filter, then filters
+        to requested pairs in Python. Much faster than N individual queries
+        or N IN-clause queries for large batches.
+
+        Args:
+            symbol_dates: List of (symbol, date_str) tuples
+
+        Returns:
+            Dict mapping (symbol, date_str) -> list of bar dicts
+        """
+        if not symbol_dates:
+            return {}
+
+        # Build set of requested pairs for fast lookup
+        requested = set(symbol_dates)
+
+        # Find date range for efficient SQL filtering
+        dates = [d for _, d in symbol_dates]
+        min_date = min(dates)
+        max_date = max(dates)
+
+        cursor = self.conn.execute("""
+            SELECT symbol, bar_date, timestamp, open, high, low, close, volume
+            FROM intraday_bars_1min
+            WHERE bar_date >= ? AND bar_date <= ?
+            ORDER BY symbol, bar_date, timestamp
+        """, (min_date, max_date))
+
+        result = {}
+        current_key = None
+        current_bars = []
+
+        for row in cursor:
+            bar_date_val = row['bar_date']
+            if hasattr(bar_date_val, 'isoformat'):
+                bar_date_val = bar_date_val.isoformat()
+            key = (row['symbol'], str(bar_date_val))
+
+            if key != current_key:
+                # Flush previous group
+                if current_key is not None and current_bars and current_key in requested:
+                    result[current_key] = current_bars
+                current_key = key
+                current_bars = []
+
+            # Only accumulate bars for requested pairs
+            if key in requested:
+                current_bars.append({
+                    'timestamp': row['timestamp'],
+                    'open': row['open'],
+                    'high': row['high'],
+                    'low': row['low'],
+                    'close': row['close'],
+                    'volume': row['volume'],
+                })
+
+        # Flush last group
+        if current_key is not None and current_bars and current_key in requested:
+            result[current_key] = current_bars
+
+        logger.debug(f"Bulk loaded {len(result)} bar sets")
+        return result
+
     def close(self) -> None:
         """Close the database connection."""
         if self.conn:

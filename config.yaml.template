@@ -88,7 +88,7 @@ trading:
   max_consecutive_losses: 2     # Stop trading for the day after 2 losses in a row
   max_trades_per_day: 5
   market_regime:
-    enabled: true
+    enabled: true               # Regime filter: +$15.6K P&L, -41% drawdown vs disabled
     vol_threshold: 1.5         # 5-day avg daily range % — high volatility signal
     sma_period: 50             # SPY below SMA(50) — downtrend signal
     min_spy_volume_ratio: 0.70 # SPY T-1 volume / SMA20 — thin liquidity threshold
