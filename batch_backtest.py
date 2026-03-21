@@ -362,6 +362,18 @@ def run_batch_backtest(
     if effective_max_trades <= 0 and market_regime:
         effective_max_trades = getattr(market_regime, 'max_trades_per_day', 0)
 
+    # SPY MACD afternoon cutoff (same logic as fast path)
+    spy_cutoff_cfg = _cfg.get("trading", {}).get("spy_macd_cutoff", {})
+    spy_cutoff_enabled = bool(spy_cutoff_cfg.get("enabled", False))
+    spy_cutoff_time = None
+    if spy_cutoff_enabled:
+        cutoff_str = spy_cutoff_cfg.get("cutoff_time", "11:30")
+        _ch, _cm = cutoff_str.split(':')
+        spy_cutoff_time = (int(_ch), int(_cm))
+        logger.info(
+            f"SPY MACD cutoff enabled: block after "
+            f"{spy_cutoff_time[0]:02d}:{spy_cutoff_time[1]:02d} ET when SPY MACD > 0"
+        )
 
     for trade_date in sorted(movers_by_date.keys()):
         # --- Friday filter ---
@@ -385,6 +397,26 @@ def run_batch_backtest(
                 f"— skipping {n_skip} symbols"
             )
             continue
+
+        # --- SPY MACD afternoon cutoff ---
+        if spy_cutoff_enabled and db:
+            try:
+                from trading.market_regime import SpyMacdCutoff, compute_spy_macd_for_day
+                spy_bars = get_1min_bars_cached('SPY', trade_date, client, db)
+                spy_prev_date = _get_previous_trading_date(trade_date)
+                spy_prev_bars = get_1min_bars_cached('SPY', spy_prev_date, client, db) if spy_prev_date else None
+                if spy_bars is not None and not spy_bars.empty:
+                    macd_by_time = compute_spy_macd_for_day(spy_bars, spy_prev_bars)
+                    spy_cutoff = SpyMacdCutoff(enabled=True, cutoff_time=spy_cutoff_time)
+                    spy_cutoff.load_spy_macd(macd_by_time)
+                    runner.set_spy_macd_cutoff(spy_cutoff)
+                else:
+                    runner.set_spy_macd_cutoff(None)
+            except Exception as e:
+                logger.debug(f"SPY MACD cutoff: failed for {trade_date}: {e}")
+                runner.set_spy_macd_cutoff(None)
+        elif spy_cutoff_enabled:
+            runner.set_spy_macd_cutoff(None)
 
         # --- Thin liquidity: tighten breakout volume requirement (H5 OR filter) ---
         if market_regime and market_regime.is_thin_liquidity(trade_date):
@@ -802,6 +834,7 @@ def run_batch_backtest_parallel(
     completed = 0
     import time
     t0 = time.time()
+    next_pct_milestone = 10
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         for result_dict in executor.map(
@@ -814,17 +847,24 @@ def run_batch_backtest_parallel(
             result = _reconstruct_result(result_dict)
             results.append(result)
 
-            if completed % 1000 == 0 or completed == filtered_total:
+            pct_done = (completed / filtered_total * 100) if filtered_total > 0 else 100
+            if pct_done >= next_pct_milestone or completed == filtered_total:
                 elapsed = time.time() - t0
                 rate = completed / elapsed if elapsed > 0 else 0
                 n_trades = sum(len(r.trades_simulated) for r in results)
-                logger.info(
-                    f"[{completed}/{filtered_total}] {n_trades} trades, "
-                    f"{rate:.0f} symbols/sec, "
-                    f"ETA {(filtered_total - completed) / rate:.0f}s"
-                    if rate > 0 else
-                    f"[{completed}/{filtered_total}] {n_trades} trades"
-                )
+                if rate > 0:
+                    eta = (filtered_total - completed) / rate
+                    eta_str = f"{eta:.0f}s" if eta < 120 else f"{eta / 60:.1f}m"
+                    logger.info(
+                        f"⏳ {int(pct_done)}% [{completed}/{filtered_total}] "
+                        f"{n_trades} trades, {rate:.0f}/sec, ETA {eta_str}"
+                    )
+                else:
+                    logger.info(
+                        f"⏳ {int(pct_done)}% [{completed}/{filtered_total}] "
+                        f"{n_trades} trades"
+                    )
+                next_pct_milestone += 10
 
     elapsed = time.time() - t0
     logger.info(
@@ -1052,12 +1092,13 @@ def run_batch_backtest_fast(
 
         preload_elapsed = time.time() - t_preload
         logger.info(
-            f"Pre-loaded {len(all_bars)} bar sets in {preload_elapsed:.1f}s"
+            f"📦 Data loading done — {len(all_bars)} bar sets in {preload_elapsed:.1f}s"
             + (f" + {len(all_prev_bars)} prev-day sets" if all_prev_bars else "")
         )
         results = []
         completed = 0
         t0 = time.time()
+        next_pct_milestone = 10  # Report progress at 10%, 20%, ... 100%
 
         for trade_date in filtered_dates:
             # Thin liquidity override
@@ -1121,15 +1162,18 @@ def run_batch_backtest_fast(
                 except Exception as e:
                     logger.warning(f"{sym} {date_str}: backtest error: {e}")
 
-                if completed % 2000 == 0:
+                pct_done = (completed / filtered_total * 100) if filtered_total > 0 else 100
+                if pct_done >= next_pct_milestone:
                     elapsed = time.time() - t0
                     rate = completed / elapsed if elapsed > 0 else 0
                     n_trades = sum(len(r.trades_simulated) for r in results)
                     eta = (filtered_total - completed) / rate if rate > 0 else 0
+                    eta_str = f"{eta:.0f}s" if eta < 120 else f"{eta / 60:.1f}m"
                     logger.info(
-                        f"[{completed}/{filtered_total}] {n_trades} trades, "
-                        f"{rate:.0f}/sec, ETA {eta:.0f}s"
+                        f"⏳ {int(pct_done)}% [{completed}/{filtered_total}] "
+                        f"{n_trades} trades, {rate:.0f}/sec, ETA {eta_str}"
                     )
+                    next_pct_milestone += 10
 
         elapsed = time.time() - t0
         n_trades = sum(len(r.trades_simulated) for r in results)
