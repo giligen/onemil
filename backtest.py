@@ -155,7 +155,7 @@ class TradeSimulator:
         exhaustion_exit_enabled: bool = False,
         exhaustion_partial_fraction: float = 0.5,
         exhaustion_tighter_trail_r: float = 0.5,
-        exhaustion_min_profit_r: float = 1.0,
+        exhaustion_min_profit_r: float = 3.0,
         exhaustion_signals: Optional[Dict[str, bool]] = None,
     ):
         """
@@ -201,9 +201,9 @@ class TradeSimulator:
         self.exhaustion_tighter_trail_r = exhaustion_tighter_trail_r
         self.exhaustion_min_profit_r = exhaustion_min_profit_r
         self.exhaustion_signals = exhaustion_signals or {
-            'volume_divergence': True,
+            'volume_divergence': False,
             'climax_candle': True,
-            'shrinking_bodies': True,
+            'shrinking_bodies': False,
             'shooting_star': True,
         }
 
@@ -759,9 +759,9 @@ class BacktestRunner:
         self.exhaustion_exit_enabled = bool(exhaust_cfg.get("enabled", False))
         exhaust_signals = exhaust_cfg.get("signals", {})
         self.exhaustion_signals = {
-            'volume_divergence': bool(exhaust_signals.get('volume_divergence', True)),
+            'volume_divergence': bool(exhaust_signals.get('volume_divergence', False)),
             'climax_candle': bool(exhaust_signals.get('climax_candle', True)),
-            'shrinking_bodies': bool(exhaust_signals.get('shrinking_bodies', True)),
+            'shrinking_bodies': bool(exhaust_signals.get('shrinking_bodies', False)),
             'shooting_star': bool(exhaust_signals.get('shooting_star', True)),
         }
 
@@ -785,7 +785,7 @@ class BacktestRunner:
                 exhaustion_exit_enabled=self.exhaustion_exit_enabled,
                 exhaustion_partial_fraction=float(exhaust_cfg.get("partial_fraction", 0.5)),
                 exhaustion_tighter_trail_r=float(exhaust_cfg.get("tighter_trail_r", 0.5)),
-                exhaustion_min_profit_r=float(exhaust_cfg.get("min_profit_r", 1.0)),
+                exhaustion_min_profit_r=float(exhaust_cfg.get("min_profit_r", 3.0)),
                 exhaustion_signals=self.exhaustion_signals,
             )
             if resolved_trail_r > 0:
@@ -807,7 +807,7 @@ class BacktestRunner:
         self.macd_dead_zone_min = float(macd_zones_cfg.get("dead_zone_min_pct", -0.2))
         self.macd_dead_zone_max = float(macd_zones_cfg.get("dead_zone_max_pct", 0.1))
         self.macd_strong_neg_threshold = float(macd_zones_cfg.get("strong_neg_threshold_pct", -0.5))
-        self.macd_strong_neg_multiplier = float(macd_zones_cfg.get("strong_neg_multiplier", 1.25))
+        self.macd_strong_neg_multiplier = float(macd_zones_cfg.get("strong_neg_multiplier", 1.5))
         self.macd_strong_pos_threshold = float(macd_zones_cfg.get("strong_pos_threshold_pct", 0.5))
         self.macd_strong_pos_multiplier = float(macd_zones_cfg.get("strong_pos_multiplier", 1.5))
         self.macd_normal_multiplier = float(macd_zones_cfg.get("normal_multiplier", 1.0))

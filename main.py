@@ -203,6 +203,11 @@ def _create_trading_engine(config, alpaca, db, notifier=None) -> TradingEngine:
             f"offset_pct={config.marketable_limit_offset_pct:.1%}"
         )
 
+    # Load time controls from config (backtest loads these too — must match)
+    _trading_cfg = config._load_yaml_only().get("trading", {})
+    _last_entry = _trading_cfg.get("last_entry_time", "15:00")
+    _force_close = _trading_cfg.get("force_close_time", "15:45")
+
     engine = TradingEngine(
         alpaca_client=alpaca,
         db=db,
@@ -213,6 +218,8 @@ def _create_trading_engine(config, alpaca, db, notifier=None) -> TradingEngine:
         pattern_poll_interval=config.pattern_poll_interval,
         enabled=config.trading_enabled,
         notifier=notifier,
+        last_entry_time_et=_last_entry,
+        force_close_time_et=_force_close,
         setup_expiry_seconds=config.setup_expiry_bars * config.pattern_poll_interval,
         market_regime=market_regime,
         stop_monitor=stop_monitor,
