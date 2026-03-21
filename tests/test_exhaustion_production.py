@@ -41,6 +41,11 @@ def mock_alpaca():
         'bid_size': 100, 'ask_size': 200,
         'timestamp': datetime.now(timezone.utc).isoformat(),
     }
+    # Order fill confirmation (for partial exit fill wait)
+    client.get_order.return_value = {
+        'status': 'filled', 'filled_avg_price': 8.49,
+    }
+    client.replace_order_qty.return_value = {'id': 'sl-456', 'status': 'accepted'}
     return client
 
 

@@ -406,12 +406,62 @@ class StopMonitor:
             )
             return None
 
-        # Step 3: Re-acquire lock and update watch state
+        # Step 3: Wait for fill confirmation before updating state.
+        # Without fill confirmation, StopMonitor would track reduced shares
+        # while the full position still exists → orphaned shares on trail exit.
+        actual_fill = None
+        deadline = time_mod.time() + 30
+        while time_mod.time() < deadline:
+            time_mod.sleep(1)
+            try:
+                order_status = self._alpaca.get_order(order_id)
+                if order_status.get('status') == 'filled':
+                    actual_fill = order_status.get('filled_avg_price') or exit_price
+                    logger.info(
+                        f"StopMonitor: {symbol} partial sell FILLED at "
+                        f"${actual_fill:.2f}"
+                    )
+                    break
+                elif order_status.get('status') in ('cancelled', 'expired', 'rejected'):
+                    logger.warning(
+                        f"StopMonitor: {symbol} partial sell {order_status['status']} "
+                        f"— aborting exhaustion exit"
+                    )
+                    return None
+            except Exception:
+                pass
+
+        if actual_fill is None:
+            # Timeout — cancel and abort (don't update state)
+            logger.warning(
+                f"StopMonitor: {symbol} partial sell UNFILLED after 30s — "
+                f"cancelling, keeping full position"
+            )
+            try:
+                self._alpaca.cancel_order(order_id)
+                # Check one more time (race with fill)
+                order_status = self._alpaca.get_order(order_id)
+                if order_status.get('status') == 'filled':
+                    actual_fill = order_status.get('filled_avg_price') or exit_price
+                    logger.info(
+                        f"StopMonitor: {symbol} partial filled during cancel at "
+                        f"${actual_fill:.2f}"
+                    )
+                else:
+                    return None
+            except Exception:
+                return None
+
+        exit_price = actual_fill
+
+        # Step 4: Fill confirmed — NOW update watch state
+        remaining = 0
+        sl_leg_id = ""
         with self._watch_lock:
             watch = self._watches.get(symbol)
             if not watch:
                 logger.warning(
-                    f"StopMonitor: {symbol} removed during partial exit API call"
+                    f"StopMonitor: {symbol} removed during partial exit"
                 )
                 return None
 
@@ -419,6 +469,7 @@ class StopMonitor:
             watch.shares = remaining
             watch.exhaustion_partial_taken = True
             watch.trail_r = tighter_trail_r
+            sl_leg_id = watch.sl_leg_id
 
             # Ratchet stop with tighter trail
             if risk_per_share > 0:
@@ -432,7 +483,23 @@ class StopMonitor:
                         f"${new_stop:.2f}, remaining {remaining}sh"
                     )
 
-        # Step 4: Emit exit event
+        # Step 5: Update safety-net SL leg qty on Alpaca to match remaining shares.
+        # Without this, a crash/gap-down would trigger the SL for the original full
+        # qty, potentially shorting us or leaving a rejected order.
+        if sl_leg_id and remaining > 0:
+            try:
+                self._alpaca.replace_order_qty(sl_leg_id, remaining)
+                logger.info(
+                    f"StopMonitor: {symbol} safety-net SL qty updated "
+                    f"to {remaining} shares"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"StopMonitor: {symbol} failed to update SL qty: {e} — "
+                    f"SL leg may still be for original qty"
+                )
+
+        # Step 6: Emit exit event
         event = StopExitEvent(
             symbol=symbol,
             stop_price=0.0,  # Not a stop exit — exhaustion partial
@@ -441,6 +508,8 @@ class StopMonitor:
             order_id=order_id,
             exit_reason='exhaustion_partial',
             trade_db_id=trade_db_id,
+            submitted_at=time_mod.time(),
+            pricing_method=pricing_method,
         )
         self._exit_events.put(event)
         return event

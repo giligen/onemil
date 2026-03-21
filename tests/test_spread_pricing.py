@@ -38,6 +38,11 @@ def mock_alpaca():
         'bid_size': 500, 'ask_size': 300,
         'timestamp': datetime.now(timezone.utc).isoformat(),
     }
+    # Order fill confirmation (for partial exit fill wait)
+    client.get_order.return_value = {
+        'status': 'filled', 'filled_avg_price': 9.99,
+    }
+    client.replace_order_qty.return_value = {'id': 'sl-001', 'status': 'accepted'}
     return client
 
 
@@ -166,29 +171,35 @@ class TestPartialExitQuoteFallback:
     """Test that partial exit falls back to fixed offset on quote failure."""
 
     def test_uses_quote_when_available(self, monitor, mock_alpaca):
-        """Quote succeeds → uses quote-based pricing."""
+        """Quote succeeds → uses quote-based pricing, fill confirmed."""
         mock_alpaca.get_latest_quote.return_value = {
             'bid_price': 8.48, 'ask_price': 8.50,
             'bid_size': 100, 'ask_size': 200,
             'timestamp': datetime.now(timezone.utc).isoformat(),
         }
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled', 'filled_avg_price': 8.49,
+        }
         monitor.add_watch('TEST', 4.50, 1000, 'tp', 'sl',
                           entry_price=5.0, risk_per_share=0.5)
         event = monitor.execute_partial_exit('TEST', 0.5, 0.5)
         assert event is not None
-        # Should use midpoint: (8.48 + 8.50) / 2 = 8.49
+        # Fill confirmed at 8.49 (midpoint)
         assert event.exit_price == 8.49
 
     def test_falls_back_on_quote_failure(self, monitor, mock_alpaca):
-        """Quote fails → falls back to fixed-offset pricing."""
+        """Quote fails → falls back to fixed-offset pricing, fill confirmed."""
         mock_alpaca.get_latest_quote.side_effect = Exception("API down")
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled', 'filled_avg_price': 8.46,
+        }
         monitor.add_watch('TEST', 4.50, 1000, 'tp', 'sl',
                           entry_price=5.0, risk_per_share=0.5)
         with monitor._watch_lock:
             monitor._watches['TEST'].highest_since_entry = 8.50
         event = monitor.execute_partial_exit('TEST', 0.5, 0.5)
         assert event is not None
-        # Should fall back to compute_limit_price(8.50) = 8.50 - max(0.03, 0.0425) = 8.46
+        # Fill confirmed at 8.46
         assert event.exit_price == 8.46
 
 

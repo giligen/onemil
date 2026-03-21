@@ -1065,34 +1065,16 @@ class TradingEngine:
 
     def _process_exhaustion_partial_event(self, event) -> None:
         """
-        Process an exhaustion partial exit event: poll fill, update DB, notify.
+        Process an exhaustion partial exit event: update DB, notify.
+
+        Fill is already confirmed by StopMonitor.execute_partial_exit()
+        (waits up to 30s for fill before emitting event). event.exit_price
+        is the actual fill price.
 
         Args:
             event: StopExitEvent from execute_partial_exit()
         """
-        # Poll for actual fill price
         actual_exit_price = event.exit_price
-        if event.order_id:
-            for poll_attempt in range(5):
-                time_mod.sleep(0.5)
-                try:
-                    exit_order = self.alpaca.get_order(event.order_id)
-                    if exit_order.get('status') == 'filled':
-                        fill = exit_order.get('filled_avg_price')
-                        if fill is not None:
-                            actual_exit_price = fill
-                            logger.info(
-                                f"{event.symbol}: exhaustion partial filled "
-                                f"at ${fill:.2f} (limit was ${event.exit_price:.2f})"
-                            )
-                            break
-                except Exception:
-                    pass
-            else:
-                logger.warning(
-                    f"{event.symbol}: exhaustion partial fill price unavailable "
-                    f"after 5 polls — using limit ${event.exit_price:.2f}"
-                )
 
         # Update DB with partial exit details
         if event.trade_db_id:

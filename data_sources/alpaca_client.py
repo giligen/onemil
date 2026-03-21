@@ -1074,6 +1074,35 @@ class AlpacaClient:
             logger.error(f"Failed to replace order limit price {order_id}: {e}")
             raise AlpacaAPIError(f"Failed to replace order limit price {order_id}: {e}")
 
+    def replace_order_qty(self, order_id: str, new_qty: int) -> Dict:
+        """
+        Replace an order's quantity (e.g., update safety-net SL after partial sell).
+
+        Args:
+            order_id: Alpaca order ID
+            new_qty: New quantity
+
+        Returns:
+            Dict with order id and status
+
+        Raises:
+            AlpacaAPIError: If replacement fails
+        """
+        try:
+            from alpaca.trading.requests import ReplaceOrderRequest
+            request = ReplaceOrderRequest(qty=new_qty)
+            order = self._call_with_timeout(
+                lambda: self.trading_client.replace_order_by_id(order_id, request),
+                f"replace_order_qty({order_id}, {new_qty})"
+            )
+            logger.info(f"Order {order_id} qty replaced to {new_qty}")
+            return {'id': str(order.id), 'status': str(order.status.value)}
+        except AlpacaAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to replace order qty {order_id}: {e}")
+            raise AlpacaAPIError(f"Failed to replace order qty {order_id}: {e}")
+
     def submit_stop_bracket_order(
         self,
         symbol: str,
