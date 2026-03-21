@@ -783,10 +783,13 @@ class TradingEngine:
 
     def _try_get_fill(self, event, max_polls: int = 2) -> Optional[float]:
         """
-        Poll exit order for fill price.
+        Poll exit order for fill price. Updates event.filled_qty.
+
+        Checks filled_qty against expected shares. If partial fill detected,
+        emergency-closes remaining via close_position().
 
         Args:
-            event: StopExitEvent with order_id
+            event: StopExitEvent with order_id (mutated: filled_qty set)
             max_polls: Number of poll attempts (0.5s apart)
 
         Returns:
@@ -800,15 +803,100 @@ class TradingEngine:
                 exit_order = self.alpaca.get_order(event.order_id)
                 if exit_order.get('status') == 'filled':
                     fill = exit_order.get('filled_avg_price')
+                    filled_qty = int(exit_order.get('filled_qty', 0) or 0)
+
                     if fill is not None:
-                        logger.info(
-                            f"{event.symbol}: exit filled at ${fill:.2f} "
-                            f"(limit=${event.exit_price:.2f}, {event.pricing_method})"
-                        )
-                        return fill
+                        # Check for partial fill
+                        if filled_qty > 0 and filled_qty < event.shares:
+                            remaining = event.shares - filled_qty
+                            logger.error(
+                                f"{event.symbol}: PARTIAL FILL on exit — "
+                                f"{filled_qty}/{event.shares} filled, "
+                                f"{remaining} shares UNPROTECTED"
+                            )
+                            blended = self._handle_exit_partial_fill(
+                                event.symbol, fill, filled_qty,
+                                event.shares, remaining
+                            )
+                            event.filled_qty = event.shares  # all shares now closed
+                            return blended
+                        else:
+                            event.filled_qty = filled_qty or event.shares
+                            logger.info(
+                                f"{event.symbol}: exit filled at ${fill:.2f} "
+                                f"({event.filled_qty}sh, {event.pricing_method})"
+                            )
+                            return fill
             except Exception:
                 pass
         return None
+
+    def _handle_exit_partial_fill(
+        self, symbol: str, first_fill_price: float, first_qty: int,
+        total_expected: int, remaining: int,
+    ) -> float:
+        """
+        Handle partial fill on exit: emergency-close remaining shares.
+
+        Args:
+            symbol: Stock symbol
+            first_fill_price: Fill price from the partial fill
+            first_qty: Shares filled in the first order
+            total_expected: Total shares we expected to sell
+            remaining: Shares still open
+
+        Returns:
+            Blended average fill price across all fills
+        """
+        logger.warning(
+            f"{symbol}: emergency closing {remaining} remaining shares"
+        )
+        try:
+            close_result = self.alpaca.close_position(symbol)
+            close_id = close_result.get('id', '')
+            for _ in range(10):
+                time_mod.sleep(0.5)
+                try:
+                    close_order = self.alpaca.get_order(close_id)
+                    if close_order.get('status') == 'filled':
+                        close_price = float(
+                            close_order.get('filled_avg_price', 0) or 0
+                        )
+                        close_qty = int(
+                            close_order.get('filled_qty', 0) or 0
+                        )
+                        total = first_qty + close_qty
+                        blended = (
+                            (first_fill_price * first_qty + close_price * close_qty)
+                            / total
+                        ) if total > 0 else first_fill_price
+                        logger.info(
+                            f"{symbol}: partial fill resolved — "
+                            f"{first_qty}@${first_fill_price:.2f} + "
+                            f"{close_qty}@${close_price:.2f} = "
+                            f"${blended:.2f} blended"
+                        )
+                        return blended
+                except Exception:
+                    pass
+
+            logger.error(
+                f"{symbol}: emergency close fill unknown — "
+                f"using first fill ${first_fill_price:.2f}"
+            )
+        except Exception as e:
+            logger.error(
+                f"{symbol}: emergency close FAILED: {e} — "
+                f"{remaining} shares may be orphaned!"
+            )
+            if self.notifier:
+                self.notifier.notify_error(
+                    f"{symbol}: PARTIAL FILL — {remaining} shares ORPHANED! "
+                    f"Manual intervention required.",
+                    component="PartialFill",
+                )
+
+        return first_fill_price
 
     def _cancel_and_market_sell(self, event) -> None:
         """
@@ -830,12 +918,25 @@ class TradingEngine:
         except Exception:
             pass  # 422 = already filled/cancelled
 
-        # Check if it filled during cancel race
+        # Check if it filled (fully or partially) during cancel race
         try:
             order = self.alpaca.get_order(event.order_id)
             if order.get('status') == 'filled':
                 actual_fill = order.get('filled_avg_price')
+                filled_qty = int(order.get('filled_qty', 0) or 0)
                 if actual_fill:
+                    # Check for partial fill during cancel
+                    if filled_qty > 0 and filled_qty < event.shares:
+                        remaining = event.shares - filled_qty
+                        logger.warning(
+                            f"{symbol}: partial fill during cancel — "
+                            f"{filled_qty}/{event.shares}, emergency closing {remaining}"
+                        )
+                        actual_fill = self._handle_exit_partial_fill(
+                            symbol, actual_fill, filled_qty,
+                            event.shares, remaining
+                        )
+                    event.filled_qty = event.shares  # all closed now
                     logger.info(
                         f"{symbol}: limit order filled during cancel — "
                         f"${actual_fill:.2f}"
@@ -844,17 +945,20 @@ class TradingEngine:
             pass
 
         if actual_fill is None:
-            # Market sell via close_position
+            # Market sell via close_position (closes entire remaining position)
             try:
                 fallback = self.alpaca.close_position(symbol)
                 fallback_id = fallback.get('id', '')
                 # Poll for market fill
-                for _ in range(5):
+                for _ in range(10):
                     time_mod.sleep(0.5)
                     try:
                         fb_order = self.alpaca.get_order(fallback_id)
                         if fb_order.get('status') == 'filled':
                             actual_fill = fb_order.get('filled_avg_price')
+                            fb_filled = int(fb_order.get('filled_qty', 0) or 0)
+                            if fb_filled > 0:
+                                event.filled_qty = fb_filled
                             break
                     except Exception:
                         pass
@@ -866,12 +970,19 @@ class TradingEngine:
                     )
                 else:
                     logger.info(
-                        f"{symbol}: market sell filled at ${actual_fill:.2f}"
+                        f"{symbol}: market sell filled at ${actual_fill:.2f} "
+                        f"({event.filled_qty}sh)"
                     )
                 event.exit_reason = f"{event.exit_reason}_timeout"
             except Exception as e:
                 logger.error(f"{symbol}: market sell also failed: {e}")
                 actual_fill = event.exit_price
+                if self.notifier:
+                    self.notifier.notify_error(
+                        f"{symbol}: EXIT FAILED — position may still be open! "
+                        f"Manual intervention required.",
+                        component="ExitFailure",
+                    )
 
         # Finalize with the fill we got
         self._finalize_stop_exit(event, actual_fill)
@@ -943,14 +1054,18 @@ class TradingEngine:
                     break
 
             if trade_record and trade_record.get('fill_price'):
-                # Remainder P&L: shares in this exit × price diff
-                remainder_pnl = (actual_exit_price - trade_record['fill_price']) * event.shares
+                # Use actual filled_qty from broker, not expected shares
+                exit_qty = event.filled_qty if event.filled_qty > 0 else event.shares
+
+                # Remainder P&L: actual shares sold in this exit × price diff
+                remainder_pnl = (actual_exit_price - trade_record['fill_price']) * exit_qty
 
                 # Combine with partial exit P&L if exhaustion partial was taken
                 partial_pnl = trade_record.get('partial_exit_pnl') or 0.0
+                partial_shares = trade_record.get('partial_exit_shares') or 0
                 pnl = remainder_pnl + partial_pnl
 
-                # Weighted average exit for pnl_pct
+                # P&L % based on total capital deployed (entry_price × total_shares)
                 total_shares = trade_record.get('filled_qty') or trade_record['shares']
                 pnl_pct = (pnl / (trade_record['fill_price'] * total_shares)) * 100
 

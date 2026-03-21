@@ -73,6 +73,7 @@ class StopExitEvent:
     trade_db_id: Optional[int] = None
     submitted_at: float = 0.0  # time.time() when exit order was submitted
     pricing_method: str = 'fixed_offset'  # quote_tight, quote_medium, quote_wide, fixed_offset
+    filled_qty: int = 0  # actual shares filled (may differ from shares on partial fill)
 
 
 class StopMonitor:
@@ -452,7 +453,25 @@ class StopMonitor:
             except Exception:
                 return None
 
-        exit_price = actual_fill
+        # Step 3b: Verify filled_qty matches sell_shares — handle partial-of-partial
+        actual_filled_qty, verified_fill_price = self._verify_fill_qty(
+            symbol, order_id, sell_shares
+        )
+        if actual_filled_qty <= 0:
+            logger.error(
+                f"StopMonitor: {symbol} partial sell fill verification failed"
+            )
+            return None
+
+        if actual_filled_qty != sell_shares:
+            logger.warning(
+                f"StopMonitor: {symbol} partial-of-partial: "
+                f"wanted {sell_shares}, got {actual_filled_qty} "
+                f"(emergency close handled remaining)"
+            )
+            sell_shares = actual_filled_qty
+
+        exit_price = verified_fill_price if verified_fill_price > 0 else actual_fill
 
         # Step 4: Fill confirmed — NOW update watch state
         remaining = 0
@@ -572,6 +591,114 @@ class StopMonitor:
             method = 'quote_wide'
 
         return (max(limit, 0.01), method)
+
+    def _verify_fill_qty(
+        self, symbol: str, order_id: str, expected_qty: int
+    ) -> tuple:
+        """
+        Verify an order's filled_qty matches expected. Handle partial fills.
+
+        If partial fill detected, emergency-close remaining shares via
+        close_position() to prevent orphans.
+
+        Args:
+            symbol: Stock symbol
+            order_id: Order to check
+            expected_qty: How many shares we expected to fill
+
+        Returns:
+            Tuple of (total_filled_qty, avg_fill_price) after handling
+            any partial fill remainder. (0, 0.0) if unable to determine.
+        """
+        try:
+            order = self._alpaca.get_order(order_id)
+            filled_qty = int(order.get('filled_qty', 0) or 0)
+            fill_price = float(order.get('filled_avg_price', 0) or 0)
+
+            if filled_qty <= 0:
+                logger.warning(
+                    f"StopMonitor: {symbol} filled_qty=0 — "
+                    f"using expected_qty={expected_qty} as fallback"
+                )
+                return (expected_qty, fill_price)
+
+            if filled_qty == expected_qty:
+                return (filled_qty, fill_price)
+
+            # PARTIAL FILL — close remaining shares immediately
+            remaining = expected_qty - filled_qty
+            logger.error(
+                f"StopMonitor: {symbol} PARTIAL FILL — "
+                f"filled {filled_qty}/{expected_qty}, "
+                f"{remaining} shares UNPROTECTED — emergency closing"
+            )
+
+            # Verify actual position to use broker as source of truth
+            try:
+                positions = self._alpaca.get_open_positions()
+                broker_qty = 0
+                for pos in positions:
+                    if pos.get('symbol') == symbol:
+                        broker_qty = abs(int(float(pos.get('qty', 0))))
+                        break
+
+                if broker_qty > 0:
+                    close_result = self._alpaca.close_position(symbol)
+                    close_id = close_result.get('id', '')
+                    # Poll for market fill
+                    for _ in range(10):
+                        time_mod.sleep(0.5)
+                        try:
+                            close_order = self._alpaca.get_order(close_id)
+                            if close_order.get('status') == 'filled':
+                                close_fill = float(
+                                    close_order.get('filled_avg_price', 0) or 0
+                                )
+                                close_qty = int(
+                                    close_order.get('filled_qty', 0) or 0
+                                )
+                                # Blended fill price
+                                total_qty = filled_qty + close_qty
+                                if total_qty > 0 and fill_price > 0 and close_fill > 0:
+                                    blended = (
+                                        fill_price * filled_qty
+                                        + close_fill * close_qty
+                                    ) / total_qty
+                                else:
+                                    blended = fill_price
+                                logger.info(
+                                    f"StopMonitor: {symbol} partial fill resolved — "
+                                    f"{filled_qty}@${fill_price:.2f} + "
+                                    f"{close_qty}@${close_fill:.2f} = "
+                                    f"{total_qty}@${blended:.2f}"
+                                )
+                                return (total_qty, blended)
+                        except Exception:
+                            pass
+
+                    logger.error(
+                        f"StopMonitor: {symbol} emergency close fill unknown"
+                    )
+                    return (filled_qty, fill_price)
+                else:
+                    logger.info(
+                        f"StopMonitor: {symbol} position already 0 — "
+                        f"partial fill was closed externally"
+                    )
+                    return (filled_qty, fill_price)
+
+            except Exception as e:
+                logger.error(
+                    f"StopMonitor: {symbol} emergency close failed: {e} — "
+                    f"only {filled_qty}/{expected_qty} filled"
+                )
+                return (filled_qty, fill_price)
+
+        except Exception as e:
+            logger.error(
+                f"StopMonitor: {symbol} fill verification failed: {e}"
+            )
+            return (0, 0.0)
 
     def _fetch_quote_for_exit(self, symbol: str) -> Optional[Dict]:
         """
