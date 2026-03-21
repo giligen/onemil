@@ -334,3 +334,123 @@ class MarketRegimeFilter:
             'is_thin_liquidity': thin,
             'is_ok': ok,
         }
+
+
+# ---------------------------------------------------------------------------
+# SPY MACD Afternoon Cutoff
+# ---------------------------------------------------------------------------
+
+
+def compute_spy_macd_for_day(
+    spy_1min_bars,
+    prev_day_bars=None,
+) -> Dict[tuple, float]:
+    """
+    Compute SPY 1-min MACD histogram for each minute of the trading day.
+
+    Uses prev_day_bars tail(60) for warm-up (continuous MACD, same as
+    per-stock MACD warmup pattern in pattern_detector.py).
+
+    Args:
+        spy_1min_bars: DataFrame with SPY 1-min bars (timestamp, OHLCV)
+        prev_day_bars: Previous day's 1-min bars for warmup (optional)
+
+    Returns:
+        Dict mapping (hour, minute) ET tuple → MACD histogram float value
+    """
+    import pandas as pd
+    import pytz
+    from datetime import timezone
+    from trading.indicators import macd_histogram
+
+    if spy_1min_bars is None or spy_1min_bars.empty:
+        return {}
+
+    closes = spy_1min_bars['close'].copy().reset_index(drop=True)
+    warmup_len = 0
+
+    if prev_day_bars is not None and not prev_day_bars.empty:
+        warmup = prev_day_bars['close'].tail(60).reset_index(drop=True)
+        closes = pd.concat([warmup, closes], ignore_index=True)
+        warmup_len = len(warmup)
+
+    if len(closes) < 35:
+        return {}
+
+    hist = macd_histogram(closes)
+
+    ET = pytz.timezone('US/Eastern')
+    result = {}
+    for i in range(len(spy_1min_bars)):
+        ts = spy_1min_bars.iloc[i]['timestamp']
+        if hasattr(ts, 'astimezone'):
+            et_time = ts.astimezone(ET)
+        elif hasattr(ts, 'replace'):
+            et_time = ts.replace(tzinfo=timezone.utc).astimezone(ET)
+        else:
+            continue
+        key = (et_time.hour, et_time.minute)
+        result[key] = float(hist.iloc[warmup_len + i])
+
+    return result
+
+
+class SpyMacdCutoff:
+    """
+    Blocks new trade entries when SPY 1-min MACD histogram is positive
+    AND time is after cutoff_time ET.
+
+    When SPY is in a short-term uptrend (MACD > 0), small-cap momentum
+    stocks lose their edge in the afternoon — 30.4% WR, -$36K over 15 months.
+    Removing these trades improves PnL by +13.5% (p=0.0026).
+
+    The check is dynamic: if SPY MACD flips negative after cutoff, trading
+    resumes. Only blocks NEW setup detection — pending buy-stops still fill.
+    """
+
+    def __init__(self, enabled: bool = True, cutoff_time: tuple = (11, 30)):
+        """
+        Initialize SPY MACD cutoff filter.
+
+        Args:
+            enabled: Whether the filter is active
+            cutoff_time: (hour, minute) ET tuple — block entries after this time
+        """
+        self.enabled = enabled
+        self.cutoff_time = cutoff_time
+        self._macd_by_time: Dict[tuple, float] = {}
+
+    def load_spy_macd(self, macd_by_time: Dict[tuple, float]) -> None:
+        """
+        Load pre-computed SPY MACD histogram indexed by (hour, minute) ET.
+
+        Called once per trading day (by batch_backtest or trading_engine).
+
+        Args:
+            macd_by_time: Dict mapping (hour, minute) → MACD histogram value
+        """
+        self._macd_by_time = macd_by_time
+
+    def is_blocked(self, bar_time_et: tuple) -> bool:
+        """
+        Check if new entries should be blocked at this bar time.
+
+        Returns True (blocked) when ALL conditions are met:
+        1. Filter is enabled
+        2. bar_time_et >= cutoff_time
+        3. SPY MACD histogram at this time > 0
+
+        Args:
+            bar_time_et: (hour, minute) tuple in ET
+
+        Returns:
+            True if entries should be blocked, False if allowed
+        """
+        if not self.enabled:
+            return False
+        if bar_time_et < self.cutoff_time:
+            return False
+        macd_val = self._macd_by_time.get(bar_time_et)
+        if macd_val is None:
+            return False  # No data → don't block (safe default)
+        return macd_val > 0

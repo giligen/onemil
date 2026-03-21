@@ -985,6 +985,71 @@ def run_batch_backtest_fast(
                 }
                 logger.info(f"MACD warm-up: {len(all_prev_bars)} prev-day bar sets available")
 
+        # Pre-load SPY 1-min bars for SPY MACD afternoon cutoff
+        spy_cutoff_cfg = _cfg.get("trading", {}).get("spy_macd_cutoff", {})
+        spy_cutoff_enabled = bool(spy_cutoff_cfg.get("enabled", False))
+        all_spy_1min: Dict[date, pd.DataFrame] = {}
+        all_spy_prev_1min: Dict[date, pd.DataFrame] = {}
+
+        if spy_cutoff_enabled:
+            cutoff_str = spy_cutoff_cfg.get("cutoff_time", "11:30")
+            _ch, _cm = cutoff_str.split(':')
+            spy_cutoff_time = (int(_ch), int(_cm))
+
+            # Collect SPY bar keys
+            spy_date_keys = [('SPY', d.isoformat()) for d in filtered_dates]
+            spy_prev_keys = []
+            for d in filtered_dates:
+                prev_d = _get_previous_trading_date(d)
+                if prev_d:
+                    spy_prev_keys.append(('SPY', prev_d.isoformat()))
+
+            # Bulk load from cache
+            spy_bulk = db.get_intraday_bars_bulk(spy_date_keys)
+            spy_prev_bulk = db.get_intraday_bars_bulk(spy_prev_keys) if spy_prev_keys else {}
+
+            # Fetch uncached SPY bars from API
+            uncached_spy = [k for k in spy_date_keys if k not in spy_bulk]
+            uncached_spy_prev = [k for k in spy_prev_keys if k not in spy_prev_bulk]
+            all_uncached = uncached_spy + uncached_spy_prev
+            if all_uncached:
+                import os as _os
+                from dotenv import load_dotenv as _load_env
+                _load_env()
+                _key = _os.getenv("ALPACA_API_KEY")
+                _secret = _os.getenv("ALPACA_API_SECRET")
+                if _key and _secret:
+                    _client = AlpacaClient(_key, _secret)
+                    logger.info(f"Fetching {len(all_uncached)} SPY bar sets for MACD cutoff...")
+                    for sym, ds in all_uncached:
+                        try:
+                            td = date.fromisoformat(ds)
+                            mo, mc = _market_hours_utc(td)
+                            bars_f = _client.get_historical_1min_bars(sym, mo, mc)
+                            if not bars_f.empty:
+                                recs = bars_f.to_dict('records')
+                                db.save_intraday_bars(sym, ds, recs)
+                                if (sym, ds) in set(spy_date_keys):
+                                    spy_bulk[(sym, ds)] = recs
+                                else:
+                                    spy_prev_bulk[(sym, ds)] = recs
+                        except Exception:
+                            pass
+
+            for d in filtered_dates:
+                key = ('SPY', d.isoformat())
+                data = spy_bulk.get(key)
+                if data:
+                    all_spy_1min[d] = pd.DataFrame(data) if not isinstance(data, pd.DataFrame) else data
+                prev_d = _get_previous_trading_date(d)
+                if prev_d:
+                    pkey = ('SPY', prev_d.isoformat())
+                    pdata = spy_prev_bulk.get(pkey)
+                    if pdata:
+                        all_spy_prev_1min[d] = pd.DataFrame(pdata) if not isinstance(pdata, pd.DataFrame) else pdata
+
+            logger.info(f"SPY MACD cutoff: {len(all_spy_1min)} trade-day + {len(all_spy_prev_1min)} prev-day bar sets")
+
         preload_elapsed = time.time() - t_preload
         logger.info(
             f"Pre-loaded {len(all_bars)} bar sets in {preload_elapsed:.1f}s"
@@ -1002,6 +1067,18 @@ def run_batch_backtest_fast(
                 )
             else:
                 runner._min_breakout_vol_override = 0
+
+            # SPY MACD afternoon cutoff for this date
+            if spy_cutoff_enabled and trade_date in all_spy_1min:
+                from trading.market_regime import SpyMacdCutoff, compute_spy_macd_for_day
+                spy_bars_day = all_spy_1min[trade_date]
+                spy_prev_day = all_spy_prev_1min.get(trade_date)
+                macd_by_time = compute_spy_macd_for_day(spy_bars_day, spy_prev_day)
+                spy_cutoff = SpyMacdCutoff(enabled=True, cutoff_time=spy_cutoff_time)
+                spy_cutoff.load_spy_macd(macd_by_time)
+                runner.set_spy_macd_cutoff(spy_cutoff)
+            else:
+                runner.set_spy_macd_cutoff(None)
 
             consec_losses = 0
             stopped_for_day = False

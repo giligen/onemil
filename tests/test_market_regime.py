@@ -554,3 +554,152 @@ class TestSpyVolumeRatio:
 
         effective = mrf.get_min_breakout_volume_ratio(trade_date, default=1.5)
         assert effective == 3.0
+
+
+# ---------------------------------------------------------------------------
+# SPY MACD Afternoon Cutoff
+# ---------------------------------------------------------------------------
+
+class TestSpyMacdCutoff:
+    """Tests for SpyMacdCutoff filter."""
+
+    def test_disabled_never_blocks(self):
+        """Disabled filter never blocks entries."""
+        from trading.market_regime import SpyMacdCutoff
+        cutoff = SpyMacdCutoff(enabled=False, cutoff_time=(11, 30))
+        cutoff.load_spy_macd({(12, 0): 0.5, (13, 0): 1.0})
+        assert cutoff.is_blocked((12, 0)) is False
+        assert cutoff.is_blocked((13, 0)) is False
+
+    def test_before_cutoff_never_blocks(self):
+        """Before cutoff time, never blocks even with positive MACD."""
+        from trading.market_regime import SpyMacdCutoff
+        cutoff = SpyMacdCutoff(enabled=True, cutoff_time=(11, 30))
+        cutoff.load_spy_macd({(10, 0): 0.5, (11, 0): 1.0})
+        assert cutoff.is_blocked((10, 0)) is False
+        assert cutoff.is_blocked((11, 0)) is False
+        assert cutoff.is_blocked((11, 29)) is False
+
+    def test_after_cutoff_positive_macd_blocks(self):
+        """After cutoff + positive MACD → blocks."""
+        from trading.market_regime import SpyMacdCutoff
+        cutoff = SpyMacdCutoff(enabled=True, cutoff_time=(11, 30))
+        cutoff.load_spy_macd({(11, 30): 0.01, (12, 0): 0.5, (14, 0): 1.0})
+        assert cutoff.is_blocked((11, 30)) is True
+        assert cutoff.is_blocked((12, 0)) is True
+        assert cutoff.is_blocked((14, 0)) is True
+
+    def test_after_cutoff_negative_macd_allows(self):
+        """After cutoff + negative MACD → allows trading."""
+        from trading.market_regime import SpyMacdCutoff
+        cutoff = SpyMacdCutoff(enabled=True, cutoff_time=(11, 30))
+        cutoff.load_spy_macd({(12, 0): -0.5, (14, 0): -0.01})
+        assert cutoff.is_blocked((12, 0)) is False
+        assert cutoff.is_blocked((14, 0)) is False
+
+    def test_after_cutoff_zero_macd_allows(self):
+        """After cutoff + MACD exactly 0 → allows (not strictly positive)."""
+        from trading.market_regime import SpyMacdCutoff
+        cutoff = SpyMacdCutoff(enabled=True, cutoff_time=(11, 30))
+        cutoff.load_spy_macd({(12, 0): 0.0})
+        assert cutoff.is_blocked((12, 0)) is False
+
+    def test_no_data_at_time_allows(self):
+        """Missing MACD data at a time → don't block (safe default)."""
+        from trading.market_regime import SpyMacdCutoff
+        cutoff = SpyMacdCutoff(enabled=True, cutoff_time=(11, 30))
+        cutoff.load_spy_macd({(12, 0): 0.5})
+        # Data exists at 12:00 but not at 13:00
+        assert cutoff.is_blocked((13, 0)) is False
+
+    def test_macd_flips_during_day(self):
+        """MACD positive then negative then positive — blocks/allows correctly."""
+        from trading.market_regime import SpyMacdCutoff
+        cutoff = SpyMacdCutoff(enabled=True, cutoff_time=(11, 30))
+        cutoff.load_spy_macd({
+            (12, 0): 0.5,   # positive → blocks
+            (13, 0): -0.3,  # negative → allows
+            (14, 0): 0.2,   # positive again → blocks
+        })
+        assert cutoff.is_blocked((12, 0)) is True
+        assert cutoff.is_blocked((13, 0)) is False
+        assert cutoff.is_blocked((14, 0)) is True
+
+
+class TestComputeSpyMacdForDay:
+    """Tests for compute_spy_macd_for_day helper."""
+
+    def test_basic_computation(self):
+        """Returns dict with (hour, minute) keys and float values."""
+        import pandas as pd
+        from datetime import datetime, timezone, timedelta
+        from trading.market_regime import compute_spy_macd_for_day
+
+        # Build 60 synthetic SPY 1-min bars (enough for MACD warmup)
+        base = datetime(2026, 3, 15, 14, 30, tzinfo=timezone.utc)  # 09:30 ET (EDT)
+        records = []
+        price = 500.0
+        for i in range(60):
+            price += 0.1
+            records.append({
+                'timestamp': base + timedelta(minutes=i),
+                'open': price - 0.05, 'high': price + 0.1,
+                'low': price - 0.1, 'close': price, 'volume': 1000000,
+            })
+        bars = pd.DataFrame(records)
+
+        result = compute_spy_macd_for_day(bars)
+
+        assert isinstance(result, dict)
+        assert len(result) > 0
+        # All keys should be (hour, minute) tuples
+        for key in result:
+            assert isinstance(key, tuple)
+            assert len(key) == 2
+        # All values should be floats
+        for val in result.values():
+            assert isinstance(val, float)
+
+    def test_with_warmup_differs_from_cold(self):
+        """Warmup changes MACD values vs cold start."""
+        import pandas as pd
+        from datetime import datetime, timezone, timedelta
+        from trading.market_regime import compute_spy_macd_for_day
+
+        base = datetime(2026, 3, 15, 14, 30, tzinfo=timezone.utc)
+        records = []
+        price = 500.0
+        for i in range(60):
+            price += 0.1
+            records.append({
+                'timestamp': base + timedelta(minutes=i),
+                'open': price - 0.05, 'high': price + 0.1,
+                'low': price - 0.1, 'close': price, 'volume': 1000000,
+            })
+        bars = pd.DataFrame(records)
+
+        # Build prev-day bars with downtrend (different from today's uptrend)
+        prev_records = []
+        prev_price = 510.0
+        prev_base = datetime(2026, 3, 14, 14, 30, tzinfo=timezone.utc)
+        for i in range(60):
+            prev_price -= 0.1
+            prev_records.append({
+                'timestamp': prev_base + timedelta(minutes=i),
+                'open': prev_price + 0.05, 'high': prev_price + 0.1,
+                'low': prev_price - 0.1, 'close': prev_price, 'volume': 1000000,
+            })
+        prev_bars = pd.DataFrame(prev_records)
+
+        cold = compute_spy_macd_for_day(bars)
+        warm = compute_spy_macd_for_day(bars, prev_bars)
+
+        # Both should have results
+        assert len(cold) > 0
+        assert len(warm) > 0
+
+        # Early bars should differ (warmup effect strongest at start)
+        common_keys = sorted(set(cold.keys()) & set(warm.keys()))
+        if common_keys:
+            first_key = common_keys[0]
+            assert cold[first_key] != warm[first_key], "Warmup should change early MACD values"

@@ -148,6 +148,14 @@ class TradingEngine:
         self.macd_strong_pos_multiplier = float(macd_zones_cfg.get("strong_pos_multiplier", 1.5))
         self.macd_normal_multiplier = float(macd_zones_cfg.get("normal_multiplier", 1.0))
 
+        # SPY MACD afternoon cutoff
+        spy_cutoff_cfg = _cfg.get("trading", {}).get("spy_macd_cutoff", {})
+        self._spy_macd_cutoff_enabled = bool(spy_cutoff_cfg.get("enabled", False))
+        _cutoff_str = spy_cutoff_cfg.get("cutoff_time", "11:30")
+        _ch, _cm = _cutoff_str.split(':')
+        self._spy_macd_cutoff_time = (int(_ch), int(_cm))
+        self._spy_macd_cache: Optional[float] = None  # latest SPY MACD histogram value
+
         self.shutdown_event = None  # Set by caller for graceful shutdown
 
     def _get_macd_zone_multiplier(self, symbol: str, bars: pd.DataFrame, entry_price: float) -> float:
@@ -233,6 +241,64 @@ class TradingEngine:
         except Exception as e:
             self._macd_warmup_cache[symbol] = None
             logger.warning(f"{symbol}: Failed to fetch MACD warm-up: {e}")
+
+    def _refresh_spy_macd(self) -> None:
+        """
+        Fetch SPY 1-min bars and compute current MACD histogram.
+
+        Called each run_pattern_check() cycle when spy_macd_cutoff is enabled.
+        Reuses _macd_warmup_cache['SPY'] for prev-day warmup.
+        """
+        if not self._spy_macd_cutoff_enabled:
+            return
+        try:
+            import pytz as _pytz
+            _et = _pytz.timezone('US/Eastern')
+            now_et = datetime.now(_et)
+            minutes_since_open = max(
+                int((now_et - now_et.replace(hour=9, minute=30, second=0)).total_seconds() / 60), 30
+            )
+            spy_bars = self.alpaca.get_1min_bars('SPY', lookback_minutes=minutes_since_open)
+            if spy_bars is None or spy_bars.empty:
+                self._spy_macd_cache = None
+                return
+
+            # Warmup: fetch prev day bars for SPY (cache once per day)
+            if 'SPY' not in self._macd_warmup_cache:
+                self._fetch_macd_warmup('SPY')
+            warmup = self._macd_warmup_cache.get('SPY')
+
+            from trading.indicators import macd_histogram
+            closes = spy_bars['close'].copy()
+            if warmup is not None:
+                closes = pd.concat([warmup, closes], ignore_index=True)
+
+            if len(closes) < 35:
+                self._spy_macd_cache = None
+                return
+
+            hist = macd_histogram(closes)
+            self._spy_macd_cache = float(hist.iloc[-1])
+            logger.debug(f"SPY MACD histogram: {self._spy_macd_cache:.6f}")
+        except Exception as e:
+            logger.warning(f"Failed to refresh SPY MACD: {e}")
+            self._spy_macd_cache = None
+
+    def _is_spy_macd_cutoff_blocked(self) -> bool:
+        """
+        Check if SPY MACD afternoon cutoff is blocking new entries.
+
+        Returns True when: enabled AND past cutoff_time AND SPY MACD > 0.
+        """
+        if not self._spy_macd_cutoff_enabled:
+            return False
+        now_et = datetime.now(ET)
+        current_time = (now_et.hour, now_et.minute)
+        if current_time < self._spy_macd_cutoff_time:
+            return False
+        if self._spy_macd_cache is None:
+            return False  # No data → don't block
+        return self._spy_macd_cache > 0
 
     def _refresh_spy_data(self) -> None:
         """Fetch recent SPY daily bars for regime filter."""
@@ -1135,6 +1201,16 @@ class TradingEngine:
         # Skip new orders after last_entry_time
         if self._is_past_last_entry_time():
             logger.debug("Past last entry time, not placing new orders")
+            return fill_result
+
+        # SPY MACD afternoon cutoff — refresh and check
+        self._refresh_spy_macd()
+        if self._is_spy_macd_cutoff_blocked():
+            logger.info(
+                f"SPY MACD CUTOFF: histogram={self._spy_macd_cache:.6f} > 0 "
+                f"after {self._spy_macd_cutoff_time[0]:02d}:{self._spy_macd_cutoff_time[1]:02d} ET "
+                f"— skipping new trades"
+            )
             return fill_result
 
         symbols_to_check = (

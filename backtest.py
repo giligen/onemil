@@ -689,6 +689,7 @@ class BacktestRunner:
         self.TRADING_MINUTES = 390
         self.rvol_mode = rvol_mode
         self._min_breakout_vol_override = 0  # 0 = disabled; set per-date by batch_backtest
+        self._spy_macd_cutoff = None  # SpyMacdCutoff instance; set per-date by batch_backtest
 
         self.early_exit_after_trade = early_exit_after_trade
         self.realistic = realistic
@@ -877,6 +878,14 @@ class BacktestRunner:
             mult = self.macd_normal_multiplier
             logger.debug(f"  MACD zone: {macd_pct:.2f}% → normal → {mult}x risk")
             return mult
+
+    def set_spy_macd_cutoff(self, cutoff) -> None:
+        """Set SPY MACD cutoff filter for the current trading day.
+
+        Called by batch_backtest per date with a SpyMacdCutoff instance.
+        Pass None to disable.
+        """
+        self._spy_macd_cutoff = cutoff
 
     def _get_bar_time_et(self, bar_ts) -> tuple:
         """Convert bar timestamp to ET (hour, minute), handling DST correctly."""
@@ -1316,6 +1325,10 @@ class BacktestRunner:
             if not trade_taken and pending_order is None:
                 # Last entry time check
                 if bar_time_et >= self.last_entry_time_et:
+                    continue
+
+                # SPY MACD afternoon cutoff: block when SPY MACD > 0 after cutoff time
+                if self._spy_macd_cutoff is not None and self._spy_macd_cutoff.is_blocked(bar_time_et):
                     continue
 
                 setup = self.detector.detect_setup(symbol, bars, end_idx=i)

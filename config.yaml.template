@@ -93,6 +93,13 @@ trading:
     sma_period: 50             # SPY below SMA(50) — downtrend signal
     min_spy_volume_ratio: 0.70 # SPY T-1 volume / SMA20 — thin liquidity threshold
     thin_liquidity_breakout_vol_ratio: 2.0  # Stricter breakout vol ratio on thin days
+  # SPY MACD afternoon cutoff: block new entries when SPY intraday momentum is bullish
+  # When SPY 1-min MACD histogram > 0 after cutoff_time, small-cap momentum stocks
+  # lose their edge (30% WR, -$36K over 15 months). Removing these = +13.5% P&L.
+  # Dynamic: if SPY MACD flips negative, trading resumes. Only blocks NEW entries.
+  spy_macd_cutoff:
+    enabled: true
+    cutoff_time: "11:30"     # Block new entries after this ET time when SPY MACD > 0
   # Self-managed stops: WebSocket price monitoring + marketable limit sell exits
   # Replaces bracket stop-market with real-time monitoring to cap exit slippage
   self_managed_stops:

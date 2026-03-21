@@ -245,7 +245,9 @@ class TestRunPatternCheck:
 
         result = engine.run_pattern_check()
         assert result is None
-        mock_alpaca.get_1min_bars.assert_not_called()
+        # SPY MACD cutoff may call get_1min_bars('SPY'), but AAPL should NOT be fetched
+        for call_args in mock_alpaca.get_1min_bars.call_args_list:
+            assert call_args[0][0] != "AAPL", "Should not fetch bars for already-traded symbol"
 
 
 class TestDailyStats:
