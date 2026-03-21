@@ -107,6 +107,19 @@ trading:
     enabled: true                        # ACTIVE — paper testing
     trail_r: 1.0                        # trail distance in R units below high
     activate_at_r: 2.0                  # activate trail after +2R gain
+  # Exhaustion exit: sell partial into strength on exhaustion signals
+  # Reduces slippage by selling while buyers are still aggressive
+  # NOTE: backtest only — not yet implemented in live trading engine
+  exhaustion_exit:
+    enabled: true                      # validated: +$19K P&L, +0.18 Sharpe vs baseline
+    partial_fraction: 0.5              # sell 50% on signal
+    tighter_trail_r: 0.5              # 0.5R trail on remainder (vs 1R)
+    min_profit_r: 3.0                 # only check signals when +3R profitable
+    signals:
+      volume_divergence: false
+      climax_candle: true
+      shrinking_bodies: false
+      shooting_star: true
   # Slippage model (percentage of price, applied in backtest)
   entry_slippage_pct: 0.001  # 0.10% — added to buy-stop fill price (lifting the ask)
   exit_slippage_pct: 0.003   # 0.30% — tick gap + spread on self-managed stop exits
@@ -129,3 +142,4 @@ trading:
     strong_neg_multiplier: 1.5         # 1.5x risk on deep pullbacks (best Sharpe)
     strong_pos_threshold_pct: 0.5     # MACD% above this = strong momentum
     strong_pos_multiplier: 1.5         # 1.5x risk on strong momentum
+    normal_multiplier: 1.0              # 1.0x risk on normal zones

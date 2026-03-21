@@ -145,36 +145,39 @@ class TradeSimulator:
         marketable_limit_offset_pct: float = 0.0,
         trailing_stop_r: float = 0.0,
         trailing_activate_at_r: float = 0.0,
+        exhaustion_exit_enabled: bool = False,
+        exhaustion_partial_fraction: float = 0.5,
+        exhaustion_tighter_trail_r: float = 0.5,
+        exhaustion_min_profit_r: float = 1.0,
+        exhaustion_signals: Optional[Dict[str, bool]] = None,
     ):
         """
         Initialize TradeSimulator.
 
         Args:
             force_close_time_et: ET time tuple (hour, minute) to force close.
-                e.g. (15, 45) = 15:45 ET. None disables force-close.
             partial_profit_enabled: Enable partial profit exit at +NR, then
                 move stop to breakeven on remaining shares.
-            partial_profit_r_multiple: Take partial profit at this R multiple
-                (default 1.0 = +1R).
-            partial_profit_fraction: Fraction of shares to sell at partial
-                target (default 0.5 = half).
+            partial_profit_r_multiple: Take partial profit at this R multiple.
+            partial_profit_fraction: Fraction of shares to sell at partial target.
             exit_slippage_pct: Slippage as fraction of stop price, subtracted
-                from stop-loss fills. E.g., 0.001 = 0.1%. Not applied to
-                limit (take-profit) or EOD exits. Default 0.0 (no slippage).
-            marketable_limit_offset: When > 0, cap stop exit slippage at this
-                dollar offset (models self-managed stops with marketable limit
-                sells instead of stop-market orders).
-            marketable_limit_offset_pct: When > 0, cap stop exit slippage at
-                this percentage of stop price (whichever cap is larger is used).
-            trailing_stop_r: When > 0, replace fixed TP with a trailing stop
-                that trails by this many R units below the highest high since
-                entry. E.g., 1.0 = trail 1R below high. 0 = disabled (use
-                fixed TP). The initial stop is unchanged until trailing activates.
-            trailing_activate_at_r: Activate the trailing stop only after price
-                has moved this many R in our favor. E.g., 2.0 = trail activates
-                after +2R. Before activation, the original SL is used and there
-                is NO fixed TP ceiling — the trade runs until trail activates
-                and then catches the reversal.
+                from stop-loss fills. Not applied to exhaustion exits (selling
+                into strength = ~0 slippage).
+            marketable_limit_offset: Cap stop exit slippage at this dollar offset.
+            marketable_limit_offset_pct: Cap stop exit slippage at this pct.
+            trailing_stop_r: Trail N×R below highest high (0 = disabled).
+            trailing_activate_at_r: Activate trail after +NR from entry.
+            exhaustion_exit_enabled: Enable exhaustion signal partial exits.
+                When a signal fires while profitable, sell partial_fraction at
+                bar close (0 slippage) and tighten trail on remainder.
+            exhaustion_partial_fraction: Fraction to sell on exhaustion signal.
+            exhaustion_tighter_trail_r: Trail distance for remainder after
+                exhaustion partial (in R units, e.g. 0.5 = tighter than 1.0).
+            exhaustion_min_profit_r: Only check signals when trade is this
+                many R in profit (default 1.0).
+            exhaustion_signals: Dict of signal_name -> enabled. Valid keys:
+                'volume_divergence', 'climax_candle', 'shrinking_bodies',
+                'shooting_star'. None = all enabled when exhaustion_exit_enabled.
         """
         self.force_close_time_et = force_close_time_et
         self.partial_profit_enabled = partial_profit_enabled
@@ -185,6 +188,100 @@ class TradeSimulator:
         self.marketable_limit_offset_pct = marketable_limit_offset_pct
         self.trailing_stop_r = trailing_stop_r
         self.trailing_activate_at_r = trailing_activate_at_r
+        # Exhaustion exit
+        self.exhaustion_exit_enabled = exhaustion_exit_enabled
+        self.exhaustion_partial_fraction = exhaustion_partial_fraction
+        self.exhaustion_tighter_trail_r = exhaustion_tighter_trail_r
+        self.exhaustion_min_profit_r = exhaustion_min_profit_r
+        self.exhaustion_signals = exhaustion_signals or {
+            'volume_divergence': True,
+            'climax_candle': True,
+            'shrinking_bodies': True,
+            'shooting_star': True,
+        }
+
+    # ------------------------------------------------------------------
+    # Exhaustion signal detectors
+    # ------------------------------------------------------------------
+
+    def _check_exhaustion(self, bars: pd.DataFrame, idx: int) -> bool:
+        """Check if any enabled exhaustion signal fires at bar idx."""
+        sigs = self.exhaustion_signals
+        if sigs.get('volume_divergence') and self._sig_volume_divergence(bars, idx):
+            return True
+        if sigs.get('climax_candle') and self._sig_climax_candle(bars, idx):
+            return True
+        if sigs.get('shrinking_bodies') and self._sig_shrinking_bodies(bars, idx):
+            return True
+        if sigs.get('shooting_star') and self._sig_shooting_star(bars, idx):
+            return True
+        return False
+
+    @staticmethod
+    def _sig_volume_divergence(bars: pd.DataFrame, idx: int, lookback: int = 3) -> bool:
+        """Volume declining over lookback bars while price makes higher highs."""
+        if idx < lookback:
+            return False
+        for j in range(1, lookback + 1):
+            curr = idx - lookback + j
+            prev = curr - 1
+            if prev < 0:
+                return False
+            if bars.iloc[curr]['volume'] >= bars.iloc[prev]['volume']:
+                return False
+            if bars.iloc[curr]['high'] < bars.iloc[prev]['high'] - 0.01:
+                return False
+        return True
+
+    @staticmethod
+    def _sig_climax_candle(bars: pd.DataFrame, idx: int,
+                           lookback: int = 5, body_mult: float = 2.0,
+                           vol_mult: float = 2.0) -> bool:
+        """Body AND volume both > mult × average of previous lookback bars."""
+        if idx < lookback:
+            return False
+        curr_body = abs(bars.iloc[idx]['close'] - bars.iloc[idx]['open'])
+        curr_vol = bars.iloc[idx]['volume']
+        avg_body = sum(
+            abs(bars.iloc[idx - j]['close'] - bars.iloc[idx - j]['open'])
+            for j in range(1, lookback + 1)
+        ) / lookback
+        avg_vol = sum(bars.iloc[idx - j]['volume'] for j in range(1, lookback + 1)) / lookback
+        if avg_body <= 0 or avg_vol <= 0:
+            return False
+        return curr_body >= avg_body * body_mult and curr_vol >= avg_vol * vol_mult
+
+    @staticmethod
+    def _sig_shrinking_bodies(bars: pd.DataFrame, idx: int,
+                              lookback: int = 3, shrink_ratio: float = 0.5) -> bool:
+        """Current body < shrink_ratio × body from lookback bars ago, price still near highs."""
+        if idx < lookback:
+            return False
+        curr_body = abs(bars.iloc[idx]['close'] - bars.iloc[idx]['open'])
+        prev_body = abs(bars.iloc[idx - lookback]['close'] - bars.iloc[idx - lookback]['open'])
+        if prev_body <= 0:
+            return False
+        if curr_body >= prev_body * shrink_ratio:
+            return False
+        if bars.iloc[idx]['close'] < bars.iloc[idx - lookback]['close']:
+            return False
+        return True
+
+    @staticmethod
+    def _sig_shooting_star(bars: pd.DataFrame, idx: int, wick_ratio: float = 2.0) -> bool:
+        """Long upper wick (> wick_ratio × body) with close near the low."""
+        bar = bars.iloc[idx]
+        body = abs(bar['close'] - bar['open'])
+        upper_wick = bar['high'] - max(bar['open'], bar['close'])
+        if body <= 0.001:
+            return False
+        if upper_wick < body * wick_ratio:
+            return False
+        bar_range = bar['high'] - bar['low']
+        if bar_range <= 0:
+            return False
+        close_position = (bar['close'] - bar['low']) / bar_range
+        return close_position <= 0.4
 
     def _compute_stop_fill(self, stop_price: float) -> float:
         """
@@ -263,6 +360,11 @@ class TradeSimulator:
         current_stop = trade.stop_loss
         risk = actual_entry - plan.stop_loss_price
 
+        # Exhaustion exit state
+        exhaust_partial_taken = False
+        active_shares = trade.shares
+        effective_trail_r = self.trailing_stop_r
+
         for i in range(entry_bar_idx + 1, len(bars)):
             bar = bars.iloc[i]
 
@@ -270,8 +372,10 @@ class TradeSimulator:
             if self.force_close_time_et is not None:
                 bar_et = self._get_bar_time_et(bar['timestamp'])
                 if bar_et >= self.force_close_time_et:
-                    self._exit_trade(trade, bar, 'force_close', bar['open'])
-                    logger.debug(f"  Bar {i}: force close at ${bar['open']:.2f}")
+                    reason = 'exhaust+force_close' if exhaust_partial_taken else 'force_close'
+                    self._exit_trade(trade, bar, reason, bar['open'],
+                                     active_shares=active_shares if exhaust_partial_taken else None)
+                    logger.debug(f"  Bar {i}: {reason} at ${bar['open']:.2f}")
                     return trade
 
             bar_low = bar['low']
@@ -288,7 +392,10 @@ class TradeSimulator:
                 if hit_stop:
                     stop_fill = self._compute_stop_fill(current_stop)
                     reason = 'trail_stop' if trailing_active else 'stop'
-                    self._exit_trade(trade, bar, reason, stop_fill)
+                    if exhaust_partial_taken:
+                        reason = 'exhaust+' + reason
+                    self._exit_trade(trade, bar, reason, stop_fill,
+                                     active_shares=active_shares if exhaust_partial_taken else None)
                     logger.debug(f"  Bar {i}: {reason} at ${stop_fill:.2f}")
                     return trade
 
@@ -298,11 +405,50 @@ class TradeSimulator:
                     if r_gain >= self.trailing_activate_at_r:
                         trailing_active = True
 
-                # Ratchet stop up
+                # Ratchet stop up (uses tighter trail after exhaustion partial)
                 if trailing_active and risk > 0:
-                    new_stop = highest_since_entry - risk * self.trailing_stop_r
+                    new_stop = highest_since_entry - risk * effective_trail_r
                     if new_stop > current_stop:
                         current_stop = new_stop
+
+                # Exhaustion exit: check signals when profitable, sell partial
+                if (self.exhaustion_exit_enabled and not exhaust_partial_taken
+                        and risk > 0):
+                    current_r = (bar['close'] - actual_entry) / risk
+                    if current_r >= self.exhaustion_min_profit_r:
+                        if self._check_exhaustion(bars, i):
+                            # Partial exit at bar close (0 slippage — selling
+                            # into strength while buyers are aggressive)
+                            partial_shares = int(
+                                active_shares * self.exhaustion_partial_fraction
+                            )
+                            remaining = active_shares - partial_shares
+
+                            trade.partial_exit_taken = True
+                            trade.partial_exit_time = bar['timestamp']
+                            trade.partial_exit_price = bar['close']
+                            trade.partial_shares = partial_shares
+                            trade.partial_pnl = (
+                                (bar['close'] - actual_entry) * partial_shares
+                            )
+                            trade.remaining_shares = remaining
+
+                            active_shares = remaining
+                            exhaust_partial_taken = True
+                            effective_trail_r = self.exhaustion_tighter_trail_r
+
+                            # Immediately ratchet with tighter trail
+                            new_stop = (highest_since_entry
+                                        - risk * effective_trail_r)
+                            if new_stop > current_stop:
+                                current_stop = new_stop
+
+                            logger.debug(
+                                f"  Bar {i}: EXHAUSTION partial — "
+                                f"sold {partial_shares}sh @ ${bar['close']:.2f}, "
+                                f"P&L ${trade.partial_pnl:.0f}, "
+                                f"trail tightened to {effective_trail_r}R"
+                            )
             else:
                 # Original fixed TP logic (unchanged)
                 hit_target = bar_high >= trade.take_profit
@@ -329,8 +475,10 @@ class TradeSimulator:
 
         # End of day — exit at last bar's close
         last_bar = bars.iloc[last_bar_idx]
-        self._exit_trade(trade, last_bar, 'eod', last_bar['close'])
-        logger.debug(f"  EOD exit at ${last_bar['close']:.2f}")
+        reason = 'exhaust+eod' if exhaust_partial_taken else 'eod'
+        self._exit_trade(trade, last_bar, reason, last_bar['close'],
+                         active_shares=active_shares if exhaust_partial_taken else None)
+        logger.debug(f"  {reason} exit at ${last_bar['close']:.2f}")
         return trade
 
     def _simulate_with_partial(
@@ -497,7 +645,7 @@ class TradeSimulator:
         trade.exit_price = price
         trade.exit_reason = reason
 
-        if active_shares is not None and self.partial_profit_enabled:
+        if active_shares is not None and trade.partial_exit_taken:
             # Combined P&L: partial profit + remaining shares exit
             final_pnl = (price - trade.entry_price) * active_shares
             trade.pnl = trade.partial_pnl + final_pnl
@@ -666,8 +814,19 @@ class BacktestRunner:
             resolved_trail_r = float(trail_cfg.get("trail_r", 1.0))
             resolved_trail_activate = float(trail_cfg.get("activate_at_r", 2.0))
 
+        # Exhaustion exit config
+        exhaust_cfg = trading_cfg.get("exhaustion_exit", {})
+        self.exhaustion_exit_enabled = bool(exhaust_cfg.get("enabled", False))
+        exhaust_signals = exhaust_cfg.get("signals", {})
+        self.exhaustion_signals = {
+            'volume_divergence': bool(exhaust_signals.get('volume_divergence', True)),
+            'climax_candle': bool(exhaust_signals.get('climax_candle', True)),
+            'shrinking_bodies': bool(exhaust_signals.get('shrinking_bodies', True)),
+            'shooting_star': bool(exhaust_signals.get('shooting_star', True)),
+        }
+
         # Wire force_close, partial profit, exit slippage, marketable
-        # limit offset, and trailing stop into the simulator
+        # limit offset, trailing stop, and exhaustion exit into the simulator
         if simulator is not None:
             self.simulator = simulator
         else:
@@ -683,11 +842,23 @@ class BacktestRunner:
                 marketable_limit_offset_pct=ml_offset_pct,
                 trailing_stop_r=resolved_trail_r,
                 trailing_activate_at_r=resolved_trail_activate,
+                exhaustion_exit_enabled=self.exhaustion_exit_enabled,
+                exhaustion_partial_fraction=float(exhaust_cfg.get("partial_fraction", 0.5)),
+                exhaustion_tighter_trail_r=float(exhaust_cfg.get("tighter_trail_r", 0.5)),
+                exhaustion_min_profit_r=float(exhaust_cfg.get("min_profit_r", 1.0)),
+                exhaustion_signals=self.exhaustion_signals,
             )
             if resolved_trail_r > 0:
                 logger.info(
                     f"Trailing stop: {resolved_trail_r:.1f}R below high, "
                     f"activates at +{resolved_trail_activate:.1f}R (replaces fixed TP)"
+                )
+            if self.exhaustion_exit_enabled:
+                active = [k for k, v in self.exhaustion_signals.items() if v]
+                logger.info(
+                    f"Exhaustion exit: {', '.join(active)}, "
+                    f"partial {float(exhaust_cfg.get('partial_fraction', 0.5)):.0%}, "
+                    f"tighter trail {float(exhaust_cfg.get('tighter_trail_r', 0.5)):.1f}R"
                 )
 
         # MACD zone filter: risk scaling based on MACD histogram strength at entry
@@ -699,13 +870,15 @@ class BacktestRunner:
         self.macd_strong_neg_multiplier = float(macd_zones_cfg.get("strong_neg_multiplier", 1.25))
         self.macd_strong_pos_threshold = float(macd_zones_cfg.get("strong_pos_threshold_pct", 0.5))
         self.macd_strong_pos_multiplier = float(macd_zones_cfg.get("strong_pos_multiplier", 1.5))
+        self.macd_normal_multiplier = float(macd_zones_cfg.get("normal_multiplier", 1.0))
         self._prev_day_bars: Optional[pd.DataFrame] = None
 
         if self.macd_zones_enabled:
             logger.info(
                 f"MACD zones: dead [{self.macd_dead_zone_min}%, {self.macd_dead_zone_max}%], "
                 f"strong neg <{self.macd_strong_neg_threshold}% → {self.macd_strong_neg_multiplier}x, "
-                f"strong pos >{self.macd_strong_pos_threshold}% → {self.macd_strong_pos_multiplier}x"
+                f"strong pos >{self.macd_strong_pos_threshold}% → {self.macd_strong_pos_multiplier}x, "
+                f"normal → {self.macd_normal_multiplier}x"
             )
 
     _ET = pytz.timezone('US/Eastern')
@@ -769,8 +942,9 @@ class BacktestRunner:
             )
             return mult
         else:
-            logger.debug(f"  MACD zone: {macd_pct:.2f}% → normal → 1.0x risk")
-            return 1.0
+            mult = self.macd_normal_multiplier
+            logger.debug(f"  MACD zone: {macd_pct:.2f}% → normal → {mult}x risk")
+            return mult
 
     def _get_bar_time_et(self, bar_ts) -> tuple:
         """Convert bar timestamp to ET (hour, minute), handling DST correctly."""

@@ -133,6 +133,7 @@ class TradingEngine:
         self.macd_strong_neg_multiplier = float(macd_zones_cfg.get("strong_neg_multiplier", 1.5))
         self.macd_strong_pos_threshold = float(macd_zones_cfg.get("strong_pos_threshold_pct", 0.5))
         self.macd_strong_pos_multiplier = float(macd_zones_cfg.get("strong_pos_multiplier", 1.5))
+        self.macd_normal_multiplier = float(macd_zones_cfg.get("normal_multiplier", 1.0))
 
         self.shutdown_event = None  # Set by caller for graceful shutdown
 
@@ -175,7 +176,7 @@ class TradingEngine:
             logger.info(f"{symbol}: MACD zone strong pos ({macd_pct:.2f}%) → {self.macd_strong_pos_multiplier}x")
             return self.macd_strong_pos_multiplier
         else:
-            return 1.0
+            return self.macd_normal_multiplier
 
     def _fetch_macd_warmup(self, symbol: str) -> None:
         """

@@ -56,11 +56,34 @@ Bull flag momentum pattern on 1-minute bars:
 
 ### Trade Plan Rules
 
-- **Entry**: Breakout level (flag high)
-- **Stop**: Flag low - $0.01, capped at $0.20 from entry (Ross's rule), minimum $0.05 risk
-- **Target**: 2:1 R:R
-- **Position size**: floor($500 / entry), max 1000 shares
+- **Entry**: Buy-stop at breakout level (flag high), limit 2% above
+- **Stop**: Flag low region, min 1% / max 4% risk as % of price
+- **Target**: 2.5:1 R:R (overridden by trailing stop when enabled)
+- **Position size**: fixed_risk mode, $2,000 risk per trade, max 10,000 shares
+- **Trailing stop**: 1R below highest high, activates at +2R from entry
+- **Self-managed stops**: WebSocket tick-by-tick monitoring, marketable limit sells
 - **One trade per symbol per day**
+
+### MACD Zone Filter
+
+Scales position risk based on MACD histogram strength at entry (as % of price). U-shape: strong negative AND strong positive MACD are the best setups; near-zero is the worst.
+
+| Zone | MACD % Range | Multiplier | Rationale |
+|------|-------------|------------|-----------|
+| Strong Negative | < -0.5% | 1.5x | Deep pullback = loaded spring |
+| Normal | -0.5% to -0.2%, +0.1% to +0.5% | 1.0x | Standard risk |
+| **Dead Zone** | **-0.2% to +0.1%** | **SKIP** | 30% WR, negative avg P&L |
+| Strong Positive | > +0.5% | 1.5x | Momentum confirmation |
+
+Uses previous day's bars for MACD warm-up (avoids cold-start on early-morning setups).
+
+### Exhaustion Exit (backtest only — not yet in production)
+
+Sells 50% of position into strength when exhaustion signals fire at +3R profit, then tightens trailing stop to 0.5R on the remainder. Reduces slippage by selling while buyers are still aggressive.
+
+Active signals: **climax candle** (2x avg body + 2x avg volume = blow-off top) and **shooting star** (upper wick > 2x body, close in bottom 40%).
+
+15-month backtest: +$19K P&L (+9%), Sharpe 2.08→2.26 vs baseline.
 
 ### Market Regime Filter
 

@@ -422,6 +422,11 @@ class Config:
         return float(self._get_yaml("trading", "macd_zones", "strong_pos_multiplier", default=1.5))
 
     @property
+    def macd_normal_multiplier(self) -> float:
+        """Risk multiplier for normal MACD zones (between dead and strong)."""
+        return float(self._get_yaml("trading", "macd_zones", "normal_multiplier", default=1.0))
+
+    @property
     def max_consecutive_losses(self) -> int:
         """Stop trading for the day after N consecutive losses."""
         return int(self._get_yaml("trading", "max_consecutive_losses", default=2))
