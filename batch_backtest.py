@@ -1172,12 +1172,12 @@ def main():
              "Uses multiprocessing — scales with CPU cores."
     )
     parser.add_argument(
-        "--parallel", "-p", action="store_true",
-        help="Run in parallel mode (multiprocessing). ~8-10x faster for cached data."
+        "--no-parallel", action="store_true",
+        help="Disable fast mode (use sequential processing with full logging)"
     )
     parser.add_argument(
         "--verbose", "-v", action="store_true",
-        help="Enable verbose/debug logging"
+        help="Enable verbose/debug logging (implies --no-parallel)"
     )
     parser.add_argument(
         "--trailing-stop-r", type=float, default=0.0,
@@ -1295,7 +1295,9 @@ def main():
     )
 
     # Step 4: Run backtests (1-min bars also cached)
-    if args.parallel:
+    # Fast mode is default; --verbose or --no-parallel disables it
+    use_fast = not args.no_parallel and not args.verbose
+    if use_fast:
         results = run_batch_backtest_fast(
             movers, db=db,
             market_regime=market_regime,
