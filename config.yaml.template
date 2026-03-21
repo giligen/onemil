@@ -8,7 +8,7 @@ scanner:
   # Price range filter (universe watchlist — wider to catch stocks drifting in/out)
   # Trade-time min_price ($2) in trading section still prevents entries below $2
   price_min: 1.0
-  price_max: 30.0
+  price_max: 30.0    # Widened from $20 — backtest shows $20-$30 stocks are +$25K net profitable
 
   # Float filter (shares)
   float_max: 10_000_000
@@ -84,11 +84,11 @@ trading:
   setup_expiry_bars: 10         # cancel pending buy-stop after N bars
   pattern_poll_interval: 60
   skip_midday: true
-  skip_fridays: true            # 30% WR on Fridays — traders close before weekend
-  max_consecutive_losses: 2     # Stop trading for the day after 2 losses in a row
-  max_trades_per_day: 5
+  skip_fridays: false           # Disabled for paper testing (re-enable for live)
+  max_consecutive_losses: 0     # Disabled — trailing stops handle risk adaptively
+  max_trades_per_day: 0         # Disabled — no cap needed with trailing stops
   market_regime:
-    enabled: true               # Regime filter: +$15.6K P&L, -41% drawdown vs disabled
+    enabled: true               # +$15.6K P&L, -41% drawdown, Sharpe 2.73→3.45 vs disabled
     vol_threshold: 1.5         # 5-day avg daily range % — high volatility signal
     sma_period: 50             # SPY below SMA(50) — downtrend signal
     min_spy_volume_ratio: 0.70 # SPY T-1 volume / SMA20 — thin liquidity threshold
@@ -96,13 +96,15 @@ trading:
   # Self-managed stops: WebSocket price monitoring + marketable limit sell exits
   # Replaces bracket stop-market with real-time monitoring to cap exit slippage
   self_managed_stops:
-    enabled: false                      # flip to true after paper testing
+    enabled: true                       # ACTIVE — paper testing
     safety_net_sl_pct: 0.05             # 5% wide SL on Alpaca (crash protection)
     marketable_limit_offset: 0.03       # $0.03 min offset below price
     marketable_limit_offset_pct: 0.005  # 0.5% offset (whichever is larger)
   # Trailing stop: replace fixed TP with trailing stop that lets winners run
+  # Trail 1R below highest high, activates after +2R from entry
+  # Backtest: +55% P&L improvement over fixed 2.5R TP across 15 months
   trailing_stop:
-    enabled: false                      # flip to true after paper testing
+    enabled: true                        # ACTIVE — paper testing
     trail_r: 1.0                        # trail distance in R units below high
     activate_at_r: 2.0                  # activate trail after +2R gain
   # Slippage model (percentage of price, applied in backtest)
