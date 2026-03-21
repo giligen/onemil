@@ -382,6 +382,45 @@ class Config:
         """Whether bull flag detector requires positive MACD."""
         return bool(self._get_yaml("trading", "bull_flag", "require_macd_positive", default=False))
 
+    # =========================================================================
+    # MACD Zone Filter
+    # =========================================================================
+
+    @property
+    def macd_zones_enabled(self) -> bool:
+        """Whether MACD zone risk scaling is active."""
+        return bool(self._get_yaml("trading", "macd_zones", "enabled", default=False))
+
+    @property
+    def macd_dead_zone_min_pct(self) -> float:
+        """Lower edge of MACD dead zone (% of price)."""
+        return float(self._get_yaml("trading", "macd_zones", "dead_zone_min_pct", default=-0.2))
+
+    @property
+    def macd_dead_zone_max_pct(self) -> float:
+        """Upper edge of MACD dead zone (% of price)."""
+        return float(self._get_yaml("trading", "macd_zones", "dead_zone_max_pct", default=0.1))
+
+    @property
+    def macd_strong_neg_threshold_pct(self) -> float:
+        """MACD% below this = strong negative zone."""
+        return float(self._get_yaml("trading", "macd_zones", "strong_neg_threshold_pct", default=-0.5))
+
+    @property
+    def macd_strong_neg_multiplier(self) -> float:
+        """Risk multiplier for strong negative MACD zone."""
+        return float(self._get_yaml("trading", "macd_zones", "strong_neg_multiplier", default=1.25))
+
+    @property
+    def macd_strong_pos_threshold_pct(self) -> float:
+        """MACD% above this = strong positive zone."""
+        return float(self._get_yaml("trading", "macd_zones", "strong_pos_threshold_pct", default=0.5))
+
+    @property
+    def macd_strong_pos_multiplier(self) -> float:
+        """Risk multiplier for strong positive MACD zone."""
+        return float(self._get_yaml("trading", "macd_zones", "strong_pos_multiplier", default=1.5))
+
     @property
     def max_consecutive_losses(self) -> int:
         """Stop trading for the day after N consecutive losses."""

@@ -609,6 +609,7 @@ class BacktestRunner:
         self.TRADING_MINUTES = 390
         self.rvol_mode = rvol_mode
         self._min_breakout_vol_override = 0  # 0 = disabled; set per-date by batch_backtest
+
         self.early_exit_after_trade = early_exit_after_trade
         self.realistic = realistic
         self.last_entry_time_et = last_entry_time_et
@@ -689,7 +690,87 @@ class BacktestRunner:
                     f"activates at +{resolved_trail_activate:.1f}R (replaces fixed TP)"
                 )
 
+        # MACD zone filter: risk scaling based on MACD histogram strength at entry
+        macd_zones_cfg = trading_cfg.get("macd_zones", {})
+        self.macd_zones_enabled = bool(macd_zones_cfg.get("enabled", False))
+        self.macd_dead_zone_min = float(macd_zones_cfg.get("dead_zone_min_pct", -0.2))
+        self.macd_dead_zone_max = float(macd_zones_cfg.get("dead_zone_max_pct", 0.1))
+        self.macd_strong_neg_threshold = float(macd_zones_cfg.get("strong_neg_threshold_pct", -0.5))
+        self.macd_strong_neg_multiplier = float(macd_zones_cfg.get("strong_neg_multiplier", 1.25))
+        self.macd_strong_pos_threshold = float(macd_zones_cfg.get("strong_pos_threshold_pct", 0.5))
+        self.macd_strong_pos_multiplier = float(macd_zones_cfg.get("strong_pos_multiplier", 1.5))
+        self._prev_day_bars: Optional[pd.DataFrame] = None
+
+        if self.macd_zones_enabled:
+            logger.info(
+                f"MACD zones: dead [{self.macd_dead_zone_min}%, {self.macd_dead_zone_max}%], "
+                f"strong neg <{self.macd_strong_neg_threshold}% → {self.macd_strong_neg_multiplier}x, "
+                f"strong pos >{self.macd_strong_pos_threshold}% → {self.macd_strong_pos_multiplier}x"
+            )
+
     _ET = pytz.timezone('US/Eastern')
+
+    def _get_macd_zone_multiplier(
+        self, symbol: str, bars: pd.DataFrame, entry_bar_idx: int, entry_price: float,
+    ) -> float:
+        """
+        Compute MACD zone risk multiplier at entry time.
+
+        Uses warmed-up MACD histogram (prev-day bars prepended) to determine
+        which zone the trade falls in, and returns the appropriate risk multiplier.
+
+        Args:
+            symbol: Stock symbol
+            bars: Full day's 1-min bars
+            entry_bar_idx: Index of entry bar
+            entry_price: Fill price at entry
+
+        Returns:
+            Risk multiplier: 0.0 = skip (dead zone), 1.0 = normal,
+            1.25/1.5 = boosted (strong zones)
+        """
+        from trading.indicators import macd_histogram
+
+        # Build closes up to entry bar
+        closes = bars['close'].iloc[:entry_bar_idx + 1]
+
+        # Prepend warm-up closes from previous day
+        if self._prev_day_bars is not None and not self._prev_day_bars.empty:
+            warmup = self._prev_day_bars['close'].tail(60).reset_index(drop=True)
+            closes = pd.concat([warmup, closes], ignore_index=True)
+
+        # Need enough bars for MACD
+        min_bars = 35  # slow(26) + signal(9)
+        if len(closes) < min_bars:
+            logger.debug(f"{symbol}: MACD zone — insufficient bars ({len(closes)}/{min_bars}), using 1.0x")
+            return 1.0
+
+        hist = macd_histogram(closes)
+        hist_val = float(hist.iloc[-1])
+        macd_pct = (hist_val / entry_price) * 100
+
+        # Determine zone
+        if self.macd_dead_zone_min <= macd_pct <= self.macd_dead_zone_max:
+            logger.info(
+                f"  MACD ZONE SKIP: histogram {hist_val:.4f} = {macd_pct:.2f}% "
+                f"(dead zone [{self.macd_dead_zone_min}%, {self.macd_dead_zone_max}%])"
+            )
+            return 0.0
+        elif macd_pct < self.macd_strong_neg_threshold:
+            mult = self.macd_strong_neg_multiplier
+            logger.debug(
+                f"  MACD zone: {macd_pct:.2f}% → strong neg → {mult}x risk"
+            )
+            return mult
+        elif macd_pct > self.macd_strong_pos_threshold:
+            mult = self.macd_strong_pos_multiplier
+            logger.debug(
+                f"  MACD zone: {macd_pct:.2f}% → strong pos → {mult}x risk"
+            )
+            return mult
+        else:
+            logger.debug(f"  MACD zone: {macd_pct:.2f}% → normal → 1.0x risk")
+            return 1.0
 
     def _get_bar_time_et(self, bar_ts) -> tuple:
         """Convert bar timestamp to ET (hour, minute), handling DST correctly."""
@@ -738,6 +819,9 @@ class BacktestRunner:
         Returns:
             BacktestResult with trades, patterns, and P&L
         """
+        # Store prev-day bars for MACD warm-up (used by detector and zone filter)
+        self._prev_day_bars = prev_day_bars
+
         # Set MACD warm-up on detector (no-op when MACD filter is disabled)
         if getattr(self.detector, 'require_macd_positive', False):
             if prev_day_bars is not None and not prev_day_bars.empty:
@@ -1087,6 +1171,29 @@ class BacktestRunner:
                             total_risk=actual_risk * plan.shares,
                             pattern=plan.pattern,
                         )
+
+                    # MACD zone filter: skip or scale risk based on MACD histogram
+                    if self.macd_zones_enabled:
+                        zone_mult = self._get_macd_zone_multiplier(
+                            symbol, bars, i, fill_price
+                        )
+                        if zone_mult == 0.0:
+                            pending_order = None
+                            continue
+                        elif zone_mult != 1.0:
+                            scaled_shares = max(1, int(plan.shares * zone_mult))
+                            plan = TradePlan(
+                                symbol=plan.symbol,
+                                entry_price=plan.entry_price,
+                                stop_loss_price=plan.stop_loss_price,
+                                take_profit_price=plan.take_profit_price,
+                                risk_per_share=plan.risk_per_share,
+                                reward_per_share=plan.reward_per_share,
+                                risk_reward_ratio=plan.risk_reward_ratio,
+                                shares=scaled_shares,
+                                total_risk=plan.risk_per_share * scaled_shares,
+                                pattern=plan.pattern,
+                            )
 
                     logger.info(
                         f"  BUY-STOP TRIGGERED at bar {i}: "
