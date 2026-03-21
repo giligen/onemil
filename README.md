@@ -4,7 +4,7 @@ Real-time stock scanner + automated trading system targeting Ross Cameron's mome
 
 ## Goals
 
-1. Real-time stock scanner (gap ups, high relative volume, low float, $2-$20)
+1. Real-time stock scanner (gap ups, high relative volume, low float, $2-$30)
 2. Automated paper trading via Alpaca
 3. Go live
 
@@ -30,7 +30,9 @@ trading/
   trading_engine.py             Main trading orchestration
   order_executor.py             Order submission/management
   position_manager.py           Position tracking
+  stop_monitor.py               WebSocket stop monitoring + spread-based exits
   market_regime.py              SPY volatility + trend regime filter
+  exhaustion_signals.py         Exhaustion exit signal detection (shared backtest/prod)
 
 persistence/
   database.py                   SQLite database layer
@@ -57,11 +59,13 @@ Bull flag momentum pattern on 1-minute bars:
 ### Trade Plan Rules
 
 - **Entry**: Buy-stop at breakout level (flag high), limit 2% above
-- **Stop**: Flag low region, min 1% / max 4% risk as % of price
+- **Stop**: Flag low region, min 1% / max 4% risk, min $0.09 stop distance (tick-noise filter)
 - **Target**: 2.5:1 R:R (overridden by trailing stop when enabled)
 - **Position size**: fixed_risk mode, $2,000 risk per trade, max 10,000 shares
 - **Trailing stop**: 1R below highest high, activates at +2R from entry
-- **Self-managed stops**: WebSocket tick-by-tick monitoring, marketable limit sells
+- **Exhaustion exit**: At +3R, sell 50% into strength, tighten trail to 0.5R on remainder
+- **Self-managed stops**: WebSocket tick-by-tick monitoring, spread-based limit sells
+- **Last entry time**: 11:00 ET (11:xx+ entries are net losers)
 - **One trade per symbol per day**
 
 ### MACD Zone Filter
@@ -77,28 +81,41 @@ Scales position risk based on MACD histogram strength at entry (as % of price). 
 
 Uses previous day's bars for MACD warm-up (avoids cold-start on early-morning setups).
 
-### Exhaustion Exit (backtest only — not yet in production)
+### Exhaustion Exit
 
 Sells 50% of position into strength when exhaustion signals fire at +3R profit, then tightens trailing stop to 0.5R on the remainder. Reduces slippage by selling while buyers are still aggressive.
 
 Active signals: **climax candle** (2x avg body + 2x avg volume = blow-off top) and **shooting star** (upper wick > 2x body, close in bottom 40%).
 
-15-month backtest: +$19K P&L (+9%), Sharpe 2.08→2.26 vs baseline.
+**Production implementation**: TradingEngine polls 1-min bars every 60s, runs signal detection from shared `trading/exhaustion_signals.py` module, executes partial sell via `StopMonitor.execute_partial_exit()` with fill confirmation + safety-net SL qty update.
+
+### Spread-Based Exit Pricing
+
+StopMonitor uses real-time NBBO quotes for exit limit pricing instead of fixed offsets:
+
+| Spread | Pricing | Method |
+|--------|---------|--------|
+| < $0.05 (tight) | Midpoint of bid/ask | Saves $0.02-$0.24/share vs fixed offset |
+| $0.05-$0.15 (medium) | Bid + $0.01 | Fast fill, minimal give |
+| > $0.15 (wide) | Bid | Take what's available |
+
+Falls back to fixed offset (`max($0.03, price × 0.5%)`) if quote fetch fails. 30-second fill timeout: if limit order unfilled, cancel and market-sell via `close_position()`.
+
+### Minimum Stop Distance Filter
+
+Rejects setups where the stop distance (entry - stop_loss) is less than $0.09. These are penny-wide stops on low-priced stocks where the breakout barely triggers the buy-stop then immediately reverses — the stop is within tick noise, not at a meaningful technical level.
+
+15-month impact: removes ~200 tick-noise trades that were net losers, breaking consecutive loss streaks that drove max drawdown.
 
 ### Market Regime Filter
 
-Blocks or tightens entries when SPY indicates a hostile regime. Two independent signals:
+Blocks or tightens entries when SPY indicates a hostile regime. Three independent signals:
 
 1. **High volatility + downtrend**: SPY 5-day avg daily range > 1.5% AND close below SMA(50) → **blocks all entries**
-2. **Thin liquidity (H5 OR filter)**: SPY T-1 volume / SMA20(volume) < 0.70 → **tightens breakout volume requirement** from 1.5x to 2.0x. Trades are only blocked when BOTH the market is thin AND the breakout bar volume is weak.
-   - **Backtest**: `BacktestRunner._min_breakout_vol_override` checks breakout bar volume at simulated fill
-   - **Live trading**: Buy-stop bracket orders are submitted on ALL days (zero latency, faithful to backtest). On thin-liquidity days, the pending order is tagged `thin_liquidity=True`. After fill, the engine checks the breakout bar's volume ratio (BVR). If BVR >= 2.0x → keep trade, proceed with gap-fill adjustment. If BVR < 2.0x → immediately close the position, record exit as `thin_liquidity_reject`, update DB and circuit breaker.
+2. **Declining SMA50 (dead-cat-bounce filter)**: SPY SMA(50) 5-day slope < 0 → **blocks all entries**. Even when price crosses above a falling SMA50, momentum breakouts fail because the underlying macro trend is still weakening. This filter eliminated the 3-month drawdown grind (Feb-May 2025) that the vol+trend filter missed.
+3. **Thin liquidity (H5 OR filter)**: SPY T-1 volume / SMA20(volume) < 0.70 → **tightens breakout volume requirement** from 1.5x to 2.0x.
 
-- **Max trades/day**: 5 (hard cap regardless of regime)
-
-The vol+trend filter prevented $21K of drawdown during Mar-May 2025 turbulence. The H5 OR thin liquidity filter removes 36 trades (5.7%) that were net losers, reducing MaxDD by $6,326 (from $19,080 to $12,754) while *increasing* PnL by $7,336. Selectivity ratio: 2.20x (removes holiday trades at 2.2x the rate of non-holiday trades).
-
-**Lookahead prevention**: All indicators use data strictly *before* trade date (`dates < trade_date`). Live system uses `date.today()` at 9:30 AM, so T-1 = yesterday's settled close.
+**Lookahead prevention**: All indicators use data strictly *before* trade date. SMA50 slope uses yesterday's value (known before market open). Live system uses `date.today()` at 9:30 AM, so T-1 = yesterday's settled close.
 
 | Config Parameter | Default | Description |
 |-----------------|---------|-------------|
@@ -130,128 +147,44 @@ python batch_backtest.py --output my_results.csv --verbose      # custom output 
 
 **Output**: Trade-level CSV with columns: `symbol, date, entry_time_et, entry_price, stop_loss, target, shares, exit_time_et, exit_price, exit_reason, pnl, pnl_pct`
 
-### Backtest Filter Analysis (Feb+Mar 2026, 48 trades)
+### 15-Month Baseline — Jan 2025 to Mar 2026
 
-| Filter Config                | Trades | Win Rate | P&L     | Avg Win | Avg Loss |
-|------------------------------|--------|----------|---------|---------|----------|
-| No filters                   | 48     | 54.2%    | $4,420  | $330    | -$189    |
-| Skip midday only (DEFAULT)   | 32     | 62.5%    | $4,241  | $333    | -$202    |
-| Price >= $5 only             | 29     | 65.5%    | $3,778  | $267    | -$129    |
-| Price >= $5 + skip midday    | 21     | 71.4%    | $3,353  | $278    | -$136    |
+Current production config with all filters active: 0.3% exit slippage, trailing stops, exhaustion exits, MACD zones, regime filter with SMA50 slope, min stop distance $0.09, last entry 11:00 ET.
 
-**Key findings:**
-- **Midday entries (11:30-14:00 ET)**: 37.5% WR — the strategy's worst time window
-- **Sub-$5 stocks**: 36.8% WR but avg win is $502 (high risk, high reward)
-- **Default**: Skip midday only — retains 96% of PnL while boosting WR from 54% to 63%
+| Metric | Value |
+|--------|-------|
+| **Trades** | 399 |
+| **Win Rate** | 42.4% |
+| **Total P&L** | **$288,742** |
+| **Avg Win** | $5,092 |
+| **Avg Loss** | -$2,486 |
+| **W/L Ratio** | 2.05 |
+| **Profit Factor** | 1.50 |
+| **Sharpe (annualized)** | 2.86 |
+| **Max Drawdown** | -$26,347 |
+| **Losing Months** | 1 (May 2025: -$2,028) |
 
-### Relative Volume (rvol) Analysis — 15-Month Comparison (Jan 2025 - Mar 2026)
+Saved as `backtest_baseline_aligned.csv`.
 
-Three rvol approaches were compared across 764 stock-day pairs:
-
-| Metric | no_rvol (disabled) | cumulative 5x (Ross) | bucket 5x (fixed) |
-|--------|-------------------|-----------------------|-------------------|
-| **Trades** | 764 | 586 | 331 |
-| **Total P&L** | **$247,088** | $170,066 | $103,717 |
-| **P&L/trade** | $323 | $290 | $313 |
-| **Win Rate** | 39.4% | 39.2% | 39.3% |
-| **Profit Factor** | **14.08** | 8.10 | 5.60 |
-| **Sharpe (monthly)** | **3.72** | 2.89 | 2.01 |
-| **Winning Months** | 12/15 | 13/15 | 9/15 |
-| **Max Drawdown** | $18,888 | $23,956 | $15,331 |
-
-**Key findings:**
-- **rvol filtering hurts performance** — both rvol modes cut profitable trades without improving win rate (~39% across all modes)
-- **no_rvol dominates** on Sharpe (3.72), total P&L ($247K), and profit factor (14.08)
-- **bucket rvol is worst** — only 9/15 winning months, a timezone mismatch bug in the scanner made this effectively disabled in production anyway
-- **Decision**: rvol filter disabled in production (`relative_volume_min: 0` in config.yaml)
-
-Month-by-month breakdown:
-
-| Month | no_rvol | cumulative | bucket |
-|-------|---------|-----------|--------|
-| 2025-01 | 32 trades +$17,091 | 24 trades +$9,442 | 12 trades -$526 |
-| 2025-02 | 33 trades +$28,241 | 30 trades +$28,177 | 11 trades +$10,724 |
-| 2025-03 | 27 trades -$5,437 | 20 trades -$7,007 | 13 trades -$5,007 |
-| 2025-04 | 47 trades -$8,793 | 38 trades -$16,949 | 23 trades -$8,516 |
-| 2025-05 | 48 trades -$4,657 | 35 trades +$159 | 19 trades -$1,807 |
-| 2025-06 | 69 trades +$41,001 | 58 trades +$39,059 | 40 trades +$31,292 |
-| 2025-07 | 62 trades +$37,293 | 55 trades +$22,148 | 41 trades +$27,614 |
-| 2025-08 | 47 trades +$10,420 | 35 trades +$6,993 | 27 trades +$2,857 |
-| 2025-09 | 55 trades +$17,353 | 44 trades +$3,866 | 25 trades +$4,371 |
-| 2025-10 | 85 trades +$42,307 | 63 trades +$26,576 | 52 trades +$24,232 |
-| 2025-11 | 42 trades +$20,838 | 32 trades +$14,376 | 12 trades -$128 |
-| 2025-12 | 51 trades +$15,078 | 41 trades +$12,813 | 16 trades +$12,595 |
-| 2026-01 | 73 trades +$11,197 | 63 trades +$10,681 | 22 trades -$6,570 |
-| 2026-02 | 44 trades +$13,090 | 23 trades +$7,730 | 4 trades +$4,798 |
-| 2026-03 | 49 trades +$12,067 | 25 trades +$12,002 | 14 trades +$7,788 |
-
-### Regime Filter Impact — 15-Month Comparison (Jan 2025 - Mar 2026)
-
-| Metric | Without Regime | With Regime | Change |
-|--------|---------------|-------------|--------|
-| Trades | 764 | 636 | -17% |
-| Total P&L | $247,088 | $247,126 | +$38 |
-| Win Rate | 39.4% | 40.6% | +1.2pp |
-| Max Drawdown | ~$28,800 | $19,080 | **-34%** |
-| Mar-May DD | ~$28,000 | $7,023 | **-76%** |
-| Sharpe | 3.72 | 4.57 | +23% |
-
-Monthly breakdown (with regime filter):
+### Month-by-Month Breakdown
 
 | Month | Trades | WR | P&L | Cum P&L |
 |-------|--------|----|-----|---------|
-| 2025-01 | 31 | 38.7% | +$17,891 | $17,891 |
-| 2025-02 | 33 | 48.5% | +$28,241 | $46,132 |
-| 2025-03 | 4 | 25.0% | -$252 | $45,879 |
-| 2025-04 | 0 | — | $0 | $45,879 |
-| 2025-05 | 41 | 39.0% | -$417 | $45,462 |
-| 2025-06 | 63 | 54.0% | +$38,885 | $84,347 |
-| 2025-07 | 60 | 46.7% | +$32,546 | $116,893 |
-| 2025-08 | 47 | 34.0% | +$10,420 | $127,313 |
-| 2025-09 | 55 | 41.8% | +$17,353 | $144,666 |
-| 2025-10 | 79 | 43.0% | +$42,778 | $187,444 |
-| 2025-11 | 31 | 35.5% | +$14,122 | $201,567 |
-| 2025-12 | 48 | 35.4% | +$12,738 | $214,305 |
-| 2026-01 | 69 | 39.1% | +$15,347 | $229,652 |
-| 2026-02 | 38 | 28.9% | +$6,302 | $235,954 |
-| 2026-03 | 37 | 32.4% | +$11,172 | $247,126 |
-
-### H5 OR Thin Liquidity Filter Impact (added on top of regime filter)
-
-| Metric | Regime Only | + H5 OR Filter | Change |
-|--------|------------|-----------------|--------|
-| Trades | 636 | 600 | -36 (5.7%) |
-| Total P&L | $247,126 | $254,462 | **+$7,336** |
-| Win Rate | 40.6% | 41.5% | +0.9pp |
-| Max Drawdown | $19,080 | $12,754 | **-$6,326 (-33%)** |
-| Sharpe | 4.57 | 4.80 | +5% |
-
-The H5 OR filter uses a conditional approach: on thin-liquidity days (SPY vol ratio < 0.70), the breakout volume requirement is tightened from 1.5x to 2.0x. A trade is only removed when BOTH conditions are weak — thin market AND weak breakout. Selectivity ratio: 2.20x (removes holiday trades at 2.2x the rate of non-holiday trades).
-
-MaxDD: $12,754 from Dec 17 2025 → Jan 8 2026 (holiday low-liquidity chop).
-
-### BacktestRunner Parameters
-
-| Parameter     | Default      | Description                                |
-|---------------|-------------|---------------------------------------------|
-| `min_price`   | 0.0         | Minimum entry price filter                  |
-| `skip_midday` | True        | Skip 11:30-14:00 ET entries (dead zone)     |
-| `rvol_mode`   | 'cumulative'| Rvol approach: 'cumulative' or 'bucket'     |
-
-```python
-# Override defaults:
-runner = BacktestRunner(min_price=5.0, skip_midday=True)  # conservative
-runner = BacktestRunner(min_price=0.0, skip_midday=False) # no filters
-runner = BacktestRunner(rvol_mode='bucket')                # bucket rvol mode
-```
-
-### Rvol Comparison Script
-
-Runs the full 3-way rvol comparison across 15 months:
-
-```bash
-python compare_rvol_modes.py    # takes ~40 minutes
-```
+| 2025-01 | 37 | 48.6% | +$52,583 | $52,583 |
+| 2025-02 | 13 | 38.5% | +$6,218 | $58,801 |
+| 2025-03 | — | — | $0 (regime blocked) | $58,801 |
+| 2025-04 | — | — | $0 (regime blocked) | $58,801 |
+| 2025-05 | 12 | 33.3% | +$2,856 | $61,657 |
+| 2025-06 | 38 | 60.5% | +$84,681 | $146,337 |
+| 2025-07 | 33 | 42.4% | +$34,189 | $180,526 |
+| 2025-08 | 23 | 43.5% | +$2,291 | $182,817 |
+| 2025-09 | 24 | 29.2% | +$83 | $182,900 |
+| 2025-10 | 48 | 39.6% | +$15,452 | $198,352 |
+| 2025-11 | 12 | 41.7% | +$6,786 | $205,139 |
+| 2025-12 | 28 | 35.7% | +$11,389 | $216,528 |
+| 2026-01 | 48 | 37.5% | +$21,294 | $237,822 |
+| 2026-02 | 14 | 50.0% | +$28,111 | $265,933 |
+| 2026-03 | 10 | 40.0% | +$6,894 | $272,827 |
 
 ## Configuration
 
@@ -266,5 +199,7 @@ pytest tests/ -q          # quick summary
 
 ## Future Tasks
 
-- **Target strategy optimization**: Currently using fixed 2:1 R:R target. Evaluate pole height projection as an alternative or combined target strategy (e.g., partial exit at 2:1, trail remainder toward pole projection). Backtesting showed pole height targets ($7.12) can be too greedy — missing exits that 2:1 ($6.98) would have captured profitably.
-- **Partial profit exit**: Sell half position at +1R, trail remainder with breakeven stop. Requires position splitting + order replacement — deferred for separate implementation.
+- **Implement min_stop_distance $0.09 in production**: Add config param and filter in both backtest and production trade planner
+- **Implement SMA50 slope regime filter**: Add slope check to MarketRegimeFilter — block when SMA50 5-day slope < 0
+- **Run fresh baseline backtest** after implementing above two filters to confirm $289K / Sharpe 2.86 / DD -$26K
+- **News-based late-day entry filter**: Evaluate using news sentiment to allow selective entries after 11:00 ET for catalyst-driven stocks
