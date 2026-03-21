@@ -100,6 +100,23 @@ class BullFlagDetector:
         self.macd_slow = macd_slow
         self.macd_signal = macd_signal
         self.max_green_in_flag = max_green_in_flag
+        # MACD warm-up: previous day's close prices, set per symbol/day
+        # When set, prepended to current day's closes for MACD computation
+        # to avoid cold-start artifacts in early-morning setups.
+        self._macd_warmup_closes: Optional[pd.Series] = None
+
+    def set_macd_warmup(self, prev_day_closes: Optional[pd.Series]) -> None:
+        """
+        Set previous day's close prices for MACD warm-up.
+
+        Call once per symbol/day before scanning. Pass None to clear.
+        Only used when require_macd_positive=True.
+
+        Args:
+            prev_day_closes: Series of close prices from previous trading day
+                (last ~60 bars recommended). None to disable warm-up.
+        """
+        self._macd_warmup_closes = prev_day_closes
 
     @classmethod
     def from_config(cls) -> 'BullFlagDetector':
@@ -225,11 +242,14 @@ class BullFlagDetector:
             from trading.indicators import macd_histogram
 
             closes = completed['close'].iloc[:scan_from_idx + 1]
+
+            # Prepend previous day's closes for warm-up (avoids cold-start)
+            if self._macd_warmup_closes is not None and len(self._macd_warmup_closes) > 0:
+                closes = pd.concat([self._macd_warmup_closes, closes], ignore_index=True)
+
             min_bars_for_macd = self.macd_slow + self.macd_signal
             if len(closes) < min_bars_for_macd:
-                # Not enough bars for reliable MACD — allow setup without filter.
-                # Early-morning setups (first ~35 min) shouldn't be rejected
-                # just because the EMA hasn't warmed up yet.
+                # Not enough bars even with warm-up — allow setup without filter.
                 logger.debug(
                     f"{symbol}: MACD warm-up ({len(closes)}/{min_bars_for_macd} bars) "
                     f"— allowing setup without MACD filter"

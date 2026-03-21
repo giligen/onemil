@@ -711,6 +711,7 @@ class BacktestRunner:
         avg_daily_volume: Optional[int] = None,
         volume_profile: Optional[Dict[str, int]] = None,
         prev_close: Optional[float] = None,
+        prev_day_bars: Optional[pd.DataFrame] = None,
     ) -> BacktestResult:
         """
         Run backtest for a symbol over a day's bars.
@@ -730,10 +731,21 @@ class BacktestRunner:
                 bar where (bar_high - prev_close) / prev_close >= qualification_pct.
                 This eliminates look-ahead bias where the backtest scans from bar 0
                 knowing the stock WILL move 10%+ (from the daily bar pre-filter).
+            prev_day_bars: Previous trading day's 1-min bars for MACD warm-up.
+                Only used when require_macd_positive=True. Last ~60 bars are
+                sufficient. None = no warm-up (cold-start, backward compatible).
 
         Returns:
             BacktestResult with trades, patterns, and P&L
         """
+        # Set MACD warm-up on detector (no-op when MACD filter is disabled)
+        if getattr(self.detector, 'require_macd_positive', False):
+            if prev_day_bars is not None and not prev_day_bars.empty:
+                warmup_closes = prev_day_bars['close'].tail(60).reset_index(drop=True)
+                self.detector.set_macd_warmup(warmup_closes)
+            else:
+                self.detector.set_macd_warmup(None)
+
         if self.realistic:
             return self._run_realistic(symbol, bars, trade_date,
                                        avg_daily_volume, volume_profile,

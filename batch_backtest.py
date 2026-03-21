@@ -279,6 +279,25 @@ def get_1min_bars_cached(
     return bars
 
 
+def _get_previous_trading_date(trade_date: date, movers_by_date: dict = None) -> Optional[date]:
+    """
+    Get the previous trading date (skipping weekends).
+
+    Args:
+        trade_date: Current trading date
+        movers_by_date: Optional dict of known trading dates (for fast lookup)
+
+    Returns:
+        Previous trading date, or None if unknown
+    """
+    # Simple approach: go back 1-3 calendar days to skip weekends
+    for delta in range(1, 4):
+        prev = trade_date - timedelta(days=delta)
+        if prev.weekday() < 5:  # Mon-Fri
+            return prev
+    return None
+
+
 def run_batch_backtest(
     movers: List[Tuple[str, date]],
     client: AlpacaClient,
@@ -414,10 +433,19 @@ def run_batch_backtest(
                     avg_vol = uni.get('avg_daily_volume') or uni.get('avg_volume_daily')
 
                 vol_profile = volume_profiles.get(symbol) if volume_profiles else None
+
+                # Fetch previous day bars for MACD warm-up (only when enabled)
+                prev_day_bars = None
+                if runner.detector.require_macd_positive and db:
+                    prev_date = _get_previous_trading_date(trade_date, movers_by_date)
+                    if prev_date:
+                        prev_day_bars = get_1min_bars_cached(symbol, prev_date, client, db)
+
                 result = runner.run(symbol, bars, date_str,
                                     avg_daily_volume=avg_vol,
                                     volume_profile=vol_profile,
-                                    prev_close=prev_close if prev_close > 0 else None)
+                                    prev_close=prev_close if prev_close > 0 else None,
+                                    prev_day_bars=prev_day_bars)
                 results.append(result)
 
                 # Track trades for max trades per day cap
@@ -518,10 +546,23 @@ def _backtest_worker(args: Tuple) -> Optional[dict]:
 
             runner = BacktestRunner()  # uses from_config() for all settings
             runner._min_breakout_vol_override = min_bv_override
+
+            # Fetch prev day bars for MACD warm-up (only when enabled)
+            prev_day_bars = None
+            if runner.detector.require_macd_positive:
+                from datetime import date as date_cls
+                td = date_cls.fromisoformat(trade_date_iso)
+                prev_date = _get_previous_trading_date(td)
+                if prev_date:
+                    prev_cached = db.get_intraday_bars_cached(symbol, prev_date.isoformat())
+                    if prev_cached:
+                        prev_day_bars = pd.DataFrame(prev_cached)
+
             result = runner.run(symbol, bars, trade_date_iso,
                                 avg_daily_volume=avg_vol,
                                 volume_profile=vol_profile,
-                                prev_close=prev_close if prev_close > 0 else None)
+                                prev_close=prev_close if prev_close > 0 else None,
+                                prev_day_bars=prev_day_bars)
 
             return _serialize_result(result)
         finally:
@@ -885,13 +926,31 @@ def run_batch_backtest_fast(
         all_bars = {
             key: pd.DataFrame(bars) for key, bars in bulk_data.items()
         }
+
+        # Create runner early to check if MACD warm-up is needed
+        runner = BacktestRunner()
+
+        # Pre-load previous day bars for MACD warm-up (only when enabled)
+        all_prev_bars: Dict[tuple, pd.DataFrame] = {}
+        if runner.detector.require_macd_positive:
+            prev_symbol_dates = set()
+            for trade_date in filtered_dates:
+                prev_date = _get_previous_trading_date(trade_date)
+                if prev_date:
+                    for sym, d, _ in movers_by_date[trade_date]:
+                        prev_symbol_dates.add((sym, prev_date.isoformat()))
+            if prev_symbol_dates:
+                logger.info(f"Pre-loading {len(prev_symbol_dates)} prev-day bar sets for MACD warm-up...")
+                prev_bulk = db.get_intraday_bars_bulk(list(prev_symbol_dates))
+                all_prev_bars = {
+                    key: pd.DataFrame(bars) for key, bars in prev_bulk.items()
+                }
+
         preload_elapsed = time.time() - t_preload
         logger.info(
             f"Pre-loaded {len(all_bars)} bar sets in {preload_elapsed:.1f}s"
+            + (f" + {len(all_prev_bars)} prev-day sets" if all_prev_bars else "")
         )
-
-        # Create single runner instance — reused across all items
-        runner = BacktestRunner()
         results = []
         completed = 0
         t0 = time.time()
@@ -920,9 +979,17 @@ def run_batch_backtest_fast(
                     continue
 
                 try:
+                    # Look up prev day bars for MACD warm-up
+                    prev_day_bars = None
+                    if all_prev_bars:
+                        prev_date = _get_previous_trading_date(trade_date)
+                        if prev_date:
+                            prev_day_bars = all_prev_bars.get((sym, prev_date.isoformat()))
+
                     result = runner.run(
                         sym, bars, date_str,
                         prev_close=prev_close if prev_close > 0 else None,
+                        prev_day_bars=prev_day_bars,
                     )
                     results.append(result)
 

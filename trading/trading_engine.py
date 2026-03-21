@@ -16,6 +16,7 @@ import time as time_mod
 from datetime import date, datetime, timedelta, timezone
 from typing import Set, Optional, Dict, Any, List
 
+import pandas as pd
 import pytz
 
 from data_sources.alpaca_client import AlpacaClient
@@ -121,7 +122,51 @@ class TradingEngine:
         self._pending_orders: Dict[str, Dict] = {}  # symbol -> {order_id, plan, setup, placed_at}
         self._daily_trade_count: int = 0
         self._notified_setups: Dict[str, float] = {}  # symbol -> breakout_level (dedup Telegram)
+        self._macd_warmup_cache: Dict[str, Optional[pd.Series]] = {}  # symbol -> prev-day closes
         self.shutdown_event = None  # Set by caller for graceful shutdown
+
+    def _fetch_macd_warmup(self, symbol: str) -> None:
+        """
+        Fetch previous trading day's 1-min bars for MACD warm-up.
+
+        Caches the result per symbol so we only fetch once per day.
+        Uses the last 60 bars (1 hour) of the previous session.
+
+        Args:
+            symbol: Stock symbol to fetch warm-up data for
+        """
+        import pytz as _pytz
+        _et = _pytz.timezone('US/Eastern')
+        today = datetime.now(_et).date()
+
+        # Find previous trading day (skip weekends)
+        prev_date = today - timedelta(days=1)
+        while prev_date.weekday() >= 5:
+            prev_date -= timedelta(days=1)
+
+        try:
+            # Previous day's market hours in UTC
+            prev_open = _et.localize(
+                datetime(prev_date.year, prev_date.month, prev_date.day, 9, 30)
+            ).astimezone(timezone.utc)
+            prev_close = _et.localize(
+                datetime(prev_date.year, prev_date.month, prev_date.day, 16, 0)
+            ).astimezone(timezone.utc)
+
+            prev_bars = self.alpaca.get_historical_1min_bars(symbol, prev_open, prev_close)
+            if prev_bars is not None and not prev_bars.empty:
+                warmup_closes = prev_bars['close'].tail(60).reset_index(drop=True)
+                self._macd_warmup_cache[symbol] = warmup_closes
+                logger.debug(
+                    f"{symbol}: MACD warm-up loaded ({len(warmup_closes)} bars "
+                    f"from {prev_date})"
+                )
+            else:
+                self._macd_warmup_cache[symbol] = None
+                logger.debug(f"{symbol}: No prev-day bars for MACD warm-up")
+        except Exception as e:
+            self._macd_warmup_cache[symbol] = None
+            logger.warning(f"{symbol}: Failed to fetch MACD warm-up: {e}")
 
     def _refresh_spy_data(self) -> None:
         """Fetch recent SPY daily bars for regime filter."""
@@ -897,6 +942,13 @@ class TradingEngine:
         if bars is None or bars.empty:
             logger.debug(f"{symbol}: No 1-min bars available")
             return None
+
+        # MACD warm-up: fetch previous trading day's bars (once per symbol per day)
+        if getattr(self.detector, 'require_macd_positive', False):
+            if symbol not in self._macd_warmup_cache:
+                self._fetch_macd_warmup(symbol)
+            warmup = self._macd_warmup_cache.get(symbol)
+            self.detector.set_macd_warmup(warmup)
 
         # Detect setup (before breakout)
         setup = self.detector.detect_setup(symbol, bars)
