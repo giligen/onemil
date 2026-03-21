@@ -342,18 +342,33 @@ class StopMonitor:
         Returns:
             StopExitEvent for the partial sell, or None on failure
         """
-        # Step 1: Read watch state under lock
+        # Step 1: Read watch state under lock + block concurrent stop exits.
+        # CRITICAL: Set _exit_in_progress to prevent _execute_stop_exit from
+        # firing on the WS thread while we hold an open partial sell order.
+        # Without this, a simultaneous trail stop + partial sell = double sell = SHORT.
+        with self._exit_lock:
+            if self._exit_in_progress.get(symbol, False):
+                logger.debug(
+                    f"StopMonitor: {symbol} exit already in progress, skipping partial"
+                )
+                return None
+            self._exit_in_progress[symbol] = True
+
         with self._watch_lock:
             watch = self._watches.get(symbol)
             if not watch:
                 logger.warning(
                     f"StopMonitor: execute_partial_exit({symbol}) — not watched"
                 )
+                with self._exit_lock:
+                    self._exit_in_progress[symbol] = False
                 return None
             if watch.exhaustion_partial_taken:
                 logger.debug(
                     f"StopMonitor: {symbol} exhaustion partial already taken"
                 )
+                with self._exit_lock:
+                    self._exit_in_progress[symbol] = False
                 return None
             sell_shares = int(watch.shares * fraction)
             if sell_shares < 1:
@@ -361,11 +376,29 @@ class StopMonitor:
                     f"StopMonitor: {symbol} partial shares < 1 "
                     f"({watch.shares} × {fraction})"
                 )
+                with self._exit_lock:
+                    self._exit_in_progress[symbol] = False
                 return None
             entry_price = watch.entry_price
             risk_per_share = watch.risk_per_share
             highest = watch.highest_since_entry
             trade_db_id = watch.trade_db_id
+            sl_leg_id_for_cancel = watch.sl_leg_id
+
+        # Step 1b: Cancel safety-net SL BEFORE submitting partial sell.
+        # CRITICAL: If SL fires while partial is pending, both fill → SHORT.
+        # Cancel SL first, then restore with reduced qty after fill confirmation.
+        if sl_leg_id_for_cancel:
+            try:
+                self._alpaca.cancel_order(sl_leg_id_for_cancel)
+                logger.info(
+                    f"StopMonitor: {symbol} cancelled SL leg before partial "
+                    f"(will restore with reduced qty after fill)"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"StopMonitor: {symbol} SL cancel failed before partial: {e}"
+                )
 
         # Step 2: API call outside lock — get quote and submit sell
         exit_price = 0.0
@@ -405,6 +438,8 @@ class StopMonitor:
             logger.error(
                 f"StopMonitor: {symbol} exhaustion partial sell FAILED: {e}"
             )
+            with self._exit_lock:
+                self._exit_in_progress[symbol] = False
             return None
 
         # Step 3: Wait for fill confirmation before updating state.
@@ -416,18 +451,33 @@ class StopMonitor:
             time_mod.sleep(1)
             try:
                 order_status = self._alpaca.get_order(order_id)
-                if order_status.get('status') == 'filled':
+                status = order_status.get('status', '')
+                if status == 'filled':
                     actual_fill = order_status.get('filled_avg_price') or exit_price
                     logger.info(
                         f"StopMonitor: {symbol} partial sell FILLED at "
                         f"${actual_fill:.2f}"
                     )
                     break
-                elif order_status.get('status') in ('cancelled', 'expired', 'rejected'):
+                elif status == 'partially_filled':
+                    # Some shares filled, cancel remainder and handle partial
                     logger.warning(
-                        f"StopMonitor: {symbol} partial sell {order_status['status']} "
+                        f"StopMonitor: {symbol} partial sell PARTIALLY filled — "
+                        f"cancelling remainder"
+                    )
+                    try:
+                        self._alpaca.cancel_order(order_id)
+                    except Exception:
+                        pass
+                    actual_fill = order_status.get('filled_avg_price') or exit_price
+                    break
+                elif status in ('cancelled', 'expired', 'rejected'):
+                    logger.warning(
+                        f"StopMonitor: {symbol} partial sell {status} "
                         f"— aborting exhaustion exit"
                     )
+                    with self._exit_lock:
+                        self._exit_in_progress[symbol] = False
                     return None
             except Exception:
                 pass
@@ -449,18 +499,25 @@ class StopMonitor:
                         f"${actual_fill:.2f}"
                     )
                 else:
+                    with self._exit_lock:
+                        self._exit_in_progress[symbol] = False
                     return None
             except Exception:
+                with self._exit_lock:
+                    self._exit_in_progress[symbol] = False
                 return None
 
         # Step 3b: Verify filled_qty matches sell_shares — handle partial-of-partial
+        # close_shortfall_only=True: only sell the shortfall, keep remainder for trail
         actual_filled_qty, verified_fill_price = self._verify_fill_qty(
-            symbol, order_id, sell_shares
+            symbol, order_id, sell_shares, close_shortfall_only=True
         )
         if actual_filled_qty <= 0:
             logger.error(
                 f"StopMonitor: {symbol} partial sell fill verification failed"
             )
+            with self._exit_lock:
+                self._exit_in_progress[symbol] = False
             return None
 
         if actual_filled_qty != sell_shares:
@@ -518,7 +575,10 @@ class StopMonitor:
                     f"SL leg may still be for original qty"
                 )
 
-        # Step 6: Emit exit event
+        # Step 6: Clear exit-in-progress and emit event
+        with self._exit_lock:
+            self._exit_in_progress[symbol] = False
+
         event = StopExitEvent(
             symbol=symbol,
             stop_price=0.0,  # Not a stop exit — exhaustion partial
@@ -529,6 +589,7 @@ class StopMonitor:
             trade_db_id=trade_db_id,
             submitted_at=time_mod.time(),
             pricing_method=pricing_method,
+            filled_qty=sell_shares,  # verified by _verify_fill_qty
         )
         self._exit_events.put(event)
         return event
@@ -593,18 +654,22 @@ class StopMonitor:
         return (max(limit, 0.01), method)
 
     def _verify_fill_qty(
-        self, symbol: str, order_id: str, expected_qty: int
+        self, symbol: str, order_id: str, expected_qty: int,
+        close_shortfall_only: bool = False,
     ) -> tuple:
         """
         Verify an order's filled_qty matches expected. Handle partial fills.
 
-        If partial fill detected, emergency-close remaining shares via
-        close_position() to prevent orphans.
+        If partial fill detected, sells the shortfall shares to complete
+        the intended quantity.
 
         Args:
             symbol: Stock symbol
             order_id: Order to check
             expected_qty: How many shares we expected to fill
+            close_shortfall_only: If True, only sell the shortfall qty
+                (not the entire position). Used for exhaustion partials
+                where we want to keep the remainder for trailing stop.
 
         Returns:
             Tuple of (total_filled_qty, avg_fill_price) after handling
@@ -643,7 +708,17 @@ class StopMonitor:
                         break
 
                 if broker_qty > 0:
-                    close_result = self._alpaca.close_position(symbol)
+                    # For partial exits, only sell the shortfall — keep remainder
+                    # for trailing stop. For full exits, close entire position.
+                    sell_qty = remaining if close_shortfall_only else broker_qty
+                    if close_shortfall_only:
+                        close_result = self._alpaca.submit_limit_sell_order(
+                            symbol=symbol,
+                            qty=min(sell_qty, broker_qty),
+                            limit_price=round(fill_price * 0.95, 2),  # aggressive limit
+                        )
+                    else:
+                        close_result = self._alpaca.close_position(symbol)
                     close_id = close_result.get('id', '')
                     # Poll for market fill
                     for _ in range(10):
