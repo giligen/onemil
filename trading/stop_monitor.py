@@ -71,6 +71,8 @@ class StopExitEvent:
     order_id: str
     exit_reason: str  # 'stop_loss' or 'stop_loss_fallback'
     trade_db_id: Optional[int] = None
+    submitted_at: float = 0.0  # time.time() when exit order was submitted
+    pricing_method: str = 'fixed_offset'  # quote_tight, quote_medium, quote_wide, fixed_offset
 
 
 class StopMonitor:
@@ -364,22 +366,28 @@ class StopMonitor:
             highest = watch.highest_since_entry
             trade_db_id = watch.trade_db_id
 
-        # Step 2: API call outside lock — get latest price and submit sell
+        # Step 2: API call outside lock — get quote and submit sell
         exit_price = 0.0
         order_id = ""
         try:
-            # Use latest snapshot price for limit
-            bars = self._alpaca.get_1min_bars(symbol, lookback_minutes=2)
-            if bars is not None and not bars.empty:
-                latest_price = float(bars.iloc[-1]['close'])
+            # Quote-based pricing: try NBBO, fall back to fixed offset
+            quote = self._fetch_quote_for_exit(symbol)
+            if quote:
+                bid = quote.get('bid_price', 0.0)
+                ask = quote.get('ask_price', 0.0)
+                limit_price, pricing_method = self.compute_limit_price_from_quote(bid, ask)
+                if limit_price <= 0:
+                    limit_price = self.compute_limit_price(highest)
+                    pricing_method = 'fixed_offset'
+                else:
+                    logger.info(
+                        f"StopMonitor: {symbol} partial quote pricing — "
+                        f"bid=${bid:.2f} ask=${ask:.2f} → ${limit_price:.2f} ({pricing_method})"
+                    )
             else:
-                logger.warning(
-                    f"StopMonitor: {symbol} no bars for partial exit price, "
-                    f"using highest_since_entry"
-                )
-                latest_price = highest
+                limit_price = self.compute_limit_price(highest)
+                pricing_method = 'fixed_offset'
 
-            limit_price = self.compute_limit_price(latest_price)
             result = self._alpaca.submit_limit_sell_order(
                 symbol=symbol,
                 qty=sell_shares,
@@ -389,7 +397,7 @@ class StopMonitor:
             exit_price = limit_price
             logger.info(
                 f"StopMonitor: {symbol} EXHAUSTION partial sell — "
-                f"{sell_shares}sh @ limit ${limit_price:.2f}, "
+                f"{sell_shares}sh @ limit ${limit_price:.2f} ({pricing_method}), "
                 f"order={order_id}"
             )
         except Exception as e:
@@ -459,6 +467,63 @@ class StopMonitor:
         offset = max(fixed_offset, pct_offset)
         limit_price = round(current_price - offset, 2)
         return max(limit_price, 0.01)  # floor at $0.01
+
+    @staticmethod
+    def compute_limit_price_from_quote(bid: float, ask: float) -> tuple:
+        """
+        Compute limit sell price from current NBBO quote using spread tiers.
+
+        Adapts pricing to market microstructure:
+        - Tight spread (<$0.05): sell at midpoint — liquid, saves vs fixed offset
+        - Medium spread ($0.05-$0.15): sell at bid + $0.01 — fast fill, minimal give
+        - Wide spread (>$0.15): sell at bid — take what's available on illiquid
+
+        Args:
+            bid: Current best bid price
+            ask: Current best ask price
+
+        Returns:
+            Tuple of (limit_price, pricing_method) where pricing_method is
+            'quote_tight', 'quote_medium', or 'quote_wide'.
+            Returns (0.0, 'invalid') if quote data is invalid.
+        """
+        if bid <= 0 or ask <= 0 or ask < bid:
+            return (0.0, 'invalid')
+
+        spread = ask - bid
+
+        if spread < 0.05:
+            limit = round((bid + ask) / 2, 2)
+            method = 'quote_tight'
+        elif spread <= 0.15:
+            limit = round(bid + 0.01, 2)
+            method = 'quote_medium'
+        else:
+            limit = round(bid, 2)
+            method = 'quote_wide'
+
+        return (max(limit, 0.01), method)
+
+    def _fetch_quote_for_exit(self, symbol: str) -> Optional[Dict]:
+        """
+        Fetch latest NBBO quote for exit pricing. Returns None on failure.
+
+        Logs a warning on failure — caller falls back to fixed-offset pricing.
+
+        Args:
+            symbol: Stock symbol
+
+        Returns:
+            Quote dict with bid_price, ask_price, or None
+        """
+        try:
+            return self._alpaca.get_latest_quote(symbol)
+        except Exception as e:
+            logger.warning(
+                f"StopMonitor: {symbol} quote fetch failed: {e} — "
+                f"falling back to fixed-offset pricing"
+            )
+            return None
 
     # =========================================================================
     # Internal — WebSocket thread
@@ -646,8 +711,32 @@ class StopMonitor:
                             f"(may be filled): {e}"
                         )
 
+            # Compute limit price: try quote-based (spread-aware), fall back to fixed offset
+            pricing_method = 'fixed_offset'
+            try:
+                quote = await loop.run_in_executor(
+                    None, self._alpaca.get_latest_quote, symbol
+                )
+                bid = quote.get('bid_price', 0.0)
+                ask = quote.get('ask_price', 0.0)
+                limit_price, pricing_method = self.compute_limit_price_from_quote(bid, ask)
+                if limit_price <= 0:
+                    raise ValueError(f"invalid quote: bid={bid}, ask={ask}")
+                spread = ask - bid
+                logger.info(
+                    f"StopMonitor: {symbol} quote-based pricing — "
+                    f"bid=${bid:.2f} ask=${ask:.2f} spread=${spread:.3f} "
+                    f"→ limit=${limit_price:.2f} ({pricing_method})"
+                )
+            except Exception as e:
+                limit_price = self.compute_limit_price(trigger_price)
+                pricing_method = 'fixed_offset'
+                logger.warning(
+                    f"StopMonitor: {symbol} quote failed ({e}) — "
+                    f"fixed-offset limit=${limit_price:.2f}"
+                )
+
             # Submit marketable limit sell (in executor)
-            limit_price = self.compute_limit_price(trigger_price)
             try:
                 result = await loop.run_in_executor(
                     None,
@@ -661,7 +750,7 @@ class StopMonitor:
                 exit_price = limit_price
                 logger.info(
                     f"StopMonitor: {symbol} limit sell submitted — "
-                    f"qty={watch.shares}, limit=${limit_price:.2f}, "
+                    f"qty={watch.shares}, limit=${limit_price:.2f} ({pricing_method}), "
                     f"order={order_id}"
                 )
             except Exception as e:
@@ -703,6 +792,8 @@ class StopMonitor:
                 order_id=order_id,
                 exit_reason=exit_reason,
                 trade_db_id=watch.trade_db_id,
+                submitted_at=time_mod.time(),
+                pricing_method=pricing_method,
             )
             self._exit_events.put(event)
 

@@ -35,11 +35,12 @@ def mock_alpaca():
         'status': 'accepted',
         'symbol': 'TEST',
     }
-    # Return bars for price lookup
-    client.get_1min_bars.return_value = pd.DataFrame([
-        {'timestamp': datetime.now(timezone.utc), 'open': 8.0,
-         'close': 8.50, 'high': 8.60, 'low': 7.90, 'volume': 5000},
-    ])
+    # Quote for spread-based exit pricing
+    client.get_latest_quote.return_value = {
+        'bid_price': 8.48, 'ask_price': 8.50,
+        'bid_size': 100, 'ask_size': 200,
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+    }
     return client
 
 

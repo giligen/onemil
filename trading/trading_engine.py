@@ -136,6 +136,7 @@ class TradingEngine:
         self._daily_trade_count: int = 0
         self._notified_setups: Dict[str, float] = {}  # symbol -> breakout_level (dedup Telegram)
         self._macd_warmup_cache: Dict[str, Optional[pd.Series]] = {}  # symbol -> prev-day closes
+        self._pending_stop_exits: Dict[str, Any] = {}  # symbol -> StopExitEvent awaiting fill
 
         # MACD zone filter config
         macd_zones_cfg = _cfg.get("trading", {}).get("macd_zones", {})
@@ -780,103 +781,215 @@ class TradingEngine:
 
         return last_fill_result
 
+    def _try_get_fill(self, event, max_polls: int = 2) -> Optional[float]:
+        """
+        Poll exit order for fill price.
+
+        Args:
+            event: StopExitEvent with order_id
+            max_polls: Number of poll attempts (0.5s apart)
+
+        Returns:
+            Actual fill price, or None if not yet filled
+        """
+        if not event.order_id:
+            return None
+        for _ in range(max_polls):
+            time_mod.sleep(0.5)
+            try:
+                exit_order = self.alpaca.get_order(event.order_id)
+                if exit_order.get('status') == 'filled':
+                    fill = exit_order.get('filled_avg_price')
+                    if fill is not None:
+                        logger.info(
+                            f"{event.symbol}: exit filled at ${fill:.2f} "
+                            f"(limit=${event.exit_price:.2f}, {event.pricing_method})"
+                        )
+                        return fill
+            except Exception:
+                pass
+        return None
+
+    def _cancel_and_market_sell(self, event) -> None:
+        """
+        Cancel unfilled limit exit and force market sell after timeout.
+
+        Args:
+            event: StopExitEvent whose limit order timed out
+        """
+        symbol = event.symbol
+        logger.warning(
+            f"{symbol}: exit limit order UNFILLED after 30s — "
+            f"cancelling and market-selling"
+        )
+
+        # Cancel the limit order (may have filled in the meantime)
+        actual_fill = None
+        try:
+            self.alpaca.cancel_order(event.order_id)
+        except Exception:
+            pass  # 422 = already filled/cancelled
+
+        # Check if it filled during cancel race
+        try:
+            order = self.alpaca.get_order(event.order_id)
+            if order.get('status') == 'filled':
+                actual_fill = order.get('filled_avg_price')
+                if actual_fill:
+                    logger.info(
+                        f"{symbol}: limit order filled during cancel — "
+                        f"${actual_fill:.2f}"
+                    )
+        except Exception:
+            pass
+
+        if actual_fill is None:
+            # Market sell via close_position
+            try:
+                fallback = self.alpaca.close_position(symbol)
+                fallback_id = fallback.get('id', '')
+                # Poll for market fill
+                for _ in range(5):
+                    time_mod.sleep(0.5)
+                    try:
+                        fb_order = self.alpaca.get_order(fallback_id)
+                        if fb_order.get('status') == 'filled':
+                            actual_fill = fb_order.get('filled_avg_price')
+                            break
+                    except Exception:
+                        pass
+                if actual_fill is None:
+                    actual_fill = event.exit_price  # last resort
+                    logger.error(
+                        f"{symbol}: market sell fill unknown — using limit "
+                        f"${event.exit_price:.2f} as estimate"
+                    )
+                else:
+                    logger.info(
+                        f"{symbol}: market sell filled at ${actual_fill:.2f}"
+                    )
+                event.exit_reason = f"{event.exit_reason}_timeout"
+            except Exception as e:
+                logger.error(f"{symbol}: market sell also failed: {e}")
+                actual_fill = event.exit_price
+
+        # Finalize with the fill we got
+        self._finalize_stop_exit(event, actual_fill)
+
+    STOP_EXIT_TIMEOUT_SECONDS = 30
+
     def _process_stop_monitor_exits(self) -> None:
         """Drain and process exit events from StopMonitor."""
         if not self.stop_monitor:
             return
 
+        # 1. Drain new events from queue
         events = self.stop_monitor.drain_exit_events()
         for event in events:
+            # Exhaustion partials are processed separately
+            if event.exit_reason == 'exhaustion_partial':
+                continue
+
             logger.info(
                 f"{event.symbol}: StopMonitor exit — "
                 f"stop=${event.stop_price:.2f}, exit=${event.exit_price:.2f}, "
-                f"reason={event.exit_reason}, order={event.order_id}"
+                f"reason={event.exit_reason}, {event.pricing_method}, "
+                f"order={event.order_id}"
             )
 
-            # Poll exit order for ACTUAL fill price (event.exit_price is the
-            # limit price, but the fill is typically better on a marketable limit)
-            actual_exit_price = event.exit_price
-            if event.order_id:
-                for poll_attempt in range(5):
-                    time_mod.sleep(0.5)
-                    try:
-                        exit_order = self.alpaca.get_order(event.order_id)
-                        if exit_order.get('status') == 'filled':
-                            fill = exit_order.get('filled_avg_price')
-                            if fill is not None:
-                                actual_exit_price = fill
-                                logger.info(
-                                    f"{event.symbol}: StopMonitor exit filled at "
-                                    f"${fill:.2f} (limit was ${event.exit_price:.2f})"
-                                )
-                                break
-                    except Exception:
-                        pass
-                else:
-                    logger.warning(
-                        f"{event.symbol}: StopMonitor exit order fill price unavailable "
-                        f"after 5 polls — using limit ${event.exit_price:.2f}"
+            # Quick fill check (2 polls × 0.5s = 1s)
+            actual_fill = self._try_get_fill(event, max_polls=2)
+            if actual_fill:
+                self._finalize_stop_exit(event, actual_fill)
+            else:
+                self._pending_stop_exits[event.symbol] = event
+                logger.info(
+                    f"{event.symbol}: exit order pending fill — "
+                    f"will timeout after {self.STOP_EXIT_TIMEOUT_SECONDS}s"
+                )
+
+        # 2. Check pending orders for fill or timeout
+        if self._pending_stop_exits:
+            self._check_pending_stop_exit_timeouts()
+
+    def _check_pending_stop_exit_timeouts(self) -> None:
+        """Check pending stop exit orders for fill or timeout, blocking until resolved."""
+        start = time_mod.time()
+        while self._pending_stop_exits and (time_mod.time() - start < 35):
+            for symbol in list(self._pending_stop_exits.keys()):
+                event = self._pending_stop_exits[symbol]
+                actual_fill = self._try_get_fill(event, max_polls=1)
+                if actual_fill:
+                    del self._pending_stop_exits[symbol]
+                    self._finalize_stop_exit(event, actual_fill)
+                elif time_mod.time() - event.submitted_at > self.STOP_EXIT_TIMEOUT_SECONDS:
+                    del self._pending_stop_exits[symbol]
+                    self._cancel_and_market_sell(event)
+
+            if self._pending_stop_exits:
+                time_mod.sleep(3)
+
+    def _finalize_stop_exit(self, event, actual_exit_price: float) -> None:
+        """Finalize a stop exit: update DB, record P&L, notify Telegram."""
+        if not event.trade_db_id:
+            return
+
+        try:
+            trades_today = self.db.get_open_trades(date.today().isoformat())
+            trade_record = None
+            for t in trades_today:
+                if t['id'] == event.trade_db_id:
+                    trade_record = t
+                    break
+
+            if trade_record and trade_record.get('fill_price'):
+                # Remainder P&L: shares in this exit × price diff
+                remainder_pnl = (actual_exit_price - trade_record['fill_price']) * event.shares
+
+                # Combine with partial exit P&L if exhaustion partial was taken
+                partial_pnl = trade_record.get('partial_exit_pnl') or 0.0
+                pnl = remainder_pnl + partial_pnl
+
+                # Weighted average exit for pnl_pct
+                total_shares = trade_record.get('filled_qty') or trade_record['shares']
+                pnl_pct = (pnl / (trade_record['fill_price'] * total_shares)) * 100
+
+                exit_reason = event.exit_reason
+                if partial_pnl != 0.0:
+                    exit_reason = f"exhaust+{event.exit_reason}"
+
+                self.db.update_trade(event.trade_db_id, {
+                    'exit_price': actual_exit_price,
+                    'exit_reason': exit_reason,
+                    'exited_at': datetime.now(timezone.utc),
+                    'pnl': pnl,
+                    'pnl_pct': pnl_pct,
+                })
+                self.position_manager.record_trade_pnl(pnl)
+                logger.info(
+                    f"{event.symbol}: exit finalized — "
+                    f"P&L ${pnl:+,.2f} ({pnl_pct:+.1f}%)"
+                    f"{f' (partial ${partial_pnl:+,.2f} + remainder ${remainder_pnl:+,.2f})' if partial_pnl != 0 else ''}"
+                )
+
+                if self.notifier:
+                    self.notifier.notify_position_closed(
+                        symbol=event.symbol,
+                        entry_price=trade_record['fill_price'],
+                        exit_price=actual_exit_price,
+                        shares=event.shares,
+                        pnl=pnl,
+                        exit_reason=exit_reason,
                     )
-
-            # Update DB trade record
-            if event.trade_db_id:
-                try:
-                    # Look up trade by ID in today's open trades
-                    trades_today = self.db.get_open_trades(date.today().isoformat())
-                    trade_record = None
-                    for t in trades_today:
-                        if t['id'] == event.trade_db_id:
-                            trade_record = t
-                            break
-
-                    if trade_record and trade_record.get('fill_price'):
-                        # Remainder P&L: shares in this exit × price diff
-                        remainder_pnl = (actual_exit_price - trade_record['fill_price']) * event.shares
-
-                        # Combine with partial exit P&L if exhaustion partial was taken
-                        partial_pnl = trade_record.get('partial_exit_pnl') or 0.0
-                        pnl = remainder_pnl + partial_pnl
-
-                        # Weighted average exit for pnl_pct
-                        total_shares = trade_record.get('filled_qty') or trade_record['shares']
-                        pnl_pct = (pnl / (trade_record['fill_price'] * total_shares)) * 100
-
-                        exit_reason = event.exit_reason
-                        if partial_pnl != 0.0:
-                            exit_reason = f"exhaust+{event.exit_reason}"
-
-                        self.db.update_trade(event.trade_db_id, {
-                            'exit_price': actual_exit_price,
-                            'exit_reason': exit_reason,
-                            'exited_at': datetime.now(timezone.utc),
-                            'pnl': pnl,
-                            'pnl_pct': pnl_pct,
-                        })
-                        self.position_manager.record_trade_pnl(pnl)
-                        logger.info(
-                            f"{event.symbol}: StopMonitor exit DB updated — "
-                            f"P&L ${pnl:+,.2f} ({pnl_pct:+.1f}%)"
-                            f"{f' (partial ${partial_pnl:+,.2f} + remainder ${remainder_pnl:+,.2f})' if partial_pnl != 0 else ''}"
-                        )
-
-                        if self.notifier:
-                            self.notifier.notify_position_closed(
-                                symbol=event.symbol,
-                                entry_price=trade_record['fill_price'],
-                                exit_price=actual_exit_price,
-                                shares=qty_for_pnl,
-                                pnl=pnl,
-                                exit_reason=event.exit_reason,
-                            )
-                    else:
-                        logger.warning(
-                            f"{event.symbol}: StopMonitor exit — "
-                            f"no matching open trade for DB id {event.trade_db_id}"
-                        )
-                except Exception as e:
-                    logger.error(
-                        f"{event.symbol}: Failed to process StopMonitor exit: {e}"
-                    )
+            else:
+                logger.warning(
+                    f"{event.symbol}: StopMonitor exit — "
+                    f"no matching open trade for DB id {event.trade_db_id}"
+                )
+        except Exception as e:
+            logger.error(
+                f"{event.symbol}: Failed to finalize stop exit: {e}"
+            )
 
     def _check_exhaustion_exits(self) -> None:
         """

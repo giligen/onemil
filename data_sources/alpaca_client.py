@@ -22,6 +22,7 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.historical.news import NewsClient
 from alpaca.data.requests import (
     StockLatestTradeRequest,
+    StockLatestQuoteRequest,
     StockBarsRequest,
     StockLatestBarRequest,
     NewsRequest,
@@ -488,6 +489,56 @@ class AlpacaClient:
         except Exception as e:
             logger.error(f"Failed to get latest trades: {e}")
             raise AlpacaAPIError(f"Failed to get latest trades: {e}")
+
+    def get_latest_quote(self, symbol: str, feed: DataFeed = DataFeed.SIP) -> Dict:
+        """
+        Get latest NBBO quote (bid/ask) for a single symbol.
+
+        Used by StopMonitor for spread-based exit pricing — sets the limit
+        sell price relative to the current bid/ask instead of a fixed offset.
+
+        Args:
+            symbol: Stock symbol
+            feed: Data feed (SIP for consolidated NBBO)
+
+        Returns:
+            Dict with bid_price, ask_price, bid_size, ask_size, timestamp
+
+        Raises:
+            AlpacaAPIError: If API call fails or no quote available
+        """
+        try:
+            request = StockLatestQuoteRequest(
+                symbol_or_symbols=symbol, feed=feed
+            )
+            quote_raw = self._call_with_timeout(
+                lambda: self.data_client.get_stock_latest_quote(request),
+                f"get_latest_quote({symbol})"
+            )
+            quotes = self._to_dict(quote_raw)
+            if symbol not in quotes:
+                raise AlpacaAPIError(f"No quote returned for {symbol}")
+
+            quote = quotes[symbol]
+            result = {
+                'bid_price': float(quote.bid_price) if quote.bid_price else 0.0,
+                'ask_price': float(quote.ask_price) if quote.ask_price else 0.0,
+                'bid_size': int(quote.bid_size) if quote.bid_size else 0,
+                'ask_size': int(quote.ask_size) if quote.ask_size else 0,
+                'timestamp': quote.timestamp.isoformat() if quote.timestamp else None,
+            }
+            logger.debug(
+                f"{symbol}: quote bid=${result['bid_price']:.2f} "
+                f"ask=${result['ask_price']:.2f} "
+                f"spread=${result['ask_price'] - result['bid_price']:.3f}"
+            )
+            return result
+
+        except AlpacaAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to get latest quote for {symbol}: {e}")
+            raise AlpacaAPIError(f"Failed to get latest quote for {symbol}: {e}")
 
     def get_current_bars(self, symbols: List[str], feed: DataFeed = DataFeed.SIP) -> Dict[str, Dict]:
         """
