@@ -535,6 +535,8 @@ class StopMonitor:
                 logger.warning(
                     f"StopMonitor: {symbol} removed during partial exit"
                 )
+                with self._exit_lock:
+                    self._exit_in_progress[symbol] = False
                 return None
 
             remaining = watch.shares - sell_shares
