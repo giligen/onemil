@@ -58,6 +58,12 @@ class WatchEntry:
     trailing_active: bool = False
     # Exhaustion exit: set True after partial sell into strength
     exhaustion_partial_taken: bool = False
+    # Quote cache (updated by WebSocket quote stream)
+    latest_bid: float = 0.0
+    latest_ask: float = 0.0
+    latest_bid_size: int = 0
+    latest_ask_size: int = 0
+    latest_quote_ts: float = 0.0
 
 
 @dataclass
@@ -74,6 +80,13 @@ class StopExitEvent:
     submitted_at: float = 0.0  # time.time() when exit order was submitted
     pricing_method: str = 'fixed_offset'  # quote_tight, quote_medium, quote_wide, fixed_offset
     filled_qty: int = 0  # actual shares filled (may differ from shares on partial fill)
+    # Exit microstructure (for execution analysis)
+    exit_trigger_price: float = 0.0  # trade price that breached stop
+    exit_quote_bid: float = 0.0
+    exit_quote_ask: float = 0.0
+    exit_quote_bid_size: int = 0
+    exit_quote_ask_size: int = 0
+    exit_limit_price: float = 0.0  # limit price we submitted
 
 
 class StopMonitor:
@@ -318,6 +331,11 @@ class StopMonitor:
                 'stop_price': w.stop_price,
                 'trail_r': w.trail_r,
                 'trailing_active': w.trailing_active,
+                'latest_bid': w.latest_bid,
+                'latest_ask': w.latest_ask,
+                'latest_bid_size': w.latest_bid_size,
+                'latest_ask_size': w.latest_ask_size,
+                'latest_quote_ts': w.latest_quote_ts,
             }
 
     def execute_partial_exit(
@@ -831,7 +849,10 @@ class StopMonitor:
                     self._stream.subscribe_trades(
                         self._on_trade, *watched
                     )
-                    logger.info(f"StopMonitor: WebSocket connecting with {len(watched)} symbols...")
+                    self._stream.subscribe_quotes(
+                        self._on_quote, *watched
+                    )
+                    logger.info(f"StopMonitor: WebSocket connecting with {len(watched)} symbols (trades+quotes)...")
                 else:
                     logger.info("StopMonitor: WebSocket connecting (no symbols yet)...")
                 await self._stream._run_forever()
@@ -869,6 +890,25 @@ class StopMonitor:
                     )
                 except Exception:
                     pass
+
+    async def _on_quote(self, quote) -> None:
+        """
+        WebSocket quote callback — update latest NBBO on WatchEntry.
+
+        Lightweight: no logging, no lock held during field writes.
+        Quotes fire 10-100x more frequently than trades.
+        """
+        symbol = quote.symbol
+        with self._watch_lock:
+            watch = self._watches.get(symbol)
+        if watch is None:
+            return
+        # Individual float/int writes are atomic under GIL
+        watch.latest_bid = float(quote.bid_price)
+        watch.latest_ask = float(quote.ask_price)
+        watch.latest_bid_size = int(quote.bid_size)
+        watch.latest_ask_size = int(quote.ask_size)
+        watch.latest_quote_ts = time_mod.time()
 
     async def _on_trade(self, trade) -> None:
         """
@@ -980,30 +1020,51 @@ class StopMonitor:
                             f"(may be filled): {e}"
                         )
 
-            # Compute limit price: try quote-based (spread-aware), fall back to fixed offset
+            # Compute limit price: use cached quote from stream (sub-50ms),
+            # fall back to REST if stale, then fixed offset as last resort
+            bid, ask, bid_size, ask_size = 0.0, 0.0, 0, 0
             pricing_method = 'fixed_offset'
-            try:
-                quote = await loop.run_in_executor(
-                    None, self._alpaca.get_latest_quote, symbol
-                )
-                bid = quote.get('bid_price', 0.0)
-                ask = quote.get('ask_price', 0.0)
+            quote_age_ms = (time_mod.time() - watch.latest_quote_ts) * 1000 if watch.latest_quote_ts > 0 else float('inf')
+
+            if watch.latest_bid > 0 and watch.latest_ask > 0 and quote_age_ms < 5000:
+                # Use cached quote from WebSocket stream
+                bid, ask = watch.latest_bid, watch.latest_ask
+                bid_size, ask_size = watch.latest_bid_size, watch.latest_ask_size
                 limit_price, pricing_method = self.compute_limit_price_from_quote(bid, ask)
-                if limit_price <= 0:
-                    raise ValueError(f"invalid quote: bid={bid}, ask={ask}")
-                spread = ask - bid
-                logger.info(
-                    f"StopMonitor: {symbol} quote-based pricing — "
-                    f"bid=${bid:.2f} ask=${ask:.2f} spread=${spread:.3f} "
-                    f"→ limit=${limit_price:.2f} ({pricing_method})"
-                )
-            except Exception as e:
-                limit_price = self.compute_limit_price(trigger_price)
-                pricing_method = 'fixed_offset'
-                logger.warning(
-                    f"StopMonitor: {symbol} quote failed ({e}) — "
-                    f"fixed-offset limit=${limit_price:.2f}"
-                )
+                if limit_price > 0:
+                    logger.info(
+                        f"StopMonitor: {symbol} cached-quote pricing — "
+                        f"bid=${bid:.2f} ask=${ask:.2f} spread=${ask-bid:.3f} "
+                        f"age={quote_age_ms:.0f}ms → limit=${limit_price:.2f} ({pricing_method})"
+                    )
+                else:
+                    limit_price = self.compute_limit_price(trigger_price)
+                    pricing_method = 'fixed_offset'
+            else:
+                # Fallback: REST call if quote stream data is stale/missing
+                try:
+                    quote = await loop.run_in_executor(
+                        None, self._alpaca.get_latest_quote, symbol
+                    )
+                    bid = quote.get('bid_price', 0.0)
+                    ask = quote.get('ask_price', 0.0)
+                    bid_size = quote.get('bid_size', 0)
+                    ask_size = quote.get('ask_size', 0)
+                    limit_price, pricing_method = self.compute_limit_price_from_quote(bid, ask)
+                    if limit_price <= 0:
+                        raise ValueError(f"invalid quote: bid={bid}, ask={ask}")
+                    logger.info(
+                        f"StopMonitor: {symbol} REST-quote pricing — "
+                        f"bid=${bid:.2f} ask=${ask:.2f} spread=${ask-bid:.3f} "
+                        f"→ limit=${limit_price:.2f} ({pricing_method})"
+                    )
+                except Exception as e:
+                    limit_price = self.compute_limit_price(trigger_price)
+                    pricing_method = 'fixed_offset'
+                    logger.warning(
+                        f"StopMonitor: {symbol} quote failed ({e}) — "
+                        f"fixed-offset limit=${limit_price:.2f}"
+                    )
 
             # Submit marketable limit sell (in executor)
             try:
@@ -1063,6 +1124,12 @@ class StopMonitor:
                 trade_db_id=watch.trade_db_id,
                 submitted_at=time_mod.time(),
                 pricing_method=pricing_method,
+                exit_trigger_price=trigger_price,
+                exit_quote_bid=bid,
+                exit_quote_ask=ask,
+                exit_quote_bid_size=bid_size,
+                exit_quote_ask_size=ask_size,
+                exit_limit_price=limit_price,
             )
             self._exit_events.put(event)
 
@@ -1076,21 +1143,23 @@ class StopMonitor:
                 self._exit_in_progress[symbol] = False
 
     async def _subscribe_symbol(self, symbol: str) -> None:
-        """Subscribe to trade updates for a symbol."""
+        """Subscribe to trade and quote updates for a symbol."""
         if self._stream:
             try:
                 self._stream.subscribe_trades(self._on_trade, symbol)
-                logger.debug(f"StopMonitor: subscribed to {symbol}")
+                self._stream.subscribe_quotes(self._on_quote, symbol)
+                logger.debug(f"StopMonitor: subscribed to {symbol} (trades+quotes)")
             except Exception as e:
                 logger.error(
                     f"StopMonitor: failed to subscribe {symbol}: {e}"
                 )
 
     async def _unsubscribe_symbol(self, symbol: str) -> None:
-        """Unsubscribe from trade updates for a symbol."""
+        """Unsubscribe from trade and quote updates for a symbol."""
         if self._stream:
             try:
                 self._stream.unsubscribe_trades(symbol)
+                self._stream.unsubscribe_quotes(symbol)
                 logger.debug(f"StopMonitor: unsubscribed from {symbol}")
             except Exception as e:
                 logger.warning(

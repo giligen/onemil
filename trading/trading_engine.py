@@ -1105,12 +1105,34 @@ class TradingEngine:
                 if partial_pnl != 0.0:
                     exit_reason = f"exhaust+{event.exit_reason}"
 
+                # Compute exit microstructure metrics
+                exit_spread = (event.exit_quote_ask - event.exit_quote_bid
+                               if event.exit_quote_ask > 0 else None)
+                exit_slippage = (event.exit_limit_price - actual_exit_price
+                                 if event.exit_limit_price > 0 else None)
+                exit_latency = ((time_mod.time() - event.submitted_at) * 1000
+                                if event.submitted_at > 0 else None)
+                exit_submitted = (datetime.fromtimestamp(event.submitted_at, tz=timezone.utc)
+                                  if event.submitted_at > 0 else None)
+
                 self.db.update_trade(event.trade_db_id, {
                     'exit_price': actual_exit_price,
                     'exit_reason': exit_reason,
                     'exited_at': datetime.now(timezone.utc),
                     'pnl': pnl,
                     'pnl_pct': pnl_pct,
+                    # Exit microstructure
+                    'exit_trigger_price': event.exit_trigger_price or None,
+                    'exit_quote_bid': event.exit_quote_bid or None,
+                    'exit_quote_ask': event.exit_quote_ask or None,
+                    'exit_quote_bid_size': event.exit_quote_bid_size or None,
+                    'exit_quote_ask_size': event.exit_quote_ask_size or None,
+                    'exit_quote_spread': exit_spread,
+                    'exit_limit_price': event.exit_limit_price or None,
+                    'exit_pricing_method': event.pricing_method,
+                    'exit_submitted_at': exit_submitted,
+                    'exit_fill_latency_ms': exit_latency,
+                    'exit_slippage': exit_slippage,
                 })
                 self.position_manager.record_trade_pnl(pnl)
                 logger.info(

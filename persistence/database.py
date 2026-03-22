@@ -304,6 +304,34 @@ class Database:
         except Exception as e:
             logger.warning(f"Migration 5 (news columns) failed (non-fatal): {e}")
 
+        # Migration 6: Add exit microstructure columns for execution analysis.
+        # Records bid/ask/depth at exit time, limit vs fill, latency, slippage.
+        exit_micro_cols = {
+            'exit_trigger_price': 'REAL',
+            'exit_quote_bid': 'REAL',
+            'exit_quote_ask': 'REAL',
+            'exit_quote_bid_size': 'INTEGER',
+            'exit_quote_ask_size': 'INTEGER',
+            'exit_quote_spread': 'REAL',
+            'exit_limit_price': 'REAL',
+            'exit_pricing_method': 'VARCHAR(20)',
+            'exit_submitted_at': 'TIMESTAMP',
+            'exit_fill_latency_ms': 'REAL',
+            'exit_slippage': 'REAL',
+        }
+        try:
+            columns = [row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()]
+            added = []
+            for col_name, col_type in exit_micro_cols.items():
+                if col_name not in columns:
+                    self.conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+                    added.append(col_name)
+            if added:
+                self.conn.commit()
+                logger.info(f"Migration 6: added exit microstructure columns: {added}")
+        except Exception as e:
+            logger.warning(f"Migration 6 (exit microstructure) failed (non-fatal): {e}")
+
     # =========================================================================
     # Universe operations
     # =========================================================================
