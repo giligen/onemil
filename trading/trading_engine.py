@@ -138,6 +138,7 @@ class TradingEngine:
         self._notified_setups: Dict[str, float] = {}  # symbol -> breakout_level (dedup Telegram)
         self._macd_warmup_cache: Dict[str, Optional[pd.Series]] = {}  # symbol -> prev-day closes
         self._pending_stop_exits: Dict[str, Any] = {}  # symbol -> StopExitEvent awaiting fill
+        self._news_data: Dict[str, Dict] = {}  # symbol -> {news_catalyst, news_headline, news_reason}
 
         # MACD zone filter config
         macd_zones_cfg = _cfg.get("trading", {}).get("macd_zones", {})
@@ -327,15 +328,27 @@ class TradingEngine:
         except Exception as e:
             logger.error(f"Failed to refresh SPY regime data: {e}")
 
-    def on_stock_qualified(self, symbol: str) -> None:
+    def on_stock_qualified(self, symbol: str, news_catalyst: bool = None,
+                           news_headline: str = None, news_reason: str = None) -> None:
         """
         Handle a stock qualified by the scanner.
 
         Adds to the qualified symbols set for pattern monitoring.
+        Optionally stores news classification for persistence with trade records.
 
         Args:
             symbol: Qualified stock symbol
+            news_catalyst: LLM classification (True=real catalyst, False=noise, None=unknown)
+            news_headline: Top news headline
+            news_reason: LLM's reason for classification
         """
+        # Store news data for later persistence with trade record
+        if news_catalyst is not None:
+            self._news_data[symbol] = {
+                'news_catalyst': news_catalyst,
+                'news_headline': (news_headline or '')[:200],
+                'news_reason': (news_reason or '')[:100],
+            }
         if not self.enabled:
             logger.debug(f"{symbol}: Trading engine disabled, ignoring qualified stock")
             return
@@ -505,12 +518,23 @@ class TradingEngine:
                 # Phase 2: Update trade record with fill data
                 trade_record = self.db.get_trade_by_order_id(order_id)
                 if trade_record:
-                    self.db.update_trade(trade_record['id'], {
+                    update = {
                         'order_status': 'filled',
                         'fill_price': fill_price,
                         'filled_qty': actual_qty,
                         'filled_at': datetime.now(timezone.utc),
-                    })
+                    }
+                    # Persist news classification with trade for future analysis
+                    news = pending.get('news_data')
+                    if news:
+                        update['news_catalyst'] = 1 if news.get('news_catalyst') else 0
+                        update['news_headline'] = news.get('news_headline', '')
+                        update['news_reason'] = news.get('news_reason', '')
+                        logger.info(
+                            f"{symbol}: News: catalyst={news['news_catalyst']}, "
+                            f"reason={news.get('news_reason', 'N/A')}"
+                        )
+                    self.db.update_trade(trade_record['id'], update)
                     logger.info(f"{symbol}: Trade DB updated — fill ${fill_price}, qty {actual_qty}")
                 else:
                     error_msg = f"{symbol}: No trade record for order {order_id} — DB integrity issue"
@@ -1596,6 +1620,7 @@ class TradingEngine:
                 'plan': plan,
                 'setup': setup,
                 'placed_at': datetime.now(timezone.utc),
+                'news_data': self._news_data.get(symbol),
             }
             # Store real stop for StopMonitor registration on fill
             if self.stop_monitor:

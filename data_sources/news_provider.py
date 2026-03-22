@@ -230,3 +230,87 @@ class NewsProvider:
 
         logger.debug(f"{symbol}: {len(articles)} articles found, none interesting")
         return False, None
+
+    def classify_news(self, symbol: str, limit: int = 5) -> Dict:
+        """
+        Classify news for a symbol with full LLM output for persistence.
+
+        Returns the classification result including the LLM's reason,
+        so it can be stored with the trade record for future analysis.
+
+        Args:
+            symbol: Stock symbol
+            limit: Maximum articles to check
+
+        Returns:
+            Dict with keys: has_news, catalyst, headline, reason
+            - has_news: bool — any articles found
+            - catalyst: bool or None — LLM classification (None if no articles)
+            - headline: str — top article headline
+            - reason: str — LLM's reason for classification
+        """
+        result = {'has_news': False, 'catalyst': None, 'headline': '', 'reason': ''}
+
+        try:
+            articles = self.get_recent_news(symbol, limit=limit)
+        except Exception as e:
+            logger.error(f"{symbol}: news fetch failed: {e}")
+            return result
+
+        if not articles:
+            return result
+
+        result['has_news'] = True
+        result['headline'] = (articles[0].get('headline') or '')[:200]
+
+        # Use LLMNewsAnalyzer if available — get full classification
+        if isinstance(self.analyzer, LLMNewsAnalyzer):
+            for article in articles:
+                headline = (article.get('headline') or '').strip()
+                summary = (article.get('summary') or '').strip()
+                if not headline and not summary:
+                    continue
+
+                cache_key = (symbol, headline)
+                if cache_key in self.analyzer._cache:
+                    result['catalyst'] = self.analyzer._cache[cache_key]
+                    result['reason'] = 'cached'
+                    if result['catalyst']:
+                        result['headline'] = headline[:200]
+                        return result
+                    continue
+
+                # Run LLM classification
+                try:
+                    user_msg = (
+                        f"Symbol: {symbol}\n"
+                        f"Headline: {headline}\n"
+                        f"Summary: {summary[:200]}"
+                    )
+                    response = self.analyzer._client.messages.create(
+                        model=self.analyzer._model,
+                        max_tokens=100,
+                        system=SYSTEM_PROMPT,
+                        messages=[{"role": "user", "content": user_msg}],
+                    )
+                    raw = response.content[0].text.strip()
+                    catalyst, reason = self.analyzer._parse_response(raw)
+                    self.analyzer._cache[cache_key] = catalyst
+
+                    if catalyst:
+                        result['catalyst'] = True
+                        result['headline'] = headline[:200]
+                        result['reason'] = reason
+                        return result
+                    else:
+                        result['catalyst'] = False
+                        result['reason'] = reason
+                except Exception as e:
+                    logger.error(f"{symbol}: LLM classification failed: {e}")
+                    result['reason'] = f'error: {str(e)[:50]}'
+        else:
+            # V1 stub analyzer — always True
+            result['catalyst'] = self.analyzer.is_interesting(articles[0], symbol=symbol)
+            result['reason'] = 'stub_v1'
+
+        return result

@@ -454,9 +454,19 @@ class RealtimeScanner:
             # Only check news for stocks that pass volume + price criteria
             has_news = False
             headline = None
+            news_catalyst = None
+            news_reason = None
             if (relative_volume >= self.criteria.relative_volume_min and
                     intraday_change_pct >= self.criteria.intraday_change_pct_min):
-                has_news, headline = self.news.has_interesting_news(symbol)
+                # Use classify_news for full LLM classification (persisted with trades)
+                if hasattr(self.news, 'classify_news'):
+                    news_info = self.news.classify_news(symbol)
+                    has_news = news_info.get('has_news', False)
+                    headline = news_info.get('headline')
+                    news_catalyst = news_info.get('catalyst')
+                    news_reason = news_info.get('reason', '')
+                else:
+                    has_news, headline = self.news.has_interesting_news(symbol)
                 if has_news:
                     news_count += 1
 
@@ -517,7 +527,12 @@ class RealtimeScanner:
 
                 # Hand off to trading engine if available
                 if self.trading_engine is not None:
-                    self.trading_engine.on_stock_qualified(symbol)
+                    self.trading_engine.on_stock_qualified(
+                        symbol,
+                        news_catalyst=news_catalyst,
+                        news_headline=headline,
+                        news_reason=news_reason,
+                    )
 
                 # Save qualified result to DB
                 self.db.save_scan_result({

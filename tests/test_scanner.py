@@ -28,7 +28,9 @@ def mock_alpaca():
 @pytest.fixture
 def mock_news():
     """Create a mock NewsProvider with spec."""
-    return MagicMock(spec=NewsProvider)
+    m = MagicMock(spec=NewsProvider)
+    m.classify_news.return_value = {'has_news': False, 'catalyst': None, 'headline': '', 'reason': ''}
+    return m
 
 
 @pytest.fixture
@@ -219,6 +221,10 @@ class TestRunIntradayCycle:
         scanner._volume_profiles[symbol][bucket] = avg_volume
 
         mock_news.has_interesting_news.return_value = (has_news, headline)
+        mock_news.classify_news.return_value = {
+            'has_news': has_news, 'catalyst': has_news if has_news else None,
+            'headline': headline or '', 'reason': 'test',
+        }
 
     @patch('scanner.realtime_scanner.datetime')
     def test_qualifies_stock(self, mock_dt, scanner, mock_alpaca, mock_news, mock_db):
@@ -246,6 +252,7 @@ class TestRunIntradayCycle:
         }
         scanner._volume_profiles = {'MOMO': {'10:00': 10_000}}
         mock_news.has_interesting_news.return_value = (True, "Big news")
+        mock_news.classify_news.return_value = {'has_news': True, 'catalyst': True, 'headline': 'Big news', 'reason': 'test'}
 
         scanner._run_intraday_cycle()
 
@@ -442,12 +449,15 @@ class TestTradingEngineHandoff:
         }
         # News check returns True (qualifies)
         mock_news.has_interesting_news.return_value = (True, "Big catalyst news")
+        mock_news.classify_news.return_value = {'has_news': True, 'catalyst': True, 'headline': 'Big catalyst news', 'reason': 'test'}
         mock_db.save_scan_result.return_value = 1
 
         scanner._run_intraday_cycle()
 
         # Verify trading engine was notified
-        mock_engine.on_stock_qualified.assert_called_once_with('HOT')
+        mock_engine.on_stock_qualified.assert_called_once()
+        call_args = mock_engine.on_stock_qualified.call_args
+        assert call_args[0][0] == 'HOT'  # first positional arg is symbol
 
 
 # =============================================================================
@@ -829,6 +839,7 @@ class TestVolumeBucketFromBarTimestamp:
         # Profile has 10:00 bucket (matching bar) but NOT 10:15 (wall clock bucket)
         scanner._volume_profiles = {'MOMO': {'10:00': 10_000}}
         mock_news.has_interesting_news.return_value = (True, "Big news")
+        mock_news.classify_news.return_value = {'has_news': True, 'catalyst': True, 'headline': 'Big news', 'reason': 'test'}
 
         scanner._run_intraday_cycle()
 
@@ -870,8 +881,10 @@ class TestVolumeBucketFromBarTimestamp:
         # the profile and qualify, but with bar timestamp (10:00) it misses.
         scanner._volume_profiles = {'MOMO': {'10:15': 10_000}}
         mock_news.has_interesting_news.return_value = (True, "Big news")
+        mock_news.classify_news.return_value = {'has_news': True, 'catalyst': True, 'headline': 'Big news', 'reason': 'test'}
 
         scanner._run_intraday_cycle()
 
         # avg_vol = 0 for bucket 10:00, so relative_volume = 0 → not qualified
         mock_db.save_scan_result.assert_not_called()
+        mock_news.classify_news.return_value = {'has_news': True, 'catalyst': True, 'headline': 'Big news', 'reason': 'test'}

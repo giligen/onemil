@@ -283,6 +283,27 @@ class Database:
         except Exception as e:
             logger.warning(f"Migration 4 (partial exit columns) failed (non-fatal): {e}")
 
+        # Migration 5: Add news classification columns for catalyst analysis.
+        # Persists LLM classification with each trade for future backtesting
+        # of news-based filters (data collection — no filtering yet).
+        news_cols = {
+            'news_catalyst': 'INTEGER',       # 1=catalyst, 0=noise, NULL=unknown
+            'news_headline': 'TEXT',           # top headline at trade time
+            'news_reason': 'VARCHAR(100)',     # LLM's reason for classification
+        }
+        try:
+            columns = [row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()]
+            added = []
+            for col_name, col_type in news_cols.items():
+                if col_name not in columns:
+                    self.conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+                    added.append(col_name)
+            if added:
+                self.conn.commit()
+                logger.info(f"Migration 5: added news columns to trades: {added}")
+        except Exception as e:
+            logger.warning(f"Migration 5 (news columns) failed (non-fatal): {e}")
+
     # =========================================================================
     # Universe operations
     # =========================================================================
