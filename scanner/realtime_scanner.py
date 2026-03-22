@@ -458,15 +458,12 @@ class RealtimeScanner:
             news_reason = None
             if (relative_volume >= self.criteria.relative_volume_min and
                     intraday_change_pct >= self.criteria.intraday_change_pct_min):
-                # Use classify_news for full LLM classification (persisted with trades)
-                if hasattr(self.news, 'classify_news'):
-                    news_info = self.news.classify_news(symbol)
-                    has_news = news_info.get('has_news', False)
-                    headline = news_info.get('headline')
-                    news_catalyst = news_info.get('catalyst')
-                    news_reason = news_info.get('reason', '')
-                else:
-                    has_news, headline = self.news.has_interesting_news(symbol)
+                # Full LLM classification — persisted with trades for future analysis
+                news_info = self.news.classify_news(symbol)
+                has_news = news_info.get('has_news', False)
+                headline = news_info.get('headline')
+                news_catalyst = news_info.get('catalyst')
+                news_reason = news_info.get('reason', '')
                 if has_news:
                     news_count += 1
 

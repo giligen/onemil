@@ -370,6 +370,7 @@ class TradingEngine:
         """
         count = len(self._qualified_symbols)
         self._qualified_symbols.clear()
+        self._news_data.clear()
         if count > 0:
             logger.debug(f"Cleared {count} qualified symbols before fresh scan")
 
@@ -525,9 +526,15 @@ class TradingEngine:
                         'filled_at': datetime.now(timezone.utc),
                     }
                     # Persist news classification with trade for future analysis
+                    # 1=catalyst, 0=noise, NULL=no articles or unknown
                     news = pending.get('news_data')
                     if news:
-                        update['news_catalyst'] = 1 if news.get('news_catalyst') else 0
+                        cat = news.get('news_catalyst')
+                        if cat is True:
+                            update['news_catalyst'] = 1
+                        elif cat is False:
+                            update['news_catalyst'] = 0
+                        # else: None → don't set (stays NULL in DB)
                         update['news_headline'] = news.get('news_headline', '')
                         update['news_reason'] = news.get('news_reason', '')
                         logger.info(
