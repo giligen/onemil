@@ -159,6 +159,7 @@ class TradeSimulator:
         exhaustion_signals: Optional[Dict[str, bool]] = None,
         no_pop_exit_bars: int = 0,
         no_pop_exit_min_pct: float = 0.005,
+        trail_exit_slippage_pct: float = None,
     ):
         """
         Initialize TradeSimulator.
@@ -211,6 +212,8 @@ class TradeSimulator:
         # No-pop exit: force close if trade doesn't gain min_pct within N bars
         self.no_pop_exit_bars = no_pop_exit_bars  # 0 = disabled
         self.no_pop_exit_min_pct = no_pop_exit_min_pct  # 0.005 = 0.5%
+        # Trail exit slippage: separate from stop loss slippage (None = use same)
+        self.trail_exit_slippage_pct = trail_exit_slippage_pct
 
     # ------------------------------------------------------------------
     # Exhaustion signal detectors (delegated to shared module)
@@ -220,7 +223,7 @@ class TradeSimulator:
         """Check if any enabled exhaustion signal fires at bar idx."""
         return check_exhaustion(bars, idx, self.exhaustion_signals)
 
-    def _compute_stop_fill(self, stop_price: float) -> float:
+    def _compute_stop_fill(self, stop_price: float, slippage_override: float = None) -> float:
         """
         Compute stop-loss fill price with slippage, optionally capped by
         marketable limit offset (models self-managed stops).
@@ -230,11 +233,13 @@ class TradeSimulator:
 
         Args:
             stop_price: The stop-loss trigger price
+            slippage_override: If set, use this slippage pct instead of default
 
         Returns:
             Simulated fill price after slippage
         """
-        raw_slip = stop_price * self.exit_slippage_pct
+        slip_pct = slippage_override if slippage_override is not None else self.exit_slippage_pct
+        raw_slip = stop_price * slip_pct
 
         if self.marketable_limit_offset > 0 or self.marketable_limit_offset_pct > 0:
             fixed_cap = self.marketable_limit_offset
@@ -342,7 +347,9 @@ class TradeSimulator:
             if use_trail:
                 # With trailing stop: no fixed TP, trail replaces it
                 if hit_stop:
-                    stop_fill = self._compute_stop_fill(current_stop)
+                    # Use trail-specific slippage if set (reversals may have worse fills)
+                    slip = self.trail_exit_slippage_pct if (trailing_active and self.trail_exit_slippage_pct is not None) else None
+                    stop_fill = self._compute_stop_fill(current_stop, slippage_override=slip)
                     reason = 'trail_stop' if trailing_active else 'stop'
                     if exhaust_partial_taken:
                         reason = 'exhaust+' + reason
@@ -665,6 +672,7 @@ class BacktestRunner:
         exit_slippage: Optional[float] = None,
         trailing_stop_r: float = 0.0,
         trailing_activate_at_r: float = 0.0,
+        trail_exit_slippage_pct: float = None,
         min_stop_distance: float = 0.0,
         vol_dead_zone_enabled: bool = False,
         vol_dead_zone_min: float = 2.0,
@@ -819,6 +827,7 @@ class BacktestRunner:
                 exhaustion_signals=self.exhaustion_signals,
                 no_pop_exit_bars=no_pop_exit_bars,
                 no_pop_exit_min_pct=no_pop_exit_min_pct,
+                trail_exit_slippage_pct=trail_exit_slippage_pct,
             )
             if resolved_trail_r > 0:
                 logger.info(
@@ -843,6 +852,10 @@ class BacktestRunner:
         self.macd_strong_pos_threshold = float(macd_zones_cfg.get("strong_pos_threshold_pct", 0.5))
         self.macd_strong_pos_multiplier = float(macd_zones_cfg.get("strong_pos_multiplier", 1.5))
         self.macd_normal_multiplier = float(macd_zones_cfg.get("normal_multiplier", 1.0))
+        # Sweet spot zone: MACD% in [sweet_min, sweet_max] gets its own multiplier
+        self.macd_sweet_spot_min = float(macd_zones_cfg.get("sweet_spot_min_pct", 0.0))  # 0 = disabled
+        self.macd_sweet_spot_max = float(macd_zones_cfg.get("sweet_spot_max_pct", 0.0))
+        self.macd_sweet_spot_multiplier = float(macd_zones_cfg.get("sweet_spot_multiplier", 2.0))
         self._prev_day_bars: Optional[pd.DataFrame] = None
 
         if self.macd_zones_enabled:
@@ -908,6 +921,14 @@ class BacktestRunner:
             )
             return mult
         elif macd_pct > self.macd_strong_pos_threshold:
+            # Check sweet spot sub-zone first (higher priority)
+            if (self.macd_sweet_spot_min > 0 and
+                    self.macd_sweet_spot_min <= macd_pct <= self.macd_sweet_spot_max):
+                mult = self.macd_sweet_spot_multiplier
+                logger.debug(
+                    f"  MACD zone: {macd_pct:.2f}% → sweet spot → {mult}x risk"
+                )
+                return mult
             mult = self.macd_strong_pos_multiplier
             logger.debug(
                 f"  MACD zone: {macd_pct:.2f}% → strong pos → {mult}x risk"

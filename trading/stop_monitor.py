@@ -64,6 +64,13 @@ class WatchEntry:
     latest_bid_size: int = 0
     latest_ask_size: int = 0
     latest_quote_ts: float = 0.0
+    # OFI (Order Flow Imbalance) — rolling sum over last 20 quote ticks
+    # Negative = selling pressure, positive = buying pressure
+    ofi_cumulative: float = 0.0
+    _prev_bid: float = 0.0
+    _prev_ask: float = 0.0
+    _prev_bid_size: int = 0
+    _prev_ask_size: int = 0
 
 
 @dataclass
@@ -87,6 +94,7 @@ class StopExitEvent:
     exit_quote_bid_size: int = 0
     exit_quote_ask_size: int = 0
     exit_limit_price: float = 0.0  # limit price we submitted
+    exit_ofi: float = 0.0  # OFI at exit time (negative = selling pressure)
 
 
 class StopMonitor:
@@ -336,6 +344,7 @@ class StopMonitor:
                 'latest_bid_size': w.latest_bid_size,
                 'latest_ask_size': w.latest_ask_size,
                 'latest_quote_ts': w.latest_quote_ts,
+                'ofi_cumulative': w.ofi_cumulative,
             }
 
     def execute_partial_exit(
@@ -893,21 +902,56 @@ class StopMonitor:
 
     async def _on_quote(self, quote) -> None:
         """
-        WebSocket quote callback — update latest NBBO on WatchEntry.
+        WebSocket quote callback — update latest NBBO + compute OFI.
+
+        OFI (Order Flow Imbalance) measures net buying/selling pressure
+        from quote changes. Negative cumulative OFI = selling pressure
+        building (bid deteriorating faster than ask improving).
 
         Lightweight: no logging, no lock held during field writes.
-        Quotes fire 10-100x more frequently than trades.
         """
         symbol = quote.symbol
         with self._watch_lock:
             watch = self._watches.get(symbol)
         if watch is None:
             return
-        # Individual float/int writes are atomic under GIL
-        watch.latest_bid = float(quote.bid_price)
-        watch.latest_ask = float(quote.ask_price)
-        watch.latest_bid_size = int(quote.bid_size)
-        watch.latest_ask_size = int(quote.ask_size)
+
+        bid = float(quote.bid_price)
+        ask = float(quote.ask_price)
+        bid_size = int(quote.bid_size)
+        ask_size = int(quote.ask_size)
+
+        # Compute OFI tick from quote change
+        if watch._prev_bid > 0:
+            # Bid side: price up = buying pressure, down = selling
+            if bid > watch._prev_bid:
+                delta_bid = bid_size
+            elif bid < watch._prev_bid:
+                delta_bid = -bid_size
+            else:
+                delta_bid = bid_size - watch._prev_bid_size
+
+            # Ask side: price down = buying pressure, up = selling
+            if ask < watch._prev_ask:
+                delta_ask = ask_size
+            elif ask > watch._prev_ask:
+                delta_ask = -ask_size
+            else:
+                delta_ask = ask_size - watch._prev_ask_size
+
+            ofi_tick = delta_bid - delta_ask
+            # Exponential moving average (decay=0.95 ≈ 20-tick window)
+            watch.ofi_cumulative = watch.ofi_cumulative * 0.95 + ofi_tick
+
+        # Update quote cache
+        watch._prev_bid = watch.latest_bid
+        watch._prev_ask = watch.latest_ask
+        watch._prev_bid_size = watch.latest_bid_size
+        watch._prev_ask_size = watch.latest_ask_size
+        watch.latest_bid = bid
+        watch.latest_ask = ask
+        watch.latest_bid_size = bid_size
+        watch.latest_ask_size = ask_size
         watch.latest_quote_ts = time_mod.time()
 
     async def _on_trade(self, trade) -> None:
@@ -1130,6 +1174,7 @@ class StopMonitor:
                 exit_quote_bid_size=bid_size,
                 exit_quote_ask_size=ask_size,
                 exit_limit_price=limit_price,
+                exit_ofi=watch.ofi_cumulative,
             )
             self._exit_events.put(event)
 

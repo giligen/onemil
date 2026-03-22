@@ -318,6 +318,7 @@ class Database:
             'exit_submitted_at': 'TIMESTAMP',
             'exit_fill_latency_ms': 'REAL',
             'exit_slippage': 'REAL',
+            'exit_ofi': 'REAL',
         }
         try:
             columns = [row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()]

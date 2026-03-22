@@ -1133,6 +1133,7 @@ class TradingEngine:
                     'exit_submitted_at': exit_submitted,
                     'exit_fill_latency_ms': exit_latency,
                     'exit_slippage': exit_slippage,
+                    'exit_ofi': event.exit_ofi if hasattr(event, 'exit_ofi') and event.exit_ofi != 0 else None,
                 })
                 self.position_manager.record_trade_pnl(pnl)
                 logger.info(
