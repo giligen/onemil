@@ -91,17 +91,17 @@ def _make_pattern(symbol="TEST"):
 
 
 def _make_plan(symbol="TEST"):
-    """Create a TradePlan."""
+    """Create a TradePlan with stop distance > min_stop_distance ($0.12)."""
     return TradePlan(
         symbol=symbol,
         entry_price=4.40,
-        stop_loss_price=4.29,
+        stop_loss_price=4.25,
         take_profit_price=4.90,
-        risk_per_share=0.11,
+        risk_per_share=0.15,
         reward_per_share=0.50,
-        risk_reward_ratio=4.5,
+        risk_reward_ratio=3.3,
         shares=113,
-        total_risk=12.43,
+        total_risk=16.95,
         pattern=_make_pattern(symbol),
     )
 
@@ -510,12 +510,12 @@ class TestGapFillStopAdjustment:
             'symbol': 'GAP',
             'side': 'buy',
             'entry_price': breakout_level,
-            'stop_loss_price': 4.29,
+            'stop_loss_price': 4.25,
             'take_profit_price': 4.90,
             'shares': 100,
-            'risk_per_share': 0.11,
-            'total_risk': 11.0,
-            'risk_reward_ratio': 4.5,
+            'risk_per_share': 0.15,
+            'total_risk': 16.95,
+            'risk_reward_ratio': 3.3,
             'order_id': 'order-gap',
             'order_status': 'accepted',
             'fill_price': None,
@@ -555,7 +555,7 @@ class TestGapFillStopAdjustment:
             # Second get_order call (for gap-fill) returns legs
             {
                 'legs': [
-                    {'id': 'sl-leg-1', 'side': 'sell', 'stop_price': 4.29,
+                    {'id': 'sl-leg-1', 'side': 'sell', 'stop_price': 4.25,
                      'limit_price': None, 'status': 'new'},
                     {'id': 'tp-leg-1', 'side': 'sell', 'stop_price': None,
                      'limit_price': 4.90, 'status': 'new'},
@@ -623,7 +623,7 @@ class TestGapFillStopAdjustment:
             {'status': 'filled', 'filled_avg_price': 4.55, 'legs': []},
             {
                 'legs': [
-                    {'id': 'sl-leg-1', 'side': 'sell', 'stop_price': 4.29,
+                    {'id': 'sl-leg-1', 'side': 'sell', 'stop_price': 4.25,
                      'limit_price': None, 'status': 'new'},
                 ],
             },

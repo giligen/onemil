@@ -146,6 +146,7 @@ def _create_trading_engine(config, alpaca, db, notifier=None) -> TradingEngine:
     """Create the trading engine with all components wired up."""
     from trading.market_regime import MarketRegimeFilter
 
+    _regime_cfg = config._load_yaml_only().get("trading", {}).get("market_regime", {})
     market_regime = MarketRegimeFilter(
         enabled=config.market_regime_enabled,
         vol_threshold=config.market_regime_vol_threshold,
@@ -153,6 +154,10 @@ def _create_trading_engine(config, alpaca, db, notifier=None) -> TradingEngine:
         max_trades_per_day=config.max_trades_per_day,
         min_spy_volume_ratio=config.market_regime_min_spy_volume_ratio,
         thin_liquidity_breakout_vol_ratio=config.market_regime_thin_liquidity_breakout_vol_ratio,
+        sma_slope_filter=bool(_regime_cfg.get("sma_slope_filter", False)),
+        euphoria_filter=bool(_regime_cfg.get("euphoria_filter", False)),
+        euphoria_ud_threshold=float(_regime_cfg.get("euphoria_ud_threshold", 1.2)),
+        euphoria_rsi_threshold=float(_regime_cfg.get("euphoria_rsi_threshold", 60.0)),
     )
 
     detector = BullFlagDetector(

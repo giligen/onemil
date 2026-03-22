@@ -45,6 +45,10 @@ class MarketRegimeFilter:
         max_trades_per_day: int = 5,
         min_spy_volume_ratio: float = 0.70,
         thin_liquidity_breakout_vol_ratio: float = 2.0,
+        sma_slope_filter: bool = False,
+        euphoria_filter: bool = False,
+        euphoria_ud_threshold: float = 1.2,
+        euphoria_rsi_threshold: float = 60.0,
     ):
         """
         Initialize MarketRegimeFilter.
@@ -60,6 +64,14 @@ class MarketRegimeFilter:
                 is raised to thin_liquidity_breakout_vol_ratio.
             thin_liquidity_breakout_vol_ratio: Minimum breakout volume ratio
                 required on thin liquidity days (default 2.0).
+            sma_slope_filter: Also block when SMA50 slope < 0 (dead-cat-bounce
+                filter). Catches periods where price is above SMA50 but the
+                moving average itself is still declining.
+            euphoria_filter: Block when SPY up/down volume ratio > threshold
+                AND RSI > threshold. Bullish euphoria crowds breakout trades —
+                FOMO buyers dump, stops get tagged. Uses T-1 data (no look-ahead).
+            euphoria_ud_threshold: Up/Down volume ratio threshold (10-day window).
+            euphoria_rsi_threshold: RSI(14) threshold.
         """
         self.enabled = enabled
         self.vol_threshold = vol_threshold
@@ -67,6 +79,10 @@ class MarketRegimeFilter:
         self.max_trades_per_day = max_trades_per_day
         self.min_spy_volume_ratio = min_spy_volume_ratio
         self.thin_liquidity_breakout_vol_ratio = thin_liquidity_breakout_vol_ratio
+        self.sma_slope_filter = sma_slope_filter
+        self.euphoria_filter = euphoria_filter
+        self.euphoria_ud_threshold = euphoria_ud_threshold
+        self.euphoria_rsi_threshold = euphoria_rsi_threshold
         self._bars_by_date: Dict[date, Dict[str, float]] = {}  # date -> {open, high, low, close, volume}
         self._sorted_dates: List[date] = []
 
@@ -179,6 +195,145 @@ class MarketRegimeFilter:
 
         t1_close = self._bars_by_date[prior_dates[-1]]['close']
         return t1_close < sma
+
+    def get_spy_sma_slope(self, trade_date: date, lookback: int = 5) -> Optional[float]:
+        """
+        5-day change in SMA50 value — detects dead-cat-bounce conditions.
+
+        When SMA50 is declining, price crossing above it is a trap, not
+        a real recovery. Momentum breakouts fail in this regime.
+
+        Uses data strictly before trade_date (no look-ahead).
+
+        Args:
+            trade_date: The date to check.
+            lookback: Number of days to measure SMA change over.
+
+        Returns:
+            SMA50 slope (change over lookback days), or None if insufficient data.
+        """
+        sma_today = self.get_spy_sma(trade_date)
+        if sma_today is None:
+            return None
+
+        # Get SMA from `lookback` trading days earlier
+        prior_dates = self._get_prior_dates(trade_date)
+        if len(prior_dates) < lookback:
+            return None
+
+        # Find the date `lookback` days before the last prior date
+        earlier_date_idx = len(prior_dates) - lookback
+        if earlier_date_idx < self.sma_period:
+            return None
+
+        # Compute SMA at that earlier point
+        earlier_dates = prior_dates[:earlier_date_idx + 1]
+        if len(earlier_dates) < self.sma_period:
+            return None
+        recent = earlier_dates[-self.sma_period:]
+        sma_earlier = sum(self._bars_by_date[d]['close'] for d in recent) / self.sma_period
+
+        return sma_today - sma_earlier
+
+    def is_sma_slope_negative(self, trade_date: date, lookback: int = 5) -> Optional[bool]:
+        """
+        Check if SMA50 slope is negative (declining trend).
+
+        Args:
+            trade_date: The date to check.
+            lookback: Number of days to measure slope over.
+
+        Returns:
+            True if slope < 0, False if >= 0, None if insufficient data.
+        """
+        slope = self.get_spy_sma_slope(trade_date, lookback)
+        if slope is None:
+            return None
+        return slope < 0
+
+    def get_spy_rsi(self, trade_date: date, period: int = 14) -> Optional[float]:
+        """
+        RSI(14) of SPY closes using data strictly before trade_date.
+
+        Args:
+            trade_date: The date to check.
+            period: RSI lookback period.
+
+        Returns:
+            RSI value (0-100), or None if insufficient data.
+        """
+        prior_dates = self._get_prior_dates(trade_date)
+        if len(prior_dates) < period + 1:
+            return None
+
+        closes = [self._bars_by_date[d]['close'] for d in prior_dates[-(period + 1):]]
+        deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+        gains = [max(d, 0) for d in deltas]
+        losses = [max(-d, 0) for d in deltas]
+        avg_gain = sum(gains) / period
+        avg_loss = sum(losses) / period
+        if avg_loss == 0:
+            return 100.0
+        rs = avg_gain / avg_loss
+        return 100.0 - (100.0 / (1.0 + rs))
+
+    def get_spy_ud_volume_ratio(self, trade_date: date, window: int = 10) -> Optional[float]:
+        """
+        Up/Down volume ratio over window days before trade_date.
+
+        Up volume = volume on days where close > prev_close.
+        Down volume = volume on days where close <= prev_close.
+        Ratio > 1.0 = bullish volume dominance (euphoria risk).
+
+        Args:
+            trade_date: The date to check.
+            window: Number of trading days to look back.
+
+        Returns:
+            UD ratio, or None if insufficient data.
+        """
+        prior_dates = self._get_prior_dates(trade_date)
+        if len(prior_dates) < window + 1:
+            return None
+
+        dates = prior_dates[-(window + 1):]
+        up_vol = 0
+        down_vol = 0
+        for i in range(1, len(dates)):
+            bar = self._bars_by_date[dates[i]]
+            prev_bar = self._bars_by_date[dates[i - 1]]
+            vol = bar.get('volume', 0) or 0
+            if bar['close'] > prev_bar['close']:
+                up_vol += vol
+            else:
+                down_vol += vol
+        if down_vol == 0:
+            return 10.0  # effectively infinite
+        return up_vol / down_vol
+
+    def is_euphoria(self, trade_date: date) -> bool:
+        """
+        Check if market is in bullish euphoria — up/down volume ratio AND
+        RSI both elevated. When both are high, momentum breakouts get
+        crowded and fail (FOMO chasers dump).
+
+        Uses T-1 data only (no look-ahead).
+
+        Returns:
+            True if euphoria detected, False otherwise.
+        """
+        if not self.euphoria_filter:
+            return False
+
+        rsi = self.get_spy_rsi(trade_date)
+        if rsi is None:
+            return False
+
+        ud = self.get_spy_ud_volume_ratio(trade_date)
+        if ud is None:
+            return False
+
+        return ud > self.euphoria_ud_threshold and rsi > self.euphoria_rsi_threshold
 
     def get_spy_volume_ratio(self, trade_date: date) -> Optional[float]:
         """
@@ -304,6 +459,16 @@ class MarketRegimeFilter:
 
         # Block only when BOTH: high vol AND downtrend
         if vol > self.vol_threshold and below:
+            return False
+
+        # SMA slope filter: block when SMA50 is declining (dead-cat-bounce)
+        if self.sma_slope_filter:
+            slope_neg = self.is_sma_slope_negative(trade_date)
+            if slope_neg is True:
+                return False
+
+        # Euphoria filter: block when UD volume ratio AND RSI both elevated
+        if self.is_euphoria(trade_date):
             return False
 
         return True

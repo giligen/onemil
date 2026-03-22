@@ -109,6 +109,7 @@ class TradingEngine:
         from config import Config
         _cfg = Config._load_yaml_only()
         self.skip_fridays = bool(_cfg.get("trading", {}).get("skip_fridays", False))
+        self.min_stop_distance = float(_cfg.get("trading", {}).get("min_stop_distance", 0.0))
         trail_cfg = _cfg.get("trading", {}).get("trailing_stop", {})
         self.trailing_stop_enabled = bool(trail_cfg.get("enabled", False))
         self.trailing_stop_r = float(trail_cfg.get("trail_r", 1.0))
@@ -1518,6 +1519,16 @@ class TradingEngine:
         plan = self.planner.create_plan(setup)
         if plan is None:
             return None
+
+        # Min stop distance filter: reject tick-noise setups
+        if self.min_stop_distance > 0:
+            stop_dist = plan.entry_price - plan.stop_loss_price
+            if stop_dist < self.min_stop_distance:
+                logger.info(
+                    f"{symbol}: SKIP — stop dist ${stop_dist:.2f} "
+                    f"< min ${self.min_stop_distance:.2f} (tick noise)"
+                )
+                return None
 
         # Notify trade planned (only if new setup)
         if not already_notified and self.notifier:

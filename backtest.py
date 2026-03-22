@@ -157,6 +157,8 @@ class TradeSimulator:
         exhaustion_tighter_trail_r: float = 0.5,
         exhaustion_min_profit_r: float = 3.0,
         exhaustion_signals: Optional[Dict[str, bool]] = None,
+        no_pop_exit_bars: int = 0,
+        no_pop_exit_min_pct: float = 0.005,
     ):
         """
         Initialize TradeSimulator.
@@ -206,6 +208,9 @@ class TradeSimulator:
             'shrinking_bodies': False,
             'shooting_star': True,
         }
+        # No-pop exit: force close if trade doesn't gain min_pct within N bars
+        self.no_pop_exit_bars = no_pop_exit_bars  # 0 = disabled
+        self.no_pop_exit_min_pct = no_pop_exit_min_pct  # 0.005 = 0.5%
 
     # ------------------------------------------------------------------
     # Exhaustion signal detectors (delegated to shared module)
@@ -316,6 +321,21 @@ class TradeSimulator:
             # Update highest high for trailing stop
             if use_trail and bar_high > highest_since_entry:
                 highest_since_entry = bar_high
+
+            # No-pop exit: if trade hasn't gained min_pct within N bars, force close
+            if self.no_pop_exit_bars > 0 and (i - entry_bar_idx) == self.no_pop_exit_bars:
+                max_move_pct = (highest_since_entry - actual_entry) / actual_entry
+                if max_move_pct < self.no_pop_exit_min_pct:
+                    reason = 'no_pop'
+                    if exhaust_partial_taken:
+                        reason = 'exhaust+no_pop'
+                    self._exit_trade(trade, bar, reason, bar['close'],
+                                     active_shares=active_shares if exhaust_partial_taken else None)
+                    logger.debug(
+                        f"  Bar {i}: NO-POP exit after {self.no_pop_exit_bars} bars — "
+                        f"max +{max_move_pct:.2%} < {self.no_pop_exit_min_pct:.1%}"
+                    )
+                    return trade
 
             hit_stop = bar_low <= current_stop
 
@@ -645,6 +665,12 @@ class BacktestRunner:
         exit_slippage: Optional[float] = None,
         trailing_stop_r: float = 0.0,
         trailing_activate_at_r: float = 0.0,
+        min_stop_distance: float = 0.0,
+        vol_dead_zone_enabled: bool = False,
+        vol_dead_zone_min: float = 2.0,
+        vol_dead_zone_max: float = 5.0,
+        no_pop_exit_bars: int = 0,
+        no_pop_exit_min_pct: float = 0.005,
     ):
         """
         Initialize BacktestRunner.
@@ -677,6 +703,10 @@ class BacktestRunner:
         self.planner = planner or TradePlanner.from_config()
         self.min_price = min_price if min_price is not None else self.DEFAULT_MIN_PRICE
         self.skip_midday = skip_midday if skip_midday is not None else self.DEFAULT_SKIP_MIDDAY
+        self.min_stop_distance = min_stop_distance
+        self.vol_dead_zone_enabled = vol_dead_zone_enabled
+        self.vol_dead_zone_min = vol_dead_zone_min
+        self.vol_dead_zone_max = vol_dead_zone_max
 
         # Cumulative rvol check at entry time (Ross's 5x filter)
         # Loaded from config.yaml scanner.relative_volume_min
@@ -787,6 +817,8 @@ class BacktestRunner:
                 exhaustion_tighter_trail_r=float(exhaust_cfg.get("tighter_trail_r", 0.5)),
                 exhaustion_min_profit_r=float(exhaust_cfg.get("min_profit_r", 3.0)),
                 exhaustion_signals=self.exhaustion_signals,
+                no_pop_exit_bars=no_pop_exit_bars,
+                no_pop_exit_min_pct=no_pop_exit_min_pct,
             )
             if resolved_trail_r > 0:
                 logger.info(
@@ -1246,6 +1278,21 @@ class BacktestRunner:
                                 pending_order = None
                                 continue
 
+                    # Vol dead zone filter: reject breakouts with volume ratio in 2-5x range
+                    if self.vol_dead_zone_enabled:
+                        breakout_vol = bar['volume']
+                        avg_flag_vol = pending_order.setup.avg_flag_volume
+                        if avg_flag_vol > 0:
+                            bvr_check = breakout_vol / avg_flag_vol
+                            if self.vol_dead_zone_min <= bvr_check <= self.vol_dead_zone_max:
+                                logger.debug(
+                                    f"  Bar {i}: breakout REJECTED (vol dead zone) — "
+                                    f"volume ratio {bvr_check:.1f}x in "
+                                    f"{self.vol_dead_zone_min:.0f}-{self.vol_dead_zone_max:.0f}x range"
+                                )
+                                pending_order = None
+                                continue
+
                     # Fill at max(bar_open, breakout_level) * (1 + entry_slippage_pct)
                     raw_fill = max(bar_open, pending_order.breakout_level)
                     fill_price = raw_fill * (1 + self.entry_slippage_pct)
@@ -1362,6 +1409,15 @@ class BacktestRunner:
                 plan = self.planner.create_plan(setup)
                 if plan is None:
                     logger.debug(f"  Plan rejected at bar {i}")
+                    continue
+
+                # Min stop distance filter (reject tick-noise setups)
+                stop_dist = plan.entry_price - plan.stop_loss_price
+                if self.min_stop_distance > 0 and stop_dist < self.min_stop_distance:
+                    logger.debug(
+                        f"  Skipping — stop dist ${stop_dist:.2f} "
+                        f"< min ${self.min_stop_distance:.2f}"
+                    )
                     continue
 
                 # Price filter
