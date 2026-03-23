@@ -155,6 +155,7 @@ def _create_trading_engine(config, alpaca, db, notifier=None) -> TradingEngine:
         min_spy_volume_ratio=config.market_regime_min_spy_volume_ratio,
         thin_liquidity_breakout_vol_ratio=config.market_regime_thin_liquidity_breakout_vol_ratio,
         sma_slope_filter=bool(_regime_cfg.get("sma_slope_filter", False)),
+        sma_slope_threshold=float(_regime_cfg.get("sma_slope_threshold", -0.5)),
         euphoria_filter=bool(_regime_cfg.get("euphoria_filter", False)),
         euphoria_ud_threshold=float(_regime_cfg.get("euphoria_ud_threshold", 1.2)),
         euphoria_rsi_threshold=float(_regime_cfg.get("euphoria_rsi_threshold", 60.0)),

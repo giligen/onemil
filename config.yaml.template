@@ -94,7 +94,8 @@ trading:
     sma_period: 50             # SPY below SMA(50) — downtrend signal
     min_spy_volume_ratio: 0.70 # SPY T-1 volume / SMA20 — thin liquidity threshold
     thin_liquidity_breakout_vol_ratio: 2.0  # Stricter breakout vol ratio on thin days
-    sma_slope_filter: true             # Block when SMA50 is declining (dead-cat-bounce filter)
+    sma_slope_filter: true             # Block when SMA50 slope < threshold (dead-cat-bounce filter)
+    sma_slope_threshold: -0.5          # SMA50 5-day change threshold (0=any decline, -0.5=steep only)
     euphoria_filter: true              # Block when SPY UD vol ratio >1.2 AND RSI >60 (crowded breakouts)
     euphoria_ud_threshold: 1.2         # Up/Down volume ratio threshold (10-day window)
     euphoria_rsi_threshold: 60.0       # RSI(14) threshold

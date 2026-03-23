@@ -103,17 +103,16 @@ Falls back to fixed offset (`max($0.03, price × 0.5%)`) if quote fetch fails. 3
 
 ### Minimum Stop Distance Filter
 
-Rejects setups where the stop distance (entry - stop_loss) is less than $0.09. These are penny-wide stops on low-priced stocks where the breakout barely triggers the buy-stop then immediately reverses — the stop is within tick noise, not at a meaningful technical level.
-
-15-month impact: removes ~200 tick-noise trades that were net losers, breaking consecutive loss streaks that drove max drawdown.
+Rejects setups where the stop distance (entry - stop_loss) is less than $0.12. These are penny-wide stops on low-priced stocks where the breakout barely triggers the buy-stop then immediately reverses — the stop is within tick noise, not at a meaningful technical level.
 
 ### Market Regime Filter
 
-Blocks or tightens entries when SPY indicates a hostile regime. Three independent signals:
+Blocks or tightens entries when SPY indicates a hostile regime. Four independent signals:
 
 1. **High volatility + downtrend**: SPY 5-day avg daily range > 1.5% AND close below SMA(50) → **blocks all entries**
-2. **Declining SMA50 (dead-cat-bounce filter)**: SPY SMA(50) 5-day slope < 0 → **blocks all entries**. Even when price crosses above a falling SMA50, momentum breakouts fail because the underlying macro trend is still weakening. This filter eliminated the 3-month drawdown grind (Feb-May 2025) that the vol+trend filter missed.
-3. **Thin liquidity (H5 OR filter)**: SPY T-1 volume / SMA20(volume) < 0.70 → **tightens breakout volume requirement** from 1.5x to 2.0x.
+2. **Declining SMA50 (dead-cat-bounce filter)**: SPY SMA(50) 5-day slope < -0.5 → **blocks all entries**. Even when price crosses above a falling SMA50, momentum breakouts fail because the underlying macro trend is still weakening. Threshold -0.5 balances DD reduction (-$20.9K best) with trade opportunity.
+3. **Euphoria filter**: SPY up/down volume ratio > 1.2 AND RSI(14) > 60 → **blocks all entries**. When broad market has bullish volume dominance + overbought RSI, momentum breakouts get crowded — FOMO buyers dump, stops get tagged. Root cause of the 12-loss consecutive streak.
+4. **Thin liquidity (H5 OR filter)**: SPY T-1 volume / SMA20(volume) < 0.70 → **tightens breakout volume requirement** from 1.5x to 2.0x.
 
 **Lookahead prevention**: All indicators use data strictly *before* trade date. SMA50 slope uses yesterday's value (known before market open). Live system uses `date.today()` at 9:30 AM, so T-1 = yesterday's settled close.
 
@@ -153,16 +152,16 @@ Current production config with all filters active: 0.3% exit slippage, trailing 
 
 | Metric | Value |
 |--------|-------|
-| **Trades** | 399 |
-| **Win Rate** | 42.4% |
-| **Total P&L** | **$288,742** |
-| **Avg Win** | $5,092 |
-| **Avg Loss** | -$2,486 |
-| **W/L Ratio** | 2.05 |
-| **Profit Factor** | 1.50 |
-| **Sharpe (annualized)** | 2.86 |
-| **Max Drawdown** | -$26,347 |
-| **Losing Months** | 1 (May 2025: -$2,028) |
+| **Trades** | 253 |
+| **Win Rate** | 43.9% |
+| **Total P&L** | **$198,494** |
+| **Avg Win** | $5,200 |
+| **Avg Loss** | -$2,650 |
+| **W/L Ratio** | 1.96 |
+| **Profit Factor** | 1.53 |
+| **Sharpe (annualized)** | 3.69 |
+| **Max Drawdown** | -$20,932 |
+| **Losing Months** | 2 |
 
 Saved as `backtest_baseline_aligned.csv`.
 

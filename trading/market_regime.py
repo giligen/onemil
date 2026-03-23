@@ -46,6 +46,7 @@ class MarketRegimeFilter:
         min_spy_volume_ratio: float = 0.70,
         thin_liquidity_breakout_vol_ratio: float = 2.0,
         sma_slope_filter: bool = False,
+        sma_slope_threshold: float = -0.5,
         euphoria_filter: bool = False,
         euphoria_ud_threshold: float = 1.2,
         euphoria_rsi_threshold: float = 60.0,
@@ -80,6 +81,7 @@ class MarketRegimeFilter:
         self.min_spy_volume_ratio = min_spy_volume_ratio
         self.thin_liquidity_breakout_vol_ratio = thin_liquidity_breakout_vol_ratio
         self.sma_slope_filter = sma_slope_filter
+        self.sma_slope_threshold = sma_slope_threshold
         self.euphoria_filter = euphoria_filter
         self.euphoria_ud_threshold = euphoria_ud_threshold
         self.euphoria_rsi_threshold = euphoria_rsi_threshold
@@ -237,19 +239,19 @@ class MarketRegimeFilter:
 
     def is_sma_slope_negative(self, trade_date: date, lookback: int = 5) -> Optional[bool]:
         """
-        Check if SMA50 slope is negative (declining trend).
+        Check if SMA50 slope is below threshold (declining trend).
 
         Args:
             trade_date: The date to check.
             lookback: Number of days to measure slope over.
 
         Returns:
-            True if slope < 0, False if >= 0, None if insufficient data.
+            True if slope < threshold, False otherwise, None if insufficient data.
         """
         slope = self.get_spy_sma_slope(trade_date, lookback)
         if slope is None:
             return None
-        return slope < 0
+        return slope < self.sma_slope_threshold
 
     def get_spy_rsi(self, trade_date: date, period: int = 14) -> Optional[float]:
         """
