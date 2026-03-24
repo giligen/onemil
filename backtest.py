@@ -1495,7 +1495,7 @@ class BacktestRunner:
                     if zone_mult == 0.0:
                         continue  # dead zone — don't place order
                     elif zone_mult != 1.0:
-                        scaled_shares = max(1, int(plan.shares * zone_mult))
+                        scaled_shares = min(self.planner.max_shares, max(1, int(plan.shares * zone_mult)))
                         plan = TradePlan(
                             symbol=plan.symbol,
                             entry_price=plan.entry_price,
