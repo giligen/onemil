@@ -357,6 +357,12 @@ def run_batch_backtest(
     _cfg = Config._load_yaml_only()
     skip_fridays = bool(_cfg.get("trading", {}).get("skip_fridays", False))
 
+    # UD risk scaling config
+    _ud_cfg = _cfg.get("trading", {}).get("ud_risk_scaling", {})
+    ud_scaling_enabled = bool(_ud_cfg.get("enabled", False))
+    ud_threshold = float(_ud_cfg.get("ud_threshold", 1.2))
+    ud_scale_factor = float(_ud_cfg.get("scale_factor", 0.5))
+
     # Resolve max_trades_per_day: explicit param > regime attr > 0 (disabled)
     effective_max_trades = max_trades_per_day
     if effective_max_trades <= 0 and market_regime:
@@ -425,6 +431,16 @@ def run_batch_backtest(
             )
         else:
             runner._min_breakout_vol_override = 0  # disabled on normal days
+
+        # --- UD risk scaling ---
+        if ud_scaling_enabled and market_regime:
+            ud = market_regime.get_spy_ud_volume_ratio(trade_date)
+            if ud is not None and isinstance(ud, (int, float)) and ud > ud_threshold:
+                runner._ud_risk_scale = ud_scale_factor
+            else:
+                runner._ud_risk_scale = 0.0
+        else:
+            runner._ud_risk_scale = 0.0
 
         # --- Consecutive loss tracking (reset per date) ---
         consec_losses = 0
@@ -914,6 +930,12 @@ def run_batch_backtest_fast(
     _cfg = Config._load_yaml_only()
     skip_fridays = bool(_cfg.get("trading", {}).get("skip_fridays", False))
 
+    # UD risk scaling config
+    ud_cfg = _cfg.get("trading", {}).get("ud_risk_scaling", {})
+    ud_scaling_enabled = bool(ud_cfg.get("enabled", False))
+    ud_threshold = float(ud_cfg.get("ud_threshold", 1.2))
+    ud_scale_factor = float(ud_cfg.get("scale_factor", 0.5))
+
     # Suppress verbose logging for speed — saves ~2-3x
     suppressed_loggers = [
         'trading.pattern_detector', 'backtest', 'trading.trade_planner',
@@ -1108,6 +1130,16 @@ def run_batch_backtest_fast(
                 )
             else:
                 runner._min_breakout_vol_override = 0
+
+            # UD risk scaling: reduce size on euphoric SPY days
+            if ud_scaling_enabled and market_regime:
+                ud = market_regime.get_spy_ud_volume_ratio(trade_date)
+                if ud is not None and isinstance(ud, (int, float)) and ud > ud_threshold:
+                    runner._ud_risk_scale = ud_scale_factor
+                else:
+                    runner._ud_risk_scale = 0.0
+            else:
+                runner._ud_risk_scale = 0.0
 
             # SPY MACD afternoon cutoff for this date
             if spy_cutoff_enabled and trade_date in all_spy_1min:

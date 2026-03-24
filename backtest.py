@@ -715,6 +715,8 @@ class BacktestRunner:
         self.vol_dead_zone_enabled = vol_dead_zone_enabled
         self.vol_dead_zone_min = vol_dead_zone_min
         self.vol_dead_zone_max = vol_dead_zone_max
+        # UD risk scaling: set per-date by batch_backtest (0 = disabled)
+        self._ud_risk_scale = 0.0  # 0 = don't scale, >0 = multiply shares by this
 
         # Cumulative rvol check at entry time (Ross's 5x filter)
         # Loaded from config.yaml scanner.relative_volume_min
@@ -1506,6 +1508,27 @@ class BacktestRunner:
                             risk_reward_ratio=plan.risk_reward_ratio,
                             shares=scaled_shares,
                             total_risk=plan.risk_per_share * scaled_shares,
+                            pattern=plan.pattern,
+                        )
+
+                # UD risk scaling: reduce size on euphoric SPY days
+                if self._ud_risk_scale > 0 and self._ud_risk_scale != 1.0:
+                    ud_shares = min(self.planner.max_shares, max(1, int(plan.shares * self._ud_risk_scale)))
+                    if ud_shares != plan.shares:
+                        logger.debug(
+                            f"  UD scaling {self._ud_risk_scale}x → "
+                            f"shares {plan.shares} → {ud_shares}"
+                        )
+                        plan = TradePlan(
+                            symbol=plan.symbol,
+                            entry_price=plan.entry_price,
+                            stop_loss_price=plan.stop_loss_price,
+                            take_profit_price=plan.take_profit_price,
+                            risk_per_share=plan.risk_per_share,
+                            reward_per_share=plan.reward_per_share,
+                            risk_reward_ratio=plan.risk_reward_ratio,
+                            shares=ud_shares,
+                            total_risk=plan.risk_per_share * ud_shares,
                             pattern=plan.pattern,
                         )
 
