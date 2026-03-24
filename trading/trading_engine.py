@@ -638,6 +638,18 @@ class TradingEngine:
 
                 # Register with StopMonitor for real-time stop watching
                 if self.stop_monitor and pending.get('real_stop_level'):
+                    if not self.stop_monitor._running:
+                        logger.error(
+                            f"{symbol}: StopMonitor NOT RUNNING! "
+                            f"Call stop_monitor.start() before trading. "
+                            f"Position has NO real-time stop protection."
+                        )
+                        if self.notifier:
+                            self.notifier.notify_error(
+                                f"{symbol}: CRITICAL — StopMonitor not started! "
+                                f"Position unprotected. Only safety-net SL active.",
+                                component="StopMonitor",
+                            )
                     real_stop = pending['real_stop_level']
                     try:
                         order_detail = self.alpaca.get_order(order_id)

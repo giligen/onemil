@@ -203,8 +203,9 @@ def _create_trading_engine(config, alpaca, db, notifier=None) -> TradingEngine:
             marketable_limit_offset_pct=config.marketable_limit_offset_pct,
             notifier=notifier,
         )
+        stop_monitor.start()
         logger.info(
-            f"StopMonitor created — safety_net={config.safety_net_sl_pct:.0%}, "
+            f"StopMonitor STARTED — safety_net={config.safety_net_sl_pct:.0%}, "
             f"offset=${config.marketable_limit_offset}, "
             f"offset_pct={config.marketable_limit_offset_pct:.1%}"
         )
