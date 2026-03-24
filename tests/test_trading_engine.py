@@ -326,7 +326,7 @@ class TestNotifierIntegration:
     @patch.object(TradingEngine, '_is_past_last_entry_time', return_value=False)
     def test_pattern_detected_notifies(self, _mock_time, mock_alpaca, db, mock_detector,
                                         mock_planner, mock_executor, mock_position_manager):
-        """Pattern detection triggers notifier.notify_pattern_detected."""
+        """Notifications only fire when all filters pass and order will be placed."""
         mock_notifier = MagicMock(spec=TelegramNotifier)
         engine = TradingEngine(
             alpaca_client=mock_alpaca, db=db,
@@ -338,12 +338,17 @@ class TestNotifierIntegration:
                             'close': [4.05], 'volume': [100000]})
         mock_alpaca.get_1min_bars.return_value = bars
         mock_detector.detect_setup.return_value = _make_pattern("AAPL")
-        mock_planner.create_plan.return_value = None  # Plan rejected
+        mock_planner.create_plan.return_value = _make_plan("AAPL")
+        mock_position_manager.can_open_position.return_value = True
+        mock_executor.submit_buy_stop_bracket_order.return_value = {
+            'order_id': 'ord-1', 'status': 'accepted', 'symbol': 'AAPL', 'shares': 113,
+        }
 
         engine.on_stock_qualified("AAPL")
         engine.run_pattern_check()
 
         mock_notifier.notify_pattern_detected.assert_called_once()
+        mock_notifier.notify_trade_planned.assert_called_once()
 
     @patch.object(TradingEngine, '_is_past_last_entry_time', return_value=False)
     def test_trade_executed_notifies_order(self, _mock_time, mock_alpaca, db, mock_detector,

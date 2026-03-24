@@ -1561,18 +1561,6 @@ class TradingEngine:
             self._notified_setups.get(symbol) == setup.breakout_level
         )
 
-        if not already_notified:
-            self._notified_setups[symbol] = setup.breakout_level
-
-            # Notify pattern detected
-            if self.notifier:
-                self.notifier.notify_pattern_detected(
-                    symbol=symbol,
-                    pole_gain_pct=setup.pole_gain_pct,
-                    retracement_pct=setup.retracement_pct,
-                    breakout_level=setup.breakout_level,
-                )
-
         # Create trade plan
         plan = self.planner.create_plan(setup)
         if plan is None:
@@ -1588,18 +1576,7 @@ class TradingEngine:
                 )
                 return None
 
-        # Notify trade planned (only if new setup)
-        if not already_notified and self.notifier:
-            self.notifier.notify_trade_planned(
-                symbol=symbol,
-                entry=plan.entry_price,
-                stop=plan.stop_loss_price,
-                target=plan.take_profit_price,
-                shares=plan.shares,
-                risk_reward=plan.risk_reward_ratio,
-            )
-
-        # Check position limits
+        # Check position limits (includes midday check)
         if not self.position_manager.can_open_position(symbol):
             return None
 
@@ -1655,6 +1632,25 @@ class TradingEngine:
         # real stop is monitored by StopMonitor via WebSocket.
         # Pass safety-net SL as override — DON'T mutate plan, so DB records
         # correct risk_per_share and stop_loss_price.
+        # All filters passed — NOW notify (pattern + plan)
+        if not already_notified:
+            self._notified_setups[symbol] = setup.breakout_level
+            if self.notifier:
+                self.notifier.notify_pattern_detected(
+                    symbol=symbol,
+                    pole_gain_pct=setup.pole_gain_pct,
+                    retracement_pct=setup.retracement_pct,
+                    breakout_level=setup.breakout_level,
+                )
+                self.notifier.notify_trade_planned(
+                    symbol=symbol,
+                    entry=plan.entry_price,
+                    stop=plan.stop_loss_price,
+                    target=plan.take_profit_price,
+                    shares=plan.shares,
+                    risk_reward=plan.risk_reward_ratio,
+                )
+
         real_stop_level = plan.stop_loss_price
         sl_override = None
         if self.stop_monitor:
