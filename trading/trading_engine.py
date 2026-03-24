@@ -1457,7 +1457,7 @@ class TradingEngine:
             )
 
         # Max trades per day — blocks NEW order placement only
-        if self.market_regime and self._daily_trade_count >= self.market_regime.max_trades_per_day:
+        if self.market_regime and self.market_regime.max_trades_per_day > 0 and self._daily_trade_count >= self.market_regime.max_trades_per_day:
             logger.warning(
                 f"MAX TRADES PER DAY reached ({self._daily_trade_count}) — skipping new trades"
             )
