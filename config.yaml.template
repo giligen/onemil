@@ -79,8 +79,8 @@ trading:
   max_risk_pct: 0.04           # 4% max risk — sloppy wide patterns have 30% WR
   min_risk_reward: 2.5
   min_price: 2.00
-  min_stop_distance: 0.12       # Reject setups with stop < $0.12 from entry (tick-noise filter)
-  last_entry_time: "11:00"      # ET — no new entries after this (11:xx+ trades are -$48K net)
+  min_stop_distance: 0.09       # Reject setups with stop < $0.09 from entry (tick-noise filter)
+  last_entry_time: "15:00"      # ET — no new entries after this (skip_midday handles 11:30-14:00)
   force_close_time: "15:45"     # ET — close all positions
   setup_expiry_bars: 10         # cancel pending buy-stop after N bars
   pattern_poll_interval: 60
@@ -94,11 +94,17 @@ trading:
     sma_period: 50             # SPY below SMA(50) — downtrend signal
     min_spy_volume_ratio: 0.70 # SPY T-1 volume / SMA20 — thin liquidity threshold
     thin_liquidity_breakout_vol_ratio: 2.0  # Stricter breakout vol ratio on thin days
-    sma_slope_filter: true             # Block when SMA50 slope < threshold (dead-cat-bounce filter)
-    sma_slope_threshold: -0.5          # SMA50 5-day change threshold (0=any decline, -0.5=steep only)
-    euphoria_filter: true              # Block when SPY UD vol ratio >1.2 AND RSI >60 (crowded breakouts)
-    euphoria_ud_threshold: 1.2         # Up/Down volume ratio threshold (10-day window)
-    euphoria_rsi_threshold: 60.0       # RSI(14) threshold
+    sma_slope_filter: false            # Disabled — replaced by UD risk scaling
+    sma_slope_threshold: -0.5
+    euphoria_filter: false             # Disabled — replaced by UD risk scaling
+    euphoria_ud_threshold: 1.2
+    euphoria_rsi_threshold: 60.0
+  # UD risk scaling: reduce position size when SPY up/down volume ratio > threshold
+  # Replaces binary euphoria skip — keeps trades at reduced risk, stacks with MACD zones
+  ud_risk_scaling:
+    enabled: true
+    ud_threshold: 1.2                  # SPY UD ratio above this = euphoric market
+    scale_factor: 0.5                  # Risk multiplier on euphoric days
   # SPY MACD afternoon cutoff: block new entries when SPY intraday momentum is bullish
   # When SPY 1-min MACD histogram > 0 after cutoff_time, small-cap momentum stocks
   # lose their edge (30% WR, -$36K over 15 months). Removing these = +13.5% P&L.

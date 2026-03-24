@@ -110,6 +110,10 @@ class TradingEngine:
         _cfg = Config._load_yaml_only()
         self.skip_fridays = bool(_cfg.get("trading", {}).get("skip_fridays", False))
         self.min_stop_distance = float(_cfg.get("trading", {}).get("min_stop_distance", 0.0))
+        ud_cfg = _cfg.get("trading", {}).get("ud_risk_scaling", {})
+        self.ud_risk_scaling_enabled = bool(ud_cfg.get("enabled", False))
+        self.ud_threshold = float(ud_cfg.get("ud_threshold", 1.2))
+        self.ud_scale_factor = float(ud_cfg.get("scale_factor", 0.5))
         trail_cfg = _cfg.get("trading", {}).get("trailing_stop", {})
         self.trailing_stop_enabled = bool(trail_cfg.get("enabled", False))
         self.trailing_stop_r = float(trail_cfg.get("trail_r", 1.0))
@@ -1618,6 +1622,28 @@ class TradingEngine:
                     risk_reward_ratio=plan.risk_reward_ratio,
                     shares=scaled_shares,
                     total_risk=plan.risk_per_share * scaled_shares,
+                    pattern=plan.pattern,
+                )
+
+        # UD risk scaling: reduce size when SPY up/down volume ratio is euphoric
+        if self.ud_risk_scaling_enabled:
+            ud = self.market_regime.get_spy_ud_volume_ratio(date.today()) if self.market_regime else None
+            if ud is not None and isinstance(ud, (int, float)) and ud > self.ud_threshold:
+                ud_shares = max(1, int(plan.shares * self.ud_scale_factor))
+                logger.info(
+                    f"{symbol}: UD scaling {self.ud_scale_factor}x (UD={ud:.2f}>{self.ud_threshold}) "
+                    f"→ shares {plan.shares} → {ud_shares}"
+                )
+                plan = TradePlan(
+                    symbol=plan.symbol,
+                    entry_price=plan.entry_price,
+                    stop_loss_price=plan.stop_loss_price,
+                    take_profit_price=plan.take_profit_price,
+                    risk_per_share=plan.risk_per_share,
+                    reward_per_share=plan.reward_per_share,
+                    risk_reward_ratio=plan.risk_reward_ratio,
+                    shares=ud_shares,
+                    total_risk=plan.risk_per_share * ud_shares,
                     pattern=plan.pattern,
                 )
 
