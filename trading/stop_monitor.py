@@ -1221,8 +1221,17 @@ class StopMonitor:
                 self._stream._handlers["trades"][symbol] = self._on_trade
                 self._stream._handlers["quotes"][symbol] = self._on_quote
                 # Send subscribe message asynchronously (no .result() deadlock)
-                await self._stream._send_subscribe_msg()
-                logger.debug(f"StopMonitor: subscribed to {symbol} (trades+quotes)")
+                # Guard: _ws may be None if stream hasn't connected yet —
+                # _run_forever will pick up handlers on next reconnect via
+                # _send_subscribe_msg() after _start_ws().
+                if self._stream._ws:
+                    await self._stream._send_subscribe_msg()
+                    logger.debug(f"StopMonitor: subscribed to {symbol} (trades+quotes)")
+                else:
+                    logger.info(
+                        f"StopMonitor: {symbol} handlers registered, "
+                        f"WS not connected yet — will subscribe on connect"
+                    )
             except Exception as e:
                 logger.error(
                     f"StopMonitor: failed to subscribe {symbol}: {e}"
