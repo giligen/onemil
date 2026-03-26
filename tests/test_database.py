@@ -512,3 +512,72 @@ class TestDeleteVolumeProfiles:
     def test_delete_nonexistent_is_noop(self, db):
         """Deleting profiles for a symbol with none is a no-op."""
         db.delete_volume_profiles("NOPE")  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# Trade queries — get_open_trades
+# ---------------------------------------------------------------------------
+
+class TestGetOpenTrades:
+    """Verify get_open_trades excludes cancelled orders."""
+
+    def _save_trade(self, db, symbol, order_status="pending_new", fill_price=None,
+                    exit_price=None, trade_date="2026-03-25"):
+        """Helper to insert a trade record."""
+        return db.save_trade({
+            "trade_date": trade_date,
+            "symbol": symbol,
+            "side": "buy",
+            "entry_price": 10.0,
+            "stop_loss_price": 9.5,
+            "take_profit_price": 12.5,
+            "shares": 100,
+            "risk_per_share": 0.5,
+            "total_risk": 50.0,
+            "risk_reward_ratio": 2.5,
+            "order_id": f"order-{symbol}",
+            "order_status": order_status,
+            "fill_price": fill_price,
+            "filled_at": None,
+            "exit_price": exit_price,
+            "exit_reason": None,
+            "exited_at": None,
+            "pnl": None,
+            "pnl_pct": None,
+            "pattern_data": "{}",
+        })
+
+    def test_cancelled_orders_excluded(self, db):
+        """Cancelled orders must NOT count as open positions."""
+        self._save_trade(db, "UGRO", order_status="cancelled")
+        self._save_trade(db, "STRO", order_status="cancelled")
+        self._save_trade(db, "MKDW", order_status="filled", fill_price=3.69)
+
+        open_trades = db.get_open_trades("2026-03-25")
+        symbols = [t["symbol"] for t in open_trades]
+        assert symbols == ["MKDW"], f"Expected only MKDW, got {symbols}"
+
+    def test_filled_with_exit_excluded(self, db):
+        """Trades with exit_price set are not open."""
+        self._save_trade(db, "AAPL", order_status="filled", fill_price=10.0,
+                         exit_price=11.0)
+        assert db.get_open_trades("2026-03-25") == []
+
+    def test_pending_order_is_open(self, db):
+        """Pending (unfilled) buy-stop orders count as open."""
+        self._save_trade(db, "AAPL", order_status="pending_new")
+        open_trades = db.get_open_trades("2026-03-25")
+        assert len(open_trades) == 1
+        assert open_trades[0]["symbol"] == "AAPL"
+
+    def test_mixed_statuses(self, db):
+        """Only non-cancelled, non-exited trades are open."""
+        self._save_trade(db, "A", order_status="cancelled")
+        self._save_trade(db, "B", order_status="filled", fill_price=5.0)
+        self._save_trade(db, "C", order_status="pending_new")
+        self._save_trade(db, "D", order_status="filled", fill_price=5.0,
+                         exit_price=6.0)
+
+        open_trades = db.get_open_trades("2026-03-25")
+        symbols = sorted(t["symbol"] for t in open_trades)
+        assert symbols == ["B", "C"], f"Expected B and C, got {symbols}"

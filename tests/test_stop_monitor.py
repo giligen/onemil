@@ -271,9 +271,9 @@ class TestDoubleFire:
 
         assert mock_alpaca.submit_limit_sell_order.call_count == 1
 
-        # Re-add watch to simulate a re-entry. The _exit_in_progress flag
-        # from the first fire is still set (only cleared on exception or
-        # via remove_watch). This correctly blocks a rapid second exit.
+        # After successful exit, _exit_in_progress is cleared and watch removed.
+        # Re-add watch to simulate re-entry — add_watch clears _exit_in_progress
+        # so a new exit CAN fire (this is correct: it's a new trade, not a dupe).
         monitor.add_watch('PLYX', 4.29, 500, 'tp-1', 'sl-1')
 
         trade2 = MagicMock()
@@ -281,20 +281,25 @@ class TestDoubleFire:
         trade2.price = 4.23
         await monitor._on_trade(trade2)
 
-        # Second exit should be blocked
-        assert mock_alpaca.submit_limit_sell_order.call_count == 1
+        # Second exit fires because add_watch cleared the flag (new trade)
+        assert mock_alpaca.submit_limit_sell_order.call_count == 2
 
-        # After explicit remove_watch, the flag is cleared and re-entry works
-        monitor.remove_watch('PLYX')
+    @pytest.mark.asyncio
+    async def test_rapid_ticks_blocked(self, monitor, mock_alpaca):
+        """Two rapid ticks on same watch — second is blocked by _exit_in_progress."""
         monitor.add_watch('PLYX', 4.29, 500, 'tp-1', 'sl-1')
 
-        trade3 = MagicMock()
-        trade3.symbol = 'PLYX'
-        trade3.price = 4.20
-        await monitor._on_trade(trade3)
+        # Manually set _exit_in_progress to simulate an in-flight exit
+        with monitor._exit_lock:
+            monitor._exit_in_progress['PLYX'] = True
 
-        # Now it should fire again
-        assert mock_alpaca.submit_limit_sell_order.call_count == 2
+        trade = MagicMock()
+        trade.symbol = 'PLYX'
+        trade.price = 4.20
+        await monitor._on_trade(trade)
+
+        # Should be blocked — no sell submitted
+        assert mock_alpaca.submit_limit_sell_order.call_count == 0
 
     @pytest.mark.asyncio
     async def test_exit_in_progress_blocks_duplicate(self, monitor, mock_alpaca):

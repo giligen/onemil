@@ -227,6 +227,9 @@ class StopMonitor:
         )
         with self._watch_lock:
             self._watches[symbol] = entry
+        # Clear any stale exit-in-progress flag from previous trade of same symbol
+        with self._exit_lock:
+            self._exit_in_progress[symbol] = False
 
         # Subscribe to trades for this symbol on the WebSocket
         if self._loop and self._stream and self._running:
@@ -247,15 +250,18 @@ class StopMonitor:
         Stop monitoring a symbol.
 
         Called from main thread on exit/force-close.
+        Sets _exit_in_progress=True BEFORE removing watch so any in-flight
+        _on_trade callback is blocked from double-selling.
 
         Args:
             symbol: Stock symbol to stop watching
         """
+        # Block any in-flight _on_trade from starting a new exit
+        with self._exit_lock:
+            self._exit_in_progress[symbol] = True
+
         with self._watch_lock:
             removed = self._watches.pop(symbol, None)
-
-        with self._exit_lock:
-            self._exit_in_progress.pop(symbol, None)
 
         if removed:
             # Unsubscribe from WebSocket
@@ -847,8 +853,10 @@ class StopMonitor:
 
         while self._running and reconnect_count < MAX_RECONNECT_ATTEMPTS:
             try:
+                from alpaca.data.enums import DataFeed
                 self._stream = StockDataStream(
-                    self._api_key, self._api_secret
+                    self._api_key, self._api_secret,
+                    feed=DataFeed.SIP,
                 )
                 # Subscribe to all currently watched symbols.
                 # If empty, subscribe_trades with no symbols is a no-op;
@@ -1043,26 +1051,22 @@ class StopMonitor:
         order_id = ""
 
         try:
-            # Cancel the bracket legs (TP and safety-net SL)
-            # Run in executor to avoid blocking the event loop
-            for leg_id, leg_name in [
-                (watch.tp_leg_id, "TP"),
-                (watch.sl_leg_id, "SL"),
-            ]:
-                if leg_id:
-                    try:
-                        await loop.run_in_executor(
-                            None, self._alpaca.cancel_order, leg_id
-                        )
-                        logger.info(
-                            f"StopMonitor: {symbol} cancelled {leg_name} leg {leg_id}"
-                        )
-                    except Exception as e:
-                        # 422 = already filled/cancelled — expected race condition
-                        logger.warning(
-                            f"StopMonitor: {symbol} {leg_name} cancel failed "
-                            f"(may be filled): {e}"
-                        )
+            # Cancel TP leg first (safe — doesn't protect downside)
+            if watch.tp_leg_id:
+                try:
+                    await loop.run_in_executor(
+                        None, self._alpaca.cancel_order, watch.tp_leg_id
+                    )
+                    logger.info(
+                        f"StopMonitor: {symbol} cancelled TP leg {watch.tp_leg_id}"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"StopMonitor: {symbol} TP cancel failed (may be filled): {e}"
+                    )
+
+            # NOTE: SL leg cancelled AFTER sell is submitted (below) so
+            # position is never naked. If sell fails, SL remains as protection.
 
             # Compute limit price: use cached quote from stream (sub-50ms),
             # fall back to REST if stale, then fixed offset as last resort
@@ -1127,12 +1131,26 @@ class StopMonitor:
                     f"qty={watch.shares}, limit=${limit_price:.2f} ({pricing_method}), "
                     f"order={order_id}"
                 )
+                # NOW cancel safety-net SL (sell is submitted, position protected)
+                if watch.sl_leg_id:
+                    try:
+                        await loop.run_in_executor(
+                            None, self._alpaca.cancel_order, watch.sl_leg_id
+                        )
+                        logger.info(
+                            f"StopMonitor: {symbol} cancelled SL leg {watch.sl_leg_id}"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"StopMonitor: {symbol} SL cancel failed (may be filled): {e}"
+                        )
             except Exception as e:
                 logger.error(
                     f"StopMonitor: {symbol} limit sell failed: {e} — "
                     f"falling back to close_position()"
                 )
                 # Fallback: market close (in executor)
+                # SL leg is STILL active as protection during fallback
                 try:
                     fallback = await loop.run_in_executor(
                         None, self._alpaca.close_position, symbol
@@ -1178,9 +1196,11 @@ class StopMonitor:
             )
             self._exit_events.put(event)
 
-            # Remove from watch list
+            # Remove from watch list and clear exit-in-progress
             with self._watch_lock:
                 self._watches.pop(symbol, None)
+            with self._exit_lock:
+                self._exit_in_progress[symbol] = False
 
         except Exception as e:
             logger.error(f"StopMonitor: {symbol} exit execution error: {e}")
@@ -1188,11 +1208,20 @@ class StopMonitor:
                 self._exit_in_progress[symbol] = False
 
     async def _subscribe_symbol(self, symbol: str) -> None:
-        """Subscribe to trade and quote updates for a symbol."""
+        """Subscribe to trade and quote updates for a symbol.
+
+        IMPORTANT: Cannot call self._stream.subscribe_trades() here because
+        that method uses asyncio.run_coroutine_threadsafe().result() which
+        deadlocks when called from the same event loop. Instead, we directly
+        register handlers and send the subscribe message asynchronously.
+        """
         if self._stream:
             try:
-                self._stream.subscribe_trades(self._on_trade, symbol)
-                self._stream.subscribe_quotes(self._on_quote, symbol)
+                # Register handlers directly (bypass sync .subscribe_trades)
+                self._stream._handlers["trades"][symbol] = self._on_trade
+                self._stream._handlers["quotes"][symbol] = self._on_quote
+                # Send subscribe message asynchronously (no .result() deadlock)
+                await self._stream._send_subscribe_msg()
                 logger.debug(f"StopMonitor: subscribed to {symbol} (trades+quotes)")
             except Exception as e:
                 logger.error(
@@ -1200,11 +1229,15 @@ class StopMonitor:
                 )
 
     async def _unsubscribe_symbol(self, symbol: str) -> None:
-        """Unsubscribe from trade and quote updates for a symbol."""
+        """Unsubscribe from trade and quote updates for a symbol.
+
+        Same deadlock avoidance as _subscribe_symbol — bypass sync SDK methods.
+        """
         if self._stream:
             try:
-                self._stream.unsubscribe_trades(symbol)
-                self._stream.unsubscribe_quotes(symbol)
+                self._stream._handlers["trades"].pop(symbol, None)
+                self._stream._handlers["quotes"].pop(symbol, None)
+                await self._stream._send_subscribe_msg()
                 logger.debug(f"StopMonitor: unsubscribed from {symbol}")
             except Exception as e:
                 logger.warning(

@@ -683,7 +683,8 @@ class Database:
             List of open trade dicts
         """
         cursor = self.conn.execute(
-            "SELECT * FROM trades WHERE trade_date = ? AND exit_price IS NULL ORDER BY created_at",
+            "SELECT * FROM trades WHERE trade_date = ? AND exit_price IS NULL "
+            "AND order_status != 'cancelled' ORDER BY created_at",
             (trade_date,)
         )
         return [dict(row) for row in cursor.fetchall()]
