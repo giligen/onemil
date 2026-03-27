@@ -139,6 +139,71 @@ class TestComputeLimitPriceFromQuote:
         # Fixed offset would be 50.01 - max(0.03, 50.01*0.005) = 50.01 - 0.25 = $49.76
         # Saving: $50.00 - $49.76 = $0.24/share
 
+    # OFI-aware pricing tests
+
+    def test_ofi_urgent_overrides_tight_spread(self):
+        """Heavy selling (OFI < -3000) → bid - $0.01 even on tight spread."""
+        price, method = StopMonitor.compute_limit_price_from_quote(
+            7.67, 7.72, ofi=-3623
+        )
+        assert price == 7.66  # bid - 0.01
+        assert method == 'ofi_urgent'
+
+    def test_ofi_aggressive_overrides_tight_spread(self):
+        """Moderate selling (OFI < -1000) → bid even on tight spread."""
+        price, method = StopMonitor.compute_limit_price_from_quote(
+            7.67, 7.72, ofi=-1500
+        )
+        assert price == 7.67  # bid
+        assert method == 'ofi_aggressive'
+
+    def test_ofi_neutral_uses_normal_tiers(self):
+        """Neutral OFI → normal spread tiers."""
+        price, method = StopMonitor.compute_limit_price_from_quote(
+            7.65, 7.75, ofi=-500
+        )
+        assert method == 'quote_medium'  # $0.10 spread = medium tier
+
+    def test_ofi_positive_uses_normal_tiers(self):
+        """Positive OFI (buying pressure) → normal spread tiers."""
+        price, method = StopMonitor.compute_limit_price_from_quote(
+            9.98, 10.00, ofi=2000
+        )
+        assert method == 'quote_tight'  # tight spread, no OFI override
+
+    # Size-aware pricing tests
+
+    def test_size_aggressive_when_overwhelming_depth(self):
+        """Selling 10K shares into 200 bid depth → bid (walk the book)."""
+        price, method = StopMonitor.compute_limit_price_from_quote(
+            7.67, 7.69, shares=10000, bid_size=200
+        )
+        assert price == 7.67  # bid
+        assert method == 'size_aggressive'
+
+    def test_size_normal_when_adequate_depth(self):
+        """Selling 500 shares into 5000 bid depth → normal tiers."""
+        price, method = StopMonitor.compute_limit_price_from_quote(
+            9.98, 10.00, shares=500, bid_size=5000
+        )
+        assert method == 'quote_tight'  # enough depth, use normal pricing
+
+    def test_ofi_takes_priority_over_size(self):
+        """OFI override fires before size check."""
+        price, method = StopMonitor.compute_limit_price_from_quote(
+            7.67, 7.69, ofi=-4000, shares=100, bid_size=10000
+        )
+        assert method == 'ofi_urgent'  # OFI checked first
+
+    def test_eeiq_exact_scenario(self):
+        """Reproduce EEIQ 2026-03-26: bid=$7.67 ask=$7.72, OFI=-3623, 9375 shares, 200 depth.
+        Old pricing: quote_tight → $7.70 (midpoint). New: ofi_urgent → $7.66."""
+        price, method = StopMonitor.compute_limit_price_from_quote(
+            7.67, 7.72, ofi=-3623, shares=9375, bid_size=200
+        )
+        assert price == 7.66  # bid - $0.01
+        assert method == 'ofi_urgent'
+
 
 # ---------------------------------------------------------------------------
 # Savings comparison vs fixed offset

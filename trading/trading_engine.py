@@ -1035,7 +1035,7 @@ class TradingEngine:
         # Finalize with the fill we got
         self._finalize_stop_exit(event, actual_fill)
 
-    STOP_EXIT_TIMEOUT_SECONDS = 30
+    STOP_EXIT_TIMEOUT_SECONDS = 10  # 10s: speed > price improvement on stop exits
 
     def _process_stop_monitor_exits(self) -> None:
         """Drain and process exit events from StopMonitor."""

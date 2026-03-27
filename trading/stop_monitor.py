@@ -649,22 +649,39 @@ class StopMonitor:
         return max(limit_price, 0.01)  # floor at $0.01
 
     @staticmethod
-    def compute_limit_price_from_quote(bid: float, ask: float) -> tuple:
+    def compute_limit_price_from_quote(
+        bid: float, ask: float,
+        ofi: float = 0.0,
+        shares: int = 0,
+        bid_size: int = 0,
+    ) -> tuple:
         """
-        Compute limit sell price from current NBBO quote using spread tiers.
+        Compute limit sell price from current NBBO quote using spread tiers,
+        with OFI and size-awareness for urgent exits.
 
-        Adapts pricing to market microstructure:
+        Spread tiers (base pricing):
         - Tight spread (<$0.05): sell at midpoint — liquid, saves vs fixed offset
         - Medium spread ($0.05-$0.15): sell at bid + $0.01 — fast fill, minimal give
         - Wide spread (>$0.15): sell at bid — take what's available on illiquid
 
+        OFI override (selling pressure detection):
+        - OFI < -1000: use bid (skip midpoint — sellers dominating, bid dropping)
+        - OFI < -3000: use bid - $0.01 (urgent exit, accept walking the book)
+
+        Size override (thin book detection):
+        - shares > 5× bid_size: use bid (we'll walk the book regardless)
+
         Args:
             bid: Current best bid price
             ask: Current best ask price
+            ofi: Order Flow Imbalance (negative = selling pressure)
+            shares: Number of shares to sell
+            bid_size: Depth at top of bid book
 
         Returns:
             Tuple of (limit_price, pricing_method) where pricing_method is
-            'quote_tight', 'quote_medium', or 'quote_wide'.
+            'quote_tight', 'quote_medium', 'quote_wide', 'ofi_urgent',
+            'ofi_aggressive', or 'size_aggressive'.
             Returns (0.0, 'invalid') if quote data is invalid.
         """
         if bid <= 0 or ask <= 0 or ask < bid:
@@ -672,7 +689,19 @@ class StopMonitor:
 
         spread = ask - bid
 
-        if spread < 0.05:
+        # OFI override: heavy selling pressure → hit bid or lower
+        if ofi < -3000:
+            limit = round(bid - 0.01, 2)
+            method = 'ofi_urgent'
+        elif ofi < -1000:
+            limit = round(bid, 2)
+            method = 'ofi_aggressive'
+        # Size override: we'd walk the book anyway
+        elif bid_size > 0 and shares > 5 * bid_size:
+            limit = round(bid, 2)
+            method = 'size_aggressive'
+        # Normal spread tiers
+        elif spread < 0.05:
             limit = round((bid + ask) / 2, 2)
             method = 'quote_tight'
         elif spread <= 0.15:
@@ -1078,12 +1107,18 @@ class StopMonitor:
                 # Use cached quote from WebSocket stream
                 bid, ask = watch.latest_bid, watch.latest_ask
                 bid_size, ask_size = watch.latest_bid_size, watch.latest_ask_size
-                limit_price, pricing_method = self.compute_limit_price_from_quote(bid, ask)
+                limit_price, pricing_method = self.compute_limit_price_from_quote(
+                    bid, ask,
+                    ofi=watch.ofi_cumulative,
+                    shares=watch.shares,
+                    bid_size=bid_size,
+                )
                 if limit_price > 0:
                     logger.info(
                         f"StopMonitor: {symbol} cached-quote pricing — "
                         f"bid=${bid:.2f} ask=${ask:.2f} spread=${ask-bid:.3f} "
-                        f"age={quote_age_ms:.0f}ms → limit=${limit_price:.2f} ({pricing_method})"
+                        f"age={quote_age_ms:.0f}ms ofi={watch.ofi_cumulative:.0f} "
+                        f"depth={bid_size}×{ask_size} → limit=${limit_price:.2f} ({pricing_method})"
                     )
                 else:
                     limit_price = self.compute_limit_price(trigger_price)
