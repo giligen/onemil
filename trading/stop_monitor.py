@@ -1420,14 +1420,17 @@ class StopMonitor:
     async def _unsubscribe_symbol(self, symbol: str) -> None:
         """Unsubscribe from trade and quote updates for a symbol.
 
-        Same deadlock avoidance as _subscribe_symbol — bypass sync SDK methods.
+        Uses SDK's _send_unsubscribe_msg (action=unsubscribe) instead of
+        re-sending subscribe with the symbol removed — avoids Alpaca 400
+        'invalid syntax' error when unsubscribing the last symbol.
         """
         if self._stream:
             try:
                 self._stream._handlers["trades"].pop(symbol, None)
                 self._stream._handlers["quotes"].pop(symbol, None)
                 if self._stream._ws:
-                    await self._stream._send_subscribe_msg()
+                    await self._stream._send_unsubscribe_msg("trades", [symbol])
+                    await self._stream._send_unsubscribe_msg("quotes", [symbol])
                 logger.debug(f"StopMonitor: unsubscribed from {symbol}")
             except Exception as e:
                 logger.warning(
