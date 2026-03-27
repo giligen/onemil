@@ -138,6 +138,7 @@ class TradingEngine:
         self._patterns_traded: int = 0
         self._pattern_details: list = []
         self._pending_orders: Dict[str, Dict] = {}  # symbol -> {order_id, plan, setup, placed_at}
+        self._invalidated_levels: Dict[str, float] = {}  # symbol -> breakout_level (skip re-detection)
         self._daily_trade_count: int = 0
         self._notified_setups: Dict[str, float] = {}  # symbol -> breakout_level (dedup Telegram)
         self._macd_warmup_cache: Dict[str, Optional[pd.Series]] = {}  # symbol -> prev-day closes
@@ -837,6 +838,8 @@ class TradingEngine:
                                     pass  # proceed with cancel attempt
                                 self.alpaca.cancel_order(order_id)
                                 symbols_to_remove.append(symbol)
+                                # Remember invalidated breakout level to prevent re-detection loop
+                                self._invalidated_levels[symbol] = setup.breakout_level
                     except Exception as e:
                         logger.error(f"{symbol}: Failed to check invalidation: {e}")
 
@@ -1586,6 +1589,17 @@ class TradingEngine:
         # Detect setup (before breakout)
         setup = self.detector.detect_setup(symbol, bars)
         if setup is None:
+            return None
+
+        # Skip if this breakout level was already invalidated (flag_low broken).
+        # Prevents re-detection loop where same historical pattern is found every cycle.
+        # New pattern at a different level will still trade.
+        invalidated = self._invalidated_levels.get(symbol)
+        if invalidated is not None and abs(setup.breakout_level - invalidated) < 0.02:
+            logger.debug(
+                f"{symbol}: Skipping invalidated breakout ${setup.breakout_level:.2f} "
+                f"(invalidated at ${invalidated:.2f})"
+            )
             return None
 
         self._patterns_detected += 1
