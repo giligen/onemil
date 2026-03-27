@@ -2320,12 +2320,13 @@ class TradingEngine:
             return
 
         # Rebuild _traded_symbols and _daily_trade_count from DB
+        # Only count FILLED trades — cancelled orders should not block re-entry
         filled_count = 0
         for trade in trades_today:
             symbol = trade['symbol']
-            self._traded_symbols.add(symbol)
-            self.position_manager.mark_traded(symbol)
             if trade.get('fill_price') is not None:
+                self._traded_symbols.add(symbol)
+                self.position_manager.mark_traded(symbol)
                 filled_count += 1
 
         self._daily_trade_count = filled_count

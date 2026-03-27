@@ -2597,7 +2597,7 @@ class TestStartupSync:
 
         assert 'PLTR' in engine._pending_orders
         assert engine._pending_orders['PLTR']['order_id'] == 'ord-pending'
-        assert 'PLTR' in engine._traded_symbols  # Prevents re-entry
+        assert 'PLTR' not in engine._traded_symbols  # Unfilled — should NOT block re-entry
         assert engine._daily_trade_count == 0  # Not filled, so not counted
 
     def test_filled_not_in_pending(self, engine, db, mock_alpaca, mock_position_manager):
