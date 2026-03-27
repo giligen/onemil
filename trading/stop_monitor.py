@@ -1107,15 +1107,14 @@ class StopMonitor:
                 # Use cached quote from WebSocket stream
                 bid, ask = watch.latest_bid, watch.latest_ask
                 bid_size, ask_size = watch.latest_bid_size, watch.latest_ask_size
-                limit_price, pricing_method = self.compute_limit_price_from_quote(
-                    bid, ask,
-                    ofi=watch.ofi_cumulative,
-                    shares=watch.shares,
-                    bid_size=bid_size,
-                )
+                # Stop exits: always use bid (selling into weakness/falling price).
+                # Midpoint never fills on a crashing stock. Bid gets us out NOW.
+                # OFI/size just confirm what exit_reason already tells us.
+                limit_price = round(bid, 2)
+                pricing_method = 'stop_bid'
                 if limit_price > 0:
                     logger.info(
-                        f"StopMonitor: {symbol} cached-quote pricing — "
+                        f"StopMonitor: {symbol} stop-exit pricing — "
                         f"bid=${bid:.2f} ask=${ask:.2f} spread=${ask-bid:.3f} "
                         f"age={quote_age_ms:.0f}ms ofi={watch.ofi_cumulative:.0f} "
                         f"depth={bid_size}×{ask_size} → limit=${limit_price:.2f} ({pricing_method})"
@@ -1133,11 +1132,12 @@ class StopMonitor:
                     ask = quote.get('ask_price', 0.0)
                     bid_size = quote.get('bid_size', 0)
                     ask_size = quote.get('ask_size', 0)
-                    limit_price, pricing_method = self.compute_limit_price_from_quote(bid, ask)
-                    if limit_price <= 0:
+                    if bid <= 0:
                         raise ValueError(f"invalid quote: bid={bid}, ask={ask}")
+                    limit_price = round(bid, 2)
+                    pricing_method = 'stop_bid_rest'
                     logger.info(
-                        f"StopMonitor: {symbol} REST-quote pricing — "
+                        f"StopMonitor: {symbol} REST stop-exit pricing — "
                         f"bid=${bid:.2f} ask=${ask:.2f} spread=${ask-bid:.3f} "
                         f"→ limit=${limit_price:.2f} ({pricing_method})"
                     )
