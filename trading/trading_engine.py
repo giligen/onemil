@@ -1051,7 +1051,7 @@ class TradingEngine:
                         f"{symbol}: market sell filled at ${actual_fill:.2f} "
                         f"({event.filled_qty}sh)"
                     )
-                event.exit_fill_method = "market_fallback"  # limit didn't fill, used market
+                event.pricing_method = f"{event.pricing_method}+market_fallback"
             except Exception as e:
                 logger.error(f"{symbol}: market sell also failed: {e}")
                 actual_fill = event.exit_price

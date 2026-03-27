@@ -293,11 +293,10 @@ class StopMonitor:
 
         with self._watch_lock:
             removed = self._watches.pop(symbol, None)
+            has_quote_watch = symbol in self._quote_watches
 
         if removed:
             # Only unsubscribe if no quote_watch also needs this symbol
-            with self._watch_lock:
-                has_quote_watch = symbol in self._quote_watches
             if not has_quote_watch and self._loop and self._stream and self._running:
                 asyncio.run_coroutine_threadsafe(
                     self._unsubscribe_symbol(symbol), self._loop
@@ -1427,7 +1426,8 @@ class StopMonitor:
             try:
                 self._stream._handlers["trades"].pop(symbol, None)
                 self._stream._handlers["quotes"].pop(symbol, None)
-                await self._stream._send_subscribe_msg()
+                if self._stream._ws:
+                    await self._stream._send_subscribe_msg()
                 logger.debug(f"StopMonitor: unsubscribed from {symbol}")
             except Exception as e:
                 logger.warning(
