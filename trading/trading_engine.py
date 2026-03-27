@@ -809,6 +809,10 @@ class TradingEngine:
                         except Exception as e:
                             logger.error(f"{symbol}: Failed to cancel expired order: {e}")
                         symbols_to_remove.append(symbol)
+                        # Remember expired breakout level to prevent re-detection
+                        setup = pending.get('setup')
+                        if setup:
+                            self._invalidated_levels[symbol] = setup.breakout_level
                         continue
 
                 # Still pending — check if setup invalidated
