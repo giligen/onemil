@@ -103,6 +103,10 @@ def setup_logging(
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("yfinance").setLevel(logging.WARNING)
     logging.getLogger("peewee").setLevel(logging.WARNING)
+    logging.getLogger("websockets").setLevel(logging.WARNING)  # SIP stream floods DEBUG with BINARY frames
+    logging.getLogger("httpcore").setLevel(logging.WARNING)    # HTTP connection pool noise
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("anthropic").setLevel(logging.WARNING)   # LLM API request/response details
 
     logging.info(f"Logging initialized at {log_level.upper()} level, file: {log_path}")
 
