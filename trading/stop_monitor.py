@@ -1025,17 +1025,24 @@ class StopMonitor:
                 # Subscribe to all currently watched symbols.
                 # If empty, subscribe_trades with no symbols is a no-op;
                 # add_watch will subscribe dynamically via _subscribe_symbol.
+                # Wait for at least one symbol before connecting.
+                # SDK's _run_forever busy-spins with asyncio.sleep(0) if no
+                # handlers registered — burns 100% CPU. Wait here instead.
                 watched = self._get_watched_symbols()
-                if watched:
-                    self._stream.subscribe_trades(
-                        self._on_trade, *watched
-                    )
-                    self._stream.subscribe_quotes(
-                        self._on_quote, *watched
-                    )
-                    logger.info(f"StopMonitor: WebSocket connecting with {len(watched)} symbols (trades+quotes)...")
-                else:
-                    logger.info("StopMonitor: WebSocket connecting (no symbols yet)...")
+                while not watched and self._running:
+                    await asyncio.sleep(1)  # real sleep, not busy spin
+                    watched = self._get_watched_symbols()
+
+                if not self._running:
+                    break
+
+                self._stream.subscribe_trades(
+                    self._on_trade, *watched
+                )
+                self._stream.subscribe_quotes(
+                    self._on_quote, *watched
+                )
+                logger.info(f"StopMonitor: WebSocket connecting with {len(watched)} symbols (trades+quotes)...")
                 await self._stream._run_forever()
 
             except Exception as e:
