@@ -1982,6 +1982,8 @@ class TradingEngine:
                 logger.error(error_msg)
                 if self.notifier:
                     self.notifier.notify_error(error_msg, component="ForceClose")
+            if self.stop_monitor:
+                self.stop_monitor.remove_quote_watch(symbol)
         self._pending_orders.clear()
 
         # Close open positions and update DB

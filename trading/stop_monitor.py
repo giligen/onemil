@@ -256,12 +256,14 @@ class StopMonitor:
         )
         with self._watch_lock:
             self._watches[symbol] = entry
+            already_subscribed = symbol in self._quote_watches
         # Clear any stale exit-in-progress flag from previous trade of same symbol
         with self._exit_lock:
             self._exit_in_progress[symbol] = False
 
         # Subscribe to trades for this symbol on the WebSocket
-        if self._loop and self._stream and self._running:
+        # Skip if quote_watch already has this symbol subscribed
+        if not already_subscribed and self._loop and self._stream and self._running:
             asyncio.run_coroutine_threadsafe(
                 self._subscribe_symbol(symbol), self._loop
             )
