@@ -547,6 +547,32 @@ class TradingEngine:
                         )
                     self.db.update_trade(trade_record['id'], update)
                     logger.info(f"{symbol}: Trade DB updated — fill ${fill_price}, qty {actual_qty}")
+
+                    # Persist entry microstructure from quote watch
+                    if self.stop_monitor:
+                        qsnap = self.stop_monitor.get_quote_watch_snapshot(symbol)
+                        if qsnap:
+                            entry_micro = {
+                                'entry_quote_bid': qsnap['submit_bid'],
+                                'entry_quote_ask': qsnap['submit_ask'],
+                                'entry_quote_bid_size': qsnap['submit_bid_size'],
+                                'entry_quote_ask_size': qsnap['submit_ask_size'],
+                                'entry_quote_spread': (
+                                    qsnap['submit_ask'] - qsnap['submit_bid']
+                                    if qsnap['submit_ask'] > 0 else None
+                                ),
+                                'entry_quote_ofi': qsnap['ofi_cumulative'],
+                                'entry_fill_quote_bid': qsnap['latest_bid'],
+                                'entry_fill_quote_ask': qsnap['latest_ask'],
+                            }
+                            self.db.update_trade(trade_record['id'], entry_micro)
+                            logger.info(
+                                f"{symbol}: Entry microstructure — "
+                                f"submit bid=${qsnap['submit_bid']:.2f} ask=${qsnap['submit_ask']:.2f}, "
+                                f"fill bid=${qsnap['latest_bid']:.2f} ask=${qsnap['latest_ask']:.2f}, "
+                                f"OFI={qsnap['ofi_cumulative']:.0f}"
+                            )
+                        self.stop_monitor.remove_quote_watch(symbol)
                 else:
                     error_msg = f"{symbol}: No trade record for order {order_id} — DB integrity issue"
                     logger.error(error_msg)
@@ -826,6 +852,10 @@ class TradingEngine:
                             'order_status': 'cancelled',
                         })
                         logger.debug(f"{symbol}: DB trade record marked cancelled")
+
+            # Clean up quote watch on cancellation
+            if self.stop_monitor:
+                self.stop_monitor.remove_quote_watch(symbol)
 
         return last_fill_result
 
@@ -1700,6 +1730,22 @@ class TradingEngine:
             else:
                 logger.info(f"{symbol}: BUY-STOP ORDER PLACED — {result}")
             self._pending_orders[symbol] = pending
+
+            # Start passive quote monitoring for entry slippage analysis
+            if self.stop_monitor:
+                try:
+                    quote = self.alpaca.get_latest_quote(symbol)
+                    self.stop_monitor.add_quote_watch(
+                        symbol,
+                        submit_bid=quote.get('bid_price', 0.0),
+                        submit_ask=quote.get('ask_price', 0.0),
+                        submit_bid_size=quote.get('bid_size', 0),
+                        submit_ask_size=quote.get('ask_size', 0),
+                    )
+                except Exception as e:
+                    logger.warning(f"{symbol}: quote-watch start failed: {e}")
+                    # Still start quote watch with zeros — will capture live quotes
+                    self.stop_monitor.add_quote_watch(symbol)
 
             # Notify order submitted
             if self.notifier:

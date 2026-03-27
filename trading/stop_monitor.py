@@ -97,6 +97,34 @@ class StopExitEvent:
     exit_ofi: float = 0.0  # OFI at exit time (negative = selling pressure)
 
 
+@dataclass
+class QuoteWatch:
+    """Passive quote monitoring for pending buy-stop orders.
+
+    Tracks NBBO + OFI from WebSocket while order is pending.
+    Used for entry microstructure analysis — no trading actions taken.
+    """
+
+    symbol: str
+    submitted_at: float = 0.0  # time.time() when order placed
+    # Snapshot at submission (filled by caller from REST quote)
+    submit_bid: float = 0.0
+    submit_ask: float = 0.0
+    submit_bid_size: int = 0
+    submit_ask_size: int = 0
+    # Live cache (updated by _on_quote callback)
+    latest_bid: float = 0.0
+    latest_ask: float = 0.0
+    latest_bid_size: int = 0
+    latest_ask_size: int = 0
+    latest_quote_ts: float = 0.0
+    ofi_cumulative: float = 0.0
+    _prev_bid: float = 0.0
+    _prev_ask: float = 0.0
+    _prev_bid_size: int = 0
+    _prev_ask_size: int = 0
+
+
 class StopMonitor:
     """
     Monitors real-time trade prices via WebSocket and triggers marketable
@@ -136,7 +164,8 @@ class StopMonitor:
         self._notifier = notifier
 
         self._watches: Dict[str, WatchEntry] = {}
-        self._watch_lock = threading.Lock()
+        self._quote_watches: Dict[str, QuoteWatch] = {}  # passive entry monitoring
+        self._watch_lock = threading.Lock()  # protects both _watches and _quote_watches
 
         self._exit_events: queue.Queue = queue.Queue()
         self._exit_in_progress: Dict[str, bool] = {}
@@ -264,12 +293,116 @@ class StopMonitor:
             removed = self._watches.pop(symbol, None)
 
         if removed:
-            # Unsubscribe from WebSocket
-            if self._loop and self._stream and self._running:
+            # Only unsubscribe if no quote_watch also needs this symbol
+            with self._watch_lock:
+                has_quote_watch = symbol in self._quote_watches
+            if not has_quote_watch and self._loop and self._stream and self._running:
                 asyncio.run_coroutine_threadsafe(
                     self._unsubscribe_symbol(symbol), self._loop
                 )
             logger.info(f"StopMonitor: removed watch for {symbol}")
+
+    # ------------------------------------------------------------------
+    # Passive quote monitoring for pending buy-stop orders
+    # ------------------------------------------------------------------
+
+    def add_quote_watch(
+        self,
+        symbol: str,
+        submit_bid: float = 0.0,
+        submit_ask: float = 0.0,
+        submit_bid_size: int = 0,
+        submit_ask_size: int = 0,
+    ) -> None:
+        """
+        Start passively monitoring quotes for a pending buy-stop order.
+
+        Called from main thread when a buy-stop is submitted. Subscribes to
+        quotes via the SIP WebSocket to track NBBO + OFI while the order is
+        pending. No trading actions taken — data collection only.
+
+        Args:
+            symbol: Stock symbol
+            submit_bid: NBBO bid at submission time
+            submit_ask: NBBO ask at submission time
+            submit_bid_size: Bid depth at submission time
+            submit_ask_size: Ask depth at submission time
+        """
+        entry = QuoteWatch(
+            symbol=symbol,
+            submitted_at=time_mod.time(),
+            submit_bid=submit_bid,
+            submit_ask=submit_ask,
+            submit_bid_size=submit_bid_size,
+            submit_ask_size=submit_ask_size,
+            latest_bid=submit_bid,
+            latest_ask=submit_ask,
+            latest_bid_size=submit_bid_size,
+            latest_ask_size=submit_ask_size,
+        )
+        with self._watch_lock:
+            self._quote_watches[symbol] = entry
+            already_subscribed = symbol in self._watches
+
+        # Subscribe only if StopMonitor isn't already watching this symbol
+        if not already_subscribed and self._loop and self._stream and self._running:
+            asyncio.run_coroutine_threadsafe(
+                self._subscribe_symbol(symbol), self._loop
+            )
+
+        logger.info(
+            f"StopMonitor: quote-watch {symbol} — "
+            f"bid=${submit_bid:.2f} ask=${submit_ask:.2f} "
+            f"depth={submit_bid_size}×{submit_ask_size}"
+        )
+
+    def remove_quote_watch(self, symbol: str) -> None:
+        """
+        Stop passively monitoring quotes for a symbol.
+
+        Called from main thread when buy-stop fills, is cancelled, or expires.
+        Only unsubscribes from WebSocket if StopMonitor isn't also watching.
+        """
+        with self._watch_lock:
+            removed = self._quote_watches.pop(symbol, None)
+            has_stop_watch = symbol in self._watches
+
+        if removed and not has_stop_watch:
+            if self._loop and self._stream and self._running:
+                asyncio.run_coroutine_threadsafe(
+                    self._unsubscribe_symbol(symbol), self._loop
+                )
+        if removed:
+            logger.debug(f"StopMonitor: removed quote-watch for {symbol}")
+
+    def get_quote_watch_snapshot(self, symbol: str) -> Optional[Dict]:
+        """
+        Return a thread-safe snapshot of a QuoteWatch's fields.
+
+        Called from main thread at fill time to capture entry microstructure.
+
+        Args:
+            symbol: Stock symbol
+
+        Returns:
+            Dict with quote watch fields, or None if not watched
+        """
+        with self._watch_lock:
+            qw = self._quote_watches.get(symbol)
+            if not qw:
+                return None
+            return {
+                'submit_bid': qw.submit_bid,
+                'submit_ask': qw.submit_ask,
+                'submit_bid_size': qw.submit_bid_size,
+                'submit_ask_size': qw.submit_ask_size,
+                'latest_bid': qw.latest_bid,
+                'latest_ask': qw.latest_ask,
+                'latest_bid_size': qw.latest_bid_size,
+                'latest_ask_size': qw.latest_ask_size,
+                'ofi_cumulative': qw.ofi_cumulative,
+                'submitted_at': qw.submitted_at,
+            }
 
     def drain_exit_events(self) -> List[StopExitEvent]:
         """
@@ -950,46 +1083,50 @@ class StopMonitor:
         symbol = quote.symbol
         with self._watch_lock:
             watch = self._watches.get(symbol)
-        if watch is None:
+            qwatch = self._quote_watches.get(symbol)
+        if watch is None and qwatch is None:
             return
 
         bid = float(quote.bid_price)
         ask = float(quote.ask_price)
         bid_size = int(quote.bid_size)
         ask_size = int(quote.ask_size)
+        now = time_mod.time()
 
-        # Compute OFI tick from quote change
-        if watch._prev_bid > 0:
-            # Bid side: price up = buying pressure, down = selling
-            if bid > watch._prev_bid:
-                delta_bid = bid_size
-            elif bid < watch._prev_bid:
-                delta_bid = -bid_size
-            else:
-                delta_bid = bid_size - watch._prev_bid_size
+        # Update all matching watches (stop watch and/or quote watch)
+        for w in [watch, qwatch]:
+            if w is None:
+                continue
 
-            # Ask side: price down = buying pressure, up = selling
-            if ask < watch._prev_ask:
-                delta_ask = ask_size
-            elif ask > watch._prev_ask:
-                delta_ask = -ask_size
-            else:
-                delta_ask = ask_size - watch._prev_ask_size
+            # Compute OFI tick from quote change
+            if w._prev_bid > 0:
+                if bid > w._prev_bid:
+                    delta_bid = bid_size
+                elif bid < w._prev_bid:
+                    delta_bid = -bid_size
+                else:
+                    delta_bid = bid_size - w._prev_bid_size
 
-            ofi_tick = delta_bid - delta_ask
-            # Exponential moving average (decay=0.95 ≈ 20-tick window)
-            watch.ofi_cumulative = watch.ofi_cumulative * 0.95 + ofi_tick
+                if ask < w._prev_ask:
+                    delta_ask = ask_size
+                elif ask > w._prev_ask:
+                    delta_ask = -ask_size
+                else:
+                    delta_ask = ask_size - w._prev_ask_size
 
-        # Update quote cache
-        watch._prev_bid = watch.latest_bid
-        watch._prev_ask = watch.latest_ask
-        watch._prev_bid_size = watch.latest_bid_size
-        watch._prev_ask_size = watch.latest_ask_size
-        watch.latest_bid = bid
-        watch.latest_ask = ask
-        watch.latest_bid_size = bid_size
-        watch.latest_ask_size = ask_size
-        watch.latest_quote_ts = time_mod.time()
+                ofi_tick = delta_bid - delta_ask
+                w.ofi_cumulative = w.ofi_cumulative * 0.95 + ofi_tick
+
+            # Update quote cache
+            w._prev_bid = w.latest_bid
+            w._prev_ask = w.latest_ask
+            w._prev_bid_size = w.latest_bid_size
+            w._prev_ask_size = w.latest_ask_size
+            w.latest_bid = bid
+            w.latest_ask = ask
+            w.latest_bid_size = bid_size
+            w.latest_ask_size = ask_size
+            w.latest_quote_ts = now
 
     async def _on_trade(self, trade) -> None:
         """
@@ -1297,6 +1434,6 @@ class StopMonitor:
                 logger.warning(f"StopMonitor: error closing stream: {e}")
 
     def _get_watched_symbols(self) -> list:
-        """Get current watch list symbols (thread-safe)."""
+        """Get all symbols needing WebSocket subscription (stop + quote watches)."""
         with self._watch_lock:
-            return list(self._watches.keys())
+            return list(set(self._watches.keys()) | set(self._quote_watches.keys()))

@@ -333,6 +333,31 @@ class Database:
         except Exception as e:
             logger.warning(f"Migration 6 (exit microstructure) failed (non-fatal): {e}")
 
+        # Migration 7: Add entry microstructure columns for slippage analysis.
+        # Records bid/ask/depth at buy-stop submission AND at fill time.
+        entry_micro_cols = {
+            'entry_quote_bid': 'REAL',
+            'entry_quote_ask': 'REAL',
+            'entry_quote_bid_size': 'INTEGER',
+            'entry_quote_ask_size': 'INTEGER',
+            'entry_quote_spread': 'REAL',
+            'entry_quote_ofi': 'REAL',
+            'entry_fill_quote_bid': 'REAL',
+            'entry_fill_quote_ask': 'REAL',
+        }
+        try:
+            columns = [row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()]
+            added = []
+            for col_name, col_type in entry_micro_cols.items():
+                if col_name not in columns:
+                    self.conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+                    added.append(col_name)
+            if added:
+                self.conn.commit()
+                logger.info(f"Migration 7: added entry microstructure columns: {added}")
+        except Exception as e:
+            logger.warning(f"Migration 7 (entry microstructure) failed (non-fatal): {e}")
+
     # =========================================================================
     # Universe operations
     # =========================================================================
