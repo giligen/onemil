@@ -152,6 +152,8 @@ class TradeSimulator:
         marketable_limit_offset_pct: float = 0.0,
         trailing_stop_r: float = 0.0,
         trailing_activate_at_r: float = 0.0,
+        breakeven_at_r: float = 0.0,
+        breakeven_profit_r: float = 0.0,
         exhaustion_exit_enabled: bool = False,
         exhaustion_partial_fraction: float = 0.5,
         exhaustion_tighter_trail_r: float = 0.5,
@@ -214,6 +216,10 @@ class TradeSimulator:
         self.no_pop_exit_min_pct = no_pop_exit_min_pct  # 0.005 = 0.5%
         # Trail exit slippage: separate from stop loss slippage (None = use same)
         self.trail_exit_slippage_pct = trail_exit_slippage_pct
+        # Breakeven stop: move stop to entry + breakeven_profit_r * risk after +breakeven_at_r
+        # Acts as stage 1 protection before full trail activates at activate_at_r
+        self.breakeven_at_r = breakeven_at_r  # 0 = disabled
+        self.breakeven_profit_r = breakeven_profit_r  # 0 = clean breakeven, 0.4 = lock 0.4R
 
     # ------------------------------------------------------------------
     # Exhaustion signal detectors (delegated to shared module)
@@ -358,7 +364,18 @@ class TradeSimulator:
                     logger.debug(f"  Bar {i}: {reason} at ${stop_fill:.2f}")
                     return trade
 
-                # Activate trailing after +NR
+                # Stage 1: Move stop to breakeven (+ optional profit) after +breakeven_at_r
+                if self.breakeven_at_r > 0 and risk > 0 and not trailing_active:
+                    r_gain = (highest_since_entry - actual_entry) / risk
+                    breakeven_target = actual_entry + self.breakeven_profit_r * risk
+                    if r_gain >= self.breakeven_at_r and current_stop < breakeven_target:
+                        current_stop = breakeven_target
+                        logger.debug(
+                            f"  Bar {i}: BREAKEVEN stop at +{r_gain:.1f}R → "
+                            f"stop ${breakeven_target:.2f} (+{self.breakeven_profit_r}R)"
+                        )
+
+                # Stage 2: Activate trailing after +NR
                 if risk > 0:
                     r_gain = (highest_since_entry - actual_entry) / risk
                     if r_gain >= self.trailing_activate_at_r:
@@ -672,6 +689,8 @@ class BacktestRunner:
         exit_slippage: Optional[float] = None,
         trailing_stop_r: float = 0.0,
         trailing_activate_at_r: float = 0.0,
+        trailing_breakeven_at_r: float = 0.0,
+        trailing_breakeven_profit_r: float = 0.0,
         trail_exit_slippage_pct: float = None,
         min_stop_distance: float = 0.0,
         vol_dead_zone_enabled: bool = False,
@@ -794,6 +813,14 @@ class BacktestRunner:
             resolved_trail_r = float(trail_cfg.get("trail_r", 1.0))
             resolved_trail_activate = float(trail_cfg.get("activate_at_r", 2.0))
 
+        # Breakeven stop: from param or config
+        resolved_breakeven = trailing_breakeven_at_r
+        if resolved_breakeven == 0.0:
+            resolved_breakeven = float(trail_cfg.get("breakeven_at_r", 0.0))
+        resolved_breakeven_profit = trailing_breakeven_profit_r
+        if resolved_breakeven_profit == 0.0:
+            resolved_breakeven_profit = float(trail_cfg.get("breakeven_profit_r", 0.0))
+
         # Exhaustion exit config
         exhaust_cfg = trading_cfg.get("exhaustion_exit", {})
         self.exhaustion_exit_enabled = bool(exhaust_cfg.get("enabled", False))
@@ -822,6 +849,8 @@ class BacktestRunner:
                 marketable_limit_offset_pct=ml_offset_pct,
                 trailing_stop_r=resolved_trail_r,
                 trailing_activate_at_r=resolved_trail_activate,
+                breakeven_at_r=resolved_breakeven,
+                breakeven_profit_r=resolved_breakeven_profit,
                 exhaustion_exit_enabled=self.exhaustion_exit_enabled,
                 exhaustion_partial_fraction=float(exhaust_cfg.get("partial_fraction", 0.5)),
                 exhaustion_tighter_trail_r=float(exhaust_cfg.get("tighter_trail_r", 0.5)),
