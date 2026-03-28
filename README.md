@@ -188,37 +188,41 @@ python macd_wave_backtest.py --w1-scout --w1-min 5 --max-waves 3  # W1 scout mod
 
 ## Running Both Services
 
-The two strategies run as **separate processes** sharing the same Alpaca paper account and SQLite database. They do not interfere with each other.
-
-```bash
-# Terminal 1: Bull Flag service (auto-restarts via systemd)
-python main.py --scan --trade --verbose
-
-# Terminal 2: MACD Wave service
-python macd_wave.py
-
-# Or both via systemd/nohup
-nohup python main.py --scan --trade --verbose &
-nohup python macd_wave.py &
-```
+Both strategies run as **systemd services** — auto-start on boot, auto-restart on failure. They share the same Alpaca paper account and SQLite database but do not interfere with each other.
 
 ### Service Management
 
 ```bash
-# Check running services
+# Status
+sudo systemctl status onemil-trader          # Bull flag
+sudo systemctl status onemil-macd-wave       # MACD wave
+
+# Start / Stop / Restart
+sudo systemctl start onemil-trader
+sudo systemctl start onemil-macd-wave
+sudo systemctl restart onemil-trader
+sudo systemctl restart onemil-macd-wave
+sudo systemctl stop onemil-trader
+sudo systemctl stop onemil-macd-wave
+
+# View logs
+journalctl -u onemil-trader -f              # Bull flag (live)
+journalctl -u onemil-macd-wave -f           # MACD wave (live)
+tail -f logs/onemil.log                      # Bull flag file log
+tail -f logs/macd_wave.log                   # MACD wave file log
+
+# Check both running
 ps aux | grep 'main.py\|macd_wave' | grep -v grep
-
-# Restart bull flag (kill → auto-restart picks up)
-kill $(ps aux | grep 'main.py.*--scan' | grep -v grep | awk '{print $2}')
-
-# Restart MACD wave
-kill $(ps aux | grep 'macd_wave.py' | grep -v grep | awk '{print $2}')
-nohup python macd_wave.py &
-
-# Logs
-tail -f logs/onemil.log       # Bull flag
-tail -f logs/macd_wave.log    # MACD wave
 ```
+
+### Systemd Service Files
+
+```
+/etc/systemd/system/onemil-trader.service       # Bull flag
+/etc/systemd/system/onemil-macd-wave.service    # MACD wave
+```
+
+Both auto-restart on failure (30s delay), use `.env` for API keys, 2GB memory limit.
 
 ### Pre-Market Universe Builder (Bull Flag)
 

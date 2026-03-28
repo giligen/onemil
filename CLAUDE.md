@@ -130,28 +130,35 @@ Pre-configure fixtures with spec= in `tests/conftest.py`.
 
 # Two Trading Services
 
-## Service 1: Bull Flag (`main.py`)
+## Service 1: Bull Flag (`onemil-trader`)
 ```bash
-python main.py --scan --trade --verbose    # Live paper trading
-python main.py --batch                     # Nightly universe builder
-python main.py --test-cycle --trade        # One-shot test cycle
+sudo systemctl status onemil-trader      # Check status
+sudo systemctl restart onemil-trader     # Restart
+sudo systemctl stop onemil-trader        # Stop
+journalctl -u onemil-trader -f           # Live logs
 ```
-- Auto-restarts via systemd
-- Kill to restart: `kill $(ps aux | grep 'main.py.*--scan' | grep -v grep | awk '{print $2}')`
+- Systemd service: `/etc/systemd/system/onemil-trader.service`
+- Runs: `python main.py --scan --trade --verbose`
+- Auto-restarts on failure (30s delay)
 - Config: `config.yaml`
 - Logs: `logs/onemil.log`
+- Universe: pre-built via `python main.py --batch` (nightly cron)
 
-## Service 2: MACD Wave (`macd_wave.py`)
+## Service 2: MACD Wave (`onemil-macd-wave`)
 ```bash
-python macd_wave.py                  # Live paper trading
-python macd_wave.py --dry-run        # Monitor only, no orders
-python macd_wave.py --verbose        # Debug logging
+sudo systemctl status onemil-macd-wave   # Check status
+sudo systemctl restart onemil-macd-wave  # Restart
+sudo systemctl stop onemil-macd-wave     # Stop
+journalctl -u onemil-macd-wave -f        # Live logs
 ```
-- Separate process, shares Alpaca account + DB with bull flag
+- Systemd service: `/etc/systemd/system/onemil-macd-wave.service`
+- Runs: `python macd_wave.py`
+- Auto-restarts on failure (30s delay)
 - Config: `macd_wave.yaml` (validated filters: $15-30, cross<3m, MACD≥0.5%, vol<300K, 2% stop)
 - Logs: `logs/macd_wave.log`
 - Telegram: messages prefixed with `[MACD Wave]`
 - DB: trades table has `strategy` column ('bull_flag' or 'macd_wave')
+- Universe: self-built at 8:30 AM ET each day from Alpaca snapshots (no pre-build needed)
 
 # Running Backtests
 
