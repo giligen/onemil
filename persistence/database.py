@@ -208,6 +208,19 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_intraday_bars_symbol_date
                 ON intraday_bars_1min(symbol, bar_date);
+
+            CREATE TABLE IF NOT EXISTS news_cache (
+                symbol VARCHAR(10) NOT NULL,
+                news_date DATE NOT NULL,
+                headline TEXT NOT NULL,
+                catalyst INTEGER,
+                reason VARCHAR(100),
+                classified_at TIMESTAMP,
+                UNIQUE(symbol, news_date, headline)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_news_cache_symbol_date
+                ON news_cache(symbol, news_date);
         """)
         self.conn.commit()
         logger.debug("Database tables verified/created")
@@ -357,6 +370,17 @@ class Database:
                 logger.info(f"Migration 7: added entry microstructure columns: {added}")
         except Exception as e:
             logger.warning(f"Migration 7 (entry microstructure) failed (non-fatal): {e}")
+
+        # Migration 8: Add strategy column to trades table.
+        # Distinguishes bull_flag trades from macd_wave trades.
+        try:
+            columns = [row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()]
+            if 'strategy' not in columns:
+                self.conn.execute("ALTER TABLE trades ADD COLUMN strategy VARCHAR(20) DEFAULT 'bull_flag'")
+                self.conn.commit()
+                logger.info("Migration 8: added strategy column to trades (default='bull_flag')")
+        except Exception as e:
+            logger.warning(f"Migration 8 (strategy column) failed (non-fatal): {e}")
 
     # =========================================================================
     # Universe operations

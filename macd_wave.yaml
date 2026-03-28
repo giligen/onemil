@@ -1,0 +1,49 @@
+# MACD Wave Strategy Configuration
+# Separate from bull flag config — independent strategy
+
+strategy:
+  name: macd_wave
+  enabled: true
+
+# Universe filters (applied to daily bars to find candidates)
+universe:
+  min_price: 15.0           # Validated: $15-30 sweet spot
+  max_price: 30.0           # Validated: >$30 kills WR, >$50 loses money
+  min_daily_volume: 1000000 # Minimum day volume
+  min_intraday_pct: 10.0    # Minimum (high-low)/low % to qualify
+
+# Entry filters (applied at the +threshold% cross point)
+entry:
+  cross_time_max_min: 3     # Validated: <=3min cross = 46% WR, 1-2min = fakeouts
+  min_vol_at_cross: 0       # Min cumulative volume at cross point (0 = any)
+  max_vol_at_cross: 300000  # Validated: >300K = crowded, 9% WR death zone
+  min_macd_hist_pct: 0.5    # Validated: <0.5% = 23% WR, >=0.5% = 37% WR
+  max_price_at_entry: 30    # Match universe max
+
+# MACD indicator parameters
+macd:
+  fast_period: 12
+  slow_period: 26
+  signal_period: 9
+  confirm_bars: 3           # Consecutive positive histogram bars before entry
+
+# Wave management
+waves:
+  max_waves: 1              # Max waves to trade per stock per day
+  w1_scout: false           # If true, W1 is paper-only, trade W2+ after qualified W1
+  w1_min_pct: 5.0           # If w1_scout, minimum W1 gain % to qualify for W2+
+
+# Position sizing
+sizing:
+  position_size: 50000      # $ per position
+  max_concurrent: 5         # Max simultaneous open positions
+
+# Slippage model
+slippage:
+  entry_pct: 0.001          # 0.1% added to entry price
+  exit_pct: 0.001           # 0.1% subtracted from exit price
+
+# Risk management
+risk:
+  hard_stop_pct: 0.02       # 2% hard stop loss per trade
+  daily_loss_limit: -5000   # Stop trading after this $ daily loss (0 = disabled)
