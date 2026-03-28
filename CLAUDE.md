@@ -203,6 +203,30 @@ python macd_wave_backtest.py --w1-scout --w1-min 5 --max-waves 3
 - 1-min bars cached in `intraday_bars_1min` table
 - All filter params configurable via CLI or `macd_wave.yaml`
 
+# Backtest Learnings & Anti-Patterns
+
+## Python output buffering
+When running backtests via `python3 -c "..."`, print() output is BUFFERED until script exits. Use `sys.stdout.flush()` after each print, or run as a script file instead of inline. This has wasted time repeatedly.
+
+## Gap threshold doesn't matter for bull flags
+Tested 3%, 5%, 8%, 10% intraday range thresholds — all produce identical results (254-257 trades, same P&L). The bull flag pattern detector (min_pole_gain_pct=3%) is the real filter, not the daily bar screen.
+
+## Key backtest numbers (Jan-Mar 2026)
+- **Bull flag**: 254 trades, 33.5% WR, PF 1.13, +$28K, DD -$30K
+- **MACD wave**: 61 trades, 44% WR, PF 5.65, +$123K, DD -$7K (15 months)
+- **Combined**: +$330K over 15 months, 14/15 green months
+
+## Overfitting warning
+MACD wave filters (cross<3m, MACD≥0.5%, vol<300K, $15-30) were optimized on the same 15-month dataset used for validation. NO out-of-sample test performed. Expect 40-60% of backtest P&L in production.
+
+## Slippage reality vs model
+- Backtest: 0.1% entry, 0.1-0.3% exit
+- Real production (13 trades): 0.54% avg entry slippage
+- Entry slippage on thin stocks is 5x worse than modeled
+
+## MACD wave P&L is outlier-dependent
+Top 3 trades (FLYE, BTTC, KELYB) = 62% of total MACD wave P&L. Miss one big winner in a quarter and results look very different.
+
 # Interactive Sessions
 * I'm here for you to answer questions and clarify ambiguous points/logic
 * **Bug Prevention Protocol**:
