@@ -11,23 +11,32 @@ Real-time stock scanner + automated trading system targeting Ross Cameron's mome
 ## Architecture
 
 ```
+=== Strategy 1: Bull Flag (main service) ===
 main.py                         CLI entry point (scanner + trading engine)
 backtest.py                     Single-symbol backtesting CLI
 batch_backtest.py               Batch backtest (universe scan → CSV report)
+config.yaml                     Bull flag configuration
 
+=== Strategy 2: MACD Wave (separate service) ===
+macd_wave.py                    Standalone service entry point
+macd_wave_backtest.py           MACD wave backtesting CLI
+macd_wave.yaml                  MACD wave configuration
+trading/macd_wave_engine.py     Core engine (mover detection, MACD, entry/exit)
+
+=== Shared Infrastructure ===
 data_sources/
   alpaca_client.py              Alpaca API client (market data + trading)
   float_provider.py             Float share data via Yahoo Finance
   news_provider.py              News & sentiment analysis
 
 scanner/
-  realtime_scanner.py           Real-time stock screening
+  realtime_scanner.py           Real-time stock screening (bull flag)
   criteria.py                   Filtering logic (price, float, volume, etc.)
 
 trading/
   pattern_detector.py           Bull flag pattern detection (1-min bars)
   trade_planner.py              Trade plan creation (entry/stop/target/sizing)
-  trading_engine.py             Main trading orchestration
+  trading_engine.py             Bull flag trading orchestration
   order_executor.py             Order submission/management
   position_manager.py           Position tracking
   stop_monitor.py               WebSocket stop monitoring + spread-based exits
@@ -35,16 +44,16 @@ trading/
   exhaustion_signals.py         Exhaustion exit signal detection (shared backtest/prod)
 
 persistence/
-  database.py                   SQLite database layer
+  database.py                   SQLite database layer (shared, strategy column)
 
 batch/
-  universe_builder.py           Stock universe construction
+  universe_builder.py           Stock universe construction (bull flag)
 
 monitoring/
   logger.py                     Logging setup (UTF-8 for Windows)
 
 notifications/
-  telegram_notifier.py          Telegram alerts
+  telegram_notifier.py          Telegram alerts (shared, [Bull Flag] / [MACD Wave] prefix)
   telegram_error_handler.py     Error notification
 ```
 
@@ -125,6 +134,102 @@ Blocks or tightens entries when SPY indicates a hostile regime. Four independent
 | `market_regime_thin_liquidity_breakout_vol_ratio` | `2.0` | Min breakout volume ratio on thin liquidity days |
 | `max_trades_per_day` | `5` | Max entries per day |
 
+## Strategy 2: MACD Wave
+
+Separate service targeting medium-cap stocks ($15-30) with strong intraday momentum. Enters on MACD histogram confirmation after +10% move, exits on histogram flip.
+
+### Backtest Results (Jan 2025 — Mar 2026, 15 months)
+
+| Metric | Value |
+|--------|-------|
+| **Trades** | 61 |
+| **Win Rate** | 44.3% |
+| **Total P&L** | **+$122,935** |
+| **Avg Win** | +$5,533 (+13.8%) |
+| **Avg Loss** | -$778 (-2.0%) |
+| **Profit Factor** | 5.65 |
+| **Sharpe** | 5.49 |
+| **Max Drawdown** | -$6,978 |
+| **Position Size** | $50,000 |
+
+### Entry Rules
+
+1. **Universe**: All US equities $15-30, volume > 1M/day (built pre-market)
+2. **Trigger**: Stock crosses +10% from open within 3 minutes
+3. **Volume filter**: Cumulative volume at cross < 300K (avoids crowded trades)
+4. **MACD confirmation**: 3 consecutive positive histogram bars, histogram ≥ 0.5% of price
+5. **Entry**: Limit buy at ask + 0.1%
+
+### Exit Rules
+
+- **MACD flip**: Histogram turns negative → limit sell at bid
+- **Hard stop**: 2% below entry → market sell
+- **Force close**: 15:45 ET → market sell
+- **One trade per symbol per day**
+
+### Running the MACD Wave Service
+
+```bash
+python macd_wave.py                  # Live paper trading
+python macd_wave.py --dry-run        # Monitor only, no orders
+python macd_wave.py --verbose        # Debug logging
+python macd_wave.py --skip-wait      # Skip pre-market wait (testing)
+```
+
+### MACD Wave Backtest
+
+```bash
+python macd_wave_backtest.py                                    # March 2026 (default)
+python macd_wave_backtest.py --start 2025-01-01 --end 2026-03-27  # Full 15 months
+python macd_wave_backtest.py --cross-time 3 --macd-min 0.5 --max-price 30 --max-vol 300000
+python macd_wave_backtest.py --no-slippage                      # Compare without slippage
+python macd_wave_backtest.py --w1-scout --w1-min 5 --max-waves 3  # W1 scout mode
+```
+
+## Running Both Services
+
+The two strategies run as **separate processes** sharing the same Alpaca paper account and SQLite database. They do not interfere with each other.
+
+```bash
+# Terminal 1: Bull Flag service (auto-restarts via systemd)
+python main.py --scan --trade --verbose
+
+# Terminal 2: MACD Wave service
+python macd_wave.py
+
+# Or both via systemd/nohup
+nohup python main.py --scan --trade --verbose &
+nohup python macd_wave.py &
+```
+
+### Service Management
+
+```bash
+# Check running services
+ps aux | grep 'main.py\|macd_wave' | grep -v grep
+
+# Restart bull flag (kill → auto-restart picks up)
+kill $(ps aux | grep 'main.py.*--scan' | grep -v grep | awk '{print $2}')
+
+# Restart MACD wave
+kill $(ps aux | grep 'macd_wave.py' | grep -v grep | awk '{print $2}')
+nohup python macd_wave.py &
+
+# Logs
+tail -f logs/onemil.log       # Bull flag
+tail -f logs/macd_wave.log    # MACD wave
+```
+
+### Pre-Market Universe Builder (Bull Flag)
+
+The bull flag scanner uses a pre-built stock universe. Run the batch builder nightly:
+
+```bash
+python main.py --batch    # Fetches assets, filters by price/float, caches volume profiles
+```
+
+The MACD wave service builds its own universe from Alpaca snapshots at 8:30 AM ET each day — no pre-build needed.
+
 ## Backtesting
 
 ### Single Symbol Backtest
@@ -198,7 +303,8 @@ pytest tests/ -q          # quick summary
 
 ## Future Tasks
 
-- **Implement min_stop_distance $0.09 in production**: Add config param and filter in both backtest and production trade planner
-- **Implement SMA50 slope regime filter**: Add slope check to MarketRegimeFilter — block when SMA50 5-day slope < 0
-- **Run fresh baseline backtest** after implementing above two filters to confirm $289K / Sharpe 2.86 / DD -$26K
+- **BuyMonitor Phase 2**: Replace buy-stop orders with SIP WebSocket limit buys for tighter entry slippage (data collection active via Phase 1 quote monitoring)
+- **MACD Wave W1 scout mode**: Paper-trade W1, only enter W2-3 if W1 >= 5% (tested: 62% WR on W2-3 but low trade count)
+- **L2 data evaluation**: Assess Level 2 order book data for entry timing optimization
+- **Combined P&L dashboard**: Unified daily report across both strategies
 - **News-based late-day entry filter**: Evaluate using news sentiment to allow selective entries after 11:00 ET for catalyst-driven stocks

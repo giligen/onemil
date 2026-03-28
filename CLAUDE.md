@@ -128,14 +128,41 @@ mock_order = MagicMock()  # Alpaca Order object, OK without spec
 ### 4. Use conftest.py Fixtures
 Pre-configure fixtures with spec= in `tests/conftest.py`.
 
+# Two Trading Services
+
+## Service 1: Bull Flag (`main.py`)
+```bash
+python main.py --scan --trade --verbose    # Live paper trading
+python main.py --batch                     # Nightly universe builder
+python main.py --test-cycle --trade        # One-shot test cycle
+```
+- Auto-restarts via systemd
+- Kill to restart: `kill $(ps aux | grep 'main.py.*--scan' | grep -v grep | awk '{print $2}')`
+- Config: `config.yaml`
+- Logs: `logs/onemil.log`
+
+## Service 2: MACD Wave (`macd_wave.py`)
+```bash
+python macd_wave.py                  # Live paper trading
+python macd_wave.py --dry-run        # Monitor only, no orders
+python macd_wave.py --verbose        # Debug logging
+```
+- Separate process, shares Alpaca account + DB with bull flag
+- Config: `macd_wave.yaml` (validated filters: $15-30, cross<3m, MACD≥0.5%, vol<300K, 2% stop)
+- Logs: `logs/macd_wave.log`
+- Telegram: messages prefixed with `[MACD Wave]`
+- DB: trades table has `strategy` column ('bull_flag' or 'macd_wave')
+
 # Running Backtests
 
-## Single symbol
+## Bull Flag Backtests
+
+### Single symbol
 ```bash
 python backtest.py PLYX 2026-03-13 --verbose
 ```
 
-## Batch backtest (all movers in a date range)
+### Batch backtest (all movers in a date range)
 ```bash
 python batch_backtest.py --start 2026-02-01 --end 2026-03-13 --verbose
 ```
@@ -143,9 +170,31 @@ python batch_backtest.py --start 2026-02-01 --end 2026-03-13 --verbose
 - Output: CSV file with trade-level results
 - Default filters: skip midday (11:30-14:00 ET) entries
 
-## Backtest defaults
+### Backtest defaults
 - `BacktestRunner(min_price=0.0, skip_midday=True)` — skip midday is the only default filter
 - To override: pass `min_price=5.0` or `skip_midday=False` to `BacktestRunner`
+
+## MACD Wave Backtests
+
+```bash
+# Default: March 2026
+python macd_wave_backtest.py
+
+# Full 15-month validation
+python macd_wave_backtest.py --start 2025-01-01 --end 2026-03-27
+
+# With winning filters (these are the defaults in macd_wave.yaml)
+python macd_wave_backtest.py --cross-time 3 --macd-min 0.5 --max-price 30 --max-vol 300000
+
+# Without slippage for comparison
+python macd_wave_backtest.py --no-slippage
+
+# W1 scout mode (paper W1, trade W2+)
+python macd_wave_backtest.py --w1-scout --w1-min 5 --max-waves 3
+```
+- Daily bars cached in `daily_bars` table (first run ~5min for full universe, subsequent instant)
+- 1-min bars cached in `intraday_bars_1min` table
+- All filter params configurable via CLI or `macd_wave.yaml`
 
 # Interactive Sessions
 * I'm here for you to answer questions and clarify ambiguous points/logic
