@@ -7,18 +7,18 @@ strategy:
 
 # Universe filters (applied to daily bars to find candidates)
 universe:
-  min_price: 15.0           # Validated: $15-30 sweet spot
+  min_price: 5.0            # Original validated run included $5-15 stocks (FLYE $5.16, BTTC $13.65 = $60K P&L)
   max_price: 30.0           # Validated: >$30 kills WR, >$50 loses money
   min_daily_volume: 1000000 # Minimum day volume
   min_intraday_pct: 10.0
 
 # Entry filters (applied at the +threshold% cross point)
 entry:
-  cross_time_max_min: 0     # 0 = disabled. Tight filters (3min) cut P&L $122K→$49K
+  cross_time_max_min: 3     # Validated: cross within 3min of open
   min_vol_at_cross: 0       # 0 = disabled
-  max_vol_at_cross: 0       # 0 = disabled. 300K filter too aggressive
-  min_macd_hist_pct: 0.0    # 0 = disabled. 0.5% filter cuts too many winners
-  max_price_at_entry: 0     # 0 = disabled
+  max_vol_at_cross: 300000  # Validated: >300K = crowded
+  min_macd_hist_pct: 0.5    # Validated: MACD hist >= 0.5% of price
+  max_price_at_entry: 30    # Match universe max
 
 # MACD indicator parameters
 macd:

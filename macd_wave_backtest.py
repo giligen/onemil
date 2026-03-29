@@ -333,14 +333,10 @@ def generate_signals(
     cross_time_min = si + 1
     vol_at_cross = int(bars.iloc[:si + 1]['volume'].sum())
 
-    # Apply cross-time filter
-    if cross_time_max > 0 and cross_time_min > cross_time_max:
-        return []
-    # Apply volume at cross filters
-    if min_vol_cross > 0 and vol_at_cross < min_vol_cross:
-        return []
-    if max_vol_cross > 0 and vol_at_cross > max_vol_cross:
-        return []
+    # NOTE: cross_time and vol_at_cross filters are applied at ENTRY time
+    # (inside the MACD loop below), NOT here. Early rejection here was a bug
+    # that skipped stocks before MACD was even evaluated — lost 50 trades
+    # and $73K of P&L vs the original validated results.
 
     # Compute MACD
     close = bars['close']
@@ -382,11 +378,20 @@ def generate_signals(
                 raw_price = bars.iloc[i]['close']
                 hist_pct = h / raw_price * 100 if raw_price > 0 else 0
 
-                # Apply MACD histogram filter
+                # Apply ALL entry filters at MACD confirmation point
+                # (not earlier — stock must be evaluated by MACD first)
+                if cross_time_max > 0 and cross_time_min > cross_time_max:
+                    pos_count = 0
+                    continue
+                if min_vol_cross > 0 and vol_at_cross < min_vol_cross:
+                    pos_count = 0
+                    continue
+                if max_vol_cross > 0 and vol_at_cross > max_vol_cross:
+                    pos_count = 0
+                    continue
                 if min_macd_pct > 0 and hist_pct < min_macd_pct:
                     pos_count = 0
                     continue
-                # Apply max price filter
                 if max_price_entry > 0 and raw_price > max_price_entry:
                     pos_count = 0
                     continue
