@@ -411,8 +411,14 @@ def generate_signals(
                 entry_idx = i
                 entry_hist_pct = hist_pct
                 in_trade = True
+                highest_since_entry = entry_price
                 pos_count = 0
         else:
+            # Track highest high for trailing stop
+            bar_high = bars.iloc[i]['high']
+            if bar_high > highest_since_entry:
+                highest_since_entry = bar_high
+
             # Check hard stop
             bar_low = bars.iloc[i]['low']
             hard_stop_price = entry_price * (1 - hard_stop_pct)
@@ -443,6 +449,37 @@ def generate_signals(
                 in_trade = False
                 pos_count = 0
                 continue
+
+            # Check trailing stop
+            trail_stop_pct = entry_filters.get('trail_stop_pct', 0)
+            if trail_stop_pct > 0:
+                trail_stop_price = highest_since_entry * (1 - trail_stop_pct)
+                if bar_low <= trail_stop_price:
+                    exit_price = trail_stop_price * (1 - exit_slippage)
+                    wave += 1
+                    pnl_pct = (exit_price - entry_price) / entry_price * 100
+                    shares = int(position_size / entry_price) if entry_price > 0 else 0
+
+                    if wave == 1:
+                        w1_result = pnl_pct
+
+                    is_paper = w1_scout and wave == 1
+                    if not is_paper:
+                        if w1_scout and wave >= 2 and w1_result < w1_min_pct:
+                            break
+
+                    signals.append({
+                        'wave': wave, 'entry_price': entry_price, 'exit_price': exit_price,
+                        'shares': shares, 'pnl_pct': pnl_pct,
+                        'pnl_dollar': (exit_price - entry_price) * shares,
+                        'entry_time': entry_time, 'exit_time': bar_ts,
+                        'exit_reason': 'trail_stop', 'paper': is_paper,
+                        'cross_time_min': cross_time_min, 'vol_at_cross': vol_at_cross,
+                        'macd_hist_pct': entry_hist_pct, 'w1_pnl': w1_result,
+                    })
+                    in_trade = False
+                    pos_count = 0
+                    continue
 
             # Check MACD flip
             if h <= 0:
@@ -725,6 +762,7 @@ def main():
     parser.add_argument("--w1-min", type=float, default=None, help="Min W1 %% to qualify W2+")
     parser.add_argument("--position-size", type=float, default=None)
     parser.add_argument("--max-concurrent", type=int, default=None)
+    parser.add_argument("--trail", type=float, default=None, help="Trailing stop %% below highest (e.g., 0.5 = 0.5%%)")
     parser.add_argument("--no-slippage", action="store_true")
     parser.add_argument("--verbose", "-v", action="store_true")
 
@@ -786,6 +824,8 @@ def main():
     label = f"{args.start} to {args.end}"
     if filters:
         label += f" | {' + '.join(filters)}"
+    if args.trail is not None:
+        filters.append(f"trail={args.trail}%")
     if args.no_slippage:
         label += " | NO SLIPPAGE"
 
@@ -818,6 +858,7 @@ def main():
         'position_size': sizing_cfg.get('position_size', 40000),
         'entry_pct': slip_cfg.get('entry_pct', 0.003),
         'exit_pct': slip_cfg.get('exit_pct', 0.003),
+        'trail_stop_pct': args.trail / 100 if args.trail is not None else 0,
     }
 
     all_signals = []

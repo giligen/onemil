@@ -35,6 +35,7 @@ class OpenPosition:
     order_id: str
     entry_time: datetime
     macd_hist_at_entry: float = 0.0
+    highest_since_entry: float = 0.0  # For trailing stop
 
 
 @dataclass
@@ -106,6 +107,7 @@ class MACDWaveEngine:
         # Risk
         risk = cfg.get('risk', {})
         self.hard_stop_pct = float(risk.get('hard_stop_pct', 0.02))
+        self.trail_stop_pct = float(risk.get('trail_stop_pct', 0.003))  # 0.3% trail below highest
         self.daily_loss_limit = float(risk.get('daily_loss_limit', -5000))
 
         # Slippage (for logging comparison, not applied to orders)
@@ -424,6 +426,7 @@ class MACDWaveEngine:
                 order_id=order_id,
                 entry_time=datetime.now(timezone.utc),
                 macd_hist_at_entry=macd_hist_pct,
+                highest_since_entry=limit_price,
             )
             self.trades_today += 1
 
@@ -502,13 +505,31 @@ class MACDWaveEngine:
 
                 latest_bar = bars.iloc[-1]
                 latest_low = latest_bar['low']
+                latest_high = latest_bar['high']
                 latest_close = latest_bar['close']
 
-                # Hard stop check
+                # Track highest high for trailing stop
+                if latest_high > pos.highest_since_entry:
+                    pos.highest_since_entry = latest_high
+
+                # Hard stop check (crash protection)
                 if latest_low <= pos.hard_stop:
                     self._submit_exit(sym, 'hard_stop')
                     exits.append(sym)
                     continue
+
+                # Trailing stop check (profit protection)
+                if self.trail_stop_pct > 0 and pos.highest_since_entry > 0:
+                    trail_price = pos.highest_since_entry * (1 - self.trail_stop_pct)
+                    if latest_low <= trail_price:
+                        logger.info(
+                            f"[{self.STRATEGY_NAME}] {sym}: trail stop — "
+                            f"high=${pos.highest_since_entry:.2f}, "
+                            f"trail=${trail_price:.2f}, low=${latest_low:.2f}"
+                        )
+                        self._submit_exit(sym, 'trail_stop')
+                        exits.append(sym)
+                        continue
 
                 # MACD flip check
                 close = bars['close']

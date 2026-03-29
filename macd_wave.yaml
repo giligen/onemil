@@ -14,7 +14,7 @@ universe:
 
 # Entry filters (applied at the +threshold% cross point)
 entry:
-  cross_time_max_min: 3     # Validated: cross within 3min of open
+  cross_time_max_min: 0     # Validated: cross within 3min of open
   min_vol_at_cross: 0       # 0 = disabled
   max_vol_at_cross: 300000  # Validated: >300K = crowded
   min_macd_hist_pct: 0.5    # Validated: MACD hist >= 0.5% of price
@@ -45,5 +45,8 @@ slippage:
 
 # Risk management
 risk:
-  hard_stop_pct: 0.02       # 2% hard stop loss per trade
+  hard_stop_pct: 0.02       # 2% hard stop loss per trade (crash protection)
+  trail_stop_pct: 0.003     # 0.3% trail below highest high (profit protection)
+                             # Validated: 48% WR, +$260K, 13/15 green months
+                             # Without trail: 30% WR, lottery-dependent
   daily_loss_limit: -5000   # Stop trading after this $ daily loss (0 = disabled)
