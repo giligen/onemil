@@ -145,12 +145,30 @@ def main():
     db = get_database()
     notifier = create_notifier(config)
 
+    # StopMonitor for real-time trail stop + hard stop via SIP WebSocket
+    # Separate instance from bull flag's StopMonitor (different process)
+    from trading.stop_monitor import StopMonitor
+    stop_monitor = StopMonitor(
+        api_key=api_key,
+        api_secret=api_secret,
+        alpaca_client=alpaca,
+        marketable_limit_offset=0.03,
+        marketable_limit_offset_pct=0.005,
+        notifier=notifier,
+    )
+    stop_monitor.start()
+    logger.info(
+        f"StopMonitor STARTED for MACD wave — "
+        f"offset=${0.03}, offset_pct={0.005:.1%}"
+    )
+
     engine = MACDWaveEngine(
         alpaca_client=alpaca,
         db=db,
         notifier=notifier,
         config=config,
         dry_run=args.dry_run,
+        stop_monitor=stop_monitor,
     )
 
     # Graceful shutdown

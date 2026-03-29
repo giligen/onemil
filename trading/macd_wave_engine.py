@@ -70,11 +70,13 @@ class MACDWaveEngine:
         notifier=None,
         config: Optional[dict] = None,
         dry_run: bool = False,
+        stop_monitor=None,
     ):
         cfg = config or {}
         self.alpaca = alpaca_client
         self.db = db
         self.notifier = notifier
+        self.stop_monitor = stop_monitor
         self.dry_run = dry_run
 
         # Universe filters
@@ -439,7 +441,26 @@ class MACDWaveEngine:
                 self.notifier.send_message(
                     f"[MACD Wave] 📈 BUY {symbol} ${limit_price:.2f} × {shares}sh "
                     f"(${self.position_size:,.0f}) — MACD hist {macd_hist_pct:.2f}%, "
-                    f"hard stop ${hard_stop:.2f}"
+                    f"hard stop ${hard_stop:.2f}, trail {self.trail_stop_pct*100:.1f}%"
+                )
+
+            # Wire StopMonitor for real-time trail + hard stop via SIP WebSocket
+            # risk_per_share = trail distance (0.3% of entry = 1R)
+            # trail_r = 1.0 means trail 1R below highest = 0.3%
+            # activate_at_r = 0 means trail active immediately
+            if self.stop_monitor:
+                risk_for_trail = limit_price * self.trail_stop_pct
+                self.stop_monitor.add_watch(
+                    symbol=symbol,
+                    stop_price=hard_stop,
+                    shares=shares,
+                    tp_leg_id='',
+                    sl_leg_id='',
+                    trade_db_id=trade_id,
+                    entry_price=limit_price,
+                    risk_per_share=risk_for_trail,
+                    trail_r=1.0,
+                    activate_at_r=0.0,
                 )
 
             return True
@@ -456,14 +477,64 @@ class MACDWaveEngine:
         """
         Check open positions for exit signals.
 
-        Hard stop: bar.low <= stop → market sell
-        MACD flip: histogram turns negative → limit sell at bid
+        Two exit paths:
+        1. StopMonitor (real-time via SIP WebSocket): trail stop + hard stop
+        2. Polling (60s via 1-min bars): MACD histogram flip
+
+        StopMonitor events are drained EVERY cycle, even if no open positions
+        (events could arrive between cycles).
         """
         exits = []
 
+        # 1. Drain StopMonitor exit events (real-time trail/hard stop exits)
+        if self.stop_monitor:
+            for event in self.stop_monitor.drain_exit_events():
+                sym = event.symbol
+                pos = self.open_positions.get(sym)
+                if not pos:
+                    logger.warning(f"[{self.STRATEGY_NAME}] {sym}: StopMonitor exit but no position")
+                    continue
+
+                exit_price = event.exit_price
+                pnl = (exit_price - pos.entry_price) * pos.shares
+                pnl_pct = (exit_price - pos.entry_price) / pos.entry_price * 100 if pos.entry_price > 0 else 0
+                self.daily_pnl += pnl
+
+                self.db.update_trade(pos.trade_id, {
+                    'exit_price': exit_price,
+                    'exit_reason': event.exit_reason,
+                    'exited_at': datetime.now(timezone.utc),
+                    'pnl': pnl,
+                    'pnl_pct': pnl_pct,
+                    'exit_trigger_price': event.exit_trigger_price,
+                    'exit_quote_bid': event.exit_quote_bid,
+                    'exit_quote_ask': event.exit_quote_ask,
+                    'exit_limit_price': event.exit_limit_price,
+                    'exit_pricing_method': event.pricing_method,
+                })
+
+                emoji = '✅' if pnl > 0 else '❌'
+                logger.info(
+                    f"[{self.STRATEGY_NAME}] {emoji} EXIT {sym} ${exit_price:.2f} "
+                    f"{pnl_pct:+.1f}% (${pnl:+,.0f}) — {event.exit_reason} (StopMonitor)"
+                )
+                if self.notifier:
+                    self.notifier.send_message(
+                        f"[MACD Wave] {emoji} SELL {sym} ${exit_price:.2f} "
+                        f"{pnl_pct:+.1f}% (${pnl:+,.0f}) — {event.exit_reason}"
+                    )
+
+                del self.open_positions[sym]
+                self.invalidated.add(sym)
+                exits.append(sym)
+
+        # 2. Check pending order fills + MACD flip on remaining positions
         for sym, pos in list(self.open_positions.items()):
+            if sym in exits:
+                continue  # Already exited by StopMonitor this cycle
+
             try:
-                # Check if order filled first
+                # Check if entry order filled
                 if pos.order_id:
                     try:
                         order_status = self.alpaca.get_order(pos.order_id)
@@ -474,6 +545,7 @@ class MACDWaveEngine:
                             if fill_price:
                                 pos.entry_price = float(fill_price)
                                 pos.hard_stop = round(pos.entry_price * (1 - self.hard_stop_pct), 2)
+                                pos.highest_since_entry = pos.entry_price
                                 if filled_qty:
                                     pos.shares = int(filled_qty)
                                 self.db.update_trade(pos.trade_id, {
@@ -482,13 +554,29 @@ class MACDWaveEngine:
                                     'filled_qty': pos.shares,
                                     'filled_at': datetime.now(timezone.utc),
                                 })
-                                pos.order_id = ''  # Clear — filled
+                                pos.order_id = ''
                                 logger.info(
                                     f"[{self.STRATEGY_NAME}] {sym}: filled @ ${pos.entry_price:.2f} "
                                     f"({pos.shares}sh)"
                                 )
+                                # Update StopMonitor with actual fill price
+                                if self.stop_monitor:
+                                    risk_for_trail = pos.entry_price * self.trail_stop_pct
+                                    self.stop_monitor.remove_watch(sym)
+                                    self.stop_monitor.add_watch(
+                                        symbol=sym,
+                                        stop_price=pos.hard_stop,
+                                        shares=pos.shares,
+                                        tp_leg_id='', sl_leg_id='',
+                                        trade_db_id=pos.trade_id,
+                                        entry_price=pos.entry_price,
+                                        risk_per_share=risk_for_trail,
+                                        trail_r=1.0, activate_at_r=0.0,
+                                    )
                         elif status in ('cancelled', 'expired', 'rejected'):
                             logger.warning(f"[{self.STRATEGY_NAME}] {sym}: order {status}")
+                            if self.stop_monitor:
+                                self.stop_monitor.remove_watch(sym)
                             del self.open_positions[sym]
                             self.invalidated.add(sym)
                             self.db.update_trade(pos.trade_id, {'order_status': status})
@@ -498,46 +586,22 @@ class MACDWaveEngine:
                     except Exception:
                         continue
 
-                # Fetch latest bar
-                bars = self.alpaca.get_1min_bars(sym, lookback_minutes=60)
+                # MACD flip check (polling — only signal that needs bar computation)
+                now_et = datetime.now(ET)
+                mins = max(30, int((now_et - now_et.replace(hour=9, minute=30, second=0)).total_seconds() / 60))
+                bars = self.alpaca.get_1min_bars(sym, lookback_minutes=mins)
                 if bars is None or len(bars) < self.macd_slow + self.macd_signal:
                     continue
 
-                latest_bar = bars.iloc[-1]
-                latest_low = latest_bar['low']
-                latest_high = latest_bar['high']
-                latest_close = latest_bar['close']
-
-                # Track highest high for trailing stop
-                if latest_high > pos.highest_since_entry:
-                    pos.highest_since_entry = latest_high
-
-                # Hard stop check (crash protection)
-                if latest_low <= pos.hard_stop:
-                    self._submit_exit(sym, 'hard_stop')
-                    exits.append(sym)
-                    continue
-
-                # Trailing stop check (profit protection)
-                if self.trail_stop_pct > 0 and pos.highest_since_entry > 0:
-                    trail_price = pos.highest_since_entry * (1 - self.trail_stop_pct)
-                    if latest_low <= trail_price:
-                        logger.info(
-                            f"[{self.STRATEGY_NAME}] {sym}: trail stop — "
-                            f"high=${pos.highest_since_entry:.2f}, "
-                            f"trail=${trail_price:.2f}, low=${latest_low:.2f}"
-                        )
-                        self._submit_exit(sym, 'trail_stop')
-                        exits.append(sym)
-                        continue
-
-                # MACD flip check
                 close = bars['close']
                 ema_fast = close.ewm(span=self.macd_fast, adjust=False).mean()
                 ema_slow = close.ewm(span=self.macd_slow, adjust=False).mean()
                 histogram = (ema_fast - ema_slow) - (ema_fast - ema_slow).ewm(span=self.macd_signal, adjust=False).mean()
 
                 if histogram.iloc[-1] <= 0:
+                    # MACD flipped — remove from StopMonitor FIRST, then exit
+                    if self.stop_monitor:
+                        self.stop_monitor.remove_watch(sym)
                     self._submit_exit(sym, 'macd_flip')
                     exits.append(sym)
 
@@ -562,11 +626,11 @@ class MACDWaveEngine:
                 self.invalidated.add(symbol)
                 return True
 
-            if reason == 'hard_stop':
-                # Market sell for speed
+            if reason == 'force_close':
+                # Market sell — end of day
                 result = self.alpaca.close_position(symbol)
                 order_id = result.get('id', '') if result else ''
-                exit_price = pos.hard_stop
+                exit_price = pos.entry_price  # Approximate, will update on fill
             else:
                 # MACD flip — limit sell at bid
                 quote = self.alpaca.get_latest_quote(symbol)
@@ -629,6 +693,15 @@ class MACDWaveEngine:
 
     def force_close_all(self) -> int:
         """Force close all open positions at market. Returns count closed."""
+        # Remove all watches from StopMonitor FIRST
+        if self.stop_monitor:
+            for sym in list(self.open_positions.keys()):
+                self.stop_monitor.remove_watch(sym)
+
+        # Drain any pending StopMonitor events
+        if self.stop_monitor:
+            self.check_exits()  # Process any real-time exits that fired
+
         closed = 0
         for sym in list(self.open_positions.keys()):
             if self._submit_exit(sym, 'force_close'):
