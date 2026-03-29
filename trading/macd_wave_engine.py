@@ -444,24 +444,9 @@ class MACDWaveEngine:
                     f"hard stop ${hard_stop:.2f}, trail {self.trail_stop_pct*100:.1f}%"
                 )
 
-            # Wire StopMonitor for real-time trail + hard stop via SIP WebSocket
-            # risk_per_share = trail distance (0.3% of entry = 1R)
-            # trail_r = 1.0 means trail 1R below highest = 0.3%
-            # activate_at_r = 0 means trail active immediately
-            if self.stop_monitor:
-                risk_for_trail = limit_price * self.trail_stop_pct
-                self.stop_monitor.add_watch(
-                    symbol=symbol,
-                    stop_price=hard_stop,
-                    shares=shares,
-                    tp_leg_id='',
-                    sl_leg_id='',
-                    trade_db_id=trade_id,
-                    entry_price=limit_price,
-                    risk_per_share=risk_for_trail,
-                    trail_r=1.0,
-                    activate_at_r=0.0,
-                )
+            # NOTE: StopMonitor watch added AFTER fill confirmation in check_exits(),
+            # NOT here. Adding before fill would let StopMonitor sell shares we
+            # don't own yet → naked short position.
 
             return True
 
@@ -559,10 +544,9 @@ class MACDWaveEngine:
                                     f"[{self.STRATEGY_NAME}] {sym}: filled @ ${pos.entry_price:.2f} "
                                     f"({pos.shares}sh)"
                                 )
-                                # Update StopMonitor with actual fill price
+                                # NOW add StopMonitor watch (only after fill confirmed)
                                 if self.stop_monitor:
                                     risk_for_trail = pos.entry_price * self.trail_stop_pct
-                                    self.stop_monitor.remove_watch(sym)
                                     self.stop_monitor.add_watch(
                                         symbol=sym,
                                         stop_price=pos.hard_stop,
@@ -575,15 +559,14 @@ class MACDWaveEngine:
                                     )
                         elif status in ('cancelled', 'expired', 'rejected'):
                             logger.warning(f"[{self.STRATEGY_NAME}] {sym}: order {status}")
-                            if self.stop_monitor:
-                                self.stop_monitor.remove_watch(sym)
                             del self.open_positions[sym]
                             self.invalidated.add(sym)
                             self.db.update_trade(pos.trade_id, {'order_status': status})
                             continue
                         else:
                             continue  # Still pending
-                    except Exception:
+                    except Exception as e:
+                        logger.warning(f"[{self.STRATEGY_NAME}] {sym}: fill check failed: {e}")
                         continue
 
                 # MACD flip check (polling — only signal that needs bar computation)
@@ -693,14 +676,27 @@ class MACDWaveEngine:
 
     def force_close_all(self) -> int:
         """Force close all open positions at market. Returns count closed."""
-        # Remove all watches from StopMonitor FIRST
+        # Remove all watches from StopMonitor FIRST (prevents race with _on_trade)
         if self.stop_monitor:
             for sym in list(self.open_positions.keys()):
                 self.stop_monitor.remove_watch(sym)
 
-        # Drain any pending StopMonitor events
-        if self.stop_monitor:
-            self.check_exits()  # Process any real-time exits that fired
+            # Drain any pending StopMonitor events (DON'T call check_exits —
+            # that would trigger MACD flip sells and double-sell positions)
+            for event in self.stop_monitor.drain_exit_events():
+                sym = event.symbol
+                if sym in self.open_positions:
+                    pos = self.open_positions[sym]
+                    pnl = (event.exit_price - pos.entry_price) * pos.shares
+                    self.db.update_trade(pos.trade_id, {
+                        'exit_price': event.exit_price,
+                        'exit_reason': event.exit_reason,
+                        'exited_at': datetime.now(timezone.utc),
+                        'pnl': pnl,
+                    })
+                    del self.open_positions[sym]
+                    self.invalidated.add(sym)
+                    logger.info(f"[{self.STRATEGY_NAME}] {sym}: drained StopMonitor exit before force close")
 
         closed = 0
         for sym in list(self.open_positions.keys()):
@@ -777,4 +773,5 @@ class MACDWaveEngine:
     def is_force_close_time(self) -> bool:
         """Check if it's time to force close all positions."""
         now = datetime.now(ET)
-        return now.hour >= self.force_close_hour and now.minute >= self.force_close_minute
+        return (now.hour > self.force_close_hour or
+                (now.hour == self.force_close_hour and now.minute >= self.force_close_minute))
