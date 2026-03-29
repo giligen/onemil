@@ -127,12 +127,17 @@ def find_movers(
     client = AlpacaClient(os.getenv('ALPACA_API_KEY'), os.getenv('ALPACA_API_SECRET'))
     conn = sqlite3.connect('data/onemil.db')
 
-    # Check which dates are already cached (have any daily bars)
+    # Check which dates have FULL market daily bars cached (not just bull flag universe).
+    # A date is "fully cached" if it has bars for 5000+ symbols (full market scan).
+    # Dates with fewer bars only have our 859-stock bull flag universe.
     cur = conn.execute(
-        "SELECT DISTINCT bar_date FROM daily_bars WHERE bar_date >= ? AND bar_date <= ?",
+        "SELECT bar_date, COUNT(DISTINCT symbol) as cnt FROM daily_bars "
+        "WHERE bar_date >= ? AND bar_date <= ? GROUP BY bar_date",
         (str(start_date), str(end_date))
     )
-    cached_dates = set(r[0] for r in cur.fetchall())
+    date_counts = {r[0]: r[1] for r in cur.fetchall()}
+    # Consider "fully cached" if 5000+ symbols (full market has ~12K, but many are low-price/no-vol)
+    cached_dates = set(d for d, cnt in date_counts.items() if cnt >= 5000)
 
     # Generate all trading dates in range (approximate — weekdays)
     all_dates = set()
@@ -143,7 +148,12 @@ def find_movers(
         d += timedelta(days=1)
 
     missing_dates = all_dates - cached_dates
-    logger.info(f"Daily bars: {len(cached_dates)} dates cached, {len(missing_dates)} missing")
+    partially_cached = set(date_counts.keys()) - cached_dates
+    logger.info(
+        f"Daily bars: {len(cached_dates)} fully cached, "
+        f"{len(partially_cached)} partial (bull flag only), "
+        f"{len(missing_dates)} need full market fetch"
+    )
 
     # Fetch missing dates from Alpaca
     if missing_dates:
