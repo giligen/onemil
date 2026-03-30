@@ -81,6 +81,11 @@ class TelegramNotifier:
             return False
 
         try:
+            # Telegram max message length is 4096 chars
+            if len(message) > 4096:
+                logger.warning(f"Telegram message truncated ({len(message)} -> 4096 chars)")
+                message = message[:4090] + "\n..."
+
             async with aiohttp.ClientSession() as session:
                 payload = {
                     "chat_id": self.chat_id,
@@ -203,7 +208,7 @@ class TelegramNotifier:
                                 entry: float) -> None:
         """Notify that a bracket order was submitted."""
         msg = (
-            f"📤 <b>Order Submitted: {html.escape(symbol)}</b>\n\n"
+            f"📤 <b>[Bull Flag] Order Submitted: {html.escape(symbol)}</b>\n\n"
             f"🆔 Order: <code>{html.escape(order_id)}</code>\n"
             f"📦 {shares} shares @ ${entry:.2f}\n"
             f"⏰ {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"
@@ -214,7 +219,7 @@ class TelegramNotifier:
                              order_id: str) -> None:
         """Notify that an order was filled."""
         msg = (
-            f"✅ <b>Order Filled: {html.escape(symbol)}</b>\n\n"
+            f"✅ <b>[Bull Flag] Order Filled: {html.escape(symbol)}</b>\n\n"
             f"📦 {shares} shares @ <b>${fill_price:.2f}</b>\n"
             f"🆔 <code>{html.escape(order_id)}</code>"
         )
@@ -243,7 +248,7 @@ class TelegramNotifier:
         reason_label = reason_map.get(exit_reason, exit_reason)
 
         msg = (
-            f"{pnl_emoji} <b>Position Closed: {html.escape(symbol)}</b>\n\n"
+            f"{pnl_emoji} <b>[Bull Flag] Position Closed: {html.escape(symbol)}</b>\n\n"
             f"📊 Entry: ${entry_price:.2f} → Exit: ${exit_price:.2f}\n"
             f"📈 P&L: <b>{pnl_sign}${pnl:.2f}</b> ({pnl_sign}{pnl_pct:.1f}%)\n"
             f"📦 Shares: {shares}\n"

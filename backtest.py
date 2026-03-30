@@ -1687,9 +1687,30 @@ def main():
 
     logger.info(f"Fetched {len(bars)} bars for {symbol}")
 
+    # Fetch previous trading day bars for MACD warm-up
+    prev_day_bars = None
+    try:
+        from datetime import timedelta
+        prev_date = trade_date - timedelta(days=1)
+        # Skip weekends
+        while prev_date.weekday() >= 5:
+            prev_date -= timedelta(days=1)
+        prev_open_et = _ET.localize(prev_date.replace(hour=9, minute=30, second=0))
+        prev_close_et = _ET.localize(prev_date.replace(hour=16, minute=0, second=0))
+        prev_open = prev_open_et.astimezone(timezone.utc)
+        prev_close = prev_close_et.astimezone(timezone.utc)
+        prev_day_bars = client.get_historical_1min_bars(symbol, prev_open, prev_close)
+        if prev_day_bars is not None and not prev_day_bars.empty:
+            logger.info(f"MACD warm-up: {len(prev_day_bars)} bars from {prev_date.strftime('%Y-%m-%d')}")
+        else:
+            logger.warning(f"No previous-day bars for MACD warm-up")
+            prev_day_bars = None
+    except Exception as e:
+        logger.warning(f"Failed to fetch prev-day bars for MACD warm-up: {e}")
+
     # Run backtest
     runner = BacktestRunner()
-    result = runner.run(symbol, bars, args.date)
+    result = runner.run(symbol, bars, args.date, prev_day_bars=prev_day_bars)
 
     # Print report
     print_report(result)

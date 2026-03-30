@@ -197,6 +197,7 @@ def main():
         time_mod.sleep(30)
 
     if engine.shutdown_requested:
+        stop_monitor.stop()
         logger.info("Shutdown before market open")
         return
 
@@ -243,6 +244,7 @@ def main():
     # End of day
     engine.force_close_all()  # In case we exited loop early
     engine.send_daily_report()
+    stop_monitor.stop()  # Close WebSocket — prevents connection limit on restarts
     logger.info("MACD Wave Service stopped")
 
 

@@ -123,6 +123,7 @@ class OrderExecutor:
             'pnl': None,
             'pnl_pct': None,
             'pattern_data': pattern_data,
+            'strategy': 'bull_flag',
             'created_at': now,
             'updated_at': now,
         }
@@ -253,6 +254,7 @@ class OrderExecutor:
             'pnl': None,
             'pnl_pct': None,
             'pattern_data': pattern_data,
+            'strategy': 'bull_flag',
             'created_at': now,
             'updated_at': now,
         }

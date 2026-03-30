@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import numpy as np
 import pandas as pd
 import pytz
+from dateutil.parser import isoparse
 
 logger = logging.getLogger(__name__)
 
@@ -163,7 +164,7 @@ class MACDWaveEngine:
         for i in range(0, len(candidates), chunk_size):
             chunk = candidates[i:i + chunk_size]
             try:
-                trades = self.alpaca.get_latest_trades_batch(chunk)
+                trades = self.alpaca.get_latest_trades(chunk)
                 for sym, trade_data in trades.items():
                     price = trade_data.get('price', 0)
                     if self.min_price <= price <= self.max_price:
@@ -177,7 +178,7 @@ class MACDWaveEngine:
         )
 
         if self.notifier:
-            self.notifier.send_message(
+            self.notifier.send_message_sync(
                 f"[MACD Wave] Service started — universe: {len(self.universe)} stocks "
                 f"(${self.min_price:.0f}-${self.max_price:.0f})"
             )
@@ -199,16 +200,40 @@ class MACDWaveEngine:
             return []
 
         now_et = datetime.now(ET)
-        minutes_since_open = max(0, int((now_et - now_et.replace(hour=9, minute=30, second=0)).total_seconds() / 60))
+        market_open_et = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        minutes_since_open = max(0, int((now_et - market_open_et).total_seconds() / 60))
 
         new_crosses = []
 
-        # Fetch latest trades in chunks
+        # First cycle: fetch real open prices from Alpaca snapshots
+        if not self.universe_opens:
+            symbols_needing_opens = [s for s in self.universe
+                                     if s not in self.crossed_stocks and s not in self.invalidated]
+            logger.info(
+                f"[{self.STRATEGY_NAME}] Recording open prices for {len(symbols_needing_opens)} symbols via snapshots..."
+            )
+            chunk_size = 200
+            for i in range(0, len(symbols_needing_opens), chunk_size):
+                chunk = symbols_needing_opens[i:i + chunk_size]
+                try:
+                    snapshots = self.alpaca.get_snapshots(chunk)
+                    for sym, snap in snapshots.items():
+                        open_price = snap.get('open', 0)
+                        if open_price > 0:
+                            self.universe_opens[sym] = open_price
+                except Exception as e:
+                    logger.warning(f"[{self.STRATEGY_NAME}] Snapshot chunk failed: {e}")
+            logger.info(
+                f"[{self.STRATEGY_NAME}] Open prices recorded: {len(self.universe_opens)} stocks"
+            )
+            return new_crosses  # First cycle just records opens — scan on next cycle
+
+        # Subsequent cycles: fetch latest trades and compare to recorded opens
         chunk_size = 200
         for i in range(0, len(self.universe), chunk_size):
             chunk = self.universe[i:i + chunk_size]
             try:
-                trades = self.alpaca.get_latest_trades_batch(chunk)
+                trades = self.alpaca.get_latest_trades(chunk)
                 for sym, trade_data in trades.items():
                     if sym in self.crossed_stocks or sym in self.invalidated:
                         continue
@@ -216,11 +241,16 @@ class MACDWaveEngine:
                         continue
 
                     price = trade_data.get('price', 0)
-                    open_price = self.universe_opens.get(sym)
 
-                    # First time seeing this symbol today — record open
-                    if open_price is None:
-                        self.universe_opens[sym] = price
+                    # Skip stale trades from before today's open
+                    trade_ts = trade_data.get('timestamp')
+                    if trade_ts:
+                        trade_dt = isoparse(trade_ts)
+                        if trade_dt.astimezone(ET) < market_open_et:
+                            continue
+
+                    open_price = self.universe_opens.get(sym)
+                    if open_price is None or open_price <= 0:
                         continue
 
                     if open_price <= 0:
@@ -267,7 +297,7 @@ class MACDWaveEngine:
                         f"in {minutes_since_open}min, vol {vol_at_cross:,} — monitoring MACD"
                     )
                     if self.notifier:
-                        self.notifier.send_message(
+                        self.notifier.send_message_sync(
                             f"[MACD Wave] 🔍 {sym} crossed +{pct_change:.1f}% "
                             f"in {minutes_since_open}min, vol {vol_at_cross:,} — monitoring MACD"
                         )
@@ -314,6 +344,10 @@ class MACDWaveEngine:
                 mins = max(30, int((now_et - now_et.replace(hour=9, minute=30, second=0)).total_seconds() / 60))
                 bars = self.alpaca.get_1min_bars(sym, lookback_minutes=mins)
                 if bars is None or len(bars) < self.macd_slow + self.macd_signal:
+                    logger.info(
+                        f"[{self.STRATEGY_NAME}] {sym}: insufficient bars "
+                        f"({len(bars) if bars is not None else 0}, need {self.macd_slow + self.macd_signal})"
+                    )
                     continue
 
                 # Compute MACD
@@ -324,26 +358,48 @@ class MACDWaveEngine:
                 signal_line = macd_line.ewm(span=self.macd_signal, adjust=False).mean()
                 histogram = macd_line - signal_line
 
-                # Check latest bar histogram
-                latest_hist = histogram.iloc[-1]
+                # Count consecutive positive histogram bars from the end
                 latest_price = close.iloc[-1]
+                latest_hist = histogram.iloc[-1]
                 hist_pct = latest_hist / latest_price * 100 if latest_price > 0 else 0
 
-                if latest_hist > 0:
-                    crossed.pos_count += 1
-                else:
-                    crossed.pos_count = 0
+                consecutive_pos = 0
+                for h in reversed(histogram.values):
+                    if h > 0:
+                        consecutive_pos += 1
+                    else:
+                        break
+                crossed.pos_count = consecutive_pos
+
+                logger.info(
+                    f"[{self.STRATEGY_NAME}] {sym}: MACD check — "
+                    f"pos_count={consecutive_pos}, hist_pct={hist_pct:.2f}%, "
+                    f"price=${latest_price:.2f}, bars={len(bars)}"
+                )
 
                 # Entry signal: N consecutive positive bars + histogram strength
                 if crossed.pos_count >= self.confirm_bars:
                     if self.min_macd_hist_pct > 0 and hist_pct < self.min_macd_hist_pct:
+                        logger.info(
+                            f"[{self.STRATEGY_NAME}] {sym}: MACD hist too weak "
+                            f"({hist_pct:.2f}% < {self.min_macd_hist_pct}%), resetting"
+                        )
                         crossed.pos_count = 0  # Reset, wait for stronger signal
                         continue
 
                     if self.max_price_at_entry > 0 and latest_price > self.max_price_at_entry:
+                        logger.debug(
+                            f"[{self.STRATEGY_NAME}] {sym}: price ${latest_price:.2f} > "
+                            f"max ${self.max_price_at_entry}, skipping"
+                        )
                         continue
 
                     # ENTRY SIGNAL
+                    logger.info(
+                        f"[{self.STRATEGY_NAME}] {sym}: ENTRY SIGNAL — "
+                        f"pos_count={consecutive_pos}, hist_pct={hist_pct:.2f}%, "
+                        f"price=${latest_price:.2f}"
+                    )
                     result = self._submit_entry(sym, latest_price, hist_pct, crossed)
                     if result:
                         entries.append(sym)
@@ -438,7 +494,7 @@ class MACDWaveEngine:
                 f"cross {crossed.cross_time_min}min, vol {crossed.vol_at_cross:,}"
             )
             if self.notifier:
-                self.notifier.send_message(
+                self.notifier.send_message_sync(
                     f"[MACD Wave] 📈 BUY {symbol} ${limit_price:.2f} × {shares}sh "
                     f"(${self.position_size:,.0f}) — MACD hist {macd_hist_pct:.2f}%, "
                     f"hard stop ${hard_stop:.2f}, trail {self.trail_stop_pct*100:.1f}%"
@@ -504,7 +560,7 @@ class MACDWaveEngine:
                     f"{pnl_pct:+.1f}% (${pnl:+,.0f}) — {event.exit_reason} (StopMonitor)"
                 )
                 if self.notifier:
-                    self.notifier.send_message(
+                    self.notifier.send_message_sync(
                         f"[MACD Wave] {emoji} SELL {sym} ${exit_price:.2f} "
                         f"{pnl_pct:+.1f}% (${pnl:+,.0f}) — {event.exit_reason}"
                     )
@@ -657,7 +713,7 @@ class MACDWaveEngine:
                 f"{pnl_pct:+.1f}% (${pnl:+,.0f}) — {reason}"
             )
             if self.notifier:
-                self.notifier.send_message(
+                self.notifier.send_message_sync(
                     f"[MACD Wave] {emoji} SELL {symbol} ${exit_price:.2f} "
                     f"{pnl_pct:+.1f}% (${pnl:+,.0f}) — {reason}"
                 )
@@ -706,7 +762,7 @@ class MACDWaveEngine:
         if closed:
             logger.info(f"[{self.STRATEGY_NAME}] Force-closed {closed} positions")
             if self.notifier:
-                self.notifier.send_message(
+                self.notifier.send_message_sync(
                     f"[MACD Wave] ⏰ Force-closed {closed} positions — end of day"
                 )
 
@@ -743,7 +799,7 @@ class MACDWaveEngine:
 
         logger.info(msg)
         if self.notifier:
-            self.notifier.send_message(msg)
+            self.notifier.send_message_sync(msg)
 
     # ------------------------------------------------------------------
     # State reset

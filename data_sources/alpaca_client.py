@@ -25,6 +25,7 @@ from alpaca.data.requests import (
     StockLatestQuoteRequest,
     StockBarsRequest,
     StockLatestBarRequest,
+    StockSnapshotRequest,
     NewsRequest,
 )
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
@@ -489,6 +490,56 @@ class AlpacaClient:
         except Exception as e:
             logger.error(f"Failed to get latest trades: {e}")
             raise AlpacaAPIError(f"Failed to get latest trades: {e}")
+
+    def get_snapshots(self, symbols: List[str], feed: DataFeed = DataFeed.SIP) -> Dict[str, Dict]:
+        """
+        Get stock snapshots (today's daily bar open/high/low/close + latest trade).
+
+        Args:
+            symbols: List of stock symbols
+            feed: Data feed (SIP for consolidated data)
+
+        Returns:
+            Dict mapping symbol -> {open, high, low, close, volume, latest_price}
+        """
+        if not symbols:
+            return {}
+
+        try:
+            results = {}
+            chunk_size = 200
+            for i in range(0, len(symbols), chunk_size):
+                chunk = symbols[i:i + chunk_size]
+                request = StockSnapshotRequest(symbol_or_symbols=chunk, feed=feed)
+                snapshots_raw = self._call_with_timeout(
+                    lambda req=request: self.data_client.get_stock_snapshot(req),
+                    f"get_snapshots(chunk {i // chunk_size + 1})"
+                )
+                snapshots = self._to_dict(snapshots_raw)
+                for symbol in chunk:
+                    if symbol in snapshots:
+                        snap = snapshots[symbol]
+                        bar = snap.daily_bar
+                        result = {}
+                        if bar:
+                            result['open'] = float(bar.open) if bar.open else 0
+                            result['high'] = float(bar.high) if bar.high else 0
+                            result['low'] = float(bar.low) if bar.low else 0
+                            result['close'] = float(bar.close) if bar.close else 0
+                            result['volume'] = int(bar.volume) if bar.volume else 0
+                        if snap.latest_trade:
+                            result['latest_price'] = float(snap.latest_trade.price) if snap.latest_trade.price else 0
+                        if result:
+                            results[symbol] = result
+
+            logger.debug(f"Fetched snapshots for {len(results)}/{len(symbols)} symbols")
+            return results
+
+        except AlpacaAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to get snapshots: {e}")
+            raise AlpacaAPIError(f"Failed to get snapshots: {e}")
 
     def get_latest_quote(self, symbol: str, feed: DataFeed = DataFeed.SIP) -> Dict:
         """
@@ -1180,6 +1231,63 @@ class AlpacaClient:
         except Exception as e:
             logger.error(f"Failed to submit stop-bracket order for {symbol}: {e}")
             raise AlpacaAPIError(f"Failed to submit stop-bracket order for {symbol}: {e}")
+
+    def submit_limit_buy_order(
+        self, symbol: str, qty: int, limit_price: float
+    ) -> Dict:
+        """
+        Submit a plain limit buy order (no bracket).
+
+        Used by MACD wave engine for entries — limit price set at/above ask
+        for immediate fill while capping worst-case slippage.
+
+        Args:
+            symbol: Stock symbol
+            qty: Number of shares to buy
+            limit_price: Limit price
+
+        Returns:
+            Dict with order details (id, status, symbol)
+
+        Raises:
+            AlpacaAPIError: If order submission fails
+        """
+        try:
+            request = LimitOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=OrderSide.BUY,
+                type=OrderType.LIMIT,
+                time_in_force=TimeInForce.DAY,
+                limit_price=round(limit_price, 2),
+                order_class=OrderClass.SIMPLE,
+            )
+
+            order = self._call_with_timeout(
+                lambda: self.trading_client.submit_order(request),
+                f"submit_limit_buy_order({symbol})"
+            )
+
+            result = {
+                'id': str(order.id) if hasattr(order, 'id') else '',
+                'status': str(order.status.value) if hasattr(order, 'status') else 'unknown',
+                'symbol': symbol,
+                'qty': qty,
+                'limit_price': limit_price,
+            }
+
+            logger.info(
+                f"Limit buy order submitted: {symbol} BUY {qty} "
+                f"@ ${limit_price:.2f} — ID: {result['id']}, "
+                f"status: {result['status']}"
+            )
+            return result
+
+        except AlpacaAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to submit limit buy order for {symbol}: {e}")
+            raise AlpacaAPIError(f"Failed to submit limit buy order for {symbol}: {e}")
 
     def submit_limit_sell_order(
         self, symbol: str, qty: int, limit_price: float

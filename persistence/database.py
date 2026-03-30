@@ -657,6 +657,9 @@ class Database:
             ID of the inserted row
         """
         now = datetime.now(timezone.utc)
+        if 'strategy' not in trade:
+            logger.warning("save_trade called without explicit strategy — defaulting to 'bull_flag'")
+        trade.setdefault('strategy', 'bull_flag')
         trade.setdefault('created_at', now)
         trade.setdefault('updated_at', now)
         cursor = self.conn.execute("""
@@ -666,14 +669,14 @@ class Database:
                                order_id, order_status, fill_price, filled_at,
                                exit_price, exit_reason, exited_at,
                                pnl, pnl_pct, pattern_data,
-                               created_at, updated_at)
+                               strategy, created_at, updated_at)
             VALUES (:trade_date, :symbol, :side, :entry_price,
                     :stop_loss_price, :take_profit_price, :shares,
                     :risk_per_share, :total_risk, :risk_reward_ratio,
                     :order_id, :order_status, :fill_price, :filled_at,
                     :exit_price, :exit_reason, :exited_at,
                     :pnl, :pnl_pct, :pattern_data,
-                    :created_at, :updated_at)
+                    :strategy, :created_at, :updated_at)
         """, trade)
         self.conn.commit()
         logger.info(f"Saved trade: {trade['symbol']} {trade['side']} "
