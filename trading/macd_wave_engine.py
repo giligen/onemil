@@ -158,23 +158,30 @@ class MACDWaveEngine:
             and a.exchange in ('NYSE', 'NASDAQ', 'AMEX', 'ARCA', 'BATS')
         ]
 
-        # Get latest trades to check price range
+        # Get snapshots to check price range + previous day volume
         self.universe = []
+        vol_filtered = 0
         chunk_size = 200
         for i in range(0, len(candidates), chunk_size):
             chunk = candidates[i:i + chunk_size]
             try:
-                trades = self.alpaca.get_latest_trades(chunk)
-                for sym, trade_data in trades.items():
-                    price = trade_data.get('price', 0)
-                    if self.min_price <= price <= self.max_price:
-                        self.universe.append(sym)
+                snapshots = self.alpaca.get_snapshots(chunk)
+                for sym, snap in snapshots.items():
+                    price = snap.get('latest_price', 0) or snap.get('close', 0)
+                    if not (self.min_price <= price <= self.max_price):
+                        continue
+                    prev_vol = snap.get('prev_volume', 0)
+                    if self.min_daily_volume > 0 and prev_vol < self.min_daily_volume:
+                        vol_filtered += 1
+                        continue
+                    self.universe.append(sym)
             except Exception as e:
                 logger.warning(f"[{self.STRATEGY_NAME}] Snapshot chunk failed: {e}")
 
         logger.info(
             f"[{self.STRATEGY_NAME}] Universe built: {len(self.universe)} stocks "
-            f"(${self.min_price}-${self.max_price})"
+            f"(${self.min_price}-${self.max_price}, vol>={self.min_daily_volume:,}, "
+            f"{vol_filtered} filtered by volume)"
         )
 
         if self.notifier:

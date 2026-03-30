@@ -527,6 +527,10 @@ class AlpacaClient:
                             result['low'] = float(bar.low) if bar.low else 0
                             result['close'] = float(bar.close) if bar.close else 0
                             result['volume'] = int(bar.volume) if bar.volume else 0
+                        prev_bar = snap.previous_daily_bar
+                        if prev_bar:
+                            result['prev_close'] = float(prev_bar.close) if prev_bar.close else 0
+                            result['prev_volume'] = int(prev_bar.volume) if prev_bar.volume else 0
                         if snap.latest_trade:
                             result['latest_price'] = float(snap.latest_trade.price) if snap.latest_trade.price else 0
                         if result:
