@@ -1131,6 +1131,7 @@ class StopMonitor:
         bid_size = int(quote.bid_size)
         ask_size = int(quote.ask_size)
         now = time_mod.time()
+        self._last_data_ts = now  # heartbeat — quotes flow even when no trades
 
         # Update all matching watches (stop watch and/or quote watch)
         for w in [watch, qwatch]:
