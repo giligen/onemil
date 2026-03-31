@@ -339,9 +339,9 @@ def generate_signals(
     max_waves = entry_filters.get('max_waves', 1)
     w1_scout = entry_filters.get('w1_scout', False)
     w1_min_pct = entry_filters.get('w1_min_pct', 0.0)
-    hard_stop_pct = cfg.get('risk', {}).get('hard_stop_pct', 0.05)
-    entry_slippage = entry_filters.get('entry_pct', 0.003)
-    exit_slippage = entry_filters.get('exit_pct', 0.003)
+    hard_stop_pct = cfg.get('risk', {}).get('hard_stop_pct', 0.02)
+    entry_slippage = entry_filters.get('entry_pct', 0.001)
+    exit_slippage = entry_filters.get('exit_pct', 0.001)
 
     # Entry filter values
     cross_time_max = entry_filters.get('cross_time_max_min', 0)
