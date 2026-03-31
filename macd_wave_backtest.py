@@ -210,8 +210,26 @@ def find_movers(
             conn.commit()
             logger.info(f"Cached {bars_cached:,} daily bars to DB")
 
+    # Build previous-day volume lookup (matches production: universe filtered by prev day vol)
+    # For each (symbol, date), find the most recent trading day's volume BEFORE that date
+    prev_vol_map = {}  # (symbol, date_str) -> prev_day_volume
+    if min_volume > 0:
+        prev_cur = conn.execute(
+            "SELECT a.symbol, a.bar_date, "
+            "  (SELECT b.volume FROM daily_bars b "
+            "   WHERE b.symbol = a.symbol AND b.bar_date < a.bar_date "
+            "   ORDER BY b.bar_date DESC LIMIT 1) as prev_volume "
+            "FROM daily_bars a "
+            "WHERE a.bar_date >= ? AND a.bar_date <= ?",
+            (str(start_date), str(end_date))
+        )
+        for sym, d, prev_vol in prev_cur:
+            if prev_vol is not None:
+                prev_vol_map[(sym, d)] = int(prev_vol)
+
     # Now read ALL movers from DB cache (fast)
     movers = []
+    vol_filtered = 0
     cur = conn.execute(
         "SELECT symbol, bar_date, open, high, low, close, volume FROM daily_bars "
         "WHERE bar_date >= ? AND bar_date <= ?",
@@ -227,12 +245,19 @@ def find_movers(
             continue
         if max_price > 0 and close > max_price:
             continue
-        if vol < min_volume:
-            continue
+        # Use PREVIOUS day's volume (matches production — no look-ahead bias)
+        if min_volume > 0:
+            prev_vol = prev_vol_map.get((sym, d), 0)
+            if prev_vol < min_volume:
+                vol_filtered += 1
+                continue
         movers.append((sym, d, pct, close, vol))
 
     movers.sort(key=lambda x: (x[1], x[0]))
-    logger.info(f"Found {len(movers)} movers (price>=${min_price}, vol>={min_volume:,}, range>={min_intraday_pct}%)")
+    logger.info(
+        f"Found {len(movers)} movers (price>=${min_price}, prev_day_vol>={min_volume:,}, "
+        f"range>={min_intraday_pct}%, {vol_filtered} filtered by prev-day volume)"
+    )
     return movers
 
 
@@ -326,6 +351,10 @@ def generate_signals(
     max_price_entry = entry_filters.get('max_price_at_entry', 0)
     position_size = entry_filters.get('position_size', 40000)
 
+    if not isinstance(bars, pd.DataFrame):
+        bars = pd.DataFrame(bars)
+    if bars.empty or 'open' not in bars.columns:
+        return []
     op = bars.iloc[0]['open']
     if op <= 0:
         return []

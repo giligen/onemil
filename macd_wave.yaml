@@ -9,7 +9,7 @@ strategy:
 universe:
   min_price: 5.0            # Original validated run included $5-15 stocks (FLYE $5.16, BTTC $13.65 = $60K P&L)
   max_price: 30.0           # Validated: >$30 kills WR, >$50 loses money
-  min_daily_volume: 1000000 # Minimum day volume
+  min_daily_volume: 500000  # Previous-day volume floor (1M kills strategy, 500K is sweet spot: 47% WR, +$230K)
   min_intraday_pct: 10.0
 
 # Entry filters (applied at the +threshold% cross point)
