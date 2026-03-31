@@ -176,6 +176,7 @@ class StopMonitor:
         self._stream = None
         self._running = False
         self._stop_event = threading.Event()
+        self._last_data_ts: float = 0.0  # time.time() of last WebSocket data received
 
     def start(self) -> None:
         """Launch the WebSocket daemon thread."""
@@ -210,6 +211,34 @@ class StopMonitor:
             self._thread.join(timeout=10)
 
         logger.info("StopMonitor stopped")
+
+    def is_healthy(self, max_stale_seconds: float = 30.0) -> bool:
+        """
+        Check if StopMonitor WebSocket is operational.
+
+        Returns True only if:
+        1. _running is True
+        2. Daemon thread is alive
+        3. Stream object exists
+        4. Data received within max_stale_seconds (only when watches exist)
+
+        Called from service main loops each cycle as circuit breaker.
+        """
+        if not self._running:
+            return False
+        if self._thread is None or not self._thread.is_alive():
+            return False
+        if self._stream is None:
+            return False
+        # Only check data freshness if we have active watches
+        # (no watches = no data expected, but infrastructure is up)
+        with self._watch_lock:
+            has_watches = len(self._watches) > 0
+        if has_watches and self._last_data_ts > 0:
+            age = time_mod.time() - self._last_data_ts
+            if age > max_stale_seconds:
+                return False
+        return True
 
     def add_watch(
         self,
@@ -1065,9 +1094,11 @@ class StopMonitor:
                 await asyncio.sleep(RECONNECT_DELAY_SECONDS)
 
         if reconnect_count >= MAX_RECONNECT_ATTEMPTS:
+            self._running = False
+            self._stream = None
             error_msg = (
                 f"StopMonitor: exhausted {MAX_RECONNECT_ATTEMPTS} reconnect "
-                f"attempts — safety-net SL on Alpaca is active"
+                f"attempts — DEAD, emergency exit required"
             )
             logger.error(error_msg)
             if self._notifier:
@@ -1152,6 +1183,7 @@ class StopMonitor:
         """
         symbol = trade.symbol
         price = float(trade.price)
+        self._last_data_ts = time_mod.time()
 
         with self._watch_lock:
             watch = self._watches.get(symbol)

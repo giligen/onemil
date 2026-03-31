@@ -210,6 +210,27 @@ def main():
         t0 = time_mod.time()
 
         try:
+            # Circuit breaker: StopMonitor dead → close all → exit
+            if stop_monitor and not stop_monitor.is_healthy():
+                msg = (
+                    f"[MACD Wave] CRITICAL: StopMonitor DEAD — "
+                    f"running={stop_monitor._running}, "
+                    f"thread={stop_monitor._thread.is_alive() if stop_monitor._thread else False}"
+                )
+                logger.error(msg)
+                if engine.open_positions:
+                    logger.error(f"Emergency closing {len(engine.open_positions)} positions")
+                    engine.force_close_all()
+                    msg += f"\nEmergency closed all positions"
+                if notifier:
+                    try:
+                        notifier.send_message_sync(msg)
+                    except Exception:
+                        pass
+                stop_monitor.stop()
+                logger.error("Exiting service — StopMonitor infrastructure failure")
+                sys.exit(1)
+
             # Scan for new movers
             new_crosses = engine.scan_for_movers()
 

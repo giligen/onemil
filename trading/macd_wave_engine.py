@@ -112,6 +112,7 @@ class MACDWaveEngine:
         self.hard_stop_pct = float(risk.get('hard_stop_pct', 0.02))
         self.trail_stop_pct = float(risk.get('trail_stop_pct', 0.003))  # 0.3% trail below highest
         self.daily_loss_limit = float(risk.get('daily_loss_limit', -5000))
+        self.safety_net_sl_pct = float(risk.get('safety_net_sl_pct', 0.05))  # 5% floor on Alpaca
 
         # Slippage (for logging comparison, not applied to orders)
         slip = cfg.get('slippage', {})
@@ -444,8 +445,15 @@ class MACDWaveEngine:
                 self.invalidated.add(symbol)
                 return False
 
-            # Submit limit buy
-            order = self.alpaca.submit_limit_buy_order(symbol, shares, limit_price)
+            # Submit bracket buy with safety-net SL on Alpaca
+            # If everything dies (StopMonitor + service), Alpaca still has a 5% floor
+            safety_sl = round(limit_price * (1 - self.safety_net_sl_pct), 2)
+            safety_tp = round(limit_price * 1.50, 2)  # effectively infinite
+            order = self.alpaca.submit_bracket_order(
+                symbol=symbol, qty=shares, side='buy',
+                limit_price=limit_price,
+                tp_price=safety_tp, sl_price=safety_sl,
+            )
             order_id = order.get('id', '') if order else ''
 
             # Save to DB
@@ -672,31 +680,23 @@ class MACDWaveEngine:
                 self.invalidated.add(symbol)
                 return True
 
-            if reason == 'force_close':
-                # Market sell — end of day
-                result = self.alpaca.close_position(symbol)
-                order_id = result.get('id', '') if result else ''
-                exit_price = pos.entry_price  # Approximate, will update on fill
-            else:
-                # MACD flip — limit sell at bid
-                quote = self.alpaca.get_latest_quote(symbol)
-                bid = quote.get('bid_price', 0)
-                if bid <= 0:
-                    result = self.alpaca.close_position(symbol)
-                    order_id = result.get('id', '') if result else ''
-                    exit_price = pos.entry_price * 0.99  # Estimate
-                else:
-                    result = self.alpaca.submit_limit_sell_order(symbol, pos.shares, bid)
-                    order_id = result.get('id', '') if result else ''
-                    exit_price = bid
+            # close_position() auto-cancels bracket legs (safety-net SL/TP)
+            # Works for both force_close and macd_flip
+            quote = self.alpaca.get_latest_quote(symbol)
+            bid = quote.get('bid_price', 0)
+            exit_price = bid if bid > 0 else pos.entry_price * 0.99
 
-                    # Log exit microstructure
-                    self.db.update_trade(pos.trade_id, {
-                        'exit_quote_bid': bid,
-                        'exit_quote_ask': quote.get('ask_price', 0),
-                        'exit_limit_price': bid,
-                        'exit_pricing_method': 'macd_bid',
-                    })
+            result = self.alpaca.close_position(symbol)
+            order_id = result.get('id', '') if result else ''
+
+            # Log exit microstructure
+            if bid > 0:
+                self.db.update_trade(pos.trade_id, {
+                    'exit_quote_bid': bid,
+                    'exit_quote_ask': quote.get('ask_price', 0),
+                    'exit_limit_price': bid,
+                    'exit_pricing_method': f'{reason}_close',
+                })
 
             # Compute P&L
             pnl = (exit_price - pos.entry_price) * pos.shares

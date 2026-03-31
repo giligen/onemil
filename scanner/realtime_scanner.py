@@ -164,6 +164,29 @@ class RealtimeScanner:
                 self._run_intraday_cycle()
                 last_bucket = current_bucket
 
+            # Circuit breaker: StopMonitor dead → close all → exit
+            if (engine is not None and getattr(engine, 'stop_monitor', None)
+                    and not engine.stop_monitor.is_healthy()):
+                sm = engine.stop_monitor
+                msg = (
+                    f"[Bull Flag] CRITICAL: StopMonitor DEAD — "
+                    f"running={sm._running}, "
+                    f"thread={sm._thread.is_alive() if sm._thread else False}"
+                )
+                logger.error(msg)
+                engine._force_close_all()
+                if self.notifier:
+                    try:
+                        self.notifier.send_message_sync(
+                            msg + "\nEmergency closed all positions."
+                        )
+                    except Exception:
+                        pass
+                sm.stop()
+                logger.error("Exiting — StopMonitor infrastructure failure")
+                import sys
+                sys.exit(1)
+
             # Engine pattern check every tick ~60s (Bug #2 fix)
             if engine is not None and engine.enabled and not force_closed:
                 engine.run_pattern_check()
