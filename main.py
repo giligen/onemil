@@ -343,8 +343,8 @@ def run_scan(config, verbose: bool = False, trade: bool = False) -> None:
         trading_engine.save_daily_summary()
 
     # Close WebSocket — prevents connection limit on restarts
-    if stop_monitor:
-        stop_monitor.stop()
+    if trading_engine and getattr(trading_engine, 'stop_monitor', None):
+        trading_engine.stop_monitor.stop()
 
 
 def run_test_cycle(config, trade: bool = False) -> None:
