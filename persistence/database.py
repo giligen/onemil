@@ -724,21 +724,30 @@ class Database:
         )
         return [dict(row) for row in cursor.fetchall()]
 
-    def get_open_trades(self, trade_date: str) -> List[Dict[str, Any]]:
+    def get_open_trades(self, trade_date: str, strategy: str = None) -> List[Dict[str, Any]]:
         """
         Get trades that are still open (no exit) for a given date.
 
         Args:
             trade_date: Date string (YYYY-MM-DD)
+            strategy: Optional strategy filter ('bull_flag' or 'macd_wave').
+                      If None, returns all strategies (backward compatible).
 
         Returns:
             List of open trade dicts
         """
-        cursor = self.conn.execute(
-            "SELECT * FROM trades WHERE trade_date = ? AND exit_price IS NULL "
-            "AND order_status != 'cancelled' ORDER BY created_at",
-            (trade_date,)
-        )
+        if strategy:
+            cursor = self.conn.execute(
+                "SELECT * FROM trades WHERE trade_date = ? AND exit_price IS NULL "
+                "AND order_status != 'cancelled' AND strategy = ? ORDER BY created_at",
+                (trade_date, strategy)
+            )
+        else:
+            cursor = self.conn.execute(
+                "SELECT * FROM trades WHERE trade_date = ? AND exit_price IS NULL "
+                "AND order_status != 'cancelled' ORDER BY created_at",
+                (trade_date,)
+            )
         return [dict(row) for row in cursor.fetchall()]
 
     def get_daily_pnl(self, trade_date: str) -> float:

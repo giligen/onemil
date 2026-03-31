@@ -1131,7 +1131,7 @@ class TradingEngine:
             return
 
         try:
-            trades_today = self.db.get_open_trades(date.today().isoformat())
+            trades_today = self.db.get_open_trades(date.today().isoformat(), strategy='bull_flag')
             trade_record = None
             for t in trades_today:
                 if t['id'] == event.trade_db_id:
@@ -1303,7 +1303,7 @@ class TradingEngine:
         if event.trade_db_id:
             try:
                 trade_record = None
-                trades_today = self.db.get_open_trades(date.today().isoformat())
+                trades_today = self.db.get_open_trades(date.today().isoformat(), strategy='bull_flag')
                 for t in trades_today:
                     if t['id'] == event.trade_db_id:
                         trade_record = t
@@ -1358,7 +1358,7 @@ class TradingEngine:
         self._check_exhaustion_exits()
 
         today = date.today().isoformat()
-        open_trades = self.db.get_open_trades(today)
+        open_trades = self.db.get_open_trades(today, strategy='bull_flag')
         if not open_trades:
             return
 
@@ -2008,7 +2008,7 @@ class TradingEngine:
         try:
             positions = self.alpaca.get_open_positions()
             today = date.today().isoformat()
-            open_trades = self.db.get_open_trades(today)
+            open_trades = self.db.get_open_trades(today, strategy='bull_flag')
             # Index open trades by symbol for fast lookup
             trades_by_symbol = {}
             for t in open_trades:
@@ -2203,7 +2203,7 @@ class TradingEngine:
         today = date.today().isoformat()
         trades = self.db.get_trades_by_date(today)
         daily_pnl = self.db.get_daily_pnl(today)
-        open_trades = self.db.get_open_trades(today)
+        open_trades = self.db.get_open_trades(today, strategy='bull_flag')
 
         winning = sum(1 for t in trades if t.get('pnl') and t['pnl'] > 0)
         losing = sum(1 for t in trades if t.get('pnl') and t['pnl'] < 0)

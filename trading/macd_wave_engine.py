@@ -710,7 +710,6 @@ class MACDWaveEngine:
                 'exited_at': datetime.now(timezone.utc),
                 'pnl': pnl,
                 'pnl_pct': pnl_pct,
-                'exit_order_id': order_id,
             })
 
             # Notify
@@ -731,6 +730,13 @@ class MACDWaveEngine:
 
         except Exception as e:
             logger.error(f"[{self.STRATEGY_NAME}] {symbol}: exit submission failed: {e}")
+            # If we can't sell (e.g., "cannot be sold short" = already closed),
+            # remove from open_positions to stop infinite retry loop
+            err_str = str(e).lower()
+            if 'sold short' in err_str or 'no position' in err_str or 'not found' in err_str:
+                logger.warning(f"[{self.STRATEGY_NAME}] {symbol}: position gone — removing from tracking")
+                del self.open_positions[symbol]
+                self.invalidated.add(symbol)
             return False
 
     # ------------------------------------------------------------------
