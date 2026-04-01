@@ -956,7 +956,8 @@ def run_batch_backtest_fast(
             prev_close = mover[2] if len(mover) > 2 else 0.0
             move_size = mover[3] if len(mover) > 3 else 0.0
             movers_by_date[d].append((sym, d, prev_close, move_size))
-        # Sort each date's movers by move size descending
+        # Sort by move size descending — biggest movers first.
+        # Live scanner naturally surfaces biggest gappers first (premarket qualification).
         for d in movers_by_date:
             movers_by_date[d].sort(key=lambda x: x[3], reverse=True)
 
