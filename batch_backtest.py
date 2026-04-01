@@ -1494,14 +1494,25 @@ def main():
         return
 
     # Standard (non-monthly) mode
-    # Step 1: Load universe
+    # Step 1: Load universe + all cached daily bar symbols (full market)
     db = get_database()
     universe = db.get_active_universe()
-    symbols = [s['symbol'] for s in universe]
-    logger.info(f"Loaded {len(symbols)} symbols from active universe")
+    universe_symbols = [s['symbol'] for s in universe]
+    logger.info(f"Loaded {len(universe_symbols)} symbols from active universe")
+
+    # Also include ALL symbols from daily_bars cache — catches stocks that
+    # moved 20%+ but aren't in the pre-built bull flag universe (e.g., MASK)
+    import sqlite3
+    conn = sqlite3.connect(db.db_path)
+    all_cached = [r[0] for r in conn.execute(
+        "SELECT DISTINCT symbol FROM daily_bars WHERE bar_date >= ? AND bar_date <= ?",
+        (str(start_date), str(end_date))
+    ).fetchall()]
+    symbols = sorted(set(universe_symbols + all_cached))
+    logger.info(f"Expanded to {len(symbols)} symbols (universe + {len(all_cached)} from daily_bars cache)")
 
     if not symbols:
-        logger.error("No active symbols in universe — run universe builder first")
+        logger.error("No symbols found — run universe builder or MACD wave backtest first")
         sys.exit(1)
 
     # Step 2: Fetch daily bars (cached) and find 10%+ movers with scanner filters
