@@ -44,6 +44,7 @@ class RealtimeScanner:
         trading_engine=None,
         notifier=None,
         shutdown_event=None,
+        macd_engine=None,
     ):
         """
         Initialize RealtimeScanner.
@@ -55,9 +56,10 @@ class RealtimeScanner:
             criteria: Scanner criteria engine
             poll_interval: Pre-market polling interval in seconds
             verbose: Enable verbose output
-            trading_engine: Optional TradingEngine for automated trading
+            trading_engine: Optional TradingEngine for bull flag strategy
             notifier: Optional TelegramNotifier for alerts
             shutdown_event: Optional threading.Event for graceful shutdown
+            macd_engine: Optional MACDWaveEngine for MACD wave strategy
         """
         self.alpaca = alpaca_client
         self.news = news_provider
@@ -68,6 +70,7 @@ class RealtimeScanner:
         self.trading_engine = trading_engine
         self.notifier = notifier
         self.shutdown_event = shutdown_event
+        self.macd_engine = macd_engine
 
         # Load notification preferences from config
         from config import Config
@@ -101,9 +104,14 @@ class RealtimeScanner:
 
         self._load_universe()
 
-        if not self._universe:
+        if not self._universe and self.macd_engine is None:
             logger.error("No stocks in universe. Run --batch first.")
             return
+
+        # Build MACD wave universe (pre-market, independent from bull flag)
+        if self.macd_engine is not None:
+            self.macd_engine.build_universe()
+            logger.info(f"MACD Wave universe built: {len(self.macd_engine.universe)} stocks")
 
         if self.trading_engine is not None:
             self.trading_engine.reset_daily()
@@ -167,17 +175,22 @@ class RealtimeScanner:
 
             # Circuit breaker: StopMonitor dead → close all → exit
             # Skip first 3 minutes (grace period for WebSocket to connect)
-            if (engine is not None and getattr(engine, 'stop_monitor', None)
+            sm = (getattr(engine, 'stop_monitor', None) if engine
+                  else getattr(self.macd_engine, 'stop_monitor', None) if self.macd_engine
+                  else None)
+            if (sm is not None
                     and time_mod.time() - _scanner_start > 180
-                    and not engine.stop_monitor.is_healthy()):
-                sm = engine.stop_monitor
+                    and not sm.is_healthy()):
                 msg = (
-                    f"[Bull Flag] CRITICAL: StopMonitor DEAD — "
+                    f"CRITICAL: StopMonitor DEAD — "
                     f"running={sm._running}, "
                     f"thread={sm._thread.is_alive() if sm._thread else False}"
                 )
                 logger.error(msg)
-                engine._force_close_all()
+                if engine:
+                    engine._force_close_all()
+                if self.macd_engine:
+                    self.macd_engine.force_close_all()
                 if self.notifier:
                     try:
                         self.notifier.send_message_sync(
@@ -194,6 +207,17 @@ class RealtimeScanner:
             if engine is not None and engine.enabled and not force_closed:
                 engine.run_pattern_check()
 
+            # MACD wave tick — scan, entries, exits every 60s
+            if self.macd_engine is not None and not force_closed:
+                try:
+                    self.macd_engine.scan_for_movers()
+                    self.macd_engine.check_entries()
+                    self.macd_engine.check_exits()
+                    if self.macd_engine.is_force_close_time():
+                        self.macd_engine.force_close_all()
+                except Exception as e:
+                    logger.error(f"MACD wave cycle error: {e}", exc_info=True)
+
             # Interruptible 60s sleep (Bug #3 fix)
             if self._interruptible_sleep(60):
                 logger.warning("Shutdown signal received during sleep")
@@ -204,6 +228,8 @@ class RealtimeScanner:
             if not force_closed:
                 logger.info("End-of-day safety net — force-closing all positions")
                 self.trading_engine._force_close_all()
+        if self.macd_engine is not None:
+            self.macd_engine.force_close_all()
 
     def run_test_cycle(self) -> Dict:
         """

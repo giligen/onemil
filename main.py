@@ -61,7 +61,20 @@ def parse_args() -> argparse.Namespace:
         '--test-cycle', action='store_true',
         help='Run one premarket + one intraday cycle with real data, then exit'
     )
-    return parser.parse_args()
+    parser.add_argument(
+        '--flag', action='store_true',
+        help='Enable bull flag strategy (default: both strategies enabled)'
+    )
+    parser.add_argument(
+        '--macd', action='store_true',
+        help='Enable MACD wave strategy (default: both strategies enabled)'
+    )
+    args = parser.parse_args()
+    # If neither --flag nor --macd specified, enable both
+    if not args.flag and not args.macd:
+        args.flag = True
+        args.macd = True
+    return args
 
 
 def _create_news_analyzer(config) -> NewsAnalyzer:
@@ -142,7 +155,29 @@ def _setup_telegram_error_handler(config) -> None:
     logger.info("Telegram error handler attached to root logger")
 
 
-def _create_trading_engine(config, alpaca, db, notifier=None) -> TradingEngine:
+def _create_stop_monitor(config, alpaca, notifier=None):
+    """Create and start the shared StopMonitor (one per process)."""
+    if not config.self_managed_stops_enabled:
+        return None
+    from trading.stop_monitor import StopMonitor
+    stop_monitor = StopMonitor(
+        api_key=config.alpaca_api_key,
+        api_secret=config.alpaca_api_secret,
+        alpaca_client=alpaca,
+        marketable_limit_offset=config.marketable_limit_offset,
+        marketable_limit_offset_pct=config.marketable_limit_offset_pct,
+        notifier=notifier,
+    )
+    stop_monitor.start()
+    logger.info(
+        f"StopMonitor STARTED — safety_net={config.safety_net_sl_pct:.0%}, "
+        f"offset=${config.marketable_limit_offset}, "
+        f"offset_pct={config.marketable_limit_offset_pct:.1%}"
+    )
+    return stop_monitor
+
+
+def _create_trading_engine(config, alpaca, db, notifier=None, stop_monitor=None) -> TradingEngine:
     """Create the trading engine with all components wired up."""
     from trading.market_regime import MarketRegimeFilter
 
@@ -191,25 +226,6 @@ def _create_trading_engine(config, alpaca, db, notifier=None) -> TradingEngine:
     )
     executor = OrderExecutor(alpaca_client=alpaca, db=db)
 
-    # Self-managed stops: WebSocket price monitoring + marketable limit exits
-    stop_monitor = None
-    if config.self_managed_stops_enabled:
-        from trading.stop_monitor import StopMonitor
-        stop_monitor = StopMonitor(
-            api_key=config.alpaca_api_key,
-            api_secret=config.alpaca_api_secret,
-            alpaca_client=alpaca,
-            marketable_limit_offset=config.marketable_limit_offset,
-            marketable_limit_offset_pct=config.marketable_limit_offset_pct,
-            notifier=notifier,
-        )
-        stop_monitor.start()
-        logger.info(
-            f"StopMonitor STARTED — safety_net={config.safety_net_sl_pct:.0%}, "
-            f"offset=${config.marketable_limit_offset}, "
-            f"offset_pct={config.marketable_limit_offset_pct:.1%}"
-        )
-
     # Load time controls from config (backtest loads these too — must match)
     _trading_cfg = config._load_yaml_only().get("trading", {})
     _last_entry = _trading_cfg.get("last_entry_time", "15:00")
@@ -245,8 +261,9 @@ def _create_trading_engine(config, alpaca, db, notifier=None) -> TradingEngine:
     return engine
 
 
-def run_scan(config, verbose: bool = False, trade: bool = False) -> None:
-    """Run the real-time scanner."""
+def run_scan(config, verbose: bool = False, trade: bool = False,
+             enable_flag: bool = True, enable_macd: bool = True) -> None:
+    """Run the real-time scanner with one or both strategies."""
     logger.info("Starting real-time scanner...")
 
     alpaca = AlpacaClient(config.alpaca_api_key, config.alpaca_api_secret, paper=config.alpaca_paper)
@@ -294,12 +311,38 @@ def run_scan(config, verbose: bool = False, trade: bool = False) -> None:
         relative_volume_min=config.relative_volume_min,
     )
 
-    trading_engine = None
+    # Create ONE shared StopMonitor for all strategies
+    stop_monitor = None
     if trade:
-        trading_engine = _create_trading_engine(config, alpaca, db, notifier=notifier)
+        stop_monitor = _create_stop_monitor(config, alpaca, notifier)
+
+    # Bull flag engine (optional)
+    trading_engine = None
+    if trade and enable_flag:
+        trading_engine = _create_trading_engine(config, alpaca, db, notifier=notifier,
+                                                 stop_monitor=stop_monitor)
         trading_engine.enabled = True
-        mode_label = "paper" if alpaca.is_paper else "LIVE"
-        logger.info(f"Trading mode ACTIVE — {mode_label} trading enabled")
+        logger.info(f"Bull Flag strategy ENABLED")
+
+    # MACD wave engine (optional)
+    macd_engine = None
+    if trade and enable_macd:
+        import yaml
+        from trading.macd_wave_engine import MACDWaveEngine
+        macd_cfg = yaml.safe_load(open('macd_wave.yaml'))
+        macd_engine = MACDWaveEngine(
+            alpaca_client=alpaca, db=db, notifier=notifier,
+            config=macd_cfg, stop_monitor=stop_monitor,
+        )
+        logger.info(f"MACD Wave strategy ENABLED")
+
+    mode_label = "paper" if alpaca.is_paper else "LIVE"
+    strategies = []
+    if enable_flag:
+        strategies.append("Bull Flag")
+    if enable_macd:
+        strategies.append("MACD Wave")
+    logger.info(f"Trading mode ACTIVE — {mode_label}, strategies: {', '.join(strategies)}")
 
     # Fix 4: Graceful shutdown via SIGTERM/SIGINT
     shutdown_event = threading.Event()
@@ -309,6 +352,8 @@ def run_scan(config, verbose: bool = False, trade: bool = False) -> None:
         sig_name = signal.Signals(signum).name
         logger.warning(f"Received {sig_name}, initiating graceful shutdown...")
         shutdown_event.set()
+        if macd_engine:
+            macd_engine.shutdown_requested = True
 
     signal.signal(signal.SIGTERM, handle_shutdown)
     signal.signal(signal.SIGINT, handle_shutdown)
@@ -326,6 +371,7 @@ def run_scan(config, verbose: bool = False, trade: bool = False) -> None:
         trading_engine=trading_engine,
         notifier=notifier,
         shutdown_event=shutdown_event,
+        macd_engine=macd_engine,
     )
 
     # Notify startup
@@ -333,12 +379,12 @@ def run_scan(config, verbose: bool = False, trade: bool = False) -> None:
         notifier.notify_scanner_started(
             universe_size=len(scanner._universe) if scanner._universe else 0,
             trading_enabled=trade,
-            mode="paper" if alpaca.is_paper else "live",
+            mode=mode_label,
         )
 
     scanner.run()
 
-    # End-of-day report + summary
+    # End-of-day reports
     if trading_engine:
         trading_engine.send_daily_report(
             premarket_gaps=scanner._premarket_gap_data,
@@ -346,10 +392,12 @@ def run_scan(config, verbose: bool = False, trade: bool = False) -> None:
             universe_size=len(scanner._universe),
         )
         trading_engine.save_daily_summary()
+    if macd_engine:
+        macd_engine.send_daily_report()
 
-    # Close WebSocket — prevents connection limit on restarts
-    if trading_engine and getattr(trading_engine, 'stop_monitor', None):
-        trading_engine.stop_monitor.stop()
+    # Close shared WebSocket
+    if stop_monitor:
+        stop_monitor.stop()
 
 
 def run_test_cycle(config, trade: bool = False) -> None:
@@ -429,7 +477,8 @@ def main() -> None:
         run_batch(config)
 
     if args.scan:
-        run_scan(config, verbose=args.verbose, trade=args.trade)
+        run_scan(config, verbose=args.verbose, trade=args.trade,
+                 enable_flag=args.flag, enable_macd=args.macd)
 
     if args.test_cycle:
         run_test_cycle(config, trade=args.trade)
