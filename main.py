@@ -271,8 +271,9 @@ def run_scan(config, verbose: bool = False, trade: bool = False) -> None:
                     f"Low buying power: ${buying_power:,.0f} < "
                     f"position size ${config.position_size_dollars:,.0f}"
                 )
+            mode_str = "paper" if alpaca.is_paper else "LIVE"
             logger.info(
-                f"Account validated — paper mode, "
+                f"Account validated — {mode_str} mode, "
                 f"buying power: ${buying_power:,.0f}"
             )
         except Exception as e:
@@ -297,7 +298,8 @@ def run_scan(config, verbose: bool = False, trade: bool = False) -> None:
     if trade:
         trading_engine = _create_trading_engine(config, alpaca, db, notifier=notifier)
         trading_engine.enabled = True
-        logger.info("Trading mode ACTIVE — paper trading enabled")
+        mode_label = "paper" if alpaca.is_paper else "LIVE"
+        logger.info(f"Trading mode ACTIVE — {mode_label} trading enabled")
 
     # Fix 4: Graceful shutdown via SIGTERM/SIGINT
     shutdown_event = threading.Event()
@@ -331,6 +333,7 @@ def run_scan(config, verbose: bool = False, trade: bool = False) -> None:
         notifier.notify_scanner_started(
             universe_size=len(scanner._universe) if scanner._universe else 0,
             trading_enabled=trade,
+            mode="paper" if alpaca.is_paper else "live",
         )
 
     scanner.run()
