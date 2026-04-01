@@ -232,16 +232,17 @@ class StopMonitor:
             return False
         if self._stream is None:
             return False
-        if not self._ws_connected:
-            return False
-        # Only check data freshness if we have active watches
-        # (no watches = no data expected, but infrastructure is up)
+        # Only check WebSocket connection + data freshness when watches exist
+        # No watches = WebSocket waiting for first symbol = normal startup
         with self._watch_lock:
             has_watches = len(self._watches) > 0
-        if has_watches and self._last_data_ts > 0:
-            age = time_mod.time() - self._last_data_ts
-            if age > max_stale_seconds:
+        if has_watches:
+            if not self._ws_connected:
                 return False
+            if self._last_data_ts > 0:
+                age = time_mod.time() - self._last_data_ts
+                if age > max_stale_seconds:
+                    return False
         return True
 
     def add_watch(
