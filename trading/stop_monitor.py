@@ -177,6 +177,7 @@ class StopMonitor:
         self._running = False
         self._stop_event = threading.Event()
         self._last_data_ts: float = 0.0  # time.time() of last WebSocket data received
+        self._ws_connected: bool = False  # True only when WebSocket is actively connected
 
     def start(self) -> None:
         """Launch the WebSocket daemon thread."""
@@ -197,6 +198,7 @@ class StopMonitor:
     def stop(self) -> None:
         """Gracefully shut down the WebSocket thread."""
         self._running = False
+        self._ws_connected = False
         self._stop_event.set()
 
         if self._loop and self._stream:
@@ -229,6 +231,8 @@ class StopMonitor:
         if self._thread is None or not self._thread.is_alive():
             return False
         if self._stream is None:
+            return False
+        if not self._ws_connected:
             return False
         # Only check data freshness if we have active watches
         # (no watches = no data expected, but infrastructure is up)
@@ -1071,9 +1075,11 @@ class StopMonitor:
                     self._on_quote, *watched
                 )
                 logger.info(f"StopMonitor: WebSocket connecting with {len(watched)} symbols (trades+quotes)...")
+                self._ws_connected = True
                 await self._stream._run_forever()
 
             except Exception as e:
+                self._ws_connected = False
                 if not self._running:
                     break
                 reconnect_count += 1
