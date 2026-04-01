@@ -258,10 +258,12 @@ def run_scan(config, verbose: bool = False, trade: bool = False) -> None:
     if trade:
         try:
             account = alpaca.get_account_info()
-            # Verify paper mode — refuse to start on live account
+            # Verify paper/live mode matches config
             if not alpaca.is_paper:
-                logger.error("REFUSING TO START: Alpaca account is LIVE, not paper!")
-                sys.exit(1)
+                if config.alpaca_paper:
+                    logger.error("REFUSING TO START: Alpaca account is LIVE but ALPACA_PAPER=true! Fix .env")
+                    sys.exit(1)
+                logger.warning("LIVE TRADING MODE — real money at risk")
             # Warn on low buying power
             buying_power = float(account.get('buying_power', 0))
             if buying_power < config.position_size_dollars:
