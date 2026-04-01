@@ -989,6 +989,36 @@ def run_batch_backtest_fast(
             key: pd.DataFrame(bars) for key, bars in bulk_data.items()
         }
 
+        # Fetch and cache any missing 1-min bars from API (one-time cost per symbol/date)
+        missing = [sd for sd in symbol_dates if sd not in all_bars]
+        if missing:
+            import os as _os
+            from dotenv import load_dotenv as _load_env
+            _load_env()
+            _key = _os.getenv("ALPACA_API_KEY")
+            _secret = _os.getenv("ALPACA_API_SECRET")
+            if _key and _secret:
+                _fetch_client = AlpacaClient(_key, _secret)
+                logger.info(f"Fetching {len(missing)} uncached 1-min bar sets from API (one-time)...")
+                fetched = 0
+                for sym, date_str in missing:
+                    try:
+                        td = date.fromisoformat(date_str)
+                        market_open, market_close = _market_hours_utc(td)
+                        bars_fetched = _fetch_client.get_historical_1min_bars(
+                            sym, market_open, market_close
+                        )
+                        if bars_fetched is not None and not bars_fetched.empty:
+                            bar_records = bars_fetched.to_dict('records')
+                            db.save_intraday_bars(sym, date_str, bar_records)
+                            all_bars[(sym, date_str)] = bars_fetched
+                        fetched += 1
+                        if fetched % 200 == 0:
+                            logger.info(f"  Fetched {fetched}/{len(missing)} bar sets...")
+                    except Exception:
+                        pass
+                logger.info(f"  Cached {fetched}/{len(missing)} bar sets for future runs")
+
         # Create runner early to check if MACD warm-up is needed
         runner = BacktestRunner()
 
