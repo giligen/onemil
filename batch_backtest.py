@@ -1237,6 +1237,65 @@ def run_batch_backtest_fast(
                     )
                     next_pct_milestone += 10
 
+        # Post-process: enforce max_positions across symbols per day.
+        # The live engine can only hold N positions simultaneously, so later
+        # setups are skipped when all slots are full. Without this, the backtest
+        # trades every setup independently and over-counts.
+        max_positions = int(_cfg.get("trading", {}).get("max_positions", 0))
+        if max_positions > 0:
+            from collections import defaultdict as _defaultdict
+
+            # Group results by date
+            results_by_date: Dict[str, list] = _defaultdict(list)
+            for r in results:
+                if r.trades_simulated:
+                    results_by_date[r.trade_date].append(r)
+
+            filtered_results = []
+            total_dropped = 0
+
+            for trade_date_str in sorted(results_by_date.keys()):
+                day_results = results_by_date[trade_date_str]
+
+                # Collect all trades for this day with entry/exit times
+                day_trades = []
+                for r in day_results:
+                    for t in r.trades_simulated:
+                        day_trades.append((t.entry_time, t.exit_time, t, r))
+
+                # Sort by entry time (first-come-first-served, like live engine)
+                day_trades.sort(key=lambda x: x[0] if x[0] else '')
+
+                # Simulate position limit
+                open_positions = []  # list of exit_times
+                kept_trades = set()  # trade ids we keep
+
+                for entry_time, exit_time, trade, result in day_trades:
+                    # Close expired positions
+                    open_positions = [et for et in open_positions if et and et > entry_time]
+
+                    if len(open_positions) < max_positions:
+                        open_positions.append(exit_time)
+                        kept_trades.add(id(trade))
+                    else:
+                        total_dropped += 1
+
+                # Rebuild results keeping only allowed trades
+                for r in day_results:
+                    kept = [t for t in r.trades_simulated if id(t) in kept_trades]
+                    r.trades_simulated = kept
+                    filtered_results.append(r)
+
+            # Also add results with no trades (pattern-only)
+            no_trade_results = [r for r in results if not any(
+                r.trade_date == rd for rd in results_by_date
+            )]
+            filtered_results.extend(no_trade_results)
+
+            if total_dropped > 0:
+                logger.info(f"Position limit (max {max_positions}): dropped {total_dropped} trades")
+            results = filtered_results
+
         elapsed = time.time() - t0
         n_trades = sum(len(r.trades_simulated) for r in results)
         logger.info(
