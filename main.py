@@ -87,7 +87,7 @@ def run_batch(config) -> None:
     """Run the nightly universe builder."""
     logger.info("Starting batch universe builder...")
 
-    alpaca = AlpacaClient(config.alpaca_api_key, config.alpaca_api_secret)
+    alpaca = AlpacaClient(config.alpaca_api_key, config.alpaca_api_secret, paper=config.alpaca_paper)
     if not alpaca.test_connection():
         logger.error("Alpaca API connection failed. Aborting batch.")
         sys.exit(1)
@@ -249,7 +249,7 @@ def run_scan(config, verbose: bool = False, trade: bool = False) -> None:
     """Run the real-time scanner."""
     logger.info("Starting real-time scanner...")
 
-    alpaca = AlpacaClient(config.alpaca_api_key, config.alpaca_api_secret)
+    alpaca = AlpacaClient(config.alpaca_api_key, config.alpaca_api_secret, paper=config.alpaca_paper)
     if not alpaca.test_connection():
         logger.error("Alpaca API connection failed. Aborting scan.")
         sys.exit(1)
@@ -351,7 +351,7 @@ def run_test_cycle(config, trade: bool = False) -> None:
     """Run a single test cycle (premarket + intraday) against real API."""
     logger.info("Starting test cycle...")
 
-    alpaca = AlpacaClient(config.alpaca_api_key, config.alpaca_api_secret)
+    alpaca = AlpacaClient(config.alpaca_api_key, config.alpaca_api_secret, paper=config.alpaca_paper)
     if not alpaca.test_connection():
         logger.error("Alpaca API connection failed. Aborting test.")
         sys.exit(1)

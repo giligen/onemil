@@ -108,6 +108,11 @@ class Config:
         return os.getenv("ALPACA_API_SECRET", "")
 
     @property
+    def alpaca_paper(self) -> bool:
+        """Whether to use Alpaca paper trading. Default True for safety."""
+        return os.getenv("ALPACA_PAPER", "true").lower() in ("true", "1", "yes")
+
+    @property
     def alpaca_base_url(self) -> str:
         """Alpaca API base URL."""
         return os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets/v2")

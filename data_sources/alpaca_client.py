@@ -69,13 +69,14 @@ class AlpacaClient:
     All methods include timeout protection and rate limit retry.
     """
 
-    def __init__(self, api_key: str, api_secret: str):
+    def __init__(self, api_key: str, api_secret: str, paper: bool = True):
         """
         Initialize AlpacaClient.
 
         Args:
             api_key: Alpaca API key
             api_secret: Alpaca API secret
+            paper: If True, use paper trading endpoint. Default True for safety.
 
         Raises:
             AlpacaAPIError: If API credentials are missing
@@ -86,7 +87,7 @@ class AlpacaClient:
             raise AlpacaAPIError("ALPACA_API_SECRET required")
 
         self.data_client = StockHistoricalDataClient(api_key, api_secret)
-        self._paper = True
+        self._paper = paper
         self.trading_client = TradingClient(api_key, api_secret, paper=self._paper)
         self.news_client = NewsClient(api_key, api_secret)
         self._api_timeout = DEFAULT_API_TIMEOUT
