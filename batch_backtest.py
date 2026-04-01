@@ -1452,6 +1452,14 @@ def main():
         "--trailing-activate-r", type=float, default=0.0,
         help="Activate trailing stop after +NR from entry (e.g., 2.0)"
     )
+    parser.add_argument(
+        "--regime-on", action="store_true",
+        help="Force regime filter ON (overrides yaml)"
+    )
+    parser.add_argument(
+        "--regime-off", action="store_true",
+        help="Force regime filter OFF (overrides yaml)"
+    )
     args = parser.parse_args()
 
     # Auto-detect worker count from CPU cores
@@ -1552,8 +1560,14 @@ def main():
     spy_bars_raw = fetch_daily_bars_cached(['SPY'], spy_start, end_date, client, db)
     spy_bars = spy_bars_raw.get('SPY', [])
     max_trades_per_day = int(trading_cfg.get("max_trades_per_day", 5))
+    # CLI override for regime filter
+    regime_enabled = bool(regime_cfg.get("enabled", True))
+    if args.regime_on:
+        regime_enabled = True
+    elif args.regime_off:
+        regime_enabled = False
     market_regime = MarketRegimeFilter(
-        enabled=bool(regime_cfg.get("enabled", True)),
+        enabled=regime_enabled,
         vol_threshold=float(regime_cfg.get("vol_threshold", 1.5)),
         sma_period=sma_period,
         max_trades_per_day=max_trades_per_day,
