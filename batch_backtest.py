@@ -155,7 +155,7 @@ def find_big_movers(
                 continue
             if end_date and bar_date > end_date:
                 continue
-            movers.append((symbol, bar_date, prev_close or 0.0))
+            movers.append((symbol, bar_date, prev_close or 0.0, upside if prev_close else move))
             logger.debug(
                 f"  {symbol} {bar_date}: move {move:.1%} "
                 f"(low=${low:.2f}, high=${high:.2f})"
@@ -948,12 +948,17 @@ def run_batch_backtest_fast(
         lg.setLevel(logging.ERROR)
 
     try:
-        # Group by date
+        # Group by date, sorted by move size descending (strongest movers first).
+        # This matches live scanner behavior where biggest movers surface first.
         movers_by_date: Dict[date, List[tuple]] = defaultdict(list)
         for mover in movers:
             sym, d = mover[0], mover[1]
             prev_close = mover[2] if len(mover) > 2 else 0.0
-            movers_by_date[d].append((sym, d, prev_close))
+            move_size = mover[3] if len(mover) > 3 else 0.0
+            movers_by_date[d].append((sym, d, prev_close, move_size))
+        # Sort each date's movers by move size descending
+        for d in movers_by_date:
+            movers_by_date[d].sort(key=lambda x: x[3], reverse=True)
 
         # Pre-filter dates (regime + friday)
         filtered_dates = []
@@ -981,7 +986,7 @@ def run_batch_backtest_fast(
         t_preload = time.time()
         symbol_dates = []
         for trade_date in filtered_dates:
-            for sym, d, prev_close in movers_by_date[trade_date]:
+            for sym, d, prev_close, *_ in movers_by_date[trade_date]:
                 symbol_dates.append((sym, d.isoformat()))
 
         bulk_data = db.get_intraday_bars_bulk(symbol_dates)
@@ -1031,7 +1036,7 @@ def run_batch_backtest_fast(
             for trade_date in filtered_dates:
                 prev_date = _get_previous_trading_date(trade_date)
                 if prev_date:
-                    for sym, d, _ in movers_by_date[trade_date]:
+                    for sym, d, *_ in movers_by_date[trade_date]:
                         prev_symbol_dates.add((sym, prev_date.isoformat()))
 
             if prev_symbol_dates:
@@ -1185,12 +1190,17 @@ def run_batch_backtest_fast(
 
             consec_losses = 0
             stopped_for_day = False
+            day_trade_count = 0
+            max_trades = int(_cfg.get("trading", {}).get("max_trades_per_day", 0))
 
-            for sym, d, prev_close in movers_by_date[trade_date]:
+            for sym, d, prev_close, *_ in movers_by_date[trade_date]:
                 completed += 1
                 date_str = d.isoformat()
 
                 if stopped_for_day:
+                    continue
+
+                if max_trades > 0 and day_trade_count >= max_trades:
                     continue
 
                 bars = all_bars.get((sym, date_str))
@@ -1211,6 +1221,9 @@ def run_batch_backtest_fast(
                         prev_day_bars=prev_day_bars,
                     )
                     results.append(result)
+
+                    # Track trades per day
+                    day_trade_count += len(result.trades_simulated)
 
                     # Consecutive loss tracking
                     if max_consecutive_losses > 0:

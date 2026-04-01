@@ -87,7 +87,7 @@ trading:
   skip_midday: true
   skip_fridays: false           # Disabled for paper testing (re-enable for live)
   max_consecutive_losses: 0     # Disabled — trailing stops handle risk adaptively
-  max_trades_per_day: 0         # Disabled — no cap needed with trailing stops
+  max_trades_per_day: 3         # Matches live scanner throughput (~3 trades/day max)
   market_regime:
     enabled: true               # +$15.6K P&L, -41% drawdown, Sharpe 2.73→3.45 vs disabled
     vol_threshold: 1.5         # 5-day avg daily range % — high volatility signal

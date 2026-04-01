@@ -1262,19 +1262,41 @@ class BacktestRunner:
             f"{f', qualification at +{qualification_pct:.0%} from ${prev_close:.2f}' if not qualified else ''}..."
         )
 
+        # Scanner qualification delay: in live, the scanner checks stocks at
+        # 15-min bucket boundaries. A stock that crosses the threshold at 09:37
+        # won't be qualified until the 09:45 bucket. Simulate this delay.
+        scan_interval = int(_cfg.get("timing", {}).get("intraday_scan_interval", 15))
+        qualification_delay_bars = scan_interval  # 15 bars = 15 minutes on 1-min data
+        qualification_pending_at = None  # bar index where threshold was first crossed
+
         for i in range(self.MIN_BARS_FOR_SETUP - 1, last_end):
-            # Real-time qualification check
+            # Real-time qualification check with scanner delay
             if not qualified:
                 bar_high = bars.iloc[i]['high']
                 move = (bar_high - prev_close) / prev_close
                 if move >= qualification_pct:
-                    qualified = True
-                    qualification_bar = i
-                    logger.info(
-                        f"  Bar {i}: QUALIFIED at +{move:.1%} "
-                        f"(high=${bar_high:.2f} vs prev_close=${prev_close:.2f})"
-                    )
+                    if qualification_pending_at is None:
+                        # First time crossing threshold — start delay
+                        qualification_pending_at = i
+                    # Check if enough bars have passed (simulates 15-min bucket wait)
+                    if i - qualification_pending_at >= qualification_delay_bars:
+                        # Re-verify: stock must STILL be above threshold at bucket time
+                        current_move = (bars.iloc[i]['close'] - prev_close) / prev_close
+                        if current_move >= qualification_pct:
+                            qualified = True
+                            qualification_bar = i
+                            logger.info(
+                                f"  Bar {i}: QUALIFIED at +{current_move:.1%} "
+                                f"(delayed {qualification_delay_bars} bars from threshold cross)"
+                            )
+                        else:
+                            # Lost qualification during delay — reset
+                            qualification_pending_at = None
+                            continue
+                    else:
+                        continue  # Still waiting for bucket boundary
                 else:
+                    qualification_pending_at = None  # Reset if drops below
                     continue  # Not qualified yet — skip all scanning
             # Multi-trade: skip bars while previous trade is still active
             if i < resume_after_bar:
