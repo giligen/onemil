@@ -50,3 +50,5 @@ htmlcov/
 
 # Claude
 .claude/
+config.yaml
+macd_wave.yaml
