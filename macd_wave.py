@@ -211,7 +211,8 @@ def main():
 
         try:
             # Circuit breaker: StopMonitor dead → close all → exit
-            if stop_monitor and not stop_monitor.is_healthy():
+            # Skip first 3 cycles (grace period for WebSocket to connect)
+            if stop_monitor and cycle > 3 and not stop_monitor.is_healthy():
                 msg = (
                     f"[MACD Wave] CRITICAL: StopMonitor DEAD — "
                     f"running={stop_monitor._running}, "

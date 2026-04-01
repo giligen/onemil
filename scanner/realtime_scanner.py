@@ -133,6 +133,7 @@ class RealtimeScanner:
         # Intraday loop: scanner cycles every 15 min, engine ticks every 60s
         force_closed = False
         last_bucket = None
+        _scanner_start = time_mod.time()
 
         while True:
             # Check shutdown
@@ -165,7 +166,9 @@ class RealtimeScanner:
                 last_bucket = current_bucket
 
             # Circuit breaker: StopMonitor dead → close all → exit
+            # Skip first 3 minutes (grace period for WebSocket to connect)
             if (engine is not None and getattr(engine, 'stop_monitor', None)
+                    and time_mod.time() - _scanner_start > 180
                     and not engine.stop_monitor.is_healthy()):
                 sm = engine.stop_monitor
                 msg = (
