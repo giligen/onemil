@@ -1050,6 +1050,14 @@ class StopMonitor:
 
         while self._running and reconnect_count < MAX_RECONNECT_ATTEMPTS:
             try:
+                # Close previous stream to release TCP connection
+                if self._stream is not None:
+                    try:
+                        await self._close_stream()
+                    except Exception:
+                        pass
+                    self._stream = None
+
                 from alpaca.data.enums import DataFeed
                 self._stream = StockDataStream(
                     self._api_key, self._api_secret,
