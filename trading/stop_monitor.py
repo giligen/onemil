@@ -1342,6 +1342,27 @@ class StopMonitor:
                         f"fixed-offset limit=${limit_price:.2f}"
                     )
 
+            # Cancel bracket legs BEFORE sell (they hold shares, blocking limit sell)
+            try:
+                from alpaca.trading.requests import GetOrdersRequest
+                from alpaca.trading.enums import QueryOrderStatus
+                open_orders = await loop.run_in_executor(
+                    None,
+                    lambda: self._alpaca.trading_client.get_orders(
+                        GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol])
+                    ),
+                )
+                for oo in open_orders:
+                    try:
+                        await loop.run_in_executor(
+                            None, self._alpaca.cancel_order, str(oo.id)
+                        )
+                        logger.info(f"StopMonitor: {symbol} cancelled bracket leg {str(oo.id)[:8]}")
+                    except Exception:
+                        pass
+            except Exception as cancel_err:
+                logger.warning(f"StopMonitor: {symbol} cancel bracket legs: {cancel_err}")
+
             # Submit marketable limit sell (in executor)
             try:
                 result = await loop.run_in_executor(
