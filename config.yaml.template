@@ -80,14 +80,14 @@ trading:
   min_risk_reward: 2.5
   min_price: 2.00
   min_stop_distance: 0.09       # Reject setups with stop < $0.09 from entry (tick-noise filter)
-  last_entry_time: "15:00"      # ET — no new entries after this (skip_midday handles 11:30-14:00)
+  last_entry_time: "10:45"      # ET — edge dies after 10:45 (15mo: 9:30-10:45 = +$227K, 10:45+ = -$10K)
   force_close_time: "15:45"     # ET — close all positions
   setup_expiry_bars: 10         # cancel pending buy-stop after N bars
   pattern_poll_interval: 60
-  skip_midday: true
+  skip_midday: false            # Disabled — last_entry_time 10:45 makes midday filter redundant
   skip_fridays: false           # Disabled for paper testing (re-enable for live)
   max_consecutive_losses: 0     # Disabled — trailing stops handle risk adaptively
-  max_trades_per_day: 3         # Matches live scanner throughput (~3 trades/day max)
+  max_trades_per_day: 5         # 15mo optimal with 10:45 cutoff: Sharpe 3.92, +$234K, $20K DD
   market_regime:
     enabled: true               # +$15.6K P&L, -41% drawdown, Sharpe 2.73→3.45 vs disabled
     vol_threshold: 1.5         # 5-day avg daily range % — high volatility signal
