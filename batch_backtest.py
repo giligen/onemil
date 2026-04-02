@@ -492,7 +492,7 @@ def run_batch_backtest(
                 result = runner.run(symbol, bars, date_str,
                                     avg_daily_volume=avg_vol,
                                     volume_profile=vol_profile,
-                                    prev_close=prev_close if prev_close > 0 else None,
+                                    prev_close=None,  # Daily bar pre-filter already ensures 20%+ range
                                     prev_day_bars=prev_day_bars)
                 results.append(result)
 
@@ -609,7 +609,7 @@ def _backtest_worker(args: Tuple) -> Optional[dict]:
             result = runner.run(symbol, bars, trade_date_iso,
                                 avg_daily_volume=avg_vol,
                                 volume_profile=vol_profile,
-                                prev_close=prev_close if prev_close > 0 else None,
+                                prev_close=None,  # Daily bar pre-filter already ensures 20%+ range
                                 prev_day_bars=prev_day_bars)
 
             return _serialize_result(result)
@@ -1218,7 +1218,7 @@ def run_batch_backtest_fast(
 
                     result = runner.run(
                         sym, bars, date_str,
-                        prev_close=prev_close if prev_close > 0 else None,
+                        prev_close=None,  # Daily bar pre-filter already ensures 20%+ range
                         prev_day_bars=prev_day_bars,
                     )
                     results.append(result)
@@ -1349,7 +1349,7 @@ def _fast_worker(args: tuple) -> Optional[dict]:
 
         result = runner.run(
             symbol, bars, date_str,
-            prev_close=prev_close if prev_close > 0 else None,
+            prev_close=None,  # Daily bar pre-filter already ensures 20%+ range
         )
         return _serialize_result(result)
     except Exception:
