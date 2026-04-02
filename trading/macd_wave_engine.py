@@ -686,6 +686,22 @@ class MACDWaveEngine:
             bid = quote.get('bid_price', 0)
             exit_price = bid if bid > 0 else pos.entry_price * 0.99
 
+            # Cancel bracket legs first (SL/TP hold shares, blocking close_position)
+            try:
+                from alpaca.trading.requests import GetOrdersRequest
+                from alpaca.trading.enums import QueryOrderStatus
+                open_orders = self.alpaca.trading_client.get_orders(
+                    GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol])
+                )
+                for oo in open_orders:
+                    try:
+                        self.alpaca.cancel_order(str(oo.id))
+                        logger.info(f"[{self.STRATEGY_NAME}] {symbol}: cancelled bracket leg {str(oo.id)[:8]}")
+                    except Exception:
+                        pass
+            except Exception as cancel_err:
+                logger.warning(f"[{self.STRATEGY_NAME}] {symbol}: cancel orders before close: {cancel_err}")
+
             result = self.alpaca.close_position(symbol)
             order_id = result.get('id', '') if result else ''
 
