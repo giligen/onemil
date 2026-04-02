@@ -165,8 +165,8 @@ class RealtimeScanner:
                     engine._force_close_all()
                     force_closed = True
 
-            # Scanner intraday cycle at 15-min bucket boundaries
-            current_bucket = f"{now_et.hour:02d}:{(now_et.minute // 15) * 15:02d}"
+            # Scanner intraday cycle every minute (matches backtest bar-by-bar qualification)
+            current_bucket = f"{now_et.hour:02d}:{now_et.minute:02d}"
             if current_bucket != last_bucket:
                 if engine is not None:
                     engine.clear_qualified_symbols()   # Bug #4 fix
