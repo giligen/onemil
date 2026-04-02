@@ -1563,6 +1563,18 @@ def main():
         "--regime-off", action="store_true",
         help="Force regime filter OFF (overrides yaml)"
     )
+    parser.add_argument(
+        "--capital", type=float, default=0,
+        help="Override capital (e.g., 50000). 0 = use yaml."
+    )
+    parser.add_argument(
+        "--risk", type=float, default=0,
+        help="Override risk_per_trade (e.g., 2000). 0 = use yaml."
+    )
+    parser.add_argument(
+        "--max-shares", type=int, default=0,
+        help="Override max_shares (e.g., 10000). 0 = use yaml."
+    )
     args = parser.parse_args()
 
     # Auto-detect worker count from CPU cores
@@ -1643,6 +1655,36 @@ def main():
         print_summary(len(symbols), movers, [])
         return
 
+    # CLI overrides for sizing (apply before runner creation)
+    if args.capital > 0:
+        cfg.setdefault("trading", {})["capital"] = args.capital
+        cfg["trading"]["position_size_dollars"] = args.capital
+        logger.info(f"CLI override: capital=${args.capital:,.0f}")
+    if args.risk > 0:
+        cfg.setdefault("trading", {})["risk_per_trade"] = args.risk
+        logger.info(f"CLI override: risk_per_trade=${args.risk:,.0f}")
+    if args.max_shares > 0:
+        cfg.setdefault("trading", {})["max_shares"] = args.max_shares
+        logger.info(f"CLI override: max_shares={args.max_shares}")
+
+    # Write overrides to config.yaml so BacktestRunner.from_config() picks them up
+    if args.capital > 0 or args.risk > 0 or args.max_shares > 0:
+        import yaml
+        with open("config.yaml", "r") as f:
+            live_cfg = yaml.safe_load(f)
+        if args.capital > 0:
+            live_cfg["trading"]["capital"] = args.capital
+            live_cfg["trading"]["position_size_dollars"] = args.capital
+        if args.risk > 0:
+            live_cfg["trading"]["risk_per_trade"] = args.risk
+        if args.max_shares > 0:
+            live_cfg["trading"]["max_shares"] = args.max_shares
+        with open("config.yaml", "w") as f:
+            yaml.dump(live_cfg, f, default_flow_style=False)
+        _sizing_overridden = True
+    else:
+        _sizing_overridden = False
+
     # Step 3: Build market regime filter
     trading_cfg = cfg.get("trading", {})
     regime_cfg = trading_cfg.get("market_regime", {})
@@ -1693,6 +1735,12 @@ def main():
             market_regime=market_regime,
             max_consecutive_losses=max_consec,
         )
+
+    # Restore config.yaml if we overrode sizing
+    if _sizing_overridden:
+        import shutil
+        shutil.copy("config.yaml.template", "config.yaml")
+        logger.info("Restored config.yaml from template (sizing overrides removed)")
 
     # Step 5: Write CSV + print summary
     write_csv_report(results, args.output)
