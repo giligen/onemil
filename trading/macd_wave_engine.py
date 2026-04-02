@@ -134,6 +134,117 @@ class MACDWaveEngine:
         self.shutdown_requested: bool = False
 
     # ------------------------------------------------------------------
+    # Startup sync: recover state from DB + Alpaca
+    # ------------------------------------------------------------------
+
+    def sync_positions(self) -> None:
+        """
+        Reconcile in-memory state with DB and Alpaca.
+
+        Called on startup AND every cycle. Handles:
+        1. Startup recovery: repopulate open_positions from DB
+        2. Closed position detection: if Alpaca no longer has a position
+           that we think is open, it was closed externally (bracket SL/TP).
+           Update DB with actual exit price from Alpaca order history.
+        """
+        today = date.today().isoformat()
+
+        # Get open MACD wave trades from DB (filled, no exit)
+        db_open = self.db.get_open_trades(today, strategy=self.STRATEGY_NAME)
+
+        # Get actual Alpaca positions
+        try:
+            alpaca_positions = {
+                p.symbol: p for p in self.alpaca.trading_client.get_all_positions()
+            }
+        except Exception as e:
+            logger.error(f"[{self.STRATEGY_NAME}] sync_positions: failed to get Alpaca positions: {e}")
+            return
+
+        for trade in db_open:
+            sym = trade['symbol']
+            fill_price = trade.get('fill_price')
+            if not fill_price:
+                continue
+
+            if sym in alpaca_positions:
+                # Position still open on Alpaca — ensure we're tracking it
+                if sym not in self.open_positions:
+                    shares = trade.get('filled_qty') or trade['shares']
+                    hard_stop = round(fill_price * (1 - self.hard_stop_pct), 2)
+                    self.open_positions[sym] = OpenPosition(
+                        symbol=sym,
+                        entry_price=fill_price,
+                        shares=shares,
+                        hard_stop=hard_stop,
+                        trade_id=trade['id'],
+                        order_id='',
+                        entry_time=datetime.now(timezone.utc),
+                        macd_hist_at_entry=0,
+                        highest_since_entry=fill_price,
+                    )
+                    # Re-register with StopMonitor
+                    if self.stop_monitor:
+                        risk_for_trail = fill_price * self.trail_stop_pct
+                        self.stop_monitor.add_watch(
+                            symbol=sym, stop_price=hard_stop,
+                            shares=shares, tp_leg_id='', sl_leg_id='',
+                            trade_db_id=trade['id'],
+                            entry_price=fill_price,
+                            risk_per_share=risk_for_trail,
+                            trail_r=1.0, activate_at_r=0.0,
+                        )
+                    logger.info(
+                        f"[{self.STRATEGY_NAME}] sync: recovered {sym} "
+                        f"({shares}sh @ ${fill_price:.2f})"
+                    )
+            else:
+                # Position GONE from Alpaca — closed externally (bracket SL/TP)
+                # Find the actual exit from Alpaca order history
+                exit_price = fill_price  # fallback
+                exit_reason = 'bracket_exit'
+                try:
+                    from alpaca.trading.requests import GetOrdersRequest
+                    from alpaca.trading.enums import QueryOrderStatus
+                    orders = self.alpaca.trading_client.get_orders(
+                        GetOrdersRequest(
+                            status=QueryOrderStatus.CLOSED,
+                            symbols=[sym], limit=5,
+                        )
+                    )
+                    for o in orders:
+                        if (o.side.value == 'sell' and o.status.value == 'filled'
+                                and o.filled_avg_price):
+                            exit_price = float(o.filled_avg_price)
+                            if o.order_class and o.order_class.value == 'bracket':
+                                exit_reason = 'bracket_sl_tp'
+                            break
+                except Exception:
+                    pass
+
+                pnl = (exit_price - fill_price) * (trade.get('filled_qty') or trade['shares'])
+                pnl_pct = (exit_price - fill_price) / fill_price * 100 if fill_price > 0 else 0
+                self.daily_pnl += pnl
+
+                self.db.update_trade(trade['id'], {
+                    'exit_price': exit_price,
+                    'exit_reason': exit_reason,
+                    'exited_at': datetime.now(timezone.utc),
+                    'pnl': pnl,
+                    'pnl_pct': pnl_pct,
+                })
+
+                # Clean up in-memory if present
+                if sym in self.open_positions:
+                    del self.open_positions[sym]
+                self.invalidated.add(sym)
+
+                logger.info(
+                    f"[{self.STRATEGY_NAME}] sync: {sym} closed externally — "
+                    f"exit ${exit_price:.2f}, P&L ${pnl:+,.0f} ({exit_reason})"
+                )
+
+    # ------------------------------------------------------------------
     # Pre-market: build universe
     # ------------------------------------------------------------------
 
@@ -541,6 +652,9 @@ class MACDWaveEngine:
         (events could arrive between cycles).
         """
         exits = []
+
+        # 0. Sync positions with Alpaca (detect external closes, recover after restart)
+        self.sync_positions()
 
         # 1. Drain StopMonitor exit events (real-time trail/hard stop exits)
         if self.stop_monitor:
