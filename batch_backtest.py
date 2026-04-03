@@ -68,23 +68,46 @@ CSV_HEADERS = [
 BULL_FLAG_CACHE_PATH = "data/bull_flag_signal_cache.csv"
 
 
-def load_bull_flag_cache(cache_path: str, start_date: date, end_date: date) -> List[Dict]:
-    """Load cached bull flag trades, filter by date range."""
+CACHE_ENTRY_SLIPPAGE = 0.001  # Slippage baked into cached entry_price
+
+
+def load_bull_flag_cache(cache_path: str, start_date: date, end_date: date,
+                         entry_slippage_pct: float = None,
+                         position_size: float = 50000) -> List[Dict]:
+    """Load cached bull flag trades, filter by date range, recompute slippage if needed."""
     trades = []
+    recompute = entry_slippage_pct is not None and abs(entry_slippage_pct - CACHE_ENTRY_SLIPPAGE) > 1e-6
+
     with open(cache_path) as f:
         reader = csv.DictReader(f)
         for row in reader:
             d = row['date']
             if d < str(start_date) or d > str(end_date):
                 continue
-            row['pnl'] = float(row['pnl'])
-            row['pnl_pct'] = float(row['pnl_pct'])
-            row['shares'] = int(row['shares'])
             row['entry_price'] = float(row['entry_price'])
             row['exit_price'] = float(row['exit_price']) if row['exit_price'] else 0
+            row['shares'] = int(row['shares'])
             row['daily_range_pct'] = float(row.get('daily_range_pct', 100))
+
+            if recompute and row['entry_price'] > 0:
+                # Reverse old slippage, apply new
+                raw_entry = row['entry_price'] / (1 + CACHE_ENTRY_SLIPPAGE)
+                new_entry = raw_entry * (1 + entry_slippage_pct)
+                new_shares = int(position_size / new_entry) if new_entry > 0 else row['shares']
+                new_pnl = (row['exit_price'] - new_entry) * new_shares
+                new_pnl_pct = (row['exit_price'] - new_entry) / new_entry * 100 if new_entry > 0 else 0
+                row['entry_price'] = round(new_entry, 4)
+                row['shares'] = new_shares
+                row['pnl'] = round(new_pnl, 2)
+                row['pnl_pct'] = round(new_pnl_pct, 2)
+            else:
+                row['pnl'] = float(row['pnl'])
+                row['pnl_pct'] = float(row['pnl_pct'])
+
             trades.append(row)
-    logger.info(f"Loaded {len(trades)} cached bull flag trades ({start_date} to {end_date})")
+
+    slip_label = f", slippage {CACHE_ENTRY_SLIPPAGE:.1%}→{entry_slippage_pct:.1%}" if recompute else ""
+    logger.info(f"Loaded {len(trades)} cached bull flag trades ({start_date} to {end_date}{slip_label})")
     return trades
 
 
@@ -1879,7 +1902,12 @@ def main():
 
     if use_cache:
         # Fast path: load cached trades, apply filters in memory
-        cached_trades = load_bull_flag_cache(BULL_FLAG_CACHE_PATH, start_date, end_date)
+        _entry_slip = float(trading_cfg.get("entry_slippage_pct", 0.005))
+        _pos_size = float(trading_cfg.get("position_size_dollars", 50000))
+        cached_trades = load_bull_flag_cache(
+            BULL_FLAG_CACHE_PATH, start_date, end_date,
+            entry_slippage_pct=_entry_slip, position_size=_pos_size,
+        )
         # Determine threshold for filtering
         if args.threshold is not None:
             _min_range = args.threshold
