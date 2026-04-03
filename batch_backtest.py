@@ -159,15 +159,14 @@ def find_big_movers(
     price_min: float = 0.0,
     price_max: float = 0.0,
     float_max: int = 0,
+    min_dollar_volume: float = 0,
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
 ) -> List[Tuple[str, date]]:
     """
     Filter daily bars for (symbol, date) pairs matching scanner criteria.
 
-    Applies price and float filters at the daily level. Relative volume
-    is NOT filtered here — it's checked at entry time inside BacktestRunner
-    using cumulative volume (matching how the live scanner works).
+    Applies price, float, and dollar volume filters at the daily level.
 
     Args:
         daily_bars: Dict mapping symbol -> list of daily bar dicts
@@ -231,6 +230,13 @@ def find_big_movers(
             if price_max > 0 and bar_close > price_max:
                 skipped_price += 1
                 continue
+
+            # Dollar volume filter: close * volume
+            if min_dollar_volume > 0:
+                bar_vol = bar.get('volume', 0)
+                dollar_vol = bar_close * bar_vol
+                if dollar_vol < min_dollar_volume:
+                    continue
 
             bar_date = bar['date'] if isinstance(bar['date'], date) else date.fromisoformat(str(bar['date']))
             # Only include movers within the requested date range
@@ -1675,6 +1681,14 @@ def main():
         "--full-market", action="store_true",
         help="Include all stocks (default: universe-only for production realism)"
     )
+    parser.add_argument(
+        "--float-max", type=int, default=None,
+        help="Override float_max (e.g., 50000000 for 50M). 0 = disabled."
+    )
+    parser.add_argument(
+        "--min-dollar-vol", type=float, default=None,
+        help="Min daily dollar volume (e.g., 3000000 for $3M). 0 = disabled."
+    )
     args = parser.parse_args()
 
     # Auto-detect worker count from CPU cores
@@ -1765,13 +1779,15 @@ def main():
             intraday_threshold = args.threshold / 100.0
         else:
             intraday_threshold = float(scanner_cfg.get("intraday_change_pct_min", 20.0)) / 100.0
+        _min_dv = args.min_dollar_vol if args.min_dollar_vol is not None else float(scanner_cfg.get("min_dollar_volume", 0))
         movers = find_big_movers(
             daily_bars,
             threshold=intraday_threshold,
             universe_dict=universe_dict,
             price_min=float(scanner_cfg.get("price_min", 2.0)),
             price_max=float(scanner_cfg.get("price_max", 20.0)),
-            float_max=int(scanner_cfg.get("float_max", 10_000_000)),
+            float_max=args.float_max if args.float_max is not None else int(scanner_cfg.get("float_max", 10_000_000)),
+            min_dollar_volume=_min_dv,
             start_date=start_date,
             end_date=end_date,
         )
