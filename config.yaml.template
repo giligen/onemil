@@ -150,7 +150,7 @@ trading:
       shrinking_bodies: false
       shooting_star: true
   # Slippage model (percentage of price, applied in backtest)
-  entry_slippage_pct: 0.001  # 0.10% — added to buy-stop fill price (lifting the ask)
+  entry_slippage_pct: 0.005  # 0.50% — production avg is 0.48% on buy-stops
   exit_slippage_pct: 0.003   # 0.30% — tick gap + spread on self-managed stop exits
   bull_flag:
     min_pole_candles: 3
