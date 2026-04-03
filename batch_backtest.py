@@ -1708,7 +1708,12 @@ def main():
     from trading.market_regime import MarketRegimeFilter
 
     cfg = Config._load_yaml_only()
-    db = get_database()
+    db_cfg = cfg.get("database", {})
+    db = get_database(
+        db_path=db_cfg.get("path", "data/onemil.db"),
+        cache_path=db_cfg.get("cache_path"),
+        trades_path=db_cfg.get("trades_path"),
+    )
 
     # Check if we can use cache (skip heavy data loading)
     cache_available = os.path.exists(BULL_FLAG_CACHE_PATH) and not args.build_cache and not args.no_cache

@@ -210,8 +210,18 @@ class Config:
 
     @property
     def db_path(self) -> str:
-        """SQLite database file path."""
+        """Legacy single SQLite database file path."""
         return self._get_yaml("database", "path", default="data/onemil.db")
+
+    @property
+    def cache_db_path(self) -> str:
+        """Cache database path (bars, universe, profiles)."""
+        return self._get_yaml("database", "cache_path", default=None)
+
+    @property
+    def trades_db_path(self) -> str:
+        """Trades database path (trades, scan results, summaries)."""
+        return self._get_yaml("database", "trades_path", default=None)
 
     # =========================================================================
     # Float Cache

@@ -984,7 +984,14 @@ def main():
             return
 
         from persistence.database import get_database
-        db = get_database()
+        from config import Config
+        _cfg = Config._load_yaml_only()
+        _db_cfg = _cfg.get("database", {})
+        db = get_database(
+            db_path=_db_cfg.get("path", "data/onemil.db"),
+            cache_path=_db_cfg.get("cache_path"),
+            trades_path=_db_cfg.get("trades_path"),
+        )
         bar_cache = load_intraday_bars(movers, db)
 
         # For --build-cache: disable all entry filters to capture everything

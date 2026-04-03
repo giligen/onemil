@@ -53,40 +53,86 @@ class Database:
     """
     SQLite database for scanner data persistence.
 
-    Uses WAL mode for concurrent read access and busy timeout
-    for handling locked DB from parallel processes.
+    Split into two physical databases:
+    - cache_conn: Disposable data (bars, universe, volume profiles) — shareable
+    - trades_conn: Precious data (trades, scan results, summaries) — per-node
+
+    The public API is unchanged — all methods work transparently.
+    For backward compatibility, passing a single db_path uses it for both.
     """
 
-    def __init__(self, db_path: str = "data/onemil.db"):
+    def __init__(self, db_path: str = None, cache_path: str = None, trades_path: str = None):
         """
-        Initialize database connection and create tables.
+        Initialize database connections and create tables.
 
         Args:
-            db_path: Path to SQLite database file
+            db_path: Legacy single-DB path (used for both if cache/trades paths not set)
+            cache_path: Path to cache database (bars, universe, profiles)
+            trades_path: Path to trades database (trades, scans, summaries)
         """
         # Re-register converters to override any third-party (e.g., peewee) interference
         sqlite3.register_converter("TIMESTAMP", _convert_timestamp)
         sqlite3.register_adapter(datetime, _adapt_datetime_iso)
 
-        self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        # Resolve paths: explicit split > legacy single path > defaults
+        if cache_path and trades_path:
+            self._cache_path = Path(cache_path)
+            self._trades_path = Path(trades_path)
+        elif db_path:
+            # Legacy: single DB for both (backward compatible)
+            self._cache_path = Path(db_path)
+            self._trades_path = Path(db_path)
+        else:
+            self._cache_path = Path("data/cache.db")
+            self._trades_path = Path("data/trades.db")
 
-        self.conn = sqlite3.connect(
-            str(self.db_path),
-            detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
-            timeout=30  # Wait up to 30s for locked DB
-        )
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA busy_timeout=30000")
-        self.conn.row_factory = sqlite3.Row
+        self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+        self._trades_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Primary connection reference (for code that accesses self.conn directly)
+        self.db_path = self._cache_path
+
+        self._cache_conn = self._open_connection(self._cache_path)
+        if self._cache_path == self._trades_path:
+            # Same file — share the connection
+            self._trades_conn = self._cache_conn
+            self._split = False
+        else:
+            self._trades_conn = self._open_connection(self._trades_path)
+            self._split = True
+
+        # Legacy alias — some code accesses self.conn directly (e.g., batch_backtest)
+        self.conn = self._cache_conn
 
         self._create_tables()
         self._migrate()
-        logger.info(f"Database initialized: {self.db_path}")
+
+        if self._split:
+            logger.info(f"Database initialized (split): cache={self._cache_path}, trades={self._trades_path}")
+        else:
+            logger.info(f"Database initialized: {self._cache_path}")
+
+    @staticmethod
+    def _open_connection(path: Path) -> sqlite3.Connection:
+        """Open a SQLite connection with WAL mode and busy timeout."""
+        conn = sqlite3.connect(
+            str(path),
+            detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
+            timeout=30
+        )
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.row_factory = sqlite3.Row
+        return conn
 
     def _create_tables(self) -> None:
         """Create all tables if they don't exist."""
-        self.conn.executescript("""
+        self._create_cache_tables()
+        self._create_trades_tables()
+
+    def _create_cache_tables(self) -> None:
+        """Create cache tables (universe, bars, profiles)."""
+        self._cache_conn.executescript("""
             CREATE TABLE IF NOT EXISTS universe (
                 symbol VARCHAR(10) PRIMARY KEY,
                 company_name TEXT,
@@ -110,6 +156,15 @@ class Database:
                 FOREIGN KEY (symbol) REFERENCES universe(symbol)
             );
 
+            CREATE INDEX IF NOT EXISTS idx_volume_profiles_symbol
+                ON volume_profiles(symbol);
+        """)
+        self._cache_conn.commit()
+        logger.debug("Cache tables verified/created")
+
+    def _create_trades_tables(self) -> None:
+        """Create trades tables (trades, scan_results, summaries)."""
+        self._trades_conn.executescript("""
             CREATE TABLE IF NOT EXISTS scan_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 scan_date DATE,
@@ -133,8 +188,6 @@ class Database:
                 ON scan_results(scan_date);
             CREATE INDEX IF NOT EXISTS idx_scan_results_symbol
                 ON scan_results(symbol, scan_date);
-            CREATE INDEX IF NOT EXISTS idx_volume_profiles_symbol
-                ON volume_profiles(symbol);
 
             CREATE TABLE IF NOT EXISTS trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -178,7 +231,11 @@ class Database:
                 ON trades(symbol, trade_date);
             CREATE INDEX IF NOT EXISTS idx_trades_order_id
                 ON trades(order_id);
+        """)
+        self._trades_conn.commit()
 
+        # Cache tables continued (daily_bars, intraday, news)
+        self._cache_conn.executescript("""
             CREATE TABLE IF NOT EXISTS daily_bars (
                 symbol VARCHAR(10) NOT NULL,
                 bar_date DATE NOT NULL,
@@ -222,42 +279,41 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_news_cache_symbol_date
                 ON news_cache(symbol, news_date);
         """)
-        self.conn.commit()
-        logger.debug("Database tables verified/created")
+        self._cache_conn.commit()
 
     def _migrate(self) -> None:
         """Run database migrations for schema changes on existing DBs."""
         # Migration 1: Add unique index on scan_results to prevent duplicate rows.
         try:
-            if not self.conn.execute(
+            if not self._trades_conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_scan_results_unique'"
             ).fetchone():
                 # Remove duplicates: keep the row with the latest detected_at per group
-                self.conn.execute("""
+                self._trades_conn.execute("""
                     DELETE FROM scan_results WHERE id NOT IN (
                         SELECT MAX(id) FROM scan_results
                         GROUP BY scan_date, symbol, phase, COALESCE(time_bucket, '')
                     )
                 """)
-                deleted = self.conn.execute("SELECT changes()").fetchone()[0]
+                deleted = self._trades_conn.execute("SELECT changes()").fetchone()[0]
                 if deleted > 0:
                     logger.info(f"Migration: removed {deleted} duplicate scan_results rows")
 
-                self.conn.execute("""
+                self._trades_conn.execute("""
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_results_unique
                         ON scan_results(scan_date, symbol, phase, COALESCE(time_bucket, ''))
                 """)
-                self.conn.commit()
+                self._trades_conn.commit()
                 logger.info("Migration: added unique index on scan_results")
         except Exception as e:
             logger.warning(f"Migration 1 (scan_results unique index) failed (non-fatal): {e}")
 
         # Migration 2: Add filled_qty column to trades table for partial fill tracking.
         try:
-            columns = [row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()]
+            columns = [row[1] for row in self._trades_conn.execute("PRAGMA table_info(trades)").fetchall()]
             if 'filled_qty' not in columns:
-                self.conn.execute("ALTER TABLE trades ADD COLUMN filled_qty INTEGER")
-                self.conn.commit()
+                self._trades_conn.execute("ALTER TABLE trades ADD COLUMN filled_qty INTEGER")
+                self._trades_conn.commit()
                 logger.info("Migration: added filled_qty column to trades table")
         except Exception as e:
             logger.warning(f"Migration 2 (filled_qty column) failed (non-fatal): {e}")
@@ -266,10 +322,10 @@ class Database:
         # Stores the actual stop level monitored by StopMonitor (flag_low region),
         # distinct from the safety-net SL on the Alpaca bracket (entry * 0.95).
         try:
-            columns = [row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()]
+            columns = [row[1] for row in self._trades_conn.execute("PRAGMA table_info(trades)").fetchall()]
             if 'real_stop_loss_price' not in columns:
-                self.conn.execute("ALTER TABLE trades ADD COLUMN real_stop_loss_price REAL")
-                self.conn.commit()
+                self._trades_conn.execute("ALTER TABLE trades ADD COLUMN real_stop_loss_price REAL")
+                self._trades_conn.commit()
                 logger.info("Migration: added real_stop_loss_price column to trades table")
         except Exception as e:
             logger.warning(f"Migration 3 (real_stop_loss_price column) failed (non-fatal): {e}")
@@ -284,14 +340,14 @@ class Database:
             'partial_exited_at': 'TIMESTAMP',
         }
         try:
-            columns = [row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()]
+            columns = [row[1] for row in self._trades_conn.execute("PRAGMA table_info(trades)").fetchall()]
             added = []
             for col_name, col_type in partial_cols.items():
                 if col_name not in columns:
-                    self.conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+                    self._trades_conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
                     added.append(col_name)
             if added:
-                self.conn.commit()
+                self._trades_conn.commit()
                 logger.info(f"Migration 4: added partial exit columns to trades: {added}")
         except Exception as e:
             logger.warning(f"Migration 4 (partial exit columns) failed (non-fatal): {e}")
@@ -305,14 +361,14 @@ class Database:
             'news_reason': 'VARCHAR(100)',     # LLM's reason for classification
         }
         try:
-            columns = [row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()]
+            columns = [row[1] for row in self._trades_conn.execute("PRAGMA table_info(trades)").fetchall()]
             added = []
             for col_name, col_type in news_cols.items():
                 if col_name not in columns:
-                    self.conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+                    self._trades_conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
                     added.append(col_name)
             if added:
-                self.conn.commit()
+                self._trades_conn.commit()
                 logger.info(f"Migration 5: added news columns to trades: {added}")
         except Exception as e:
             logger.warning(f"Migration 5 (news columns) failed (non-fatal): {e}")
@@ -334,14 +390,14 @@ class Database:
             'exit_ofi': 'REAL',
         }
         try:
-            columns = [row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()]
+            columns = [row[1] for row in self._trades_conn.execute("PRAGMA table_info(trades)").fetchall()]
             added = []
             for col_name, col_type in exit_micro_cols.items():
                 if col_name not in columns:
-                    self.conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+                    self._trades_conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
                     added.append(col_name)
             if added:
-                self.conn.commit()
+                self._trades_conn.commit()
                 logger.info(f"Migration 6: added exit microstructure columns: {added}")
         except Exception as e:
             logger.warning(f"Migration 6 (exit microstructure) failed (non-fatal): {e}")
@@ -359,14 +415,14 @@ class Database:
             'entry_fill_quote_ask': 'REAL',
         }
         try:
-            columns = [row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()]
+            columns = [row[1] for row in self._trades_conn.execute("PRAGMA table_info(trades)").fetchall()]
             added = []
             for col_name, col_type in entry_micro_cols.items():
                 if col_name not in columns:
-                    self.conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+                    self._trades_conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
                     added.append(col_name)
             if added:
-                self.conn.commit()
+                self._trades_conn.commit()
                 logger.info(f"Migration 7: added entry microstructure columns: {added}")
         except Exception as e:
             logger.warning(f"Migration 7 (entry microstructure) failed (non-fatal): {e}")
@@ -374,10 +430,10 @@ class Database:
         # Migration 8: Add strategy column to trades table.
         # Distinguishes bull_flag trades from macd_wave trades.
         try:
-            columns = [row[1] for row in self.conn.execute("PRAGMA table_info(trades)").fetchall()]
+            columns = [row[1] for row in self._trades_conn.execute("PRAGMA table_info(trades)").fetchall()]
             if 'strategy' not in columns:
-                self.conn.execute("ALTER TABLE trades ADD COLUMN strategy VARCHAR(20) DEFAULT 'bull_flag'")
-                self.conn.commit()
+                self._trades_conn.execute("ALTER TABLE trades ADD COLUMN strategy VARCHAR(20) DEFAULT 'bull_flag'")
+                self._trades_conn.commit()
                 logger.info("Migration 8: added strategy column to trades (default='bull_flag')")
         except Exception as e:
             logger.warning(f"Migration 8 (strategy column) failed (non-fatal): {e}")
@@ -393,7 +449,7 @@ class Database:
         Args:
             stock: Dict with keys matching universe columns
         """
-        self.conn.execute("""
+        self._cache_conn.execute("""
             INSERT INTO universe (symbol, company_name, exchange, sector, country,
                                   price_close, float_shares, float_updated_at,
                                   avg_volume_daily, last_updated, active)
@@ -412,7 +468,7 @@ class Database:
                 last_updated = excluded.last_updated,
                 active = excluded.active
         """, stock)
-        self.conn.commit()
+        self._cache_conn.commit()
 
     def upsert_universe_stocks_batch(self, stocks: List[Dict[str, Any]]) -> int:
         """
@@ -427,7 +483,7 @@ class Database:
         if not stocks:
             return 0
 
-        self.conn.executemany("""
+        self._cache_conn.executemany("""
             INSERT INTO universe (symbol, company_name, exchange, sector, country,
                                   price_close, float_shares, float_updated_at,
                                   avg_volume_daily, last_updated, active)
@@ -446,19 +502,19 @@ class Database:
                 last_updated = excluded.last_updated,
                 active = excluded.active
         """, stocks)
-        self.conn.commit()
+        self._cache_conn.commit()
         return len(stocks)
 
     def get_active_universe(self) -> List[Dict[str, Any]]:
         """Get all active stocks in the universe."""
-        cursor = self.conn.execute(
+        cursor = self._cache_conn.execute(
             "SELECT * FROM universe WHERE active = 1 ORDER BY symbol"
         )
         return [dict(row) for row in cursor.fetchall()]
 
     def get_universe_stock(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Get a single stock from the universe."""
-        cursor = self.conn.execute(
+        cursor = self._cache_conn.execute(
             "SELECT * FROM universe WHERE symbol = ?", (symbol,)
         )
         row = cursor.fetchone()
@@ -478,11 +534,11 @@ class Database:
             return 0
 
         placeholders = ','.join('?' for _ in symbols)
-        cursor = self.conn.execute(
+        cursor = self._cache_conn.execute(
             f"UPDATE universe SET active = 0, last_updated = ? WHERE symbol IN ({placeholders})",
             [datetime.now(timezone.utc)] + symbols
         )
-        self.conn.commit()
+        self._cache_conn.commit()
         return cursor.rowcount
 
     def get_symbols_needing_float_update(self, max_age_days: int = 7) -> List[str]:
@@ -496,7 +552,7 @@ class Database:
             List of symbols needing float update
         """
         cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
-        cursor = self.conn.execute("""
+        cursor = self._cache_conn.execute("""
             SELECT symbol FROM universe
             WHERE active = 1
               AND (float_updated_at IS NULL OR float_updated_at < ?)
@@ -512,11 +568,11 @@ class Database:
         even when float_shares is None (prevents re-fetching unavailable data).
         """
         now = datetime.now(timezone.utc)
-        self.conn.execute("""
+        self._cache_conn.execute("""
             UPDATE universe SET float_shares = ?, float_updated_at = ?, last_updated = ?
             WHERE symbol = ?
         """, (float_shares, now, now, symbol))
-        self.conn.commit()
+        self._cache_conn.commit()
 
     # =========================================================================
     # Volume profile operations
@@ -535,14 +591,14 @@ class Database:
         if not profiles:
             return 0
 
-        self.conn.executemany("""
+        self._cache_conn.executemany("""
             INSERT INTO volume_profiles (symbol, time_bucket, avg_volume, last_updated)
             VALUES (:symbol, :time_bucket, :avg_volume, :last_updated)
             ON CONFLICT(symbol, time_bucket) DO UPDATE SET
                 avg_volume = excluded.avg_volume,
                 last_updated = excluded.last_updated
         """, profiles)
-        self.conn.commit()
+        self._cache_conn.commit()
         return len(profiles)
 
     def get_volume_profile(self, symbol: str) -> Dict[str, int]:
@@ -552,7 +608,7 @@ class Database:
         Returns:
             Dict mapping time_bucket -> avg_volume (e.g., {'09:30': 50000, ...})
         """
-        cursor = self.conn.execute(
+        cursor = self._cache_conn.execute(
             "SELECT time_bucket, avg_volume FROM volume_profiles WHERE symbol = ?",
             (symbol,)
         )
@@ -565,7 +621,7 @@ class Database:
         Returns:
             Dict mapping symbol -> {time_bucket: avg_volume}
         """
-        cursor = self.conn.execute(
+        cursor = self._cache_conn.execute(
             "SELECT symbol, time_bucket, avg_volume FROM volume_profiles ORDER BY symbol"
         )
         profiles: Dict[str, Dict[str, int]] = {}
@@ -578,8 +634,8 @@ class Database:
 
     def delete_volume_profiles(self, symbol: str) -> None:
         """Delete all volume profiles for a symbol."""
-        self.conn.execute("DELETE FROM volume_profiles WHERE symbol = ?", (symbol,))
-        self.conn.commit()
+        self._cache_conn.execute("DELETE FROM volume_profiles WHERE symbol = ?", (symbol,))
+        self._cache_conn.commit()
 
     # =========================================================================
     # Scan results operations
@@ -595,7 +651,7 @@ class Database:
         Returns:
             ID of the inserted row
         """
-        cursor = self.conn.execute("""
+        cursor = self._cache_conn.execute("""
             INSERT OR REPLACE INTO scan_results (scan_date, symbol, detected_at, phase,
                                       prev_close, current_price, gap_pct,
                                       intraday_change_pct, relative_volume,
@@ -607,7 +663,7 @@ class Database:
                     :current_volume, :time_bucket, :float_shares,
                     :has_news, :news_headline, :qualified)
         """, result)
-        self.conn.commit()
+        self._cache_conn.commit()
         return cursor.lastrowid
 
     def get_scan_results(self, scan_date: str, phase: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -622,12 +678,12 @@ class Database:
             List of scan result dicts
         """
         if phase:
-            cursor = self.conn.execute(
+            cursor = self._cache_conn.execute(
                 "SELECT * FROM scan_results WHERE scan_date = ? AND phase = ? ORDER BY detected_at",
                 (scan_date, phase)
             )
         else:
-            cursor = self.conn.execute(
+            cursor = self._cache_conn.execute(
                 "SELECT * FROM scan_results WHERE scan_date = ? ORDER BY detected_at",
                 (scan_date,)
             )
@@ -635,7 +691,7 @@ class Database:
 
     def get_premarket_gap_symbols(self, scan_date: str) -> List[str]:
         """Get symbols that had a pre-market gap on the given date."""
-        cursor = self.conn.execute("""
+        cursor = self._cache_conn.execute("""
             SELECT DISTINCT symbol FROM scan_results
             WHERE scan_date = ? AND phase = 'premarket' AND gap_pct >= 2.0
             ORDER BY symbol
@@ -662,7 +718,7 @@ class Database:
         trade.setdefault('strategy', 'bull_flag')
         trade.setdefault('created_at', now)
         trade.setdefault('updated_at', now)
-        cursor = self.conn.execute("""
+        cursor = self._cache_conn.execute("""
             INSERT INTO trades (trade_date, symbol, side, entry_price,
                                stop_loss_price, take_profit_price, shares,
                                risk_per_share, total_risk, risk_reward_ratio,
@@ -678,7 +734,7 @@ class Database:
                     :pnl, :pnl_pct, :pattern_data,
                     :strategy, :created_at, :updated_at)
         """, trade)
-        self.conn.commit()
+        self._cache_conn.commit()
         logger.info(f"Saved trade: {trade['symbol']} {trade['side']} "
                      f"{trade['shares']} shares @ ${trade['entry_price']:.2f}")
         return cursor.lastrowid
@@ -694,15 +750,15 @@ class Database:
         updates['updated_at'] = datetime.now(timezone.utc)
         set_clause = ', '.join(f"{k} = :{k}" for k in updates)
         updates['id'] = trade_id
-        self.conn.execute(
+        self._cache_conn.execute(
             f"UPDATE trades SET {set_clause} WHERE id = :id", updates
         )
-        self.conn.commit()
+        self._cache_conn.commit()
         logger.debug(f"Updated trade {trade_id}: {list(updates.keys())}")
 
     def get_trade_by_order_id(self, order_id: str) -> Optional[Dict[str, Any]]:
         """Get a trade by its Alpaca order ID."""
-        cursor = self.conn.execute(
+        cursor = self._cache_conn.execute(
             "SELECT * FROM trades WHERE order_id = ?", (order_id,)
         )
         row = cursor.fetchone()
@@ -718,7 +774,7 @@ class Database:
         Returns:
             List of trade dicts
         """
-        cursor = self.conn.execute(
+        cursor = self._cache_conn.execute(
             "SELECT * FROM trades WHERE trade_date = ? ORDER BY created_at",
             (trade_date,)
         )
@@ -737,13 +793,13 @@ class Database:
             List of open trade dicts
         """
         if strategy:
-            cursor = self.conn.execute(
+            cursor = self._cache_conn.execute(
                 "SELECT * FROM trades WHERE trade_date = ? AND exit_price IS NULL "
                 "AND order_status != 'cancelled' AND strategy = ? ORDER BY created_at",
                 (trade_date, strategy)
             )
         else:
-            cursor = self.conn.execute(
+            cursor = self._cache_conn.execute(
                 "SELECT * FROM trades WHERE trade_date = ? AND exit_price IS NULL "
                 "AND order_status != 'cancelled' ORDER BY created_at",
                 (trade_date,)
@@ -760,7 +816,7 @@ class Database:
         Returns:
             Total P&L in dollars
         """
-        cursor = self.conn.execute(
+        cursor = self._cache_conn.execute(
             "SELECT COALESCE(SUM(pnl), 0.0) FROM trades WHERE trade_date = ? AND pnl IS NOT NULL",
             (trade_date,)
         )
@@ -773,7 +829,7 @@ class Database:
         Args:
             summary: Dict with trade_date and summary stats
         """
-        self.conn.execute("""
+        self._cache_conn.execute("""
             INSERT INTO daily_trading_summary
                 (trade_date, total_trades, winning_trades, losing_trades,
                  gross_pnl, patterns_detected, patterns_traded)
@@ -787,13 +843,13 @@ class Database:
                 patterns_detected = excluded.patterns_detected,
                 patterns_traded = excluded.patterns_traded
         """, summary)
-        self.conn.commit()
+        self._cache_conn.commit()
         logger.info(f"Saved daily summary for {summary['trade_date']}: "
                      f"{summary['total_trades']} trades, P&L: ${summary['gross_pnl']:.2f}")
 
     def get_daily_summary(self, trade_date: str) -> Optional[Dict[str, Any]]:
         """Get daily trading summary for a date."""
-        cursor = self.conn.execute(
+        cursor = self._cache_conn.execute(
             "SELECT * FROM daily_trading_summary WHERE trade_date = ?",
             (trade_date,)
         )
@@ -806,12 +862,12 @@ class Database:
 
     def get_universe_count(self) -> int:
         """Get count of active stocks in universe."""
-        cursor = self.conn.execute("SELECT COUNT(*) FROM universe WHERE active = 1")
+        cursor = self._cache_conn.execute("SELECT COUNT(*) FROM universe WHERE active = 1")
         return cursor.fetchone()[0]
 
     def get_volume_profile_count(self) -> int:
         """Get count of unique symbols with volume profiles."""
-        cursor = self.conn.execute("SELECT COUNT(DISTINCT symbol) FROM volume_profiles")
+        cursor = self._cache_conn.execute("SELECT COUNT(DISTINCT symbol) FROM volume_profiles")
         return cursor.fetchone()[0]
 
     # =========================================================================
@@ -832,12 +888,12 @@ class Database:
             return 0
 
         now = datetime.now(timezone.utc)
-        self.conn.executemany("""
+        self._cache_conn.executemany("""
             INSERT OR REPLACE INTO daily_bars
                 (symbol, bar_date, open, high, low, close, volume, fetched_at)
             VALUES (:symbol, :date, :open, :high, :low, :close, :volume, :fetched_at)
         """, [{**b, 'fetched_at': now} for b in bars])
-        self.conn.commit()
+        self._cache_conn.commit()
         logger.info(f"Cached {len(bars)} daily bars")
         return len(bars)
 
@@ -863,7 +919,7 @@ class Database:
         for i in range(0, len(symbols), chunk_size):
             chunk = symbols[i:i + chunk_size]
             placeholders = ','.join('?' * len(chunk))
-            cursor = self.conn.execute(f"""
+            cursor = self._cache_conn.execute(f"""
                 SELECT symbol, bar_date, open, high, low, close, volume
                 FROM daily_bars
                 WHERE symbol IN ({placeholders})
@@ -904,7 +960,7 @@ class Database:
         Returns:
             Set of symbol strings with cached data
         """
-        cursor = self.conn.execute("""
+        cursor = self._cache_conn.execute("""
             SELECT DISTINCT symbol FROM daily_bars
             WHERE bar_date >= ? AND bar_date <= ?
         """, (start_date, end_date))
@@ -946,12 +1002,12 @@ class Database:
                 'volume': int(b['volume']),
             })
 
-        self.conn.executemany("""
+        self._cache_conn.executemany("""
             INSERT OR REPLACE INTO intraday_bars_1min
                 (symbol, bar_date, timestamp, open, high, low, close, volume)
             VALUES (:symbol, :bar_date, :timestamp, :open, :high, :low, :close, :volume)
         """, rows)
-        self.conn.commit()
+        self._cache_conn.commit()
         logger.debug(f"Cached {len(rows)} intraday 1-min bars for {symbol} on {bar_date}")
         return len(rows)
 
@@ -967,7 +1023,7 @@ class Database:
             List of bar dicts with keys: timestamp, open, high, low, close, volume
             Empty list if no cached data
         """
-        cursor = self.conn.execute("""
+        cursor = self._cache_conn.execute("""
             SELECT timestamp, open, high, low, close, volume
             FROM intraday_bars_1min
             WHERE symbol = ? AND bar_date = ?
@@ -1007,7 +1063,7 @@ class Database:
         min_date = min(dates)
         max_date = max(dates)
 
-        cursor = self.conn.execute("""
+        cursor = self._cache_conn.execute("""
             SELECT symbol, bar_date, timestamp, open, high, low, close, volume
             FROM intraday_bars_1min
             WHERE bar_date >= ? AND bar_date <= ?
@@ -1050,25 +1106,37 @@ class Database:
         return result
 
     def close(self) -> None:
-        """Close the database connection."""
-        if self.conn:
-            self.conn.close()
-            logger.info("Database connection closed")
+        """Close all database connections."""
+        if self._cache_conn:
+            self._cache_conn.close()
+        if self._split and self._trades_conn:
+            self._trades_conn.close()
+        logger.info("Database connections closed")
 
 
-def get_database(db_path: str = "data/onemil.db") -> Database:
+def get_database(
+    db_path: str = None,
+    cache_path: str = None,
+    trades_path: str = None,
+) -> Database:
     """
     Get or create the singleton Database instance.
 
     Args:
-        db_path: Path to SQLite database file
+        db_path: Legacy single-DB path (backward compatible)
+        cache_path: Path to cache database
+        trades_path: Path to trades database
 
     Returns:
         Database singleton instance
     """
     global _db_instance
     if _db_instance is None:
-        _db_instance = Database(db_path=db_path)
+        _db_instance = Database(
+            db_path=db_path or "data/onemil.db",
+            cache_path=cache_path,
+            trades_path=trades_path,
+        )
     return _db_instance
 
 

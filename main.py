@@ -106,7 +106,7 @@ def run_batch(config) -> None:
         sys.exit(1)
 
     float_provider = FloatProvider()
-    db = get_database(config.db_path)
+    db = get_database(db_path=config.db_path, cache_path=config.cache_db_path, trades_path=config.trades_db_path)
 
     builder = UniverseBuilder(
         alpaca_client=alpaca,
@@ -299,7 +299,7 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
 
     analyzer = _create_news_analyzer(config)
     news_provider = NewsProvider(alpaca, analyzer)
-    db = get_database(config.db_path)
+    db = get_database(db_path=config.db_path, cache_path=config.cache_db_path, trades_path=config.trades_db_path)
     notifier = _create_notifier(config)
 
     criteria = ScannerCriteria(
@@ -411,7 +411,7 @@ def run_test_cycle(config, trade: bool = False) -> None:
 
     analyzer = _create_news_analyzer(config)
     news_provider = NewsProvider(alpaca, analyzer)
-    db = get_database(config.db_path)
+    db = get_database(db_path=config.db_path, cache_path=config.cache_db_path, trades_path=config.trades_db_path)
     notifier = _create_notifier(config)
 
     criteria = ScannerCriteria(
