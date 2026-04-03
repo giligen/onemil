@@ -770,8 +770,90 @@ def write_csv(trades: List[Trade], path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Signal cache — generate once, filter instantly
+# ---------------------------------------------------------------------------
+
+CACHE_DIR = "data"
+
+
+def get_cache_path(trail_pct: float, slip_entry: float, slip_exit: float) -> str:
+    """Build cache filename from params that affect exit prices."""
+    trail_key = int(trail_pct * 10000)  # 0.003 → 30
+    slip_key = int((slip_entry + slip_exit) * 10000)
+    return os.path.join(CACHE_DIR, f"macd_signal_cache_t{trail_key}_s{slip_key}.csv")
+
+
+def save_signal_cache(signals: List[dict], cache_path: str) -> None:
+    """Save all unfiltered signals to CSV cache."""
+    import csv as csv_mod
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    fields = ['symbol', 'date', 'wave', 'entry_price', 'exit_price', 'shares',
+              'pnl_pct', 'pnl_dollar', 'entry_time', 'exit_time', 'exit_reason',
+              'cross_time_min', 'vol_at_cross', 'macd_hist_pct', 'w1_pnl', 'paper']
+    with open(cache_path, 'w', newline='') as f:
+        w = csv_mod.DictWriter(f, fieldnames=fields, extrasaction='ignore')
+        w.writeheader()
+        w.writerows(signals)
+    logger.info(f"Signal cache saved: {cache_path} ({len(signals)} signals)")
+
+
+def load_signal_cache(cache_path: str, start_date: date, end_date: date) -> List[dict]:
+    """Load cached signals, filter by date range."""
+    import csv as csv_mod
+    signals = []
+    with open(cache_path) as f:
+        for row in csv_mod.DictReader(f):
+            d = row['date']
+            if d < str(start_date) or d > str(end_date):
+                continue
+            row['wave'] = int(row['wave'])
+            row['entry_price'] = float(row['entry_price'])
+            row['exit_price'] = float(row['exit_price'])
+            row['shares'] = int(row['shares'])
+            row['pnl_pct'] = float(row['pnl_pct'])
+            row['pnl_dollar'] = float(row['pnl_dollar'])
+            row['cross_time_min'] = int(row['cross_time_min'])
+            row['vol_at_cross'] = int(row['vol_at_cross'])
+            row['macd_hist_pct'] = float(row['macd_hist_pct'])
+            row['w1_pnl'] = float(row['w1_pnl'])
+            row['paper'] = row.get('paper', 'False') == 'True'
+            signals.append(row)
+    logger.info(f"Loaded {len(signals)} cached signals from {cache_path} ({start_date} to {end_date})")
+    return signals
+
+
+def filter_signals(signals: List[dict], entry_filters: dict) -> List[dict]:
+    """Apply entry filters to cached signals in memory."""
+    cross_time_max = entry_filters.get('cross_time_max_min', 0)
+    min_vol_cross = entry_filters.get('min_vol_at_cross', 0)
+    max_vol_cross = entry_filters.get('max_vol_at_cross', 0)
+    min_macd_pct = entry_filters.get('min_macd_hist_pct', 0.0)
+    max_price_entry = entry_filters.get('max_price_at_entry', 0)
+
+    filtered = []
+    for sig in signals:
+        if cross_time_max > 0 and sig['cross_time_min'] > cross_time_max:
+            continue
+        if min_vol_cross > 0 and sig['vol_at_cross'] < min_vol_cross:
+            continue
+        if max_vol_cross > 0 and sig['vol_at_cross'] > max_vol_cross:
+            continue
+        if min_macd_pct > 0 and sig['macd_hist_pct'] < min_macd_pct:
+            continue
+        if max_price_entry > 0 and sig['entry_price'] > max_price_entry:
+            continue
+        filtered.append(sig)
+
+    logger.info(f"Filter: {len(signals)} → {len(filtered)} signals "
+                f"(cross<{cross_time_max}m, vol {min_vol_cross}-{max_vol_cross}, "
+                f"macd>={min_macd_pct}%, price<={max_price_entry})")
+    return filtered
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main():
     parser = argparse.ArgumentParser(description="MACD Wave Strategy Backtest")
@@ -793,6 +875,10 @@ def main():
     parser.add_argument("--max-concurrent", type=int, default=None)
     parser.add_argument("--trail", type=float, default=None, help="Trailing stop %% below highest (e.g., 0.5 = 0.5%%)")
     parser.add_argument("--no-slippage", action="store_true")
+    parser.add_argument("--build-cache", action="store_true",
+                        help="Generate ALL signals (no entry filters) and save to cache CSV")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="Force regeneration even if cache exists")
     parser.add_argument("--verbose", "-v", action="store_true")
 
     args = parser.parse_args()
@@ -860,55 +946,81 @@ def main():
 
     t0 = time_mod.time()
 
-    # Step 1: Find movers
-    movers = find_movers(
-        start_date, end_date,
-        min_price=uni_cfg.get('min_price', 10.0),
-        max_price=uni_cfg.get('max_price', 0),
-        min_volume=int(uni_cfg.get('min_daily_volume', 1_000_000)),
-        min_intraday_pct=uni_cfg.get('min_intraday_pct', 10.0),
-    )
+    # Step 3: Generate signals (use cache if available)
+    trail_pct = args.trail / 100 if args.trail is not None else risk_cfg.get('trail_stop_pct', 0.003)
+    slip_entry = slip_cfg.get('entry_pct', 0.003)
+    slip_exit = slip_cfg.get('exit_pct', 0.003)
 
-    if not movers:
-        print("No movers found.")
-        return
-
-    # Step 2: Load 1-min bars
-    from persistence.database import get_database
-    db = get_database()
-    bar_cache = load_intraday_bars(movers, db)
-
-    # Step 3: Generate signals per stock
     entry_filters = {
         **entry_cfg,
         'max_waves': wave_cfg.get('max_waves', 1),
         'w1_scout': wave_cfg.get('w1_scout', False),
         'w1_min_pct': wave_cfg.get('w1_min_pct', 0.0),
         'position_size': sizing_cfg.get('position_size', 40000),
-        'entry_pct': slip_cfg.get('entry_pct', 0.003),
-        'exit_pct': slip_cfg.get('exit_pct', 0.003),
-        'trail_stop_pct': args.trail / 100 if args.trail is not None else risk_cfg.get('trail_stop_pct', 0.003),
+        'entry_pct': slip_entry,
+        'exit_pct': slip_exit,
+        'trail_stop_pct': trail_pct,
     }
 
-    all_signals = []
-    candidates = 0
-    filtered_out = 0
+    cache_path = get_cache_path(trail_pct, slip_entry, slip_exit)
+    use_cache = os.path.exists(cache_path) and not args.build_cache and not args.no_cache
 
-    for sym, d, pct, close, vol in movers:
-        bars = bar_cache.get((sym, d))
-        if bars is None:
-            continue
-        candidates += 1
-        sigs = generate_signals(bars, cfg, entry_filters)
-        for sig in sigs:
-            sig['symbol'] = sym
-            sig['date'] = d
-        if sigs:
-            all_signals.extend(sigs)
-        else:
-            filtered_out += 1
+    if use_cache:
+        # Fast path: skip find_movers + load_bars entirely
+        all_signals = load_signal_cache(cache_path, start_date, end_date)
+        all_signals = filter_signals(all_signals, entry_filters)
+        movers = []  # Not needed for cached path
+    else:
+        # Slow path: find movers, load bars, generate signals
+        movers = find_movers(
+            start_date, end_date,
+            min_price=uni_cfg.get('min_price', 10.0),
+            max_price=uni_cfg.get('max_price', 0),
+            min_volume=int(uni_cfg.get('min_daily_volume', 1_000_000)),
+            min_intraday_pct=uni_cfg.get('min_intraday_pct', 10.0),
+        )
+        if not movers:
+            print("No movers found.")
+            return
 
-    logger.info(f"Generated {len(all_signals)} signals from {candidates} candidates ({filtered_out} filtered out)")
+        from persistence.database import get_database
+        db = get_database()
+        bar_cache = load_intraday_bars(movers, db)
+
+        # For --build-cache: disable all entry filters to capture everything
+        gen_filters = dict(entry_filters)
+        if args.build_cache:
+            gen_filters['cross_time_max_min'] = 0
+            gen_filters['min_vol_at_cross'] = 0
+            gen_filters['max_vol_at_cross'] = 0
+            gen_filters['min_macd_hist_pct'] = 0
+            gen_filters['max_price_at_entry'] = 0
+            logger.info("Building signal cache (all entry filters disabled)...")
+
+        all_signals = []
+        candidates = 0
+        filtered_out = 0
+
+        for sym, d, pct, close, vol in movers:
+            bars = bar_cache.get((sym, d))
+            if bars is None:
+                continue
+            candidates += 1
+            sigs = generate_signals(bars, cfg, gen_filters)
+            for sig in sigs:
+                sig['symbol'] = sym
+                sig['date'] = d
+            if sigs:
+                all_signals.extend(sigs)
+            else:
+                filtered_out += 1
+
+        logger.info(f"Generated {len(all_signals)} signals from {candidates} candidates ({filtered_out} filtered out)")
+
+        if args.build_cache:
+            save_signal_cache(all_signals, cache_path)
+            # Apply entry filters for this run's output
+            all_signals = filter_signals(all_signals, entry_filters)
 
     # Step 4: Sequential position simulation
     trades, sim_stats = simulate_positions(
