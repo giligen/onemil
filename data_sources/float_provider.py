@@ -102,20 +102,25 @@ class FloatProvider:
         return info.get('float_shares')
 
     def get_stock_info_batch(
-        self, symbols: list, progress_interval: int = 50
+        self, symbols: list, progress_interval: int = 50,
+        volume_map: Optional[Dict[str, int]] = None,
     ) -> Dict[str, Dict]:
         """
         Get float + sector + country for multiple symbols in a single pass.
 
         Makes ONE yfinance call per symbol (not two separate passes).
+        Falls back to FMP + volume estimation for stocks Yahoo misses.
 
         Args:
             symbols: List of stock symbols
             progress_interval: Log progress every N symbols
+            volume_map: Optional dict mapping symbol -> avg_daily_volume
+                        (used for volume-based float estimation fallback)
 
         Returns:
             Dict mapping symbol -> {float_shares, sector, country}
         """
+        volume_map = volume_map or {}
         results = {}
         total = len(symbols)
         success_count = 0
@@ -124,7 +129,8 @@ class FloatProvider:
         logger.info(f"Fetching stock info (float/sector/country) for {total} symbols...")
 
         for i, symbol in enumerate(symbols):
-            info = self.get_stock_info(symbol)
+            avg_vol = volume_map.get(symbol, 0)
+            info = self.get_stock_info(symbol, avg_daily_volume=avg_vol)
             results[symbol] = info
 
             if info.get('float_shares') is not None:
@@ -162,14 +168,14 @@ class FloatProvider:
         batch = self.get_stock_info_batch(symbols, progress_interval)
         return {sym: info.get('float_shares') for sym, info in batch.items()}
 
-    def get_stock_info(self, symbol: str) -> Dict:
+    def get_stock_info(self, symbol: str, avg_daily_volume: int = 0) -> Dict:
         """
         Get extended stock info (sector, country, float) with multi-source fallback.
 
         Sources tried in order:
         1. Yahoo Finance — primary
         2. FMP marketCap/price — for BATS-listed stocks Yahoo misses
-        3. Volume-based estimate — last resort
+        3. Volume-based estimate — if avg_daily_volume provided, estimate float as 5x volume
 
         Args:
             symbol: Stock symbol
@@ -202,7 +208,15 @@ class FloatProvider:
             logger.debug(f"{symbol}: float from FMP estimate = {fmp_float:,}")
             return result
 
-        # Source 3: no float available
+        # Source 3: Volume-based estimate
+        # Float is typically 3-10x avg daily volume for momentum small-caps.
+        # Use 5x as conservative estimate. Only if volume is meaningful (>100K shares).
+        if avg_daily_volume > 100_000:
+            est_float = avg_daily_volume * 5
+            result['float_shares'] = est_float
+            logger.debug(f"{symbol}: float estimated from volume ({avg_daily_volume:,} × 5 = {est_float:,})")
+            return result
+
         logger.debug(f"{symbol}: float unavailable from all sources")
         return result
 

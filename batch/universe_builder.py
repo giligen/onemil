@@ -152,8 +152,19 @@ class UniverseBuilder:
         )
 
         if symbols_need_float:
+            # Build volume map for fallback float estimation
+            volume_map = {}
+            for sym in symbols_need_float:
+                bar = daily_bars.get(sym)
+                if bar and isinstance(bar, dict) and bar.get('volume'):
+                    volume_map[sym] = int(bar['volume'])
+                elif bar and isinstance(bar, list) and bar:
+                    volume_map[sym] = int(bar[-1].get('volume', 0))
+
             # Single pass: fetch float + sector + country together
-            stock_info_batch = self.float_provider.get_stock_info_batch(symbols_need_float)
+            stock_info_batch = self.float_provider.get_stock_info_batch(
+                symbols_need_float, volume_map=volume_map
+            )
             for symbol, info in stock_info_batch.items():
                 float_shares = info.get('float_shares')
                 # Always update float_updated_at (even for None) to prevent re-fetching
