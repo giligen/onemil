@@ -192,9 +192,11 @@ def find_big_movers(
         sym_float = uni.get('float_shares')
 
         # Float filter (applied once per symbol)
-        if float_max > 0 and sym_float and sym_float > float_max:
-            skipped_float += len([b for b in bars if b['low'] > 0 and (b['high'] - b['low']) / b['low'] >= threshold])
-            continue
+        # If float is unknown AND float_max is set, exclude (conservative)
+        if float_max > 0:
+            if sym_float is None or sym_float > float_max:
+                skipped_float += len([b for b in bars if b['low'] > 0 and (b['high'] - b['low']) / b['low'] >= threshold])
+                continue
 
         # Need prev close for direction check — build lookup from consecutive bars
         prev_close_map = {}

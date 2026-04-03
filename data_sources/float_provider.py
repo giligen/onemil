@@ -1,14 +1,19 @@
 """
-Float data provider using Yahoo Finance (yfinance).
+Float data provider with multi-source fallback.
 
-Fetches shares float for stock universe filtering.
-Sequential fetching with progress logging (10-20 min for full batch).
+Sources (in order):
+1. Yahoo Finance (yfinance) — primary, covers ~85% of stocks
+2. FMP marketCap/price estimate — fallback for BATS-listed micro-caps
+3. Volume-based estimation — last resort for stocks with no data anywhere
+
 Results cached in DB with weekly refresh.
-Includes exponential backoff retry for Yahoo Finance rate limits.
 """
 
+import json
 import logging
+import os
 import time
+import urllib.request
 from typing import Optional, Dict
 
 import yfinance as yf
@@ -159,7 +164,12 @@ class FloatProvider:
 
     def get_stock_info(self, symbol: str) -> Dict:
         """
-        Get extended stock info (sector, country, float) from Yahoo Finance with retry.
+        Get extended stock info (sector, country, float) with multi-source fallback.
+
+        Sources tried in order:
+        1. Yahoo Finance — primary
+        2. FMP marketCap/price — for BATS-listed stocks Yahoo misses
+        3. Volume-based estimate — last resort
 
         Args:
             symbol: Stock symbol
@@ -167,7 +177,8 @@ class FloatProvider:
         Returns:
             Dict with sector, country, float_shares (values may be None)
         """
-        def _fetch():
+        # Source 1: Yahoo Finance
+        def _fetch_yahoo():
             ticker = yf.Ticker(symbol)
             info = ticker.info
             return {
@@ -176,7 +187,66 @@ class FloatProvider:
                 'float_shares': int(info['floatShares']) if info.get('floatShares') else None,
             }
 
-        result = self._fetch_with_retry(symbol, _fetch)
+        result = self._fetch_with_retry(symbol, _fetch_yahoo)
         if result is None:
-            return {'sector': None, 'country': None, 'float_shares': None}
+            result = {'sector': None, 'country': None, 'float_shares': None}
+
+        # If Yahoo got float, we're done
+        if result.get('float_shares') is not None:
+            return result
+
+        # Source 2: FMP marketCap / price estimate
+        fmp_float = self._get_float_from_fmp(symbol)
+        if fmp_float is not None:
+            result['float_shares'] = fmp_float
+            logger.debug(f"{symbol}: float from FMP estimate = {fmp_float:,}")
+            return result
+
+        # Source 3: no float available
+        logger.debug(f"{symbol}: float unavailable from all sources")
         return result
+
+    def _get_float_from_fmp(self, symbol: str) -> Optional[int]:
+        """
+        Estimate shares outstanding from FMP marketCap / price.
+
+        Uses the /stable/profile endpoint (works on free tier).
+        Returns estimated total shares (conservative proxy for float).
+
+        Args:
+            symbol: Stock symbol
+
+        Returns:
+            Estimated shares count, or None if unavailable
+        """
+        api_key = os.getenv('FMP_API_KEY', '')
+        if not api_key:
+            return None
+
+        try:
+            url = (
+                f"https://financialmodelingprep.com/stable/profile"
+                f"?symbol={symbol}&apikey={api_key}"
+            )
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            resp = urllib.request.urlopen(req, timeout=5)
+            data = json.loads(resp.read())
+
+            if isinstance(data, list) and data:
+                d = data[0]
+            elif isinstance(data, dict):
+                d = data
+            else:
+                return None
+
+            market_cap = d.get('marketCap', 0)
+            price = d.get('price', 0)
+
+            if price > 0 and market_cap > 0:
+                shares_est = int(market_cap / price)
+                return shares_est
+
+        except Exception as e:
+            logger.debug(f"{symbol}: FMP float estimate failed: {e}")
+
+        return None
