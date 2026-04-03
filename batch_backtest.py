@@ -64,6 +64,73 @@ CSV_HEADERS = [
     "partial_taken", "partial_price", "partial_shares", "partial_pnl",
 ]
 
+BULL_FLAG_CACHE_PATH = "data/bull_flag_signal_cache.csv"
+
+
+def load_bull_flag_cache(cache_path: str, start_date: date, end_date: date) -> List[Dict]:
+    """Load cached bull flag trades, filter by date range."""
+    trades = []
+    with open(cache_path) as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            d = row['date']
+            if d < str(start_date) or d > str(end_date):
+                continue
+            row['pnl'] = float(row['pnl'])
+            row['pnl_pct'] = float(row['pnl_pct'])
+            row['shares'] = int(row['shares'])
+            row['entry_price'] = float(row['entry_price'])
+            row['exit_price'] = float(row['exit_price']) if row['exit_price'] else 0
+            trades.append(row)
+    logger.info(f"Loaded {len(trades)} cached bull flag trades ({start_date} to {end_date})")
+    return trades
+
+
+def filter_bull_flag_trades(
+    trades: List[Dict],
+    market_regime=None,
+    max_trades_per_day: int = 0,
+    max_consecutive_losses: int = 0,
+) -> List[Dict]:
+    """Apply regime, max trades/day, and consecutive loss filters to cached trades."""
+    from collections import defaultdict
+
+    # Group by date
+    by_date = defaultdict(list)
+    for t in trades:
+        by_date[t['date']].append(t)
+
+    filtered = []
+    for d in sorted(by_date):
+        td = date.fromisoformat(d)
+
+        # Regime filter
+        if market_regime and not market_regime.is_regime_ok(td):
+            continue
+
+        day_trades = by_date[d]
+        day_count = 0
+        consec_losses = 0
+
+        for t in day_trades:
+            if max_trades_per_day > 0 and day_count >= max_trades_per_day:
+                break
+            if max_consecutive_losses > 0 and consec_losses >= max_consecutive_losses:
+                break
+
+            filtered.append(t)
+            day_count += 1
+
+            if t['pnl'] > 0:
+                consec_losses = 0
+            else:
+                consec_losses += 1
+
+    logger.info(f"Filter: {len(trades)} → {len(filtered)} trades "
+                f"(regime={'on' if market_regime and market_regime.enabled else 'off'}, "
+                f"max_trades={max_trades_per_day}, max_consec_loss={max_consecutive_losses})")
+    return filtered
+
 
 # ---------------------------------------------------------------------------
 # Step 1: Find 10%+ intraday movers
@@ -1575,6 +1642,14 @@ def main():
         "--max-shares", type=int, default=0,
         help="Override max_shares (e.g., 10000). 0 = use yaml."
     )
+    parser.add_argument(
+        "--build-cache", action="store_true",
+        help="Generate ALL trades (no regime/max_trades) and save to cache CSV"
+    )
+    parser.add_argument(
+        "--no-cache", action="store_true",
+        help="Force regeneration even if cache exists"
+    )
     args = parser.parse_args()
 
     # Auto-detect worker count from CPU cores
@@ -1617,40 +1692,56 @@ def main():
         return
 
     # Standard (non-monthly) mode
-    # Step 1: Load active universe (matches live scanner)
-    db = get_database()
-    universe = db.get_active_universe()
-    symbols = [s['symbol'] for s in universe]
-    logger.info(f"Loaded {len(symbols)} symbols from active universe")
-
-    if not symbols:
-        logger.error("No active symbols in universe — run universe builder first")
-        sys.exit(1)
-
-    # Step 2: Fetch daily bars (cached) and find 10%+ movers with scanner filters
-    # Fetch from 7 days before start_date so the direction filter has prev_close
-    # (need trading day before start, not calendar day — 7 days covers weekends/holidays)
-    client = AlpacaClient(api_key=api_key, api_secret=api_secret)
-    logger.info("Fetching daily bars for date range (cache-first)...")
-    daily_bars = fetch_daily_bars_cached(symbols, start_date - timedelta(days=7), end_date, client, db)
-    universe_dict = {s['symbol']: s for s in universe}
-
     from config import Config
     from trading.market_regime import MarketRegimeFilter
 
     cfg = Config._load_yaml_only()
-    scanner_cfg = cfg.get("scanner", {})
-    movers = find_big_movers(
-        daily_bars,
-        universe_dict=universe_dict,
-        price_min=float(scanner_cfg.get("price_min", 2.0)),
-        price_max=float(scanner_cfg.get("price_max", 20.0)),
-        float_max=int(scanner_cfg.get("float_max", 10_000_000)),
-        start_date=start_date,
-        end_date=end_date,
-    )
+    db = get_database()
 
-    if not movers:
+    # Check if we can use cache (skip heavy data loading)
+    cache_available = os.path.exists(BULL_FLAG_CACHE_PATH) and not args.build_cache and not args.no_cache
+
+    if not cache_available:
+        # Step 1: Load active universe (matches live scanner)
+        universe = db.get_active_universe()
+        symbols = [s['symbol'] for s in universe]
+        logger.info(f"Loaded {len(symbols)} symbols from active universe")
+
+        # Also include ALL symbols from daily_bars cache
+        import sqlite3
+        conn = sqlite3.connect(db.db_path)
+        all_cached = [r[0] for r in conn.execute(
+            "SELECT DISTINCT symbol FROM daily_bars WHERE bar_date >= ? AND bar_date <= ?",
+            (str(start_date), str(end_date))
+        ).fetchall()]
+        symbols = sorted(set(symbols + all_cached))
+        logger.info(f"Expanded to {len(symbols)} symbols (universe + daily_bars cache)")
+
+        if not symbols:
+            logger.error("No symbols found")
+            sys.exit(1)
+
+        # Step 2: Fetch daily bars and find movers
+        client = AlpacaClient(api_key=api_key, api_secret=api_secret)
+        logger.info("Fetching daily bars for date range (cache-first)...")
+        daily_bars = fetch_daily_bars_cached(symbols, start_date - timedelta(days=7), end_date, client, db)
+        universe_dict = {s['symbol']: s for s in db.get_active_universe()}
+
+        scanner_cfg = cfg.get("scanner", {})
+        movers = find_big_movers(
+            daily_bars,
+            universe_dict=universe_dict,
+            price_min=float(scanner_cfg.get("price_min", 2.0)),
+            price_max=float(scanner_cfg.get("price_max", 20.0)),
+            float_max=int(scanner_cfg.get("float_max", 10_000_000)),
+            start_date=start_date,
+            end_date=end_date,
+        )
+    else:
+        movers = []
+        symbols = []
+
+    if not movers and not cache_available:
         logger.warning("No symbols with 10%+ intraday move found — nothing to backtest")
         print_summary(len(symbols), movers, [])
         return
@@ -1691,8 +1782,19 @@ def main():
     sma_period = int(regime_cfg.get("sma_period", 50))
     spy_lookback_days = int(sma_period * 1.5) + 14
     spy_start = start_date - timedelta(days=spy_lookback_days)
-    spy_bars_raw = fetch_daily_bars_cached(['SPY'], spy_start, end_date, client, db)
-    spy_bars = spy_bars_raw.get('SPY', [])
+    if cache_available:
+        # Load SPY from DB only (no API client needed)
+        import sqlite3
+        _conn = sqlite3.connect(db.db_path)
+        spy_bars = [{'date': r[0], 'open': r[1], 'high': r[2], 'low': r[3], 'close': r[4], 'volume': r[5]}
+                    for r in _conn.execute(
+                        "SELECT bar_date, open, high, low, close, volume FROM daily_bars "
+                        "WHERE symbol='SPY' AND bar_date >= ? AND bar_date <= ? ORDER BY bar_date",
+                        (str(spy_start), str(end_date))
+                    ).fetchall()]
+    else:
+        spy_bars_raw = fetch_daily_bars_cached(['SPY'], spy_start, end_date, client, db)
+        spy_bars = spy_bars_raw.get('SPY', [])
     max_trades_per_day = int(trading_cfg.get("max_trades_per_day", 5))
     # CLI override for regime filter
     regime_enabled = bool(regime_cfg.get("enabled", True))
@@ -1718,23 +1820,116 @@ def main():
         f"max_consec_losses={max_consec}"
     )
 
-    # Step 4: Run backtests (1-min bars also cached)
-    # Fast mode is default; --verbose or --no-parallel disables it
+    # Step 4: Run backtests — use cache if available
+    use_cache = os.path.exists(BULL_FLAG_CACHE_PATH) and not args.build_cache and not args.no_cache
+
+    if use_cache:
+        # Fast path: load cached trades, apply filters in memory
+        cached_trades = load_bull_flag_cache(BULL_FLAG_CACHE_PATH, start_date, end_date)
+        filtered_trades = filter_bull_flag_trades(
+            cached_trades,
+            market_regime=market_regime if market_regime.enabled else None,
+            max_trades_per_day=max_trades_per_day,
+            max_consecutive_losses=max_consec,
+        )
+        # Write output CSV
+        trade_count = 0
+        with open(args.output, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(CSV_HEADERS)
+            for t in filtered_trades:
+                writer.writerow([
+                    t['symbol'], t['date'], t.get('entry_time_et', ''),
+                    t['entry_price'], t.get('stop_loss', ''), t.get('target', ''),
+                    t['shares'], t.get('exit_time_et', ''), t['exit_price'],
+                    t.get('exit_reason', ''), f"{t['pnl']:.2f}", f"{t['pnl_pct']:.2f}",
+                    t.get('partial_taken', ''), t.get('partial_price', ''),
+                    t.get('partial_shares', ''), t.get('partial_pnl', ''),
+                ])
+                trade_count += 1
+        logger.info(f"CSV report written to {args.output} ({trade_count} trades)")
+
+        # Print summary
+        n = len(filtered_trades)
+        wins = sum(1 for t in filtered_trades if t['pnl'] > 0)
+        losses = n - wins
+        total_pnl = sum(t['pnl'] for t in filtered_trades)
+        wr = wins / n * 100 if n else 0
+        avg_win = sum(t['pnl'] for t in filtered_trades if t['pnl'] > 0) / wins if wins else 0
+        avg_loss = sum(t['pnl'] for t in filtered_trades if t['pnl'] <= 0) / losses if losses else 0
+        import time as _t; elapsed = 0  # Cache path is instant
+        print(f"\n{'='*70}")
+        print(f"  BATCH BACKTEST (from cache) — {start_date} to {end_date}")
+        print(f"{'='*70}")
+        print(f"  Total trades taken:      {n}")
+        print(f"  Winning trades:          {wins}")
+        print(f"  Losing trades:           {losses}")
+        print(f"  Win rate:                {wr:.1f}%")
+        print(f"  Total P&L:              ${total_pnl:+,.2f}")
+        print(f"  Avg win:                ${avg_win:+,.2f}")
+        print(f"  Avg loss:               ${avg_loss:+,.2f}")
+        print(f"  Elapsed:                {elapsed:.1f}s")
+        print(f"{'='*70}")
+        return
+
+    # Slow path: generate from scratch
     use_fast = not args.no_parallel and not args.verbose
-    if use_fast:
-        results = run_batch_backtest_fast(
-            movers, db=db,
-            market_regime=market_regime,
-            max_consecutive_losses=max_consec,
-            max_workers=args.scan_workers,
-        )
+
+    if args.build_cache:
+        # Disable regime + max_trades for cache generation
+        cache_regime = MarketRegimeFilter(enabled=False)
+        cache_regime.load_spy_bars(spy_bars)
+        logger.info("Building bull flag cache (regime OFF, no max_trades)...")
+        if use_fast:
+            results = run_batch_backtest_fast(
+                movers, db=db,
+                market_regime=cache_regime,
+                max_consecutive_losses=0,
+                max_workers=args.scan_workers,
+            )
+        else:
+            runner = BacktestRunner()
+            results = run_batch_backtest(
+                movers, client, runner, db=db, universe_dict=universe_dict,
+                market_regime=cache_regime,
+                max_consecutive_losses=0,
+            )
+        # Save ALL trades to cache
+        trade_count = 0
+        with open(BULL_FLAG_CACHE_PATH, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(CSV_HEADERS)
+            for result in results:
+                for trade in result.trades_simulated:
+                    writer.writerow([
+                        trade.symbol, result.trade_date,
+                        utc_to_et_str(trade.entry_time),
+                        f"{trade.entry_price:.2f}", f"{trade.stop_loss:.2f}",
+                        f"{trade.take_profit:.2f}", trade.shares,
+                        utc_to_et_str(trade.exit_time),
+                        f"{trade.exit_price:.2f}" if trade.exit_price else "",
+                        trade.exit_reason or "", f"{trade.pnl:.2f}",
+                        f"{trade.pnl_pct:.2f}", trade.partial_exit_taken,
+                        f"{trade.partial_exit_price:.2f}" if trade.partial_exit_price else "",
+                        trade.partial_shares, f"{trade.partial_pnl:.2f}",
+                    ])
+                    trade_count += 1
+        logger.info(f"Bull flag cache saved: {BULL_FLAG_CACHE_PATH} ({trade_count} trades)")
     else:
-        runner = BacktestRunner()  # uses from_config() for all settings
-        results = run_batch_backtest(
-            movers, client, runner, db=db, universe_dict=universe_dict,
-            market_regime=market_regime,
-            max_consecutive_losses=max_consec,
-        )
+        if use_fast:
+            results = run_batch_backtest_fast(
+                movers, db=db,
+                market_regime=market_regime,
+                max_consecutive_losses=max_consec,
+                max_workers=args.scan_workers,
+            )
+        else:
+            runner = BacktestRunner()
+            results = run_batch_backtest(
+                movers, client, runner, db=db, universe_dict=universe_dict,
+                market_regime=market_regime,
+                max_consecutive_losses=max_consec,
+            )
 
     # Restore config.yaml if we overrode sizing
     if _sizing_overridden:
