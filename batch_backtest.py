@@ -18,7 +18,7 @@ import os
 import sys
 from collections import defaultdict
 from datetime import datetime, timezone, date, timedelta
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional, Set
 
 import pandas as pd
 import pytz
@@ -94,9 +94,16 @@ def filter_bull_flag_trades(
     max_trades_per_day: int = 0,
     max_consecutive_losses: int = 0,
     min_daily_range_pct: float = 0,
+    universe_symbols: Optional[Set[str]] = None,
 ) -> List[Dict]:
-    """Apply regime, max trades/day, consecutive loss, and threshold filters."""
+    """Apply regime, max trades/day, consecutive loss, threshold, and universe filters."""
     from collections import defaultdict
+
+    # Pre-filter by universe
+    if universe_symbols is not None:
+        before = len(trades)
+        trades = [t for t in trades if t['symbol'] in universe_symbols]
+        logger.info(f"Universe filter: {before} → {len(trades)} trades")
 
     # Pre-filter by daily range threshold
     if min_daily_range_pct > 0:
@@ -1662,6 +1669,10 @@ def main():
         "--threshold", type=float, default=None,
         help="Override intraday_change_pct_min (e.g., 20 for 20%%)"
     )
+    parser.add_argument(
+        "--full-market", action="store_true",
+        help="Include all stocks (default: universe-only for production realism)"
+    )
     args = parser.parse_args()
 
     # Auto-detect worker count from CPU cores
@@ -1856,12 +1867,18 @@ def main():
             _min_range = args.threshold
         else:
             _min_range = float(cfg.get("scanner", {}).get("intraday_change_pct_min", 20.0))
+        # Universe filter: default = universe-only, --full-market = all
+        _uni_syms = None
+        if not args.full_market:
+            _uni_syms = set(r[0] for r in db.conn.execute('SELECT symbol FROM universe').fetchall())
+
         filtered_trades = filter_bull_flag_trades(
             cached_trades,
             market_regime=market_regime if market_regime.enabled else None,
             max_trades_per_day=max_trades_per_day,
             max_consecutive_losses=max_consec,
             min_daily_range_pct=_min_range,
+            universe_symbols=_uni_syms,
         )
         # Write output CSV
         trade_count = 0
