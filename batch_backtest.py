@@ -1870,7 +1870,9 @@ def main():
         # Universe filter: default = universe-only, --full-market = all
         _uni_syms = None
         if not args.full_market:
-            _uni_syms = set(r[0] for r in db.conn.execute('SELECT symbol FROM universe').fetchall())
+            _active = db.get_active_universe()
+            _uni_syms = set(s['symbol'] for s in _active)
+            logger.info(f"Active universe: {len(_uni_syms)} stocks")
 
         filtered_trades = filter_bull_flag_trades(
             cached_trades,
