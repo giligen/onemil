@@ -887,7 +887,7 @@ def main():
         'position_size': sizing_cfg.get('position_size', 40000),
         'entry_pct': slip_cfg.get('entry_pct', 0.003),
         'exit_pct': slip_cfg.get('exit_pct', 0.003),
-        'trail_stop_pct': args.trail / 100 if args.trail is not None else 0,
+        'trail_stop_pct': args.trail / 100 if args.trail is not None else risk_cfg.get('trail_stop_pct', 0.003),
     }
 
     all_signals = []
