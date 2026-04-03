@@ -24,6 +24,9 @@ scanner:
   # Intraday move threshold
   intraday_change_pct_min: 20.0
 
+  # News catalyst requirement — disabled: pattern detector already filters quality
+  require_news: false
+
   # Relative volume threshold (0 = disabled)
   # 15-month backtest showed rvol filtering HURTS performance:
   #   no_rvol: $247K, Sharpe 3.72 | cumulative 5x: $170K, Sharpe 2.89 | bucket 5x: $104K, Sharpe 2.01

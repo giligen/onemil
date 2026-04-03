@@ -63,6 +63,7 @@ class ScannerCriteria:
         gap_pct_min: float = 2.0,
         intraday_change_pct_min: float = 10.0,
         relative_volume_min: float = 5.0,
+        require_news: bool = True,
     ):
         """
         Initialize criteria thresholds.
@@ -79,6 +80,7 @@ class ScannerCriteria:
         self.price_max = price_max
         self.float_max = float_max
         self.gap_pct_min = gap_pct_min
+        self.require_news = require_news
         self.intraday_change_pct_min = intraday_change_pct_min
         self.relative_volume_min = relative_volume_min
 
@@ -143,7 +145,7 @@ class ScannerCriteria:
         candidate.criteria_met['intraday_change'] = (
             candidate.intraday_change_pct >= self.intraday_change_pct_min
         )
-        candidate.criteria_met['has_news'] = candidate.has_news
+        candidate.criteria_met['has_news'] = candidate.has_news or not self.require_news
 
         qualified = all(candidate.criteria_met.values())
 

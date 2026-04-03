@@ -171,6 +171,11 @@ class Config:
         return float(self._get_yaml("scanner", "relative_volume_min", default=5.0))
 
     @property
+    def require_news(self) -> bool:
+        """Whether to require news catalyst for qualification."""
+        return bool(self._get_yaml("scanner", "require_news", default=False))
+
+    @property
     def volume_profile_days(self) -> int:
         """Number of days for volume profile calculation."""
         return int(self._get_yaml("scanner", "volume_profile_days", default=50))

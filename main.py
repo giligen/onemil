@@ -309,6 +309,7 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
         gap_pct_min=config.gap_pct_min,
         intraday_change_pct_min=config.intraday_change_pct_min,
         relative_volume_min=config.relative_volume_min,
+        require_news=config.require_news,
     )
 
     # Create ONE shared StopMonitor for all strategies
