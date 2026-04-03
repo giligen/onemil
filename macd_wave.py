@@ -183,6 +183,13 @@ def main():
     mode = "DRY RUN" if args.dry_run else "LIVE"
     logger.info(f"MACD Wave Service starting ({mode})")
 
+    # Check if today is a trading day (skip holidays)
+    if not alpaca.is_trading_day():
+        now_et = datetime.now(ET)
+        logger.info(f"Not a trading day ({now_et.strftime('%A %Y-%m-%d')}). Exiting.")
+        stop_monitor.stop()
+        return
+
     # Wait for pre-market
     if not args.skip_wait:
         wait_for_premarket()
