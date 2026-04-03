@@ -62,6 +62,7 @@ CSV_HEADERS = [
     "target", "shares", "exit_time_et", "exit_price", "exit_reason",
     "pnl", "pnl_pct",
     "partial_taken", "partial_price", "partial_shares", "partial_pnl",
+    "daily_range_pct",
 ]
 
 BULL_FLAG_CACHE_PATH = "data/bull_flag_signal_cache.csv"
@@ -81,6 +82,7 @@ def load_bull_flag_cache(cache_path: str, start_date: date, end_date: date) -> L
             row['shares'] = int(row['shares'])
             row['entry_price'] = float(row['entry_price'])
             row['exit_price'] = float(row['exit_price']) if row['exit_price'] else 0
+            row['daily_range_pct'] = float(row.get('daily_range_pct', 100))
             trades.append(row)
     logger.info(f"Loaded {len(trades)} cached bull flag trades ({start_date} to {end_date})")
     return trades
@@ -91,9 +93,14 @@ def filter_bull_flag_trades(
     market_regime=None,
     max_trades_per_day: int = 0,
     max_consecutive_losses: int = 0,
+    min_daily_range_pct: float = 0,
 ) -> List[Dict]:
-    """Apply regime, max trades/day, and consecutive loss filters to cached trades."""
+    """Apply regime, max trades/day, consecutive loss, and threshold filters."""
     from collections import defaultdict
+
+    # Pre-filter by daily range threshold
+    if min_daily_range_pct > 0:
+        trades = [t for t in trades if float(t.get('daily_range_pct', 100)) >= min_daily_range_pct]
 
     # Group by date
     by_date = defaultdict(list)
@@ -128,7 +135,8 @@ def filter_bull_flag_trades(
 
     logger.info(f"Filter: {len(trades)} → {len(filtered)} trades "
                 f"(regime={'on' if market_regime and market_regime.enabled else 'off'}, "
-                f"max_trades={max_trades_per_day}, max_consec_loss={max_consecutive_losses})")
+                f"max_trades={max_trades_per_day}, max_consec_loss={max_consecutive_losses}, "
+                f"min_range={min_daily_range_pct}%)")
     return filtered
 
 
@@ -1650,6 +1658,10 @@ def main():
         "--no-cache", action="store_true",
         help="Force regeneration even if cache exists"
     )
+    parser.add_argument(
+        "--threshold", type=float, default=None,
+        help="Override intraday_change_pct_min (e.g., 20 for 20%%)"
+    )
     args = parser.parse_args()
 
     # Auto-detect worker count from CPU cores
@@ -1728,8 +1740,16 @@ def main():
         universe_dict = {s['symbol']: s for s in db.get_active_universe()}
 
         scanner_cfg = cfg.get("scanner", {})
+        # Use 10% for cache builds (broadest), config value otherwise
+        if args.build_cache:
+            intraday_threshold = 0.10  # Cache at 10% — filter at query time
+        elif args.threshold is not None:
+            intraday_threshold = args.threshold / 100.0
+        else:
+            intraday_threshold = float(scanner_cfg.get("intraday_change_pct_min", 20.0)) / 100.0
         movers = find_big_movers(
             daily_bars,
+            threshold=intraday_threshold,
             universe_dict=universe_dict,
             price_min=float(scanner_cfg.get("price_min", 2.0)),
             price_max=float(scanner_cfg.get("price_max", 20.0)),
@@ -1826,11 +1846,17 @@ def main():
     if use_cache:
         # Fast path: load cached trades, apply filters in memory
         cached_trades = load_bull_flag_cache(BULL_FLAG_CACHE_PATH, start_date, end_date)
+        # Determine threshold for filtering
+        if args.threshold is not None:
+            _min_range = args.threshold
+        else:
+            _min_range = float(cfg.get("scanner", {}).get("intraday_change_pct_min", 20.0))
         filtered_trades = filter_bull_flag_trades(
             cached_trades,
             market_regime=market_regime if market_regime.enabled else None,
             max_trades_per_day=max_trades_per_day,
             max_consecutive_losses=max_consec,
+            min_daily_range_pct=_min_range,
         )
         # Write output CSV
         trade_count = 0
@@ -1894,6 +1920,18 @@ def main():
                 market_regime=cache_regime,
                 max_consecutive_losses=0,
             )
+        # Build daily range lookup: (sym, date) -> (high-low)/low * 100
+        import sqlite3 as _sql
+        _conn = _sql.connect(db.db_path)
+        _range_map = {}
+        for r in _conn.execute(
+            "SELECT symbol, bar_date, high, low FROM daily_bars "
+            "WHERE bar_date >= ? AND bar_date <= ?",
+            (str(start_date), str(end_date))
+        ).fetchall():
+            if r[3] > 0:
+                _range_map[(r[0], r[1])] = (r[2] - r[3]) / r[3] * 100
+
         # Save ALL trades to cache
         trade_count = 0
         with open(BULL_FLAG_CACHE_PATH, 'w', newline='', encoding='utf-8') as f:
@@ -1901,6 +1939,7 @@ def main():
             writer.writerow(CSV_HEADERS)
             for result in results:
                 for trade in result.trades_simulated:
+                    dr = _range_map.get((trade.symbol, result.trade_date), 0)
                     writer.writerow([
                         trade.symbol, result.trade_date,
                         utc_to_et_str(trade.entry_time),
@@ -1912,6 +1951,7 @@ def main():
                         f"{trade.pnl_pct:.2f}", trade.partial_exit_taken,
                         f"{trade.partial_exit_price:.2f}" if trade.partial_exit_price else "",
                         trade.partial_shares, f"{trade.partial_pnl:.2f}",
+                        f"{dr:.1f}",
                     ])
                     trade_count += 1
         logger.info(f"Bull flag cache saved: {BULL_FLAG_CACHE_PATH} ({trade_count} trades)")
