@@ -162,6 +162,8 @@ class TradeSimulator:
         no_pop_exit_bars: int = 0,
         no_pop_exit_min_pct: float = 0.005,
         trail_exit_slippage_pct: float = None,
+        trail_tighten_at_r: float = 0.0,
+        trail_tightened_r: float = 0.5,
     ):
         """
         Initialize TradeSimulator.
@@ -220,6 +222,10 @@ class TradeSimulator:
         # Acts as stage 1 protection before full trail activates at activate_at_r
         self.breakeven_at_r = breakeven_at_r  # 0 = disabled
         self.breakeven_profit_r = breakeven_profit_r  # 0 = clean breakeven, 0.4 = lock 0.4R
+        # Trail tightening: once profit reaches tighten_at_r, reduce trail from trail_r to tightened_r
+        # Locks in more profit on big runners without capping them (replaces fixed TP)
+        self.trail_tighten_at_r = trail_tighten_at_r  # 0 = disabled
+        self.trail_tightened_r = trail_tightened_r  # 0.5 = tighter trail after threshold
 
     # ------------------------------------------------------------------
     # Exhaustion signal detectors (delegated to shared module)
@@ -380,6 +386,17 @@ class TradeSimulator:
                     r_gain = (highest_since_entry - actual_entry) / risk
                     if r_gain >= self.trailing_activate_at_r:
                         trailing_active = True
+
+                # Stage 2.5: Tighten trail after passing threshold (e.g., 2.5R)
+                # Locks in more profit on runners without capping them
+                if (trailing_active and not exhaust_partial_taken
+                        and self.trail_tighten_at_r > 0 and risk > 0):
+                    if r_gain >= self.trail_tighten_at_r and effective_trail_r > self.trail_tightened_r:
+                        effective_trail_r = self.trail_tightened_r
+                        logger.debug(
+                            f"  Bar {i}: trail TIGHTENED at +{r_gain:.1f}R → "
+                            f"{effective_trail_r}R trail"
+                        )
 
                 # Ratchet stop up (uses tighter trail after exhaustion partial)
                 if trailing_active and risk > 0:
@@ -856,6 +873,8 @@ class BacktestRunner:
                 marketable_limit_offset_pct=ml_offset_pct,
                 trailing_stop_r=resolved_trail_r,
                 trailing_activate_at_r=resolved_trail_activate,
+                trail_tighten_at_r=float(trail_cfg.get("tighten_at_r", 0)),
+                trail_tightened_r=float(trail_cfg.get("tightened_trail_r", 0.5)),
                 breakeven_at_r=resolved_breakeven,
                 breakeven_profit_r=resolved_breakeven_profit,
                 exhaustion_exit_enabled=self.exhaustion_exit_enabled,
