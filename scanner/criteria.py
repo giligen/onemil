@@ -64,6 +64,7 @@ class ScannerCriteria:
         intraday_change_pct_min: float = 10.0,
         relative_volume_min: float = 5.0,
         require_news: bool = True,
+        min_dollar_volume: float = 0,
     ):
         """
         Initialize criteria thresholds.
@@ -75,6 +76,7 @@ class ScannerCriteria:
             gap_pct_min: Minimum pre-market gap percentage
             intraday_change_pct_min: Minimum intraday price change percentage
             relative_volume_min: Minimum relative volume ratio
+            min_dollar_volume: Minimum daily dollar volume (price × volume)
         """
         self.price_min = price_min
         self.price_max = price_max
@@ -83,6 +85,7 @@ class ScannerCriteria:
         self.require_news = require_news
         self.intraday_change_pct_min = intraday_change_pct_min
         self.relative_volume_min = relative_volume_min
+        self.min_dollar_volume = min_dollar_volume
 
     def evaluate_premarket(self, candidate: ScanCandidate) -> bool:
         """
@@ -146,6 +149,10 @@ class ScannerCriteria:
             candidate.intraday_change_pct >= self.intraday_change_pct_min
         )
         candidate.criteria_met['has_news'] = candidate.has_news or not self.require_news
+        candidate.criteria_met['dollar_volume'] = (
+            self.min_dollar_volume <= 0 or
+            (candidate.current_price * candidate.current_volume >= self.min_dollar_volume)
+        )
 
         qualified = all(candidate.criteria_met.values())
 

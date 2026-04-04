@@ -128,11 +128,11 @@ class TestEvaluateIntraday:
         return ScanCandidate(**defaults)
 
     def test_all_criteria_met(self):
-        """Stock meeting all 6 criteria qualifies intraday."""
+        """Stock meeting all 7 criteria qualifies intraday."""
         candidate = self._make_qualified_candidate()
         assert self.criteria.evaluate_intraday(candidate) is True
-        assert candidate.criteria_met_count == 6
-        assert candidate.total_criteria == 6
+        assert candidate.criteria_met_count == 7
+        assert candidate.total_criteria == 7
 
     def test_fail_price_too_low(self):
         """Stock below $2 fails price_range criterion."""
@@ -189,7 +189,7 @@ class TestCloseCallDetection:
         self.criteria = ScannerCriteria()
 
     def test_close_call_one_criterion_failing(self):
-        """Stock with 5 of 6 criteria met is a close call."""
+        """Stock with 6 of 7 criteria met is a close call."""
         candidate = ScanCandidate(
             symbol="NEAR",
             current_price=5.0,
@@ -201,13 +201,13 @@ class TestCloseCallDetection:
         )
         result = self.criteria.evaluate_intraday(candidate)
         assert result is False
-        assert candidate.criteria_met_count == 5
-        assert candidate.total_criteria == 6
+        assert candidate.criteria_met_count == 6
+        assert candidate.total_criteria == 7
         # Verify it's exactly one short
         assert candidate.criteria_met_count >= candidate.total_criteria - 1
 
     def test_not_close_call_two_failing(self):
-        """Stock with 4 of 6 criteria is NOT a close call."""
+        """Stock with 5 of 7 criteria is NOT a close call."""
         candidate = ScanCandidate(
             symbol="FAR",
             current_price=5.0,
@@ -219,7 +219,7 @@ class TestCloseCallDetection:
         )
         result = self.criteria.evaluate_intraday(candidate)
         assert result is False
-        assert candidate.criteria_met_count == 4
+        assert candidate.criteria_met_count == 5
         assert candidate.criteria_met_count < candidate.total_criteria - 1
 
 

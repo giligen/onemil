@@ -176,6 +176,11 @@ class Config:
         return bool(self._get_yaml("scanner", "require_news", default=False))
 
     @property
+    def min_dollar_volume(self) -> float:
+        """Minimum daily dollar volume to filter untradeable micro-caps."""
+        return float(self._get_yaml("scanner", "min_dollar_volume", default=0))
+
+    @property
     def volume_profile_days(self) -> int:
         """Number of days for volume profile calculation."""
         return int(self._get_yaml("scanner", "volume_profile_days", default=50))

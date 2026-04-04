@@ -310,6 +310,7 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
         intraday_change_pct_min=config.intraday_change_pct_min,
         relative_volume_min=config.relative_volume_min,
         require_news=config.require_news,
+        min_dollar_volume=config.min_dollar_volume,
     )
 
     # Create ONE shared StopMonitor for all strategies
@@ -422,6 +423,8 @@ def run_test_cycle(config, trade: bool = False) -> None:
         gap_pct_min=config.gap_pct_min,
         intraday_change_pct_min=config.intraday_change_pct_min,
         relative_volume_min=config.relative_volume_min,
+        require_news=config.require_news,
+        min_dollar_volume=config.min_dollar_volume,
     )
 
     trading_engine = None

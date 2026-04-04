@@ -107,9 +107,12 @@ def filter_bull_flag_trades(
     max_consecutive_losses: int = 0,
     min_daily_range_pct: float = 0,
     universe_symbols: Optional[Set[str]] = None,
+    max_concurrent: int = 0,
+    daily_loss_limit: float = 0,
 ) -> List[Dict]:
-    """Apply regime, max trades/day, consecutive loss, threshold, and universe filters."""
+    """Apply regime, max trades/day, consecutive loss, threshold, concurrent, and loss limit filters."""
     from collections import defaultdict
+    from datetime import datetime as _dt
 
     # Pre-filter by universe
     if universe_symbols is not None:
@@ -127,6 +130,9 @@ def filter_bull_flag_trades(
         by_date[t['date']].append(t)
 
     filtered = []
+    concurrent_skipped = 0
+    loss_limit_skipped = 0
+
     for d in sorted(by_date):
         td = date.fromisoformat(d)
 
@@ -137,6 +143,8 @@ def filter_bull_flag_trades(
         day_trades = by_date[d]
         day_count = 0
         consec_losses = 0
+        daily_pnl = 0.0
+        active_positions = []  # list of exit times
 
         for t in day_trades:
             if max_trades_per_day > 0 and day_count >= max_trades_per_day:
@@ -144,8 +152,33 @@ def filter_bull_flag_trades(
             if max_consecutive_losses > 0 and consec_losses >= max_consecutive_losses:
                 break
 
+            # Daily loss limit
+            if daily_loss_limit < 0 and daily_pnl <= daily_loss_limit:
+                loss_limit_skipped += 1
+                continue
+
+            # Concurrent position limit
+            if max_concurrent > 0:
+                entry_str = t.get('entry_time_et', '')
+                exit_str = t.get('exit_time_et', '')
+                if entry_str and exit_str:
+                    try:
+                        entry_t = _dt.strptime(f"{d} {entry_str}", '%Y-%m-%d %H:%M:%S')
+                        # Remove expired positions
+                        active_positions = [
+                            ex for ex in active_positions if ex > entry_t
+                        ]
+                        if len(active_positions) >= max_concurrent:
+                            concurrent_skipped += 1
+                            continue
+                        exit_t = _dt.strptime(f"{d} {exit_str}", '%Y-%m-%d %H:%M:%S')
+                        active_positions.append(exit_t)
+                    except (ValueError, TypeError):
+                        pass  # Can't parse times, allow trade
+
             filtered.append(t)
             day_count += 1
+            daily_pnl += t['pnl']
 
             if t['pnl'] > 0:
                 consec_losses = 0
@@ -154,8 +187,11 @@ def filter_bull_flag_trades(
 
     logger.info(f"Filter: {len(trades)} → {len(filtered)} trades "
                 f"(regime={'on' if market_regime and market_regime.enabled else 'off'}, "
-                f"max_trades={max_trades_per_day}, max_consec_loss={max_consecutive_losses}, "
-                f"min_range={min_daily_range_pct}%)")
+                f"max_trades={max_trades_per_day}, max_concurrent={max_concurrent}, "
+                f"daily_loss_limit=${daily_loss_limit:,.0f}, "
+                f"min_range={min_daily_range_pct}%)"
+                + (f", {concurrent_skipped} concurrent-skipped" if concurrent_skipped else "")
+                + (f", {loss_limit_skipped} loss-limit-skipped" if loss_limit_skipped else ""))
     return filtered
 
 
@@ -1919,6 +1955,8 @@ def main():
             _uni_syms = set(s['symbol'] for s in _active)
             logger.info(f"Active universe: {len(_uni_syms)} stocks")
 
+        _max_pos = int(trading_cfg.get("max_positions", 3))
+        _daily_loss = float(trading_cfg.get("daily_loss_limit", -5000))
         filtered_trades = filter_bull_flag_trades(
             cached_trades,
             market_regime=market_regime if market_regime.enabled else None,
@@ -1926,6 +1964,8 @@ def main():
             max_consecutive_losses=max_consec,
             min_daily_range_pct=_min_range,
             universe_symbols=_uni_syms,
+            max_concurrent=_max_pos,
+            daily_loss_limit=_daily_loss,
         )
         # Write output CSV
         trade_count = 0
