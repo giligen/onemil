@@ -246,12 +246,11 @@ def find_big_movers(
         uni = universe_dict.get(symbol, {})
         sym_float = uni.get('float_shares')
 
-        # Float filter (applied once per symbol)
-        # If float is unknown AND float_max is set, exclude (conservative)
-        if float_max > 0:
-            if sym_float is None or sym_float > float_max:
-                skipped_float += len([b for b in bars if b['low'] > 0 and (b['high'] - b['low']) / b['low'] >= threshold])
-                continue
+        # Float filter: only exclude stocks with KNOWN float > max.
+        # NULL float = unknown = include (many BATS-listed stocks like BEX, CORD).
+        if float_max > 0 and sym_float is not None and sym_float > float_max:
+            skipped_float += len([b for b in bars if b['low'] > 0 and (b['high'] - b['low']) / b['low'] >= threshold])
+            continue
 
         # Need prev close for direction check — build lookup from consecutive bars
         prev_close_map = {}
