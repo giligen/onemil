@@ -747,6 +747,18 @@ class MACDWaveEngine:
                                         risk_per_share=risk_for_trail,
                                         trail_r=1.0, activate_at_r=0.0,
                                     )
+
+                                # Log L2 order book depth at fill time (non-blocking)
+                                try:
+                                    from data_sources.l2_depth import snapshot_l2_at_fill, l2_to_json
+                                    l2 = snapshot_l2_at_fill(sym, datetime.now(timezone.utc))
+                                    if l2:
+                                        self.db.update_trade(pos.trade_id, {
+                                            'entry_l2_depth': l2_to_json(l2)
+                                        })
+                                except Exception as e:
+                                    logger.debug(f"[{self.STRATEGY_NAME}] {sym}: L2 snapshot failed: {e}")
+
                         elif status in ('cancelled', 'expired', 'rejected'):
                             logger.warning(f"[{self.STRATEGY_NAME}] {sym}: order {status}")
                             del self.open_positions[sym]

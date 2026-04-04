@@ -574,6 +574,20 @@ class TradingEngine:
                                 f"OFI={qsnap['ofi_cumulative']:.0f}"
                             )
                         self.stop_monitor.remove_quote_watch(symbol)
+
+                    # Log L2 order book depth at fill time (Databento, non-blocking)
+                    try:
+                        from data_sources.l2_depth import snapshot_l2_at_fill, l2_to_json
+                        from datetime import datetime as _dt
+                        fill_dt = _dt.fromisoformat(str(filled_at)) if filled_at else None
+                        if fill_dt:
+                            l2 = snapshot_l2_at_fill(symbol, fill_dt)
+                            if l2:
+                                self.db.update_trade(trade_record['id'], {
+                                    'entry_l2_depth': l2_to_json(l2)
+                                })
+                    except Exception as e:
+                        logger.debug(f"{symbol}: L2 snapshot failed (non-fatal): {e}")
                 else:
                     error_msg = f"{symbol}: No trade record for order {order_id} — DB integrity issue"
                     logger.error(error_msg)

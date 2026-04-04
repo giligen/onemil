@@ -438,6 +438,18 @@ class Database:
         except Exception as e:
             logger.warning(f"Migration 8 (strategy column) failed (non-fatal): {e}")
 
+        # Migration 9: Add L2 order book depth snapshot column.
+        # JSON blob with 10 levels of bid/ask price+size at entry fill time.
+        # Source: Databento ITCH/PITCH feed, logged for position sizing research.
+        try:
+            columns = [row[1] for row in self._trades_conn.execute("PRAGMA table_info(trades)").fetchall()]
+            if 'entry_l2_depth' not in columns:
+                self._trades_conn.execute("ALTER TABLE trades ADD COLUMN entry_l2_depth TEXT")
+                self._trades_conn.commit()
+                logger.info("Migration 9: added entry_l2_depth column to trades")
+        except Exception as e:
+            logger.warning(f"Migration 9 (entry_l2_depth) failed (non-fatal): {e}")
+
     # =========================================================================
     # Universe operations
     # =========================================================================
