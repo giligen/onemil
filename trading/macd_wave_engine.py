@@ -106,6 +106,8 @@ class MACDWaveEngine:
         sizing = cfg.get('sizing', {})
         self.position_size = float(sizing.get('position_size', 50_000))
         self.max_concurrent = int(sizing.get('max_concurrent', 5))
+        adv_pct = sizing.get('max_adv_participation_pct')
+        self.max_adv_participation_pct = float(adv_pct) if adv_pct else None
 
         # Risk
         risk = cfg.get('risk', {})
@@ -126,6 +128,7 @@ class MACDWaveEngine:
         # State (reset daily)
         self.universe: List[str] = []
         self.universe_opens: Dict[str, float] = {}  # symbol → today's open price
+        self.universe_volumes: Dict[str, int] = {}  # symbol → prev day volume (ADV proxy)
         self.crossed_stocks: Dict[str, CrossedStock] = {}
         self.open_positions: Dict[str, OpenPosition] = {}
         self.invalidated: Set[str] = set()
@@ -287,6 +290,8 @@ class MACDWaveEngine:
                         vol_filtered += 1
                         continue
                     self.universe.append(sym)
+                    if prev_vol > 0:
+                        self.universe_volumes[sym] = prev_vol
             except Exception as e:
                 logger.warning(f"[{self.STRATEGY_NAME}] Snapshot chunk failed: {e}")
 
@@ -544,6 +549,21 @@ class MACDWaveEngine:
             shares = int(self.position_size / limit_price)
             if shares <= 0:
                 return False
+
+            # ADV participation cap: limit shares to X% of average daily volume
+            if self.max_adv_participation_pct and shares > 0:
+                adv = self.universe_volumes.get(symbol, 0)
+                if not adv:
+                    uni = self.db.get_universe_stock(symbol)
+                    adv = uni.get('avg_volume_daily', 0) if uni else 0
+                if adv > 0:
+                    adv_cap = int(adv * self.max_adv_participation_pct)
+                    if adv_cap > 0 and shares > adv_cap:
+                        logger.info(
+                            f"[{self.STRATEGY_NAME}] {symbol}: ADV cap {shares} → {adv_cap} shares "
+                            f"({self.max_adv_participation_pct:.1%} of {adv:,} ADV)"
+                        )
+                        shares = adv_cap
 
             hard_stop = round(limit_price * (1 - self.hard_stop_pct), 2)
 
@@ -951,6 +971,7 @@ class MACDWaveEngine:
     def reset_daily(self) -> None:
         """Reset all daily state."""
         self.universe_opens.clear()
+        self.universe_volumes.clear()
         self.crossed_stocks.clear()
         self.open_positions.clear()
         self.invalidated.clear()

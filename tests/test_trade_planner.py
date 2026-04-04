@@ -543,3 +543,67 @@ class TestBackwardCompatibility:
         )
         plan = planner.create_plan(pattern)
         assert plan is None
+
+
+# =============================================================================
+# ADV participation cap
+# =============================================================================
+
+class TestADVParticipationCap:
+    """Tests for max_adv_participation_pct liquidity cap."""
+
+    def test_adv_cap_reduces_shares(self):
+        """Shares capped at 1% of ADV when position would exceed it."""
+        planner = TradePlanner(
+            sizing_mode="fixed_risk",
+            risk_per_trade=2000,
+            max_shares=10000,
+            max_adv_participation_pct=0.01,
+        )
+        # $5 stock, risk=$0.20/share → 2000/0.20 = 10000 shares
+        # But ADV=200K → 1% cap = 2000 shares
+        pattern = _make_pattern(breakout_level=5.00, flag_low=4.80)
+        plan = planner.create_plan(pattern, avg_daily_volume=200_000)
+        assert plan is not None
+        assert plan.shares == 2000
+
+    def test_adv_cap_no_effect_below_cap(self):
+        """When computed shares already under ADV cap, no reduction."""
+        planner = TradePlanner(
+            sizing_mode="fixed_risk",
+            risk_per_trade=500,
+            max_shares=10000,
+            max_adv_participation_pct=0.01,
+        )
+        # $5 stock, risk=$0.20/share → 500/0.20 = 2500 shares
+        # ADV=1M → 1% cap = 10000 shares → no reduction
+        pattern = _make_pattern(breakout_level=5.00, flag_low=4.80)
+        plan = planner.create_plan(pattern, avg_daily_volume=1_000_000)
+        assert plan is not None
+        assert plan.shares == 2500
+
+    def test_adv_cap_disabled_when_none(self):
+        """When max_adv_participation_pct is None, no cap applied."""
+        planner = TradePlanner(
+            sizing_mode="fixed_risk",
+            risk_per_trade=2000,
+            max_shares=10000,
+            max_adv_participation_pct=None,
+        )
+        pattern = _make_pattern(breakout_level=5.00, flag_low=4.80)
+        plan = planner.create_plan(pattern, avg_daily_volume=200_000)
+        assert plan is not None
+        assert plan.shares == 10000  # No ADV cap, only max_shares
+
+    def test_adv_cap_disabled_when_no_volume(self):
+        """When avg_daily_volume is None, no cap applied."""
+        planner = TradePlanner(
+            sizing_mode="fixed_risk",
+            risk_per_trade=2000,
+            max_shares=10000,
+            max_adv_participation_pct=0.01,
+        )
+        pattern = _make_pattern(breakout_level=5.00, flag_low=4.80)
+        plan = planner.create_plan(pattern, avg_daily_volume=None)
+        assert plan is not None
+        assert plan.shares == 10000  # No volume data, cap skipped

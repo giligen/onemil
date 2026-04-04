@@ -57,6 +57,7 @@ class TradePlanner:
         risk_per_trade: float = 500.0,
         min_risk_pct: Optional[float] = 0.005,
         max_risk_pct: Optional[float] = None,
+        max_adv_participation_pct: Optional[float] = None,
     ):
         """
         Initialize TradePlanner.
@@ -71,6 +72,7 @@ class TradePlanner:
             risk_per_trade: Dollar risk budget per trade (fixed_risk mode)
             min_risk_pct: Min risk as fraction of entry price (e.g., 0.01 = 1%); overrides min_risk_per_share
             max_risk_pct: Max risk as fraction of entry price (e.g., 0.05 = 5%); overrides max_risk_per_share
+            max_adv_participation_pct: Max shares as fraction of avg daily volume (liquidity cap)
         """
         if sizing_mode not in ("fixed_investment", "fixed_risk"):
             raise ValueError(f"sizing_mode must be 'fixed_investment' or 'fixed_risk', got '{sizing_mode}'")
@@ -84,6 +86,7 @@ class TradePlanner:
         self.risk_per_trade = risk_per_trade
         self.min_risk_pct = min_risk_pct
         self.max_risk_pct = max_risk_pct
+        self.max_adv_participation_pct = max_adv_participation_pct
 
     @classmethod
     def from_config(cls) -> 'TradePlanner':
@@ -94,6 +97,7 @@ class TradePlanner:
             trading = cfg.get("trading", {})
             min_risk_pct = trading.get("min_risk_pct")
             max_risk_pct = trading.get("max_risk_pct")
+            adv_pct = trading.get("max_adv_participation_pct")
             return cls(
                 position_size_dollars=float(trading.get("position_size_dollars", 10000)),
                 max_shares=int(trading.get("max_shares", 10000)),
@@ -104,12 +108,14 @@ class TradePlanner:
                 risk_per_trade=float(trading.get("risk_per_trade", 500.0)),
                 min_risk_pct=float(min_risk_pct) if min_risk_pct is not None else None,
                 max_risk_pct=float(max_risk_pct) if max_risk_pct is not None else None,
+                max_adv_participation_pct=float(adv_pct) if adv_pct else None,
             )
         except Exception as e:
             logger.warning(f"Failed to load config.yaml, using defaults: {e}")
             return cls()
 
-    def create_plan(self, pattern: BullFlagPattern) -> Optional[TradePlan]:
+    def create_plan(self, pattern: BullFlagPattern,
+                     avg_daily_volume: Optional[int] = None) -> Optional[TradePlan]:
         """
         Create a trade plan from a detected bull flag pattern.
 
@@ -198,6 +204,16 @@ class TradePlanner:
         else:
             shares = math.floor(self.position_size_dollars / entry_price)
         shares = min(shares, self.max_shares)
+
+        # ADV participation cap: limit shares to X% of average daily volume
+        if self.max_adv_participation_pct and avg_daily_volume and avg_daily_volume > 0:
+            adv_cap = math.floor(avg_daily_volume * self.max_adv_participation_pct)
+            if adv_cap > 0 and shares > adv_cap:
+                logger.info(
+                    f"{pattern.symbol}: ADV cap {shares} → {adv_cap} shares "
+                    f"({self.max_adv_participation_pct:.1%} of {avg_daily_volume:,} ADV)"
+                )
+                shares = adv_cap
 
         if shares <= 0:
             logger.debug(f"{pattern.symbol}: Zero shares at ${entry_price:.2f}, rejecting")

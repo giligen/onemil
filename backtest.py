@@ -1037,6 +1037,8 @@ class BacktestRunner:
             else:
                 self.detector.set_macd_warmup(None)
 
+        self._current_avg_daily_volume = avg_daily_volume
+
         if self.realistic:
             return self._run_realistic(symbol, bars, trade_date,
                                        avg_daily_volume, volume_profile,
@@ -1093,7 +1095,8 @@ class BacktestRunner:
                 logger.debug(f"  Skipping — already in a trade")
                 continue
 
-            plan = self.planner.create_plan(pattern)
+            plan = self.planner.create_plan(
+                pattern, avg_daily_volume=self._current_avg_daily_volume)
             if plan is None:
                 logger.debug(f"  Plan rejected at bar {i}")
                 continue
@@ -1459,7 +1462,8 @@ class BacktestRunner:
                     f"buy-stop @ ${setup.breakout_level:.2f}"
                 )
 
-                plan = self.planner.create_plan(setup)
+                plan = self.planner.create_plan(
+                    setup, avg_daily_volume=self._current_avg_daily_volume)
                 if plan is None:
                     logger.debug(f"  Plan rejected at bar {i}")
                     continue

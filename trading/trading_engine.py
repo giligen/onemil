@@ -1621,8 +1621,12 @@ class TradingEngine:
             self._notified_setups.get(symbol) == setup.breakout_level
         )
 
-        # Create trade plan
-        plan = self.planner.create_plan(setup)
+        # Create trade plan (with ADV liquidity cap)
+        adv = None
+        uni_stock = self.db.get_universe_stock(setup.symbol)
+        if uni_stock:
+            adv = uni_stock.get('avg_volume_daily')
+        plan = self.planner.create_plan(setup, avg_daily_volume=adv)
         if plan is None:
             return None
 
