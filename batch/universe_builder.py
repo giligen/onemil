@@ -237,16 +237,27 @@ class UniverseBuilder:
         """
         Get active stocks that pass the float filter.
 
-        Stocks with no float data are excluded (we can't verify they qualify).
+        Stocks with unknown float are INCLUDED — many BATS-listed micro-caps
+        (BEX, CORD, APLZ) have no float data but are legitimate momentum stocks.
+        The pattern detector and scanner criteria are the real quality filters.
+        Only exclude stocks with KNOWN float > max.
         """
         all_active = self.db.get_active_universe()
         passed = []
+        excluded_known = 0
+        unknown_float = 0
         for stock in all_active:
             float_shares = stock.get('float_shares')
-            if float_shares is not None and float_shares <= self.float_max:
+            if float_shares is not None and float_shares > self.float_max:
+                excluded_known += 1
+                logger.debug(f"{stock['symbol']}: excluded (float {float_shares:,.0f} > {self.float_max:,.0f})")
+            else:
+                # float <= max OR float unknown — include both
+                if float_shares is None:
+                    unknown_float += 1
                 passed.append(stock)
-            elif float_shares is None:
-                logger.debug(f"{stock['symbol']}: excluded (float data unavailable)")
+        if unknown_float:
+            logger.info(f"Float filter: {unknown_float} stocks with unknown float included")
         return passed
 
     def _cache_volume_profiles(self, stocks: List[Dict]) -> None:
