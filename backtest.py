@@ -750,6 +750,13 @@ class BacktestRunner:
         self._min_breakout_vol_override = 0  # 0 = disabled; set per-date by batch_backtest
         self._spy_macd_cutoff = None  # SpyMacdCutoff instance; set per-date by batch_backtest
 
+        # JIT liquidity cap: size based on fill bar volume (not static ADV)
+        # On breakout days, volume is 3-10x ADV — static ADV% is too conservative.
+        # 15% of fill bar volume = realistic participation at the breakout moment.
+        self.max_bar_participation_pct = float(
+            cfg.get("trading", {}).get("max_bar_participation_pct", 0)
+        )
+
         self.early_exit_after_trade = early_exit_after_trade
         self.realistic = realistic
         self.setup_expiry_bars = setup_expiry_bars
@@ -1397,6 +1404,33 @@ class BacktestRunner:
                             total_risk=actual_risk * plan.shares,
                             pattern=plan.pattern,
                         )
+
+                    # JIT liquidity cap: limit shares to X% of fill bar volume.
+                    # On big-mover days, bar volume reflects ACTUAL liquidity at
+                    # the breakout moment — far more honest than static ADV%.
+                    jit_shares = plan.shares
+                    bar_volume = bar.get('volume', 0) if hasattr(bar, 'get') else bar['volume']
+                    if self.max_bar_participation_pct > 0 and bar_volume > 0:
+                        bar_cap = int(bar_volume * self.max_bar_participation_pct)
+                        if bar_cap > 0 and jit_shares > bar_cap:
+                            logger.info(
+                                f"  JIT cap: {jit_shares} → {bar_cap} shares "
+                                f"({self.max_bar_participation_pct:.0%} of {bar_volume:,} bar vol)"
+                            )
+                            jit_shares = bar_cap
+                            # Rebuild plan with capped shares
+                            plan = TradePlan(
+                                symbol=plan.symbol,
+                                entry_price=plan.entry_price,
+                                stop_loss_price=plan.stop_loss_price,
+                                take_profit_price=plan.take_profit_price,
+                                risk_per_share=plan.risk_per_share,
+                                reward_per_share=plan.reward_per_share,
+                                risk_reward_ratio=plan.risk_reward_ratio,
+                                shares=jit_shares,
+                                total_risk=plan.risk_per_share * jit_shares,
+                                pattern=plan.pattern,
+                            )
 
                     logger.info(
                         f"  BUY-STOP TRIGGERED at bar {i}: "

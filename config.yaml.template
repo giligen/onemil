@@ -83,7 +83,8 @@ trading:
   risk_per_trade: 2000
   position_size_dollars: 50000
   max_shares: 10000
-  max_adv_participation_pct: 0.01  # Cap shares at 1% of avg daily volume (liquidity guard)
+  max_adv_participation_pct: 0       # Disabled — waiting for real L2 depth data
+  max_bar_participation_pct: 0       # Disabled — waiting for real L2 depth data
   max_positions: 3
   daily_loss_limit: -5000.0
   min_risk_pct: 0.01           # 1% min risk — filters degenerate thin-risk setups

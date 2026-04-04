@@ -550,21 +550,6 @@ class MACDWaveEngine:
             if shares <= 0:
                 return False
 
-            # ADV participation cap: limit shares to X% of average daily volume
-            if self.max_adv_participation_pct and shares > 0:
-                adv = self.universe_volumes.get(symbol, 0)
-                if not adv:
-                    uni = self.db.get_universe_stock(symbol)
-                    adv = uni.get('avg_volume_daily', 0) if uni else 0
-                if adv > 0:
-                    adv_cap = int(adv * self.max_adv_participation_pct)
-                    if adv_cap > 0 and shares > adv_cap:
-                        logger.info(
-                            f"[{self.STRATEGY_NAME}] {symbol}: ADV cap {shares} → {adv_cap} shares "
-                            f"({self.max_adv_participation_pct:.1%} of {adv:,} ADV)"
-                        )
-                        shares = adv_cap
-
             hard_stop = round(limit_price * (1 - self.hard_stop_pct), 2)
 
             if self.dry_run:
