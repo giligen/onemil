@@ -113,6 +113,14 @@ def filter_bull_flag_trades(
     """Apply regime, max trades/day, consecutive loss, threshold, concurrent, and loss limit filters."""
     from collections import defaultdict
     from datetime import datetime as _dt
+    from data_sources.alpaca_client import AlpacaClient
+
+    # Pre-filter: remove leveraged/inverse ETFs (synthetic, not real stocks)
+    before_lev = len(trades)
+    trades = [t for t in trades if t['symbol'] not in AlpacaClient._LEVERAGED_ETF_SYMBOLS]
+    lev_removed = before_lev - len(trades)
+    if lev_removed:
+        logger.info(f"Leveraged ETF filter: {before_lev} → {len(trades)} trades ({lev_removed} removed)")
 
     # Pre-filter by universe
     if universe_symbols is not None:

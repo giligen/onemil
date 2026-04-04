@@ -173,10 +173,41 @@ class AlpacaClient:
     # Non-common-stock patterns in symbols
     _EXCLUDED_SYMBOL_PATTERNS = ['.PR']
 
+    # Leveraged/inverse ETF keywords in asset names — synthetic instruments,
+    # not real stocks. Bull flags on these are pattern artifacts (31% WR, -$5K/15mo).
+    _LEVERAGED_ETF_NAME_KEYWORDS = [
+        '2X', '3X', '-2X', '-3X',
+        'LEVERAGED', 'INVERSE', 'ULTRA',
+        'DAILY BULL', 'DAILY BEAR',
+        'DIREXION', 'PROSHARES', 'GRANITESHARES',
+    ]
+
+    # Known leveraged/inverse ETF symbols — manually maintained for tickers
+    # whose names don't always contain the keywords above.
+    _LEVERAGED_ETF_SYMBOLS = {
+        # Single-stock leveraged
+        'MSTU', 'MSTX', 'AMZU', 'AMZZ', 'AMDL', 'NVDX', 'AAPU', 'AAPB', 'AAPX',
+        'TSLT', 'BABX', 'NVDU', 'NVDD', 'GOOX', 'GOOGL', 'MSFU', 'MSFD',
+        'TSLL', 'TSLZ', 'CONL', 'CONY', 'NFLX', 'APTV',
+        # Index leveraged
+        'TQQQ', 'SQQQ', 'UPRO', 'SPXU', 'UDOW', 'SDOW', 'QLD', 'QID',
+        'SSO', 'SDS', 'SPXS', 'SPXL',
+        # Sector leveraged
+        'TNA', 'TZA', 'LABU', 'LABD', 'SOXL', 'SOXS',
+        'FNGU', 'FNGD', 'BULZ', 'BERZ', 'NAIL', 'CURE', 'DFEN',
+        'FAS', 'FAZ', 'ERX', 'ERY', 'NUGT', 'DUST', 'JNUG', 'JDST',
+        'DRN', 'DRV', 'TECL', 'TECS', 'DPST', 'PILL', 'RETL',
+        # Leveraged commodity/crypto
+        'BITX', 'BITU', 'MARA', 'RIOT',
+        # Leveraged with "CR" suffix (credit-based)
+        'LFCR',
+    }
+
     @classmethod
     def _is_common_stock(cls, symbol: str, name: str) -> bool:
         """
-        Filter out warrants, units, preferred shares, rights, and SPACs.
+        Filter out warrants, units, preferred shares, rights, SPACs,
+        and leveraged/inverse ETFs.
 
         Only keeps common stocks suitable for momentum day trading.
         """
@@ -194,6 +225,15 @@ class AlpacaClient:
         # Units: symbol ends with 'U' AND name ends with 'Unit' or 'Units'
         if symbol.endswith('U') and (name_upper.endswith('UNIT') or name_upper.endswith('UNITS')):
             return False
+
+        # Leveraged/inverse ETFs: explicit symbol list
+        if symbol in cls._LEVERAGED_ETF_SYMBOLS:
+            return False
+
+        # Leveraged/inverse ETFs: name keywords
+        for keyword in cls._LEVERAGED_ETF_NAME_KEYWORDS:
+            if keyword in name_upper:
+                return False
 
         return True
 
