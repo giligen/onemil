@@ -65,49 +65,38 @@ CSV_HEADERS = [
     "daily_range_pct",
 ]
 
+def _get_bull_flag_cache_path(entry_slip: float, exit_slip: float) -> str:
+    """Cache path includes slippage params since they affect trade simulation."""
+    e = int(entry_slip * 10000)  # 0.005 → 50
+    x = int(exit_slip * 10000)   # 0.003 → 30
+    return f"data/bull_flag_cache_e{e}_x{x}.csv"
+
+# Default cache path (for backward compat)
 BULL_FLAG_CACHE_PATH = "data/bull_flag_signal_cache.csv"
 
 
-CACHE_ENTRY_SLIPPAGE = 0.001  # Slippage baked into cached entry_price
-
-
 def load_bull_flag_cache(cache_path: str, start_date: date, end_date: date,
-                         entry_slippage_pct: float = None,
-                         position_size: float = 50000) -> List[Dict]:
-    """Load cached bull flag trades, filter by date range, recompute slippage if needed."""
-    trades = []
-    recompute = entry_slippage_pct is not None and abs(entry_slippage_pct - CACHE_ENTRY_SLIPPAGE) > 1e-6
+                         **kwargs) -> List[Dict]:
+    """Load cached bull flag trades, filter by date range.
 
+    Slippage is baked into cached prices (filename includes slippage params).
+    Change slippage → rebuild cache with --build-cache.
+    """
+    trades = []
     with open(cache_path) as f:
         reader = csv.DictReader(f)
         for row in reader:
             d = row['date']
             if d < str(start_date) or d > str(end_date):
                 continue
+            row['pnl'] = float(row['pnl'])
+            row['pnl_pct'] = float(row['pnl_pct'])
+            row['shares'] = int(row['shares'])
             row['entry_price'] = float(row['entry_price'])
             row['exit_price'] = float(row['exit_price']) if row['exit_price'] else 0
-            row['shares'] = int(row['shares'])
             row['daily_range_pct'] = float(row.get('daily_range_pct', 100))
-
-            if recompute and row['entry_price'] > 0:
-                # Reverse old slippage, apply new
-                raw_entry = row['entry_price'] / (1 + CACHE_ENTRY_SLIPPAGE)
-                new_entry = raw_entry * (1 + entry_slippage_pct)
-                new_shares = int(position_size / new_entry) if new_entry > 0 else row['shares']
-                new_pnl = (row['exit_price'] - new_entry) * new_shares
-                new_pnl_pct = (row['exit_price'] - new_entry) / new_entry * 100 if new_entry > 0 else 0
-                row['entry_price'] = round(new_entry, 4)
-                row['shares'] = new_shares
-                row['pnl'] = round(new_pnl, 2)
-                row['pnl_pct'] = round(new_pnl_pct, 2)
-            else:
-                row['pnl'] = float(row['pnl'])
-                row['pnl_pct'] = float(row['pnl_pct'])
-
             trades.append(row)
-
-    slip_label = f", slippage {CACHE_ENTRY_SLIPPAGE:.1%}→{entry_slippage_pct:.1%}" if recompute else ""
-    logger.info(f"Loaded {len(trades)} cached bull flag trades ({start_date} to {end_date}{slip_label})")
+    logger.info(f"Loaded {len(trades)} cached trades from {cache_path} ({start_date} to {end_date})")
     return trades
 
 
@@ -1898,15 +1887,25 @@ def main():
     )
 
     # Step 4: Run backtests — use cache if available
-    use_cache = os.path.exists(BULL_FLAG_CACHE_PATH) and not args.build_cache and not args.no_cache
+    _entry_slip = float(trading_cfg.get("entry_slippage_pct", 0.005))
+    _exit_slip = float(trading_cfg.get("exit_slippage_pct", 0.003))
+    _cache_path = _get_bull_flag_cache_path(_entry_slip, _exit_slip)
+    # Also check legacy path for backward compat
+    if os.path.exists(_cache_path):
+        _active_cache = _cache_path
+    elif os.path.exists(BULL_FLAG_CACHE_PATH):
+        _active_cache = BULL_FLAG_CACHE_PATH
+    else:
+        _active_cache = None
+    use_cache = _active_cache is not None and not args.build_cache and not args.no_cache
 
     if use_cache:
         # Fast path: load cached trades, apply filters in memory
-        _entry_slip = float(trading_cfg.get("entry_slippage_pct", 0.005))
         _pos_size = float(trading_cfg.get("position_size_dollars", 50000))
         cached_trades = load_bull_flag_cache(
-            BULL_FLAG_CACHE_PATH, start_date, end_date,
-            entry_slippage_pct=_entry_slip, position_size=_pos_size,
+            _active_cache, start_date, end_date,
+            entry_slippage_pct=_entry_slip, exit_slippage_pct=_exit_slip,
+            position_size=_pos_size,
         )
         # Determine threshold for filtering
         if args.threshold is not None:
@@ -1973,9 +1972,10 @@ def main():
 
     if args.build_cache:
         # Disable regime + max_trades for cache generation
+        # Slippage from config is baked in — cache filename includes slippage params
         cache_regime = MarketRegimeFilter(enabled=False)
         cache_regime.load_spy_bars(spy_bars)
-        logger.info("Building bull flag cache (regime OFF, no max_trades)...")
+        logger.info(f"Building bull flag cache (regime OFF, no max_trades, entry_slip={_entry_slip:.1%}, exit_slip={_exit_slip:.1%})...")
         if use_fast:
             results = run_batch_backtest_fast(
                 movers, db=db,
@@ -2002,9 +2002,10 @@ def main():
             if r[3] > 0:
                 _range_map[(r[0], r[1])] = (r[2] - r[3]) / r[3] * 100
 
-        # Save ALL trades to cache
+        # Save ALL trades to cache (slippage baked in from config)
+        _save_path = _get_bull_flag_cache_path(_entry_slip, _exit_slip)
         trade_count = 0
-        with open(BULL_FLAG_CACHE_PATH, 'w', newline='', encoding='utf-8') as f:
+        with open(_save_path, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow(CSV_HEADERS)
             for result in results:
@@ -2024,7 +2025,7 @@ def main():
                         f"{dr:.1f}",
                     ])
                     trade_count += 1
-        logger.info(f"Bull flag cache saved: {BULL_FLAG_CACHE_PATH} ({trade_count} trades)")
+        logger.info(f"Bull flag cache saved: {_save_path} ({trade_count} trades, entry_slip={_entry_slip:.1%}, exit_slip={_exit_slip:.1%})")
     else:
         if use_fast:
             results = run_batch_backtest_fast(
