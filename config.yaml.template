@@ -56,8 +56,8 @@ database:
 
 # Float caching
 float_cache:
-  # Refresh float data if older than N days
-  refresh_days: 7
+  # Refresh float data if older than N days — floats rarely change
+  refresh_days: 30
 
 # News analyzer (optional - requires ANTHROPIC_API_KEY in .env)
 news_analyzer:
