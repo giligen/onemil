@@ -699,6 +699,18 @@ class MACDWaveEngine:
                         f"{pnl_pct:+.1f}% (${pnl:+,.0f}) — {event.exit_reason}"
                     )
 
+                # Log L2 depth at stop trigger time (non-blocking)
+                try:
+                    from data_sources.l2_depth import snapshot_l2_at_fill, l2_to_json
+                    trigger_dt = (datetime.fromtimestamp(event.submitted_at, tz=timezone.utc)
+                                  if hasattr(event, 'submitted_at') and event.submitted_at > 0
+                                  else datetime.now(timezone.utc))
+                    l2 = snapshot_l2_at_fill(sym, trigger_dt)
+                    if l2:
+                        self.db.update_trade(pos.trade_id, {'exit_l2_depth': l2_to_json(l2)})
+                except Exception as e:
+                    logger.debug(f"[{self.STRATEGY_NAME}] {sym}: Exit L2 failed: {e}")
+
                 del self.open_positions[sym]
                 self.invalidated.add(sym)
                 exits.append(sym)
@@ -870,6 +882,15 @@ class MACDWaveEngine:
                     f"[MACD Wave] {emoji} SELL {symbol} ${exit_price:.2f} "
                     f"{pnl_pct:+.1f}% (${pnl:+,.0f}) — {reason}"
                 )
+
+            # Log L2 depth at exit time (non-blocking)
+            try:
+                from data_sources.l2_depth import snapshot_l2_at_fill, l2_to_json
+                l2 = snapshot_l2_at_fill(symbol, datetime.now(timezone.utc))
+                if l2:
+                    self.db.update_trade(pos.trade_id, {'exit_l2_depth': l2_to_json(l2)})
+            except Exception as e_l2:
+                logger.debug(f"[{self.STRATEGY_NAME}] {symbol}: Exit L2 failed: {e_l2}")
 
             del self.open_positions[symbol]
             self.invalidated.add(symbol)

@@ -1209,6 +1209,20 @@ class TradingEngine:
                     f"{f' (partial ${partial_pnl:+,.2f} + remainder ${remainder_pnl:+,.2f})' if partial_pnl != 0 else ''}"
                 )
 
+                # Log L2 order book depth at stop trigger time (non-blocking)
+                # Use submitted_at (when stop fired), not now (post-fill, book already moved)
+                try:
+                    from data_sources.l2_depth import snapshot_l2_at_fill, l2_to_json
+                    trigger_dt = (datetime.fromtimestamp(event.submitted_at, tz=timezone.utc)
+                                  if event.submitted_at > 0 else datetime.now(timezone.utc))
+                    l2 = snapshot_l2_at_fill(event.symbol, trigger_dt)
+                    if l2:
+                        self.db.update_trade(event.trade_db_id, {
+                            'exit_l2_depth': l2_to_json(l2)
+                        })
+                except Exception as e:
+                    logger.debug(f"{event.symbol}: Exit L2 snapshot failed (non-fatal): {e}")
+
                 if self.notifier:
                     self.notifier.notify_position_closed(
                         symbol=event.symbol,
