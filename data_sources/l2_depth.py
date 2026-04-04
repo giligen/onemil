@@ -13,9 +13,9 @@ from typing import Optional, Dict
 
 logger = logging.getLogger(__name__)
 
-# Databento dataset mapping by exchange prefix
-# NASDAQ-listed → XNAS.ITCH, BATS/CBOE-listed → try both
-_DATASETS = ["XNAS.ITCH"]
+# Databento datasets — query all major exchanges for consolidated depth.
+# Combined depth is ~4x any single exchange on small-cap stocks.
+_DATASETS = ["XNAS.ITCH", "ARCX.PILLAR", "BATS.PITCH", "EDGX.PITCH"]
 
 
 def snapshot_l2_at_fill(
@@ -54,6 +54,11 @@ def snapshot_l2_at_fill(
 
     client = db.Historical(key=api_key)
 
+    # Query all exchanges and aggregate depth
+    exchange_depths = {}
+    combined_ask_depth = 0
+    combined_bid_depth = 0
+
     for dataset in _DATASETS:
         try:
             data = client.timeseries.get_range(
@@ -71,50 +76,53 @@ def snapshot_l2_at_fill(
             # Take the row closest to fill time (middle of window)
             row = df.iloc[len(df) // 2]
 
-            # Extract 10 levels of depth
+            ask_depth = 0
+            bid_depth = 0
             levels = []
-            total_bid_depth = 0
-            total_ask_depth = 0
-
             for lvl in range(10):
                 bid_px = float(row.get(f'bid_px_{lvl:02d}', 0) or 0)
                 ask_px = float(row.get(f'ask_px_{lvl:02d}', 0) or 0)
                 bid_sz = int(row.get(f'bid_sz_{lvl:02d}', 0) or 0)
                 ask_sz = int(row.get(f'ask_sz_{lvl:02d}', 0) or 0)
-
-                total_bid_depth += bid_sz
-                total_ask_depth += ask_sz
-
+                bid_depth += bid_sz
+                ask_depth += ask_sz
                 levels.append({
                     'bid_px': bid_px, 'bid_sz': bid_sz,
                     'ask_px': ask_px, 'ask_sz': ask_sz,
                 })
 
-            snapshot = {
-                'dataset': dataset,
-                'symbol': symbol,
-                'fill_time': fill_time.isoformat(),
-                'snapshot_time': str(row.name) if hasattr(row, 'name') else None,
-                'total_bid_depth': total_bid_depth,
-                'total_ask_depth': total_ask_depth,
+            exchange_depths[dataset] = {
+                'ask_depth': ask_depth,
+                'bid_depth': bid_depth,
                 'levels': levels,
-                'records_in_window': len(df),
+                'records': len(df),
             }
-
-            logger.info(
-                f"{symbol}: L2 snapshot — "
-                f"ask depth {total_ask_depth:,} shares (10 lvls), "
-                f"bid depth {total_bid_depth:,} shares, "
-                f"{len(df)} records in ±{window_seconds}s window"
-            )
-            return snapshot
+            combined_ask_depth += ask_depth
+            combined_bid_depth += bid_depth
 
         except Exception as e:
-            logger.debug(f"{symbol}: L2 snapshot from {dataset} failed: {e}")
+            logger.debug(f"{symbol}: L2 from {dataset} failed: {e}")
             continue
 
-    logger.info(f"{symbol}: No L2 data available from any dataset")
-    return None
+    if not exchange_depths:
+        logger.info(f"{symbol}: No L2 data available from any exchange")
+        return None
+
+    snapshot = {
+        'symbol': symbol,
+        'fill_time': fill_time.isoformat(),
+        'combined_ask_depth': combined_ask_depth,
+        'combined_bid_depth': combined_bid_depth,
+        'exchanges': exchange_depths,
+        'exchange_count': len(exchange_depths),
+    }
+
+    logger.info(
+        f"{symbol}: L2 snapshot — "
+        f"combined ask {combined_ask_depth:,} / bid {combined_bid_depth:,} "
+        f"across {len(exchange_depths)} exchanges"
+    )
+    return snapshot
 
 
 def l2_to_json(snapshot: Optional[Dict]) -> Optional[str]:
