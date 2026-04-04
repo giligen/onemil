@@ -84,7 +84,7 @@ trading:
   position_size_dollars: 50000
   max_shares: 10000
   max_positions: 3
-  daily_loss_limit: -2000.0
+  daily_loss_limit: -5000.0
   min_risk_pct: 0.01           # 1% min risk — filters degenerate thin-risk setups
   max_risk_pct: 0.04           # 4% max risk — sloppy wide patterns have 30% WR
   min_risk_reward: 2.5
