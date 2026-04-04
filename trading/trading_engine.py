@@ -575,19 +575,16 @@ class TradingEngine:
                             )
                         self.stop_monitor.remove_quote_watch(symbol)
 
-                    # Log L2 order book depth at fill time (Databento, non-blocking)
+                    # Log L2 order book depth at fill time (async, never blocks trading)
                     try:
-                        from data_sources.l2_depth import snapshot_l2_at_fill, l2_to_json
+                        from data_sources.l2_depth import log_l2_async
                         from datetime import datetime as _dt
                         fill_dt = _dt.fromisoformat(str(filled_at)) if filled_at else None
                         if fill_dt:
-                            l2 = snapshot_l2_at_fill(symbol, fill_dt)
-                            if l2:
-                                self.db.update_trade(trade_record['id'], {
-                                    'entry_l2_depth': l2_to_json(l2)
-                                })
+                            log_l2_async(symbol, fill_dt, trade_record['id'],
+                                         self.db.update_trade, column='entry_l2_depth')
                     except Exception as e:
-                        logger.debug(f"{symbol}: L2 snapshot failed (non-fatal): {e}")
+                        logger.debug(f"{symbol}: L2 async launch failed: {e}")
                 else:
                     error_msg = f"{symbol}: No trade record for order {order_id} — DB integrity issue"
                     logger.error(error_msg)
@@ -1210,18 +1207,15 @@ class TradingEngine:
                 )
 
                 # Log L2 order book depth at stop trigger time (non-blocking)
-                # Use submitted_at (when stop fired), not now (post-fill, book already moved)
+                # Log exit L2 async (use trigger time, not post-fill)
                 try:
-                    from data_sources.l2_depth import snapshot_l2_at_fill, l2_to_json
+                    from data_sources.l2_depth import log_l2_async
                     trigger_dt = (datetime.fromtimestamp(event.submitted_at, tz=timezone.utc)
                                   if event.submitted_at > 0 else datetime.now(timezone.utc))
-                    l2 = snapshot_l2_at_fill(event.symbol, trigger_dt)
-                    if l2:
-                        self.db.update_trade(event.trade_db_id, {
-                            'exit_l2_depth': l2_to_json(l2)
-                        })
+                    log_l2_async(event.symbol, trigger_dt, event.trade_db_id,
+                                 self.db.update_trade, column='exit_l2_depth')
                 except Exception as e:
-                    logger.debug(f"{event.symbol}: Exit L2 snapshot failed (non-fatal): {e}")
+                    logger.debug(f"{event.symbol}: Exit L2 async launch failed: {e}")
 
                 if self.notifier:
                     self.notifier.notify_position_closed(

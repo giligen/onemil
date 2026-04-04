@@ -8,8 +8,9 @@ Non-blocking: failures are logged and silently ignored — never affects trading
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict
+from typing import Optional, Dict, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +124,38 @@ def snapshot_l2_at_fill(
         f"across {len(exchange_depths)} exchanges"
     )
     return snapshot
+
+
+def log_l2_async(
+    symbol: str,
+    fill_time: datetime,
+    trade_db_id: int,
+    db_update_fn: Callable,
+    column: str = 'entry_l2_depth',
+) -> None:
+    """
+    Fire-and-forget L2 snapshot logging in a background thread.
+
+    Queries Databento, stores result in DB. Never blocks the trading loop.
+    All errors silently logged.
+
+    Args:
+        symbol: Stock ticker
+        fill_time: UTC datetime of the fill/trigger
+        trade_db_id: Trade ID in the DB for update
+        db_update_fn: Callable(trade_id, dict) to update the trade record
+        column: DB column name ('entry_l2_depth' or 'exit_l2_depth')
+    """
+    def _worker():
+        try:
+            l2 = snapshot_l2_at_fill(symbol, fill_time)
+            if l2:
+                db_update_fn(trade_db_id, {column: l2_to_json(l2)})
+        except Exception as e:
+            logger.debug(f"{symbol}: async L2 snapshot failed ({column}): {e}")
+
+    t = threading.Thread(target=_worker, daemon=True, name=f"l2-{symbol}-{column}")
+    t.start()
 
 
 def l2_to_json(snapshot: Optional[Dict]) -> Optional[str]:
