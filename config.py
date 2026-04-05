@@ -221,7 +221,7 @@ class Config:
     @property
     def db_path(self) -> str:
         """Legacy single SQLite database file path."""
-        return self._get_yaml("database", "path", default="data/onemil.db")
+        return self._get_yaml("database", "path", default=None)
 
     @property
     def cache_db_path(self) -> str:

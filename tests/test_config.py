@@ -117,7 +117,7 @@ class TestConfigLoading:
         assert cfg.premarket_start == "04:00"
         assert cfg.market_open == "09:30"
         assert cfg.market_close == "16:00"
-        assert cfg.db_path == "data/onemil.db"
+        assert cfg.db_path is None  # No legacy fallback — use split DB
         assert cfg.float_cache_refresh_days == 7
 
         # Trading defaults

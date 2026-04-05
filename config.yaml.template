@@ -50,7 +50,6 @@ timing:
 
 # Database (split: cache is shareable, trades is per-node)
 database:
-  path: data/onemil.db       # Legacy single-DB fallback
   cache_path: data/cache.db  # Bars, universe, profiles — disposable, shareable
   trades_path: data/trades.db # Trades, scans, summaries — precious, per-node
 

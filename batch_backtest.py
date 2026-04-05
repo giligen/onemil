@@ -909,7 +909,7 @@ def _reconstruct_result(result_dict: dict) -> BacktestResult:
 
 def run_batch_backtest_parallel(
     movers: List[Tuple[str, date]],
-    db_path: str = "data/onemil.db",
+    db_path: str = None,
     max_workers: int = 4,
     market_regime: Optional['MarketRegimeFilter'] = None,
     max_consecutive_losses: int = 0,
@@ -1792,7 +1792,7 @@ def main():
     cfg = Config._load_yaml_only()
     db_cfg = cfg.get("database", {})
     db = get_database(
-        db_path=db_cfg.get("path", "data/onemil.db"),
+        db_path=db_cfg.get("path"),
         cache_path=db_cfg.get("cache_path"),
         trades_path=db_cfg.get("trades_path"),
     )

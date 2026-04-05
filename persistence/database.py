@@ -1149,7 +1149,7 @@ def get_database(
     global _db_instance
     if _db_instance is None:
         _db_instance = Database(
-            db_path=db_path or "data/onemil.db",
+            db_path=db_path,
             cache_path=cache_path,
             trades_path=trades_path,
         )

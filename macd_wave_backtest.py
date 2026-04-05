@@ -125,7 +125,7 @@ def find_movers(
     from alpaca.trading.enums import AssetClass, AssetStatus
 
     client = AlpacaClient(os.getenv('ALPACA_API_KEY'), os.getenv('ALPACA_API_SECRET'))
-    conn = sqlite3.connect('data/onemil.db')
+    conn = sqlite3.connect('data/cache.db')
 
     # Check which dates have FULL market daily bars cached (not just bull flag universe).
     # A date is "fully cached" if it has bars for 5000+ symbols (full market scan).
@@ -988,7 +988,7 @@ def main():
         _cfg = Config._load_yaml_only()
         _db_cfg = _cfg.get("database", {})
         db = get_database(
-            db_path=_db_cfg.get("path", "data/onemil.db"),
+            db_path=_db_cfg.get("path"),
             cache_path=_db_cfg.get("cache_path"),
             trades_path=_db_cfg.get("trades_path"),
         )
