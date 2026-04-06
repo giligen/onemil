@@ -210,8 +210,8 @@ class FloatProvider:
 
         # Source 3: Volume-based estimate
         # Float is typically 3-10x avg daily volume for momentum small-caps.
-        # Use 5x as conservative estimate. Only if volume is meaningful (>100K shares).
-        if avg_daily_volume > 100_000:
+        # Use 5x as conservative estimate. Any stock with >1K daily volume gets an estimate.
+        if avg_daily_volume > 1_000:
             est_float = avg_daily_volume * 5
             result['float_shares'] = est_float
             logger.debug(f"{symbol}: float estimated from volume ({avg_daily_volume:,} × 5 = {est_float:,})")
