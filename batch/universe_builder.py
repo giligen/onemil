@@ -153,6 +153,8 @@ class UniverseBuilder:
 
         if symbols_need_float:
             # Build volume map for fallback float estimation
+            # Primary: volume from daily bars fetched this build
+            # Fallback: avg_volume_daily already in the universe table
             volume_map = {}
             for sym in symbols_need_float:
                 bar = daily_bars.get(sym)
@@ -160,6 +162,11 @@ class UniverseBuilder:
                     volume_map[sym] = int(bar['volume'])
                 elif bar and isinstance(bar, list) and bar:
                     volume_map[sym] = int(bar[-1].get('volume', 0))
+                else:
+                    # Fallback: use stored avg_volume_daily from universe table
+                    uni_stock = self.db.get_universe_stock(sym)
+                    if uni_stock and uni_stock.get('avg_volume_daily'):
+                        volume_map[sym] = int(uni_stock['avg_volume_daily'])
 
             # Single pass: fetch float + sector + country together
             stock_info_batch = self.float_provider.get_stock_info_batch(
