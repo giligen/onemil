@@ -184,12 +184,13 @@ class ScannerCriteria:
         Returns:
             Formatted string for display
         """
+        float_str = f"{candidate.float_shares / 1_000_000:.1f}M" if candidate.float_shares else "N/A"
         if phase == 'premarket':
             return (
                 f"  {candidate.symbol:<6} | {candidate.company_name[:20]:<20} | "
                 f"Gap: {candidate.gap_pct:+.1f}% | "
                 f"Price: ${candidate.current_price:.2f} | "
-                f"Float: {candidate.float_shares / 1_000_000:.1f}M | "
+                f"Float: {float_str} | "
                 f"News: {candidate.news_headline or 'N/A'}"
             )
         else:
@@ -198,6 +199,6 @@ class ScannerCriteria:
                 f"${candidate.prev_close:.2f} -> ${candidate.current_price:.2f} "
                 f"({candidate.intraday_change_pct:+.1f}%)  "
                 f"RelVol: {candidate.relative_volume:.1f}x  "
-                f"Float: {candidate.float_shares / 1_000_000:.1f}M  "
+                f"Float: {float_str}  "
                 f"\"{candidate.news_headline or 'N/A'}\""
             )
