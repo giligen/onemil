@@ -1095,8 +1095,12 @@ class StopMonitor:
                     self._on_quote, *all_symbols
                 )
                 logger.info(f"StopMonitor: WebSocket connecting with {len(all_symbols)} symbols ({len(watched)} watched + SPY keepalive)...")
+                # Single connection attempt — don't use _run_forever (has uncontrollable internal retry)
+                await self._stream._start_ws()
                 self._ws_connected = True
-                await self._stream._run_forever()
+                self._last_data_ts = time_mod.time()
+                logger.info("StopMonitor: WebSocket CONNECTED")
+                await self._stream._consume()
 
             except Exception as e:
                 self._ws_connected = False
