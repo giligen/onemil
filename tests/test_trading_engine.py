@@ -2645,3 +2645,203 @@ class TestStartupSync:
         assert len(engine._traded_symbols) == 0
         assert len(engine._pending_orders) == 0
         assert engine._daily_trade_count == 0
+
+
+# ===========================================================================
+# Simple Order Path (no bracket)
+# ===========================================================================
+
+class TestSimpleOrderPath:
+    """Tests for simple stop-limit order submission when StopMonitor is active."""
+
+    @pytest.fixture
+    def mock_alpaca(self):
+        alpaca = MagicMock(spec=AlpacaClient)
+        alpaca.get_1min_bars.return_value = pd.DataFrame({'close': [4.35]})
+        alpaca.get_open_positions.return_value = []
+        alpaca.get_daily_bars_range.return_value = {}
+        return alpaca
+
+    @pytest.fixture
+    def db(self, tmp_path):
+        database = Database(db_path=str(tmp_path / "test.db"))
+        yield database
+        database.close()
+
+    @pytest.fixture
+    def mock_stop_monitor(self):
+        from trading.stop_monitor import StopMonitor
+        sm = MagicMock(spec=StopMonitor)
+        sm._running = True
+        sm._watch_lock = threading.Lock()
+        sm._watches = {}
+        return sm
+
+    @patch('trading.trading_engine.TradingEngine._is_past_last_entry_time', return_value=False)
+    def test_uses_simple_order_when_stop_monitor_active(
+        self, _mock_time, mock_alpaca, db, mock_stop_monitor
+    ):
+        """With StopMonitor, engine calls submit_buy_stop_order (not bracket)."""
+        mock_detector = MagicMock(spec=BullFlagDetector)
+        mock_planner = MagicMock(spec=TradePlanner)
+        mock_executor = MagicMock(spec=OrderExecutor)
+        mock_pm = MagicMock(spec=PositionManager)
+        mock_pm.can_open_position.return_value = True
+
+        setup = _make_pattern("AAPL")
+        plan = _make_plan("AAPL")
+        mock_detector.detect_setup.return_value = setup
+        mock_planner.create_plan.return_value = plan
+        mock_executor.submit_buy_stop_order.return_value = {
+            'order_id': 'simple-1', 'status': 'accepted',
+            'symbol': 'AAPL', 'shares': 113,
+            'order_type': 'stop_simple',
+            'stop_price': 4.40, 'limit_price': 4.49,
+            'stop_loss_price': 4.25, 'take_profit_price': 4.90,
+        }
+
+        engine = TradingEngine(
+            alpaca_client=mock_alpaca, db=db, detector=mock_detector,
+            planner=mock_planner, executor=mock_executor,
+            position_manager=mock_pm, enabled=True,
+            stop_monitor=mock_stop_monitor,
+        )
+
+        engine.on_stock_qualified("AAPL")
+        engine.run_pattern_check()
+
+        # Simple order called, NOT bracket
+        mock_executor.submit_buy_stop_order.assert_called_once()
+        mock_executor.submit_buy_stop_bracket_order.assert_not_called()
+
+    @patch('trading.trading_engine.TradingEngine._is_past_last_entry_time', return_value=False)
+    def test_uses_bracket_when_no_stop_monitor(
+        self, _mock_time, mock_alpaca, db
+    ):
+        """Without StopMonitor, engine falls back to bracket order."""
+        mock_detector = MagicMock(spec=BullFlagDetector)
+        mock_planner = MagicMock(spec=TradePlanner)
+        mock_executor = MagicMock(spec=OrderExecutor)
+        mock_pm = MagicMock(spec=PositionManager)
+        mock_pm.can_open_position.return_value = True
+
+        setup = _make_pattern("AAPL")
+        plan = _make_plan("AAPL")
+        mock_detector.detect_setup.return_value = setup
+        mock_planner.create_plan.return_value = plan
+        mock_executor.submit_buy_stop_bracket_order.return_value = {
+            'order_id': 'bracket-1', 'status': 'accepted',
+            'symbol': 'AAPL', 'shares': 113,
+            'order_type': 'stop_bracket',
+            'stop_price': 4.40, 'limit_price': 4.49,
+            'stop_loss_price': 4.25, 'take_profit_price': 4.90,
+        }
+
+        engine = TradingEngine(
+            alpaca_client=mock_alpaca, db=db, detector=mock_detector,
+            planner=mock_planner, executor=mock_executor,
+            position_manager=mock_pm, enabled=True,
+            # No stop_monitor
+        )
+
+        engine.on_stock_qualified("AAPL")
+        engine.run_pattern_check()
+
+        # Bracket called, NOT simple
+        mock_executor.submit_buy_stop_bracket_order.assert_called_once()
+        mock_executor.submit_buy_stop_order.assert_not_called()
+
+    @patch('trading.trading_engine.TradingEngine._is_past_last_entry_time', return_value=False)
+    def test_pending_order_stores_order_type(
+        self, _mock_time, mock_alpaca, db, mock_stop_monitor
+    ):
+        """Pending dict stores order_type for fill-time routing."""
+        mock_detector = MagicMock(spec=BullFlagDetector)
+        mock_planner = MagicMock(spec=TradePlanner)
+        mock_executor = MagicMock(spec=OrderExecutor)
+        mock_pm = MagicMock(spec=PositionManager)
+        mock_pm.can_open_position.return_value = True
+
+        setup = _make_pattern("AAPL")
+        plan = _make_plan("AAPL")
+        mock_detector.detect_setup.return_value = setup
+        mock_planner.create_plan.return_value = plan
+        mock_executor.submit_buy_stop_order.return_value = {
+            'order_id': 'simple-2', 'status': 'accepted',
+            'symbol': 'AAPL', 'shares': 113,
+            'order_type': 'stop_simple',
+            'stop_price': 4.40, 'limit_price': 4.49,
+            'stop_loss_price': 4.25, 'take_profit_price': 4.90,
+        }
+
+        engine = TradingEngine(
+            alpaca_client=mock_alpaca, db=db, detector=mock_detector,
+            planner=mock_planner, executor=mock_executor,
+            position_manager=mock_pm, enabled=True,
+            stop_monitor=mock_stop_monitor,
+        )
+
+        engine.on_stock_qualified("AAPL")
+        engine.run_pattern_check()
+
+        assert 'AAPL' in engine._pending_orders
+        assert engine._pending_orders['AAPL']['order_type'] == 'stop_simple'
+
+    def test_fill_submits_standalone_safety_net_sl(
+        self, mock_alpaca, db, mock_stop_monitor
+    ):
+        """On fill of simple order, standalone safety-net SL is submitted."""
+        mock_executor = MagicMock(spec=OrderExecutor)
+        mock_pm = MagicMock(spec=PositionManager)
+
+        engine = TradingEngine(
+            alpaca_client=mock_alpaca, db=db,
+            detector=MagicMock(spec=BullFlagDetector),
+            planner=MagicMock(spec=TradePlanner),
+            executor=mock_executor,
+            position_manager=mock_pm, enabled=True,
+            stop_monitor=mock_stop_monitor,
+            safety_net_sl_pct=0.05,
+        )
+
+        # Simulate a pending simple order that just filled
+        plan = _make_plan("AAPL")
+        engine._pending_orders['AAPL'] = {
+            'order_id': 'simple-fill-1',
+            'plan': plan,
+            'setup': _make_pattern("AAPL"),
+            'placed_at': datetime.now(timezone.utc),
+            'news_data': None,
+            'order_type': 'stop_simple',
+            'real_stop_level': 4.25,
+        }
+
+        # Mock the fill
+        mock_alpaca.get_order.return_value = {
+            'id': 'simple-fill-1',
+            'status': 'filled',
+            'filled_avg_price': 4.42,
+            'filled_qty': 113,
+            'filled_at': datetime.now(timezone.utc).isoformat(),
+            'legs': [],
+        }
+        mock_alpaca.submit_stop_sell_order.return_value = {
+            'id': 'safety-net-sl-1', 'status': 'accepted',
+            'symbol': 'AAPL', 'qty': 113, 'stop_price': 4.20,
+        }
+
+        engine._manage_pending_orders()
+
+        # Verify standalone SL was submitted
+        mock_alpaca.submit_stop_sell_order.assert_called_once()
+        call_args = mock_alpaca.submit_stop_sell_order.call_args
+        assert call_args.kwargs['symbol'] == 'AAPL'
+        assert call_args.kwargs['qty'] == 113
+        # Safety net = fill_price * (1 - 0.05) = 4.42 * 0.95 = 4.199
+        assert call_args.kwargs['stop_price'] == round(4.42 * 0.95, 2)
+
+        # Verify StopMonitor.add_watch called with the SL order ID
+        mock_stop_monitor.add_watch.assert_called_once()
+        watch_kwargs = mock_stop_monitor.add_watch.call_args.kwargs
+        assert watch_kwargs['sl_leg_id'] == 'safety-net-sl-1'
+        assert watch_kwargs['tp_leg_id'] == ''  # No TP leg for simple orders

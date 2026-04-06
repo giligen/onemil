@@ -153,3 +153,79 @@ class TestSubmitBracketOrder:
         assert pattern_data['breakout_level'] == 4.40
 
 
+class TestSubmitBuyStopOrder:
+    """Tests for simple stop-limit order submission (no bracket)."""
+
+    def test_submits_order_and_saves_trade(self, executor, mock_alpaca, db):
+        """Successful simple order submission saves trade to DB."""
+        mock_alpaca.submit_stop_limit_order.return_value = {
+            'id': 'order-simple-1',
+            'status': 'accepted',
+            'symbol': 'TEST',
+            'qty': 113,
+        }
+
+        plan = _make_plan()
+        result = executor.submit_buy_stop_order(plan)
+
+        assert result is not None
+        assert result['order_id'] == 'order-simple-1'
+        assert result['order_type'] == 'stop_simple'
+        assert result['symbol'] == 'TEST'
+        assert result['shares'] == 113
+
+        # Verify trade saved to DB
+        from datetime import date
+        trades = db.get_trades_by_date(date.today().isoformat())
+        assert len(trades) == 1
+        assert trades[0]['symbol'] == 'TEST'
+        assert trades[0]['order_id'] == 'order-simple-1'
+
+    def test_calls_alpaca_with_correct_params(self, executor, mock_alpaca):
+        """Verifies correct parameters passed to Alpaca — no bracket legs."""
+        mock_alpaca.submit_stop_limit_order.return_value = {
+            'id': 'order-simple-2', 'status': 'accepted',
+            'symbol': 'TEST', 'qty': 113,
+        }
+
+        plan = _make_plan()
+        executor.submit_buy_stop_order(plan, slippage_pct=0.02)
+
+        mock_alpaca.submit_stop_limit_order.assert_called_once_with(
+            symbol='TEST',
+            qty=113,
+            side='buy',
+            stop_price=4.40,
+            limit_price=round(4.40 * 1.02, 2),
+        )
+
+    def test_handles_api_failure(self, executor, mock_alpaca):
+        """Returns None when Alpaca API call fails."""
+        mock_alpaca.submit_stop_limit_order.side_effect = AlpacaAPIError("API down")
+
+        plan = _make_plan()
+        result = executor.submit_buy_stop_order(plan)
+        assert result is None
+
+    def test_handles_none_return(self, executor, mock_alpaca):
+        """Returns None when Alpaca returns None."""
+        mock_alpaca.submit_stop_limit_order.return_value = None
+
+        plan = _make_plan()
+        result = executor.submit_buy_stop_order(plan)
+        assert result is None
+
+    def test_stop_price_and_limit_price(self, executor, mock_alpaca):
+        """Stop price = entry_price, limit = entry * (1 + slippage)."""
+        mock_alpaca.submit_stop_limit_order.return_value = {
+            'id': 'order-3', 'status': 'accepted',
+            'symbol': 'TEST', 'qty': 113,
+        }
+
+        plan = _make_plan()
+        result = executor.submit_buy_stop_order(plan, slippage_pct=0.03)
+
+        assert result['stop_price'] == 4.40
+        assert result['limit_price'] == round(4.40 * 1.03, 2)
+
+
