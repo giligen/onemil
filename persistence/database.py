@@ -734,7 +734,7 @@ class Database:
         trade.setdefault('strategy', 'bull_flag')
         trade.setdefault('created_at', now)
         trade.setdefault('updated_at', now)
-        cursor = self._cache_conn.execute("""
+        cursor = self._trades_conn.execute("""
             INSERT INTO trades (trade_date, symbol, side, entry_price,
                                stop_loss_price, take_profit_price, shares,
                                risk_per_share, total_risk, risk_reward_ratio,
@@ -750,7 +750,7 @@ class Database:
                     :pnl, :pnl_pct, :pattern_data,
                     :strategy, :created_at, :updated_at)
         """, trade)
-        self._cache_conn.commit()
+        self._trades_conn.commit()
         logger.info(f"Saved trade: {trade['symbol']} {trade['side']} "
                      f"{trade['shares']} shares @ ${trade['entry_price']:.2f}")
         return cursor.lastrowid
@@ -766,15 +766,15 @@ class Database:
         updates['updated_at'] = datetime.now(timezone.utc)
         set_clause = ', '.join(f"{k} = :{k}" for k in updates)
         updates['id'] = trade_id
-        self._cache_conn.execute(
+        self._trades_conn.execute(
             f"UPDATE trades SET {set_clause} WHERE id = :id", updates
         )
-        self._cache_conn.commit()
+        self._trades_conn.commit()
         logger.debug(f"Updated trade {trade_id}: {list(updates.keys())}")
 
     def get_trade_by_order_id(self, order_id: str) -> Optional[Dict[str, Any]]:
         """Get a trade by its Alpaca order ID."""
-        cursor = self._cache_conn.execute(
+        cursor = self._trades_conn.execute(
             "SELECT * FROM trades WHERE order_id = ?", (order_id,)
         )
         row = cursor.fetchone()
@@ -790,7 +790,7 @@ class Database:
         Returns:
             List of trade dicts
         """
-        cursor = self._cache_conn.execute(
+        cursor = self._trades_conn.execute(
             "SELECT * FROM trades WHERE trade_date = ? ORDER BY created_at",
             (trade_date,)
         )
@@ -809,13 +809,13 @@ class Database:
             List of open trade dicts
         """
         if strategy:
-            cursor = self._cache_conn.execute(
+            cursor = self._trades_conn.execute(
                 "SELECT * FROM trades WHERE trade_date = ? AND exit_price IS NULL "
                 "AND order_status != 'cancelled' AND strategy = ? ORDER BY created_at",
                 (trade_date, strategy)
             )
         else:
-            cursor = self._cache_conn.execute(
+            cursor = self._trades_conn.execute(
                 "SELECT * FROM trades WHERE trade_date = ? AND exit_price IS NULL "
                 "AND order_status != 'cancelled' ORDER BY created_at",
                 (trade_date,)
@@ -832,7 +832,7 @@ class Database:
         Returns:
             Total P&L in dollars
         """
-        cursor = self._cache_conn.execute(
+        cursor = self._trades_conn.execute(
             "SELECT COALESCE(SUM(pnl), 0.0) FROM trades WHERE trade_date = ? AND pnl IS NOT NULL",
             (trade_date,)
         )
@@ -845,7 +845,7 @@ class Database:
         Args:
             summary: Dict with trade_date and summary stats
         """
-        self._cache_conn.execute("""
+        self._trades_conn.execute("""
             INSERT INTO daily_trading_summary
                 (trade_date, total_trades, winning_trades, losing_trades,
                  gross_pnl, patterns_detected, patterns_traded)
@@ -859,13 +859,13 @@ class Database:
                 patterns_detected = excluded.patterns_detected,
                 patterns_traded = excluded.patterns_traded
         """, summary)
-        self._cache_conn.commit()
+        self._trades_conn.commit()
         logger.info(f"Saved daily summary for {summary['trade_date']}: "
                      f"{summary['total_trades']} trades, P&L: ${summary['gross_pnl']:.2f}")
 
     def get_daily_summary(self, trade_date: str) -> Optional[Dict[str, Any]]:
         """Get daily trading summary for a date."""
-        cursor = self._cache_conn.execute(
+        cursor = self._trades_conn.execute(
             "SELECT * FROM daily_trading_summary WHERE trade_date = ?",
             (trade_date,)
         )
