@@ -204,17 +204,29 @@ class StopMonitor:
         self._ws_connected = False
         self._stop_event.set()
 
+        # Close WebSocket and WAIT for completion — prevents zombie connections
         if self._loop and self._stream:
             try:
-                asyncio.run_coroutine_threadsafe(
+                future = asyncio.run_coroutine_threadsafe(
                     self._close_stream(), self._loop
                 )
+                future.result(timeout=5)  # block until close completes or 5s timeout
+                logger.info("StopMonitor: WebSocket stream closed")
             except Exception as e:
                 logger.warning(f"StopMonitor: error during stream close: {e}")
+                # Force-close the underlying websocket if graceful close failed
+                try:
+                    if self._stream and hasattr(self._stream, '_ws') and self._stream._ws:
+                        asyncio.run_coroutine_threadsafe(
+                            self._stream._ws.close(), self._loop
+                        ).result(timeout=3)
+                except Exception:
+                    pass
 
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=10)
 
+        self._stream = None
         logger.info("StopMonitor stopped")
 
     def is_healthy(self, max_stale_seconds: float = 30.0) -> bool:
