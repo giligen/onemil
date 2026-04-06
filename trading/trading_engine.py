@@ -369,15 +369,16 @@ class TradingEngine:
     def clear_qualified_symbols(self) -> None:
         """Clear qualified symbols for fresh scanner cycle.
 
-        Called by scanner before each 15-min intraday cycle so stale
-        symbols don't accumulate. Pending orders and traded symbols
-        are tracked separately and unaffected.
+        Called by scanner before each 1-min intraday cycle. Symbols that
+        already qualified are KEPT — once qualified, stay qualified for
+        the day. This prevents dollar-volume bucket rotation from
+        de-qualifying stocks mid-session. Only news_data for NEW symbols
+        is refreshed; existing qualified symbols retain their data.
         """
-        count = len(self._qualified_symbols)
-        self._qualified_symbols.clear()
-        self._news_data.clear()
-        if count > 0:
-            logger.debug(f"Cleared {count} qualified symbols before fresh scan")
+        # Don't clear _qualified_symbols — once qualified, always qualified
+        # Only clear news_data for symbols not yet qualified (fresh scan picks up new ones)
+        # The scanner will re-call on_stock_qualified() which is idempotent (checks set membership)
+        pass
 
     def _is_past_last_entry_time(self) -> bool:
         """Check if current ET time is past last_entry_time."""

@@ -2288,13 +2288,13 @@ class TestThinLiquidityPostFillCheck:
 # ===========================================================================
 
 class TestClearQualifiedSymbols:
-    """Tests for clear_qualified_symbols() — Bug #4 fix."""
+    """Tests for clear_qualified_symbols() — once qualified, stay qualified."""
 
-    def test_clear_qualified_clears_set(self, engine):
-        """clear_qualified_symbols() empties the qualified set."""
+    def test_clear_qualified_preserves_symbols(self, engine):
+        """clear_qualified_symbols() keeps previously qualified symbols."""
         engine._qualified_symbols = {'AAPL', 'TSLA', 'MSFT'}
         engine.clear_qualified_symbols()
-        assert len(engine._qualified_symbols) == 0
+        assert engine._qualified_symbols == {'AAPL', 'TSLA', 'MSFT'}
 
     def test_clear_qualified_preserves_traded_and_pending(self, engine):
         """Clearing qualified does not affect traded symbols or pending orders."""
@@ -2304,7 +2304,7 @@ class TestClearQualifiedSymbols:
 
         engine.clear_qualified_symbols()
 
-        assert len(engine._qualified_symbols) == 0
+        assert engine._qualified_symbols == {'AAPL', 'TSLA'}
         assert 'GOOG' in engine._traded_symbols
         assert 'AMZN' in engine._pending_orders
 
