@@ -1277,6 +1277,138 @@ class AlpacaClient:
             logger.error(f"Failed to submit stop-bracket order for {symbol}: {e}")
             raise AlpacaAPIError(f"Failed to submit stop-bracket order for {symbol}: {e}")
 
+    def submit_stop_limit_order(
+        self,
+        symbol: str,
+        qty: int,
+        side: str,
+        stop_price: float,
+        limit_price: float,
+    ) -> Dict:
+        """
+        Submit a simple stop-limit order (no bracket legs).
+
+        Uses less margin than bracket orders — no TP/SL legs reserved.
+        Used when StopMonitor handles real-time stop management.
+
+        Args:
+            symbol: Stock symbol
+            qty: Number of shares
+            side: 'buy' or 'sell'
+            stop_price: Trigger price
+            limit_price: Max fill price after trigger
+
+        Returns:
+            Dict with order details (id, status, symbol, qty)
+
+        Raises:
+            AlpacaAPIError: If order submission fails
+        """
+        try:
+            from alpaca.trading.requests import StopLimitOrderRequest
+
+            order_side = OrderSide.BUY if side == 'buy' else OrderSide.SELL
+
+            request = StopLimitOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=order_side,
+                type=OrderType.STOP_LIMIT,
+                time_in_force=TimeInForce.DAY,
+                stop_price=round(stop_price, 2),
+                limit_price=round(limit_price, 2),
+                order_class=OrderClass.SIMPLE,
+            )
+
+            order = self._call_with_timeout(
+                lambda: self.trading_client.submit_order(request),
+                f"submit_stop_limit_order({symbol})"
+            )
+
+            result = {
+                'id': str(order.id) if hasattr(order, 'id') else '',
+                'status': str(order.status.value) if hasattr(order, 'status') else 'unknown',
+                'symbol': symbol,
+                'qty': qty,
+                'side': side,
+                'stop_price': stop_price,
+                'limit_price': limit_price,
+            }
+
+            logger.info(
+                f"Stop-limit order submitted: {symbol} {side} {qty} "
+                f"stop @ ${stop_price:.2f}, limit ${limit_price:.2f} "
+                f"— ID: {result['id']}, status: {result['status']}"
+            )
+            return result
+
+        except AlpacaAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to submit stop-limit order for {symbol}: {e}")
+            raise AlpacaAPIError(f"Failed to submit stop-limit order for {symbol}: {e}")
+
+    def submit_stop_sell_order(
+        self,
+        symbol: str,
+        qty: int,
+        stop_price: float,
+    ) -> Dict:
+        """
+        Submit a standalone stop-market sell order (safety-net SL).
+
+        Used as crash protection after fill — if service dies, this stop
+        remains on Alpaca to limit loss.
+
+        Args:
+            symbol: Stock symbol
+            qty: Number of shares to sell
+            stop_price: Trigger price for stop sell
+
+        Returns:
+            Dict with order details (id, status, symbol)
+
+        Raises:
+            AlpacaAPIError: If order submission fails
+        """
+        try:
+            from alpaca.trading.requests import StopOrderRequest
+
+            request = StopOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=OrderSide.SELL,
+                type=OrderType.STOP,
+                time_in_force=TimeInForce.DAY,
+                stop_price=round(stop_price, 2),
+            )
+
+            order = self._call_with_timeout(
+                lambda: self.trading_client.submit_order(request),
+                f"submit_stop_sell_order({symbol})"
+            )
+
+            result = {
+                'id': str(order.id) if hasattr(order, 'id') else '',
+                'status': str(order.status.value) if hasattr(order, 'status') else 'unknown',
+                'symbol': symbol,
+                'qty': qty,
+                'stop_price': stop_price,
+            }
+
+            logger.info(
+                f"Stop sell order submitted: {symbol} SELL {qty} "
+                f"stop @ ${stop_price:.2f} — ID: {result['id']}, "
+                f"status: {result['status']}"
+            )
+            return result
+
+        except AlpacaAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to submit stop sell order for {symbol}: {e}")
+            raise AlpacaAPIError(f"Failed to submit stop sell order for {symbol}: {e}")
+
     def submit_limit_buy_order(
         self, symbol: str, qty: int, limit_price: float
     ) -> Dict:

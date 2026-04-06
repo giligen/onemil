@@ -687,24 +687,50 @@ class TradingEngine:
                             )
                     real_stop = pending['real_stop_level']
                     try:
-                        order_detail = self.alpaca.get_order(order_id)
-                        sl_leg, tp_leg = self._identify_bracket_legs(
-                            order_detail.get('legs', []),
-                            expected_sl=plan.entry_price * (1 - self.safety_net_sl_pct) if plan else None,
-                            expected_tp=plan.take_profit_price if plan else None,
-                        )
-                        tp_leg_id = tp_leg['id'] if tp_leg else ''
-                        sl_leg_id = sl_leg['id'] if sl_leg else ''
+                        # Trailing stop params (0 = disabled)
+                        trail_r = self.trailing_stop_r if self.trailing_stop_enabled else 0.0
+                        activate_r = self.trailing_activate_at_r if self.trailing_stop_enabled else 0.0
+
+                        is_simple_order = pending.get('order_type') == 'stop_simple'
+
+                        if is_simple_order:
+                            # Simple order path: submit standalone safety-net SL
+                            safety_net_price = round(fill_price * (1 - self.safety_net_sl_pct), 2)
+                            try:
+                                sl_result = self.alpaca.submit_stop_sell_order(
+                                    symbol=symbol,
+                                    qty=actual_qty,
+                                    stop_price=safety_net_price,
+                                )
+                                sl_leg_id = sl_result.get('id', '') if sl_result else ''
+                                logger.info(
+                                    f"{symbol}: Safety-net SL submitted — "
+                                    f"${safety_net_price:.2f} ({self.safety_net_sl_pct:.0%}), "
+                                    f"ID: {sl_leg_id}"
+                                )
+                            except Exception as sl_err:
+                                logger.error(
+                                    f"{symbol}: Safety-net SL submission FAILED: {sl_err} — "
+                                    f"position has NO crash protection, StopMonitor only"
+                                )
+                                sl_leg_id = ''
+                            tp_leg_id = ''  # No TP leg — trailing stop handles it
+                        else:
+                            # Bracket order path: identify existing bracket legs
+                            order_detail = self.alpaca.get_order(order_id)
+                            sl_leg, tp_leg = self._identify_bracket_legs(
+                                order_detail.get('legs', []),
+                                expected_sl=plan.entry_price * (1 - self.safety_net_sl_pct) if plan else None,
+                                expected_tp=plan.take_profit_price if plan else None,
+                            )
+                            tp_leg_id = tp_leg['id'] if tp_leg else ''
+                            sl_leg_id = sl_leg['id'] if sl_leg else ''
 
                         # Save real_stop_loss_price to DB
                         if trade_record:
                             self.db.update_trade(trade_record['id'], {
                                 'real_stop_loss_price': real_stop,
                             })
-
-                        # Trailing stop params (0 = disabled)
-                        trail_r = self.trailing_stop_r if self.trailing_stop_enabled else 0.0
-                        activate_r = self.trailing_activate_at_r if self.trailing_stop_enabled else 0.0
 
                         self.stop_monitor.add_watch(
                             symbol=symbol,
@@ -719,12 +745,10 @@ class TradingEngine:
                             activate_at_r=activate_r,
                         )
 
-                        # Cancel TP leg when trailing stop is active — trail replaces fixed TP
+                        # Cancel TP leg when trailing stop is active (bracket path only)
                         if trail_r > 0 and tp_leg_id:
                             try:
                                 self.alpaca.cancel_order(tp_leg_id)
-                                # Clear TP leg in watch so _execute_stop_exit
-                                # doesn't try to cancel it again
                                 with self.stop_monitor._watch_lock:
                                     w = self.stop_monitor._watches.get(symbol)
                                     if w:
@@ -735,8 +759,6 @@ class TradingEngine:
                                     f"replaces fixed TP"
                                 )
                             except Exception as e:
-                                # TP leg still active — if it fills before trail,
-                                # _sync_closed_positions will detect it. Not fatal.
                                 logger.warning(
                                     f"{symbol}: TP leg cancel failed: {e} — "
                                     f"TP may still fill before trail activates"
@@ -745,7 +767,7 @@ class TradingEngine:
                         logger.info(
                             f"{symbol}: StopMonitor watching — "
                             f"real stop ${real_stop:.2f}, "
-                            f"TP leg {tp_leg_id}, SL leg {sl_leg_id}"
+                            f"SL leg {sl_leg_id}"
                             f"{f', trail={trail_r:.1f}R' if trail_r > 0 else ''}"
                         )
                     except Exception as e:
@@ -1731,17 +1753,18 @@ class TradingEngine:
                 )
 
         real_stop_level = plan.stop_loss_price
-        sl_override = None
         if self.stop_monitor:
-            sl_override = round(plan.entry_price * (1 - self.safety_net_sl_pct), 2)
+            # Simple stop-limit (no bracket) — avoids 3x margin reservation
+            # Safety-net SL submitted separately after fill detection
             logger.info(
                 f"{symbol}: Self-managed stops — real stop ${real_stop_level:.2f}, "
-                f"safety-net SL ${sl_override:.2f} ({self.safety_net_sl_pct:.0%})"
+                f"safety-net SL after fill ({self.safety_net_sl_pct:.0%})"
             )
-
-        result = self.executor.submit_buy_stop_bracket_order(
-            plan, sl_override=sl_override
-        )
+            result = self.executor.submit_buy_stop_order(plan)
+        else:
+            # Bracket order — SL/TP legs provide protection without StopMonitor
+            # No sl_override: bracket SL = plan.stop_loss_price (real stop)
+            result = self.executor.submit_buy_stop_bracket_order(plan)
 
         if result is not None:
             # NOTE: _daily_trade_count and mark_traded are deferred to fill
@@ -1753,6 +1776,7 @@ class TradingEngine:
                 'setup': setup,
                 'placed_at': datetime.now(timezone.utc),
                 'news_data': self._news_data.get(symbol),
+                'order_type': result.get('order_type', 'stop_bracket'),
             }
             # Store real stop for StopMonitor registration on fill
             if self.stop_monitor:
