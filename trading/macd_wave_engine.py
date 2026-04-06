@@ -95,6 +95,14 @@ class MACDWaveEngine:
         self.min_macd_hist_pct = float(entry.get('min_macd_hist_pct', 0.5))
         self.max_price_at_entry = float(entry.get('max_price_at_entry', 0))
 
+        # Smart entry: L1-informed pricing + early entry on strong book
+        self.smart_entry_enabled = bool(entry.get('smart_entry_enabled', False))
+        self.early_entry_bars = int(entry.get('early_entry_bars', 1))
+        self.early_bid_ask_ratio = float(entry.get('early_bid_ask_ratio', 2.0))
+        self.early_max_spread_pct = float(entry.get('early_max_spread_pct', 0.003))
+        self.normal_bid_ask_ratio = float(entry.get('normal_bid_ask_ratio', 1.5))
+        self.normal_max_spread_pct = float(entry.get('normal_max_spread_pct', 0.005))
+
         # MACD params
         macd = cfg.get('macd', {})
         self.macd_fast = int(macd.get('fast_period', 12))
@@ -515,30 +523,62 @@ class MACDWaveEngine:
                     f"price=${latest_price:.2f}, bars={len(bars)}"
                 )
 
-                # Entry signal: N consecutive positive bars + histogram strength
-                if crossed.pos_count >= self.confirm_bars:
-                    if self.min_macd_hist_pct > 0 and hist_pct < self.min_macd_hist_pct:
+                # Entry filters (applied at all entry levels)
+                if self.min_macd_hist_pct > 0 and hist_pct < self.min_macd_hist_pct:
+                    if crossed.pos_count >= self.confirm_bars:
                         logger.info(
                             f"[{self.STRATEGY_NAME}] {sym}: MACD hist too weak "
                             f"({hist_pct:.2f}% < {self.min_macd_hist_pct}%), resetting"
                         )
-                        crossed.pos_count = 0  # Reset, wait for stronger signal
-                        continue
+                        crossed.pos_count = 0
+                    continue
 
-                    if self.max_price_at_entry > 0 and latest_price > self.max_price_at_entry:
-                        logger.debug(
-                            f"[{self.STRATEGY_NAME}] {sym}: price ${latest_price:.2f} > "
-                            f"max ${self.max_price_at_entry}, skipping"
-                        )
-                        continue
+                if self.max_price_at_entry > 0 and latest_price > self.max_price_at_entry:
+                    continue
 
-                    # ENTRY SIGNAL
+                # Smart early entry: check L1 book at 1st and 2nd bar
+                entered = False
+                # Smart entry: get quote once, reuse for both early entry check and submission
+                smart_quote = None
+                if self.smart_entry_enabled:
+                    try:
+                        smart_quote = self._get_smart_limit_price(sym)
+                    except Exception as e:
+                        logger.debug(f"[{self.STRATEGY_NAME}] {sym}: smart pricing failed: {e}")
+
+                if self.smart_entry_enabled and smart_quote and crossed.pos_count < self.confirm_bars:
+                    _, info = smart_quote
+                    ba_ratio = info.get('ba_ratio', 0)
+                    spread_pct = info.get('spread_pct', 1)
+
+                    if crossed.pos_count >= self.early_entry_bars:
+                        # Early entry: strong book required
+                        if ba_ratio >= self.early_bid_ask_ratio and spread_pct <= self.early_max_spread_pct:
+                            logger.info(
+                                f"[{self.STRATEGY_NAME}] {sym}: EARLY ENTRY (bar {crossed.pos_count}) — "
+                                f"ba_ratio={ba_ratio:.1f} spread={spread_pct:.2%}"
+                            )
+                            result = self._submit_entry(sym, latest_price, hist_pct, crossed, smart_quote=smart_quote)
+                            if result:
+                                entries.append(sym)
+                                entered = True
+                        elif crossed.pos_count >= 2 and ba_ratio >= self.normal_bid_ask_ratio and spread_pct <= self.normal_max_spread_pct:
+                            logger.info(
+                                f"[{self.STRATEGY_NAME}] {sym}: ENTRY (bar 2, moderate book) — "
+                                f"ba_ratio={ba_ratio:.1f} spread={spread_pct:.2%}"
+                            )
+                            result = self._submit_entry(sym, latest_price, hist_pct, crossed, smart_quote=smart_quote)
+                            if result:
+                                entries.append(sym)
+                                entered = True
+
+                # Standard entry: 3rd bar (always, with smart pricing if enabled)
+                if not entered and crossed.pos_count >= self.confirm_bars:
                     logger.info(
-                        f"[{self.STRATEGY_NAME}] {sym}: ENTRY SIGNAL — "
-                        f"pos_count={consecutive_pos}, hist_pct={hist_pct:.2f}%, "
-                        f"price=${latest_price:.2f}"
+                        f"[{self.STRATEGY_NAME}] {sym}: ENTRY SIGNAL (bar {consecutive_pos}) — "
+                        f"hist_pct={hist_pct:.2f}%, price=${latest_price:.2f}"
                     )
-                    result = self._submit_entry(sym, latest_price, hist_pct, crossed)
+                    result = self._submit_entry(sym, latest_price, hist_pct, crossed, smart_quote=smart_quote)
                     if result:
                         entries.append(sym)
 
@@ -549,17 +589,35 @@ class MACDWaveEngine:
 
     def _submit_entry(
         self, symbol: str, price: float, macd_hist_pct: float, crossed: CrossedStock,
+        smart_quote: tuple = None,
     ) -> bool:
-        """Submit a buy order for MACD wave entry."""
-        try:
-            # Get quote for pricing
-            quote = self.alpaca.get_latest_quote(symbol)
-            ask = quote.get('ask_price', 0)
-            bid = quote.get('bid_price', 0)
-            if ask <= 0:
-                ask = price * 1.001
+        """Submit a buy order for MACD wave entry.
 
-            limit_price = round(ask * 1.001, 2)  # ask + 0.1%
+        Args:
+            smart_quote: Optional (limit_price, quote_info) from _get_smart_limit_price,
+                         passed to avoid double API call.
+        """
+        try:
+            # Get limit price: smart (L1-informed) or dumb (ask + 0.1%)
+            if smart_quote:
+                limit_price, quote_info = smart_quote
+                bid = quote_info.get('bid', 0)
+                ask = quote_info.get('ask', 0)
+            elif self.smart_entry_enabled:
+                limit_price, quote_info = self._get_smart_limit_price(symbol)
+                bid = quote_info.get('bid', 0)
+                ask = quote_info.get('ask', 0)
+            else:
+                quote = self.alpaca.get_latest_quote(symbol)
+                ask = quote.get('ask_price', 0)
+                bid = quote.get('bid_price', 0)
+                if ask <= 0:
+                    ask = price * 1.001
+                limit_price = round(ask * 1.001, 2)  # ask + 0.1%
+
+            if limit_price <= 0:
+                logger.warning(f"[{self.STRATEGY_NAME}] {symbol}: limit_price=0, skipping")
+                return False
             shares = int(self.position_size / limit_price)
             if shares <= 0:
                 return False
@@ -654,6 +712,54 @@ class MACDWaveEngine:
         except Exception as e:
             logger.error(f"[{self.STRATEGY_NAME}] {symbol}: entry submission failed: {e}")
             return False
+
+    def _get_smart_limit_price(self, symbol: str) -> tuple:
+        """
+        Get L1-informed limit price using bid/ask spread.
+
+        Returns (limit_price, quote_info_dict). Uses spread-aware pricing
+        to reduce entry slippage from ~0.5% to ~0.1-0.2%.
+        """
+        quote = self.alpaca.get_latest_quote(symbol)
+        bid = quote.get('bid_price', 0)
+        ask = quote.get('ask_price', 0)
+        bid_sz = quote.get('bid_size', 0)
+        ask_sz = quote.get('ask_size', 0)
+
+        if ask <= 0 or bid <= 0:
+            fallback = round(ask * 1.001, 2) if ask > 0 else 0
+            return fallback, {'bid': bid, 'ask': ask, 'pricing': 'fallback_no_quote'}
+
+        if bid >= ask:
+            # Crossed/inverted market — stale quotes, use ask as-is
+            logger.debug(f"[{self.STRATEGY_NAME}] {symbol}: crossed market bid=${bid} >= ask=${ask}, using ask")
+            return round(ask, 2), {'bid': bid, 'ask': ask, 'pricing': 'fallback_crossed'}
+
+        spread = ask - bid
+        spread_pct = spread / ask if ask > 0 else 0
+        ba_ratio = bid_sz / ask_sz if ask_sz > 0 else 0
+
+        # Spread-aware pricing: tighter spread → more aggressive limit
+        if spread_pct < 0.0015:        # < 0.15% — very tight
+            limit = ask                 # buy at ask, no premium needed
+        elif spread_pct < 0.005:       # < 0.5% — moderate
+            limit = bid + spread * 0.75 # 75% into the spread
+        else:                           # wide spread
+            limit = bid + spread * 0.60 # 60% into the spread
+
+        limit = min(round(limit, 2), ask)
+
+        info = {
+            'bid': bid, 'ask': ask, 'bid_sz': bid_sz, 'ask_sz': ask_sz,
+            'spread': spread, 'spread_pct': spread_pct, 'ba_ratio': ba_ratio,
+            'pricing': 'smart',
+        }
+        logger.info(
+            f"[{self.STRATEGY_NAME}] {symbol}: smart pricing — "
+            f"bid=${bid:.2f}×{bid_sz} ask=${ask:.2f}×{ask_sz} "
+            f"spread={spread_pct:.2%} ba_ratio={ba_ratio:.1f} → limit=${limit:.2f}"
+        )
+        return limit, info
 
     # ------------------------------------------------------------------
     # Intraday: check exits
