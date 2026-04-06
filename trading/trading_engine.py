@@ -578,11 +578,8 @@ class TradingEngine:
                     # Log L2 order book depth at fill time (async, never blocks trading)
                     try:
                         from data_sources.l2_depth import log_l2_async
-                        from datetime import datetime as _dt
-                        fill_dt = _dt.fromisoformat(str(filled_at)) if filled_at else None
-                        if fill_dt:
-                            log_l2_async(symbol, fill_dt, trade_record['id'],
-                                         self.db.update_trade, column='entry_l2_depth')
+                        log_l2_async(symbol, update['filled_at'], trade_record['id'],
+                                     self.db.update_trade, column='entry_l2_depth')
                     except Exception as e:
                         logger.debug(f"{symbol}: L2 async launch failed: {e}")
                 else:

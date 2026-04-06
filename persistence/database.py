@@ -667,7 +667,7 @@ class Database:
         Returns:
             ID of the inserted row
         """
-        cursor = self._cache_conn.execute("""
+        cursor = self._trades_conn.execute("""
             INSERT OR REPLACE INTO scan_results (scan_date, symbol, detected_at, phase,
                                       prev_close, current_price, gap_pct,
                                       intraday_change_pct, relative_volume,
@@ -679,7 +679,7 @@ class Database:
                     :current_volume, :time_bucket, :float_shares,
                     :has_news, :news_headline, :qualified)
         """, result)
-        self._cache_conn.commit()
+        self._trades_conn.commit()
         return cursor.lastrowid
 
     def get_scan_results(self, scan_date: str, phase: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -694,12 +694,12 @@ class Database:
             List of scan result dicts
         """
         if phase:
-            cursor = self._cache_conn.execute(
+            cursor = self._trades_conn.execute(
                 "SELECT * FROM scan_results WHERE scan_date = ? AND phase = ? ORDER BY detected_at",
                 (scan_date, phase)
             )
         else:
-            cursor = self._cache_conn.execute(
+            cursor = self._trades_conn.execute(
                 "SELECT * FROM scan_results WHERE scan_date = ? ORDER BY detected_at",
                 (scan_date,)
             )
@@ -707,7 +707,7 @@ class Database:
 
     def get_premarket_gap_symbols(self, scan_date: str) -> List[str]:
         """Get symbols that had a pre-market gap on the given date."""
-        cursor = self._cache_conn.execute("""
+        cursor = self._trades_conn.execute("""
             SELECT DISTINCT symbol FROM scan_results
             WHERE scan_date = ? AND phase = 'premarket' AND gap_pct >= 2.0
             ORDER BY symbol
