@@ -94,7 +94,7 @@ trading:
   last_entry_time: "10:45"      # ET — edge dies after 10:45 (15mo: 9:30-10:45 = +$227K, 10:45+ = -$10K)
   force_close_time: "15:45"     # ET — close all positions
   setup_expiry_bars: 10         # cancel pending buy-stop after N bars
-  pattern_poll_interval: 60
+  pattern_poll_interval: 15
   skip_midday: false            # Disabled — last_entry_time 10:45 makes midday filter redundant
   skip_fridays: false           # Disabled for paper testing (re-enable for live)
   max_consecutive_losses: 0     # Disabled — trailing stops handle risk adaptively

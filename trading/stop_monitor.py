@@ -56,6 +56,9 @@ class WatchEntry:
     activate_at_r: float = 0.0
     highest_since_entry: float = 0.0
     trailing_active: bool = False
+    # Percentage-based trail (for MACD wave): trail = highest * (1 - trail_pct)
+    # When > 0, overrides R-based trail computation
+    trail_pct: float = 0.0
     # Exhaustion exit: set True after partial sell into strength
     exhaustion_partial_taken: bool = False
     # Quote cache (updated by WebSocket quote stream)
@@ -257,6 +260,7 @@ class StopMonitor:
         risk_per_share: float = 0.0,
         trail_r: float = 0.0,
         activate_at_r: float = 0.0,
+        trail_pct: float = 0.0,
     ) -> None:
         """
         Register a symbol for stop-price monitoring.
@@ -287,6 +291,8 @@ class StopMonitor:
             trail_r=trail_r,
             activate_at_r=activate_at_r,
             highest_since_entry=entry_price,
+            trail_pct=trail_pct,
+            trailing_active=trail_pct > 0,  # %-based trail activates immediately
         )
         with self._watch_lock:
             self._watches[symbol] = entry
@@ -1223,7 +1229,11 @@ class StopMonitor:
                     )
 
             if watch.trailing_active:
-                new_stop = watch.highest_since_entry - watch.risk_per_share * watch.trail_r
+                # Percentage-based trail (MACD wave) or R-based trail (bull flag)
+                if watch.trail_pct > 0:
+                    new_stop = watch.highest_since_entry * (1 - watch.trail_pct)
+                else:
+                    new_stop = watch.highest_since_entry - watch.risk_per_share * watch.trail_r
                 if new_stop > watch.stop_price:
                     old_stop = watch.stop_price
                     watch.stop_price = new_stop

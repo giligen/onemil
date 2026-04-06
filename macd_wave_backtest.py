@@ -340,8 +340,8 @@ def generate_signals(
     w1_scout = entry_filters.get('w1_scout', False)
     w1_min_pct = entry_filters.get('w1_min_pct', 0.0)
     hard_stop_pct = cfg.get('risk', {}).get('hard_stop_pct', 0.02)
-    entry_slippage = entry_filters.get('entry_pct', 0.001)
-    exit_slippage = entry_filters.get('exit_pct', 0.001)
+    entry_slippage = entry_filters.get('entry_pct', 0.005)
+    exit_slippage = entry_filters.get('exit_pct', 0.002)
 
     # Entry filter values
     cross_time_max = entry_filters.get('cross_time_max_min', 0)
@@ -443,6 +443,29 @@ def generate_signals(
                 highest_since_entry = entry_price
                 pos_count = 0
         else:
+            # Force close at 15:45 ET (matches production)
+            # Bar index 0 = 9:30 ET, so index 375 = 15:45 ET
+            if i >= 375:
+                raw_exit = bars.iloc[i]['close']
+                exit_price = raw_exit * (1 - exit_slippage)
+                wave += 1
+                pnl_pct = (exit_price - entry_price) / entry_price * 100
+                shares = int(position_size / entry_price) if entry_price > 0 else 0
+                is_paper = w1_scout and wave == 1
+                if not is_paper:
+                    signals.append({
+                        'wave': wave, 'entry_price': entry_price, 'exit_price': exit_price,
+                        'shares': shares, 'pnl_pct': pnl_pct,
+                        'pnl_dollar': (exit_price - entry_price) * shares,
+                        'entry_time': entry_time, 'exit_time': bar_ts,
+                        'exit_reason': 'force_close', 'paper': False,
+                        'cross_time_min': cross_time_min, 'vol_at_cross': vol_at_cross,
+                        'macd_hist_pct': entry_hist_pct, 'w1_pnl': w1_result,
+                        'entry_idx': entry_idx,
+                    })
+                in_trade = False
+                continue
+
             # Track highest high for trailing stop
             bar_high = bars.iloc[i]['high']
             if bar_high > highest_since_entry:

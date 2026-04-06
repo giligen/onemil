@@ -188,14 +188,14 @@ class MACDWaveEngine:
                     )
                     # Re-register with StopMonitor
                     if self.stop_monitor:
-                        risk_for_trail = fill_price * self.trail_stop_pct
                         self.stop_monitor.add_watch(
                             symbol=sym, stop_price=hard_stop,
                             shares=shares, tp_leg_id='', sl_leg_id='',
                             trade_db_id=trade['id'],
                             entry_price=fill_price,
-                            risk_per_share=risk_for_trail,
-                            trail_r=1.0, activate_at_r=0.0,
+                            risk_per_share=0,
+                            trail_r=0, activate_at_r=0.0,
+                            trail_pct=self.trail_stop_pct,
                         )
                     logger.info(
                         f"[{self.STRATEGY_NAME}] sync: recovered {sym} "
@@ -761,7 +761,6 @@ class MACDWaveEngine:
                                 )
                                 # NOW add StopMonitor watch (only after fill confirmed)
                                 if self.stop_monitor:
-                                    risk_for_trail = pos.entry_price * self.trail_stop_pct
                                     self.stop_monitor.add_watch(
                                         symbol=sym,
                                         stop_price=pos.hard_stop,
@@ -769,8 +768,9 @@ class MACDWaveEngine:
                                         tp_leg_id='', sl_leg_id='',
                                         trade_db_id=pos.trade_id,
                                         entry_price=pos.entry_price,
-                                        risk_per_share=risk_for_trail,
-                                        trail_r=1.0, activate_at_r=0.0,
+                                        risk_per_share=0,  # not used — trail_pct overrides
+                                        trail_r=0, activate_at_r=0.0,
+                                        trail_pct=self.trail_stop_pct,  # percentage-based trail
                                     )
 
                                 # Log entry L2 async
