@@ -35,8 +35,8 @@ from data_sources.alpaca_client import AlpacaClient
 
 logger = logging.getLogger(__name__)
 
-RECONNECT_DELAY_SECONDS = 15.0  # Don't hammer Alpaca — 15s between retries
-MAX_RECONNECT_ATTEMPTS = 20     # 20 × 15s = 5 min of retrying before giving up
+RECONNECT_DELAY_SECONDS = 60.0  # 60s between retries — stop triggering Alpaca's rate limiter
+MAX_RECONNECT_ATTEMPTS = 60     # 60 × 60s = 1 hour of retrying before giving up
 
 
 @dataclass
