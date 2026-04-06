@@ -362,7 +362,7 @@ class MACDWaveEngine:
                     if sym in self.crossed_stocks or sym in self.invalidated:
                         continue
                     if sym in self.open_positions:
-                        continue
+                        continue  # Already have position or pending order for this symbol
 
                     price = trade_data.get('price', 0)
 
@@ -450,8 +450,22 @@ class MACDWaveEngine:
             if sym in self.invalidated:
                 continue
 
-            # Capacity check
-            if len(self.open_positions) >= self.max_concurrent:
+            # Capacity check — exclude stale pending orders (>2 min old, likely rejected)
+            active_count = 0
+            stale_pending = []
+            for psym, pos in self.open_positions.items():
+                if not pos.order_id:
+                    active_count += 1  # filled
+                elif (datetime.now(timezone.utc) - pos.entry_time).total_seconds() < 120:
+                    active_count += 1  # pending but fresh
+                else:
+                    stale_pending.append(psym)  # pending > 2 min = dead
+            # Clean up stale pending orders
+            for psym in stale_pending:
+                logger.warning(f"[{self.STRATEGY_NAME}] {psym}: stale pending order (>2min), removing")
+                del self.open_positions[psym]
+                self.invalidated.add(psym)
+            if active_count >= self.max_concurrent:
                 break
 
             # Daily loss limit
