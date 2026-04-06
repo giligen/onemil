@@ -35,8 +35,8 @@ from data_sources.alpaca_client import AlpacaClient
 
 logger = logging.getLogger(__name__)
 
-RECONNECT_DELAY_SECONDS = 5.0
-MAX_RECONNECT_ATTEMPTS = 50
+RECONNECT_DELAY_SECONDS = 15.0  # Don't hammer Alpaca — 15s between retries
+MAX_RECONNECT_ATTEMPTS = 20     # 20 × 15s = 5 min of retrying before giving up
 
 
 @dataclass
@@ -1081,27 +1081,20 @@ class StopMonitor:
                     self._api_key, self._api_secret,
                     feed=DataFeed.SIP,
                 )
-                # Subscribe to all currently watched symbols.
-                # If empty, subscribe_trades with no symbols is a no-op;
-                # add_watch will subscribe dynamically via _subscribe_symbol.
-                # Wait for at least one symbol before connecting.
-                # SDK's _run_forever busy-spins with asyncio.sleep(0) if no
-                # handlers registered — burns 100% CPU. Wait here instead.
+                # Connect ONCE at startup with SPY as keepalive.
+                # Dynamic symbol subscriptions happen via _subscribe_symbol().
+                # No waiting for watches — the connection stays alive permanently.
                 watched = self._get_watched_symbols()
-                while not watched and self._running:
-                    await asyncio.sleep(1)  # real sleep, not busy spin
-                    watched = self._get_watched_symbols()
-
-                if not self._running:
-                    break
+                # Always include SPY as keepalive — prevents SDK busy-spin on empty handlers
+                all_symbols = list(set(watched + ['SPY']))
 
                 self._stream.subscribe_trades(
-                    self._on_trade, *watched
+                    self._on_trade, *all_symbols
                 )
                 self._stream.subscribe_quotes(
-                    self._on_quote, *watched
+                    self._on_quote, *all_symbols
                 )
-                logger.info(f"StopMonitor: WebSocket connecting with {len(watched)} symbols (trades+quotes)...")
+                logger.info(f"StopMonitor: WebSocket connecting with {len(all_symbols)} symbols ({len(watched)} watched + SPY keepalive)...")
                 self._ws_connected = True
                 await self._stream._run_forever()
 
