@@ -641,13 +641,14 @@ class RealtimeScanner:
                 print(f"  Hot stocks (5x vol + 10%+ move): {len(hot_stocks)}")
                 for h in sorted(hot_stocks, key=lambda x: x['change_pct'], reverse=True):
                     news_status = f'"{h["headline"]}"' if h['has_news'] else 'NO NEWS'
+                    float_str = f"{h['float_shares'] / 1_000_000:.1f}M" if h.get('float_shares') else "N/A"
                     print(
                         f"    {h['symbol']:<6} "
                         f"${h['prev_close']:.2f} -> ${h['current_price']:.2f} "
                         f"({h['change_pct']:+.1f}%)  "
                         f"RelVol: {h['relative_volume']:.1f}x "
                         f"(vol: {h['current_volume']:,} / avg: {h['avg_volume']:,})  "
-                        f"Float: {h['float_shares'] / 1_000_000:.1f}M  "
+                        f"Float: {float_str}  "
                         f"News: {news_status}"
                     )
 

@@ -157,11 +157,12 @@ class ScannerCriteria:
         qualified = all(candidate.criteria_met.values())
 
         if qualified:
+            float_q = f"{candidate.float_shares / 1_000_000:.1f}M" if candidate.float_shares else "N/A"
             logger.info(
                 f"INTRADAY QUALIFIED: {candidate.symbol} | "
                 f"${candidate.current_price:.2f} ({candidate.intraday_change_pct:+.1f}%) | "
                 f"RelVol: {candidate.relative_volume:.1f}x | "
-                f"Float: {candidate.float_shares / 1_000_000:.1f}M | "
+                f"Float: {float_q} | "
                 f"News: {candidate.news_headline}"
             )
         elif candidate.criteria_met_count >= candidate.total_criteria - 1:
