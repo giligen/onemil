@@ -1109,6 +1109,17 @@ class StopMonitor:
                 self._ws_connected = False
                 if not self._running:
                     break
+
+                # Force-close any lingering TCP socket from failed connection
+                if self._stream:
+                    try:
+                        if hasattr(self._stream, '_ws') and self._stream._ws:
+                            await self._stream._ws.close()
+                        await self._close_stream()
+                    except Exception:
+                        pass
+                    self._stream = None
+
                 reconnect_count += 1
                 error_msg = (
                     f"StopMonitor: WebSocket disconnected ({e}) — "
