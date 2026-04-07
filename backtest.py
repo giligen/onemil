@@ -715,6 +715,10 @@ class BacktestRunner:
         vol_dead_zone_max: float = 5.0,
         no_pop_exit_bars: int = 0,
         no_pop_exit_min_pct: float = 0.005,
+        min_cum_dollar_vol: float = 0,
+        min_cum_shares: int = 0,
+        min_relative_vol_rate: float = 0,
+        avg_daily_volume: int = 0,
     ):
         """
         Initialize BacktestRunner.
@@ -886,18 +890,24 @@ class BacktestRunner:
                 no_pop_exit_min_pct=no_pop_exit_min_pct,
                 trail_exit_slippage_pct=trail_exit_slippage_pct,
             )
-            if resolved_trail_r > 0:
-                logger.info(
-                    f"Trailing stop: {resolved_trail_r:.1f}R below high, "
-                    f"activates at +{resolved_trail_activate:.1f}R (replaces fixed TP)"
-                )
-            if self.exhaustion_exit_enabled:
-                active = [k for k, v in self.exhaustion_signals.items() if v]
-                logger.info(
-                    f"Exhaustion exit: {', '.join(active)}, "
-                    f"partial {float(exhaust_cfg.get('partial_fraction', 0.5)):.0%}, "
-                    f"tighter trail {float(exhaust_cfg.get('tighter_trail_r', 0.5)):.1f}R"
-                )
+        # Volume qualification gates (for live/backtest alignment testing)
+        self.min_cum_dollar_vol = min_cum_dollar_vol
+        self.min_cum_shares = min_cum_shares
+        self.min_relative_vol_rate = min_relative_vol_rate
+        self.avg_daily_volume = avg_daily_volume
+
+        if resolved_trail_r > 0:
+            logger.info(
+                f"Trailing stop: {resolved_trail_r:.1f}R below high, "
+                f"activates at +{resolved_trail_activate:.1f}R (replaces fixed TP)"
+            )
+        if self.exhaustion_exit_enabled:
+            active = [k for k, v in self.exhaustion_signals.items() if v]
+            logger.info(
+                f"Exhaustion exit: {', '.join(active)}, "
+                f"partial {float(exhaust_cfg.get('partial_fraction', 0.5)):.0%}, "
+                f"tighter trail {float(exhaust_cfg.get('tighter_trail_r', 0.5)):.1f}R"
+            )
 
         # MACD zone filter: risk scaling based on MACD histogram strength at entry
         macd_zones_cfg = trading_cfg.get("macd_zones", {})
@@ -1298,6 +1308,25 @@ class BacktestRunner:
                 bar_high = bars.iloc[i]['high']
                 move = (bar_high - prev_close) / prev_close
                 if move >= qualification_pct:
+                    # Price threshold passed — check volume gate
+                    vol_ok = True
+                    if (self.min_cum_dollar_vol > 0 or self.min_cum_shares > 0
+                            or self.min_relative_vol_rate > 0):
+                        cum_vol = int(bars.iloc[:i+1]['volume'].sum())
+                        minutes = i + 1
+                        if self.min_cum_dollar_vol > 0:
+                            cum_dv = float((bars.iloc[:i+1]['close'] * bars.iloc[:i+1]['volume']).sum())
+                            if cum_dv < self.min_cum_dollar_vol:
+                                vol_ok = False
+                        if self.min_cum_shares > 0 and cum_vol < self.min_cum_shares:
+                            vol_ok = False
+                        if self.min_relative_vol_rate > 0 and self.avg_daily_volume > 0:
+                            rate = cum_vol / minutes
+                            expected = self.avg_daily_volume / 390
+                            if expected > 0 and rate / expected < self.min_relative_vol_rate:
+                                vol_ok = False
+                    if not vol_ok:
+                        continue  # Price OK but volume insufficient — keep waiting
                     qualified = True
                     qualification_bar = i
                     logger.info(

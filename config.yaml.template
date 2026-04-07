@@ -18,9 +18,9 @@ scanner:
   # <50K vol: 25% WR (garbage), 200K+: 53% WR. Filters 30% of trades, keeps 90% of PnL.
   min_daily_volume: 200_000
 
-  # Minimum daily dollar volume — filters untradeable micro-caps
-  # $3M keeps BEX ($20M), CORD ($28M), removes EUDA ($1M), GLND ($1M)
-  min_dollar_volume: 3_000_000
+  # Minimum daily dollar volume — DISABLED: backtest shows all gates destroy P&L
+  # $3M cost $193K/quarter in missed trades. 200K avg daily vol filter catches garbage.
+  min_dollar_volume: 0
 
   # Pre-market gap threshold
   gap_pct_min: 2.0

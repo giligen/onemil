@@ -674,10 +674,25 @@ def run_batch_backtest(
                     if prev_date:
                         prev_day_bars = get_1min_bars_cached(symbol, prev_date, client, db)
 
+                # Set per-symbol avg_daily_volume for relative vol rate gate
+                runner.avg_daily_volume = avg_vol or 0
+
+                # Pass prev_close when volume gates are active (needed for qualification loop)
+                # prev_close from mover tuple can be 0.0 — fetch from daily bars if needed
+                _prev_close = None
+                if (runner.min_cum_dollar_vol > 0
+                        or runner.min_cum_shares > 0
+                        or runner.min_relative_vol_rate > 0):
+                    _prev_close = prev_close if prev_close and prev_close > 0 else None
+                    if not _prev_close and db:
+                        _pc_row = db._cache_conn.execute(
+                            'SELECT close FROM daily_bars WHERE symbol = ? AND bar_date < ? ORDER BY bar_date DESC LIMIT 1',
+                            (symbol, date_str)).fetchone()
+                        _prev_close = float(_pc_row[0]) if _pc_row else None
                 result = runner.run(symbol, bars, date_str,
                                     avg_daily_volume=avg_vol,
                                     volume_profile=vol_profile,
-                                    prev_close=None,  # Daily bar pre-filter already ensures 20%+ range
+                                    prev_close=_prev_close,
                                     prev_day_bars=prev_day_bars)
                 results.append(result)
 
@@ -1786,6 +1801,18 @@ def main():
         "--min-dollar-vol", type=float, default=None,
         help="Min daily dollar volume (e.g., 3000000 for $3M). 0 = disabled."
     )
+    parser.add_argument(
+        "--min-cum-dollar-vol", type=float, default=0,
+        help="Volume gate: min cumulative dollar volume at qualification (live alignment)"
+    )
+    parser.add_argument(
+        "--min-cum-shares", type=int, default=0,
+        help="Volume gate: min cumulative shares at qualification"
+    )
+    parser.add_argument(
+        "--min-relative-vol-rate", type=float, default=0,
+        help="Volume gate: min relative volume rate (vol_rate / expected_rate)"
+    )
     args = parser.parse_args()
 
     # Auto-detect worker count from CPU cores
@@ -2089,7 +2116,11 @@ def main():
                     build_cache=True,
                 )
             else:
-                runner = BacktestRunner()
+                runner = BacktestRunner(
+                    min_cum_dollar_vol=args.min_cum_dollar_vol,
+                    min_cum_shares=args.min_cum_shares,
+                    min_relative_vol_rate=args.min_relative_vol_rate,
+                )
                 chunk_results = run_batch_backtest(
                     chunk, client, runner, db=db, universe_dict=universe_dict,
                     market_regime=cache_regime,
@@ -2145,7 +2176,11 @@ def main():
                 max_workers=args.scan_workers,
             )
         else:
-            runner = BacktestRunner()
+            runner = BacktestRunner(
+                min_cum_dollar_vol=args.min_cum_dollar_vol,
+                min_cum_shares=args.min_cum_shares,
+                min_relative_vol_rate=args.min_relative_vol_rate,
+            )
             results = run_batch_backtest(
                 movers, client, runner, db=db, universe_dict=universe_dict,
                 market_regime=market_regime,
