@@ -1046,6 +1046,7 @@ def run_batch_backtest_fast(
     market_regime: Optional['MarketRegimeFilter'] = None,
     max_consecutive_losses: int = 0,
     max_workers: int = 0,
+    build_cache: bool = False,
 ) -> List[BacktestResult]:
     """
     Fastest batch backtest: single-process, pre-loaded bars, minimal logging.
@@ -1337,7 +1338,8 @@ def run_batch_backtest_fast(
             consec_losses = 0
             stopped_for_day = False
             day_trade_count = 0
-            max_trades = int(_cfg.get("trading", {}).get("max_trades_per_day", 0))
+            # Disable max_trades during cache builds — cache ALL trades, filter at query time
+            max_trades = 0 if build_cache else int(_cfg.get("trading", {}).get("max_trades_per_day", 0))
 
             for sym, d, prev_close, *_ in movers_by_date[trade_date]:
                 completed += 1
@@ -2029,6 +2031,7 @@ def main():
                 market_regime=cache_regime,
                 max_consecutive_losses=0,
                 max_workers=args.scan_workers,
+                build_cache=True,
             )
         else:
             runner = BacktestRunner()
