@@ -1612,7 +1612,7 @@ class TradingEngine:
             uni_stock = self.db.get_universe_stock(symbol) if hasattr(self, 'db') and self.db else None
             avg_vol = (uni_stock.get('avg_volume_daily') or 0) if uni_stock else 0
             if avg_vol > 0 and avg_vol < self.min_daily_volume:
-                logger.debug(
+                logger.info(
                     f"{symbol}: Skipping — avg daily vol {avg_vol:,.0f} "
                     f"< {self.min_daily_volume:,.0f} minimum"
                 )
