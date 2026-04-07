@@ -109,6 +109,7 @@ def filter_bull_flag_trades(
     universe_symbols: Optional[Set[str]] = None,
     max_concurrent: int = 0,
     daily_loss_limit: float = 0,
+    universe_vol_map: Optional[Dict[str, int]] = None,
 ) -> List[Dict]:
     """Apply regime, max trades/day, consecutive loss, threshold, concurrent, and loss limit filters."""
     from collections import defaultdict
@@ -127,6 +128,17 @@ def filter_bull_flag_trades(
         before = len(trades)
         trades = [t for t in trades if t['symbol'] in universe_symbols]
         logger.info(f"Universe filter: {before} → {len(trades)} trades")
+
+    # Pre-filter by minimum daily volume (avoid illiquid stocks)
+    from config import Config as _Cfg
+    _cfg_vol = _Cfg._load_yaml_only()
+    min_daily_vol = int(_cfg_vol.get("scanner", {}).get("min_daily_volume", 0))
+    if min_daily_vol > 0 and universe_vol_map:
+        before_vol = len(trades)
+        trades = [t for t in trades if universe_vol_map.get(t['symbol'], 0) >= min_daily_vol]
+        vol_removed = before_vol - len(trades)
+        if vol_removed:
+            logger.info(f"Volume filter (>={min_daily_vol:,}): {before_vol} → {len(trades)} trades ({vol_removed} removed)")
 
     # Pre-filter by daily range threshold
     if min_daily_range_pct > 0:
@@ -1966,6 +1978,8 @@ def main():
 
         _max_pos = int(trading_cfg.get("max_positions", 3))
         _daily_loss = float(trading_cfg.get("daily_loss_limit", -5000))
+        # Build volume map for min_daily_volume filter
+        _vol_map = {s['symbol']: s.get('avg_volume_daily', 0) or 0 for s in db.get_active_universe()}
         filtered_trades = filter_bull_flag_trades(
             cached_trades,
             market_regime=market_regime if market_regime.enabled else None,
@@ -1975,6 +1989,7 @@ def main():
             universe_symbols=_uni_syms,
             max_concurrent=_max_pos,
             daily_loss_limit=_daily_loss,
+            universe_vol_map=_vol_map,
         )
         # Write output CSV
         trade_count = 0
