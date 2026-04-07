@@ -2040,22 +2040,38 @@ def main():
         cache_regime = MarketRegimeFilter(enabled=False, max_trades_per_day=0)
         cache_regime.load_spy_bars(spy_bars)
         logger.info(f"Building bull flag cache (regime OFF, no max_trades, entry_slip={_entry_slip:.1%}, exit_slip={_exit_slip:.1%})...")
-        if use_fast:
-            results = run_batch_backtest_fast(
-                movers, db=db,
-                market_regime=cache_regime,
-                max_consecutive_losses=0,
-                max_workers=args.scan_workers,
-                build_cache=True,
-            )
-        else:
-            runner = BacktestRunner()
-            results = run_batch_backtest(
-                movers, client, runner, db=db, universe_dict=universe_dict,
-                market_regime=cache_regime,
-                max_consecutive_losses=0,
-                max_trades_per_day=0,
-            )
+
+        # Chunk movers by month to cap memory (~500MB/chunk instead of 5GB+ all-at-once)
+        from itertools import groupby as _groupby
+        monthly_movers = []
+        for _, grp in _groupby(sorted(movers, key=lambda m: m[1]), key=lambda m: (m[1].year, m[1].month)):
+            monthly_movers.append(list(grp))
+        logger.info(f"Processing {len(monthly_movers)} monthly chunks")
+
+        results = []
+        for chunk_idx, chunk in enumerate(monthly_movers):
+            chunk_label = f"{chunk[0][1].strftime('%Y-%m')}"
+            logger.info(f"📦 Chunk {chunk_idx+1}/{len(monthly_movers)} ({chunk_label}): {len(chunk)} movers")
+            if use_fast:
+                chunk_results = run_batch_backtest_fast(
+                    chunk, db=db,
+                    market_regime=cache_regime,
+                    max_consecutive_losses=0,
+                    max_workers=args.scan_workers,
+                    build_cache=True,
+                )
+            else:
+                runner = BacktestRunner()
+                chunk_results = run_batch_backtest(
+                    chunk, client, runner, db=db, universe_dict=universe_dict,
+                    market_regime=cache_regime,
+                    max_consecutive_losses=0,
+                    max_trades_per_day=0,
+                )
+            results.extend(chunk_results)
+            n_chunk_trades = sum(len(r.trades_simulated) for r in chunk_results)
+            logger.info(f"  {chunk_label}: {n_chunk_trades} trades found")
+            import gc; gc.collect()
         # Build daily range lookup: (sym, date) -> (high-low)/low * 100
         import sqlite3 as _sql
         _conn = _sql.connect(db.db_path)
