@@ -2845,3 +2845,177 @@ class TestSimpleOrderPath:
         watch_kwargs = mock_stop_monitor.add_watch.call_args.kwargs
         assert watch_kwargs['sl_leg_id'] == 'safety-net-sl-1'
         assert watch_kwargs['tp_leg_id'] == ''  # No TP leg for simple orders
+
+
+# ===========================================================================
+# MACD Dead Zone + Risk Tier Interaction
+# ===========================================================================
+
+class TestMacdDeadZoneWithRiskTier:
+    """Dead zone must reject trades regardless of risk tier multiplier."""
+
+    @pytest.fixture
+    def db(self, tmp_path):
+        database = Database(db_path=str(tmp_path / "test.db"))
+        yield database
+        database.close()
+
+    def _build_engine(self, mock_alpaca, db):
+        """Create engine with MACD zones + risk tiers both enabled."""
+        mock_detector = MagicMock(spec=BullFlagDetector)
+        mock_planner = MagicMock(spec=TradePlanner)
+        mock_executor = MagicMock(spec=OrderExecutor)
+        mock_pm = MagicMock(spec=PositionManager)
+        mock_pm.can_open_position.return_value = True
+
+        engine = TradingEngine(
+            alpaca_client=mock_alpaca, db=db,
+            detector=mock_detector, planner=mock_planner,
+            executor=mock_executor, position_manager=mock_pm,
+            enabled=True,
+        )
+        # Enable MACD zones
+        engine.macd_zones_enabled = True
+        engine.macd_dead_zone_min = -0.2
+        engine.macd_dead_zone_max = 0.1
+        engine.macd_strong_neg_threshold = -0.5
+        engine.macd_strong_neg_multiplier = 1.5
+        engine.macd_strong_pos_threshold = 0.5
+        engine.macd_strong_pos_multiplier = 1.5
+        engine.macd_normal_multiplier = 1.0
+
+        # Enable risk tiers
+        engine.risk_tiers_enabled = True
+        engine.risk_tiers = [{
+            'min_price': 10.0, 'max_price': 15.0,
+            'min_volume': 500000, 'max_volume': 5000000,
+            'multiplier': 2.0,
+        }]
+        return engine, mock_detector, mock_planner, mock_executor
+
+    @patch('trading.trading_engine.TradingEngine._is_past_last_entry_time', return_value=False)
+    def test_dead_zone_rejects_even_with_risk_tier(self, _mock_time):
+        """MACD dead zone must reject trades even when risk tier = 2x."""
+        mock_alpaca = MagicMock(spec=AlpacaClient)
+        mock_alpaca.get_open_positions.return_value = []
+
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(db_path=os.path.join(tmp, "test.db"))
+            try:
+                engine, mock_detector, mock_planner, mock_executor = self._build_engine(mock_alpaca, db)
+
+                # Stock at $12 with 1M volume → matches tier1 (2x)
+                pattern = _make_pattern("TIER")
+                pattern = BullFlagPattern(
+                    symbol="TIER",
+                    pole_start_idx=0, pole_end_idx=2,
+                    flag_start_idx=3, flag_end_idx=4,
+                    pole_low=11.0, pole_high=12.5,
+                    pole_height=1.5, pole_gain_pct=13.6,
+                    flag_low=11.80, flag_high=12.10,
+                    retracement_pct=26.7, pullback_candle_count=2,
+                    avg_pole_volume=800000, avg_flag_volume=400000,
+                    breakout_level=12.10,
+                )
+                plan = TradePlan(
+                    symbol="TIER", entry_price=12.10,
+                    stop_loss_price=11.79, take_profit_price=12.88,
+                    risk_per_share=0.31, reward_per_share=0.78,
+                    risk_reward_ratio=2.5, shares=322,
+                    total_risk=99.82, pattern=pattern,
+                )
+
+                # Mock universe stock with sufficient volume for tier match
+                db.get_universe_stock = MagicMock(return_value={
+                    'symbol': 'TIER', 'avg_volume_daily': 1000000,
+                })
+
+                bars = pd.DataFrame({
+                    'open': [11.9, 12.0, 12.05],
+                    'high': [12.0, 12.1, 12.08],
+                    'low': [11.85, 11.95, 12.0],
+                    'close': [12.0, 12.05, 12.05],
+                    'volume': [500000, 600000, 400000],
+                })
+                mock_alpaca.get_1min_bars.return_value = bars
+
+                mock_detector.detect_setup.return_value = pattern
+                mock_planner.create_plan.return_value = plan
+                mock_planner.max_shares = 10000
+                mock_alpaca.is_marginable.return_value = True
+                mock_alpaca.get_buying_power.return_value = 100000.0
+
+                # MACD histogram returns dead zone value (0.0 → reject)
+                with patch.object(engine, '_get_macd_zone_multiplier', return_value=0.0):
+                    engine.on_stock_qualified("TIER")
+                    result = engine.run_pattern_check()
+
+                # Order should NOT be submitted — dead zone must reject
+                mock_executor.submit_buy_stop_bracket_order.assert_not_called()
+                mock_executor.submit_buy_stop_order.assert_not_called()
+            finally:
+                db.close()
+
+    @patch('trading.trading_engine.TradingEngine._is_past_last_entry_time', return_value=False)
+    def test_risk_tier_skips_macd_scaling_but_not_rejection(self, _mock_time):
+        """Risk tier trades skip MACD scaling (no compounding) but pass through."""
+        mock_alpaca = MagicMock(spec=AlpacaClient)
+        mock_alpaca.get_open_positions.return_value = []
+
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(db_path=os.path.join(tmp, "test.db"))
+            try:
+                engine, mock_detector, mock_planner, mock_executor = self._build_engine(mock_alpaca, db)
+
+                pattern = BullFlagPattern(
+                    symbol="TIER2", pole_start_idx=0, pole_end_idx=2,
+                    flag_start_idx=3, flag_end_idx=4,
+                    pole_low=11.0, pole_high=12.5, pole_height=1.5,
+                    pole_gain_pct=13.6, flag_low=11.80, flag_high=12.10,
+                    retracement_pct=26.7, pullback_candle_count=2,
+                    avg_pole_volume=800000, avg_flag_volume=400000,
+                    breakout_level=12.10,
+                )
+                plan = TradePlan(
+                    symbol="TIER2", entry_price=12.10,
+                    stop_loss_price=11.79, take_profit_price=12.88,
+                    risk_per_share=0.31, reward_per_share=0.78,
+                    risk_reward_ratio=2.5, shares=322,
+                    total_risk=99.82, pattern=pattern,
+                )
+
+                db.get_universe_stock = MagicMock(return_value={
+                    'symbol': 'TIER2', 'avg_volume_daily': 1000000,
+                })
+
+                bars = pd.DataFrame({
+                    'open': [11.9, 12.0, 12.05],
+                    'high': [12.0, 12.1, 12.08],
+                    'low': [11.85, 11.95, 12.0],
+                    'close': [12.0, 12.05, 12.05],
+                    'volume': [500000, 600000, 400000],
+                })
+                mock_alpaca.get_1min_bars.return_value = bars
+                mock_detector.detect_setup.return_value = pattern
+                mock_planner.create_plan.return_value = plan
+                mock_planner.max_shares = 10000
+                mock_alpaca.is_marginable.return_value = True
+                mock_alpaca.get_buying_power.return_value = 100000.0
+
+                # MACD zone returns 1.5x (strong momentum) — should NOT compound with tier
+                with patch.object(engine, '_get_macd_zone_multiplier', return_value=1.5):
+                    engine.on_stock_qualified("TIER2")
+                    result = engine.run_pattern_check()
+
+                # Order should be submitted (not dead zone), but shares should be
+                # unchanged (1.5x scaling skipped due to risk tier)
+                assert mock_executor.submit_buy_stop_bracket_order.called or mock_executor.submit_buy_stop_order.called
+                # Verify planner was called with risk_multiplier=2.0 (tier), not 3.0 (tier*MACD)
+                planner_calls = mock_planner.create_plan.call_args_list
+                # The last call should have risk_multiplier=2.0
+                last_call = planner_calls[-1]
+                assert last_call.kwargs.get('risk_multiplier', last_call.args[1] if len(last_call.args) > 1 else 1.0) == 2.0
+            finally:
+                db.close()

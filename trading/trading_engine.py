@@ -1638,9 +1638,11 @@ class TradingEngine:
         Returns:
             Dict with order details if buy-stop placed, None otherwise
         """
+        # Fetch universe stock data once (used for volume filter + risk tier)
+        uni_stock = self.db.get_universe_stock(symbol) if self.db else None
+
         # Volume filter: skip illiquid stocks before wasting API calls
         if self.min_daily_volume > 0:
-            uni_stock = self.db.get_universe_stock(symbol) if hasattr(self, 'db') and self.db else None
             avg_vol = (uni_stock.get('avg_volume_daily') or 0) if uni_stock else 0
             if avg_vol > 0 and avg_vol < self.min_daily_volume:
                 logger.info(
@@ -1711,7 +1713,6 @@ class TradingEngine:
         # Risk tier: scale risk on high-conviction setups
         risk_multiplier = 1.0
         if self.risk_tiers_enabled:
-            uni_stock = self.db.get_universe_stock(symbol)
             avg_vol = (uni_stock.get('avg_volume_daily') or 0) if uni_stock else 0
             risk_multiplier = self._get_risk_tier(setup.breakout_level, avg_vol)
 
@@ -1770,14 +1771,15 @@ class TradingEngine:
         if not self.position_manager.can_open_position(symbol):
             return None
 
-        # MACD zone filter: skip dead zone, scale risk on strong zones
-        # Skip scaling if risk tier already applied (don't compound 3x * 1.5x = 4.5x)
-        if self.macd_zones_enabled and risk_multiplier <= 1.0:
+        # MACD zone filter: dead zone always rejects, scaling only when no risk tier
+        # Dead zone = garbage setups (30% WR) → reject regardless of tier
+        # Scaling skipped when risk tier active (don't compound 3x * 1.5x = 4.5x)
+        if self.macd_zones_enabled:
             zone_mult = self._get_macd_zone_multiplier(symbol, bars, plan.entry_price)
             if zone_mult == 0.0:
                 logger.info(f"{symbol}: MACD zone SKIP (dead zone)")
                 return None
-            elif zone_mult != 1.0:
+            elif zone_mult != 1.0 and risk_multiplier <= 1.0:
                 max_sh = self.planner.max_shares
                 scaled_shares = min(max_sh, max(1, int(plan.shares * zone_mult)))
                 logger.info(f"{symbol}: MACD zone {zone_mult}x → shares {plan.shares} → {scaled_shares}")
