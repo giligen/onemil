@@ -261,7 +261,7 @@ class StopMonitor:
             return False
         if self._thread is None or not self._thread.is_alive():
             return False
-        if self._stream is None:
+        if not self._polling_mode and self._stream is None:
             return False
         # Only check WebSocket connection + data freshness when watches exist
         # No watches = WebSocket waiting for first symbol = normal startup
