@@ -132,6 +132,9 @@ class TradingEngine:
             'shooting_star': True,
         })
 
+        # Minimum daily volume filter — skip illiquid stocks
+        self.min_daily_volume = int(_cfg.get("scanner", {}).get("min_daily_volume", 0))
+
         self._qualified_symbols: Set[str] = set()
         self._traded_symbols: Set[str] = set()
         self._patterns_detected: int = 0
@@ -1604,6 +1607,17 @@ class TradingEngine:
         Returns:
             Dict with order details if buy-stop placed, None otherwise
         """
+        # Volume filter: skip illiquid stocks before wasting API calls
+        if self.min_daily_volume > 0:
+            uni_stock = self.db.get_universe_stock(symbol) if hasattr(self, 'db') and self.db else None
+            avg_vol = (uni_stock.get('avg_volume_daily') or 0) if uni_stock else 0
+            if avg_vol > 0 and avg_vol < self.min_daily_volume:
+                logger.debug(
+                    f"{symbol}: Skipping — avg daily vol {avg_vol:,.0f} "
+                    f"< {self.min_daily_volume:,.0f} minimum"
+                )
+                return None
+
         # Fetch 1-min bars from market open (not a fixed window).
         # Fixed 90-min window misses setups that formed earlier in the day —
         # the backtest sees all bars from open, so live must too.
