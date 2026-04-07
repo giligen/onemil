@@ -294,7 +294,7 @@ class AlpacaClient:
     # Daily Bars
     # =========================================================================
 
-    def get_daily_bars(self, symbols: List[str], days: int = 5) -> Dict[str, Dict]:
+    def get_daily_bars(self, symbols: List[str], days: int = 20) -> Dict[str, Dict]:
         """
         Get recent daily bars for multiple symbols.
 
@@ -334,9 +334,10 @@ class AlpacaClient:
                 for symbol in chunk:
                     if symbol in bars and len(bars[symbol]) > 0:
                         latest = bars[symbol][-1]
+                        avg_vol = sum(int(b.volume) for b in bars[symbol]) / len(bars[symbol])
                         results[symbol] = {
                             'close': float(latest.close),
-                            'volume': int(latest.volume),
+                            'volume': int(avg_vol),
                             'timestamp': latest.timestamp
                         }
 
