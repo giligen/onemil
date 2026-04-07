@@ -160,6 +160,9 @@ def _create_stop_monitor(config, alpaca, notifier=None):
     if not config.self_managed_stops_enabled:
         return None
     from trading.stop_monitor import StopMonitor
+    # Paper accounts use REST polling (no WebSocket) to avoid conflict
+    # with live account's WebSocket on shared Alpaca account
+    use_polling = config.alpaca_paper
     stop_monitor = StopMonitor(
         api_key=config.alpaca_api_key,
         api_secret=config.alpaca_api_secret,
@@ -167,10 +170,13 @@ def _create_stop_monitor(config, alpaca, notifier=None):
         marketable_limit_offset=config.marketable_limit_offset,
         marketable_limit_offset_pct=config.marketable_limit_offset_pct,
         notifier=notifier,
+        polling_mode=use_polling,
+        polling_interval=2.0,
     )
     stop_monitor.start()
+    mode = "REST polling (paper)" if use_polling else "WebSocket (live)"
     logger.info(
-        f"StopMonitor STARTED — safety_net={config.safety_net_sl_pct:.0%}, "
+        f"StopMonitor STARTED ({mode}) — safety_net={config.safety_net_sl_pct:.0%}, "
         f"offset=${config.marketable_limit_offset}, "
         f"offset_pct={config.marketable_limit_offset_pct:.1%}"
     )

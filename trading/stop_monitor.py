@@ -145,6 +145,8 @@ class StopMonitor:
         marketable_limit_offset: float = 0.03,
         marketable_limit_offset_pct: float = 0.005,
         notifier=None,
+        polling_mode: bool = False,
+        polling_interval: float = 2.0,
     ):
         """
         Initialize StopMonitor.
@@ -158,6 +160,8 @@ class StopMonitor:
             marketable_limit_offset_pct: Percentage offset below price
                 (default 0.5%). Whichever is larger is used.
             notifier: Optional TelegramNotifier for alerts
+            polling_mode: Use REST polling instead of WebSocket (paper nodes)
+            polling_interval: Seconds between REST polls (default 2.0)
         """
         self._api_key = api_key
         self._api_secret = api_secret
@@ -165,6 +169,8 @@ class StopMonitor:
         self._marketable_limit_offset = marketable_limit_offset
         self._marketable_limit_offset_pct = marketable_limit_offset_pct
         self._notifier = notifier
+        self._polling_mode = polling_mode
+        self._polling_interval = polling_interval
 
         self._watches: Dict[str, WatchEntry] = {}
         self._quote_watches: Dict[str, QuoteWatch] = {}  # passive entry monitoring
@@ -183,13 +189,24 @@ class StopMonitor:
         self._ws_connected: bool = False  # True only when WebSocket is actively connected
 
     def start(self) -> None:
-        """Launch the WebSocket daemon thread."""
+        """Launch the stop monitoring daemon thread (WebSocket or REST polling)."""
         if self._thread is not None and self._thread.is_alive():
             logger.warning("StopMonitor already running")
             return
 
         self._stop_event.clear()
         self._running = True
+
+        if self._polling_mode:
+            self._thread = threading.Thread(
+                target=self._run_polling_loop,
+                name="StopMonitor-REST",
+                daemon=True,
+            )
+            self._thread.start()
+            logger.info("StopMonitor started (REST polling, daemon thread)")
+            return
+
         self._thread = threading.Thread(
             target=self._run_stream_loop,
             name="StopMonitor-WS",
@@ -1041,6 +1058,106 @@ class StopMonitor:
                 f"falling back to fixed-offset pricing"
             )
             return None
+
+    # =========================================================================
+    # Internal — REST polling mode (paper nodes)
+    # =========================================================================
+
+    def _run_polling_loop(self) -> None:
+        """REST polling alternative to WebSocket. For paper nodes sharing Alpaca account."""
+        import time as time_mod
+        logger.info(f"StopMonitor: REST polling mode — interval={self._polling_interval}s")
+        self._ws_connected = True  # pretend connected for is_healthy()
+        self._last_data_ts = time_mod.time()
+
+        while self._running:
+            try:
+                with self._watch_lock:
+                    symbols = list(self._watches.keys())
+
+                if not symbols:
+                    time_mod.sleep(self._polling_interval)
+                    self._last_data_ts = time_mod.time()
+                    continue
+
+                # Fetch latest trades
+                try:
+                    trades = self._alpaca.get_latest_trades(symbols)
+                except Exception as e:
+                    logger.debug(f"StopMonitor poll: trades failed: {e}")
+                    time_mod.sleep(self._polling_interval)
+                    continue
+
+                # Fetch latest quotes
+                quotes = {}
+                for sym in symbols:
+                    try:
+                        quotes[sym] = self._alpaca.get_latest_quote(sym)
+                    except Exception:
+                        pass
+
+                self._last_data_ts = time_mod.time()
+
+                for sym in symbols:
+                    with self._watch_lock:
+                        watch = self._watches.get(sym)
+                    if not watch:
+                        continue
+
+                    price = trades.get(sym, {}).get('price', 0)
+                    if price <= 0:
+                        continue
+
+                    # Update quotes
+                    q = quotes.get(sym, {})
+                    if q:
+                        watch.latest_bid = q.get('bid_price', 0)
+                        watch.latest_ask = q.get('ask_price', 0)
+
+                    # Update highest
+                    if price > watch.highest_since_entry:
+                        watch.highest_since_entry = price
+
+                    # Trail activation
+                    if not watch.trailing_active and watch.entry_price > 0:
+                        risk = watch.risk_per_share if watch.risk_per_share > 0 else watch.entry_price * 0.02
+                        if risk > 0:
+                            r_gain = (watch.highest_since_entry - watch.entry_price) / risk
+                            if watch.trail_pct > 0:
+                                watch.trailing_active = True
+                            elif r_gain >= watch.activate_at_r:
+                                watch.trailing_active = True
+                                logger.info(f"StopMonitor poll: {sym} trail ACTIVATED +{r_gain:.1f}R")
+
+                    # Ratchet trail
+                    if watch.trailing_active:
+                        if watch.trail_pct > 0:
+                            new_stop = watch.highest_since_entry * (1 - watch.trail_pct)
+                        else:
+                            new_stop = watch.highest_since_entry - watch.risk_per_share * watch.trail_r
+                        if new_stop > watch.stop_price:
+                            watch.stop_price = new_stop
+
+                    # Check stop
+                    if price <= watch.stop_price:
+                        reason = 'trail_stop' if watch.trailing_active else 'stop_loss'
+                        logger.info(f"StopMonitor poll: {sym} {reason} @ ${price:.2f} (stop=${watch.stop_price:.2f})")
+                        self._exit_events.put(StopExitEvent(
+                            symbol=sym, exit_price=price, exit_reason=reason,
+                            shares=watch.shares, trade_db_id=watch.trade_db_id,
+                            submitted_at=time_mod.time(),
+                            exit_trigger_price=price,
+                            exit_quote_bid=watch.latest_bid, exit_quote_ask=watch.latest_ask,
+                            exit_quote_bid_size=0, exit_quote_ask_size=0,
+                            pricing_method='poll_market', exit_limit_price=watch.latest_bid,
+                        ))
+
+                time_mod.sleep(self._polling_interval)
+            except Exception as e:
+                logger.error(f"StopMonitor poll error: {e}")
+                time_mod.sleep(self._polling_interval)
+
+        logger.info("StopMonitor polling loop stopped")
 
     # =========================================================================
     # Internal — WebSocket thread
