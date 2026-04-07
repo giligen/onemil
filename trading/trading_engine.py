@@ -1544,6 +1544,10 @@ class TradingEngine:
         if not self.enabled:
             return None
 
+        # Clear per-cycle caches (buying power, marginability)
+        self._cycle_buying_power = None
+        self._margin_cache = {}
+
         # ALWAYS sync positions and manage pending orders — these must run
         # regardless of regime filter or max trades. Skipping them means
         # SL/TP exits go unrecorded, PnL is wrong, and circuit breaker is deaf.
@@ -1712,9 +1716,13 @@ class TradingEngine:
             avg_vol = (uni_stock.get('avg_volume_daily') or 0) if uni_stock else 0
             risk_multiplier = self._get_risk_tier(setup.breakout_level, avg_vol)
 
-            # Check marginability for leveraged trades (real-time API check)
+            # Check marginability for leveraged trades (real-time, cached per cycle)
             if risk_multiplier > 1.0:
-                if not self.alpaca.is_marginable(symbol):
+                if not hasattr(self, '_margin_cache'):
+                    self._margin_cache = {}
+                if symbol not in self._margin_cache:
+                    self._margin_cache[symbol] = self.alpaca.is_marginable(symbol)
+                if not self._margin_cache[symbol]:
                     logger.info(
                         f"{symbol}: Not marginable — falling back to 1x "
                         f"(wanted {risk_multiplier:.1f}x)"
@@ -1727,8 +1735,11 @@ class TradingEngine:
             return None
 
         # Buying power check: reduce size if needed, never skip
+        # Cache buying power per cycle to avoid repeated API calls
         try:
-            buying_power = self.alpaca.get_buying_power()
+            if not hasattr(self, '_cycle_buying_power') or self._cycle_buying_power is None:
+                self._cycle_buying_power = self.alpaca.get_buying_power()
+            buying_power = self._cycle_buying_power
             position_cost = plan.entry_price * plan.shares
             if position_cost > buying_power and buying_power > 0:
                 affordable_shares = int(buying_power / plan.entry_price)
