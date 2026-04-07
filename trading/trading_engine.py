@@ -1544,8 +1544,7 @@ class TradingEngine:
         if not self.enabled:
             return None
 
-        # Clear per-cycle caches (buying power, marginability)
-        self._cycle_buying_power = None
+        # Clear per-cycle caches (marginability)
         self._margin_cache = {}
 
         # ALWAYS sync positions and manage pending orders — these must run
@@ -1735,11 +1734,9 @@ class TradingEngine:
             return None
 
         # Buying power check: reduce size if needed, never skip
-        # Cache buying power per cycle to avoid repeated API calls
+        # Query real-time buying power (reflects pending orders already reserved)
         try:
-            if not hasattr(self, '_cycle_buying_power') or self._cycle_buying_power is None:
-                self._cycle_buying_power = self.alpaca.get_buying_power()
-            buying_power = self._cycle_buying_power
+            buying_power = self.alpaca.get_buying_power()
             position_cost = plan.entry_price * plan.shares
             if position_cost > buying_power and buying_power > 0:
                 affordable_shares = int(buying_power / plan.entry_price)
@@ -1774,7 +1771,8 @@ class TradingEngine:
             return None
 
         # MACD zone filter: skip dead zone, scale risk on strong zones
-        if self.macd_zones_enabled:
+        # Skip scaling if risk tier already applied (don't compound 3x * 1.5x = 4.5x)
+        if self.macd_zones_enabled and risk_multiplier <= 1.0:
             zone_mult = self._get_macd_zone_multiplier(symbol, bars, plan.entry_price)
             if zone_mult == 0.0:
                 logger.info(f"{symbol}: MACD zone SKIP (dead zone)")

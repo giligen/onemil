@@ -206,7 +206,7 @@ class TradePlanner:
                     f"max_shares {self.max_shares}, capping (risk budget distorted)"
                 )
         else:
-            shares = math.floor(self.position_size_dollars / entry_price)
+            shares = math.floor((self.position_size_dollars * risk_multiplier) / entry_price)
         shares = min(shares, self.max_shares)
 
         # ADV participation cap: limit shares to X% of average daily volume
