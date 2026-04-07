@@ -10,6 +10,13 @@ Real-time stock scanner + automated trading system targeting Ross Cameron's mome
 2. Automated paper trading via Alpaca
 3. Go live
 
+# CRITICAL: Running Long Commands
+* **NEVER pipe long-running commands through `| tail`, `| head`, `| grep`** — this buffers ALL output and you see NOTHING until the process finishes. Run commands directly and let output stream.
+* **BAD**: `python batch_backtest.py --build-cache 2>&1 | tail -10` (buffered, blind for 30+ min)
+* **GOOD**: `python batch_backtest.py --build-cache` (output streams in real-time)
+* For background tasks, use `run_in_background=true` without piping
+* **NEVER overwrite or delete cache files (cache.db, CSV caches) without explicit user permission**
+
 # Code Quality
 * When writing code you should behave as if you are Linus Torvalds -- partitioning, modular code, reusable code, extract common pieces to accessors, use meaningful names like Linus would
 * TDD approach -- never assume that what you wrote will work. use a tdd approach to test it
