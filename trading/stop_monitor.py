@@ -160,7 +160,8 @@ class StopMonitor:
             marketable_limit_offset_pct: Percentage offset below price
                 (default 0.5%). Whichever is larger is used.
             notifier: Optional TelegramNotifier for alerts
-            polling_mode: Use REST polling instead of WebSocket (paper nodes)
+            polling_mode: Use REST API polling instead of WebSocket.
+                For paper nodes that share Alpaca account with live (1 WS slot).
             polling_interval: Seconds between REST polls (default 2.0)
         """
         self._api_key = api_key
@@ -169,8 +170,6 @@ class StopMonitor:
         self._marketable_limit_offset = marketable_limit_offset
         self._marketable_limit_offset_pct = marketable_limit_offset_pct
         self._notifier = notifier
-        self._polling_mode = polling_mode
-        self._polling_interval = polling_interval
 
         self._watches: Dict[str, WatchEntry] = {}
         self._quote_watches: Dict[str, QuoteWatch] = {}  # passive entry monitoring
@@ -185,8 +184,10 @@ class StopMonitor:
         self._stream = None
         self._running = False
         self._stop_event = threading.Event()
-        self._last_data_ts: float = 0.0  # time.time() of last WebSocket data received
+        self._last_data_ts: float = 0.0  # time.time() of last data received
         self._ws_connected: bool = False  # True only when WebSocket is actively connected
+        self._polling_mode = polling_mode
+        self._polling_interval = polling_interval
 
     def start(self) -> None:
         """Launch the stop monitoring daemon thread (WebSocket or REST polling)."""
@@ -203,17 +204,15 @@ class StopMonitor:
                 name="StopMonitor-REST",
                 daemon=True,
             )
-            self._thread.start()
-            logger.info("StopMonitor started (REST polling, daemon thread)")
-            return
-
-        self._thread = threading.Thread(
-            target=self._run_stream_loop,
-            name="StopMonitor-WS",
-            daemon=True,
-        )
+        else:
+            self._thread = threading.Thread(
+                target=self._run_stream_loop,
+                name="StopMonitor-WS",
+                daemon=True,
+            )
         self._thread.start()
-        logger.info("StopMonitor started (daemon thread)")
+        mode = "REST polling" if self._polling_mode else "WebSocket"
+        logger.info(f"StopMonitor started ({mode}, daemon thread)")
 
     def stop(self) -> None:
         """Gracefully shut down the WebSocket thread."""
@@ -1064,57 +1063,67 @@ class StopMonitor:
     # =========================================================================
 
     def _run_polling_loop(self) -> None:
-        """REST polling alternative to WebSocket. For paper nodes sharing Alpaca account."""
+        """REST polling via single get_snapshots() call per cycle. Paper nodes only."""
         import time as time_mod
-        logger.info(f"StopMonitor: REST polling mode — interval={self._polling_interval}s")
+        logger.info(
+            f"StopMonitor: REST polling mode — interval={self._polling_interval}s "
+            f"(1 snapshot call per cycle, no WebSocket)"
+        )
         self._ws_connected = True  # pretend connected for is_healthy()
         self._last_data_ts = time_mod.time()
 
         while self._running:
             try:
                 with self._watch_lock:
-                    symbols = list(self._watches.keys())
+                    watch_symbols = list(self._watches.keys())
+                    quote_watch_symbols = list(self._quote_watches.keys())
+                all_symbols = list(set(watch_symbols + quote_watch_symbols))
 
-                if not symbols:
+                if not all_symbols:
                     time_mod.sleep(self._polling_interval)
                     self._last_data_ts = time_mod.time()
                     continue
 
-                # Fetch latest trades
+                # Single API call: snapshot returns trade price + bid/ask/sizes
                 try:
-                    trades = self._alpaca.get_latest_trades(symbols)
+                    snapshots = self._alpaca.get_snapshots(all_symbols)
                 except Exception as e:
-                    logger.debug(f"StopMonitor poll: trades failed: {e}")
+                    logger.debug(f"StopMonitor poll: snapshot failed: {e}")
                     time_mod.sleep(self._polling_interval)
                     continue
 
-                # Fetch latest quotes
-                quotes = {}
-                for sym in symbols:
-                    try:
-                        quotes[sym] = self._alpaca.get_latest_quote(sym)
-                    except Exception:
-                        pass
-
                 self._last_data_ts = time_mod.time()
 
-                for sym in symbols:
+                # Update quote watches (passive entry monitoring)
+                for sym in quote_watch_symbols:
+                    snap = snapshots.get(sym)
+                    if not snap:
+                        continue
+                    with self._watch_lock:
+                        qw = self._quote_watches.get(sym)
+                    if qw:
+                        qw.latest_bid = snap.get('bid_price', 0)
+                        qw.latest_ask = snap.get('ask_price', 0)
+                        qw.latest_bid_size = snap.get('bid_size', 0)
+                        qw.latest_ask_size = snap.get('ask_size', 0)
+
+                # Process stop/trail watches
+                for sym in watch_symbols:
+                    snap = snapshots.get(sym)
+                    if not snap:
+                        continue
                     with self._watch_lock:
                         watch = self._watches.get(sym)
                     if not watch:
                         continue
 
-                    price = trades.get(sym, {}).get('price', 0)
+                    price = snap.get('latest_price', 0)
                     if price <= 0:
                         continue
 
-                    # Update quotes
-                    q = quotes.get(sym, {})
-                    if q:
-                        watch.latest_bid = q.get('bid_price', 0)
-                        watch.latest_ask = q.get('ask_price', 0)
+                    watch.latest_bid = snap.get('bid_price', 0)
+                    watch.latest_ask = snap.get('ask_price', 0)
 
-                    # Update highest
                     if price > watch.highest_since_entry:
                         watch.highest_since_entry = price
 
@@ -1136,7 +1145,9 @@ class StopMonitor:
                         else:
                             new_stop = watch.highest_since_entry - watch.risk_per_share * watch.trail_r
                         if new_stop > watch.stop_price:
+                            old = watch.stop_price
                             watch.stop_price = new_stop
+                            logger.debug(f"StopMonitor poll: {sym} trail ${old:.2f}→${new_stop:.2f}")
 
                     # Check stop
                     if price <= watch.stop_price:
@@ -1145,11 +1156,12 @@ class StopMonitor:
                         self._exit_events.put(StopExitEvent(
                             symbol=sym, exit_price=price, exit_reason=reason,
                             shares=watch.shares, trade_db_id=watch.trade_db_id,
-                            submitted_at=time_mod.time(),
-                            exit_trigger_price=price,
+                            submitted_at=time_mod.time(), exit_trigger_price=price,
                             exit_quote_bid=watch.latest_bid, exit_quote_ask=watch.latest_ask,
-                            exit_quote_bid_size=0, exit_quote_ask_size=0,
-                            pricing_method='poll_market', exit_limit_price=watch.latest_bid,
+                            exit_quote_bid_size=snap.get('bid_size', 0),
+                            exit_quote_ask_size=snap.get('ask_size', 0),
+                            pricing_method='poll_snapshot',
+                            exit_limit_price=watch.latest_bid,
                         ))
 
                 time_mod.sleep(self._polling_interval)

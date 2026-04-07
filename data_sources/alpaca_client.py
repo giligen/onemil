@@ -575,6 +575,12 @@ class AlpacaClient:
                             result['prev_volume'] = int(prev_bar.volume) if prev_bar.volume else 0
                         if snap.latest_trade:
                             result['latest_price'] = float(snap.latest_trade.price) if snap.latest_trade.price else 0
+                        if snap.latest_quote:
+                            q = snap.latest_quote
+                            result['bid_price'] = float(q.bid_price) if q.bid_price else 0
+                            result['ask_price'] = float(q.ask_price) if q.ask_price else 0
+                            result['bid_size'] = int(q.bid_size) if q.bid_size else 0
+                            result['ask_size'] = int(q.ask_size) if q.ask_size else 0
                         if result:
                             results[symbol] = result
 
