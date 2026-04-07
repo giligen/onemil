@@ -2037,7 +2037,7 @@ def main():
     if args.build_cache:
         # Disable regime + max_trades for cache generation
         # Slippage from config is baked in — cache filename includes slippage params
-        cache_regime = MarketRegimeFilter(enabled=False)
+        cache_regime = MarketRegimeFilter(enabled=False, max_trades_per_day=0)
         cache_regime.load_spy_bars(spy_bars)
         logger.info(f"Building bull flag cache (regime OFF, no max_trades, entry_slip={_entry_slip:.1%}, exit_slip={_exit_slip:.1%})...")
         if use_fast:
@@ -2054,6 +2054,7 @@ def main():
                 movers, client, runner, db=db, universe_dict=universe_dict,
                 market_regime=cache_regime,
                 max_consecutive_losses=0,
+                max_trades_per_day=0,
             )
         # Build daily range lookup: (sym, date) -> (high-low)/low * 100
         import sqlite3 as _sql
