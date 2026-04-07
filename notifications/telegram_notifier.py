@@ -100,6 +100,17 @@ class TelegramNotifier:
                     if response.status == 200:
                         logger.debug("Telegram message sent successfully")
                         return True
+                    elif response.status == 400 and "parse entities" in (await response.text()):
+                        # HTML parse error — retry without parse_mode (plain text)
+                        logger.warning("Telegram HTML parse error — retrying as plain text")
+                        payload.pop("parse_mode", None)
+                        async with session.post(self.api_url, json=payload, timeout=timeout) as retry:
+                            if retry.status == 200:
+                                logger.debug("Telegram message sent (plain text fallback)")
+                                return True
+                            else:
+                                logger.error(f"Telegram plain text fallback also failed: {retry.status}")
+                                return False
                     else:
                         error_text = await response.text()
                         logger.error(f"Telegram API error {response.status}: {error_text}")
