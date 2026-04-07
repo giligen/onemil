@@ -140,6 +140,34 @@ def filter_bull_flag_trades(
         if vol_removed:
             logger.info(f"Volume filter (>={min_daily_vol:,}): {before_vol} → {len(trades)} trades ({vol_removed} removed)")
 
+    # Apply risk tier scaling to PnL
+    tier_cfg = _cfg_vol.get("trading", {}).get("risk_tiers", {})
+    if bool(tier_cfg.get("enabled", False)) and universe_vol_map:
+        tiers = []
+        for prefix in ['tier1', 'tier2', 'tier3']:
+            mult = float(tier_cfg.get(f"{prefix}_multiplier", 0))
+            if mult > 0:
+                tiers.append({
+                    'min_price': float(tier_cfg.get(f"{prefix}_min_price", 0)),
+                    'max_price': float(tier_cfg.get(f"{prefix}_max_price", 999)),
+                    'min_volume': int(tier_cfg.get(f"{prefix}_min_volume", 0)),
+                    'max_volume': int(tier_cfg.get(f"{prefix}_max_volume", 999999999)),
+                    'multiplier': mult,
+                })
+        scaled = 0
+        for t in trades:
+            ep = t['entry_price']
+            vol = universe_vol_map.get(t['symbol'], 0)
+            for tier in tiers:
+                if (tier['min_price'] <= ep < tier['max_price'] and
+                        tier['min_volume'] <= vol <= tier['max_volume']):
+                    t['pnl'] *= tier['multiplier']
+                    t['shares'] = int(t['shares'] * tier['multiplier'])
+                    scaled += 1
+                    break
+        if scaled:
+            logger.info(f"Risk tiers: {scaled} trades scaled (of {len(trades)})")
+
     # Pre-filter by daily range threshold
     if min_daily_range_pct > 0:
         trades = [t for t in trades if float(t.get('daily_range_pct', 100)) >= min_daily_range_pct]

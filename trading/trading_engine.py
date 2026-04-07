@@ -135,6 +135,22 @@ class TradingEngine:
         # Minimum daily volume filter — skip illiquid stocks
         self.min_daily_volume = int(_cfg.get("scanner", {}).get("min_daily_volume", 0))
 
+        # Risk tiers: scale risk on high-conviction setups
+        tier_cfg = _cfg.get("trading", {}).get("risk_tiers", {})
+        self.risk_tiers_enabled = bool(tier_cfg.get("enabled", False))
+        self.risk_tiers = []
+        if self.risk_tiers_enabled:
+            for prefix in ['tier1', 'tier2', 'tier3']:
+                mult = float(tier_cfg.get(f"{prefix}_multiplier", 0))
+                if mult > 0:
+                    self.risk_tiers.append({
+                        'min_price': float(tier_cfg.get(f"{prefix}_min_price", 0)),
+                        'max_price': float(tier_cfg.get(f"{prefix}_max_price", 999)),
+                        'min_volume': int(tier_cfg.get(f"{prefix}_min_volume", 0)),
+                        'max_volume': int(tier_cfg.get(f"{prefix}_max_volume", 999999999)),
+                        'multiplier': mult,
+                    })
+
         self._qualified_symbols: Set[str] = set()
         self._traded_symbols: Set[str] = set()
         self._patterns_detected: int = 0
@@ -168,6 +184,18 @@ class TradingEngine:
         self._spy_macd_cache: Optional[float] = None  # latest SPY MACD histogram value
 
         self.shutdown_event = None  # Set by caller for graceful shutdown
+
+    def _get_risk_tier(self, entry_price: float, avg_volume: int) -> float:
+        """
+        Determine risk multiplier based on entry price and daily volume.
+
+        Returns 1.0 (default) if no tier matches.
+        """
+        for tier in self.risk_tiers:
+            if (tier['min_price'] <= entry_price < tier['max_price'] and
+                    tier['min_volume'] <= avg_volume <= tier['max_volume']):
+                return tier['multiplier']
+        return 1.0
 
     def _get_macd_zone_multiplier(self, symbol: str, bars: pd.DataFrame, entry_price: float) -> float:
         """
@@ -1677,10 +1705,48 @@ class TradingEngine:
             self._notified_setups.get(symbol) == setup.breakout_level
         )
 
-        # Create trade plan — liquidity is handled by the market (partial fills)
-        plan = self.planner.create_plan(setup)
+        # Risk tier: scale risk on high-conviction setups
+        risk_multiplier = 1.0
+        if self.risk_tiers_enabled:
+            uni_stock = self.db.get_universe_stock(symbol)
+            avg_vol = (uni_stock.get('avg_volume_daily') or 0) if uni_stock else 0
+            risk_multiplier = self._get_risk_tier(setup.breakout_level, avg_vol)
+
+            # Check marginability for leveraged trades (real-time API check)
+            if risk_multiplier > 1.0:
+                if not self.alpaca.is_marginable(symbol):
+                    logger.info(
+                        f"{symbol}: Not marginable — falling back to 1x "
+                        f"(wanted {risk_multiplier:.1f}x)"
+                    )
+                    risk_multiplier = 1.0
+
+        # Create trade plan
+        plan = self.planner.create_plan(setup, risk_multiplier=risk_multiplier)
         if plan is None:
             return None
+
+        # Buying power check: reduce size if needed, never skip
+        try:
+            buying_power = self.alpaca.get_buying_power()
+            position_cost = plan.entry_price * plan.shares
+            if position_cost > buying_power and buying_power > 0:
+                affordable_shares = int(buying_power / plan.entry_price)
+                if affordable_shares >= 1:
+                    logger.info(
+                        f"{symbol}: Reducing {plan.shares} → {affordable_shares} shares "
+                        f"(buying power ${buying_power:,.0f} < cost ${position_cost:,.0f})"
+                    )
+                    # Recreate plan with reduced multiplier
+                    reduced_mult = risk_multiplier * (affordable_shares / plan.shares)
+                    plan = self.planner.create_plan(setup, risk_multiplier=max(reduced_mult, 0.1))
+                    if plan is None:
+                        return None
+                else:
+                    logger.warning(f"{symbol}: No buying power for even 1 share, skipping")
+                    return None
+        except Exception as e:
+            logger.warning(f"{symbol}: Buying power check failed: {e} — proceeding with plan")
 
         # Min stop distance filter: reject tick-noise setups
         if self.min_stop_distance > 0:

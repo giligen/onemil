@@ -102,6 +102,20 @@ trading:
   skip_midday: false            # Disabled — last_entry_time 10:45 makes midday filter redundant
   skip_fridays: false           # Disabled for paper testing (re-enable for live)
   max_consecutive_losses: 0     # Disabled — trailing stops handle risk adaptively
+  # Risk tiers: scale risk on high-conviction setups (higher price + right volume)
+  # 15mo backtest: 2x on $10-15 + 3x on $15-20 (500K-5M vol) = +$130K (+36%)
+  risk_tiers:
+    enabled: true
+    tier1_min_price: 10.0
+    tier1_max_price: 15.0
+    tier1_min_volume: 500000
+    tier1_max_volume: 5000000
+    tier1_multiplier: 2.0
+    tier2_min_price: 15.0
+    tier2_max_price: 20.0
+    tier2_min_volume: 500000
+    tier2_max_volume: 5000000
+    tier2_multiplier: 3.0
   max_trades_per_day: 5         # 15mo optimal with 10:45 cutoff: Sharpe 3.92, +$234K, $20K DD
   market_regime:
     enabled: false              # Regime OFF: +$902K vs ON: +$760K. Blocks profitable days for no DD benefit.

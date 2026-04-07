@@ -276,6 +276,7 @@ class AlpacaClient:
                     'symbol': asset.symbol,
                     'company_name': asset.name or '',
                     'exchange': asset.exchange.value if asset.exchange else '',
+                    'marginable': bool(getattr(asset, 'marginable', False)),
                 })
 
             logger.info(
@@ -1030,6 +1031,34 @@ class AlpacaClient:
         except Exception as e:
             logger.error(f"Failed to get account info: {e}")
             raise AlpacaAPIError(f"Failed to get account info: {e}")
+
+    def get_buying_power(self) -> float:
+        """Get current account buying power."""
+        try:
+            return self.get_account_info()['buying_power']
+        except Exception as e:
+            logger.error(f"Failed to get buying power: {e}")
+            return 0.0
+
+    def is_marginable(self, symbol: str) -> bool:
+        """
+        Check if a stock can be bought on margin.
+
+        Args:
+            symbol: Stock ticker
+
+        Returns:
+            True if marginable, False otherwise
+        """
+        try:
+            asset = self._call_with_timeout(
+                lambda: self.trading_client.get_asset(symbol),
+                f"is_marginable({symbol})"
+            )
+            return bool(getattr(asset, 'marginable', False))
+        except Exception as e:
+            logger.warning(f"{symbol}: Failed to check marginable: {e}")
+            return False  # Assume not marginable on error
 
     def cancel_order(self, order_id: str) -> bool:
         """

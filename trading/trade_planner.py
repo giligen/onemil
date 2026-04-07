@@ -115,12 +115,15 @@ class TradePlanner:
             return cls()
 
     def create_plan(self, pattern: BullFlagPattern,
-                     avg_daily_volume: Optional[int] = None) -> Optional[TradePlan]:
+                     avg_daily_volume: Optional[int] = None,
+                     risk_multiplier: float = 1.0) -> Optional[TradePlan]:
         """
         Create a trade plan from a detected bull flag pattern.
 
         Args:
             pattern: Detected BullFlagPattern
+            avg_daily_volume: Avg daily volume for ADV participation cap
+            risk_multiplier: Scale risk budget (1.0=normal, 2.0=2x risk, etc.)
 
         Returns:
             TradePlan if valid, None if rejected
@@ -193,9 +196,10 @@ class TradePlanner:
             )
             return None
 
-        # Position sizing
+        # Position sizing (apply risk multiplier for tiered scaling)
+        effective_risk_budget = self.risk_per_trade * risk_multiplier
         if self.sizing_mode == "fixed_risk":
-            shares = math.floor(self.risk_per_trade / risk_per_share)
+            shares = math.floor(effective_risk_budget / risk_per_share)
             if shares > self.max_shares:
                 logger.warning(
                     f"{pattern.symbol}: fixed_risk shares {shares} exceeds "
@@ -220,6 +224,13 @@ class TradePlanner:
             return None
 
         total_risk = risk_per_share * shares
+
+        if risk_multiplier > 1.0:
+            logger.info(
+                f"{pattern.symbol}: Risk tier {risk_multiplier:.1f}x — "
+                f"{shares} shares, ${total_risk:.0f} risk "
+                f"(base: ${self.risk_per_trade:.0f} × {risk_multiplier:.1f})"
+            )
 
         plan = TradePlan(
             symbol=pattern.symbol,
