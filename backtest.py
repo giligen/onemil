@@ -896,6 +896,24 @@ class BacktestRunner:
         self.min_relative_vol_rate = min_relative_vol_rate
         self.avg_daily_volume = avg_daily_volume
 
+        # Risk tiers: same logic as trading_engine._get_risk_tier()
+        tier_cfg = trading_cfg.get("risk_tiers", {})
+        self.risk_tiers_enabled = bool(tier_cfg.get("enabled", False))
+        self.risk_tiers = []
+        if self.risk_tiers_enabled:
+            for prefix in ['tier1', 'tier2', 'tier3']:
+                mult = float(tier_cfg.get(f"{prefix}_multiplier", 0))
+                if mult > 0:
+                    self.risk_tiers.append({
+                        'min_price': float(tier_cfg.get(f"{prefix}_min_price", 0)),
+                        'max_price': float(tier_cfg.get(f"{prefix}_max_price", 999)),
+                        'min_volume': int(tier_cfg.get(f"{prefix}_min_volume", 0)),
+                        'max_volume': int(tier_cfg.get(f"{prefix}_max_volume", 999999999)),
+                        'multiplier': mult,
+                    })
+            if self.risk_tiers:
+                logger.info(f"Risk tiers: {len(self.risk_tiers)} tiers loaded")
+
         if resolved_trail_r > 0:
             logger.info(
                 f"Trailing stop: {resolved_trail_r:.1f}R below high, "
@@ -1614,15 +1632,34 @@ class BacktestRunner:
                         )
                         continue
 
+                # Risk tier: scale risk on high-conviction setups (same as trading_engine)
+                risk_tier_mult = 1.0
+                if self.risk_tiers_enabled:
+                    ep = plan.entry_price
+                    av = self.avg_daily_volume or 0
+                    for tier in self.risk_tiers:
+                        if (tier['min_price'] <= ep < tier['max_price'] and
+                                tier['min_volume'] <= av <= tier['max_volume']):
+                            risk_tier_mult = tier['multiplier']
+                            break
+                    if risk_tier_mult > 1.0:
+                        plan = self.planner.create_plan(setup, risk_multiplier=risk_tier_mult)
+                        if plan is None:
+                            continue
+                        logger.debug(
+                            f"  Risk tier {risk_tier_mult:.0f}x — "
+                            f"{plan.shares} shares, ${plan.total_risk:.0f} risk"
+                        )
+
                 # MACD zone filter: skip dead zone, scale risk on strong zones
-                # Checked at setup time (matches production — decide before placing order)
+                # Skip scaling if risk tier already applied (don't compound)
                 if self.macd_zones_enabled:
                     zone_mult = self._get_macd_zone_multiplier(
                         symbol, bars, i, plan.entry_price
                     )
                     if zone_mult == 0.0:
                         continue  # dead zone — don't place order
-                    elif zone_mult != 1.0:
+                    elif zone_mult != 1.0 and risk_tier_mult <= 1.0:
                         scaled_shares = min(self.planner.max_shares, max(1, int(plan.shares * zone_mult)))
                         plan = TradePlan(
                             symbol=plan.symbol,
