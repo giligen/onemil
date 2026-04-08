@@ -181,6 +181,7 @@ def filter_bull_flag_trades(
                     'max_volume': int(tier_cfg.get(f"{prefix}_max_volume", 999999999)),
                     'multiplier': mult,
                 })
+        max_shares = int(_cfg_vol.get("trading", {}).get("max_shares", 10000))
         scaled = 0
         for t in trades:
             ep = t['entry_price']
@@ -188,8 +189,12 @@ def filter_bull_flag_trades(
             for tier in tiers:
                 if (tier['min_price'] <= ep < tier['max_price'] and
                         tier['min_volume'] <= vol <= tier['max_volume']):
-                    t['pnl'] *= tier['multiplier']
-                    t['shares'] = int(t['shares'] * tier['multiplier'])
+                    original_shares = t['shares']
+                    new_shares = min(int(original_shares * tier['multiplier']), max_shares)
+                    if new_shares != original_shares:
+                        scale_ratio = new_shares / original_shares
+                        t['pnl'] *= scale_ratio
+                        t['shares'] = new_shares
                     scaled += 1
                     break
         if scaled:
