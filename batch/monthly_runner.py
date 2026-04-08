@@ -122,7 +122,8 @@ def build_rich_row(
     uni = universe_dict.get(symbol, {})
     sector = uni.get('sector', '')
     float_shares = uni.get('float_shares', '')
-    avg_volume_daily = uni.get('avg_volume_daily', '')
+    # Point-in-time 20d avg volume (attached by backtest runner), fallback to universe
+    avg_volume_daily = getattr(trade, '_avg_volume_20d', 0) or uni.get('avg_volume_daily', '')
 
     # Relative volume: day_volume / avg_volume_daily
     relative_volume = ''

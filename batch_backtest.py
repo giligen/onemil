@@ -859,6 +859,9 @@ def _backtest_worker(args: Tuple) -> Optional[dict]:
                                 volume_profile=vol_profile,
                                 prev_close=None,  # Daily bar pre-filter already ensures 20%+ range
                                 prev_day_bars=prev_day_bars)
+            # Attach point-in-time volume for cache
+            for trade in result.trades_simulated:
+                trade._avg_volume_20d = avg_vol or 0
 
             return _serialize_result(result)
         finally:
@@ -903,6 +906,7 @@ def _serialize_result(result: 'BacktestResult') -> dict:
             'partial_exit_price': t.partial_exit_price,
             'partial_shares': t.partial_shares,
             'partial_pnl': t.partial_pnl,
+            '_avg_volume_20d': getattr(t, '_avg_volume_20d', 0),
         }
         if t.plan:
             trade_dict['plan'] = {
@@ -998,6 +1002,7 @@ def _reconstruct_result(result_dict: dict) -> BacktestResult:
             entry_bar_close=td.get('entry_bar_close'),
             entry_bar_volume=td.get('entry_bar_volume'),
         )
+        trade._avg_volume_20d = td.get('_avg_volume_20d', 0)
         trades.append(trade)
 
     result = BacktestResult(
@@ -1710,6 +1715,8 @@ def write_csv_report(results: List[BacktestResult], output_path: str) -> int:
                     f"{trade.partial_exit_price:.2f}" if trade.partial_exit_price else "",
                     trade.partial_shares,
                     f"{trade.partial_pnl:.2f}",
+                    f"{getattr(trade, '_daily_range_pct', 0):.1f}",
+                    int(getattr(trade, '_avg_volume_20d', 0)),
                 ])
                 trade_count += 1
 
