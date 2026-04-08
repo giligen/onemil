@@ -62,7 +62,7 @@ CSV_HEADERS = [
     "target", "shares", "exit_time_et", "exit_price", "exit_reason",
     "pnl", "pnl_pct",
     "partial_taken", "partial_price", "partial_shares", "partial_pnl",
-    "daily_range_pct",
+    "daily_range_pct", "avg_volume_20d",
 ]
 
 def _trade_to_cache_row(trade) -> Optional[Dict]:
@@ -86,6 +86,7 @@ def _trade_to_cache_row(trade) -> Optional[Dict]:
             'partial_shares': trade.partial_shares,
             'partial_pnl': f"{trade.partial_pnl:.2f}",
             'daily_range_pct': f"{getattr(trade, '_daily_range_pct', 0):.1f}",
+            'avg_volume_20d': int(getattr(trade, '_avg_volume_20d', 0)),
         }
     except Exception as e:
         logger.warning(f"Failed to convert trade to cache row: {e}")
@@ -122,6 +123,7 @@ def load_bull_flag_cache(cache_path: str, start_date: date, end_date: date,
             row['entry_price'] = float(row['entry_price'])
             row['exit_price'] = float(row['exit_price']) if row['exit_price'] else 0
             row['daily_range_pct'] = float(row.get('daily_range_pct', 100))
+            row['avg_volume_20d'] = int(float(row.get('avg_volume_20d', 0)))
             trades.append(row)
     logger.info(f"Loaded {len(trades)} cached trades from {cache_path} ({start_date} to {end_date})")
     return trades
@@ -157,12 +159,19 @@ def filter_bull_flag_trades(
         logger.info(f"Universe filter: {before} → {len(trades)} trades")
 
     # Pre-filter by minimum daily volume (avoid illiquid stocks)
+    # Use point-in-time avg_volume_20d from cache (no look-ahead bias).
+    # Falls back to universe_vol_map for old caches without the column.
     from config import Config as _Cfg
     _cfg_vol = _Cfg._load_yaml_only()
     min_daily_vol = int(_cfg_vol.get("scanner", {}).get("min_daily_volume", 0))
-    if min_daily_vol > 0 and universe_vol_map:
+    if min_daily_vol > 0:
         before_vol = len(trades)
-        trades = [t for t in trades if universe_vol_map.get(t['symbol'], 0) >= min_daily_vol]
+        def _get_trade_vol(t):
+            v = t.get('avg_volume_20d', 0)
+            if v and v > 0:
+                return v
+            return universe_vol_map.get(t['symbol'], 0) if universe_vol_map else 0
+        trades = [t for t in trades if _get_trade_vol(t) == 0 or _get_trade_vol(t) >= min_daily_vol]
         vol_removed = before_vol - len(trades)
         if vol_removed:
             logger.info(f"Volume filter (>={min_daily_vol:,}): {before_vol} → {len(trades)} trades ({vol_removed} removed)")
@@ -184,7 +193,8 @@ def filter_bull_flag_trades(
         scaled = 0
         for t in trades:
             ep = t['entry_price']
-            vol = universe_vol_map.get(t['symbol'], 0)
+            # Point-in-time volume from cache, fallback to universe
+            vol = t.get('avg_volume_20d', 0) or (universe_vol_map.get(t['symbol'], 0) if universe_vol_map else 0)
             for tier in tiers:
                 if (tier['min_price'] <= ep < tier['max_price'] and
                         tier['min_volume'] <= vol <= tier['max_volume']):
@@ -691,10 +701,16 @@ def run_batch_backtest(
                     logger.warning(f"[{idx}/{total}] {symbol} {date_str} — no bars, skipping")
                     continue
 
+                # Point-in-time 20d avg volume from daily_bars (no look-ahead)
                 avg_vol = None
-                if universe_dict:
-                    uni = universe_dict.get(symbol, {})
-                    avg_vol = uni.get('avg_daily_volume') or uni.get('avg_volume_daily')
+                if db and hasattr(db, '_cache_conn'):
+                    try:
+                        _vol_rows = db._cache_conn.execute(
+                            'SELECT volume FROM daily_bars WHERE symbol=? AND bar_date < ? ORDER BY bar_date DESC LIMIT 20',
+                            (symbol, date_str)).fetchall()
+                        avg_vol = int(sum(r[0] for r in _vol_rows) / len(_vol_rows)) if _vol_rows else None
+                    except Exception:
+                        avg_vol = None
 
                 vol_profile = volume_profiles.get(symbol) if volume_profiles else None
 
@@ -725,6 +741,9 @@ def run_batch_backtest(
                                     volume_profile=vol_profile,
                                     prev_close=_prev_close,
                                     prev_day_bars=prev_day_bars)
+                # Attach point-in-time volume for cache
+                for trade in result.trades_simulated:
+                    trade._avg_volume_20d = avg_vol or 0
                 results.append(result)
 
                 # Track trades for max trades per day cap
@@ -816,9 +835,11 @@ def _backtest_worker(args: Tuple) -> Optional[dict]:
             if bars.empty:
                 return None
 
-            # Look up avg_daily_volume for cumulative rvol check
-            uni = db.get_universe_stock(symbol)
-            avg_vol = uni.get('avg_volume_daily') if uni else None
+            # Point-in-time 20d avg volume from daily_bars (no look-ahead)
+            _vol_rows = db._cache_conn.execute(
+                'SELECT volume FROM daily_bars WHERE symbol=? AND bar_date < ? ORDER BY bar_date DESC LIMIT 20',
+                (symbol, trade_date_iso)).fetchall()
+            avg_vol = int(sum(r[0] for r in _vol_rows) / len(_vol_rows)) if _vol_rows else None
 
             # Look up volume profile for bucket rvol check
             vol_profile = db.get_volume_profile(symbol)
@@ -1924,6 +1945,7 @@ def main():
                         row.get('partial_shares', '0'),
                         row.get('partial_pnl', '0.00'),
                         row.get('intraday_move_pct', row.get('daily_range_pct', '0')),
+                        row.get('avg_volume_daily', row.get('avg_volume_20d', '0')),
                     ])
 
             # Determine new date range to merge
@@ -2226,8 +2248,11 @@ def main():
                     bars = get_1min_bars_cached(sym, trade_date, client, db)
                     if bars is None or len(bars) < runner.MIN_BARS_FOR_SETUP:
                         continue
-                    uni = universe_dict.get(sym, {})
-                    avg_vol = uni.get('avg_daily_volume') or uni.get('avg_volume_daily')
+                    # Point-in-time 20d avg volume from daily_bars (no look-ahead)
+                    _vol_rows = db._cache_conn.execute(
+                        'SELECT volume FROM daily_bars WHERE symbol=? AND bar_date < ? ORDER BY bar_date DESC LIMIT 20',
+                        (sym, td_str)).fetchall()
+                    avg_vol = int(sum(r[0] for r in _vol_rows) / len(_vol_rows)) if _vol_rows else 0
                     vol_profile = volume_profiles.get(sym)
                     # Compute daily range for cache
                     _range_pct = mover_tuple[3] if len(mover_tuple) > 3 else 0
@@ -2265,7 +2290,8 @@ def main():
                                         prev_close=_prev_close,
                                         prev_day_bars=_prev_day_bars)
                     for trade in result.trades_simulated:
-                        trade._daily_range_pct = _range_pct  # attach for cache row
+                        trade._daily_range_pct = _range_pct
+                        trade._avg_volume_20d = avg_vol  # point-in-time for cache
                         _new_trades.append(trade)
 
                 if _new_trades:
@@ -2437,6 +2463,7 @@ def main():
                         f"{trade.partial_exit_price:.2f}" if trade.partial_exit_price else "",
                         trade.partial_shares, f"{trade.partial_pnl:.2f}",
                         f"{dr:.1f}",
+                        int(getattr(trade, '_avg_volume_20d', 0)),
                     ])
                     trade_count += 1
         logger.info(f"Bull flag cache saved: {_save_path} ({trade_count} trades, entry_slip={_entry_slip:.1%}, exit_slip={_exit_slip:.1%})")
