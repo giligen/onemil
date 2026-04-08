@@ -1780,7 +1780,7 @@ class TradingEngine:
                 logger.info(f"{symbol}: MACD zone SKIP (dead zone)")
                 return None
             elif zone_mult != 1.0 and risk_multiplier <= 1.0:
-                max_sh = self.planner.max_shares
+                max_sh = int(self.planner.max_shares * zone_mult)
                 scaled_shares = min(max_sh, max(1, int(plan.shares * zone_mult)))
                 logger.info(f"{symbol}: MACD zone {zone_mult}x → shares {plan.shares} → {scaled_shares}")
                 plan = TradePlan(
