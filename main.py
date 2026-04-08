@@ -42,8 +42,8 @@ def parse_args() -> argparse.Namespace:
         description="OneMil Day Trading Scanner - Momentum stock scanner"
     )
     parser.add_argument(
-        '--batch', action='store_true',
-        help='Run nightly universe builder (fetch assets, filter, cache volumes)'
+        '--batch', '--rebuild-universe', action='store_true', dest='batch',
+        help='Rebuild universe (fetch assets, filter by price/float/volume, cache profiles)'
     )
     parser.add_argument(
         '--scan', action='store_true',
@@ -470,7 +470,7 @@ def main() -> None:
     args = parse_args()
 
     if not args.batch and not args.scan and not args.test_cycle:
-        print("Error: specify --batch, --scan, or --test-cycle")
+        print("Error: specify --rebuild-universe (or --batch), --scan, or --test-cycle")
         print("Run 'python main.py --help' for usage")
         sys.exit(1)
 

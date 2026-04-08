@@ -150,7 +150,7 @@ journalctl -u onemil-trader -f           # Live logs
 - Auto-restarts on failure (30s delay)
 - Config: `config.yaml`
 - Logs: `logs/onemil.log`
-- Universe: pre-built via `python main.py --batch` (nightly cron)
+- Universe: pre-built via `python main.py --rebuild-universe` (nightly cron)
 
 ## Service 2: MACD Wave (`onemil-macd-wave`)
 ```bash
