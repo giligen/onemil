@@ -1902,14 +1902,12 @@ def main():
             _exit_slip = float(_cfg.get("trading", {}).get("exit_slippage_pct", 0.003))
             _save_path = _get_bull_flag_cache_path(_entry_slip, _exit_slip)
 
-            trade_count = 0
-            with open(master_csv, 'r', encoding='utf-8') as src, \
-                 open(_save_path, 'w', newline='', encoding='utf-8') as dst:
+            # Read new trades from monthly CSV
+            new_rows = []
+            with open(master_csv, 'r', encoding='utf-8') as src:
                 reader = csv.DictReader(src)
-                writer = csv.writer(dst)
-                writer.writerow(CSV_HEADERS)
                 for row in reader:
-                    writer.writerow([
+                    new_rows.append([
                         row['symbol'], row['date'],
                         row.get('entry_time_et', ''),
                         row.get('entry_price', ''),
@@ -1927,6 +1925,35 @@ def main():
                         row.get('partial_pnl', '0.00'),
                         row.get('intraday_move_pct', row.get('daily_range_pct', '0')),
                     ])
+
+            # Determine new date range to merge
+            new_dates = set(r[1] for r in new_rows)  # date is column 1
+
+            # Read existing cache, keep rows outside the new date range
+            existing_rows = []
+            if os.path.exists(_save_path):
+                with open(_save_path, 'r', encoding='utf-8') as ef:
+                    ereader = csv.reader(ef)
+                    header = next(ereader, None)
+                    for erow in ereader:
+                        if len(erow) > 1 and erow[1] not in new_dates:
+                            existing_rows.append(erow)
+                logger.info(
+                    f"Merging cache: keeping {len(existing_rows)} existing trades "
+                    f"(outside {min(new_dates)} to {max(new_dates)}), "
+                    f"adding {len(new_rows)} new trades"
+                )
+
+            # Write merged cache (existing outside range + new)
+            trade_count = 0
+            with open(_save_path, 'w', newline='', encoding='utf-8') as dst:
+                writer = csv.writer(dst)
+                writer.writerow(CSV_HEADERS)
+                for erow in existing_rows:
+                    writer.writerow(erow)
+                    trade_count += 1
+                for nrow in new_rows:
+                    writer.writerow(nrow)
                     trade_count += 1
             logger.info(
                 f"Bull flag cache saved: {_save_path} ({trade_count} trades, "
