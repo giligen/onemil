@@ -1762,12 +1762,12 @@ def main():
         help=f"CSV output path (default: {CSV_OUTPUT})"
     )
     parser.add_argument(
-        "--monthly", action="store_true", default=True,
-        help="Monthly-chunked mode (default). Use --no-monthly to disable."
+        "--monthly", action="store_true", default=False,
+        help="Monthly-chunked mode for cache building (10%% threshold, parallel workers)"
     )
     parser.add_argument(
         "--no-monthly", action="store_true",
-        help="Disable monthly chunking — single-process mode (may OOM on large ranges)"
+        help="(deprecated, now the default) Filtered backtest from cache"
     )
     parser.add_argument(
         "--workers", type=int, default=2,
@@ -1877,6 +1877,10 @@ def main():
     end_date = datetime.strptime(args.end, "%Y-%m-%d").date()
 
     logger.info(f"Batch backtest: {start_date} to {end_date}")
+
+    # --build-cache implies --monthly (chunked processing for cache building)
+    if args.build_cache and not args.no_monthly:
+        args.monthly = True
 
     # Monthly mode: use MonthlyBacktestRunner for parallel, chunked processing
     if args.monthly and not args.no_monthly:
