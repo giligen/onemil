@@ -37,6 +37,8 @@ def mock_alpaca():
     """Mocked AlpacaClient (only external dependency)."""
     client = MagicMock(spec=AlpacaClient)
     client.get_open_positions.return_value = []
+    client.get_buying_power.return_value = 1_000_000.0  # ample buying power
+    client.is_marginable.return_value = True
     return client
 
 
@@ -256,11 +258,14 @@ class TestFullTradingPipeline:
         result1 = engine.run_pattern_check()
         assert result1 is not None
 
-        # Second trade should be blocked (max_positions=1, AAPL already marked traded)
+        # Second trade should be blocked (max_positions=1, AAPL pending)
         engine.on_stock_qualified("TSLA")
         mock_alpaca.get_1min_bars.return_value = _make_bull_flag_setup_bars()
+        # AAPL's pending order is still 'new' (not filled)
+        mock_alpaca.get_order.return_value = {'status': 'new', 'filled_avg_price': None, 'filled_qty': 0}
         result2 = engine.run_pattern_check()
-        assert result2 is None
+        # TSLA should not have a pending order (position manager blocks it)
+        assert "TSLA" not in engine._pending_orders
 
     def test_database_trade_crud(self, db):
         """Test trade CRUD operations on the database."""
