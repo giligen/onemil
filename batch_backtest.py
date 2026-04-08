@@ -2141,17 +2141,47 @@ def main():
                 symbols = [s['symbol'] for s in db.get_active_universe()]
             _miss_start = date.fromisoformat(missing_days[0])
             _miss_end = date.fromisoformat(missing_days[-1])
-            daily_bars = fetch_daily_bars_cached(symbols, _miss_start - timedelta(days=7), _miss_end, client, db)
             universe_dict = {s['symbol']: s for s in db.get_active_universe()}
 
-            _miss_movers = find_big_movers(
-                daily_bars, threshold=0.10,  # Cache at 10%
-                universe_dict=universe_dict,
-                price_min=float(cfg.get("scanner", {}).get("price_min", 2.0)),
-                price_max=float(cfg.get("scanner", {}).get("price_max", 20.0)),
-                float_max=int(cfg.get("scanner", {}).get("float_max", 10_000_000)),
-                start_date=_miss_start, end_date=_miss_end,
-            )
+            # For today: use live snapshots to find movers (daily bars incomplete)
+            _today = date.today()
+            _today_str = str(_today)
+            if _today_str in missing_days:
+                logger.info("Today detected in missing dates — using live snapshots for movers")
+                _snap_symbols = list(universe_dict.keys())
+                snapshots = client.get_snapshots(_snap_symbols)
+                _today_movers = []
+                for sym, snap in snapshots.items():
+                    prev_close = snap.get('prev_close', 0)
+                    high = snap.get('high', 0)
+                    if prev_close > 0 and high > 0:
+                        move = (high - prev_close) / prev_close
+                        if move >= 0.10:  # 10% threshold for cache
+                            _today_movers.append((sym, _today, prev_close, move * 100))
+                logger.info(f"Live snapshots: {len(_today_movers)} movers with 10%+ move today")
+                # For non-today missing days, use daily bars as normal
+                _other_days = [d for d in missing_days if d != _today_str]
+            else:
+                _today_movers = []
+                _other_days = missing_days
+
+            # Fetch daily bars for non-today missing days
+            if _other_days:
+                _other_start = date.fromisoformat(_other_days[0])
+                _other_end = date.fromisoformat(_other_days[-1])
+                daily_bars = fetch_daily_bars_cached(symbols, _other_start - timedelta(days=7), _other_end, client, db)
+                _other_movers = find_big_movers(
+                    daily_bars, threshold=0.10,
+                    universe_dict=universe_dict,
+                    price_min=float(cfg.get("scanner", {}).get("price_min", 2.0)),
+                    price_max=float(cfg.get("scanner", {}).get("price_max", 20.0)),
+                    float_max=int(cfg.get("scanner", {}).get("float_max", 10_000_000)),
+                    start_date=_other_start, end_date=_other_end,
+                )
+            else:
+                _other_movers = []
+
+            _miss_movers = _today_movers + _other_movers
             if _miss_movers:
                 logger.info(f"Found {len(_miss_movers)} movers on missing dates, running backtests...")
                 # Run backtests on missing movers (reuse existing runner setup)
@@ -2162,28 +2192,22 @@ def main():
                 for mover_tuple in _miss_movers:
                     sym, trade_date = mover_tuple[0], mover_tuple[1]
                     td_str = str(trade_date)
-                    import pandas as pd
-                    bars_raw = db.get_intraday_bars_cached(sym, td_str)
-                    if not bars_raw:
-                        bars_df = client.get_1min_bars(sym, trade_date=td_str)
-                        if bars_df is not None and len(bars_df) > 0:
-                            # Save raw bars to DB for future cache hits
-                            bars_list = bars_df.to_dict('records') if hasattr(bars_df, 'to_dict') else bars_df
-                            db.save_intraday_bars(sym, td_str, bars_list)
-                        bars = bars_df
-                    else:
-                        bars = pd.DataFrame(bars_raw)
+                    bars = get_1min_bars_cached(sym, trade_date, client, db)
                     if bars is None or len(bars) < runner.MIN_BARS_FOR_SETUP:
                         continue
                     uni = universe_dict.get(sym, {})
                     avg_vol = uni.get('avg_daily_volume') or uni.get('avg_volume_daily')
                     vol_profile = volume_profiles.get(sym)
                     # Compute daily range for cache
-                    _day_bars = daily_bars.get(sym, [])
-                    _day_bar = next((b for b in _day_bars if str(b.get('date', '')) == td_str), None)
-                    _range_pct = 0
-                    if _day_bar and _day_bar.get('low', 0) > 0:
-                        _range_pct = (_day_bar['high'] - _day_bar['low']) / _day_bar['low'] * 100
+                    _range_pct = mover_tuple[3] if len(mover_tuple) > 3 else 0
+                    if not _range_pct:
+                        try:
+                            _day_bars = daily_bars.get(sym, [])
+                            _day_bar = next((b for b in _day_bars if str(b.get('date', '')) == td_str), None)
+                            if _day_bar and _day_bar.get('low', 0) > 0:
+                                _range_pct = (_day_bar['high'] - _day_bar['low']) / _day_bar['low'] * 100
+                        except (NameError, UnboundLocalError):
+                            pass  # daily_bars not available (today-only mode)
                     result = runner.run(sym, bars, td_str,
                                         avg_daily_volume=avg_vol,
                                         volume_profile=vol_profile,
