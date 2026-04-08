@@ -407,7 +407,8 @@ class MonthlyBacktestRunner:
             # so all bars must be cached first.
             if self.scan_workers > 1:
                 uncached = 0
-                for sym, d in movers:
+                for mover in movers:
+                    sym, d = mover[0], mover[1]
                     cached = db.get_intraday_bars_cached(sym, d.isoformat())
                     if not cached:
                         uncached += 1
