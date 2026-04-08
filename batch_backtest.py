@@ -1889,6 +1889,45 @@ def main():
         )
         master_csv = runner.run_all(start_date, end_date, output_dir="backtest_results")
         logger.info(f"Monthly backtest complete: {master_csv}")
+
+        # Aggregate monthly results into standard cache CSV for --build-cache
+        if args.build_cache and master_csv and os.path.exists(master_csv):
+            from config import Config as _Cfg
+            _cfg = _Cfg._load_yaml_only()
+            _entry_slip = float(_cfg.get("trading", {}).get("entry_slippage_pct", 0.005))
+            _exit_slip = float(_cfg.get("trading", {}).get("exit_slippage_pct", 0.003))
+            _save_path = _get_bull_flag_cache_path(_entry_slip, _exit_slip)
+
+            trade_count = 0
+            with open(master_csv, 'r', encoding='utf-8') as src, \
+                 open(_save_path, 'w', newline='', encoding='utf-8') as dst:
+                reader = csv.DictReader(src)
+                writer = csv.writer(dst)
+                writer.writerow(CSV_HEADERS)
+                for row in reader:
+                    writer.writerow([
+                        row['symbol'], row['date'],
+                        row.get('entry_time_et', ''),
+                        row.get('entry_price', ''),
+                        row.get('stop_loss', ''),
+                        row.get('target', ''),
+                        row.get('shares', ''),
+                        row.get('exit_time_et', ''),
+                        row.get('exit_price', ''),
+                        row.get('exit_reason', ''),
+                        row.get('pnl', ''),
+                        row.get('pnl_pct', ''),
+                        row.get('partial_taken', 'False'),
+                        row.get('partial_price', ''),
+                        row.get('partial_shares', '0'),
+                        row.get('partial_pnl', '0.00'),
+                        row.get('intraday_move_pct', row.get('daily_range_pct', '0')),
+                    ])
+                    trade_count += 1
+            logger.info(
+                f"Bull flag cache saved: {_save_path} ({trade_count} trades, "
+                f"entry_slip={_entry_slip:.1%}, exit_slip={_exit_slip:.1%})"
+            )
         return
 
     # Standard (non-monthly) mode
