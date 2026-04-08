@@ -141,11 +141,12 @@ class UniverseBuilder:
             })
         logger.info(f"Step 4: Stored {len(price_filtered)} price-filtered stocks in DB")
 
-        # Step 5: Fetch float + sector/country (only for price-filtered, skip fresh cache)
+        # Step 5: Fetch float + sector/country for ALL active stocks needing update.
+        # Don't re-filter by price_filtered_syms — stock is already active in universe.
+        # Re-filtering excluded stocks without same-day daily bars (BATS, thin, holidays).
         symbols_need_float = self.db.get_symbols_needing_float_update(
             max_age_days=self.float_cache_refresh_days
         )
-        symbols_need_float = [s for s in symbols_need_float if s in price_filtered_syms]
         logger.info(
             f"Step 5: {len(symbols_need_float)} need float update "
             f"(of {len(price_filtered)} price-filtered)"
