@@ -900,3 +900,102 @@ class TestBatchBacktestRegimeAndCB:
         # SYM1 and SYM2 ran (2 losses), SYM3 skipped
         assert len(results) == 2
         assert runner.run.call_count == 2
+
+    def test_macd_warmup_fetched_when_zones_enabled(self):
+        """run_batch_backtest fetches previous-day bars for MACD warm-up."""
+        movers = [("PLYX", date(2026, 3, 10))]  # Tuesday
+
+        client = MagicMock(spec=AlpacaClient)
+        runner = _make_runner_mock(macd_zones_enabled=True)
+        runner.detector.require_macd_positive = False
+        runner.MIN_BARS_FOR_SETUP = 5
+
+        result = BacktestResult(
+            symbol="PLYX", trade_date="2026-03-10",
+            total_bars=100, patterns_detected=0, trades_simulated=[],
+        )
+        runner.run.return_value = result
+
+        # Today's bars
+        bars_today = pd.DataFrame({
+            'timestamp': [datetime(2026, 3, 10, 14, i, tzinfo=timezone.utc) for i in range(10)],
+            'open': [5.0]*10, 'high': [5.5]*10, 'low': [4.8]*10,
+            'close': [5.3]*10, 'volume': [100000]*10,
+        })
+        # Previous day's bars (warm-up)
+        bars_prev = pd.DataFrame({
+            'timestamp': [datetime(2026, 3, 9, 14, i, tzinfo=timezone.utc) for i in range(60)],
+            'open': [5.0]*60, 'high': [5.5]*60, 'low': [4.8]*60,
+            'close': [5.3]*60, 'volume': [100000]*60,
+        })
+        client.get_historical_1min_bars.return_value = bars_today
+
+        # Mock DB to return no cache (forces API fetch)
+        db = MagicMock(spec=Database)
+        db.get_intraday_bars_cached.return_value = []
+        db.save_intraday_bars.return_value = None
+
+        # Patch get_1min_bars_cached to track calls and return appropriate bars
+        with patch('batch_backtest.get_1min_bars_cached') as mock_get_bars:
+            def side_effect(sym, td, cli, database):
+                if td == date(2026, 3, 10):
+                    return bars_today
+                elif td == date(2026, 3, 9):
+                    return bars_prev
+                return pd.DataFrame()
+
+            mock_get_bars.side_effect = side_effect
+
+            results = run_batch_backtest(movers, client, runner, db=db)
+
+        # Should have fetched bars for both today AND previous day (warm-up)
+        calls = mock_get_bars.call_args_list
+        fetched_dates = [c.args[1] for c in calls]
+        assert date(2026, 3, 10) in fetched_dates, "Should fetch today's bars"
+        assert date(2026, 3, 9) in fetched_dates, "Should fetch previous day bars for MACD warm-up"
+
+        # Verify prev_day_bars was passed to runner.run
+        runner.run.assert_called_once()
+        _, kwargs = runner.run.call_args
+        assert kwargs.get('prev_day_bars') is not None, "prev_day_bars must be passed for MACD warm-up"
+        assert len(kwargs['prev_day_bars']) == 60, "Should pass previous day's bars"
+
+    def test_macd_warmup_not_fetched_when_zones_disabled(self):
+        """run_batch_backtest skips warm-up fetch when MACD zones are disabled."""
+        movers = [("PLYX", date(2026, 3, 10))]
+
+        client = MagicMock(spec=AlpacaClient)
+        runner = _make_runner_mock(macd_zones_enabled=False)
+        runner.detector.require_macd_positive = False
+        runner.MIN_BARS_FOR_SETUP = 5
+
+        result = BacktestResult(
+            symbol="PLYX", trade_date="2026-03-10",
+            total_bars=100, patterns_detected=0, trades_simulated=[],
+        )
+        runner.run.return_value = result
+
+        bars_today = pd.DataFrame({
+            'timestamp': [datetime(2026, 3, 10, 14, i, tzinfo=timezone.utc) for i in range(10)],
+            'open': [5.0]*10, 'high': [5.5]*10, 'low': [4.8]*10,
+            'close': [5.3]*10, 'volume': [100000]*10,
+        })
+
+        db = MagicMock(spec=Database)
+        db.get_intraday_bars_cached.return_value = []
+        db.save_intraday_bars.return_value = None
+
+        with patch('batch_backtest.get_1min_bars_cached') as mock_get_bars:
+            mock_get_bars.return_value = bars_today
+
+            results = run_batch_backtest(movers, client, runner, db=db)
+
+        # Should only fetch today's bars, NOT previous day
+        calls = mock_get_bars.call_args_list
+        fetched_dates = [c.args[1] for c in calls]
+        assert date(2026, 3, 10) in fetched_dates
+        assert date(2026, 3, 9) not in fetched_dates, "Should NOT fetch warm-up when zones disabled"
+
+        # prev_day_bars should be None
+        _, kwargs = runner.run.call_args
+        assert kwargs.get('prev_day_bars') is None

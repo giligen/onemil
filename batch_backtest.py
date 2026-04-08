@@ -2208,11 +2208,31 @@ def main():
                                 _range_pct = (_day_bar['high'] - _day_bar['low']) / _day_bar['low'] * 100
                         except (NameError, UnboundLocalError):
                             pass  # daily_bars not available (today-only mode)
+
+                    # Fetch previous day bars for MACD warm-up (matches run_batch_backtest)
+                    _prev_day_bars = None
+                    if runner.macd_zones_enabled:
+                        _prev_td = _get_previous_trading_date(trade_date)
+                        if _prev_td:
+                            _prev_day_bars = get_1min_bars_cached(sym, _prev_td, client, db)
+                            if _prev_day_bars is not None and not _prev_day_bars.empty:
+                                logger.debug(f"{sym}: MACD warm-up loaded ({len(_prev_day_bars)} bars from {_prev_td})")
+                            else:
+                                logger.warning(f"{sym}: No prev-day bars for MACD warm-up ({_prev_td})")
+
+                    # Get prev_close for volume gates
+                    _prev_close = mover_tuple[2] if len(mover_tuple) > 2 else None
+                    if not _prev_close and db:
+                        _pc_row = db._cache_conn.execute(
+                            'SELECT close FROM daily_bars WHERE symbol = ? AND bar_date < ? ORDER BY bar_date DESC LIMIT 1',
+                            (sym, td_str)).fetchone()
+                        _prev_close = float(_pc_row[0]) if _pc_row else None
+
                     result = runner.run(sym, bars, td_str,
                                         avg_daily_volume=avg_vol,
                                         volume_profile=vol_profile,
-                                        prev_close=None,
-                                        prev_day_bars=None)
+                                        prev_close=_prev_close,
+                                        prev_day_bars=_prev_day_bars)
                     for trade in result.trades_simulated:
                         trade._daily_range_pct = _range_pct  # attach for cache row
                         _new_trades.append(trade)
