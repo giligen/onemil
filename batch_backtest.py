@@ -2265,7 +2265,8 @@ def main():
                     build_cache=True,
                 )
             else:
-                runner = BacktestRunner(
+                from backtest import BacktestRunner as _BtRunner2
+                runner = _BtRunner2(
                     min_cum_dollar_vol=args.min_cum_dollar_vol,
                     min_cum_shares=args.min_cum_shares,
                     min_relative_vol_rate=args.min_relative_vol_rate,
