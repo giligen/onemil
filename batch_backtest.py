@@ -843,9 +843,9 @@ def _backtest_worker(args: Tuple) -> Optional[dict]:
             runner = BacktestRunner()  # uses from_config() for all settings
             runner._min_breakout_vol_override = min_bv_override
 
-            # Fetch prev day bars for MACD warm-up (only when enabled)
+            # Fetch prev day bars for MACD warm-up
             prev_day_bars = None
-            if runner.detector.require_macd_positive:
+            if runner.detector.require_macd_positive or runner.macd_zones_enabled:
                 from datetime import date as date_cls
                 td = date_cls.fromisoformat(trade_date_iso)
                 prev_date = _get_previous_trading_date(td)
@@ -854,10 +854,18 @@ def _backtest_worker(args: Tuple) -> Optional[dict]:
                     if prev_cached:
                         prev_day_bars = pd.DataFrame(prev_cached)
 
+            # Get prev_close for qualification gate (simulates scanner timing)
+            _prev_close = prev_close if prev_close and prev_close > 0 else None
+            if not _prev_close:
+                _pc_row = db._cache_conn.execute(
+                    'SELECT close FROM daily_bars WHERE symbol = ? AND bar_date < ? ORDER BY bar_date DESC LIMIT 1',
+                    (symbol, trade_date_iso)).fetchone()
+                _prev_close = float(_pc_row[0]) if _pc_row else None
+
             result = runner.run(symbol, bars, trade_date_iso,
                                 avg_daily_volume=avg_vol,
                                 volume_profile=vol_profile,
-                                prev_close=None,  # Daily bar pre-filter already ensures 20%+ range
+                                prev_close=_prev_close,
                                 prev_day_bars=prev_day_bars)
             # Attach point-in-time volume for cache
             for trade in result.trades_simulated:
