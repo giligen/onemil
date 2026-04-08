@@ -93,6 +93,7 @@ Integration tests MUST validate:
 * All Errors must be reported, e.g., missing API Keys and execution should break
 * Always document latest architecture in readme.md and keep it up-to-date
 * **CRITICAL: All fallback code paths MUST log ERROR or WARNING** - Silent failures hide bugs. Every fallback (try/except, if/else with defaults, .get() with fallback values) MUST explain WHY it triggered via logger.error() or logger.warning()
+* **NEVER leave broken unit tests** - Even if the test was broken by someone else's code, fix it. Zero failing tests is mandatory. Every session should end with all tests passing.
 
 # System-in-dev
 
