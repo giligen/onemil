@@ -145,9 +145,10 @@ def main():
     db = get_database()
     notifier = create_notifier(config)
 
-    # StopMonitor for real-time trail stop + hard stop via SIP WebSocket
-    # Separate instance from bull flag's StopMonitor (different process)
+    # StopMonitor: REST polling on paper (avoids WebSocket connection limit),
+    # WebSocket on live. Matches bull flag service behavior in main.py.
     from trading.stop_monitor import StopMonitor
+    use_polling = alpaca.is_paper
     stop_monitor = StopMonitor(
         api_key=api_key,
         api_secret=api_secret,
@@ -155,10 +156,13 @@ def main():
         marketable_limit_offset=0.03,
         marketable_limit_offset_pct=0.005,
         notifier=notifier,
+        polling_mode=use_polling,
+        polling_interval=2.0,
     )
     stop_monitor.start()
+    mode = "REST polling (paper)" if use_polling else "WebSocket (live)"
     logger.info(
-        f"StopMonitor STARTED for MACD wave — "
+        f"StopMonitor STARTED for MACD wave ({mode}) — "
         f"offset=${0.03}, offset_pct={0.005:.1%}"
     )
 
