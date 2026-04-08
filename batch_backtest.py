@@ -307,13 +307,17 @@ def find_big_movers(
             if move < threshold:
                 continue
 
-            # Direction filter: high must be 10%+ above prev close (gap UP).
-            # Matches live scanner: (current_price - prev_close) / prev_close >= 10%.
-            # Without this, crashing stocks with wide ranges qualify as "movers".
+            # Direction filter: qualify gap-ups OR V-reversals.
+            # Gap-up: high >= prev_close * (1 + threshold) — stock UP from yesterday
+            # V-reversal: range >= threshold AND close > open — big intraday range, closed green
+            # Without either, crashing stocks with wide ranges would qualify.
             prev_close = prev_close_map.get(str(bar['date']))
+            bar_close = bar.get('close', 0)
+            bar_open = bar.get('open', 0)
             if prev_close and prev_close > 0:
                 upside = (high - prev_close) / prev_close
-                if upside < threshold:
+                is_v_reversal = move >= threshold and bar_close > bar_open  # big range + green close
+                if upside < threshold and not is_v_reversal:
                     skipped_direction += 1
                     continue
 

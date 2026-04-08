@@ -83,6 +83,8 @@ class RealtimeScanner:
         self._premarket_gap_symbols: Set[str] = set()
         self._premarket_gap_data: List[Dict] = []
         self._qualified_stock_data: List[Dict] = []
+        self._day_highs: Dict[str, float] = {}  # Track intraday highs for V-reversal detection
+        self._day_lows: Dict[str, float] = {}   # Track intraday lows for V-reversal detection
 
     @property
     def _today(self) -> str:
@@ -489,9 +491,17 @@ class RealtimeScanner:
 
             bucket = f"{bar_et.hour:02d}:{(bar_et.minute // 15) * 15:02d}"
 
-            # Calculate metrics
+            # Track intraday extremes for V-reversal detection
+            bar_high = bar.get('high', current_price)
+            bar_low = bar.get('low', current_price)
+            self._day_highs[symbol] = max(self._day_highs.get(symbol, 0), bar_high)
+            self._day_lows[symbol] = min(self._day_lows.get(symbol, float('inf')), bar_low)
+
+            # Calculate metrics — qualify on gap-up OR V-reversal (intraday range)
             gap_pct = ((current_price - prev_close) / prev_close) * 100
-            intraday_change_pct = gap_pct  # Same calc: current vs prev close
+            day_low = self._day_lows.get(symbol, current_price)
+            range_pct = ((self._day_highs.get(symbol, current_price) - day_low) / day_low * 100) if day_low > 0 else 0
+            intraday_change_pct = max(gap_pct, range_pct)  # Qualify on whichever is higher
 
             # Relative volume
             profile = self._volume_profiles.get(symbol, {})

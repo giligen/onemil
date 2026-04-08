@@ -1301,13 +1301,23 @@ class BacktestRunner:
             f"{f', qualification at +{qualification_pct:.0%} from ${prev_close:.2f}' if not qualified else ''}..."
         )
 
+        running_high = 0.0
+        running_low = float('inf')
+
         for i in range(self.MIN_BARS_FOR_SETUP - 1, last_end):
+            # Track intraday extremes for V-reversal detection
+            if not qualified:
+                running_high = max(running_high, bars.iloc[i]['high'])
+                running_low = min(running_low, bars.iloc[i]['low'])
+
             # Real-time qualification check: stock must cross threshold before scanning.
-            # In live, stocks with big premarket gaps qualify immediately at open.
+            # Gap-up: high >= prev_close * (1 + threshold)
+            # V-reversal: (running_high - running_low) / running_low >= threshold
             if not qualified:
                 bar_high = bars.iloc[i]['high']
                 move = (bar_high - prev_close) / prev_close
-                if move >= qualification_pct:
+                range_move = (running_high - running_low) / running_low if running_low > 0 else 0
+                if move >= qualification_pct or range_move >= qualification_pct:
                     # Price threshold passed — check volume gate
                     vol_ok = True
                     if (self.min_cum_dollar_vol > 0 or self.min_cum_shares > 0
