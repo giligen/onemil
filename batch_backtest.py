@@ -1914,15 +1914,20 @@ def main():
         symbols = [s['symbol'] for s in universe]
         logger.info(f"Loaded {len(symbols)} symbols from active universe")
 
-        # Also include ALL symbols from daily_bars cache
-        import sqlite3
-        conn = sqlite3.connect(db.db_path)
-        all_cached = [r[0] for r in conn.execute(
-            "SELECT DISTINCT symbol FROM daily_bars WHERE bar_date >= ? AND bar_date <= ?",
-            (str(start_date), str(end_date))
-        ).fetchall()]
-        symbols = sorted(set(symbols + all_cached))
-        logger.info(f"Expanded to {len(symbols)} symbols (universe + daily_bars cache)")
+        # Expand universe with daily_bars cache for normal runs (catches
+        # historical movers no longer in active universe). Skip for --build-cache
+        # to ensure deterministic output regardless of DB state.
+        if not args.build_cache:
+            import sqlite3
+            conn = sqlite3.connect(db.db_path)
+            all_cached = [r[0] for r in conn.execute(
+                "SELECT DISTINCT symbol FROM daily_bars WHERE bar_date >= ? AND bar_date <= ?",
+                (str(start_date), str(end_date))
+            ).fetchall()]
+            symbols = sorted(set(symbols + all_cached))
+            logger.info(f"Expanded to {len(symbols)} symbols (universe + daily_bars cache)")
+        else:
+            logger.info(f"Cache build: using active universe only ({len(symbols)} symbols)")
 
         if not symbols:
             logger.error("No symbols found")
