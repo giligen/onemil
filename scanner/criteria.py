@@ -141,7 +141,6 @@ class ScannerCriteria:
             and candidate.float_shares > 0
             and candidate.float_shares <= self.float_max
         )
-        candidate.criteria_met['gap'] = candidate.gap_pct >= self.gap_pct_min
         candidate.criteria_met['relative_volume'] = (
             candidate.relative_volume >= self.relative_volume_min
         )
