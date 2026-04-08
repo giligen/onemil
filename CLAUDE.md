@@ -177,17 +177,42 @@ journalctl -u onemil-macd-wave -f        # Live logs
 python backtest.py PLYX 2026-03-13 --verbose
 ```
 
-### Batch backtest (all movers in a date range)
+### Batch backtest — TWO-STAGE WORKFLOW (CRITICAL)
+
+**The backtest is a two-stage process. You MUST run both stages and ONLY report Stage 2 numbers.**
+
+#### Stage 1: Build cache (broad, 10% threshold)
 ```bash
-python batch_backtest.py --start 2026-02-01 --end 2026-03-13 --verbose
+# --monthly builds the cache at 10% intraday range threshold (broad net)
+python batch_backtest.py --start 2026-01-01 --end 2026-03-31 --monthly --verbose
 ```
-- Data is cached in SQLite (daily bars + 1-min bars) — first run fetches from Alpaca API, subsequent runs are instant
-- Output: CSV file with trade-level results
-- Default filters: skip midday (11:30-14:00 ET) entries
+- Finds ALL movers with 10%+ intraday range
+- Stores raw unfiltered trades in `data/bull_flag_cache_e50_x30.csv`
+- These numbers are RAW/UNFILTERED — **NEVER report these as backtest results**
+- Example: Q1 2026 cache = 1057 trades, $82K (WRONG number to report)
+
+#### Stage 2: Run filtered backtest (production-matched, 20% threshold)
+```bash
+# --no-monthly reads from cache and applies ALL production filters from config.yaml
+python batch_backtest.py --start 2026-01-01 --end 2026-03-31 --no-monthly --verbose
+```
+- Reads from cache, applies: 20% threshold, 200K volume, leveraged ETF filter, max 3 concurrent, $5K daily loss limit, risk tiers
+- These numbers match production behavior — **THIS is the real backtest result**
+- Example: Q1 2026 filtered = 212 trades, $297K (CORRECT number to report)
+- Takes <1 second (reads from cache), so there is ZERO reason to skip this step
+
+**NEVER report Stage 1 numbers as results. ALWAYS run Stage 2 after Stage 1.**
+**If your numbers don't match what the user expects, question YOUR methodology first, not the user's memory.**
+
+### Single symbol
+```bash
+python backtest.py PLYX 2026-03-13 --verbose
+```
 
 ### Backtest defaults
 - `BacktestRunner(min_price=0.0, skip_midday=True)` — skip midday is the only default filter
 - To override: pass `min_price=5.0` or `skip_midday=False` to `BacktestRunner`
+- Data is cached in SQLite (daily bars + 1-min bars) — first run fetches from Alpaca API, subsequent runs are instant
 
 ## MACD Wave Backtests
 
@@ -219,10 +244,10 @@ When running backtests via `python3 -c "..."`, print() output is BUFFERED until 
 ## Gap threshold doesn't matter for bull flags
 Tested 3%, 5%, 8%, 10% intraday range thresholds — all produce identical results (254-257 trades, same P&L). The bull flag pattern detector (min_pole_gain_pct=3%) is the real filter, not the daily bar screen.
 
-## Key backtest numbers (Jan-Mar 2026)
-- **Bull flag**: 254 trades, 33.5% WR, PF 1.13, +$28K, DD -$30K
+## Key backtest numbers (Q1 2026, filtered 20% threshold)
+- **Bull flag Q1**: 212 trades, 52.8% WR, +$297K (Jan +$123K, Feb -$41K, Mar ~$0)
 - **MACD wave**: 61 trades, 44% WR, PF 5.65, +$123K, DD -$7K (15 months)
-- **Combined**: +$330K over 15 months, 14/15 green months
+- Note: unfiltered cache (10% threshold) shows 1057 trades, $82K — that is NOT the real number
 
 ## Overfitting warning
 MACD wave filters (cross<3m, MACD≥0.5%, vol<300K, $15-30) were optimized on the same 15-month dataset used for validation. NO out-of-sample test performed. Expect 40-60% of backtest P&L in production.
