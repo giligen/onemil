@@ -198,16 +198,17 @@ class TradePlanner:
 
         # Position sizing (apply risk multiplier for tiered scaling)
         effective_risk_budget = self.risk_per_trade * risk_multiplier
+        effective_max_shares = int(self.max_shares * risk_multiplier)
         if self.sizing_mode == "fixed_risk":
             shares = math.floor(effective_risk_budget / risk_per_share)
-            if shares > self.max_shares:
+            if shares > effective_max_shares:
                 logger.warning(
                     f"{pattern.symbol}: fixed_risk shares {shares} exceeds "
-                    f"max_shares {self.max_shares}, capping (risk budget distorted)"
+                    f"max_shares {effective_max_shares} ({self.max_shares}×{risk_multiplier:.0f}x), capping"
                 )
         else:
             shares = math.floor((self.position_size_dollars * risk_multiplier) / entry_price)
-        shares = min(shares, self.max_shares)
+        shares = min(shares, effective_max_shares)
 
         # ADV participation cap: limit shares to X% of average daily volume
         if self.max_adv_participation_pct and avg_daily_volume and avg_daily_volume > 0:
