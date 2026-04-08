@@ -183,18 +183,18 @@ python backtest.py PLYX 2026-03-13 --verbose
 
 #### Stage 1: Build cache (broad, 10% threshold)
 ```bash
-# --monthly builds the cache at 10% intraday range threshold (broad net)
-python batch_backtest.py --start 2026-01-01 --end 2026-03-31 --monthly --verbose
+# --build-cache auto-enables --monthly chunking
+python batch_backtest.py --start 2026-01-01 --end 2026-03-31 --build-cache
 ```
 - Finds ALL movers with 10%+ intraday range
 - Stores raw unfiltered trades in `data/bull_flag_cache_e50_x30.csv`
 - These numbers are RAW/UNFILTERED — **NEVER report these as backtest results**
 - Example: Q1 2026 cache = 1057 trades, $82K (WRONG number to report)
 
-#### Stage 2: Run filtered backtest (production-matched, 20% threshold)
+#### Stage 2: Run filtered backtest (production-matched, DEFAULT)
 ```bash
-# --no-monthly reads from cache and applies ALL production filters from config.yaml
-python batch_backtest.py --start 2026-01-01 --end 2026-03-31 --no-monthly --verbose
+# Default behavior — reads from cache, applies ALL production filters from config.yaml
+python batch_backtest.py --start 2026-01-01 --end 2026-03-31
 ```
 - Reads from cache, applies: 20% threshold, 200K volume, leveraged ETF filter, max 3 concurrent, $5K daily loss limit, risk tiers
 - These numbers match production behavior — **THIS is the real backtest result**
