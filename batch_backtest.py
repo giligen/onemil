@@ -1259,6 +1259,8 @@ def run_batch_backtest_fast(
 
         # Create runner early to check if MACD warm-up is needed
         runner = BacktestRunner()
+        if build_cache:
+            runner.risk_tiers_enabled = False  # Cache at 1x — tiers applied at query time
 
         # Pre-load previous day bars for MACD warm-up (needed for MACD filter OR zone filter)
         # First pass: identify needed prev-day pairs and fetch any uncached from API
@@ -2271,6 +2273,8 @@ def main():
                     min_cum_shares=args.min_cum_shares,
                     min_relative_vol_rate=args.min_relative_vol_rate,
                 )
+                # Cache at 1x — risk tiers applied at query time by filter_bull_flag_trades()
+                runner.risk_tiers_enabled = False
                 chunk_results = run_batch_backtest(
                     chunk, client, runner, db=db, universe_dict=universe_dict,
                     market_regime=cache_regime,
