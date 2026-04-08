@@ -2321,7 +2321,8 @@ def main():
                 max_workers=args.scan_workers,
             )
         else:
-            runner = BacktestRunner(
+            from backtest import BacktestRunner as _BtRunner
+            runner = _BtRunner(
                 min_cum_dollar_vol=args.min_cum_dollar_vol,
                 min_cum_shares=args.min_cum_shares,
                 min_relative_vol_rate=args.min_relative_vol_rate,
