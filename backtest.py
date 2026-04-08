@@ -1309,8 +1309,8 @@ class BacktestRunner:
         from config import Config
         _cfg = Config._load_yaml_only()
         qualification_pct = float(
-            _cfg.get("scanner", {}).get("intraday_change_pct_min", 10.0)
-        ) / 100.0  # Convert 10.0 → 0.10
+            _cfg.get("scanner", {}).get("intraday_change_pct_min", 20.0)
+        ) / 100.0  # Convert 20.0 → 0.20
         qualified = prev_close is None or prev_close <= 0
         qualification_bar = 0
 
@@ -1843,9 +1843,16 @@ def main():
     except Exception as e:
         logger.warning(f"Failed to fetch prev-day bars for MACD warm-up: {e}")
 
+    # Get previous day's closing price for qualification gate
+    _prev_close_price = None
+    if prev_day_bars is not None and not prev_day_bars.empty:
+        _prev_close_price = float(prev_day_bars['close'].iloc[-1])
+        logger.info(f"Qualification gate: prev_close=${_prev_close_price:.2f}")
+
     # Run backtest
     runner = BacktestRunner()
-    result = runner.run(symbol, bars, args.date, prev_day_bars=prev_day_bars)
+    result = runner.run(symbol, bars, args.date, prev_day_bars=prev_day_bars,
+                        prev_close=_prev_close_price)
 
     # Print report
     print_report(result)

@@ -934,6 +934,11 @@ class TestBatchBacktestRegimeAndCB:
         db = MagicMock(spec=Database)
         db.get_intraday_bars_cached.return_value = []
         db.save_intraday_bars.return_value = None
+        # Mock _cache_conn for prev_close lookup
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = (5.0,)  # prev close price
+        db._cache_conn = MagicMock()
+        db._cache_conn.execute.return_value = mock_cursor
 
         # Patch get_1min_bars_cached to track calls and return appropriate bars
         with patch('batch_backtest.get_1min_bars_cached') as mock_get_bars:
@@ -984,6 +989,10 @@ class TestBatchBacktestRegimeAndCB:
         db = MagicMock(spec=Database)
         db.get_intraday_bars_cached.return_value = []
         db.save_intraday_bars.return_value = None
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = (5.0,)
+        db._cache_conn = MagicMock()
+        db._cache_conn.execute.return_value = mock_cursor
 
         with patch('batch_backtest.get_1min_bars_cached') as mock_get_bars:
             mock_get_bars.return_value = bars_today

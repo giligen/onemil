@@ -724,18 +724,14 @@ def run_batch_backtest(
                 # Set per-symbol avg_daily_volume for relative vol rate gate
                 runner.avg_daily_volume = avg_vol or 0
 
-                # Pass prev_close when volume gates are active (needed for qualification loop)
-                # prev_close from mover tuple can be 0.0 — fetch from daily bars if needed
-                _prev_close = None
-                if (runner.min_cum_dollar_vol > 0
-                        or runner.min_cum_shares > 0
-                        or runner.min_relative_vol_rate > 0):
-                    _prev_close = prev_close if prev_close and prev_close > 0 else None
-                    if not _prev_close and db:
-                        _pc_row = db._cache_conn.execute(
-                            'SELECT close FROM daily_bars WHERE symbol = ? AND bar_date < ? ORDER BY bar_date DESC LIMIT 1',
-                            (symbol, date_str)).fetchone()
-                        _prev_close = float(_pc_row[0]) if _pc_row else None
+                # Always pass prev_close — needed for real-time qualification gate
+                # (simulates scanner's intraday_change_pct threshold timing)
+                _prev_close = prev_close if prev_close and prev_close > 0 else None
+                if not _prev_close and db:
+                    _pc_row = db._cache_conn.execute(
+                        'SELECT close FROM daily_bars WHERE symbol = ? AND bar_date < ? ORDER BY bar_date DESC LIMIT 1',
+                        (symbol, date_str)).fetchone()
+                    _prev_close = float(_pc_row[0]) if _pc_row else None
                 result = runner.run(symbol, bars, date_str,
                                     avg_daily_volume=avg_vol,
                                     volume_profile=vol_profile,
