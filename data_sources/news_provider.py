@@ -32,9 +32,13 @@ SYSTEM_PROMPT = (
     "  OTHER — tangential mention, penny stock promo, technical analysis, unrelated\n"
     "  NO_NEWS — no meaningful content\n"
     "\n"
-    "CRITICAL: A 'why is X stock moving' or 'N stocks moving in Monday's session' "
-    "article is ALWAYS GARBAGE_RECAP, catalyst=false. These are written AFTER the move, "
-    "not the cause."
+    "CRITICAL RULES:\n"
+    "1. 'Why is X stock moving' or 'N stocks moving in session' = ALWAYS GARBAGE_RECAP\n"
+    "2. If stock is >80% below 52-week high AND has float <500K: treat ANY 'contract', "
+    "'agreement', 'partnership' with undisclosed/unnamed counterparty as GARBAGE_RECAP "
+    "(penny stock promotional PR, not a real catalyst)\n"
+    "3. If no dollar amounts in the deal AND counterparty is 'undisclosed' = suspicious\n"
+    "4. Multiple similar PRs from same company in short period = pump cadence = GARBAGE_RECAP"
 )
 
 
@@ -116,7 +120,8 @@ class LLMNewsAnalyzer(NewsAnalyzer):
             )
             return first_word == "TRUE", "OTHER", f"text-fallback: {raw[:60]}"
 
-    def classify(self, article: Dict, symbol: str = None) -> Tuple[bool, str, str]:
+    def classify(self, article: Dict, symbol: str = None,
+                 stock_context: Optional[Dict] = None) -> Tuple[bool, str, str]:
         """
         Classify a news article using Claude Haiku 4.5.
 
@@ -125,6 +130,8 @@ class LLMNewsAnalyzer(NewsAnalyzer):
         Args:
             article: Dict with headline, summary, source, created_at, url
             symbol: Stock symbol for context in the prompt
+            stock_context: Optional dict with float_shares, price, pct_from_high
+                          for penny stock promo detection
 
         Returns:
             Tuple of (is_catalyst: bool, category: str, reason: str)
@@ -145,10 +152,23 @@ class LLMNewsAnalyzer(NewsAnalyzer):
             logger.debug(f"{symbol}: cache hit for '{headline[:60]}' -> {cached}")
             return cached, 'cached', 'cached'
 
-        # Build user prompt
+        # Build user prompt with stock context
         truncated_summary = summary[:200]
+        context_lines = ""
+        if stock_context:
+            fl = stock_context.get('float_shares', 0)
+            pct = stock_context.get('pct_from_high', 0)
+            price = stock_context.get('price', 0)
+            if fl:
+                context_lines += f"Float: {fl:,.0f} shares\n"
+            if pct:
+                context_lines += f"Stock is {abs(pct):.0f}% below 52-week high\n"
+            if price:
+                context_lines += f"Current price: ${price:.2f}\n"
+
         user_msg = (
             f"Symbol: {symbol or 'UNKNOWN'}\n"
+            f"{context_lines}"
             f"Headline: {headline}\n"
             f"Summary: {truncated_summary}"
         )
@@ -254,7 +274,8 @@ class NewsProvider:
         logger.debug(f"{symbol}: {len(articles)} articles found, none interesting")
         return False, None
 
-    def classify_news(self, symbol: str, limit: int = 5) -> Dict:
+    def classify_news(self, symbol: str, limit: int = 5,
+                      stock_context: Optional[Dict] = None) -> Dict:
         """
         Classify news for a symbol with full LLM output for persistence.
 
@@ -301,7 +322,8 @@ class NewsProvider:
 
         for article in articles:
             if hasattr(self.analyzer, 'classify'):
-                catalyst, category, reason = self.analyzer.classify(article, symbol=symbol)
+                catalyst, category, reason = self.analyzer.classify(
+                    article, symbol=symbol, stock_context=stock_context)
             else:
                 catalyst = self.analyzer.is_interesting(article, symbol=symbol)
                 category = 'OTHER'

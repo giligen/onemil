@@ -521,8 +521,12 @@ class RealtimeScanner:
             news_category = None
             if (relative_volume >= self.criteria.relative_volume_min and
                     intraday_change_pct >= self.criteria.intraday_change_pct_min):
-                # Full LLM classification — persisted with trades for future analysis
-                news_info = self.news.classify_news(symbol)
+                # Full LLM classification — with stock context for penny stock detection
+                _stock_ctx = {
+                    'float_shares': stock.get('float_shares', 0),
+                    'price': current_price,
+                }
+                news_info = self.news.classify_news(symbol, stock_context=_stock_ctx)
                 has_news = news_info.get('has_news', False)
                 headline = news_info.get('headline')
                 news_catalyst = news_info.get('catalyst')
