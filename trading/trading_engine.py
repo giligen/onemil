@@ -435,7 +435,22 @@ class TradingEngine:
         return max(0.25, min(3.0, score))
 
     def _get_spy_3d_range_live(self) -> float:
-        """Get SPY 3-day avg range from cached SPY bars. No extra API call."""
+        """Get SPY 3-day avg daily range. Uses market_regime's SPY daily bars if available."""
+        # Try market_regime first (has SPY daily bars from _refresh_spy_data)
+        if hasattr(self, 'market_regime') and self.market_regime:
+            try:
+                spy_bars = self.market_regime._spy_bars
+                if spy_bars and len(spy_bars) >= 3:
+                    ranges = []
+                    for b in spy_bars[-3:]:
+                        h = b.get('high', 0); l = b.get('low', 0)
+                        if l > 0:
+                            ranges.append((h - l) / l * 100)
+                    if ranges:
+                        return sum(ranges) / len(ranges)
+            except Exception:
+                pass
+        # Fallback: today's range from cached 1-min SPY bars
         if self._spy_bars_cache is not None and len(self._spy_bars_cache) > 1:
             day_high = float(self._spy_bars_cache['high'].max())
             day_low = float(self._spy_bars_cache['low'].min())

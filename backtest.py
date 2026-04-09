@@ -1252,16 +1252,22 @@ class BacktestRunner:
         return max(0.25, min(3.0, score))
 
     def _get_spy_3d_range(self, trade_date: str) -> float:
-        """Get SPY 3-day average daily range. Uses cached daily bars."""
-        spy_bars = self._load_spy_bars(trade_date)
-        if spy_bars is None or len(spy_bars) < 2:
-            return 1.0  # default neutral
-        # Compute single-day range from 1-min bars
-        day_high = spy_bars['high'].max()
-        day_low = spy_bars['low'].min()
-        if day_low <= 0:
+        """Get SPY 3-day average daily range from daily bars in DB."""
+        db_path = self._db_path or "data/cache.db"
+        try:
+            import sqlite3
+            conn = sqlite3.connect(db_path)
+            rows = conn.execute(
+                "SELECT high, low FROM daily_bars WHERE symbol='SPY' AND bar_date<? "
+                "ORDER BY bar_date DESC LIMIT 3", (trade_date,)
+            ).fetchall()
+            conn.close()
+            if not rows:
+                return 1.0
+            ranges = [(r[0]-r[1])/r[1]*100 for r in rows if r[1]>0]
+            return sum(ranges)/len(ranges) if ranges else 1.0
+        except Exception:
             return 1.0
-        return (day_high - day_low) / day_low * 100
 
     def set_spy_macd_cutoff(self, cutoff) -> None:
         """Set SPY MACD cutoff filter for the current trading day.
@@ -1786,7 +1792,6 @@ class BacktestRunner:
                                 f"  POST-FILL EXIT: SPY 3d {_spy_3d:.2f}% + bk_vol {_bk_ratio:.1f}x "
                                 f"→ immediate exit, P&L ${slippage_pnl:.0f}")
                             # Create a minimal trade record for the cache
-                            from backtest import SimulatedTrade
                             trade = SimulatedTrade(
                                 symbol=plan.symbol,
                                 entry_time=bars.iloc[i].get('timestamp', bars.iloc[i].name),
