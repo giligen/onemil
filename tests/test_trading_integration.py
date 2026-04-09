@@ -197,6 +197,7 @@ class TestFullTradingPipeline:
             executor=executor, position_manager=position_manager,
             enabled=True,
         )
+        engine.quality_filter_enabled = False
 
         # Mock Alpaca responses — setup bars (no breakout yet)
         mock_alpaca.get_1min_bars.return_value = _make_bull_flag_setup_bars()
@@ -247,6 +248,7 @@ class TestFullTradingPipeline:
             executor=executor, position_manager=position_manager,
             enabled=True,
         )
+        engine.quality_filter_enabled = False
 
         mock_alpaca.get_1min_bars.return_value = _make_bull_flag_setup_bars()
         mock_alpaca.submit_stop_bracket_order.return_value = {
@@ -442,6 +444,7 @@ class TestThinLiquidityIntegration:
             executor=executor, position_manager=position_manager,
             enabled=True, market_regime=regime,
         )
+        engine.quality_filter_enabled = False
 
         # Phase 1: Setup detection + buy-stop submission
         mock_alpaca.get_1min_bars.return_value = _make_bull_flag_setup_bars()
@@ -521,6 +524,7 @@ class TestThinLiquidityIntegration:
             executor=executor, position_manager=position_manager,
             enabled=True, market_regime=regime,
         )
+        engine.quality_filter_enabled = False
 
         # Phase 1: Setup detection + buy-stop submission
         mock_alpaca.get_1min_bars.return_value = _make_bull_flag_setup_bars()
@@ -593,6 +597,7 @@ class TestThinLiquidityIntegration:
             executor=executor, position_manager=position_manager,
             enabled=True, market_regime=regime,
         )
+        engine.quality_filter_enabled = False
 
         # Phase 1: Setup + buy-stop
         mock_alpaca.get_1min_bars.return_value = _make_bull_flag_setup_bars()

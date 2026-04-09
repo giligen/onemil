@@ -305,7 +305,8 @@ class MonthlyBacktestRunner:
     with busy_timeout for write contention.
     """
 
-    def __init__(self, max_workers: int = 2, scan_workers: int = 1, verbose: bool = False):
+    def __init__(self, max_workers: int = 2, scan_workers: int = 1, verbose: bool = False,
+                 qualification_pct_override: float = None):
         """
         Initialize MonthlyBacktestRunner.
 
@@ -315,10 +316,12 @@ class MonthlyBacktestRunner:
                 within each month. >1 uses multiprocessing (best for cached
                 re-runs where all data is in SQLite). Default 1 (sequential).
             verbose: Enable verbose/debug logging
+            qualification_pct_override: Override qualification threshold (e.g., 15 for 15%)
         """
         self.max_workers = max_workers
         self.scan_workers = scan_workers
         self.verbose = verbose
+        self.qualification_pct_override = qualification_pct_override
 
     def run_month(
         self,
@@ -387,8 +390,12 @@ class MonthlyBacktestRunner:
             from config import Config
             cfg = Config._load_yaml_only()
             scanner_cfg = cfg.get("scanner", {})
+            _mover_threshold = 0.10  # default: 10%
+            if self.qualification_pct_override is not None:
+                _mover_threshold = min(self.qualification_pct_override / 100.0, 0.10)
             movers = find_big_movers(
                 daily_bars,
+                threshold=_mover_threshold,
                 universe_dict=universe_dict,
                 price_min=float(scanner_cfg.get("price_min", 2.0)),
                 price_max=float(scanner_cfg.get("price_max", 20.0)),
@@ -457,7 +464,8 @@ class MonthlyBacktestRunner:
             # Run backtests — use multiprocessing if scan_workers > 1
             if self.scan_workers > 1:
                 results = run_batch_backtest_parallel(
-                    movers, db_path=str(db.db_path), max_workers=self.scan_workers
+                    movers, db_path=str(db.db_path), max_workers=self.scan_workers,
+                    qualification_pct_override=self.qualification_pct_override
                 )
             else:
                 runner = BacktestRunner()  # uses from_config() for all settings

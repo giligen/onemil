@@ -109,7 +109,7 @@ def _make_plan(symbol="TEST"):
 @pytest.fixture
 def engine(mock_alpaca, db, mock_detector, mock_planner, mock_executor, mock_position_manager):
     """TradingEngine with all mocked dependencies."""
-    return TradingEngine(
+    eng = TradingEngine(
         alpaca_client=mock_alpaca,
         db=db,
         detector=mock_detector,
@@ -119,6 +119,9 @@ def engine(mock_alpaca, db, mock_detector, mock_planner, mock_executor, mock_pos
         pattern_poll_interval=60,
         enabled=True,
     )
+    # Disable quality filter in tests — mock bars don't have OHLCV columns
+    eng.quality_filter_enabled = False
+    return eng
 
 
 # ===========================================================================
@@ -334,6 +337,7 @@ class TestNotifierIntegration:
             executor=mock_executor, position_manager=mock_position_manager,
             notifier=mock_notifier, enabled=True,
         )
+        engine.quality_filter_enabled = False  # Mock bars don't have OHLCV
         bars = pd.DataFrame({'open': [4.0], 'high': [4.1], 'low': [3.9],
                             'close': [4.05], 'volume': [100000]})
         mock_alpaca.get_1min_bars.return_value = bars
@@ -361,6 +365,7 @@ class TestNotifierIntegration:
             executor=mock_executor, position_manager=mock_position_manager,
             notifier=mock_notifier, enabled=True,
         )
+        engine.quality_filter_enabled = False  # Mock bars don't have OHLCV
         bars = pd.DataFrame({'open': [4.0], 'high': [4.1], 'low': [3.9],
                             'close': [4.05], 'volume': [100000]})
         mock_alpaca.get_1min_bars.return_value = bars

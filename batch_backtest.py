@@ -805,13 +805,17 @@ def _backtest_worker(args: Tuple) -> Optional[dict]:
     Returns:
         Serializable dict with backtest results, or None on error
     """
-    # Unpack args — supports both legacy 3-tuple and extended 5-tuple
-    if len(args) == 5:
+    # Unpack args — supports legacy 3-tuple, 5-tuple, and extended 6-tuple
+    if len(args) >= 6:
+        symbol, trade_date_iso, db_path, prev_close, min_bv_override, qual_pct_override = args
+    elif len(args) == 5:
         symbol, trade_date_iso, db_path, prev_close, min_bv_override = args
+        qual_pct_override = None
     else:
         symbol, trade_date_iso, db_path = args
         prev_close = 0.0
         min_bv_override = 0
+        qual_pct_override = None
 
     try:
         from persistence.database import Database
@@ -842,6 +846,7 @@ def _backtest_worker(args: Tuple) -> Optional[dict]:
 
             runner = BacktestRunner()  # uses from_config() for all settings
             runner._min_breakout_vol_override = min_bv_override
+            runner.set_db_path(db_path)
 
             # Fetch prev day bars for MACD warm-up
             prev_day_bars = None
@@ -866,7 +871,8 @@ def _backtest_worker(args: Tuple) -> Optional[dict]:
                                 avg_daily_volume=avg_vol,
                                 volume_profile=vol_profile,
                                 prev_close=_prev_close,
-                                prev_day_bars=prev_day_bars)
+                                prev_day_bars=prev_day_bars,
+                                qualification_pct_override=qual_pct_override)
             # Attach point-in-time volume for cache
             for trade in result.trades_simulated:
                 trade._avg_volume_20d = avg_vol or 0
@@ -1029,6 +1035,7 @@ def run_batch_backtest_parallel(
     max_workers: int = 4,
     market_regime: Optional['MarketRegimeFilter'] = None,
     max_consecutive_losses: int = 0,
+    qualification_pct_override: Optional[float] = None,
 ) -> List[BacktestResult]:
     """
     Run backtests in parallel using multiprocessing.
@@ -1093,7 +1100,7 @@ def run_batch_backtest_parallel(
 
         for sym, d, prev_close in date_movers:
             filtered_items.append(
-                (sym, d.isoformat(), db_path, prev_close, min_bv_override)
+                (sym, d.isoformat(), db_path, prev_close, min_bv_override, qualification_pct_override)
             )
 
     if friday_skipped:
@@ -1855,6 +1862,14 @@ def main():
         help="Force regeneration even if cache exists"
     )
     parser.add_argument(
+        "--skip-missing", action="store_true",
+        help="Skip auto-building missing dates (faster filtered runs from cache)"
+    )
+    parser.add_argument(
+        "--cache-file", type=str, default=None,
+        help="Override cache CSV path (e.g., data/bull_flag_cache_e50_x30_t15.csv)"
+    )
+    parser.add_argument(
         "--threshold", type=float, default=None,
         help="Override intraday_change_pct_min (e.g., 20 for 20%%)"
     )
@@ -1922,6 +1937,7 @@ def main():
             max_workers=args.workers,
             scan_workers=args.scan_workers,
             verbose=args.verbose,
+            qualification_pct_override=args.threshold,
         )
         master_csv = runner.run_all(start_date, end_date, output_dir="backtest_results")
         logger.info(f"Monthly backtest complete: {master_csv}")
@@ -2043,8 +2059,10 @@ def main():
         universe_dict = {s['symbol']: s for s in db.get_active_universe()}
 
         scanner_cfg = cfg.get("scanner", {})
-        # Use 10% for cache builds (broadest), config value otherwise
-        if args.build_cache:
+        # Use threshold if specified, else 10% for cache builds (broadest), else config value
+        if args.build_cache and args.threshold is not None:
+            intraday_threshold = min(args.threshold / 100.0, 0.10)  # Use lower of threshold or 10%
+        elif args.build_cache:
             intraday_threshold = 0.10  # Cache at 10% — filter at query time
         elif args.threshold is not None:
             intraday_threshold = args.threshold / 100.0
@@ -2148,14 +2166,20 @@ def main():
     # Step 4: Run backtests — use cache if available
     _entry_slip = float(trading_cfg.get("entry_slippage_pct", 0.005))
     _exit_slip = float(trading_cfg.get("exit_slippage_pct", 0.003))
-    _cache_path = _get_bull_flag_cache_path(_entry_slip, _exit_slip)
-    # Also check legacy path for backward compat
-    if os.path.exists(_cache_path):
-        _active_cache = _cache_path
-    elif os.path.exists(BULL_FLAG_CACHE_PATH):
-        _active_cache = BULL_FLAG_CACHE_PATH
+    if args.cache_file:
+        _active_cache = args.cache_file
+        if not os.path.exists(_active_cache):
+            logger.error(f"Cache file not found: {_active_cache}")
+            return
     else:
-        _active_cache = None
+        _cache_path = _get_bull_flag_cache_path(_entry_slip, _exit_slip)
+        # Also check legacy path for backward compat
+        if os.path.exists(_cache_path):
+            _active_cache = _cache_path
+        elif os.path.exists(BULL_FLAG_CACHE_PATH):
+            _active_cache = BULL_FLAG_CACHE_PATH
+        else:
+            _active_cache = None
     use_cache = _active_cache is not None and not args.build_cache and not args.no_cache
 
     if use_cache:
@@ -2167,165 +2191,166 @@ def main():
             position_size=_pos_size,
         )
 
-        # Auto-build missing dates: check which trading days in range are NOT cached
-        cached_dates = set(t['date'] for t in cached_trades)
-        # Get all trading days in range from Alpaca calendar
-        try:
-            if not client:
-                client = AlpacaClient(api_key=api_key, api_secret=api_secret)
-            _cal = client.get_market_calendar(start_date, end_date)
-            all_trading_days = set(str(d['date']) for d in _cal)
-        except Exception:
-            # Fallback: generate weekdays
-            all_trading_days = set()
-            d = start_date
-            while d <= end_date:
-                if d.weekday() < 5:
-                    all_trading_days.add(str(d))
-                d += timedelta(days=1)
+        # Auto-build missing dates (skip with --skip-missing for fast cached runs)
+        if not args.skip_missing:
+            cached_dates = set(t['date'] for t in cached_trades)
+            # Get all trading days in range from Alpaca calendar
+            try:
+                if not client:
+                    client = AlpacaClient(api_key=api_key, api_secret=api_secret)
+                _cal = client.get_market_calendar(start_date, end_date)
+                all_trading_days = set(str(d['date']) for d in _cal)
+            except Exception:
+                # Fallback: generate weekdays
+                all_trading_days = set()
+                d = start_date
+                while d <= end_date:
+                    if d.weekday() < 5:
+                        all_trading_days.add(str(d))
+                    d += timedelta(days=1)
 
-        # Also include dates from the full cache (beyond requested range) to avoid
-        # re-processing dates that exist in cache but outside the current query
-        _all_cached = set()
-        try:
-            import csv as _csv
-            with open(_active_cache) as _f:
-                for _row in _csv.DictReader(_f):
-                    _all_cached.add(_row['date'])
-        except Exception:
-            pass
+            # Also include dates from the full cache (beyond requested range) to avoid
+            # re-processing dates that exist in cache but outside the current query
+            _all_cached = set()
+            try:
+                import csv as _csv
+                with open(_active_cache) as _f:
+                    for _row in _csv.DictReader(_f):
+                        _all_cached.add(_row['date'])
+            except Exception:
+                pass
 
-        missing_days = sorted(all_trading_days - _all_cached)
-        if missing_days:
-            logger.info(f"Auto-building {len(missing_days)} missing dates: {missing_days[0]} to {missing_days[-1]}")
-            # Fetch daily bars for missing dates
-            if not client:
-                client = AlpacaClient(api_key=api_key, api_secret=api_secret)
-            if not symbols:
-                symbols = [s['symbol'] for s in db.get_active_universe()]
-            _miss_start = date.fromisoformat(missing_days[0])
-            _miss_end = date.fromisoformat(missing_days[-1])
-            universe_dict = {s['symbol']: s for s in db.get_active_universe()}
+            missing_days = sorted(all_trading_days - _all_cached)
+            if missing_days:
+                logger.info(f"Auto-building {len(missing_days)} missing dates: {missing_days[0]} to {missing_days[-1]}")
+                # Fetch daily bars for missing dates
+                if not client:
+                    client = AlpacaClient(api_key=api_key, api_secret=api_secret)
+                if not symbols:
+                    symbols = [s['symbol'] for s in db.get_active_universe()]
+                _miss_start = date.fromisoformat(missing_days[0])
+                _miss_end = date.fromisoformat(missing_days[-1])
+                universe_dict = {s['symbol']: s for s in db.get_active_universe()}
 
-            # For today: use live snapshots to find movers (daily bars incomplete)
-            _today = date.today()
-            _today_str = str(_today)
-            if _today_str in missing_days:
-                logger.info("Today detected in missing dates — using live snapshots for movers")
-                _snap_symbols = list(universe_dict.keys())
-                snapshots = client.get_snapshots(_snap_symbols)
-                _today_movers = []
-                for sym, snap in snapshots.items():
-                    prev_close = snap.get('prev_close', 0)
-                    high = snap.get('high', 0)
-                    if prev_close > 0 and high > 0:
-                        move = (high - prev_close) / prev_close
-                        if move >= 0.10:  # 10% threshold for cache
-                            _today_movers.append((sym, _today, prev_close, move * 100))
-                logger.info(f"Live snapshots: {len(_today_movers)} movers with 10%+ move today")
-                # For non-today missing days, use daily bars as normal
-                _other_days = [d for d in missing_days if d != _today_str]
-            else:
-                _today_movers = []
-                _other_days = missing_days
+                # For today: use live snapshots to find movers (daily bars incomplete)
+                _today = date.today()
+                _today_str = str(_today)
+                if _today_str in missing_days:
+                    logger.info("Today detected in missing dates — using live snapshots for movers")
+                    _snap_symbols = list(universe_dict.keys())
+                    snapshots = client.get_snapshots(_snap_symbols)
+                    _today_movers = []
+                    for sym, snap in snapshots.items():
+                        prev_close = snap.get('prev_close', 0)
+                        high = snap.get('high', 0)
+                        if prev_close > 0 and high > 0:
+                            move = (high - prev_close) / prev_close
+                            if move >= 0.10:  # 10% threshold for cache
+                                _today_movers.append((sym, _today, prev_close, move * 100))
+                    logger.info(f"Live snapshots: {len(_today_movers)} movers with 10%+ move today")
+                    # For non-today missing days, use daily bars as normal
+                    _other_days = [d for d in missing_days if d != _today_str]
+                else:
+                    _today_movers = []
+                    _other_days = missing_days
 
-            # Fetch daily bars for non-today missing days
-            if _other_days:
-                _other_start = date.fromisoformat(_other_days[0])
-                _other_end = date.fromisoformat(_other_days[-1])
-                daily_bars = fetch_daily_bars_cached(symbols, _other_start - timedelta(days=7), _other_end, client, db)
-                _other_movers = find_big_movers(
-                    daily_bars, threshold=0.10,
-                    universe_dict=universe_dict,
-                    price_min=float(cfg.get("scanner", {}).get("price_min", 2.0)),
-                    price_max=float(cfg.get("scanner", {}).get("price_max", 20.0)),
-                    float_max=int(cfg.get("scanner", {}).get("float_max", 10_000_000)),
-                    start_date=_other_start, end_date=_other_end,
-                )
-            else:
-                _other_movers = []
-
-            _miss_movers = _today_movers + _other_movers
-            if _miss_movers:
-                logger.info(f"Found {len(_miss_movers)} movers on missing dates, running backtests...")
-                # Run backtests on missing movers (reuse existing runner setup)
-                from backtest import BacktestRunner
-                runner = BacktestRunner(realistic=True)
-                _new_trades = []
-                volume_profiles = db.get_all_volume_profiles()
-                for mover_tuple in _miss_movers:
-                    sym, trade_date = mover_tuple[0], mover_tuple[1]
-                    td_str = str(trade_date)
-                    bars = get_1min_bars_cached(sym, trade_date, client, db)
-                    if bars is None or len(bars) < runner.MIN_BARS_FOR_SETUP:
-                        continue
-                    # Point-in-time 20d avg volume from daily_bars (no look-ahead)
-                    _vol_rows = db._cache_conn.execute(
-                        'SELECT volume FROM daily_bars WHERE symbol=? AND bar_date < ? ORDER BY bar_date DESC LIMIT 20',
-                        (sym, td_str)).fetchall()
-                    avg_vol = int(sum(r[0] for r in _vol_rows) / len(_vol_rows)) if _vol_rows else 0
-                    vol_profile = volume_profiles.get(sym)
-                    # Compute daily range for cache
-                    _range_pct = mover_tuple[3] if len(mover_tuple) > 3 else 0
-                    if not _range_pct:
-                        try:
-                            _day_bars = daily_bars.get(sym, [])
-                            _day_bar = next((b for b in _day_bars if str(b.get('date', '')) == td_str), None)
-                            if _day_bar and _day_bar.get('low', 0) > 0:
-                                _range_pct = (_day_bar['high'] - _day_bar['low']) / _day_bar['low'] * 100
-                        except (NameError, UnboundLocalError):
-                            pass  # daily_bars not available (today-only mode)
-
-                    # Fetch previous day bars for MACD warm-up (matches run_batch_backtest)
-                    _prev_day_bars = None
-                    if runner.macd_zones_enabled:
-                        _prev_td = _get_previous_trading_date(trade_date)
-                        if _prev_td:
-                            _prev_day_bars = get_1min_bars_cached(sym, _prev_td, client, db)
-                            if _prev_day_bars is not None and not _prev_day_bars.empty:
-                                logger.debug(f"{sym}: MACD warm-up loaded ({len(_prev_day_bars)} bars from {_prev_td})")
-                            else:
-                                logger.warning(f"{sym}: No prev-day bars for MACD warm-up ({_prev_td})")
-
-                    # Get prev_close for volume gates
-                    _prev_close = mover_tuple[2] if len(mover_tuple) > 2 else None
-                    if not _prev_close and db:
-                        _pc_row = db._cache_conn.execute(
-                            'SELECT close FROM daily_bars WHERE symbol = ? AND bar_date < ? ORDER BY bar_date DESC LIMIT 1',
-                            (sym, td_str)).fetchone()
-                        _prev_close = float(_pc_row[0]) if _pc_row else None
-
-                    result = runner.run(sym, bars, td_str,
-                                        avg_daily_volume=avg_vol,
-                                        volume_profile=vol_profile,
-                                        prev_close=_prev_close,
-                                        prev_day_bars=_prev_day_bars)
-                    for trade in result.trades_simulated:
-                        trade._daily_range_pct = _range_pct
-                        trade._avg_volume_20d = avg_vol  # point-in-time for cache
-                        _new_trades.append(trade)
-
-                if _new_trades:
-                    # Append to cache CSV
-                    _append_count = 0
-                    with open(_active_cache, 'a', newline='') as _f:
-                        import csv as _csv
-                        writer = _csv.DictWriter(_f, fieldnames=CSV_HEADERS)
-                        for trade in _new_trades:
-                            row = _trade_to_cache_row(trade)
-                            if row:
-                                writer.writerow(row)
-                                _append_count += 1
-                    logger.info(f"Appended {_append_count} trades to cache for {len(missing_days)} new dates")
-
-                    # Reload cache with new trades included
-                    cached_trades = load_bull_flag_cache(
-                        _active_cache, start_date, end_date,
-                        entry_slippage_pct=_entry_slip, exit_slippage_pct=_exit_slip,
-                        position_size=_pos_size,
+                # Fetch daily bars for non-today missing days
+                if _other_days:
+                    _other_start = date.fromisoformat(_other_days[0])
+                    _other_end = date.fromisoformat(_other_days[-1])
+                    daily_bars = fetch_daily_bars_cached(symbols, _other_start - timedelta(days=7), _other_end, client, db)
+                    _other_movers = find_big_movers(
+                        daily_bars, threshold=0.10,
+                        universe_dict=universe_dict,
+                        price_min=float(cfg.get("scanner", {}).get("price_min", 2.0)),
+                        price_max=float(cfg.get("scanner", {}).get("price_max", 20.0)),
+                        float_max=int(cfg.get("scanner", {}).get("float_max", 10_000_000)),
+                        start_date=_other_start, end_date=_other_end,
                     )
-            else:
-                logger.info(f"No movers found on {len(missing_days)} missing dates")
+                else:
+                    _other_movers = []
+
+                _miss_movers = _today_movers + _other_movers
+                if _miss_movers:
+                    logger.info(f"Found {len(_miss_movers)} movers on missing dates, running backtests...")
+                    # Run backtests on missing movers (reuse existing runner setup)
+                    from backtest import BacktestRunner
+                    runner = BacktestRunner(realistic=True)
+                    _new_trades = []
+                    volume_profiles = db.get_all_volume_profiles()
+                    for mover_tuple in _miss_movers:
+                        sym, trade_date = mover_tuple[0], mover_tuple[1]
+                        td_str = str(trade_date)
+                        bars = get_1min_bars_cached(sym, trade_date, client, db)
+                        if bars is None or len(bars) < runner.MIN_BARS_FOR_SETUP:
+                            continue
+                        # Point-in-time 20d avg volume from daily_bars (no look-ahead)
+                        _vol_rows = db._cache_conn.execute(
+                            'SELECT volume FROM daily_bars WHERE symbol=? AND bar_date < ? ORDER BY bar_date DESC LIMIT 20',
+                            (sym, td_str)).fetchall()
+                        avg_vol = int(sum(r[0] for r in _vol_rows) / len(_vol_rows)) if _vol_rows else 0
+                        vol_profile = volume_profiles.get(sym)
+                        # Compute daily range for cache
+                        _range_pct = mover_tuple[3] if len(mover_tuple) > 3 else 0
+                        if not _range_pct:
+                            try:
+                                _day_bars = daily_bars.get(sym, [])
+                                _day_bar = next((b for b in _day_bars if str(b.get('date', '')) == td_str), None)
+                                if _day_bar and _day_bar.get('low', 0) > 0:
+                                    _range_pct = (_day_bar['high'] - _day_bar['low']) / _day_bar['low'] * 100
+                            except (NameError, UnboundLocalError):
+                                pass  # daily_bars not available (today-only mode)
+
+                        # Fetch previous day bars for MACD warm-up (matches run_batch_backtest)
+                        _prev_day_bars = None
+                        if runner.macd_zones_enabled:
+                            _prev_td = _get_previous_trading_date(trade_date)
+                            if _prev_td:
+                                _prev_day_bars = get_1min_bars_cached(sym, _prev_td, client, db)
+                                if _prev_day_bars is not None and not _prev_day_bars.empty:
+                                    logger.debug(f"{sym}: MACD warm-up loaded ({len(_prev_day_bars)} bars from {_prev_td})")
+                                else:
+                                    logger.warning(f"{sym}: No prev-day bars for MACD warm-up ({_prev_td})")
+
+                        # Get prev_close for volume gates
+                        _prev_close = mover_tuple[2] if len(mover_tuple) > 2 else None
+                        if not _prev_close and db:
+                            _pc_row = db._cache_conn.execute(
+                                'SELECT close FROM daily_bars WHERE symbol = ? AND bar_date < ? ORDER BY bar_date DESC LIMIT 1',
+                                (sym, td_str)).fetchone()
+                            _prev_close = float(_pc_row[0]) if _pc_row else None
+
+                        result = runner.run(sym, bars, td_str,
+                                            avg_daily_volume=avg_vol,
+                                            volume_profile=vol_profile,
+                                            prev_close=_prev_close,
+                                            prev_day_bars=_prev_day_bars)
+                        for trade in result.trades_simulated:
+                            trade._daily_range_pct = _range_pct
+                            trade._avg_volume_20d = avg_vol  # point-in-time for cache
+                            _new_trades.append(trade)
+
+                    if _new_trades:
+                        # Append to cache CSV
+                        _append_count = 0
+                        with open(_active_cache, 'a', newline='') as _f:
+                            import csv as _csv
+                            writer = _csv.DictWriter(_f, fieldnames=CSV_HEADERS)
+                            for trade in _new_trades:
+                                row = _trade_to_cache_row(trade)
+                                if row:
+                                    writer.writerow(row)
+                                    _append_count += 1
+                        logger.info(f"Appended {_append_count} trades to cache for {len(missing_days)} new dates")
+
+                        # Reload cache with new trades included
+                        cached_trades = load_bull_flag_cache(
+                            _active_cache, start_date, end_date,
+                            entry_slippage_pct=_entry_slip, exit_slippage_pct=_exit_slip,
+                            position_size=_pos_size,
+                        )
+                else:
+                    logger.info(f"No movers found on {len(missing_days)} missing dates")
         # Determine threshold for filtering
         if args.threshold is not None:
             _min_range = args.threshold

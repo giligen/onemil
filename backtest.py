@@ -951,6 +951,25 @@ class BacktestRunner:
                 f"normal → {self.macd_normal_multiplier}x"
             )
 
+        # Quality filter: skip low-probability setups based on pre-entry features
+        qf_cfg = trading_cfg.get("quality_filter", {})
+        self.quality_filter_enabled = bool(qf_cfg.get("enabled", False))
+        self.qf_max_vwap_dist = float(qf_cfg.get("max_vwap_distance_pct", 4.0))
+        self.qf_gap_fade_threshold = float(qf_cfg.get("gap_fade_threshold_pct", 15.0))
+        self.qf_min_spy_return = float(qf_cfg.get("min_spy_return_pct", -0.3))
+        self.qf_slow_pole_max_bars = int(qf_cfg.get("slow_pole_max_bars", 15))
+        self.qf_slow_pole_min_gain = float(qf_cfg.get("slow_pole_min_gain_pct", 5.0))
+        self._spy_bars_cache: Dict[str, pd.DataFrame] = {}
+        self._db_path: Optional[str] = None
+
+        if self.quality_filter_enabled:
+            logger.info(
+                f"Quality filter: VWAP>{self.qf_max_vwap_dist}%, "
+                f"gap_fade>{self.qf_gap_fade_threshold}%, "
+                f"SPY<{self.qf_min_spy_return}%, "
+                f"slow_pole>{self.qf_slow_pole_max_bars}bars/<{self.qf_slow_pole_min_gain}%"
+            )
+
     _ET = pytz.timezone('US/Eastern')
 
     def _get_macd_zone_multiplier(
@@ -1024,6 +1043,108 @@ class BacktestRunner:
             logger.debug(f"  MACD zone: {macd_pct:.2f}% → normal → {mult}x risk")
             return mult
 
+    def set_db_path(self, db_path: str) -> None:
+        """Set DB path for SPY bar loading (quality filter)."""
+        self._db_path = db_path
+
+    def _compute_vwap(self, bars: pd.DataFrame, up_to_idx: int) -> Optional[float]:
+        """Compute VWAP from bars[0:up_to_idx+1]. All bars are complete — no look-ahead."""
+        if up_to_idx < 0:
+            return None
+        slice_end = min(up_to_idx + 1, len(bars))
+        highs = bars['high'].iloc[:slice_end].values
+        lows = bars['low'].iloc[:slice_end].values
+        closes = bars['close'].iloc[:slice_end].values
+        volumes = bars['volume'].iloc[:slice_end].values
+        cum_vol = volumes.sum()
+        if cum_vol <= 0:
+            return None
+        typical_prices = (highs + lows + closes) / 3.0
+        return float((typical_prices * volumes).sum() / cum_vol)
+
+    def _load_spy_bars(self, trade_date: str) -> Optional[pd.DataFrame]:
+        """Load SPY 1-min bars for a date, with caching."""
+        if trade_date in self._spy_bars_cache:
+            return self._spy_bars_cache[trade_date]
+
+        db_path = self._db_path
+        if not db_path:
+            # Try default path
+            db_path = "data/cache.db"
+
+        try:
+            import sqlite3
+            conn = sqlite3.connect(db_path)
+            df = pd.read_sql_query(
+                "SELECT timestamp, open, high, low, close, volume FROM intraday_bars_1min "
+                "WHERE symbol='SPY' AND DATE(timestamp)=? ORDER BY timestamp",
+                conn, params=(trade_date,)
+            )
+            conn.close()
+            if df.empty:
+                self._spy_bars_cache[trade_date] = None
+                return None
+            self._spy_bars_cache[trade_date] = df
+            return df
+        except Exception as e:
+            logger.debug(f"Failed to load SPY bars for {trade_date}: {e}")
+            self._spy_bars_cache[trade_date] = None
+            return None
+
+    def _check_quality_filter(
+        self, symbol: str, bars: pd.DataFrame, setup, bar_idx: int,
+        plan, prev_close: Optional[float],
+    ) -> tuple:
+        """Check quality filter conditions. All features are known at setup detection time.
+
+        Returns (pass: bool, reason: str). If pass=False, skip this setup.
+        """
+        breakout_level = setup.breakout_level
+
+        # 1. VWAP overextension: is breakout level too far above VWAP?
+        vwap = self._compute_vwap(bars, bar_idx)
+        if vwap and vwap > 0:
+            vwap_dist_pct = (breakout_level - vwap) / vwap * 100
+            if vwap_dist_pct > self.qf_max_vwap_dist:
+                return (False, f"VWAP +{vwap_dist_pct:.1f}% > {self.qf_max_vwap_dist}% (overextended)")
+
+        # 2. Gap fading: stock gapped up big but pulled back below open
+        if prev_close and prev_close > 0:
+            open_price = float(bars.iloc[0]['open'])
+            gap_pct = (open_price - prev_close) / prev_close * 100
+            if gap_pct >= self.qf_gap_fade_threshold and breakout_level < open_price:
+                return (False, f"gap_fade: gap +{gap_pct:.1f}% but breakout ${breakout_level:.2f} < open ${open_price:.2f}")
+
+        # 3. SPY down: risk-off environment
+        trade_date = str(bars.index[0])[:10] if hasattr(bars.index[0], 'strftime') else None
+        if not trade_date:
+            # Try extracting from timestamp column
+            try:
+                ts = str(bars.iloc[0].name)
+                trade_date = ts[:10]
+            except Exception:
+                trade_date = None
+
+        if trade_date:
+            spy_bars = self._load_spy_bars(trade_date)
+            if spy_bars is not None and len(spy_bars) > 1:
+                spy_open = float(spy_bars.iloc[0]['open'])
+                # Use bar_idx-1 (previous completed bar) to avoid look-ahead
+                spy_idx = min(max(0, bar_idx - 1), len(spy_bars) - 1)
+                spy_close = float(spy_bars.iloc[spy_idx]['close'])
+                if spy_open > 0:
+                    spy_return = (spy_close - spy_open) / spy_open * 100
+                    if spy_return < self.qf_min_spy_return:
+                        return (False, f"SPY {spy_return:+.2f}% < {self.qf_min_spy_return}% (risk-off)")
+
+        # 4. Slow weak pole: pattern took too long with too little gain
+        pole_bars = setup.pole_end_idx - setup.pole_start_idx
+        pole_gain = setup.pole_gain_pct
+        if pole_bars > self.qf_slow_pole_max_bars and pole_gain < self.qf_slow_pole_min_gain:
+            return (False, f"slow_pole: {pole_bars} bars, {pole_gain:.1f}% gain (weak momentum)")
+
+        return (True, "")
+
     def set_spy_macd_cutoff(self, cutoff) -> None:
         """Set SPY MACD cutoff filter for the current trading day.
 
@@ -1053,6 +1174,7 @@ class BacktestRunner:
         volume_profile: Optional[Dict[str, int]] = None,
         prev_close: Optional[float] = None,
         prev_day_bars: Optional[pd.DataFrame] = None,
+        qualification_pct_override: Optional[float] = None,
     ) -> BacktestResult:
         """
         Run backtest for a symbol over a day's bars.
@@ -1096,7 +1218,8 @@ class BacktestRunner:
         if self.realistic:
             return self._run_realistic(symbol, bars, trade_date,
                                        avg_daily_volume, volume_profile,
-                                       prev_close=prev_close)
+                                       prev_close=prev_close,
+                                       qualification_pct_override=qualification_pct_override)
         return self._run_fantasy(symbol, bars, trade_date)
 
     def _run_fantasy(self, symbol: str, bars: pd.DataFrame, trade_date: str) -> BacktestResult:
@@ -1267,6 +1390,7 @@ class BacktestRunner:
         avg_daily_volume: Optional[int] = None,
         volume_profile: Optional[Dict[str, int]] = None,
         prev_close: Optional[float] = None,
+        qualification_pct_override: Optional[float] = None,
     ) -> BacktestResult:
         """
         Realistic backtest: detect_setup() fires before breakout, places pending
@@ -1306,11 +1430,14 @@ class BacktestRunner:
         # Real-time qualification gate: simulate the scanner's qualification step.
         # Without prev_close, all bars are scanned (backward compatible).
         # With prev_close, scanning starts only after the stock hits the threshold.
-        from config import Config
-        _cfg = Config._load_yaml_only()
-        qualification_pct = float(
-            _cfg.get("scanner", {}).get("intraday_change_pct_min", 20.0)
-        ) / 100.0  # Convert 20.0 → 0.20
+        if qualification_pct_override is not None:
+            qualification_pct = qualification_pct_override / 100.0
+        else:
+            from config import Config
+            _cfg = Config._load_yaml_only()
+            qualification_pct = float(
+                _cfg.get("scanner", {}).get("intraday_change_pct_min", 20.0)
+            ) / 100.0  # Convert 20.0 → 0.20
         qualified = prev_close is None or prev_close <= 0
         qualification_bar = 0
 
@@ -1321,6 +1448,11 @@ class BacktestRunner:
 
         running_high = 0.0
         running_low = float('inf')
+        # Seed running extremes from early bars (before scan loop starts)
+        # so V-reversal qualification doesn't miss the opening range
+        for j in range(min(self.MIN_BARS_FOR_SETUP - 1, len(bars))):
+            running_high = max(running_high, bars.iloc[j]['high'])
+            running_low = min(running_low, bars.iloc[j]['low'])
 
         for i in range(self.MIN_BARS_FOR_SETUP - 1, last_end):
             # Track intraday extremes for V-reversal detection
@@ -1695,6 +1827,14 @@ class BacktestRunner:
                             total_risk=plan.risk_per_share * ud_shares,
                             pattern=plan.pattern,
                         )
+
+                # Quality filter: skip low-probability setups
+                if self.quality_filter_enabled:
+                    qf_pass, qf_reason = self._check_quality_filter(
+                        symbol, bars, setup, i, plan, prev_close)
+                    if not qf_pass:
+                        logger.info(f"  QUALITY FILTER SKIP: {qf_reason}")
+                        continue
 
                 pending_order = PendingBuyStop(
                     setup=setup,

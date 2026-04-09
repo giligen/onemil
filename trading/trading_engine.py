@@ -175,6 +175,25 @@ class TradingEngine:
         self.macd_strong_pos_multiplier = float(macd_zones_cfg.get("strong_pos_multiplier", 1.5))
         self.macd_normal_multiplier = float(macd_zones_cfg.get("normal_multiplier", 1.0))
 
+        # Quality filter: skip low-probability setups (validated on 15mo data)
+        qf_cfg = _cfg.get("trading", {}).get("quality_filter", {})
+        self.quality_filter_enabled = bool(qf_cfg.get("enabled", False))
+        self.qf_max_vwap_dist = float(qf_cfg.get("max_vwap_distance_pct", 4.0))
+        self.qf_gap_fade_threshold = float(qf_cfg.get("gap_fade_threshold_pct", 15.0))
+        self.qf_min_spy_return = float(qf_cfg.get("min_spy_return_pct", -0.3))
+        self.qf_slow_pole_max_bars = int(qf_cfg.get("slow_pole_max_bars", 15))
+        self.qf_slow_pole_min_gain = float(qf_cfg.get("slow_pole_min_gain_pct", 5.0))
+        self._spy_bars_cache: Optional[pd.DataFrame] = None  # cached SPY 1-min bars for quality filter
+        self._spy_bars_cache_date: Optional[str] = None
+
+        if self.quality_filter_enabled:
+            logger.info(
+                f"Quality filter: VWAP>{self.qf_max_vwap_dist}%, "
+                f"gap_fade>{self.qf_gap_fade_threshold}%, "
+                f"SPY<{self.qf_min_spy_return}%, "
+                f"slow_pole>{self.qf_slow_pole_max_bars}bars/<{self.qf_slow_pole_min_gain}%"
+            )
+
         # SPY MACD afternoon cutoff
         spy_cutoff_cfg = _cfg.get("trading", {}).get("spy_macd_cutoff", {})
         self._spy_macd_cutoff_enabled = bool(spy_cutoff_cfg.get("enabled", False))
@@ -281,6 +300,92 @@ class TradingEngine:
             self._macd_warmup_cache[symbol] = None
             logger.warning(f"{symbol}: Failed to fetch MACD warm-up: {e}")
 
+    def _compute_vwap(self, bars: pd.DataFrame) -> Optional[float]:
+        """Compute VWAP from all bars (completed data only, no in-progress bar).
+
+        VWAP = Σ(typical_price × volume) / Σ(volume)
+        typical_price = (H + L + C) / 3
+        """
+        if bars is None or len(bars) < 1:
+            return None
+        try:
+            highs = bars['high'].values
+            lows = bars['low'].values
+            closes = bars['close'].values
+            volumes = bars['volume'].values
+            cum_vol = volumes.sum()
+            if cum_vol <= 0:
+                return None
+            typical_prices = (highs + lows + closes) / 3.0
+            return float((typical_prices * volumes).sum() / cum_vol)
+        except (KeyError, TypeError):
+            return None
+
+    def _get_spy_return(self) -> Optional[float]:
+        """Get SPY return from open to now using cached bars. No extra API calls.
+
+        Uses the SPY bars already fetched by _refresh_spy_macd().
+        Returns SPY return as percentage, or None if unavailable.
+        """
+        if self._spy_bars_cache is None or len(self._spy_bars_cache) < 2:
+            return None
+        spy_open = float(self._spy_bars_cache.iloc[0]['open'])
+        spy_close = float(self._spy_bars_cache.iloc[-1]['close'])
+        if spy_open <= 0:
+            return None
+        return (spy_close - spy_open) / spy_open * 100
+
+    def _check_quality_filter(
+        self, symbol: str, bars: pd.DataFrame, setup, plan,
+        prev_close: Optional[float] = None,
+    ) -> tuple:
+        """Check quality filter conditions. All features known at setup detection time.
+
+        Args:
+            symbol: Stock ticker
+            bars: 1-min bars from market open to now (completed bars)
+            setup: BullFlagSetup with pattern measurements
+            plan: TradePlan with entry/stop/target
+            prev_close: Previous day's close price (from scanner tracked data)
+
+        Returns:
+            (pass: bool, reason: str). If pass=False, skip this setup.
+        """
+        breakout_level = setup.breakout_level
+
+        # 1. VWAP overextension: breakout level too far above VWAP
+        vwap = self._compute_vwap(bars)
+        if vwap and vwap > 0:
+            vwap_dist_pct = (breakout_level - vwap) / vwap * 100
+            if vwap_dist_pct > self.qf_max_vwap_dist:
+                return (False, f"VWAP +{vwap_dist_pct:.1f}% > {self.qf_max_vwap_dist}% (overextended)")
+
+        # 2. Gap fading: stock gapped up big but breakout is below open
+        if prev_close and prev_close > 0 and len(bars) > 0:
+            try:
+                open_price = float(bars.iloc[0]['open'])
+                gap_pct = (open_price - prev_close) / prev_close * 100
+                if gap_pct >= self.qf_gap_fade_threshold and breakout_level < open_price:
+                    return (False,
+                            f"gap_fade: gap +{gap_pct:.1f}% but breakout "
+                            f"${breakout_level:.2f} < open ${open_price:.2f}")
+            except (KeyError, TypeError):
+                pass  # bars missing 'open' column (test mocks)
+
+        # 3. SPY down: risk-off environment (uses cached SPY bars, no extra API call)
+        spy_return = self._get_spy_return()
+        if spy_return is not None and spy_return < self.qf_min_spy_return:
+            return (False, f"SPY {spy_return:+.2f}% < {self.qf_min_spy_return}% (risk-off)")
+
+        # 4. Slow weak pole: pattern took too long with too little gain
+        pole_bars = setup.pole_end_idx - setup.pole_start_idx
+        pole_gain = setup.pole_gain_pct
+        if pole_bars > self.qf_slow_pole_max_bars and pole_gain < self.qf_slow_pole_min_gain:
+            return (False,
+                    f"slow_pole: {pole_bars} bars, {pole_gain:.1f}% gain (weak momentum)")
+
+        return (True, "")
+
     def _refresh_spy_macd(self) -> None:
         """
         Fetch SPY 1-min bars and compute current MACD histogram.
@@ -288,7 +393,7 @@ class TradingEngine:
         Called each run_pattern_check() cycle when spy_macd_cutoff is enabled.
         Reuses _macd_warmup_cache['SPY'] for prev-day warmup.
         """
-        if not self._spy_macd_cutoff_enabled:
+        if not self._spy_macd_cutoff_enabled and not self.quality_filter_enabled:
             return
         try:
             import pytz as _pytz
@@ -301,6 +406,9 @@ class TradingEngine:
             if spy_bars is None or spy_bars.empty:
                 self._spy_macd_cache = None
                 return
+
+            # Cache SPY bars for quality filter (no extra API call)
+            self._spy_bars_cache = spy_bars
 
             # Warmup: fetch prev day bars for SPY (cache once per day)
             if 'SPY' not in self._macd_warmup_cache:
@@ -1770,6 +1878,17 @@ class TradingEngine:
         # Check position limits (includes midday check)
         if not self.position_manager.can_open_position(symbol):
             return None
+
+        # Quality filter: skip low-probability setups (VWAP, gap fade, SPY, slow pole)
+        if self.quality_filter_enabled:
+            _prev_close = (uni_stock.get('price_close') or 0) if uni_stock else 0
+            qf_pass, qf_reason = self._check_quality_filter(
+                symbol, bars, setup, plan,
+                prev_close=_prev_close if _prev_close > 0 else None,
+            )
+            if not qf_pass:
+                logger.info(f"{symbol}: QUALITY FILTER SKIP: {qf_reason}")
+                return None
 
         # MACD zone filter: dead zone always rejects, scaling only when no risk tier
         # Dead zone = garbage setups (30% WR) → reject regardless of tier
