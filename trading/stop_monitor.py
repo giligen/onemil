@@ -1154,8 +1154,10 @@ class StopMonitor:
                         reason = 'trail_stop' if watch.trailing_active else 'stop_loss'
                         logger.info(f"StopMonitor poll: {sym} {reason} @ ${price:.2f} (stop=${watch.stop_price:.2f})")
                         self._exit_events.put(StopExitEvent(
-                            symbol=sym, exit_price=price, exit_reason=reason,
-                            shares=watch.shares, trade_db_id=watch.trade_db_id,
+                            symbol=sym, stop_price=watch.stop_price,
+                            exit_price=price, shares=watch.shares,
+                            order_id=getattr(watch, 'order_id', ''),
+                            exit_reason=reason, trade_db_id=watch.trade_db_id,
                             submitted_at=time_mod.time(), exit_trigger_price=price,
                             exit_quote_bid=watch.latest_bid, exit_quote_ask=watch.latest_ask,
                             exit_quote_bid_size=snap.get('bid_size', 0),
