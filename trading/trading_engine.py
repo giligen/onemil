@@ -657,6 +657,32 @@ class TradingEngine:
                     f"{symbol}: Buy-stop order FILLED at ${fill_price} — "
                     f"{actual_qty} shares, ID: {order_id}"
                 )
+
+                # Gap-over rejection: if fill is >2% above breakout, close immediately.
+                # 15-month BT data: >2% gap-overs have 23% WR, net losers.
+                # Matches backtest.py:1587 logic.
+                setup = pending.get('setup')
+                if setup and setup.breakout_level > 0:
+                    gap_over_pct = (fill_price - setup.breakout_level) / setup.breakout_level
+                    if gap_over_pct > 0.02:
+                        logger.warning(
+                            f"{symbol}: GAP-OVER REJECTION — fill ${fill_price:.2f} is "
+                            f"{gap_over_pct:.1%} above breakout ${setup.breakout_level:.2f} "
+                            f"(max 2%). Closing position immediately."
+                        )
+                        try:
+                            self.alpaca.close_position(symbol)
+                            if self.notifier:
+                                self.notifier.notify_error(
+                                    f"{symbol}: Gap-over rejection — sold at market "
+                                    f"(fill ${fill_price:.2f} vs breakout ${setup.breakout_level:.2f})",
+                                    component="GapOver"
+                                )
+                        except Exception as e:
+                            logger.error(f"{symbol}: Failed to close gap-over position: {e}")
+                        symbols_to_remove.append(symbol)
+                        continue
+
                 self._traded_symbols.add(symbol)
                 self.position_manager.mark_traded(symbol)
                 symbols_to_remove.append(symbol)

@@ -553,13 +553,13 @@ class TestGapFillStopAdjustment:
 
     def test_gap_fill_adjusts_target_keeps_stop(self, engine, mock_alpaca, db):
         """Fill above breakout adjusts target UP but keeps stop at technical level."""
-        plan, setup = self._setup_filled_order(engine, mock_alpaca, db, fill_price=4.55)
+        plan, setup = self._setup_filled_order(engine, mock_alpaca, db, fill_price=4.48)
 
         # First get_order call returns filled status
         mock_alpaca.get_order.side_effect = [
             {
                 'status': 'filled',
-                'filled_avg_price': 4.55,
+                'filled_avg_price': 4.48,
                 'legs': [],
             },
             # Second get_order call (for gap-fill) returns legs
@@ -580,7 +580,7 @@ class TestGapFillStopAdjustment:
         mock_alpaca.replace_order_stop_price.assert_not_called()
 
         # Target adjusted up
-        expected_target = round(4.55 + plan.risk_per_share * plan.risk_reward_ratio, 2)
+        expected_target = round(4.48 + plan.risk_per_share * plan.risk_reward_ratio, 2)
         mock_alpaca.replace_order_limit_price.assert_called_once_with('tp-leg-1', expected_target)
 
         # DB: stop unchanged, only target updated
@@ -605,10 +605,10 @@ class TestGapFillStopAdjustment:
     @patch('trading.trading_engine.time_mod')
     def test_gap_fill_no_legs_triggers_emergency_close(self, mock_time, engine, mock_alpaca, db):
         """No SL leg found on gap-fill triggers emergency close."""
-        self._setup_filled_order(engine, mock_alpaca, db, fill_price=4.55)
+        self._setup_filled_order(engine, mock_alpaca, db, fill_price=4.48)
 
         mock_alpaca.get_order.side_effect = [
-            {'status': 'filled', 'filled_avg_price': 4.55, 'legs': []},
+            {'status': 'filled', 'filled_avg_price': 4.48, 'legs': []},
             {'legs': []},  # No legs — gap_adjust_failed
             # get_order for close poll
             {'status': 'filled', 'filled_avg_price': 4.50},
@@ -627,10 +627,10 @@ class TestGapFillStopAdjustment:
     @patch('trading.trading_engine.time_mod')
     def test_gap_fill_replace_fails_triggers_emergency_close(self, mock_time, engine, mock_alpaca, db):
         """Replace exception on gap-fill triggers emergency close."""
-        self._setup_filled_order(engine, mock_alpaca, db, fill_price=4.55)
+        self._setup_filled_order(engine, mock_alpaca, db, fill_price=4.48)
 
         mock_alpaca.get_order.side_effect = [
-            {'status': 'filled', 'filled_avg_price': 4.55, 'legs': []},
+            {'status': 'filled', 'filled_avg_price': 4.48, 'legs': []},
             {
                 'legs': [
                     {'id': 'sl-leg-1', 'side': 'sell', 'stop_price': 4.25,
@@ -1084,15 +1084,15 @@ class TestFillDataFallback:
         # First call: filled but no price. Second call (retry): price present.
         mock_alpaca.get_order.side_effect = [
             {'status': 'filled', 'filled_avg_price': None, 'filled_qty': 0, 'legs': []},
-            {'filled_avg_price': 5.10, 'filled_qty': 100},
+            {'filled_avg_price': 4.48, 'filled_qty': 100},
         ]
 
         result = engine._manage_pending_orders()
 
         assert result is not None
-        assert result['fill_price'] == 5.10
+        assert result['fill_price'] == 4.48
         trade = db.get_trade_by_order_id('order-retry')
-        assert trade['fill_price'] == 5.10
+        assert trade['fill_price'] == 4.48
 
     @patch('trading.trading_engine.time_mod.sleep')
     def test_position_fallback_when_retries_fail(self, mock_sleep, engine, mock_alpaca, db):
@@ -1104,13 +1104,13 @@ class TestFillDataFallback:
             'status': 'filled', 'filled_avg_price': None, 'filled_qty': 0, 'legs': [],
         }
         mock_alpaca.get_open_positions.return_value = [
-            {'symbol': 'RETRY', 'avg_entry_price': '5.05', 'qty': '100'},
+            {'symbol': 'RETRY', 'avg_entry_price': '4.47', 'qty': '100'},
         ]
 
         result = engine._manage_pending_orders()
 
         assert result is not None
-        assert result['fill_price'] == 5.05
+        assert result['fill_price'] == 4.47
 
     @patch('trading.trading_engine.time_mod.sleep')
     def test_skip_when_all_fallbacks_fail(self, mock_sleep, engine, mock_alpaca, db):
