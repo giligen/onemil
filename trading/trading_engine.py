@@ -110,6 +110,7 @@ class TradingEngine:
         _cfg = Config._load_yaml_only()
         self.skip_fridays = bool(_cfg.get("trading", {}).get("skip_fridays", False))
         self.min_stop_distance = float(_cfg.get("trading", {}).get("min_stop_distance", 0.0))
+        self.min_price = float(_cfg.get("trading", {}).get("min_price", 2.0))
         ud_cfg = _cfg.get("trading", {}).get("ud_risk_scaling", {})
         self.ud_risk_scaling_enabled = bool(ud_cfg.get("enabled", False))
         self.ud_threshold = float(ud_cfg.get("ud_threshold", 1.2))
@@ -1900,6 +1901,14 @@ class TradingEngine:
                     f"< min ${self.min_stop_distance:.2f} (tick noise)"
                 )
                 return None
+
+        # Min price filter: reject sub-$2 entries (matches backtest.py:1737)
+        if self.min_price > 0 and plan.entry_price < self.min_price:
+            logger.info(
+                f"{symbol}: SKIP — entry ${plan.entry_price:.2f} "
+                f"< min ${self.min_price:.2f}"
+            )
+            return None
 
         # Check position limits (includes midday check)
         if not self.position_manager.can_open_position(symbol):
