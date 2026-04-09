@@ -1124,19 +1124,19 @@ class BacktestRunner:
 
         # 3. SPY return at setup time
         features['qf_spy_return_pct'] = None
-        trade_date = str(bars.index[0])[:10] if hasattr(bars.index[0], 'strftime') else None
-        if not trade_date:
-            try:
-                trade_date = str(bars.iloc[0].name)[:10]
-            except Exception:
-                trade_date = None
+        trade_date = None
+        try:
+            ts = bars.iloc[0].get('timestamp') if hasattr(bars.iloc[0], 'get') else bars.iloc[0].name
+            trade_date = str(ts)[:10]
+        except Exception:
+            pass
 
         if trade_date:
             spy_bars = self._load_spy_bars(trade_date)
             if spy_bars is not None and len(spy_bars) > 1:
                 spy_open = float(spy_bars.iloc[0]['open'])
                 try:
-                    stock_ts = bars.iloc[bar_idx].name
+                    stock_ts = bars.iloc[bar_idx].get('timestamp', bars.iloc[bar_idx].name)
                     stock_ts_str = str(stock_ts)[:19]
                     spy_ts_strs = spy_bars['timestamp'].astype(str).str[:19]
                     spy_mask = spy_ts_strs <= stock_ts_str
