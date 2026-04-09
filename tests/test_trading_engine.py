@@ -119,8 +119,9 @@ def engine(mock_alpaca, db, mock_detector, mock_planner, mock_executor, mock_pos
         pattern_poll_interval=60,
         enabled=True,
     )
-    # Disable quality filter in tests — mock bars don't have OHLCV columns
+    # Disable quality filter and conviction in tests — mock bars don't have OHLCV columns
     eng.quality_filter_enabled = False
+    eng.conviction_enabled = False
     return eng
 
 
@@ -2879,6 +2880,9 @@ class TestMacdDeadZoneWithRiskTier:
             executor=mock_executor, position_manager=mock_pm,
             enabled=True,
         )
+        # Disable conviction/QF in this test — testing MACD zone interaction only
+        engine.conviction_enabled = False
+        engine.quality_filter_enabled = False
         # Enable MACD zones
         engine.macd_zones_enabled = True
         engine.macd_dead_zone_min = -0.2

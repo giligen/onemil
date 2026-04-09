@@ -195,6 +195,12 @@ class TradingEngine:
                 f"slow_pole>{self.qf_slow_pole_max_bars}bars/<{self.qf_slow_pole_min_gain}%"
             )
 
+        # Conviction scoring: scale position size by setup quality
+        conv_cfg = _cfg.get("trading", {}).get("conviction_scoring", {})
+        self.conviction_enabled = bool(conv_cfg.get("enabled", False))
+        if self.conviction_enabled:
+            logger.info("Conviction scoring: ENABLED (matches backtest V4 model)")
+
         # SPY MACD afternoon cutoff
         spy_cutoff_cfg = _cfg.get("trading", {}).get("spy_macd_cutoff", {})
         self._spy_macd_cutoff_enabled = bool(spy_cutoff_cfg.get("enabled", False))
@@ -386,6 +392,56 @@ class TradingEngine:
                     f"slow_pole: {pole_bars} bars, {pole_gain:.1f}% gain (weak momentum)")
 
         return (True, "")
+
+    def _compute_conviction_score_setup(self, setup, spy_3d_range: float) -> float:
+        """Compute conviction score at setup detection time.
+
+        Identical to backtest.py implementation.
+        Returns a multiplier (0.25 to 3.0) that scales position size.
+        """
+        score = 1.0
+
+        # 1. Pole gain sweet spot (4.5-9%)
+        pg = setup.pole_gain_pct
+        if 4.5 <= pg <= 9.0:
+            score += 0.3
+
+        # 2. Flag tightness (tight < 30% = good, loose > 50% = bad)
+        pole_height = setup.pole_high - setup.pole_low
+        if pole_height > 0:
+            flag_range = setup.flag_high - setup.flag_low
+            tightness = flag_range / pole_height * 100
+            if tightness < 30:
+                score += 0.3
+            elif tightness > 50:
+                score -= 0.3
+
+        # 3. Volume ratio pole/flag (>1.7x = buying conviction)
+        if setup.avg_flag_volume > 0:
+            vol_ratio = setup.avg_pole_volume / setup.avg_flag_volume
+            if vol_ratio > 1.7:
+                score += 0.3
+
+        # 4. SPY 3d range regime
+        if spy_3d_range > 1.2:
+            score += 0.3
+        elif spy_3d_range < 0.8:
+            score -= 0.5
+
+        # 5. Shallow retracement (< 30%)
+        if setup.retracement_pct < 30:
+            score += 0.2
+
+        return max(0.25, min(3.0, score))
+
+    def _get_spy_3d_range_live(self) -> float:
+        """Get SPY 3-day avg range from cached SPY bars. No extra API call."""
+        if self._spy_bars_cache is not None and len(self._spy_bars_cache) > 1:
+            day_high = float(self._spy_bars_cache['high'].max())
+            day_low = float(self._spy_bars_cache['low'].min())
+            if day_low > 0:
+                return (day_high - day_low) / day_low * 100
+        return 1.0  # default neutral
 
     def _refresh_spy_macd(self) -> None:
         """
@@ -1864,8 +1920,21 @@ class TradingEngine:
                     )
                     risk_multiplier = 1.0
 
+        # Conviction scoring: combine with risk tier, cap at 3x
+        conviction_mult = 1.0
+        if self.conviction_enabled:
+            spy_3d = self._get_spy_3d_range_live()
+            conviction_mult = self._compute_conviction_score_setup(setup, spy_3d)
+            if abs(conviction_mult - 1.0) > 0.05:
+                logger.info(
+                    f"{symbol}: Conviction {conviction_mult:.2f}x "
+                    f"(pole={setup.pole_gain_pct:.1f}%, "
+                    f"retr={setup.retracement_pct:.0f}%, SPY3d={spy_3d:.1f}%)")
+
+        combined_mult = min(3.0, risk_multiplier * conviction_mult)
+
         # Create trade plan
-        plan = self.planner.create_plan(setup, risk_multiplier=risk_multiplier)
+        plan = self.planner.create_plan(setup, risk_multiplier=combined_mult)
         if plan is None:
             return None
 
