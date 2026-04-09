@@ -85,7 +85,7 @@ trading:
   capital: 50000
   risk_per_trade: 2000
   position_size_dollars: 50000
-  max_shares: 10000
+  max_shares: 30000            # Dollar-based limit ($50K position_size) is the real cap, not shares
   max_adv_participation_pct: 0       # Disabled — waiting for real L2 depth data
   max_bar_participation_pct: 0       # Disabled — waiting for real L2 depth data
   max_positions: 3

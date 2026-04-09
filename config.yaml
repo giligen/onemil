@@ -85,7 +85,7 @@ trading:
   capital: 50000
   risk_per_trade: 2000
   position_size_dollars: 50000
-  max_shares: 10000
+  max_shares: 15000            # ~$50K position at $3/share. Conviction 3x → 45K shares max via planner
   max_adv_participation_pct: 0       # Disabled — waiting for real L2 depth data
   max_bar_participation_pct: 0       # Disabled — waiting for real L2 depth data
   max_positions: 3

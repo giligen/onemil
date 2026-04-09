@@ -1915,8 +1915,8 @@ class BacktestRunner:
                     if abs(conviction_mult - 1.0) > 0.05:
                         logger.debug(f"  Conviction score: {conviction_mult:.2f}x")
 
-                # Combine risk tier + conviction into single multiplier
-                combined_mult = risk_tier_mult * conviction_mult
+                # Combine risk tier + conviction, cap at 3x (max leverage on $50K base)
+                combined_mult = min(3.0, risk_tier_mult * conviction_mult)
                 if combined_mult != 1.0:
                     plan = self.planner.create_plan(setup, risk_multiplier=combined_mult)
                     if plan is None:
