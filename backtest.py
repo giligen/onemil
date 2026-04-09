@@ -1129,9 +1129,23 @@ class BacktestRunner:
             spy_bars = self._load_spy_bars(trade_date)
             if spy_bars is not None and len(spy_bars) > 1:
                 spy_open = float(spy_bars.iloc[0]['open'])
-                # Use bar_idx-1 (previous completed bar) to avoid look-ahead
-                spy_idx = min(max(0, bar_idx - 1), len(spy_bars) - 1)
-                spy_close = float(spy_bars.iloc[spy_idx]['close'])
+                # Match by timestamp — bar_idx in stock frame != index in SPY frame
+                # Get the stock bar's timestamp, find the latest SPY bar AT OR BEFORE that time
+                try:
+                    stock_ts = bars.iloc[bar_idx].name  # timestamp of setup detection bar
+                    stock_ts_str = str(stock_ts)[:19]  # "2025-01-02 14:45:00"
+                    # Find SPY bars at or before this timestamp
+                    spy_ts_strs = spy_bars['timestamp'].astype(str).str[:19]
+                    spy_mask = spy_ts_strs <= stock_ts_str
+                    if spy_mask.any():
+                        spy_close = float(spy_bars.loc[spy_mask, 'close'].iloc[-1])
+                    else:
+                        spy_close = float(spy_bars.iloc[0]['close'])
+                except Exception:
+                    # Fallback: use index-based (imperfect but better than nothing)
+                    spy_idx = min(max(0, bar_idx - 1), len(spy_bars) - 1)
+                    spy_close = float(spy_bars.iloc[spy_idx]['close'])
+
                 if spy_open > 0:
                     spy_return = (spy_close - spy_open) / spy_open * 100
                     if spy_return < self.qf_min_spy_return:
