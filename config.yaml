@@ -213,4 +213,13 @@ trading:
   conviction_scoring:
     enabled: true                      # V4 model: scales risk_per_trade via planner (not shares post-hoc)
   news_gate:
-    enabled: false                     # Gate kills Q1 2025 (+$104K blocked). Use news as conviction score instead.
+    enabled: false                     # Full gate kills Q1 2025. Use news_kill_rules instead.
+  # News kill rules: block no-news trades in specific LOSER segments only
+  # Has real catalyst → always trade. No catalyst + loser segment → kill.
+  # Validated: $175K → $333K (+90%), all quarters positive, walk-forward passes.
+  news_kill_rules:
+    enabled: true
+    max_avg_vol_no_news: 3000000       # avg daily vol >= 3M + no news → kill (22% WR, -$101K)
+    min_price_no_news: 3.0             # price < $3 + no news → kill (20% WR, -$11K)
+    max_float_no_news: 30000000        # float >= 30M + no news → kill (19% WR, -$14K)
+    # Rule 4: $5-12 + pole 8-15% + no news → kill (27% WR, -$32K) — hardcoded in method

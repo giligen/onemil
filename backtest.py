@@ -976,6 +976,19 @@ class BacktestRunner:
         if self.conviction_enabled:
             logger.info("Conviction scoring: ENABLED")
 
+        # News kill rules: block no-news trades in specific loser segments
+        nkr_cfg = trading_cfg.get("news_kill_rules", {})
+        self.news_kill_enabled = bool(nkr_cfg.get("enabled", False))
+        self.nkr_max_avg_vol = float(nkr_cfg.get("max_avg_vol_no_news", 3_000_000))
+        self.nkr_min_price = float(nkr_cfg.get("min_price_no_news", 3.0))
+        self.nkr_max_float = float(nkr_cfg.get("max_float_no_news", 30_000_000))
+        self._news_cache: Dict[str, bool] = {}  # (symbol, date) → has_real_catalyst
+        if self.news_kill_enabled:
+            logger.info(
+                f"News kill rules: vol>={self.nkr_max_avg_vol/1e6:.0f}M, "
+                f"price<${self.nkr_min_price:.0f}, float>={self.nkr_max_float/1e6:.0f}M "
+                f"(all no-news only)")
+
     _ET = pytz.timezone('US/Eastern')
 
     def _get_macd_zone_multiplier(
@@ -1268,6 +1281,81 @@ class BacktestRunner:
             return sum(ranges)/len(ranges) if ranges else 1.0
         except Exception:
             return 1.0
+
+    def _has_real_catalyst(self, symbol: str, trade_date: str) -> bool:
+        """Check news_history DB for real catalyst on this symbol/date."""
+        cache_key = f"{symbol}_{trade_date}"
+        if cache_key in self._news_cache:
+            return self._news_cache[cache_key]
+
+        real_cats = {'FDA_CLINICAL', 'EARNINGS', 'CONTRACT_DEAL', 'CONTRACT',
+                     'MA', 'ANALYST', 'PRODUCT', 'PRODUCT_LAUNCH',
+                     'MGMT', 'MANAGEMENT', 'SEC_FILING', 'CRYPTO'}
+        result = False
+        db_path = self._db_path or "data/cache.db"
+        try:
+            import sqlite3
+            conn = sqlite3.connect(db_path)
+            rows = conn.execute(
+                "SELECT category FROM news_history WHERE symbol=? AND trade_date=?",
+                (symbol, trade_date)).fetchall()
+            conn.close()
+            for r in rows:
+                if r[0] in real_cats:
+                    result = True
+                    break
+        except Exception:
+            pass  # table might not exist yet
+
+        self._news_cache[cache_key] = result
+        return result
+
+    def _check_news_kill(self, symbol: str, bars: pd.DataFrame, setup,
+                          plan, avg_daily_volume: int,
+                          float_shares: int = 0) -> tuple:
+        """Check if a no-news trade should be killed based on segment rules.
+
+        Returns (should_trade: bool, reason: str).
+        """
+        if not self.news_kill_enabled:
+            return (True, "")
+
+        # Get trade date
+        trade_date = None
+        try:
+            trade_date = str(bars.iloc[0].get('timestamp', bars.iloc[0].name))[:10]
+        except Exception:
+            pass
+
+        if not trade_date:
+            return (True, "")
+
+        # If stock has real catalyst → always trade
+        if self._has_real_catalyst(symbol, trade_date):
+            return (True, f"has_catalyst")
+
+        # No catalyst — check kill rules
+        entry_price = plan.entry_price
+        pole_gain = setup.pole_gain_pct
+        avg_vol = avg_daily_volume or 0
+
+        # Rule 1: avg_vol >= 3M + no news
+        if avg_vol >= self.nkr_max_avg_vol:
+            return (False, f"no_news + avg_vol {avg_vol/1e6:.1f}M >= {self.nkr_max_avg_vol/1e6:.0f}M")
+
+        # Rule 2: price < $3 + no news
+        if entry_price < self.nkr_min_price:
+            return (False, f"no_news + price ${entry_price:.2f} < ${self.nkr_min_price:.0f}")
+
+        # Rule 3: float >= 30M + no news
+        if float_shares >= self.nkr_max_float:
+            return (False, f"no_news + float {float_shares/1e6:.0f}M >= {self.nkr_max_float/1e6:.0f}M")
+
+        # Rule 4: $5-12 + pole 8-15% + no news
+        if 5 <= entry_price < 12 and 8 <= pole_gain < 15:
+            return (False, f"no_news + ${entry_price:.0f} + pole {pole_gain:.1f}% (overextended mid-cap)")
+
+        return (True, "no_news_but_good_segment")
 
     def set_spy_macd_cutoff(self, cutoff) -> None:
         """Set SPY MACD cutoff filter for the current trading day.
@@ -1937,6 +2025,27 @@ class BacktestRunner:
                             f"  Skipping — {rvol_label} rvol {rvol:.1f}x "
                             f"< {self.relative_volume_min:.1f}x at bar {i}"
                         )
+                        continue
+
+                # News kill rules: block no-news trades in loser segments
+                if self.news_kill_enabled:
+                    _float_shares = 0
+                    try:
+                        import sqlite3 as _sql
+                        _nconn = _sql.connect(self._db_path or "data/cache.db")
+                        _fr = _nconn.execute(
+                            "SELECT float_shares FROM universe WHERE symbol=? LIMIT 1",
+                            (symbol,)).fetchone()
+                        _nconn.close()
+                        _float_shares = int(_fr[0]) if _fr else 0
+                    except Exception:
+                        pass
+                    nk_pass, nk_reason = self._check_news_kill(
+                        symbol, bars, setup, plan,
+                        avg_daily_volume=self._current_avg_daily_volume or 0,
+                        float_shares=_float_shares)
+                    if not nk_pass:
+                        logger.info(f"  NEWS KILL: {nk_reason}")
                         continue
 
                 # Risk tier: scale risk on high-conviction setups (same as trading_engine)
