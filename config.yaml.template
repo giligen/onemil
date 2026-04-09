@@ -185,7 +185,7 @@ trading:
   # Histogram as % of price → zone → risk multiplier (0 = skip trade)
   # U-shape: strong negative + strong positive = best setups, near-zero = worst
   macd_zones:
-    enabled: false                    # DISABLED — quality filter handles trade selection. Dead zone was removing $113K of profitable trades.
+    enabled: true                     # Dead zone blocks garbage trades in flat MACD histogram range
     dead_zone_min_pct: -0.2           # skip trades with MACD% in [-0.2%, +0.1%]
     dead_zone_max_pct: 0.1
     strong_neg_threshold_pct: -0.5    # MACD% below this = deep pullback (loaded spring)
