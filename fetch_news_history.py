@@ -33,7 +33,7 @@ def classify_headline(h: str) -> str:
     h = h.lower()
     if re.search(r'fda|phase [123]|clinical|trial|drug|therapy|approv|orphan|ind |nda|biologics', h): return 'FDA_CLINICAL'
     if re.search(r'earn|revenue|quarter|q[1-4]|eps|guidance|beat|miss|fiscal', h): return 'EARNINGS'
-    if re.search(r'contract|deal|agreement|partner|collaborat|licens|amend|award', h): return 'CONTRACT'
+    if re.search(r'contract|deal|agreement|partner|collaborat|licens|amend|award', h): return 'CONTRACT_DEAL'
     if re.search(r'acqui|merge|buyout|takeover', h): return 'MA'
     if re.search(r'analyst|upgrade|downgrade|price target|initiat.*coverage', h): return 'ANALYST'
     if re.search(r'launch|new product|expansion|patent|initiative', h): return 'PRODUCT'

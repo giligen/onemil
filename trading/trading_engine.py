@@ -447,8 +447,9 @@ class TradingEngine:
         # Validated: Q1 25 -$4K, Q4 25 +$21K, Q1 26 +$23K = +$40K net
         if symbol and symbol in self._news_data:
             news_cat = self._news_data[symbol].get('news_category', 'NO_NEWS')
-            real_cats = {'FDA_CLINICAL', 'EARNINGS', 'CONTRACT_DEAL', 'MA',
-                        'ANALYST', 'PRODUCT_LAUNCH', 'MANAGEMENT', 'SEC_FILING'}
+            real_cats = {'FDA_CLINICAL', 'EARNINGS', 'CONTRACT_DEAL', 'CONTRACT',
+                        'MA', 'ANALYST', 'PRODUCT_LAUNCH', 'PRODUCT',
+                        'MANAGEMENT', 'MGMT', 'SEC_FILING', 'CRYPTO'}
             if news_cat in real_cats:
                 score += 0.5
             elif news_cat in ('GARBAGE_RECAP', 'NO_NEWS', 'OTHER'):
@@ -647,7 +648,7 @@ class TradingEngine:
         msg = "\n".join(lines)
         logger.info(msg)
         try:
-            self.notifier.send_message(msg)
+            self.notifier.send_message_sync(msg)
         except Exception as e:
             logger.error(f"Failed to send EOD summary: {e}")
 
