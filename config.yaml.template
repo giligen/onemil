@@ -115,7 +115,7 @@ trading:
     tier2_max_price: 23.0
     tier2_min_volume: 500000
     tier2_max_volume: 5000000
-    tier2_multiplier: 3.0
+    tier2_multiplier: 1.0
   max_trades_per_day: 5         # 15mo optimal with 10:45 cutoff: Sharpe 3.92, +$234K, $20K DD
   market_regime:
     enabled: false              # Regime OFF: +$902K vs ON: +$760K. Blocks profitable days for no DD benefit.
