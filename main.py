@@ -330,6 +330,7 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
         trading_engine = _create_trading_engine(config, alpaca, db, notifier=notifier,
                                                  stop_monitor=stop_monitor)
         trading_engine.enabled = True
+        trading_engine.news_provider = news_provider  # For news re-check at trade time
         logger.info(f"Bull Flag strategy ENABLED")
 
     # MACD wave engine (optional)

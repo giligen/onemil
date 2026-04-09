@@ -2045,6 +2045,27 @@ class TradingEngine:
                     )
                     risk_multiplier = 1.0
 
+        # Re-check news if we don't have a real catalyst yet
+        # Only at trade decision time (pattern found), not every poll
+        if self.conviction_enabled and hasattr(self, 'news_provider') and self.news_provider:
+            current_cat = self._news_data.get(symbol, {}).get('news_category', 'NO_NEWS')
+            if current_cat in ('NO_NEWS', 'OTHER', 'GARBAGE_RECAP', None):
+                try:
+                    _stock_ctx = {'float_shares': (uni_stock.get('float_shares') or 0) if uni_stock else 0,
+                                  'price': setup.breakout_level}
+                    fresh = self.news_provider.classify_news(symbol, stock_context=_stock_ctx)
+                    fresh_cat = fresh.get('category', 'NO_NEWS')
+                    if fresh_cat != current_cat:
+                        logger.info(f"{symbol}: News re-check: {current_cat} → {fresh_cat}")
+                        self._news_data[symbol] = {
+                            'news_catalyst': fresh.get('catalyst'),
+                            'news_headline': fresh.get('headline', '')[:200],
+                            'news_reason': fresh.get('reason', '')[:100],
+                            'news_category': fresh_cat,
+                        }
+                except Exception as e:
+                    logger.debug(f"{symbol}: News re-check failed: {e}")
+
         # Conviction scoring: combine with risk tier, cap at 3x
         conviction_mult = 1.0
         if self.conviction_enabled:
