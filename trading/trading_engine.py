@@ -740,6 +740,34 @@ class TradingEngine:
                         symbols_to_remove.append(symbol)
                         continue
 
+                # Post-fill exit: in calm markets + weak breakout vol → close immediately
+                # Matches backtest.py post-fill exit logic
+                if self.conviction_enabled and setup:
+                    _afv = float(setup.avg_flag_volume) if hasattr(setup, 'avg_flag_volume') else 0
+                    _spy_3d = self._get_spy_3d_range_live()
+                    if _afv > 0 and _spy_3d < 0.8:
+                        # Get recent bar volume (the fill bar)
+                        try:
+                            _recent_bars = self.alpaca.get_1min_bars(symbol, lookback_minutes=2)
+                            _bk_vol = float(_recent_bars.iloc[-1]['volume']) if _recent_bars is not None and len(_recent_bars) > 0 else 0
+                        except Exception:
+                            _bk_vol = 0
+                        _bk_ratio = _bk_vol / _afv if _afv > 0 else 99
+                        if _bk_ratio < 1.0:
+                            logger.warning(
+                                f"{symbol}: POST-FILL EXIT — SPY 3d {_spy_3d:.2f}% + "
+                                f"bk_vol {_bk_ratio:.1f}x → closing immediately")
+                            try:
+                                self.alpaca.close_position(symbol)
+                                if self.notifier:
+                                    self.notifier.notify_error(
+                                        f"{symbol}: Post-fill exit (calm market + weak breakout vol)",
+                                        component="PostFillExit")
+                            except Exception as e:
+                                logger.error(f"{symbol}: Failed to close post-fill exit: {e}")
+                            symbols_to_remove.append(symbol)
+                            continue
+
                 self._traded_symbols.add(symbol)
                 self.position_manager.mark_traded(symbol)
                 symbols_to_remove.append(symbol)

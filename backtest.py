@@ -1765,6 +1765,49 @@ class BacktestRunner:
                         f"{plan.shares} shares"
                     )
 
+                    # Post-fill exit: in calm markets (SPY 3d range < 0.8%),
+                    # exit immediately if breakout volume is weak (< 1.0x flag avg).
+                    # Cost: ~0.8% slippage. Saves: ~$2K avg stop loss.
+                    if self.conviction_enabled:
+                        _bk_vol = float(bar.get('volume', 0) if hasattr(bar, 'get') else bar['volume'])
+                        _afv = float(pending_order.setup.avg_flag_volume) if hasattr(pending_order.setup, 'avg_flag_volume') else 0
+                        _bk_ratio = _bk_vol / _afv if _afv > 0 else 99
+                        _trade_date = None
+                        try:
+                            _trade_date = str(bars.iloc[0].get('timestamp', bars.iloc[0].name))[:10]
+                        except Exception:
+                            pass
+                        _spy_3d = self._get_spy_3d_range(_trade_date) if _trade_date else 1.0
+                        if _spy_3d < 0.8 and _bk_ratio < 1.0:
+                            # Immediate exit — record slippage loss
+                            exit_price = fill_price * (1 - self.exit_slippage_pct)
+                            slippage_pnl = (exit_price - fill_price) * plan.shares
+                            logger.info(
+                                f"  POST-FILL EXIT: SPY 3d {_spy_3d:.2f}% + bk_vol {_bk_ratio:.1f}x "
+                                f"→ immediate exit, P&L ${slippage_pnl:.0f}")
+                            # Create a minimal trade record for the cache
+                            from backtest import SimulatedTrade
+                            trade = SimulatedTrade(
+                                symbol=plan.symbol,
+                                entry_time=bars.iloc[i].get('timestamp', bars.iloc[i].name),
+                                entry_price=fill_price,
+                                stop_loss=plan.stop_loss_price,
+                                take_profit=plan.take_profit_price,
+                                shares=plan.shares,
+                                exit_time=bars.iloc[min(i+1, len(bars)-1)].get('timestamp', bars.iloc[min(i+1, len(bars)-1)].name),
+                                exit_price=exit_price,
+                                exit_reason='post_fill_exit',
+                                pnl=slippage_pnl,
+                                pnl_pct=(exit_price - fill_price) / fill_price * 100,
+                                bars_held=1,
+                                plan=plan,
+                            )
+                            if hasattr(pending_order, '_qf_features'):
+                                trade._qf_features = pending_order._qf_features
+                            result.trades_simulated.append(trade)
+                            pending_order = None
+                            continue
+
                     trade = self.simulator.simulate(
                         plan, bars, i, entry_price_override=fill_price
                     )
