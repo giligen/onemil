@@ -970,6 +970,12 @@ class BacktestRunner:
                 f"slow_pole>{self.qf_slow_pole_max_bars}bars/<{self.qf_slow_pole_min_gain}%"
             )
 
+        # Conviction scoring: scale position size based on setup quality
+        conv_cfg = trading_cfg.get("conviction_scoring", {})
+        self.conviction_enabled = bool(conv_cfg.get("enabled", False))
+        if self.conviction_enabled:
+            logger.info("Conviction scoring: ENABLED")
+
     _ET = pytz.timezone('US/Eastern')
 
     def _get_macd_zone_multiplier(
@@ -1184,6 +1190,78 @@ class BacktestRunner:
             return (False, f"slow_pole: {pole_bars} bars, {pole_gain:.1f}% gain")
 
         return (True, "")
+
+    def _compute_conviction_score_setup(self, setup, spy_3d_range: float) -> float:
+        """Compute conviction score at setup detection time.
+
+        Returns a multiplier (0.25 to 3.0) that scales position size.
+        Uses only features known at setup detection — no look-ahead.
+        """
+        score = 1.0
+
+        # 1. Pole gain sweet spot (4.5-9%)
+        pg = setup.pole_gain_pct
+        if 4.5 <= pg <= 9.0:
+            score += 0.3
+
+        # 2. Flag tightness (tight < 30% = good, loose > 50% = bad)
+        pole_height = setup.pole_high - setup.pole_low
+        if pole_height > 0:
+            flag_range = setup.flag_high - setup.flag_low
+            tightness = flag_range / pole_height * 100
+            if tightness < 30:
+                score += 0.3
+            elif tightness > 50:
+                score -= 0.3
+
+        # 3. Volume ratio pole/flag (>1.7x = buying conviction)
+        if setup.avg_flag_volume > 0:
+            vol_ratio = setup.avg_pole_volume / setup.avg_flag_volume
+            if vol_ratio > 1.7:
+                score += 0.3
+
+        # 4. SPY 3d range regime
+        if spy_3d_range > 1.2:
+            score += 0.3
+        elif spy_3d_range < 0.8:
+            score -= 0.5
+
+        # 5. Shallow retracement (< 30%)
+        if setup.retracement_pct < 30:
+            score += 0.2
+
+        return max(0.25, min(3.0, score))
+
+    def _compute_conviction_score_fill(self, entry_bar_volume: float,
+                                        avg_flag_volume: float,
+                                        setup_score: float) -> float:
+        """Adjust conviction score at fill time based on breakout bar volume.
+
+        Called AFTER buy-stop triggers. Can exit immediately if score drops too low.
+        """
+        score = setup_score
+
+        # 6. Breakout bar volume vs flag average
+        if avg_flag_volume > 0:
+            bk_ratio = entry_bar_volume / avg_flag_volume
+            if bk_ratio > 1.5:
+                score += 0.4  # strong breakout volume
+            elif bk_ratio < 0.5:
+                score -= 0.5  # weak breakout volume
+
+        return max(0.25, min(3.0, score))
+
+    def _get_spy_3d_range(self, trade_date: str) -> float:
+        """Get SPY 3-day average daily range. Uses cached daily bars."""
+        spy_bars = self._load_spy_bars(trade_date)
+        if spy_bars is None or len(spy_bars) < 2:
+            return 1.0  # default neutral
+        # Compute single-day range from 1-min bars
+        day_high = spy_bars['high'].max()
+        day_low = spy_bars['low'].min()
+        if day_low <= 0:
+            return 1.0
+        return (day_high - day_low) / day_low * 100
 
     def set_spy_macd_cutoff(self, cutoff) -> None:
         """Set SPY MACD cutoff filter for the current trading day.
@@ -1680,6 +1758,32 @@ class BacktestRunner:
                                 pattern=plan.pattern,
                             )
 
+                    # Conviction scoring: adjust shares at fill based on breakout volume
+                    if self.conviction_enabled and hasattr(pending_order, '_conviction_score'):
+                        setup_score = pending_order._conviction_score
+                        _bk_vol = bar.get('volume', 0) if hasattr(bar, 'get') else bar['volume']
+                        _afv = pending_order.setup.avg_flag_volume if hasattr(pending_order.setup, 'avg_flag_volume') else 0
+                        final_score = self._compute_conviction_score_fill(
+                            float(_bk_vol), float(_afv), setup_score)
+                        if abs(final_score - 1.0) > 0.05:
+                            conv_shares = min(self.planner.max_shares,
+                                              max(1, int(plan.shares * final_score)))
+                            logger.info(
+                                f"  CONVICTION {final_score:.2f}x → "
+                                f"shares {plan.shares} → {conv_shares}")
+                            plan = TradePlan(
+                                symbol=plan.symbol,
+                                entry_price=plan.entry_price,
+                                stop_loss_price=plan.stop_loss_price,
+                                take_profit_price=plan.take_profit_price,
+                                risk_per_share=plan.risk_per_share,
+                                reward_per_share=plan.reward_per_share,
+                                risk_reward_ratio=plan.risk_reward_ratio,
+                                shares=conv_shares,
+                                total_risk=plan.risk_per_share * conv_shares,
+                                pattern=plan.pattern,
+                            )
+
                     logger.info(
                         f"  BUY-STOP TRIGGERED at bar {i}: "
                         f"planned ${pending_order.breakout_level:.2f}, "
@@ -1888,6 +1992,17 @@ class BacktestRunner:
                         logger.info(f"  QUALITY FILTER SKIP: {qf_reason}")
                         continue
 
+                # Conviction scoring: compute setup-time score
+                _conv_score = 1.0
+                if self.conviction_enabled:
+                    _trade_date = None
+                    try:
+                        _trade_date = str(bars.iloc[0].get('timestamp', bars.iloc[0].name))[:10]
+                    except Exception:
+                        pass
+                    _spy_3d = self._get_spy_3d_range(_trade_date) if _trade_date else 1.0
+                    _conv_score = self._compute_conviction_score_setup(setup, _spy_3d)
+
                 pending_order = PendingBuyStop(
                     setup=setup,
                     plan=plan,
@@ -1895,6 +2010,7 @@ class BacktestRunner:
                     breakout_level=setup.breakout_level,
                 )
                 pending_order._qf_features = qf_features
+                pending_order._conviction_score = _conv_score
                 logger.info(
                     f"  PENDING BUY-STOP placed at bar {i}: "
                     f"${setup.breakout_level:.2f}, "

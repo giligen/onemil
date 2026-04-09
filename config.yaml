@@ -207,3 +207,8 @@ trading:
     # 4. Slow weak pole — pattern took too long with too little gain = no real momentum
     slow_pole_max_bars: 15             # combined: pole_bars > 15 AND pole_gain < 5%
     slow_pole_min_gain_pct: 5.0
+  # Conviction scoring: scale position size based on setup quality
+  # Validated on 15mo walk-forward: $61K → $208K, Sharpe 0.22 → 0.55
+  # OOS improvement: H2 +$8K, Q1 +$33K (Q1 from -$41K to -$9K)
+  conviction_scoring:
+    enabled: true
