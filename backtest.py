@@ -1842,13 +1842,9 @@ class BacktestRunner:
                             pattern=plan.pattern,
                         )
 
-                # Quality filter: skip low-probability setups
-                if self.quality_filter_enabled:
-                    qf_pass, qf_reason = self._check_quality_filter(
-                        symbol, bars, setup, i, plan, prev_close)
-                    if not qf_pass:
-                        logger.info(f"  QUALITY FILTER SKIP: {qf_reason}")
-                        continue
+                # Quality filter is POST-HOC only — applied in batch_backtest.py
+                # filtered run, NOT during cache build. All trades go into cache.
+                # Production (trading_engine.py) applies it at entry time.
 
                 pending_order = PendingBuyStop(
                     setup=setup,
