@@ -212,3 +212,5 @@ trading:
   # OOS improvement: H2 +$8K, Q1 +$33K (Q1 from -$41K to -$9K)
   conviction_scoring:
     enabled: true                      # V4 model: scales risk_per_trade via planner (not shares post-hoc)
+  news_gate:
+    enabled: true                      # No real catalyst = no trade. Q1 data: real catalyst PF 1.99 vs no news PF 0.82

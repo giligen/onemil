@@ -119,9 +119,10 @@ def engine(mock_alpaca, db, mock_detector, mock_planner, mock_executor, mock_pos
         pattern_poll_interval=60,
         enabled=True,
     )
-    # Disable quality filter and conviction in tests — mock bars don't have OHLCV columns
+    # Disable features that need real data in tests
     eng.quality_filter_enabled = False
     eng.conviction_enabled = False
+    eng.news_gate_enabled = False
     return eng
 
 
@@ -321,6 +322,7 @@ class TestNotifierIntegration:
             executor=mock_executor, position_manager=mock_position_manager,
             notifier=mock_notifier, enabled=True,
         )
+        engine.news_gate_enabled = False
         assert engine.notifier is mock_notifier
 
     def test_engine_without_notifier(self, engine):
@@ -338,6 +340,7 @@ class TestNotifierIntegration:
             executor=mock_executor, position_manager=mock_position_manager,
             notifier=mock_notifier, enabled=True,
         )
+        engine.news_gate_enabled = False
         engine.quality_filter_enabled = False  # Mock bars don't have OHLCV
         bars = pd.DataFrame({'open': [4.0], 'high': [4.1], 'low': [3.9],
                             'close': [4.05], 'volume': [100000]})
@@ -366,6 +369,7 @@ class TestNotifierIntegration:
             executor=mock_executor, position_manager=mock_position_manager,
             notifier=mock_notifier, enabled=True,
         )
+        engine.news_gate_enabled = False
         engine.quality_filter_enabled = False  # Mock bars don't have OHLCV
         bars = pd.DataFrame({'open': [4.0], 'high': [4.1], 'low': [3.9],
                             'close': [4.05], 'volume': [100000]})
@@ -411,6 +415,7 @@ class TestNotifierIntegration:
             executor=mock_executor, position_manager=mock_position_manager,
             notifier=mock_notifier, enabled=True,
         )
+        engine.news_gate_enabled = False
         engine.send_daily_report(universe_size=100)
         mock_notifier.send_daily_report.assert_called_once()
 
@@ -1644,6 +1649,7 @@ class TestMarketRegimeInEngine:
             position_manager=mock_position_manager,
             enabled=True, market_regime=regime,
         )
+        engine.news_gate_enabled = False
         engine.on_stock_qualified("AAPL")
 
         with patch('trading.trading_engine.date') as mock_date:
@@ -1673,6 +1679,7 @@ class TestMarketRegimeInEngine:
             position_manager=mock_position_manager,
             enabled=True, market_regime=regime,
         )
+        engine.news_gate_enabled = False
         engine.on_stock_qualified("AAPL")
 
         with patch('trading.trading_engine.date') as mock_date:
@@ -1696,6 +1703,7 @@ class TestMarketRegimeInEngine:
             position_manager=mock_position_manager,
             enabled=True, market_regime=regime,
         )
+        engine.news_gate_enabled = False
         engine._daily_trade_count = 2  # Already at max
 
         result = engine.run_pattern_check()
@@ -1713,6 +1721,7 @@ class TestMarketRegimeInEngine:
             position_manager=mock_position_manager,
             enabled=True, market_regime=regime,
         )
+        engine.news_gate_enabled = False
         engine._daily_trade_count = 5
 
         mock_alpaca.get_daily_bars_range.return_value = {'SPY': [
@@ -1734,6 +1743,7 @@ class TestMarketRegimeInEngine:
             position_manager=mock_position_manager,
             enabled=True, market_regime=regime,
         )
+        engine.news_gate_enabled = False
 
         mock_alpaca.get_daily_bars_range.return_value = {'SPY': [
             {'date': date(2025, 3, 10), 'close': 510.0},
@@ -1756,12 +1766,16 @@ class TestThinLiquidityPostFillCheck:
     def _make_engine(self, mock_alpaca, db, mock_detector, mock_planner,
                      mock_executor, mock_position_manager, market_regime):
         """Create TradingEngine with market_regime."""
-        return TradingEngine(
+        eng = TradingEngine(
             alpaca_client=mock_alpaca, db=db, detector=mock_detector,
             planner=mock_planner, executor=mock_executor,
             position_manager=mock_position_manager,
             enabled=True, market_regime=market_regime,
         )
+        eng.news_gate_enabled = False
+        eng.quality_filter_enabled = False
+        eng.conviction_enabled = False
+        return eng
 
     def _make_thin_regime(self):
         """Create a mock MarketRegimeFilter that reports thin liquidity."""
@@ -2370,6 +2384,7 @@ class TestDailyTradeCountFix:
             position_manager=mock_position_manager,
             enabled=True, market_regime=regime,
         )
+        engine.news_gate_enabled = False
 
         self._setup_filled_order(engine, mock_alpaca, db, 'AAPL', thin_liquidity=True)
 
@@ -2402,6 +2417,7 @@ class TestDailyTradeCountFix:
             position_manager=mock_position_manager,
             enabled=True,
         )
+        engine.news_gate_enabled = False
 
         self._setup_filled_order(engine, mock_alpaca, db, 'AAPL')
 
@@ -2429,6 +2445,7 @@ class TestDailyTradeCountFix:
             position_manager=mock_position_manager,
             enabled=True,
         )
+        engine.news_gate_enabled = False
 
         self._setup_filled_order(engine, mock_alpaca, db, 'AAPL')
 
@@ -2712,6 +2729,7 @@ class TestSimpleOrderPath:
             position_manager=mock_pm, enabled=True,
             stop_monitor=mock_stop_monitor,
         )
+        engine.news_gate_enabled = False
 
         engine.on_stock_qualified("AAPL")
         engine.run_pattern_check()
@@ -2749,6 +2767,7 @@ class TestSimpleOrderPath:
             position_manager=mock_pm, enabled=True,
             # No stop_monitor
         )
+        engine.news_gate_enabled = False
 
         engine.on_stock_qualified("AAPL")
         engine.run_pattern_check()
@@ -2786,6 +2805,7 @@ class TestSimpleOrderPath:
             position_manager=mock_pm, enabled=True,
             stop_monitor=mock_stop_monitor,
         )
+        engine.news_gate_enabled = False
 
         engine.on_stock_qualified("AAPL")
         engine.run_pattern_check()
@@ -2809,6 +2829,7 @@ class TestSimpleOrderPath:
             stop_monitor=mock_stop_monitor,
             safety_net_sl_pct=0.05,
         )
+        engine.news_gate_enabled = False
 
         # Simulate a pending simple order that just filled
         plan = _make_plan("AAPL")
@@ -2882,6 +2903,7 @@ class TestMacdDeadZoneWithRiskTier:
         )
         # Disable conviction/QF in this test — testing MACD zone interaction only
         engine.conviction_enabled = False
+        engine.news_gate_enabled = False
         engine.quality_filter_enabled = False
         # Enable MACD zones
         engine.macd_zones_enabled = True

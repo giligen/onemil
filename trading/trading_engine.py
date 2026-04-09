@@ -201,6 +201,16 @@ class TradingEngine:
         if self.conviction_enabled:
             logger.info("Conviction scoring: ENABLED (matches backtest V4 model)")
 
+        # News gate: require real catalyst before trading
+        news_gate_cfg = _cfg.get("trading", {}).get("news_gate", {})
+        self.news_gate_enabled = bool(news_gate_cfg.get("enabled", False))
+        if self.news_gate_enabled:
+            logger.info("News gate: ENABLED — no catalyst = no trade")
+
+        # EOD summary tracking
+        self._eod_traded: list = []    # [(symbol, category, headline, pnl)]
+        self._eod_skipped: list = []   # [(symbol, category, headline)]
+
         # SPY MACD afternoon cutoff
         spy_cutoff_cfg = _cfg.get("trading", {}).get("spy_macd_cutoff", {})
         self._spy_macd_cutoff_enabled = bool(spy_cutoff_cfg.get("enabled", False))
@@ -545,18 +555,20 @@ class TradingEngine:
             logger.error(f"Failed to refresh SPY regime data: {e}")
 
     def on_stock_qualified(self, symbol: str, news_catalyst: bool = None,
-                           news_headline: str = None, news_reason: str = None) -> None:
+                           news_headline: str = None, news_reason: str = None,
+                           news_category: str = None) -> None:
         """
         Handle a stock qualified by the scanner.
 
         Adds to the qualified symbols set for pattern monitoring.
-        Optionally stores news classification for persistence with trade records.
+        Stores news classification for gate check + persistence.
 
         Args:
             symbol: Qualified stock symbol
             news_catalyst: LLM classification (True=real catalyst, False=noise, None=unknown)
             news_headline: Top news headline
             news_reason: LLM's reason for classification
+            news_category: News category (FDA_CLINICAL, EARNINGS, GARBAGE_RECAP, etc.)
         """
         # Store news data for later persistence with trade record
         if news_catalyst is not None:
@@ -564,6 +576,7 @@ class TradingEngine:
                 'news_catalyst': news_catalyst,
                 'news_headline': (news_headline or '')[:200],
                 'news_reason': (news_reason or '')[:100],
+                'news_category': news_category or 'OTHER',
             }
         if not self.enabled:
             logger.debug(f"{symbol}: Trading engine disabled, ignoring qualified stock")
@@ -596,6 +609,39 @@ class TradingEngine:
         now_et = datetime.now(ET)
         return (now_et.hour > self.last_entry_hour or
                 (now_et.hour == self.last_entry_hour and now_et.minute >= self.last_entry_minute))
+
+    def send_eod_summary(self) -> None:
+        """Send EOD summary of traded and skipped stocks to Telegram."""
+        if not self.notifier:
+            return
+        if not self._eod_traded and not self._eod_skipped:
+            return
+
+        lines = ["📊 EOD News Gate Summary:"]
+
+        if self._eod_traded:
+            lines.append("\nTRADED (with catalyst):")
+            for sym, cat, hl, pnl in self._eod_traded:
+                lines.append(f"  {sym} — {cat}: {hl[:60]}")
+
+        if self._eod_skipped:
+            lines.append("\nSKIPPED (no catalyst):")
+            for sym, cat, hl in self._eod_skipped:
+                reason = hl[:60] if hl else "no news found"
+                lines.append(f"  {sym} — {cat}: {reason}")
+
+        lines.append(f"\nStats: {len(self._eod_traded)} traded, {len(self._eod_skipped)} skipped")
+
+        msg = "\n".join(lines)
+        logger.info(msg)
+        try:
+            self.notifier.send_message(msg)
+        except Exception as e:
+            logger.error(f"Failed to send EOD summary: {e}")
+
+        # Reset for next day
+        self._eod_traded.clear()
+        self._eod_skipped.clear()
 
     def _is_past_force_close_time(self) -> bool:
         """Check if current ET time is past force_close_time."""
@@ -1943,6 +1989,29 @@ class TradingEngine:
         already_notified = (
             self._notified_setups.get(symbol) == setup.breakout_level
         )
+
+        # News gate: require real catalyst before trading
+        if self.news_gate_enabled:
+            news_data = self._news_data.get(symbol, {})
+            news_cat = news_data.get('news_category', 'NO_NEWS')
+            news_catalyst = news_data.get('news_catalyst')
+            news_hl = news_data.get('news_headline', '')[:80]
+
+            real_catalysts = {'FDA_CLINICAL', 'EARNINGS', 'CONTRACT_DEAL', 'MA',
+                            'ANALYST', 'PRODUCT_LAUNCH', 'MANAGEMENT', 'SEC_FILING'}
+
+            if news_cat not in real_catalysts:
+                skip_reason = f"no catalyst ({news_cat})" if news_cat != 'NO_NEWS' else "no news found"
+                logger.info(f"{symbol}: NEWS GATE SKIP — {skip_reason}: {news_hl}")
+                self._eod_skipped.append((symbol, news_cat, news_hl))
+                if self.notifier:
+                    self.notifier.notify_error(
+                        f"{symbol} SKIPPED — {skip_reason}",
+                        component="NewsGate")
+                return None
+            else:
+                logger.info(f"{symbol}: NEWS GATE PASS — [{news_cat}]: {news_hl}")
+                self._eod_traded.append((symbol, news_cat, news_hl, 0))  # pnl filled later
 
         # Risk tier: scale risk on high-conviction setups
         risk_multiplier = 1.0

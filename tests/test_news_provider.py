@@ -235,7 +235,7 @@ class TestLLMNewsAnalyzer:
 
     def test_parse_response_valid_json_true(self):
         """_parse_response correctly parses catalyst=true JSON."""
-        result, reason = LLMNewsAnalyzer._parse_response(
+        result, category, reason = LLMNewsAnalyzer._parse_response(
             '{"catalyst": true, "reason": "FDA approval for new drug"}'
         )
         assert result is True
@@ -243,7 +243,7 @@ class TestLLMNewsAnalyzer:
 
     def test_parse_response_valid_json_false(self):
         """_parse_response correctly parses catalyst=false JSON."""
-        result, reason = LLMNewsAnalyzer._parse_response(
+        result, category, reason = LLMNewsAnalyzer._parse_response(
             '{"catalyst": false, "reason": "generic market recap"}'
         )
         assert result is False
@@ -251,21 +251,21 @@ class TestLLMNewsAnalyzer:
 
     def test_parse_response_text_fallback(self):
         """_parse_response falls back to text parsing for non-JSON."""
-        result, reason = LLMNewsAnalyzer._parse_response("TRUE\nSome explanation")
+        result, category, reason = LLMNewsAnalyzer._parse_response("TRUE\nSome explanation")
         assert result is True
         assert "text-fallback" in reason
 
     def test_parse_response_code_fence_json(self):
         """_parse_response strips markdown code fences around JSON."""
         raw = '```json\n{"catalyst": true, "reason": "FDA approval"}\n```'
-        result, reason = LLMNewsAnalyzer._parse_response(raw)
+        result, category, reason = LLMNewsAnalyzer._parse_response(raw)
         assert result is True
         assert "FDA" in reason
 
     def test_parse_response_code_fence_multiline(self):
         """_parse_response handles multiline JSON inside code fences."""
         raw = '```json\n{\n  "catalyst": false,\n  "reason": "generic recap"\n}\n```'
-        result, reason = LLMNewsAnalyzer._parse_response(raw)
+        result, category, reason = LLMNewsAnalyzer._parse_response(raw)
         assert result is False
         assert "recap" in reason
 

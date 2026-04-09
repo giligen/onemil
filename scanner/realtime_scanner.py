@@ -518,6 +518,7 @@ class RealtimeScanner:
             headline = None
             news_catalyst = None
             news_reason = None
+            news_category = None
             if (relative_volume >= self.criteria.relative_volume_min and
                     intraday_change_pct >= self.criteria.intraday_change_pct_min):
                 # Full LLM classification — persisted with trades for future analysis
@@ -526,6 +527,7 @@ class RealtimeScanner:
                 headline = news_info.get('headline')
                 news_catalyst = news_info.get('catalyst')
                 news_reason = news_info.get('reason', '')
+                news_category = news_info.get('category', 'OTHER')
                 if has_news:
                     news_count += 1
 
@@ -591,6 +593,7 @@ class RealtimeScanner:
                         news_catalyst=news_catalyst,
                         news_headline=headline,
                         news_reason=news_reason,
+                        news_category=news_category,
                     )
 
                 # Save qualified result to DB

@@ -16,12 +16,25 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
     "You classify stock news. Reply with ONLY a JSON object, no other text.\n"
-    "Format: {\"catalyst\": true/false, \"reason\": \"<max 20 words>\"}\n\n"
-    "catalyst=true: real catalyst (FDA approval, earnings beat/miss, contract win, "
-    "merger/acquisition, offering, partnership, analyst upgrade/downgrade, "
-    "significant legal/regulatory action).\n"
-    "catalyst=false: noise (listicle, generic market recap, tangential mention, "
-    "penny stock promo, technical analysis, \"stocks moving\" roundup)."
+    "Format: {\"catalyst\": true/false, \"category\": \"<CATEGORY>\", \"reason\": \"<max 20 words>\"}\n\n"
+    "Categories (catalyst=true):\n"
+    "  FDA_CLINICAL — FDA approval, clinical trial results, drug/therapy news\n"
+    "  EARNINGS — quarterly results, revenue, EPS, guidance, beat/miss\n"
+    "  CONTRACT_DEAL — contract win, partnership, licensing deal, collaboration\n"
+    "  MA — merger, acquisition, buyout, tender offer\n"
+    "  ANALYST — upgrade, downgrade, price target, initiate coverage\n"
+    "  PRODUCT_LAUNCH — new product, expansion, patent, initiative\n"
+    "  MANAGEMENT — CEO/CFO hire/resign, board changes\n"
+    "  SEC_FILING — offering, IPO, shelf registration\n"
+    "\n"
+    "Categories (catalyst=false):\n"
+    "  GARBAGE_RECAP — listicle, \"why is X moving\", \"stocks moving in\", market roundup\n"
+    "  OTHER — tangential mention, penny stock promo, technical analysis, unrelated\n"
+    "  NO_NEWS — no meaningful content\n"
+    "\n"
+    "CRITICAL: A 'why is X stock moving' or 'N stocks moving in Monday's session' "
+    "article is ALWAYS GARBAGE_RECAP, catalyst=false. These are written AFTER the move, "
+    "not the cause."
 )
 
 
@@ -71,25 +84,20 @@ class LLMNewsAnalyzer(NewsAnalyzer):
         logger.info(f"LLMNewsAnalyzer initialized with model={model}")
 
     @staticmethod
-    def _parse_response(raw: str) -> Tuple[bool, str]:
+    def _parse_response(raw: str) -> Tuple[bool, str, str]:
         """
-        Parse LLM JSON response into (catalyst_bool, reason_string).
+        Parse LLM JSON response into (catalyst_bool, category, reason_string).
 
         Handles JSON (with or without markdown code fences) and plain TRUE/FALSE fallback.
 
-        Args:
-            raw: Raw response text from LLM
-
         Returns:
-            Tuple of (is_catalyst: bool, reason: str)
+            Tuple of (is_catalyst: bool, category: str, reason: str)
         """
         # Strip markdown code fences if present
         cleaned = raw.strip()
         if cleaned.startswith("```"):
-            # Remove opening ```json or ``` line
             lines = cleaned.split("\n")
-            lines = lines[1:]  # Drop ```json line
-            # Remove closing ``` if present
+            lines = lines[1:]
             if lines and lines[-1].strip() == "```":
                 lines = lines[:-1]
             cleaned = "\n".join(lines).strip()
@@ -97,30 +105,29 @@ class LLMNewsAnalyzer(NewsAnalyzer):
         try:
             data = json.loads(cleaned)
             catalyst = bool(data.get("catalyst", False))
+            category = str(data.get("category", "OTHER"))[:30]
             reason = str(data.get("reason", ""))[:100]
-            return catalyst, reason
+            return catalyst, category, reason
         except (json.JSONDecodeError, AttributeError):
-            # Fallback: parse as plain TRUE/FALSE
             first_word = raw.split()[0].upper() if raw.split() else ""
             logger.warning(
                 f"LLM returned non-JSON response, falling back to text parsing: "
                 f"'{raw[:80]}'"
             )
-            return first_word == "TRUE", f"text-fallback: {raw[:60]}"
+            return first_word == "TRUE", "OTHER", f"text-fallback: {raw[:60]}"
 
-    def classify(self, article: Dict, symbol: str = None) -> Tuple[bool, str]:
+    def classify(self, article: Dict, symbol: str = None) -> Tuple[bool, str, str]:
         """
         Classify a news article using Claude Haiku 4.5.
 
-        Returns both the classification AND the reason, so callers can
-        persist the full LLM output for future analysis.
+        Returns classification, category, AND reason for persistence.
 
         Args:
             article: Dict with headline, summary, source, created_at, url
             symbol: Stock symbol for context in the prompt
 
         Returns:
-            Tuple of (is_catalyst: bool, reason: str)
+            Tuple of (is_catalyst: bool, category: str, reason: str)
         """
         headline = (article.get('headline') or '').strip()
         summary = (article.get('summary') or '').strip()
@@ -129,14 +136,14 @@ class LLMNewsAnalyzer(NewsAnalyzer):
             logger.warning(
                 f"{symbol or '???'}: empty headline+summary, skipping LLM call"
             )
-            return False, 'empty_content'
+            return False, 'NO_NEWS', 'empty_content'
 
         # Check cache
         cache_key = (symbol or '', headline)
         if cache_key in self._cache:
             cached = self._cache[cache_key]
             logger.debug(f"{symbol}: cache hit for '{headline[:60]}' -> {cached}")
-            return cached, 'cached'
+            return cached, 'cached', 'cached'
 
         # Build user prompt
         truncated_summary = summary[:200]
@@ -147,37 +154,39 @@ class LLMNewsAnalyzer(NewsAnalyzer):
         )
 
         result = False
+        category = 'OTHER'
         reason = ''
         try:
             response = self._client.messages.create(
                 model=self._model,
-                max_tokens=100,
+                max_tokens=150,
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_msg}],
             )
             raw = response.content[0].text.strip()
-            result, reason = self._parse_response(raw)
+            result, category, reason = self._parse_response(raw)
 
             logger.info(
                 f"{symbol}: LLM classified '{headline[:60]}' -> {result} "
-                f"(reason='{reason}')"
+                f"[{category}] (reason='{reason}')"
             )
         except Exception as e:
             logger.error(
                 f"{symbol}: LLM classification failed: {e} — defaulting to False"
             )
+            category = 'OTHER'
             reason = f'error: {str(e)[:50]}'
 
         self._cache[cache_key] = result
-        return result, reason
+        return result, category, reason
 
     def is_interesting(self, article: Dict, symbol: str = None) -> bool:
         """
         Classify a news article. Returns True if real catalyst.
 
-        Delegates to classify() and discards the reason.
+        Delegates to classify() and discards category/reason.
         """
-        result, _ = self.classify(article, symbol=symbol)
+        result, _cat, _reason = self.classify(article, symbol=symbol)
         return result
 
 
@@ -257,13 +266,15 @@ class NewsProvider:
             limit: Maximum articles to check
 
         Returns:
-            Dict with keys: has_news, catalyst, headline, reason
+            Dict with keys: has_news, catalyst, category, headline, reason
             - has_news: bool — any articles found
             - catalyst: bool or None — LLM classification (None if no articles)
+            - category: str — news category (FDA_CLINICAL, EARNINGS, etc.)
             - headline: str — top article headline
             - reason: str — LLM's reason for classification
         """
-        result = {'has_news': False, 'catalyst': None, 'headline': '', 'reason': ''}
+        result = {'has_news': False, 'catalyst': None, 'category': 'NO_NEWS',
+                  'headline': '', 'reason': '', 'news_headline': ''}
 
         try:
             articles = self.get_recent_news(symbol, limit=limit)
@@ -276,22 +287,46 @@ class NewsProvider:
 
         result['has_news'] = True
         result['headline'] = (articles[0].get('headline') or '')[:200]
+        result['news_headline'] = result['headline']
 
-        # Classify articles through the analyzer
+        # Classify articles — find the BEST (highest quality) catalyst
+        best_catalyst = False
+        best_category = 'OTHER'
+        best_reason = ''
+        best_headline = result['headline']
+
+        # Priority: real catalysts first
+        catalyst_priority = ['FDA_CLINICAL', 'MA', 'EARNINGS', 'CONTRACT_DEAL',
+                            'ANALYST', 'PRODUCT_LAUNCH', 'MANAGEMENT', 'SEC_FILING']
+
         for article in articles:
             if hasattr(self.analyzer, 'classify'):
-                catalyst, reason = self.analyzer.classify(article, symbol=symbol)
+                catalyst, category, reason = self.analyzer.classify(article, symbol=symbol)
             else:
                 catalyst = self.analyzer.is_interesting(article, symbol=symbol)
+                category = 'OTHER'
                 reason = 'stub_v1'
 
-            if catalyst:
+            if catalyst and category in catalyst_priority:
+                # Found a real catalyst — use it
                 result['catalyst'] = True
+                result['category'] = category
                 result['headline'] = (article.get('headline') or '')[:200]
+                result['news_headline'] = result['headline']
                 result['reason'] = reason
                 return result
-            else:
-                result['catalyst'] = False
-                result['reason'] = reason
+
+            # Track best non-catalyst classification
+            if not best_catalyst:
+                best_category = category
+                best_reason = reason
+                best_headline = (article.get('headline') or '')[:200]
+
+        # No real catalyst found
+        result['catalyst'] = False
+        result['category'] = best_category
+        result['reason'] = best_reason
+        result['headline'] = best_headline
+        result['news_headline'] = best_headline
 
         return result
