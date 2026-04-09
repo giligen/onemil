@@ -1693,6 +1693,12 @@ class BacktestRunner:
                     # Propagate QF features from pending order to trade for cache storage
                     if hasattr(pending_order, '_qf_features'):
                         trade._qf_features = pending_order._qf_features
+                    # Add post-fill VWAP (at fill bar) — for post-filter analysis
+                    fill_vwap = self._compute_vwap(bars, i)
+                    if fill_vwap and fill_vwap > 0:
+                        trade._qf_features = trade._qf_features.copy() if hasattr(trade, '_qf_features') else {}
+                        trade._qf_features['qf_fill_vwap_dist_pct'] = round(
+                            (fill_price - fill_vwap) / fill_vwap * 100, 2)
                     result.trades_simulated.append(trade)
                     pending_order = None
 

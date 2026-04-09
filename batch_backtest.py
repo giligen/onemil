@@ -65,6 +65,7 @@ CSV_HEADERS = [
     "daily_range_pct", "avg_volume_20d",
     "qf_vwap_dist_pct", "qf_gap_pct", "qf_gap_fading",
     "qf_spy_return_pct", "qf_pole_bars", "qf_pole_gain_pct",
+    "qf_fill_vwap_dist_pct",
 ]
 
 def _trade_to_cache_row(trade) -> Optional[Dict]:
@@ -1985,6 +1986,7 @@ def main():
                         row.get('qf_spy_return_pct', ''),
                         row.get('qf_pole_bars', ''),
                         row.get('qf_pole_gain_pct', ''),
+                        row.get('qf_fill_vwap_dist_pct', ''),
                     ])
 
             # Determine new date range to merge

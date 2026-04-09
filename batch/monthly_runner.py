@@ -71,6 +71,7 @@ RICH_CSV_HEADERS = [
     # Quality filter features (computed at setup detection, always logged)
     "qf_vwap_dist_pct", "qf_gap_pct", "qf_gap_fading",
     "qf_spy_return_pct", "qf_pole_bars", "qf_pole_gain_pct",
+    "qf_fill_vwap_dist_pct",
 ]
 
 
@@ -201,6 +202,7 @@ def build_rich_row(
               getattr(trade, '_qf_features', {}).get('qf_spy_return_pct'),
               getattr(trade, '_qf_features', {}).get('qf_pole_bars'),
               getattr(trade, '_qf_features', {}).get('qf_pole_gain_pct'),
+              getattr(trade, '_qf_features', {}).get('qf_fill_vwap_dist_pct'),
           ]],
     ]
 
