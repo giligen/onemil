@@ -63,6 +63,8 @@ CSV_HEADERS = [
     "pnl", "pnl_pct",
     "partial_taken", "partial_price", "partial_shares", "partial_pnl",
     "daily_range_pct", "avg_volume_20d",
+    "qf_vwap_dist_pct", "qf_gap_pct", "qf_gap_fading",
+    "qf_spy_return_pct", "qf_pole_bars", "qf_pole_gain_pct",
 ]
 
 def _trade_to_cache_row(trade) -> Optional[Dict]:
@@ -87,6 +89,8 @@ def _trade_to_cache_row(trade) -> Optional[Dict]:
             'partial_pnl': f"{trade.partial_pnl:.2f}",
             'daily_range_pct': f"{getattr(trade, '_daily_range_pct', 0):.1f}",
             'avg_volume_20d': int(getattr(trade, '_avg_volume_20d', 0)),
+            **{k: (f"{v:.2f}" if isinstance(v, float) else str(v) if v is not None else '')
+               for k, v in getattr(trade, '_qf_features', {}).items()},
         }
     except Exception as e:
         logger.warning(f"Failed to convert trade to cache row: {e}")
@@ -921,6 +925,7 @@ def _serialize_result(result: 'BacktestResult') -> dict:
             'partial_shares': t.partial_shares,
             'partial_pnl': t.partial_pnl,
             '_avg_volume_20d': getattr(t, '_avg_volume_20d', 0),
+            '_qf_features': getattr(t, '_qf_features', {}),
         }
         if t.plan:
             trade_dict['plan'] = {
@@ -1017,6 +1022,7 @@ def _reconstruct_result(result_dict: dict) -> BacktestResult:
             entry_bar_volume=td.get('entry_bar_volume'),
         )
         trade._avg_volume_20d = td.get('_avg_volume_20d', 0)
+        trade._qf_features = td.get('_qf_features', {})
         trades.append(trade)
 
     result = BacktestResult(
@@ -1973,6 +1979,12 @@ def main():
                         row.get('partial_pnl', '0.00'),
                         row.get('intraday_move_pct', row.get('daily_range_pct', '0')),
                         row.get('avg_volume_daily', row.get('avg_volume_20d', '0')),
+                        row.get('qf_vwap_dist_pct', ''),
+                        row.get('qf_gap_pct', ''),
+                        row.get('qf_gap_fading', ''),
+                        row.get('qf_spy_return_pct', ''),
+                        row.get('qf_pole_bars', ''),
+                        row.get('qf_pole_gain_pct', ''),
                     ])
 
             # Determine new date range to merge
@@ -1999,6 +2011,9 @@ def main():
                 writer = csv.writer(dst)
                 writer.writerow(CSV_HEADERS)
                 for erow in existing_rows:
+                    # Pad old rows missing QF columns
+                    while len(erow) < len(CSV_HEADERS):
+                        erow.append('')
                     writer.writerow(erow)
                     trade_count += 1
                 for nrow in new_rows:

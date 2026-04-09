@@ -1091,37 +1091,43 @@ class BacktestRunner:
             self._spy_bars_cache[trade_date] = None
             return None
 
-    def _check_quality_filter(
+    def _compute_qf_features(
         self, symbol: str, bars: pd.DataFrame, setup, bar_idx: int,
         plan, prev_close: Optional[float],
-    ) -> tuple:
-        """Check quality filter conditions. All features are known at setup detection time.
+    ) -> dict:
+        """Compute quality filter features at setup detection time.
 
-        Returns (pass: bool, reason: str). If pass=False, skip this setup.
+        Always runs (even when QF disabled) so features are stored in the cache.
+        All values are known at setup detection — no look-ahead.
         """
         breakout_level = setup.breakout_level
+        features = {}
 
-        # 1. VWAP overextension: is breakout level too far above VWAP?
+        # 1. VWAP distance
         vwap = self._compute_vwap(bars, bar_idx)
         if vwap and vwap > 0:
-            vwap_dist_pct = (breakout_level - vwap) / vwap * 100
-            if vwap_dist_pct > self.qf_max_vwap_dist:
-                return (False, f"VWAP +{vwap_dist_pct:.1f}% > {self.qf_max_vwap_dist}% (overextended)")
+            features['qf_vwap_dist_pct'] = round((breakout_level - vwap) / vwap * 100, 2)
+        else:
+            features['qf_vwap_dist_pct'] = None
 
-        # 2. Gap fading: stock gapped up big but pulled back below open
+        # 2. Gap info
         if prev_close and prev_close > 0:
             open_price = float(bars.iloc[0]['open'])
-            gap_pct = (open_price - prev_close) / prev_close * 100
-            if gap_pct >= self.qf_gap_fade_threshold and breakout_level < open_price:
-                return (False, f"gap_fade: gap +{gap_pct:.1f}% but breakout ${breakout_level:.2f} < open ${open_price:.2f}")
+            features['qf_gap_pct'] = round((open_price - prev_close) / prev_close * 100, 2)
+            features['qf_gap_fading'] = (
+                features['qf_gap_pct'] >= self.qf_gap_fade_threshold
+                and breakout_level < open_price
+            )
+        else:
+            features['qf_gap_pct'] = None
+            features['qf_gap_fading'] = False
 
-        # 3. SPY down: risk-off environment
+        # 3. SPY return at setup time
+        features['qf_spy_return_pct'] = None
         trade_date = str(bars.index[0])[:10] if hasattr(bars.index[0], 'strftime') else None
         if not trade_date:
-            # Try extracting from timestamp column
             try:
-                ts = str(bars.iloc[0].name)
-                trade_date = ts[:10]
+                trade_date = str(bars.iloc[0].name)[:10]
             except Exception:
                 trade_date = None
 
@@ -1129,12 +1135,9 @@ class BacktestRunner:
             spy_bars = self._load_spy_bars(trade_date)
             if spy_bars is not None and len(spy_bars) > 1:
                 spy_open = float(spy_bars.iloc[0]['open'])
-                # Match by timestamp — bar_idx in stock frame != index in SPY frame
-                # Get the stock bar's timestamp, find the latest SPY bar AT OR BEFORE that time
                 try:
-                    stock_ts = bars.iloc[bar_idx].name  # timestamp of setup detection bar
-                    stock_ts_str = str(stock_ts)[:19]  # "2025-01-02 14:45:00"
-                    # Find SPY bars at or before this timestamp
+                    stock_ts = bars.iloc[bar_idx].name
+                    stock_ts_str = str(stock_ts)[:19]
                     spy_ts_strs = spy_bars['timestamp'].astype(str).str[:19]
                     spy_mask = spy_ts_strs <= stock_ts_str
                     if spy_mask.any():
@@ -1142,20 +1145,43 @@ class BacktestRunner:
                     else:
                         spy_close = float(spy_bars.iloc[0]['close'])
                 except Exception:
-                    # Fallback: use index-based (imperfect but better than nothing)
                     spy_idx = min(max(0, bar_idx - 1), len(spy_bars) - 1)
                     spy_close = float(spy_bars.iloc[spy_idx]['close'])
-
                 if spy_open > 0:
-                    spy_return = (spy_close - spy_open) / spy_open * 100
-                    if spy_return < self.qf_min_spy_return:
-                        return (False, f"SPY {spy_return:+.2f}% < {self.qf_min_spy_return}% (risk-off)")
+                    features['qf_spy_return_pct'] = round(
+                        (spy_close - spy_open) / spy_open * 100, 3)
 
-        # 4. Slow weak pole: pattern took too long with too little gain
-        pole_bars = setup.pole_end_idx - setup.pole_start_idx
-        pole_gain = setup.pole_gain_pct
+        # 4. Pole quality
+        features['qf_pole_bars'] = setup.pole_end_idx - setup.pole_start_idx
+        features['qf_pole_gain_pct'] = round(setup.pole_gain_pct, 2)
+
+        return features
+
+    def _evaluate_qf(self, features: dict) -> tuple:
+        """Evaluate quality filter thresholds against pre-computed features.
+
+        Returns (pass: bool, reason: str). If pass=False, skip this setup.
+        """
+        # 1. VWAP overextension
+        vwap_dist = features.get('qf_vwap_dist_pct')
+        if vwap_dist is not None and vwap_dist > self.qf_max_vwap_dist:
+            return (False, f"VWAP +{vwap_dist:.1f}% > {self.qf_max_vwap_dist}% (overextended)")
+
+        # 2. Gap fading
+        if features.get('qf_gap_fading'):
+            gap = features.get('qf_gap_pct', 0)
+            return (False, f"gap_fade: gap +{gap:.1f}%")
+
+        # 3. SPY down
+        spy_ret = features.get('qf_spy_return_pct')
+        if spy_ret is not None and spy_ret < self.qf_min_spy_return:
+            return (False, f"SPY {spy_ret:+.2f}% < {self.qf_min_spy_return}% (risk-off)")
+
+        # 4. Slow weak pole
+        pole_bars = features.get('qf_pole_bars', 0)
+        pole_gain = features.get('qf_pole_gain_pct', 99)
         if pole_bars > self.qf_slow_pole_max_bars and pole_gain < self.qf_slow_pole_min_gain:
-            return (False, f"slow_pole: {pole_bars} bars, {pole_gain:.1f}% gain (weak momentum)")
+            return (False, f"slow_pole: {pole_bars} bars, {pole_gain:.1f}% gain")
 
         return (True, "")
 
@@ -1664,6 +1690,9 @@ class BacktestRunner:
                     trade = self.simulator.simulate(
                         plan, bars, i, entry_price_override=fill_price
                     )
+                    # Propagate QF features from pending order to trade for cache storage
+                    if hasattr(pending_order, '_qf_features'):
+                        trade._qf_features = pending_order._qf_features
                     result.trades_simulated.append(trade)
                     pending_order = None
 
@@ -1842,12 +1871,13 @@ class BacktestRunner:
                             pattern=plan.pattern,
                         )
 
-                # Quality filter: skip low-probability setups (matches production behavior).
-                # Must be in BacktestRunner (not post-hoc) because blocking a setup
-                # lets the scanner find replacement patterns — same as production.
+                # Quality filter: compute features for EVERY setup, store on pending order.
+                # Filter only when enabled (production + final BT validation).
+                # During --build-cache: disabled → all trades generated with features logged.
+                qf_features = self._compute_qf_features(
+                    symbol, bars, setup, i, plan, prev_close)
                 if self.quality_filter_enabled:
-                    qf_pass, qf_reason = self._check_quality_filter(
-                        symbol, bars, setup, i, plan, prev_close)
+                    qf_pass, qf_reason = self._evaluate_qf(qf_features)
                     if not qf_pass:
                         logger.info(f"  QUALITY FILTER SKIP: {qf_reason}")
                         continue
@@ -1858,6 +1888,7 @@ class BacktestRunner:
                     placed_at_bar_idx=i,
                     breakout_level=setup.breakout_level,
                 )
+                pending_order._qf_features = qf_features
                 logger.info(
                     f"  PENDING BUY-STOP placed at bar {i}: "
                     f"${setup.breakout_level:.2f}, "

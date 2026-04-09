@@ -198,7 +198,7 @@ trading:
   quality_filter:
     enabled: true
     # 1. VWAP overextension — entry too far above VWAP = overextended, likely to reverse
-    max_vwap_distance_pct: 4.0         # skip if breakout_level > VWAP * 1.04
+    max_vwap_distance_pct: 6.0         # skip if breakout_level > VWAP * 1.06 (BT computes VWAP at setup bar, ~1.5% lower than at entry)
     # 2. Gap fading — stock gapped 15%+ but pulled back below open = failed gap, trap
     gap_fade_threshold_pct: 15.0       # skip if gap >= 15% AND breakout < open
     # 3. SPY down — risk-off environment, momentum doesn't stick

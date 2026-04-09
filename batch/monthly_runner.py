@@ -68,6 +68,9 @@ RICH_CSV_HEADERS = [
     "sector", "float_shares",
     # Derived
     "entry_minutes_from_open", "patterns_detected_that_day",
+    # Quality filter features (computed at setup detection, always logged)
+    "qf_vwap_dist_pct", "qf_gap_pct", "qf_gap_fading",
+    "qf_spy_return_pct", "qf_pole_bars", "qf_pole_gain_pct",
 ]
 
 
@@ -189,6 +192,16 @@ def build_rich_row(
         # Derived
         entry_minutes,
         result.patterns_detected,
+        # Quality filter features
+        *[f"{v:.2f}" if isinstance(v, float) else str(v) if v is not None else ''
+          for v in [
+              getattr(trade, '_qf_features', {}).get('qf_vwap_dist_pct'),
+              getattr(trade, '_qf_features', {}).get('qf_gap_pct'),
+              getattr(trade, '_qf_features', {}).get('qf_gap_fading'),
+              getattr(trade, '_qf_features', {}).get('qf_spy_return_pct'),
+              getattr(trade, '_qf_features', {}).get('qf_pole_bars'),
+              getattr(trade, '_qf_features', {}).get('qf_pole_gain_pct'),
+          ]],
     ]
 
 
