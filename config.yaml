@@ -197,7 +197,7 @@ trading:
   # Quality filter: skip low-probability setups based on pre-entry features
   # Validated on 15mo data: removes 48% of trades (73% losers), PF 1.15→1.80, Sharpe 0.27→0.90
   quality_filter:
-    enabled: false                     # Disabled for cache build — features logged, filter applied post-hoc
+    enabled: false                     # VWAP filter conflicts with 2x tier — removes the big winners. Features logged for research.
     # 1. VWAP overextension — entry too far above VWAP = overextended, likely to reverse
     max_vwap_distance_pct: 6.0         # skip if breakout_level > VWAP * 1.06 (BT computes VWAP at setup bar, ~1.5% lower than at entry)
     # 2. Gap fading — stock gapped 15%+ but pulled back below open = failed gap, trap
