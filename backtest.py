@@ -1758,32 +1758,6 @@ class BacktestRunner:
                                 pattern=plan.pattern,
                             )
 
-                    # Conviction scoring: adjust shares at fill based on breakout volume
-                    if self.conviction_enabled and hasattr(pending_order, '_conviction_score'):
-                        setup_score = pending_order._conviction_score
-                        _bk_vol = bar.get('volume', 0) if hasattr(bar, 'get') else bar['volume']
-                        _afv = pending_order.setup.avg_flag_volume if hasattr(pending_order.setup, 'avg_flag_volume') else 0
-                        final_score = self._compute_conviction_score_fill(
-                            float(_bk_vol), float(_afv), setup_score)
-                        if abs(final_score - 1.0) > 0.05:
-                            conv_shares = min(self.planner.max_shares,
-                                              max(1, int(plan.shares * final_score)))
-                            logger.info(
-                                f"  CONVICTION {final_score:.2f}x → "
-                                f"shares {plan.shares} → {conv_shares}")
-                            plan = TradePlan(
-                                symbol=plan.symbol,
-                                entry_price=plan.entry_price,
-                                stop_loss_price=plan.stop_loss_price,
-                                take_profit_price=plan.take_profit_price,
-                                risk_per_share=plan.risk_per_share,
-                                reward_per_share=plan.reward_per_share,
-                                risk_reward_ratio=plan.risk_reward_ratio,
-                                shares=conv_shares,
-                                total_risk=plan.risk_per_share * conv_shares,
-                                pattern=plan.pattern,
-                            )
-
                     logger.info(
                         f"  BUY-STOP TRIGGERED at bar {i}: "
                         f"planned ${pending_order.breakout_level:.2f}, "
@@ -1927,14 +1901,30 @@ class BacktestRunner:
                                 tier['min_volume'] <= av <= tier['max_volume']):
                             risk_tier_mult = tier['multiplier']
                             break
-                    if risk_tier_mult > 1.0:
-                        plan = self.planner.create_plan(setup, risk_multiplier=risk_tier_mult)
-                        if plan is None:
-                            continue
-                        logger.debug(
-                            f"  Risk tier {risk_tier_mult:.0f}x — "
-                            f"{plan.shares} shares, ${plan.total_risk:.0f} risk"
-                        )
+
+                # Conviction scoring: multiply with risk tier for combined sizing
+                conviction_mult = 1.0
+                if self.conviction_enabled:
+                    _trade_date = None
+                    try:
+                        _trade_date = str(bars.iloc[0].get('timestamp', bars.iloc[0].name))[:10]
+                    except Exception:
+                        pass
+                    _spy_3d = self._get_spy_3d_range(_trade_date) if _trade_date else 1.0
+                    conviction_mult = self._compute_conviction_score_setup(setup, _spy_3d)
+                    if abs(conviction_mult - 1.0) > 0.05:
+                        logger.debug(f"  Conviction score: {conviction_mult:.2f}x")
+
+                # Combine risk tier + conviction into single multiplier
+                combined_mult = risk_tier_mult * conviction_mult
+                if combined_mult != 1.0:
+                    plan = self.planner.create_plan(setup, risk_multiplier=combined_mult)
+                    if plan is None:
+                        continue
+                    logger.debug(
+                        f"  Risk scaling {combined_mult:.2f}x (tier={risk_tier_mult:.1f} × conv={conviction_mult:.2f}) — "
+                        f"{plan.shares} shares, ${plan.total_risk:.0f} risk"
+                    )
 
                 # MACD zone filter: skip dead zone, scale risk on strong zones
                 # Skip scaling if risk tier already applied (don't compound)
@@ -1992,17 +1982,6 @@ class BacktestRunner:
                         logger.info(f"  QUALITY FILTER SKIP: {qf_reason}")
                         continue
 
-                # Conviction scoring: compute setup-time score
-                _conv_score = 1.0
-                if self.conviction_enabled:
-                    _trade_date = None
-                    try:
-                        _trade_date = str(bars.iloc[0].get('timestamp', bars.iloc[0].name))[:10]
-                    except Exception:
-                        pass
-                    _spy_3d = self._get_spy_3d_range(_trade_date) if _trade_date else 1.0
-                    _conv_score = self._compute_conviction_score_setup(setup, _spy_3d)
-
                 pending_order = PendingBuyStop(
                     setup=setup,
                     plan=plan,
@@ -2010,7 +1989,6 @@ class BacktestRunner:
                     breakout_level=setup.breakout_level,
                 )
                 pending_order._qf_features = qf_features
-                pending_order._conviction_score = _conv_score
                 logger.info(
                     f"  PENDING BUY-STOP placed at bar {i}: "
                     f"${setup.breakout_level:.2f}, "

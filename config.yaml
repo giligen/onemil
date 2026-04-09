@@ -211,4 +211,4 @@ trading:
   # Validated on 15mo walk-forward: $61K → $208K, Sharpe 0.22 → 0.55
   # OOS improvement: H2 +$8K, Q1 +$33K (Q1 from -$41K to -$9K)
   conviction_scoring:
-    enabled: false                     # Post-hoc shows +$147K but in-BT share scaling interacts with partial exits — needs decoupling
+    enabled: true                      # V4 model: scales risk_per_trade via planner (not shares post-hoc)
