@@ -1286,30 +1286,148 @@ class BacktestRunner:
         except Exception:
             return 1.0
 
+    _REAL_CATS = {'FDA_CLINICAL', 'EARNINGS', 'CONTRACT_DEAL', 'CONTRACT',
+                  'MA', 'ANALYST', 'PRODUCT', 'PRODUCT_LAUNCH',
+                  'MGMT', 'MANAGEMENT', 'SEC_FILING', 'CRYPTO'}
+
+    @staticmethod
+    def _classify_headline(h: str) -> str:
+        """Classify a news headline into category using regex (fast, no LLM)."""
+        import re
+        h = h.lower()
+        if re.search(r'fda|phase [123]|clinical|trial|drug|therapy|approv|orphan|ind |nda|biologics', h): return 'FDA_CLINICAL'
+        if re.search(r'earn|revenue|quarter|q[1-4]|eps|guidance|beat|miss|fiscal', h): return 'EARNINGS'
+        if re.search(r'contract|deal|agreement|partner|collaborat|licens|amend|award', h): return 'CONTRACT_DEAL'
+        if re.search(r'acqui|merge|buyout|takeover', h): return 'MA'
+        if re.search(r'analyst|upgrade|downgrade|price target|initiat.*coverage', h): return 'ANALYST'
+        if re.search(r'launch|new product|expansion|patent|initiative', h): return 'PRODUCT'
+        if re.search(r'insider|ceo|cfo|director|appoint|resign|hire', h): return 'MGMT'
+        if re.search(r'offering|ipo|shelf|registration|prospectus', h): return 'SEC_FILING'
+        if re.search(r'why is|why are|stocks? moving|here are \d+|top \d+ stocks', h): return 'GARBAGE_RECAP'
+        if re.search(r'bitcoin|crypto|blockchain|mining', h): return 'CRYPTO'
+        return 'OTHER'
+
+    def _ensure_news_table(self, conn) -> None:
+        """Create news_history table if it doesn't exist."""
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS news_history (
+                symbol VARCHAR(10) NOT NULL,
+                trade_date DATE NOT NULL,
+                article_time VARCHAR(30),
+                headline TEXT,
+                source VARCHAR(50),
+                category VARCHAR(30),
+                is_catalyst INTEGER,
+                UNIQUE(symbol, trade_date, headline)
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_news_history_sym_date
+                ON news_history(symbol, trade_date)
+        """)
+
+    def _fetch_news_for_date(self, symbol: str, trade_date: str, conn) -> bool:
+        """Fetch news from Alpaca API and store in news_history. Returns has_catalyst."""
+        import os
+        from config import Config
+        cfg = Config._load_yaml_only()
+
+        api_key = os.environ.get('APCA_API_KEY_ID', cfg.get('alpaca', {}).get('api_key', ''))
+        api_secret = os.environ.get('APCA_API_SECRET_KEY', cfg.get('alpaca', {}).get('api_secret', ''))
+        if not api_key or not api_secret:
+            # Try Config object
+            try:
+                c = Config()
+                api_key = api_key or c.alpaca_api_key
+                api_secret = api_secret or c.alpaca_api_secret
+            except Exception:
+                pass
+        if not api_key:
+            return False
+
+        headers = {
+            'APCA-API-KEY-ID': api_key,
+            'APCA-API-SECRET-KEY': api_secret,
+        }
+
+        # Time window: prev day 4PM ET (21:00 UTC) to trade_date 3PM ET (20:00 UTC)
+        from datetime import timedelta
+        prev_date = (datetime.strptime(trade_date, '%Y-%m-%d') - timedelta(days=1)).strftime('%Y-%m-%d')
+        start = f"{prev_date}T21:00:00Z"
+        end = f"{trade_date}T20:00:00Z"
+
+        try:
+            import requests
+            url = (f"https://data.alpaca.markets/v1beta1/news?"
+                   f"symbols={symbol}&start={start}&end={end}&limit=10&sort=desc")
+            resp = requests.get(url, headers=headers, timeout=10)
+            articles = resp.json().get('news', [])
+        except Exception as e:
+            logger.debug(f"{symbol} {trade_date}: news fetch failed: {e}")
+            return False
+
+        self._ensure_news_table(conn)
+        has_catalyst = False
+
+        if not articles:
+            conn.execute(
+                "INSERT OR IGNORE INTO news_history (symbol, trade_date, headline, category, is_catalyst) "
+                "VALUES (?, ?, '', 'NO_NEWS', 0)",
+                (symbol, trade_date)
+            )
+            conn.commit()
+            return False
+
+        for a in articles:
+            headline = (a.get('headline') or '')[:500]
+            article_time = (a.get('created_at') or '')[:30]
+            source = (a.get('source') or '')[:50]
+            cat = self._classify_headline(headline)
+            is_cat = 1 if cat in self._REAL_CATS else 0
+            if is_cat:
+                has_catalyst = True
+            conn.execute(
+                "INSERT OR IGNORE INTO news_history "
+                "(symbol, trade_date, article_time, headline, source, category, is_catalyst) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (symbol, trade_date, article_time, headline, source, cat, is_cat)
+            )
+
+        conn.commit()
+        return has_catalyst
+
     def _has_real_catalyst(self, symbol: str, trade_date: str) -> bool:
-        """Check news_history DB for real catalyst on this symbol/date."""
+        """Check news_history DB for real catalyst on this symbol/date.
+
+        Auto-fetches from Alpaca News API on cache miss (creates table if needed).
+        """
         cache_key = f"{symbol}_{trade_date}"
         if cache_key in self._news_cache:
             return self._news_cache[cache_key]
 
-        real_cats = {'FDA_CLINICAL', 'EARNINGS', 'CONTRACT_DEAL', 'CONTRACT',
-                     'MA', 'ANALYST', 'PRODUCT', 'PRODUCT_LAUNCH',
-                     'MGMT', 'MANAGEMENT', 'SEC_FILING', 'CRYPTO'}
         result = False
         db_path = self._db_path or "data/cache.db"
         try:
             import sqlite3
             conn = sqlite3.connect(db_path)
+            self._ensure_news_table(conn)
             rows = conn.execute(
                 "SELECT category FROM news_history WHERE symbol=? AND trade_date=?",
                 (symbol, trade_date)).fetchall()
+
+            if rows:
+                # Already cached — check categories
+                for r in rows:
+                    if r[0] in self._REAL_CATS:
+                        result = True
+                        break
+            else:
+                # Not cached — fetch from API and classify
+                result = self._fetch_news_for_date(symbol, trade_date, conn)
+
             conn.close()
-            for r in rows:
-                if r[0] in real_cats:
-                    result = True
-                    break
-        except Exception:
-            pass  # table might not exist yet
+        except Exception as e:
+            logger.warning(f"{symbol} {trade_date}: news lookup failed: {e}")
 
         self._news_cache[cache_key] = result
         return result
@@ -1655,6 +1773,10 @@ class BacktestRunner:
                 _cfg.get("scanner", {}).get("intraday_change_pct_min", 20.0)
             ) / 100.0  # Convert 20.0 → 0.20
         qualified = prev_close is None or prev_close <= 0
+        price_qualified = qualified  # Track price and volume independently
+        volume_qualified = qualified or (
+            self.min_cum_dollar_vol <= 0 and self.min_cum_shares <= 0
+            and self.min_relative_vol_rate <= 0)  # No volume gate = auto-qualified
         qualification_bar = 0
 
         logger.info(
@@ -1676,35 +1798,43 @@ class BacktestRunner:
                 running_high = max(running_high, bars.iloc[i]['high'])
                 running_low = min(running_low, bars.iloc[i]['low'])
 
-            # Real-time qualification check: stock must cross threshold before scanning.
-            # Gap-up: high >= prev_close * (1 + threshold)
-            # V-reversal: (running_high - running_low) / running_low >= threshold
+            # Real-time qualification check: price and volume tracked INDEPENDENTLY.
+            # Price qualifies once (stays qualified). Volume qualifies once (stays qualified).
+            # Scanning starts when BOTH have been met (at any point, not same bar).
             if not qualified:
-                bar_high = bars.iloc[i]['high']
-                move = (bar_high - prev_close) / prev_close
-                range_move = (running_high - running_low) / running_low if running_low > 0 else 0
-                if move >= qualification_pct or range_move >= qualification_pct:
-                    # Price threshold passed — check volume gate
+                # Price check
+                if not price_qualified:
+                    bar_high = bars.iloc[i]['high']
+                    move = (bar_high - prev_close) / prev_close
+                    range_move = (running_high - running_low) / running_low if running_low > 0 else 0
+                    if move >= qualification_pct or range_move >= qualification_pct:
+                        price_qualified = True
+
+                # Volume check (independent of price)
+                if not volume_qualified:
+                    cum_vol = int(bars.iloc[:i+1]['volume'].sum())
+                    minutes = i + 1
                     vol_ok = True
-                    if (self.min_cum_dollar_vol > 0 or self.min_cum_shares > 0
-                            or self.min_relative_vol_rate > 0):
-                        cum_vol = int(bars.iloc[:i+1]['volume'].sum())
-                        minutes = i + 1
-                        if self.min_cum_dollar_vol > 0:
-                            cum_dv = float((bars.iloc[:i+1]['close'] * bars.iloc[:i+1]['volume']).sum())
-                            if cum_dv < self.min_cum_dollar_vol:
-                                vol_ok = False
-                        if self.min_cum_shares > 0 and cum_vol < self.min_cum_shares:
+                    if self.min_cum_dollar_vol > 0:
+                        cum_dv = float((bars.iloc[:i+1]['close'] * bars.iloc[:i+1]['volume']).sum())
+                        if cum_dv < self.min_cum_dollar_vol:
                             vol_ok = False
-                        if self.min_relative_vol_rate > 0 and self.avg_daily_volume > 0:
-                            rate = cum_vol / minutes
-                            expected = self.avg_daily_volume / 390
-                            if expected > 0 and rate / expected < self.min_relative_vol_rate:
-                                vol_ok = False
-                    if not vol_ok:
-                        continue  # Price OK but volume insufficient — keep waiting
+                    if self.min_cum_shares > 0 and cum_vol < self.min_cum_shares:
+                        vol_ok = False
+                    if self.min_relative_vol_rate > 0 and self.avg_daily_volume > 0:
+                        rate = cum_vol / minutes
+                        expected = self.avg_daily_volume / 390
+                        if expected > 0 and rate / expected < self.min_relative_vol_rate:
+                            vol_ok = False
+                    if vol_ok:
+                        volume_qualified = True
+
+                # Both met?
+                if price_qualified and volume_qualified:
                     qualified = True
                     qualification_bar = i
+                    bar_high = bars.iloc[i]['high']
+                    move = (bar_high - prev_close) / prev_close
                     logger.info(
                         f"  Bar {i}: QUALIFIED at +{move:.1%} "
                         f"(high=${bar_high:.2f} vs prev_close=${prev_close:.2f})"
