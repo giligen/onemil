@@ -3149,11 +3149,14 @@ class TradingEngine:
             return None
 
     def _close_orphan_positions(self, trades_today: List[Dict]) -> None:
-        """Detect and close positions from prior days still open on Alpaca.
+        """Detect and close positions from prior days opened by THIS node.
 
-        An orphan is an Alpaca position with no matching trade in today's DB.
-        This handles the case where the service crashed after market close
-        without running force_close.
+        An orphan is an Alpaca position that THIS node opened (has a record
+        in our trades DB) but failed to close (e.g., service crashed after
+        market close without running force_close).
+
+        Positions with NO record in our DB are assumed to belong to another
+        node/strategy sharing the same Alpaca account — leave them alone.
 
         Args:
             trades_today: Today's trades from DB (already fetched)
@@ -3171,11 +3174,32 @@ class TradingEngine:
 
         for pos in positions:
             symbol = pos['symbol']
-            if symbol not in today_symbols:
-                logger.warning(f"{symbol}: Orphan position from prior day — closing")
+            if symbol in today_symbols:
+                continue  # Known today — handled by startup sync
+
+            # Check if THIS node has any record of this position in our DB
+            # (open trade from today or any prior day)
+            our_trade = self.db.get_trade_by_symbol(symbol) if self.db and hasattr(self.db, 'get_trade_by_symbol') else None
+            if our_trade is None and self.db:
+                # Fallback: check all recent trades
+                from datetime import timedelta
+                for days_back in range(5):
+                    _check_date = (date.today() - timedelta(days=days_back)).isoformat()
+                    _trades = self.db.get_trades_by_date(_check_date)
+                    if any(t['symbol'] == symbol for t in _trades):
+                        our_trade = True
+                        break
+
+            if our_trade:
+                # We opened it but didn't close — orphan from prior day
+                logger.warning(f"{symbol}: Orphan position from prior day (ours) — closing")
                 try:
                     self.alpaca.close_position(symbol)
                     self._traded_symbols.add(symbol)
                     logger.info(f"{symbol}: Orphan position closed")
                 except Exception as e:
                     logger.error(f"{symbol}: Failed to close orphan position: {e}")
+            else:
+                # Not ours — belongs to another node/strategy
+                logger.info(f"{symbol}: Position exists but not ours — skipping (other node/strategy)")
+                self._traded_symbols.add(symbol)  # Prevent this node from trading it

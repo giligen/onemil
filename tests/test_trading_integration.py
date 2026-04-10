@@ -1340,6 +1340,14 @@ class TestOrphanPositionIntegration:
         )
         engine.news_gate_enabled = False
 
+        # Seed a prior-day trade for YEST in our DB (so orphan detector knows it's ours)
+        from datetime import timedelta
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        db.save_trade(_make_trade_record(
+            symbol='YEST', order_id='ord-yest', trade_date=yesterday,
+            fill_price=8.00, order_status='filled',
+        ))
+
         # No trades today in DB
         mock_alpaca.get_daily_bars_range.return_value = {}
         # But Alpaca has a position from yesterday
@@ -1354,11 +1362,41 @@ class TestOrphanPositionIntegration:
 
         engine.reset_daily()
 
-        # Orphan closed
+        # Orphan closed (it's in our DB from yesterday)
         mock_alpaca.close_position.assert_called_once_with('YEST')
         # Marked traded to prevent re-entry
         assert 'YEST' in engine._traded_symbols
         assert engine._daily_trade_count == 0  # Orphan is not counted as today's trade
+
+    @patch('trading.trading_engine.time_mod.sleep')
+    def test_other_node_position_not_closed(self, mock_sleep, db, mock_alpaca):
+        """Position from another node (no record in our DB) is NOT closed."""
+        detector = BullFlagDetector()
+        planner = TradePlanner()
+        executor = OrderExecutor(mock_alpaca, db)
+        pm = PositionManager(mock_alpaca, db)
+
+        engine = TradingEngine(
+            alpaca_client=mock_alpaca, db=db, detector=detector,
+            planner=planner, executor=executor, position_manager=pm,
+            enabled=True,
+        )
+        engine.news_gate_enabled = False
+
+        # No trades in our DB at all
+        mock_alpaca.get_daily_bars_range.return_value = {}
+        # Alpaca has a position from another node
+        mock_alpaca.get_open_positions.return_value = [
+            {'symbol': 'CLSK', 'qty': 500, 'avg_entry_price': 12.00,
+             'market_value': 6000.0},
+        ]
+
+        engine.reset_daily()
+
+        # NOT closed — not ours
+        mock_alpaca.close_position.assert_not_called()
+        # But marked traded to prevent this node from trading it
+        assert 'CLSK' in engine._traded_symbols
 
 
 class TestFlagHighMaxFlowThrough:
