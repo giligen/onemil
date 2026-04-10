@@ -10,25 +10,25 @@ scanner:
   price_min: 1.0
   price_max: 23.0    # $20-23 profitable (PF 2.75+), $24+ is death zone (0-14% WR)
 
-  # Float filter (shares) — 50M captures mid-float stocks with cleaner patterns
-  # 15mo backtest: 50M=+$902K 56%WR vs 10M=+$680K 55%WR (both 16/16 green)
+  # Float filter (shares)
   float_max: 50_000_000
 
-  # Minimum avg daily volume — filters illiquid stocks where fills are unrealistic
+  # Minimum daily share volume — filters untradeable garbage
   # <50K vol: 25% WR (garbage), 200K+: 53% WR. Filters 30% of trades, keeps 90% of PnL.
   min_daily_volume: 200_000
 
-  # Minimum daily dollar volume — DISABLED: backtest shows all gates destroy P&L
-  # $3M cost $193K/quarter in missed trades. 200K avg daily vol filter catches garbage.
+  # Minimum daily dollar volume — filters untradeable micro-caps
+  # $3M = catches EUDA ($1M), GLND ($1M), keeps BEX ($20M), CORD ($28M)
   min_dollar_volume: 0
 
   # Pre-market gap threshold
   gap_pct_min: 2.0
 
-  # Intraday move threshold
+  # Intraday move threshold — 20% validated: +$422K vs +$217K at 10% (15mo backtest)
   intraday_change_pct_min: 20.0
 
   # News catalyst requirement — disabled: pattern detector already filters quality
+  # Backtest without news: +$902K. With news: ~50% of trades rejected.
   require_news: false
 
   # Relative volume threshold (0 = disabled)
@@ -80,13 +80,13 @@ notifications:
 # Trading (Phase 2 - automated paper trading)
 # To scale for $1K live: capital=1000, risk_per_trade=40, max_shares=500, daily_loss_limit=-40
 trading:
-  enabled: false
+  enabled: true
   sizing_mode: fixed_risk
   capital: 50000
   risk_per_trade: 2000
   position_size_dollars: 50000
-  max_shares: 30000            # Dollar-based limit ($50K position_size) is the real cap, not shares
-  max_adv_participation_pct: 0       # Disabled — waiting for real L2 depth data
+  max_shares: 15000            # ~$50K position at $3/share. Conviction 3x → 45K shares max via planner
+  max_adv_participation_pct: 0.02    # 2% of 20d ADV — prod fills on >200K ADV stocks are 0.1-3.8%
   max_bar_participation_pct: 0       # Disabled — waiting for real L2 depth data
   max_positions: 3
   daily_loss_limit: -5000.0
@@ -95,15 +95,15 @@ trading:
   min_risk_reward: 2.5
   min_price: 2.00
   min_stop_distance: 0.09       # Reject setups with stop < $0.09 from entry (tick-noise filter)
-  last_entry_time: "10:45"      # ET — edge dies after 10:45 (15mo: 9:30-10:45 = +$227K, 10:45+ = -$10K)
+  last_entry_time: "10:30"      # ET — 15mo data: 10:30-11:00 bucket is breakeven (PF 1.01)
   force_close_time: "15:45"     # ET — close all positions
   setup_expiry_bars: 10         # cancel pending buy-stop after N bars
-  pattern_poll_interval: 15
-  skip_midday: false            # Disabled — last_entry_time 10:45 makes midday filter redundant
+  pattern_poll_interval: 5              # 5s — breakout fills are time-critical (was 15s)
+  skip_midday: false            # Disabled — 10:45 cutoff makes it redundant
   skip_fridays: false           # Disabled for paper testing (re-enable for live)
   max_consecutive_losses: 0     # Disabled — trailing stops handle risk adaptively
   # Risk tiers: scale risk on high-conviction setups (higher price + right volume)
-  # 15mo backtest: 2x on $10-15 + 3x on $15-20 (500K-5M vol) = +$130K (+36%)
+  # 15mo backtest: 2x on $10-15 validated (PF 2.16, $3.2K/trade). 3x on $15-20 killed (PF 0.65, -$47K).
   risk_tiers:
     enabled: true
     tier1_min_price: 10.0
@@ -116,24 +116,25 @@ trading:
     tier2_min_volume: 500000
     tier2_max_volume: 5000000
     tier2_multiplier: 1.0
-  max_trades_per_day: 5         # 15mo optimal with 10:45 cutoff: Sharpe 3.92, +$234K, $20K DD
+  max_trades_per_day: 5         # 15mo optimal with 10:45 cutoff
   market_regime:
     enabled: false              # Regime OFF: +$902K vs ON: +$760K. Blocks profitable days for no DD benefit.
     vol_threshold: 1.5         # 5-day avg daily range % — high volatility signal
     sma_period: 50             # SPY below SMA(50) — downtrend signal
     min_spy_volume_ratio: 0.70 # SPY T-1 volume / SMA20 — thin liquidity threshold
     thin_liquidity_breakout_vol_ratio: 2.0  # Stricter breakout vol ratio on thin days
-    sma_slope_filter: false            # Disabled — replaced by UD risk scaling
+    sma_slope_filter: false            # Disabled — replaced by UD risk scaling (faster recovery)
     sma_slope_threshold: -0.5
-    euphoria_filter: false             # Disabled — replaced by UD risk scaling
+    euphoria_filter: false             # Disabled — replaced by UD risk scaling (half size, not skip)
     euphoria_ud_threshold: 1.2
     euphoria_rsi_threshold: 60.0
-  # UD risk scaling: reduce position size when SPY up/down volume ratio > threshold
-  # Replaces binary euphoria skip — keeps trades at reduced risk, stacks with MACD zones
+  # UD risk scaling: when SPY 10-day up/down volume ratio > threshold,
+  # reduce position size to ud_scale_factor (0.5 = half size).
+  # Replaces binary euphoria skip — keeps trades at reduced risk.
   ud_risk_scaling:
     enabled: true
     ud_threshold: 1.2                  # SPY UD ratio above this = euphoric market
-    scale_factor: 0.5                  # Risk multiplier on euphoric days
+    scale_factor: 0.5                  # Risk multiplier on euphoric days (stacks with MACD zones)
   # SPY MACD afternoon cutoff: block new entries when SPY intraday momentum is bullish
   # When SPY 1-min MACD histogram > 0 after cutoff_time, small-cap momentum stocks
   # lose their edge (30% WR, -$36K over 15 months). Removing these = +13.5% P&L.
@@ -144,7 +145,7 @@ trading:
   # Self-managed stops: WebSocket price monitoring + marketable limit sell exits
   # Replaces bracket stop-market with real-time monitoring to cap exit slippage
   self_managed_stops:
-    enabled: true                       # ACTIVE — paper testing
+    enabled: true                       # Paper node uses REST polling (auto-detected from alpaca_paper flag)
     safety_net_sl_pct: 0.05             # 5% wide SL on Alpaca (crash protection)
     marketable_limit_offset: 0.03       # $0.03 min offset below price
     marketable_limit_offset_pct: 0.005  # 0.5% offset (whichever is larger)
@@ -161,7 +162,7 @@ trading:
   # Reduces slippage by selling while buyers are still aggressive
   # Production: polls 1-min bars every 60s, matches backtest signal logic
   exhaustion_exit:
-    enabled: true                      # validated: +$19K P&L, +0.18 Sharpe vs baseline
+    enabled: true                      # testing exhaustion signals
     partial_fraction: 0.5              # sell 50% on signal
     tighter_trail_r: 0.5              # 0.5R trail on remainder (vs 1R)
     min_profit_r: 3.0                 # only check signals when +3R profitable
@@ -185,7 +186,7 @@ trading:
   # Histogram as % of price → zone → risk multiplier (0 = skip trade)
   # U-shape: strong negative + strong positive = best setups, near-zero = worst
   macd_zones:
-    enabled: true                     # Dead zone blocks garbage trades in flat MACD histogram range
+    enabled: true                     # RE-ENABLED — dead zone blocks garbage trades worth -$120K+. Earlier "removing profitable trades" analysis was on wrong dataset.
     dead_zone_min_pct: -0.2           # skip trades with MACD% in [-0.2%, +0.1%]
     dead_zone_max_pct: 0.1
     strong_neg_threshold_pct: -0.5    # MACD% below this = deep pullback (loaded spring)
@@ -196,7 +197,7 @@ trading:
   # Quality filter: skip low-probability setups based on pre-entry features
   # Validated on 15mo data: removes 48% of trades (73% losers), PF 1.15→1.80, Sharpe 0.27→0.90
   quality_filter:
-    enabled: true
+    enabled: false                     # VWAP filter conflicts with 2x tier — removes the big winners. Features logged for research.
     # 1. VWAP overextension — entry too far above VWAP = overextended, likely to reverse
     max_vwap_distance_pct: 6.0         # skip if breakout_level > VWAP * 1.06 (BT computes VWAP at setup bar, ~1.5% lower than at entry)
     # 2. Gap fading — stock gapped 15%+ but pulled back below open = failed gap, trap
@@ -206,3 +207,19 @@ trading:
     # 4. Slow weak pole — pattern took too long with too little gain = no real momentum
     slow_pole_max_bars: 15             # combined: pole_bars > 15 AND pole_gain < 5%
     slow_pole_min_gain_pct: 5.0
+  # Conviction scoring: scale position size based on setup quality
+  # Validated on 15mo walk-forward: $61K → $208K, Sharpe 0.22 → 0.55
+  # OOS improvement: H2 +$8K, Q1 +$33K (Q1 from -$41K to -$9K)
+  conviction_scoring:
+    enabled: true                      # V4 model: scales risk_per_trade via planner (not shares post-hoc)
+  news_gate:
+    enabled: false                     # Full gate kills Q1 2025. Use news_kill_rules instead.
+  # News kill rules: block no-news trades in specific LOSER segments only
+  # Has real catalyst → always trade. No catalyst + loser segment → kill.
+  # Validated: $175K → $333K (+90%), all quarters positive, walk-forward passes.
+  news_kill_rules:
+    enabled: true
+    max_avg_vol_no_news: 3000000       # avg daily vol >= 3M + no news → kill (22% WR, -$101K)
+    min_price_no_news: 3.0             # price < $3 + no news → kill (20% WR, -$11K)
+    max_float_no_news: 30000000        # float >= 30M + no news → kill (19% WR, -$14K)
+    # Rule 4: $5-12 + pole 8-15% + no news → kill (27% WR, -$32K) — hardcoded in method
