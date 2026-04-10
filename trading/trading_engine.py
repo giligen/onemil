@@ -675,6 +675,18 @@ class TradingEngine:
     def _drain_bar_events(self) -> Optional[Dict[str, Any]]:
         """Process queued bar events from WebSocket thread. Called from main thread."""
         last_result = None
+
+        # Same guards as run_pattern_check() — RT events must respect all limits
+        if self.skip_fridays and date.today().weekday() == 4:
+            self._bar_event_queue.queue.clear()
+            return None
+        if self.market_regime and not self.market_regime.is_regime_ok(date.today()):
+            self._bar_event_queue.queue.clear()
+            return None
+        if self.market_regime and self.market_regime.max_trades_per_day > 0 and self._daily_trade_count >= self.market_regime.max_trades_per_day:
+            self._bar_event_queue.queue.clear()
+            return None
+
         while not self._bar_event_queue.empty():
             try:
                 symbol, bars_df = self._bar_event_queue.get_nowait()
