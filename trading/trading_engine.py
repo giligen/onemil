@@ -604,14 +604,19 @@ class TradingEngine:
             news_reason: LLM's reason for classification
             news_category: News category (FDA_CLINICAL, EARNINGS, GARBAGE_RECAP, etc.)
         """
-        # Store news data for later persistence with trade record
+        # Store news data for later persistence with trade record.
+        # Never downgrade: once a real catalyst is found, keep it.
+        # Scanner re-qualifies stocks each cycle — LLM may flip on re-classification.
         if news_catalyst is not None:
-            self._news_data[symbol] = {
-                'news_catalyst': news_catalyst,
-                'news_headline': (news_headline or '')[:200],
-                'news_reason': (news_reason or '')[:100],
-                'news_category': news_category or 'OTHER',
-            }
+            existing = self._news_data.get(symbol, {})
+            existing_is_real = existing.get('news_catalyst') is True
+            if not existing_is_real or news_catalyst is True:
+                self._news_data[symbol] = {
+                    'news_catalyst': news_catalyst,
+                    'news_headline': (news_headline or '')[:200],
+                    'news_reason': (news_reason or '')[:100],
+                    'news_category': news_category or 'OTHER',
+                }
         if not self.enabled:
             logger.debug(f"{symbol}: Trading engine disabled, ignoring qualified stock")
             return
