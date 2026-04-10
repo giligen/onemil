@@ -162,7 +162,9 @@ def _create_stop_monitor(config, alpaca, notifier=None):
     from trading.stop_monitor import StopMonitor
     # Paper accounts use REST polling (no WebSocket) to avoid conflict
     # with live account's WebSocket on shared Alpaca account
-    use_polling = config.alpaca_paper
+    # Paper CAN use WebSocket SIP — only force polling if live+paper share the same WS slot
+    # For single-node paper trading, WebSocket gives real-time stops + instant bar detection
+    use_polling = False
     stop_monitor = StopMonitor(
         api_key=config.alpaca_api_key,
         api_secret=config.alpaca_api_secret,
@@ -331,6 +333,10 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
                                                  stop_monitor=stop_monitor)
         trading_engine.enabled = True
         trading_engine.news_provider = news_provider  # For news re-check at trade time
+        # Register real-time bar callback for instant pattern detection
+        if stop_monitor and not stop_monitor._polling_mode:
+            stop_monitor.set_bar_callback(trading_engine._on_bar_close)
+            logger.info("Real-time bar stream → instant pattern detection ENABLED")
         logger.info(f"Bull Flag strategy ENABLED")
 
     # MACD wave engine (optional)

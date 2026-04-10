@@ -207,6 +207,20 @@ class TradingEngine:
         if self.news_gate_enabled:
             logger.info("News gate: ENABLED — no catalyst = no trade")
 
+        # News kill rules: block no-news trades in specific loser segments
+        nkr_cfg = _cfg.get("trading", {}).get("news_kill_rules", {})
+        self.news_kill_enabled = bool(nkr_cfg.get("enabled", False))
+        self.nkr_max_avg_vol = float(nkr_cfg.get("max_avg_vol_no_news", 3_000_000))
+        self.nkr_min_price = float(nkr_cfg.get("min_price_no_news", 3.0))
+        self.nkr_max_float = float(nkr_cfg.get("max_float_no_news", 30_000_000))
+        if self.news_kill_enabled:
+            logger.info(
+                f"News kill rules: ENABLED — "
+                f"vol>={self.nkr_max_avg_vol/1e6:.0f}M, "
+                f"price<${self.nkr_min_price:.0f}, float>={self.nkr_max_float/1e6:.0f}M "
+                f"(no-news only)"
+            )
+
         # EOD summary tracking
         self._eod_traded: list = []    # [(symbol, category, headline, pnl)]
         self._eod_skipped: list = []   # [(symbol, category, headline)]
@@ -403,11 +417,11 @@ class TradingEngine:
 
         return (True, "")
 
-    def _compute_conviction_score_setup(self, setup, spy_3d_range: float,
-                                        symbol: str = None) -> float:
+    def _compute_conviction_score_setup(self, setup, spy_3d_range: float) -> float:
         """Compute conviction score at setup detection time.
 
         Returns a multiplier (0.25 to 3.0) that scales position size.
+        Matches backtest.py exactly — 5 pattern rules, no news scoring.
         """
         score = 1.0
 
@@ -441,19 +455,6 @@ class TradingEngine:
         # 5. Shallow retracement (< 30%)
         if setup.retracement_pct < 30:
             score += 0.2
-
-        # 6. News catalyst scoring
-        # Real catalyst → scale up, no news → scale down
-        # Validated: Q1 25 -$4K, Q4 25 +$21K, Q1 26 +$23K = +$40K net
-        if symbol and symbol in self._news_data:
-            news_cat = self._news_data[symbol].get('news_category', 'NO_NEWS')
-            real_cats = {'FDA_CLINICAL', 'EARNINGS', 'CONTRACT_DEAL', 'CONTRACT',
-                        'MA', 'ANALYST', 'PRODUCT_LAUNCH', 'PRODUCT',
-                        'MANAGEMENT', 'MGMT', 'SEC_FILING', 'CRYPTO'}
-            if news_cat in real_cats:
-                score += 0.5
-            elif news_cat in ('GARBAGE_RECAP', 'NO_NEWS', 'OTHER'):
-                score -= 0.3
 
         return max(0.25, min(3.0, score))
 
@@ -602,6 +603,47 @@ class TradingEngine:
         if symbol not in self._qualified_symbols:
             self._qualified_symbols.add(symbol)
             logger.info(f"{symbol}: Added to qualified symbols for pattern monitoring")
+            # Subscribe to real-time 1-min bars for instant pattern detection
+            if self.stop_monitor and hasattr(self.stop_monitor, 'subscribe_bars'):
+                self.stop_monitor.subscribe_bars(symbol)
+                # Seed bar window with historical bars from market open
+                try:
+                    import pytz as _pytz
+                    _et = _pytz.timezone('US/Eastern')
+                    _now_et = datetime.now(_et)
+                    _market_open = _now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+                    _mins = max(int((_now_et - _market_open).total_seconds() / 60), 30)
+                    hist = self.alpaca.get_1min_bars(symbol, lookback_minutes=_mins)
+                    if hist is not None and not hist.empty:
+                        self.stop_monitor._bar_windows[symbol] = hist.to_dict('records')
+                        logger.info(f"{symbol}: Seeded bar window with {len(hist)} historical bars")
+                except Exception as e:
+                    logger.warning(f"{symbol}: Failed to seed bar window: {e}")
+
+    def _on_bar_close(self, symbol: str, bars_df) -> None:
+        """Handle real-time 1-min bar close from WebSocket.
+
+        Called by StopMonitor when a completed 1-min bar arrives.
+        Runs pattern detection instantly — no polling delay.
+        """
+        if not self.enabled:
+            return
+        if symbol not in self._qualified_symbols:
+            return
+        if symbol in self._traded_symbols:
+            return
+        if symbol in self._pending_orders:
+            return
+        if self._is_past_last_entry_time():
+            return
+
+        logger.info(f"{symbol}: RT bar close — running instant pattern check")
+        try:
+            result = self._check_symbol(symbol, prefetched_bars=bars_df)
+            if result:
+                logger.info(f"{symbol}: RT pattern detection → order placed!")
+        except Exception as e:
+            logger.error(f"{symbol}: RT bar callback error: {e}")
 
     def clear_qualified_symbols(self) -> None:
         """Clear qualified symbols for fresh scanner cycle.
@@ -1885,6 +1927,40 @@ class TradingEngine:
             logger.debug("No qualified symbols to check")
             return fill_result
 
+        # Background news refresh: re-check ONE no-news symbol per cycle (round-robin).
+        # Catches news that breaks after scanner qualification. Updates _news_data cache
+        # so the instant bar callback and news kill rules see fresh classifications.
+        # NOT in the order path — runs here in the 5s polling loop.
+        if hasattr(self, 'news_provider') and self.news_provider:
+            no_news_syms = [
+                s for s in self._qualified_symbols - self._traded_symbols
+                if self._news_data.get(s, {}).get('news_category', 'NO_NEWS')
+                   in ('NO_NEWS', 'OTHER', 'GARBAGE_RECAP', None)
+            ]
+            if no_news_syms:
+                # Round-robin: pick one symbol per cycle
+                if not hasattr(self, '_news_refresh_idx'):
+                    self._news_refresh_idx = 0
+                sym = no_news_syms[self._news_refresh_idx % len(no_news_syms)]
+                self._news_refresh_idx += 1
+                try:
+                    uni = self.db.get_universe_stock(sym) if self.db else None
+                    _ctx = {'float_shares': (uni.get('float_shares') or 0) if uni else 0,
+                            'price': 0}
+                    fresh = self.news_provider.classify_news(sym, stock_context=_ctx)
+                    fresh_cat = fresh.get('category', 'NO_NEWS')
+                    old_cat = self._news_data.get(sym, {}).get('news_category', 'NO_NEWS')
+                    if fresh_cat != old_cat and fresh_cat not in ('NO_NEWS', 'OTHER', 'GARBAGE_RECAP'):
+                        logger.info(f"{sym}: Background news refresh: {old_cat} → {fresh_cat}")
+                        self._news_data[sym] = {
+                            'news_catalyst': fresh.get('catalyst'),
+                            'news_headline': (fresh.get('headline') or '')[:200],
+                            'news_reason': (fresh.get('reason') or '')[:100],
+                            'news_category': fresh_cat,
+                        }
+                except Exception as e:
+                    logger.debug(f"{sym}: Background news refresh failed: {e}")
+
         # Skip new orders after last_entry_time
         if self._is_past_last_entry_time():
             logger.debug("Past last entry time, not placing new orders")
@@ -1910,15 +1986,31 @@ class TradingEngine:
 
         logger.info(f"Pattern check: {len(symbols_to_check)} symbols — {sorted(symbols_to_check)}")
 
+        # Batch-fetch 1-min bars for ALL symbols in a single API call.
+        # Eliminates N sequential REST calls (1-2s each) → single ~1s call.
+        import pytz as _pytz
+        _et = _pytz.timezone('US/Eastern')
+        _now_et = datetime.now(_et)
+        _market_open = _now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        _minutes_since_open = max(int((_now_et - _market_open).total_seconds() / 60), 30)
+        try:
+            _bars_batch = self.alpaca.get_1min_bars_multi(
+                list(symbols_to_check), lookback_minutes=_minutes_since_open)
+        except Exception as e:
+            logger.error(f"Batch bar fetch failed: {e}, falling back to sequential")
+            _bars_batch = {}
+
         last_order_result = None
         for symbol in sorted(symbols_to_check):
-            result = self._check_symbol(symbol)
+            prefetched = _bars_batch.get(symbol)
+            result = self._check_symbol(symbol, prefetched_bars=prefetched)
             if result is not None:
                 last_order_result = result
 
         return fill_result or last_order_result
 
-    def _check_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
+    def _check_symbol(self, symbol: str,
+                      prefetched_bars: 'pd.DataFrame' = None) -> Optional[Dict[str, Any]]:
         """
         Check a single symbol for bull flag setup and place buy-stop order.
 
@@ -1927,6 +2019,7 @@ class TradingEngine:
 
         Args:
             symbol: Stock symbol to check
+            prefetched_bars: Pre-fetched 1-min bars from batch call (skips individual API call)
 
         Returns:
             Dict with order details if buy-stop placed, None otherwise
@@ -1951,19 +2044,20 @@ class TradingEngine:
                 )
                 return None
 
-        # Fetch 1-min bars from market open (not a fixed window).
-        # Fixed 90-min window misses setups that formed earlier in the day —
-        # the backtest sees all bars from open, so live must too.
+        # Use pre-fetched bars if available (batch call), otherwise fetch individually
         import pytz as _pytz
         _et = _pytz.timezone('US/Eastern')
-        _now_et = datetime.now(_et)
-        _market_open = _now_et.replace(hour=9, minute=30, second=0, microsecond=0)
-        _minutes_since_open = max(int((_now_et - _market_open).total_seconds() / 60), 30)
-        try:
-            bars = self.alpaca.get_1min_bars(symbol, lookback_minutes=_minutes_since_open)
-        except Exception as e:
-            logger.error(f"{symbol}: Failed to fetch 1-min bars: {e}")
-            return None
+        if prefetched_bars is not None and not prefetched_bars.empty:
+            bars = prefetched_bars
+        else:
+            _now_et = datetime.now(_et)
+            _market_open = _now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+            _minutes_since_open = max(int((_now_et - _market_open).total_seconds() / 60), 30)
+            try:
+                bars = self.alpaca.get_1min_bars(symbol, lookback_minutes=_minutes_since_open)
+            except Exception as e:
+                logger.error(f"{symbol}: Failed to fetch 1-min bars: {e}")
+                return None
 
         if bars is None or bars.empty:
             logger.debug(f"{symbol}: No 1-min bars available")
@@ -2052,32 +2146,46 @@ class TradingEngine:
                     )
                     risk_multiplier = 1.0
 
-        # Re-check news if we don't have a real catalyst yet
-        # Only at trade decision time (pattern found), not every poll
-        if self.conviction_enabled and hasattr(self, 'news_provider') and self.news_provider:
-            current_cat = self._news_data.get(symbol, {}).get('news_category', 'NO_NEWS')
-            if current_cat in ('NO_NEWS', 'OTHER', 'GARBAGE_RECAP', None):
-                try:
-                    _stock_ctx = {'float_shares': (uni_stock.get('float_shares') or 0) if uni_stock else 0,
-                                  'price': setup.breakout_level}
-                    fresh = self.news_provider.classify_news(symbol, stock_context=_stock_ctx)
-                    fresh_cat = fresh.get('category', 'NO_NEWS')
-                    if fresh_cat != current_cat:
-                        logger.info(f"{symbol}: News re-check: {current_cat} → {fresh_cat}")
-                        self._news_data[symbol] = {
-                            'news_catalyst': fresh.get('catalyst'),
-                            'news_headline': fresh.get('headline', '')[:200],
-                            'news_reason': fresh.get('reason', '')[:100],
-                            'news_category': fresh_cat,
-                        }
-                except Exception as e:
-                    logger.debug(f"{symbol}: News re-check failed: {e}")
+        # News classification: use scanner's cached result (from on_stock_qualified).
+        # LLM re-check removed — was 2-5s in critical order path. News kill rules
+        # handle no-news risk, scanner classification is sufficient.
+
+        # News kill rules: block no-news trades in specific loser segments
+        # Matches backtest.py _check_news_kill() logic exactly
+        if self.news_kill_enabled:
+            _ndata = self._news_data.get(symbol, {})
+            _ncat = _ndata.get('news_category', 'NO_NEWS')
+            _real_cats = {'FDA_CLINICAL', 'EARNINGS', 'CONTRACT_DEAL', 'CONTRACT',
+                         'MA', 'ANALYST', 'PRODUCT_LAUNCH', 'PRODUCT',
+                         'MANAGEMENT', 'MGMT', 'SEC_FILING', 'CRYPTO'}
+            if _ncat not in _real_cats:
+                _avg_vol = (uni_stock.get('avg_volume_daily') or 0) if uni_stock else 0
+                _float = (uni_stock.get('float_shares') or 0) if uni_stock else 0
+                _ep = setup.breakout_level
+                _pg = setup.pole_gain_pct
+                _kill_reason = None
+                if _avg_vol >= self.nkr_max_avg_vol:
+                    _kill_reason = f"no_news + avg_vol {_avg_vol/1e6:.1f}M"
+                elif _ep < self.nkr_min_price:
+                    _kill_reason = f"no_news + price ${_ep:.2f}"
+                elif _float >= self.nkr_max_float:
+                    _kill_reason = f"no_news + float {_float/1e6:.0f}M"
+                elif 5 <= _ep < 12 and 8 <= _pg < 15:
+                    _kill_reason = f"no_news + ${_ep:.0f} + pole {_pg:.1f}%"
+                if _kill_reason:
+                    logger.info(f"{symbol}: NEWS KILL: {_kill_reason}")
+                    self._eod_skipped.append((symbol, _ncat, _kill_reason))
+                    if self.notifier:
+                        self.notifier.notify_error(
+                            f"{symbol} KILLED — {_kill_reason}",
+                            component="NewsKill")
+                    return None
 
         # Conviction scoring: combine with risk tier, cap at 3x
         conviction_mult = 1.0
         if self.conviction_enabled:
             spy_3d = self._get_spy_3d_range_live()
-            conviction_mult = self._compute_conviction_score_setup(setup, spy_3d, symbol=symbol)
+            conviction_mult = self._compute_conviction_score_setup(setup, spy_3d)
             if abs(conviction_mult - 1.0) > 0.05:
                 logger.info(
                     f"{symbol}: Conviction {conviction_mult:.2f}x "
@@ -2086,8 +2194,9 @@ class TradingEngine:
 
         combined_mult = min(3.0, risk_multiplier * conviction_mult)
 
-        # Create trade plan
-        plan = self.planner.create_plan(setup, risk_multiplier=combined_mult)
+        # Create trade plan (pass ADV for liquidity cap — matches BT)
+        _adv = int(uni_stock.get('avg_volume_daily') or 0) if uni_stock else 0
+        plan = self.planner.create_plan(setup, avg_daily_volume=_adv, risk_multiplier=combined_mult)
         if plan is None:
             return None
 
@@ -2105,7 +2214,7 @@ class TradingEngine:
                     )
                     # Recreate plan with reduced multiplier
                     reduced_mult = risk_multiplier * (affordable_shares / plan.shares)
-                    plan = self.planner.create_plan(setup, risk_multiplier=max(reduced_mult, 0.1))
+                    plan = self.planner.create_plan(setup, avg_daily_volume=_adv, risk_multiplier=max(reduced_mult, 0.1))
                     if plan is None:
                         return None
                 else:

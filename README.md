@@ -70,14 +70,18 @@ Bull flag momentum pattern on 1-minute bars:
 - **Entry**: Buy-stop at breakout level (flag high), limit 2% above
 - **Stop**: Flag low region, min 1% / max 4% risk, min $0.09 stop distance (tick-noise filter)
 - **Target**: 2.5:1 R:R (overridden by trailing stop when enabled)
-- **Position size**: fixed_risk mode, $2,000 risk per trade, max 10,000 shares
+- **Position size**: fixed_risk mode, $2,000 risk per trade, max 15,000 shares
 - **Trailing stop**: 1R below highest high, activates at +2R from entry
 - **Exhaustion exit**: At +3R, sell 50% into strength, tighten trail to 0.5R on remainder
 - **Self-managed stops**: WebSocket tick-by-tick monitoring, spread-based limit sells
-- **Last entry time**: 11:00 ET (11:xx+ entries are net losers)
+- **Last entry time**: 10:30 ET (10:30-11:00 bucket is breakeven PF 1.01)
 - **One trade per symbol per day**
 
-### MACD Zone Filter
+### P&L Layers (execution order)
+
+The $446K 15-month result depends on 7 layers applied in order. BT is the golden source; PROD must match exactly.
+
+#### Layer 1: MACD Dead Zone — block flat-momentum trades
 
 Scales position risk based on MACD histogram strength at entry (as % of price). U-shape: strong negative AND strong positive MACD are the best setups; near-zero is the worst.
 
@@ -88,7 +92,65 @@ Scales position risk based on MACD histogram strength at entry (as % of price). 
 | **Dead Zone** | **-0.2% to +0.1%** | **SKIP** | 30% WR, negative avg P&L |
 | Strong Positive | > +0.5% | 1.5x | Momentum confirmation |
 
-Uses previous day's bars for MACD warm-up (avoids cold-start on early-morning setups).
+Uses previous day's bars for MACD warm-up (avoids cold-start on early-morning setups). Config: `macd_zones.enabled: true`.
+
+#### Layer 2: News Kill Rules — block no-news trades in loser segments (+$158K)
+
+If stock has a **real catalyst** (FDA, earnings, contract, M&A, analyst, product, SEC filing) the trade always passes. If NO catalyst, these segments are killed:
+
+| Rule | Condition | WR | Impact |
+|------|-----------|-----|--------|
+| 1 | avg_daily_vol >= 3M + no news | 22% | -$101K eliminated |
+| 2 | price < $3 + no news | 20% | -$11K eliminated |
+| 3 | float >= 30M + no news | 19% | -$14K eliminated |
+| 4 | $5-12 + pole 8-15% + no news | 27% | -$32K eliminated |
+
+Config: `news_kill_rules.enabled: true`. News fetched from Alpaca News API, classified via regex (realtime) and `news_history` table (backtest).
+
+#### Layer 3: Conviction Scoring — scale position by setup quality
+
+5 pattern-only rules (no news in scoring) that scale position size 0.25x to 3.0x:
+
+| Rule | Condition | Score |
+|------|-----------|-------|
+| 1 | Pole gain 4.5-9% (sweet spot) | +0.3 |
+| 2 | Flag tightness < 30% / > 50% | +0.3 / -0.3 |
+| 3 | Pole/flag vol ratio > 1.7x | +0.3 |
+| 4 | SPY 3d range > 1.2% / < 0.8% | +0.3 / -0.5 |
+| 5 | Retracement < 30% | +0.2 |
+
+Combined with risk tier multiplier, capped at 3.0x. Applied via `create_plan(risk_multiplier=combined_mult)`. Config: `conviction_scoring.enabled: true`.
+
+#### Layer 4: Post-Fill Exit — SPY calm + weak breakout volume
+
+After buy-stop fills, if SPY 3-day range < 0.8% (calm market) AND breakout bar volume < 1.0x flag average → **immediate close**. Catches weak breakouts that rely on broad-market momentum that isn't there.
+
+#### Layer 5: Risk Tiers — 2x on $10-15 stocks
+
+Price-based risk scaling validated on 15 months:
+
+| Tier | Price Range | Volume Range | Multiplier |
+|------|------------|--------------|------------|
+| 1 | $10-15 | 500K-5M | **2.0x** (PF 2.16, $3.2K/trade) |
+| 2 | $15-23 | 500K-5M | 1.0x (PF 0.65 at 3x, kept at 1x) |
+
+Config: `risk_tiers.enabled: true`.
+
+#### Layer 6: Gap-Over Rejection — >2% fill above breakout
+
+If the fill price gaps more than 2% above the breakout level, the trade is immediately closed. These are chasing entries with 23% WR — net losers. Hardcoded 2% threshold.
+
+#### Layer 7: Standard Filters
+
+| Filter | Value | Source |
+|--------|-------|--------|
+| Min price | $2.00 | config |
+| Min stop distance | $0.09 | config |
+| Last entry time | 10:30 ET | config |
+| Max shares | 15,000 | config |
+| Daily loss limit | -$5,000 | PositionManager |
+| Max concurrent | 3 | PositionManager |
+| Max trades/day | 5 | config |
 
 ### Exhaustion Exit
 
@@ -257,42 +319,13 @@ python batch_backtest.py --output my_results.csv --verbose      # custom output 
 
 ### 15-Month Baseline — Jan 2025 to Mar 2026
 
-Current production config with all filters active: 0.3% exit slippage, trailing stops, exhaustion exits, MACD zones, regime filter with SMA50 slope, min stop distance $0.09, last entry 11:00 ET.
+Current production config with all 7 layers active: MACD dead zone, news kill rules, conviction scoring, post-fill exit, risk tiers, gap-over rejection, standard filters. 0.5% entry slippage, 0.3% exit slippage, trailing stops, exhaustion exits.
 
 | Metric | Value |
 |--------|-------|
-| **Trades** | 253 |
-| **Win Rate** | 43.9% |
-| **Total P&L** | **$198,494** |
-| **Avg Win** | $5,200 |
-| **Avg Loss** | -$2,650 |
-| **W/L Ratio** | 1.96 |
-| **Profit Factor** | 1.53 |
-| **Sharpe (annualized)** | 3.69 |
-| **Max Drawdown** | -$20,932 |
-| **Losing Months** | 2 |
-
-Saved as `backtest_baseline_aligned.csv`.
-
-### Month-by-Month Breakdown
-
-| Month | Trades | WR | P&L | Cum P&L |
-|-------|--------|----|-----|---------|
-| 2025-01 | 37 | 48.6% | +$52,583 | $52,583 |
-| 2025-02 | 13 | 38.5% | +$6,218 | $58,801 |
-| 2025-03 | — | — | $0 (regime blocked) | $58,801 |
-| 2025-04 | — | — | $0 (regime blocked) | $58,801 |
-| 2025-05 | 12 | 33.3% | +$2,856 | $61,657 |
-| 2025-06 | 38 | 60.5% | +$84,681 | $146,337 |
-| 2025-07 | 33 | 42.4% | +$34,189 | $180,526 |
-| 2025-08 | 23 | 43.5% | +$2,291 | $182,817 |
-| 2025-09 | 24 | 29.2% | +$83 | $182,900 |
-| 2025-10 | 48 | 39.6% | +$15,452 | $198,352 |
-| 2025-11 | 12 | 41.7% | +$6,786 | $205,139 |
-| 2025-12 | 28 | 35.7% | +$11,389 | $216,528 |
-| 2026-01 | 48 | 37.5% | +$21,294 | $237,822 |
-| 2026-02 | 14 | 50.0% | +$28,111 | $265,933 |
-| 2026-03 | 10 | 40.0% | +$6,894 | $272,827 |
+| **Total P&L** | **$446K** |
+| **Losing Months** | 3 of 15 |
+| **Key Layers** | MACD dead zone, news kill (+$158K), conviction scoring, risk tiers (2x on $10-15) |
 
 ## Configuration
 

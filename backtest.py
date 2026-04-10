@@ -74,6 +74,10 @@ class SimulatedTrade:
     partial_pnl: float = 0.0
     remaining_shares: int = 0
     breakeven_stop_active: bool = False
+    # Conviction multiplier at setup time (for cache → batch filter cap alignment)
+    conviction_mult: float = 1.0
+    # MACD zone multiplier (for cache → batch filter tier interaction)
+    macd_zone_mult: float = 1.0
 
 
 @dataclass
@@ -1897,6 +1901,8 @@ class BacktestRunner:
                             )
                             if hasattr(pending_order, '_qf_features'):
                                 trade._qf_features = pending_order._qf_features
+                            trade.conviction_mult = getattr(pending_order, '_conviction_mult', 1.0)
+                            trade.macd_zone_mult = getattr(pending_order, '_macd_zone_mult', 1.0)
                             result.trades_simulated.append(trade)
                             pending_order = None
                             continue
@@ -1904,9 +1910,11 @@ class BacktestRunner:
                     trade = self.simulator.simulate(
                         plan, bars, i, entry_price_override=fill_price
                     )
-                    # Propagate QF features from pending order to trade for cache storage
+                    # Propagate QF features and conviction from pending order to trade
                     if hasattr(pending_order, '_qf_features'):
                         trade._qf_features = pending_order._qf_features
+                    trade.conviction_mult = getattr(pending_order, '_conviction_mult', 1.0)
+                    trade.macd_zone_mult = getattr(pending_order, '_macd_zone_mult', 1.0)
                     # Add post-fill VWAP (at fill bar) — for post-filter analysis
                     fill_vwap = self._compute_vwap(bars, i)
                     if fill_vwap and fill_vwap > 0:
@@ -2075,7 +2083,7 @@ class BacktestRunner:
                 # Combine risk tier + conviction, cap at 3x (max leverage on $50K base)
                 combined_mult = min(3.0, risk_tier_mult * conviction_mult)
                 if combined_mult != 1.0:
-                    plan = self.planner.create_plan(setup, risk_multiplier=combined_mult)
+                    plan = self.planner.create_plan(setup, avg_daily_volume=self._current_avg_daily_volume, risk_multiplier=combined_mult)
                     if plan is None:
                         continue
                     logger.debug(
@@ -2085,6 +2093,7 @@ class BacktestRunner:
 
                 # MACD zone filter: skip dead zone, scale risk on strong zones
                 # Skip scaling if risk tier already applied (don't compound)
+                _applied_macd_zone = 1.0
                 if self.macd_zones_enabled:
                     zone_mult = self._get_macd_zone_multiplier(
                         symbol, bars, i, plan.entry_price
@@ -2092,6 +2101,7 @@ class BacktestRunner:
                     if zone_mult == 0.0:
                         continue  # dead zone — don't place order
                     elif zone_mult != 1.0 and risk_tier_mult <= 1.0:
+                        _applied_macd_zone = zone_mult
                         effective_max = int(self.planner.max_shares * zone_mult)
                         scaled_shares = min(effective_max, max(1, int(plan.shares * zone_mult)))
                         plan = TradePlan(
@@ -2146,6 +2156,8 @@ class BacktestRunner:
                     breakout_level=setup.breakout_level,
                 )
                 pending_order._qf_features = qf_features
+                pending_order._conviction_mult = conviction_mult
+                pending_order._macd_zone_mult = _applied_macd_zone
                 logger.info(
                     f"  PENDING BUY-STOP placed at bar {i}: "
                     f"${setup.breakout_level:.2f}, "

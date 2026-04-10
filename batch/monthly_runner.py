@@ -72,6 +72,8 @@ RICH_CSV_HEADERS = [
     "qf_vwap_dist_pct", "qf_gap_pct", "qf_gap_fading",
     "qf_spy_return_pct", "qf_pole_bars", "qf_pole_gain_pct",
     "qf_fill_vwap_dist_pct",
+    "conviction_mult",
+    "macd_zone_mult",
 ]
 
 
@@ -204,6 +206,9 @@ def build_rich_row(
               getattr(trade, '_qf_features', {}).get('qf_pole_gain_pct'),
               getattr(trade, '_qf_features', {}).get('qf_fill_vwap_dist_pct'),
           ]],
+        # Conviction and MACD zone multipliers for cache → batch filter alignment
+        f"{getattr(trade, 'conviction_mult', 1.0):.2f}",
+        f"{getattr(trade, 'macd_zone_mult', 1.0):.2f}",
     ]
 
 

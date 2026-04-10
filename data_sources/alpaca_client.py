@@ -838,6 +838,60 @@ class AlpacaClient:
             logger.error(f"Failed to get 1-min bars for {symbol}: {e}")
             raise AlpacaAPIError(f"Failed to get 1-min bars for {symbol}: {e}")
 
+    def get_1min_bars_multi(self, symbols: list, lookback_minutes: int = 30) -> dict:
+        """
+        Fetch 1-minute bars for multiple symbols in a single API call.
+
+        Returns dict mapping symbol -> DataFrame. Missing symbols have empty DataFrame.
+        Single API call vs N sequential calls = N× faster.
+        """
+        if not symbols:
+            return {}
+        try:
+            start = datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes + 5)
+            import pytz
+            et_tz = pytz.timezone('US/Eastern')
+            now_utc = datetime.now(timezone.utc)
+            market_open_et = now_utc.astimezone(et_tz).replace(
+                hour=9, minute=30, second=0, microsecond=0)
+            market_open_utc = market_open_et.astimezone(timezone.utc)
+            if start < market_open_utc:
+                start = market_open_utc
+
+            request = StockBarsRequest(
+                symbol_or_symbols=symbols,
+                timeframe=TimeFrame(1, TimeFrameUnit.Minute),
+                start=start,
+                feed=DataFeed.SIP,
+            )
+            bars_raw = self._call_with_timeout(
+                lambda: self.data_client.get_stock_bars(request),
+                f"get_1min_bars_multi({len(symbols)} symbols)"
+            )
+            bars = self._to_dict(bars_raw)
+
+            result = {}
+            for sym in symbols:
+                if sym not in bars or len(bars[sym]) == 0:
+                    result[sym] = pd.DataFrame()
+                    continue
+                records = []
+                for bar in bars[sym]:
+                    records.append({
+                        'timestamp': bar.timestamp,
+                        'open': float(bar.open),
+                        'high': float(bar.high),
+                        'low': float(bar.low),
+                        'close': float(bar.close),
+                        'volume': int(bar.volume),
+                    })
+                result[sym] = pd.DataFrame(records)
+            logger.debug(f"Fetched 1-min bars for {len(result)} symbols in single call")
+            return result
+        except Exception as e:
+            logger.error(f"Failed to get multi-symbol 1-min bars: {e}")
+            return {}
+
     def get_historical_1min_bars(self, symbol: str, start: datetime, end: datetime) -> pd.DataFrame:
         """
         Get historical 1-minute bars for a specific time range.

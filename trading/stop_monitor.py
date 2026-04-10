@@ -29,7 +29,7 @@ import queue
 import threading
 import time as time_mod
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from data_sources.alpaca_client import AlpacaClient
 
@@ -189,6 +189,11 @@ class StopMonitor:
         self._polling_mode = polling_mode
         self._polling_interval = polling_interval
 
+        # Bar streaming for pattern detection: callback(symbol, bars_df) on each 1-min bar close
+        self._bar_callback: Optional[Callable] = None
+        self._bar_symbols: set = set()  # symbols subscribed to bar stream
+        self._bar_windows: Dict[str, list] = {}  # rolling bar window per symbol
+
     def start(self) -> None:
         """Launch the stop monitoring daemon thread (WebSocket or REST polling)."""
         if self._thread is not None and self._thread.is_alive():
@@ -244,6 +249,72 @@ class StopMonitor:
 
         self._stream = None
         logger.info("StopMonitor stopped")
+
+    def set_bar_callback(self, callback: Callable) -> None:
+        """Register callback for real-time bar closes: callback(symbol, bars_df).
+
+        Called from TradingEngine to receive instant bar updates for pattern detection.
+        The callback receives the complete bar window (all bars from market open) as a DataFrame.
+        """
+        self._bar_callback = callback
+        logger.info("StopMonitor: Bar callback registered for real-time pattern detection")
+
+    def subscribe_bars(self, symbol: str) -> None:
+        """Subscribe to 1-min bar stream for a symbol (for pattern detection).
+
+        Thread-safe: can be called from main thread.
+        """
+        if symbol in self._bar_symbols:
+            return
+        self._bar_symbols.add(symbol)
+        self._bar_windows.setdefault(symbol, [])
+
+        if self._loop and self._stream and self._ws_connected:
+            asyncio.run_coroutine_threadsafe(
+                self._subscribe_bars_async(symbol), self._loop
+            )
+
+    async def _subscribe_bars_async(self, symbol: str) -> None:
+        """Subscribe to bar stream on the WebSocket (async, runs in WS thread)."""
+        if self._stream:
+            try:
+                self._stream._handlers["bars"][symbol] = self._on_bar
+                if self._stream._ws:
+                    await self._stream._send_subscribe_msg()
+                    logger.info(f"StopMonitor: subscribed to {symbol} bars")
+            except Exception as e:
+                logger.error(f"StopMonitor: failed to subscribe {symbol} bars: {e}")
+
+    async def _on_bar(self, bar) -> None:
+        """Handle 1-min bar close from WebSocket. Fires pattern detection callback."""
+        try:
+            symbol = bar.symbol
+            if symbol not in self._bar_symbols:
+                return
+
+            # Append to rolling window
+            bar_dict = {
+                'timestamp': bar.timestamp,
+                'open': float(bar.open),
+                'high': float(bar.high),
+                'low': float(bar.low),
+                'close': float(bar.close),
+                'volume': int(bar.volume),
+            }
+            self._bar_windows.setdefault(symbol, []).append(bar_dict)
+            self._last_data_ts = time_mod.time()
+
+            # Fire callback with complete bar window as DataFrame
+            if self._bar_callback:
+                import pandas as pd
+                bars_df = pd.DataFrame(self._bar_windows[symbol])
+                try:
+                    self._bar_callback(symbol, bars_df)
+                except Exception as e:
+                    logger.error(f"StopMonitor: bar callback error for {symbol}: {e}")
+
+        except Exception as e:
+            logger.error(f"StopMonitor: _on_bar error: {e}")
 
     def is_healthy(self, max_stale_seconds: float = 30.0) -> bool:
         """
@@ -1225,6 +1296,13 @@ class StopMonitor:
                 self._stream.subscribe_quotes(
                     self._on_quote, *all_symbols
                 )
+                # Subscribe to bars for pattern detection symbols
+                if self._bar_symbols:
+                    bar_syms = list(self._bar_symbols)
+                    self._stream.subscribe_bars(
+                        self._on_bar, *bar_syms
+                    )
+                    logger.info(f"StopMonitor: subscribing to bars for {len(bar_syms)} pattern detection symbols")
                 logger.info(f"StopMonitor: WebSocket connecting with {len(all_symbols)} symbols ({len(watched)} watched + SPY keepalive)...")
                 # Single connection attempt — don't use _run_forever (has uncontrollable internal retry)
                 await self._stream._start_ws()

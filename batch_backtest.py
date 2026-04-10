@@ -66,6 +66,8 @@ CSV_HEADERS = [
     "qf_vwap_dist_pct", "qf_gap_pct", "qf_gap_fading",
     "qf_spy_return_pct", "qf_pole_bars", "qf_pole_gain_pct",
     "qf_fill_vwap_dist_pct",
+    "conviction_mult",
+    "macd_zone_mult",
 ]
 
 def _trade_to_cache_row(trade) -> Optional[Dict]:
@@ -92,6 +94,8 @@ def _trade_to_cache_row(trade) -> Optional[Dict]:
             'avg_volume_20d': int(getattr(trade, '_avg_volume_20d', 0)),
             **{k: (f"{v:.2f}" if isinstance(v, float) else str(v) if v is not None else '')
                for k, v in getattr(trade, '_qf_features', {}).items()},
+            'conviction_mult': f"{getattr(trade, 'conviction_mult', 1.0):.2f}",
+            'macd_zone_mult': f"{getattr(trade, 'macd_zone_mult', 1.0):.2f}",
         }
     except Exception as e:
         logger.warning(f"Failed to convert trade to cache row: {e}")
@@ -197,6 +201,7 @@ def filter_bull_flag_trades(
                     'multiplier': mult,
                 })
         scaled = 0
+        capped = 0
         for t in trades:
             ep = t['entry_price']
             # Point-in-time volume from cache, fallback to universe
@@ -204,12 +209,25 @@ def filter_bull_flag_trades(
             for tier in tiers:
                 if (tier['min_price'] <= ep < tier['max_price'] and
                         tier['min_volume'] <= vol <= tier['max_volume']):
-                    t['pnl'] *= tier['multiplier']
-                    t['shares'] = int(t['shares'] * tier['multiplier'])
-                    scaled += 1
+                    # Cache includes conviction_mult AND macd_zone_mult baked into shares/pnl.
+                    # BT skips MACD scaling when tier > 1.0, so divide it out for tier'd stocks.
+                    # Combined conv × tier must not exceed 3.0x.
+                    conv_mult = float(t.get('conviction_mult') or 1.0)
+                    macd_mult = float(t.get('macd_zone_mult') or 1.0)
+                    combined = min(3.0, conv_mult * tier['multiplier'])
+                    # Divide out both conv and macd (already in cache), apply capped combined
+                    denominator = conv_mult * macd_mult
+                    actual_scale = combined / denominator if denominator > 0 else 1.0
+                    if abs(actual_scale - 1.0) > 0.001:
+                        t['pnl'] *= actual_scale
+                        t['shares'] = max(1, int(t['shares'] * actual_scale))
+                        scaled += 1
+                    if combined < conv_mult * tier['multiplier']:
+                        capped += 1
                     break
         if scaled:
-            logger.info(f"Risk tiers: {scaled} trades scaled (of {len(trades)})")
+            logger.info(f"Risk tiers: {scaled} trades scaled (of {len(trades)})"
+                        f"{f', {capped} capped at 3.0x' if capped else ''}")
 
     # Pre-filter by daily range threshold
     if min_daily_range_pct > 0:
@@ -928,6 +946,8 @@ def _serialize_result(result: 'BacktestResult') -> dict:
             'partial_pnl': t.partial_pnl,
             '_avg_volume_20d': getattr(t, '_avg_volume_20d', 0),
             '_qf_features': getattr(t, '_qf_features', {}),
+            'conviction_mult': getattr(t, 'conviction_mult', 1.0),
+            'macd_zone_mult': getattr(t, 'macd_zone_mult', 1.0),
         }
         if t.plan:
             trade_dict['plan'] = {
@@ -1022,6 +1042,8 @@ def _reconstruct_result(result_dict: dict) -> BacktestResult:
             entry_bar_low=td.get('entry_bar_low'),
             entry_bar_close=td.get('entry_bar_close'),
             entry_bar_volume=td.get('entry_bar_volume'),
+            conviction_mult=td.get('conviction_mult', 1.0),
+            macd_zone_mult=td.get('macd_zone_mult', 1.0),
         )
         trade._avg_volume_20d = td.get('_avg_volume_20d', 0)
         trade._qf_features = td.get('_qf_features', {})
@@ -1066,6 +1088,12 @@ def run_batch_backtest_parallel(
     """
     from concurrent.futures import ProcessPoolExecutor
     from collections import defaultdict
+    import multiprocessing as _mp
+    # Use forkserver to avoid deadlocks when ProcessPool runs inside ThreadPool
+    try:
+        _mp.set_start_method('forkserver', force=False)
+    except (RuntimeError, ValueError):
+        pass  # Already set or not available
 
     total = len(movers)
 
@@ -1721,26 +1749,10 @@ def write_csv_report(results: List[BacktestResult], output_path: str) -> int:
 
         for result in results:
             for trade in result.trades_simulated:
-                writer.writerow([
-                    trade.symbol,
-                    result.trade_date,
-                    utc_to_et_str(trade.entry_time),
-                    f"{trade.entry_price:.2f}",
-                    f"{trade.stop_loss:.2f}",
-                    f"{trade.take_profit:.2f}",
-                    trade.shares,
-                    utc_to_et_str(trade.exit_time),
-                    f"{trade.exit_price:.2f}" if trade.exit_price else "",
-                    trade.exit_reason or "",
-                    f"{trade.pnl:.2f}",
-                    f"{trade.pnl_pct:.2f}",
-                    trade.partial_exit_taken,
-                    f"{trade.partial_exit_price:.2f}" if trade.partial_exit_price else "",
-                    trade.partial_shares,
-                    f"{trade.partial_pnl:.2f}",
-                    f"{getattr(trade, '_daily_range_pct', 0):.1f}",
-                    int(getattr(trade, '_avg_volume_20d', 0)),
-                ])
+                row = _trade_to_cache_row(trade)
+                if row:
+                    row['date'] = result.trade_date
+                    writer.writerow([row.get(h, '') for h in CSV_HEADERS])
                 trade_count += 1
 
     logger.info(f"CSV report written to {output_path} ({trade_count} trades)")
@@ -1988,6 +2000,8 @@ def main():
                         row.get('qf_pole_bars', ''),
                         row.get('qf_pole_gain_pct', ''),
                         row.get('qf_fill_vwap_dist_pct', ''),
+                        row.get('conviction_mult', '1.00'),
+                        row.get('macd_zone_mult', '1.00'),
                     ])
 
             # Determine new date range to merge
@@ -2239,8 +2253,13 @@ def main():
                 pass
 
             missing_days = sorted(all_trading_days - _all_cached)
+            # Only auto-build dates AFTER the last cached date (extending forward).
+            # Old gaps (dates before last cached) are intentional (0 trades) — skip them.
+            if _all_cached:
+                _last_cached = max(_all_cached)
+                missing_days = [d for d in missing_days if d > _last_cached]
             if missing_days:
-                logger.info(f"Auto-building {len(missing_days)} missing dates: {missing_days[0]} to {missing_days[-1]}")
+                logger.info(f"Auto-building {len(missing_days)} new dates: {missing_days[0]} to {missing_days[-1]}")
                 # Fetch daily bars for missing dates
                 if not client:
                     client = AlpacaClient(api_key=api_key, api_secret=api_secret)
@@ -2396,20 +2415,17 @@ def main():
             daily_loss_limit=_daily_loss,
             universe_vol_map=_vol_map,
         )
-        # Write output CSV
+        # Write output CSV — pass through all cache columns
         trade_count = 0
         with open(args.output, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(CSV_HEADERS)
+            writer = csv.DictWriter(f, fieldnames=CSV_HEADERS, extrasaction='ignore')
+            writer.writeheader()
             for t in filtered_trades:
-                writer.writerow([
-                    t['symbol'], t['date'], t.get('entry_time_et', ''),
-                    t['entry_price'], t.get('stop_loss', ''), t.get('target', ''),
-                    t['shares'], t.get('exit_time_et', ''), t['exit_price'],
-                    t.get('exit_reason', ''), f"{t['pnl']:.2f}", f"{t['pnl_pct']:.2f}",
-                    t.get('partial_taken', ''), t.get('partial_price', ''),
-                    t.get('partial_shares', ''), t.get('partial_pnl', ''),
-                ])
+                # Ensure pnl is formatted (may have been scaled by risk tier)
+                row = {h: t.get(h, '') for h in CSV_HEADERS}
+                row['pnl'] = f"{t['pnl']:.2f}"
+                row['pnl_pct'] = f"{t['pnl_pct']:.2f}"
+                writer.writerow(row)
                 trade_count += 1
         logger.info(f"CSV report written to {args.output} ({trade_count} trades)")
 
@@ -2504,21 +2520,12 @@ def main():
             writer.writerow(CSV_HEADERS)
             for result in results:
                 for trade in result.trades_simulated:
-                    dr = _range_map.get((trade.symbol, result.trade_date), 0)
-                    writer.writerow([
-                        trade.symbol, result.trade_date,
-                        utc_to_et_str(trade.entry_time),
-                        f"{trade.entry_price:.2f}", f"{trade.stop_loss:.2f}",
-                        f"{trade.take_profit:.2f}", trade.shares,
-                        utc_to_et_str(trade.exit_time),
-                        f"{trade.exit_price:.2f}" if trade.exit_price else "",
-                        trade.exit_reason or "", f"{trade.pnl:.2f}",
-                        f"{trade.pnl_pct:.2f}", trade.partial_exit_taken,
-                        f"{trade.partial_exit_price:.2f}" if trade.partial_exit_price else "",
-                        trade.partial_shares, f"{trade.partial_pnl:.2f}",
-                        f"{dr:.1f}",
-                        int(getattr(trade, '_avg_volume_20d', 0)),
-                    ])
+                    row = _trade_to_cache_row(trade)
+                    if row:
+                        row['date'] = result.trade_date
+                        dr = _range_map.get((trade.symbol, result.trade_date), 0)
+                        row['daily_range_pct'] = f"{dr:.1f}"
+                        writer.writerow([row.get(h, '') for h in CSV_HEADERS])
                     trade_count += 1
         logger.info(f"Bull flag cache saved: {_save_path} ({trade_count} trades, entry_slip={_entry_slip:.1%}, exit_slip={_exit_slip:.1%})")
     else:
