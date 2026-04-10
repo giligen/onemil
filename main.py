@@ -389,6 +389,9 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
         macd_engine=macd_engine,
     )
 
+    # Enable async news classification (non-blocking LLM calls)
+    scanner.enable_async_news()
+
     # Notify startup
     if notifier:
         notifier.notify_scanner_started(

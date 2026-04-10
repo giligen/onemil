@@ -86,6 +86,16 @@ class RealtimeScanner:
         self._day_highs: Dict[str, float] = {}  # Track intraday highs for V-reversal detection
         self._day_lows: Dict[str, float] = {}   # Track intraday lows for V-reversal detection
 
+        # Async news worker — non-blocking LLM classification
+        # Enabled by default; tests can pass async_news=False to disable
+        self._news_worker = None
+
+    def enable_async_news(self):
+        """Start async news worker for non-blocking LLM classification."""
+        from data_sources.news_provider import NewsWorker
+        self._news_worker = NewsWorker(self.news)
+        self._news_worker.start()
+
     @property
     def _today(self) -> str:
         """Current date as ISO string. Always fresh, never stale."""
@@ -521,12 +531,23 @@ class RealtimeScanner:
             news_category = None
             if (relative_volume >= self.criteria.relative_volume_min and
                     intraday_change_pct >= self.criteria.intraday_change_pct_min):
-                # Full LLM classification — with stock context for penny stock detection
                 _stock_ctx = {
                     'float_shares': stock.get('float_shares', 0),
                     'price': current_price,
                 }
-                news_info = self.news.classify_news(symbol, stock_context=_stock_ctx)
+                # Async news: check cache first, enqueue if not yet classified
+                if self._news_worker:
+                    news_info = self._news_worker.get_result(symbol)
+                    if news_info is None:
+                        # Not yet classified — enqueue for background processing
+                        self._news_worker.enqueue(symbol, stock_context=_stock_ctx)
+                        # Use empty result for now; next cycle will have it
+                        news_info = {'has_news': False, 'catalyst': None,
+                                     'category': 'PENDING', 'headline': '',
+                                     'reason': 'async pending', 'news_headline': ''}
+                else:
+                    # Fallback: blocking classification (no async worker)
+                    news_info = self.news.classify_news(symbol, stock_context=_stock_ctx)
                 has_news = news_info.get('has_news', False)
                 headline = news_info.get('headline')
                 news_catalyst = news_info.get('catalyst')

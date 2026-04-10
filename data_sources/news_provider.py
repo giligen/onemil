@@ -352,3 +352,100 @@ class NewsProvider:
         result['news_headline'] = best_headline
 
         return result
+
+
+class NewsWorker:
+    """
+    Async news classification worker.
+
+    Decouples news API + LLM calls from the scanner loop. Scanner enqueues
+    symbols, worker classifies in background. Results cached for trading
+    engine to read at trade time.
+
+    Usage:
+        worker = NewsWorker(news_provider)
+        worker.start()
+        worker.enqueue('AAPL', stock_context={...})
+        # Later:
+        result = worker.get_result('AAPL')  # None if not yet classified
+    """
+
+    import queue
+    import threading
+
+    def __init__(self, news_provider: 'NewsProvider'):
+        """
+        Initialize NewsWorker.
+
+        Args:
+            news_provider: NewsProvider instance for classification
+        """
+        import queue as _q
+        import threading as _t
+        self._news = news_provider
+        self._queue: _q.Queue = _q.Queue()
+        self._results: Dict[str, Dict] = {}  # symbol -> classification result
+        self._lock = _t.Lock()
+        self._thread = _t.Thread(target=self._run, daemon=True, name='news-worker')
+        self._running = False
+
+    def start(self):
+        """Start the background worker thread."""
+        self._running = True
+        self._thread.start()
+        logger.info("NewsWorker started (async news classification)")
+
+    def stop(self):
+        """Signal the worker to stop."""
+        self._running = False
+
+    def enqueue(self, symbol: str, stock_context: Optional[Dict] = None):
+        """
+        Queue a symbol for news classification.
+
+        Skips if already classified (cached result exists).
+
+        Args:
+            symbol: Stock symbol
+            stock_context: Optional dict with float_shares, price for LLM context
+        """
+        with self._lock:
+            if symbol in self._results:
+                return  # Already classified
+        self._queue.put((symbol, stock_context))
+
+    def get_result(self, symbol: str) -> Optional[Dict]:
+        """
+        Get cached classification result for a symbol.
+
+        Returns:
+            Classification dict if available, None if pending/not requested
+        """
+        with self._lock:
+            return self._results.get(symbol)
+
+    def _run(self):
+        """Background worker loop — processes news queue."""
+        while self._running:
+            try:
+                symbol, stock_context = self._queue.get(timeout=1.0)
+            except Exception:
+                continue  # Timeout, check _running flag
+
+            try:
+                result = self._news.classify_news(symbol, stock_context=stock_context)
+                with self._lock:
+                    self._results[symbol] = result
+                logger.debug(
+                    f"{symbol}: news classified async — "
+                    f"catalyst={result.get('catalyst')}, "
+                    f"category={result.get('category', 'N/A')}"
+                )
+            except Exception as e:
+                logger.warning(f"{symbol}: async news classification failed: {e}")
+                with self._lock:
+                    self._results[symbol] = {
+                        'has_news': False, 'catalyst': None,
+                        'category': 'ERROR', 'headline': '',
+                        'reason': f'async error: {e}', 'news_headline': '',
+                    }
