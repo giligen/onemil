@@ -331,8 +331,8 @@ class TradingEngine:
             self._macd_warmup_cache[symbol] = None
             logger.warning(f"{symbol}: Failed to fetch MACD warm-up: {e}")
 
-    def _compute_vwap(self, bars: pd.DataFrame) -> Optional[float]:
-        """Compute VWAP from all bars (completed data only, no in-progress bar).
+    def _compute_vwap(self, bars: pd.DataFrame, up_to_idx: int = None) -> Optional[float]:
+        """Compute VWAP from bars[0:up_to_idx+1]. Point-in-time correct.
 
         VWAP = Σ(typical_price × volume) / Σ(volume)
         typical_price = (H + L + C) / 3
@@ -340,10 +340,11 @@ class TradingEngine:
         if bars is None or len(bars) < 1:
             return None
         try:
-            highs = bars['high'].values
-            lows = bars['low'].values
-            closes = bars['close'].values
-            volumes = bars['volume'].values
+            slice_end = min(up_to_idx + 1, len(bars)) if up_to_idx is not None else len(bars)
+            highs = bars['high'].iloc[:slice_end].values
+            lows = bars['low'].iloc[:slice_end].values
+            closes = bars['close'].iloc[:slice_end].values
+            volumes = bars['volume'].iloc[:slice_end].values
             cum_vol = volumes.sum()
             if cum_vol <= 0:
                 return None
@@ -352,23 +353,38 @@ class TradingEngine:
         except (KeyError, TypeError):
             return None
 
-    def _get_spy_return(self) -> Optional[float]:
-        """Get SPY return from open to now using cached bars. No extra API calls.
+    def _get_spy_return(self, at_timestamp=None) -> Optional[float]:
+        """Get SPY return from open to a specific time. Point-in-time correct.
 
         Uses the SPY bars already fetched by _refresh_spy_macd().
+        If at_timestamp provided, uses SPY close at-or-before that time (matches BT).
+        Otherwise uses latest bar.
         Returns SPY return as percentage, or None if unavailable.
         """
         if self._spy_bars_cache is None or len(self._spy_bars_cache) < 2:
             return None
         spy_open = float(self._spy_bars_cache.iloc[0]['open'])
-        spy_close = float(self._spy_bars_cache.iloc[-1]['close'])
         if spy_open <= 0:
             return None
+        if at_timestamp is not None:
+            try:
+                ts_str = str(at_timestamp)[:19]
+                spy_ts = self._spy_bars_cache['timestamp'].astype(str).str[:19]
+                mask = spy_ts <= ts_str
+                if mask.any():
+                    spy_close = float(self._spy_bars_cache.loc[mask, 'close'].iloc[-1])
+                else:
+                    spy_close = float(self._spy_bars_cache.iloc[0]['close'])
+            except Exception:
+                spy_close = float(self._spy_bars_cache.iloc[-1]['close'])
+        else:
+            spy_close = float(self._spy_bars_cache.iloc[-1]['close'])
         return (spy_close - spy_open) / spy_open * 100
 
     def _check_quality_filter(
         self, symbol: str, bars: pd.DataFrame, setup, plan,
         prev_close: Optional[float] = None,
+        bar_idx: int = None,
     ) -> tuple:
         """Check quality filter conditions. All features known at setup detection time.
 
@@ -385,7 +401,7 @@ class TradingEngine:
         breakout_level = setup.breakout_level
 
         # 1. VWAP overextension: breakout level too far above VWAP
-        vwap = self._compute_vwap(bars)
+        vwap = self._compute_vwap(bars, up_to_idx=bar_idx)
         if vwap and vwap > 0:
             vwap_dist_pct = (breakout_level - vwap) / vwap * 100
             if vwap_dist_pct > self.qf_max_vwap_dist:
@@ -403,8 +419,9 @@ class TradingEngine:
             except (KeyError, TypeError):
                 pass  # bars missing 'open' column (test mocks)
 
-        # 3. SPY down: risk-off environment (uses cached SPY bars, no extra API call)
-        spy_return = self._get_spy_return()
+        # 3. SPY down: risk-off environment (point-in-time, matches BT)
+        _setup_ts = bars.iloc[bar_idx].name if bar_idx is not None and bar_idx < len(bars) else None
+        spy_return = self._get_spy_return(at_timestamp=_setup_ts)
         if spy_return is not None and spy_return < self.qf_min_spy_return:
             return (False, f"SPY {spy_return:+.2f}% < {self.qf_min_spy_return}% (risk-off)")
 
@@ -2251,6 +2268,7 @@ class TradingEngine:
             qf_pass, qf_reason = self._check_quality_filter(
                 symbol, bars, setup, plan,
                 prev_close=_prev_close if _prev_close > 0 else None,
+                bar_idx=setup.flag_end_idx,
             )
             if not qf_pass:
                 logger.info(f"{symbol}: QUALITY FILTER SKIP: {qf_reason}")
