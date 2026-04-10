@@ -230,10 +230,25 @@ class RealtimeScanner:
                 except Exception as e:
                     logger.error(f"MACD wave cycle error: {e}", exc_info=True)
 
-            # Interruptible 60s sleep (Bug #3 fix)
-            if self._interruptible_sleep(60):
-                logger.warning("Shutdown signal received during sleep")
-                break
+            # Sleep in 1s chunks, draining RT bar events between (Bug #3 fix + latency fix)
+            # Bar events arrive via WebSocket on bar close. Without frequent
+            # draining, they queue up for the full 60s sleep → 60s+ latency.
+            # With 1s chunks: worst case 1s from bar close to pattern check.
+            _sleep_remaining = 60
+            while _sleep_remaining > 0:
+                _chunk = min(1, _sleep_remaining)
+                if self._interruptible_sleep(_chunk):
+                    logger.warning("Shutdown signal received during sleep")
+                    break
+                _sleep_remaining -= _chunk
+                # Drain RT bar events from WebSocket (sub-5s latency)
+                if engine is not None and engine.enabled and not force_closed:
+                    rt = engine._drain_bar_events()
+                    if rt:
+                        logger.info(f"RT bar event processed during sleep: {rt.get('symbol', '?')}")
+            else:
+                continue  # Normal loop continuation
+            break  # Shutdown signal
 
         # Post-loop safety net: force close (Bug #1 fix)
         if self.trading_engine is not None and self.trading_engine.enabled:
