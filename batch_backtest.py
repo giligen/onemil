@@ -2112,6 +2112,41 @@ def main():
             start_date=start_date,
             end_date=end_date,
         )
+
+        # For today: daily bars are incomplete (no OHLC). Use live snapshots.
+        _today = date.today()
+        if start_date <= _today <= end_date:
+            _today_in_movers = any(m[1] == _today for m in movers)
+            if not _today_in_movers:
+                logger.info("Today's daily bars incomplete — using live snapshots for movers")
+                _snap_symbols = list(universe_dict.keys()) or symbols
+                snapshots = client.get_snapshots(_snap_symbols)
+                _price_min = float(scanner_cfg.get("price_min", 2.0))
+                _price_max = float(scanner_cfg.get("price_max", 20.0))
+                _float_max = args.float_max if args.float_max is not None else int(scanner_cfg.get("float_max", 10_000_000))
+                _today_count = 0
+                for sym, snap in snapshots.items():
+                    prev_close = snap.get('prev_close', 0)
+                    high = snap.get('high', 0)
+                    close = snap.get('close', 0)
+                    if prev_close <= 0 or high <= 0:
+                        continue
+                    # Price filter
+                    if _price_min > 0 and close < _price_min:
+                        continue
+                    if _price_max > 0 and close > _price_max:
+                        continue
+                    # Float filter
+                    uni = universe_dict.get(sym, {})
+                    sym_float = uni.get('float_shares')
+                    if _float_max > 0 and sym_float is not None and sym_float > _float_max:
+                        continue
+                    move = (high - prev_close) / prev_close
+                    if move >= intraday_threshold:
+                        movers.append((sym, _today, prev_close, move * 100))
+                        _today_count += 1
+                movers.sort(key=lambda x: (x[1], x[0]))
+                logger.info(f"Live snapshots: {_today_count} movers with {intraday_threshold:.0%}+ move today")
     else:
         movers = []
         symbols = []
