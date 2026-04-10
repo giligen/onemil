@@ -12,6 +12,7 @@ Flow:
 """
 
 import logging
+import queue
 import time as time_mod
 from datetime import date, datetime, timedelta, timezone
 from typing import Set, Optional, Dict, Any, List
@@ -234,6 +235,8 @@ class TradingEngine:
         self._spy_macd_cache: Optional[float] = None  # latest SPY MACD histogram value
 
         self.shutdown_event = None  # Set by caller for graceful shutdown
+        # Bar event queue: WebSocket thread enqueues (symbol, bars_df), main thread drains
+        self._bar_event_queue: queue.Queue = queue.Queue()
 
     def _get_risk_tier(self, entry_price: float, avg_volume: int) -> float:
         """
@@ -640,8 +643,8 @@ class TradingEngine:
     def _on_bar_close(self, symbol: str, bars_df) -> None:
         """Handle real-time 1-min bar close from WebSocket.
 
-        Called by StopMonitor when a completed 1-min bar arrives.
-        Runs pattern detection instantly — no polling delay.
+        Called by StopMonitor in the WebSocket daemon thread.
+        Enqueues the event for the main thread to process (avoids SQLite cross-thread errors).
         """
         if not self.enabled:
             return
@@ -651,16 +654,36 @@ class TradingEngine:
             return
         if symbol in self._pending_orders:
             return
-        if self._is_past_last_entry_time():
-            return
 
-        logger.info(f"{symbol}: RT bar close — running instant pattern check")
+        # Enqueue for main thread — WebSocket thread can't touch SQLite
         try:
-            result = self._check_symbol(symbol, prefetched_bars=bars_df)
-            if result:
-                logger.info(f"{symbol}: RT pattern detection → order placed!")
-        except Exception as e:
-            logger.error(f"{symbol}: RT bar callback error: {e}")
+            self._bar_event_queue.put_nowait((symbol, bars_df))
+        except queue.Full:
+            logger.warning(f"{symbol}: Bar event queue full, dropping")
+
+    def _drain_bar_events(self) -> Optional[Dict[str, Any]]:
+        """Process queued bar events from WebSocket thread. Called from main thread."""
+        last_result = None
+        while not self._bar_event_queue.empty():
+            try:
+                symbol, bars_df = self._bar_event_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            if symbol in self._traded_symbols or symbol in self._pending_orders:
+                continue
+            if self._is_past_last_entry_time():
+                continue
+
+            logger.info(f"{symbol}: RT bar close — instant pattern check")
+            try:
+                result = self._check_symbol(symbol, prefetched_bars=bars_df)
+                if result:
+                    logger.info(f"{symbol}: RT pattern detection → order placed!")
+                    last_result = result
+            except Exception as e:
+                logger.error(f"{symbol}: RT bar check error: {e}")
+        return last_result
 
     def clear_qualified_symbols(self) -> None:
         """Clear qualified symbols for fresh scanner cycle.
@@ -1896,6 +1919,9 @@ class TradingEngine:
         if not self.enabled:
             return None
 
+        # Drain real-time bar events FIRST (from WebSocket thread, via queue)
+        rt_result = self._drain_bar_events()
+
         # Clear per-cycle caches (marginability)
         self._margin_cache = {}
 
@@ -2024,7 +2050,7 @@ class TradingEngine:
             if result is not None:
                 last_order_result = result
 
-        return fill_result or last_order_result
+        return rt_result or fill_result or last_order_result
 
     def _check_symbol(self, symbol: str,
                       prefetched_bars: 'pd.DataFrame' = None) -> Optional[Dict[str, Any]]:
