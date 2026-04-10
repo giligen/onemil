@@ -95,7 +95,7 @@ trading:
   min_risk_reward: 2.5
   min_price: 2.00
   min_stop_distance: 0.09       # Reject setups with stop < $0.09 from entry (tick-noise filter)
-  last_entry_time: "10:30"      # ET — 15mo data: 10:30-11:00 bucket is breakeven (PF 1.01)
+  last_entry_time: "10:45"      # ET — with all filters active, 10:30-10:45 is best bucket (+$4.2K avg)
   force_close_time: "15:45"     # ET — close all positions
   setup_expiry_bars: 10         # cancel pending buy-stop after N bars
   pattern_poll_interval: 5              # 5s — breakout fills are time-critical (was 15s)
