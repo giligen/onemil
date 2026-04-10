@@ -623,9 +623,15 @@ class TradingEngine:
         if symbol not in self._qualified_symbols:
             self._qualified_symbols.add(symbol)
             logger.info(f"{symbol}: Added to qualified symbols for pattern monitoring")
-            # Subscribe to real-time 1-min bars for instant pattern detection
+            # Subscribe to real-time 1-min bars — skip for sub-ADV stocks
+            # (saves WebSocket bandwidth + RT callback cycles)
             if self.stop_monitor and hasattr(self.stop_monitor, 'subscribe_bars'):
-                self.stop_monitor.subscribe_bars(symbol)
+                _uni = self.db.get_universe_stock(symbol) if self.db else None
+                _adv = int((_uni.get('avg_volume_daily') or 0)) if _uni else 0
+                if self.min_daily_volume > 0 and 0 < _adv < self.min_daily_volume:
+                    logger.debug(f"{symbol}: Skipping bar subscription (ADV {_adv:,} < {self.min_daily_volume:,})")
+                else:
+                    self.stop_monitor.subscribe_bars(symbol)
                 # Seed bar window with historical bars from market open
                 try:
                     import pytz as _pytz
