@@ -2161,10 +2161,6 @@ class TradingEngine:
                 skip_reason = f"no catalyst ({news_cat})" if news_cat != 'NO_NEWS' else "no news found"
                 logger.info(f"{symbol}: NEWS GATE SKIP — {skip_reason}: {news_hl}")
                 self._eod_skipped.append((symbol, news_cat, news_hl))
-                if self.notifier:
-                    self.notifier.notify_error(
-                        f"{symbol} SKIPPED — {skip_reason}",
-                        component="NewsGate")
                 return None
             else:
                 logger.info(f"{symbol}: NEWS GATE PASS — [{news_cat}]: {news_hl}")
@@ -2218,10 +2214,6 @@ class TradingEngine:
                 if _kill_reason:
                     logger.info(f"{symbol}: NEWS KILL: {_kill_reason}")
                     self._eod_skipped.append((symbol, _ncat, _kill_reason))
-                    if self.notifier:
-                        self.notifier.notify_error(
-                            f"{symbol} KILLED — {_kill_reason}",
-                            component="NewsKill")
                     return None
 
         # Conviction scoring: combine with risk tier, cap at 3x
