@@ -370,9 +370,6 @@ class NewsWorker:
         result = worker.get_result('AAPL')  # None if not yet classified
     """
 
-    import queue
-    import threading
-
     def __init__(self, news_provider: 'NewsProvider'):
         """
         Initialize NewsWorker.
@@ -385,6 +382,7 @@ class NewsWorker:
         self._news = news_provider
         self._queue: _q.Queue = _q.Queue()
         self._results: Dict[str, Dict] = {}  # symbol -> classification result
+        self._pending: set = set()  # symbols queued but not yet classified
         self._lock = _t.Lock()
         self._thread = _t.Thread(target=self._run, daemon=True, name='news-worker')
         self._running = False
@@ -403,15 +401,16 @@ class NewsWorker:
         """
         Queue a symbol for news classification.
 
-        Skips if already classified (cached result exists).
+        Skips if already classified or already pending.
 
         Args:
             symbol: Stock symbol
             stock_context: Optional dict with float_shares, price for LLM context
         """
         with self._lock:
-            if symbol in self._results:
-                return  # Already classified
+            if symbol in self._results or symbol in self._pending:
+                return  # Already classified or queued
+            self._pending.add(symbol)
         self._queue.put((symbol, stock_context))
 
     def get_result(self, symbol: str) -> Optional[Dict]:
@@ -436,6 +435,7 @@ class NewsWorker:
                 result = self._news.classify_news(symbol, stock_context=stock_context)
                 with self._lock:
                     self._results[symbol] = result
+                    self._pending.discard(symbol)
                 logger.debug(
                     f"{symbol}: news classified async — "
                     f"catalyst={result.get('catalyst')}, "
@@ -444,6 +444,7 @@ class NewsWorker:
             except Exception as e:
                 logger.warning(f"{symbol}: async news classification failed: {e}")
                 with self._lock:
+                    self._pending.discard(symbol)
                     self._results[symbol] = {
                         'has_news': False, 'catalyst': None,
                         'category': 'ERROR', 'headline': '',

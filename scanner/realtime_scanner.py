@@ -241,7 +241,7 @@ class RealtimeScanner:
                     logger.warning("Shutdown signal received during sleep")
                     break
                 _sleep_remaining -= _chunk
-                # Drain RT bar events from WebSocket (sub-5s latency)
+                # Drain RT bar events from WebSocket (sub-1s latency)
                 if engine is not None and engine.enabled and not force_closed:
                     rt = engine._drain_bar_events()
                     if rt:
