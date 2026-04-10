@@ -251,7 +251,7 @@ def _create_trading_engine(config, alpaca, db, notifier=None, stop_monitor=None)
         notifier=notifier,
         last_entry_time_et=_last_entry,
         force_close_time_et=_force_close,
-        setup_expiry_seconds=config.setup_expiry_bars * config.pattern_poll_interval,
+        setup_expiry_seconds=config.setup_expiry_bars * 60,  # 10 bars × 60s = 10 min (bars are 1-min)
         market_regime=market_regime,
         stop_monitor=stop_monitor,
         safety_net_sl_pct=config.safety_net_sl_pct,
