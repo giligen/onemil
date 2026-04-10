@@ -677,14 +677,21 @@ class TradingEngine:
         last_result = None
 
         # Same guards as run_pattern_check() — RT events must respect all limits
+        def _flush_queue():
+            while not self._bar_event_queue.empty():
+                try:
+                    self._bar_event_queue.get_nowait()
+                except queue.Empty:
+                    break
+
         if self.skip_fridays and date.today().weekday() == 4:
-            self._bar_event_queue.queue.clear()
+            _flush_queue()
             return None
         if self.market_regime and not self.market_regime.is_regime_ok(date.today()):
-            self._bar_event_queue.queue.clear()
+            _flush_queue()
             return None
         if self.market_regime and self.market_regime.max_trades_per_day > 0 and self._daily_trade_count >= self.market_regime.max_trades_per_day:
-            self._bar_event_queue.queue.clear()
+            _flush_queue()
             return None
 
         while not self._bar_event_queue.empty():
@@ -2217,10 +2224,9 @@ class TradingEngine:
         if self.news_kill_enabled:
             _ndata = self._news_data.get(symbol, {})
             _ncat = _ndata.get('news_category', 'NO_NEWS')
-            _real_cats = {'FDA_CLINICAL', 'EARNINGS', 'CONTRACT_DEAL', 'CONTRACT',
-                         'MA', 'ANALYST', 'PRODUCT_LAUNCH', 'PRODUCT',
-                         'MANAGEMENT', 'MGMT', 'SEC_FILING', 'CRYPTO'}
-            if _ncat not in _real_cats:
+            # Only kill confirmed no-news. PENDING/ERROR get benefit of the doubt.
+            _no_news_cats = {'NO_NEWS', 'GARBAGE_RECAP', 'OTHER'}
+            if _ncat in _no_news_cats:
                 _avg_vol = (uni_stock.get('avg_volume_daily') or 0) if uni_stock else 0
                 _float = (uni_stock.get('float_shares') or 0) if uni_stock else 0
                 _ep = setup.breakout_level

@@ -445,8 +445,5 @@ class NewsWorker:
                 logger.warning(f"{symbol}: async news classification failed: {e}")
                 with self._lock:
                     self._pending.discard(symbol)
-                    self._results[symbol] = {
-                        'has_news': False, 'catalyst': None,
-                        'category': 'ERROR', 'headline': '',
-                        'reason': f'async error: {e}', 'news_headline': '',
-                    }
+                    # Don't cache errors — allow re-enqueue on next scanner cycle
+                    # Transient LLM failures shouldn't permanently classify a stock
