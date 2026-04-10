@@ -2091,7 +2091,7 @@ class TradingEngine:
                 )
                 return None
             avg_vol = (uni_stock.get('avg_volume_daily') or 0)
-            if avg_vol > 0 and avg_vol < self.min_daily_volume:
+            if avg_vol < self.min_daily_volume:
                 logger.info(
                     f"{symbol}: Skipping — avg daily vol {avg_vol:,.0f} "
                     f"< {self.min_daily_volume:,.0f} minimum"
