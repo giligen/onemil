@@ -1935,8 +1935,15 @@ class TradingEngine:
         uni_stock = self.db.get_universe_stock(symbol) if self.db else None
 
         # Volume filter: skip illiquid stocks before wasting API calls
+        # Stocks NOT in universe (uni_stock=None) are blocked — no volume history.
+        # Stocks in universe with avg_vol=0 are also blocked (no data = untradeable).
         if self.min_daily_volume > 0:
-            avg_vol = (uni_stock.get('avg_volume_daily') or 0) if uni_stock else 0
+            if uni_stock is None:
+                logger.info(
+                    f"{symbol}: Skipping — not in universe (no volume data)"
+                )
+                return None
+            avg_vol = (uni_stock.get('avg_volume_daily') or 0)
             if avg_vol > 0 and avg_vol < self.min_daily_volume:
                 logger.info(
                     f"{symbol}: Skipping — avg daily vol {avg_vol:,.0f} "

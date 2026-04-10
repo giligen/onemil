@@ -176,7 +176,8 @@ def filter_bull_flag_trades(
             if v and v > 0:
                 return v
             return universe_vol_map.get(t['symbol'], 0) if universe_vol_map else 0
-        trades = [t for t in trades if _get_trade_vol(t) == 0 or _get_trade_vol(t) >= min_daily_vol]
+        # No volume data = block (untradeable), not pass-through
+        trades = [t for t in trades if _get_trade_vol(t) >= min_daily_vol]
         vol_removed = before_vol - len(trades)
         if vol_removed:
             logger.info(f"Volume filter (>={min_daily_vol:,}): {before_vol} → {len(trades)} trades ({vol_removed} removed)")

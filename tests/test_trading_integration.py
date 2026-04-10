@@ -24,10 +24,24 @@ from trading.trading_engine import TradingEngine
 # Fixtures
 # ---------------------------------------------------------------------------
 
+def _seed_universe(database, symbols=("AAPL", "TSLA", "ELAB")):
+    """Seed universe with test symbols so volume filter doesn't block them."""
+    from datetime import datetime, timezone
+    for sym in symbols:
+        database.upsert_universe_stock({
+            'symbol': sym, 'company_name': sym, 'exchange': 'NASDAQ',
+            'sector': '', 'country': 'US', 'price_close': 10.0,
+            'float_shares': 5_000_000, 'float_updated_at': None,
+            'avg_volume_daily': 500_000, 'last_updated': datetime.now(timezone.utc),
+            'active': 1,
+        })
+
+
 @pytest.fixture
 def db(tmp_path):
-    """Real database with temp file."""
+    """Real database with temp file + seeded universe."""
     database = Database(db_path=str(tmp_path / "test.db"))
+    _seed_universe(database)
     yield database
     database.close()
 
