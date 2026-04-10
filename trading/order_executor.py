@@ -41,6 +41,27 @@ class OrderExecutor:
         self.alpaca = alpaca_client
         self.db = db
 
+    def _has_conflicting_orders(self, symbol: str) -> bool:
+        """Check if symbol has existing open orders on Alpaca (any strategy).
+
+        Prevents wash trades when two strategies target the same symbol.
+        """
+        try:
+            from alpaca.trading.requests import GetOrdersRequest
+            from alpaca.trading.enums import QueryOrderStatus
+            req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol])
+            existing = self.alpaca.trading_client.get_orders(filter=req)
+            if existing:
+                sides = [o.side.value for o in existing]
+                logger.warning(
+                    f"{symbol}: BLOCKED — {len(existing)} existing order(s) "
+                    f"({', '.join(sides)}) would cause wash trade"
+                )
+                return True
+        except Exception as e:
+            logger.warning(f"{symbol}: Failed to check existing orders: {e}")
+        return False
+
     def submit_bracket_order(self, plan: TradePlan) -> Optional[Dict[str, Any]]:
         """
         Submit a bracket order for a trade plan.
@@ -175,6 +196,9 @@ class OrderExecutor:
         Returns:
             Dict with order details if successful, None on failure
         """
+        if self._has_conflicting_orders(plan.symbol):
+            return None
+
         stop_price = plan.entry_price
         limit_price = round(stop_price * (1 + slippage_pct), 2)
         bracket_sl = sl_override if sl_override is not None else plan.stop_loss_price
@@ -294,6 +318,9 @@ class OrderExecutor:
         Returns:
             Dict with order details if successful, None on failure
         """
+        if self._has_conflicting_orders(plan.symbol):
+            return None
+
         stop_price = plan.entry_price
         limit_price = round(stop_price * (1 + slippage_pct), 2)
 
