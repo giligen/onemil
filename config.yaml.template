@@ -24,7 +24,7 @@ scanner:
   # Pre-market gap threshold
   gap_pct_min: 2.0
 
-  # Intraday move threshold — 20% validated: +$422K vs +$217K at 10% (15mo backtest)
+  # Intraday move threshold — 20% validated: +$372K vs +$217K at 10% (16mo backtest, realistic ADV cap)
   intraday_change_pct_min: 20.0
 
   # News catalyst requirement — disabled: pattern detector already filters quality
@@ -145,7 +145,7 @@ trading:
   # Self-managed stops: WebSocket price monitoring + marketable limit sell exits
   # Replaces bracket stop-market with real-time monitoring to cap exit slippage
   self_managed_stops:
-    enabled: true                       # Paper node uses REST polling (auto-detected from alpaca_paper flag)
+    enabled: true                       # WebSocket SIP for live + paper (REST polling only if sharing WS slot)
     safety_net_sl_pct: 0.05             # 5% wide SL on Alpaca (crash protection)
     marketable_limit_offset: 0.03       # $0.03 min offset below price
     marketable_limit_offset_pct: 0.005  # 0.5% offset (whichever is larger)
