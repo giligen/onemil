@@ -454,6 +454,37 @@ class Database:
         except Exception as e:
             logger.warning(f"Migration 9 (L2 depth columns) failed (non-fatal): {e}")
 
+        # Migration 10: Entry pipeline timing + reference price for slippage breakdown.
+        # Decomposes slippage into: wait (bar close → loop processes) + quote RTT +
+        # submit RTT + fill RTT. Reference price = last 1-min bar close when signal fired.
+        slippage_cols = {
+            'bar_close_price': 'REAL',      # close of the confirmation bar (ideal reference)
+            'bar_close_at': 'TIMESTAMP',    # timestamp of that bar
+            'loop_processed_at': 'TIMESTAMP',   # when engine finished MACD compute
+            'quote_fetched_at': 'TIMESTAMP',    # when L1 quote came back
+            'order_submitted_at': 'TIMESTAMP',  # when submit_bracket_order returned
+            'order_filled_at': 'TIMESTAMP',     # when fill status first observed
+            'bar_close_to_loop_ms': 'INTEGER',
+            'loop_to_quote_ms': 'INTEGER',
+            'quote_to_submit_ms': 'INTEGER',
+            'submit_to_fill_ms': 'INTEGER',
+            'drift_bar_to_ask_bps': 'REAL',   # (ask - bar_close) / bar_close * 10000
+            'drift_bar_to_fill_bps': 'REAL',  # (fill - bar_close) / bar_close * 10000
+            'drift_ask_to_fill_bps': 'REAL',  # (fill - ask) / ask * 10000 (should be ≤ 0)
+        }
+        try:
+            columns = [row[1] for row in self._trades_conn.execute("PRAGMA table_info(trades)").fetchall()]
+            added = []
+            for col_name, col_type in slippage_cols.items():
+                if col_name not in columns:
+                    self._trades_conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+                    added.append(col_name)
+            if added:
+                self._trades_conn.commit()
+                logger.info(f"Migration 10: added slippage timing columns: {added}")
+        except Exception as e:
+            logger.warning(f"Migration 10 (slippage timing) failed (non-fatal): {e}")
+
     # =========================================================================
     # Universe operations
     # =========================================================================
