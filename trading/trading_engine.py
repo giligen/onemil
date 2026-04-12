@@ -1061,9 +1061,20 @@ class TradingEngine:
                     update['order_filled_at'] = fill_at
                     if placed_at:
                         update['order_submitted_at'] = placed_at
-                        update['submit_to_fill_ms'] = int(
-                            (fill_at - placed_at).total_seconds() * 1000
-                        )
+                        # Guard against tz-naive placed_at from historic DB
+                        # rows (startup recovery path: _sync_startup_state
+                        # reads created_at which may lack a tz suffix). Skip
+                        # this derived field rather than raising — the rest
+                        # of the update still persists.
+                        try:
+                            update['submit_to_fill_ms'] = int(
+                                (fill_at - placed_at).total_seconds() * 1000
+                            )
+                        except (TypeError, ValueError) as e:
+                            logger.debug(
+                                f"{symbol}: submit_to_fill_ms skipped "
+                                f"(tz/value mismatch): {e}"
+                            )
                     if _plan and getattr(_plan, 'entry_price', 0) > 0:
                         ref = float(_plan.entry_price)
                         update['bar_close_price'] = ref

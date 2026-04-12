@@ -554,6 +554,54 @@ class TestDBUpdateOnFill:
         # Drift positive (fill above breakout)
         assert abs(trade['drift_bar_to_fill_bps'] - 113.636) < 0.5
 
+    def test_fill_with_naive_placed_at_survives(self, engine, mock_alpaca, db):
+        """Regression: if placed_at comes back tz-naive (historic DB rows
+        restored via startup recovery), the (fill_at - placed_at) subtraction
+        would raise TypeError aware/naive and abort the entire update.
+        Guard skips submit_to_fill_ms without losing fill_price + other fields."""
+        from datetime import timezone
+        now = datetime.now(timezone.utc)
+        # Simulate startup-recovery: placed_at is tz-NAIVE (as produced by
+        # datetime.fromisoformat on a legacy '2026-04-12T14:00:00' string
+        # that lacks a tz suffix).
+        naive_placed_at = datetime(2026, 4, 12, 14, 0, 0)  # no tzinfo
+
+        db.save_trade({
+            'trade_date': date.today().isoformat(),
+            'symbol': 'TEST', 'side': 'buy',
+            'entry_price': 4.40, 'stop_loss_price': 4.25, 'take_profit_price': 4.90,
+            'shares': 113, 'risk_per_share': 0.15, 'total_risk': 16.95,
+            'risk_reward_ratio': 3.3,
+            'order_id': 'order-naive', 'order_status': 'accepted',
+            'fill_price': None, 'filled_at': None,
+            'exit_price': None, 'exit_reason': None, 'exited_at': None,
+            'pnl': None, 'pnl_pct': None, 'pattern_data': '{}',
+            'created_at': now, 'updated_at': now,
+        })
+        engine._pending_orders['TEST'] = {
+            'order_id': 'order-naive',
+            'plan': _make_plan("TEST"),
+            'setup': _make_pattern("TEST"),
+            'placed_at': naive_placed_at,  # ← the dangerous case
+        }
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled', 'filled_avg_price': 4.45, 'legs': [],
+        }
+
+        # Must not raise
+        engine._manage_pending_orders()
+
+        trade = db.get_trade_by_order_id('order-naive')
+        # Core fill fields still persisted
+        assert trade['fill_price'] == 4.45
+        assert trade['order_status'] == 'filled'
+        assert trade['filled_at'] is not None
+        # bar_close_price doesn't depend on placed_at → still populated
+        assert trade['bar_close_price'] == 4.40
+        assert trade['drift_bar_to_fill_bps'] is not None
+        # submit_to_fill_ms couldn't be computed → stayed NULL
+        assert trade['submit_to_fill_ms'] is None
+
     def test_fill_missing_placed_at_graceful(self, engine, mock_alpaca, db):
         """If placed_at is None (shouldn't happen but be defensive), the
         Migration 10 fields that depend on it stay NULL, and the rest of
