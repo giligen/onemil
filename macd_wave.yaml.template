@@ -20,13 +20,20 @@ entry:
   max_vol_at_cross: 300000  # Validated: >300K = crowded
   min_macd_hist_pct: 0.5    # Validated: MACD hist >= 0.5% of price
   max_price_at_entry: 30    # Match universe max
+  # Smart entry: L1-informed pricing + early entry on strong book
+  smart_entry_enabled: true   # Smart PRICING enabled (spread-aware limits)
+  early_entry_bars: 3         # DISABLED: set to confirm_bars (3) = no early entry until backtested
+  early_bid_ask_ratio: 2.0    # bid_sz/ask_sz required for early entry
+  early_max_spread_pct: 0.003 # max spread for early entry (0.3%)
+  normal_bid_ask_ratio: 1.5   # for 2nd bar entry
+  normal_max_spread_pct: 0.005 # for 2nd bar entry (0.5%)
 
 # MACD indicator parameters
 macd:
   fast_period: 12
   slow_period: 26
   signal_period: 9
-  confirm_bars: 3           # Consecutive positive histogram bars before entry
+  confirm_bars: 3
 
 # Wave management
 waves:
@@ -38,16 +45,17 @@ waves:
 sizing:
   position_size: 50000      # $ per position
   max_concurrent: 5         # Max simultaneous open positions
+  max_adv_participation_pct: 0  # Disabled — waiting for real L2 depth data
 
-# Slippage model
+# Slippage model — matched to production measurements (0.54% avg entry, ~0.2% exit)
 slippage:
-  entry_pct: 0.001          # 0.1% added to entry price
-  exit_pct: 0.001           # 0.1% subtracted from exit price
+  entry_pct: 0.005          # 0.5% — production avg on buy-stop/limit fills
+  exit_pct: 0.002           # 0.2% — blend of stop exits (0.3%) and clean exits (~0%)
 
 # Risk management
 risk:
   hard_stop_pct: 0.02       # 2% hard stop loss per trade (crash protection)
-  trail_stop_pct: 0.002     # 0.2% trail (Phase B2: tightened from 0.3% at realistic 0.5% slip — improved both Q1 25 +$2.7K and Q1 26 +$3.5K)
-                             # Prior 0.3% validated at 0.1% slip fantasy: 48% WR, +$260K, 13/15 green months
+  trail_stop_pct: 0.003     # 0.3% trail below highest high (profit protection)
+                             # Validated: 48% WR, +$260K, 13/15 green months
                              # Without trail: 30% WR, lottery-dependent
-  daily_loss_limit: -5000   # Stop trading after this $ daily loss (0 = disabled)
+  daily_loss_limit: -5000
