@@ -333,11 +333,28 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
                                                  stop_monitor=stop_monitor)
         trading_engine.enabled = True
         trading_engine.news_provider = news_provider  # For news re-check at trade time
-        # Register real-time bar callback for instant pattern detection
-        if stop_monitor and not stop_monitor._polling_mode:
-            stop_monitor.set_bar_callback(trading_engine._on_bar_close)
+        # Register real-time bar handler (multi-consumer since Step 1) for instant pattern detection
+        if stop_monitor and not stop_monitor.polling_mode:
+            stop_monitor.register_bar_handler('bull_flag', trading_engine._on_bar_close)
             logger.info("Real-time bar stream → instant pattern detection ENABLED")
         logger.info(f"Bull Flag strategy ENABLED")
+
+    # T3.1: shared OrderStreamWatcher — one TradingStream for both strategies
+    order_stream = None
+    if trade and stop_monitor is not None:
+        try:
+            from trading.order_stream import OrderStreamWatcher
+            order_stream = OrderStreamWatcher(
+                api_key=config.alpaca_api_key,
+                api_secret=config.alpaca_api_secret,
+                paper=alpaca.is_paper,
+                alpaca_client=alpaca,
+            )
+            order_stream.start()
+            logger.info("OrderStreamWatcher STARTED — fill detection via TradingStream")
+        except Exception as e:
+            logger.warning(f"OrderStreamWatcher failed to start (fallback to REST polling): {e}")
+            order_stream = None
 
     # MACD wave engine (optional)
     macd_engine = None
@@ -348,7 +365,14 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
         macd_engine = MACDWaveEngine(
             alpaca_client=alpaca, db=db, notifier=notifier,
             config=macd_cfg, stop_monitor=stop_monitor,
+            order_stream=order_stream,
         )
+        # T1.1: register bar handler on the shared StopMonitor so bar closes
+        # for crossed_stocks flow into MACD's event queue (drained by scanner's
+        # 1s sleep chunks for targeted check_entries).
+        if stop_monitor is not None and not stop_monitor.polling_mode:
+            macd_engine.register_on_stop_monitor()
+            logger.info("MACD Wave: bar handler registered on shared StopMonitor")
         logger.info(f"MACD Wave strategy ENABLED")
 
     mode_label = "paper" if alpaca.is_paper else "LIVE"
@@ -413,7 +437,12 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
     if macd_engine:
         macd_engine.send_daily_report()
 
-    # Close shared WebSocket
+    # Close shared WebSockets
+    if order_stream:
+        try:
+            order_stream.stop()
+        except Exception as e:
+            logger.warning(f"order_stream.stop() error: {e}")
     if stop_monitor:
         stop_monitor.stop()
 

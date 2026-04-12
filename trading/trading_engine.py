@@ -1546,8 +1546,9 @@ class TradingEngine:
         if not self.stop_monitor:
             return
 
-        # 1. Drain new events from queue
-        events = self.stop_monitor.drain_exit_events()
+        # 1. Drain new events from queue — filter to bull-flag-tagged events
+        # so MACD wave's events stay queued for its own engine to consume.
+        events = self.stop_monitor.drain_exit_events(strategy='bull_flag')
         for event in events:
             # Exhaustion partials are processed separately
             if event.exit_reason == 'exhaustion_partial':

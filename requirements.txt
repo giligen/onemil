@@ -1,5 +1,9 @@
-# Alpaca SDK for stock trading and market data
-alpaca-py>=0.21.0
+# Alpaca SDK for stock trading and market data.
+# Upper bound: StopMonitor and OrderStreamWatcher use the private
+# _stream._run_forever() entry point on StockDataStream / TradingStream (the
+# public run() creates a new event loop, which conflicts with our
+# daemon-thread asyncio pattern). Re-verify after any major bump.
+alpaca-py>=0.21.0,<1.0.0
 
 # Yahoo Finance for float data
 yfinance>=0.2.30

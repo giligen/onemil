@@ -13,7 +13,7 @@ import time as time_mod
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -37,6 +37,10 @@ class OpenPosition:
     entry_time: datetime
     macd_hist_at_entry: float = 0.0
     highest_since_entry: float = 0.0  # For trailing stop
+    # Slippage attribution (set at entry submit, used at fill)
+    bar_close_price: Optional[float] = None
+    order_submitted_at: Optional[datetime] = None
+    entry_quote_ask: Optional[float] = None
 
 
 @dataclass
@@ -72,13 +76,24 @@ class MACDWaveEngine:
         config: Optional[dict] = None,
         dry_run: bool = False,
         stop_monitor=None,
+        order_stream=None,
     ):
         cfg = config or {}
         self.alpaca = alpaca_client
         self.db = db
         self.notifier = notifier
         self.stop_monitor = stop_monitor
+        self.order_stream = order_stream  # T3.1: TradingStream watcher (optional)
         self.dry_run = dry_run
+        # T1.1: bar events pushed here by StopMonitor's dispatched bar handler.
+        # Main loop drains via drain_bar_events() for targeted check_entries.
+        # Bounded to detect stuck main loops — at steady state this holds only
+        # ~1-2 events (one per sec at most from the scanner's 1s tick), so any
+        # actual backlog signals something is wrong.
+        import queue as _q
+        self._bar_event_queue: "_q.Queue" = _q.Queue(maxsize=1000)
+        self._bar_handler_registered = False
+        self._bar_queue_full_logged = False
 
         # Universe filters
         uni = cfg.get('universe', {})
@@ -204,6 +219,7 @@ class MACDWaveEngine:
                             risk_per_share=0,
                             trail_r=0, activate_at_r=0.0,
                             trail_pct=self.trail_stop_pct,
+                            strategy=self.STRATEGY_NAME,
                         )
                     logger.info(
                         f"[{self.STRATEGY_NAME}] sync: recovered {sym} "
@@ -318,6 +334,62 @@ class MACDWaveEngine:
         return len(self.universe)
 
     # ------------------------------------------------------------------
+    # T1.1: WebSocket-bar-event integration (unified main loop drives this)
+    # ------------------------------------------------------------------
+
+    def register_on_stop_monitor(self) -> None:
+        """
+        Register a bar handler with the shared StopMonitor so 1-min bar closes
+        for our crossed_stocks flow into self._bar_event_queue. Called once by
+        the unified service after StopMonitor.start().
+        """
+        if self.stop_monitor is None:
+            return
+        if self._bar_handler_registered:
+            return
+
+        import queue as _q_mod
+
+        def _on_bar(symbol: str, bars_df) -> None:
+            # Cheap enqueue; main loop does the actual MACD re-eval.
+            try:
+                self._bar_event_queue.put_nowait(symbol)
+                if self._bar_queue_full_logged:
+                    # Recovered from a previous Full — log recovery and reset.
+                    logger.info(
+                        f"[{self.STRATEGY_NAME}] bar event queue recovered "
+                        f"(size={self._bar_event_queue.qsize()})"
+                    )
+                    self._bar_queue_full_logged = False
+            except _q_mod.Full:
+                # Main loop is stuck or too slow — drop the event rather than
+                # blocking the WS thread. Log once per blockage; recovery logs
+                # again when space opens up.
+                if not self._bar_queue_full_logged:
+                    logger.error(
+                        f"[{self.STRATEGY_NAME}] bar event queue FULL "
+                        f"(maxsize=1000) — main loop likely stuck; dropping {symbol}"
+                    )
+                    self._bar_queue_full_logged = True
+            except Exception as e:
+                logger.error(f"[{self.STRATEGY_NAME}] bar event enqueue error: {e}")
+
+        self.stop_monitor.register_bar_handler(self.STRATEGY_NAME, _on_bar)
+        self._bar_handler_registered = True
+        logger.info(f"[{self.STRATEGY_NAME}] bar handler registered on StopMonitor")
+
+    def drain_bar_events(self) -> Set[str]:
+        """Pop all queued bar events and return the unique set of symbols."""
+        symbols: Set[str] = set()
+        while True:
+            try:
+                sym = self._bar_event_queue.get_nowait()
+            except Exception:
+                break
+            symbols.add(sym)
+        return symbols
+
+    # ------------------------------------------------------------------
     # Intraday: scan for +10% movers
     # ------------------------------------------------------------------
 
@@ -423,6 +495,16 @@ class MACDWaveEngine:
                         crossed_at=datetime.now(timezone.utc),
                     )
                     new_crosses.append(sym)
+                    # T1.1: subscribe to 1-min bars so the unified main loop
+                    # can react within seconds of each bar close instead of
+                    # waiting for the 60s polling sweep.
+                    if self.stop_monitor is not None:
+                        try:
+                            self.stop_monitor.subscribe_bars(sym)
+                        except Exception as e:
+                            logger.debug(
+                                f"[{self.STRATEGY_NAME}] {sym}: subscribe_bars failed: {e}"
+                            )
 
                     logger.info(
                         f"[{self.STRATEGY_NAME}] {sym}: crossed +{pct_change:.1f}% "
@@ -443,52 +525,133 @@ class MACDWaveEngine:
     # Intraday: check entries (MACD confirmation)
     # ------------------------------------------------------------------
 
-    def check_entries(self) -> List[str]:
+    def _has_conflicting_alpaca_orders(self, symbol: str) -> bool:
+        """
+        True if Alpaca shows an existing OPEN order for this symbol (any strategy).
+
+        Prevents wash trades in the unified process where both strategies run
+        under one Alpaca account. Returns False on check failure (fail-open,
+        Alpaca will still reject at submit time — we just won't get the nicer
+        pre-emptive log).
+        """
+        try:
+            from alpaca.trading.requests import GetOrdersRequest
+            from alpaca.trading.enums import QueryOrderStatus
+            req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol])
+            existing = self.alpaca.trading_client.get_orders(filter=req)
+            if existing:
+                sides = [getattr(o.side, 'value', str(o.side)) for o in existing]
+                logger.warning(
+                    f"[{self.STRATEGY_NAME}] {symbol}: "
+                    f"{len(existing)} conflicting open order(s) already "
+                    f"({', '.join(sides)})"
+                )
+                return True
+        except Exception as e:
+            logger.warning(
+                f"[{self.STRATEGY_NAME}] {symbol}: conflict check failed: {e}"
+            )
+        return False
+
+    def _has_entry_capacity(self) -> bool:
+        """
+        True if we can still submit a new entry: under max_concurrent AND
+        above daily_loss_limit. Also garbage-collects stale pending orders
+        (>2 min old = likely rejected, reclaim the slot).
+        """
+        # Daily-loss gate
+        if self.daily_loss_limit < 0 and self.daily_pnl <= self.daily_loss_limit:
+            return False
+
+        active_count = 0
+        stale_pending: List[str] = []
+        now = datetime.now(timezone.utc)
+        for psym, pos in self.open_positions.items():
+            if not pos.order_id:
+                active_count += 1  # filled
+            elif (now - pos.entry_time).total_seconds() < 120:
+                active_count += 1  # pending but fresh
+            else:
+                stale_pending.append(psym)  # pending > 2 min = dead
+        for psym in stale_pending:
+            logger.warning(
+                f"[{self.STRATEGY_NAME}] {psym}: stale pending order (>2min), removing"
+            )
+            self.open_positions.pop(psym, None)
+            self.invalidated.add(psym)
+        return active_count < self.max_concurrent
+
+    def check_entries(self, symbols: Optional[Iterable[str]] = None) -> List[str]:
         """
         Check crossed stocks for MACD entry signal.
 
         For each crossed stock, compute MACD histogram on 1-min bars.
         Enter when confirm_bars consecutive positive bars with hist >= threshold.
+
+        Args:
+            symbols: optional subset of symbols to evaluate (used by bar-event
+                     triggered targeted re-eval). If None, evaluate all
+                     crossed_stocks (legacy behavior).
         """
-        entries = []
+        entries: List[str] = []
 
-        for sym, crossed in list(self.crossed_stocks.items()):
-            if sym in self.open_positions:
+        # Gate 1: capacity + daily-loss limit — check ONCE before any I/O so
+        # we don't burn a batch REST call when we have no slots to use.
+        if not self._has_entry_capacity():
+            return entries
+
+        # Gate 2: build the effective watchlist (exclude positioned/invalidated)
+        # and use it directly as the iteration target — no double-filtering.
+        if symbols is not None:
+            candidate_iter = list(symbols)
+        else:
+            candidate_iter = list(self.crossed_stocks.keys())
+        watchlist = [
+            s for s in candidate_iter
+            if s in self.crossed_stocks
+            and s not in self.open_positions
+            and s not in self.invalidated
+        ]
+        if not watchlist:
+            return entries
+
+        # T1.2: batch-fetch bars for the watchlist in one REST call instead of
+        # N serial calls. `loop_processed_at` captured per-symbol below now
+        # includes only the thin loop overhead (not per-symbol RTT) for
+        # batched symbols — expect bar_close_to_loop_ms medians to shrink by
+        # ~(N-1) * 300ms after this lands. For symbols missed by the batch
+        # (empty response), a per-symbol get_1min_bars RTT is still billed.
+        now_et_outer = datetime.now(ET)
+        mins_outer = max(30, int((now_et_outer - now_et_outer.replace(
+            hour=9, minute=30, second=0)).total_seconds() / 60))
+        bars_by_sym: Dict[str, pd.DataFrame] = {}
+        try:
+            bars_by_sym = self.alpaca.get_1min_bars_multi(
+                watchlist, lookback_minutes=mins_outer
+            )
+        except Exception as e:
+            logger.warning(
+                f"[{self.STRATEGY_NAME}] batch bar fetch failed "
+                f"({len(watchlist)} syms), falling back per-symbol: {e}"
+            )
+
+        for sym in watchlist:
+            crossed = self.crossed_stocks.get(sym)
+            if crossed is None:  # defensive: races with scan_for_movers
                 continue
-            if sym in self.invalidated:
-                continue
-
-            # Capacity check — exclude stale pending orders (>2 min old, likely rejected)
-            active_count = 0
-            stale_pending = []
-            for psym, pos in self.open_positions.items():
-                if not pos.order_id:
-                    active_count += 1  # filled
-                elif (datetime.now(timezone.utc) - pos.entry_time).total_seconds() < 120:
-                    active_count += 1  # pending but fresh
-                else:
-                    stale_pending.append(psym)  # pending > 2 min = dead
-            # Clean up stale pending orders
-            for psym in stale_pending:
-                logger.warning(f"[{self.STRATEGY_NAME}] {psym}: stale pending order (>2min), removing")
-                del self.open_positions[psym]
-                self.invalidated.add(psym)
-            if active_count >= self.max_concurrent:
-                break
-
-            # Daily loss limit
-            if self.daily_loss_limit < 0 and self.daily_pnl <= self.daily_loss_limit:
-                logger.warning(
-                    f"[{self.STRATEGY_NAME}] Daily loss limit hit (${self.daily_pnl:,.0f}), "
-                    f"skipping {sym}"
-                )
+            # Re-check capacity inside the loop — we may enter symbols as we go,
+            # and subsequent iterations must honor the updated count.
+            if not self._has_entry_capacity():
                 break
 
             try:
-                # Fetch 1-min bars
-                now_et = datetime.now(ET)
-                mins = max(30, int((now_et - now_et.replace(hour=9, minute=30, second=0)).total_seconds() / 60))
-                bars = self.alpaca.get_1min_bars(sym, lookback_minutes=mins)
+                # T1.2: look up from the batched fetch; fall back per-symbol on miss.
+                bars = bars_by_sym.get(sym)
+                if bars is None or bars.empty:
+                    bars = self.alpaca.get_1min_bars(sym, lookback_minutes=mins_outer)
+                # Slippage instrumentation: timestamp right after bars are in hand.
+                # Captures polling interval + bar-fetch RTT (the "wait" component of drift).
+                loop_processed_at = datetime.now(timezone.utc)
                 if bars is None or len(bars) < self.macd_slow + self.macd_signal:
                     logger.info(
                         f"[{self.STRATEGY_NAME}] {sym}: insufficient bars "
@@ -508,6 +671,23 @@ class MACDWaveEngine:
                 latest_price = close.iloc[-1]
                 latest_hist = histogram.iloc[-1]
                 hist_pct = latest_hist / latest_price * 100 if latest_price > 0 else 0
+
+                # Reference price/time for slippage attribution: last 1-min bar
+                # seen at signal time (the BT's ideal entry reference).
+                try:
+                    bar_close_at_raw = bars['timestamp'].iloc[-1]
+                    if isinstance(bar_close_at_raw, pd.Timestamp):
+                        bar_close_at = bar_close_at_raw.to_pydatetime()
+                    elif isinstance(bar_close_at_raw, datetime):
+                        bar_close_at = bar_close_at_raw
+                    else:
+                        bar_close_at = pd.to_datetime(bar_close_at_raw, utc=True).to_pydatetime()
+                    if bar_close_at.tzinfo is None:
+                        bar_close_at = bar_close_at.replace(tzinfo=timezone.utc)
+                    bar_close_price = float(latest_price)
+                except Exception:
+                    bar_close_at = None
+                    bar_close_price = None
 
                 consecutive_pos = 0
                 for h in reversed(histogram.values):
@@ -546,6 +726,12 @@ class MACDWaveEngine:
                     except Exception as e:
                         logger.debug(f"[{self.STRATEGY_NAME}] {sym}: smart pricing failed: {e}")
 
+                pipeline_timing = {
+                    'loop_processed_at': loop_processed_at,
+                    'bar_close_at': bar_close_at,
+                    'bar_close_price': bar_close_price,
+                }
+
                 if self.smart_entry_enabled and smart_quote and crossed.pos_count < self.confirm_bars:
                     _, info = smart_quote
                     ba_ratio = info.get('ba_ratio', 0)
@@ -558,7 +744,9 @@ class MACDWaveEngine:
                                 f"[{self.STRATEGY_NAME}] {sym}: EARLY ENTRY (bar {crossed.pos_count}) — "
                                 f"ba_ratio={ba_ratio:.1f} spread={spread_pct:.2%}"
                             )
-                            result = self._submit_entry(sym, latest_price, hist_pct, crossed, smart_quote=smart_quote)
+                            result = self._submit_entry(sym, latest_price, hist_pct, crossed,
+                                                        smart_quote=smart_quote,
+                                                        pipeline_timing=pipeline_timing)
                             if result:
                                 entries.append(sym)
                                 entered = True
@@ -567,7 +755,9 @@ class MACDWaveEngine:
                                 f"[{self.STRATEGY_NAME}] {sym}: ENTRY (bar 2, moderate book) — "
                                 f"ba_ratio={ba_ratio:.1f} spread={spread_pct:.2%}"
                             )
-                            result = self._submit_entry(sym, latest_price, hist_pct, crossed, smart_quote=smart_quote)
+                            result = self._submit_entry(sym, latest_price, hist_pct, crossed,
+                                                        smart_quote=smart_quote,
+                                                        pipeline_timing=pipeline_timing)
                             if result:
                                 entries.append(sym)
                                 entered = True
@@ -578,7 +768,9 @@ class MACDWaveEngine:
                         f"[{self.STRATEGY_NAME}] {sym}: ENTRY SIGNAL (bar {consecutive_pos}) — "
                         f"hist_pct={hist_pct:.2f}%, price=${latest_price:.2f}"
                     )
-                    result = self._submit_entry(sym, latest_price, hist_pct, crossed, smart_quote=smart_quote)
+                    result = self._submit_entry(sym, latest_price, hist_pct, crossed,
+                                                smart_quote=smart_quote,
+                                                pipeline_timing=pipeline_timing)
                     if result:
                         entries.append(sym)
 
@@ -590,25 +782,32 @@ class MACDWaveEngine:
     def _submit_entry(
         self, symbol: str, price: float, macd_hist_pct: float, crossed: CrossedStock,
         smart_quote: tuple = None,
+        pipeline_timing: dict = None,
     ) -> bool:
         """Submit a buy order for MACD wave entry.
 
         Args:
             smart_quote: Optional (limit_price, quote_info) from _get_smart_limit_price,
                          passed to avoid double API call.
+            pipeline_timing: dict with loop_processed_at, bar_close_at, bar_close_price
+                             for slippage attribution. Optional.
         """
         try:
             # Get limit price: smart (L1-informed) or dumb (ask + 0.1%)
+            quote_fetched_at = None
             if smart_quote:
                 limit_price, quote_info = smart_quote
                 bid = quote_info.get('bid', 0)
                 ask = quote_info.get('ask', 0)
+                quote_fetched_at = quote_info.get('quote_fetched_at')
             elif self.smart_entry_enabled:
                 limit_price, quote_info = self._get_smart_limit_price(symbol)
                 bid = quote_info.get('bid', 0)
                 ask = quote_info.get('ask', 0)
+                quote_fetched_at = quote_info.get('quote_fetched_at')
             else:
                 quote = self.alpaca.get_latest_quote(symbol)
+                quote_fetched_at = datetime.now(timezone.utc)
                 ask = quote.get('ask_price', 0)
                 bid = quote.get('bid_price', 0)
                 if ask <= 0:
@@ -633,6 +832,19 @@ class MACDWaveEngine:
                 self.invalidated.add(symbol)
                 return False
 
+            # Wash-trade pre-check: if bull flag (or any other strategy) already
+            # has an open order for this symbol on Alpaca, submitting ours would
+            # be rejected as a wash trade. Mirrors OrderExecutor._has_conflicting_orders
+            # (trading/order_executor.py:44). Cheap REST call; only runs when we
+            # actually have a signal to submit.
+            if self._has_conflicting_alpaca_orders(symbol):
+                logger.warning(
+                    f"[{self.STRATEGY_NAME}] {symbol}: skipping entry — "
+                    f"another strategy has an open order (would be wash trade)"
+                )
+                self.invalidated.add(symbol)
+                return False
+
             # Submit bracket buy with safety-net SL on Alpaca
             # If everything dies (StopMonitor + service), Alpaca still has a 5% floor
             safety_sl = round(limit_price * (1 - self.safety_net_sl_pct), 2)
@@ -642,6 +854,7 @@ class MACDWaveEngine:
                 limit_price=limit_price,
                 tp_price=safety_tp, sl_price=safety_sl,
             )
+            order_submitted_at = datetime.now(timezone.utc)
             order_id = order.get('id', '') if order else ''
 
             # Save to DB
@@ -671,12 +884,42 @@ class MACDWaveEngine:
                                 f'"macd_hist_pct": {macd_hist_pct:.4f}}}',
             })
 
-            # Entry microstructure
-            self.db.update_trade(trade_id, {
+            # Entry microstructure + slippage pipeline timing (Migration 10).
+            # Decomposes the "bar close → order at Alpaca" latency so we can
+            # see where drift is eaten: wait, MACD compute, quote RTT, submit RTT.
+            micro = {
                 'entry_quote_bid': bid,
                 'entry_quote_ask': ask,
                 'entry_quote_spread': ask - bid if ask > 0 and bid > 0 else None,
-            })
+            }
+            pt = pipeline_timing or {}
+            bar_close_at = pt.get('bar_close_at')
+            loop_processed_at = pt.get('loop_processed_at')
+            bar_close_price = pt.get('bar_close_price')
+
+            def _ms(a, b):
+                if a is None or b is None:
+                    return None
+                return int((b - a).total_seconds() * 1000)
+
+            if bar_close_price:
+                micro['bar_close_price'] = bar_close_price
+            if bar_close_at:
+                micro['bar_close_at'] = bar_close_at
+            if loop_processed_at:
+                micro['loop_processed_at'] = loop_processed_at
+            if quote_fetched_at:
+                micro['quote_fetched_at'] = quote_fetched_at
+            micro['order_submitted_at'] = order_submitted_at
+
+            micro['bar_close_to_loop_ms'] = _ms(bar_close_at, loop_processed_at)
+            micro['loop_to_quote_ms'] = _ms(loop_processed_at, quote_fetched_at)
+            micro['quote_to_submit_ms'] = _ms(quote_fetched_at, order_submitted_at)
+
+            if bar_close_price and bar_close_price > 0 and ask > 0:
+                micro['drift_bar_to_ask_bps'] = (ask - bar_close_price) / bar_close_price * 10000
+
+            self.db.update_trade(trade_id, micro)
 
             self.open_positions[symbol] = OpenPosition(
                 symbol=symbol,
@@ -688,6 +931,9 @@ class MACDWaveEngine:
                 entry_time=datetime.now(timezone.utc),
                 macd_hist_at_entry=macd_hist_pct,
                 highest_since_entry=limit_price,
+                bar_close_price=bar_close_price,
+                order_submitted_at=order_submitted_at,
+                entry_quote_ask=ask if ask > 0 else None,
             )
             self.trades_today += 1
 
@@ -717,10 +963,11 @@ class MACDWaveEngine:
         """
         Get L1-informed limit price using bid/ask spread.
 
-        Returns (limit_price, quote_info_dict). Uses spread-aware pricing
-        to reduce entry slippage from ~0.5% to ~0.1-0.2%.
+        Returns (limit_price, quote_info_dict). info dict carries
+        quote_fetched_at (UTC datetime) for slippage-pipeline timing.
         """
         quote = self.alpaca.get_latest_quote(symbol)
+        quote_fetched_at = datetime.now(timezone.utc)
         bid = quote.get('bid_price', 0)
         ask = quote.get('ask_price', 0)
         bid_sz = quote.get('bid_size', 0)
@@ -728,12 +975,18 @@ class MACDWaveEngine:
 
         if ask <= 0 or bid <= 0:
             fallback = round(ask * 1.001, 2) if ask > 0 else 0
-            return fallback, {'bid': bid, 'ask': ask, 'pricing': 'fallback_no_quote'}
+            return fallback, {
+                'bid': bid, 'ask': ask, 'pricing': 'fallback_no_quote',
+                'quote_fetched_at': quote_fetched_at,
+            }
 
         if bid >= ask:
             # Crossed/inverted market — stale quotes, use ask as-is
             logger.debug(f"[{self.STRATEGY_NAME}] {symbol}: crossed market bid=${bid} >= ask=${ask}, using ask")
-            return round(ask, 2), {'bid': bid, 'ask': ask, 'pricing': 'fallback_crossed'}
+            return round(ask, 2), {
+                'bid': bid, 'ask': ask, 'pricing': 'fallback_crossed',
+                'quote_fetched_at': quote_fetched_at,
+            }
 
         spread = ask - bid
         spread_pct = spread / ask if ask > 0 else 0
@@ -753,6 +1006,7 @@ class MACDWaveEngine:
             'bid': bid, 'ask': ask, 'bid_sz': bid_sz, 'ask_sz': ask_sz,
             'spread': spread, 'spread_pct': spread_pct, 'ba_ratio': ba_ratio,
             'pricing': 'smart',
+            'quote_fetched_at': quote_fetched_at,
         }
         logger.info(
             f"[{self.STRATEGY_NAME}] {symbol}: smart pricing — "
@@ -783,7 +1037,7 @@ class MACDWaveEngine:
 
         # 1. Drain StopMonitor exit events (real-time trail/hard stop exits)
         if self.stop_monitor:
-            for event in self.stop_monitor.drain_exit_events():
+            for event in self.stop_monitor.drain_exit_events(strategy=self.STRATEGY_NAME):
                 sym = event.symbol
                 pos = self.open_positions.get(sym)
                 if not pos:
@@ -843,7 +1097,22 @@ class MACDWaveEngine:
                 # Check if entry order filled
                 if pos.order_id:
                     try:
-                        order_status = self.alpaca.get_order(pos.order_id)
+                        # T3.1: prefer push-delivered status from TradingStream;
+                        # fall back to REST if stream is silent and the order has aged.
+                        order_status = None
+                        if self.order_stream is not None:
+                            order_status = self.order_stream.get_status(pos.order_id)
+                        if order_status is None:
+                            age_s = 0.0
+                            if pos.order_submitted_at:
+                                age_s = (datetime.now(timezone.utc) - pos.order_submitted_at).total_seconds()
+                            # Always fall back to REST if the stream has nothing yet
+                            # past the first few seconds after submit. First fill is
+                            # often 100-300 ms, so don't wait too long.
+                            if age_s >= 5.0 or self.order_stream is None:
+                                order_status = self.alpaca.get_order(pos.order_id)
+                        if order_status is None:
+                            continue  # stream empty, too-fresh-for-REST — try next tick
                         status = order_status.get('status', '')
                         if status == 'filled':
                             fill_price = order_status.get('filled_avg_price')
@@ -854,12 +1123,29 @@ class MACDWaveEngine:
                                 pos.highest_since_entry = pos.entry_price
                                 if filled_qty:
                                     pos.shares = int(filled_qty)
-                                self.db.update_trade(pos.trade_id, {
+                                fill_at = datetime.now(timezone.utc)
+                                fill_update = {
                                     'order_status': 'filled',
                                     'fill_price': pos.entry_price,
                                     'filled_qty': pos.shares,
-                                    'filled_at': datetime.now(timezone.utc),
-                                })
+                                    'filled_at': fill_at,
+                                    'order_filled_at': fill_at,
+                                }
+                                # Slippage attribution uses values captured at submit-time
+                                # on the in-memory OpenPosition (no DB roundtrip needed).
+                                if pos.bar_close_price and pos.bar_close_price > 0:
+                                    fill_update['drift_bar_to_fill_bps'] = (
+                                        (pos.entry_price - pos.bar_close_price) / pos.bar_close_price * 10000
+                                    )
+                                if pos.entry_quote_ask and pos.entry_quote_ask > 0:
+                                    fill_update['drift_ask_to_fill_bps'] = (
+                                        (pos.entry_price - pos.entry_quote_ask) / pos.entry_quote_ask * 10000
+                                    )
+                                if pos.order_submitted_at:
+                                    fill_update['submit_to_fill_ms'] = int(
+                                        (fill_at - pos.order_submitted_at).total_seconds() * 1000
+                                    )
+                                self.db.update_trade(pos.trade_id, fill_update)
                                 pos.order_id = ''
                                 logger.info(
                                     f"[{self.STRATEGY_NAME}] {sym}: filled @ ${pos.entry_price:.2f} "
@@ -877,6 +1163,7 @@ class MACDWaveEngine:
                                         risk_per_share=0,  # not used — trail_pct overrides
                                         trail_r=0, activate_at_r=0.0,
                                         trail_pct=self.trail_stop_pct,  # percentage-based trail
+                                        strategy=self.STRATEGY_NAME,
                                     )
 
                                 # Log entry L2 async
@@ -1035,7 +1322,7 @@ class MACDWaveEngine:
 
             # Drain any pending StopMonitor events (DON'T call check_exits —
             # that would trigger MACD flip sells and double-sell positions)
-            for event in self.stop_monitor.drain_exit_events():
+            for event in self.stop_monitor.drain_exit_events(strategy=self.STRATEGY_NAME):
                 sym = event.symbol
                 if sym in self.open_positions:
                     pos = self.open_positions[sym]
@@ -1110,6 +1397,9 @@ class MACDWaveEngine:
         self.invalidated.clear()
         self.daily_pnl = 0.0
         self.trades_today = 0
+        # Drain any stale bar events leftover from yesterday.
+        self.drain_bar_events()
+        self._bar_queue_full_logged = False
 
     # ------------------------------------------------------------------
     # Time helpers

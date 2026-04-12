@@ -74,6 +74,9 @@ class WatchEntry:
     _prev_ask: float = 0.0
     _prev_bid_size: int = 0
     _prev_ask_size: int = 0
+    # Strategy tag (routes exit events back to the originating engine under the
+    # unified trader service). Defaults preserve legacy callers.
+    strategy: str = 'bull_flag'
 
 
 @dataclass
@@ -98,6 +101,7 @@ class StopExitEvent:
     exit_quote_ask_size: int = 0
     exit_limit_price: float = 0.0  # limit price we submitted
     exit_ofi: float = 0.0  # OFI at exit time (negative = selling pressure)
+    strategy: str = 'bull_flag'  # copied from the originating WatchEntry
 
 
 @dataclass
@@ -189,10 +193,18 @@ class StopMonitor:
         self._polling_mode = polling_mode
         self._polling_interval = polling_interval
 
-        # Bar streaming for pattern detection: callback(symbol, bars_df) on each 1-min bar close
-        self._bar_callback: Optional[Callable] = None
+        # Bar streaming for pattern detection: handlers fire on each 1-min bar close.
+        # Multi-consumer: multiple strategies may register; each gets (symbol, bars_df).
+        # Keyed by handler_id so consumers can update/unregister cleanly.
+        self._bar_handlers: Dict[str, Callable] = {}
+        self._bar_handler_lock = threading.Lock()
         self._bar_symbols: set = set()  # symbols subscribed to bar stream
         self._bar_windows: Dict[str, list] = {}  # rolling bar window per symbol
+
+    @property
+    def polling_mode(self) -> bool:
+        """True if this monitor is in REST polling mode (no data WebSocket)."""
+        return self._polling_mode
 
     def start(self) -> None:
         """Launch the stop monitoring daemon thread (WebSocket or REST polling)."""
@@ -250,14 +262,56 @@ class StopMonitor:
         self._stream = None
         logger.info("StopMonitor stopped")
 
-    def set_bar_callback(self, callback: Callable) -> None:
-        """Register callback for real-time bar closes: callback(symbol, bars_df).
-
-        Called from TradingEngine to receive instant bar updates for pattern detection.
-        The callback receives the complete bar window (all bars from market open) as a DataFrame.
+    def register_bar_handler(self, handler_id: str, callback: Callable) -> None:
         """
-        self._bar_callback = callback
-        logger.info("StopMonitor: Bar callback registered for real-time pattern detection")
+        Register a bar-close handler: callback(symbol, bars_df).
+
+        Multiple strategies may register under different handler_id keys.
+        Registering with an existing id OVERWRITES the previous handler for that id
+        (supports clean re-registration after config reloads).
+
+        Args:
+            handler_id: stable identifier, e.g. 'bull_flag', 'macd_wave'
+            callback: invoked for every bar event on every subscribed symbol
+        """
+        with self._bar_handler_lock:
+            existed = handler_id in self._bar_handlers
+            self._bar_handlers[handler_id] = callback
+        logger.info(
+            f"StopMonitor: bar handler {'updated' if existed else 'registered'} "
+            f"(id={handler_id}, total={len(self._bar_handlers)})"
+        )
+
+    def unregister_bar_handler(self, handler_id: str) -> None:
+        """Remove a bar-close handler by id. No-op if not registered."""
+        with self._bar_handler_lock:
+            existed = self._bar_handlers.pop(handler_id, None) is not None
+        if existed:
+            logger.info(f"StopMonitor: bar handler unregistered (id={handler_id})")
+
+    def set_bar_callback(self, callback: Callable) -> None:
+        """
+        Deprecated — use register_bar_handler(id, callback) instead.
+
+        Kept as a back-compat shim that registers under id='default'. Schedule
+        for removal once all call sites have been migrated (see project audit
+        notes). Any future caller hitting this path will see a DeprecationWarning
+        via the stdlib warnings module and a logged warning, making the
+        remaining uses visible in production logs.
+        """
+        import warnings
+        warnings.warn(
+            "StopMonitor.set_bar_callback is deprecated; "
+            "use register_bar_handler(handler_id, callback) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        logger.warning(
+            "StopMonitor.set_bar_callback is deprecated — "
+            "registering under handler_id='default'. "
+            "Migrate callers to register_bar_handler(id, cb)."
+        )
+        self.register_bar_handler('default', callback)
 
     def subscribe_bars(self, symbol: str) -> None:
         """Subscribe to 1-min bar stream for a symbol (for pattern detection).
@@ -286,7 +340,7 @@ class StopMonitor:
                 logger.error(f"StopMonitor: failed to subscribe {symbol} bars: {e}")
 
     async def _on_bar(self, bar) -> None:
-        """Handle 1-min bar close from WebSocket. Fires pattern detection callback."""
+        """Handle 1-min bar close from WebSocket. Fans out to all registered handlers."""
         try:
             symbol = bar.symbol
             if symbol not in self._bar_symbols:
@@ -304,14 +358,21 @@ class StopMonitor:
             self._bar_windows.setdefault(symbol, []).append(bar_dict)
             self._last_data_ts = time_mod.time()
 
-            # Fire callback with complete bar window as DataFrame
-            if self._bar_callback:
-                import pandas as pd
-                bars_df = pd.DataFrame(self._bar_windows[symbol])
+            # Snapshot handlers under lock, then fire outside lock so a slow handler
+            # doesn't block registration/unregistration on another thread.
+            with self._bar_handler_lock:
+                handlers = list(self._bar_handlers.items())
+            if not handlers:
+                return
+            import pandas as pd
+            bars_df = pd.DataFrame(self._bar_windows[symbol])
+            for handler_id, cb in handlers:
                 try:
-                    self._bar_callback(symbol, bars_df)
+                    cb(symbol, bars_df)
                 except Exception as e:
-                    logger.error(f"StopMonitor: bar callback error for {symbol}: {e}")
+                    logger.error(
+                        f"StopMonitor: bar handler '{handler_id}' raised for {symbol}: {e}"
+                    )
 
         except Exception as e:
             logger.error(f"StopMonitor: _on_bar error: {e}")
@@ -360,6 +421,7 @@ class StopMonitor:
         trail_r: float = 0.0,
         activate_at_r: float = 0.0,
         trail_pct: float = 0.0,
+        strategy: str = 'bull_flag',
     ) -> None:
         """
         Register a symbol for stop-price monitoring.
@@ -392,6 +454,7 @@ class StopMonitor:
             highest_since_entry=entry_price,
             trail_pct=trail_pct,
             trailing_active=trail_pct > 0,  # %-based trail activates immediately
+            strategy=strategy,
         )
         with self._watch_lock:
             self._watches[symbol] = entry
@@ -544,23 +607,40 @@ class StopMonitor:
                 'submitted_at': qw.submitted_at,
             }
 
-    def drain_exit_events(self) -> List[StopExitEvent]:
+    def drain_exit_events(self, strategy: Optional[str] = None) -> List[StopExitEvent]:
         """
-        Drain all pending exit events from the queue.
+        Drain pending exit events from the queue.
 
-        Called from main thread each monitoring cycle.
+        Called from main thread each monitoring cycle. In the unified trader
+        process, BOTH strategies drain the same queue, so each must pass its
+        own `strategy` tag. Events for OTHER strategies are preserved (requeued)
+        so the owning engine still sees them on its next drain.
+
+        Args:
+            strategy: optional strategy name ('bull_flag' | 'macd_wave'). If None,
+                      drain everything regardless of tag (legacy behavior, tests).
 
         Returns:
-            List of StopExitEvent objects to process
+            List of StopExitEvent objects matching `strategy` (or all, if None).
         """
-        events = []
+        mine: List[StopExitEvent] = []
+        others: List[StopExitEvent] = []
         while True:
             try:
                 event = self._exit_events.get_nowait()
-                events.append(event)
             except queue.Empty:
                 break
-        return events
+            ev_strategy = getattr(event, 'strategy', 'bull_flag') or 'bull_flag'
+            if strategy is None or ev_strategy == strategy:
+                mine.append(event)
+            else:
+                others.append(event)
+        # Re-queue events that don't belong to this caller's strategy so the
+        # owning engine picks them up on its own drain. Ordering across
+        # strategies is not meaningful (each engine processes its own chain).
+        for ev in others:
+            self._exit_events.put(ev)
+        return mine
 
     def update_stop(self, symbol: str, new_stop_price: float) -> bool:
         """
@@ -850,6 +930,7 @@ class StopMonitor:
             watch.exhaustion_partial_taken = True
             watch.trail_r = tighter_trail_r
             sl_leg_id = watch.sl_leg_id
+            watch_strategy = watch.strategy
 
             # Ratchet stop with tighter trail
             if risk_per_share > 0:
@@ -894,6 +975,7 @@ class StopMonitor:
             submitted_at=time_mod.time(),
             pricing_method=pricing_method,
             filled_qty=sell_shares,  # verified by _verify_fill_qty
+            strategy=watch_strategy,
         )
         self._exit_events.put(event)
         return event
@@ -1235,6 +1317,7 @@ class StopMonitor:
                             exit_quote_ask_size=snap.get('ask_size', 0),
                             pricing_method='poll_snapshot',
                             exit_limit_price=watch.latest_bid,
+                            strategy=watch.strategy,
                         ))
 
                 time_mod.sleep(self._polling_interval)
@@ -1681,6 +1764,7 @@ class StopMonitor:
                 exit_quote_ask_size=ask_size,
                 exit_limit_price=limit_price,
                 exit_ofi=watch.ofi_cumulative,
+                strategy=watch.strategy,
             )
             self._exit_events.put(event)
 

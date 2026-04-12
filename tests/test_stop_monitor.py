@@ -737,3 +737,129 @@ class TestBacktestSlippageCap:
         sim = TradeSimulator(exit_slippage_pct=0.0)
         fill = sim._compute_stop_fill(5.00)
         assert fill == 5.00
+
+
+# ---------------------------------------------------------------------------
+# Multi-consumer bar handlers (unified service support)
+# ---------------------------------------------------------------------------
+
+class TestBarHandlerMultiConsumer:
+    """register_bar_handler + unregister_bar_handler + _on_bar fan-out."""
+
+    @pytest.mark.asyncio
+    async def test_two_handlers_both_fire(self, monitor):
+        """Both handlers receive every bar event for subscribed symbols."""
+        calls_a, calls_b = [], []
+        monitor.register_bar_handler('strat_a', lambda s, df: calls_a.append(s))
+        monitor.register_bar_handler('strat_b', lambda s, df: calls_b.append(s))
+        monitor._bar_symbols.add('AAPL')
+
+        bar = MagicMock(symbol='AAPL', timestamp='2026-04-12T14:00:00Z',
+                       open=10.0, high=10.1, low=9.95, close=10.05, volume=1000)
+        await monitor._on_bar(bar)
+        assert calls_a == ['AAPL']
+        assert calls_b == ['AAPL']
+
+    @pytest.mark.asyncio
+    async def test_failing_handler_does_not_kill_others(self, monitor):
+        """One handler raising does not prevent others from firing."""
+        def broken(symbol, df):
+            raise RuntimeError("boom")
+        good_calls = []
+        monitor.register_bar_handler('broken', broken)
+        monitor.register_bar_handler('good', lambda s, df: good_calls.append(s))
+        monitor._bar_symbols.add('MSFT')
+
+        bar = MagicMock(symbol='MSFT', timestamp='2026-04-12T14:00:00Z',
+                       open=300.0, high=301.0, low=299.0, close=300.5, volume=500)
+        await monitor._on_bar(bar)
+        assert good_calls == ['MSFT']
+
+    def test_unregister_removes_handler(self, monitor):
+        """After unregister, the handler is gone from the dict."""
+        monitor.register_bar_handler('tmp', lambda s, df: None)
+        assert 'tmp' in monitor._bar_handlers
+        monitor.unregister_bar_handler('tmp')
+        assert 'tmp' not in monitor._bar_handlers
+
+    def test_backcompat_set_bar_callback(self, monitor):
+        """Legacy set_bar_callback still works — registers under id='default'."""
+        cb = lambda s, df: None
+        monitor.set_bar_callback(cb)
+        assert monitor._bar_handlers.get('default') is cb
+
+    def test_register_same_id_overwrites(self, monitor):
+        """Registering the same id twice overwrites the previous callback."""
+        first = lambda s, df: None
+        second = lambda s, df: None
+        monitor.register_bar_handler('strategy', first)
+        monitor.register_bar_handler('strategy', second)
+        assert monitor._bar_handlers['strategy'] is second
+
+
+class TestWatchStrategyTag:
+    """add_watch accepts strategy; propagates to WatchEntry."""
+
+    def test_default_strategy_bull_flag(self, monitor):
+        monitor.add_watch('AAPL', stop_price=10, shares=100,
+                          tp_leg_id='', sl_leg_id='')
+        assert monitor._watches['AAPL'].strategy == 'bull_flag'
+
+    def test_explicit_strategy_macd_wave(self, monitor):
+        monitor.add_watch('TSLA', stop_price=200, shares=50,
+                          tp_leg_id='', sl_leg_id='', strategy='macd_wave')
+        assert monitor._watches['TSLA'].strategy == 'macd_wave'
+
+    def test_exit_event_default_strategy(self):
+        """StopExitEvent defaults to bull_flag when not set."""
+        ev = StopExitEvent(symbol='X', stop_price=1, exit_price=0.99,
+                           shares=10, order_id='', exit_reason='stop_loss')
+        assert ev.strategy == 'bull_flag'
+
+
+class TestDrainExitEventsFilter:
+    """drain_exit_events(strategy=...) filters by strategy and requeues others."""
+
+    def _make_event(self, symbol: str, strategy: str):
+        return StopExitEvent(
+            symbol=symbol, stop_price=1.0, exit_price=0.99, shares=10,
+            order_id='', exit_reason='stop_loss', strategy=strategy,
+        )
+
+    def test_no_arg_drains_all_backcompat(self, monitor):
+        monitor._exit_events.put(self._make_event('A', 'bull_flag'))
+        monitor._exit_events.put(self._make_event('B', 'macd_wave'))
+        events = monitor.drain_exit_events()
+        assert {e.symbol for e in events} == {'A', 'B'}
+        # queue empty afterward
+        assert monitor._exit_events.qsize() == 0
+
+    def test_strategy_filter_returns_only_matching(self, monitor):
+        monitor._exit_events.put(self._make_event('A', 'bull_flag'))
+        monitor._exit_events.put(self._make_event('B', 'macd_wave'))
+        monitor._exit_events.put(self._make_event('C', 'bull_flag'))
+        mw = monitor.drain_exit_events(strategy='macd_wave')
+        assert {e.symbol for e in mw} == {'B'}
+        # bull_flag events requeued
+        bf = monitor.drain_exit_events(strategy='bull_flag')
+        assert {e.symbol for e in bf} == {'A', 'C'}
+
+    def test_requeued_events_survive_multiple_drains(self, monitor):
+        monitor._exit_events.put(self._make_event('A', 'bull_flag'))
+        monitor._exit_events.put(self._make_event('B', 'macd_wave'))
+        # MACD drains — bull_flag event requeues
+        monitor.drain_exit_events(strategy='macd_wave')
+        # Second MACD drain returns empty; bull_flag drain finds A
+        assert monitor.drain_exit_events(strategy='macd_wave') == []
+        bf = monitor.drain_exit_events(strategy='bull_flag')
+        assert {e.symbol for e in bf} == {'A'}
+
+    def test_missing_strategy_attribute_defaults_bull_flag(self, monitor):
+        """Backwards compat: events from before strategy field default to bull_flag."""
+        # Simulate a legacy event without strategy
+        ev = StopExitEvent(symbol='X', stop_price=1, exit_price=0.99,
+                           shares=10, order_id='', exit_reason='stop_loss')
+        # Explicitly remove the attribute to simulate a pre-migration pickle
+        monitor._exit_events.put(ev)
+        bf = monitor.drain_exit_events(strategy='bull_flag')
+        assert len(bf) == 1 and bf[0].symbol == 'X'

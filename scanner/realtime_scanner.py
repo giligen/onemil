@@ -71,6 +71,12 @@ class RealtimeScanner:
         self.notifier = notifier
         self.shutdown_event = shutdown_event
         self.macd_engine = macd_engine
+        # Throttle repeated bar-drain errors: the 1s sleep chunk loop can
+        # otherwise log the same exception 60× per minute if something stays
+        # broken. Track last-seen error signature + timestamp.
+        self._macd_bar_drain_last_err: Optional[str] = None
+        self._macd_bar_drain_last_err_ts: float = 0.0
+        self._macd_bar_drain_err_count: int = 0
 
         # Load notification preferences from config
         from config import Config
@@ -246,6 +252,24 @@ class RealtimeScanner:
                     rt = engine._drain_bar_events()
                     if rt:
                         logger.info(f"RT bar event processed during sleep: {rt.get('symbol', '?')}")
+                # T1.1: drain MACD wave bar events and run targeted check_entries
+                # for any crossed_stocks that just got a new bar close.
+                if self.macd_engine is not None and not force_closed:
+                    try:
+                        mw_syms = self.macd_engine.drain_bar_events()
+                        reeval = mw_syms & set(self.macd_engine.crossed_stocks.keys())
+                        if reeval:
+                            self.macd_engine.check_entries(symbols=reeval)
+                        # Reset error tracking on success
+                        if self._macd_bar_drain_err_count:
+                            logger.info(
+                                f"MACD wave bar-drain recovered after "
+                                f"{self._macd_bar_drain_err_count} errors"
+                            )
+                            self._macd_bar_drain_last_err = None
+                            self._macd_bar_drain_err_count = 0
+                    except Exception as e:
+                        self._log_throttled_bar_drain_error(e)
             else:
                 continue  # Normal loop continuation
             break  # Shutdown signal
@@ -719,6 +743,32 @@ class RealtimeScanner:
     # =========================================================================
     # Timing Helpers
     # =========================================================================
+
+    def _log_throttled_bar_drain_error(self, exc: Exception) -> None:
+        """
+        Rate-limit MACD bar-drain error logs.
+
+        First occurrence of a given error signature logs at ERROR with stack;
+        repeats of the SAME signature within 60s are counted silently; every
+        60s we emit a throttle summary (N more of the same error).
+        """
+        sig = f"{type(exc).__name__}: {exc}"
+        now = time_mod.time()
+        if sig != self._macd_bar_drain_last_err:
+            # New error — log full detail once.
+            logger.error(f"MACD wave bar-drain error: {exc}", exc_info=True)
+            self._macd_bar_drain_last_err = sig
+            self._macd_bar_drain_last_err_ts = now
+            self._macd_bar_drain_err_count = 1
+            return
+        self._macd_bar_drain_err_count += 1
+        if now - self._macd_bar_drain_last_err_ts >= 60.0:
+            logger.error(
+                f"MACD wave bar-drain error (repeating, {self._macd_bar_drain_err_count} "
+                f"occurrences in last ~60s): {sig}"
+            )
+            self._macd_bar_drain_last_err_ts = now
+            self._macd_bar_drain_err_count = 0
 
     def _interruptible_sleep(self, seconds: float) -> bool:
         """Sleep for up to `seconds`, returning True if shutdown requested."""
