@@ -36,7 +36,7 @@ from pathlib import Path
 from statistics import mean, median
 
 COLS = [
-    'trade_date', 'symbol', 'entry_price', 'fill_price',
+    'trade_date', 'symbol', 'strategy', 'entry_price', 'fill_price',
     'bar_close_price', 'entry_quote_bid', 'entry_quote_ask', 'entry_quote_spread',
     'bar_close_at', 'loop_processed_at', 'quote_fetched_at',
     'order_submitted_at', 'order_filled_at',
@@ -46,14 +46,15 @@ COLS = [
 ]
 
 
-def load_trades(db_path: Path, since: str | None):
+def load_trades(db_path: Path, since: str | None, strategy: str | None):
+    """Load instrumented fills. strategy=None loads both; else filters."""
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
-    q = (
-        f"SELECT {', '.join(COLS)} FROM trades "
-        "WHERE strategy = 'macd_wave' AND fill_price IS NOT NULL"
-    )
-    params = []
+    q = f"SELECT {', '.join(COLS)} FROM trades WHERE fill_price IS NOT NULL"
+    params: list = []
+    if strategy:
+        q += " AND strategy = ?"
+        params.append(strategy)
     if since:
         q += " AND trade_date >= ?"
         params.append(since)
@@ -131,6 +132,8 @@ def main():
     p.add_argument('--db', default='data/trades.db')
     p.add_argument('--since', default=None, help='ISO date, e.g. 2026-04-01')
     p.add_argument('--detail', action='store_true', help='per-trade table')
+    p.add_argument('--strategy', default=None, choices=['bull_flag', 'macd_wave'],
+                   help='Filter to one strategy (default: both, with per-strategy breakdown)')
     args = p.parse_args()
 
     db_path = Path(args.db)
@@ -138,8 +141,9 @@ def main():
         print(f"ERROR: {db_path} not found")
         return
 
-    rows = load_trades(db_path, args.since)
-    print(f"Loaded {len(rows)} MACD wave filled trades from {db_path}")
+    rows = load_trades(db_path, args.since, args.strategy)
+    label = args.strategy or 'all'
+    print(f"Loaded {len(rows)} filled trades from {db_path} ({label})")
     if args.since:
         print(f"  (since {args.since})")
 
@@ -154,7 +158,17 @@ def main():
 
     if args.detail:
         print_per_trade(instrumented)
-    print_summary(instrumented)
+
+    if args.strategy is None:
+        # Per-strategy breakdown when both are loaded
+        by_strategy: dict = {}
+        for r in instrumented:
+            by_strategy.setdefault(r.get('strategy') or 'unknown', []).append(r)
+        for strat, subset in sorted(by_strategy.items()):
+            print(f"\n=== {strat} ({len(subset)} trades) ===")
+            print_summary(subset)
+    else:
+        print_summary(instrumented)
 
 
 if __name__ == "__main__":

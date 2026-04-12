@@ -229,3 +229,54 @@ class TestSubmitBuyStopOrder:
         assert result['limit_price'] == round(4.40 * 1.03, 2)
 
 
+class TestConflictCheckFastPath:
+    """OrderExecutor wash-trade check: prefer OrderStreamWatcher cache when
+    available, fall back to REST when stream is absent/unhealthy."""
+
+    @pytest.fixture
+    def alpaca_with_client(self):
+        """MagicMock without spec so trading_client attribute can be set."""
+        m = MagicMock()
+        return m
+
+    def test_stream_hit_blocks_without_rest(self, alpaca_with_client, db):
+        stream = MagicMock()
+        stream.is_healthy.return_value = True
+        stream.get_open_order_symbols.return_value = {'AAPL'}
+        ex = OrderExecutor(alpaca_client=alpaca_with_client, db=db, order_stream=stream)
+        assert ex._has_conflicting_orders('AAPL') is True
+        alpaca_with_client.trading_client.get_orders.assert_not_called()
+
+    def test_stream_clear_no_rest(self, alpaca_with_client, db):
+        stream = MagicMock()
+        stream.is_healthy.return_value = True
+        stream.get_open_order_symbols.return_value = {'MSFT'}  # different sym
+        ex = OrderExecutor(alpaca_client=alpaca_with_client, db=db, order_stream=stream)
+        assert ex._has_conflicting_orders('AAPL') is False
+        alpaca_with_client.trading_client.get_orders.assert_not_called()
+
+    def test_unhealthy_stream_falls_back_to_rest(self, alpaca_with_client, db):
+        stream = MagicMock()
+        stream.is_healthy.return_value = False
+        ex = OrderExecutor(alpaca_client=alpaca_with_client, db=db, order_stream=stream)
+        alpaca_with_client.trading_client.get_orders.return_value = []
+        assert ex._has_conflicting_orders('AAPL') is False
+        alpaca_with_client.trading_client.get_orders.assert_called_once()
+
+    def test_no_stream_uses_rest(self, alpaca_with_client, db):
+        ex = OrderExecutor(alpaca_client=alpaca_with_client, db=db)
+        alpaca_with_client.trading_client.get_orders.return_value = []
+        assert ex._has_conflicting_orders('AAPL') is False
+        alpaca_with_client.trading_client.get_orders.assert_called_once()
+
+    def test_stream_exception_falls_through(self, alpaca_with_client, db):
+        stream = MagicMock()
+        stream.is_healthy.return_value = True
+        stream.get_open_order_symbols.side_effect = RuntimeError("boom")
+        ex = OrderExecutor(alpaca_client=alpaca_with_client, db=db, order_stream=stream)
+        alpaca_with_client.trading_client.get_orders.return_value = []
+        # Stream raised → REST fallback fires, returns no conflict
+        assert ex._has_conflicting_orders('AAPL') is False
+        alpaca_with_client.trading_client.get_orders.assert_called_once()
+
+

@@ -232,7 +232,7 @@ def _create_trading_engine(config, alpaca, db, notifier=None, stop_monitor=None,
         stop_trading_before_close_min=config.stop_trading_before_close_min,
         max_consecutive_losses=config.max_consecutive_losses,
     )
-    executor = OrderExecutor(alpaca_client=alpaca, db=db)
+    executor = OrderExecutor(alpaca_client=alpaca, db=db, order_stream=order_stream)
 
     # Load time controls from config (backtest loads these too — must match)
     _trading_cfg = config._load_yaml_only().get("trading", {})

@@ -503,6 +503,97 @@ class TestDBUpdateOnFill:
         assert trade['order_status'] == 'filled'
         assert trade['filled_at'] is not None
 
+    def test_fill_writes_migration_10_columns(self, engine, mock_alpaca, db):
+        """Bull flag fill writes Migration 10 slippage instrumentation columns:
+        bar_close_price (=plan.entry_price), order_submitted_at, order_filled_at,
+        submit_to_fill_ms, drift_bar_to_fill_bps. Parity with MACD wave."""
+        from datetime import timezone
+        now = datetime.now(timezone.utc)
+        placed_at = now - timedelta(seconds=3)
+
+        db.save_trade({
+            'trade_date': date.today().isoformat(),
+            'symbol': 'TEST',
+            'side': 'buy',
+            'entry_price': 4.40,
+            'stop_loss_price': 4.25,
+            'take_profit_price': 4.90,
+            'shares': 113,
+            'risk_per_share': 0.15,
+            'total_risk': 16.95,
+            'risk_reward_ratio': 3.3,
+            'order_id': 'order-mig10',
+            'order_status': 'accepted',
+            'fill_price': None, 'filled_at': None,
+            'exit_price': None, 'exit_reason': None, 'exited_at': None,
+            'pnl': None, 'pnl_pct': None, 'pattern_data': '{}',
+            'created_at': now, 'updated_at': now,
+        })
+
+        plan = _make_plan("TEST")  # entry_price = 4.40 (= breakout reference)
+        engine._pending_orders['TEST'] = {
+            'order_id': 'order-mig10',
+            'plan': plan, 'setup': _make_pattern("TEST"),
+            'placed_at': placed_at,
+        }
+        # Filled at 4.45 → drift = (4.45 - 4.40) / 4.40 * 10000 ≈ 113.6 bps
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled', 'filled_avg_price': 4.45, 'legs': [],
+        }
+
+        engine._manage_pending_orders()
+
+        trade = db.get_trade_by_order_id('order-mig10')
+        # Reference price = breakout level (= plan.entry_price)
+        assert trade['bar_close_price'] == 4.40
+        # Timestamps written
+        assert trade['order_submitted_at'] is not None
+        assert trade['order_filled_at'] is not None
+        # Latency ≈ 3000 ms (tolerate +/- 2000 for test jitter)
+        assert 1000 <= trade['submit_to_fill_ms'] <= 6000
+        # Drift positive (fill above breakout)
+        assert abs(trade['drift_bar_to_fill_bps'] - 113.636) < 0.5
+
+    def test_fill_missing_placed_at_graceful(self, engine, mock_alpaca, db):
+        """If placed_at is None (shouldn't happen but be defensive), the
+        Migration 10 fields that depend on it stay NULL, and the rest of
+        the fill flow still runs."""
+        from datetime import timezone
+        now = datetime.now(timezone.utc)
+        db.save_trade({
+            'trade_date': date.today().isoformat(),
+            'symbol': 'TEST', 'side': 'buy',
+            'entry_price': 4.40, 'stop_loss_price': 4.25, 'take_profit_price': 4.90,
+            'shares': 113, 'risk_per_share': 0.15, 'total_risk': 16.95,
+            'risk_reward_ratio': 3.3,
+            'order_id': 'order-noplaced',
+            'order_status': 'accepted', 'fill_price': None, 'filled_at': None,
+            'exit_price': None, 'exit_reason': None, 'exited_at': None,
+            'pnl': None, 'pnl_pct': None, 'pattern_data': '{}',
+            'created_at': now, 'updated_at': now,
+        })
+        engine._pending_orders['TEST'] = {
+            'order_id': 'order-noplaced',
+            'plan': _make_plan("TEST"),
+            'setup': _make_pattern("TEST"),
+            'placed_at': None,  # missing
+        }
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled', 'filled_avg_price': 4.45, 'legs': [],
+        }
+
+        engine._manage_pending_orders()
+
+        trade = db.get_trade_by_order_id('order-noplaced')
+        # Fill itself still persisted
+        assert trade['fill_price'] == 4.45
+        # Reference price still captured (from plan)
+        assert trade['bar_close_price'] == 4.40
+        # Drift still computable (doesn't need placed_at)
+        assert trade['drift_bar_to_fill_bps'] is not None
+        # submit_to_fill_ms needs placed_at — stays NULL
+        assert trade['submit_to_fill_ms'] is None
+
     def test_fill_no_trade_record_logs_error(self, engine, mock_alpaca, db):
         """Logs error when no DB trade record exists for filled order."""
         plan = _make_plan("TEST")

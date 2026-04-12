@@ -1042,12 +1042,35 @@ class TradingEngine:
                 # Phase 2: Update trade record with fill data
                 trade_record = self.db.get_trade_by_order_id(order_id)
                 if trade_record:
+                    fill_at = datetime.now(timezone.utc)
                     update = {
                         'order_status': 'filled',
                         'fill_price': fill_price,
                         'filled_qty': actual_qty,
-                        'filled_at': datetime.now(timezone.utc),
+                        'filled_at': fill_at,
                     }
+                    # Slippage instrumentation (Migration 10) for bull flag —
+                    # parity with MACD wave's analyze_slippage.py output. For
+                    # bull flag the BT reference price IS the breakout level
+                    # (plan.entry_price is set to pattern.breakout_level by
+                    # the planner), so we reuse bar_close_price for that role.
+                    # loop_processed_at / quote_fetched_at / bar_close_at have
+                    # no natural bull-flag analog and stay NULL.
+                    placed_at = pending.get('placed_at')
+                    _plan = pending.get('plan')
+                    update['order_filled_at'] = fill_at
+                    if placed_at:
+                        update['order_submitted_at'] = placed_at
+                        update['submit_to_fill_ms'] = int(
+                            (fill_at - placed_at).total_seconds() * 1000
+                        )
+                    if _plan and getattr(_plan, 'entry_price', 0) > 0:
+                        ref = float(_plan.entry_price)
+                        update['bar_close_price'] = ref
+                        if fill_price:
+                            update['drift_bar_to_fill_bps'] = (
+                                (float(fill_price) - ref) / ref * 10000
+                            )
                     # Persist news classification with trade for future analysis
                     # 1=catalyst, 0=noise, NULL=no articles or unknown
                     news = pending.get('news_data')

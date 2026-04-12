@@ -10,7 +10,7 @@ Handles:
 import json
 import logging
 from datetime import date, datetime, timezone
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
 
 from data_sources.alpaca_client import AlpacaClient
 from persistence.database import Database
@@ -30,22 +30,54 @@ class OrderExecutor:
     All with TimeInForce.DAY (expire at close).
     """
 
-    def __init__(self, alpaca_client: AlpacaClient, db: Database):
+    def __init__(
+        self,
+        alpaca_client: AlpacaClient,
+        db: Database,
+        order_stream: Optional[Any] = None,
+    ):
         """
         Initialize OrderExecutor.
 
         Args:
             alpaca_client: Alpaca API client for order submission
             db: Database for trade record persistence
+            order_stream: Optional OrderStreamWatcher for fast wash-trade check.
+                When attached and healthy, conflict check uses the in-memory
+                cache (~microseconds) instead of a REST call (~200-400 ms).
         """
         self.alpaca = alpaca_client
         self.db = db
+        self.order_stream = order_stream
 
     def _has_conflicting_orders(self, symbol: str) -> bool:
         """Check if symbol has existing open orders on Alpaca (any strategy).
 
         Prevents wash trades when two strategies target the same symbol.
+
+        Fast path: if OrderStreamWatcher is attached AND healthy, read from its
+        push-updated in-memory set. O(1). No network.
+        Slow path: REST get_orders fallback (legacy behaviour).
         """
+        # Fast path via the shared OrderStreamWatcher cache.
+        if self.order_stream is not None and self.order_stream.is_healthy():
+            try:
+                open_symbols = self.order_stream.get_open_order_symbols()
+                if symbol in open_symbols:
+                    logger.warning(
+                        f"{symbol}: BLOCKED — open order detected via "
+                        f"order-stream cache (would cause wash trade)"
+                    )
+                    return True
+                return False
+            except Exception as e:
+                logger.warning(
+                    f"{symbol}: order-stream conflict check failed, "
+                    f"falling back to REST: {e}"
+                )
+                # fall through to REST
+
+        # Slow path: REST (unchanged from legacy).
         try:
             from alpaca.trading.requests import GetOrdersRequest
             from alpaca.trading.enums import QueryOrderStatus
