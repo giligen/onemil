@@ -336,10 +336,16 @@ def generate_signals(
     macd_slow = cfg.get('macd', {}).get('slow_period', 26)
     macd_signal = cfg.get('macd', {}).get('signal_period', 9)
     confirm_bars = cfg.get('macd', {}).get('confirm_bars', 3)
+    # Phase A: CLI override for confirm_bars
+    if entry_filters.get('confirm_bars_override') is not None:
+        confirm_bars = entry_filters['confirm_bars_override']
     max_waves = entry_filters.get('max_waves', 1)
     w1_scout = entry_filters.get('w1_scout', False)
     w1_min_pct = entry_filters.get('w1_min_pct', 0.0)
     hard_stop_pct = cfg.get('risk', {}).get('hard_stop_pct', 0.02)
+    # Phase B: CLI override for hard stop
+    if entry_filters.get('hard_stop_override') is not None:
+        hard_stop_pct = entry_filters['hard_stop_override']
     entry_slippage = entry_filters.get('entry_pct', 0.005)
     exit_slippage = entry_filters.get('exit_pct', 0.002)
 
@@ -350,6 +356,30 @@ def generate_signals(
     min_macd_pct = entry_filters.get('min_macd_hist_pct', 0.0)
     max_price_entry = entry_filters.get('max_price_at_entry', 0)
     position_size = entry_filters.get('position_size', 40000)
+    # New indicator filters
+    max_rsi_val = entry_filters.get('max_rsi', 0)
+    require_hist_accel = entry_filters.get('require_hist_accel', False)
+    require_obv_rising = entry_filters.get('require_obv_rising', False)
+    require_ema_above = entry_filters.get('require_ema_above', False)
+    # Phase A
+    require_vwap_above = entry_filters.get('require_vwap_above', False)
+    require_vol_surge = entry_filters.get('require_vol_surge', False)
+    require_strong_close = entry_filters.get('require_strong_close', False)
+    require_higher_high = entry_filters.get('require_higher_high', False)
+    # Phase B
+    trail_activate_pct = entry_filters.get('trail_activate_pct', 0)
+    # Phase C
+    partial_pct = entry_filters.get('partial_pct', 0)
+    partial_fraction = entry_filters.get('partial_fraction', 0.5)
+    # Phase D: vol_at_cross exclusion zone
+    exclude_vol_zone = entry_filters.get('exclude_vol_zone')
+    excl_vol_low = excl_vol_high = None
+    if exclude_vol_zone:
+        try:
+            lo, hi = exclude_vol_zone.split('-')
+            excl_vol_low, excl_vol_high = int(lo), int(hi)
+        except Exception:
+            excl_vol_low = excl_vol_high = None
 
     if not isinstance(bars, pd.DataFrame):
         bars = pd.DataFrame(bars)
@@ -428,12 +458,88 @@ def generate_signals(
                 if max_vol_cross > 0 and vol_at_cross > max_vol_cross:
                     pos_count = 0
                     continue
+                # Phase D: vol_at_cross exclusion zone (data-driven dead zone)
+                if excl_vol_low is not None and excl_vol_low <= vol_at_cross < excl_vol_high:
+                    pos_count = 0
+                    continue
                 if min_macd_pct > 0 and hist_pct < min_macd_pct:
                     pos_count = 0
                     continue
                 if max_price_entry > 0 and raw_price > max_price_entry:
                     pos_count = 0
                     continue
+
+                # --- New indicator filters ---
+                closes_so_far = bars['close'].iloc[:i + 1]
+
+                # RSI: skip overbought entries
+                if max_rsi_val > 0 and len(closes_so_far) >= 15:
+                    from trading.indicators import rsi as _rsi
+                    rsi_val = _rsi(closes_so_far).iloc[-1]
+                    if not pd.isna(rsi_val) and rsi_val > max_rsi_val:
+                        pos_count = 0
+                        continue
+
+                # MACD histogram acceleration: current bar > previous bar
+                if require_hist_accel and i >= 1:
+                    if histogram.iloc[i] <= histogram.iloc[i - 1]:
+                        pos_count = 0
+                        continue
+
+                # OBV rising: OBV at entry > OBV 3 bars ago
+                if require_obv_rising and len(closes_so_far) >= 4:
+                    from trading.indicators import obv as _obv
+                    vols_so_far = bars['volume'].iloc[:i + 1]
+                    obv_series = _obv(closes_so_far, vols_so_far)
+                    if obv_series.iloc[-1] <= obv_series.iloc[-4]:
+                        pos_count = 0
+                        continue
+
+                # EMA alignment: price above EMA(21)
+                if require_ema_above and len(closes_so_far) >= 22:
+                    from trading.indicators import ema as _ema
+                    ema21 = _ema(closes_so_far, 21).iloc[-1]
+                    if raw_price < ema21:
+                        pos_count = 0
+                        continue
+
+                # --- Phase A: earlier-entry secondary confirmations ---
+                # VWAP: price above intraday VWAP at entry bar
+                if require_vwap_above and i >= 1:
+                    from trading.indicators import vwap as _vwap
+                    bars_so_far = bars.iloc[:i + 1]
+                    v = _vwap(bars_so_far['high'], bars_so_far['low'],
+                              bars_so_far['close'], bars_so_far['volume']).iloc[-1]
+                    if raw_price < v:
+                        pos_count = 0
+                        continue
+
+                # Volume surge: entry-bar volume > prev-bar volume * 1.5
+                if require_vol_surge and i >= 1:
+                    cur_vol = bars.iloc[i]['volume']
+                    prev_vol = bars.iloc[i - 1]['volume']
+                    if prev_vol <= 0 or cur_vol < prev_vol * 1.5:
+                        pos_count = 0
+                        continue
+
+                # Strong close: entry-bar close in upper third of bar range
+                if require_strong_close:
+                    bar = bars.iloc[i]
+                    bar_range = bar['high'] - bar['low']
+                    if bar_range <= 0:
+                        pos_count = 0
+                        continue
+                    upper_third = bar['low'] + bar_range * (2.0 / 3.0)
+                    if bar['close'] < upper_third:
+                        pos_count = 0
+                        continue
+
+                # Higher high: entry-bar high > prev-bar high
+                if require_higher_high and i >= 1:
+                    if bars.iloc[i]['high'] <= bars.iloc[i - 1]['high']:
+                        pos_count = 0
+                        continue
+                # --- End new indicator filters ---
 
                 entry_price = raw_price * (1 + entry_slippage)
                 entry_time = bar_ts
@@ -442,6 +548,10 @@ def generate_signals(
                 in_trade = True
                 highest_since_entry = entry_price
                 pos_count = 0
+                # Phase C: partial profit tracking
+                partial_taken = False
+                partial_pnl_dollar = 0.0
+                partial_shares_sold = 0
         else:
             # Force close at 15:45 ET (matches production)
             # Bar index 0 = 9:30 ET, so index 375 = 15:45 ET
@@ -451,17 +561,21 @@ def generate_signals(
                 wave += 1
                 pnl_pct = (exit_price - entry_price) / entry_price * 100
                 shares = int(position_size / entry_price) if entry_price > 0 else 0
+                # Phase C: blend partial profit with remaining shares
+                remaining_shares = shares - partial_shares_sold
+                pnl_dollar = (exit_price - entry_price) * remaining_shares + partial_pnl_dollar
                 is_paper = w1_scout and wave == 1
                 if not is_paper:
                     signals.append({
                         'wave': wave, 'entry_price': entry_price, 'exit_price': exit_price,
-                        'shares': shares, 'pnl_pct': pnl_pct,
-                        'pnl_dollar': (exit_price - entry_price) * shares,
+                        'shares': shares, 'pnl_pct': pnl_dollar / (entry_price * shares) * 100 if shares > 0 else pnl_pct,
+                        'pnl_dollar': pnl_dollar,
                         'entry_time': entry_time, 'exit_time': bar_ts,
                         'exit_reason': 'force_close', 'paper': False,
                         'cross_time_min': cross_time_min, 'vol_at_cross': vol_at_cross,
                         'macd_hist_pct': entry_hist_pct, 'w1_pnl': w1_result,
                         'entry_idx': entry_idx,
+                        'partial_taken': partial_taken, 'partial_pnl': partial_pnl_dollar,
                     })
                 in_trade = False
                 continue
@@ -470,6 +584,16 @@ def generate_signals(
             bar_high = bars.iloc[i]['high']
             if bar_high > highest_since_entry:
                 highest_since_entry = bar_high
+
+            # Phase C: take partial profit at +X% (uses HIGH so target gets hit if bar reached it)
+            if partial_pct > 0 and not partial_taken:
+                partial_target = entry_price * (1 + partial_pct / 100.0)
+                if bar_high >= partial_target:
+                    total_shares = int(position_size / entry_price) if entry_price > 0 else 0
+                    partial_shares_sold = int(total_shares * partial_fraction)
+                    partial_exit_price = partial_target * (1 - exit_slippage)
+                    partial_pnl_dollar = (partial_exit_price - entry_price) * partial_shares_sold
+                    partial_taken = True
 
             # Check hard stop
             bar_low = bars.iloc[i]['low']
@@ -489,14 +613,19 @@ def generate_signals(
                     if w1_scout and wave >= 2 and w1_result < w1_min_pct:
                         break  # W1 didn't qualify, skip remaining waves
 
+                # Phase C: blend partial profit with remaining shares
+                remaining_shares = shares - partial_shares_sold
+                pnl_dollar = (exit_price - entry_price) * remaining_shares + partial_pnl_dollar
                 signals.append({
                     'wave': wave, 'entry_price': entry_price, 'exit_price': exit_price,
-                    'shares': shares, 'pnl_pct': pnl_pct,
-                    'pnl_dollar': (exit_price - entry_price) * shares,
+                    'shares': shares,
+                    'pnl_pct': pnl_dollar / (entry_price * shares) * 100 if shares > 0 else pnl_pct,
+                    'pnl_dollar': pnl_dollar,
                     'entry_time': entry_time, 'exit_time': bar_ts,
                     'exit_reason': 'hard_stop', 'paper': is_paper,
                     'cross_time_min': cross_time_min, 'vol_at_cross': vol_at_cross,
                     'macd_hist_pct': entry_hist_pct, 'w1_pnl': w1_result,
+                    'partial_taken': partial_taken, 'partial_pnl': partial_pnl_dollar,
                 })
                 in_trade = False
                 pos_count = 0
@@ -504,7 +633,10 @@ def generate_signals(
 
             # Check trailing stop
             trail_stop_pct = entry_filters.get('trail_stop_pct', 0)
-            if trail_stop_pct > 0:
+            # Phase B: trail activation — only check trail after profit > threshold
+            current_profit_pct = (highest_since_entry - entry_price) / entry_price * 100
+            trail_active = (trail_activate_pct <= 0) or (current_profit_pct >= trail_activate_pct)
+            if trail_stop_pct > 0 and trail_active:
                 trail_stop_price = highest_since_entry * (1 - trail_stop_pct)
                 if bar_low <= trail_stop_price:
                     exit_price = trail_stop_price * (1 - exit_slippage)
@@ -520,14 +652,19 @@ def generate_signals(
                         if w1_scout and wave >= 2 and w1_result < w1_min_pct:
                             break
 
+                    # Phase C: blend partial profit with remaining shares
+                    remaining_shares = shares - partial_shares_sold
+                    pnl_dollar = (exit_price - entry_price) * remaining_shares + partial_pnl_dollar
                     signals.append({
                         'wave': wave, 'entry_price': entry_price, 'exit_price': exit_price,
-                        'shares': shares, 'pnl_pct': pnl_pct,
-                        'pnl_dollar': (exit_price - entry_price) * shares,
+                        'shares': shares,
+                        'pnl_pct': pnl_dollar / (entry_price * shares) * 100 if shares > 0 else pnl_pct,
+                        'pnl_dollar': pnl_dollar,
                         'entry_time': entry_time, 'exit_time': bar_ts,
                         'exit_reason': 'trail_stop', 'paper': is_paper,
                         'cross_time_min': cross_time_min, 'vol_at_cross': vol_at_cross,
                         'macd_hist_pct': entry_hist_pct, 'w1_pnl': w1_result,
+                        'partial_taken': partial_taken, 'partial_pnl': partial_pnl_dollar,
                     })
                     in_trade = False
                     pos_count = 0
@@ -549,14 +686,19 @@ def generate_signals(
                     if w1_scout and wave >= 2 and w1_result < w1_min_pct:
                         break
 
+                # Phase C: blend partial profit with remaining shares
+                remaining_shares = shares - partial_shares_sold
+                pnl_dollar = (exit_price - entry_price) * remaining_shares + partial_pnl_dollar
                 signals.append({
                     'wave': wave, 'entry_price': entry_price, 'exit_price': exit_price,
-                    'shares': shares, 'pnl_pct': pnl_pct,
-                    'pnl_dollar': (exit_price - entry_price) * shares,
+                    'shares': shares,
+                    'pnl_pct': pnl_dollar / (entry_price * shares) * 100 if shares > 0 else pnl_pct,
+                    'pnl_dollar': pnl_dollar,
                     'entry_time': entry_time, 'exit_time': bar_ts,
                     'exit_reason': 'macd_flip', 'paper': is_paper,
                     'cross_time_min': cross_time_min, 'vol_at_cross': vol_at_cross,
                     'macd_hist_pct': entry_hist_pct, 'w1_pnl': w1_result,
+                    'partial_taken': partial_taken, 'partial_pnl': partial_pnl_dollar,
                 })
                 in_trade = False
                 pos_count = 0
@@ -887,7 +1029,7 @@ def main():
 
     # Filter overrides
     parser.add_argument("--cross-time", type=int, default=None, help="Max minutes to +10% cross")
-    parser.add_argument("--macd-min", type=float, default=None, help="Min MACD hist %% at entry")
+    parser.add_argument("--macd-min", type=float, default=None, help="Min MACD hist pct at entry")
     parser.add_argument("--max-price", type=float, default=None, help="Max price at entry")
     parser.add_argument("--min-vol", type=int, default=None, help="Min volume at cross")
     parser.add_argument("--max-vol", type=int, default=None, help="Max volume at cross")
@@ -898,6 +1040,27 @@ def main():
     parser.add_argument("--max-concurrent", type=int, default=None)
     parser.add_argument("--trail", type=float, default=None, help="Trailing stop %% below highest (e.g., 0.5 = 0.5%%)")
     parser.add_argument("--no-slippage", action="store_true")
+    parser.add_argument("--entry-slip", type=float, default=None, help="Entry slippage pct (e.g. 0.005 = 0.5%%)")
+    parser.add_argument("--exit-slip", type=float, default=None, help="Exit slippage pct")
+    # New indicator filters
+    parser.add_argument("--max-rsi", type=float, default=0, help="Max RSI at entry (e.g. 70 = skip overbought)")
+    parser.add_argument("--require-hist-accel", action="store_true", help="Only enter when MACD histogram accelerating")
+    parser.add_argument("--require-obv-rising", action="store_true", help="Only enter when OBV confirms move")
+    parser.add_argument("--require-ema-above", action="store_true", help="Only enter when price > EMA21")
+    # Phase A: earlier-entry hypotheses
+    parser.add_argument("--confirm-bars", type=int, default=None, help="Override MACD confirmation bars (default 3)")
+    parser.add_argument("--require-vwap-above", action="store_true", help="Require price > VWAP at entry")
+    parser.add_argument("--require-vol-surge", action="store_true", help="Require entry-bar volume > prev-bar volume * 1.5")
+    parser.add_argument("--require-strong-close", action="store_true", help="Require entry-bar close in upper third of bar range")
+    parser.add_argument("--require-higher-high", action="store_true", help="Require entry-bar high > prev-bar high")
+    # Phase B: exit optimization
+    parser.add_argument("--hard-stop", type=float, default=None, help="Hard stop pct (e.g. 0.015 = 1.5)")
+    parser.add_argument("--trail-activate-pct", type=float, default=0, help="Trail activates only after profit > X pct (e.g. 0.5)")
+    # Phase C: partial profit
+    parser.add_argument("--partial-pct", type=float, default=0, help="Take partial profit at +X pct (e.g. 1.0)")
+    parser.add_argument("--partial-fraction", type=float, default=0.5, help="Fraction to sell on partial (default 0.5)")
+    # Phase D: data-driven bucket exclusion
+    parser.add_argument("--exclude-vol-zone", type=str, default=None, help="Skip vol_at_cross in this zone, format LOW-HIGH (e.g. 100000-150000)")
     parser.add_argument("--build-cache", action="store_true",
                         help="Generate ALL signals (no entry filters) and save to cache CSV")
     parser.add_argument("--no-cache", action="store_true",
@@ -971,8 +1134,8 @@ def main():
 
     # Step 3: Generate signals (use cache if available)
     trail_pct = args.trail / 100 if args.trail is not None else risk_cfg.get('trail_stop_pct', 0.003)
-    slip_entry = slip_cfg.get('entry_pct', 0.003)
-    slip_exit = slip_cfg.get('exit_pct', 0.003)
+    slip_entry = args.entry_slip if args.entry_slip is not None else slip_cfg.get('entry_pct', 0.003)
+    slip_exit = args.exit_slip if args.exit_slip is not None else slip_cfg.get('exit_pct', 0.003)
 
     entry_filters = {
         **entry_cfg,
@@ -983,6 +1146,25 @@ def main():
         'entry_pct': slip_entry,
         'exit_pct': slip_exit,
         'trail_stop_pct': trail_pct,
+        # New indicator filters
+        'max_rsi': args.max_rsi,
+        'require_hist_accel': args.require_hist_accel,
+        'require_obv_rising': args.require_obv_rising,
+        'require_ema_above': args.require_ema_above,
+        # Phase A
+        'confirm_bars_override': args.confirm_bars,
+        'require_vwap_above': args.require_vwap_above,
+        'require_vol_surge': args.require_vol_surge,
+        'require_strong_close': args.require_strong_close,
+        'require_higher_high': args.require_higher_high,
+        # Phase B
+        'hard_stop_override': args.hard_stop,
+        'trail_activate_pct': args.trail_activate_pct,
+        # Phase C
+        'partial_pct': args.partial_pct,
+        'partial_fraction': args.partial_fraction,
+        # Phase D
+        'exclude_vol_zone': args.exclude_vol_zone,
     }
 
     cache_path = get_cache_path(trail_pct, slip_entry, slip_exit)
