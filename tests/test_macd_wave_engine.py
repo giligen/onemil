@@ -57,7 +57,8 @@ class TestHasEntryCapacity:
         }
         assert e._has_entry_capacity() is False
 
-    def test_stale_pending_reclaims_slot(self):
+    def test_stale_pending_counted_until_gc(self):
+        """After split: stale-pending stays counted until _gc_stale_pending runs."""
         e = _make_engine()
         e.max_concurrent = 1
         stale = _make_pos(
@@ -65,9 +66,41 @@ class TestHasEntryCapacity:
             entry_time=datetime.now(timezone.utc) - timedelta(minutes=3),
         )
         e.open_positions = {'STALE': stale}
-        assert e._has_entry_capacity() is True  # stale evicted, slot freed
+        # Pure predicate: stale order was >120s, so NOT counted as active.
+        # With max=1 and 0 active, capacity is True.
+        assert e._has_entry_capacity() is True
+        # But the stale entry is still in open_positions until GC runs.
+        assert 'STALE' in e.open_positions
+
+    def test_gc_stale_pending_removes_old(self):
+        e = _make_engine()
+        stale = _make_pos(
+            order_id='pending-xyz',
+            entry_time=datetime.now(timezone.utc) - timedelta(minutes=3),
+        )
+        fresh = _make_pos(
+            order_id='pending-abc',
+            entry_time=datetime.now(timezone.utc) - timedelta(seconds=30),
+        )
+        e.open_positions = {'STALE': stale, 'FRESH': fresh}
+        e._gc_stale_pending()
         assert 'STALE' not in e.open_positions
         assert 'STALE' in e.invalidated
+        assert 'FRESH' in e.open_positions  # untouched
+
+    def test_has_entry_capacity_is_pure(self):
+        """_has_entry_capacity must not mutate state."""
+        e = _make_engine()
+        stale = _make_pos(
+            order_id='pending-xyz',
+            entry_time=datetime.now(timezone.utc) - timedelta(minutes=3),
+        )
+        e.open_positions = {'STALE': stale}
+        invalidated_before = set(e.invalidated)
+        positions_before = dict(e.open_positions)
+        _ = e._has_entry_capacity()
+        assert e.open_positions == positions_before
+        assert e.invalidated == invalidated_before
 
     def test_fresh_pending_counts_as_active(self):
         e = _make_engine()
@@ -86,22 +119,60 @@ class TestHasEntryCapacity:
 
 
 class TestConflictingOrdersCheck:
-    def test_no_existing_orders(self):
-        e = _make_engine()
+    """Covers both the fast (stream cache) and slow (REST) paths."""
+
+    # --- Slow path: no stream or unhealthy stream → hit REST ---
+
+    def test_no_existing_orders_rest(self):
+        e = _make_engine()  # no order_stream attached
         e.alpaca.trading_client.get_orders.return_value = []
         assert e._has_conflicting_alpaca_orders('AAPL') is False
 
-    def test_existing_order_blocks(self):
+    def test_existing_order_blocks_rest(self):
         e = _make_engine()
         fake_order = SimpleNamespace(side=SimpleNamespace(value='buy'))
         e.alpaca.trading_client.get_orders.return_value = [fake_order]
         assert e._has_conflicting_alpaca_orders('AAPL') is True
 
-    def test_fail_open_on_exception(self):
+    def test_fail_open_on_exception_rest(self):
         e = _make_engine()
         e.alpaca.trading_client.get_orders.side_effect = RuntimeError("api down")
         # Should NOT raise; returns False so Alpaca is the final gate
         assert e._has_conflicting_alpaca_orders('AAPL') is False
+
+    # --- Fast path: healthy stream → no REST call ---
+
+    def test_fast_path_conflict_via_stream(self):
+        from trading.order_stream import OrderStreamWatcher
+        e = _make_engine()
+        stream = MagicMock(spec=OrderStreamWatcher)
+        stream.is_healthy.return_value = True
+        stream.get_open_order_symbols.return_value = {'AAPL'}
+        e.order_stream = stream
+        assert e._has_conflicting_alpaca_orders('AAPL') is True
+        # REST must NOT be called when fast path is healthy
+        e.alpaca.trading_client.get_orders.assert_not_called()
+
+    def test_fast_path_no_conflict_via_stream(self):
+        from trading.order_stream import OrderStreamWatcher
+        e = _make_engine()
+        stream = MagicMock(spec=OrderStreamWatcher)
+        stream.is_healthy.return_value = True
+        stream.get_open_order_symbols.return_value = {'MSFT', 'NVDA'}
+        e.order_stream = stream
+        assert e._has_conflicting_alpaca_orders('AAPL') is False
+        e.alpaca.trading_client.get_orders.assert_not_called()
+
+    def test_unhealthy_stream_falls_back_to_rest(self):
+        from trading.order_stream import OrderStreamWatcher
+        e = _make_engine()
+        stream = MagicMock(spec=OrderStreamWatcher)
+        stream.is_healthy.return_value = False  # unhealthy
+        e.order_stream = stream
+        e.alpaca.trading_client.get_orders.return_value = []
+        assert e._has_conflicting_alpaca_orders('AAPL') is False
+        # REST path WAS invoked
+        e.alpaca.trading_client.get_orders.assert_called_once()
 
 
 class TestBarEventQueue:

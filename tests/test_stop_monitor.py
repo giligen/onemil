@@ -761,6 +761,33 @@ class TestBarHandlerMultiConsumer:
         assert calls_b == ['AAPL']
 
     @pytest.mark.asyncio
+    async def test_handlers_get_independent_dataframes(self, monitor):
+        """Each handler gets its own DataFrame copy — mutation by one
+        doesn't leak to others."""
+        import pandas as pd
+        frames_seen = []
+
+        def mutating(symbol, df):
+            df['poisoned'] = 1  # mutate
+            frames_seen.append(('mutator', df))
+
+        def later(symbol, df):
+            frames_seen.append(('later', df))
+
+        monitor.register_bar_handler('mutator', mutating)
+        monitor.register_bar_handler('later', later)
+        monitor._bar_symbols.add('NVDA')
+
+        bar = MagicMock(symbol='NVDA', timestamp='2026-04-12T14:00:00Z',
+                       open=800.0, high=801.0, low=799.0, close=800.5, volume=2000)
+        await monitor._on_bar(bar)
+
+        mutator_df = next(df for tag, df in frames_seen if tag == 'mutator')
+        later_df = next(df for tag, df in frames_seen if tag == 'later')
+        assert 'poisoned' in mutator_df.columns
+        assert 'poisoned' not in later_df.columns  # independent copy
+
+    @pytest.mark.asyncio
     async def test_failing_handler_does_not_kill_others(self, monitor):
         """One handler raising does not prevent others from firing."""
         def broken(symbol, df):
@@ -795,6 +822,23 @@ class TestBarHandlerMultiConsumer:
         monitor.register_bar_handler('strategy', first)
         monitor.register_bar_handler('strategy', second)
         assert monitor._bar_handlers['strategy'] is second
+
+    def test_polling_mode_warning_on_register(self, mock_alpaca, caplog):
+        """register_bar_handler under polling_mode=True still stores but WARNs loudly."""
+        import logging
+        from trading.stop_monitor import StopMonitor
+        m = StopMonitor(
+            api_key='k', api_secret='s', alpaca_client=mock_alpaca,
+            polling_mode=True,
+        )
+        with caplog.at_level(logging.WARNING, logger='trading.stop_monitor'):
+            m.register_bar_handler('macd_wave', lambda s, df: None)
+        assert any(
+            'polling mode' in r.message.lower() and 'macd_wave' in r.message
+            for r in caplog.records
+        )
+        # Handler was still stored (for mode-switch resilience)
+        assert 'macd_wave' in m._bar_handlers
 
 
 class TestWatchStrategyTag:

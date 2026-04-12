@@ -11,12 +11,13 @@ can swap with minimal changes and fall back to REST if a status is missing.
 """
 
 import asyncio
+import contextlib
 import logging
 import threading
 import time as time_mod
 from collections import OrderedDict
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +124,24 @@ class OrderStreamWatcher:
         with self._lock:
             return self._statuses.get(order_id)
 
+    def get_open_order_symbols(self) -> Set[str]:
+        """
+        Set of symbols currently holding a non-terminal order, per the stream
+        cache. Used by MACDWaveEngine as a fast local wash-trade check instead
+        of a REST round-trip on the entry hot path.
+
+        Correctness depends on the cache being fresh — we populate from
+        _resync_from_rest on (re)connect, then keep it live via push events.
+        Callers should gate on `is_healthy()` and fall back to REST when
+        the stream is unavailable or stale.
+        """
+        with self._lock:
+            return {
+                s.get('symbol') for s in self._statuses.values()
+                if s.get('symbol')
+                and (s.get('status') or '').lower() not in _TERMINAL_STATUSES
+            }
+
     # -------- internals --------
 
     def _run_stream_loop(self) -> None:
@@ -151,18 +170,34 @@ class OrderStreamWatcher:
                 )
                 self._stream.subscribe_trade_updates(self._on_trade_update)
 
-                # On (re)connect, repopulate state from REST so we don't miss
-                # fills that happened during the disconnect window.
-                await self._resync_from_rest()
-
                 logger.info("OrderStreamWatcher: connecting TradingStream...")
+                # Run the stream as a task so the REST resync can happen
+                # AFTER the WS is actually connected. Previous ordering did
+                # resync before connect, which created a window where fills
+                # between the REST snapshot and WS-online were missed. Now:
+                #   1. subscribe handler (stream will deliver events on connect)
+                #   2. start `_run_forever` task — WS handshake begins
+                #   3. sleep briefly for the handshake to complete
+                #   4. REST resync — reconciles any state we couldn't see yet
+                #   5. await the stream task (blocks until WS exits)
+                #
                 # NOTE: alpaca-py's public `run()` creates its own event loop,
-                # incompatible with our daemon-thread loop. We call the
-                # private async entry point `_run_forever()` — same pattern
-                # used by StopMonitor (see trading/stop_monitor.py
-                # _stream_with_reconnect). Pinned via requirements.txt upper
-                # bound; revisit if upstream exposes a proper async run().
-                await self._stream._run_forever()
+                # incompatible with our daemon-thread loop. Call the private
+                # async entry point `_run_forever()` — same pattern used by
+                # StopMonitor. Pinned via requirements.txt upper bound.
+                stream_task = asyncio.create_task(self._stream._run_forever())
+                try:
+                    # Give the WS handshake ~1.5s to complete before firing
+                    # the REST resync. Empirically enough for Alpaca's TLS +
+                    # subscribe acknowledgment on healthy connections.
+                    await asyncio.sleep(1.5)
+                    await self._resync_from_rest()
+                    await stream_task
+                except asyncio.CancelledError:
+                    stream_task.cancel()
+                    with contextlib.suppress(Exception):
+                        await stream_task
+                    raise
                 backoff = 1.0  # reset on clean exit
             except asyncio.CancelledError:
                 raise
@@ -275,6 +310,7 @@ def _order_to_status(order, event: str = '') -> Dict[str, Any]:
 
     return {
         'id': str(getattr(order, 'id', '') or ''),
+        'symbol': str(getattr(order, 'symbol', '') or ''),
         'status': _s(getattr(order, 'status', '')),
         'filled_avg_price': _f(getattr(order, 'filled_avg_price', None)),
         'filled_qty': _i(getattr(order, 'filled_qty', None)),

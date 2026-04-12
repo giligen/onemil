@@ -530,10 +530,35 @@ class MACDWaveEngine:
         True if Alpaca shows an existing OPEN order for this symbol (any strategy).
 
         Prevents wash trades in the unified process where both strategies run
-        under one Alpaca account. Returns False on check failure (fail-open,
-        Alpaca will still reject at submit time — we just won't get the nicer
-        pre-emptive log).
+        under one Alpaca account. Two code paths:
+
+        FAST: if OrderStreamWatcher is attached AND healthy, read from its
+              push-updated in-memory set. O(1). No network.
+        SLOW: REST `get_orders(filter=req)`. 200-400ms. Used as fallback when
+              the stream is unavailable or unhealthy.
+
+        Returns False on any failure (fail-open — Alpaca still rejects on
+        submit, we just lose the pre-emptive log).
         """
+        # Fast path via OrderStreamWatcher's push-updated cache.
+        if self.order_stream is not None and self.order_stream.is_healthy():
+            try:
+                open_symbols = self.order_stream.get_open_order_symbols()
+                if symbol in open_symbols:
+                    logger.warning(
+                        f"[{self.STRATEGY_NAME}] {symbol}: conflicting open order "
+                        f"(detected via order-stream cache)"
+                    )
+                    return True
+                return False
+            except Exception as e:
+                logger.warning(
+                    f"[{self.STRATEGY_NAME}] {symbol}: order-stream check failed, "
+                    f"falling back to REST: {e}"
+                )
+                # fall through to REST
+
+        # Slow path: REST (stream absent or unhealthy).
         try:
             from alpaca.trading.requests import GetOrdersRequest
             from alpaca.trading.enums import QueryOrderStatus
@@ -553,33 +578,38 @@ class MACDWaveEngine:
             )
         return False
 
-    def _has_entry_capacity(self) -> bool:
+    def _gc_stale_pending(self) -> None:
         """
-        True if we can still submit a new entry: under max_concurrent AND
-        above daily_loss_limit. Also garbage-collects stale pending orders
-        (>2 min old = likely rejected, reclaim the slot).
+        Remove open_positions whose buy order has been pending >2 minutes
+        (likely rejected by Alpaca, or the submit result was lost). Mutates
+        self.open_positions and self.invalidated. Safe to call multiple times.
         """
-        # Daily-loss gate
-        if self.daily_loss_limit < 0 and self.daily_pnl <= self.daily_loss_limit:
-            return False
-
-        active_count = 0
-        stale_pending: List[str] = []
         now = datetime.now(timezone.utc)
-        for psym, pos in self.open_positions.items():
-            if not pos.order_id:
-                active_count += 1  # filled
-            elif (now - pos.entry_time).total_seconds() < 120:
-                active_count += 1  # pending but fresh
-            else:
-                stale_pending.append(psym)  # pending > 2 min = dead
-        for psym in stale_pending:
+        stale = [
+            psym for psym, pos in self.open_positions.items()
+            if pos.order_id and (now - pos.entry_time).total_seconds() >= 120
+        ]
+        for psym in stale:
             logger.warning(
                 f"[{self.STRATEGY_NAME}] {psym}: stale pending order (>2min), removing"
             )
             self.open_positions.pop(psym, None)
             self.invalidated.add(psym)
-        return active_count < self.max_concurrent
+
+    def _has_entry_capacity(self) -> bool:
+        """
+        Pure predicate: True if we can still submit a new entry (under
+        max_concurrent AND above daily_loss_limit). No side effects — call
+        _gc_stale_pending() separately if you want stale-pending cleanup.
+        """
+        if self.daily_loss_limit < 0 and self.daily_pnl <= self.daily_loss_limit:
+            return False
+        now = datetime.now(timezone.utc)
+        active = sum(
+            1 for pos in self.open_positions.values()
+            if not pos.order_id or (now - pos.entry_time).total_seconds() < 120
+        )
+        return active < self.max_concurrent
 
     def check_entries(self, symbols: Optional[Iterable[str]] = None) -> List[str]:
         """
@@ -597,6 +627,8 @@ class MACDWaveEngine:
 
         # Gate 1: capacity + daily-loss limit — check ONCE before any I/O so
         # we don't burn a batch REST call when we have no slots to use.
+        # GC stale pending orders first (frees up slots that have gone dead).
+        self._gc_stale_pending()
         if not self._has_entry_capacity():
             return entries
 

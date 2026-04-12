@@ -274,6 +274,14 @@ class StopMonitor:
             handler_id: stable identifier, e.g. 'bull_flag', 'macd_wave'
             callback: invoked for every bar event on every subscribed symbol
         """
+        if self._polling_mode:
+            # Handler is still stored so that a mode-switch later would wire it
+            # up — but in polling mode the WS isn't active, no bar events fire.
+            # Surface this loudly so misconfigured deployments get noticed.
+            logger.warning(
+                f"StopMonitor: register_bar_handler('{handler_id}') called but "
+                f"monitor is in REST polling mode — bar events will NOT be delivered."
+            )
         with self._bar_handler_lock:
             existed = handler_id in self._bar_handlers
             self._bar_handlers[handler_id] = callback
@@ -366,9 +374,11 @@ class StopMonitor:
                 return
             import pandas as pd
             bars_df = pd.DataFrame(self._bar_windows[symbol])
+            # Defensive: each handler gets its own copy so in-place mutation
+            # by one consumer cannot corrupt state for the others.
             for handler_id, cb in handlers:
                 try:
-                    cb(symbol, bars_df)
+                    cb(symbol, bars_df.copy())
                 except Exception as e:
                     logger.error(
                         f"StopMonitor: bar handler '{handler_id}' raised for {symbol}: {e}"

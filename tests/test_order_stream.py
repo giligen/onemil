@@ -99,6 +99,44 @@ class TestThreadSafety:
             assert w.get_status(f'ord-{i}') is not None
 
 
+class TestGetOpenOrderSymbols:
+    """Symbol-level view used by MACD's fast conflict check."""
+
+    @pytest.mark.asyncio
+    async def test_open_orders_only(self):
+        w = OrderStreamWatcher(api_key='k', api_secret='s')
+        await w._on_trade_update(_fake_trade_update('o1', 'new', event='new'))
+        await w._on_trade_update(_fake_trade_update('o2', 'accepted', event='accepted'))
+        await w._on_trade_update(_fake_trade_update('o3', 'filled'))
+        # Manually set symbols so the fake update's missing symbol doesn't leak
+        # (SimpleNamespace in _fake_trade_update doesn't set symbol by default)
+        with w._lock:
+            w._statuses['o1']['symbol'] = 'AAA'
+            w._statuses['o2']['symbol'] = 'BBB'
+            w._statuses['o3']['symbol'] = 'CCC'
+        syms = w.get_open_order_symbols()
+        assert syms == {'AAA', 'BBB'}  # 'CCC' is filled (terminal)
+
+    @pytest.mark.asyncio
+    async def test_empty_when_all_terminal(self):
+        w = OrderStreamWatcher(api_key='k', api_secret='s')
+        await w._on_trade_update(_fake_trade_update('o1', 'filled'))
+        await w._on_trade_update(_fake_trade_update('o2', 'canceled'))
+        with w._lock:
+            w._statuses['o1']['symbol'] = 'A'
+            w._statuses['o2']['symbol'] = 'B'
+        assert w.get_open_order_symbols() == set()
+
+    @pytest.mark.asyncio
+    async def test_missing_symbol_excluded(self):
+        """Orders without a symbol field are defensively excluded."""
+        w = OrderStreamWatcher(api_key='k', api_secret='s')
+        await w._on_trade_update(_fake_trade_update('o1', 'new'))
+        with w._lock:
+            w._statuses['o1']['symbol'] = ''  # simulate missing
+        assert w.get_open_order_symbols() == set()
+
+
 class TestStatusPruning:
     """Terminal-order eviction bounds memory under long-running use."""
 
