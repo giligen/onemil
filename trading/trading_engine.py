@@ -58,6 +58,7 @@ class TradingEngine:
         market_regime: Optional['MarketRegimeFilter'] = None,
         stop_monitor: Optional[Any] = None,
         safety_net_sl_pct: float = 0.05,
+        order_stream: Optional[Any] = None,
     ):
         """
         Initialize TradingEngine.
@@ -105,6 +106,11 @@ class TradingEngine:
         # Self-managed stops
         self.stop_monitor = stop_monitor
         self.safety_net_sl_pct = safety_net_sl_pct
+
+        # S1: OrderStreamWatcher for push-delivered order status. When present
+        # and healthy, the hybrid helper below prefers its cached status over
+        # a REST get_order() round-trip on hot-path fill detection.
+        self.order_stream = order_stream
 
         # Load trailing stop + skip_fridays from config
         from config import Config
@@ -237,6 +243,61 @@ class TradingEngine:
         self.shutdown_event = None  # Set by caller for graceful shutdown
         # Bar event queue: WebSocket thread enqueues (symbol, bars_df), main thread drains
         self._bar_event_queue: queue.Queue = queue.Queue()
+
+    # ------------------------------------------------------------------
+    # S1 — Hybrid order-status helper (stream-first, REST fallback)
+    # ------------------------------------------------------------------
+
+    def _get_order_hybrid(
+        self,
+        order_id: str,
+        submitted_at: Optional[datetime] = None,
+        fallback_after_s: float = 5.0,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Return the latest known order status, preferring push-delivered data
+        from OrderStreamWatcher (if attached and healthy).
+
+        Semantics mirror AlpacaClient.get_order() return shape so call sites
+        can swap with zero downstream changes. Returns None when the stream
+        has nothing yet AND the order is too fresh to justify a REST fallback
+        (caller should treat as "still pending, try next tick").
+
+        Behavior matrix:
+          stream=None                     -> REST always (previous behavior)
+          stream set, cache hit           -> cached dict, no network
+          stream set, cache miss, aged>=N -> REST (reconcile missed push)
+          stream set, cache miss, age<N   -> None  (fresh order; caller retries)
+
+        Args:
+            order_id: Alpaca order id to look up
+            submitted_at: when the order was submitted (UTC). Enables the
+                age gate; if None we skip the gate and fall through to REST.
+            fallback_after_s: REST fallback kicks in at or after this age.
+        """
+        if self.order_stream is not None:
+            try:
+                cached = self.order_stream.get_status(order_id)
+                if cached is not None:
+                    return cached
+            except Exception as e:
+                logger.debug(
+                    f"_get_order_hybrid: order_stream.get_status({order_id}) "
+                    f"raised ({e}), falling back to REST"
+                )
+
+        # Cache miss (or no stream). Decide whether to hit REST now or wait.
+        if self.order_stream is not None and submitted_at is not None:
+            age = (datetime.now(timezone.utc) - submitted_at).total_seconds()
+            if age < fallback_after_s:
+                return None  # too fresh; let the stream deliver
+
+        # Fall through to REST.
+        try:
+            return self.alpaca.get_order(order_id)
+        except Exception as e:
+            logger.warning(f"_get_order_hybrid: REST get_order({order_id}) failed: {e}")
+            return None
 
     def _get_risk_tier(self, entry_price: float, avg_volume: int) -> float:
         """
@@ -832,13 +893,26 @@ class TradingEngine:
         for symbol, pending in list(self._pending_orders.items()):
             order_id = pending['order_id']
 
-            try:
-                order_status = self.alpaca.get_order(order_id)
-            except Exception as e:
-                error_msg = f"{symbol}: Failed to get order status: {e}"
-                logger.error(error_msg)
-                if self.notifier:
-                    self.notifier.notify_error(error_msg, component="OrderTracking")
+            # S1: stream-first, REST fallback after 5s of order age. When the
+            # stream has nothing yet for a fresh order, hybrid returns None —
+            # we continue and re-check next tick (the stream will deliver).
+            order_status = self._get_order_hybrid(
+                order_id, submitted_at=pending.get('placed_at')
+            )
+            if order_status is None:
+                # Only notify if the order is old enough that REST should've
+                # answered — fresh-order None is just "stream hasn't fired yet".
+                placed = pending.get('placed_at')
+                aged = (
+                    placed is not None
+                    and (datetime.now(timezone.utc) - placed).total_seconds() >= 10.0
+                )
+                if aged and self.notifier:
+                    self.notifier.notify_error(
+                        f"{symbol}: order status unavailable for >10s "
+                        "(stream+REST both empty)",
+                        component="OrderTracking",
+                    )
                 continue
 
             status = order_status.get('status', 'unknown')
@@ -847,19 +921,26 @@ class TradingEngine:
                 fill_price = order_status.get('filled_avg_price')
                 filled_qty = order_status.get('filled_qty', 0)
 
-                # Fix 1: Retry if fill data missing (Alpaca can lag on fill price)
+                # Fix 1: Retry if fill data missing (Alpaca can lag on fill price).
+                # S1: hybrid prefers the stream (no RTT when push has delivered);
+                # fallback_after_s=0 disables the age gate for this tight retry
+                # loop — we want REST IMMEDIATELY on a stream miss, not wait for
+                # the default 5s gate when the order is already known to be filled.
                 if fill_price is None:
                     for attempt in range(5):
                         time_mod.sleep(0.5)
-                        try:
-                            refreshed = self.alpaca.get_order(order_id)
-                            fill_price = refreshed.get('filled_avg_price')
-                            filled_qty = refreshed.get('filled_qty', filled_qty)
-                            if fill_price is not None:
-                                logger.info(f"{symbol}: Fill price resolved on retry {attempt + 1}")
-                                break
-                        except Exception:
-                            pass
+                        refreshed = self._get_order_hybrid(
+                            order_id,
+                            submitted_at=pending.get('placed_at'),
+                            fallback_after_s=0.0,
+                        )
+                        if refreshed is None:
+                            continue
+                        fill_price = refreshed.get('filled_avg_price')
+                        filled_qty = refreshed.get('filled_qty', filled_qty)
+                        if fill_price is not None:
+                            logger.info(f"{symbol}: Fill price resolved on retry {attempt + 1}")
+                            break
 
                     # Position fallback
                     if fill_price is None:
@@ -1259,9 +1340,12 @@ class TradingEngine:
                     age = (datetime.now(timezone.utc) - placed_at).total_seconds()
                     if age > self.setup_expiry_seconds:
                         logger.info(f"{symbol}: Buy-stop EXPIRED after {age:.0f}s, cancelling")
-                        # Fix 7: Refresh status before cancel — order may have filled
-                        try:
-                            refreshed = self.alpaca.get_order(order_id)
+                        # Fix 7: Refresh status before cancel — order may have filled.
+                        # S1: hybrid uses the stream cache first (zero RTT when
+                        # we have a fresh push) and only falls back to REST when
+                        # the cache is cold.
+                        refreshed = self._get_order_hybrid(order_id, submitted_at=placed_at)
+                        if refreshed is not None:
                             if refreshed.get('status') == 'filled':
                                 logger.info(f"{symbol}: Order filled while checking expiry — handling next cycle")
                                 continue
@@ -1269,8 +1353,6 @@ class TradingEngine:
                                 logger.info(f"{symbol}: Order already {refreshed['status']}")
                                 symbols_to_remove.append(symbol)
                                 continue
-                        except Exception:
-                            pass  # proceed with cancel attempt
                         try:
                             self.alpaca.cancel_order(order_id)
                         except Exception as e:
@@ -1295,9 +1377,12 @@ class TradingEngine:
                                     f"low ${latest_low:.2f} < flag_low ${setup.flag_low:.2f}, "
                                     f"cancelling order {order_id}"
                                 )
-                                # Fix 7: Refresh status before cancel
-                                try:
-                                    refreshed = self.alpaca.get_order(order_id)
+                                # Fix 7: Refresh status before cancel.
+                                # S1: hybrid uses the stream cache first.
+                                refreshed = self._get_order_hybrid(
+                                    order_id, submitted_at=pending.get('placed_at')
+                                )
+                                if refreshed is not None:
                                     if refreshed.get('status') == 'filled':
                                         logger.info(f"{symbol}: Order filled while checking invalidation — handling next cycle")
                                         continue
@@ -1305,8 +1390,6 @@ class TradingEngine:
                                         logger.info(f"{symbol}: Order already {refreshed['status']}")
                                         symbols_to_remove.append(symbol)
                                         continue
-                                except Exception:
-                                    pass  # proceed with cancel attempt
                                 self.alpaca.cancel_order(order_id)
                                 symbols_to_remove.append(symbol)
                                 # Remember invalidated breakout level to prevent re-detection loop
@@ -1349,38 +1432,52 @@ class TradingEngine:
         """
         if not event.order_id:
             return None
+        # Convert StopExitEvent.submitted_at (Unix float) to a tz-aware datetime
+        # for the hybrid age gate. Missing/zero → None → hybrid skips the gate.
+        submitted_dt: Optional[datetime] = None
+        evt_ts = getattr(event, 'submitted_at', 0.0)
+        if evt_ts:
+            try:
+                submitted_dt = datetime.fromtimestamp(float(evt_ts), tz=timezone.utc)
+            except Exception:
+                submitted_dt = None
         for _ in range(max_polls):
             time_mod.sleep(0.5)
-            try:
-                exit_order = self.alpaca.get_order(event.order_id)
-                if exit_order.get('status') == 'filled':
-                    fill = exit_order.get('filled_avg_price')
-                    filled_qty = int(exit_order.get('filled_qty', 0) or 0)
+            # S1: stream-first (no network RTT when push has delivered).
+            # fallback_after_s=0 disables the age gate — this is a tight poll
+            # loop (max_polls × 0.5s = 1-5s total) where we NEED REST on every
+            # stream miss, not a wait for the default 5s gate.
+            exit_order = self._get_order_hybrid(
+                event.order_id, submitted_at=submitted_dt, fallback_after_s=0.0
+            )
+            if exit_order is None:
+                continue
+            if exit_order.get('status') == 'filled':
+                fill = exit_order.get('filled_avg_price')
+                filled_qty = int(exit_order.get('filled_qty', 0) or 0)
 
-                    if fill is not None:
-                        # Check for partial fill
-                        if filled_qty > 0 and filled_qty < event.shares:
-                            remaining = event.shares - filled_qty
-                            logger.error(
-                                f"{event.symbol}: PARTIAL FILL on exit — "
-                                f"{filled_qty}/{event.shares} filled, "
-                                f"{remaining} shares UNPROTECTED"
-                            )
-                            blended = self._handle_exit_partial_fill(
-                                event.symbol, fill, filled_qty,
-                                event.shares, remaining
-                            )
-                            event.filled_qty = event.shares  # all shares now closed
-                            return blended
-                        else:
-                            event.filled_qty = filled_qty or event.shares
-                            logger.info(
-                                f"{event.symbol}: exit filled at ${fill:.2f} "
-                                f"({event.filled_qty}sh, {event.pricing_method})"
-                            )
-                            return fill
-            except Exception:
-                pass
+                if fill is not None:
+                    # Check for partial fill
+                    if filled_qty > 0 and filled_qty < event.shares:
+                        remaining = event.shares - filled_qty
+                        logger.error(
+                            f"{event.symbol}: PARTIAL FILL on exit — "
+                            f"{filled_qty}/{event.shares} filled, "
+                            f"{remaining} shares UNPROTECTED"
+                        )
+                        blended = self._handle_exit_partial_fill(
+                            event.symbol, fill, filled_qty,
+                            event.shares, remaining
+                        )
+                        event.filled_qty = event.shares  # all shares now closed
+                        return blended
+                    else:
+                        event.filled_qty = filled_qty or event.shares
+                        logger.info(
+                            f"{event.symbol}: exit filled at ${fill:.2f} "
+                            f"({event.filled_qty}sh, {event.pricing_method})"
+                        )
+                        return fill
         return None
 
     def _handle_exit_partial_fill(
@@ -1406,31 +1503,36 @@ class TradingEngine:
         try:
             close_result = self.alpaca.close_position(symbol)
             close_id = close_result.get('id', '')
+            close_submitted_at = datetime.now(timezone.utc)
             for _ in range(10):
                 time_mod.sleep(0.5)
-                try:
-                    close_order = self.alpaca.get_order(close_id)
-                    if close_order.get('status') == 'filled':
-                        close_price = float(
-                            close_order.get('filled_avg_price', 0) or 0
-                        )
-                        close_qty = int(
-                            close_order.get('filled_qty', 0) or 0
-                        )
-                        total = first_qty + close_qty
-                        blended = (
-                            (first_fill_price * first_qty + close_price * close_qty)
-                            / total
-                        ) if total > 0 else first_fill_price
-                        logger.info(
-                            f"{symbol}: partial fill resolved — "
-                            f"{first_qty}@${first_fill_price:.2f} + "
-                            f"{close_qty}@${close_price:.2f} = "
-                            f"${blended:.2f} blended"
-                        )
-                        return blended
-                except Exception:
-                    pass
+                # S1: hybrid — stream-first, REST on every miss.
+                # fallback_after_s=0 disables the default age gate (this is a
+                # 5-second tight loop where stream-miss must go straight to REST).
+                close_order = self._get_order_hybrid(
+                    close_id, submitted_at=close_submitted_at, fallback_after_s=0.0
+                )
+                if close_order is None:
+                    continue
+                if close_order.get('status') == 'filled':
+                    close_price = float(
+                        close_order.get('filled_avg_price', 0) or 0
+                    )
+                    close_qty = int(
+                        close_order.get('filled_qty', 0) or 0
+                    )
+                    total = first_qty + close_qty
+                    blended = (
+                        (first_fill_price * first_qty + close_price * close_qty)
+                        / total
+                    ) if total > 0 else first_fill_price
+                    logger.info(
+                        f"{symbol}: partial fill resolved — "
+                        f"{first_qty}@${first_fill_price:.2f} + "
+                        f"{close_qty}@${close_price:.2f} = "
+                        f"${blended:.2f} blended"
+                    )
+                    return blended
 
             logger.error(
                 f"{symbol}: emergency close fill unknown — "
@@ -1470,50 +1572,61 @@ class TradingEngine:
         except Exception:
             pass  # 422 = already filled/cancelled
 
-        # Check if it filled (fully or partially) during cancel race
-        try:
-            order = self.alpaca.get_order(event.order_id)
-            if order.get('status') == 'filled':
-                actual_fill = order.get('filled_avg_price')
-                filled_qty = int(order.get('filled_qty', 0) or 0)
-                if actual_fill:
-                    # Check for partial fill during cancel
-                    if filled_qty > 0 and filled_qty < event.shares:
-                        remaining = event.shares - filled_qty
-                        logger.warning(
-                            f"{symbol}: partial fill during cancel — "
-                            f"{filled_qty}/{event.shares}, emergency closing {remaining}"
-                        )
-                        actual_fill = self._handle_exit_partial_fill(
-                            symbol, actual_fill, filled_qty,
-                            event.shares, remaining
-                        )
-                    event.filled_qty = event.shares  # all closed now
-                    logger.info(
-                        f"{symbol}: limit order filled during cancel — "
-                        f"${actual_fill:.2f}"
+        # Check if it filled (fully or partially) during cancel race.
+        # S1: hybrid is ideal here — push-delivered status ends the race cleanly.
+        evt_ts = getattr(event, 'submitted_at', 0.0)
+        evt_submitted_dt: Optional[datetime] = None
+        if evt_ts:
+            try:
+                evt_submitted_dt = datetime.fromtimestamp(float(evt_ts), tz=timezone.utc)
+            except Exception:
+                evt_submitted_dt = None
+        order = self._get_order_hybrid(event.order_id, submitted_at=evt_submitted_dt)
+        if order is not None and order.get('status') == 'filled':
+            actual_fill = order.get('filled_avg_price')
+            filled_qty = int(order.get('filled_qty', 0) or 0)
+            if actual_fill:
+                # Check for partial fill during cancel
+                if filled_qty > 0 and filled_qty < event.shares:
+                    remaining = event.shares - filled_qty
+                    logger.warning(
+                        f"{symbol}: partial fill during cancel — "
+                        f"{filled_qty}/{event.shares}, emergency closing {remaining}"
                     )
-        except Exception:
-            pass
+                    actual_fill = self._handle_exit_partial_fill(
+                        symbol, actual_fill, filled_qty,
+                        event.shares, remaining
+                    )
+                event.filled_qty = event.shares  # all closed now
+                logger.info(
+                    f"{symbol}: limit order filled during cancel — "
+                    f"${actual_fill:.2f}"
+                )
 
         if actual_fill is None:
             # Market sell via close_position (closes entire remaining position)
             try:
                 fallback = self.alpaca.close_position(symbol)
                 fallback_id = fallback.get('id', '')
-                # Poll for market fill
+                fallback_submitted_at = datetime.now(timezone.utc)
+                # Poll for market fill (S1: hybrid — stream-first).
+                # fallback_after_s=0 disables age gate for this tight loop —
+                # market fills happen in <1s, we want REST on any stream miss.
                 for _ in range(10):
                     time_mod.sleep(0.5)
-                    try:
-                        fb_order = self.alpaca.get_order(fallback_id)
-                        if fb_order.get('status') == 'filled':
-                            actual_fill = fb_order.get('filled_avg_price')
-                            fb_filled = int(fb_order.get('filled_qty', 0) or 0)
-                            if fb_filled > 0:
-                                event.filled_qty = fb_filled
-                            break
-                    except Exception:
-                        pass
+                    fb_order = self._get_order_hybrid(
+                        fallback_id,
+                        submitted_at=fallback_submitted_at,
+                        fallback_after_s=0.0,
+                    )
+                    if fb_order is None:
+                        continue
+                    if fb_order.get('status') == 'filled':
+                        actual_fill = fb_order.get('filled_avg_price')
+                        fb_filled = int(fb_order.get('filled_qty', 0) or 0)
+                        if fb_filled > 0:
+                            event.filled_qty = fb_filled
+                        break
                 if actual_fill is None:
                     actual_fill = event.exit_price  # last resort
                     logger.error(

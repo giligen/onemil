@@ -3065,3 +3065,227 @@ class TestMacdDeadZoneWithRiskTier:
                 assert last_call.kwargs.get('risk_multiplier', last_call.args[1] if len(last_call.args) > 1 else 1.0) == 2.0
             finally:
                 db.close()
+
+
+class TestGetOrderHybrid:
+    """S1: Stream-first, REST-fallback order-status helper."""
+
+    def _make_engine(self, order_stream=None, alpaca=None):
+        alpaca = alpaca or MagicMock(spec=AlpacaClient)
+        db = MagicMock(spec=Database)
+        detector = MagicMock(spec=BullFlagDetector)
+        planner = MagicMock(spec=TradePlanner)
+        executor = MagicMock(spec=OrderExecutor)
+        pm = MagicMock(spec=PositionManager)
+        return TradingEngine(
+            alpaca_client=alpaca, db=db,
+            detector=detector, planner=planner,
+            executor=executor, position_manager=pm,
+            order_stream=order_stream,
+        )
+
+    def test_stream_hit_short_circuits_rest(self):
+        """When the stream has the order, REST is not called."""
+        stream = MagicMock()
+        stream.get_status.return_value = {
+            'id': 'abc', 'status': 'filled',
+            'filled_avg_price': 10.0, 'filled_qty': 100,
+        }
+        alpaca = MagicMock(spec=AlpacaClient)
+        engine = self._make_engine(order_stream=stream, alpaca=alpaca)
+
+        result = engine._get_order_hybrid('abc')
+        assert result['status'] == 'filled'
+        alpaca.get_order.assert_not_called()
+
+    def test_stream_miss_falls_back_to_rest_when_aged(self):
+        """Cache miss + order_submitted_at older than 5s → REST fires."""
+        stream = MagicMock()
+        stream.get_status.return_value = None
+        alpaca = MagicMock(spec=AlpacaClient)
+        alpaca.get_order.return_value = {'id': 'x', 'status': 'filled'}
+        engine = self._make_engine(order_stream=stream, alpaca=alpaca)
+
+        old_submit = datetime.now(timezone.utc) - timedelta(seconds=10)
+        result = engine._get_order_hybrid('x', submitted_at=old_submit)
+        assert result['status'] == 'filled'
+        alpaca.get_order.assert_called_once_with('x')
+
+    def test_stream_miss_too_fresh_returns_none(self):
+        """Cache miss + order<5s old → None (caller retries next tick)."""
+        stream = MagicMock()
+        stream.get_status.return_value = None
+        alpaca = MagicMock(spec=AlpacaClient)
+        engine = self._make_engine(order_stream=stream, alpaca=alpaca)
+
+        fresh_submit = datetime.now(timezone.utc) - timedelta(seconds=1)
+        result = engine._get_order_hybrid('x', submitted_at=fresh_submit)
+        assert result is None
+        alpaca.get_order.assert_not_called()
+
+    def test_no_stream_uses_rest_always(self):
+        """order_stream=None → REST is always the path (legacy behavior)."""
+        alpaca = MagicMock(spec=AlpacaClient)
+        alpaca.get_order.return_value = {'id': 'y', 'status': 'filled'}
+        engine = self._make_engine(order_stream=None, alpaca=alpaca)
+
+        result = engine._get_order_hybrid('y')
+        assert result['status'] == 'filled'
+        alpaca.get_order.assert_called_once_with('y')
+
+    def test_stream_exception_falls_through_to_rest(self):
+        """Stream raising doesn't break the hybrid — falls to REST."""
+        stream = MagicMock()
+        stream.get_status.side_effect = RuntimeError("boom")
+        alpaca = MagicMock(spec=AlpacaClient)
+        alpaca.get_order.return_value = {'id': 'z', 'status': 'filled'}
+        engine = self._make_engine(order_stream=stream, alpaca=alpaca)
+
+        result = engine._get_order_hybrid('z')
+        assert result['status'] == 'filled'
+        alpaca.get_order.assert_called_once_with('z')
+
+    def test_rest_exception_returns_none_no_raise(self):
+        """REST failure logs warning but doesn't raise; caller sees None."""
+        alpaca = MagicMock(spec=AlpacaClient)
+        alpaca.get_order.side_effect = RuntimeError("api down")
+        engine = self._make_engine(order_stream=None, alpaca=alpaca)
+
+        result = engine._get_order_hybrid('w')
+        assert result is None
+
+    def test_fallback_after_s_zero_disables_age_gate(self):
+        """fallback_after_s=0 means stream miss ALWAYS falls to REST, even
+        for very fresh orders. Used by the tight poll loops in _try_get_fill,
+        _handle_exit_partial_fill, _manage_pending_orders retry, and
+        _cancel_and_market_sell — each runs at 0.5s cadence where we can't
+        tolerate a 5-second wait on stream misses.
+        """
+        stream = MagicMock()
+        stream.get_status.return_value = None  # miss
+        alpaca = MagicMock(spec=AlpacaClient)
+        alpaca.get_order.return_value = {'id': 'f', 'status': 'filled'}
+        engine = self._make_engine(order_stream=stream, alpaca=alpaca)
+
+        # Very fresh order — default gate would return None without REST
+        fresh = datetime.now(timezone.utc) - timedelta(milliseconds=100)
+        result = engine._get_order_hybrid('f', submitted_at=fresh, fallback_after_s=0.0)
+        assert result['status'] == 'filled'
+        alpaca.get_order.assert_called_once_with('f')
+
+
+class TestS1CallSiteIntegration:
+    """S1: verify the hybrid is wired correctly at the migrated call sites.
+
+    These tests are integration-flavour — they construct a near-real engine,
+    invoke the migrated method directly with both stream-hit and stream-miss
+    scenarios, and assert the correct downstream effect (fill captured,
+    REST not called, notifier fired, etc.).
+    """
+
+    def _make_engine(self, order_stream=None, alpaca=None, notifier=None):
+        alpaca = alpaca or MagicMock(spec=AlpacaClient)
+        db = MagicMock(spec=Database)
+        detector = MagicMock(spec=BullFlagDetector)
+        planner = MagicMock(spec=TradePlanner)
+        executor = MagicMock(spec=OrderExecutor)
+        pm = MagicMock(spec=PositionManager)
+        return TradingEngine(
+            alpaca_client=alpaca, db=db,
+            detector=detector, planner=planner,
+            executor=executor, position_manager=pm,
+            order_stream=order_stream, notifier=notifier,
+        )
+
+    # -------- _try_get_fill --------
+
+    @patch('trading.trading_engine.time_mod.sleep', new=lambda *_: None)
+    def test_try_get_fill_stream_hit_no_rest(self):
+        """Stream delivers 'filled' → _try_get_fill returns fill, REST untouched."""
+        from types import SimpleNamespace
+        import time
+        stream = MagicMock()
+        stream.get_status.return_value = {
+            'id': 'exit-1', 'status': 'filled',
+            'filled_avg_price': 45.50, 'filled_qty': 100,
+        }
+        alpaca = MagicMock(spec=AlpacaClient)
+        alpaca.get_order.side_effect = AssertionError("REST must not be called on stream hit")
+        engine = self._make_engine(order_stream=stream, alpaca=alpaca)
+
+        event = SimpleNamespace(
+            order_id='exit-1', shares=100,
+            submitted_at=time.time() - 10.0,  # 10s ago
+            filled_qty=0, symbol='AAPL', pricing_method='test',
+        )
+        fill = engine._try_get_fill(event, max_polls=1)
+        assert fill == 45.50
+        assert event.filled_qty == 100
+        alpaca.get_order.assert_not_called()
+
+    @patch('trading.trading_engine.time_mod.sleep', new=lambda *_: None)
+    def test_try_get_fill_fresh_stream_miss_hits_rest_via_zero_gate(self):
+        """Fresh order + stream miss: age-gate fix means REST fires on the
+        very first poll iteration (fallback_after_s=0 on this call site)."""
+        from types import SimpleNamespace
+        import time
+        stream = MagicMock()
+        stream.get_status.return_value = None  # stream miss
+        alpaca = MagicMock(spec=AlpacaClient)
+        alpaca.get_order.return_value = {
+            'id': 'exit-fresh', 'status': 'filled',
+            'filled_avg_price': 42.0, 'filled_qty': 100,
+        }
+        engine = self._make_engine(order_stream=stream, alpaca=alpaca)
+
+        event = SimpleNamespace(
+            order_id='exit-fresh', shares=100,
+            submitted_at=time.time() - 0.5,  # 500ms ago — would trigger default gate
+            filled_qty=0, symbol='AAPL', pricing_method='test',
+        )
+        fill = engine._try_get_fill(event, max_polls=1)
+        assert fill == 42.0
+        # REST was called despite fresh age because fallback_after_s=0 disables gate
+        alpaca.get_order.assert_called_once()
+
+    # -------- _manage_pending_orders aged-notify guard --------
+
+    def test_manage_pending_orders_fresh_order_no_notify(self):
+        """Fresh pending order + stream miss + REST would fail → notify NOT fired
+        (age gate keeps us from trying REST at all for orders <5s old)."""
+        stream = MagicMock()
+        stream.get_status.return_value = None
+        alpaca = MagicMock(spec=AlpacaClient)
+        # If REST were called this would raise, but age gate prevents the call
+        alpaca.get_order.side_effect = AssertionError("REST should be gated on fresh order")
+        notifier = MagicMock()
+        engine = self._make_engine(order_stream=stream, alpaca=alpaca, notifier=notifier)
+
+        engine._pending_orders['AAPL'] = {
+            'order_id': 'p1',
+            'placed_at': datetime.now(timezone.utc) - timedelta(seconds=2),
+            'plan': MagicMock(),
+            'setup': MagicMock(),
+        }
+        engine._manage_pending_orders()
+        notifier.notify_error.assert_not_called()
+
+    def test_manage_pending_orders_aged_both_empty_notifies(self):
+        """Aged pending order (>10s) + stream miss + REST failure → aged-notify fires."""
+        stream = MagicMock()
+        stream.get_status.return_value = None
+        alpaca = MagicMock(spec=AlpacaClient)
+        alpaca.get_order.side_effect = RuntimeError("api down")
+        notifier = MagicMock()
+        engine = self._make_engine(order_stream=stream, alpaca=alpaca, notifier=notifier)
+
+        engine._pending_orders['AAPL'] = {
+            'order_id': 'p1',
+            'placed_at': datetime.now(timezone.utc) - timedelta(seconds=15),
+            'plan': MagicMock(),
+            'setup': MagicMock(),
+        }
+        engine._manage_pending_orders()
+        notifier.notify_error.assert_called_once()
+        msg = notifier.notify_error.call_args[0][0]
+        assert 'unavailable' in msg.lower()

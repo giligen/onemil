@@ -185,7 +185,7 @@ def _create_stop_monitor(config, alpaca, notifier=None):
     return stop_monitor
 
 
-def _create_trading_engine(config, alpaca, db, notifier=None, stop_monitor=None) -> TradingEngine:
+def _create_trading_engine(config, alpaca, db, notifier=None, stop_monitor=None, order_stream=None) -> TradingEngine:
     """Create the trading engine with all components wired up."""
     from trading.market_regime import MarketRegimeFilter
 
@@ -255,6 +255,7 @@ def _create_trading_engine(config, alpaca, db, notifier=None, stop_monitor=None)
         market_regime=market_regime,
         stop_monitor=stop_monitor,
         safety_net_sl_pct=config.safety_net_sl_pct,
+        order_stream=order_stream,
     )
 
     # Load SPY data immediately so regime is ready if service starts mid-day
@@ -326,20 +327,10 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
     if trade:
         stop_monitor = _create_stop_monitor(config, alpaca, notifier)
 
-    # Bull flag engine (optional)
-    trading_engine = None
-    if trade and enable_flag:
-        trading_engine = _create_trading_engine(config, alpaca, db, notifier=notifier,
-                                                 stop_monitor=stop_monitor)
-        trading_engine.enabled = True
-        trading_engine.news_provider = news_provider  # For news re-check at trade time
-        # Register real-time bar handler (multi-consumer since Step 1) for instant pattern detection
-        if stop_monitor and not stop_monitor.polling_mode:
-            stop_monitor.register_bar_handler('bull_flag', trading_engine._on_bar_close)
-            logger.info("Real-time bar stream → instant pattern detection ENABLED")
-        logger.info(f"Bull Flag strategy ENABLED")
-
-    # T3.1: shared OrderStreamWatcher — one TradingStream for both strategies
+    # T3.1 / S1: shared OrderStreamWatcher — one TradingStream for both strategies.
+    # MUST be created BEFORE trading_engine so the bull flag engine can consume
+    # push-delivered order status via _get_order_hybrid (replaces REST polling
+    # at 8 hot-path fill-detection sites).
     order_stream = None
     if trade and stop_monitor is not None:
         try:
@@ -355,6 +346,20 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
         except Exception as e:
             logger.warning(f"OrderStreamWatcher failed to start (fallback to REST polling): {e}")
             order_stream = None
+
+    # Bull flag engine (optional)
+    trading_engine = None
+    if trade and enable_flag:
+        trading_engine = _create_trading_engine(config, alpaca, db, notifier=notifier,
+                                                 stop_monitor=stop_monitor,
+                                                 order_stream=order_stream)
+        trading_engine.enabled = True
+        trading_engine.news_provider = news_provider  # For news re-check at trade time
+        # Register real-time bar handler (multi-consumer since Step 1) for instant pattern detection
+        if stop_monitor and not stop_monitor.polling_mode:
+            stop_monitor.register_bar_handler('bull_flag', trading_engine._on_bar_close)
+            logger.info("Real-time bar stream → instant pattern detection ENABLED")
+        logger.info(f"Bull Flag strategy ENABLED")
 
     # MACD wave engine (optional)
     macd_engine = None
