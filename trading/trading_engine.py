@@ -1154,15 +1154,23 @@ class TradingEngine:
                         }
                         continue
 
-                # Phase 3: Gap-fill TARGET adjustment only.
+                # Phase 3: Gap-fill TARGET adjustment only — BRACKET orders only.
                 # Stop stays at the original technical level (flag low region).
                 # Moving stop above the technical level puts it in no-man's land
                 # where normal price noise triggers it. Dollar risk increases
                 # but the stop is at a price that has structural meaning.
                 # When trailing stop is enabled, skip TP adjustment — trail handles exits.
+                # Simple (non-bracket) orders have no TP leg; gap-fill adjustment
+                # is a no-op and its leg-identification would fire a spurious
+                # 'No TP leg found → emergency close' — skip entirely. StopMonitor
+                # trail + standalone safety-net SL (submitted below) protect the
+                # position on the downside.
                 setup = pending.get('setup')
                 trail_active = self.trailing_stop_enabled and self.stop_monitor
-                if fill_price and plan and setup and fill_price > setup.breakout_level:
+                is_simple_order = pending.get('order_type') == 'stop_simple'
+                if (not is_simple_order
+                        and fill_price and plan and setup
+                        and fill_price > setup.breakout_level):
                     entry_gap = fill_price - setup.breakout_level
                     actual_risk = round(fill_price - plan.stop_loss_price, 2)
                     adjusted_target = round(fill_price + plan.risk_per_share * plan.risk_reward_ratio, 2)
