@@ -423,6 +423,19 @@ class MACDWaveEngine:
                     snapshots = self.alpaca.get_snapshots(chunk)
                     for sym, snap in snapshots.items():
                         open_price = snap.get('open', 0)
+                        prev_close = snap.get('prev_close', 0)
+                        # Reverse-split detection: >100% jump overnight = corporate
+                        # action (2:1 split or bigger). % move calcs would be meaningless.
+                        if prev_close > 0 and open_price > 0:
+                            jump_ratio = abs(open_price - prev_close) / prev_close
+                            if jump_ratio > 1.0:
+                                self.invalidated.add(sym)
+                                logger.info(
+                                    f"[{self.STRATEGY_NAME}] {sym}: split detected "
+                                    f"(prev_close ${prev_close:.2f} → open ${open_price:.2f}, "
+                                    f"{jump_ratio * 100:.0f}% jump) — invalidating"
+                                )
+                                continue
                         if open_price > 0:
                             self.universe_opens[sym] = open_price
                 except Exception as e:

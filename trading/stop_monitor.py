@@ -141,6 +141,24 @@ class StopMonitor:
     the main thread. WebSocket callbacks run in a daemon thread.
     """
 
+    @staticmethod
+    def _is_race_condition_error(e: Exception) -> bool:
+        """Detect errors from bracket SL winning the race to exit.
+
+        When the broker-side bracket SL fills first, our subsequent sell
+        attempt lands on an already-flat position. Alpaca returns:
+          - 42210000 / "cannot be sold short" — position already flat
+          - 40410000 / "position not found" — close_position on empty
+        These are expected noise after a successful bracket exit,
+        NOT actionable failures — don't page on them.
+        """
+        msg = str(e).lower()
+        return (
+            '42210000' in msg or 'cannot be sold short' in msg or
+            '40410000' in msg or 'position not found' in msg or
+            'no position' in msg
+        )
+
     def __init__(
         self,
         api_key: str,
@@ -1726,6 +1744,19 @@ class StopMonitor:
                             f"StopMonitor: {symbol} SL cancel failed (may be filled): {e}"
                         )
             except Exception as e:
+                # Bracket SL may have won the race — position already flat.
+                # Don't page on this; just clean up and exit.
+                if self._is_race_condition_error(e):
+                    logger.info(
+                        f"StopMonitor: {symbol} position already closed "
+                        f"(bracket SL filled first) — skipping limit sell"
+                    )
+                    with self._watch_lock:
+                        self._watches.pop(symbol, None)
+                    with self._exit_lock:
+                        self._exit_in_progress[symbol] = False
+                    return
+
                 logger.error(
                     f"StopMonitor: {symbol} limit sell failed: {e} — "
                     f"falling back to close_position()"
@@ -1744,10 +1775,19 @@ class StopMonitor:
                         f"order={order_id}"
                     )
                 except Exception as e2:
-                    logger.error(
-                        f"StopMonitor: {symbol} fallback close also failed: {e2} — "
-                        f"safety-net SL is the last line of defense"
-                    )
+                    # Race condition: bracket closed the position before our
+                    # fallback ran. Log as INFO, not ERROR — Telegram stays quiet.
+                    if self._is_race_condition_error(e2):
+                        logger.info(
+                            f"StopMonitor: {symbol} bracket SL already closed "
+                            f"position — fallback close_position returned "
+                            f"{e2.__class__.__name__}"
+                        )
+                    else:
+                        logger.error(
+                            f"StopMonitor: {symbol} fallback close also failed: {e2} — "
+                            f"safety-net SL is the last line of defense"
+                        )
                     # Remove watch to prevent infinite retry on every tick
                     # (likely TP already filled — no position to sell)
                     with self._watch_lock:
