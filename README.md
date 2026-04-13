@@ -192,24 +192,36 @@ Falls back to fixed offset (`max($0.03, price × 0.5%)`) if quote fetch fails. 3
 
 Rejects setups where the stop distance (entry - stop_loss) is less than $0.12. These are penny-wide stops on low-priced stocks where the breakout barely triggers the buy-stop then immediately reverses — the stop is within tick noise, not at a meaningful technical level.
 
-### Market Regime Filter
+### Market Regime Filter (Vol-Only Mode)
 
-Blocks or tightens entries when SPY indicates a hostile regime. Four independent signals:
+**Primary block**: SPY 5-day avg daily range > **5.0%** → blocks all entries. Catches extreme regime chaos where momentum breakouts fail.
 
-1. **High volatility + downtrend**: SPY 5-day avg daily range > 1.5% AND close below SMA(50) → **blocks all entries**
-2. **Declining SMA50 (dead-cat-bounce filter)**: SPY SMA(50) 5-day slope < -0.5 → **blocks all entries**. Even when price crosses above a falling SMA50, momentum breakouts fail because the underlying macro trend is still weakening. Threshold -0.5 balances DD reduction (-$20.9K best) with trade opportunity.
-3. **Euphoria filter**: SPY up/down volume ratio > 1.2 AND RSI(14) > 60 → **blocks all entries**. When broad market has bullish volume dominance + overbought RSI, momentum breakouts get crowded — FOMO buyers dump, stops get tagged. Root cause of the 12-loss consecutive streak.
-4. **Thin liquidity (H5 OR filter)**: SPY T-1 volume / SMA20(volume) < 0.70 → **tightens breakout volume requirement** from 1.5x to 2.0x.
+**Validated on 16mo (Jan 2025 – Apr 2026):**
 
-**Lookahead prevention**: All indicators use data strictly *before* trade date. SMA50 slope uses yesterday's value (known before market open). Live system uses `date.today()` at 9:30 AM, so T-1 = yesterday's settled close.
+| Metric | Filter OFF | Filter ON (vol>5%) |
+|--------|-----------|---------------------|
+| Total P&L | $347,276 | **$368,294** (+$21K) |
+| Max DD | $51,889 | **$36,273** (-30%) |
+| Win rate | 42.3% | 43.7% |
+| Red months | 3 | 3 |
+| Days blocked | — | 9 of ~350 (2.5%) |
+
+**Why vol-only (not vol AND downtrend)**: Prior AND logic kept the filter dormant on Feb 2026 (flat SPY but extreme intraday chop) and blocked Mar 2025 winners (SPY down but low vol). Historical chaos happens in BOTH directions — vol alone catches it cleanly.
+
+**Threshold 5.0% specifically**: There's a dead zone between 3% and 5% in SPY 5-day vol (either calm <2% or chaos >5%). Threshold 5.0% activates only during genuine regime breaks (Feb 2026 early-month spike to 18-19%, 1 Apr 2025 day). 14 of 16 months completely untouched.
+
+**Secondary filters** (all independent, all default **disabled**):
+- `sma_slope_filter`: block when SPY SMA(50) slope < -0.5 (dead-cat-bounce catcher)
+- `euphoria_filter`: block when SPY UD ratio > 1.2 AND RSI(14) > 60 (FOMO top)
+- `thin_liquidity_breakout_vol_ratio`: tightens breakout vol to 2.0x on thin SPY days (not a block — just raises the bar)
+
+**Lookahead prevention**: All indicators use data strictly *before* trade date. T-1 close + 5-day vol window ending T-1.
 
 | Config Parameter | Default | Description |
 |-----------------|---------|-------------|
-| `market_regime_enabled` | `true` | Enable/disable regime filter |
-| `market_regime_vol_threshold` | `1.5` | SPY vol threshold (%) |
-| `market_regime_sma_period` | `50` | SMA lookback period |
-| `market_regime_min_spy_volume_ratio` | `0.70` | Min SPY volume ratio (T-1 vol / SMA20) — thin liquidity threshold |
-| `market_regime_thin_liquidity_breakout_vol_ratio` | `2.0` | Min breakout volume ratio on thin liquidity days |
+| `market_regime_enabled` | `true` | Enable filter (vol-only mode) |
+| `market_regime_vol_threshold` | `5.0` | SPY 5d avg range % — blocks when exceeded |
+| `market_regime_sma_period` | `50` | SMA lookback (used by sma_slope_filter only) |
 | `max_trades_per_day` | `5` | Max entries per day |
 
 ## Strategy 2: MACD Wave

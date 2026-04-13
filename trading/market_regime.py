@@ -428,19 +428,18 @@ class MarketRegimeFilter:
         """
         Check if trading is allowed on trade_date.
 
-        Blocks when BOTH conditions are true:
-        - vol_5d > vol_threshold (high volatility)
-        - T-1 close < SMA(sma_period) (downtrend)
-
-        Note: thin liquidity does NOT block outright — it tightens breakout
-        volume requirements via get_min_breakout_volume_ratio(). This is the
-        H5 OR filter: only block when BOTH market liquidity AND pattern
-        conviction are weak.
+        Blocks when SPY 5-day avg daily range > vol_threshold.
+        Extreme volatility (5%+ range) indicates regime chaos where
+        momentum breakouts fail. Validated on 16mo:
+        - Threshold 5.0%: +$21K P&L, -30% Max DD, 9 trades blocked
+        - Touches only Feb 2026 (chaos) + 1 Apr 2025 day; 14 other months untouched
+        - SMA-below condition removed: trendy down-months (Mar 2025) still had
+          big winners. Only chaos (not direction) kills our setups.
 
         Returns True (trading allowed) when:
         - Filter is disabled
         - Insufficient data (safe default — better to trade than miss)
-        - Either volatility is low OR SPY is above SMA
+        - vol <= threshold
 
         Args:
             trade_date: The date to check.
@@ -455,12 +454,8 @@ class MarketRegimeFilter:
         if vol is None:
             return True
 
-        below = self.is_below_sma(trade_date)
-        if below is None:
-            return True
-
-        # Block only when BOTH: high vol AND downtrend
-        if vol > self.vol_threshold and below:
+        # Block on extreme volatility regardless of direction
+        if vol > self.vol_threshold:
             return False
 
         # SMA slope filter: block when SMA50 is declining (dead-cat-bounce)

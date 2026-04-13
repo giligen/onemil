@@ -118,8 +118,13 @@ class TestMarketRegimeFilter:
 
         assert mrf.is_regime_ok(next_day) is False
 
-    def test_high_vol_above_sma_allowed(self):
-        """High vol but above SMA (uptrend) — trading allowed."""
+    def test_high_vol_above_sma_blocks(self):
+        """Vol-only mode: high vol blocks regardless of SMA direction.
+
+        Prior AND logic allowed high vol if uptrend; new vol-only logic
+        blocks chaos regardless of direction (validated: Feb 2026 flat
+        SPY but extreme vol still crushed our setups).
+        """
         bars = _build_50_sma_bars(base_close=500.0)
         # Make last 5 bars volatile but ABOVE SMA
         for i in range(-5, 0):
@@ -137,7 +142,8 @@ class TestMarketRegimeFilter:
         while next_day.weekday() >= 5:
             next_day += timedelta(days=1)
 
-        assert mrf.is_regime_ok(next_day) is True
+        # Vol-only mode: high vol blocks even above SMA
+        assert mrf.is_regime_ok(next_day) is False
 
     def test_low_vol_below_sma_allowed(self):
         """Below SMA but low volatility (calm downtrend) — trading allowed."""
@@ -337,7 +343,11 @@ class TestSpyVolumeRatio:
     """Tests for thin liquidity filter (SPY volume ratio / H5 OR)."""
 
     def _build_volume_bars(self, n=25, base_volume=100_000_000):
-        """Build 25 bars with constant volume for predictable SMA20."""
+        """Build 25 bars with constant volume for predictable SMA20.
+
+        Daily range kept below vol_threshold (~0.4%) so tests isolate
+        the volume-ratio logic without tripping vol regime block.
+        """
         from datetime import timedelta
         bars = []
         d = date(2025, 1, 1)
@@ -346,7 +356,7 @@ class TestSpyVolumeRatio:
                 d += timedelta(days=1)
             bars.append({
                 'date': d,
-                'open': 500, 'high': 505, 'low': 495, 'close': 500,
+                'open': 500, 'high': 501, 'low': 499, 'close': 500,
                 'volume': base_volume,
             })
             d += timedelta(days=1)
@@ -518,9 +528,12 @@ class TestSpyVolumeRatio:
         assert info['is_thin_liquidity'] is False
 
     def test_volume_ratio_backwards_compat_no_volume(self):
-        """Bars without 'volume' key — volume defaults to 0, not thin."""
+        """Bars without 'volume' key — volume defaults to 0, not thin.
+
+        Uses low vol bars (0.4% range) so vol filter doesn't interfere.
+        """
         bars = _make_ohlc_bars([
-            (date(2025, 3, d), 500, 505, 495, 500) for d in range(3, 28)
+            (date(2025, 3, d), 500, 501, 499, 500) for d in range(3, 28)
             if date(2025, 3, d).weekday() < 5
         ])
         mrf = MarketRegimeFilter(enabled=True, min_spy_volume_ratio=0.70)

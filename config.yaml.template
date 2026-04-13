@@ -118,8 +118,8 @@ trading:
     tier2_multiplier: 1.0
   max_trades_per_day: 5         # 15mo optimal with 10:45 cutoff
   market_regime:
-    enabled: false              # Regime OFF: +$902K vs ON: +$760K. Blocks profitable days for no DD benefit.
-    vol_threshold: 1.5         # 5-day avg daily range % — high volatility signal
+    enabled: true               # Vol-only mode: blocks extreme chaos (SPY vol>5%), dormant 87% of days
+    vol_threshold: 5.0         # 5-day avg daily range % — validated 16mo: +$21K, -30% Max DD
     sma_period: 50             # SPY below SMA(50) — downtrend signal
     min_spy_volume_ratio: 0.70 # SPY T-1 volume / SMA20 — thin liquidity threshold
     thin_liquidity_breakout_vol_ratio: 2.0  # Stricter breakout vol ratio on thin days
