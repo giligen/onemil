@@ -71,10 +71,26 @@ Bull flag momentum pattern on 1-minute bars:
 - **Stop**: Flag low region, min 1% / max 4% risk, min $0.09 stop distance (tick-noise filter)
 - **Target**: 2.5:1 R:R (overridden by trailing stop when enabled)
 - **Position size**: fixed_risk mode, $2,000 risk per trade, max 15,000 shares
-- **Trailing stop**: 1R below highest high, activates at +2R from entry
+- **Trailing stop**: 1R below highest high, activates at +1.5R from entry
 - **Exhaustion exit**: At +3R, sell 50% into strength, tighten trail to 0.5R on remainder
 - **Self-managed stops**: WebSocket tick-by-tick monitoring, spread-based limit sells
 - **Last entry time**: 10:30 ET (10:30-11:00 bucket is breakeven PF 1.01)
+
+#### Trail activation tradeoff (validated Q1 2026)
+
+Current config is **activate_at_r=1.5, trail_r=1.0**. Prior default was 2.0/1.0. Q1 2026 comparison (apples-to-apples, same code, only trail differs):
+
+| Metric | a=2.0 t=1.0 (prior) | a=1.5 t=1.0 (current) |
+|--------|--------------------|-----------------------|
+| Q1 2026 P&L | -$9,919 | -$586 (**+$9,333**) |
+| Win rate | 30.9% | 33.3% |
+| Feb 2026 loss | -$35,484 | -$18,843 (**+$16,641**) |
+| Max DD | $46,846 | $34,759 (**-$12,087**) |
+| Profit factor | 0.92 | 0.99 |
+
+Earlier activation (1.5R) locks in profits on marginal winners that peak between +1.5R and +2.0R then reverse — OPTX on 2026-04-13 peaked at exactly +1.97R ($0.01 below 2.0R trigger) then stopped out. The 1.5R trigger captures that class of trade.
+
+**Tradeoff**: sacrifices some extension on multi-R winners that would run past 2.0R under the old config. Net on Q1 2026 is strongly positive; full 16-month validation pending proper rebuild.
 - **One trade per symbol per day**
 
 ### P&L Layers (execution order)

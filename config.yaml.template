@@ -155,7 +155,7 @@ trading:
   trailing_stop:
     enabled: true                        # ACTIVE — paper testing
     trail_r: 1.0                        # trail distance in R units below high
-    activate_at_r: 2.0                  # activate trail after +2R gain
+    activate_at_r: 1.5                  # activate trail after +1.5R gain (was 2.0)
     tighten_at_r: 0                   # tighten trail after +2.5R (+33% P&L vs no tightening)
     tightened_trail_r: 0.5              # 0.5R trail after 2.5R (was 1R)
   # Exhaustion exit: sell partial into strength on exhaustion signals
