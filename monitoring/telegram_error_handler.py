@@ -26,6 +26,14 @@ class TelegramErrorHandler(logging.Handler):
     (sends every 10th duplicate).
     """
 
+    # Loggers whose ERRORs are external/expected — not actionable bugs.
+    # Universe build hits Yahoo Finance for thousands of symbols; rate limits
+    # and 404s for delisted/class-share tickers are normal noise.
+    NOISY_LOGGERS = {
+        'yfinance',
+        'data_sources.float_provider',
+    }
+
     def __init__(self, bot_token: str, chat_id: str):
         """
         Initialize Telegram error handler.
@@ -51,7 +59,12 @@ class TelegramErrorHandler(logging.Handler):
         Emit a log record by sending it to Telegram.
 
         Called for every ERROR level log message. Deduplicates repeated errors.
+        Skips noisy external-API loggers (yfinance, float_provider).
         """
+        # Filter out noise from external APIs — these are not application bugs
+        for noisy in self.NOISY_LOGGERS:
+            if record.name == noisy or record.name.startswith(noisy + '.'):
+                return
         try:
             message = self._format_error_message(record)
 
