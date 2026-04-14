@@ -274,6 +274,38 @@ class TestConvictionSizingConfig:
         assert any('Conviction sizing: ENABLED' in m for m in msgs), \
             f"Expected 'Conviction sizing: ENABLED' log, got: {msgs}"
 
+    def test_warning_when_cap_is_nonpositive(self, caplog):
+        """max_position_size_usd <= 0 is a footgun — warn at startup."""
+        import logging
+        with caplog.at_level(logging.WARNING, logger='trading.macd_wave_engine'):
+            _make_engine_with_conviction(enabled=True, max_pos_usd=0)
+        msgs = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any('is <=0' in m for m in msgs), \
+            f"Expected zero-cap warning, got: {msgs}"
+
+    def test_warning_when_cap_below_baseline(self, caplog):
+        """max_position_size_usd < position_size would cap baseline below flat."""
+        import logging
+        with caplog.at_level(logging.WARNING, logger='trading.macd_wave_engine'):
+            _make_engine_with_conviction(enabled=True, max_pos_usd=30_000)  # baseline 50K
+        msgs = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any('BELOW baseline position_size' in m for m in msgs), \
+            f"Expected below-baseline warning, got: {msgs}"
+
+    def test_no_warning_when_cap_is_sensible(self, caplog):
+        """Sensible cap (>= baseline) doesn't emit warnings."""
+        import logging
+        with caplog.at_level(logging.WARNING, logger='trading.macd_wave_engine'):
+            _make_engine_with_conviction(enabled=True, max_pos_usd=90_000)
+        # Filter to only the warnings from our conviction config code (others
+        # may come from db/alpaca mock infrastructure — ignore those).
+        cap_warnings = [
+            r.message for r in caplog.records
+            if r.levelno >= logging.WARNING
+            and ('is <=0' in r.message or 'BELOW baseline' in r.message)
+        ]
+        assert cap_warnings == [], f"Unexpected cap warnings: {cap_warnings}"
+
 
 class TestConvictionShareScaling:
     """The core contract — shares scale by conv_mult when enabled."""
@@ -417,3 +449,30 @@ class TestConvictionTelemetry:
         msgs = [r.message for r in caplog.records]
         assert any('CONVICTION 1.80' in m for m in msgs), f"Expected CONVICTION log, got: {msgs}"
         assert any('cross=+0.4 vol=+0.4' in m for m in msgs)
+
+    def test_telegram_shows_effective_position_not_flat(self):
+        """Telegram notifier must receive the SCALED position $, not flat.
+
+        Otherwise users see flat $ in telegram while DB/broker have scaled.
+        """
+        e = _make_engine_with_conviction(enabled=True)
+        e.notifier = MagicMock()
+        self._run_entry(e, cross_time=1, vol_at_cross=10_000)  # conv=1.8 → $90K
+        # Telegram notifier was called
+        assert e.notifier.send_message_sync.called
+        msg = e.notifier.send_message_sync.call_args.args[0]
+        # Must show $90K (scaled), not $50K (flat)
+        assert '$90,000' in msg, f"Expected $90,000 in telegram msg, got: {msg}"
+        assert '$50,000' not in msg, f"Should NOT show flat $50K when sizing enabled, got: {msg}"
+        # Telegram also annotates with conv when sizing is on
+        assert 'conv 1.80' in msg
+
+    def test_telegram_shows_flat_when_sizing_disabled(self):
+        """With sizing disabled, telegram shows flat $50K — no conv annotation."""
+        e = _make_engine_with_conviction(enabled=False)
+        e.notifier = MagicMock()
+        # Top-tier setup but sizing off → telegram shows flat baseline
+        self._run_entry(e, cross_time=1, vol_at_cross=10_000)
+        msg = e.notifier.send_message_sync.call_args.args[0]
+        assert '$50,000' in msg
+        assert 'conv' not in msg, "Should not annotate conv when sizing disabled"

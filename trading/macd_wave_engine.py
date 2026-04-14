@@ -140,6 +140,21 @@ class MACDWaveEngine:
         conv_cfg = sizing.get('conviction_sizing', {})
         self.conviction_sizing_enabled = bool(conv_cfg.get('enabled', False))
         self.max_position_size_usd = float(conv_cfg.get('max_position_size_usd', 90_000))
+        # Sanity checks — invalid caps silently break trading. Surface at startup.
+        if self.max_position_size_usd <= 0:
+            logger.warning(
+                f"[{self.STRATEGY_NAME}] conviction_sizing.max_position_size_usd="
+                f"{self.max_position_size_usd} is <=0 — all conviction-sized trades "
+                f"will be rejected (shares=0). Set to a positive value or disable sizing."
+            )
+        elif (self.conviction_sizing_enabled
+              and self.max_position_size_usd < self.position_size):
+            logger.warning(
+                f"[{self.STRATEGY_NAME}] conviction_sizing.max_position_size_usd="
+                f"${self.max_position_size_usd:,.0f} is BELOW baseline position_size="
+                f"${self.position_size:,.0f} — baseline (conv=1.0) trades will be "
+                f"capped below flat sizing. Raise the cap or lower position_size."
+            )
         if self.conviction_sizing_enabled:
             logger.info(
                 f"[{self.STRATEGY_NAME}] Conviction sizing: ENABLED "
@@ -900,8 +915,11 @@ class MACDWaveEngine:
             if self.dry_run:
                 logger.info(
                     f"[{self.STRATEGY_NAME}] DRY RUN: would BUY {symbol} "
-                    f"{shares}sh @ ${limit_price:.2f}, stop ${hard_stop:.2f}, "
-                    f"MACD hist {macd_hist_pct:.2f}%"
+                    f"{shares}sh @ ${limit_price:.2f} (${effective_position:,.0f}), "
+                    f"stop ${hard_stop:.2f}, MACD hist {macd_hist_pct:.2f}%, "
+                    f"CONVICTION {conv_mult:.2f} "
+                    f"(cross=+{conv_brkdn['cross_speed']:.1f} "
+                    f"vol=+{conv_brkdn['vol_at_cross']:.1f})"
                 )
                 self.invalidated.add(symbol)
                 return False
@@ -1033,9 +1051,17 @@ class MACDWaveEngine:
                 f"pos=${effective_position:,.0f})"
             )
             if self.notifier:
+                # Telegram reflects the ACTUAL position deployed (scaled by conv_mult
+                # when sizing is enabled), not the flat baseline. Otherwise users
+                # see flat $ in telegram while DB/broker show scaled.
+                conv_note = (
+                    f" · conv {conv_mult:.2f}" if self.conviction_sizing_enabled
+                    else ""
+                )
                 self.notifier.send_message_sync(
                     f"[MACD Wave] 📈 BUY {symbol} ${limit_price:.2f} × {shares}sh "
-                    f"(${self.position_size:,.0f}) — MACD hist {macd_hist_pct:.2f}%, "
+                    f"(${effective_position:,.0f}{conv_note}) — "
+                    f"MACD hist {macd_hist_pct:.2f}%, "
                     f"hard stop ${hard_stop:.2f}, trail {self.trail_stop_pct*100:.1f}%"
                 )
 
