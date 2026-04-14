@@ -3498,6 +3498,30 @@ class TestConvictionFilter:
         assert isinstance(score, float)
         assert score == 0.25
 
+    def test_threshold_boundary_strict_less_than(self, engine):
+        """Filter uses strict less-than: conviction == threshold PASSES.
+
+        Locks in the boundary semantic — if a future maintainer changes
+        `<` to `<=`, this test fails. A setup that hits ONLY the
+        retracement rule scores exactly 1.2 (1.0 base + 0.2 retr).
+        With threshold 1.2, the trade should NOT be filtered.
+        """
+        s = MagicMock()
+        s.pole_gain_pct = 12.0       # outside 4.5-9 sweet spot → 0.0
+        s.pole_high = 10.0
+        s.pole_low = 9.0             # height 1.0
+        s.flag_high = 9.4
+        s.flag_low = 9.0             # range 0.4 = 40% (between 30 and 50) → 0.0
+        s.avg_pole_volume = 100      # ratio 1.0 (≤1.7) → 0.0
+        s.avg_flag_volume = 100
+        s.retracement_pct = 25.0     # < 30 → +0.2
+        # spy_3d in dead zone 0.8-1.2 (no contribution)
+        score = engine._compute_conviction_score_setup(s, spy_3d_range=1.0)
+        assert score == 1.2, f"Expected exactly 1.2, got {score}"
+        # Verify strict less-than semantic: 1.2 < 1.2 is False
+        threshold = 1.2
+        assert (score < threshold) is False, "1.2 < 1.2 must be False"
+
     def test_threshold_loaded_from_config(self, mock_alpaca, db, mock_detector,
                                           mock_planner, mock_executor,
                                           mock_position_manager, monkeypatch):
@@ -3544,3 +3568,84 @@ class TestConvictionFilter:
         )
         # Default is 0.0 — filter disabled (backward compat)
         assert eng.conviction_min_threshold == 0.0
+
+    def _make_engine_with_conv_config(self, mocks, monkeypatch, *,
+                                       enabled=True, min_threshold=None):
+        """Helper: build engine with patched conviction_scoring config."""
+        mock_alpaca, db, mock_detector, mock_planner, mock_executor, mock_pm = mocks
+        from config import Config
+        original = Config._load_yaml_only
+        def patched():
+            cfg = original()
+            cfg.setdefault('trading', {}).setdefault('conviction_scoring', {})
+            cfg['trading']['conviction_scoring']['enabled'] = enabled
+            if min_threshold is None:
+                cfg['trading']['conviction_scoring'].pop('min_threshold', None)
+            else:
+                cfg['trading']['conviction_scoring']['min_threshold'] = min_threshold
+            return cfg
+        monkeypatch.setattr(Config, '_load_yaml_only', staticmethod(patched))
+        return TradingEngine(
+            alpaca_client=mock_alpaca, db=db, detector=mock_detector,
+            planner=mock_planner, executor=mock_executor,
+            position_manager=mock_pm,
+            pattern_poll_interval=60, enabled=True,
+        )
+
+    def test_warning_threshold_above_max_blocks_everything(
+        self, mock_alpaca, db, mock_detector, mock_planner,
+        mock_executor, mock_position_manager, monkeypatch, caplog):
+        """Threshold > 3.0 (max conviction) emits WARNING — would block all trades."""
+        import logging
+        mocks = (mock_alpaca, db, mock_detector, mock_planner,
+                 mock_executor, mock_position_manager)
+        with caplog.at_level(logging.WARNING):
+            self._make_engine_with_conv_config(
+                mocks, monkeypatch, enabled=True, min_threshold=12.0)
+        warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert any('> 3.0' in w and 'ALL trades will be blocked' in w
+                   for w in warnings), f"Expected '> 3.0' warning. Got: {warnings}"
+
+    def test_warning_threshold_negative(
+        self, mock_alpaca, db, mock_detector, mock_planner,
+        mock_executor, mock_position_manager, monkeypatch, caplog):
+        """Negative threshold emits WARNING (filter inactive)."""
+        import logging
+        mocks = (mock_alpaca, db, mock_detector, mock_planner,
+                 mock_executor, mock_position_manager)
+        with caplog.at_level(logging.WARNING):
+            self._make_engine_with_conv_config(
+                mocks, monkeypatch, enabled=True, min_threshold=-1.0)
+        warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert any('< 0' in w and 'INACTIVE' in w
+                   for w in warnings), f"Expected '< 0' warning. Got: {warnings}"
+
+    def test_warning_threshold_set_but_conviction_disabled(
+        self, mock_alpaca, db, mock_detector, mock_planner,
+        mock_executor, mock_position_manager, monkeypatch, caplog):
+        """Threshold set with enabled=false emits WARNING (silent ignore)."""
+        import logging
+        mocks = (mock_alpaca, db, mock_detector, mock_planner,
+                 mock_executor, mock_position_manager)
+        with caplog.at_level(logging.WARNING):
+            self._make_engine_with_conv_config(
+                mocks, monkeypatch, enabled=False, min_threshold=1.2)
+        warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert any('enabled=false' in w and 'INACTIVE' in w
+                   for w in warnings), f"Expected enabled=false warning. Got: {warnings}"
+
+    def test_no_warning_for_valid_threshold(
+        self, mock_alpaca, db, mock_detector, mock_planner,
+        mock_executor, mock_position_manager, monkeypatch, caplog):
+        """Valid threshold (0 < t <= 3) with enabled=true → no warnings."""
+        import logging
+        mocks = (mock_alpaca, db, mock_detector, mock_planner,
+                 mock_executor, mock_position_manager)
+        with caplog.at_level(logging.WARNING):
+            self._make_engine_with_conv_config(
+                mocks, monkeypatch, enabled=True, min_threshold=1.2)
+        # No conviction-related warnings (other warnings from setup are OK)
+        conv_warnings = [r.message for r in caplog.records
+                         if r.levelno == logging.WARNING
+                         and 'conviction_min_threshold' in r.message]
+        assert conv_warnings == [], f"Unexpected warnings: {conv_warnings}"

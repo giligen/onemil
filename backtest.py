@@ -980,6 +980,23 @@ class BacktestRunner:
         # Conviction filter (skip trades below threshold). 0.0 = disabled.
         # Mirrors trading_engine.py for BT/PROD parity.
         self.conviction_min_threshold = float(conv_cfg.get("min_threshold", 0.0))
+        # Sanity-check threshold at startup (parity with trading_engine.py)
+        if self.conviction_min_threshold > 3.0:
+            logger.warning(
+                f"conviction_min_threshold={self.conviction_min_threshold:.2f} > 3.0 "
+                f"(max possible conviction score). ALL trades will be blocked. "
+                f"Did you mean {self.conviction_min_threshold/10:.2f}?"
+            )
+        elif self.conviction_min_threshold < 0:
+            logger.warning(
+                f"conviction_min_threshold={self.conviction_min_threshold:.2f} < 0 "
+                f"— filter is INACTIVE (threshold must be > 0)."
+            )
+        if not self.conviction_enabled and self.conviction_min_threshold > 0:
+            logger.warning(
+                f"conviction_min_threshold={self.conviction_min_threshold:.2f} set but "
+                f"conviction_scoring.enabled=false — filter is INACTIVE."
+            )
         if self.conviction_enabled:
             msg = "Conviction scoring: ENABLED"
             if self.conviction_min_threshold > 0:

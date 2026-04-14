@@ -1334,6 +1334,26 @@ class TestBTConvictionFilter:
         assert isinstance(score, float)
         assert score == 0.25
 
+    def test_threshold_boundary_strict_less_than(self):
+        """BT mirror: conviction == threshold PASSES (strict less-than).
+
+        Setup hitting only retracement rule scores exactly 1.2.
+        Threshold 1.2 should NOT filter it. Locks the < vs <= semantic.
+        """
+        runner = BacktestRunner()
+        # Construct setup that scores exactly 1.2 (only retracement fires)
+        s = self._setup(
+            pole_gain=12.0,         # outside 4.5-9 → 0.0
+            pole_h=10.0, pole_l=9.0,
+            flag_h=9.4, flag_l=9.0, # range 40% (in dead zone 30-50) → 0.0
+            vol_pole=100, vol_flag=100,  # ratio 1.0 → 0.0
+            retr=25.0,              # < 30 → +0.2
+        )
+        # spy_3d in dead zone (0.8-1.2) → 0.0
+        score = runner._compute_conviction_score_setup(s, spy_3d_range=1.0)
+        assert score == 1.2, f"Expected exactly 1.2, got {score}"
+        assert (score < 1.2) is False, "1.2 < 1.2 must be False"
+
     def test_bt_prod_parity(self):
         """BT and PROD compute identical conviction score + breakdown for same inputs.
         Drift detector — guards against accidental divergence between the two

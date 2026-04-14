@@ -209,6 +209,24 @@ class TradingEngine:
         # 1.2 = walk-forward validated (+$10-18K/period OOS).
         # COUPLED to current 5 conviction rules — re-validate if rules change.
         self.conviction_min_threshold = float(conv_cfg.get("min_threshold", 0.0))
+        # Sanity-check threshold at startup — catch misconfig loudly,
+        # not at first trade tomorrow morning.
+        if self.conviction_min_threshold > 3.0:
+            logger.warning(
+                f"conviction_min_threshold={self.conviction_min_threshold:.2f} > 3.0 "
+                f"(max possible conviction score). ALL trades will be blocked. "
+                f"Did you mean {self.conviction_min_threshold/10:.2f}?"
+            )
+        elif self.conviction_min_threshold < 0:
+            logger.warning(
+                f"conviction_min_threshold={self.conviction_min_threshold:.2f} < 0 "
+                f"— filter is INACTIVE (threshold must be > 0)."
+            )
+        if not self.conviction_enabled and self.conviction_min_threshold > 0:
+            logger.warning(
+                f"conviction_min_threshold={self.conviction_min_threshold:.2f} set but "
+                f"conviction_scoring.enabled=false — filter is INACTIVE."
+            )
         if self.conviction_enabled:
             msg = "Conviction scoring: ENABLED (matches backtest V4 model)"
             if self.conviction_min_threshold > 0:
