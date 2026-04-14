@@ -58,6 +58,17 @@ def load_config(path: str = CONFIG_PATH) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Conviction scoring — shared with PROD via trading/macd_conviction.py
+# ---------------------------------------------------------------------------
+# BT-PROD parity is enforced by a single implementation in
+# trading/macd_conviction.py. See that module for the V4 formula, research
+# provenance (step 1 bucket analysis + step 2 walk-forward study), and
+# thresholds. Both backtest and `trading/macd_wave_engine.py` import from it.
+
+from trading.macd_conviction import compute_conviction_score  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
 # Data types
 # ---------------------------------------------------------------------------
 
@@ -97,6 +108,7 @@ class Trade:
     vol_at_cross: int = 0
     macd_hist_pct: float = 0.0
     w1_pnl: float = 0.0
+    conv_mult: float = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +360,8 @@ def generate_signals(
         hard_stop_pct = entry_filters['hard_stop_override']
     entry_slippage = entry_filters.get('entry_pct', 0.005)
     exit_slippage = entry_filters.get('exit_pct', 0.002)
+    # Conviction-based sizing (opt-in; default off to preserve legacy behavior)
+    conviction_sizing_enabled = bool(entry_filters.get('conviction_sizing', False))
 
     # Entry filter values
     cross_time_max = entry_filters.get('cross_time_max_min', 0)
@@ -552,6 +566,13 @@ def generate_signals(
                 partial_taken = False
                 partial_pnl_dollar = 0.0
                 partial_shares_sold = 0
+                # Conviction-based sizing (OOS-validated in step 1 research)
+                conv_mult, _ = compute_conviction_score(cross_time_min, vol_at_cross)
+                if conviction_sizing_enabled:
+                    effective_position = position_size * conv_mult
+                else:
+                    effective_position = position_size
+                entry_shares = int(effective_position / entry_price) if entry_price > 0 else 0
         else:
             # Force close at 15:45 ET (matches production)
             # Bar index 0 = 9:30 ET, so index 375 = 15:45 ET
@@ -560,7 +581,7 @@ def generate_signals(
                 exit_price = raw_exit * (1 - exit_slippage)
                 wave += 1
                 pnl_pct = (exit_price - entry_price) / entry_price * 100
-                shares = int(position_size / entry_price) if entry_price > 0 else 0
+                shares = entry_shares
                 # Phase C: blend partial profit with remaining shares
                 remaining_shares = shares - partial_shares_sold
                 pnl_dollar = (exit_price - entry_price) * remaining_shares + partial_pnl_dollar
@@ -574,6 +595,7 @@ def generate_signals(
                         'exit_reason': 'force_close', 'paper': False,
                         'cross_time_min': cross_time_min, 'vol_at_cross': vol_at_cross,
                         'macd_hist_pct': entry_hist_pct, 'w1_pnl': w1_result,
+                        'conv_mult': conv_mult,
                         'entry_idx': entry_idx,
                         'partial_taken': partial_taken, 'partial_pnl': partial_pnl_dollar,
                     })
@@ -589,7 +611,7 @@ def generate_signals(
             if partial_pct > 0 and not partial_taken:
                 partial_target = entry_price * (1 + partial_pct / 100.0)
                 if bar_high >= partial_target:
-                    total_shares = int(position_size / entry_price) if entry_price > 0 else 0
+                    total_shares = entry_shares
                     partial_shares_sold = int(total_shares * partial_fraction)
                     partial_exit_price = partial_target * (1 - exit_slippage)
                     partial_pnl_dollar = (partial_exit_price - entry_price) * partial_shares_sold
@@ -602,7 +624,7 @@ def generate_signals(
                 exit_price = hard_stop_price * (1 - exit_slippage)
                 wave += 1
                 pnl_pct = (exit_price - entry_price) / entry_price * 100
-                shares = int(position_size / entry_price) if entry_price > 0 else 0
+                shares = entry_shares
 
                 if wave == 1:
                     w1_result = pnl_pct
@@ -625,6 +647,7 @@ def generate_signals(
                     'exit_reason': 'hard_stop', 'paper': is_paper,
                     'cross_time_min': cross_time_min, 'vol_at_cross': vol_at_cross,
                     'macd_hist_pct': entry_hist_pct, 'w1_pnl': w1_result,
+                    'conv_mult': conv_mult,
                     'partial_taken': partial_taken, 'partial_pnl': partial_pnl_dollar,
                 })
                 in_trade = False
@@ -642,7 +665,7 @@ def generate_signals(
                     exit_price = trail_stop_price * (1 - exit_slippage)
                     wave += 1
                     pnl_pct = (exit_price - entry_price) / entry_price * 100
-                    shares = int(position_size / entry_price) if entry_price > 0 else 0
+                    shares = entry_shares
 
                     if wave == 1:
                         w1_result = pnl_pct
@@ -664,6 +687,7 @@ def generate_signals(
                         'exit_reason': 'trail_stop', 'paper': is_paper,
                         'cross_time_min': cross_time_min, 'vol_at_cross': vol_at_cross,
                         'macd_hist_pct': entry_hist_pct, 'w1_pnl': w1_result,
+                        'conv_mult': conv_mult,
                         'partial_taken': partial_taken, 'partial_pnl': partial_pnl_dollar,
                     })
                     in_trade = False
@@ -676,7 +700,7 @@ def generate_signals(
                 exit_price = raw_exit * (1 - exit_slippage)
                 wave += 1
                 pnl_pct = (exit_price - entry_price) / entry_price * 100
-                shares = int(position_size / entry_price) if entry_price > 0 else 0
+                shares = entry_shares
 
                 if wave == 1:
                     w1_result = pnl_pct
@@ -698,6 +722,7 @@ def generate_signals(
                     'exit_reason': 'macd_flip', 'paper': is_paper,
                     'cross_time_min': cross_time_min, 'vol_at_cross': vol_at_cross,
                     'macd_hist_pct': entry_hist_pct, 'w1_pnl': w1_result,
+                    'conv_mult': conv_mult,
                     'partial_taken': partial_taken, 'partial_pnl': partial_pnl_dollar,
                 })
                 in_trade = False
@@ -709,7 +734,7 @@ def generate_signals(
         exit_price = raw_exit * (1 - exit_slippage)
         wave += 1
         pnl_pct = (exit_price - entry_price) / entry_price * 100
-        shares = int(position_size / entry_price) if entry_price > 0 else 0
+        shares = entry_shares
         if wave == 1:
             w1_result = pnl_pct
         is_paper = w1_scout and wave == 1
@@ -725,6 +750,7 @@ def generate_signals(
                     'exit_reason': 'eod_close', 'paper': is_paper,
                     'cross_time_min': cross_time_min, 'vol_at_cross': vol_at_cross,
                     'macd_hist_pct': entry_hist_pct, 'w1_pnl': w1_result,
+                    'conv_mult': conv_mult,
                 })
         elif is_paper:
             # Still record W1 for stats even though it's paper
@@ -736,6 +762,7 @@ def generate_signals(
                 'exit_reason': 'eod_close', 'paper': True,
                 'cross_time_min': cross_time_min, 'vol_at_cross': vol_at_cross,
                 'macd_hist_pct': entry_hist_pct, 'w1_pnl': w1_result,
+                'conv_mult': conv_mult,
             })
 
     return signals
@@ -811,6 +838,7 @@ def simulate_positions(
                 vol_at_cross=sig['vol_at_cross'],
                 macd_hist_pct=sig['macd_hist_pct'],
                 w1_pnl=sig.get('w1_pnl', 0.0),
+                conv_mult=sig.get('conv_mult', 1.0),
             )
             trades.append(trade)
             daily_pnl[trade_date] += trade.pnl_dollar
@@ -913,6 +941,7 @@ def write_csv(trades: List[Trade], path: str) -> None:
         'symbol', 'date', 'wave', 'entry_time', 'exit_time',
         'entry_price', 'exit_price', 'shares', 'pnl_pct', 'pnl_dollar',
         'exit_reason', 'cross_time_min', 'vol_at_cross', 'macd_hist_pct', 'w1_pnl',
+        'conv_mult',
     ]
     with open(path, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -930,6 +959,7 @@ def write_csv(trades: List[Trade], path: str) -> None:
                 'vol_at_cross': t.vol_at_cross,
                 'macd_hist_pct': round(t.macd_hist_pct, 4),
                 'w1_pnl': round(t.w1_pnl, 2),
+                'conv_mult': round(t.conv_mult, 3),
             })
     logger.info(f"CSV written: {path} ({len(trades)} trades)")
 
@@ -963,7 +993,11 @@ def save_signal_cache(signals: List[dict], cache_path: str) -> None:
 
 
 def load_signal_cache(cache_path: str, start_date: date, end_date: date) -> List[dict]:
-    """Load cached signals, filter by date range."""
+    """Load cached signals, filter by date range.
+
+    Also computes conv_mult for each signal from cross_time_min + vol_at_cross
+    so downstream can apply conviction-based sizing without regenerating signals.
+    """
     import csv as csv_mod
     signals = []
     with open(cache_path) as f:
@@ -982,18 +1016,28 @@ def load_signal_cache(cache_path: str, start_date: date, end_date: date) -> List
             row['macd_hist_pct'] = float(row['macd_hist_pct'])
             row['w1_pnl'] = float(row['w1_pnl'])
             row['paper'] = row.get('paper', 'False') == 'True'
+            # Compute conviction multiplier from raw signal features
+            conv, _ = compute_conviction_score(row['cross_time_min'], row['vol_at_cross'])
+            row['conv_mult'] = conv
             signals.append(row)
     logger.info(f"Loaded {len(signals)} cached signals from {cache_path} ({start_date} to {end_date})")
     return signals
 
 
 def filter_signals(signals: List[dict], entry_filters: dict) -> List[dict]:
-    """Apply entry filters to cached signals in memory."""
+    """Apply entry filters to cached signals in memory.
+
+    If conviction_sizing is enabled, scale each signal's shares and pnl_dollar
+    by conv_mult. This lets us apply conviction sizing to cached signals without
+    regenerating (since shares and pnl_dollar both scale linearly with the
+    position-size multiplier).
+    """
     cross_time_max = entry_filters.get('cross_time_max_min', 0)
     min_vol_cross = entry_filters.get('min_vol_at_cross', 0)
     max_vol_cross = entry_filters.get('max_vol_at_cross', 0)
     min_macd_pct = entry_filters.get('min_macd_hist_pct', 0.0)
     max_price_entry = entry_filters.get('max_price_at_entry', 0)
+    conviction_sizing = bool(entry_filters.get('conviction_sizing', False))
 
     filtered = []
     for sig in signals:
@@ -1007,11 +1051,20 @@ def filter_signals(signals: List[dict], entry_filters: dict) -> List[dict]:
             continue
         if max_price_entry > 0 and sig['entry_price'] > max_price_entry:
             continue
+        # Conviction sizing: shares and pnl_dollar scale linearly with position size.
+        # pnl_pct is a ratio and stays the same.
+        if conviction_sizing:
+            cm = sig.get('conv_mult', 1.0)
+            if cm != 1.0:
+                sig = dict(sig)  # avoid mutating cached dict
+                sig['shares'] = int(sig['shares'] * cm)
+                sig['pnl_dollar'] = sig['pnl_dollar'] * cm
         filtered.append(sig)
 
     logger.info(f"Filter: {len(signals)} → {len(filtered)} signals "
                 f"(cross<{cross_time_max}m, vol {min_vol_cross}-{max_vol_cross}, "
-                f"macd>={min_macd_pct}%, price<={max_price_entry})")
+                f"macd>={min_macd_pct}%, price<={max_price_entry})"
+                + (" [conviction sizing ON]" if conviction_sizing else ""))
     return filtered
 
 
@@ -1039,6 +1092,8 @@ def main():
     parser.add_argument("--position-size", type=float, default=None)
     parser.add_argument("--max-concurrent", type=int, default=None)
     parser.add_argument("--trail", type=float, default=None, help="Trailing stop %% below highest (e.g., 0.5 = 0.5%%)")
+    parser.add_argument("--conviction-sizing", action="store_true",
+                        help="Scale position size by conviction_mult (2-rule score, OOS-validated)")
     parser.add_argument("--no-slippage", action="store_true")
     parser.add_argument("--entry-slip", type=float, default=None, help="Entry slippage pct (e.g. 0.005 = 0.5%%)")
     parser.add_argument("--exit-slip", type=float, default=None, help="Exit slippage pct")
@@ -1165,6 +1220,8 @@ def main():
         'partial_fraction': args.partial_fraction,
         # Phase D
         'exclude_vol_zone': args.exclude_vol_zone,
+        # Conviction-based sizing (opt-in)
+        'conviction_sizing': bool(args.conviction_sizing),
     }
 
     cache_path = get_cache_path(trail_pct, slip_entry, slip_exit)

@@ -189,7 +189,6 @@ python batch_backtest.py --start 2026-01-01 --end 2026-03-31 --build-cache
 - Finds ALL movers with 10%+ intraday range
 - Stores raw unfiltered trades in `data/bull_flag_cache_e50_x30.csv`
 - These numbers are RAW/UNFILTERED — **NEVER report these as backtest results**
-- Example: Q1 2026 cache = 1057 trades, $82K (WRONG number to report)
 
 #### Stage 2: Run filtered backtest (production-matched, DEFAULT)
 ```bash
@@ -198,7 +197,6 @@ python batch_backtest.py --start 2026-01-01 --end 2026-03-31
 ```
 - Reads from cache, applies: 20% threshold, 200K volume, leveraged ETF filter, max 3 concurrent, $5K daily loss limit, risk tiers
 - These numbers match production behavior — **THIS is the real backtest result**
-- Example: Q1 2026 filtered = 212 trades, $297K (CORRECT number to report)
 - Takes <1 second (reads from cache), so there is ZERO reason to skip this step
 
 **NEVER report Stage 1 numbers as results. ALWAYS run Stage 2 after Stage 1.**
@@ -242,23 +240,16 @@ python macd_wave_backtest.py --w1-scout --w1-min 5 --max-waves 3
 When running backtests via `python3 -c "..."`, print() output is BUFFERED until script exits. Use `sys.stdout.flush()` after each print, or run as a script file instead of inline. This has wasted time repeatedly.
 
 ## Gap threshold doesn't matter for bull flags
-Tested 3%, 5%, 8%, 10% intraday range thresholds — all produce identical results (254-257 trades, same P&L). The bull flag pattern detector (min_pole_gain_pct=3%) is the real filter, not the daily bar screen.
-
-## Key backtest numbers (Q1 2026, filtered 20% threshold)
-- **Bull flag Q1**: 212 trades, 52.8% WR, +$297K (Jan +$123K, Feb -$41K, Mar ~$0)
-- **MACD wave**: 61 trades, 44% WR, PF 5.65, +$123K, DD -$7K (15 months)
-- Note: unfiltered cache (10% threshold) shows 1057 trades, $82K — that is NOT the real number
+Changing the intraday range threshold on the cache-build step (3%, 5%, 8%, 10%) produces essentially identical results. The bull flag pattern detector (min_pole_gain_pct) is the real filter, not the daily bar screen — don't waste time re-tuning the cache threshold.
 
 ## Overfitting warning
-MACD wave filters (cross<3m, MACD≥0.5%, vol<300K, $15-30) were optimized on the same 15-month dataset used for validation. NO out-of-sample test performed. Expect 40-60% of backtest P&L in production.
+MACD wave filters were originally tuned on the same 15-month dataset used for validation, with no out-of-sample split. Expect real-world P&L to be a significant haircut off the backtest. When proposing filter changes, push for walk-forward validation (train on one split, test on another).
 
 ## Slippage reality vs model
-- Backtest: 0.1% entry, 0.1-0.3% exit
-- Real production (13 trades): 0.54% avg entry slippage
-- Entry slippage on thin stocks is 5x worse than modeled
+Bull flag entry slippage on thin stocks runs multiples of the backtest model. When recalibrating, source numbers from the `trades` DB (entry/exit quote telemetry) rather than re-quoting memorized figures — they drift as trades accumulate. Authoritative numbers live in README.md.
 
 ## MACD wave P&L is outlier-dependent
-Top 3 trades (FLYE, BTTC, KELYB) = 62% of total MACD wave P&L. Miss one big winner in a quarter and results look very different.
+A small number of top trades can drive the majority of total MACD wave P&L. Miss one big winner in a quarter and results look very different — be careful quoting blended P&L without checking the contribution distribution.
 
 # Interactive Sessions
 * I'm here for you to answer questions and clarify ambiguous points/logic

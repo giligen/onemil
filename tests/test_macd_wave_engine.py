@@ -219,3 +219,201 @@ class TestBarEventQueue:
         assert e._bar_event_queue.qsize() == 2
         e.reset_daily()
         assert e._bar_event_queue.qsize() == 0
+
+
+# ---------------------------------------------------------------------------
+# V4 Conviction Sizing — PROD wiring tests
+# ---------------------------------------------------------------------------
+
+def _make_engine_with_conviction(enabled, max_pos_usd=90_000, **overrides):
+    """Engine factory that opts into/out of conviction sizing."""
+    cfg = {
+        'universe': {}, 'entry': {}, 'macd': {},
+        'sizing': {
+            'position_size': 50_000,
+            'max_concurrent': 3,
+            'conviction_sizing': {
+                'enabled': enabled,
+                'max_position_size_usd': max_pos_usd,
+            },
+        },
+        'risk': {'daily_loss_limit': -5000},
+        'slippage': {}, 'waves': {},
+    }
+    overrides.setdefault('alpaca_client', MagicMock())
+    overrides.setdefault('db', MagicMock())
+    overrides['config'] = cfg
+    return MACDWaveEngine(**overrides)
+
+
+class TestConvictionSizingConfig:
+    """Config parsing + defaults."""
+
+    def test_disabled_by_default_when_block_missing(self):
+        """No `conviction_sizing:` block → enabled=False (safe default)."""
+        e = _make_engine()
+        assert e.conviction_sizing_enabled is False
+        # Cap still defaults to $90K even when disabled
+        assert e.max_position_size_usd == 90_000.0
+
+    def test_enabled_true_loads(self):
+        e = _make_engine_with_conviction(enabled=True)
+        assert e.conviction_sizing_enabled is True
+        assert e.max_position_size_usd == 90_000.0
+
+    def test_custom_max_position_loads(self):
+        e = _make_engine_with_conviction(enabled=True, max_pos_usd=75_000)
+        assert e.max_position_size_usd == 75_000.0
+
+    def test_startup_log_fires_when_enabled(self, caplog):
+        import logging
+        with caplog.at_level(logging.INFO, logger='trading.macd_wave_engine'):
+            _make_engine_with_conviction(enabled=True)
+        # The INFO log announces ENABLED so failures in yaml wiring are visible
+        msgs = [r.message for r in caplog.records]
+        assert any('Conviction sizing: ENABLED' in m for m in msgs), \
+            f"Expected 'Conviction sizing: ENABLED' log, got: {msgs}"
+
+
+class TestConvictionShareScaling:
+    """The core contract — shares scale by conv_mult when enabled."""
+
+    def _build_submit_kwargs(self, cross_time, vol_at_cross, entry_price=10.0):
+        """Common args for _submit_entry test calls."""
+        crossed = CrossedStock(
+            symbol='TEST', open_price=entry_price * 0.9,
+            cross_time_min=cross_time, vol_at_cross=vol_at_cross,
+            crossed_at=datetime.now(timezone.utc),
+        )
+        # Pre-made smart_quote tuple matches the expected shape from
+        # _get_smart_limit_price: (limit_price, quote_info_dict)
+        smart_quote = (
+            entry_price,
+            {'bid': entry_price - 0.01, 'ask': entry_price,
+             'quote_fetched_at': datetime.now(timezone.utc)},
+        )
+        return dict(
+            symbol='TEST', price=entry_price, macd_hist_pct=1.0,
+            crossed=crossed, smart_quote=smart_quote,
+        )
+
+    def _primed_engine(self, enabled, max_pos_usd=90_000):
+        """Engine with all external boundaries mocked so _submit_entry runs end-to-end."""
+        e = _make_engine_with_conviction(enabled=enabled, max_pos_usd=max_pos_usd)
+        # No conflicting orders — test the sizing math, not the wash-trade path
+        e._has_conflicting_alpaca_orders = MagicMock(return_value=False)
+        e.alpaca.submit_bracket_order = MagicMock(return_value={'id': 'o1'})
+        e.db.save_trade = MagicMock(return_value=1)
+        e.db.update_trade = MagicMock()
+        return e
+
+    def test_sizing_disabled_uses_flat_position_size(self):
+        """enabled=False → shares = int(50_000 / entry) regardless of conviction."""
+        e = self._primed_engine(enabled=False)
+        # Top-tier conviction setup (cross=1, vol=10K → conv=1.8), but sizing disabled
+        e._submit_entry(**self._build_submit_kwargs(cross_time=1, vol_at_cross=10_000))
+        submitted = e.alpaca.submit_bracket_order.call_args
+        assert submitted is not None, "submit_bracket_order was not called"
+        # $50K / $10 = 5000 shares flat (no scaling)
+        assert submitted.kwargs['qty'] == 5000, \
+            f"Expected flat 5000 shares, got {submitted.kwargs['qty']}"
+
+    def test_sizing_enabled_scales_by_conviction(self):
+        """enabled=True, conv=1.8 → shares = int(90K / entry) = 9000."""
+        e = self._primed_engine(enabled=True)
+        e._submit_entry(**self._build_submit_kwargs(cross_time=1, vol_at_cross=10_000))
+        submitted = e.alpaca.submit_bracket_order.call_args
+        # $90K / $10 = 9000 shares (1.8x baseline 5000)
+        assert submitted.kwargs['qty'] == 9000
+
+    def test_sizing_enabled_baseline_trade(self):
+        """enabled=True, conv=1.0 (both rules miss) → shares unchanged from baseline."""
+        e = self._primed_engine(enabled=True)
+        # Both rules bottom tier: cross=10, vol=300K → conv=1.0, effective=$50K
+        e._submit_entry(**self._build_submit_kwargs(cross_time=10, vol_at_cross=300_000))
+        submitted = e.alpaca.submit_bracket_order.call_args
+        assert submitted.kwargs['qty'] == 5000  # Flat baseline
+
+    def test_sizing_enabled_partial_tier(self):
+        """enabled=True, conv=1.4 (one top-tier, one bottom) → 1.4x baseline."""
+        e = self._primed_engine(enabled=True)
+        # cross=3 (+0.4) + vol=300K (+0.0) → conv=1.4, effective=$70K
+        e._submit_entry(**self._build_submit_kwargs(cross_time=3, vol_at_cross=300_000))
+        submitted = e.alpaca.submit_bracket_order.call_args
+        # $70K / $10 = 7000 shares
+        assert submitted.kwargs['qty'] == 7000
+
+    def test_max_position_cap_enforced(self):
+        """Cap at $60K clips a conv=1.8 setup even though raw would be $90K."""
+        e = self._primed_engine(enabled=True, max_pos_usd=60_000)
+        # Top-tier conv=1.8; would be $90K but cap is $60K
+        e._submit_entry(**self._build_submit_kwargs(cross_time=1, vol_at_cross=10_000))
+        submitted = e.alpaca.submit_bracket_order.call_args
+        # $60K / $10 = 6000 shares (capped)
+        assert submitted.kwargs['qty'] == 6000
+
+
+class TestConvictionTelemetry:
+    """Breakdown persisted to DB; EOD list populated."""
+
+    def _run_entry(self, engine, cross_time, vol_at_cross, entry_price=10.0):
+        crossed = CrossedStock(
+            symbol='TEST', open_price=entry_price * 0.9,
+            cross_time_min=cross_time, vol_at_cross=vol_at_cross,
+            crossed_at=datetime.now(timezone.utc),
+        )
+        smart_quote = (
+            entry_price,
+            {'bid': entry_price - 0.01, 'ask': entry_price,
+             'quote_fetched_at': datetime.now(timezone.utc)},
+        )
+        engine._has_conflicting_alpaca_orders = MagicMock(return_value=False)
+        engine.alpaca.submit_bracket_order = MagicMock(return_value={'id': 'o1'})
+        engine.db.save_trade = MagicMock(return_value=42)
+        engine.db.update_trade = MagicMock()
+        engine._submit_entry(
+            symbol='TEST', price=entry_price, macd_hist_pct=1.0,
+            crossed=crossed, smart_quote=smart_quote,
+        )
+
+    def test_pattern_data_includes_conviction_fields(self):
+        """save_trade receives pattern_data JSON with conviction_* fields."""
+        e = _make_engine_with_conviction(enabled=True)
+        self._run_entry(e, cross_time=1, vol_at_cross=10_000)
+        # Extract the pattern_data string passed to save_trade
+        saved = e.db.save_trade.call_args.args[0]
+        pat = saved['pattern_data']
+        assert '"conviction_mult": 1.800' in pat
+        assert '"conv_cross_speed": 0.4' in pat
+        assert '"conv_vol_at_cross": 0.4' in pat
+
+    def test_eod_traded_populated_on_entry(self):
+        """Each accepted entry appends to self._eod_traded."""
+        e = _make_engine_with_conviction(enabled=True)
+        assert e._eod_traded == []
+        self._run_entry(e, cross_time=1, vol_at_cross=10_000)
+        assert len(e._eod_traded) == 1
+        entry = e._eod_traded[0]
+        assert entry['symbol'] == 'TEST'
+        assert entry['conv_mult'] == pytest.approx(1.8)
+        assert entry['conv_cross_speed'] == pytest.approx(0.4)
+        assert entry['conv_vol_at_cross'] == pytest.approx(0.4)
+        assert entry['effective_position'] == 90_000.0
+
+    def test_eod_traded_cleared_by_reset_daily(self):
+        """reset_daily() drops yesterday's telemetry."""
+        e = _make_engine_with_conviction(enabled=True)
+        self._run_entry(e, cross_time=1, vol_at_cross=10_000)
+        assert len(e._eod_traded) == 1
+        e.reset_daily()
+        assert e._eod_traded == []
+
+    def test_conviction_logged_on_entry(self, caplog):
+        """CONVICTION line appears in INFO log."""
+        import logging
+        e = _make_engine_with_conviction(enabled=True)
+        with caplog.at_level(logging.INFO, logger='trading.macd_wave_engine'):
+            self._run_entry(e, cross_time=1, vol_at_cross=10_000)
+        msgs = [r.message for r in caplog.records]
+        assert any('CONVICTION 1.80' in m for m in msgs), f"Expected CONVICTION log, got: {msgs}"
+        assert any('cross=+0.4 vol=+0.4' in m for m in msgs)

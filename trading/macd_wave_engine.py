@@ -20,6 +20,8 @@ import pandas as pd
 import pytz
 from dateutil.parser import isoparse
 
+from trading.macd_conviction import compute_conviction_score
+
 logger = logging.getLogger(__name__)
 
 ET = pytz.timezone('US/Eastern')
@@ -132,6 +134,18 @@ class MACDWaveEngine:
         adv_pct = sizing.get('max_adv_participation_pct')
         self.max_adv_participation_pct = float(adv_pct) if adv_pct else None
 
+        # V4 conviction sizing (step 1+2 validated: +$54K / +49.5% on 15mo BT).
+        # Applied as a position-size multiplier at entry time; never as a filter.
+        # Formula lives in trading/macd_conviction.py (shared with BT).
+        conv_cfg = sizing.get('conviction_sizing', {})
+        self.conviction_sizing_enabled = bool(conv_cfg.get('enabled', False))
+        self.max_position_size_usd = float(conv_cfg.get('max_position_size_usd', 90_000))
+        if self.conviction_sizing_enabled:
+            logger.info(
+                f"[{self.STRATEGY_NAME}] Conviction sizing: ENABLED "
+                f"(V4 3-tier, max position ${self.max_position_size_usd:,.0f})"
+            )
+
         # Risk
         risk = cfg.get('risk', {})
         self.hard_stop_pct = float(risk.get('hard_stop_pct', 0.02))
@@ -158,6 +172,8 @@ class MACDWaveEngine:
         self.daily_pnl: float = 0.0
         self.trades_today: int = 0
         self.shutdown_requested: bool = False
+        # Per-entry telemetry for EOD telegram (conviction sizing trace)
+        self._eod_traded: List[Dict[str, Any]] = []
 
     # ------------------------------------------------------------------
     # Startup sync: recover state from DB + Alpaca
@@ -862,7 +878,20 @@ class MACDWaveEngine:
             if limit_price <= 0:
                 logger.warning(f"[{self.STRATEGY_NAME}] {symbol}: limit_price=0, skipping")
                 return False
-            shares = int(self.position_size / limit_price)
+
+            # V4 conviction — always compute for logging/DB; scale shares only if enabled.
+            conv_mult, conv_brkdn = compute_conviction_score(
+                crossed.cross_time_min, crossed.vol_at_cross
+            )
+            if self.conviction_sizing_enabled:
+                effective_position = min(
+                    self.position_size * conv_mult,
+                    self.max_position_size_usd,
+                )
+            else:
+                effective_position = self.position_size
+
+            shares = int(effective_position / limit_price)
             if shares <= 0:
                 return False
 
@@ -924,9 +953,14 @@ class MACDWaveEngine:
                 'exited_at': None,
                 'pnl': None,
                 'pnl_pct': None,
-                'pattern_data': f'{{"cross_time_min": {crossed.cross_time_min}, '
-                                f'"vol_at_cross": {crossed.vol_at_cross}, '
-                                f'"macd_hist_pct": {macd_hist_pct:.4f}}}',
+                'pattern_data': (
+                    f'{{"cross_time_min": {crossed.cross_time_min}, '
+                    f'"vol_at_cross": {crossed.vol_at_cross}, '
+                    f'"macd_hist_pct": {macd_hist_pct:.4f}, '
+                    f'"conviction_mult": {conv_mult:.3f}, '
+                    f'"conv_cross_speed": {conv_brkdn["cross_speed"]:.1f}, '
+                    f'"conv_vol_at_cross": {conv_brkdn["vol_at_cross"]:.1f}}}'
+                ),
             })
 
             # Entry microstructure + slippage pipeline timing (Migration 10).
@@ -981,11 +1015,22 @@ class MACDWaveEngine:
                 entry_quote_ask=ask if ask > 0 else None,
             )
             self.trades_today += 1
+            self._eod_traded.append({
+                'symbol': symbol,
+                'shares': shares,
+                'effective_position': effective_position,
+                'conv_mult': conv_mult,
+                'conv_cross_speed': conv_brkdn['cross_speed'],
+                'conv_vol_at_cross': conv_brkdn['vol_at_cross'],
+            })
 
             logger.info(
                 f"[{self.STRATEGY_NAME}] BUY {symbol} {shares}sh @ ${limit_price:.2f} "
                 f"— MACD hist {macd_hist_pct:.2f}%, stop ${hard_stop:.2f}, "
-                f"cross {crossed.cross_time_min}min, vol {crossed.vol_at_cross:,}"
+                f"cross {crossed.cross_time_min}min, vol {crossed.vol_at_cross:,}, "
+                f"CONVICTION {conv_mult:.2f} "
+                f"(cross=+{conv_brkdn['cross_speed']:.1f} vol=+{conv_brkdn['vol_at_cross']:.1f}; "
+                f"pos=${effective_position:,.0f})"
             )
             if self.notifier:
                 self.notifier.send_message_sync(
@@ -1424,6 +1469,22 @@ class MACDWaveEngine:
                 f"[MACD Wave] 📊 Daily: {len(trades)} trades, "
                 f"{wins}W {losses}L, P&L ${total_pnl:+,.0f}"
             )
+            # Append conviction stats for sized runs (quiet block when all conv=1.0)
+            if self._eod_traded:
+                convs = [t['conv_mult'] for t in self._eod_traded]
+                positions = [t['effective_position'] for t in self._eod_traded]
+                avg_conv = sum(convs) / len(convs)
+                max_conv = max(convs)
+                min_conv = min(convs)
+                total_notional = sum(positions)
+                flat_notional = self.position_size * len(self._eod_traded)
+                status = "ENABLED (V4)" if self.conviction_sizing_enabled else "disabled"
+                msg += (
+                    f"\nConviction stats ({status}):"
+                    f"\n  avg conv: {avg_conv:.2f}  max: {max_conv:.2f}  min: {min_conv:.2f}"
+                    f"\n  notional: ${total_notional:,.0f}"
+                    f"  (vs flat ${flat_notional:,.0f})"
+                )
 
         logger.info(msg)
         if self.notifier:
@@ -1442,6 +1503,7 @@ class MACDWaveEngine:
         self.invalidated.clear()
         self.daily_pnl = 0.0
         self.trades_today = 0
+        self._eod_traded.clear()
         # Drain any stale bar events leftover from yesterday.
         self.drain_bar_events()
         self._bar_queue_full_logged = False

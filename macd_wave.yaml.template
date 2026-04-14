@@ -46,16 +46,30 @@ sizing:
   position_size: 50000      # $ per position
   max_concurrent: 5         # Max simultaneous open positions
   max_adv_participation_pct: 0  # Disabled — waiting for real L2 depth data
+  # V4 conviction sizing — multiplies shares by conv_mult at entry time.
+  # OOS-validated: +$54K / +49.5% total P&L on 15mo BT, +$24.6K mean lift
+  # across 3 walk-forward splits (worst split +$10.3K — robust).
+  # Applied as a sizing multiplier only; filter approach fails OOS.
+  conviction_sizing:
+    enabled: true                     # Off disables scaling; on ships V4 (score 1.0-1.8).
+    max_position_size_usd: 90000      # Hard cap even if conv_mult * position > this.
+                                      # V4 raw max = 50K * 1.8 = 90K; cap matches. Lower if
+                                      # exit slippage degrades on large thin-book positions.
 
-# Slippage model — matched to production measurements (0.54% avg entry, ~0.2% exit)
+# Slippage model — matched to production measurements
+# Entry recalibrated 2026-04-14: 29 filled trades showed -15 bps mean (favorable fill).
+# Set to +10 bps for conservatism (buffer against tail of bad-fill days).
+# Exit kept at 20 bps pending larger sample — 9 exits observed so far (mix of
+# bracket stop-sweeps at +220 bps and clean macd_flip bid fills at ~0 bps).
+# Revisit exit_pct after ~20 more exits to stratify by exit_reason.
 slippage:
-  entry_pct: 0.005          # 0.5% — production avg on buy-stop/limit fills
+  entry_pct: 0.001          # 0.1% — production telemetry shows -15 bps mean (favorable); 10 bps buffer
   exit_pct: 0.002           # 0.2% — blend of stop exits (0.3%) and clean exits (~0%)
 
 # Risk management
 risk:
   hard_stop_pct: 0.02       # 2% hard stop loss per trade (crash protection)
-  trail_stop_pct: 0.002     # 0.2% trail (Phase B2: tightened from 0.3% at realistic 0.5% slip — improved both Q1 25 +$2.7K and Q1 26 +$3.5K)
-                             # Prior 0.3% validated at 0.1% slip fantasy: 48% WR, +$260K, 13/15 green months
+  trail_stop_pct: 0.003     # 0.3% trail below highest high (profit protection)
+                             # Validated: 48% WR, +$260K, 13/15 green months
                              # Without trail: 30% WR, lottery-dependent
   daily_loss_limit: -5000

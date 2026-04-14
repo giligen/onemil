@@ -270,6 +270,32 @@ Separate service targeting medium-cap stocks ($15-30) with strong intraday momen
 - **Force close**: 15:45 ET → market sell
 - **One trade per symbol per day**
 
+### V4 Conviction Sizing (shipped 2026-04-14)
+
+Position size is scaled by a 2-rule conviction score at entry time. Formula lives in `trading/macd_conviction.py` — imported by BOTH the BT and PROD engine so they can't drift.
+
+| Rule | Top tier (+0.4) | Second (+0.2) | Third (+0.1) | Bottom (0.0) |
+|---|---|---|---|---|
+| `cross_time_min` (minutes open→+10% cross) | ≤3 | ≤5 | ≤7 | >7 |
+| `vol_at_cross` (cumulative shares at cross) | ≤27K | ≤79K | ≤165K | >165K |
+
+Score = `1.0 + cross_contrib + vol_contrib`, clamped to `[0.5, 2.0]`. Range on current rules: **1.0 → 1.8**. Position: `shares = int(position_size × score / entry_price)`. Hard cap via `sizing.conviction_sizing.max_position_size_usd` in yaml (default $90K).
+
+**Walk-forward evidence** (`analysis_results/macd_conviction_step2_*.md`):
+
+| Split | Test ΔP&L (V4 vs flat) |
+|---|---|
+| A — Train H1'25 → Test Jul'25-Mar'26 | +$33,851 |
+| B — Train Jan-Dec'25 → Test Q1'26 | +$10,305 |
+| C — Train Jan-Sep'25 → Test Oct'25-Mar'26 | +$29,668 |
+| **Mean** | **+$24,608** (worst +$10,305 — robust across all 3 splits) |
+
+**Canonical 15mo BT**: baseline $109K / DD -$9.5K → V4 sized **+$163K / DD -$13K** (+49.5% P&L, same 551 trades).
+
+**Filter approach was tested and rejected.** Dropping low-conviction trades fails OOS (mean -$153, worst -$5.9K — the low-conv bucket still has positive EV in test). Used as sizing multiplier only.
+
+Toggle via `sizing.conviction_sizing.enabled` in `macd_wave.yaml`. Every entry logs its breakdown: `[macd_wave] SYM: ... CONVICTION 1.80 (cross=+0.4 vol=+0.4; pos=$90,000)`.
+
 ### Running the MACD Wave Service
 
 ```bash
