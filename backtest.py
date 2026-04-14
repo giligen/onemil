@@ -2221,6 +2221,39 @@ class BacktestRunner:
                         logger.info(f"  NEWS KILL: {nk_reason}")
                         continue
 
+                # Filter ordering matches PROD trading_engine.py:
+                #   news_kill (above) → conviction → risk_tier → combined_mult
+                # Conviction filter runs before risk_tier for parity, even
+                # though BT has no API call to save (PROD does).
+
+                # Conviction scoring: compute breakdown once; use on skip-log too.
+                conviction_mult = 1.0
+                if self.conviction_enabled:
+                    _trade_date = None
+                    try:
+                        _trade_date = str(bars.iloc[0].get('timestamp', bars.iloc[0].name))[:10]
+                    except Exception:
+                        pass
+                    _spy_3d = self._get_spy_3d_range(_trade_date) if _trade_date else 1.0
+                    conviction_mult, _conv_brkdn = self._compute_conviction_score_setup(
+                        setup, _spy_3d, return_breakdown=True)
+                    if abs(conviction_mult - 1.0) > 0.05:
+                        logger.debug(f"  Conviction score: {conviction_mult:.2f}x")
+
+                    # Conviction filter: skip below threshold (mirrors trading_engine).
+                    if (self.conviction_min_threshold > 0
+                            and conviction_mult < self.conviction_min_threshold):
+                        logger.debug(
+                            f"  CONVICTION SKIP: {conviction_mult:.2f} < "
+                            f"{self.conviction_min_threshold:.2f} "
+                            f"(pole={_conv_brkdn['pole_gain']:+.1f} "
+                            f"flag={_conv_brkdn['flag_tightness']:+.1f} "
+                            f"vol={_conv_brkdn['vol_ratio']:+.1f} "
+                            f"spy={_conv_brkdn['spy_regime']:+.1f} "
+                            f"retr={_conv_brkdn['retracement']:+.1f})"
+                        )
+                        continue
+
                 # Risk tier: scale risk on high-conviction setups (same as trading_engine)
                 risk_tier_mult = 1.0
                 if self.risk_tiers_enabled:
@@ -2231,28 +2264,6 @@ class BacktestRunner:
                                 tier['min_volume'] <= av <= tier['max_volume']):
                             risk_tier_mult = tier['multiplier']
                             break
-
-                # Conviction scoring: multiply with risk tier for combined sizing
-                conviction_mult = 1.0
-                if self.conviction_enabled:
-                    _trade_date = None
-                    try:
-                        _trade_date = str(bars.iloc[0].get('timestamp', bars.iloc[0].name))[:10]
-                    except Exception:
-                        pass
-                    _spy_3d = self._get_spy_3d_range(_trade_date) if _trade_date else 1.0
-                    conviction_mult = self._compute_conviction_score_setup(setup, _spy_3d)
-                    if abs(conviction_mult - 1.0) > 0.05:
-                        logger.debug(f"  Conviction score: {conviction_mult:.2f}x")
-
-                    # Conviction filter: skip below threshold (mirrors trading_engine).
-                    if (self.conviction_min_threshold > 0
-                            and conviction_mult < self.conviction_min_threshold):
-                        logger.debug(
-                            f"  CONVICTION SKIP: {conviction_mult:.2f} < "
-                            f"{self.conviction_min_threshold:.2f}"
-                        )
-                        continue
 
                 # Combine risk tier + conviction, cap at 3x (max leverage on $50K base)
                 combined_mult = min(3.0, risk_tier_mult * conviction_mult)

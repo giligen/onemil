@@ -2390,24 +2390,17 @@ class TradingEngine:
                 logger.info(f"{symbol}: NEWS GATE PASS — [{news_cat}]: {news_hl}")
                 self._eod_traded.append((symbol, news_cat, news_hl, 0))  # pnl filled later
 
-        # Risk tier: scale risk on high-conviction setups
-        risk_multiplier = 1.0
-        if self.risk_tiers_enabled:
-            avg_vol = (uni_stock.get('avg_volume_daily') or 0) if uni_stock else 0
-            risk_multiplier = self._get_risk_tier(setup.breakout_level, avg_vol)
-
-            # Check marginability for leveraged trades (real-time, cached per cycle)
-            if risk_multiplier > 1.0:
-                if not hasattr(self, '_margin_cache'):
-                    self._margin_cache = {}
-                if symbol not in self._margin_cache:
-                    self._margin_cache[symbol] = self.alpaca.is_marginable(symbol)
-                if not self._margin_cache[symbol]:
-                    logger.info(
-                        f"{symbol}: Not marginable — falling back to 1x "
-                        f"(wanted {risk_multiplier:.1f}x)"
-                    )
-                    risk_multiplier = 1.0
+        # ============================================================
+        # Filter ordering (cheap → expensive):
+        #   1. News kill        (no API)
+        #   2. Conviction       (no API)
+        #   3. Risk tier + marginability check (Alpaca API call)
+        # Conviction MUST come before marginability so we don't waste an
+        # API call on trades we'll skip. Filters run sequentially — the
+        # first to fire attributes the skip in logs/_eod_skipped. For
+        # multi-reason post-hoc analysis, parse INFO logs (each filter
+        # logs its own SKIP line independently).
+        # ============================================================
 
         # News classification: use scanner's cached result (from on_stock_qualified).
         # LLM re-check removed — was 2-5s in critical order path. News kill rules
@@ -2440,10 +2433,13 @@ class TradingEngine:
                     return None
 
         # Conviction scoring: combine with risk tier, cap at 3x
+        # Always compute breakdown (cheap, pure arithmetic) so we have it
+        # ready for the skip-log without recomputing.
         conviction_mult = 1.0
         if self.conviction_enabled:
             spy_3d = self._get_spy_3d_range_live()
-            conviction_mult = self._compute_conviction_score_setup(setup, spy_3d)
+            conviction_mult, _conv_brkdn = self._compute_conviction_score_setup(
+                setup, spy_3d, return_breakdown=True)
             if abs(conviction_mult - 1.0) > 0.05:
                 logger.info(
                     f"{symbol}: Conviction {conviction_mult:.2f}x "
@@ -2452,27 +2448,48 @@ class TradingEngine:
 
             # Conviction filter: skip trades below quality threshold.
             # Walk-forward validated: conv<1.2 setups = 28% WR, -0.18R avg (negative EV).
+            # Placed before risk_tier+marginability so we save the is_marginable API
+            # call (~100-200ms) on every conviction-skipped trade.
             if (self.conviction_min_threshold > 0
                     and conviction_mult < self.conviction_min_threshold):
-                _, brkdn = self._compute_conviction_score_setup(
-                    setup, spy_3d, return_breakdown=True)
                 breakdown_str = (
-                    f"pole={brkdn['pole_gain']:+.1f} "
-                    f"flag={brkdn['flag_tightness']:+.1f} "
-                    f"vol={brkdn['vol_ratio']:+.1f} "
-                    f"spy={brkdn['spy_regime']:+.1f} "
-                    f"retr={brkdn['retracement']:+.1f}"
+                    f"pole={_conv_brkdn['pole_gain']:+.1f} "
+                    f"flag={_conv_brkdn['flag_tightness']:+.1f} "
+                    f"vol={_conv_brkdn['vol_ratio']:+.1f} "
+                    f"spy={_conv_brkdn['spy_regime']:+.1f} "
+                    f"retr={_conv_brkdn['retracement']:+.1f}"
                 )
                 logger.info(
                     f"{symbol}: CONVICTION SKIP: {conviction_mult:.2f} < "
                     f"{self.conviction_min_threshold:.2f} "
-                    f"({breakdown_str}; raw={brkdn['raw_score']:.2f})"
+                    f"({breakdown_str}; raw={_conv_brkdn['raw_score']:.2f})"
                 )
                 self._eod_skipped.append((
                     symbol, "LOW_CONVICTION",
                     f"conv {conviction_mult:.2f} ({breakdown_str})"
                 ))
                 return None
+
+        # Risk tier: scale risk on high-conviction setups.
+        # Marginability API call is gated by risk_multiplier > 1.0,
+        # AND only happens after news_kill + conviction filters pass.
+        risk_multiplier = 1.0
+        if self.risk_tiers_enabled:
+            avg_vol = (uni_stock.get('avg_volume_daily') or 0) if uni_stock else 0
+            risk_multiplier = self._get_risk_tier(setup.breakout_level, avg_vol)
+
+            # Check marginability for leveraged trades (real-time, cached per cycle)
+            if risk_multiplier > 1.0:
+                if not hasattr(self, '_margin_cache'):
+                    self._margin_cache = {}
+                if symbol not in self._margin_cache:
+                    self._margin_cache[symbol] = self.alpaca.is_marginable(symbol)
+                if not self._margin_cache[symbol]:
+                    logger.info(
+                        f"{symbol}: Not marginable — falling back to 1x "
+                        f"(wanted {risk_multiplier:.1f}x)"
+                    )
+                    risk_multiplier = 1.0
 
         combined_mult = min(3.0, risk_multiplier * conviction_mult)
 

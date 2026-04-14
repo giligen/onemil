@@ -1288,3 +1288,91 @@ class TestSlippageModel:
         assert trade.exit_reason == 'stop'
         # Stop at 4.90 * (1 - 0.01) = 4.851
         assert trade.exit_price == pytest.approx(4.90 * 0.99, abs=0.001)
+
+
+# ===========================================================================
+# Conviction filter (BT side) — must mirror trading_engine.py exactly so
+# BT (golden) and PROD produce identical skip decisions.
+# ===========================================================================
+
+class TestBTConvictionFilter:
+    """BT-side conviction filter parity with PROD."""
+
+    def _setup(self, pole_gain=12.0, pole_h=10.0, pole_l=9.0,
+               flag_h=9.6, flag_l=9.0, vol_pole=100, vol_flag=100,
+               retr=50.0):
+        s = MagicMock()
+        s.pole_gain_pct = pole_gain
+        s.pole_high = pole_h
+        s.pole_low = pole_l
+        s.flag_high = flag_h
+        s.flag_low = flag_l
+        s.avg_pole_volume = vol_pole
+        s.avg_flag_volume = vol_flag
+        s.retracement_pct = retr
+        return s
+
+    def test_breakdown_returns_per_rule_contributions(self):
+        """BacktestRunner._compute_conviction_score_setup matches expected breakdown."""
+        runner = BacktestRunner()
+        s = self._setup(pole_gain=12.0, retr=50.0)  # low quality
+        score, brk = runner._compute_conviction_score_setup(
+            s, spy_3d_range=0.5, return_breakdown=True)
+        assert score == 0.25
+        assert brk['pole_gain'] == 0.0
+        assert brk['flag_tightness'] == -0.3
+        assert brk['vol_ratio'] == 0.0
+        assert brk['spy_regime'] == -0.5
+        assert brk['retracement'] == 0.0
+        assert brk['raw_score'] == pytest.approx(0.20, abs=0.001)
+
+    def test_backward_compat_returns_float(self):
+        """Without return_breakdown: returns plain float (not tuple)."""
+        runner = BacktestRunner()
+        s = self._setup()
+        score = runner._compute_conviction_score_setup(s, spy_3d_range=0.5)
+        assert isinstance(score, float)
+        assert score == 0.25
+
+    def test_bt_prod_parity(self):
+        """BT and PROD compute identical conviction score + breakdown for same inputs.
+        Drift detector — guards against accidental divergence between the two
+        independent _compute_conviction_score_setup implementations."""
+        from trading.trading_engine import TradingEngine
+        runner = BacktestRunner()
+
+        for cfg in [
+            dict(pole_gain=6.0, pole_h=10.0, pole_l=9.0, flag_h=9.7, flag_l=9.5,
+                 vol_pole=200, vol_flag=100, retr=25.0),  # high quality
+            dict(pole_gain=12.0, pole_h=10.0, pole_l=9.0, flag_h=9.6, flag_l=9.0,
+                 vol_pole=100, vol_flag=100, retr=50.0),  # low quality
+            dict(pole_gain=4.5, pole_h=10.0, pole_l=9.0, flag_h=9.4, flag_l=9.0,
+                 vol_pole=180, vol_flag=100, retr=40.0),  # boundary
+        ]:
+            for spy_3d in (0.5, 0.85, 1.5):
+                s = self._setup(**cfg)
+                bt_score, bt_brk = runner._compute_conviction_score_setup(
+                    s, spy_3d_range=spy_3d, return_breakdown=True)
+                # Use TradingEngine method as unbound — we only need the rule arithmetic
+                # which is pure (no self attributes). Both files implement same rules.
+                prod_score, prod_brk = TradingEngine._compute_conviction_score_setup(
+                    None, s, spy_3d_range=spy_3d, return_breakdown=True)
+                assert bt_score == prod_score, f"score drift: BT={bt_score} PROD={prod_score} for {cfg}, spy3d={spy_3d}"
+                assert bt_brk == prod_brk, f"breakdown drift: BT={bt_brk} PROD={prod_brk} for {cfg}, spy3d={spy_3d}"
+
+    def test_threshold_default_zero(self):
+        """When config has no min_threshold, BT default is 0.0 (filter disabled)."""
+        from config import Config
+        original = Config._load_yaml_only
+
+        def patched():
+            cfg = original()
+            cfg.setdefault('trading', {}).setdefault('conviction_scoring', {})
+            cfg['trading']['conviction_scoring'].pop('min_threshold', None)
+            return cfg
+
+        # Use a context-managed monkeypatch
+        import unittest.mock as _mock
+        with _mock.patch.object(Config, '_load_yaml_only', staticmethod(patched)):
+            runner = BacktestRunner()
+            assert runner.conviction_min_threshold == 0.0

@@ -3464,12 +3464,12 @@ class TestConvictionFilter:
         s.retracement_pct = 25.0     # < 30 → +0.2
         return s
 
-    def test_breakdown_returns_per_rule_contributions(self):
+    def test_breakdown_returns_per_rule_contributions(self, engine):
         """return_breakdown=True returns (final_score, breakdown_dict)
         with all 5 rule contributions + raw_score + final_score."""
         s = self._low_quality_setup()
-        score, brk = TradingEngine._compute_conviction_score_setup(
-            None, s, spy_3d_range=0.5, return_breakdown=True)
+        score, brk = engine._compute_conviction_score_setup(
+            s, spy_3d_range=0.5, return_breakdown=True)
         assert score == 0.25  # clamped from 0.20
         assert brk['pole_gain'] == 0.0
         assert brk['flag_tightness'] == -0.3
@@ -3479,11 +3479,11 @@ class TestConvictionFilter:
         assert brk['raw_score'] == pytest.approx(0.20, abs=0.001)
         assert brk['final_score'] == 0.25
 
-    def test_breakdown_high_quality_setup(self):
+    def test_breakdown_high_quality_setup(self, engine):
         """High-quality setup: all positive contributions, no clamp."""
         s = self._high_quality_setup()
-        score, brk = TradingEngine._compute_conviction_score_setup(
-            None, s, spy_3d_range=1.5, return_breakdown=True)
+        score, brk = engine._compute_conviction_score_setup(
+            s, spy_3d_range=1.5, return_breakdown=True)
         assert score == pytest.approx(2.40, abs=0.01)
         assert brk['pole_gain'] == 0.3
         assert brk['flag_tightness'] == 0.3
@@ -3491,11 +3491,10 @@ class TestConvictionFilter:
         assert brk['spy_regime'] == 0.3
         assert brk['retracement'] == 0.2
 
-    def test_backward_compat_returns_float_only(self):
+    def test_backward_compat_returns_float_only(self, engine):
         """Without return_breakdown, returns plain float (not tuple)."""
         s = self._low_quality_setup()
-        score = TradingEngine._compute_conviction_score_setup(
-            None, s, spy_3d_range=0.5)
+        score = engine._compute_conviction_score_setup(s, spy_3d_range=0.5)
         assert isinstance(score, float)
         assert score == 0.25
 
