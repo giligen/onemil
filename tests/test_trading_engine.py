@@ -3428,3 +3428,120 @@ class TestS1CallSiteIntegration:
         notifier.notify_error.assert_called_once()
         msg = notifier.notify_error.call_args[0][0]
         assert 'unavailable' in msg.lower()
+
+
+# ===========================================================================
+# Conviction filter (skip trades with conviction_mult < min_threshold)
+# Walk-forward validated: conv<1.2 = 28% WR / -0.18R avg (negative EV)
+# ===========================================================================
+
+class TestConvictionFilter:
+    """Tests for the conviction-min-threshold filter."""
+
+    def _low_quality_setup(self):
+        """Setup expected to score 0.25 (clamped) — fails most rules."""
+        s = MagicMock()
+        s.pole_gain_pct = 12.0       # outside 4.5-9.0 sweet spot → 0.0
+        s.pole_high = 10.0
+        s.pole_low = 9.0             # height 1.0
+        s.flag_high = 9.6
+        s.flag_low = 9.0             # range 0.6 = 60% of pole → loose → -0.3
+        s.avg_pole_volume = 100      # ratio 1.0 → 0.0
+        s.avg_flag_volume = 100
+        s.retracement_pct = 50.0     # > 30 → 0.0
+        return s
+
+    def _high_quality_setup(self):
+        """Setup expected to score ~2.4 — hits all rules."""
+        s = MagicMock()
+        s.pole_gain_pct = 6.0        # in sweet spot → +0.3
+        s.pole_high = 10.0
+        s.pole_low = 9.0             # height 1.0
+        s.flag_high = 9.7
+        s.flag_low = 9.5             # range 0.2 = 20% of pole → tight → +0.3
+        s.avg_pole_volume = 200      # ratio 2.0 → +0.3
+        s.avg_flag_volume = 100
+        s.retracement_pct = 25.0     # < 30 → +0.2
+        return s
+
+    def test_breakdown_returns_per_rule_contributions(self):
+        """return_breakdown=True returns (final_score, breakdown_dict)
+        with all 5 rule contributions + raw_score + final_score."""
+        s = self._low_quality_setup()
+        score, brk = TradingEngine._compute_conviction_score_setup(
+            None, s, spy_3d_range=0.5, return_breakdown=True)
+        assert score == 0.25  # clamped from 0.20
+        assert brk['pole_gain'] == 0.0
+        assert brk['flag_tightness'] == -0.3
+        assert brk['vol_ratio'] == 0.0
+        assert brk['spy_regime'] == -0.5
+        assert brk['retracement'] == 0.0
+        assert brk['raw_score'] == pytest.approx(0.20, abs=0.001)
+        assert brk['final_score'] == 0.25
+
+    def test_breakdown_high_quality_setup(self):
+        """High-quality setup: all positive contributions, no clamp."""
+        s = self._high_quality_setup()
+        score, brk = TradingEngine._compute_conviction_score_setup(
+            None, s, spy_3d_range=1.5, return_breakdown=True)
+        assert score == pytest.approx(2.40, abs=0.01)
+        assert brk['pole_gain'] == 0.3
+        assert brk['flag_tightness'] == 0.3
+        assert brk['vol_ratio'] == 0.3
+        assert brk['spy_regime'] == 0.3
+        assert brk['retracement'] == 0.2
+
+    def test_backward_compat_returns_float_only(self):
+        """Without return_breakdown, returns plain float (not tuple)."""
+        s = self._low_quality_setup()
+        score = TradingEngine._compute_conviction_score_setup(
+            None, s, spy_3d_range=0.5)
+        assert isinstance(score, float)
+        assert score == 0.25
+
+    def test_threshold_loaded_from_config(self, mock_alpaca, db, mock_detector,
+                                          mock_planner, mock_executor,
+                                          mock_position_manager, monkeypatch):
+        """min_threshold loads from config.yaml conviction_scoring section."""
+        from config import Config
+        # Patch config loader to return our test value
+        original = Config._load_yaml_only
+        def patched():
+            cfg = original()
+            cfg.setdefault('trading', {}).setdefault('conviction_scoring', {})['min_threshold'] = 1.2
+            cfg['trading']['conviction_scoring']['enabled'] = True
+            return cfg
+        monkeypatch.setattr(Config, '_load_yaml_only', staticmethod(patched))
+
+        eng = TradingEngine(
+            alpaca_client=mock_alpaca, db=db, detector=mock_detector,
+            planner=mock_planner, executor=mock_executor,
+            position_manager=mock_position_manager,
+            pattern_poll_interval=60, enabled=True,
+        )
+        assert eng.conviction_enabled is True
+        assert eng.conviction_min_threshold == 1.2
+
+    def test_threshold_default_zero_when_unset(self, mock_alpaca, db, mock_detector,
+                                                mock_planner, mock_executor,
+                                                mock_position_manager, monkeypatch):
+        """When config has no min_threshold, default is 0.0 (filter disabled,
+        backward compat)."""
+        from config import Config
+        original = Config._load_yaml_only
+        def patched():
+            cfg = original()
+            # Strip min_threshold if present — test the default
+            cfg.setdefault('trading', {}).setdefault('conviction_scoring', {})
+            cfg['trading']['conviction_scoring'].pop('min_threshold', None)
+            return cfg
+        monkeypatch.setattr(Config, '_load_yaml_only', staticmethod(patched))
+
+        eng = TradingEngine(
+            alpaca_client=mock_alpaca, db=db, detector=mock_detector,
+            planner=mock_planner, executor=mock_executor,
+            position_manager=mock_position_manager,
+            pattern_poll_interval=60, enabled=True,
+        )
+        # Default is 0.0 — filter disabled (backward compat)
+        assert eng.conviction_min_threshold == 0.0

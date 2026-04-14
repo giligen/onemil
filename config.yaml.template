@@ -212,6 +212,9 @@ trading:
   # OOS improvement: H2 +$8K, Q1 +$33K (Q1 from -$41K to -$9K)
   conviction_scoring:
     enabled: true                      # V4 model: scales risk_per_trade via planner (not shares post-hoc)
+    min_threshold: 1.2                 # Skip trades when conviction_mult < this (0.0 = filter disabled)
+                                        # 1.2 = walk-forward validated (+$10-18K/period OOS, WR 42→53%)
+                                        # COUPLED to current 5 conviction rules — re-validate if rules change
   news_gate:
     enabled: false                     # Full gate kills Q1 2025. Use news_kill_rules instead.
   # News kill rules: block no-news trades in specific LOSER segments only

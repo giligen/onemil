@@ -205,8 +205,15 @@ class TradingEngine:
         # Conviction scoring: scale position size by setup quality
         conv_cfg = _cfg.get("trading", {}).get("conviction_scoring", {})
         self.conviction_enabled = bool(conv_cfg.get("enabled", False))
+        # Conviction filter (skip trades below threshold). 0.0 = disabled.
+        # 1.2 = walk-forward validated (+$10-18K/period OOS).
+        # COUPLED to current 5 conviction rules — re-validate if rules change.
+        self.conviction_min_threshold = float(conv_cfg.get("min_threshold", 0.0))
         if self.conviction_enabled:
-            logger.info("Conviction scoring: ENABLED (matches backtest V4 model)")
+            msg = "Conviction scoring: ENABLED (matches backtest V4 model)"
+            if self.conviction_min_threshold > 0:
+                msg += f" — filter trades with conv < {self.conviction_min_threshold:.2f}"
+            logger.info(msg)
 
         # News gate: require real catalyst before trading
         news_gate_cfg = _cfg.get("trading", {}).get("news_gate", {})
@@ -498,46 +505,77 @@ class TradingEngine:
 
         return (True, "")
 
-    def _compute_conviction_score_setup(self, setup, spy_3d_range: float) -> float:
+    def _compute_conviction_score_setup(
+        self, setup, spy_3d_range: float, return_breakdown: bool = False,
+    ):
         """Compute conviction score at setup detection time.
 
         Returns a multiplier (0.25 to 3.0) that scales position size.
         Matches backtest.py exactly — 5 pattern rules, no news scoring.
+
+        Args:
+            setup: BullFlagSetup object
+            spy_3d_range: SPY 3-day average daily range (%)
+            return_breakdown: If True, return (final_score, breakdown_dict).
+                breakdown_dict has per-rule contributions plus 'raw_score'
+                (pre-clamp) and 'final_score' (post-clamp). For trace logging.
+
+        Returns:
+            float (when return_breakdown=False) — the position multiplier
+            tuple (float, dict) — when return_breakdown=True
         """
         score = 1.0
+        breakdown = {}
 
         # 1. Pole gain sweet spot (4.5-9%)
         pg = setup.pole_gain_pct
-        if 4.5 <= pg <= 9.0:
-            score += 0.3
+        pg_contrib = 0.3 if 4.5 <= pg <= 9.0 else 0.0
+        score += pg_contrib
+        breakdown['pole_gain'] = pg_contrib
 
         # 2. Flag tightness (tight < 30% = good, loose > 50% = bad)
+        ft_contrib = 0.0
         pole_height = setup.pole_high - setup.pole_low
         if pole_height > 0:
             flag_range = setup.flag_high - setup.flag_low
             tightness = flag_range / pole_height * 100
             if tightness < 30:
-                score += 0.3
+                ft_contrib = 0.3
             elif tightness > 50:
-                score -= 0.3
+                ft_contrib = -0.3
+        score += ft_contrib
+        breakdown['flag_tightness'] = ft_contrib
 
         # 3. Volume ratio pole/flag (>1.7x = buying conviction)
+        vr_contrib = 0.0
         if setup.avg_flag_volume > 0:
             vol_ratio = setup.avg_pole_volume / setup.avg_flag_volume
             if vol_ratio > 1.7:
-                score += 0.3
+                vr_contrib = 0.3
+        score += vr_contrib
+        breakdown['vol_ratio'] = vr_contrib
 
         # 4. SPY 3d range regime
         if spy_3d_range > 1.2:
-            score += 0.3
+            sr_contrib = 0.3
         elif spy_3d_range < 0.8:
-            score -= 0.5
+            sr_contrib = -0.5
+        else:
+            sr_contrib = 0.0
+        score += sr_contrib
+        breakdown['spy_regime'] = sr_contrib
 
         # 5. Shallow retracement (< 30%)
-        if setup.retracement_pct < 30:
-            score += 0.2
+        rt_contrib = 0.2 if setup.retracement_pct < 30 else 0.0
+        score += rt_contrib
+        breakdown['retracement'] = rt_contrib
 
-        return max(0.25, min(3.0, score))
+        final = max(0.25, min(3.0, score))
+        if return_breakdown:
+            breakdown['raw_score'] = score
+            breakdown['final_score'] = final
+            return final, breakdown
+        return final
 
     def _get_spy_3d_range_live(self) -> float:
         """Get SPY 3-day avg daily range. Uses market_regime's SPY daily bars if available."""
@@ -2411,6 +2449,30 @@ class TradingEngine:
                     f"{symbol}: Conviction {conviction_mult:.2f}x "
                     f"(pole={setup.pole_gain_pct:.1f}%, "
                     f"retr={setup.retracement_pct:.0f}%, SPY3d={spy_3d:.1f}%)")
+
+            # Conviction filter: skip trades below quality threshold.
+            # Walk-forward validated: conv<1.2 setups = 28% WR, -0.18R avg (negative EV).
+            if (self.conviction_min_threshold > 0
+                    and conviction_mult < self.conviction_min_threshold):
+                _, brkdn = self._compute_conviction_score_setup(
+                    setup, spy_3d, return_breakdown=True)
+                breakdown_str = (
+                    f"pole={brkdn['pole_gain']:+.1f} "
+                    f"flag={brkdn['flag_tightness']:+.1f} "
+                    f"vol={brkdn['vol_ratio']:+.1f} "
+                    f"spy={brkdn['spy_regime']:+.1f} "
+                    f"retr={brkdn['retracement']:+.1f}"
+                )
+                logger.info(
+                    f"{symbol}: CONVICTION SKIP: {conviction_mult:.2f} < "
+                    f"{self.conviction_min_threshold:.2f} "
+                    f"({breakdown_str}; raw={brkdn['raw_score']:.2f})"
+                )
+                self._eod_skipped.append((
+                    symbol, "LOW_CONVICTION",
+                    f"conv {conviction_mult:.2f} ({breakdown_str})"
+                ))
+                return None
 
         combined_mult = min(3.0, risk_multiplier * conviction_mult)
 

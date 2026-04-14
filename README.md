@@ -137,6 +137,19 @@ Config: `news_kill_rules.enabled: true`. News fetched from Alpaca News API, clas
 
 Combined with risk tier multiplier, capped at 3.0x. Applied via `create_plan(risk_multiplier=combined_mult)`. Config: `conviction_scoring.enabled: true`.
 
+**Conviction also acts as a hard filter** when `conviction_scoring.min_threshold > 0`. Setups scoring below the threshold are skipped entirely (no order placed). Walk-forward validated at threshold = 1.2 across 3 train/test splits:
+
+| Split | Filter | Test P&L | Δ vs baseline | WR |
+|-------|--------|----------|---------------|-----|
+| Train 2025 → Test 2026 Q1+Q2 | vol>5 only | +$46,959 | +$15,615 | 35% |
+| Train 2025 → Test 2026 Q1+Q2 | **vol>5 OR conv<1.2** | **+$49,457** | **+$18,113** | **46%** |
+| Train H1 2025 → Test H2 2025 | vol>5 only | +$115,876 | $0 | 42% |
+| Train H1 2025 → Test H2 2025 | **vol>5 OR conv<1.2** | **+$125,999** | **+$10,123** | **53%** |
+| Train Jan-Sep → Test Oct-Apr | vol>5 only | +$107,246 | +$15,615 | 39% |
+| Train Jan-Sep → Test Oct-Apr | **vol>5 OR conv<1.2** | **+$109,350** | **+$17,719** | **48%** |
+
+The conv<1.2 bucket is monotonically negative-EV (28% WR, -0.18R avg). Skipping these reduces trade count ~40-50% but lifts WR to ~53% and trims max DD. Each skip is logged with per-rule breakdown for trace/improve cycles. **Threshold is coupled to the current 5 conviction rules — re-validate if rules change.**
+
 #### Layer 4: Post-Fill Exit — SPY calm + weak breakout volume
 
 After buy-stop fills, if SPY 3-day range < 0.8% (calm market) AND breakout bar volume < 1.0x flag average → **immediate close**. Catches weak breakouts that rely on broad-market momentum that isn't there.
