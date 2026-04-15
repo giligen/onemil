@@ -516,3 +516,90 @@ class TestBarStartToClose:
         ts = datetime(2026, 4, 15, 14, 59, 0, tzinfo=timezone.utc)
         out = MACDWaveEngine._bar_start_to_close(ts)
         assert out == datetime(2026, 4, 15, 15, 0, 0, tzinfo=timezone.utc)
+
+
+# =============================================================================
+# Exit telemetry parity with bull_flag (added 2026-04-15 — see learnings from
+# XNDU/MNTS trades where macd_flip exits had NULL exit_quote_bid_size,
+# exit_trigger_price, exit_fill_latency_ms, exit_slippage)
+# =============================================================================
+
+class TestSubmitExitTelemetry:
+    """_submit_exit must populate the same exit-microstructure fields as the
+    bull_flag stop/TP exit so we can analyze WHY waves die."""
+
+    def _engine_with_open_pos(self):
+        e = _make_engine()
+        # Stub out helpers we don't care about
+        e.alpaca.get_latest_quote = MagicMock(return_value={
+            'bid_price': 6.13, 'ask_price': 6.14,
+            'bid_size': 500, 'ask_size': 800,
+        })
+        e.alpaca.close_position = MagicMock(return_value={'id': 'order-xyz'})
+        e.alpaca.trading_client = MagicMock()
+        e.alpaca.trading_client.get_orders = MagicMock(return_value=[])
+        # Insert an open position to close
+        pos = OpenPosition(
+            symbol='MNTS', entry_price=6.12, shares=12254, hard_stop=6.00,
+            trade_id=42, order_id='entry-abc',
+            entry_time=datetime.now(timezone.utc),
+        )
+        e.open_positions['MNTS'] = pos
+        return e
+
+    def test_macd_flip_exit_populates_full_telemetry(self):
+        e = self._engine_with_open_pos()
+        ok = e._submit_exit('MNTS', 'macd_flip', trigger_price=6.10)
+        assert ok is True
+
+        # Find the FINAL update_trade call (the one with the full exit dict).
+        calls = e.db.update_trade.call_args_list
+        # The last call carries exit_price + exit_reason + the new telemetry.
+        last_payload = calls[-1].args[1] if len(calls[-1].args) > 1 else calls[-1].kwargs
+        assert last_payload['exit_price'] == 6.13
+        assert last_payload['exit_reason'] == 'macd_flip'
+        # NEW telemetry fields — these were NULL before today's fix.
+        assert last_payload['exit_trigger_price'] == 6.10
+        assert last_payload['exit_quote_bid'] == 6.13
+        assert last_payload['exit_quote_ask'] == 6.14
+        assert last_payload['exit_quote_bid_size'] == 500
+        assert last_payload['exit_quote_ask_size'] == 800
+        assert last_payload['exit_quote_spread'] == pytest.approx(0.01, abs=1e-9)
+        assert last_payload['exit_limit_price'] == 6.13
+        assert last_payload['exit_pricing_method'] == 'macd_flip_close'
+        assert last_payload['exit_submitted_at'] is not None
+        # fill latency is positive (we measure between two time.time() calls)
+        assert last_payload['exit_fill_latency_ms'] >= 0
+        # exit_slippage = limit (6.13) - actual fill (6.13) = 0
+        assert last_payload['exit_slippage'] == pytest.approx(0.0, abs=1e-9)
+
+    def test_force_close_exit_populates_telemetry_with_null_trigger(self):
+        e = self._engine_with_open_pos()
+        ok = e._submit_exit('MNTS', 'force_close')  # no trigger_price
+        assert ok is True
+        last_payload = e.db.update_trade.call_args_list[-1].args[1]
+        # Force-close has no specific trigger price (EOD timer, not a signal).
+        assert last_payload['exit_trigger_price'] is None
+        # But all the rest is still captured.
+        assert last_payload['exit_pricing_method'] == 'force_close_close'
+        assert last_payload['exit_quote_bid_size'] == 500
+        assert last_payload['exit_submitted_at'] is not None
+
+    def test_no_quote_falls_back_safely(self):
+        """If the broker returns a zero/missing quote, telemetry stores None
+        rather than crashing."""
+        e = self._engine_with_open_pos()
+        e.alpaca.get_latest_quote = MagicMock(return_value={
+            'bid_price': 0, 'ask_price': 0, 'bid_size': 0, 'ask_size': 0,
+        })
+        ok = e._submit_exit('MNTS', 'macd_flip', trigger_price=6.10)
+        assert ok is True
+        last_payload = e.db.update_trade.call_args_list[-1].args[1]
+        assert last_payload['exit_quote_bid'] is None
+        assert last_payload['exit_quote_ask'] is None
+        assert last_payload['exit_quote_bid_size'] is None
+        assert last_payload['exit_quote_spread'] is None
+        assert last_payload['exit_limit_price'] is None
+        assert last_payload['exit_slippage'] is None
+        # Trigger price is still recorded (we know what bar fired the flip).
+        assert last_payload['exit_trigger_price'] == 6.10

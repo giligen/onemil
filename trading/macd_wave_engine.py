@@ -1311,10 +1311,12 @@ class MACDWaveEngine:
                 histogram = (ema_fast - ema_slow) - (ema_fast - ema_slow).ewm(span=self.macd_signal, adjust=False).mean()
 
                 if histogram.iloc[-1] <= 0:
-                    # MACD flipped — remove from StopMonitor FIRST, then exit
+                    # MACD flipped — remove from StopMonitor FIRST, then exit.
+                    # trigger_price = the bar close that caused the flip (telemetry).
                     if self.stop_monitor:
                         self.stop_monitor.remove_watch(sym)
-                    self._submit_exit(sym, 'macd_flip')
+                    self._submit_exit(sym, 'macd_flip',
+                                      trigger_price=float(close.iloc[-1]))
                     exits.append(sym)
 
             except Exception as e:
@@ -1322,8 +1324,20 @@ class MACDWaveEngine:
 
         return exits
 
-    def _submit_exit(self, symbol: str, reason: str) -> bool:
-        """Submit a sell order."""
+    def _submit_exit(self, symbol: str, reason: str,
+                     trigger_price: Optional[float] = None) -> bool:
+        """Submit a sell order.
+
+        Args:
+            symbol: Stock to close.
+            reason: 'macd_flip' or 'force_close' (used for exit_reason +
+                exit_pricing_method).
+            trigger_price: Bar close price that triggered the exit decision
+                (e.g., the bar whose MACD histogram flipped). Stored for
+                post-hoc analysis — distinguishes "what we saw" from "what
+                we filled at" (which can drift over the 10s submit→fill).
+                None for force_close (no specific price triggered it).
+        """
         pos = self.open_positions.get(symbol)
         if not pos:
             return False
@@ -1342,6 +1356,11 @@ class MACDWaveEngine:
             # Works for both force_close and macd_flip
             quote = self.alpaca.get_latest_quote(symbol)
             bid = quote.get('bid_price', 0)
+            ask = quote.get('ask_price', 0)
+            bid_size = quote.get('bid_size', 0)
+            ask_size = quote.get('ask_size', 0)
+            exit_spread = (ask - bid) if (ask > 0 and bid > 0) else None
+            exit_limit_price = bid if bid > 0 else None
             exit_price = bid if bid > 0 else pos.entry_price * 0.99
 
             # Cancel bracket legs first (SL/TP hold shares, blocking close_position)
@@ -1360,30 +1379,50 @@ class MACDWaveEngine:
             except Exception as cancel_err:
                 logger.warning(f"[{self.STRATEGY_NAME}] {symbol}: cancel orders before close: {cancel_err}")
 
+            # Capture submit timestamp BEFORE the close_position call so we can
+            # measure submit→fill latency. Mirrors the bull-flag exit pattern.
+            submitted_at_ts = time_mod.time()
+            submitted_at_dt = datetime.fromtimestamp(submitted_at_ts, tz=timezone.utc)
+
             result = self.alpaca.close_position(symbol)
             order_id = result.get('id', '') if result else ''
 
-            # Log exit microstructure
-            if bid > 0:
-                self.db.update_trade(pos.trade_id, {
-                    'exit_quote_bid': bid,
-                    'exit_quote_ask': quote.get('ask_price', 0),
-                    'exit_limit_price': bid,
-                    'exit_pricing_method': f'{reason}_close',
-                })
+            fill_latency_ms = (time_mod.time() - submitted_at_ts) * 1000
+            # Exit slippage: how far did the actual fill drift from our intended
+            # limit (the bid we saw at submit). Positive = we got LESS than
+            # planned (sold below our target). Bull-flag uses the same sign
+            # convention (exit_limit_price - actual_exit_price).
+            exit_slippage = (
+                exit_limit_price - exit_price
+                if exit_limit_price is not None else None
+            )
 
             # Compute P&L
             pnl = (exit_price - pos.entry_price) * pos.shares
             pnl_pct = (exit_price - pos.entry_price) / pos.entry_price * 100 if pos.entry_price > 0 else 0
             self.daily_pnl += pnl
 
-            # Update DB
+            # Update DB — single write for all exit telemetry (atomic per row).
+            # Mirrors trading_engine.py:1877-1896 field set so post-hoc analysis
+            # can join across both strategies on the same column names.
             self.db.update_trade(pos.trade_id, {
                 'exit_price': exit_price,
                 'exit_reason': reason,
                 'exited_at': datetime.now(timezone.utc),
                 'pnl': pnl,
                 'pnl_pct': pnl_pct,
+                # Exit microstructure (parity with bull_flag stop/TP exits)
+                'exit_trigger_price': trigger_price,
+                'exit_quote_bid': bid if bid > 0 else None,
+                'exit_quote_ask': ask if ask > 0 else None,
+                'exit_quote_bid_size': bid_size if bid_size > 0 else None,
+                'exit_quote_ask_size': ask_size if ask_size > 0 else None,
+                'exit_quote_spread': exit_spread,
+                'exit_limit_price': exit_limit_price,
+                'exit_pricing_method': f'{reason}_close',
+                'exit_submitted_at': submitted_at_dt,
+                'exit_fill_latency_ms': fill_latency_ms,
+                'exit_slippage': exit_slippage,
             })
 
             # Notify
