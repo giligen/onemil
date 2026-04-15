@@ -2018,7 +2018,11 @@ class TestThinLiquidityPostFillCheck:
         engine.on_stock_qualified("AAPL")
         engine.run_pattern_check()
 
-        mock_executor.submit_buy_stop_bracket_order.assert_called_once_with(plan)
+        # plan is the positional arg; pipeline_timing kwarg added in 2026-04-15
+        # bull-flag telemetry rollout — assert positional arg only.
+        mock_executor.submit_buy_stop_bracket_order.assert_called_once()
+        call = mock_executor.submit_buy_stop_bracket_order.call_args
+        assert call.args == (plan,)
 
     @patch('trading.trading_engine.TradingEngine._is_past_last_entry_time', return_value=False)
     def test_normal_day_no_thin_tag(
@@ -3689,3 +3693,44 @@ class TestConvictionFilter:
                          if r.levelno == logging.WARNING
                          and 'conviction_min_threshold' in r.message]
         assert conv_warnings == [], f"Unexpected warnings: {conv_warnings}"
+
+
+# ===========================================================================
+# Pipeline timing helper (bar START → bar CLOSE conversion)
+# Added 2026-04-15 alongside bull-flag submit-timing telemetry. Inline-
+# duplicate of MACDWaveEngine._bar_start_to_close to avoid cross-engine
+# coupling — test pins both implementations to the same behavior.
+# ===========================================================================
+
+class TestBarStartToClose:
+    def test_pd_timestamp_adds_60s(self):
+        from trading.trading_engine import TradingEngine
+        import pandas as _pd
+        ts = _pd.Timestamp('2026-04-15 14:04:00', tz='UTC')
+        out = TradingEngine._bar_start_to_close(ts)
+        assert out == datetime(2026, 4, 15, 14, 5, 0, tzinfo=timezone.utc)
+
+    def test_naive_datetime_assumed_utc(self):
+        from trading.trading_engine import TradingEngine
+        ts = datetime(2026, 4, 15, 14, 4, 0)
+        out = TradingEngine._bar_start_to_close(ts)
+        assert out == datetime(2026, 4, 15, 14, 5, 0, tzinfo=timezone.utc)
+        assert out.tzinfo == timezone.utc
+
+    def test_minute_rollover_to_next_hour(self):
+        from trading.trading_engine import TradingEngine
+        ts = datetime(2026, 4, 15, 14, 59, 0, tzinfo=timezone.utc)
+        out = TradingEngine._bar_start_to_close(ts)
+        assert out == datetime(2026, 4, 15, 15, 0, 0, tzinfo=timezone.utc)
+
+    def test_matches_macd_wave_engine_implementation(self):
+        """Drift-detector: TradingEngine and MACDWaveEngine must agree."""
+        from trading.trading_engine import TradingEngine
+        from trading.macd_wave_engine import MACDWaveEngine
+        for ts in [
+            datetime(2026, 4, 15, 14, 4, 0, tzinfo=timezone.utc),
+            datetime(2026, 4, 15, 9, 30, 0, tzinfo=timezone.utc),
+            datetime(2026, 4, 15, 15, 59, 0, tzinfo=timezone.utc),
+        ]:
+            assert TradingEngine._bar_start_to_close(ts) == \
+                   MACDWaveEngine._bar_start_to_close(ts)

@@ -1009,6 +1009,18 @@ class MACDWaveEngine:
             micro['loop_to_quote_ms'] = _ms(loop_processed_at, quote_fetched_at)
             micro['quote_to_submit_ms'] = _ms(quote_fetched_at, order_submitted_at)
 
+            # Anomaly signal: warn when q2s exceeds the threshold so we get
+            # an early heads-up on Alpaca/cloud-provider degradation
+            # (see 2026-04-15 incident — q2s spiked from 220-450ms to 3.3s).
+            # Threshold matches OrderExecutor._SUBMIT_LATENCY_WARN_MS for parity.
+            _q2s = micro['quote_to_submit_ms']
+            if _q2s is not None and _q2s > 1000:
+                logger.warning(
+                    f"[{self.STRATEGY_NAME}] {symbol}: SLOW SUBMIT — "
+                    f"quote→submit {_q2s}ms > 1000ms threshold. "
+                    f"Likely Alpaca/cloud-provider degradation."
+                )
+
             if bar_close_price and bar_close_price > 0 and ask > 0:
                 micro['drift_bar_to_ask_bps'] = (ask - bar_close_price) / bar_close_price * 10000
 

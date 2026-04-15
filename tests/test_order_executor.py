@@ -4,8 +4,9 @@ Unit tests for OrderExecutor — bracket order submission via Alpaca.
 Uses mocked AlpacaClient and real database (temp file).
 """
 
+import logging
 import pytest
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, patch
 
 from data_sources.alpaca_client import AlpacaClient, AlpacaAPIError
@@ -278,5 +279,125 @@ class TestConflictCheckFastPath:
         # Stream raised → REST fallback fires, returns no conflict
         assert ex._has_conflicting_orders('AAPL') is False
         alpaca_with_client.trading_client.get_orders.assert_called_once()
+
+
+# ===========================================================================
+# Pipeline timing telemetry (added 2026-04-15 — see learnings from MACD wave
+# 3.3s quote_to_submit on Anthropic+Alpaca cloud incident day. Bull-flag was
+# missing this telemetry entirely, so the analogous incident on bull-flag
+# would have been invisible.)
+# ===========================================================================
+
+class TestSubmitTimingTelemetry:
+    """OrderExecutor must capture loop→submit latency so we can detect
+    Alpaca/cloud-provider degradation in real time."""
+
+    def _setup_simple_alpaca(self, mock_alpaca):
+        mock_alpaca.submit_stop_limit_order.return_value = {
+            'id': 'order-timing-1', 'status': 'accepted',
+            'symbol': 'TEST', 'qty': 113,
+        }
+
+    def test_simple_order_persists_full_pipeline_timing(self, executor, mock_alpaca, db):
+        self._setup_simple_alpaca(mock_alpaca)
+        bar_close_at = datetime.now(timezone.utc) - timedelta(seconds=2)
+        loop_processed_at = bar_close_at + timedelta(milliseconds=600)
+        plan = _make_plan()
+        result = executor.submit_buy_stop_order(
+            plan,
+            pipeline_timing={
+                'bar_close_at': bar_close_at,
+                'loop_processed_at': loop_processed_at,
+            },
+        )
+        assert result is not None
+        from datetime import date as _date
+        trades = db.get_trades_by_date(_date.today().isoformat())
+        assert len(trades) == 1
+        t = trades[0]
+        # All four timing fields populated; q2s is computed; b2l is 600 ms.
+        assert t['order_submitted_at'] is not None
+        assert t['loop_processed_at'] is not None
+        assert t['bar_close_at'] is not None
+        assert t['bar_close_to_loop_ms'] == 600
+        assert t['quote_to_submit_ms'] >= 0  # actual elapsed since loop_processed_at
+
+    def test_bracket_order_persists_full_pipeline_timing(self, executor, mock_alpaca, db):
+        mock_alpaca.submit_stop_bracket_order.return_value = {
+            'id': 'order-timing-2', 'status': 'accepted',
+            'symbol': 'TEST', 'qty': 113,
+        }
+        bar_close_at = datetime.now(timezone.utc) - timedelta(seconds=3)
+        loop_processed_at = bar_close_at + timedelta(milliseconds=1500)
+        plan = _make_plan()
+        result = executor.submit_buy_stop_bracket_order(
+            plan,
+            pipeline_timing={
+                'bar_close_at': bar_close_at,
+                'loop_processed_at': loop_processed_at,
+            },
+        )
+        assert result is not None
+        from datetime import date as _date
+        trades = db.get_trades_by_date(_date.today().isoformat())
+        assert len(trades) == 1
+        t = trades[0]
+        assert t['bar_close_to_loop_ms'] == 1500
+        assert t['quote_to_submit_ms'] >= 0
+
+    def test_no_pipeline_timing_leaves_columns_null_safely(
+        self, executor, mock_alpaca, db,
+    ):
+        """Calling without pipeline_timing must NOT crash and must NOT pollute
+        the DB with synthetic timestamps."""
+        self._setup_simple_alpaca(mock_alpaca)
+        plan = _make_plan()
+        result = executor.submit_buy_stop_order(plan)  # no pipeline_timing
+        assert result is not None
+        from datetime import date as _date
+        trades = db.get_trades_by_date(_date.today().isoformat())
+        assert len(trades) == 1
+        t = trades[0]
+        # order_submitted_at IS captured (we know when WE submitted)
+        assert t['order_submitted_at'] is not None
+        # but bar_close_at / loop_processed_at / derived metrics stay NULL
+        assert t['bar_close_at'] is None
+        assert t['loop_processed_at'] is None
+        assert t['bar_close_to_loop_ms'] is None
+        assert t['quote_to_submit_ms'] is None
+
+    def test_slow_submit_fires_warn_log(self, executor, mock_alpaca, db, caplog):
+        """When loop→submit > 1000ms, a WARN must fire — early signal of
+        cloud-provider degradation (the 2026-04-15 Anthropic+Alpaca incident)."""
+        self._setup_simple_alpaca(mock_alpaca)
+        # Fake an old loop_processed_at so order_submitted_at - loop > 1000ms.
+        loop_processed_at = datetime.now(timezone.utc) - timedelta(milliseconds=2500)
+        plan = _make_plan()
+        with caplog.at_level(logging.WARNING):
+            executor.submit_buy_stop_order(
+                plan, pipeline_timing={'loop_processed_at': loop_processed_at},
+            )
+        slow_warns = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and 'SLOW SUBMIT' in r.message
+        ]
+        assert len(slow_warns) == 1
+        assert 'TEST' in slow_warns[0].message
+        assert 'strategy=bull_flag' in slow_warns[0].message
+
+    def test_fast_submit_does_not_warn(self, executor, mock_alpaca, db, caplog):
+        """Normal-latency submits (<1000ms) must NOT spam WARN logs."""
+        self._setup_simple_alpaca(mock_alpaca)
+        loop_processed_at = datetime.now(timezone.utc)
+        plan = _make_plan()
+        with caplog.at_level(logging.WARNING):
+            executor.submit_buy_stop_order(
+                plan, pipeline_timing={'loop_processed_at': loop_processed_at},
+            )
+        slow_warns = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and 'SLOW SUBMIT' in r.message
+        ]
+        assert slow_warns == []
 
 

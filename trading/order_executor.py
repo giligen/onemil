@@ -18,6 +18,13 @@ from trading.trade_planner import TradePlan
 
 logger = logging.getLogger(__name__)
 
+# Telemetry threshold: WARN when loop_processed_at → order_submitted_at exceeds
+# this. Historical norm (April 2026, paper API): 220-450ms. The 2026-04-15
+# Anthropic+Alpaca cloud incident pushed this to 3.3s — that's the kind of
+# anomaly we want to surface in real time. See research/macd_wave_latency.md
+# (or memory:project_prod_timing) for the underlying analysis.
+_SUBMIT_LATENCY_WARN_MS = 1000
+
 
 class OrderExecutor:
     """
@@ -49,6 +56,58 @@ class OrderExecutor:
         self.alpaca = alpaca_client
         self.db = db
         self.order_stream = order_stream
+
+    def _persist_submit_timing(self, trade_id: int, symbol: str,
+                                strategy: str,
+                                pipeline_timing: Optional[Dict[str, Any]]) -> None:
+        """Persist pipeline timing telemetry for a trade. Call AFTER save_trade.
+
+        Updates: order_submitted_at, bar_close_at, loop_processed_at, and
+        derived bar_close_to_loop_ms + quote_to_submit_ms. Persisted via
+        update_trade because save_trade's INSERT only covers a fixed set of
+        columns — mirrors macd_wave_engine's pattern.
+
+        For bull_flag, loop_to_quote_ms stays NULL (no quote-fetch step);
+        quote_to_submit_ms carries the entire loop→submit-ack interval and
+        is the primary anomaly signal. Logs WARN when it exceeds
+        _SUBMIT_LATENCY_WARN_MS so we get early notice of Alpaca/cloud
+        degradation days (see 2026-04-15 incident).
+        """
+        order_submitted_at = datetime.now(timezone.utc)
+        pt = pipeline_timing or {}
+        bar_close_at = pt.get('bar_close_at')
+        loop_processed_at = pt.get('loop_processed_at')
+
+        updates: Dict[str, Any] = {'order_submitted_at': order_submitted_at}
+        if bar_close_at is not None:
+            updates['bar_close_at'] = bar_close_at
+        if loop_processed_at is not None:
+            updates['loop_processed_at'] = loop_processed_at
+
+        if bar_close_at is not None and loop_processed_at is not None:
+            updates['bar_close_to_loop_ms'] = int(
+                (loop_processed_at - bar_close_at).total_seconds() * 1000
+            )
+
+        if loop_processed_at is not None:
+            loop_to_submit_ms = int(
+                (order_submitted_at - loop_processed_at).total_seconds() * 1000
+            )
+            updates['quote_to_submit_ms'] = loop_to_submit_ms
+            if loop_to_submit_ms > _SUBMIT_LATENCY_WARN_MS:
+                logger.warning(
+                    f"{symbol}: SLOW SUBMIT — loop→submit "
+                    f"{loop_to_submit_ms}ms > {_SUBMIT_LATENCY_WARN_MS}ms "
+                    f"threshold (strategy={strategy}). "
+                    f"Likely Alpaca/cloud-provider degradation."
+                )
+
+        try:
+            self.db.update_trade(trade_id, updates)
+        except Exception as e:
+            logger.warning(
+                f"{symbol}: failed to persist timing telemetry: {e}"
+            )
 
     def _has_conflicting_orders(self, symbol: str) -> bool:
         """Check if symbol has existing open orders on Alpaca (any strategy).
@@ -200,6 +259,7 @@ class OrderExecutor:
     def submit_buy_stop_bracket_order(
         self, plan: TradePlan, slippage_pct: float = 0.02,
         sl_override: Optional[float] = None,
+        pipeline_timing: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Submit a buy-stop bracket order for a trade plan.
@@ -318,6 +378,11 @@ class OrderExecutor:
         try:
             trade_id = self.db.save_trade(trade_record)
             logger.info(f"{plan.symbol}: Trade record saved (id={trade_id})")
+            # Persist pipeline timing telemetry via UPDATE (save_trade INSERT
+            # doesn't cover these columns).
+            self._persist_submit_timing(
+                trade_id, plan.symbol, 'bull_flag', pipeline_timing,
+            )
         except Exception as e:
             logger.error(f"{plan.symbol}: Failed to save trade record: {e}")
 
@@ -335,6 +400,7 @@ class OrderExecutor:
 
     def submit_buy_stop_order(
         self, plan: TradePlan, slippage_pct: float = 0.02,
+        pipeline_timing: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Submit a simple stop-limit buy order (no bracket legs).
@@ -435,6 +501,11 @@ class OrderExecutor:
         try:
             trade_id = self.db.save_trade(trade_record)
             logger.info(f"{plan.symbol}: Trade record saved (id={trade_id})")
+            # Persist pipeline timing telemetry via UPDATE (save_trade INSERT
+            # doesn't cover these columns).
+            self._persist_submit_timing(
+                trade_id, plan.symbol, 'bull_flag', pipeline_timing,
+            )
         except Exception as e:
             logger.error(f"{plan.symbol}: Failed to save trade record: {e}")
 

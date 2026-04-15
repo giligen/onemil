@@ -873,6 +873,25 @@ class TradingEngine:
         # The scanner will re-call on_stock_qualified() which is idempotent (checks set membership)
         pass
 
+    @staticmethod
+    def _bar_start_to_close(bar_timestamp_raw) -> datetime:
+        """Convert an Alpaca 1-min bar timestamp (bar START) to actual close time.
+
+        Alpaca convention: a bar with `timestamp = 14:04:00` represents trades
+        from 14:04:00 to 14:05:00, closing at 14:05:00. Add 60s to get the
+        actual close. Mirrors trading.macd_wave_engine.MACDWaveEngine._bar_start_to_close
+        — kept as an inline duplicate to avoid cross-engine coupling.
+        """
+        if isinstance(bar_timestamp_raw, pd.Timestamp):
+            bar_start = bar_timestamp_raw.to_pydatetime()
+        elif isinstance(bar_timestamp_raw, datetime):
+            bar_start = bar_timestamp_raw
+        else:
+            bar_start = pd.to_datetime(bar_timestamp_raw, utc=True).to_pydatetime()
+        if bar_start.tzinfo is None:
+            bar_start = bar_start.replace(tzinfo=timezone.utc)
+        return bar_start + timedelta(seconds=60)
+
     def _is_past_last_entry_time(self) -> bool:
         """Check if current ET time is past last_entry_time."""
         now_et = datetime.now(ET)
@@ -2336,6 +2355,12 @@ class TradingEngine:
         Returns:
             Dict with order details if buy-stop placed, None otherwise
         """
+        # Pipeline timing — captured at the very top so it represents
+        # "we started looking at this symbol". Bar-close is derived later
+        # once we have the bars dataframe (only meaningful when prefetched
+        # bars came from a real-time WebSocket bar event).
+        loop_processed_at = datetime.now(timezone.utc)
+
         # Fetch universe stock data once (used for volume filter + risk tier)
         uni_stock = self.db.get_universe_stock(symbol) if self.db else None
 
@@ -2701,6 +2726,24 @@ class TradingEngine:
                     risk_reward=plan.risk_reward_ratio,
                 )
 
+        # Build pipeline_timing once for whichever submit path runs. Only
+        # populate bar_close_at when we have prefetched bars from a RT
+        # WebSocket event (the periodic poll fetches bars itself, where
+        # the "last bar close" isn't a meaningful trigger).
+        _bar_close_at = None
+        if prefetched_bars is not None and not prefetched_bars.empty:
+            try:
+                _ts = prefetched_bars.iloc[-1].get('timestamp')
+                if _ts is None:
+                    _ts = prefetched_bars.iloc[-1].name
+                _bar_close_at = self._bar_start_to_close(_ts)
+            except Exception:
+                _bar_close_at = None  # not fatal — derived metrics just stay NULL
+        _pipeline_timing = {
+            'loop_processed_at': loop_processed_at,
+            'bar_close_at': _bar_close_at,
+        }
+
         real_stop_level = plan.stop_loss_price
         if self.stop_monitor:
             # Simple stop-limit (no bracket) — avoids 3x margin reservation
@@ -2709,11 +2752,13 @@ class TradingEngine:
                 f"{symbol}: Self-managed stops — real stop ${real_stop_level:.2f}, "
                 f"safety-net SL after fill ({self.safety_net_sl_pct:.0%})"
             )
-            result = self.executor.submit_buy_stop_order(plan)
+            result = self.executor.submit_buy_stop_order(
+                plan, pipeline_timing=_pipeline_timing)
         else:
             # Bracket order — SL/TP legs provide protection without StopMonitor
             # No sl_override: bracket SL = plan.stop_loss_price (real stop)
-            result = self.executor.submit_buy_stop_bracket_order(plan)
+            result = self.executor.submit_buy_stop_bracket_order(
+                plan, pipeline_timing=_pipeline_timing)
 
         if result is not None:
             # NOTE: _daily_trade_count and mark_traded are deferred to fill
