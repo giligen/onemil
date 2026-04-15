@@ -191,12 +191,13 @@ class LLMNewsAnalyzer(NewsAnalyzer):
         # runs in the NewsWorker background thread, so it does NOT block the
         # trading hot path (which reads a pre-populated dict via get_result).
         MAX_ATTEMPTS = 3
-        BACKOFF_S = (0, 1, 2)  # sleep BEFORE attempt index (no sleep before #0)
         raw = None
         last_error: Optional[Exception] = None
         for attempt in range(MAX_ATTEMPTS):
-            if BACKOFF_S[attempt] > 0:
-                time.sleep(BACKOFF_S[attempt])
+            if attempt > 0:
+                # Exponential: 1s, 2s, 4s, ... — derived from attempt index so
+                # bumping MAX_ATTEMPTS doesn't require touching a backoff tuple.
+                time.sleep(2 ** (attempt - 1))
             try:
                 response = self._client.messages.create(
                     model=self._model,

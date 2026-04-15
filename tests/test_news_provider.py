@@ -186,6 +186,24 @@ class TestLLMNewsAnalyzer:
         assert result is False
         assert client.messages.create.call_count == 2
 
+    def test_backoff_schedule_is_exponential(self, monkeypatch):
+        """Backoff sleep before retries follows 2**(attempt-1) — pin schedule."""
+        sleeps: list = []
+        monkeypatch.setattr(
+            'data_sources.news_provider.time.sleep',
+            lambda s: sleeps.append(s),
+        )
+        err_529 = self._make_status_error(529)
+        client = MagicMock()
+        client.messages.create.side_effect = lambda **_: (_ for _ in ()).throw(err_529)
+        analyzer = LLMNewsAnalyzer(client, model="test-model")
+
+        analyzer.is_interesting(
+            {'headline': 'h', 'summary': 's'}, symbol='SLEEP',
+        )
+        # First attempt: no sleep. Second: 2**0 = 1s. Third: 2**1 = 2s.
+        assert sleeps == [1, 2]
+
     def test_retries_on_apiconnectionerror_class_name(self, monkeypatch):
         """Network errors with no status_code retry by class-name fallback."""
         monkeypatch.setattr('time.sleep', lambda _: None)
