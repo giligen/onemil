@@ -10,9 +10,20 @@ LLMNewsAnalyzer uses Claude Haiku 4.5 to classify articles.
 
 import json
 import logging
+import time
 from typing import List, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+# HTTP status codes worth retrying — server-side capacity / transient.
+# 429 rate_limit, 502 bad_gateway, 503 service_unavailable, 504 gateway_timeout,
+# 529 anthropic-specific overloaded_error.
+_RETRYABLE_STATUS_CODES = frozenset({429, 502, 503, 504, 529})
+
+# Class names for SDK exceptions without an HTTP status (network/timeout).
+_RETRYABLE_EXC_NAMES = frozenset({
+    'APIConnectionError', 'APITimeoutError', 'APIConnectionTimeoutError',
+})
 
 SYSTEM_PROMPT = (
     "You classify stock news. Reply with ONLY a JSON object, no other text.\n"
@@ -173,32 +184,76 @@ class LLMNewsAnalyzer(NewsAnalyzer):
             f"Summary: {truncated_summary}"
         )
 
-        result = False
-        category = 'OTHER'
-        reason = ''
-        try:
-            response = self._client.messages.create(
-                model=self._model,
-                max_tokens=150,
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user_msg}],
-            )
-            raw = response.content[0].text.strip()
-            result, category, reason = self._parse_response(raw)
+        # Up to 3 attempts with exponential backoff for transient capacity errors
+        # (HTTP 529 overloaded, 503 unavailable, etc.). Backoff sleeps before
+        # attempts 2 and 3 only — first attempt is immediate.
+        # Total worst-case sleep on full failure: 1s + 2s = 3s. The retry loop
+        # runs in the NewsWorker background thread, so it does NOT block the
+        # trading hot path (which reads a pre-populated dict via get_result).
+        MAX_ATTEMPTS = 3
+        BACKOFF_S = (0, 1, 2)  # sleep BEFORE attempt index (no sleep before #0)
+        raw = None
+        last_error: Optional[Exception] = None
+        for attempt in range(MAX_ATTEMPTS):
+            if BACKOFF_S[attempt] > 0:
+                time.sleep(BACKOFF_S[attempt])
+            try:
+                response = self._client.messages.create(
+                    model=self._model,
+                    max_tokens=150,
+                    system=SYSTEM_PROMPT,
+                    messages=[{"role": "user", "content": user_msg}],
+                )
+                raw = response.content[0].text.strip()
+                break  # success — exit retry loop
+            except Exception as e:
+                last_error = e
+                if not self._is_retryable_error(e):
+                    # Permanent (e.g., 4xx auth, 400 bad request) — don't retry.
+                    logger.error(
+                        f"{symbol}: LLM classification failed (non-retryable): {e} "
+                        f"— defaulting to False, NOT cached"
+                    )
+                    break
+                logger.warning(
+                    f"{symbol}: LLM classification attempt "
+                    f"{attempt + 1}/{MAX_ATTEMPTS} failed (retryable): {e}"
+                )
 
-            logger.info(
-                f"{symbol}: LLM classified '{headline[:60]}' -> {result} "
-                f"[{category}] (reason='{reason}')"
-            )
-        except Exception as e:
-            logger.error(
-                f"{symbol}: LLM classification failed: {e} — defaulting to False"
-            )
-            category = 'OTHER'
-            reason = f'error: {str(e)[:50]}'
+        if raw is None:
+            # All attempts failed (or non-retryable broke out early).
+            # Do NOT cache the failure — next scanner cycle gets a clean retry.
+            if last_error and self._is_retryable_error(last_error):
+                logger.error(
+                    f"{symbol}: LLM classification exhausted {MAX_ATTEMPTS} "
+                    f"retries — last error: {last_error}. Returning False "
+                    f"(NOT cached, will retry on next scanner cycle)"
+                )
+            return False, 'OTHER', f'error: {str(last_error)[:50]}'
 
+        # Success — parse, log, cache, return.
+        result, category, reason = self._parse_response(raw)
+        logger.info(
+            f"{symbol}: LLM classified '{headline[:60]}' -> {result} "
+            f"[{category}] (reason='{reason}')"
+        )
         self._cache[cache_key] = result
         return result, category, reason
+
+    @staticmethod
+    def _is_retryable_error(exc: Exception) -> bool:
+        """True if the exception is a transient capacity/server error worth retrying.
+
+        Checks HTTP status_code first (Anthropic SDK sets this on APIStatusError
+        subclasses). Falls back to exception class name for network errors that
+        have no HTTP response (APIConnectionError, APITimeoutError).
+        """
+        status = getattr(exc, 'status_code', None)
+        if status in _RETRYABLE_STATUS_CODES:
+            return True
+        if type(exc).__name__ in _RETRYABLE_EXC_NAMES:
+            return True
+        return False
 
     def is_interesting(self, article: Dict, symbol: str = None) -> bool:
         """

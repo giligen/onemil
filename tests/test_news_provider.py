@@ -89,7 +89,7 @@ class TestLLMNewsAnalyzer:
         assert result is False
 
     def test_api_error_returns_false(self):
-        """API exception => is_interesting returns False (safe default)."""
+        """Generic API exception (non-retryable) => returns False with 1 call."""
         client = MagicMock()
         client.messages.create.side_effect = Exception("API timeout")
         analyzer = LLMNewsAnalyzer(client)
@@ -100,6 +100,113 @@ class TestLLMNewsAnalyzer:
         )
 
         assert result is False
+        # Generic Exception has no status_code → non-retryable → 1 call only.
+        assert client.messages.create.call_count == 1
+
+    @staticmethod
+    def _make_status_error(status_code: int, message: str = 'Overloaded'):
+        """Build a fake Anthropic-style APIStatusError with status_code."""
+        exc = Exception(f"Error code: {status_code} - {message}")
+        exc.status_code = status_code
+        return exc
+
+    def test_retries_on_overloaded_then_succeeds(self, monkeypatch):
+        """529 on first attempt, success on second → 2 calls, returns True, cached."""
+        monkeypatch.setattr('time.sleep', lambda _: None)  # skip backoff sleep
+        client = MagicMock()
+        success_response = MagicMock()
+        success_response.content = [MagicMock(text='{"catalyst": true, "reason": "FDA"}')]
+        client.messages.create.side_effect = [
+            self._make_status_error(529),  # first attempt fails
+            success_response,              # second attempt succeeds
+        ]
+        analyzer = LLMNewsAnalyzer(client, model="test-model")
+
+        article = {'headline': 'FDA Approves Drug', 'summary': 'Big pharma win'}
+        result = analyzer.is_interesting(article, symbol='DRUG')
+
+        assert result is True
+        assert client.messages.create.call_count == 2
+        # Second identical call should hit cache (no extra API call).
+        result2 = analyzer.is_interesting(article, symbol='DRUG')
+        assert result2 is True
+        assert client.messages.create.call_count == 2
+
+    def test_retries_exhausted_returns_false_not_cached(self, monkeypatch):
+        """3x 529 → returns False, NOT cached, next call retries from scratch."""
+        monkeypatch.setattr('time.sleep', lambda _: None)
+        # Always raise 529 — no exhaustion of side_effects across calls.
+        err_529 = self._make_status_error(529)
+        client = MagicMock()
+        client.messages.create.side_effect = lambda **_: (_ for _ in ()).throw(err_529)
+        analyzer = LLMNewsAnalyzer(client, model="test-model")
+
+        article = {'headline': 'Earnings Beat', 'summary': 'Revenue surged'}
+        result = analyzer.is_interesting(article, symbol='EARN')
+
+        assert result is False
+        assert client.messages.create.call_count == 3  # 3 retries exhausted
+        # CRITICAL: failure is NOT cached — next cycle retries with 3 fresh attempts.
+        analyzer.is_interesting(article, symbol='EARN')
+        assert client.messages.create.call_count == 6  # +3 fresh attempts
+
+    def test_no_retry_on_non_retryable_status(self, monkeypatch):
+        """401 (non-retryable) → 1 call, returns False, NOT cached."""
+        monkeypatch.setattr('time.sleep', lambda _: None)
+        client = MagicMock()
+        client.messages.create.side_effect = self._make_status_error(401, 'Unauthorized')
+        analyzer = LLMNewsAnalyzer(client, model="test-model")
+
+        article = {'headline': 'Real catalyst', 'summary': 'foo'}
+        result = analyzer.is_interesting(article, symbol='AUTH')
+
+        assert result is False
+        assert client.messages.create.call_count == 1  # no retry on 401
+        # And not cached (next call would re-attempt).
+        client.messages.create.side_effect = self._make_status_error(401)
+        analyzer.is_interesting(article, symbol='AUTH')
+        assert client.messages.create.call_count == 2
+
+    def test_retries_on_503_too(self, monkeypatch):
+        """503 service_unavailable also triggers retry (not just 529)."""
+        monkeypatch.setattr('time.sleep', lambda _: None)
+        client = MagicMock()
+        success_response = MagicMock()
+        success_response.content = [MagicMock(text='{"catalyst": false, "reason": "noise"}')]
+        client.messages.create.side_effect = [
+            self._make_status_error(503),
+            success_response,
+        ]
+        analyzer = LLMNewsAnalyzer(client, model="test-model")
+
+        result = analyzer.is_interesting(
+            {'headline': 'Some headline', 'summary': 'Some summary'},
+            symbol='SVC',
+        )
+        assert result is False
+        assert client.messages.create.call_count == 2
+
+    def test_retries_on_apiconnectionerror_class_name(self, monkeypatch):
+        """Network errors with no status_code retry by class-name fallback."""
+        monkeypatch.setattr('time.sleep', lambda _: None)
+
+        # Build an exception whose class name matches the retryable set.
+        APIConnectionError = type('APIConnectionError', (Exception,), {})
+        client = MagicMock()
+        success_response = MagicMock()
+        success_response.content = [MagicMock(text='{"catalyst": true, "reason": "test"}')]
+        client.messages.create.side_effect = [
+            APIConnectionError("network blip"),
+            success_response,
+        ]
+        analyzer = LLMNewsAnalyzer(client, model="test-model")
+
+        result = analyzer.is_interesting(
+            {'headline': 'Headline', 'summary': 'summary'},
+            symbol='NET',
+        )
+        assert result is True
+        assert client.messages.create.call_count == 2
 
     def test_cache_prevents_duplicate_calls(self):
         """Second call with same (symbol, headline) uses cache, no API call."""
