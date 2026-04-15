@@ -187,6 +187,27 @@ def filter_bull_flag_trades(
         if vol_removed:
             logger.info(f"Volume filter (>={min_daily_vol:,}): {before_vol} → {len(trades)} trades ({vol_removed} removed)")
 
+    # Conviction filter — mirror PROD (trading_engine.py:2461) and single-symbol
+    # BT (backtest.py:2261). The cache (--build-cache mode) DISABLES the per-trade
+    # filter to capture all signals, so Stage 2 must re-apply it here for honest
+    # BT/PROD parity. Was a silent bug pre-2026-04-15: 51 conv<1.2 trades were
+    # leaking into the BT P&L (see commit msg for impact analysis).
+    conv_cfg = _cfg_vol.get("trading", {}).get("conviction_scoring", {})
+    conv_enabled = bool(conv_cfg.get("enabled", False))
+    conv_threshold = float(conv_cfg.get("min_threshold", 0.0))
+    if conv_enabled and conv_threshold > 0:
+        before_conv = len(trades)
+        trades = [
+            t for t in trades
+            if float(t.get('conviction_mult') or 1.0) >= conv_threshold
+        ]
+        conv_removed = before_conv - len(trades)
+        if conv_removed:
+            logger.info(
+                f"Conviction filter (conv>={conv_threshold:.2f}): "
+                f"{before_conv} → {len(trades)} trades ({conv_removed} removed)"
+            )
+
     # Apply risk tier scaling to PnL
     tier_cfg = _cfg_vol.get("trading", {}).get("risk_tiers", {})
     if bool(tier_cfg.get("enabled", False)) and universe_vol_map:

@@ -30,6 +30,7 @@ from batch_backtest import (
     utc_to_et_str,
     fetch_daily_bars_cached,
     get_1min_bars_cached,
+    filter_bull_flag_trades,
     INTRADAY_MOVE_THRESHOLD,
     CSV_HEADERS,
 )
@@ -1008,3 +1009,108 @@ class TestBatchBacktestRegimeAndCB:
         # prev_day_bars should be None
         _, kwargs = runner.run.call_args
         assert kwargs.get('prev_day_bars') is None
+
+
+class TestConvictionFilterInBatch:
+    """Stage 2 cache-read path must enforce conviction filter (bug fix 2026-04-15).
+
+    Previously the cache (--build-cache) disabled per-trade filters to capture
+    all signals, but Stage 2 (this fn) didn't re-apply the conviction filter
+    on read. PROD enforces it; BT silently bypassed → 51 trades with conv<1.2
+    leaked into 16mo BT, inflating trade count and depressing WR.
+    """
+
+    @staticmethod
+    def _make_trade(symbol, conv_mult, pnl=100.0):
+        return {
+            'symbol': symbol,
+            'date': '2026-01-15',
+            'entry_time_et': '09:35:00',
+            'exit_time_et': '09:40:00',
+            'entry_price': 10.0,
+            'shares': 1000,
+            'pnl': pnl,
+            'pnl_pct': 1.0,
+            'conviction_mult': conv_mult,
+            'avg_volume_20d': 1_000_000,
+            'daily_range_pct': 25.0,
+        }
+
+    def test_filter_drops_below_threshold(self, monkeypatch):
+        """Conviction filter at 1.2 drops trades with conv<1.2."""
+        from batch_backtest import filter_bull_flag_trades
+        from config import Config
+        monkeypatch.setattr(Config, '_load_yaml_only', lambda: {
+            'scanner': {'min_daily_volume': 0},
+            'trading': {
+                'risk_tiers': {'enabled': False},
+                'conviction_scoring': {'enabled': True, 'min_threshold': 1.2},
+            },
+        })
+        trades = [
+            self._make_trade('LOW', 1.0),     # below threshold
+            self._make_trade('MID', 1.19),    # just below
+            self._make_trade('PASS', 1.20),   # at threshold (>=)
+            self._make_trade('HIGH', 1.8),    # above
+        ]
+        result = filter_bull_flag_trades(trades)
+        symbols = {t['symbol'] for t in result}
+        assert symbols == {'PASS', 'HIGH'}, f"Expected only PASS+HIGH, got {symbols}"
+
+    def test_filter_disabled_keeps_all(self, monkeypatch):
+        """conviction_scoring.enabled=False → no filtering."""
+        from batch_backtest import filter_bull_flag_trades
+        from config import Config
+        monkeypatch.setattr(Config, '_load_yaml_only', lambda: {
+            'scanner': {'min_daily_volume': 0},
+            'trading': {
+                'risk_tiers': {'enabled': False},
+                'conviction_scoring': {'enabled': False, 'min_threshold': 1.2},
+            },
+        })
+        trades = [
+            self._make_trade('LOW', 0.5),
+            self._make_trade('HIGH', 1.8),
+        ]
+        result = filter_bull_flag_trades(trades)
+        assert len(result) == 2, "Filter should not run when disabled"
+
+    def test_filter_threshold_zero_keeps_all(self, monkeypatch):
+        """Threshold = 0 means no filter (backward compat)."""
+        from batch_backtest import filter_bull_flag_trades
+        from config import Config
+        monkeypatch.setattr(Config, '_load_yaml_only', lambda: {
+            'scanner': {'min_daily_volume': 0},
+            'trading': {
+                'risk_tiers': {'enabled': False},
+                'conviction_scoring': {'enabled': True, 'min_threshold': 0.0},
+            },
+        })
+        trades = [self._make_trade('LOW', 0.5), self._make_trade('HIGH', 1.8)]
+        result = filter_bull_flag_trades(trades)
+        assert len(result) == 2
+
+    def test_filter_handles_missing_conviction_mult(self, monkeypatch):
+        """Old cache rows without conviction_mult default to 1.0 (above 1.2 threshold? no, 1.0<1.2)."""
+        from batch_backtest import filter_bull_flag_trades
+        from config import Config
+        monkeypatch.setattr(Config, '_load_yaml_only', lambda: {
+            'scanner': {'min_daily_volume': 0},
+            'trading': {
+                'risk_tiers': {'enabled': False},
+                'conviction_scoring': {'enabled': True, 'min_threshold': 1.2},
+            },
+        })
+        # Trade missing conviction_mult column entirely
+        trade_no_conv = {
+            'symbol': 'NOCONV', 'date': '2026-01-15',
+            'entry_time_et': '09:35:00', 'exit_time_et': '09:40:00',
+            'entry_price': 10.0, 'shares': 1000, 'pnl': 100.0, 'pnl_pct': 1.0,
+            'avg_volume_20d': 1_000_000, 'daily_range_pct': 25.0,
+            # NO 'conviction_mult' key
+        }
+        trade_conv_none = self._make_trade('NULLCONV', None)
+        result = filter_bull_flag_trades([trade_no_conv, trade_conv_none])
+        # Both should be DROPPED — defaulted to 1.0 which is below 1.2
+        assert len(result) == 0, \
+            "Missing/None conviction_mult must default to 1.0 (filtered at 1.2)"
