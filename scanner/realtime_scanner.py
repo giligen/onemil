@@ -162,6 +162,8 @@ class RealtimeScanner:
         _scanner_start = time_mod.time()
 
         while True:
+            _cycle_start = time_mod.time()  # measured for cycle-overrun warning
+
             # Check shutdown
             if self.shutdown_event and self.shutdown_event.is_set():
                 logger.warning("Shutdown signal received in scanner loop")
@@ -282,13 +284,14 @@ class RealtimeScanner:
                         self._log_throttled_bar_drain_error(e)
             if _shutdown:
                 break  # exits while True (intraday loop)
-            # Cycle overrun detection: if sleep loop exited without ever sleeping
-            # (because cycle work took >=60s and target was already past), the gap
-            # to next minute boundary will exceed 1s. Surface so we can spot slow cycles.
-            if _target < time_mod.time() - 1.0:
+            # Cycle-overrun warning: if cycle work took longer than the 60s budget
+            # we skipped at least one minute boundary (alignment dropped a tick).
+            # Surfaced so we can investigate slow scans (universe-poll spikes etc).
+            _cycle_dur = time_mod.time() - _cycle_start
+            if _cycle_dur > 60.0:
                 logger.warning(
-                    f"Cycle overrun: alignment target was {time_mod.time() - _target:.1f}s "
-                    f"in the past — re-aligning next cycle"
+                    f"Cycle overrun: work took {_cycle_dur:.1f}s (>60s budget) — "
+                    f"skipped a minute boundary, re-aligning"
                 )
 
         # Post-loop safety net: force close (Bug #1 fix)
