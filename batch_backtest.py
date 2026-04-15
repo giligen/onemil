@@ -68,6 +68,15 @@ CSV_HEADERS = [
     "qf_fill_vwap_dist_pct",
     "conviction_mult",
     "macd_zone_mult",
+    # Phase A — V2 conviction research: per-rule contributions + spy_3d input
+    # so post-hoc analysis can recompute conviction with new rules in pandas
+    # (without rebuilding the whole BT cache).
+    "conv_pole_gain", "conv_flag_tightness", "conv_vol_ratio",
+    "conv_spy_regime", "conv_retracement", "conv_raw_score",
+    "spy_3d_range",
+    # V2_clean rules (added 2026-04-15). Appended at END so old cache rows
+    # padded with empty strings stay aligned for columns above.
+    "conv_vwap_dist", "conv_gap_fading",
 ]
 
 def _trade_to_cache_row(trade) -> Optional[Dict]:
@@ -96,6 +105,18 @@ def _trade_to_cache_row(trade) -> Optional[Dict]:
                for k, v in getattr(trade, '_qf_features', {}).items()},
             'conviction_mult': f"{getattr(trade, 'conviction_mult', 1.0):.2f}",
             'macd_zone_mult': f"{getattr(trade, 'macd_zone_mult', 1.0):.2f}",
+            # Phase A: per-rule conviction contributions + spy_3d_range input.
+            # Default 0.0 keeps old caches readable (missing column → "" → 0).
+            'conv_pole_gain': f"{getattr(trade, 'conv_pole_gain', 0.0):.2f}",
+            'conv_flag_tightness': f"{getattr(trade, 'conv_flag_tightness', 0.0):.2f}",
+            'conv_vol_ratio': f"{getattr(trade, 'conv_vol_ratio', 0.0):.2f}",
+            'conv_spy_regime': f"{getattr(trade, 'conv_spy_regime', 0.0):.2f}",
+            'conv_retracement': f"{getattr(trade, 'conv_retracement', 0.0):.2f}",
+            'conv_raw_score': f"{getattr(trade, 'conv_raw_score', 1.0):.3f}",
+            'spy_3d_range': f"{getattr(trade, 'spy_3d_range', 0.0):.3f}",
+            # V2_clean rules (appended at end for schema stability)
+            'conv_vwap_dist': f"{getattr(trade, 'conv_vwap_dist', 0.0):.2f}",
+            'conv_gap_fading': f"{getattr(trade, 'conv_gap_fading', 0.0):.2f}",
         }
     except Exception as e:
         logger.warning(f"Failed to convert trade to cache row: {e}")
@@ -970,6 +991,17 @@ def _serialize_result(result: 'BacktestResult') -> dict:
             '_qf_features': getattr(t, '_qf_features', {}),
             'conviction_mult': getattr(t, 'conviction_mult', 1.0),
             'macd_zone_mult': getattr(t, 'macd_zone_mult', 1.0),
+            # Phase A — V2 conviction research: per-rule contribs + spy_3d
+            'conv_pole_gain': getattr(t, 'conv_pole_gain', 0.0),
+            'conv_flag_tightness': getattr(t, 'conv_flag_tightness', 0.0),
+            'conv_vol_ratio': getattr(t, 'conv_vol_ratio', 0.0),
+            'conv_spy_regime': getattr(t, 'conv_spy_regime', 0.0),
+            'conv_retracement': getattr(t, 'conv_retracement', 0.0),
+            # V2_clean rules
+            'conv_vwap_dist': getattr(t, 'conv_vwap_dist', 0.0),
+            'conv_gap_fading': getattr(t, 'conv_gap_fading', 0.0),
+            'conv_raw_score': getattr(t, 'conv_raw_score', 1.0),
+            'spy_3d_range': getattr(t, 'spy_3d_range', 0.0),
         }
         if t.plan:
             trade_dict['plan'] = {
@@ -1066,6 +1098,17 @@ def _reconstruct_result(result_dict: dict) -> BacktestResult:
             entry_bar_volume=td.get('entry_bar_volume'),
             conviction_mult=td.get('conviction_mult', 1.0),
             macd_zone_mult=td.get('macd_zone_mult', 1.0),
+            # Phase A — V2 conviction research: per-rule contribs + spy_3d
+            conv_pole_gain=td.get('conv_pole_gain', 0.0),
+            conv_flag_tightness=td.get('conv_flag_tightness', 0.0),
+            conv_vol_ratio=td.get('conv_vol_ratio', 0.0),
+            conv_spy_regime=td.get('conv_spy_regime', 0.0),
+            conv_retracement=td.get('conv_retracement', 0.0),
+            # V2_clean rules
+            conv_vwap_dist=td.get('conv_vwap_dist', 0.0),
+            conv_gap_fading=td.get('conv_gap_fading', 0.0),
+            conv_raw_score=td.get('conv_raw_score', 1.0),
+            spy_3d_range=td.get('spy_3d_range', 0.0),
         )
         trade._avg_volume_20d = td.get('_avg_volume_20d', 0)
         trade._qf_features = td.get('_qf_features', {})
@@ -2024,6 +2067,17 @@ def main():
                         row.get('qf_fill_vwap_dist_pct', ''),
                         row.get('conviction_mult', '1.00'),
                         row.get('macd_zone_mult', '1.00'),
+                        # Phase A: per-rule conviction contribs + spy_3d input
+                        row.get('conv_pole_gain', '0.00'),
+                        row.get('conv_flag_tightness', '0.00'),
+                        row.get('conv_vol_ratio', '0.00'),
+                        row.get('conv_spy_regime', '0.00'),
+                        row.get('conv_retracement', '0.00'),
+                        row.get('conv_raw_score', '1.000'),
+                        row.get('spy_3d_range', '0.000'),
+                        # V2_clean rules (appended at end for schema stability)
+                        row.get('conv_vwap_dist', '0.00'),
+                        row.get('conv_gap_fading', '0.00'),
                     ])
 
             # Determine new date range to merge

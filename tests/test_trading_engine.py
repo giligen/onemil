@@ -3466,7 +3466,8 @@ class TestConvictionFilter:
 
     def test_breakdown_returns_per_rule_contributions(self, engine):
         """return_breakdown=True returns (final_score, breakdown_dict)
-        with all 5 rule contributions + raw_score + final_score."""
+        with all 7 rule contributions (V1 + V2_clean rules 7+8) +
+        raw_score + final_score."""
         s = self._low_quality_setup()
         score, brk = engine._compute_conviction_score_setup(
             s, spy_3d_range=0.5, return_breakdown=True)
@@ -3476,8 +3477,47 @@ class TestConvictionFilter:
         assert brk['vol_ratio'] == 0.0
         assert brk['spy_regime'] == -0.5
         assert brk['retracement'] == 0.0
+        # V2_clean rules: defaults silent
+        assert brk['vwap_dist'] == 0.0
+        assert brk['gap_fading'] == 0.0
         assert brk['raw_score'] == pytest.approx(0.20, abs=0.001)
         assert brk['final_score'] == 0.25
+
+    def test_rule7_vwap_dist_boundary(self, engine):
+        """Rule 7: vwap_dist >= 2 → +0.2; otherwise 0. No stacking above +0.2."""
+        s = self._low_quality_setup()
+        _, brk = engine._compute_conviction_score_setup(
+            s, spy_3d_range=1.0, vwap_dist_pct=1.99, return_breakdown=True)
+        assert brk['vwap_dist'] == 0.0
+        _, brk = engine._compute_conviction_score_setup(
+            s, spy_3d_range=1.0, vwap_dist_pct=2.0, return_breakdown=True)
+        assert brk['vwap_dist'] == 0.2
+        _, brk = engine._compute_conviction_score_setup(
+            s, spy_3d_range=1.0, vwap_dist_pct=10.0, return_breakdown=True)
+        assert brk['vwap_dist'] == 0.2
+
+    def test_rule8_gap_fading_penalty(self, engine):
+        """Rule 8: gap_fading=True → -0.3; False → 0."""
+        s = self._low_quality_setup()
+        _, brk = engine._compute_conviction_score_setup(
+            s, spy_3d_range=1.0, gap_fading=True, return_breakdown=True)
+        assert brk['gap_fading'] == -0.3
+        _, brk = engine._compute_conviction_score_setup(
+            s, spy_3d_range=1.0, gap_fading=False, return_breakdown=True)
+        assert brk['gap_fading'] == 0.0
+
+    def test_default_args_keep_v1_behavior(self, engine):
+        """Calling without vwap_dist_pct/gap_fading reproduces V1 raw score."""
+        s = self._high_quality_setup()
+        score_v1, brk_v1 = engine._compute_conviction_score_setup(
+            s, spy_3d_range=1.5, return_breakdown=True)
+        score_explicit, brk_explicit = engine._compute_conviction_score_setup(
+            s, spy_3d_range=1.5, vwap_dist_pct=0.0, gap_fading=False,
+            return_breakdown=True)
+        assert score_v1 == score_explicit
+        assert brk_v1 == brk_explicit
+        assert brk_v1['vwap_dist'] == 0.0
+        assert brk_v1['gap_fading'] == 0.0
 
     def test_breakdown_high_quality_setup(self, engine):
         """High-quality setup: all positive contributions, no clamp."""

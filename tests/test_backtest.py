@@ -1324,7 +1324,55 @@ class TestBTConvictionFilter:
         assert brk['vol_ratio'] == 0.0
         assert brk['spy_regime'] == -0.5
         assert brk['retracement'] == 0.0
+        # V2_clean rules: defaults silent (vwap_dist=0 < 2 → 0; gap_fading=False → 0)
+        assert brk['vwap_dist'] == 0.0
+        assert brk['gap_fading'] == 0.0
         assert brk['raw_score'] == pytest.approx(0.20, abs=0.001)
+
+    def test_rule7_vwap_dist_boundary(self):
+        """Rule 7: vwap_dist >= 2 → +0.2; otherwise 0. No stacking above +0.2."""
+        runner = BacktestRunner()
+        s = self._setup(pole_gain=12.0, retr=50.0)  # baseline = clamped 0.25
+        # Below threshold
+        _, brk = runner._compute_conviction_score_setup(
+            s, spy_3d_range=1.0, vwap_dist_pct=1.99, return_breakdown=True)
+        assert brk['vwap_dist'] == 0.0
+        # At threshold (inclusive)
+        _, brk = runner._compute_conviction_score_setup(
+            s, spy_3d_range=1.0, vwap_dist_pct=2.0, return_breakdown=True)
+        assert brk['vwap_dist'] == 0.2
+        # Far above — caps at +0.2 (no stacking)
+        _, brk = runner._compute_conviction_score_setup(
+            s, spy_3d_range=1.0, vwap_dist_pct=10.0, return_breakdown=True)
+        assert brk['vwap_dist'] == 0.2
+
+    def test_rule8_gap_fading_penalty(self):
+        """Rule 8: gap_fading=True → -0.3; False → 0."""
+        runner = BacktestRunner()
+        s = self._setup(pole_gain=12.0, retr=50.0)
+        _, brk = runner._compute_conviction_score_setup(
+            s, spy_3d_range=1.0, gap_fading=True, return_breakdown=True)
+        assert brk['gap_fading'] == -0.3
+        _, brk = runner._compute_conviction_score_setup(
+            s, spy_3d_range=1.0, gap_fading=False, return_breakdown=True)
+        assert brk['gap_fading'] == 0.0
+
+    def test_default_args_keep_v1_behavior(self):
+        """Calling without vwap_dist_pct/gap_fading reproduces V1 raw score."""
+        runner = BacktestRunner()
+        s = self._setup(pole_gain=6.0, pole_h=10.0, pole_l=9.0,
+                        flag_h=9.7, flag_l=9.5, vol_pole=200, vol_flag=100,
+                        retr=25.0)  # high quality V1
+        score_v1, brk_v1 = runner._compute_conviction_score_setup(
+            s, spy_3d_range=1.5, return_breakdown=True)
+        score_explicit, brk_explicit = runner._compute_conviction_score_setup(
+            s, spy_3d_range=1.5, vwap_dist_pct=0.0, gap_fading=False,
+            return_breakdown=True)
+        assert score_v1 == score_explicit
+        assert brk_v1['raw_score'] == brk_explicit['raw_score']
+        # New rules silent under defaults
+        assert brk_v1['vwap_dist'] == 0.0
+        assert brk_v1['gap_fading'] == 0.0
 
     def test_backward_compat_returns_float(self):
         """Without return_breakdown: returns plain float (not tuple)."""
@@ -1357,7 +1405,12 @@ class TestBTConvictionFilter:
     def test_bt_prod_parity(self):
         """BT and PROD compute identical conviction score + breakdown for same inputs.
         Drift detector — guards against accidental divergence between the two
-        independent _compute_conviction_score_setup implementations."""
+        independent _compute_conviction_score_setup implementations.
+
+        V2_clean (2026-04-15): also matrices vwap_dist and gap_fading inputs to
+        guard against drift in the new rules. Total scenarios: 3 cfg × 3 spy ×
+        4 vwap × 2 gap = 72.
+        """
         from trading.trading_engine import TradingEngine
         runner = BacktestRunner()
 
@@ -1370,15 +1423,24 @@ class TestBTConvictionFilter:
                  vol_pole=180, vol_flag=100, retr=40.0),  # boundary
         ]:
             for spy_3d in (0.5, 0.85, 1.5):
-                s = self._setup(**cfg)
-                bt_score, bt_brk = runner._compute_conviction_score_setup(
-                    s, spy_3d_range=spy_3d, return_breakdown=True)
-                # Use TradingEngine method as unbound — we only need the rule arithmetic
-                # which is pure (no self attributes). Both files implement same rules.
-                prod_score, prod_brk = TradingEngine._compute_conviction_score_setup(
-                    None, s, spy_3d_range=spy_3d, return_breakdown=True)
-                assert bt_score == prod_score, f"score drift: BT={bt_score} PROD={prod_score} for {cfg}, spy3d={spy_3d}"
-                assert bt_brk == prod_brk, f"breakdown drift: BT={bt_brk} PROD={prod_brk} for {cfg}, spy3d={spy_3d}"
+                for vwap_dist in (0.0, 1.5, 2.0, 5.0):
+                    for gap_fade in (False, True):
+                        s = self._setup(**cfg)
+                        bt_score, bt_brk = runner._compute_conviction_score_setup(
+                            s, spy_3d_range=spy_3d,
+                            vwap_dist_pct=vwap_dist, gap_fading=gap_fade,
+                            return_breakdown=True)
+                        # TradingEngine method is pure rule arithmetic — call unbound.
+                        prod_score, prod_brk = TradingEngine._compute_conviction_score_setup(
+                            None, s, spy_3d_range=spy_3d,
+                            vwap_dist_pct=vwap_dist, gap_fading=gap_fade,
+                            return_breakdown=True)
+                        ctx = (f"cfg={cfg} spy3d={spy_3d} "
+                               f"vwap={vwap_dist} gap={gap_fade}")
+                        assert bt_score == prod_score, (
+                            f"score drift: BT={bt_score} PROD={prod_score} ({ctx})")
+                        assert bt_brk == prod_brk, (
+                            f"breakdown drift: BT={bt_brk} PROD={prod_brk} ({ctx})")
 
     def test_threshold_default_zero(self):
         """When config has no min_threshold, BT default is 0.0 (filter disabled)."""

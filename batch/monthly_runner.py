@@ -74,6 +74,13 @@ RICH_CSV_HEADERS = [
     "qf_fill_vwap_dist_pct",
     "conviction_mult",
     "macd_zone_mult",
+    # Phase A — V2 conviction research: per-rule contribs + spy_3d input
+    "conv_pole_gain", "conv_flag_tightness", "conv_vol_ratio",
+    "conv_spy_regime", "conv_retracement", "conv_raw_score",
+    "spy_3d_range",
+    # V2_clean rules (added 2026-04-15). Appended at END to match
+    # batch_backtest CSV_HEADERS — keeps old cache rows aligned.
+    "conv_vwap_dist", "conv_gap_fading",
 ]
 
 
@@ -209,6 +216,17 @@ def build_rich_row(
         # Conviction and MACD zone multipliers for cache → batch filter alignment
         f"{getattr(trade, 'conviction_mult', 1.0):.2f}",
         f"{getattr(trade, 'macd_zone_mult', 1.0):.2f}",
+        # Phase A — V2 research: per-rule conviction contribs + spy_3d_range
+        f"{getattr(trade, 'conv_pole_gain', 0.0):.2f}",
+        f"{getattr(trade, 'conv_flag_tightness', 0.0):.2f}",
+        f"{getattr(trade, 'conv_vol_ratio', 0.0):.2f}",
+        f"{getattr(trade, 'conv_spy_regime', 0.0):.2f}",
+        f"{getattr(trade, 'conv_retracement', 0.0):.2f}",
+        f"{getattr(trade, 'conv_raw_score', 1.0):.3f}",
+        f"{getattr(trade, 'spy_3d_range', 0.0):.3f}",
+        # V2_clean rules (appended at end for schema stability)
+        f"{getattr(trade, 'conv_vwap_dist', 0.0):.2f}",
+        f"{getattr(trade, 'conv_gap_fading', 0.0):.2f}",
     ]
 
 

@@ -78,6 +78,20 @@ class SimulatedTrade:
     conviction_mult: float = 1.0
     # MACD zone multiplier (for cache → batch filter tier interaction)
     macd_zone_mult: float = 1.0
+    # Per-rule conviction contributions + raw inputs (Phase A — V2 research).
+    # Cached so post-hoc analyses can recompute conviction with new rules
+    # without rebuilding the whole BT. Each conv_* is the rule's signed
+    # contribution; spy_3d_range is rule 4's input (computed live, not in qf_*).
+    conv_pole_gain: float = 0.0
+    conv_flag_tightness: float = 0.0
+    conv_vol_ratio: float = 0.0
+    conv_spy_regime: float = 0.0
+    conv_retracement: float = 0.0
+    # V2_clean rules (added 2026-04-15)
+    conv_vwap_dist: float = 0.0
+    conv_gap_fading: float = 0.0
+    conv_raw_score: float = 1.0
+    spy_3d_range: float = 0.0
 
 
 @dataclass
@@ -1232,7 +1246,10 @@ class BacktestRunner:
         return (True, "")
 
     def _compute_conviction_score_setup(
-        self, setup, spy_3d_range: float, return_breakdown: bool = False,
+        self, setup, spy_3d_range: float, *,
+        vwap_dist_pct: float = 0.0,
+        gap_fading: bool = False,
+        return_breakdown: bool = False,
     ):
         """Compute conviction score at setup detection time.
 
@@ -1242,11 +1259,22 @@ class BacktestRunner:
         Args:
             setup: BullFlagSetup object
             spy_3d_range: SPY 3-day average daily range (%)
+            vwap_dist_pct: (breakout_level - vwap)/vwap * 100, computed up to
+                setup bar. Defaults to 0.0 (rule 7 silent) for back-compat.
+                NEW in V2_clean (shipped 2026-04-15).
+            gap_fading: True if today gapped up >= qf_gap_fade_threshold%
+                from prev_close AND breakout_level is below today's open.
+                Defaults to False (rule 8 silent) for back-compat.
+                NEW in V2_clean.
             return_breakdown: If True, return (final_score, breakdown_dict).
 
         Returns:
             float (when return_breakdown=False) — the position multiplier
             tuple (float, dict) — when return_breakdown=True
+
+        V2_clean rules 7+8 added 2026-04-15 from walk-forward research:
+        canonical 16mo +$52K (+15.5%), mean OOS test +$28K, robust on
+        all 3 splits. Rule 6 (daily_range_pct) was rejected — look-ahead.
         """
         score = 1.0
         breakdown = {}
@@ -1293,6 +1321,20 @@ class BacktestRunner:
         rt_contrib = 0.2 if setup.retracement_pct < 30 else 0.0
         score += rt_contrib
         breakdown['retracement'] = rt_contrib
+
+        # 6. (Rule 6 reserved — daily_range_pct was rejected as look-ahead.)
+
+        # 7. VWAP distance — extension above VWAP signals momentum quality.
+        # Walk-forward bucket EV: vwap_dist >= 2 → mean +$1.5K/trade vs <0 → -$1K/tr.
+        vw_contrib = 0.2 if vwap_dist_pct >= 2.0 else 0.0
+        score += vw_contrib
+        breakdown['vwap_dist'] = vw_contrib
+
+        # 8. Gap fading penalty — gap-up that broke down before entry is bearish.
+        # Walk-forward: gap_fading=True → -$612/trade test, =False → +$535/tr.
+        gf_contrib = -0.3 if gap_fading else 0.0
+        score += gf_contrib
+        breakdown['gap_fading'] = gf_contrib
 
         final = max(0.25, min(3.0, score))
         if return_breakdown:
@@ -2085,6 +2127,17 @@ class BacktestRunner:
                                 trade._qf_features = pending_order._qf_features
                             trade.conviction_mult = getattr(pending_order, '_conviction_mult', 1.0)
                             trade.macd_zone_mult = getattr(pending_order, '_macd_zone_mult', 1.0)
+                            _bd = getattr(pending_order, '_conv_breakdown', None)
+                            if _bd:
+                                trade.conv_pole_gain = _bd.get('pole_gain', 0.0)
+                                trade.conv_flag_tightness = _bd.get('flag_tightness', 0.0)
+                                trade.conv_vol_ratio = _bd.get('vol_ratio', 0.0)
+                                trade.conv_spy_regime = _bd.get('spy_regime', 0.0)
+                                trade.conv_retracement = _bd.get('retracement', 0.0)
+                                trade.conv_vwap_dist = _bd.get('vwap_dist', 0.0)
+                                trade.conv_gap_fading = _bd.get('gap_fading', 0.0)
+                                trade.conv_raw_score = _bd.get('raw_score', 1.0)
+                            trade.spy_3d_range = getattr(pending_order, '_spy_3d_range', 0.0)
                             result.trades_simulated.append(trade)
                             pending_order = None
                             continue
@@ -2097,6 +2150,17 @@ class BacktestRunner:
                         trade._qf_features = pending_order._qf_features
                     trade.conviction_mult = getattr(pending_order, '_conviction_mult', 1.0)
                     trade.macd_zone_mult = getattr(pending_order, '_macd_zone_mult', 1.0)
+                    _bd = getattr(pending_order, '_conv_breakdown', None)
+                    if _bd:
+                        trade.conv_pole_gain = _bd.get('pole_gain', 0.0)
+                        trade.conv_flag_tightness = _bd.get('flag_tightness', 0.0)
+                        trade.conv_vol_ratio = _bd.get('vol_ratio', 0.0)
+                        trade.conv_spy_regime = _bd.get('spy_regime', 0.0)
+                        trade.conv_retracement = _bd.get('retracement', 0.0)
+                        trade.conv_vwap_dist = _bd.get('vwap_dist', 0.0)
+                        trade.conv_gap_fading = _bd.get('gap_fading', 0.0)
+                        trade.conv_raw_score = _bd.get('raw_score', 1.0)
+                    trade.spy_3d_range = getattr(pending_order, '_spy_3d_range', 0.0)
                     # Add post-fill VWAP (at fill bar) — for post-filter analysis
                     fill_vwap = self._compute_vwap(bars, i)
                     if fill_vwap and fill_vwap > 0:
@@ -2245,6 +2309,14 @@ class BacktestRunner:
 
                 # Conviction scoring: compute breakdown once; use on skip-log too.
                 conviction_mult = 1.0
+                # Defaults for cache emission when conviction disabled (Phase A).
+                _conv_brkdn = {
+                    'pole_gain': 0.0, 'flag_tightness': 0.0, 'vol_ratio': 0.0,
+                    'spy_regime': 0.0, 'retracement': 0.0,
+                    'vwap_dist': 0.0, 'gap_fading': 0.0,
+                    'raw_score': 1.0, 'final_score': 1.0,
+                }
+                _spy_3d = 0.0
                 if self.conviction_enabled:
                     _trade_date = None
                     try:
@@ -2252,8 +2324,28 @@ class BacktestRunner:
                     except Exception:
                         pass
                     _spy_3d = self._get_spy_3d_range(_trade_date) if _trade_date else 1.0
+                    # V2_clean rule 7+8 inputs — computed inline at the SAME
+                    # bar boundary PROD uses (setup.flag_end_idx) so BT and PROD
+                    # produce identical conviction scores. (qf_features below
+                    # uses bar_idx=i = flag_end_idx+1 for legacy reasons; we
+                    # don't reuse it here because that would diverge from PROD.)
+                    _v7_dist = 0.0
+                    _g8_fade = False
+                    _vwap_at_setup = self._compute_vwap(bars, setup.flag_end_idx)
+                    if _vwap_at_setup and _vwap_at_setup > 0:
+                        _v7_dist = (setup.breakout_level - _vwap_at_setup) / _vwap_at_setup * 100
+                    if prev_close and prev_close > 0:
+                        _today_open = float(bars.iloc[0]['open'])
+                        _gap_pct = (_today_open - prev_close) / prev_close * 100
+                        _g8_fade = bool(
+                            _gap_pct >= self.qf_gap_fade_threshold
+                            and setup.breakout_level < _today_open
+                        )
                     conviction_mult, _conv_brkdn = self._compute_conviction_score_setup(
-                        setup, _spy_3d, return_breakdown=True)
+                        setup, _spy_3d,
+                        vwap_dist_pct=_v7_dist,
+                        gap_fading=_g8_fade,
+                        return_breakdown=True)
                     if abs(conviction_mult - 1.0) > 0.05:
                         logger.debug(f"  Conviction score: {conviction_mult:.2f}x")
 
@@ -2267,7 +2359,9 @@ class BacktestRunner:
                             f"flag={_conv_brkdn['flag_tightness']:+.1f} "
                             f"vol={_conv_brkdn['vol_ratio']:+.1f} "
                             f"spy={_conv_brkdn['spy_regime']:+.1f} "
-                            f"retr={_conv_brkdn['retracement']:+.1f})"
+                            f"retr={_conv_brkdn['retracement']:+.1f} "
+                            f"vwap={_conv_brkdn['vwap_dist']:+.1f} "
+                            f"gap={_conv_brkdn['gap_fading']:+.1f})"
                         )
                         continue
 
@@ -2360,6 +2454,10 @@ class BacktestRunner:
                 pending_order._qf_features = qf_features
                 pending_order._conviction_mult = conviction_mult
                 pending_order._macd_zone_mult = _applied_macd_zone
+                # Phase A — V2 research: stash per-rule contributions + spy_3d input
+                # so they flow into the cache CSV via batch_backtest._trade_to_cache_row.
+                pending_order._conv_breakdown = _conv_brkdn
+                pending_order._spy_3d_range = _spy_3d
                 logger.info(
                     f"  PENDING BUY-STOP placed at bar {i}: "
                     f"${setup.breakout_level:.2f}, "

@@ -125,7 +125,7 @@ Config: `news_kill_rules.enabled: true`. News fetched from Alpaca News API, clas
 
 #### Layer 3: Conviction Scoring — scale position by setup quality
 
-5 pattern-only rules (no news in scoring) that scale position size 0.25x to 3.0x:
+7 pattern-only rules (no news in scoring) that scale position size 0.25x to 3.0x:
 
 | Rule | Condition | Score |
 |------|-----------|-------|
@@ -134,21 +134,26 @@ Config: `news_kill_rules.enabled: true`. News fetched from Alpaca News API, clas
 | 3 | Pole/flag vol ratio > 1.7x | +0.3 |
 | 4 | SPY 3d range > 1.2% / < 0.8% | +0.3 / -0.5 |
 | 5 | Retracement < 30% | +0.2 |
+| 7 | VWAP distance >= 2% (extension above VWAP) | +0.2 |
+| 8 | Gap fading (gap-up >=2% but breakout below open) | -0.3 |
+
+(Rule 6 reserved — `daily_range_pct` was rejected as look-ahead: uses whole-day high/low which isn't knowable at setup detection.)
 
 Combined with risk tier multiplier, capped at 3.0x. Applied via `create_plan(risk_multiplier=combined_mult)`. Config: `conviction_scoring.enabled: true`.
 
-**Conviction also acts as a hard filter** when `conviction_scoring.min_threshold > 0`. Setups scoring below the threshold are skipped entirely (no order placed). Walk-forward validated at threshold = 1.2 across 3 train/test splits:
+**Conviction also acts as a hard filter** when `conviction_scoring.min_threshold > 0`. Setups scoring below the threshold are skipped entirely (no order placed).
 
-| Split | Filter | Test P&L | Δ vs baseline | WR |
-|-------|--------|----------|---------------|-----|
-| Train 2025 → Test 2026 Q1+Q2 | vol>5 only | +$46,959 | +$15,615 | 35% |
-| Train 2025 → Test 2026 Q1+Q2 | **vol>5 OR conv<1.2** | **+$49,457** | **+$18,113** | **46%** |
-| Train H1 2025 → Test H2 2025 | vol>5 only | +$115,876 | $0 | 42% |
-| Train H1 2025 → Test H2 2025 | **vol>5 OR conv<1.2** | **+$125,999** | **+$10,123** | **53%** |
-| Train Jan-Sep → Test Oct-Apr | vol>5 only | +$107,246 | +$15,615 | 39% |
-| Train Jan-Sep → Test Oct-Apr | **vol>5 OR conv<1.2** | **+$109,350** | **+$17,719** | **48%** |
+V2_clean (shipped 2026-04-15) added Rules 7+8 and raised the threshold from 1.2 → 1.4. Walk-forward OOS (test only, 3 chronological splits):
 
-The conv<1.2 bucket is monotonically negative-EV (28% WR, -0.18R avg). Skipping these reduces trade count ~40-50% but lifts WR to ~53% and trims max DD. Each skip is logged with per-rule breakdown for trace/improve cycles. **Threshold is coupled to the current 5 conviction rules — re-validate if rules change.**
+| Split | V0 (5 rules @ 1.2) test P&L | **V2_clean (7 rules @ 1.4)** | Δ |
+|-------|------------------------------|-------------------------------|---|
+| A: H1'25 → H2'25-Apr'26 | +$165,688 | **+$205,874** | **+$40,186** |
+| B: Y2025 → Q1+Apr'26 | +$34,080 | **+$53,475** | **+$19,395** |
+| C: Jan-Sep'25 → Oct'25-Apr'26 | +$102,104 | **+$127,887** | **+$25,783** |
+| **Mean Δ** | | | **+$28,455** |
+| **Worst Δ** | | | **+$19,395** |
+
+Canonical 16mo BT: $338K → **$390K (+$52K, +15.5%)**, 161 → 142 trades, WR 54% → **57%**. Each skip is logged with per-rule breakdown. **Threshold is coupled to the 7 rules — re-validate if rules change.**
 
 #### Layer 4: Post-Fill Exit — SPY calm + weak breakout volume
 

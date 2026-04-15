@@ -524,16 +524,25 @@ class TradingEngine:
         return (True, "")
 
     def _compute_conviction_score_setup(
-        self, setup, spy_3d_range: float, return_breakdown: bool = False,
+        self, setup, spy_3d_range: float, *,
+        vwap_dist_pct: float = 0.0,
+        gap_fading: bool = False,
+        return_breakdown: bool = False,
     ):
         """Compute conviction score at setup detection time.
 
         Returns a multiplier (0.25 to 3.0) that scales position size.
-        Matches backtest.py exactly — 5 pattern rules, no news scoring.
+        Matches backtest.py exactly — 7 pattern rules (V2_clean, 2026-04-15).
 
         Args:
             setup: BullFlagSetup object
             spy_3d_range: SPY 3-day average daily range (%)
+            vwap_dist_pct: (breakout_level - vwap)/vwap * 100, computed up to
+                setup bar. Defaults to 0.0 (rule 7 silent) for back-compat.
+                NEW in V2_clean.
+            gap_fading: True if today gapped up >=qf_gap_fade_threshold% from
+                prev_close AND breakout_level is below today's open. Defaults
+                to False (rule 8 silent) for back-compat. NEW in V2_clean.
             return_breakdown: If True, return (final_score, breakdown_dict).
                 breakdown_dict has per-rule contributions plus 'raw_score'
                 (pre-clamp) and 'final_score' (post-clamp). For trace logging.
@@ -541,6 +550,10 @@ class TradingEngine:
         Returns:
             float (when return_breakdown=False) — the position multiplier
             tuple (float, dict) — when return_breakdown=True
+
+        V2_clean rules 7+8 added 2026-04-15 from walk-forward research:
+        canonical 16mo +$52K (+15.5%), mean OOS test +$28K, robust on
+        all 3 splits. Rule 6 (daily_range_pct) was rejected — look-ahead.
         """
         score = 1.0
         breakdown = {}
@@ -587,6 +600,20 @@ class TradingEngine:
         rt_contrib = 0.2 if setup.retracement_pct < 30 else 0.0
         score += rt_contrib
         breakdown['retracement'] = rt_contrib
+
+        # 6. (Rule 6 reserved — daily_range_pct was rejected as look-ahead.)
+
+        # 7. VWAP distance — extension above VWAP signals momentum quality.
+        # Walk-forward bucket EV: vwap_dist >= 2 → mean +$1.5K/trade vs <0 → -$1K/tr.
+        vw_contrib = 0.2 if vwap_dist_pct >= 2.0 else 0.0
+        score += vw_contrib
+        breakdown['vwap_dist'] = vw_contrib
+
+        # 8. Gap fading penalty — gap-up that broke down before entry is bearish.
+        # Walk-forward: gap_fading=True → -$612/trade test, =False → +$535/tr.
+        gf_contrib = -0.3 if gap_fading else 0.0
+        score += gf_contrib
+        breakdown['gap_fading'] = gf_contrib
 
         final = max(0.25, min(3.0, score))
         if return_breakdown:
@@ -2456,16 +2483,41 @@ class TradingEngine:
         conviction_mult = 1.0
         if self.conviction_enabled:
             spy_3d = self._get_spy_3d_range_live()
+            # V2_clean rule 7+8 inputs — computed inline (mirrors
+            # backtest._compute_qf_features:1166-1183 EXACTLY for parity).
+            # NB: prev_close is available here from the universe (uni_stock
+            # was loaded at line 2340); compute up-front so conviction has it.
+            _v7_dist = 0.0
+            _g8_fade = False
+            _vwap_at_setup = self._compute_vwap(bars, up_to_idx=setup.flag_end_idx)
+            if _vwap_at_setup and _vwap_at_setup > 0:
+                _v7_dist = (setup.breakout_level - _vwap_at_setup) / _vwap_at_setup * 100
+            _conv_prev_close = (uni_stock.get('price_close') or 0) if uni_stock else 0
+            if _conv_prev_close > 0 and len(bars) > 0:
+                try:
+                    _today_open = float(bars.iloc[0]['open'])
+                    _gap_pct = (_today_open - _conv_prev_close) / _conv_prev_close * 100
+                    _g8_fade = bool(
+                        _gap_pct >= self.qf_gap_fade_threshold
+                        and setup.breakout_level < _today_open
+                    )
+                except (KeyError, TypeError):
+                    pass  # bars missing 'open' column — leave _g8_fade=False
             conviction_mult, _conv_brkdn = self._compute_conviction_score_setup(
-                setup, spy_3d, return_breakdown=True)
+                setup, spy_3d,
+                vwap_dist_pct=_v7_dist,
+                gap_fading=_g8_fade,
+                return_breakdown=True)
             if abs(conviction_mult - 1.0) > 0.05:
                 logger.info(
                     f"{symbol}: Conviction {conviction_mult:.2f}x "
                     f"(pole={setup.pole_gain_pct:.1f}%, "
-                    f"retr={setup.retracement_pct:.0f}%, SPY3d={spy_3d:.1f}%)")
+                    f"retr={setup.retracement_pct:.0f}%, SPY3d={spy_3d:.1f}%, "
+                    f"vwap_dist={_v7_dist:+.1f}%, gap_fade={_g8_fade})")
 
             # Conviction filter: skip trades below quality threshold.
-            # Walk-forward validated: conv<1.2 setups = 28% WR, -0.18R avg (negative EV).
+            # V2_clean (2026-04-15): 7-rule formula at threshold 1.4 (was 1.2).
+            # Walk-forward: mean OOS +$28K, robust on all 3 splits.
             # Placed before risk_tier+marginability so we save the is_marginable API
             # call (~100-200ms) on every conviction-skipped trade.
             if (self.conviction_min_threshold > 0
@@ -2475,7 +2527,9 @@ class TradingEngine:
                     f"flag={_conv_brkdn['flag_tightness']:+.1f} "
                     f"vol={_conv_brkdn['vol_ratio']:+.1f} "
                     f"spy={_conv_brkdn['spy_regime']:+.1f} "
-                    f"retr={_conv_brkdn['retracement']:+.1f}"
+                    f"retr={_conv_brkdn['retracement']:+.1f} "
+                    f"vwap={_conv_brkdn['vwap_dist']:+.1f} "
+                    f"gap={_conv_brkdn['gap_fading']:+.1f}"
                 )
                 logger.info(
                     f"{symbol}: CONVICTION SKIP: {conviction_mult:.2f} < "
