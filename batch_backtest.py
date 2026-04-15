@@ -132,7 +132,8 @@ def load_bull_flag_cache(cache_path: str, start_date: date, end_date: date,
             row['entry_price'] = float(row['entry_price'])
             row['exit_price'] = float(row['exit_price']) if row['exit_price'] else 0
             row['daily_range_pct'] = float(row.get('daily_range_pct', 100))
-            row['avg_volume_20d'] = int(float(row.get('avg_volume_20d', 0)))
+            _avg_vol = row.get('avg_volume_20d', '0') or '0'
+            row['avg_volume_20d'] = int(float(_avg_vol))
             trades.append(row)
     logger.info(f"Loaded {len(trades)} cached trades from {cache_path} ({start_date} to {end_date})")
     return trades
@@ -1526,7 +1527,7 @@ def run_batch_backtest_fast(
 
                     result = runner.run(
                         sym, bars, date_str,
-                        prev_close=None,  # Daily bar pre-filter already ensures 20%+ range
+                        prev_close=prev_close if prev_close and prev_close > 0 else None,
                         prev_day_bars=prev_day_bars,
                     )
                     results.append(result)
@@ -1657,7 +1658,7 @@ def _fast_worker(args: tuple) -> Optional[dict]:
 
         result = runner.run(
             symbol, bars, date_str,
-            prev_close=None,  # Daily bar pre-filter already ensures 20%+ range
+            prev_close=prev_close if prev_close and prev_close > 0 else None,
         )
         return _serialize_result(result)
     except Exception:
