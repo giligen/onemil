@@ -153,7 +153,7 @@ V2_clean (shipped 2026-04-15) added Rules 7+8 and raised the threshold from 1.2 
 | **Mean Δ** | | | **+$28,455** |
 | **Worst Δ** | | | **+$19,395** |
 
-Canonical 16mo BT: $338K → **$390K (+$52K, +15.5%)**, 161 → 142 trades, WR 54% → **57%**. Each skip is logged with per-rule breakdown. **Threshold is coupled to the 7 rules — re-validate if rules change.**
+**Canonical 16mo BT** (measured, post-ship on rebuilt cache): $338K → **$372K (+$34K, +10.1%)**, 161 → 145 trades, WR 54% → **56.6%**. The walk-forward rescaling heuristic estimated $390K; real BT came in $18K lower due to integer-share rounding and max-concurrent-3 reshuffling — lift is smaller than estimated but still directionally positive on every metric (fewer trades, higher WR, more P&L). Each skip is logged with per-rule breakdown. **Threshold is coupled to the 7 rules — re-validate if rules change.**
 
 #### Layer 4: Post-Fill Exit — SPY calm + weak breakout volume
 
