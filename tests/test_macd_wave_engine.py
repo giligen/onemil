@@ -476,3 +476,43 @@ class TestConvictionTelemetry:
         msg = e.notifier.send_message_sync.call_args.args[0]
         assert '$50,000' in msg
         assert 'conv' not in msg, "Should not annotate conv when sizing disabled"
+
+
+class TestBarStartToClose:
+    """Alpaca bar timestamp = bar START. Helper adds 60s for actual close.
+
+    Fixed 2026-04-15. Old DB rows had bar_close_at = bar_start_at, inflating
+    bar_close_to_loop_ms metric by exactly 60_000.
+    """
+
+    def test_pd_timestamp_input(self):
+        """pd.Timestamp input → datetime + 60s, UTC-aware."""
+        import pandas as pd
+        ts = pd.Timestamp('2026-04-15 14:04:00', tz='UTC')
+        out = MACDWaveEngine._bar_start_to_close(ts)
+        assert out == datetime(2026, 4, 15, 14, 5, 0, tzinfo=timezone.utc)
+        assert out.tzinfo == timezone.utc
+
+    def test_datetime_input(self):
+        """Native datetime input."""
+        ts = datetime(2026, 4, 15, 14, 4, 0, tzinfo=timezone.utc)
+        out = MACDWaveEngine._bar_start_to_close(ts)
+        assert out == datetime(2026, 4, 15, 14, 5, 0, tzinfo=timezone.utc)
+
+    def test_string_input(self):
+        """String input gets parsed."""
+        out = MACDWaveEngine._bar_start_to_close('2026-04-15T14:04:00+00:00')
+        assert out == datetime(2026, 4, 15, 14, 5, 0, tzinfo=timezone.utc)
+
+    def test_naive_datetime_treated_as_utc(self):
+        """Datetime without tzinfo is treated as UTC, +60s applied."""
+        ts_naive = datetime(2026, 4, 15, 14, 4, 0)  # no tzinfo
+        out = MACDWaveEngine._bar_start_to_close(ts_naive)
+        assert out == datetime(2026, 4, 15, 14, 5, 0, tzinfo=timezone.utc)
+        assert out.tzinfo == timezone.utc
+
+    def test_minute_rollover_to_next_hour(self):
+        """At HH:59:00 → close at (HH+1):00:00."""
+        ts = datetime(2026, 4, 15, 14, 59, 0, tzinfo=timezone.utc)
+        out = MACDWaveEngine._bar_start_to_close(ts)
+        assert out == datetime(2026, 4, 15, 15, 0, 0, tzinfo=timezone.utc)

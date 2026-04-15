@@ -399,6 +399,25 @@ def generate_signals(
         bars = pd.DataFrame(bars)
     if bars.empty or 'open' not in bars.columns:
         return []
+
+    # Clip to regular session (09:30 ET onward). The intraday bar cache
+    # sometimes includes pre-market bars (08:30 ET+) for certain symbols.
+    # Without this clip, `op = bars.iloc[0]['open']` would use the pre-market
+    # open as the day anchor, allowing pre-market crosses + pre-market entries
+    # that PROD would never take (PROD scanner only runs after market open).
+    # Fix introduced 2026-04-15 after Q1 2026 ToD analysis showed ~58% of
+    # baseline P&L coming from pre-market BT artifacts.
+    if 'ts' in bars.columns and len(bars) > 0:
+        bars_ts = pd.to_datetime(bars['ts'], utc=True)
+        et_dt = bars_ts.dt.tz_convert(ET)
+        # Regular session: 09:30 ET onward (any minute >= 09:30)
+        regular = (et_dt.dt.hour > 9) | (
+            (et_dt.dt.hour == 9) & (et_dt.dt.minute >= 30)
+        )
+        bars = bars[regular].reset_index(drop=True)
+        if bars.empty:
+            return []
+
     op = bars.iloc[0]['open']
     if op <= 0:
         return []

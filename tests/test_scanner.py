@@ -888,3 +888,59 @@ class TestVolumeBucketFromBarTimestamp:
         # avg_vol = 0 for bucket 10:00, so relative_volume = 0 → not qualified
         mock_db.save_scan_result.assert_not_called()
         mock_news.classify_news.return_value = {'has_news': True, 'catalyst': True, 'headline': 'Big news', 'reason': 'test'}
+
+
+class TestNextAlignedWakeup:
+    """Static helper that picks the next ":offset_secs past minute" wakeup target.
+
+    Used by the main loop to align cycle work with bar boundaries (cycle fires
+    at HH:MM:01 instead of drifting 0-60s).
+    """
+
+    def test_returns_next_minute_plus_offset_when_mid_minute(self, monkeypatch):
+        """At HH:MM:30, next aligned wakeup is HH:(MM+1):01."""
+        import time as time_mod
+        # Pin time to 1234567890.0 → second 30 of some minute
+        # 1234567890 % 60 = 30 → minute_start = 1234567860, +1 = 1234567861 (in past)
+        # → target = 1234567861 + 60 = 1234567921
+        monkeypatch.setattr(time_mod, 'time', lambda: 1234567890.0)
+        target = RealtimeScanner._next_aligned_wakeup(offset_secs=1.0)
+        assert target == 1234567921.0
+        # 31 seconds in the future
+        assert target - 1234567890.0 == 31.0
+
+    def test_targets_current_minute_offset_when_before_offset(self, monkeypatch):
+        """At HH:MM:00.5 (before :01), target is HH:MM:01.0 — same minute, 0.5s away."""
+        import time as time_mod
+        monkeypatch.setattr(time_mod, 'time', lambda: 1234567860.5)
+        target = RealtimeScanner._next_aligned_wakeup(offset_secs=1.0)
+        assert target == 1234567861.0
+        assert target - 1234567860.5 == 0.5
+
+    def test_skips_to_next_minute_when_at_offset_boundary(self, monkeypatch):
+        """At HH:MM:01.0 exactly, target jumps to HH:(MM+1):01.0 (target<=now → +60s)."""
+        import time as time_mod
+        monkeypatch.setattr(time_mod, 'time', lambda: 1234567861.0)
+        target = RealtimeScanner._next_aligned_wakeup(offset_secs=1.0)
+        assert target == 1234567921.0  # +60s
+        assert target - 1234567861.0 == 60.0
+
+    def test_custom_offset_works(self, monkeypatch):
+        """offset_secs=2.0 means align to HH:MM:02."""
+        import time as time_mod
+        monkeypatch.setattr(time_mod, 'time', lambda: 1234567860.0)  # at minute boundary
+        target = RealtimeScanner._next_aligned_wakeup(offset_secs=2.0)
+        assert target == 1234567862.0
+        assert target - 1234567860.0 == 2.0
+
+    def test_target_always_in_future(self, monkeypatch):
+        """For ANY input second, the returned target is strictly greater than now."""
+        import time as time_mod
+        # Sample many sub-second offsets to flush rounding edge cases
+        for sub in (0.0, 0.001, 0.5, 0.999, 1.0, 1.001, 30.0, 59.999):
+            now = 1234567860.0 + sub
+            monkeypatch.setattr(time_mod, 'time', lambda n=now: n)
+            target = RealtimeScanner._next_aligned_wakeup(offset_secs=1.0)
+            assert target > now, f"target {target} not > now {now} (sub={sub})"
+            # And target is within (0, 60] seconds away
+            assert 0 < target - now <= 60.0, f"unexpected delta {target - now} (sub={sub})"

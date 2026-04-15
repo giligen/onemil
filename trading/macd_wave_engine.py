@@ -750,16 +750,12 @@ class MACDWaveEngine:
 
                 # Reference price/time for slippage attribution: last 1-min bar
                 # seen at signal time (the BT's ideal entry reference).
+                # NOTE: Alpaca 1-min bar `timestamp` is the bar START (the minute
+                # the bar represents). The bar CLOSES 60s later — see
+                # _bar_start_to_close() for the conversion (was off by 60s before
+                # 2026-04-15, inflating bar_close_to_loop_ms by exactly 60_000).
                 try:
-                    bar_close_at_raw = bars['timestamp'].iloc[-1]
-                    if isinstance(bar_close_at_raw, pd.Timestamp):
-                        bar_close_at = bar_close_at_raw.to_pydatetime()
-                    elif isinstance(bar_close_at_raw, datetime):
-                        bar_close_at = bar_close_at_raw
-                    else:
-                        bar_close_at = pd.to_datetime(bar_close_at_raw, utc=True).to_pydatetime()
-                    if bar_close_at.tzinfo is None:
-                        bar_close_at = bar_close_at.replace(tzinfo=timezone.utc)
+                    bar_close_at = self._bar_start_to_close(bars['timestamp'].iloc[-1])
                     bar_close_price = float(latest_price)
                 except Exception:
                     bar_close_at = None
@@ -1545,6 +1541,29 @@ class MACDWaveEngine:
         market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
         market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
         return market_open <= now <= market_close and now.weekday() < 5
+
+    @staticmethod
+    def _bar_start_to_close(bar_timestamp_raw) -> datetime:
+        """Convert an Alpaca 1-min bar timestamp (bar START) to actual close time.
+
+        Alpaca convention: a bar with `timestamp = 14:04:00` represents trades
+        from 14:04:00 to 14:05:00, closing at 14:05:00. Add 60s to get the
+        actual close. Accepts pd.Timestamp, datetime, or string-like.
+        Always returns a UTC-aware datetime.
+
+        Pre-2026-04-15 the engine stored the bar START in `bar_close_at` (off
+        by 60s, inflating bar_close_to_loop_ms by 60_000). This helper is the
+        single source of truth for the conversion.
+        """
+        if isinstance(bar_timestamp_raw, pd.Timestamp):
+            bar_start = bar_timestamp_raw.to_pydatetime()
+        elif isinstance(bar_timestamp_raw, datetime):
+            bar_start = bar_timestamp_raw
+        else:
+            bar_start = pd.to_datetime(bar_timestamp_raw, utc=True).to_pydatetime()
+        if bar_start.tzinfo is None:
+            bar_start = bar_start.replace(tzinfo=timezone.utc)
+        return bar_start + timedelta(seconds=60)
 
     def is_force_close_time(self) -> bool:
         """Check if it's time to force close all positions."""

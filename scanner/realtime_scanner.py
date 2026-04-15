@@ -236,17 +236,27 @@ class RealtimeScanner:
                 except Exception as e:
                     logger.error(f"MACD wave cycle error: {e}", exc_info=True)
 
-            # Sleep in 1s chunks, draining RT bar events between (Bug #3 fix + latency fix)
-            # Bar events arrive via WebSocket on bar close. Without frequent
-            # draining, they queue up for the full 60s sleep → 60s+ latency.
-            # With 1s chunks: worst case 1s from bar close to pattern check.
-            _sleep_remaining = 60
-            while _sleep_remaining > 0:
-                _chunk = min(1, _sleep_remaining)
+            # Sleep until next :01 past the wall-clock minute (boundary alignment).
+            # Cycle work above (scan_for_movers, run_pattern_check) fires at predictable
+            # HH:MM:01 → first-cross detection happens within ~1-2s of the closing bar
+            # instead of drifting 0-60s with start-time offset. Bar events still drained
+            # every 1s for sub-second reaction on already-subscribed crossed_stocks.
+            _target = self._next_aligned_wakeup(offset_secs=1.0)
+            _shutdown = False
+            # Iterate up to 60 chunks (matches the original 60s sleep budget).
+            # In real prod time.time() advances during _interruptible_sleep, so
+            # the natural exit is `time.time() >= _target`. The for-loop bound
+            # makes the loop test-friendly when _interruptible_sleep is mocked
+            # (otherwise the loop would spin until real wall-clock advances).
+            for _ in range(60):
+                _remaining = _target - time_mod.time()
+                if _remaining <= 0:
+                    break
+                _chunk = min(1.0, _remaining)
                 if self._interruptible_sleep(_chunk):
                     logger.warning("Shutdown signal received during sleep")
+                    _shutdown = True
                     break
-                _sleep_remaining -= _chunk
                 # Drain RT bar events from WebSocket (sub-1s latency)
                 if engine is not None and engine.enabled and not force_closed:
                     rt = engine._drain_bar_events()
@@ -270,9 +280,16 @@ class RealtimeScanner:
                             self._macd_bar_drain_err_count = 0
                     except Exception as e:
                         self._log_throttled_bar_drain_error(e)
-            else:
-                continue  # Normal loop continuation
-            break  # Shutdown signal
+            if _shutdown:
+                break  # exits while True (intraday loop)
+            # Cycle overrun detection: if sleep loop exited without ever sleeping
+            # (because cycle work took >=60s and target was already past), the gap
+            # to next minute boundary will exceed 1s. Surface so we can spot slow cycles.
+            if _target < time_mod.time() - 1.0:
+                logger.warning(
+                    f"Cycle overrun: alignment target was {time_mod.time() - _target:.1f}s "
+                    f"in the past — re-aligning next cycle"
+                )
 
         # Post-loop safety net: force close (Bug #1 fix)
         if self.trading_engine is not None and self.trading_engine.enabled:
@@ -780,6 +797,22 @@ class RealtimeScanner:
         else:
             time_mod.sleep(seconds)
             return False
+
+    @staticmethod
+    def _next_aligned_wakeup(offset_secs: float = 1.0) -> float:
+        """Return Unix epoch seconds for the next ":offset_secs" past the wall-clock minute.
+
+        If we're already past :offset within the current minute, target the next minute.
+        Used by the main loop to align cycle work (scan_for_movers, run_pattern_check)
+        with bar boundaries — first-cross detection happens within ~1-2s of the closing
+        bar instead of drifting 0-60s. TZ-agnostic (uses time.time(), unaffected by DST).
+        """
+        now = time_mod.time()
+        minute_start = (int(now) // 60) * 60
+        target = minute_start + offset_secs
+        if target <= now:
+            target += 60
+        return target
 
     def _sleep_until(self, target_time: str) -> bool:
         """Sleep until a target Eastern Time (HH:MM).
