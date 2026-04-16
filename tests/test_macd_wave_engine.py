@@ -72,21 +72,83 @@ class TestHasEntryCapacity:
         # But the stale entry is still in open_positions until GC runs.
         assert 'STALE' in e.open_positions
 
-    def test_gc_stale_pending_removes_old(self):
+    def test_gc_stale_pending_removes_when_alpaca_says_rejected(self):
+        """Stale + Alpaca confirms rejected → purge."""
         e = _make_engine()
-        stale = _make_pos(
-            order_id='pending-xyz',
-            entry_time=datetime.now(timezone.utc) - timedelta(minutes=3),
-        )
-        fresh = _make_pos(
-            order_id='pending-abc',
-            entry_time=datetime.now(timezone.utc) - timedelta(seconds=30),
-        )
-        e.open_positions = {'STALE': stale, 'FRESH': fresh}
+        e.alpaca.get_order = MagicMock(return_value={'status': 'rejected'})
+        stale = _make_pos(order_id='x', entry_time=datetime.now(timezone.utc) - timedelta(minutes=3))
+        e.open_positions = {'STALE': stale}
         e._gc_stale_pending()
         assert 'STALE' not in e.open_positions
         assert 'STALE' in e.invalidated
-        assert 'FRESH' in e.open_positions  # untouched
+
+    def test_gc_stale_keeps_fresh_untouched(self):
+        """<2min old: skipped entirely — no Alpaca call, no purge."""
+        e = _make_engine()
+        e.alpaca.get_order = MagicMock()
+        fresh = _make_pos(order_id='abc', entry_time=datetime.now(timezone.utc) - timedelta(seconds=30))
+        e.open_positions = {'FRESH': fresh}
+        e._gc_stale_pending()
+        assert 'FRESH' in e.open_positions
+        e.alpaca.get_order.assert_not_called()
+
+    def test_gc_stale_KEEPS_live_order_on_alpaca(self):
+        """🔥 REGRESSION TEST for 2026-04-16 CDNA/BBGI orphan bug.
+
+        Order is >2min old but Alpaca says it's still LIVE (pending_new,
+        new, accepted, partially_filled). MUST NOT be purged — the old
+        behavior orphaned legitimate slow-fill limit orders on thin stocks.
+        """
+        for live_status in ['pending_new', 'new', 'accepted',
+                            'partially_filled', 'pending_replace']:
+            e = _make_engine()
+            e.alpaca.get_order = MagicMock(return_value={'status': live_status})
+            stale = _make_pos(order_id='x',
+                              entry_time=datetime.now(timezone.utc) - timedelta(minutes=5))
+            e.open_positions = {'CDNA': stale}
+            e._gc_stale_pending()
+            assert 'CDNA' in e.open_positions, \
+                f"order with status={live_status} was incorrectly purged — this is the bug"
+            assert 'CDNA' not in e.invalidated, \
+                f"status={live_status} should NOT invalidate"
+
+    def test_gc_stale_KEEPS_filled_order_for_fill_check(self):
+        """Stale + Alpaca says filled → leave in place so fill-check claims it."""
+        e = _make_engine()
+        e.alpaca.get_order = MagicMock(return_value={'status': 'filled'})
+        stale = _make_pos(order_id='x',
+                          entry_time=datetime.now(timezone.utc) - timedelta(minutes=5))
+        e.open_positions = {'QBTX': stale}
+        e._gc_stale_pending()
+        assert 'QBTX' in e.open_positions  # kept for fill-check to claim
+
+    def test_gc_stale_hard_cancels_very_old_live(self):
+        """>30min AND still live → actively cancel + purge (don't strand capital)."""
+        e = _make_engine()
+        e.alpaca.get_order = MagicMock(return_value={'status': 'new'})
+        e.alpaca.cancel_order = MagicMock()
+        super_stale = _make_pos(order_id='old-1',
+                                entry_time=datetime.now(timezone.utc) - timedelta(minutes=45))
+        e.open_positions = {'OLD': super_stale}
+        e._gc_stale_pending()
+        assert 'OLD' not in e.open_positions
+        assert 'OLD' in e.invalidated
+        e.alpaca.cancel_order.assert_called_once_with('old-1')
+
+    def test_gc_stale_keeps_tracking_on_alpaca_error(self):
+        """Transient Alpaca error → keep tracking, retry next cycle.
+
+        Never silently purge on a network blip — that was the failure mode
+        the original code had.
+        """
+        e = _make_engine()
+        e.alpaca.get_order = MagicMock(side_effect=Exception('network blip'))
+        stale = _make_pos(order_id='x',
+                          entry_time=datetime.now(timezone.utc) - timedelta(minutes=5))
+        e.open_positions = {'NET': stale}
+        e._gc_stale_pending()
+        assert 'NET' in e.open_positions
+        assert 'NET' not in e.invalidated
 
     def test_has_entry_capacity_is_pure(self):
         """_has_entry_capacity must not mutate state."""

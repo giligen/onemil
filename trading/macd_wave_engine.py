@@ -302,6 +302,79 @@ class MACDWaveEngine:
                     f"exit ${exit_price:.2f}, P&L ${pnl:+,.0f} ({exit_reason})"
                 )
 
+        # Phase 2 (added 2026-04-16): orphan-position recovery.
+        # Catch the reverse of the above: Alpaca has a position we have no
+        # filled DB record for. Happens when the fill-update path fails
+        # (e.g., the old _gc_stale_pending purged a still-live order before
+        # the fill landed; TradingStream reconnected and missed a push; or
+        # a crash dropped the in-flight update). Without this, the position
+        # silently exits via bracket SL/TP and we never even log it.
+        # db_open already contains pending_new rows (they have no exit_price).
+        # Filter to pending_new only — those are the candidates for orphan recovery.
+        db_pending_by_sym = {
+            t['symbol']: t for t in db_open
+            if (t.get('order_status') == 'pending_new'
+                and t.get('fill_price') in (None, 0, 0.0))
+        }
+        db_open_syms = {
+            t['symbol'] for t in db_open
+            if t.get('fill_price') not in (None, 0, 0.0)
+        }
+
+        for sym, alpaca_pos in alpaca_positions.items():
+            if sym in self.open_positions or sym in db_open_syms:
+                continue  # already tracked
+            # Alpaca has it, we don't — orphan.
+            trade = db_pending_by_sym.get(sym)
+            try:
+                avg_price = float(alpaca_pos.avg_entry_price)
+                qty = int(alpaca_pos.qty)
+            except Exception:
+                continue
+            if trade is None:
+                logger.warning(
+                    f"[{self.STRATEGY_NAME}] sync: orphan Alpaca position {sym} "
+                    f"({qty}sh @ ${avg_price:.2f}) — no DB record, skipping"
+                )
+                continue
+            # Update the stuck pending_new trade with actual fill info.
+            hard_stop = round(avg_price * (1 - self.hard_stop_pct), 2)
+            fill_update = {
+                'order_status': 'filled',
+                'fill_price': avg_price,
+                'filled_qty': qty,
+                'filled_at': datetime.now(timezone.utc),
+                'order_filled_at': datetime.now(timezone.utc),
+            }
+            try:
+                self.db.update_trade(trade['id'], fill_update)
+            except Exception as e:
+                logger.warning(
+                    f"[{self.STRATEGY_NAME}] sync: DB update failed for {sym}: {e}"
+                )
+                continue
+            # Recover into open_positions so MACD flip + trailing-stop monitoring resumes.
+            self.open_positions[sym] = OpenPosition(
+                symbol=sym, entry_price=avg_price, shares=qty,
+                hard_stop=hard_stop, trade_id=trade['id'], order_id='',
+                entry_time=datetime.now(timezone.utc),
+                macd_hist_at_entry=0, highest_since_entry=avg_price,
+            )
+            if self.stop_monitor:
+                self.stop_monitor.add_watch(
+                    symbol=sym, stop_price=hard_stop, shares=qty,
+                    tp_leg_id='', sl_leg_id='', trade_db_id=trade['id'],
+                    entry_price=avg_price, risk_per_share=0,
+                    trail_r=0, activate_at_r=0.0,
+                    trail_pct=self.trail_stop_pct,
+                    strategy=self.STRATEGY_NAME,
+                )
+            logger.warning(
+                f"[{self.STRATEGY_NAME}] sync: RECOVERED orphan {sym} "
+                f"({qty}sh @ ${avg_price:.2f}) — DB back-filled, "
+                f"MACD/trail monitoring resumed"
+            )
+
     # ------------------------------------------------------------------
     # Pre-market: build universe
     # ------------------------------------------------------------------
@@ -622,23 +695,101 @@ class MACDWaveEngine:
             )
         return False
 
+    # Order statuses that mean the order is really gone and safe to purge.
+    _DEAD_ORDER_STATUSES = frozenset({'rejected', 'canceled', 'cancelled', 'expired'})
+    # Order statuses that mean the order is still working — keep tracking.
+    _LIVE_ORDER_STATUSES = frozenset({
+        'pending_new', 'new', 'accepted', 'accepted_for_bidding',
+        'partially_filled', 'pending_replace', 'replaced',
+    })
+
     def _gc_stale_pending(self) -> None:
-        """
-        Remove open_positions whose buy order has been pending >2 minutes
-        (likely rejected by Alpaca, or the submit result was lost). Mutates
-        self.open_positions and self.invalidated. Safe to call multiple times.
+        """Purge pending orders, but ONLY after confirming they're really dead.
+
+        Prior behavior (pre-2026-04-16): any order >2min in open_positions was
+        purged unconditionally on the assumption "pending >2min = rejected or
+        lost". That's wrong for limit orders on thin/volatile stocks, which
+        legitimately take 3-20 minutes to fill. The old GC orphaned those
+        orders — Alpaca still had them, but our code stopped tracking, so the
+        subsequent fill event never updated the DB, the MACD-flip exit loop
+        never ran, and the position could only exit via bracket SL/TP.
+        Evidence: 2026-04-16 CDNA (filled 19 min after submit, -$0 realized,
+        orphaned) + BBGI (filled 6:49 after submit, later bracket-stopped for
+        -$4,603 without ever being in our tracking).
+
+        New behavior: for each order >2min old, query Alpaca for actual status.
+        - Dead (rejected/canceled/expired) → purge
+        - Filled → leave in place, fill-check loop will claim it next tick
+        - Live (pending_new/accepted/new/partially_filled) → keep tracking
+        - Very stale (>30min) AND still live → actively cancel + purge
+
+        Network errors keep the position tracked (retry next cycle). No silent
+        purges that strand capital.
         """
         now = datetime.now(timezone.utc)
-        stale = [
-            psym for psym, pos in self.open_positions.items()
-            if pos.order_id and (now - pos.entry_time).total_seconds() >= 120
-        ]
-        for psym in stale:
-            logger.warning(
-                f"[{self.STRATEGY_NAME}] {psym}: stale pending order (>2min), removing"
-            )
-            self.open_positions.pop(psym, None)
-            self.invalidated.add(psym)
+        HARD_CANCEL_SECONDS = 30 * 60  # 30 min
+
+        for psym in list(self.open_positions.keys()):
+            pos = self.open_positions.get(psym)
+            if pos is None or not pos.order_id:
+                continue  # already filled or no order_id — nothing to GC
+            age_s = (now - pos.entry_time).total_seconds()
+            if age_s < 120:
+                continue  # still within the "let it settle" window
+
+            try:
+                order_status = self.alpaca.get_order(pos.order_id)
+            except Exception as e:
+                logger.warning(
+                    f"[{self.STRATEGY_NAME}] {psym}: stale-GC skipped — "
+                    f"Alpaca get_order failed: {e}. Will retry next cycle."
+                )
+                continue  # transient network — keep tracking, retry next tick
+
+            status = (order_status or {}).get('status', '') if order_status else ''
+
+            if status in self._DEAD_ORDER_STATUSES:
+                logger.warning(
+                    f"[{self.STRATEGY_NAME}] {psym}: order {status} on Alpaca "
+                    f"(age {age_s:.0f}s) — purging"
+                )
+                self.open_positions.pop(psym, None)
+                self.invalidated.add(psym)
+            elif status == 'filled':
+                # Missed the fill push; next fill-check tick will claim it.
+                logger.info(
+                    f"[{self.STRATEGY_NAME}] {psym}: order already filled on "
+                    f"Alpaca (age {age_s:.0f}s) — keeping for fill-check"
+                )
+            elif age_s >= HARD_CANCEL_SECONDS:
+                # Truly stale — actively cancel to free capital, then purge.
+                try:
+                    self.alpaca.cancel_order(pos.order_id)
+                    logger.warning(
+                        f"[{self.STRATEGY_NAME}] {psym}: order still '{status}' "
+                        f"after {age_s/60:.0f}min — cancelling + purging"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[{self.STRATEGY_NAME}] {psym}: cancel failed: {e} — "
+                        f"purging anyway (will resolve via sync_positions)"
+                    )
+                self.open_positions.pop(psym, None)
+                self.invalidated.add(psym)
+            elif status in self._LIVE_ORDER_STATUSES or not status:
+                # Live or unknown-but-not-dead — keep tracking silently.
+                # Emit DEBUG so we can grep for "still pending" if needed.
+                status_label = status or 'unknown'
+                logger.debug(
+                    f"[{self.STRATEGY_NAME}] {psym}: still '{status_label}' "
+                    f"on Alpaca (age {age_s:.0f}s) — keeping"
+                )
+            else:
+                # Unknown status — log and keep tracking; reconcile next cycle.
+                logger.warning(
+                    f"[{self.STRATEGY_NAME}] {psym}: unrecognized Alpaca status "
+                    f"'{status}' (age {age_s:.0f}s) — keeping, will retry"
+                )
 
     def _has_entry_capacity(self) -> bool:
         """
