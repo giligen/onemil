@@ -118,7 +118,8 @@ class Database:
         conn = sqlite3.connect(
             str(path),
             detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
-            timeout=30
+            timeout=30,
+            check_same_thread=False,
         )
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=30000")
