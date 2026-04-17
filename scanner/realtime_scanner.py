@@ -10,6 +10,7 @@ Uses Alpaca SIP feed for real-time data.
 
 import logging
 import time as time_mod
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, date
 from typing import List, Dict, Optional, Set
 
@@ -160,6 +161,10 @@ class RealtimeScanner:
         force_closed = False
         last_bucket = None
         _scanner_start = time_mod.time()
+        # Reusable thread pool for parallel engine ticks (bull flag + MACD wave).
+        # Created once, cleaned up after loop exits.
+        _engine_pool = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix='engine')
 
         while True:
             _cycle_start = time_mod.time()  # measured for cycle-overrun warning
@@ -228,30 +233,24 @@ class RealtimeScanner:
             # thread-safe (httpx). Running concurrently saves ~10-15s per
             # cycle (the time of the shorter engine), pushing the combined
             # cycle from ~60s to ~40-45s.
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-
             _engine_futures = []
-            with ThreadPoolExecutor(max_workers=2,
-                                    thread_name_prefix='engine') as _pool:
-                if engine is not None and engine.enabled and not force_closed:
-                    _engine_futures.append(
-                        _pool.submit(engine.run_pattern_check))
-
-                if self.macd_engine is not None and not force_closed:
-                    def _macd_tick():
-                        self.macd_engine.scan_for_movers()
-                        self.macd_engine.check_entries()
-                        self.macd_engine.check_exits()
-                        if self.macd_engine.is_force_close_time():
-                            self.macd_engine.force_close_all()
-                    _engine_futures.append(_pool.submit(_macd_tick))
-
-                for f in as_completed(_engine_futures):
-                    try:
-                        f.result()
-                    except Exception as e:
-                        logger.error(
-                            f"Engine tick error: {e}", exc_info=True)
+            if engine is not None and engine.enabled and not force_closed:
+                _engine_futures.append(
+                    _engine_pool.submit(engine.run_pattern_check))
+            if self.macd_engine is not None and not force_closed:
+                _engine_futures.append(
+                    _engine_pool.submit(self._macd_wave_tick))
+            for f in _engine_futures:
+                try:
+                    f.result(timeout=50)
+                except TimeoutError:
+                    logger.error(
+                        "Engine tick TIMEOUT (>50s) — one engine stalled, "
+                        "continuing to next cycle"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Engine tick error: {e}", exc_info=True)
 
             # Sleep until next :01 past the wall-clock minute (boundary alignment).
             # Cycle work above (scan_for_movers, run_pattern_check) fires at predictable
@@ -309,6 +308,8 @@ class RealtimeScanner:
                     f"skipped a minute boundary, re-aligning"
                 )
 
+        _engine_pool.shutdown(wait=False)
+
         # Post-loop safety net: only force-close at EOD, NOT on mid-session
         # SIGTERM (code deploy). Positions survive restart and get recovered
         # by startup sync. See 2026-04-16 CDNA incident.
@@ -329,6 +330,18 @@ class RealtimeScanner:
                     self.trading_engine._force_close_all()
             if self.macd_engine is not None:
                 self.macd_engine.force_close_all()
+
+    def _macd_wave_tick(self) -> None:
+        """One MACD wave engine cycle (scan + entries + exits).
+
+        Runs in the parallel engine-tick thread pool. Isolated from the bull
+        flag engine — no shared mutable state.
+        """
+        self.macd_engine.scan_for_movers()
+        self.macd_engine.check_entries()
+        self.macd_engine.check_exits()
+        if self.macd_engine.is_force_close_time():
+            self.macd_engine.force_close_all()
 
     def run_test_cycle(self) -> Dict:
         """
