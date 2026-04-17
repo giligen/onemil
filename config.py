@@ -478,6 +478,43 @@ class Config:
                                    "enabled", default=False))
 
     @property
+    def v_reversal_bonus_cfg(self) -> dict:
+        """Experiment V — V-reversal conviction bonus.
+
+        Rule 9 adds `bonus` to the raw conviction score when a setup matches
+        the V-reversal pattern (gap_pct < gap_pct_max, intraday_range >=
+        intraday_range_min, pole_gain >= pole_gain_min). Disabled by default.
+        """
+        cfg = self._get_yaml("trading", "conviction_scoring",
+                             "v_reversal_bonus", default={}) or {}
+        return {
+            "enabled": bool(cfg.get("enabled", False)),
+            "bonus": float(cfg.get("bonus", 0.4)),
+            "gap_pct_max": float(cfg.get("gap_pct_max", 0.0)),
+            "intraday_range_min": float(cfg.get("intraday_range_min", 20.0)),
+            "pole_gain_min": float(cfg.get("pole_gain_min", 5.0)),
+        }
+
+    @property
+    def conviction_marginal_scaling_cfg(self) -> dict:
+        """Experiment H — marginal-conviction defensive scaling.
+
+        After min_threshold filter passes, trades with conviction in
+        [min_threshold, upper_bound) get their SIZING multiplier scaled by
+        scale_factor. Disabled by default (scale_factor effectively 1.0).
+        """
+        cfg = self._get_yaml("trading", "conviction_scoring",
+                             "marginal_scaling", default={}) or {}
+        enabled = bool(cfg.get("enabled", False))
+        raw_factor = float(cfg.get("scale_factor", 0.5))
+        return {
+            "enabled": enabled,
+            # When disabled, expose factor=1.0 so downstream sizing is a no-op.
+            "scale_factor": raw_factor if enabled else 1.0,
+            "upper_bound": float(cfg.get("upper_bound", 1.7)),
+        }
+
+    @property
     def vol_confirmed_trail_cfg(self) -> dict:
         """Volume-confirmed trail exit config (Experiment D).
 

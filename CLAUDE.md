@@ -163,6 +163,23 @@ journalctl -u onemil-trader -f           # Live logs
 - Full details in README.md "Two-Tier Filter" section
 - **Dormant companion change**: `BT_ALLOW_REENTRY=1` env var enables multi-trade-per-symbol-per-day in the backtest. Empirically −$1,299/yr — DO NOT enable in prod.
 
+### Feature flag: V-reversal conviction bonus (Experiment V, added 2026-04-17, shipping ON)
+- Config key: `trading.conviction_scoring.v_reversal_bonus.enabled`
+- Default: `true` (shipping ON). Set to `false` to revert to V2_clean 7-rule baseline.
+- When `true`: Rule 9 adds `bonus` (default 0.4) to raw conviction for gap-down V-reversal setups (gap<0 + intraday_range≥20% + pole_gain≥5%). Final score still clamped to [0.25, 3.0] — max sizing unchanged.
+- BT lift: 2025 +$4,396 (+6.4%), Q1 2026 +$2,284 (+19%). Stacks on TTF+D.
+- Shared between BT (`backtest.py`) and live (`trading/trading_engine.py`) conviction functions — parity by construction.
+- Live: no cache rebuild, just restart trader. Enable via `Config().v_reversal_bonus_cfg`.
+- Monitor: `journalctl -u onemil-trader | grep "v_reversal"` in log breakdown when conv trade fires.
+
+### Feature flag: marginal-conviction defensive scaling (Experiment H, added 2026-04-17, research artifact)
+- Config key: `trading.conviction_scoring.marginal_scaling.enabled`
+- Default: `false` — mixed BT signal. 2025 V+H: −$4,892 (hurts); Q1 2026 V+H: +$851 (helps). Net **−$4,041 across both periods**, so NOT shipping on.
+- Keep in codebase for future regime-aware activation (bucket is net-loser in some periods, net-winner in others).
+- When `true`: trades with conv in `[min_threshold, upper_bound)` have SIZING scaled by `scale_factor` (default 0.5). Stored conviction_mult unchanged (Stage-2 filters see raw).
+- Live: `journalctl -u onemil-trader | grep "MARGINAL CONV SCALE"`
+- Rollback: flip flag to `false`, restart.
+
 ### Feature flag: volume-confirmed trail exit (Experiment D, added 2026-04-17, shipping ON)
 - Config key: `trading.trailing_stop.vol_confirmed_exit.enabled`
 - Default: `true` (shipping ON). Set to `false` to revert to naive trail behavior.

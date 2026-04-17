@@ -348,6 +348,65 @@ pytest tests/                                         # full suite (1,142 passin
 - **Re-entry** (multiple trades per symbol per day) — empirically −$1,299 over 58 trades. Env-gated via `BT_ALLOW_REENTRY=1`, dormant in code.
 - **Multiplier re-tuning** (Kelly v3 capping to 2.0×) — reserved for when base risk scales to $1,000+ (current $200 base, rubric is P&L-max as-is).
 
+### V-Reversal Conviction Bonus (Experiment V, 2026-04-17) — default ON (shipped, rollback via flag)
+
+Fat-tail analysis on the shipping TTF+D stack revealed that the top 10 winners of 2025 share a distinctive feature: **median `qf_gap_pct = −1.09%`** (gap-down) plus intraday range ≥ 20% and pole gain ≥ 5% — i.e., oversold V-reversal plays, not the gap-ups the pattern was originally designed around. The existing 7-rule conviction scoring had no term that explicitly rewarded this shape.
+
+Rule 9 (V-reversal bonus) adds a configurable amount to the conviction raw score when all three triggers fire:
+
+```
+is_v_reversal = (gap_pct < gap_pct_max) AND (intraday_range_pct >= intraday_range_min) AND (pole_gain_pct >= pole_gain_min)
+```
+
+**Stays within the existing conviction envelope** — final score still clamped to `[0.25, 3.0]`, max risk multiplier still 3.0×. The rule simply shifts V-reversals UP the existing scale so they size bigger.
+
+**Backtest lift** (TTF+D on, bonus=0.4, defaults):
+
+| | TTF+D (shipping) | **+V (V-reversal)** | Δ |
+|---|---:|---:|---:|
+| 2025 trades | 135 | 142 | +7 (borderline V-revs now pass conv filter) |
+| 2025 P&L | +$68,791 | **+$73,187** | **+$4,396 (+6.4%)** |
+| 2025 WR | 58.5% | 56.3% | −2.2pt |
+| 2025 avg_win | +$1,392 | **+$1,451** | +$59 |
+| Q1 2026 trades | 46 | 47 | +1 |
+| Q1 2026 P&L | +$9,934→$11,770 (D) | **+$14,054** | **+$2,284 (+19%)** |
+
+**Config block** (under `trading.conviction_scoring`):
+```yaml
+v_reversal_bonus:
+  enabled: false            # flip to true to activate
+  bonus: 0.4
+  gap_pct_max: 0.0          # fires only when qf_gap_pct < this
+  intraday_range_min: 20.0  # fires only when intraday range >= this
+  pole_gain_min: 5.0        # fires only when pole gain >= this
+```
+
+**Unlike TTF/D, no cache rebuild needed in prod**: live engine computes conviction per-trade in real-time. Deployment is a config flip + `sudo systemctl restart onemil-trader`.
+
+### Marginal-Conviction Defensive Scaling (Experiment H, 2026-04-17) — feature-flagged, default OFF (research artifact)
+
+Complements V on the defensive side. P&L-bucket analysis showed the shipping stack has **35 mid-losers (−$500 to −$1K)** vs A_f6's 18 — a disproportionate concentration of marginal-quality trades that barely clear the `min_threshold: 1.4` conviction filter.
+
+Marginal scaling halves (or scales by configurable factor) the SIZING multiplier for trades with conviction in `[min_threshold, upper_bound)` — without changing the stored conviction value (so Stage-2 filters still see the true quality signal).
+
+**Backtest result — regime-dependent, not a universal win**:
+
+| | V-on baseline | V+H | Δ |
+|---|---:|---:|---:|
+| 2025 P&L | +$73,187 | +$68,295 | **−$4,892** (H hurts) |
+| Q1 2026 P&L | +$14,054 | +$14,905 | +$851 (H helps) |
+| **Combined** | **+$87,241** | **+$83,200** | **−$4,041 (−4.6%)** |
+
+The marginal bucket [1.4, 1.7] is net-winner on 2025 but net-loser on Q1 — halving both symmetrically costs more on winners than it saves on losers **on 2025's data**. Could still be worth enabling in a regime where the bucket is predominantly loser; shipped as research artifact for future tuning (e.g., regime-conditional activation).
+
+**Config block**:
+```yaml
+marginal_scaling:
+  enabled: false             # DEFAULT OFF — mixed BT signal
+  scale_factor: 0.5          # size multiplier for marginal trades
+  upper_bound: 1.7           # applies to conviction in [min_threshold, this)
+```
+
 ### Volume-Confirmed Trail Exit (Experiment D, 2026-04-17) — default ON (shipped, rollback via flag)
 
 When a trailing stop triggers on a bar, require that bar's volume to exceed `flag_avg_volume × min_vol_ratio` before firing the exit. Low-volume drift-downs are treated as noise (hold position); only active selling (volume-confirmed) fires the exit. Initial hard stop (pre-trailing) is never skipped. Shared helper `trading/trail_vol_guard.py` used by both BT simulator and live `StopMonitor` for parity.

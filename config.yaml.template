@@ -267,6 +267,28 @@ trading:
                                         # V2_clean (2026-04-15): 1.4 lifts canonical 16mo +$52K (+15.5%)
                                         # Walk-forward OOS: mean +$28K, worst split +$19K (3 splits)
                                         # COUPLED to 7 conviction rules (V1 + Rules 7+8) — re-validate if rules change
+    # V-reversal bonus (Experiment V, 2026-04-17). Rule 9: adds `bonus` to the raw
+    # conviction score when the setup is a gap-down V-reversal (oversold intraday
+    # reversal pattern). Fat-tail analysis showed the top 10 2025 winners have
+    # median gap_pct=-1.09% with >=20% intraday range — this rule explicitly
+    # rewards that shape. Stays within conviction's [0.25, 3.0] clamp.
+    # BT lift (TTF+D on, bonus=0.4): 2025 +$4,396, Q1 2026 +$2,284 — same DD.
+    v_reversal_bonus:
+      enabled: true                    # shipping ON — validated +$6.7K combined 2025+Q1 vs TTF+D
+      bonus: 0.4                       # added to raw score when all triggers fire
+      gap_pct_max: 0.0                 # fires only when qf_gap_pct < this (gap-down)
+      intraday_range_min: 20.0         # fires only when intraday range (%) >= this
+      pole_gain_min: 5.0               # fires only when pole gain (%) >= this
+    # Marginal-conviction defensive scaling (Experiment H, 2026-04-17). After
+    # min_threshold filter passes, trades with conviction in [min_threshold,
+    # upper_bound) get their SIZING (not their stored conviction value) scaled
+    # by scale_factor. Protects against marginal-quality trades that barely
+    # clear the threshold but disproportionately contribute to mid-losers.
+    # BT: Q1 2026 +$851 on 47 trades (no change in count). cuts avg loss 16%.
+    marginal_scaling:
+      enabled: false
+      scale_factor: 0.5                # size multiplier for marginal-conv trades
+      upper_bound: 1.7                 # trades with conviction < this are scaled
   news_gate:
     enabled: false                     # Full gate kills Q1 2025. Use news_kill_rules instead.
   # News kill rules: block no-news trades in specific LOSER segments only

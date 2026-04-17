@@ -248,6 +248,24 @@ class TradingEngine:
             if self.conviction_min_threshold > 0:
                 msg += f" — filter trades with conv < {self.conviction_min_threshold:.2f}"
             logger.info(msg)
+        # Marginal-conviction defensive scaling (Experiment H, 2026-04-17).
+        # Feature-flagged. When enabled, trades with conviction in
+        # [min_threshold, upper_bound) have SIZING scaled by scale_factor.
+        _marg_cfg = conv_cfg.get("marginal_scaling", {}) or {}
+        _marg_enabled = bool(_marg_cfg.get("enabled", False))
+        self.conviction_marginal_scale_factor = (
+            float(_marg_cfg.get("scale_factor", 0.5)) if _marg_enabled else 1.0
+        )
+        self.conviction_marginal_upper = float(_marg_cfg.get("upper_bound", 1.7))
+        # V-reversal bonus (Experiment V, 2026-04-17). Feature-flagged.
+        _vrev_cfg = conv_cfg.get("v_reversal_bonus", {}) or {}
+        self.v_reversal_enabled = bool(_vrev_cfg.get("enabled", False))
+        self.v_reversal_bonus = float(_vrev_cfg.get("bonus", 0.4))
+        self.v_reversal_gap_pct_max = float(_vrev_cfg.get("gap_pct_max", 0.0))
+        self.v_reversal_intraday_range_min = float(
+            _vrev_cfg.get("intraday_range_min", 20.0))
+        self.v_reversal_pole_gain_min = float(
+            _vrev_cfg.get("pole_gain_min", 5.0))
 
         # News gate: require real catalyst before trading
         news_gate_cfg = _cfg.get("trading", {}).get("news_gate", {})
@@ -543,12 +561,20 @@ class TradingEngine:
         self, setup, spy_3d_range: float, *,
         vwap_dist_pct: float = 0.0,
         gap_fading: bool = False,
+        gap_pct: float = 0.0,
+        intraday_range_pct: float = 0.0,
+        v_reversal_enabled: bool = False,
+        v_reversal_bonus: float = 0.4,
+        v_reversal_gap_pct_max: float = 0.0,
+        v_reversal_intraday_range_min: float = 20.0,
+        v_reversal_pole_gain_min: float = 5.0,
         return_breakdown: bool = False,
     ):
         """Compute conviction score at setup detection time.
 
         Returns a multiplier (0.25 to 3.0) that scales position size.
-        Matches backtest.py exactly — 7 pattern rules (V2_clean, 2026-04-15).
+        Matches backtest.py exactly — 8 pattern rules (V2_clean + V-reversal
+        rule 9, 2026-04-17).
 
         Args:
             setup: BullFlagSetup object
@@ -630,6 +656,18 @@ class TradingEngine:
         gf_contrib = -0.3 if gap_fading else 0.0
         score += gf_contrib
         breakdown['gap_fading'] = gf_contrib
+
+        # 9. V-reversal bonus — gap-down + high intraday range + meaningful pole.
+        # Feature-flagged; default OFF. Mirrors backtest.py for BT/PROD parity.
+        vr_contrib = 0.0
+        if v_reversal_enabled and (
+            gap_pct < v_reversal_gap_pct_max
+            and intraday_range_pct >= v_reversal_intraday_range_min
+            and setup.pole_gain_pct >= v_reversal_pole_gain_min
+        ):
+            vr_contrib = v_reversal_bonus
+        score += vr_contrib
+        breakdown['v_reversal'] = vr_contrib
 
         final = max(0.25, min(3.0, score))
         if return_breakdown:
@@ -2544,6 +2582,7 @@ class TradingEngine:
             # was loaded at line 2340); compute up-front so conviction has it.
             _v7_dist = 0.0
             _g8_fade = False
+            _gap_pct_for_v9 = 0.0
             _vwap_at_setup = self._compute_vwap(bars, up_to_idx=setup.flag_end_idx)
             if _vwap_at_setup and _vwap_at_setup > 0:
                 _v7_dist = (setup.breakout_level - _vwap_at_setup) / _vwap_at_setup * 100
@@ -2552,16 +2591,35 @@ class TradingEngine:
                 try:
                     _today_open = float(bars.iloc[0]['open'])
                     _gap_pct = (_today_open - _conv_prev_close) / _conv_prev_close * 100
+                    _gap_pct_for_v9 = _gap_pct
                     _g8_fade = bool(
                         _gap_pct >= self.qf_gap_fade_threshold
                         and setup.breakout_level < _today_open
                     )
                 except (KeyError, TypeError):
                     pass  # bars missing 'open' column — leave _g8_fade=False
+            # Rule 9 intraday range (V-reversal). Uses bars up to setup bar.
+            _intraday_range_pct = 0.0
+            if len(bars) > 0 and setup.flag_end_idx >= 0:
+                try:
+                    _end = min(setup.flag_end_idx + 1, len(bars))
+                    _hi = float(bars.iloc[:_end]['high'].max())
+                    _lo = float(bars.iloc[:_end]['low'].min())
+                    if _lo > 0:
+                        _intraday_range_pct = (_hi - _lo) / _lo * 100
+                except (KeyError, ValueError):
+                    pass
             conviction_mult, _conv_brkdn = self._compute_conviction_score_setup(
                 setup, spy_3d,
                 vwap_dist_pct=_v7_dist,
                 gap_fading=_g8_fade,
+                gap_pct=_gap_pct_for_v9,
+                intraday_range_pct=_intraday_range_pct,
+                v_reversal_enabled=self.v_reversal_enabled,
+                v_reversal_bonus=self.v_reversal_bonus,
+                v_reversal_gap_pct_max=self.v_reversal_gap_pct_max,
+                v_reversal_intraday_range_min=self.v_reversal_intraday_range_min,
+                v_reversal_pole_gain_min=self.v_reversal_pole_gain_min,
                 return_breakdown=True)
             if abs(conviction_mult - 1.0) > 0.05:
                 logger.info(
@@ -2597,6 +2655,19 @@ class TradingEngine:
                 ))
                 return None
 
+        # Marginal-conviction defensive scaling: applied to the SIZING multiplier
+        # only. conviction_mult is left as the raw value so telemetry + downstream
+        # filters see the true quality; sizing_conviction is used in combined_mult.
+        sizing_conviction = conviction_mult
+        if (self.conviction_marginal_scale_factor < 1.0
+                and conviction_mult < self.conviction_marginal_upper):
+            sizing_conviction = conviction_mult * self.conviction_marginal_scale_factor
+            logger.info(
+                f"{symbol}: MARGINAL CONV SCALE — conv {conviction_mult:.2f} × "
+                f"{self.conviction_marginal_scale_factor} = "
+                f"sizing {sizing_conviction:.2f} (below {self.conviction_marginal_upper})"
+            )
+
         # Risk tier: scale risk on high-conviction setups.
         # Marginability API call is gated by risk_multiplier > 1.0,
         # AND only happens after news_kill + conviction filters pass.
@@ -2618,7 +2689,9 @@ class TradingEngine:
                     )
                     risk_multiplier = 1.0
 
-        combined_mult = min(3.0, risk_multiplier * conviction_mult)
+        # Use sizing_conviction (may be halved for marginal trades) for sizing,
+        # but conviction_mult (raw) for telemetry / TTF composite features.
+        combined_mult = min(3.0, risk_multiplier * sizing_conviction)
 
         # Two-tier filter gate (2026-04-17). When enabled, classify the trade
         # by max intraday change seen by scanner, then apply surgical drop +

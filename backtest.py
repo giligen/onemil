@@ -1064,6 +1064,29 @@ class BacktestRunner:
             if self.conviction_min_threshold > 0:
                 msg += f" — filter trades with conv < {self.conviction_min_threshold:.2f}"
             logger.info(msg)
+        # Marginal-conviction defensive scaling (Experiment H, 2026-04-17).
+        # Feature-flagged under trading.conviction_scoring.marginal_scaling.
+        # When enabled, trades with conviction in [min_threshold, upper_bound)
+        # have SIZING scaled by scale_factor. The cached conviction_mult stays
+        # as the raw quality value so Stage-2 filters see it unchanged.
+        _marg_cfg = conv_cfg.get("marginal_scaling", {}) or {}
+        _marg_enabled = bool(_marg_cfg.get("enabled", False))
+        self.conviction_marginal_scale_factor = (
+            float(_marg_cfg.get("scale_factor", 0.5)) if _marg_enabled else 1.0
+        )
+        self.conviction_marginal_upper = float(_marg_cfg.get("upper_bound", 1.7))
+        # V-reversal bonus (Experiment V, 2026-04-17). Feature-flagged under
+        # trading.conviction_scoring.v_reversal_bonus. When disabled, Rule 9
+        # never fires regardless of setup. When enabled, adds `bonus` to raw
+        # conviction score for gap-down V-reversal setups.
+        _vrev_cfg = conv_cfg.get("v_reversal_bonus", {}) or {}
+        self.v_reversal_enabled = bool(_vrev_cfg.get("enabled", False))
+        self.v_reversal_bonus = float(_vrev_cfg.get("bonus", 0.4))
+        self.v_reversal_gap_pct_max = float(_vrev_cfg.get("gap_pct_max", 0.0))
+        self.v_reversal_intraday_range_min = float(
+            _vrev_cfg.get("intraday_range_min", 20.0))
+        self.v_reversal_pole_gain_min = float(
+            _vrev_cfg.get("pole_gain_min", 5.0))
 
         # News kill rules: block no-news trades in specific loser segments
         nkr_cfg = trading_cfg.get("news_kill_rules", {})
@@ -1297,6 +1320,13 @@ class BacktestRunner:
         self, setup, spy_3d_range: float, *,
         vwap_dist_pct: float = 0.0,
         gap_fading: bool = False,
+        gap_pct: float = 0.0,
+        intraday_range_pct: float = 0.0,
+        v_reversal_enabled: bool = False,
+        v_reversal_bonus: float = 0.4,
+        v_reversal_gap_pct_max: float = 0.0,
+        v_reversal_intraday_range_min: float = 20.0,
+        v_reversal_pole_gain_min: float = 5.0,
         return_breakdown: bool = False,
     ):
         """Compute conviction score at setup detection time.
@@ -1314,6 +1344,10 @@ class BacktestRunner:
                 from prev_close AND breakout_level is below today's open.
                 Defaults to False (rule 8 silent) for back-compat.
                 NEW in V2_clean.
+            gap_pct: (today_open - prev_close) / prev_close * 100. Used by
+                Rule 9 (V-reversal) — fires only on gap-down setups.
+            intraday_range_pct: (day_high - day_low) / day_low * 100 up to
+                setup bar. Used by Rule 9 — V-reversal requires >= 20% range.
             return_breakdown: If True, return (final_score, breakdown_dict).
 
         Returns:
@@ -1323,6 +1357,12 @@ class BacktestRunner:
         V2_clean rules 7+8 added 2026-04-15 from walk-forward research:
         canonical 16mo +$52K (+15.5%), mean OOS test +$28K, robust on
         all 3 splits. Rule 6 (daily_range_pct) was rejected — look-ahead.
+
+        Rule 9 (V-reversal bonus) added 2026-04-17 from fat-tail analysis:
+        top-10 2025 winners have median gap_pct=-1.09% and cleared 20%
+        intraday range — oversold V-reversals, not gap-ups. Bonus captures
+        this distinctive pattern within the existing conviction envelope
+        (clamp stays [0.25, 3.0]).
         """
         score = 1.0
         breakdown = {}
@@ -1383,6 +1423,21 @@ class BacktestRunner:
         gf_contrib = -0.3 if gap_fading else 0.0
         score += gf_contrib
         breakdown['gap_fading'] = gf_contrib
+
+        # 9. V-reversal bonus — oversold reversal plays (gap-down + high intraday
+        # range + meaningful pole). Feature-flagged; default OFF. When enabled,
+        # adds `v_reversal_bonus` to the raw score. Thresholds are configurable.
+        # Fat-tail analysis showed top-10 2025 winners have median gap=-1.1%,
+        # cleared 20% range — this rule explicitly rewards that shape.
+        vr_contrib = 0.0
+        if v_reversal_enabled and (
+            gap_pct < v_reversal_gap_pct_max
+            and intraday_range_pct >= v_reversal_intraday_range_min
+            and setup.pole_gain_pct >= v_reversal_pole_gain_min
+        ):
+            vr_contrib = v_reversal_bonus
+        score += vr_contrib
+        breakdown['v_reversal'] = vr_contrib
 
         final = max(0.25, min(3.0, score))
         if return_breakdown:
@@ -2381,20 +2436,36 @@ class BacktestRunner:
                     # don't reuse it here because that would diverge from PROD.)
                     _v7_dist = 0.0
                     _g8_fade = False
+                    _gap_pct_for_v9 = 0.0
                     _vwap_at_setup = self._compute_vwap(bars, setup.flag_end_idx)
                     if _vwap_at_setup and _vwap_at_setup > 0:
                         _v7_dist = (setup.breakout_level - _vwap_at_setup) / _vwap_at_setup * 100
                     if prev_close and prev_close > 0:
                         _today_open = float(bars.iloc[0]['open'])
                         _gap_pct = (_today_open - prev_close) / prev_close * 100
+                        _gap_pct_for_v9 = _gap_pct
                         _g8_fade = bool(
                             _gap_pct >= self.qf_gap_fade_threshold
                             and setup.breakout_level < _today_open
                         )
+                    # Rule 9 intraday range (V-reversal). Uses bars up to setup.
+                    _day_high = float(bars.iloc[:setup.flag_end_idx + 1]['high'].max())
+                    _day_low = float(bars.iloc[:setup.flag_end_idx + 1]['low'].min())
+                    _intraday_range_pct = (
+                        (_day_high - _day_low) / _day_low * 100
+                        if _day_low > 0 else 0.0
+                    )
                     conviction_mult, _conv_brkdn = self._compute_conviction_score_setup(
                         setup, _spy_3d,
                         vwap_dist_pct=_v7_dist,
                         gap_fading=_g8_fade,
+                        gap_pct=_gap_pct_for_v9,
+                        intraday_range_pct=_intraday_range_pct,
+                        v_reversal_enabled=self.v_reversal_enabled,
+                        v_reversal_bonus=self.v_reversal_bonus,
+                        v_reversal_gap_pct_max=self.v_reversal_gap_pct_max,
+                        v_reversal_intraday_range_min=self.v_reversal_intraday_range_min,
+                        v_reversal_pole_gain_min=self.v_reversal_pole_gain_min,
                         return_breakdown=True)
                     if abs(conviction_mult - 1.0) > 0.05:
                         logger.debug(f"  Conviction score: {conviction_mult:.2f}x")
@@ -2415,6 +2486,21 @@ class BacktestRunner:
                         )
                         continue
 
+                # Marginal-conviction defensive scaling: compute the sizing
+                # multiplier separately. conviction_mult stays as-is so that
+                # the Stage-2 cache-filter sees the true quality signal; only
+                # the applied sizing is scaled.
+                sizing_conviction = conviction_mult
+                if (self.conviction_marginal_scale_factor < 1.0
+                        and conviction_mult < self.conviction_marginal_upper):
+                    sizing_conviction = conviction_mult * self.conviction_marginal_scale_factor
+                    logger.debug(
+                        f"  CONVICTION MARGINAL SCALE: {conviction_mult:.2f} → "
+                        f"sizing {sizing_conviction:.2f} "
+                        f"(below {self.conviction_marginal_upper}, "
+                        f"factor {self.conviction_marginal_scale_factor})"
+                    )
+
                 # Risk tier: scale risk on high-conviction setups (same as trading_engine)
                 risk_tier_mult = 1.0
                 if self.risk_tiers_enabled:
@@ -2426,14 +2512,16 @@ class BacktestRunner:
                             risk_tier_mult = tier['multiplier']
                             break
 
-                # Combine risk tier + conviction, cap at 3x (max leverage on $50K base)
-                combined_mult = min(3.0, risk_tier_mult * conviction_mult)
+                # Combine risk tier + (sizing) conviction, cap at 3x (max leverage on $50K base).
+                # sizing_conviction reflects the marginal defensive scaling; the cached
+                # conviction_mult stays as the raw value so Stage-2 filters see it.
+                combined_mult = min(3.0, risk_tier_mult * sizing_conviction)
                 if combined_mult != 1.0:
                     plan = self.planner.create_plan(setup, avg_daily_volume=self._current_avg_daily_volume, risk_multiplier=combined_mult)
                     if plan is None:
                         continue
                     logger.debug(
-                        f"  Risk scaling {combined_mult:.2f}x (tier={risk_tier_mult:.1f} × conv={conviction_mult:.2f}) — "
+                        f"  Risk scaling {combined_mult:.2f}x (tier={risk_tier_mult:.1f} × conv_size={sizing_conviction:.2f}) — "
                         f"{plan.shares} shares, ${plan.total_risk:.0f} risk"
                     )
 
