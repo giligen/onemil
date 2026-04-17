@@ -112,6 +112,10 @@ class MACDWaveEngine:
         self.min_macd_hist_pct = float(entry.get('min_macd_hist_pct', 0.5))
         self.max_price_at_entry = float(entry.get('max_price_at_entry', 0))
 
+        # Spread gate — skip entries when bid-ask spread is too wide.
+        # 0 = disabled. 100 = skip if spread > 100bps.
+        self.max_entry_spread_bps = float(entry.get('max_entry_spread_bps', 0))
+
         # Smart entry: L1-informed pricing + early entry on strong book
         self.smart_entry_enabled = bool(entry.get('smart_entry_enabled', False))
         self.early_entry_bars = int(entry.get('early_entry_bars', 1))
@@ -1040,6 +1044,25 @@ class MACDWaveEngine:
             if limit_price <= 0:
                 logger.warning(f"[{self.STRATEGY_NAME}] {symbol}: limit_price=0, skipping")
                 return False
+
+            # Spread gate: skip if bid-ask spread exceeds threshold.
+            # Live data (36 trades): <100bps → +$920/trade avg; >=100bps → -$1,621/trade.
+            if self.max_entry_spread_bps > 0 and bid > 0 and ask > 0:
+                spread_bps = (ask - bid) / limit_price * 10000
+                if spread_bps >= self.max_entry_spread_bps:
+                    logger.info(
+                        f"[{self.STRATEGY_NAME}] {symbol}: SPREAD SKIP — "
+                        f"{spread_bps:.0f}bps >= {self.max_entry_spread_bps:.0f}bps "
+                        f"(bid=${bid:.2f} ask=${ask:.2f})"
+                    )
+                    if self.notifier:
+                        self.notifier.send_message_sync(
+                            f"[MACD Wave] {symbol}: SPREAD SKIP — "
+                            f"{spread_bps:.0f}bps >= {self.max_entry_spread_bps:.0f}bps "
+                            f"(bid=${bid:.2f} ask=${ask:.2f}, hist={macd_hist_pct:.2f}%)"
+                        )
+                    self.invalidated.add(symbol)
+                    return False
 
             # V4 conviction — always compute for logging/DB; scale shares only if enabled.
             conv_mult, conv_brkdn = compute_conviction_score(
