@@ -60,15 +60,16 @@ sizing:
                                       # V4 raw max = 50K * 1.8 = 90K; cap matches. Lower if
                                       # exit slippage degrades on large thin-book positions.
 
-# Slippage model — recalibrated 2026-04-17 from 36 live MACD wave trades.
-# Prior model (10bps entry / 20bps exit) was 11× too optimistic vs live
-# median spread of 109bps. New model uses 50bps entry (conservative: live
-# median is 109 but we now gate at 100bps, so surviving trades have tighter
-# spreads) and 30bps exit (live exit-spread median was 59bps). Round-trip
-# cost: 80bps vs prior 30bps. BT P&L will be smaller but real.
+# Slippage model — recalibrated 2026-04-17 from 36 live trades.
+# Era 1 (Mar 30-Apr 2, pre-smart-pricing): fills at ask → full spread cost.
+# Era 2 (Apr 13-16, smart pricing active): fills at 30-50% into spread.
+# With smart entry limits + 100bps spread gate, actual costs are:
+#   Entry: ~25-35bps (30-50% of a <100bps spread), model at 30bps
+#   Exit: ~5bps (fills at bid consistently), model at 10bps conservatively
+# Round-trip: ~35-40bps actual, modeled at 40bps.
 slippage:
-  entry_pct: 0.005          # 50bps — conservative median for <100bps-spread trades
-  exit_pct: 0.003           # 30bps — live exit-spread median 59bps, halved for conservatism
+  entry_pct: 0.003          # 30bps — matches Era 2 smart-pricing fill at ~35% into spread
+  exit_pct: 0.001           # 10bps — exits fill at bid; 10bps buffer for slippage on stops
 
 # Risk management
 risk:
