@@ -169,9 +169,10 @@ trading:
     #   2025:    +$3,764 (+5.8%) vs baseline — same trades, same DD, better avg_win
     #   Q1 2026: +$1,836 (+18%) HOLDOUT
     # Sweep [0.5..1.5] → flat surface, ratio is a noisy knob. 1.0 is safe default.
-    # Feature-flagged; start with enabled=false. Flip to true after canary.
+    # Shipping ON — Pareto improvement, same trades / same DD / bigger avg_win.
+    # Set enabled: false to roll back to naive trail behavior.
     vol_confirmed_exit:
-      enabled: false
+      enabled: true
       min_vol_ratio: 1.0
   # Exhaustion exit: sell partial into strength on exhaustion signals
   # Reduces slippage by selling while buyers are still aggressive
@@ -208,7 +209,7 @@ trading:
     # composite z-score gate on Extras only. BT numbers (O + f6 + this filter):
     # 2025 +$57,679 (beats A_f6 +$54,572); Q1 2026 +$8,450 (beats A_f6 +$4,495).
     two_tier_filter:
-      enabled: false                       # flip to true after canary / integration
+      enabled: true                        # shipping ON — validated +$10.5K on 2025 OOS, +$5.4K on Q1 2026 vs A_f6
       extras_lower: 10.0                   # % intraday threshold: Extras floor
       a_tier_lower: 20.0                   # % intraday threshold: A-tier floor
       drop_extras_macd_below: 1.25         # surgical drop: reject Extras where macd_zone_mult < this

@@ -242,7 +242,7 @@ Rejects setups where the stop distance (entry - stop_loss) is less than $0.12. T
 | `market_regime_sma_period` | `50` | SMA lookback (used by sma_slope_filter only) |
 | `max_trades_per_day` | `5` | Max entries per day |
 
-### Two-Tier Filter (2026-04-17) — feature-flagged, default OFF
+### Two-Tier Filter (2026-04-17) — default ON (shipped, rollback via flag)
 
 Tests whether lowering the scanner threshold from 20% to 10% can beat A_f6 by catching the same A-tier setups earlier plus a filtered subset of 10-19% "Extras" setups. Lives in `trading/two_tier_filter.py`, shared by BT Stage-2 and the live engine for BT↔live parity.
 
@@ -348,7 +348,7 @@ pytest tests/                                         # full suite (1,142 passin
 - **Re-entry** (multiple trades per symbol per day) — empirically −$1,299 over 58 trades. Env-gated via `BT_ALLOW_REENTRY=1`, dormant in code.
 - **Multiplier re-tuning** (Kelly v3 capping to 2.0×) — reserved for when base risk scales to $1,000+ (current $200 base, rubric is P&L-max as-is).
 
-### Volume-Confirmed Trail Exit (Experiment D, 2026-04-17) — feature-flagged, default OFF
+### Volume-Confirmed Trail Exit (Experiment D, 2026-04-17) — default ON (shipped, rollback via flag)
 
 When a trailing stop triggers on a bar, require that bar's volume to exceed `flag_avg_volume × min_vol_ratio` before firing the exit. Low-volume drift-downs are treated as noise (hold position); only active selling (volume-confirmed) fires the exit. Initial hard stop (pre-trailing) is never skipped. Shared helper `trading/trail_vol_guard.py` used by both BT simulator and live `StopMonitor` for parity.
 

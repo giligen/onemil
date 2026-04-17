@@ -152,9 +152,9 @@ journalctl -u onemil-trader -f           # Live logs
 - Logs: `logs/onemil.log`
 - Universe: pre-built via `python main.py --rebuild-universe` (nightly cron)
 
-### Feature flag: two-tier filter (added 2026-04-17)
+### Feature flag: two-tier filter (added 2026-04-17, shipping ON)
 - Config key: `trading.bull_flag.two_tier_filter.enabled`
-- Default: `false` — byte-identical to pre-change A_f6 behavior ($54,572.15 / 83 trades, verified)
+- Default: `true` (shipping ON). Set to `false` to revert to A_f6 behavior (byte-identical: $54,572.15 / 83 trades, verified).
 - When `true`: BT projects **+$10,455 on 2025 OOS and +$5,439 on Q1 2026 vs A_f6**
 - Shared module: `trading/two_tier_filter.py` (imported by both BT Stage-2 and live engine → parity by construction)
 - Enable: flip flag in `config.yaml`, run `python -c "from config import Config; print(Config().two_tier_filter_cfg)"` to verify, then `sudo systemctl restart onemil-trader`
@@ -163,9 +163,9 @@ journalctl -u onemil-trader -f           # Live logs
 - Full details in README.md "Two-Tier Filter" section
 - **Dormant companion change**: `BT_ALLOW_REENTRY=1` env var enables multi-trade-per-symbol-per-day in the backtest. Empirically −$1,299/yr — DO NOT enable in prod.
 
-### Feature flag: volume-confirmed trail exit (Experiment D, added 2026-04-17)
+### Feature flag: volume-confirmed trail exit (Experiment D, added 2026-04-17, shipping ON)
 - Config key: `trading.trailing_stop.vol_confirmed_exit.enabled`
-- Default: `false` — trailing-stop behavior unchanged from pre-change
+- Default: `true` (shipping ON). Set to `false` to revert to naive trail behavior.
 - When `true` (stacked on top of TTF-on): BT projects **additional +$3,764 on 2025 and +$1,836 on Q1 2026** (Pareto improvement — same trades, same DD, bigger avg win)
 - Shared module: `trading/trail_vol_guard.py` (single helper used by BT simulator + live StopMonitor both tick and poll paths)
 - Logic: trail-stop triggering bar must have volume >= `min_vol_ratio × flag_avg_volume` to fire. Low-vol drift-downs are skipped. Hard stop (pre-trailing) always fires.
