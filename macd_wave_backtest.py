@@ -1000,18 +1000,50 @@ def get_cache_path(trail_pct: float, slip_entry: float, slip_exit: float) -> str
     return os.path.join(CACHE_DIR, f"macd_signal_cache_t{trail_key}_s{slip_key}.csv")
 
 
-def save_signal_cache(signals: List[dict], cache_path: str) -> None:
-    """Save all unfiltered signals to CSV cache."""
+SIGNAL_CACHE_FIELDS = [
+    'symbol', 'date', 'wave', 'entry_price', 'exit_price', 'shares',
+    'pnl_pct', 'pnl_dollar', 'entry_time', 'exit_time', 'exit_reason',
+    'cross_time_min', 'vol_at_cross', 'macd_hist_pct', 'w1_pnl', 'paper',
+]
+
+
+def save_signal_cache(signals: List[dict], cache_path: str,
+                      merge: bool = False) -> None:
+    """Save unfiltered signals to CSV cache.
+
+    When merge=True: load existing cache, keep rows OUTSIDE the new
+    signals' date range, combine with new signals, write back. This
+    lets --build-cache run on a narrow date range (e.g., just yesterday)
+    without erasing the 15-month history.
+    """
     import csv as csv_mod
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-    fields = ['symbol', 'date', 'wave', 'entry_price', 'exit_price', 'shares',
-              'pnl_pct', 'pnl_dollar', 'entry_time', 'exit_time', 'exit_reason',
-              'cross_time_min', 'vol_at_cross', 'macd_hist_pct', 'w1_pnl', 'paper']
+
+    if merge and os.path.exists(cache_path) and signals:
+        new_dates = {s['date'] if isinstance(s['date'], str)
+                     else str(s['date']) for s in signals}
+        existing = []
+        with open(cache_path, 'r', newline='') as ef:
+            for row in csv_mod.DictReader(ef):
+                if row['date'] not in new_dates:
+                    existing.append(row)
+        logger.info(
+            f"Merging cache: keeping {len(existing)} existing signals "
+            f"(outside {min(new_dates)} to {max(new_dates)}), "
+            f"adding {len(signals)} new signals"
+        )
+        combined = existing + [
+            {k: s.get(k, '') for k in SIGNAL_CACHE_FIELDS} for s in signals
+        ]
+    else:
+        combined = signals
+
     with open(cache_path, 'w', newline='') as f:
-        w = csv_mod.DictWriter(f, fieldnames=fields, extrasaction='ignore')
+        w = csv_mod.DictWriter(f, fieldnames=SIGNAL_CACHE_FIELDS,
+                               extrasaction='ignore')
         w.writeheader()
-        w.writerows(signals)
-    logger.info(f"Signal cache saved: {cache_path} ({len(signals)} signals)")
+        w.writerows(combined)
+    logger.info(f"Signal cache saved: {cache_path} ({len(combined)} signals)")
 
 
 def load_signal_cache(cache_path: str, start_date: date, end_date: date) -> List[dict]:
@@ -1309,7 +1341,7 @@ def main():
         logger.info(f"Generated {len(all_signals)} signals from {candidates} candidates ({filtered_out} filtered out)")
 
         if args.build_cache:
-            save_signal_cache(all_signals, cache_path)
+            save_signal_cache(all_signals, cache_path, merge=True)
             # Apply entry filters for this run's output
             all_signals = filter_signals(all_signals, entry_filters)
 
