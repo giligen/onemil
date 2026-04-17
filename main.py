@@ -212,6 +212,7 @@ def _create_trading_engine(config, alpaca, db, notifier=None, stop_monitor=None,
         min_breakout_volume_ratio=config.min_breakout_volume_ratio,
         require_macd_positive=config.require_macd_positive,
         max_green_in_flag=config.max_green_in_flag,
+        max_pole_bars=config.max_pole_bars,
     )
     planner = TradePlanner(
         position_size_dollars=config.position_size_dollars,

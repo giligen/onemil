@@ -621,6 +621,90 @@ class TestNegativePatterns:
 
 
 # ===========================================================================
+# MAX POLE BARS FILTER — pattern-quality filter for "tired" long poles.
+# Off-by-one: pole_candle_count - 1 > max_pole_bars triggers rejection.
+# max=3 → reject 5+ candles; 4-candle pole passes (3-1=2, 2>3=False).
+# ===========================================================================
+
+class TestMaxPoleBarsFilter:
+    """Validate `max_pole_bars` filter live vs BT cache-delta semantics."""
+
+    def test_disabled_by_default(self):
+        """max_pole_bars=0 (default) allows arbitrary-length poles."""
+        detector = BullFlagDetector()
+        assert detector.max_pole_bars == 0
+
+    def test_rejects_5_candle_pole_at_max_3(self):
+        """5-candle pole must be rejected: pole_candle_count - 1 = 4 > 3."""
+        detector = BullFlagDetector(max_pole_bars=3)
+        candles = [
+            # Pole: 5 green candles — deliberately long
+            (4.00, 4.08, 3.98, 4.06, 200000),
+            (4.06, 4.14, 4.04, 4.12, 180000),
+            (4.12, 4.20, 4.10, 4.18, 160000),
+            (4.18, 4.26, 4.16, 4.24, 140000),
+            (4.24, 4.32, 4.22, 4.30, 120000),
+            # Pullback: 2 red candles
+            (4.30, 4.31, 4.20, 4.22, 50000),
+            (4.22, 4.23, 4.16, 4.18, 30000),
+            # Breakout
+            (4.18, 4.35, 4.17, 4.32, 250000),
+            (4.32, 4.34, 4.30, 4.33, 80000),
+        ]
+        bars = _make_bars(candles)
+        assert detector.detect("TEST", bars) is None
+
+    def test_accepts_3_candle_pole_at_max_3(self):
+        """3-candle pole must pass: pole_candle_count - 1 = 2, 2 > 3 is False."""
+        detector = BullFlagDetector(max_pole_bars=3)
+        candles = [
+            # Classic 3-candle pole (matches test_classic_bull_flag_3_pole_2_pullback)
+            (4.00, 4.10, 3.98, 4.15, 200000),
+            (4.15, 4.30, 4.12, 4.30, 180000),
+            (4.30, 4.55, 4.28, 4.50, 150000),
+            (4.50, 4.52, 4.38, 4.40, 50000),
+            (4.40, 4.42, 4.33, 4.35, 30000),
+            (4.35, 4.60, 4.34, 4.55, 250000),
+            (4.55, 4.60, 4.50, 4.58, 100000),
+        ]
+        bars = _make_bars(candles)
+        assert detector.detect("TEST", bars) is not None
+
+    def test_disabled_allows_long_pole(self):
+        """max_pole_bars=0 allows the same 5-candle pole that max=3 rejects."""
+        detector = BullFlagDetector(max_pole_bars=0)
+        candles = [
+            (4.00, 4.08, 3.98, 4.06, 200000),
+            (4.06, 4.14, 4.04, 4.12, 180000),
+            (4.12, 4.20, 4.10, 4.18, 160000),
+            (4.18, 4.26, 4.16, 4.24, 140000),
+            (4.24, 4.32, 4.22, 4.30, 120000),
+            (4.30, 4.31, 4.20, 4.22, 50000),
+            (4.22, 4.23, 4.16, 4.18, 30000),
+            (4.18, 4.35, 4.17, 4.32, 250000),
+            (4.32, 4.34, 4.30, 4.33, 80000),
+        ]
+        bars = _make_bars(candles)
+        assert detector.detect("TEST", bars) is not None
+
+    def test_from_config_reads_max_pole_bars(self, tmp_path, monkeypatch):
+        """from_config() picks up trading.bull_flag.max_pole_bars."""
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text(
+            "trading:\n"
+            "  bull_flag:\n"
+            "    max_pole_bars: 5\n"
+        )
+        from config import Config
+        Config.set_config_path(str(cfg_file))
+        try:
+            detector = BullFlagDetector.from_config()
+            assert detector.max_pole_bars == 5
+        finally:
+            Config.set_config_path(None)
+
+
+# ===========================================================================
 # EDGE CASES
 # ===========================================================================
 

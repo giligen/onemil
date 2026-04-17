@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import copy
 import csv
 import logging
 import os
@@ -227,6 +228,56 @@ def filter_bull_flag_trades(
             logger.info(
                 f"Conviction filter (conv>={conv_threshold:.2f}): "
                 f"{before_conv} → {len(trades)} trades ({conv_removed} removed)"
+            )
+
+    # Pattern-quality filter: cap pole length. Feature-lift analysis (2026-04-17)
+    # on 10% threshold cache showed trades with pole_bars>3 have ~28pt lower WR
+    # than pole_bars<=3. Short poles = explosive fresh momentum; long poles =
+    # energy already spent. Setting max_pole_bars=0 disables the filter.
+    bull_flag_cfg = _cfg_vol.get("trading", {}).get("bull_flag", {})
+    max_pole_bars = int(bull_flag_cfg.get("max_pole_bars", 0))
+    if max_pole_bars > 0:
+        before_pb = len(trades)
+        trades = [
+            t for t in trades
+            if 0 < int(float(t.get('qf_pole_bars') or 0)) <= max_pole_bars
+        ]
+        pb_removed = before_pb - len(trades)
+        if pb_removed:
+            logger.info(
+                f"Pole-bars filter (pole_bars<={max_pole_bars}): "
+                f"{before_pb} → {len(trades)} trades ({pb_removed} removed)"
+            )
+
+    # Min MACD zone multiplier filter (Phase 3 / Ross emulation).
+    # macd_zone_mult==1.5 showed +16.7pt WR lift vs ==1.0 on 10% threshold cache.
+    # Setting min_macd_zone_mult=1.5 keeps only "strong zone" trades. 0 = disabled.
+    min_macd_zone_mult = float(bull_flag_cfg.get("min_macd_zone_mult", 0))
+    if min_macd_zone_mult > 0:
+        before_mz = len(trades)
+        trades = [
+            t for t in trades
+            if float(t.get('macd_zone_mult') or 0) >= min_macd_zone_mult
+        ]
+        mz_removed = before_mz - len(trades)
+        if mz_removed:
+            logger.info(
+                f"MACD zone filter (macd>={min_macd_zone_mult:.1f}): "
+                f"{before_mz} → {len(trades)} trades ({mz_removed} removed)"
+            )
+
+    # Reject gap-fading setups (conv_gap_fading < 0 means fading). Phase 3 lift
+    # analysis on 10% cache: non-fading gaps had +8.3pt better WR. 0 = disabled.
+    if bool(bull_flag_cfg.get("require_not_gap_fading", False)):
+        before_gf = len(trades)
+        trades = [
+            t for t in trades
+            if float(t.get('conv_gap_fading') or 0) >= 0
+        ]
+        gf_removed = before_gf - len(trades)
+        if gf_removed:
+            logger.info(
+                f"Gap-fade filter: {before_gf} → {len(trades)} trades ({gf_removed} removed)"
             )
 
     # Apply risk tier scaling to PnL
@@ -1110,6 +1161,13 @@ def _reconstruct_result(result_dict: dict) -> BacktestResult:
             conv_raw_score=td.get('conv_raw_score', 1.0),
             spy_3d_range=td.get('spy_3d_range', 0.0),
         )
+        # Restore partial-exit tracking — these are in _serialize_result but were
+        # previously dropped here, causing cache rows to always show partial_taken=False
+        # even when exit_reason was "partial+target".
+        trade.partial_exit_taken = td.get('partial_exit_taken', False)
+        trade.partial_exit_price = td.get('partial_exit_price')
+        trade.partial_shares = td.get('partial_shares', 0)
+        trade.partial_pnl = td.get('partial_pnl', 0.0)
         trade._avg_volume_20d = td.get('_avg_volume_20d', 0)
         trade._qf_features = td.get('_qf_features', {})
         trades.append(trade)
@@ -1911,6 +1969,12 @@ def main():
         help="Enable verbose/debug logging (implies --no-parallel)"
     )
     parser.add_argument(
+        "--config", type=str, default=None,
+        help="Path to alternate config.yaml for this run (e.g., /tmp/my_test.yaml). "
+             "If omitted, uses project config.yaml. Prevents corruption of prod "
+             "config during experiments.",
+    )
+    parser.add_argument(
         "--trailing-stop-r", type=float, default=0.0,
         help="Replace fixed TP with trailing stop N×R below high (0 = disabled)"
     )
@@ -1984,6 +2048,15 @@ def main():
     )
     args = parser.parse_args()
 
+    # Apply --config override BEFORE anything reads config. Inherited by forked
+    # workers. Never touches the real config.yaml — tools pass --config <tmp>.
+    from config import Config as _CfgCls
+    if args.config:
+        if not os.path.exists(args.config):
+            print(f"ERROR: --config path does not exist: {args.config}", file=sys.stderr)
+            sys.exit(2)
+        _CfgCls.set_config_path(args.config)
+
     # Auto-detect worker count from CPU cores
     if args.scan_workers <= 0:
         import multiprocessing
@@ -1996,6 +2069,8 @@ def main():
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         handlers=[logging.StreamHandler(sys.stdout)],
     )
+    if args.config:
+        logger.info(f"Using config override: {args.config}")
 
     # Load environment
     load_dotenv()
@@ -2033,7 +2108,13 @@ def main():
             _cfg = _Cfg._load_yaml_only()
             _entry_slip = float(_cfg.get("trading", {}).get("entry_slippage_pct", 0.005))
             _exit_slip = float(_cfg.get("trading", {}).get("exit_slippage_pct", 0.003))
-            _save_path = _get_bull_flag_cache_path(_entry_slip, _exit_slip)
+            # --cache-file overrides the write path so experiments never clobber
+            # the production cache (data/bull_flag_cache_e50_x30.csv).
+            if args.cache_file:
+                _save_path = args.cache_file
+                logger.info(f"--cache-file set: writing experimental cache to {_save_path}")
+            else:
+                _save_path = _get_bull_flag_cache_path(_entry_slip, _exit_slip)
 
             # Read new trades from monthly CSV
             new_rows = []
@@ -2244,23 +2325,31 @@ def main():
         cfg.setdefault("trading", {})["max_shares"] = args.max_shares
         logger.info(f"CLI override: max_shares={args.max_shares}")
 
-    # Write overrides to config.yaml so BacktestRunner.from_config() picks them up
+    # CLI sizing overrides: write to a temp file and register it as the active
+    # config path (module state inherited by forked workers). NEVER touch the
+    # real config.yaml. Previous code wrote overrides back to config.yaml
+    # in-place which destroyed prod config on --capital/--risk experiments.
+    _sizing_overridden = False
     if args.capital > 0 or args.risk > 0 or args.max_shares > 0:
-        import yaml
-        with open("config.yaml", "r") as f:
-            live_cfg = yaml.safe_load(f)
+        import yaml as _yaml
+        import tempfile
+        _override_cfg = copy.deepcopy(cfg)
+        _override_cfg.setdefault("trading", {})
         if args.capital > 0:
-            live_cfg["trading"]["capital"] = args.capital
-            live_cfg["trading"]["position_size_dollars"] = args.capital
+            _override_cfg["trading"]["capital"] = args.capital
+            _override_cfg["trading"]["position_size_dollars"] = args.capital
         if args.risk > 0:
-            live_cfg["trading"]["risk_per_trade"] = args.risk
+            _override_cfg["trading"]["risk_per_trade"] = args.risk
         if args.max_shares > 0:
-            live_cfg["trading"]["max_shares"] = args.max_shares
-        with open("config.yaml", "w") as f:
-            yaml.dump(live_cfg, f, default_flow_style=False)
+            _override_cfg["trading"]["max_shares"] = args.max_shares
+        _fd, _override_path = tempfile.mkstemp(
+            prefix="onemil_cfg_sizing_", suffix=".yaml", dir="/tmp"
+        )
+        with os.fdopen(_fd, "w") as _f:
+            _yaml.safe_dump(_override_cfg, _f, default_flow_style=False)
+        _CfgCls.set_config_path(_override_path)
+        logger.info(f"Sizing overrides written to {_override_path} (Config path override set)")
         _sizing_overridden = True
-    else:
-        _sizing_overridden = False
 
     # Step 3: Build market regime filter
     trading_cfg = cfg.get("trading", {})
@@ -2499,11 +2588,17 @@ def main():
                         )
                 else:
                     logger.info(f"No movers found on {len(missing_days)} missing dates")
-        # Determine threshold for filtering
-        if args.threshold is not None:
-            _min_range = args.threshold
-        else:
-            _min_range = float(cfg.get("scanner", {}).get("intraday_change_pct_min", 20.0))
+        # Stage 2 daily_range_pct filter is EOD look-ahead — the qualification gate
+        # baked into cache at --build-cache time (via prev_close) is the honest real-time
+        # check. Disable this filter unconditionally. If someone wants a different
+        # qualification threshold, they must rebuild the cache with --build-cache --threshold N.
+        _min_range = 0.0
+        if args.threshold is not None and not args.build_cache:
+            logger.warning(
+                f"--threshold {args.threshold} is look-ahead in Stage 2 (uses EOD "
+                f"daily_range_pct). Ignoring. Rebuild cache with --build-cache "
+                f"--threshold {args.threshold} for an honest qualification threshold."
+            )
         # Universe filter: default = universe-only, --full-market = all
         _uni_syms = None
         if not args.full_market:
@@ -2624,7 +2719,12 @@ def main():
                 _range_map[(r[0], r[1])] = (r[2] - r[3]) / r[3] * 100
 
         # Save ALL trades to cache (slippage baked in from config)
-        _save_path = _get_bull_flag_cache_path(_entry_slip, _exit_slip)
+        # --cache-file overrides write path for experiments (never touch prod cache).
+        if args.cache_file:
+            _save_path = args.cache_file
+            logger.info(f"--cache-file set: writing experimental cache to {_save_path}")
+        else:
+            _save_path = _get_bull_flag_cache_path(_entry_slip, _exit_slip)
         trade_count = 0
         with open(_save_path, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)

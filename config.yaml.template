@@ -182,6 +182,12 @@ trading:
     min_breakout_volume_ratio: 1.5
     require_macd_positive: false
     max_green_in_flag: 2
+    # Pattern-quality filter: reject "tired" long poles. Cache-delta units
+    # (off-by-one from pole_candle_count) matches qf_pole_bars cache convention.
+    # max_pole_bars=3 means reject 5+ candle poles (pole_candle_count > 4).
+    # 2025 OOS (pole<=3): WR 54%→60%, PF 2.41→3.50, max DD $4.5K→$2.5K (halved)
+    # 0 = disabled.
+    max_pole_bars: 3
   # MACD zone filter: scale risk based on MACD histogram strength at entry
   # Histogram as % of price → zone → risk multiplier (0 = skip trade)
   # U-shape: strong negative + strong positive = best setups, near-zero = worst

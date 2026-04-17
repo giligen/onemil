@@ -19,6 +19,16 @@ logger = logging.getLogger(__name__)
 # Singleton instance
 _config_instance: Optional['Config'] = None
 
+# Module-level override for yaml path. Set via Config.set_config_path() by
+# CLI tools (batch_backtest, variant_runner) that want to load an alternate
+# config without touching config.yaml in the project root. Inherited by
+# multiprocessing fork() workers so subprocess backtest runs use the same
+# override without needing to thread the path through every call site.
+#
+# NOT an env var — explicit module state. Tools should pass --config on the
+# command line and call Config.set_config_path(args.config) once, up front.
+_config_path_override: Optional[Path] = None
+
 
 class Config:
     """Application configuration loaded from environment variables and YAML."""
@@ -53,9 +63,11 @@ class Config:
         load_dotenv(env_path)
         logger.info(f"Loaded environment from {env_path}")
 
-        # Load YAML config
+        # Load YAML config. Precedence: explicit yaml_path arg > module override
+        # (set via Config.set_config_path) > _ONEMIL_CFG env (worker inheritance)
+        # > default project_root/config.yaml.
         if yaml_path is None:
-            yaml_path = project_root / "config.yaml"
+            yaml_path = Config._resolve_config_path()
 
         self._yaml: Dict[str, Any] = {}
         if Path(yaml_path).exists():
@@ -75,10 +87,48 @@ class Config:
             raise ValueError(f"Missing required environment variables: {missing}")
 
     @staticmethod
+    def set_config_path(path: Optional[str]) -> None:
+        """Set the override config.yaml path for this process and its workers.
+
+        Used by CLI tools (batch_backtest, variant_runner) to redirect all
+        Config loads to an alternate YAML file without mutating config.yaml.
+
+        Sets BOTH module state AND an env var. The env var is required so
+        that multiprocessing `forkserver` workers (which start cleanly and
+        do not inherit module state) still pick up the override via
+        os.environ inheritance. Pass None to clear both.
+
+        User-facing interface is still the --config CLI argument; the env
+        var is an internal implementation detail for worker inheritance.
+        """
+        global _config_path_override
+        if path:
+            resolved = Path(path)
+            _config_path_override = resolved
+            os.environ["_ONEMIL_CFG"] = str(resolved)
+        else:
+            _config_path_override = None
+            os.environ.pop("_ONEMIL_CFG", None)
+
+    @staticmethod
+    def _resolve_config_path() -> Path:
+        """Return the active config path. Module state wins, then env, then default."""
+        if _config_path_override is not None:
+            return _config_path_override
+        env_path = os.environ.get("_ONEMIL_CFG")
+        if env_path:
+            return Path(env_path)
+        return Path(__file__).parent / "config.yaml"
+
+    @staticmethod
     def _load_yaml_only() -> dict:
-        """Load config.yaml without .env (for backtest use — avoids env pollution)."""
-        project_root = Path(__file__).parent
-        yaml_path = project_root / "config.yaml"
+        """Load config.yaml without .env (for backtest use — avoids env pollution).
+
+        Resolves path via module override > env var > default. Env var is set
+        internally by set_config_path so multiprocessing workers (forkserver)
+        pick up the same override.
+        """
+        yaml_path = Config._resolve_config_path()
         if yaml_path.exists():
             with open(yaml_path, 'r') as f:
                 return yaml.safe_load(f) or {}
@@ -406,6 +456,16 @@ class Config:
     def require_macd_positive(self) -> bool:
         """Whether bull flag detector requires positive MACD."""
         return bool(self._get_yaml("trading", "bull_flag", "require_macd_positive", default=False))
+
+    @property
+    def max_pole_bars(self) -> int:
+        """Max bull flag pole length filter (cache-delta units; 0 = disabled).
+
+        Compared as `(pole_candle_count - 1) > max_pole_bars`, so 3 means
+        reject 5+ candle poles. Off-by-one matches `qf_pole_bars` cache
+        convention for BT↔live parity.
+        """
+        return int(self._get_yaml("trading", "bull_flag", "max_pole_bars", default=0))
 
     # =========================================================================
     # MACD Zone Filter

@@ -867,6 +867,25 @@ class BacktestRunner:
         if resolved_breakeven_profit == 0.0:
             resolved_breakeven_profit = float(trail_cfg.get("breakeven_profit_r", 0.0))
 
+        # Partial profit (early scale-out): load from config if not explicitly passed.
+        # When enabled, take partial_profit_fraction of shares at +r_multiple*R,
+        # remainder runs with trail/exhaustion. Improves daily consistency by
+        # locking in a small win before trail activation.
+        pp_cfg = trading_cfg.get("partial_profit", {})
+        pp_enabled_cfg = bool(pp_cfg.get("enabled", False))
+        if not partial_profit_enabled and pp_enabled_cfg:
+            partial_profit_enabled = True
+            partial_profit_r_multiple = float(pp_cfg.get("r_multiple", partial_profit_r_multiple))
+            partial_profit_fraction = float(pp_cfg.get("fraction", partial_profit_fraction))
+
+        # No-pop exit (scratch-trade): load from config if not explicitly passed.
+        # Exits at entry price if price hasn't moved up min_pct within N bars.
+        # Cuts slow-bleeding losers before they hit stop.
+        npe_cfg = trading_cfg.get("no_pop_exit", {})
+        if no_pop_exit_bars == 0 and bool(npe_cfg.get("enabled", False)):
+            no_pop_exit_bars = int(npe_cfg.get("bars", 5))
+            no_pop_exit_min_pct = float(npe_cfg.get("min_pct", 0.005))
+
         # Exhaustion exit config
         exhaust_cfg = trading_cfg.get("exhaustion_exit", {})
         self.exhaustion_exit_enabled = bool(exhaust_cfg.get("enabled", False))
