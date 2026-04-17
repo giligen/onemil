@@ -75,9 +75,11 @@ CSV_HEADERS = [
     "conv_pole_gain", "conv_flag_tightness", "conv_vol_ratio",
     "conv_spy_regime", "conv_retracement", "conv_raw_score",
     "spy_3d_range",
-    # V2_clean rules (added 2026-04-15). Appended at END so old cache rows
-    # padded with empty strings stay aligned for columns above.
     "conv_vwap_dist", "conv_gap_fading",
+    # Two-tier filter signal (2026-04-17). Computed at setup-fire time as
+    # max(gap%, range%) over pre-entry bars — mirrors scanner's intraday_change
+    # qualification metric. Empty string means "unknown" (old cache rows).
+    "intraday_change_at_entry",
 ]
 
 def _trade_to_cache_row(trade) -> Optional[Dict]:
@@ -118,6 +120,12 @@ def _trade_to_cache_row(trade) -> Optional[Dict]:
             # V2_clean rules (appended at end for schema stability)
             'conv_vwap_dist': f"{getattr(trade, 'conv_vwap_dist', 0.0):.2f}",
             'conv_gap_fading': f"{getattr(trade, 'conv_gap_fading', 0.0):.2f}",
+            # Two-tier filter signal (tier classification input)
+            'intraday_change_at_entry': (
+                f"{getattr(trade, 'intraday_change_at_entry', None):.2f}"
+                if getattr(trade, 'intraday_change_at_entry', None) is not None
+                else ''
+            ),
         }
     except Exception as e:
         logger.warning(f"Failed to convert trade to cache row: {e}")
@@ -278,6 +286,54 @@ def filter_bull_flag_trades(
         if gf_removed:
             logger.info(
                 f"Gap-fade filter: {before_gf} → {len(trades)} trades ({gf_removed} removed)"
+            )
+
+    # Two-tier filter (2026-04-17). A-tier (intraday>=20% at entry) and edge
+    # (<10%) passthrough; Extras (10-19%) go through surgical-drop + composite
+    # z-score gate. Live engine uses the same shared module, so BT/live parity
+    # holds by construction. Cfg-disabled → no-op.
+    tt_cfg = bull_flag_cfg.get("two_tier_filter") or {}
+    if bool(tt_cfg.get("enabled", False)):
+        from trading.two_tier_filter import (
+            classify_tier,
+            build_features_from_trade,
+            should_keep,
+        )
+        before_tt = len(trades)
+        rejected_counts = {}
+        kept = []
+        for t in trades:
+            ic = t.get('intraday_change_at_entry')
+            try:
+                ic_val = float(ic) if ic not in (None, '', 'None') else None
+            except (ValueError, TypeError):
+                ic_val = None
+            tier_label = classify_tier(
+                ic_val,
+                a_tier_lower=float(tt_cfg.get("a_tier_lower", 20.0)),
+                extras_lower=float(tt_cfg.get("extras_lower", 10.0)),
+            )
+            try:
+                mzm = float(t.get('macd_zone_mult') or 0.0)
+            except (ValueError, TypeError):
+                mzm = 0.0
+            keep, reason = should_keep(
+                tier=tier_label,
+                macd_zone_mult=mzm,
+                features=build_features_from_trade(t),
+                cfg=tt_cfg,
+            )
+            if keep:
+                kept.append(t)
+            else:
+                rejected_counts[reason] = rejected_counts.get(reason, 0) + 1
+        trades = kept
+        tt_removed = before_tt - len(trades)
+        if tt_removed:
+            breakdown = ', '.join(f"{k}={v}" for k, v in sorted(rejected_counts.items()))
+            logger.info(
+                f"Two-tier filter: {before_tt} → {len(trades)} trades "
+                f"({tt_removed} removed; {breakdown})"
             )
 
     # Apply risk tier scaling to PnL
@@ -965,6 +1021,8 @@ def _backtest_worker(args: Tuple) -> Optional[dict]:
             runner = BacktestRunner()  # uses from_config() for all settings
             runner._min_breakout_vol_override = min_bv_override
             runner.set_db_path(db_path)
+            if os.environ.get("BT_ALLOW_REENTRY") == "1":
+                runner.early_exit_after_trade = False
 
             # Fetch prev day bars for MACD warm-up
             prev_day_bars = None
@@ -1053,6 +1111,8 @@ def _serialize_result(result: 'BacktestResult') -> dict:
             'conv_gap_fading': getattr(t, 'conv_gap_fading', 0.0),
             'conv_raw_score': getattr(t, 'conv_raw_score', 1.0),
             'spy_3d_range': getattr(t, 'spy_3d_range', 0.0),
+            # Two-tier filter classification input
+            'intraday_change_at_entry': getattr(t, 'intraday_change_at_entry', None),
         }
         if t.plan:
             trade_dict['plan'] = {
@@ -1170,6 +1230,7 @@ def _reconstruct_result(result_dict: dict) -> BacktestResult:
         trade.partial_pnl = td.get('partial_pnl', 0.0)
         trade._avg_volume_20d = td.get('_avg_volume_20d', 0)
         trade._qf_features = td.get('_qf_features', {})
+        trade.intraday_change_at_entry = td.get('intraday_change_at_entry')
         trades.append(trade)
 
     result = BacktestResult(
@@ -1457,6 +1518,9 @@ def run_batch_backtest_fast(
         runner = BacktestRunner()
         if build_cache:
             runner.risk_tiers_enabled = False  # Cache at 1x — tiers applied at query time
+        if os.environ.get("BT_ALLOW_REENTRY") == "1":
+            runner.early_exit_after_trade = False
+            logger.info("BT_ALLOW_REENTRY=1 — multi-trade-per-day enabled")
 
         # Pre-load previous day bars for MACD warm-up (needed for MACD filter OR zone filter)
         # First pass: identify needed prev-day pairs and fetch any uncached from API
@@ -2159,6 +2223,8 @@ def main():
                         # V2_clean rules (appended at end for schema stability)
                         row.get('conv_vwap_dist', '0.00'),
                         row.get('conv_gap_fading', '0.00'),
+                        # Two-tier filter classification signal (empty = old cache)
+                        row.get('intraday_change_at_entry', ''),
                     ])
 
             # Determine new date range to merge

@@ -81,6 +81,8 @@ RICH_CSV_HEADERS = [
     # V2_clean rules (added 2026-04-15). Appended at END to match
     # batch_backtest CSV_HEADERS — keeps old cache rows aligned.
     "conv_vwap_dist", "conv_gap_fading",
+    # Two-tier filter classification input: max(gap%, range%) over pre-entry bars
+    "intraday_change_at_entry",
 ]
 
 
@@ -227,6 +229,12 @@ def build_rich_row(
         # V2_clean rules (appended at end for schema stability)
         f"{getattr(trade, 'conv_vwap_dist', 0.0):.2f}",
         f"{getattr(trade, 'conv_gap_fading', 0.0):.2f}",
+        # Two-tier filter classification signal
+        (
+            f"{getattr(trade, 'intraday_change_at_entry', None):.2f}"
+            if getattr(trade, 'intraday_change_at_entry', None) is not None
+            else ''
+        ),
     ]
 
 
@@ -507,6 +515,9 @@ class MonthlyBacktestRunner:
                 )
             else:
                 runner = BacktestRunner()  # uses from_config() for all settings
+                import os as _os
+                if _os.environ.get("BT_ALLOW_REENTRY") == "1":
+                    runner.early_exit_after_trade = False
                 results = run_batch_backtest(movers, client, runner, db=db,
                                             universe_dict=universe_dict,
                                             volume_profiles=volume_profiles,

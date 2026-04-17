@@ -2146,6 +2146,7 @@ class BacktestRunner:
                                 trade._qf_features = pending_order._qf_features
                             trade.conviction_mult = getattr(pending_order, '_conviction_mult', 1.0)
                             trade.macd_zone_mult = getattr(pending_order, '_macd_zone_mult', 1.0)
+                            trade.intraday_change_at_entry = getattr(pending_order, '_intraday_change_at_entry', None)
                             _bd = getattr(pending_order, '_conv_breakdown', None)
                             if _bd:
                                 trade.conv_pole_gain = _bd.get('pole_gain', 0.0)
@@ -2169,6 +2170,7 @@ class BacktestRunner:
                         trade._qf_features = pending_order._qf_features
                     trade.conviction_mult = getattr(pending_order, '_conviction_mult', 1.0)
                     trade.macd_zone_mult = getattr(pending_order, '_macd_zone_mult', 1.0)
+                    trade.intraday_change_at_entry = getattr(pending_order, '_intraday_change_at_entry', None)
                     _bd = getattr(pending_order, '_conv_breakdown', None)
                     if _bd:
                         trade.conv_pole_gain = _bd.get('pole_gain', 0.0)
@@ -2473,6 +2475,32 @@ class BacktestRunner:
                 pending_order._qf_features = qf_features
                 pending_order._conviction_mult = conviction_mult
                 pending_order._macd_zone_mult = _applied_macd_zone
+                # Two-tier filter feature: max intraday change (max(gap%, range%))
+                # over bars [0..i] INCLUSIVE of setup bar. Mirrors live parity:
+                # scanner updates _day_max_intraday_change BEFORE the engine
+                # runs setup detection on the same bar, so live includes it too.
+                # None when prev_close unknown or no bars.
+                try:
+                    from trading.two_tier_filter import max_intraday_change_pre_entry as _max_ic
+                    _pre_bars = [
+                        (str(bars.iloc[j].get('timestamp', '')),
+                         bars.iloc[j].get('open'),
+                         bars.iloc[j].get('high'),
+                         bars.iloc[j].get('low'),
+                         bars.iloc[j].get('close'))
+                        for j in range(i + 1)  # inclusive of setup bar i
+                    ]
+                    # Sentinel timestamp guaranteed to sort after any real bar.
+                    pending_order._intraday_change_at_entry = _max_ic(
+                        _pre_bars, prev_close, "\uffff"
+                    )
+                except Exception as _ttf_exc:
+                    logger.warning(
+                        f"{symbol}: two-tier intraday_change_at_entry compute "
+                        f"failed ({_ttf_exc!r}); setting None — trade will be "
+                        f"classified as edge (passthrough) in Stage-2."
+                    )
+                    pending_order._intraday_change_at_entry = None
                 # Phase A — V2 research: stash per-rule contributions + spy_3d input
                 # so they flow into the cache CSV via batch_backtest._trade_to_cache_row.
                 pending_order._conv_breakdown = _conv_brkdn

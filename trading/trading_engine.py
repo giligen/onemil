@@ -143,6 +143,12 @@ class TradingEngine:
         # Minimum daily volume filter — skip illiquid stocks
         self.min_daily_volume = int(_cfg.get("scanner", {}).get("min_daily_volume", 0))
 
+        # Two-tier filter config (surgical drop + composite gate on Extras only).
+        # Uses the Config.two_tier_filter_cfg helper which returns a dict compatible
+        # with trading.two_tier_filter.should_keep. Enabled=false is a no-op at runtime.
+        from config import Config as _ConfigCls
+        self._two_tier_cfg = _ConfigCls().two_tier_filter_cfg
+
         # Risk tiers: scale risk on high-conviction setups
         tier_cfg = _cfg.get("trading", {}).get("risk_tiers", {})
         self.risk_tiers_enabled = bool(tier_cfg.get("enabled", False))
@@ -171,6 +177,10 @@ class TradingEngine:
         self._macd_warmup_cache: Dict[str, Optional[pd.Series]] = {}  # symbol -> prev-day closes
         self._pending_stop_exits: Dict[str, Any] = {}  # symbol -> StopExitEvent awaiting fill
         self._news_data: Dict[str, Dict] = {}  # symbol -> {news_catalyst, news_headline, news_reason}
+        # Two-tier filter: running max(gap_pct, range_pct) per symbol as seen
+        # by scanner at qualification time. Used at _check_symbol to classify
+        # A-tier (>=20%) vs Extras (10-19%) for the surgical+composite gate.
+        self._qualified_max_intraday: Dict[str, float] = {}
 
         # MACD zone filter config
         macd_zones_cfg = _cfg.get("trading", {}).get("macd_zones", {})
@@ -734,7 +744,8 @@ class TradingEngine:
 
     def on_stock_qualified(self, symbol: str, news_catalyst: bool = None,
                            news_headline: str = None, news_reason: str = None,
-                           news_category: str = None) -> None:
+                           news_category: str = None,
+                           max_intraday_change_pct: Optional[float] = None) -> None:
         """
         Handle a stock qualified by the scanner.
 
@@ -747,7 +758,15 @@ class TradingEngine:
             news_headline: Top news headline
             news_reason: LLM's reason for classification
             news_category: News category (FDA_CLINICAL, EARNINGS, GARBAGE_RECAP, etc.)
+            max_intraday_change_pct: Running max of max(gap_pct, range_pct) so far
+                today. Used by the two-tier filter to classify A-tier vs Extras
+                at entry time. None = scanner didn't provide (older callers).
         """
+        # Two-tier filter: keep running max across re-qualifications.
+        if max_intraday_change_pct is not None:
+            existing = self._qualified_max_intraday.get(symbol)
+            if existing is None or max_intraday_change_pct > existing:
+                self._qualified_max_intraday[symbol] = float(max_intraday_change_pct)
         # Store news data for later persistence with trade record.
         # Never downgrade: once a real catalyst is found, keep it.
         # Scanner re-qualifies stocks each cycle — LLM may flip on re-classification.
@@ -2589,6 +2608,61 @@ class TradingEngine:
                     risk_multiplier = 1.0
 
         combined_mult = min(3.0, risk_multiplier * conviction_mult)
+
+        # Two-tier filter gate (2026-04-17). When enabled, classify the trade
+        # by max intraday change seen by scanner, then apply surgical drop +
+        # composite z-score to Extras only (10-19%). A-tier (>=20%) and edge
+        # (<10%) unfiltered. See trading/two_tier_filter.py for logic.
+        if self._two_tier_cfg.get("enabled", False):
+            from trading.two_tier_filter import (
+                classify_tier,
+                should_keep,
+                TIER_EXTRAS,
+            )
+            _max_ic = self._qualified_max_intraday.get(symbol)
+            tier_label = classify_tier(
+                _max_ic,
+                a_tier_lower=self._two_tier_cfg.get("a_tier_lower", 20.0),
+                extras_lower=self._two_tier_cfg.get("extras_lower", 10.0),
+            )
+            # Only compute the MACD zone mult ONCE if we're about to gate on
+            # Extras — it's used later anyway for sizing when zone filter fires.
+            # None = signal unavailable (macd_zones disabled) -> should_keep
+            # will skip the surgical check. When enabled, value in [0, 2.0].
+            _ttf_macd_mult = None
+            if tier_label == TIER_EXTRAS and self.macd_zones_enabled:
+                _ttf_macd_mult = self._get_macd_zone_multiplier(symbol, bars, setup.breakout_level)
+            # entry_minute = minutes-since-midnight ET of the current bar
+            import pytz as _pytz
+            _et = _pytz.timezone('US/Eastern')
+            _now_et = datetime.now(_et)
+            _feat_entry_min = _now_et.hour * 60 + _now_et.minute
+            # vwap distance %: breakout_level vs cumulative VWAP through setup bar
+            _vwap = self._compute_vwap(bars, setup.flag_end_idx)
+            _vwap_dist = (
+                (setup.breakout_level - _vwap) / _vwap * 100
+                if _vwap and _vwap > 0 else None
+            )
+            _features = {
+                "conviction_mult": float(conviction_mult),
+                "qf_vwap_dist_pct": _vwap_dist,
+                "qf_fill_vwap_dist_pct": _vwap_dist,  # fill ~= setup in live scanner moment
+                "entry_minute": float(_feat_entry_min),
+            }
+            keep, reason = should_keep(
+                tier=tier_label,
+                macd_zone_mult=_ttf_macd_mult,
+                features=_features,
+                cfg=self._two_tier_cfg,
+            )
+            if not keep:
+                _mi_str = f"{_max_ic:.1f}%" if _max_ic is not None else "?"
+                _mz_str = f"{_ttf_macd_mult:.2f}" if _ttf_macd_mult is not None else "?"
+                logger.info(
+                    f"{symbol}: TWO-TIER FILTER SKIP (tier={tier_label}, "
+                    f"max_intraday={_mi_str}, macd_mult={_mz_str}): {reason}"
+                )
+                return None
 
         # Create trade plan (pass ADV for liquidity cap — matches BT)
         _adv = int(uni_stock.get('avg_volume_daily') or 0) if uni_stock else 0

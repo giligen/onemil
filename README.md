@@ -242,6 +242,112 @@ Rejects setups where the stop distance (entry - stop_loss) is less than $0.12. T
 | `market_regime_sma_period` | `50` | SMA lookback (used by sma_slope_filter only) |
 | `max_trades_per_day` | `5` | Max entries per day |
 
+### Two-Tier Filter (2026-04-17) — feature-flagged, default OFF
+
+Tests whether lowering the scanner threshold from 20% to 10% can beat A_f6 by catching the same A-tier setups earlier plus a filtered subset of 10-19% "Extras" setups. Lives in `trading/two_tier_filter.py`, shared by BT Stage-2 and the live engine for BT↔live parity.
+
+**Tiers (by `max(gap_pct, range_pct)` at/before entry bar):**
+
+| Tier | Range | Treatment |
+|---|---|---|
+| **A** | ≥ 20% | Unfiltered — same setups A_f6 already takes |
+| **Extras** | 10-19% | Surgical drop + composite z-score gate |
+| **edge** | < 10% | Unfiltered — small residual near qualification boundary |
+
+**Extras gate (both conditions must pass):**
+
+1. **Surgical drop**: reject if `macd_zone_mult < 1.25` (one joint cell — Extras × MACD 1.0 — had +0.01 Kelly on TRAIN and −0.13 on VAL; empirically noise)
+2. **Composite score**: 4-feature signed z-score average over `conviction_mult`, `qf_vwap_dist_pct`, `qf_fill_vwap_dist_pct`, `entry_minute` (all `sign=-1`, lower raw is better). Reject if average z < −0.50.
+
+Frozen-fit params from Jan–Jul 2025 Extras subset (n=83); locked in `config.yaml`.
+
+**Backtest results with flag enabled:**
+
+| | A_f6 (reference) | **O + TTF** | Δ |
+|---|---:|---:|---:|
+| 2025 trades | 83 | **135** | +52 |
+| 2025 P&L | +$54,572 | **+$65,027** | **+$10,455 (+19%)** |
+| 2025 WR | 60.2% | 58.5% | −1.7pt |
+| 2025 DD | $2,502 | ~$4,700 | +$2.2K |
+| Q1 2026 P&L | +$4,495 | **+$9,934** | **+$5,439 (+121%)** |
+| Q1 2026 WR | — | 47.8% | — |
+| **Combined (2025 + Q1 2026)** | **+$59,067** | **+$74,961** | **+$15,894 (+27%)** |
+
+**Parity verified:** with flag `false`, A_f6 produces byte-identical output ($54,572.15 to the cent, 83/83 trade match).
+
+**Config block** (under `trading.bull_flag`):
+```yaml
+two_tier_filter:
+  enabled: false                   # flip to true to activate
+  extras_lower: 10.0
+  a_tier_lower: 20.0
+  drop_extras_macd_below: 1.25
+  composite_threshold: -0.50
+  composite_features:              # frozen z-score params (TRAIN fit)
+    conviction_mult:       {mean: 1.789,   std: 0.284,  sign: -1}
+    qf_vwap_dist_pct:      {mean: 4.218,   std: 2.239,  sign: -1}
+    qf_fill_vwap_dist_pct: {mean: 4.604,   std: 2.274,  sign: -1}
+    entry_minute:          {mean: 603.614, std: 20.195, sign: -1}
+```
+
+**Running backtests with the filter:**
+
+```bash
+# With flag OFF (current behavior — matches A_f6)
+python batch_backtest.py --start 2025-01-01 --end 2025-12-31
+
+# With flag ON (experiment) — write a one-off config, don't edit prod
+cp config.yaml /tmp/config_ttf_on.yaml
+sed -i 's/enabled: false  *# flip to true.*$/enabled: true/' /tmp/config_ttf_on.yaml
+python batch_backtest.py --config /tmp/config_ttf_on.yaml --start 2025-01-01 --end 2025-12-31
+
+# Expected with flag ON:
+#  2025:   135 tr, WR 58.5%, P&L +$65,027
+#  Q1 26:   46 tr, WR 47.8%, P&L +$9,934
+```
+
+**Deploying to live prod:**
+
+```bash
+# Edit the real prod config
+vi config.yaml   # set trading.bull_flag.two_tier_filter.enabled: true
+
+# Validate config loads
+python -c "from config import Config; print(Config().two_tier_filter_cfg)"
+# → {'enabled': True, 'extras_lower': 10.0, 'a_tier_lower': 20.0, ...}
+
+# Restart service
+sudo systemctl restart onemil-trader
+
+# Monitor rejections
+journalctl -u onemil-trader -f | grep "TWO-TIER FILTER"
+# → "...: TWO-TIER FILTER SKIP (tier=E, max_intraday=14.3%, macd_mult=1.00): extras_macd_surgical_drop"
+
+# Rollback (zero state to unwind — pure flag flip)
+vi config.yaml    # flip enabled: true → false
+sudo systemctl restart onemil-trader
+```
+
+**Tests:**
+
+```bash
+pytest tests/test_two_tier_filter.py -v              # 37 unit tests (classifier, scorer, bar replay)
+pytest tests/test_two_tier_filter_integration.py -v  # 13 BT-live parity tests
+pytest tests/                                         # full suite (1,142 passing)
+```
+
+**Key implementation notes:**
+
+- `intraday_change_at_entry` is computed at setup-fire time in `backtest.py` and persisted as a cache column. Any backtest that runs pre-deploy code on a post-deploy cache will see the new column; old caches (missing column) still work via `.get('', '')` fallback (trades classify as edge → passthrough).
+- Live engine reads `self._qualified_max_intraday[symbol]` populated by the scanner via the `max_intraday_change_pct` kwarg on `on_stock_qualified()`. Scanner maintains running max per symbol.
+- When `macd_zones.enabled=false`, the engine passes `macd_zone_mult=None` to the gate, which skips the surgical drop (signal unavailable) and evaluates only the composite.
+- Frozen composite params live in YAML — retune requires re-fitting on TRAIN and updating the YAML values. Do NOT refit per-backtest (look-ahead).
+
+**Out of scope (tested but NOT shipping this PR):**
+
+- **Re-entry** (multiple trades per symbol per day) — empirically −$1,299 over 58 trades. Env-gated via `BT_ALLOW_REENTRY=1`, dormant in code.
+- **Multiplier re-tuning** (Kelly v3 capping to 2.0×) — reserved for when base risk scales to $1,000+ (current $200 base, rubric is P&L-max as-is).
+
 ## Strategy 2: MACD Wave
 
 Separate service targeting medium-cap stocks ($15-30) with strong intraday momentum. Enters on MACD histogram confirmation after +10% move, exits on histogram flip.

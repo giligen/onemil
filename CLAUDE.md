@@ -152,6 +152,17 @@ journalctl -u onemil-trader -f           # Live logs
 - Logs: `logs/onemil.log`
 - Universe: pre-built via `python main.py --rebuild-universe` (nightly cron)
 
+### Feature flag: two-tier filter (added 2026-04-17)
+- Config key: `trading.bull_flag.two_tier_filter.enabled`
+- Default: `false` — byte-identical to pre-change A_f6 behavior ($54,572.15 / 83 trades, verified)
+- When `true`: BT projects **+$10,455 on 2025 OOS and +$5,439 on Q1 2026 vs A_f6**
+- Shared module: `trading/two_tier_filter.py` (imported by both BT Stage-2 and live engine → parity by construction)
+- Enable: flip flag in `config.yaml`, run `python -c "from config import Config; print(Config().two_tier_filter_cfg)"` to verify, then `sudo systemctl restart onemil-trader`
+- Monitor: `journalctl -u onemil-trader | grep "TWO-TIER FILTER"` — shows rejected Extras with reason (`extras_macd_surgical_drop` or `extras_composite_below_threshold`)
+- Rollback: flip flag to `false` + restart (zero state to unwind — pure gate flip)
+- Full details in README.md "Two-Tier Filter" section
+- **Dormant companion change**: `BT_ALLOW_REENTRY=1` env var enables multi-trade-per-symbol-per-day in the backtest. Empirically −$1,299/yr — DO NOT enable in prod.
+
 ## Service 2: MACD Wave (`onemil-macd-wave`)
 ```bash
 sudo systemctl status onemil-macd-wave   # Check status

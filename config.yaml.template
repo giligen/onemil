@@ -188,6 +188,35 @@ trading:
     # 2025 OOS (pole<=3): WR 54%→60%, PF 2.41→3.50, max DD $4.5K→$2.5K (halved)
     # 0 = disabled.
     max_pole_bars: 3
+    # Two-tier filter: classify trades by max intraday change at entry (A >=20,
+    # Extras 10-19, edge <10). Keep A + edge unfiltered. Apply surgical drop +
+    # composite z-score gate on Extras only. BT numbers (O + f6 + this filter):
+    # 2025 +$57,679 (beats A_f6 +$54,572); Q1 2026 +$8,450 (beats A_f6 +$4,495).
+    two_tier_filter:
+      enabled: false                       # flip to true after canary / integration
+      extras_lower: 10.0                   # % intraday threshold: Extras floor
+      a_tier_lower: 20.0                   # % intraday threshold: A-tier floor
+      drop_extras_macd_below: 1.25         # surgical drop: reject Extras where macd_zone_mult < this
+      composite_threshold: -0.50           # reject Extras with composite z-score below this
+      # Frozen TRAIN-fit params (O_f6 2025-Jan..Jul Extras, n=83). sign=-1 means
+      # lower raw value contributes positive (good) to the composite score.
+      composite_features:
+        conviction_mult:
+          mean: 1.789
+          std: 0.284
+          sign: -1
+        qf_vwap_dist_pct:
+          mean: 4.218
+          std: 2.239
+          sign: -1
+        qf_fill_vwap_dist_pct:
+          mean: 4.604
+          std: 2.274
+          sign: -1
+        entry_minute:
+          mean: 603.614
+          std: 20.195
+          sign: -1
   # MACD zone filter: scale risk based on MACD histogram strength at entry
   # Histogram as % of price → zone → risk multiplier (0 = skip trade)
   # U-shape: strong negative + strong positive = best setups, near-zero = worst

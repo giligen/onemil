@@ -92,6 +92,9 @@ class RealtimeScanner:
         self._qualified_stock_data: List[Dict] = []
         self._day_highs: Dict[str, float] = {}  # Track intraday highs for V-reversal detection
         self._day_lows: Dict[str, float] = {}   # Track intraday lows for V-reversal detection
+        # Running max of max(gap_pct, range_pct) per symbol — used by the two-tier
+        # filter in trading_engine to classify A-tier (>=20%) vs Extras (10-19%).
+        self._day_max_intraday_change: Dict[str, float] = {}
 
         # Async news worker — non-blocking LLM classification
         # Enabled by default; tests can pass async_news=False to disable
@@ -612,6 +615,10 @@ class RealtimeScanner:
             day_low = self._day_lows.get(symbol, current_price)
             range_pct = ((self._day_highs.get(symbol, current_price) - day_low) / day_low * 100) if day_low > 0 else 0
             intraday_change_pct = max(gap_pct, range_pct)  # Qualify on whichever is higher
+            # Running max for two-tier filter classification (A-tier vs Extras).
+            prev_max = self._day_max_intraday_change.get(symbol)
+            if prev_max is None or intraday_change_pct > prev_max:
+                self._day_max_intraday_change[symbol] = intraday_change_pct
 
             # Relative volume
             profile = self._volume_profiles.get(symbol, {})
@@ -719,6 +726,7 @@ class RealtimeScanner:
                         news_headline=headline,
                         news_reason=news_reason,
                         news_category=news_category,
+                        max_intraday_change_pct=self._day_max_intraday_change.get(symbol),
                     )
 
                 # Save qualified result to DB

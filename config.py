@@ -468,6 +468,35 @@ class Config:
         return int(self._get_yaml("trading", "bull_flag", "max_pole_bars", default=0))
 
     # =========================================================================
+    # Two-Tier Filter (10% scanner quality gate)
+    # =========================================================================
+
+    @property
+    def two_tier_filter_enabled(self) -> bool:
+        """Whether the two-tier filter is active (BT + live)."""
+        return bool(self._get_yaml("trading", "bull_flag", "two_tier_filter",
+                                   "enabled", default=False))
+
+    @property
+    def two_tier_filter_cfg(self) -> dict:
+        """Full two-tier filter config dict (threshold, cap, feature params).
+
+        Returns a dict with keys: enabled, extras_lower, a_tier_lower,
+        drop_extras_macd_below, composite_threshold, composite_features.
+        Suitable to pass directly to `trading.two_tier_filter.should_keep`.
+        """
+        cfg = self._get_yaml("trading", "bull_flag", "two_tier_filter", default={}) or {}
+        # Provide sane fallbacks so callers can rely on keys being present.
+        return {
+            "enabled": bool(cfg.get("enabled", False)),
+            "extras_lower": float(cfg.get("extras_lower", 10.0)),
+            "a_tier_lower": float(cfg.get("a_tier_lower", 20.0)),
+            "drop_extras_macd_below": cfg.get("drop_extras_macd_below"),
+            "composite_threshold": cfg.get("composite_threshold"),
+            "composite_features": cfg.get("composite_features") or {},
+        }
+
+    # =========================================================================
     # MACD Zone Filter
     # =========================================================================
 
