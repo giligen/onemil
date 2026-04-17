@@ -294,13 +294,26 @@ class RealtimeScanner:
                     f"skipped a minute boundary, re-aligning"
                 )
 
-        # Post-loop safety net: force close (Bug #1 fix)
-        if self.trading_engine is not None and self.trading_engine.enabled:
-            if not force_closed:
-                logger.info("End-of-day safety net — force-closing all positions")
-                self.trading_engine._force_close_all()
-        if self.macd_engine is not None:
-            self.macd_engine.force_close_all()
+        # Post-loop safety net: only force-close at EOD, NOT on mid-session
+        # SIGTERM (code deploy). Positions survive restart and get recovered
+        # by startup sync. See 2026-04-16 CDNA incident.
+        _is_shutdown = self.shutdown_event and self.shutdown_event.is_set()
+        _is_eod = (
+            self.trading_engine._is_past_force_close_time()
+            if self.trading_engine else True  # fallback: assume EOD if no engine
+        )
+        if _is_shutdown and not _is_eod and not force_closed:
+            logger.info(
+                "Shutdown mid-session — skipping force-close "
+                "(positions survive restart)"
+            )
+        else:
+            if self.trading_engine is not None and self.trading_engine.enabled:
+                if not force_closed:
+                    logger.info("End-of-day safety net — force-closing all positions")
+                    self.trading_engine._force_close_all()
+            if self.macd_engine is not None:
+                self.macd_engine.force_close_all()
 
     def run_test_cycle(self) -> Dict:
         """

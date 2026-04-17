@@ -1039,6 +1039,40 @@ class TestForceCloseDBUpdate:
         mock_position_manager.record_trade_pnl.assert_called_once()
         assert mock_position_manager.record_trade_pnl.call_args[0][0] == pytest.approx(expected_pnl, abs=0.01)
 
+    @patch('trading.trading_engine.time_mod')
+    def test_force_close_skips_macd_wave_positions(self, mock_time, engine, mock_alpaca, db):
+        """Positions with no matching bull_flag DB trade are SKIPPED.
+
+        Regression test for the 2026-04-16 CDNA incident: a service restart
+        at 12:20 ET force-closed a macd_wave position because _force_close_all
+        iterated ALL Alpaca positions without strategy filtering.
+        """
+        now = datetime.now(timezone.utc)
+        # Save a MACD wave trade (not bull_flag) — should be skipped
+        db.save_trade({
+            'trade_date': date.today().isoformat(),
+            'symbol': 'CDNA', 'side': 'buy',
+            'entry_price': 21.43, 'stop_loss_price': 20.36,
+            'take_profit_price': 32.0, 'shares': 3499,
+            'risk_per_share': 1.07, 'total_risk': 3743.0,
+            'risk_reward_ratio': 2.0, 'order_id': 'macd-order',
+            'order_status': 'filled', 'fill_price': 21.43, 'filled_at': now,
+            'exit_price': None, 'exit_reason': None, 'exited_at': None,
+            'pnl': None, 'pnl_pct': None,
+            'pattern_data': '{}', 'strategy': 'macd_wave',
+            'created_at': now, 'updated_at': now,
+        })
+        # Alpaca has the macd_wave position
+        mock_alpaca.get_open_positions.return_value = [
+            {'symbol': 'CDNA', 'qty': 3499, 'avg_entry_price': 21.43,
+             'market_value': 75000, 'unrealized_pl': 800},
+        ]
+
+        engine._force_close_all()
+
+        # close_position should NOT have been called — CDNA is macd_wave, not bull_flag
+        mock_alpaca.close_position.assert_not_called()
+
     def test_force_close_cancels_pending(self, engine, mock_alpaca):
         """Force-close cancels pending buy-stop orders."""
         engine._pending_orders['PEND'] = {
@@ -1503,6 +1537,19 @@ class TestForceCloseRetry:
         mock_notifier = MagicMock(spec=TelegramNotifier)
         engine.notifier = mock_notifier
 
+        # Must have a matching bull_flag trade in DB (post-strategy-filter fix)
+        now = datetime.now(timezone.utc)
+        db.save_trade({
+            'trade_date': date.today().isoformat(), 'symbol': 'STUCK',
+            'side': 'buy', 'entry_price': 5.00, 'stop_loss_price': 4.80,
+            'take_profit_price': 5.40, 'shares': 100,
+            'risk_per_share': 0.20, 'total_risk': 20.0,
+            'risk_reward_ratio': 2.0, 'order_id': 'order-stuck',
+            'order_status': 'filled', 'fill_price': 5.00, 'filled_at': now,
+            'exit_price': None, 'exit_reason': None, 'exited_at': None,
+            'pnl': None, 'pnl_pct': None, 'pattern_data': '{}',
+            'created_at': now, 'updated_at': now,
+        })
         mock_alpaca.get_open_positions.return_value = [
             {'symbol': 'STUCK', 'qty': 100, 'avg_entry_price': 5.00,
              'market_value': 520.0},
@@ -1523,20 +1570,40 @@ class TestForceCloseRetry:
 class TestGracefulShutdown:
     """Tests for shutdown_event integration in monitoring loop."""
 
-    def test_shutdown_event_stops_loop(self, engine, mock_alpaca, db):
-        """Setting shutdown_event stops the monitoring loop."""
+    def test_shutdown_event_stops_loop_midday_no_force_close(self, engine, mock_alpaca, db):
+        """Mid-session SIGTERM: stops loop but does NOT force-close positions.
+
+        Regression test for 2026-04-16 CDNA incident: a code deploy at 12:20 ET
+        force-closed a winning MACD wave position via the shutdown handler.
+        """
         shutdown_event = threading.Event()
         engine.shutdown_event = shutdown_event
+        # Force_close_time = 15:45 ET — simulate mid-session (before that)
+        engine.force_close_hour = 15
+        engine.force_close_minute = 45
 
-        # Set shutdown immediately
         shutdown_event.set()
-
         mock_alpaca.get_open_positions.return_value = []
 
-        # Should exit immediately and call force_close_all
         engine.run_monitoring_loop()
 
-        # Verify graceful shutdown happened
+        # Mid-session SIGTERM: should NOT call get_open_positions (no force close)
+        mock_alpaca.get_open_positions.assert_not_called()
+
+    def test_shutdown_event_at_eod_does_force_close(self, engine, mock_alpaca, db):
+        """EOD SIGTERM: stops loop AND force-closes positions (correct behavior)."""
+        shutdown_event = threading.Event()
+        engine.shutdown_event = shutdown_event
+        # Set force_close_time to now (simulate "it's past 15:45 ET")
+        engine.force_close_hour = 0
+        engine.force_close_minute = 0
+
+        shutdown_event.set()
+        mock_alpaca.get_open_positions.return_value = []
+
+        engine.run_monitoring_loop()
+
+        # At EOD, should force-close (get_open_positions called)
         mock_alpaca.get_open_positions.assert_called()
 
     def test_loop_without_shutdown_event(self, engine):

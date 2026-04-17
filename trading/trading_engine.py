@@ -3056,6 +3056,18 @@ class TradingEngine:
 
             for pos in positions:
                 symbol = pos['symbol']
+
+                # Only close positions owned by bull_flag. MACD wave manages
+                # its own positions via MACDWaveEngine.force_close_all().
+                # Without this filter, a systemctl restart mid-session would
+                # liquidate macd_wave winners (see 2026-04-16 CDNA incident).
+                if symbol not in trades_by_symbol:
+                    logger.info(
+                        f"{symbol}: Skipping force-close — no open bull_flag "
+                        f"trade (likely macd_wave or external position)"
+                    )
+                    continue
+
                 close_succeeded = False
 
                 # Cancel any open sell orders (TP/SL legs) holding shares
@@ -3228,10 +3240,20 @@ class TradingEngine:
         if self.stop_monitor:
             self.stop_monitor.stop()
 
-        # Graceful shutdown: force-close all positions
+        # Graceful shutdown: only force-close if past EOD time.
+        # Mid-session SIGTERM (code deploy) should NOT liquidate positions —
+        # they survive the restart and get recovered by startup sync.
+        # See 2026-04-16 CDNA incident: a deploy at 12:20 ET force-closed
+        # a winning MACD wave position via this path.
         if self.shutdown_event and self.shutdown_event.is_set():
-            logger.info("Shutdown signal received — force-closing all positions...")
-            self._force_close_all()
+            if self._is_past_force_close_time():
+                logger.info("Shutdown at EOD — force-closing bull_flag positions...")
+                self._force_close_all()
+            else:
+                logger.info(
+                    "Shutdown mid-session — skipping force-close "
+                    "(positions survive restart via startup sync)"
+                )
             self.save_daily_summary()
             logger.info("Graceful shutdown complete")
 
