@@ -348,6 +348,99 @@ pytest tests/                                         # full suite (1,142 passin
 - **Re-entry** (multiple trades per symbol per day) — empirically −$1,299 over 58 trades. Env-gated via `BT_ALLOW_REENTRY=1`, dormant in code.
 - **Multiplier re-tuning** (Kelly v3 capping to 2.0×) — reserved for when base risk scales to $1,000+ (current $200 base, rubric is P&L-max as-is).
 
+### Volume-Confirmed Trail Exit (Experiment D, 2026-04-17) — feature-flagged, default OFF
+
+When a trailing stop triggers on a bar, require that bar's volume to exceed `flag_avg_volume × min_vol_ratio` before firing the exit. Low-volume drift-downs are treated as noise (hold position); only active selling (volume-confirmed) fires the exit. Initial hard stop (pre-trailing) is never skipped. Shared helper `trading/trail_vol_guard.py` used by both BT simulator and live `StopMonitor` for parity.
+
+**Empirical analysis** (on 20 mid-range Q1 2026 winners, see `exit_quality_research.py` for the full deep-dive): classified exits as LUCKY (saved from reversal, ~45%), GOOD (caught near peak, ~30%), MIXED (~20%), or EARLY (~5%). The core thesis from the analysis: for "slow-burn" winners (CDNA, KPTI, HBIO), the trail fires on a small low-volume pullback mid-day, missing the afternoon continuation. Volume confirmation preserves these.
+
+**Backtest results** (TTF on, r=1.0 default):
+
+| | Baseline (trail 1.0R) | **D (vol-conf trail)** | Δ |
+|---|---:|---:|---:|
+| 2025 trades | 135 | 135 | 0 |
+| 2025 P&L | +$65,027 | **+$68,791** | **+$3,764 (+5.8%)** |
+| 2025 WR | 58.5% | 57.8% | −0.7pt |
+| 2025 DD | $4,722 | **$4,722** | unchanged |
+| 2025 avg_win | +$1,322 | **+$1,392** | +$70 |
+| 2025 avg_loss | −$704 | −$698 | +$6 (better) |
+| Q1 2026 trades | 46 | 46 | 0 |
+| Q1 2026 P&L | +$9,934 | **+$11,770** | **+$1,836 (+18%)** |
+| Q1 2026 DD | $5,296 | **$5,296** | unchanged |
+
+**Pareto improvement**: same trade count, same DD, same avg loss — winners just run further. Stacks cleanly on top of the two-tier filter.
+
+**Parameter sensitivity** (Q1 2026, TTF on):
+
+| min_vol_ratio | Q1 P&L | 2025 P&L (where tested) |
+|---:|---:|---:|
+| 0.5 | +$11,892 (Q1 best) | +$66,836 |
+| 0.8 | +$10,733 | — |
+| **1.0 (default)** | **+$11,770** | **+$68,791 (2025 best)** |
+| 1.2 | +$11,716 | — |
+| 1.5 | +$11,837 | — |
+
+Flat surface; any ratio in [0.5, 1.5] gives similar results. Default `1.0` is the safest choice.
+
+**Config block** (under `trading.trailing_stop`):
+```yaml
+vol_confirmed_exit:
+  enabled: false           # flip to true to activate
+  min_vol_ratio: 1.0       # bar vol must be >= this × flag_avg_volume
+```
+
+**Combined with TTF — full config stack result:**
+
+| Config | 2025 P&L | Q1 2026 P&L | Combined vs A_f6 |
+|---|---:|---:|---|
+| A_f6 (current prod baseline) | +$54,572 | +$4,495 | — |
+| TTF-on only | +$65,027 | +$9,934 | +27% |
+| **TTF-on + D (full stack)** | **+$68,791** | **+$11,770** | **+36%** |
+
+**Running backtests with D:**
+
+```bash
+# OFF (current behavior)
+python batch_backtest.py --start 2025-01-01 --end 2025-12-31 --build-cache
+python batch_backtest.py --start 2025-01-01 --end 2025-12-31
+
+# ON — requires rebuild (D affects Stage-1 simulator exits)
+cp config.yaml /tmp/config_D_on.yaml
+sed -i 's/vol_confirmed_exit:\n      enabled: false/vol_confirmed_exit:\n      enabled: true/' /tmp/config_D_on.yaml
+python batch_backtest.py --config /tmp/config_D_on.yaml --start 2025-01-01 --end 2025-12-31 --build-cache --cache-file /tmp/cache_D.csv
+python batch_backtest.py --config /tmp/config_D_on.yaml --start 2025-01-01 --end 2025-12-31 --cache-file /tmp/cache_D.csv
+
+# Expected with D on + TTF on:
+#  2025:   135 tr, WR 57.8%, P&L +$68,791
+#  Q1 26:   46 tr, WR 47.8%, P&L +$11,770
+```
+
+**Deploying to live prod:**
+
+```bash
+vi config.yaml    # set trading.trailing_stop.vol_confirmed_exit.enabled: true
+python -c "from config import Config; print(Config().vol_confirmed_trail_cfg)"
+# → {'enabled': True, 'min_vol_ratio': 1.0}
+sudo systemctl restart onemil-trader
+journalctl -u onemil-trader -f | grep "VOL-CONF SKIP"
+# Rollback: flip enabled: false + restart (pure flag flip, zero state)
+```
+
+**Tests:**
+```bash
+pytest tests/test_trail_vol_guard.py -v          # 21 unit tests (helper boundaries)
+pytest tests/test_backtest.py::TestVolConfirmedTrailExit -v       # 4 BT simulator tests
+pytest tests/test_stop_monitor.py::TestVolConfirmedTrailExit -v   # 5 live path tests
+```
+
+**Key implementation notes:**
+
+- Shared helper `trading/trail_vol_guard.py` — single source of truth for BT + live.
+- Safe defaults throughout: missing baseline → never skip (fall back to naive trail); missing bar volume → treated as 0 (skips when ratio > 0, matching "no trading" semantic).
+- Live: `WatchEntry.last_bar_volume` updated by `_on_bar()` callback on every closed bar. Both tick path (`_on_trade`) and poll path (`_process_bar_snapshot`) call the shared helper.
+- Only trail exits are gated — initial hard stop (before trail activation) never skips (capital-preservation path).
+- Crash-recovery path: watches re-registered from DB pass `avg_flag_volume=0.0` (not stored), so vol-conf falls back to naive trail until next fresh trade.
+
 ## Strategy 2: MACD Wave
 
 Separate service targeting medium-cap stocks ($15-30) with strong intraday momentum. Enters on MACD histogram confirmation after +10% move, exits on histogram flip.

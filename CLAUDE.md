@@ -163,6 +163,17 @@ journalctl -u onemil-trader -f           # Live logs
 - Full details in README.md "Two-Tier Filter" section
 - **Dormant companion change**: `BT_ALLOW_REENTRY=1` env var enables multi-trade-per-symbol-per-day in the backtest. Empirically −$1,299/yr — DO NOT enable in prod.
 
+### Feature flag: volume-confirmed trail exit (Experiment D, added 2026-04-17)
+- Config key: `trading.trailing_stop.vol_confirmed_exit.enabled`
+- Default: `false` — trailing-stop behavior unchanged from pre-change
+- When `true` (stacked on top of TTF-on): BT projects **additional +$3,764 on 2025 and +$1,836 on Q1 2026** (Pareto improvement — same trades, same DD, bigger avg win)
+- Shared module: `trading/trail_vol_guard.py` (single helper used by BT simulator + live StopMonitor both tick and poll paths)
+- Logic: trail-stop triggering bar must have volume >= `min_vol_ratio × flag_avg_volume` to fire. Low-vol drift-downs are skipped. Hard stop (pre-trailing) always fires.
+- Enable: flip flag in `config.yaml`, verify via `python -c "from config import Config; print(Config().vol_confirmed_trail_cfg)"`, then `sudo systemctl restart onemil-trader`
+- Monitor: `journalctl -u onemil-trader | grep "VOL-CONF SKIP"` — shows each skipped trail exit with bar volume vs threshold
+- Rollback: flip flag to `false` + restart (pure config flip)
+- Full details in README.md "Volume-Confirmed Trail Exit" section
+
 ## Service 2: MACD Wave (`onemil-macd-wave`)
 ```bash
 sudo systemctl status onemil-macd-wave   # Check status

@@ -77,6 +77,18 @@ class WatchEntry:
     # Strategy tag (routes exit events back to the originating engine under the
     # unified trader service). Defaults preserve legacy callers.
     strategy: str = 'bull_flag'
+    # Experiment D — volume-confirmed trail exit (2026-04-17).
+    # When `vol_confirmed_trail_enabled` is True AND trailing_active is True
+    # AND the current price crosses the trail stop, we first check whether the
+    # LAST CLOSED 1-min bar's volume >= flag_avg_volume × min_ratio. If not,
+    # skip the exit (treat as low-vol drift). Falls back to naive exit when any
+    # required field is missing. See trading/trail_vol_guard.py.
+    avg_flag_volume: float = 0.0
+    vol_confirmed_trail_enabled: bool = False
+    vol_confirmed_trail_min_ratio: float = 1.0
+    # Last fully-closed bar's volume (updated on bar-close events). Used only
+    # by the vol-confirmed guard above.
+    last_bar_volume: int = 0
 
 
 @dataclass
@@ -384,6 +396,14 @@ class StopMonitor:
             self._bar_windows.setdefault(symbol, []).append(bar_dict)
             self._last_data_ts = time_mod.time()
 
+            # Experiment D: stash last-closed-bar volume on the active watch so
+            # the tick-path vol-confirmed trail check can read it. Poll path
+            # uses the bar dict directly; this covers the tick-path.
+            with self._watch_lock:
+                watch = self._watches.get(symbol)
+                if watch is not None:
+                    watch.last_bar_volume = bar_dict['volume']
+
             # Snapshot handlers under lock, then fire outside lock so a slow handler
             # doesn't block registration/unregistration on another thread.
             with self._bar_handler_lock:
@@ -450,6 +470,9 @@ class StopMonitor:
         activate_at_r: float = 0.0,
         trail_pct: float = 0.0,
         strategy: str = 'bull_flag',
+        avg_flag_volume: float = 0.0,
+        vol_confirmed_trail_enabled: bool = False,
+        vol_confirmed_trail_min_ratio: float = 1.0,
     ) -> None:
         """
         Register a symbol for stop-price monitoring.
@@ -467,6 +490,11 @@ class StopMonitor:
             risk_per_share: entry_price - original_stop (= 1R, for trail distance)
             trail_r: Trail distance in R units below highest high (0 = disabled)
             activate_at_r: Activate trail after price reaches +NR from entry
+            avg_flag_volume: Avg 1-min bar volume during the setup's flag
+                consolidation — baseline for vol-confirmed trail exit (0 disables).
+            vol_confirmed_trail_enabled: When True, trail exits require the
+                latest closed bar's volume >= avg_flag_volume × min_ratio.
+            vol_confirmed_trail_min_ratio: Ratio threshold (default 1.0).
         """
         entry = WatchEntry(
             symbol=symbol,
@@ -483,6 +511,9 @@ class StopMonitor:
             trail_pct=trail_pct,
             trailing_active=trail_pct > 0,  # %-based trail activates immediately
             strategy=strategy,
+            avg_flag_volume=avg_flag_volume,
+            vol_confirmed_trail_enabled=vol_confirmed_trail_enabled,
+            vol_confirmed_trail_min_ratio=vol_confirmed_trail_min_ratio,
         )
         with self._watch_lock:
             self._watches[symbol] = entry
@@ -1333,6 +1364,22 @@ class StopMonitor:
                     # Check stop
                     if price <= watch.stop_price:
                         reason = 'trail_stop' if watch.trailing_active else 'stop_loss'
+                        # Experiment D: vol-confirmed trail gate. Only applies
+                        # to trail exits with the flag enabled on this watch.
+                        if reason == 'trail_stop' and watch.vol_confirmed_trail_enabled:
+                            from trading.trail_vol_guard import should_skip_trail_exit_on_low_vol
+                            if should_skip_trail_exit_on_low_vol(
+                                bar_volume=watch.last_bar_volume,
+                                flag_avg_volume=watch.avg_flag_volume,
+                                min_vol_ratio=watch.vol_confirmed_trail_min_ratio,
+                            ):
+                                logger.info(
+                                    f"StopMonitor poll: {sym} TRAIL VOL-CONF SKIP "
+                                    f"— bar_vol={watch.last_bar_volume:,} < "
+                                    f"{watch.vol_confirmed_trail_min_ratio}×"
+                                    f"flag_avg={watch.avg_flag_volume:,.0f}"
+                                )
+                                continue
                         logger.info(f"StopMonitor poll: {sym} {reason} @ ${price:.2f} (stop=${watch.stop_price:.2f})")
                         self._exit_events.put(StopExitEvent(
                             symbol=sym, stop_price=watch.stop_price,
@@ -1586,6 +1633,24 @@ class StopMonitor:
         # Check stop level (works for both fixed and trailing stops)
         if price <= watch.stop_price:
             exit_reason = 'trail_stop' if (watch.trail_r > 0 and watch.trailing_active) else 'stop_loss'
+            # Experiment D: for trail exits (not initial hard stop), require
+            # the last closed bar's volume to confirm active selling. Skip if
+            # the bar looks like low-volume drift. Only applies when
+            # trailing_active is True AND vol_confirmed_trail_enabled.
+            if exit_reason == 'trail_stop' and watch.vol_confirmed_trail_enabled:
+                from trading.trail_vol_guard import should_skip_trail_exit_on_low_vol
+                if should_skip_trail_exit_on_low_vol(
+                    bar_volume=watch.last_bar_volume,
+                    flag_avg_volume=watch.avg_flag_volume,
+                    min_vol_ratio=watch.vol_confirmed_trail_min_ratio,
+                ):
+                    logger.info(
+                        f"StopMonitor: {symbol} TRAIL VOL-CONF SKIP — "
+                        f"bar_vol={watch.last_bar_volume:,} < "
+                        f"{watch.vol_confirmed_trail_min_ratio}×flag_avg={watch.avg_flag_volume:,.0f}, "
+                        f"price=${price:.2f} stop=${watch.stop_price:.2f} (holding)"
+                    )
+                    return
             logger.info(
                 f"StopMonitor: {symbol} price ${price:.2f} "
                 f"<= stop ${watch.stop_price:.2f} — triggering {exit_reason}"

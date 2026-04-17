@@ -126,6 +126,12 @@ class TradingEngine:
         self.trailing_stop_enabled = bool(trail_cfg.get("enabled", False))
         self.trailing_stop_r = float(trail_cfg.get("trail_r", 1.0))
         self.trailing_activate_at_r = float(trail_cfg.get("activate_at_r", 2.0))
+        # Experiment D: volume-confirmed trail exit. When enabled, StopMonitor
+        # skips trail exits on bars where last-closed-bar volume is below
+        # `flag_avg_volume × min_vol_ratio`. See trading/trail_vol_guard.py.
+        _vol_conf_cfg = trail_cfg.get("vol_confirmed_exit", {}) or {}
+        self.vol_confirmed_trail_enabled = bool(_vol_conf_cfg.get("enabled", False))
+        self.vol_confirmed_trail_min_ratio = float(_vol_conf_cfg.get("min_vol_ratio", 1.0))
 
         # Exhaustion exit config
         exhaust_cfg = _cfg.get("trading", {}).get("exhaustion_exit", {})
@@ -1413,6 +1419,8 @@ class TradingEngine:
                                 'real_stop_loss_price': real_stop,
                             })
 
+                        _flag_vol = (plan.pattern.avg_flag_volume
+                                     if plan and plan.pattern else 0.0)
                         self.stop_monitor.add_watch(
                             symbol=symbol,
                             stop_price=real_stop,
@@ -1424,6 +1432,9 @@ class TradingEngine:
                             risk_per_share=fill_price - real_stop,
                             trail_r=trail_r,
                             activate_at_r=activate_r,
+                            avg_flag_volume=_flag_vol,
+                            vol_confirmed_trail_enabled=self.vol_confirmed_trail_enabled,
+                            vol_confirmed_trail_min_ratio=self.vol_confirmed_trail_min_ratio,
                         )
 
                         # Cancel TP leg when trailing stop is active (bracket path only)
@@ -3512,6 +3523,13 @@ class TradingEngine:
                             risk_per_share=fill - real_sl,
                             trail_r=trail_r,
                             activate_at_r=activate_r,
+                            # Crash recovery: avg_flag_volume not in DB; passing
+                            # 0.0 → vol-confirm helper falls back to always-fire.
+                            # Worst case: recovered watches miss the vol-conf
+                            # hold benefit until next fresh trade.
+                            avg_flag_volume=0.0,
+                            vol_confirmed_trail_enabled=self.vol_confirmed_trail_enabled,
+                            vol_confirmed_trail_min_ratio=self.vol_confirmed_trail_min_ratio,
                         )
                         logger.info(
                             f"{symbol}: Crash recovery — re-registered StopMonitor watch "

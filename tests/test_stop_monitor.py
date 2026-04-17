@@ -907,3 +907,134 @@ class TestDrainExitEventsFilter:
         monitor._exit_events.put(ev)
         bf = monitor.drain_exit_events(strategy='bull_flag')
         assert len(bf) == 1 and bf[0].symbol == 'X'
+
+
+# ---------------------------------------------------------------------------
+# Volume-confirmed trail exit (Experiment D) — tick-path tests
+# ---------------------------------------------------------------------------
+
+class TestVolConfirmedTrailExit:
+    """Live-path tests: _on_trade skips trail exits on low-volume bars.
+
+    Setup: trail ratchets up as price climbs, then a drop triggers the trail
+    stop. The test varies whether the last closed bar had enough volume to
+    confirm active selling.
+    """
+
+    @pytest.fixture
+    def vol_mon(self, mock_alpaca):
+        """StopMonitor with vol-confirmed trail enabled on the watch."""
+        mon = StopMonitor(
+            api_key='k', api_secret='s', alpaca_client=mock_alpaca,
+            marketable_limit_offset=0.03, marketable_limit_offset_pct=0.005,
+        )
+        mon.add_watch(
+            'PLYX', stop_price=4.29, shares=500,
+            tp_leg_id='tp-1', sl_leg_id='sl-1',
+            entry_price=4.40, risk_per_share=0.11,
+            trail_r=1.0, activate_at_r=2.0,
+            avg_flag_volume=50_000,
+            vol_confirmed_trail_enabled=True,
+            vol_confirmed_trail_min_ratio=1.0,
+        )
+        return mon
+
+    @pytest.mark.asyncio
+    async def test_vol_conf_low_vol_skips_trail_exit(self, vol_mon):
+        """Trail would fire, but last bar volume < threshold → skip, keep holding."""
+        # Push high to activate trail: +3R = 4.40 + 0.33 = 4.73
+        t1 = MagicMock(); t1.symbol = 'PLYX'; t1.price = 4.80
+        await vol_mon._on_trade(t1)
+
+        # Simulate last closed bar volume: 5_000 < 50_000 × 1.0 → low-vol
+        with vol_mon._watch_lock:
+            vol_mon._watches['PLYX'].last_bar_volume = 5_000
+
+        # Price drops below trail stop (4.80 - 0.11 = 4.69). Would normally exit.
+        t2 = MagicMock(); t2.symbol = 'PLYX'; t2.price = 4.65
+        await vol_mon._on_trade(t2)
+
+        # Exit skipped — no event emitted
+        events = vol_mon.drain_exit_events()
+        assert len(events) == 0
+
+    @pytest.mark.asyncio
+    async def test_vol_conf_high_vol_fires_trail_exit(self, vol_mon):
+        """Trail fires normally when last bar volume >= threshold."""
+        t1 = MagicMock(); t1.symbol = 'PLYX'; t1.price = 4.80
+        await vol_mon._on_trade(t1)
+
+        with vol_mon._watch_lock:
+            vol_mon._watches['PLYX'].last_bar_volume = 100_000  # 2× baseline
+
+        t2 = MagicMock(); t2.symbol = 'PLYX'; t2.price = 4.65
+        await vol_mon._on_trade(t2)
+
+        events = vol_mon.drain_exit_events()
+        assert len(events) == 1
+        assert events[0].exit_reason == 'trail_stop'
+
+    @pytest.mark.asyncio
+    async def test_vol_conf_disabled_fires_regardless(self, mock_alpaca):
+        """When vol_confirmed flag is off, trail fires as before."""
+        mon = StopMonitor(
+            api_key='k', api_secret='s', alpaca_client=mock_alpaca,
+        )
+        mon.add_watch(
+            'PLYX', stop_price=4.29, shares=500,
+            tp_leg_id='tp-1', sl_leg_id='sl-1',
+            entry_price=4.40, risk_per_share=0.11,
+            trail_r=1.0, activate_at_r=2.0,
+            avg_flag_volume=50_000,
+            vol_confirmed_trail_enabled=False,  # OFF
+            vol_confirmed_trail_min_ratio=1.0,
+        )
+        t1 = MagicMock(); t1.symbol = 'PLYX'; t1.price = 4.80
+        await mon._on_trade(t1)
+
+        with mon._watch_lock:
+            mon._watches['PLYX'].last_bar_volume = 100  # very low
+
+        t2 = MagicMock(); t2.symbol = 'PLYX'; t2.price = 4.65
+        await mon._on_trade(t2)
+
+        events = mon.drain_exit_events()
+        assert len(events) == 1  # fires regardless of low vol — flag is off
+        assert events[0].exit_reason == 'trail_stop'
+
+    @pytest.mark.asyncio
+    async def test_vol_conf_does_not_skip_initial_stop_loss(self, vol_mon):
+        """Initial hard stop (not trailing) fires regardless of vol-conf.
+
+        Vol-confirmed guard only filters TRAIL exits, not the base stop_loss.
+        """
+        # Set last bar volume very low
+        with vol_mon._watch_lock:
+            vol_mon._watches['PLYX'].last_bar_volume = 1  # low
+
+        # Drop straight through stop (trail never activated → initial stop_loss)
+        t = MagicMock(); t.symbol = 'PLYX'; t.price = 4.20
+        await vol_mon._on_trade(t)
+
+        events = vol_mon.drain_exit_events()
+        assert len(events) == 1
+        assert events[0].exit_reason == 'stop_loss'  # NOT trail_stop
+
+    @pytest.mark.asyncio
+    async def test_on_bar_updates_last_bar_volume(self, vol_mon):
+        """_on_bar callback stashes the latest closed bar volume on the watch."""
+        vol_mon._bar_symbols.add('PLYX')  # required for _on_bar to process
+
+        bar = MagicMock()
+        bar.symbol = 'PLYX'
+        bar.timestamp = '2025-01-01T09:31:00Z'
+        bar.open = 4.50
+        bar.high = 4.55
+        bar.low = 4.48
+        bar.close = 4.52
+        bar.volume = 75_000
+
+        await vol_mon._on_bar(bar)
+
+        with vol_mon._watch_lock:
+            assert vol_mon._watches['PLYX'].last_bar_volume == 75_000

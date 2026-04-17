@@ -1458,3 +1458,87 @@ class TestBTConvictionFilter:
         with _mock.patch.object(Config, '_load_yaml_only', staticmethod(patched)):
             runner = BacktestRunner()
             assert runner.conviction_min_threshold == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Volume-confirmed trail exit (Experiment D)
+# ---------------------------------------------------------------------------
+
+
+class TestVolConfirmedTrailExit:
+    """Simulator-level tests for the vol-confirmed trail skip.
+
+    Fixtures build a setup where bar_high pushes up to activate trail at +1.5R
+    then bar_low dips below current_stop on a subsequent bar. The trail has
+    ratcheted up; what matters is whether the dip-bar's volume is < or >=
+    the flag_avg_volume threshold.
+    """
+
+    def _run(self, vol_conf_enabled, vol_conf_ratio,
+             bar_dip_volume, flag_avg_volume=5000):
+        # Pattern with avg_flag_volume=flag_avg_volume
+        pattern = _make_pattern()
+        pattern.avg_flag_volume = flag_avg_volume
+        # Plan at entry 5.00 stop 4.90 (0.10 risk) → 1R move = 5.10, 1.5R = 5.15
+        plan = TradePlan(
+            symbol="TEST",
+            entry_price=5.00,
+            stop_loss_price=4.90,
+            take_profit_price=5.40,
+            risk_per_share=0.10,
+            reward_per_share=0.40,
+            risk_reward_ratio=4.0,
+            shares=100,
+            total_risk=10.0,
+            pattern=pattern,
+        )
+        sim = TradeSimulator(
+            trailing_stop_r=1.0,
+            trailing_activate_at_r=1.5,
+            vol_confirmed_trail_enabled=vol_conf_enabled,
+            vol_confirmed_trail_min_ratio=vol_conf_ratio,
+        )
+        # Bars: entry, ratchet to +2R (push trail to +1R = 5.10), then dip below stop
+        bars = _make_bars([
+            (5.00, 5.05, 4.95, 5.02, 5000),    # 0 entry bar
+            (5.02, 5.15, 5.01, 5.14, 5000),    # 1 high 5.15 (+1.5R), activate trail
+            (5.14, 5.20, 5.12, 5.18, 5000),    # 2 push high to 5.20 → trail stop=5.10
+            (5.18, 5.18, 5.05, 5.08, bar_dip_volume),  # 3 dip low=5.05 crosses stop 5.10
+        ])
+        return sim.simulate(plan, bars, entry_bar_idx=0)
+
+    def test_disabled_fires_trail_normally(self):
+        # Vol-conf off: trail fires on bar 3 regardless of volume
+        trade = self._run(
+            vol_conf_enabled=False, vol_conf_ratio=1.0,
+            bar_dip_volume=100,  # low — but flag is off, should still exit
+        )
+        assert trade.exit_reason == 'trail_stop'
+        # Exited near stop 5.10 (with tiny slippage model)
+        assert trade.exit_price == pytest.approx(5.10, abs=0.05)
+
+    def test_enabled_low_volume_skips_exit(self):
+        # Vol-conf on: bar_dip volume 100 << flag 5000 × 1.0 → skip trail exit
+        # Trade continues past bar 3. No more bars → force EOD fill at last close.
+        trade = self._run(
+            vol_conf_enabled=True, vol_conf_ratio=1.0,
+            bar_dip_volume=100,
+        )
+        # Exit reason is NOT trail_stop (skipped) — EOD fill on last bar close
+        assert trade.exit_reason != 'trail_stop'
+
+    def test_enabled_high_volume_fires_exit(self):
+        # Vol-conf on: bar_dip volume 10000 >= flag 5000 × 1.0 → confirmed exit
+        trade = self._run(
+            vol_conf_enabled=True, vol_conf_ratio=1.0,
+            bar_dip_volume=10_000,
+        )
+        assert trade.exit_reason == 'trail_stop'
+
+    def test_enabled_missing_flag_avg_fires_exit(self):
+        # avg_flag_volume=0 → helper returns False → fire exit (safe default)
+        trade = self._run(
+            vol_conf_enabled=True, vol_conf_ratio=1.0,
+            bar_dip_volume=100, flag_avg_volume=0,
+        )
+        assert trade.exit_reason == 'trail_stop'

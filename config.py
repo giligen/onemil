@@ -478,6 +478,21 @@ class Config:
                                    "enabled", default=False))
 
     @property
+    def vol_confirmed_trail_cfg(self) -> dict:
+        """Volume-confirmed trail exit config (Experiment D).
+
+        Returns dict with {enabled, min_vol_ratio}. Default disabled. Loaded
+        from `trading.trailing_stop.vol_confirmed_exit`. Safe for use as
+        kwargs into the shared helper / TradeSimulator / StopMonitor.
+        """
+        cfg = self._get_yaml("trading", "trailing_stop", "vol_confirmed_exit",
+                             default={}) or {}
+        return {
+            "enabled": bool(cfg.get("enabled", False)),
+            "min_vol_ratio": float(cfg.get("min_vol_ratio", 1.0)),
+        }
+
+    @property
     def two_tier_filter_cfg(self) -> dict:
         """Full two-tier filter config dict (threshold, cap, feature params).
 

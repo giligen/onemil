@@ -182,6 +182,8 @@ class TradeSimulator:
         trail_exit_slippage_pct: float = None,
         trail_tighten_at_r: float = 0.0,
         trail_tightened_r: float = 0.5,
+        vol_confirmed_trail_enabled: bool = False,
+        vol_confirmed_trail_min_ratio: float = 1.0,
     ):
         """
         Initialize TradeSimulator.
@@ -244,6 +246,12 @@ class TradeSimulator:
         # Locks in more profit on big runners without capping them (replaces fixed TP)
         self.trail_tighten_at_r = trail_tighten_at_r  # 0 = disabled
         self.trail_tightened_r = trail_tightened_r  # 0.5 = tighter trail after threshold
+        # Volume-confirmed trail exit (Experiment D): when trailing stop triggers,
+        # require the stop-crossing bar to have volume >= min_ratio × flag avg.
+        # Low-volume drift-downs are skipped (treated as noise, not active selling).
+        # Prevents exit on passive pullbacks within a slow-burn rally.
+        self.vol_confirmed_trail_enabled = vol_confirmed_trail_enabled
+        self.vol_confirmed_trail_min_ratio = vol_confirmed_trail_min_ratio
 
     # ------------------------------------------------------------------
     # Exhaustion signal detectors (delegated to shared module)
@@ -373,6 +381,25 @@ class TradeSimulator:
                     return trade
 
             hit_stop = bar_low <= current_stop
+
+            # Experiment D: volume-confirmed trail exit. Shared helper gates the
+            # trail-stop trigger; skipped bars leave the stop in place and the
+            # next bar re-evaluates. Does NOT apply to initial hard stop.
+            if (hit_stop and use_trail and trailing_active
+                    and self.vol_confirmed_trail_enabled):
+                from trading.trail_vol_guard import should_skip_trail_exit_on_low_vol
+                flag_vol = plan.pattern.avg_flag_volume if plan.pattern else None
+                cur_vol = bar['volume']
+                if should_skip_trail_exit_on_low_vol(
+                    bar_volume=cur_vol,
+                    flag_avg_volume=flag_vol,
+                    min_vol_ratio=self.vol_confirmed_trail_min_ratio,
+                ):
+                    hit_stop = False
+                    logger.info(
+                        f"  Bar {i}: TRAIL VOL-CONF SKIP — bar_vol={cur_vol:,} < "
+                        f"{self.vol_confirmed_trail_min_ratio}×flag_avg={flag_vol:,.0f}"
+                    )
 
             if use_trail:
                 # With trailing stop: no fixed TP, trail replaces it
@@ -926,6 +953,8 @@ class BacktestRunner:
                 no_pop_exit_bars=no_pop_exit_bars,
                 no_pop_exit_min_pct=no_pop_exit_min_pct,
                 trail_exit_slippage_pct=trail_exit_slippage_pct,
+                vol_confirmed_trail_enabled=bool(trail_cfg.get("vol_confirmed_exit", {}).get("enabled", False)),
+                vol_confirmed_trail_min_ratio=float(trail_cfg.get("vol_confirmed_exit", {}).get("min_vol_ratio", 1.0)),
             )
         # Volume qualification gates (for live/backtest alignment testing)
         self.min_cum_dollar_vol = min_cum_dollar_vol
