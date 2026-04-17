@@ -223,20 +223,35 @@ class RealtimeScanner:
                 import sys
                 sys.exit(1)
 
-            # Engine pattern check every tick ~60s (Bug #2 fix)
-            if engine is not None and engine.enabled and not force_closed:
-                engine.run_pattern_check()
+            # Engine ticks — bull flag + MACD wave run in PARALLEL.
+            # Each engine has isolated mutable state and the Alpaca SDK is
+            # thread-safe (httpx). Running concurrently saves ~10-15s per
+            # cycle (the time of the shorter engine), pushing the combined
+            # cycle from ~60s to ~40-45s.
+            from concurrent.futures import ThreadPoolExecutor, as_completed
 
-            # MACD wave tick — scan, entries, exits every 60s
-            if self.macd_engine is not None and not force_closed:
-                try:
-                    self.macd_engine.scan_for_movers()
-                    self.macd_engine.check_entries()
-                    self.macd_engine.check_exits()
-                    if self.macd_engine.is_force_close_time():
-                        self.macd_engine.force_close_all()
-                except Exception as e:
-                    logger.error(f"MACD wave cycle error: {e}", exc_info=True)
+            _engine_futures = []
+            with ThreadPoolExecutor(max_workers=2,
+                                    thread_name_prefix='engine') as _pool:
+                if engine is not None and engine.enabled and not force_closed:
+                    _engine_futures.append(
+                        _pool.submit(engine.run_pattern_check))
+
+                if self.macd_engine is not None and not force_closed:
+                    def _macd_tick():
+                        self.macd_engine.scan_for_movers()
+                        self.macd_engine.check_entries()
+                        self.macd_engine.check_exits()
+                        if self.macd_engine.is_force_close_time():
+                            self.macd_engine.force_close_all()
+                    _engine_futures.append(_pool.submit(_macd_tick))
+
+                for f in as_completed(_engine_futures):
+                    try:
+                        f.result()
+                    except Exception as e:
+                        logger.error(
+                            f"Engine tick error: {e}", exc_info=True)
 
             # Sleep until next :01 past the wall-clock minute (boundary alignment).
             # Cycle work above (scan_for_movers, run_pattern_check) fires at predictable
