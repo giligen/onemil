@@ -1003,18 +1003,27 @@ class BacktestRunner:
         self.macd_strong_pos_threshold = float(macd_zones_cfg.get("strong_pos_threshold_pct", 0.5))
         self.macd_strong_pos_multiplier = float(macd_zones_cfg.get("strong_pos_multiplier", 1.5))
         self.macd_normal_multiplier = float(macd_zones_cfg.get("normal_multiplier", 1.0))
-        # Sweet spot zone: MACD% in [sweet_min, sweet_max] gets its own multiplier
-        self.macd_sweet_spot_min = float(macd_zones_cfg.get("sweet_spot_min_pct", 0.0))  # 0 = disabled
-        self.macd_sweet_spot_max = float(macd_zones_cfg.get("sweet_spot_max_pct", 0.0))
-        self.macd_sweet_spot_multiplier = float(macd_zones_cfg.get("sweet_spot_multiplier", 2.0))
+        # Per-tier MACD zone multipliers for Extras tier (10% ≤ intraday < 20%).
+        # Falls back to A-tier defaults if extras_tier block absent.
+        _extras_cfg = macd_zones_cfg.get("extras_tier", {}) or {}
+        self.macd_extras_strong_pos_multiplier = float(
+            _extras_cfg.get("strong_pos_multiplier", self.macd_strong_pos_multiplier))
+        self.macd_extras_strong_neg_multiplier = float(
+            _extras_cfg.get("strong_neg_multiplier", self.macd_strong_neg_multiplier))
+        self.macd_extras_normal_multiplier = float(
+            _extras_cfg.get("normal_multiplier", self.macd_normal_multiplier))
         self._prev_day_bars: Optional[pd.DataFrame] = None
 
         if self.macd_zones_enabled:
             logger.info(
-                f"MACD zones: dead [{self.macd_dead_zone_min}%, {self.macd_dead_zone_max}%], "
+                f"MACD zones — A-tier (≥20%): dead [{self.macd_dead_zone_min}%, "
+                f"{self.macd_dead_zone_max}%], "
                 f"strong neg <{self.macd_strong_neg_threshold}% → {self.macd_strong_neg_multiplier}x, "
                 f"strong pos >{self.macd_strong_pos_threshold}% → {self.macd_strong_pos_multiplier}x, "
-                f"normal → {self.macd_normal_multiplier}x"
+                f"normal → {self.macd_normal_multiplier}x | "
+                f"Extras-tier (10-19.99%): strong → "
+                f"{self.macd_extras_strong_pos_multiplier}x, "
+                f"normal → {self.macd_extras_normal_multiplier}x"
             )
 
         # Quality filter: skip low-probability setups based on pre-entry features
@@ -1104,25 +1113,30 @@ class BacktestRunner:
     _ET = pytz.timezone('US/Eastern')
 
     def _get_macd_zone_multiplier(
-        self, symbol: str, bars: pd.DataFrame, entry_bar_idx: int, entry_price: float,
+        self, symbol: str, bars: pd.DataFrame, entry_bar_idx: int,
+        entry_price: float, intraday_change_pct: float = 0.0,
     ) -> float:
         """
-        Compute MACD zone risk multiplier at entry time.
+        Compute MACD zone risk multiplier at entry time (tier-aware).
 
         Uses warmed-up MACD histogram (prev-day bars prepended) to determine
-        which zone the trade falls in, and returns the appropriate risk multiplier.
+        which zone the trade falls in, then selects the multiplier from the
+        tier bucket based on intraday_change_pct (A-tier ≥20%, Extras 10-20%).
 
         Args:
             symbol: Stock symbol
             bars: Full day's 1-min bars
             entry_bar_idx: Index of entry bar
             entry_price: Fill price at entry
+            intraday_change_pct: max intraday % gain at entry time (0.0 means
+                "unknown" → defaults to A-tier multipliers for back-compat)
 
         Returns:
-            Risk multiplier: 0.0 = skip (dead zone), 1.0 = normal,
-            1.25/1.5 = boosted (strong zones)
+            Risk multiplier: 0.0 = skip (dead zone OR Extras-tier normal), else
+            tier-specific multiplier for the identified zone.
         """
         from trading.indicators import macd_histogram
+        from trading.macd_tier_helpers import select_tier_multipliers
 
         # Build closes up to entry bar
         closes = bars['close'].iloc[:entry_bar_idx + 1]
@@ -1142,37 +1156,50 @@ class BacktestRunner:
         hist_val = float(hist.iloc[-1])
         macd_pct = (hist_val / entry_price) * 100
 
-        # Determine zone
+        # Tier-aware multiplier selection — single source of truth shared
+        # with trading/trading_engine.py via trading.macd_tier_helpers.
+        strong_pos_mult, strong_neg_mult, normal_mult, tier = \
+            select_tier_multipliers(
+                intraday_change_pct,
+                self.macd_strong_pos_multiplier,
+                self.macd_strong_neg_multiplier,
+                self.macd_normal_multiplier,
+                self.macd_extras_strong_pos_multiplier,
+                self.macd_extras_strong_neg_multiplier,
+                self.macd_extras_normal_multiplier,
+            )
+
+        # Determine zone (dead / strong neg / strong pos / normal)
         if self.macd_dead_zone_min <= macd_pct <= self.macd_dead_zone_max:
             logger.info(
-                f"  MACD ZONE SKIP: histogram {hist_val:.4f} = {macd_pct:.2f}% "
+                f"  MACD ZONE SKIP (dead): histogram {hist_val:.4f} = {macd_pct:.2f}% "
                 f"(dead zone [{self.macd_dead_zone_min}%, {self.macd_dead_zone_max}%])"
             )
             return 0.0
         elif macd_pct < self.macd_strong_neg_threshold:
-            mult = self.macd_strong_neg_multiplier
-            logger.debug(
-                f"  MACD zone: {macd_pct:.2f}% → strong neg → {mult}x risk"
+            logger.info(
+                f"  MACD zone strong neg ({macd_pct:.2f}%) tier={tier} → {strong_neg_mult}x"
             )
-            return mult
+            return strong_neg_mult
         elif macd_pct > self.macd_strong_pos_threshold:
-            # Check sweet spot sub-zone first (higher priority)
-            if (self.macd_sweet_spot_min > 0 and
-                    self.macd_sweet_spot_min <= macd_pct <= self.macd_sweet_spot_max):
-                mult = self.macd_sweet_spot_multiplier
-                logger.debug(
-                    f"  MACD zone: {macd_pct:.2f}% → sweet spot → {mult}x risk"
-                )
-                return mult
-            mult = self.macd_strong_pos_multiplier
-            logger.debug(
-                f"  MACD zone: {macd_pct:.2f}% → strong pos → {mult}x risk"
+            logger.info(
+                f"  MACD zone strong pos ({macd_pct:.2f}%) tier={tier} → {strong_pos_mult}x"
             )
-            return mult
+            return strong_pos_mult
         else:
-            mult = self.macd_normal_multiplier
-            logger.debug(f"  MACD zone: {macd_pct:.2f}% → normal → {mult}x risk")
-            return mult
+            # Normal zone. For Extras tier under S2-max, normal_mult=0.0 →
+            # trade is skipped (caller checks `zone_mult == 0.0`). Log at
+            # INFO so live monitor catches it (matches dead-zone visibility).
+            if normal_mult == 0.0:
+                logger.info(
+                    f"  MACD ZONE SKIP (Extras-tier normal): {macd_pct:.2f}% → 0.0x "
+                    f"(Extras-tier MACD-neutral filtered per S2-max)"
+                )
+            else:
+                logger.info(
+                    f"  MACD zone normal ({macd_pct:.2f}%) tier={tier} → {normal_mult}x"
+                )
+            return normal_mult
 
     def set_db_path(self, db_path: str) -> None:
         """Set DB path for SPY bar loading (quality filter)."""
@@ -2525,12 +2552,36 @@ class BacktestRunner:
                         f"{plan.shares} shares, ${plan.total_risk:.0f} risk"
                     )
 
+                # Compute max intraday change at entry (for tier classification).
+                # Reused: (a) MACD zone multiplier lookup (tier-aware), and
+                # (b) stashed on pending_order for Stage-2 TTF filter.
+                try:
+                    from trading.two_tier_filter import max_intraday_change_pre_entry as _max_ic
+                    _pre_bars = [
+                        (str(bars.iloc[j].get('timestamp', '')),
+                         bars.iloc[j].get('open'),
+                         bars.iloc[j].get('high'),
+                         bars.iloc[j].get('low'),
+                         bars.iloc[j].get('close'))
+                        for j in range(i + 1)  # inclusive of setup bar i
+                    ]
+                    _intraday_change_at_entry = _max_ic(
+                        _pre_bars, prev_close, "\uffff"
+                    )
+                except Exception as _ttf_exc:
+                    logger.warning(
+                        f"{symbol}: intraday_change_at_entry compute failed "
+                        f"({_ttf_exc!r}); defaulting to 0.0 → A-tier MACD path."
+                    )
+                    _intraday_change_at_entry = None
+
                 # MACD zone filter: skip dead zone, scale risk on strong zones
                 # Skip scaling if risk tier already applied (don't compound)
                 _applied_macd_zone = 1.0
                 if self.macd_zones_enabled:
                     zone_mult = self._get_macd_zone_multiplier(
-                        symbol, bars, i, plan.entry_price
+                        symbol, bars, i, plan.entry_price,
+                        intraday_change_pct=float(_intraday_change_at_entry or 0.0)
                     )
                     if zone_mult == 0.0:
                         continue  # dead zone — don't place order
@@ -2596,28 +2647,8 @@ class BacktestRunner:
                 # over bars [0..i] INCLUSIVE of setup bar. Mirrors live parity:
                 # scanner updates _day_max_intraday_change BEFORE the engine
                 # runs setup detection on the same bar, so live includes it too.
-                # None when prev_close unknown or no bars.
-                try:
-                    from trading.two_tier_filter import max_intraday_change_pre_entry as _max_ic
-                    _pre_bars = [
-                        (str(bars.iloc[j].get('timestamp', '')),
-                         bars.iloc[j].get('open'),
-                         bars.iloc[j].get('high'),
-                         bars.iloc[j].get('low'),
-                         bars.iloc[j].get('close'))
-                        for j in range(i + 1)  # inclusive of setup bar i
-                    ]
-                    # Sentinel timestamp guaranteed to sort after any real bar.
-                    pending_order._intraday_change_at_entry = _max_ic(
-                        _pre_bars, prev_close, "\uffff"
-                    )
-                except Exception as _ttf_exc:
-                    logger.warning(
-                        f"{symbol}: two-tier intraday_change_at_entry compute "
-                        f"failed ({_ttf_exc!r}); setting None — trade will be "
-                        f"classified as edge (passthrough) in Stage-2."
-                    )
-                    pending_order._intraday_change_at_entry = None
+                # Reuse value computed above for tier-aware MACD zone multiplier.
+                pending_order._intraday_change_at_entry = _intraday_change_at_entry
                 # Phase A — V2 research: stash per-rule contributions + spy_3d input
                 # so they flow into the cache CSV via batch_backtest._trade_to_cache_row.
                 pending_order._conv_breakdown = _conv_brkdn

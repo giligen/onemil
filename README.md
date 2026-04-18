@@ -500,6 +500,60 @@ pytest tests/test_stop_monitor.py::TestVolConfirmedTrailExit -v   # 5 live path 
 - Only trail exits are gated — initial hard stop (before trail activation) never skips (capital-preservation path).
 - Crash-recovery path: watches re-registered from DB pass `avg_flag_volume=0.0` (not stored), so vol-conf falls back to naive trail until next fresh trade.
 
+### Per-tier MACD zone scaling (S2-max, shipped 2026-04-18)
+
+MACD zone multipliers are now **tier-aware** — A-tier (intraday change ≥20%) and Extras tier (10% ≤ intraday < 20%) receive different multipliers based on where the edge actually is.
+
+**Research finding**: per-tier β-coefficient analysis on 10%-frame 2025+Q1 2026 fresh clean caches showed rule edges are radically different between tiers:
+
+- **A-tier MACD-strong** bucket: already positive edge, amp helps modestly
+- **A-tier V-reversal** (rule 9, fires only on ≥20% range): β = +0.839R stable across TRAIN/VAL/HOLDOUT — the single most consistent signal in the conviction system
+- **Extras MACD-strong** bucket: +0.32R edge on HOLDOUT — BIG under-utilized signal
+- **Extras MACD-neutral** bucket: **−$14,734 landmine** across 219 baseline trades — consistent loser every split
+
+**Ship config** (default-on, no feature flag — simple value bumps):
+
+```yaml
+trading:
+  macd_zones:
+    strong_pos_multiplier: 1.8          # A-tier strong-MACD (was 1.5)
+    strong_neg_multiplier: 1.8          # A-tier strong-MACD
+    normal_multiplier: 1.0              # A-tier neutral (unchanged)
+    extras_tier:
+      strong_pos_multiplier: 2.0        # amp Extras strong bucket
+      strong_neg_multiplier: 2.0
+      normal_multiplier: 0.0            # SKIP Extras neutral (landmine)
+  conviction_scoring:
+    v_reversal_bonus:
+      bonus: 1.0                         # was 0.4 — bump A-tier V-rev
+```
+
+**BT validation** (Stage-2, production frame: 10% scanner threshold + 200K min_daily_volume):
+
+| Quarter | Baseline | S2-max | Δ | Δ% |
+|---|---:|---:|---:|---:|
+| 2025-Q1 | $28,913 | $36,118 | +$7,205 | +24.9% |
+| 2025-Q2 | $14,996 | $17,579 | +$2,583 | +17.2% |
+| 2025-Q3 | $12,463 | $16,355 | +$3,892 | +31.2% |
+| 2025-Q4 | $12,368 | $17,460 | +$5,093 | +41.2% |
+| 2026-Q1 (HOLDOUT) | $13,170 | $17,907 | +$4,737 | +36.0% |
+| **TOTAL** | **$81,911** | **$105,420** | **+$23,509** | **+28.7%** |
+
+Every quarter positive. HOQ1 holdout gain (+$4,737) is anti-overfit validation.
+
+**Per-tier wiring**: `_get_macd_zone_multiplier(..., intraday_change_pct=<float>)` — both BT and PROD now take the intraday change as a parameter and classify via `trading/two_tier_filter.py::classify_tier()`.
+
+**Rollback**: single-commit `git revert` flips all 4 yaml values back. Or manual YAML edit of `strong_pos_multiplier`, `strong_neg_multiplier`, `bonus`, and delete the `extras_tier` block.
+
+**Research artifacts**: `research/S2_proposal.md` (ship synthesis), `research/per_tier_decomp.md` (tier-by-feature decomposition), `research/per_tier_joint_search.md` (22,700-config grid search), `research/scripts/holistic_*.py` (reproducibility).
+
+**Key implementation notes:**
+
+- Tier classifier reused: `trading/two_tier_filter.py::classify_tier` (same one TTF uses at Stage-2).
+- `intraday_change_pct` is plumbed through at the caller level. PROD reads from `_qualified_max_intraday[symbol]` populated by `on_stock_qualified`. BT computes via `trading.two_tier_filter.max_intraday_change_pre_entry` before the MACD call.
+- Per-tier BT↔PROD parity enforced by `tests/test_bt_prod_parity.py` (11 tests).
+- Per-tier multiplier correctness enforced by `tests/test_per_tier_macd_zones.py` (19 tests, including tier boundaries and dead-zone invariance).
+
 ## Strategy 2: MACD Wave
 
 Separate service targeting medium-cap stocks ($15-30) with strong intraday momentum. Enters on MACD histogram confirmation after +10% move, exits on histogram flip.

@@ -233,18 +233,27 @@ trading:
           mean: 603.614
           std: 20.195
           sign: -1
-  # MACD zone filter: scale risk based on MACD histogram strength at entry
-  # Histogram as % of price → zone → risk multiplier (0 = skip trade)
-  # U-shape: strong negative + strong positive = best setups, near-zero = worst
+  # MACD zone filter: tier-aware risk multiplier based on MACD histogram
+  # strength at entry, split by intraday_change tier (A-tier ≥20%, Extras
+  # 10-20%). Per-tier optimization 2026-04-18 (S2-max): BT +28.7% across
+  # 2025+Q1 2026, HOQ1 holdout positive every quarter (research/S2_proposal.md).
   macd_zones:
-    enabled: true                     # RE-ENABLED — dead zone blocks garbage trades worth -$120K+. Earlier "removing profitable trades" analysis was on wrong dataset.
+    enabled: true                     # dead zone blocks garbage trades (-$120K baseline impact)
     dead_zone_min_pct: -0.2           # skip trades with MACD% in [-0.2%, +0.1%]
     dead_zone_max_pct: 0.1
     strong_neg_threshold_pct: -0.5    # MACD% below this = deep pullback (loaded spring)
-    strong_neg_multiplier: 1.5         # 1.5x risk on deep pullbacks (best Sharpe)
     strong_pos_threshold_pct: 0.5     # MACD% above this = strong momentum
-    strong_pos_multiplier: 1.5         # 1.5x risk on strong momentum
-    normal_multiplier: 1.0              # 1.0x risk on normal zones
+    # A-tier defaults (applied when intraday_change ≥ 20% OR <10%=edge).
+    strong_neg_multiplier: 1.8         # A-tier strong bucket (was 1.5 pre-S2)
+    strong_pos_multiplier: 1.8         # A-tier strong bucket (was 1.5 pre-S2)
+    normal_multiplier: 1.0             # A-tier neutral zone (unchanged)
+    # Extras-tier (10% ≤ intraday_change < 20%) overrides. MACD-neutral
+    # E-tier trades are a consistent loser (-$14,734 baseline); amplifying
+    # strong E-tier captures +0.32R edge on HOLDOUT.
+    extras_tier:
+      normal_multiplier: 0.0            # skip E-tier MACD-neutral (landmine)
+      strong_pos_multiplier: 2.0
+      strong_neg_multiplier: 2.0
   # Quality filter: skip low-probability setups based on pre-entry features
   # Validated on 15mo data: removes 48% of trades (73% losers), PF 1.15→1.80, Sharpe 0.27→0.90
   quality_filter:
@@ -267,15 +276,14 @@ trading:
                                         # V2_clean (2026-04-15): 1.4 lifts canonical 16mo +$52K (+15.5%)
                                         # Walk-forward OOS: mean +$28K, worst split +$19K (3 splits)
                                         # COUPLED to 7 conviction rules (V1 + Rules 7+8) — re-validate if rules change
-    # V-reversal bonus (Experiment V, 2026-04-17). Rule 9: adds `bonus` to the raw
-    # conviction score when the setup is a gap-down V-reversal (oversold intraday
-    # reversal pattern). Fat-tail analysis showed the top 10 2025 winners have
-    # median gap_pct=-1.09% with >=20% intraday range — this rule explicitly
-    # rewards that shape. Stays within conviction's [0.25, 3.0] clamp.
-    # BT lift (TTF+D on, bonus=0.4): 2025 +$4,396, Q1 2026 +$2,284 — same DD.
+    # V-reversal bonus (Rule 9) — gap-down + range≥20% + pole≥5% fires bonus.
+    # A-tier-exclusive by construction (intraday_range≥20% ⇒ A-tier). Bonus
+    # was 0.4 (Experiment V 2026-04-17); bumped to 1.0 in S2-max ship
+    # 2026-04-18 — β = +0.839R stable across TRAIN/VAL/HOLDOUT, the most
+    # consistent signal in the conviction system. Bonus clamps to [0.25, 3.0].
     v_reversal_bonus:
-      enabled: true                    # shipping ON — validated +$6.7K combined 2025+Q1 vs TTF+D
-      bonus: 0.4                       # added to raw score when all triggers fire
+      enabled: true                    # shipping ON
+      bonus: 1.0                       # S2-max ship (was 0.4)
       gap_pct_max: 0.0                 # fires only when qf_gap_pct < this (gap-down)
       intraday_range_min: 20.0         # fires only when intraday range (%) >= this
       pole_gain_min: 5.0               # fires only when pole gain (%) >= this

@@ -191,6 +191,17 @@ journalctl -u onemil-trader -f           # Live logs
 - Rollback: flip flag to `false` + restart (pure config flip)
 - Full details in README.md "Volume-Confirmed Trail Exit" section
 
+### Per-tier MACD scaling + V-rev bump (S2-max, shipped 2026-04-18, **default-on, no flag**)
+- Config: `trading.macd_zones.extras_tier.{strong_pos,strong_neg,normal}_multiplier` + bumped `strong_pos/neg_multiplier: 1.5→1.8` (A-tier) + `v_reversal_bonus.bonus: 0.4→1.0`
+- Ships with hardcoded values (no feature flag — per-tier analysis is the production baseline going forward)
+- BT: **+28.7% lift on 2025+Q1 2026** (baseline $81,911 → $105,420). Per-quarter breakdown: all 5 quarters positive. HOQ1 holdout +$4,737 (+36.0%).
+- Mechanism: A-tier (≥20% intraday) stays close to current behavior; Extras-tier (10-20%) amps strong MACD 2.0x and SKIPS MACD-neutral trades (the −$14,734 landmine bucket).
+- Shared classifier: `trading/two_tier_filter.py::classify_tier` (same as TTF). Both BT `backtest.py:_get_macd_zone_multiplier` and PROD `trading/trading_engine.py:_get_macd_zone_multiplier` take `intraday_change_pct` kwarg.
+- Parity: `tests/test_bt_prod_parity.py` (11 tests), `tests/test_per_tier_macd_zones.py` (19 tests). 1217 total tests pass.
+- Monitor: `journalctl -u onemil-trader | grep "tier="` — shows per-trade tier classification + applied multiplier.
+- Rollback: `git revert` the ship commit (single commit flips all 6 yaml values + 2 function signatures back). Or manual YAML revert of `strong_pos/neg_multiplier` to 1.5, `v_reversal_bonus.bonus` to 0.4, delete `extras_tier` block.
+- Full details in README.md "Per-tier MACD zone scaling (S2-max)" section.
+
 ## Service 2: MACD Wave (`onemil-macd-wave`)
 ```bash
 sudo systemctl status onemil-macd-wave   # Check status

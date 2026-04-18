@@ -106,6 +106,14 @@ def should_keep(
     # it — in that case skip the surgical check and rely only on composite.
     # Setting macd_zone_mult explicitly to 0.0 or low values DOES trigger the
     # drop (that's the "MACD dead zone" case from the empirical data).
+    #
+    # NOTE (S2-max ship, 2026-04-18): this gate is now largely redundant for
+    # Extras trades because per-tier MACD zone mults are {dead=0.0, normal=0.0,
+    # strong=2.0}. All Extras normal/dead trades are rejected at
+    # `_get_macd_zone_multiplier` before reaching TTF; surviving trades have
+    # macd_zone_mult=2.0 > drop_below(1.25), so they pass. Kept as defensive
+    # safety net in case extras_tier config is removed (fallback to A-tier
+    # macd mults = {1.0, 1.8}, where normal=1.0 < 1.25 still triggers drop).
     drop_below = cfg.get("drop_extras_macd_below")
     if drop_below is not None and macd_zone_mult is not None:
         if macd_zone_mult < float(drop_below):
