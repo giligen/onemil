@@ -89,6 +89,26 @@ class WatchEntry:
     # Last fully-closed bar's volume (updated on bar-close events). Used only
     # by the vol-confirmed guard above.
     last_bar_volume: int = 0
+    # Static-lock exit (ORB strategy, 2026-04-19). When lock_arm_at_r > 0, the
+    # stop ratchets UP to entry + lock_stop_r × lock_r_unit the first time
+    # price prints at or above entry + lock_arm_at_r × lock_r_unit. Unlike
+    # trailing stops, the lock NEVER moves after arming — letting runners go
+    # freely while protecting the locked-in minimum profit. Backtest: +34%
+    # Calmar vs fixed targets on ORB (see study_orb_lock_variants.py).
+    #
+    # lock_r_unit defines what "1R" means for the lock. Defaults to
+    # risk_per_share when 0.0. ORB passes range_size (range_high - range_low)
+    # explicitly to match BT's R convention (BT: `range_size * LOCK_TRIGGER_R`).
+    lock_arm_at_r: float = 0.0     # if > 0: trigger level (R-multiple above entry)
+    lock_stop_r: float = 0.0       # stop-level after arming (R-multiple above entry)
+    lock_armed: bool = False       # runtime state (internal; do not set at add_watch)
+    lock_r_unit: float = 0.0       # explicit 1R for lock math; 0 = use risk_per_share
+    # Entry-bar skip (ORB BT parity, 2026-04-19): in BT simulate_orb_trade,
+    # `for row in sim_bars.iloc[1:]` skips the entry bar entirely for exit
+    # checks. PROD matches by skipping all stop/lock checks for ticks before
+    # this timestamp. Defaults to 0.0 (no skip) so bull flag / MACD wave are
+    # unaffected. ORB sets to end-of-entry-bar (fill_time ceiled to next minute).
+    skip_exits_until_ts: float = 0.0   # Unix timestamp; no checks before this
 
 
 @dataclass
@@ -181,14 +201,16 @@ class StopMonitor:
         notifier=None,
         polling_mode: bool = False,
         polling_interval: float = 2.0,
+        alpaca_clients_by_strategy: Optional[Dict[str, AlpacaClient]] = None,
     ):
         """
         Initialize StopMonitor.
 
         Args:
-            api_key: Alpaca API key (for StockDataStream)
+            api_key: Alpaca API key (for StockDataStream market-data feed)
             api_secret: Alpaca API secret
-            alpaca_client: AlpacaClient instance for order submission
+            alpaca_client: Default AlpacaClient for order submission (fallback
+                when a watch's strategy has no entry in alpaca_clients_by_strategy).
             marketable_limit_offset: Minimum dollar offset below price for
                 marketable limit sell (default $0.03)
             marketable_limit_offset_pct: Percentage offset below price
@@ -197,10 +219,19 @@ class StopMonitor:
             polling_mode: Use REST API polling instead of WebSocket.
                 For paper nodes that share Alpaca account with live (1 WS slot).
             polling_interval: Seconds between REST polls (default 2.0)
+            alpaca_clients_by_strategy: Optional dict of {strategy: AlpacaClient}.
+                When set, exit orders for a watch with matching `strategy` tag
+                are submitted via the mapped client. Strategies not in the dict
+                fall through to `alpaca_client` (the default). This enables
+                multi-account operation (e.g., ORB paper + bull flag live)
+                without requiring a separate StopMonitor per account. The
+                market-data WebSocket is account-agnostic so one feed is fine.
         """
         self._api_key = api_key
         self._api_secret = api_secret
         self._alpaca = alpaca_client
+        # Per-strategy order-execution routing. Empty dict = legacy single-client behavior.
+        self._clients_by_strategy: Dict[str, AlpacaClient] = dict(alpaca_clients_by_strategy or {})
         self._marketable_limit_offset = marketable_limit_offset
         self._marketable_limit_offset_pct = marketable_limit_offset_pct
         self._notifier = notifier
@@ -235,6 +266,16 @@ class StopMonitor:
     def polling_mode(self) -> bool:
         """True if this monitor is in REST polling mode (no data WebSocket)."""
         return self._polling_mode
+
+    def _client_for(self, strategy: str) -> AlpacaClient:
+        """Return the AlpacaClient that should execute orders for this strategy.
+
+        If `alpaca_clients_by_strategy` was provided at init AND contains an
+        entry for the given strategy, that client is returned. Otherwise the
+        default (self._alpaca) is used — preserves legacy single-client
+        behavior for strategies not in the routing dict.
+        """
+        return self._clients_by_strategy.get(strategy, self._alpaca)
 
     def start(self) -> None:
         """Launch the stop monitoring daemon thread (WebSocket or REST polling)."""
@@ -473,6 +514,10 @@ class StopMonitor:
         avg_flag_volume: float = 0.0,
         vol_confirmed_trail_enabled: bool = False,
         vol_confirmed_trail_min_ratio: float = 1.0,
+        lock_arm_at_r: float = 0.0,
+        lock_stop_r: float = 0.0,
+        lock_r_unit: float = 0.0,
+        skip_exits_until_ts: float = 0.0,
     ) -> None:
         """
         Register a symbol for stop-price monitoring.
@@ -514,6 +559,10 @@ class StopMonitor:
             avg_flag_volume=avg_flag_volume,
             vol_confirmed_trail_enabled=vol_confirmed_trail_enabled,
             vol_confirmed_trail_min_ratio=vol_confirmed_trail_min_ratio,
+            lock_arm_at_r=lock_arm_at_r,
+            lock_stop_r=lock_stop_r,
+            lock_r_unit=lock_r_unit,
+            skip_exits_until_ts=skip_exits_until_ts,
         )
         with self._watch_lock:
             self._watches[symbol] = entry
@@ -1600,6 +1649,14 @@ class StopMonitor:
         if watch is None:
             return
 
+        # Entry-bar skip (ORB BT parity): tick is within the entry bar — don't
+        # evaluate arm/stop yet, but DO keep highest_since_entry updated so
+        # when the skip window closes, arming can fire on the correct peak.
+        if watch.skip_exits_until_ts > 0 and self._last_data_ts < watch.skip_exits_until_ts:
+            if price > watch.highest_since_entry:
+                watch.highest_since_entry = price
+            return
+
         # Trailing stop: update highest high and ratchet stop
         if watch.trail_r > 0 and watch.risk_per_share > 0:
             if price > watch.highest_since_entry:
@@ -1630,9 +1687,39 @@ class StopMonitor:
                         f"(high=${watch.highest_since_entry:.2f})"
                     )
 
-        # Check stop level (works for both fixed and trailing stops)
+        # Static-lock arming (ORB strategy). When price first reaches
+        # entry + lock_arm_at_r × R, move stop UP to entry + lock_stop_r × R
+        # and NEVER lower it (one-shot, not trailing).
+        # R unit precedence: watch.lock_r_unit (explicit) > risk_per_share (fallback).
+        if watch.lock_arm_at_r > 0 and not watch.lock_armed:
+            r_unit = watch.lock_r_unit if watch.lock_r_unit > 0 else watch.risk_per_share
+            if r_unit > 0:
+                # Track running high so arming uses the peak (not current tick)
+                if watch.trail_r == 0 and price > watch.highest_since_entry:
+                    watch.highest_since_entry = price
+                arm_level = watch.entry_price + watch.lock_arm_at_r * r_unit
+                if watch.highest_since_entry >= arm_level:
+                    new_stop = watch.entry_price + watch.lock_stop_r * r_unit
+                    if new_stop > watch.stop_price:
+                        old_stop = watch.stop_price
+                        watch.stop_price = new_stop
+                        watch.lock_armed = True
+                        logger.info(
+                            f"StopMonitor: {symbol} LOCK ARMED at "
+                            f"+{watch.lock_arm_at_r:.1f}R (R=${r_unit:.2f}) — stop moved "
+                            f"${old_stop:.2f} → ${new_stop:.2f} "
+                            f"(high=${watch.highest_since_entry:.2f}, "
+                            f"entry=${watch.entry_price:.2f})"
+                        )
+
+        # Check stop level (works for fixed, trailing, and static-lock stops)
         if price <= watch.stop_price:
-            exit_reason = 'trail_stop' if (watch.trail_r > 0 and watch.trailing_active) else 'stop_loss'
+            if watch.trail_r > 0 and watch.trailing_active:
+                exit_reason = 'trail_stop'
+            elif watch.lock_armed:
+                exit_reason = 'lock_stop'
+            else:
+                exit_reason = 'stop_loss'
             # Experiment D: for trail exits (not initial hard stop), require
             # the last closed bar's volume to confirm active selling. Skip if
             # the bar looks like low-volume drift. Only applies when
@@ -1684,6 +1771,10 @@ class StopMonitor:
             self._exit_in_progress[symbol] = True
 
         loop = asyncio.get_event_loop()
+        # Route order-submission calls to the correct Alpaca account when
+        # alpaca_clients_by_strategy was configured. Market-data calls below
+        # (get_latest_quote) stay on the default client — quotes are public.
+        client = self._client_for(watch.strategy)
         exit_price = 0.0
         order_id = ""
 
@@ -1692,7 +1783,7 @@ class StopMonitor:
             if watch.tp_leg_id:
                 try:
                     await loop.run_in_executor(
-                        None, self._alpaca.cancel_order, watch.tp_leg_id
+                        None, client.cancel_order, watch.tp_leg_id
                     )
                     logger.info(
                         f"StopMonitor: {symbol} cancelled TP leg {watch.tp_leg_id}"
@@ -1763,14 +1854,14 @@ class StopMonitor:
                 from alpaca.trading.enums import QueryOrderStatus
                 open_orders = await loop.run_in_executor(
                     None,
-                    lambda: self._alpaca.trading_client.get_orders(
+                    lambda: client.trading_client.get_orders(
                         GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol])
                     ),
                 )
                 for oo in open_orders:
                     try:
                         await loop.run_in_executor(
-                            None, self._alpaca.cancel_order, str(oo.id)
+                            None, client.cancel_order, str(oo.id)
                         )
                         logger.info(f"StopMonitor: {symbol} cancelled bracket leg {str(oo.id)[:8]}")
                     except Exception:
@@ -1782,7 +1873,7 @@ class StopMonitor:
             try:
                 result = await loop.run_in_executor(
                     None,
-                    lambda: self._alpaca.submit_limit_sell_order(
+                    lambda: client.submit_limit_sell_order(
                         symbol=symbol,
                         qty=watch.shares,
                         limit_price=limit_price,
@@ -1799,7 +1890,7 @@ class StopMonitor:
                 if watch.sl_leg_id:
                     try:
                         await loop.run_in_executor(
-                            None, self._alpaca.cancel_order, watch.sl_leg_id
+                            None, client.cancel_order, watch.sl_leg_id
                         )
                         logger.info(
                             f"StopMonitor: {symbol} cancelled SL leg {watch.sl_leg_id}"
@@ -1830,7 +1921,7 @@ class StopMonitor:
                 # SL leg is STILL active as protection during fallback
                 try:
                     fallback = await loop.run_in_executor(
-                        None, self._alpaca.close_position, symbol
+                        None, client.close_position, symbol
                     )
                     order_id = fallback.get("id", "")
                     exit_price = trigger_price

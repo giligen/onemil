@@ -46,6 +46,7 @@ class RealtimeScanner:
         notifier=None,
         shutdown_event=None,
         macd_engine=None,
+        orb_engine=None,
     ):
         """
         Initialize RealtimeScanner.
@@ -61,6 +62,7 @@ class RealtimeScanner:
             notifier: Optional TelegramNotifier for alerts
             shutdown_event: Optional threading.Event for graceful shutdown
             macd_engine: Optional MACDWaveEngine for MACD wave strategy
+            orb_engine: Optional ORBEngine for opening-range-breakout strategy
         """
         self.alpaca = alpaca_client
         self.news = news_provider
@@ -72,6 +74,7 @@ class RealtimeScanner:
         self.notifier = notifier
         self.shutdown_event = shutdown_event
         self.macd_engine = macd_engine
+        self.orb_engine = orb_engine
         # Throttle repeated bar-drain errors: the 1s sleep chunk loop can
         # otherwise log the same exception 60× per minute if something stays
         # broken. Track last-seen error signature + timestamp.
@@ -134,6 +137,17 @@ class RealtimeScanner:
         if self.macd_engine is not None:
             self.macd_engine.build_universe()
             logger.info(f"MACD Wave universe built: {len(self.macd_engine.universe)} stocks")
+
+        # Build ORB universe (seeded from bull flag qualified stocks today —
+        # Phase A uses the same live-scanner candidates). Initialized on the
+        # first scan cycle; refreshed as scanner qualifies more stocks.
+        if self.orb_engine is not None:
+            # Seed with any symbols the scanner has already flagged (e.g., via
+            # pre-market gap scan). Will be re-seeded each cycle below.
+            self.orb_engine.build_universe(
+                source_loader=lambda: [d.get('symbol') for d in self._qualified_stock_data]
+            )
+            logger.info(f"ORB universe seeded: {len(self.orb_engine.universe)} stocks")
 
         if self.trading_engine is not None:
             self.trading_engine.reset_daily()
@@ -231,7 +245,7 @@ class RealtimeScanner:
                 import sys
                 sys.exit(1)
 
-            # Engine ticks — bull flag + MACD wave run in PARALLEL.
+            # Engine ticks — bull flag + MACD wave + ORB run in PARALLEL.
             # Each engine has isolated mutable state and the Alpaca SDK is
             # thread-safe (httpx). Running concurrently saves ~10-15s per
             # cycle (the time of the shorter engine), pushing the combined
@@ -243,6 +257,9 @@ class RealtimeScanner:
             if self.macd_engine is not None and not force_closed:
                 _engine_futures.append(
                     _engine_pool.submit(self._macd_wave_tick))
+            if self.orb_engine is not None and not force_closed:
+                _engine_futures.append(
+                    _engine_pool.submit(self._orb_tick))
             for f in _engine_futures:
                 try:
                     f.result(timeout=50)
@@ -299,6 +316,15 @@ class RealtimeScanner:
                             self._macd_bar_drain_err_count = 0
                     except Exception as e:
                         self._log_throttled_bar_drain_error(e)
+                # Drain ORB bar events — triggers targeted check_entries for
+                # any symbol whose 5-min range just closed.
+                if self.orb_engine is not None and not force_closed:
+                    try:
+                        orb_syms = self.orb_engine.drain_bar_events()
+                        if orb_syms:
+                            self.orb_engine.check_entries(symbols=orb_syms)
+                    except Exception as e:
+                        logger.error(f"ORB bar-drain error: {e}", exc_info=True)
             if _shutdown:
                 break  # exits while True (intraday loop)
             # Cycle-overrun warning: if cycle work took longer than the 60s budget
@@ -333,6 +359,8 @@ class RealtimeScanner:
                     self.trading_engine._force_close_all()
             if self.macd_engine is not None:
                 self.macd_engine.force_close_all()
+            if self.orb_engine is not None:
+                self.orb_engine.force_close_all()
 
     def _macd_wave_tick(self) -> None:
         """One MACD wave engine cycle (scan + entries + exits).
@@ -345,6 +373,49 @@ class RealtimeScanner:
         self.macd_engine.check_exits()
         if self.macd_engine.is_force_close_time():
             self.macd_engine.force_close_all()
+
+    def _orb_tick(self) -> None:
+        """One ORB engine cycle (re-seed universe + entries + exits).
+
+        Runs in the parallel engine-tick thread pool. Isolated from bull flag
+        and MACD wave — uses separate AlpacaClient (paper account in Phase 1).
+        build_universe is idempotent — preserves candidate state across ticks.
+        """
+        # Seed universe from BOTH pre-market gap candidates AND intraday
+        # qualified stocks. Pre-market is critical so ORB has candidates by
+        # 9:35 ET (the first range-close event); intraday keeps adding as
+        # new qualifiers arrive.
+        self.orb_engine.build_universe(
+            source_loader=self._orb_universe_source,
+        )
+        self.orb_engine.check_entries()
+        self.orb_engine.check_exits()
+        if self.orb_engine.is_force_close_time():
+            self.orb_engine.force_close_all()
+
+    def _orb_universe_source(self) -> List[str]:
+        """Seed ORB with a BROAD candidate pool, then apply ORB's own BT-parity
+        filter (gap >= 5%, vol >= 500K, price $3-30) via snapshot query.
+
+        Rationale: scanner's `_qualified_stock_data` uses bull-flag criteria
+        (narrow, low-float). For BT parity, ORB needs gap-up stocks matching
+        `study_orb_broad.py` criteria, which is broader. We pull from the pool
+        of pre-market gap + intraday qualified as a SEED, then ORB's
+        `build_orb_universe_from_snapshots` applies the strict ORB criteria.
+        """
+        syms: Set[str] = set()
+        for d in getattr(self, '_premarket_gap_data', []) or []:
+            s = d.get('symbol') if isinstance(d, dict) else None
+            if s: syms.add(s)
+        for d in getattr(self, '_qualified_stock_data', []) or []:
+            s = d.get('symbol') if isinstance(d, dict) else None
+            if s: syms.add(s)
+        seed = list(syms)
+        # If ORB is configured for snapshot filtering, apply it
+        if self.orb_engine is not None and getattr(
+                self.orb_engine, 'universe_source', 'alpaca_snapshots') == 'alpaca_snapshots':
+            return self.orb_engine.build_orb_universe_from_snapshots(seed)
+        return seed
 
     def run_test_cycle(self) -> Dict:
         """

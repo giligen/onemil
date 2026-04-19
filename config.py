@@ -167,6 +167,25 @@ class Config:
         """Alpaca API base URL."""
         return os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets/v2")
 
+    # =========================================================================
+    # ORB Paper Account (Phase 1 paper validation — separate from main/live)
+    # =========================================================================
+
+    @property
+    def alpaca_orb_api_key(self) -> str:
+        """Alpaca API key for ORB paper account (Phase 1). Empty until creds provided."""
+        return os.getenv("ALPACA_ORB_API_KEY", "")
+
+    @property
+    def alpaca_orb_api_secret(self) -> str:
+        """Alpaca API secret for ORB paper account (Phase 1)."""
+        return os.getenv("ALPACA_ORB_API_SECRET", "")
+
+    @property
+    def alpaca_orb_paper(self) -> bool:
+        """Whether the ORB account is paper (default True for Phase 1)."""
+        return os.getenv("ALPACA_ORB_PAPER", "true").lower() in ("true", "1", "yes")
+
     @property
     def anthropic_api_key(self) -> str:
         """Anthropic API key (optional — enables LLM news analysis)."""

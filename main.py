@@ -69,8 +69,15 @@ def parse_args() -> argparse.Namespace:
         '--macd', action='store_true',
         help='Enable MACD wave strategy (default: both strategies enabled)'
     )
+    parser.add_argument(
+        '--orb', action='store_true',
+        help='Enable ORB (Opening Range Breakout) strategy. Reads orb.yaml.'
+             ' OFF by default — requires ALPACA_ORB_API_KEY/SECRET in .env and'
+             ' strategy.enabled=true in orb.yaml to actually trade.'
+    )
     args = parser.parse_args()
-    # If neither --flag nor --macd specified, enable both
+    # If neither --flag nor --macd specified, enable both (legacy default).
+    # --orb stays opt-in even when unspecified.
     if not args.flag and not args.macd:
         args.flag = True
         args.macd = True
@@ -155,8 +162,15 @@ def _setup_telegram_error_handler(config) -> None:
     logger.info("Telegram error handler attached to root logger")
 
 
-def _create_stop_monitor(config, alpaca, notifier=None):
-    """Create and start the shared StopMonitor (one per process)."""
+def _create_stop_monitor(config, alpaca, notifier=None, alpaca_clients_by_strategy=None):
+    """Create and start the shared StopMonitor (one per process).
+
+    Args:
+        alpaca_clients_by_strategy: optional dict mapping strategy tag → AlpacaClient.
+            When set, exit orders for watches with matching `strategy` are submitted
+            via the mapped client (enables multi-account operation). Legacy callers
+            leave this None → all exits use the default `alpaca` client.
+    """
     if not config.self_managed_stops_enabled:
         return None
     from trading.stop_monitor import StopMonitor
@@ -174,6 +188,7 @@ def _create_stop_monitor(config, alpaca, notifier=None):
         notifier=notifier,
         polling_mode=use_polling,
         polling_interval=2.0,
+        alpaca_clients_by_strategy=alpaca_clients_by_strategy,
     )
     stop_monitor.start()
     mode = "REST polling (paper)" if use_polling else "WebSocket (live)"
@@ -272,8 +287,9 @@ def _create_trading_engine(config, alpaca, db, notifier=None, stop_monitor=None,
 
 
 def run_scan(config, verbose: bool = False, trade: bool = False,
-             enable_flag: bool = True, enable_macd: bool = True) -> None:
-    """Run the real-time scanner with one or both strategies."""
+             enable_flag: bool = True, enable_macd: bool = True,
+             enable_orb: bool = False) -> None:
+    """Run the real-time scanner with one or more strategies."""
     logger.info("Starting real-time scanner...")
 
     alpaca = AlpacaClient(config.alpaca_api_key, config.alpaca_api_secret, paper=config.alpaca_paper)
@@ -323,10 +339,50 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
         min_dollar_volume=config.min_dollar_volume,
     )
 
-    # Create ONE shared StopMonitor for all strategies
+    # --- ORB paper AlpacaClient (Phase 1) — created BEFORE StopMonitor so we can
+    # route ORB exit-order execution to this separate paper account via the
+    # StopMonitor's alpaca_clients_by_strategy dict. When we eventually migrate
+    # ORB to the main account, this block goes away (dict becomes empty, legacy
+    # path takes over). ---
+    orb_alpaca = None
+    if trade and enable_orb:
+        if not config.alpaca_orb_api_key or not config.alpaca_orb_api_secret:
+            logger.warning(
+                "--orb requested but ALPACA_ORB_API_KEY/SECRET are empty. "
+                "ORB will be DISABLED for this session. Set creds in .env first."
+            )
+            enable_orb = False
+        else:
+            try:
+                orb_alpaca = AlpacaClient(
+                    config.alpaca_orb_api_key,
+                    config.alpaca_orb_api_secret,
+                    paper=config.alpaca_orb_paper,
+                )
+                if not orb_alpaca.test_connection():
+                    raise RuntimeError("ORB Alpaca connection test failed")
+                orb_account = orb_alpaca.get_account_info()
+                orb_mode = "paper" if orb_alpaca.is_paper else "LIVE"
+                logger.info(
+                    f"ORB Alpaca client connected — {orb_mode} mode, "
+                    f"buying power: ${float(orb_account.get('buying_power', 0)):,.0f}"
+                )
+            except Exception as e:
+                logger.error(f"ORB Alpaca client init failed: {e} — disabling ORB")
+                orb_alpaca = None
+                enable_orb = False
+
+    # Create ONE shared StopMonitor for all strategies. If ORB has its own
+    # AlpacaClient (paper account), pass the routing dict so ORB exit orders
+    # go to the paper account — bull flag + MACD wave continue using `alpaca`
+    # (main account) by default.
     stop_monitor = None
     if trade:
-        stop_monitor = _create_stop_monitor(config, alpaca, notifier)
+        orb_clients_dict = {'orb': orb_alpaca} if orb_alpaca is not None else None
+        stop_monitor = _create_stop_monitor(
+            config, alpaca, notifier,
+            alpaca_clients_by_strategy=orb_clients_dict,
+        )
 
     # T3.1 / S1: shared OrderStreamWatcher — one TradingStream for both strategies.
     # MUST be created BEFORE trading_engine so the bull flag engine can consume
@@ -381,12 +437,52 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
             logger.info("MACD Wave: bar handler registered on shared StopMonitor")
         logger.info(f"MACD Wave strategy ENABLED")
 
+    # ORB (Opening Range Breakout) engine — runs on separate paper Alpaca
+    # account in Phase 1. Fires at 9:35 ET. See orb.yaml for tuning.
+    orb_engine = None
+    if trade and enable_orb and orb_alpaca is not None:
+        import yaml
+        from trading.orb_engine import ORBEngine
+        from trading.order_stream import OrderStreamWatcher
+        orb_cfg = yaml.safe_load(open('orb.yaml'))
+        # ORB has its own OrderStreamWatcher on the paper account — order events
+        # are account-specific (unlike market data). Must be started separately.
+        orb_order_stream = None
+        try:
+            orb_order_stream = OrderStreamWatcher(
+                api_key=config.alpaca_orb_api_key,
+                api_secret=config.alpaca_orb_api_secret,
+                paper=orb_alpaca.is_paper,
+                alpaca_client=orb_alpaca,
+            )
+            orb_order_stream.start()
+            logger.info("ORB OrderStreamWatcher STARTED — paper account")
+        except Exception as e:
+            logger.warning(f"ORB OrderStreamWatcher failed to start: {e}")
+            orb_order_stream = None
+        orb_engine = ORBEngine(
+            alpaca_client=orb_alpaca, db=db, notifier=notifier,
+            config=orb_cfg, stop_monitor=stop_monitor,
+            order_stream=orb_order_stream,
+        )
+        if stop_monitor is not None and not stop_monitor.polling_mode:
+            orb_engine.register_on_stop_monitor()
+            logger.info("ORB: bar handler registered on shared StopMonitor")
+        # Restart-safe: rehydrate any open ORB positions on the paper account.
+        orb_engine.sync_positions()
+        logger.info(
+            f"ORB strategy ENABLED — "
+            f"master_flag={orb_engine.enabled}, dry_run={orb_engine.dry_run}"
+        )
+
     mode_label = "paper" if alpaca.is_paper else "LIVE"
     strategies = []
     if enable_flag:
         strategies.append("Bull Flag")
     if enable_macd:
         strategies.append("MACD Wave")
+    if enable_orb and orb_engine is not None:
+        strategies.append("ORB (paper)")
     logger.info(f"Trading mode ACTIVE — {mode_label}, strategies: {', '.join(strategies)}")
 
     # Fix 4: Graceful shutdown via SIGTERM/SIGINT
@@ -399,6 +495,8 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
         shutdown_event.set()
         if macd_engine:
             macd_engine.shutdown_requested = True
+        if orb_engine:
+            orb_engine.shutdown_requested = True
 
     signal.signal(signal.SIGTERM, handle_shutdown)
     signal.signal(signal.SIGINT, handle_shutdown)
@@ -417,6 +515,7 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
         notifier=notifier,
         shutdown_event=shutdown_event,
         macd_engine=macd_engine,
+        orb_engine=orb_engine,
     )
 
     # Enable async news classification (non-blocking LLM calls)
@@ -533,7 +632,8 @@ def main() -> None:
 
     if args.scan:
         run_scan(config, verbose=args.verbose, trade=args.trade,
-                 enable_flag=args.flag, enable_macd=args.macd)
+                 enable_flag=args.flag, enable_macd=args.macd,
+                 enable_orb=args.orb)
 
     if args.test_cycle:
         run_test_cycle(config, trade=args.trade)

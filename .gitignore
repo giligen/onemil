@@ -50,3 +50,14 @@ htmlcov/
 
 # Claude
 .claude/
+
+# Research data (heavy — L2 depth dumps, PDFs, HTML, backtest CSV dumps)
+research/l2_full_trades/
+research/l2_march/
+research/literature/
+research/*.pdf
+research/*.html
+research/1011.6402
+analysis_results/
+backtest_results_*.csv
+macd_wave_results*.csv

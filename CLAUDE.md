@@ -136,9 +136,12 @@ mock_order = MagicMock()  # Alpaca Order object, OK without spec
 ### 4. Use conftest.py Fixtures
 Pre-configure fixtures with spec= in `tests/conftest.py`.
 
-# Two Trading Services
+# Three Trading Strategies (one systemd service: `onemil-trader`)
 
-## Service 1: Bull Flag (`onemil-trader`)
+Bull flag, MACD wave, and ORB all run as modules inside `main.py` under the
+`onemil-trader` service. Each is toggled via CLI flags: `--flag`, `--macd`, `--orb`.
+
+## Strategy 1: Bull Flag (`onemil-trader`)
 ```bash
 sudo systemctl status onemil-trader      # Check status
 sudo systemctl restart onemil-trader     # Restart
@@ -202,7 +205,7 @@ journalctl -u onemil-trader -f           # Live logs
 - Rollback: `git revert` the ship commit (single commit flips all 6 yaml values + 2 function signatures back). Or manual YAML revert of `strong_pos/neg_multiplier` to 1.5, `v_reversal_bonus.bonus` to 0.4, delete `extras_tier` block.
 - Full details in README.md "Per-tier MACD zone scaling (S2-max)" section.
 
-## Service 2: MACD Wave (`onemil-macd-wave`)
+## Strategy 2: MACD Wave (in `onemil-trader`)
 ```bash
 sudo systemctl status onemil-macd-wave   # Check status
 sudo systemctl restart onemil-macd-wave  # Restart
@@ -215,8 +218,66 @@ journalctl -u onemil-macd-wave -f        # Live logs
 - Config: `macd_wave.yaml` (validated filters: $15-30, cross<3m, MACD≥0.5%, vol<300K, 2% stop)
 - Logs: `logs/macd_wave.log`
 - Telegram: messages prefixed with `[MACD Wave]`
-- DB: trades table has `strategy` column ('bull_flag' or 'macd_wave')
+- DB: trades table has `strategy` column ('bull_flag', 'macd_wave', or 'orb')
 - Universe: self-built at 8:30 AM ET each day from Alpaca snapshots (no pre-build needed)
+
+## Strategy 3: ORB — Opening Range Breakout (added 2026-04-19, OFF by default)
+
+```bash
+sudo systemctl restart onemil-trader           # Must restart after config change
+journalctl -u onemil-trader | grep "\[ORB\]"   # Monitor ORB-specific logs
+```
+
+Runs as a module inside `onemil-trader`. Fires at 9:35 ET on gap-up stocks that
+break above their first 5-min opening range high. Validated full-timeline Calmar
+15.68x on Jan'25-Apr'26 (see `study_orb_*.py` + `analysis_results/`).
+
+**Enable**:
+1. Set `ALPACA_ORB_API_KEY` + `ALPACA_ORB_API_SECRET` in `.env` (separate paper account in Phase 1)
+2. Flip `strategy.enabled: true` in `orb.yaml`
+3. Add `--orb` CLI flag to the service command (systemd unit file)
+4. Restart service
+
+**Architecture**:
+- Separate paper `AlpacaClient` for order execution (Phase 1)
+- SHARED `StopMonitor` routes exit orders to ORB via `alpaca_clients_by_strategy={'orb': orb_paper_client}` — uses main-account WebSocket for market data (free, account-agnostic) but ORB-account client for order submission
+- Separate `OrderStreamWatcher` for ORB's order events
+- Shared DB with `strategy='orb'` tag
+- `[ORB]` Telegram prefix
+
+**Entry mechanics**:
+- Pre-placed **stop-limit buy** at `range_high × (1 + 30bps)` at 9:35 ET, auto-cancel after 60min
+- 7-feature composite z-score filter (threshold ≥ 0.0, TRAIN-fit params in `orb.yaml`)
+- Q4-preferred ranking, then composite DESC
+- Family + super-group dedup (14 families, 91 symbols, `lev_short`/`lev_long` super-groups)
+- Max 4 concurrent positions, per-pos cap $25K ($100K budget / 4)
+- Risk-parity sizing: $3K risk/trade, applied adaptive quintile mult (Q5 capped at 1.5x — anti-overfit)
+- Spread gate: skip entries with spread > 150bps + Telegram warning
+
+**Exit mechanics**:
+- Initial stop: `range_low`
+- **Static lock**: after price touches +1.5R, stop moves to +1R forever (no trailing). StopMonitor has new `lock_arm_at_r` + `lock_stop_r` fields on WatchEntry.
+- No fixed target: hold until stop/lock hit OR 15:45 ET force close
+
+**Feature flag + rollback**:
+- Master kill switch: `strategy.enabled` in `orb.yaml` (default `false`)
+- Runtime disable: flip to `false` + restart. Existing positions force-close on shutdown. Bull flag + MACD wave unaffected (separate accounts/tags).
+
+**Monitoring**:
+- `journalctl -u onemil-trader | grep '\[ORB\]'` for entries/exits/skips
+- `journalctl -u onemil-trader | grep 'LOCK ARMED'` for lock-state transitions
+- DB queries: `db.get_open_trades(today, strategy='orb')`
+
+**Rollout phases (as of 2026-04-19)**:
+- Phase 0: code merged, `enabled: false` — no trades
+- Phase 1: paper account, `enabled: true`, risk=$3K — 1 week monitor
+- Phase 2: live small, risk=$1K — 1 week monitor
+- Phase 3: live full, risk=$3K
+
+**Do NOT**:
+- Enable with `ALPACA_ORB_API_KEY` empty — main.py will warn + disable
+- Refit z-score / quintile / adaptive params without running `study_orb_refit.py` first (quarterly cadence)
+- Remove Q5 cap from `orb.yaml::adaptive_mults.Q5: 1.5` — it's the anti-overfit guard
 
 # Running Backtests
 

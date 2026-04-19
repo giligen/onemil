@@ -1,0 +1,145 @@
+# ORB (Opening Range Breakout) Strategy Configuration
+# Third strategy, runs alongside bull flag + MACD wave in main.py process.
+# Fires at 9:35 ET on gap-up movers breaking the first 5-minute range high.
+#
+# Validated Jan'25-Apr'26 through defended pipeline:
+#   Full-timeline P&L: $+239,853
+#   Full-timeline DD:  $-15,299
+#   Calmar: 15.68x
+#   Trade WR: 51.4%  Daily WR: 55.3%
+#   Source: study_orb_*.py, show_q1_2025_static_lock.py, test_eod_time.py
+
+strategy:
+  name: orb
+  enabled: true           # MASTER KILL SWITCH. Restart to flip.
+
+# Universe — BT-parity criteria (study_orb_broad.py::load_broad_universe):
+# gap >= 5%, prev-day volume >= 500K, price $3-30.
+# Applied via build_orb_universe_from_snapshots() on scanner-qualified candidates.
+# Strategy: scanner provides a broad pool (its own bull-flag criteria), then ORB
+# filters that pool down via its own criteria. Matches BT universe closely.
+universe:
+  source: alpaca_snapshots  # 'alpaca_snapshots' (BT-parity) | 'scanner_qualified' (legacy)
+  min_price: 3.0
+  max_price: 30.0
+  min_gap_pct: 5.0
+  min_prev_volume: 500000
+
+# Entry — 5-min opening range breakout.
+# Trigger mode: TOUCH (bar high > range_high). Production = pre-placed stop-limit buy.
+entry:
+  range_minutes: 5          # 9:30-9:35 ET range window
+  entry_mode: touch         # 'touch' | 'close_above'
+  entry_slip_bps: 30        # calibrated from bull flag live data; measured in Phase 1
+  time_stop_minutes: 60     # cancel unfilled buy-stop at 10:35 ET
+  max_spread_bps: 150       # skip entry + telegram warning if (ask-bid)/price > 150bps
+  stop_limit_buffer_bps: 30 # stop-limit buy: limit = range_high × (1 + buffer/10000)
+
+# Composite filter — 7-feature signed z-score, threshold >= 0.
+# Params baked from H1 2025 TRAIN fit (1090 trades). Refit quarterly via study_orb_refit.py.
+filter:
+  threshold: 0.0
+  features:
+    gap_pct:
+      sign: -1              # lower gap = better
+      mean: 187.905162
+      std: 1749.630103
+    range_total_volume:
+      sign: -1              # lower early volume = less exhausted
+      mean: 1032481.678899
+      std: 2236111.090560
+    range_avg_bar_range_pct:
+      sign: -1              # narrower bars = better breakout
+      mean: 2.481485
+      std: 1.721792
+    range_size_pct:
+      sign: -1              # tighter 5-min range = cleaner continuation
+      mean: 6.304430
+      std: 4.482915
+    price_vs_20d_high_pct:
+      sign: -1              # further from 20d high = fresher
+      mean: 26.814918
+      std: 339.841711
+    prev_day_close_position:
+      sign: -1              # prev closed low in range = less tired
+      mean: 0.488915
+      std: 0.303208
+    range_close_position:
+      sign: +1              # close high in range = real momentum
+      mean: 0.580629
+      std: 0.303179
+
+# Quintile cutoffs on composite score (H1 2025 TRAIN kept, n=670).
+# Used to assign Q1-Q5 bucket → feed adaptive mult.
+quintile_cutoffs: [0.1082, 0.1959, 0.2893, 0.4081]
+
+# Adaptive position-size multipliers per quintile (H1 2025 TRAIN fit).
+# Q5 CAPPED at 1.5x to prevent over-sizing on extreme z-scores (Split A anomaly).
+# Without cap: Q5 raw was 2.462x — empirically overfit.
+adaptive_mults:
+  Q1: 0.830
+  Q2: 0.266
+  Q3: 0.496
+  Q4: 0.946
+  Q5: 1.500    # CAPPED at 1.5 (raw 2.462 pre-cap)
+
+# Ranking — Q4-preferred, then composite DESC.
+# Q4 empirically best bucket across all 3 walk-forward splits.
+ranking:
+  order: [Q4, Q5, Q3, Q2, Q1]   # Q4 first, Q5 second, ...
+
+# Correlation dedup — at most 1 pick per family AND 1 per super-group per day.
+# Family + super-group definitions live in trading/orb_correlation.py (data module).
+dedup:
+  by_family: true
+  by_super_group: true
+
+# Sizing — risk-parity within per-position cap.
+sizing:
+  account_budget_usd: 100000    # ORB's carved pool (shared account later)
+  max_concurrent: 4             # top-N picks per day
+  risk_per_trade_usd: 3000      # validated value; lower to $1000 for Phase 2 live ramp
+  min_stop_pct: 1.0             # floor on stop distance (% of entry) to prevent inf sizing
+  old_position_reference_usd: 50000  # BT base for _rp_scale math — do not change
+
+# Exit — static_lock_1R pattern.
+# Initial stop = range_low. After price touches +1.5R, stop pinned at +1R (never moves).
+# No hard target — hold to force_close or lock exit if price retraces.
+exit:
+  stop_mode: range_low
+  lock_arm_at_r: 1.5            # arm lock when bar high reaches entry + 1.5 * range_size
+  lock_stop_r: 1.0              # stop level after lock armed (entry + 1R)
+  force_close_time_et: "15:45"  # matches bull flag + MACD wave policy
+  exit_slip_bps: 10             # calibrated from live exit telemetry
+
+# Safety-net bracket stop-loss sent to Alpaca (wide, backup if service crashes).
+# Real stop is monitored client-side via StopMonitor; this fires only in disaster cases.
+safety_net:
+  sl_pct: 0.10                  # 10% below entry — wider than MACD's 5% because ORB stops are wider
+
+# Risk management
+risk:
+  daily_loss_limit_usd: -5000   # once hit, skip new entries for the day
+  max_consecutive_losing_days: 0  # 0 = disabled (we tested and it didn't help on OOS)
+
+# Cross-strategy conflict: FCFS — skip if any strategy has symbol open today.
+conflict:
+  skip_if_any_strategy_has_symbol: true
+
+# Telegram notifications
+notifications:
+  telegram:
+    prefix: "[ORB]"
+    notify_on_startup: true
+    notify_on_entry: true
+    notify_on_exit: true
+    notify_on_spread_skip: true      # warn when we skip due to > max_spread_bps
+    notify_on_capital_exhausted: true
+    notify_on_daily_loss_limit: true
+    notify_on_filter_skip: false     # too noisy — most candidates don't qualify
+    notify_on_force_close: true
+
+# Slippage model for reference (matches BT assumptions). Production uses entry_slip_bps + exit_slip_bps above.
+slippage:
+  entry_pct: 0.003   # 30bps — validate in Phase 1 paper
+  exit_pct: 0.001    # 10bps — validate in Phase 1 paper
