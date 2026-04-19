@@ -205,6 +205,22 @@ journalctl -u onemil-trader -f           # Live logs
 - Rollback: `git revert` the ship commit (single commit flips all 6 yaml values + 2 function signatures back). Or manual YAML revert of `strong_pos/neg_multiplier` to 1.5, `v_reversal_bonus.bonus` to 0.4, delete `extras_tier` block.
 - Full details in README.md "Per-tier MACD zone scaling (S2-max)" section.
 
+### Feature flag: regime-aware sizing (Phase 1.4b, shipped 2026-04-18, **default-on**)
+- Config key: `trading.regime_sizing.enabled`
+- Default: `true` (shipping ON). Set to `false` to revert to pre-regime S2-max behavior (byte-identical via `_get_regime_for_date` short-circuit when disabled).
+- Classifies each trading day as A/B/C1/C2 from SPY T-1 features (vol_20_ann, above_sma_50, sma_50_slope_10d). Applies per-regime mult on top of conviction × macd_zone.
+  - **A** (Clean Bull: above SMA, vol<22%) → 1.25×
+  - **B** (Volatile: vol≥22%) → 1.00×
+  - **C1** (True Defensive: below SMA, slope≤+0.15%) → 1.50×
+  - **C2** (Shallow-dip-in-uptrend: below SMA, slope>+0.15%) → **0.00× (skip)**
+- BT: **+$28,470 on Jan 2025 → Apr 17 2026 (+34% lift)**. Feb 2026 drawdown flips −$1,159 → +$1,570. Full monthly breakdown: `research/scripts/monthly_regime_report.py`.
+- All 3 CV splits positive (TRAIN +$6K, VAL +$6.1K, HOQ1 +$15.2K). MDD unchanged ($18.5K — Apr 2025 DD was all B-regime, mult=1.0).
+- Shared module: `trading/regime_helpers.py` — imported by both `backtest.py` (`_get_regime_for_date` + sizing stack) and `trading/trading_engine.py` (`_get_today_regime` + sizing stack). Parity by construction; enforced by `tests/test_regime_sizing_parity.py` (23 tests).
+- PROD classifier runs once per ET date at first trade attempt — fetches ~100 calendar days of SPY daily bars via `alpaca.get_daily_bars_range(['SPY'], today-100, today-1)`, classifies last row. Cached per-day; error path caches `'unknown'` (mult 1.0, no trade effect).
+- Monitor: `journalctl -u onemil-trader -f | grep REGIME` — one line per day ("REGIME today=YYYY-MM-DD classified as X") + one per trade that scales ("SYM: REGIME C1 mult=1.50 → shares A→B") or skips ("SYM: REGIME C2 skip — no trade").
+- Rollback: flip `trading.regime_sizing.enabled: false` + `sudo systemctl restart onemil-trader` (pure config flip, zero state to unwind).
+- Known cost: Jan 2025 lost $2,534 because 21/24 trades were C2-skipped on profitable days — C1/C2 threshold is a global optimum; accepts individual-month variance.
+
 ## Strategy 2: MACD Wave (in `onemil-trader`)
 ```bash
 sudo systemctl status onemil-macd-wave   # Check status

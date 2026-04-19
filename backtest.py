@@ -1045,6 +1045,34 @@ class BacktestRunner:
                 f"slow_pole>{self.qf_slow_pole_max_bars}bars/<{self.qf_slow_pole_min_gain}%"
             )
 
+        # Regime-aware sizing (Phase 1.4b ship, 2026-04-18). Classifies each
+        # trading day A/B/C1/C2 from SPY T-1 features; applies per-regime
+        # multiplier ON TOP of macd_zone * conviction sizing. C2 regime (shallow
+        # dip in uptrend) → multiplier 0 → skip trade. Shared classifier with
+        # PROD via trading/regime_helpers.py (parity by construction).
+        _regime_cfg_dict = trading_cfg.get("regime_sizing", {}) or {}
+        _regime_mults_raw = _regime_cfg_dict.get("multipliers", {}) or {}
+        self.regime_sizing_enabled = bool(_regime_cfg_dict.get("enabled", False))
+        self.regime_vol_threshold = float(_regime_cfg_dict.get("vol_threshold_pct", 22.0))
+        self.regime_slope_threshold = float(_regime_cfg_dict.get("slope_threshold_pct", 0.15))
+        self.regime_multipliers: Dict[str, float] = {
+            "A":  float(_regime_mults_raw.get("A",  1.0)),
+            "B":  float(_regime_mults_raw.get("B",  1.0)),
+            "C1": float(_regime_mults_raw.get("C1", 1.0)),
+            "C2": float(_regime_mults_raw.get("C2", 1.0)),
+        }
+        self._regime_by_date: Dict[str, str] = {}   # lazily built on first use
+        self._regime_lookup_built = False
+        if self.regime_sizing_enabled:
+            logger.info(
+                f"Regime sizing: vol>={self.regime_vol_threshold}%=B, "
+                f"slope>{self.regime_slope_threshold}%→C2, "
+                f"mults A={self.regime_multipliers['A']} "
+                f"B={self.regime_multipliers['B']} "
+                f"C1={self.regime_multipliers['C1']} "
+                f"C2={self.regime_multipliers['C2']} (0=skip)"
+            )
+
         # Conviction scoring: scale position size based on setup quality
         conv_cfg = trading_cfg.get("conviction_scoring", {})
         self.conviction_enabled = bool(conv_cfg.get("enabled", False))
@@ -1219,6 +1247,60 @@ class BacktestRunner:
             return None
         typical_prices = (highs + lows + closes) / 3.0
         return float((typical_prices * volumes).sum() / cum_vol)
+
+    def _get_regime_for_date(self, date_str: str) -> str:
+        """Return the Phase 1.4b regime label ('A'/'B'/'C1'/'C2'/'unknown')
+        for a trading date, using SPY features from the PREVIOUS session.
+
+        Lazily builds the full {date → regime} lookup on first call from
+        SPY daily bars in the SQLite cache. Returns 'disabled' when the
+        feature flag is off (caller treats as multiplier=1.0, no skip).
+        """
+        if not self.regime_sizing_enabled:
+            return 'disabled'
+        if not self._regime_lookup_built:
+            import sqlite3
+            from trading.regime_helpers import build_regime_lookup
+
+            db_path = self._db_path or "data/cache.db"
+            try:
+                conn = sqlite3.connect(db_path)
+                spy = pd.read_sql_query(
+                    "SELECT bar_date, close FROM daily_bars "
+                    "WHERE symbol='SPY' ORDER BY bar_date",
+                    conn,
+                )
+                conn.close()
+            except Exception as exc:
+                logger.error(
+                    f"Regime sizing: SPY bar load from {db_path} failed "
+                    f"({exc!r}) — disabling regime sizing for this run."
+                )
+                self.regime_sizing_enabled = False
+                self._regime_lookup_built = True
+                return 'disabled'
+
+            if spy is None or spy.empty:
+                logger.warning(
+                    "Regime sizing enabled but daily_bars has no SPY rows — "
+                    "disabling regime sizing for this run."
+                )
+                self.regime_sizing_enabled = False
+                self._regime_lookup_built = True
+                return 'disabled'
+
+            spy['bar_date'] = pd.to_datetime(spy['bar_date'])
+            self._regime_by_date = build_regime_lookup(
+                spy,
+                vol_threshold_pct=self.regime_vol_threshold,
+                slope_threshold_pct=self.regime_slope_threshold,
+            )
+            self._regime_lookup_built = True
+            logger.info(
+                f"Regime sizing: classified {len(self._regime_by_date)} "
+                f"SPY trading days (lookup built from {len(spy)} bars)."
+            )
+        return self._regime_by_date.get(date_str, 'unknown')
 
     def _load_spy_bars(self, trade_date: str) -> Optional[pd.DataFrame]:
         """Load SPY 1-min bars for a date, with caching."""
@@ -2599,6 +2681,44 @@ class BacktestRunner:
                             risk_reward_ratio=plan.risk_reward_ratio,
                             shares=scaled_shares,
                             total_risk=plan.risk_per_share * scaled_shares,
+                            pattern=plan.pattern,
+                        )
+
+                # Regime-aware sizing (Phase 1.4b): C2 regime skips; A/C1 boost.
+                # Stacks multiplicatively on top of MACD zone scaling (above).
+                if self.regime_sizing_enabled:
+                    from trading.regime_helpers import get_regime_multiplier
+                    # Match the idiom used elsewhere in BT (e.g., line 2311):
+                    # timestamp may be a column OR the DataFrame index.
+                    _trade_date = str(
+                        bars.iloc[i].get('timestamp', bars.iloc[i].name)
+                    )[:10]
+                    _regime = self._get_regime_for_date(_trade_date)
+                    _regime_mult = get_regime_multiplier(_regime, self.regime_multipliers)
+                    if _regime_mult == 0.0:
+                        logger.info(
+                            f"  REGIME {_regime} skip ({_trade_date}) — no trade"
+                        )
+                        continue
+                    if _regime_mult != 1.0:
+                        _reg_max = int(
+                            self.planner.max_shares * _applied_macd_zone * _regime_mult
+                        )
+                        _reg_shares = min(_reg_max, max(1, int(plan.shares * _regime_mult)))
+                        logger.info(
+                            f"  REGIME {_regime} mult={_regime_mult:.2f} "
+                            f"({_trade_date}) → shares {plan.shares} → {_reg_shares}"
+                        )
+                        plan = TradePlan(
+                            symbol=plan.symbol,
+                            entry_price=plan.entry_price,
+                            stop_loss_price=plan.stop_loss_price,
+                            take_profit_price=plan.take_profit_price,
+                            risk_per_share=plan.risk_per_share,
+                            reward_per_share=plan.reward_per_share,
+                            risk_reward_ratio=plan.risk_reward_ratio,
+                            shares=_reg_shares,
+                            total_risk=plan.risk_per_share * _reg_shares,
                             pattern=plan.pattern,
                         )
 

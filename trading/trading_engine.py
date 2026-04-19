@@ -227,6 +227,35 @@ class TradingEngine:
                 f"slow_pole>{self.qf_slow_pole_max_bars}bars/<{self.qf_slow_pole_min_gain}%"
             )
 
+        # Regime-aware sizing (Phase 1.4b ship, 2026-04-18). Classifies the
+        # current trading day A/B/C1/C2 from SPY T-1 features; applies per-regime
+        # multiplier ON TOP of macd_zone * conviction sizing. C2 regime (shallow
+        # dip in uptrend) → multiplier 0 → skip trade. Shared classifier with
+        # backtest.py via trading/regime_helpers.py (parity by construction).
+        _regime_cfg_raw = _cfg.get("trading", {}).get("regime_sizing", {}) or {}
+        _regime_mults_raw = _regime_cfg_raw.get("multipliers", {}) or {}
+        self.regime_sizing_enabled = bool(_regime_cfg_raw.get("enabled", False))
+        self.regime_vol_threshold = float(_regime_cfg_raw.get("vol_threshold_pct", 22.0))
+        self.regime_slope_threshold = float(_regime_cfg_raw.get("slope_threshold_pct", 0.15))
+        self.regime_multipliers: Dict[str, float] = {
+            "A":  float(_regime_mults_raw.get("A",  1.0)),
+            "B":  float(_regime_mults_raw.get("B",  1.0)),
+            "C1": float(_regime_mults_raw.get("C1", 1.0)),
+            "C2": float(_regime_mults_raw.get("C2", 1.0)),
+        }
+        # Per-trading-day cache — classify at first use each day, reuse all day.
+        self._regime_cache_date: Optional[date] = None
+        self._regime_cache_value: str = 'unknown'
+        if self.regime_sizing_enabled:
+            logger.info(
+                f"Regime sizing: vol>={self.regime_vol_threshold}%=B, "
+                f"slope>{self.regime_slope_threshold}%→C2, "
+                f"mults A={self.regime_multipliers['A']} "
+                f"B={self.regime_multipliers['B']} "
+                f"C1={self.regime_multipliers['C1']} "
+                f"C2={self.regime_multipliers['C2']} (0=skip)"
+            )
+
         # Conviction scoring: scale position size by setup quality
         conv_cfg = _cfg.get("trading", {}).get("conviction_scoring", {})
         self.conviction_enabled = bool(conv_cfg.get("enabled", False))
@@ -785,6 +814,60 @@ class TradingEngine:
         except Exception as e:
             logger.warning(f"Failed to refresh SPY MACD: {e}")
             self._spy_macd_cache = None
+
+    def _get_today_regime(self) -> str:
+        """Return the Phase 1.4b regime label ('A'/'B'/'C1'/'C2'/'unknown')
+        for today's trading session, using SPY features from YESTERDAY's close.
+
+        Cached once per ET calendar date — first call of the day triggers
+        an Alpaca fetch of ~100 calendar days of SPY daily bars (enough
+        warmup for the 50-day SMA), subsequent calls reuse the cached label.
+
+        Safe behavior on any failure: return 'unknown' (downstream mult=1.0,
+        no trade effect). Never silently amps size or skips everything.
+        """
+        if not self.regime_sizing_enabled:
+            return 'disabled'
+        today_et = datetime.now(ET).date()
+        if self._regime_cache_date == today_et:
+            return self._regime_cache_value
+
+        try:
+            from trading.regime_helpers import (
+                compute_regime_features, classify_regime)
+            # ~100 calendar days ≈ 69 trading days; need 50 for SMA warmup +
+            # 10 for slope + 20 for vol. Extra buffer absorbs holidays.
+            start = today_et - timedelta(days=100)
+            end = today_et - timedelta(days=1)
+            bars_by_symbol = self.alpaca.get_daily_bars_range(['SPY'], start, end)
+            rows = bars_by_symbol.get('SPY') or []
+            if not rows:
+                raise RuntimeError("Alpaca returned zero SPY daily bars")
+            spy = pd.DataFrame(rows)
+            # get_daily_bars_range returns column 'date'; helper expects 'bar_date'.
+            if 'bar_date' not in spy.columns and 'date' in spy.columns:
+                spy = spy.rename(columns={'date': 'bar_date'})
+            spy['bar_date'] = pd.to_datetime(spy['bar_date'])
+            feats = compute_regime_features(spy)
+            last = feats.iloc[-1]
+            above = last['above_sma_50']
+            regime = classify_regime(
+                float(last['vol_20_ann']) if not pd.isna(last['vol_20_ann']) else None,
+                None if pd.isna(above) else bool(above),
+                float(last['sma_50_slope_10d']) if not pd.isna(last['sma_50_slope_10d']) else None,
+                self.regime_vol_threshold, self.regime_slope_threshold,
+            )
+        except Exception as exc:
+            logger.error(
+                f"Regime classification failed for {today_et} ({exc!r}) — "
+                f"defaulting to 'unknown' (multiplier 1.0, no trade effect)."
+            )
+            regime = 'unknown'
+
+        self._regime_cache_date = today_et
+        self._regime_cache_value = regime
+        logger.info(f"REGIME today={today_et} classified as {regime}")
+        return regime
 
     def _is_spy_macd_cutoff_blocked(self) -> bool:
         """
@@ -2858,6 +2941,7 @@ class TradingEngine:
         # Dead zone = garbage setups (30% WR) → reject regardless of tier
         # Scaling skipped when risk tier active (don't compound 3x * 1.5x = 4.5x)
         # Pass intraday_change_pct for tier-aware multiplier (A-tier vs Extras).
+        _applied_macd_zone = 1.0
         if self.macd_zones_enabled:
             _max_ic_for_macd = self._qualified_max_intraday.get(symbol) or 0.0
             zone_mult = self._get_macd_zone_multiplier(
@@ -2867,6 +2951,7 @@ class TradingEngine:
                 logger.info(f"{symbol}: MACD zone SKIP (dead zone)")
                 return None
             elif zone_mult != 1.0 and risk_multiplier <= 1.0:
+                _applied_macd_zone = zone_mult
                 max_sh = int(self.planner.max_shares * zone_mult)
                 scaled_shares = min(max_sh, max(1, int(plan.shares * zone_mult)))
                 logger.info(f"{symbol}: MACD zone {zone_mult}x → shares {plan.shares} → {scaled_shares}")
@@ -2880,6 +2965,37 @@ class TradingEngine:
                     risk_reward_ratio=plan.risk_reward_ratio,
                     shares=scaled_shares,
                     total_risk=plan.risk_per_share * scaled_shares,
+                    pattern=plan.pattern,
+                )
+
+        # Regime-aware sizing (Phase 1.4b): C2 regime skips; A/C1 boost.
+        # Stacks multiplicatively on top of MACD zone scaling (above).
+        if self.regime_sizing_enabled:
+            from trading.regime_helpers import get_regime_multiplier
+            _regime = self._get_today_regime()
+            _regime_mult = get_regime_multiplier(_regime, self.regime_multipliers)
+            if _regime_mult == 0.0:
+                logger.info(f"{symbol}: REGIME {_regime} skip — no trade")
+                return None
+            if _regime_mult != 1.0:
+                _reg_max = int(
+                    self.planner.max_shares * _applied_macd_zone * _regime_mult
+                )
+                _reg_shares = min(_reg_max, max(1, int(plan.shares * _regime_mult)))
+                logger.info(
+                    f"{symbol}: REGIME {_regime} mult={_regime_mult:.2f} "
+                    f"→ shares {plan.shares} → {_reg_shares}"
+                )
+                plan = TradePlan(
+                    symbol=plan.symbol,
+                    entry_price=plan.entry_price,
+                    stop_loss_price=plan.stop_loss_price,
+                    take_profit_price=plan.take_profit_price,
+                    risk_per_share=plan.risk_per_share,
+                    reward_per_share=plan.reward_per_share,
+                    risk_reward_ratio=plan.risk_reward_ratio,
+                    shares=_reg_shares,
+                    total_risk=plan.risk_per_share * _reg_shares,
                     pattern=plan.pattern,
                 )
 

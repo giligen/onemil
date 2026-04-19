@@ -128,6 +128,21 @@ trading:
     euphoria_filter: false             # Disabled — replaced by UD risk scaling (half size, not skip)
     euphoria_ud_threshold: 1.2
     euphoria_rsi_threshold: 60.0
+  # Regime-aware sizing (Phase 1.4b ship, 2026-04-18). Classifies each
+  # trading day into A/B/C1/C2 using SPY features (vol_20, above_sma_50,
+  # sma_50_slope_10d) from T-1 close. Applies per-regime sizing mult on
+  # top of conviction × macd_zone. Grid winner validated +$27,321 across
+  # 2025+Q1 2026 (TRAIN/VAL/HOQ1 all positive). Feb 2026 flips from −$1,159
+  # to +$483 via C2-skip. See research/regime_*.md.
+  regime_sizing:
+    enabled: true
+    vol_threshold_pct: 22.0         # B-regime when vol_20_ann >= this
+    slope_threshold_pct: 0.15       # C1 if slope_10d <= this, else C2
+    multipliers:
+      A: 1.25
+      B: 1.00
+      C1: 1.50
+      C2: 0.00                      # skip (shallow dip in uptrend)
   # UD risk scaling: when SPY 10-day up/down volume ratio > threshold,
   # reduce position size to ud_scale_factor (0.5 = half size).
   # Replaces binary euphoria skip — keeps trades at reduced risk.

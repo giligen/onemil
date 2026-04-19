@@ -549,6 +549,33 @@ class Config:
         }
 
     @property
+    def regime_sizing_cfg(self) -> dict:
+        """Regime-aware sizing config (Phase 1.4b ship, 2026-04-18).
+
+        Classifies each trading day A/B/C1/C2 from SPY T-1 features, then
+        multiplies final shares by the per-regime multiplier (stacking on
+        top of conviction × macd_zone). Default disabled. Loaded from
+        `trading.regime_sizing`. Passed to `trading.regime_helpers`.
+
+        Returns {enabled, vol_threshold_pct, slope_threshold_pct,
+        multipliers: {A, B, C1, C2}}. Unknown regime or flag-off →
+        multiplier 1.0 downstream (no boost, no skip).
+        """
+        cfg = self._get_yaml("trading", "regime_sizing", default={}) or {}
+        mults_raw = cfg.get("multipliers") or {}
+        return {
+            "enabled": bool(cfg.get("enabled", False)),
+            "vol_threshold_pct": float(cfg.get("vol_threshold_pct", 22.0)),
+            "slope_threshold_pct": float(cfg.get("slope_threshold_pct", 0.15)),
+            "multipliers": {
+                "A":  float(mults_raw.get("A",  1.0)),
+                "B":  float(mults_raw.get("B",  1.0)),
+                "C1": float(mults_raw.get("C1", 1.0)),
+                "C2": float(mults_raw.get("C2", 1.0)),
+            },
+        }
+
+    @property
     def two_tier_filter_cfg(self) -> dict:
         """Full two-tier filter config dict (threshold, cap, feature params).
 
