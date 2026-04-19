@@ -80,14 +80,19 @@ filter:
 # Used to assign Q1-Q5 bucket → feed adaptive mult.
 quintile_cutoffs: [0.1082, 0.1959, 0.2893, 0.4081]
 
-# Adaptive position-size multipliers per quintile (H1 2025 TRAIN fit).
-# Q5 CAPPED at 1.5x to prevent over-sizing on extreme z-scores (Split A anomaly).
-# Without cap: Q5 raw was 2.462x — empirically overfit.
+# Adaptive position-size multipliers per quintile — fit from H1 2025 TRAIN
+# using the SHIPPED static_lock_1R exit (not the old fixed +2R/-1R simulation
+# that produced the prior stale values).
+# Q5 CAPPED at 1.5x (raw 2.462); Q2/Q3 floored at MIN_MULT=0.25 (raw below).
+# Per-position impact: Q4 at 1.84x on a $25K cap → $46K Q4 position. Four Q4
+# picks could deploy $184K, exceeding the $100K declared budget (paper BP
+# is $200K so it fits, but this is the validated BT behavior — Q4 is the
+# alpha bucket and the pipeline leans into it).
 adaptive_mults:
-  Q1: 0.830
-  Q2: 0.266
-  Q3: 0.496
-  Q4: 0.946
+  Q1: 0.502
+  Q2: 0.250    # floored at MIN_MULT=0.25 (raw < 0.25)
+  Q3: 0.250    # floored at MIN_MULT=0.25 (raw < 0.25)
+  Q4: 1.842    # primary alpha bucket — sized aggressively
   Q5: 1.500    # CAPPED at 1.5 (raw 2.462 pre-cap)
 
 # Ranking — Q4-preferred, then composite DESC.
