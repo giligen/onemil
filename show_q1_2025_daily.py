@@ -1,5 +1,11 @@
 """Day-by-day breakdown of Q1 2025 under the proposed ORB pipeline.
 
+⚠️  NOT PRODUCTION-PARITY — uses fixed +2R target / -1R stop from
+orb_features CSV. Shipped exit is static_lock_1R. Use
+show_q1_2025_static_lock.py for production-parity results.
+
+
+
 Shows for every trading day:
   - How many ORB signals fired (filtered)
   - Which 3 we picked (Q4-preferred)

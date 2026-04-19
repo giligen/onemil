@@ -148,7 +148,7 @@ class OrbTradePlanner:
         # BT-parity sizing: stop_pct relative to range_open (NOT entry_price).
         # Source: study_orb_100k_defended.py::apply_sizing uses
         #   stop_pct = range_size_pct = (range_high - range_low) / range_open × 100
-        # This is what BT validated on (Calmar 15.68x). PROD's earlier
+        # This is what BT validated on (Calmar 18.90x under static_lock_1R). PROD's earlier
         # (entry - range_low) / entry formula is mathematically more correct
         # for risk parity, but it produces different sizing on wide-range
         # trades, violating BT parity.

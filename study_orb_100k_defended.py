@@ -1,9 +1,26 @@
 #!/usr/bin/env python3
 """ORB $100K account sweep — WITH Q5 mult cap + family/super-group dedup.
 
-This is the integrated "production BT" version. Previously, study_orb_100k_account.py
-ran the sweep WITHOUT the Q5 cap and WITHOUT dedup (those lived in separate files).
-This file unifies them.
+⚠️  EXIT LOGIC MISMATCH — NOT PRODUCTION-PARITY  ⚠️
+This script reads `pnl` from analysis_results/orb_features_*.csv, which was
+generated with simulate_orb_trade(target_mult=2.0) — a FIXED +2R target /
+-1R stop exit. The SHIPPED engine uses static_lock_1R (orb.yaml::exit).
+Numbers from this script do NOT match live behavior.
+
+For production-parity results use:
+  * study_orb_pipeline_static_lock.py   (full timeline + monthly)
+  * study_orb_loser_dive_static_lock.py (per-trade MFE analysis)
+  * show_q1_2025_static_lock.py         (Q1 2025 day-by-day)
+
+This file stays as the HISTORICAL record of the sizing/dedup sweep that
+chose N=4 / risk=$3K. The relative ranking across (N, risk) combos is
+still informative even if absolute $ figures don't match the shipped exit.
+
+Defenses applied (each one validated in prior studies):
+  A. Risk-parity sizing: position = risk / stop_pct, capped at per-pos cap
+  B. Q5 adaptive-mult CAP at 1.5x (prevents Split A's anomalous TRAIN from over-sizing)
+  C. Family dedup (e.g., TSLA leveraged pair, MSTR leveraged pair)
+  D. Super-group dedup (lev_short, lev_long — cross-underlying directional correlation)
 
 Defenses applied (each one validated in prior studies):
   A. Risk-parity sizing: position = risk / stop_pct, capped at per-pos cap

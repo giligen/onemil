@@ -229,8 +229,16 @@ journalctl -u onemil-trader | grep "\[ORB\]"   # Monitor ORB-specific logs
 ```
 
 Runs as a module inside `onemil-trader`. Fires at 9:35 ET on gap-up stocks that
-break above their first 5-min opening range high. Validated full-timeline Calmar
-15.68x on Jan'25-Apr'26 (see `study_orb_*.py` + `analysis_results/`).
+break above their first 5-min opening range high. Validated full-timeline on
+Jan'25-Apr'26 with the shipped static_lock_1R exit (`study_orb_pipeline_static_lock.py`):
+**$+342,565 P&L, $-18,126 max DD (trough 2025-11-13), Calmar 18.90x, 1,001 trades,
+daily WR 56.6%, only 1 red month (Aug 2025 at $-9,288)**.
+
+⚠️  IMPORTANT: earlier docs cited `$+239,853 / Calmar 15.68x` — those came from
+scripts that read `orb_features_*.csv::pnl` directly. That CSV was generated with
+fixed +2R target / -1R stop exits, NOT the shipped `static_lock_1R`. The numbers
+above are production-parity. Use the `*_static_lock*.py` scripts for any new
+ORB analysis; the older ones have warning headers pointing to the shipped variants.
 
 **Enable**:
 1. Set `ALPACA_ORB_API_KEY` + `ALPACA_ORB_API_SECRET` in `.env` (separate paper account in Phase 1)

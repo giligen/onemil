@@ -1,5 +1,9 @@
 """Q1 2025 day-by-day under RECOMMENDED defended config.
 
+⚠️  NOT PRODUCTION-PARITY — see study_orb_100k_defended.py header.
+Uses fixed +2R target / -1R stop. Shipped exit is static_lock_1R.
+For production-parity Q1 2025: use show_q1_2025_static_lock.py.
+
 Config: N=4, risk=$3K, Q5 cap 1.5x, family+super-group dedup, $100K account.
 Per-position cap = $25K.
 

@@ -2,12 +2,19 @@
 # Third strategy, runs alongside bull flag + MACD wave in main.py process.
 # Fires at 9:35 ET on gap-up movers breaking the first 5-minute range high.
 #
-# Validated Jan'25-Apr'26 through defended pipeline:
-#   Full-timeline P&L: $+239,853
-#   Full-timeline DD:  $-15,299
-#   Calmar: 15.68x
-#   Trade WR: 51.4%  Daily WR: 55.3%
-#   Source: study_orb_*.py, show_q1_2025_static_lock.py, test_eod_time.py
+# Validated Jan'25-Apr'26 through defended pipeline (static_lock_1R exit —
+# what this engine actually ships with):
+#   Full-timeline P&L: $+342,565
+#   Full-timeline DD:  $-18,126   (trough 2025-11-13)
+#   Calmar:            18.90x
+#   Daily WR:          56.6%
+#   Trades:            1,001 on 309 trading days
+#   Negative months:   1 (Aug 2025, $-9,288)
+#   Source: study_orb_pipeline_static_lock.py (authoritative),
+#           show_q1_2025_static_lock.py, study_orb_loser_dive_static_lock.py
+# NOTE: Earlier headline numbers ($239,853 / Calmar 15.68x) came from scripts
+# that read orb_features_*.csv pnl directly — that CSV uses fixed +2R/-1R
+# exits, NOT static_lock_1R. Those scripts are marked with warning headers.
 
 strategy:
   name: orb
