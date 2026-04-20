@@ -621,21 +621,27 @@ class ORBEngine:
 
         ctx: Dict[str, dict] = {}
         try:
-            # Fetch ~25 daily bars (need 20d + T-1 + buffer)
-            # Preferred: self.alpaca.get_daily_bars([symbol], days=25) if available.
-            # Fallback: self.db.get_daily_bars(symbol, days=25) or similar.
+            # Fetch ~25 daily bars (need 20d + T-1 + buffer).
+            # Preferred: DB cache (populated by nightly universe build — fast + free).
+            # Fallback: alpaca.get_daily_bars_range (NB: plain get_daily_bars returns
+            # only a summary dict per symbol, NOT a bar list — don't use here).
             daily_bars = None
-            if hasattr(self.alpaca, 'get_daily_bars'):
+            start_d = (datetime.now(timezone.utc) - timedelta(days=40)).date()
+            end_d = (datetime.now(timezone.utc) - timedelta(days=1)).date()
+            if hasattr(self.db, 'get_daily_bars_cached'):
                 try:
-                    bars_dict = self.alpaca.get_daily_bars([symbol], days=25)
-                    daily_bars = bars_dict.get(symbol) if isinstance(bars_dict, dict) else None
+                    bulk = self.db.get_daily_bars_cached(
+                        [symbol], str(start_d), str(end_d))
+                    daily_bars = bulk.get(symbol) if isinstance(bulk, dict) else None
                 except Exception as e:
-                    logger.debug(f"ORB: alpaca.get_daily_bars({symbol}) failed: {e}")
-            if daily_bars is None and hasattr(self.db, 'get_daily_bars'):
+                    logger.debug(f"ORB: db.get_daily_bars_cached({symbol}) failed: {e}")
+            if not daily_bars and hasattr(self.alpaca, 'get_daily_bars_range'):
                 try:
-                    daily_bars = self.db.get_daily_bars(symbol, days=25)
+                    bulk = self.alpaca.get_daily_bars_range(
+                        [symbol], start_d, end_d)
+                    daily_bars = bulk.get(symbol) if isinstance(bulk, dict) else None
                 except Exception as e:
-                    logger.debug(f"ORB: db.get_daily_bars({symbol}) failed: {e}")
+                    logger.debug(f"ORB: alpaca.get_daily_bars_range({symbol}) failed: {e}")
 
             if not daily_bars:
                 self._feature_context_cache[symbol] = ctx
