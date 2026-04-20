@@ -765,14 +765,21 @@ class ORBEngine:
         if self._daily_loss_limit_hit():
             return []
 
+        # BT parity: pick top-K ONCE at 9:35, then no new entries ever.
+        #   (a) at most max_concurrent TOTAL entries per day
+        #   (b) at most 1 entry per symbol per day — even after an exit
+        # The in-memory counters (daily_n_placed, CandidateState.plan_submitted)
+        # are lost on restart, so rely on DB state as the source of truth.
+        # This was the bug on 2026-04-20: two mid-morning restarts wiped the
+        # in-memory flags → BMNZ/SKYQ re-entered after stopping out, and
+        # QBTZ/BATL slipped in as brand-new entries at 12:30 / 1:11 PM ET.
+        symbols_entered_today = self._symbols_entered_today_db()
+        if len(symbols_entered_today) >= self.max_concurrent:
+            return []  # daily cap exhausted (restart-safe via DB)
+
         # 1. Build candidate set
         eligible: List[CandidateState] = []
         cand_pool = symbols if symbols is not None else self.candidates.keys()
-        # BT parity: BT picks top-K ONCE at 9:35 (cumulative cap of K per day).
-        # Also check concurrent positions (pending + filled) — belt-and-suspenders
-        # if cancels somehow free up slots mid-day.
-        if self.daily_n_placed >= self.max_concurrent:
-            return []
         current_positions = len(self.open_positions)
         if current_positions >= self.max_concurrent:
             return []
@@ -784,6 +791,12 @@ class ORBEngine:
                 continue
             if sym in self.open_positions:
                 continue  # already have ORB position (pending or filled)
+            # DB-backed per-symbol dedup: if this symbol has ANY ORB trade row
+            # today (any status — even closed), skip. Prevents re-entry after
+            # exit and survives restart.
+            if sym in symbols_entered_today:
+                cand.rejected_reason = 'already_entered_today'
+                continue
             # Cross-strategy FCFS
             if self.skip_if_any_strategy_has_symbol and self._symbol_has_any_open_trade(sym):
                 logger.info(f"ORB: {sym} FCFS skip — already open in another strategy")
@@ -1636,6 +1649,31 @@ class ORBEngine:
                 self.daily_loss_limit_logged = True
             return True
         return False
+
+    def _symbols_entered_today_db(self) -> Set[str]:
+        """Return the set of symbols that have ANY ORB trade today in DB —
+        regardless of current status (pending, filled, closed, canceled, etc).
+
+        Used by check_entries to enforce BT-parity daily caps:
+          * max_concurrent entries total per day
+          * 1 entry per symbol per day (no re-entry after stop-out)
+
+        DB-backed so it survives restarts (in-memory CandidateState.plan_submitted
+        and daily_n_placed counter are lost on every service restart — the
+        source of the 2026-04-20 re-entry + new-entry-late bugs).
+        """
+        try:
+            today = datetime.now(timezone.utc).date().isoformat()
+            if hasattr(self.db, 'get_trades_by_date'):
+                rows = self.db.get_trades_by_date(today) or []
+                return {
+                    t.get('symbol') for t in rows
+                    if t.get('strategy') == STRATEGY_NAME and t.get('symbol')
+                }
+            return set()
+        except Exception as e:
+            logger.warning(f"ORB: _symbols_entered_today_db failed: {e}")
+            return set()
 
     def _symbol_has_any_open_trade(self, symbol: str) -> bool:
         """FCFS cross-strategy check — if any strategy has symbol open today, skip."""

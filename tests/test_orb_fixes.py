@@ -436,6 +436,87 @@ class TestSubmitEntry:
 # zoneinfo DST
 # =========================================================================
 
+class TestDailyCapsRestartSafe:
+    """Regression for 2026-04-20 bugs: after mid-day restart, ORB re-entered
+    BMNZ/SKYQ after stop-outs and entered brand-new QBTZ/BATL past the intended
+    cutoff. Root cause: in-memory daily_n_placed + CandidateState.plan_submitted
+    reset on restart → BT's 'top-K picked once per day' invariant violated.
+
+    Fix: check_entries must use a DB-backed set of symbols-entered-today to:
+      * block >max_concurrent total entries per day
+      * block re-entry of any symbol already traded today
+    Both gates survive restart.
+    """
+    def test_daily_total_cap_enforced_from_db(self, engine, mock_alpaca, mock_db, mock_sm):
+        """DB has 4 ORB trades today → check_entries blocks ALL new entries."""
+        from trading.orb_engine import CandidateState, RangeData
+        import pandas as pd
+        mock_db.get_trades_by_date = MagicMock(return_value=[
+            {'symbol': 'A', 'strategy': 'orb'},
+            {'symbol': 'B', 'strategy': 'orb'},
+            {'symbol': 'C', 'strategy': 'orb'},
+            {'symbol': 'D', 'strategy': 'orb'},
+        ])
+        # Universe has a fresh candidate E with full range_data + composite
+        engine.build_universe(source_loader=lambda: ['E'])
+        engine.candidates['E'].range_data = RangeData(
+            symbol='E', range_high=10, range_low=9.5, range_volume=1000,
+            range_avg_bar_range_pct=1.0, range_close=9.9,
+            range_start_ts=pd.Timestamp.utcnow(), range_open=9.6,
+        )
+        engine.candidates['E'].plan_submitted = False  # restart simulation
+        engine.enabled = True
+        submitted = engine.check_entries()
+        assert submitted == []
+        # Alpaca submit never called — daily cap blocked before reaching plan
+        mock_alpaca.submit_stop_bracket_order.assert_not_called()
+
+    def test_per_symbol_dedup_from_db_prevents_reentry(self, engine, mock_alpaca, mock_db, mock_sm):
+        """BMNZ already in DB (stopped out) → check_entries skips it even with
+        clean in-memory CandidateState. Regression for the restart bug."""
+        from trading.orb_engine import CandidateState, RangeData
+        import pandas as pd
+        # Only 1 trade today → daily_total (1) < max_concurrent (4), so cap is fine
+        mock_db.get_trades_by_date = MagicMock(return_value=[
+            {'symbol': 'BMNZ', 'strategy': 'orb'},
+        ])
+        engine.build_universe(source_loader=lambda: ['BMNZ', 'FRESH'])
+        # Both symbols have full ranges + fresh in-memory state (restart-like)
+        for sym in ['BMNZ', 'FRESH']:
+            engine.candidates[sym].range_data = RangeData(
+                symbol=sym, range_high=10, range_low=9.5, range_volume=1000,
+                range_avg_bar_range_pct=1.0, range_close=9.9,
+                range_start_ts=pd.Timestamp.utcnow(), range_open=9.6,
+            )
+            engine.candidates[sym].plan_submitted = False
+        engine.enabled = True
+
+        # Provide minimal feature ctx so composite won't be None
+        providers = {
+            'BMNZ': {'prev_day_bar': {'close': 9.0, 'volume': 500_000},
+                     'daily_stats_20d': {'high_20d': 10, 'volume_20d': 500_000}},
+            'FRESH': {'prev_day_bar': {'close': 9.0, 'volume': 500_000},
+                      'daily_stats_20d': {'high_20d': 10, 'volume_20d': 500_000}},
+        }
+        engine.check_entries(symbols=['BMNZ', 'FRESH'], feature_providers=providers)
+        # BMNZ must be skipped with the new reason
+        assert engine.candidates['BMNZ'].rejected_reason == 'already_entered_today'
+
+    def test_cap_does_not_block_initial_picks(self, engine, mock_db):
+        """Sanity: when DB is empty (fresh day), no cap is triggered."""
+        mock_db.get_trades_by_date = MagicMock(return_value=[])
+        assert engine._symbols_entered_today_db() == set()
+
+    def test_helper_filters_by_strategy(self, engine, mock_db):
+        """Bull flag + MACD wave trades must not count against ORB's daily cap."""
+        mock_db.get_trades_by_date = MagicMock(return_value=[
+            {'symbol': 'A', 'strategy': 'bull_flag'},
+            {'symbol': 'B', 'strategy': 'macd_wave'},
+            {'symbol': 'C', 'strategy': 'orb'},
+        ])
+        assert engine._symbols_entered_today_db() == {'C'}
+
+
 class TestFillRateTelemetry:
     """Fill-rate counters must track placed/filled/canceled per day.
     Validates PROD against BT-expected ~73% fill rate target."""
