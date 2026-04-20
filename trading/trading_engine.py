@@ -3694,10 +3694,28 @@ class TradingEngine:
         """
         today = date.today().isoformat()
         try:
-            trades_today = self.db.get_trades_by_date(today)
+            all_trades_today = self.db.get_trades_by_date(today)
         except Exception as e:
             logger.error(f"Startup sync: failed to load today's trades: {e}")
             return
+
+        # CRITICAL: filter to BULL FLAG trades only. Before this filter, ORB
+        # (and any other strategy running in the same service) had its pending
+        # order_ids swept into bull flag's _pending_orders — bull flag then
+        # polled them against the MAIN Alpaca account (wrong account for ORB
+        # paper orders) and logged "order not found" every cycle. Legacy trades
+        # from before the `strategy` column existed have strategy=None — treat
+        # those as bull flag for backwards compatibility.
+        trades_today = [
+            t for t in all_trades_today
+            if (t.get('strategy') or 'bull_flag') == 'bull_flag'
+        ]
+        skipped = len(all_trades_today) - len(trades_today)
+        if skipped:
+            logger.info(
+                f"Startup sync: skipping {skipped} non-bull_flag trades "
+                f"(other strategies manage their own state)"
+            )
 
         # Rebuild _traded_symbols and _daily_trade_count from DB
         # Only count FILLED trades — cancelled orders should not block re-entry
