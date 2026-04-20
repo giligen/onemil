@@ -129,6 +129,7 @@ class TestFullEntryFlow:
     def test_range_ingest_then_check_entries_submits_order_and_saves_trade(
         self, engine, real_db, mock_alpaca,
     ):
+        from unittest.mock import patch
         engine.build_universe(source_loader=lambda: ['TSLA'])
         # Full 5-min range + breakout bar
         bars = _make_bars([
@@ -149,7 +150,9 @@ class TestFullEntryFlow:
                 'daily_stats_20d': {'high_20d': 12.00, 'range_pct_20d': 5.0, 'volume_20d': 800_000},
             }
         }
-        submitted = engine.check_entries(feature_providers=providers)
+        # Bypass the 10:00 ET last-entry cutoff (test runs at arbitrary wall clock)
+        with patch.object(engine, '_past_last_entry_time', return_value=False):
+            submitted = engine.check_entries(feature_providers=providers)
         # Result depends on composite z — with reasonable values it should pass
         # Either it's submitted OR rejected for below-threshold. Both are valid
         # behavior — what we verify is NO CRASH and proper state mutation.
@@ -188,19 +191,22 @@ class TestFullEntryFlow:
             'pnl': None, 'pnl_pct': None,
             'pattern_data': '{}',
         })
+        from unittest.mock import patch
         engine.build_universe(source_loader=lambda: ['TSLA'])
         engine.candidates['TSLA'].range_data = RangeData(
             symbol='TSLA', range_high=10.30, range_low=9.95, range_volume=600_000,
             range_avg_bar_range_pct=1.0, range_close=10.25,
             range_start_ts=pd.Timestamp.utcnow(),
         )
-        submitted = engine.check_entries(feature_providers={})
+        with patch.object(engine, '_past_last_entry_time', return_value=False):
+            submitted = engine.check_entries(feature_providers={})
         assert submitted == []
         assert engine.candidates['TSLA'].rejected_reason == 'fcfs_other_strategy'
         mock_alpaca.submit_stop_bracket_order.assert_not_called()
 
     def test_spread_gate_blocks_submission(self, engine, mock_alpaca):
         """Wide spread (>150bps) → reject with spread_gate reason + no Alpaca call."""
+        from unittest.mock import patch
         engine.build_universe(source_loader=lambda: ['TSLA'])
         engine.candidates['TSLA'].range_data = RangeData(
             symbol='TSLA', range_high=10.30, range_low=9.95, range_volume=600_000,
@@ -213,7 +219,8 @@ class TestFullEntryFlow:
             'prev_day_bar': {'close': 9.50, 'high': 10.00, 'low': 9.40, 'open': 9.50},
             'daily_stats_20d': {'high_20d': 12.00},
         }}
-        submitted = engine.check_entries(feature_providers=providers)
+        with patch.object(engine, '_past_last_entry_time', return_value=False):
+            submitted = engine.check_entries(feature_providers=providers)
         assert submitted == []
         # If composite passed, the reject reason is spread_gate
         cand = engine.candidates['TSLA']

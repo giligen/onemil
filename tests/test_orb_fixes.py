@@ -475,6 +475,7 @@ class TestDailyCapsRestartSafe:
         """BMNZ already in DB (stopped out) → check_entries skips it even with
         clean in-memory CandidateState. Regression for the restart bug."""
         from trading.orb_engine import CandidateState, RangeData
+        from unittest.mock import patch
         import pandas as pd
         # Only 1 trade today → daily_total (1) < max_concurrent (4), so cap is fine
         mock_db.get_trades_by_date = MagicMock(return_value=[
@@ -498,7 +499,9 @@ class TestDailyCapsRestartSafe:
             'FRESH': {'prev_day_bar': {'close': 9.0, 'volume': 500_000},
                       'daily_stats_20d': {'high_20d': 10, 'volume_20d': 500_000}},
         }
-        engine.check_entries(symbols=['BMNZ', 'FRESH'], feature_providers=providers)
+        # Bypass the time-of-day cutoff — test runs at arbitrary wall clock
+        with patch.object(engine, '_past_last_entry_time', return_value=False):
+            engine.check_entries(symbols=['BMNZ', 'FRESH'], feature_providers=providers)
         # BMNZ must be skipped with the new reason
         assert engine.candidates['BMNZ'].rejected_reason == 'already_entered_today'
 
@@ -515,6 +518,90 @@ class TestDailyCapsRestartSafe:
             {'symbol': 'C', 'strategy': 'orb'},
         ])
         assert engine._symbols_entered_today_db() == {'C'}
+
+
+class TestLastEntryCutoff:
+    """Post-2026-04-20 fix: hard time-of-day cutoff on NEW entry submissions.
+    BT picks top-K once at 9:35 ET; live allows a short window but must block
+    late-afternoon entries (QBTZ 12:30 ET + BATL 1:11 PM ET today's bug)."""
+    def _et_noon_utc(self):
+        """12:00 ET in UTC. Today (2026-04-20) is EDT (UTC-4) → 16:00 UTC."""
+        from datetime import datetime, timezone as _tz
+        return datetime(2026, 4, 20, 16, 0, 0, tzinfo=_tz.utc)
+
+    def _et_915_utc(self):
+        """09:15 ET pre-market in UTC (EDT)."""
+        from datetime import datetime, timezone as _tz
+        return datetime(2026, 4, 20, 13, 15, 0, tzinfo=_tz.utc)
+
+    def test_past_cutoff_true_after_1000_et(self, engine):
+        """Default cutoff 10:00 ET → noon ET must be past."""
+        assert engine._past_last_entry_time(self._et_noon_utc()) is True
+
+    def test_past_cutoff_false_before_1000_et(self, engine):
+        """Pre-market 9:15 ET must NOT trip the cutoff."""
+        assert engine._past_last_entry_time(self._et_915_utc()) is False
+
+    def test_cutoff_reads_from_config(self, orb_cfg, mock_alpaca, mock_db, mock_sm):
+        """yaml::entry.last_entry_submit_time_et configures the cutoff."""
+        from trading.orb_engine import ORBEngine
+        cfg = dict(orb_cfg)
+        cfg['entry'] = dict(cfg.get('entry', {}))
+        cfg['entry']['last_entry_submit_time_et'] = "09:45"
+        e = ORBEngine(alpaca_client=mock_alpaca, db=mock_db,
+                      stop_monitor=mock_sm, config=cfg)
+        assert e.last_entry_hour_et == 9
+        assert e.last_entry_minute_et == 45
+
+    def test_check_entries_returns_empty_past_cutoff(self, engine, mock_alpaca, mock_db, mock_sm):
+        """Past cutoff, check_entries returns [] without touching Alpaca.
+        Regression for today's QBTZ/BATL late-afternoon bug."""
+        from unittest.mock import patch
+        # Seed state so there WOULD be eligible candidates if cutoff didn't block
+        from trading.orb_engine import RangeData
+        import pandas as pd
+        engine.build_universe(source_loader=lambda: ['LATE'])
+        engine.candidates['LATE'].range_data = RangeData(
+            symbol='LATE', range_high=10, range_low=9.5, range_volume=1000,
+            range_avg_bar_range_pct=1.0, range_close=9.9,
+            range_start_ts=pd.Timestamp.utcnow(), range_open=9.6,
+        )
+        engine.enabled = True
+
+        # Mock current time to 12:00 ET (past the 10:00 cutoff)
+        with patch.object(engine, '_past_last_entry_time', return_value=True):
+            result = engine.check_entries()
+        assert result == []
+        mock_alpaca.submit_stop_bracket_order.assert_not_called()
+
+    def test_check_entries_proceeds_before_cutoff(self, engine, mock_alpaca, mock_db, mock_sm):
+        """Before cutoff, check_entries proceeds to normal evaluation (no early return)."""
+        from unittest.mock import patch
+        # Empty universe → returns [] BUT we want to verify the cutoff guard
+        # didn't early-return. Patch _past_last_entry_time to False; verify
+        # the function didn't return at the cutoff guard (would have needed
+        # no DB query) — instead it proceeds, queries DB, then returns [] at
+        # the empty-universe path.
+        mock_db.get_trades_by_date = MagicMock(return_value=[])
+        with patch.object(engine, '_past_last_entry_time', return_value=False):
+            engine.enabled = True
+            engine.check_entries()
+        # _symbols_entered_today_db queries get_trades_by_date → proves we
+        # got past the cutoff guard
+        mock_db.get_trades_by_date.assert_called()
+
+    def test_cutoff_logged_once(self, engine, caplog):
+        """The 'past cutoff' log fires at most once per day (not every tick)."""
+        from unittest.mock import patch
+        with patch.object(engine, '_past_last_entry_time', return_value=True):
+            engine.enabled = True
+            with caplog.at_level('INFO'):
+                engine.check_entries()
+                engine.check_entries()
+                engine.check_entries()
+        hits = [r for r in caplog.records
+                if 'past last_entry_submit_time' in r.getMessage()]
+        assert len(hits) == 1
 
 
 class TestFillRateTelemetry:

@@ -226,6 +226,18 @@ class ORBEngine:
         self.force_close_hour_et = hour
         self.force_close_minute_et = minute
 
+        # Last-entry cutoff (ET). BT picks top-K once at 9:35 ET and never
+        # submits new entries afterward. Live allows a short window for
+        # bar-stream latency / backfill / candidates arriving slowly, but
+        # hard-blocks new submits past this time. Default 10:00 ET = 25-min
+        # window post range-close. Raise to be more permissive; lower to
+        # tighten to BT-exact behavior. See `check_entries` for the guard.
+        le_str = entry_cfg.get('last_entry_submit_time_et', '10:00')
+        le_hour, le_minute = [int(x) for x in le_str.split(':')]
+        self.last_entry_hour_et = le_hour
+        self.last_entry_minute_et = le_minute
+        self._late_entry_cutoff_logged = False
+
         # Planner (stateless, built once)
         self.planner = OrbTradePlanner(cfg)
 
@@ -763,6 +775,21 @@ class ORBEngine:
         self._cancel_stale_pending_orders()
 
         if self._daily_loss_limit_hit():
+            return []
+
+        # Hard time-of-day cutoff on NEW entry submissions. BT picks top-K
+        # once at 9:35 ET; live needs a short window for bar-stream latency
+        # + backfill but must block late-afternoon entries (see 2026-04-20:
+        # QBTZ submitted 12:30 ET, BATL 1:11 PM ET — well outside BT's
+        # time_stop window of 10:35 ET). Defaults to 10:00 ET (25-min window).
+        if self._past_last_entry_time():
+            if not self._late_entry_cutoff_logged:
+                logger.info(
+                    f"ORB: past last_entry_submit_time "
+                    f"{self.last_entry_hour_et:02d}:{self.last_entry_minute_et:02d} ET "
+                    f"— no new entries for the rest of the day"
+                )
+                self._late_entry_cutoff_logged = True
             return []
 
         # BT parity: pick top-K ONCE at 9:35, then no new entries ever.
@@ -1622,6 +1649,7 @@ class ORBEngine:
         self.daily_n_filled = 0
         self.daily_n_time_stop_canceled = 0
         self.daily_summary_sent = False
+        self._late_entry_cutoff_logged = False
         # Drain any leftover bar events from yesterday
         try:
             while True:
@@ -1833,6 +1861,23 @@ class ORBEngine:
             et_offset_hours = _et_offset_hours(now_utc)
             et_naive = now_utc - timedelta(hours=et_offset_hours)
             return et_naive.time() >= fc
+
+    def _past_last_entry_time(self, now_utc: Optional[datetime] = None) -> bool:
+        """True if current ET time is >= last_entry_submit_time_et.
+
+        BT parity hard-cutoff for NEW order submissions. Paired with
+        time_stop_minutes for existing-order cancellation. See check_entries.
+        """
+        now_utc = now_utc or datetime.now(timezone.utc)
+        le = dtime(hour=self.last_entry_hour_et, minute=self.last_entry_minute_et)
+        try:
+            from zoneinfo import ZoneInfo
+            et = now_utc.astimezone(ZoneInfo('America/New_York'))
+            return et.time() >= le
+        except Exception:
+            et_offset_hours = _et_offset_hours(now_utc)
+            et_naive = now_utc - timedelta(hours=et_offset_hours)
+            return et_naive.time() >= le
 
 
 # ---------------------------------------------------------------------------

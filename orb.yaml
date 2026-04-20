@@ -38,9 +38,15 @@ entry:
   range_minutes: 5          # 9:30-9:35 ET range window
   entry_mode: touch         # 'touch' | 'close_above'
   entry_slip_bps: 30        # calibrated from bull flag live data; measured in Phase 1
-  time_stop_minutes: 60     # cancel unfilled buy-stop at 10:35 ET
+  time_stop_minutes: 60     # cancel unfilled buy-stop at 10:35 ET (per-order clock, from submit)
   max_spread_bps: 150       # skip entry + telegram warning if (ask-bid)/price > 150bps
   stop_limit_buffer_bps: 30 # stop-limit buy: limit = range_high × (1 + buffer/10000)
+  # BT picks top-K once at 9:35 ET. Live allows a short window for late bar-
+  # stream / backfill / candidates arriving slowly, then HARD-BLOCKS new
+  # submissions. Fix shipped 2026-04-20 after QBTZ/BATL slipped through at
+  # 12:30 / 1:11 PM ET. Raise to be more permissive with late arrivals, or
+  # lower toward "09:45" for strict BT-exact behavior.
+  last_entry_submit_time_et: "10:00"
 
 # Composite filter — 7-feature signed z-score, threshold >= 0.
 # Params baked from H1 2025 TRAIN fit (1090 trades). Refit quarterly via study_orb_refit.py.

@@ -257,6 +257,7 @@ class TestCheckEntries:
         assert submitted == []
 
     def test_fcfs_skip_if_other_strategy_open(self, engine, mock_db):
+        from unittest.mock import patch as _patch
         engine.build_universe(source_loader=lambda: ['TSLA'])
         # Pre-populate range
         engine.candidates['TSLA'].range_data = RangeData(
@@ -266,7 +267,9 @@ class TestCheckEntries:
         )
         # Mock DB: bull flag already has TSLA open today
         mock_db.get_open_trades.return_value = [{'symbol': 'TSLA', 'strategy': 'bull_flag'}]
-        submitted = engine.check_entries()
+        # Bypass wall-clock time cutoff
+        with _patch.object(engine, '_past_last_entry_time', return_value=False):
+            submitted = engine.check_entries()
         assert submitted == []
         # Should be marked as fcfs_other_strategy rejection
         assert engine.candidates['TSLA'].rejected_reason == 'fcfs_other_strategy'
