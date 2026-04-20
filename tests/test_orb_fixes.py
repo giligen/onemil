@@ -49,13 +49,18 @@ def mock_alpaca():
     c.submit_stop_bracket_order.return_value = {'id': 'o-1', 'status': 'accepted'}
     c.cancel_order.return_value = True
     c.close_position.return_value = {'id': 'c-1'}
-    c.get_daily_bars.return_value = {
+    # _get_feature_context was changed to use get_daily_bars_range (list of
+    # OHLCV dicts) instead of get_daily_bars (summary dict) — keep both
+    # stubbed so the full call chain works. DB-cache path is tested separately.
+    c.get_daily_bars_range.return_value = {
         'TSLA': [
-            {'open': 9 + i*0.01, 'high': 10 + i*0.01, 'low': 8.5 + i*0.01,
+            {'date': f'2026-03-{(i%28)+1:02d}',
+             'open': 9 + i*0.01, 'high': 10 + i*0.01, 'low': 8.5 + i*0.01,
              'close': 9.5 + i*0.01, 'volume': 1_000_000}
             for i in range(25)
         ]
     }
+    c.get_daily_bars.return_value = {}  # legacy, no longer called by engine
     return c
 
 
@@ -145,11 +150,12 @@ class TestFeatureContext:
         engine._get_feature_context('TSLA')
         engine._get_feature_context('TSLA')  # cached
         engine._get_feature_context('TSLA')
-        # Only one Alpaca call per symbol
-        assert mock_alpaca.get_daily_bars.call_count == 1
+        # Only one Alpaca call per symbol (DB cache is checked first and
+        # returns empty in this test fixture → falls through to alpaca)
+        assert mock_alpaca.get_daily_bars_range.call_count == 1
 
     def test_returns_empty_on_fetch_failure(self, engine, mock_alpaca):
-        mock_alpaca.get_daily_bars.side_effect = RuntimeError("api down")
+        mock_alpaca.get_daily_bars_range.side_effect = RuntimeError("api down")
         ctx = engine._get_feature_context('BROKEN')
         assert ctx == {}
 
@@ -158,7 +164,7 @@ class TestFeatureContext:
         engine.reset_daily()
         engine._get_feature_context('TSLA')
         # Fresh fetch — cache was cleared
-        assert mock_alpaca.get_daily_bars.call_count == 2
+        assert mock_alpaca.get_daily_bars_range.call_count == 2
 
 
 # =========================================================================
@@ -346,6 +352,84 @@ class TestSubmitEntry:
         assert kw['tp_price'] > kw['stop_price'] * 2
         # sl_price is 10% below entry (safety-net)
         assert kw['sl_price'] < kw['stop_price']
+
+    def test_sync_positions_preserves_submit_time_across_restart(
+        self, engine, mock_alpaca, mock_db, mock_sm
+    ):
+        """Restart-safety: cancel-clock must survive restart.
+
+        Pre-fix bug: sync_positions' pending-rehydration set
+        cand.order_submitted_at = datetime.now() (at restart time), which
+        restarted the 60min time-stop clock. An order submitted at 09:57
+        that should have canceled at 10:57 instead survived until 11:20+
+        after a 10:20 restart — ~23 min extra market exposure.
+
+        Post-fix: rehydration reads order_submitted_at from DB so the
+        original submit clock is preserved.
+        """
+        from datetime import datetime, timezone
+        original_submit = datetime(2026, 4, 20, 13, 57, 18, tzinfo=timezone.utc)
+
+        # sync_positions uses db.get_open_trades(date, strategy='orb')
+        mock_db.get_open_trades = MagicMock(return_value=[{
+            'id': 42, 'symbol': 'TSLA', 'strategy': 'orb',
+            'order_id': 'ord-persisted', 'order_status': 'pending_new',
+            'entry_price': 10.03, 'stop_loss_price': 9.50, 'shares': 100,
+            'fill_price': None, 'exit_price': None,
+            'pattern_data': '{"range_high": 10.0, "range_low": 9.5, '
+                            '"lock_arm_at_r": 1.5, "lock_stop_r": 1.0, '
+                            '"composite_score": 0.5, "quintile": "Q4"}',
+            'order_submitted_at': original_submit,
+            'bar_close_price': 10.0,
+            'entry_quote_ask': 10.00,
+            'created_at': original_submit,
+        }])
+        # Alpaca confirms the order is still live via trading_client
+        fake_order = MagicMock()
+        fake_order.id = 'ord-persisted'
+        fake_order.symbol = 'TSLA'
+        mock_alpaca.trading_client = MagicMock()
+        mock_alpaca.trading_client.get_all_positions.return_value = []
+        mock_alpaca.trading_client.get_orders.return_value = [fake_order]
+
+        engine.sync_positions()
+
+        # Position rehydrated with ORIGINAL submit time, not now()
+        assert 'TSLA' in engine.open_positions
+        pos = engine.open_positions['TSLA']
+        assert pos.entry_time == original_submit
+        assert pos.order_submitted_at == original_submit
+        assert pos.bar_close_price == 10.0
+        assert pos.entry_quote_ask == 10.00
+        # Candidate's cancel-clock also anchored to original submit
+        cand = engine.candidates.get('TSLA')
+        if cand is not None:
+            assert cand.order_submitted_at == original_submit
+
+    def test_submit_persists_slippage_fields_to_db(self, engine, mock_alpaca, mock_db):
+        """Restart-safety: _save_pending_trade must write order_submitted_at,
+        bar_close_price, entry_quote_bid/ask/spread so a restart can rehydrate
+        the OpenPosition attribution correctly."""
+        from trading.orb_planner import OrbTradePlan
+        plan = OrbTradePlan(
+            symbol='R', range_high=10, range_low=9.5, range_size=0.5,
+            entry_price=10.03, stop_price=9.5, shares=100, position_dollars=1003,
+            lock_arm_at_r=1.5, lock_stop_r=1.0, risk_per_share=0.53, total_risk=53,
+            composite_score=0.5, quintile='Q4', adaptive_mult=0.95,
+        )
+        mock_alpaca.get_latest_quote.return_value = {
+            'bid_price': 9.98, 'ask_price': 10.00, 'bid_size': 500, 'ask_size': 700,
+        }
+        engine._submit_entry(plan)
+        record = mock_db.save_trade.call_args[0][0]
+        # All attribution fields present at submit time
+        assert record['order_submitted_at'] is not None
+        assert record['bar_close_price'] == 10.0  # = range_high (BT reference)
+        assert record['entry_quote_bid'] == 9.98
+        assert record['entry_quote_ask'] == 10.00
+        assert record['entry_quote_bid_size'] == 500
+        assert record['entry_quote_ask_size'] == 700
+        assert record['entry_quote_spread'] == pytest.approx(0.02, abs=1e-9)
 
 
 # =========================================================================

@@ -916,20 +916,10 @@ class ORBEngine:
             logger.error(f"ORB: {plan.symbol} submit_entry failed: {e}")
             return None
 
-        trade_id = self._save_pending_trade(plan, order_id)
-        if trade_id is None:
-            logger.error(f"ORB: {plan.symbol} DB save failed — cannot track order {order_id}")
-            return None
-
-        # Fill-rate telemetry
-        self.daily_n_placed += 1
-
-        # Track pending position (cleared once fill confirmed in _process_pending_fills)
-        submit_time = datetime.now(timezone.utc)
         # Capture NBBO at submit for entry slippage attribution (mirrors bull flag).
-        # bar_close_price is the BT reference — for ORB, that's range_high (the
-        # level BT fills at; anything above it is real slippage on top of the
-        # 30bps planner slip buffer already in entry_price).
+        # Done BEFORE _save_pending_trade so the quote fields persist to DB and
+        # survive a restart (previously lost — reconstructed OpenPosition had
+        # entry_quote_ask=None after sync_positions).
         entry_quote_ask: Optional[float] = None
         submit_bid, submit_ask = 0.0, 0.0
         submit_bid_size, submit_ask_size = 0, 0
@@ -944,6 +934,25 @@ class ORBEngine:
                     entry_quote_ask = submit_ask
         except Exception as e:
             logger.debug(f"ORB: get_latest_quote({plan.symbol}) failed at submit: {e}")
+
+        # Single submit_time used for both DB persistence AND the in-memory position.
+        # This ensures sync_positions on restart can recover the exact original
+        # submit time from DB (vs the prior bug where rehydration used now()).
+        submit_time = datetime.now(timezone.utc)
+        trade_id = self._save_pending_trade(
+            plan, order_id,
+            submit_time=submit_time,
+            submit_bid=submit_bid, submit_ask=submit_ask,
+            submit_bid_size=submit_bid_size, submit_ask_size=submit_ask_size,
+        )
+        if trade_id is None:
+            logger.error(f"ORB: {plan.symbol} DB save failed — cannot track order {order_id}")
+            return None
+
+        # Fill-rate telemetry
+        self.daily_n_placed += 1
+
+        # Track pending position (cleared once fill confirmed in _process_pending_fills)
 
         self.open_positions[plan.symbol] = OpenPosition(
             symbol=plan.symbol,
@@ -1175,10 +1184,17 @@ class ORBEngine:
                     lock_r_unit=range_size,  # BT-parity: 1R = range_size, not risk_per_share
                     skip_exits_until_ts=skip_until_ts,  # BT-parity: skip entry bar
                 )
+                # 1R for the displayed lock levels is range_size (matches the
+                # lock_r_unit passed to StopMonitor), not risk_per_share.
+                # risk_per_share differs by the slippage buffer baked into
+                # entry_price — using it here misreports the actual lock levels
+                # by a couple cents on wide-range setups.
+                lock_arm_px = pos.entry_price + pos.lock_arm_at_r * range_size
+                lock_stop_px = pos.entry_price + pos.lock_stop_r * range_size
                 logger.info(
                     f"ORB FILL: {pos.symbol} @ ${fill_price:.2f} x{shares} — "
                     f"StopMonitor watching (stop=${pos.stop_price:.2f}, "
-                    f"lock arms +{pos.lock_arm_at_r:.1f}R at stop=${pos.entry_price + pos.lock_stop_r * risk_per_share:.2f})"
+                    f"lock arms at ${lock_arm_px:.2f}, lock stop ${lock_stop_px:.2f})"
                 )
             except Exception as e:
                 logger.error(f"ORB: add_watch failed for {pos.symbol}: {e}")
@@ -1459,6 +1475,28 @@ class ORBEngine:
                         pdata = _json.loads(pdata)
                     except (ValueError, TypeError):
                         pdata = {}
+                # Recover ORIGINAL submit time from DB so the time-stop cancel
+                # clock doesn't get reset by restart. Prefer the explicit
+                # order_submitted_at column (written at submit); fall back to
+                # created_at (always present) for legacy trades that predate
+                # the explicit column.
+                submit_ts = (
+                    t.get('order_submitted_at')
+                    or t.get('created_at')
+                    or datetime.now(timezone.utc)
+                )
+                # DB may return naive strings — normalize to tz-aware UTC
+                if isinstance(submit_ts, str):
+                    try:
+                        from dateutil.parser import isoparse as _iso
+                        submit_ts = _iso(submit_ts)
+                    except Exception:
+                        submit_ts = datetime.now(timezone.utc)
+                if submit_ts.tzinfo is None:
+                    submit_ts = submit_ts.replace(tzinfo=timezone.utc)
+                # Recover slippage-attribution fields persisted at submit
+                bar_close = t.get('bar_close_price')
+                entry_ask = t.get('entry_quote_ask')
                 pos = OpenPosition(
                     symbol=sym,
                     entry_price=float(t.get('entry_price') or 0.0),
@@ -1466,23 +1504,29 @@ class ORBEngine:
                     shares=int(t.get('shares') or 0),
                     trade_id=int(t['id']),
                     order_id=order_id,  # CRITICAL: populated = pending; _process_pending_fills will poll
-                    entry_time=datetime.now(timezone.utc),  # submit time unknown post-restart
+                    entry_time=submit_ts,
                     range_high=float(pdata.get('range_high', 0.0)),
                     range_low=float(pdata.get('range_low', 0.0)),
                     lock_arm_at_r=float(pdata.get('lock_arm_at_r', 1.5)),
                     lock_stop_r=float(pdata.get('lock_stop_r', 1.0)),
                     composite_score=float(pdata.get('composite_score', 0.0)),
                     quintile=str(pdata.get('quintile', 'Q3')),
+                    bar_close_price=(float(bar_close) if bar_close else float(pdata.get('range_high', 0.0)) or None),
+                    order_submitted_at=submit_ts,
+                    entry_quote_ask=(float(entry_ask) if entry_ask else None),
                 )
                 self.open_positions[sym] = pos
-                # Also track on candidate so time-stop cancel logic works
+                # Also track on candidate so time-stop cancel logic works with
+                # the ORIGINAL submit clock (not now()).
                 if sym in self.candidates:
                     self.candidates[sym].order_id = order_id
-                    self.candidates[sym].order_submitted_at = pos.entry_time
+                    self.candidates[sym].order_submitted_at = submit_ts
                 recovered_pending += 1
                 logger.info(
                     f"ORB.sync: {sym} rehydrated as PENDING "
-                    f"(order {order_id}, will poll for fill)"
+                    f"(order {order_id}, submitted {submit_ts.isoformat()}, "
+                    f"age {(datetime.now(timezone.utc) - submit_ts).total_seconds()/60:.1f}min, "
+                    f"will poll for fill)"
                 )
                 continue
 
@@ -1632,11 +1676,25 @@ class ORBEngine:
         except Exception:
             return None
 
-    def _save_pending_trade(self, plan: OrbTradePlan, order_id: str) -> Optional[int]:
+    def _save_pending_trade(
+        self,
+        plan: OrbTradePlan,
+        order_id: str,
+        submit_time: Optional[datetime] = None,
+        submit_bid: float = 0.0,
+        submit_ask: float = 0.0,
+        submit_bid_size: int = 0,
+        submit_ask_size: int = 0,
+    ) -> Optional[int]:
         """Insert pending_new trade record with strategy='orb'.
 
-        Includes all DB columns explicitly — SQLite requires every :bind parameter
-        to be present (matches MACDWaveEngine._submit_entry pattern).
+        Persists slippage-attribution fields at submit time so that:
+          1. `_confirm_fill` can compute drift_bar_to_fill_bps + submit_to_fill_ms
+             correctly even after a restart wipes the in-memory OpenPosition.
+          2. `sync_positions` rehydration can restore the submit-time reference
+             fields onto the OpenPosition (previously lost on restart).
+          3. Time-stop cancel uses the ORIGINAL submit_time from DB, not the
+             post-restart rehydration time.
         """
         import json as _json
         try:
@@ -1650,8 +1708,9 @@ class ORBEngine:
                 'lock_arm_at_r': plan.lock_arm_at_r,
                 'lock_stop_r': plan.lock_stop_r,
             })
+            now_utc = submit_time or datetime.now(timezone.utc)
             record = {
-                'trade_date': datetime.now(timezone.utc).date().isoformat(),
+                'trade_date': now_utc.date().isoformat(),
                 'symbol': plan.symbol,
                 'side': 'buy',
                 'entry_price': plan.entry_price,
@@ -1672,6 +1731,17 @@ class ORBEngine:
                 'pnl_pct': None,
                 'pattern_data': pattern_data,
                 'strategy': STRATEGY_NAME,
+                # Slippage attribution baseline (set ONCE at submit; consumed at fill)
+                'order_submitted_at': now_utc,
+                'bar_close_price': plan.range_high,  # BT reference = range_high
+                'entry_quote_bid': submit_bid if submit_bid > 0 else None,
+                'entry_quote_ask': submit_ask if submit_ask > 0 else None,
+                'entry_quote_bid_size': submit_bid_size if submit_bid_size > 0 else None,
+                'entry_quote_ask_size': submit_ask_size if submit_ask_size > 0 else None,
+                'entry_quote_spread': (
+                    (submit_ask - submit_bid)
+                    if submit_bid > 0 and submit_ask > 0 else None
+                ),
             }
             trade_id = self.db.save_trade(record)
             return int(trade_id) if trade_id else None
