@@ -1885,11 +1885,25 @@ class ORBEngine:
 # ---------------------------------------------------------------------------
 
 def _first_session_open_ts_utc(bars_df: pd.DataFrame) -> Optional[pd.Timestamp]:
-    """Return the timestamp of the first regular-session bar (9:30 ET)."""
+    """Return the timestamp of the first regular-session bar (9:30 ET).
+
+    Resilient to DataFrames where the 'timestamp' column is object-dtype
+    (e.g. when bars arrive from the StopMonitor WebSocket with raw python
+    datetime objects, which happens in the scanner's drain_bar_events path).
+    Coerce via pd.to_datetime before using the .dt accessor.
+    """
     if bars_df is None or len(bars_df) == 0:
         return None
+    if 'timestamp' not in bars_df.columns:
+        return None
     ts_col = bars_df['timestamp']
-    mask = (ts_col.dt.minute == 30) & (ts_col.dt.hour.isin([13, 14]))
+    try:
+        if not pd.api.types.is_datetime64_any_dtype(ts_col):
+            ts_col = pd.to_datetime(ts_col, utc=True, errors='coerce')
+        mask = (ts_col.dt.minute == 30) & (ts_col.dt.hour.isin([13, 14]))
+    except (AttributeError, TypeError, ValueError) as e:
+        logger.debug(f"ORB: _first_session_open_ts_utc timestamp parse failed: {e}")
+        return None
     if not mask.any():
         return None
     return ts_col.loc[mask].iloc[0]

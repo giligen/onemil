@@ -427,6 +427,42 @@ class TestModuleHelpers:
     def test_first_session_open_ts_empty(self):
         assert _first_session_open_ts_utc(pd.DataFrame()) is None
 
+    def test_first_session_open_ts_object_dtype_timestamps(self):
+        """Regression 2026-04-20: StopMonitor WS drain path occasionally
+        produces DataFrames with object-dtype 'timestamp' (raw python datetime
+        objects) instead of datetime64. Helper must coerce gracefully —
+        prior code raised 'Can only use .dt accessor with datetimelike
+        values' repeatedly in the scanner loop."""
+        from datetime import datetime as _dt, timezone as _tz
+        bars = pd.DataFrame([
+            {'timestamp': _dt(2026, 4, 20, 13, 30, tzinfo=_tz.utc),
+             'open': 10.0, 'high': 10.1, 'low': 9.95, 'close': 10.05, 'volume': 1000},
+            {'timestamp': _dt(2026, 4, 20, 13, 31, tzinfo=_tz.utc),
+             'open': 10.05, 'high': 10.15, 'low': 10.0, 'close': 10.1, 'volume': 1200},
+        ])
+        # Force object dtype — pandas auto-upgrades to datetime64 otherwise
+        bars['timestamp'] = bars['timestamp'].astype(object)
+        assert bars['timestamp'].dtype == object  # reproduces the bug condition
+        # Must NOT raise — coerce inside the helper + find the 9:30 ET bar
+        ts = _first_session_open_ts_utc(bars)
+        assert ts is not None
+        assert ts.hour == 13 and ts.minute == 30
+
+    def test_first_session_open_ts_missing_column(self):
+        """No 'timestamp' column → return None, don't raise."""
+        bars = pd.DataFrame({'open': [1.0], 'close': [1.0]})
+        assert _first_session_open_ts_utc(bars) is None
+
+    def test_first_session_open_ts_malformed_strings(self):
+        """Non-parseable timestamp strings → return None, don't crash the
+        scanner loop."""
+        bars = pd.DataFrame({
+            'timestamp': ['not-a-date', 'also-nope'],
+            'open': [10, 11], 'high': [11, 12], 'low': [9, 10],
+            'close': [10, 11], 'volume': [100, 200],
+        })
+        assert _first_session_open_ts_utc(bars) is None
+
     def test_et_offset_summer(self):
         assert _et_offset_hours(datetime(2026, 6, 1, tzinfo=timezone.utc)) == 4
 
