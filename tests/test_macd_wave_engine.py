@@ -540,6 +540,87 @@ class TestConvictionTelemetry:
         assert 'conv' not in msg, "Should not annotate conv when sizing disabled"
 
 
+class TestSmartLimitAskBuffer:
+    """Post-2026-04-20 fix: smart-limit pricing uses ask + configurable
+    buffer (default 30bps) instead of the legacy spread-midpoint logic.
+    Rationale in _get_smart_limit_price docstring — USGG post-mortem."""
+
+    def _engine_with_buffer(self, buffer_bps):
+        e = _make_engine()
+        e.smart_limit_ask_buffer_bps = float(buffer_bps)
+        return e
+
+    def test_limit_equals_ask_plus_30bps_by_default(self):
+        e = _make_engine()
+        assert e.smart_limit_ask_buffer_bps == 30.0
+        e.alpaca.get_latest_quote.return_value = {
+            'bid_price': 15.52, 'ask_price': 15.58,
+            'bid_size': 500, 'ask_size': 400,
+        }
+        limit, info = e._get_smart_limit_price('USGG')
+        # ask × 1.003 = 15.58 × 1.003 = 15.6267 → rounded 15.63
+        assert limit == 15.63
+        assert info['pricing'] == 'ask_plus_buffer'
+        assert info['ask_buffer_bps'] == 30.0
+
+    def test_buffer_configurable_via_yaml_read(self):
+        """smart_limit_ask_buffer_bps from entry config block, not hardcoded."""
+        cfg = {
+            'universe': {}, 'entry': {'smart_limit_ask_buffer_bps': 50},
+            'macd': {}, 'sizing': {'position_size': 50000, 'max_concurrent': 3},
+            'risk': {'daily_loss_limit': -5000}, 'slippage': {}, 'waves': {},
+        }
+        e = MACDWaveEngine(alpaca_client=MagicMock(), db=MagicMock(), config=cfg)
+        assert e.smart_limit_ask_buffer_bps == 50.0
+
+    def test_zero_buffer_gives_ask_price(self):
+        """Buffer=0 reproduces 'at ask' behavior (for A/B vs older logic)."""
+        e = self._engine_with_buffer(0)
+        e.alpaca.get_latest_quote.return_value = {
+            'bid_price': 10.00, 'ask_price': 10.05,
+            'bid_size': 100, 'ask_size': 200,
+        }
+        limit, info = e._get_smart_limit_price('X')
+        assert limit == 10.05
+        assert info['ask_buffer_bps'] == 0.0
+
+    def test_crossed_market_falls_back_to_ask(self):
+        """bid >= ask is stale/crossed — skip buffer math, use ask as-is."""
+        e = self._engine_with_buffer(30)
+        e.alpaca.get_latest_quote.return_value = {
+            'bid_price': 10.10, 'ask_price': 10.00,  # crossed
+            'bid_size': 100, 'ask_size': 100,
+        }
+        limit, info = e._get_smart_limit_price('X')
+        assert limit == 10.00
+        assert info['pricing'] == 'fallback_crossed'
+
+    def test_missing_quote_falls_back(self):
+        e = self._engine_with_buffer(30)
+        e.alpaca.get_latest_quote.return_value = {
+            'bid_price': 0, 'ask_price': 0, 'bid_size': 0, 'ask_size': 0,
+        }
+        limit, info = e._get_smart_limit_price('X')
+        assert limit == 0
+        assert info['pricing'] == 'fallback_no_quote'
+
+    def test_usgg_postmortem_would_have_filled(self):
+        """Regression: replay 2026-04-20 USGG quote snapshot. Under the new
+        pricing, limit would have been $15.63 (vs old logic's $15.56). Given
+        the actual post-signal price ran to $16.70, a $15.63 limit would
+        have filled at submit — capturing the trade we missed."""
+        e = self._engine_with_buffer(30)
+        e.alpaca.get_latest_quote.return_value = {
+            'bid_price': 15.52, 'ask_price': 15.58,
+            'bid_size': 800, 'ask_size': 400,
+        }
+        limit, info = e._get_smart_limit_price('USGG')
+        # The post-signal ask moved to $15.60+ within 1s; $15.63 limit survives
+        # that latency. Old midpoint logic gave $15.56 — stranded.
+        assert limit >= 15.58  # above current ask
+        assert limit == 15.63
+
+
 class TestBarStartToClose:
     """Alpaca bar timestamp = bar START. Helper adds 60s for actual close.
 

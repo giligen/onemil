@@ -123,6 +123,10 @@ class MACDWaveEngine:
 
         # Smart entry: L1-informed pricing + early entry on strong book
         self.smart_entry_enabled = bool(entry.get('smart_entry_enabled', False))
+        # Limit-price buffer above the ask. Set >0 to survive sub-second ask ticks
+        # during submit latency. Matches ORB/bull flag's 30bps stop-limit buffer.
+        # 0 = use current ask as-is (legacy behavior — vulnerable to fast movers).
+        self.smart_limit_ask_buffer_bps = float(entry.get('smart_limit_ask_buffer_bps', 30.0))
         self.early_entry_bars = int(entry.get('early_entry_bars', 1))
         self.early_bid_ask_ratio = float(entry.get('early_bid_ask_ratio', 2.0))
         self.early_max_spread_pct = float(entry.get('early_max_spread_pct', 0.003))
@@ -1536,26 +1540,29 @@ class MACDWaveEngine:
         spread_pct = spread / ask if ask > 0 else 0
         ba_ratio = bid_sz / ask_sz if ask_sz > 0 else 0
 
-        # Spread-aware pricing: tighter spread → more aggressive limit
-        if spread_pct < 0.0015:        # < 0.15% — very tight
-            limit = ask                 # buy at ask, no premium needed
-        elif spread_pct < 0.005:       # < 0.5% — moderate
-            limit = bid + spread * 0.75 # 75% into the spread
-        else:                           # wide spread
-            limit = bid + spread * 0.60 # 60% into the spread
-
-        limit = min(round(limit, 2), ask)
+        # Ask + buffer: buy at ask shifted up by `smart_limit_ask_buffer_bps`.
+        # Rationale (from 2026-04-20 post-mortem): on fast momentum entries, the
+        # old spread-aware limit (midpoint / bid + 0.75×spread) went stale in
+        # the ~1s quote→submit latency because the ask ticked up. USGG 2026-04-20
+        # 15:21 UTC missed a +3.6R move because limit was $15.56 and ask ran
+        # from $15.58 to $15.60+ during submit. A small buffer above the ask
+        # survives 1-2 tick upward moves and matches the 30bps slip budget
+        # ORB/bull flag already use.
+        limit = ask * (1.0 + self.smart_limit_ask_buffer_bps / 10000.0)
+        limit = round(limit, 2)
 
         info = {
             'bid': bid, 'ask': ask, 'bid_sz': bid_sz, 'ask_sz': ask_sz,
             'spread': spread, 'spread_pct': spread_pct, 'ba_ratio': ba_ratio,
-            'pricing': 'smart',
+            'pricing': 'ask_plus_buffer',
+            'ask_buffer_bps': self.smart_limit_ask_buffer_bps,
             'quote_fetched_at': quote_fetched_at,
         }
         logger.info(
             f"[{self.STRATEGY_NAME}] {symbol}: smart pricing — "
             f"bid=${bid:.2f}×{bid_sz} ask=${ask:.2f}×{ask_sz} "
-            f"spread={spread_pct:.2%} ba_ratio={ba_ratio:.1f} → limit=${limit:.2f}"
+            f"spread={spread_pct:.2%} ba_ratio={ba_ratio:.1f} "
+            f"→ limit=${limit:.2f} (ask+{self.smart_limit_ask_buffer_bps:.0f}bps)"
         )
         return limit, info
 

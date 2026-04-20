@@ -25,7 +25,13 @@ entry:
   # >=100bps → 5% WR, -$1,621/trade. Consistent across all 4 time periods.
   max_entry_spread_bps: 100   # Skip if (ask-bid)/price > 100bps. 0 = disabled.
   # Smart entry: L1-informed pricing + early entry on strong book
-  smart_entry_enabled: true   # Smart PRICING enabled (spread-aware limits)
+  smart_entry_enabled: true   # Smart PRICING enabled (ask + buffer, see below)
+  # Post-2026-04-20 fix: limit = ask × (1 + buffer_bps/10000). Replaces the
+  # older midpoint/bid+0.75*spread logic that went stale on fast movers (USGG
+  # miss — see post-mortem). 30bps matches ORB + bull flag slip budget and
+  # survives sub-second ask ticks during the ~1s quote→submit latency.
+  # Raise to 50bps if fast-movers still miss; drop to 0 to re-test legacy pricing.
+  smart_limit_ask_buffer_bps: 30
   early_entry_bars: 3         # DISABLED: set to confirm_bars (3) = no early entry until backtested
   early_bid_ask_ratio: 2.0    # bid_sz/ask_sz required for early entry
   early_max_spread_pct: 0.003 # max spread for early entry (0.3%)
