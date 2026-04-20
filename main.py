@@ -435,6 +435,20 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
         if stop_monitor is not None and not stop_monitor.polling_mode:
             macd_engine.register_on_stop_monitor()
             logger.info("MACD Wave: bar handler registered on shared StopMonitor")
+        # Restart-safe: reconcile positions (DB ↔ Alpaca) then rebuild intraday
+        # state. `_sync_intraday_state` is a no-op before 9:30 or after 15:45 ET
+        # but on mid-day restart it repopulates `universe_opens`, rebuilds
+        # `crossed_stocks` from historical 1-min bars, and replays closed
+        # trades from DB into `daily_pnl` / `trades_today`. Without this a
+        # restart after 9:40 ET permanently loses the day's cross events.
+        try:
+            macd_engine.sync_positions()
+        except Exception as e:
+            logger.error(f"MACD Wave: sync_positions failed at startup: {e}")
+        try:
+            macd_engine._sync_intraday_state()
+        except Exception as e:
+            logger.error(f"MACD Wave: _sync_intraday_state failed at startup: {e}")
         logger.info(f"MACD Wave strategy ENABLED")
 
     # ORB (Opening Range Breakout) engine — runs on separate paper Alpaca

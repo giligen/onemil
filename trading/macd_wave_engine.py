@@ -109,6 +109,11 @@ class MACDWaveEngine:
         self.cross_time_max_min = int(entry.get('cross_time_max_min', 3))
         self.min_vol_at_cross = int(entry.get('min_vol_at_cross', 0))
         self.max_vol_at_cross = int(entry.get('max_vol_at_cross', 300_000))
+        # Per-symbol trade cap per day — used by intraday recovery to decide
+        # whether to re-add a previously-traded symbol to crossed_stocks. The
+        # live path relies on crossed_stocks membership to prevent re-entry;
+        # on mid-day restart that membership is lost, so we DB-check instead.
+        self.max_waves = int(cfg.get('waves', {}).get('max_waves', 1))
         self.min_macd_hist_pct = float(entry.get('min_macd_hist_pct', 0.5))
         self.max_price_at_entry = float(entry.get('max_price_at_entry', 0))
 
@@ -378,6 +383,247 @@ class MACDWaveEngine:
                 f"({qty}sh @ ${avg_price:.2f}) — DB back-filled, "
                 f"MACD/trail monitoring resumed"
             )
+
+    # ------------------------------------------------------------------
+    # Mid-day restart recovery
+    # ------------------------------------------------------------------
+
+    def _find_cross_minute(
+        self,
+        bars_df: pd.DataFrame,
+        open_price: float,
+        market_open_et: datetime,
+    ) -> Tuple[Optional[int], int]:
+        """Scan historical bars for the first minute the stock hit the
+        `min_intraday_pct` threshold. Returns (cross_minute, vol_at_cross) or
+        (None, 0) if never crossed in the bars provided.
+
+        Mirrors the cross logic in scan_for_movers: vol_at_cross = cumulative
+        volume from 9:30 through the bar that breaches the threshold.
+        """
+        if open_price <= 0 or bars_df is None or bars_df.empty:
+            return None, 0
+        threshold = open_price * (1.0 + self.min_intraday_pct / 100.0)
+        cum_vol = 0
+        for _, bar in bars_df.iterrows():
+            try:
+                cum_vol += int(bar.get('volume', 0) or 0)
+            except (TypeError, ValueError):
+                pass
+            try:
+                bar_high = float(bar.get('high', 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if bar_high >= threshold:
+                bar_ts = bar.get('timestamp')
+                try:
+                    cross_minute = int(
+                        (bar_ts.astimezone(ET) - market_open_et).total_seconds() / 60
+                    )
+                except Exception:
+                    return None, 0
+                return cross_minute, cum_vol
+        return None, 0
+
+    def _already_traded_and_capped_today(self, sym: str) -> bool:
+        """True if symbol has hit `max_waves` trades today (DB-backed).
+        Prevents re-adding a symbol to `crossed_stocks` if it already filled
+        + exited today and the per-symbol wave cap blocks another entry."""
+        if self.max_waves <= 0:
+            return False
+        today = date.today().isoformat()
+        try:
+            trades = self.db.get_trades_by_date(today)
+        except Exception as e:
+            logger.debug(f"[{self.STRATEGY_NAME}] _already_traded: DB query failed: {e}")
+            return False
+        count = sum(
+            1 for t in (trades or [])
+            if t.get('symbol') == sym and t.get('strategy') == self.STRATEGY_NAME
+        )
+        return count >= self.max_waves
+
+    def _sync_intraday_state(self) -> None:
+        """Rebuild intraday state on mid-day restart.
+
+        Repopulates `universe_opens`, `crossed_stocks`, `invalidated` from
+        snapshots + historical 1-min bars, and replays closed-trade P&L from
+        DB. No-op outside 9:30-15:45 ET window (nothing to recover) and when
+        universe is empty (pre-build restart — next scanner cycle will handle).
+
+        Called from main.py after `sync_positions()`. Idempotent.
+        """
+        now_et = datetime.now(ET)
+        from datetime import time as dtime
+        market_open_et = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+
+        # Time window guard
+        if now_et < market_open_et:
+            logger.debug(f"[{self.STRATEGY_NAME}] intraday sync: pre-market, skipping")
+            return
+        if now_et.time() >= dtime(15, 45):
+            logger.debug(f"[{self.STRATEGY_NAME}] intraday sync: post-close, skipping")
+            return
+
+        # Ensure universe exists. If pre-market build missed us (booted after
+        # 9:30) try to build now — idempotent, cheap.
+        if not self.universe:
+            try:
+                self.build_universe()
+            except Exception as e:
+                logger.warning(f"[{self.STRATEGY_NAME}] intraday sync: build_universe failed: {e}")
+        if not self.universe:
+            logger.warning(f"[{self.STRATEGY_NAME}] intraday sync: universe empty, skipping")
+            return
+
+        minutes_since_open = max(0, int((now_et - market_open_et).total_seconds() / 60))
+        logger.info(
+            f"[{self.STRATEGY_NAME}] intraday sync: recovering state "
+            f"({minutes_since_open}min since open, universe={len(self.universe)})"
+        )
+
+        # ---- Step 1: snapshots → universe_opens + split detection ----
+        snapshots: Dict[str, Dict] = {}
+        chunk_size = 200
+        for i in range(0, len(self.universe), chunk_size):
+            chunk = self.universe[i:i + chunk_size]
+            try:
+                chunk_snaps = self.alpaca.get_snapshots(chunk)
+                snapshots.update(chunk_snaps or {})
+            except Exception as e:
+                logger.warning(f"[{self.STRATEGY_NAME}] intraday sync: snapshot chunk failed: {e}")
+
+        for sym, snap in snapshots.items():
+            if not isinstance(snap, dict):
+                continue
+            open_price = float(snap.get('open', 0) or 0)
+            prev_close = float(snap.get('prev_close', 0) or 0)
+            # Reverse-split detection (mirrors scan_for_movers lines 535-546)
+            if prev_close > 0 and open_price > 0:
+                jump_ratio = abs(open_price - prev_close) / prev_close
+                if jump_ratio > 1.0:
+                    self.invalidated.add(sym)
+                    logger.info(
+                        f"[{self.STRATEGY_NAME}] {sym}: split detected on sync "
+                        f"(prev_close ${prev_close:.2f} → open ${open_price:.2f}) — invalidating"
+                    )
+                    continue
+            if open_price > 0:
+                self.universe_opens[sym] = open_price
+
+        # ---- Step 2: prefilter candidates via snapshot high/open ----
+        threshold_ratio = 1.0 + self.min_intraday_pct / 100.0
+        candidates: List[str] = []
+        for sym, snap in snapshots.items():
+            if sym in self.invalidated:
+                continue
+            if sym in self.open_positions:
+                continue  # sync_positions already handled live positions
+            if sym in self.crossed_stocks:
+                continue  # already tracked (shouldn't happen at startup but safe)
+            if not isinstance(snap, dict):
+                continue
+            open_price = float(snap.get('open', 0) or 0)
+            bar_high = float(snap.get('high', 0) or 0)
+            if open_price <= 0 or bar_high <= 0:
+                continue
+            if bar_high / open_price < threshold_ratio:
+                continue
+            if self._already_traded_and_capped_today(sym):
+                continue
+            candidates.append(sym)
+
+        # ---- Step 3: fetch historical bars + reconstruct crossed_stocks ----
+        recovered: List[str] = []
+        if candidates:
+            try:
+                bars_by_sym = self.alpaca.get_1min_bars_multi(
+                    candidates, lookback_minutes=minutes_since_open + 5
+                )
+            except Exception as e:
+                logger.warning(f"[{self.STRATEGY_NAME}] intraday sync: bar fetch failed: {e}")
+                bars_by_sym = {}
+
+            for sym in candidates:
+                bars = bars_by_sym.get(sym)
+                if bars is None or (hasattr(bars, 'empty') and bars.empty):
+                    continue
+                open_price = self.universe_opens.get(sym, 0)
+                cross_minute, vol_at_cross = self._find_cross_minute(
+                    bars, open_price, market_open_et
+                )
+                if cross_minute is None:
+                    continue
+                if self.cross_time_max_min > 0 and cross_minute > self.cross_time_max_min:
+                    continue  # crossed outside the entry window
+                # Apply volume filters (same gates scan_for_movers uses)
+                if self.max_vol_at_cross > 0 and vol_at_cross > self.max_vol_at_cross:
+                    self.invalidated.add(sym)
+                    continue
+                if self.min_vol_at_cross > 0 and vol_at_cross < self.min_vol_at_cross:
+                    continue
+
+                # Derive crossed_at timestamp from the actual cross bar. Best
+                # approximation: the minute that breached threshold.
+                crossed_at_utc = market_open_et.astimezone(timezone.utc) + timedelta(
+                    minutes=cross_minute
+                )
+                self.crossed_stocks[sym] = CrossedStock(
+                    symbol=sym,
+                    open_price=open_price,
+                    cross_time_min=cross_minute,
+                    vol_at_cross=vol_at_cross,
+                    crossed_at=crossed_at_utc,
+                )
+                if self.stop_monitor is not None:
+                    try:
+                        self.stop_monitor.subscribe_bars(sym)
+                    except Exception as e:
+                        logger.debug(
+                            f"[{self.STRATEGY_NAME}] {sym}: subscribe_bars failed: {e}"
+                        )
+                recovered.append(sym)
+
+        # ---- Step 4: replay today's closed trades into daily_pnl counters ----
+        today = date.today().isoformat()
+        replayed = 0
+        try:
+            all_today = self.db.get_trades_by_date(today) or []
+        except Exception as e:
+            logger.warning(f"[{self.STRATEGY_NAME}] intraday sync: DB trades fetch failed: {e}")
+            all_today = []
+        closed_today = [
+            t for t in all_today
+            if t.get('strategy') == self.STRATEGY_NAME
+            and t.get('exit_price') is not None
+        ]
+        closed_today.sort(key=lambda t: t.get('exited_at') or t.get('created_at') or '')
+        for t in closed_today:
+            try:
+                pnl = float(t.get('pnl') or 0)
+            except (TypeError, ValueError):
+                pnl = 0.0
+            self.daily_pnl += pnl
+            self.trades_today += 1
+            replayed += 1
+
+        # ---- Telemetry ----
+        sample = ', '.join(recovered[:8]) + ('...' if len(recovered) > 8 else '')
+        logger.info(
+            f"[{self.STRATEGY_NAME}] intraday state synced: "
+            f"{len(self.universe_opens)} opens, {len(recovered)} crossed recovered "
+            f"[{sample}], {replayed} closed trades replayed, "
+            f"daily_pnl=${self.daily_pnl:+,.2f}, trades_today={self.trades_today}"
+        )
+        if self.notifier and (recovered or replayed):
+            try:
+                self.notifier.send_message_sync(
+                    f"[MACD Wave] 🔄 Restart recovery: {len(recovered)} crossed symbols "
+                    f"reconstructed, {replayed} trades replayed "
+                    f"(day P&L ${self.daily_pnl:+,.0f})"
+                )
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Pre-market: build universe
