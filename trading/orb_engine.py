@@ -348,30 +348,22 @@ class ORBEngine:
         keep: List[str] = []
         for sym, snap in (snapshots or {}).items():
             try:
-                # Snapshot may be a dict or an object
-                latest = snap.get('latest_trade', {}) if isinstance(snap, dict) else getattr(snap, 'latest_trade', None)
-                prev_bar = snap.get('previous_daily_bar', {}) if isinstance(snap, dict) else getattr(snap, 'previous_daily_bar', None)
-                today_bar = snap.get('daily_bar', {}) if isinstance(snap, dict) else getattr(snap, 'daily_bar', None)
-                # Price: prefer today's open, fallback to latest trade
-                open_price = 0.0
-                if today_bar:
-                    o = today_bar.get('open') if isinstance(today_bar, dict) else getattr(today_bar, 'open', None)
-                    if o:
-                        open_price = float(o)
-                if open_price == 0.0 and latest:
-                    p = latest.get('price') if isinstance(latest, dict) else getattr(latest, 'price', None)
-                    if p:
-                        open_price = float(p)
+                # AlpacaClient.get_snapshots returns a FLAT dict per symbol:
+                #   {'open', 'high', 'low', 'close', 'volume',           # today's daily bar
+                #    'prev_close', 'prev_volume',                         # yesterday's daily bar
+                #    'latest_price', 'bid_price', 'ask_price', ...}       # latest trade/quote
+                # Prior code tried `snap.daily_bar.open` nested access — that's how
+                # Alpaca's raw SDK object looks, but alpaca_client.py flattens it.
+                open_price = float(snap.get('open', 0) or 0) if isinstance(snap, dict) else 0
+                if open_price <= 0:
+                    # Fall back to latest trade price (used when today's daily bar
+                    # hasn't been ticked yet — rare but seen right at 9:30 ET).
+                    lp = snap.get('latest_price', 0) if isinstance(snap, dict) else 0
+                    open_price = float(lp or 0)
                 if open_price <= 0:
                     continue
-                # Prev close + volume for gap + volume filters
-                prev_close = 0.0
-                prev_volume = 0
-                if prev_bar:
-                    pc = prev_bar.get('close') if isinstance(prev_bar, dict) else getattr(prev_bar, 'close', None)
-                    pv = prev_bar.get('volume') if isinstance(prev_bar, dict) else getattr(prev_bar, 'volume', None)
-                    if pc: prev_close = float(pc)
-                    if pv: prev_volume = int(pv)
+                prev_close = float(snap.get('prev_close', 0) or 0) if isinstance(snap, dict) else 0
+                prev_volume = int(snap.get('prev_volume', 0) or 0) if isinstance(snap, dict) else 0
                 # Apply BT criteria
                 if not (self.universe_min_price <= open_price <= self.universe_max_price):
                     continue
