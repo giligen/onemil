@@ -986,7 +986,13 @@ class ORBEngine:
             submit_bid_size=submit_bid_size, submit_ask_size=submit_ask_size,
         )
         if trade_id is None:
-            logger.error(f"ORB: {plan.symbol} DB save failed — cannot track order {order_id}")
+            # Order was accepted by Alpaca but we failed to persist tracking.
+            # Operator must decide: cancel the orphan order or manually record.
+            self._notify_error(
+                f"{plan.symbol}: DB save failed AFTER Alpaca accepted order "
+                f"{order_id}. Order is LIVE on Alpaca but ORB engine will not "
+                f"track it. CANCEL MANUALLY or insert DB row before next fill."
+            )
             return None
 
         # Fill-rate telemetry
@@ -1160,7 +1166,15 @@ class ORBEngine:
         try:
             self.db.update_trade(pos.trade_id, fill_update)
         except Exception as e:
-            logger.error(f"ORB: _confirm_fill DB update failed: {e}")
+            # DB missed the fill transition. Alpaca says filled but our DB
+            # still shows pending_new. Next sync will re-try; meanwhile exit
+            # paths that query DB may misbehave. Operator should verify.
+            self._notify_error(
+                f"{pos.symbol}: DB update failed on fill confirm "
+                f"(fill=${fill_price:.2f} x{shares}). Row {pos.trade_id} may "
+                f"show wrong state until next sync.",
+                exc=e,
+            )
 
         # Entry microstructure from quote watch (bid/ask/depth/OFI at submit + fill).
         if self.stop_monitor is not None and hasattr(self.stop_monitor, 'get_quote_watch_snapshot'):
@@ -1237,7 +1251,17 @@ class ORBEngine:
                     f"lock arms at ${lock_arm_px:.2f}, lock stop ${lock_stop_px:.2f})"
                 )
             except Exception as e:
-                logger.error(f"ORB: add_watch failed for {pos.symbol}: {e}")
+                # CRITICAL: position filled but StopMonitor isn't watching it.
+                # Only the safety-net bracket SL (10% below entry) will exit
+                # this trade. Operator must manually add a tighter stop or
+                # rebuild the watch.
+                self._notify_error(
+                    f"{pos.symbol}: filled @ ${fill_price:.2f} x{shares} but "
+                    f"StopMonitor.add_watch FAILED. Safety-net SL at "
+                    f"${pos.entry_price * (1 - self.safety_sl_pct):.2f} is the "
+                    f"ONLY active stop. Rebuild watch or cancel position.",
+                    exc=e,
+                )
 
         # Clear candidate order tracking (position is now live)
         cand = self.candidates.get(pos.symbol)
@@ -1373,19 +1397,57 @@ class ORBEngine:
             f"pnl=${pnl:+,.2f} daily_pnl=${self.daily_pnl:+,.2f}"
         )
 
+    def _cancel_symbol_open_orders(self, sym: str) -> int:
+        """Cancel ALL open Alpaca orders for a symbol (SL/TP bracket legs, etc).
+
+        Required before `close_position` — if any sell order is live for the
+        symbol, Alpaca reports available=0 / held_for_orders=N and rejects
+        the close with "insufficient qty available". On 2026-04-20 this
+        caused ANNA to leak overnight (-$2.5K) because the unreachable TP
+        leg held all 11,682 shares.
+
+        Returns:
+            Number of orders canceled.
+        """
+        canceled = 0
+        try:
+            from alpaca.trading.requests import GetOrdersRequest
+            from alpaca.trading.enums import QueryOrderStatus
+            open_orders = self.alpaca.trading_client.get_orders(
+                GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[sym])
+            ) or []
+        except Exception as e:
+            logger.warning(f"ORB: get_orders({sym}) failed pre-close: {e}")
+            return 0
+        for o in open_orders:
+            oid = str(getattr(o, 'id', '') or '')
+            if not oid:
+                continue
+            try:
+                # Prefer direct trading_client call — cancel_order_by_id is the
+                # canonical path. Our AlpacaClient.cancel_order wrapper also works.
+                self.alpaca.trading_client.cancel_order_by_id(oid)
+                canceled += 1
+            except Exception as e:
+                logger.warning(f"ORB: cancel_order_by_id({oid}/{sym}) failed: {e}")
+        return canceled
+
     def force_close_all(self) -> int:
         """15:45 ET: cancel pending ORB orders + market-close all ORB positions.
+
+        Bracket legs (OCO SL + safety-net TP) hold shares as 'held_for_orders'
+        on Alpaca. They MUST be canceled before close_position or Alpaca
+        refuses the close. See _cancel_symbol_open_orders for the history.
 
         Returns:
             Number of positions closed.
         """
         closed = 0
+        failed = []
         # Cancel pending buy-stop orders (candidates with plan submitted but not filled)
         for sym, cand in self.candidates.items():
             if cand.plan_submitted and sym not in self.open_positions:
                 logger.info(f"ORB FORCE-CLOSE: cancelling unfilled pending order for {sym}")
-                # The order_id is tracked via DB; we'd need to query or cache.
-                # For simplicity, rely on DB query.
                 try:
                     pending = self.db.get_open_trades(
                         datetime.now(timezone.utc).date(), strategy=STRATEGY_NAME
@@ -1396,17 +1458,52 @@ class ORBEngine:
                 except Exception as e:
                     logger.warning(f"ORB: cancel pending for {sym} failed: {e}")
 
-        # Market-close all ORB open positions
+        # Market-close all ORB open positions. Cancel bracket legs FIRST.
+        import time as _time
         for sym, pos in list(self.open_positions.items()):
             try:
+                n_legs = self._cancel_symbol_open_orders(sym)
+                if n_legs > 0:
+                    logger.info(
+                        f"ORB FORCE-CLOSE: {sym} canceled {n_legs} bracket/safety legs "
+                        f"— waiting for ACK before close_position"
+                    )
+                    # Alpaca needs a moment to process cancels before the shares
+                    # become 'available' again. 0.8s empirically sufficient on paper.
+                    _time.sleep(0.8)
                 result = self.alpaca.close_position(sym)
-                logger.info(f"ORB FORCE-CLOSE: {sym} market close order={result.get('id', '?')}")
+                logger.info(
+                    f"ORB FORCE-CLOSE: {sym} market close order="
+                    f"{(result or {}).get('id', '?')}"
+                )
                 closed += 1
             except Exception as e:
-                logger.error(f"ORB: force-close {sym} failed: {e}")
+                failed.append(sym)
+                # Retry ONCE with longer wait — Alpaca may still be ACK'ing cancels.
+                try:
+                    _time.sleep(2.0)
+                    result = self.alpaca.close_position(sym)
+                    logger.info(f"ORB FORCE-CLOSE: {sym} closed on retry "
+                                f"(order={(result or {}).get('id', '?')})")
+                    closed += 1
+                    failed.remove(sym)
+                except Exception as e2:
+                    # CRITICAL: position will leak overnight unless operator acts.
+                    # Telegram + DB flag so it shows in tomorrow's sync drift scan.
+                    self._notify_error(
+                        f"FORCE-CLOSE FAILED for {sym} — position will leak overnight "
+                        f"(qty={pos.shares}, entry=${pos.entry_price:.2f}). "
+                        f"MANUAL ACTION REQUIRED before next market open.",
+                        exc=e2,
+                    )
 
         if self.notify_on_force_close and self.notifier and closed > 0:
-            self._notify(f"{self.tg_prefix} FORCE-CLOSE at 15:45 — {closed} positions closed")
+            self._notify(
+                f"{self.tg_prefix} FORCE-CLOSE at "
+                f"{self.force_close_hour_et:02d}:{self.force_close_minute_et:02d} — "
+                f"{closed} positions closed"
+                + (f" / {len(failed)} FAILED ({','.join(failed)})" if failed else "")
+            )
 
         # Daily summary — fires once per day at force-close. Telegram + log.
         if not self.daily_summary_sent:
@@ -1626,11 +1723,41 @@ class ORBEngine:
                     logger.error(f"ORB.sync: re-watch {sym} failed: {e}")
             recovered += 1
 
+        # Orphan detection: Alpaca has positions we don't track.
+        # Cause (seen 2026-04-20→21): force-close failed → position carried
+        # overnight → today's sync_positions queries get_open_trades(today)
+        # which returns 0 rows → ORB engine has no tracker for a live
+        # Alpaca position. Without this alert the position drifts unmanaged.
+        orphans = [
+            sym for sym in alp_pos_by_sym
+            if sym not in self.open_positions
+        ]
+        if orphans:
+            # Gather per-orphan info for the alert
+            details = []
+            for sym in orphans:
+                p = alp_pos_by_sym[sym]
+                try:
+                    qty = int(getattr(p, 'qty', 0) or (p.get('qty', 0) if isinstance(p, dict) else 0))
+                    avg = float(getattr(p, 'avg_entry_price', 0) or
+                                (p.get('avg_entry_price', 0) if isinstance(p, dict) else 0))
+                    upl = float(getattr(p, 'unrealized_pl', 0) or
+                                (p.get('unrealized_pl', 0) if isinstance(p, dict) else 0))
+                    details.append(f"{sym} qty={qty} avg=${avg:.2f} upl=${upl:+.0f}")
+                except Exception:
+                    details.append(f"{sym} (parse-failed)")
+            self._notify_error(
+                f"ORPHAN ALPACA POSITIONS ({len(orphans)}) not tracked by ORB — "
+                f"{'; '.join(details)}. Likely from a failed force-close or "
+                f"cross-day state drift. Manual review required."
+            )
+
         logger.info(
             f"ORB.sync_positions: {recovered} filled + {recovered_pending} pending rehydrated; "
             f"{len(self.open_positions)} tracked; "
             f"{len(alp_pos_by_sym)} Alpaca positions, "
             f"{len(alp_pending_by_id)} Alpaca pending orders"
+            + (f"; {len(orphans)} ORPHAN(s): {','.join(orphans)}" if orphans else "")
         )
 
     def reset_daily(self) -> None:
@@ -1843,6 +1970,25 @@ class ORBEngine:
                     _asyncio.run(result)
         except Exception as e:
             logger.debug(f"ORB: notifier failed (non-critical): {e}")
+
+    def _notify_error(self, msg: str, exc: Optional[Exception] = None) -> None:
+        """Log + Telegram critical error.
+
+        Use for state-drift / unrecoverable-position / failed-exit scenarios
+        where a human may need to intervene manually. Lower-stakes errors
+        should use `logger.error` or `logger.warning` directly without
+        telegram noise.
+
+        Policy (from 2026-04-21 post-mortem on the ANNA force-close failure
+        that leaked overnight): anything that could leave Alpaca and DB in
+        an inconsistent state, or leave a position unmanaged, MUST alert
+        via telegram so we catch it before market close.
+        """
+        full = f"{self.tg_prefix} ❌ {msg}"
+        if exc is not None:
+            full += f" — {type(exc).__name__}: {exc}"
+        logger.error(f"ORB CRITICAL: {msg}" + (f" ({exc})" if exc else ""))
+        self._notify(full)
 
     def is_force_close_time(self, now_utc: Optional[datetime] = None) -> bool:
         """True if current ET time is past the force-close threshold (15:45 ET default).
