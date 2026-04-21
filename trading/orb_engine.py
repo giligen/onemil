@@ -237,6 +237,8 @@ class ORBEngine:
         self.last_entry_hour_et = le_hour
         self.last_entry_minute_et = le_minute
         self._late_entry_cutoff_logged = False
+        # Post-open range-sweep done flag (one-shot per day). See _ensure_ranges_post_open.
+        self._post_open_range_sweep_done = False
 
         # Planner (stateless, built once)
         self.planner = OrbTradePlanner(cfg)
@@ -501,6 +503,94 @@ class ORBEngine:
             self._ingest_bars(symbol, bars_df)
         except Exception as e:
             logger.warning(f"ORB: backfill for {symbol} failed: {e}")
+
+    def _ensure_ranges_post_open(self) -> None:
+        """One-shot post-9:35 ET sweep — backfill range_data for any candidate
+        that didn't get it via the WebSocket bar stream.
+
+        Context: universe_build runs at ~9:31 ET and subscribes symbols to the
+        WS bar stream. But Alpaca's WS only delivers bars from subscribe-time
+        forward — the 9:30 bar (closed at 9:31:00) is already gone. Late-arriving
+        or low-volume bars can also delay the 5-bar range from completing. Result
+        on 2026-04-21: 7 of 11 candidates had INCOMPLETE ranges 13 minutes after
+        range close, even though all 5 bars existed in Alpaca's historical feed.
+
+        Fix: on the first check_entries call after 9:35 ET, batch-fetch historical
+        1-min bars for every candidate still missing range_data. One API call via
+        get_1min_bars_multi. Then ingest each — which computes range_data.
+
+        Idempotent via self._post_open_range_sweep_done; resets daily.
+        """
+        if self._post_open_range_sweep_done:
+            return
+        now_utc = datetime.now(timezone.utc)
+        try:
+            from zoneinfo import ZoneInfo
+            et_now = now_utc.astimezone(ZoneInfo('America/New_York'))
+        except Exception:
+            et_now = now_utc - timedelta(hours=_et_offset_hours(now_utc))
+        # Gate: only run between 9:35 and 11:00 ET (same window as
+        # _backfill_range_if_needed — past 11:00, ORB shouldn't trade anyway).
+        if et_now.time() < dtime(9, 35) or et_now.time() > dtime(11, 0):
+            return
+
+        missing = [
+            sym for sym, cand in self.candidates.items()
+            if cand.range_data is None
+        ]
+        if not missing:
+            self._post_open_range_sweep_done = True
+            return
+
+        logger.info(
+            f"ORB: post-open range sweep — backfilling {len(missing)} candidates "
+            f"missing range_data at {et_now.time().strftime('%H:%M:%S')} ET: "
+            f"{','.join(missing[:10])}{'...' if len(missing) > 10 else ''}"
+        )
+
+        # Batch fetch: 1 API call for all missing symbols. Lookback covers
+        # 9:30 ET → now with headroom. Generous (60 min) is fine — we only
+        # look at the 9:30-9:34 slice for range computation; extra bars are
+        # just stored in the rolling window.
+        minutes_since_open = 60
+        bars_by_sym: Dict[str, pd.DataFrame] = {}
+        try:
+            if hasattr(self.alpaca, 'get_1min_bars_multi'):
+                bars_by_sym = self.alpaca.get_1min_bars_multi(
+                    missing, lookback_minutes=minutes_since_open
+                ) or {}
+            else:
+                for sym in missing:
+                    try:
+                        b = self.alpaca.get_1min_bars(sym, lookback_minutes=minutes_since_open)
+                        if b is not None and not b.empty:
+                            bars_by_sym[sym] = b
+                    except Exception:
+                        continue
+        except Exception as e:
+            logger.warning(f"ORB: post-open sweep bar fetch failed: {e}")
+
+        filled = 0
+        for sym in missing:
+            bars = bars_by_sym.get(sym)
+            if bars is None or bars.empty:
+                continue
+            try:
+                bars = bars.copy()
+                bars['timestamp'] = pd.to_datetime(bars['timestamp'], utc=True)
+                bars = bars.sort_values('timestamp').reset_index(drop=True)
+                self._ingest_bars(sym, bars)
+                if self.candidates.get(sym) and self.candidates[sym].range_data is not None:
+                    filled += 1
+            except Exception as e:
+                logger.warning(f"ORB: post-open sweep ingest({sym}) failed: {e}")
+
+        logger.info(
+            f"ORB: post-open range sweep — filled {filled}/{len(missing)} ranges"
+        )
+        # Mark done even if some failed — next tick's WS bars will handle
+        # any stragglers through the normal flow.
+        self._post_open_range_sweep_done = True
 
     # =====================================================================
     # Bar stream integration
@@ -773,6 +863,15 @@ class ORBEngine:
 
         # Cancel any unfilled stop-buy orders past the 10:35 ET time stop.
         self._cancel_stale_pending_orders()
+
+        # Post-9:35 range sweep: any candidate without range_data gets
+        # backfilled via REST. Runs ONCE per day, triggered on the first
+        # check_entries call after 9:35 ET. Prevents the 2026-04-21 bug
+        # where bars subscribed at 9:31 via WS missed the 9:30/9:31 bars
+        # (WS only delivers from subscribe-time forward) and ranges stayed
+        # incomplete for 10-15 minutes until a late scanner tick noticed.
+        # Direct REST fetch with a single batch call is instant + reliable.
+        self._ensure_ranges_post_open()
 
         if self._daily_loss_limit_hit():
             return []
@@ -1777,6 +1876,7 @@ class ORBEngine:
         self.daily_n_time_stop_canceled = 0
         self.daily_summary_sent = False
         self._late_entry_cutoff_logged = False
+        self._post_open_range_sweep_done = False
         # Drain any leftover bar events from yesterday
         try:
             while True:
