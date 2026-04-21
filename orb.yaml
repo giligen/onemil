@@ -46,10 +46,7 @@ entry:
   # submissions. Fix shipped 2026-04-20 after QBTZ/BATL slipped through at
   # 12:30 / 1:11 PM ET. Raise to be more permissive with late arrivals, or
   # lower toward "09:45" for strict BT-exact behavior.
-  # 2026-04-21: TEMPORARILY bumped to 10:15 for one day to validate the new
-  # _ensure_ranges_post_open sweep live after today's slow-entry bug. REVERT
-  # to "10:00" tomorrow after validation.
-  last_entry_submit_time_et: "10:15"
+  last_entry_submit_time_et: "10:00"
 
 # Composite filter — 7-feature signed z-score, threshold >= 0.
 # Params baked from H1 2025 TRAIN fit (1090 trades). Refit quarterly via study_orb_refit.py.
