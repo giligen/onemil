@@ -504,7 +504,7 @@ class ORBEngine:
         except Exception as e:
             logger.warning(f"ORB: backfill for {symbol} failed: {e}")
 
-    def _ensure_ranges_post_open(self) -> None:
+    def _ensure_ranges_post_open(self) -> Set[str]:
         """One-shot post-9:35 ET sweep — backfill range_data for any candidate
         that didn't get it via the WebSocket bar stream.
 
@@ -520,9 +520,18 @@ class ORBEngine:
         get_1min_bars_multi. Then ingest each — which computes range_data.
 
         Idempotent via self._post_open_range_sweep_done; resets daily.
+
+        Returns:
+            Set of symbols whose range_data was just filled by this sweep.
+            Callers (check_entries) should widen their eligible set with these
+            so a subset-scoped check_entries(symbols=subset) doesn't skip them
+            — was the 2026-04-22 bug: WS drain fired check_entries with the
+            Q5 subset {CRMX,BKKT,RGTX,BITU}, sweep filled ETHT/RDTL/NBIG/VNCE
+            (all Q4 — should rank FIRST per orb.yaml), but those never scored
+            because cand_pool=symbols didn't include them.
         """
         if self._post_open_range_sweep_done:
-            return
+            return set()
         now_utc = datetime.now(timezone.utc)
         try:
             from zoneinfo import ZoneInfo
@@ -532,7 +541,7 @@ class ORBEngine:
         # Gate: only run between 9:35 and 11:00 ET (same window as
         # _backfill_range_if_needed — past 11:00, ORB shouldn't trade anyway).
         if et_now.time() < dtime(9, 35) or et_now.time() > dtime(11, 0):
-            return
+            return set()
 
         missing = [
             sym for sym, cand in self.candidates.items()
@@ -540,7 +549,7 @@ class ORBEngine:
         ]
         if not missing:
             self._post_open_range_sweep_done = True
-            return
+            return set()
 
         logger.info(
             f"ORB: post-open range sweep — backfilling {len(missing)} candidates "
@@ -570,7 +579,7 @@ class ORBEngine:
         except Exception as e:
             logger.warning(f"ORB: post-open sweep bar fetch failed: {e}")
 
-        filled = 0
+        filled_syms: Set[str] = set()
         for sym in missing:
             bars = bars_by_sym.get(sym)
             if bars is None or bars.empty:
@@ -581,16 +590,17 @@ class ORBEngine:
                 bars = bars.sort_values('timestamp').reset_index(drop=True)
                 self._ingest_bars(sym, bars)
                 if self.candidates.get(sym) and self.candidates[sym].range_data is not None:
-                    filled += 1
+                    filled_syms.add(sym)
             except Exception as e:
                 logger.warning(f"ORB: post-open sweep ingest({sym}) failed: {e}")
 
         logger.info(
-            f"ORB: post-open range sweep — filled {filled}/{len(missing)} ranges"
+            f"ORB: post-open range sweep — filled {len(filled_syms)}/{len(missing)} ranges"
         )
         # Mark done even if some failed — next tick's WS bars will handle
         # any stragglers through the normal flow.
         self._post_open_range_sweep_done = True
+        return filled_syms
 
     # =====================================================================
     # Bar stream integration
@@ -871,7 +881,18 @@ class ORBEngine:
         # (WS only delivers from subscribe-time forward) and ranges stayed
         # incomplete for 10-15 minutes until a late scanner tick noticed.
         # Direct REST fetch with a single batch call is instant + reliable.
-        self._ensure_ranges_post_open()
+        #
+        # 2026-04-22 bug fix: when called via scanner's WS drain path,
+        # check_entries gets `symbols=<subset>` — only WS-touched symbols.
+        # The sweep populates ranges for symbols that DIDN'T arrive via WS
+        # (e.g. 9:30 bars already closed by subscribe-time). Without this
+        # widening, those sweep-filled candidates are never scored and top-K
+        # collapses to whatever the WS happened to deliver. On 4/22 that
+        # meant Q4 winners (ETHT/RDTL/NBIG/VNCE) were skipped and four Q5s
+        # filled all 4 slots — against orb.yaml ranking.order=[Q4,Q5,...].
+        sweep_filled = self._ensure_ranges_post_open()
+        if sweep_filled and symbols is not None:
+            symbols = set(symbols) | sweep_filled
 
         if self._daily_loss_limit_hit():
             return []
@@ -957,6 +978,30 @@ class ORBEngine:
             cand.composite = score
             cand.quintile = assign_quintile(score, self.quintile_cutoffs)
             scored.append(cand)
+            # Telemetry for live-vs-BT parity debugging. 2026-04-22: live
+            # composites ran ~0.09 below BT on same symbols/data, cause
+            # unknown. Dump each feature so next session we can diff against
+            # analysis_results/orb_features_*.csv to identify the divergent
+            # input (likely a stale T-1 daily bar or 20d-high at 9:35 ET).
+            # Abbrev: rtv=range_total_volume, rabr=range_avg_bar_range_pct,
+            # rs=range_size_pct, p20h=price_vs_20d_high_pct,
+            # pdcp=prev_day_close_position, rcp=range_close_position.
+            # Names match column headers in orb_features_*.csv.
+            logger.info(
+                "ORB SCORED: %s comp=%.4f %s | "
+                "gap=%.3f rtv=%.0f rabr=%.3f rs=%.3f p20h=%.3f pdcp=%.3f rcp=%.3f "
+                "| prev_close=%.4f range_open=%.4f",
+                cand.symbol, score, cand.quintile,
+                feats.get('gap_pct', float('nan')),
+                feats.get('range_total_volume', float('nan')),
+                feats.get('range_avg_bar_range_pct', float('nan')),
+                feats.get('range_size_pct', float('nan')),
+                feats.get('price_vs_20d_high_pct', float('nan')),
+                feats.get('prev_day_close_position', float('nan')),
+                feats.get('range_close_position', float('nan')),
+                float((providers.get('prev_day_bar') or {}).get('close') or 0.0),
+                cand.range_data.range_open if cand.range_data else 0.0,
+            )
 
         if not scored:
             return []
