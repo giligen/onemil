@@ -30,7 +30,10 @@ from trading.stop_monitor import (
 
 @pytest.fixture
 def mock_alpaca():
-    """Mocked AlpacaClient."""
+    """Mocked AlpacaClient with the post-2026-04-23 fill-confirmation path
+    pre-wired so tests don't accidentally hit the 10s poll timeout. Tests
+    that specifically exercise the timeout/escalation path should override
+    `get_order` with a non-filled response."""
     client = MagicMock(spec=AlpacaClient)
     client.cancel_order.return_value = True
     client.submit_limit_sell_order.return_value = {
@@ -43,19 +46,31 @@ def mock_alpaca():
         'status': 'accepted',
         'symbol': 'TEST',
     }
+    # Default happy path: limit fill confirmed immediately.
+    client.get_order.return_value = {
+        'id': 'sell-order-123',
+        'status': 'filled',
+        'filled_avg_price': 4.20,
+        'filled_qty': 500,
+    }
     return client
 
 
 @pytest.fixture
 def monitor(mock_alpaca):
-    """StopMonitor instance (not started — no WebSocket thread)."""
-    return StopMonitor(
+    """StopMonitor instance (not started — no WebSocket thread).
+    Shortened fill-confirmation timings so the poll loop doesn't
+    dominate test runtime when escalation paths are exercised."""
+    mon = StopMonitor(
         api_key='test-key',
         api_secret='test-secret',
         alpaca_client=mock_alpaca,
         marketable_limit_offset=0.03,
         marketable_limit_offset_pct=0.005,
     )
+    mon._STOP_EXIT_FILL_TIMEOUT_S = 0.2
+    mon._STOP_EXIT_POLL_INTERVAL_S = 0.05
+    return mon
 
 
 # ---------------------------------------------------------------------------
