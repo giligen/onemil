@@ -1750,27 +1750,27 @@ class StopMonitor:
     _STOP_EXIT_POLL_INTERVAL_S = 1.0
 
     async def _poll_order_fill(
-        self, client, order_id: str,
-        fallback_price: float, fallback_qty: int,
+        self, client, order_id: str, fallback_price: float,
         timeout_s: Optional[float] = None,
-    ) -> tuple:
+    ) -> Optional[float]:
         """Poll an Alpaca order until it fills, is cancelled, or timeout.
 
-        Returns (fill_price, fill_qty) on confirmed fill, (None, 0) if the
-        poll timed out or the order died (caller decides how to recover).
+        Returns the `filled_avg_price` on a confirmed fill, `None` if the poll
+        timed out or the order ended in a non-fill terminal state
+        (cancelled/rejected/expired). Caller decides how to recover (escalate
+        to market close, give up, etc.).
 
-        Shared by the main stop-exit path and the market-close fallback.
-        Caller should not rely on the order still being active after this
-        returns with (None, 0) — it may still fill later. The caller's job
-        is to cancel + retry or escalate.
+        Only `status == 'filled'` counts as success — a brief `partially_filled`
+        window won't short-circuit us; we wait for either full fill, a terminal
+        state, or timeout. `fallback_price` is returned in the exotic case
+        where Alpaca reports filled but with no `filled_avg_price`.
         """
-        import asyncio as _asyncio
-        loop = _asyncio.get_event_loop()
+        loop = asyncio.get_event_loop()
         deadline = time_mod.time() + (
             timeout_s if timeout_s is not None else self._STOP_EXIT_FILL_TIMEOUT_S
         )
         while time_mod.time() < deadline:
-            await _asyncio.sleep(self._STOP_EXIT_POLL_INTERVAL_S)
+            await asyncio.sleep(self._STOP_EXIT_POLL_INTERVAL_S)
             try:
                 status_info = await loop.run_in_executor(
                     None, client.get_order, order_id
@@ -1782,33 +1782,66 @@ class StopMonitor:
                 continue
             st = str(status_info.get('status', '')).lower()
             if st == 'filled':
-                price = float(status_info.get('filled_avg_price') or fallback_price)
-                qty = int(status_info.get('filled_qty') or fallback_qty)
-                return price, qty
+                return float(status_info.get('filled_avg_price') or fallback_price)
             if st in ('canceled', 'cancelled', 'rejected', 'expired'):
                 logger.warning(
                     f"StopMonitor: order {order_id[:8]}... ended in state "
                     f"'{st}' before fill"
                 )
-                return None, 0
-        return None, 0
+                return None
+        return None
+
+    async def _sl_leg_fill_price(
+        self, client, sl_leg_id: Optional[str],
+    ) -> Optional[float]:
+        """If the broker-side bracket SL leg won the exit race, its order record
+        carries the real fill price. Look that up so a race-condition
+        reconciliation doesn't fall back to a made-up price.
+
+        Returns the SL leg's `filled_avg_price` or None if we can't recover it
+        (missing id, API failure, or the leg isn't filled).
+        """
+        if not sl_leg_id:
+            return None
+        loop = asyncio.get_event_loop()
+        try:
+            status_info = await loop.run_in_executor(
+                None, client.get_order, sl_leg_id
+            )
+        except Exception as e:
+            logger.debug(
+                f"StopMonitor: SL leg {sl_leg_id[:8]} lookup failed: {e}"
+            )
+            return None
+        if str(status_info.get('status', '')).lower() != 'filled':
+            return None
+        price = status_info.get('filled_avg_price')
+        return float(price) if price else None
 
     async def _escalate_to_market_close(
         self, client, symbol: str, stale_limit_order_id: str,
-        trigger_price: float, shares: int,
+        trigger_price: float, sl_leg_id: Optional[str] = None,
     ) -> tuple:
         """Cancel a stale limit, submit a market close, poll for its fill.
 
-        Returns (fill_price, fill_qty, market_order_id) or
-        (trigger_price, shares, '') if we can't confirm a fill (last-resort
-        for DB to record something while we investigate manually).
+        Returns (fill_price, market_order_id). fill_price is the real
+        filled_avg_price when we can recover one (limit filled during cancel
+        race, market close confirmed, or broker-side bracket SL race resolved
+        via `_sl_leg_fill_price`). Falls back to `trigger_price` with an ERROR
+        log and a "verify manually" flag only when every recovery path fails.
 
-        Invoked when the primary limit sell didn't fill within the window.
-        During this escalation the bracket SL leg remains active as a
-        catastrophic safety net.
+        `sl_leg_id` is queried when `close_position` raises the race-condition
+        error (Alpaca says "position not found"): the bracket SL leg probably
+        won, and its order record has the real fill.
+
+        Note: the bulk-cancel upstream in `_execute_stop_exit` already freed
+        our shares by cancelling all open orders for the symbol before the
+        limit submit — so by the time we reach this escalation, the SL leg
+        is usually ALREADY cancelled and can't protect anything. The SL
+        recovery below only pays off when the bulk-cancel itself errored
+        and the SL survived long enough to fill.
         """
-        import asyncio as _asyncio
-        loop = _asyncio.get_event_loop()
+        loop = asyncio.get_event_loop()
         logger.warning(
             f"StopMonitor: {symbol} limit sell UNFILLED after "
             f"{self._STOP_EXIT_FILL_TIMEOUT_S}s — cancel + market close "
@@ -1827,12 +1860,11 @@ class StopMonitor:
             )
             if str(status_info.get('status', '')).lower() == 'filled':
                 price = float(status_info.get('filled_avg_price') or trigger_price)
-                qty = int(status_info.get('filled_qty') or shares)
                 logger.info(
                     f"StopMonitor: {symbol} limit filled during cancel race "
                     f"at ${price:.4f}"
                 )
-                return price, qty, stale_limit_order_id
+                return price, stale_limit_order_id
         except Exception:
             pass
 
@@ -1849,23 +1881,35 @@ class StopMonitor:
         except Exception as e:
             if self._is_race_condition_error(e):
                 logger.info(
-                    f"StopMonitor: {symbol} market close race — position may "
-                    f"already be flat via bracket SL"
+                    f"StopMonitor: {symbol} market close race — position "
+                    f"already flat; recovering fill from SL leg"
+                )
+                sl_price = await self._sl_leg_fill_price(client, sl_leg_id)
+                if sl_price is not None:
+                    logger.info(
+                        f"StopMonitor: {symbol} bracket SL filled at "
+                        f"${sl_price:.4f} — using as exit price"
+                    )
+                    return sl_price, ''
+                logger.error(
+                    f"StopMonitor: {symbol} POSITION FLAT BUT FILL PRICE UNKNOWN — "
+                    f"DB will record trigger_price=${trigger_price:.2f}. "
+                    f"VERIFY POSITION MANUALLY on Alpaca."
                 )
             else:
                 logger.error(
                     f"StopMonitor: {symbol} market close failed: {e}"
                 )
-            return trigger_price, shares, ''
+            return trigger_price, ''
 
         if not mkt_order_id:
             logger.error(
                 f"StopMonitor: {symbol} market close returned no order id"
             )
-            return trigger_price, shares, ''
+            return trigger_price, ''
 
-        price, qty = await self._poll_order_fill(
-            client, mkt_order_id, fallback_price=trigger_price, fallback_qty=shares,
+        price = await self._poll_order_fill(
+            client, mkt_order_id, fallback_price=trigger_price,
         )
         if price is None:
             logger.error(
@@ -1873,8 +1917,8 @@ class StopMonitor:
                 f"{self._STOP_EXIT_FILL_TIMEOUT_S}s — DB will record trigger "
                 f"price as last-resort. VERIFY POSITION MANUALLY on Alpaca."
             )
-            return trigger_price, shares, mkt_order_id
-        return price, qty, mkt_order_id
+            return trigger_price, mkt_order_id
+        return price, mkt_order_id
 
     async def _execute_stop_exit(
         self, symbol: str, trigger_price: float, watch: WatchEntry,
@@ -1907,7 +1951,6 @@ class StopMonitor:
         # alpaca_clients_by_strategy was configured. Market-data calls below
         # (get_latest_quote) stay on the default client — quotes are public.
         client = self._client_for(watch.strategy)
-        exit_price = 0.0
         order_id = ""
 
         try:
@@ -1925,8 +1968,16 @@ class StopMonitor:
                         f"StopMonitor: {symbol} TP cancel failed (may be filled): {e}"
                     )
 
-            # NOTE: SL leg cancelled AFTER sell is submitted (below) so
-            # position is never naked. If sell fails, SL remains as protection.
+            # NOTE on naked-window: Alpaca holds shares inside active bracket
+            # legs, blocking a separate limit sell. So the bulk-cancel below
+            # (before submit) must kill the SL leg too, which means there's
+            # NO broker-side stop active during the fill-poll window (up to
+            # ~10s limit poll + ~10s market-close fallback = 20s max). This
+            # is an accepted trade-off: we're *actively* exiting via our own
+            # limit + market-close fallback, and the max window is short vs
+            # the 10% bracket buffer. The trailing `watch.sl_leg_id` cancel
+            # after fill confirmation is a best-effort backstop in case the
+            # bulk-cancel's get_orders call errored and left the SL alive.
 
             # Compute limit price: use cached quote from stream (sub-50ms),
             # fall back to REST if stale, then fixed offset as last resort
@@ -2018,11 +2069,7 @@ class StopMonitor:
             # the limit sat unfilled (as with BMNZ on 2026-04-23), DB said
             # closed while Alpaca was still long — a silent desync that cost
             # us $288 extra loss on BMNZ before we noticed it manually.
-            # Also: SL leg is deferred-cancelled until the position is
-            # confirmed flat, so it provides catastrophic protection during
-            # the market-close fallback window.
-            actual_fill = None
-            actual_qty = 0
+            exit_price: Optional[float] = None
             try:
                 result = await loop.run_in_executor(
                     None,
@@ -2038,15 +2085,17 @@ class StopMonitor:
                     f"qty={watch.shares}, limit=${limit_price:.2f} ({pricing_method}), "
                     f"order={order_id} — awaiting fill confirmation"
                 )
-                actual_fill, actual_qty = await self._poll_order_fill(
+                exit_price = await self._poll_order_fill(
                     client, order_id, fallback_price=limit_price,
-                    fallback_qty=watch.shares,
                 )
-                if actual_fill is None:
+                if exit_price is None:
                     # Limit unfilled within timeout — escalate to market close.
-                    # The SL leg is still active as catastrophic protection.
-                    actual_fill, actual_qty, mkt_order_id = await self._escalate_to_market_close(
-                        client, symbol, order_id, trigger_price, watch.shares,
+                    # Pass sl_leg_id so we can recover the real price if the
+                    # broker-side bracket SL won the race (rare but possible
+                    # when the bulk-cancel above errored).
+                    exit_price, mkt_order_id = await self._escalate_to_market_close(
+                        client, symbol, order_id, trigger_price,
+                        sl_leg_id=watch.sl_leg_id,
                     )
                     if mkt_order_id:
                         order_id = mkt_order_id
@@ -2070,7 +2119,6 @@ class StopMonitor:
                     f"falling back to close_position()"
                 )
                 # Fallback: market close (in executor)
-                # SL leg is STILL active as protection during fallback
                 try:
                     fallback = await loop.run_in_executor(
                         None, client.close_position, symbol
@@ -2081,11 +2129,10 @@ class StopMonitor:
                         f"StopMonitor: {symbol} fallback close_position — "
                         f"order={order_id} — awaiting fill confirmation"
                     )
-                    actual_fill, actual_qty = await self._poll_order_fill(
+                    exit_price = await self._poll_order_fill(
                         client, order_id, fallback_price=trigger_price,
-                        fallback_qty=watch.shares,
                     )
-                    if actual_fill is None:
+                    if exit_price is None:
                         # Market close order never confirmed filled. Log loudly;
                         # use trigger_price as last-resort marker but flag it.
                         logger.error(
@@ -2093,8 +2140,7 @@ class StopMonitor:
                             f"DB will use trigger_price=${trigger_price:.2f}. "
                             f"VERIFY POSITION MANUALLY on Alpaca."
                         )
-                        actual_fill = trigger_price
-                        actual_qty = watch.shares
+                        exit_price = trigger_price
                 except Exception as e2:
                     # Race condition: bracket closed the position before our
                     # fallback ran. Log as INFO, not ERROR — Telegram stays quiet.
@@ -2118,9 +2164,12 @@ class StopMonitor:
                     return
 
             # Position confirmed flat (or we've exhausted retries with a
-            # known-bad price). NOW safe to cancel the SL leg and use the
-            # actual fill price in the exit event.
-            exit_price = actual_fill if actual_fill is not None else limit_price
+            # known-bad price). NOW safe to cancel any surviving SL leg and
+            # use the actual fill price in the exit event. Every exit path
+            # above either set exit_price to a real fill or to trigger_price
+            # as a last-resort; `None` is impossible here, but defensive.
+            if exit_price is None:
+                exit_price = trigger_price
             if watch.sl_leg_id:
                 try:
                     await loop.run_in_executor(

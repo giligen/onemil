@@ -255,11 +255,19 @@ class TestStopExitFillConfirmation:
         assert events[0].exit_reason == 'stop_loss_market_fallback'
 
     @pytest.mark.asyncio
-    async def test_sl_leg_only_cancelled_after_fill_confirmed(self, monitor, mock_alpaca):
-        """SL leg must survive until we've confirmed the position is flat —
-        it's the catastrophic-protection backstop during market-close
-        escalation. If we cancelled SL on submit and the limit failed to
-        fill AND market close also failed, we'd be naked."""
+    async def test_explicit_sl_leg_cancel_deferred_until_after_fill(self, monitor, mock_alpaca):
+        """The explicit `watch.sl_leg_id` cancel at the end of the exit path is
+        a best-effort backstop in case the bulk-cancel-all-open-orders block
+        upstream failed. This test asserts that that trailing cancel fires
+        AFTER the TP cancel (and AFTER fill confirmation) — i.e., we don't
+        bail out early and leave the explicit SL cancel unexecuted.
+
+        Note: in production, the bulk-cancel (which depends on
+        `trading_client.get_orders`) usually cancels the SL leg BEFORE the
+        limit submit because Alpaca holds shares inside active bracket legs.
+        So the naked window during the fill poll is real; the trailing cancel
+        is just a safety net for the bulk-cancel-errored case.
+        """
         cancel_log = []
 
         def _track_cancel(order_id):
@@ -276,16 +284,18 @@ class TestStopExitFillConfirmation:
 
         await monitor._execute_stop_exit('PLYX', 4.25, w, exit_reason='stop_loss')
 
-        # SL leg ('sl-leg') cancel must come AFTER limit submit in the order log.
-        # Specifically: TP cancel first, then later SL cancel — SL must not be
-        # the 1st or 2nd cancel (that would put it pre-fill-confirmation).
+        # Both explicit cancels fire, and SL comes after TP (after fill is
+        # confirmed). Bulk-cancel is a no-op here because the fixture's
+        # trading_client.get_orders returns [] — production would also kill
+        # the SL leg in that block.
         assert 'tp-leg' in cancel_log
         assert 'sl-leg' in cancel_log
         tp_idx = cancel_log.index('tp-leg')
         sl_idx = cancel_log.index('sl-leg')
         assert sl_idx > tp_idx, (
             f"SL leg cancelled at position {sl_idx}, TP at {tp_idx} — "
-            f"SL must cancel AFTER fill is confirmed (full log: {cancel_log})"
+            f"trailing sl_leg_id cancel must fire AFTER fill confirmation "
+            f"(full log: {cancel_log})"
         )
 
     @pytest.mark.asyncio
@@ -335,3 +345,157 @@ class TestStopExitFillConfirmation:
         assert len(events) == 1
         # trigger_price = 4.25; DB records this so we don't lose the trade row.
         assert events[0].exit_price == pytest.approx(4.25, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# Race-condition SL-leg recovery (item 5 from the code review)
+# ---------------------------------------------------------------------------
+#
+# When the primary limit fails to fill AND close_position raises
+# "position not found" ("40410000"), the broker-side bracket SL leg most
+# likely won the exit race. Before the 2026-04-23 v2 fix the event carried
+# trigger_price (often $1+ above the real SL fill — e.g. BMNZ would have
+# misreported by ~$3.5K). Now `_escalate_to_market_close` queries the SL
+# leg via `_sl_leg_fill_price` and uses the real filled_avg_price when
+# recoverable.
+# ---------------------------------------------------------------------------
+
+
+class TestSlLegFillRecoveryOnRace:
+
+    @pytest.mark.asyncio
+    async def test_race_on_close_position_recovers_sl_leg_fill(
+        self, monitor, mock_alpaca
+    ):
+        """close_position races → query SL leg → use its real fill price."""
+        from alpaca.common.exceptions import APIError
+
+        # Limit sell returns 'new' forever → forces escalation
+        def _get_order(order_id):
+            if order_id == 'sell-order-123':
+                return {'id': 'sell-order-123', 'status': 'new',
+                        'filled_avg_price': None, 'filled_qty': 0}
+            if order_id == 'sl-1':
+                # SL leg won the race and actually filled at $2.70
+                return {'id': 'sl-1', 'status': 'filled',
+                        'filled_avg_price': 2.70, 'filled_qty': 500}
+            return {'id': order_id, 'status': 'new',
+                    'filled_avg_price': None, 'filled_qty': 0}
+        mock_alpaca.get_order.side_effect = _get_order
+        # close_position raises "position not found" (race condition)
+        mock_alpaca.close_position.side_effect = Exception(
+            "40410000: position not found for PLYX"
+        )
+
+        monitor.add_watch('PLYX', 3.00, 500, 'tp-1', 'sl-1')
+        with monitor._watch_lock:
+            w = monitor._watches['PLYX']
+            w.latest_bid = 2.99
+            w.latest_ask = 3.00
+            w.latest_quote_ts = time.time()
+
+        await monitor._execute_stop_exit('PLYX', 2.98, w, exit_reason='stop_loss')
+        events = monitor.drain_exit_events()
+        assert len(events) == 1
+        # Event must carry the SL leg's real fill ($2.70), NOT trigger_price ($2.98)
+        assert events[0].exit_price == pytest.approx(2.70, abs=0.01)
+
+    @pytest.mark.asyncio
+    async def test_race_on_close_position_no_sl_leg_filled_uses_trigger(
+        self, monitor, mock_alpaca
+    ):
+        """close_position races, SL leg status is NOT 'filled' (e.g. someone
+        cancelled it, or it's still live but we still got a race) — fall back
+        to trigger_price with ERROR (logged for manual reconcile)."""
+        def _get_order(order_id):
+            if order_id == 'sl-1':
+                # SL leg was cancelled — nothing to recover from it
+                return {'id': 'sl-1', 'status': 'canceled',
+                        'filled_avg_price': None, 'filled_qty': 0}
+            return {'id': order_id, 'status': 'new',
+                    'filled_avg_price': None, 'filled_qty': 0}
+        mock_alpaca.get_order.side_effect = _get_order
+        mock_alpaca.close_position.side_effect = Exception(
+            "40410000: position not found"
+        )
+
+        monitor.add_watch('PLYX', 3.00, 500, 'tp-1', 'sl-1')
+        with monitor._watch_lock:
+            w = monitor._watches['PLYX']
+            w.latest_bid = 2.99
+            w.latest_ask = 3.00
+            w.latest_quote_ts = time.time()
+
+        await monitor._execute_stop_exit('PLYX', 2.98, w, exit_reason='stop_loss')
+        events = monitor.drain_exit_events()
+        assert len(events) == 1
+        assert events[0].exit_price == pytest.approx(2.98, abs=0.01)
+
+    @pytest.mark.asyncio
+    async def test_race_on_close_position_no_sl_leg_id_uses_trigger(
+        self, monitor, mock_alpaca
+    ):
+        """If the watch was registered without an SL leg id (unusual), the
+        race-condition recovery has nothing to query and falls back to
+        trigger_price with ERROR."""
+        def _get_order(order_id):
+            return {'id': order_id, 'status': 'new',
+                    'filled_avg_price': None, 'filled_qty': 0}
+        mock_alpaca.get_order.side_effect = _get_order
+        mock_alpaca.close_position.side_effect = Exception(
+            "40410000: position not found"
+        )
+
+        # Watch registered with sl_leg_id=None
+        monitor.add_watch('PLYX', 3.00, 500, 'tp-1', None)
+        with monitor._watch_lock:
+            w = monitor._watches['PLYX']
+            w.latest_bid = 2.99
+            w.latest_ask = 3.00
+            w.latest_quote_ts = time.time()
+
+        await monitor._execute_stop_exit('PLYX', 2.98, w, exit_reason='stop_loss')
+        events = monitor.drain_exit_events()
+        assert len(events) == 1
+        assert events[0].exit_price == pytest.approx(2.98, abs=0.01)
+
+    @pytest.mark.asyncio
+    async def test_sl_leg_fill_price_helper_returns_none_on_missing_id(
+        self, monitor, mock_alpaca
+    ):
+        """_sl_leg_fill_price is a pure helper; None id → None, no API call."""
+        result = await monitor._sl_leg_fill_price(mock_alpaca, None)
+        assert result is None
+        mock_alpaca.get_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sl_leg_fill_price_helper_returns_none_when_not_filled(
+        self, monitor, mock_alpaca
+    ):
+        mock_alpaca.get_order.return_value = {
+            'id': 'sl-1', 'status': 'accepted',
+            'filled_avg_price': None, 'filled_qty': 0,
+        }
+        result = await monitor._sl_leg_fill_price(mock_alpaca, 'sl-1')
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_sl_leg_fill_price_helper_returns_price_on_fill(
+        self, monitor, mock_alpaca
+    ):
+        mock_alpaca.get_order.return_value = {
+            'id': 'sl-1', 'status': 'filled',
+            'filled_avg_price': 12.94, 'filled_qty': 500,
+        }
+        result = await monitor._sl_leg_fill_price(mock_alpaca, 'sl-1')
+        assert result == pytest.approx(12.94, abs=0.001)
+
+    @pytest.mark.asyncio
+    async def test_sl_leg_fill_price_helper_swallows_api_errors(
+        self, monitor, mock_alpaca
+    ):
+        """Network / API errors in the SL lookup must not crash the exit
+        flow. Return None so caller falls back cleanly."""
+        mock_alpaca.get_order.side_effect = Exception("boom")
+        result = await monitor._sl_leg_fill_price(mock_alpaca, 'sl-1')
+        assert result is None
