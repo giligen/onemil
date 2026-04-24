@@ -722,6 +722,31 @@ pytest tests/ -v          # full suite
 pytest tests/ -q          # quick summary
 ```
 
+## ORB Live Roll-Out
+
+Going live with ORB follows a **cushion-gated capital ramp** — 5 stages
+from conservative launch ($30K budget, $1K risk) up to full 4× PDT margin
+deployment ($174K budget, $5.2K risk). Each stage advance is gated by
+realized P&L, not calendar time. Bad stages auto-demote. Hard stop at
+−15% of starting cash.
+
+Authoritative artifacts:
+
+- **[docs/orb_rollout_plan.md](docs/orb_rollout_plan.md)** — the full
+  playbook: stages table, advancement gates, demotion triggers, hard
+  stop, timeline expectations, FAQ.
+- **[scripts/orb_ramp_check.py](scripts/orb_ramp_check.py)** —
+  eligibility checker. Reads `orb.yaml` + trades DB + git log; prints
+  current stage, cushion, blockers, demotion triggers, hard-stop status:
+
+  ```bash
+  python3 scripts/orb_ramp_check.py          # summary
+  python3 scripts/orb_ramp_check.py -v       # with per-day P&L history
+  ```
+
+Run the checker **before every stage change** and whenever you want a
+dispassionate read on how the live ramp is going.
+
 ## Future Tasks
 
 - **BuyMonitor Phase 2**: Replace buy-stop orders with SIP WebSocket limit buys for tighter entry slippage (data collection active via Phase 1 quote monitoring)
