@@ -722,6 +722,160 @@ pytest tests/ -v          # full suite
 pytest tests/ -q          # quick summary
 ```
 
+## ORB (Opening Range Breakout) — Third Strategy
+
+Runs as a module inside the same `onemil-trader` systemd service alongside
+Bull Flag and MACD Wave. Fires at 9:35 ET on gap-up stocks that break
+above their 9:30–9:34 opening-range high. Uses the `static_lock_1R` exit
+(stop at range_low, lock at entry+1R after price touches +1.5R).
+
+**Validated Jan 2025 → Apr 2026** (`study_orb_pipeline_static_lock.py`,
+production-parity):
+
+| Metric | Value |
+|---|---:|
+| Full-timeline P&L | **$+342,565** |
+| Max DD (full-timeline) | −$18,126 (trough 2025-11-13) |
+| Calmar | 18.90× |
+| Daily WR | 56.6% |
+| Trades | 1,001 over 309 trading days |
+| Negative months | 1 (Aug 2025, −$9,288) |
+
+### Enable
+
+1. **Set ORB Alpaca keys in `.env`** (separate paper account from Bull
+   Flag / MACD so ORB's positions & BP don't interact with the others):
+
+   ```bash
+   ALPACA_ORB_API_KEY=<your-orb-paper-key>
+   ALPACA_ORB_API_SECRET=<your-orb-paper-secret>
+   ALPACA_ORB_PAPER=true
+   ```
+
+2. **Master kill switch** in `orb.yaml`:
+
+   ```yaml
+   strategy:
+     name: orb
+     enabled: true          # ← flip to true
+   ```
+
+3. **Add `--orb` to the systemd unit** so `main.py` loads the module
+   alongside the other strategies:
+
+   ```bash
+   # The shipped unit runs all three:
+   #   /usr/bin/python3 main.py --scan --trade --flag --macd --orb --verbose
+   grep ExecStart /etc/systemd/system/onemil-trader.service
+   # If --orb isn't there yet, edit the unit + daemon-reload:
+   sudo systemctl edit --full onemil-trader
+   sudo systemctl daemon-reload
+   ```
+
+4. **Restart**:
+
+   ```bash
+   sudo systemctl restart onemil-trader
+   journalctl -u onemil-trader --since "1 minute ago" | grep "ORB strategy ENABLED"
+   # Expected: "ORB strategy ENABLED — master_flag=True, dry_run=False"
+   ```
+
+ORB runs concurrently with Bull Flag and MACD Wave in the same process —
+no separate service. Each strategy uses its own Alpaca client (ORB's
+keys above; Bull Flag + MACD share the main `ALPACA_API_KEY`). Cross-
+strategy FCFS dedup means if a symbol is already open in any strategy,
+ORB skips it (`conflict.skip_if_any_strategy_has_symbol: true` in
+`orb.yaml`).
+
+### Disable / Rollback
+
+Flip the master kill switch + restart. Existing ORB positions force-close
+on shutdown (controlled by `exit.force_close_time_et` and the shutdown
+hook in `trading/orb_engine.py`):
+
+```yaml
+strategy:
+  enabled: false
+```
+
+```bash
+sudo systemctl restart onemil-trader
+```
+
+Bull Flag and MACD Wave remain unaffected — they run from different
+accounts with different tags in `trades.strategy`.
+
+Nuclear option (service crash / emergency): `sudo systemctl stop
+onemil-trader` halts everything. Any still-open ORB position on the ORB
+Alpaca account can be flattened manually via the Alpaca web UI or:
+
+```bash
+python3 -c "
+import sys; sys.path.insert(0, '.')
+from config import Config
+from alpaca.trading.client import TradingClient
+cfg = Config()
+tc = TradingClient(cfg.alpaca_orb_api_key, cfg.alpaca_orb_api_secret, paper=True)
+tc.close_all_positions(cancel_orders=True)
+"
+```
+
+### Monitor
+
+```bash
+# Live ORB activity only
+journalctl -u onemil-trader -f | grep '\[ORB\]\|ORB:'
+
+# Per-candidate composite scoring (telemetry from 2026-04-22 fix)
+journalctl -u onemil-trader --since today | grep "ORB SCORED"
+
+# Entries / fills / exits
+journalctl -u onemil-trader --since today | grep -E "ORB ENTRY SUBMITTED|ORB FILL|ORB EXIT"
+
+# Today's trade summary from the DB
+sqlite3 data/trades.db "
+  SELECT symbol, fill_price, exit_price, exit_reason, pnl,
+         json_extract(pattern_data, '\$.quintile') AS Q
+  FROM trades
+  WHERE strategy='orb' AND trade_date = date('now')
+  ORDER BY id;
+"
+
+# Alpaca-side open positions (ORB account)
+python3 -c "
+import sys; sys.path.insert(0, '.')
+from config import Config
+from data_sources.alpaca_client import AlpacaClient
+cfg = Config()
+orb = AlpacaClient(cfg.alpaca_orb_api_key, cfg.alpaca_orb_api_secret, paper=True)
+for p in orb.get_open_positions():
+    print(f\"{p['symbol']:6s} qty={p['qty']} avg={p['avg_entry_price']} upnl={p['unrealized_pl']}\")
+"
+```
+
+### Nightly post-close BT refresh
+
+A systemd timer fires at 16:30 ET Mon–Fri to refresh the features CSV
++ run the BT pipeline against today's final bars (installed separately —
+see `systemd/README.md`):
+
+```bash
+systemctl list-timers onemil-orb-backtest.timer
+journalctl -u onemil-orb-backtest.service -n 200 --no-pager   # latest run
+```
+
+### Deeper references
+
+- **`CLAUDE.md`** — full ORB reference: entry mechanics, exit mechanics,
+  sizing math, risk config, correlation dedup, rollout phases, "do NOT"
+  list, telemetry examples.
+- **`orb.yaml`** — the single source of truth for all tunable parameters.
+  Top-level comments explain what each section does. Do NOT change
+  `sizing.old_position_reference_usd` or the `quintile_cutoffs` /
+  `adaptive_mults` / `filter.features` blocks without running
+  `study_orb_refit.py` first (quarterly cadence).
+- **`docs/orb_rollout_plan.md`** — live capital ramp (next section).
+
 ## ORB Live Roll-Out
 
 Going live with ORB follows a **cushion-gated capital ramp** — 5 stages
