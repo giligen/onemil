@@ -1,6 +1,10 @@
 [Unit]
 Description=Fire onemil-orb-backtest.service post-close each weekday
-Requires=onemil-orb-backtest.service
+# No explicit Requires= — systemd naming convention (.timer → same-name
+# .service) implicitly activates the paired service when the timer fires.
+# Using Requires= on the target service would be circular (timer fires
+# service; service doesn't need timer to exist) and can interact weirdly
+# with the service's failure state.
 
 [Timer]
 # 16:30 America/New_York Mon–Fri, DST-aware via the zoneinfo specifier.

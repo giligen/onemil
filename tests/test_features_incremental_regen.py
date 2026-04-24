@@ -24,6 +24,7 @@ from study_orb_features import (
     _merge_new_with_existing,
     _resolve_incremental_plan,
     _atomic_write_csv,
+    IncrementalSchemaDrift,
 )
 
 
@@ -119,6 +120,37 @@ class TestMergeSemantics:
         ]
         merged = _merge_new_with_existing(pd.DataFrame(), new_rows)
         assert len(merged) == 1
+
+    def test_column_drift_new_has_extra_feature_raises(self):
+        """Post-refactor safety (I3): schema mismatch must fail loudly.
+        A silent pd.concat would NaN-fill the missing column on old rows,
+        which downstream dropna would silently delete."""
+        existing = _mk_existing_df()
+        new_rows = [{
+            'symbol': 'X', 'date': date(2026, 4, 23), 'entry_price': 1.0,
+            'pnl': 10.0, 'pnl_pct': 1.0, 'exit_reason': 'target', 'win': 1,
+            'gap_pct': 5.0, 'range_size_pct': 2.0,
+            'new_feature_added_today': 0.123,  # <- extra column
+        }]
+        with pytest.raises(IncrementalSchemaDrift) as excinfo:
+            _merge_new_with_existing(existing, new_rows)
+        msg = str(excinfo.value)
+        assert 'new_feature_added_today' in msg
+        assert '--force-full-regen' in msg
+
+    def test_column_drift_new_missing_feature_raises(self):
+        """Mirror case: new_rows dropped a column → old rows would keep
+        their value but new rows would be NaN on concat."""
+        existing = _mk_existing_df()
+        new_rows = [{
+            # Missing 'range_size_pct' that exists in existing_df
+            'symbol': 'X', 'date': date(2026, 4, 23), 'entry_price': 1.0,
+            'pnl': 10.0, 'pnl_pct': 1.0, 'exit_reason': 'target', 'win': 1,
+            'gap_pct': 5.0,
+        }]
+        with pytest.raises(IncrementalSchemaDrift) as excinfo:
+            _merge_new_with_existing(existing, new_rows)
+        assert 'range_size_pct' in str(excinfo.value)
 
     def test_merged_is_sorted_by_date_then_symbol(self):
         existing = _mk_existing_df()

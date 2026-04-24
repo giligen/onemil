@@ -1035,9 +1035,14 @@ class Database:
         trades without polluting the main `daily_bars` cache that live
         reads. No time-of-day guard — callers opt in explicitly.
 
-        Callers (just `orb_backtest.py --include-today-provisional`
-        today) should TRUNCATE the table at the start of each run to
-        avoid carrying stale rows forward — see `clear_provisional_daily_bars`.
+        Auto-cleanup: BEFORE each write we DELETE any provisional rows
+        whose `bar_date < today_et`. Rationale: this table is only ever
+        meant to carry TODAY's still-open bar; anything older is stale
+        from a prior mid-day run that forgot (or couldn't) call
+        `clear_provisional_daily_bars()` on its way out. Deleting here
+        removes the caller-contract footgun and keeps the table small.
+        `clear_provisional_daily_bars()` still exists for a full wipe
+        (BT always calls it at run start to clear today's leftover too).
 
         Args:
             bars: list of dicts with keys symbol, date, open, high, low, close, volume
@@ -1047,6 +1052,20 @@ class Database:
         """
         if not bars:
             return 0
+        # Sweep stale (pre-today) rows so a previous run's leftover can't
+        # linger after the next day's boundary.
+        today_str = today_et().isoformat()
+        cur = self._cache_conn.execute(
+            "DELETE FROM daily_bars_provisional WHERE bar_date < ?",
+            (today_str,),
+        )
+        swept = cur.rowcount or 0
+        if swept:
+            logger.info(
+                f"save_daily_bars_provisional: swept {swept} stale pre-today "
+                f"row(s) (< {today_str}) before insert"
+            )
+
         now = datetime.now(timezone.utc)
         self._cache_conn.executemany("""
             INSERT OR REPLACE INTO daily_bars_provisional

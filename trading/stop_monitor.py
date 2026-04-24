@@ -1818,17 +1818,27 @@ class StopMonitor:
         price = status_info.get('filled_avg_price')
         return float(price) if price else None
 
+    # Branch tags returned by `_escalate_to_market_close` so the caller
+    # can pick the right exit_reason for downstream analytics.
+    #   limit_race       — limit filled during our cancel attempt; order_id = limit
+    #   market_close     — market close fired and fill confirmed; order_id = mkt
+    #   sl_leg_race      — bracket SL race: position already flat, SL leg had fill
+    #   last_resort      — no recovery path succeeded; using trigger_price (log ERROR)
+    BRANCH_LIMIT_RACE = 'limit_race'
+    BRANCH_MARKET_CLOSE = 'market_close'
+    BRANCH_SL_LEG_RACE = 'sl_leg_race'
+    BRANCH_LAST_RESORT = 'last_resort'
+
     async def _escalate_to_market_close(
         self, client, symbol: str, stale_limit_order_id: str,
         trigger_price: float, sl_leg_id: Optional[str] = None,
     ) -> tuple:
         """Cancel a stale limit, submit a market close, poll for its fill.
 
-        Returns (fill_price, market_order_id). fill_price is the real
-        filled_avg_price when we can recover one (limit filled during cancel
-        race, market close confirmed, or broker-side bracket SL race resolved
-        via `_sl_leg_fill_price`). Falls back to `trigger_price` with an ERROR
-        log and a "verify manually" flag only when every recovery path fails.
+        Returns (fill_price, order_id, branch). branch is one of the
+        BRANCH_* constants above — caller uses it to pick a distinct
+        exit_reason so analytics can tell a "clean market fallback" fill
+        apart from an SL-race-recovered fill or a trigger-price fallback.
 
         `sl_leg_id` is queried when `close_position` raises the race-condition
         error (Alpaca says "position not found"): the bracket SL leg probably
@@ -1864,7 +1874,7 @@ class StopMonitor:
                     f"StopMonitor: {symbol} limit filled during cancel race "
                     f"at ${price:.4f}"
                 )
-                return price, stale_limit_order_id
+                return price, stale_limit_order_id, self.BRANCH_LIMIT_RACE
         except Exception:
             pass
 
@@ -1890,7 +1900,9 @@ class StopMonitor:
                         f"StopMonitor: {symbol} bracket SL filled at "
                         f"${sl_price:.4f} — using as exit price"
                     )
-                    return sl_price, ''
+                    # order_id for analytics points at the SL leg that actually
+                    # filled, not the cancelled limit.
+                    return sl_price, (sl_leg_id or ''), self.BRANCH_SL_LEG_RACE
                 logger.error(
                     f"StopMonitor: {symbol} POSITION FLAT BUT FILL PRICE UNKNOWN — "
                     f"DB will record trigger_price=${trigger_price:.2f}. "
@@ -1900,13 +1912,13 @@ class StopMonitor:
                 logger.error(
                     f"StopMonitor: {symbol} market close failed: {e}"
                 )
-            return trigger_price, ''
+            return trigger_price, '', self.BRANCH_LAST_RESORT
 
         if not mkt_order_id:
             logger.error(
                 f"StopMonitor: {symbol} market close returned no order id"
             )
-            return trigger_price, ''
+            return trigger_price, '', self.BRANCH_LAST_RESORT
 
         price = await self._poll_order_fill(
             client, mkt_order_id, fallback_price=trigger_price,
@@ -1917,8 +1929,8 @@ class StopMonitor:
                 f"{self._STOP_EXIT_FILL_TIMEOUT_S}s — DB will record trigger "
                 f"price as last-resort. VERIFY POSITION MANUALLY on Alpaca."
             )
-            return trigger_price, mkt_order_id
-        return price, mkt_order_id
+            return trigger_price, mkt_order_id, self.BRANCH_LAST_RESORT
+        return price, mkt_order_id, self.BRANCH_MARKET_CLOSE
 
     async def _execute_stop_exit(
         self, symbol: str, trigger_price: float, watch: WatchEntry,
@@ -2093,13 +2105,25 @@ class StopMonitor:
                     # Pass sl_leg_id so we can recover the real price if the
                     # broker-side bracket SL won the race (rare but possible
                     # when the bulk-cancel above errored).
-                    exit_price, mkt_order_id = await self._escalate_to_market_close(
+                    exit_price, mkt_order_id, branch = await self._escalate_to_market_close(
                         client, symbol, order_id, trigger_price,
                         sl_leg_id=watch.sl_leg_id,
                     )
                     if mkt_order_id:
                         order_id = mkt_order_id
+                    # Each branch maps to a distinct exit_reason so analytics
+                    # can separate a clean fallback fill from an SL-race
+                    # recovery or a last-resort trigger-price estimate.
+                    if branch == self.BRANCH_MARKET_CLOSE:
                         exit_reason = 'stop_loss_market_fallback'
+                    elif branch == self.BRANCH_LIMIT_RACE:
+                        # Original limit filled during our cancel — keep the
+                        # plain 'stop_loss' reason since the limit did work.
+                        pass
+                    elif branch == self.BRANCH_SL_LEG_RACE:
+                        exit_reason = 'stop_loss_bracket_sl_race'
+                    elif branch == self.BRANCH_LAST_RESORT:
+                        exit_reason = 'stop_loss_unconfirmed'
             except Exception as e:
                 # Bracket SL may have won the race — position already flat.
                 # Don't page on this; just clean up and exit.

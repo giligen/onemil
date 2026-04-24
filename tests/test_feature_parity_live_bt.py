@@ -257,6 +257,78 @@ def test_live_vs_bt_features_match(
     )
 
 
+def test_load_broad_universe_provisional_overlay(tmp_path, monkeypatch):
+    """P2 (from 2026-04-24 code review): exercise the provisional overlay
+    path through `load_broad_universe(include_provisional_today=today)`
+    to prove it finds today's qualifying candidates from the sidecar
+    table — the same data plumbing mid-day BT depends on.
+
+    Uses a temp cache.db with fully controlled contents. Not a feature-
+    parity test per se; it verifies the DATA FEED into the parity-tested
+    feature extractors is correctly populated when mid-day BT runs.
+    """
+    import sqlite3
+    from datetime import date as _date
+
+    db_path = str(tmp_path / 'cache.db')
+
+    # Mirror the schema pieces we need. Not the full Database class — just
+    # enough for load_broad_universe's SQL.
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript("""
+            CREATE TABLE daily_bars (
+                symbol VARCHAR(10), bar_date DATE,
+                open REAL, high REAL, low REAL, close REAL, volume INTEGER,
+                PRIMARY KEY (symbol, bar_date)
+            );
+            CREATE TABLE daily_bars_provisional (
+                symbol VARCHAR(10), bar_date DATE,
+                open REAL, high REAL, low REAL, close REAL, volume INTEGER,
+                PRIMARY KEY (symbol, bar_date)
+            );
+            CREATE TABLE intraday_bars_1min (
+                symbol VARCHAR(10), bar_date DATE, timestamp TIMESTAMP,
+                open REAL, high REAL, low REAL, close REAL, volume INTEGER,
+                PRIMARY KEY (symbol, timestamp)
+            );
+        """)
+        # Yesterday's final bar for prev_close ($10 close, 1M vol)
+        conn.execute(
+            "INSERT INTO daily_bars VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ('TODAYMVR', '2026-04-23', 10.00, 10.20, 9.80, 10.00, 1_000_000),
+        )
+        # Today's provisional bar: gapped from $10 to $10.80 (8% gap > 5%)
+        conn.execute(
+            "INSERT INTO daily_bars_provisional VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ('TODAYMVR', '2026-04-24', 10.80, 10.95, 10.75, 10.90, 50_000),
+        )
+        # Intraday bar so the EXISTS check in load_broad_universe passes
+        conn.execute(
+            "INSERT INTO intraday_bars_1min VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ('TODAYMVR', '2026-04-24', '2026-04-24T13:30:00+00:00',
+             10.80, 10.85, 10.78, 10.83, 10_000),
+        )
+        conn.commit()
+
+    # Without the overlay kwarg, today's symbol must NOT appear.
+    from study_orb_broad import load_broad_universe
+    universe_no_overlay = load_broad_universe(db_path=db_path)
+    assert '2026-04-24' not in universe_no_overlay, (
+        "Without include_provisional_today=today, today's provisional "
+        "candidate must not leak into the universe."
+    )
+
+    # With the overlay, today's TODAYMVR is discovered.
+    universe_with_overlay = load_broad_universe(
+        db_path=db_path,
+        include_provisional_today=_date(2026, 4, 24),
+    )
+    assert universe_with_overlay.get('2026-04-24') == ['TODAYMVR'], (
+        f"Provisional overlay path failed to surface today's candidate: "
+        f"got {universe_with_overlay.get('2026-04-24')}"
+    )
+
+
 def test_bmnz_real_world_recovery(engine, z_params_prod):
     """Re-derive the 2026-04-23 BMNZ composite from real-world inputs and
     confirm both paths land on the correct ~0.48 Q5 answer. This is the

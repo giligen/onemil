@@ -499,3 +499,130 @@ class TestSlLegFillRecoveryOnRace:
         mock_alpaca.get_order.side_effect = Exception("boom")
         result = await monitor._sl_leg_fill_price(mock_alpaca, 'sl-1')
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# C6 — branch-specific exit_reason for analytics
+# ---------------------------------------------------------------------------
+
+
+class TestExitReasonPerBranch:
+    """Each recovery branch in `_escalate_to_market_close` now signals back
+    a distinct tag so `_execute_stop_exit` can set a distinct exit_reason.
+    Analytics can't separate 'clean market fallback' from 'catastrophic
+    SL race recovery' from 'last-resort trigger_price estimate' without
+    this."""
+
+    @pytest.mark.asyncio
+    async def test_market_close_branch_sets_market_fallback_reason(
+        self, monitor, mock_alpaca
+    ):
+        """Happy-ish fallback: limit didn't fill, market close did."""
+        def _get_order(order_id):
+            if order_id == 'sell-order-123':
+                return {'id': order_id, 'status': 'new',
+                        'filled_avg_price': None, 'filled_qty': 0}
+            # market close order fills at $4.00
+            return {'id': order_id, 'status': 'filled',
+                    'filled_avg_price': 4.00, 'filled_qty': 500}
+        mock_alpaca.get_order.side_effect = _get_order
+        mock_alpaca.close_position.return_value = {
+            'id': 'mkt-999', 'status': 'accepted', 'symbol': 'PLYX',
+        }
+
+        monitor.add_watch('PLYX', 4.29, 500, 'tp-1', 'sl-1')
+        with monitor._watch_lock:
+            w = monitor._watches['PLYX']
+            w.latest_bid = 4.26; w.latest_ask = 4.27
+            w.latest_quote_ts = time.time()
+
+        await monitor._execute_stop_exit('PLYX', 4.25, w, exit_reason='stop_loss')
+        events = monitor.drain_exit_events()
+        assert len(events) == 1
+        assert events[0].exit_reason == 'stop_loss_market_fallback'
+
+    @pytest.mark.asyncio
+    async def test_sl_leg_race_branch_sets_sl_race_reason(
+        self, monitor, mock_alpaca
+    ):
+        """Race path: close_position raises 'position not found', SL leg
+        reports filled, event picks up sl_race reason + SL order_id."""
+        def _get_order(order_id):
+            if order_id == 'sl-1':
+                return {'id': 'sl-1', 'status': 'filled',
+                        'filled_avg_price': 2.70, 'filled_qty': 500}
+            return {'id': order_id, 'status': 'new',
+                    'filled_avg_price': None, 'filled_qty': 0}
+        mock_alpaca.get_order.side_effect = _get_order
+        mock_alpaca.close_position.side_effect = Exception(
+            "40410000: position not found for PLYX"
+        )
+
+        monitor.add_watch('PLYX', 3.00, 500, 'tp-1', 'sl-1')
+        with monitor._watch_lock:
+            w = monitor._watches['PLYX']
+            w.latest_bid = 2.99; w.latest_ask = 3.00
+            w.latest_quote_ts = time.time()
+
+        await monitor._execute_stop_exit('PLYX', 2.98, w, exit_reason='stop_loss')
+        events = monitor.drain_exit_events()
+        assert len(events) == 1
+        assert events[0].exit_reason == 'stop_loss_bracket_sl_race'
+        # order_id should point at the SL leg that actually filled
+        assert events[0].order_id == 'sl-1'
+
+    @pytest.mark.asyncio
+    async def test_last_resort_branch_sets_unconfirmed_reason(
+        self, monitor, mock_alpaca
+    ):
+        """Every recovery path failed → trigger_price + ERROR log +
+        distinct exit_reason so analytics can flag these rows for
+        manual review."""
+        mock_alpaca.get_order.return_value = {
+            'id': 'x', 'status': 'new',
+            'filled_avg_price': None, 'filled_qty': 0,
+        }
+
+        monitor.add_watch('PLYX', 4.29, 500, 'tp-1', 'sl-1')
+        with monitor._watch_lock:
+            w = monitor._watches['PLYX']
+            w.latest_bid = 4.26; w.latest_ask = 4.27
+            w.latest_quote_ts = time.time()
+
+        await monitor._execute_stop_exit('PLYX', 4.25, w, exit_reason='stop_loss')
+        events = monitor.drain_exit_events()
+        assert len(events) == 1
+        assert events[0].exit_reason == 'stop_loss_unconfirmed'
+
+    @pytest.mark.asyncio
+    async def test_limit_race_branch_keeps_plain_stop_loss_reason(
+        self, monitor, mock_alpaca
+    ):
+        """If the primary limit fills during our cancel attempt, the
+        limit did its job — keep 'stop_loss' as the reason rather than
+        labeling this a fallback."""
+        # After cancel attempt, limit is reported filled.
+        def _get_order(order_id):
+            if order_id == 'sell-order-123':
+                # First poll iteration sees 'new' (triggering escalation),
+                # then during escalation's cancel-race check it's 'filled'.
+                if getattr(_get_order, 'polled', False):
+                    return {'id': 'sell-order-123', 'status': 'filled',
+                            'filled_avg_price': 4.22, 'filled_qty': 500}
+                _get_order.polled = True
+                return {'id': 'sell-order-123', 'status': 'new',
+                        'filled_avg_price': None, 'filled_qty': 0}
+            return {'id': order_id, 'status': 'new'}
+        mock_alpaca.get_order.side_effect = _get_order
+
+        monitor.add_watch('PLYX', 4.29, 500, 'tp-1', 'sl-1')
+        with monitor._watch_lock:
+            w = monitor._watches['PLYX']
+            w.latest_bid = 4.26; w.latest_ask = 4.27
+            w.latest_quote_ts = time.time()
+
+        await monitor._execute_stop_exit('PLYX', 4.25, w, exit_reason='stop_loss')
+        events = monitor.drain_exit_events()
+        assert len(events) == 1
+        assert events[0].exit_reason == 'stop_loss'
+        assert events[0].exit_price == pytest.approx(4.22, abs=0.01)

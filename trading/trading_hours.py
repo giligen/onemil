@@ -52,21 +52,30 @@ def today_et(now_et: Optional[datetime] = None) -> _date:
 
 
 def is_regular_session_closed(now_et: Optional[datetime] = None) -> bool:
-    """True if it's past 16:15 ET on a weekday, OR it's a weekend.
+    """True iff today's regular-session daily bar can be trusted as FINAL.
 
-    Weekends are always "closed". Weekday holidays return True only post
-    16:15 ET — in practice Alpaca won't return a bar for a holiday during
-    regular hours so the guard is a no-op, but `True` is the safer default
-    for the save-side path (more permissive — allows persisting whatever
-    the API returns).
+    Despite the name, this is specifically the "is a today-row in
+    daily_bars safe to persist / return to callers?" predicate. It is
+    NOT a "is the market currently closed?" check. Specifically:
+
+      - Saturday/Sunday → True (no market today, no pollution risk).
+      - Weekday before 16:15 ET → False (session in progress or
+        pre-market; Alpaca returns a provisional intraday snapshot).
+      - Weekday ≥ 16:15 ET → True (consolidated-tape has settled; the
+        bar Alpaca returns is the real end-of-session close).
+      - Weekday holiday (e.g. MLK Day Monday) pre-16:15 → returns
+        False even though market IS closed. This is the cosmetic
+        imprecision in the name. Safe in practice because Alpaca
+        returns no bar on a holiday, so the save-side guard has
+        nothing to drop and the read-side guard has nothing to hide.
 
     Notes:
-      - Does NOT query Alpaca's market calendar. Relying on clock + weekday
-        is sufficient for the current pollution fix because Alpaca simply
-        returns nothing on closed days.
-      - Does NOT handle early-close days (day after Thanksgiving, Christmas
-        Eve). If we care, swap in a calendar-aware impl here and all
-        callers benefit automatically.
+      - Does NOT query Alpaca's market calendar. Relying on clock +
+        weekday is sufficient for the pollution fix this function
+        serves, because Alpaca simply returns nothing on closed days.
+      - Does NOT handle early-close days (day after Thanksgiving,
+        Christmas Eve). If we care, swap in a calendar-aware impl
+        here and all callers benefit automatically.
     """
     now = _now_et(now_et)
     if ET is None:

@@ -77,6 +77,16 @@ def _load_existing_features(path: Optional[str]) -> pd.DataFrame:
     return df
 
 
+class IncrementalSchemaDrift(RuntimeError):
+    """Raised when the existing features CSV's column set doesn't match
+    the new rows being produced. A silent `pd.concat` would NaN-fill
+    the missing columns, corrupting downstream pipeline stats.
+
+    Users hitting this must pass `--force-full-regen` to rebuild the CSV
+    from scratch under the new feature schema.
+    """
+
+
 def _merge_new_with_existing(
     existing_df: pd.DataFrame, new_rows: List[Dict],
 ) -> pd.DataFrame:
@@ -94,6 +104,11 @@ def _merge_new_with_existing(
       - Mid-day run with no provisional overlay where today's row is
         already in the CSV → today not processed, today's row preserved
         (no silent data loss).
+
+    Safety: raises IncrementalSchemaDrift if the existing CSV's columns
+    don't match the new_rows' columns. A silent `pd.concat` would
+    NaN-fill the missing columns and downstream `dropna` would silently
+    delete rows, skewing stats. Fail fast instead.
     """
     new_df = pd.DataFrame(new_rows) if new_rows else pd.DataFrame()
     if new_df.empty:
@@ -102,6 +117,23 @@ def _merge_new_with_existing(
         new_df['date'] = pd.to_datetime(new_df['date']).dt.date
     if existing_df.empty:
         return new_df.sort_values(['date', 'symbol']).reset_index(drop=True)
+
+    # Column-drift guard: both frames must have the same column set.
+    # Missing columns in either direction would silently NaN-fill on concat.
+    ex_cols = set(existing_df.columns)
+    new_cols = set(new_df.columns)
+    if ex_cols != new_cols:
+        missing_in_new = ex_cols - new_cols
+        missing_in_existing = new_cols - ex_cols
+        raise IncrementalSchemaDrift(
+            f"feature-schema mismatch between existing CSV and freshly "
+            f"extracted rows. Run with --force-full-regen to rebuild from "
+            f"scratch under the new schema.\n"
+            f"  missing in new_rows      : {sorted(missing_in_new) or '(none)'}\n"
+            f"  missing in existing_df   : {sorted(missing_in_existing) or '(none)'}\n"
+            f"  (existing={len(ex_cols)} cols, new={len(new_cols)} cols)"
+        )
+
     dates_processed = set(new_df['date'].unique())
     kept = existing_df[~existing_df['date'].isin(dates_processed)]
     merged = pd.concat([kept, new_df], ignore_index=True)

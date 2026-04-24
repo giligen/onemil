@@ -46,6 +46,7 @@ sys.path.insert(0, ROOT)
 from config import Config
 from data_sources.alpaca_client import AlpacaClient
 from persistence.database import Database
+from trading.trading_hours import today_et
 
 CACHE_DB = os.path.join(ROOT, 'data', 'cache.db')
 FEATURES_GLOB = os.path.join(ROOT, 'analysis_results', 'orb_features_*.csv')
@@ -453,10 +454,24 @@ def main():
                         "of each run so stale mid-day values don't accumulate.")
     args = p.parse_args()
 
+    # ET-based "today" so a BT run between 00:00-04:00 UTC (late night ET)
+    # doesn't silently use UTC's next calendar day. `--end` honors the user's
+    # explicit date; default is today in ET.
+    et_today = today_et()
     end_date = (
         datetime.strptime(args.end, '%Y-%m-%d').date() if args.end
-        else date.today()
+        else et_today
     )
+
+    # Sanity check: --include-today-provisional only makes sense when we're
+    # actually BT'ing through today — otherwise we'd fetch today's bar but
+    # not feed it to any date we're computing features for.
+    if args.include_today_provisional and end_date != et_today:
+        raise SystemExit(
+            f"--include-today-provisional requires --end to be today "
+            f"(ET={et_today}), got --end={end_date}. Drop the flag, or "
+            f"re-run with --end {et_today.isoformat()}."
+        )
 
     cfg = Config()
     alpaca = AlpacaClient(cfg.alpaca_api_key, cfg.alpaca_api_secret, paper=True)
@@ -499,7 +514,9 @@ def main():
     # still letting BT see today's trades. Sidecar is cleared here so stale
     # rows from a prior run can't leak in.
     if args.include_today_provisional:
-        today = date.today()
+        # Use ET-today throughout — we've already validated end_date == et_today
+        # above, so this is consistent with what extract_features will see.
+        today = et_today
         db = Database(db_path=CACHE_DB)
         db.clear_provisional_daily_bars()
         try:

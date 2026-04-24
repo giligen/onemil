@@ -277,6 +277,67 @@ class TestProvisionalSideTable:
     def test_empty_provisional_write_is_noop(self, db):
         assert db.save_daily_bars_provisional([]) == 0
 
+    def test_save_sweeps_stale_pre_today_rows(self, db, monkeypatch):
+        """D1 (2026-04-24 cleanup): a caller who forgot to call
+        clear_provisional_daily_bars() shouldn't accumulate old rows
+        day-over-day. Each save auto-deletes rows whose bar_date < today."""
+        # Freeze today so the test is deterministic regardless of when it runs.
+        frozen_today_iso = '2026-04-24'
+        monkeypatch.setattr(
+            'persistence.database.today_et',
+            lambda now_et=None: date.fromisoformat(frozen_today_iso),
+        )
+
+        # Seed yesterday's stale provisional row directly via raw SQL to
+        # mimic "caller forgot to clear last time".
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
+        db._cache_conn.execute(
+            "INSERT OR REPLACE INTO daily_bars_provisional "
+            "(symbol, bar_date, open, high, low, close, volume, fetched_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ('X', '2026-04-23', 1.0, 1.0, 1.0, 1.0, 0, _dt.now(_tz.utc)),
+        )
+        db._cache_conn.commit()
+        # Confirm stale row present
+        cnt = db._cache_conn.execute(
+            "SELECT COUNT(*) FROM daily_bars_provisional"
+        ).fetchone()[0]
+        assert cnt == 1
+
+        # Now save today's row. The save should sweep yesterday.
+        db.save_daily_bars_provisional([{
+            'symbol': 'Y', 'date': '2026-04-24',
+            'open': 2.0, 'high': 2.1, 'low': 1.9, 'close': 2.05, 'volume': 100,
+        }])
+        # Only today's row remains
+        rows = db._cache_conn.execute(
+            "SELECT symbol, bar_date FROM daily_bars_provisional"
+        ).fetchall()
+        assert [(r['symbol'], str(r['bar_date'])) for r in rows] == \
+               [('Y', '2026-04-24')]
+
+    def test_save_does_not_sweep_today_rows(self, db, monkeypatch):
+        """Sanity: the auto-sweep is strictly `< today`, not `<= today`.
+        Multiple today-rows for different symbols must accumulate, not
+        nuke each other."""
+        monkeypatch.setattr(
+            'persistence.database.today_et',
+            lambda now_et=None: date.fromisoformat('2026-04-24'),
+        )
+        db.save_daily_bars_provisional([{
+            'symbol': 'X', 'date': '2026-04-24',
+            'open': 1.0, 'high': 1.0, 'low': 1.0, 'close': 1.0, 'volume': 0,
+        }])
+        db.save_daily_bars_provisional([{
+            'symbol': 'Y', 'date': '2026-04-24',
+            'open': 2.0, 'high': 2.0, 'low': 2.0, 'close': 2.0, 'volume': 0,
+        }])
+        rows = db._cache_conn.execute(
+            "SELECT symbol FROM daily_bars_provisional ORDER BY symbol"
+        ).fetchall()
+        assert [r['symbol'] for r in rows] == ['X', 'Y']
+
     def test_provisional_and_final_for_different_dates_both_visible(self, db):
         """Common mid-day case: final for 4/22 (past), provisional for 4/24
         (today). Both visible under include_provisional=True."""
