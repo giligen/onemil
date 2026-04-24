@@ -346,22 +346,34 @@ def fill_intraday_for_pairs(
 # Pipeline runners (via subprocess — keeps imports clean)
 # ---------------------------------------------------------------------------
 
-def regen_features(include_provisional: bool = False) -> Optional[str]:
+def regen_features(
+    include_provisional: bool = False,
+    force_full: bool = False,
+) -> Optional[str]:
     """Run study_orb_features.py. Returns the path to the NEW CSV.
 
     `include_provisional=True` sets ORB_INCLUDE_PROVISIONAL_DAILY=1 in the
     subprocess env so `study_orb_features.load_daily_bars_frame` unions
     the `daily_bars_provisional` sidecar into its working frame — giving
     BT visibility into today's mid-day snapshot.
+
+    `force_full=True` passes --force-full-regen, recomputing every trade
+    from scratch instead of using the default incremental path. Use when
+    feature-extraction logic changes (bugfixes in extract_features, new
+    features added/removed, etc.).
     """
     before = set(glob.glob(FEATURES_GLOB))
-    _log("regenerating features CSV (study_orb_features.py)...")
+    mode = "FULL REGEN" if force_full else "incremental"
+    _log(f"regenerating features CSV (study_orb_features.py) — mode={mode}...")
     t0 = datetime.now()
     sub_env = os.environ.copy()
     if include_provisional:
         sub_env['ORB_INCLUDE_PROVISIONAL_DAILY'] = '1'
+    cmd = [sys.executable, 'study_orb_features.py']
+    if force_full:
+        cmd.append('--force-full-regen')
     result = subprocess.run(
-        [sys.executable, 'study_orb_features.py'],
+        cmd,
         cwd=ROOT, capture_output=True, text=True, timeout=900,
         env=sub_env,
     )
@@ -426,7 +438,13 @@ def main():
     p.add_argument('--no-fill', action='store_true',
                    help="Skip data-fill, only run the pipeline")
     p.add_argument('--force-features', action='store_true',
-                   help="Force features CSV regen even if no missing dates")
+                   help="Run features CSV regen even if no missing dates "
+                        "(still incremental — just don't skip the regen step)")
+    p.add_argument('--force-full-regen', action='store_true',
+                   help="Tell study_orb_features.py to recompute EVERY trade "
+                        "from scratch (disable incremental). Use when you "
+                        "change extract_features logic or add/remove a feature. "
+                        "Implies --force-features.")
     p.add_argument('--include-today-provisional', action='store_true',
                    help="(Mid-day use) Fetch today's still-open bar into the "
                         "daily_bars_provisional sidecar so BT can see today's "
@@ -533,8 +551,17 @@ def main():
         finally:
             db.close()
 
+    # --force-full-regen implies we need to regen (it's the whole point
+    # of the flag) — set need_regen so we don't skip based on "no missing
+    # dates" upstream.
+    if args.force_full_regen:
+        need_regen = True
+
     if need_regen:
-        new_csv = regen_features(include_provisional=args.include_today_provisional)
+        new_csv = regen_features(
+            include_provisional=args.include_today_provisional,
+            force_full=args.force_full_regen,
+        )
         if new_csv:
             _log(f"new features CSV: {new_csv}")
 

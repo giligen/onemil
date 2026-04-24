@@ -48,7 +48,10 @@ DATE_START = '2025-01-01'
 DATE_END = '2026-04-30'
 
 
-def load_broad_universe(db_path: str = CACHE_DB) -> Dict[str, List[str]]:
+def load_broad_universe(
+    db_path: str = CACHE_DB,
+    include_provisional_today=None,
+) -> Dict[str, List[str]]:
     """Query daily_bars for gap-up movers with liquidity.
 
     Criteria (all must hold):
@@ -59,11 +62,17 @@ def load_broad_universe(db_path: str = CACHE_DB) -> Dict[str, List[str]]:
       - AND we have intraday 1-min bars cached for the (symbol, date) pair
         (we can't backtest without bars; missing pairs are documented)
 
-    Returns {date_str: [symbol, ...]} and also returns coverage stats.
+    `include_provisional_today` (a `datetime.date`) adds a second pass that
+    pulls today's gap-up candidates from `daily_bars_provisional`, joined
+    against prev-day's FINAL row in `daily_bars`. Used by mid-day BT runs
+    with `--include-today-provisional` so today's trades are visible even
+    though the main daily_bars table is (correctly) empty for today.
+
+    Returns {date_str: [symbol, ...]}.
     """
     conn = sqlite3.connect(db_path)
-    # Pull qualifying pairs that ALSO have intraday bars cached.
-    # We do the EXISTS check in SQL — single round-trip.
+    grouped: Dict[str, List[str]] = {}
+    # Main pass: final daily_bars only.
     query = """
     WITH daily_ranked AS (
         SELECT symbol, bar_date, open,
@@ -92,9 +101,46 @@ def load_broad_universe(db_path: str = CACHE_DB) -> Dict[str, List[str]]:
         (DATE_START, DATE_END, MIN_GAP_PCT, MIN_PREV_DAY_VOL,
          MIN_OPEN_PRICE, MAX_OPEN_PRICE),
     )
-    grouped: Dict[str, List[str]] = {}
     for symbol, bar_date in cur.fetchall():
         grouped.setdefault(str(bar_date), []).append(symbol)
+
+    # Mid-day overlay: use today's provisional row. Prev-close / prev-vol
+    # come from the most-recent row in daily_bars strictly before today.
+    # Intraday bars must also exist for today (written by the BT's provisional
+    # intraday-fill step) — otherwise we can't extract features / simulate.
+    if include_provisional_today is not None:
+        today_str = str(include_provisional_today)
+        q2 = """
+        WITH prior AS (
+            SELECT symbol, close AS prev_close, volume AS prev_vol,
+                   ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY bar_date DESC) AS rn
+            FROM daily_bars
+            WHERE bar_date < ?
+        )
+        SELECT p.symbol
+        FROM daily_bars_provisional p
+        JOIN prior r ON r.symbol = p.symbol AND r.rn = 1
+        WHERE p.bar_date = ?
+          AND r.prev_close > 0
+          AND (p.open - r.prev_close) / r.prev_close * 100 >= ?
+          AND r.prev_vol >= ?
+          AND p.open BETWEEN ? AND ?
+          AND EXISTS (
+              SELECT 1 FROM intraday_bars_1min i
+              WHERE i.symbol = p.symbol AND i.bar_date = ?
+          )
+        ORDER BY p.symbol
+        """
+        cur = conn.execute(
+            q2,
+            (today_str, today_str,
+             MIN_GAP_PCT, MIN_PREV_DAY_VOL,
+             MIN_OPEN_PRICE, MAX_OPEN_PRICE,
+             today_str),
+        )
+        for (symbol,) in cur.fetchall():
+            grouped.setdefault(today_str, []).append(symbol)
+
     conn.close()
     return grouped
 

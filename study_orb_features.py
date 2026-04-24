@@ -20,12 +20,14 @@ Usage:
 """
 from __future__ import annotations
 
+import argparse
+import glob
 import math
 import os
 import sqlite3
 import sys
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date as _date
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -40,10 +42,78 @@ from study_orb import (
     _session_open_timestamp,
 )
 from study_orb_broad import load_broad_universe
+from trading.trading_hours import today_et
 
 
 CACHE_DB = 'data/cache.db'
 RANGE_MINUTES = 5  # locked to 5-min ORB for the feature study
+FEATURES_GLOB = os.path.join(OUT_DIR, 'orb_features_*.csv')
+
+
+# ---------------------------------------------------------------------------
+# Incremental-regen helpers
+# ---------------------------------------------------------------------------
+
+def _latest_features_csv() -> Optional[str]:
+    """Most recent orb_features_*.csv, excluding the corrmatrix sidecar."""
+    files = [p for p in sorted(glob.glob(FEATURES_GLOB)) if 'corrmatrix' not in p]
+    return files[-1] if files else None
+
+
+def _load_existing_features(path: Optional[str]) -> pd.DataFrame:
+    """Read a prior features CSV and normalize the date column to
+    datetime.date. Empty DataFrame if no path or unreadable."""
+    if not path or not os.path.exists(path):
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(path)
+    except Exception as e:
+        print(f"[features] WARN: couldn't read {path}: {e} — treating as empty")
+        return pd.DataFrame()
+    if 'date' not in df.columns:
+        print(f"[features] WARN: {path} missing 'date' — ignoring for incremental")
+        return pd.DataFrame()
+    df['date'] = pd.to_datetime(df['date']).dt.date
+    return df
+
+
+def _merge_new_with_existing(
+    existing_df: pd.DataFrame, new_rows: List[Dict],
+) -> pd.DataFrame:
+    """Return the merged DataFrame for the new features CSV.
+
+    Rule: for every date we PROCESSED this run (set of dates in new_rows),
+    drop existing rows on those dates — the new values replace them. For
+    every other date, existing rows pass through untouched. This means:
+      - Full regen (dates_processed covers everything) → existing dropped,
+        new takes over.
+      - Incremental adding dates (no overlap) → existing untouched, new
+        appended.
+      - Post-close refresh of a date computed mid-day as provisional →
+        that date's old row is dropped; final row replaces it.
+      - Mid-day run with no provisional overlay where today's row is
+        already in the CSV → today not processed, today's row preserved
+        (no silent data loss).
+    """
+    new_df = pd.DataFrame(new_rows) if new_rows else pd.DataFrame()
+    if new_df.empty:
+        return existing_df.reset_index(drop=True) if not existing_df.empty else new_df
+    if 'date' in new_df.columns:
+        new_df['date'] = pd.to_datetime(new_df['date']).dt.date
+    if existing_df.empty:
+        return new_df.sort_values(['date', 'symbol']).reset_index(drop=True)
+    dates_processed = set(new_df['date'].unique())
+    kept = existing_df[~existing_df['date'].isin(dates_processed)]
+    merged = pd.concat([kept, new_df], ignore_index=True)
+    return merged.sort_values(['date', 'symbol']).reset_index(drop=True)
+
+
+def _atomic_write_csv(df: pd.DataFrame, path: str) -> None:
+    """Write CSV via .tmp + os.replace so a crashed run can't leave a
+    half-written file that a subsequent incremental run would misread."""
+    tmp = path + '.tmp'
+    df.to_csv(tmp, index=False)
+    os.replace(tmp, path)
 
 
 # ---------------------------------------------------------------------------
@@ -271,14 +341,94 @@ def extract_features(
 # Main: run ORB + extract features + analyze
 # ---------------------------------------------------------------------------
 
+def _parse_args():
+    p = argparse.ArgumentParser(
+        description="ORB per-trade feature extraction (default: incremental)"
+    )
+    p.add_argument(
+        '--force-full-regen', action='store_true',
+        help="Ignore any existing features CSV and recompute every trade "
+             "from scratch. Use when feature-extraction logic changes.",
+    )
+    p.add_argument(
+        '--start-date', type=str, default=None,
+        help="YYYY-MM-DD — explicit start date for the recompute window. "
+             "Overrides the incremental auto-detect.",
+    )
+    return p.parse_args()
+
+
+def _resolve_incremental_plan(
+    args,
+) -> Tuple[pd.DataFrame, Optional[_date]]:
+    """Decide which existing rows to preserve and which start_date to use.
+
+    Returns (existing_df, start_date). `start_date` is inclusive — pairs
+    with date >= start_date are reprocessed; existing rows on those dates
+    are dropped and replaced in the merge step. `start_date` may be None,
+    meaning "no filter — full regen".
+    """
+    if args.force_full_regen:
+        print("[features] FORCE FULL REGEN — ignoring any existing CSV")
+        return pd.DataFrame(), None
+    if args.start_date:
+        try:
+            explicit = datetime.strptime(args.start_date, '%Y-%m-%d').date()
+        except Exception:
+            raise SystemExit(f"--start-date: invalid YYYY-MM-DD: {args.start_date}")
+        existing = _load_existing_features(_latest_features_csv())
+        print(f"[features] explicit start_date={explicit}")
+        return existing, explicit
+
+    # Default: incremental, anchored at last date of most-recent CSV.
+    latest = _latest_features_csv()
+    if latest is None:
+        print("[features] no prior CSV — full regen")
+        return pd.DataFrame(), None
+    existing = _load_existing_features(latest)
+    if existing.empty:
+        print(f"[features] prior CSV unreadable ({latest}) — full regen")
+        return pd.DataFrame(), None
+    last_date = existing['date'].max()
+    # Recompute the LAST date in the CSV too — this covers two edge cases:
+    #   1. A post-close run refreshes a date that was computed mid-day
+    #      against a provisional daily bar.
+    #   2. If today's already in the CSV from a prior run + the daily bar
+    #      has since been updated (provisional → final), today's row gets
+    #      refreshed.
+    # Cost: N symbols × 1 day ≈ a second or two — negligible.
+    print(f"[features] incremental — existing={latest} last_date={last_date} "
+          f"(recomputing {last_date} onward)")
+    return existing, last_date
+
+
 def main() -> None:
+    args = _parse_args()
     t0 = datetime.now()
     print(f"[{t0.isoformat(timespec='seconds')}] ORB feature study — ORB_5_vanilla")
 
+    existing_df, start_date = _resolve_incremental_plan(args)
+
     print("\nLoading broad universe...")
-    universe = load_broad_universe()
+    # Env-var toggle: include today's provisional row from daily_bars_provisional.
+    # Set by orb_backtest.py --include-today-provisional via subprocess env.
+    provisional_today = (
+        today_et() if os.environ.get('ORB_INCLUDE_PROVISIONAL_DAILY') == '1'
+        else None
+    )
+    universe = load_broad_universe(include_provisional_today=provisional_today)
+    n_pairs_full = sum(len(v) for v in universe.values())
+
+    if start_date is not None:
+        start_str = start_date.isoformat()
+        universe = {d: syms for d, syms in universe.items() if d >= start_str}
     n_pairs = sum(len(v) for v in universe.values())
-    print(f"  {n_pairs:,} (symbol, date) pairs across {len(universe)} days")
+    print(f"  {n_pairs:,} (symbol, date) pairs across {len(universe)} days "
+          f"[filtered from {n_pairs_full:,} by start_date={start_date}]")
+
+    if not universe and existing_df.empty:
+        print("No pairs to process and no existing CSV — nothing to do.")
+        return
 
     print("Loading daily bars + SPY context...")
     daily = load_daily_bars_frame()
@@ -291,13 +441,13 @@ def main() -> None:
     spy_intraday = load_spy_intraday()
     print(f"  SPY intraday bars: {len(spy_intraday):,}")
 
-    # Bulk-fetch all pair bars
+    # Bulk-fetch intraday bars for the filtered pair set only.
     print("\nBulk-fetching 1-min bars for universe...")
     db = Database(db_path=CACHE_DB)
     pair_list: List[Tuple[str, str]] = [
         (s, d) for d, syms in universe.items() for s in syms
     ]
-    raw = db.get_intraday_bars_bulk(pair_list)
+    raw = db.get_intraday_bars_bulk(pair_list) if pair_list else {}
     print(f"  Got {len(raw):,} bar sets")
     db.close()
 
@@ -344,13 +494,13 @@ def main() -> None:
             n_extracted += 1
 
     print(f"  Simulated: {n_simulated:,} | Entered: {n_extracted:,} "
-          f"({n_extracted/max(n_simulated,1)*100:.1f}%)")
+          f"({n_extracted/max(n_simulated,1)*100:.1f}%) "
+          f"| existing preserved: {len(existing_df)}")
 
-    if not rows:
-        print("No trades — nothing to analyze.")
+    df = _merge_new_with_existing(existing_df, rows)
+    if df.empty:
+        print("No trades in merged dataset — nothing to analyze.")
         return
-
-    df = pd.DataFrame(rows)
 
     # --- Analysis ---
     print("\n=== Pearson correlation with pnl_pct ===")
@@ -416,7 +566,9 @@ def main() -> None:
     csv_path = f"{OUT_DIR}/orb_features_{ts}.csv"
     md_path = f"{OUT_DIR}/orb_features_{ts}.md"
     mat_path = f"{OUT_DIR}/orb_features_corrmatrix_{ts}.csv"
-    df.to_csv(csv_path, index=False)
+    # Atomic write — .tmp + os.replace. A crashed run cannot leave a
+    # half-written CSV that the next incremental run would misread.
+    _atomic_write_csv(df, csv_path)
     feat_corr.to_csv(mat_path)
     print(f"\nPer-trade features CSV: {csv_path} ({len(df)} rows)")
     print(f"Feature correlation matrix CSV: {mat_path}")
