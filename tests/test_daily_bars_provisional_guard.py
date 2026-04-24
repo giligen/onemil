@@ -199,3 +199,101 @@ class TestSaveDailyBarsIntegration:
         sat_row = {'symbol': 'X', 'date': '2026-04-25', 'open': 1, 'high': 1,
                    'low': 1, 'close': 1, 'volume': 0}
         assert db.save_daily_bars([sat_row], now_et=SATURDAY) == 1
+
+
+# ---------------------------------------------------------------------------
+# Sidecar table for mid-day BT runs
+# ---------------------------------------------------------------------------
+
+
+class TestProvisionalSideTable:
+    """`daily_bars_provisional` is the opt-in escape hatch for BT flows that
+    want to see today's still-open trades without poisoning the main
+    `daily_bars` cache that live reads."""
+
+    def test_save_provisional_persists(self, db):
+        row = {'symbol': 'BMNZ', 'date': '2026-04-24',
+               'open': 14.23, 'high': 14.64, 'low': 13.71,
+               'close': 14.10, 'volume': 900_000}
+        assert db.save_daily_bars_provisional([row]) == 1
+
+    def test_provisional_hidden_by_default_from_main_reader(self, db):
+        """Default reads (what live uses) must NOT see provisional rows."""
+        db.save_daily_bars_provisional([
+            {'symbol': 'X', 'date': '2026-04-24', 'open': 1, 'high': 1,
+             'low': 1, 'close': 1, 'volume': 0}
+        ])
+        res = db.get_daily_bars_cached(['X'], '2026-04-24', '2026-04-24')
+        assert res.get('X', []) == []
+
+    def test_provisional_visible_with_include_flag(self, db):
+        db.save_daily_bars_provisional([
+            {'symbol': 'X', 'date': '2026-04-24', 'open': 14.23, 'high': 14.64,
+             'low': 13.71, 'close': 14.10, 'volume': 900_000}
+        ])
+        res = db.get_daily_bars_cached(
+            ['X'], '2026-04-24', '2026-04-24', include_provisional=True,
+        )
+        bars = res.get('X', [])
+        assert len(bars) == 1
+        assert bars[0]['close'] == pytest.approx(14.10)
+
+    def test_final_wins_over_provisional_same_key(self, db):
+        """If a FINAL row exists for (sym, date), the provisional row for
+        the same key is SHADOWED when reading with include_provisional."""
+        # FINAL written for yesterday post-close (different day, clean path)
+        db.save_daily_bars(
+            [{'symbol': 'BMNZ', 'date': '2026-04-22', 'open': 14.12, 'high': 14.31,
+              'low': 13.24, 'close': 13.43, 'volume': 4_150_038}],
+            now_et=POST_MARKET_1630,
+        )
+        # Provisional also written for the same date somehow (stale leftover)
+        db.save_daily_bars_provisional(
+            [{'symbol': 'BMNZ', 'date': '2026-04-22', 'open': 14.12, 'high': 14.20,
+              'low': 13.30, 'close': 13.66, 'volume': 1_000_000}]  # mid-day snap
+        )
+        res = db.get_daily_bars_cached(
+            ['BMNZ'], '2026-04-22', '2026-04-22', include_provisional=True,
+        )
+        bars = res.get('BMNZ', [])
+        assert len(bars) == 1
+        assert bars[0]['close'] == pytest.approx(13.43), (
+            "FINAL close must win over the provisional row on the same date"
+        )
+
+    def test_clear_provisional_removes_all(self, db):
+        db.save_daily_bars_provisional([
+            {'symbol': 'X', 'date': '2026-04-24', 'open': 1, 'high': 1,
+             'low': 1, 'close': 1, 'volume': 0},
+            {'symbol': 'Y', 'date': '2026-04-24', 'open': 2, 'high': 2,
+             'low': 2, 'close': 2, 'volume': 0},
+        ])
+        assert db.clear_provisional_daily_bars() == 2
+        res = db.get_daily_bars_cached(
+            ['X', 'Y'], '2026-04-24', '2026-04-24', include_provisional=True,
+        )
+        assert res == {}
+
+    def test_empty_provisional_write_is_noop(self, db):
+        assert db.save_daily_bars_provisional([]) == 0
+
+    def test_provisional_and_final_for_different_dates_both_visible(self, db):
+        """Common mid-day case: final for 4/22 (past), provisional for 4/24
+        (today). Both visible under include_provisional=True."""
+        db.save_daily_bars(
+            [{'symbol': 'X', 'date': '2026-04-22', 'open': 5, 'high': 5,
+              'low': 5, 'close': 5, 'volume': 100}],
+            now_et=POST_MARKET_1630,
+        )
+        db.save_daily_bars_provisional([
+            {'symbol': 'X', 'date': '2026-04-24', 'open': 6, 'high': 6,
+             'low': 6, 'close': 6, 'volume': 200}
+        ])
+        res = db.get_daily_bars_cached(
+            ['X'], '2026-04-20', '2026-04-24', include_provisional=True,
+        )
+        bars = res.get('X', [])
+        assert len(bars) == 2
+        closes = {str(b['date']): b['close'] for b in bars}
+        assert closes['2026-04-22'] == 5
+        assert closes['2026-04-24'] == 6

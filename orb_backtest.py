@@ -147,38 +147,71 @@ def _daily_bar_dates_cached(
 
 
 def _qualifying_pairs_for_dates(
-    db_path: str, dates: List[date]
+    db_path: str, dates: List[date],
+    include_provisional_today: Optional[date] = None,
 ) -> Dict[str, List[str]]:
     """Run the gap-up filter against daily_bars for specific dates.
     Matches `study_orb_broad.load_broad_universe` SQL but scoped + no intraday
-    existence check (we'll fetch missing intraday bars next)."""
-    if not dates:
+    existence check (we'll fetch missing intraday bars next).
+
+    `include_provisional_today` (a date) adds a second pass that unions in
+    provisional rows for that date only — so mid-day BT can also identify
+    today's gap-up candidates without touching the main daily_bars table."""
+    if not dates and not include_provisional_today:
         return {}
-    date_set = ','.join('?' * len(dates))
     conn = sqlite3.connect(db_path)
+    out: Dict[str, List[str]] = {}
     try:
-        q = f"""
-        WITH daily_ranked AS (
-            SELECT symbol, bar_date, open,
-                   LAG(close)  OVER (PARTITION BY symbol ORDER BY bar_date) AS prev_close,
-                   LAG(volume) OVER (PARTITION BY symbol ORDER BY bar_date) AS prev_vol
-            FROM daily_bars
-        )
-        SELECT symbol, bar_date FROM daily_ranked
-        WHERE bar_date IN ({date_set})
-          AND prev_close IS NOT NULL AND prev_close > 0
-          AND (open - prev_close) / prev_close * 100 >= ?
-          AND prev_vol >= ?
-          AND open BETWEEN ? AND ?
-        ORDER BY bar_date, symbol
-        """
-        params = [str(d) for d in dates] + [
-            MIN_GAP_PCT, MIN_PREV_DAY_VOL, MIN_OPEN_PRICE, MAX_OPEN_PRICE
-        ]
-        cur = conn.execute(q, params)
-        out: Dict[str, List[str]] = {}
-        for sym, bd in cur.fetchall():
-            out.setdefault(str(bd), []).append(sym)
+        if dates:
+            date_set = ','.join('?' * len(dates))
+            q = f"""
+            WITH daily_ranked AS (
+                SELECT symbol, bar_date, open,
+                       LAG(close)  OVER (PARTITION BY symbol ORDER BY bar_date) AS prev_close,
+                       LAG(volume) OVER (PARTITION BY symbol ORDER BY bar_date) AS prev_vol
+                FROM daily_bars
+            )
+            SELECT symbol, bar_date FROM daily_ranked
+            WHERE bar_date IN ({date_set})
+              AND prev_close IS NOT NULL AND prev_close > 0
+              AND (open - prev_close) / prev_close * 100 >= ?
+              AND prev_vol >= ?
+              AND open BETWEEN ? AND ?
+            ORDER BY bar_date, symbol
+            """
+            params = [str(d) for d in dates] + [
+                MIN_GAP_PCT, MIN_PREV_DAY_VOL, MIN_OPEN_PRICE, MAX_OPEN_PRICE
+            ]
+            cur = conn.execute(q, params)
+            for sym, bd in cur.fetchall():
+                out.setdefault(str(bd), []).append(sym)
+        # Mid-day overlay: use today's provisional row as today's "open" and
+        # pull prev_close / prev_vol from the main daily_bars table.
+        if include_provisional_today is not None:
+            today_str = str(include_provisional_today)
+            q2 = """
+            WITH prior AS (
+                SELECT symbol, close AS prev_close, volume AS prev_vol,
+                       ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY bar_date DESC) AS rn
+                FROM daily_bars
+                WHERE bar_date < ?
+            )
+            SELECT p.symbol FROM daily_bars_provisional p
+            JOIN prior r ON r.symbol = p.symbol AND r.rn = 1
+            WHERE p.bar_date = ?
+              AND r.prev_close > 0
+              AND (p.open - r.prev_close) / r.prev_close * 100 >= ?
+              AND r.prev_vol >= ?
+              AND p.open BETWEEN ? AND ?
+            ORDER BY p.symbol
+            """
+            params2 = [
+                today_str, today_str,
+                MIN_GAP_PCT, MIN_PREV_DAY_VOL, MIN_OPEN_PRICE, MAX_OPEN_PRICE,
+            ]
+            cur = conn.execute(q2, params2)
+            for (sym,) in cur.fetchall():
+                out.setdefault(today_str, []).append(sym)
         return out
     finally:
         conn.close()
@@ -313,14 +346,24 @@ def fill_intraday_for_pairs(
 # Pipeline runners (via subprocess — keeps imports clean)
 # ---------------------------------------------------------------------------
 
-def regen_features() -> Optional[str]:
-    """Run study_orb_features.py. Returns the path to the NEW CSV."""
+def regen_features(include_provisional: bool = False) -> Optional[str]:
+    """Run study_orb_features.py. Returns the path to the NEW CSV.
+
+    `include_provisional=True` sets ORB_INCLUDE_PROVISIONAL_DAILY=1 in the
+    subprocess env so `study_orb_features.load_daily_bars_frame` unions
+    the `daily_bars_provisional` sidecar into its working frame — giving
+    BT visibility into today's mid-day snapshot.
+    """
     before = set(glob.glob(FEATURES_GLOB))
     _log("regenerating features CSV (study_orb_features.py)...")
     t0 = datetime.now()
+    sub_env = os.environ.copy()
+    if include_provisional:
+        sub_env['ORB_INCLUDE_PROVISIONAL_DAILY'] = '1'
     result = subprocess.run(
         [sys.executable, 'study_orb_features.py'],
         cwd=ROOT, capture_output=True, text=True, timeout=900,
+        env=sub_env,
     )
     if result.returncode != 0:
         _log(f"features regen failed: {result.stderr[-500:]}")
@@ -384,6 +427,12 @@ def main():
                    help="Skip data-fill, only run the pipeline")
     p.add_argument('--force-features', action='store_true',
                    help="Force features CSV regen even if no missing dates")
+    p.add_argument('--include-today-provisional', action='store_true',
+                   help="(Mid-day use) Fetch today's still-open bar into the "
+                        "daily_bars_provisional sidecar so BT can see today's "
+                        "trades. Never touches the main daily_bars table that "
+                        "live reads. Provisional rows are cleared at the start "
+                        "of each run so stale mid-day values don't accumulate.")
     args = p.parse_args()
 
     end_date = (
@@ -427,8 +476,65 @@ def main():
         else:
             _log("no missing dates — features CSV is up to date")
 
+    # Optional mid-day provisional overlay. Keeps the main daily_bars cache
+    # clean (save_daily_bars drops today-rows during market hours) while
+    # still letting BT see today's trades. Sidecar is cleared here so stale
+    # rows from a prior run can't leak in.
+    if args.include_today_provisional:
+        today = date.today()
+        db = Database(db_path=CACHE_DB)
+        db.clear_provisional_daily_bars()
+        try:
+            all_syms = _symbols_in_daily_cache()
+            _log(f"provisional fetch: {len(all_syms)} symbols × 1 date ({today})")
+            chunk = 200
+            written = 0
+            for i in range(0, len(all_syms), chunk):
+                batch = all_syms[i:i + chunk]
+                try:
+                    res = alpaca.get_daily_bars_range(batch, today, today)
+                except Exception as e:
+                    _log(f"provisional fetch chunk {i // chunk} failed: {e}")
+                    continue
+                rows = []
+                for sym, bars in (res or {}).items():
+                    for b in bars:
+                        bdate = b['date']
+                        if isinstance(bdate, datetime):
+                            bdate = bdate.date()
+                        if bdate != today:
+                            continue
+                        rows.append({
+                            'symbol': sym, 'date': str(bdate),
+                            'open': float(b['open']), 'high': float(b['high']),
+                            'low': float(b['low']), 'close': float(b['close']),
+                            'volume': int(b['volume']),
+                        })
+                if rows:
+                    db.save_daily_bars_provisional(rows)
+                    written += len(rows)
+                _log(f"  provisional progress: "
+                     f"{min(i+chunk, len(all_syms))}/{len(all_syms)} symbols, "
+                     f"+{len(rows)} rows")
+            _log(f"provisional: {written} rows for {today}")
+
+            # Derive today's qualifying gap-up pairs from the provisional
+            # overlay and fetch intraday 1-min bars so features extraction
+            # has the 9:30-9:34 range bars. Intraday bars for a closed
+            # minute are truly final — no pollution concern.
+            pairs = _qualifying_pairs_for_dates(
+                CACHE_DB, dates=[], include_provisional_today=today,
+            )
+            n_pairs = sum(len(v) for v in pairs.values())
+            _log(f"provisional qualifying pairs today: {n_pairs}")
+            if n_pairs:
+                fill_intraday_for_pairs(alpaca, db, pairs)
+            need_regen = True
+        finally:
+            db.close()
+
     if need_regen:
-        new_csv = regen_features()
+        new_csv = regen_features(include_provisional=args.include_today_provisional)
         if new_csv:
             _log(f"new features CSV: {new_csv}")
 

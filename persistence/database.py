@@ -309,6 +309,22 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_daily_bars_date
                 ON daily_bars(bar_date);
 
+            -- Sidecar for MID-DAY provisional daily bars. Only written by
+            -- BT runs that opt in to `--include-today-provisional`. Live
+            -- engines NEVER read this table. See save_daily_bars_provisional
+            -- / get_daily_bars_cached(include_provisional=True).
+            CREATE TABLE IF NOT EXISTS daily_bars_provisional (
+                symbol VARCHAR(10) NOT NULL,
+                bar_date DATE NOT NULL,
+                open REAL NOT NULL,
+                high REAL NOT NULL,
+                low REAL NOT NULL,
+                close REAL NOT NULL,
+                volume INTEGER NOT NULL,
+                fetched_at TIMESTAMP NOT NULL,
+                PRIMARY KEY (symbol, bar_date)
+            );
+
             CREATE TABLE IF NOT EXISTS intraday_bars_1min (
                 symbol VARCHAR(10) NOT NULL,
                 bar_date DATE NOT NULL,
@@ -1023,8 +1039,50 @@ class Database:
         logger.info(f"Cached {len(bars)} daily bars")
         return len(bars)
 
+    def save_daily_bars_provisional(self, bars: List[Dict[str, Any]]) -> int:
+        """Write mid-day provisional daily bars to the sidecar table.
+
+        This is the escape hatch for BT runs that want to see today's
+        trades without polluting the main `daily_bars` cache that live
+        reads. No time-of-day guard — callers opt in explicitly.
+
+        Callers (just `orb_backtest.py --include-today-provisional`
+        today) should TRUNCATE the table at the start of each run to
+        avoid carrying stale rows forward — see `clear_provisional_daily_bars`.
+
+        Args:
+            bars: list of dicts with keys symbol, date, open, high, low, close, volume
+
+        Returns:
+            number of rows written
+        """
+        if not bars:
+            return 0
+        now = datetime.now(timezone.utc)
+        self._cache_conn.executemany("""
+            INSERT OR REPLACE INTO daily_bars_provisional
+                (symbol, bar_date, open, high, low, close, volume, fetched_at)
+            VALUES (:symbol, :date, :open, :high, :low, :close, :volume, :fetched_at)
+        """, [{**b, 'fetched_at': now} for b in bars])
+        self._cache_conn.commit()
+        logger.info(f"Cached {len(bars)} PROVISIONAL daily bars (sidecar)")
+        return len(bars)
+
+    def clear_provisional_daily_bars(self) -> int:
+        """Wipe the provisional sidecar. Call at the start of a BT run so
+        stale mid-day data from a previous run doesn't leak into today's
+        features extraction.
+        """
+        cur = self._cache_conn.execute("DELETE FROM daily_bars_provisional")
+        n = cur.rowcount or 0
+        self._cache_conn.commit()
+        if n:
+            logger.info(f"Cleared {n} provisional daily bars")
+        return n
+
     def get_daily_bars_cached(
-        self, symbols: List[str], start_date: str, end_date: str
+        self, symbols: List[str], start_date: str, end_date: str,
+        include_provisional: bool = False,
     ) -> Dict[str, List[Dict[str, Any]]]:
         """
         Retrieve cached daily bars for symbols in a date range.
@@ -1033,6 +1091,12 @@ class Database:
             symbols: List of stock symbols
             start_date: Start date string (YYYY-MM-DD)
             end_date: End date string (YYYY-MM-DD)
+            include_provisional: If True, also union in today's mid-day
+                provisional rows from `daily_bars_provisional`. Finals
+                always win over provisional for the same (sym, date) —
+                a FINAL row hides any leftover provisional for the same
+                key. Live engines should NEVER set this to True; only BT
+                flows that explicitly opt in via `--include-today-provisional`.
 
         Returns:
             Dict mapping symbol -> list of bar dicts {date, open, high, low, close, volume}
@@ -1040,7 +1104,9 @@ class Database:
         if not symbols:
             return {}
 
-        results: Dict[str, List[Dict[str, Any]]] = {}
+        # Step 1: collect final bars into a per-symbol dict keyed by bar_date
+        # so it's easy to layer provisional rows on top.
+        per_sym: Dict[str, Dict[Any, Dict[str, Any]]] = {}
         chunk_size = 500  # SQLite parameter limit
         for i in range(0, len(symbols), chunk_size):
             chunk = symbols[i:i + chunk_size]
@@ -1052,26 +1118,50 @@ class Database:
                   AND bar_date >= ? AND bar_date <= ?
                 ORDER BY symbol, bar_date
             """, chunk + [start_date, end_date])
-
             for row in cursor.fetchall():
-                row_dict = dict(row)
-                symbol = row_dict['symbol']
-                bar = {
-                    'date': row_dict['bar_date'],
-                    'open': row_dict['open'],
-                    'high': row_dict['high'],
-                    'low': row_dict['low'],
-                    'close': row_dict['close'],
-                    'volume': row_dict['volume'],
+                rd = dict(row)
+                per_sym.setdefault(rd['symbol'], {})[rd['bar_date']] = {
+                    'date': rd['bar_date'],
+                    'open': rd['open'], 'high': rd['high'],
+                    'low': rd['low'], 'close': rd['close'],
+                    'volume': rd['volume'],
                 }
-                if symbol not in results:
-                    results[symbol] = []
-                results[symbol].append(bar)
 
+        # Step 2: if opted-in, layer provisional rows but DO NOT overwrite a
+        # final row. Final always wins.
+        if include_provisional:
+            for i in range(0, len(symbols), chunk_size):
+                chunk = symbols[i:i + chunk_size]
+                placeholders = ','.join('?' * len(chunk))
+                cursor = self._cache_conn.execute(f"""
+                    SELECT symbol, bar_date, open, high, low, close, volume
+                    FROM daily_bars_provisional
+                    WHERE symbol IN ({placeholders})
+                      AND bar_date >= ? AND bar_date <= ?
+                    ORDER BY symbol, bar_date
+                """, chunk + [start_date, end_date])
+                for row in cursor.fetchall():
+                    rd = dict(row)
+                    bucket = per_sym.setdefault(rd['symbol'], {})
+                    if rd['bar_date'] in bucket:
+                        continue  # final already present — skip provisional
+                    bucket[rd['bar_date']] = {
+                        'date': rd['bar_date'],
+                        'open': rd['open'], 'high': rd['high'],
+                        'low': rd['low'], 'close': rd['close'],
+                        'volume': rd['volume'],
+                    }
+
+        # Step 3: collapse to list-per-symbol ordered by date.
+        results: Dict[str, List[Dict[str, Any]]] = {
+            sym: [bars[d] for d in sorted(bars.keys())]
+            for sym, bars in per_sym.items()
+        }
         if results:
+            suffix = " (+ provisional overlay)" if include_provisional else ""
             logger.info(
                 f"Cache hit: {len(results)} symbols with daily bars "
-                f"({start_date} to {end_date})"
+                f"({start_date} to {end_date}){suffix}"
             )
         return results
 

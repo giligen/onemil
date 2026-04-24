@@ -51,12 +51,41 @@ RANGE_MINUTES = 5  # locked to 5-min ORB for the feature study
 # ---------------------------------------------------------------------------
 
 def load_daily_bars_frame(db_path: str = CACHE_DB) -> pd.DataFrame:
-    """All daily bars for all symbols — one query, used for prev-day + 20d stats."""
+    """All daily bars for all symbols — one query, used for prev-day + 20d stats.
+
+    If the env var ORB_INCLUDE_PROVISIONAL_DAILY=1 is set, also reads mid-day
+    provisional rows from `daily_bars_provisional` (written by
+    `orb_backtest.py --include-today-provisional`). FINAL rows win for
+    any (symbol, bar_date) collision; provisional rows only fill gaps.
+    Live engines never set this var.
+    """
+    include_prov = os.environ.get('ORB_INCLUDE_PROVISIONAL_DAILY') == '1'
     conn = sqlite3.connect(db_path)
     df = pd.read_sql_query(
         "SELECT symbol, bar_date, open, high, low, close, volume FROM daily_bars",
         conn,
     )
+    if include_prov:
+        prov = pd.read_sql_query(
+            "SELECT symbol, bar_date, open, high, low, close, volume "
+            "FROM daily_bars_provisional",
+            conn,
+        )
+        if not prov.empty:
+            # Drop provisional rows that collide with an existing FINAL row.
+            prov['bar_date'] = pd.to_datetime(prov['bar_date'])
+            df_norm = df.copy()
+            df_norm['bar_date'] = pd.to_datetime(df_norm['bar_date'])
+            final_keys = set(zip(df_norm['symbol'], df_norm['bar_date']))
+            mask = ~prov.apply(
+                lambda r: (r['symbol'], r['bar_date']) in final_keys, axis=1
+            )
+            kept = prov[mask]
+            if len(kept):
+                df = pd.concat([df, kept], ignore_index=True)
+                print(f"[features] provisional overlay: +{len(kept)} rows "
+                      f"({len(prov) - len(kept)} shadowed by FINAL)",
+                      flush=True)
     conn.close()
     df['bar_date'] = pd.to_datetime(df['bar_date'])
     return df.sort_values(['symbol', 'bar_date']).reset_index(drop=True)
