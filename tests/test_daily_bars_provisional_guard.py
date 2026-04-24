@@ -291,9 +291,102 @@ class TestProvisionalSideTable:
         ])
         res = db.get_daily_bars_cached(
             ['X'], '2026-04-20', '2026-04-24', include_provisional=True,
+            now_et=POST_MARKET_1630,  # market closed — no read-side filter
         )
         bars = res.get('X', [])
         assert len(bars) == 2
         closes = {str(b['date']): b['close'] for b in bars}
         assert closes['2026-04-22'] == 5
         assert closes['2026-04-24'] == 6
+
+
+# ---------------------------------------------------------------------------
+# Read-side defensive guard (P2): legacy/bypassed polluted rows in
+# daily_bars must not leak out during market hours.
+# ---------------------------------------------------------------------------
+
+
+class TestReadSideTodayGuard:
+    """Direct INSERT of a polluted today-row (simulating legacy pollution
+    or a caller that bypasses save_daily_bars) must be FILTERED by
+    get_daily_bars_cached when the market is open."""
+
+    def _force_insert_today(self, db, row):
+        """Bypass save_daily_bars to simulate legacy polluted data."""
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
+        db._cache_conn.execute(
+            "INSERT OR REPLACE INTO daily_bars "
+            "(symbol, bar_date, open, high, low, close, volume, fetched_at) "
+            "VALUES (:symbol, :date, :open, :high, :low, :close, :volume, :fetched_at)",
+            {**row, 'fetched_at': _dt.now(_tz.utc)},
+        )
+        db._cache_conn.commit()
+
+    def test_polluted_today_row_hidden_during_market_hours(self, db):
+        self._force_insert_today(db, {
+            'symbol': 'X', 'date': '2026-04-24',
+            'open': 14.0, 'high': 14.1, 'low': 13.9, 'close': 14.0,
+            'volume': 100_000,
+        })
+        # Mid-day read — guard should hide the today-row
+        res = db.get_daily_bars_cached(
+            ['X'], '2026-04-24', '2026-04-24', now_et=MARKET_OPEN_10AM,
+        )
+        assert res.get('X', []) == []
+
+    def test_polluted_today_row_visible_post_close(self, db):
+        """After 16:15 ET, guard stops filtering; today-row (now final)
+        is returned normally."""
+        self._force_insert_today(db, {
+            'symbol': 'X', 'date': '2026-04-24',
+            'open': 14.0, 'high': 14.1, 'low': 13.9, 'close': 14.05,
+            'volume': 100_000,
+        })
+        res = db.get_daily_bars_cached(
+            ['X'], '2026-04-24', '2026-04-24', now_et=POST_MARKET_1630,
+        )
+        bars = res.get('X', [])
+        assert len(bars) == 1
+        assert bars[0]['close'] == pytest.approx(14.05)
+
+    def test_polluted_today_row_falls_back_to_provisional_when_included(self, db):
+        """THE KEY POLLUTION-RECOVERY CASE: if daily_bars has a legacy
+        polluted row AND daily_bars_provisional has a fresh correct row,
+        the read-side guard drops the polluted one so the provisional
+        becomes visible under include_provisional=True. Without the
+        read-side guard, the polluted FINAL row would shadow the clean
+        PROVISIONAL row (regression of the original bug)."""
+        self._force_insert_today(db, {
+            'symbol': 'BMNZ', 'date': '2026-04-24',
+            'open': 14.23, 'high': 14.30, 'low': 14.10, 'close': 14.10,
+            'volume': 500_000,  # polluted mid-day snapshot
+        })
+        db.save_daily_bars_provisional([{
+            'symbol': 'BMNZ', 'date': '2026-04-24',
+            'open': 14.23, 'high': 14.64, 'low': 13.71, 'close': 14.55,
+            'volume': 800_000,  # fresh provisional fetch
+        }])
+        res = db.get_daily_bars_cached(
+            ['BMNZ'], '2026-04-24', '2026-04-24',
+            include_provisional=True, now_et=MARKET_OPEN_10AM,
+        )
+        bars = res.get('BMNZ', [])
+        assert len(bars) == 1
+        assert bars[0]['close'] == pytest.approx(14.55), (
+            "Fresh provisional row must be returned, not the legacy "
+            "polluted row shadowed by the read-side guard."
+        )
+
+    def test_past_rows_always_visible(self, db):
+        """Guard is scoped to today — any prior date passes through
+        regardless of market state."""
+        db.save_daily_bars(
+            [{'symbol': 'X', 'date': '2026-04-22', 'open': 5, 'high': 5,
+              'low': 5, 'close': 5, 'volume': 100}],
+            now_et=POST_MARKET_1630,
+        )
+        res = db.get_daily_bars_cached(
+            ['X'], '2026-04-22', '2026-04-22', now_et=MARKET_OPEN_10AM,
+        )
+        assert len(res.get('X', [])) == 1

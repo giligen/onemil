@@ -15,11 +15,10 @@ from datetime import datetime, timezone, timedelta, date as _date
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 
-try:
-    from zoneinfo import ZoneInfo as _ZoneInfo
-    _ET = _ZoneInfo('America/New_York')
-except Exception:  # pragma: no cover — py<3.9 fallback not used in this repo
-    _ET = None
+# Central source of truth for "is the regular session over?". Save-side
+# and read-side daily-bar guards both consult this so their decision can
+# never drift.
+from trading.trading_hours import is_regular_session_closed, today_et
 
 logger = logging.getLogger(__name__)
 
@@ -48,19 +47,9 @@ def _drop_today_provisional_bars(
     """
     if not bars:
         return bars, 0
-    if _ET is None:
-        return bars, 0  # no timezone support — be permissive
-    if now_et is None:
-        now_et = datetime.now(timezone.utc).astimezone(_ET)
-    # Weekends — Alpaca won't return a today-bar and the guard is moot.
-    if now_et.weekday() >= 5:
+    if is_regular_session_closed(now_et=now_et):
         return bars, 0
-    # After 16:15 ET, daily bars are final (5-15 min settlement margin
-    # after 16:00 ET close). Safe to persist.
-    session_guard_close = now_et.replace(hour=16, minute=15, second=0, microsecond=0)
-    if now_et >= session_guard_close:
-        return bars, 0
-    today_str = now_et.strftime('%Y-%m-%d')
+    today_str = today_et(now_et=now_et).isoformat()
     out: List[Dict[str, Any]] = []
     dropped = 0
     for b in bars:
@@ -1083,6 +1072,7 @@ class Database:
     def get_daily_bars_cached(
         self, symbols: List[str], start_date: str, end_date: str,
         include_provisional: bool = False,
+        now_et: Optional[datetime] = None,
     ) -> Dict[str, List[Dict[str, Any]]]:
         """
         Retrieve cached daily bars for symbols in a date range.
@@ -1097,12 +1087,32 @@ class Database:
                 a FINAL row hides any leftover provisional for the same
                 key. Live engines should NEVER set this to True; only BT
                 flows that explicitly opt in via `--include-today-provisional`.
+            now_et: override clock for tests.
+
+        Defensive read-side guard: during market hours (before 16:15 ET)
+        we treat ANY today-row in the main `daily_bars` table as
+        non-final and drop it from the result. This protects against
+        legacy polluted rows that existed before the save-side guard
+        shipped, or rows written via paths that bypass
+        `save_daily_bars`. Cost: live queries use `end_date = today - 1`
+        and are never affected by this filter; BT queries that want
+        today's data opt in via `include_provisional=True` and get the
+        sidecar row instead.
 
         Returns:
             Dict mapping symbol -> list of bar dicts {date, open, high, low, close, volume}
         """
         if not symbols:
             return {}
+
+        # Compute the "treat this date as provisional" predicate for the
+        # read-side guard. Only applies when the regular session hasn't
+        # closed yet.
+        today_drop = (
+            today_et(now_et=now_et).isoformat()
+            if not is_regular_session_closed(now_et=now_et)
+            else None
+        )
 
         # Step 1: collect final bars into a per-symbol dict keyed by bar_date
         # so it's easy to layer provisional rows on top.
@@ -1120,6 +1130,10 @@ class Database:
             """, chunk + [start_date, end_date])
             for row in cursor.fetchall():
                 rd = dict(row)
+                # Defensive: skip today-rows during market hours. Legacy
+                # polluted rows or bypassed-guard writes won't leak out.
+                if today_drop and str(rd['bar_date']) == today_drop:
+                    continue
                 per_sym.setdefault(rd['symbol'], {})[rd['bar_date']] = {
                     'date': rd['bar_date'],
                     'open': rd['open'], 'high': rd['high'],
