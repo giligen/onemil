@@ -2160,7 +2160,11 @@ class TradingEngine:
 
         from trading.exhaustion_signals import check_exhaustion
 
-        watched = self.stop_monitor.watched_symbols
+        # Scope to bull-flag watches ONLY. The shared StopMonitor also holds
+        # watches added by ORB and MACD Wave; iterating those here would
+        # make bull flag try to exit ORB positions on the main Alpaca
+        # account and log 42210000 rejections (the 2026-04-24 SMCX bug).
+        watched = self.stop_monitor.watched_symbols_for('bull_flag')
         if not watched:
             return
 
@@ -3337,9 +3341,12 @@ class TradingEngine:
         are recorded before we attempt to close remaining positions.
         """
         # Stop StopMonitor before force-closing — prevents race conditions
-        # where monitor tries to exit while we're also closing
+        # where monitor tries to exit while we're also closing.
+        # SCOPED to bull_flag watches so we don't remove ORB / MACD Wave
+        # watches from the shared monitor (would disable their own exit
+        # paths). Each strategy runs its own force_close_all.
         if self.stop_monitor:
-            for symbol in list(self.stop_monitor.watched_symbols):
+            for symbol in list(self.stop_monitor.watched_symbols_for('bull_flag')):
                 self.stop_monitor.remove_watch(symbol)
             self._process_stop_monitor_exits()
 

@@ -775,9 +775,24 @@ class StopMonitor:
 
     @property
     def watched_symbols(self) -> List[str]:
-        """Return list of currently watched symbols."""
+        """All currently watched symbols, regardless of which strategy added
+        them. Callers in a multi-strategy context should prefer
+        `watched_symbols_for(strategy)` to avoid processing other
+        strategies' positions (e.g. bull flag's exhaustion-exit logic
+        trying to sell an ORB-owned symbol on the main account — the
+        2026-04-24 SMCX bug)."""
         with self._watch_lock:
             return list(self._watches.keys())
+
+    def watched_symbols_for(self, strategy: str) -> List[str]:
+        """Currently watched symbols whose WatchEntry was tagged with the
+        given strategy. Use this in any per-strategy loop that iterates
+        over positions — otherwise a handler added by one strategy will
+        see and act on symbols owned by another.
+        """
+        with self._watch_lock:
+            return [s for s, w in self._watches.items()
+                    if w.strategy == strategy]
 
     def get_watch_snapshot(self, symbol: str) -> Optional[Dict]:
         """
