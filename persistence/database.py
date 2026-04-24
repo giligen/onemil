@@ -11,14 +11,71 @@ Handles concurrent access via WAL mode and busy timeouts.
 
 import sqlite3
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date as _date
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
+
+try:
+    from zoneinfo import ZoneInfo as _ZoneInfo
+    _ET = _ZoneInfo('America/New_York')
+except Exception:  # pragma: no cover — py<3.9 fallback not used in this repo
+    _ET = None
 
 logger = logging.getLogger(__name__)
 
 # Singleton instance
 _db_instance: Optional['Database'] = None
+
+
+def _drop_today_provisional_bars(
+    bars: List[Dict[str, Any]],
+    now_et: Optional[datetime] = None,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Strip rows whose `date == today_et` when the regular session hasn't
+    closed yet (using a 16:15 ET grace window for settlement).
+
+    Alpaca's daily-bar endpoint, queried during market hours, returns a bar
+    whose `close` is the last trade price at that moment — NOT the
+    end-of-session close. Persisting such a row would pollute `prev_close`
+    reads the next morning (bug seen 2026-04-22 → 2026-04-23: BMNZ's 4/22
+    close came back as $13.66 mid-day vs the real final of $13.43, which
+    shifted live's 4/23 gap_pct from BT's 5.96% to 4.17% and mis-quintiled
+    the trade).
+
+    Weekends and post-16:15-ET hours: all rows pass through unchanged.
+
+    Returns (kept_bars, n_dropped). Pass `now_et` for deterministic tests.
+    """
+    if not bars:
+        return bars, 0
+    if _ET is None:
+        return bars, 0  # no timezone support — be permissive
+    if now_et is None:
+        now_et = datetime.now(timezone.utc).astimezone(_ET)
+    # Weekends — Alpaca won't return a today-bar and the guard is moot.
+    if now_et.weekday() >= 5:
+        return bars, 0
+    # After 16:15 ET, daily bars are final (5-15 min settlement margin
+    # after 16:00 ET close). Safe to persist.
+    session_guard_close = now_et.replace(hour=16, minute=15, second=0, microsecond=0)
+    if now_et >= session_guard_close:
+        return bars, 0
+    today_str = now_et.strftime('%Y-%m-%d')
+    out: List[Dict[str, Any]] = []
+    dropped = 0
+    for b in bars:
+        bdate = b.get('date')
+        if isinstance(bdate, datetime):
+            bdate_str = bdate.date().isoformat()
+        elif isinstance(bdate, _date):
+            bdate_str = bdate.isoformat()
+        else:
+            bdate_str = str(bdate)
+        if bdate_str == today_str:
+            dropped += 1
+            continue
+        out.append(b)
+    return out, dropped
 
 
 # =============================================================================
@@ -922,16 +979,37 @@ class Database:
     # Daily bars cache
     # =========================================================================
 
-    def save_daily_bars(self, bars: List[Dict[str, Any]]) -> int:
+    def save_daily_bars(
+        self, bars: List[Dict[str, Any]],
+        now_et: Optional[datetime] = None,
+    ) -> int:
         """
-        Cache daily bars to avoid re-fetching from API.
+        Cache daily bars to avoid re-fetching from API. INSERT OR REPLACE
+        semantics — a previous row for (symbol, date) is overwritten.
+
+        Silently drops rows whose `date == today_et` when the regular
+        session hasn't ended (before 16:15 ET). See
+        `_drop_today_provisional_bars` for background. Pass `now_et` to
+        override the clock for tests.
 
         Args:
             bars: List of dicts with keys: symbol, date, open, high, low, close, volume
+            now_et: Override 'now' for tests. Defaults to real ET wall clock.
 
         Returns:
-            Number of bars saved
+            Number of bars actually saved (may be < len(bars) if some were
+            dropped by the provisional-today guard).
         """
+        if not bars:
+            return 0
+
+        bars, n_dropped = _drop_today_provisional_bars(bars, now_et=now_et)
+        if n_dropped:
+            logger.warning(
+                f"save_daily_bars: dropped {n_dropped} provisional row(s) "
+                f"for today — market still open (write post-16:15 ET to "
+                f"persist today's bar). See _drop_today_provisional_bars."
+            )
         if not bars:
             return 0
 
