@@ -1,0 +1,28 @@
+[Unit]
+Description=OneMil ORB Backtest — nightly post-close refresh
+Documentation=file:///home/ec2-user/onemil/systemd/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Oneshot so systemd knows the unit is "inactive" once the run completes.
+# The paired .timer schedules it; we never want this to linger.
+Type=oneshot
+User=ec2-user
+Group=ec2-user
+WorkingDirectory=/home/ec2-user/onemil
+# No CLI flags — the backtest auto-detects missing dates and refreshes.
+# `--include-today-provisional` is intentionally omitted; post-close runs
+# persist today's FINAL bar via the regular save_daily_bars path.
+ExecStart=/usr/bin/python3 orb_backtest.py
+# Total budget: daily-fill (~1 min) + intraday-fill (seconds) +
+# features regen (~10 min) + pipeline (~2 min) ≈ 13 min.
+TimeoutStartSec=1800
+MemoryMax=4G
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=onemil-orb-backtest
+EnvironmentFile=/home/ec2-user/onemil/.env
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,18 @@
+[Unit]
+Description=Fire onemil-orb-backtest.service post-close each weekday
+Requires=onemil-orb-backtest.service
+
+[Timer]
+# 16:30 America/New_York Mon–Fri, DST-aware via the zoneinfo specifier.
+# The 16:15 ET settlement-grace window inside save_daily_bars is the
+# hard invariant; 16:30 ET gives ~15 min buffer for the Alpaca endpoint
+# to finalize and for late trade corrections to trickle in.
+OnCalendar=Mon..Fri *-*-* 16:30:00 America/New_York
+# If the machine was asleep when the timer should have fired, run asap
+# on next boot rather than waiting 24h.
+Persistent=true
+# Small jitter so we don't hammer Alpaca at the exact top of the minute.
+RandomizedDelaySec=30
+
+[Install]
+WantedBy=timers.target
