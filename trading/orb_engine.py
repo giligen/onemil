@@ -1012,17 +1012,24 @@ class ORBEngine:
 
         # 3a. Q1 filter — drop bottom-quintile candidates if configured.
         # Q1 is net-negative OOS (see filter.skip_q1 comment in orb.yaml).
+        # Single-pass partition keeps semantics identical to the prior two-pass
+        # version while making the data flow obvious.
         if self.skip_q1:
-            q1_dropped = [c for c in scored if c.quintile == 'Q1']
+            kept_scored = []
+            q1_dropped = []
+            for c in scored:
+                if c.quintile == 'Q1':
+                    c.rejected_reason = 'q1_filter'
+                    q1_dropped.append(c)
+                else:
+                    kept_scored.append(c)
             if q1_dropped:
                 logger.info(
                     "[ORB] Q1 filter dropped %d candidate(s): %s",
                     len(q1_dropped),
                     ', '.join(f"{c.symbol}(comp={c.composite:.3f})" for c in q1_dropped)
                 )
-                for c in q1_dropped:
-                    c.rejected_reason = 'q1_filter'
-                scored = [c for c in scored if c.quintile != 'Q1']
+            scored = kept_scored
             if not scored:
                 return []
 

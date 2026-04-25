@@ -30,8 +30,11 @@ import pandas as pd
 import yaml
 
 
-DB_PATH = '/home/ec2-user/onemil/data/trades.db'
-ORB_YAML = '/home/ec2-user/onemil/orb.yaml'
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+DB_PATH = str(ROOT / 'data' / 'trades.db')
+ORB_YAML = str(ROOT / 'orb.yaml')
 
 # Pre-Stage-0 spec
 PRE0_BUDGET = 15000
@@ -41,6 +44,7 @@ PRE0_DAILY_LOSS = -750
 # Promotion thresholds
 PROMOTE_MIN_DAYS = 10
 PROMOTE_MIN_CUSHION = 1000
+PROMOTE_MIN_CLOSED_TRADES = 5  # min N for slippage stats to be meaningful
 PROMOTE_MAX_RT_SLIP_BPS = 60
 PROMOTE_MAX_ENTRY_BPS = 45
 PROMOTE_MAX_EXIT_BPS = 25
@@ -65,36 +69,15 @@ def find_launch_date_from_git() -> Optional[date]:
     try:
         result = subprocess.run(
             ['git', 'log', '--all', '--pretty=format:%aI %s'],
-            capture_output=True, text=True, cwd='/home/ec2-user/onemil',
+            capture_output=True, text=True, cwd=str(ROOT),
         )
         for line in result.stdout.splitlines():
             if 'ORB ramp: Pre-Stage-0 LIVE' in line or \
                'ORB ramp: Pre-Stage-0 (live launch)' in line:
                 ts = line.split(' ', 1)[0]
                 return datetime.fromisoformat(ts.replace('Z', '+00:00')).date()
-    except Exception:
-        pass
-    return None
-
-
-def find_launch_date_from_db() -> Optional[date]:
-    """Fallback: look for first ORB trade after orb.yaml had budget=15000.
-
-    Approximation: first ORB trade in the DB. (We don't store config snapshot
-    per trade, so this is best-effort.)
-    """
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        df = pd.read_sql_query(
-            "SELECT MIN(trade_date) AS first FROM trades WHERE strategy = 'orb'",
-            conn,
-        )
-        conn.close()
-        first = df.iloc[0]['first']
-        if first:
-            return datetime.strptime(first, '%Y-%m-%d').date()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"WARNING: git log lookup failed: {e}", file=sys.stderr)
     return None
 
 
@@ -146,15 +129,37 @@ def main():
     parser.add_argument('--launch-date', type=str, default=None)
     args = parser.parse_args()
 
+    # Verify config FIRST — refuse to compute cushion if we're not on Pre-0.
+    # Without this check, the script silently uses the first ORB trade ever
+    # as launch date, yielding nonsense cushion math when run before launch.
+    cfg = load_config_state()
+    config_matches = (
+        cfg.get('budget') == PRE0_BUDGET
+        and cfg.get('risk') == PRE0_RISK
+        and cfg.get('daily_loss') == PRE0_DAILY_LOSS
+    )
+    if not config_matches and not args.launch_date:
+        print(f"ERROR: orb.yaml does NOT match Pre-Stage-0 spec, and no")
+        print(f"       --launch-date was provided. Refusing to guess.")
+        print()
+        print(f"  Current orb.yaml:")
+        print(f"    budget       ${cfg.get('budget')}    (expected ${PRE0_BUDGET})")
+        print(f"    risk/trade   ${cfg.get('risk')}     (expected ${PRE0_RISK})")
+        print(f"    daily_loss   ${cfg.get('daily_loss')} (expected ${PRE0_DAILY_LOSS})")
+        print()
+        print(f"Either: (a) you're not in Pre-Stage-0 LIVE yet — that's fine,")
+        print(f"  this script only applies once you flip orb.yaml to Pre-0 spec.")
+        print(f"  (b) you ARE in Pre-0 but ran before flipping — flip first.")
+        print(f"  (c) explicit override: pass --launch-date YYYY-MM-DD")
+        sys.exit(1)
+
     # Resolve launch date
     if args.launch_date:
         launch = datetime.strptime(args.launch_date, '%Y-%m-%d').date()
     else:
         launch = find_launch_date_from_git()
-        if launch is None:
-            launch = find_launch_date_from_db()
     if launch is None:
-        print("ERROR: Cannot determine Pre-Stage-0 launch date.")
+        print("ERROR: Cannot determine Pre-Stage-0 launch date from git log.")
         print("Pass --launch-date YYYY-MM-DD or commit with message containing")
         print("'ORB ramp: Pre-Stage-0 LIVE'.")
         sys.exit(1)
@@ -169,9 +174,6 @@ def main():
     print(f"  Launch date:        {launch}")
     print(f"  Days in stage:      {days_in_stage}")
     print()
-
-    # Verify config is actually Pre-Stage-0
-    cfg = load_config_state()
     print(f"  Current orb.yaml config:")
     print(f"    budget:       ${cfg.get('budget'):>7}  (expected ${PRE0_BUDGET})"
           if cfg.get('budget') is not None else f"    budget:       ?")
@@ -180,14 +182,9 @@ def main():
     print(f"    daily_loss:  ${cfg.get('daily_loss'):>7}  (expected ${PRE0_DAILY_LOSS})"
           if cfg.get('daily_loss') is not None else f"    daily_loss:   ?")
     print(f"    tg prefix:    {cfg.get('tg_prefix')!r}  (expected '[ORB-LIVE-PRE0]')")
-    config_matches = (
-        cfg.get('budget') == PRE0_BUDGET
-        and cfg.get('risk') == PRE0_RISK
-        and cfg.get('daily_loss') == PRE0_DAILY_LOSS
-    )
     if not config_matches:
         print(f"\n  WARNING: orb.yaml does NOT match Pre-Stage-0 spec.")
-        print(f"  Either you're not in Pre-Stage-0 yet, or the config has drifted.")
+        print(f"  Continuing because --launch-date was provided as override.")
 
     # Fetch trades since launch
     trades = fetch_orb_trades_since(launch)
@@ -209,13 +206,11 @@ def main():
 
     # Daily breakdown (last 5 days)
     print(f"\n  Last 5 trading days:")
-    for d in (closed.groupby('trade_date')['pnl'].sum()
-              .reset_index().sort_values('trade_date').tail(5).iterrows()):
-        idx, row = d
-        marker = '  '
-        if row['pnl'] < DEMOTE_DAILY_LOSS:
-            marker = '⚠ '
-        print(f"    {marker}{row['trade_date']}: ${row['pnl']:+8,.0f}")
+    daily = (closed.groupby('trade_date')['pnl'].sum()
+             .sort_index().tail(5))
+    for trade_date, pnl in daily.items():
+        marker = '⚠ ' if pnl < DEMOTE_DAILY_LOSS else '  '
+        print(f"    {marker}{trade_date}: ${pnl:+8,.0f}")
 
     # Slippage today
     if len(today_trades):
@@ -283,16 +278,19 @@ def main():
     print(f"{'='*72}")
     days_ok = days_in_stage >= PROMOTE_MIN_DAYS
     cushion_ok = cushion >= PROMOTE_MIN_CUSHION
-    slip_ok = True
-    if len(closed_all):
+    slip_n_ok = len(closed_all) >= PROMOTE_MIN_CLOSED_TRADES
+    slip_ok = False
+    if slip_n_ok:
         em = closed_all['entry_slip_bps'].dropna().mean()
         xm = closed_all['exit_slip_bps'].dropna().mean()
         slip_ok = (em <= PROMOTE_MAX_ENTRY_BPS and xm <= PROMOTE_MAX_EXIT_BPS
                    and (em + xm) <= PROMOTE_MAX_RT_SLIP_BPS)
-    print(f"  ≥ {PROMOTE_MIN_DAYS} days in stage:    {'✓' if days_ok else '✗'}  ({days_in_stage} days)")
-    print(f"  ≥ ${PROMOTE_MIN_CUSHION} cushion:      {'✓' if cushion_ok else '✗'}  (${cushion:+,.0f})")
-    print(f"  Slippage gates met:  {'✓' if slip_ok else '✗'}")
-    if days_ok and cushion_ok and slip_ok:
+    print(f"  ≥ {PROMOTE_MIN_DAYS} days in stage:        {'✓' if days_ok else '✗'}  ({days_in_stage} days)")
+    print(f"  ≥ ${PROMOTE_MIN_CUSHION} cushion:          {'✓' if cushion_ok else '✗'}  (${cushion:+,.0f})")
+    print(f"  ≥ {PROMOTE_MIN_CLOSED_TRADES} closed trades for slip: "
+          f"{'✓' if slip_n_ok else '✗'}  ({len(closed_all)} trades)")
+    print(f"  Slippage means within gates: {'✓' if slip_ok else ('✗' if slip_n_ok else '~')}")
+    if days_ok and cushion_ok and slip_n_ok and slip_ok:
         print(f"\n  ✓✓ ELIGIBLE for promotion to Stage 0 ($30K, $1K risk).")
         print(f"     Edit orb.yaml: budget=30000, risk=1000, daily_loss=-1500")
         print(f"     Telegram prefix: '[ORB-LIVE]'")

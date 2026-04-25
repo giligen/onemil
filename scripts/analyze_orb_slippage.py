@@ -17,12 +17,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
 
 
-DB_PATH = '/home/ec2-user/onemil/data/trades.db'
+ROOT = Path(__file__).resolve().parent.parent
+DB_PATH = str(ROOT / 'data' / 'trades.db')
 BT_ENTRY_BPS = 30.0
 BT_EXIT_BPS = 10.0
 

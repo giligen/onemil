@@ -292,16 +292,29 @@ ORB analysis; the older ones have warning headers pointing to the shipped varian
 - `journalctl -u onemil-trader | grep 'LOCK ARMED'` for lock-state transitions
 - DB queries: `db.get_open_trades(today, strategy='orb')`
 
-**Rollout phases (as of 2026-04-19)**:
-- Phase 0: code merged, `enabled: false` — no trades
-- Phase 1: paper account, `enabled: true`, risk=$3K — 1 week monitor
-- Phase 2: live small, risk=$1K — 1 week monitor
-- Phase 3: live full, risk=$3K
+**Rollout phases — see `docs/orb_rollout_plan.md` for the live cushion-gated ramp**:
+- Pre-Stage-0 LIVE (data collection): $15K budget / $500 risk / -$750 daily loss — half-size live to capture real fill quality vs paper. Hard stop -$3K cushion. Use `scripts/orb_pre0_daily.py` for daily monitoring.
+- Stage 0: $30K budget / $1K risk / -$1.5K daily — formal live launch
+- Stages 1-4: $50K → $174K (full DTBP). Cushion + days-in-stage gated.
+
+**Q1 filter (shipped 2026-04-25, default ON)**: drops bottom-quintile candidates at ranking time. BT lift +$8,556 OOS (no DD increase). Config: `orb.yaml::filter.skip_q1: true` (also via `ORB_SKIP_Q1=0` to disable in BT). Validated by `study_orb_q1q2_filter.py`. Slot mechanics: filter never refills slots (Q1 is last-priority — see `check_q1_refill_potential.py`). Monitor: `journalctl -u onemil-trader | grep "Q1 filter"`.
+
+**ORB diagnostic scripts** (in `scripts/`):
+- `orb_ramp_check.py` — current stage + advancement eligibility (cushion + days)
+- `orb_pre0_daily.py` — Pre-Stage-0 daily monitor (cushion, slippage vs BT, promotion eligibility, demotion triggers). Refuses to run if orb.yaml ≠ Pre-0 spec unless `--launch-date` passed.
+- `analyze_orb_slippage.py` — per-trade entry/exit slippage vs BT 30/10 bps
+- `investigate_composite_drift.py` — diff live `ORB SCORED` log vs BT features CSV to find feature responsible for any composite drift
+
+**ORB research summary**: `docs/orb_research_apr_2026.md` (50+ exit/add-to-winners variants tested April 2026 — V0 confirmed Pareto-frontier; only Q1 filter shipped; bull-flag-gated add-to-winners parked due to small ~$10K/yr lift).
+
+**orb.yaml** is gitignored (instance-specific config). Use `orb.yaml.template` as base for new node setup: `cp orb.yaml.template orb.yaml`.
 
 **Do NOT**:
 - Enable with `ALPACA_ORB_API_KEY` empty — main.py will warn + disable
 - Refit z-score / quintile / adaptive params without running `study_orb_refit.py` first (quarterly cadence)
 - Remove Q5 cap from `orb.yaml::adaptive_mults.Q5: 1.5` — it's the anti-overfit guard
+- Disable Q1 filter (`filter.skip_q1`) without revisiting `docs/orb_research_apr_2026.md` first
+- Skip Pre-Stage-0 LIVE phase before formal Stage 0 — paper data has structural limits (synthetic fills don't capture real venue queue)
 
 # Running Backtests
 

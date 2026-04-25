@@ -151,8 +151,13 @@ def main():
 
     # Q1 filter (ships on by default; matches trading/orb_engine.py skip_q1).
     # BT-validated lift: +$8,556 OOS across VAL + HOQ1+. Controlled via env var
-    # ORB_SKIP_Q1=0 to disable for research/diff runs.
-    skip_q1 = os.environ.get('ORB_SKIP_Q1', '1') != '0'
+    # ORB_SKIP_Q1=0/false/no/off to disable for research/diff runs.
+    # NOTE: mults above are fit on TRAIN data INCLUDING Q1 trades. Q1 still
+    # influences calibration of Q4/Q5 mults via train_k.mean(). Filter only
+    # affects which trades are SELECTED, not how mults are FIT. Acceptable
+    # because Q1's contribution to avg is small (mult capped at 0.5x).
+    _q1_env = os.environ.get('ORB_SKIP_Q1', '1').strip().lower()
+    skip_q1 = _q1_env not in ('0', 'false', 'no', 'off', '')
     if skip_q1:
         n_q1 = int((kept['_quintile'] == 'Q1').sum())
         kept = kept[kept['_quintile'] != 'Q1'].copy()

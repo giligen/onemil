@@ -103,6 +103,29 @@ ALL must be true:
 - Single day worse than **−$1,000** (24h pause + trade-by-trade review before resume)
 - Composite drift exceeds **0.20** sustained over 3+ days
 
+### Reset procedure (after demotion, before re-launching Pre-0)
+
+The launch-date discovery in `scripts/orb_pre0_daily.py` reads from git
+log for `ORB ramp: Pre-Stage-0 LIVE` commits. After a demotion + relaunch,
+two attempts share the same git history, which means days-in-stage and
+cumulative cushion mechanics get confused.
+
+To re-launch cleanly:
+
+```bash
+# 1. Document the demotion + reason in docs/ramp_log.md (one line)
+echo "$(date -I)  Pre-0 demoted: <trigger>"  >> docs/ramp_log.md
+
+# 2. Take 2 full trading days off (emotional decompression)
+
+# 3. When re-launching, use a NEW commit message tag so the script picks
+#    up the latest launch:
+git commit -m "ORB ramp: Pre-Stage-0 LIVE (relaunch attempt 2 - <reason>)"
+
+# 4. The daily monitor will use the most-recent matching commit. If you
+#    want to be explicit, pass --launch-date YYYY-MM-DD.
+```
+
 ### Telegram prefix change
 
 `orb.yaml::notifications.telegram.prefix: "[ORB-LIVE-PRE0]"`

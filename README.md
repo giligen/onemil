@@ -752,7 +752,18 @@ production-parity):
    ALPACA_ORB_PAPER=true
    ```
 
-2. **Master kill switch** in `orb.yaml`:
+2. **Bootstrap `orb.yaml` from the template** (only needed once per node — `orb.yaml` is gitignored, instance-specific):
+
+   ```bash
+   # First-time setup or after a rebuild — copy the in-repo template:
+   cp orb.yaml.template orb.yaml
+
+   # Subsequent updates: pull and merge any new template fields into your
+   # existing orb.yaml manually (config.yaml follows the same pattern).
+   git diff origin/master -- orb.yaml.template
+   ```
+
+3. **Master kill switch** in `orb.yaml`:
 
    ```yaml
    strategy:
@@ -760,7 +771,7 @@ production-parity):
      enabled: true          # ← flip to true
    ```
 
-3. **Add `--orb` to the systemd unit** so `main.py` loads the module
+4. **Add `--orb` to the systemd unit** so `main.py` loads the module
    alongside the other strategies:
 
    ```bash
@@ -772,7 +783,7 @@ production-parity):
    sudo systemctl daemon-reload
    ```
 
-4. **Restart**:
+5. **Restart**:
 
    ```bash
    sudo systemctl restart onemil-trader

@@ -64,6 +64,10 @@ class Stage:
     min_days_in_stage: Optional[int]
 
 
+PRE_STAGE_IDX = -1  # Pre-Stage-0 LIVE half-size data-collection phase
+TERMINAL_STAGE_IDX = 4
+
+
 def _stage_by_idx(i: int) -> Optional[Stage]:
     """Look up Stage by its semantic idx (-1 for Pre-0, 0-4 for the ramp).
 
@@ -73,6 +77,11 @@ def _stage_by_idx(i: int) -> Optional[Stage]:
         if row[0] == i:
             return Stage(*row)
     return None
+
+
+def is_pre_stage(stage: Stage) -> bool:
+    """True if `stage` is the Pre-Stage-0 LIVE phase."""
+    return stage.idx == PRE_STAGE_IDX
 
 
 def _current_stage_from_yaml() -> Optional[Stage]:
@@ -241,7 +250,7 @@ def main():
 
     # --- Advancement ---
     # Stage idx semantics: -1 (Pre-0) → 0 (Stage 0) → 1 → 2 → 3 → 4 (terminal).
-    next_stage = _stage_by_idx(stage.idx + 1) if stage.idx < 4 else None
+    next_stage = _stage_by_idx(stage.idx + 1) if stage.idx < TERMINAL_STAGE_IDX else None
     advance_blockers = []
     if next_stage is not None and stage.cushion_to_advance is not None:
         if cushion < stage.cushion_to_advance:
@@ -302,7 +311,7 @@ def main():
 
     # Demotion
     if demote_triggers:
-        if stage.idx == -1:
+        if is_pre_stage(stage):
             # Pre-0 demotion = revert to paper / research config, not "Stage -2"
             print(f"⚠️  DEMOTION TRIGGERED — revert Pre-Stage-0 → paper:")
             print(f"   Restore orb.yaml to research config ($100K budget) and")
@@ -315,7 +324,7 @@ def main():
         print()
 
     # Pre-Stage-0 has richer gating (slippage + drift) — defer
-    if stage.idx == -1:
+    if is_pre_stage(stage):
         print(f"ℹ️  Pre-Stage-0 has richer promotion gating (slippage, drift).")
         print(f"   Run: python3 scripts/orb_pre0_daily.py")
         print(f"   for the full eligibility check.")

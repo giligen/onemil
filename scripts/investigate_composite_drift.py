@@ -87,14 +87,56 @@ def parse_journalctl(log_text: str) -> List[dict]:
     return out
 
 
+def fetch_journalctl_for_date(date_str: str) -> str:
+    """Fetch SCORED lines bounded to a specific ET trading day.
+
+    Uses --since YYYY-MM-DD 08:00:00 / --until YYYY-MM-DD 17:00:00 (ET)
+    via systemd's local-time interpretation (host should be UTC; we pass
+    UTC bounds that span the ET trading day).
+    """
+    if os.geteuid() != 0:
+        print("NOTE: not running as root. journalctl may return no data.",
+              file=sys.stderr)
+    # Trading day in ET = 9:30-16:30 ET = 13:30-20:30 UTC during EDT.
+    # Widen to 12:00-22:00 UTC for slop.
+    since = f"{date_str} 12:00:00 UTC"
+    until = f"{date_str} 22:00:00 UTC"
+    try:
+        result = subprocess.run(
+            ['journalctl', '-u', 'onemil-trader', '--since', since,
+             '--until', until, '-o', 'cat', '--grep', 'ORB SCORED'],
+            capture_output=True, text=True, timeout=60,
+        )
+        return result.stdout
+    except subprocess.CalledProcessError as e:
+        print(f"WARNING: journalctl failed: {e}", file=sys.stderr)
+        return ''
+    except FileNotFoundError:
+        print("ERROR: journalctl not found — run on the trading host", file=sys.stderr)
+        sys.exit(1)
+
+
 def fetch_journalctl_24h() -> str:
-    """Fetch ORB SCORED lines from journalctl (last 24h)."""
+    """Fetch ORB SCORED lines from journalctl (last 24h).
+
+    Requires either root or membership in the systemd-journal/adm group.
+    Detect that early and surface a usable error.
+    """
+    if os.geteuid() != 0:
+        # Non-root user — try anyway but warn first
+        print("NOTE: not running as root. journalctl may return no data.",
+              file=sys.stderr)
+        print("      If output below is empty, retry with: sudo python3 ...",
+              file=sys.stderr)
     try:
         result = subprocess.run(
             ['journalctl', '-u', 'onemil-trader', '--since', '24 hours ago',
              '-o', 'cat', '--grep', 'ORB SCORED'],
             capture_output=True, text=True, timeout=60,
         )
+        if result.returncode != 0 and result.stderr:
+            print(f"WARNING: journalctl stderr: {result.stderr.strip()[:200]}",
+                  file=sys.stderr)
         return result.stdout
     except subprocess.CalledProcessError as e:
         print(f"WARNING: journalctl failed: {e}", file=sys.stderr)
@@ -130,6 +172,11 @@ def main():
     if args.log:
         with open(args.log) as f:
             log_text = f.read()
+    elif args.date:
+        # Specific date requested — bound journalctl to that ET trading day
+        # (9:00 ET to 16:30 ET = 13:00 UTC to 20:30 UTC during EDT;
+        # widen by 1 hour each side for slop)
+        log_text = fetch_journalctl_for_date(args.date)
     else:
         log_text = fetch_journalctl_24h()
     if not log_text:
