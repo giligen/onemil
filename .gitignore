@@ -10,8 +10,9 @@ __pycache__/
 .env.*
 !.env.example
 
-# Instance-specific config (use config.yaml.template as base)
+# Instance-specific config (use *.yaml.template as base)
 config.yaml
+orb.yaml
 
 # IDE
 .vscode/
