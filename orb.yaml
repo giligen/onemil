@@ -52,6 +52,15 @@ entry:
 # Params baked from H1 2025 TRAIN fit (1090 trades). Refit quarterly via study_orb_refit.py.
 filter:
   threshold: 0.0
+  # Drop Q1 (bottom quintile) candidates at ranking time. Q1 is TRAIN-positive
+  # but OOS-negative (VAL -$5.1K, HOQ1+ -$3.4K) — classic overfit. Reduces
+  # trade frequency from 3.25 → 2.96/day with no DD impact. Note: slots do
+  # NOT refill with higher-quintile candidates because Q1 is last-priority
+  # in ranking_order — removing it never unblocks higher-Q via dedup
+  # (verified by check_q1_refill_potential.py). The filter is pure subtraction.
+  # BT lift: +$8,556 combined OOS (VAL +$5,151, HOQ1+ +$3,405). See
+  # study_orb_q1q2_filter.py for walk-forward validation.
+  skip_q1: true
   features:
     gap_pct:
       sign: -1              # lower gap = better

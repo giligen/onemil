@@ -206,6 +206,10 @@ class ORBEngine:
         # Filter + conviction params (loaded once, used repeatedly)
         filter_cfg = cfg.get('filter', {})
         self.filter_threshold = float(filter_cfg.get('threshold', 0.0))
+        # Q1 filter — drop bottom-quintile candidates at ranking time. Default on.
+        # Q1 was TRAIN-positive (+$6K) but OOS-negative (VAL -$5.1K, HOQ1+ -$3.4K).
+        # BT validation: study_orb_q1q2_filter.py.
+        self.skip_q1 = bool(filter_cfg.get('skip_q1', True))
         self.z_params: Dict[str, FeatureParam] = (
             load_feature_params(filter_cfg) if filter_cfg.get('features') else {}
         )
@@ -1006,7 +1010,23 @@ class ORBEngine:
         if not scored:
             return []
 
-        # 3. Rank — quintile order first, then composite DESC inside bucket
+        # 3a. Q1 filter — drop bottom-quintile candidates if configured.
+        # Q1 is net-negative OOS (see filter.skip_q1 comment in orb.yaml).
+        if self.skip_q1:
+            q1_dropped = [c for c in scored if c.quintile == 'Q1']
+            if q1_dropped:
+                logger.info(
+                    "[ORB] Q1 filter dropped %d candidate(s): %s",
+                    len(q1_dropped),
+                    ', '.join(f"{c.symbol}(comp={c.composite:.3f})" for c in q1_dropped)
+                )
+                for c in q1_dropped:
+                    c.rejected_reason = 'q1_filter'
+                scored = [c for c in scored if c.quintile != 'Q1']
+            if not scored:
+                return []
+
+        # 3b. Rank — quintile order first, then composite DESC inside bucket
         q_rank = {q: i for i, q in enumerate(self.ranking_order)}
         scored.sort(key=lambda c: (q_rank.get(c.quintile, 99), -c.composite))
         ranked_symbols = [c.symbol for c in scored]

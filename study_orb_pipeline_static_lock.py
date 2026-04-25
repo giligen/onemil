@@ -149,6 +149,16 @@ def main():
     kept = df[df['_composite'] >= FILTER_THRESHOLD].copy()
     kept['_quintile'] = assign_quintile(kept['_composite'], cutoffs)
 
+    # Q1 filter (ships on by default; matches trading/orb_engine.py skip_q1).
+    # BT-validated lift: +$8,556 OOS across VAL + HOQ1+. Controlled via env var
+    # ORB_SKIP_Q1=0 to disable for research/diff runs.
+    skip_q1 = os.environ.get('ORB_SKIP_Q1', '1') != '0'
+    if skip_q1:
+        n_q1 = int((kept['_quintile'] == 'Q1').sum())
+        kept = kept[kept['_quintile'] != 'Q1'].copy()
+        print(f"Q1 filter: dropped {n_q1} Q1 candidates "
+              f"(set ORB_SKIP_Q1=0 to disable)")
+
     # Top-K + dedup per day
     sel_rows = []
     for day, dg in kept.groupby('date'):
