@@ -34,9 +34,14 @@ ORB_YAML = ROOT / 'orb.yaml'
 TRADES_DB = ROOT / 'data' / 'trades.db'
 
 # The ramp stages — KEEP IN SYNC with docs/orb_rollout_plan.md
+# Stage -1 ("Pre-0") is the half-size live data-collection phase that
+# precedes the formal ramp. It uses scripts/orb_pre0_daily.py for its
+# own monitoring; the standard ramp script recognizes it but applies
+# different gates.
 STAGES = [
     # (stage_idx, account_budget_usd, risk_per_trade_usd, daily_loss_limit_usd,
     #  cushion_to_advance, min_days_in_stage)
+    (-1, 15000,  500, -750,    1000, 10),  # Pre-0 — see orb_pre0_daily.py for richer gating
     (0,  30000, 1000, -1500,   5000, 10),
     (1,  50000, 1500, -2500,  10000, 10),
     (2,  80000, 2400, -4000,  18000, 15),
@@ -59,8 +64,15 @@ class Stage:
     min_days_in_stage: Optional[int]
 
 
-def _stage_by_idx(i: int) -> Stage:
-    return Stage(*STAGES[i])
+def _stage_by_idx(i: int) -> Optional[Stage]:
+    """Look up Stage by its semantic idx (-1 for Pre-0, 0-4 for the ramp).
+
+    Note: list position != stage idx since Pre-0 is idx=-1.
+    """
+    for row in STAGES:
+        if row[0] == i:
+            return Stage(*row)
+    return None
 
 
 def _current_stage_from_yaml() -> Optional[Stage]:
@@ -228,8 +240,8 @@ def main():
     total_trading_days = _trading_days_between(ramp_start, today)
 
     # --- Advancement ---
-    next_stage = (_stage_by_idx(stage.idx + 1)
-                  if stage.idx + 1 < len(STAGES) else None)
+    # Stage idx semantics: -1 (Pre-0) → 0 (Stage 0) → 1 → 2 → 3 → 4 (terminal).
+    next_stage = _stage_by_idx(stage.idx + 1) if stage.idx < 4 else None
     advance_blockers = []
     if next_stage is not None and stage.cushion_to_advance is not None:
         if cushion < stage.cushion_to_advance:
@@ -290,10 +302,23 @@ def main():
 
     # Demotion
     if demote_triggers:
-        print(f"⚠️  DEMOTION TRIGGERED — step down to stage {max(0, stage.idx - 1)}:")
+        if stage.idx == -1:
+            # Pre-0 demotion = revert to paper / research config, not "Stage -2"
+            print(f"⚠️  DEMOTION TRIGGERED — revert Pre-Stage-0 → paper:")
+            print(f"   Restore orb.yaml to research config ($100K budget) and")
+            print(f"   re-investigate before retrying live.")
+        else:
+            print(f"⚠️  DEMOTION TRIGGERED — step down to stage {max(0, stage.idx - 1)}:")
         for t in demote_triggers:
             print(f"   - {t}")
         print("   Apply via docs/orb_rollout_plan.md § Demotion procedure.")
+        print()
+
+    # Pre-Stage-0 has richer gating (slippage + drift) — defer
+    if stage.idx == -1:
+        print(f"ℹ️  Pre-Stage-0 has richer promotion gating (slippage, drift).")
+        print(f"   Run: python3 scripts/orb_pre0_daily.py")
+        print(f"   for the full eligibility check.")
         print()
 
     # Advancement

@@ -27,12 +27,13 @@ If your cash level changes materially (> ±20%), recompute the stages table belo
 
 ---
 
-## The ramp — 5 stages
+## The ramp — Pre-Stage-0 + 5 stages
 
 Each stage = one row. Switch by editing `orb.yaml` (see "How to apply" below) and restarting `onemil-trader`.
 
 | Stage | `account_budget_usd` | `risk_per_trade_usd` | `daily_loss_limit_usd` | Max daily $ deployed worst-case 4×Q4 | % of $80K cash |
 |:-:|---:|---:|---:|---:|---:|
+| **Pre-0** — Live data collection | **15,000** | **500** | **−750** | $28K | 35% (no margin) |
 | **0** — Launch | **30,000** | **1,000** | **−1,500** | $55K | 69% (no margin) |
 | **1** | **50,000** | **1,500** | **−2,500** | $92K | 115% (light margin) |
 | **2** | **80,000** | **2,400** | **−4,000** | $147K | 184% (moderate margin) |
@@ -43,7 +44,94 @@ Each stage = one row. Switch by editing `orb.yaml` (see "How to apply" below) an
 - `max_concurrent: 4`
 - `old_position_reference_usd: 50000` — hard-coded BT fit constant.
 - `min_stop_pct: 1.0`
-- Anything in `adaptive_mults`, `quintile_cutoffs`, `filter.features`, `ranking.order`, `dedup`, `exit`, `conflict`, or `notifications`.
+- Anything in `adaptive_mults`, `quintile_cutoffs`, `filter.features`, `ranking.order`, `dedup`, `exit`, `conflict` (notifications.telegram.prefix is the only exception — see Pre-Stage-0 below).
+
+---
+
+## Pre-Stage-0 LIVE — Data Collection Phase
+
+**Purpose:** collect real-money execution data (fill quality, spread experience,
+operational stability, BT-vs-live parity) before committing to formal Stage 0.
+Paper data has structural limits — synthetic Alpaca paper fills don't capture
+real venue queue position, market impact, or rejection-rate distribution.
+Half-size live caps the cost of learning at ~$3K worst-case while exposing
+the strategy to real execution conditions.
+
+### Config (apply to `orb.yaml`)
+
+```yaml
+sizing:
+  account_budget_usd: 15000      # half of Stage 0
+  risk_per_trade_usd:   500      # half of Stage 0
+notifications:
+  telegram:
+    prefix: "[ORB-LIVE-PRE0]"   # visually distinct from paper [ORB] alerts
+risk:
+  daily_loss_limit_usd: -750     # half of Stage 0
+```
+
+Everything else stays at production defaults.
+
+### Entry criteria (ALL must be true to launch)
+
+- [ ] Q1 filter validated **≥ 1 paper session** (post-shipment 2026-04-25)
+- [ ] **No P0/P1 incidents** in preceding 3 trading days
+- [ ] Composite drift investigated — root cause identified (does NOT have to be
+      fully fixed; we just need to know what's causing the ~0.09 BT-vs-live gap)
+- [ ] Paper cumulative P&L **> −$5,000** (we're at −$2,320 currently — passes)
+- [ ] One ORB strategy change at a time — no other simultaneous strategy edits
+
+### Duration
+
+**10–15 trading days** at half-size. After 15 days mandatory review:
+either advance to full Stage 0 (criteria below) OR demote back to paper.
+
+### Promotion criteria (Pre-Stage-0 → Stage 0)
+
+ALL must be true:
+- [ ] **≥ 10 trading days** completed at half-size
+- [ ] **Cumulative cushion ≥ +$1,000** realized
+- [ ] **Live round-trip slippage ≤ 60 bps** measured (entry ≤ 45 bps mean,
+      exit ≤ 25 bps mean — 1.5× BT assumption max)
+- [ ] **Zero P0 incidents** during the window
+- [ ] **Composite drift held < 0.05** sustained (live `ORB SCORED` vs BT)
+
+### Demotion to paper (ANY triggers immediate revert)
+
+- Cumulative P&L drops to ≤ **−$3,000** (hard stop, override-proof)
+- 2 P0/P1 incidents within 5 days
+- Single day worse than **−$1,000** (24h pause + trade-by-trade review before resume)
+- Composite drift exceeds **0.20** sustained over 3+ days
+
+### Telegram prefix change
+
+`orb.yaml::notifications.telegram.prefix: "[ORB-LIVE-PRE0]"`
+
+This is the ONLY notification config that should change between paper and
+half-size live. Distinct prefix prevents misreading paper vs live alerts.
+After Pre-Stage-0 → Stage 0 promotion, change to `"[ORB-LIVE]"`.
+
+### Daily monitoring
+
+Run `python3 scripts/orb_pre0_daily.py` after market close each day. Reports:
+cushion, days-in-stage, today's slippage vs BT, eligibility status, demotion
+triggers fired (if any).
+
+### What this phase WILL teach you
+
+- True live fill prices (vs paper synthetic)
+- Real spread experience at exit, especially for cheap stocks
+- Order rejection rates from real venues
+- Operational bug surfacing (paper hides some bugs)
+- Q1 filter behavior under real market conditions
+
+### What this phase WILL NOT teach you
+
+- Stage 4 capacity behavior (sizes too small to test market impact)
+- Margin/DTBP utilization stress (using ~5% of available BP)
+- Most operational risk (most bugs are size-independent)
+
+Capacity questions wait for Stage 3-4 actual scaling.
 
 ---
 
@@ -53,6 +141,7 @@ Each stage = one row. Switch by editing `orb.yaml` (see "How to apply" below) an
 
 | Advance to → | Cushion needed | Min trading days in current stage | Health check |
 |:-:|---:|---:|---|
+| Pre-0 → 0 | ≥ **+$1,000** realized at half-size | 10 | Slippage ≤ 1.5× BT, no P0 incidents, drift < 0.05 |
 | 0 → 1 | ≥ **+$5,000** realized since live-ramp start | 10 | No operational incidents in last 5 days |
 | 1 → 2 | ≥ **+$10,000** realized cumulative | 10 | Current drawdown < 8% of peak equity |
 | 2 → 3 | ≥ **+$18,000** realized cumulative | 15 | Same |
