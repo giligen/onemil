@@ -462,6 +462,38 @@ class TestRunIntradayCycle:
         with _pt.raises(AlpacaAPIError, match="simulated trades failure"):
             scanner._run_intraday_cycle()
 
+    @patch('scanner.realtime_scanner.datetime')
+    def test_intraday_cycle_both_fail_propagates_one_exception(
+        self, mock_dt, scanner, mock_alpaca, mock_news
+    ):
+        """When BOTH bars and trades raise, exactly one exception
+        propagates (the bars one — it is .result()'d first). The trades
+        exception is consumed by the executor's shutdown. The cycle
+        wrapper at the caller (cbe780a) catches whatever surfaces and
+        skips the minute; we only need to guarantee that an exception
+        does propagate (not silently swallowed)."""
+        import pytz
+        from datetime import datetime as real_datetime
+        import pytest as _pt
+        from data_sources.alpaca_client import AlpacaAPIError
+
+        fake_now = real_datetime(2026, 3, 13, 10, 0, 0,
+                                 tzinfo=pytz.timezone('US/Eastern'))
+        mock_dt.now.return_value = fake_now
+        mock_dt.side_effect = lambda *a, **kw: real_datetime(*a, **kw)
+
+        scanner._universe = [
+            {'symbol': 'BOTH', 'price_close': 4.0,
+             'company_name': 'Both Co', 'float_shares': 2_000_000},
+        ]
+        mock_alpaca.get_current_bars.side_effect = AlpacaAPIError(
+            "bars fail")
+        mock_alpaca.get_latest_trades.side_effect = AlpacaAPIError(
+            "trades fail")
+
+        with _pt.raises(AlpacaAPIError, match="bars fail"):
+            scanner._run_intraday_cycle()
+
 
 # =============================================================================
 # _print_intraday_output

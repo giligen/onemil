@@ -57,6 +57,10 @@ MAX_TIMEOUT_RETRIES = 1        # 2026-04-27: retry once on FuturesTimeoutError �
                                 # most timeouts during congestion are transient
                                 # (same call 5s later succeeds). Asymmetry with
                                 # 429 retries before this was unintentional.
+                                # Why 1 and not 5 (like rate-limit): at 90s
+                                # timeout, 5× retries × ~95s would block the
+                                # cycle for ~8 minutes. 1 retry caps worst-case
+                                # at ~185s — bad but recoverable next cycle.
 TIMEOUT_RETRY_BACKOFF_SECONDS = 5.0
 
 
@@ -700,12 +704,15 @@ class AlpacaClient:
             # Fetch last 45 min of 15-min bars to ensure we get 2+ bars
             start = datetime.now(timezone.utc) - timedelta(minutes=45)
             results = {}
-            # 2026-04-27: chunk_size reduced 200 → 100 after market-open
-            # congestion timeouts. Larger chunks took 60s+ at 9:32 ET when
-            # Alpaca latency peaks (got_current_bars(chunk 2) timeout killed
-            # service twice on 4/27). Smaller chunks = faster individual
-            # responses, with the trade-off of more chunks per call.
-            chunk_size = 100
+            # 2026-04-27: chunk_size restored 100 → 200 after empirical
+            # disconfirmation. Initial reduction (993779c) hypothesized
+            # smaller chunks would lower per-chunk timeout risk. Wrong:
+            # smaller chunks = MORE total API calls = MORE shots at the
+            # timeout, not fewer (verified post-deploy at 14:03 UTC same
+            # day with chunk 2 still timing out). The actual fix was the
+            # 90s timeout + retry-once + parallelization (commits 6a48d86
+            # and d9633b8). 200 is fine; reverted to reduce call count.
+            chunk_size = 200
             for i in range(0, len(symbols), chunk_size):
                 chunk = symbols[i:i + chunk_size]
                 request = StockBarsRequest(
