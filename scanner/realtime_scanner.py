@@ -212,7 +212,28 @@ class RealtimeScanner:
             if current_bucket != last_bucket:
                 if engine is not None:
                     engine.clear_qualified_symbols()   # Bug #4 fix
-                self._run_intraday_cycle()
+                # 2026-04-27: prior versions let any exception inside the
+                # cycle (e.g. AlpacaAPITimeoutError on get_current_bars at
+                # 9:32 ET market-open congestion) propagate up and kill the
+                # scanner — service died at 13:34:01 + 13:37:15 UTC, costing
+                # ORB its 9:35 ET range-build window. Wrap so a single
+                # failed cycle skips this minute and we retry next bucket.
+                try:
+                    self._run_intraday_cycle()
+                except Exception as e:
+                    logger.error(
+                        f"Scanner intraday cycle failed at {current_bucket} ET: "
+                        f"{type(e).__name__}: {e}",
+                        exc_info=True,
+                    )
+                    if self.notifier:
+                        try:
+                            self.notifier.send_message_sync(
+                                f"⚠️ Scanner cycle failed at {current_bucket} ET — "
+                                f"{type(e).__name__}. Retrying next minute."
+                            )
+                        except Exception:
+                            pass
                 last_bucket = current_bucket
 
             # Circuit breaker: StopMonitor dead → close all → exit
