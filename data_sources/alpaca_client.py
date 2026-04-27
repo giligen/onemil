@@ -670,7 +670,12 @@ class AlpacaClient:
             # Fetch last 45 min of 15-min bars to ensure we get 2+ bars
             start = datetime.now(timezone.utc) - timedelta(minutes=45)
             results = {}
-            chunk_size = 200
+            # 2026-04-27: chunk_size reduced 200 → 100 after market-open
+            # congestion timeouts. Larger chunks took 60s+ at 9:32 ET when
+            # Alpaca latency peaks (got_current_bars(chunk 2) timeout killed
+            # service twice on 4/27). Smaller chunks = faster individual
+            # responses, with the trade-off of more chunks per call.
+            chunk_size = 100
             for i in range(0, len(symbols), chunk_size):
                 chunk = symbols[i:i + chunk_size]
                 request = StockBarsRequest(

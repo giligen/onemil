@@ -423,6 +423,13 @@ class RealtimeScanner:
         `study_orb_broad.py` criteria, which is broader. We pull from the pool
         of pre-market gap + intraday qualified as a SEED, then ORB's
         `build_orb_universe_from_snapshots` applies the strict ORB criteria.
+
+        Post-restart recovery (2026-04-27): if both in-memory lists are empty
+        (e.g. service crashed mid-session and lost pre-market scan state),
+        hydrate from `scan_results` DB table. Today's 4/27 incident showed
+        ORB universe stuck at 0 stocks for 4+ minutes after restart because
+        scanner state was wiped but DB had 1600+ scan rows from earlier
+        in pre-market.
         """
         syms: Set[str] = set()
         for d in getattr(self, '_premarket_gap_data', []) or []:
@@ -431,6 +438,23 @@ class RealtimeScanner:
         for d in getattr(self, '_qualified_stock_data', []) or []:
             s = d.get('symbol') if isinstance(d, dict) else None
             if s: syms.add(s)
+
+        # Post-restart recovery: hydrate from DB scan_results if in-memory empty
+        if not syms:
+            try:
+                today = datetime.now(ET).strftime('%Y-%m-%d')
+                rows = self.db.get_scan_results(today) if hasattr(self, 'db') else []
+                db_syms = {r.get('symbol') for r in (rows or []) if r.get('symbol')}
+                if db_syms:
+                    logger.info(
+                        f"ORB universe: hydrating from DB scan_results "
+                        f"(in-memory state empty — likely post-restart) — "
+                        f"{len(db_syms)} symbols from today's scans"
+                    )
+                    syms.update(db_syms)
+            except Exception as e:
+                logger.warning(f"ORB universe DB recovery failed: {e}")
+
         seed = list(syms)
         # If ORB is configured for snapshot filtering, apply it
         if self.orb_engine is not None and getattr(
