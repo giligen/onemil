@@ -46,9 +46,18 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar('T')
 
-DEFAULT_API_TIMEOUT = 60
+DEFAULT_API_TIMEOUT = 90       # was 60; bumped after 2026-04-27 observed
+                                # 30-90s Alpaca REST latency at 9:30-10:00 ET
+                                # market-open congestion. 60s was inside the
+                                # natural response distribution → spurious
+                                # timeouts. 90s is at p98 of observed latency.
 MAX_RATE_LIMIT_RETRIES = 5
 INITIAL_BACKOFF_SECONDS = 1.0
+MAX_TIMEOUT_RETRIES = 1        # 2026-04-27: retry once on FuturesTimeoutError —
+                                # most timeouts during congestion are transient
+                                # (same call 5s later succeeds). Asymmetry with
+                                # 429 retries before this was unintentional.
+TIMEOUT_RETRY_BACKOFF_SECONDS = 5.0
 
 
 class AlpacaAPIError(Exception):
@@ -116,6 +125,7 @@ class AlpacaClient:
         """
         backoff = INITIAL_BACKOFF_SECONDS
         last_exception = None
+        timeout_attempts = 0
 
         for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
             try:
@@ -123,8 +133,28 @@ class AlpacaClient:
                     future = executor.submit(func)
                     return future.result(timeout=self._api_timeout)
             except FuturesTimeoutError:
-                logger.error(f"API call timed out after {self._api_timeout}s: {operation}")
-                raise AlpacaAPITimeoutError(f"API call timed out ({self._api_timeout}s): {operation}")
+                # 2026-04-27: retry once on timeout. Alpaca REST occasionally
+                # has 60-90s response latency during 9:30-10:00 ET congestion.
+                # A second attempt 5s later usually succeeds. Without this,
+                # transient slowness becomes a hard error and the scanner
+                # cycle skips an entire minute of work.
+                if timeout_attempts < MAX_TIMEOUT_RETRIES:
+                    timeout_attempts += 1
+                    logger.warning(
+                        f"API call timed out after {self._api_timeout}s on {operation}, "
+                        f"retrying in {TIMEOUT_RETRY_BACKOFF_SECONDS}s "
+                        f"(attempt {timeout_attempts}/{MAX_TIMEOUT_RETRIES})"
+                    )
+                    time_mod.sleep(TIMEOUT_RETRY_BACKOFF_SECONDS)
+                    continue
+                logger.error(
+                    f"API call timed out after {self._api_timeout}s + "
+                    f"{MAX_TIMEOUT_RETRIES} retry: {operation}"
+                )
+                raise AlpacaAPITimeoutError(
+                    f"API call timed out ({self._api_timeout}s × "
+                    f"{1 + MAX_TIMEOUT_RETRIES} attempts): {operation}"
+                )
             except Exception as e:
                 error_str = str(e).lower()
                 if '429' in str(e) or 'rate limit' in error_str or 'too many requests' in error_str:
