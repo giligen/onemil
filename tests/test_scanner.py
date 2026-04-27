@@ -300,6 +300,168 @@ class TestRunIntradayCycle:
         assert "Close calls" in captured.out
         assert "NEAR" in captured.out
 
+    # =========================================================================
+    # Parallelism: bars + trades fetch run concurrently
+    # =========================================================================
+    # Intraday cycle does TWO independent broad-universe API calls.
+    # 2026-04-27 incident showed sequential calls compound during 9:30-10:00 ET
+    # Alpaca congestion (60s + 60s = 120s vs 60s cycle budget). Now parallelized
+    # via ThreadPoolExecutor(max_workers=2). These tests guard against accidental
+    # regression to sequential.
+
+    @patch('scanner.realtime_scanner.datetime')
+    def test_intraday_cycle_runs_both_api_calls(
+        self, mock_dt, scanner, mock_alpaca, mock_news, mock_db
+    ):
+        """Happy path: both bars and trades fetched, called once each with
+        the same universe symbol list."""
+        import pytz
+        from datetime import datetime as real_datetime
+
+        fake_now = real_datetime(2026, 3, 13, 10, 0, 0,
+                                 tzinfo=pytz.timezone('US/Eastern'))
+        mock_dt.now.return_value = fake_now
+        mock_dt.side_effect = lambda *a, **kw: real_datetime(*a, **kw)
+
+        scanner._universe = [
+            {'symbol': 'MOMO', 'price_close': 4.0,
+             'company_name': 'Momo Co', 'float_shares': 2_000_000},
+        ]
+        bar_ts = real_datetime(2026, 3, 13, 10, 0, 0,
+                               tzinfo=pytz.timezone('US/Eastern'))
+        mock_alpaca.get_current_bars.return_value = {
+            'MOMO': {'volume': 100_000, 'timestamp': bar_ts},
+        }
+        mock_alpaca.get_latest_trades.return_value = {
+            'MOMO': {'price': 5.0},
+        }
+        scanner._volume_profiles = {'MOMO': {'10:00': 10_000}}
+        mock_news.has_interesting_news.return_value = (True, "n")
+        mock_news.classify_news.return_value = {
+            'has_news': True, 'catalyst': True,
+            'headline': 'n', 'reason': 'test',
+        }
+
+        # Should not raise
+        scanner._run_intraday_cycle()
+
+        # Both calls were made exactly once with the same universe symbols
+        mock_alpaca.get_current_bars.assert_called_once_with(['MOMO'])
+        mock_alpaca.get_latest_trades.assert_called_once_with(['MOMO'])
+
+    @patch('scanner.realtime_scanner.datetime')
+    def test_intraday_cycle_runs_calls_in_parallel(
+        self, mock_dt, scanner, mock_alpaca, mock_news
+    ):
+        """The proof: bars + trades execute concurrently, not sequentially.
+
+        Each mocked call sleeps 0.5s. If sequential, total >= 1.0s.
+        If parallel (correct), total ~0.5s + small thread overhead.
+        Generous bound (0.9s) avoids flakiness on slow CI but still
+        catches any regression to sequential execution.
+        """
+        import pytz
+        from datetime import datetime as real_datetime
+        import time as _time
+
+        fake_now = real_datetime(2026, 3, 13, 10, 0, 0,
+                                 tzinfo=pytz.timezone('US/Eastern'))
+        mock_dt.now.return_value = fake_now
+        mock_dt.side_effect = lambda *a, **kw: real_datetime(*a, **kw)
+
+        scanner._universe = [
+            {'symbol': 'PARA', 'price_close': 4.0,
+             'company_name': 'Para Co', 'float_shares': 2_000_000},
+        ]
+        bar_ts = real_datetime(2026, 3, 13, 10, 0, 0,
+                               tzinfo=pytz.timezone('US/Eastern'))
+
+        def slow_bars(*_args, **_kw):
+            _time.sleep(0.5)
+            return {'PARA': {'volume': 100_000, 'timestamp': bar_ts}}
+
+        def slow_trades(*_args, **_kw):
+            _time.sleep(0.5)
+            return {'PARA': {'price': 5.0}}
+
+        mock_alpaca.get_current_bars.side_effect = slow_bars
+        mock_alpaca.get_latest_trades.side_effect = slow_trades
+        scanner._volume_profiles = {'PARA': {'10:00': 10_000}}
+        mock_news.has_interesting_news.return_value = (False, None)
+
+        t0 = _time.perf_counter()
+        scanner._run_intraday_cycle()
+        elapsed = _time.perf_counter() - t0
+
+        # Sequential would be ≥1.0s. Parallel is ~0.5s + thread overhead.
+        # 0.9s is the discrimination boundary. Sequential regression hits >1.0s.
+        assert elapsed < 0.9, (
+            f"Intraday cycle took {elapsed:.2f}s with two 0.5s API calls — "
+            f"this means bars + trades ran sequentially, not in parallel. "
+            f"Parallel execution should complete in ~0.5s + thread overhead."
+        )
+
+    @patch('scanner.realtime_scanner.datetime')
+    def test_intraday_cycle_propagates_bars_error(
+        self, mock_dt, scanner, mock_alpaca, mock_news
+    ):
+        """Error in get_current_bars propagates up. Caller's wrapper
+        (cbe780a) catches at cycle boundary and skips the minute."""
+        import pytz
+        from datetime import datetime as real_datetime
+        import pytest as _pt
+        from data_sources.alpaca_client import AlpacaAPIError
+
+        fake_now = real_datetime(2026, 3, 13, 10, 0, 0,
+                                 tzinfo=pytz.timezone('US/Eastern'))
+        mock_dt.now.return_value = fake_now
+        mock_dt.side_effect = lambda *a, **kw: real_datetime(*a, **kw)
+
+        scanner._universe = [
+            {'symbol': 'BAR', 'price_close': 4.0,
+             'company_name': 'Bar Co', 'float_shares': 2_000_000},
+        ]
+        mock_alpaca.get_current_bars.side_effect = AlpacaAPIError(
+            "simulated bars failure")
+        mock_alpaca.get_latest_trades.return_value = {
+            'BAR': {'price': 5.0},
+        }
+
+        with _pt.raises(AlpacaAPIError, match="simulated bars failure"):
+            scanner._run_intraday_cycle()
+
+    @patch('scanner.realtime_scanner.datetime')
+    def test_intraday_cycle_propagates_trades_error(
+        self, mock_dt, scanner, mock_alpaca, mock_news
+    ):
+        """Error in get_latest_trades propagates up. Symmetric to bars
+        error path — confirms either side can fail without losing the
+        exception in the parallel pool."""
+        import pytz
+        from datetime import datetime as real_datetime
+        import pytest as _pt
+        from data_sources.alpaca_client import AlpacaAPIError
+
+        fake_now = real_datetime(2026, 3, 13, 10, 0, 0,
+                                 tzinfo=pytz.timezone('US/Eastern'))
+        mock_dt.now.return_value = fake_now
+        mock_dt.side_effect = lambda *a, **kw: real_datetime(*a, **kw)
+
+        scanner._universe = [
+            {'symbol': 'TRD', 'price_close': 4.0,
+             'company_name': 'Trd Co', 'float_shares': 2_000_000},
+        ]
+        bar_ts = real_datetime(2026, 3, 13, 10, 0, 0,
+                               tzinfo=pytz.timezone('US/Eastern'))
+        mock_alpaca.get_current_bars.return_value = {
+            'TRD': {'volume': 100_000, 'timestamp': bar_ts},
+        }
+        mock_alpaca.get_latest_trades.side_effect = AlpacaAPIError(
+            "simulated trades failure")
+
+        with _pt.raises(AlpacaAPIError, match="simulated trades failure"):
+            scanner._run_intraday_cycle()
+
 
 # =============================================================================
 # _print_intraday_output

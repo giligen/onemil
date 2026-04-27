@@ -677,11 +677,22 @@ class RealtimeScanner:
         now_et = datetime.now(ET)
         bucket = f"{now_et.hour:02d}:{(now_et.minute // 15) * 15:02d}"
 
-        # Get current bars for volume check
-        bars = self.alpaca.get_current_bars(symbols)
-
-        # Get latest trades for current price
-        trades = self.alpaca.get_latest_trades(symbols)
+        # Fetch bars + trades concurrently. The two calls are independent and
+        # the alpaca-py SDK is httpx-backed (thread-safe — already validated by
+        # the engine-tick parallelism above at line ~270). During 9:30-10:00 ET
+        # market-open congestion each broad-universe call can take 30-90s; this
+        # cuts cycle wall time from ~sum to ~max. Each underlying call has its
+        # own 90s timeout + retry-once via _call_with_timeout (alpaca_client.py),
+        # so .result() here doesn't add another timeout layer. If either call
+        # exhausts retries, the exception propagates up to the cycle wrapper
+        # at the caller (commit cbe780a), which catches + skips the minute.
+        with ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix='cycle-fetch'
+        ) as ex:
+            bars_future = ex.submit(self.alpaca.get_current_bars, symbols)
+            trades_future = ex.submit(self.alpaca.get_latest_trades, symbols)
+            bars = bars_future.result()
+            trades = trades_future.result()
 
         qualified = []
         close_calls = []
