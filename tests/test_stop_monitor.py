@@ -892,6 +892,81 @@ class TestPercentTrailingStop:
         # Stop ratchets to 4.63 - 0.11 = 4.52
         assert w.stop_price == pytest.approx(4.52, abs=0.01)
 
+    @pytest.mark.asyncio
+    async def test_oneg_2026_04_28_replay(self, mock_alpaca):
+        """Replay of the actual ONEG price sequence from 2026-04-28.
+
+        Live timeline (from journalctl) — entry $8.50 at 16:06:19 UTC,
+        broken trail let the position ride to a $9.60 peak then collapse
+        through entry to the initial $8.33 hard stop, costing ~$13.5K.
+
+        With the fix, the 0.3% trail must:
+        1. Ratchet up as price climbs through $8.65, $8.70, $8.92, $9.60
+        2. Lock the stop at $9.60 * 0.997 = $9.5712
+        3. Fire trail_stop on the very next tick at $9.00 (well below stop)
+        4. Classify exit as 'trail_stop' (not 'stop_loss')
+
+        This is a regression test that the specific incident-day bug
+        cannot recur. If this test ever fails, today's $13.5K loss is
+        possible again.
+        """
+        mon = StopMonitor(
+            api_key='k', api_secret='s', alpaca_client=mock_alpaca,
+            marketable_limit_offset=0.03, marketable_limit_offset_pct=0.005,
+        )
+        # Watch params match macd_wave_engine's add_watch call
+        mon.add_watch(
+            'ONEG', stop_price=8.33, shares=10550,
+            tp_leg_id='tp-1', sl_leg_id='sl-1',
+            entry_price=8.50, risk_per_share=0.0,
+            trail_r=0.0, activate_at_r=0.0,
+            trail_pct=0.003,
+            strategy='macd_wave',
+        )
+
+        # Step 1: rising sequence from journalctl. After each tick the
+        # ratcheted stop should equal price * 0.997.
+        rising_ticks = [8.65, 8.70, 8.92, 9.60]
+        for px in rising_ticks:
+            t = MagicMock(); t.symbol = 'ONEG'; t.price = px
+            await mon._on_trade(t)
+
+        with mon._watch_lock:
+            w = mon._watches['ONEG']
+        assert w.highest_since_entry == 9.60, (
+            f"Peak not tracked: highest={w.highest_since_entry}, expected 9.60"
+        )
+        assert w.stop_price == pytest.approx(9.60 * 0.997, abs=0.001), (
+            f"Stop not ratcheted: stop={w.stop_price}, expected ~9.5712"
+        )
+        # Critical: ratcheted stop must be ABOVE entry — that's the entire
+        # point of the trail. With the bug, stop stayed at $8.33 (-2%).
+        assert w.stop_price > 8.50, (
+            f"Stop {w.stop_price} did not ratchet above entry $8.50 — "
+            f"this is the exact bug that cost ~$13.5K on ONEG today."
+        )
+
+        # Step 2: actual next quote was $9.00 (60s after peak). Far below
+        # ratcheted stop $9.5712. Trail must fire.
+        t = MagicMock(); t.symbol = 'ONEG'; t.price = 9.00
+        await mon._on_trade(t)
+
+        events = mon.drain_exit_events()
+        assert len(events) == 1, "Trail did not fire on $9.00 tick"
+        ev = events[0]
+        assert ev.symbol == 'ONEG'
+        assert ev.exit_reason == 'trail_stop', (
+            f"Exit reason {ev.exit_reason}, expected trail_stop. "
+            f"%-trails must classify correctly."
+        )
+        # Trigger price = the tick that crossed the stop
+        assert ev.exit_trigger_price == pytest.approx(9.00, abs=0.01)
+        # Stop level on the event = the ratcheted stop, not the original $8.33
+        assert ev.stop_price == pytest.approx(9.60 * 0.997, abs=0.001), (
+            f"Event stop_price={ev.stop_price}, expected ratcheted $9.57. "
+            f"If this is $8.33, the trail wasn't ratcheted — bug returned."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Backtest slippage cap integration
