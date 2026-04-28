@@ -12,7 +12,7 @@ import logging
 import time as time_mod
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import numpy as np
@@ -79,6 +79,8 @@ class MACDWaveEngine:
         dry_run: bool = False,
         stop_monitor=None,
         order_stream=None,
+        news_provider=None,
+        news_worker=None,
     ):
         cfg = config or {}
         self.alpaca = alpaca_client
@@ -86,6 +88,14 @@ class MACDWaveEngine:
         self.notifier = notifier
         self.stop_monitor = stop_monitor
         self.order_stream = order_stream  # T3.1: TradingStream watcher (optional)
+        # 2026-04-28: news_provider drives the halt-aware entry filter
+        # (sub-ms SQLite read against news_cache.halt). news_worker is the
+        # bull flag scanner's async classifier — when present, MACD wave
+        # enqueues newly-monitored symbols so halt detection runs in the
+        # background well before any entry signal could fire (≥35 bars / 30+
+        # min lead). Both optional — if None, halt filter no-ops.
+        self.news_provider = news_provider
+        self.news_worker = news_worker
         self.dry_run = dry_run
         # T1.1: bar events pushed here by StopMonitor's dispatched bar handler.
         # Main loop drains via drain_bar_events() for targeted check_entries.
@@ -120,6 +130,20 @@ class MACDWaveEngine:
         # Spread gate — skip entries when bid-ask spread is too wide.
         # 0 = disabled. 100 = skip if spread > 100bps.
         self.max_entry_spread_bps = float(entry.get('max_entry_spread_bps', 0))
+
+        # 2026-04-28 incident-driven entry filters (HTCO bought at 22% of day
+        # high after a 360% pre-mkt pump retraced; ONEG ran +12.9% then
+        # collapsed to hard stop). Both are STRUCTURAL guards, not fitted
+        # parameters — calibrated to be inert in the 16-month BT (min observed
+        # pct_of_day_high in production-filtered signals: 0.727).
+        filt = cfg.get('filter', {})
+        # Day-from-high floor: skip when entry_price / today's RTH high
+        # < threshold. 0 = disabled. 0.70 = catches HTCO archetype while
+        # provably inert in BT (research/study_macd_day_from_high.py).
+        self.day_from_high_min_pct = float(filt.get('day_from_high_min_pct', 0.0))
+        # Halt-aware filter: skip when recent news headline mentions a
+        # halt or circuit breaker. Requires news_provider to be wired in.
+        self.halt_aware = bool(filt.get('halt_aware', False))
 
         # Smart entry: L1-informed pricing + early entry on strong book
         self.smart_entry_enabled = bool(entry.get('smart_entry_enabled', False))
@@ -877,6 +901,21 @@ class MACDWaveEngine:
                                 f"[{self.STRATEGY_NAME}] {sym}: subscribe_bars failed: {e}"
                             )
 
+                    # 2026-04-28: pre-warm halt detection. NewsWorker fetches
+                    # + classifies in background; classify_news side-effects
+                    # the halt flag into news_cache. By the time MACD's entry
+                    # signal fires (≥35 bars later), the halt-aware filter's
+                    # is_halted_today() read is sub-ms with the answer in
+                    # place. Idempotent: NewsWorker.enqueue de-dups symbols
+                    # already classified or pending.
+                    if self.news_worker is not None:
+                        try:
+                            self.news_worker.enqueue(sym)
+                        except Exception as e:
+                            logger.debug(
+                                f"[{self.STRATEGY_NAME}] {sym}: news enqueue failed: {e}"
+                            )
+
                     logger.info(
                         f"[{self.STRATEGY_NAME}] {sym}: crossed +{pct_change:.1f}% "
                         f"in {minutes_since_open}min, vol {vol_at_cross:,} — monitoring MACD"
@@ -1256,6 +1295,94 @@ class MACDWaveEngine:
 
         return entries
 
+    # ---------------------------------------------------------------------
+    # Entry filters (2026-04-28 incident-driven)
+    # ---------------------------------------------------------------------
+
+    def _check_day_from_high(
+        self, bars_df, price: float,
+    ) -> Tuple[bool, str]:
+        """Day-from-high floor: skip when entry price has retraced too far
+        from today's RTH high. Returns (passes, reason_if_skip).
+
+        Computes today's high from the bar cache (RTH only — premarket bars
+        excluded since they often print exotic). If no prior RTH bars are
+        available (e.g. 9:30 ET first-bar entry), we pass (no information).
+
+        DST-safe: converts UTC bar timestamps to ET via module-level `ET`
+        timezone, then checks 9:30 <= time < 16:00 in ET directly. A naive
+        UTC range (13:30-20:00) only matches EDT — in EST it would include
+        8:30-9:30 ET premarket (exactly the gap-up regime we want to
+        exclude) and miss 15:00-16:00 ET RTH.
+
+        Calibration: in 16-mo BT on production-filtered signals, no signal
+        had pct_of_day_high < 0.727. Threshold 0.70 is provably inert.
+        """
+        if self.day_from_high_min_pct <= 0:
+            return True, ""
+        if bars_df is None or len(bars_df) == 0:
+            return True, ""
+
+        df = bars_df
+        try:
+            if 'timestamp' in df.columns:
+                ts_utc = pd.to_datetime(df['timestamp'], utc=True)
+            else:
+                ts_utc = pd.to_datetime(df.index, utc=True)
+            ts_et = ts_utc.dt.tz_convert(ET)
+            today_et = datetime.now(ET).date()
+            mask = (
+                (ts_et.dt.date == today_et)
+                & (ts_et.dt.time >= time(9, 30))
+                & (ts_et.dt.time < time(16, 0))
+            )
+            today_bars = df[mask.values]
+        except Exception:
+            return True, ""  # bar cache shape unexpected — fail open
+
+        if len(today_bars) == 0 or 'high' not in today_bars.columns:
+            return True, ""
+        day_high = float(today_bars['high'].max())
+        if day_high <= 0:
+            return True, ""
+        pct = price / day_high
+        if pct < self.day_from_high_min_pct:
+            return False, (
+                f"price ${price:.2f} = {pct:.0%} of day_high ${day_high:.2f} "
+                f"< floor {self.day_from_high_min_pct:.0%}"
+            )
+        return True, ""
+
+    def _check_halt_news(self, symbol: str) -> Tuple[bool, str]:
+        """Halt-aware filter: skip if news_cache flags a halt today.
+
+        Reads from `news_provider.is_halted_today()` — a sub-millisecond
+        SQLite point-query against the (symbol, news_date, halt) index.
+        The persisted halt flag is set by `NewsProvider.classify_news()` as
+        a side effect of the bull flag scanner's NewsWorker enqueue at
+        qualification time, so the cache is warm well before MACD's entry
+        signal fires (≥35 bars / ~30 min lead).
+
+        Fail-open if filter disabled, news_provider not wired, or DB error
+        — never block legitimate trades on infrastructure issues.
+
+        Returns (passes, reason_if_skip).
+        """
+        if not self.halt_aware:
+            return True, ""
+        if self.news_provider is None:
+            return True, ""
+        try:
+            halted, headline = self.news_provider.is_halted_today(symbol)
+        except Exception as e:
+            logger.warning(
+                f"[{self.STRATEGY_NAME}] {symbol}: halt check failed (fail-open): {e}"
+            )
+            return True, ""
+        if halted:
+            return False, f"halt detected — '{(headline or '')[:80]}'"
+        return True, ""
+
     def _submit_entry(
         self, symbol: str, price: float, macd_hist_pct: float, crossed: CrossedStock,
         smart_quote: tuple = None,
@@ -1313,6 +1440,40 @@ class MACDWaveEngine:
                         )
                     self.invalidated.add(symbol)
                     return False
+
+            # 2026-04-28: day-from-high floor. Skip if we're entering far
+            # below today's RTH intraday high (a falling-knife archetype).
+            # See research/study_macd_day_from_high.py — at 0.70 this is
+            # provably inert across 16mo of production signals (min observed
+            # 0.727) yet would have caught the 4/28 HTCO entry at 0.22.
+            ok, day_high_reason = self._check_day_from_high(crossed.bars_cache, price)
+            if not ok:
+                logger.info(
+                    f"[{self.STRATEGY_NAME}] {symbol}: DAY-HIGH SKIP — {day_high_reason}"
+                )
+                if self.notifier:
+                    self.notifier.send_message_sync(
+                        f"[MACD Wave] {symbol}: DAY-HIGH SKIP — {day_high_reason} "
+                        f"(hist={macd_hist_pct:.2f}%)"
+                    )
+                self.invalidated.add(symbol)
+                return False
+
+            # 2026-04-28: halt-aware filter. Skip if Alpaca news headlines for
+            # this symbol mention a circuit-breaker / volatility halt today —
+            # post-halt rebound trades carry asymmetric tail risk (HTCO 4/28).
+            ok, halt_reason = self._check_halt_news(symbol)
+            if not ok:
+                logger.info(
+                    f"[{self.STRATEGY_NAME}] {symbol}: HALT SKIP — {halt_reason}"
+                )
+                if self.notifier:
+                    self.notifier.send_message_sync(
+                        f"[MACD Wave] {symbol}: HALT SKIP — {halt_reason} "
+                        f"(hist={macd_hist_pct:.2f}%)"
+                    )
+                self.invalidated.add(symbol)
+                return False
 
             # V4 conviction — always compute for logging/DB; scale shares only if enabled.
             conv_mult, conv_brkdn = compute_conviction_score(

@@ -38,6 +38,19 @@ entry:
   normal_bid_ask_ratio: 1.5   # for 2nd bar entry
   normal_max_spread_pct: 0.005 # for 2nd bar entry (0.5%)
 
+# 2026-04-28: incident-driven entry filters (HTCO bought at 22% of day high
+# after a 360% premarket pump retraced — circuit-breaker halt, lost $3,482).
+# See research/study_macd_day_from_high.py for BT calibration.
+filter:
+  # Day-from-high floor: skip if entry_price / today's RTH high < threshold.
+  # 0.0 = disabled. 0.70 = provably inert in 16-mo BT (min observed 0.727)
+  # while catching the HTCO-class falling-knife archetype.
+  day_from_high_min_pct: 0.70
+  # Halt-aware: skip if news_cache flags a halt today (LULD / circuit
+  # breaker / trading paused). Sub-ms SQLite read at entry path; bull flag's
+  # NewsWorker pre-warms the cache as a side effect of normal classification.
+  halt_aware: true
+
 # MACD indicator parameters
 macd:
   fast_period: 12

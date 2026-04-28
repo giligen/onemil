@@ -746,3 +746,301 @@ class TestSubmitExitTelemetry:
         assert last_payload['exit_slippage'] is None
         # Trigger price is still recorded (we know what bar fired the flip).
         assert last_payload['exit_trigger_price'] == 6.10
+
+
+# =============================================================================
+# Entry filters (2026-04-28 incident-driven: HTCO + ONEG)
+# =============================================================================
+# Filter 1: day-from-high floor — pure local computation against
+#   crossed.bars_cache, no API calls. Calibrated structurally to be
+#   inert in 16-mo BT (research/study_macd_day_from_high.py).
+# Filter 2: halt-aware — sub-ms SQLite read via news_provider.is_halted_today.
+#   Pre-warming runs in background via NewsWorker (bull flag scanner) — no
+#   entry-path latency.
+
+class TestDayFromHighFilter:
+    """Filter 1: skip when entry < day_high * day_from_high_min_pct."""
+
+    def _bars(self, highs, et_hours_minutes):
+        """Build a 1-min bars dataframe with ET timestamps for `today_et`.
+
+        `et_hours_minutes`: list of (hour, minute) tuples in ET. The helper
+        constructs ET-localized timestamps for today_ET, then stores them as
+        UTC in the dataframe (matches the wire format the engine sees).
+        DST-safe — works in both EST and EDT.
+        """
+        import pandas as pd
+        import pytz as _pytz
+        et_tz = _pytz.timezone('US/Eastern')
+        today_et = datetime.now(et_tz).date()
+        ts = [
+            et_tz.localize(datetime(today_et.year, today_et.month, today_et.day, h, m))
+            for (h, m) in et_hours_minutes
+        ]
+        return pd.DataFrame({
+            'timestamp': pd.to_datetime(ts, utc=True),
+            'high': highs,
+            'open': [h - 0.05 for h in highs],
+            'low': [h - 0.10 for h in highs],
+            'close': highs,
+            'volume': [10000] * len(highs),
+        })
+
+    def test_skip_when_below_threshold(self):
+        e = _make_engine(config={
+            'universe': {}, 'entry': {}, 'macd': {},
+            'sizing': {'position_size': 50000, 'max_concurrent': 3},
+            'risk': {}, 'slippage': {}, 'waves': {},
+            'filter': {'day_from_high_min_pct': 0.70},
+        })
+        bars = self._bars(
+            [38.0, 30.0, 22.0, 15.0],
+            [(10, 0), (11, 0), (12, 0), (13, 0)],  # all RTH ET
+        )
+        ok, reason = e._check_day_from_high(bars, price=8.47)
+        assert ok is False
+        assert 'day_high' in reason.lower() or 'high' in reason.lower()
+
+    def test_pass_when_at_high(self):
+        e = _make_engine(config={
+            'universe': {}, 'entry': {}, 'macd': {},
+            'sizing': {'position_size': 50000, 'max_concurrent': 3},
+            'risk': {}, 'slippage': {}, 'waves': {},
+            'filter': {'day_from_high_min_pct': 0.70},
+        })
+        bars = self._bars(
+            [10.0, 11.0, 12.0],
+            [(10, 0), (11, 0), (12, 0)],
+        )
+        ok, reason = e._check_day_from_high(bars, price=11.5)
+        assert ok is True
+        assert reason == ""
+
+    def test_disabled_when_threshold_zero(self):
+        """day_from_high_min_pct=0 disables the filter entirely."""
+        e = _make_engine(config={
+            'universe': {}, 'entry': {}, 'macd': {},
+            'sizing': {'position_size': 50000, 'max_concurrent': 3},
+            'risk': {}, 'slippage': {}, 'waves': {},
+            'filter': {'day_from_high_min_pct': 0.0},
+        })
+        bars = self._bars(
+            [50.0, 40.0],
+            [(10, 0), (11, 0)],
+        )
+        ok, _ = e._check_day_from_high(bars, price=5.0)  # 10% of high
+        assert ok is True
+
+    def test_pass_with_no_bars(self):
+        """Empty bar cache → fail open (pass)."""
+        e = _make_engine(config={
+            'universe': {}, 'entry': {}, 'macd': {},
+            'sizing': {'position_size': 50000, 'max_concurrent': 3},
+            'risk': {}, 'slippage': {}, 'waves': {},
+            'filter': {'day_from_high_min_pct': 0.70},
+        })
+        ok, _ = e._check_day_from_high(None, price=10.0)
+        assert ok is True
+        import pandas as pd
+        ok, _ = e._check_day_from_high(pd.DataFrame(), price=10.0)
+        assert ok is True
+
+    def test_excludes_premarket_bars(self):
+        """Premarket bars (before 9:30 ET) are excluded from day_high.
+
+        Setup: premarket bar peaks at $50, RTH peaks at $20. Entry at $15
+        should pass (75% of $20 RTH high), NOT fail (30% of $50 premarket).
+
+        DST-safe: uses ET timestamps via _bars helper. The premarket bar at
+        7:00 ET is below the 9:30 ET RTH boundary in both EST and EDT.
+        """
+        bars = self._bars(
+            [50.0, 20.0, 18.0],
+            [(7, 0), (10, 0), (11, 0)],  # 7am ET = premarket; 10am, 11am = RTH
+        )
+        e = _make_engine(config={
+            'universe': {}, 'entry': {}, 'macd': {},
+            'sizing': {'position_size': 50000, 'max_concurrent': 3},
+            'risk': {}, 'slippage': {}, 'waves': {},
+            'filter': {'day_from_high_min_pct': 0.70},
+        })
+        ok, _ = e._check_day_from_high(bars, price=15.0)
+        # 15.0 / 20.0 (RTH high) = 0.75 ≥ 0.70 → pass
+        # If premarket had been included, 15.0 / 50.0 = 0.30 → would fail
+        assert ok is True
+
+
+class TestHaltAwareFilter:
+    """Filter 2: skip when news_provider.is_halted_today returns True."""
+
+    def test_skip_when_halted(self):
+        provider = MagicMock()
+        provider.is_halted_today.return_value = (True, "Halted On Circuit Breaker")
+        e = _make_engine(
+            news_provider=provider,
+            config={
+                'universe': {}, 'entry': {}, 'macd': {},
+                'sizing': {'position_size': 50000, 'max_concurrent': 3},
+                'risk': {}, 'slippage': {}, 'waves': {},
+                'filter': {'halt_aware': True},
+            },
+        )
+        ok, reason = e._check_halt_news('HTCO')
+        assert ok is False
+        assert 'Halted' in reason
+
+    def test_pass_when_not_halted(self):
+        provider = MagicMock()
+        provider.is_halted_today.return_value = (False, "")
+        e = _make_engine(
+            news_provider=provider,
+            config={
+                'universe': {}, 'entry': {}, 'macd': {},
+                'sizing': {'position_size': 50000, 'max_concurrent': 3},
+                'risk': {}, 'slippage': {}, 'waves': {},
+                'filter': {'halt_aware': True},
+            },
+        )
+        ok, _ = e._check_halt_news('NORM')
+        assert ok is True
+
+    def test_disabled_when_halt_aware_off(self):
+        """halt_aware=False → pass even if provider would say halted."""
+        provider = MagicMock()
+        provider.is_halted_today.return_value = (True, "Halted")
+        e = _make_engine(
+            news_provider=provider,
+            config={
+                'universe': {}, 'entry': {}, 'macd': {},
+                'sizing': {'position_size': 50000, 'max_concurrent': 3},
+                'risk': {}, 'slippage': {}, 'waves': {},
+                'filter': {'halt_aware': False},
+            },
+        )
+        ok, _ = e._check_halt_news('ANY')
+        assert ok is True
+        # Provider should NOT have been queried
+        provider.is_halted_today.assert_not_called()
+
+    def test_pass_when_no_provider(self):
+        """No news_provider wired → fail open (pass)."""
+        e = _make_engine(config={
+            'universe': {}, 'entry': {}, 'macd': {},
+            'sizing': {'position_size': 50000, 'max_concurrent': 3},
+            'risk': {}, 'slippage': {}, 'waves': {},
+            'filter': {'halt_aware': True},
+        })
+        # news_provider defaults to None
+        ok, _ = e._check_halt_news('ANY')
+        assert ok is True
+
+    def test_fail_open_on_provider_error(self):
+        """Provider raises → pass with WARNING; do not block trades."""
+        provider = MagicMock()
+        provider.is_halted_today.side_effect = RuntimeError("DB locked")
+        e = _make_engine(
+            news_provider=provider,
+            config={
+                'universe': {}, 'entry': {}, 'macd': {},
+                'sizing': {'position_size': 50000, 'max_concurrent': 3},
+                'risk': {}, 'slippage': {}, 'waves': {},
+                'filter': {'halt_aware': True},
+            },
+        )
+        ok, _ = e._check_halt_news('ANY')
+        assert ok is True
+
+    def test_does_not_call_alpaca_at_entry_path(self):
+        """CRITICAL: halt check must be sub-ms — no Alpaca REST call.
+
+        This guards the entry-path latency invariant. The halt-aware filter
+        reads from news_cache via is_halted_today, NOT from get_recent_news
+        (which would trigger an Alpaca news API call at entry decision).
+        """
+        from data_sources.alpaca_client import AlpacaClient
+        mock_alpaca = MagicMock(spec=AlpacaClient)
+        # Wire a real NewsProvider so we can spec it tightly
+        from data_sources.news_provider import NewsProvider
+        from persistence.database import Database
+        db = Database()
+        db._cache_conn.execute("DELETE FROM news_cache WHERE symbol='LATENCY'")
+        db._cache_conn.commit()
+        provider = NewsProvider(mock_alpaca, db=db)
+
+        e = _make_engine(
+            news_provider=provider,
+            config={
+                'universe': {}, 'entry': {}, 'macd': {},
+                'sizing': {'position_size': 50000, 'max_concurrent': 3},
+                'risk': {}, 'slippage': {}, 'waves': {},
+                'filter': {'halt_aware': True},
+            },
+        )
+        ok, _ = e._check_halt_news('LATENCY')
+
+        # Halt check must NEVER call Alpaca's news API at entry path.
+        mock_alpaca.get_news.assert_not_called()
+        assert ok is True  # cache miss → fail open
+
+    def test_htco_2026_04_28_replay(self):
+        """Replay the 4/28 incident: HTCO entered at $8.47 with intraday RTH
+        high of $22 and a halt headline in news. Both filters fire — either
+        alone would have blocked the entry that cost $3,482 live.
+        """
+        import pandas as pd
+        from data_sources.alpaca_client import AlpacaClient
+        from data_sources.news_provider import NewsProvider
+        from persistence.database import Database
+
+        # Pre-populate news_cache with HTCO halt for today (test setup)
+        db = Database()
+        db._cache_conn.execute("DELETE FROM news_cache WHERE symbol='HTCO_REPLAY'")
+        db._cache_conn.commit()
+        today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        db.save_news_classification(
+            symbol='HTCO_REPLAY', news_date=today,
+            headline='HTCO_REPLAY Halted On Circuit Breaker To The Upside, Stock Now Up 360.18%',
+            catalyst=False, reason='HALT', halt=True,
+        )
+
+        provider = NewsProvider(MagicMock(spec=AlpacaClient), db=db)
+        e = _make_engine(
+            news_provider=provider,
+            config={
+                'universe': {}, 'entry': {}, 'macd': {},
+                'sizing': {'position_size': 50000, 'max_concurrent': 3},
+                'risk': {}, 'slippage': {}, 'waves': {},
+                'filter': {
+                    'day_from_high_min_pct': 0.70,
+                    'halt_aware': True,
+                },
+            },
+        )
+
+        # Filter 1: bars showing RTH high of $22, entry at $8.47 = 38% of high.
+        # DST-safe: build ET-localized timestamps for today_ET.
+        import pytz as _pytz
+        et_tz = _pytz.timezone('US/Eastern')
+        today_et = datetime.now(et_tz).date()
+        ts = [
+            et_tz.localize(datetime(today_et.year, today_et.month, today_et.day, h, m))
+            for (h, m) in [(10, 0), (11, 0), (12, 0)]  # all RTH ET
+        ]
+        bars = pd.DataFrame({
+            'timestamp': pd.to_datetime(ts, utc=True),
+            'high': [22.0, 18.0, 12.0],
+            'open': [21.0, 17.0, 11.0],
+            'low': [20.0, 16.0, 10.0],
+            'close': [22.0, 18.0, 12.0],
+            'volume': [10000, 10000, 10000],
+        })
+        ok1, reason1 = e._check_day_from_high(bars, price=8.47)
+        assert ok1 is False, f"Filter 1 should block HTCO at $8.47 / $22 high: {reason1}"
+
+        # Filter 2: halt headline already persisted
+        ok2, reason2 = e._check_halt_news('HTCO_REPLAY')
+        assert ok2 is False, f"Filter 2 should block HTCO with halt headline: {reason2}"
+
+        # Cleanup
+        db._cache_conn.execute("DELETE FROM news_cache WHERE symbol='HTCO_REPLAY'")
+        db._cache_conn.commit()

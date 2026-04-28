@@ -324,8 +324,8 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
             sys.exit(1)
 
     analyzer = _create_news_analyzer(config)
-    news_provider = NewsProvider(alpaca, analyzer)
     db = get_database(db_path=config.db_path, cache_path=config.cache_db_path, trades_path=config.trades_db_path)
+    news_provider = NewsProvider(alpaca, analyzer, db=db)
     notifier = _create_notifier(config)
 
     criteria = ScannerCriteria(
@@ -428,6 +428,13 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
             alpaca_client=alpaca, db=db, notifier=notifier,
             config=macd_cfg, stop_monitor=stop_monitor,
             order_stream=order_stream,
+            # 2026-04-28: news_provider drives halt-aware entry filter
+            # (sub-ms SQLite read against news_cache.halt). news_worker
+            # is wired in AFTER scanner construction below (it owns the
+            # NewsWorker instance) — see `macd_engine.news_worker = ...`
+            # post-scanner-init.
+            news_provider=news_provider,
+            # news_worker attached post-scanner construction (see below)
         )
         # T1.1: register bar handler on the shared StopMonitor so bar closes
         # for crossed_stocks flow into MACD's event queue (drained by scanner's
@@ -535,6 +542,12 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
     # Enable async news classification (non-blocking LLM calls)
     scanner.enable_async_news()
 
+    # 2026-04-28: wire scanner's NewsWorker into MACD wave engine for halt
+    # pre-warming. Only after enable_async_news() has constructed it.
+    if macd_engine is not None and hasattr(scanner, '_news_worker'):
+        macd_engine.news_worker = scanner._news_worker
+        logger.info("MACD Wave: NewsWorker attached for halt pre-warming")
+
     # Notify startup
     if notifier:
         notifier.notify_scanner_started(
@@ -576,8 +589,8 @@ def run_test_cycle(config, trade: bool = False) -> None:
         sys.exit(1)
 
     analyzer = _create_news_analyzer(config)
-    news_provider = NewsProvider(alpaca, analyzer)
     db = get_database(db_path=config.db_path, cache_path=config.cache_db_path, trades_path=config.trades_db_path)
+    news_provider = NewsProvider(alpaca, analyzer, db=db)
     notifier = _create_notifier(config)
 
     criteria = ScannerCriteria(
