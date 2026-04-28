@@ -336,6 +336,7 @@ class Database:
                 catalyst INTEGER,
                 reason VARCHAR(100),
                 classified_at TIMESTAMP,
+                halt INTEGER DEFAULT 0,
                 UNIQUE(symbol, news_date, headline)
             );
 
@@ -547,6 +548,89 @@ class Database:
                 logger.info(f"Migration 10: added slippage timing columns: {added}")
         except Exception as e:
             logger.warning(f"Migration 10 (slippage timing) failed (non-fatal): {e}")
+
+        # Migration 11: Add halt column to news_cache for halt-aware entry filter.
+        # Populated by NewsProvider.classify_news as a side effect of regex-matching
+        # halt vocabulary in headlines. Read by NewsProvider.is_halted_today via
+        # an indexed point-query — sub-ms at entry path. Drives the MACD wave
+        # halt-aware filter (4/28 HTCO incident: Stock Now Up 360.18%, Halted
+        # On Circuit Breaker To The Upside → entered after collapse, lost $3.5K).
+        try:
+            cols = [row[1] for row in self._cache_conn.execute("PRAGMA table_info(news_cache)").fetchall()]
+            if 'halt' not in cols:
+                self._cache_conn.execute("ALTER TABLE news_cache ADD COLUMN halt INTEGER DEFAULT 0")
+                self._cache_conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_news_cache_halt "
+                    "ON news_cache(symbol, news_date, halt)"
+                )
+                self._cache_conn.commit()
+                logger.info("Migration 11: added halt column + index to news_cache")
+        except Exception as e:
+            logger.warning(f"Migration 11 (news_cache halt column) failed (non-fatal): {e}")
+
+    # =========================================================================
+    # News cache (halt detection + per-article classification)
+    # =========================================================================
+
+    def save_news_classification(
+        self, symbol: str, news_date: str, headline: str,
+        catalyst: Optional[bool], reason: str,
+        halt: bool = False,
+    ) -> None:
+        """Upsert a per-article classification row in news_cache.
+
+        Args:
+            symbol: Stock symbol.
+            news_date: ISO date string (YYYY-MM-DD) for the article publication date.
+            headline: Article headline (truncated to 500 chars to match TEXT capacity guidance).
+            catalyst: LLM classification — True (catalyst), False (noise), None (unknown).
+            reason: LLM's reason / category short-label.
+            halt: True if headline matched halt-vocabulary regex (separate from catalyst).
+        """
+        try:
+            self._cache_conn.execute(
+                "INSERT OR REPLACE INTO news_cache "
+                "(symbol, news_date, headline, catalyst, reason, classified_at, halt) "
+                "VALUES (?, ?, ?, ?, ?, datetime('now'), ?)",
+                (
+                    symbol, news_date, (headline or '')[:500],
+                    (1 if catalyst else 0) if catalyst is not None else None,
+                    (reason or '')[:100],
+                    1 if halt else 0,
+                ),
+            )
+            self._cache_conn.commit()
+        except Exception as e:
+            logger.warning(f"save_news_classification({symbol}, {news_date}) failed: {e}")
+
+    def is_halted_today(self, symbol: str, today: Optional[str] = None) -> Tuple[bool, str]:
+        """Return (halt_detected, matched_headline) for the symbol on `today`.
+
+        Per-day semantics: a halt headline persists in news for the rest of the
+        day. Sub-ms point-query on (symbol, news_date, halt) index.
+
+        Fail-open: any DB error returns (False, "") with a warning logged —
+        we never block legitimate trades on infrastructure issues.
+
+        Args:
+            symbol: Stock symbol.
+            today: ISO date string (YYYY-MM-DD). Defaults to UTC today.
+                   Callers may pass an ET-derived date for boundary clarity.
+        """
+        if today is None:
+            today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        try:
+            row = self._cache_conn.execute(
+                "SELECT headline FROM news_cache "
+                "WHERE symbol = ? AND news_date = ? AND halt = 1 LIMIT 1",
+                (symbol, today),
+            ).fetchone()
+            if row:
+                return True, row[0] or ""
+            return False, ""
+        except Exception as e:
+            logger.warning(f"is_halted_today({symbol}, {today}) failed (fail-open): {e}")
+            return False, ""
 
     # =========================================================================
     # Universe operations

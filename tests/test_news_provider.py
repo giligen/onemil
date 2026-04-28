@@ -12,7 +12,9 @@ import pytest
 from unittest.mock import MagicMock, call
 
 from data_sources.alpaca_client import AlpacaClient
-from data_sources.news_provider import NewsAnalyzer, LLMNewsAnalyzer, NewsProvider
+from data_sources.news_provider import (
+    NewsAnalyzer, LLMNewsAnalyzer, NewsProvider, headline_indicates_halt,
+)
 
 
 # =============================================================================
@@ -530,3 +532,165 @@ class TestHasInterestingNews:
 
         assert has_news is False
         assert headline is None
+
+
+# =============================================================================
+# Halt detection (2026-04-28 incident-driven)
+# =============================================================================
+# HTCO entered at $8.47 on 4/28 after the news feed already carried "Halted
+# On Circuit Breaker To The Upside, Stock Now Up 360%". Persistent per-day
+# halt state pinned in news_cache lets all strategies skip post-halt
+# rebound trades at sub-ms cost. These tests pin the contract.
+
+class TestHaltDetection:
+    """Tests for halt headline regex + classify_news persistence + is_halted_today."""
+
+    # ----- regex -----
+
+    def test_halt_pattern_matches_circuit_breaker_upside(self):
+        assert headline_indicates_halt(
+            "Halted On Circuit Breaker To The Upside, Stock Now Up 360.18%"
+        )
+
+    def test_halt_pattern_matches_circuit_dash_breaker(self):
+        assert headline_indicates_halt("Trading halted by NYSE circuit-breaker")
+
+    def test_halt_pattern_matches_trading_paused(self):
+        assert headline_indicates_halt("Trading paused due to volatility")
+
+    def test_halt_pattern_matches_luld(self):
+        assert headline_indicates_halt("Stock LULD halt triggered")
+
+    def test_halt_pattern_matches_short_token(self):
+        assert headline_indicates_halt("Trading halted")
+
+    def test_halt_pattern_excludes_benign(self):
+        assert not headline_indicates_halt("Q3 Earnings Beat Estimates")
+        assert not headline_indicates_halt("Stock surges on FDA approval")
+
+    def test_halt_pattern_empty_string(self):
+        assert headline_indicates_halt("") is False
+        assert headline_indicates_halt(None) is False
+
+    # ----- classify_news persistence -----
+
+    def _make_db(self):
+        from persistence.database import Database
+        db = Database()
+        # Clean any prior test rows
+        db._cache_conn.execute("DELETE FROM news_cache WHERE symbol LIKE 'TEST%'")
+        db._cache_conn.commit()
+        return db
+
+    def test_classify_news_persists_halt_flag(self):
+        """When any article matches halt regex, news_cache row gets halt=1."""
+        db = self._make_db()
+        mock_alpaca = MagicMock(spec=AlpacaClient)
+        mock_alpaca.get_news.return_value = [
+            {'headline': 'Random recap article'},
+            {'headline': 'TEST_A Halted On Circuit Breaker'},
+        ]
+        provider = NewsProvider(mock_alpaca, db=db)
+
+        result = provider.classify_news('TEST_A')
+
+        assert result['halt_detected'] is True
+        assert 'Halted' in result['halt_headline']
+
+        # Halt persisted with halt=1 row
+        halted, headline = provider.is_halted_today('TEST_A')
+        assert halted is True
+        assert 'Halted' in headline
+
+        db._cache_conn.execute("DELETE FROM news_cache WHERE symbol='TEST_A'")
+        db._cache_conn.commit()
+
+    def test_classify_news_no_halt_persists_zero(self):
+        """Benign news → halt_detected=False; is_halted_today returns False."""
+        db = self._make_db()
+        mock_alpaca = MagicMock(spec=AlpacaClient)
+        mock_alpaca.get_news.return_value = [
+            {'headline': 'TEST_B Q3 Earnings beat estimates'},
+        ]
+        provider = NewsProvider(mock_alpaca, db=db)
+
+        result = provider.classify_news('TEST_B')
+
+        assert result['halt_detected'] is False
+        halted, _ = provider.is_halted_today('TEST_B')
+        assert halted is False
+
+        db._cache_conn.execute("DELETE FROM news_cache WHERE symbol='TEST_B'")
+        db._cache_conn.commit()
+
+    def test_is_halted_today_per_day_isolation(self):
+        """A halt row dated yesterday must NOT mark the symbol halted today."""
+        db = self._make_db()
+        provider = NewsProvider(MagicMock(spec=AlpacaClient), db=db)
+
+        # Manually pin a halt row for yesterday
+        db.save_news_classification(
+            'TEST_C', '2025-01-01', 'TEST_C Halted On Circuit Breaker',
+            catalyst=False, reason='HALT', halt=True,
+        )
+
+        halted_today, _ = provider.is_halted_today('TEST_C', '2026-04-28')
+        halted_yesterday, _ = provider.is_halted_today('TEST_C', '2025-01-01')
+
+        assert halted_today is False
+        assert halted_yesterday is True
+
+        db._cache_conn.execute("DELETE FROM news_cache WHERE symbol='TEST_C'")
+        db._cache_conn.commit()
+
+    def test_is_halted_today_returns_false_on_no_row(self):
+        """Symbol never classified → is_halted_today returns (False, '')."""
+        db = self._make_db()
+        provider = NewsProvider(MagicMock(spec=AlpacaClient), db=db)
+
+        halted, headline = provider.is_halted_today('TEST_NEVER_SEEN')
+        assert halted is False
+        assert headline == ''
+
+    def test_is_halted_today_aggregates_multiple_articles(self):
+        """If ANY persisted row for symbol+today has halt=1, returns True."""
+        db = self._make_db()
+        provider = NewsProvider(MagicMock(spec=AlpacaClient), db=db)
+
+        # Pin two rows, second with halt=1
+        db.save_news_classification(
+            'TEST_D', '2026-04-28', 'TEST_D Q3 earnings beat',
+            catalyst=True, reason='EARNINGS', halt=False,
+        )
+        db.save_news_classification(
+            'TEST_D', '2026-04-28', 'TEST_D Halted On Circuit Breaker',
+            catalyst=False, reason='HALT', halt=True,
+        )
+
+        halted, headline = provider.is_halted_today('TEST_D', '2026-04-28')
+        assert halted is True
+        assert 'Halted' in headline
+
+        db._cache_conn.execute("DELETE FROM news_cache WHERE symbol='TEST_D'")
+        db._cache_conn.commit()
+
+    def test_is_halted_today_fail_open_when_db_detached(self):
+        """No db wired → fail open (returns False, no exception)."""
+        provider = NewsProvider(MagicMock(spec=AlpacaClient), db=None)
+        halted, headline = provider.is_halted_today('ANYTHING')
+        assert halted is False
+        assert headline == ''
+
+    def test_classify_news_persistence_silent_on_db_error(self):
+        """Persistence failure must not raise — classification still returns."""
+        mock_db = MagicMock()
+        mock_db.save_news_classification.side_effect = RuntimeError("disk full")
+        mock_alpaca = MagicMock(spec=AlpacaClient)
+        mock_alpaca.get_news.return_value = [
+            {'headline': 'TEST_E Halted On Circuit Breaker'},
+        ]
+        provider = NewsProvider(mock_alpaca, db=mock_db)
+
+        # Must not raise despite DB error
+        result = provider.classify_news('TEST_E')
+        assert result['halt_detected'] is True

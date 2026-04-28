@@ -10,10 +10,32 @@ LLMNewsAnalyzer uses Claude Haiku 4.5 to classify articles.
 
 import json
 import logging
+import re
 import time
+from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+# 2026-04-28: halt-vocabulary regex used by the halt-aware entry filter.
+# Word-boundary'd to reduce false positives ("halt to spending plans" must
+# NOT match). Lexical-only — no LLM tokens needed for halt detection.
+# Vocabulary covers: SEC/exchange halts, LULD circuit-breaker halts on
+# upside or downside, and explicit "trading paused" announcements.
+HALT_HEADLINE_PATTERN = re.compile(
+    r"\b(halt(ed|s)?|circuit[\s-]?breaker|trading\s+paused|LULD)\b",
+    re.IGNORECASE,
+)
+
+
+def headline_indicates_halt(headline: str) -> bool:
+    """True if the headline contains halt-vocabulary tokens.
+
+    Used both by classify_news (write path) and tests (validation path).
+    """
+    if not headline:
+        return False
+    return bool(HALT_HEADLINE_PATTERN.search(headline))
 
 # HTTP status codes worth retrying — server-side capacity / transient.
 # 429 rate_limit, 502 bad_gateway, 503 service_unavailable, 504 gateway_timeout,
@@ -274,17 +296,24 @@ class NewsProvider:
     through NewsAnalyzer to determine relevance.
     """
 
-    def __init__(self, alpaca_client, analyzer: Optional[NewsAnalyzer] = None):
+    def __init__(self, alpaca_client, analyzer: Optional[NewsAnalyzer] = None,
+                 db=None):
         """
         Initialize NewsProvider.
 
         Args:
-            alpaca_client: AlpacaClient instance for news fetching
-            analyzer: NewsAnalyzer instance (defaults to V1 stub)
+            alpaca_client: AlpacaClient instance for news fetching.
+            analyzer: NewsAnalyzer instance (defaults to V1 stub).
+            db: Optional persistence.Database for caching classifications +
+                halt-detection state. When None, classify_news still works
+                in-memory (returns dict) but does not persist; is_halted_today
+                falls open (returns False). Required for production use of
+                the halt-aware entry filter.
         """
         self.alpaca_client = alpaca_client
         self.analyzer = analyzer or NewsAnalyzer()
-        logger.info("NewsProvider initialized")
+        self.db = db
+        logger.info(f"NewsProvider initialized (db={'attached' if db else 'detached'})")
 
     def get_recent_news(self, symbol: str, limit: int = 5) -> List[Dict]:
         """
@@ -351,7 +380,8 @@ class NewsProvider:
             - reason: str — LLM's reason for classification
         """
         result = {'has_news': False, 'catalyst': None, 'category': 'NO_NEWS',
-                  'headline': '', 'reason': '', 'news_headline': ''}
+                  'headline': '', 'reason': '', 'news_headline': '',
+                  'halt_detected': False, 'halt_headline': ''}
 
         try:
             articles = self.get_recent_news(symbol, limit=limit)
@@ -365,6 +395,19 @@ class NewsProvider:
         result['has_news'] = True
         result['headline'] = (articles[0].get('headline') or '')[:200]
         result['news_headline'] = result['headline']
+
+        # 2026-04-28: halt scan — runs across ALL articles, regardless of LLM
+        # outcome. Lexical-only, zero token cost. The first article that
+        # matches sets halt_detected; we keep iterating because an EARLIER
+        # article may carry the catalyst classification we still want to
+        # return as the LLM-grade result.
+        for article in articles:
+            h = (article.get('headline') or '')
+            if h and headline_indicates_halt(h):
+                result['halt_detected'] = True
+                result['halt_headline'] = h[:200]
+                logger.info(f"{symbol}: halt detected — '{h[:80]}'")
+                break
 
         # Classify articles — find the BEST (highest quality) catalyst
         best_catalyst = False
@@ -392,6 +435,7 @@ class NewsProvider:
                 result['headline'] = (article.get('headline') or '')[:200]
                 result['news_headline'] = result['headline']
                 result['reason'] = reason
+                self._persist_classification(symbol, result)
                 return result
 
             # Track best non-catalyst classification
@@ -407,7 +451,52 @@ class NewsProvider:
         result['headline'] = best_headline
         result['news_headline'] = best_headline
 
+        self._persist_classification(symbol, result)
         return result
+
+    def _persist_classification(self, symbol: str, result: Dict) -> None:
+        """Best-effort persistence of classification + halt flag to news_cache.
+
+        No-op if db is detached. Errors are logged but never raised — news
+        persistence is observability/state, not on the trade-execution path.
+        """
+        if self.db is None:
+            return
+        try:
+            today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+            # If halt was detected, persist the HALT headline so the read
+            # path returns the true halt evidence (not the catalyst headline,
+            # which may be a different article entirely).
+            headline = result.get('halt_headline') or result.get('headline') or ''
+            self.db.save_news_classification(
+                symbol=symbol,
+                news_date=today,
+                headline=headline,
+                catalyst=result.get('catalyst'),
+                reason=result.get('reason') or '',
+                halt=bool(result.get('halt_detected')),
+            )
+        except Exception as e:
+            logger.warning(f"{symbol}: classification persistence failed: {e}")
+
+    def is_halted_today(self, symbol: str, today: Optional[str] = None) -> Tuple[bool, str]:
+        """Return (halt_detected, matched_headline) for `symbol` today.
+
+        Sub-millisecond DB read against an indexed (symbol, news_date, halt)
+        column — safe for the entry decision path. Fail-open: returns
+        (False, "") if db is detached or any error occurs.
+
+        Args:
+            symbol: Stock symbol.
+            today: ISO date string. Defaults to UTC today inside Database.
+        """
+        if self.db is None:
+            return False, ""
+        try:
+            return self.db.is_halted_today(symbol, today)
+        except Exception as e:
+            logger.warning(f"{symbol}: is_halted_today read failed (fail-open): {e}")
+            return False, ""
 
 
 class NewsWorker:
