@@ -690,6 +690,210 @@ class TestTrailingStop:
 
 
 # ---------------------------------------------------------------------------
+# Percentage-based trailing stop (MACD wave config)
+# ---------------------------------------------------------------------------
+# 2026-04-28 incident: ONDG entered $6.94, peaked $7.06 (+1.7% MFE,
+# +$1,121 unrealized at 9,339 sh), exited at $6.93 via macd_flip (-$93).
+# 0.3% trail at peak should have fired at $7.04. Root cause: WS trade
+# callback's trail-update block was gated on `trail_r > 0 AND
+# risk_per_share > 0`, which is False for MACD wave (uses trail_pct only).
+# These tests pin the contract for percentage-based trailing in the WS path.
+
+class TestPercentTrailingStop:
+    """Test percentage-based trailing stop (MACD wave) on WS _on_trade path."""
+
+    @pytest.fixture
+    def pct_trail_monitor(self, mock_alpaca):
+        """StopMonitor with a MACD-wave-style %-trail watch.
+
+        Mirrors macd_wave_engine's add_watch call:
+          risk_per_share=0, trail_r=0, activate_at_r=0, trail_pct=0.003.
+        Stop is 2% below entry (hard stop). Trail should activate
+        immediately and ratchet from highest_since_entry × (1 - 0.003).
+        """
+        mon = StopMonitor(
+            api_key='k', api_secret='s', alpaca_client=mock_alpaca,
+            marketable_limit_offset=0.03, marketable_limit_offset_pct=0.005,
+        )
+        mon.add_watch(
+            'ONDG', stop_price=6.80, shares=9339,
+            tp_leg_id='tp-1', sl_leg_id='sl-1',
+            entry_price=6.94, risk_per_share=0.0,
+            trail_r=0.0, activate_at_r=0.0,
+            trail_pct=0.003,
+            strategy='macd_wave',
+        )
+        return mon
+
+    def test_pct_watch_starts_trailing_active(self, pct_trail_monitor):
+        """%-trail activates immediately at watch creation (no R threshold)."""
+        with pct_trail_monitor._watch_lock:
+            w = pct_trail_monitor._watches['ONDG']
+        assert w.trail_pct == 0.003
+        assert w.trailing_active is True  # set by add_watch since trail_pct>0
+        assert w.highest_since_entry == 6.94
+
+    @pytest.mark.asyncio
+    async def test_pct_trail_updates_highest_on_rising_price(
+        self, pct_trail_monitor
+    ):
+        """Each tick at a new high updates highest_since_entry.
+
+        REGRESSION TEST: prior bug skipped the entire trail block when
+        trail_r=0 and risk_per_share=0, leaving highest_since_entry frozen
+        at entry forever. ONDG's peak of $7.06 was never recorded.
+        """
+        for px in [6.96, 7.00, 7.06, 7.05, 7.06, 7.04]:
+            t = MagicMock(); t.symbol = 'ONDG'; t.price = px
+            await pct_trail_monitor._on_trade(t)
+
+        with pct_trail_monitor._watch_lock:
+            w = pct_trail_monitor._watches['ONDG']
+        assert w.highest_since_entry == 7.06, (
+            f"highest_since_entry frozen at {w.highest_since_entry} — "
+            f"trail block was skipped. Expected 7.06."
+        )
+
+    @pytest.mark.asyncio
+    async def test_pct_trail_ratchets_stop_up(self, pct_trail_monitor):
+        """Stop ratchets up to highest × (1 - trail_pct) as price climbs.
+
+        REGRESSION TEST: prior bug never updated stop_price in WS path.
+        ONDG stop stayed at $6.80 (initial hard stop) all day.
+        """
+        # Tick to $7.06 — stop should be 7.06 * (1 - 0.003) = 7.03882
+        t = MagicMock(); t.symbol = 'ONDG'; t.price = 7.06
+        await pct_trail_monitor._on_trade(t)
+
+        with pct_trail_monitor._watch_lock:
+            w = pct_trail_monitor._watches['ONDG']
+        expected_stop = 7.06 * (1 - 0.003)  # 7.03882
+        assert w.stop_price == pytest.approx(expected_stop, abs=0.001), (
+            f"stop_price={w.stop_price} not ratcheted. Expected ~{expected_stop:.4f}."
+        )
+
+    @pytest.mark.asyncio
+    async def test_pct_trail_never_ratchets_down(self, pct_trail_monitor):
+        """Stop never moves down when price retraces (only ratchets up)."""
+        # Climb to $7.10 → stop ratchets to 7.10 * 0.997 = 7.0787
+        t1 = MagicMock(); t1.symbol = 'ONDG'; t1.price = 7.10
+        await pct_trail_monitor._on_trade(t1)
+
+        with pct_trail_monitor._watch_lock:
+            stop_after_high = pct_trail_monitor._watches['ONDG'].stop_price
+
+        # Price retraces to $7.09 (still ABOVE the $7.0787 ratcheted stop —
+        # don't pick a price that would fire the stop, which would remove
+        # the watch and defeat the purpose of this test).
+        t2 = MagicMock(); t2.symbol = 'ONDG'; t2.price = 7.09
+        await pct_trail_monitor._on_trade(t2)
+
+        with pct_trail_monitor._watch_lock:
+            w = pct_trail_monitor._watches['ONDG']
+        assert w.stop_price == stop_after_high, "Stop moved down on retrace"
+        assert w.highest_since_entry == 7.10
+
+    @pytest.mark.asyncio
+    async def test_pct_trail_fires_exit_on_pullback(
+        self, pct_trail_monitor, mock_alpaca
+    ):
+        """Trail fires when price drops below the ratcheted stop.
+
+        This is the ONDG scenario: peak $7.06 → trail at $7.039 → price
+        drops to $6.93 (way below) → trail must fire.
+        """
+        # Peak at $7.06 → ratcheted stop ~$7.039
+        t1 = MagicMock(); t1.symbol = 'ONDG'; t1.price = 7.06
+        await pct_trail_monitor._on_trade(t1)
+
+        # Pullback to $6.93 — should fire trail_stop
+        t2 = MagicMock(); t2.symbol = 'ONDG'; t2.price = 6.93
+        await pct_trail_monitor._on_trade(t2)
+
+        events = pct_trail_monitor.drain_exit_events()
+        assert len(events) == 1, (
+            "No exit fired. ONDG dropped from $7.06 → $6.93 with trail "
+            "at $7.039 — trail must fire."
+        )
+        assert events[0].exit_reason == 'trail_stop', (
+            f"Exit reason was {events[0].exit_reason}, expected trail_stop. "
+            f"%-based trails must classify as trail_stop, not stop_loss."
+        )
+        assert events[0].symbol == 'ONDG'
+        # exit_trigger_price = the tick that crossed the stop (raw price).
+        # exit_price/exit_limit_price are the computed marketable-limit
+        # values used to actually fill — different field, different units.
+        assert events[0].exit_trigger_price == pytest.approx(6.93, abs=0.01)
+
+    @pytest.mark.asyncio
+    async def test_pct_trail_does_not_fire_above_stop(self, pct_trail_monitor):
+        """Trail does not fire while price stays above the ratcheted stop."""
+        # Climb to $7.10 → stop ~$7.0787
+        t1 = MagicMock(); t1.symbol = 'ONDG'; t1.price = 7.10
+        await pct_trail_monitor._on_trade(t1)
+
+        # Stay above stop
+        t2 = MagicMock(); t2.symbol = 'ONDG'; t2.price = 7.09
+        await pct_trail_monitor._on_trade(t2)
+
+        events = pct_trail_monitor.drain_exit_events()
+        assert len(events) == 0, "Exit fired prematurely while above stop"
+
+    @pytest.mark.asyncio
+    async def test_pct_trail_below_initial_hard_stop_fires_stop_loss(
+        self, pct_trail_monitor, mock_alpaca
+    ):
+        """If price collapses below initial hard stop BEFORE any new high,
+        exit is still 'trail_stop' (since trailing_active was set on
+        watch creation for %-trails). This documents the chosen semantics:
+        for %-trails we treat the watch as 'trailing from entry'.
+        """
+        # Drop straight to $6.50 (well below $6.80 hard stop)
+        # without ever making a new high above $6.94 entry.
+        t = MagicMock(); t.symbol = 'ONDG'; t.price = 6.50
+        await pct_trail_monitor._on_trade(t)
+
+        events = pct_trail_monitor.drain_exit_events()
+        assert len(events) == 1
+        # %-trails set trailing_active at creation, so even an immediate
+        # drop is classified as trail_stop. Acceptable — economic effect
+        # identical (exit at stop level), only the reason label differs.
+        assert events[0].exit_reason == 'trail_stop'
+
+    @pytest.mark.asyncio
+    async def test_pct_trail_does_not_affect_r_based_trail(self, mock_alpaca):
+        """Regression: bull-flag-style R-based trail must still work after
+        the fix. Trail should not activate before +activate_at_r and
+        should ratchet at risk_per_share × trail_r distance.
+        """
+        mon = StopMonitor(
+            api_key='k', api_secret='s', alpaca_client=mock_alpaca,
+        )
+        mon.add_watch(
+            'PLYX', stop_price=4.29, shares=500,
+            tp_leg_id='tp-1', sl_leg_id='sl-1',
+            entry_price=4.40, risk_per_share=0.11,
+            trail_r=1.0, activate_at_r=2.0,
+        )
+        # +1R = $4.51 — below threshold, trail must not activate
+        t1 = MagicMock(); t1.symbol = 'PLYX'; t1.price = 4.51
+        await mon._on_trade(t1)
+        with mon._watch_lock:
+            w = mon._watches['PLYX']
+        assert w.trailing_active is False, "R-trail activated before threshold"
+        assert w.stop_price == 4.29
+
+        # +2R = $4.62 — use 4.63 to clear float precision (matches existing tests)
+        t2 = MagicMock(); t2.symbol = 'PLYX'; t2.price = 4.63
+        await mon._on_trade(t2)
+        with mon._watch_lock:
+            w = mon._watches['PLYX']
+        assert w.trailing_active is True
+        # Stop ratchets to 4.63 - 0.11 = 4.52
+        assert w.stop_price == pytest.approx(4.52, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
 # Backtest slippage cap integration
 # ---------------------------------------------------------------------------
 

@@ -1672,24 +1672,42 @@ class StopMonitor:
                 watch.highest_since_entry = price
             return
 
-        # Trailing stop: update highest high and ratchet stop
-        if watch.trail_r > 0 and watch.risk_per_share > 0:
+        # Trail update — supports both R-based (bull flag) and pct-based
+        # (MACD wave). Mirrors poll-loop semantics at line ~1402-1430.
+        # 2026-04-28 bugfix: previously this entire block was gated on
+        # `trail_r > 0 AND risk_per_share > 0`, which is False for MACD
+        # wave (trail_pct only, both R-fields = 0). Result: in WebSocket
+        # mode (production), MACD wave watches NEVER ratcheted their
+        # stop. ONDG entered $6.94, peaked $7.06, exited $6.93 via
+        # macd_flip with no trail event recorded — trail at $7.039
+        # should have fired. See tests/test_stop_monitor.py
+        # ::TestPercentTrailingStop for the regression contract.
+        has_r_trail = watch.trail_r > 0 and watch.risk_per_share > 0
+        has_pct_trail = watch.trail_pct > 0
+        if has_r_trail or has_pct_trail:
             if price > watch.highest_since_entry:
                 watch.highest_since_entry = price
 
+            # Activate trail. %-based trails activate immediately
+            # (set at watch creation already, but re-confirm here for
+            # clarity); R-based trails wait for the +activate_at_r
+            # threshold.
             if not watch.trailing_active:
-                r_gain = (watch.highest_since_entry - watch.entry_price) / watch.risk_per_share
-                if r_gain >= watch.activate_at_r:
+                if has_pct_trail:
                     watch.trailing_active = True
-                    logger.info(
-                        f"StopMonitor: {symbol} trailing stop ACTIVATED — "
-                        f"high=${watch.highest_since_entry:.2f}, "
-                        f"+{r_gain:.1f}R from entry ${watch.entry_price:.2f}"
-                    )
+                elif has_r_trail:
+                    r_gain = (watch.highest_since_entry - watch.entry_price) / watch.risk_per_share
+                    if r_gain >= watch.activate_at_r:
+                        watch.trailing_active = True
+                        logger.info(
+                            f"StopMonitor: {symbol} trailing stop ACTIVATED — "
+                            f"high=${watch.highest_since_entry:.2f}, "
+                            f"+{r_gain:.1f}R from entry ${watch.entry_price:.2f}"
+                        )
 
             if watch.trailing_active:
-                # Percentage-based trail (MACD wave) or R-based trail (bull flag)
-                if watch.trail_pct > 0:
+                # %-based trail (MACD wave) takes precedence if set, else R-based.
+                if has_pct_trail:
                     new_stop = watch.highest_since_entry * (1 - watch.trail_pct)
                 else:
                     new_stop = watch.highest_since_entry - watch.risk_per_share * watch.trail_r
@@ -1729,7 +1747,13 @@ class StopMonitor:
 
         # Check stop level (works for fixed, trailing, and static-lock stops)
         if price <= watch.stop_price:
-            if watch.trail_r > 0 and watch.trailing_active:
+            # 2026-04-28 bugfix: previous gate `watch.trail_r > 0 and
+            # watch.trailing_active` mis-classified MACD wave's %-based
+            # trail exits as `stop_loss` (since trail_r=0). `trailing_active`
+            # alone is the right discriminator — it's set by add_watch
+            # when trail_pct>0, and by _on_trade when R-trail crosses
+            # activate_at_r. Matches poll-path classification at line ~1430.
+            if watch.trailing_active:
                 exit_reason = 'trail_stop'
             elif watch.lock_armed:
                 exit_reason = 'lock_stop'
