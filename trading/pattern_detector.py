@@ -239,6 +239,22 @@ class BullFlagDetector:
             logger.debug(f"{symbol}: Zero pole height")
             return None
 
+        # FVRR fix (2026-04-29): if any closed bar AFTER flag_end_idx already
+        # broke the flag's low, the pattern is dead-on-arrival. Without this
+        # check the detector reports stale setups (the pullback-finder skips
+        # trailing green bars to "look past the bounce", but a red bar between
+        # flag_end and now silently bypasses validation). Both BT and live
+        # share this code path, so the fix lands in both at once.
+        if flag_end_idx + 1 < len(completed):
+            after_flag = completed.iloc[flag_end_idx + 1:]
+            if (after_flag['low'] < flag_low).any():
+                logger.debug(
+                    f"{symbol}: Flag already invalidated — bar after "
+                    f"flag_end_idx={flag_end_idx} has low < flag_low "
+                    f"(${flag_low:.4f}). Rejecting stale setup."
+                )
+                return None
+
         retracement = pole_high - flag_low
         retracement_pct = (retracement / pole_height) * 100
 

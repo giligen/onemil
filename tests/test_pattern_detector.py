@@ -1390,6 +1390,75 @@ class TestFlagHighUsesMax:
 # Bug #2: Pullback allows limited green candles inside flag
 # ---------------------------------------------------------------------------
 
+class TestStaleFlagRejection:
+    """Verify setups whose flag low has already been broken by a later closed
+    bar are rejected as dead-on-arrival (FVRR 2026-04-29 incident).
+
+    The detector's pullback-finder aggressively extends the flag to include
+    trailing red/doji bars, so this fix only triggers when flag_end_idx is
+    NOT the last closed bar (e.g., due to max_pullback length constraints
+    or trailing green bars that get skipped). Tested at the metric-extraction
+    level since constructing the natural-detector path is brittle.
+    """
+
+    def test_scan_rejects_when_post_flag_bar_breaks_low(self):
+        """Force scan_from_idx=4 so _find_pullback ends at idx 4.
+        Then bar at idx 5 has low BELOW flag_low → fix must reject."""
+        detector = BullFlagDetector()
+        candles = [
+            # Pole (idx 0-2)
+            (12.00, 12.40, 11.95, 12.35, 200000),
+            (12.35, 12.75, 12.30, 12.70, 180000),
+            (12.70, 13.10, 12.65, 13.05, 160000),
+            # Flag (idx 3-4): 2 red, flag_low=$12.75
+            (13.05, 13.10, 12.85, 12.90, 50000),
+            (12.90, 12.95, 12.75, 12.80, 40000),
+            # Bar idx 5 — low BELOW flag_low (NOT included in flag because
+            # we force scan to end at idx 4, simulating FVRR's geometry)
+            (12.80, 12.83, 12.68, 12.69, 58000),
+        ]
+        bars = _make_bars(candles)
+        result = detector._scan_pole_and_flag("FVRR_REPLAY", bars, scan_from_idx=4)
+        assert result is None, (
+            "Stale-flag fix must reject: bar at idx 5 (low=$12.68) is below "
+            "flag_low ($12.75) — pattern is dead on arrival"
+        )
+
+    def test_scan_accepts_when_post_flag_bar_above_flag_low(self):
+        """Same shape, but post-flag bar low is ABOVE flag_low → accepted."""
+        detector = BullFlagDetector()
+        candles = [
+            (12.00, 12.40, 11.95, 12.35, 200000),
+            (12.35, 12.75, 12.30, 12.70, 180000),
+            (12.70, 13.10, 12.65, 13.05, 160000),
+            (13.05, 13.10, 12.85, 12.90, 50000),
+            (12.90, 12.95, 12.75, 12.80, 40000),
+            # Bar idx 5 low ABOVE flag_low (12.78 >= 12.75)
+            (12.80, 12.95, 12.78, 12.92, 55000),
+        ]
+        bars = _make_bars(candles)
+        result = detector._scan_pole_and_flag("CLEAN_FLAG", bars, scan_from_idx=4)
+        assert result is not None, (
+            "Setup should be accepted — bar at idx 5 (low=$12.78) is above "
+            "flag_low ($12.75); flag is still intact"
+        )
+
+    def test_scan_no_post_flag_bars_accepts(self):
+        """flag_end is the last bar — no bars after; fix has no effect."""
+        detector = BullFlagDetector()
+        candles = [
+            (12.00, 12.40, 11.95, 12.35, 200000),
+            (12.35, 12.75, 12.30, 12.70, 180000),
+            (12.70, 13.10, 12.65, 13.05, 160000),
+            (13.05, 13.10, 12.85, 12.90, 50000),
+            (12.90, 12.95, 12.75, 12.80, 40000),
+        ]
+        bars = _make_bars(candles)
+        # scan from last available bar (idx 4)
+        result = detector._scan_pole_and_flag("FRESH_FLAG", bars, scan_from_idx=4)
+        assert result is not None
+
+
 class TestPullbackGreenTolerance:
     """Verify pullback detection tolerates up to max_green_in_flag green bars."""
 
