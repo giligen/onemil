@@ -1668,6 +1668,75 @@ class ORBEngine:
                         exc=e2,
                     )
 
+        # 2026-04-29: Alpaca-driven orphan sweep. Engine state can drift from
+        # Alpaca via crashes / cross-day persistence gaps (4/28 OPRA: BUY
+        # filled during the 13:34/13:37 UTC crash window, fill never reached
+        # DB, sync_positions classified as orphan, FC ignored it because the
+        # iterator above is engine-state-driven). Belt-and-suspenders: after
+        # the engine-state pass, query Alpaca for ANY remaining position on
+        # the ORB account and close it. This is the source-of-truth path —
+        # if it sees a position, it closes it, full stop.
+        try:
+            alp_positions = self.alpaca.get_open_positions() or []
+        except Exception as e:
+            self._notify_error(
+                f"FC SWEEP: Alpaca query failed — cannot verify flat: {e}"
+            )
+            alp_positions = []
+        for p in alp_positions:
+            sym = (
+                getattr(p, 'symbol', None)
+                or (p.get('symbol') if isinstance(p, dict) else None)
+            )
+            if not sym:
+                continue
+            logger.warning(
+                f"ORB FC SWEEP: Alpaca position {sym} survived engine-state "
+                f"close pass — orphan from prior crash/drift, closing now"
+            )
+            try:
+                self._cancel_symbol_open_orders(sym)
+                _time.sleep(0.5)
+                result = self.alpaca.close_position(sym)
+                logger.warning(
+                    f"ORB FC SWEEP: closed orphan {sym} "
+                    f"(order={(result or {}).get('id', '?')})"
+                )
+                self._notify(
+                    f"{self.tg_prefix} ⚠️ FC SWEEP: closed orphan {sym} "
+                    f"(not tracked in engine state)"
+                )
+                closed += 1
+            except Exception as e:
+                self._notify_error(
+                    f"FC SWEEP: failed to close orphan {sym} — "
+                    f"position WILL leak overnight: {e}"
+                )
+                failed.append(sym)
+
+        # Post-FC verification: confirm Alpaca shows zero positions. If any
+        # remain, this is a hard CRITICAL — operator must intervene before
+        # market close. We don't retry indefinitely (retry already happened
+        # in the engine-state path + sweep above); the goal here is to make
+        # the failure loud, not to mask it.
+        try:
+            _time.sleep(1.0)  # let the close orders propagate
+            still_open = self.alpaca.get_open_positions() or []
+            if still_open:
+                still_syms = [
+                    getattr(p, 'symbol', None)
+                    or (p.get('symbol') if isinstance(p, dict) else '?')
+                    for p in still_open
+                ]
+                self._notify_error(
+                    f"FC VERIFY FAILED: {len(still_open)} position(s) STILL "
+                    f"open after force-close + sweep: "
+                    f"{','.join(s for s in still_syms if s)}. "
+                    f"MANUAL ACTION REQUIRED before market close."
+                )
+        except Exception as e:
+            logger.warning(f"FC VERIFY: Alpaca query failed (non-fatal): {e}")
+
         if self.notify_on_force_close and self.notifier and closed > 0:
             self._notify(
                 f"{self.tg_prefix} FORCE-CLOSE at "
@@ -1920,8 +1989,57 @@ class ORBEngine:
             self._notify_error(
                 f"ORPHAN ALPACA POSITIONS ({len(orphans)}) not tracked by ORB — "
                 f"{'; '.join(details)}. Likely from a failed force-close or "
-                f"cross-day state drift. Manual review required."
+                f"cross-day state drift."
             )
+
+            # 2026-04-29: auto-close orphans IF we're outside regular session
+            # hours. Inside RTH (9:30-16:00 ET) we keep alert-only behavior
+            # because mid-day startup may be racing with an in-flight fill
+            # that just hasn't reached the DB yet — closing it would kill a
+            # legitimate trade. Outside RTH, auto-close is unambiguously safe
+            # (no in-flight orders possible) and covers the OPRA-class case
+            # (4/28 force-close failed → carried overnight → 4/29 startup at
+            # 12:30 UTC = 8:30 ET premarket should auto-close before the
+            # market opens and the position drifts further).
+            try:
+                from zoneinfo import ZoneInfo
+                et_now = datetime.now(ZoneInfo('America/New_York'))
+                in_rth = (
+                    et_now.weekday() < 5
+                    and dtime(9, 30) <= et_now.time() < dtime(16, 0)
+                )
+            except Exception:
+                in_rth = True  # fail safe — assume in-hours, alert-only
+            if in_rth:
+                logger.warning(
+                    "ORB sync: orphan(s) detected during RTH — alert-only, "
+                    "manual review required (auto-close gated to off-hours "
+                    "to avoid killing in-flight fills)."
+                )
+            else:
+                logger.warning(
+                    f"ORB sync: orphan(s) detected outside RTH "
+                    f"(et={et_now.strftime('%H:%M')}) — auto-closing now"
+                )
+                import time as _time_mod
+                for sym in orphans:
+                    try:
+                        self._cancel_symbol_open_orders(sym)
+                        _time_mod.sleep(0.5)
+                        result = self.alpaca.close_position(sym)
+                        logger.warning(
+                            f"ORB sync auto-close: orphan {sym} closed "
+                            f"(order={(result or {}).get('id', '?')})"
+                        )
+                        self._notify(
+                            f"{self.tg_prefix} ✅ Auto-closed orphan {sym} "
+                            f"at off-hours startup"
+                        )
+                    except Exception as e:
+                        self._notify_error(
+                            f"Auto-close orphan {sym} FAILED at startup: {e}. "
+                            f"Manual action required."
+                        )
 
         logger.info(
             f"ORB.sync_positions: {recovered} filled + {recovered_pending} pending rehydrated; "

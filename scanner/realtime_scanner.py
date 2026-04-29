@@ -200,12 +200,59 @@ class RealtimeScanner:
 
             engine = self.trading_engine
 
-            # Force close check (Bug #1 fix)
-            if engine is not None and engine.enabled and not force_closed:
-                if engine._is_past_force_close_time():
-                    logger.info("Force close time reached — closing all positions")
-                    engine._force_close_all()
-                    force_closed = True
+            # Force close check (Bug #1 fix; 2026-04-29 multi-engine extension)
+            #
+            # Original logic: only bull flag's force_close fired here, then
+            # `force_closed = True` blocked ALL engine ticks below. ORB and
+            # MACD wave each have their own force_close_all() that was
+            # supposed to fire from inside their tick — but the tick was
+            # gated by `force_closed`, so ORB FC NEVER ran at EOD. Result:
+            # 4/28 OPRA position carried overnight (orphan; closed 4/29 9:33
+            # ET via stale bracket order). All three engines must fire FC
+            # together; any single engine deciding it's past FC time
+            # triggers the lot.
+            past_fc_bull = (
+                engine is not None and engine.enabled
+                and engine._is_past_force_close_time()
+            )
+            past_fc_macd = (
+                self.macd_engine is not None
+                and getattr(self.macd_engine, 'is_force_close_time', None)
+                and self.macd_engine.is_force_close_time()
+            )
+            past_fc_orb = (
+                self.orb_engine is not None
+                and getattr(self.orb_engine, 'is_force_close_time', None)
+                and self.orb_engine.is_force_close_time()
+            )
+            if not force_closed and (past_fc_bull or past_fc_macd or past_fc_orb):
+                logger.info(
+                    f"Force close time reached — closing all positions "
+                    f"across all engines (bull={past_fc_bull}, "
+                    f"macd={past_fc_macd}, orb={past_fc_orb})"
+                )
+                if engine is not None and engine.enabled:
+                    try:
+                        engine._force_close_all()
+                    except Exception as e:
+                        logger.error(
+                            f"Bull flag force-close raised: {e}", exc_info=True
+                        )
+                if self.macd_engine is not None:
+                    try:
+                        self.macd_engine.force_close_all()
+                    except Exception as e:
+                        logger.error(
+                            f"MACD wave force-close raised: {e}", exc_info=True
+                        )
+                if self.orb_engine is not None:
+                    try:
+                        self.orb_engine.force_close_all()
+                    except Exception as e:
+                        logger.error(
+                            f"ORB force-close raised: {e}", exc_info=True
+                        )
+                force_closed = True
 
             # Scanner intraday cycle every minute (matches backtest bar-by-bar qualification)
             current_bucket = f"{now_et.hour:02d}:{now_et.minute:02d}"

@@ -351,6 +351,241 @@ class TestForceClose:
 
 
 # =========================================================================
+# 2026-04-29 OPRA incident — force-close MUST close orphans (Alpaca sweep)
+# =========================================================================
+# OPRA was bought by ORB on 4/28 during a service-crash window. Fill never
+# reached DB. ORB's open_positions was empty at force-close. force_close_all
+# iterated engine state, closed nothing, exited normally. Position carried
+# overnight.
+#
+# Fix: after the engine-state pass, query Alpaca for ANY remaining position
+# on the account and close it (source-of-truth = Alpaca, not engine state).
+
+class TestForceCloseOrphanSweep:
+
+    def _orphan_position(self, symbol='OPRA', qty=2508, avg_entry=18.34, upl=-1229.0):
+        """Build a mock Alpaca position object."""
+        p = MagicMock()
+        p.symbol = symbol
+        p.qty = qty
+        p.avg_entry_price = avg_entry
+        p.unrealized_pl = upl
+        return p
+
+    def test_orphan_in_alpaca_but_not_engine_gets_swept(self, engine, mock_alpaca):
+        """If Alpaca has a position but engine.open_positions is empty,
+        force_close_all must still close the position via the sweep path.
+
+        This is the OPRA 4/28 scenario directly.
+        """
+        # Engine state: empty (mirrors crash-induced state loss)
+        assert engine.open_positions == {}
+        # Alpaca shows the orphan on the FIRST query (sweep), then empty on
+        # the SECOND query (post-FC verification).
+        mock_alpaca.get_open_positions.side_effect = [
+            [self._orphan_position()],
+            [],
+        ]
+
+        closed = engine.force_close_all()
+
+        assert closed == 1, "Sweep must close 1 orphan even with empty engine state"
+        mock_alpaca.close_position.assert_called_with('OPRA')
+
+    def test_sweep_runs_after_engine_state_close(self, engine, mock_alpaca):
+        """When engine has a tracked position AND Alpaca has an additional
+        orphan, both get closed. Tracked first, then orphan via sweep.
+        """
+        engine.open_positions['TRACKED'] = OpenPosition(
+            symbol='TRACKED', entry_price=10, stop_price=9, shares=100,
+            trade_id=1, order_id='o', entry_time=datetime.now(timezone.utc),
+            range_high=10, range_low=9, lock_arm_at_r=1.5, lock_stop_r=1.0,
+            composite_score=0.5, quintile='Q4',
+        )
+        # First sweep query: orphan only (TRACKED already closed by engine path)
+        # Second query: post-verification, all gone
+        mock_alpaca.get_open_positions.side_effect = [
+            [self._orphan_position(symbol='ORPHAN')],
+            [],
+        ]
+
+        closed = engine.force_close_all()
+
+        assert closed == 2, f"Expected TRACKED + ORPHAN both closed, got {closed}"
+        # close_position called for both
+        called_symbols = {
+            c.args[0] for c in mock_alpaca.close_position.call_args_list
+        }
+        assert 'TRACKED' in called_symbols
+        assert 'ORPHAN' in called_symbols
+
+    def test_post_fc_verification_alerts_when_position_remains(
+        self, engine, mock_alpaca,
+    ):
+        """If Alpaca still shows positions AFTER sweep, _notify_error fires.
+
+        Simulates the worst case: close orders submitted but didn't fill in
+        time. Operator must intervene before market close.
+        """
+        # Engine empty
+        # First query: orphan present
+        # Second query (post-verification): still present (close didn't propagate)
+        mock_alpaca.get_open_positions.side_effect = [
+            [self._orphan_position(symbol='STUCK')],
+            [self._orphan_position(symbol='STUCK')],
+        ]
+        # Track _notify_error calls
+        engine._notify_error = MagicMock()
+
+        engine.force_close_all()
+
+        # The verification should have raised CRITICAL
+        verify_alerts = [
+            c for c in engine._notify_error.call_args_list
+            if 'VERIFY FAILED' in str(c)
+        ]
+        assert len(verify_alerts) >= 1, (
+            "Post-FC verification did NOT alert when position survived sweep"
+        )
+
+    def test_sweep_handles_alpaca_query_failure_gracefully(
+        self, engine, mock_alpaca,
+    ):
+        """If Alpaca query during sweep raises, FC still completes (no crash).
+
+        Alerts via _notify_error so operator knows verification was skipped.
+        """
+        engine.open_positions['X'] = OpenPosition(
+            symbol='X', entry_price=10, stop_price=9, shares=100,
+            trade_id=1, order_id='o', entry_time=datetime.now(timezone.utc),
+            range_high=10, range_low=9, lock_arm_at_r=1.5, lock_stop_r=1.0,
+            composite_score=0.5, quintile='Q4',
+        )
+        mock_alpaca.get_open_positions.side_effect = RuntimeError("API down")
+        engine._notify_error = MagicMock()
+
+        # Must not raise
+        closed = engine.force_close_all()
+
+        # Engine-state X still closed, sweep alerted but didn't fail
+        assert closed == 1
+        assert any(
+            'SWEEP' in str(c) for c in engine._notify_error.call_args_list
+        ), "Sweep query failure was not alerted"
+
+
+# =========================================================================
+# Sync_positions — orphan auto-close at off-hours startup
+# =========================================================================
+
+class TestSyncPositionsOrphanAutoClose:
+
+    def _orphan_position(self, symbol='OPRA'):
+        p = MagicMock()
+        p.symbol = symbol
+        p.qty = 100
+        p.avg_entry_price = 10.0
+        p.unrealized_pl = -50.0
+        return p
+
+    @pytest.fixture
+    def patched_orphan_engine(self, engine, mock_alpaca, mock_db):
+        """Engine with sync_positions inputs configured to produce an orphan.
+
+        sync_positions queries:
+        - alpaca.get_open_positions → returns the OPRA orphan
+        - alpaca.trading_client.get_orders → none open (no in-flight orders)
+        - db.get_open_trades(today) → empty (no DB record → classifies as orphan)
+        """
+        mock_alpaca.get_open_positions.return_value = [self._orphan_position()]
+        # _cancel_symbol_open_orders uses trading_client.get_orders; mock it
+        mock_alpaca.trading_client = MagicMock()
+        mock_alpaca.trading_client.get_orders.return_value = []
+        mock_alpaca.trading_client.cancel_order_by_id.return_value = True
+        mock_db.get_open_trades.return_value = []
+        return engine
+
+    def test_orphan_auto_closes_at_premarket(
+        self, patched_orphan_engine, mock_alpaca, monkeypatch,
+    ):
+        """Premarket startup (e.g. 8:30 ET) → orphan auto-closed."""
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo
+        et_tz = ZoneInfo('America/New_York')
+        # Force ET clock to 8:30 AM (premarket, weekday)
+        # Pick a known weekday in EDT — 2026-04-29 is Wednesday EDT
+        fake_now = _dt(2026, 4, 29, 8, 30, 0, tzinfo=et_tz)
+
+        import trading.orb_engine as orb_mod
+        real_dt = orb_mod.datetime
+        class MockDT:
+            @staticmethod
+            def now(tz=None):
+                if tz is not None:
+                    return fake_now.astimezone(tz)
+                return fake_now.replace(tzinfo=None)
+            def __getattr__(self, name):
+                return getattr(real_dt, name)
+        monkeypatch.setattr(orb_mod, 'datetime', MockDT())
+
+        patched_orphan_engine.sync_positions()
+
+        # Auto-close should have called close_position
+        mock_alpaca.close_position.assert_called_with('OPRA')
+
+    def test_orphan_alerts_only_during_rth(
+        self, patched_orphan_engine, mock_alpaca, monkeypatch,
+    ):
+        """Mid-day startup during RTH → alert ONLY, no auto-close (avoids
+        killing in-flight fills that haven't reached DB yet)."""
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo
+        et_tz = ZoneInfo('America/New_York')
+        fake_now = _dt(2026, 4, 29, 10, 30, 0, tzinfo=et_tz)  # 10:30 ET = RTH
+
+        import trading.orb_engine as orb_mod
+        real_dt = orb_mod.datetime
+        class MockDT:
+            @staticmethod
+            def now(tz=None):
+                if tz is not None:
+                    return fake_now.astimezone(tz)
+                return fake_now.replace(tzinfo=None)
+            def __getattr__(self, name):
+                return getattr(real_dt, name)
+        monkeypatch.setattr(orb_mod, 'datetime', MockDT())
+
+        patched_orphan_engine.sync_positions()
+
+        # Auto-close MUST NOT have been called during RTH
+        mock_alpaca.close_position.assert_not_called()
+
+    def test_orphan_auto_closes_post_close(
+        self, patched_orphan_engine, mock_alpaca, monkeypatch,
+    ):
+        """Post-close startup (17:00 ET) → orphan auto-closed."""
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo
+        et_tz = ZoneInfo('America/New_York')
+        fake_now = _dt(2026, 4, 29, 17, 0, 0, tzinfo=et_tz)  # 5:00 PM ET = after-hours
+
+        import trading.orb_engine as orb_mod
+        real_dt = orb_mod.datetime
+        class MockDT:
+            @staticmethod
+            def now(tz=None):
+                if tz is not None:
+                    return fake_now.astimezone(tz)
+                return fake_now.replace(tzinfo=None)
+            def __getattr__(self, name):
+                return getattr(real_dt, name)
+        monkeypatch.setattr(orb_mod, 'datetime', MockDT())
+
+        patched_orphan_engine.sync_positions()
+        mock_alpaca.close_position.assert_called_with('OPRA')
+
+
+# =========================================================================
 # Exit flow
 # =========================================================================
 
