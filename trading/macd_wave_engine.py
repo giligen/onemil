@@ -1172,10 +1172,26 @@ class MACDWaveEngine:
                 # Slippage instrumentation: timestamp right after bars are in hand.
                 # Captures polling interval + bar-fetch RTT (the "wait" component of drift).
                 loop_processed_at = datetime.now(timezone.utc)
-                if bars is None or len(bars) < self.macd_slow + self.macd_signal:
-                    logger.info(
+                # 2026-05-01: warmup gate dropped from 35 (= macd_slow + macd_signal)
+                # to confirm_bars (=3) to match BT's signal-cache generation —
+                # `pandas.ewm(adjust=False)` produces values from bar 0 with
+                # `adjust=False` initialization. Production-filtered BT analysis
+                # showed only 4 trades over 16mo at warmup=35 (effectively zero
+                # edge); at warmup=0 the cache shows 595 trades / +$92K cum P&L
+                # with TRAIN/VAL/OOS all positive. The "MACD" at early bars is
+                # mathematically biased (EMAs initialized at close[0], haven't
+                # converged) — closer to a momentum-since-open measurement than
+                # a true MACD. Cross-validation supports edge but the
+                # methodology is non-standard. Monitor day-1 metrics:
+                #   - signal volume (expect 5-30/day, was ~0)
+                #   - halt filter coverage (NewsWorker queue depth at entry)
+                #   - spread gate hit rate
+                # Revert: change to len(bars) < self.macd_slow + self.macd_signal.
+                min_bars_required = max(self.confirm_bars, 3)
+                if bars is None or len(bars) < min_bars_required:
+                    logger.debug(
                         f"[{self.STRATEGY_NAME}] {sym}: insufficient bars "
-                        f"({len(bars) if bars is not None else 0}, need {self.macd_slow + self.macd_signal})"
+                        f"({len(bars) if bars is not None else 0}, need {min_bars_required})"
                     )
                     continue
 
