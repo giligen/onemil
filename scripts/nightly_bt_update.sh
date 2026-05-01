@@ -102,11 +102,44 @@ NEW_ROWS=$(($(wc -l < "$TMP_CACHE") - 1))
 echo "Temp cache has $NEW_ROWS new trade rows." >> "$LOG"
 
 if [ "$NEW_ROWS" -gt 0 ]; then
+    # SCHEMA GUARD (added 2026-05-01 after CSV_HEADERS-grew incident)
+    # ===============================================================
+    # If the temp build was produced with a different CSV_HEADERS than the
+    # production cache (typical cause: schema grew between when production
+    # was last fully rebuilt and now), naive `tail >> file` would silently
+    # produce a file with mismatched header vs body row widths. Downstream
+    # csv.DictReader then drops fields, BT loses data, alignment work goes
+    # off the rails (see commit history 2026-05-01).
+    #
+    # Refuse to append if column counts disagree. The operator must either
+    # rebuild the production cache, or run scripts/migrate_cache_schema.py
+    # (which we should add if this fires more than once).
+    PROD_COLS=$(head -1 "$CACHE_PATH" | awk -F, '{print NF}')
+    TMP_COLS=$(head -1 "$TMP_CACHE" | awk -F, '{print NF}')
+    if [ "$PROD_COLS" != "$TMP_COLS" ]; then
+        {
+            echo ""
+            echo "ERROR: schema mismatch — production cache header has $PROD_COLS columns,"
+            echo "       temp build has $TMP_COLS columns. Refusing to append (would corrupt"
+            echo "       the cache). Production cache LEFT UNTOUCHED."
+            echo ""
+            echo "       Production header (first 5): $(head -1 "$CACHE_PATH" | cut -d, -f1-5)"
+            echo "       Temp build header (first 5): $(head -1 "$TMP_CACHE" | cut -d, -f1-5)"
+            echo ""
+            echo "       To recover: either rebuild the production cache via --build-cache"
+            echo "       directly (overwrites — last-resort), or migrate the prod cache"
+            echo "       header to current CSV_HEADERS and pad short rows with empty fields."
+        } >> "$LOG"
+        rm -f "$TMP_CACHE"
+        mark_log "FAILED (schema mismatch: prod=$PROD_COLS, tmp=$TMP_COLS)"
+        exit 3
+    fi
+
     # Atomic append: copy production cache to .tmp, append new rows, rename.
     cp "$CACHE_PATH" "${CACHE_PATH}.tmp"
     tail -n +2 "$TMP_CACHE" >> "${CACHE_PATH}.tmp"
     mv "${CACHE_PATH}.tmp" "$CACHE_PATH"
-    echo "Appended $NEW_ROWS rows to $CACHE_PATH" >> "$LOG"
+    echo "Appended $NEW_ROWS rows to $CACHE_PATH (schema OK at $PROD_COLS cols)" >> "$LOG"
 fi
 
 rm -f "$TMP_CACHE"
