@@ -465,20 +465,55 @@ class RealtimeScanner:
         """Seed ORB with a BROAD candidate pool, then apply ORB's own BT-parity
         filter (gap >= 5%, vol >= 500K, price $3-30) via snapshot query.
 
-        Rationale: scanner's `_qualified_stock_data` uses bull-flag criteria
-        (narrow, low-float). For BT parity, ORB needs gap-up stocks matching
-        `study_orb_broad.py` criteria, which is broader. We pull from the pool
-        of pre-market gap + intraday qualified as a SEED, then ORB's
-        `build_orb_universe_from_snapshots` applies the strict ORB criteria.
+        2026-05-01 universe alignment (matches BT's `study_orb_broad.py`
+        ::load_broad_universe semantics): seed primarily comes from the
+        active universe table — every stock with valid prev-day data is a
+        candidate. The snapshot filter then enforces BT-parity criteria
+        using LIVE today's open + cached prev close + prev volume.
 
-        Post-restart recovery (2026-04-27): if both in-memory lists are empty
-        (e.g. service crashed mid-session and lost pre-market scan state),
-        hydrate from `scan_results` DB table. Today's 4/27 incident showed
-        ORB universe stuck at 0 stocks for 4+ minutes after restart because
-        scanner state was wiped but DB had 1600+ scan rows from earlier
-        in pre-market.
+        Prior versions seeded only from scanner's premarket-qualified
+        symbols (`_premarket_gap_data`) which uses last-premarket-trade gap.
+        That misses opening-bar gappers whose premarket prints stayed
+        small. April 2026 evidence (10 days): 18 BT-only picks (live
+        missed) totaled −$5,332 P&L; the 14 BT∩live overlap was +$2,498.
+        Live's narrower seed was systematically excluding edge-region
+        candidates BT correctly captured.
+
+        Fallback chain (in order):
+          1. Active universe DB (~4700 symbols) — primary BT-parity seed
+          2. Premarket + intraday scanner state — supplements the above
+          3. scan_results DB (post-restart recovery)
         """
+        # 1. Primary seed: query daily_bars for most-recent-prev-trading-day
+        # rows matching BT pre-filterable criteria (prev_volume >= 500K,
+        # prev_close in loose range $1-$50). The strict snapshot filter
+        # downstream enforces gap_pct >= 5%, today.open in [$3, $30].
+        # Pre-filtering here keeps the snapshot call to ~1500-2500 symbols
+        # (vs 4700+ if we passed all active universe → too slow at 9:35 ET).
         syms: Set[str] = set()
+        try:
+            # Most recent prev-day in daily_bars per symbol; one row per symbol.
+            cur = self.db._cache_conn.execute("""
+                SELECT symbol FROM (
+                    SELECT symbol, close, volume,
+                           ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY bar_date DESC) AS rn
+                    FROM daily_bars
+                ) WHERE rn = 1 AND close BETWEEN 1.0 AND 50.0 AND volume >= 500000
+            """) if hasattr(self, 'db') else []
+            for r in cur:
+                syms.add(r[0])
+            if syms:
+                logger.debug(
+                    f"ORB universe seed: {len(syms)} symbols from daily_bars "
+                    f"prev-day pre-filter (vol>=500K, close $1-50)"
+                )
+        except Exception as e:
+            logger.warning(f"ORB universe DB seed failed (falling back): {e}")
+
+        # 2. Supplement with scanner's premarket + intraday state. Should
+        # already be a subset of (1) but kept for defense-in-depth — if
+        # universe DB is stale or empty, scanner state is the next-best
+        # source.
         for d in getattr(self, '_premarket_gap_data', []) or []:
             s = d.get('symbol') if isinstance(d, dict) else None
             if s: syms.add(s)
@@ -486,7 +521,8 @@ class RealtimeScanner:
             s = d.get('symbol') if isinstance(d, dict) else None
             if s: syms.add(s)
 
-        # Post-restart recovery: hydrate from DB scan_results if in-memory empty
+        # 3. Post-restart recovery: hydrate from DB scan_results if everything
+        # else is empty (universe DB read failed AND scanner state empty).
         if not syms:
             try:
                 today = datetime.now(ET).strftime('%Y-%m-%d')
