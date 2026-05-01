@@ -494,6 +494,68 @@ class TestRunIntradayCycle:
         with _pt.raises(AlpacaAPIError, match="bars fail"):
             scanner._run_intraday_cycle()
 
+    @patch('scanner.realtime_scanner.datetime')
+    def test_intraday_cycle_drains_bar_events_during_wait(
+        self, mock_dt, scanner, mock_alpaca, mock_news
+    ):
+        """TMCR-class fix (2026-05-01): while bars+trades broad-universe
+        calls are in-flight (30-90s in prod), incoming WS bar events for
+        already-qualified crossed_stocks must be drained on the main
+        thread — otherwise the breakout bar queues for tens of seconds
+        and the buy-stop is placed too late (TMCR 4/9 cost +$24K
+        unrealized winner).
+
+        This test slows bars/trades by 0.4s and asserts the engine drain
+        runs at least once during that window."""
+        import pytz
+        from datetime import datetime as real_datetime
+        import time as _time
+        from unittest.mock import MagicMock
+
+        fake_now = real_datetime(2026, 3, 13, 10, 0, 0,
+                                 tzinfo=pytz.timezone('US/Eastern'))
+        mock_dt.now.return_value = fake_now
+        mock_dt.side_effect = lambda *a, **kw: real_datetime(*a, **kw)
+
+        # Slow API so the wait loop has time to drain
+        bar_ts = real_datetime(2026, 3, 13, 10, 0, 0,
+                               tzinfo=pytz.timezone('US/Eastern'))
+
+        def slow_bars(*_a, **_kw):
+            _time.sleep(0.4)
+            return {'TMCR': {'volume': 100_000, 'timestamp': bar_ts}}
+
+        def slow_trades(*_a, **_kw):
+            _time.sleep(0.4)
+            return {'TMCR': {'price': 5.0}}
+
+        mock_alpaca.get_current_bars.side_effect = slow_bars
+        mock_alpaca.get_latest_trades.side_effect = slow_trades
+
+        scanner._universe = [
+            {'symbol': 'TMCR', 'price_close': 4.0,
+             'company_name': 'TMCR Co', 'float_shares': 2_000_000},
+        ]
+        scanner._volume_profiles = {'TMCR': {'10:00': 10_000}}
+        mock_news.has_interesting_news.return_value = (False, None)
+
+        # Inject a trading_engine whose _drain_bar_events we can count
+        fake_engine = MagicMock()
+        fake_engine.enabled = True
+        fake_engine._drain_bar_events.return_value = None
+        scanner.trading_engine = fake_engine
+
+        scanner._run_intraday_cycle()
+
+        # Drain must have fired at least twice during the ~0.4s wait
+        # (poll is 0.5s, but futures aren't both done immediately, so
+        # at least one drain happens before the wait completes).
+        assert fake_engine._drain_bar_events.call_count >= 1, (
+            f"Expected drain to run during bars+trades wait, but "
+            f"call_count was {fake_engine._drain_bar_events.call_count}. "
+            f"TMCR-class latency fix regressed."
+        )
+
 
 # =============================================================================
 # _print_intraday_output

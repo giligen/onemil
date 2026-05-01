@@ -769,11 +769,23 @@ class RealtimeScanner:
         # so .result() here doesn't add another timeout layer. If either call
         # exhausts retries, the exception propagates up to the cycle wrapper
         # at the caller (commit cbe780a), which catches + skips the minute.
+        #
+        # TMCR-class latency fix (2026-05-01): while waiting for the broad-
+        # universe API calls (30-90s), drain incoming WebSocket bar events on
+        # the main thread. Otherwise the breakout bar for an already-qualified
+        # crossed_stocks symbol queues up for tens of seconds — by the time the
+        # sleep-loop drain runs at line ~366, liquidity is gone (TMCR 4/9).
+        # The drain is the same code as the sleep-loop path; mid-cycle is safe
+        # because engine ticks haven't started yet (they run AFTER this method
+        # returns), so there's no concurrent run_pattern_check / check_entries.
         with ThreadPoolExecutor(
             max_workers=2, thread_name_prefix='cycle-fetch'
         ) as ex:
             bars_future = ex.submit(self.alpaca.get_current_bars, symbols)
             trades_future = ex.submit(self.alpaca.get_latest_trades, symbols)
+            while not (bars_future.done() and trades_future.done()):
+                self._drain_engine_bar_events_safe()
+                time_mod.sleep(0.5)
             bars = bars_future.result()
             trades = trades_future.result()
 
@@ -1022,6 +1034,59 @@ class RealtimeScanner:
     # =========================================================================
     # Timing Helpers
     # =========================================================================
+
+    def _drain_engine_bar_events_safe(self) -> None:
+        """
+        Drain queued WS bar events for all 3 engines without raising.
+
+        Called from `_run_intraday_cycle` while the broad-universe bars+trades
+        Alpaca calls are in-flight (30-90s). Mirrors the sleep-loop drain at
+        line ~364 but runs DURING the cycle instead of after, eliminating the
+        tens-of-seconds queueing latency that caused TMCR 4/9 (buy-stop placed
+        13s after breakout, missed the liquidity window).
+
+        Safe to call mid-cycle: engine ticks (run_pattern_check, check_entries)
+        only run AFTER `_run_intraday_cycle` returns, so this drain doesn't
+        race with engine state mutation. Each engine's drain is wrapped in
+        try/except — a drain error must not abort the broader cycle.
+        """
+        if (self.trading_engine is not None
+                and getattr(self.trading_engine, 'enabled', False)):
+            try:
+                rt = self.trading_engine._drain_bar_events()
+                if rt:
+                    logger.info(
+                        f"RT bar event processed mid-cycle: "
+                        f"{rt.get('symbol', '?')}"
+                    )
+            except Exception as e:
+                logger.error(
+                    f"Bull flag mid-cycle bar-drain error: {e}", exc_info=True
+                )
+        if self.macd_engine is not None:
+            try:
+                mw_syms = self.macd_engine.drain_bar_events()
+                reeval = mw_syms & set(self.macd_engine.crossed_stocks.keys())
+                if reeval:
+                    self.macd_engine.check_entries(symbols=reeval)
+                if self._macd_bar_drain_err_count:
+                    logger.info(
+                        f"MACD wave bar-drain recovered after "
+                        f"{self._macd_bar_drain_err_count} errors"
+                    )
+                    self._macd_bar_drain_last_err = None
+                    self._macd_bar_drain_err_count = 0
+            except Exception as e:
+                self._log_throttled_bar_drain_error(e)
+        if self.orb_engine is not None:
+            try:
+                orb_syms = self.orb_engine.drain_bar_events()
+                if orb_syms:
+                    self.orb_engine.check_entries(symbols=orb_syms)
+            except Exception as e:
+                logger.error(
+                    f"ORB mid-cycle bar-drain error: {e}", exc_info=True
+                )
 
     def _log_throttled_bar_drain_error(self, exc: Exception) -> None:
         """
