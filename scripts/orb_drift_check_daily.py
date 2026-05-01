@@ -99,16 +99,34 @@ def run_drift_diagnostic(date_str: str) -> dict:
         logger.error(f"drift diagnostic exit {out.returncode}: {out.stderr[:500]}")
         return {'error': 'diagnostic_failed', 'stderr': out.stderr[:500]}
 
-    # Parse the output for the AGGREGATE FEATURE DIFFS section.
+    # Parse the AGGREGATE FEATURE DIFFS section only. Each per-symbol detail
+    # block above also has lines starting with feature names but with
+    # different column meanings (parts[1]=live value, parts[3]=Δ). The
+    # AGGREGATE section is unambiguous (parts[1]=mean Δ, [2]=min Δ, [3]=max Δ).
     text = out.stdout
     if 'AGGREGATE FEATURE DIFFS' not in text:
         return {'error': 'no_scored_lines', 'date': date_str}
 
+    # Slice to lines AFTER the "AGGREGATE FEATURE DIFFS" header, BEFORE the
+    # next major section ("PRIME SUSPECTS" or "Live composites") if any.
+    lines = text.splitlines()
+    in_agg = False
+    end_markers = ('PRIME SUSPECTS', 'Live composites', '====')
+    agg_lines = []
+    for line in lines:
+        if 'AGGREGATE FEATURE DIFFS' in line:
+            in_agg = True
+            continue
+        if in_agg:
+            if any(m in line for m in end_markers):
+                break
+            agg_lines.append(line)
+
     drifted = []
-    for line in text.splitlines():
-        # Lines look like:
-        # "  gap_pct                                 -0.0001        -0.0004        +0.0005  (n=7)"
+    for line in agg_lines:
         parts = line.split()
+        # Only feature-summary rows like:
+        # "  gap_pct                                 -0.0001        -0.0004        +0.0005  (n=7)"
         if len(parts) >= 4 and parts[0] in (
             'gap_pct', 'range_total_volume', 'range_avg_bar_range_pct',
             'range_size_pct', 'price_vs_20d_high_pct',
