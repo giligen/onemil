@@ -179,6 +179,7 @@ def filter_bull_flag_trades(
     max_concurrent: int = 0,
     daily_loss_limit: float = 0,
     universe_vol_map: Optional[Dict[str, int]] = None,
+    min_intraday_change_at_entry: float = 0,
 ) -> List[Dict]:
     """Apply regime, max trades/day, consecutive loss, threshold, concurrent, and loss limit filters."""
     from collections import defaultdict
@@ -382,6 +383,49 @@ def filter_bull_flag_trades(
     # Pre-filter by daily range threshold
     if min_daily_range_pct > 0:
         trades = [t for t in trades if float(t.get('daily_range_pct', 100)) >= min_daily_range_pct]
+
+    # Stage-2 intraday-change filter — point-in-time qualification gate.
+    # Mirrors the live scanner's `intraday_change_pct >= N` check at entry
+    # bar (NOT EOD daily_range_pct, which is look-ahead). Honest because
+    # `intraday_change_at_entry` is computed at entry minute during cache
+    # build (max(gap_pct, range_pct) over pre-entry bars). Without this,
+    # BT runs at the cache-build threshold (10%) — which inflates BT
+    # vs LIVE since live filters at 20% by default. See
+    # study_threshold_10_vs_20.py 2026-05-01 finding: 10%→20% removes 16
+    # trades / -$28K nominal, but lift was driven by 1 outlier (QMCO 9/19);
+    # ex-outlier 10% is net -$13K and recent regime -$21K.
+    if min_intraday_change_at_entry > 0:
+        before_ic = len(trades)
+        kept = []
+        missing = 0
+        dropped = 0
+        for t in trades:
+            ic_raw = t.get('intraday_change_at_entry')
+            try:
+                ic = float(ic_raw) if ic_raw not in (None, '', 'None') else None
+            except (ValueError, TypeError):
+                ic = None
+            if ic is None:
+                # Old cache rows pre-dating the column (commit 8e23215, 2026-04-17).
+                # Fail OPEN — pass through unfiltered. Rebuild cache to populate.
+                missing += 1
+                kept.append(t)
+                continue
+            if ic >= min_intraday_change_at_entry:
+                kept.append(t)
+            else:
+                dropped += 1
+        trades = kept
+        logger.info(
+            f"Intraday-change filter (>= {min_intraday_change_at_entry}%): "
+            f"{before_ic} → {len(trades)} trades "
+            f"({dropped} dropped, {missing} missing-field passthrough)"
+        )
+        if missing > before_ic * 0.10:
+            logger.warning(
+                f"  {missing}/{before_ic} cache rows missing "
+                f"intraday_change_at_entry — rebuild cache for honest filtering"
+            )
 
     # Group by date
     by_date = defaultdict(list)
@@ -2419,6 +2463,7 @@ def main():
 
     # Step 3: Build market regime filter
     trading_cfg = cfg.get("trading", {})
+    scanner_cfg = cfg.get("scanner", {})
     regime_cfg = trading_cfg.get("market_regime", {})
     sma_period = int(regime_cfg.get("sma_period", 50))
     spy_lookback_days = int(sma_period * 1.5) + 14
@@ -2654,16 +2699,27 @@ def main():
                         )
                 else:
                     logger.info(f"No movers found on {len(missing_days)} missing dates")
-        # Stage 2 daily_range_pct filter is EOD look-ahead — the qualification gate
-        # baked into cache at --build-cache time (via prev_close) is the honest real-time
-        # check. Disable this filter unconditionally. If someone wants a different
-        # qualification threshold, they must rebuild the cache with --build-cache --threshold N.
+        # Stage 2 daily_range_pct filter is EOD look-ahead — disabled.
+        # The HONEST point-in-time threshold is `intraday_change_at_entry`
+        # (computed at the entry bar during cache build via pre-entry
+        # max(gap_pct, range_pct)). The Stage-2 filter below uses that
+        # field. --threshold N applied here is the intraday-change threshold.
         _min_range = 0.0
+        # Default to live's config value so BT matches live by default.
+        # --threshold N overrides; --build-cache only rebuilds the cache layer.
+        _live_threshold = float(scanner_cfg.get("intraday_change_pct_min", 20.0))
         if args.threshold is not None and not args.build_cache:
-            logger.warning(
-                f"--threshold {args.threshold} is look-ahead in Stage 2 (uses EOD "
-                f"daily_range_pct). Ignoring. Rebuild cache with --build-cache "
-                f"--threshold {args.threshold} for an honest qualification threshold."
+            _stage2_threshold = float(args.threshold)
+            logger.info(
+                f"--threshold {args.threshold}% applied at Stage 2 via "
+                f"intraday_change_at_entry (point-in-time, not look-ahead)"
+            )
+        else:
+            _stage2_threshold = _live_threshold
+            logger.info(
+                f"Stage-2 intraday-change threshold: {_stage2_threshold}% "
+                f"(from config.yaml::scanner.intraday_change_pct_min — "
+                f"matches live)"
             )
         # Universe filter: default = universe-only, --full-market = all
         _uni_syms = None
@@ -2686,6 +2742,7 @@ def main():
             max_concurrent=_max_pos,
             daily_loss_limit=_daily_loss,
             universe_vol_map=_vol_map,
+            min_intraday_change_at_entry=_stage2_threshold,
         )
         # Write output CSV — pass through all cache columns
         trade_count = 0

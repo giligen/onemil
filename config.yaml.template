@@ -24,8 +24,13 @@ scanner:
   # Pre-market gap threshold
   gap_pct_min: 2.0
 
-  # Intraday move threshold — 20% validated: +$372K vs +$217K at 10% (16mo backtest, realistic ADV cap)
-  intraday_change_pct_min: 20.0
+  # Intraday move threshold — 15% structural floor (2026-05-01 analysis):
+  # BT at 20%: $+237K / 108 trades.  BT at 15%: $+302K / 111 trades.
+  # The +$65K lift comes from 3 trades — all entered between ic=16.55% and 19.34%.
+  # 15% sits 1.55pp below the lowest empirical Extras winner (SKBL @16.55%) — provably
+  # inert in BT (10-16% band has 0 trades after Stage-2 stack), captures all 3 historical
+  # winners, excludes 10-14% noise. See scripts/study_threshold_10_vs_20.py.
+  intraday_change_pct_min: 15.0
 
   # News catalyst requirement — disabled: pattern detector already filters quality
   # Backtest without news: +$902K. With news: ~50% of trades rejected.
