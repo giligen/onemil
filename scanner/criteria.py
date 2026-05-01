@@ -185,9 +185,10 @@ class ScannerCriteria:
             Formatted string for display
         """
         float_str = f"{candidate.float_shares / 1_000_000:.1f}M" if candidate.float_shares else "N/A"
+        company = (candidate.company_name or '')[:20]
         if phase == 'premarket':
             return (
-                f"  {candidate.symbol:<6} | {candidate.company_name[:20]:<20} | "
+                f"  {candidate.symbol:<6} | {company:<20} | "
                 f"Gap: {candidate.gap_pct:+.1f}% | "
                 f"Price: ${candidate.current_price:.2f} | "
                 f"Float: {float_str} | "
