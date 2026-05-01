@@ -2623,7 +2623,7 @@ def main():
                     logger.info(f"Found {len(_miss_movers)} movers on missing dates, running backtests...")
                     # Run backtests on missing movers (reuse existing runner setup)
                     from backtest import BacktestRunner
-                    runner = BacktestRunner(realistic=True)
+                    runner = BacktestRunner(realistic=True, db=db)
                     _new_trades = []
                     volume_profiles = db.get_all_volume_profiles()
                     for mover_tuple in _miss_movers:

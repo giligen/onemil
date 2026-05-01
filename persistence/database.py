@@ -549,6 +549,31 @@ class Database:
         except Exception as e:
             logger.warning(f"Migration 10 (slippage timing) failed (non-fatal): {e}")
 
+        # Migration 12: Add is_marginable + marginability_checked_at to universe.
+        # Populated by trading_engine.TradingEngine when LIVE calls
+        # alpaca.is_marginable(symbol) for the first time per symbol per day.
+        # Read by backtest.BacktestRunner during risk-tier sizing — when LIVE has
+        # observed the symbol is non-marginable, BT also downgrades to 1.0x.
+        # Without this, BT systematically overstates P&L on non-marginable
+        # micro-caps (OPTX 4/13: BT applied 2.0x risk → 10,303 shares; LIVE
+        # downgraded to 1.0x → 5,799 shares; same trade, 2x P&L gap).
+        # Default NULL means "unknown" — BT fails open (full risk_tier) until
+        # LIVE has populated the field. Over time the universe table converges.
+        try:
+            cols = [row[1] for row in self._cache_conn.execute("PRAGMA table_info(universe)").fetchall()]
+            added = []
+            if 'is_marginable' not in cols:
+                self._cache_conn.execute("ALTER TABLE universe ADD COLUMN is_marginable INTEGER DEFAULT NULL")
+                added.append('is_marginable')
+            if 'marginability_checked_at' not in cols:
+                self._cache_conn.execute("ALTER TABLE universe ADD COLUMN marginability_checked_at TIMESTAMP DEFAULT NULL")
+                added.append('marginability_checked_at')
+            if added:
+                self._cache_conn.commit()
+                logger.info(f"Migration 12: added marginability columns to universe: {added}")
+        except Exception as e:
+            logger.warning(f"Migration 12 (universe marginability) failed (non-fatal): {e}")
+
         # Migration 11: Add halt column to news_cache for halt-aware entry filter.
         # Populated by NewsProvider.classify_news as a side effect of regex-matching
         # halt vocabulary in headlines. Read by NewsProvider.is_halted_today via
@@ -713,6 +738,63 @@ class Database:
         )
         row = cursor.fetchone()
         return dict(row) if row else None
+
+    def get_marginability(self, symbol: str) -> Optional[bool]:
+        """Read cached marginability for a symbol (None = unknown).
+
+        Populated by LIVE's `alpaca.is_marginable` call (see
+        trading.trading_engine._check_marginability_with_persist). BT reads
+        this to mirror LIVE's risk-tier downgrade on non-marginable stocks.
+
+        Returns:
+            True/False if LIVE has observed the symbol's marginability,
+            None if never checked (BT should fail open = use full risk_tier).
+        """
+        try:
+            row = self._cache_conn.execute(
+                "SELECT is_marginable FROM universe WHERE symbol = ?",
+                (symbol,),
+            ).fetchone()
+            if row is None or row[0] is None:
+                return None
+            return bool(row[0])
+        except Exception as e:
+            logger.warning(
+                f"get_marginability({symbol}) failed: {e} — returning None"
+            )
+            return None
+
+    def set_marginability(self, symbol: str, is_marginable: bool) -> None:
+        """Persist a marginability observation for a symbol.
+
+        Called from LIVE on first successful is_marginable() return per
+        symbol per day. The universe row must already exist (universe is
+        prebuilt via main.py --rebuild-universe). On a missing row we
+        upsert just the marginability columns to avoid losing the
+        observation, but log a warning.
+        """
+        now = datetime.now(timezone.utc)
+        try:
+            cursor = self._cache_conn.execute(
+                "UPDATE universe SET is_marginable = ?, "
+                "marginability_checked_at = ? WHERE symbol = ?",
+                (1 if is_marginable else 0, now, symbol),
+            )
+            if cursor.rowcount == 0:
+                logger.warning(
+                    f"set_marginability({symbol}, {is_marginable}) — "
+                    f"symbol not in universe; inserting minimal row"
+                )
+                self._cache_conn.execute(
+                    "INSERT INTO universe (symbol, is_marginable, "
+                    "marginability_checked_at, active) VALUES (?, ?, ?, 1)",
+                    (symbol, 1 if is_marginable else 0, now),
+                )
+            self._cache_conn.commit()
+        except Exception as e:
+            logger.error(
+                f"set_marginability({symbol}, {is_marginable}) failed: {e}"
+            )
 
     def deactivate_stocks(self, symbols: List[str]) -> int:
         """

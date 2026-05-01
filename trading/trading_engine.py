@@ -1001,19 +1001,49 @@ class TradingEngine:
                 except Exception as e:
                     logger.warning(f"{symbol}: Failed to seed bar window: {e}")
 
+    def _persist_marginability_if_needed(
+        self, symbol: str, is_marginable: bool,
+    ) -> None:
+        """Persist marginability observation to universe table (main thread).
+
+        Idempotent within a session via `_margin_persisted` set — writes
+        DB at most once per (symbol, day). MUST be called from the main
+        thread; the pre-warm daemon thread MUST NOT call this (SQLite
+        connections are not thread-safe).
+        """
+        if not self.db:
+            return
+        if not hasattr(self, '_margin_persisted'):
+            self._margin_persisted = set()
+        if symbol in self._margin_persisted:
+            return
+        try:
+            self.db.set_marginability(symbol, is_marginable)
+            self._margin_persisted.add(symbol)
+        except Exception as e:
+            logger.warning(
+                f"{symbol}: marginability persist failed: {e}"
+            )
+
     def _prewarm_marginability(self, symbol: str) -> None:
-        """Background task: fetch is_marginable and cache it (Fix 4).
+        """Background task: fetch is_marginable and cache it in-memory (Fix 4).
 
         Runs in a daemon thread spawned from `on_stock_qualified`. Errors
         are swallowed at WARNING — the entry path retries synchronously
-        if the cache is still empty when needed (line 2810-2812). Designed
-        to be cheap and idempotent.
+        if the cache is still empty when needed (line 2810-2812).
+
+        IMPORTANT: this thread does NOT touch SQLite. Cross-thread DB
+        writes on a main-thread connection cause SQLite segfaults under
+        pytest (tests/test_trading_engine.py crashed on this in 5/1
+        pre-deploy). The DB persistence is handled on the main thread
+        in `_persist_marginability_if_needed` invoked from the entry
+        path, which sees the cache populated and writes once.
         """
         try:
             if symbol in self._margin_cache:
                 return
             result = self.alpaca.is_marginable(symbol)
-            self._margin_cache[symbol] = result
+            self._margin_cache[symbol] = bool(result)
             logger.debug(
                 f"{symbol}: marginability pre-warmed = {result}"
             )
@@ -2849,12 +2879,21 @@ class TradingEngine:
             avg_vol = (uni_stock.get('avg_volume_daily') or 0) if uni_stock else 0
             risk_multiplier = self._get_risk_tier(setup.breakout_level, avg_vol)
 
-            # Check marginability for leveraged trades (real-time, cached per cycle)
+            # Check marginability for leveraged trades (cached per-day).
             if risk_multiplier > 1.0:
                 if not hasattr(self, '_margin_cache'):
                     self._margin_cache = {}
                 if symbol not in self._margin_cache:
-                    self._margin_cache[symbol] = self.alpaca.is_marginable(symbol)
+                    self._margin_cache[symbol] = bool(
+                        self.alpaca.is_marginable(symbol)
+                    )
+                # Persist to universe table for BT-LIVE parity. Always
+                # called on the main thread (this code path) — never from
+                # the pre-warm daemon thread, which would trigger SQLite
+                # cross-thread errors.
+                self._persist_marginability_if_needed(
+                    symbol, self._margin_cache[symbol]
+                )
                 if not self._margin_cache[symbol]:
                     logger.info(
                         f"{symbol}: Not marginable — falling back to 1x "
@@ -3731,6 +3770,7 @@ class TradingEngine:
         self._daily_trade_count = 0
         self._notified_setups.clear()
         self._margin_cache = {}  # marginability cache is per-day (Fix 4)
+        self._margin_persisted = set()  # DB-write tracker, per-day
         self.position_manager.reset_daily()
         self._refresh_spy_data()
         self._sync_startup_state()

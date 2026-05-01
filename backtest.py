@@ -764,6 +764,7 @@ class BacktestRunner:
         min_cum_shares: int = 0,
         min_relative_vol_rate: float = 0,
         avg_daily_volume: int = 0,
+        db: Optional["Database"] = None,
     ):
         """
         Initialize BacktestRunner.
@@ -961,6 +962,10 @@ class BacktestRunner:
         self.min_cum_shares = min_cum_shares
         self.min_relative_vol_rate = min_relative_vol_rate
         self.avg_daily_volume = avg_daily_volume
+        # BT-LIVE marginability parity (2026-05-01): when provided, BT reads
+        # universe.is_marginable to mirror LIVE's risk-tier downgrade on
+        # non-marginable symbols. None = fail open (legacy behavior).
+        self.db = db
 
         # Risk tiers: same logic as trading_engine._get_risk_tier()
         tier_cfg = trading_cfg.get("risk_tiers", {})
@@ -1232,6 +1237,57 @@ class BacktestRunner:
     def set_db_path(self, db_path: str) -> None:
         """Set DB path for SPY bar loading (quality filter)."""
         self._db_path = db_path
+
+    def _lookup_marginability(self, symbol: str) -> Optional[bool]:
+        """BT-LIVE parity: read marginability from universe table.
+
+        Returns True (marginable), False (not marginable, downgrade
+        risk_tier), or None (unknown — fail open). Memoized per
+        BacktestRunner instance + lazy-opens the cache DB once.
+
+        Can be overridden by setting `self.db` to a Database instance
+        (preferred) — when set, uses Database.get_marginability instead
+        of opening a raw sqlite3 connection.
+        """
+        if not hasattr(self, '_marginability_cache'):
+            self._marginability_cache = {}
+        if symbol in self._marginability_cache:
+            return self._marginability_cache[symbol]
+
+        result: Optional[bool] = None
+        # Prefer the Database wrapper when available (handles errors etc).
+        if getattr(self, 'db', None) is not None:
+            try:
+                result = self.db.get_marginability(symbol)
+            except Exception as e:
+                logger.warning(
+                    f"BT marginability lookup via Database failed for "
+                    f"{symbol}: {e} — failing open"
+                )
+                result = None
+        else:
+            # Fallback: raw sqlite3 read off _db_path. Some research call
+            # sites construct a BacktestRunner without a Database — keep
+            # them working with a direct query.
+            db_path = getattr(self, '_db_path', None)
+            if db_path:
+                try:
+                    import sqlite3 as _sql
+                    con = _sql.connect(db_path)
+                    row = con.execute(
+                        "SELECT is_marginable FROM universe WHERE symbol = ?",
+                        (symbol,),
+                    ).fetchone()
+                    con.close()
+                    if row is not None and row[0] is not None:
+                        result = bool(row[0])
+                except Exception as e:
+                    logger.warning(
+                        f"BT marginability raw lookup failed for "
+                        f"{symbol}: {e} — failing open"
+                    )
+        self._marginability_cache[symbol] = result
+        return result
 
     def _compute_vwap(self, bars: pd.DataFrame, up_to_idx: int) -> Optional[float]:
         """Compute VWAP from bars[0:up_to_idx+1]. All bars are complete — no look-ahead."""
@@ -2620,6 +2676,28 @@ class BacktestRunner:
                                 tier['min_volume'] <= av <= tier['max_volume']):
                             risk_tier_mult = tier['multiplier']
                             break
+
+                    # BT-LIVE parity: mirror LIVE's marginability downgrade.
+                    # LIVE (trading_engine.py:2812) calls alpaca.is_marginable
+                    # before applying risk_tier_mult > 1.0; if False, downgrades
+                    # to 1.0x. BT can't call Alpaca during a backtest, so we
+                    # read the persisted value from the universe table — LIVE
+                    # populates it on first observation per symbol.
+                    # NULL = unknown → fail open (full risk_tier, current
+                    # behavior). False = downgrade to 1.0x. True = use full
+                    # risk_tier. Without this BT systematically inflates P&L
+                    # on non-marginable micro-caps (OPTX 4/13: BT 2.0x → 10,303
+                    # sh vs LIVE 1.0x → 5,799 sh; same setup, 2x P&L gap).
+                    if risk_tier_mult > 1.0:
+                        persisted = self._lookup_marginability(pattern.symbol)
+                        if persisted is False:
+                            logger.debug(
+                                f"  {pattern.symbol}: BT marginability "
+                                f"downgrade — universe.is_marginable=False "
+                                f"(LIVE-observed); risk_tier "
+                                f"{risk_tier_mult:.1f}x → 1.0x"
+                            )
+                            risk_tier_mult = 1.0
 
                 # Combine risk tier + (sizing) conviction, cap at 3x (max leverage on $50K base).
                 # sizing_conviction reflects the marginal defensive scaling; the cached
