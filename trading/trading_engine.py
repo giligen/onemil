@@ -13,6 +13,7 @@ Flow:
 
 import logging
 import queue
+import threading
 import time as time_mod
 from datetime import date, datetime, timedelta, timezone
 from typing import Set, Optional, Dict, Any, List
@@ -959,6 +960,24 @@ class TradingEngine:
         if symbol not in self._qualified_symbols:
             self._qualified_symbols.add(symbol)
             logger.info(f"{symbol}: Added to qualified symbols for pattern monitoring")
+            # Fix 4 (2026-05-01): pre-warm marginability cache in background.
+            # `is_marginable` is the only Alpaca API call on the entry-path
+            # critical section (gated on risk_multiplier > 1.0). Pre-warming
+            # at qualification time means the result is cached well before
+            # the pattern fires (worst case ~30 min later, best case ~30 sec).
+            # Fail-safe: if pre-warm errors, the entry path's sync fallback
+            # still works (line 2810-2812).
+            if (self.risk_tiers_enabled
+                    and not hasattr(self, '_margin_cache')):
+                self._margin_cache = {}
+            if (self.risk_tiers_enabled
+                    and symbol not in self._margin_cache):
+                threading.Thread(
+                    target=self._prewarm_marginability,
+                    args=(symbol,),
+                    name=f'prewarm-margin-{symbol}',
+                    daemon=True,
+                ).start()
             # Subscribe to real-time 1-min bars — skip for sub-ADV stocks
             # (saves WebSocket bandwidth + RT callback cycles)
             if self.stop_monitor and hasattr(self.stop_monitor, 'subscribe_bars'):
@@ -981,6 +1000,28 @@ class TradingEngine:
                         logger.info(f"{symbol}: Seeded bar window with {len(hist)} historical bars")
                 except Exception as e:
                     logger.warning(f"{symbol}: Failed to seed bar window: {e}")
+
+    def _prewarm_marginability(self, symbol: str) -> None:
+        """Background task: fetch is_marginable and cache it (Fix 4).
+
+        Runs in a daemon thread spawned from `on_stock_qualified`. Errors
+        are swallowed at WARNING — the entry path retries synchronously
+        if the cache is still empty when needed (line 2810-2812). Designed
+        to be cheap and idempotent.
+        """
+        try:
+            if symbol in self._margin_cache:
+                return
+            result = self.alpaca.is_marginable(symbol)
+            self._margin_cache[symbol] = result
+            logger.debug(
+                f"{symbol}: marginability pre-warmed = {result}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"{symbol}: marginability pre-warm failed: {e} — "
+                f"entry-path will retry synchronously if needed"
+            )
 
     def _on_bar_close(self, symbol: str, bars_df) -> None:
         """Handle real-time 1-min bar close from WebSocket.
@@ -2406,8 +2447,12 @@ class TradingEngine:
         # Drain real-time bar events FIRST (from WebSocket thread, via queue)
         rt_result = self._drain_bar_events()
 
-        # Clear per-cycle caches (marginability)
-        self._margin_cache = {}
+        # Marginability cache is per-day (cleared in reset_daily). Marginability
+        # is stable within a session — clearing per-cycle was wasteful, costing
+        # ~150ms per qualified symbol per cycle (60 cycles/hour = 60 redundant
+        # API calls per symbol per hour). Pre-warm via on_stock_qualified
+        # (Fix 4, 2026-05-01) means the cache hit rate at the entry path is
+        # ~100% in normal operation.
 
         # ALWAYS sync positions and manage pending orders — these must run
         # regardless of regime filter or max trades. Skipping them means
@@ -3685,6 +3730,7 @@ class TradingEngine:
         self._pending_orders.clear()
         self._daily_trade_count = 0
         self._notified_setups.clear()
+        self._margin_cache = {}  # marginability cache is per-day (Fix 4)
         self.position_manager.reset_daily()
         self._refresh_spy_data()
         self._sync_startup_state()

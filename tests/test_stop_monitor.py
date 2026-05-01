@@ -1204,6 +1204,134 @@ class TestDrainExitEventsFilter:
 
 
 # ---------------------------------------------------------------------------
+# OPTX-class regression — bar.high drives highest_since_entry / trail state
+# ---------------------------------------------------------------------------
+
+class TestBarHighDrivesTrailState:
+    """Bar-path trail update (2026-05-01 OPTX 4/13 fix).
+
+    `_on_bar` must update `highest_since_entry` from `bar.high` so the trail
+    activates and ratchets even when WS trade ticks miss/delay the bar peak
+    (Alpaca SIP gaps on micro-caps, off-NBBO prints, async back-pressure).
+    """
+
+    @pytest.fixture
+    def trail_monitor(self, mock_alpaca):
+        mon = StopMonitor(
+            api_key='k', api_secret='s', alpaca_client=mock_alpaca,
+            marketable_limit_offset=0.03, marketable_limit_offset_pct=0.005,
+        )
+        # OPTX 4/13 entry: $11.45, stop $11.07, R = $0.38
+        # config: trail_r=1.0, activate_at_r=1.5
+        mon.add_watch(
+            'OPTX', stop_price=11.07, shares=5799,
+            tp_leg_id='tp-1', sl_leg_id='sl-1',
+            entry_price=11.45, risk_per_share=0.38,
+            trail_r=1.0, activate_at_r=1.5,
+        )
+        mon._bar_symbols.add('OPTX')
+        return mon
+
+    @pytest.mark.asyncio
+    async def test_bar_high_below_threshold_does_not_activate(self, trail_monitor):
+        """Bar high below +1.5R does not flip trailing_active."""
+        # +1R = $11.83. Below +1.5R = $12.02
+        bar = MagicMock(symbol='OPTX', timestamp='2026-04-13T13:53:00Z',
+                        open=11.75, high=11.95, low=11.64, close=11.93,
+                        volume=81681)
+        await trail_monitor._on_bar(bar)
+        with trail_monitor._watch_lock:
+            w = trail_monitor._watches['OPTX']
+        assert w.highest_since_entry == 11.95  # tracked
+        assert w.trailing_active is False  # below +1.5R
+        assert w.stop_price == 11.07  # original stop unchanged
+
+    @pytest.mark.asyncio
+    async def test_bar_high_at_optx_peak_activates_trail(self, trail_monitor):
+        """OPTX 10:07 bar.high=$12.20 (+1.97R) MUST activate trail.
+
+        Regression contract: this is the exact bar where live failed in
+        prod on 4/13. With the fix, trail activates and ratchets up.
+        """
+        # 10:07 ET bar: high $12.20 → +1.97R → activates
+        bar = MagicMock(symbol='OPTX', timestamp='2026-04-13T14:07:00Z',
+                        open=11.85, high=12.20, low=11.85, close=12.10,
+                        volume=171955)
+        await trail_monitor._on_bar(bar)
+        with trail_monitor._watch_lock:
+            w = trail_monitor._watches['OPTX']
+        assert w.highest_since_entry == 12.20
+        assert w.trailing_active is True
+        # Ratcheted: highest - 1R = 12.20 - 0.38 = 11.82
+        assert abs(w.stop_price - 11.82) < 0.01
+
+    @pytest.mark.asyncio
+    async def test_subsequent_lower_bar_does_not_lower_high(self, trail_monitor):
+        """Bar high updates are monotone — a later lower-high bar must
+        NOT roll back highest_since_entry or stop_price."""
+        # First bar pushes high to $12.20, ratchets stop to $11.82
+        bar1 = MagicMock(symbol='OPTX', timestamp='2026-04-13T14:07:00Z',
+                         open=11.85, high=12.20, low=11.85, close=12.10,
+                         volume=171955)
+        await trail_monitor._on_bar(bar1)
+        # Second bar: lower high $11.95
+        bar2 = MagicMock(symbol='OPTX', timestamp='2026-04-13T14:08:00Z',
+                         open=12.06, high=12.09, low=11.51, close=11.63,
+                         volume=148102)
+        await trail_monitor._on_bar(bar2)
+        with trail_monitor._watch_lock:
+            w = trail_monitor._watches['OPTX']
+        assert w.highest_since_entry == 12.20  # not lowered
+        assert abs(w.stop_price - 11.82) < 0.01  # ratchet held
+
+    @pytest.mark.asyncio
+    async def test_post_bar_tick_at_trail_level_fires_exit(
+        self, trail_monitor, mock_alpaca
+    ):
+        """OPTX-class end-to-end: bar high arms trail, subsequent tick at
+        trail level fires `trail_stop` (NOT `stop_loss`).
+
+        This is the regression contract for the 4/13 incident — the live
+        trade exited via `stop_loss` at $11.07 because trail never armed.
+        With the fix, the bar at 10:07 arms the trail and a tick at the
+        ratchet level $11.82 fires `trail_stop`.
+        """
+        # Replay the 10:07 bar (peak $12.20)
+        bar = MagicMock(symbol='OPTX', timestamp='2026-04-13T14:07:00Z',
+                        open=11.85, high=12.20, low=11.85, close=12.10,
+                        volume=171955)
+        await trail_monitor._on_bar(bar)
+
+        # 10:08 tick at trail level — must fire trail_stop, not stop_loss
+        mock_alpaca.get_latest_quote.return_value = {
+            'bid_price': 11.80, 'ask_price': 11.84,
+            'bid_size': 200, 'ask_size': 200,
+        }
+        mock_alpaca.submit_limit_sell_order.return_value = {'id': 'o-1'}
+        mock_alpaca.cancel_order.return_value = None
+
+        events = []
+        trail_monitor._notifier = None
+
+        async def capture_event(symbol, trigger_price, watch, **kwargs):
+            events.append(('exec', symbol, kwargs.get('exit_reason')))
+
+        trail_monitor._execute_stop_exit = capture_event
+
+        tick = MagicMock()
+        tick.symbol = 'OPTX'
+        tick.price = 11.80  # below ratcheted $11.82
+        await trail_monitor._on_trade(tick)
+
+        # The exit must be tagged trail_stop (not stop_loss)
+        assert events, "exit must fire when tick crosses ratcheted trail"
+        assert events[0][2] == 'trail_stop', (
+            f"OPTX-class regression: exit tagged {events[0][2]}, "
+            f"expected 'trail_stop'"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Volume-confirmed trail exit (Experiment D) — tick-path tests
 # ---------------------------------------------------------------------------
 

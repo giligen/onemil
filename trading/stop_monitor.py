@@ -440,10 +440,22 @@ class StopMonitor:
             # Experiment D: stash last-closed-bar volume on the active watch so
             # the tick-path vol-confirmed trail check can read it. Poll path
             # uses the bar dict directly; this covers the tick-path.
+            #
+            # OPTX-class fix (2026-05-01): also drive `highest_since_entry`
+            # off bar.high. Tick-path alone is fragile — Alpaca SIP delivery
+            # has sub-second gaps on micro-caps during fast moves, off-NBBO
+            # prints don't make it to the trade stream, and async back-pressure
+            # can serialize ticks. Result: OPTX 4/13 BT trail_stop +$3,302
+            # vs LIVE stop_loss -$1,798 — bar high reached $12.20 (+1.97R)
+            # but `trailing_active` never flipped. Bar.high IS the consensus
+            # print over the closed minute; using it for trail-state updates
+            # is honest and monotone (only ratchets UP).
+            bar_high = bar_dict['high']
             with self._watch_lock:
                 watch = self._watches.get(symbol)
                 if watch is not None:
                     watch.last_bar_volume = bar_dict['volume']
+                    self._maybe_ratchet_from_bar_high(symbol, watch, bar_high)
 
             # Snapshot handlers under lock, then fire outside lock so a slow handler
             # doesn't block registration/unregistration on another thread.
@@ -465,6 +477,60 @@ class StopMonitor:
 
         except Exception as e:
             logger.error(f"StopMonitor: _on_bar error: {e}")
+
+    def _maybe_ratchet_from_bar_high(
+        self, symbol: str, watch: "WatchEntry", bar_high: float,
+    ) -> None:
+        """Ratchet trail state off the closed-bar high.
+
+        Called from `_on_bar` under `_watch_lock`. Mirrors the tick-path
+        update (`_on_trade` line ~1685) but uses `bar.high` as the price
+        signal. Idempotent and monotone — bar high never moves
+        `highest_since_entry` down, so calling repeatedly is safe.
+
+        Does NOT trigger an exit by itself. The exit fires on the next
+        tick that crosses the (now-ratcheted) stop_price, in `_on_trade`
+        at line ~1748. This keeps exit-execution single-sourced
+        (tick-path) while making trail-state robust to tick gaps.
+
+        See: OPTX 2026-04-13 incident. BT/LIVE divergence root cause —
+        `highest_since_entry` was tick-only.
+        """
+        if bar_high <= 0 or bar_high <= watch.highest_since_entry:
+            return
+
+        watch.highest_since_entry = bar_high
+
+        has_r_trail = watch.trail_r > 0 and watch.risk_per_share > 0
+        has_pct_trail = watch.trail_pct > 0
+        if not (has_r_trail or has_pct_trail):
+            return
+
+        # Activate (R-based only — pct-based already active at watch creation)
+        if not watch.trailing_active and has_r_trail:
+            r_gain = (bar_high - watch.entry_price) / watch.risk_per_share
+            if r_gain >= watch.activate_at_r:
+                watch.trailing_active = True
+                logger.info(
+                    f"StopMonitor (bar): {symbol} trail ACTIVATED via bar.high — "
+                    f"high=${bar_high:.2f}, +{r_gain:.1f}R from "
+                    f"entry ${watch.entry_price:.2f}"
+                )
+
+        # Ratchet
+        if watch.trailing_active:
+            if has_pct_trail:
+                new_stop = bar_high * (1 - watch.trail_pct)
+            else:
+                new_stop = bar_high - watch.risk_per_share * watch.trail_r
+            if new_stop > watch.stop_price:
+                old_stop = watch.stop_price
+                watch.stop_price = new_stop
+                logger.info(
+                    f"StopMonitor (bar): {symbol} trail ratchet "
+                    f"${old_stop:.2f} → ${new_stop:.2f} "
+                    f"(bar.high=${bar_high:.2f})"
+                )
 
     def is_healthy(self, max_stale_seconds: float = 30.0) -> bool:
         """
