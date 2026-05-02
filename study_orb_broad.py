@@ -45,7 +45,12 @@ MIN_PREV_DAY_VOL = 500_000  # yesterday's volume floor
 MIN_OPEN_PRICE = 3.0
 MAX_OPEN_PRICE = 30.0
 DATE_START = '2025-01-01'
-DATE_END = '2026-04-30'
+# DATE_END: dynamic — defaults to today's date so nightly/intraday BT runs
+# always include the freshest data. Fixed-date ceiling caused 5/1/2026
+# regression where ORB pipeline returned 0 trades because universe loader
+# silently dropped all post-4/30 candidates.
+import datetime as _dt
+DATE_END = _dt.date.today().isoformat()
 
 
 def load_broad_universe(
