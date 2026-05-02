@@ -123,6 +123,49 @@ class MarketRegimeFilter:
         """Get all trading dates strictly before trade_date, sorted ascending."""
         return [d for d in self._sorted_dates if d < trade_date]
 
+    def get_recent_bars(
+        self, n: int = 3, before_date: Optional[date] = None
+    ) -> List[Dict]:
+        """Return the most-recent up-to-`n` SPY bars in ascending date order.
+
+        Public API for consumers that need raw bars (e.g., the SPY-3d-range
+        helper used by conviction scoring). Replaces direct access to the
+        internal `_bars_by_date` / `_sorted_dates` attributes — see post-mortem
+        on EAF 2026-05-01 where the live conviction reader reached for a
+        non-existent `_spy_bars` attribute and silently fell back to a 1.0
+        sentinel.
+
+        Args:
+            n: Maximum number of bars to return.
+            before_date: If provided, only consider bars strictly before this
+                date (look-ahead prevention for backtests). If None, return
+                up to `n` most recent bars regardless of date.
+
+        Returns:
+            List of bar dicts each containing 'date', 'open', 'high', 'low',
+            'close', 'volume'. Ascending date order. Empty list if no matching
+            bars exist.
+        """
+        if before_date is not None:
+            candidates = [d for d in self._sorted_dates if d < before_date]
+        else:
+            candidates = list(self._sorted_dates)
+        if not candidates:
+            return []
+        selected = candidates[-n:] if n > 0 else []
+        return [
+            {**self._bars_by_date[d], 'date': d} for d in selected
+        ]
+
+    def get_latest_bar_date(self) -> Optional[date]:
+        """Most-recent SPY bar date, or None if none loaded.
+
+        Used by callers running a staleness check (e.g.,
+        `trading.spy_regime.is_spy_data_stale`) without exposing the internal
+        sorted-dates list.
+        """
+        return self._sorted_dates[-1] if self._sorted_dates else None
+
     def get_spy_vol_5d(self, trade_date: date) -> Optional[float]:
         """
         Average daily range % over 5 trading days BEFORE trade_date.

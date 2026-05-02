@@ -277,6 +277,25 @@ def _create_trading_engine(config, alpaca, db, notifier=None, stop_monitor=None,
     # Load SPY data immediately so regime is ready if service starts mid-day
     engine._refresh_spy_data()
 
+    # Startup staleness guard — added 2026-05-02 after EAF post-mortem.
+    # Logs ERROR (does NOT abort) if SPY's freshest bar is too old to be
+    # trustworthy. Conviction's spy_regime input still degrades gracefully
+    # via the None-aware path (rule 4 applies max penalty), but operators
+    # should know about the data outage at startup time, not discover it
+    # via post-trade analysis.
+    if market_regime is not None:
+        from datetime import date
+        from trading.spy_regime import is_spy_data_stale
+        latest_bar = market_regime.get_latest_bar_date()
+        if is_spy_data_stale(latest_bar, date.today()):
+            logger.error(
+                "STARTUP CHECK: SPY daily_bars are stale or missing "
+                "(latest=%s). Conviction's spy_regime input will fall "
+                "back to max-penalty until refresh succeeds. Investigate "
+                "Alpaca data feed and the universe-rebuild cron.",
+                latest_bar,
+            )
+
     logger.info(
         f"Trading engine created — enabled: {config.trading_enabled}, "
         f"position_size: ${config.position_size_dollars}, "

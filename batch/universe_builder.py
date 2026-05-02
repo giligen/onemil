@@ -8,12 +8,17 @@ Runs after market close to build the tradeable stock universe:
 4. Get float from Yahoo Finance (cached, weekly refresh)
 5. Filter by float (<= 10M shares)
 6. Cache 15-min volume profiles (50-day averages)
+7. Refresh INDEX_SYMBOLS daily bars in cache.db (SPY etc — used by
+   regime/conviction scorers but NOT in the tradeable universe; see
+   post-mortem 2026-05-01 EAF false-positive on prod for why this step
+   was added — SPY had fallen 14 calendar days behind because nothing
+   refreshed it).
 
 Verbose progress logging throughout.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import List, Dict, Optional
 
 import pandas as pd
@@ -26,6 +31,19 @@ from persistence.database import Database
 logger = logging.getLogger(__name__)
 
 ET = pytz.timezone('US/Eastern')
+
+# Symbols whose daily bars are needed by regime/conviction scorers but which
+# are NOT part of the tradeable universe. The build pipeline refreshes their
+# `daily_bars` rows so BT's `_get_spy_3d_range` (and parity-checked live
+# fallbacks) always see fresh data. Add to this list (don't fork into a new
+# script) to keep there a single owner for "non-universe daily bars".
+INDEX_SYMBOLS: List[str] = ['SPY']
+
+# How many calendar days of history to refetch per build. 100 days covers
+# the 50-bar SMA + 3-day range + a generous gap buffer (long weekend +
+# missed market holiday). Cheap because Alpaca's daily-bars endpoint is
+# one call regardless of range.
+INDEX_REFRESH_LOOKBACK_DAYS: int = 100
 
 # Time buckets for volume profiles — ET market hours (09:30 to 15:45, 15-min intervals).
 # All bucket keys throughout the system use ET hours, matching the scanner and TIME_BUCKETS.
@@ -203,6 +221,12 @@ class UniverseBuilder:
         # Step 7: Cache volume profiles (only for final universe - smallest set)
         self._cache_volume_profiles(float_passed)
 
+        # Step 8: Refresh non-universe index symbols (SPY etc). These feed the
+        # regime/conviction scorers in BT and live. Failure logs ERROR but does
+        # NOT abort the universe build — universe rebuild is the higher-value
+        # job and should keep going if SPY's API call hiccups.
+        self._refresh_index_symbols(INDEX_SYMBOLS, INDEX_REFRESH_LOOKBACK_DAYS)
+
         # Summary
         added = current_symbols - previous_symbols
         removed = previous_symbols - current_symbols
@@ -267,6 +291,87 @@ class UniverseBuilder:
         if unknown_float:
             logger.info(f"Float filter: {unknown_float} stocks with unknown float included")
         return passed
+
+    def _refresh_index_symbols(
+        self, symbols: List[str], lookback_days: int
+    ) -> int:
+        """Refresh `daily_bars` rows for non-universe index symbols (SPY etc).
+
+        These symbols are used by `_get_spy_3d_range` in BT (and live's
+        MarketRegimeFilter, via separate refresh path) but aren't in the
+        tradeable universe so they don't get touched by the price/float
+        steps above. Without this step they fall behind silently — the
+        2026-05-01 EAF false-positive happened because prod's SPY was
+        14 days stale and the conviction-scoring helper had a silent
+        1.0-sentinel fallback that masked the staleness.
+
+        Args:
+            symbols: Non-empty list of ticker symbols to refresh.
+            lookback_days: Calendar-day window to fetch.
+
+        Returns:
+            Number of bar rows persisted to `daily_bars`. Logs ERROR
+            (without raising) on API failure so the universe build
+            continues even if this step hiccups.
+        """
+        if not symbols:
+            logger.info("Step 8: No index symbols configured — skipping refresh")
+            return 0
+
+        end = date.today()
+        start = end - timedelta(days=lookback_days)
+        logger.info(
+            f"Step 8: Refreshing daily_bars for index symbols {symbols} "
+            f"({start} → {end}, {lookback_days}d window)"
+        )
+
+        try:
+            bars_by_sym = self.alpaca.get_daily_bars_range(symbols, start, end)
+        except Exception as e:
+            logger.error(
+                f"Step 8: get_daily_bars_range FAILED for {symbols}: {e} — "
+                f"index daily_bars may be stale; conviction's spy_regime "
+                f"input will fall back to None and apply max penalty."
+            )
+            return 0
+
+        # Flatten into the same shape `db.save_daily_bars` expects, matching
+        # `batch_backtest.fetch_daily_bars_cached` so storage is identical.
+        flat_bars: List[Dict] = []
+        for sym in symbols:
+            sym_bars = bars_by_sym.get(sym) or []
+            if not sym_bars:
+                logger.error(
+                    f"Step 8: NO bars returned for {sym} — fresh data unavailable "
+                    f"(API outage? symbol delisted?). Conviction's spy_regime "
+                    f"may fall back to max-penalty for trades on the next BT/run."
+                )
+                continue
+            for bar in sym_bars:
+                d = bar['date']
+                flat_bars.append({
+                    'symbol': sym,
+                    'date': d.isoformat() if isinstance(d, date) else d,
+                    'open': bar['open'],
+                    'high': bar['high'],
+                    'low': bar['low'],
+                    'close': bar['close'],
+                    'volume': bar['volume'],
+                })
+
+        if not flat_bars:
+            logger.error(
+                "Step 8: NO index bars to persist — daily_bars unchanged. "
+                "Investigate Alpaca data feed before next BT/live cycle."
+            )
+            return 0
+
+        self.db.save_daily_bars(flat_bars)
+        logger.info(
+            f"Step 8: Refreshed {len(flat_bars)} daily_bars rows for "
+            f"{sorted(set(b['symbol'] for b in flat_bars))}"
+        )
+        return len(flat_bars)
 
     def _cache_volume_profiles(self, stocks: List[Dict]) -> None:
         """

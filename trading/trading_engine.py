@@ -629,7 +629,7 @@ class TradingEngine:
         return (True, "")
 
     def _compute_conviction_score_setup(
-        self, setup, spy_3d_range: float, *,
+        self, setup, spy_3d_range: Optional[float], *,
         vwap_dist_pct: float = 0.0,
         gap_fading: bool = False,
         gap_pct: float = 0.0,
@@ -699,8 +699,14 @@ class TradingEngine:
         score += vr_contrib
         breakdown['vol_ratio'] = vr_contrib
 
-        # 4. SPY 3d range regime
-        if spy_3d_range > 1.2:
+        # 4. SPY 3d range regime.
+        # None = data missing/stale per spy_regime helper. Treat as worst case
+        # (same penalty as low-vol regime) — matches BT exactly and degrades
+        # gracefully when SPY refresh fails. Was a 1.0 sentinel pre-2026-05-02
+        # which silently inflated conviction by +0.5 (EAF post-mortem).
+        if spy_3d_range is None:
+            sr_contrib = -0.5
+        elif spy_3d_range > 1.2:
             sr_contrib = 0.3
         elif spy_3d_range < 0.8:
             sr_contrib = -0.5
@@ -747,29 +753,81 @@ class TradingEngine:
             return final, breakdown
         return final
 
-    def _get_spy_3d_range_live(self) -> float:
-        """Get SPY 3-day avg daily range. Uses market_regime's SPY daily bars if available."""
-        # Try market_regime first (has SPY daily bars from _refresh_spy_data)
-        if hasattr(self, 'market_regime') and self.market_regime:
+    def _get_spy_3d_range_live(self) -> Optional[float]:
+        """SPY 3-day avg daily range from MarketRegimeFilter, or None if missing.
+
+        Calls into `trading.spy_regime.compute_spy_3d_range` for the math —
+        same helper used by BT — so live and BT produce identical outputs
+        for identical bars (parity by construction).
+
+        Returns:
+            Average daily range %, or `None` if SPY data is missing or stale.
+            Callers MUST treat `None` as 'regime unknown' (the conviction
+            rule maps None to the worst-case -0.5 penalty). NEVER substitute
+            a numeric default — historical bug 2026-05-01 was a `1.0`
+            sentinel that landed in the rule's neutral band and inflated
+            conviction by +0.5, firing a live order that should have been
+            filtered.
+        """
+        from trading.spy_regime import (
+            compute_spy_3d_range,
+            is_spy_data_stale,
+        )
+
+        # Path 1 (preferred): MarketRegimeFilter daily bars, populated by
+        # `_refresh_spy_data` at startup + per-cycle. Use the public
+        # `get_recent_bars` API rather than reaching for private internals.
+        if self.market_regime is not None:
             try:
-                spy_bars = self.market_regime._spy_bars
-                if spy_bars and len(spy_bars) >= 3:
-                    ranges = []
-                    for b in spy_bars[-3:]:
-                        h = b.get('high', 0); l = b.get('low', 0)
-                        if l > 0:
-                            ranges.append((h - l) / l * 100)
-                    if ranges:
-                        return sum(ranges) / len(ranges)
-            except Exception:
-                pass
-        # Fallback: today's range from cached 1-min SPY bars
+                recent = self.market_regime.get_recent_bars(n=3)
+                latest = self.market_regime.get_latest_bar_date()
+            except Exception as e:
+                logger.warning(
+                    "_get_spy_3d_range_live: market_regime accessor raised "
+                    "%s — skipping path 1", e,
+                )
+                recent, latest = None, None
+            if recent and len(recent) >= 3:
+                if latest is None or not is_spy_data_stale(latest, date.today()):
+                    result = compute_spy_3d_range(recent)
+                    if result is not None:
+                        return result
+                    # compute_spy_3d_range already logged WARNING
+            else:
+                logger.warning(
+                    "_get_spy_3d_range_live: market_regime has fewer than 3 "
+                    "bars (got %d) — _refresh_spy_data may not have run",
+                    len(recent) if recent else 0,
+                )
+        else:
+            logger.warning(
+                "_get_spy_3d_range_live: no market_regime configured — "
+                "regime scoring unavailable",
+            )
+
+        # Path 2 (fallback): today's intraday SPY bars give a 1-day range,
+        # not 3-day, but it's a directional signal when daily bars are missing.
+        # Logged as WARNING so this fallback is observable in journalctl.
         if self._spy_bars_cache is not None and len(self._spy_bars_cache) > 1:
             day_high = float(self._spy_bars_cache['high'].max())
             day_low = float(self._spy_bars_cache['low'].min())
             if day_low > 0:
-                return (day_high - day_low) / day_low * 100
-        return 1.0  # default neutral
+                logger.warning(
+                    "_get_spy_3d_range_live: using today's 1-min range as "
+                    "3d-range proxy (market_regime data unavailable)",
+                )
+                return (day_high - day_low) / day_low * 100.0
+
+        # Both paths failed — fail closed. Caller (conviction rule) must
+        # treat None as the worst-case penalty per CLAUDE.md "All Errors
+        # must be reported and execution should break" (here: refuse to
+        # score regime, downstream conviction may still allow a trade if
+        # other rules are strong enough).
+        logger.error(
+            "_get_spy_3d_range_live: NO SPY data available from any source "
+            "— returning None (regime contribution will be max penalty)",
+        )
+        return None
 
     def _refresh_spy_macd(self) -> None:
         """
@@ -1367,12 +1425,14 @@ class TradingEngine:
                         symbols_to_remove.append(symbol)
                         continue
 
-                # Post-fill exit: in calm markets + weak breakout vol → close immediately
-                # Matches backtest.py post-fill exit logic
+                # Post-fill exit: in calm markets + weak breakout vol → close immediately.
+                # Matches backtest.py post-fill exit logic. Treat missing/stale SPY
+                # data (None) the same as low-vol regime — defensive default.
                 if self.conviction_enabled and setup:
                     _afv = float(setup.avg_flag_volume) if hasattr(setup, 'avg_flag_volume') else 0
                     _spy_3d = self._get_spy_3d_range_live()
-                    if _afv > 0 and _spy_3d < 0.8:
+                    _spy_hostile = _spy_3d is None or _spy_3d < 0.8
+                    if _afv > 0 and _spy_hostile:
                         # Get recent bar volume (the fill bar)
                         try:
                             _recent_bars = self.alpaca.get_1min_bars(symbol, lookback_minutes=2)
@@ -1381,8 +1441,9 @@ class TradingEngine:
                             _bk_vol = 0
                         _bk_ratio = _bk_vol / _afv if _afv > 0 else 99
                         if _bk_ratio < 1.0:
+                            _spy_str = f"{_spy_3d:.2f}%" if _spy_3d is not None else "MISSING"
                             logger.warning(
-                                f"{symbol}: POST-FILL EXIT — SPY 3d {_spy_3d:.2f}% + "
+                                f"{symbol}: POST-FILL EXIT — SPY 3d {_spy_str} + "
                                 f"bk_vol {_bk_ratio:.1f}x → closing immediately")
                             try:
                                 self.alpaca.close_position(symbol)
@@ -2825,10 +2886,11 @@ class TradingEngine:
                 v_reversal_pole_gain_min=self.v_reversal_pole_gain_min,
                 return_breakdown=True)
             if abs(conviction_mult - 1.0) > 0.05:
+                _spy3d_str = f"{spy_3d:.1f}%" if spy_3d is not None else "MISSING"
                 logger.info(
                     f"{symbol}: Conviction {conviction_mult:.2f}x "
                     f"(pole={setup.pole_gain_pct:.1f}%, "
-                    f"retr={setup.retracement_pct:.0f}%, SPY3d={spy_3d:.1f}%, "
+                    f"retr={setup.retracement_pct:.0f}%, SPY3d={_spy3d_str}, "
                     f"vwap_dist={_v7_dist:+.1f}%, gap_fade={_g8_fade})")
 
             # Conviction filter: skip trades below quality threshold.

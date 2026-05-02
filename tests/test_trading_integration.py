@@ -213,6 +213,7 @@ class TestFullTradingPipeline:
         )
         engine.quality_filter_enabled = False
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
 
         # Mock Alpaca responses — setup bars (no breakout yet)
         mock_alpaca.get_1min_bars.return_value = _make_bull_flag_setup_bars()
@@ -265,6 +266,7 @@ class TestFullTradingPipeline:
         )
         engine.quality_filter_enabled = False
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
 
         mock_alpaca.get_1min_bars.return_value = _make_bull_flag_setup_bars()
         mock_alpaca.submit_stop_bracket_order.return_value = {
@@ -462,6 +464,7 @@ class TestThinLiquidityIntegration:
         )
         engine.quality_filter_enabled = False
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
 
         # Phase 1: Setup detection + buy-stop submission
         mock_alpaca.get_1min_bars.return_value = _make_bull_flag_setup_bars()
@@ -543,6 +546,7 @@ class TestThinLiquidityIntegration:
         )
         engine.quality_filter_enabled = False
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
 
         # Phase 1: Setup detection + buy-stop submission
         mock_alpaca.get_1min_bars.return_value = _make_bull_flag_setup_bars()
@@ -617,6 +621,7 @@ class TestThinLiquidityIntegration:
         )
         engine.quality_filter_enabled = False
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
 
         # Phase 1: Setup + buy-stop
         mock_alpaca.get_1min_bars.return_value = _make_bull_flag_setup_bars()
@@ -674,6 +679,7 @@ class TestThinLiquidityIntegration:
             enabled=True, market_regime=regime,
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
 
         # Create a trade that was already rejected (has exit_price set)
         now = datetime.now(timezone.utc)
@@ -720,6 +726,7 @@ class TestThinLiquidityIntegration:
             enabled=True, market_regime=regime,
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
 
         now = datetime.now(timezone.utc)
         trade_id = db.save_trade({
@@ -787,6 +794,7 @@ class TestScannerEngineLoopIntegration:
             force_close_time_et="15:45",
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
         return engine
 
     @patch('scanner.realtime_scanner.datetime')
@@ -1039,6 +1047,7 @@ class TestPositionSyncUnderGuards:
             enabled=True, market_regime=regime,
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
 
         # Pre-existing filled trade in DB
         today = date.today().isoformat()
@@ -1089,6 +1098,7 @@ class TestStartupSyncIntegration:
             enabled=True,
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
 
         # Simulate: previous run traded AAPL, then crashed
         today = date.today().isoformat()
@@ -1124,6 +1134,7 @@ class TestStartupSyncIntegration:
             enabled=True,
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
 
         today = date.today().isoformat()
         db.save_trade(_make_trade_record(
@@ -1170,6 +1181,7 @@ class TestCrashRecoveryIntegration:
             enabled=True,
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
 
         today = date.today().isoformat()
         pattern_data = json.dumps({
@@ -1227,6 +1239,7 @@ class TestCrashRecoveryIntegration:
             enabled=True,
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
 
         today = date.today().isoformat()
         db.save_trade(_make_trade_record(
@@ -1270,6 +1283,7 @@ class TestCrashRecoveryIntegration:
             enabled=True,
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
 
         today = date.today().isoformat()
         pattern_data = json.dumps({'breakout_level': 5.0, 'flag_low': 4.5})
@@ -1339,6 +1353,7 @@ class TestOrphanPositionIntegration:
             enabled=True,
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
 
         # Seed a prior-day trade for YEST in our DB (so orphan detector knows it's ours)
         from datetime import timedelta
@@ -1382,6 +1397,7 @@ class TestOrphanPositionIntegration:
             enabled=True,
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
 
         # No trades in our DB at all
         mock_alpaca.get_daily_bars_range.return_value = {}

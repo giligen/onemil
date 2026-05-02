@@ -337,6 +337,7 @@ class TestNotifierIntegration:
             notifier=mock_notifier, enabled=True,
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
         assert engine.notifier is mock_notifier
 
     def test_engine_without_notifier(self, engine):
@@ -355,6 +356,7 @@ class TestNotifierIntegration:
             notifier=mock_notifier, enabled=True,
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
         engine.quality_filter_enabled = False  # Mock bars don't have OHLCV
         bars = pd.DataFrame({'open': [4.0], 'high': [4.1], 'low': [3.9],
                             'close': [4.05], 'volume': [100000]})
@@ -384,6 +386,7 @@ class TestNotifierIntegration:
             notifier=mock_notifier, enabled=True,
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
         engine.quality_filter_enabled = False  # Mock bars don't have OHLCV
         bars = pd.DataFrame({'open': [4.0], 'high': [4.1], 'low': [3.9],
                             'close': [4.05], 'volume': [100000]})
@@ -430,6 +433,7 @@ class TestNotifierIntegration:
             notifier=mock_notifier, enabled=True,
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
         engine.send_daily_report(universe_size=100)
         mock_notifier.send_daily_report.assert_called_once()
 
@@ -1870,6 +1874,7 @@ class TestMarketRegimeInEngine:
             enabled=True, market_regime=regime,
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
         engine.on_stock_qualified("AAPL")
 
         with patch('trading.trading_engine.date') as mock_date:
@@ -1900,6 +1905,7 @@ class TestMarketRegimeInEngine:
             enabled=True, market_regime=regime,
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
         engine.on_stock_qualified("AAPL")
 
         with patch('trading.trading_engine.date') as mock_date:
@@ -1924,6 +1930,7 @@ class TestMarketRegimeInEngine:
             enabled=True, market_regime=regime,
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
         engine._daily_trade_count = 2  # Already at max
 
         result = engine.run_pattern_check()
@@ -1942,6 +1949,7 @@ class TestMarketRegimeInEngine:
             enabled=True, market_regime=regime,
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
         engine._daily_trade_count = 5
 
         mock_alpaca.get_daily_bars_range.return_value = {'SPY': [
@@ -1964,6 +1972,7 @@ class TestMarketRegimeInEngine:
             enabled=True, market_regime=regime,
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
 
         mock_alpaca.get_daily_bars_range.return_value = {'SPY': [
             {'date': date(2025, 3, 10), 'close': 510.0},
@@ -2609,6 +2618,7 @@ class TestDailyTradeCountFix:
             enabled=True, market_regime=regime,
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
 
         self._setup_filled_order(engine, mock_alpaca, db, 'AAPL', thin_liquidity=True)
 
@@ -2642,6 +2652,7 @@ class TestDailyTradeCountFix:
             enabled=True,
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
 
         self._setup_filled_order(engine, mock_alpaca, db, 'AAPL')
 
@@ -2670,6 +2681,7 @@ class TestDailyTradeCountFix:
             enabled=True,
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
 
         self._setup_filled_order(engine, mock_alpaca, db, 'AAPL')
 
@@ -2955,6 +2967,7 @@ class TestSimpleOrderPath:
             stop_monitor=mock_stop_monitor,
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
 
         engine.on_stock_qualified("AAPL")
         engine.run_pattern_check()
@@ -2993,6 +3006,7 @@ class TestSimpleOrderPath:
             # No stop_monitor
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
 
         engine.on_stock_qualified("AAPL")
         engine.run_pattern_check()
@@ -3031,6 +3045,7 @@ class TestSimpleOrderPath:
             stop_monitor=mock_stop_monitor,
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
 
         engine.on_stock_qualified("AAPL")
         engine.run_pattern_check()
@@ -3055,6 +3070,7 @@ class TestSimpleOrderPath:
             safety_net_sl_pct=0.05,
         )
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
 
         # Simulate a pending simple order that just filled
         plan = _make_plan("AAPL")
@@ -3129,6 +3145,7 @@ class TestMacdDeadZoneWithRiskTier:
         # Disable conviction/QF in this test — testing MACD zone interaction only
         engine.conviction_enabled = False
         engine.news_gate_enabled = False
+        engine.conviction_enabled = False  # SPY-aware conviction filter — see test_spy_regime_parity.py
         engine.quality_filter_enabled = False
         # Enable MACD zones
         engine.macd_zones_enabled = True

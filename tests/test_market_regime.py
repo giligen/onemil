@@ -716,3 +716,111 @@ class TestComputeSpyMacdForDay:
         if common_keys:
             first_key = common_keys[0]
             assert cold[first_key] != warm[first_key], "Warmup should change early MACD values"
+
+
+# ---------------------------------------------------------------------------
+# get_recent_bars / get_latest_bar_date — public accessors used by spy_regime
+# helper. Added 2026-05-02 after EAF post-mortem (live reader was reaching for
+# a non-existent _spy_bars attribute → silent 1.0 fallback).
+# ---------------------------------------------------------------------------
+
+class TestGetRecentBars:
+    def test_returns_empty_when_no_bars_loaded(self):
+        f = MarketRegimeFilter()
+        assert f.get_recent_bars() == []
+
+    def test_returns_all_bars_when_n_exceeds_count(self):
+        f = MarketRegimeFilter()
+        f.load_spy_bars(_make_ohlc_bars([
+            (date(2026, 4, 28), 100, 101, 99, 100.5),
+            (date(2026, 4, 29), 100, 101, 99, 100.5),
+        ]))
+        result = f.get_recent_bars(n=5)
+        assert len(result) == 2
+        # Ascending order
+        assert result[0]['date'] == date(2026, 4, 28)
+        assert result[1]['date'] == date(2026, 4, 29)
+
+    def test_returns_last_n_bars_in_ascending_order(self):
+        f = MarketRegimeFilter()
+        f.load_spy_bars(_make_ohlc_bars([
+            (date(2026, 4, 27), 100, 101, 99, 100.5),
+            (date(2026, 4, 28), 100, 101, 99, 100.5),
+            (date(2026, 4, 29), 100, 101, 99, 100.5),
+            (date(2026, 4, 30), 100, 101, 99, 100.5),
+            (date(2026, 5, 1), 100, 101, 99, 100.5),
+        ]))
+        result = f.get_recent_bars(n=3)
+        assert [b['date'] for b in result] == [
+            date(2026, 4, 29), date(2026, 4, 30), date(2026, 5, 1),
+        ]
+
+    def test_each_bar_has_ohlcv_plus_date(self):
+        f = MarketRegimeFilter()
+        f.load_spy_bars(_make_ohlc_bars([
+            (date(2026, 4, 28), 100.0, 101.0, 99.0, 100.5, 1000),
+            (date(2026, 4, 29), 100.0, 101.0, 99.0, 100.5, 2000),
+            (date(2026, 4, 30), 100.0, 101.0, 99.0, 100.5, 3000),
+        ]))
+        bars = f.get_recent_bars(n=3)
+        for b in bars:
+            for k in ('date', 'open', 'high', 'low', 'close', 'volume'):
+                assert k in b, f"missing key {k} in {b}"
+
+    def test_before_date_excludes_on_or_after(self):
+        f = MarketRegimeFilter()
+        f.load_spy_bars(_make_ohlc_bars([
+            (date(2026, 4, 28), 100, 101, 99, 100.5),
+            (date(2026, 4, 29), 100, 101, 99, 100.5),
+            (date(2026, 4, 30), 100, 101, 99, 100.5),
+            (date(2026, 5, 1),  100, 101, 99, 100.5),
+        ]))
+        # Before May 1 → only 28, 29, 30
+        bars = f.get_recent_bars(n=3, before_date=date(2026, 5, 1))
+        assert [b['date'] for b in bars] == [
+            date(2026, 4, 28), date(2026, 4, 29), date(2026, 4, 30),
+        ]
+
+    def test_n_zero_returns_empty(self):
+        f = MarketRegimeFilter()
+        f.load_spy_bars(_make_ohlc_bars([
+            (date(2026, 4, 28), 100, 101, 99, 100.5),
+        ]))
+        assert f.get_recent_bars(n=0) == []
+
+    def test_returned_bars_are_independent_copies(self):
+        # Caller mutating the returned dict must NOT corrupt internal state
+        f = MarketRegimeFilter()
+        f.load_spy_bars(_make_ohlc_bars([
+            (date(2026, 4, 28), 100, 101, 99, 100.5),
+        ]))
+        bars = f.get_recent_bars(n=1)
+        bars[0]['high'] = 999.0
+        bars2 = f.get_recent_bars(n=1)
+        assert bars2[0]['high'] == 101
+
+
+class TestGetLatestBarDate:
+    def test_returns_none_when_empty(self):
+        f = MarketRegimeFilter()
+        assert f.get_latest_bar_date() is None
+
+    def test_returns_latest_after_load(self):
+        f = MarketRegimeFilter()
+        f.load_spy_bars(_make_ohlc_bars([
+            (date(2026, 4, 27), 100, 101, 99, 100.5),
+            (date(2026, 5, 1),  100, 101, 99, 100.5),
+            (date(2026, 4, 30), 100, 101, 99, 100.5),
+        ]))
+        # Latest = max date regardless of input order
+        assert f.get_latest_bar_date() == date(2026, 5, 1)
+
+    def test_clears_on_reload(self):
+        f = MarketRegimeFilter()
+        f.load_spy_bars(_make_ohlc_bars([
+            (date(2026, 5, 1), 100, 101, 99, 100.5),
+        ]))
+        assert f.get_latest_bar_date() == date(2026, 5, 1)
+        # Reload with empty -> sorted_dates cleared
+        f.load_spy_bars([])
+        assert f.get_latest_bar_date() is None

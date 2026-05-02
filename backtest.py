@@ -1482,7 +1482,7 @@ class BacktestRunner:
         return (True, "")
 
     def _compute_conviction_score_setup(
-        self, setup, spy_3d_range: float, *,
+        self, setup, spy_3d_range: Optional[float], *,
         vwap_dist_pct: float = 0.0,
         gap_fading: bool = False,
         gap_pct: float = 0.0,
@@ -1501,7 +1501,11 @@ class BacktestRunner:
 
         Args:
             setup: BullFlagSetup object
-            spy_3d_range: SPY 3-day average daily range (%)
+            spy_3d_range: SPY 3-day avg daily range %, or None when SPY data
+                is missing/stale (per `trading.spy_regime`). None is mapped
+                to the worst-case -0.5 penalty in rule 4 — same as low-vol
+                regime — so degraded data fails closed rather than silently
+                neutralizing the rule.
             vwap_dist_pct: (breakout_level - vwap)/vwap * 100, computed up to
                 setup bar. Defaults to 0.0 (rule 7 silent) for back-compat.
                 NEW in V2_clean (shipped 2026-04-15).
@@ -1560,8 +1564,14 @@ class BacktestRunner:
         score += vr_contrib
         breakdown['vol_ratio'] = vr_contrib
 
-        # 4. SPY 3d range regime
-        if spy_3d_range > 1.2:
+        # 4. SPY 3d range regime.
+        # None = data missing/stale per spy_regime helper. Treat as worst case
+        # (same penalty as low-vol regime) — matches live exactly and degrades
+        # gracefully when SPY refresh fails. Was a 1.0 sentinel pre-2026-05-02
+        # which silently inflated conviction by +0.5 (EAF post-mortem).
+        if spy_3d_range is None:
+            sr_contrib = -0.5
+        elif spy_3d_range > 1.2:
             sr_contrib = 0.3
         elif spy_3d_range < 0.8:
             sr_contrib = -0.5
@@ -1630,23 +1640,70 @@ class BacktestRunner:
 
         return max(0.25, min(3.0, score))
 
-    def _get_spy_3d_range(self, trade_date: str) -> float:
-        """Get SPY 3-day average daily range from daily bars in DB."""
+    def _get_spy_3d_range(self, trade_date: str) -> Optional[float]:
+        """SPY 3-day avg daily range for `trade_date` from cache.db, or None.
+
+        Wraps `trading.spy_regime.compute_spy_3d_range` (shared with live
+        trader so BT and live compute identically). Returns `None` if SPY
+        bars are missing or stale; the conviction rule treats `None` as
+        the worst-case -0.5 penalty.
+
+        Pre-2026-05-02 this returned a `1.0` sentinel on missing data, which
+        the rule maps to `sr_contrib = 0.0` — silently inflating conviction
+        by +0.5 vs real data. See post-mortem on EAF 2026-05-01.
+        """
+        from trading.spy_regime import (
+            compute_spy_3d_range,
+            is_spy_data_stale,
+        )
+        from datetime import date as _date
+
         db_path = self._db_path or "data/cache.db"
         try:
             import sqlite3
             conn = sqlite3.connect(db_path)
             rows = conn.execute(
-                "SELECT high, low FROM daily_bars WHERE symbol='SPY' AND bar_date<? "
+                "SELECT bar_date, high, low FROM daily_bars "
+                "WHERE symbol='SPY' AND bar_date<? "
                 "ORDER BY bar_date DESC LIMIT 3", (trade_date,)
             ).fetchall()
             conn.close()
-            if not rows:
-                return 1.0
-            ranges = [(r[0]-r[1])/r[1]*100 for r in rows if r[1]>0]
-            return sum(ranges)/len(ranges) if ranges else 1.0
-        except Exception:
-            return 1.0
+        except Exception as e:
+            logger.error(
+                "_get_spy_3d_range: DB query failed for trade_date=%s: %s "
+                "— returning None", trade_date, e,
+            )
+            return None
+
+        if not rows:
+            logger.warning(
+                "_get_spy_3d_range: no SPY bars in cache.db before %s "
+                "— returning None (rebuild SPY cache or check universe cron)",
+                trade_date,
+            )
+            return None
+
+        # Staleness guard: rows[0] is the most-recent bar (DESC order).
+        try:
+            ref = _date.fromisoformat(trade_date)
+        except (ValueError, TypeError) as e:
+            logger.error(
+                "_get_spy_3d_range: invalid trade_date=%r (%s) — returning None",
+                trade_date, e,
+            )
+            return None
+        latest = rows[0][0]
+        if isinstance(latest, str):
+            try:
+                latest = _date.fromisoformat(latest)
+            except (ValueError, TypeError):
+                latest = None
+        if is_spy_data_stale(latest, ref):
+            return None  # is_spy_data_stale already logged ERROR
+
+        # DESC -> ASC so compute_spy_3d_range's "last 3" semantics match.
+        bars = [{'high': r[1], 'low': r[2]} for r in reversed(rows)]
+        return compute_spy_3d_range(bars)
 
     _REAL_CATS = {'FDA_CLINICAL', 'EARNINGS', 'CONTRACT_DEAL', 'CONTRACT',
                   'MA', 'ANALYST', 'PRODUCT', 'PRODUCT_LAUNCH',
@@ -2367,8 +2424,11 @@ class BacktestRunner:
                             _trade_date = str(bars.iloc[0].get('timestamp', bars.iloc[0].name))[:10]
                         except Exception:
                             pass
-                        _spy_3d = self._get_spy_3d_range(_trade_date) if _trade_date else 1.0
-                        if _spy_3d < 0.8 and _bk_ratio < 1.0:
+                        _spy_3d = self._get_spy_3d_range(_trade_date) if _trade_date else None
+                        # None (missing/stale SPY) treated same as low-vol regime —
+                        # consistent with the conviction rule's worst-case mapping.
+                        _spy_hostile = _spy_3d is None or _spy_3d < 0.8
+                        if _spy_hostile and _bk_ratio < 1.0:
                             # Immediate exit — record slippage loss
                             exit_price = fill_price * (1 - self.exit_slippage_pct)
                             slippage_pnl = (exit_price - fill_price) * plan.shares
@@ -2586,14 +2646,17 @@ class BacktestRunner:
                     'vwap_dist': 0.0, 'gap_fading': 0.0,
                     'raw_score': 1.0, 'final_score': 1.0,
                 }
-                _spy_3d = 0.0
+                _spy_3d: Optional[float] = None
                 if self.conviction_enabled:
                     _trade_date = None
                     try:
                         _trade_date = str(bars.iloc[0].get('timestamp', bars.iloc[0].name))[:10]
                     except Exception:
                         pass
-                    _spy_3d = self._get_spy_3d_range(_trade_date) if _trade_date else 1.0
+                    # _get_spy_3d_range returns None on missing/stale data —
+                    # the conviction rule maps None to the -0.5 worst-case
+                    # penalty (parity with live).
+                    _spy_3d = self._get_spy_3d_range(_trade_date) if _trade_date else None
                     # V2_clean rule 7+8 inputs — computed inline at the SAME
                     # bar boundary PROD uses (setup.flag_end_idx) so BT and PROD
                     # produce identical conviction scores. (qf_features below
