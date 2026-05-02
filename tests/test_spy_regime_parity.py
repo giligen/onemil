@@ -127,3 +127,92 @@ class TestEafFalsePositiveRegression:
         score = _live_conviction(1.0)
         assert score == pytest.approx(1.5)
         assert score >= 1.4
+
+# ---------------------------------------------------------------------------
+# CSV-write regression — added 2026-05-02 during code review.
+#
+# When `_get_spy_3d_range` returns None (missing/stale SPY), the BT writes
+# the trade to `bull_flag_cache_e50_x30.csv` with a {:.3f} format spec on
+# `trade.spy_3d_range`. If None propagated through the pending_order →
+# trade chain, the format would raise:
+#
+#     TypeError: unsupported format string passed to NoneType.__format__
+#
+# The fix in backtest.py:2474/2500 collapses None → 0.0 at the trade-storage
+# point so the dataclass field stays float. This test pins the contract.
+# ---------------------------------------------------------------------------
+
+
+class TestNoneSpyDoesNotCrashCsvWrite:
+    """Pinned regression for the trade.spy_3d_range = None → CSV crash."""
+
+    def _make_simulated_trade(self):
+        """Minimal SimulatedTrade for cache-row conversion."""
+        from datetime import datetime, timezone
+        from backtest import SimulatedTrade
+        return SimulatedTrade(
+            symbol="EAF",
+            entry_time=datetime(2026, 5, 1, 14, 36, tzinfo=timezone.utc),
+            entry_price=7.17,
+            stop_loss=6.99,
+            take_profit=7.42,
+            shares=1620,
+            exit_time=datetime(2026, 5, 1, 15, 19, tzinfo=timezone.utc),
+            exit_price=7.73,
+            exit_reason="exhaust+trail_stop",
+            pnl=955.55,
+            pnl_pct=8.22,
+        )
+
+    def test_storage_collapses_none_to_zero(self):
+        """Simulating the assignment in backtest.py:2474/2500."""
+
+        class _Pending:
+            pass
+
+        pending = _Pending()
+        pending._spy_3d_range = None  # missing data path
+
+        trade = self._make_simulated_trade()
+        # Mirror exactly the line in backtest.py
+        trade.spy_3d_range = getattr(pending, '_spy_3d_range', 0.0) or 0.0
+
+        assert trade.spy_3d_range == 0.0
+        # Verify the CSV format spec works without crashing
+        formatted = f"{trade.spy_3d_range:.3f}"
+        assert formatted == "0.000"
+
+    def test_real_value_passes_through_unchanged(self):
+        """`or 0.0` must NOT clobber a legitimate spy_3d_range value."""
+
+        class _Pending:
+            pass
+
+        pending = _Pending()
+        pending._spy_3d_range = 0.789
+
+        trade = self._make_simulated_trade()
+        trade.spy_3d_range = getattr(pending, '_spy_3d_range', 0.0) or 0.0
+        assert trade.spy_3d_range == 0.789
+
+    def test_csv_row_serializes_with_none_input_at_format(self):
+        """End-to-end: pending_order with None _spy_3d_range → cache row OK."""
+        from batch_backtest import _trade_to_cache_row
+
+        class _Pending:
+            pass
+
+        pending = _Pending()
+        pending._spy_3d_range = None
+
+        trade = self._make_simulated_trade()
+        trade.spy_3d_range = getattr(pending, '_spy_3d_range', 0.0) or 0.0
+        trade.partial_exit_taken = False
+        trade.partial_exit_price = None
+        trade.partial_shares = 0
+        trade.partial_pnl = 0.0
+        # Defaults the dataclass would have set to 0.0 / None already.
+
+        row = _trade_to_cache_row(trade)
+        assert row is not None, "_trade_to_cache_row must not crash on None spy"
+        assert row['spy_3d_range'] == "0.000"

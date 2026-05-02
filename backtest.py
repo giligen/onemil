@@ -2466,7 +2466,12 @@ class BacktestRunner:
                                 trade.conv_vwap_dist = _bd.get('vwap_dist', 0.0)
                                 trade.conv_gap_fading = _bd.get('gap_fading', 0.0)
                                 trade.conv_raw_score = _bd.get('raw_score', 1.0)
-                            trade.spy_3d_range = getattr(pending_order, '_spy_3d_range', 0.0)
+                            # `or 0.0` collapses None (missing/stale SPY data) into 0.0 —
+                            # the dataclass field is `float`, and downstream CSV writers
+                            # format with `{:.3f}` which crashes on None. The conviction
+                            # breakdown's `conv_spy_regime` field already records the
+                            # missing-data state via -0.5 contribution.
+                            trade.spy_3d_range = getattr(pending_order, '_spy_3d_range', 0.0) or 0.0
                             result.trades_simulated.append(trade)
                             pending_order = None
                             continue
@@ -2490,7 +2495,9 @@ class BacktestRunner:
                         trade.conv_vwap_dist = _bd.get('vwap_dist', 0.0)
                         trade.conv_gap_fading = _bd.get('gap_fading', 0.0)
                         trade.conv_raw_score = _bd.get('raw_score', 1.0)
-                    trade.spy_3d_range = getattr(pending_order, '_spy_3d_range', 0.0)
+                    # `or 0.0` collapses None (missing/stale SPY data) into 0.0 —
+                    # see comment on the parallel assignment above for rationale.
+                    trade.spy_3d_range = getattr(pending_order, '_spy_3d_range', 0.0) or 0.0
                     # Add post-fill VWAP (at fill bar) — for post-filter analysis
                     fill_vwap = self._compute_vwap(bars, i)
                     if fill_vwap and fill_vwap > 0:
