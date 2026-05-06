@@ -73,19 +73,49 @@ class PositionManager:
         self._traded_symbols: Set[str] = set()
         self._consecutive_losses: int = 0
         self._stopped_for_day: bool = False
+        self._current_et_date: Optional[date] = None
+
+    def _check_day_rollover(self) -> None:
+        """Auto-reset daily state when the ET calendar date changes.
+
+        Why: long-running services that don't restart at the day boundary
+        leak state from yesterday into today — _stopped_for_day,
+        _traded_symbols, and _consecutive_losses all need to clear.
+        Idempotent on the first call (no false reset on init).
+        """
+        today_et = datetime.now(ET).date()
+        if self._current_et_date is None:
+            self._current_et_date = today_et
+            return
+        if self._current_et_date != today_et:
+            logger.warning(
+                f"Position manager: ET date rolled "
+                f"{self._current_et_date} → {today_et} — auto-resetting daily state "
+                f"(was: stopped_for_day={self._stopped_for_day}, "
+                f"consecutive_losses={self._consecutive_losses}, "
+                f"traded={len(self._traded_symbols)})"
+            )
+            self.reset_daily()
+            self._current_et_date = today_et
 
     def record_trade_pnl(self, pnl: float) -> None:
         """Record completed trade P&L for consecutive-loss tracking."""
+        self._check_day_rollover()
         if pnl > 0:
             self._consecutive_losses = 0
-        else:
-            self._consecutive_losses += 1
-            if self._consecutive_losses >= self.max_consecutive_losses:
-                self._stopped_for_day = True
-                logger.warning(
-                    f"CONSECUTIVE LOSS LIMIT: {self._consecutive_losses} losses in a row "
-                    f"— done for the day"
-                )
+            return
+        self._consecutive_losses += 1
+        # max_consecutive_losses <= 0 means the circuit breaker is disabled.
+        # Without this guard, 0 silently triggers on the first loss
+        # (1 >= 0 is True) — that's a footgun, not a sane default.
+        if self.max_consecutive_losses <= 0:
+            return
+        if self._consecutive_losses >= self.max_consecutive_losses:
+            self._stopped_for_day = True
+            logger.warning(
+                f"CONSECUTIVE LOSS LIMIT: {self._consecutive_losses} losses in a row "
+                f"— done for the day"
+            )
 
     def can_open_position(self, symbol: str) -> bool:
         """
@@ -105,6 +135,8 @@ class PositionManager:
         Returns:
             True if position can be opened, False otherwise
         """
+        self._check_day_rollover()
+
         # Check consecutive loss limit
         if self._stopped_for_day:
             logger.warning(

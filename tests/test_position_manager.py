@@ -392,3 +392,117 @@ class TestConsecutiveLossLimit:
 
         assert manager._consecutive_losses == 0
         assert manager._stopped_for_day is False
+
+    def test_zero_max_consecutive_losses_is_disabled(self, mock_alpaca, db):
+        """max_consecutive_losses=0 means circuit breaker disabled, NOT 'stop on first loss'.
+
+        Regression: 0 used to silently trigger on first loss because
+        '1 >= 0' is True. Now 0 (or negative) is treated as 'disabled'.
+        """
+        manager = PositionManager(
+            alpaca_client=mock_alpaca, db=db,
+            max_consecutive_losses=0,
+        )
+        for _ in range(10):
+            manager.record_trade_pnl(-1000.0)
+        assert manager._consecutive_losses == 10
+        assert manager._stopped_for_day is False
+
+    def test_negative_max_consecutive_losses_is_disabled(self, mock_alpaca, db):
+        """Negative max_consecutive_losses is also treated as disabled."""
+        manager = PositionManager(
+            alpaca_client=mock_alpaca, db=db,
+            max_consecutive_losses=-1,
+        )
+        manager.record_trade_pnl(-1000.0)
+        assert manager._stopped_for_day is False
+
+
+class TestDayRollover:
+    """Auto-reset daily state across the ET date boundary.
+
+    Critical for long-running services that span multiple trading days
+    without a restart — without this, _stopped_for_day, _consecutive_losses,
+    and _traded_symbols leak from yesterday into today.
+    """
+
+    @patch('trading.position_manager.datetime')
+    def test_rollover_resets_stopped_for_day(self, mock_dt, mock_alpaca, db):
+        """ET date change clears _stopped_for_day flag."""
+        manager = PositionManager(
+            alpaca_client=mock_alpaca, db=db,
+            max_consecutive_losses=2,
+        )
+
+        mock_dt.now.return_value.date.return_value = date(2026, 5, 5)
+        manager._stopped_for_day = True
+        manager._consecutive_losses = 2
+        manager._traded_symbols.add("INTT")
+        manager._check_day_rollover()
+        assert manager._stopped_for_day is True  # same day, no reset
+
+        mock_dt.now.return_value.date.return_value = date(2026, 5, 6)
+        manager._check_day_rollover()
+        assert manager._stopped_for_day is False
+        assert manager._consecutive_losses == 0
+        assert "INTT" not in manager._traded_symbols
+        assert manager._current_et_date == date(2026, 5, 6)
+
+    @patch('trading.position_manager.datetime')
+    def test_rollover_clears_traded_symbols(self, mock_dt, mock_alpaca, db):
+        """Symbols traded yesterday don't block today's re-entry."""
+        manager = PositionManager(
+            alpaca_client=mock_alpaca, db=db,
+        )
+        mock_dt.now.return_value.date.return_value = date(2026, 5, 5)
+        manager._check_day_rollover()
+        manager.mark_traded("AAPL")
+        assert "AAPL" in manager._traded_symbols
+
+        mock_dt.now.return_value.date.return_value = date(2026, 5, 6)
+        manager._check_day_rollover()
+        assert "AAPL" not in manager._traded_symbols
+
+    @patch('trading.position_manager.datetime')
+    def test_rollover_via_record_trade_pnl(self, mock_dt, mock_alpaca, db):
+        """record_trade_pnl auto-detects rollover at the call site."""
+        manager = PositionManager(
+            alpaca_client=mock_alpaca, db=db,
+            max_consecutive_losses=2,
+        )
+        mock_dt.now.return_value.date.return_value = date(2026, 5, 5)
+        manager.record_trade_pnl(-100.0)
+        manager.record_trade_pnl(-100.0)
+        assert manager._stopped_for_day is True
+
+        mock_dt.now.return_value.date.return_value = date(2026, 5, 6)
+        manager.record_trade_pnl(-100.0)  # rollover should fire BEFORE this
+        assert manager._stopped_for_day is False
+        assert manager._consecutive_losses == 1
+
+    @patch('trading.position_manager.datetime')
+    def test_no_false_reset_on_init(self, mock_dt, mock_alpaca, db):
+        """First call after construction must not reset (state is fresh)."""
+        manager = PositionManager(
+            alpaca_client=mock_alpaca, db=db,
+        )
+        manager.mark_traded("PRESEED")  # simulate state set before first check
+        assert manager._current_et_date is None
+
+        mock_dt.now.return_value.date.return_value = date(2026, 5, 6)
+        manager._check_day_rollover()
+        assert "PRESEED" in manager._traded_symbols
+        assert manager._current_et_date == date(2026, 5, 6)
+
+    @patch('trading.position_manager.datetime')
+    def test_same_day_repeated_calls_no_reset(self, mock_dt, mock_alpaca, db):
+        """Calling _check_day_rollover many times within a day is a no-op."""
+        manager = PositionManager(
+            alpaca_client=mock_alpaca, db=db,
+        )
+        mock_dt.now.return_value.date.return_value = date(2026, 5, 6)
+        manager._check_day_rollover()
+        manager.mark_traded("AAPL")
+        for _ in range(10):
+            manager._check_day_rollover()
+        assert "AAPL" in manager._traded_symbols
