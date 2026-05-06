@@ -952,6 +952,70 @@ class TestMainLoopBehavior:
         # Pattern check should be called on every tick (not just bucket changes)
         assert mock_engine.run_pattern_check.call_count >= 2
 
+    def test_shutdown_during_engine_tick_exits_within_3s(
+        self, mock_alpaca, mock_news, mock_db, criteria
+    ):
+        """Scanner reacts to shutdown_event within ~1-2s even when an
+        engine tick is mid-flight.
+
+        Regression for 2026-05-06 17:06 incident: scanner used
+        `f.result(timeout=50)` per future, which blocked SIGTERM response
+        for up to 50s × N engines. systemd's 120s graceful-shutdown window
+        then escalated to SIGKILL. Fix: poll shutdown_event every 1s while
+        waiting on engine futures.
+        """
+        import threading
+        import time as real_time
+        import pytz
+        from datetime import datetime as real_datetime
+
+        shutdown = threading.Event()
+        scanner, mock_engine = self._make_scanner_with_engine(
+            mock_alpaca, mock_news, mock_db, criteria, shutdown_event=shutdown)
+
+        ET = pytz.timezone('US/Eastern')
+        engine_started = threading.Event()
+
+        # Simulate a slow engine tick (e.g., Alpaca fetch hanging)
+        def slow_pattern_check():
+            engine_started.set()
+            real_time.sleep(8.0)  # would block scanner pre-fix
+
+        mock_engine.run_pattern_check.side_effect = slow_pattern_check
+        mock_engine._is_past_force_close_time.return_value = False
+        mock_db.get_active_universe.return_value = [
+            {'symbol': 'AAA', 'price_close': 5.0, 'float_shares': 1_000_000},
+        ]
+        mock_db.get_all_volume_profiles.return_value = {}
+        mock_alpaca.is_trading_day.return_value = True
+        mock_alpaca.is_short_trading_day.return_value = False
+        mock_alpaca.get_latest_trades.return_value = {}
+        mock_alpaca.get_current_bars.return_value = {}
+
+        # Race: signal shutdown shortly AFTER engine tick begins.
+        # The polling loop should observe shutdown within 1s.
+        def trigger():
+            engine_started.wait(timeout=3.0)
+            real_time.sleep(0.3)
+            shutdown.set()
+        threading.Thread(target=trigger, daemon=True).start()
+
+        with patch('scanner.realtime_scanner.datetime') as mock_dt:
+            fake_now = real_datetime(2026, 3, 16, 10, 0, 0, tzinfo=ET)
+            mock_dt.now.return_value = fake_now
+            mock_dt.side_effect = lambda *a, **kw: real_datetime(*a, **kw)
+
+            t0 = real_time.time()
+            scanner.run()
+            elapsed = real_time.time() - t0
+
+        # Pre-fix: ~8s (waits for slow_pattern_check). Post-fix: ~1.5s
+        # (engine_started + 0.3s + 1s poll interval).
+        assert elapsed < 4.0, (
+            f"Scanner took {elapsed:.2f}s to react to shutdown "
+            f"(expected < 4s; pre-fix would have been ~8s)"
+        )
+
     def test_shutdown_event_breaks_loop(self, mock_alpaca, mock_news, mock_db, criteria):
         """Setting shutdown event causes run() to exit + force-close."""
         import threading

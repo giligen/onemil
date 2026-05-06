@@ -10,7 +10,7 @@ Uses Alpaca SIP feed for real-time data.
 
 import logging
 import time as time_mod
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timezone, date
 from typing import List, Dict, Optional, Set
 
@@ -328,17 +328,42 @@ class RealtimeScanner:
             if self.orb_engine is not None and not force_closed:
                 _engine_futures.append(
                     _engine_pool.submit(self._orb_tick))
+            # Wait for engine futures, polling shutdown_event every 1s.
+            # Previously this used a single blocking `f.result(timeout=50)`
+            # which kept the scanner unresponsive to SIGTERM for up to
+            # 50s × N engines (~100s in prod). systemd's default 120s
+            # graceful-shutdown window then escalated to SIGKILL — see
+            # 2026-05-06 17:06→17:08 incident in journalctl.
+            ENGINE_TICK_TIMEOUT_S = 50.0
+            SHUTDOWN_POLL_INTERVAL_S = 1.0
+            _shutdown_during_ticks = False
             for f in _engine_futures:
-                try:
-                    f.result(timeout=50)
-                except TimeoutError:
-                    logger.error(
-                        "Engine tick TIMEOUT (>50s) — one engine stalled, "
-                        "continuing to next cycle"
-                    )
-                except Exception as e:
-                    logger.error(
-                        f"Engine tick error: {e}", exc_info=True)
+                if _shutdown_during_ticks:
+                    break
+                _f_deadline = time_mod.time() + ENGINE_TICK_TIMEOUT_S
+                while True:
+                    if self.shutdown_event and self.shutdown_event.is_set():
+                        logger.warning(
+                            "Shutdown signaled during engine ticks — abandoning "
+                            "in-flight futures (pool will be torn down post-loop)"
+                        )
+                        _shutdown_during_ticks = True
+                        break
+                    try:
+                        f.result(timeout=SHUTDOWN_POLL_INTERVAL_S)
+                        break  # this future done
+                    except FuturesTimeoutError:
+                        if time_mod.time() >= _f_deadline:
+                            logger.error(
+                                "Engine tick TIMEOUT (>50s) — one engine stalled, "
+                                "continuing to next cycle"
+                            )
+                            break
+                        continue
+                    except Exception as e:
+                        logger.error(
+                            f"Engine tick error: {e}", exc_info=True)
+                        break
 
             # Sleep until next :01 past the wall-clock minute (boundary alignment).
             # Cycle work above (scan_for_movers, run_pattern_check) fires at predictable
@@ -405,7 +430,12 @@ class RealtimeScanner:
                     f"skipped a minute boundary, re-aligning"
                 )
 
-        _engine_pool.shutdown(wait=False)
+        # cancel_futures=True (Python 3.9+) cancels QUEUED futures so
+        # ThreadPoolExecutor's atexit hook doesn't wait on them. In-flight
+        # futures still complete naturally — bounded by per-engine work
+        # which is normally seconds; the polling loop above already
+        # protected the scanner-side responsiveness.
+        _engine_pool.shutdown(wait=False, cancel_futures=True)
 
         # Post-loop safety net: only force-close at EOD, NOT on mid-session
         # SIGTERM (code deploy). Positions survive restart and get recovered
