@@ -294,10 +294,14 @@ class MACDWaveEngine:
                         f"({shares}sh @ ${fill_price:.2f})"
                     )
             else:
-                # Position GONE from Alpaca — closed externally (bracket SL/TP)
-                # Find the actual exit from Alpaca order history
+                # Position GONE from Alpaca — closed externally. The exit could
+                # be: StopMonitor's market sell at hard_stop/trail_stop, the
+                # Alpaca bracket SL/TP leg firing, or a manual cancel.
+                # Inspect order history to label correctly (2026-05-06: was
+                # always tagging as bracket_exit which inflated apparent
+                # bracket damage in post-mortems).
                 exit_price = fill_price  # fallback
-                exit_reason = 'bracket_exit'
+                exit_reason = 'bracket_exit'  # default if we can't classify
                 try:
                     from alpaca.trading.requests import GetOrdersRequest
                     from alpaca.trading.enums import QueryOrderStatus
@@ -307,13 +311,42 @@ class MACDWaveEngine:
                             symbols=[sym], limit=5,
                         )
                     )
+                    classified_sell = None
                     for o in orders:
                         if (o.side.value == 'sell' and o.status.value == 'filled'
                                 and o.filled_avg_price):
-                            exit_price = float(o.filled_avg_price)
-                            if o.order_class and o.order_class.value == 'bracket':
-                                exit_reason = 'bracket_sl_tp'
+                            classified_sell = o
                             break
+                    if classified_sell is not None:
+                        o = classified_sell
+                        exit_price = float(o.filled_avg_price)
+                        oc = o.order_class.value if o.order_class else None
+                        ot = o.type.value if o.type else None
+                        # Bracket leg: parented to original buy via order_class
+                        # ('simple' for solo orders, 'bracket' or specific child
+                        # type when the leg fired).
+                        if oc == 'bracket':
+                            exit_reason = 'bracket_sl_tp'
+                        elif oc in ('oto', 'oco'):
+                            exit_reason = 'bracket_sl_tp'
+                        elif ot == 'stop' or ot == 'stop_limit':
+                            exit_reason = 'hard_stop'
+                        elif ot == 'market':
+                            # Market sell from a non-bracket order — almost
+                            # always StopMonitor's hard_stop/trail_stop exit.
+                            # Compare against entry to disambiguate hard vs trail.
+                            try:
+                                drop_pct = (exit_price - fill_price) / fill_price
+                                if drop_pct <= -0.018:  # within 0.2% of -2% hard_stop
+                                    exit_reason = 'hard_stop'
+                                elif drop_pct < 0:
+                                    exit_reason = 'trail_stop'
+                                else:
+                                    exit_reason = 'trail_stop'  # exited in profit
+                            except Exception:
+                                exit_reason = 'stopmonitor_exit'
+                        elif ot == 'limit':
+                            exit_reason = 'limit_exit'
                 except Exception:
                     pass
 
@@ -855,25 +888,78 @@ class MACDWaveEngine:
                     if open_price <= 0:
                         continue
 
-                    # Check if crossed threshold
+                    # Tick-level pre-filter (cheap): is the latest trade above threshold?
+                    # If not, skip — no need to fetch bars.
                     pct_change = (price - open_price) / open_price * 100
                     if pct_change < self.min_intraday_pct:
                         continue
 
-                    # Apply cross time filter
-                    if self.cross_time_max_min > 0 and minutes_since_open > self.cross_time_max_min:
-                        continue
-
-                    # Get volume at cross (approximate from bars)
+                    # BAR-CONFIRMED CROSS DETECTION (2026-05-06: BT-LIVE parity fix)
+                    # The previous tick-only path detected phantom crosses where a
+                    # single off-exchange print exceeded threshold but no 1-min bar
+                    # high actually crossed. Those phantom signals drove ~30 of 69
+                    # losing live trades through 5/6 (BT cache had no signal for
+                    # them). Fix: require bar.high >= threshold, matching BT's
+                    # `bars.iloc[i]['high'] >= open*1.10` logic exactly.
+                    #
+                    # cross_time_min = bar INDEX (1-based) within the regular-
+                    # session bars, matching BT's `cross_time_min = si + 1` in
+                    # macd_wave_backtest.py:438. Index-based (not elapsed-minutes)
+                    # is the BT semantic and is what the cross_time_max_min
+                    # filter is calibrated against in the validated parameters.
                     vol_at_cross = 0
+                    bar_cross_minute: Optional[int] = None
+                    bar_cross_ts = None
+                    threshold_price = open_price * (1 + self.min_intraday_pct / 100.0)
                     try:
                         bars = self.alpaca.get_1min_bars(sym, lookback_minutes=minutes_since_open + 1)
                         if bars is not None and not bars.empty:
-                            vol_at_cross = int(bars['volume'].sum())
+                            # Clip to regular session (09:30 ET to 16:00 ET) — matches
+                            # BT generate_signals (macd_wave_backtest.py:412-422).
+                            if 'timestamp' in bars.columns:
+                                bar_ts_series = pd.to_datetime(bars['timestamp'], utc=True)
+                                et_dt = bar_ts_series.dt.tz_convert(ET)
+                                regular = (
+                                    ((et_dt.dt.hour == 9) & (et_dt.dt.minute >= 30))
+                                    | ((et_dt.dt.hour > 9) & (et_dt.dt.hour < 16))
+                                )
+                                bars_clipped = bars[regular].reset_index(drop=True)
+                            else:
+                                bars_clipped = bars.reset_index(drop=True)
+                            vol_at_cross = int(bars_clipped['volume'].sum()) if not bars_clipped.empty else 0
+                            for idx, bar in bars_clipped.iterrows():
+                                try:
+                                    bar_high = float(bar.get('high', 0) or 0)
+                                except (TypeError, ValueError):
+                                    continue
+                                if bar_high >= threshold_price:
+                                    bar_cross_minute = int(idx) + 1  # BT semantic: si + 1
+                                    bar_cross_ts = bar.get('timestamp')
+                                    # Recompute vol_at_cross to be cumulative volume
+                                    # through the cross bar (matches BT).
+                                    try:
+                                        vol_at_cross = int(
+                                            bars_clipped.iloc[:int(idx) + 1]['volume'].sum()
+                                        )
+                                    except Exception:
+                                        pass
+                                    break
                     except Exception:
                         pass
 
-                    # Apply volume filter
+                    # Phantom-tick guard: tick said crossed but no bar.high crossed → SKIP
+                    if bar_cross_minute is None:
+                        logger.debug(
+                            f"[{self.STRATEGY_NAME}] {sym}: tick at +{pct_change:.1f}% but "
+                            f"no bar.high >= threshold (${threshold_price:.2f}) — phantom, skipping"
+                        )
+                        continue
+
+                    # Apply cross time filter on BAR-CONFIRMED minute (matches BT)
+                    if self.cross_time_max_min > 0 and bar_cross_minute > self.cross_time_max_min:
+                        continue
+
+                    # Apply volume filter (existing behaviour preserved)
                     if self.max_vol_at_cross > 0 and vol_at_cross > self.max_vol_at_cross:
                         logger.debug(f"[{self.STRATEGY_NAME}] {sym}: vol {vol_at_cross:,} > {self.max_vol_at_cross:,}, skipping")
                         self.invalidated.add(sym)
@@ -882,12 +968,21 @@ class MACDWaveEngine:
                         continue
 
                     # Passed all filters — start monitoring
+                    # crossed_at: prefer the actual bar timestamp; fallback to
+                    # market_open + bar_cross_minute (rough proxy when ts missing).
+                    if bar_cross_ts is not None:
+                        try:
+                            crossed_at_utc = pd.to_datetime(bar_cross_ts, utc=True).to_pydatetime()
+                        except Exception:
+                            crossed_at_utc = market_open_et.astimezone(timezone.utc) + timedelta(minutes=bar_cross_minute)
+                    else:
+                        crossed_at_utc = market_open_et.astimezone(timezone.utc) + timedelta(minutes=bar_cross_minute)
                     self.crossed_stocks[sym] = CrossedStock(
                         symbol=sym,
                         open_price=open_price,
-                        cross_time_min=minutes_since_open,
+                        cross_time_min=bar_cross_minute,
                         vol_at_cross=vol_at_cross,
-                        crossed_at=datetime.now(timezone.utc),
+                        crossed_at=crossed_at_utc,
                     )
                     new_crosses.append(sym)
                     # T1.1: subscribe to 1-min bars so the unified main loop
