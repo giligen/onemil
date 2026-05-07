@@ -286,6 +286,15 @@ class ORBEngine:
         self.notify_on_daily_loss_limit = bool(notifications_cfg.get('notify_on_daily_loss_limit', True))
         self.notify_on_force_close = bool(notifications_cfg.get('notify_on_force_close', True))
 
+        # FC verify/retry tunables (2026-05-07 hardening). Defaults matched to
+        # Alpaca paper ACK latency; tests can shrink these for fast execution.
+        fc_cfg = notifications_cfg.get('force_close_verify', {}) if isinstance(
+            notifications_cfg.get('force_close_verify', {}), dict) else {}
+        self.fc_verify_max_wait_s = float(fc_cfg.get('max_wait_s', 10.0))
+        self.fc_verify_poll_interval_s = float(fc_cfg.get('poll_interval_s', 1.0))
+        self.fc_retry_count = int(fc_cfg.get('retry_count', 3))
+        self.fc_retry_backoffs_s = list(fc_cfg.get('retry_backoffs_s', [5, 10, 15]))
+
         tg_prefix = notifications_cfg.get('prefix', '[ORB]')
         self.tg_prefix = tg_prefix
 
@@ -1615,6 +1624,10 @@ class ORBEngine:
         """
         closed = 0
         failed = []
+        # Track which symbols got close orders submitted, for the post-FC
+        # DB sync pass (recovers exit_price from Alpaca order history when
+        # the async TradingStream watcher misses the sell-fill event).
+        closed_symbols: List[str] = []
         # Cancel pending buy-stop orders (candidates with plan submitted but not filled)
         for sym, cand in self.candidates.items():
             if cand.plan_submitted and sym not in self.open_positions:
@@ -1648,6 +1661,7 @@ class ORBEngine:
                     f"{(result or {}).get('id', '?')}"
                 )
                 closed += 1
+                closed_symbols.append(sym)
             except Exception as e:
                 failed.append(sym)
                 # Retry ONCE with longer wait — Alpaca may still be ACK'ing cancels.
@@ -1657,6 +1671,7 @@ class ORBEngine:
                     logger.info(f"ORB FORCE-CLOSE: {sym} closed on retry "
                                 f"(order={(result or {}).get('id', '?')})")
                     closed += 1
+                    closed_symbols.append(sym)
                     failed.remove(sym)
                 except Exception as e2:
                     # CRITICAL: position will leak overnight unless operator acts.
@@ -1707,6 +1722,7 @@ class ORBEngine:
                     f"(not tracked in engine state)"
                 )
                 closed += 1
+                closed_symbols.append(sym)
             except Exception as e:
                 self._notify_error(
                     f"FC SWEEP: failed to close orphan {sym} — "
@@ -1714,28 +1730,85 @@ class ORBEngine:
                 )
                 failed.append(sym)
 
-        # Post-FC verification: confirm Alpaca shows zero positions. If any
-        # remain, this is a hard CRITICAL — operator must intervene before
-        # market close. We don't retry indefinitely (retry already happened
-        # in the engine-state path + sweep above); the goal here is to make
-        # the failure loud, not to mask it.
-        try:
-            _time.sleep(1.0)  # let the close orders propagate
-            still_open = self.alpaca.get_open_positions() or []
-            if still_open:
-                still_syms = [
-                    getattr(p, 'symbol', None)
-                    or (p.get('symbol') if isinstance(p, dict) else '?')
-                    for p in still_open
-                ]
-                self._notify_error(
-                    f"FC VERIFY FAILED: {len(still_open)} position(s) STILL "
-                    f"open after force-close + sweep: "
-                    f"{','.join(s for s in still_syms if s)}. "
-                    f"MANUAL ACTION REQUIRED before market close."
-                )
-        except Exception as e:
-            logger.warning(f"FC VERIFY: Alpaca query failed (non-fatal): {e}")
+        # Post-FC verification: confirm Alpaca shows zero positions.
+        # 2026-05-07 hardening (ASTX 5/6 post-mortem):
+        #   - Verify with grace: poll Alpaca up to 10s, succeed as soon as
+        #     position is gone. The previous 1s sleep was below typical
+        #     Alpaca ACK latency and false-positive'd FC failures.
+        #   - Retry on failure: re-close + re-verify up to 3 times with
+        #     5s/10s/15s backoff. Total max ~45s, well within the 15-min
+        #     FC window. Loud CRITICAL alert only if all 3 retries fail.
+        #   - DB sync: on success, fetch each closed symbol's actual sell
+        #     order from Alpaca and write exit_price/pnl to DB. Closes the
+        #     async-watcher gap that left phantom-open rows for ASTX 5/6,
+        #     NVOX 5/1, CRML 5/4.
+        max_retries = self.fc_retry_count
+        backoffs_s = self.fc_retry_backoffs_s
+        verify_passed = False
+        last_still_open: List = []
+        for attempt in range(max_retries):
+            still_open = self._verify_flat_with_grace(
+                max_wait_s=self.fc_verify_max_wait_s,
+                poll_interval_s=self.fc_verify_poll_interval_s,
+            )
+            last_still_open = still_open
+            if not still_open:
+                verify_passed = True
+                if attempt > 0:
+                    logger.info(
+                        f"FC VERIFY: passed on retry {attempt+1}/{max_retries}"
+                    )
+                break
+            still_syms = [
+                getattr(p, 'symbol', None)
+                or (p.get('symbol') if isinstance(p, dict) else '?')
+                for p in still_open
+            ]
+            still_syms = [s for s in still_syms if s]
+            logger.warning(
+                f"FC VERIFY attempt {attempt+1}/{max_retries}: "
+                f"{len(still_open)} position(s) STILL open: "
+                f"{','.join(still_syms)} — re-closing"
+            )
+            # Re-close each remaining position
+            for sym in still_syms:
+                try:
+                    self._cancel_symbol_open_orders(sym)
+                    _time.sleep(0.5)
+                    self.alpaca.close_position(sym)
+                    if sym not in closed_symbols:
+                        closed_symbols.append(sym)
+                except Exception as e:
+                    logger.warning(
+                        f"FC VERIFY retry {attempt+1}: close {sym} failed: {e}"
+                    )
+            # Backoff before next verify (except after the last attempt)
+            if attempt < max_retries - 1:
+                backoff = (backoffs_s[attempt] if attempt < len(backoffs_s)
+                           else (backoffs_s[-1] if backoffs_s else 5))
+                _time.sleep(backoff)
+
+        if not verify_passed:
+            still_syms = [
+                getattr(p, 'symbol', None)
+                or (p.get('symbol') if isinstance(p, dict) else '?')
+                for p in last_still_open
+            ]
+            self._notify_error(
+                f"FC VERIFY FAILED after {max_retries} retries: "
+                f"{len(last_still_open)} position(s) STILL open: "
+                f"{','.join(s for s in still_syms if s)}. "
+                f"MANUAL ACTION REQUIRED before market close."
+            )
+
+        # DB sync: even on partial success, sync the symbols we know we closed.
+        # This is the path that recovers exit_price for the trades whose
+        # async sell-fill events were missed by the TradingStream watcher.
+        if closed_symbols:
+            try:
+                self._sync_db_after_fc(closed_symbols)
+            except Exception as e:
+                logger.warning(f"FC DB SYNC: failed (non-fatal): {e}")
 
         if self.notify_on_force_close and self.notifier and closed > 0:
             self._notify(
@@ -2239,6 +2312,122 @@ class ORBEngine:
                 f"{reject.details.get('spread_bps', 0):.0f}bps > {self.max_spread_bps:.0f}bps"
             )
         logger.info(f"ORB: {symbol} rejected ({reject.reason}) — {reject.details}")
+
+    def _verify_flat_with_grace(
+        self, max_wait_s: int = 10, poll_interval_s: float = 1.0,
+    ) -> List:
+        """Poll Alpaca for open positions until flat or timeout.
+
+        Replaces the previous single-shot post-close check that ran 1s after
+        submission — too fast for typical Alpaca ACK latency, generating
+        false-positive FC failures (ASTX 5/6 post-mortem).
+
+        Returns the list of remaining positions (empty list = flat). Polling
+        stops as soon as Alpaca reports zero. Returns empty on transient
+        query errors so the caller can decide whether to retry.
+        """
+        import time as _time
+        deadline = _time.time() + max_wait_s
+        last = []
+        while _time.time() < deadline:
+            try:
+                last = self.alpaca.get_open_positions() or []
+            except Exception as e:
+                logger.warning(f"FC VERIFY poll: Alpaca query failed: {e}")
+                _time.sleep(poll_interval_s)
+                continue
+            if not last:
+                return []
+            _time.sleep(poll_interval_s)
+        return last
+
+    def _sync_db_after_fc(self, symbols: List[str]) -> None:
+        """For each symbol whose FC close order was submitted, fetch the
+        actual sell-fill from Alpaca and update DB exit_price/pnl.
+
+        Closes the gap where the async TradingStream watcher misses sell-fill
+        events, leaving phantom-open DB rows (ASTX 5/6, NVOX 5/1, CRML 5/4).
+        Idempotent: rows that already have exit_price are skipped.
+        """
+        if not symbols:
+            return
+        try:
+            from alpaca.trading.requests import GetOrdersRequest
+            from alpaca.trading.enums import QueryOrderStatus
+        except Exception as e:
+            logger.warning(f"FC DB SYNC: alpaca import failed: {e}")
+            return
+
+        today = datetime.now(timezone.utc).date()
+        try:
+            db_open = self.db.get_open_trades(today, strategy=STRATEGY_NAME) or []
+        except Exception as e:
+            logger.warning(f"FC DB SYNC: db query failed: {e}")
+            return
+        # Index by symbol — one open trade per symbol per day in normal flow.
+        db_by_sym: Dict[str, Dict] = {}
+        for t in db_open:
+            sym = t.get('symbol')
+            if not sym:
+                continue
+            if t.get('fill_price') in (None, 0, 0.0):
+                continue  # not actually filled
+            if t.get('exit_price') is not None:
+                continue  # already updated by stream watcher
+            db_by_sym[sym] = t
+
+        for sym in symbols:
+            t = db_by_sym.get(sym)
+            if t is None:
+                continue
+            try:
+                orders = self.alpaca.trading_client.get_orders(
+                    GetOrdersRequest(
+                        status=QueryOrderStatus.CLOSED,
+                        symbols=[sym], limit=10,
+                    )
+                ) or []
+            except Exception as e:
+                logger.warning(f"FC DB SYNC {sym}: get_orders failed: {e}")
+                continue
+            sell = None
+            for o in orders:
+                if o.side.value != 'sell':
+                    continue
+                if o.status.value != 'filled':
+                    continue
+                if not o.filled_avg_price:
+                    continue
+                # Most recent first
+                if sell is None or (o.filled_at and sell.filled_at
+                                     and o.filled_at > sell.filled_at):
+                    sell = o
+            if sell is None:
+                logger.warning(
+                    f"FC DB SYNC {sym}: no FILLED sell order found at Alpaca"
+                )
+                continue
+            entry_price = float(t.get('fill_price') or 0)
+            shares = int(t.get('filled_qty') or t.get('shares') or 0)
+            if entry_price <= 0 or shares <= 0:
+                continue
+            exit_price = float(sell.filled_avg_price)
+            pnl = (exit_price - entry_price) * shares
+            pnl_pct = (exit_price - entry_price) / entry_price * 100
+            try:
+                self.db.update_trade(t['id'], {
+                    'exit_price': exit_price,
+                    'exit_reason': 'force_close',
+                    'exited_at': sell.filled_at or datetime.now(timezone.utc),
+                    'pnl': pnl,
+                    'pnl_pct': pnl_pct,
+                })
+                logger.info(
+                    f"FC DB SYNC: {sym} updated exit=${exit_price:.2f} "
+                    f"pnl=${pnl:+,.0f} (order={str(sell.id)[:8]})"
+                )
+            except Exception as e:
+                logger.warning(f"FC DB SYNC {sym}: db update failed: {e}")
 
     def _notify(self, msg: str) -> None:
         """Send Telegram message (never raises — notifier failure shouldn't break trading)."""

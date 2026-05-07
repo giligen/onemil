@@ -420,32 +420,38 @@ class TestForceCloseOrphanSweep:
         assert 'ORPHAN' in called_symbols
 
     def test_post_fc_verification_alerts_when_position_remains(
-        self, engine, mock_alpaca,
+        self, engine, mock_alpaca, monkeypatch,
     ):
-        """If Alpaca still shows positions AFTER sweep, _notify_error fires.
+        """If Alpaca still shows positions AFTER sweep + 3 retries, alert fires.
 
-        Simulates the worst case: close orders submitted but didn't fill in
-        time. Operator must intervene before market close.
+        2026-05-07 hardening: previously the verify ran once with 1s sleep and
+        immediately alerted on failure. Now does verify-with-grace + 3 retries
+        with backoffs. Test shrinks the tunables to keep run-time small.
+        Alert only fires AFTER all 3 retries fail — that's the contract.
         """
-        # Engine empty
-        # First query: orphan present
-        # Second query (post-verification): still present (close didn't propagate)
-        mock_alpaca.get_open_positions.side_effect = [
-            [self._orphan_position(symbol='STUCK')],
-            [self._orphan_position(symbol='STUCK')],
+        # Always return the stuck orphan — no grace period or retry will clear it
+        mock_alpaca.get_open_positions.return_value = [
+            self._orphan_position(symbol='STUCK')
         ]
         # Track _notify_error calls
         engine._notify_error = MagicMock()
+        # Shrink tunables for fast test execution
+        engine.fc_verify_max_wait_s = 0.1
+        engine.fc_verify_poll_interval_s = 0.01
+        engine.fc_retry_backoffs_s = [0.0, 0.0, 0.0]
+        # Patch sleep too in case the engine-pass section sleeps
+        import time as _real_time
+        monkeypatch.setattr(_real_time, 'sleep', lambda *a, **kw: None)
 
         engine.force_close_all()
 
-        # The verification should have raised CRITICAL
+        # The verification should have raised CRITICAL after 3 retries
         verify_alerts = [
             c for c in engine._notify_error.call_args_list
             if 'VERIFY FAILED' in str(c)
         ]
         assert len(verify_alerts) >= 1, (
-            "Post-FC verification did NOT alert when position survived sweep"
+            "Post-FC verification did NOT alert when position survived sweep+retries"
         )
 
     def test_sweep_handles_alpaca_query_failure_gracefully(
