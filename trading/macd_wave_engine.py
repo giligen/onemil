@@ -321,32 +321,30 @@ class MACDWaveEngine:
                         o = classified_sell
                         exit_price = float(o.filled_avg_price)
                         oc = o.order_class.value if o.order_class else None
-                        ot = o.type.value if o.type else None
-                        # Bracket leg: parented to original buy via order_class
-                        # ('simple' for solo orders, 'bracket' or specific child
-                        # type when the leg fired).
+                        # 2026-05-07 fix (regression from yesterday's D2 fix):
+                        # StopMonitor submits LIMIT sells with quote-aware
+                        # pricing for ALL exits — trail_stop AND hard_stop.
+                        # The previous "ot == 'limit' → limit_exit" branch
+                        # mislabeled today's trail_stops as limit_exit. The
+                        # discriminator is the price magnitude, not the order
+                        # type. Bracket legs are tagged by oc explicitly.
                         if oc == 'bracket':
                             exit_reason = 'bracket_sl_tp'
                         elif oc in ('oto', 'oco'):
                             exit_reason = 'bracket_sl_tp'
-                        elif ot == 'stop' or ot == 'stop_limit':
-                            exit_reason = 'hard_stop'
-                        elif ot == 'market':
-                            # Market sell from a non-bracket order — almost
-                            # always StopMonitor's hard_stop/trail_stop exit.
-                            # Compare against entry to disambiguate hard vs trail.
+                        else:
+                            # Solo sell from StopMonitor — disambiguate by drop %.
+                            # MACD wave hard_stop is at -2% (config). Anything
+                            # close to -2% is hard_stop; smaller drop is trail.
                             try:
-                                drop_pct = (exit_price - fill_price) / fill_price
+                                drop_pct = ((exit_price - fill_price)
+                                             / fill_price) if fill_price > 0 else 0
                                 if drop_pct <= -0.018:  # within 0.2% of -2% hard_stop
                                     exit_reason = 'hard_stop'
-                                elif drop_pct < 0:
-                                    exit_reason = 'trail_stop'
                                 else:
-                                    exit_reason = 'trail_stop'  # exited in profit
+                                    exit_reason = 'trail_stop'  # incl small wins
                             except Exception:
                                 exit_reason = 'stopmonitor_exit'
-                        elif ot == 'limit':
-                            exit_reason = 'limit_exit'
                 except Exception:
                     pass
 
