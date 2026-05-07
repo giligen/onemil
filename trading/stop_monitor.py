@@ -2231,66 +2231,130 @@ class StopMonitor:
                         exit_reason = 'stop_loss_unconfirmed'
             except Exception as e:
                 # Bracket SL may have won the race — position already flat.
-                # Don't page on this; just clean up and exit.
                 if self._is_race_condition_error(e):
-                    logger.info(
-                        f"StopMonitor: {symbol} position already closed "
-                        f"(bracket SL filled first) — skipping limit sell"
-                    )
-                    with self._watch_lock:
-                        self._watches.pop(symbol, None)
-                    with self._exit_lock:
-                        self._exit_in_progress[symbol] = False
-                    return
-
-                logger.error(
-                    f"StopMonitor: {symbol} limit sell failed: {e} — "
-                    f"falling back to close_position()"
-                )
-                # Fallback: market close (in executor)
-                try:
-                    fallback = await loop.run_in_executor(
-                        None, client.close_position, symbol
-                    )
-                    order_id = fallback.get("id", "")
-                    exit_reason = "stop_loss_fallback"
-                    logger.info(
-                        f"StopMonitor: {symbol} fallback close_position — "
-                        f"order={order_id} — awaiting fill confirmation"
-                    )
-                    exit_price = await self._poll_order_fill(
-                        client, order_id, fallback_price=trigger_price,
-                    )
-                    if exit_price is None:
-                        # Market close order never confirmed filled. Log loudly;
-                        # use trigger_price as last-resort marker but flag it.
-                        logger.error(
-                            f"StopMonitor: {symbol} MARKET CLOSE UNCONFIRMED — "
-                            f"DB will use trigger_price=${trigger_price:.2f}. "
-                            f"VERIFY POSITION MANUALLY on Alpaca."
-                        )
-                        exit_price = trigger_price
-                except Exception as e2:
-                    # Race condition: bracket closed the position before our
-                    # fallback ran. Log as INFO, not ERROR — Telegram stays quiet.
-                    if self._is_race_condition_error(e2):
+                    # PN 2026-05-07 fix: previously this branch returned
+                    # without emitting an exit event, leaving the trade
+                    # row to be reconciled later as 'unknown_exit' with
+                    # P&L=0 — silently masking the real loss. Recover the
+                    # SL leg's actual fill price (poll briefly because the
+                    # leg's status may be eventually-consistent for a few
+                    # hundred ms after the position becomes 0).
+                    recovered = None
+                    if watch.sl_leg_id:
+                        try:
+                            recovered = await self._poll_order_fill(
+                                client, watch.sl_leg_id,
+                                fallback_price=trigger_price,
+                                timeout_s=3.0,
+                            )
+                        except Exception as poll_err:
+                            logger.warning(
+                                f"StopMonitor: {symbol} SL leg poll "
+                                f"error: {poll_err}"
+                            )
+                    if recovered is not None:
                         logger.info(
-                            f"StopMonitor: {symbol} bracket SL already closed "
-                            f"position — fallback close_position returned "
-                            f"{e2.__class__.__name__}"
+                            f"StopMonitor: {symbol} bracket SL won race — "
+                            f"recovered exit ${recovered:.2f} from SL leg "
+                            f"{watch.sl_leg_id[:8]}"
                         )
+                        exit_price = recovered
+                        order_id = watch.sl_leg_id
+                        exit_reason = 'stop_loss_bracket_sl_race'
+                        # FALL THROUGH to the exit-event emit path below
                     else:
                         logger.error(
-                            f"StopMonitor: {symbol} fallback close also failed: {e2} — "
-                            f"safety-net SL is the last line of defense"
+                            f"StopMonitor: {symbol} bracket SL won race "
+                            f"AND fill-price recovery failed (sl_leg_id="
+                            f"{watch.sl_leg_id or 'MISSING'}) — DB will "
+                            f"record 'unknown_exit'. RECONCILE MANUALLY."
                         )
-                    # Remove watch to prevent infinite retry on every tick
-                    # (likely TP already filled — no position to sell)
-                    with self._watch_lock:
-                        self._watches.pop(symbol, None)
-                    with self._exit_lock:
-                        self._exit_in_progress[symbol] = False
-                    return
+                        with self._watch_lock:
+                            self._watches.pop(symbol, None)
+                        with self._exit_lock:
+                            self._exit_in_progress[symbol] = False
+                        return
+                else:
+                    logger.error(
+                        f"StopMonitor: {symbol} limit sell failed: {e} — "
+                        f"falling back to close_position()"
+                    )
+                    # Fallback: market close (in executor)
+                    try:
+                        fallback = await loop.run_in_executor(
+                            None, client.close_position, symbol
+                        )
+                        order_id = fallback.get("id", "")
+                        exit_reason = "stop_loss_fallback"
+                        logger.info(
+                            f"StopMonitor: {symbol} fallback close_position — "
+                            f"order={order_id} — awaiting fill confirmation"
+                        )
+                        exit_price = await self._poll_order_fill(
+                            client, order_id, fallback_price=trigger_price,
+                        )
+                        if exit_price is None:
+                            # Market close order never confirmed filled. Log loudly;
+                            # use trigger_price as last-resort marker but flag it.
+                            logger.error(
+                                f"StopMonitor: {symbol} MARKET CLOSE UNCONFIRMED — "
+                                f"DB will use trigger_price=${trigger_price:.2f}. "
+                                f"VERIFY POSITION MANUALLY on Alpaca."
+                            )
+                            exit_price = trigger_price
+                    except Exception as e2:
+                        # Race condition: bracket closed the position before our
+                        # fallback ran. Try the same SL-leg recovery used by the
+                        # outer race branch — same root cause (PN 5/7 incident).
+                        if self._is_race_condition_error(e2):
+                            recovered2 = None
+                            if watch.sl_leg_id:
+                                try:
+                                    recovered2 = await self._poll_order_fill(
+                                        client, watch.sl_leg_id,
+                                        fallback_price=trigger_price,
+                                        timeout_s=3.0,
+                                    )
+                                except Exception as poll_err:
+                                    logger.warning(
+                                        f"StopMonitor: {symbol} SL leg poll "
+                                        f"error: {poll_err}"
+                                    )
+                            if recovered2 is not None:
+                                logger.info(
+                                    f"StopMonitor: {symbol} bracket SL won race "
+                                    f"during fallback — recovered exit "
+                                    f"${recovered2:.2f}"
+                                )
+                                exit_price = recovered2
+                                order_id = watch.sl_leg_id
+                                exit_reason = 'stop_loss_bracket_sl_race'
+                                # Fall through to exit-event emit
+                            else:
+                                logger.error(
+                                    f"StopMonitor: {symbol} bracket SL race "
+                                    f"during fallback AND recovery failed "
+                                    f"(sl_leg_id="
+                                    f"{watch.sl_leg_id or 'MISSING'}) — DB "
+                                    f"will record 'unknown_exit'. RECONCILE."
+                                )
+                                with self._watch_lock:
+                                    self._watches.pop(symbol, None)
+                                with self._exit_lock:
+                                    self._exit_in_progress[symbol] = False
+                                return
+                        else:
+                            logger.error(
+                                f"StopMonitor: {symbol} fallback close also failed: {e2} — "
+                                f"safety-net SL is the last line of defense"
+                            )
+                            # Remove watch to prevent infinite retry on every tick
+                            # (likely TP already filled — no position to sell)
+                            with self._watch_lock:
+                                self._watches.pop(symbol, None)
+                            with self._exit_lock:
+                                self._exit_in_progress[symbol] = False
+                            return
 
             # Position confirmed flat (or we've exhausted retries with a
             # known-bad price). NOW safe to cancel any surviving SL leg and

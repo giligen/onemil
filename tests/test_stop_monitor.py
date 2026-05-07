@@ -387,6 +387,121 @@ class TestFallback:
 
 
 # ---------------------------------------------------------------------------
+# Bracket SL race recovery (PN 2026-05-07 fix)
+# ---------------------------------------------------------------------------
+
+class TestBracketSLRaceRecovery:
+    """When the broker-side bracket SL leg fills first (winning the race),
+    our subsequent limit-sell submission lands on a flat position and
+    Alpaca returns a 'no locates' / 'cannot be sold short' error.
+
+    Pre-fix: StopMonitor logged it, removed the watch, returned silently.
+    The trade row was later reconciled as 'unknown_exit' with P&L=0,
+    silently masking the real loss (PN 5/7: real ≈ −$220, recorded $0).
+
+    Post-fix: poll the SL leg, recover its filled_avg_price, emit a
+    StopExitEvent with exit_reason='stop_loss_bracket_sl_race'.
+    """
+
+    @pytest.mark.asyncio
+    async def test_race_with_recovery_emits_event(self, monitor, mock_alpaca):
+        """Bracket SL won race, leg fill price is fetchable → exit event
+        carries the recovered price + 'stop_loss_bracket_sl_race' reason."""
+        # Simulate Alpaca's "no locates" error on limit-sell submit
+        mock_alpaca.submit_limit_sell_order.side_effect = Exception(
+            'asset "PN" cannot be sold short: no locates for account/symbol'
+        )
+        # And the SL leg has filled — get_order returns the real price
+        mock_alpaca.get_order.return_value = {
+            'id': 'sl-leg-pn',
+            'status': 'filled',
+            'filled_avg_price': 6.605,
+            'filled_qty': 610,
+        }
+
+        monitor.add_watch('PN', 6.62, 610, 'tp-pn', 'sl-leg-pn')
+        trade = MagicMock()
+        trade.symbol = 'PN'
+        trade.price = 6.60
+
+        await monitor._on_trade(trade)
+
+        events = monitor.drain_exit_events()
+        assert len(events) == 1
+        assert events[0].exit_reason == 'stop_loss_bracket_sl_race'
+        assert events[0].exit_price == 6.605
+        assert events[0].order_id == 'sl-leg-pn'
+        assert events[0].shares == 610
+
+    @pytest.mark.asyncio
+    async def test_race_with_failed_recovery_no_event(self, monitor, mock_alpaca):
+        """Bracket SL won race AND leg lookup fails → no event emitted,
+        watch removed, log a loud ERROR. This is the 'reconcile manually'
+        terminal state — strictly worse than recovery, so it must not
+        silently pretend to succeed."""
+        mock_alpaca.submit_limit_sell_order.side_effect = Exception(
+            'cannot be sold short'
+        )
+        # SL leg lookup keeps returning non-filled until poll times out
+        mock_alpaca.get_order.return_value = {
+            'id': 'sl-leg-pn',
+            'status': 'pending_replace',
+        }
+
+        monitor.add_watch('PN', 6.62, 610, 'tp-pn', 'sl-leg-pn')
+        trade = MagicMock()
+        trade.symbol = 'PN'
+        trade.price = 6.60
+
+        await monitor._on_trade(trade)
+
+        events = monitor.drain_exit_events()
+        assert len(events) == 0
+        # Watch is removed (don't infinitely retry on every tick)
+        assert 'PN' not in monitor._watches
+
+    @pytest.mark.asyncio
+    async def test_race_recovery_when_no_sl_leg_id(self, monitor, mock_alpaca):
+        """If sl_leg_id is empty, recovery has nothing to query → no event,
+        watch removed, ERROR logged (caller must reconcile manually)."""
+        mock_alpaca.submit_limit_sell_order.side_effect = Exception(
+            '42210000 cannot be sold short'
+        )
+
+        # Empty sl_leg_id — defensive case
+        monitor.add_watch('PN', 6.62, 610, 'tp-pn', '')
+        trade = MagicMock()
+        trade.symbol = 'PN'
+        trade.price = 6.60
+
+        await monitor._on_trade(trade)
+
+        events = monitor.drain_exit_events()
+        assert len(events) == 0
+        assert 'PN' not in monitor._watches
+
+    @pytest.mark.asyncio
+    async def test_non_race_error_still_falls_back_to_close_position(
+        self, monitor, mock_alpaca
+    ):
+        """The race-recovery branch must NOT swallow non-race errors —
+        they should still trigger the close_position fallback."""
+        mock_alpaca.submit_limit_sell_order.side_effect = Exception(
+            'random unrelated rejection'
+        )
+
+        monitor.add_watch('PN', 6.62, 610, 'tp-pn', 'sl-leg-pn')
+        trade = MagicMock()
+        trade.symbol = 'PN'
+        trade.price = 6.60
+
+        await monitor._on_trade(trade)
+
+        # Existing fallback path should still run
+        mock_alpaca.close_position.assert_called_once_with('PN')
+
+
+# ---------------------------------------------------------------------------
 # Drain exit events
 # ---------------------------------------------------------------------------
 
