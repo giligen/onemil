@@ -166,6 +166,20 @@ notifications:
     notify_on_filter_skip: false     # too noisy — most candidates don't qualify
     notify_on_force_close: true
 
+    # Force-close verify/retry tunables (2026-05-07 hardening; ASTX 5/6
+    # post-mortem). The engine-state and orphan-sweep passes submit close
+    # orders. After that, the verify pass polls Alpaca to confirm the
+    # account is flat; if any position survives, we re-close + re-verify
+    # up to retry_count times with backoff. Defaults are sized for typical
+    # Alpaca paper ACK latency and the 15-minute window between
+    # force_close_time_et and 16:00 ET market close. Override only when
+    # reproducing failures locally / running tests.
+    force_close_verify:
+      max_wait_s: 10        # poll up to 10s for position to clear
+      poll_interval_s: 1.0  # query Alpaca every 1s during the wait
+      retry_count: 3        # full verify+re-close cycles before CRITICAL alert
+      retry_backoffs_s: [5, 10, 15]  # sleep between retries (size = retry_count - 1 used)
+
 # Slippage model for reference (matches BT assumptions). Production uses entry_slip_bps + exit_slip_bps above.
 slippage:
   entry_pct: 0.003   # 30bps — validate in Phase 1 paper
