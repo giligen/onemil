@@ -402,10 +402,18 @@ class TestGetLatestTrades:
 # ===================================================================
 
 class TestGetCurrentBars:
-    """Tests for AlpacaClient.get_current_bars (uses 15-min StockBarsRequest)."""
+    """Tests for AlpacaClient.get_current_bars.
 
-    def test_returns_bar_data(self, client, mock_sdk_clients):
-        """Returns dict with OHLCV and timestamp for each symbol."""
+    2026-05-08: switched to day-running 1-min aggregation (start=today
+    09:30 ET) so live qualification matches BASELINE BT exactly. Each
+    symbol's result represents ALL 1-min RTH bars from market open to
+    now: high/low are running max/min, volume is cumulative, open is
+    the first 09:30 bar's open, close is latest minute's close,
+    timestamp is the latest minute's bar timestamp."""
+
+    def test_single_bar_returns_its_values(self, client, mock_sdk_clients):
+        """A single 1-min bar (e.g., right after market open) returns
+        its own OHLCV — running stats over 1 sample = the sample."""
         bar = _make_bar(open=9.0, high=12.0, low=8.5, close=11.0, volume=200_000)
         mock_response = MagicMock()
         mock_response.data = {"TSLA": [bar]}
@@ -433,32 +441,24 @@ class TestGetCurrentBars:
         result = client.get_current_bars(["MISSING"])
         assert result == {}
 
-    def test_uses_completed_bar_from_multiple(self, client, mock_sdk_clients):
-        """When 3+ bars returned, uses second-to-last (latest completed) bar."""
-        bar_old = _make_bar(open=8.0, high=9.0, low=7.5, close=8.5, volume=100_000)
-        bar_completed = _make_bar(open=9.0, high=12.0, low=8.5, close=11.0, volume=200_000)
-        bar_current = _make_bar(open=11.0, high=11.5, low=10.8, close=11.2, volume=50_000)
+    def test_aggregates_running_stats_across_bars(self, client, mock_sdk_clients):
+        """When N 1-min bars returned, aggregates: high=max, low=min,
+        volume=sum, open=first.open, close=last.close, timestamp=last.timestamp.
+        Mirrors what BT's running_high/running_low computes per-bar."""
+        bar_open = _make_bar(open=8.0, high=9.0, low=7.5, close=8.5, volume=100_000)
+        bar_mid = _make_bar(open=9.0, high=12.0, low=8.5, close=11.0, volume=200_000)
+        bar_latest = _make_bar(open=11.0, high=11.5, low=10.8, close=11.2, volume=50_000)
         mock_response = MagicMock()
-        mock_response.data = {"TSLA": [bar_old, bar_completed, bar_current]}
+        mock_response.data = {"TSLA": [bar_open, bar_mid, bar_latest]}
         mock_sdk_clients["data_client"].get_stock_bars.return_value = mock_response
 
         result = client.get_current_bars(["TSLA"])
 
-        # Should use bar_completed (second-to-last), not bar_current (last/incomplete)
-        assert result["TSLA"]["close"] == 11.0
-        assert result["TSLA"]["volume"] == 200_000
-
-    def test_fallback_to_single_bar(self, client, mock_sdk_clients):
-        """When only 1 bar returned (market open), uses that bar."""
-        bar_only = _make_bar(open=9.0, high=9.5, low=8.8, close=9.2, volume=150_000)
-        mock_response = MagicMock()
-        mock_response.data = {"TSLA": [bar_only]}
-        mock_sdk_clients["data_client"].get_stock_bars.return_value = mock_response
-
-        result = client.get_current_bars(["TSLA"])
-
-        assert result["TSLA"]["close"] == 9.2
-        assert result["TSLA"]["volume"] == 150_000
+        assert result["TSLA"]["open"] == 8.0       # first bar's open
+        assert result["TSLA"]["high"] == 12.0      # running max
+        assert result["TSLA"]["low"] == 7.5        # running min
+        assert result["TSLA"]["close"] == 11.2     # latest bar's close
+        assert result["TSLA"]["volume"] == 350_000  # cumulative
 
     def test_api_error_propagates(self, client, mock_sdk_clients):
         """RuntimeError is wrapped in AlpacaAPIError."""

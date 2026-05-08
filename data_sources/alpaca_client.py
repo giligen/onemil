@@ -681,19 +681,35 @@ class AlpacaClient:
 
     def get_current_bars(self, symbols: List[str], feed: DataFeed = DataFeed.SIP) -> Dict[str, Dict]:
         """
-        Get the most recent COMPLETED 15-min bar for multiple symbols.
+        Get the day's RUNNING high/low/open/close/volume per symbol via
+        1-min RTH bars from today's market open (09:30 ET) to now.
 
-        Returns the second-to-last bar (the latest fully completed 15-min
-        bucket) so that volume is representative of the full period. Falls
-        back to the latest bar if only one bar is available (e.g. at market
-        open).
+        2026-05-08: switched from latest-15-min-bar to day-running-1-min
+        aggregation so live's qualification matches BASELINE BT exactly.
+        BT iterates 1-min bars from 09:30 ET tracking running max/min;
+        without this change, live's 15-min-bar polling lagged BT by
+        10-15 minutes (live couldn't qualify a stock until the first
+        09:30-09:45 RTH 15-min bar completed at 09:46 ET, while BT can
+        qualify as early as 09:35 ET after a 5-bar seed). That window
+        is where many of the day's strongest setups fire, so missing it
+        was a structural drift.
+
+        Premarket bars are excluded by the start=today_open_utc query —
+        Alpaca's 1-min bar feed includes extended hours, but we use
+        only RTH so the running stats match baseline BT.
 
         Args:
             symbols: List of stock symbols
-            feed: Data feed
+            feed: Data feed (SIP for live trading)
 
         Returns:
-            Dict mapping symbol -> {open, high, low, close, volume, timestamp}
+            Dict mapping symbol -> {open, high, low, close, volume, timestamp}.
+            Schema is unchanged from prior 15-min behavior — fields now
+            mean: open=first 1-min bar's open at 09:30, high=day's running
+            high since 09:30, low=day's running low since 09:30, close=
+            latest minute's close, volume=cumulative volume since 09:30,
+            timestamp=latest minute bar's timestamp. Symbol absent from
+            result means no RTH bars yet today.
 
         Raises:
             AlpacaAPIError: If API call fails
@@ -701,25 +717,28 @@ class AlpacaClient:
         if not symbols:
             return {}
 
+        # Compute today's 09:30 ET in UTC
+        ET = pytz.timezone('US/Eastern')
+        now_et = datetime.now(ET)
+        today_open_et = ET.localize(datetime(
+            now_et.year, now_et.month, now_et.day, 9, 30, 0
+        ))
+        today_open_utc = today_open_et.astimezone(timezone.utc)
+        # Pre-market guard: if the scanner happens to call this before
+        # market open, fall back to the prior 15-min behavior so we
+        # don't return empty for every symbol.
+        if datetime.now(timezone.utc) < today_open_utc:
+            today_open_utc = datetime.now(timezone.utc) - timedelta(minutes=45)
+
         try:
-            # Fetch last 45 min of 15-min bars to ensure we get 2+ bars
-            start = datetime.now(timezone.utc) - timedelta(minutes=45)
             results = {}
-            # 2026-04-27: chunk_size restored 100 → 200 after empirical
-            # disconfirmation. Initial reduction (993779c) hypothesized
-            # smaller chunks would lower per-chunk timeout risk. Wrong:
-            # smaller chunks = MORE total API calls = MORE shots at the
-            # timeout, not fewer (verified post-deploy at 14:03 UTC same
-            # day with chunk 2 still timing out). The actual fix was the
-            # 90s timeout + retry-once + parallelization (commits 6a48d86
-            # and d9633b8). 200 is fine; reverted to reduce call count.
             chunk_size = 200
             for i in range(0, len(symbols), chunk_size):
                 chunk = symbols[i:i + chunk_size]
                 request = StockBarsRequest(
                     symbol_or_symbols=chunk,
-                    timeframe=TimeFrame(15, TimeFrameUnit.Minute),
-                    start=start,
+                    timeframe=TimeFrame(1, TimeFrameUnit.Minute),
+                    start=today_open_utc,
                     feed=feed,
                 )
                 bars_raw = self._call_with_timeout(
@@ -728,23 +747,28 @@ class AlpacaClient:
                 )
                 bars = self._to_dict(bars_raw)
                 for symbol in chunk:
-                    if symbol in bars and len(bars[symbol]) > 0:
-                        # Use second-to-last bar (latest completed) if available,
-                        # fall back to last bar at market open when only 1 exists
-                        if len(bars[symbol]) >= 2:
-                            bar = bars[symbol][-2]
-                        else:
-                            bar = bars[symbol][-1]
-                        results[symbol] = {
-                            'open': float(bar.open),
-                            'high': float(bar.high),
-                            'low': float(bar.low),
-                            'close': float(bar.close),
-                            'volume': int(bar.volume),
-                            'timestamp': bar.timestamp
-                        }
+                    syms_bars = bars.get(symbol) or []
+                    if not syms_bars:
+                        continue
+                    # Aggregate 1-min bars to day-running stats
+                    day_high = max(float(b.high) for b in syms_bars)
+                    day_low = min(float(b.low) for b in syms_bars)
+                    day_volume = sum(int(b.volume) for b in syms_bars)
+                    first_open = float(syms_bars[0].open)
+                    latest = syms_bars[-1]
+                    results[symbol] = {
+                        'open': first_open,
+                        'high': day_high,
+                        'low': day_low,
+                        'close': float(latest.close),
+                        'volume': day_volume,
+                        'timestamp': latest.timestamp,
+                    }
 
-            logger.debug(f"Fetched current 15-min bars for {len(results)}/{len(symbols)} symbols")
+            logger.debug(
+                f"Fetched day-running 1-min bars (since 09:30 ET) for "
+                f"{len(results)}/{len(symbols)} symbols"
+            )
             return results
 
         except AlpacaAPIError:
