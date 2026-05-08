@@ -287,6 +287,126 @@ class TestFullTradingPipeline:
         # TSLA should not have a pending order (position manager blocks it)
         assert "TSLA" not in engine._pending_orders
 
+    @patch('trading.trading_engine.TradingEngine._is_past_last_entry_time', return_value=False)
+    @patch('trading.position_manager.datetime')
+    def test_marketable_limit_fallback_full_pipeline(
+        self, mock_dt, _mock_time, mock_alpaca, db,
+    ):
+        """End-to-end pinned regression for the marketable-limit fallback wiring.
+
+        Exercises the FULL stack with REAL OrderExecutor + TradingEngine — the
+        only mocked component is Alpaca. Catches wiring regressions between
+        OrderExecutor (returns order_type='marketable_limit_fallback') and
+        TradingEngine (must propagate to pending and route fills through
+        _is_simple_order to the SIMPLE post-fill path).
+
+        Sequence:
+          1. Pattern detection on real bull-flag bars (live OrderExecutor path).
+          2. OrderExecutor pre-flight bid check sees bid > stop, submits
+             marketable LIMIT instead of stop-limit.
+          3. result['order_type']='marketable_limit_fallback' propagates to
+             engine._pending_orders[symbol]['order_type'].
+          4. Fill simulation: get_order returns status=filled, fill > breakout.
+          5. _manage_pending_orders takes the SIMPLE path (no emergency close,
+             standalone safety-net SL submitted).
+        """
+        mock_now = MagicMock()
+        mock_now.hour = 10
+        mock_now.minute = 30
+        mock_dt.now.return_value = mock_now
+
+        # Real components (only Alpaca mocked)
+        detector = BullFlagDetector()
+        planner = TradePlanner(
+            position_size_dollars=500, max_shares=1000, min_risk_per_share=0.05,
+        )
+        executor = OrderExecutor(alpaca_client=mock_alpaca, db=db)
+        position_manager = PositionManager(
+            alpaca_client=mock_alpaca, db=db,
+            max_positions=3, daily_loss_limit=-100.0,
+        )
+
+        engine = TradingEngine(
+            alpaca_client=mock_alpaca, db=db,
+            detector=detector, planner=planner,
+            executor=executor, position_manager=position_manager,
+            enabled=True,
+        )
+        engine.quality_filter_enabled = False
+        engine.news_gate_enabled = False
+        engine.conviction_enabled = False
+        # StopMonitor presence triggers self-managed-stops dispatch →
+        # OrderExecutor.submit_buy_stop_order (the path with my fix).
+        engine.stop_monitor = MagicMock()
+        engine.stop_monitor._running = True
+        engine.stop_monitor.get_quote_watch_snapshot.return_value = None
+
+        # KEY: bid > stop forces marketable-limit fallback in OrderExecutor.
+        # Stop will be set to plan.entry_price ≈ pattern.breakout_level (~4.50
+        # from _make_bull_flag_setup_bars). bid 4.60 puts us above stop.
+        mock_alpaca.get_latest_quote.return_value = {
+            'bid_price': 4.60, 'ask_price': 4.62,
+            'bid_size': 100, 'ask_size': 100,
+        }
+        mock_alpaca.get_1min_bars.return_value = _make_bull_flag_setup_bars()
+        # Marketable LIMIT submission succeeds (NOT stop-limit).
+        mock_alpaca.submit_limit_buy_order.return_value = {
+            'id': 'mlf-e2e-1', 'status': 'accepted',
+        }
+
+        # ---- Phase 1: pattern detection → marketable limit submitted ----
+        engine.on_stock_qualified("AAPL")
+        result = engine.run_pattern_check()
+        assert result is not None, "Pattern detection should fire"
+        assert result['symbol'] == 'AAPL'
+        # CRITICAL: result and pending must carry the fallback tag.
+        assert result['order_type'] == 'marketable_limit_fallback', (
+            f"Expected order_type='marketable_limit_fallback' (bid > stop), "
+            f"got {result['order_type']!r}. The pre-flight bid check in "
+            f"OrderExecutor.submit_buy_stop_order is not firing."
+        )
+        assert 'AAPL' in engine._pending_orders
+        assert engine._pending_orders['AAPL']['order_type'] == \
+            'marketable_limit_fallback', (
+            "Pending order_type didn't propagate from result dict — wiring at "
+            "trading_engine.py:3380 broken."
+        )
+        # Real OrderExecutor called submit_limit_buy_order, NOT submit_stop_limit_order
+        mock_alpaca.submit_limit_buy_order.assert_called_once()
+        mock_alpaca.submit_stop_limit_order.assert_not_called()
+
+        # ---- Phase 2: simulate fill → must take SIMPLE post-fill path ----
+        # Fill at 4.55 = ~1% above breakout (under 2% gap-over, but above
+        # breakout so the bracket gap-fill code WOULD have fired without
+        # the hotfix and emergency-closed the position).
+        breakout = engine._pending_orders['AAPL']['setup'].breakout_level
+        fill_price = round(breakout + 0.05, 2)
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled', 'filled_avg_price': fill_price, 'legs': [],
+        }
+        mock_alpaca.submit_stop_sell_order.return_value = {
+            'id': 'safety-net-e2e', 'status': 'accepted',
+        }
+
+        engine._manage_pending_orders()
+
+        # Hotfix correctness: simple path taken
+        mock_alpaca.close_position.assert_not_called()
+        assert mock_alpaca.submit_stop_sell_order.called, (
+            "Safety-net SL was NOT submitted via simple path. The hotfix "
+            "(_is_simple_order helper covering 'marketable_limit_fallback') "
+            "must have regressed."
+        )
+        engine.stop_monitor.upgrade_quote_to_stop_watch.assert_called_once()
+
+        # DB row reflects clean fill
+        trades = db.get_trades_by_date(date.today().isoformat())
+        assert len(trades) == 1
+        assert trades[0]['order_id'] == 'mlf-e2e-1'
+        assert trades[0]['order_status'] == 'filled'
+        assert trades[0]['fill_price'] == fill_price
+        assert trades[0]['exit_reason'] != 'gap_adjust_failed'
+
     def test_database_trade_crud(self, db):
         """Test trade CRUD operations on the database."""
         now = datetime.now(timezone.utc)
