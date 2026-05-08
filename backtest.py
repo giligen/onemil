@@ -2495,20 +2495,34 @@ class BacktestRunner:
                     # Post-fill exit: in calm markets (SPY 3d range < 0.8%),
                     # exit immediately if breakout volume is weak (< 1.0x flag avg).
                     # Cost: ~0.8% slippage. Saves: ~$2K avg stop loss.
+                    # Experiment harness (2026-05-08 IREZ post-mortem):
+                    #   BT_POST_FILL_GATE_DISABLE=1 -> skip the kill but still
+                    #     record bk_ratio_at_fill / spy_3d_at_fill on the trade
+                    #     so post-hoc analysis can replay alternative gate logic.
+                    _gate_disabled = bool(os.environ.get('BT_POST_FILL_GATE_DISABLE'))
+                    _bk_vol_post = 0.0
+                    _afv_post = 0.0
+                    _bk_ratio_at_fill = None
+                    _spy_3d_at_fill = None
                     if self.conviction_enabled:
-                        _bk_vol = float(bar.get('volume', 0) if hasattr(bar, 'get') else bar['volume'])
-                        _afv = float(pending_order.setup.avg_flag_volume) if hasattr(pending_order.setup, 'avg_flag_volume') else 0
-                        _bk_ratio = _bk_vol / _afv if _afv > 0 else 99
+                        _bk_vol_post = float(bar.get('volume', 0) if hasattr(bar, 'get') else bar['volume'])
+                        _afv_post = float(pending_order.setup.avg_flag_volume) if hasattr(pending_order.setup, 'avg_flag_volume') else 0
+                        _bk_ratio_at_fill = _bk_vol_post / _afv_post if _afv_post > 0 else 99
                         _trade_date = None
                         try:
                             _trade_date = str(bars.iloc[0].get('timestamp', bars.iloc[0].name))[:10]
                         except Exception:
                             pass
-                        _spy_3d = self._get_spy_3d_range(_trade_date) if _trade_date else None
+                        _spy_3d_at_fill = self._get_spy_3d_range(_trade_date) if _trade_date else None
                         # None (missing/stale SPY) treated same as low-vol regime —
                         # consistent with the conviction rule's worst-case mapping.
-                        _spy_hostile = _spy_3d is None or _spy_3d < 0.8
-                        if _spy_hostile and _bk_ratio < 1.0:
+                        _spy_hostile = _spy_3d_at_fill is None or _spy_3d_at_fill < 0.8
+                        # Backwards-compat aliases for the kill branch below
+                        _bk_vol = _bk_vol_post
+                        _afv = _afv_post
+                        _bk_ratio = _bk_ratio_at_fill
+                        _spy_3d = _spy_3d_at_fill
+                        if not _gate_disabled and _spy_hostile and _bk_ratio < 1.0:
                             # Immediate exit — record slippage loss
                             exit_price = fill_price * (1 - self.exit_slippage_pct)
                             slippage_pnl = (exit_price - fill_price) * plan.shares
@@ -2552,6 +2566,9 @@ class BacktestRunner:
                             # breakdown's `conv_spy_regime` field already records the
                             # missing-data state via -0.5 contribution.
                             trade.spy_3d_range = getattr(pending_order, '_spy_3d_range', 0.0) or 0.0
+                            # Experiment columns (always populated when conviction_enabled)
+                            trade.bk_ratio_at_fill = _bk_ratio_at_fill
+                            trade.spy_3d_at_fill = _spy_3d_at_fill
                             result.trades_simulated.append(trade)
                             pending_order = None
                             continue
@@ -2559,6 +2576,11 @@ class BacktestRunner:
                     trade = self.simulator.simulate(
                         plan, bars, i, entry_price_override=fill_price
                     )
+                    # Experiment columns: gate inputs at fill time, populated
+                    # for both kill and natural-exit branches so post-hoc gate
+                    # variants can replay decisions.
+                    trade.bk_ratio_at_fill = _bk_ratio_at_fill
+                    trade.spy_3d_at_fill = _spy_3d_at_fill
                     # Propagate QF features and conviction from pending order to trade
                     if hasattr(pending_order, '_qf_features'):
                         trade._qf_features = pending_order._qf_features

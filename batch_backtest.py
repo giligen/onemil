@@ -80,6 +80,10 @@ CSV_HEADERS = [
     # max(gap%, range%) over pre-entry bars — mirrors scanner's intraday_change
     # qualification metric. Empty string means "unknown" (old cache rows).
     "intraday_change_at_entry",
+    # Post-fill gate inputs (2026-05-08, IREZ post-mortem). Always populated
+    # at fill time when conviction_enabled, regardless of whether the gate
+    # actually fired. Lets post-hoc analysis replay alternative gate variants.
+    "bk_ratio_at_fill", "spy_3d_at_fill",
 ]
 
 def _trade_to_cache_row(trade) -> Optional[Dict]:
@@ -126,6 +130,18 @@ def _trade_to_cache_row(trade) -> Optional[Dict]:
                 if getattr(trade, 'intraday_change_at_entry', None) is not None
                 else ''
             ),
+            # Post-fill gate inputs (IREZ post-mortem). Empty string when None
+            # so the CSV stays parseable on missing-data paths.
+            'bk_ratio_at_fill': (
+                f"{getattr(trade, 'bk_ratio_at_fill', None):.3f}"
+                if getattr(trade, 'bk_ratio_at_fill', None) is not None
+                else ''
+            ),
+            'spy_3d_at_fill': (
+                f"{getattr(trade, 'spy_3d_at_fill', None):.3f}"
+                if getattr(trade, 'spy_3d_at_fill', None) is not None
+                else ''
+            ),
         }
     except Exception as e:
         logger.warning(f"Failed to convert trade to cache row: {e}")
@@ -133,7 +149,14 @@ def _trade_to_cache_row(trade) -> Optional[Dict]:
 
 
 def _get_bull_flag_cache_path(entry_slip: float, exit_slip: float) -> str:
-    """Cache path includes slippage params since they affect trade simulation."""
+    """Cache path includes slippage params since they affect trade simulation.
+
+    Honors `BT_CACHE_PATH_OVERRIDE` env var for experiments that must NOT
+    clobber the production cache (e.g., gate-variant comparison runs).
+    """
+    override = os.environ.get('BT_CACHE_PATH_OVERRIDE')
+    if override:
+        return override
     e = int(entry_slip * 10000)  # 0.005 → 50
     x = int(exit_slip * 10000)   # 0.003 → 30
     return f"data/bull_flag_cache_e{e}_x{x}.csv"
