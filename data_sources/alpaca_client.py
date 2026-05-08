@@ -41,6 +41,7 @@ from alpaca.trading.requests import (
 from alpaca.trading.enums import AssetClass, AssetStatus, OrderSide, TimeInForce, OrderClass, OrderType
 from alpaca.common.exceptions import APIError
 import pandas as pd
+import pytz
 
 logger = logging.getLogger(__name__)
 
