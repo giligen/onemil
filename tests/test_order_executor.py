@@ -366,6 +366,27 @@ class TestMarketableLimitFallback:
             symbol='TEST', qty=113, limit_price=round(4.40 * 1.02, 2),
         )
 
+    def test_returns_none_when_marketable_limit_submit_raises(
+        self, executor, mock_alpaca,
+    ):
+        """If the marketable-limit submission fails after the fallback fires,
+        return None — DO NOT silently fall back to the original stop-limit
+        path (which would also reject under the same conditions, just from
+        Alpaca's pre-trade validation). Trader will retry on next bar.
+        Pinned regression for missing test coverage in the original ship."""
+        mock_alpaca.get_latest_quote.return_value = {'bid_price': 4.45}
+        mock_alpaca.submit_limit_buy_order.side_effect = AlpacaAPIError(
+            "Alpaca transient 503"
+        )
+        plan = _make_plan()
+        result = executor.submit_buy_stop_order(plan)
+        assert result is None
+        mock_alpaca.submit_limit_buy_order.assert_called_once()
+        # IMPORTANT: must NOT have fallen through to stop-limit on this path.
+        # If we did, Alpaca would reject for the same reason (bid >= stop)
+        # and we'd be making 2 wasted API calls per attempted entry.
+        mock_alpaca.submit_stop_limit_order.assert_not_called()
+
     def test_returns_consistent_dict_shape(self, executor, mock_alpaca):
         """Both submission paths return dicts with identical key sets so
         downstream consumers don't need to special-case order_type."""

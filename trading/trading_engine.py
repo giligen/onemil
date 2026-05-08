@@ -34,6 +34,30 @@ logger = logging.getLogger(__name__)
 ET = pytz.timezone('US/Eastern')
 
 
+# Order types that have NO broker-level bracket legs (no pre-attached SL/TP).
+# Both `stop_simple` (production default w/ self_managed_stops=True) and
+# `marketable_limit_fallback` (IREZ+TTGT post-mortem 2026-05-08 — submitted
+# when bid >= stop, since Alpaca live rejects stop-limit BUY in that case)
+# go through the SAME post-fill flow:
+#   * gap-fill target adjustment is SKIPPED (no TP leg to replace)
+#   * safety-net SL is submitted as a STANDALONE stop-sell (no bracket leg)
+# Adding 'marketable_limit_fallback' to this set was missed in the original
+# ship — caused fills to take the bracket gap-adjust path, fail to find a
+# TP leg, and get emergency-closed (the exact failure shape this fix was
+# trying to prevent). Use this set going forward; do not duplicate the
+# string check inline.
+_SIMPLE_ORDER_TYPES = frozenset(('stop_simple', 'marketable_limit_fallback'))
+
+
+def _is_simple_order(pending: dict) -> bool:
+    """True if the pending order has no broker-level bracket legs.
+
+    Centralized check for the post-fill flow's simple-vs-bracket dispatch.
+    See `_SIMPLE_ORDER_TYPES` for rationale.
+    """
+    return pending.get('order_type') in _SIMPLE_ORDER_TYPES
+
+
 class TradingEngine:
     """
     Orchestrates the automated trading pipeline.
@@ -1676,7 +1700,12 @@ class TradingEngine:
                 # position on the downside.
                 setup = pending.get('setup')
                 trail_active = self.trailing_stop_enabled and self.stop_monitor
-                is_simple_order = pending.get('order_type') == 'stop_simple'
+                # Use the shared helper (covers stop_simple AND
+                # marketable_limit_fallback). Simple orders have no broker
+                # bracket legs, so the gap-fill TP-replacement path is a no-op
+                # and would emergency-close the position trying to find a leg
+                # that doesn't exist. See `_SIMPLE_ORDER_TYPES`.
+                is_simple_order = _is_simple_order(pending)
                 if (not is_simple_order
                         and fill_price and plan and setup
                         and fill_price > setup.breakout_level):
@@ -1760,7 +1789,10 @@ class TradingEngine:
                         trail_r = self.trailing_stop_r if self.trailing_stop_enabled else 0.0
                         activate_r = self.trailing_activate_at_r if self.trailing_stop_enabled else 0.0
 
-                        is_simple_order = pending.get('order_type') == 'stop_simple'
+                        # Shared helper — both stop_simple AND
+                        # marketable_limit_fallback have no bracket legs and
+                        # need a standalone safety-net SL. See _SIMPLE_ORDER_TYPES.
+                        is_simple_order = _is_simple_order(pending)
 
                         if is_simple_order:
                             # Simple order path: submit standalone safety-net SL

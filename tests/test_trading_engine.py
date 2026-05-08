@@ -826,6 +826,196 @@ class TestPostFillBookkeepingOrder:
         )
 
 
+class TestMarketableLimitFallbackFillFlow:
+    """Pinned regression for the hotfix found in code review (2026-05-08).
+
+    The original ship of marketable_limit_fallback set
+    `pending['order_type']='marketable_limit_fallback'`. Two downstream
+    branches in `_manage_pending_orders` (gap-fill at line 1679 +
+    safety-net SL at line 1763) checked
+    `pending.get('order_type') == 'stop_simple'` strictly, so they
+    treated marketable_limit_fallback fills as BRACKET orders. That's
+    wrong: marketable LIMIT orders have no broker bracket legs (the
+    Alpaca SDK only attaches legs for explicit bracket order_class).
+    The bracket gap-fill path then tried to find a TP leg, failed with
+    "No TP leg found", and emergency-closed every fill — turning the
+    TTGT-class fix INTO a TTGT-class kill.
+
+    Hotfix: introduced `_is_simple_order(pending)` helper backed by
+    `_SIMPLE_ORDER_TYPES = frozenset({'stop_simple',
+    'marketable_limit_fallback'})`. Both branches now use the helper.
+
+    These tests fail without the hotfix.
+    """
+
+    def _save_pending_trade(self, db, symbol='TEST', order_id='test-order'):
+        from datetime import timezone
+        now = datetime.now(timezone.utc)
+        db.save_trade({
+            'trade_date': date.today().isoformat(),
+            'symbol': symbol, 'side': 'buy',
+            'entry_price': 4.40, 'stop_loss_price': 4.25,
+            'take_profit_price': 4.90, 'shares': 113,
+            'risk_per_share': 0.15, 'total_risk': 16.95,
+            'risk_reward_ratio': 3.3,
+            'order_id': order_id, 'order_status': 'accepted',
+            'fill_price': None, 'filled_at': None,
+            'exit_price': None, 'exit_reason': None, 'exited_at': None,
+            'pnl': None, 'pnl_pct': None, 'pattern_data': '{}',
+            'created_at': now, 'updated_at': now,
+        })
+
+    def _setup_pending(self, engine, mock_alpaca, db, order_type, fill_price):
+        """Common setup: pending order, mocked StopMonitor, mocked fill."""
+        from datetime import timezone
+        from unittest.mock import MagicMock as _MM
+
+        order_id = f"order-{order_type}-fill"
+        self._save_pending_trade(db, 'TEST', order_id)
+        plan = _make_plan('TEST')
+        setup = _make_pattern('TEST')
+
+        # Engine needs StopMonitor + real_stop_level for the safety-net branch
+        engine.stop_monitor = _MM()
+        engine.stop_monitor._running = True
+        # Disable the entry-microstructure branch (qsnap=None bypasses it)
+        engine.stop_monitor.get_quote_watch_snapshot.return_value = None
+
+        engine._pending_orders['TEST'] = {
+            'order_id': order_id,
+            'plan': plan, 'setup': setup,
+            'placed_at': datetime.now(timezone.utc),
+            'order_type': order_type,
+            'real_stop_level': 4.30,
+        }
+        # Fill at $4.45 = 1.1% above $4.40 breakout. Under 2% gap-over
+        # threshold, so gap-over rejection does NOT fire. But > breakout,
+        # so gap-fill TP-replacement WOULD fire on the bracket path —
+        # which is what we want to confirm is SKIPPED for simple orders.
+        # legs=[] mirrors what a real LIMIT or simple-stop order returns.
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled',
+            'filled_avg_price': fill_price,
+            'legs': [],
+        }
+        mock_alpaca.submit_stop_sell_order.return_value = {
+            'id': 'safety-net-sl-1', 'status': 'accepted',
+        }
+        return order_id
+
+    def test_marketable_limit_fill_takes_simple_path_no_emergency_close(
+        self, engine, mock_alpaca, db, mock_position_manager,
+    ):
+        """marketable_limit_fallback fill must NOT emergency-close.
+        The bracket gap-fill path (which would fire 'No TP leg found →
+        emergency close') MUST be skipped because marketable-limit orders
+        have no bracket legs."""
+        order_id = self._setup_pending(
+            engine, mock_alpaca, db,
+            order_type='marketable_limit_fallback', fill_price=4.45,
+        )
+
+        engine._manage_pending_orders()
+
+        # 1. Symbol marked traded — bookkeeping ran
+        assert 'TEST' in engine._traded_symbols
+        mock_position_manager.mark_traded.assert_called_with('TEST')
+
+        # 2. NO emergency close — this is the regression we're guarding
+        mock_alpaca.close_position.assert_not_called()
+
+        # 3. Standalone safety-net SL submitted (the SIMPLE path)
+        assert mock_alpaca.submit_stop_sell_order.called, (
+            "Safety-net SL was NOT submitted via the simple path. "
+            "If this fails, the hotfix to _is_simple_order() regressed and "
+            "the fill is going down the bracket path — expect emergency closes."
+        )
+
+        # 4. StopMonitor upgraded to active stop watching
+        engine.stop_monitor.upgrade_quote_to_stop_watch.assert_called_once()
+
+        # 5. DB row reflects clean fill — no spurious exit_reason
+        trade = db.get_trade_by_order_id(order_id)
+        assert trade['order_status'] == 'filled'
+        assert trade['fill_price'] == 4.45
+        assert trade['exit_reason'] != 'gap_adjust_failed', (
+            "exit_reason='gap_adjust_failed' means the bracket gap-fill "
+            "branch fired and emergency-closed the position — exactly the "
+            "bug this test pins."
+        )
+
+    def test_stop_simple_fill_also_takes_simple_path(
+        self, engine, mock_alpaca, db, mock_position_manager,
+    ):
+        """Companion: the original 'stop_simple' path stays unchanged.
+        Confirms _is_simple_order continues to recognize the legacy tag."""
+        order_id = self._setup_pending(
+            engine, mock_alpaca, db,
+            order_type='stop_simple', fill_price=4.45,
+        )
+
+        engine._manage_pending_orders()
+
+        assert 'TEST' in engine._traded_symbols
+        mock_alpaca.close_position.assert_not_called()
+        assert mock_alpaca.submit_stop_sell_order.called
+        engine.stop_monitor.upgrade_quote_to_stop_watch.assert_called_once()
+        trade = db.get_trade_by_order_id(order_id)
+        assert trade['fill_price'] == 4.45
+        assert trade['exit_reason'] != 'gap_adjust_failed'
+
+    def test_bracket_fill_still_takes_bracket_path(
+        self, engine, mock_alpaca, db, mock_position_manager,
+    ):
+        """Negative case: bracket orders MUST still go through bracket
+        path. _is_simple_order MUST return False for stop_bracket — else
+        we'd skip the gap-fill TP adjustment for legitimate bracket fills."""
+        from datetime import timezone
+        from unittest.mock import MagicMock as _MM
+
+        self._save_pending_trade(db, 'TEST', 'order-bracket-fill')
+        plan = _make_plan('TEST')
+        setup = _make_pattern('TEST')
+
+        engine.stop_monitor = _MM()
+        engine.stop_monitor._running = True
+        engine.stop_monitor.get_quote_watch_snapshot.return_value = None
+
+        engine._pending_orders['TEST'] = {
+            'order_id': 'order-bracket-fill',
+            'plan': plan, 'setup': setup,
+            'placed_at': datetime.now(timezone.utc),
+            'order_type': 'stop_bracket',
+            'real_stop_level': 4.30,
+        }
+        # Bracket order returns legs (real Alpaca behavior) — TP+SL legs
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled', 'filled_avg_price': 4.45,
+            'legs': [
+                {'id': 'tp-leg-1', 'side': 'sell',
+                 'order_type': 'limit', 'limit_price': 4.90},
+                {'id': 'sl-leg-1', 'side': 'sell',
+                 'order_type': 'stop', 'stop_price': 4.18},
+            ],
+        }
+        # Disable trailing stop so the gap-fill TP replacement actually fires
+        # (skipped when trail is active — see line 1693 comment)
+        engine.trailing_stop_enabled = False
+        # Mock leg replacement
+        mock_alpaca.replace_order_limit_price.return_value = {
+            'id': 'tp-leg-1', 'status': 'replaced',
+        }
+
+        engine._manage_pending_orders()
+
+        # Bracket path: replace_order_limit_price WAS called for the TP leg
+        # (this is exactly what we DON'T want for simple orders — they have
+        # no TP leg, hence the bug).
+        mock_alpaca.replace_order_limit_price.assert_called_once()
+        # No standalone SL submission for bracket — pre-existing legs handle it
+        mock_alpaca.submit_stop_sell_order.assert_not_called()
+
+
 # ===========================================================================
 # Phase 3: Gap-Fill Stop Adjustment
 # ===========================================================================
