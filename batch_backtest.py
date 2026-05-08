@@ -1227,6 +1227,12 @@ def _serialize_result(result: 'BacktestResult') -> dict:
             'spy_3d_range': getattr(t, 'spy_3d_range', 0.0),
             # Two-tier filter classification input
             'intraday_change_at_entry': getattr(t, 'intraday_change_at_entry', None),
+            # Post-fill gate inputs (IREZ post-mortem). Always recorded at
+            # fill time when conviction_enabled — see backtest.py:2502 area.
+            # Must be carried across process boundaries or the cache CSV
+            # ends up with empty columns despite the BT computing them.
+            'bk_ratio_at_fill': getattr(t, 'bk_ratio_at_fill', None),
+            'spy_3d_at_fill': getattr(t, 'spy_3d_at_fill', None),
         }
         if t.plan:
             trade_dict['plan'] = {
@@ -1345,6 +1351,8 @@ def _reconstruct_result(result_dict: dict) -> BacktestResult:
         trade._avg_volume_20d = td.get('_avg_volume_20d', 0)
         trade._qf_features = td.get('_qf_features', {})
         trade.intraday_change_at_entry = td.get('intraday_change_at_entry')
+        trade.bk_ratio_at_fill = td.get('bk_ratio_at_fill')
+        trade.spy_3d_at_fill = td.get('spy_3d_at_fill')
         trades.append(trade)
 
     result = BacktestResult(
