@@ -156,6 +156,12 @@ class TradingEngine:
         from config import Config as _ConfigCls
         self._two_tier_cfg = _ConfigCls().two_tier_filter_cfg
 
+        # Post-fill gate thresholds (IREZ post-mortem 2026-05-08).
+        # Defaults 0.5 / 0.5 — see docs/post_fill_gate_variant_analysis.md.
+        # Override via `trading.post_fill_gate.{spy_3d_threshold,bk_ratio_threshold}`
+        # in config.yaml. `enabled=false` short-circuits the entire kill switch.
+        self._post_fill_gate_cfg = _ConfigCls().post_fill_gate_cfg
+
         # Risk tiers: scale risk on high-conviction setups
         tier_cfg = _cfg.get("trading", {}).get("risk_tiers", {})
         self.risk_tiers_enabled = bool(tier_cfg.get("enabled", False))
@@ -760,6 +766,19 @@ class TradingEngine:
         same helper used by BT — so live and BT produce identical outputs
         for identical bars (parity by construction).
 
+        Uses bars STRICTLY BEFORE today (T-1, T-2, T-3) — same window as
+        BT's `_get_spy_3d_range` (`WHERE bar_date < trade_date`). Today's
+        intraday-updating partial daily bar is excluded so the value is
+        stable across the entire trading day.
+
+        IREZ post-mortem 2026-05-08: prior to this fix, live re-fetched
+        SPY daily bars per cycle including today's partial bar; the 3-day
+        mean drifted within seconds (0.80% at conviction → 0.77% at
+        post-fill 9 sec later), tripping the post-fill gate kill switch
+        on a $37K-shape winner that BT (which always uses T-1/T-2/T-3)
+        would have happily ridden. This mismatch was a silent BT-live
+        parity bug, separate from any threshold tuning.
+
         Returns:
             Average daily range %, or `None` if SPY data is missing or stale.
             Callers MUST treat `None` as 'regime unknown' (the conviction
@@ -774,21 +793,29 @@ class TradingEngine:
             is_spy_data_stale,
         )
 
+        today = date.today()
+
         # Path 1 (preferred): MarketRegimeFilter daily bars, populated by
         # `_refresh_spy_data` at startup + per-cycle. Use the public
         # `get_recent_bars` API rather than reaching for private internals.
+        # `before_date=today` restricts to T-1 / T-2 / T-3 — must match
+        # BT's `WHERE bar_date < trade_date` filter (parity guarantee).
         if self.market_regime is not None:
             try:
-                recent = self.market_regime.get_recent_bars(n=3)
-                latest = self.market_regime.get_latest_bar_date()
+                recent = self.market_regime.get_recent_bars(n=3, before_date=today)
             except Exception as e:
                 logger.warning(
                     "_get_spy_3d_range_live: market_regime accessor raised "
                     "%s — skipping path 1", e,
                 )
-                recent, latest = None, None
+                recent = None
             if recent and len(recent) >= 3:
-                if latest is None or not is_spy_data_stale(latest, date.today()):
+                # Staleness is gauged from the freshest bar IN OUR 3-DAY
+                # WINDOW (T-1 typically). If T-1 is too old (e.g., we've
+                # missed a week of data), fall through to None — same
+                # behavior as BT.
+                latest_in_window = recent[-1].get('date')
+                if latest_in_window is None or not is_spy_data_stale(latest_in_window, today):
                     result = compute_spy_3d_range(recent)
                     if result is not None:
                         return result
@@ -796,7 +823,7 @@ class TradingEngine:
             else:
                 logger.warning(
                     "_get_spy_3d_range_live: market_regime has fewer than 3 "
-                    "bars (got %d) — _refresh_spy_data may not have run",
+                    "bars before today (got %d) — _refresh_spy_data may not have run",
                     len(recent) if recent else 0,
                 )
         else:
@@ -1477,10 +1504,15 @@ class TradingEngine:
                 # Post-fill exit: in calm markets + weak breakout vol → close immediately.
                 # Matches backtest.py post-fill exit logic. Treat missing/stale SPY
                 # data (None) the same as low-vol regime — defensive default.
-                if self.conviction_enabled and setup:
+                # Thresholds + enable flag are config-driven (IREZ post-mortem
+                # 2026-05-08): defaults tightened to 0.5/0.5 from 0.8/1.0.
+                _pfg_enabled = self._post_fill_gate_cfg.get('enabled', True)
+                _pfg_spy_thresh = self._post_fill_gate_cfg.get('spy_3d_threshold', 0.5)
+                _pfg_bk_thresh = self._post_fill_gate_cfg.get('bk_ratio_threshold', 0.5)
+                if _pfg_enabled and self.conviction_enabled and setup:
                     _afv = float(setup.avg_flag_volume) if hasattr(setup, 'avg_flag_volume') else 0
                     _spy_3d = self._get_spy_3d_range_live()
-                    _spy_hostile = _spy_3d is None or _spy_3d < 0.8
+                    _spy_hostile = _spy_3d is None or _spy_3d < _pfg_spy_thresh
                     if _afv > 0 and _spy_hostile:
                         # Get recent bar volume (the fill bar)
                         try:
@@ -1489,7 +1521,7 @@ class TradingEngine:
                         except Exception:
                             _bk_vol = 0
                         _bk_ratio = _bk_vol / _afv if _afv > 0 else 99
-                        if _bk_ratio < 1.0:
+                        if _bk_ratio < _pfg_bk_thresh:
                             _spy_str = f"{_spy_3d:.2f}%" if _spy_3d is not None else "MISSING"
                             logger.warning(
                                 f"{symbol}: POST-FILL EXIT — SPY 3d {_spy_str} + "

@@ -194,6 +194,18 @@ trading:
     vol_confirmed_exit:
       enabled: true
       min_vol_ratio: 1.0
+  # Post-fill gate (IREZ post-mortem 2026-05-08).
+  # Kills positions immediately after fill if SPY 3d range AND breakout volume
+  # are BOTH below their thresholds. 16-mo BT (Jan 2025-May 2026) showed the
+  # original 0.8/1.0 thresholds destroyed $24K of net P&L via a non-discriminating
+  # winner/loser kill (5W/4L of 9 kills) and walk-forward sign-flip (gate net-helped
+  # in train, hurt in test). At 0.5/0.5 zero kills fired — equivalent to disabled
+  # in observable behavior, but retains a defense for severely hostile market events.
+  # See docs/post_fill_gate_variant_analysis.md for the full memo.
+  post_fill_gate:
+    enabled: true                        # set false to short-circuit the kill switch entirely
+    spy_3d_threshold: 0.5                # was 0.8 — tightened (V1)
+    bk_ratio_threshold: 0.5              # was 1.0 — tightened (V1)
   # Exhaustion exit: sell partial into strength on exhaustion signals
   # Reduces slippage by selling while buyers are still aggressive
   # Production: polls 1-min bars every 60s, matches backtest signal logic

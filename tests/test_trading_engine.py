@@ -751,6 +751,16 @@ class TestPostFillBookkeepingOrder:
 
         # Enable conviction so the post-fill-exit gate runs
         engine.conviction_enabled = True
+        # Force the gate's thresholds to the historic 0.8 / 1.0 pair so this
+        # test exercises gate-firing behavior independent of the V1 default
+        # (post-IREZ ship 2026-05-08 lowered defaults to 0.5 / 0.5, which
+        # would not fire on 0.5 / 0.5 inputs — this test is about the gate
+        # mechanism, not the threshold tuning).
+        engine._post_fill_gate_cfg = {
+            'enabled': True,
+            'spy_3d_threshold': 0.8,
+            'bk_ratio_threshold': 1.0,
+        }
         # Force calm SPY + weak breakout vol
         engine._get_spy_3d_range_live = lambda: 0.5  # < 0.8 threshold
         # Mock 1-min bars so bk_vol = 20000 → bk_ratio = 0.5 < 1.0

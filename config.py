@@ -549,6 +549,32 @@ class Config:
         }
 
     @property
+    def post_fill_gate_cfg(self) -> dict:
+        """Post-fill gate config (IREZ post-mortem 2026-05-08).
+
+        Kills positions immediately after fill if SPY 3d range AND
+        breakout volume are BOTH below their thresholds.
+
+        Default thresholds tightened to 0.5 / 0.5 (V1) on 2026-05-08.
+        16-mo BT (Jan 2025-May 2026, 310 trades) showed the prior 0.8/1.0
+        thresholds destroyed $24,643 of net P&L via a non-discriminating
+        winner/loser kill — outcome distribution was 5 winners / 4 losers
+        out of 9 kills (~50/50). Walk-forward sign-flipped: gate net-helped
+        in train (Jan-Sep 2025: +$8,917) and net-hurt in test (Oct 2025-
+        May 2026: -$33,560). At 0.5/0.5 zero kills fired on the 16-mo
+        dataset — equivalent to disabled in observable behavior, but
+        retains a defense for severely hostile market events.
+
+        See `docs/post_fill_gate_variant_analysis.md` for the full memo.
+        """
+        cfg = self._get_yaml("trading", "post_fill_gate", default={}) or {}
+        return {
+            "enabled": bool(cfg.get("enabled", True)),
+            "spy_3d_threshold": float(cfg.get("spy_3d_threshold", 0.5)),
+            "bk_ratio_threshold": float(cfg.get("bk_ratio_threshold", 0.5)),
+        }
+
+    @property
     def regime_sizing_cfg(self) -> dict:
         """Regime-aware sizing config (Phase 1.4b ship, 2026-04-18).
 

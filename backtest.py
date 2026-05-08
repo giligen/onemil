@@ -1131,6 +1131,17 @@ class BacktestRunner:
         # Conviction scoring: scale position size based on setup quality
         conv_cfg = trading_cfg.get("conviction_scoring", {})
         self.conviction_enabled = bool(conv_cfg.get("enabled", False))
+
+        # Post-fill gate thresholds (IREZ post-mortem 2026-05-08).
+        # Defaults 0.5 / 0.5 — see docs/post_fill_gate_variant_analysis.md.
+        # Override via `trading.post_fill_gate.{spy_3d_threshold,bk_ratio_threshold}`
+        # in config.yaml. `enabled=false` short-circuits the entire kill switch.
+        # Read directly from yaml to keep parity with trading_engine.py without
+        # introducing a Config singleton dependency in the BT entry point.
+        _pfg = trading_cfg.get("post_fill_gate", {}) or {}
+        self.post_fill_gate_enabled = bool(_pfg.get("enabled", True))
+        self.post_fill_gate_spy_threshold = float(_pfg.get("spy_3d_threshold", 0.5))
+        self.post_fill_gate_bk_threshold = float(_pfg.get("bk_ratio_threshold", 0.5))
         # Conviction filter (skip trades below threshold). 0.0 = disabled.
         # Mirrors trading_engine.py for BT/PROD parity.
         # Env var override for sweep / research runs that need to capture all
@@ -2499,7 +2510,12 @@ class BacktestRunner:
                     #   BT_POST_FILL_GATE_DISABLE=1 -> skip the kill but still
                     #     record bk_ratio_at_fill / spy_3d_at_fill on the trade
                     #     so post-hoc analysis can replay alternative gate logic.
-                    _gate_disabled = bool(os.environ.get('BT_POST_FILL_GATE_DISABLE'))
+                    _gate_disabled = (
+                        bool(os.environ.get('BT_POST_FILL_GATE_DISABLE'))
+                        or not self.post_fill_gate_enabled
+                    )
+                    _spy_thresh = self.post_fill_gate_spy_threshold
+                    _bk_thresh = self.post_fill_gate_bk_threshold
                     _bk_vol_post = 0.0
                     _afv_post = 0.0
                     _bk_ratio_at_fill = None
@@ -2516,13 +2532,13 @@ class BacktestRunner:
                         _spy_3d_at_fill = self._get_spy_3d_range(_trade_date) if _trade_date else None
                         # None (missing/stale SPY) treated same as low-vol regime —
                         # consistent with the conviction rule's worst-case mapping.
-                        _spy_hostile = _spy_3d_at_fill is None or _spy_3d_at_fill < 0.8
+                        _spy_hostile = _spy_3d_at_fill is None or _spy_3d_at_fill < _spy_thresh
                         # Backwards-compat aliases for the kill branch below
                         _bk_vol = _bk_vol_post
                         _afv = _afv_post
                         _bk_ratio = _bk_ratio_at_fill
                         _spy_3d = _spy_3d_at_fill
-                        if not _gate_disabled and _spy_hostile and _bk_ratio < 1.0:
+                        if not _gate_disabled and _spy_hostile and _bk_ratio < _bk_thresh:
                             # Immediate exit — record slippage loss
                             exit_price = fill_price * (1 - self.exit_slippage_pct)
                             slippage_pnl = (exit_price - fill_price) * plan.shares
