@@ -2284,6 +2284,38 @@ def main():
     if args.build_cache and not args.no_monthly:
         args.monthly = True
 
+    # Apply CLI sizing overrides BEFORE monthly mode (workers in monthly mode
+    # read config via Config() which honors set_config_path). Without this
+    # block, --build-cache + --capital/--risk silently ignored the overrides
+    # and built the cache at config.yaml's checked-in sizing — making
+    # production-sized BT runs report tiny P&L (e.g., $200-500 risk per trade
+    # instead of $2000). Discovered 2026-05-08 mid-Q1+Apr research run.
+    if args.monthly and not args.no_monthly and (
+        args.capital > 0 or args.risk > 0 or args.max_shares > 0
+    ):
+        import yaml as _yaml
+        import tempfile
+        from config import Config as _CfgCls
+        _override_cfg = copy.deepcopy(_CfgCls._load_yaml_only())
+        _override_cfg.setdefault("trading", {})
+        if args.capital > 0:
+            _override_cfg["trading"]["capital"] = args.capital
+            _override_cfg["trading"]["position_size_dollars"] = args.capital
+            logger.info(f"Monthly CLI override: capital=${args.capital:,.0f}")
+        if args.risk > 0:
+            _override_cfg["trading"]["risk_per_trade"] = args.risk
+            logger.info(f"Monthly CLI override: risk_per_trade=${args.risk:,.0f}")
+        if args.max_shares > 0:
+            _override_cfg["trading"]["max_shares"] = args.max_shares
+            logger.info(f"Monthly CLI override: max_shares={args.max_shares}")
+        _fd, _override_path = tempfile.mkstemp(
+            prefix="onemil_cfg_monthly_", suffix=".yaml", dir="/tmp"
+        )
+        with os.fdopen(_fd, "w") as _f:
+            _yaml.safe_dump(_override_cfg, _f, default_flow_style=False)
+        _CfgCls.set_config_path(_override_path)
+        logger.info(f"Monthly sizing overrides written to {_override_path}")
+
     # Monthly mode: use MonthlyBacktestRunner for parallel, chunked processing
     if args.monthly and not args.no_monthly:
         from batch.monthly_runner import MonthlyBacktestRunner
