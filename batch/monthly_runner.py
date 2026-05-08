@@ -513,7 +513,9 @@ class MonthlyBacktestRunner:
             if self.scan_workers > 1:
                 results = run_batch_backtest_parallel(
                     movers, db_path=str(db.db_path), max_workers=self.scan_workers,
-                    qualification_pct_override=self.qualification_pct_override
+                    qualification_pct_override=self.qualification_pct_override,
+                    include_premarket=self.include_premarket,
+                    client=client,
                 )
             else:
                 runner = BacktestRunner()  # uses from_config() for all settings

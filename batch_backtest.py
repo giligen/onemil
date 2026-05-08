@@ -1066,8 +1066,11 @@ def _backtest_worker(args: Tuple) -> Optional[dict]:
     Returns:
         Serializable dict with backtest results, or None on error
     """
-    # Unpack args — supports legacy 3-tuple, 5-tuple, and extended 6-tuple
-    if len(args) >= 6:
+    # Unpack args — supports legacy 3-tuple, 5-tuple, 6-tuple, and 7-tuple
+    pm_extremes = None
+    if len(args) >= 7:
+        symbol, trade_date_iso, db_path, prev_close, min_bv_override, qual_pct_override, pm_extremes = args
+    elif len(args) == 6:
         symbol, trade_date_iso, db_path, prev_close, min_bv_override, qual_pct_override = args
     elif len(args) == 5:
         symbol, trade_date_iso, db_path, prev_close, min_bv_override = args
@@ -1135,7 +1138,8 @@ def _backtest_worker(args: Tuple) -> Optional[dict]:
                                 volume_profile=vol_profile,
                                 prev_close=_prev_close,
                                 prev_day_bars=prev_day_bars,
-                                qualification_pct_override=qual_pct_override)
+                                qualification_pct_override=qual_pct_override,
+                                premarket_extremes=pm_extremes)
             # Attach point-in-time volume for cache
             for trade in result.trades_simulated:
                 trade._avg_volume_20d = avg_vol or 0
@@ -1337,6 +1341,8 @@ def run_batch_backtest_parallel(
     market_regime: Optional['MarketRegimeFilter'] = None,
     max_consecutive_losses: int = 0,
     qualification_pct_override: Optional[float] = None,
+    include_premarket: bool = False,
+    client: Optional['AlpacaClient'] = None,
 ) -> List[BacktestResult]:
     """
     Run backtests in parallel using multiprocessing.
@@ -1407,13 +1413,44 @@ def run_batch_backtest_parallel(
 
         for sym, d, prev_close in date_movers:
             filtered_items.append(
-                (sym, d.isoformat(), db_path, prev_close, min_bv_override, qualification_pct_override)
+                (sym, d.isoformat(), db_path, prev_close, min_bv_override, qualification_pct_override, None)
             )
 
     if friday_skipped:
         logger.info(f"Friday filter skipped {friday_skipped} symbol/date pairs")
     if regime_skipped:
         logger.info(f"Regime filter skipped {regime_skipped} symbol/date pairs")
+
+    # Pre-fetch premarket extremes (batch by date) and inject into worker args.
+    # This is the parallel-path counterpart to run_batch_backtest's per-call
+    # _fetch_premarket_extremes helper. We do it here so each (symbol, date)
+    # gets its pm_extremes once via the SIP feed in chunks of 200 symbols,
+    # rather than each worker spawning its own AlpacaClient.
+    if include_premarket and client is not None and filtered_items:
+        from collections import defaultdict as _dd
+        items_by_date = _dd(list)
+        for it in filtered_items:
+            items_by_date[it[1]].append(it[0])
+        pm_lookup: Dict[Tuple[str, str], Tuple[float, float]] = {}
+        for date_iso, syms in items_by_date.items():
+            try:
+                td = date.fromisoformat(date_iso)
+                pm_map = client.get_premarket_extremes(syms, td)
+                for sym, extremes in pm_map.items():
+                    pm_lookup[(sym, date_iso)] = extremes
+            except Exception as e:
+                logger.warning(
+                    f"premarket pre-fetch failed for {date_iso}: {e}"
+                )
+        # Re-build filtered_items with pm_extremes filled in
+        filtered_items = [
+            (it[0], it[1], it[2], it[3], it[4], it[5], pm_lookup.get((it[0], it[1])))
+            for it in filtered_items
+        ]
+        logger.info(
+            f"Parallel batch: pre-fetched premarket extremes for "
+            f"{len(pm_lookup)}/{len(filtered_items)} (symbol, date) pairs"
+        )
 
     filtered_total = len(filtered_items)
     logger.info(
