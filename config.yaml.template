@@ -206,6 +206,14 @@ trading:
     enabled: true                        # set false to short-circuit the kill switch entirely
     spy_3d_threshold: 0.5                # was 0.8 — tightened (V1)
     bk_ratio_threshold: 0.5              # was 1.0 — tightened (V1)
+  # Marketable-limit fallback (IREZ+TTGT post-mortem 2026-05-08).
+  # When the bull-flag entry order would otherwise be rejected by Alpaca live
+  # (stop_price <= current bid — stop already triggered), submit as a
+  # marketable LIMIT BUY at the configured limit_price instead. Preserves the
+  # slippage cap. Paper Alpaca skips this validation; live enforces it. Set
+  # enabled: false to revert to the legacy stop-limit-only path.
+  marketable_limit_fallback:
+    enabled: true
   # Exhaustion exit: sell partial into strength on exhaustion signals
   # Reduces slippage by selling while buyers are still aggressive
   # Production: polls 1-min bars every 60s, matches backtest signal logic

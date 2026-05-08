@@ -57,6 +57,20 @@ class OrderExecutor:
         self.db = db
         self.order_stream = order_stream
 
+        # Marketable-limit fallback config (IREZ+TTGT post-mortem 2026-05-08).
+        # Read once at construction so submit_buy_stop_order's hot path doesn't
+        # touch yaml. Defaults to enabled — see
+        # docs/irez_ttgt_paper_vs_prod_divergence.md.
+        try:
+            from config import Config as _Config
+            self._marketable_limit_fallback_cfg = _Config().marketable_limit_fallback_cfg
+        except Exception as e:
+            logger.warning(
+                f"OrderExecutor: failed to load marketable_limit_fallback_cfg: {e} "
+                f"— defaulting to enabled"
+            )
+            self._marketable_limit_fallback_cfg = {"enabled": True}
+
     def _persist_submit_timing(self, trade_id: int, symbol: str,
                                 strategy: str,
                                 pipeline_timing: Optional[Dict[str, Any]]) -> None:
@@ -428,17 +442,63 @@ class OrderExecutor:
             f"limit ${limit_price:.2f}"
         )
 
-        try:
-            order = self.alpaca.submit_stop_limit_order(
-                symbol=plan.symbol,
-                qty=plan.shares,
-                side='buy',
-                stop_price=stop_price,
-                limit_price=limit_price,
-            )
-        except Exception as e:
-            logger.error(f"{plan.symbol}: Buy-stop order submission failed: {e}")
-            return None
+        # Pre-flight bid check (IREZ+TTGT post-mortem 2026-05-08).
+        # Alpaca live REJECTS buy stop-limit when stop_price <= current bid
+        # (rejected ~4ms after submit, no reject_reason exposed in the REST
+        # response). Paper Alpaca does NOT enforce this rule — that's the
+        # parity gap that lost TTGT (and ~24 other prod orders in the last
+        # 5 weeks). When bid is already at/above the stop, the order is
+        # effectively a marketable limit — submit one directly. Slippage cap
+        # is preserved by limit_price (= stop * 1.02 from line 423).
+        # See docs/irez_ttgt_paper_vs_prod_divergence.md.
+        _mlf_enabled = (self._marketable_limit_fallback_cfg or {}).get(
+            'enabled', True
+        )
+        _used_marketable_limit = False
+        order = None
+        if _mlf_enabled:
+            try:
+                _q = self.alpaca.get_latest_quote(plan.symbol)
+                _bid = float((_q or {}).get('bid_price', 0) or 0)
+            except Exception as _quote_err:
+                logger.warning(
+                    f"{plan.symbol}: pre-flight quote fetch failed: "
+                    f"{_quote_err} — proceeding with stop-limit "
+                    f"(defensive fallback)"
+                )
+                _bid = 0.0
+            if _bid > 0 and _bid >= stop_price:
+                logger.info(
+                    f"{plan.symbol}: STOP ALREADY TRIGGERED "
+                    f"(bid ${_bid:.2f} >= stop ${stop_price:.2f}) — "
+                    f"submitting as marketable LIMIT @ ${limit_price:.2f} "
+                    f"to avoid Alpaca live rejection"
+                )
+                try:
+                    order = self.alpaca.submit_limit_buy_order(
+                        symbol=plan.symbol,
+                        qty=plan.shares,
+                        limit_price=limit_price,
+                    )
+                    _used_marketable_limit = True
+                except Exception as e:
+                    logger.error(
+                        f"{plan.symbol}: marketable-limit fallback failed: {e}"
+                    )
+                    return None
+
+        if order is None:
+            try:
+                order = self.alpaca.submit_stop_limit_order(
+                    symbol=plan.symbol,
+                    qty=plan.shares,
+                    side='buy',
+                    stop_price=stop_price,
+                    limit_price=limit_price,
+                )
+            except Exception as e:
+                logger.error(f"{plan.symbol}: Buy-stop order submission failed: {e}")
+                return None
 
         if order is None:
             logger.error(f"{plan.symbol}: Buy-stop order returned None")
@@ -518,6 +578,11 @@ class OrderExecutor:
             'limit_price': limit_price,
             'stop_loss_price': plan.stop_loss_price,
             'take_profit_price': plan.take_profit_price,
-            'order_type': 'stop_simple',
+            # Tag distinguishes the two submit paths so post-hoc DB queries
+            # can count fallback fills vs. baseline. See marketable_limit_fallback.
+            'order_type': (
+                'marketable_limit_fallback' if _used_marketable_limit
+                else 'stop_simple'
+            ),
         }
 

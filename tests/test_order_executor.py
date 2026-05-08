@@ -230,6 +230,164 @@ class TestSubmitBuyStopOrder:
         assert result['limit_price'] == round(4.40 * 1.03, 2)
 
 
+class TestMarketableLimitFallback:
+    """Marketable-limit fallback (IREZ+TTGT post-mortem 2026-05-08).
+
+    Pinned regression: when the bid is at/above the configured stop_price,
+    OrderExecutor MUST submit a marketable LIMIT BUY instead of a stop-limit.
+    Alpaca live rejects stop-limit BUY orders where stop is already triggered;
+    paper accepts them. This is the parity gap that lost ~24 prod orders in
+    the last 5 weeks (TTGT, IREZ, EAF, RMAX, AGCC, OPTX, MLEC, SMX, TOYO).
+    """
+
+    def test_falls_back_to_limit_when_bid_above_stop(self, executor, mock_alpaca):
+        """Bid > stop → submit_limit_buy_order called instead of stop-limit."""
+        mock_alpaca.get_latest_quote.return_value = {
+            'bid_price': 4.45, 'ask_price': 4.46,
+        }
+        mock_alpaca.submit_limit_buy_order.return_value = {
+            'id': 'mlf-1', 'status': 'accepted',
+        }
+        plan = _make_plan()
+        result = executor.submit_buy_stop_order(plan)
+        assert result is not None
+        assert result['order_type'] == 'marketable_limit_fallback'
+        mock_alpaca.submit_limit_buy_order.assert_called_once()
+        mock_alpaca.submit_stop_limit_order.assert_not_called()
+
+    def test_falls_back_when_bid_equal_stop(self, executor, mock_alpaca):
+        """Bid == stop (boundary case) → marketable limit fallback fires."""
+        mock_alpaca.get_latest_quote.return_value = {'bid_price': 4.40}
+        mock_alpaca.submit_limit_buy_order.return_value = {
+            'id': 'mlf-eq', 'status': 'accepted',
+        }
+        plan = _make_plan()
+        result = executor.submit_buy_stop_order(plan)
+        assert result['order_type'] == 'marketable_limit_fallback'
+        mock_alpaca.submit_limit_buy_order.assert_called_once()
+        mock_alpaca.submit_stop_limit_order.assert_not_called()
+
+    def test_uses_stop_limit_when_bid_below_stop(self, executor, mock_alpaca):
+        """Bid < stop → original stop-limit path (current behavior)."""
+        mock_alpaca.get_latest_quote.return_value = {'bid_price': 4.30}
+        mock_alpaca.submit_stop_limit_order.return_value = {
+            'id': 'sl-1', 'status': 'accepted',
+            'symbol': 'TEST', 'qty': 113,
+        }
+        plan = _make_plan()
+        result = executor.submit_buy_stop_order(plan)
+        assert result['order_type'] == 'stop_simple'
+        mock_alpaca.submit_stop_limit_order.assert_called_once()
+        mock_alpaca.submit_limit_buy_order.assert_not_called()
+
+    def test_falls_through_when_quote_unavailable(self, executor, mock_alpaca):
+        """get_latest_quote raises → defensive default to stop-limit."""
+        mock_alpaca.get_latest_quote.side_effect = AlpacaAPIError("flaky")
+        mock_alpaca.submit_stop_limit_order.return_value = {
+            'id': 'fallthrough-1', 'status': 'accepted',
+            'symbol': 'TEST', 'qty': 113,
+        }
+        plan = _make_plan()
+        result = executor.submit_buy_stop_order(plan)
+        assert result['order_type'] == 'stop_simple'
+        mock_alpaca.submit_stop_limit_order.assert_called_once()
+        mock_alpaca.submit_limit_buy_order.assert_not_called()
+
+    def test_falls_through_when_quote_returns_zero_bid(self, executor, mock_alpaca):
+        """bid == 0 (degenerate) → defensive default to stop-limit."""
+        mock_alpaca.get_latest_quote.return_value = {'bid_price': 0.0}
+        mock_alpaca.submit_stop_limit_order.return_value = {
+            'id': 'zero-1', 'status': 'accepted',
+            'symbol': 'TEST', 'qty': 113,
+        }
+        plan = _make_plan()
+        result = executor.submit_buy_stop_order(plan)
+        assert result['order_type'] == 'stop_simple'
+        mock_alpaca.submit_stop_limit_order.assert_called_once()
+        mock_alpaca.submit_limit_buy_order.assert_not_called()
+
+    def test_disabled_by_config_always_uses_stop_limit(self, mock_alpaca, db):
+        """Config kill-switch: enabled=False bypasses the check entirely,
+        even when bid > stop. Restores legacy stop-limit-only behavior."""
+        executor = OrderExecutor(alpaca_client=mock_alpaca, db=db)
+        executor._marketable_limit_fallback_cfg = {'enabled': False}
+        mock_alpaca.get_latest_quote.return_value = {'bid_price': 4.45}
+        mock_alpaca.submit_stop_limit_order.return_value = {
+            'id': 'disabled-1', 'status': 'accepted',
+            'symbol': 'TEST', 'qty': 113,
+        }
+        plan = _make_plan()
+        result = executor.submit_buy_stop_order(plan)
+        assert result['order_type'] == 'stop_simple'
+        mock_alpaca.submit_stop_limit_order.assert_called_once()
+        mock_alpaca.submit_limit_buy_order.assert_not_called()
+
+    def test_db_record_saved_in_marketable_path(self, executor, mock_alpaca, db):
+        """DB trade row must persist on the fallback path, same as stop-limit."""
+        from datetime import date
+        mock_alpaca.get_latest_quote.return_value = {'bid_price': 4.45}
+        mock_alpaca.submit_limit_buy_order.return_value = {
+            'id': 'mlf-db-1', 'status': 'accepted',
+        }
+        plan = _make_plan()
+        executor.submit_buy_stop_order(plan)
+        trades = db.get_trades_by_date(date.today().isoformat())
+        assert len(trades) == 1
+        assert trades[0]['order_id'] == 'mlf-db-1'
+        assert trades[0]['symbol'] == 'TEST'
+
+    def test_marketable_path_logs_diagnostic(self, executor, mock_alpaca, caplog):
+        """The fallback branch logs `STOP ALREADY TRIGGERED` so journalctl
+        spotting the new path is trivial."""
+        mock_alpaca.get_latest_quote.return_value = {'bid_price': 4.45}
+        mock_alpaca.submit_limit_buy_order.return_value = {
+            'id': 'log-1', 'status': 'accepted',
+        }
+        plan = _make_plan()
+        with caplog.at_level(logging.INFO, logger='trading.order_executor'):
+            executor.submit_buy_stop_order(plan)
+        assert any(
+            'STOP ALREADY TRIGGERED' in rec.message
+            for rec in caplog.records
+        ), "Expected 'STOP ALREADY TRIGGERED' INFO log on the fallback path"
+
+    def test_marketable_path_passes_correct_limit_to_alpaca(
+        self, executor, mock_alpaca,
+    ):
+        """Fallback uses limit_price = stop * (1 + slippage_pct) — same cap
+        the stop-limit path would have applied."""
+        mock_alpaca.get_latest_quote.return_value = {'bid_price': 4.45}
+        mock_alpaca.submit_limit_buy_order.return_value = {
+            'id': 'price-1', 'status': 'accepted',
+        }
+        plan = _make_plan()
+        executor.submit_buy_stop_order(plan, slippage_pct=0.02)
+        mock_alpaca.submit_limit_buy_order.assert_called_once_with(
+            symbol='TEST', qty=113, limit_price=round(4.40 * 1.02, 2),
+        )
+
+    def test_returns_consistent_dict_shape(self, executor, mock_alpaca):
+        """Both submission paths return dicts with identical key sets so
+        downstream consumers don't need to special-case order_type."""
+        mock_alpaca.get_latest_quote.return_value = {'bid_price': 4.45}
+        mock_alpaca.submit_limit_buy_order.return_value = {
+            'id': 'mlf-shape', 'status': 'accepted',
+        }
+        mlf_result = executor.submit_buy_stop_order(_make_plan())
+
+        mock_alpaca.reset_mock()
+        mock_alpaca.get_latest_quote.return_value = {'bid_price': 4.30}
+        mock_alpaca.submit_stop_limit_order.return_value = {
+            'id': 'sl-shape', 'status': 'accepted',
+            'symbol': 'TEST', 'qty': 113,
+        }
+        sl_result = executor.submit_buy_stop_order(_make_plan())
+
+        assert set(mlf_result.keys()) == set(sl_result.keys())
+        assert mlf_result['order_type'] == 'marketable_limit_fallback'
+        assert sl_result['order_type'] == 'stop_simple'
+
+
 class TestConflictCheckFastPath:
     """OrderExecutor wash-trade check: prefer OrderStreamWatcher cache when
     available, fall back to REST when stream is absent/unhealthy."""

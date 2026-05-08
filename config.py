@@ -549,6 +549,23 @@ class Config:
         }
 
     @property
+    def marketable_limit_fallback_cfg(self) -> dict:
+        """Marketable-limit fallback for buy stop-limit (IREZ+TTGT post-mortem
+        2026-05-08).
+
+        When enabled, OrderExecutor checks the current bid before submitting
+        a buy stop-limit. If `bid >= stop_price`, submits as marketable LIMIT
+        instead — Alpaca live rejects stop-limit BUY orders where the stop is
+        already triggered (paper accepts them; that's the parity gap that
+        lost TTGT and ~24 other prod orders in the last 5 weeks).
+
+        See docs/irez_ttgt_paper_vs_prod_divergence.md.
+        """
+        cfg = self._get_yaml("trading", "marketable_limit_fallback",
+                             default={}) or {}
+        return {"enabled": bool(cfg.get("enabled", True))}
+
+    @property
     def post_fill_gate_cfg(self) -> dict:
         """Post-fill gate config (IREZ post-mortem 2026-05-08).
 
