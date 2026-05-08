@@ -1928,6 +1928,7 @@ class BacktestRunner:
         prev_close: Optional[float] = None,
         prev_day_bars: Optional[pd.DataFrame] = None,
         qualification_pct_override: Optional[float] = None,
+        premarket_extremes: Optional[tuple] = None,
     ) -> BacktestResult:
         """
         Run backtest for a symbol over a day's bars.
@@ -1972,7 +1973,8 @@ class BacktestRunner:
             return self._run_realistic(symbol, bars, trade_date,
                                        avg_daily_volume, volume_profile,
                                        prev_close=prev_close,
-                                       qualification_pct_override=qualification_pct_override)
+                                       qualification_pct_override=qualification_pct_override,
+                                       premarket_extremes=premarket_extremes)
         return self._run_fantasy(symbol, bars, trade_date)
 
     def _run_fantasy(self, symbol: str, bars: pd.DataFrame, trade_date: str) -> BacktestResult:
@@ -2144,6 +2146,7 @@ class BacktestRunner:
         volume_profile: Optional[Dict[str, int]] = None,
         prev_close: Optional[float] = None,
         qualification_pct_override: Optional[float] = None,
+        premarket_extremes: Optional[tuple] = None,
     ) -> BacktestResult:
         """
         Realistic backtest: detect_setup() fires before breakout, places pending
@@ -2205,6 +2208,26 @@ class BacktestRunner:
 
         running_high = 0.0
         running_low = float('inf')
+        # Premarket-extremes seed (parity with live's get_current_bars
+        # behavior: when called early in the session, the latest completed
+        # 15-min bar is a premarket bar, so live's _day_highs/_day_lows
+        # carry premarket high/low forward into RTH qualification. BT
+        # without this seed only sees RTH bars and qualifies later — or
+        # not at all — for stocks that gapped/extended in premarket.
+        # See research notes: 5/5 INTT and 5/7 PN both qualified live
+        # via premarket-derived range_pct.
+        if premarket_extremes is not None:
+            pm_high, pm_low = premarket_extremes
+            if pm_high is not None and pm_high > 0:
+                running_high = max(running_high, float(pm_high))
+            if pm_low is not None and pm_low > 0 and pm_low != float('inf'):
+                running_low = min(running_low, float(pm_low))
+            logger.info(
+                f"{symbol}: Premarket seed — pm_high=${pm_high}, "
+                f"pm_low=${pm_low} (running_high=${running_high:.2f}, "
+                f"running_low=${running_low if running_low != float('inf') else 'inf'})"
+            )
+
         # Seed running extremes from early bars (before scan loop starts)
         # so V-reversal qualification doesn't miss the opening range
         for j in range(min(self.MIN_BARS_FOR_SETUP - 1, len(bars))):
@@ -2998,6 +3021,14 @@ def main():
     parser.add_argument(
         "--verbose", "-v", action="store_true", help="Enable verbose/debug logging"
     )
+    parser.add_argument(
+        "--include-premarket", action="store_true",
+        help="Fetch premarket 1-min bars (04:00-09:30 ET) and seed the "
+             "qualification gate's running_high/low with their extremes. "
+             "Matches live's behavior of carrying forward premarket "
+             "high/low via 15-min bar lookback. Off by default (BT-LIVE "
+             "drift research)."
+    )
     args = parser.parse_args()
 
     # Configure logging
@@ -3068,10 +3099,33 @@ def main():
         _prev_close_price = float(prev_day_bars['close'].iloc[-1])
         logger.info(f"Qualification gate: prev_close=${_prev_close_price:.2f}")
 
+    # Optional: fetch premarket bars and compute extremes
+    pm_extremes = None
+    if args.include_premarket:
+        try:
+            pm_start_et = _ET.localize(trade_date.replace(hour=4, minute=0, second=0))
+            pm_end_et = _ET.localize(trade_date.replace(hour=9, minute=30, second=0))
+            pm_start = pm_start_et.astimezone(timezone.utc)
+            pm_end = pm_end_et.astimezone(timezone.utc)
+            pm_bars = client.get_historical_1min_bars(symbol, pm_start, pm_end)
+            if pm_bars is not None and not pm_bars.empty:
+                pm_high = float(pm_bars['high'].max())
+                pm_low = float(pm_bars['low'].min())
+                pm_extremes = (pm_high, pm_low)
+                logger.info(
+                    f"Premarket: {len(pm_bars)} bars, "
+                    f"high=${pm_high:.2f}, low=${pm_low:.2f}"
+                )
+            else:
+                logger.info("Premarket: no bars returned (light/no premarket trading)")
+        except Exception as e:
+            logger.warning(f"Premarket fetch failed: {e}")
+
     # Run backtest
     runner = BacktestRunner()
     result = runner.run(symbol, bars, args.date, prev_day_bars=prev_day_bars,
-                        prev_close=_prev_close_price)
+                        prev_close=_prev_close_price,
+                        premarket_extremes=pm_extremes)
 
     # Print report
     print_report(result)

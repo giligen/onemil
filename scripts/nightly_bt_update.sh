@@ -77,11 +77,19 @@ echo "Building gap: $NEW_START to $TODAY → $TMP_CACHE" >> "$LOG"
 
 # --build-cache disables max_trades/regime/CB filters → produces raw cache
 # matching the schema of the production cache.
+#
+# Sizing args MUST mirror live config.yaml so cached pnl values are
+# directly comparable to live trades. Mismatch produced apples-to-oranges
+# BT-vs-LIVE numbers for week of 2026-05-04 (cache had ~$240/trade risk;
+# live ran $60/trade × tier multipliers). config.yaml as of 2026-05-08:
+#   trading.capital: 5000
+#   trading.risk_per_trade: 60
+#   trading.max_shares: 15000
 /usr/bin/python3 batch_backtest.py \
     --start "$NEW_START" --end "$TODAY" \
     --build-cache --no-cache \
     --cache-file "$TMP_CACHE" \
-    --capital 50000 --risk 2000 --max-shares 10000 \
+    --capital 5000 --risk 60 --max-shares 15000 \
     >> "$LOG" 2>&1
 
 BUILD_EXIT=$?
