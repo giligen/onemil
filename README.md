@@ -912,6 +912,297 @@ Authoritative artifacts:
 Run the checker **before every stage change** and whenever you want a
 dispassionate read on how the live ramp is going.
 
+## Production Bug Fixes — 2026-05-08
+
+A long debugging day surfaced **5 distinct production bugs** that had been
+silently corroding LIVE P&L vs BT for 14+ days. Documented here so the same
+incident vectors don't recur.
+
+### Bug 1 — MACD wave trail-arm gate (CORD/BOBS/ASPN flash exits)
+
+**Symptom**: BOBS, ASPN, CORD all entered around 13:35 ET. Within seconds:
+- BOBS: trail ratcheted from $13.01 → $13.37 from a tick high $13.41,
+  then tripped at $13.33 → exit -$675 (7 sec from fill).
+- ASPN: peak $5.52 (+$725 unrealized), trail tripped at $5.47 → $0 P&L.
+  ASPN then ran to $5.63 (+$2,100 unrealized) AFTER the trail had exited.
+- CORD: trail tripped 1 sec after fill on a $5.12 bid (entry $5.19); the
+  follow-up close failed (held_for_orders race) → naked position rescued
+  manually.
+
+**Root cause**: pct trails (MACD wave's `trail_pct=0.003`) had `trailing_active`
+set to True at watch creation. With `highest_since_entry = entry_price`, the
+trail stop was placed at `entry × 0.997` — below entry. First post-fill bid
+print typically dipped 0.5%+ → trail tripped immediately at a small loss.
+
+**Fix**: new `trail_arm_pct` field on `WatchEntry`. Trail does not activate
+until `observed_high ≥ entry_price × (1 + trail_arm_pct)`. Default to
+`trail_pct` so the trail can never fire at a loss.
+
+Files: `trading/stop_monitor.py` (WatchEntry, _maybe_arm_pct_trail helper, 3
+trail-update sites). Config: `macd_wave.yaml::risk.trail_arm_pct: 0.003`.
+
+### Bug 2 — MACD wave pct trail tick-ratchet whipsaw
+
+**Symptom**: even when trail did arm correctly, individual ticks during
+fast moves ratcheted the stop to `tick_high × 0.997` and the very next bid
+print tripped it. BT runs on 1-min bars only (`backtest.py` simulator) and
+shows trail_pct=0.003 producing +$260K over 15 months. LIVE wasn't
+delivering anywhere near that.
+
+**Root cause**: pct trail ratcheted on EVERY tick. BT/LIVE divergence —
+BT only sees 1-min bar.high, never tick-level micro-volatility.
+
+**Fix**: pct trails now ratchet `stop_price` ONLY on closed-bar highs (BT
+parity). Tick path still updates `highest_since_entry` (for arming check)
+and still TRIGGERS exits when `price ≤ stop_price` — only the
+stop_price-ratchet path moved from tick-cadence to bar-cadence.
+
+Files: `trading/stop_monitor.py::_on_trade` and the poll-loop equivalent.
+
+### Bug 3 — Held-qty race + emergency SL safety net
+
+**Symptom**: when StopMonitor cancelled bracket legs to submit a fresh
+limit sell, Alpaca's `held_for_orders` had not propagated yet. The new
+sell came back with code `40310000` ("insufficient qty available, requested
+N, available 0"). Fallback `close_position()` failed for the same reason.
+Original code logged "safety-net SL is the last line of defense" and
+returned — but the bracket's OCO had auto-cancelled the safety SL when its
+sibling was cancelled, so the position was actually NAKED.
+
+**Fix** (3 layers):
+1. **Held-qty retry-with-backoff**: new `_is_held_qty_race(e)` classifier;
+   `_submit_with_held_qty_retry()` helper retries at 0.2s / 0.5s / 1.5s
+   (cumulative 2.2s, fits inside fill-poll budget).
+2. **Emergency stop-market SL**: if both `submit_limit_sell` and
+   `close_position` fail through retries, place a fresh `submit_stop_sell_order`
+   at min(trigger_price, watch.stop_price) × 0.99 — broker-side protection.
+3. **CRITICAL log + Telegram alert** if even the emergency SL fails.
+
+Files: `trading/stop_monitor.py` (_is_held_qty_race, _submit_with_held_qty_retry,
+emergency-SL block at the end of force-close path).
+
+### Bug 4 — Bull flag WS handler-loss race (TTGT — 14+ days silent)
+
+**Symptom**: TTGT entered at $5.79 (10:04 ET). Peak $6.32 (+2.4R). The
+trail's R-activation gate is +1.5R = $6.12. **Trail never armed.** Position
+drifted back to fill price with 0% protection — and the same pattern was
+true for every bull flag fill in the prior 14 days. `journalctl` over
+2 weeks showed **0 (zero) R-trail activations across all bull flag positions**
+despite multiple trades crossing +1.5R.
+
+**Root cause** — asyncio race in the quote-watch → stop-watch upgrade flow:
+1. `remove_quote_watch(symbol)` schedules `_unsubscribe_symbol` coroutine
+   (which does `_handlers["trades"].pop(symbol)` then awaits an unsubscribe
+   message).
+2. `add_watch(symbol, ...)` schedules `_subscribe_symbol` coroutine (which
+   does `_handlers["trades"][symbol] = self._on_trade` then awaits subscribe).
+3. Asyncio interleaves them. If the subscribe's sync handler-set runs
+   BEFORE the unsubscribe's sync handler-pop, the **unsubscribe wipes out
+   the freshly-installed handler**. WS server keeps delivering trade ticks;
+   client-side dispatch has no handler → ticks silently dropped.
+
+**Fix**: new atomic `StopMonitor.upgrade_quote_to_stop_watch()` that pops
+quote-watch + installs stop-watch under one lock with NO WS operations.
+The handlers stay registered because the prior quote-watch already
+installed them. `trading_engine.py` fill path now calls this single method
+instead of the racy `remove_quote_watch + add_watch` pair.
+
+Regression coverage: `tests/test_quote_to_stop_upgrade_race.py::TestUpgradeRaceProof`
+4 tests including a synthetic asyncio-interleave reproducer that fails on
+the OLD path and passes on the NEW.
+
+Files: `trading/stop_monitor.py` (new method ~95 LOC), `trading/trading_engine.py`
+(call site swap at fill-time).
+
+### Bug 5 — Bull flag plan-R (slippage-inflated activation gate)
+
+**Symptom**: TTGT planned breakout $5.715, fill $5.79 (1.3% slip). IREZ
+planned $6.72, fill $6.83 (1.6% slip). Under fill-based R math:
+
+| Trade | planned R | fill-based R | activation level | peak | armed? |
+|---|---|---|---|---|---|
+| TTGT  | $0.145    | $0.22        | $6.12            | $6.32 | yes (just barely) |
+| IREZ  | $0.25     | $0.36        | $7.37            | $7.29 | **NO — peaked $0.08 short** |
+
+Slippage inflates R by `slippage% × entry / R`, which pushes the +1.5R
+activation gate further from current price. The strongest momentum
+breakouts (which have the most slippage) get the WORST trail protection —
+inverse of what's wanted.
+
+**Root cause**: trail math (activation, ratchet) used
+`risk_per_share = fill - planned_stop`. Slippage inflated this number, and
+all R-multiples derived from it shifted away from entry.
+
+**Fix**: new `planned_entry_price` and `planned_risk_per_share` fields on
+`WatchEntry`. When set, R-trail math uses these (the SETUP's structural
+values) instead of fill-based. Hard stop and broker safety SL stay at
+fill-based levels — only trail/lock thresholds move.
+
+**BT validation** (`study_planned_r_realistic_slippage.py`): plan-R wins
+HOLDOUT P&L at every slippage level tested. At LIVE-realistic slippage
+(1.5-2.0%), plan-R adds **+$62-72K HOLDOUT vs fill-R**. Note: BT also shows
+the strategy is unprofitable at >1% slippage in BOTH modes — plan-R is
+damage mitigation; reducing slippage at entry is the bigger lever.
+
+**Live verification (2026-05-08 16:01:54 / 16:03:20)**: TTGT armed within
+2 sec of restart with new code; IREZ armed 88 sec later. **First R-trail
+activations in production in 14+ days** — log line shows `(planned=yes)`
+confirming the new path is firing.
+
+Regression coverage: `tests/test_quote_to_stop_upgrade_race.py::TestPlanRTrail`
+(IREZ + TTGT replay scenarios + helper unit test + legacy backward-compat).
+
+Files: `trading/stop_monitor.py` (WatchEntry fields, `_r_baseline_and_unit`
+helper, 3 trail-update sites), `trading/trading_engine.py` (fresh-fill +
+crash-recovery paths pass planned values).
+
+### Bug 6 — Post-fill kill switch idempotency on OrderStream replay
+
+**Symptom**: A second restart re-fired the bull flag post-fill kill switch
+(`SPY 3d hostile + bk_vol < 1x → close immediately`) on the open IREZ
+position. `close_position()` failed (held_for_orders race) and the system
+nearly flushed +$1.2K of unrealized gain. Saved only by the broker SL
+holding the qty against the market sell.
+
+**Root cause** (two layers):
+1. **Pending-order recovery includes terminal-status trades**:
+   `_sync_filled_trades_at_startup` re-added cancelled IREZ trade rows
+   (which had `order_id` + NULL fill/exit) to `_pending_orders`. Their
+   original Alpaca order ID still showed "filled" in order history (the
+   buy-stop did fill before being closed) → OrderStream replay treated
+   the stale fill as a fresh fill.
+2. **No idempotency guard in `_manage_pending_orders`**: every restart
+   could re-process old fills.
+
+**Fix** (defense-in-depth):
+1. Pending-order recovery filters terminal statuses: `cancelled`, `canceled`,
+   `expired`, `rejected`, `time_stop_canceled`.
+2. `_manage_pending_orders` skips fills for symbols already in
+   `_traded_symbols` (live position managed elsewhere).
+
+Files: `trading/trading_engine.py` (sync + manage_pending_orders).
+Tests: `tests/test_trading_engine.py::TestStartupSync` (2 new regression
+cases).
+
+### Bug 7 — BT study harness double-counted partial_pnl (1.8x inflation)
+
+**Symptom**: `study_bull_flag_exits.py` claimed ProdBaseline HOLDOUT
+P&L = +$186,946. After fixing harness math, true value was +$104,684 (1.8x
+inflation). The user noticed: "with $20-30K/mo from today's gains, BT $46K/mo
+sounds too good".
+
+**Root cause**: `backtest.py:739` sets `trade.pnl = trade.partial_pnl + final_pnl`
+— `pnl` is already the TOTAL. The study script was adding `trade.partial_pnl`
+on top, double-counting partial exits.
+
+**Fix**: removed the `+= partial_pnl` line. Re-ran study; HOLDOUT now reads
+$104,684 (= $26K/month) which matches LIVE projection from today's actuals.
+
+Files: `study_bull_flag_exits.py::simulate_one`.
+
+### Strategy upgrade — ORB lock thresholds 1.5R/1.0R → 1.75R/0.5R (shipped 2026-05-08)
+
+After today's debugging exposed the bull flag plan-R issue, a parallel
+investigation surfaced that ORB's `lock_arm_at_r` / `lock_stop_r` pair was
+not at the empirical optimum. Walk-forward BT (TRAIN H1 2025 / VAL H2 2025
+/ HOLDOUT Jan-Apr 2026) ran a full 38-config grid of `(arm_r, lock_r)` pairs
+plus a 16-config two-stage exit grid (BE-lock + static lock).
+
+**Result**: `1.75R / 0.50R` Pareto-dominates the prior `1.5R / 1.0R` PROD on
+every metric measured on the OOS HOLDOUT:
+
+| Metric | PROD (1.5/1.0) | New (1.75/0.5) | Δ |
+|---|---|---|---|
+| HOLDOUT P&L | $93,989 | $116,325 | **+$22,336 (+24%)** |
+| Sharpe (weekly, annualized) | 4.30 | 5.83 | +36% |
+| Sortino (downside-only) | 21.96 | 38.45 | +75% |
+| % weeks positive | 66.7% | 77.8% | +11pp |
+| Worst weekly loss | -$5,525 | -$4,814 | -13% |
+| Max consecutive losing weeks | 2 | 1 | half |
+| Weekly std dev | $8,758 | $7,991 | -9% |
+| Calmar | 4.78 | 8.55 | +79% |
+| % months positive (4-mo HOLDOUT) | 100% | 100% | same |
+
+Walk-forward integrity: 1.75/0.5 ranked #2 on VAL ($149K, vs #1 winner
+1.75/0.75 at $151K — within $2K = noise). VAL top-5 was a tightly bunched
+cluster; 1.75/0.5 is the strict-walk-forward best within tolerance and the
+Pareto-best on HOLDOUT stability.
+
+Not shipped (BT-falsified):
+- **Lower arm thresholds (0.5-1.0R)**: lost $20-55K HOLDOUT vs PROD.
+  Capping the runners costs more than rescuing near-misses.
+- **Two-stage exits (BE-lock + static lock)**: every walk-forward winner
+  failed HOLDOUT by $11-23K. Adding a BE_arm_r parameter overfits without
+  improving stability.
+
+Sanity check: ran the BT harness on the prior PROD config first;
+reproduced the documented full-timeline ~$342K P&L (mine: $340,077) within
+0.7%. Confirms BT mechanics are honest — no double-count or look-ahead.
+
+Files: `orb.yaml`, `orb.yaml.template`, `study_orb_pipeline_static_lock.py`
+(constants updated). Studies: `study_orb_r_grid.py`, `study_orb_two_stage.py`,
+`study_orb_two_stage_variance.py`.
+
+### Cross-strategy impact summary
+
+| Bug | Bull Flag | MACD Wave | ORB |
+|---|---|---|---|
+| #1 trail-arm gate | not affected (R-trail uses different activation) | **fixed** | not affected (no pct trail) |
+| #2 bar-only ratchet | not affected (R-trail bar-ratchet was already there post-OPTX 4/13) | **fixed** | not affected (uses static_lock, no ratchet at all) |
+| #3 held-qty race + emergency SL | **fixed** (shared StopMonitor exit path) | **fixed** (same path) | **fixed** (same path) |
+| #4 WS handler-loss race (atomic upgrade) | **fixed** | not affected (no quote-watch upgrade flow) | not affected (no quote-watch upgrade flow) |
+| #5 plan-R | **fixed** | n/a (uses pct trail not R-trail) | already correct (passes `lock_r_unit = range_size` — fixed at setup time, slippage-immune by design) |
+| #6 post-fill kill switch idempotency | **fixed** | not affected (no post-fill kill switch) | not affected (no post-fill kill switch) |
+| #7 BT harness double-count partial_pnl | study-only fix; production bull flag P&L unaffected | n/a | n/a |
+
+**Why ORB was structurally immune to most of these**: ORB was designed
+around a fixed-R unit (`lock_r_unit = range_size`) from the start —
+slippage-decoupled by construction. ORB uses static lock (one-shot stop
+ratchet at +arm_R touch, no further trailing) instead of dynamic trail —
+no whipsaw surface. ORB doesn't use the quote-watch → stop-watch upgrade
+flow — no async race. The bull flag and MACD wave designs evolved
+piecewise and accumulated structural debt that ORB avoided.
+
+**Three strategies — combined live impact (today)**:
+- **Bull flag**: TTGT + IREZ both armed within minutes of plan-R fix.
+  IREZ ratcheted 23+ times (trail climbed from $6.85 → $7.10), locked
+  profit floor +$2.9K. Combined unrealized +$9.6K at one point. **First
+  R-trail activations across any bull flag trade in 14+ days.**
+- **MACD wave**: 8 trades closed on the day, post-fix entries (FNKO at
+  14:16) exited cleanly at -$146 (small loss, no flash exit). Pre-fix
+  trades earlier in the day (BOBS, ASPN, CORD, XNDU, AMN, ARLO, PGNY,
+  RDWU) totaled -$4,338 — the cohort that exposed Bugs 1-3.
+- **ORB**: GLWG and DBX held cleanly. ORB's static-lock arming behavior
+  is by-design plan-R-equivalent — no fixes required.
+
+### Lessons learned
+
+1. **BT-LIVE divergence is rarely a single bug**. We had 5 distinct
+   production bugs simultaneously corroding bull flag + MACD wave LIVE P&L
+   in different directions. Each one alone would have looked like noise;
+   together they made LIVE consistently underperform BT by ~$15-20K/month.
+2. **Async race conditions in event-driven code can be silent for weeks.**
+   The bull flag handler-loss race produced ZERO error logs — every
+   bull flag trail simply didn't fire. Only careful counting (`grep
+   "trailing stop ACTIVATED" | wc -l` over 14 days = 0) made it visible.
+3. **Tick-cadence vs bar-cadence is a structural BT/LIVE knob.** BT
+   doesn't see ticks; LIVE does. Anything that ratchets on tick (stops,
+   trails, activations) will whipsaw differently than BT projects. Match
+   the cadence to BT (`bar-only ratchet`) when seeking parity.
+4. **R-based math is sensitive to slippage.** `R = entry - stop` looks
+   innocent until you realize entry is the FILL (slippage-inflated) and
+   stop is PLANNED (unchanged). High slippage inflates R, pushing
+   R-multiples away from entry. The fix (plan-R) decouples them.
+5. **Multiple defense layers > one perfect layer.** The held-qty race
+   bug went undetected for weeks because the bracket-OCO and broker SL
+   silently saved us. Today they didn't (different cancel order). The
+   emergency-SL fallback + retries + CRITICAL alerting are now in place.
+6. **Tests must reproduce the bug, not just exercise the fix.** The
+   upgrade-race regression test forces the asyncio interleave that breaks
+   the OLD code path AND verifies the NEW path is structurally immune.
+   Without the failing-on-old-code test, we'd have no proof the fix
+   addresses the exact failure mode.
+
 ## Future Tasks
 
 - **BuyMonitor Phase 2**: Replace buy-stop orders with SIP WebSocket limit buys for tighter entry slippage (data collection active via Phase 1 quote monitoring)

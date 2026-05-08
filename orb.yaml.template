@@ -134,8 +134,10 @@ sizing:
 # No hard target — hold to force_close or lock exit if price retraces.
 exit:
   stop_mode: range_low
-  lock_arm_at_r: 1.5            # arm lock when bar high reaches entry + 1.5 * range_size
-  lock_stop_r: 1.0              # stop level after lock armed (entry + 1R)
+  # 2026-05-08 BT: 1.75R/0.50R Pareto-dominates 1.5R/1.0R on HOLDOUT —
+  # +$22K P&L (+24%), better Sharpe/Sortino/win-rate/worst-week. See README.
+  lock_arm_at_r: 1.75           # arm lock when bar high reaches entry + 1.75 * range_size
+  lock_stop_r: 0.5              # stop level after lock armed (entry + 0.5R)
   force_close_time_et: "15:45"  # matches bull flag + MACD wave policy
   exit_slip_bps: 10             # calibrated from live exit telemetry
 

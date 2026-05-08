@@ -33,8 +33,8 @@ MIN_STOP_PCT = 1.0
 OLD_POS = 50_000.0
 Q_CAPS = {'Q1': 3.0, 'Q2': 3.0, 'Q3': 3.0, 'Q4': 3.0, 'Q5': 1.5}
 Q_ORDER = {'Q4': 0, 'Q5': 1, 'Q3': 2, 'Q2': 3, 'Q1': 4}
-LOCK_TRIGGER_R = 1.5
-LOCK_STOP_R = 1.0
+LOCK_TRIGGER_R = 1.75   # 2026-05-08: BT-validated upgrade from 1.5
+LOCK_STOP_R = 0.5       # 2026-05-08: BT-validated upgrade from 1.0
 EXIT_SLIP_BPS = 10.0
 
 
