@@ -136,6 +136,7 @@ def max_intraday_change_pre_entry(
     bars,
     prev_close: Optional[float],
     entry_ts_utc: str,
+    premarket_extremes: Optional[tuple] = None,
 ) -> Optional[float]:
     """Replay pre-entry bars (1-min) tracking max(gap_pct, range_pct).
 
@@ -147,12 +148,26 @@ def max_intraday_change_pre_entry(
     gap_pct = (close - prev_close) / prev_close * 100 (skipped if prev_close None)
     range_pct = (day_high - day_low) / day_low * 100
 
+    `premarket_extremes` (optional): (pm_high, pm_low) tuple to seed
+    day_high / day_low before the bar loop, mirroring live's behavior of
+    carrying premarket high/low into RTH range_pct via the 15-min bar
+    lookback in get_current_bars. Without this seed, BT's tier
+    classification + Stage-2 intraday-change filter under-counts
+    qualifying trades (the 5/5 INTT case: range_pct from RTH alone is
+    9.55%, but with premarket seed it's 41.9%).
+
     This is the canonical feature used for tier classification.
     """
     day_high = None
     day_low = None
     max_qual = None
     saw_bar = False
+    if premarket_extremes is not None:
+        pm_h, pm_l = premarket_extremes
+        if pm_h is not None and pm_h > 0:
+            day_high = float(pm_h)
+        if pm_l is not None and pm_l > 0:
+            day_low = float(pm_l)
     for ts, _o, h, l, c in bars:
         if ts >= entry_ts_utc:
             break

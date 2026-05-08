@@ -2819,7 +2819,8 @@ class BacktestRunner:
                         for j in range(i + 1)  # inclusive of setup bar i
                     ]
                     _intraday_change_at_entry = _max_ic(
-                        _pre_bars, prev_close, "\uffff"
+                        _pre_bars, prev_close, "\uffff",
+                        premarket_extremes=premarket_extremes,
                     )
                 except Exception as _ttf_exc:
                     logger.warning(
