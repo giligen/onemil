@@ -2423,6 +2423,9 @@ def main():
                         row.get('conv_gap_fading', '0.00'),
                         # Two-tier filter classification signal (empty = old cache)
                         row.get('intraday_change_at_entry', ''),
+                        # Post-fill gate inputs at fill time (IREZ post-mortem)
+                        row.get('bk_ratio_at_fill', ''),
+                        row.get('spy_3d_at_fill', ''),
                     ])
 
             # Determine new date range to merge

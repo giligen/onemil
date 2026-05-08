@@ -83,6 +83,10 @@ RICH_CSV_HEADERS = [
     "conv_vwap_dist", "conv_gap_fading",
     # Two-tier filter classification input: max(gap%, range%) over pre-entry bars
     "intraday_change_at_entry",
+    # Post-fill gate inputs (IREZ post-mortem 2026-05-08). Computed at fill
+    # time when conviction_enabled — written to the monthly master CSV here
+    # so the build-cache aggregator can pass them through to the cache CSV.
+    "bk_ratio_at_fill", "spy_3d_at_fill",
 ]
 
 
@@ -233,6 +237,17 @@ def build_rich_row(
         (
             f"{getattr(trade, 'intraday_change_at_entry', None):.2f}"
             if getattr(trade, 'intraday_change_at_entry', None) is not None
+            else ''
+        ),
+        # Post-fill gate inputs at fill time
+        (
+            f"{getattr(trade, 'bk_ratio_at_fill', None):.3f}"
+            if getattr(trade, 'bk_ratio_at_fill', None) is not None
+            else ''
+        ),
+        (
+            f"{getattr(trade, 'spy_3d_at_fill', None):.3f}"
+            if getattr(trade, 'spy_3d_at_fill', None) is not None
             else ''
         ),
     ]
