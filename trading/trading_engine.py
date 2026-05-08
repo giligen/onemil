@@ -1400,6 +1400,23 @@ class TradingEngine:
                     f"{actual_qty} shares, ID: {order_id}"
                 )
 
+                # IREZ 2026-05-08 fix: idempotency guard against OrderStream
+                # replay re-firing the post-fill kill switch on stale fills.
+                # If the symbol is already in _traded_symbols, a prior live
+                # entry already processed (and either kept open or closed
+                # this fill). Subsequent "fills" detected here are replays
+                # from OrderStream reconnect after restart — silently discard.
+                # Without this, the kill switch can re-trigger and try to
+                # close a separate live position (today's IREZ #237 was
+                # saved only because broker SL was holding the qty).
+                if symbol in self._traded_symbols:
+                    logger.warning(
+                        f"{symbol}: ignoring stale fill replay for {order_id} — "
+                        f"symbol already in _traded_symbols (live position managed elsewhere)"
+                    )
+                    symbols_to_remove.append(symbol)
+                    continue
+
                 # Gap-over rejection: if fill is >2% above breakout, close immediately.
                 # 15-month BT data: >2% gap-overs have 23% WR, net losers.
                 # Matches backtest.py:1587 logic.
@@ -1719,6 +1736,14 @@ class TradingEngine:
 
                         _flag_vol = (plan.pattern.avg_flag_volume
                                      if plan and plan.pattern else 0.0)
+                        # plan-R fix (2026-05-08): pass planned breakout level
+                        # and planned R as well — these decouple the trail's
+                        # activation/ratchet math from entry slippage. BT proves
+                        # +$62K-$98K HOLDOUT lift at LIVE-realistic slippage.
+                        # Hard stop and broker SL stay at fill-based levels.
+                        _planned_entry = plan.entry_price if plan else 0.0
+                        _planned_R = (plan.entry_price - plan.stop_loss_price
+                                      if plan else 0.0)
                         # TTGT 2026-05-08 root-cause fix: atomic quote→stop
                         # upgrade. Replaces the racy remove_quote_watch +
                         # add_watch pair. See StopMonitor.upgrade_quote_to_stop_watch
@@ -1739,6 +1764,8 @@ class TradingEngine:
                             avg_flag_volume=_flag_vol,
                             vol_confirmed_trail_enabled=self.vol_confirmed_trail_enabled,
                             vol_confirmed_trail_min_ratio=self.vol_confirmed_trail_min_ratio,
+                            planned_entry_price=_planned_entry,
+                            planned_risk_per_share=_planned_R,
                         )
 
                         # Cancel TP leg when trailing stop is active (bracket path only)
@@ -3894,11 +3921,25 @@ class TradingEngine:
 
         self._daily_trade_count = filled_count
 
-        # Rebuild _pending_orders from DB trades that have order_id but no fill
+        # Rebuild _pending_orders from DB trades that have order_id but no fill.
+        # IREZ 2026-05-08 fix: must EXCLUDE terminal statuses (cancelled,
+        # time_stop_canceled, etc.) — otherwise dead orders get re-added to
+        # pending. Their fills are then "rediscovered" via OrderStream replay
+        # at the next restart, re-firing the post-fill kill switch on what
+        # is now a SEPARATE live position. Today's IREZ #237 was preserved
+        # only because the broker SL was holding the qty (close failed). Don't
+        # rely on luck — filter by status here at the source.
+        _terminal_pending_statuses = {
+            'cancelled', 'canceled', 'expired', 'rejected', 'time_stop_canceled',
+        }
         for trade in trades_today:
             symbol = trade['symbol']
             order_id = trade.get('order_id')
-            if order_id and trade.get('fill_price') is None and trade.get('exit_price') is None:
+            order_status = (trade.get('order_status') or '').lower()
+            if (order_id
+                    and trade.get('fill_price') is None
+                    and trade.get('exit_price') is None
+                    and order_status not in _terminal_pending_statuses):
                 plan = self._reconstruct_plan(trade)
                 setup = self._reconstruct_setup(trade)
                 self._pending_orders[symbol] = {
@@ -3931,6 +3972,17 @@ class TradingEngine:
                         activate_r = self.trailing_activate_at_r if self.trailing_stop_enabled else 0.0
                         fill = trade['fill_price']
                         real_sl = trade['real_stop_loss_price']
+                        # plan-R fix: pass planned values from DB.
+                        # entry_price column = planned breakout level (set
+                        # at trade-plan time, before fill). stop_loss_price
+                        # is the planned stop (also unchanged by fill).
+                        _planned_entry_db = float(trade.get('entry_price') or 0)
+                        _planned_stop_db = float(trade.get('stop_loss_price') or 0)
+                        _planned_R_db = (
+                            (_planned_entry_db - _planned_stop_db)
+                            if (_planned_entry_db > 0 and _planned_stop_db > 0)
+                            else 0.0
+                        )
                         self.stop_monitor.add_watch(
                             symbol=symbol,
                             stop_price=real_sl,
@@ -3949,6 +4001,8 @@ class TradingEngine:
                             avg_flag_volume=0.0,
                             vol_confirmed_trail_enabled=self.vol_confirmed_trail_enabled,
                             vol_confirmed_trail_min_ratio=self.vol_confirmed_trail_min_ratio,
+                            planned_entry_price=_planned_entry_db,
+                            planned_risk_per_share=_planned_R_db,
                         )
                         logger.info(
                             f"{symbol}: Crash recovery — re-registered StopMonitor watch "

@@ -111,6 +111,16 @@ class WatchEntry:
     lock_stop_r: float = 0.0       # stop-level after arming (R-multiple above entry)
     lock_armed: bool = False       # runtime state (internal; do not set at add_watch)
     lock_r_unit: float = 0.0       # explicit 1R for lock math; 0 = use risk_per_share
+    # Plan-R variant (TTGT/IREZ 2026-05-08 fix). Decouples R-trail math from
+    # entry slippage. When BOTH fields > 0, R-baseline and risk_unit for trail
+    # math (activation, ratchet) use the SETUP values rather than the (possibly
+    # slippage-inflated) fill. Hard stop and broker SL are unchanged. BT proves
+    # +$62-72K HOLDOUT lift at LIVE-realistic slippage (1.5-2.0%). Without this,
+    # fast breakouts whose buy-stop fills 1-2% above the planned breakout level
+    # get an inflated R, pushing the activation gate further from current price
+    # — many trades never reach +1.5R activation despite real profit.
+    planned_entry_price: float = 0.0     # planned breakout level
+    planned_risk_per_share: float = 0.0  # planned_entry - planned_stop
     # Entry-bar skip (ORB BT parity, 2026-04-19): in BT simulate_orb_trade,
     # `for row in sim_bars.iloc[1:]` skips the entry bar entirely for exit
     # checks. PROD matches by skipping all stop/lock checks for ticks before
@@ -245,6 +255,21 @@ class StopMonitor:
         # Exhausted retries — re-raise so caller can place emergency SL
         assert last_err is not None
         raise last_err
+
+    @staticmethod
+    def _r_baseline_and_unit(watch: 'WatchEntry') -> 'tuple[float, float]':
+        """Return (r_baseline, r_unit) for R-trail math.
+
+        TTGT/IREZ 2026-05-08 fix: when planned values are set on the watch
+        (via add_watch / upgrade_quote_to_stop_watch), use the SETUP's
+        breakout level + planned risk for activation/ratchet math. This
+        decouples the R-trail from entry slippage. Falls back to fill-based
+        when planned fields are zero (legacy behavior).
+        """
+        if (watch.planned_entry_price > 0
+                and watch.planned_risk_per_share > 0):
+            return watch.planned_entry_price, watch.planned_risk_per_share
+        return watch.entry_price, watch.risk_per_share
 
     @staticmethod
     def _maybe_arm_pct_trail(watch: 'WatchEntry', observed_high: float) -> bool:
@@ -588,14 +613,16 @@ class StopMonitor:
 
         # Activate (R-based only — pct-based already active at watch creation
         # OR gated by trail_arm_pct, handled via _maybe_arm_pct_trail below).
+        # TTGT/IREZ 2026-05-08 fix: R math uses planned baseline+unit when set.
+        r_baseline, r_unit = self._r_baseline_and_unit(watch)
         if not watch.trailing_active and has_r_trail:
-            r_gain = (bar_high - watch.entry_price) / watch.risk_per_share
+            r_gain = (bar_high - r_baseline) / r_unit
             if r_gain >= watch.activate_at_r:
                 watch.trailing_active = True
                 logger.info(
                     f"StopMonitor (bar): {symbol} trail ACTIVATED via bar.high — "
                     f"high=${bar_high:.2f}, +{r_gain:.1f}R from "
-                    f"entry ${watch.entry_price:.2f}"
+                    f"r_baseline=${r_baseline:.2f} (planned={'yes' if watch.planned_entry_price > 0 else 'no'})"
                 )
         # CORD 5/8 fix: pct-trail arming gate. When trail_arm_pct > 0, only
         # activate after high crosses entry × (1 + arm_pct).
@@ -607,12 +634,12 @@ class StopMonitor:
                 f"(entry=${watch.entry_price:.2f}, arm_pct={watch.trail_arm_pct:.4f})"
             )
 
-        # Ratchet
+        # Ratchet (R-trail uses planned R unit when plan-R fields set).
         if watch.trailing_active:
             if has_pct_trail:
                 new_stop = bar_high * (1 - watch.trail_pct)
             else:
-                new_stop = bar_high - watch.risk_per_share * watch.trail_r
+                new_stop = bar_high - r_unit * watch.trail_r
             if new_stop > watch.stop_price:
                 old_stop = watch.stop_price
                 watch.stop_price = new_stop
@@ -675,6 +702,8 @@ class StopMonitor:
         lock_stop_r: float = 0.0,
         lock_r_unit: float = 0.0,
         skip_exits_until_ts: float = 0.0,
+        planned_entry_price: float = 0.0,
+        planned_risk_per_share: float = 0.0,
     ) -> None:
         """
         Register a symbol for stop-price monitoring.
@@ -724,6 +753,8 @@ class StopMonitor:
             lock_stop_r=lock_stop_r,
             lock_r_unit=lock_r_unit,
             skip_exits_until_ts=skip_exits_until_ts,
+            planned_entry_price=planned_entry_price,
+            planned_risk_per_share=planned_risk_per_share,
         )
         with self._watch_lock:
             self._watches[symbol] = entry
@@ -769,6 +800,8 @@ class StopMonitor:
         lock_stop_r: float = 0.0,
         lock_r_unit: float = 0.0,
         skip_exits_until_ts: float = 0.0,
+        planned_entry_price: float = 0.0,
+        planned_risk_per_share: float = 0.0,
     ) -> None:
         """Atomic quote-watch → stop-watch promotion.
 
@@ -815,6 +848,8 @@ class StopMonitor:
             lock_stop_r=lock_stop_r,
             lock_r_unit=lock_r_unit,
             skip_exits_until_ts=skip_exits_until_ts,
+            planned_entry_price=planned_entry_price,
+            planned_risk_per_share=planned_risk_per_share,
         )
 
         # Atomic swap under one lock: pop quote-watch, install stop-watch.
@@ -1678,9 +1713,11 @@ class StopMonitor:
                                     f"arm=${arm_level:.2f}"
                                 )
                         else:
-                            risk = watch.risk_per_share if watch.risk_per_share > 0 else watch.entry_price * 0.02
+                            # plan-R: use planned baseline+unit when set
+                            _r_base, _r_unit = self._r_baseline_and_unit(watch)
+                            risk = _r_unit if _r_unit > 0 else (watch.entry_price * 0.02)
                             if risk > 0:
-                                r_gain = (watch.highest_since_entry - watch.entry_price) / risk
+                                r_gain = (watch.highest_since_entry - _r_base) / risk
                                 if r_gain >= watch.activate_at_r:
                                     watch.trailing_active = True
                                     logger.info(f"StopMonitor poll: {sym} trail ACTIVATED +{r_gain:.1f}R")
@@ -1690,7 +1727,8 @@ class StopMonitor:
                     # snapshots are tick-cadence so this branch skips
                     # pct ratcheting; bar handler is the sole source.
                     if watch.trailing_active and watch.trail_pct <= 0:
-                        new_stop = watch.highest_since_entry - watch.risk_per_share * watch.trail_r
+                        _r_base, _r_unit = self._r_baseline_and_unit(watch)
+                        new_stop = watch.highest_since_entry - _r_unit * watch.trail_r
                         if new_stop > watch.stop_price:
                             old = watch.stop_price
                             watch.stop_price = new_stop
@@ -1978,13 +2016,16 @@ class StopMonitor:
                             f"(entry=${watch.entry_price:.2f})"
                         )
                 elif has_r_trail:
-                    r_gain = (watch.highest_since_entry - watch.entry_price) / watch.risk_per_share
+                    # plan-R fix: use planned baseline+unit when set
+                    _r_base, _r_unit = self._r_baseline_and_unit(watch)
+                    r_gain = (watch.highest_since_entry - _r_base) / _r_unit
                     if r_gain >= watch.activate_at_r:
                         watch.trailing_active = True
                         logger.info(
                             f"StopMonitor: {symbol} trailing stop ACTIVATED — "
                             f"high=${watch.highest_since_entry:.2f}, "
-                            f"+{r_gain:.1f}R from entry ${watch.entry_price:.2f}"
+                            f"+{r_gain:.1f}R from r_base=${_r_base:.2f} "
+                            f"(planned={'yes' if watch.planned_entry_price > 0 else 'no'})"
                         )
 
             if watch.trailing_active:
@@ -1998,7 +2039,9 @@ class StopMonitor:
                 # exit promptly when a closed-bar-ratcheted stop is hit).
                 # See _maybe_ratchet_from_bar_high for the ratchet path.
                 if has_r_trail:
-                    new_stop = watch.highest_since_entry - watch.risk_per_share * watch.trail_r
+                    # plan-R fix: trail distance uses planned R unit when set
+                    _r_base, _r_unit = self._r_baseline_and_unit(watch)
+                    new_stop = watch.highest_since_entry - _r_unit * watch.trail_r
                     if new_stop > watch.stop_price:
                         old_stop = watch.stop_price
                         watch.stop_price = new_stop

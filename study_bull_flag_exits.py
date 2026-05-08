@@ -47,16 +47,23 @@ SPLITS = {
 }
 
 
-def make_simulator(name: str) -> TradeSimulator:
+def make_simulator(name: str, use_planned_r: bool = False) -> TradeSimulator:
     """Build a TradeSimulator for each named variant.
 
     All variants share a 15:45 ET force-close. Vol-confirmed and exhaustion
     are off in StripBaseline / B / C to isolate the exit mechanism. They are
     on in ProdBaseline to mirror current production.
+
+    When use_planned_r=True, R-based math (activation, breakeven, static lock,
+    trail ratchet, r_gain) uses the SETUP's structural risk
+    (planned_entry - planned_stop) instead of fill-based R. Tests whether
+    decoupling trail behavior from entry slippage helps the IREZ-class
+    trades (slippage-inflated activation gates).
     """
     common = dict(
         force_close_time_et=(15, 45),
         exit_slippage_pct=0.001,
+        use_planned_r=use_planned_r,
     )
     if name == 'ProdBaseline':
         return TradeSimulator(
@@ -226,9 +233,9 @@ def simulate_one(sim: TradeSimulator, entry: CachedEntry, bars: pd.DataFrame) ->
         return None
     plan = make_plan(entry)
     trade = sim.simulate(plan, bars, entry_bar_idx=idx, entry_price_override=entry.entry_price)
+    # backtest.py:739 sets trade.pnl = partial_pnl + final_pnl — already total.
+    # Earlier version of this script double-counted the partial.
     pnl = trade.pnl if trade.pnl is not None else 0.0
-    if trade.partial_pnl:
-        pnl += trade.partial_pnl
     return TradeResult(pnl=pnl, exit_reason=trade.exit_reason or 'unknown')
 
 
@@ -292,44 +299,68 @@ def main():
             bar_cache[key] = bars
     print(f'  bars cached for {sum(1 for v in bar_cache.values() if v is not None)} (sym,date)s; {skipped_no_bars} missing')
 
-    # Run all variants × splits
-    results = {v: {s: [] for s in SPLITS} for v in VARIANTS}
-    for variant in VARIANTS:
-        sim = make_simulator(variant)
-        for split, lst in by_split.items():
-            for e in lst:
-                bars = bar_cache.get((e.symbol, e.trade_date.isoformat()))
-                if bars is None:
-                    continue
-                r = simulate_one(sim, e, bars)
-                if r is not None:
-                    results[variant][split].append(r.pnl)
+    # Run all variants × splits × {fill-R, planned-R}
+    R_MODES = [('fill-R', False), ('plan-R', True)]
+    results = {
+        (mode, v): {s: [] for s in SPLITS}
+        for mode, _ in R_MODES for v in VARIANTS
+    }
+    for mode_name, use_planned_r in R_MODES:
+        for variant in VARIANTS:
+            sim = make_simulator(variant, use_planned_r=use_planned_r)
+            for split, lst in by_split.items():
+                for e in lst:
+                    bars = bar_cache.get((e.symbol, e.trade_date.isoformat()))
+                    if bars is None:
+                        continue
+                    r = simulate_one(sim, e, bars)
+                    if r is not None:
+                        results[(mode_name, variant)][split].append(r.pnl)
 
-    # Print comparison table
-    print('\n' + '=' * 96)
-    print(f'{"Variant":<14}{"Split":<10}{"N":>5}{"P&L":>10}{"WR%":>7}{"AvgW":>9}{"AvgL":>9}{"PF":>6}{"MDD":>10}{"Calmar":>8}')
-    print('=' * 96)
-    for variant in VARIANTS:
-        for split in SPLITS:
-            agg = aggregate(results[variant][split])
-            print(f'{variant:<14}{split:<10}{agg["n"]:>5}'
-                  f'  ${agg["pnl"]:>+8.0f}'
-                  f' {agg["wr"]:>5.1f}%'
-                  f'  ${agg["avg_w"]:>+6.0f}'
-                  f' ${agg["avg_l"]:>+7.0f}'
-                  f' {agg["pf"]:>5.2f}'
-                  f' ${agg["mdd"]:>7.0f}'
-                  f' {agg["calmar"]:>7.2f}')
-        print('-' * 96)
+    # Print comparison tables — fill-R first (today's production), then plan-R
+    for mode_name, _ in R_MODES:
+        print('\n' + '=' * 100)
+        print(f'R-MODE: {mode_name}  (use_planned_r={mode_name == "plan-R"})')
+        print('=' * 100)
+        print(f'{"Variant":<14}{"Split":<10}{"N":>5}{"P&L":>10}{"WR%":>7}{"AvgW":>9}{"AvgL":>9}{"PF":>6}{"MDD":>10}{"Calmar":>8}')
+        print('-' * 100)
+        for variant in VARIANTS:
+            for split in SPLITS:
+                agg = aggregate(results[(mode_name, variant)][split])
+                print(f'{variant:<14}{split:<10}{agg["n"]:>5}'
+                      f'  ${agg["pnl"]:>+8.0f}'
+                      f' {agg["wr"]:>5.1f}%'
+                      f'  ${agg["avg_w"]:>+6.0f}'
+                      f' ${agg["avg_l"]:>+7.0f}'
+                      f' {agg["pf"]:>5.2f}'
+                      f' ${agg["mdd"]:>7.0f}'
+                      f' {agg["calmar"]:>7.2f}')
+            print()
 
-    # Combined HOLDOUT table for verdict
-    print('\nHOLDOUT (Jan-Apr 2026) — final OOS comparison:')
-    print(f'{"Variant":<14}{"P&L":>10}{"WR%":>7}{"PF":>6}{"MDD":>10}{"Calmar":>8}  vs ProdBaseline')
-    base_pnl = aggregate(results['ProdBaseline']['HOLDOUT'])['pnl']
+    # Combined HOLDOUT comparison: fill-R vs plan-R per variant
+    print('\n' + '=' * 100)
+    print('HOLDOUT (Jan-Apr 2026) — fill-R vs plan-R, per variant')
+    print('=' * 100)
+    print(f'{"Variant":<14}{"fill-R PnL":>12}{"plan-R PnL":>12}{"Δ (plan-fill)":>16}'
+          f'{"fill-R Calmar":>15}{"plan-R Calmar":>15}')
+    print('-' * 100)
     for v in VARIANTS:
-        a = aggregate(results[v]['HOLDOUT'])
-        delta = a['pnl'] - base_pnl
-        print(f'{v:<14}  ${a["pnl"]:>+8.0f} {a["wr"]:>5.1f}% {a["pf"]:>5.2f} ${a["mdd"]:>7.0f} {a["calmar"]:>7.2f}  Δ ${delta:+,.0f}')
+        f_agg = aggregate(results[('fill-R', v)]['HOLDOUT'])
+        p_agg = aggregate(results[('plan-R', v)]['HOLDOUT'])
+        delta = p_agg['pnl'] - f_agg['pnl']
+        marker = '★' if delta > 0 else ' '
+        print(f'{v:<14}  ${f_agg["pnl"]:>+9.0f}  ${p_agg["pnl"]:>+9.0f}'
+              f'  ${delta:>+11,.0f}{marker}'
+              f'  {f_agg["calmar"]:>11.2f}    {p_agg["calmar"]:>11.2f}')
+
+    # Top-line verdict: best variant in each mode
+    print('\n' + '=' * 100)
+    print('VERDICT — best HOLDOUT P&L by R-mode')
+    print('=' * 100)
+    for mode_name, _ in R_MODES:
+        best_v = max(VARIANTS, key=lambda v: aggregate(results[(mode_name, v)]['HOLDOUT'])['pnl'])
+        a = aggregate(results[(mode_name, best_v)]['HOLDOUT'])
+        print(f'  {mode_name:<10s}: {best_v:<14s} P&L ${a["pnl"]:>+9.0f}  Calmar {a["calmar"]:>5.2f}')
 
 
 if __name__ == '__main__':

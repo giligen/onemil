@@ -2905,6 +2905,64 @@ class TestStartupSync:
         assert len(engine._pending_orders) == 0
         assert engine._daily_trade_count == 0
 
+    def test_cancelled_trades_NOT_in_pending(self, engine, db, mock_alpaca, mock_position_manager):
+        """REGRESSION (IREZ 2026-05-08): cancelled trades MUST NOT be re-added
+        to _pending_orders. The bug: cancelled rows have order_id and NULL
+        fill/exit, satisfying the old condition. On OrderStream replay after
+        restart, the dead order's original fill is rediscovered and the
+        post-fill kill switch fires on what is now a separate live position.
+        """
+        today = date.today().isoformat()
+        # Three IREZ trades like today's: 2 cancelled, 1 live filled
+        db.save_trade(_make_trade_record(
+            trade_date=today, symbol='IREZ', order_id='ord-cancelled-1',
+            order_status='cancelled',
+        ))
+        db.save_trade(_make_trade_record(
+            trade_date=today, symbol='IREZ', order_id='ord-cancelled-2',
+            order_status='cancelled',
+        ))
+        db.save_trade(_make_trade_record(
+            trade_date=today, symbol='IREZ', order_id='ord-live',
+            order_status='filled', fill_price=6.83,
+        ))
+
+        mock_alpaca.get_daily_bars_range.return_value = {}
+
+        engine.reset_daily()
+
+        # Only the LIVE filled trade matters. Cancelled trades must NOT
+        # populate _pending_orders, even though their order_ids exist and
+        # fill/exit are NULL.
+        assert 'IREZ' in engine._traded_symbols, "live filled trade tracked"
+        assert 'IREZ' not in engine._pending_orders, (
+            "REGRESSION: cancelled trade(s) must not be re-added to pending — "
+            "OrderStream replay would re-fire post-fill kill switch on the "
+            "live position (today's IREZ #237 incident)"
+        )
+
+    def test_terminal_status_variants_excluded_from_pending(self, engine, db, mock_alpaca, mock_position_manager):
+        """All terminal pending statuses are excluded — not just 'cancelled'."""
+        today = date.today().isoformat()
+        for i, status in enumerate([
+            'cancelled', 'canceled', 'expired', 'rejected', 'time_stop_canceled'
+        ]):
+            db.save_trade(_make_trade_record(
+                trade_date=today, symbol=f'X{i:02d}',
+                order_id=f'ord-{status}-{i}',
+                order_status=status,
+            ))
+
+        mock_alpaca.get_daily_bars_range.return_value = {}
+
+        engine.reset_daily()
+
+        for i in range(5):
+            sym = f'X{i:02d}'
+            assert sym not in engine._pending_orders, (
+                f"{sym}: terminal-status trades must not enter _pending_orders"
+            )
+
 
 # ===========================================================================
 # Simple Order Path (no bracket)
