@@ -198,3 +198,68 @@ class TestOrderToStatus:
         st = _order_to_status(order)
         assert st['filled_avg_price'] is None
         assert st['filled_qty'] == 0
+
+
+class TestRejectReasonCapture:
+    """Pinned regression for reject_reason capture (TTGT post-mortem 2026-05-08).
+
+    Alpaca's REST GET /orders/{id} does NOT include reject_reason — it's only
+    delivered via the OrderStream trade-update event. Capture happens in
+    _order_to_status from one of several known field names (alpaca-py and
+    raw REST differ; defensive across all of them). Persisted to the
+    `trades.reject_reason` column (Migration 13) by trading_engine when
+    handling cancelled/rejected status.
+    """
+
+    def test_reject_reason_field_present(self):
+        order = SimpleNamespace(
+            id='rej-1', status='rejected', filled_avg_price=None,
+            filled_qty=0, submitted_at=None, filled_at=None,
+            reject_reason='insufficient_buying_power',
+        )
+        st = _order_to_status(order, event='rejected')
+        assert st['reject_reason'] == 'insufficient_buying_power'
+
+    def test_cancel_reason_field_alternate_name(self):
+        """Some Alpaca SDK versions use cancel_reason instead of reject_reason."""
+        order = SimpleNamespace(
+            id='rej-2', status='rejected', filled_avg_price=None,
+            filled_qty=0, submitted_at=None, filled_at=None,
+            cancel_reason='wash_trade_violation',
+        )
+        st = _order_to_status(order)
+        assert st['reject_reason'] == 'wash_trade_violation'
+
+    def test_reason_field_third_alternate(self):
+        """Raw REST occasionally exposes a generic 'reason' field."""
+        order = SimpleNamespace(
+            id='rej-3', status='rejected', filled_avg_price=None,
+            filled_qty=0, submitted_at=None, filled_at=None,
+            reason='bp',
+        )
+        st = _order_to_status(order)
+        assert st['reject_reason'] == 'bp'
+
+    def test_reject_reason_none_when_absent(self):
+        """When Alpaca doesn't populate any of the known fields, leave None.
+        The DB column accepts NULL — the rejection is still recorded, just
+        without a reason (better than dropping the row entirely)."""
+        order = SimpleNamespace(
+            id='rej-4', status='rejected', filled_avg_price=None,
+            filled_qty=0, submitted_at=None, filled_at=None,
+        )
+        st = _order_to_status(order)
+        assert st['reject_reason'] is None
+
+    def test_reject_reason_truncated_to_100_chars(self):
+        """DB column is VARCHAR(100). Truncate at the boundary so a verbose
+        Alpaca message can't blow up the INSERT."""
+        long_reason = 'x' * 250
+        order = SimpleNamespace(
+            id='rej-5', status='rejected', filled_avg_price=None,
+            filled_qty=0, submitted_at=None, filled_at=None,
+            reject_reason=long_reason,
+        )
+        st = _order_to_status(order)
+        assert st['reject_reason'] is not None
+        assert len(st['reject_reason']) == 100

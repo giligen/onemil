@@ -1921,7 +1921,44 @@ class TradingEngine:
                 }
 
             elif status in ('cancelled', 'expired', 'rejected'):
-                logger.info(f"{symbol}: Pending order {status} — ID: {order_id}")
+                # Capture reject_reason from OrderStreamWatcher (only the
+                # WebSocket trade-update event carries it; REST GET /orders
+                # does NOT). See db Migration 13 + trading/order_stream.py
+                # _order_to_status. NULL is acceptable — older rejections
+                # without a captured reason still get logged.
+                reject_reason = None
+                try:
+                    if (self.executor is not None
+                            and getattr(self.executor, 'order_stream', None) is not None):
+                        _ws_status = self.executor.order_stream.get_status(order_id)
+                        if _ws_status:
+                            reject_reason = _ws_status.get('reject_reason')
+                except Exception as _rr_err:
+                    logger.warning(
+                        f"{symbol}: failed to read reject_reason from OrderStream: "
+                        f"{_rr_err}"
+                    )
+                _rr_str = (
+                    f" reason={reject_reason!r}" if reject_reason else ""
+                )
+                logger.info(
+                    f"{symbol}: Pending order {status} — ID: {order_id}"
+                    f"{_rr_str}"
+                )
+                # Persist status + reject_reason to the trade DB row so SQL
+                # post-mortems work without REST archaeology.
+                try:
+                    trade_row = self.db.get_trade_by_order_id(order_id)
+                    if trade_row:
+                        update = {'order_status': status}
+                        if reject_reason:
+                            update['reject_reason'] = reject_reason
+                        self.db.update_trade(trade_row['id'], update)
+                except Exception as _db_err:
+                    logger.warning(
+                        f"{symbol}: failed to persist {status} status to DB: "
+                        f"{_db_err}"
+                    )
                 symbols_to_remove.append(symbol)
 
             else:
@@ -2009,10 +2046,19 @@ class TradingEngine:
                 if order_id:
                     trade_record = self.db.get_trade_by_order_id(order_id)
                     if trade_record and trade_record.get('fill_price') is None:
-                        self.db.update_trade(trade_record['id'], {
-                            'order_status': 'cancelled',
-                        })
-                        logger.debug(f"{symbol}: DB trade record marked cancelled")
+                        # Don't clobber a more specific terminal status
+                        # ('rejected'/'expired') that the elif branch above
+                        # already persisted with reject_reason. Only mark
+                        # 'cancelled' when status is still in a non-terminal
+                        # state (e.g., we're cleaning up an invalidation,
+                        # midday-pause cancel, or expiry-by-our-cancel).
+                        current_status = (trade_record.get('order_status')
+                                          or '').lower()
+                        if current_status not in ('rejected', 'expired'):
+                            self.db.update_trade(trade_record['id'], {
+                                'order_status': 'cancelled',
+                            })
+                            logger.debug(f"{symbol}: DB trade record marked cancelled")
 
             # Clean up quote watch on cancellation
             if self.stop_monitor:

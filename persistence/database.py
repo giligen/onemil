@@ -593,6 +593,28 @@ class Database:
         except Exception as e:
             logger.warning(f"Migration 11 (news_cache halt column) failed (non-fatal): {e}")
 
+        # Migration 13: Add reject_reason column to trades table.
+        # Captures Alpaca's reject reason (when present) on rejected/cancelled
+        # OrderStream events so post-mortems don't have to grep journalctl or
+        # query Alpaca's REST API to discover why an order failed. The TTGT
+        # rejection on 2026-05-08 took ~30 minutes of REST archaeology because
+        # this column didn't exist. With it: SELECT reject_reason FROM trades
+        # WHERE order_status='rejected' AND trade_date=?.
+        # NOTE: Alpaca's REST GET /orders/{id} does NOT include reject_reason
+        # — it's only delivered via the OrderStream trade-update event. So
+        # capture happens in trading/order_stream.py:_on_trade_update.
+        try:
+            columns = [row[1] for row in self._trades_conn.execute(
+                "PRAGMA table_info(trades)").fetchall()]
+            if 'reject_reason' not in columns:
+                self._trades_conn.execute(
+                    "ALTER TABLE trades ADD COLUMN reject_reason VARCHAR(100)"
+                )
+                self._trades_conn.commit()
+                logger.info("Migration 13: added reject_reason column to trades")
+        except Exception as e:
+            logger.warning(f"Migration 13 (reject_reason column) failed (non-fatal): {e}")
+
     # =========================================================================
     # News cache (halt detection + per-article classification)
     # =========================================================================

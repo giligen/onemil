@@ -964,6 +964,82 @@ class TestMarketableLimitFallbackFillFlow:
         assert trade['fill_price'] == 4.45
         assert trade['exit_reason'] != 'gap_adjust_failed'
 
+    def test_rejected_order_persists_reject_reason_to_db(
+        self, engine, mock_alpaca, db, mock_position_manager,
+    ):
+        """Pinned regression for reject_reason capture (TTGT 2026-05-08).
+
+        When Alpaca rejects a pending order, _manage_pending_orders MUST:
+          (1) Read reject_reason from OrderStreamWatcher (REST doesn't have it)
+          (2) Update the DB trade row with order_status='rejected' + reject_reason
+
+        Lets future post-mortems run a SQL query instead of REST archaeology."""
+        from datetime import timezone
+        from unittest.mock import MagicMock as _MM
+
+        self._save_pending_trade(db, 'TEST', 'order-rejected-1')
+        plan = _make_plan('TEST')
+        setup = _make_pattern('TEST')
+
+        engine._pending_orders['TEST'] = {
+            'order_id': 'order-rejected-1',
+            'plan': plan, 'setup': setup,
+            'placed_at': datetime.now(timezone.utc),
+            'order_type': 'marketable_limit_fallback',
+        }
+        # Alpaca returns status='rejected'
+        mock_alpaca.get_order.return_value = {
+            'status': 'rejected', 'filled_avg_price': None, 'filled_qty': 0,
+        }
+        # Stand up a mocked OrderStreamWatcher that returns reject_reason
+        engine.executor = _MM()
+        engine.executor.order_stream = _MM()
+        engine.executor.order_stream.get_status.return_value = {
+            'reject_reason': 'insufficient_buying_power',
+        }
+
+        engine._manage_pending_orders()
+
+        trade = db.get_trade_by_order_id('order-rejected-1')
+        assert trade['order_status'] == 'rejected'
+        assert trade['reject_reason'] == 'insufficient_buying_power', (
+            f"reject_reason must be persisted to DB on rejection — got "
+            f"{trade.get('reject_reason')!r}. Future post-mortems depend on "
+            f"this column being populated."
+        )
+
+    def test_rejected_order_handles_missing_reject_reason(
+        self, engine, mock_alpaca, db, mock_position_manager,
+    ):
+        """Even when OrderStreamWatcher has no entry for the order_id (e.g.,
+        WebSocket missed the event), we MUST still persist order_status='rejected'.
+        reject_reason stays NULL in that case — the rejection is still recorded."""
+        from datetime import timezone
+        from unittest.mock import MagicMock as _MM
+
+        self._save_pending_trade(db, 'TEST', 'order-rejected-2')
+        plan = _make_plan('TEST')
+        setup = _make_pattern('TEST')
+
+        engine._pending_orders['TEST'] = {
+            'order_id': 'order-rejected-2',
+            'plan': plan, 'setup': setup,
+            'placed_at': datetime.now(timezone.utc),
+            'order_type': 'marketable_limit_fallback',
+        }
+        mock_alpaca.get_order.return_value = {
+            'status': 'rejected', 'filled_avg_price': None, 'filled_qty': 0,
+        }
+        engine.executor = _MM()
+        engine.executor.order_stream = _MM()
+        engine.executor.order_stream.get_status.return_value = None
+
+        engine._manage_pending_orders()
+
+        trade = db.get_trade_by_order_id('order-rejected-2')
+        assert trade['order_status'] == 'rejected'
+        assert trade['reject_reason'] is None or trade.get('reject_reason') is None
+
     def test_bracket_fill_still_takes_bracket_path(
         self, engine, mock_alpaca, db, mock_position_manager,
     ):

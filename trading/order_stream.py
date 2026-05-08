@@ -308,6 +308,16 @@ def _order_to_status(order, event: str = '') -> Dict[str, Any]:
             return ''
         return x.value if hasattr(x, 'value') else str(x)
 
+    # reject_reason: Alpaca sometimes attaches a reason field on the Order
+    # (alpaca-py vs raw REST differ; defensive over multiple known names).
+    # If none of these are populated, leave as None — DB column allows NULL.
+    # Captured here so post-mortems can SQL-query rejections directly instead
+    # of grepping journalctl + querying REST. See db Migration 13.
+    _reject_reason = (
+        getattr(order, 'reject_reason', None)
+        or getattr(order, 'cancel_reason', None)
+        or getattr(order, 'reason', None)
+    )
     return {
         'id': str(getattr(order, 'id', '') or ''),
         'symbol': str(getattr(order, 'symbol', '') or ''),
@@ -318,4 +328,5 @@ def _order_to_status(order, event: str = '') -> Dict[str, Any]:
         'filled_at': getattr(order, 'filled_at', None),
         'updated_at': datetime.now(timezone.utc),
         'event': event,
+        'reject_reason': str(_reject_reason)[:100] if _reject_reason else None,
     }
