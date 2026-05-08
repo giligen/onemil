@@ -742,6 +742,37 @@ def _get_previous_trading_date(trade_date: date, movers_by_date: dict = None) ->
     return None
 
 
+def _fetch_premarket_extremes(
+    client: AlpacaClient, symbol: str, trade_date: date,
+    cache: Optional[Dict] = None,
+) -> Optional[tuple]:
+    """Fetch premarket 1-min bars (04:00-09:30 ET) and return (pm_high, pm_low).
+    Returns None when no premarket bars are available or fetch fails.
+    Optional in-memory cache avoids re-fetching for the same (symbol, date)."""
+    key = (symbol, trade_date.isoformat())
+    if cache is not None and key in cache:
+        return cache[key]
+    try:
+        ET = pytz.timezone('US/Eastern')
+        pm_start_et = ET.localize(datetime(
+            trade_date.year, trade_date.month, trade_date.day, 4, 0, 0))
+        pm_end_et = ET.localize(datetime(
+            trade_date.year, trade_date.month, trade_date.day, 9, 30, 0))
+        pm_start = pm_start_et.astimezone(timezone.utc)
+        pm_end = pm_end_et.astimezone(timezone.utc)
+        pm_bars = client.get_historical_1min_bars(symbol, pm_start, pm_end)
+        if pm_bars is None or pm_bars.empty:
+            result = None
+        else:
+            result = (float(pm_bars['high'].max()), float(pm_bars['low'].min()))
+    except Exception as e:
+        logger.debug(f"premarket fetch failed for {symbol} {trade_date}: {e}")
+        result = None
+    if cache is not None:
+        cache[key] = result
+    return result
+
+
 def run_batch_backtest(
     movers: List[Tuple[str, date]],
     client: AlpacaClient,
@@ -752,6 +783,9 @@ def run_batch_backtest(
     market_regime: Optional['MarketRegimeFilter'] = None,
     max_consecutive_losses: int = 0,
     max_trades_per_day: int = 0,
+    circuit_breaker_dd: float = 0.0,
+    circuit_breaker_pause: int = 0,
+    include_premarket: bool = False,
 ) -> List[BacktestResult]:
     """
     Run backtests on all qualifying (symbol, date) pairs.
@@ -950,11 +984,20 @@ def run_batch_backtest(
                         'SELECT close FROM daily_bars WHERE symbol = ? AND bar_date < ? ORDER BY bar_date DESC LIMIT 1',
                         (symbol, date_str)).fetchone()
                     _prev_close = float(_pc_row[0]) if _pc_row else None
+                _pm_extremes = None
+                if include_premarket:
+                    if not hasattr(run_batch_backtest, '_pm_cache'):
+                        run_batch_backtest._pm_cache = {}
+                    _pm_extremes = _fetch_premarket_extremes(
+                        client, symbol, trade_date,
+                        cache=run_batch_backtest._pm_cache,
+                    )
                 result = runner.run(symbol, bars, date_str,
                                     avg_daily_volume=avg_vol,
                                     volume_profile=vol_profile,
                                     prev_close=_prev_close,
-                                    prev_day_bars=prev_day_bars)
+                                    prev_day_bars=prev_day_bars,
+                                    premarket_extremes=_pm_extremes)
                 # Attach point-in-time volume for cache
                 for trade in result.trades_simulated:
                     trade._avg_volume_20d = avg_vol or 0
@@ -2131,6 +2174,13 @@ def main():
         help="Override intraday_change_pct_min (e.g., 20 for 20%%)"
     )
     parser.add_argument(
+        "--include-premarket", action=argparse.BooleanOptionalAction, default=True,
+        help="Fetch premarket 1-min bars (04:00-09:30 ET) and seed the "
+             "qualification gate's running_high/running_low. Closes the "
+             "BT-LIVE drift uncovered by 5/5 INTT (BT 0 trades vs live "
+             "filled). Default: True. Use --no-include-premarket to opt out."
+    )
+    parser.add_argument(
         "--full-market", action="store_true",
         help="Include all stocks (default: universe-only for production realism)"
     )
@@ -2206,6 +2256,7 @@ def main():
             scan_workers=args.scan_workers,
             verbose=args.verbose,
             qualification_pct_override=args.threshold,
+            include_premarket=args.include_premarket,
         )
         master_csv = runner.run_all(start_date, end_date, output_dir="backtest_results")
         logger.info(f"Monthly backtest complete: {master_csv}")

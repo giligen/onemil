@@ -174,6 +174,16 @@ class RealtimeScanner:
             logger.info("Running opening gap scan...")
             self._run_premarket_cycle()
 
+        # Seed _day_highs/_day_lows from premarket bars (04:00-09:30 ET).
+        # Without this, get_current_bars only catches the 09:15-09:30 PM
+        # bar when the FIRST cycle runs in 09:30-09:45 ET (after that the
+        # latest completed 15-min bar is RTH and PM data is invisible).
+        # A SIGTERM-induced restart at 13:06 ET (5/6 incident) thus
+        # silently lost premarket-derived range_pct for the rest of the
+        # day. Prime the dicts explicitly so qualification is robust to
+        # restart timing.
+        self._prime_day_extremes_from_premarket()
+
         # Intraday loop: scanner cycles every 15 min, engine ticks every 60s
         force_closed = False
         last_bucket = None
@@ -691,6 +701,45 @@ class RealtimeScanner:
     # =========================================================================
     # Pre-Market Phase
     # =========================================================================
+
+    def _prime_day_extremes_from_premarket(self) -> None:
+        """Seed _day_highs / _day_lows from 04:00-09:30 ET premarket bars.
+
+        Without this, intraday_change_pct = max(gap_pct, range_pct) can
+        only use range_pct after the scanner has accumulated RTH bars in
+        _day_highs/_day_lows — which means premarket extremes never
+        contribute to range qualification unless get_current_bars
+        happens to return the 09:15-09:30 premarket 15-min bar (only
+        true for cycles in the 09:30-09:45 ET window).
+
+        Restart-fragile: a mid-session restart loses premarket data
+        entirely, silently degrading qualification fidelity. Priming
+        explicitly makes the qualification gate restart-tolerant.
+
+        Best-effort — failures are logged and do NOT abort startup.
+        """
+        if not self._universe:
+            return
+        try:
+            from datetime import date as _date
+            symbols = [s['symbol'] for s in self._universe]
+            today_et = datetime.now(ET).date()
+            extremes = self.alpaca.get_premarket_extremes(symbols, today_et)
+            for sym, (pm_high, pm_low) in extremes.items():
+                cur_high = self._day_highs.get(sym, 0.0)
+                cur_low = self._day_lows.get(sym, float('inf'))
+                self._day_highs[sym] = max(cur_high, pm_high)
+                self._day_lows[sym] = min(cur_low, pm_low)
+            logger.info(
+                f"Premarket seed: primed _day_highs/_day_lows for "
+                f"{len(extremes)} symbols (out of {len(symbols)} in universe)"
+            )
+        except Exception as e:
+            logger.error(
+                f"Premarket seed failed ({e!r}) — qualification will fall "
+                f"back to gap_pct only for stocks until they accumulate "
+                f"RTH bars in the scanner cycle. Trader continues."
+            )
 
     def _run_premarket_cycle(self) -> None:
         """Run one pre-market gap scan. Pure quantitative — no LLM calls.

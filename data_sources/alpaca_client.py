@@ -752,6 +752,66 @@ class AlpacaClient:
             logger.error(f"Failed to get current bars: {e}")
             raise AlpacaAPIError(f"Failed to get current bars: {e}")
 
+    def get_premarket_extremes(
+        self, symbols: List[str], trade_date: date,
+        feed: DataFeed = DataFeed.SIP,
+    ) -> Dict[str, tuple]:
+        """Batch-fetch premarket high/low (04:00-09:30 ET) for many symbols.
+
+        Returns {symbol: (pm_high, pm_low)} for symbols that traded in
+        premarket. Symbols with no premarket activity are absent from the
+        return dict (caller should default to None).
+
+        Used by live scanner at startup to seed _day_highs/_day_lows so
+        intraday range_pct qualification matches BT-with-premarket. Closes
+        the BT-LIVE drift documented in 5/5 INTT (gapped down 13% in PM,
+        ranged 17.7% during RTH; live caught it via premarket-derived
+        range_pct, BT missed without premarket).
+        """
+        if not symbols:
+            return {}
+        ET = pytz.timezone('US/Eastern')
+        pm_start_et = ET.localize(datetime(
+            trade_date.year, trade_date.month, trade_date.day, 4, 0, 0))
+        pm_end_et = ET.localize(datetime(
+            trade_date.year, trade_date.month, trade_date.day, 9, 30, 0))
+        pm_start = pm_start_et.astimezone(timezone.utc)
+        pm_end = pm_end_et.astimezone(timezone.utc)
+        results: Dict[str, tuple] = {}
+        chunk_size = 200
+        try:
+            for i in range(0, len(symbols), chunk_size):
+                chunk = symbols[i:i + chunk_size]
+                request = StockBarsRequest(
+                    symbol_or_symbols=chunk,
+                    timeframe=TimeFrame(1, TimeFrameUnit.Minute),
+                    start=pm_start,
+                    end=pm_end,
+                    feed=feed,
+                )
+                bars_raw = self._call_with_timeout(
+                    lambda req=request: self.data_client.get_stock_bars(req),
+                    f"get_premarket_extremes(chunk {i // chunk_size + 1})"
+                )
+                bars = self._to_dict(bars_raw)
+                for symbol in chunk:
+                    syms_bars = bars.get(symbol) or []
+                    if not syms_bars:
+                        continue
+                    pm_high = max(float(b.high) for b in syms_bars)
+                    pm_low = min(float(b.low) for b in syms_bars)
+                    results[symbol] = (pm_high, pm_low)
+        except Exception as e:
+            logger.error(
+                f"get_premarket_extremes failed (chunk i={i}): {e}"
+            )
+            return results  # partial results are still useful
+        logger.info(
+            f"Premarket extremes fetched for {len(results)}/{len(symbols)} "
+            f"symbols on {trade_date}"
+        )
+        return results
+
     # =========================================================================
     # News
     # =========================================================================

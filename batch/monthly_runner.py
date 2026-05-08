@@ -352,7 +352,8 @@ class MonthlyBacktestRunner:
     """
 
     def __init__(self, max_workers: int = 2, scan_workers: int = 1, verbose: bool = False,
-                 qualification_pct_override: float = None):
+                 qualification_pct_override: float = None,
+                 include_premarket: bool = False):
         """
         Initialize MonthlyBacktestRunner.
 
@@ -368,6 +369,7 @@ class MonthlyBacktestRunner:
         self.scan_workers = scan_workers
         self.verbose = verbose
         self.qualification_pct_override = qualification_pct_override
+        self.include_premarket = include_premarket
 
     def run_month(
         self,
@@ -523,7 +525,8 @@ class MonthlyBacktestRunner:
                                             volume_profiles=volume_profiles,
                                             market_regime=market_regime,
                                             circuit_breaker_dd=cb_dd,
-                                            circuit_breaker_pause=cb_pause)
+                                            circuit_breaker_pause=cb_pause,
+                                            include_premarket=self.include_premarket)
 
             # Write rich CSV for this month
             csv_filename = f"backtest_{month_start.year}_{month_start.month:02d}.csv"
