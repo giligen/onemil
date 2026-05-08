@@ -1546,7 +1546,11 @@ class TradingEngine:
                                 f"fill bid=${qsnap['latest_bid']:.2f} ask=${qsnap['latest_ask']:.2f}, "
                                 f"OFI={qsnap['ofi_cumulative']:.0f}"
                             )
-                        self.stop_monitor.remove_quote_watch(symbol)
+                        # NOTE: do NOT remove_quote_watch here — that schedules
+                        # an _unsubscribe_symbol coroutine that races against
+                        # the add_watch / upgrade_quote_to_stop_watch call
+                        # below (TTGT 2026-05-08 root cause). The atomic
+                        # upgrade later in this method handles the swap.
 
                     # Log L2 order book depth at fill time (async, never blocks trading)
                     try:
@@ -1715,7 +1719,13 @@ class TradingEngine:
 
                         _flag_vol = (plan.pattern.avg_flag_volume
                                      if plan and plan.pattern else 0.0)
-                        self.stop_monitor.add_watch(
+                        # TTGT 2026-05-08 root-cause fix: atomic quote→stop
+                        # upgrade. Replaces the racy remove_quote_watch +
+                        # add_watch pair. See StopMonitor.upgrade_quote_to_stop_watch
+                        # docstring for why the prior approach silently lost
+                        # WS handlers, causing 14+ days of zero R-trail
+                        # activations across all bull flag trades.
+                        self.stop_monitor.upgrade_quote_to_stop_watch(
                             symbol=symbol,
                             stop_price=real_stop,
                             shares=actual_qty,

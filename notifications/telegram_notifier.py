@@ -169,12 +169,25 @@ class TelegramNotifier:
         self.send_message_sync(msg)
 
     def notify_premarket_gaps(self, gaps: List[Dict]) -> None:
-        """Notify about pre-market gap-ups detected."""
+        """Notify about pre-market gap-ups detected.
+
+        Cap at top 30 by gap_pct — full list lives in console + DB.
+        Telegram ceiling is 4096 chars; 375-row dump (5/8 incident) hit
+        14K chars, truncated mid-<b> tag, broke HTML parse.
+        """
         if not gaps:
             return
 
-        lines = [f"🌅 <b>Pre-Market Gap-Ups: {len(gaps)} found</b>\n"]
-        for g in sorted(gaps, key=lambda x: x.get('gap_pct', 0), reverse=True):
+        TOP_N = 30
+        sorted_gaps = sorted(gaps, key=lambda x: x.get('gap_pct', 0), reverse=True)
+        shown = sorted_gaps[:TOP_N]
+
+        header = f"🌅 <b>Pre-Market Gap-Ups: {len(gaps)} found</b>"
+        if len(gaps) > TOP_N:
+            header += f" (showing top {TOP_N})"
+        lines = [header + "\n"]
+
+        for g in shown:
             symbol = html.escape(g.get('symbol', ''))
             gap_pct = g.get('gap_pct', 0)
             price = g.get('current_price', 0)

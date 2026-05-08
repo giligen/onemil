@@ -96,4 +96,10 @@ risk:
   trail_stop_pct: 0.003     # 0.3% trail below highest high (profit protection)
                              # Validated: 48% WR, +$260K, 13/15 green months
                              # Without trail: 30% WR, lottery-dependent
+  trail_arm_pct: 0.003      # CORD 5/8 fix: trail arms only after high crosses
+                             # entry × (1+arm_pct). Default = trail_stop_pct so
+                             # trail can NEVER fire at a loss. Without this gate
+                             # CORD 5/8: entry $5.19, first bid $5.12 → instant
+                             # flash trail trigger before bracket cancels
+                             # propagated → naked position.
   daily_loss_limit: -5000

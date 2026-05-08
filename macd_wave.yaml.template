@@ -77,4 +77,8 @@ risk:
   trail_stop_pct: 0.003     # 0.3% trail below highest high (profit protection)
                              # Validated: 48% WR, +$260K, 13/15 green months
                              # Without trail: 30% WR, lottery-dependent
+  trail_arm_pct: 0.003      # Trail activates only after high crosses
+                             # entry × (1+arm_pct). Default = trail_stop_pct so
+                             # trail can NEVER fire at a loss. Set to 0 to
+                             # restore legacy "arm immediately" behaviour.
   daily_loss_limit: -5000

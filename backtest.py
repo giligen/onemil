@@ -184,6 +184,19 @@ class TradeSimulator:
         trail_tightened_r: float = 0.5,
         vol_confirmed_trail_enabled: bool = False,
         vol_confirmed_trail_min_ratio: float = 1.0,
+        # Static lock (ORB-style): touch +static_lock_arm_r → stop ratchets to
+        # entry + static_lock_at_r * R ONCE and NEVER moves further. Disables
+        # trailing after lock arms. Both fields > 0 to enable.
+        static_lock_arm_r: float = 0.0,
+        static_lock_at_r: float = 0.0,
+        # Planned-R variant: when True, R-based math (activation, breakeven,
+        # static lock, trail ratchet, r_gain) uses (plan.entry_price -
+        # plan.stop_loss_price) — the SETUP's structural R — instead of
+        # (actual_fill - plan.stop_loss_price). De-couples trail behavior
+        # from entry slippage so a fast breakout that fills 1-2% above the
+        # planned breakout level doesn't push the activation gate further
+        # away. Hard stop stays at plan.stop_loss_price either way.
+        use_planned_r: bool = False,
     ):
         """
         Initialize TradeSimulator.
@@ -252,6 +265,11 @@ class TradeSimulator:
         # Prevents exit on passive pullbacks within a slow-burn rally.
         self.vol_confirmed_trail_enabled = vol_confirmed_trail_enabled
         self.vol_confirmed_trail_min_ratio = vol_confirmed_trail_min_ratio
+        # Static lock (ORB-style)
+        self.static_lock_arm_r = static_lock_arm_r
+        self.static_lock_at_r = static_lock_at_r
+        # Planned-R variant
+        self.use_planned_r = use_planned_r
 
     # ------------------------------------------------------------------
     # Exhaustion signal detectors (delegated to shared module)
@@ -334,11 +352,22 @@ class TradeSimulator:
             return self._simulate_with_partial(trade, plan, bars, entry_bar_idx, actual_entry)
 
         # Trailing stop state
-        use_trail = self.trailing_stop_r > 0
+        use_trail = self.trailing_stop_r > 0 or self.static_lock_arm_r > 0
         trailing_active = False
+        static_locked = False
         highest_since_entry = actual_entry
         current_stop = trade.stop_loss
-        risk = actual_entry - plan.stop_loss_price
+        # Planned-R variant: decouple trail-math from fill slippage. R is
+        # the SETUP's structural risk (planned_entry - planned_stop), and
+        # r_gain / activation / lock thresholds are measured from
+        # planned_entry instead of fill price. Hard stop is unchanged
+        # (still trade.stop_loss = plan.stop_loss_price).
+        if self.use_planned_r:
+            risk = plan.entry_price - plan.stop_loss_price
+            r_baseline = plan.entry_price
+        else:
+            risk = actual_entry - plan.stop_loss_price
+            r_baseline = actual_entry
 
         # Exhaustion exit state
         exhaust_partial_taken = False
@@ -415,10 +444,12 @@ class TradeSimulator:
                     logger.debug(f"  Bar {i}: {reason} at ${stop_fill:.2f}")
                     return trade
 
-                # Stage 1: Move stop to breakeven (+ optional profit) after +breakeven_at_r
+                # Stage 1: Move stop to breakeven (+ optional profit) after +breakeven_at_r.
+                # Levels are anchored at r_baseline (= planned_entry under planned-R,
+                # fill price under fill-R) so slippage doesn't shift the gates.
                 if self.breakeven_at_r > 0 and risk > 0 and not trailing_active:
-                    r_gain = (highest_since_entry - actual_entry) / risk
-                    breakeven_target = actual_entry + self.breakeven_profit_r * risk
+                    r_gain = (highest_since_entry - r_baseline) / risk
+                    breakeven_target = r_baseline + self.breakeven_profit_r * risk
                     if r_gain >= self.breakeven_at_r and current_stop < breakeven_target:
                         current_stop = breakeven_target
                         logger.debug(
@@ -426,15 +457,33 @@ class TradeSimulator:
                             f"stop ${breakeven_target:.2f} (+{self.breakeven_profit_r}R)"
                         )
 
-                # Stage 2: Activate trailing after +NR
-                if risk > 0:
-                    r_gain = (highest_since_entry - actual_entry) / risk
-                    if r_gain >= self.trailing_activate_at_r:
+                # Compute r_gain once (used by Stage 2, 2.5, ratchet, static lock)
+                r_gain = (highest_since_entry - r_baseline) / risk if risk > 0 else 0.0
+
+                # Static lock (ORB-style): one-shot stop move at +arm_r touch.
+                # Stop ratchets to r_baseline + lock_r × risk and NEVER moves again.
+                # Disables trailing-style ratcheting below.
+                if (self.static_lock_arm_r > 0 and not static_locked
+                        and risk > 0):
+                    if r_gain >= self.static_lock_arm_r:
+                        lock_target = r_baseline + self.static_lock_at_r * risk
+                        if lock_target > current_stop:
+                            current_stop = lock_target
+                        static_locked = True
+                        trailing_active = True  # so exit reports as 'trail_stop'
+                        logger.debug(
+                            f"  Bar {i}: STATIC LOCK at +{r_gain:.1f}R → "
+                            f"stop ${lock_target:.2f} (+{self.static_lock_at_r}R, NO TRAIL)"
+                        )
+
+                # Stage 2: Activate trailing after +NR (skipped when static-locked)
+                if not static_locked and risk > 0:
+                    if r_gain >= self.trailing_activate_at_r and self.trailing_stop_r > 0:
                         trailing_active = True
 
                 # Stage 2.5: Tighten trail after passing threshold (e.g., 2.5R)
                 # Locks in more profit on runners without capping them
-                if (trailing_active and not exhaust_partial_taken
+                if (trailing_active and not static_locked and not exhaust_partial_taken
                         and self.trail_tighten_at_r > 0 and risk > 0):
                     if r_gain >= self.trail_tighten_at_r and effective_trail_r > self.trail_tightened_r:
                         effective_trail_r = self.trail_tightened_r
@@ -444,7 +493,8 @@ class TradeSimulator:
                         )
 
                 # Ratchet stop up (uses tighter trail after exhaustion partial)
-                if trailing_active and risk > 0:
+                # Skipped when static-locked — the lock is one-shot and final.
+                if trailing_active and not static_locked and risk > 0 and self.trailing_stop_r > 0:
                     new_stop = highest_since_entry - risk * effective_trail_r
                     if new_stop > current_stop:
                         current_stop = new_stop
@@ -1083,7 +1133,14 @@ class BacktestRunner:
         self.conviction_enabled = bool(conv_cfg.get("enabled", False))
         # Conviction filter (skip trades below threshold). 0.0 = disabled.
         # Mirrors trading_engine.py for BT/PROD parity.
-        self.conviction_min_threshold = float(conv_cfg.get("min_threshold", 0.0))
+        # Env var override for sweep / research runs that need to capture all
+        # candidates in cache (so post-hoc sweeps over conviction params are honest).
+        import os as _os
+        _conv_env = _os.environ.get('BT_CONV_THRESHOLD_OVERRIDE')
+        if _conv_env is not None:
+            self.conviction_min_threshold = float(_conv_env)
+        else:
+            self.conviction_min_threshold = float(conv_cfg.get("min_threshold", 0.0))
         # Sanity-check threshold at startup (parity with trading_engine.py)
         if self.conviction_min_threshold > 3.0:
             logger.warning(

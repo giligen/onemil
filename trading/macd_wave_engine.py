@@ -202,6 +202,10 @@ class MACDWaveEngine:
         risk = cfg.get('risk', {})
         self.hard_stop_pct = float(risk.get('hard_stop_pct', 0.02))
         self.trail_stop_pct = float(risk.get('trail_stop_pct', 0.003))  # 0.3% trail below highest
+        # CORD 5/8 fix: trail arms only after high crosses entry × (1+arm_pct).
+        # Default = trail_stop_pct so trail can never trigger at a loss
+        # (premature exit on first post-fill bid dip — see tests).
+        self.trail_arm_pct = float(risk.get('trail_arm_pct', self.trail_stop_pct))
         self.daily_loss_limit = float(risk.get('daily_loss_limit', -5000))
         self.safety_net_sl_pct = float(risk.get('safety_net_sl_pct', 0.05))  # 5% floor on Alpaca
 
@@ -287,6 +291,7 @@ class MACDWaveEngine:
                             risk_per_share=0,
                             trail_r=0, activate_at_r=0.0,
                             trail_pct=self.trail_stop_pct,
+                            trail_arm_pct=self.trail_arm_pct,
                             strategy=self.STRATEGY_NAME,
                         )
                     logger.info(
@@ -435,6 +440,7 @@ class MACDWaveEngine:
                     entry_price=avg_price, risk_per_share=0,
                     trail_r=0, activate_at_r=0.0,
                     trail_pct=self.trail_stop_pct,
+                    trail_arm_pct=self.trail_arm_pct,
                     strategy=self.STRATEGY_NAME,
                 )
             logger.warning(
@@ -1984,6 +1990,7 @@ class MACDWaveEngine:
                                         risk_per_share=0,  # not used — trail_pct overrides
                                         trail_r=0, activate_at_r=0.0,
                                         trail_pct=self.trail_stop_pct,  # percentage-based trail
+                                        trail_arm_pct=self.trail_arm_pct,  # CORD 5/8 fix
                                         strategy=self.STRATEGY_NAME,
                                     )
 

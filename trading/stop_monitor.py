@@ -59,6 +59,14 @@ class WatchEntry:
     # Percentage-based trail (for MACD wave): trail = highest * (1 - trail_pct)
     # When > 0, overrides R-based trail computation
     trail_pct: float = 0.0
+    # Percentage-based trail arming threshold. Trail does NOT activate
+    # (and stop_price does NOT ratchet) until observed_high >=
+    # entry * (1 + trail_arm_pct). Prevents the CORD 5/8 flash exit:
+    # entry $5.19, trail_pct 0.003 → stop seeded at $5.17 (high=entry),
+    # first post-fill bid $5.12 instantly tripped trail at a loss.
+    # Default 0.0 = legacy "arm immediately" (back-compat).
+    # Recommended: set arm_pct == trail_pct so trail can never fire at a loss.
+    trail_arm_pct: float = 0.0
     # Exhaustion exit: set True after partial sell into strength
     exhaustion_partial_taken: bool = False
     # Quote cache (updated by WebSocket quote stream)
@@ -190,6 +198,74 @@ class StopMonitor:
             '40410000' in msg or 'position not found' in msg or
             'no position' in msg
         )
+
+    @staticmethod
+    def _is_held_qty_race(e: Exception) -> bool:
+        """Detect transient "held_for_orders" race after a bracket cancel.
+
+        CORD 5/8: after we cancel a bracket leg, Alpaca's release of
+        `held_for_orders` is async. A new sell submitted within ~1-2s
+        comes back with code 40310000 / "insufficient qty available".
+        This is RETRYABLE (with backoff), unlike the "position flat"
+        races above. Caller should sleep+retry rather than escalating.
+        """
+        msg = str(e).lower()
+        return '40310000' in msg or 'insufficient qty available' in msg
+
+    # CORD 5/8: backoff schedule for held_for_orders releases. Cumulative
+    # ≈ 2.2s — enough to clear any sane bracket-cancel propagation while
+    # still leaving headroom inside the 10s fill-poll budget.
+    _HELD_QTY_RETRY_BACKOFFS_S = (0.2, 0.5, 1.5)
+
+    async def _submit_with_held_qty_retry(self, loop, fn, label: str):
+        """Run a sync Alpaca submit (in executor) with backoff retry on the
+        40310000 / 'insufficient qty available' transient race.
+
+        Re-raises any non-held-qty exception immediately so the caller's
+        existing race-condition / bracket-SL recovery branches still trigger
+        on the right errors. Logs each retry at WARNING.
+        """
+        last_err: Optional[Exception] = None
+        attempts = 1 + len(self._HELD_QTY_RETRY_BACKOFFS_S)
+        for attempt in range(attempts):
+            if attempt > 0:
+                delay = self._HELD_QTY_RETRY_BACKOFFS_S[attempt - 1]
+                await asyncio.sleep(delay)
+            try:
+                return await loop.run_in_executor(None, fn)
+            except Exception as e:
+                last_err = e
+                if not self._is_held_qty_race(e):
+                    raise
+                logger.warning(
+                    f"StopMonitor: {label} held_for_orders race "
+                    f"(attempt {attempt + 1}/{attempts}) — "
+                    f"{'retrying' if attempt + 1 < attempts else 'giving up'}"
+                )
+        # Exhausted retries — re-raise so caller can place emergency SL
+        assert last_err is not None
+        raise last_err
+
+    @staticmethod
+    def _maybe_arm_pct_trail(watch: 'WatchEntry', observed_high: float) -> bool:
+        """Activate a pct trail when observed_high crosses the arm threshold.
+
+        Only relevant when trail_pct > 0 AND trail_arm_pct > 0. Returns True
+        iff trail JUST activated (caller should log). Legacy "arm immediately"
+        is handled at add_watch time by initialising trailing_active=True.
+        """
+        if (
+            watch.trail_pct <= 0 or
+            watch.trailing_active or
+            watch.trail_arm_pct <= 0 or
+            watch.entry_price <= 0
+        ):
+            return False
+        arm_level = watch.entry_price * (1 + watch.trail_arm_pct)
+        if observed_high >= arm_level:
+            watch.trailing_active = True
+            return True
+        return False
 
     def __init__(
         self,
@@ -496,17 +572,22 @@ class StopMonitor:
         See: OPTX 2026-04-13 incident. BT/LIVE divergence root cause —
         `highest_since_entry` was tick-only.
         """
-        if bar_high <= 0 or bar_high <= watch.highest_since_entry:
+        if bar_high <= 0:
             return
-
-        watch.highest_since_entry = bar_high
+        # Update highest if bar high is a new peak. Don't early-return when
+        # equal — even if a tick already pushed `highest_since_entry` to
+        # this level, the bar handler is the ONLY ratchet source for pct
+        # trails post-BOBS-5/8, so we must let the ratchet block run.
+        if bar_high > watch.highest_since_entry:
+            watch.highest_since_entry = bar_high
 
         has_r_trail = watch.trail_r > 0 and watch.risk_per_share > 0
         has_pct_trail = watch.trail_pct > 0
         if not (has_r_trail or has_pct_trail):
             return
 
-        # Activate (R-based only — pct-based already active at watch creation)
+        # Activate (R-based only — pct-based already active at watch creation
+        # OR gated by trail_arm_pct, handled via _maybe_arm_pct_trail below).
         if not watch.trailing_active and has_r_trail:
             r_gain = (bar_high - watch.entry_price) / watch.risk_per_share
             if r_gain >= watch.activate_at_r:
@@ -516,6 +597,15 @@ class StopMonitor:
                     f"high=${bar_high:.2f}, +{r_gain:.1f}R from "
                     f"entry ${watch.entry_price:.2f}"
                 )
+        # CORD 5/8 fix: pct-trail arming gate. When trail_arm_pct > 0, only
+        # activate after high crosses entry × (1 + arm_pct).
+        if has_pct_trail and self._maybe_arm_pct_trail(watch, bar_high):
+            arm_level = watch.entry_price * (1 + watch.trail_arm_pct)
+            logger.info(
+                f"StopMonitor (bar): {symbol} pct trail ARMED — "
+                f"high=${bar_high:.2f} >= arm=${arm_level:.2f} "
+                f"(entry=${watch.entry_price:.2f}, arm_pct={watch.trail_arm_pct:.4f})"
+            )
 
         # Ratchet
         if watch.trailing_active:
@@ -576,6 +666,7 @@ class StopMonitor:
         trail_r: float = 0.0,
         activate_at_r: float = 0.0,
         trail_pct: float = 0.0,
+        trail_arm_pct: float = 0.0,
         strategy: str = 'bull_flag',
         avg_flag_volume: float = 0.0,
         vol_confirmed_trail_enabled: bool = False,
@@ -620,7 +711,11 @@ class StopMonitor:
             activate_at_r=activate_at_r,
             highest_since_entry=entry_price,
             trail_pct=trail_pct,
-            trailing_active=trail_pct > 0,  # %-based trail activates immediately
+            trail_arm_pct=trail_arm_pct,
+            # CORD 5/8 fix: when trail_arm_pct > 0, trail starts INACTIVE and
+            # arms only when observed_high >= entry × (1 + trail_arm_pct).
+            # Legacy callers (trail_arm_pct=0.0) keep immediate-arm behaviour.
+            trailing_active=(trail_pct > 0 and trail_arm_pct <= 0),
             strategy=strategy,
             avg_flag_volume=avg_flag_volume,
             vol_confirmed_trail_enabled=vol_confirmed_trail_enabled,
@@ -650,6 +745,104 @@ class StopMonitor:
         logger.info(
             f"StopMonitor: watching {symbol} — "
             f"stop=${stop_price:.2f}, shares={shares}{trail_msg}"
+        )
+
+    def upgrade_quote_to_stop_watch(
+        self,
+        symbol: str,
+        stop_price: float,
+        shares: int,
+        tp_leg_id: str,
+        sl_leg_id: str,
+        trade_db_id: Optional[int] = None,
+        entry_price: float = 0.0,
+        risk_per_share: float = 0.0,
+        trail_r: float = 0.0,
+        activate_at_r: float = 0.0,
+        trail_pct: float = 0.0,
+        trail_arm_pct: float = 0.0,
+        strategy: str = 'bull_flag',
+        avg_flag_volume: float = 0.0,
+        vol_confirmed_trail_enabled: bool = False,
+        vol_confirmed_trail_min_ratio: float = 1.0,
+        lock_arm_at_r: float = 0.0,
+        lock_stop_r: float = 0.0,
+        lock_r_unit: float = 0.0,
+        skip_exits_until_ts: float = 0.0,
+    ) -> None:
+        """Atomic quote-watch → stop-watch promotion.
+
+        Replaces the unsafe `remove_quote_watch() + add_watch()` pair which
+        races on the SDK's `_handlers` dict — `_unsubscribe_symbol` pops
+        the trade handler while `_subscribe_symbol` is concurrently
+        re-adding it, and the order on the asyncio event loop is not
+        guaranteed. When the unsubscribe lands AFTER the subscribe, the
+        SDK ends up with NO handler for the symbol — server-side delivery
+        continues but client-side dispatch is silent. Result: bull flag
+        R-trail had ZERO activations across all symbols in the 14 days
+        prior to 2026-05-08 despite price action repeatedly crossing
+        +1.5R activation thresholds.
+
+        This method does the swap atomically under one lock with no WS
+        operations: the symbol is already subscribed (via the prior
+        quote-watch), and the handler (`self._on_trade` / `self._on_quote`)
+        does not change — only the watch dict it routes to.
+
+        Edge case: if no quote-watch exists (e.g., post-restart
+        sync_positions), this falls back to add_watch semantics with a
+        fresh subscribe.
+        """
+        entry = WatchEntry(
+            symbol=symbol,
+            stop_price=stop_price,
+            shares=shares,
+            tp_leg_id=tp_leg_id,
+            sl_leg_id=sl_leg_id,
+            trade_db_id=trade_db_id,
+            entry_price=entry_price,
+            risk_per_share=risk_per_share,
+            trail_r=trail_r,
+            activate_at_r=activate_at_r,
+            highest_since_entry=entry_price,
+            trail_pct=trail_pct,
+            trail_arm_pct=trail_arm_pct,
+            trailing_active=(trail_pct > 0 and trail_arm_pct <= 0),
+            strategy=strategy,
+            avg_flag_volume=avg_flag_volume,
+            vol_confirmed_trail_enabled=vol_confirmed_trail_enabled,
+            vol_confirmed_trail_min_ratio=vol_confirmed_trail_min_ratio,
+            lock_arm_at_r=lock_arm_at_r,
+            lock_stop_r=lock_stop_r,
+            lock_r_unit=lock_r_unit,
+            skip_exits_until_ts=skip_exits_until_ts,
+        )
+
+        # Atomic swap under one lock: pop quote-watch, install stop-watch.
+        # `had_quote_watch` tells us whether the symbol was already
+        # subscribed at the SDK handler level (set by add_quote_watch's
+        # _subscribe_symbol). If yes, NO WS work needed — the handlers
+        # already route _on_trade/_on_quote to this StopMonitor, and
+        # they look up symbols in self._watches (post-swap) automatically.
+        with self._watch_lock:
+            had_quote_watch = self._quote_watches.pop(symbol, None) is not None
+            self._watches[symbol] = entry
+        with self._exit_lock:
+            self._exit_in_progress[symbol] = False
+
+        # Fallback: if no prior quote-watch, schedule a subscribe so the
+        # SDK's `_handlers` dict gets our callbacks for this symbol.
+        if not had_quote_watch and self._loop and self._stream and self._running:
+            asyncio.run_coroutine_threadsafe(
+                self._subscribe_symbol(symbol), self._loop
+            )
+
+        trail_msg = ""
+        if trail_r > 0:
+            trail_msg = f", trail={trail_r:.1f}R (activates +{activate_at_r:.1f}R)"
+        logger.info(
+            f"StopMonitor: upgraded quote-watch → stop-watch for {symbol} — "
+            f"stop=${stop_price:.2f}, shares={shares}{trail_msg} "
+            f"(had_quote_watch={had_quote_watch})"
         )
 
     def remove_watch(self, symbol: str) -> None:
@@ -1471,21 +1664,33 @@ class StopMonitor:
 
                     # Trail activation
                     if not watch.trailing_active and watch.entry_price > 0:
-                        risk = watch.risk_per_share if watch.risk_per_share > 0 else watch.entry_price * 0.02
-                        if risk > 0:
-                            r_gain = (watch.highest_since_entry - watch.entry_price) / risk
-                            if watch.trail_pct > 0:
-                                watch.trailing_active = True
-                            elif r_gain >= watch.activate_at_r:
-                                watch.trailing_active = True
-                                logger.info(f"StopMonitor poll: {sym} trail ACTIVATED +{r_gain:.1f}R")
-
-                    # Ratchet trail
-                    if watch.trailing_active:
+                        # CORD 5/8 fix: pct trails respect trail_arm_pct.
+                        # Legacy (arm_pct=0): arm immediately, as before.
+                        # New (arm_pct>0): arm only when high >= entry × (1+arm_pct).
                         if watch.trail_pct > 0:
-                            new_stop = watch.highest_since_entry * (1 - watch.trail_pct)
+                            if watch.trail_arm_pct <= 0:
+                                watch.trailing_active = True
+                            elif self._maybe_arm_pct_trail(watch, watch.highest_since_entry):
+                                arm_level = watch.entry_price * (1 + watch.trail_arm_pct)
+                                logger.info(
+                                    f"StopMonitor poll: {sym} pct trail ARMED — "
+                                    f"high=${watch.highest_since_entry:.2f} >= "
+                                    f"arm=${arm_level:.2f}"
+                                )
                         else:
-                            new_stop = watch.highest_since_entry - watch.risk_per_share * watch.trail_r
+                            risk = watch.risk_per_share if watch.risk_per_share > 0 else watch.entry_price * 0.02
+                            if risk > 0:
+                                r_gain = (watch.highest_since_entry - watch.entry_price) / risk
+                                if r_gain >= watch.activate_at_r:
+                                    watch.trailing_active = True
+                                    logger.info(f"StopMonitor poll: {sym} trail ACTIVATED +{r_gain:.1f}R")
+
+                    # Ratchet trail. BOBS/ASPN 5/8 fix: pct trails ratchet
+                    # stop ONLY on closed bar highs (BT parity). Poll-loop
+                    # snapshots are tick-cadence so this branch skips
+                    # pct ratcheting; bar handler is the sole source.
+                    if watch.trailing_active and watch.trail_pct <= 0:
+                        new_stop = watch.highest_since_entry - watch.risk_per_share * watch.trail_r
                         if new_stop > watch.stop_price:
                             old = watch.stop_price
                             watch.stop_price = new_stop
@@ -1760,7 +1965,18 @@ class StopMonitor:
             # threshold.
             if not watch.trailing_active:
                 if has_pct_trail:
-                    watch.trailing_active = True
+                    # CORD 5/8 fix: respect trail_arm_pct gate. Legacy
+                    # (arm_pct=0) keeps immediate-arm behaviour.
+                    if watch.trail_arm_pct <= 0:
+                        watch.trailing_active = True
+                    elif self._maybe_arm_pct_trail(watch, watch.highest_since_entry):
+                        arm_level = watch.entry_price * (1 + watch.trail_arm_pct)
+                        logger.info(
+                            f"StopMonitor: {symbol} pct trail ARMED — "
+                            f"high=${watch.highest_since_entry:.2f} >= "
+                            f"arm=${arm_level:.2f} "
+                            f"(entry=${watch.entry_price:.2f})"
+                        )
                 elif has_r_trail:
                     r_gain = (watch.highest_since_entry - watch.entry_price) / watch.risk_per_share
                     if r_gain >= watch.activate_at_r:
@@ -1772,19 +1988,26 @@ class StopMonitor:
                         )
 
             if watch.trailing_active:
-                # %-based trail (MACD wave) takes precedence if set, else R-based.
-                if has_pct_trail:
-                    new_stop = watch.highest_since_entry * (1 - watch.trail_pct)
-                else:
+                # BOBS/ASPN 5/8 fix: pct trails (MACD wave) ratchet stop_price
+                # ONLY on closed-bar highs, matching BT behavior. Tick-based
+                # ratchet caused whipsaw — BOBS tripped 7s after fill from a
+                # mid-bar tick high. BT runs on 1-min bars only, so BT trail
+                # is bar-based; live must match for BT/LIVE parity. Tick path
+                # still UPDATES highest_since_entry (for arming check) and
+                # still TRIGGERS the exit when price ≤ stop_price (so we
+                # exit promptly when a closed-bar-ratcheted stop is hit).
+                # See _maybe_ratchet_from_bar_high for the ratchet path.
+                if has_r_trail:
                     new_stop = watch.highest_since_entry - watch.risk_per_share * watch.trail_r
-                if new_stop > watch.stop_price:
-                    old_stop = watch.stop_price
-                    watch.stop_price = new_stop
-                    logger.debug(
-                        f"StopMonitor: {symbol} trail ratchet "
-                        f"${old_stop:.2f} → ${new_stop:.2f} "
-                        f"(high=${watch.highest_since_entry:.2f})"
-                    )
+                    if new_stop > watch.stop_price:
+                        old_stop = watch.stop_price
+                        watch.stop_price = new_stop
+                        logger.debug(
+                            f"StopMonitor: {symbol} trail ratchet "
+                            f"${old_stop:.2f} → ${new_stop:.2f} "
+                            f"(high=${watch.highest_since_entry:.2f})"
+                        )
+                # has_pct_trail: NO tick-based stop ratchet (bar-only).
 
         # Static-lock arming (ORB strategy). When price first reaches
         # entry + lock_arm_at_r × R, move stop UP to entry + lock_stop_r × R
@@ -2188,13 +2411,18 @@ class StopMonitor:
             # us $288 extra loss on BMNZ before we noticed it manually.
             exit_price: Optional[float] = None
             try:
-                result = await loop.run_in_executor(
-                    None,
+                # CORD 5/8 fix: retry-with-backoff on held_for_orders race
+                # (40310000) so we ride out Alpaca's async OCO release window
+                # instead of falling through to close_position(), which fails
+                # for the same reason and leaves the position naked.
+                result = await self._submit_with_held_qty_retry(
+                    loop,
                     lambda: client.submit_limit_sell_order(
                         symbol=symbol,
                         qty=watch.shares,
                         limit_price=limit_price,
                     ),
+                    label=f"{symbol} limit_sell",
                 )
                 order_id = result.get("id", "")
                 logger.info(
@@ -2279,10 +2507,13 @@ class StopMonitor:
                         f"StopMonitor: {symbol} limit sell failed: {e} — "
                         f"falling back to close_position()"
                     )
-                    # Fallback: market close (in executor)
+                    # Fallback: market close. Same held_for_orders race
+                    # applies — retry with backoff before giving up.
                     try:
-                        fallback = await loop.run_in_executor(
-                            None, client.close_position, symbol
+                        fallback = await self._submit_with_held_qty_retry(
+                            loop,
+                            lambda: client.close_position(symbol),
+                            label=f"{symbol} close_position",
                         )
                         order_id = fallback.get("id", "")
                         exit_reason = "stop_loss_fallback"
@@ -2344,12 +2575,61 @@ class StopMonitor:
                                     self._exit_in_progress[symbol] = False
                                 return
                         else:
-                            logger.error(
-                                f"StopMonitor: {symbol} fallback close also failed: {e2} — "
-                                f"safety-net SL is the last line of defense"
+                            # CORD 5/8 fix: previous behaviour was to return
+                            # silently — but the bracket OCO is gone (cancel
+                            # bulk above already killed both legs), so the
+                            # position is NAKED. Place an emergency stop-
+                            # market sell at trigger_price so the broker has
+                            # something to fire on. If even THAT fails (no
+                            # qty, API down), log CRITICAL + Telegram so the
+                            # user can intervene. Don't silently return.
+                            emergency_stop_price = round(
+                                min(trigger_price, watch.stop_price) * 0.99,
+                                2,
                             )
-                            # Remove watch to prevent infinite retry on every tick
-                            # (likely TP already filled — no position to sell)
+                            try:
+                                em_result = await self._submit_with_held_qty_retry(
+                                    loop,
+                                    lambda: client.submit_stop_sell_order(
+                                        symbol=symbol, qty=watch.shares,
+                                        stop_price=emergency_stop_price,
+                                    ),
+                                    label=f"{symbol} emergency_stop",
+                                )
+                                em_id = em_result.get('id', '') if em_result else ''
+                                logger.critical(
+                                    f"StopMonitor: {symbol} EXIT FAILED — "
+                                    f"placed EMERGENCY stop-market @ "
+                                    f"${emergency_stop_price:.2f} "
+                                    f"(order={em_id}). limit_err={e}; "
+                                    f"close_err={e2}. VERIFY POSITION."
+                                )
+                                if self.notifier:
+                                    try:
+                                        self.notifier.notify_error(
+                                            f"{symbol} exit failed — emergency SL "
+                                            f"placed @ ${emergency_stop_price:.2f}. "
+                                            f"VERIFY POSITION on Alpaca.",
+                                            component="StopMonitor",
+                                        )
+                                    except Exception:
+                                        pass
+                            except Exception as em_err:
+                                logger.critical(
+                                    f"StopMonitor: {symbol} POSITION NAKED — "
+                                    f"limit, close, AND emergency-SL all failed. "
+                                    f"limit_err={e}; close_err={e2}; "
+                                    f"emergency_err={em_err}. USER ACTION REQUIRED."
+                                )
+                                if self.notifier:
+                                    try:
+                                        self.notifier.notify_error(
+                                            f"{symbol} POSITION NAKED — all exit "
+                                            f"paths failed. Manual close required.",
+                                            component="StopMonitor",
+                                        )
+                                    except Exception:
+                                        pass
                             with self._watch_lock:
                                 self._watches.pop(symbol, None)
                             with self._exit_lock:

@@ -871,57 +871,49 @@ class TestPercentTrailingStop:
 
     @pytest.mark.asyncio
     async def test_pct_trail_ratchets_stop_up(self, pct_trail_monitor):
-        """Stop ratchets up to highest × (1 - trail_pct) as price climbs.
+        """Stop ratchets up to bar_high × (1 - trail_pct) on closed-bar highs.
 
-        REGRESSION TEST: prior bug never updated stop_price in WS path.
-        ONDG stop stayed at $6.80 (initial hard stop) all day.
+        BOBS/ASPN 5/8 fix: pct trails ratchet stop ONLY on closed-bar highs
+        (BT parity). Tick-based ratchet caused whipsaw within the first
+        seconds of a fill. Bar handler is now the sole source.
         """
-        # Tick to $7.06 — stop should be 7.06 * (1 - 0.003) = 7.03882
-        t = MagicMock(); t.symbol = 'ONDG'; t.price = 7.06
-        await pct_trail_monitor._on_trade(t)
-
         with pct_trail_monitor._watch_lock:
             w = pct_trail_monitor._watches['ONDG']
-        expected_stop = 7.06 * (1 - 0.003)  # 7.03882
+        # Bar high $7.06 ratchets stop to 7.06 × 0.997 = 7.03882
+        pct_trail_monitor._maybe_ratchet_from_bar_high('ONDG', w, bar_high=7.06)
+        expected_stop = 7.06 * (1 - 0.003)
         assert w.stop_price == pytest.approx(expected_stop, abs=0.001), (
             f"stop_price={w.stop_price} not ratcheted. Expected ~{expected_stop:.4f}."
         )
 
     @pytest.mark.asyncio
     async def test_pct_trail_never_ratchets_down(self, pct_trail_monitor):
-        """Stop never moves down when price retraces (only ratchets up)."""
-        # Climb to $7.10 → stop ratchets to 7.10 * 0.997 = 7.0787
-        t1 = MagicMock(); t1.symbol = 'ONDG'; t1.price = 7.10
-        await pct_trail_monitor._on_trade(t1)
-
-        with pct_trail_monitor._watch_lock:
-            stop_after_high = pct_trail_monitor._watches['ONDG'].stop_price
-
-        # Price retraces to $7.09 (still ABOVE the $7.0787 ratcheted stop —
-        # don't pick a price that would fire the stop, which would remove
-        # the watch and defeat the purpose of this test).
-        t2 = MagicMock(); t2.symbol = 'ONDG'; t2.price = 7.09
-        await pct_trail_monitor._on_trade(t2)
-
+        """Stop never moves down when bar high retraces (bar handler ratchets up only)."""
         with pct_trail_monitor._watch_lock:
             w = pct_trail_monitor._watches['ONDG']
-        assert w.stop_price == stop_after_high, "Stop moved down on retrace"
+        # Bar 1 high $7.10 → stop ratchets to 7.10 × 0.997 = 7.0787
+        pct_trail_monitor._maybe_ratchet_from_bar_high('ONDG', w, bar_high=7.10)
+        stop_after_high = w.stop_price
+        # Bar 2 high $7.05 (lower than bar 1) — stop must NOT move down
+        pct_trail_monitor._maybe_ratchet_from_bar_high('ONDG', w, bar_high=7.05)
+        assert w.stop_price == stop_after_high, "Stop moved down on lower bar"
         assert w.highest_since_entry == 7.10
 
     @pytest.mark.asyncio
     async def test_pct_trail_fires_exit_on_pullback(
         self, pct_trail_monitor, mock_alpaca
     ):
-        """Trail fires when price drops below the ratcheted stop.
+        """Trail fires when tick price drops below the bar-ratcheted stop.
 
-        This is the ONDG scenario: peak $7.06 → trail at $7.039 → price
-        drops to $6.93 (way below) → trail must fire.
+        Mixed contract: bar handler ratchets stop, tick handler triggers
+        the exit. Peak bar high $7.06 → stop ratchets to $7.039 → tick at
+        $6.93 (below ratcheted stop) → trail fires.
         """
-        # Peak at $7.06 → ratcheted stop ~$7.039
-        t1 = MagicMock(); t1.symbol = 'ONDG'; t1.price = 7.06
-        await pct_trail_monitor._on_trade(t1)
-
-        # Pullback to $6.93 — should fire trail_stop
+        with pct_trail_monitor._watch_lock:
+            w = pct_trail_monitor._watches['ONDG']
+        # Bar high $7.06 ratchets stop to $7.039
+        pct_trail_monitor._maybe_ratchet_from_bar_high('ONDG', w, bar_high=7.06)
+        # Pullback tick to $6.93 — should fire trail_stop
         t2 = MagicMock(); t2.symbol = 'ONDG'; t2.price = 6.93
         await pct_trail_monitor._on_trade(t2)
 
@@ -942,11 +934,11 @@ class TestPercentTrailingStop:
 
     @pytest.mark.asyncio
     async def test_pct_trail_does_not_fire_above_stop(self, pct_trail_monitor):
-        """Trail does not fire while price stays above the ratcheted stop."""
-        # Climb to $7.10 → stop ~$7.0787
-        t1 = MagicMock(); t1.symbol = 'ONDG'; t1.price = 7.10
-        await pct_trail_monitor._on_trade(t1)
-
+        """Trail does not fire while tick price stays above the bar-ratcheted stop."""
+        with pct_trail_monitor._watch_lock:
+            w = pct_trail_monitor._watches['ONDG']
+        # Bar high $7.10 ratchets stop to $7.0787
+        pct_trail_monitor._maybe_ratchet_from_bar_high('ONDG', w, bar_high=7.10)
         # Stay above stop
         t2 = MagicMock(); t2.symbol = 'ONDG'; t2.price = 7.09
         await pct_trail_monitor._on_trade(t2)
@@ -1039,15 +1031,15 @@ class TestPercentTrailingStop:
             strategy='macd_wave',
         )
 
-        # Step 1: rising sequence from journalctl. After each tick the
-        # ratcheted stop should equal price * 0.997.
-        rising_ticks = [8.65, 8.70, 8.92, 9.60]
-        for px in rising_ticks:
-            t = MagicMock(); t.symbol = 'ONEG'; t.price = px
-            await mon._on_trade(t)
-
+        # Step 1: rising sequence as a sequence of CLOSED-bar highs (the
+        # BOBS/ASPN 5/8 fix moved pct trail ratcheting from tick to bar
+        # only — BT parity). Each closed bar's high ratchets the stop.
+        rising_bar_highs = [8.65, 8.70, 8.92, 9.60]
         with mon._watch_lock:
             w = mon._watches['ONEG']
+        for bh in rising_bar_highs:
+            mon._maybe_ratchet_from_bar_high('ONEG', w, bar_high=bh)
+
         assert w.highest_since_entry == 9.60, (
             f"Peak not tracked: highest={w.highest_since_entry}, expected 9.60"
         )
@@ -1575,3 +1567,371 @@ class TestVolConfirmedTrailExit:
 
         with vol_mon._watch_lock:
             assert vol_mon._watches['PLYX'].last_bar_volume == 75_000
+
+
+# ---------------------------------------------------------------------------
+# CORD 5/8: pct trail arming gate (Bug 1)
+# ---------------------------------------------------------------------------
+
+class TestPctTrailArming:
+    """trail_arm_pct gates trail activation. Without this gate, MACD wave
+    fills with trail_pct=0.003 are vulnerable to a flash exit when the
+    first post-fill bid prints below entry × 0.997 (CORD 5/8 incident)."""
+
+    def _make_armed(self, mock_alpaca, *, trail_pct=0.003, trail_arm_pct=0.003,
+                    entry_price=5.19, stop_price=5.08, shares=13409):
+        mon = StopMonitor(
+            api_key='k', api_secret='s', alpaca_client=mock_alpaca,
+            marketable_limit_offset=0.03, marketable_limit_offset_pct=0.005,
+        )
+        mon._STOP_EXIT_FILL_TIMEOUT_S = 0.1
+        mon._STOP_EXIT_POLL_INTERVAL_S = 0.05
+        mon.add_watch(
+            'CORD', stop_price=stop_price, shares=shares,
+            tp_leg_id='tp-1', sl_leg_id='sl-1',
+            entry_price=entry_price, risk_per_share=0.0,
+            trail_r=0.0, activate_at_r=0.0,
+            trail_pct=trail_pct, trail_arm_pct=trail_arm_pct,
+            strategy='macd_wave',
+        )
+        return mon
+
+    def test_arm_pct_field_stored_on_watch(self, mock_alpaca):
+        mon = self._make_armed(mock_alpaca, trail_arm_pct=0.005)
+        with mon._watch_lock:
+            w = mon._watches['CORD']
+        assert w.trail_pct == 0.003
+        assert w.trail_arm_pct == 0.005
+
+    def test_pct_watch_with_arm_starts_inactive(self, mock_alpaca):
+        """With trail_arm_pct > 0, trail starts INACTIVE (not arm-on-create)."""
+        mon = self._make_armed(mock_alpaca)
+        with mon._watch_lock:
+            w = mon._watches['CORD']
+        assert w.trailing_active is False, (
+            "trail must NOT activate at watch creation when trail_arm_pct > 0"
+        )
+
+    def test_pct_watch_legacy_arms_immediately(self, mock_alpaca):
+        """Backward compat: trail_arm_pct=0 keeps the old arm-on-create."""
+        mon = self._make_armed(mock_alpaca, trail_arm_pct=0.0)
+        with mon._watch_lock:
+            w = mon._watches['CORD']
+        assert w.trailing_active is True
+
+    @pytest.mark.asyncio
+    async def test_cord_5_8_regression_first_bid_does_not_trip_trail(
+        self, mock_alpaca
+    ):
+        """REGRESSION: CORD 5/8 — entry $5.19, first quote $5.12.
+
+        Pre-fix: trailing_active=True at creation, high=$5.19,
+                 stop ratchets to $5.17 from bar high, $5.12 trips trail.
+        Post-fix: trail_arm_pct=0.003 keeps trail INACTIVE until high
+                  reaches $5.205. First quote at $5.12 stays under hard
+                  stop $5.08 → no exit fired. Position survives.
+        """
+        mon = self._make_armed(mock_alpaca)
+
+        # First post-fill print at $5.12 (the CORD bid that broke it).
+        # Hard stop is $5.08 → above hard stop, no exit.
+        t = MagicMock(); t.symbol = 'CORD'; t.price = 5.12
+        await mon._on_trade(t)
+
+        events = mon.drain_exit_events()
+        assert events == [], (
+            "Trail must NOT fire on first post-fill dip — arm gate broken. "
+            f"Got {len(events)} events."
+        )
+        with mon._watch_lock:
+            w = mon._watches['CORD']
+        # Stop should still be the original hard stop (no ratchet)
+        assert w.stop_price == pytest.approx(5.08, abs=0.001), (
+            f"stop_price ratcheted prematurely to {w.stop_price}. "
+            f"Trail must be inactive until high crosses arm threshold."
+        )
+        assert w.trailing_active is False
+
+    @pytest.mark.asyncio
+    async def test_trail_arms_when_high_crosses_arm_level(self, mock_alpaca):
+        """Trail activates when observed high >= entry × (1 + arm_pct).
+
+        Note: post-BOBS-5/8 contract, arming happens but stop_price does
+        NOT ratchet from the tick (bar-only ratchet). The next CLOSED bar
+        is what actually moves the stop up.
+        """
+        mon = self._make_armed(mock_alpaca)  # entry 5.19, arm_pct 0.003
+
+        # arm_level = 5.19 × 1.003 = 5.20557. Tick at $5.21 arms.
+        t = MagicMock(); t.symbol = 'CORD'; t.price = 5.21
+        await mon._on_trade(t)
+
+        with mon._watch_lock:
+            w = mon._watches['CORD']
+        assert w.trailing_active is True, (
+            "Trail must arm when high crosses entry × (1 + arm_pct)"
+        )
+        # Stop_price does NOT ratchet from the tick — bar handler does it.
+        # Stays at hard stop 5.08 until the bar handler runs.
+        assert w.stop_price == pytest.approx(5.08, abs=0.001)
+        # Now feed a closed-bar high to ratchet the stop properly.
+        mon._maybe_ratchet_from_bar_high('CORD', w, bar_high=5.21)
+        expected_stop = 5.21 * (1 - 0.003)
+        assert w.stop_price == pytest.approx(expected_stop, abs=0.001)
+
+    @pytest.mark.asyncio
+    async def test_trail_does_not_fire_at_a_loss_after_arming(
+        self, mock_alpaca
+    ):
+        """After arming at +arm_pct AND a closed bar, the trail stop is
+        at >= entry — so the trail can never trigger an exit at a loss.
+
+        Post-BOBS-5/8: tick arms (no stop ratchet); next closed-bar high
+        is what ratchets the stop to high × (1-trail_pct).
+        """
+        mon = self._make_armed(mock_alpaca)
+
+        # Tick to $5.21 — arms the trail (highest_since_entry=5.21)
+        t1 = MagicMock(); t1.symbol = 'CORD'; t1.price = 5.21
+        await mon._on_trade(t1)
+
+        # Now a closed bar at the same high ratchets the stop
+        with mon._watch_lock:
+            w = mon._watches['CORD']
+        mon._maybe_ratchet_from_bar_high('CORD', w, bar_high=5.21)
+        # After ratchet: stop = 5.21 × 0.997 = 5.19437 ≥ entry $5.19 → no loss
+        assert w.stop_price >= 5.19 * 0.999
+
+    @pytest.mark.asyncio
+    async def test_trail_arm_via_bar_high(self, mock_alpaca):
+        """_update_trail_from_bar arms the pct trail same as tick path."""
+        mon = self._make_armed(mock_alpaca)
+
+        with mon._watch_lock:
+            watch = mon._watches['CORD']
+
+        # Bar high $5.22 (above arm level $5.20557) → arms
+        mon._maybe_ratchet_from_bar_high('CORD', watch, bar_high=5.22)
+        assert watch.trailing_active is True
+        # And ratchets: stop = 5.22 × 0.997 = 5.20434
+        assert watch.stop_price == pytest.approx(5.22 * 0.997, abs=0.001)
+
+    @pytest.mark.asyncio
+    async def test_trail_does_not_arm_below_threshold_via_bar(self, mock_alpaca):
+        """Bar high below arm level keeps trail inactive."""
+        mon = self._make_armed(mock_alpaca)
+
+        with mon._watch_lock:
+            watch = mon._watches['CORD']
+
+        # Bar high $5.20 (below arm $5.20557)
+        mon._maybe_ratchet_from_bar_high('CORD', watch, bar_high=5.20)
+        assert watch.trailing_active is False
+        # No ratchet — stop unchanged
+        assert watch.stop_price == pytest.approx(5.08, abs=0.001)
+
+
+# ---------------------------------------------------------------------------
+# CORD 5/8: held_for_orders race classifier + retry-with-backoff (Bug 2)
+# ---------------------------------------------------------------------------
+
+class TestPctTrailBarOnlyRatchet:
+    """BOBS/ASPN 5/8 regression: pct trails ratchet stop_price ONLY on
+    closed-bar highs, never on intra-bar tick highs. BT runs on 1-min
+    bars only; tick-based ratchet whipsaws on micro-volatility within
+    a bar (BOBS tripped 7s after fill from a single tick high $13.41
+    → stop $13.37 → next bid $13.18). Bar-only matches BT behavior.
+    """
+
+    def _make_monitor_with_pct_trail(self, mock_alpaca, *, entry, hard_stop,
+                                     trail_pct=0.003, trail_arm_pct=0.0):
+        mon = StopMonitor(
+            api_key='k', api_secret='s', alpaca_client=mock_alpaca,
+            marketable_limit_offset=0.03, marketable_limit_offset_pct=0.005,
+        )
+        mon._STOP_EXIT_FILL_TIMEOUT_S = 0.1
+        mon._STOP_EXIT_POLL_INTERVAL_S = 0.05
+        mon.add_watch(
+            'BOBS', stop_price=hard_stop, shares=6751,
+            tp_leg_id='tp-1', sl_leg_id='sl-1',
+            entry_price=entry, risk_per_share=0.0,
+            trail_r=0.0, activate_at_r=0.0,
+            trail_pct=trail_pct, trail_arm_pct=trail_arm_pct,
+            strategy='macd_wave',
+        )
+        return mon
+
+    @pytest.mark.asyncio
+    async def test_tick_does_not_ratchet_pct_stop(self, mock_alpaca):
+        """A single high tick must NOT ratchet the pct trail stop.
+
+        Pre-BOBS-fix: tick at $13.41 ratcheted stop to $13.37 within 5 sec
+        of fill. Post-fix: tick updates highest_since_entry but stop stays
+        at hard stop until a closed bar high arrives.
+        """
+        mon = self._make_monitor_with_pct_trail(
+            mock_alpaca, entry=13.28, hard_stop=13.01, trail_arm_pct=0.0
+        )
+
+        # Tick at $13.41 (the BOBS peak that broke it)
+        t = MagicMock(); t.symbol = 'BOBS'; t.price = 13.41
+        await mon._on_trade(t)
+
+        with mon._watch_lock:
+            w = mon._watches['BOBS']
+        # highest_since_entry tracks the tick (for arming) — that part is fine
+        assert w.highest_since_entry == 13.41
+        # But stop_price MUST NOT ratchet from a tick — BT parity
+        assert w.stop_price == pytest.approx(13.01, abs=0.001), (
+            f"stop_price ratcheted from tick to {w.stop_price}. "
+            f"Pct trails must ratchet on closed-bar highs only (BT parity)."
+        )
+
+    @pytest.mark.asyncio
+    async def test_bar_close_high_ratchets_pct_stop(self, mock_alpaca):
+        """Closed-bar high IS the trigger for pct trail ratchet."""
+        mon = self._make_monitor_with_pct_trail(
+            mock_alpaca, entry=13.28, hard_stop=13.01, trail_arm_pct=0.0
+        )
+        with mon._watch_lock:
+            w = mon._watches['BOBS']
+        # Bar 1 high $13.41 (closed bar) → stop ratchets to 13.41 × 0.997 = 13.36
+        mon._maybe_ratchet_from_bar_high('BOBS', w, bar_high=13.41)
+        expected_stop = 13.41 * (1 - 0.003)
+        assert w.stop_price == pytest.approx(expected_stop, abs=0.001)
+
+    @pytest.mark.asyncio
+    async def test_bobs_5_8_regression_does_not_flash_exit(self, mock_alpaca):
+        """REGRESSION: BOBS 5/8 — entry $13.28, ticks $13.30→$13.41→$13.33.
+
+        Pre-fix: tick at $13.41 ratcheted stop to $13.37; tick at $13.33
+        tripped trail. Position exited 7s after fill at -$675.
+        Post-fix: ticks update highest_since_entry but DO NOT ratchet stop.
+        Without a closed bar to ratchet, stop stays at hard $13.01. No exit.
+        """
+        mon = self._make_monitor_with_pct_trail(
+            mock_alpaca, entry=13.28, hard_stop=13.01, trail_arm_pct=0.003
+        )
+
+        # Replay the BOBS tick sequence
+        for px in [13.30, 13.41, 13.33]:
+            t = MagicMock(); t.symbol = 'BOBS'; t.price = px
+            await mon._on_trade(t)
+
+        events = mon.drain_exit_events()
+        assert events == [], (
+            f"BOBS 5/8 flash exit reproduced. Got {len(events)} events. "
+            f"Pct trail tick-ratchet must be disabled for BT parity."
+        )
+        with mon._watch_lock:
+            w = mon._watches['BOBS']
+        # Stop unchanged from hard stop (no bar close yet)
+        assert w.stop_price == pytest.approx(13.01, abs=0.001)
+        # But high tracked (so the next bar close can ratchet)
+        assert w.highest_since_entry == 13.41
+
+    @pytest.mark.asyncio
+    async def test_tick_below_bar_ratcheted_stop_still_triggers(
+        self, mock_alpaca
+    ):
+        """Tick path STILL triggers exits — only the ratchet path changed."""
+        mon = self._make_monitor_with_pct_trail(
+            mock_alpaca, entry=13.28, hard_stop=13.01, trail_arm_pct=0.0
+        )
+        with mon._watch_lock:
+            w = mon._watches['BOBS']
+        # Bar high $13.41 → stop $13.36
+        mon._maybe_ratchet_from_bar_high('BOBS', w, bar_high=13.41)
+        # Tick at $13.30 (below ratcheted stop) → must trigger exit
+        t = MagicMock(); t.symbol = 'BOBS'; t.price = 13.30
+        await mon._on_trade(t)
+
+        events = mon.drain_exit_events()
+        assert len(events) == 1
+        assert events[0].exit_reason == 'trail_stop'
+
+
+class TestHeldQtyRace:
+    """40310000 / 'insufficient qty available' is a transient race after
+    bracket cancel. Must be classified separately from 'position flat'
+    races and retried with backoff (CORD 5/8 incident)."""
+
+    def test_classifier_matches_40310000(self):
+        e = Exception(
+            '{"available":"0","code":40310000,"existing_qty":"13409",'
+            '"held_for_orders":"13409","message":"insufficient qty available"}'
+        )
+        assert StopMonitor._is_held_qty_race(e) is True
+
+    def test_classifier_matches_message_text(self):
+        e = Exception('insufficient qty available for order (requested: 100, available: 0)')
+        assert StopMonitor._is_held_qty_race(e) is True
+
+    def test_classifier_rejects_position_flat_race(self):
+        e = Exception('42210000: cannot be sold short')
+        assert StopMonitor._is_held_qty_race(e) is False
+
+    def test_classifier_rejects_unrelated_errors(self):
+        e = Exception('rate limit exceeded')
+        assert StopMonitor._is_held_qty_race(e) is False
+
+    def test_held_qty_distinct_from_position_flat(self):
+        """The two races are mutually exclusive — they take different paths
+        in _execute_stop_exit (held_qty: retry; position-flat: SL recovery).
+        """
+        held = Exception('40310000 insufficient qty available')
+        flat = Exception('42210000 cannot be sold short')
+        assert StopMonitor._is_held_qty_race(held) is True
+        assert StopMonitor._is_race_condition_error(held) is False
+        assert StopMonitor._is_held_qty_race(flat) is False
+        assert StopMonitor._is_race_condition_error(flat) is True
+
+    @pytest.mark.asyncio
+    async def test_retry_succeeds_after_held_qty_release(self, monitor):
+        """Backoff helper: held_qty error twice, then success."""
+        # Compress backoff so the test runs in <100ms
+        monitor._HELD_QTY_RETRY_BACKOFFS_S = (0.001, 0.001, 0.001)
+        attempts = []
+
+        def fn():
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise Exception('40310000 insufficient qty available')
+            return {'id': 'order-x', 'status': 'accepted'}
+
+        loop = asyncio.get_event_loop()
+        result = await monitor._submit_with_held_qty_retry(loop, fn, label='X test')
+        assert result == {'id': 'order-x', 'status': 'accepted'}
+        assert len(attempts) == 3
+
+    @pytest.mark.asyncio
+    async def test_retry_passes_through_non_held_qty_error(self, monitor):
+        """Non-held-qty errors raise immediately — caller paths still work."""
+        monitor._HELD_QTY_RETRY_BACKOFFS_S = (0.001,)
+        attempts = []
+
+        def fn():
+            attempts.append(1)
+            raise Exception('42210000 cannot be sold short')
+
+        loop = asyncio.get_event_loop()
+        with pytest.raises(Exception, match='42210000'):
+            await monitor._submit_with_held_qty_retry(loop, fn, label='Y test')
+        assert len(attempts) == 1, "non-held-qty errors must NOT retry"
+
+    @pytest.mark.asyncio
+    async def test_retry_exhausted_reraises(self, monitor):
+        """If all retries fail with held_qty, the helper re-raises (caller
+        proceeds to fallback paths or emergency safety-net)."""
+        monitor._HELD_QTY_RETRY_BACKOFFS_S = (0.001, 0.001)
+        attempts = []
+
+        def fn():
+            attempts.append(1)
+            raise Exception('40310000 insufficient qty available')
+
+        loop = asyncio.get_event_loop()
+        with pytest.raises(Exception, match='40310000'):
+            await monitor._submit_with_held_qty_retry(loop, fn, label='Z test')
+        # 1 initial + 2 backoffs = 3 attempts
+        assert len(attempts) == 3
