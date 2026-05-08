@@ -980,6 +980,25 @@ class ORBEngine:
                 daily_stats_20d=providers.get('daily_stats_20d'),
             )
             cand.features = feats
+            # 2026-05-08 fix: phantom-gap guard at scoring time.
+            # Universe filter at 9:30 used snapshot.open (line 392) which can
+            # be a phantom-print or pre-open quote. We now have the real
+            # bar1.open via range_open, so re-validate gap_pct here.
+            # Without this guard, symbols whose real bar1.open == prev_close
+            # (no gap) get scored — and because gap_pct sign=-1 in the
+            # composite, low-gap entries SCORE HIGHER, ranking phantom-gap
+            # symbols above legit ones. LYG 5/7 was a textbook case:
+            # snapshot.open showed +5% gap, real bar1.open = prev_close,
+            # yet LYG ranked Q5 in LIVE.
+            real_gap_pct = feats.get('gap_pct', None)
+            if real_gap_pct is not None and real_gap_pct < self.universe_min_gap_pct:
+                logger.info(
+                    f"ORB: {cand.symbol} phantom-gap reject — "
+                    f"real gap {real_gap_pct:.2f}% < {self.universe_min_gap_pct}% "
+                    f"(snapshot universe was satisfied via phantom snap.open)"
+                )
+                cand.rejected_reason = 'phantom_gap'
+                continue
             score = composite_score(feats, self.z_params)
             if score is None:
                 logger.debug(f"ORB: {cand.symbol} dropped — missing feature")
@@ -1307,7 +1326,26 @@ class ORBEngine:
             shares = int(filled_qty) if filled_qty else pos.shares
         except (TypeError, ValueError):
             shares = pos.shares
-        fill_at = datetime.now(timezone.utc)
+        # 2026-05-08 fix: prefer Alpaca's actual filled_at timestamp instead
+        # of NOW(). Pre-fix, polling-based fill confirmation (after restart)
+        # wrote sync-time as filled_at, clobbering real fill times by minutes
+        # to hours (ASTX 5/6 was -5h50m off; OKLS 5/7 was -13min off).
+        if isinstance(order_status, dict):
+            alp_fill_at = order_status.get('filled_at')
+        else:
+            alp_fill_at = getattr(order_status, 'filled_at', None)
+        if alp_fill_at is not None:
+            try:
+                if isinstance(alp_fill_at, str):
+                    from dateutil.parser import isoparse as _iso
+                    alp_fill_at = _iso(alp_fill_at)
+                if alp_fill_at.tzinfo is None:
+                    alp_fill_at = alp_fill_at.replace(tzinfo=timezone.utc)
+                fill_at = alp_fill_at
+            except Exception:
+                fill_at = datetime.now(timezone.utc)
+        else:
+            fill_at = datetime.now(timezone.utc)
 
         pos.entry_price = fill_price
         pos.shares = shares
@@ -1966,11 +2004,22 @@ class ORBEngine:
                     entry_quote_ask=(float(entry_ask) if entry_ask else None),
                 )
                 self.open_positions[sym] = pos
-                # Also track on candidate so time-stop cancel logic works with
-                # the ORIGINAL submit clock (not now()).
-                if sym in self.candidates:
-                    self.candidates[sym].order_id = order_id
-                    self.candidates[sym].order_submitted_at = submit_ts
+                # 2026-05-08 fix: ALWAYS register the recovered pending order
+                # on self.candidates, creating a stub CandidateState if needed.
+                # Pre-fix, the conditional `if sym in self.candidates` made
+                # restart-recovered pending orders invisible to
+                # _cancel_stale_pending_orders (which iterates self.candidates),
+                # so the 60-min time_stop never fired post-restart.
+                # CORD 5/7 was the symptom: my 13:53 ET restart killed the
+                # old process before time_stop's 10:35 deadline; the new
+                # process recovered CORD into open_positions but NOT into
+                # candidates → CORD's buy-stop stayed live until 11:22 ET,
+                # 47 min past the cancel deadline.
+                if sym not in self.candidates:
+                    self.candidates[sym] = CandidateState(symbol=sym)
+                    self.candidates[sym].plan_submitted = True
+                self.candidates[sym].order_id = order_id
+                self.candidates[sym].order_submitted_at = submit_ts
                 recovered_pending += 1
                 logger.info(
                     f"ORB.sync: {sym} rehydrated as PENDING "

@@ -186,6 +186,27 @@ def main():
     sel['date'] = pd.to_datetime(sel['date'])
     sel['month'] = sel['date'].dt.to_period('M').astype(str)
 
+    # 2026-05-08: fill-rate haircut. Pre-fix, BT assumed every qualified
+    # signal filled — no model of buy-stop misses. LIVE Mon-Thu 5/4-5/7
+    # observed 9 fills out of 16 buy-stops (56%). The cross_time_min
+    # within-10min window in BT does not equal "filled in live": real
+    # fills require sustained price + sufficient depth at limit_price.
+    # Set ORB_BT_FILL_RATE=0.0 → no haircut (legacy). 0.56 → empirical.
+    # 1.0 → full kill (debug). Default 0 = legacy behaviour preserved.
+    fill_rate = float(os.environ.get('ORB_BT_FILL_RATE', '0') or 0)
+    if 0 < fill_rate < 1:
+        import numpy as _np
+        rng = _np.random.RandomState(42)  # deterministic
+        n_before = len(sel)
+        keep_mask = rng.random(n_before) < fill_rate
+        sel_pre_haircut_pnl = float(sel['_sized_pnl'].sum())
+        sel = sel[keep_mask].copy()
+        n_after = len(sel)
+        sel_post_haircut_pnl = float(sel['_sized_pnl'].sum())
+        print(f"Fill-rate haircut: ORB_BT_FILL_RATE={fill_rate:.2f} "
+              f"→ kept {n_after}/{n_before} trades "
+              f"(${sel_pre_haircut_pnl:+,.0f} → ${sel_post_haircut_pnl:+,.0f})")
+
     # Save trade-level CSV for further analysis
     sel.to_csv('analysis_results/orb_static_lock_trades.csv', index=False)
 

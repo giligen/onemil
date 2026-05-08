@@ -146,7 +146,12 @@ class TestFullEntryFlow:
         # Provide prior-day + 20d stats so composite filter has all features
         providers = {
             'TSLA': {
-                'prev_day_bar': {'open': 9.50, 'high': 10.00, 'low': 9.40, 'close': 9.80, 'volume': 500_000},
+                # 2026-05-08: prev_close lowered to 9.00 (was 9.80) so the
+                # real gap (range_open=10.00 vs prev_close=9.00) = +11.1% passes
+                # the new phantom-gap guard at scoring time (default min_gap=5%).
+                # With prev_close=9.80, real gap was 2.04% which the guard
+                # correctly rejects as phantom.
+                'prev_day_bar': {'open': 8.80, 'high': 9.20, 'low': 8.60, 'close': 9.00, 'volume': 500_000},
                 'daily_stats_20d': {'high_20d': 12.00, 'range_pct_20d': 5.0, 'volume_20d': 800_000},
             }
         }
