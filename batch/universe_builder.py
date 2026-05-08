@@ -377,29 +377,79 @@ class UniverseBuilder:
         """
         Fetch and cache 15-min volume profiles for all universe stocks.
 
+        Per-stock SIGALRM timeout (60s) protects against pathological hangs
+        observed 2026-05-08: rebuild process hung in futex_wait_queue at
+        this step for 5+ minutes when trader was concurrently reading
+        cache.db. Without a wall-clock cap, a single stuck stock blocks
+        every subsequent stock and the entire rebuild silently leaks.
+
         Args:
             stocks: List of stock dicts from universe
         """
+        import signal
+
         total = len(stocks)
         logger.info(f"Caching volume profiles for {total} stocks...")
 
         progress_interval = max(1, total // 10)  # Log every ~10%
         cached_count = 0
+        timeout_count = 0
+        PER_STOCK_TIMEOUT_S = 60
 
-        for i, stock in enumerate(stocks):
-            symbol = stock['symbol']
-            try:
-                profiles = self._calculate_volume_profile(symbol)
-                if profiles:
-                    self.db.upsert_volume_profiles(profiles)
-                    cached_count += 1
-            except Exception as e:
-                logger.error(f"Failed to cache volume profile for {symbol}: {e}")
+        class _VolumeProfileTimeout(Exception):
+            pass
 
-            if (i + 1) % progress_interval == 0 or (i + 1) == total:
-                logger.info(f"Caching volume profiles: {i + 1}/{total} complete...")
+        def _alarm_handler(signum, frame):
+            raise _VolumeProfileTimeout()
 
-        logger.info(f"Volume profiles cached: {cached_count}/{total} successful")
+        # SIGALRM is main-thread only — universe_builder runs from
+        # main.py --batch which IS main thread. If this is ever called
+        # from a worker thread, signal.signal() raises ValueError; catch
+        # and fall back to no-timeout (existing behavior).
+        prev_handler = None
+        try:
+            prev_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+        except ValueError:
+            logger.warning(
+                "_cache_volume_profiles: not main thread, skipping "
+                "per-stock timeout protection"
+            )
+
+        try:
+            for i, stock in enumerate(stocks):
+                symbol = stock['symbol']
+                if prev_handler is not None:
+                    signal.alarm(PER_STOCK_TIMEOUT_S)
+                try:
+                    profiles = self._calculate_volume_profile(symbol)
+                    if profiles:
+                        self.db.upsert_volume_profiles(profiles)
+                        cached_count += 1
+                except _VolumeProfileTimeout:
+                    timeout_count += 1
+                    logger.error(
+                        f"{symbol}: volume profile timed out "
+                        f"({PER_STOCK_TIMEOUT_S}s) — skipping"
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to cache volume profile for {symbol}: {e}")
+                finally:
+                    if prev_handler is not None:
+                        signal.alarm(0)  # always disarm
+
+                if (i + 1) % progress_interval == 0 or (i + 1) == total:
+                    logger.info(
+                        f"Caching volume profiles: {i + 1}/{total} complete "
+                        f"(timeouts: {timeout_count})"
+                    )
+        finally:
+            if prev_handler is not None:
+                signal.signal(signal.SIGALRM, prev_handler)
+
+        logger.info(
+            f"Volume profiles cached: {cached_count}/{total} successful, "
+            f"{timeout_count} timeouts"
+        )
 
     def _calculate_volume_profile(self, symbol: str) -> List[Dict]:
         """

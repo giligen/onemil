@@ -1417,6 +1417,31 @@ class TradingEngine:
                     symbols_to_remove.append(symbol)
                     continue
 
+                # IREZ 2026-05-08 fix (Bugs 4b + 5): book the fill state FIRST,
+                # BEFORE any early-exit rule (gap-over / post-fill-exit) can
+                # short-circuit via continue. Without this, the rule paths
+                # bypassed _traded_symbols.add + mark_traded → pattern
+                # detector kept firing → Alpaca wash-trade-rejected the
+                # re-buys all the way to last-entry cutoff. The DB row
+                # also stayed in pre-fill state with no fill_price/exit_*,
+                # then got marked 'cancelled' by downstream cleanup
+                # (today's IREZ row 113 looked cancelled despite a real
+                # round-trip on Alpaca).
+                self._traded_symbols.add(symbol)
+                self.position_manager.mark_traded(symbol)
+                symbols_to_remove.append(symbol)
+
+                fill_at = datetime.now(timezone.utc)
+                trade_record = self.db.get_trade_by_order_id(order_id)
+                if trade_record:
+                    update = {
+                        'order_status': 'filled',
+                        'fill_price': fill_price,
+                        'filled_qty': actual_qty,
+                        'filled_at': fill_at,
+                    }
+                    self.db.update_trade(trade_record['id'], update)
+
                 # Gap-over rejection: if fill is >2% above breakout, close immediately.
                 # 15-month BT data: >2% gap-overs have 23% WR, net losers.
                 # Matches backtest.py:1587 logic.
@@ -1439,7 +1464,14 @@ class TradingEngine:
                                 )
                         except Exception as e:
                             logger.error(f"{symbol}: Failed to close gap-over position: {e}")
-                        symbols_to_remove.append(symbol)
+                        # Stamp exit_reason + exited_at on the trade row so
+                        # the round-trip record is complete. exit_price + pnl
+                        # are filled in by the sell-fill handler downstream.
+                        if trade_record:
+                            self.db.update_trade(trade_record['id'], {
+                                'exit_reason': 'gap_over_rejection',
+                                'exited_at': datetime.now(timezone.utc),
+                            })
                         continue
 
                 # Post-fill exit: in calm markets + weak breakout vol → close immediately.
@@ -1470,12 +1502,15 @@ class TradingEngine:
                                         component="PostFillExit")
                             except Exception as e:
                                 logger.error(f"{symbol}: Failed to close post-fill exit: {e}")
-                            symbols_to_remove.append(symbol)
+                            # Stamp exit_reason + exited_at so the round-trip
+                            # record is complete — exit_price + pnl come in
+                            # from the sell-fill handler.
+                            if trade_record:
+                                self.db.update_trade(trade_record['id'], {
+                                    'exit_reason': 'post_fill_exit',
+                                    'exited_at': datetime.now(timezone.utc),
+                                })
                             continue
-
-                self._traded_symbols.add(symbol)
-                self.position_manager.mark_traded(symbol)
-                symbols_to_remove.append(symbol)
 
                 # Phase 2: Update trade record with fill data
                 trade_record = self.db.get_trade_by_order_id(order_id)

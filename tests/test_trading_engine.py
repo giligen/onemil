@@ -668,6 +668,155 @@ class TestDBUpdateOnFill:
 
 
 # ===========================================================================
+# IREZ 2026-05-08 fix (Bugs 4b + 5): early-exit paths must bookkeep first
+# ===========================================================================
+
+class TestPostFillBookkeepingOrder:
+    """Regression: gap-over and post-fill-exit early-exit paths previously
+    used `continue` BEFORE running self._traded_symbols.add() and the DB
+    fill update. Result on IREZ 5/8: pattern detector kept re-firing →
+    Alpaca wash-trade-rejected re-buys until last-entry cutoff. AND the
+    DB row stayed in pre-fill state with no fill_price/exit_*, making
+    today's IREZ row 113 look 'cancelled' despite a real round-trip on
+    Alpaca's books.
+
+    Fix: bookkeep (mark_traded + DB fill update) FIRST, then check rules.
+    Each rule's exit path also stamps exit_reason + exited_at."""
+
+    def _save_pending_trade(self, db, symbol='TEST', order_id='test-order'):
+        from datetime import timezone
+        now = datetime.now(timezone.utc)
+        db.save_trade({
+            'trade_date': date.today().isoformat(),
+            'symbol': symbol, 'side': 'buy',
+            'entry_price': 4.40, 'stop_loss_price': 4.25,
+            'take_profit_price': 4.90, 'shares': 113,
+            'risk_per_share': 0.15, 'total_risk': 16.95,
+            'risk_reward_ratio': 3.3,
+            'order_id': order_id, 'order_status': 'accepted',
+            'fill_price': None, 'filled_at': None,
+            'exit_price': None, 'exit_reason': None, 'exited_at': None,
+            'pnl': None, 'pnl_pct': None, 'pattern_data': '{}',
+            'created_at': now, 'updated_at': now,
+        })
+
+    def test_gap_over_rejection_marks_traded_and_writes_exit_reason(
+        self, engine, mock_alpaca, db, mock_position_manager
+    ):
+        """Gap-over rejection (>2% above breakout): symbol must be in
+        _traded_symbols + position_manager.mark_traded called + DB row
+        has order_status='filled' + fill_price + exit_reason='gap_over_rejection'."""
+        from datetime import timezone
+        self._save_pending_trade(db, 'TEST', 'order-gap-over')
+
+        plan = _make_plan('TEST')
+        setup = _make_pattern('TEST')  # breakout_level=4.40
+        engine._pending_orders['TEST'] = {
+            'order_id': 'order-gap-over',
+            'plan': plan, 'setup': setup,
+            'placed_at': datetime.now(timezone.utc),
+        }
+        # Fill at 4.51 = 2.5% above $4.40 breakout → triggers gap-over (>2%)
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled', 'filled_avg_price': 4.51, 'legs': [],
+        }
+        mock_alpaca.close_position.return_value = {'id': 'close-1'}
+
+        engine._manage_pending_orders()
+
+        # Bookkeeping ran BEFORE the gap-over `continue`
+        assert 'TEST' in engine._traded_symbols, \
+            "Bug 4b: gap-over must still add to _traded_symbols (else wash-trade cascade)"
+        mock_position_manager.mark_traded.assert_called_with('TEST')
+
+        # DB row reflects fill + exit_reason (Bug 5: was 'cancelled' before)
+        trade = db.get_trade_by_order_id('order-gap-over')
+        assert trade['order_status'] == 'filled', \
+            f"Bug 5: order_status should be 'filled', got {trade['order_status']!r}"
+        assert trade['fill_price'] == 4.51
+        assert trade['exit_reason'] == 'gap_over_rejection'
+        assert trade['exited_at'] is not None
+
+    def test_post_fill_exit_marks_traded_and_writes_exit_reason(
+        self, engine, mock_alpaca, db, mock_position_manager
+    ):
+        """Post-fill exit (calm SPY + weak breakout vol): same bookkeeping
+        contract as gap-over."""
+        from datetime import timezone
+        import pandas as _pd
+
+        self._save_pending_trade(db, 'TEST', 'order-pf-exit')
+        plan = _make_plan('TEST')
+        setup = _make_pattern('TEST')  # avg_flag_volume=40000
+
+        # Enable conviction so the post-fill-exit gate runs
+        engine.conviction_enabled = True
+        # Force calm SPY + weak breakout vol
+        engine._get_spy_3d_range_live = lambda: 0.5  # < 0.8 threshold
+        # Mock 1-min bars so bk_vol = 20000 → bk_ratio = 0.5 < 1.0
+        weak_bar_df = _pd.DataFrame([{'volume': 20000}])
+        mock_alpaca.get_1min_bars.return_value = weak_bar_df
+
+        engine._pending_orders['TEST'] = {
+            'order_id': 'order-pf-exit',
+            'plan': plan, 'setup': setup,
+            'placed_at': datetime.now(timezone.utc),
+        }
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled', 'filled_avg_price': 4.41, 'legs': [],
+        }
+        mock_alpaca.close_position.return_value = {'id': 'close-2'}
+
+        engine._manage_pending_orders()
+
+        assert 'TEST' in engine._traded_symbols
+        mock_position_manager.mark_traded.assert_called_with('TEST')
+
+        trade = db.get_trade_by_order_id('order-pf-exit')
+        assert trade['order_status'] == 'filled'
+        assert trade['fill_price'] == 4.41
+        assert trade['exit_reason'] == 'post_fill_exit'
+        assert trade['exited_at'] is not None
+
+    def test_kept_position_marks_traded_no_exit_reason(
+        self, engine, mock_alpaca, db, mock_position_manager
+    ):
+        """Normal fill (no rule fires): symbol in _traded_symbols +
+        DB row order_status='filled' + NO exit_reason."""
+        from datetime import timezone
+        self._save_pending_trade(db, 'TEST', 'order-keep')
+        plan = _make_plan('TEST')
+        setup = _make_pattern('TEST')
+
+        engine._pending_orders['TEST'] = {
+            'order_id': 'order-keep',
+            'plan': plan, 'setup': setup,
+            'placed_at': datetime.now(timezone.utc),
+        }
+        # Fill at $4.41 = 0.2% above breakout, well under 2% gap-over threshold
+        # conviction_enabled=False (test default), so post-fill-exit doesn't fire
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled', 'filled_avg_price': 4.41, 'legs': [],
+        }
+
+        engine._manage_pending_orders()
+
+        assert 'TEST' in engine._traded_symbols
+        mock_position_manager.mark_traded.assert_called_with('TEST')
+
+        trade = db.get_trade_by_order_id('order-keep')
+        assert trade['order_status'] == 'filled'
+        assert trade['fill_price'] == 4.41
+        # Neither gap-over nor post-fill-exit fired → those exit_reasons
+        # specifically should be absent. Other downstream code may write
+        # different exit_reasons for unrelated reasons (e.g.,
+        # gap_adjust_failed) — out of scope for this regression.
+        assert trade['exit_reason'] not in (
+            'gap_over_rejection', 'post_fill_exit'
+        )
+
+
+# ===========================================================================
 # Phase 3: Gap-Fill Stop Adjustment
 # ===========================================================================
 

@@ -567,10 +567,19 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
         macd_engine.news_worker = scanner._news_worker
         logger.info("MACD Wave: NewsWorker attached for halt pre-warming")
 
-    # Notify startup
+    # Notify startup. Universe count: query DB directly because
+    # scanner._universe is still [] at this point — _load_universe()
+    # runs INSIDE scanner.run() which is called below. Without the DB
+    # query the Telegram message reported 0 stocks every day.
     if notifier:
+        try:
+            _ucount = db._cache_conn.execute(
+                "SELECT COUNT(*) FROM universe WHERE active = 1"
+            ).fetchone()[0]
+        except Exception:
+            _ucount = 0
         notifier.notify_scanner_started(
-            universe_size=len(scanner._universe) if scanner._universe else 0,
+            universe_size=_ucount,
             trading_enabled=trade,
             mode=mode_label,
         )
