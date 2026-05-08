@@ -2211,11 +2211,14 @@ def main():
         help="Override intraday_change_pct_min (e.g., 20 for 20%%)"
     )
     parser.add_argument(
-        "--include-premarket", action=argparse.BooleanOptionalAction, default=True,
+        "--include-premarket", action=argparse.BooleanOptionalAction, default=False,
         help="Fetch premarket 1-min bars (04:00-09:30 ET) and seed the "
              "qualification gate's running_high/running_low. Closes the "
-             "BT-LIVE drift uncovered by 5/5 INTT (BT 0 trades vs live "
-             "filled). Default: True. Use --no-include-premarket to opt out."
+             "BT-LIVE drift uncovered by 5/5 INTT. Default: False. "
+             "Reverted from default-ON after 16-month validation showed "
+             "PM lift (+$29K vs baseline) was outlier-driven (Mar 2026 "
+             "alone = +$41K) and CoV doubled (1.36 → 2.13). Use the flag "
+             "for opt-in BT-LIVE drift research only."
     )
     parser.add_argument(
         "--full-market", action="store_true",

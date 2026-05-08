@@ -174,15 +174,14 @@ class RealtimeScanner:
             logger.info("Running opening gap scan...")
             self._run_premarket_cycle()
 
-        # Seed _day_highs/_day_lows from premarket bars (04:00-09:30 ET).
-        # Without this, get_current_bars only catches the 09:15-09:30 PM
-        # bar when the FIRST cycle runs in 09:30-09:45 ET (after that the
-        # latest completed 15-min bar is RTH and PM data is invisible).
-        # A SIGTERM-induced restart at 13:06 ET (5/6 incident) thus
-        # silently lost premarket-derived range_pct for the rest of the
-        # day. Prime the dicts explicitly so qualification is robust to
-        # restart timing.
-        self._prime_day_extremes_from_premarket()
+        # 2026-05-08: REVERTED premarket priming. The 16-month BT validation
+        # showed PM-included qualification: (a) doubles CoV (1.36 → 2.13),
+        # (b) hurts 6 of 16 months while only helping 2, and (c) lifts P&L
+        # by +$29K but the entire lift is one outlier (Mar 2026 +$41K).
+        # Reverting to RTH-only matches the BASELINE BT — which is the
+        # validated, more-stable behavior. The premarket bar filter in
+        # _run_intraday_cycle (below) closes the implicit 15-min leak too.
+        # Premarket prime helper kept in code (unused) for reference.
 
         # Intraday loop: scanner cycles every 15 min, engine ticks every 60s
         force_closed = False
@@ -905,11 +904,22 @@ class RealtimeScanner:
 
             bucket = f"{bar_et.hour:02d}:{(bar_et.minute // 15) * 15:02d}"
 
-            # Track intraday extremes for V-reversal detection
+            # Track intraday extremes for V-reversal detection — RTH ONLY.
+            # 2026-05-08: BASELINE BT (validated, more stable) uses RTH-only
+            # qualification. get_current_bars returns 15-min bars and at
+            # 09:31 ET the latest completed bar is 09:15-09:30 PREMARKET —
+            # which would silently leak into _day_highs/_day_lows. Skip pre-
+            # 09:30 ET bars so live's qualification matches the baseline BT
+            # (which doesn't see premarket data at all). Bar timestamp is
+            # the START of the 15-min window.
             bar_high = bar.get('high', current_price)
             bar_low = bar.get('low', current_price)
-            self._day_highs[symbol] = max(self._day_highs.get(symbol, 0), bar_high)
-            self._day_lows[symbol] = min(self._day_lows.get(symbol, float('inf')), bar_low)
+            is_premarket_bar = (
+                bar_et.hour < 9 or (bar_et.hour == 9 and bar_et.minute < 30)
+            )
+            if not is_premarket_bar:
+                self._day_highs[symbol] = max(self._day_highs.get(symbol, 0), bar_high)
+                self._day_lows[symbol] = min(self._day_lows.get(symbol, float('inf')), bar_low)
 
             # Calculate metrics — qualify on gap-up OR V-reversal (intraday range)
             gap_pct = ((current_price - prev_close) / prev_close) * 100

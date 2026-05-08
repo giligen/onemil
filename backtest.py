@@ -3023,11 +3023,12 @@ def main():
         "--verbose", "-v", action="store_true", help="Enable verbose/debug logging"
     )
     parser.add_argument(
-        "--include-premarket", action=argparse.BooleanOptionalAction, default=True,
+        "--include-premarket", action=argparse.BooleanOptionalAction, default=False,
         help="Fetch premarket 1-min bars (04:00-09:30 ET) and seed the "
              "qualification gate's running_high/low with their extremes. "
-             "Matches live's behavior. Default: True (closes the BT-LIVE "
-             "drift documented for 5/5 INTT). Use --no-include-premarket to opt out."
+             "Default: False. 16-month validation showed PM-added trades "
+             "have 50%% higher volatility (CoV 1.36→2.13) with outlier-"
+             "driven edge — keep opt-in for BT-LIVE drift research."
     )
     args = parser.parse_args()
 
