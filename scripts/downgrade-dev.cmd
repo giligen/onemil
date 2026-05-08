@@ -1,10 +1,12 @@
 @echo off
 setlocal EnableDelayedExpansion
-rem Downgrade dev (paper) onemil node back to t3.large baseline.
+rem Downgrade dev (paper) onemil node back to t3.medium baseline.
+rem Sized at 4 GB / 2 vCPU based on observed steady-state usage of ~500 MB
+rem (onemil-trader ~250 MB) -- 3x headroom for occasional pytest + claude.
 rem Pass /y to skip the confirmation prompt.
 
 set REGION=eu-north-1
-set TARGET_TYPE=t3.large
+set TARGET_TYPE=t3.medium
 set DEV_EIP=13.61.40.28
 
 echo Resolving dev instance ID via EIP %DEV_EIP%...
