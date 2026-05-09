@@ -320,7 +320,11 @@ class TestCheckExhaustionExits:
         mock_db = MagicMock()
         mock_db.get_open_trades.return_value = []
         mock_sm = MagicMock()
+        # SMCX 2026-04-24 fix: exhaustion path now iterates the strategy-scoped
+        # method `watched_symbols_for('bull_flag')` instead of the global list.
+        # Configure both so this test stays independent of the underlying API.
         mock_sm.watched_symbols = ['TEST']
+        mock_sm.watched_symbols_for.return_value = ['TEST']
         mock_sm.get_watch_snapshot.return_value = {
             'entry_price': 5.0, 'risk_per_share': 0.5,
             'highest_since_entry': 8.0, 'shares': 1000,

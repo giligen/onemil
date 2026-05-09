@@ -42,16 +42,38 @@ class TestRegimeHelperImportedByBoth:
 class TestConfigLoadedIdentically:
     """BT and PROD must read the SAME config keys with the SAME defaults."""
 
-    def test_shipped_config_matches_expected_defaults(self):
-        """Config property returns the Grid-winner multipliers."""
+    def test_shipped_config_matches_expected_defaults(self, tmp_path, monkeypatch):
+        """The SHIPPED config (config.yaml.template) has the Grid-winner mults.
+
+        Local `config.yaml` is per-instance and may be partially edited (e.g.,
+        dev's was missing the regime_sizing block entirely as of 2026-05-08).
+        This test enforces that the *template* — what new deployments get —
+        ships the validated values. We construct a Config pointed at the
+        template so we don't depend on any one instance's local edits.
+        """
         from config import Config
+        import shutil
+        target = tmp_path / "config.yaml"
+        shutil.copy("config.yaml.template", target)
+        monkeypatch.chdir(tmp_path)
         cfg = Config().regime_sizing_cfg
         assert cfg['enabled'] is True
         assert cfg['vol_threshold_pct'] == 22.0
         assert cfg['slope_threshold_pct'] == 0.15
         assert cfg['multipliers'] == {'A': 1.25, 'B': 1.0, 'C1': 1.5, 'C2': 0.0}
 
-    def test_bt_loads_shipped_multipliers(self):
+    def test_bt_loads_shipped_multipliers(self, tmp_path, monkeypatch):
+        """Same template-based check, exercised through BacktestRunner."""
+        import shutil, os
+        # Copy entire repo skeleton for BacktestRunner — keep it minimal:
+        # the runner only needs config.yaml in cwd to read its sizing block.
+        target = tmp_path / "config.yaml"
+        shutil.copy("config.yaml.template", target)
+        # BacktestRunner also reads orb.yaml and macd_wave.yaml at import time.
+        for opt in ("orb.yaml.template", "macd_wave.yaml.template"):
+            if os.path.exists(opt):
+                shutil.copy(opt, tmp_path / opt.replace(".template", ""))
+        monkeypatch.chdir(tmp_path)
         from backtest import BacktestRunner
         r = BacktestRunner()
         assert r.regime_sizing_enabled is True

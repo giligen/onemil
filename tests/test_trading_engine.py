@@ -3591,9 +3591,12 @@ class TestSimpleOrderPath:
         # Safety net = fill_price * (1 - 0.05) = 4.42 * 0.95 = 4.199
         assert call_args.kwargs['stop_price'] == round(4.42 * 0.95, 2)
 
-        # Verify StopMonitor.add_watch called with the SL order ID
-        mock_stop_monitor.add_watch.assert_called_once()
-        watch_kwargs = mock_stop_monitor.add_watch.call_args.kwargs
+        # Verify StopMonitor.upgrade_quote_to_stop_watch called with the SL order ID.
+        # The fill path was migrated from add_watch → upgrade_quote_to_stop_watch
+        # in the TTGT 2026-05-08 fix (handler-loss race). The promotion is atomic
+        # and falls back to add_watch semantics when no prior quote-watch exists.
+        mock_stop_monitor.upgrade_quote_to_stop_watch.assert_called_once()
+        watch_kwargs = mock_stop_monitor.upgrade_quote_to_stop_watch.call_args.kwargs
         assert watch_kwargs['sl_leg_id'] == 'safety-net-sl-1'
         assert watch_kwargs['tp_leg_id'] == ''  # No TP leg for simple orders
 
