@@ -2118,6 +2118,14 @@ class StopMonitor:
     # Shared constants for fill-confirmation polling. Short and aggressive —
     # on a stop we prefer getting flat fast over holding out for price.
     _STOP_EXIT_FILL_TIMEOUT_S = 10
+    # Market-close (post-limit-fail) needs a longer budget than a limit poll.
+    # On a thin stock the market sell has to walk the book, which can take
+    # 30-60s vs the limit's sub-5s expected fill. We've already given up on
+    # price by escalating to market — we just want the fill confirmation.
+    # GSIT 2026-05-11: market close took ~25s to fill on 6363sh in a 15¢
+    # spread; old 10s budget timed out and would have written trigger_price
+    # ($10.63 instead of real $10.31) had downstream sync not caught it.
+    _MARKET_CLOSE_FILL_TIMEOUT_S = 60
     _STOP_EXIT_POLL_INTERVAL_S = 1.0
 
     async def _poll_order_fill(
@@ -2293,12 +2301,39 @@ class StopMonitor:
 
         price = await self._poll_order_fill(
             client, mkt_order_id, fallback_price=trigger_price,
+            timeout_s=self._MARKET_CLOSE_FILL_TIMEOUT_S,
         )
         if price is None:
-            logger.error(
-                f"StopMonitor: {symbol} MARKET CLOSE DID NOT CONFIRM FILL within "
-                f"{self._STOP_EXIT_FILL_TIMEOUT_S}s — DB will record trigger "
-                f"price as last-resort. VERIFY POSITION MANUALLY on Alpaca."
+            # Final lookup: order may have filled in the poll-interval gap,
+            # or the previous get_order calls hit transient errors. Cheap
+            # one-shot — if it returns filled, we still got the real price.
+            try:
+                final = await loop.run_in_executor(
+                    None, client.get_order, mkt_order_id,
+                )
+                if str(final.get('status', '')).lower() == 'filled':
+                    price = float(
+                        final.get('filled_avg_price') or trigger_price
+                    )
+                    logger.info(
+                        f"StopMonitor: {symbol} market close fill confirmed "
+                        f"on final retry @ ${price:.4f}"
+                    )
+                    return price, mkt_order_id, self.BRANCH_MARKET_CLOSE
+            except Exception:
+                pass
+            # Downgraded from ERROR to WARNING (2026-05-11): downstream
+            # sync_positions()/_try_get_fill() reconcile the real fill from
+            # Alpaca order history within ~30s. The trigger_price write here
+            # is a placeholder that gets overwritten — no manual intervention
+            # required. Kept the trigger_price last-resort to preserve event-
+            # consumer contract (price is non-None).
+            logger.warning(
+                f"StopMonitor: {symbol} market close ({mkt_order_id[:8]}) "
+                f"did not confirm fill within "
+                f"{self._MARKET_CLOSE_FILL_TIMEOUT_S}s — using "
+                f"trigger_price=${trigger_price:.2f} as placeholder. "
+                f"sync_positions() will reconcile from order history."
             )
             return trigger_price, mkt_order_id, self.BRANCH_LAST_RESORT
         return price, mkt_order_id, self.BRANCH_MARKET_CLOSE
@@ -2566,16 +2601,40 @@ class StopMonitor:
                         )
                         exit_price = await self._poll_order_fill(
                             client, order_id, fallback_price=trigger_price,
+                            timeout_s=self._MARKET_CLOSE_FILL_TIMEOUT_S,
                         )
                         if exit_price is None:
-                            # Market close order never confirmed filled. Log loudly;
-                            # use trigger_price as last-resort marker but flag it.
-                            logger.error(
-                                f"StopMonitor: {symbol} MARKET CLOSE UNCONFIRMED — "
-                                f"DB will use trigger_price=${trigger_price:.2f}. "
-                                f"VERIFY POSITION MANUALLY on Alpaca."
-                            )
-                            exit_price = trigger_price
+                            # Final retry — order may have filled in the
+                            # poll-interval gap (same logic as escalate path).
+                            try:
+                                final = await loop.run_in_executor(
+                                    None, client.get_order, order_id,
+                                )
+                                if str(final.get('status', '')).lower() == 'filled':
+                                    exit_price = float(
+                                        final.get('filled_avg_price')
+                                        or trigger_price
+                                    )
+                                    logger.info(
+                                        f"StopMonitor: {symbol} fallback close "
+                                        f"fill confirmed on final retry "
+                                        f"@ ${exit_price:.4f}"
+                                    )
+                            except Exception:
+                                pass
+                            if exit_price is None:
+                                # Downgraded ERROR→WARNING (2026-05-11):
+                                # sync_positions()/_try_get_fill() will
+                                # reconcile from Alpaca order history.
+                                logger.warning(
+                                    f"StopMonitor: {symbol} fallback close "
+                                    f"({order_id[:8]}) did not confirm fill "
+                                    f"within {self._MARKET_CLOSE_FILL_TIMEOUT_S}s "
+                                    f"— using trigger_price=${trigger_price:.2f} "
+                                    f"as placeholder. sync_positions() will "
+                                    f"reconcile from order history."
+                                )
+                                exit_price = trigger_price
                     except Exception as e2:
                         # Race condition: bracket closed the position before our
                         # fallback ran. Try the same SL-leg recovery used by the

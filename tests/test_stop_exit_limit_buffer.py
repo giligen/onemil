@@ -69,6 +69,7 @@ def monitor(mock_alpaca):
     )
     # Collapse poll timings so tests finish quickly even on escalation paths.
     mon._STOP_EXIT_FILL_TIMEOUT_S = 0.2
+    mon._MARKET_CLOSE_FILL_TIMEOUT_S = 0.2
     mon._STOP_EXIT_POLL_INTERVAL_S = 0.05
     return mon
 
@@ -626,3 +627,166 @@ class TestExitReasonPerBranch:
         assert len(events) == 1
         assert events[0].exit_reason == 'stop_loss'
         assert events[0].exit_price == pytest.approx(4.22, abs=0.01)
+
+
+class TestMarketCloseExtendedTimeout:
+    """GSIT 2026-05-11 regression: market close on thin stocks can take
+    30-60s to fill (walking the book). Old 10s timeout fired ERROR + wrote
+    trigger_price as last-resort. Verifies extended 60s budget +
+    final-retry catches the actual fill, and that the giveup-path uses
+    WARNING (not ERROR)."""
+
+    @pytest.mark.asyncio
+    async def test_market_close_uses_extended_timeout_constant(
+        self, monitor, mock_alpaca
+    ):
+        """The market-close poll must use _MARKET_CLOSE_FILL_TIMEOUT_S,
+        not the shorter _STOP_EXIT_FILL_TIMEOUT_S used for the limit poll.
+        Verified by patching _poll_order_fill and asserting timeout_s
+        kwarg matches."""
+        # Limit poll: always 'new' → escalation.
+        # Market-close poll: capture kwargs.
+        seen_timeouts = []
+
+        original_poll = monitor._poll_order_fill
+
+        async def _capture_poll(client, order_id, fallback_price,
+                                timeout_s=None):
+            seen_timeouts.append((order_id, timeout_s))
+            return await original_poll(
+                client, order_id, fallback_price=fallback_price,
+                timeout_s=timeout_s,
+            )
+        monitor._poll_order_fill = _capture_poll
+
+        # Limit never fills → escalate. Market close also stays 'new' →
+        # giveup. Test setup differentiates by order id below.
+        def _get_order(order_id):
+            return {'id': order_id, 'status': 'new',
+                    'filled_avg_price': None, 'filled_qty': 0}
+        mock_alpaca.get_order.side_effect = _get_order
+
+        monitor.add_watch('PLYX', 4.29, 500, 'tp-1', 'sl-1')
+        with monitor._watch_lock:
+            w = monitor._watches['PLYX']
+            w.latest_bid = 4.26; w.latest_ask = 4.27
+            w.latest_quote_ts = time.time()
+
+        await monitor._execute_stop_exit(
+            'PLYX', 4.25, w, exit_reason='stop_loss',
+        )
+
+        # Two polls expected: limit (sell-order-123) and market close
+        # (close-order-456). Limit uses default ≤ _STOP_EXIT_FILL_TIMEOUT_S,
+        # market uses _MARKET_CLOSE_FILL_TIMEOUT_S.
+        timeouts_by_order = dict(seen_timeouts)
+        assert 'sell-order-123' in timeouts_by_order
+        assert 'close-order-456' in timeouts_by_order
+        # Limit poll: default (None → falls back to _STOP_EXIT_FILL_TIMEOUT_S)
+        assert timeouts_by_order['sell-order-123'] in (
+            None, monitor._STOP_EXIT_FILL_TIMEOUT_S
+        )
+        # Market close: must be the longer constant.
+        assert timeouts_by_order['close-order-456'] == (
+            monitor._MARKET_CLOSE_FILL_TIMEOUT_S
+        )
+
+    @pytest.mark.asyncio
+    async def test_market_close_final_retry_catches_late_fill(
+        self, monitor, mock_alpaca, caplog
+    ):
+        """Order returns 'new' throughout the poll loop, then 'filled' on
+        the post-timeout final retry. Should use the real fill price (not
+        trigger) and emit BRANCH_MARKET_CLOSE (not LAST_RESORT)."""
+        # Track calls. Poll iterations all return 'new'. The final
+        # one-shot retry (after _poll_order_fill returns None) returns
+        # 'filled'. Counter-driven side_effect: every call to mkt order
+        # returns 'new' until we've returned at least N times — then
+        # 'filled'.
+        poll_calls = {'sell-order-123': 0, 'close-order-456': 0}
+
+        def _get_order(order_id):
+            poll_calls[order_id] = poll_calls.get(order_id, 0) + 1
+            # Sell-order-123 always 'new' → triggers escalation.
+            if order_id == 'sell-order-123':
+                return {'id': order_id, 'status': 'new',
+                        'filled_avg_price': None, 'filled_qty': 0}
+            # close-order-456: 'new' during poll loop, 'filled' on final retry.
+            # With _MARKET_CLOSE_FILL_TIMEOUT_S=0.2 + poll interval 0.05,
+            # we see ~4 poll-loop calls. Switch to 'filled' on call #5+.
+            if poll_calls[order_id] >= 5:
+                return {'id': order_id, 'status': 'filled',
+                        'filled_avg_price': 10.31, 'filled_qty': 500}
+            return {'id': order_id, 'status': 'new',
+                    'filled_avg_price': None, 'filled_qty': 0}
+        mock_alpaca.get_order.side_effect = _get_order
+
+        monitor.add_watch('GSIT', 10.85, 500, 'tp-1', 'sl-1')
+        with monitor._watch_lock:
+            w = monitor._watches['GSIT']
+            w.latest_bid = 10.60; w.latest_ask = 10.75
+            w.latest_quote_ts = time.time()
+
+        await monitor._execute_stop_exit(
+            'GSIT', 10.63, w, exit_reason='stop_loss',
+        )
+
+        events = monitor.drain_exit_events()
+        assert len(events) == 1
+        ev = events[0]
+        # Final retry recovered the real fill.
+        assert ev.exit_price == pytest.approx(10.31, abs=0.01)
+        # Branch is MARKET_CLOSE (not LAST_RESORT)
+        assert ev.exit_reason == 'stop_loss_market_fallback'
+
+    @pytest.mark.asyncio
+    async def test_market_close_giveup_logs_warning_not_error(
+        self, monitor, mock_alpaca, caplog
+    ):
+        """When even the final retry can't confirm, the log level must
+        be WARNING — not ERROR. The trigger_price is a placeholder that
+        sync_positions() reconciles; not an operator-action alert."""
+        import logging as _logging
+        caplog.set_level(_logging.WARNING, logger='trading.stop_monitor')
+
+        # All polls + final retry stay 'new' → giveup path.
+        mock_alpaca.get_order.return_value = {
+            'id': 'x', 'status': 'new',
+            'filled_avg_price': None, 'filled_qty': 0,
+        }
+
+        monitor.add_watch('PLYX', 4.29, 500, 'tp-1', 'sl-1')
+        with monitor._watch_lock:
+            w = monitor._watches['PLYX']
+            w.latest_bid = 4.26; w.latest_ask = 4.27
+            w.latest_quote_ts = time.time()
+
+        await monitor._execute_stop_exit(
+            'PLYX', 4.25, w, exit_reason='stop_loss',
+        )
+
+        # Find the "did not confirm fill" record — it must be WARNING.
+        confirm_records = [
+            r for r in caplog.records
+            if 'did not confirm fill' in r.getMessage()
+        ]
+        assert len(confirm_records) >= 1, (
+            f"expected 'did not confirm fill' log; got: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+        for r in confirm_records:
+            assert r.levelno == _logging.WARNING, (
+                f"expected WARNING for unconfirmed market close, "
+                f"got {_logging.getLevelName(r.levelno)}: {r.getMessage()}"
+            )
+        # Message should mention the deferral plan (sync_positions).
+        assert any(
+            'sync_positions' in r.getMessage() for r in confirm_records
+        ), "expected deferral note pointing at sync_positions()"
+
+        # Event still emitted with trigger_price placeholder + unconfirmed
+        # reason — preserves event-consumer contract.
+        events = monitor.drain_exit_events()
+        assert len(events) == 1
+        assert events[0].exit_reason == 'stop_loss_unconfirmed'
+        assert events[0].exit_price == pytest.approx(4.25, abs=0.01)
