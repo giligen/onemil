@@ -790,3 +790,142 @@ class TestMarketCloseExtendedTimeout:
         assert len(events) == 1
         assert events[0].exit_reason == 'stop_loss_unconfirmed'
         assert events[0].exit_price == pytest.approx(4.25, abs=0.01)
+
+
+class TestExitQtyReconciliation:
+    """APT/MLTX 2026-05-11 defense-in-depth: stop_monitor re-queries broker
+    position qty right before the sell. If broker has MORE shares than
+    watch.shares (the orphan-residual signature), use the broker qty so we
+    don't leave shares behind."""
+
+    @pytest.mark.asyncio
+    async def test_uses_broker_qty_when_higher_than_watch(
+        self, monitor, mock_alpaca, caplog
+    ):
+        """Broker has 5153 sh; watch.shares=2257 (the APT signature).
+        The sell must submit with qty=5153, not 2257, and the event's
+        shares field must reflect 5153."""
+        import logging as _logging
+        caplog.set_level(_logging.WARNING, logger='trading.stop_monitor')
+
+        # Broker says position is 5153 (parent kept filling after partial accept)
+        mock_alpaca.get_open_positions.return_value = [
+            {'symbol': 'APT', 'qty': 5153, 'avg_entry_price': 7.26,
+             'side': 'long', 'market_value': 36000.0,
+             'unrealized_pl': -1900.0, 'unrealized_plpc': -0.05},
+        ]
+        # Happy-path order fill so we don't escalate.
+        mock_alpaca.get_order.return_value = {
+            'id': 'sell-order-123', 'status': 'filled',
+            'filled_avg_price': 7.01, 'filled_qty': 5153,
+        }
+
+        # watch.shares set to the (too-low) partial.
+        monitor.add_watch('APT', 7.05, 2257, 'tp-1', 'sl-1')
+        with monitor._watch_lock:
+            w = monitor._watches['APT']
+            w.latest_bid = 7.00; w.latest_ask = 7.09
+            w.latest_quote_ts = time.time()
+
+        await monitor._execute_stop_exit(
+            'APT', 7.04, w, exit_reason='stop_loss',
+        )
+
+        # Sell-order submission used 5153 (the broker view), not 2257.
+        mock_alpaca.submit_limit_sell_order.assert_called_once()
+        sell_kwargs = mock_alpaca.submit_limit_sell_order.call_args.kwargs
+        assert sell_kwargs['qty'] == 5153, (
+            f"expected qty=5153 (broker view), got {sell_kwargs.get('qty')}"
+        )
+        # A mismatch WARNING was logged
+        mismatch_logs = [
+            r for r in caplog.records
+            if 'qty mismatch' in r.getMessage()
+        ]
+        assert len(mismatch_logs) >= 1, (
+            "expected 'qty mismatch' warning when broker_qty != watch.shares"
+        )
+        # The emitted event also carries the reconciled qty (for P&L math)
+        events = monitor.drain_exit_events()
+        assert len(events) == 1
+        assert events[0].shares == 5153
+
+    @pytest.mark.asyncio
+    async def test_uses_watch_shares_when_broker_matches(
+        self, monitor, mock_alpaca, caplog
+    ):
+        """Broker view matches watch.shares — no mismatch warning, sell uses
+        the matched qty. The reconcile check should be silent on the happy
+        path."""
+        import logging as _logging
+        caplog.set_level(_logging.WARNING, logger='trading.stop_monitor')
+
+        mock_alpaca.get_open_positions.return_value = [
+            {'symbol': 'PLYX', 'qty': 500, 'avg_entry_price': 4.29,
+             'side': 'long', 'market_value': 2150.0,
+             'unrealized_pl': -25.0, 'unrealized_plpc': -0.01},
+        ]
+        mock_alpaca.get_order.return_value = {
+            'id': 'sell-order-123', 'status': 'filled',
+            'filled_avg_price': 4.22, 'filled_qty': 500,
+        }
+        monitor.add_watch('PLYX', 4.29, 500, 'tp-1', 'sl-1')
+        with monitor._watch_lock:
+            w = monitor._watches['PLYX']
+            w.latest_bid = 4.26; w.latest_ask = 4.27
+            w.latest_quote_ts = time.time()
+
+        await monitor._execute_stop_exit(
+            'PLYX', 4.25, w, exit_reason='stop_loss',
+        )
+
+        # No mismatch warning — broker matched
+        mismatch_logs = [
+            r for r in caplog.records
+            if 'qty mismatch' in r.getMessage()
+        ]
+        assert len(mismatch_logs) == 0, (
+            f"unexpected mismatch warning on match path: "
+            f"{[r.getMessage() for r in mismatch_logs]}"
+        )
+        mock_alpaca.submit_limit_sell_order.assert_called_once()
+        sell_kwargs = mock_alpaca.submit_limit_sell_order.call_args.kwargs
+        assert sell_kwargs['qty'] == 500
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_watch_shares_on_query_error(
+        self, monitor, mock_alpaca, caplog
+    ):
+        """If the broker position re-query raises, fall back to watch.shares
+        so the exit still proceeds. Log a warning so this case is observable
+        but don't block the sell."""
+        import logging as _logging
+        caplog.set_level(_logging.WARNING, logger='trading.stop_monitor')
+
+        mock_alpaca.get_open_positions.side_effect = Exception(
+            "alpaca API timeout"
+        )
+        mock_alpaca.get_order.return_value = {
+            'id': 'sell-order-123', 'status': 'filled',
+            'filled_avg_price': 4.22, 'filled_qty': 500,
+        }
+        monitor.add_watch('PLYX', 4.29, 500, 'tp-1', 'sl-1')
+        with monitor._watch_lock:
+            w = monitor._watches['PLYX']
+            w.latest_bid = 4.26; w.latest_ask = 4.27
+            w.latest_quote_ts = time.time()
+
+        await monitor._execute_stop_exit(
+            'PLYX', 4.25, w, exit_reason='stop_loss',
+        )
+
+        # Fell back to watch.shares=500
+        mock_alpaca.submit_limit_sell_order.assert_called_once()
+        sell_kwargs = mock_alpaca.submit_limit_sell_order.call_args.kwargs
+        assert sell_kwargs['qty'] == 500
+        # Fallback warning was logged (don't fail silently)
+        fallback_logs = [
+            r for r in caplog.records
+            if 'position re-query failed' in r.getMessage()
+        ]
+        assert len(fallback_logs) >= 1

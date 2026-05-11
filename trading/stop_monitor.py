@@ -2474,6 +2474,40 @@ class StopMonitor:
             except Exception as cancel_err:
                 logger.warning(f"StopMonitor: {symbol} cancel bracket legs: {cancel_err}")
 
+            # Defense-in-depth qty reconciliation (APT/MLTX 2026-05-11 class):
+            # Query the broker for the symbol's actual position qty right
+            # before the sell. If the broker has MORE shares than we tracked,
+            # use the broker's view to avoid leaving an orphan residual.
+            # Catches: ORB partial-fill orphans, restart-state drift, any
+            # other case where watch.shares diverges from reality. Cost is
+            # one extra REST call per stop exit (~50ms) — worth it.
+            qty_to_sell = watch.shares
+            try:
+                positions = await loop.run_in_executor(
+                    None, client.get_open_positions,
+                )
+                broker_qty = 0
+                for _p in positions:
+                    if _p.get('symbol') == symbol:
+                        try:
+                            broker_qty = abs(int(_p.get('qty', 0)))
+                        except (TypeError, ValueError):
+                            broker_qty = 0
+                        break
+                if broker_qty > 0 and broker_qty != watch.shares:
+                    logger.warning(
+                        f"StopMonitor: {symbol} qty mismatch — broker has "
+                        f"{broker_qty} sh, watch.shares={watch.shares}. "
+                        f"Using broker qty to avoid orphan residual."
+                    )
+                    qty_to_sell = broker_qty
+            except Exception as _e:
+                logger.warning(
+                    f"StopMonitor: {symbol} broker position re-query "
+                    f"failed: {_e} — falling back to watch.shares="
+                    f"{watch.shares}"
+                )
+
             # Submit marketable limit sell (in executor)
             # After submit, we POLL for fill with a timeout. If the limit
             # hasn't filled within STOP_EXIT_FILL_TIMEOUT_S (bid moved
@@ -2497,7 +2531,7 @@ class StopMonitor:
                     loop,
                     lambda: client.submit_limit_sell_order(
                         symbol=symbol,
-                        qty=watch.shares,
+                        qty=qty_to_sell,
                         limit_price=limit_price,
                     ),
                     label=f"{symbol} limit_sell",
@@ -2505,7 +2539,7 @@ class StopMonitor:
                 order_id = result.get("id", "")
                 logger.info(
                     f"StopMonitor: {symbol} limit sell submitted — "
-                    f"qty={watch.shares}, limit=${limit_price:.2f} ({pricing_method}), "
+                    f"qty={qty_to_sell}, limit=${limit_price:.2f} ({pricing_method}), "
                     f"order={order_id} — awaiting fill confirmation"
                 )
                 exit_price = await self._poll_order_fill(
@@ -2758,12 +2792,15 @@ class StopMonitor:
                         f"StopMonitor: {symbol} SL cancel failed (may be filled): {e}"
                     )
 
-            # Emit exit event for main thread
+            # Emit exit event for main thread. shares = qty_to_sell (the
+            # reconciled broker qty), not watch.shares, so downstream P&L
+            # math reflects the ACTUAL qty closed (catches APT/MLTX-class
+            # orphans where watch.shares lagged the broker view).
             event = StopExitEvent(
                 symbol=symbol,
                 stop_price=watch.stop_price,
                 exit_price=exit_price,
-                shares=watch.shares,
+                shares=qty_to_sell,
                 order_id=order_id,
                 exit_reason=exit_reason,
                 trade_db_id=watch.trade_db_id,

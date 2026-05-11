@@ -1284,14 +1284,57 @@ class ORBEngine:
                 if status == 'filled':
                     self._confirm_fill(pos, order_status)
                 elif status == 'partially_filled':
-                    # Accept the partial as a real fill. Subsequent fills on
-                    # same order would be rare (day stop-limit) but if they
-                    # happen, the bracket SL/TP cap the position anyway.
-                    # Use filled_qty from status.
+                    # APT/MLTX 2026-05-11 regression: previously this branch
+                    # accepted the partial and called _confirm_fill but did
+                    # NOT cancel the parent's unfilled remainder. The parent
+                    # kept filling in the background, growing the actual
+                    # position beyond watch.shares. When StopMonitor later
+                    # cancelled the bracket to submit its standalone exit
+                    # sell, only watch.shares (the partial qty) got sold —
+                    # leaving the rest as unmanaged orphans on Alpaca
+                    # (APT: 2257 sold / 5153 filled → 2896 orphan at
+                    # -$1,957 unrealized; MLTX: 2279 / 2487 → 208 orphan).
+                    # The previous comment "bracket SL/TP cap the position
+                    # anyway" was wrong: StopMonitor cancels the bracket
+                    # before its standalone sell, so the safety-net legs
+                    # don't catch post-confirm fills.
+                    # Fix: cancel the parent remainder now. Alpaca cancels
+                    # the unfilled portion only; the partial position stays
+                    # and the bracket OCO children attached to the parent
+                    # are removed — StopMonitor's add_watch call inside
+                    # _confirm_fill (below) re-protects the position via
+                    # WebSocket tick-watch within <100ms.
+                    if isinstance(order_status, dict):
+                        _filled_qty = order_status.get('filled_qty', 0)
+                        _req_qty = order_status.get('qty', 0)
+                    else:
+                        _filled_qty = getattr(order_status, 'filled_qty', 0)
+                        _req_qty = getattr(order_status, 'qty', 0)
+                    try:
+                        _filled_int = int(_filled_qty) if _filled_qty else 0
+                        _req_int = int(_req_qty) if _req_qty else 0
+                    except (ValueError, TypeError):
+                        _filled_int = 0
+                        _req_int = 0
+                    _remaining = max(_req_int - _filled_int, 0)
                     logger.warning(
-                        f"ORB: {sym} partial fill — treating as complete "
-                        f"(filled_qty={order_status.get('filled_qty') if isinstance(order_status, dict) else getattr(order_status, 'filled_qty', 0)})"
+                        f"ORB: {sym} partial fill — filled "
+                        f"{_filled_int}/{_req_int}; cancelling remaining "
+                        f"{_remaining} sh of parent to prevent position-"
+                        f"growth orphan; accepting {_filled_int} as "
+                        f"managed qty"
                     )
+                    if _remaining > 0 and pos.order_id:
+                        try:
+                            self.alpaca.cancel_order(pos.order_id)
+                        except Exception as e:
+                            logger.error(
+                                f"ORB: {sym} cancel of partial-fill "
+                                f"remainder FAILED: {e} — position may "
+                                f"continue growing beyond watch.shares; "
+                                f"sync_positions orphan-detect is the only "
+                                f"backstop"
+                            )
                     self._confirm_fill(pos, order_status)
                 elif status in ('canceled', 'cancelled', 'expired', 'rejected',
                                  'done_for_day', 'suspended'):
