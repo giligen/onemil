@@ -186,6 +186,25 @@ class Config:
         """Whether the ORB account is paper (default True for Phase 1)."""
         return os.getenv("ALPACA_ORB_PAPER", "true").lower() in ("true", "1", "yes")
 
+    # =========================================================================
+    # Bull Flag Paper Account (created 2026-05-11 — isolates BF from main acct)
+    # =========================================================================
+
+    @property
+    def alpaca_bf_api_key(self) -> str:
+        """Alpaca API key for bull flag paper account. Empty → fall back to main."""
+        return os.getenv("ALPACA_BF_API_KEY", "")
+
+    @property
+    def alpaca_bf_api_secret(self) -> str:
+        """Alpaca API secret for bull flag paper account."""
+        return os.getenv("ALPACA_BF_API_SECRET", "")
+
+    @property
+    def alpaca_bf_paper(self) -> bool:
+        """Whether the bull flag account is paper (default True)."""
+        return os.getenv("ALPACA_BF_PAPER", "true").lower() in ("true", "1", "yes")
+
     @property
     def anthropic_api_key(self) -> str:
         """Anthropic API key (optional — enables LLM news analysis)."""

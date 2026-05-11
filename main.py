@@ -391,16 +391,46 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
                 orb_alpaca = None
                 enable_orb = False
 
-    # Create ONE shared StopMonitor for all strategies. If ORB has its own
-    # AlpacaClient (paper account), pass the routing dict so ORB exit orders
-    # go to the paper account — bull flag + MACD wave continue using `alpaca`
-    # (main account) by default.
+    # --- Bull Flag paper AlpacaClient (created 2026-05-11) — same isolation
+    # pattern as ORB so BF order submission goes to its own paper account.
+    # MACD wave stays on the main account. Keys empty → soft fallback to main
+    # for backwards compat. Keys present but connection fails → DISABLE BF for
+    # the session (don't silently submit to wrong account). ---
+    bf_alpaca = None
+    if trade and enable_flag and config.alpaca_bf_api_key and config.alpaca_bf_api_secret:
+        try:
+            bf_alpaca = AlpacaClient(
+                config.alpaca_bf_api_key,
+                config.alpaca_bf_api_secret,
+                paper=config.alpaca_bf_paper,
+            )
+            if not bf_alpaca.test_connection():
+                raise RuntimeError("BF Alpaca connection test failed")
+            bf_account = bf_alpaca.get_account_info()
+            bf_mode = "paper" if bf_alpaca.is_paper else "LIVE"
+            logger.info(
+                f"BF Alpaca client connected — {bf_mode} mode, "
+                f"buying power: ${float(bf_account.get('buying_power', 0)):,.0f}"
+            )
+        except Exception as e:
+            logger.error(f"BF Alpaca client init failed: {e} — disabling Bull Flag")
+            bf_alpaca = None
+            enable_flag = False
+
+    # Create ONE shared StopMonitor for all strategies. ORB and BF each have
+    # their own AlpacaClient (separate paper accounts) — pass a routing dict
+    # so exit orders for those strategies go to the right account. MACD wave
+    # continues to use the main `alpaca` client by default (no entry needed).
     stop_monitor = None
     if trade:
-        orb_clients_dict = {'orb': orb_alpaca} if orb_alpaca is not None else None
+        strategy_clients: dict = {}
+        if orb_alpaca is not None:
+            strategy_clients['orb'] = orb_alpaca
+        if bf_alpaca is not None:
+            strategy_clients['bull_flag'] = bf_alpaca
         stop_monitor = _create_stop_monitor(
             config, alpaca, notifier,
-            alpaca_clients_by_strategy=orb_clients_dict,
+            alpaca_clients_by_strategy=(strategy_clients or None),
         )
 
     # T3.1 / S1: shared OrderStreamWatcher — one TradingStream for both strategies.
@@ -423,19 +453,44 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
             logger.warning(f"OrderStreamWatcher failed to start (fallback to REST polling): {e}")
             order_stream = None
 
-    # Bull flag engine (optional)
+    # Bull flag engine (optional). If BF has its own paper account (bf_alpaca
+    # not None) route order submission AND fill detection to that account.
+    # Otherwise fall back to the main `alpaca` + shared `order_stream` for
+    # backwards compat (empty BF keys).
     trading_engine = None
     if trade and enable_flag:
-        trading_engine = _create_trading_engine(config, alpaca, db, notifier=notifier,
+        bf_client = bf_alpaca if bf_alpaca is not None else alpaca
+        bf_order_stream = order_stream  # fallback to shared main-account stream
+        if bf_alpaca is not None:
+            # Dedicated OrderStreamWatcher on BF paper account. Same rationale
+            # as ORB: order events are account-specific (unlike market data).
+            try:
+                from trading.order_stream import OrderStreamWatcher
+                bf_order_stream = OrderStreamWatcher(
+                    api_key=config.alpaca_bf_api_key,
+                    api_secret=config.alpaca_bf_api_secret,
+                    paper=bf_alpaca.is_paper,
+                    alpaca_client=bf_alpaca,
+                )
+                bf_order_stream.start()
+                logger.info("BF OrderStreamWatcher STARTED — paper account")
+            except Exception as e:
+                logger.warning(
+                    f"BF OrderStreamWatcher failed to start: {e} — "
+                    f"falling back to REST polling on bull flag fills"
+                )
+                bf_order_stream = None
+        trading_engine = _create_trading_engine(config, bf_client, db, notifier=notifier,
                                                  stop_monitor=stop_monitor,
-                                                 order_stream=order_stream)
+                                                 order_stream=bf_order_stream)
         trading_engine.enabled = True
         trading_engine.news_provider = news_provider  # For news re-check at trade time
         # Register real-time bar handler (multi-consumer since Step 1) for instant pattern detection
         if stop_monitor and not stop_monitor.polling_mode:
             stop_monitor.register_bar_handler('bull_flag', trading_engine._on_bar_close)
             logger.info("Real-time bar stream → instant pattern detection ENABLED")
-        logger.info(f"Bull Flag strategy ENABLED")
+        _bf_acct_label = "BF paper account" if bf_alpaca is not None else "main account"
+        logger.info(f"Bull Flag strategy ENABLED — orders → {_bf_acct_label}")
 
     # MACD wave engine (optional)
     macd_engine = None
