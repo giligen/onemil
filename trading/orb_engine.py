@@ -1658,6 +1658,79 @@ class ORBEngine:
             f"pnl=${pnl:+,.2f} daily_pnl=${self.daily_pnl:+,.2f}"
         )
 
+    # GLWG 2026-05-11 FC: bracket cancel ACK can take 1-5s+ on busy Alpaca
+    # paper accounts. Hardcoded sleep(0.8) before close was insufficient —
+    # close_position fired with held_for_orders=1431, triggering false-alarm
+    # CRITICAL leaks. Backoff schedule mirrors StopMonitor's
+    # _HELD_QTY_RETRY_BACKOFFS_S but with longer values (FC has more time
+    # headroom than a stop exit). Cumulative ~6.5s.
+    _FC_HELD_QTY_BACKOFFS_S = (0.5, 1.0, 2.0, 3.0)
+
+    def _close_position_with_held_qty_retry(self, sym: str):
+        """close_position with backoff retry on held_for_orders (40310000).
+
+        Bracket-cancel ACK propagation on Alpaca is async — the qty stays
+        `held_for_orders` for hundreds of ms to several seconds after the
+        cancel ACK lands. Re-attempts on that specific race; re-raises any
+        other exception immediately so the caller's existing error paths
+        still trigger.
+
+        Returns the order submission dict on success (NOT a fill confirmation
+        — caller must verify fill separately).
+        """
+        import time as _time
+        attempts = 1 + len(self._FC_HELD_QTY_BACKOFFS_S)
+        last_err = None
+        for attempt in range(attempts):
+            if attempt > 0:
+                _time.sleep(self._FC_HELD_QTY_BACKOFFS_S[attempt - 1])
+            try:
+                return self.alpaca.close_position(sym)
+            except Exception as e:
+                last_err = e
+                msg = str(e).lower()
+                if '40310000' not in str(e) and 'insufficient qty available' not in msg:
+                    raise
+                logger.warning(
+                    f"ORB FC: {sym} close_position held_for_orders race "
+                    f"(attempt {attempt + 1}/{attempts}) — "
+                    f"{'retrying' if attempt + 1 < attempts else 'giving up'}"
+                )
+        if last_err is not None:
+            raise last_err
+        return None
+
+    def _has_pending_sell(self, sym: str) -> bool:
+        """True if Alpaca has an open SELL order for this symbol.
+
+        Used by FC VERIFY to avoid cancelling a Phase-1 close that's still
+        in flight — submission ≠ fill, and a market sell can take several
+        seconds to fill on thin stocks (GLWG 2026-05-11: Phase-1 close
+        d086167a was pending for 12s before FC VERIFY cancelled it and
+        submitted a duplicate).
+
+        Returns False on any API error (fail-open: FC VERIFY proceeds with
+        its cancel+re-close, which is the safer side of the race).
+        """
+        try:
+            from alpaca.trading.requests import GetOrdersRequest
+            from alpaca.trading.enums import QueryOrderStatus
+            open_orders = self.alpaca.trading_client.get_orders(
+                GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[sym])
+            ) or []
+        except Exception as e:
+            logger.warning(
+                f"ORB FC: {sym} _has_pending_sell get_orders failed "
+                f"(assume no pending): {e}"
+            )
+            return False
+        for o in open_orders:
+            side = getattr(o, 'side', None)
+            side_val = getattr(side, 'value', side) if side else None
+            if str(side_val).lower() == 'sell':
+                return True
+        return False
+
     def _cancel_symbol_open_orders(self, sym: str) -> int:
         """Cancel ALL open Alpaca orders for a symbol (SL/TP bracket legs, etc).
 
@@ -1709,60 +1782,78 @@ class ORBEngine:
         # DB sync pass (recovers exit_price from Alpaca order history when
         # the async TradingStream watcher misses the sell-fill event).
         closed_symbols: List[str] = []
-        # Cancel pending buy-stop orders (candidates with plan submitted but not filled)
+        import time as _time
+
+        # Phase 1a: cancel any unfilled pending buy-stop entry orders.
+        # GLWG 2026-05-11 fix (Bug 5): query DB pending list ONCE and filter,
+        # don't iterate-then-query-per-candidate. Pre-fix, every candidate
+        # with `cand.plan_submitted=True` triggered a "cancelling unfilled
+        # pending order for X" log line even when X had filled+exited hours
+        # ago (plan_submitted stays True for the session). SONY/APT/MLTX
+        # spammed the log at 19:45:01 on 2026-05-11 even though all three
+        # had already exited via stop_loss / lock_stop.
+        db_pending_now: Dict[str, List[Dict]] = {}
+        try:
+            pending_today = self.db.get_open_trades(
+                datetime.now(timezone.utc).date(), strategy=STRATEGY_NAME
+            ) if hasattr(self.db, 'get_open_trades') else []
+            for t in pending_today:
+                if t.get('order_status') == 'pending_new':
+                    db_pending_now.setdefault(t.get('symbol'), []).append(t)
+        except Exception as e:
+            logger.warning(f"ORB FC: pending-orders DB query failed: {e}")
         for sym, cand in self.candidates.items():
-            if cand.plan_submitted and sym not in self.open_positions:
-                logger.info(f"ORB FORCE-CLOSE: cancelling unfilled pending order for {sym}")
+            if not cand.plan_submitted or sym in self.open_positions:
+                continue
+            actual_pending = db_pending_now.get(sym, [])
+            if not actual_pending:
+                # plan_submitted stays True after fill+exit — suppress noise
+                continue
+            logger.info(
+                f"ORB FORCE-CLOSE: cancelling {len(actual_pending)} unfilled "
+                f"pending order(s) for {sym}"
+            )
+            for t in actual_pending:
                 try:
-                    pending = self.db.get_open_trades(
-                        datetime.now(timezone.utc).date(), strategy=STRATEGY_NAME
-                    ) if hasattr(self.db, 'get_open_trades') else []
-                    for t in pending:
-                        if t.get('symbol') == sym and t.get('order_status') == 'pending_new':
-                            self.alpaca.cancel_order(t['order_id'])
+                    self.alpaca.cancel_order(t['order_id'])
                 except Exception as e:
                     logger.warning(f"ORB: cancel pending for {sym} failed: {e}")
 
-        # Market-close all ORB open positions. Cancel bracket legs FIRST.
-        import time as _time
+        # Phase 1b: market-close all ORB open positions. Cancel bracket legs
+        # FIRST so close_position doesn't fail with held_for_orders. Use the
+        # retry helper (Bug 1 fix) — pre-fix code used a hardcoded 0.8s sleep
+        # then ONE retry at 2.0s; insufficient on busy paper accounts (GLWG
+        # 2026-05-11: held_for_orders=1431 fired after 0.8s wait). Bug 3
+        # fix: log "submitted" not "closed" — close_position returns the
+        # order submission, NOT a fill confirmation.
         for sym, pos in list(self.open_positions.items()):
             try:
                 n_legs = self._cancel_symbol_open_orders(sym)
                 if n_legs > 0:
                     logger.info(
-                        f"ORB FORCE-CLOSE: {sym} canceled {n_legs} bracket/safety legs "
-                        f"— waiting for ACK before close_position"
+                        f"ORB FORCE-CLOSE: {sym} canceled {n_legs} bracket/safety legs"
                     )
-                    # Alpaca needs a moment to process cancels before the shares
-                    # become 'available' again. 0.8s empirically sufficient on paper.
-                    _time.sleep(0.8)
-                result = self.alpaca.close_position(sym)
+                result = self._close_position_with_held_qty_retry(sym)
                 logger.info(
-                    f"ORB FORCE-CLOSE: {sym} market close order="
-                    f"{(result or {}).get('id', '?')}"
+                    f"ORB FORCE-CLOSE: {sym} submitted close order="
+                    f"{(result or {}).get('id', '?')} (awaiting fill via VERIFY)"
                 )
                 closed += 1
                 closed_symbols.append(sym)
             except Exception as e:
+                # Helper exhausted retries OR a non-race exception. FC VERIFY
+                # will get another bite; this alert means BOTH the retry
+                # helper AND FC VERIFY may be in trouble. Downgrade from
+                # the pre-fix double-CRITICAL ("position will leak overnight"
+                # at this layer was firing on the transient race even when
+                # the position closed 30s later via VERIFY).
                 failed.append(sym)
-                # Retry ONCE with longer wait — Alpaca may still be ACK'ing cancels.
-                try:
-                    _time.sleep(2.0)
-                    result = self.alpaca.close_position(sym)
-                    logger.info(f"ORB FORCE-CLOSE: {sym} closed on retry "
-                                f"(order={(result or {}).get('id', '?')})")
-                    closed += 1
-                    closed_symbols.append(sym)
-                    failed.remove(sym)
-                except Exception as e2:
-                    # CRITICAL: position will leak overnight unless operator acts.
-                    # Telegram + DB flag so it shows in tomorrow's sync drift scan.
-                    self._notify_error(
-                        f"FORCE-CLOSE FAILED for {sym} — position will leak overnight "
-                        f"(qty={pos.shares}, entry=${pos.entry_price:.2f}). "
-                        f"MANUAL ACTION REQUIRED before next market open.",
-                        exc=e2,
-                    )
+                self._notify_error(
+                    f"ORB FC: {sym} close_position helper exhausted retries "
+                    f"(qty={pos.shares}, entry=${pos.entry_price:.2f}) — "
+                    f"FC VERIFY will retry; only escalate if VERIFY also fails.",
+                    exc=e,
+                )
 
         # 2026-04-29: Alpaca-driven orphan sweep. Engine state can drift from
         # Alpaca via crashes / cross-day persistence gaps (4/28 OPRA: BUY
@@ -1786,6 +1877,19 @@ class ORBEngine:
             )
             if not sym:
                 continue
+            # Bug 2 fix (GLWG 2026-05-11): Phase 1 may have already submitted
+            # a close order for this symbol that's still PENDING fill on
+            # Alpaca. Pre-fix, SWEEP saw the pending position, declared it
+            # "orphan from prior crash/drift", tried to close again, FAILED
+            # with held_for_orders (held by Phase 1's pending close), and
+            # fired CRITICAL "WILL leak overnight" alert — all false alarms.
+            # FC VERIFY (next phase) is the right place to wait + retry.
+            if sym in closed_symbols:
+                logger.info(
+                    f"ORB FC SWEEP: {sym} close submitted in Phase 1 — "
+                    f"awaiting fill via VERIFY (not a SWEEP orphan)"
+                )
+                continue
             logger.warning(
                 f"ORB FC SWEEP: Alpaca position {sym} survived engine-state "
                 f"close pass — orphan from prior crash/drift, closing now"
@@ -1793,7 +1897,7 @@ class ORBEngine:
             try:
                 self._cancel_symbol_open_orders(sym)
                 _time.sleep(0.5)
-                result = self.alpaca.close_position(sym)
+                result = self._close_position_with_held_qty_retry(sym)
                 logger.warning(
                     f"ORB FC SWEEP: closed orphan {sym} "
                     f"(order={(result or {}).get('id', '?')})"
@@ -1851,12 +1955,27 @@ class ORBEngine:
                 f"{len(still_open)} position(s) STILL open: "
                 f"{','.join(still_syms)} — re-closing"
             )
-            # Re-close each remaining position
+            # Bug 4 fix (GLWG 2026-05-11): on non-final attempts, check if
+            # a Phase-1/SWEEP close order is still in flight. If yes, let
+            # it work — don't cancel + duplicate. Pre-fix, FC VERIFY blindly
+            # cancelled any open order and submitted a fresh close, which
+            # killed Phase-1's d086167a 12s after submission (it may have
+            # been seconds from filling) and submitted duplicate d315539c.
+            # Final attempt (attempt == max_retries - 1): force cancel +
+            # close to break a wedged state (prevents leaking past FC).
+            is_final_attempt = (attempt == max_retries - 1)
             for sym in still_syms:
                 try:
+                    if not is_final_attempt and self._has_pending_sell(sym):
+                        logger.info(
+                            f"FC VERIFY attempt {attempt+1}/{max_retries}: "
+                            f"{sym} has pending sell order — letting it work; "
+                            f"will recheck after backoff"
+                        )
+                        continue
                     self._cancel_symbol_open_orders(sym)
                     _time.sleep(0.5)
-                    self.alpaca.close_position(sym)
+                    self._close_position_with_held_qty_retry(sym)
                     if sym not in closed_symbols:
                         closed_symbols.append(sym)
                 except Exception as e:
