@@ -1637,7 +1637,15 @@ class BacktestRunner:
         # (same penalty as low-vol regime) — matches live exactly and degrades
         # gracefully when SPY refresh fails. Was a 1.0 sentinel pre-2026-05-02
         # which silently inflated conviction by +0.5 (EAF post-mortem).
-        if spy_3d_range is None:
+        #
+        # Ablation hook: BT_SPY_FEATURE_OFF=1 zeros this rule's contribution.
+        # Used by study_spy_filter_ablation.py to measure the SPY regime
+        # feature's standalone value. Does NOT change production behavior;
+        # default-off (no env var → original logic). Live code (trading_engine.
+        # py:_compute_conviction_score_setup) is intentionally NOT toggled.
+        if os.getenv("BT_SPY_FEATURE_OFF") == "1":
+            sr_contrib = 0.0
+        elif spy_3d_range is None:
             sr_contrib = -0.5
         elif spy_3d_range > 1.2:
             sr_contrib = 0.3
