@@ -249,6 +249,66 @@ def filter_bull_flag_trades(
     conv_cfg = _cfg_vol.get("trading", {}).get("conviction_scoring", {})
     conv_enabled = bool(conv_cfg.get("enabled", False))
     conv_threshold = float(conv_cfg.get("min_threshold", 0.0))
+
+    # Ablation hook (study_spy_filter_ablation.py): BT_SPY_FEATURE_OFF=1
+    # zeros out the SPY 3d range contribution at Stage-2 filter time and
+    # rescales pnl/shares accordingly. The cache rows already have
+    # conv_spy_regime + conv_raw_score persisted, so the recompute is
+    # exact: new_raw = raw - spy_contrib; new_mult = clamp(new_raw, 0.25, 3.0).
+    # Pnl/shares scale by (new_mult / cached_mult) since the cache baked
+    # the OLD conviction_mult into them at Stage-1 build time. Default-off;
+    # no effect on production BT runs.
+    _spy_off = os.getenv("BT_SPY_FEATURE_OFF") == "1"
+    if _spy_off:
+        recomputed = 0
+        # Bug-5 fix (post-code-review): fail loudly on malformed conviction
+        # fields. Pre-fix `except: continue` left such rows with their OLD
+        # conviction_mult, so they'd be evaluated against the SPY-on
+        # threshold instead of the SPY-off threshold — inconsistent results
+        # that wouldn't be flagged. This is a research-only env var;
+        # correctness > tolerance.
+        malformed_rows: List[str] = []
+        for t in trades:
+            try:
+                old_mult = float(t.get('conviction_mult') or 1.0)
+                raw = float(t.get('conv_raw_score') or 1.0)
+                spy_c = float(t.get('conv_spy_regime') or 0.0)
+            except (ValueError, TypeError) as _e:
+                malformed_rows.append(
+                    f"{t.get('symbol')}/{t.get('date')}: conviction fields ({_e})"
+                )
+                continue
+            new_raw = raw - spy_c  # zero out SPY rule contribution
+            new_mult = max(0.25, min(3.0, new_raw))
+            if abs(new_mult - old_mult) < 1e-9 or old_mult <= 0:
+                t['conviction_mult'] = new_mult
+                continue
+            scale = new_mult / old_mult
+            try:
+                t['pnl'] = float(t.get('pnl', 0.0)) * scale
+                t['shares'] = max(1, int(float(t.get('shares', 0)) * scale))
+            except (ValueError, TypeError) as _e:
+                malformed_rows.append(
+                    f"{t.get('symbol')}/{t.get('date')}: pnl/shares ({_e})"
+                )
+            # Downstream risk-tier and other filters see the new value.
+            t['conviction_mult'] = new_mult
+            t['conv_spy_regime'] = 0.0
+            recomputed += 1
+        logger.info(
+            f"BT_SPY_FEATURE_OFF=1: recomputed conviction (zeroed SPY rule) "
+            f"on {recomputed}/{len(trades)} trades"
+        )
+        if malformed_rows:
+            preview = '; '.join(malformed_rows[:5])
+            suffix = f"; +{len(malformed_rows) - 5} more" if len(malformed_rows) > 5 else ""
+            raise RuntimeError(
+                f"BT_SPY_FEATURE_OFF=1 aborted: {len(malformed_rows)} trades "
+                f"had malformed conviction/pnl/shares fields — results would "
+                f"be inconsistent across the ON/OFF comparison. Rebuild the "
+                f"cache. Sample: {preview}{suffix}"
+            )
+
     if conv_enabled and conv_threshold > 0:
         before_conv = len(trades)
         trades = [

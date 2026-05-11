@@ -2481,6 +2481,16 @@ class StopMonitor:
             # Catches: ORB partial-fill orphans, restart-state drift, any
             # other case where watch.shares diverges from reality. Cost is
             # one extra REST call per stop exit (~50ms) — worth it.
+            #
+            # KNOWN LIMITATION: this is a SNAPSHOT, not a lock. Between
+            # get_open_positions returning broker_qty and submit_limit_sell
+            # firing, the parent buy could fill MORE shares if it's still
+            # working. The bracket-cancel above kills the parent for the
+            # typical bracket flow; ORB's partial-fill cancel-parent fix
+            # (orb_engine.py:_process_pending_fills) closes the other
+            # main source. Residual race window: ~100ms after get_orders
+            # if a parent slipped through both cancels. Acceptable trade-
+            # off vs the complexity of a hold/lock primitive.
             qty_to_sell = watch.shares
             try:
                 positions = await loop.run_in_executor(

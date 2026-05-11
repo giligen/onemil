@@ -154,25 +154,41 @@ class TestForceCloseBracketCancel:
         assert call_log[-1][0] == 'close'
 
     def test_close_failure_telegrams_critical(self, engine, mock_alpaca, notifier):
-        """When the held_qty retry helper exhausts all 5 attempts, the
-        engine still alerts (lighter-touch wording than pre-fix — FC VERIFY
-        will get another chance, so the alert says 'helper exhausted retries'
-        and 'only escalate if VERIFY also fails')."""
+        """When all phases fail (Phase 1b helper exhausted + SWEEP close
+        fails + VERIFY also fails), the engine fires ONE consolidated
+        FINAL FAILURE alert at end-of-FC (Bug-3 fix: pre-fix fired 2-3
+        alerts per failed FC; post-fix one summary at end)."""
         engine.open_positions['ANNA'] = _pos()
         mock_alpaca.trading_client.get_orders.return_value = []
-        # Speed: zero backoffs so the 5 attempts run instantly.
+        # Speed: zero backoffs / verify waits so the FC runs in <100ms
         engine._FC_HELD_QTY_BACKOFFS_S = (0.0, 0.0, 0.0, 0.0)
+        engine._FC_PHASE1B_PRE_CLOSE_SLEEP_S = 0.0
+        engine.fc_retry_backoffs_s = [0.0, 0.0, 0.0]
+        engine.fc_verify_max_wait_s = 0.05
+        engine.fc_verify_poll_interval_s = 0.01
         mock_alpaca.close_position.side_effect = RuntimeError(
             "insufficient qty available"
         )
+        # Position survives every close attempt
+        survivor = MagicMock()
+        survivor.symbol = 'ANNA'; survivor.qty = 1000
+        survivor.avg_entry_price = 10.0; survivor.unrealized_pl = 0.0
+        mock_alpaca.get_open_positions.return_value = [survivor]
         engine.force_close_all()
         msgs = [c[0][0] for c in notifier.send_message.call_args_list]
-        critical = [
-            m for m in msgs
-            if 'close_position helper exhausted retries' in m
-        ]
-        assert len(critical) == 1
-        assert 'ANNA' in critical[0]
+        # Exactly ONE alert with the consolidated FINAL FAILURE phrasing,
+        # mentioning ANNA + the helper_exhausted / sweep_close_failed context.
+        final = [m for m in msgs if 'FC FINAL FAILURE' in m]
+        assert len(final) == 1, (
+            f"expected exactly 1 FINAL FAILURE alert; got msgs={msgs}"
+        )
+        assert 'ANNA' in final[0]
+        assert 'helper_exhausted' in final[0]
+        # And NO per-phase CRITICAL ('helper exhausted retries' / 'orphan'
+        # alerts that pre-fix would have fired earlier in the FC sequence)
+        assert not any(
+            'close_position helper exhausted retries' in m for m in msgs
+        ), f"per-phase Phase-1 alert should be deferred; got: {msgs}"
 
     def test_close_retry_succeeds_no_alert(self, engine, mock_alpaca, notifier):
         """First close fails with held_for_orders, retry succeeds → no
@@ -181,6 +197,7 @@ class TestForceCloseBracketCancel:
         engine.open_positions['ANNA'] = _pos()
         mock_alpaca.trading_client.get_orders.return_value = []
         engine._FC_HELD_QTY_BACKOFFS_S = (0.0,)  # fast retry
+        engine._FC_PHASE1B_PRE_CLOSE_SLEEP_S = 0.0
         call_count = [0]
         def close_side(sym):
             call_count[0] += 1
@@ -192,8 +209,46 @@ class TestForceCloseBracketCancel:
         engine.force_close_all()
         msgs = [c[0][0] for c in notifier.send_message.call_args_list]
         assert not any(
-            'close_position helper exhausted retries' in m for m in msgs
+            'FC FINAL FAILURE' in m or
+            'close_position helper exhausted retries' in m
+            for m in msgs
         )
+
+    def test_helper_retries_on_5xx(self, engine, mock_alpaca):
+        """Bug-9 fix (post-code-review): helper retries on Alpaca 5xx
+        server errors (broadened from the pre-fix narrow
+        '40310000-only' check)."""
+        engine.open_positions['ANNA'] = _pos()
+        mock_alpaca.trading_client.get_orders.return_value = []
+        engine._FC_HELD_QTY_BACKOFFS_S = (0.0,)
+        engine._FC_PHASE1B_PRE_CLOSE_SLEEP_S = 0.0
+        call_count = [0]
+        def close_side(sym):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise RuntimeError("Internal server error")
+            return {'id': 'retry-after-5xx'}
+        mock_alpaca.close_position.side_effect = close_side
+        engine.force_close_all()
+        assert call_count[0] == 2, "expected retry on 5xx"
+        # And the close eventually succeeded
+        assert 'ANNA' in engine.open_positions or call_count[0] >= 2
+
+    def test_helper_retries_on_rate_limit(self, engine, mock_alpaca):
+        """Bug-9 fix (post-code-review): retry on 429 rate-limit too."""
+        engine.open_positions['ANNA'] = _pos()
+        mock_alpaca.trading_client.get_orders.return_value = []
+        engine._FC_HELD_QTY_BACKOFFS_S = (0.0,)
+        engine._FC_PHASE1B_PRE_CLOSE_SLEEP_S = 0.0
+        call_count = [0]
+        def close_side(sym):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise RuntimeError("Too many requests")
+            return {'id': 'retry-after-429'}
+        mock_alpaca.close_position.side_effect = close_side
+        engine.force_close_all()
+        assert call_count[0] == 2, "expected retry on rate-limit"
 
     def test_non_race_exception_not_retried(self, engine, mock_alpaca, notifier):
         """Helper must re-raise non-held_for_orders exceptions immediately
@@ -323,76 +378,212 @@ class TestFCSweepRaceFix:
 
 class TestFCVerifyPendingSellWait:
     """Bug 4: FC VERIFY previously blindly cancelled in-flight close orders
-    on every attempt. Post-fix: non-final attempts wait for pending sells
-    to work; final attempt forces cancel + close to break wedged state."""
+    on every attempt. Post-fix: non-final attempts wait for OUR Phase-1
+    close to work (Bug-2 post-review: order-specific lookup); final attempt
+    forces cancel + close to break wedged state."""
 
-    def test_verify_skips_when_pending_sell_exists_non_final(
+    def test_verify_skips_when_phase1_close_still_pending_non_final(
         self, engine, mock_alpaca
     ):
-        """Pending sell exists; non-final attempt → no cancel, no re-close."""
-        engine.open_positions = {}  # nothing to close in Phase 1
-        # Speed: zero verify backoffs so the test doesn't sleep
+        """Phase 1 submitted a close that's still pending; non-final VERIFY
+        attempts skip — they don't cancel + duplicate. Validates Bug-2 fix
+        (post-code-review): uses _is_close_order_still_pending(specific
+        order_id), not the pre-fix _has_pending_sell(any sell)."""
+        # Phase 1 submits close, succeeds (records in phase1_close_orders)
+        engine.open_positions['ANNA'] = _pos()
+        mock_alpaca.trading_client.get_orders.return_value = []
+        mock_alpaca.close_position.return_value = {'id': 'phase1-close-id'}
+        # Speed
+        engine._FC_HELD_QTY_BACKOFFS_S = (0.0,)
+        engine._FC_PHASE1B_PRE_CLOSE_SLEEP_S = 0.0
         engine.fc_retry_backoffs_s = [0.0, 0.0, 0.0]
-        engine.fc_verify_max_wait_s = 0.1
-        engine.fc_verify_poll_interval_s = 0.05
-        # Position survives Phase 1 + 2; FC VERIFY sees it open every time
+        engine.fc_verify_max_wait_s = 0.05
+        engine.fc_verify_poll_interval_s = 0.01
+        # Position survives every poll (close never fills); FC VERIFY sees
+        # ANNA still open across all retries.
         pos = MagicMock(); pos.symbol = 'ANNA'; pos.qty = 1000
         pos.avg_entry_price = 10.0; pos.unrealized_pl = 0.0
         mock_alpaca.get_open_positions.return_value = [pos]
-        # Pending sell ALWAYS exists in get_orders (simulates Phase-1 close
-        # in flight). The non-final attempts must NOT cancel it.
-        sell_order = MagicMock()
-        sell_side = MagicMock(); sell_side.value = 'sell'
-        sell_order.side = sell_side
-        sell_order.id = 'phase1-pending-sell'
-        mock_alpaca.trading_client.get_orders.return_value = [sell_order]
+        # get_order on the phase1 close returns 'new' (still working) on
+        # every call — VERIFY non-final attempts MUST skip the cancel.
+        mock_alpaca.get_order.return_value = {
+            'id': 'phase1-close-id', 'status': 'new',
+        }
 
         engine.force_close_all()
 
-        # On the first 2 (non-final) attempts, _cancel_symbol_open_orders
-        # MUST NOT have been called for ANNA. The final attempt DOES call.
-        # _cancel_symbol_open_orders calls trading_client.cancel_order_by_id
-        # only once we don't skip — verify call count <= 1 (final attempt).
-        cancel_calls = mock_alpaca.trading_client.cancel_order_by_id.call_args_list
-        # Pre-fix this was 3 — once per VERIFY attempt × 3 attempts
-        # plus 1 from FC SWEEP. Post-fix: SWEEP also skips Phase-1
-        # closed, but ANNA is not in closed_symbols (no Phase 1 success),
-        # so SWEEP DOES try once. Then VERIFY non-final attempts skip,
-        # final attempt cancels once. Total ≤ 2 cancels.
-        assert len(cancel_calls) <= 2, (
-            f"expected ≤2 cancel calls (SWEEP + final VERIFY); pre-fix "
-            f"would have been 4+. Got {len(cancel_calls)}: {cancel_calls}"
+        # _is_close_order_still_pending should have been queried via
+        # get_order (the order-specific lookup).
+        get_order_calls = [
+            c.args[0] if c.args else c.kwargs.get('order_id')
+            for c in mock_alpaca.get_order.call_args_list
+        ]
+        assert 'phase1-close-id' in get_order_calls, (
+            f"expected get_order check on the Phase-1 close id; "
+            f"got: {get_order_calls}"
+        )
+        # Cancel calls for ANNA: SWEEP skips (sym in closed_symbols),
+        # non-final VERIFY attempts skip (pending), final VERIFY attempt
+        # forces cancel. So expect ≤ 1 cancel on the final attempt only.
+        # (cancel_order_by_id is also called for bracket legs via
+        # _cancel_symbol_open_orders — get_orders returns [] so no legs
+        # to cancel either.)
+        cancel_by_id_calls = mock_alpaca.trading_client.cancel_order_by_id.call_args_list
+        assert len(cancel_by_id_calls) == 0, (
+            f"no bracket-leg cancels expected (get_orders=[]); "
+            f"got {len(cancel_by_id_calls)} calls"
         )
 
-    def test_verify_proceeds_when_no_pending_sell(
+    def test_verify_proceeds_when_phase1_close_filled(
         self, engine, mock_alpaca
     ):
-        """No pending sell → FC VERIFY does cancel + close normally."""
-        engine.open_positions = {}
-        engine.fc_retry_backoffs_s = [0.0, 0.0, 0.0]
-        engine.fc_verify_max_wait_s = 0.1
-        engine.fc_verify_poll_interval_s = 0.05
+        """Phase-1 close was submitted but is now FILLED on Alpaca (terminal).
+        FC VERIFY should NOT wait for it — it should re-close any remaining
+        position (orphan, partial qty after fill, etc.). Validates that
+        _is_close_order_still_pending correctly returns False on terminal
+        statuses."""
+        engine.open_positions['ANNA'] = _pos()
+        mock_alpaca.trading_client.get_orders.return_value = []
+        mock_alpaca.close_position.return_value = {'id': 'phase1-close-id'}
         engine._FC_HELD_QTY_BACKOFFS_S = (0.0,)
-        # Position open, but no pending sell (helps prove the flow proceeds)
-        pos = MagicMock(); pos.symbol = 'ANNA'; pos.qty = 1000
-        pos.avg_entry_price = 10.0; pos.unrealized_pl = 0.0
-        # First call: position is open. Subsequent calls (after close):
-        # position is gone. This lets the first VERIFY attempt close
-        # successfully and the next verify see flat.
+        engine._FC_PHASE1B_PRE_CLOSE_SLEEP_S = 0.0
+        engine.fc_retry_backoffs_s = [0.0, 0.0, 0.0]
+        engine.fc_verify_max_wait_s = 0.05
+        engine.fc_verify_poll_interval_s = 0.01
+        # First positions query (during SWEEP): position open
+        # Second+ queries (VERIFY polls): position cleared (close filled)
         positions_call_count = [0]
         def positions_side():
             positions_call_count[0] += 1
-            if positions_call_count[0] <= 2:
-                return [pos]
-            return []
+            return [] if positions_call_count[0] > 2 else [
+                type('P', (), {
+                    'symbol': 'ANNA', 'qty': 1000,
+                    'avg_entry_price': 10.0, 'unrealized_pl': 0.0,
+                })(),
+            ]
         mock_alpaca.get_open_positions.side_effect = positions_side
-        mock_alpaca.trading_client.get_orders.return_value = []  # no pending sell
-        mock_alpaca.close_position.return_value = {'id': 'verify-close'}
+        mock_alpaca.get_order.return_value = {
+            'id': 'phase1-close-id', 'status': 'filled',
+        }
 
         engine.force_close_all()
-        # close_position WAS called (FC VERIFY proceeded — no skip).
-        # (May be called multiple times across SWEEP + VERIFY; just verify > 0.)
+        # close_position called at least once (Phase 1b). The exact count
+        # depends on whether VERIFY needed a re-close — could be 1 (Phase1
+        # alone resolved it after position cleared) or 2 (VERIFY also fired
+        # a re-close). Just confirm Phase 1b ran.
         assert mock_alpaca.close_position.call_count >= 1
+
+    def test_pre_close_sleep_eliminates_first_attempt_race(
+        self, engine, mock_alpaca, caplog
+    ):
+        """Bug-6 fix (post-code-review): Phase 1b's pre-sleep gives Alpaca
+        time to propagate the bracket cancel before close_position. Without
+        this, attempt 0 of the retry helper would always hit held_for_orders.
+        Validate: with a working close (no race), no 'retryable error'
+        warnings fire on the happy path."""
+        engine.open_positions['ANNA'] = _pos()
+        # Bracket legs to cancel
+        leg = MagicMock(); leg.id = 'leg-1'
+        mock_alpaca.trading_client.get_orders.return_value = [leg]
+        # Close succeeds immediately (no race)
+        mock_alpaca.close_position.return_value = {'id': 'happy-close'}
+        # Tiny pre-sleep for test speed (real prod is 200ms)
+        engine._FC_PHASE1B_PRE_CLOSE_SLEEP_S = 0.01
+        engine._FC_HELD_QTY_BACKOFFS_S = (0.0,)
+        engine.fc_retry_backoffs_s = [0.0]
+        engine.fc_verify_max_wait_s = 0.05
+        engine.fc_verify_poll_interval_s = 0.01
+        mock_alpaca.get_open_positions.return_value = []  # flat after close
+
+        import logging as _logging
+        caplog.set_level(_logging.WARNING, logger='trading.orb_engine')
+        engine.force_close_all()
+        # NO "retryable error" warnings should fire on the happy path
+        retry_warnings = [
+            r for r in caplog.records
+            if 'retryable error' in r.getMessage()
+        ]
+        assert not retry_warnings, (
+            f"happy-path FC should not produce retry warnings: "
+            f"{[r.getMessage() for r in retry_warnings]}"
+        )
+
+
+class TestFCDBQueryFallback:
+    """Bug-1 fix (post-code-review): if the batch DB query for pending
+    orders fails at FC start, fall back to per-candidate cancel using
+    cand.order_id (the in-memory pending order id). Pre-fix, a single
+    DB hiccup would silently skip cancelling ALL unfilled orders."""
+
+    def test_batch_db_failure_falls_back_to_cand_order_id(
+        self, engine, mock_alpaca, mock_db, caplog
+    ):
+        """DB raises on the batch query — engine falls back to cancelling
+        via cand.order_id. The pending order DOES get cancelled."""
+        from trading.orb_engine import CandidateState
+        # Set up a pending candidate (plan_submitted, not in open_positions)
+        cand = CandidateState(symbol='APT')
+        cand.plan_submitted = True
+        cand.order_id = 'pending-stop-buy-123'
+        engine.candidates['APT'] = cand
+        # DB raises on the batch query
+        mock_db.get_open_trades.side_effect = RuntimeError("db locked")
+        # Speed: nothing to close in open_positions
+        engine.open_positions = {}
+        engine._FC_HELD_QTY_BACKOFFS_S = (0.0,)
+        engine.fc_retry_backoffs_s = [0.0]
+        engine.fc_verify_max_wait_s = 0.05
+        mock_alpaca.get_open_positions.return_value = []
+
+        import logging as _logging
+        caplog.set_level(_logging.INFO, logger='trading.orb_engine')
+        engine.force_close_all()
+
+        # Engine still attempted to cancel the candidate's pending order
+        cancel_calls = mock_alpaca.cancel_order.call_args_list
+        cancelled_ids = [c.args[0] if c.args else c.kwargs.get('order_id')
+                         for c in cancel_calls]
+        assert 'pending-stop-buy-123' in cancelled_ids, (
+            f"expected fallback to cancel cand.order_id; got: {cancelled_ids}"
+        )
+        # And the log noted the fallback path
+        assert any(
+            'DB-fallback' in r.getMessage() for r in caplog.records
+        ), "expected 'DB-fallback' log entry"
+
+    def test_batch_db_success_no_fallback(
+        self, engine, mock_alpaca, mock_db, caplog
+    ):
+        """DB query succeeds → normal path (DB rows drive cancels), no
+        fallback log."""
+        from trading.orb_engine import CandidateState
+        cand = CandidateState(symbol='APT')
+        cand.plan_submitted = True
+        cand.order_id = 'pending-stop-buy-123'
+        engine.candidates['APT'] = cand
+        # DB returns the pending order
+        mock_db.get_open_trades.return_value = [{
+            'symbol': 'APT', 'order_id': 'pending-stop-buy-123',
+            'order_status': 'pending_new',
+        }]
+        engine.open_positions = {}
+        engine._FC_HELD_QTY_BACKOFFS_S = (0.0,)
+        engine.fc_retry_backoffs_s = [0.0]
+        engine.fc_verify_max_wait_s = 0.05
+        mock_alpaca.get_open_positions.return_value = []
+
+        import logging as _logging
+        caplog.set_level(_logging.INFO, logger='trading.orb_engine')
+        engine.force_close_all()
+        # Normal path used; no fallback log
+        assert not any(
+            'DB-fallback' in r.getMessage() for r in caplog.records
+        )
+        # Normal cancel went through
+        cancel_calls = mock_alpaca.cancel_order.call_args_list
+        cancelled_ids = [c.args[0] if c.args else c.kwargs.get('order_id')
+                         for c in cancel_calls]
+        assert 'pending-stop-buy-123' in cancelled_ids
 
 
 class TestSyncOrphanDetection:

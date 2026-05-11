@@ -446,9 +446,13 @@ class TestForceCloseOrphanSweep:
         engine.force_close_all()
 
         # The verification should have raised CRITICAL after 3 retries
+        # 2026-05-11 fix (Bug-3 from post-code-review): per-phase alerts
+        # consolidated into ONE 'FC FINAL FAILURE' alert at end-of-FC.
+        # Old phrasing was 'VERIFY FAILED after N retries'; new phrasing
+        # is 'FC FINAL FAILURE: ... after Phase1+SWEEP+VERIFY(N retries)'.
         verify_alerts = [
             c for c in engine._notify_error.call_args_list
-            if 'VERIFY FAILED' in str(c)
+            if 'FC FINAL FAILURE' in str(c)
         ]
         assert len(verify_alerts) >= 1, (
             "Post-FC verification did NOT alert when position survived sweep+retries"
