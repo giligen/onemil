@@ -196,6 +196,52 @@ class AlpacaClient:
         logger.warning(f"Unexpected response type: {type(response)}, returning as-is")
         return response
 
+    @staticmethod
+    def _log_order_op_failure(op_name: str, symbol: str, e: Exception) -> None:
+        """Log an order-operation failure at the right level.
+
+        Background (added 2026-05-13 after 2 days of FC noise complaints):
+        Order-op failures (submit_*, close_position) were ALL logged at
+        ERROR. But retry-wrapped callers (ORB FC `_close_position_with_held_qty_retry`,
+        StopMonitor `_submit_with_held_qty_retry`) handle the well-known
+        transient races gracefully via backoff. Each retry attempt
+        produced an ERROR line — operator inbox spammed even on clean
+        recovery (GLWG 5/11, VG+BMNZ 5/12: 4 ERROR lines, zero actual
+        leaks).
+
+        This helper splits by error content:
+          - WARNING: known-transient (40310000 / held_for_orders,
+            429 rate-limit, 5xx) — caller may retry; the API-layer log
+            is informational
+          - ERROR:   everything else (auth, network, invalid order, etc.)
+            — real operator-attention failures
+
+        Net: ERROR channel becomes a real-failures-only signal.
+
+        Note: this only changes the log level. The exception still
+        propagates (caller wraps and re-raises as AlpacaAPIError) — error
+        handling behavior is unchanged.
+        """
+        msg = str(e)
+        msg_l = msg.lower()
+        is_transient = (
+            '40310000' in msg
+            or 'insufficient qty available' in msg_l
+            or 'rate limit' in msg_l
+            or 'too many requests' in msg_l
+            or any(p in msg_l for p in (
+                'internal server error', 'bad gateway',
+                'service unavailable', 'gateway timeout',
+            ))
+        )
+        if is_transient:
+            logger.warning(
+                f"{op_name} {symbol} transient error "
+                f"(caller may retry via backoff): {e}"
+            )
+        else:
+            logger.error(f"Failed to {op_name} for {symbol}: {e}")
+
     # =========================================================================
     # Assets
     # =========================================================================
@@ -1143,7 +1189,7 @@ class AlpacaClient:
         except AlpacaAPIError:
             raise
         except Exception as e:
-            logger.error(f"Failed to submit bracket order for {symbol}: {e}")
+            self._log_order_op_failure("submit bracket order", symbol, e)
             raise AlpacaAPIError(f"Failed to submit bracket order for {symbol}: {e}")
 
     def get_open_positions(self) -> List[Dict]:
@@ -1491,7 +1537,7 @@ class AlpacaClient:
         except AlpacaAPIError:
             raise
         except Exception as e:
-            logger.error(f"Failed to submit stop-bracket order for {symbol}: {e}")
+            self._log_order_op_failure("submit stop-bracket order", symbol, e)
             raise AlpacaAPIError(f"Failed to submit stop-bracket order for {symbol}: {e}")
 
     def submit_stop_limit_order(
@@ -1562,7 +1608,7 @@ class AlpacaClient:
         except AlpacaAPIError:
             raise
         except Exception as e:
-            logger.error(f"Failed to submit stop-limit order for {symbol}: {e}")
+            self._log_order_op_failure("submit stop-limit order", symbol, e)
             raise AlpacaAPIError(f"Failed to submit stop-limit order for {symbol}: {e}")
 
     def submit_stop_sell_order(
@@ -1623,7 +1669,7 @@ class AlpacaClient:
         except AlpacaAPIError:
             raise
         except Exception as e:
-            logger.error(f"Failed to submit stop sell order for {symbol}: {e}")
+            self._log_order_op_failure("submit stop sell order", symbol, e)
             raise AlpacaAPIError(f"Failed to submit stop sell order for {symbol}: {e}")
 
     def submit_limit_buy_order(
@@ -1680,7 +1726,7 @@ class AlpacaClient:
         except AlpacaAPIError:
             raise
         except Exception as e:
-            logger.error(f"Failed to submit limit buy order for {symbol}: {e}")
+            self._log_order_op_failure("submit limit buy order", symbol, e)
             raise AlpacaAPIError(f"Failed to submit limit buy order for {symbol}: {e}")
 
     def submit_limit_sell_order(
@@ -1738,7 +1784,7 @@ class AlpacaClient:
         except AlpacaAPIError:
             raise
         except Exception as e:
-            logger.error(f"Failed to submit limit sell order for {symbol}: {e}")
+            self._log_order_op_failure("submit limit sell order", symbol, e)
             raise AlpacaAPIError(f"Failed to submit limit sell order for {symbol}: {e}")
 
     def close_position(self, symbol: str) -> Dict:
@@ -1774,7 +1820,7 @@ class AlpacaClient:
         except AlpacaAPIError:
             raise
         except Exception as e:
-            logger.error(f"Failed to close position for {symbol}: {e}")
+            self._log_order_op_failure("close position", symbol, e)
             raise AlpacaAPIError(f"Failed to close position for {symbol}: {e}")
 
     # =========================================================================
