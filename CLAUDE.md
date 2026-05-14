@@ -338,14 +338,26 @@ python batch_backtest.py --start 2026-01-01 --end 2026-03-31 --build-cache
 - Stores raw unfiltered trades in `data/bull_flag_cache_e50_x30.csv`
 - These numbers are RAW/UNFILTERED — **NEVER report these as backtest results**
 
-#### Stage 2: Run filtered backtest (production-matched, DEFAULT)
+#### Stage 2: Run filtered backtest (RELATIVE tool — NOT a P&L forecast)
 ```bash
-# Default behavior — reads from cache, applies ALL production filters from config.yaml
+# Default behavior — reads from cache, applies production filters from config.yaml
 python batch_backtest.py --start 2026-01-01 --end 2026-03-31
 ```
-- Reads from cache, applies: 20% threshold, 200K volume, leveraged ETF filter, max 3 concurrent, $5K daily loss limit, risk tiers
-- These numbers match production behavior — **THIS is the real backtest result**
+- Reads from cache, applies: 20% threshold, 200K volume, leveraged ETF filter, max 3 concurrent, $5K daily loss limit, risk tiers, **buying-power ceiling** (`bt_buying_power_usd`, added 2026-05-14)
 - Takes <1 second (reads from cache), so there is ZERO reason to skip this step
+
+**Stage 2 is a RELATIVE tool, not a P&L forecast.** It models *some* of the
+live sizing/filter stack but NOT all of it. Known parity gaps as of
+2026-05-14: Stage 2 does **not** apply **regime sizing** (A/B/C1/C2 per-day
+multipliers) or **UD scaling** (SPY up/down-volume euphoria guard) — both
+are live-only. Plus the 6 structural BT/LIVE drift sources in the
+`project_bull_flag_drift_findings` memory (20% threshold mismatch,
+scan_results bug, entry latency, exit divergence, …).
+
+→ Stage 2 is valid for **feature A/B comparisons** ("does filter X help vs
+not-X?") — the unmodeled layers cancel in the diff. It is **NOT** valid as
+an absolute P&L projection. The only honest P&L forecast is accumulated
+**LIVE** data. Do not tell the user "BT says we'll make $X".
 
 **NEVER report Stage 1 numbers as results. ALWAYS run Stage 2 after Stage 1.**
 **If your numbers don't match what the user expects, question YOUR methodology first, not the user's memory.**

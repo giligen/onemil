@@ -91,6 +91,10 @@ trading:
   risk_per_trade: 2000
   position_size_dollars: 50000
   max_shares: 15000            # ~$50K position at $3/share. Conviction 3x → 45K shares max via planner
+  bt_buying_power_usd: 200000  # BT-only: Stage-2 clamps each position to this BP ceiling, matching
+                               # the live BF paper account ($100K cash × 2x margin). Pre-2026-05-14
+                               # Stage-2 had no account model and sized positions LIVE can't hold.
+                               # Set 0 to disable the BT BP ceiling. Does NOT affect live sizing.
   max_adv_participation_pct: 0.02    # 2% of 20d ADV — prod fills on >200K ADV stocks are 0.1-3.8%
   max_bar_participation_pct: 0       # Disabled — waiting for real L2 depth data
   max_positions: 7         # 2026-05-02: bumped 3→7 (cross-strategy slot collision; ORB+BF+MACD)

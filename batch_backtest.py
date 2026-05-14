@@ -463,6 +463,43 @@ def filter_bull_flag_trades(
             logger.info(f"Risk tiers: {scaled} trades scaled (of {len(trades)})"
                         f"{f', {capped} capped at 3.0x' if capped else ''}")
 
+    # Buying-power ceiling (2026-05-14 BT/LIVE parity fix). LIVE clamps each
+    # position to the account's buying power AFTER all sizing multipliers
+    # (trading_engine.py::_apply_bp_ceiling). Pre-fix, Stage-2 had NO account
+    # model at all — it sized positions LIVE literally cannot hold (TRT
+    # 2026-05-14: BT 21,052 sh = $279K on a $200K account; LIVE clamped to
+    # 15,071). This clamps each trade's shares to what BP allows and rescales
+    # pnl, matching the live ceiling. Runs AFTER risk-tier scaling so it caps
+    # the fully-sized position.
+    #
+    # NOTE: this closes ONE of several BT/LIVE sizing-parity gaps. Regime
+    # sizing and UD scaling are still NOT modeled in Stage-2. Stage-2 remains
+    # a RELATIVE tool (feature A/B where sizing cancels), not a P&L forecast.
+    bt_bp = float(_cfg_vol.get("trading", {}).get("bt_buying_power_usd", 0) or 0)
+    if bt_bp > 0:
+        bp_capped = 0
+        for t in trades:
+            ep = float(t.get('entry_price') or 0)
+            sh = int(t.get('shares') or 0)
+            if ep <= 0 or sh <= 0:
+                continue
+            if ep * sh > bt_bp:
+                affordable = int(bt_bp / ep)
+                if affordable < 1:
+                    continue  # near-impossible at realistic prices; leave as-is
+                ratio = affordable / sh
+                try:
+                    t['pnl'] = float(t.get('pnl', 0.0)) * ratio
+                except (ValueError, TypeError):
+                    pass
+                t['shares'] = affordable
+                bp_capped += 1
+        if bp_capped:
+            logger.info(
+                f"BP ceiling (${bt_bp:,.0f}): {bp_capped} trades clamped to "
+                f"fit buying power (of {len(trades)})"
+            )
+
     # Pre-filter by daily range threshold
     if min_daily_range_pct > 0:
         trades = [t for t in trades if float(t.get('daily_range_pct', 100)) >= min_daily_range_pct]

@@ -4304,3 +4304,87 @@ class TestBarStartToClose:
         ]:
             assert TradingEngine._bar_start_to_close(ts) == \
                    MACDWaveEngine._bar_start_to_close(ts)
+
+
+class TestBuyingPowerCeiling:
+    """Regression for the 2026-05-14 TRT BP-replan bug + ordering defect.
+
+    `_apply_bp_ceiling` is the LAST sizing step. Pre-fix the BP check ran
+    mid-flow (before MACD-zone / regime / UD scaling) and re-planned with
+    `risk_multiplier` (bare tier mult) instead of `combined_mult`, dropping
+    the conviction factor and under-sizing BP-capped trades ~33-50%. The
+    helper now clamps the FINAL share count to exactly what BP affords —
+    no re-plan, no multiplier math.
+    """
+
+    def _plan(self, entry_price=13.27, shares=21052, risk_per_share=0.29):
+        return TradePlan(
+            symbol="TRT",
+            entry_price=entry_price,
+            stop_loss_price=entry_price - risk_per_share,
+            take_profit_price=entry_price + risk_per_share * 2.5,
+            risk_per_share=risk_per_share,
+            reward_per_share=risk_per_share * 2.5,
+            risk_reward_ratio=2.5,
+            shares=shares,
+            total_risk=risk_per_share * shares,
+            pattern=_make_pattern("TRT"),
+        )
+
+    def test_noop_when_affordable(self, engine, mock_alpaca):
+        """Position cost <= BP → plan returned unchanged (same object)."""
+        mock_alpaca.get_buying_power.return_value = 500_000
+        plan = self._plan(shares=1000)  # 1000 * 13.27 = $13,270 << $500k
+        out = engine._apply_bp_ceiling(plan, "TRT")
+        assert out is plan  # unchanged, same object
+
+    def test_clamps_to_exactly_affordable_shares(self, engine, mock_alpaca):
+        """The TRT case: 21,052 sh @ $13.27 = $279k on a $200k account.
+        Must clamp to EXACTLY int(200000 / 13.27) = 15,071 — NOT
+        affordable/conviction (the old bug under-sized to ~10,047)."""
+        mock_alpaca.get_buying_power.return_value = 200_000
+        plan = self._plan(entry_price=13.27, shares=21052)
+        out = engine._apply_bp_ceiling(plan, "TRT")
+        expected = int(200_000 / 13.27)  # 15,071
+        assert out.shares == expected
+        assert out.shares == 15071
+        # NOT the buggy ~10,047 (15071 / 1.5 conviction)
+        assert out.shares > 14000, "regression: BP cap dropped the conviction factor"
+        # total_risk recomputed; per-share fields preserved
+        assert out.total_risk == pytest.approx(plan.risk_per_share * expected)
+        assert out.entry_price == plan.entry_price
+        assert out.stop_loss_price == plan.stop_loss_price
+        assert out.risk_per_share == plan.risk_per_share
+        assert out.pattern is plan.pattern
+
+    def test_returns_none_when_cant_afford_one_share(self, engine, mock_alpaca):
+        """BP < entry_price → can't afford even 1 share → None (skip trade)."""
+        mock_alpaca.get_buying_power.return_value = 5.0
+        plan = self._plan(entry_price=13.27, shares=100)
+        assert engine._apply_bp_ceiling(plan, "TRT") is None
+
+    def test_fail_open_on_api_error(self, engine, mock_alpaca):
+        """get_buying_power raises → return plan unchanged (never block a
+        trade on a transient BP-query failure)."""
+        mock_alpaca.get_buying_power.side_effect = RuntimeError("alpaca timeout")
+        plan = self._plan(shares=21052)
+        out = engine._apply_bp_ceiling(plan, "TRT")
+        assert out is plan
+
+    def test_noop_when_bp_zero(self, engine, mock_alpaca):
+        """BP reported as 0 → fail open, plan unchanged (don't divide by it,
+        don't skip the trade on a bogus 0)."""
+        mock_alpaca.get_buying_power.return_value = 0
+        plan = self._plan(shares=21052)
+        out = engine._apply_bp_ceiling(plan, "TRT")
+        assert out is plan
+
+    def test_clamp_is_independent_of_conviction(self, engine, mock_alpaca):
+        """The defining regression: the clamp result depends ONLY on BP and
+        entry_price — NOT on how the inbound share count was reached. Two
+        plans with the same entry but very different inbound share counts
+        (e.g. one conviction-scaled, one not) must clamp to the SAME value."""
+        mock_alpaca.get_buying_power.return_value = 200_000
+        big = engine._apply_bp_ceiling(self._plan(shares=21052), "TRT")
+        bigger = engine._apply_bp_ceiling(self._plan(shares=40000), "TRT")
+        assert big.shares == bigger.shares == int(200_000 / 13.27)

@@ -439,6 +439,68 @@ class TradingEngine:
                 return tier['multiplier']
         return 1.0
 
+    def _apply_bp_ceiling(self, plan: 'TradePlan', symbol: str) -> Optional['TradePlan']:
+        """Clamp a plan's share count to what buying power allows.
+
+        2026-05-14: this MUST run LAST in the sizing chain — after
+        tier×conviction, MACD-zone, regime, and UD scaling. Pre-2026-05-14
+        the BP check ran right after create_plan, BEFORE regime/UD scaling,
+        with two defects:
+          1. Ordering — regime's up-to-1.5x boost could push the position
+             back OVER buying power after the cap had reduced it, producing
+             orders the account can't hold (→ rejects / partial fills).
+          2. The re-plan used `risk_multiplier` (bare tier mult) instead of
+             `combined_mult` (tier × conviction), silently dropping the
+             conviction factor and under-sizing BP-capped trades ~33-50%
+             (TRT 2026-05-14: BP allowed 15,071 sh, buggy re-plan gave
+             ~10,047).
+        As a pure post-hoc hard ceiling on the FINAL share count there is no
+        re-plan and no multiplier math — it cannot be re-violated by a later
+        scaler and it cannot drop a multiplier.
+
+        Returns the (possibly clamped) plan, or None if BP can't afford even
+        one share. On any API error it returns the plan unchanged (fail
+        open — never block a trade on a transient BP-query failure).
+        """
+        # Wrap the whole BP computation (API call + comparisons + arithmetic)
+        # — fail open on ANY error, never block a trade on a transient BP
+        # issue. Matches the pre-2026-05-14 block's broad try/except.
+        try:
+            buying_power = self.alpaca.get_buying_power()
+            if buying_power <= 0:
+                return plan
+            position_cost = plan.entry_price * plan.shares
+            if position_cost <= buying_power:
+                return plan
+            affordable_shares = int(buying_power / plan.entry_price)
+        except Exception as e:
+            logger.warning(
+                f"{symbol}: Buying power check failed: {e} — proceeding with plan"
+            )
+            return plan
+        if affordable_shares < 1:
+            logger.warning(
+                f"{symbol}: No buying power for even 1 share "
+                f"(BP ${buying_power:,.0f}, entry ${plan.entry_price:.2f}) — skipping"
+            )
+            return None
+        logger.info(
+            f"{symbol}: BP ceiling — {plan.shares} → {affordable_shares} shares "
+            f"(cost ${position_cost:,.0f} > BP ${buying_power:,.0f})"
+        )
+        return TradePlan(
+            symbol=plan.symbol,
+            entry_price=plan.entry_price,
+            stop_loss_price=plan.stop_loss_price,
+            take_profit_price=plan.take_profit_price,
+            risk_per_share=plan.risk_per_share,
+            reward_per_share=plan.reward_per_share,
+            risk_reward_ratio=plan.risk_reward_ratio,
+            shares=affordable_shares,
+            total_risk=plan.risk_per_share * affordable_shares,
+            pattern=plan.pattern,
+        )
+
     def _get_macd_zone_multiplier(self, symbol: str, bars: pd.DataFrame,
                                     entry_price: float,
                                     intraday_change_pct: float = 0.0) -> float:
@@ -3212,28 +3274,12 @@ class TradingEngine:
         if plan is None:
             return None
 
-        # Buying power check: reduce size if needed, never skip
-        # Query real-time buying power (reflects pending orders already reserved)
-        try:
-            buying_power = self.alpaca.get_buying_power()
-            position_cost = plan.entry_price * plan.shares
-            if position_cost > buying_power and buying_power > 0:
-                affordable_shares = int(buying_power / plan.entry_price)
-                if affordable_shares >= 1:
-                    logger.info(
-                        f"{symbol}: Reducing {plan.shares} → {affordable_shares} shares "
-                        f"(buying power ${buying_power:,.0f} < cost ${position_cost:,.0f})"
-                    )
-                    # Recreate plan with reduced multiplier
-                    reduced_mult = risk_multiplier * (affordable_shares / plan.shares)
-                    plan = self.planner.create_plan(setup, avg_daily_volume=_adv, risk_multiplier=max(reduced_mult, 0.1))
-                    if plan is None:
-                        return None
-                else:
-                    logger.warning(f"{symbol}: No buying power for even 1 share, skipping")
-                    return None
-        except Exception as e:
-            logger.warning(f"{symbol}: Buying power check failed: {e} — proceeding with plan")
+        # Buying-power ceiling moved (2026-05-14) — it used to run HERE,
+        # right after create_plan, BEFORE MACD-zone / regime / UD scaling.
+        # That let regime's up-to-1.5x boost re-violate buying power after
+        # the cap, and the re-plan dropped the conviction multiplier. It is
+        # now a true last-step hard ceiling — see `_apply_bp_ceiling` call
+        # after UD scaling below.
 
         # Min stop distance filter: reject tick-noise setups
         if self.min_stop_distance > 0:
@@ -3352,6 +3398,15 @@ class TradingEngine:
                     total_risk=plan.risk_per_share * ud_shares,
                     pattern=plan.pattern,
                 )
+
+        # Buying-power ceiling — LAST sizing step, after tier×conviction +
+        # MACD-zone + regime + UD scaling. A pure post-hoc hard ceiling that
+        # no later multiplier can re-violate. See _apply_bp_ceiling docstring
+        # for the 2026-05-14 reorder rationale (TRT BP-replan bug + regime
+        # re-violation).
+        plan = self._apply_bp_ceiling(plan, symbol)
+        if plan is None:
+            return None
 
         # Production enforcement: buy-stop submitted on all days; post-fill volume check on thin days
         is_thin = self.market_regime and self.market_regime.is_thin_liquidity(date.today())
