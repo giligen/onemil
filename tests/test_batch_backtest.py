@@ -31,6 +31,7 @@ from batch_backtest import (
     fetch_daily_bars_cached,
     get_1min_bars_cached,
     filter_bull_flag_trades,
+    _cache_schema_ok,
     INTRADAY_MOVE_THRESHOLD,
     CSV_HEADERS,
 )
@@ -1114,3 +1115,45 @@ class TestConvictionFilterInBatch:
         # Both should be DROPPED — defaulted to 1.0 which is below 1.2
         assert len(result) == 0, \
             "Missing/None conviction_mult must default to 1.0 (filtered at 1.2)"
+
+
+class TestCacheSchemaGuard:
+    """Regression for the 2026-05-14 cache corruption. The Stage-2 auto-append
+    path (batch_backtest.py "Appended N trades to cache") had no schema guard,
+    unlike scripts/nightly_bt_update.sh. A wide-range run appended current-
+    schema (39-col) rows onto a 37-col-header cache → pandas-unreadable file.
+    `_cache_schema_ok` is the guard now wired into that append path."""
+
+    def test_matching_header_ok(self, tmp_path):
+        p = tmp_path / "cache.csv"
+        p.write_text(",".join(CSV_HEADERS) + "\n")
+        assert _cache_schema_ok(str(p), len(CSV_HEADERS)) is True
+
+    def test_narrower_header_rejected(self, tmp_path):
+        """The actual corruption signature: cache built with fewer columns
+        than the current CSV_HEADERS (37 vs 39)."""
+        p = tmp_path / "cache.csv"
+        p.write_text(",".join(CSV_HEADERS[:-2]) + "\n")  # 2 cols short
+        assert _cache_schema_ok(str(p), len(CSV_HEADERS)) is False
+
+    def test_wider_header_rejected(self, tmp_path):
+        p = tmp_path / "cache.csv"
+        p.write_text(",".join(CSV_HEADERS) + ",extra1,extra2\n")
+        assert _cache_schema_ok(str(p), len(CSV_HEADERS)) is False
+
+    def test_missing_file_ok(self, tmp_path):
+        """Missing file → caller writes fresh, no mismatch possible."""
+        assert _cache_schema_ok(str(tmp_path / "nope.csv"), len(CSV_HEADERS)) is True
+
+    def test_empty_file_ok(self, tmp_path):
+        """Empty file → no header to mismatch."""
+        p = tmp_path / "empty.csv"
+        p.write_text("")
+        assert _cache_schema_ok(str(p), len(CSV_HEADERS)) is True
+
+    def test_trailing_newline_variants(self, tmp_path):
+        """CRLF / no-trailing-newline headers must still count correctly."""
+        for hdr in (",".join(CSV_HEADERS), ",".join(CSV_HEADERS) + "\r\n"):
+            p = tmp_path / "cache.csv"
+            p.write_bytes(hdr.encode())
+            assert _cache_schema_ok(str(p), len(CSV_HEADERS)) is True

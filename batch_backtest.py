@@ -165,6 +165,36 @@ def _get_bull_flag_cache_path(entry_slip: float, exit_slip: float) -> str:
 BULL_FLAG_CACHE_PATH = "data/bull_flag_signal_cache.csv"
 
 
+def _cache_schema_ok(cache_path: str, expected_col_count: int) -> bool:
+    """True iff the cache file's header column count matches expected.
+
+    Schema guard (2026-05-14). Appending current-schema rows onto a cache
+    built with an older/shorter `CSV_HEADERS` silently corrupts the file —
+    pandas then fails with "Expected N fields, saw M" and the cache is
+    unreadable. `scripts/nightly_bt_update.sh` already guards its append
+    path; batch_backtest's OWN Stage-2 append path (the "Appended N trades
+    to cache" block) did NOT — so any Stage-2 run over uncached dates could
+    corrupt the production cache (this is exactly what happened on
+    2026-05-14: a wide-range ablation run appended 39-col rows onto a
+    37-col-header cache).
+
+    Returns True when the file is missing or empty (a fresh write — no
+    mismatch is possible) or the header width matches; False on a width
+    mismatch. Naive comma-count matches the nightly script's `awk -F,`
+    check — CSV_HEADERS column names contain no commas.
+    """
+    try:
+        with open(cache_path, 'r', newline='') as f:
+            header = f.readline()
+    except (OSError, IOError):
+        return True  # missing file → caller writes fresh, no mismatch
+    header = header.rstrip('\r\n')
+    if not header:
+        return True  # empty file
+    actual_col_count = header.count(',') + 1
+    return actual_col_count == expected_col_count
+
+
 def load_bull_flag_cache(cache_path: str, start_date: date, end_date: date,
                          **kwargs) -> List[Dict]:
     """Load cached bull flag trades, filter by date range.
@@ -2933,24 +2963,42 @@ def main():
                             _new_trades.append(trade)
 
                     if _new_trades:
-                        # Append to cache CSV
-                        _append_count = 0
-                        with open(_active_cache, 'a', newline='') as _f:
-                            import csv as _csv
-                            writer = _csv.DictWriter(_f, fieldnames=CSV_HEADERS)
-                            for trade in _new_trades:
-                                row = _trade_to_cache_row(trade)
-                                if row:
-                                    writer.writerow(row)
-                                    _append_count += 1
-                        logger.info(f"Appended {_append_count} trades to cache for {len(missing_days)} new dates")
+                        # Schema guard (2026-05-14): refuse to append if the
+                        # existing cache header width != current CSV_HEADERS.
+                        # Appending mismatched-width rows silently corrupts
+                        # the cache (pandas: "Expected N fields, saw M"). The
+                        # nightly shell wrapper has this guard; this path did
+                        # not — recover by rebuilding via --build-cache.
+                        if not _cache_schema_ok(_active_cache, len(CSV_HEADERS)):
+                            logger.error(
+                                f"Cache schema mismatch: {_active_cache} header "
+                                f"width != {len(CSV_HEADERS)} cols (current "
+                                f"CSV_HEADERS). REFUSING to append "
+                                f"{len(_new_trades)} rows for {len(missing_days)} "
+                                f"new dates — appending would corrupt the cache. "
+                                f"Rebuild: `python batch_backtest.py --build-cache`. "
+                                f"This run continues with the cache as-is "
+                                f"(missing dates absent from results)."
+                            )
+                        else:
+                            # Append to cache CSV
+                            _append_count = 0
+                            with open(_active_cache, 'a', newline='') as _f:
+                                import csv as _csv
+                                writer = _csv.DictWriter(_f, fieldnames=CSV_HEADERS)
+                                for trade in _new_trades:
+                                    row = _trade_to_cache_row(trade)
+                                    if row:
+                                        writer.writerow(row)
+                                        _append_count += 1
+                            logger.info(f"Appended {_append_count} trades to cache for {len(missing_days)} new dates")
 
-                        # Reload cache with new trades included
-                        cached_trades = load_bull_flag_cache(
-                            _active_cache, start_date, end_date,
-                            entry_slippage_pct=_entry_slip, exit_slippage_pct=_exit_slip,
-                            position_size=_pos_size,
-                        )
+                            # Reload cache with new trades included
+                            cached_trades = load_bull_flag_cache(
+                                _active_cache, start_date, end_date,
+                                entry_slippage_pct=_entry_slip, exit_slippage_pct=_exit_slip,
+                                position_size=_pos_size,
+                            )
                 else:
                     logger.info(f"No movers found on {len(missing_days)} missing dates")
         # Stage 2 daily_range_pct filter is EOD look-ahead — disabled.

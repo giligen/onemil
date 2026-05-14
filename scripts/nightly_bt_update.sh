@@ -50,6 +50,17 @@ mark_log() {
     } >> "$LOG"
 }
 
+# Telegram alert on failure (2026-05-14). This cron runs outside the
+# onemil-trader service so its log has no Telegram relay — without this, a
+# wedged nightly cron (e.g. the 2026-05-08 schema-mismatch failure) sits
+# unnoticed in the log file for weeks. Non-fatal: `|| true` so a failed
+# alert never masks the real exit code.
+alert_failure() {
+    /usr/bin/python3 "${REPO}/scripts/send_telegram_alert.py" \
+        "🔴 nightly_bt_update FAILED: $1 — $(date -u '+%Y-%m-%d %H:%M UTC'). Cache left untouched; manual rebuild needed (batch_backtest.py --build-cache)." \
+        >> "$LOG" 2>&1 || true
+}
+
 mark_log "started"
 
 if [ ! -f "$CACHE_PATH" ]; then
@@ -97,6 +108,7 @@ if [ "$BUILD_EXIT" -ne 0 ]; then
     echo "ERROR: build exited $BUILD_EXIT — leaving cache untouched." >> "$LOG"
     rm -f "$TMP_CACHE"
     mark_log "FAILED (build exit=$BUILD_EXIT)"
+    alert_failure "build step exited $BUILD_EXIT"
     exit "$BUILD_EXIT"
 fi
 
@@ -140,6 +152,7 @@ if [ "$NEW_ROWS" -gt 0 ]; then
         } >> "$LOG"
         rm -f "$TMP_CACHE"
         mark_log "FAILED (schema mismatch: prod=$PROD_COLS, tmp=$TMP_COLS)"
+        alert_failure "cache schema mismatch (prod=$PROD_COLS cols, build=$TMP_COLS cols)"
         exit 3
     fi
 
