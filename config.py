@@ -569,20 +569,38 @@ class Config:
 
     @property
     def marketable_limit_fallback_cfg(self) -> dict:
-        """Marketable-limit fallback for buy stop-limit (IREZ+TTGT post-mortem
-        2026-05-08).
+        """Buy stop-limit rejection workaround (IREZ+TTGT post-mortem
+        2026-05-08; extended 2026-05-14 after KPTI/TRT).
 
-        When enabled, OrderExecutor checks the current bid before submitting
-        a buy stop-limit. If `bid >= stop_price`, submits as marketable LIMIT
-        instead — Alpaca live rejects stop-limit BUY orders where the stop is
-        already triggered (paper accepts them; that's the parity gap that
-        lost TTGT and ~24 other prod orders in the last 5 weeks).
+        Alpaca LIVE rejects a buy stop-limit whenever stop_price <= current
+        ASK — the order is immediately marketable, not a real stop. (Paper
+        Alpaca does not enforce this; that's the parity gap that lost TTGT,
+        KPTI, TRT and ~24 other prod orders.) The earlier revision of this
+        fix checked the BID, which is the wrong side of the spread — it only
+        caught the "whole spread above stop" case and let the straddle case
+        through. Two sub-cases, both gated by `enabled`:
+
+          bid >= stop        → breakout fully confirmed → marketable LIMIT
+                               buy at limit_price.
+          bid < stop <= ask  → spread straddles the breakout level; a native
+                               stop is rejected but the breakout is NOT yet
+                               confirmed by trades → re-bump the stop to
+                               ask + rebump_buffer (still a real stop — only
+                               fills on a genuine upward print), provided the
+                               bumped stop stays <= limit_price. If the ask
+                               has already run past limit_price the breakout
+                               is too extended — skip (don't chase).
 
         See docs/irez_ttgt_paper_vs_prod_divergence.md.
         """
         cfg = self._get_yaml("trading", "marketable_limit_fallback",
                              default={}) or {}
-        return {"enabled": bool(cfg.get("enabled", True))}
+        return {
+            "enabled": bool(cfg.get("enabled", True)),
+            # Min 0.02 so the bumped stop is strictly > ask after 2-dp
+            # rounding (Alpaca requires a buy stop strictly above market).
+            "rebump_buffer": max(0.02, float(cfg.get("rebump_buffer", 0.02))),
+        }
 
     @property
     def post_fill_gate_cfg(self) -> dict:

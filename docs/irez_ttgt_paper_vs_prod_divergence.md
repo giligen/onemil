@@ -156,3 +156,73 @@ Both are prod-only bugs because prod is real money. Dev/paper hides them.
 3. **In parallel**: capture `reject_reason` from OrderStream events into the DB so the next prod-only divergence is diagnosable in minutes, not hours of API archaeology.
 
 Both items should land before next week's market open to capture early-week breakout moves on the same setups that have been getting rejected.
+
+---
+
+## CORRECTION — 2026-05-14 (KPTI + TRT)
+
+**The rule above is wrong. It's the ASK, not the bid.**
+
+On 2026-05-14 two more buy stop-limits were rejected on the live account —
+KPTI (stop $9.71) and TRT (stop $13.27). Both had **`bid < stop`**, so the
+shipped marketable-limit fallback (which only fires on `bid >= stop`) did
+**not** trigger, and both were submitted as stop-limits → rejected 4ms later.
+
+The quotes at submission:
+
+| Symbol | bid | stop | ask | shipped fix saw `bid >= stop`? | rejected? |
+|---|---|---|---|---|---|
+| KPTI | $9.56 | $9.71 | $9.79 | no → submitted stop-limit | **yes** |
+| TRT | $13.09 | $13.27 | $13.30 | no → submitted stop-limit | **yes** |
+
+Empirically verified the same day with live probe orders (`/tmp/debug_reject.py`):
+- Market buy 1 share KPTI/TRT → **filled** → assets are tradable; `overnight_halted`
+  (an earlier hypothesis) is NOT the cause.
+- Stop-limit with `stop > ask` → **accepted**.
+- Stop-limit with `stop < ask` → **rejected** (TRT) / **canceled** (KPTI) — reproduces
+  the incident.
+
+**The actual rule: Alpaca live rejects a buy stop-limit whenever
+`stop_price <= current ASK`.** A stop at/below the ask is immediately
+marketable — not a real stop. The original TTGT example (`bid $5.68`,
+`stop $5.67`, `ask $5.72`) happened to satisfy *both* `bid >= stop` and
+`ask >= stop`, so it never distinguished the two rules. KPTI/TRT, with the
+spread *straddling* the stop, are the cases that disambiguate it.
+
+### Fix shipped 2026-05-14
+
+`submit_buy_stop_order` now branches on the full quote (not just the bid):
+
+| Condition | Action |
+|---|---|
+| `bid >= stop` | marketable LIMIT buy (unchanged — the original fallback) |
+| `bid < stop <= ask` | **re-bump** the stop to `ask + rebump_buffer` (default $0.02) so it stays a real stop; if the bumped stop would exceed `limit_price` (= stop × 1.02) the breakout has run too far → **skip**, return None, engine retries next bar |
+| `ask < stop` | normal stop-limit (unchanged) |
+
+Why re-bump instead of marketable-limit for the straddle case: a marketable
+limit would *buy immediately*, but in the straddle case the breakout is **not
+yet confirmed by trades** (only the thin/wide ask is above the level). KPTI
+proved this — its price never actually traded up to $9.71 after the setup
+(subsequent bar highs 9.68 → 9.56 → 9.55); a marketable-limit would have
+bought a fakeout that dropped to $9.44. The re-bumped stop stays a real stop:
+it only fills on a genuine upward print. Verified against the incident — KPTI
+re-bumps to $9.80 and never triggers (matches BT: no trade); TRT re-bumps to
+$13.32 and the 14:18 bar high $13.50 triggers it (matches BT: enters).
+
+Config: `trading.marketable_limit_fallback.rebump_buffer` (min $0.02, floored
+in `config.py`). The single `enabled` flag still gates the whole feature
+(rollback = flip to `false` → legacy stop-limit-only path). DB `order_type`
+tag `stop_rebump` distinguishes these fills for post-hoc analysis.
+
+BT needs no change: it has no bid/ask and fills buy-stops on `bar_high >=
+breakout_level` — it structurally cannot hit this rejection. The re-bump is a
+live-microstructure adaptation; BT's existing 2% gap-over cap
+(`backtest.py max_gap_pct`) mirrors `limit_price` here, so trade-existence
+parity is preserved and the price residual stays in the already-documented
+slippage category.
+
+**Residual race (known, accepted):** the ask can still drift above
+`ask + rebump_buffer` between the pre-flight quote fetch and Alpaca's
+admission. When that happens the order rejects exactly as before — strictly
+no worse than today, just no longer the *common* case. Bumping the buffer
+trades this off against chasing; $0.02 is the default and is config-tunable.

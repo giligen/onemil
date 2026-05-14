@@ -442,32 +442,50 @@ class OrderExecutor:
             f"limit ${limit_price:.2f}"
         )
 
-        # Pre-flight bid check (IREZ+TTGT post-mortem 2026-05-08).
-        # Alpaca live REJECTS buy stop-limit when stop_price <= current bid
-        # (rejected ~4ms after submit, no reject_reason exposed in the REST
-        # response). Paper Alpaca does NOT enforce this rule — that's the
-        # parity gap that lost TTGT (and ~24 other prod orders in the last
-        # 5 weeks). When bid is already at/above the stop, the order is
-        # effectively a marketable limit — submit one directly. Slippage cap
-        # is preserved by limit_price (= stop * 1.02 from line 423).
+        # Pre-flight quote check (IREZ+TTGT post-mortem 2026-05-08; extended
+        # 2026-05-14 after KPTI/TRT). Alpaca LIVE rejects a buy stop-limit
+        # whenever stop_price <= current ASK — the order is immediately
+        # marketable, not a real stop (rejected ~4ms after submit, no
+        # reject_reason in the REST response). Paper Alpaca does NOT enforce
+        # this — the parity gap that lost TTGT, KPTI, TRT and ~24 other prod
+        # orders. The earlier revision of this code checked the BID; that is
+        # the wrong side of the spread and let the straddle case through.
+        #   bid >= stop       → breakout fully confirmed → marketable LIMIT.
+        #   bid < stop <= ask → spread straddles the breakout level → re-bump
+        #                       the stop to ask + rebump_buffer so it stays a
+        #                       real stop (only fills on a genuine upward
+        #                       print). If the bumped stop would exceed
+        #                       limit_price the breakout has run past our max
+        #                       fill price → skip (return None; the engine
+        #                       leaves the symbol un-traded and retries it on
+        #                       the next bar).
+        #   ask < stop        → normal stop-limit (unchanged).
+        # BT has no bid/ask so it cannot hit this rejection — the rebump is a
+        # live-microstructure adaptation, not a parity divergence; BT's 2%
+        # gap-over cap (backtest.py max_gap_pct) mirrors limit_price here.
         # See docs/irez_ttgt_paper_vs_prod_divergence.md.
-        _mlf_enabled = (self._marketable_limit_fallback_cfg or {}).get(
-            'enabled', True
-        )
+        _mlf_cfg = self._marketable_limit_fallback_cfg or {}
+        _mlf_enabled = _mlf_cfg.get('enabled', True)
+        _rebump_buffer = _mlf_cfg.get('rebump_buffer', 0.02)
         _used_marketable_limit = False
+        _used_stop_rebump = False
+        _submitted_stop = stop_price
         order = None
         if _mlf_enabled:
             try:
                 _q = self.alpaca.get_latest_quote(plan.symbol)
                 _bid = float((_q or {}).get('bid_price', 0) or 0)
+                _ask = float((_q or {}).get('ask_price', 0) or 0)
             except Exception as _quote_err:
                 logger.warning(
                     f"{plan.symbol}: pre-flight quote fetch failed: "
                     f"{_quote_err} — proceeding with stop-limit "
                     f"(defensive fallback)"
                 )
-                _bid = 0.0
+                _bid = _ask = 0.0
+
             if _bid > 0 and _bid >= stop_price:
+                # Whole spread already above the breakout level — confirmed.
                 logger.info(
                     f"{plan.symbol}: STOP ALREADY TRIGGERED "
                     f"(bid ${_bid:.2f} >= stop ${stop_price:.2f}) — "
@@ -484,6 +502,44 @@ class OrderExecutor:
                 except Exception as e:
                     logger.error(
                         f"{plan.symbol}: marketable-limit fallback failed: {e}"
+                    )
+                    return None
+            elif _ask > 0 and _ask >= stop_price:
+                # Spread straddles the breakout level (bid < stop <= ask). A
+                # native stop here is immediately marketable → Alpaca rejects
+                # it. Re-bump the stop just above the ask so it stays a real
+                # stop that only fills on a genuine upward print.
+                _new_stop = round(_ask + _rebump_buffer, 2)
+                if _new_stop > limit_price:
+                    # Ask has already run past our max fill price — the
+                    # breakout is too extended. Don't chase.
+                    logger.warning(
+                        f"{plan.symbol}: BUY-STOP SKIPPED — breakout "
+                        f"extended past limit (ask ${_ask:.2f} + buffer "
+                        f"${_rebump_buffer:.2f} = ${_new_stop:.2f} > limit "
+                        f"${limit_price:.2f}). Not chasing."
+                    )
+                    return None
+                logger.info(
+                    f"{plan.symbol}: STOP STRADDLED BY SPREAD "
+                    f"(bid ${_bid:.2f} < stop ${stop_price:.2f} <= ask "
+                    f"${_ask:.2f}) — re-bumping stop ${stop_price:.2f} → "
+                    f"${_new_stop:.2f} (limit ${limit_price:.2f} unchanged) "
+                    f"to avoid Alpaca live rejection"
+                )
+                try:
+                    order = self.alpaca.submit_stop_limit_order(
+                        symbol=plan.symbol,
+                        qty=plan.shares,
+                        side='buy',
+                        stop_price=_new_stop,
+                        limit_price=limit_price,
+                    )
+                    _used_stop_rebump = True
+                    _submitted_stop = _new_stop
+                except Exception as e:
+                    logger.error(
+                        f"{plan.symbol}: stop-rebump submission failed: {e}"
                     )
                     return None
 
@@ -574,14 +630,18 @@ class OrderExecutor:
             'status': order_status,
             'symbol': plan.symbol,
             'shares': plan.shares,
-            'stop_price': stop_price,
+            # The actually-submitted stop — equals stop_price normally, or the
+            # re-bumped ask+buffer when the spread straddled the breakout.
+            'stop_price': _submitted_stop,
             'limit_price': limit_price,
             'stop_loss_price': plan.stop_loss_price,
             'take_profit_price': plan.take_profit_price,
-            # Tag distinguishes the two submit paths so post-hoc DB queries
-            # can count fallback fills vs. baseline. See marketable_limit_fallback.
+            # Tag distinguishes the submit paths so post-hoc DB queries can
+            # count fallback / rebump fills vs. baseline. See
+            # marketable_limit_fallback in config.yaml.
             'order_type': (
                 'marketable_limit_fallback' if _used_marketable_limit
+                else 'stop_rebump' if _used_stop_rebump
                 else 'stop_simple'
             ),
         }

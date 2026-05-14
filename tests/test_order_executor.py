@@ -409,6 +409,201 @@ class TestMarketableLimitFallback:
         assert sl_result['order_type'] == 'stop_simple'
 
 
+class TestStopRebumpStraddle:
+    """Stop re-bump when the bid/ask spread straddles the breakout level
+    (IREZ+TTGT post-mortem extended 2026-05-14 after KPTI/TRT).
+
+    Alpaca live rejects a buy stop-limit whenever stop_price <= current ASK
+    (the order is immediately marketable). The earlier marketable-limit fix
+    only checked the BID, so it missed the straddle case bid < stop <= ask —
+    exactly what rejected KPTI ($9.71 stop / $9.79 ask) and TRT ($13.27 /
+    $13.30). When the spread straddles the breakout level the order is
+    re-bumped to ask + rebump_buffer so it stays a real stop; if the bumped
+    stop would exceed limit_price the breakout is too extended and the trade
+    is skipped (engine retries next bar).
+
+    Plan under test: entry/stop = 4.40, limit = round(4.40 * 1.02, 2) = 4.49.
+    """
+
+    def test_rebumps_stop_when_spread_straddles(self, executor, mock_alpaca):
+        """bid < stop <= ask, bumped stop within limit → stop re-bumped to
+        ask + 0.02, limit unchanged, order_type tagged stop_rebump."""
+        mock_alpaca.get_latest_quote.return_value = {
+            'bid_price': 4.35, 'ask_price': 4.45,
+        }
+        mock_alpaca.submit_stop_limit_order.return_value = {
+            'id': 'rebump-1', 'status': 'accepted',
+            'symbol': 'TEST', 'qty': 113,
+        }
+        result = executor.submit_buy_stop_order(_make_plan())
+        assert result is not None
+        assert result['order_type'] == 'stop_rebump'
+        assert result['stop_price'] == 4.47        # round(4.45 + 0.02, 2)
+        assert result['limit_price'] == 4.49       # unchanged
+        mock_alpaca.submit_stop_limit_order.assert_called_once_with(
+            symbol='TEST', qty=113, side='buy',
+            stop_price=4.47, limit_price=4.49,
+        )
+        mock_alpaca.submit_limit_buy_order.assert_not_called()
+
+    def test_rebumps_when_ask_equals_stop_boundary(self, executor, mock_alpaca):
+        """ask == stop exactly (bid below) → straddle branch fires."""
+        mock_alpaca.get_latest_quote.return_value = {
+            'bid_price': 4.30, 'ask_price': 4.40,
+        }
+        mock_alpaca.submit_stop_limit_order.return_value = {
+            'id': 'rebump-eq', 'status': 'accepted',
+            'symbol': 'TEST', 'qty': 113,
+        }
+        result = executor.submit_buy_stop_order(_make_plan())
+        assert result['order_type'] == 'stop_rebump'
+        assert result['stop_price'] == 4.42        # round(4.40 + 0.02, 2)
+
+    def test_skips_when_breakout_extended_past_limit(
+        self, executor, mock_alpaca, db,
+    ):
+        """bid < stop <= ask but ask + buffer > limit → skip entirely:
+        return None, submit nothing, persist no trade row. Engine retries
+        the symbol on the next bar (result is None == un-traded)."""
+        from datetime import date
+        mock_alpaca.get_latest_quote.return_value = {
+            'bid_price': 4.35, 'ask_price': 4.48,   # 4.48 + 0.02 = 4.50 > 4.49
+        }
+        result = executor.submit_buy_stop_order(_make_plan())
+        assert result is None
+        mock_alpaca.submit_stop_limit_order.assert_not_called()
+        mock_alpaca.submit_limit_buy_order.assert_not_called()
+        trades = db.get_trades_by_date(date.today().isoformat())
+        assert len(trades) == 0                    # no junk rejected row
+
+    def test_normal_stop_limit_when_ask_below_stop(self, executor, mock_alpaca):
+        """ask < stop → unchanged: normal stop-limit at the original stop."""
+        mock_alpaca.get_latest_quote.return_value = {
+            'bid_price': 4.30, 'ask_price': 4.38,
+        }
+        mock_alpaca.submit_stop_limit_order.return_value = {
+            'id': 'normal-1', 'status': 'accepted',
+            'symbol': 'TEST', 'qty': 113,
+        }
+        result = executor.submit_buy_stop_order(_make_plan())
+        assert result['order_type'] == 'stop_simple'
+        assert result['stop_price'] == 4.40
+        mock_alpaca.submit_stop_limit_order.assert_called_once_with(
+            symbol='TEST', qty=113, side='buy',
+            stop_price=4.40, limit_price=4.49,
+        )
+
+    def test_disabled_config_skips_rebump(self, mock_alpaca, db):
+        """enabled=False → straddle quote is ignored, legacy stop-limit at
+        the original stop price (byte-identical rollback path)."""
+        executor = OrderExecutor(alpaca_client=mock_alpaca, db=db)
+        executor._marketable_limit_fallback_cfg = {'enabled': False}
+        mock_alpaca.get_latest_quote.return_value = {
+            'bid_price': 4.35, 'ask_price': 4.45,
+        }
+        mock_alpaca.submit_stop_limit_order.return_value = {
+            'id': 'disabled-rebump', 'status': 'accepted',
+            'symbol': 'TEST', 'qty': 113,
+        }
+        result = executor.submit_buy_stop_order(_make_plan())
+        assert result['order_type'] == 'stop_simple'
+        assert result['stop_price'] == 4.40        # original, not re-bumped
+        mock_alpaca.submit_stop_limit_order.assert_called_once()
+
+    def test_rebump_buffer_read_from_config(self, mock_alpaca, db):
+        """rebump_buffer is honored from config (not hardcoded 0.02)."""
+        executor = OrderExecutor(alpaca_client=mock_alpaca, db=db)
+        executor._marketable_limit_fallback_cfg = {
+            'enabled': True, 'rebump_buffer': 0.05,
+        }
+        mock_alpaca.get_latest_quote.return_value = {
+            'bid_price': 4.35, 'ask_price': 4.43,
+        }
+        mock_alpaca.submit_stop_limit_order.return_value = {
+            'id': 'buf-1', 'status': 'accepted',
+            'symbol': 'TEST', 'qty': 113,
+        }
+        result = executor.submit_buy_stop_order(_make_plan())
+        assert result['order_type'] == 'stop_rebump'
+        assert result['stop_price'] == 4.48        # round(4.43 + 0.05, 2)
+
+    def test_rebump_submit_raises_returns_none(self, executor, mock_alpaca):
+        """If the re-bumped stop-limit submission fails, return None — DO NOT
+        fall through to the original-stop path (Alpaca would reject it for
+        the same reason). Engine retries on the next bar."""
+        mock_alpaca.get_latest_quote.return_value = {
+            'bid_price': 4.35, 'ask_price': 4.45,
+        }
+        mock_alpaca.submit_stop_limit_order.side_effect = AlpacaAPIError(
+            "Alpaca transient 503"
+        )
+        result = executor.submit_buy_stop_order(_make_plan())
+        assert result is None
+        assert mock_alpaca.submit_stop_limit_order.call_count == 1
+
+    def test_rebump_saves_trade_record(self, executor, mock_alpaca, db):
+        """Integration: the re-bumped order persists a trade row, same as the
+        normal path — downstream fill tracking depends on it."""
+        from datetime import date
+        mock_alpaca.get_latest_quote.return_value = {
+            'bid_price': 4.35, 'ask_price': 4.45,
+        }
+        mock_alpaca.submit_stop_limit_order.return_value = {
+            'id': 'rebump-db-1', 'status': 'accepted',
+            'symbol': 'TEST', 'qty': 113,
+        }
+        executor.submit_buy_stop_order(_make_plan())
+        trades = db.get_trades_by_date(date.today().isoformat())
+        assert len(trades) == 1
+        assert trades[0]['order_id'] == 'rebump-db-1'
+        assert trades[0]['symbol'] == 'TEST'
+
+    def test_rebump_logs_diagnostic(self, executor, mock_alpaca, caplog):
+        """The re-bump branch logs `STOP STRADDLED BY SPREAD` for journalctl."""
+        mock_alpaca.get_latest_quote.return_value = {
+            'bid_price': 4.35, 'ask_price': 4.45,
+        }
+        mock_alpaca.submit_stop_limit_order.return_value = {
+            'id': 'log-rebump', 'status': 'accepted',
+            'symbol': 'TEST', 'qty': 113,
+        }
+        with caplog.at_level(logging.INFO, logger='trading.order_executor'):
+            executor.submit_buy_stop_order(_make_plan())
+        assert any(
+            'STOP STRADDLED BY SPREAD' in rec.message
+            for rec in caplog.records
+        ), "Expected 'STOP STRADDLED BY SPREAD' INFO log on the re-bump path"
+
+    def test_skip_logs_warning(self, executor, mock_alpaca, caplog):
+        """The extended-breakout skip logs a WARNING (silent skips hide bugs)."""
+        mock_alpaca.get_latest_quote.return_value = {
+            'bid_price': 4.35, 'ask_price': 4.48,
+        }
+        with caplog.at_level(logging.WARNING, logger='trading.order_executor'):
+            executor.submit_buy_stop_order(_make_plan())
+        assert any(
+            'BUY-STOP SKIPPED' in rec.message
+            for rec in caplog.records
+        ), "Expected 'BUY-STOP SKIPPED' WARNING on the extended-breakout path"
+
+    def test_degenerate_zero_bid_with_ask_above_stop_rebumps(
+        self, executor, mock_alpaca,
+    ):
+        """bid <= 0 (no bid quote) but ask >= stop → still re-bump. A native
+        stop would still be rejected (ask >= stop), and re-bumping stays safe
+        (only fills on a genuine upward print)."""
+        mock_alpaca.get_latest_quote.return_value = {
+            'bid_price': 0.0, 'ask_price': 4.45,
+        }
+        mock_alpaca.submit_stop_limit_order.return_value = {
+            'id': 'zerobid-1', 'status': 'accepted',
+            'symbol': 'TEST', 'qty': 113,
+        }
+        result = executor.submit_buy_stop_order(_make_plan())
+        assert result['order_type'] == 'stop_rebump'
+        assert result['stop_price'] == 4.47        # round(4.45 + 0.02, 2)
+
+
 class TestConflictCheckFastPath:
     """OrderExecutor wash-trade check: prefer OrderStreamWatcher cache when
     available, fall back to REST when stream is absent/unhealthy."""
