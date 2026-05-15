@@ -239,6 +239,10 @@ trading:
   entry_slippage_pct: 0.005  # 0.50% — production avg is 0.48% on buy-stops
   exit_slippage_pct: 0.003   # 0.30% — tick gap + spread on self-managed stop exits
   bull_flag:
+    # 2026-05-15: tested lowering 3→2. 2025 OOS positive (+$63K/12mo) but 2026
+    # Jan-Apr OOS negative (3 of 4 months worse, total −$16K). NOT SHIPPED.
+    # See scripts/study_bf_wide_sweep_2025.sh + CLAUDE.md "min_pole_candles"
+    # block for details. Reconsider if 2026 Q2+ live data flips supportive.
     min_pole_candles: 3
     min_pole_gain_pct: 3.0
     max_retracement_pct: 50.0

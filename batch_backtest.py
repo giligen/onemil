@@ -1824,7 +1824,6 @@ def run_batch_backtest_fast(
 
                 if uncached:
                     # Need AlpacaClient to fetch missing bars
-                    import os
                     from dotenv import load_dotenv
                     load_dotenv()
                     api_key = os.getenv("ALPACA_API_KEY")

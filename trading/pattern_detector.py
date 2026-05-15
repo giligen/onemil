@@ -11,6 +11,7 @@ minute bar is always dropped to prevent false signals from partial data.
 """
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
@@ -75,6 +76,7 @@ class BullFlagDetector:
         macd_signal: int = 9,
         max_green_in_flag: int = 1,
         max_pole_bars: int = 0,
+        fvrr_strict: bool = True,
     ):
         """
         Initialize BullFlagDetector with configurable thresholds.
@@ -108,6 +110,24 @@ class BullFlagDetector:
         self.macd_signal = macd_signal
         self.max_green_in_flag = max_green_in_flag
         self.max_pole_bars = max_pole_bars
+        self.fvrr_strict = fvrr_strict
+        # Research env overrides (BT sweep, 2026-05-15). Default OFF.
+        # Production code paths never set these; only enabled when running
+        # `scripts/study_bf_pattern_sweep.py`.
+        if os.environ.get('BF_MAX_PULLBACK_CANDLES'):
+            self.max_pullback_candles = int(os.environ['BF_MAX_PULLBACK_CANDLES'])
+        if os.environ.get('BF_FVRR_STRICT') is not None:
+            self.fvrr_strict = os.environ['BF_FVRR_STRICT'] == '1'
+        if os.environ.get('BF_MIN_POLE_CANDLES'):
+            self.min_pole_candles = int(os.environ['BF_MIN_POLE_CANDLES'])
+        if os.environ.get('BF_MIN_POLE_GAIN_PCT'):
+            self.min_pole_gain_pct = float(os.environ['BF_MIN_POLE_GAIN_PCT'])
+        if os.environ.get('BF_MAX_RETRACEMENT_PCT'):
+            self.max_retracement_pct = float(os.environ['BF_MAX_RETRACEMENT_PCT'])
+        if os.environ.get('BF_MAX_GREEN_IN_FLAG'):
+            self.max_green_in_flag = int(os.environ['BF_MAX_GREEN_IN_FLAG'])
+        if os.environ.get('BF_MIN_BREAKOUT_VOLUME_RATIO'):
+            self.min_breakout_volume_ratio = float(os.environ['BF_MIN_BREAKOUT_VOLUME_RATIO'])
         # MACD warm-up: previous day's close prices, set per symbol/day
         # When set, prepended to current day's closes for MACD computation
         # to avoid cold-start artifacts in early-morning setups.
@@ -245,7 +265,8 @@ class BullFlagDetector:
         # trailing green bars to "look past the bounce", but a red bar between
         # flag_end and now silently bypasses validation). Both BT and live
         # share this code path, so the fix lands in both at once.
-        if flag_end_idx + 1 < len(completed):
+        # Gated by fvrr_strict (default True) so research sweeps can compare.
+        if self.fvrr_strict and flag_end_idx + 1 < len(completed):
             after_flag = completed.iloc[flag_end_idx + 1:]
             if (after_flag['low'] < flag_low).any():
                 logger.debug(

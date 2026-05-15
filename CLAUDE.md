@@ -194,6 +194,17 @@ journalctl -u onemil-trader -f           # Live logs
 - Rollback: flip flag to `false` + restart (pure config flip)
 - Full details in README.md "Volume-Confirmed Trail Exit" section
 
+### `min_pole_candles` tested 3 → 2 — **NOT SHIPPED** (2026-05-15)
+- Motivation: live this week 3,234 "Pole too short (2 candles, need 3+)" rejections. AIIO 2026-05-13 rejected as 2-candle pole at 14:14, ran +52% intraday. Same pattern killed SMX/MASK/KPTI live wins.
+- **2025 OOS (12 months)** with pole=2: **+$63,172 (+18.3%)**, WR 46.8%→47.9%, 267→338 trades. 8 better months, 4 worse.
+- **2026 OOS Jan-Apr (4 months)** per-month head-to-head: **3 of 4 months WORSE under pole=2**. Jan −$20K, Feb −$7K, Mar −$11K, Apr +$22K. Net 4mo: **−$16,007**.
+- **Combined 16 months**: net +$47K (+5%). Annualized ~$35K/yr — but 3-of-4 recent months negative + WR drop in 3/4 months reads as overfit to 2025 regime, not durable signal. Same "marginal positive with bad recency" pattern that justified rejecting the earlier `max_pullback 5→10` change.
+- Trade-level diff (2025): 79 new (symbol, date) added in pole=2, WR 48.1%. Top winners MSW +$2.2K / RYET +$1.3K / BQ +$1.2K (broad signal in 2025 only).
+- Other knobs tested and **rejected** in the same sweep: `max_retracement_pct 50→70` (−$24K 2025 alone), `max_green_in_flag 2→3` (−$119K!), `min_breakout_volume_ratio 1.5→1.0` (BT-inert), `min_pole_gain_pct 3→2` (+$28K but dominated by pole=2).
+- **Kept as research infrastructure**: env-var overrides in `trading/pattern_detector.py` (`BF_MIN_POLE_CANDLES`, `BF_MAX_PULLBACK_CANDLES`, `BF_FVRR_STRICT`, `BF_MIN_POLE_GAIN_PCT`, `BF_MAX_RETRACEMENT_PCT`, `BF_MAX_GREEN_IN_FLAG`, `BF_MIN_BREAKOUT_VOLUME_RATIO`) — default OFF, no behavior change without explicit env var. Also `fvrr_strict` constructor flag (default True, matches existing FVRR-on behavior).
+- Reconsider when: 2026 Q2+ accumulates 3+ months of live data that flips supportive, OR a regime model can predict which months favor 2-candle vs 3-candle poles.
+- Sweep artifacts: `scripts/study_bf_wide_sweep_2025.sh`, `scripts/diff_a_pole2_trades.py`.
+
 ### Per-tier MACD scaling + V-rev bump (S2-max, shipped 2026-04-18, **default-on, no flag**)
 - Config: `trading.macd_zones.extras_tier.{strong_pos,strong_neg,normal}_multiplier` + bumped `strong_pos/neg_multiplier: 1.5→1.8` (A-tier) + `v_reversal_bonus.bonus: 0.4→1.0`
 - Ships with hardcoded values (no feature flag — per-tier analysis is the production baseline going forward)
