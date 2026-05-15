@@ -581,3 +581,78 @@ class TestGetOpenTrades:
         open_trades = db.get_open_trades("2026-03-25")
         symbols = sorted(t["symbol"] for t in open_trades)
         assert symbols == ["B", "C"], f"Expected B and C, got {symbols}"
+
+    def test_time_stop_canceled_excluded(self, db):
+        """ORB time_stop_canceled rows must not be returned as open.
+
+        Regression test for TRT 2026-05-15: an ORB stop-buy that never
+        filled and was time-cancelled was treated as an open position by
+        the old denylist (which only excluded 'cancelled'), blocking
+        bull_flag from entering the same symbol later in the day.
+        """
+        self._save_trade(db, "TRT", order_status="time_stop_canceled")
+        assert db.get_open_trades("2026-03-25") == []
+
+    def test_rejected_excluded(self, db):
+        """Broker-rejected orders must not count as open positions."""
+        self._save_trade(db, "REJ", order_status="rejected")
+        assert db.get_open_trades("2026-03-25") == []
+
+    def test_canceled_alt_spelling_excluded(self, db):
+        """The 'canceled' (American) spelling must also be excluded."""
+        self._save_trade(db, "CXL", order_status="canceled")
+        assert db.get_open_trades("2026-03-25") == []
+
+    def test_expired_excluded(self, db):
+        """Expired orders are terminal and must not count as open."""
+        self._save_trade(db, "EXP", order_status="expired")
+        assert db.get_open_trades("2026-03-25") == []
+
+    def test_partially_filled_is_open(self, db):
+        """Partial fills are still holding shares and must count as open."""
+        self._save_trade(db, "PF", order_status="partially_filled",
+                         fill_price=10.0)
+        open_trades = db.get_open_trades("2026-03-25")
+        assert [t["symbol"] for t in open_trades] == ["PF"]
+
+    def test_accepted_and_new_are_open(self, db):
+        """Accepted / new in-flight orders count as open."""
+        self._save_trade(db, "ACC", order_status="accepted")
+        self._save_trade(db, "NEW", order_status="new")
+        open_trades = db.get_open_trades("2026-03-25")
+        symbols = sorted(t["symbol"] for t in open_trades)
+        assert symbols == ["ACC", "NEW"]
+
+    def test_strategy_scope_unaffected_by_terminal_rows(self, db):
+        """Strategy-scoped query also excludes terminal statuses."""
+        self._save_trade(db, "TRT", order_status="time_stop_canceled")
+        # Same symbol, different strategy, currently filled:
+        db.save_trade({
+            "trade_date": "2026-03-25",
+            "symbol": "TRT",
+            "side": "buy",
+            "entry_price": 18.4,
+            "stop_loss_price": 17.8,
+            "take_profit_price": 19.8,
+            "shares": 100,
+            "risk_per_share": 0.6,
+            "total_risk": 60.0,
+            "risk_reward_ratio": 2.5,
+            "order_id": "order-TRT-bf",
+            "order_status": "filled",
+            "fill_price": 18.4,
+            "filled_at": None,
+            "exit_price": None,
+            "exit_reason": None,
+            "exited_at": None,
+            "pnl": None,
+            "pnl_pct": None,
+            "pattern_data": "{}",
+            "strategy": "bull_flag",
+        })
+        # The terminal ORB row is filtered out regardless of strategy filter
+        bf_open = db.get_open_trades("2026-03-25", strategy="bull_flag")
+        assert len(bf_open) == 1 and bf_open[0]["strategy"] == "bull_flag"
+        # And the ORB-scoped query also returns nothing (terminal row)
+        orb_open = db.get_open_trades("2026-03-25", strategy="orb")
+        assert orb_open == []

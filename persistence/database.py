@@ -1078,29 +1078,46 @@ class Database:
         )
         return [dict(row) for row in cursor.fetchall()]
 
+    # Statuses that indicate an order is actively in flight or holding a live
+    # position. Anything not in this set (cancelled, canceled, rejected,
+    # expired, time_stop_canceled, closed, stale_closed, …) is treated as
+    # terminal — see TRT cross-strategy lock incident 2026-05-15 where an
+    # ORB time_stop_canceled row blocked bull_flag re-entry because the
+    # old denylist only excluded 'cancelled'.
+    _ACTIVE_ORDER_STATUSES = (
+        'filled', 'partially_filled', 'pending_new', 'accepted', 'new'
+    )
+
     def get_open_trades(self, trade_date: str, strategy: str = None) -> List[Dict[str, Any]]:
         """
         Get trades that are still open (no exit) for a given date.
 
+        "Open" means: exit_price not yet set AND order_status is one of the
+        active in-flight states (see ``_ACTIVE_ORDER_STATUSES``). Terminal
+        statuses such as 'cancelled', 'rejected', 'time_stop_canceled' are
+        excluded, even when the row carries no exit_price.
+
         Args:
             trade_date: Date string (YYYY-MM-DD)
-            strategy: Optional strategy filter ('bull_flag' or 'macd_wave').
+            strategy: Optional strategy filter ('bull_flag', 'macd_wave', 'orb').
                       If None, returns all strategies (backward compatible).
 
         Returns:
             List of open trade dicts
         """
+        placeholders = ','.join('?' for _ in self._ACTIVE_ORDER_STATUSES)
         if strategy:
             cursor = self._trades_conn.execute(
-                "SELECT * FROM trades WHERE trade_date = ? AND exit_price IS NULL "
-                "AND order_status != 'cancelled' AND strategy = ? ORDER BY created_at",
-                (trade_date, strategy)
+                f"SELECT * FROM trades WHERE trade_date = ? AND exit_price IS NULL "
+                f"AND order_status IN ({placeholders}) AND strategy = ? "
+                f"ORDER BY created_at",
+                (trade_date, *self._ACTIVE_ORDER_STATUSES, strategy)
             )
         else:
             cursor = self._trades_conn.execute(
-                "SELECT * FROM trades WHERE trade_date = ? AND exit_price IS NULL "
-                "AND order_status != 'cancelled' ORDER BY created_at",
-                (trade_date,)
+                f"SELECT * FROM trades WHERE trade_date = ? AND exit_price IS NULL "
+                f"AND order_status IN ({placeholders}) ORDER BY created_at",
+                (trade_date, *self._ACTIVE_ORDER_STATUSES)
             )
         return [dict(row) for row in cursor.fetchall()]
 
