@@ -24,6 +24,9 @@ from study_orb_sizing import (
     ADAPTIVE_MULT_MIN,
 )
 from study_orb_correlation_filter import symbol_family, symbol_super_group
+from trading.orb_touchgo_filter import (
+    evaluate_rule_m, evaluate_rule_d, load_touchgo_config,
+)
 
 
 ACCOUNT = 100_000.0
@@ -36,6 +39,11 @@ Q_ORDER = {'Q4': 0, 'Q5': 1, 'Q3': 2, 'Q2': 3, 'Q1': 4}
 LOCK_TRIGGER_R = 1.75   # 2026-05-08: BT-validated upgrade from 1.5
 LOCK_STOP_R = 0.5       # 2026-05-08: BT-validated upgrade from 1.0
 EXIT_SLIP_BPS = 10.0
+
+# Touch-and-go filter (Rule M + Rule D). Default-on; env-var overrides via
+# ORB_TOUCHGO_* (see trading/orb_touchgo_filter.py::load_touchgo_config).
+# BT/LIVE parity by construction: trading/orb_engine.py imports the same helper.
+TOUCHGO_CFG = load_touchgo_config({})
 
 
 def _session_open_timestamp(bars):
@@ -51,12 +59,51 @@ def _session_open_timestamp(bars):
 
 
 def simulate_static_lock(bars, entry_price, range_high, range_low, entry_time):
+    """Simulate ORB static_lock exit with Rule M / Rule D touchgo filter.
+
+    Exit precedence (first to fire wins):
+        1. Rule M: at close of entry bar (the breakout bar that triggered our
+           buy-stop), if bb_close_pos < TOUCHGO_CFG.rule_m_threshold (default
+           0.5) -> exit at bb_close * (1 - 10bps slippage), reason='tag_bb'.
+        2. Rule D: at close of bar 1 (first post-entry bar), if bar 1 low
+           reverted >= TOUCHGO_CFG.rule_d_revert_R (default 0.75R) below entry
+           -> exit at (entry + rule_d_exit_R*range_size) * (1 - 10bps),
+           reason='tag_b1'.
+        3. Static lock loop (existing): scans remaining bars for lock trigger
+           (entry + 1.75R) and stop (range_low) with mid-trade lock_stop ratchet.
+        4. EOD (no exit hit): close of last bar.
+
+    Touchgo rules can be globally disabled via env var ORB_TOUCHGO_ENABLED=0
+    (re-imports happen at startup; restart needed).
+    """
     range_size = range_high - range_low
     trigger_lvl = entry_price + LOCK_TRIGGER_R * range_size
     lock_stop = entry_price + LOCK_STOP_R * range_size
     stop_price = range_low
     armed = False
     post = bars[bars['timestamp'] >= entry_time].reset_index(drop=True)
+
+    # Rule M: evaluate at close of entry bar (post.iloc[0]).
+    if len(post) >= 1:
+        entry_bar = post.iloc[0]
+        fire_m, exit_m = evaluate_rule_m(
+            float(entry_bar['open']), float(entry_bar['high']),
+            float(entry_bar['low']), float(entry_bar['close']),
+            TOUCHGO_CFG,
+        )
+        if fire_m and exit_m is not None:
+            return exit_m * (1 - EXIT_SLIP_BPS / 10000), 'tag_bb'
+
+    # Rule D: evaluate at close of bar 1 (post.iloc[1]).
+    if len(post) >= 2:
+        b1 = post.iloc[1]
+        fire_d, exit_d = evaluate_rule_d(
+            entry_price, float(b1['low']), range_size, TOUCHGO_CFG,
+        )
+        if fire_d and exit_d is not None:
+            return exit_d * (1 - EXIT_SLIP_BPS / 10000), 'tag_b1'
+
+    # Static lock loop (existing).
     for _, row in post.iloc[1:].iterrows():
         bar_high = float(row['high']); bar_low = float(row['low'])
         if not armed and bar_high >= trigger_lvl:

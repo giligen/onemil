@@ -127,6 +127,11 @@ class WatchEntry:
     # this timestamp. Defaults to 0.0 (no skip) so bull flag / MACD wave are
     # unaffected. ORB sets to end-of-entry-bar (fill_time ceiled to next minute).
     skip_exits_until_ts: float = 0.0   # Unix timestamp; no checks before this
+    # One-shot exit-price override (used by StopMonitor.force_exit). When set,
+    # _execute_stop_exit uses this as the limit price instead of computing
+    # from the latest quote. Consumed (set to None) at exit-submit time.
+    # Used by ORB touchgo filter to exit at the helper-computed price.
+    force_exit_limit_price: Optional[float] = None
 
 
 @dataclass
@@ -906,6 +911,99 @@ class StopMonitor:
                     self._unsubscribe_symbol(symbol), self._loop
                 )
             logger.info(f"StopMonitor: removed watch for {symbol}")
+
+    # ------------------------------------------------------------------
+    # External force-exit (used by ORB touchgo filter, etc.)
+    # ------------------------------------------------------------------
+
+    # Whitelist of exit reasons accepted by force_exit. Extend here when
+    # new external-trigger exits are added (e.g., touchgo, news flush).
+    _FORCE_EXIT_REASON_WHITELIST = frozenset({
+        'tag_bb',         # ORB Rule M (breakout-bar close in bottom half)
+        'tag_b1',         # ORB Rule D (bar-1 deep revert)
+    })
+
+    def force_exit(
+        self,
+        symbol: str,
+        reason: str,
+        limit_price: Optional[float] = None,
+    ) -> bool:
+        """Trigger an exit on an open position from an external engine.
+
+        Routes through the same machinery as autonomous stop/lock exits:
+            1. Cancel bracket TP+SL legs.
+            2. Submit marketable limit sell (or use cached quote pricing).
+            3. Poll for fill; escalate to market-close fallback if needed.
+            4. Update DB with exit_reason; emit StopExitEvent for engine to drain.
+
+        Idempotent: if an exit is already in progress for the symbol, this
+        is a no-op (returns False).
+
+        Args:
+            symbol: Stock symbol with an active watch.
+            reason: Exit reason tag (must be in _FORCE_EXIT_REASON_WHITELIST).
+            limit_price: Optional target limit price. If None, StopMonitor's
+                quote-based pricing fires (same as autonomous stop exits).
+
+        Returns:
+            True if exit was scheduled; False if symbol not watched or exit
+            already in progress.
+
+        Thread-safe: callable from main thread (sync). Schedules
+        _execute_stop_exit on the event loop via run_coroutine_threadsafe.
+        """
+        if reason not in self._FORCE_EXIT_REASON_WHITELIST:
+            logger.error(
+                f"StopMonitor: force_exit({symbol}, reason={reason!r}) — "
+                f"reason not in whitelist {self._FORCE_EXIT_REASON_WHITELIST}; ignored"
+            )
+            return False
+        with self._watch_lock:
+            watch = self._watches.get(symbol)
+        if watch is None:
+            logger.warning(
+                f"StopMonitor: force_exit({symbol}, {reason}) — "
+                f"no active watch; ignored"
+            )
+            return False
+        with self._exit_lock:
+            if self._exit_in_progress.get(symbol, False):
+                logger.debug(
+                    f"StopMonitor: force_exit({symbol}, {reason}) — "
+                    f"exit already in progress; no-op"
+                )
+                return False
+
+        # Optional pricing override: if limit_price provided, stash it on the
+        # watch so _execute_stop_exit picks it up instead of recomputing.
+        # NOTE: current _execute_stop_exit always computes its own limit from
+        # the latest quote. To honor `limit_price`, we set a one-shot override
+        # field on the watch; _execute_stop_exit must check it. The flag is
+        # consumed (set back to None) once the exit submits.
+        if limit_price is not None:
+            watch.force_exit_limit_price = float(limit_price)
+
+        trigger_price = limit_price if limit_price is not None else watch.stop_price
+        logger.info(
+            f"StopMonitor: force_exit({symbol}, {reason}, "
+            f"limit_price={limit_price}) scheduled"
+        )
+
+        # Schedule the async exit on the event loop. _execute_stop_exit is
+        # the SAME function used by autonomous stops — single code path.
+        if self._loop is not None and self._running:
+            asyncio.run_coroutine_threadsafe(
+                self._execute_stop_exit(symbol, float(trigger_price), watch, reason),
+                self._loop,
+            )
+            return True
+        else:
+            logger.error(
+                f"StopMonitor: force_exit({symbol}) — event loop not running; "
+                f"position will NOT exit. Fall back to manual close."
+            )
+            return False
 
     # ------------------------------------------------------------------
     # Passive quote monitoring for pending buy-stop orders
@@ -2398,12 +2496,29 @@ class StopMonitor:
             # bulk-cancel's get_orders call errored and left the SL alive.
 
             # Compute limit price: use cached quote from stream (sub-50ms),
-            # fall back to REST if stale, then fixed offset as last resort
+            # fall back to REST if stale, then fixed offset as last resort.
+            # Exception: if force_exit set a one-shot override (e.g., ORB
+            # touchgo filter passing the helper-computed exit price), use
+            # that as the starting point and apply the standard buffer.
             bid, ask, bid_size, ask_size = 0.0, 0.0, 0, 0
             pricing_method = 'fixed_offset'
             quote_age_ms = (time_mod.time() - watch.latest_quote_ts) * 1000 if watch.latest_quote_ts > 0 else float('inf')
 
-            if watch.latest_bid > 0 and watch.latest_ask > 0 and quote_age_ms < 5000:
+            # Consume the one-shot force_exit override BEFORE quote logic.
+            # The helper passes a target price (e.g., bb_close or entry-0.5R);
+            # we still buffer it through compute_limit_price for marketable
+            # submission. Override cleared after consumption.
+            forced = getattr(watch, 'force_exit_limit_price', None)
+            if forced is not None and forced > 0:
+                limit_price = self.compute_limit_price(float(forced))
+                pricing_method = 'force_exit_override'
+                watch.force_exit_limit_price = None  # consume one-shot
+                logger.info(
+                    f"StopMonitor: {symbol} force-exit pricing — "
+                    f"target=${forced:.2f} → limit=${limit_price:.2f} "
+                    f"(reason={exit_reason}, {pricing_method})"
+                )
+            elif watch.latest_bid > 0 and watch.latest_ask > 0 and quote_age_ms < 5000:
                 # Use cached quote from WebSocket stream
                 bid, ask = watch.latest_bid, watch.latest_ask
                 bid_size, ask_size = watch.latest_bid_size, watch.latest_ask_size

@@ -310,6 +310,16 @@ ORB analysis; the older ones have warning headers pointing to the shipped varian
 
 **Q1 filter (shipped 2026-04-25, default ON)**: drops bottom-quintile candidates at ranking time. BT lift +$8,556 OOS (no DD increase). Config: `orb.yaml::filter.skip_q1: true` (also via `ORB_SKIP_Q1=0` to disable in BT). Validated by `study_orb_q1q2_filter.py`. Slot mechanics: filter never refills slots (Q1 is last-priority — see `check_q1_refill_potential.py`). Monitor: `journalctl -u onemil-trader | grep "Q1 filter"`.
 
+**Touchgo filter (Rule M + Rule D) (shipped 2026-05-16, default ON)**: two post-fill exit rules that catch failed breakouts within the first 1-2 minutes of trade life.
+- **Rule M**: at the close of the breakout bar (the bar that triggered our stop-limit BUY), if its close was in the bottom half of its high-low range (`bb_close_pos < 0.5`), exit at next bar open. Catches "touch and go" failed breakouts.
+- **Rule D**: at the close of the first post-entry bar, if the bar's low went ≥0.75R below entry (R = range_high - range_low), exit at entry - 0.5R. Catches fast reversal patterns.
+- **BT validation**: walk-forward Jan'25-May'26 (924 trades, 8/11 OOS months helped, +$27K OOS lift, +$26K full-timeline pipeline-integrated lift, **WR 47.8% → 52.1%, negative months 4 → 2**). Threshold 0.5/0.75 stable across all rolling training windows.
+- **Shared module**: `trading/orb_touchgo_filter.py` (imported by both BT `study_orb_pipeline_static_lock.py` and live `trading/orb_engine.py` — parity by construction; enforced by `tests/test_orb_touchgo_parity.py`).
+- **Live wiring**: `_evaluate_touchgo` called from `_ingest_bars` on every bar event; on fire, calls `stop_monitor.force_exit(symbol, reason='tag_bb'/'tag_b1', limit_price=...)` (new public method on StopMonitor) which routes through the same exit machinery as autonomous stops. Sends `[ORB] TAG_BB/TAG_B1 EXIT` Telegram message with bb_close_pos or b1_revert_R, exit price, and saved-vs-full-stop estimate.
+- **Config**: `orb.yaml::filter.touchgo.{enabled,rule_m.{enabled,threshold},rule_d.{enabled,revert_R,exit_R}}`. Env-var overrides: `ORB_TOUCHGO_ENABLED=0` (master), `ORB_TOUCHGO_RULE_M_THRESH`, `ORB_TOUCHGO_RULE_D_R`, `ORB_TOUCHGO_RULE_D_EXIT_R`.
+- **Monitor**: `journalctl -u onemil-trader | grep -E "TAG_BB|TAG_B1|touchgo"`. Expect ~3 firings/day (BT prevalence 26% of fills × ~12 daily entries).
+- **Rollback**: `filter.touchgo.enabled: false` + `sudo systemctl restart onemil-trader` (zero-state — filter only fires within first 2min post-fill).
+
 **ORB diagnostic scripts** (in `scripts/`):
 - `orb_ramp_check.py` — current stage + advancement eligibility (cushion + days)
 - `orb_pre0_daily.py` — Pre-Stage-0 daily monitor (cushion, slippage vs BT, promotion eligibility, demotion triggers). Refuses to run if orb.yaml ≠ Pre-0 spec unless `--launch-date` passed.

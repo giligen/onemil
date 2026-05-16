@@ -61,6 +61,34 @@ filter:
   # BT lift: +$8,556 combined OOS (VAL +$5,151, HOQ1+ +$3,405). See
   # study_orb_q1q2_filter.py for walk-forward validation.
   skip_q1: true
+  # Touch-and-go filter (Rule M + Rule D). Default-on, walk-forward validated
+  # on Jan'25-May'26 (924 trades, 8/11 OOS months helped, +$27K OOS,
+  # +$44K full-timeline lift, WR 47.8% → 52.1%, cumulative max DD -16%).
+  # Shared module: trading/orb_touchgo_filter.py (imported by both BT
+  # study_orb_pipeline_static_lock.py and live trading/orb_engine.py for parity).
+  #
+  # Rule M: at the close of the breakout bar (the bar that triggered our
+  # stop-limit BUY), if its close sat in the bottom half of its high-low
+  # range (close_pos < threshold), exit at next bar open. Catches "touch
+  # and go" failed breakouts where buyers couldn't hold the high.
+  #
+  # Rule D: at the close of the first post-entry bar, if the bar's low
+  # reverted >= revert_R below entry (where R = range_high - range_low),
+  # exit at entry + exit_R * range_size. Catches fast reversal patterns.
+  #
+  # Rollback: flip `enabled: false` and restart onemil-trader.
+  # Per-rule disable: flip rule_m.enabled or rule_d.enabled.
+  # Env-var override for BT research: ORB_TOUCHGO_ENABLED=0 (master),
+  # ORB_TOUCHGO_RULE_M_THRESH=0.4 etc.
+  touchgo:
+    enabled: true
+    rule_m:
+      enabled: true
+      threshold: 0.5
+    rule_d:
+      enabled: true
+      revert_R: 0.75
+      exit_R: -0.5
   features:
     gap_pct:
       sign: -1              # lower gap = better

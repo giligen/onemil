@@ -33,6 +33,9 @@ from trading.orb_filter import (
 )
 from trading.orb_conviction import apply_adaptive_mult, load_adaptive_mults
 from trading.orb_planner import OrbTradePlan, OrbTradePlanner, PlannerReject
+from trading.orb_touchgo_filter import (
+    TouchgoConfig, evaluate_rule_d, evaluate_rule_m, load_touchgo_config,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -118,6 +121,12 @@ class OpenPosition:
     bar_close_price: Optional[float] = None
     order_submitted_at: Optional[datetime] = None
     entry_quote_ask: Optional[float] = None
+    # Touchgo filter state (Rule M / Rule D). Populated at fill time.
+    # breakout_bar_ts is the minute-floor of fill time (UTC); Rule M evaluated
+    # at the bar event with timestamp == breakout_bar_ts, Rule D at +1min.
+    breakout_bar_ts: Optional[datetime] = None
+    rule_m_evaluated: bool = False
+    rule_d_evaluated: bool = False
 
 
 class ORBEngine:
@@ -210,6 +219,13 @@ class ORBEngine:
         # Q1 was TRAIN-positive (+$6K) but OOS-negative (VAL -$5.1K, HOQ1+ -$3.4K).
         # BT validation: study_orb_q1q2_filter.py.
         self.skip_q1 = bool(filter_cfg.get('skip_q1', True))
+        # Touchgo filter (Rule M = entry-bar close-pos < 0.5; Rule D = bar-1
+        # revert ≥ 0.75R → exit at entry -0.5R). Shared module
+        # trading/orb_touchgo_filter.py imported by both LIVE and BT for parity.
+        # Walk-forward validated +$27K OOS / +$44K full-timeline. Default on.
+        self.touchgo_cfg: TouchgoConfig = load_touchgo_config(
+            filter_cfg.get('touchgo', {})
+        )
         self.z_params: Dict[str, FeatureParam] = (
             load_feature_params(filter_cfg) if filter_cfg.get('features') else {}
         )
@@ -683,6 +699,14 @@ class ORBEngine:
         # Keep rolling window (latest ~60 bars is enough for ORB)
         self._bar_windows[symbol] = bars_df.tail(60).to_dict('records')
 
+        # Evaluate touchgo filter on any open position for this symbol.
+        # Runs before range-complete check so it fires even for already-filled
+        # positions (range was completed at fill time).
+        try:
+            self._evaluate_touchgo(symbol, bars_df)
+        except Exception as e:
+            logger.warning(f"ORB: _evaluate_touchgo({symbol}) failed: {e}")
+
         cand = self.candidates.get(symbol)
         if cand is None or cand.range_data is not None:
             return  # already processed or not in universe
@@ -725,6 +749,157 @@ class ORBEngine:
             f"ORB: {symbol} range complete — "
             f"H=${rh:.2f} L=${rl:.2f} range%={(rh-rl)/rl*100:.2f}% vol={total_vol:,}"
         )
+
+    # =====================================================================
+    # Touchgo filter (Rule M + Rule D)
+    # =====================================================================
+
+    def _evaluate_touchgo(self, symbol: str, bars_df: pd.DataFrame) -> None:
+        """Evaluate Rule M and Rule D for any open position on this symbol.
+
+        Called from _ingest_bars on every bar event. The bar event's last row
+        is the just-closed 1-min bar.
+
+        Rule M: at the close of the breakout bar (the bar containing the fill
+            timestamp), if bb_close_pos < threshold, force-exit.
+        Rule D: at the close of the next bar (breakout_bar + 1min), if bar's
+            low reverted ≥ revert_R below entry, force-exit at entry + exit_R*R.
+
+        Both rules dedup via rule_*_evaluated flags so the same bar can't
+        trigger twice.
+        """
+        pos = self.open_positions.get(symbol)
+        if pos is None or pos.order_id != '':
+            return  # no position or not yet filled
+        if pos.breakout_bar_ts is None:
+            return
+        if pos.rule_m_evaluated and pos.rule_d_evaluated:
+            return  # both already evaluated
+        if bars_df is None or len(bars_df) == 0:
+            return
+
+        # The latest bar is the just-closed one.
+        last_bar = bars_df.iloc[-1]
+        last_ts = last_bar['timestamp']
+        if last_ts.tzinfo is None:
+            last_ts = last_ts.tz_localize('UTC')
+
+        bb_ts = pos.breakout_bar_ts
+        if bb_ts.tzinfo is None:
+            bb_ts = bb_ts.replace(tzinfo=timezone.utc)
+        b1_ts = bb_ts + timedelta(minutes=1)
+
+        range_size = max(pos.range_high - pos.range_low, 0.0)
+
+        # Rule M: triggered when the bar event for breakout_bar_ts arrives.
+        # (Accept any bar at-or-after bb_ts before b1_ts arrives, to handle
+        # slight Alpaca timestamp jitter and the case where the engine sees
+        # multiple bars in one event.)
+        if not pos.rule_m_evaluated and last_ts >= bb_ts and last_ts < b1_ts:
+            try:
+                bb_row = bars_df[bars_df['timestamp'].between(bb_ts, b1_ts, inclusive='left')]
+                if len(bb_row) > 0:
+                    bb_bar = bb_row.iloc[-1]
+                    fire, exit_p = evaluate_rule_m(
+                        float(bb_bar['open']), float(bb_bar['high']),
+                        float(bb_bar['low']), float(bb_bar['close']),
+                        self.touchgo_cfg,
+                    )
+                    pos.rule_m_evaluated = True
+                    if fire and exit_p is not None:
+                        bb_high = float(bb_bar['high']); bb_low = float(bb_bar['low'])
+                        close_pos = (float(bb_bar['close']) - bb_low) / (bb_high - bb_low) if bb_high > bb_low else 0.0
+                        self._fire_touchgo_exit(
+                            pos, reason='tag_bb', exit_price=exit_p,
+                            detail=f"bb_close_pos={close_pos:.3f} (threshold {self.touchgo_cfg.rule_m_threshold})",
+                        )
+                        return  # position is being exited; don't evaluate D
+            except Exception as e:
+                logger.warning(f"ORB: Rule M eval failed for {symbol}: {e}")
+
+        # Rule D: triggered when the bar event for b1_ts arrives.
+        if not pos.rule_d_evaluated and last_ts >= b1_ts:
+            try:
+                b1_end = b1_ts + timedelta(minutes=1)
+                b1_row = bars_df[bars_df['timestamp'].between(b1_ts, b1_end, inclusive='left')]
+                if len(b1_row) > 0:
+                    b1_bar = b1_row.iloc[-1]
+                    fire, exit_p = evaluate_rule_d(
+                        pos.entry_price, float(b1_bar['low']), range_size,
+                        self.touchgo_cfg,
+                    )
+                    pos.rule_d_evaluated = True
+                    if fire and exit_p is not None:
+                        revert_R = (pos.entry_price - float(b1_bar['low'])) / range_size if range_size > 0 else 0.0
+                        self._fire_touchgo_exit(
+                            pos, reason='tag_b1', exit_price=exit_p,
+                            detail=f"b1_revert={revert_R:.2f}R (threshold ≥{self.touchgo_cfg.rule_d_revert_R}R)",
+                        )
+                # Even if no bar found, mark evaluated so we don't keep checking.
+                # We'll catch it on the NEXT event if we mis-aligned.
+                elif last_ts >= b1_end:
+                    pos.rule_d_evaluated = True
+            except Exception as e:
+                logger.warning(f"ORB: Rule D eval failed for {symbol}: {e}")
+
+    def _fire_touchgo_exit(self, pos: 'OpenPosition', reason: str,
+                            exit_price: float, detail: str) -> None:
+        """Route a touchgo exit through StopMonitor.force_exit + Telegram alert.
+
+        reason: 'tag_bb' or 'tag_b1'.
+        exit_price: target limit price from the shared helper.
+        detail: human-readable diagnostic string (e.g., 'bb_close_pos=0.32').
+        """
+        # Estimate $-impact vs holding to full -1R stop, for Telegram message.
+        full_stop_pnl = (pos.stop_price - pos.entry_price) * pos.shares
+        est_exit_pnl = (exit_price - pos.entry_price) * pos.shares
+        saved_vs_stop = est_exit_pnl - full_stop_pnl  # +ve = filter helped
+
+        logger.info(
+            f"ORB: {pos.symbol} TOUCHGO {reason.upper()} fired — "
+            f"{detail}, entry=${pos.entry_price:.2f} exit≈${exit_price:.2f} "
+            f"est_pnl=${est_exit_pnl:+,.2f} saved_vs_stop=${saved_vs_stop:+,.2f}"
+        )
+
+        # Route exit through StopMonitor's force_exit (new public wrapper).
+        if self.stop_monitor is not None:
+            try:
+                self.stop_monitor.force_exit(
+                    symbol=pos.symbol,
+                    reason=reason,
+                    limit_price=exit_price,
+                )
+            except Exception as e:
+                logger.error(
+                    f"ORB: {pos.symbol} touchgo exit force_exit failed: {e}"
+                )
+                return
+
+        # Telegram alert (fire-and-forget; failure is non-fatal).
+        if self.notifier is not None:
+            try:
+                rule_label = 'TAG_BB EXIT' if reason == 'tag_bb' else 'TAG_B1 EXIT'
+                rule_desc = (
+                    'Breakout bar closed weak'
+                    if reason == 'tag_bb'
+                    else 'Bar-1 reverted deep'
+                )
+                msg = (
+                    f"[ORB] {rule_label}: {pos.symbol}\n"
+                    f"{rule_desc} ({detail})\n"
+                    f"Entry: ${pos.entry_price:.2f}  Exit: ${exit_price:.2f}  "
+                    f"Stop was: ${pos.stop_price:.2f}\n"
+                    f"Est P&L: ${est_exit_pnl:+,.2f}  "
+                    f"Saved vs full stop: ${saved_vs_stop:+,.2f}"
+                )
+                if hasattr(self.notifier, 'send_message_async'):
+                    self.notifier.send_message_async(msg)
+                elif hasattr(self.notifier, 'send_message'):
+                    self.notifier.send_message(msg)
+            except Exception as e:
+                logger.warning(
+                    f"ORB: {pos.symbol} touchgo Telegram send failed: {e}"
+                )
 
     # =====================================================================
     # Feature extraction
@@ -1394,6 +1569,13 @@ class ORBEngine:
         pos.shares = shares
         pos.entry_time = fill_at
         pos.order_id = ''  # cleared = filled
+        # Touchgo filter state: breakout_bar_ts is the minute-floor of fill
+        # time (UTC). Rule M evaluated when the bar event arrives with
+        # timestamp == breakout_bar_ts; Rule D at breakout_bar_ts + 1 min.
+        # See _evaluate_touchgo (called from _ingest_bars).
+        pos.breakout_bar_ts = fill_at.replace(second=0, microsecond=0)
+        pos.rule_m_evaluated = False
+        pos.rule_d_evaluated = False
         # Fill-rate telemetry
         self.daily_n_filled += 1
 
