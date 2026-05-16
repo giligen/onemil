@@ -791,11 +791,14 @@ class ORBEngine:
 
         range_size = max(pos.range_high - pos.range_low, 0.0)
 
-        # Rule M: triggered when the bar event for breakout_bar_ts arrives.
-        # (Accept any bar at-or-after bb_ts before b1_ts arrives, to handle
-        # slight Alpaca timestamp jitter and the case where the engine sees
-        # multiple bars in one event.)
-        if not pos.rule_m_evaluated and last_ts >= bb_ts and last_ts < b1_ts:
+        # Rule M: evaluated as soon as the breakout bar is in our window.
+        # We do NOT gate on last_ts < b1_ts — if bars arrive late, batched,
+        # or the engine restarts mid-trade after both bars have closed, the
+        # rolling bars_df can have last_ts >= b1_ts on the very first event
+        # we see. The bb_row lookup below is robust to this (it searches
+        # bars_df for the breakout bar by timestamp range, regardless of
+        # last_ts). The rule_m_evaluated flag dedups against re-firing.
+        if not pos.rule_m_evaluated and last_ts >= bb_ts:
             try:
                 bb_row = bars_df[bars_df['timestamp'].between(bb_ts, b1_ts, inclusive='left')]
                 if len(bb_row) > 0:

@@ -369,12 +369,80 @@ class TestRulePrecedence:
         fill_at = datetime(2025, 6, 2, 13, 35, 23, tzinfo=timezone.utc)
         pos = _build_position(fill_at=fill_at)
         eng.open_positions[pos.symbol] = pos
-        # Bar event arrives only with the breakout bar (most realistic case)
-        bars = _bars_after_fill(fill_at, [(0, 9.95, 10.10, 9.60, 9.70, 5000)])
+        # Bar event arrives with BOTH breakout bar AND bar 1, where each
+        # would independently fire Rule M and Rule D. Rule M must win.
+        bars = _bars_after_fill(fill_at, [
+            (0, 9.95, 10.10, 9.60, 9.70, 5000),   # Rule M: weak breakout
+            (1, 9.70, 9.75, 9.20, 9.25, 5000),    # Rule D: 0.83R revert
+        ])
 
         eng._evaluate_touchgo(pos.symbol, bars)
 
-        # Rule M fires; Rule D not yet evaluated because bar 1 hasn't arrived
+        # Rule M fires; Rule D not evaluated (we returned before checking it)
         mock_stop_monitor.force_exit.assert_called_once()
         assert mock_stop_monitor.force_exit.call_args.kwargs['reason'] == 'tag_bb'
         assert pos.rule_m_evaluated is True
+        assert pos.rule_d_evaluated is False  # short-circuited after M fired
+
+
+class TestLateBarArrival:
+    """Regression: if the engine first sees a bar event where last_ts is at
+    or after b1_ts (e.g., engine restart mid-trade, WebSocket reconnect
+    catching up multiple bars at once, or batched bar delivery), Rule M
+    must STILL evaluate against the breakout bar present in bars_df.
+
+    Pre-fix: outer guard `last_ts < b1_ts` skipped Rule M permanently.
+    Post-fix: only gated on `last_ts >= bb_ts`; bb_row lookup finds the
+    breakout bar in the rolling window regardless of last_ts.
+    """
+
+    def test_rule_m_fires_when_first_event_has_both_bars(self, orb_cfg,
+                                                          mock_alpaca, mock_db,
+                                                          mock_stop_monitor):
+        eng = _make_engine(orb_cfg, mock_alpaca, mock_db, mock_stop_monitor)
+        fill_at = datetime(2025, 6, 2, 13, 35, 23, tzinfo=timezone.utc)
+        pos = _build_position(fill_at=fill_at)
+        eng.open_positions[pos.symbol] = pos
+        # Simulated late delivery: first event the engine sees contains BOTH
+        # the breakout bar and bar 1. Breakout bar is weak; bar 1 is mild.
+        # Pre-fix: Rule M would be skipped because last_ts == b1_ts is NOT
+        # < b1_ts. Post-fix: Rule M evaluates first and fires.
+        bars = _bars_after_fill(fill_at, [
+            (0, 9.95, 10.10, 9.60, 9.70, 5000),   # weak breakout bar
+            (1, 9.70, 9.85, 9.65, 9.80, 5000),    # no Rule D trigger (0.23R)
+        ])
+
+        eng._evaluate_touchgo(pos.symbol, bars)
+
+        # Rule M MUST fire on the breakout bar even though last_ts == b1_ts
+        mock_stop_monitor.force_exit.assert_called_once()
+        assert mock_stop_monitor.force_exit.call_args.kwargs['reason'] == 'tag_bb'
+        assert pos.rule_m_evaluated is True
+
+    def test_rule_m_fires_after_restart_when_last_ts_past_b1(self, orb_cfg,
+                                                                mock_alpaca,
+                                                                mock_db,
+                                                                mock_stop_monitor):
+        """Restart scenario: engine wakes up minutes after fill, first bar
+        event contains breakout_bar + bar1 + bar2. Strong breakout, no
+        Rule D trigger — Rule M must STILL evaluate (and not fire because
+        the close was strong).
+        """
+        eng = _make_engine(orb_cfg, mock_alpaca, mock_db, mock_stop_monitor)
+        fill_at = datetime(2025, 6, 2, 13, 35, 23, tzinfo=timezone.utc)
+        pos = _build_position(fill_at=fill_at)
+        eng.open_positions[pos.symbol] = pos
+        # last_ts will be at +2 min, well past b1_ts. Strong breakout.
+        bars = _bars_after_fill(fill_at, [
+            (0, 9.95, 10.10, 9.90, 10.08, 5000),   # strong breakout
+            (1, 10.05, 10.15, 9.95, 10.10, 5000),  # no revert
+            (2, 10.10, 10.20, 10.05, 10.15, 5000),
+        ])
+
+        eng._evaluate_touchgo(pos.symbol, bars)
+
+        # Rule M was evaluated but did not fire (strong breakout)
+        mock_stop_monitor.force_exit.assert_not_called()
+        assert pos.rule_m_evaluated is True
+        # Rule D evaluated too (last_ts well past b1_ts) — bar 1 had no revert
+        assert pos.rule_d_evaluated is True
