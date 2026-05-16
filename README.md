@@ -875,6 +875,109 @@ systemctl list-timers onemil-orb-backtest.timer
 journalctl -u onemil-orb-backtest.service -n 200 --no-pager   # latest run
 ```
 
+### Touchgo filter — Rule M + Rule D (shipped 2026-05-16, default ON)
+
+Two post-fill exit rules that catch failed breakouts within the first 1–2
+minutes of trade life. The composite score plus quintile sizing already
+selects high-probability setups, but **the breakout-bar price action is
+not captured by entry-time features** — that's the gap the touchgo filter
+fills.
+
+**Rule M (entry-bar weakness)**: at the close of the breakout bar (the
+1-min bar whose high triggered our stop-limit BUY), if its close sat in
+the bottom half of its high-low range (`bb_close_pos < 0.5`), exit at the
+next bar open. Catches "touch and go" failed breakouts where buyers
+couldn't hold the high.
+
+**Rule D (bar-1 pullback)**: at the close of the first post-entry bar, if
+the bar's low went ≥0.75R below entry (`R = range_high − range_low`),
+exit at `entry − 0.5R`. Catches fast reversal patterns the composite
+can't see.
+
+**BT validation** (walk-forward, Jan 2025 → May 2026, 924 trades):
+- 8/11 OOS months helped (+$27,238 OOS lift)
+- +$26,076 full-timeline pipeline-integrated lift ($406K → $432K)
+- WR 47.8% → 52.1% (+4.3 pp)
+- Negative months 4 → 2 (halved)
+- Cumulative max DD −16%
+- Threshold 0.5/0.75 stable across all rolling 6-month training windows
+  — not overfit
+
+**Architecture (BT/LIVE parity by construction)**:
+- Shared helper: `trading/orb_touchgo_filter.py` (3 pure functions +
+  `TouchgoConfig` dataclass).
+- BT: `study_orb_pipeline_static_lock.py::simulate_static_lock` imports
+  the helper and applies Rule M / Rule D in priority order before the
+  static-lock loop. Exit reasons `tag_bb` / `tag_b1`.
+- LIVE: `trading/orb_engine.py::_evaluate_touchgo` invoked from
+  `_ingest_bars` on every 1-min bar event. On fire, calls
+  `stop_monitor.force_exit(symbol, reason, limit_price)` — the new
+  public wrapper around `_execute_stop_exit`, so the exit flows through
+  the same machinery as autonomous stops (bracket cancel → marketable
+  limit sell → fill polling → market fallback). No fork of exit logic.
+- Parity enforced by `tests/test_orb_touchgo_parity.py` (source-code
+  inspection: both modules must import from `trading.orb_touchgo_filter`,
+  neither may redefine `evaluate_rule_m` / `evaluate_rule_d`).
+
+**Telegram**: every firing sends `[ORB] TAG_BB EXIT: <SYMBOL>` (or
+`TAG_B1 EXIT`) with `bb_close_pos` or `b1_revert_R`, entry / exit / stop
+prices, estimated P&L, and savings vs full −1R stop. Failure is
+non-fatal — the exit submits regardless.
+
+**Configuration** (`orb.yaml::filter.touchgo`):
+
+```yaml
+filter:
+  skip_q1: true                  # existing Q1 filter
+  touchgo:                       # NEW (default-on)
+    enabled: true                # master kill switch
+    rule_m:
+      enabled: true
+      threshold: 0.5
+    rule_d:
+      enabled: true
+      revert_R: 0.75
+      exit_R: -0.5
+```
+
+Defaults are baked into `load_touchgo_config({})` so BT runs without
+`orb.yaml` still apply the validated thresholds.
+
+**Env-var overrides for BT research / live emergency**:
+- `ORB_TOUCHGO_ENABLED=0` — master disable
+- `ORB_TOUCHGO_RULE_M_ENABLED=0` / `ORB_TOUCHGO_RULE_D_ENABLED=0` — per-rule
+- `ORB_TOUCHGO_RULE_M_THRESH=0.4` — tighten Rule M
+- `ORB_TOUCHGO_RULE_D_R=0.6` — tighten Rule D revert trigger
+- `ORB_TOUCHGO_RULE_D_EXIT_R=-0.3` — less aggressive Rule D exit
+
+**Monitor**:
+
+```bash
+journalctl -u onemil-trader -f | grep -E "TAG_BB|TAG_B1|touchgo"
+```
+
+Expected firing rate ≈ 3/day (BT prevalence: 26% of fills × ~12 daily
+entries). Telegram messages appear at firing time with full context.
+
+**Rollback paths** (safest first; all zero-state because filter only
+fires within first 2 min post-fill — no in-flight position state to
+unwind):
+1. `filter.touchgo.enabled: false` in `orb.yaml` → restart trader
+2. `ORB_TOUCHGO_ENABLED=0` in systemd `Environment=` → restart
+3. `git revert <ship-commit>` → restart
+
+**Tests**:
+- `tests/test_orb_touchgo_filter.py` — 38 helper unit tests
+- `tests/test_study_orb_static_lock.py` — 10 BT integration tests
+  (Rule M / Rule D fires; existing stop / lock / eod paths unchanged
+  regression guards; env-var disable matches pre-change behavior)
+- `tests/test_orb_engine_touchgo.py` — 15 live integration tests
+  (`breakout_bar_ts` capture, Rule M / D firing, no double-eval,
+  Telegram alert, Telegram failure non-blocking, disabled-via-YAML)
+- `tests/test_orb_touchgo_parity.py` — 12 parity tests (source-code
+  inspection + scalar equivalence + defaults locked + force_exit
+  whitelist)
+
 ### Deeper references
 
 - **`CLAUDE.md`** — full ORB reference: entry mechanics, exit mechanics,
