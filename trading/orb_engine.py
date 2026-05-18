@@ -226,6 +226,20 @@ class ORBEngine:
         self.touchgo_cfg: TouchgoConfig = load_touchgo_config(
             filter_cfg.get('touchgo', {})
         )
+        # Buy-stop rejection guard (shared with bull flag via
+        # trading/buy_stop_guard.py — parity by construction). Reads
+        # config.yaml::trading.marketable_limit_fallback for enabled flag +
+        # rebump_buffer. Defaults to enabled with $0.02 buffer.
+        # See docs/irez_ttgt_paper_vs_prod_divergence.md.
+        try:
+            from config import Config as _Config
+            self._buy_stop_guard_cfg = _Config().marketable_limit_fallback_cfg
+        except Exception as e:
+            logger.warning(
+                f"ORBEngine: failed to load marketable_limit_fallback_cfg: {e} "
+                f"— defaulting to enabled with $0.02 buffer"
+            )
+            self._buy_stop_guard_cfg = {"enabled": True, "rebump_buffer": 0.02}
         self.z_params: Dict[str, FeatureParam] = (
             load_feature_params(filter_cfg) if filter_cfg.get('features') else {}
         )
@@ -1305,37 +1319,23 @@ class ORBEngine:
                 f"(stop={plan.stop_price:.2f}, R=${plan.range_size:.2f})"
             )
             return 'dry-run-' + plan.symbol
-        try:
-            # Safety-net bracket legs (REAL exit is monitored client-side by StopMonitor):
-            #   SL: 10% below entry (wide — belt-and-suspenders if StopMonitor WS dies)
-            #   TP: 300% of entry (unreachable — ORB has no fixed target; legally must set)
-            safety_sl = round(plan.entry_price * (1.0 - self.safety_sl_pct), 2)
-            safety_tp = round(plan.entry_price * 3.0, 2)  # unreachable safety-net
-            # BT parity: stop triggers at range_high (BT: `if row['high'] > range_high`),
-            # limit at range_high × (1 + entry_slip_bps/10000) = plan.entry_price
-            # (30bps slippage budget baked in the planner — DO NOT double-apply here).
-            stop_trigger = round(plan.range_high, 2)
-            limit_price = round(plan.entry_price, 2)
-            result = self.alpaca.submit_stop_bracket_order(
-                symbol=plan.symbol,
-                qty=plan.shares,
-                side='buy',
-                stop_price=stop_trigger,
-                limit_price=limit_price,
-                tp_price=safety_tp,
-                sl_price=safety_sl,
-            )
-            if not result:
-                logger.error(f"ORB: {plan.symbol} alpaca submit returned empty")
-                return None
-            order_id = result.get('id') or ''
-        except Exception as e:
-            logger.error(f"ORB: {plan.symbol} submit_entry failed: {e}")
-            return None
+        # Safety-net bracket legs (REAL exit is monitored client-side by StopMonitor):
+        #   SL: 10% below entry (wide — belt-and-suspenders if StopMonitor WS dies)
+        #   TP: 300% of entry (unreachable — ORB has no fixed target; legally must set)
+        safety_sl = round(plan.entry_price * (1.0 - self.safety_sl_pct), 2)
+        safety_tp = round(plan.entry_price * 3.0, 2)  # unreachable safety-net
+        # BT parity: stop triggers at range_high (BT: `if row['high'] > range_high`),
+        # limit at range_high × (1 + entry_slip_bps/10000) = plan.entry_price
+        # (30bps slippage budget baked in the planner — DO NOT double-apply here).
+        stop_trigger = round(plan.range_high, 2)
+        limit_price = round(plan.entry_price, 2)
 
-        # Capture NBBO at submit for entry slippage attribution (mirrors bull flag).
-        # Done BEFORE _save_pending_trade so the quote fields persist to DB and
-        # survive a restart (previously lost — reconstructed OpenPosition had
+        # Fetch the NBBO at submit BEFORE we decide how to submit. Used for
+        # both the buy-stop rejection guard AND entry-slippage telemetry —
+        # one quote, two purposes. Done early so the guard can pick the
+        # right submission path (marketable / rebump / skip / as-is). Quote
+        # fields persist to DB via _save_pending_trade so they survive a
+        # restart (previously lost — reconstructed OpenPosition had
         # entry_quote_ask=None after sync_positions).
         entry_quote_ask: Optional[float] = None
         submit_bid, submit_ask = 0.0, 0.0
@@ -1351,6 +1351,83 @@ class ORBEngine:
                     entry_quote_ask = submit_ask
         except Exception as e:
             logger.debug(f"ORB: get_latest_quote({plan.symbol}) failed at submit: {e}")
+
+        # Pre-flight buy-stop rejection guard (shared with bull flag via
+        # trading/buy_stop_guard.py — parity by construction). Alpaca LIVE
+        # rejects buy stop-limit with stop_price <= ask. The guard returns
+        # one of: SUBMIT_AS_IS, MARKETABLE_LIMIT, REBUMP_STOP, SKIP.
+        # 2026-05-18 ORB rejections (BTCZ/YSS/BMNZ) all match this pattern.
+        from trading.buy_stop_guard import BuyStopAction, evaluate_buy_stop
+        _guard_cfg = self._buy_stop_guard_cfg or {}
+        _guard_enabled = _guard_cfg.get('enabled', True)
+        _rebump_buffer = _guard_cfg.get('rebump_buffer', 0.02)
+        if _guard_enabled:
+            decision = evaluate_buy_stop(
+                bid=submit_bid, ask=submit_ask,
+                stop_price=stop_trigger, limit_price=limit_price,
+                rebump_buffer=_rebump_buffer,
+            )
+        else:
+            from trading.buy_stop_guard import BuyStopDecision
+            decision = BuyStopDecision(
+                action=BuyStopAction.SUBMIT_AS_IS,
+                reason="guard disabled by config",
+            )
+
+        try:
+            if decision.action == BuyStopAction.MARKETABLE_LIMIT:
+                logger.info(
+                    f"ORB: {plan.symbol} STOP ALREADY TRIGGERED "
+                    f"({decision.reason}) — submitting as marketable "
+                    f"LIMIT-BRACKET @ ${limit_price:.2f} (SL ${safety_sl:.2f}, "
+                    f"TP ${safety_tp:.2f}) to avoid Alpaca live rejection"
+                )
+                result = self.alpaca.submit_bracket_order(
+                    symbol=plan.symbol,
+                    qty=plan.shares,
+                    side='buy',
+                    limit_price=limit_price,
+                    tp_price=safety_tp,
+                    sl_price=safety_sl,
+                )
+            elif decision.action == BuyStopAction.SKIP:
+                logger.warning(
+                    f"ORB: {plan.symbol} ENTRY SKIPPED — {decision.reason}. "
+                    f"Not chasing."
+                )
+                return None
+            elif decision.action == BuyStopAction.REBUMP_STOP:
+                _new_stop = decision.new_stop_price
+                logger.info(
+                    f"ORB: {plan.symbol} STOP STRADDLED BY SPREAD "
+                    f"({decision.reason}) — limit ${limit_price:.2f} unchanged"
+                )
+                result = self.alpaca.submit_stop_bracket_order(
+                    symbol=plan.symbol,
+                    qty=plan.shares,
+                    side='buy',
+                    stop_price=_new_stop,
+                    limit_price=limit_price,
+                    tp_price=safety_tp,
+                    sl_price=safety_sl,
+                )
+            else:  # SUBMIT_AS_IS
+                result = self.alpaca.submit_stop_bracket_order(
+                    symbol=plan.symbol,
+                    qty=plan.shares,
+                    side='buy',
+                    stop_price=stop_trigger,
+                    limit_price=limit_price,
+                    tp_price=safety_tp,
+                    sl_price=safety_sl,
+                )
+            if not result:
+                logger.error(f"ORB: {plan.symbol} alpaca submit returned empty")
+                return None
+            order_id = result.get('id') or ''
+        except Exception as e:
+            logger.error(f"ORB: {plan.symbol} submit_entry failed: {e}")
+            return None
 
         # Single submit_time used for both DB persistence AND the in-memory position.
         # This ensures sync_positions on restart can recover the exact original

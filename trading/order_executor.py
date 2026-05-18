@@ -443,27 +443,16 @@ class OrderExecutor:
         )
 
         # Pre-flight quote check (IREZ+TTGT post-mortem 2026-05-08; extended
-        # 2026-05-14 after KPTI/TRT). Alpaca LIVE rejects a buy stop-limit
-        # whenever stop_price <= current ASK — the order is immediately
-        # marketable, not a real stop (rejected ~4ms after submit, no
-        # reject_reason in the REST response). Paper Alpaca does NOT enforce
-        # this — the parity gap that lost TTGT, KPTI, TRT and ~24 other prod
-        # orders. The earlier revision of this code checked the BID; that is
-        # the wrong side of the spread and let the straddle case through.
-        #   bid >= stop       → breakout fully confirmed → marketable LIMIT.
-        #   bid < stop <= ask → spread straddles the breakout level → re-bump
-        #                       the stop to ask + rebump_buffer so it stays a
-        #                       real stop (only fills on a genuine upward
-        #                       print). If the bumped stop would exceed
-        #                       limit_price the breakout has run past our max
-        #                       fill price → skip (return None; the engine
-        #                       leaves the symbol un-traded and retries it on
-        #                       the next bar).
-        #   ask < stop        → normal stop-limit (unchanged).
-        # BT has no bid/ask so it cannot hit this rejection — the rebump is a
-        # live-microstructure adaptation, not a parity divergence; BT's 2%
-        # gap-over cap (backtest.py max_gap_pct) mirrors limit_price here.
+        # 2026-05-14 after KPTI/TRT; unified with ORB 2026-05-18 after
+        # BTCZ/YSS/BMNZ). Alpaca LIVE rejects a buy stop-limit whenever
+        # stop_price <= current ASK — the order is immediately marketable,
+        # not a real stop (rejected ~4ms after submit, no reject_reason in
+        # the REST response). Paper Alpaca does NOT enforce this — the
+        # parity gap that has cost ~30 prod orders across BF + ORB. The
+        # decision logic is now in trading/buy_stop_guard.evaluate_buy_stop,
+        # shared with ORBEngine._submit_entry for parity by construction.
         # See docs/irez_ttgt_paper_vs_prod_divergence.md.
+        from trading.buy_stop_guard import BuyStopAction, evaluate_buy_stop
         _mlf_cfg = self._marketable_limit_fallback_cfg or {}
         _mlf_enabled = _mlf_cfg.get('enabled', True)
         _rebump_buffer = _mlf_cfg.get('rebump_buffer', 0.02)
@@ -484,13 +473,17 @@ class OrderExecutor:
                 )
                 _bid = _ask = 0.0
 
-            if _bid > 0 and _bid >= stop_price:
-                # Whole spread already above the breakout level — confirmed.
+            decision = evaluate_buy_stop(
+                bid=_bid, ask=_ask,
+                stop_price=stop_price, limit_price=limit_price,
+                rebump_buffer=_rebump_buffer,
+            )
+
+            if decision.action == BuyStopAction.MARKETABLE_LIMIT:
                 logger.info(
                     f"{plan.symbol}: STOP ALREADY TRIGGERED "
-                    f"(bid ${_bid:.2f} >= stop ${stop_price:.2f}) — "
-                    f"submitting as marketable LIMIT @ ${limit_price:.2f} "
-                    f"to avoid Alpaca live rejection"
+                    f"({decision.reason}) — submitting as marketable LIMIT "
+                    f"@ ${limit_price:.2f} to avoid Alpaca live rejection"
                 )
                 try:
                     order = self.alpaca.submit_limit_buy_order(
@@ -504,28 +497,18 @@ class OrderExecutor:
                         f"{plan.symbol}: marketable-limit fallback failed: {e}"
                     )
                     return None
-            elif _ask > 0 and _ask >= stop_price:
-                # Spread straddles the breakout level (bid < stop <= ask). A
-                # native stop here is immediately marketable → Alpaca rejects
-                # it. Re-bump the stop just above the ask so it stays a real
-                # stop that only fills on a genuine upward print.
-                _new_stop = round(_ask + _rebump_buffer, 2)
-                if _new_stop > limit_price:
-                    # Ask has already run past our max fill price — the
-                    # breakout is too extended. Don't chase.
-                    logger.warning(
-                        f"{plan.symbol}: BUY-STOP SKIPPED — breakout "
-                        f"extended past limit (ask ${_ask:.2f} + buffer "
-                        f"${_rebump_buffer:.2f} = ${_new_stop:.2f} > limit "
-                        f"${limit_price:.2f}). Not chasing."
-                    )
-                    return None
+            elif decision.action == BuyStopAction.SKIP:
+                logger.warning(
+                    f"{plan.symbol}: BUY-STOP SKIPPED — {decision.reason}. "
+                    f"Not chasing."
+                )
+                return None
+            elif decision.action == BuyStopAction.REBUMP_STOP:
+                _new_stop = decision.new_stop_price
                 logger.info(
                     f"{plan.symbol}: STOP STRADDLED BY SPREAD "
-                    f"(bid ${_bid:.2f} < stop ${stop_price:.2f} <= ask "
-                    f"${_ask:.2f}) — re-bumping stop ${stop_price:.2f} → "
-                    f"${_new_stop:.2f} (limit ${limit_price:.2f} unchanged) "
-                    f"to avoid Alpaca live rejection"
+                    f"({decision.reason}) — limit ${limit_price:.2f} "
+                    f"unchanged"
                 )
                 try:
                     order = self.alpaca.submit_stop_limit_order(
@@ -542,6 +525,7 @@ class OrderExecutor:
                         f"{plan.symbol}: stop-rebump submission failed: {e}"
                     )
                     return None
+            # else SUBMIT_AS_IS — fall through to the normal-submit block below.
 
         if order is None:
             try:
