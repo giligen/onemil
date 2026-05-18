@@ -46,12 +46,15 @@ INDEX_SYMBOLS: List[str] = ['SPY']
 INDEX_REFRESH_LOOKBACK_DAYS: int = 100
 
 # ORB live's universe seeder (scanner.realtime_scanner._orb_universe_source)
-# queries `daily_bars` directly with `close BETWEEN 1.0 AND 50.0 AND
-# volume >= 500000` to find prev-day candidates at 9:35 ET. These bounds
-# MUST match that query — change one, change the other.
+# queries `daily_bars` with `close BETWEEN 1.0 AND 50.0 AND volume >= 500000`.
+# The price band is pinned here (must match the live query); we DELIBERATELY
+# do NOT prefilter by volume — Step 2's in-memory dict carries 20-day AVG
+# volume, but the ORB query checks per-day volume, so a stock with avg
+# 200K but a 1M-share volume spike yesterday must still be persisted.
+# Match orb-backtest's broad coverage by fetching every $1-50 symbol; the
+# downstream live query enforces the volume floor at read time.
 BROAD_BARS_MIN_CLOSE: float = 1.0
 BROAD_BARS_MAX_CLOSE: float = 50.0
-BROAD_BARS_MIN_VOLUME: int = 500_000
 
 # 7-day lookback handles long weekends + a single missed market holiday
 # without persisting unnecessary history. ORB only reads the most-recent
@@ -248,16 +251,17 @@ class UniverseBuilder:
         self._refresh_index_symbols(INDEX_SYMBOLS, INDEX_REFRESH_LOOKBACK_DAYS)
 
         # Step 9: Refresh broad `daily_bars` for ORB live universe seeding.
-        # ORB needs $1-50 / vol>=500K prev-day rows broader than bull flag's
-        # narrow universe. Pre-filter from Step 2's lossy in-memory dict
-        # (close + 20d-avg volume is enough for prefilter), then re-fetch
-        # full OHLCV via get_daily_bars_range. Failure logs ERROR but does
+        # ORB seed query filters on close $1-50 AND per-day vol >= 500K.
+        # We prefilter ONLY by close (Step 2's volume is a 20-day average —
+        # filtering on it would drop stocks whose recent day was high-vol
+        # but whose 20d-avg is below threshold). The live query enforces
+        # the volume floor at read time, so persisting extra rows is safe
+        # (~3K symbols vs avg-filtered ~2K). Failure logs ERROR but does
         # NOT abort the build.
         broad_symbols = [
             sym for sym, bar in (daily_bars or {}).items()
             if bar
             and BROAD_BARS_MIN_CLOSE <= bar.get('close', 0) <= BROAD_BARS_MAX_CLOSE
-            and bar.get('volume', 0) >= BROAD_BARS_MIN_VOLUME
         ]
         self._refresh_broad_daily_bars(broad_symbols, BROAD_BARS_LOOKBACK_DAYS)
 

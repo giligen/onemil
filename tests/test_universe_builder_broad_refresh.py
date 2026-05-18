@@ -25,7 +25,6 @@ from batch.universe_builder import (
     BROAD_BARS_LOOKBACK_DAYS,
     BROAD_BARS_MAX_CLOSE,
     BROAD_BARS_MIN_CLOSE,
-    BROAD_BARS_MIN_VOLUME,
     UniverseBuilder,
 )
 from data_sources.alpaca_client import AlpacaClient
@@ -61,9 +60,6 @@ class TestModuleConstants:
 
     def test_max_close_matches_orb_seed_query(self):
         assert BROAD_BARS_MAX_CLOSE == 50.0
-
-    def test_min_volume_matches_orb_seed_query(self):
-        assert BROAD_BARS_MIN_VOLUME == 500_000
 
     def test_lookback_covers_long_weekend(self):
         # 3-day weekend (Fri close → Mon morning cron) + 1 holiday = 4 days.
@@ -261,7 +257,7 @@ class TestBuildPipelinePrefilter:
 
     def test_symbol_at_lower_close_bound_included(self, builder):
         self._stub_build_dependencies(builder, {
-            'EDGE_LO': {'close': BROAD_BARS_MIN_CLOSE, 'volume': BROAD_BARS_MIN_VOLUME},
+            'EDGE_LO': {'close': BROAD_BARS_MIN_CLOSE, 'volume': 750_000},
         })
         builder.build()
         # Find the broad-refresh call (Step 8's SPY call comes first)
@@ -274,7 +270,7 @@ class TestBuildPipelinePrefilter:
 
     def test_symbol_at_upper_close_bound_included(self, builder):
         self._stub_build_dependencies(builder, {
-            'EDGE_HI': {'close': BROAD_BARS_MAX_CLOSE, 'volume': BROAD_BARS_MIN_VOLUME},
+            'EDGE_HI': {'close': BROAD_BARS_MAX_CLOSE, 'volume': 750_000},
         })
         builder.build()
         broad_calls = [
@@ -286,8 +282,8 @@ class TestBuildPipelinePrefilter:
 
     def test_symbol_below_min_close_excluded(self, builder):
         self._stub_build_dependencies(builder, {
-            'TOO_LOW': {'close': 0.50, 'volume': BROAD_BARS_MIN_VOLUME},
-            'KEEP':    {'close': 10.0, 'volume': BROAD_BARS_MIN_VOLUME},
+            'TOO_LOW': {'close': 0.50, 'volume': 750_000},
+            'KEEP':    {'close': 10.0, 'volume': 750_000},
         })
         builder.build()
         broad_calls = [
@@ -301,8 +297,8 @@ class TestBuildPipelinePrefilter:
 
     def test_symbol_above_max_close_excluded(self, builder):
         self._stub_build_dependencies(builder, {
-            'TOO_HIGH': {'close': 75.0, 'volume': BROAD_BARS_MIN_VOLUME},
-            'KEEP':     {'close': 10.0, 'volume': BROAD_BARS_MIN_VOLUME},
+            'TOO_HIGH': {'close': 75.0, 'volume': 750_000},
+            'KEEP':     {'close': 10.0, 'volume': 750_000},
         })
         builder.build()
         broad_calls = [
@@ -314,10 +310,12 @@ class TestBuildPipelinePrefilter:
         assert 'TOO_HIGH' not in seed
         assert 'KEEP' in seed
 
-    def test_symbol_below_min_volume_excluded(self, builder):
+    def test_thin_volume_symbol_still_included(self, builder):
+        """Step 2's volume is 20d AVG; a thin-avg stock may spike yesterday.
+        We persist regardless and let ORB's live query enforce per-day vol."""
         self._stub_build_dependencies(builder, {
-            'THIN': {'close': 10.0, 'volume': 100_000},
-            'KEEP': {'close': 10.0, 'volume': BROAD_BARS_MIN_VOLUME},
+            'THIN_AVG': {'close': 10.0, 'volume': 100_000},
+            'KEEP':     {'close': 10.0, 'volume': 750_000},
         })
         builder.build()
         broad_calls = [
@@ -326,14 +324,16 @@ class TestBuildPipelinePrefilter:
         ]
         assert broad_calls
         seed = broad_calls[0].args[0]
-        assert 'THIN' not in seed
+        # Both included — only close band gates Step 9; vol gated downstream.
+        assert 'THIN_AVG' in seed
         assert 'KEEP' in seed
 
-    def test_missing_volume_key_excluded(self, builder):
-        """Bar without 'volume' key — defensive: don't crash, just exclude."""
+    def test_missing_volume_key_still_included(self, builder):
+        """Bar without 'volume' key — should still be included because Step 9
+        no longer filters on volume (price-band only). Defensive: don't crash."""
         self._stub_build_dependencies(builder, {
             'NO_VOL': {'close': 10.0},  # missing 'volume'
-            'KEEP':   {'close': 10.0, 'volume': BROAD_BARS_MIN_VOLUME},
+            'KEEP':   {'close': 10.0, 'volume': 750_000},
         })
         builder.build()
         broad_calls = [
@@ -342,4 +342,10 @@ class TestBuildPipelinePrefilter:
         ]
         assert broad_calls
         seed = broad_calls[0].args[0]
-        assert 'NO_VOL' not in seed
+        assert 'NO_VOL' in seed
+        assert 'KEEP' in seed
+
+    # Note: missing 'close' key in Step 2's daily_bars would crash earlier
+    # in _filter_by_price (Step 3) before Step 9 runs — a pre-existing
+    # fragility, not part of the broad-refresh contract. Our prefilter
+    # uses bar.get('close', 0) defensively but Step 3 is the actual gate.
