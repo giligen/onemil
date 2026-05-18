@@ -45,6 +45,26 @@ INDEX_SYMBOLS: List[str] = ['SPY']
 # one call regardless of range.
 INDEX_REFRESH_LOOKBACK_DAYS: int = 100
 
+# ORB live's universe seeder (scanner.realtime_scanner._orb_universe_source)
+# queries `daily_bars` directly with `close BETWEEN 1.0 AND 50.0 AND
+# volume >= 500000` to find prev-day candidates at 9:35 ET. These bounds
+# MUST match that query — change one, change the other.
+BROAD_BARS_MIN_CLOSE: float = 1.0
+BROAD_BARS_MAX_CLOSE: float = 50.0
+BROAD_BARS_MIN_VOLUME: int = 500_000
+
+# 7-day lookback handles long weekends + a single missed market holiday
+# without persisting unnecessary history. ORB only reads the most-recent
+# prev-day row per symbol (ROW_NUMBER OVER ORDER BY bar_date DESC), so
+# the lookback only needs to GUARANTEE we capture at least one trading day.
+BROAD_BARS_LOOKBACK_DAYS: int = 7
+
+# Caller-level chunking for Step 9. get_daily_bars_range chunks INTERNALLY
+# at 200 but raises on first chunk failure (losing prior chunks). We chunk
+# at the caller so each chunk's success is persisted independently — one
+# bad chunk doesn't wipe out 19 good ones.
+BROAD_BARS_CHUNK_SIZE: int = 200
+
 # Time buckets for volume profiles — ET market hours (09:30 to 15:45, 15-min intervals).
 # All bucket keys throughout the system use ET hours, matching the scanner and TIME_BUCKETS.
 TIME_BUCKETS = [
@@ -227,6 +247,20 @@ class UniverseBuilder:
         # job and should keep going if SPY's API call hiccups.
         self._refresh_index_symbols(INDEX_SYMBOLS, INDEX_REFRESH_LOOKBACK_DAYS)
 
+        # Step 9: Refresh broad `daily_bars` for ORB live universe seeding.
+        # ORB needs $1-50 / vol>=500K prev-day rows broader than bull flag's
+        # narrow universe. Pre-filter from Step 2's lossy in-memory dict
+        # (close + 20d-avg volume is enough for prefilter), then re-fetch
+        # full OHLCV via get_daily_bars_range. Failure logs ERROR but does
+        # NOT abort the build.
+        broad_symbols = [
+            sym for sym, bar in (daily_bars or {}).items()
+            if bar
+            and BROAD_BARS_MIN_CLOSE <= bar.get('close', 0) <= BROAD_BARS_MAX_CLOSE
+            and bar.get('volume', 0) >= BROAD_BARS_MIN_VOLUME
+        ]
+        self._refresh_broad_daily_bars(broad_symbols, BROAD_BARS_LOOKBACK_DAYS)
+
         # Summary
         added = current_symbols - previous_symbols
         removed = previous_symbols - current_symbols
@@ -372,6 +406,114 @@ class UniverseBuilder:
             f"{sorted(set(b['symbol'] for b in flat_bars))}"
         )
         return len(flat_bars)
+
+    def _refresh_broad_daily_bars(
+        self, symbols: List[str], lookback_days: int
+    ) -> int:
+        """Refresh `daily_bars` rows for the broad ORB-eligible universe.
+
+        ORB's live universe seeder (scanner.realtime_scanner
+        ::_orb_universe_source) queries the `daily_bars` table directly
+        with `WHERE close BETWEEN 1.0 AND 50.0 AND volume >= 500000` to
+        find prev-day candidates at 9:35 ET. Without this step `daily_bars`
+        is only fresh for:
+          (a) INDEX_SYMBOLS (SPY) via Step 8, and
+          (b) whatever historical batch_backtest / orb_backtest runs have
+              incidentally populated.
+
+        Until 2026-05-18 the broad refresh was a SIDE EFFECT of the
+        onemil-orb-backtest.timer (dev only). Prod never had that timer,
+        so its daily_bars stagnated to ~4.9K symbols vs dev's ~12.5K.
+        Making this a first-class step of the universe-rebuild cron
+        (Mon-Fri 10:30 UTC + Sat 06:00 UTC) gives both nodes broad fresh
+        rows on every weekday morning, independent of any BT cron.
+
+        Implementation notes:
+          - Caller-level chunking (BROAD_BARS_CHUNK_SIZE) so partial
+            failures persist what worked. get_daily_bars_range chunks
+            INTERNALLY but raises on first-chunk failure (losing prior
+            results). One bad chunk doesn't wipe 19 good ones here.
+          - 16:15 ET save_daily_bars guard: cron runs at 10:30 UTC =
+            5:30/6:30 ET pre-market. Last bar fetched is yesterday, so
+            the guard never trips.
+
+        Args:
+            symbols: Pre-filtered list of ORB-eligible tickers (close
+                     $1-50, vol >= 500K based on Step 2's lossy dict).
+            lookback_days: Calendar-day window. 7 days handles long
+                           weekends + a single missed holiday.
+
+        Returns:
+            Number of bar rows persisted. Logs ERROR (without raising)
+            on API failure so the universe build continues.
+        """
+        if not symbols:
+            logger.warning(
+                "Step 9: No symbols passed ORB-broad pre-filter — broad "
+                "daily_bars NOT refreshed. ORB live universe seed may be "
+                "stale. Check Step 2's daily_bars fetch (was the API "
+                "response empty?)."
+            )
+            return 0
+
+        end = date.today()
+        start = end - timedelta(days=lookback_days)
+        logger.info(
+            f"Step 9: Refreshing broad daily_bars for {len(symbols)} ORB-"
+            f"eligible symbols ({start} → {end}, {lookback_days}d window)"
+        )
+
+        total = 0
+        n_chunks = (len(symbols) + BROAD_BARS_CHUNK_SIZE - 1) // BROAD_BARS_CHUNK_SIZE
+        for i in range(0, len(symbols), BROAD_BARS_CHUNK_SIZE):
+            chunk_num = i // BROAD_BARS_CHUNK_SIZE + 1
+            batch = symbols[i:i + BROAD_BARS_CHUNK_SIZE]
+            try:
+                bars_by_sym = self.alpaca.get_daily_bars_range(batch, start, end)
+            except Exception as e:
+                logger.error(
+                    f"Step 9: get_daily_bars_range chunk {chunk_num}/{n_chunks} "
+                    f"FAILED ({len(batch)} syms): {e} — continuing with "
+                    f"remaining chunks. ORB seed may be partial."
+                )
+                continue
+
+            flat_bars: List[Dict] = []
+            for sym, bars in (bars_by_sym or {}).items():
+                for bar in bars:
+                    d = bar['date']
+                    flat_bars.append({
+                        'symbol': sym,
+                        'date': d.isoformat() if isinstance(d, date) else d,
+                        'open': bar['open'],
+                        'high': bar['high'],
+                        'low': bar['low'],
+                        'close': bar['close'],
+                        'volume': bar['volume'],
+                    })
+
+            if flat_bars:
+                try:
+                    self.db.save_daily_bars(flat_bars)
+                    total += len(flat_bars)
+                except Exception as e:
+                    logger.error(
+                        f"Step 9: save_daily_bars chunk {chunk_num}/{n_chunks} "
+                        f"FAILED ({len(flat_bars)} rows): {e} — continuing."
+                    )
+
+            if chunk_num % 5 == 0 or chunk_num == n_chunks:
+                logger.info(
+                    f"Step 9 progress: chunk {chunk_num}/{n_chunks} "
+                    f"({min(i + BROAD_BARS_CHUNK_SIZE, len(symbols))}/"
+                    f"{len(symbols)} symbols), +{total} rows so far"
+                )
+
+        logger.info(
+            f"Step 9: Refreshed {total} broad daily_bars rows across "
+            f"{len(symbols)} ORB-eligible symbols"
+        )
+        return total
 
     def _cache_volume_profiles(self, stocks: List[Dict]) -> None:
         """
