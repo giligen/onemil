@@ -457,11 +457,18 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
     # not None) route order submission AND fill detection to that account.
     # Otherwise fall back to the main `alpaca` + shared `order_stream` for
     # backwards compat (empty BF keys).
+    # Same-account detection (2026-05-18): when ALPACA_BF_API_KEY == ALPACA_API_KEY
+    # the BF "account" is the main account — reuse the shared OrderStreamWatcher
+    # instead of opening a second TradingStream connection on the same key.
     trading_engine = None
     if trade and enable_flag:
         bf_client = bf_alpaca if bf_alpaca is not None else alpaca
         bf_order_stream = order_stream  # fallback to shared main-account stream
-        if bf_alpaca is not None:
+        bf_uses_separate_account = (
+            bf_alpaca is not None
+            and config.alpaca_bf_api_key != config.alpaca_api_key
+        )
+        if bf_uses_separate_account:
             # Dedicated OrderStreamWatcher on BF paper account. Same rationale
             # as ORB: order events are account-specific (unlike market data).
             try:
@@ -473,13 +480,17 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
                     alpaca_client=bf_alpaca,
                 )
                 bf_order_stream.start()
-                logger.info("BF OrderStreamWatcher STARTED — paper account")
+                logger.info("BF OrderStreamWatcher STARTED — separate account")
             except Exception as e:
                 logger.warning(
                     f"BF OrderStreamWatcher failed to start: {e} — "
                     f"falling back to REST polling on bull flag fills"
                 )
                 bf_order_stream = None
+        elif bf_alpaca is not None:
+            logger.info(
+                "BF: keys match main account — reusing shared OrderStreamWatcher"
+            )
         trading_engine = _create_trading_engine(config, bf_client, db, notifier=notifier,
                                                  stop_monitor=stop_monitor,
                                                  order_stream=bf_order_stream)
@@ -533,28 +544,40 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
         logger.info(f"MACD Wave strategy ENABLED")
 
     # ORB (Opening Range Breakout) engine — runs on separate paper Alpaca
-    # account in Phase 1. Fires at 9:35 ET. See orb.yaml for tuning.
+    # account in Phase 1, OR on the main account when ORB keys equal main keys.
+    # Fires at 9:35 ET. See orb.yaml for tuning.
     orb_engine = None
     if trade and enable_orb and orb_alpaca is not None:
         import yaml
         from trading.orb_engine import ORBEngine
-        from trading.order_stream import OrderStreamWatcher
         orb_cfg = yaml.safe_load(open('orb.yaml'))
-        # ORB has its own OrderStreamWatcher on the paper account — order events
-        # are account-specific (unlike market data). Must be started separately.
-        orb_order_stream = None
-        try:
-            orb_order_stream = OrderStreamWatcher(
-                api_key=config.alpaca_orb_api_key,
-                api_secret=config.alpaca_orb_api_secret,
-                paper=orb_alpaca.is_paper,
-                alpaca_client=orb_alpaca,
-            )
-            orb_order_stream.start()
-            logger.info("ORB OrderStreamWatcher STARTED — paper account")
-        except Exception as e:
-            logger.warning(f"ORB OrderStreamWatcher failed to start: {e}")
+        # Same-account detection (2026-05-18): when ALPACA_ORB_API_KEY ==
+        # ALPACA_API_KEY the "ORB account" IS the main account — reuse the
+        # shared OrderStreamWatcher instead of opening a second TradingStream
+        # on the same key (Alpaca delivers order events once per account).
+        orb_uses_separate_account = (
+            config.alpaca_orb_api_key != config.alpaca_api_key
+        )
+        if orb_uses_separate_account:
+            from trading.order_stream import OrderStreamWatcher
             orb_order_stream = None
+            try:
+                orb_order_stream = OrderStreamWatcher(
+                    api_key=config.alpaca_orb_api_key,
+                    api_secret=config.alpaca_orb_api_secret,
+                    paper=orb_alpaca.is_paper,
+                    alpaca_client=orb_alpaca,
+                )
+                orb_order_stream.start()
+                logger.info("ORB OrderStreamWatcher STARTED — separate account")
+            except Exception as e:
+                logger.warning(f"ORB OrderStreamWatcher failed to start: {e}")
+                orb_order_stream = None
+        else:
+            orb_order_stream = order_stream  # share main-account watcher
+            logger.info(
+                "ORB: keys match main account — reusing shared OrderStreamWatcher"
+            )
         orb_engine = ORBEngine(
             alpaca_client=orb_alpaca, db=db, notifier=notifier,
             config=orb_cfg, stop_monitor=stop_monitor,
