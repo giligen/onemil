@@ -216,3 +216,110 @@ class TestRealIncidentReplay:
         no rejection."""
         d = evaluate_buy_stop(bid=3.75, ask=3.76, stop_price=4.07, limit_price=4.08)
         assert d.action == BuyStopAction.SUBMIT_AS_IS
+
+
+class TestPathologicalInputs:
+    """Inputs the helper must NOT crash on, even if they should never happen
+    in practice. The function is called every time we submit a buy-stop —
+    a crash here takes down ORB or BF on tomorrow's open."""
+
+    def test_none_bid_does_not_crash(self):
+        d = evaluate_buy_stop(bid=None, ask=4.45, stop_price=STOP, limit_price=LIMIT)
+        # None bid is treated as missing → ask branch fires → REBUMP
+        assert d.action == BuyStopAction.REBUMP_STOP
+
+    def test_none_ask_does_not_crash(self):
+        d = evaluate_buy_stop(bid=4.30, ask=None, stop_price=STOP, limit_price=LIMIT)
+        # ask None and bid below stop → fall-through to SUBMIT_AS_IS
+        assert d.action == BuyStopAction.SUBMIT_AS_IS
+
+    def test_both_none(self):
+        d = evaluate_buy_stop(bid=None, ask=None, stop_price=STOP, limit_price=LIMIT)
+        assert d.action == BuyStopAction.SUBMIT_AS_IS
+
+    def test_nan_bid_falls_through(self):
+        import math
+        d = evaluate_buy_stop(
+            bid=math.nan, ask=4.30, stop_price=STOP, limit_price=LIMIT,
+        )
+        # nan > 0 is False → bid branch skipped. ask < stop → SUBMIT_AS_IS.
+        assert d.action == BuyStopAction.SUBMIT_AS_IS
+
+    def test_nan_ask_falls_through(self):
+        import math
+        d = evaluate_buy_stop(
+            bid=4.30, ask=math.nan, stop_price=STOP, limit_price=LIMIT,
+        )
+        assert d.action == BuyStopAction.SUBMIT_AS_IS
+
+    def test_inf_bid_routes_to_marketable(self):
+        """Pathological: shouldn't happen, but inf > stop is True → marketable.
+        Limit cap on the order still bounds the fill."""
+        import math
+        d = evaluate_buy_stop(
+            bid=math.inf, ask=math.inf, stop_price=STOP, limit_price=LIMIT,
+        )
+        assert d.action == BuyStopAction.MARKETABLE_LIMIT
+
+    def test_crossed_market_bid_above_ask_routes_via_bid_branch(self):
+        """Crossed market (bid > ask) — rare but real during fast moves.
+        Bid branch wins → MARKETABLE_LIMIT. Harmless; limit_price still caps
+        the actual fill price."""
+        d = evaluate_buy_stop(bid=4.50, ask=4.30, stop_price=STOP, limit_price=LIMIT)
+        assert d.action == BuyStopAction.MARKETABLE_LIMIT
+
+    def test_very_high_price_no_precision_loss(self):
+        """High-priced symbol (e.g., $250 stock): rounding to 2dp still works."""
+        d = evaluate_buy_stop(
+            bid=249.95, ask=250.05, stop_price=250.00, limit_price=255.00,
+            rebump_buffer=0.02,
+        )
+        assert d.action == BuyStopAction.REBUMP_STOP
+        assert d.new_stop_price == 250.07
+
+    def test_negative_rebump_buffer_floored(self):
+        d = evaluate_buy_stop(
+            bid=4.30, ask=4.45, stop_price=STOP, limit_price=LIMIT,
+            rebump_buffer=-100.0,
+        )
+        assert d.action == BuyStopAction.REBUMP_STOP
+        assert d.new_stop_price == 4.47  # 4.45 + 0.02 floored
+
+    def test_none_buffer_floored(self):
+        d = evaluate_buy_stop(
+            bid=4.30, ask=4.45, stop_price=STOP, limit_price=LIMIT,
+            rebump_buffer=None,
+        )
+        assert d.action == BuyStopAction.REBUMP_STOP
+
+
+class TestDataclassImmutability:
+    """BuyStopDecision is frozen — accidental mutation must fail loudly."""
+
+    def test_cannot_mutate_action(self):
+        d = evaluate_buy_stop(bid=4.45, ask=4.46, stop_price=STOP, limit_price=LIMIT)
+        with pytest.raises(Exception):
+            d.action = BuyStopAction.SKIP
+
+    def test_cannot_mutate_new_stop_price(self):
+        d = evaluate_buy_stop(bid=4.30, ask=4.45, stop_price=STOP, limit_price=LIMIT)
+        with pytest.raises(Exception):
+            d.new_stop_price = 99.99
+
+
+class TestActionEnumStability:
+    """The string values of BuyStopAction are persisted in DB `order_type`
+    tags and Telegram alerts. Changing them silently breaks downstream
+    queries — lock them in here."""
+
+    def test_action_string_values(self):
+        assert BuyStopAction.SUBMIT_AS_IS.value == "submit_as_is"
+        assert BuyStopAction.MARKETABLE_LIMIT.value == "marketable_limit"
+        assert BuyStopAction.REBUMP_STOP.value == "rebump_stop"
+        assert BuyStopAction.SKIP.value == "skip"
+
+    def test_action_count_is_four(self):
+        """If a 5th action is added, callers (BF, ORB) must explicitly
+        decide how to dispatch it. Forcing this test to fail makes that
+        impossible to forget."""
+        assert len(list(BuyStopAction)) == 4

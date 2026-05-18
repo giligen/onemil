@@ -27,6 +27,9 @@ from typing import Dict, Iterable, List, Optional, Set
 
 import pandas as pd
 
+from trading.buy_stop_guard import (
+    BuyStopAction, BuyStopDecision, evaluate_buy_stop,
+)
 from trading.orb_correlation import dedup_candidates, symbol_family, symbol_super_group
 from trading.orb_filter import (
     FeatureParam, assign_quintile, composite_score, load_feature_params,
@@ -1357,7 +1360,6 @@ class ORBEngine:
         # rejects buy stop-limit with stop_price <= ask. The guard returns
         # one of: SUBMIT_AS_IS, MARKETABLE_LIMIT, REBUMP_STOP, SKIP.
         # 2026-05-18 ORB rejections (BTCZ/YSS/BMNZ) all match this pattern.
-        from trading.buy_stop_guard import BuyStopAction, evaluate_buy_stop
         _guard_cfg = self._buy_stop_guard_cfg or {}
         _guard_enabled = _guard_cfg.get('enabled', True)
         _rebump_buffer = _guard_cfg.get('rebump_buffer', 0.02)
@@ -1368,7 +1370,6 @@ class ORBEngine:
                 rebump_buffer=_rebump_buffer,
             )
         else:
-            from trading.buy_stop_guard import BuyStopDecision
             decision = BuyStopDecision(
                 action=BuyStopAction.SUBMIT_AS_IS,
                 reason="guard disabled by config",

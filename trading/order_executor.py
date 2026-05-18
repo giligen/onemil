@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 
 from data_sources.alpaca_client import AlpacaClient
 from persistence.database import Database
+from trading.buy_stop_guard import BuyStopAction, evaluate_buy_stop
 from trading.trade_planner import TradePlan
 
 logger = logging.getLogger(__name__)
@@ -452,7 +453,6 @@ class OrderExecutor:
         # decision logic is now in trading/buy_stop_guard.evaluate_buy_stop,
         # shared with ORBEngine._submit_entry for parity by construction.
         # See docs/irez_ttgt_paper_vs_prod_divergence.md.
-        from trading.buy_stop_guard import BuyStopAction, evaluate_buy_stop
         _mlf_cfg = self._marketable_limit_fallback_cfg or {}
         _mlf_enabled = _mlf_cfg.get('enabled', True)
         _rebump_buffer = _mlf_cfg.get('rebump_buffer', 0.02)

@@ -96,8 +96,17 @@ def evaluate_buy_stop(
         BuyStopDecision describing how to submit (or skip).
     """
     # Floor the buffer so the rebumped stop is strictly > ask after rounding.
-    if rebump_buffer < 0.02:
+    if rebump_buffer is None or rebump_buffer < 0.02:
         rebump_buffer = 0.02
+
+    # Defensive: callers convert quote fields via `float(... or 0)`, but if
+    # someone passes None directly, treat it as a missing quote. NaN compares
+    # False against any number in Python, so it falls through to SUBMIT_AS_IS
+    # naturally — but be explicit here so the intent is documented.
+    if bid is None:
+        bid = 0.0
+    if ask is None:
+        ask = 0.0
 
     # Bid branch — whole spread above the breakout level → breakout fully
     # confirmed by trades. A native stop here is immediately marketable →
