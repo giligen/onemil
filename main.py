@@ -36,6 +36,33 @@ from monitoring.telegram_error_handler import TelegramErrorHandler
 logger = logging.getLogger(__name__)
 
 
+def _strategy_uses_separate_account(strategy_key: str, main_key: str) -> bool:
+    """Return True iff strategy's API key points to a different Alpaca account.
+
+    Used to decide whether to create a dedicated AlpacaClient + OrderStreamWatcher
+    for a strategy, or to share the main account's instances.
+
+    Semantics:
+      - Empty strategy key   -> False (fall back to main; same account)
+      - Equal to main key    -> False (same account; share resources)
+      - Different from main  -> True  (truly separate account; dedicate resources)
+
+    Strips whitespace defensively — .env files commonly carry trailing newlines
+    or spaces that would otherwise cause false-negatives ("treat as separate
+    account") and recreate the original duplicate-OrderStreamWatcher bug.
+
+    Args:
+        strategy_key: API key configured for the strategy (BF, ORB, etc.).
+        main_key:     API key for the main / default Alpaca account.
+
+    Returns:
+        True if strategy key resolves to a different account.
+    """
+    if not strategy_key:
+        return False
+    return strategy_key.strip() != main_key.strip()
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -371,6 +398,19 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
                 "ORB will be DISABLED for this session. Set creds in .env first."
             )
             enable_orb = False
+        elif not _strategy_uses_separate_account(
+            config.alpaca_orb_api_key, config.alpaca_api_key
+        ):
+            # ORB keys point at the main account — share the main `alpaca`
+            # instead of creating a duplicate REST client. Avoids extra
+            # startup connection-test + account-info call against the same
+            # account and keeps a single object identity in callers that
+            # check `orb_alpaca is alpaca`.
+            orb_alpaca = alpaca
+            logger.info(
+                "ORB Alpaca client: keys match main account — reusing main "
+                "AlpacaClient instance"
+            )
         else:
             try:
                 orb_alpaca = AlpacaClient(
@@ -398,24 +438,36 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
     # the session (don't silently submit to wrong account). ---
     bf_alpaca = None
     if trade and enable_flag and config.alpaca_bf_api_key and config.alpaca_bf_api_secret:
-        try:
-            bf_alpaca = AlpacaClient(
-                config.alpaca_bf_api_key,
-                config.alpaca_bf_api_secret,
-                paper=config.alpaca_bf_paper,
-            )
-            if not bf_alpaca.test_connection():
-                raise RuntimeError("BF Alpaca connection test failed")
-            bf_account = bf_alpaca.get_account_info()
-            bf_mode = "paper" if bf_alpaca.is_paper else "LIVE"
+        if not _strategy_uses_separate_account(
+            config.alpaca_bf_api_key, config.alpaca_api_key
+        ):
+            # BF keys point at the main account — share the main `alpaca`.
+            # Avoids duplicate REST client + redundant startup connection
+            # tests on the same account.
+            bf_alpaca = alpaca
             logger.info(
-                f"BF Alpaca client connected — {bf_mode} mode, "
-                f"buying power: ${float(bf_account.get('buying_power', 0)):,.0f}"
+                "BF Alpaca client: keys match main account — reusing main "
+                "AlpacaClient instance"
             )
-        except Exception as e:
-            logger.error(f"BF Alpaca client init failed: {e} — disabling Bull Flag")
-            bf_alpaca = None
-            enable_flag = False
+        else:
+            try:
+                bf_alpaca = AlpacaClient(
+                    config.alpaca_bf_api_key,
+                    config.alpaca_bf_api_secret,
+                    paper=config.alpaca_bf_paper,
+                )
+                if not bf_alpaca.test_connection():
+                    raise RuntimeError("BF Alpaca connection test failed")
+                bf_account = bf_alpaca.get_account_info()
+                bf_mode = "paper" if bf_alpaca.is_paper else "LIVE"
+                logger.info(
+                    f"BF Alpaca client connected — {bf_mode} mode, "
+                    f"buying power: ${float(bf_account.get('buying_power', 0)):,.0f}"
+                )
+            except Exception as e:
+                logger.error(f"BF Alpaca client init failed: {e} — disabling Bull Flag")
+                bf_alpaca = None
+                enable_flag = False
 
     # Create ONE shared StopMonitor for all strategies. ORB and BF each have
     # their own AlpacaClient (separate paper accounts) — pass a routing dict
@@ -466,7 +518,9 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
         bf_order_stream = order_stream  # fallback to shared main-account stream
         bf_uses_separate_account = (
             bf_alpaca is not None
-            and config.alpaca_bf_api_key != config.alpaca_api_key
+            and _strategy_uses_separate_account(
+                config.alpaca_bf_api_key, config.alpaca_api_key
+            )
         )
         if bf_uses_separate_account:
             # Dedicated OrderStreamWatcher on BF paper account. Same rationale
@@ -555,8 +609,8 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
         # ALPACA_API_KEY the "ORB account" IS the main account — reuse the
         # shared OrderStreamWatcher instead of opening a second TradingStream
         # on the same key (Alpaca delivers order events once per account).
-        orb_uses_separate_account = (
-            config.alpaca_orb_api_key != config.alpaca_api_key
+        orb_uses_separate_account = _strategy_uses_separate_account(
+            config.alpaca_orb_api_key, config.alpaca_api_key
         )
         if orb_uses_separate_account:
             from trading.order_stream import OrderStreamWatcher
