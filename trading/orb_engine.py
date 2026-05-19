@@ -896,6 +896,10 @@ class ORBEngine:
                 return
 
         # Telegram alert (fire-and-forget; failure is non-fatal).
+        # Use self._notify which handles both sync TelegramNotifier and the
+        # async TelegramNotifier.send_message coroutine correctly. Calling
+        # send_message directly (without await) was the 2026-05-19 bug —
+        # coroutine was created and discarded, alert never delivered.
         if self.notifier is not None:
             try:
                 rule_label = 'TAG_BB EXIT' if reason == 'tag_bb' else 'TAG_B1 EXIT'
@@ -912,10 +916,7 @@ class ORBEngine:
                     f"Est P&L: ${est_exit_pnl:+,.2f}  "
                     f"Saved vs full stop: ${saved_vs_stop:+,.2f}"
                 )
-                if hasattr(self.notifier, 'send_message_async'):
-                    self.notifier.send_message_async(msg)
-                elif hasattr(self.notifier, 'send_message'):
-                    self.notifier.send_message(msg)
+                self._notify(msg)
             except Exception as e:
                 logger.warning(
                     f"ORB: {pos.symbol} touchgo Telegram send failed: {e}"

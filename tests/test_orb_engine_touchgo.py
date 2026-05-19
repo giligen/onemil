@@ -210,11 +210,69 @@ class TestRuleMFires:
 
         eng._evaluate_touchgo(pos.symbol, bars)
 
-        mock_notifier.send_message_async.assert_called_once()
-        msg = mock_notifier.send_message_async.call_args.args[0]
+        # _notify forwards to send_message; MagicMock has both attributes so
+        # the route can be either. Assert that ONE of them was called with
+        # a TAG_BB-shaped message.
+        sent = (
+            mock_notifier.send_message_async.call_args_list
+            + mock_notifier.send_message.call_args_list
+        )
+        assert len(sent) == 1, (
+            "exactly one Telegram send expected; "
+            f"send_message_async={mock_notifier.send_message_async.call_args_list} "
+            f"send_message={mock_notifier.send_message.call_args_list}"
+        )
+        msg = sent[0].args[0]
         assert 'TAG_BB EXIT' in msg
         assert pos.symbol in msg
         assert 'bb_close_pos' in msg
+
+    def test_rule_m_telegram_works_with_real_async_notifier_api(
+        self, orb_cfg, mock_alpaca, mock_db, mock_stop_monitor,
+    ):
+        """Regression: production TelegramNotifier.send_message is an async
+        coroutine function. Calling it without await creates a never-awaited
+        coroutine warning AND silently drops the alert. This was the
+        2026-05-19 prod bug. Fix: route via self._notify which detects
+        and runs the coroutine. This test simulates the real API shape:
+        only send_message exists (no send_message_async), AND it's a
+        coroutine function.
+        """
+        import warnings
+        from unittest.mock import MagicMock, AsyncMock
+
+        # Real notifier shape: send_message is async; no send_message_async.
+        # Using AsyncMock to mimic coroutine return.
+        async_notifier = MagicMock(spec=['send_message'])
+        async_notifier.send_message = AsyncMock(return_value=True)
+
+        eng = _make_engine(orb_cfg, mock_alpaca, mock_db, mock_stop_monitor,
+                           notifier=async_notifier)
+        fill_at = datetime(2025, 6, 2, 13, 35, 23, tzinfo=timezone.utc)
+        pos = _build_position(fill_at=fill_at)
+        eng.open_positions[pos.symbol] = pos
+        bars = _bars_after_fill(fill_at, [(0, 9.95, 10.10, 9.60, 9.70, 5000)])
+
+        # Capture warnings so we can fail on RuntimeWarning(coroutine never awaited)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            eng._evaluate_touchgo(pos.symbol, bars)
+            # No "coroutine was never awaited" warning means the fix
+            # routed the call through self._notify which awaited the coroutine.
+            unawaited = [
+                w for w in caught
+                if issubclass(w.category, RuntimeWarning)
+                and 'never awaited' in str(w.message)
+            ]
+            assert not unawaited, (
+                f"coroutine was created but never awaited — Telegram alert "
+                f"silently dropped: {[str(w.message) for w in unawaited]}"
+            )
+
+        # And the async send_message was actually invoked
+        async_notifier.send_message.assert_called_once()
+        msg = async_notifier.send_message.call_args.args[0]
+        assert 'TAG_BB EXIT' in msg
 
 
 # =========================================================================
@@ -277,8 +335,13 @@ class TestRuleDFires:
 
         eng._evaluate_touchgo(pos.symbol, bars)
 
-        mock_notifier.send_message_async.assert_called_once()
-        msg = mock_notifier.send_message_async.call_args.args[0]
+        # Routed via _notify which calls notifier.send_message (or async equiv).
+        sent = (
+            mock_notifier.send_message_async.call_args_list
+            + mock_notifier.send_message.call_args_list
+        )
+        assert len(sent) == 1
+        msg = sent[0].args[0]
         assert 'TAG_B1 EXIT' in msg
         assert 'b1_revert' in msg
 
@@ -330,7 +393,10 @@ class TestEdgeCases:
     def test_telegram_failure_does_not_block_exit(self, orb_cfg, mock_alpaca,
                                                     mock_db, mock_stop_monitor):
         notifier = MagicMock()
-        notifier.send_message_async.side_effect = RuntimeError('telegram down')
+        # _notify reaches send_message (sync MagicMock returns a MagicMock,
+        # not a coroutine, so we don't trigger the async path). Make it
+        # raise.
+        notifier.send_message.side_effect = RuntimeError('telegram down')
         eng = _make_engine(orb_cfg, mock_alpaca, mock_db, mock_stop_monitor,
                            notifier=notifier)
         fill_at = datetime(2025, 6, 2, 13, 35, 23, tzinfo=timezone.utc)
@@ -342,7 +408,7 @@ class TestEdgeCases:
         eng._evaluate_touchgo(pos.symbol, bars)
 
         mock_stop_monitor.force_exit.assert_called_once()
-        notifier.send_message_async.assert_called_once()  # tried (and failed)
+        notifier.send_message.assert_called_once()  # tried (and failed)
 
     def test_no_notifier_does_not_crash(self, orb_cfg, mock_alpaca, mock_db,
                                          mock_stop_monitor):
