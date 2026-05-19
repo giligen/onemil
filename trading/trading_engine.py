@@ -4308,6 +4308,52 @@ class TradingEngine:
             logger.warning(f"{trade.get('symbol')}: Failed to reconstruct setup: {e}")
             return None
 
+    def _cancel_open_orders_for_symbol(self, symbol: str) -> int:
+        """Cancel any OPEN orders for a symbol, returns count cancelled.
+
+        Used before close_position on an orphan: Alpaca holds the shares
+        for any open bracket legs (held_for_orders == qty), so a plain
+        close_position fails with "insufficient qty available". Cancelling
+        the legs releases the shares so close can proceed.
+
+        Idempotent: returns 0 if there are no open orders. Per-order cancel
+        failures are logged WARN but don't raise — best-effort.
+        """
+        import time as _time
+        try:
+            from alpaca.trading.requests import GetOrdersRequest
+            from alpaca.trading.enums import QueryOrderStatus
+            req = GetOrdersRequest(
+                status=QueryOrderStatus.OPEN, symbols=[symbol]
+            )
+            open_orders = self.alpaca.trading_client.get_orders(filter=req)
+        except Exception as e:
+            logger.warning(
+                f"{symbol}: failed to query open orders before close: {e}"
+            )
+            return 0
+        cancelled = 0
+        for o in (open_orders or []):
+            try:
+                self.alpaca.cancel_order(str(o.id))
+                cancelled += 1
+                logger.info(
+                    f"{symbol}: Cancelled open order {o.id} "
+                    f"({str(o.side).split('.')[-1]} "
+                    f"{str(o.order_type).split('.')[-1]} qty={o.qty}) "
+                    f"before close"
+                )
+            except Exception as ce:
+                logger.warning(
+                    f"{symbol}: Failed to cancel open order {o.id}: {ce}"
+                )
+        if cancelled > 0:
+            # Brief pause so cancels propagate and held_for_orders releases
+            # before the close_position call. Alpaca's eventual consistency
+            # window is typically <500ms; 1s is safe.
+            _time.sleep(1.0)
+        return cancelled
+
     def _close_orphan_positions(self, trades_today: List[Dict]) -> None:
         """Detect and close positions from prior days opened by THIS node.
 
@@ -4338,21 +4384,35 @@ class TradingEngine:
                 continue  # Known today — handled by startup sync
 
             # Check if THIS node has any record of this position in our DB
-            # (open trade from today or any prior day)
+            # (open trade from today or any prior day). 2026-05-19 fix: filter
+            # by strategy='bull_flag' so we don't mis-claim ORB or MACD-wave
+            # positions as ours. Pre-fix, BF orphan-cleanup tried to close
+            # today's ORB CORD/LMRI/PURR/WAY positions, which (separately)
+            # also failed on held_for_orders from ORB's own bracket legs.
             our_trade = self.db.get_trade_by_symbol(symbol) if self.db and hasattr(self.db, 'get_trade_by_symbol') else None
             if our_trade is None and self.db:
-                # Fallback: check all recent trades
+                # Fallback: check all recent trades, BF-only.
                 from datetime import timedelta
                 for days_back in range(5):
                     _check_date = (date.today() - timedelta(days=days_back)).isoformat()
                     _trades = self.db.get_trades_by_date(_check_date)
-                    if any(t['symbol'] == symbol for t in _trades):
+                    if any(
+                        t['symbol'] == symbol
+                        and t.get('strategy', 'bull_flag') == 'bull_flag'
+                        for t in _trades
+                    ):
                         our_trade = True
                         break
 
             if our_trade:
-                # We opened it but didn't close — orphan from prior day
+                # We opened it but didn't close — orphan from prior day.
+                # 2026-05-19 fix: cancel any open orders for the symbol FIRST
+                # to release held_for_orders (e.g., bracket SL/TP legs from
+                # a prior bracket entry). Without this step, close_position
+                # fails with "insufficient qty available" because Alpaca is
+                # holding the shares for the still-open legs.
                 logger.warning(f"{symbol}: Orphan position from prior day (ours) — closing")
+                self._cancel_open_orders_for_symbol(symbol)
                 try:
                     self.alpaca.close_position(symbol)
                     self._traded_symbols.add(symbol)

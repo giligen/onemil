@@ -26,6 +26,46 @@ logger = logging.getLogger(__name__)
 ET = pytz.timezone('US/Eastern')
 
 
+def _stop_monitor_circuit_breaker_state(
+    *,
+    is_healthy: bool,
+    unhealthy_since: Optional[float],
+    now: float,
+    threshold_s: float,
+) -> tuple:
+    """Pure state-machine for the StopMonitor circuit-breaker tolerance.
+
+    Today (2026-05-19) the trader exited after only 8s of unhealthy
+    StopMonitor (transient WS disconnect at 13:45:02; reconnect was in
+    progress with 1s→30s backoff). Force-close cascade + orphan brackets
+    followed. The fix: require sustained unhealthy state, not a single tick.
+
+    Args:
+        is_healthy: result of sm.is_healthy(...) on the current tick.
+        unhealthy_since: timestamp when we first saw unhealthy; None if
+            previously healthy.
+        now: current monotonic / wall time in seconds.
+        threshold_s: how long we tolerate unhealthy before tripping.
+
+    Returns:
+        (new_unhealthy_since, action) where action is one of:
+          'healthy'         — was healthy, still healthy. Do nothing.
+          'recovered'       — was unhealthy, now healthy. Log info.
+          'unhealthy_start' — first unhealthy tick. Log warning.
+          'unhealthy_grace' — still in grace period. Do nothing.
+          'tripped'         — sustained unhealthy ≥ threshold_s. Close + exit.
+    """
+    if is_healthy:
+        if unhealthy_since is not None:
+            return (None, 'recovered')
+        return (None, 'healthy')
+    if unhealthy_since is None:
+        return (now, 'unhealthy_start')
+    if now - unhealthy_since >= threshold_s:
+        return (unhealthy_since, 'tripped')
+    return (unhealthy_since, 'unhealthy_grace')
+
+
 class RealtimeScanner:
     """
     Real-time momentum stock scanner.
@@ -187,6 +227,16 @@ class RealtimeScanner:
         force_closed = False
         last_bucket = None
         _scanner_start = time_mod.time()
+        # StopMonitor circuit breaker — tolerate transient WS disconnects.
+        # Today (2026-05-19) the trader exited after only 8s of unhealthy
+        # StopMonitor (WS disconnect at 13:45:02, dead-declared at 13:45:10)
+        # even though the WS reconnect loop was actively running (1s→30s
+        # backoff, 60 attempts). The exit force-closed 0 in-flight positions
+        # but left 4 ORB brackets stuck in held_for_orders → cascade.
+        # The fix: require sustained unhealthy state, not a single tick.
+        _sm_unhealthy_since: Optional[float] = None
+        _SM_DEAD_THRESHOLD_S = 180.0          # tolerate up to 3 minutes
+        _SM_HEALTH_STALE_S = 90.0             # is_healthy() leniency on event-staleness
         # Reusable thread pool for parallel engine ticks (bull flag + MACD wave).
         # Created once, cleaned up after loop exits.
         _engine_pool = ThreadPoolExecutor(
@@ -293,34 +343,62 @@ class RealtimeScanner:
                 last_bucket = current_bucket
 
             # Circuit breaker: StopMonitor dead → close all → exit
-            # Skip first 3 minutes (grace period for WebSocket to connect)
+            # Skip first 3 minutes (grace period for WebSocket to connect).
+            #
+            # 2026-05-19 fix: tolerate sustained unhealthy state instead of
+            # single-tick. StopMonitor's WS reconnect uses exponential backoff
+            # (1s → 30s, up to 60 attempts) and typically recovers in <60s.
+            # Previously we exited after 8s, force-closing in-flight positions
+            # and triggering an orphan-cleanup cascade. Now we tolerate up to
+            # _SM_DEAD_THRESHOLD_S (180s) and pass a lenient
+            # _SM_HEALTH_STALE_S to is_healthy() so the event-stale path
+            # doesn't trip during normal reconnect windows.
             sm = (getattr(engine, 'stop_monitor', None) if engine
                   else getattr(self.macd_engine, 'stop_monitor', None) if self.macd_engine
                   else None)
-            if (sm is not None
-                    and time_mod.time() - _scanner_start > 180
-                    and not sm.is_healthy()):
-                msg = (
-                    f"CRITICAL: StopMonitor DEAD — "
-                    f"running={sm._running}, "
-                    f"thread={sm._thread.is_alive() if sm._thread else False}"
+            if sm is not None and time_mod.time() - _scanner_start > 180:
+                _now = time_mod.time()
+                _sm_unhealthy_since, _action = _stop_monitor_circuit_breaker_state(
+                    is_healthy=sm.is_healthy(max_stale_seconds=_SM_HEALTH_STALE_S),
+                    unhealthy_since=_sm_unhealthy_since,
+                    now=_now,
+                    threshold_s=_SM_DEAD_THRESHOLD_S,
                 )
-                logger.error(msg)
-                if engine:
-                    engine._force_close_all()
-                if self.macd_engine:
-                    self.macd_engine.force_close_all()
-                if self.notifier:
-                    try:
-                        self.notifier.send_message_sync(
-                            msg + "\nEmergency closed all positions."
-                        )
-                    except Exception:
-                        pass
-                sm.stop()
-                logger.error("Exiting — StopMonitor infrastructure failure")
-                import sys
-                sys.exit(1)
+                if _action == 'recovered':
+                    logger.info(
+                        "StopMonitor recovered (circuit-breaker not tripped)."
+                    )
+                elif _action == 'unhealthy_start':
+                    logger.warning(
+                        f"StopMonitor unhealthy — "
+                        f"running={sm._running}, "
+                        f"thread={sm._thread.is_alive() if sm._thread else False}. "
+                        f"Tolerating up to {_SM_DEAD_THRESHOLD_S:.0f}s "
+                        f"for WS reconnect before circuit-breaker."
+                    )
+                elif _action == 'tripped':
+                    msg = (
+                        f"CRITICAL: StopMonitor DEAD for "
+                        f"{_now - _sm_unhealthy_since:.0f}s — "
+                        f"running={sm._running}, "
+                        f"thread={sm._thread.is_alive() if sm._thread else False}"
+                    )
+                    logger.error(msg)
+                    if engine:
+                        engine._force_close_all()
+                    if self.macd_engine:
+                        self.macd_engine.force_close_all()
+                    if self.notifier:
+                        try:
+                            self.notifier.send_message_sync(
+                                msg + "\nEmergency closed all positions."
+                            )
+                        except Exception:
+                            pass
+                    sm.stop()
+                    logger.error("Exiting — StopMonitor infrastructure failure")
+                    import sys
+                    sys.exit(1)
 
             # Engine ticks — bull flag + MACD wave + ORB run in PARALLEL.
             # Each engine has isolated mutable state and the Alpaca SDK is
