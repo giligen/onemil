@@ -25,6 +25,7 @@ from dotenv import load_dotenv
 from data_sources.alpaca_client import AlpacaClient
 from trading.pattern_detector import BullFlagDetector, BullFlagPattern, BullFlagSetup
 from trading.trade_planner import TradePlanner, TradePlan
+from trading.news_kill_guard import news_kill_decision
 from trading.exhaustion_signals import (
     check_exhaustion,
     sig_volume_divergence,
@@ -1204,6 +1205,11 @@ class BacktestRunner:
         self.nkr_max_avg_vol = float(nkr_cfg.get("max_avg_vol_no_news", 3_000_000))
         self.nkr_min_price = float(nkr_cfg.get("min_price_no_news", 3.0))
         self.nkr_max_float = float(nkr_cfg.get("max_float_no_news", 30_000_000))
+        # Catalyst exemption — default OFF (2026-05 A/B found the exemption is
+        # value-destroying; the segment rules now apply to every trade). See
+        # trading/news_kill_guard.py.
+        self.news_kill_catalyst_exemption = bool(
+            nkr_cfg.get("catalyst_exemption", False))
         self._news_cache: Dict[str, bool] = {}  # (symbol, date) → has_real_catalyst
 
         # News-classifier A/B (research). BT_NEWS_CLASSIFIER ∈ regex|haiku|
@@ -1235,7 +1241,7 @@ class BacktestRunner:
             logger.info(
                 f"News kill rules: vol>={self.nkr_max_avg_vol/1e6:.0f}M, "
                 f"price<${self.nkr_min_price:.0f}, float>={self.nkr_max_float/1e6:.0f}M "
-                f"(all no-news only)")
+                f"(catalyst_exemption={self.news_kill_catalyst_exemption})")
 
     _ET = pytz.timezone('US/Eastern')
 
@@ -1990,9 +1996,10 @@ class BacktestRunner:
     def _check_news_kill(self, symbol: str, bars: pd.DataFrame, setup,
                           plan, avg_daily_volume: int,
                           float_shares: int = 0) -> tuple:
-        """Check if a no-news trade should be killed based on segment rules.
+        """Check if a trade should be killed by the news-kill segment gate.
 
-        Returns (should_trade: bool, reason: str).
+        Delegates to the shared trading.news_kill_guard.news_kill_decision so
+        BT and the live engine cannot drift. Returns (should_trade, reason).
         """
         if not self.news_kill_enabled:
             return (True, "")
@@ -2007,32 +2014,21 @@ class BacktestRunner:
         if not trade_date:
             return (True, "")
 
-        # If stock has real catalyst → always trade
-        if self._has_real_catalyst(symbol, trade_date):
-            return (True, f"has_catalyst")
-
-        # No catalyst — check kill rules
-        entry_price = plan.entry_price
-        pole_gain = setup.pole_gain_pct
-        avg_vol = avg_daily_volume or 0
-
-        # Rule 1: avg_vol >= 3M + no news
-        if avg_vol >= self.nkr_max_avg_vol:
-            return (False, f"no_news + avg_vol {avg_vol/1e6:.1f}M >= {self.nkr_max_avg_vol/1e6:.0f}M")
-
-        # Rule 2: price < $3 + no news
-        if entry_price < self.nkr_min_price:
-            return (False, f"no_news + price ${entry_price:.2f} < ${self.nkr_min_price:.0f}")
-
-        # Rule 3: float >= 30M + no news
-        if float_shares >= self.nkr_max_float:
-            return (False, f"no_news + float {float_shares/1e6:.0f}M >= {self.nkr_max_float/1e6:.0f}M")
-
-        # Rule 4: $5-12 + pole 8-15% + no news
-        if 5 <= entry_price < 12 and 8 <= pole_gain < 15:
-            return (False, f"no_news + ${entry_price:.0f} + pole {pole_gain:.1f}% (overextended mid-cap)")
-
-        return (True, "no_news_but_good_segment")
+        # Catalyst status is only consulted when the exemption is enabled —
+        # skip the (regex-classifier) news lookup entirely when it is off.
+        has_cat = (self.news_kill_catalyst_exemption
+                   and self._has_real_catalyst(symbol, trade_date))
+        return news_kill_decision(
+            has_catalyst=has_cat,
+            catalyst_exemption=self.news_kill_catalyst_exemption,
+            avg_vol=avg_daily_volume or 0,
+            entry_price=plan.entry_price,
+            float_shares=float_shares or 0,
+            pole_gain=setup.pole_gain_pct,
+            max_avg_vol=self.nkr_max_avg_vol,
+            min_price=self.nkr_min_price,
+            max_float=self.nkr_max_float,
+        )
 
     def set_spy_macd_cutoff(self, cutoff) -> None:
         """Set SPY MACD cutoff filter for the current trading day.

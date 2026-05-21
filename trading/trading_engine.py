@@ -25,6 +25,7 @@ from data_sources.alpaca_client import AlpacaClient
 from persistence.database import Database
 from trading.pattern_detector import BullFlagDetector
 from trading.trade_planner import TradePlanner, TradePlan
+from trading.news_kill_guard import news_kill_decision
 from trading.order_executor import OrderExecutor
 from trading.position_manager import PositionManager
 from notifications.telegram_notifier import TelegramNotifier
@@ -342,18 +343,22 @@ class TradingEngine:
         if self.news_gate_enabled:
             logger.info("News gate: ENABLED — no catalyst = no trade")
 
-        # News kill rules: block no-news trades in specific loser segments
+        # News kill rules: block trades in specific loser segments
         nkr_cfg = _cfg.get("trading", {}).get("news_kill_rules", {})
         self.news_kill_enabled = bool(nkr_cfg.get("enabled", False))
         self.nkr_max_avg_vol = float(nkr_cfg.get("max_avg_vol_no_news", 3_000_000))
         self.nkr_min_price = float(nkr_cfg.get("min_price_no_news", 3.0))
         self.nkr_max_float = float(nkr_cfg.get("max_float_no_news", 30_000_000))
+        # Catalyst exemption — default OFF (2026-05 A/B: value-destroying;
+        # segment rules now apply to every trade). See trading/news_kill_guard.py.
+        self.news_kill_catalyst_exemption = bool(
+            nkr_cfg.get("catalyst_exemption", False))
         if self.news_kill_enabled:
             logger.info(
                 f"News kill rules: ENABLED — "
                 f"vol>={self.nkr_max_avg_vol/1e6:.0f}M, "
                 f"price<${self.nkr_min_price:.0f}, float>={self.nkr_max_float/1e6:.0f}M "
-                f"(no-news only)"
+                f"(catalyst_exemption={self.news_kill_catalyst_exemption})"
             )
 
         # EOD summary tracking
@@ -3052,31 +3057,30 @@ class TradingEngine:
         # LLM re-check removed — was 2-5s in critical order path. News kill rules
         # handle no-news risk, scanner classification is sufficient.
 
-        # News kill rules: block no-news trades in specific loser segments
-        # Matches backtest.py _check_news_kill() logic exactly
+        # News kill rules: block trades in specific loser segments.
+        # Shared decision (trading/news_kill_guard.py) — BT + live parity.
         if self.news_kill_enabled:
             _ndata = self._news_data.get(symbol, {})
             _ncat = _ndata.get('news_category', 'NO_NEWS')
-            # Only kill confirmed no-news. PENDING/ERROR get benefit of the doubt.
+            # has_catalyst is only consulted when the exemption is ON. A real-
+            # catalyst category (or PENDING/ERROR) counts as catalyst so the
+            # legacy exemption keeps giving them benefit of the doubt.
             _no_news_cats = {'NO_NEWS', 'GARBAGE_RECAP', 'OTHER'}
-            if _ncat in _no_news_cats:
-                _avg_vol = (uni_stock.get('avg_volume_daily') or 0) if uni_stock else 0
-                _float = (uni_stock.get('float_shares') or 0) if uni_stock else 0
-                _ep = setup.breakout_level
-                _pg = setup.pole_gain_pct
-                _kill_reason = None
-                if _avg_vol >= self.nkr_max_avg_vol:
-                    _kill_reason = f"no_news + avg_vol {_avg_vol/1e6:.1f}M"
-                elif _ep < self.nkr_min_price:
-                    _kill_reason = f"no_news + price ${_ep:.2f}"
-                elif _float >= self.nkr_max_float:
-                    _kill_reason = f"no_news + float {_float/1e6:.0f}M"
-                elif 5 <= _ep < 12 and 8 <= _pg < 15:
-                    _kill_reason = f"no_news + ${_ep:.0f} + pole {_pg:.1f}%"
-                if _kill_reason:
-                    logger.info(f"{symbol}: NEWS KILL: {_kill_reason}")
-                    self._eod_skipped.append((symbol, _ncat, _kill_reason))
-                    return None
+            _has_cat = (self.news_kill_catalyst_exemption
+                        and _ncat not in _no_news_cats)
+            _avg_vol = (uni_stock.get('avg_volume_daily') or 0) if uni_stock else 0
+            _float = (uni_stock.get('float_shares') or 0) if uni_stock else 0
+            _trade, _reason = news_kill_decision(
+                has_catalyst=_has_cat,
+                catalyst_exemption=self.news_kill_catalyst_exemption,
+                avg_vol=_avg_vol, entry_price=setup.breakout_level,
+                float_shares=_float, pole_gain=setup.pole_gain_pct,
+                max_avg_vol=self.nkr_max_avg_vol,
+                min_price=self.nkr_min_price, max_float=self.nkr_max_float)
+            if not _trade:
+                logger.info(f"{symbol}: NEWS KILL: {_reason}")
+                self._eod_skipped.append((symbol, _ncat, _reason))
+                return None
 
         # Conviction scoring: combine with risk tier, cap at 3x
         # Always compute breakdown (cheap, pure arithmetic) so we have it

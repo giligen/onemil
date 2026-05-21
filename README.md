@@ -110,18 +110,20 @@ Scales position risk based on MACD histogram strength at entry (as % of price). 
 
 Uses previous day's bars for MACD warm-up (avoids cold-start on early-morning setups). Config: `macd_zones.enabled: true`.
 
-#### Layer 2: News Kill Rules — block no-news trades in loser segments (+$158K)
+#### Layer 2: News Kill Rules — block trades in loser segments (+$158K)
 
-If stock has a **real catalyst** (FDA, earnings, contract, M&A, analyst, product, SEC filing) the trade always passes. If NO catalyst, these segments are killed:
+These empirically loser segments are killed:
 
 | Rule | Condition | WR | Impact |
 |------|-----------|-----|--------|
-| 1 | avg_daily_vol >= 3M + no news | 22% | -$101K eliminated |
-| 2 | price < $3 + no news | 20% | -$11K eliminated |
-| 3 | float >= 30M + no news | 19% | -$14K eliminated |
-| 4 | $5-12 + pole 8-15% + no news | 27% | -$32K eliminated |
+| 1 | avg_daily_vol >= 3M | 22% | -$101K eliminated |
+| 2 | price < $3 | 20% | -$11K eliminated |
+| 3 | float >= 30M | 19% | -$14K eliminated |
+| 4 | $5-12 + pole 8-15% | 27% | -$32K eliminated |
 
-Config: `news_kill_rules.enabled: true`. News fetched from Alpaca News API, classified via regex (realtime) and `news_history` table (backtest).
+Config: `news_kill_rules.enabled: true`. Shared decision module `trading/news_kill_guard.py` (`news_kill_decision`) — imported by both the backtest (`_check_news_kill`) and the live engine, so they cannot drift.
+
+**Catalyst exemption (`news_kill_rules.catalyst_exemption`, default `false` — shipped 2026-05-21):** Historically a trade with a real news catalyst (FDA, earnings, contract, M&A, analyst, product, SEC filing) was *exempted* from the segment rules. The 2026-05 news-classifier A/B found that exemption is **value-destroying** — bad-segment trades that genuinely have a real catalyst are still net losers, and the exemption just leaks them past the gate. On a 1,195-trade sample, applying the rules with **no** exemption ($204,844 raw) beat the regex-exemption config ($192,721) by ~$12K; an *accurate* Haiku classifier was worse still ($43K behind regex on the clean Stage-2 A/B — the rules were co-calibrated to regex's loose catalyst rate). With the flag `false` the segment rules apply to **every** trade and **no news classifier is consulted on the trade-decision path** (the buggy regex / Haiku divergence both become irrelevant). Set to `true` to restore the legacy exempt-on-catalyst behavior. Monitor: `journalctl -u onemil-trader | grep "NEWS KILL"`. Rollback: flip flag to `true` + restart.
 
 #### Layer 3: Conviction Scoring — scale position by setup quality
 
