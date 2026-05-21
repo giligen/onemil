@@ -116,16 +116,21 @@ class LLMNewsAnalyzer(NewsAnalyzer):
     re-classifying the same article across 60s poll cycles.
     """
 
-    def __init__(self, anthropic_client, model: str = "claude-haiku-4-5-20251001"):
+    def __init__(self, anthropic_client, model: str = "claude-haiku-4-5-20251001",
+                 system_prompt: Optional[str] = None):
         """
         Initialize LLMNewsAnalyzer.
 
         Args:
             anthropic_client: anthropic.Anthropic client instance
             model: Model ID to use for classification
+            system_prompt: Classifier system prompt. Defaults to the production
+                SYSTEM_PROMPT. Overridable so research / backtest A/B arms can
+                test prompt variants without forking this class.
         """
         self._client = anthropic_client
         self._model = model
+        self._system_prompt = system_prompt or SYSTEM_PROMPT
         self._cache: Dict[Tuple[str, str], bool] = {}
         logger.info(f"LLMNewsAnalyzer initialized with model={model}")
 
@@ -234,7 +239,7 @@ class LLMNewsAnalyzer(NewsAnalyzer):
                     model=self._model,
                     max_tokens=150,
                     temperature=CLASSIFIER_TEMPERATURE,
-                    system=SYSTEM_PROMPT,
+                    system=self._system_prompt,
                     messages=[{"role": "user", "content": user_msg}],
                 )
                 raw = response.content[0].text.strip()

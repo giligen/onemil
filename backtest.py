@@ -1205,6 +1205,32 @@ class BacktestRunner:
         self.nkr_min_price = float(nkr_cfg.get("min_price_no_news", 3.0))
         self.nkr_max_float = float(nkr_cfg.get("max_float_no_news", 30_000_000))
         self._news_cache: Dict[str, bool] = {}  # (symbol, date) → has_real_catalyst
+
+        # News-classifier A/B (research). BT_NEWS_CLASSIFIER ∈ regex|haiku|
+        # haiku_revised reads precomputed verdicts from data/news_ab.db so the
+        # arms differ ONLY by classifier. Unset → production behavior (regex via
+        # news_history) is byte-identical. BT_NEWS_KILL=0/1 force the news-kill
+        # gate off/on — the "no news filter at all" A/B arm uses BT_NEWS_KILL=0.
+        import os as _os
+        self._news_ab_mode = _os.environ.get('BT_NEWS_CLASSIFIER') or None
+        self._news_ab_store = None
+        if self._news_ab_mode and self._news_ab_mode not in (
+                'regex', 'haiku', 'haiku_revised'):
+            raise ValueError(
+                f"BT_NEWS_CLASSIFIER='{self._news_ab_mode}' invalid — "
+                f"expected one of: regex, haiku, haiku_revised")
+        if self._news_ab_mode:
+            logger.info(
+                f"News A/B ENABLED: classifier='{self._news_ab_mode}' "
+                f"(precomputed data/news_ab.db)")
+        _nk_env = _os.environ.get('BT_NEWS_KILL')
+        if _nk_env in ('0', '1'):
+            self.news_kill_enabled = (_nk_env == '1')
+            logger.info(
+                f"News-kill gate forced "
+                f"{'ON' if self.news_kill_enabled else 'OFF'} "
+                f"via BT_NEWS_KILL={_nk_env}")
+
         if self.news_kill_enabled:
             logger.info(
                 f"News kill rules: vol>={self.nkr_max_avg_vol/1e6:.0f}M, "
@@ -1892,14 +1918,50 @@ class BacktestRunner:
         return has_catalyst
 
     def _has_real_catalyst(self, symbol: str, trade_date: str) -> bool:
-        """Check news_history DB for real catalyst on this symbol/date.
+        """Check for a real news catalyst on this symbol/date.
 
-        Auto-fetches from Alpaca News API on cache miss (creates table if needed).
+        Default (production): regex classification via news_history, auto-
+        fetching from the Alpaca News API on a cache miss. When
+        BT_NEWS_CLASSIFIER is set, reads the precomputed verdict from
+        data/news_ab.db instead — the 3-arm news-classifier A/B (see
+        scripts/precompute_news_ab.py).
         """
         cache_key = f"{symbol}_{trade_date}"
         if cache_key in self._news_cache:
             return self._news_cache[cache_key]
 
+        if self._news_ab_mode:
+            result = self._news_ab_catalyst(symbol, trade_date)
+        else:
+            result = self._has_real_catalyst_regex(symbol, trade_date)
+
+        self._news_cache[cache_key] = result
+        return result
+
+    def _news_ab_catalyst(self, symbol: str, trade_date: str) -> bool:
+        """Read the precomputed catalyst verdict for the active A/B classifier.
+
+        Falls back to the regex path (with a WARNING) if the (symbol, date) was
+        never precomputed — that signals scripts/precompute_news_ab.py must be
+        re-run to cover the row; it must NOT be silently treated as 'no news'.
+        """
+        if self._news_ab_store is None:
+            from trading.news_ab import NewsABStore
+            self._news_ab_store = NewsABStore()
+        verdict = self._news_ab_store.get_verdict(
+            symbol, trade_date, self._news_ab_mode)
+        if verdict is None:
+            logger.warning(
+                f"{symbol} {trade_date}: no precomputed news_ab verdict for "
+                f"classifier='{self._news_ab_mode}' — falling back to regex. "
+                f"Re-run scripts/precompute_news_ab.py to cover this row.")
+            return self._has_real_catalyst_regex(symbol, trade_date)
+        return verdict
+
+    def _has_real_catalyst_regex(self, symbol: str, trade_date: str) -> bool:
+        """Production catalyst check: regex classification via the news_history
+        table, auto-fetching from the Alpaca News API on a cache miss.
+        """
         result = False
         db_path = self._db_path or "data/cache.db"
         try:
@@ -1923,8 +1985,6 @@ class BacktestRunner:
             conn.close()
         except Exception as e:
             logger.warning(f"{symbol} {trade_date}: news lookup failed: {e}")
-
-        self._news_cache[cache_key] = result
         return result
 
     def _check_news_kill(self, symbol: str, bars: pd.DataFrame, setup,

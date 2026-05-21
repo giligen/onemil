@@ -319,6 +319,27 @@ class TestLLMNewsAnalyzer:
         call_kwargs = client.messages.create.call_args.kwargs
         assert call_kwargs['temperature'] == 0.0
 
+    def test_custom_system_prompt_is_used(self):
+        """A custom system_prompt is sent to the API instead of the default."""
+        client = self._make_mock_client('{"catalyst": false, "reason": "x"}')
+        analyzer = LLMNewsAnalyzer(client, system_prompt="CUSTOM RESEARCH PROMPT")
+
+        analyzer.is_interesting({'headline': 'h', 'summary': 's'}, symbol='SYM')
+
+        call_kwargs = client.messages.create.call_args.kwargs
+        assert call_kwargs['system'] == "CUSTOM RESEARCH PROMPT"
+
+    def test_default_system_prompt_is_production_prompt(self):
+        """No override → the production SYSTEM_PROMPT is used (parity guard)."""
+        from data_sources.news_provider import SYSTEM_PROMPT
+        client = self._make_mock_client('{"catalyst": false, "reason": "x"}')
+        analyzer = LLMNewsAnalyzer(client)
+
+        analyzer.is_interesting({'headline': 'h', 'summary': 's'}, symbol='SYM')
+
+        call_kwargs = client.messages.create.call_args.kwargs
+        assert call_kwargs['system'] == SYSTEM_PROMPT
+
     def test_unexpected_response_returns_false(self):
         """Non-JSON, non-TRUE response (e.g. 'MAYBE') => False (safe default)."""
         client = self._make_mock_client("MAYBE")
