@@ -55,8 +55,15 @@ def fmt(label, trades):
 
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser(description="News-classifier A/B analysis")
+    ap.add_argument('--cache', default=CACHE_CSV, help="Stage-1 cache CSV path")
+    ap.add_argument('--db', default=NEWS_AB_DB, help="news_ab.db path")
+    args = ap.parse_args()
+    cache_csv, news_ab_db = args.cache, args.db
+
     verdict, floats = {}, {}
-    c = sqlite3.connect(NEWS_AB_DB)
+    c = sqlite3.connect(news_ab_db)
     for s, d, rx, hk, hkr in c.execute(
             "SELECT symbol,trade_date,regex_catalyst,haiku_catalyst,"
             "haiku_revised_catalyst FROM news_ab"):
@@ -68,7 +75,7 @@ def main():
     cc.close()
 
     trades = []
-    with open(CACHE_CSV) as f:
+    with open(cache_csv) as f:
         for r in csv.DictReader(f):
             key = (r['symbol'], r['date'])
             if key not in verdict:
@@ -141,7 +148,7 @@ def main():
         'arm2_regex': set((t['symbol'], t['date']) for t in arms['regex']['kept']),
         'arm3_haiku': set((t['symbol'], t['date']) for t in arms['haiku']['kept']),
     }
-    with open(CACHE_CSV) as f:
+    with open(cache_csv) as f:
         rdr = csv.DictReader(f)
         hdr = rdr.fieldnames
         allrows = list(rdr)

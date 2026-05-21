@@ -48,18 +48,20 @@ def load_env() -> None:
                 os.environ.setdefault(k, v.strip())
 
 
-def get_keys() -> tuple:
+def get_keys(need_anthropic: bool = True) -> tuple:
     """Return (anthropic_key, alpaca_key, alpaca_secret) or exit fatally.
 
     CLAUDE.md: missing API keys must break execution loudly, never silently.
+    need_anthropic=False (regex-only mode) skips the ANTHROPIC_API_KEY check.
     """
     load_env()
     ak = os.environ.get('ANTHROPIC_API_KEY')
     alp_k = os.environ.get('ALPACA_API_KEY') or os.environ.get('APCA_API_KEY_ID')
     alp_s = os.environ.get('ALPACA_API_SECRET') or os.environ.get('APCA_API_SECRET_KEY')
-    missing = [n for n, v in [('ANTHROPIC_API_KEY', ak),
-                              ('ALPACA_API_KEY', alp_k),
-                              ('ALPACA_API_SECRET', alp_s)] if not v]
+    required = [('ALPACA_API_KEY', alp_k), ('ALPACA_API_SECRET', alp_s)]
+    if need_anthropic:
+        required.append(('ANTHROPIC_API_KEY', ak))
+    missing = [n for n, v in required if not v]
     if missing:
         sys.exit(f"FATAL: missing required API key(s): {', '.join(missing)}")
     return ak, alp_k, alp_s
@@ -116,9 +118,12 @@ def main() -> None:
     ap.add_argument('--reclassify', action='store_true',
                     help="re-run Haiku on cached articles (after a prompt change)")
     ap.add_argument('--cache', default=CACHE_CSV, help="Stage-1 cache CSV path")
+    ap.add_argument('--regex-only', action='store_true',
+                    help="classify with regex only — no Haiku calls (free, fast)")
+    ap.add_argument('--db', default=None, help="news_ab.db path override")
     args = ap.parse_args()
 
-    ak, alp_k, alp_s = get_keys()
+    ak, alp_k, alp_s = get_keys(need_anthropic=not args.regex_only)
 
     import anthropic
     from backtest import BacktestRunner
@@ -128,10 +133,12 @@ def main() -> None:
 
     real_cats = BacktestRunner._REAL_CATS
     regex_fn = BacktestRunner._classify_headline
-    client = anthropic.Anthropic(api_key=ak)
-    an_cur = LLMNewsAnalyzer(client)                                  # LIVE prompt
-    an_rev = LLMNewsAnalyzer(client, system_prompt=REVISED_SYSTEM_PROMPT)
-    store = NewsABStore()
+    an_cur = an_rev = None
+    if not args.regex_only:
+        client = anthropic.Anthropic(api_key=ak)
+        an_cur = LLMNewsAnalyzer(client)                              # LIVE prompt
+        an_rev = LLMNewsAnalyzer(client, system_prompt=REVISED_SYSTEM_PROMPT)
+    store = NewsABStore(args.db) if args.db else NewsABStore()
     floats = load_floats(UNIVERSE_DB)
 
     rows = load_cache_rows(args.cache)
@@ -161,13 +168,20 @@ def main() -> None:
 
         rx_cat, rx_category = regex_verdict(articles, regex_fn, real_cats)
 
-        an_cur._cache.clear()
-        an_rev._cache.clear()
-        h_cat, h_category, top_hl, n1 = classify_day_catalyst(
-            articles, sym, an_cur, real_cats, ctx)
-        hr_cat, hr_category, _, n2 = classify_day_catalyst(
-            articles, sym, an_rev, real_cats, ctx)
-        haiku_calls += n1 + n2
+        if args.regex_only:
+            # No Haiku — store regex verdict in the haiku columns too so the
+            # row is complete (this db is a throwaway for the news-kill test).
+            h_cat = hr_cat = rx_cat
+            h_category = hr_category = 'regex_only'
+            top_hl = (articles[0].get('headline') or '') if articles else ''
+        else:
+            an_cur._cache.clear()
+            an_rev._cache.clear()
+            h_cat, h_category, top_hl, n1 = classify_day_catalyst(
+                articles, sym, an_cur, real_cats, ctx)
+            hr_cat, hr_category, _, n2 = classify_day_catalyst(
+                articles, sym, an_rev, real_cats, ctx)
+            haiku_calls += n1 + n2
 
         store.upsert(sym, date, n_articles=len(articles),
                      regex_catalyst=rx_cat, haiku_catalyst=h_cat,
