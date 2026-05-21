@@ -300,6 +300,25 @@ class TestLLMNewsAnalyzer:
         summary_content = summary_line.split('Summary: ')[1]
         assert len(summary_content) == 200
 
+    def test_classifier_uses_temperature_zero(self):
+        """Classifier calls Haiku with temperature=0.0 for determinism.
+
+        Root-cause fix for the 2026-05-20 QUCY paper/live divergence: at
+        temp=1.0 the patent headline flipped catalyst True/False ~1-in-20
+        runs, so paper and live could disagree on the same article. temp=0
+        makes the classification deterministic — they always agree.
+        """
+        client = self._make_mock_client('{"catalyst": true, "reason": "test"}')
+        analyzer = LLMNewsAnalyzer(client, model="test-model")
+
+        analyzer.is_interesting(
+            {'headline': 'FDA Approves Drug', 'summary': 'Big pharma win'},
+            symbol='DRUG',
+        )
+
+        call_kwargs = client.messages.create.call_args.kwargs
+        assert call_kwargs['temperature'] == 0.0
+
     def test_unexpected_response_returns_false(self):
         """Non-JSON, non-TRUE response (e.g. 'MAYBE') => False (safe default)."""
         client = self._make_mock_client("MAYBE")

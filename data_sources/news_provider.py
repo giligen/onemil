@@ -74,6 +74,15 @@ SYSTEM_PROMPT = (
     "4. Multiple similar PRs from same company in short period = pump cadence = GARBAGE_RECAP"
 )
 
+# 2026-05-21: temperature=0 for the catalyst classifier — root-cause fix for the
+# 2026-05-20 QUCY paper/live divergence. At temp=1.0 the QUCY patent headline
+# classified as catalyst=True only 19/20 runs (5% flip-rate); live drew the
+# 1-in-20 tail, classified it OTHER, and NEWS-killed what paper traded for
+# +$9,299. The _exp_qucy_news.py determinism experiment confirmed temp=0.0 is
+# 20/20 stable. A classifier that gates trade/no-trade MUST be deterministic —
+# at temp=0 paper and live always agree, so the divergence class of bug is gone.
+CLASSIFIER_TEMPERATURE = 0.0
+
 
 class NewsAnalyzer:
     """
@@ -224,6 +233,7 @@ class LLMNewsAnalyzer(NewsAnalyzer):
                 response = self._client.messages.create(
                     model=self._model,
                     max_tokens=150,
+                    temperature=CLASSIFIER_TEMPERATURE,
                     system=SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": user_msg}],
                 )
