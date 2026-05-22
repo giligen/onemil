@@ -1044,3 +1044,80 @@ class TestHaltAwareFilter:
         # Cleanup
         db._cache_conn.execute("DELETE FROM news_cache WHERE symbol='HTCO_REPLAY'")
         db._cache_conn.commit()
+
+
+# =====================================================================
+# Entry time-of-day gate (added 2026-05-22)
+# =====================================================================
+# Forensic of 110 live MACD trades (4 weeks): entries <=09:45 ET ran
+# 31% WR / -$17K; entries >09:45 ET ran 11% WR / -$37K. cross_time_max_min
+# only bounds when the +10% threshold was hit, not when the entry fires.
+# This gate rejects entries past N minutes after 09:30 ET.
+from datetime import datetime as _dt
+try:
+    from zoneinfo import ZoneInfo as _ZI
+    _ET = _ZI('America/New_York')
+except Exception:  # pragma: no cover
+    _ET = timezone.utc
+
+
+class TestEntryTimeOfDayGate:
+
+    def test_config_default_is_15_min(self):
+        e = _make_engine()
+        assert e.last_entry_minutes_after_open == 15
+
+    def test_config_override(self):
+        cfg = {
+            'universe': {}, 'entry': {'last_entry_minutes_after_open': 30},
+            'macd': {}, 'sizing': {'position_size': 50000, 'max_concurrent': 3},
+            'risk': {'daily_loss_limit': -5000}, 'slippage': {}, 'waves': {},
+        }
+        e = _make_engine(config=cfg)
+        assert e.last_entry_minutes_after_open == 30
+
+    def test_minutes_since_open_arithmetic(self):
+        e = _make_engine()
+        assert e._minutes_since_open(_dt(2026, 5, 22, 9, 30, tzinfo=_ET)) == 0
+        assert e._minutes_since_open(_dt(2026, 5, 22, 9, 45, tzinfo=_ET)) == 15
+        assert e._minutes_since_open(_dt(2026, 5, 22, 10, 30, tzinfo=_ET)) == 60
+        # before the open → negative
+        assert e._minutes_since_open(_dt(2026, 5, 22, 9, 0, tzinfo=_ET)) == -30
+
+    def test_gate_open_inside_window(self):
+        e = _make_engine()  # default cutoff 15
+        # 09:30, 09:40, 09:45 → all within (<=15 min)
+        for h, m in [(9, 30), (9, 40), (9, 45)]:
+            assert e._is_past_entry_cutoff(
+                _dt(2026, 5, 22, h, m, tzinfo=_ET)) is False
+
+    def test_gate_closed_past_cutoff(self):
+        e = _make_engine()  # default cutoff 15
+        # 09:46, 10:00, 11:30 → all past the 15-min cutoff
+        for h, m in [(9, 46), (10, 0), (11, 30)]:
+            assert e._is_past_entry_cutoff(
+                _dt(2026, 5, 22, h, m, tzinfo=_ET)) is True
+
+    def test_gate_boundary_exactly_at_cutoff(self):
+        e = _make_engine()  # cutoff 15 → 09:45 is exactly 15 min, allowed (>)
+        assert e._is_past_entry_cutoff(
+            _dt(2026, 5, 22, 9, 45, tzinfo=_ET)) is False
+        assert e._is_past_entry_cutoff(
+            _dt(2026, 5, 22, 9, 46, tzinfo=_ET)) is True
+
+    def test_gate_disabled_when_zero(self):
+        cfg = {
+            'universe': {}, 'entry': {'last_entry_minutes_after_open': 0},
+            'macd': {}, 'sizing': {'position_size': 50000, 'max_concurrent': 3},
+            'risk': {'daily_loss_limit': -5000}, 'slippage': {}, 'waves': {},
+        }
+        e = _make_engine(config=cfg)
+        # Even at 14:00 ET, disabled gate never closes
+        assert e._is_past_entry_cutoff(
+            _dt(2026, 5, 22, 14, 0, tzinfo=_ET)) is False
+
+    def test_entry_cutoff_logged_flag_resets_daily(self):
+        e = _make_engine()
+        e._entry_cutoff_logged = True
+        e.reset_daily()
+        assert e._entry_cutoff_logged is False

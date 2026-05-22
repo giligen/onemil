@@ -106,6 +106,8 @@ class MACDWaveEngine:
         self._bar_event_queue: "_q.Queue" = _q.Queue(maxsize=1000)
         self._bar_handler_registered = False
         self._bar_queue_full_logged = False
+        # One-shot log flag for the entry time-of-day cutoff (reset daily).
+        self._entry_cutoff_logged = False
 
         # Universe filters
         uni = cfg.get('universe', {})
@@ -126,6 +128,15 @@ class MACDWaveEngine:
         self.max_waves = int(cfg.get('waves', {}).get('max_waves', 1))
         self.min_macd_hist_pct = float(entry.get('min_macd_hist_pct', 0.5))
         self.max_price_at_entry = float(entry.get('max_price_at_entry', 0))
+        # Entry time-of-day gate (added 2026-05-22). cross_time_max_min only
+        # bounds when the +10% threshold was first hit — NOT when the entry
+        # fires. Forensic of 110 live trades (4 wks): entries <=09:45 ET =
+        # 31% WR / -$17K; entries >09:45 ET = 11% WR / -$37K. Late-day MACD
+        # crosses on momentum stocks are noise. This gate rejects any entry
+        # whose actual decision time is > N minutes after 09:30 ET.
+        # 0 = disabled (legacy behaviour). Default 15 (= 09:45 cliff edge).
+        self.last_entry_minutes_after_open = int(
+            entry.get('last_entry_minutes_after_open', 15))
 
         # Spread gate — skip entries when bid-ask spread is too wide.
         # 0 = disabled. 100 = skip if spread > 100bps.
@@ -1243,6 +1254,19 @@ class MACDWaveEngine:
         now_et_outer = datetime.now(ET)
         mins_outer = max(30, int((now_et_outer - now_et_outer.replace(
             hour=9, minute=30, second=0)).total_seconds() / 60))
+        # True (un-floored) minutes since 09:30 ET — for the entry time-of-day
+        # gate. mins_outer is floored at 30 for bar lookback and cannot be
+        # reused here.
+        true_mins_since_open = self._minutes_since_open(now_et_outer)
+        past_entry_cutoff = self._is_past_entry_cutoff(now_et_outer)
+        if past_entry_cutoff and not self._entry_cutoff_logged:
+            logger.info(
+                f"[{self.STRATEGY_NAME}] entry window closed — "
+                f"{true_mins_since_open}min since open > "
+                f"{self.last_entry_minutes_after_open}min cutoff; "
+                f"no new entries (monitoring/exits unaffected)"
+            )
+            self._entry_cutoff_logged = True
         bars_by_sym: Dict[str, pd.DataFrame] = {}
         try:
             bars_by_sym = self.alpaca.get_1min_bars_multi(
@@ -1345,6 +1369,18 @@ class MACDWaveEngine:
                     continue
 
                 if self.max_price_at_entry > 0 and latest_price > self.max_price_at_entry:
+                    continue
+
+                # Entry time-of-day gate. cross_time_max_min bounds only when
+                # the +10% threshold was first hit, not when the entry fires —
+                # so without this, MACD-cross entries can submit hours after
+                # the open. Forensic: entries >09:45 ET ran 11% WR / -$37K.
+                if past_entry_cutoff:
+                    logger.debug(
+                        f"[{self.STRATEGY_NAME}] {sym}: entry skipped — "
+                        f"{true_mins_since_open}min since open > "
+                        f"{self.last_entry_minutes_after_open}min cutoff"
+                    )
                     continue
 
                 # Smart early entry: check L1 book at 1st and 2nd bar
@@ -2284,10 +2320,31 @@ class MACDWaveEngine:
         # Drain any stale bar events leftover from yesterday.
         self.drain_bar_events()
         self._bar_queue_full_logged = False
+        self._entry_cutoff_logged = False
 
     # ------------------------------------------------------------------
     # Time helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _minutes_since_open(now_et: datetime) -> int:
+        """Whole minutes elapsed since 09:30 ET on now_et's date.
+
+        Negative before the open. Pure function — no I/O.
+        """
+        open_et = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        return int((now_et - open_et).total_seconds() / 60)
+
+    def _is_past_entry_cutoff(self, now_et: datetime) -> bool:
+        """True when no new MACD-wave entry should be opened — the time-of-day
+        gate. Bounds entries to the opening window where the strategy has edge.
+
+        last_entry_minutes_after_open == 0 disables the gate (legacy behaviour).
+        """
+        if self.last_entry_minutes_after_open <= 0:
+            return False
+        return (self._minutes_since_open(now_et)
+                > self.last_entry_minutes_after_open)
 
     @staticmethod
     def is_market_open() -> bool:

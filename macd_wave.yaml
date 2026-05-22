@@ -15,7 +15,14 @@ universe:
 
 # Entry filters (applied at the +threshold% cross point)
 entry:
-  cross_time_max_min: 10    # Max minutes after open for MACD cross entry
+  cross_time_max_min: 10    # Max minutes after open for the +10% threshold
+                            # to be HIT (gates wave onset, NOT entry time).
+  # Entry time-of-day gate (added 2026-05-22). Reject any MACD-cross entry
+  # whose decision time is > N minutes after 09:30 ET. cross_time_max_min
+  # only bounds when +10% was first hit — entries could fire hours later.
+  # Forensic of 110 live trades: entries <=09:45 ET = 31% WR / -$17K;
+  # entries >09:45 ET = 11% WR / -$37K. 0 = disabled (legacy).
+  last_entry_minutes_after_open: 15
   min_vol_at_cross: 0       # 0 = disabled
   max_vol_at_cross: 300000  # Validated: >300K = crowded
   min_macd_hist_pct: 0.5    # Validated: MACD hist >= 0.5% of price
