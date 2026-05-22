@@ -2214,9 +2214,15 @@ class ORBEngine:
         # filled during the 13:34/13:37 UTC crash window, fill never reached
         # DB, sync_positions classified as orphan, FC ignored it because the
         # iterator above is engine-state-driven). Belt-and-suspenders: after
-        # the engine-state pass, query Alpaca for ANY remaining position on
-        # the ORB account and close it. This is the source-of-truth path —
-        # if it sees a position, it closes it, full stop.
+        # the engine-state pass, query Alpaca for ORB's remaining positions
+        # and close them.
+        #
+        # 2026-05-22: STRATEGY-SCOPED. ORB shares its Alpaca account with
+        # bull flag (and other projects on some nodes). The sweep MUST only
+        # close positions ORB owns (`orb_owned`) or it flattens another
+        # strategy's position — a divergence CLF short was one force-close
+        # away from being covered here.
+        orb_owned = self._orb_owned_symbols()
         try:
             alp_positions = self.alpaca.get_open_positions() or []
         except Exception as e:
@@ -2242,6 +2248,14 @@ class ORBEngine:
                 logger.info(
                     f"ORB FC SWEEP: {sym} close submitted in Phase 1 — "
                     f"awaiting fill via VERIFY (not a SWEEP orphan)"
+                )
+                continue
+            if sym not in orb_owned:
+                logger.warning(
+                    f"ORB FC SWEEP: {sym} is on the account but is NOT an "
+                    f"ORB position (no open ORB trade row) — leaving it "
+                    f"untouched. Shared account: {sym} belongs to another "
+                    f"strategy/project."
                 )
                 continue
             logger.warning(
@@ -2294,6 +2308,7 @@ class ORBEngine:
             still_open = self._verify_flat_with_grace(
                 max_wait_s=self.fc_verify_max_wait_s,
                 poll_interval_s=self.fc_verify_poll_interval_s,
+                orb_owned=orb_owned,
             )
             last_still_open = still_open
             if not still_open:
@@ -2671,11 +2686,13 @@ class ORBEngine:
             # hours. Inside RTH (9:30-16:00 ET) we keep alert-only behavior
             # because mid-day startup may be racing with an in-flight fill
             # that just hasn't reached the DB yet — closing it would kill a
-            # legitimate trade. Outside RTH, auto-close is unambiguously safe
-            # (no in-flight orders possible) and covers the OPRA-class case
-            # (4/28 force-close failed → carried overnight → 4/29 startup at
-            # 12:30 UTC = 8:30 ET premarket should auto-close before the
-            # market opens and the position drifts further).
+            # legitimate trade.
+            #
+            # 2026-05-22: STRATEGY-SCOPED. Only orphans ORB actually owns
+            # (an open ORB trade row in the last 5 days — covers a position
+            # carried past a day boundary by a failed force-close) are
+            # auto-closed. Other positions on this shared account belong to
+            # bull flag / other projects and stay alert-only.
             try:
                 from zoneinfo import ZoneInfo
                 et_now = datetime.now(ZoneInfo('America/New_York'))
@@ -2697,7 +2714,16 @@ class ORBEngine:
                     f"(et={et_now.strftime('%H:%M')}) — auto-closing now"
                 )
                 import time as _time_mod
+                orb_owned = self._orb_owned_symbols(lookback_days=4)
                 for sym in orphans:
+                    if sym not in orb_owned:
+                        logger.warning(
+                            f"ORB sync: orphan {sym} is NOT an ORB position "
+                            f"(no open ORB trade row in the last 5 days) — "
+                            f"alert-only, NOT auto-closing. Shared account: "
+                            f"{sym} belongs to another strategy/project."
+                        )
+                        continue
                     try:
                         self._cancel_symbol_open_orders(sym)
                         _time_mod.sleep(0.5)
@@ -2808,6 +2834,57 @@ class ORBEngine:
             logger.warning(f"ORB: FCFS check for {symbol} failed: {e}")
             return False
 
+    @staticmethod
+    def _position_symbol(p) -> Optional[str]:
+        """Extract the ticker from an Alpaca position object or dict."""
+        return (
+            getattr(p, 'symbol', None)
+            or (p.get('symbol') if isinstance(p, dict) else None)
+        )
+
+    def _orb_owned_symbols(self, lookback_days: int = 0) -> Set[str]:
+        """Symbols ORB currently has an OPEN trade row for (strategy='orb').
+
+        The authoritative "positions ORB owns" set. ORB shares its Alpaca
+        account with bull flag (and, on some nodes, other projects), so
+        every position-closing action — the force-close sweep, post-FC
+        verify, and orphan auto-close — MUST scope to this set or it will
+        flatten another strategy's position (2026-05-22: a divergence CLF
+        short was one force-close away from being covered by ORB's sweep).
+
+        Only OPEN ORB rows count (exit_price NULL, active order_status) —
+        a closed row does NOT, because the symbol may since have been
+        re-opened by another strategy on the shared account.
+
+        Args:
+            lookback_days: also scan open ORB rows from this many prior
+                calendar days (0 = today only). Covers a position carried
+                past a day boundary by a failed force-close.
+
+        Returns:
+            Set of symbols. Empty on DB error — the safe default: every
+            caller treats "not ORB-owned" as "do not close".
+        """
+        if not hasattr(self.db, 'get_open_trades'):
+            return set()
+        owned: Set[str] = set()
+        try:
+            today = datetime.now(timezone.utc).date()
+            for d in range(lookback_days + 1):
+                day = (today - timedelta(days=d)).isoformat()
+                for t in (self.db.get_open_trades(day, strategy=STRATEGY_NAME) or []):
+                    sym = t.get('symbol')
+                    if sym:
+                        owned.add(sym)
+        except Exception as e:
+            logger.error(
+                f"ORB: _orb_owned_symbols DB query failed: {e} — treating "
+                f"ALL Alpaca positions as non-ORB (close nothing). Manual "
+                f"review needed."
+            )
+            return set()
+        return owned
+
     def _has_buying_power(self, required_usd: float) -> bool:
         try:
             info = self.alpaca.get_account_info() if hasattr(self.alpaca, 'get_account_info') else None
@@ -2917,6 +2994,7 @@ class ORBEngine:
 
     def _verify_flat_with_grace(
         self, max_wait_s: int = 10, poll_interval_s: float = 1.0,
+        orb_owned: Optional[Set[str]] = None,
     ) -> List:
         """Poll Alpaca for open positions until flat or timeout.
 
@@ -2927,6 +3005,12 @@ class ORBEngine:
         Returns the list of remaining positions (empty list = flat). Polling
         stops as soon as Alpaca reports zero. Returns empty on transient
         query errors so the caller can decide whether to retry.
+
+        Args:
+            orb_owned: when provided, positions whose symbol is NOT in this
+                set are ignored — they belong to another strategy on a
+                shared account, are not ORB's to close, and must not trip
+                an FC-failure alert or a VERIFY re-close.
         """
         import time as _time
         deadline = _time.time() + max_wait_s
@@ -2938,6 +3022,11 @@ class ORBEngine:
                 logger.warning(f"FC VERIFY poll: Alpaca query failed: {e}")
                 _time.sleep(poll_interval_s)
                 continue
+            if orb_owned is not None:
+                last = [
+                    p for p in last
+                    if self._position_symbol(p) in orb_owned
+                ]
             if not last:
                 return []
             _time.sleep(poll_interval_s)

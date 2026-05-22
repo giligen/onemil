@@ -380,6 +380,8 @@ class TestForceCloseOrphanSweep:
         """
         # Engine state: empty (mirrors crash-induced state loss)
         assert engine.open_positions == {}
+        # OPRA was an ORB position — ORB submitted the buy, so a DB row exists.
+        engine._orb_owned_symbols = lambda *a, **k: {'OPRA'}
         # Alpaca shows the orphan on the FIRST query (sweep), then empty on
         # the SECOND query (post-FC verification).
         mock_alpaca.get_open_positions.side_effect = [
@@ -404,6 +406,7 @@ class TestForceCloseOrphanSweep:
         )
         # First sweep query: orphan only (TRACKED already closed by engine path)
         # Second query: post-verification, all gone
+        engine._orb_owned_symbols = lambda *a, **k: {'TRACKED', 'ORPHAN'}
         mock_alpaca.get_open_positions.side_effect = [
             [self._orphan_position(symbol='ORPHAN')],
             [],
@@ -430,6 +433,7 @@ class TestForceCloseOrphanSweep:
         Alert only fires AFTER all 3 retries fail — that's the contract.
         """
         # Always return the stuck orphan — no grace period or retry will clear it
+        engine._orb_owned_symbols = lambda *a, **k: {'STUCK'}
         mock_alpaca.get_open_positions.return_value = [
             self._orphan_position(symbol='STUCK')
         ]
@@ -483,6 +487,42 @@ class TestForceCloseOrphanSweep:
             'SWEEP' in str(c) for c in engine._notify_error.call_args_list
         ), "Sweep query failure was not alerted"
 
+    def test_non_orb_position_not_swept(self, engine, mock_alpaca):
+        """Regression (2026-05-22): a position ORB does NOT own (a divergence
+        CLF short on the shared account) must NOT be closed by the FC sweep.
+        An ORB-owned position in the same query is still swept.
+        """
+        engine._orb_owned_symbols = lambda *a, **k: {'OPRA'}  # ORB owns OPRA only
+        orb_pos = self._orphan_position(symbol='OPRA')
+        clf = self._orphan_position(symbol='CLF', qty=-3690, avg_entry=10.84, upl=6.0)
+        mock_alpaca.get_open_positions.side_effect = [
+            [orb_pos, clf],          # sweep sees both
+            [clf], [clf], [clf],     # verify polls: CLF lingers, correctly ignored
+        ]
+
+        engine.force_close_all()
+
+        closed = {c.args[0] for c in mock_alpaca.close_position.call_args_list}
+        assert 'OPRA' in closed, "ORB-owned OPRA must be swept"
+        assert 'CLF' not in closed, "Non-ORB CLF must NOT be closed by ORB"
+
+    def test_verify_ignores_non_orb_position(self, engine, mock_alpaca):
+        """Post-FC verify must not re-close — or raise FC FINAL FAILURE for —
+        a non-ORB position that legitimately remains on the shared account.
+        """
+        engine._orb_owned_symbols = lambda *a, **k: set()  # ORB owns nothing
+        engine._notify_error = MagicMock()
+        clf = self._orphan_position(symbol='CLF', qty=-3690)
+        mock_alpaca.get_open_positions.return_value = [clf]  # CLF always present
+
+        engine.force_close_all()
+
+        assert mock_alpaca.close_position.call_count == 0, "CLF must never be closed"
+        assert not any(
+            'FC FINAL FAILURE' in str(c)
+            for c in engine._notify_error.call_args_list
+        ), "Non-ORB CLF must not trip an FC-failure alert"
+
 
 # =========================================================================
 # Sync_positions — orphan auto-close at off-hours startup
@@ -518,7 +558,9 @@ class TestSyncPositionsOrphanAutoClose:
     def test_orphan_auto_closes_at_premarket(
         self, patched_orphan_engine, mock_alpaca, monkeypatch,
     ):
-        """Premarket startup (e.g. 8:30 ET) → orphan auto-closed."""
+        """Premarket startup (e.g. 8:30 ET) → ORB-owned orphan auto-closed."""
+        # OPRA is a genuine ORB position carried overnight — ORB owns it.
+        patched_orphan_engine._orb_owned_symbols = lambda *a, **k: {'OPRA'}
         from datetime import datetime as _dt
         from zoneinfo import ZoneInfo
         et_tz = ZoneInfo('America/New_York')
@@ -573,7 +615,9 @@ class TestSyncPositionsOrphanAutoClose:
     def test_orphan_auto_closes_post_close(
         self, patched_orphan_engine, mock_alpaca, monkeypatch,
     ):
-        """Post-close startup (17:00 ET) → orphan auto-closed."""
+        """Post-close startup (17:00 ET) → ORB-owned orphan auto-closed."""
+        # OPRA is a genuine ORB position carried overnight — ORB owns it.
+        patched_orphan_engine._orb_owned_symbols = lambda *a, **k: {'OPRA'}
         from datetime import datetime as _dt
         from zoneinfo import ZoneInfo
         et_tz = ZoneInfo('America/New_York')
@@ -593,6 +637,78 @@ class TestSyncPositionsOrphanAutoClose:
 
         patched_orphan_engine.sync_positions()
         mock_alpaca.close_position.assert_called_with('OPRA')
+
+    def test_non_orb_orphan_not_auto_closed(
+        self, patched_orphan_engine, mock_alpaca, monkeypatch,
+    ):
+        """Regression (2026-05-22): outside RTH, an orphan ORB does NOT own
+        (a divergence CLF short on the shared account) must stay alert-only —
+        never auto-closed. The CRITICAL orphan alert still fires.
+        """
+        # ORB owns nothing — the orphan belongs to another project.
+        patched_orphan_engine._orb_owned_symbols = lambda *a, **k: set()
+        patched_orphan_engine._notify_error = MagicMock()
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo
+        et_tz = ZoneInfo('America/New_York')
+        fake_now = _dt(2026, 4, 29, 17, 0, 0, tzinfo=et_tz)  # 5 PM ET = after-hours
+
+        import trading.orb_engine as orb_mod
+        real_dt = orb_mod.datetime
+        class MockDT:
+            @staticmethod
+            def now(tz=None):
+                if tz is not None:
+                    return fake_now.astimezone(tz)
+                return fake_now.replace(tzinfo=None)
+            def __getattr__(self, name):
+                return getattr(real_dt, name)
+        monkeypatch.setattr(orb_mod, 'datetime', MockDT())
+
+        patched_orphan_engine.sync_positions()
+
+        # Not closed...
+        mock_alpaca.close_position.assert_not_called()
+        # ...but the operator WAS alerted about the orphan.
+        assert any(
+            'ORPHAN' in str(c)
+            for c in patched_orphan_engine._notify_error.call_args_list
+        ), "Non-ORB orphan must still raise the CRITICAL orphan alert"
+
+
+# =========================================================================
+# _orb_owned_symbols — strategy-scoped position ownership
+# =========================================================================
+
+class TestOrbOwnedSymbols:
+    """The helper that decides which Alpaca positions ORB may close."""
+
+    def test_returns_open_orb_symbols(self, engine, mock_db):
+        mock_db.get_open_trades.return_value = [
+            {'symbol': 'AAA', 'strategy': 'orb'},
+            {'symbol': 'BBB', 'strategy': 'orb'},
+        ]
+        assert engine._orb_owned_symbols() == {'AAA', 'BBB'}
+
+    def test_queries_orb_strategy_only(self, engine, mock_db):
+        from unittest.mock import ANY
+        mock_db.get_open_trades.return_value = []
+        engine._orb_owned_symbols()
+        mock_db.get_open_trades.assert_called_with(ANY, strategy='orb')
+
+    def test_lookback_scans_today_plus_prior_days(self, engine, mock_db):
+        mock_db.get_open_trades.return_value = []
+        engine._orb_owned_symbols(lookback_days=4)
+        assert mock_db.get_open_trades.call_count == 5  # today + 4 prior
+
+    def test_lookback_zero_is_today_only(self, engine, mock_db):
+        mock_db.get_open_trades.return_value = []
+        engine._orb_owned_symbols(lookback_days=0)
+        assert mock_db.get_open_trades.call_count == 1
+
+    def test_empty_set_on_db_error(self, engine, mock_db):
+        mock_db.get_open_trades.side_effect = RuntimeError('db locked')
+        assert engine._orb_owned_symbols() == set()
 
 
 # =========================================================================

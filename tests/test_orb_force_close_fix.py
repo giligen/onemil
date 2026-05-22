@@ -159,6 +159,8 @@ class TestForceCloseBracketCancel:
         FINAL FAILURE alert at end-of-FC (Bug-3 fix: pre-fix fired 2-3
         alerts per failed FC; post-fix one summary at end)."""
         engine.open_positions['ANNA'] = _pos()
+        # ANNA is a real ORB position (engine-state tracked) — ORB owns it.
+        engine._orb_owned_symbols = lambda *a, **k: {'ANNA'}
         mock_alpaca.trading_client.get_orders.return_value = []
         # Speed: zero backoffs / verify waits so the FC runs in <100ms
         engine._FC_HELD_QTY_BACKOFFS_S = (0.0, 0.0, 0.0, 0.0)
@@ -391,6 +393,8 @@ class TestFCVerifyPendingSellWait:
         order_id), not the pre-fix _has_pending_sell(any sell)."""
         # Phase 1 submits close, succeeds (records in phase1_close_orders)
         engine.open_positions['ANNA'] = _pos()
+        # ANNA is a real ORB position (engine-state tracked) — ORB owns it.
+        engine._orb_owned_symbols = lambda *a, **k: {'ANNA'}
         mock_alpaca.trading_client.get_orders.return_value = []
         mock_alpaca.close_position.return_value = {'id': 'phase1-close-id'}
         # Speed
