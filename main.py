@@ -274,6 +274,9 @@ def _create_trading_engine(config, alpaca, db, notifier=None, stop_monitor=None,
         daily_loss_limit=config.daily_loss_limit,
         stop_trading_before_close_min=config.stop_trading_before_close_min,
         max_consecutive_losses=config.max_consecutive_losses,
+        # max_positions counts only bull-flag trades — ORB and MACD wave may
+        # share this Alpaca account but must not consume bull flag's slots.
+        strategy='bull_flag',
     )
     executor = OrderExecutor(alpaca_client=alpaca, db=db, order_stream=order_stream)
 

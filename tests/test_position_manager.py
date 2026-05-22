@@ -44,8 +44,12 @@ def manager(mock_alpaca, db):
     )
 
 
-def _save_open_trade(db, symbol, entry_price=4.40):
-    """Helper to save an open trade record to DB."""
+def _save_open_trade(db, symbol, entry_price=4.40, strategy='bull_flag'):
+    """Helper to save an open trade record to DB.
+
+    Args:
+        strategy: strategy tag for the row ('bull_flag', 'orb', 'macd_wave').
+    """
     from datetime import timezone
     now = datetime.now(timezone.utc)
     db.save_trade({
@@ -69,6 +73,7 @@ def _save_open_trade(db, symbol, entry_price=4.40):
         'pnl': None,
         'pnl_pct': None,
         'pattern_data': '{}',
+        'strategy': strategy,
         'created_at': now,
         'updated_at': now,
     })
@@ -506,3 +511,114 @@ class TestDayRollover:
         for _ in range(10):
             manager._check_day_rollover()
         assert "AAPL" in manager._traded_symbols
+
+
+def _mock_now(hour, minute):
+    """Mock datetime.now() return value at a given ET wall-clock time."""
+    m = MagicMock()
+    m.hour = hour
+    m.minute = minute
+    return m
+
+
+class TestStrategyScopedPositionCap:
+    """The max_positions cap must count only the manager's own strategy.
+
+    Regression guard for the 2026-05-22 incident: on the prod node ORB and
+    bull flag share one Alpaca account. ORB filled 3 positions at 09:35 and
+    the bull flag position manager — which counted every strategy's open
+    trades — hit 'Max positions (3) reached' and blocked bull flag for the
+    whole trading day.
+    """
+
+    @pytest.fixture
+    def bf_manager(self, mock_alpaca, db):
+        """PositionManager scoped to the bull_flag strategy, cap 3."""
+        return PositionManager(
+            alpaca_client=mock_alpaca,
+            db=db,
+            max_positions=3,
+            daily_loss_limit=-100.0,
+            stop_trading_before_close_min=15,
+            strategy='bull_flag',
+        )
+
+    @patch('trading.position_manager.datetime')
+    def test_other_strategy_positions_do_not_consume_cap(self, mock_dt, bf_manager, db):
+        """3 ORB positions must NOT block a bull flag entry — the prod bug."""
+        mock_dt.now.return_value = _mock_now(hour=10, minute=30)
+
+        _save_open_trade(db, "YANG", strategy='orb')
+        _save_open_trade(db, "FLO", strategy='orb')
+        _save_open_trade(db, "MGNX", strategy='orb')
+
+        # Bull flag holds 0 of its own positions → entry must be allowed.
+        assert bf_manager.can_open_position("QBTX") is True
+
+    @patch('trading.position_manager.datetime')
+    def test_own_strategy_positions_consume_cap(self, mock_dt, bf_manager, db):
+        """3 bull flag positions DO block a 4th bull flag entry."""
+        mock_dt.now.return_value = _mock_now(hour=10, minute=30)
+
+        _save_open_trade(db, "AAA", strategy='bull_flag')
+        _save_open_trade(db, "BBB", strategy='bull_flag')
+        _save_open_trade(db, "CCC", strategy='bull_flag')
+
+        assert bf_manager.can_open_position("DDD") is False
+
+    @patch('trading.position_manager.datetime')
+    def test_mixed_strategies_count_only_own(self, mock_dt, bf_manager, db):
+        """2 BF + 5 ORB open: bull flag (cap 3) still has a free slot."""
+        mock_dt.now.return_value = _mock_now(hour=10, minute=30)
+
+        _save_open_trade(db, "BF1", strategy='bull_flag')
+        _save_open_trade(db, "BF2", strategy='bull_flag')
+        for sym in ("O1", "O2", "O3", "O4", "O5"):
+            _save_open_trade(db, sym, strategy='orb')
+
+        assert bf_manager.can_open_position("BF3") is True
+
+    @patch('trading.position_manager.datetime')
+    def test_duplicate_symbol_blocked_across_strategies(self, mock_dt, bf_manager, db):
+        """A symbol ORB already holds must NOT be re-entered by bull flag:
+        the broker nets both orders into one position. The duplicate-symbol
+        guard stays cross-strategy even though the cap is per-strategy."""
+        mock_dt.now.return_value = _mock_now(hour=10, minute=30)
+
+        _save_open_trade(db, "FLO", strategy='orb')
+
+        assert bf_manager.can_open_position("FLO") is False
+
+    @patch('trading.position_manager.datetime')
+    def test_unscoped_manager_still_counts_all(self, mock_dt, mock_alpaca, db):
+        """strategy=None (legacy) keeps counting every strategy's positions."""
+        mock_dt.now.return_value = _mock_now(hour=10, minute=30)
+
+        legacy = PositionManager(
+            alpaca_client=mock_alpaca, db=db, max_positions=3,
+            daily_loss_limit=-100.0, stop_trading_before_close_min=15,
+        )
+        _save_open_trade(db, "X1", strategy='orb')
+        _save_open_trade(db, "X2", strategy='macd_wave')
+        _save_open_trade(db, "X3", strategy='bull_flag')
+
+        assert legacy.can_open_position("X4") is False
+
+    def test_get_open_position_count_is_strategy_scoped(self, bf_manager, db):
+        """get_open_position_count() reports only the manager's own strategy."""
+        _save_open_trade(db, "BF1", strategy='bull_flag')
+        _save_open_trade(db, "O1", strategy='orb')
+        _save_open_trade(db, "O2", strategy='orb')
+
+        assert bf_manager.get_open_position_count() == 1
+
+    def test_unknown_strategy_is_rejected(self, mock_alpaca, db):
+        """A misspelled strategy tag must fail loudly at construction — a
+        silently-zero count would disable the position cap on a live account."""
+        with pytest.raises(ValueError, match="unrecognized strategy"):
+            PositionManager(
+                alpaca_client=mock_alpaca,
+                db=db,
+                max_positions=3,
+                strategy='bullflag',  # typo — missing underscore
+            )

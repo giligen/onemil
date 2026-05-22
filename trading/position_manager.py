@@ -2,7 +2,7 @@
 Position manager for tracking open positions and enforcing risk limits.
 
 Enforces:
-- Max 3 concurrent positions
+- Max concurrent positions (per-strategy when a strategy tag is set)
 - Daily loss limit (-$100)
 - No duplicate symbols
 - No new positions within 15 min of market close
@@ -22,6 +22,12 @@ from persistence.database import Database
 logger = logging.getLogger(__name__)
 
 ET = pytz.timezone('US/Eastern')
+
+# Strategy tags that may own rows in the DB `trades.strategy` column. Used to
+# validate the `strategy` constructor arg: a typo there would make the
+# per-strategy position cap silently count zero open trades — i.e. never fire —
+# so an unrecognized value is a hard error, not a quiet fallback.
+KNOWN_STRATEGIES = ('bull_flag', 'macd_wave', 'orb')
 
 
 class PositionManager:
@@ -49,6 +55,7 @@ class PositionManager:
         stop_trading_before_close_min: int = 15,
         skip_midday: bool = True,
         max_consecutive_losses: int = 2,
+        strategy: Optional[str] = None,
     ):
         """
         Initialize PositionManager.
@@ -62,7 +69,20 @@ class PositionManager:
             skip_midday: Skip 11:30-14:00 ET entries (backtest-proven dead zone)
             max_consecutive_losses: Stop trading for the day after N consecutive
                 losses. Reduces worst-day drawdown by 40% at 8% P&L cost.
+            strategy: Strategy tag this manager governs (e.g. 'bull_flag').
+                When set, the max_positions cap counts ONLY this strategy's
+                open trades, so strategies sharing one Alpaca account don't
+                consume each other's slots. None counts all strategies (legacy).
+
+        Raises:
+            ValueError: if ``strategy`` is not None and not a recognized tag.
         """
+        if strategy is not None and strategy not in KNOWN_STRATEGIES:
+            raise ValueError(
+                f"PositionManager: unrecognized strategy {strategy!r}. The "
+                f"per-strategy position cap would silently never fire. "
+                f"Expected one of {KNOWN_STRATEGIES} or None."
+            )
         self.alpaca = alpaca_client
         self.db = db
         self.max_positions = max_positions
@@ -70,6 +90,7 @@ class PositionManager:
         self.stop_trading_before_close_min = stop_trading_before_close_min
         self.skip_midday = skip_midday
         self.max_consecutive_losses = max_consecutive_losses
+        self.strategy = strategy
         self._traded_symbols: Set[str] = set()
         self._consecutive_losses: int = 0
         self._stopped_for_day: bool = False
@@ -166,19 +187,28 @@ class PositionManager:
             logger.debug(f"{symbol}: Already traded today, skipping")
             return False
 
-        # Check open positions from DB
+        # Check open positions from DB.
         today = date.today().isoformat()
-        open_trades = self.db.get_open_trades(today)
-        open_symbols = {t['symbol'] for t in open_trades}
 
-        if symbol in open_symbols:
-            logger.debug(f"{symbol}: Already has open position, skipping")
+        # Duplicate-symbol guard — CROSS-STRATEGY on purpose: two engines must
+        # never both hold the same symbol on one Alpaca account. The broker
+        # nets same-symbol orders into a single position, and the strategies'
+        # StopMonitors would then fight over that one position.
+        all_open_trades = self.db.get_open_trades(today)
+        if symbol in {t['symbol'] for t in all_open_trades}:
+            logger.debug(f"{symbol}: Already has an open position (any strategy), skipping")
             return False
 
-        if len(open_trades) >= self.max_positions:
+        # Max-concurrent cap — PER-STRATEGY: max_positions governs only this
+        # manager's own strategy. On a shared Alpaca account, counting other
+        # strategies' positions here would let one strategy (e.g. ORB filling
+        # its slots at the open) lock this one out for the whole day.
+        strategy_open_trades = self.db.get_open_trades(today, strategy=self.strategy)
+        if len(strategy_open_trades) >= self.max_positions:
             logger.warning(
-                f"{symbol}: Max positions ({self.max_positions}) reached, "
-                f"open: {[t['symbol'] for t in open_trades]}"
+                f"{symbol}: Max positions ({self.max_positions}) reached for "
+                f"strategy={self.strategy or 'all'}, "
+                f"open: {[t['symbol'] for t in strategy_open_trades]}"
             )
             return False
 
@@ -219,9 +249,13 @@ class PositionManager:
             return []
 
     def get_open_position_count(self) -> int:
-        """Get count of open trades for today from the database."""
+        """Get count of this strategy's open trades for today from the database.
+
+        Scoped to this manager's ``strategy`` when one is set; counts all
+        strategies when ``strategy`` is None (legacy behavior).
+        """
         today = date.today().isoformat()
-        return len(self.db.get_open_trades(today))
+        return len(self.db.get_open_trades(today, strategy=self.strategy))
 
     def reset_daily(self) -> None:
         """Reset daily state (called at start of each trading day)."""
