@@ -132,8 +132,6 @@ class TestStrategyFiltering:
         a = _mk_alpaca()
         a.get_open_positions.return_value = [{'symbol': 'CORD'}]
         db = _mk_db()
-        # No get_trade_by_symbol method → falls to the 5-day lookback
-        del db.get_trade_by_symbol
         db.get_trades_by_date.return_value = [
             {'symbol': 'CORD', 'strategy': 'orb'},
         ]
@@ -150,7 +148,6 @@ class TestStrategyFiltering:
         a.get_open_positions.return_value = [{'symbol': 'XYZ'}]
         a.trading_client.get_orders.return_value = []  # no orders to cancel
         db = _mk_db()
-        del db.get_trade_by_symbol
         db.get_trades_by_date.return_value = [
             {'symbol': 'XYZ', 'strategy': 'bull_flag'},
         ]
@@ -166,7 +163,6 @@ class TestStrategyFiltering:
         a.get_open_positions.return_value = [{'symbol': 'OLD'}]
         a.trading_client.get_orders.return_value = []
         db = _mk_db()
-        del db.get_trade_by_symbol
         db.get_trades_by_date.return_value = [
             {'symbol': 'OLD'},   # no 'strategy' key
         ]
@@ -188,7 +184,6 @@ class TestCloseOrphanWithBracketLegs:
             _mk_order('tp-1', 'SELL', 'LIMIT', 100),
         ]
         db = _mk_db()
-        del db.get_trade_by_symbol
         db.get_trades_by_date.return_value = [
             {'symbol': 'XYZ', 'strategy': 'bull_flag'}
         ]

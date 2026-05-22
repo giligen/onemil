@@ -12,7 +12,7 @@ Enforces:
 
 import logging
 from datetime import datetime, date
-from typing import Set, List, Dict, Any, Optional
+from typing import Set, Optional
 
 import pytz
 
@@ -232,21 +232,6 @@ class PositionManager:
         """
         self._traded_symbols.add(symbol)
         logger.debug(f"{symbol}: Marked as traded today")
-
-    def get_open_positions(self) -> List[Dict[str, Any]]:
-        """
-        Get current open positions from Alpaca.
-
-        Returns:
-            List of position dicts from Alpaca
-        """
-        try:
-            positions = self.alpaca.get_open_positions()
-            logger.debug(f"Open positions: {len(positions)}")
-            return positions
-        except Exception as e:
-            logger.error(f"Failed to get open positions: {e}")
-            return []
 
     def get_open_position_count(self) -> int:
         """Get count of this strategy's open trades for today from the database.

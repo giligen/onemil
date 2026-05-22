@@ -4393,9 +4393,9 @@ class TradingEngine:
             # positions as ours. Pre-fix, BF orphan-cleanup tried to close
             # today's ORB CORD/LMRI/PURR/WAY positions, which (separately)
             # also failed on held_for_orders from ORB's own bracket legs.
-            our_trade = self.db.get_trade_by_symbol(symbol) if self.db and hasattr(self.db, 'get_trade_by_symbol') else None
-            if our_trade is None and self.db:
-                # Fallback: check all recent trades, BF-only.
+            our_trade = None
+            if self.db:
+                # Scan today + the last 4 days of trades, bull_flag only.
                 from datetime import timedelta
                 for days_back in range(5):
                     _check_date = (date.today() - timedelta(days=days_back)).isoformat()

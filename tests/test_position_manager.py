@@ -216,25 +216,6 @@ class TestResetDaily:
         assert len(manager._traded_symbols) == 0
 
 
-class TestGetOpenPositions:
-    """Tests for getting open positions from Alpaca."""
-
-    def test_returns_positions(self, manager, mock_alpaca):
-        """Returns positions from Alpaca."""
-        mock_alpaca.get_open_positions.return_value = [
-            {'symbol': 'AAPL', 'qty': 100},
-        ]
-        positions = manager.get_open_positions()
-        assert len(positions) == 1
-        assert positions[0]['symbol'] == 'AAPL'
-
-    def test_handles_api_error(self, manager, mock_alpaca):
-        """Returns empty list on API error."""
-        mock_alpaca.get_open_positions.side_effect = Exception("API down")
-        positions = manager.get_open_positions()
-        assert positions == []
-
-
 class TestMiddayFilter:
     """Tests for midday dead zone filter (11:30-14:00 ET)."""
 
