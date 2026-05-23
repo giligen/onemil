@@ -21,6 +21,11 @@ import pytz
 from dateutil.parser import isoparse
 
 from trading.macd_conviction import compute_conviction_score
+from trading.macd_cross_detector import (
+    compute_macd_histogram,
+    count_consecutive_positive_ending_at,
+    find_wave_onset,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1318,15 +1323,16 @@ class MACDWaveEngine:
                     )
                     continue
 
-                # Compute MACD
+                # Compute MACD via shared detector module — same logic as
+                # macd_wave_backtest.py uses; parity by construction.
                 close = bars['close']
-                ema_fast = close.ewm(span=self.macd_fast, adjust=False).mean()
-                ema_slow = close.ewm(span=self.macd_slow, adjust=False).mean()
-                macd_line = ema_fast - ema_slow
-                signal_line = macd_line.ewm(span=self.macd_signal, adjust=False).mean()
-                histogram = macd_line - signal_line
+                histogram = compute_macd_histogram(
+                    close, self.macd_fast, self.macd_slow, self.macd_signal,
+                )
 
-                # Count consecutive positive histogram bars from the end
+                # Count consecutive positive histogram bars ending at the
+                # latest bar (live's "is now confirmed?" semantic). Replaces
+                # the inline reverse-iteration loop with the shared helper.
                 latest_price = close.iloc[-1]
                 latest_hist = histogram.iloc[-1]
                 hist_pct = latest_hist / latest_price * 100 if latest_price > 0 else 0
@@ -1344,12 +1350,9 @@ class MACDWaveEngine:
                     bar_close_at = None
                     bar_close_price = None
 
-                consecutive_pos = 0
-                for h in reversed(histogram.values):
-                    if h > 0:
-                        consecutive_pos += 1
-                    else:
-                        break
+                consecutive_pos = count_consecutive_positive_ending_at(
+                    histogram, len(histogram) - 1,
+                )
                 crossed.pos_count = consecutive_pos
 
                 logger.info(
@@ -2058,9 +2061,10 @@ class MACDWaveEngine:
                     continue
 
                 close = bars['close']
-                ema_fast = close.ewm(span=self.macd_fast, adjust=False).mean()
-                ema_slow = close.ewm(span=self.macd_slow, adjust=False).mean()
-                histogram = (ema_fast - ema_slow) - (ema_fast - ema_slow).ewm(span=self.macd_signal, adjust=False).mean()
+                # MACD via shared detector — same logic the BT uses.
+                histogram = compute_macd_histogram(
+                    close, self.macd_fast, self.macd_slow, self.macd_signal,
+                )
 
                 if histogram.iloc[-1] <= 0:
                     # MACD flipped — remove from StopMonitor FIRST, then exit.

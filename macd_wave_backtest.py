@@ -66,6 +66,10 @@ def load_config(path: str = CONFIG_PATH) -> dict:
 # thresholds. Both backtest and `trading/macd_wave_engine.py` import from it.
 
 from trading.macd_conviction import compute_conviction_score  # noqa: E402
+from trading.macd_cross_detector import (  # noqa: E402
+    compute_macd_histogram,
+    find_wave_onset,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -427,35 +431,25 @@ def generate_signals(
         if bars.empty:
             return []
 
-    op = bars.iloc[0]['open']
-    if op <= 0:
+    # Wave onset via the shared detector — same threshold-cross logic as
+    # trading/macd_wave_engine.py. Parity by construction.
+    onset = find_wave_onset(bars, intraday_pct)
+    if onset is None or onset.bar_index + 10 >= len(bars):
         return []
-
-    # Find +threshold% cross
-    threshold = op * (1 + intraday_pct / 100)
-    si = None
-    for i in range(len(bars)):
-        if bars.iloc[i]['high'] >= threshold:
-            si = i
-            break
-    if si is None or si + 10 >= len(bars):
-        return []
-
-    cross_time_min = si + 1
-    vol_at_cross = int(bars.iloc[:si + 1]['volume'].sum())
+    si = onset.bar_index
+    cross_time_min = onset.bar_close_minute
+    vol_at_cross = onset.cumulative_volume
 
     # NOTE: cross_time and vol_at_cross filters are applied at ENTRY time
     # (inside the MACD loop below), NOT here. Early rejection here was a bug
     # that skipped stocks before MACD was even evaluated — lost 50 trades
     # and $73K of P&L vs the original validated results.
 
-    # Compute MACD
-    close = bars['close']
-    ema_fast = close.ewm(span=macd_fast, adjust=False).mean()
-    ema_slow = close.ewm(span=macd_slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=macd_signal, adjust=False).mean()
-    histogram = macd_line - signal_line
+    # MACD histogram via the shared detector — same EMA computation as
+    # trading/macd_wave_engine.py. Parity by construction.
+    histogram = compute_macd_histogram(
+        bars['close'], macd_fast, macd_slow, macd_signal,
+    )
 
     # Generate wave signals
     signals = []
