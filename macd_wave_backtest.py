@@ -364,8 +364,16 @@ def generate_signals(
         hard_stop_pct = entry_filters['hard_stop_override']
     entry_slippage = entry_filters.get('entry_pct', 0.005)
     exit_slippage = entry_filters.get('exit_pct', 0.002)
-    # Conviction-based sizing (opt-in; default off to preserve legacy behavior)
-    conviction_sizing_enabled = bool(entry_filters.get('conviction_sizing', False))
+    # Phase 2a: per-symbol min-cents floor for slippage (live parity).
+    entry_min_cents = entry_filters.get('entry_min_cents',
+                                          DEFAULT_ENTRY_MIN_CENTS)
+    exit_min_cents = entry_filters.get('exit_min_cents',
+                                          DEFAULT_EXIT_MIN_CENTS)
+    # Conviction-based sizing is applied in filter_signals (post-cache), NOT
+    # here. Reasoning: the cache is a single source of "raw outcomes" — sizing
+    # decisions are filter-time concerns so the same cache file serves both
+    # conviction-on and conviction-off runs without double-scaling. (Phase 1d.)
+    conviction_sizing_enabled = False  # cache stores raw shares — never scaled at build time
 
     # Entry filter values
     cross_time_max = entry_filters.get('cross_time_max_min', 0)
@@ -584,7 +592,9 @@ def generate_signals(
                         continue
                 # --- End new indicator filters ---
 
-                entry_price = raw_price * (1 + entry_slippage)
+                raw_entry_price = raw_price
+                entry_price = apply_entry_slippage(
+                    raw_entry_price, entry_slippage, entry_min_cents)
                 entry_time = bar_ts
                 entry_idx = i
                 entry_hist_pct = hist_pct
@@ -606,8 +616,9 @@ def generate_signals(
             # Force close at 15:45 ET (matches production)
             # Bar index 0 = 9:30 ET, so index 375 = 15:45 ET
             if i >= 375:
-                raw_exit = bars.iloc[i]['close']
-                exit_price = raw_exit * (1 - exit_slippage)
+                raw_exit_price = float(bars.iloc[i]['close'])
+                exit_price = apply_exit_slippage(
+                    raw_exit_price, exit_slippage, exit_min_cents)
                 wave += 1
                 pnl_pct = (exit_price - entry_price) / entry_price * 100
                 shares = entry_shares
@@ -618,6 +629,7 @@ def generate_signals(
                 if not is_paper:
                     signals.append({
                         'wave': wave, 'entry_price': entry_price, 'exit_price': exit_price,
+                        'raw_entry_price': raw_entry_price, 'raw_exit_price': raw_exit_price,
                         'shares': shares, 'pnl_pct': pnl_dollar / (entry_price * shares) * 100 if shares > 0 else pnl_pct,
                         'pnl_dollar': pnl_dollar,
                         'entry_time': entry_time, 'exit_time': bar_ts,
@@ -642,7 +654,8 @@ def generate_signals(
                 if bar_high >= partial_target:
                     total_shares = entry_shares
                     partial_shares_sold = int(total_shares * partial_fraction)
-                    partial_exit_price = partial_target * (1 - exit_slippage)
+                    partial_exit_price = apply_exit_slippage(
+                        partial_target, exit_slippage, exit_min_cents)
                     partial_pnl_dollar = (partial_exit_price - entry_price) * partial_shares_sold
                     partial_taken = True
 
@@ -650,7 +663,9 @@ def generate_signals(
             bar_low = bars.iloc[i]['low']
             hard_stop_price = entry_price * (1 - hard_stop_pct)
             if bar_low <= hard_stop_price:
-                exit_price = hard_stop_price * (1 - exit_slippage)
+                raw_exit_price = float(hard_stop_price)
+                exit_price = apply_exit_slippage(
+                    raw_exit_price, exit_slippage, exit_min_cents)
                 wave += 1
                 pnl_pct = (exit_price - entry_price) / entry_price * 100
                 shares = entry_shares
@@ -669,6 +684,7 @@ def generate_signals(
                 pnl_dollar = (exit_price - entry_price) * remaining_shares + partial_pnl_dollar
                 signals.append({
                     'wave': wave, 'entry_price': entry_price, 'exit_price': exit_price,
+                    'raw_entry_price': raw_entry_price, 'raw_exit_price': raw_exit_price,
                     'shares': shares,
                     'pnl_pct': pnl_dollar / (entry_price * shares) * 100 if shares > 0 else pnl_pct,
                     'pnl_dollar': pnl_dollar,
@@ -691,7 +707,9 @@ def generate_signals(
             if trail_stop_pct > 0 and trail_active:
                 trail_stop_price = highest_since_entry * (1 - trail_stop_pct)
                 if bar_low <= trail_stop_price:
-                    exit_price = trail_stop_price * (1 - exit_slippage)
+                    raw_exit_price = float(trail_stop_price)
+                    exit_price = apply_exit_slippage(
+                        raw_exit_price, exit_slippage, exit_min_cents)
                     wave += 1
                     pnl_pct = (exit_price - entry_price) / entry_price * 100
                     shares = entry_shares
@@ -709,6 +727,7 @@ def generate_signals(
                     pnl_dollar = (exit_price - entry_price) * remaining_shares + partial_pnl_dollar
                     signals.append({
                         'wave': wave, 'entry_price': entry_price, 'exit_price': exit_price,
+                        'raw_entry_price': raw_entry_price, 'raw_exit_price': raw_exit_price,
                         'shares': shares,
                         'pnl_pct': pnl_dollar / (entry_price * shares) * 100 if shares > 0 else pnl_pct,
                         'pnl_dollar': pnl_dollar,
@@ -725,8 +744,9 @@ def generate_signals(
 
             # Check MACD flip
             if h <= 0:
-                raw_exit = bars.iloc[i]['close']
-                exit_price = raw_exit * (1 - exit_slippage)
+                raw_exit_price = float(bars.iloc[i]['close'])
+                exit_price = apply_exit_slippage(
+                    raw_exit_price, exit_slippage, exit_min_cents)
                 wave += 1
                 pnl_pct = (exit_price - entry_price) / entry_price * 100
                 shares = entry_shares
@@ -744,6 +764,7 @@ def generate_signals(
                 pnl_dollar = (exit_price - entry_price) * remaining_shares + partial_pnl_dollar
                 signals.append({
                     'wave': wave, 'entry_price': entry_price, 'exit_price': exit_price,
+                    'raw_entry_price': raw_entry_price, 'raw_exit_price': raw_exit_price,
                     'shares': shares,
                     'pnl_pct': pnl_dollar / (entry_price * shares) * 100 if shares > 0 else pnl_pct,
                     'pnl_dollar': pnl_dollar,
@@ -759,8 +780,9 @@ def generate_signals(
 
     # Close open trade at EOD
     if in_trade:
-        raw_exit = bars.iloc[-1]['close']
-        exit_price = raw_exit * (1 - exit_slippage)
+        raw_exit_price = float(bars.iloc[-1]['close'])
+        exit_price = apply_exit_slippage(
+            raw_exit_price, exit_slippage, exit_min_cents)
         wave += 1
         pnl_pct = (exit_price - entry_price) / entry_price * 100
         shares = entry_shares
@@ -773,6 +795,7 @@ def generate_signals(
             else:
                 signals.append({
                     'wave': wave, 'entry_price': entry_price, 'exit_price': exit_price,
+                    'raw_entry_price': raw_entry_price, 'raw_exit_price': raw_exit_price,
                     'shares': shares, 'pnl_pct': pnl_pct,
                     'pnl_dollar': (exit_price - entry_price) * shares,
                     'entry_time': entry_time, 'exit_time': str(bars.iloc[-1]['ts']),
@@ -1011,7 +1034,44 @@ SIGNAL_CACHE_FIELDS = [
     'symbol', 'date', 'wave', 'entry_price', 'exit_price', 'shares',
     'pnl_pct', 'pnl_dollar', 'entry_time', 'exit_time', 'exit_reason',
     'cross_time_min', 'vol_at_cross', 'macd_hist_pct', 'w1_pnl', 'paper',
+    # Phase 2b: raw (pre-slippage) reference prices. Stored so that
+    # filter_signals can re-apply slippage with current runtime params
+    # without rebuilding the cache. Backwards-compatible: rows from old
+    # cache builds will have these empty; filter_signals falls back to
+    # the baked entry_price / exit_price in that case.
+    'raw_entry_price', 'raw_exit_price',
 ]
+
+
+# Phase 2a: per-symbol slippage model with min-cents floor.
+# Live execution: entry at ask + ~30bps via smart-limit; exit at bid -
+# max(3¢, 50bps) via StopMonitor.compute_limit_price. On a $5 stock, 3¢
+# = 60 bps — the flat 50bps model under-states exit cost.
+# Default min-cents = 0.03 matches StopMonitor.compute_limit_price's fixed
+# offset; can be tuned per slippage section in macd_wave.yaml.
+DEFAULT_ENTRY_MIN_CENTS = 0.03
+DEFAULT_EXIT_MIN_CENTS = 0.03
+
+
+def apply_entry_slippage(raw_price: float, pct: float,
+                          min_cents: float = DEFAULT_ENTRY_MIN_CENTS) -> float:
+    """Entry: pay above the raw reference price by max(pct of price, $min)."""
+    if raw_price <= 0:
+        return raw_price
+    slip = max(raw_price * pct, min_cents)
+    return raw_price + slip
+
+
+def apply_exit_slippage(raw_price: float, pct: float,
+                         min_cents: float = DEFAULT_EXIT_MIN_CENTS) -> float:
+    """Exit: receive below the raw reference price by max(pct of price, $min).
+
+    Floored at $0.01 to never invert into negative.
+    """
+    if raw_price <= 0:
+        return raw_price
+    slip = max(raw_price * pct, min_cents)
+    return max(raw_price - slip, 0.01)
 
 
 def save_signal_cache(signals: List[dict], cache_path: str,
@@ -1100,6 +1160,22 @@ def filter_signals(signals: List[dict], entry_filters: dict) -> List[dict]:
     max_price_entry = entry_filters.get('max_price_at_entry', 0)
     last_entry_min = entry_filters.get('last_entry_minutes_after_open', 0)
     conviction_sizing = bool(entry_filters.get('conviction_sizing', False))
+    # Phase 2b: re-apply slippage on cached signals using current runtime
+    # params. Requires raw_entry_price/raw_exit_price in the cache row.
+    # Rows without raw_* (old cache) fall back to the baked entry/exit_price.
+    recompute_slippage = bool(entry_filters.get('recompute_slippage', True))
+    entry_slip_pct = entry_filters.get('entry_pct', 0.005)
+    exit_slip_pct = entry_filters.get('exit_pct', 0.002)
+    entry_min_cents = entry_filters.get('entry_min_cents',
+                                          DEFAULT_ENTRY_MIN_CENTS)
+    exit_min_cents = entry_filters.get('exit_min_cents',
+                                         DEFAULT_EXIT_MIN_CENTS)
+
+    def _as_float(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
 
     def _entry_minutes(sig: dict) -> Optional[int]:
         """Extract minutes-after-09:30-ET from a cached signal's entry_time.
@@ -1135,14 +1211,58 @@ def filter_signals(signals: List[dict], entry_filters: dict) -> List[dict]:
             continue
         if max_price_entry > 0 and sig['entry_price'] > max_price_entry:
             continue
-        # Conviction sizing: shares and pnl_dollar scale linearly with position size.
-        # pnl_pct is a ratio and stays the same.
+        # Mutations below — always defensively copy once so we never write to
+        # the cached row. (Avoids cache poisoning if the same signals list
+        # is reused.)
+        mutated = False
+
+        # Phase 2b: recompute slippage from raw prices if available. Old
+        # cache rows without raw_* fall back to the baked entry/exit_price.
+        # NOTE: partial-take blending is NOT preserved here — cache lacks
+        # the partial_pnl_dollar split, so recomputed pnl_dollar/pnl_pct
+        # are exit-only. Safe under the shipping default (partial_pct=0).
+        # If you enable --partial-pct, rebuild the cache (raw partial fields
+        # would need adding to SIGNAL_CACHE_FIELDS first).
+        if recompute_slippage:
+            raw_e = _as_float(sig.get('raw_entry_price'))
+            raw_x = _as_float(sig.get('raw_exit_price'))
+            if raw_e is not None and raw_x is not None and raw_e > 0:
+                new_entry = apply_entry_slippage(
+                    raw_e, entry_slip_pct, entry_min_cents)
+                new_exit = apply_exit_slippage(
+                    raw_x, exit_slip_pct, exit_min_cents)
+                shares_val = sig.get('shares', 0) or 0
+                try:
+                    shares_int = int(shares_val)
+                except (TypeError, ValueError):
+                    shares_int = 0
+                if not mutated:
+                    sig = dict(sig); mutated = True
+                sig['entry_price'] = new_entry
+                sig['exit_price'] = new_exit
+                new_pnl_dollar = (new_exit - new_entry) * shares_int
+                sig['pnl_dollar'] = new_pnl_dollar
+                # Derive pnl_pct from pnl_dollar so partial-taken (when
+                # those land in cache later) stay consistent with non-
+                # partial: ratio = $-return / cost-basis. Matches the
+                # generator's pnl_dollar/(entry*shares)*100 formula.
+                if new_entry > 0 and shares_int > 0:
+                    sig['pnl_pct'] = (
+                        new_pnl_dollar / (new_entry * shares_int) * 100
+                    )
+
+        # Conviction sizing: shares + pnl_dollar scale linearly; pnl_pct fixed.
         if conviction_sizing:
             cm = sig.get('conv_mult', 1.0)
+            try:
+                cm = float(cm) if cm not in (None, '') else 1.0
+            except (TypeError, ValueError):
+                cm = 1.0
             if cm != 1.0:
-                sig = dict(sig)  # avoid mutating cached dict
-                sig['shares'] = int(sig['shares'] * cm)
-                sig['pnl_dollar'] = sig['pnl_dollar'] * cm
+                if not mutated:
+                    sig = dict(sig); mutated = True
+                sig['shares'] = int((sig.get('shares', 0) or 0) * cm)
+                sig['pnl_dollar'] = (sig.get('pnl_dollar', 0) or 0) * cm
         filtered.append(sig)
 
     logger.info(f"Filter: {len(signals)} → {len(filtered)} signals "
@@ -1180,11 +1300,22 @@ def main():
     parser.add_argument("--position-size", type=float, default=None)
     parser.add_argument("--max-concurrent", type=int, default=None)
     parser.add_argument("--trail", type=float, default=None, help="Trailing stop %% below highest (e.g., 0.5 = 0.5%%)")
-    parser.add_argument("--conviction-sizing", action="store_true",
-                        help="Scale position size by conviction_mult (2-rule score, OOS-validated)")
+    parser.add_argument("--conviction-sizing", dest="conviction_sizing",
+                        action="store_true", default=None,
+                        help="Force conviction sizing ON (override config).")
+    parser.add_argument("--no-conviction-sizing", dest="conviction_sizing",
+                        action="store_false",
+                        help="Force conviction sizing OFF (override config).")
     parser.add_argument("--no-slippage", action="store_true")
     parser.add_argument("--entry-slip", type=float, default=None, help="Entry slippage pct (e.g. 0.005 = 0.5%%)")
     parser.add_argument("--exit-slip", type=float, default=None, help="Exit slippage pct")
+    parser.add_argument("--entry-min-cents", type=float, default=None,
+                        help="Min cents floor on entry slippage. Live's $0.03+ "
+                             "tick floor on cheap stocks; matches "
+                             "slippage.entry_min_cents in macd_wave.yaml.")
+    parser.add_argument("--exit-min-cents", type=float, default=None,
+                        help="Min cents floor on exit slippage. "
+                             "Matches slippage.exit_min_cents in macd_wave.yaml.")
     # New indicator filters
     parser.add_argument("--max-rsi", type=float, default=0, help="Max RSI at entry (e.g. 70 = skip overbought)")
     parser.add_argument("--require-hist-accel", action="store_true", help="Only enter when MACD histogram accelerating")
@@ -1250,6 +1381,12 @@ def main():
     if args.no_slippage:
         slip_cfg['entry_pct'] = 0.0
         slip_cfg['exit_pct'] = 0.0
+        slip_cfg['entry_min_cents'] = 0.0
+        slip_cfg['exit_min_cents'] = 0.0
+    if args.entry_min_cents is not None:
+        slip_cfg['entry_min_cents'] = args.entry_min_cents
+    if args.exit_min_cents is not None:
+        slip_cfg['exit_min_cents'] = args.exit_min_cents
 
     start_date = date.fromisoformat(args.start)
     end_date = date.fromisoformat(args.end)
@@ -1290,6 +1427,12 @@ def main():
         'position_size': sizing_cfg.get('position_size', 40000),
         'entry_pct': slip_entry,
         'exit_pct': slip_exit,
+        'entry_min_cents': slip_cfg.get('entry_min_cents', DEFAULT_ENTRY_MIN_CENTS),
+        'exit_min_cents': slip_cfg.get('exit_min_cents', DEFAULT_EXIT_MIN_CENTS),
+        # Phase 2b: recompute slippage in filter_signals from raw_*_price
+        # cache fields so runtime slippage changes don't require cache rebuild.
+        # Cache rows from before raw_* existed fall back to baked entry_price/exit_price.
+        'recompute_slippage': True,
         'trail_stop_pct': trail_pct,
         # New indicator filters
         'max_rsi': args.max_rsi,
@@ -1310,8 +1453,19 @@ def main():
         'partial_fraction': args.partial_fraction,
         # Phase D
         'exclude_vol_zone': args.exclude_vol_zone,
-        # Conviction-based sizing (opt-in)
-        'conviction_sizing': bool(args.conviction_sizing),
+        # Conviction-based sizing. Source of truth in yaml is
+        # `sizing.conviction_sizing.enabled` (the live engine reads the same
+        # key). Default-on to match live behavior. CLI flags
+        # --conviction-sizing / --no-conviction-sizing override at runtime.
+        'conviction_sizing': (
+            args.conviction_sizing
+            if args.conviction_sizing is not None
+            else bool(
+                sizing_cfg.get('conviction_sizing', {}).get('enabled', True)
+                if isinstance(sizing_cfg.get('conviction_sizing'), dict)
+                else sizing_cfg.get('conviction_sizing', True)
+            )
+        ),
     }
 
     cache_path = get_cache_path(trail_pct, slip_entry, slip_exit)

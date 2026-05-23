@@ -96,6 +96,12 @@ sizing:
 slippage:
   entry_pct: 0.003          # 30bps — matches Era 2 smart-pricing fill at ~35% into spread
   exit_pct: 0.001           # 10bps — exits fill at bid; 10bps buffer for slippage on stops
+  # Phase 2a: per-symbol min-cents floor on slippage. Live's smart limits use
+  # a $0.03 (3¢) fixed offset that dominates the % component on cheap stocks
+  # — a $5 stock at 30bps = 1.5¢, but live actually pays 3¢. Modeling the
+  # floor closes a structural BT/LIVE divergence on $5-$15 fills.
+  entry_min_cents: 0.03     # min entry slippage = max(entry_pct * price, $0.03)
+  exit_min_cents: 0.03      # min exit slippage = max(exit_pct * price, $0.03)
 
 # Risk management
 risk:
