@@ -369,6 +369,12 @@ def generate_signals(
     max_vol_cross = entry_filters.get('max_vol_at_cross', 0)
     min_macd_pct = entry_filters.get('min_macd_hist_pct', 0.0)
     max_price_entry = entry_filters.get('max_price_at_entry', 0)
+    # Entry time-of-day gate (added 2026-05-22 to match live engine fix).
+    # Reject entries past N minutes after 09:30 ET. Bars are 1-min and
+    # already clipped to regular session, so bar index i+1 == minutes-from-
+    # 09:30 at the bar's close (which is when the entry fires).
+    # 0 = disabled (legacy). See trading/macd_wave_engine.py for live parity.
+    last_entry_min = entry_filters.get('last_entry_minutes_after_open', 0)
     position_size = entry_filters.get('position_size', 40000)
     # New indicator filters
     max_rsi_val = entry_filters.get('max_rsi', 0)
@@ -485,6 +491,13 @@ def generate_signals(
 
                 # Apply ALL entry filters at MACD confirmation point
                 # (not earlier — stock must be evaluated by MACD first)
+                # Entry time-of-day gate. The previous `cross_time_max_min`
+                # filter only gates when the +10% threshold was first hit
+                # (wave onset), not when the 3-bar-confirmed entry fires.
+                # Matches the live engine's last_entry_minutes_after_open.
+                if last_entry_min > 0 and (i + 1) > last_entry_min:
+                    pos_count = 0
+                    continue
                 if cross_time_max > 0 and cross_time_min > cross_time_max:
                     pos_count = 0
                     continue
@@ -1091,12 +1104,35 @@ def filter_signals(signals: List[dict], entry_filters: dict) -> List[dict]:
     max_vol_cross = entry_filters.get('max_vol_at_cross', 0)
     min_macd_pct = entry_filters.get('min_macd_hist_pct', 0.0)
     max_price_entry = entry_filters.get('max_price_at_entry', 0)
+    last_entry_min = entry_filters.get('last_entry_minutes_after_open', 0)
     conviction_sizing = bool(entry_filters.get('conviction_sizing', False))
+
+    def _entry_minutes(sig: dict) -> Optional[int]:
+        """Extract minutes-after-09:30-ET from a cached signal's entry_time.
+
+        Cache stores entry_time as ISO string ('YYYY-MM-DDTHH:MM:SS+TZ').
+        We compute minutes from the 09:30 ET open on the same calendar date.
+        Returns None if parsing fails (then we don't filter — fail open).
+        """
+        et_str = sig.get('entry_time')
+        if not et_str:
+            return None
+        try:
+            dt = pd.to_datetime(et_str, utc=True).tz_convert(ET)
+        except Exception:
+            return None
+        open_et = dt.replace(hour=9, minute=30, second=0, microsecond=0,
+                              nanosecond=0)
+        return int((dt - open_et).total_seconds() / 60)
 
     filtered = []
     for sig in signals:
         if cross_time_max > 0 and sig['cross_time_min'] > cross_time_max:
             continue
+        if last_entry_min > 0:
+            m = _entry_minutes(sig)
+            if m is not None and m > last_entry_min:
+                continue
         if min_vol_cross > 0 and sig['vol_at_cross'] < min_vol_cross:
             continue
         if max_vol_cross > 0 and sig['vol_at_cross'] > max_vol_cross:
@@ -1136,6 +1172,10 @@ def main():
 
     # Filter overrides
     parser.add_argument("--cross-time", type=int, default=None, help="Max minutes to +10% cross")
+    parser.add_argument("--last-entry-min", type=int, default=None,
+                        help="Entry time-of-day gate — reject entries past N "
+                             "min after 09:30 ET. 0 = disabled. Matches the "
+                             "live engine's last_entry_minutes_after_open.")
     parser.add_argument("--macd-min", type=float, default=None, help="Min MACD hist pct at entry")
     parser.add_argument("--max-price", type=float, default=None, help="Max price at entry")
     parser.add_argument("--min-vol", type=int, default=None, help="Min volume at cross")
@@ -1193,6 +1233,8 @@ def main():
 
     if args.cross_time is not None:
         entry_cfg['cross_time_max_min'] = args.cross_time
+    if args.last_entry_min is not None:
+        entry_cfg['last_entry_minutes_after_open'] = args.last_entry_min
     if args.macd_min is not None:
         entry_cfg['min_macd_hist_pct'] = args.macd_min
     if args.max_price is not None:

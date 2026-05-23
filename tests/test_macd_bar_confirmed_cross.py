@@ -119,3 +119,77 @@ class TestBarConfirmedCross(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
+
+# =====================================================================
+# BT entry time-of-day gate (added 2026-05-23 to match live engine)
+# =====================================================================
+
+import pandas as pd
+from macd_wave_backtest import filter_signals
+
+
+def _sig(symbol, entry_time, cross=1, vol=50000, hist=0.6, price=10.0):
+    """Minimal signal dict matching the cache schema."""
+    return {
+        'symbol': symbol, 'date': entry_time[:10], 'wave': 1,
+        'entry_time': entry_time, 'exit_time': entry_time,
+        'entry_price': price, 'exit_price': price, 'shares': 1000,
+        'pnl_pct': 0.0, 'pnl_dollar': 0.0, 'exit_reason': 'eod',
+        'cross_time_min': cross, 'vol_at_cross': vol, 'macd_hist_pct': hist,
+        'w1_pnl': 0.0, 'conv_mult': 1.0,
+    }
+
+
+class TestBTEntryTimeOfDayGate:
+    """filter_signals must respect last_entry_minutes_after_open and drop
+    cached signals whose entry_time is past the cutoff. Matches the live
+    engine fix in trading/macd_wave_engine.py (commit 59216be)."""
+
+    def test_disabled_keeps_all(self):
+        sigs = [
+            _sig('A', '2026-05-22T13:32:00+00:00'),  # 09:32 ET
+            _sig('B', '2026-05-22T14:30:00+00:00'),  # 10:30 ET
+            _sig('C', '2026-05-22T18:00:00+00:00'),  # 14:00 ET
+        ]
+        out = filter_signals(sigs, {})
+        assert len(out) == 3
+
+    def test_15min_keeps_only_early(self):
+        sigs = [
+            _sig('A', '2026-05-22T13:32:00+00:00'),  # 09:32 ET (2 min — keep)
+            _sig('B', '2026-05-22T13:45:00+00:00'),  # 09:45 ET (15 min — keep, boundary)
+            _sig('C', '2026-05-22T13:46:00+00:00'),  # 09:46 ET (16 min — DROP)
+            _sig('D', '2026-05-22T18:00:00+00:00'),  # 14:00 ET — DROP
+        ]
+        out = filter_signals(sigs, {'last_entry_minutes_after_open': 15})
+        kept = {s['symbol'] for s in out}
+        assert kept == {'A', 'B'}, f"got {kept}"
+
+    def test_zero_disables(self):
+        sigs = [_sig('A', '2026-05-22T18:00:00+00:00')]
+        out = filter_signals(sigs, {'last_entry_minutes_after_open': 0})
+        assert len(out) == 1
+
+    def test_unparseable_entry_time_fails_open(self):
+        """Malformed entry_time should not crash; signal passes through.
+        Cache-load robustness — don't lose signals on bad metadata.
+        """
+        sigs = [_sig('A', 'not-a-timestamp')]
+        # Should NOT raise
+        out = filter_signals(sigs, {'last_entry_minutes_after_open': 15})
+        # entry_time unparseable → no filter applied to this signal
+        assert len(out) == 1
+
+    def test_dst_handling_uses_et_zone(self):
+        """The cutoff is N minutes after 09:30 ET regardless of UTC offset
+        (DST vs EST). 13:32 UTC = 09:32 ET in summer (EDT); 14:32 UTC =
+        09:32 ET in winter (EST). Both should be 'inside the 15-min window'.
+        """
+        # EDT (Mar-Nov): 13:32 UTC = 09:32 ET
+        sig_edt = _sig('A', '2026-05-22T13:32:00+00:00')
+        # EST (Nov-Mar): 14:32 UTC = 09:32 ET
+        sig_est = _sig('B', '2026-01-15T14:32:00+00:00')
+        out = filter_signals([sig_edt, sig_est],
+                              {'last_entry_minutes_after_open': 15})
+        assert len(out) == 2, f"both should be inside 15-min window: {out}"
