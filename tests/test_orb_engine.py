@@ -884,3 +884,19 @@ class TestFeatureContextFreshness:
         ctx = engine._get_feature_context('NEW')
         mock_alpaca.get_daily_bars_range.assert_called_once()
         assert ctx['prev_day_bar']['close'] == pytest.approx(4.10)
+
+    def test_stale_refetch_failure_falls_back_to_stale_cache(self, engine, mock_db, mock_alpaca):
+        # Alpaca refetch raises on the stale path → must keep the stale cache
+        # as a logged last resort, never crash the scoring loop.
+        today = datetime.now(timezone.utc).date()
+        stale_date = today - timedelta(days=10)
+        mock_db.get_daily_bars_cached.return_value = {
+            'FOO': [{'date': stale_date.strftime('%Y-%m-%d'),
+                     'open': 6.0, 'high': 6.1, 'low': 5.2, 'close': 5.51,
+                     'volume': 4_000_000}]
+        }
+        mock_alpaca.get_daily_bars_range.side_effect = RuntimeError("alpaca down")
+        ctx = engine._get_feature_context('FOO')
+        mock_alpaca.get_daily_bars_range.assert_called_once()
+        # refetch failed → fall back to the stale cache rather than blow up
+        assert ctx['prev_day_bar']['close'] == pytest.approx(5.51)
