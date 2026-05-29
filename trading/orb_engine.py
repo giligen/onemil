@@ -22,7 +22,7 @@ import logging
 import queue
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, time as dtime, timedelta, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional, Set
 
 import pandas as pd
@@ -42,6 +42,42 @@ from trading.orb_touchgo_filter import (
 
 
 logger = logging.getLogger(__name__)
+
+
+# Max calendar-day age tolerated for a cached prev-day daily bar before the
+# ORB feature path force-refetches it from Alpaca. The prior *trading* day is
+# at most 4 calendar days behind "today" (Tue after a Monday market holiday:
+# prev trading day = Friday). A newest cached bar older than that means the
+# nightly broad-universe refresh skipped this symbol — and silently using its
+# stale close corrupts gap_pct / prev_day_close_position, which flips the
+# composite quintile and changes which symbols ORB trades (ASTN/PLTG on
+# 2026-05-29: prod's daily_bars were frozen at 05-22).
+_PREV_BAR_STALENESS_MAX_DAYS = 4
+
+
+def _newest_bar_date(bars) -> Optional[date]:
+    """Most-recent bar date from a list of daily-bar dicts/rows, or None.
+
+    Normalizes the 'date' field, which is a 'YYYY-MM-DD' string from the DB
+    cache but a datetime.date from the Alpaca range fetch.
+    """
+    latest: Optional[date] = None
+    for b in bars:
+        raw = b.get('date') if isinstance(b, dict) else getattr(b, 'date', None)
+        if raw is None:
+            continue
+        if isinstance(raw, datetime):
+            d = raw.date()
+        elif isinstance(raw, date):
+            d = raw
+        else:
+            try:
+                d = datetime.strptime(str(raw)[:10], '%Y-%m-%d').date()
+            except (ValueError, TypeError):
+                continue
+        if latest is None or d > latest:
+            latest = d
+    return latest
 
 STRATEGY_NAME = 'orb'
 
@@ -947,8 +983,9 @@ class ORBEngine:
             # Fallback: alpaca.get_daily_bars_range (NB: plain get_daily_bars returns
             # only a summary dict per symbol, NOT a bar list — don't use here).
             daily_bars = None
-            start_d = (datetime.now(timezone.utc) - timedelta(days=40)).date()
-            end_d = (datetime.now(timezone.utc) - timedelta(days=1)).date()
+            today = datetime.now(timezone.utc).date()
+            start_d = today - timedelta(days=40)
+            end_d = today - timedelta(days=1)
             if hasattr(self.db, 'get_daily_bars_cached'):
                 try:
                     bulk = self.db.get_daily_bars_cached(
@@ -956,13 +993,44 @@ class ORBEngine:
                     daily_bars = bulk.get(symbol) if isinstance(bulk, dict) else None
                 except Exception as e:
                     logger.debug(f"ORB: db.get_daily_bars_cached({symbol}) failed: {e}")
-            if not daily_bars and hasattr(self.alpaca, 'get_daily_bars_range'):
+
+            # Freshness guard. The old code only refetched when the symbol was
+            # ENTIRELY absent from cache, so a STALE most-recent bar (nightly
+            # broad-universe refresh dropped this symbol) slipped through and
+            # silently fed a days-old prev_close into the gap/feature math.
+            # Refetch on demand when the newest cached bar predates the last
+            # trading day. (See ASTN/PLTG 2026-05-29 prod incident.)
+            stale = False
+            if daily_bars:
+                newest = _newest_bar_date(daily_bars)
+                if newest is not None and (today - newest).days > _PREV_BAR_STALENESS_MAX_DAYS:
+                    logger.warning(
+                        f"ORB: {symbol} cached prev-day bar is stale "
+                        f"(newest={newest}, today={today}, "
+                        f">{_PREV_BAR_STALENESS_MAX_DAYS}d) — refetching daily "
+                        f"bars from Alpaca to avoid a stale-gap mispick"
+                    )
+                    stale = True
+
+            if (not daily_bars or stale) and hasattr(self.alpaca, 'get_daily_bars_range'):
                 try:
                     bulk = self.alpaca.get_daily_bars_range(
                         [symbol], start_d, end_d)
-                    daily_bars = bulk.get(symbol) if isinstance(bulk, dict) else None
+                    fresh = bulk.get(symbol) if isinstance(bulk, dict) else None
+                    if fresh:
+                        daily_bars = fresh
+                    elif stale:
+                        logger.warning(
+                            f"ORB: {symbol} stale-bar Alpaca refetch returned no "
+                            f"data — falling back to stale cache"
+                        )
                 except Exception as e:
-                    logger.debug(f"ORB: alpaca.get_daily_bars_range({symbol}) failed: {e}")
+                    # On the stale path, keep the stale cache as last resort but
+                    # log loudly: a silent stale-gap pick is worse than a logged
+                    # refetch failure.
+                    (logger.warning if stale else logger.debug)(
+                        f"ORB: alpaca.get_daily_bars_range({symbol}) failed: {e}"
+                    )
 
             if not daily_bars:
                 self._feature_context_cache[symbol] = ctx

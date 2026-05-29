@@ -829,3 +829,58 @@ class TestModuleHelpers:
 
     def test_et_offset_winter(self):
         assert _et_offset_hours(datetime(2026, 1, 1, tzinfo=timezone.utc)) == 5
+
+
+# =========================================================================
+# Feature-context daily-bar freshness guard
+#
+# Regression for the 2026-05-29 prod incident: prod's daily_bars cache was
+# frozen at 05-22 for ORB-only gappers (ASTN/PLTG/SOFX). The old code only
+# refetched when a symbol was ENTIRELY absent, so the stale prev_close fed
+# the gap/feature math → wrong quintile → wrong picks (ASTN falsely
+# phantom-gap-rejected; PLTG flipped Q1→Q4). The guard must refetch from
+# Alpaca when the newest cached bar predates the last trading day.
+# =========================================================================
+class TestFeatureContextFreshness:
+    def test_stale_cache_triggers_alpaca_refetch(self, engine, mock_db, mock_alpaca):
+        today = datetime.now(timezone.utc).date()
+        stale_date = today - timedelta(days=10)   # > _PREV_BAR_STALENESS_MAX_DAYS
+        fresh_date = today - timedelta(days=1)
+        # Cache holds a STALE bar (close 5.51, like prod's frozen 05-22 ASTN).
+        mock_db.get_daily_bars_cached.return_value = {
+            'ASTN': [{'date': stale_date.strftime('%Y-%m-%d'),
+                      'open': 6.0, 'high': 6.1, 'low': 5.2, 'close': 5.51,
+                      'volume': 4_000_000}]
+        }
+        # Alpaca has the real recent bar (close 3.20, like dev's fresh 05-28).
+        mock_alpaca.get_daily_bars_range.return_value = {
+            'ASTN': [{'date': fresh_date, 'open': 3.5, 'high': 3.8, 'low': 3.1,
+                      'close': 3.20, 'volume': 11_000_000}]
+        }
+        ctx = engine._get_feature_context('ASTN')
+        mock_alpaca.get_daily_bars_range.assert_called_once()
+        # prev_day_bar must come from the FRESH refetch, not the stale cache.
+        assert ctx['prev_day_bar']['close'] == pytest.approx(3.20)
+
+    def test_fresh_cache_uses_cache_without_refetch(self, engine, mock_db, mock_alpaca):
+        today = datetime.now(timezone.utc).date()
+        fresh_date = today - timedelta(days=1)
+        mock_db.get_daily_bars_cached.return_value = {
+            'BAR': [{'date': fresh_date.strftime('%Y-%m-%d'),
+                     'open': 3.1, 'high': 3.3, 'low': 3.0, 'close': 3.20,
+                     'volume': 9_000_000}]
+        }
+        ctx = engine._get_feature_context('BAR')
+        mock_alpaca.get_daily_bars_range.assert_not_called()
+        assert ctx['prev_day_bar']['close'] == pytest.approx(3.20)
+
+    def test_absent_cache_falls_back_to_alpaca(self, engine, mock_db, mock_alpaca):
+        today = datetime.now(timezone.utc).date()
+        mock_db.get_daily_bars_cached.return_value = {}   # symbol absent
+        mock_alpaca.get_daily_bars_range.return_value = {
+            'NEW': [{'date': today - timedelta(days=1), 'open': 4.0, 'high': 4.2,
+                     'low': 3.9, 'close': 4.10, 'volume': 2_000_000}]
+        }
+        ctx = engine._get_feature_context('NEW')
+        mock_alpaca.get_daily_bars_range.assert_called_once()
+        assert ctx['prev_day_bar']['close'] == pytest.approx(4.10)
