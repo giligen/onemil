@@ -940,10 +940,26 @@ filter:
       enabled: true
       revert_R: 0.75
       exit_R: -0.5
+    breakout_bar_source: market    # NEW 2026-06-04 (BT-parity); 'fill' = legacy
+    max_breakout_age_min: 15       # NEW: late-fill guard (skip touchgo if stale)
 ```
 
 Defaults are baked into `load_touchgo_config({})` so BT runs without
 `orb.yaml` still apply the validated thresholds.
+
+**Breakout-bar re-keying + late-fill guard (2026-06-04)**: Rule M/D evaluate
+the **market breakout bar** — the first 1-min bar with `high > range_high`,
+located by the shared `find_breakout_bar_ts` (BT and live call it, so they key
+to the identical bar). Live previously used the minute of the actual *fill*,
+which diverged from BT whenever a stop-limit fill lagged the breakout — measured
+at **23% of live fills, every one flipping the `tag_bb` decision** (paper-vs-live
+investigation, May–Jun 2026). The breakout bar is captured during the pending
+phase (`_ensure_breakout_bar_ts`), so the fix is robust to late fills. The
+**late-fill guard** (`max_breakout_age_min`, default 15) skips touchgo entirely
+when the fill lagged the breakout bar by more than the cap — a stale entry is no
+longer an opening-range breakout and gets no retroactive tag exit. Counterfactual
+on the 33-trade live sample: **+$251.8** (restores the BT-validated edge).
+Rollback: `breakout_bar_source: fill` + restart.
 
 **Env-var overrides for BT research / live emergency**:
 - `ORB_TOUCHGO_ENABLED=0` — master disable
@@ -951,6 +967,8 @@ Defaults are baked into `load_touchgo_config({})` so BT runs without
 - `ORB_TOUCHGO_RULE_M_THRESH=0.4` — tighten Rule M
 - `ORB_TOUCHGO_RULE_D_R=0.6` — tighten Rule D revert trigger
 - `ORB_TOUCHGO_RULE_D_EXIT_R=-0.3` — less aggressive Rule D exit
+- `ORB_TOUCHGO_BREAKOUT_BAR_SOURCE=fill` — roll back to legacy fill-bar keying
+- `ORB_TOUCHGO_MAX_BREAKOUT_AGE_MIN=15` — late-fill guard threshold (minutes)
 
 **Monitor**:
 

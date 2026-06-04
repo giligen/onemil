@@ -37,7 +37,8 @@ from trading.orb_filter import (
 from trading.orb_conviction import apply_adaptive_mult, load_adaptive_mults
 from trading.orb_planner import OrbTradePlan, OrbTradePlanner, PlannerReject
 from trading.orb_touchgo_filter import (
-    TouchgoConfig, evaluate_rule_d, evaluate_rule_m, load_touchgo_config,
+    TouchgoConfig, evaluate_rule_d, evaluate_rule_m, find_breakout_bar_ts,
+    load_touchgo_config,
 )
 
 
@@ -160,9 +161,13 @@ class OpenPosition:
     bar_close_price: Optional[float] = None
     order_submitted_at: Optional[datetime] = None
     entry_quote_ask: Optional[float] = None
-    # Touchgo filter state (Rule M / Rule D). Populated at fill time.
-    # breakout_bar_ts is the minute-floor of fill time (UTC); Rule M evaluated
-    # at the bar event with timestamp == breakout_bar_ts, Rule D at +1min.
+    # Touchgo filter state (Rule M / Rule D).
+    # breakout_bar_ts = the MARKET breakout bar (first 1-min bar with
+    # high > range_high), captured during the pending/early phase by
+    # _ensure_breakout_bar_ts — what BT keys touchgo to (parity). Rule M is
+    # evaluated at the bar event with timestamp == breakout_bar_ts, Rule D at
+    # +1min. Under the legacy breakout_bar_source='fill' rollback it is instead
+    # the minute-floor of the fill time (pre-2026-06 behaviour).
     breakout_bar_ts: Optional[datetime] = None
     rule_m_evaluated: bool = False
     rule_d_evaluated: bool = False
@@ -752,6 +757,16 @@ class ORBEngine:
         # Keep rolling window (latest ~60 bars is enough for ORB)
         self._bar_windows[symbol] = bars_df.tail(60).to_dict('records')
 
+        # Capture the MARKET breakout bar (first bar high>range_high) for any
+        # position on this symbol — pending OR filled — so touchgo Rule M/D
+        # evaluate the BT-parity bar regardless of fill latency. Runs every bar
+        # event from the pending phase onward, so the breakout bar is captured
+        # while still in the streamed window (robust to late fills).
+        try:
+            self._ensure_breakout_bar_ts(symbol, bars_df)
+        except Exception as e:
+            logger.warning(f"ORB: _ensure_breakout_bar_ts({symbol}) failed: {e}")
+
         # Evaluate touchgo filter on any open position for this symbol.
         # Runs before range-complete check so it fires even for already-filled
         # positions (range was completed at fill time).
@@ -807,6 +822,40 @@ class ORBEngine:
     # Touchgo filter (Rule M + Rule D)
     # =====================================================================
 
+    def _market_breakout_bar_ts(self, bars_df: pd.DataFrame, range_high: float):
+        """Market breakout bar timestamp from a bars DataFrame.
+
+        The first 1-min bar (at/after the 9:35 ET range end) whose high exceeds
+        range_high — identical definition to BT (study_orb_pipeline_static_lock).
+        Delegates to the shared trading.orb_touchgo_filter.find_breakout_bar_ts.
+        Returns a tz-aware pd.Timestamp or None.
+        """
+        session_open_ts = _first_session_open_ts_utc(bars_df)
+        range_end_ts = (
+            session_open_ts + timedelta(minutes=self.range_minutes)
+            if session_open_ts is not None else None
+        )
+        return find_breakout_bar_ts(bars_df, range_high, range_end_ts)
+
+    def _ensure_breakout_bar_ts(self, symbol: str, bars_df: pd.DataFrame) -> None:
+        """Set pos.breakout_bar_ts to the MARKET breakout bar (BT-parity).
+
+        Runs on every bar event for pending or filled positions. No-op in
+        legacy breakout_bar_source='fill' mode, once breakout_bar_ts is set, or
+        when there's no position. Because it runs from the pending phase, the
+        breakout bar is captured while still in the streamed window — so even a
+        late fill (whose breakout bar would have rolled out of the window by
+        fill time) gets the correct, BT-parity bar.
+        """
+        if self.touchgo_cfg.breakout_bar_source != 'market':
+            return
+        pos = self.open_positions.get(symbol)
+        if pos is None or pos.breakout_bar_ts is not None:
+            return
+        bb_ts = self._market_breakout_bar_ts(bars_df, pos.range_high)
+        if bb_ts is not None:
+            pos.breakout_bar_ts = bb_ts
+
     def _evaluate_touchgo(self, symbol: str, bars_df: pd.DataFrame) -> None:
         """Evaluate Rule M and Rule D for any open position on this symbol.
 
@@ -841,6 +890,29 @@ class ORBEngine:
         if bb_ts.tzinfo is None:
             bb_ts = bb_ts.replace(tzinfo=timezone.utc)
         b1_ts = bb_ts + timedelta(minutes=1)
+
+        # Late-fill guard (market mode only): if we filled long after the
+        # breakout bar, the entry is no longer a clean opening-range breakout.
+        # Rule M/D are a first-1-2-minute failed-breakout detector — do NOT fire
+        # a retroactive tag exit on a bar that closed long before we held the
+        # position. BT never sees this (instant fill at the breakout bar), so
+        # this guards live's pathological late stop-limit fills only.
+        if (self.touchgo_cfg.breakout_bar_source == 'market'
+                and pos.entry_time is not None):
+            et = pos.entry_time
+            if getattr(et, 'tzinfo', None) is None:
+                et = et.replace(tzinfo=timezone.utc)
+            age_min = (et - bb_ts).total_seconds() / 60.0
+            if age_min > self.touchgo_cfg.max_breakout_age_min:
+                if not (pos.rule_m_evaluated and pos.rule_d_evaluated):
+                    logger.info(
+                        f"ORB: {symbol} touchgo SKIP — fill lagged breakout bar "
+                        f"by {age_min:.0f}min (> {self.touchgo_cfg.max_breakout_age_min:.0f}min "
+                        f"cap); stale entry, no retroactive tag exit"
+                    )
+                pos.rule_m_evaluated = True
+                pos.rule_d_evaluated = True
+                return
 
         range_size = max(pos.range_high - pos.range_low, 0.0)
 
@@ -1719,11 +1791,29 @@ class ORBEngine:
         pos.shares = shares
         pos.entry_time = fill_at
         pos.order_id = ''  # cleared = filled
-        # Touchgo filter state: breakout_bar_ts is the minute-floor of fill
-        # time (UTC). Rule M evaluated when the bar event arrives with
-        # timestamp == breakout_bar_ts; Rule D at breakout_bar_ts + 1 min.
-        # See _evaluate_touchgo (called from _ingest_bars).
-        pos.breakout_bar_ts = fill_at.replace(second=0, microsecond=0)
+        # Touchgo breakout bar (Rule M / Rule D reference). See _evaluate_touchgo.
+        if self.touchgo_cfg.breakout_bar_source == 'fill':
+            # Legacy rollback path: minute-floor of the fill time (pre-2026-06).
+            pos.breakout_bar_ts = fill_at.replace(second=0, microsecond=0)
+        elif pos.breakout_bar_ts is None:
+            # Market mode (BT-parity, default): the breakout bar is normally
+            # captured during the pending phase by _ensure_breakout_bar_ts. If a
+            # very fast fill beat the first post-fill bar event, best-effort from
+            # the rolling window now; _ingest_bars sets it on the next event
+            # otherwise. If neither resolves it, touchgo stays inert for this
+            # position (logged in _ensure path) — acceptable for a stale entry.
+            window = self._bar_windows.get(pos.symbol)
+            if window:
+                try:
+                    bb = self._market_breakout_bar_ts(
+                        pd.DataFrame(window), pos.range_high
+                    )
+                    if bb is not None:
+                        pos.breakout_bar_ts = bb
+                except Exception as e:
+                    logger.warning(
+                        f"ORB: breakout-bar capture at fill failed for {pos.symbol}: {e}"
+                    )
         pos.rule_m_evaluated = False
         pos.rule_d_evaluated = False
         # Fill-rate telemetry

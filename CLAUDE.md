@@ -320,6 +320,15 @@ ORB analysis; the older ones have warning headers pointing to the shipped varian
 - **Monitor**: `journalctl -u onemil-trader | grep -E "TAG_BB|TAG_B1|touchgo"`. Expect ~3 firings/day (BT prevalence 26% of fills × ~12 daily entries).
 - **Rollback**: `filter.touchgo.enabled: false` + `sudo systemctl restart onemil-trader` (zero-state — filter only fires within first 2min post-fill).
 
+**Touchgo breakout-bar re-keying + late-fill guard (shipped 2026-06-04, default ON)**: fixes a BT↔LIVE parity gap discovered comparing paper(dev) vs live(prod).
+- **Bug**: live keyed Rule M/D to the minute of the actual *fill* (`breakout_bar_ts = minute(fill)`), but BT keys to the *market breakout bar* (first 1-min bar with `high > range_high`). When a stop-limit fill lagged the breakout, live evaluated a different bar → **23% of live fills (7/31, May 19–Jun 3) flipped the `tag_bb` decision**, skewed toward spurious early exits.
+- **Fix**: live now captures the market breakout bar during the pending phase (`_ensure_breakout_bar_ts` from `_ingest_bars`) via the shared `trading.orb_touchgo_filter.find_breakout_bar_ts` (BT calls the same helper — parity by construction). Robust to late fills (captured while the bar is still in the streamed window).
+- **Late-fill guard**: if the fill lagged the breakout bar by > `max_breakout_age_min` (default 15), touchgo is skipped — a stale entry (e.g. ASTN 2026-06-03 filled 34min late) is no longer a clean ORB and gets no retroactive tag exit.
+- **Counterfactual**: on the 33-trade live sample the fix nets **+$251.8** (7 flipped trades −$223 → +$29; e.g. re-enables the failed-breakout cut on LMRI −3.84%→tag_bb, drops spurious cuts on IHRT/PURR). Directionally restores the BT-validated +$27K touchgo edge; small sample, not an annual projection.
+- **Config**: `orb.yaml::filter.touchgo.{breakout_bar_source: market|fill, max_breakout_age_min: 15}`. Env: `ORB_TOUCHGO_BREAKOUT_BAR_SOURCE`, `ORB_TOUCHGO_MAX_BREAKOUT_AGE_MIN`.
+- **Rollback**: `filter.touchgo.breakout_bar_source: fill` + restart (restores legacy fill-bar behaviour, zero state). Audit scripts: `scripts/audit_touchgo_breakout_bar_gap.py`, `scripts/audit_touchgo_fix_pnl_delta.py`.
+- **Tests**: `tests/test_orb_touchgo_parity.py` (helper unit + BT/live parity), `tests/test_orb_engine.py::TestTouchgoBreakoutBarReKey` (capture, fire-on-breakout-bar, late-fill guard, legacy mode).
+
 **ORB diagnostic scripts** (in `scripts/`):
 - `orb_ramp_check.py` — current stage + advancement eligibility (cushion + days)
 - `orb_pre0_daily.py` — Pre-Stage-0 daily monitor (cushion, slippage vs BT, promotion eligibility, demotion triggers). Refuses to run if orb.yaml ≠ Pre-0 spec unless `--launch-date` passed.

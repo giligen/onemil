@@ -89,6 +89,17 @@ filter:
       enabled: true
       revert_R: 0.75
       exit_R: -0.5
+    # Which bar Rule M/D evaluate (2026-06-04 fix):
+    #   market = the MARKET breakout bar (first bar high>range_high) — BT-parity
+    #            and robust to fill latency. DEFAULT.
+    #   fill   = legacy: the minute of the fill (pre-fix; diverges from BT when
+    #            stop-limit fills lag the breakout). Rollback only.
+    # Env override: ORB_TOUCHGO_BREAKOUT_BAR_SOURCE=market|fill
+    breakout_bar_source: market
+    # Late-fill guard: skip touchgo if the fill landed more than this many
+    # minutes after the market breakout bar (stale entry — no retroactive tag
+    # exit). Env override: ORB_TOUCHGO_MAX_BREAKOUT_AGE_MIN
+    max_breakout_age_min: 15
   features:
     gap_pct:
       sign: -1              # lower gap = better

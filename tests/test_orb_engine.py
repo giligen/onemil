@@ -900,3 +900,121 @@ class TestFeatureContextFreshness:
         mock_alpaca.get_daily_bars_range.assert_called_once()
         # refetch failed → fall back to the stale cache rather than blow up
         assert ctx['prev_day_bar']['close'] == pytest.approx(5.51)
+
+
+# =========================================================================
+# Touchgo breakout-bar re-keying (2026-06-04 fix)
+#
+# Live previously keyed touchgo Rule M/D to the minute of the actual fill.
+# When a stop-limit fill lagged the market breakout, that evaluated the wrong
+# bar and diverged from BT (~23% of live fills, all flipping the tag_bb
+# decision). The fix re-keys to the MARKET breakout bar (first high>range_high)
+# captured during the pending phase, plus a late-fill staleness guard.
+# =========================================================================
+
+import dataclasses
+
+_DATE = '2026-04-20'
+
+
+def _weak_breakout_bars():
+    """Range 13:30-13:34 (range_high=10.0); a WEAK breakout bar at 13:35
+    (closes near its low -> Rule M should fire), then STRONG later bars so the
+    fill bar (13:39) would NOT fire under the legacy fill-bar policy."""
+    return _make_bars([
+        (13, 30, 9.80, 10.00, 9.70, 9.90, 1000),
+        (13, 31, 9.90, 9.95, 9.80, 9.90, 1000),
+        (13, 32, 9.90, 9.90, 9.80, 9.85, 1000),
+        (13, 33, 9.85, 9.95, 9.80, 9.90, 1000),
+        (13, 34, 9.90, 10.00, 9.85, 9.95, 1000),
+        (13, 35, 10.00, 10.30, 9.90, 9.95, 5000),  # breakout, WEAK close (pos=0.125)
+        (13, 36, 9.95, 10.20, 9.92, 10.10, 4000),
+        (13, 37, 10.10, 10.40, 10.05, 10.35, 4000),
+        (13, 38, 10.35, 10.50, 10.20, 10.40, 4000),
+        (13, 39, 10.40, 10.50, 10.00, 10.45, 4000),  # fill bar, STRONG close (pos=0.9)
+    ], date_str=_DATE)
+
+
+def _pending_pos(sym='BRK', order_id='pending'):
+    return OpenPosition(
+        symbol=sym, entry_price=10.03, stop_price=9.0, shares=100,
+        trade_id=1, order_id=order_id,
+        entry_time=pd.Timestamp(f'{_DATE} 13:35:00', tz='UTC'),
+        range_high=10.0, range_low=9.0, lock_arm_at_r=1.75, lock_stop_r=0.5,
+        composite_score=0.5, quintile='Q4',
+    )
+
+
+class TestTouchgoBreakoutBarReKey:
+    def test_captures_market_breakout_bar_not_fill_minute(self, engine):
+        """_ensure_breakout_bar_ts sets the first-high>range_high bar (13:35),
+        independent of when the fill lands."""
+        assert engine.touchgo_cfg.breakout_bar_source == 'market'
+        sym = 'BRK'
+        pos = _pending_pos(sym)
+        engine.open_positions[sym] = pos
+        bars = _weak_breakout_bars()
+        engine._ingest_bars(sym, bars)
+        assert pos.breakout_bar_ts == pd.Timestamp(f'{_DATE} 13:35:00', tz='UTC')
+
+    def test_rule_m_fires_on_market_breakout_bar_despite_strong_fill_bar(
+            self, engine, mock_stop_monitor):
+        """Capture during pending (bb=13:35 weak), fill late at 13:39 (strong
+        bar). Market mode evaluates 13:35 -> Rule M fires. This is the bug fix:
+        legacy fill-bar policy would have evaluated 13:39 and NOT fired."""
+        sym = 'BRK'
+        pos = _pending_pos(sym)
+        engine.open_positions[sym] = pos
+        bars = _weak_breakout_bars()
+        # Pending phase: capture the breakout bar.
+        engine._ingest_bars(sym, bars)
+        assert pos.breakout_bar_ts == pd.Timestamp(f'{_DATE} 13:35:00', tz='UTC')
+        # Fill at 13:39 (4 min after breakout — within the 15-min guard).
+        pos.order_id = ''
+        pos.entry_time = pd.Timestamp(f'{_DATE} 13:39:00', tz='UTC')
+        pos.rule_m_evaluated = False
+        pos.rule_d_evaluated = False
+        engine._evaluate_touchgo(sym, bars)
+        assert mock_stop_monitor.force_exit.called
+        kwargs = mock_stop_monitor.force_exit.call_args.kwargs
+        assert kwargs['reason'] == 'tag_bb'
+
+    def test_late_fill_guard_skips_touchgo(self, engine, mock_stop_monitor):
+        """A fill that lags the breakout bar by more than max_breakout_age_min
+        is a stale entry — touchgo must not fire a retroactive exit."""
+        sym = 'BRK'
+        pos = _pending_pos(sym)
+        engine.open_positions[sym] = pos
+        bars = _weak_breakout_bars()
+        engine._ingest_bars(sym, bars)            # bb = 13:35
+        pos.order_id = ''
+        pos.entry_time = pd.Timestamp(f'{_DATE} 13:56:00', tz='UTC')  # 21 min late
+        pos.rule_m_evaluated = False
+        pos.rule_d_evaluated = False
+        engine._evaluate_touchgo(sym, bars)
+        assert not mock_stop_monitor.force_exit.called
+        assert pos.rule_m_evaluated and pos.rule_d_evaluated  # guard marked done
+
+    def test_legacy_fill_mode_no_capture_and_evaluates_fill_bar(
+            self, engine, mock_stop_monitor):
+        """breakout_bar_source='fill' restores legacy behaviour: _ensure does
+        not capture, and Rule M evaluates the fill-minute bar (13:39, strong) so
+        it does NOT fire."""
+        engine.touchgo_cfg = dataclasses.replace(
+            engine.touchgo_cfg, breakout_bar_source='fill')
+        sym = 'BRK'
+        pos = _pending_pos(sym)
+        engine.open_positions[sym] = pos
+        bars = _weak_breakout_bars()
+        engine._ingest_bars(sym, bars)
+        # _ensure is a no-op in fill mode.
+        assert pos.breakout_bar_ts is None
+        # Simulate the legacy fill handler keying to the fill minute (13:39).
+        pos.order_id = ''
+        pos.entry_time = pd.Timestamp(f'{_DATE} 13:39:00', tz='UTC')
+        pos.breakout_bar_ts = pd.Timestamp(f'{_DATE} 13:39:00', tz='UTC')
+        pos.rule_m_evaluated = False
+        pos.rule_d_evaluated = False
+        engine._evaluate_touchgo(sym, bars)
+        # 13:39 bar closed strong (pos 0.9) -> no fire (the divergence the fix removes).
+        assert not mock_stop_monitor.force_exit.called

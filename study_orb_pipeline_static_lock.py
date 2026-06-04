@@ -25,7 +25,7 @@ from study_orb_sizing import (
 )
 from study_orb_correlation_filter import symbol_family, symbol_super_group
 from trading.orb_touchgo_filter import (
-    evaluate_rule_m, evaluate_rule_d, load_touchgo_config,
+    evaluate_rule_m, evaluate_rule_d, find_breakout_bar_ts, load_touchgo_config,
 )
 
 
@@ -151,10 +151,10 @@ def main():
         rh = float(range_bars['high'].max()); rl = float(range_bars['low'].min())
         search = bars[(bars['timestamp'] >= range_end) &
                       (bars['timestamp'] < range_end + timedelta(minutes=60))]
-        entry_ts = None
-        for _, b in search.iterrows():
-            if float(b['high']) > rh:
-                entry_ts = b['timestamp']; break
+        # Shared with live (trading/orb_engine.py) — the market breakout bar is
+        # the first bar with high > range_high. `search` is already windowed to
+        # [range_end, range_end+60min), so no range_end_ts arg needed.
+        entry_ts = find_breakout_bar_ts(search, rh)
         if entry_ts is None:
             new_pnls.append(row['pnl']); new_pnl_pcts.append(row['pnl_pct'])
             new_reasons.append(row['exit_reason']); continue

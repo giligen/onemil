@@ -14,6 +14,14 @@ Rules:
         bar's low went >= 0.75R below entry (R = range_high - range_low),
         exit at entry - 0.5R. Catches fast reversal patterns.
 
+    Breakout-bar attribution (2026-06-04): both rules evaluate the MARKET
+        breakout bar (first 1-min bar with high > range_high) via
+        find_breakout_bar_ts — identical in BT and live. Live previously keyed
+        Rule M to the minute of the actual fill, which diverged from BT when a
+        stop-limit fill lagged the breakout (measured ~23% of live fills, all
+        flipping the tag_bb decision). breakout_bar_source='fill' restores the
+        legacy behaviour for rollback.
+
 Walk-forward validated: 8/11 OOS months helped, +$27K OOS lift on 924 trades,
 +$44K full-timeline (Jan 2025 - May 2026). Threshold stable at 0.5-0.6 across
 all rolling 6-month training windows.
@@ -26,6 +34,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from typing import Optional, Tuple
+
+import pandas as pd
 
 
 @dataclass(frozen=True)
@@ -40,6 +50,20 @@ class TouchgoConfig:
     rule_d_revert_R: float = 0.75      # b1_revert >= this R -> Rule D fires
     rule_d_exit_R: float = -0.5        # exit price = entry + this*range_size
     master_enabled: bool = True        # master kill switch (overrides both)
+    # Which bar Rule M / Rule D evaluate.
+    #   'market' (default, BT-parity): the MARKET breakout bar — the first
+    #       1-min bar whose high > range_high (what BT validates). Robust to
+    #       fill latency; live and BT agree by construction.
+    #   'fill' (legacy rollback): the minute of the actual fill. Pre-2026-06
+    #       live behaviour — diverges from BT when fills lag the breakout.
+    breakout_bar_source: str = 'market'
+    # Late-fill guard: if the actual fill landed more than this many minutes
+    # after the market breakout bar, the entry is no longer a clean opening-
+    # range breakout — skip touchgo (don't fire a retroactive exit on a bar
+    # that closed long before we held the position). BT never sees this gap
+    # (it assumes an instant fill at the breakout bar), so this only guards
+    # live's pathological late stop-limit fills (e.g. a 34-min-late fill).
+    max_breakout_age_min: float = 15.0
 
 
 def evaluate_rule_m(
@@ -110,6 +134,54 @@ def evaluate_rule_d(
     return (False, None)
 
 
+def find_breakout_bar_ts(
+    bars_df: "pd.DataFrame",
+    range_high: float,
+    range_end_ts=None,
+):
+    """Timestamp of the MARKET breakout bar = first bar whose high > range_high.
+
+    This is the bar BT keys touchgo Rule M / Rule D to (study_orb_pipeline_
+    static_lock.py finds `first bar with high > range_high`), and the bar live
+    re-keys to under breakout_bar_source='market'. Sharing this single function
+    keeps BT and live identical by construction.
+
+    Args:
+        bars_df: DataFrame with 'timestamp' and 'high' columns, in ascending
+            timestamp order.
+        range_high: the 5-min opening-range high. Strict ``>`` — opening-range
+            bars (whose max high IS range_high) never match, so they are
+            excluded automatically.
+        range_end_ts: optional lower bound (tz-aware). When provided, only bars
+            at/after it are considered — excludes any pre-market spike above
+            range_high. Callers that pre-window their bars (BT) may pass None.
+
+    Returns:
+        UTC-aware pd.Timestamp of the first qualifying bar, or None if no bar
+        breaks the range high. Pure / no side effects; never raises.
+    """
+    if bars_df is None or len(bars_df) == 0:
+        return None
+    if 'timestamp' not in bars_df.columns or 'high' not in bars_df.columns:
+        return None
+    try:
+        ts = bars_df['timestamp']
+        if not pd.api.types.is_datetime64_any_dtype(ts):
+            ts = pd.to_datetime(ts, utc=True, errors='coerce')
+        elif ts.dt.tz is None:
+            ts = ts.dt.tz_localize('UTC')
+        highs = pd.to_numeric(bars_df['high'], errors='coerce')
+        mask = highs > range_high
+        if range_end_ts is not None:
+            mask = mask & (ts >= range_end_ts)
+        if not mask.any():
+            return None
+        return ts[mask].iloc[0]
+    except (AttributeError, TypeError, ValueError, KeyError):
+        # Degenerate / malformed bars — fail closed (no breakout bar found).
+        return None
+
+
 def load_touchgo_config(cfg_dict: Optional[dict]) -> TouchgoConfig:
     """Build TouchgoConfig from raw orb.yaml::filter.touchgo dict.
 
@@ -146,6 +218,13 @@ def load_touchgo_config(cfg_dict: Optional[dict]) -> TouchgoConfig:
     rule_d_enabled = bool(rule_d_dict.get('enabled', True))
     rule_d_revert_R = float(rule_d_dict.get('revert_R', 0.75))
     rule_d_exit_R = float(rule_d_dict.get('exit_R', -0.5))
+    breakout_bar_source = str(
+        cfg_dict.get('breakout_bar_source', 'market')
+    ).strip().lower() if isinstance(cfg_dict, dict) else 'market'
+    if breakout_bar_source not in ('market', 'fill'):
+        breakout_bar_source = 'market'
+    max_breakout_age_min = float(cfg_dict.get('max_breakout_age_min', 15.0)) \
+        if isinstance(cfg_dict, dict) else 15.0
 
     # Env-var overrides
     def _truthy(v: str) -> bool:
@@ -178,6 +257,15 @@ def load_touchgo_config(cfg_dict: Optional[dict]) -> TouchgoConfig:
             rule_d_exit_R = float(env_d_exit)
         except ValueError:
             pass
+    env_src = os.environ.get('ORB_TOUCHGO_BREAKOUT_BAR_SOURCE')
+    if env_src is not None and env_src.strip().lower() in ('market', 'fill'):
+        breakout_bar_source = env_src.strip().lower()
+    env_age = os.environ.get('ORB_TOUCHGO_MAX_BREAKOUT_AGE_MIN')
+    if env_age is not None:
+        try:
+            max_breakout_age_min = float(env_age)
+        except ValueError:
+            pass
 
     return TouchgoConfig(
         master_enabled=master_enabled,
@@ -186,4 +274,6 @@ def load_touchgo_config(cfg_dict: Optional[dict]) -> TouchgoConfig:
         rule_d_enabled=rule_d_enabled,
         rule_d_revert_R=rule_d_revert_R,
         rule_d_exit_R=rule_d_exit_R,
+        breakout_bar_source=breakout_bar_source,
+        max_breakout_age_min=max_breakout_age_min,
     )
