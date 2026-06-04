@@ -829,12 +829,21 @@ class ORBEngine:
         range_high — identical definition to BT (study_orb_pipeline_static_lock).
         Delegates to the shared trading.orb_touchgo_filter.find_breakout_bar_ts.
         Returns a tz-aware pd.Timestamp or None.
+
+        Requires the 9:30 session-open bar to be present so the search can be
+        anchored at the range end. If it is absent — e.g. a position rehydrated
+        after a mid-session restart, where the fresh StopMonitor window starts
+        mid-day — we DECLINE (return None) rather than do an unanchored search
+        that could match a random later bar trading above range_high. Declining
+        leaves breakout_bar_ts None, so _evaluate_touchgo stays inert for that
+        position (touchgo is a first-1-2-min filter; a position recovered hours
+        in is past it anyway). Mirrors the same 9:30 anchor that range detection
+        in _ingest_bars already depends on.
         """
         session_open_ts = _first_session_open_ts_utc(bars_df)
-        range_end_ts = (
-            session_open_ts + timedelta(minutes=self.range_minutes)
-            if session_open_ts is not None else None
-        )
+        if session_open_ts is None:
+            return None
+        range_end_ts = session_open_ts + timedelta(minutes=self.range_minutes)
         return find_breakout_bar_ts(bars_df, range_high, range_end_ts)
 
     def _ensure_breakout_bar_ts(self, symbol: str, bars_df: pd.DataFrame) -> None:

@@ -995,6 +995,31 @@ class TestTouchgoBreakoutBarReKey:
         assert not mock_stop_monitor.force_exit.called
         assert pos.rule_m_evaluated and pos.rule_d_evaluated  # guard marked done
 
+    def test_no_capture_when_session_open_absent_rehydration_guard(
+            self, engine, mock_stop_monitor):
+        """Regression: a position rehydrated after a mid-session restart sees a
+        fresh bars window with no 9:30 anchor. _ensure must DECLINE (leave
+        breakout_bar_ts None) rather than match a random afternoon bar trading
+        above range_high — otherwise touchgo could fire a spurious exit on a
+        position that's been open since the morning."""
+        sym = 'BRK'
+        # Afternoon-only window (14:00-14:02 ET = 18:00 UTC): no 9:30 bar, every
+        # bar trades above range_high (10.0), first bar closes weak.
+        bars = _make_bars([
+            (18, 0, 10.50, 10.80, 10.40, 10.45, 4000),  # high>10, weak-ish close
+            (18, 1, 10.45, 10.90, 10.40, 10.85, 4000),
+            (18, 2, 10.85, 11.00, 10.70, 10.95, 4000),
+        ], date_str=_DATE)
+        pos = _pending_pos(sym)
+        pos.order_id = ''  # filled (rehydrated)
+        pos.entry_time = pd.Timestamp(f'{_DATE} 13:35:00', tz='UTC')  # morning fill
+        engine.open_positions[sym] = pos
+        engine._ingest_bars(sym, bars)
+        # No 9:30 anchor -> no capture -> touchgo stays inert.
+        assert pos.breakout_bar_ts is None
+        engine._evaluate_touchgo(sym, bars)
+        assert not mock_stop_monitor.force_exit.called
+
     def test_legacy_fill_mode_no_capture_and_evaluates_fill_bar(
             self, engine, mock_stop_monitor):
         """breakout_bar_source='fill' restores legacy behaviour: _ensure does
