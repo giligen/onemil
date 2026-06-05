@@ -656,6 +656,37 @@ class Config:
         }
 
     @property
+    def orphan_reconciler_cfg(self):
+        """Build ReconcilerConfig from `orphan_reconciler` block.
+
+        All keys optional — defaults come from the dataclass. Returns the
+        dataclass instance ready to pass to reconcile_strategy_orphans.
+
+        Shipping defaults (set in config.yaml):
+          auto_close_enabled: true  — flip to false for observe-mode
+          max_closes_per_hour: 3    — blast-radius cap if something breaks
+          alert_cooldown_minutes: 60 — Telegram dedup per (strategy, symbol)
+          lookback_days: 14          — covers the 10-day SMU case
+        """
+        from trading.orphan_reconciler import ReconcilerConfig
+        raw = self._get_yaml("orphan_reconciler", default={}) or {}
+        defaults = ReconcilerConfig()
+        return ReconcilerConfig(
+            auto_close_enabled=bool(raw.get(
+                "auto_close_enabled", defaults.auto_close_enabled)),
+            lookback_days=int(raw.get(
+                "lookback_days", defaults.lookback_days)),
+            avg_entry_match_pct=float(raw.get(
+                "avg_entry_match_pct", defaults.avg_entry_match_pct)),
+            avg_entry_match_abs_min=float(raw.get(
+                "avg_entry_match_abs_min", defaults.avg_entry_match_abs_min)),
+            max_closes_per_hour=int(raw.get(
+                "max_closes_per_hour", defaults.max_closes_per_hour)),
+            alert_cooldown_minutes=int(raw.get(
+                "alert_cooldown_minutes", defaults.alert_cooldown_minutes)),
+        )
+
+    @property
     def two_tier_filter_cfg(self) -> dict:
         """Full two-tier filter config dict (threshold, cap, feature params).
 

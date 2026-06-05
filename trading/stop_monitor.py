@@ -223,19 +223,38 @@ def build_exit_update(event: 'StopExitEvent') -> Dict[str, Any]:
     pos.entry_price and pos.shares; in the unconfirmed branch the caller
     can pass any values — they will be discarded.
     """
+    # Defensive coercion for test doubles + legacy callers:
+    # - getattr fallbacks so callers without the new `confirmed` field
+    #   still work (default = confirmed = True).
+    # - _numf/_numi/_strs reject MagicMock + zero-ish values so loose
+    #   mocks in test_orb_telemetry / test_orb_integration produce
+    #   None instead of MagicMock leaking through to the DB write.
+    def _numf(v):
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None
+        f = float(v)
+        return f if f > 0 else None
+
+    def _numi(v):
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None
+        i = int(v)
+        return i if i > 0 else None
+
+    def _strs(v):
+        return v if isinstance(v, str) and v else None
+
     base: Dict[str, Any] = {
-        'exit_reason': event.exit_reason,
-        'exit_trigger_price': (
-            event.exit_trigger_price if event.exit_trigger_price else None
-        ),
-        'exit_quote_bid': event.exit_quote_bid or None,
-        'exit_quote_ask': event.exit_quote_ask or None,
-        'exit_quote_bid_size': event.exit_quote_bid_size or None,
-        'exit_quote_ask_size': event.exit_quote_ask_size or None,
-        'exit_limit_price': event.exit_limit_price or None,
-        'exit_pricing_method': event.pricing_method or None,
+        'exit_reason': _strs(getattr(event, 'exit_reason', None)),
+        'exit_trigger_price': _numf(getattr(event, 'exit_trigger_price', None)),
+        'exit_quote_bid': _numf(getattr(event, 'exit_quote_bid', None)),
+        'exit_quote_ask': _numf(getattr(event, 'exit_quote_ask', None)),
+        'exit_quote_bid_size': _numi(getattr(event, 'exit_quote_bid_size', None)),
+        'exit_quote_ask_size': _numi(getattr(event, 'exit_quote_ask_size', None)),
+        'exit_limit_price': _numf(getattr(event, 'exit_limit_price', None)),
+        'exit_pricing_method': _strs(getattr(event, 'pricing_method', None)),
     }
-    if not event.confirmed:
+    if not getattr(event, 'confirmed', True):
         # Pending verification — the orphan reconciler is the next layer.
         base['order_status'] = 'exit_pending_verification'
         return base

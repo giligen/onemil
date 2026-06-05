@@ -303,6 +303,13 @@ def _create_trading_engine(config, alpaca, db, notifier=None, stop_monitor=None,
         safety_net_sl_pct=config.safety_net_sl_pct,
         order_stream=order_stream,
     )
+    # Attach orphan reconciler config so the engine's sync paths can read
+    # the kill switch + rate limits from config.yaml. Same pattern as
+    # config.two_tier_filter_cfg / regime_sizing_cfg.
+    try:
+        engine.orphan_reconciler_cfg = config.orphan_reconciler_cfg
+    except Exception as e:
+        logger.warning(f"orphan_reconciler_cfg load failed: {e} — using defaults")
 
     # Load SPY data immediately so regime is ready if service starts mid-day
     engine._refresh_spy_data()
@@ -578,6 +585,10 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
             news_provider=news_provider,
             # news_worker attached post-scanner construction (see below)
         )
+        try:
+            macd_engine.orphan_reconciler_cfg = config.orphan_reconciler_cfg
+        except Exception as e:
+            logger.warning(f"MACD orphan_reconciler_cfg load failed: {e}")
         # T1.1: register bar handler on the shared StopMonitor so bar closes
         # for crossed_stocks flow into MACD's event queue (drained by scanner's
         # 1s sleep chunks for targeted check_entries).
@@ -640,6 +651,10 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
             config=orb_cfg, stop_monitor=stop_monitor,
             order_stream=orb_order_stream,
         )
+        try:
+            orb_engine.orphan_reconciler_cfg = config.orphan_reconciler_cfg
+        except Exception as e:
+            logger.warning(f"ORB orphan_reconciler_cfg load failed: {e}")
         if stop_monitor is not None and not stop_monitor.polling_mode:
             orb_engine.register_on_stop_monitor()
             logger.info("ORB: bar handler registered on shared StopMonitor")
