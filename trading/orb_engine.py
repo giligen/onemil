@@ -2025,7 +2025,10 @@ class ORBEngine:
     def check_exits(self) -> List[str]:
         """Drain StopMonitor exit events tagged strategy='orb'.
 
-        Updates DB + in-memory state for each exit.
+        Updates DB + in-memory state for each exit. Also runs the orphan
+        reconciler on a throttled cadence so intraday-occurring orphans
+        (e.g., a stop_loss_unconfirmed at noon) get resolved within
+        seconds, not next morning.
 
         Returns:
             list of symbols that exited on this tick.
@@ -2042,7 +2045,30 @@ class ORBEngine:
         for ev in events:
             self._handle_exit_event(ev)
             exited.append(ev.symbol)
+        # Throttled orphan reconciliation. The full sync_positions cost
+        # (~1 broker API call + DB queries) is acceptable every 60s.
+        self._maybe_reconcile_orphans()
         return exited
+
+    _last_reconcile_ts: float = 0.0
+    _reconcile_min_interval_s: float = 60.0
+
+    def _maybe_reconcile_orphans(self) -> None:
+        """Re-run reconciler if it's been > _reconcile_min_interval_s
+        since the last call. Mirrors the MACD wave pattern where
+        sync_positions runs every cycle. Throttling means we don't hit
+        Alpaca every 10s but we also don't wait until next morning to
+        catch an intraday stop_loss_unconfirmed.
+        """
+        import time as _time
+        now = _time.time()
+        if now - getattr(self, '_last_reconcile_ts', 0.0) < self._reconcile_min_interval_s:
+            return
+        self._last_reconcile_ts = now
+        try:
+            self.sync_positions()
+        except Exception as e:
+            logger.error(f"ORB: intraday reconcile raised: {e}")
 
     def _handle_exit_event(self, ev) -> None:
         """Update DB + open_positions from a StopMonitor exit event."""
@@ -2839,7 +2865,11 @@ class ORBEngine:
             if sym not in self.open_positions
         ]
         if orphans:
-            # Gather per-orphan info for the alert
+            # Summary log (no Telegram) — the reconciler's per-orphan
+            # alerts below ARE rate-limited (alert_cooldown_minutes).
+            # Pre-2026-06-05 we Telegram'd this summary unconditionally,
+            # which produced a duplicate alert per sync cycle for any
+            # long-lived orphan (e.g., 10 days × 1 alert/min = ~14k spam).
             details = []
             for sym in orphans:
                 p = alp_pos_by_sym[sym]
@@ -2852,10 +2882,9 @@ class ORBEngine:
                     details.append(f"{sym} qty={qty} avg=${avg:.2f} upl=${upl:+.0f}")
                 except Exception:
                     details.append(f"{sym} (parse-failed)")
-            self._notify_error(
-                f"ORPHAN ALPACA POSITIONS ({len(orphans)}) not tracked by ORB — "
-                f"{'; '.join(details)}. Likely from a failed force-close or "
-                f"cross-day state drift."
+            logger.error(
+                f"ORB: orphan(s) detected — {'; '.join(details)} — "
+                f"deferring to reconciler for classification + action"
             )
 
             # 2026-06-05: orphan reconciler replaces the old in-engine

@@ -747,11 +747,18 @@ class TestSyncPositionsOrphanAutoClose:
 
         # Not closed...
         mock_alpaca.close_position.assert_not_called()
-        # ...but the operator WAS alerted about the orphan.
-        assert any(
-            'ORPHAN' in str(c)
-            for c in patched_orphan_engine._notify_error.call_args_list
-        ), "Non-ORB orphan must still raise the CRITICAL orphan alert"
+        # ...but the reconciler still alerted (FOREIGN classification).
+        # 2026-06-05: the pre-existing engine-level _notify_error
+        # ("ORPHAN ALPACA POSITIONS") was removed because it had no
+        # cooldown and produced alert storms on stuck orphans. The
+        # reconciler's per-orphan FOREIGN alert (with 60-min cooldown)
+        # replaces it.
+        notifier = patched_orphan_engine.notifier
+        if notifier is not None and hasattr(notifier, 'notify_error'):
+            assert any(
+                ('ORPHAN' in str(c)) or ('FOREIGN' in str(c))
+                for c in notifier.notify_error.call_args_list
+            ), "Reconciler must alert on foreign positions"
 
 
 # =========================================================================

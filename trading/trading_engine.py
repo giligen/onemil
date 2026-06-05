@@ -2812,6 +2812,12 @@ class TradingEngine:
         # Drain real-time bar events FIRST (from WebSocket thread, via queue)
         rt_result = self._drain_bar_events()
 
+        # Throttled intraday orphan reconciliation. Without this hook,
+        # an unconfirmed-exit happening at 10am stays orphaned until
+        # next morning's reset_daily. ORB has the same pattern; MACD
+        # wave runs its own sync_positions every cycle.
+        self._maybe_reconcile_orphans()
+
         # Marginability cache is per-day (cleared in reset_daily). Marginability
         # is stable within a session — clearing per-cycle was wasteful, costing
         # ~150ms per qualified symbol per cycle (60 cycles/hour = 60 redundant
@@ -4280,6 +4286,36 @@ class TradingEngine:
         # Detect orphan positions from prior days (registration only —
         # close decisions are the reconciler's job, see above).
         self._close_orphan_positions(trades_today)
+
+    _last_reconcile_ts: float = 0.0
+    _reconcile_min_interval_s: float = 60.0
+
+    def _maybe_reconcile_orphans(self) -> None:
+        """Throttled intraday orphan reconciler. Mirrors ORB's pattern:
+        runs every _reconcile_min_interval_s (default 60s) from
+        run_pattern_check. Catches intraday stop_loss_unconfirmed events
+        within ~1min instead of next-morning's reset_daily."""
+        # Local import so tests that patch `trading.trading_engine.time_mod`
+        # don't break the throttle check.
+        import time as _time
+        try:
+            now = float(_time.time())
+        except Exception:
+            return  # weird; just skip this cycle
+        last = float(getattr(self, '_last_reconcile_ts', 0.0) or 0.0)
+        if now - last < float(self._reconcile_min_interval_s):
+            return
+        self._last_reconcile_ts = now
+        try:
+            today_symbols = set(self._traded_symbols)
+            reconcile_strategy_orphans(
+                strategy='bull_flag', alpaca=self.alpaca, db=self.db,
+                notifier=self.notifier, tracked_symbols=today_symbols,
+                cfg=getattr(self, 'orphan_reconciler_cfg',
+                             None) or ReconcilerConfig(),
+            )
+        except Exception as e:
+            logger.error(f"bull_flag intraday reconciler raised: {e}")
 
         logger.info(
             f"Startup sync: {len(self._traded_symbols)} traded symbols, "

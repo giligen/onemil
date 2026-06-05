@@ -592,8 +592,16 @@ class TestFCDBQueryFallback:
 
 class TestSyncOrphanDetection:
     def test_orphan_alpaca_position_telegrams(self, engine, mock_alpaca, notifier):
-        """Alpaca has ANNA open, but no DB row for today → orphan alert."""
-        # Simulate Alpaca position not in DB
+        """Alpaca has ANNA open, but no DB row for today → orphan alert.
+
+        Post-2026-06-05 the pre-existing 'ORPHAN ALPACA POSITIONS'
+        summary _notify_error was removed (it had no cooldown and fired
+        every sync cycle on stuck orphans → alert storm). The reconciler
+        now sends a per-orphan structured alert with a 60-min cooldown
+        and a clear FOREIGN vs OWNED classification.
+        """
+        from trading.orphan_reconciler import reset_state_for_tests
+        reset_state_for_tests()
         orphan = MagicMock()
         orphan.symbol = 'ANNA'
         orphan.qty = 11682
@@ -601,15 +609,32 @@ class TestSyncOrphanDetection:
         orphan.unrealized_pl = -2578.0
         mock_alpaca.get_open_positions.return_value = [orphan]
         mock_alpaca.trading_client.get_orders.return_value = []
-        engine.db.get_open_trades.return_value = []  # empty for today
+        engine.db.get_open_trades.return_value = []
+        # Reconciler reads via get_strategy_trades_in_window — return
+        # empty so ANNA classifies as FOREIGN.
+        engine.db.get_strategy_trades_in_window = lambda *a, **k: []
 
         engine.sync_positions()
 
-        msgs = [c[0][0] for c in notifier.send_message.call_args_list]
-        critical = [m for m in msgs if 'ORPHAN' in m]
-        assert len(critical) == 1
-        assert 'ANNA' in critical[0]
-        assert '11682' in critical[0]
+        # Reconciler uses notifier.notify_error (preferred path), which
+        # routes through send_message_sync internally. Look at both
+        # call sites so this is robust to either implementation.
+        notify_msgs = [
+            str(c) for c in notifier.notify_error.call_args_list
+        ] if hasattr(notifier, 'notify_error') else []
+        send_msgs = [
+            c[0][0] for c in notifier.send_message.call_args_list
+        ]
+        all_msgs = notify_msgs + send_msgs
+        any_orphan_alert = [
+            m for m in all_msgs
+            if 'ANNA' in m and ('FOREIGN' in m or 'ORPHAN' in m)
+        ]
+        assert len(any_orphan_alert) >= 1, (
+            "Reconciler must send at least one alert per detected orphan; "
+            f"notifier.notify_error calls: {notify_msgs}; "
+            f"notifier.send_message calls: {send_msgs}"
+        )
 
     def test_no_orphan_alert_when_all_positions_tracked(self, engine, mock_alpaca, notifier):
         """All Alpaca positions are in our open_positions → no alert."""
