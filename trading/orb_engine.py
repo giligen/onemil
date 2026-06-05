@@ -1832,11 +1832,19 @@ class ORBEngine:
         risk_per_share = max(pos.entry_price - pos.stop_price, 0.0)
 
         # DB update — include entry slippage attribution (parity with bull flag + MACD wave).
+        # 2026-06-05 fix: also persist the ACTUAL filled qty. Without this,
+        # `shares` in the DB stays as the original order qty (e.g., RPGL 6-04
+        # showed shares=3596 in the DB but only 1 share actually filled), and
+        # any downstream notional/exposure query computed off `shares` is wrong.
+        # Both `shares` and `filled_qty` get the actual filled count — the
+        # original order qty is recoverable from Alpaca order history if needed.
         fill_update: Dict[str, object] = {
             'order_status': 'filled',
             'fill_price': fill_price,
             'filled_at': fill_at,
             'order_filled_at': fill_at,
+            'shares': shares,
+            'filled_qty': shares,
         }
         if pos.order_submitted_at is not None:
             fill_update['order_submitted_at'] = pos.order_submitted_at
