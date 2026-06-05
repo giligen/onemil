@@ -3456,6 +3456,17 @@ class TradingEngine:
             'bar_close_at': _bar_close_at,
         }
 
+        # Account-level halt check (margin call / blocked / status). Refuses
+        # NEW entries only; existing position management is unaffected.
+        from trading import system_state as _system_state
+        if _system_state.is_account_halted():
+            _det = _system_state.get_halt_details()
+            logger.warning(
+                f"{symbol}: BF entry refused — account halt active "
+                f"(event={_det.get('event_type')}, since {_det.get('halted_at')})"
+            )
+            return None
+
         real_stop_level = plan.stop_loss_price
         if self.stop_monitor:
             # Simple stop-limit (no bracket) — avoids 3x margin reservation

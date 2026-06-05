@@ -237,6 +237,21 @@ class RealtimeScanner:
         _sm_unhealthy_since: Optional[float] = None
         _SM_DEAD_THRESHOLD_S = 180.0          # tolerate up to 3 minutes
         _SM_HEALTH_STALE_S = 90.0             # is_healthy() leniency on event-staleness
+
+        # Account-state monitor — detects PDT-replacement (intraday margin
+        # framework) state transitions. Margin calls under the new framework
+        # surface via trading_blocked/account_blocked/status fields, since
+        # there is no dedicated 'margin_call' field on the Account object
+        # (verified by probing live account 2026-06-05).
+        # Edge-triggered: only state CHANGES emit events. First sample yields
+        # no events (no prior to compare to).
+        from trading.account_state_monitor import (
+            diff_state as _acc_diff_state,
+            snapshot_from_account_dict as _acc_snapshot_from_dict,
+            is_halt_worthy as _acc_is_halt_worthy,
+        )
+        from trading import system_state as _system_state
+        _last_acct_snap = None
         # Reusable thread pool for parallel engine ticks (bull flag + MACD wave).
         # Created once, cleaned up after loop exits.
         _engine_pool = ThreadPoolExecutor(
@@ -399,6 +414,47 @@ class RealtimeScanner:
                     logger.error("Exiting — StopMonitor infrastructure failure")
                     import sys
                     sys.exit(1)
+
+            # Account-state monitor — once per cycle. Cheap (1 REST call,
+            # piggybacks on existing get_account_info infrastructure). On any
+            # halt-worthy transition: log CRITICAL (Telegram error handler
+            # routes the message), set the process-wide halt flag, and let
+            # the engines refuse new entries. Existing positions continue to
+            # be managed normally — exits/lock_stops still fire.
+            try:
+                _acc_info = self.alpaca.get_account_info()
+                _acc_snap = _acc_snapshot_from_dict(_acc_info)
+            except Exception as _e:
+                _acc_snap = None
+                logger.debug(f"account-state: get_account_info failed: {_e}")
+            if _acc_snap is not None:
+                _acc_events = _acc_diff_state(_last_acct_snap, _acc_snap)
+                _last_acct_snap = _acc_snap
+                for _ev in _acc_events:
+                    _msg = (
+                        f"account-state {_ev.severity.value.upper()}: "
+                        f"{_ev.event_type} — {_ev.detail}"
+                    )
+                    if _ev.severity.value == 'critical':
+                        logger.critical(_msg)
+                        _system_state.set_account_halt(
+                            event_type=_ev.event_type,
+                            reason=_ev.detail,
+                            occurred_at=_ev.occurred_at,
+                        )
+                        if self.notifier:
+                            try:
+                                self.notifier.send_message_sync(
+                                    f"CRITICAL: {_msg}\n"
+                                    f"Account-level halt set; new entries refused. "
+                                    f"Existing positions remain managed."
+                                )
+                            except Exception:
+                                pass
+                    elif _ev.severity.value == 'warn':
+                        logger.warning(_msg)
+                    else:
+                        logger.info(_msg)
 
             # Engine ticks — bull flag + MACD wave + ORB run in PARALLEL.
             # Each engine has isolated mutable state and the Alpaca SDK is

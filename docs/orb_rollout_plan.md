@@ -18,10 +18,21 @@ The 16-month BT baseline shows **$342K P&L / $18K max DD on a $100K account budg
 | | Value | Notes |
 |---|---:|---|
 | Cash | $80K | Real account, not paper |
-| PDT status | Yes | Required for 4× day-trading BP |
-| Day-trading BP (4× cash) | ~$320K | Intraday only; ORB closes 15:45 ET so overnight limits don't apply |
+| Margin-enabled | Yes | Required for 4× intraday buying power |
+| Intraday BP (~4× cash) | ~$320K | ORB closes 15:45 ET so overnight limits don't apply |
 | Overnight BP (2× Reg T) | ~$160K | N/A for ORB |
-| **Max intraday deployment goal** | **$320K** | i.e., willing to use full DTBP at final stage |
+| **Max intraday deployment goal** | **$320K** | i.e., willing to use full intraday BP at final stage |
+
+> **Framework note (2026-06-05)**: FINRA retired the Pattern Day Trader rule
+> and Alpaca replaced it with a real-time intraday margin framework. Prior
+> versions of this doc referenced PDT classification and `daytrading_buying_power`;
+> those concepts are deprecated. Under the new framework the same ~4× intraday
+> BP is available on margin-enabled accounts (minimum equity now $2K, not $25K),
+> margin enforcement happens at order submission (server-side pre-trade
+> rejection) and via real-time margin calls. Sustained unmet margin calls
+> within 5 business days can lead to 90-day account restriction — see the
+> `trading/account_state_monitor.py` halt mechanism for our automated
+> protection.
 
 If your cash level changes materially (> ±20%), recompute the stages table below and update this doc.
 
@@ -38,7 +49,7 @@ Each stage = one row. Switch by editing `orb.yaml` (see "How to apply" below) an
 | **1** | **50,000** | **1,500** | **−2,500** | $92K | 115% (light margin) |
 | **2** | **80,000** | **2,400** | **−4,000** | $147K | 184% (moderate margin) |
 | **3** | **120,000** | **3,600** | **−6,000** | $221K | 276% (heavy margin) |
-| **4** — Full | **174,000** | **5,200** | **−8,800** | $320K | 400% (full DTBP) |
+| **4** — Full | **174,000** | **5,200** | **−8,800** | $320K | 400% (full intraday BP) |
 
 **Never change** (across all stages):
 - `max_concurrent: 4`
@@ -151,7 +162,7 @@ triggers fired (if any).
 ### What this phase WILL NOT teach you
 
 - Stage 4 capacity behavior (sizes too small to test market impact)
-- Margin/DTBP utilization stress (using ~5% of available BP)
+- Margin / intraday-BP utilization stress (using ~5% of available BP)
 - Most operational risk (most bugs are size-independent)
 
 Capacity questions wait for Stage 3-4 actual scaling.

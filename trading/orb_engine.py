@@ -1472,6 +1472,17 @@ class ORBEngine:
                 f"(stop={plan.stop_price:.2f}, R=${plan.range_size:.2f})"
             )
             return 'dry-run-' + plan.symbol
+        # Account-level halt check (set by the scanner's account-state monitor
+        # on margin call / blocked / status-leaves-ACTIVE). Existing positions
+        # keep being managed; only NEW entries are refused.
+        from trading import system_state as _system_state
+        if _system_state.is_account_halted():
+            _det = _system_state.get_halt_details()
+            logger.warning(
+                f"ORB: {plan.symbol} entry refused — account halt active "
+                f"(event={_det.get('event_type')}, since {_det.get('halted_at')})"
+            )
+            return None
         # Safety-net bracket legs (REAL exit is monitored client-side by StopMonitor):
         #   SL: 10% below entry (wide — belt-and-suspenders if StopMonitor WS dies)
         #   TP: 300% of entry (unreachable — ORB has no fixed target; legally must set)
