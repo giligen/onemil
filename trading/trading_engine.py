@@ -27,6 +27,10 @@ from trading.pattern_detector import BullFlagDetector
 from trading.trade_planner import TradePlanner, TradePlan
 from trading.news_kill_guard import news_kill_decision
 from trading.order_executor import OrderExecutor
+from trading.orphan_reconciler import (
+    ReconcilerConfig, reconcile_strategy_orphans,
+)
+from trading.stop_monitor import build_exit_update
 from trading.position_manager import PositionManager
 from notifications.telegram_notifier import TelegramNotifier
 
@@ -2395,7 +2399,6 @@ class TradingEngine:
                     f"exit_reason={event.exit_reason}. Reconciler will retry."
                 )
                 if event.trade_db_id:
-                    from trading.stop_monitor import build_exit_update
                     try:
                         self.db.update_trade(event.trade_db_id,
                                              build_exit_update(event))
@@ -4252,27 +4255,31 @@ class TradingEngine:
                             f"StopMonitor watch: {e} (safety-net SL active)"
                         )
 
-        # Detect orphan positions from prior days
-        self._close_orphan_positions(trades_today)
-
-        # 2026-06-05: cross-strategy orphan reconciler. Detects + closes
-        # any broker position bull flag is supposed to own but doesn't
-        # track (the failure mode that hid SMU/QBTZ in MACD/ORB for
-        # 10/4 days). Uses the hardened predicate so it won't touch
-        # other strategies' positions on the shared MAIN account.
+        # 2026-06-05: cross-strategy orphan reconciler. Run BEFORE the
+        # _close_orphan_positions registration step so the reconciler
+        # sees prior-day broker positions as candidates (not as already-
+        # tracked). _close_orphan_positions then registers any survivors
+        # in _traded_symbols to prevent same-day re-entry.
         try:
-            from trading.orphan_reconciler import (
-                ReconcilerConfig, reconcile_strategy_orphans,
-            )
-            tracked = set(self._traded_symbols)
+            # tracked = symbols the engine is ACTIVELY managing right now.
+            # At startup we have no in-flight bull flag positions, so any
+            # broker position belongs in the orphan candidates pool. Past
+            # this point, anything still on the broker is either ours and
+            # got close-submitted, or foreign and got alerted.
+            today_symbols = {t['symbol'] for t in trades_today
+                             if t.get('fill_price') is not None}
             reconcile_strategy_orphans(
                 strategy='bull_flag', alpaca=self.alpaca, db=self.db,
-                notifier=self.notifier, tracked_symbols=tracked,
+                notifier=self.notifier, tracked_symbols=today_symbols,
                 cfg=getattr(self, 'orphan_reconciler_cfg',
                              None) or ReconcilerConfig(),
             )
         except Exception as e:
             logger.error(f"bull_flag orphan reconciler raised: {e}")
+
+        # Detect orphan positions from prior days (registration only —
+        # close decisions are the reconciler's job, see above).
+        self._close_orphan_positions(trades_today)
 
         logger.info(
             f"Startup sync: {len(self._traded_symbols)} traded symbols, "
@@ -4411,14 +4418,19 @@ class TradingEngine:
         return cancelled
 
     def _close_orphan_positions(self, trades_today: List[Dict]) -> None:
-        """Detect and close positions from prior days opened by THIS node.
+        """Register prior-day positions in `_traded_symbols` so we don't
+        re-trade them today. ACTUAL close is delegated to the shared
+        orphan_reconciler (called separately from _sync_startup_state),
+        which applies the hardened predicate so we never accidentally
+        flatten another strategy's identical-symbol position.
 
-        An orphan is an Alpaca position that THIS node opened (has a record
-        in our trades DB) but failed to close (e.g., service crashed after
-        market close without running force_close).
-
-        Positions with NO record in our DB are assumed to belong to another
-        node/strategy sharing the same Alpaca account — leave them alone.
+        Before 2026-06-05 this method ALSO called close_position. That
+        path had the same vulnerability the SMU/QBTZ post-mortem
+        exposed in ORB: any DB row tagged strategy='bull_flag' within
+        the lookback window claimed ownership regardless of avg-entry
+        match or stale signal. An unknown-strategy or manual position
+        could match by symbol coincidence and get flattened. The
+        reconciler does not have this hole.
 
         Args:
             trades_today: Today's trades from DB (already fetched)
@@ -4438,44 +4450,12 @@ class TradingEngine:
             symbol = pos['symbol']
             if symbol in today_symbols:
                 continue  # Known today — handled by startup sync
-
-            # Check if THIS node has any record of this position in our DB
-            # (open trade from today or any prior day). 2026-05-19 fix: filter
-            # by strategy='bull_flag' so we don't mis-claim ORB or MACD-wave
-            # positions as ours. Pre-fix, BF orphan-cleanup tried to close
-            # today's ORB CORD/LMRI/PURR/WAY positions, which (separately)
-            # also failed on held_for_orders from ORB's own bracket legs.
-            our_trade = None
-            if self.db:
-                # Scan today + the last 4 days of trades, bull_flag only.
-                from datetime import timedelta
-                for days_back in range(5):
-                    _check_date = (date.today() - timedelta(days=days_back)).isoformat()
-                    _trades = self.db.get_trades_by_date(_check_date)
-                    if any(
-                        t['symbol'] == symbol
-                        and t.get('strategy', 'bull_flag') == 'bull_flag'
-                        for t in _trades
-                    ):
-                        our_trade = True
-                        break
-
-            if our_trade:
-                # We opened it but didn't close — orphan from prior day.
-                # 2026-05-19 fix: cancel any open orders for the symbol FIRST
-                # to release held_for_orders (e.g., bracket SL/TP legs from
-                # a prior bracket entry). Without this step, close_position
-                # fails with "insufficient qty available" because Alpaca is
-                # holding the shares for the still-open legs.
-                logger.warning(f"{symbol}: Orphan position from prior day (ours) — closing")
-                self._cancel_open_orders_for_symbol(symbol)
-                try:
-                    self.alpaca.close_position(symbol)
-                    self._traded_symbols.add(symbol)
-                    logger.info(f"{symbol}: Orphan position closed")
-                except Exception as e:
-                    logger.error(f"{symbol}: Failed to close orphan position: {e}")
-            else:
-                # Not ours — belongs to another node/strategy
-                logger.info(f"{symbol}: Position exists but not ours — skipping (other node/strategy)")
-                self._traded_symbols.add(symbol)  # Prevent this node from trading it
+            # Register the symbol either way so bull flag doesn't try to
+            # take a fresh setup on a symbol the broker already holds —
+            # whether it's ours or not. The reconciler handles the
+            # close decision separately.
+            self._traded_symbols.add(symbol)
+            logger.info(
+                f"{symbol}: pre-existing broker position registered with "
+                f"_traded_symbols (close decision deferred to reconciler)"
+            )

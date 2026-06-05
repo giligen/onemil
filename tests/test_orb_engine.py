@@ -568,7 +568,9 @@ class TestSyncPositionsOrphanAutoClose:
         mock_alpaca.trading_client.cancel_order_by_id.return_value = True
         mock_db.get_open_trades.return_value = []
 
-        # Reconciler reads via db._trades_conn.execute(...) — wire a stub.
+        # Reconciler now prefers the public
+        # Database.get_strategy_trades_in_window — implement it via a
+        # closure so individual tests can override engine._reconciler_rows.
         engine._reconciler_rows = [{
             'id': 99, 'trade_date': '2026-06-01', 'symbol': 'OPRA',
             'strategy': 'orb', 'fill_price': 10.0, 'filled_qty': 100,
@@ -576,12 +578,24 @@ class TestSyncPositionsOrphanAutoClose:
             'order_status': 'closed',
         }]
 
+        def _get_strategy_trades(strategy, since_date, symbols=None):
+            out = []
+            for r in engine._reconciler_rows:
+                if r.get('strategy') != strategy:
+                    continue
+                if symbols and r['symbol'] not in symbols:
+                    continue
+                out.append(dict(r))
+            return out
+
+        mock_db.get_strategy_trades_in_window = _get_strategy_trades
+
+        # Back-compat fallback if anything still pokes the private path.
         class _Cur:
             def __init__(self, rows): self._rows = rows
             def fetchall(self): return list(self._rows)
 
         def _execute(sql, params):
-            # The reconciler filters by (strategy, lookback_start, *symbols).
             return _Cur(engine._reconciler_rows)
 
         mock_db._trades_conn = MagicMock()

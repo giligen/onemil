@@ -208,21 +208,37 @@ class TestUnknownStrategySafety:
 # =========================================================================
 
 def _stub_db(rows_by_symbol=None):
-    """A DB stub that satisfies the queries the reconciler issues."""
+    """A DB stub that satisfies the queries the reconciler issues.
+
+    Implements the public `get_strategy_trades_in_window` API the
+    reconciler uses; also keeps the legacy `_trades_conn.execute`
+    fallback for back-compat with the old code path.
+    """
     rows_by_symbol = rows_by_symbol or {}
     flat_rows = [r for rs in rows_by_symbol.values() for r in rs]
     db = MagicMock()
 
+    def _get_strategy_trades(strategy, since_date, symbols=None):
+        out = []
+        for r in flat_rows:
+            if r.get('strategy') != strategy:
+                continue
+            if str(r.get('trade_date') or '') < str(since_date):
+                continue
+            if symbols and r['symbol'] not in symbols:
+                continue
+            out.append(dict(r))
+        return out
+
+    db.get_strategy_trades_in_window = _get_strategy_trades
+
     class Cursor:
         def __init__(self, results):
             self._results = results
-
         def fetchall(self):
             return self._results
 
     def _execute(sql, params):
-        # The reconciler issues exactly one query per call. Use the
-        # symbol IN (...) tail to filter the stub rows.
         symbol_filter = set(params[2:])
         out = [r for r in flat_rows if r['symbol'] in symbol_filter]
         return Cursor(out)

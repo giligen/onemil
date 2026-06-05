@@ -40,6 +40,10 @@ from trading.orb_touchgo_filter import (
     TouchgoConfig, evaluate_rule_d, evaluate_rule_m, find_breakout_bar_ts,
     load_touchgo_config,
 )
+from trading.orphan_reconciler import (
+    ReconcilerConfig, reconcile_strategy_orphans,
+)
+from trading.stop_monitor import build_exit_update
 
 
 logger = logging.getLogger(__name__)
@@ -2061,7 +2065,6 @@ class ORBEngine:
 
         # Shared build_exit_update gives us the confirmed/unconfirmed-correct
         # base payload; ORB adds its own exit_slippage + qty fields on top.
-        from trading.stop_monitor import build_exit_update
         exit_update = build_exit_update(ev)
         exit_limit_price = exit_update.get('exit_limit_price')
         if confirmed:
@@ -2864,15 +2867,33 @@ class ORBEngine:
             # is safe to run any time of day — same-day fresh entries are
             # excluded by the cross-day stale-signal check.
             try:
-                from trading.orphan_reconciler import (
-                    ReconcilerConfig, reconcile_strategy_orphans,
-                )
                 cfg = getattr(self, 'orphan_reconciler_cfg', None) or ReconcilerConfig()
+                # alp_pos_by_sym was built at the top of sync_positions —
+                # pass it in instead of re-hitting Alpaca.
+                broker_snapshot = []
+                for p in alp_pos_by_sym.values():
+                    try:
+                        broker_snapshot.append({
+                            'symbol': getattr(p, 'symbol', None) or p.get('symbol'),
+                            'qty': int(getattr(p, 'qty', 0) or
+                                       (p.get('qty', 0) if isinstance(p, dict) else 0)),
+                            'avg_entry_price': float(
+                                getattr(p, 'avg_entry_price', 0) or
+                                (p.get('avg_entry_price', 0) if isinstance(p, dict) else 0)
+                            ),
+                            'unrealized_pl': float(
+                                getattr(p, 'unrealized_pl', 0) or
+                                (p.get('unrealized_pl', 0) if isinstance(p, dict) else 0)
+                            ),
+                        })
+                    except Exception:
+                        continue
                 reconcile_strategy_orphans(
                     strategy=STRATEGY_NAME, alpaca=self.alpaca, db=self.db,
                     notifier=self.notifier,
                     tracked_symbols=set(self.open_positions.keys()),
                     cfg=cfg,
+                    broker_positions=broker_snapshot,
                 )
             except Exception as e:
                 logger.error(

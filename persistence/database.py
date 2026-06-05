@@ -1095,6 +1095,39 @@ class Database:
         'exit_pending_verification',
     )
 
+    def get_strategy_trades_in_window(
+        self, strategy: str, since_date: str,
+        symbols: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """All rows for ``strategy`` on/after ``since_date``, optionally
+        filtered to ``symbols``.
+
+        Returns rows regardless of order_status or exit state — used by the
+        orphan reconciler, which needs to see poisoned-but-marked-exited
+        rows (exit_price set, exit_reason='stop_loss_unconfirmed') that
+        get_open_trades would filter out.
+
+        Public alternative to the private _trades_conn.execute pattern;
+        gives tests a clean seam to mock.
+        """
+        if not symbols:
+            cursor = self._trades_conn.execute(
+                "SELECT * FROM trades "
+                "WHERE strategy = ? AND trade_date >= ? "
+                "ORDER BY trade_date DESC, id DESC",
+                (strategy, since_date),
+            )
+        else:
+            placeholders = ','.join('?' for _ in symbols)
+            cursor = self._trades_conn.execute(
+                f"SELECT * FROM trades "
+                f"WHERE strategy = ? AND trade_date >= ? "
+                f"AND symbol IN ({placeholders}) "
+                f"ORDER BY trade_date DESC, id DESC",
+                (strategy, since_date, *symbols),
+            )
+        return [dict(row) for row in cursor.fetchall()]
+
     def get_open_trades(self, trade_date: str, strategy: str = None) -> List[Dict[str, Any]]:
         """
         Get trades that are still open (no exit) for a given date.

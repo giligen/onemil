@@ -84,6 +84,19 @@ class ReconcilerConfig:
     # few seconds, so without a cooldown we'd see 100s of duplicates.
     alert_cooldown_minutes: int = 60
 
+    # Fill-poll budget after submitting close. Market orders typically
+    # fill in <2s; we poll briefly so the recovery row carries the actual
+    # exit_price. If we run out of budget, we mark the row as
+    # exit_pending_verification (NOT a fake exit) and a separate
+    # in-flight tracker prevents duplicate close submission next cycle.
+    fill_poll_timeout_s: float = 5.0
+    fill_poll_interval_s: float = 0.5
+
+    # In-flight close cooldown — after submitting close, skip this symbol
+    # for N seconds even if broker still reports the position. Prevents
+    # duplicate close submissions while the original is propagating.
+    inflight_close_cooldown_s: float = 30.0
+
 
 @dataclass(frozen=True)
 class OrphanAction:
@@ -153,7 +166,10 @@ def is_owned_orphan(
         return False
 
     # 4. Qty sanity — larger broker position implies someone else added.
-    db_qty = db_row.get('filled_qty') or 0
+    # Fallback to the planned `shares` column when filled_qty is missing
+    # (legacy rows + tests). Both express "this is the max # of shares we
+    # ever held"; the partial-fill sanity still holds for either.
+    db_qty = int(db_row.get('filled_qty') or db_row.get('shares') or 0)
     broker_qty = int(broker_pos.get('qty') or 0)
     if db_qty <= 0 or broker_qty > db_qty:
         return False
@@ -193,6 +209,10 @@ class _ReconcilerState:
     close_timestamps: Dict[str, List[datetime]] = field(default_factory=dict)
     # last alert per (strategy, symbol)
     last_alert: Dict[tuple, datetime] = field(default_factory=dict)
+    # in-flight close orders awaiting fill: (strategy, symbol) → expiry datetime.
+    # Stops a follow-up sync from re-submitting close on a symbol whose
+    # close just went out but hasn't propagated to get_open_positions yet.
+    inflight_close: Dict[tuple, datetime] = field(default_factory=dict)
 
 
 _state = _ReconcilerState()
@@ -216,20 +236,50 @@ def _closes_in_last_hour(strategy: str) -> int:
 
 def _should_alert(strategy: str, symbol: str, cooldown_minutes: int) -> bool:
     """True iff no alert has been sent for (strategy, symbol) within the
-    cooldown window."""
-    key = (strategy, symbol)
+    cooldown window. Also prunes expired entries so the dict can't grow
+    unbounded across long-running processes."""
     now = datetime.now(timezone.utc)
+    cooldown = timedelta(minutes=cooldown_minutes)
+    # Prune expired entries opportunistically — bounds memory.
+    if len(_state.last_alert) > 64:
+        expired = [k for k, t in _state.last_alert.items()
+                   if (now - t) >= cooldown]
+        for k in expired:
+            _state.last_alert.pop(k, None)
+    key = (strategy, symbol)
     last = _state.last_alert.get(key)
-    if last is not None and (now - last) < timedelta(minutes=cooldown_minutes):
+    if last is not None and (now - last) < cooldown:
         return False
     _state.last_alert[key] = now
     return True
+
+
+def _is_close_inflight(strategy: str, symbol: str) -> bool:
+    """Has a close been recently submitted for this (strategy, symbol)?
+
+    Also prunes expired entries while we're here. Returning True means
+    the reconciler should SKIP this symbol — no detection, no alert, no
+    second close submission.
+    """
+    now = datetime.now(timezone.utc)
+    expired = [k for k, exp in _state.inflight_close.items() if exp <= now]
+    for k in expired:
+        _state.inflight_close.pop(k, None)
+    return (strategy, symbol) in _state.inflight_close
+
+
+def _mark_close_inflight(strategy: str, symbol: str,
+                          cooldown_s: float) -> None:
+    _state.inflight_close[(strategy, symbol)] = (
+        datetime.now(timezone.utc) + timedelta(seconds=cooldown_s)
+    )
 
 
 def reset_state_for_tests() -> None:
     """Clear in-memory rate-limit state. Tests only."""
     _state.close_timestamps.clear()
     _state.last_alert.clear()
+    _state.inflight_close.clear()
 
 
 # =========================================================================
@@ -335,6 +385,49 @@ def _write_recovery_row(
 # Main reconciliation entry point
 # =========================================================================
 
+def _poll_for_fill(
+    fetcher: Callable[[str], Dict[str, Any]],
+    order_id: str,
+    timeout_s: float,
+    interval_s: float,
+) -> tuple:
+    """Poll the order until filled or timeout. Returns (fill_price, fill_qty).
+
+    Break conditions (any):
+      - get a non-zero fill_price + fill_qty (assume fill or partial fill —
+        good enough for recovery row).
+      - status reports terminal-non-filled (canceled / rejected / expired).
+      - timeout hit.
+
+    Returns (None, 0) on no fill or polling failure. The caller decides
+    whether to write a recovery row (got fill) or a pending-verification
+    row (poll timed out).
+    """
+    import time as _time
+    deadline = _time.time() + timeout_s
+    fill_price: Optional[float] = None
+    fill_qty: int = 0
+    while _time.time() < deadline:
+        try:
+            o = fetcher(order_id)
+        except Exception as e:
+            logger.warning(f"orphan reconciler: fill poll error: {e}")
+            return (None, 0)
+        if not isinstance(o, dict):
+            break
+        status = str(o.get('status') or '').lower()
+        fq = int(o.get('filled_qty') or 0)
+        fp = o.get('filled_avg_price')
+        if fp is not None and fq > 0:
+            fill_price = float(fp)
+            fill_qty = fq
+            break  # Got a fill — done.
+        if status in ('canceled', 'rejected', 'expired'):
+            break
+        _time.sleep(interval_s)
+    return (fill_price, fill_qty)
+
+
 def reconcile_strategy_orphans(
     *,
     strategy: str,
@@ -346,14 +439,16 @@ def reconcile_strategy_orphans(
     today_et: Optional[date] = None,
     close_position_fn: Optional[Callable[[str], Dict[str, Any]]] = None,
     fetch_fill_fn: Optional[Callable[[str], Dict[str, Any]]] = None,
+    broker_positions: Optional[List[Dict[str, Any]]] = None,
 ) -> List[OrphanAction]:
-    """Compare broker positions vs (engine-tracked + DB-open) and act on
-    orphans.
+    """Compare broker positions vs (engine-tracked + DB) and act on orphans.
 
     Args:
         strategy: 'bull_flag' / 'macd_wave' / 'orb' — ownership filter.
+            ALSO the account-routing assumption: caller must pass the
+            ``alpaca`` client for THIS strategy's broker account.
         alpaca: AlpacaClient for the strategy's broker account.
-        db: persistence.database.Database instance.
+        db: Database instance. Used via ``get_strategy_trades_in_window``.
         notifier: TelegramNotifier (or None).
         tracked_symbols: symbols the engine currently has in its
             open_positions map. Anything broker has but engine doesn't is
@@ -362,11 +457,18 @@ def reconcile_strategy_orphans(
         today_et: optional date override (testing).
         close_position_fn: optional override for the close call (testing).
         fetch_fill_fn: optional override for fill polling (testing).
+        broker_positions: optional pre-fetched positions snapshot. When
+            sync_positions already called get_open_positions, pass that
+            list here to avoid a duplicate API hit.
 
     Returns:
         List of OrphanAction — one per orphan detected this cycle.
-        Empty if nothing was orphan. Pure side-effect ordering: detect →
-        classify → alert → (close + DB update if OWNED).
+        Empty if nothing was orphan.
+
+    Pure side-effect ordering: detect → classify → alert → (close + DB
+    update if OWNED). The in-flight-close cache shields a freshly
+    submitted close from re-detection until either the broker stops
+    reporting the position or `cfg.inflight_close_cooldown_s` expires.
     """
     if cfg is None:
         cfg = ReconcilerConfig()
@@ -374,46 +476,49 @@ def reconcile_strategy_orphans(
         today_et = datetime.now(timezone.utc).date()
     actions: List[OrphanAction] = []
 
-    # 1. Snapshot broker positions.
-    try:
-        broker_positions = alpaca.get_open_positions()
-    except Exception as e:
-        logger.error(
-            f"orphan reconciler [{strategy}]: broker snapshot failed: {e}"
-        )
-        return actions
+    # 1. Snapshot broker positions (use the caller's if provided).
+    if broker_positions is None:
+        try:
+            broker_positions = alpaca.get_open_positions()
+        except Exception as e:
+            logger.error(
+                f"orphan reconciler [{strategy}]: broker snapshot failed: {e}"
+            )
+            return actions
 
-    # 2. Filter to candidates: broker has it, engine doesn't track it.
+    # 2. Filter to candidates: broker has it, engine doesn't track it,
+    #    and we don't have a close already in flight for this symbol.
     candidates = [
         p for p in broker_positions
-        if p['symbol'] not in tracked_symbols
+        if p.get('symbol') not in tracked_symbols
+        and not _is_close_inflight(strategy, p.get('symbol'))
     ]
     if not candidates:
         return actions
 
-    # 3. Query DB for strategy-tagged rows in the lookback window keyed by
-    #    symbol. We grab all rows (any state) so we can apply the OWNED
-    #    predicate's stale-signal check.
+    # 3. Query DB for strategy-tagged rows in the lookback window.
     candidate_symbols = [p['symbol'] for p in candidates]
     db_rows_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
     lookback_start = (today_et - timedelta(days=cfg.lookback_days)).isoformat()
-    placeholders = ','.join('?' for _ in candidate_symbols)
     try:
-        # Direct query — get_open_trades doesn't include rows where
-        # the OLD code wrote exit_price (the very case we need to
-        # reconcile). This is the cross-day-historical-row query.
-        cur = db._trades_conn.execute(
-            f"SELECT id, trade_date, symbol, strategy, fill_price, "
-            f"filled_qty, exit_price, exit_reason, order_status "
-            f"FROM trades "
-            f"WHERE strategy = ? AND trade_date >= ? "
-            f"AND symbol IN ({placeholders}) "
-            f"ORDER BY trade_date DESC, id DESC",
-            (strategy, lookback_start, *candidate_symbols),
-        )
-        for r in cur.fetchall():
-            d = dict(r)
-            db_rows_by_symbol.setdefault(d['symbol'], []).append(d)
+        if hasattr(db, 'get_strategy_trades_in_window'):
+            rows = db.get_strategy_trades_in_window(
+                strategy, lookback_start, candidate_symbols,
+            )
+        else:
+            # Legacy / test-double fallback. Will be removed once all
+            # callers are on the public API.
+            placeholders = ','.join('?' for _ in candidate_symbols)
+            cur = db._trades_conn.execute(
+                f"SELECT * FROM trades "
+                f"WHERE strategy = ? AND trade_date >= ? "
+                f"AND symbol IN ({placeholders}) "
+                f"ORDER BY trade_date DESC, id DESC",
+                (strategy, lookback_start, *candidate_symbols),
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+        for r in rows:
+            db_rows_by_symbol.setdefault(r['symbol'], []).append(r)
     except Exception as e:
         logger.error(
             f"orphan reconciler [{strategy}]: DB lookup failed: {e} — "
@@ -429,7 +534,6 @@ def reconcile_strategy_orphans(
         owned_row = _select_owned_row(broker_pos, rows, today_et, cfg)
 
         if owned_row is None:
-            # FOREIGN — alert only, never close.
             action = OrphanAction(
                 symbol=sym, qty=qty, avg_entry=avg_entry,
                 classification='foreign',
@@ -442,7 +546,6 @@ def reconcile_strategy_orphans(
                    cfg.alert_cooldown_minutes)
             continue
 
-        # OWNED — decide action based on auto_close + rate-limit gates.
         db_fill = float(owned_row.get('fill_price') or 0.0)
         if not cfg.auto_close_enabled:
             action = OrphanAction(
@@ -472,7 +575,6 @@ def reconcile_strategy_orphans(
                    cfg.alert_cooldown_minutes)
             continue
 
-        # Act: submit close.
         close = close_position_fn or alpaca.close_position
         try:
             result = close(sym)
@@ -497,45 +599,43 @@ def reconcile_strategy_orphans(
             continue
 
         _record_close(strategy)
+        _mark_close_inflight(strategy, sym, cfg.inflight_close_cooldown_s)
 
-        # Best-effort: poll the fill to write the DB recovery row with
-        # actual exit_price. If the caller didn't supply fetch_fill_fn,
-        # use alpaca.get_order with a brief poll. If we can't get a fill
-        # within the budget, write what we know (avg_entry as a
-        # placeholder is misleading — better to leave exit_price NULL
-        # and let the next sync see it as still pending).
+        # Poll for fill with retries. Single-shot polls almost never see
+        # the fill because the broker hasn't acknowledged yet — the
+        # original implementation's single get_order call left ~half of
+        # rows stuck in exit_pending_verification with no real exit_price.
         fill_price: Optional[float] = None
         fill_qty: int = 0
-        if order_id and (fetch_fill_fn or hasattr(alpaca, 'get_order')):
-            try:
-                getter = fetch_fill_fn or (lambda oid: alpaca.get_order(oid))
-                # Simple single-poll: market closes fill in <2s typically;
-                # if not, the next sync cycle catches it. Don't block.
-                o = getter(order_id)
-                fq = int(o.get('filled_qty') or 0) if isinstance(o, dict) else 0
-                fp = o.get('filled_avg_price') if isinstance(o, dict) else None
-                if fp is not None and fq > 0:
-                    fill_price = float(fp)
-                    fill_qty = fq
-            except Exception as e:
-                logger.warning(
-                    f"orphan reconciler [{strategy}]: fill poll for "
-                    f"{order_id} failed: {e}"
+        if order_id:
+            getter = fetch_fill_fn or (
+                getattr(alpaca, 'get_order', None) if hasattr(alpaca, 'get_order')
+                else None
+            )
+            if getter is not None:
+                fill_price, fill_qty = _poll_for_fill(
+                    getter, order_id,
+                    cfg.fill_poll_timeout_s, cfg.fill_poll_interval_s,
                 )
 
         if fill_price is not None and fill_qty > 0:
             _write_recovery_row(db, owned_row, fill_price, fill_qty,
                                  avg_entry, order_id)
         else:
-            # Mark as pending-verification so we re-check next cycle.
+            # Poll budget exhausted — flip to pending-verification. The
+            # in-flight cache ensures the next sync cycle (which will see
+            # the broker still holding it) doesn't re-submit close.
             try:
                 db.update_trade(owned_row['id'], {
                     'order_status': PENDING_VERIFICATION_STATUS,
                     'exit_reason': owned_row.get('exit_reason')
                                      or 'stop_loss_unconfirmed',
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    f"orphan reconciler [{strategy}]: pending-verification "
+                    f"DB write for {sym} failed: {e}"
+                )
 
         action = OrphanAction(
             symbol=sym, qty=qty, avg_entry=avg_entry,

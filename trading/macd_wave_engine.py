@@ -21,6 +21,10 @@ import pytz
 from dateutil.parser import isoparse
 
 from trading.macd_conviction import compute_conviction_score
+from trading.orphan_reconciler import (
+    ReconcilerConfig, reconcile_strategy_orphans,
+)
+from trading.stop_monitor import build_exit_update
 from trading.macd_cross_detector import (
     compute_macd_histogram,
     count_consecutive_positive_ending_at,
@@ -473,15 +477,25 @@ class MACDWaveEngine:
         # per-engine "warning + skip" branch — closes only when the
         # hardened predicate proves ownership.
         try:
-            from trading.orphan_reconciler import (
-                ReconcilerConfig, reconcile_strategy_orphans,
-            )
             cfg = getattr(self, 'orphan_reconciler_cfg', None) or ReconcilerConfig()
+            # alpaca_positions above maps symbol → SDK Position object;
+            # convert to the dict shape the reconciler expects so it
+            # doesn't have to re-hit Alpaca.
+            broker_snapshot = [
+                {
+                    'symbol': p.symbol,
+                    'qty': int(p.qty),
+                    'avg_entry_price': float(p.avg_entry_price),
+                    'unrealized_pl': float(getattr(p, 'unrealized_pl', 0) or 0),
+                }
+                for p in alpaca_positions.values()
+            ]
             reconcile_strategy_orphans(
                 strategy=self.STRATEGY_NAME, alpaca=self.alpaca, db=self.db,
                 notifier=self.notifier,
                 tracked_symbols=set(self.open_positions.keys()),
                 cfg=cfg,
+                broker_positions=broker_snapshot,
             )
         except Exception as e:
             logger.error(
@@ -1939,7 +1953,6 @@ class MACDWaveEngine:
                 pnl_pct = (exit_price - pos.entry_price) / pos.entry_price * 100 if pos.entry_price > 0 else 0
                 # Unconfirmed-exit branch: do NOT mutate daily_pnl or write
                 # confirmed exit columns. Orphan reconciler picks it up.
-                from trading.stop_monitor import build_exit_update
                 update = build_exit_update(event)
                 if event.confirmed:
                     self.daily_pnl += pnl
@@ -2255,7 +2268,6 @@ class MACDWaveEngine:
 
             # Drain any pending StopMonitor events (DON'T call check_exits —
             # that would trigger MACD flip sells and double-sell positions)
-            from trading.stop_monitor import build_exit_update
             for event in self.stop_monitor.drain_exit_events(strategy=self.STRATEGY_NAME):
                 sym = event.symbol
                 if sym in self.open_positions:

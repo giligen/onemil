@@ -142,11 +142,18 @@ class TestStrategyFiltering:
         # symbol is marked traded to keep this node from trading it
         assert 'CORD' in eng._traded_symbols
 
-    def test_bf_trade_is_claimed_by_bf(self, monkeypatch):
-        """A BF strategy trade IS ours — cleanup proceeds."""
+    def test_bf_trade_registered_in_traded_symbols(self, monkeypatch):
+        """A pre-existing broker position (whether ours or not) is
+        registered in _traded_symbols so bull flag won't re-trade it.
+
+        2026-06-05: _close_orphan_positions no longer calls
+        close_position directly — that close was the SMU/QBTZ-class
+        vulnerability (no avg-entry check, no stale-signal check, would
+        flatten same-symbol unknown-strategy positions). The shared
+        orphan_reconciler handles the close decision separately."""
         a = _mk_alpaca()
         a.get_open_positions.return_value = [{'symbol': 'XYZ'}]
-        a.trading_client.get_orders.return_value = []  # no orders to cancel
+        a.trading_client.get_orders.return_value = []
         db = _mk_db()
         db.get_trades_by_date.return_value = [
             {'symbol': 'XYZ', 'strategy': 'bull_flag'},
@@ -154,11 +161,14 @@ class TestStrategyFiltering:
         eng = _mk_engine(monkeypatch, a, db)
         with patch('time.sleep'):
             eng._close_orphan_positions(trades_today=[])
-        a.close_position.assert_called_once_with('XYZ')
+        # No direct close from this method any more
+        a.close_position.assert_not_called()
+        # Symbol IS registered so the engine doesn't double-enter
+        assert 'XYZ' in eng._traded_symbols
 
-    def test_legacy_trade_without_strategy_defaults_to_bf(self, monkeypatch):
-        """Pre-migration-8 trades may lack a `strategy` field; default
-        should be bull_flag to preserve old behavior."""
+    def test_legacy_trade_without_strategy_also_registered(self, monkeypatch):
+        """Pre-migration-8 trades lacking a `strategy` field still
+        register in _traded_symbols. Same delegate-to-reconciler logic."""
         a = _mk_alpaca()
         a.get_open_positions.return_value = [{'symbol': 'OLD'}]
         a.trading_client.get_orders.return_value = []
@@ -169,19 +179,23 @@ class TestStrategyFiltering:
         eng = _mk_engine(monkeypatch, a, db)
         with patch('time.sleep'):
             eng._close_orphan_positions(trades_today=[])
-        a.close_position.assert_called_once_with('OLD')
+        a.close_position.assert_not_called()
+        assert 'OLD' in eng._traded_symbols
 
 
 class TestCloseOrphanWithBracketLegs:
-    """Integration: orphan cleanup cancels then closes (the today-incident
-    replay)."""
+    """The cancel-then-close ordering used to live here. As of
+    2026-06-05 the close step moved to trading.orphan_reconciler, which
+    has its own bracket-cancel logic (via close_position internally) and
+    a hardened ownership predicate. _close_orphan_positions only
+    registers the symbol now; the cancel + close behaviour is exercised
+    by tests/test_orphan_reconciler.py instead."""
 
-    def test_close_after_cancel(self, monkeypatch):
+    def test_close_orphan_positions_does_not_close_or_cancel(self, monkeypatch):
         a = _mk_alpaca()
         a.get_open_positions.return_value = [{'symbol': 'XYZ'}]
         a.trading_client.get_orders.return_value = [
             _mk_order('sl-1', 'SELL', 'STOP', 100),
-            _mk_order('tp-1', 'SELL', 'LIMIT', 100),
         ]
         db = _mk_db()
         db.get_trades_by_date.return_value = [
@@ -190,6 +204,8 @@ class TestCloseOrphanWithBracketLegs:
         eng = _mk_engine(monkeypatch, a, db)
         with patch('time.sleep'):
             eng._close_orphan_positions(trades_today=[])
-        # Order of operations: cancels first, then close
-        assert a.cancel_order.call_count == 2
-        a.close_position.assert_called_once_with('XYZ')
+        # Neither close nor cancel is called from this method any more.
+        a.close_position.assert_not_called()
+        a.cancel_order.assert_not_called()
+        # But the symbol is still registered so we don't double-enter.
+        assert 'XYZ' in eng._traded_symbols
