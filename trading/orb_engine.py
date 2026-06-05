@@ -2047,14 +2047,11 @@ class ORBEngine:
         if pos is None:
             logger.warning(f"ORB: exit event for {symbol} but no tracked position — orphan?")
             return
+        confirmed = getattr(ev, 'confirmed', True)
         exit_price = float(ev.exit_price)
         pnl = (exit_price - pos.entry_price) * pos.shares
         pnl_pct = (exit_price - pos.entry_price) / pos.entry_price * 100.0
-        self.daily_pnl += pnl
 
-        # Exit microstructure from StopMonitor event (parity with bull flag + MACD wave).
-        # exit_slippage convention: exit_limit_price - actual_exit_price.
-        # Positive = we got a better price than our limit; negative = we paid slip.
         def _numf(v):
             """Coerce to float if real numeric (not MagicMock), else None."""
             if isinstance(v, bool) or not isinstance(v, (int, float)):
@@ -2062,37 +2059,27 @@ class ORBEngine:
             f = float(v)
             return f if f > 0 else None
 
-        def _numi(v):
-            if isinstance(v, bool) or not isinstance(v, (int, float)):
-                return None
-            i = int(v)
-            return i if i > 0 else None
-
-        def _strs(v):
-            if isinstance(v, str) and v:
-                return v
-            return None
-
-        exit_limit_price = _numf(getattr(ev, 'exit_limit_price', None))
-        exit_slippage = (
-            exit_limit_price - exit_price if exit_limit_price is not None else None
-        )
-        exit_update = {
-            'exit_price': exit_price,
-            'exit_reason': ev.exit_reason,
-            'exited_at': datetime.now(timezone.utc),
-            'pnl': pnl,
-            'pnl_pct': pnl_pct,
-            'order_status': 'closed',
-            'exit_trigger_price': _numf(getattr(ev, 'exit_trigger_price', None)),
-            'exit_quote_bid': _numf(getattr(ev, 'exit_quote_bid', None)),
-            'exit_quote_ask': _numf(getattr(ev, 'exit_quote_ask', None)),
-            'exit_quote_bid_size': _numi(getattr(ev, 'exit_quote_bid_size', None)),
-            'exit_quote_ask_size': _numi(getattr(ev, 'exit_quote_ask_size', None)),
-            'exit_limit_price': exit_limit_price,
-            'exit_pricing_method': _strs(getattr(ev, 'pricing_method', None)),
-            'exit_slippage': exit_slippage,
-        }
+        # Shared build_exit_update gives us the confirmed/unconfirmed-correct
+        # base payload; ORB adds its own exit_slippage + qty fields on top.
+        from trading.stop_monitor import build_exit_update
+        exit_update = build_exit_update(ev)
+        exit_limit_price = exit_update.get('exit_limit_price')
+        if confirmed:
+            self.daily_pnl += pnl
+            exit_update['pnl'] = pnl
+            exit_update['pnl_pct'] = pnl_pct
+            exit_update['exit_slippage'] = (
+                exit_limit_price - exit_price if exit_limit_price is not None else None
+            )
+        else:
+            # Unconfirmed: no daily_pnl mutation, no exit_price/pnl write.
+            # The orphan reconciler will retry. Keep the position visible to
+            # ORB's per-day caps (exit_pending_verification stays "open").
+            logger.error(
+                f"ORB: {symbol} UNCONFIRMED EXIT (BRANCH_LAST_RESORT) — "
+                f"order_status=exit_pending_verification, "
+                f"exit_reason={ev.exit_reason}. Reconciler will retry."
+            )
         try:
             self.db.update_trade(pos.trade_id, exit_update)
         except Exception as e:

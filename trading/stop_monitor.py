@@ -29,7 +29,8 @@ import queue
 import threading
 import time as time_mod
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Optional
 
 from data_sources.alpaca_client import AlpacaClient
 
@@ -157,6 +158,17 @@ class StopExitEvent:
     exit_limit_price: float = 0.0  # limit price we submitted
     exit_ofi: float = 0.0  # OFI at exit time (negative = selling pressure)
     strategy: str = 'bull_flag'  # copied from the originating WatchEntry
+    # Exit-confirmation flag (added 2026-06-05 after the SMU/QBTZ orphan
+    # incident — 8-10 days of unmanaged broker exposure because the BRANCH_
+    # LAST_RESORT path wrote a "confirmed" exit_price + pnl + exited_at into
+    # the DB when the actual broker fill was never acknowledged).
+    # True  → fill was confirmed (either by _poll_order_fill or by recovering
+    #         from the SL leg). Consumer writes the full exit payload.
+    # False → fill NOT confirmed (BRANCH_LAST_RESORT exhausted all retries).
+    #         Consumer writes order_status='exit_pending_verification',
+    #         leaves exit_price/exited_at/pnl NULL, sets exit_attempted_at.
+    #         The orphan reconciler picks it up on the next sync cycle.
+    confirmed: bool = True
 
 
 @dataclass
@@ -185,6 +197,52 @@ class QuoteWatch:
     _prev_ask: float = 0.0
     _prev_bid_size: int = 0
     _prev_ask_size: int = 0
+
+
+def build_exit_update(event: 'StopExitEvent') -> Dict[str, Any]:
+    """Build the DB update payload for a StopExitEvent.
+
+    Centralizes the "confirmed vs unconfirmed" branching so every engine
+    (bull_flag, macd_wave, orb) writes the SAME shape — preventing the
+    divergence that produced the SMU/QBTZ orphans, where the unconfirmed
+    path used to write a fake confirmed exit (exit_price + pnl + exited_at
+    all populated despite the broker never acknowledging the fill).
+
+    Confirmed path (the common case): full exit payload including
+    exit_price, exited_at, pnl, pnl_pct, status='closed', and exit
+    microstructure (bid/ask/limit/slippage).
+
+    Unconfirmed path (`event.confirmed == False`): a SAFE-DEFAULT payload
+    that leaves exit_price / exited_at / pnl NULL and sets order_status
+    to 'exit_pending_verification' so the orphan reconciler picks it up
+    on the next sync. exit_reason is still recorded ('stop_loss_unconfirmed')
+    for forensics, along with the trigger price + quote context that the
+    StopMonitor saw at the time.
+
+    Pnl / pnl_pct are caller-provided because the engine knows
+    pos.entry_price and pos.shares; in the unconfirmed branch the caller
+    can pass any values — they will be discarded.
+    """
+    base: Dict[str, Any] = {
+        'exit_reason': event.exit_reason,
+        'exit_trigger_price': (
+            event.exit_trigger_price if event.exit_trigger_price else None
+        ),
+        'exit_quote_bid': event.exit_quote_bid or None,
+        'exit_quote_ask': event.exit_quote_ask or None,
+        'exit_quote_bid_size': event.exit_quote_bid_size or None,
+        'exit_quote_ask_size': event.exit_quote_ask_size or None,
+        'exit_limit_price': event.exit_limit_price or None,
+        'exit_pricing_method': event.pricing_method or None,
+    }
+    if not event.confirmed:
+        # Pending verification — the orphan reconciler is the next layer.
+        base['order_status'] = 'exit_pending_verification'
+        return base
+    base['exit_price'] = float(event.exit_price)
+    base['exited_at'] = datetime.now(timezone.utc)
+    base['order_status'] = 'closed'
+    return base
 
 
 class StopMonitor:
@@ -2921,6 +2979,11 @@ class StopMonitor:
             # reconciled broker qty), not watch.shares, so downstream P&L
             # math reflects the ACTUAL qty closed (catches APT/MLTX-class
             # orphans where watch.shares lagged the broker view).
+            #
+            # confirmed=False ONLY for BRANCH_LAST_RESORT (stop_loss_unconfirmed)
+            # — that's the path where every retry failed and we have NO actual
+            # fill report from the broker. Consumer must NOT write a confirmed
+            # exit_price/pnl/exited_at — the orphan reconciler picks it up.
             event = StopExitEvent(
                 symbol=symbol,
                 stop_price=watch.stop_price,
@@ -2939,6 +3002,7 @@ class StopMonitor:
                 exit_limit_price=limit_price,
                 exit_ofi=watch.ofi_cumulative,
                 strategy=watch.strategy,
+                confirmed=(exit_reason != 'stop_loss_unconfirmed'),
             )
             self._exit_events.put(event)
 

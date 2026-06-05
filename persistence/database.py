@@ -1084,8 +1084,15 @@ class Database:
     # terminal — see TRT cross-strategy lock incident 2026-05-15 where an
     # ORB time_stop_canceled row blocked bull_flag re-entry because the
     # old denylist only excluded 'cancelled'.
+    #
+    # 'exit_pending_verification' (2026-06-05): added after the SMU/QBTZ
+    # orphan incident — when StopMonitor's BRANCH_LAST_RESORT cannot
+    # confirm an exit fill, the trade is left in this state instead of
+    # being marked 'closed' with a fake exit_price. Stays in
+    # get_open_trades() so the orphan reconciler can retry.
     _ACTIVE_ORDER_STATUSES = (
-        'filled', 'partially_filled', 'pending_new', 'accepted', 'new'
+        'filled', 'partially_filled', 'pending_new', 'accepted', 'new',
+        'exit_pending_verification',
     )
 
     def get_open_trades(self, trade_date: str, strategy: str = None) -> List[Dict[str, Any]]:

@@ -1913,20 +1913,22 @@ class MACDWaveEngine:
                 exit_price = event.exit_price
                 pnl = (exit_price - pos.entry_price) * pos.shares
                 pnl_pct = (exit_price - pos.entry_price) / pos.entry_price * 100 if pos.entry_price > 0 else 0
-                self.daily_pnl += pnl
-
-                self.db.update_trade(pos.trade_id, {
-                    'exit_price': exit_price,
-                    'exit_reason': event.exit_reason,
-                    'exited_at': datetime.now(timezone.utc),
-                    'pnl': pnl,
-                    'pnl_pct': pnl_pct,
-                    'exit_trigger_price': event.exit_trigger_price,
-                    'exit_quote_bid': event.exit_quote_bid,
-                    'exit_quote_ask': event.exit_quote_ask,
-                    'exit_limit_price': event.exit_limit_price,
-                    'exit_pricing_method': event.pricing_method,
-                })
+                # Unconfirmed-exit branch: do NOT mutate daily_pnl or write
+                # confirmed exit columns. Orphan reconciler picks it up.
+                from trading.stop_monitor import build_exit_update
+                update = build_exit_update(event)
+                if event.confirmed:
+                    self.daily_pnl += pnl
+                    update['pnl'] = pnl
+                    update['pnl_pct'] = pnl_pct
+                else:
+                    logger.error(
+                        f"[{self.STRATEGY_NAME}] {sym}: UNCONFIRMED EXIT — "
+                        f"order_status=exit_pending_verification, "
+                        f"exit_reason={event.exit_reason}. Orphan reconciler "
+                        f"will retry. Position remains OPEN on broker."
+                    )
+                self.db.update_trade(pos.trade_id, update)
 
                 emoji = '✅' if pnl > 0 else '❌'
                 logger.info(
@@ -2229,17 +2231,20 @@ class MACDWaveEngine:
 
             # Drain any pending StopMonitor events (DON'T call check_exits —
             # that would trigger MACD flip sells and double-sell positions)
+            from trading.stop_monitor import build_exit_update
             for event in self.stop_monitor.drain_exit_events(strategy=self.STRATEGY_NAME):
                 sym = event.symbol
                 if sym in self.open_positions:
                     pos = self.open_positions[sym]
-                    pnl = (event.exit_price - pos.entry_price) * pos.shares
-                    self.db.update_trade(pos.trade_id, {
-                        'exit_price': event.exit_price,
-                        'exit_reason': event.exit_reason,
-                        'exited_at': datetime.now(timezone.utc),
-                        'pnl': pnl,
-                    })
+                    update = build_exit_update(event)
+                    if event.confirmed:
+                        update['pnl'] = (event.exit_price - pos.entry_price) * pos.shares
+                    else:
+                        logger.error(
+                            f"[{self.STRATEGY_NAME}] {sym}: UNCONFIRMED EXIT "
+                            f"during force-close drain — reconciler will retry"
+                        )
+                    self.db.update_trade(pos.trade_id, update)
                     del self.open_positions[sym]
                     self.invalidated.add(sym)
                     logger.info(f"[{self.STRATEGY_NAME}] {sym}: drained StopMonitor exit before force close")

@@ -2384,6 +2384,28 @@ class TradingEngine:
             if event.exit_reason == 'exhaustion_partial':
                 continue
 
+            # Unconfirmed exits (BRANCH_LAST_RESORT — no broker fill report)
+            # short-circuit to the pending-verification state. Trying to
+            # poll fill on these is useless: the StopMonitor already
+            # exhausted its retries. The orphan reconciler handles them.
+            if not getattr(event, 'confirmed', True):
+                logger.error(
+                    f"{event.symbol}: UNCONFIRMED EXIT — writing "
+                    f"order_status=exit_pending_verification, "
+                    f"exit_reason={event.exit_reason}. Reconciler will retry."
+                )
+                if event.trade_db_id:
+                    from trading.stop_monitor import build_exit_update
+                    try:
+                        self.db.update_trade(event.trade_db_id,
+                                             build_exit_update(event))
+                    except Exception as e:
+                        logger.error(
+                            f"{event.symbol}: pending-verification DB "
+                            f"write failed: {e}"
+                        )
+                continue
+
             logger.info(
                 f"{event.symbol}: StopMonitor exit — "
                 f"stop=${event.stop_price:.2f}, exit=${event.exit_price:.2f}, "
