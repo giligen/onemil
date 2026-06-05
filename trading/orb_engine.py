@@ -2855,65 +2855,29 @@ class ORBEngine:
                 f"cross-day state drift."
             )
 
-            # 2026-04-29: auto-close orphans IF we're outside regular session
-            # hours. Inside RTH (9:30-16:00 ET) we keep alert-only behavior
-            # because mid-day startup may be racing with an in-flight fill
-            # that just hasn't reached the DB yet — closing it would kill a
-            # legitimate trade.
-            #
-            # 2026-05-22: STRATEGY-SCOPED. Only orphans ORB actually owns
-            # (an open ORB trade row in the last 5 days — covers a position
-            # carried past a day boundary by a failed force-close) are
-            # auto-closed. Other positions on this shared account belong to
-            # bull flag / other projects and stay alert-only.
+            # 2026-06-05: orphan reconciler replaces the old in-engine
+            # ownership check (_orb_owned_symbols → get_open_trades), which
+            # excluded the exact rows we need to reconcile (rows where
+            # exit_reason='stop_loss_unconfirmed' had a fake exit_price
+            # written). That deadlock hid QBTZ for 4 days. The hardened
+            # multi-signal predicate (strategy + stale + avg-entry + qty)
+            # is safe to run any time of day — same-day fresh entries are
+            # excluded by the cross-day stale-signal check.
             try:
-                from zoneinfo import ZoneInfo
-                et_now = datetime.now(ZoneInfo('America/New_York'))
-                in_rth = (
-                    et_now.weekday() < 5
-                    and dtime(9, 30) <= et_now.time() < dtime(16, 0)
+                from trading.orphan_reconciler import (
+                    ReconcilerConfig, reconcile_strategy_orphans,
                 )
-            except Exception:
-                in_rth = True  # fail safe — assume in-hours, alert-only
-            if in_rth:
-                logger.warning(
-                    "ORB sync: orphan(s) detected during RTH — alert-only, "
-                    "manual review required (auto-close gated to off-hours "
-                    "to avoid killing in-flight fills)."
+                cfg = getattr(self, 'orphan_reconciler_cfg', None) or ReconcilerConfig()
+                reconcile_strategy_orphans(
+                    strategy=STRATEGY_NAME, alpaca=self.alpaca, db=self.db,
+                    notifier=self.notifier,
+                    tracked_symbols=set(self.open_positions.keys()),
+                    cfg=cfg,
                 )
-            else:
-                logger.warning(
-                    f"ORB sync: orphan(s) detected outside RTH "
-                    f"(et={et_now.strftime('%H:%M')}) — auto-closing now"
+            except Exception as e:
+                logger.error(
+                    f"ORB: orphan reconciler raised: {e} — sync continues"
                 )
-                import time as _time_mod
-                orb_owned = self._orb_owned_symbols(lookback_days=4)
-                for sym in orphans:
-                    if sym not in orb_owned:
-                        logger.warning(
-                            f"ORB sync: orphan {sym} is NOT an ORB position "
-                            f"(no open ORB trade row in the last 5 days) — "
-                            f"alert-only, NOT auto-closing. Shared account: "
-                            f"{sym} belongs to another strategy/project."
-                        )
-                        continue
-                    try:
-                        self._cancel_symbol_open_orders(sym)
-                        _time_mod.sleep(0.5)
-                        result = self.alpaca.close_position(sym)
-                        logger.warning(
-                            f"ORB sync auto-close: orphan {sym} closed "
-                            f"(order={(result or {}).get('id', '?')})"
-                        )
-                        self._notify(
-                            f"{self.tg_prefix} ✅ Auto-closed orphan {sym} "
-                            f"at off-hours startup"
-                        )
-                    except Exception as e:
-                        self._notify_error(
-                            f"Auto-close orphan {sym} FAILED at startup: {e}. "
-                            f"Manual action required."
-                        )
 
         logger.info(
             f"ORB.sync_positions: {recovered} filled + {recovered_pending} pending rehydrated; "

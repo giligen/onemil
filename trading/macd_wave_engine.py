@@ -465,6 +465,30 @@ class MACDWaveEngine:
                 f"MACD/trail monitoring resumed"
             )
 
+        # Phase 3 (added 2026-06-05): cross-strategy orphan reconciliation.
+        # Handles the case the pending_new recovery above CAN'T handle:
+        # broker still holds a position despite our DB marking it as
+        # exited via 'stop_loss_unconfirmed' (the SMU 10-day orphan was
+        # this exact pattern). Strictly more conservative than the old
+        # per-engine "warning + skip" branch — closes only when the
+        # hardened predicate proves ownership.
+        try:
+            from trading.orphan_reconciler import (
+                ReconcilerConfig, reconcile_strategy_orphans,
+            )
+            cfg = getattr(self, 'orphan_reconciler_cfg', None) or ReconcilerConfig()
+            reconcile_strategy_orphans(
+                strategy=self.STRATEGY_NAME, alpaca=self.alpaca, db=self.db,
+                notifier=self.notifier,
+                tracked_symbols=set(self.open_positions.keys()),
+                cfg=cfg,
+            )
+        except Exception as e:
+            logger.error(
+                f"[{self.STRATEGY_NAME}] orphan reconciler raised: {e} — "
+                f"sync_positions continues"
+            )
+
     # ------------------------------------------------------------------
     # Mid-day restart recovery
     # ------------------------------------------------------------------

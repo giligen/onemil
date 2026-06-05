@@ -4255,6 +4255,25 @@ class TradingEngine:
         # Detect orphan positions from prior days
         self._close_orphan_positions(trades_today)
 
+        # 2026-06-05: cross-strategy orphan reconciler. Detects + closes
+        # any broker position bull flag is supposed to own but doesn't
+        # track (the failure mode that hid SMU/QBTZ in MACD/ORB for
+        # 10/4 days). Uses the hardened predicate so it won't touch
+        # other strategies' positions on the shared MAIN account.
+        try:
+            from trading.orphan_reconciler import (
+                ReconcilerConfig, reconcile_strategy_orphans,
+            )
+            tracked = set(self._traded_symbols)
+            reconcile_strategy_orphans(
+                strategy='bull_flag', alpaca=self.alpaca, db=self.db,
+                notifier=self.notifier, tracked_symbols=tracked,
+                cfg=getattr(self, 'orphan_reconciler_cfg',
+                             None) or ReconcilerConfig(),
+            )
+        except Exception as e:
+            logger.error(f"bull_flag orphan reconciler raised: {e}")
+
         logger.info(
             f"Startup sync: {len(self._traded_symbols)} traded symbols, "
             f"{self._daily_trade_count} filled trades, "
