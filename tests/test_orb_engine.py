@@ -649,11 +649,19 @@ class TestSyncPositionsOrphanAutoClose:
         rows in 'exit_pending_verification' state, or rows already tagged
         with a known unconfirmed exit_reason. A same-day filled row with
         no exit is the engine's normal active position — not an orphan.
+
+        2026-06-06: pin trade_date to TODAY's real wall-clock date.
+        The reconciler reads `today_et = datetime.now(timezone.utc).date()`
+        from its own module (not from orb_engine's mocked datetime),
+        so we use the real date here to keep "same day" stable across
+        runs.
         """
+        from datetime import date as _date
+        today_str = _date.today().isoformat()
         # Override the cross-day stale row from the fixture with a fresh
         # same-day filled row (no exit, no stale signal).
         patched_orphan_engine._reconciler_rows = [{
-            'id': 200, 'trade_date': '2026-06-05', 'symbol': 'OPRA',
+            'id': 200, 'trade_date': today_str, 'symbol': 'OPRA',
             'strategy': 'orb', 'fill_price': 10.0, 'filled_qty': 100,
             'exit_price': None, 'exit_reason': None,
             'order_status': 'filled',

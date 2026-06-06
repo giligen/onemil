@@ -2025,10 +2025,11 @@ class ORBEngine:
     def check_exits(self) -> List[str]:
         """Drain StopMonitor exit events tagged strategy='orb'.
 
-        Updates DB + in-memory state for each exit. Also runs the orphan
-        reconciler on a throttled cadence so intraday-occurring orphans
-        (e.g., a stop_loss_unconfirmed at noon) get resolved within
-        seconds, not next morning.
+        Updates DB + in-memory state for each exit. Orphan reconciliation
+        is NOT triggered here — the L7 periodic intraday hook
+        (2026-06-05) introduced race A with the sync_positions recovery
+        loop and was bypassed in practice. Reconciler is startup-only:
+        cross-day orphans get caught at the next reset_daily.
 
         Returns:
             list of symbols that exited on this tick.
@@ -2045,30 +2046,7 @@ class ORBEngine:
         for ev in events:
             self._handle_exit_event(ev)
             exited.append(ev.symbol)
-        # Throttled orphan reconciliation. The full sync_positions cost
-        # (~1 broker API call + DB queries) is acceptable every 60s.
-        self._maybe_reconcile_orphans()
         return exited
-
-    _last_reconcile_ts: float = 0.0
-    _reconcile_min_interval_s: float = 60.0
-
-    def _maybe_reconcile_orphans(self) -> None:
-        """Re-run reconciler if it's been > _reconcile_min_interval_s
-        since the last call. Mirrors the MACD wave pattern where
-        sync_positions runs every cycle. Throttling means we don't hit
-        Alpaca every 10s but we also don't wait until next morning to
-        catch an intraday stop_loss_unconfirmed.
-        """
-        import time as _time
-        now = _time.time()
-        if now - getattr(self, '_last_reconcile_ts', 0.0) < self._reconcile_min_interval_s:
-            return
-        self._last_reconcile_ts = now
-        try:
-            self.sync_positions()
-        except Exception as e:
-            logger.error(f"ORB: intraday reconcile raised: {e}")
 
     def _handle_exit_event(self, ev) -> None:
         """Update DB + open_positions from a StopMonitor exit event."""
@@ -2722,6 +2700,15 @@ class ORBEngine:
             order_id = str(t.get('order_id') or '')
             db_status = t.get('order_status') or ''
             alp_pos = alp_pos_by_sym.get(sym)
+
+            # Race-A fix (2026-06-06): an exit_pending_verification row was
+            # emitted by StopMonitor.BRANCH_LAST_RESORT — the orphan_reconciler
+            # owns it from this point. Skip the State A/B/C rehydrate paths;
+            # re-creating a StopMonitor watch with a stale hard_stop would
+            # bypass the reconciler (which would then skip the symbol because
+            # it's back in open_positions).
+            if db_status == 'exit_pending_verification':
+                continue
 
             # State B: order still pending on Alpaca + DB shows pending
             if alp_pos is None and order_id and order_id in alp_pending_by_id:

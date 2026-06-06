@@ -284,6 +284,15 @@ class MACDWaveEngine:
             fill_price = trade.get('fill_price')
             if not fill_price:
                 continue
+            # Race-A fix (2026-06-06): an exit_pending_verification row was
+            # emitted by StopMonitor.BRANCH_LAST_RESORT — the orphan_reconciler
+            # owns it from this point. The engine must NOT re-rehydrate it
+            # into open_positions / StopMonitor; doing so would spawn a fresh
+            # watch with a stale hard_stop AND bypass the reconciler (which
+            # would then skip any symbol back in open_positions). See plan
+            # mellow-sniffing-abelson + L1/L2 in the orphan-fix series.
+            if trade.get('order_status') == 'exit_pending_verification':
+                continue
 
             if sym in alpaca_positions:
                 # Position still open on Alpaca — ensure we're tracking it
