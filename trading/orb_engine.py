@@ -1591,6 +1591,28 @@ class ORBEngine:
                 logger.error(f"ORB: {plan.symbol} alpaca submit returned empty")
                 return None
             order_id = result.get('id') or ''
+            # 2026-06-09 (FABC fix): extract bracket leg IDs so StopMonitor's
+            # BRANCH_SL_LEG_RACE recovery path can query the SL leg fill.
+            # alpaca_client.submit_bracket_order now returns 'legs' list
+            # (mirroring get_order's leg shape). Pick TP by limit_price,
+            # SL by stop_price.
+            _legs = result.get('legs') or []
+            tp_leg_id = next(
+                (str(leg.get('id', '')) for leg in _legs
+                 if leg.get('limit_price') is not None and leg.get('side') == 'sell'),
+                '',
+            )
+            sl_leg_id = next(
+                (str(leg.get('id', '')) for leg in _legs
+                 if leg.get('stop_price') is not None and leg.get('side') == 'sell'),
+                '',
+            )
+            if _legs and not (tp_leg_id and sl_leg_id):
+                logger.warning(
+                    f"ORB: {plan.symbol} bracket leg extraction incomplete "
+                    f"(tp={bool(tp_leg_id)}, sl={bool(sl_leg_id)}, "
+                    f"n_legs={len(_legs)}) — SL race recovery degraded"
+                )
         except Exception as e:
             logger.error(f"ORB: {plan.symbol} submit_entry failed: {e}")
             return None
@@ -1637,6 +1659,8 @@ class ORBEngine:
             bar_close_price=plan.range_high,
             order_submitted_at=submit_time,
             entry_quote_ask=entry_quote_ask,
+            tp_leg_id=tp_leg_id,
+            sl_leg_id=sl_leg_id,
         )
         # Track on CandidateState too for clean time-stop cancellation
         cand = self.candidates.get(plan.symbol)
