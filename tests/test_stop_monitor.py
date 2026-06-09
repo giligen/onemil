@@ -114,6 +114,79 @@ class TestComputeLimitPrice:
         assert mon.compute_limit_price(8.00) == 7.90
 
 
+class TestSpreadAwareExitPricing:
+    """FABC 2026-06-09: when an ask is supplied, compute_limit_price uses
+    spread-aware offsets (max(exit_min_offset, spread × factor)) instead of
+    the legacy max(fixed, pct). Backward compat: no ask → legacy formula
+    unchanged. Inverted/missing/zero-ask → legacy fallback with a WARNING."""
+
+    def test_tight_spread_uses_floor(self, monitor):
+        """FABC scenario: bid=$3.97, ask=$4.00 (3¢ spread). 0.30 × $0.03 =
+        $0.009 → below $0.01 floor → offset=$0.01, limit=$3.96."""
+        assert monitor.compute_limit_price(3.97, ask=4.00) == pytest.approx(3.96, abs=0.001)
+
+    def test_medium_spread_uses_proportional(self, monitor):
+        """Spread $0.10: 0.30 × $0.10 = $0.03 → above $0.01 floor →
+        offset=$0.03, limit = $10.00 − $0.03 = $9.97."""
+        assert monitor.compute_limit_price(10.00, ask=10.10) == pytest.approx(9.97, abs=0.001)
+
+    def test_wide_spread_uses_proportional(self, monitor):
+        """Spread $0.15: 0.30 × $0.15 = $0.045 → offset=$0.045 →
+        limit = round($20.00 − $0.045, 2) = $19.96 (banker's round)."""
+        limit = monitor.compute_limit_price(20.00, ask=20.15)
+        # $20.00 - $0.045 = $19.955 → Python's banker rounding → $19.96
+        assert limit == pytest.approx(19.96, abs=0.001)
+
+    def test_ask_none_falls_back_to_legacy(self, monitor):
+        """No ask → legacy max($0.03, 0.5%) formula unchanged.
+        $10.00 × 0.005 = $0.05 → offset=$0.05 → limit=$9.95."""
+        assert monitor.compute_limit_price(10.00) == 9.95
+        assert monitor.compute_limit_price(10.00, ask=None) == 9.95
+
+    def test_inverted_quote_falls_back_to_legacy_with_warning(self, monitor, caplog):
+        """ask < bid is a stale or crossed quote — don't trust the spread.
+        Fall back to legacy formula + log WARNING."""
+        import logging as _logging
+        caplog.set_level(_logging.WARNING, logger='trading.stop_monitor')
+        # bid=$10.00, ask=$9.99 (inverted). Legacy gives 50bps = $0.05 → $9.95
+        limit = monitor.compute_limit_price(10.00, ask=9.99)
+        assert limit == 9.95
+        assert any(
+            'inverted quote' in r.getMessage() for r in caplog.records
+        )
+
+    def test_zero_ask_falls_back_to_legacy(self, monitor):
+        """ask=0.0 (e.g., quote not yet populated) → legacy formula."""
+        assert monitor.compute_limit_price(10.00, ask=0.0) == 9.95
+
+    def test_equal_bid_ask_zero_spread_falls_back_to_legacy(self, monitor):
+        """ask == bid (zero spread) — proportional offset would be $0 which
+        would have given us a stranded limit AT the bid (the original BMNZ
+        bug). Fall through to legacy fixed/pct so we keep some buffer."""
+        # $10.00 × 0.005 = $0.05 → limit=$9.95
+        assert monitor.compute_limit_price(10.00, ask=10.00) == 9.95
+
+    def test_floor_protects_against_negative_limit(self, monitor):
+        """Pathological case: bid=$0.02, ask=$0.05. Spread×factor=$0.009 →
+        floor $0.01 → limit=$0.01 (clamped at minimum)."""
+        assert monitor.compute_limit_price(0.02, ask=0.05) == 0.01
+
+    def test_custom_exit_params(self):
+        """Custom exit_min_offset + factor flow through __init__."""
+        client = MagicMock(spec=AlpacaClient)
+        mon = StopMonitor(
+            api_key='k', api_secret='s', alpaca_client=client,
+            marketable_limit_offset=0.03,
+            marketable_limit_offset_pct=0.005,
+            exit_min_offset=0.05,
+            exit_spread_offset_factor=0.50,
+        )
+        # Spread=$0.10, factor=0.50 → $0.05 (matches floor) → limit=$9.95
+        assert mon.compute_limit_price(10.00, ask=10.10) == 9.95
+        # Spread=$0.20, factor=0.50 → $0.10 (dominates floor) → limit=$9.90
+        assert mon.compute_limit_price(10.00, ask=10.20) == 9.90
+
+
 # ---------------------------------------------------------------------------
 # Watch management
 # ---------------------------------------------------------------------------

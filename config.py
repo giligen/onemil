@@ -782,6 +782,27 @@ class Config:
         """Percentage offset below price for marketable limit sell."""
         return float(self._get_yaml("trading", "self_managed_stops", "marketable_limit_offset_pct", default=0.005))
 
+    @property
+    def exit_min_offset(self) -> float:
+        """Minimum floor (dollars) on the spread-aware exit limit buffer.
+
+        Used by StopMonitor.compute_limit_price when an ask is supplied
+        (stop_bid / stop_bid_rest paths). Prevents the buffer collapsing
+        to $0 on penny-spread NBBOs. FABC 2026-06-09: default $0.01.
+        """
+        return float(self._get_yaml(
+            "trading", "self_managed_stops", "exit_min_offset", default=0.01))
+
+    @property
+    def exit_spread_offset_factor(self) -> float:
+        """Fraction of the bid-ask spread used as the exit-limit buffer.
+
+        FABC 2026-06-09: default 0.30. A 3¢ spread → ~1¢ buffer (vs the
+        old fixed $0.03 that placed the limit a full spread below bid).
+        """
+        return float(self._get_yaml(
+            "trading", "self_managed_stops", "exit_spread_offset_factor", default=0.30))
+
     # =========================================================================
     # Trailing Stop
     # =========================================================================

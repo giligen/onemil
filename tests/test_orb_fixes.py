@@ -261,18 +261,17 @@ class TestProcessPendingFills:
         # get_order should NOT be called for already-filled positions
         mock_alpaca.get_order.assert_not_called()
 
-    def test_partial_fill_cancels_parent_remainder(
+    def test_partial_fill_keeps_polling_no_cancel_no_confirm(
         self, engine, mock_alpaca, mock_sm
     ):
-        """APT/MLTX 2026-05-11 regression: when a partial fill is accepted as
-        the position, the parent order's unfilled remainder MUST be cancelled
-        so the position can't grow beyond watch.shares. Without this, the
-        parent keeps filling in the background; StopMonitor later cancels
-        the bracket to exit, but its standalone sell only covers watch.shares
-        — the rest becomes an unmanaged orphan."""
+        """FABC 2026-06-09 rewrite: partial fills no longer trigger early
+        _confirm_fill. The pre-fix behavior (cancel + accept first partial)
+        silently under-reported multi-fill orders — FABC recorded 1438 of
+        3188 shares because the first partial fired before the broker
+        reached terminal 'filled'. New behavior: log + keep polling. The
+        APT/MLTX orphan-growth scenario is now handled by sync_positions'
+        orphan-detect (the existing backstop)."""
         pos = self._seed_pending(engine)
-        # Original request = 100 shares; only 44 filled (matches APT's
-        # 2257/5153 ratio of ~44%).
         mock_alpaca.get_order.return_value = {
             'status': 'partially_filled',
             'filled_avg_price': 10.05,
@@ -281,59 +280,47 @@ class TestProcessPendingFills:
         }
         engine._process_pending_fills()
 
-        # Parent order cancel was called (remainder cleanup)
-        mock_alpaca.cancel_order.assert_any_call('o-pending')
-        # Engine still tracks the partial as a managed position
-        assert 'TSLA' in engine.open_positions
-        assert engine.open_positions['TSLA'].shares == 44
-        # StopMonitor watch was registered with the partial qty
-        mock_sm.add_watch.assert_called_once()
-        assert mock_sm.add_watch.call_args.kwargs['shares'] == 44
+        # Parent remainder NOT cancelled — we wait for terminal status
+        for call in mock_alpaca.cancel_order.call_args_list:
+            assert call.args[0] != 'o-pending', (
+                "cancel_order should NOT fire on first partial — wait for "
+                "terminal 'filled' or stall-timeout"
+            )
+        # Position still pending — _confirm_fill did NOT run
+        assert engine.open_positions['TSLA'].order_id == 'o-pending'
+        # first_partial_at recorded for stall-timeout accounting
+        assert engine.open_positions['TSLA'].first_partial_at is not None
+        # No StopMonitor watch yet
+        mock_sm.add_watch.assert_not_called()
 
-    def test_partial_fill_skips_cancel_when_no_remainder(
+    def test_partial_then_filled_confirms_with_full_qty(
         self, engine, mock_alpaca, mock_sm
     ):
-        """If the partial reports filled_qty == requested qty (edge case
-        where status flips to partially_filled but everything filled), do
-        NOT call cancel — there's nothing to cancel and a spurious cancel
-        could race with a status-flip to 'filled'."""
+        """When the broker eventually transitions partial → filled, the
+        engine confirms at the FINAL qty (not the first-seen partial).
+        This is the path that fixes the FABC-style under-recording."""
         pos = self._seed_pending(engine)
+        # Poll 1: partial 44/100
         mock_alpaca.get_order.return_value = {
             'status': 'partially_filled',
+            'filled_avg_price': 10.05,
+            'filled_qty': 44,
+            'qty': 100,
+        }
+        engine._process_pending_fills()
+        mock_sm.add_watch.assert_not_called()
+        # Poll 2: terminal 'filled' at full 100
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled',
             'filled_avg_price': 10.05,
             'filled_qty': 100,
             'qty': 100,
         }
-        # Reset the cancel mock so we can assert it was NOT called.
-        mock_alpaca.cancel_order.reset_mock()
         engine._process_pending_fills()
-        # No cancel call expected
-        for call in mock_alpaca.cancel_order.call_args_list:
-            assert call.args[0] != 'o-pending', (
-                "cancel_order should NOT be called when remainder == 0"
-            )
-        # _confirm_fill still ran
+        # Confirmed at full qty
+        assert engine.open_positions['TSLA'].shares == 100
+        assert engine.open_positions['TSLA'].order_id == ''
         mock_sm.add_watch.assert_called_once()
-
-    def test_partial_fill_cancel_failure_still_confirms(
-        self, engine, mock_alpaca, mock_sm
-    ):
-        """If the cancel of the parent remainder fails, the engine should
-        STILL confirm the partial as managed (logging an error). The
-        sync_positions orphan detector is the backstop for an uncancelled
-        parent that keeps growing."""
-        pos = self._seed_pending(engine)
-        mock_alpaca.get_order.return_value = {
-            'status': 'partially_filled',
-            'filled_avg_price': 10.05,
-            'filled_qty': 44,
-            'qty': 100,
-        }
-        mock_alpaca.cancel_order.side_effect = Exception("cancel API timeout")
-        engine._process_pending_fills()
-        # Watch was still added — engine doesn't bail on cancel failure
-        mock_sm.add_watch.assert_called_once()
-        assert engine.open_positions['TSLA'].shares == 44
 
 
 # =========================================================================

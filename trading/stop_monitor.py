@@ -308,6 +308,8 @@ class StopMonitor:
         polling_mode: bool = False,
         polling_interval: float = 2.0,
         alpaca_clients_by_strategy: Optional[Dict[str, AlpacaClient]] = None,
+        exit_min_offset: float = 0.01,
+        exit_spread_offset_factor: float = 0.30,
     ):
         """
         Initialize StopMonitor.
@@ -340,6 +342,12 @@ class StopMonitor:
         self._clients_by_strategy: Dict[str, AlpacaClient] = dict(alpaca_clients_by_strategy or {})
         self._marketable_limit_offset = marketable_limit_offset
         self._marketable_limit_offset_pct = marketable_limit_offset_pct
+        # FABC 2026-06-09 fix: spread-aware exit pricing parameters. Used by
+        # compute_limit_price when an `ask` argument is supplied. The legacy
+        # max($fixed, %×price) formula stays the fallback when ask is None
+        # (force-exit override path, REST-failure last-resort).
+        self._exit_min_offset = float(exit_min_offset)
+        self._exit_spread_offset_factor = float(exit_spread_offset_factor)
         self._notifier = notifier
 
         self._watches: Dict[str, WatchEntry] = {}
@@ -1495,23 +1503,62 @@ class StopMonitor:
         self._exit_events.put(event)
         return event
 
-    def compute_limit_price(self, current_price: float) -> float:
+    def compute_limit_price(
+        self,
+        current_price: float,
+        ask: Optional[float] = None,
+    ) -> float:
         """
         Compute the marketable limit sell price.
 
-        Uses the larger of:
-        - Fixed offset: current_price - marketable_limit_offset
-        - Percentage offset: current_price * (1 - marketable_limit_offset_pct)
+        Two paths:
 
-        This ensures the limit is aggressive enough to fill immediately
-        while capping worst-case slippage.
+        1. Spread-aware (ask is not None and ask > current_price):
+           offset = max(exit_min_offset, spread × exit_spread_offset_factor)
+           limit = round(current_price - offset, 2)
+
+           This is the default for stop-loss exits where we have a fresh
+           NBBO quote. With tight 3¢ spreads (FABC 2026-06-09) the legacy
+           fixed-$0.03 offset placed the limit a full spread below bid;
+           the spread-aware path caps the buffer near the actual spread.
+
+        2. Legacy fixed/pct (ask is None, ask<=current_price, or zero/neg ask):
+           offset = max(marketable_limit_offset, current_price × pct)
+           limit  = round(current_price - offset, 2)
+
+           Preserved for force-exit overrides + REST-failure last resorts
+           where we don't have a trusted ask. An inverted quote (ask < bid)
+           is treated as untrusted and falls back to legacy with a WARNING.
 
         Args:
-            current_price: Current trade price
+            current_price: Treated as the bid in the spread-aware path; the
+                last trade or stop-trigger price in the legacy path.
+            ask: Current NBBO ask. None = use legacy formula.
 
         Returns:
-            Limit price for the sell order
+            Limit price for the sell order (floored at $0.01).
         """
+        if ask is not None:
+            try:
+                ask_f = float(ask)
+            except (TypeError, ValueError):
+                ask_f = 0.0
+            if ask_f > 0 and ask_f < current_price:
+                logger.warning(
+                    f"compute_limit_price: inverted quote bid={current_price:.4f} "
+                    f"ask={ask_f:.4f} — falling back to legacy fixed/pct formula"
+                )
+            elif ask_f > current_price:
+                spread = ask_f - current_price
+                offset = max(
+                    self._exit_min_offset,
+                    spread * self._exit_spread_offset_factor,
+                )
+                limit_price = round(current_price - offset, 2)
+                return max(limit_price, 0.01)
+            # else: ask_f <= 0 or ask_f == current_price (zero spread) — fall
+            # through to legacy formula below.
+
         fixed_offset = self._marketable_limit_offset
         pct_offset = current_price * self._marketable_limit_offset_pct
         offset = max(fixed_offset, pct_offset)
@@ -2525,10 +2572,13 @@ class StopMonitor:
                 # Stop exits: always price BELOW bid (selling into weakness on a
                 # falling stock). Pricing AT bid was the 2026-04-23 BMNZ bug —
                 # limit at $14.03 never filled because bid dropped to $13.86
-                # within seconds of submission. compute_limit_price applies a
-                # max(3¢, 50bps) buffer below, keeping the limit marketable
-                # even if bid slips during submission latency.
-                limit_price = self.compute_limit_price(bid)
+                # within seconds of submission. compute_limit_price now takes
+                # the ask so it can size the offset proportional to the spread
+                # rather than the legacy fixed $0.03 — FABC 2026-06-09: 3¢
+                # spread + 3¢ fixed offset placed the limit a full spread
+                # below bid (+5¢/sh slippage). Spread-aware: 30% of spread,
+                # floor $0.01.
+                limit_price = self.compute_limit_price(bid, ask=ask)
                 pricing_method = 'stop_bid'
                 if limit_price > 0:
                     logger.info(
@@ -2552,8 +2602,9 @@ class StopMonitor:
                     ask_size = quote.get('ask_size', 0)
                     if bid <= 0:
                         raise ValueError(f"invalid quote: bid={bid}, ask={ask}")
-                    # Same buffer rationale as the WS-cache path above.
-                    limit_price = self.compute_limit_price(bid)
+                    # Same spread-aware buffer rationale as the WS-cache path
+                    # above (FABC 2026-06-09).
+                    limit_price = self.compute_limit_price(bid, ask=ask)
                     pricing_method = 'stop_bid_rest'
                     logger.info(
                         f"StopMonitor: {symbol} REST stop-exit pricing — "

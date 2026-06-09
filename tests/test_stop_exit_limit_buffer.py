@@ -80,8 +80,15 @@ class TestStopExitLimitBuffer:
 
     @pytest.mark.asyncio
     async def test_ws_cache_path_applies_buffer_below_bid(self, monitor, mock_alpaca):
-        """Fresh WS quote path: BMNZ-style scenario — bid=$14.03, limit must be
-        <= bid - max(3¢, 50bps) = $14.03 - max($0.03, $0.07) = $13.96."""
+        """Fresh WS quote path: BMNZ-style scenario — bid=$14.03, ask=$14.05.
+
+        FABC 2026-06-09 spread-aware update: offset = max(exit_min_offset,
+        spread × exit_spread_offset_factor) = max($0.01, $0.02 × 0.30)
+        = $0.01. Limit = $14.03 − $0.01 = $14.02.
+
+        Pre-fix this was $13.96 (legacy max($0.03, 0.5%) = $0.07 offset)
+        — a full spread below bid. Spread-aware cuts the give-up from
+        ~7¢ to ~1¢ on tight quotes."""
         monitor.add_watch('BMNZ', 14.05, 3202, 'tp-1', 'sl-1')
         with monitor._watch_lock:
             w = monitor._watches['BMNZ']
@@ -97,12 +104,14 @@ class TestStopExitLimitBuffer:
         kwargs = mock_alpaca.submit_limit_sell_order.call_args.kwargs
         limit = kwargs['limit_price']
         assert limit < 14.03, f"limit {limit} must be strictly below bid 14.03"
-        # $14.03 × 0.005 = $0.07015 → offset rounds to $0.07
-        assert limit == pytest.approx(13.96, abs=0.01)
+        assert limit == pytest.approx(14.02, abs=0.001)
 
     @pytest.mark.asyncio
     async def test_rest_fallback_path_applies_buffer_below_bid(self, monitor, mock_alpaca):
-        """Same buffer semantics on the REST quote fallback (stale WS)."""
+        """Same spread-aware buffer on REST fallback (stale WS).
+
+        Fixture's get_latest_quote returns bid=$14.03, ask=$14.05 — same
+        offset math as the WS-cache path → limit=$14.02."""
         monitor.add_watch('BMNZ', 14.05, 3202, 'tp-1', 'sl-1')
         with monitor._watch_lock:
             w = monitor._watches['BMNZ']
@@ -116,12 +125,12 @@ class TestStopExitLimitBuffer:
         kwargs = mock_alpaca.submit_limit_sell_order.call_args.kwargs
         limit = kwargs['limit_price']
         assert limit < 14.03
-        assert limit == pytest.approx(13.96, abs=0.01)
+        assert limit == pytest.approx(14.02, abs=0.001)
 
     @pytest.mark.asyncio
-    async def test_low_price_uses_fixed_three_cent_floor(self, monitor, mock_alpaca):
-        """Low-price stocks (bid < $6): buffer falls back to the 3¢ fixed
-        offset since 0.5% is smaller."""
+    async def test_low_price_tight_spread_uses_min_offset_floor(self, monitor, mock_alpaca):
+        """Low-price stock with 1¢ spread: 0.30 × $0.01 = $0.003 is below the
+        $0.01 floor, so the limit sits exactly $0.01 below bid."""
         monitor.add_watch('CHEAP', 5.00, 1000, 'tp-1', 'sl-1')
         with monitor._watch_lock:
             w = monitor._watches['CHEAP']
@@ -134,13 +143,14 @@ class TestStopExitLimitBuffer:
         await monitor._execute_stop_exit('CHEAP', 5.09, w, exit_reason='stop_loss')
         kwargs = mock_alpaca.submit_limit_sell_order.call_args.kwargs
         limit = kwargs['limit_price']
-        # 5.10 × 0.005 = $0.0255 < 3¢ → use 3¢ → limit=$5.07
-        assert limit == pytest.approx(5.07, abs=0.01)
+        # Spread=$0.01, factor=0.30 → $0.003 vs floor $0.01 → use $0.01
+        assert limit == pytest.approx(5.09, abs=0.001)
         assert limit < 5.10
 
     @pytest.mark.asyncio
-    async def test_high_price_uses_pct_buffer(self, monitor, mock_alpaca):
-        """High-price stocks: 50bps buffer dominates the 3¢ floor."""
+    async def test_high_price_tight_spread_uses_min_offset_floor(self, monitor, mock_alpaca):
+        """High-price stock with 2¢ spread: 0.30 × $0.02 = $0.006 < $0.01
+        floor. Limit = bid − $0.01 = $27.99 (vs the legacy 50bps = $27.86)."""
         monitor.add_watch('HIGH', 30.00, 100, 'tp-1', 'sl-1')
         with monitor._watch_lock:
             w = monitor._watches['HIGH']
@@ -153,8 +163,7 @@ class TestStopExitLimitBuffer:
         await monitor._execute_stop_exit('HIGH', 28.01, w, exit_reason='stop_loss')
         kwargs = mock_alpaca.submit_limit_sell_order.call_args.kwargs
         limit = kwargs['limit_price']
-        # $28 × 0.005 = $0.14 (dominates 3¢) → limit=$27.86
-        assert limit == pytest.approx(27.86, abs=0.01)
+        assert limit == pytest.approx(27.99, abs=0.001)
 
     @pytest.mark.asyncio
     async def test_limit_never_zero_or_negative(self, monitor, mock_alpaca):

@@ -193,7 +193,17 @@ class TestStopPriceAndSlippage:
 # =========================================================================
 
 class TestPartiallyFilledHandling:
-    def test_partially_filled_treated_as_fill(self, engine, mock_alpaca, mock_sm):
+    """FABC 2026-06-09 regression: partial-fill events must keep the order
+    polling open (not transition to filled). Pre-fix the engine accepted the
+    first partial as terminal and stopped polling, missing subsequent partials
+    + the final 'filled' event. FABC ordered 3,188 sh but recorded 1,438 sh
+    because the first partial fired before the broker reached terminal."""
+
+    def test_partially_filled_keeps_polling_does_not_confirm(
+        self, engine, mock_alpaca, mock_sm
+    ):
+        """First observed partial: just track first_partial_at + keep
+        order_id set. _confirm_fill MUST NOT run (would stop polling)."""
         pos = OpenPosition(
             symbol='X', entry_price=10.03, stop_price=9.50, shares=100,
             trade_id=1, order_id='pending-1',
@@ -206,12 +216,55 @@ class TestPartiallyFilledHandling:
             'status': 'partially_filled',
             'filled_avg_price': 10.04,
             'filled_qty': 60,
+            'qty': 100,
         }
         engine._process_pending_fills()
-        # Transitioned to filled state with partial shares
-        assert engine.open_positions['X'].order_id == ''  # cleared
-        assert engine.open_positions['X'].shares == 60
-        # StopMonitor watch registered
+        # Order still pending — polling continues
+        assert engine.open_positions['X'].order_id == 'pending-1'
+        # first_partial_at marked
+        assert engine.open_positions['X'].first_partial_at is not None
+        # last_observed_filled_qty tracks broker view
+        assert engine.open_positions['X'].last_observed_filled_qty == 60
+        # Pre-fill shares still reflect original ORDER qty (not partial)
+        assert engine.open_positions['X'].shares == 100
+        # _confirm_fill did NOT run — no StopMonitor watch yet
+        mock_sm.add_watch.assert_not_called()
+
+    def test_partial_then_filled_records_full_qty(
+        self, engine, mock_alpaca, mock_sm
+    ):
+        """FABC scenario: partial(1438) → filled(3188) across two polls.
+        Recorded qty MUST be the final filled (3188), not the first partial."""
+        pos = OpenPosition(
+            symbol='FABC', entry_price=3.97, stop_price=3.92, shares=3188,
+            trade_id=1, order_id='pending-1',
+            entry_time=datetime.now(timezone.utc) - timedelta(seconds=10),
+            range_high=3.96, range_low=3.92,
+            lock_arm_at_r=1.5, lock_stop_r=1.0,
+            composite_score=0.5, quintile='Q4',
+        )
+        engine.open_positions['FABC'] = pos
+        # Poll 1: partial 1438/3188
+        mock_alpaca.get_order.return_value = {
+            'status': 'partially_filled',
+            'filled_avg_price': 3.97,
+            'filled_qty': 1438,
+            'qty': 3188,
+        }
+        engine._process_pending_fills()
+        assert pos.order_id == 'pending-1'
+        mock_sm.add_watch.assert_not_called()
+        # Poll 2: broker now reports terminal filled at 3188
+        mock_alpaca.get_order.return_value = {
+            'status': 'filled',
+            'filled_avg_price': 3.97,
+            'filled_qty': 3188,
+            'qty': 3188,
+        }
+        engine._process_pending_fills()
+        # Now _confirm_fill ran with full qty
+        assert pos.shares == 3188
+        assert pos.order_id == ''  # cleared = filled
         mock_sm.add_watch.assert_called_once()
 
 

@@ -216,13 +216,17 @@ def _create_stop_monitor(config, alpaca, notifier=None, alpaca_clients_by_strate
         polling_mode=use_polling,
         polling_interval=2.0,
         alpaca_clients_by_strategy=alpaca_clients_by_strategy,
+        exit_min_offset=config.exit_min_offset,
+        exit_spread_offset_factor=config.exit_spread_offset_factor,
     )
     stop_monitor.start()
     mode = "REST polling (paper)" if use_polling else "WebSocket (live)"
     logger.info(
         f"StopMonitor STARTED ({mode}) — safety_net={config.safety_net_sl_pct:.0%}, "
         f"offset=${config.marketable_limit_offset}, "
-        f"offset_pct={config.marketable_limit_offset_pct:.1%}"
+        f"offset_pct={config.marketable_limit_offset_pct:.1%}, "
+        f"exit_min_offset=${config.exit_min_offset}, "
+        f"exit_spread_factor={config.exit_spread_offset_factor:.2f}"
     )
     return stop_monitor
 

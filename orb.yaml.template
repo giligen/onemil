@@ -194,6 +194,16 @@ risk:
 conflict:
   skip_if_any_strategy_has_symbol: true
 
+# Multi-fill / partial-fill handling for ORB entry orders (FABC 2026-06-09 fix).
+# When the broker reports `partially_filled` status, the engine keeps polling
+# (does NOT call _confirm_fill) until either `filled` arrives or
+# partial_fill_stall_seconds_max elapses. The pre-fix behavior accepted the
+# first partial as final, which silently under-reported FABC's qty (1438
+# recorded vs 3188 actual) and hid $683 of real loss.
+fill_handling:
+  partial_fill_stall_seconds_max: 60  # cancel + confirm at observed qty if
+                                       # broker stays partial > N sec.
+
 # Telegram notifications
 notifications:
   telegram:

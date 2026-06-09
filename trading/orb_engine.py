@@ -171,6 +171,15 @@ class OpenPosition:
     breakout_bar_ts: Optional[datetime] = None
     rule_m_evaluated: bool = False
     rule_d_evaluated: bool = False
+    # FABC 2026-06-09 fix: track when we first saw a partial fill, so we can
+    # tell the difference between "broker is still working the order" and
+    # "broker stalled mid-fill, time to cancel + accept the partial". None
+    # until first partial observed; reset on terminal-state transition.
+    first_partial_at: Optional[datetime] = None
+    # Highest filled_qty observed so far on this order. Used by the
+    # partial-fill polling loop to suppress duplicate INFO logs when the
+    # broker reports the same qty across multiple polls.
+    last_observed_filled_qty: int = 0
 
 
 class ORBEngine:
@@ -232,6 +241,16 @@ class ORBEngine:
         conflict_cfg = cfg.get('conflict', {})
         notifications_cfg = cfg.get('notifications', {}).get('telegram', {})
         safety_cfg = cfg.get('safety_net', {})
+        # FABC 2026-06-09: how long to keep polling a partially-filled order
+        # before giving up and accepting whatever filled. Set high enough that
+        # a normal multi-fill order ("partial 1438 → partial 3188 → filled
+        # 3188" inside a couple seconds) always reaches terminal `filled`
+        # before timing out. Set low enough that a truly stuck broker order
+        # doesn't strand the engine in a never-confirms state.
+        fill_handling_cfg = cfg.get('fill_handling', {})
+        self.partial_fill_stall_seconds_max = int(
+            fill_handling_cfg.get('partial_fill_stall_seconds_max', 60)
+        )
 
         self.range_minutes = int(entry_cfg.get('range_minutes', 5))
         self.entry_slip_bps = float(entry_cfg.get('entry_slip_bps', 30))
@@ -1701,26 +1720,22 @@ class ORBEngine:
                 if status == 'filled':
                     self._confirm_fill(pos, order_status)
                 elif status == 'partially_filled':
-                    # APT/MLTX 2026-05-11 regression: previously this branch
-                    # accepted the partial and called _confirm_fill but did
-                    # NOT cancel the parent's unfilled remainder. The parent
-                    # kept filling in the background, growing the actual
-                    # position beyond watch.shares. When StopMonitor later
-                    # cancelled the bracket to submit its standalone exit
-                    # sell, only watch.shares (the partial qty) got sold —
-                    # leaving the rest as unmanaged orphans on Alpaca
-                    # (APT: 2257 sold / 5153 filled → 2896 orphan at
-                    # -$1,957 unrealized; MLTX: 2279 / 2487 → 208 orphan).
-                    # The previous comment "bracket SL/TP cap the position
-                    # anyway" was wrong: StopMonitor cancels the bracket
-                    # before its standalone sell, so the safety-net legs
-                    # don't catch post-confirm fills.
-                    # Fix: cancel the parent remainder now. Alpaca cancels
-                    # the unfilled portion only; the partial position stays
-                    # and the bracket OCO children attached to the parent
-                    # are removed — StopMonitor's add_watch call inside
-                    # _confirm_fill (below) re-protects the position via
-                    # WebSocket tick-watch within <100ms.
+                    # FABC 2026-06-09 fix: previously this branch accepted
+                    # the FIRST observed partial as terminal and called
+                    # _confirm_fill, which clears pos.order_id → polling
+                    # stops → subsequent partials (and the final 'filled'
+                    # transition) were never recorded. FABC ordered 3,188 sh
+                    # in a multi-fill sequence (~1438 → 3188 within seconds);
+                    # pre-fix engine recorded shares=1438 and reported a
+                    # $561 loss while the broker filled all 3,188 and the
+                    # real account loss was $1,243.
+                    #
+                    # New behavior (mirrors bull-flag's _manage_pending_orders
+                    # at trading/trading_engine.py): on partial, just log and
+                    # keep polling. Terminal 'filled' status drives the
+                    # _confirm_fill below. The stall-timeout branch above
+                    # is a safety net for orders the broker never marks
+                    # 'filled' (rare; we still capture the observed qty).
                     if isinstance(order_status, dict):
                         _filled_qty = order_status.get('filled_qty', 0)
                         _req_qty = order_status.get('qty', 0)
@@ -1733,26 +1748,50 @@ class ORBEngine:
                     except (ValueError, TypeError):
                         _filled_int = 0
                         _req_int = 0
-                    _remaining = max(_req_int - _filled_int, 0)
-                    logger.warning(
-                        f"ORB: {sym} partial fill — filled "
-                        f"{_filled_int}/{_req_int}; cancelling remaining "
-                        f"{_remaining} sh of parent to prevent position-"
-                        f"growth orphan; accepting {_filled_int} as "
-                        f"managed qty"
+                    now_utc = datetime.now(timezone.utc)
+                    if pos.first_partial_at is None:
+                        pos.first_partial_at = now_utc
+                        logger.info(
+                            f"ORB: {sym} partial — filled {_filled_int}/"
+                            f"{_req_int} sh, continuing to poll (stall-"
+                            f"timeout={self.partial_fill_stall_seconds_max}s)"
+                        )
+                    elif _filled_int > pos.last_observed_filled_qty:
+                        # Progress — re-log so we have telemetry on multi-bar
+                        # fills without spamming on flat polls.
+                        logger.info(
+                            f"ORB: {sym} partial fill progress — "
+                            f"{pos.last_observed_filled_qty} → {_filled_int}"
+                            f"/{_req_int} sh"
+                        )
+                    pos.last_observed_filled_qty = max(
+                        pos.last_observed_filled_qty, _filled_int
                     )
-                    if _remaining > 0 and pos.order_id:
-                        try:
-                            self.alpaca.cancel_order(pos.order_id)
-                        except Exception as e:
-                            logger.error(
-                                f"ORB: {sym} cancel of partial-fill "
-                                f"remainder FAILED: {e} — position may "
-                                f"continue growing beyond watch.shares; "
-                                f"sync_positions orphan-detect is the only "
-                                f"backstop"
-                            )
-                    self._confirm_fill(pos, order_status)
+                    # Stall timeout: broker reported partials but never
+                    # transitioned to terminal 'filled'. Cancel remainder +
+                    # accept observed qty. _confirm_fill writes the actual
+                    # filled qty (the order_status payload at this point
+                    # carries the latest broker-reported fill).
+                    elapsed = (now_utc - pos.first_partial_at).total_seconds()
+                    if elapsed > self.partial_fill_stall_seconds_max:
+                        _remaining = max(_req_int - _filled_int, 0)
+                        logger.warning(
+                            f"ORB: {sym} partial-fill stall — "
+                            f"{_filled_int}/{_req_int} sh after {elapsed:.0f}s; "
+                            f"cancelling remaining {_remaining} sh + "
+                            f"accepting observed qty as final"
+                        )
+                        if _remaining > 0 and pos.order_id:
+                            try:
+                                self.alpaca.cancel_order(pos.order_id)
+                            except Exception as e:
+                                logger.error(
+                                    f"ORB: {sym} stall-cancel FAILED: {e} — "
+                                    f"position may continue growing; "
+                                    f"sync_positions orphan-detect is the "
+                                    f"only backstop"
+                                )
+                        self._confirm_fill(pos, order_status)
                 elif status in ('canceled', 'cancelled', 'expired', 'rejected',
                                  'done_for_day', 'suspended'):
                     logger.warning(

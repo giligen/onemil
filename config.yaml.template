@@ -171,8 +171,15 @@ trading:
   self_managed_stops:
     enabled: true                       # WebSocket SIP for live + paper (REST polling only if sharing WS slot)
     safety_net_sl_pct: 0.05             # 5% wide SL on Alpaca (crash protection)
-    marketable_limit_offset: 0.03       # $0.03 min offset below price
-    marketable_limit_offset_pct: 0.005  # 0.5% offset (whichever is larger)
+    marketable_limit_offset: 0.03       # $0.03 min offset below price (legacy/fallback path)
+    marketable_limit_offset_pct: 0.005  # 0.5% offset (legacy/fallback path)
+    # FABC 2026-06-09 fix: spread-aware exit limit pricing. When the WS
+    # cache (or REST fallback) has a fresh ask, compute_limit_price uses
+    # offset = max(exit_min_offset, spread × exit_spread_offset_factor)
+    # instead of the legacy max($0.03, 0.5%). On a 3¢ spread the new path
+    # gives a 1¢ buffer; the old path gave 3¢ = full-spread slippage.
+    exit_min_offset: 0.01               # floor on offset, prevents 0¢ buffer
+    exit_spread_offset_factor: 0.30     # fraction of spread used as offset
   # Trailing stop: replace fixed TP with trailing stop that lets winners run
   # Trail 1R below highest high, activates after +2R from entry
   # Backtest: +55% P&L improvement over fixed 2.5R TP across 15 months
