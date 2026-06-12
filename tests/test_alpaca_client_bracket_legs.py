@@ -40,6 +40,54 @@ def _client_with_mocked_sdk():
     return c
 
 
+class TestSubmitStopBracketReturnsLegs:
+    """Same shape as submit_bracket_order, applied to the stop-bracket
+    variant. Caught 2026-06-12 day after L9 ship: ORB's REBUMP_STOP +
+    SUBMIT_AS_IS entry paths route through submit_stop_bracket_order,
+    not submit_bracket_order. The FABC fix had to be mirrored here or
+    leg-id extraction stayed broken for 3 of 5 ORB entry shapes. OSCR
+    2026-06-10 + ORCS/UMC/TROX 2026-06-11 confirmed the gap."""
+
+    def test_stop_bracket_returns_legs(self):
+        tp = _mk_leg('tp-id-stop-1', 'sell', 'limit', limit_price=20.0)
+        sl = _mk_leg('sl-id-stop-1', 'sell', 'stop', stop_price=15.0)
+        c = _client_with_mocked_sdk()
+        c.trading_client.submit_order = MagicMock(
+            return_value=_mk_order(order_id='parent-stop-1', legs=[tp, sl])
+        )
+
+        result = c.submit_stop_bracket_order(
+            symbol='OSCR', qty=1590, side='buy',
+            stop_price=18.0, limit_price=18.5,
+            tp_price=20.0, sl_price=15.0,
+        )
+
+        assert 'legs' in result
+        assert len(result['legs']) == 2
+        ids = {leg['id'] for leg in result['legs']}
+        assert ids == {'tp-id-stop-1', 'sl-id-stop-1'}
+
+    def test_stop_bracket_tp_sl_discriminated_by_price_field(self):
+        """ORB downstream picks TP by limit_price + SL by stop_price.
+        Verify each leg carries the correct field."""
+        tp = _mk_leg('tp-x', 'sell', 'limit', limit_price=20.0)
+        sl = _mk_leg('sl-x', 'sell', 'stop', stop_price=15.0)
+        c = _client_with_mocked_sdk()
+        c.trading_client.submit_order = MagicMock(
+            return_value=_mk_order(legs=[tp, sl])
+        )
+        result = c.submit_stop_bracket_order(
+            symbol='X', qty=100, side='buy',
+            stop_price=18.0, limit_price=18.5,
+            tp_price=20.0, sl_price=15.0,
+        )
+        by_id = {leg['id']: leg for leg in result['legs']}
+        assert by_id['tp-x']['limit_price'] == 20.0
+        assert by_id['tp-x']['stop_price'] is None
+        assert by_id['sl-x']['stop_price'] == 15.0
+        assert by_id['sl-x']['limit_price'] is None
+
+
 class TestSubmitBracketReturnsLegs:
 
     def test_legs_extracted_with_correct_ids(self):

@@ -1537,6 +1537,15 @@ class AlpacaClient:
                 f"submit_stop_bracket_order({symbol})"
             )
 
+            # 2026-06-12 (FABC fix follow-up): mirror submit_bracket_order
+            # (commit 1797cc0) — include 'legs' in the response so callers
+            # can populate tp_leg_id / sl_leg_id on the StopMonitor watch.
+            # Pre-fix: ORB's REBUMP_STOP and SUBMIT_AS_IS entry paths went
+            # through this method and silently lost the leg IDs, leaving
+            # BRANCH_SL_LEG_RACE recovery dead-code for those entries.
+            # OSCR 2026-06-10 was the canary case that exposed the gap.
+            # Bull flag's stop-limit entries via order_executor:322 also
+            # benefit from this.
             result = {
                 'id': str(order.id) if hasattr(order, 'id') else '',
                 'status': str(order.status.value) if hasattr(order, 'status') else 'unknown',
@@ -1545,13 +1554,28 @@ class AlpacaClient:
                 'side': side,
                 'stop_price': stop_price,
                 'limit_price': limit_price,
+                'legs': [
+                    {
+                        'id': str(leg.id),
+                        'side': (str(leg.side.value) if hasattr(leg, 'side')
+                                  and leg.side else ''),
+                        'type': (str(leg.type.value) if hasattr(leg, 'type')
+                                  and leg.type else ''),
+                        'stop_price': (float(leg.stop_price)
+                                        if leg.stop_price else None),
+                        'limit_price': (float(leg.limit_price)
+                                         if leg.limit_price else None),
+                    }
+                    for leg in (getattr(order, 'legs', None) or [])
+                ],
             }
 
             logger.info(
                 f"Stop-bracket order submitted: {symbol} {side} {qty} "
                 f"stop @ ${stop_price:.2f}, limit ${limit_price:.2f}, "
                 f"TP ${tp_price:.2f}, SL ${sl_price:.2f} "
-                f"— ID: {result['id']}, status: {result['status']}"
+                f"— ID: {result['id']}, status: {result['status']}, "
+                f"legs={len(result['legs'])}"
             )
             return result
 
