@@ -16,7 +16,7 @@ import queue
 import threading
 import time as time_mod
 from datetime import date, datetime, timedelta, timezone
-from typing import Set, Optional, Dict, Any, List
+from typing import Set, Optional, Dict, Any, List, Tuple
 
 import pandas as pd
 import pytz
@@ -2685,6 +2685,99 @@ class TradingEngine:
                     f"{event.symbol}: Failed to process exhaustion partial: {e}"
                 )
 
+    def _recover_exit_from_order_history(
+        self, symbol: str, fill_price: float,
+        planned_stop: Optional[float] = None,
+    ) -> Tuple[Optional[float], Optional[str]]:
+        """Query Alpaca's recent closed orders for ``symbol`` and return
+        ``(exit_price, exit_reason)`` for the actual sell that closed the
+        position.
+
+        Mirrors the proven MACD wave pattern
+        (``macd_wave_engine.py:339-381``). Used by
+        ``_sync_closed_positions`` when the bracket-leg lookup can't find
+        a fill (e.g., StopMonitor's market close fired AFTER we cancelled
+        both legs — GLXG 2026-06-11 case). Pre-fix this path wrote
+        ``exit_reason='unknown_exit'`` with ``pnl=$0`` placeholder,
+        silently losing the real P&L.
+
+        Classification of ``exit_reason``:
+          - ``order_class in {bracket, oto, oco}`` → ``'bracket_sl_tp'``
+          - solo sell within 0.5% of planned_stop (or below) → ``'stop_loss'``
+          - solo sell ≥ fill_price (small win / breakeven) → ``'trail_stop'``
+          - solo sell between fill_price and stop → ``'stop_loss_market_fallback'``
+          - planned_stop unknown → ``'stopmonitor_exit'``
+
+        Returns ``(None, None)`` when no filled sell can be recovered
+        (API error, empty list, or only cancelled/expired orders).
+        Caller should fall through to the ``unknown_exit`` placeholder
+        only in that case.
+        """
+        try:
+            from alpaca.trading.requests import GetOrdersRequest
+            from alpaca.trading.enums import QueryOrderStatus
+            orders = self.alpaca.trading_client.get_orders(
+                GetOrdersRequest(
+                    status=QueryOrderStatus.CLOSED,
+                    symbols=[symbol], limit=10,
+                )
+            )
+        except Exception as e:
+            logger.warning(
+                f"{symbol}: order-history fetch failed: {e}"
+            )
+            return None, None
+
+        classified_sell = None
+        for o in orders or []:
+            try:
+                if (o.side.value == 'sell'
+                        and o.status.value == 'filled'
+                        and o.filled_avg_price):
+                    classified_sell = o
+                    break
+            except Exception:
+                continue
+
+        if classified_sell is None:
+            return None, None
+
+        try:
+            exit_price = float(classified_sell.filled_avg_price)
+        except Exception:
+            return None, None
+
+        # Classify exit_reason — same shape as MACD wave's discriminator.
+        try:
+            oc = (classified_sell.order_class.value
+                   if classified_sell.order_class else None)
+        except Exception:
+            oc = None
+
+        if oc in ('bracket', 'oto', 'oco'):
+            exit_reason = 'bracket_sl_tp'
+        elif (planned_stop and planned_stop > 0
+                and fill_price and fill_price > 0):
+            # Solo sell — discriminate by where exit landed relative to
+            # the planned stop. Tolerance: 0.5% of stop covers normal
+            # slippage on a marketable limit fill.
+            tolerance = planned_stop * 0.005
+            if exit_price <= planned_stop + tolerance:
+                exit_reason = 'stop_loss'
+            elif exit_price >= fill_price:
+                # Sold at or above entry — trail caught a small win or
+                # breakeven exit.
+                exit_reason = 'trail_stop'
+            else:
+                # Between planned stop and entry: limit didn't fill,
+                # escalate-to-market caught at a worse price than entry
+                # but better than the planned stop.
+                exit_reason = 'stop_loss_market_fallback'
+        else:
+            exit_reason = 'stopmonitor_exit'
+
+        return exit_price, exit_reason
+
     def _sync_closed_positions(self) -> None:
         """Detect bracket exits (SL/TP hit) and update DB + circuit breaker."""
         # Process StopMonitor exits first — updates DB with exit_price.
@@ -2766,13 +2859,74 @@ class TradingEngine:
                             f"P&L ${pnl:+,.2f} ({pnl_pct:+.1f}%)"
                         )
                     else:
-                        # Use fill_price as fallback exit to prevent infinite re-check
-                        # (exit_price IS NULL keeps this trade in get_open_trades forever)
+                        # 2026-06-19 (GLXG 06-11 fix): bracket legs didn't
+                        # fill — that means the position closed via a
+                        # different path (StopMonitor's market close,
+                        # manual sell, etc.). Mirror MACD wave's
+                        # sync external-close pattern (macd_wave_engine.py
+                        # :339-381) and query Alpaca's recent closed
+                        # orders for the symbol to find the actual sell
+                        # fill. Pre-fix this branch wrote
+                        # exit_reason='unknown_exit' / pnl=$0 placeholder,
+                        # losing the real P&L (GLXG 2026-06-11 case).
+                        recovered_price, recovered_reason = (
+                            self._recover_exit_from_order_history(
+                                symbol,
+                                trade['fill_price'],
+                                planned_stop=trade.get('stop_loss_price'),
+                            )
+                        )
+                        if recovered_price is not None:
+                            total_shares = (trade.get('filled_qty')
+                                              or trade['shares'])
+                            partial_shares = trade.get('partial_exit_shares') or 0
+                            remainder_shares = (
+                                total_shares - partial_shares
+                                if partial_shares else total_shares
+                            )
+                            remainder_pnl = (
+                                (recovered_price - trade['fill_price'])
+                                * remainder_shares
+                            )
+                            partial_pnl = trade.get('partial_exit_pnl') or 0.0
+                            pnl_recovered = remainder_pnl + partial_pnl
+                            pnl_pct = (
+                                (pnl_recovered
+                                  / (trade['fill_price'] * total_shares))
+                                * 100
+                            )
+                            final_reason = (
+                                f"exhaust+{recovered_reason}"
+                                if partial_pnl != 0.0 else recovered_reason
+                            )
+                            self.db.update_trade(trade['id'], {
+                                'exit_price': recovered_price,
+                                'exit_reason': final_reason,
+                                'exited_at': datetime.now(timezone.utc),
+                                'pnl': pnl_recovered,
+                                'pnl_pct': pnl_pct,
+                            })
+                            self.position_manager.record_trade_pnl(
+                                pnl_recovered)
+                            if self.stop_monitor:
+                                self.stop_monitor.remove_watch(symbol)
+                            logger.info(
+                                f"{symbol}: {final_reason} — exit "
+                                f"${recovered_price:.2f} (recovered from "
+                                f"order history), P&L ${pnl_recovered:+,.2f} "
+                                f"({pnl_pct:+.1f}%)"
+                            )
+                            continue
+
+                        # Truly unrecoverable. Use fill_price as fallback
+                        # exit to prevent infinite re-check (exit_price IS
+                        # NULL keeps this trade in get_open_trades forever).
                         fallback_exit = trade['fill_price']
                         pnl_est = 0.0  # Assume breakeven if unknown
                         error_msg = (
                             f"{symbol}: Position closed but exit price unknown — "
-                            f"using fill_price ${fallback_exit:.2f} as estimate"
+                            f"using fill_price ${fallback_exit:.2f} as estimate "
+                            f"(order-history recovery also failed)"
                         )
                         logger.warning(error_msg)
                         if self.notifier:
