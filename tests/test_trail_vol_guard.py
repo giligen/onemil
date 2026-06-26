@@ -65,12 +65,21 @@ class TestSafeDefaults:
 class TestBarVolumeEdgeCases:
     """bar_volume=None, 0, non-numeric."""
 
-    def test_bar_volume_none_treated_as_zero(self):
-        # baseline 100k × 1.0 = 100k threshold. 0 < 100k → skip.
-        assert should_skip_trail_exit_on_low_vol(None, 100_000, 1.0) is True
+    def test_bar_volume_none_does_not_skip(self):
+        """GLXG 2026-06-11 regression: None means "no bar observed yet" — NOT
+        "this bar had zero trading". The pre-fix semantic (None → skip) held
+        off the trail for ~20s on a fresh watch while the stock peaked.
+        New semantic: None → fail open, fire the stop."""
+        assert should_skip_trail_exit_on_low_vol(None, 100_000, 1.0) is False
+
+    def test_bar_volume_none_still_no_skip_with_high_ratio(self):
+        """Even with a very high ratio, None must NOT cause skip — the
+        absence of bar data should never suppress downside protection."""
+        assert should_skip_trail_exit_on_low_vol(None, 100_000, 10.0) is False
 
     def test_bar_volume_zero_skips(self):
-        # bar_vol=0 (no trading on this bar) → skip since 0 < any positive threshold
+        """0 (we observed a bar with zero trading) → skip if min_ratio > 0.
+        Distinct from None — 0 is a real signal that the minute was dead."""
         assert should_skip_trail_exit_on_low_vol(0, 100_000, 1.0) is True
 
     def test_bar_volume_float_coerced(self):
@@ -80,6 +89,48 @@ class TestBarVolumeEdgeCases:
     def test_bar_volume_non_numeric_treated_as_zero(self):
         # Defensive: string gets coerced to 0 → will skip if threshold > 0
         assert should_skip_trail_exit_on_low_vol("bad", 100_000, 1.0) is True
+
+
+class TestWatchEntryDefault:
+    """Pin the WatchEntry default. The pre-fix `last_bar_volume: int = 0`
+    was the root of the GLXG incident — a fresh watch was indistinguishable
+    from a real zero-volume bar. Anyone reverting the default to `0` (or any
+    int) without re-thinking the guard semantics will trip this test."""
+
+    def test_last_bar_volume_default_is_none(self):
+        from trading.stop_monitor import WatchEntry
+        # Construct with only the required fields; rely on default.
+        e = WatchEntry(
+            symbol='X', stop_price=10.0, shares=100,
+            tp_leg_id='tp', sl_leg_id='sl',
+        )
+        assert e.last_bar_volume is None, (
+            "WatchEntry.last_bar_volume default must be None — see GLXG "
+            "2026-06-11 incident. Reverting to int=0 re-introduces the "
+            "'no bar yet' vs 'dead minute' ambiguity that suppressed the "
+            "trail exit for ~20s while the stock peaked."
+        )
+
+
+class TestGLXGScenarioIncidentReplay:
+    """2026-06-11 GLXG incident: a watch added mid-session had
+    `last_bar_volume=0` (its WatchEntry default at the time) before the
+    first 1-min bar event arrived. The vol-conf guard saw bar_vol=0 and
+    skipped the trail exit for ~20 seconds while the stock peaked at $3.75.
+    The fix flips `last_bar_volume` default to `None` and the guard treats
+    None as "no signal" instead of "low signal"."""
+
+    def test_recently_armed_watch_no_bar_yet_still_fires(self):
+        """The exact incident: flag_avg=589,668 (real GLXG number), ratio=1.0,
+        bar_volume=None (no bar event seen since arm). Pre-fix: skip (bug).
+        Post-fix: don't skip — trail fires."""
+        assert should_skip_trail_exit_on_low_vol(None, 589_668, 1.0) is False
+
+    def test_observed_zero_still_skips(self):
+        """A LATER bar event arriving with volume=0 (truly dead minute) should
+        still skip — the fix only changes the "no observation" semantics, not
+        the "observed dead minute" semantics."""
+        assert should_skip_trail_exit_on_low_vol(0, 589_668, 1.0) is True
 
 
 class TestRealWorldScenarios:

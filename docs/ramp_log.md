@@ -40,3 +40,62 @@ diff is recorded inline here.
             Backup at `orb.yaml.bak.pre_stage_0` (gitignored). Trader was
             inactive at time of change (06:31 ET); cron-driven start at
             12:30 UTC picks up new config.
+
+2026-06-12  HELD Stage 0 through a −20.1% demotion flag (override, no config
+            change). `orb_ramp_check.py` fired DEMOTE: realized cushion
+            $3,553.52 vs peak $4,446.66 (−$893.14, −20.1% ≥ 20% threshold).
+
+            Override justification (advance/hold on cushion, not vibes):
+              * BT parity confirms regime, not defect — this week ORB BT took
+                the same 7/7 names/direction and lost MORE: BT −$4,861 vs
+                live −$893. Regime sizing dampened the down week by ~$4K.
+              * Absolute DD −$893 << Stage-0 expected max DD $5,400 (~16% of
+                budget). Nothing stressed.
+              * −20.1% is a small-denominator artifact: 20% of a $4,446 peak,
+                not a real risk event. The % trigger is hair-trigger this
+                early in the ramp before the cushion base is large.
+              * The flag was tripped BY today's Alpaca reconciliation (FABC
+                #196 −$560→−$1,243; GLXG #210 $0→+$114). Pre-reconcile DD was
+                −7.3% (under both the 8% health ceiling and 20% demote line).
+                The reconciliation made the drawdown honest — the FABC
+                partial-fill bug had been masking it. Books now match broker.
+
+            NOT advancing to Stage 1 either. Stage 1 gate when ALL hold:
+              * cushion ≥ +$5,000 (need +$1,446; new peak auto-clears the
+                demote flag + 8% health check)
+              * 5 clean trading days since the 6/12 reconcile/vol-guard/race
+                fixes (operational-incident gate, ≈ through 6/19)
+              * days-in-stage already satisfied (20)
+            Target: flip the three Stage-1 numbers next week once
+            `orb_ramp_check.py` prints ELIGIBLE with no demote flag.
+
+2026-06-19  HELD Stage 0 through a REAL −69.8% demote trigger (override, no
+            config change). Cushion $3,553 → $1,344; peak $4,446; 3 red days
+            6/15–6/17; week −$2,141 (ORB −$1,694, BF −$447, MACD $0).
+
+            NOT an artifact this time — genuine regime drawdown. Override is
+            an explicit acceptance-of-variance decision, weaker-justified than
+            the 6/12 hold. Basis:
+              * Confirmed regime, not defect: ORB BT (static_lock) this week
+                −$13,302 @ 19% WR vs live −$1,694 @ 20% WR — same direction,
+                same WR, every day aligned. Ramp size turned a 5-figure BT
+                loss into a 4-figure live scratch (de-risking worked).
+              * Whole gap-up universe failed: 18% breakout WR (vs 34% prior),
+                Mon 6/15 13% across 113 candidates, Tue 6/16 0%. No filter
+                saves you at 82–87% fade rates — regime, not picks.
+              * Still net +$1,344 since launch; ~$13K of room to the −$12K
+                hard stop (non-negotiable floor, unchanged).
+              * Universe WR recovering intraweek: 13→0→43→50%. Thu 6/18 live
+                +$202 while BT −$3,244 (filter dodged BT losers). Possible
+                regime turn — demoting into a turn locks in small size for the
+                recovery.
+
+            Watch items (not blocking, revisit post-regime):
+              * MACD wave $0 contribution all weeks — verify it's actually
+                running / has setups.
+              * No cooldown on freshly-stopped symbols (ARQQ stopped 6/16 +
+                6/17; RGTZ up-sized into a fade −$556). Cheap filter to weigh
+                AFTER the regime, not during.
+
+            Re-advance to S1 on standard gates ($5K cushion + clean days +
+            no demote flag). Hard stop remains the only override-proof line.

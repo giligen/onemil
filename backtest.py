@@ -23,6 +23,7 @@ import pytz
 from dotenv import load_dotenv
 
 from data_sources.alpaca_client import AlpacaClient
+from trading.exit_reasons import ExitReason
 from trading.pattern_detector import BullFlagDetector, BullFlagPattern, BullFlagSetup
 from trading.trade_planner import TradePlanner, TradePlan
 from trading.news_kill_guard import news_kill_decision
@@ -2619,7 +2620,7 @@ class BacktestRunner:
                                 shares=plan.shares,
                                 exit_time=bars.iloc[min(i+1, len(bars)-1)].get('timestamp', bars.iloc[min(i+1, len(bars)-1)].name),
                                 exit_price=exit_price,
-                                exit_reason='post_fill_exit',
+                                exit_reason=ExitReason.POST_FILL_EXIT.value,
                                 pnl=slippage_pnl,
                                 pnl_pct=(exit_price - fill_price) / fill_price * 100,
                                 bars_held=1,

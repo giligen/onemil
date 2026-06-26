@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 
 from data_sources.alpaca_client import AlpacaClient
+from trading.exit_reasons import ExitReason
 
 logger = logging.getLogger(__name__)
 
@@ -95,8 +96,12 @@ class WatchEntry:
     vol_confirmed_trail_enabled: bool = False
     vol_confirmed_trail_min_ratio: float = 1.0
     # Last fully-closed bar's volume (updated on bar-close events). Used only
-    # by the vol-confirmed guard above.
-    last_bar_volume: int = 0
+    # by the vol-confirmed guard above. `None` until the first bar event
+    # arrives for this watched symbol — distinct from `0` (a bar with no
+    # trades). GLXG 2026-06-11 incident: the default `0` was indistinguishable
+    # from a real "no-volume drift" signal, so the guard held off the trail
+    # for ~20s on a fresh watch.
+    last_bar_volume: Optional[int] = None
     # Static-lock exit (ORB strategy, 2026-04-19). When lock_arm_at_r > 0, the
     # stop ratchets UP to entry + lock_stop_r × lock_r_unit the first time
     # price prints at or above entry + lock_arm_at_r × lock_r_unit. Unlike
@@ -356,6 +361,16 @@ class StopMonitor:
 
         self._exit_events: queue.Queue = queue.Queue()
         self._exit_in_progress: Dict[str, bool] = {}
+        # GLXG 2026-06-11 fix: race guard between sync_closed_positions and
+        # _execute_stop_exit. trading_engine._sync_closed_positions polls open
+        # positions; if it sees a position has gone flat while StopMonitor's
+        # exit flow is still pending its fill confirmation, it would write the
+        # UNKNOWN_EXIT fallback (exit_price = fill_price, pnl = 0) before
+        # StopMonitor's real exit event lands. We stamp the start time of every
+        # in-progress exit and expose `is_exit_in_progress()` so sync can defer.
+        # Staleness cutoff (60s) lets sync take over if StopMonitor really got
+        # stuck — preserves the unknown_exit safety net for true leaks.
+        self._exit_started_at: Dict[str, float] = {}
         self._exit_lock = threading.Lock()
 
         self._thread: Optional[threading.Thread] = None
@@ -893,6 +908,40 @@ class StopMonitor:
             f"(had_quote_watch={had_quote_watch})"
         )
 
+    # GLXG 2026-06-11 race guard. trading_engine._sync_closed_positions polls
+    # broker positions; if it sees a position has gone flat WHILE this monitor
+    # is mid-exit (e.g. waiting on a market-close fill confirmation), it would
+    # write the UNKNOWN_EXIT fallback before our real exit event lands. Sync
+    # calls this method to defer the fallback write.
+    #
+    # Returns True only when an exit is BOTH flagged in-progress AND started
+    # less than `stale_after_s` seconds ago. A flag older than that is treated
+    # as stuck — sync is allowed to take over so a true leak still surfaces.
+    def is_exit_in_progress(self, symbol: str, stale_after_s: float = 60.0) -> bool:
+        """Whether an exit flow is currently active for `symbol`.
+
+        Args:
+            symbol: Stock symbol.
+            stale_after_s: Max age of the in-progress flag. Older = treated as
+                stuck (caller can take over). Default 60s — bigger than the
+                worst observed StopMonitor escalation (limit poll 10s +
+                market-close poll 60s), small enough that a truly stuck flow
+                doesn't suppress reconciliation forever.
+
+        Returns: True iff caller should DEFER any reconcile-style fallback
+            write for this symbol. False otherwise (no exit in flight, or
+            the flag is stale).
+        """
+        with self._exit_lock:
+            if not self._exit_in_progress.get(symbol, False):
+                return False
+            started = self._exit_started_at.get(symbol)
+        if started is None:
+            # Flag set without timestamp (legacy code path or test fixture) —
+            # treat as unknown age; conservatively let caller proceed.
+            return False
+        return (time_mod.time() - started) < stale_after_s
+
     def remove_watch(self, symbol: str) -> None:
         """
         Stop monitoring a symbol.
@@ -907,6 +956,7 @@ class StopMonitor:
         # Block any in-flight _on_trade from starting a new exit
         with self._exit_lock:
             self._exit_in_progress[symbol] = True
+            self._exit_started_at[symbol] = time_mod.time()
 
         with self._watch_lock:
             removed = self._watches.pop(symbol, None)
@@ -926,9 +976,12 @@ class StopMonitor:
 
     # Whitelist of exit reasons accepted by force_exit. Extend here when
     # new external-trigger exits are added (e.g., touchgo, news flush).
+    # See trading/exit_reasons.py — these strings are the single source of
+    # truth. Add new force_exit triggers there first, then list the .value
+    # here.
     _FORCE_EXIT_REASON_WHITELIST = frozenset({
-        'tag_bb',         # ORB Rule M (breakout-bar close in bottom half)
-        'tag_b1',         # ORB Rule D (bar-1 deep revert)
+        ExitReason.TAG_BB.value,   # ORB Rule M (breakout-bar close in bottom half)
+        ExitReason.TAG_B1.value,   # ORB Rule D (bar-1 deep revert)
     })
 
     def force_exit(
@@ -1262,6 +1315,7 @@ class StopMonitor:
                 )
                 return None
             self._exit_in_progress[symbol] = True
+            self._exit_started_at[symbol] = time_mod.time()
 
         with self._watch_lock:
             watch = self._watches.get(symbol)
@@ -1493,7 +1547,7 @@ class StopMonitor:
             exit_price=exit_price,
             shares=sell_shares,
             order_id=order_id,
-            exit_reason='exhaustion_partial',
+            exit_reason=ExitReason.EXHAUSTION_PARTIAL.value,
             trade_db_id=trade_db_id,
             submitted_at=time_mod.time(),
             pricing_method=pricing_method,
@@ -1891,9 +1945,11 @@ class StopMonitor:
                                 flag_avg_volume=watch.avg_flag_volume,
                                 min_vol_ratio=watch.vol_confirmed_trail_min_ratio,
                             ):
+                                _bv_disp = (f"{watch.last_bar_volume:,}"
+                                            if watch.last_bar_volume is not None else 'None')
                                 logger.info(
                                     f"StopMonitor poll: {sym} TRAIL VOL-CONF SKIP "
-                                    f"— bar_vol={watch.last_bar_volume:,} < "
+                                    f"— bar_vol={_bv_disp} < "
                                     f"{watch.vol_confirmed_trail_min_ratio}×"
                                     f"flag_avg={watch.avg_flag_volume:,.0f}"
                                 )
@@ -2231,25 +2287,27 @@ class StopMonitor:
             # when trail_pct>0, and by _on_trade when R-trail crosses
             # activate_at_r. Matches poll-path classification at line ~1430.
             if watch.trailing_active:
-                exit_reason = 'trail_stop'
+                exit_reason = ExitReason.TRAIL_STOP.value
             elif watch.lock_armed:
-                exit_reason = 'lock_stop'
+                exit_reason = ExitReason.LOCK_STOP.value
             else:
-                exit_reason = 'stop_loss'
+                exit_reason = ExitReason.STOP_LOSS.value
             # Experiment D: for trail exits (not initial hard stop), require
             # the last closed bar's volume to confirm active selling. Skip if
             # the bar looks like low-volume drift. Only applies when
             # trailing_active is True AND vol_confirmed_trail_enabled.
-            if exit_reason == 'trail_stop' and watch.vol_confirmed_trail_enabled:
+            if exit_reason == ExitReason.TRAIL_STOP.value and watch.vol_confirmed_trail_enabled:
                 from trading.trail_vol_guard import should_skip_trail_exit_on_low_vol
                 if should_skip_trail_exit_on_low_vol(
                     bar_volume=watch.last_bar_volume,
                     flag_avg_volume=watch.avg_flag_volume,
                     min_vol_ratio=watch.vol_confirmed_trail_min_ratio,
                 ):
+                    _bv_disp = (f"{watch.last_bar_volume:,}"
+                                if watch.last_bar_volume is not None else 'None')
                     logger.info(
                         f"StopMonitor: {symbol} TRAIL VOL-CONF SKIP — "
-                        f"bar_vol={watch.last_bar_volume:,} < "
+                        f"bar_vol={_bv_disp} < "
                         f"{watch.vol_confirmed_trail_min_ratio}×flag_avg={watch.avg_flag_volume:,.0f}, "
                         f"price=${price:.2f} stop=${watch.stop_price:.2f} (holding)"
                     )
@@ -2508,6 +2566,7 @@ class StopMonitor:
                 )
                 return
             self._exit_in_progress[symbol] = True
+            self._exit_started_at[symbol] = time_mod.time()
 
         loop = asyncio.get_event_loop()
         # Route order-submission calls to the correct Alpaca account when
@@ -2736,15 +2795,15 @@ class StopMonitor:
                     # can separate a clean fallback fill from an SL-race
                     # recovery or a last-resort trigger-price estimate.
                     if branch == self.BRANCH_MARKET_CLOSE:
-                        exit_reason = 'stop_loss_market_fallback'
+                        exit_reason = ExitReason.STOP_LOSS_MARKET_FALLBACK.value
                     elif branch == self.BRANCH_LIMIT_RACE:
                         # Original limit filled during our cancel — keep the
-                        # plain 'stop_loss' reason since the limit did work.
+                        # plain STOP_LOSS reason since the limit did work.
                         pass
                     elif branch == self.BRANCH_SL_LEG_RACE:
-                        exit_reason = 'stop_loss_bracket_sl_race'
+                        exit_reason = ExitReason.STOP_LOSS_BRACKET_SL_RACE.value
                     elif branch == self.BRANCH_LAST_RESORT:
-                        exit_reason = 'stop_loss_unconfirmed'
+                        exit_reason = ExitReason.STOP_LOSS_UNCONFIRMED.value
             except Exception as e:
                 # Bracket SL may have won the race — position already flat.
                 if self._is_race_condition_error(e):
@@ -2776,7 +2835,7 @@ class StopMonitor:
                         )
                         exit_price = recovered
                         order_id = watch.sl_leg_id
-                        exit_reason = 'stop_loss_bracket_sl_race'
+                        exit_reason = ExitReason.STOP_LOSS_BRACKET_SL_RACE.value
                         # FALL THROUGH to the exit-event emit path below
                     else:
                         logger.error(
@@ -2804,7 +2863,7 @@ class StopMonitor:
                             label=f"{symbol} close_position",
                         )
                         order_id = fallback.get("id", "")
-                        exit_reason = "stop_loss_fallback"
+                        exit_reason = ExitReason.STOP_LOSS_FALLBACK.value
                         logger.info(
                             f"StopMonitor: {symbol} fallback close_position — "
                             f"order={order_id} — awaiting fill confirmation"
@@ -2871,7 +2930,7 @@ class StopMonitor:
                                 )
                                 exit_price = recovered2
                                 order_id = watch.sl_leg_id
-                                exit_reason = 'stop_loss_bracket_sl_race'
+                                exit_reason = ExitReason.STOP_LOSS_BRACKET_SL_RACE.value
                                 # Fall through to exit-event emit
                             else:
                                 logger.error(

@@ -208,6 +208,45 @@ StopMonitor uses real-time NBBO quotes for exit limit pricing instead of fixed o
 
 Falls back to fixed offset (`max($0.03, price × 0.5%)`) if quote fetch fails. 30-second fill timeout: if limit order unfilled, cancel and market-sell via `close_position()`.
 
+### Exit Reason Taxonomy
+
+Every closed trade in `trades.exit_reason` carries one of the values
+below. The single source of truth is `trading/exit_reasons.py::ExitReason`
+— inline string literals are forbidden (enforced by
+`tests/test_exit_reasons.py::TestNoStringLiteralDrift`).
+
+| Group | Value | When emitted |
+|---|---|---|
+| **Shared** | `stop_loss` | StopMonitor's stop level hit + sell filled cleanly |
+| | `take_profit` | TP leg filled (pre-trail BF; rare under current config) |
+| | `trail_stop` | Trailing stop ratcheted past last high then triggered |
+| | `lock_stop` | ORB static-lock: stop locked at +1R after touching +1.5R, then hit |
+| | `force_close` | End-of-day force flat (15:45 ET for ORB; configurable per strategy) |
+| | `unknown_exit` | **Leak signal** — every row of this type is a bug. See `needs_reconcile()`. |
+| | `post_fill_exit` | Post-fill filter (BT gap check; BF thin-liquidity check) |
+| **StopMonitor recovery** | `stop_loss_market_fallback` | Limit sell stranded → escalated to market close, which filled |
+| | `stop_loss_bracket_sl_race` | `close_position` raced; bracket SL leg won the exit — real fill recovered from leg |
+| | `stop_loss_unconfirmed` | Limit AND market-close both timed out; `trigger_price` placeholder + WARNING |
+| | `stop_loss_fallback` | Older generic SL recovery (BF only) |
+| | `exhaustion_partial` | Exhaustion-candle partial sell (not a full close — see `partial_exit_*` columns) |
+| **Bull flag** | `gap_over_rejection` | Rejected at fill: gap up exceeded cap |
+| | `gap_adjust_failed` | Gap-up SL adjust failed; safety force-exit |
+| | `thin_liquidity_reject` | Post-fill spread/depth degraded below floor → force-exit |
+| **ORB touchgo** | `tag_bb` | Rule M: breakout bar closed in bottom half (bb_close_pos < 0.5) |
+| | `tag_b1` | Rule D: bar-1 reverted ≥0.75R below entry |
+| **MACD wave** | `macd_flip` | MACD histogram flipped sign — momentum reversal exit |
+| | `bracket_exit` | Bracket leg handled exit; unable to classify which leg |
+| | `bracket_sl_tp` | Bracket-attributed exit (SL or TP) |
+| | `hard_stop` | Hard SL leg fired (distinct from trail) |
+| | `stopmonitor_exit` | StopMonitor (not bracket) closed it |
+| **Historical** | `sync_reconcile` | **No current writer** — 6 rows 2026-04-02 orphan cleanup. New paths emit `unknown_exit`. |
+| | `stop_loss_timeout` | **No current writer** — 1 row 2026-03-26. Superseded by `stop_loss_unconfirmed`. |
+
+Helper predicates exposed by the same module:
+- `is_known(value)` — gate at every DB read; novel strings = drift bug
+- `is_attributed(value)` — `True` for clean attributions; `False` for leak paths
+- `needs_reconcile(value)` — `True` for `unknown_exit`, `*_unconfirmed`, historical reconcile values. Daily summary should alert on non-zero count.
+
 ### Minimum Stop Distance Filter
 
 Rejects setups where the stop distance (entry - stop_loss) is less than $0.12. These are penny-wide stops on low-priced stocks where the breakout barely triggers the buy-stop then immediately reverses — the stop is within tick noise, not at a meaningful technical level.

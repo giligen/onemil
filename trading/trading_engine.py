@@ -23,6 +23,7 @@ import pytz
 
 from data_sources.alpaca_client import AlpacaClient
 from persistence.database import Database
+from trading.exit_reasons import ExitReason
 from trading.pattern_detector import BullFlagDetector
 from trading.trade_planner import TradePlanner, TradePlan
 from trading.news_kill_guard import news_kill_decision
@@ -1587,7 +1588,7 @@ class TradingEngine:
                         # are filled in by the sell-fill handler downstream.
                         if trade_record:
                             self.db.update_trade(trade_record['id'], {
-                                'exit_reason': 'gap_over_rejection',
+                                'exit_reason': ExitReason.GAP_OVER_REJECTION.value,
                                 'exited_at': datetime.now(timezone.utc),
                             })
                         continue
@@ -1630,7 +1631,7 @@ class TradingEngine:
                             # from the sell-fill handler.
                             if trade_record:
                                 self.db.update_trade(trade_record['id'], {
-                                    'exit_reason': 'post_fill_exit',
+                                    'exit_reason': ExitReason.POST_FILL_EXIT.value,
                                     'exited_at': datetime.now(timezone.utc),
                                 })
                             continue
@@ -1826,7 +1827,7 @@ class TradingEngine:
                                 self.notifier.notify_error(error_msg, component="GapFill")
                             self._emergency_close_position(
                                 symbol, order_id, fill_price, actual_qty, trade_record,
-                                exit_reason='gap_adjust_failed',
+                                exit_reason=ExitReason.GAP_ADJUST_FAILED.value,
                             )
                             last_fill_result = {
                                 'status': 'gap_adjust_failed',
@@ -2631,7 +2632,7 @@ class TradingEngine:
                         'partial_exit_price': actual_exit_price,
                         'partial_exit_shares': event.shares,
                         'partial_exit_pnl': partial_pnl,
-                        'partial_exit_reason': 'exhaustion',
+                        'partial_exit_reason': 'exhaustion',  # partial-exit reason has its own column; ExitReason enum tracks full-exit only
                         'partial_exited_at': datetime.now(timezone.utc),
                     })
                     logger.info(
@@ -2648,7 +2649,7 @@ class TradingEngine:
                             exit_price=actual_exit_price,
                             shares=event.shares,
                             pnl=partial_pnl,
-                            exit_reason='exhaustion_partial',
+                            exit_reason=ExitReason.EXHAUSTION_PARTIAL.value,
                         )
                 else:
                     logger.warning(
@@ -2702,12 +2703,12 @@ class TradingEngine:
                         if sl_leg and sl_leg.get('status') == 'filled':
                             fill = sl_leg.get('filled_avg_price')
                             exit_price = fill or sl_leg['stop_price']
-                            exit_reason = 'stop_loss'
+                            exit_reason = ExitReason.STOP_LOSS.value
                         # Check TP leg
                         elif tp_leg and tp_leg.get('status') == 'filled':
                             fill = tp_leg.get('filled_avg_price')
                             exit_price = fill or tp_leg['limit_price']
-                            exit_reason = 'take_profit'
+                            exit_reason = ExitReason.TAKE_PROFIT.value
 
                     if exit_price:
                         # Remaining shares after any partial exit
@@ -2741,6 +2742,21 @@ class TradingEngine:
                             f"P&L ${pnl:+,.2f} ({pnl_pct:+.1f}%)"
                         )
                     else:
+                        # GLXG 2026-06-11 race guard: if StopMonitor is
+                        # currently mid-exit on this symbol (limit poll,
+                        # market-close escalation, SL-leg recovery), DEFER
+                        # the UNKNOWN_EXIT fallback. Next sync iteration
+                        # will either pick up the real exit event from the
+                        # queue, or — if 60s elapses — proceed with the
+                        # fallback so a true leak still surfaces.
+                        if (self.stop_monitor is not None
+                                and self.stop_monitor.is_exit_in_progress(symbol)):
+                            logger.info(
+                                f"{symbol}: Position closed but StopMonitor exit "
+                                f"in-progress — deferring unknown_exit fallback "
+                                f"(retry next sync iteration)"
+                            )
+                            continue
                         # Use fill_price as fallback exit to prevent infinite re-check
                         # (exit_price IS NULL keeps this trade in get_open_trades forever)
                         fallback_exit = trade['fill_price']
@@ -2752,9 +2768,13 @@ class TradingEngine:
                         logger.warning(error_msg)
                         if self.notifier:
                             self.notifier.notify_error(error_msg, component="PositionSync")
+                        # UNKNOWN_EXIT is the documented leak signal — every
+                        # row in DB with this value means a code path failed
+                        # to attribute the close. See trading/exit_reasons.py
+                        # and needs_reconcile().
                         self.db.update_trade(trade['id'], {
                             'exit_price': fallback_exit,
-                            'exit_reason': 'unknown_exit',
+                            'exit_reason': ExitReason.UNKNOWN_EXIT.value,
                             'exited_at': datetime.now(timezone.utc),
                             'pnl': pnl_est,
                             'pnl_pct': 0.0,
@@ -3878,7 +3898,7 @@ class TradingEngine:
                     pnl_pct = (exit_price / trade['fill_price'] - 1) * 100
                     self.db.update_trade(trade['id'], {
                         'exit_price': exit_price,
-                        'exit_reason': 'force_close',
+                        'exit_reason': ExitReason.FORCE_CLOSE.value,
                         'exited_at': datetime.now(timezone.utc),
                         'pnl': pnl,
                         'pnl_pct': pnl_pct,
@@ -3904,7 +3924,7 @@ class TradingEngine:
                         exit_price=exit_price,
                         shares=fc_shares,
                         pnl=fc_pnl,
-                        exit_reason='force_close',
+                        exit_reason=ExitReason.FORCE_CLOSE.value,
                     )
         except Exception as e:
             error_msg = f"Failed to get open positions for force-close: {e}"

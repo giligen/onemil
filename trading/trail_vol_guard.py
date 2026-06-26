@@ -37,8 +37,14 @@ def should_skip_trail_exit_on_low_vol(
     Safe defaults:
         - flag_avg_volume None, NaN, or <= 0: return False (no baseline known;
           never skip — fall back to naive trail behavior)
-        - bar_volume None: treat as 0 (skip if min_vol_ratio > 0, matching a
-          "no trading on this bar" scenario)
+        - bar_volume None: return False (no bar observed yet → no signal
+          known → fail OPEN, fire the stop). GLXG 2026-06-11 incident: a
+          watch added mid-session had `last_bar_volume=0` (its default)
+          before the first bar event arrived; the prior semantic
+          (`None → skip`) held off the trail for ~20s while the stock
+          peaked. "Unknown" must not be conflated with "low".
+        - bar_volume non-int (e.g. "bad"): treat as 0 (skip) — preserves
+          legacy defensive behavior for malformed input.
         - min_vol_ratio <= 0: returns False (ratio effectively disables the
           check; any volume >= 0 passes)
     """
@@ -56,9 +62,12 @@ def should_skip_trail_exit_on_low_vol(
         return False
     if ratio <= 0:
         return False
-    vol = bar_volume if bar_volume is not None else 0
+    if bar_volume is None:
+        # No bar observed yet — fail open. The stop is downside protection;
+        # "we don't know" must never silently suppress it.
+        return False
     try:
-        vol = int(vol)
+        vol = int(bar_volume)
     except (TypeError, ValueError):
         vol = 0
     return vol < baseline * ratio

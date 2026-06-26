@@ -40,6 +40,8 @@ from trading.orb_touchgo_filter import (
     TouchgoConfig, evaluate_rule_d, evaluate_rule_m, find_breakout_bar_ts,
     load_touchgo_config,
 )
+from trading.exit_reasons import ExitReason
+from trading import touchgo_audit as _tg_audit
 
 
 logger = logging.getLogger(__name__)
@@ -956,17 +958,24 @@ class ORBEngine:
                 bb_row = bars_df[bars_df['timestamp'].between(bb_ts, b1_ts, inclusive='left')]
                 if len(bb_row) > 0:
                     bb_bar = bb_row.iloc[-1]
+                    bb_o = float(bb_bar['open']); bb_high = float(bb_bar['high'])
+                    bb_low = float(bb_bar['low']); bb_close = float(bb_bar['close'])
                     fire, exit_p = evaluate_rule_m(
-                        float(bb_bar['open']), float(bb_bar['high']),
-                        float(bb_bar['low']), float(bb_bar['close']),
-                        self.touchgo_cfg,
+                        bb_o, bb_high, bb_low, bb_close, self.touchgo_cfg,
                     )
                     pos.rule_m_evaluated = True
+                    close_pos = ((bb_close - bb_low) / (bb_high - bb_low)
+                                 if bb_high > bb_low else 0.0)
+                    # Audit EVERY Rule-M eval (fire + no-fire) for BT↔live
+                    # divergence diagnosis — see trading/touchgo_audit.py.
+                    self._audit_touchgo(
+                        pos, 'M', fire, exit_p, last_ts, bb_ts, range_size,
+                        bb_ohlc=(bb_o, bb_high, bb_low, bb_close),
+                        bb_close_pos=close_pos,
+                    )
                     if fire and exit_p is not None:
-                        bb_high = float(bb_bar['high']); bb_low = float(bb_bar['low'])
-                        close_pos = (float(bb_bar['close']) - bb_low) / (bb_high - bb_low) if bb_high > bb_low else 0.0
                         self._fire_touchgo_exit(
-                            pos, reason='tag_bb', exit_price=exit_p,
+                            pos, reason=ExitReason.TAG_BB.value, exit_price=exit_p,
                             detail=f"bb_close_pos={close_pos:.3f} (threshold {self.touchgo_cfg.rule_m_threshold})",
                         )
                         return  # position is being exited; don't evaluate D
@@ -980,15 +989,20 @@ class ORBEngine:
                 b1_row = bars_df[bars_df['timestamp'].between(b1_ts, b1_end, inclusive='left')]
                 if len(b1_row) > 0:
                     b1_bar = b1_row.iloc[-1]
+                    b1_low = float(b1_bar['low'])
                     fire, exit_p = evaluate_rule_d(
-                        pos.entry_price, float(b1_bar['low']), range_size,
-                        self.touchgo_cfg,
+                        pos.entry_price, b1_low, range_size, self.touchgo_cfg,
                     )
                     pos.rule_d_evaluated = True
+                    revert_R = ((pos.entry_price - b1_low) / range_size
+                                if range_size > 0 else 0.0)
+                    self._audit_touchgo(
+                        pos, 'D', fire, exit_p, last_ts, bb_ts, range_size,
+                        b1_ts=b1_ts, b1_low=b1_low, b1_revert_R=revert_R,
+                    )
                     if fire and exit_p is not None:
-                        revert_R = (pos.entry_price - float(b1_bar['low'])) / range_size if range_size > 0 else 0.0
                         self._fire_touchgo_exit(
-                            pos, reason='tag_b1', exit_price=exit_p,
+                            pos, reason=ExitReason.TAG_B1.value, exit_price=exit_p,
                             detail=f"b1_revert={revert_R:.2f}R (threshold ≥{self.touchgo_cfg.rule_d_revert_R}R)",
                         )
                 # Even if no bar found, mark evaluated so we don't keep checking.
@@ -997,6 +1011,77 @@ class ORBEngine:
                     pos.rule_d_evaluated = True
             except Exception as e:
                 logger.warning(f"ORB: Rule D eval failed for {symbol}: {e}")
+
+    def _audit_touchgo(self, pos: 'OpenPosition', rule: str, fired: bool,
+                       exit_p, last_ts, bb_ts, range_size: float,
+                       bb_ohlc=None, bb_close_pos=None,
+                       b1_ts=None, b1_low=None, b1_revert_R=None) -> None:
+        """Emit a diagnostic record for one Rule M / Rule D evaluation.
+
+        Captures the exact bar live keyed to + the computed decision so a
+        divergence vs the consolidated market bars (the EIDO/OSCR/TSDD
+        false-positive class) can be diagnosed post-hoc by
+        scripts/audit_touchgo_live_vs_consolidated.py. Best-effort: never
+        raises into the trade path.
+        """
+        try:
+            def _iso(t):
+                if t is None:
+                    return None
+                return t.isoformat() if hasattr(t, 'isoformat') else str(t)
+
+            entry_time = getattr(pos, 'entry_time', None)
+            bb_age_min = None
+            if entry_time is not None and bb_ts is not None:
+                try:
+                    et = entry_time
+                    if getattr(et, 'tzinfo', None) is None:
+                        et = et.replace(tzinfo=timezone.utc)
+                    _bb = bb_ts
+                    if getattr(_bb, 'tzinfo', None) is None:
+                        _bb = _bb.replace(tzinfo=timezone.utc)
+                    bb_age_min = (et - _bb).total_seconds() / 60.0
+                except Exception:
+                    bb_age_min = None
+
+            rec = {
+                'ts_utc': datetime.now(timezone.utc).isoformat(),
+                'trade_date': (_iso(bb_ts) or '')[:10],
+                'symbol': pos.symbol,
+                'trade_id': getattr(pos, 'trade_id', None),
+                'rule': rule,
+                'fired': bool(fired),
+                'exit_price': float(exit_p) if exit_p is not None else None,
+                'breakout_bar_ts': _iso(bb_ts),
+                'breakout_bar_source': getattr(self.touchgo_cfg, 'breakout_bar_source', None),
+                'bb_age_min': round(bb_age_min, 2) if bb_age_min is not None else None,
+                'max_breakout_age_min': getattr(self.touchgo_cfg, 'max_breakout_age_min', None),
+                'range_high': float(pos.range_high),
+                'range_low': float(pos.range_low),
+                'range_size': float(range_size),
+                'entry_price': float(pos.entry_price),
+                'entry_time': _iso(entry_time),
+                'last_bar_ts': _iso(last_ts),
+            }
+            if rule == 'M':
+                o, h, l, c = (bb_ohlc if bb_ohlc else (None, None, None, None))
+                rec.update({
+                    'bb_open': o, 'bb_high': h, 'bb_low': l, 'bb_close': c,
+                    'bb_close_pos': (round(bb_close_pos, 4)
+                                     if bb_close_pos is not None else None),
+                    'rule_m_threshold': getattr(self.touchgo_cfg, 'rule_m_threshold', None),
+                })
+            else:  # 'D'
+                rec.update({
+                    'b1_ts': _iso(b1_ts),
+                    'b1_low': b1_low,
+                    'b1_revert_R': (round(b1_revert_R, 4)
+                                    if b1_revert_R is not None else None),
+                    'rule_d_revert_R': getattr(self.touchgo_cfg, 'rule_d_revert_R', None),
+                })
+            _tg_audit.record(rec)
+        except Exception as e:  # diagnostic must never break the trade path
+            logger.debug(f"ORB: touchgo audit record failed for {pos.symbol}: {e}")
 
     def _fire_touchgo_exit(self, pos: 'OpenPosition', reason: str,
                             exit_price: float, detail: str) -> None:
@@ -1038,10 +1123,10 @@ class ORBEngine:
         # coroutine was created and discarded, alert never delivered.
         if self.notifier is not None:
             try:
-                rule_label = 'TAG_BB EXIT' if reason == 'tag_bb' else 'TAG_B1 EXIT'
+                rule_label = 'TAG_BB EXIT' if reason == ExitReason.TAG_BB.value else 'TAG_B1 EXIT'
                 rule_desc = (
                     'Breakout bar closed weak'
-                    if reason == 'tag_bb'
+                    if reason == ExitReason.TAG_BB.value
                     else 'Bar-1 reverted deep'
                 )
                 msg = (
@@ -3333,7 +3418,7 @@ class ORBEngine:
             try:
                 self.db.update_trade(t['id'], {
                     'exit_price': exit_price,
-                    'exit_reason': 'force_close',
+                    'exit_reason': ExitReason.FORCE_CLOSE.value,
                     'exited_at': sell.filled_at or datetime.now(timezone.utc),
                     'pnl': pnl,
                     'pnl_pct': pnl_pct,

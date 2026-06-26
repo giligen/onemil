@@ -20,6 +20,8 @@ import pandas as pd
 import pytz
 from dateutil.parser import isoparse
 
+from trading.exit_reasons import ExitReason
+
 from trading.macd_conviction import compute_conviction_score
 from trading.macd_cross_detector import (
     compute_macd_histogram,
@@ -322,7 +324,7 @@ class MACDWaveEngine:
                 # always tagging as bracket_exit which inflated apparent
                 # bracket damage in post-mortems).
                 exit_price = fill_price  # fallback
-                exit_reason = 'bracket_exit'  # default if we can't classify
+                exit_reason = ExitReason.BRACKET_EXIT.value  # default if we can't classify
                 try:
                     from alpaca.trading.requests import GetOrdersRequest
                     from alpaca.trading.enums import QueryOrderStatus
@@ -350,9 +352,9 @@ class MACDWaveEngine:
                         # discriminator is the price magnitude, not the order
                         # type. Bracket legs are tagged by oc explicitly.
                         if oc == 'bracket':
-                            exit_reason = 'bracket_sl_tp'
+                            exit_reason = ExitReason.BRACKET_SL_TP.value
                         elif oc in ('oto', 'oco'):
-                            exit_reason = 'bracket_sl_tp'
+                            exit_reason = ExitReason.BRACKET_SL_TP.value
                         else:
                             # Solo sell from StopMonitor — disambiguate by drop %.
                             # MACD wave hard_stop is at -2% (config). Anything
@@ -361,11 +363,11 @@ class MACDWaveEngine:
                                 drop_pct = ((exit_price - fill_price)
                                              / fill_price) if fill_price > 0 else 0
                                 if drop_pct <= -0.018:  # within 0.2% of -2% hard_stop
-                                    exit_reason = 'hard_stop'
+                                    exit_reason = ExitReason.HARD_STOP.value
                                 else:
-                                    exit_reason = 'trail_stop'  # incl small wins
+                                    exit_reason = ExitReason.TRAIL_STOP.value  # incl small wins
                             except Exception:
-                                exit_reason = 'stopmonitor_exit'
+                                exit_reason = ExitReason.STOPMONITOR_EXIT.value
                 except Exception:
                     pass
 
@@ -2071,7 +2073,7 @@ class MACDWaveEngine:
                     # trigger_price = the bar close that caused the flip (telemetry).
                     if self.stop_monitor:
                         self.stop_monitor.remove_watch(sym)
-                    self._submit_exit(sym, 'macd_flip',
+                    self._submit_exit(sym, ExitReason.MACD_FLIP.value,
                                       trigger_price=float(close.iloc[-1]))
                     exits.append(sym)
 
