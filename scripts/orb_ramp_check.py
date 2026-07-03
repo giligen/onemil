@@ -285,12 +285,27 @@ def main():
                 f"{days_in_stage} trading day(s) in stage < required "
                 f"{stage.min_days_in_stage}"
             )
+        # Green streak — computed by scripts/daily_green_check.py (21:30 UTC
+        # weekdays) into logs/green_streak.json. Falls back to a manual-check
+        # reminder if the file doesn't exist yet.
+        try:
+            import json as _json
+            _st = _json.loads(
+                (Path(__file__).resolve().parent.parent / 'logs' /
+                 'green_streak.json').read_text())
+            if _st.get('streak', 0) < OPERATIONAL_GREEN_SESSIONS:
+                advance_blockers.append(
+                    f"operational-green streak {_st.get('streak', 0)}"
+                    f"/{OPERATIONAL_GREEN_SESSIONS} (daily_green_check)")
+        except Exception:
+            advance_blockers.append(
+                f"MANUAL CHECK: {OPERATIONAL_GREEN_SESSIONS} consecutive "
+                f"operational-green sessions (no green_streak.json yet — "
+                f"daily_green_check.py cron populates it)"
+            )
         advance_blockers.append(
-            f"MANUAL CHECKS (script cannot verify): "
-            f"{OPERATIONAL_GREEN_SESSIONS} consecutive operational-green "
-            f"sessions (observer 0 drops, REKEY=0, fills reconciled, all "
-            f"exits attributed) + median entry slippage <= BT+10bps "
-            f"(analyze_orb_slippage.py)"
+            "MANUAL CHECK: median entry slippage <= BT+10bps "
+            "(analyze_orb_slippage.py)"
         )
 
     # --- Demotion triggers (2026-07-06: operational failures OR deep
