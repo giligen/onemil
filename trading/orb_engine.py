@@ -22,6 +22,7 @@ import logging
 import queue
 import threading
 import time
+import os
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional, Set
@@ -36,6 +37,9 @@ from trading.orb_filter import (
     FeatureParam, assign_quintile, composite_score, load_feature_params,
 )
 from trading.orb_conviction import apply_adaptive_mult, load_adaptive_mults
+from trading.orb_pdr_veto import (
+    DEFAULT_MIN_PDR_PCT, compute_prev_day_range_pct, pdr_veto_applies,
+)
 from trading.orb_planner import OrbTradePlan, OrbTradePlanner, PlannerReject
 from trading.orb_touchgo_filter import (
     TouchgoConfig, evaluate_rule_d, evaluate_rule_m, find_breakout_bar_ts,
@@ -310,6 +314,21 @@ class ORBEngine:
         # Q1 was TRAIN-positive (+$6K) but OOS-negative (VAL -$5.1K, HOQ1+ -$3.4K).
         # BT validation: study_orb_q1q2_filter.py.
         self.skip_q1 = bool(filter_cfg.get('skip_q1', True))
+        # PDR veto — skip picks whose PREV day range was quiet (<= min pct).
+        # NO-REFILL: the vetoed pick's slot stays empty (backfill tested
+        # toxic — see trading/orb_pdr_veto.py docstring for evidence).
+        # Replica-validated +$55K / MDD −31% over Jan'25–Jul'26. Default on.
+        pdr_cfg = filter_cfg.get('prev_day_range_veto', {}) or {}
+        self.pdr_veto_enabled = bool(pdr_cfg.get('enabled', True))
+        self.pdr_veto_min_pct = float(
+            pdr_cfg.get('min_prev_day_range_pct', DEFAULT_MIN_PDR_PCT))
+        _pdr_env = os.environ.get('ORB_PDR_VETO')
+        if _pdr_env is not None:
+            self.pdr_veto_enabled = _pdr_env.strip().lower() not in (
+                '0', 'false', 'no', 'off', '')
+        _pdr_min_env = os.environ.get('ORB_PDR_VETO_MIN_PCT')
+        if _pdr_min_env:
+            self.pdr_veto_min_pct = float(_pdr_min_env)
         # Touchgo filter (Rule M = entry-bar close-pos < 0.5; Rule D = bar-1
         # revert ≥ 0.75R → exit at entry -0.5R). Shared module
         # trading/orb_touchgo_filter.py imported by both LIVE and BT for parity.
@@ -364,6 +383,9 @@ class ORBEngine:
         self._late_entry_cutoff_logged = False
         # Post-open range-sweep done flag (one-shot per day). See _ensure_ranges_post_open.
         self._post_open_range_sweep_done = False
+        # The 4s consolidation-lag retry inside the sweep runs at most once
+        # per day, even when the grace gate re-arms the sweep (2026-07-04).
+        self._sweep_retry_used_today = False
 
         # Planner (stateless, built once)
         self.planner = OrbTradePlanner(cfg)
@@ -742,7 +764,9 @@ class ORBEngine:
         # first ranking sees the full field. Bounded: adds <= retry_delay+
         # fetch time (~5s) to the opening tick, only when stragglers exist.
         still_missing = [s for s in missing if s not in filled_syms]
-        if still_missing and self.sweep_retry_delay_s > 0:
+        if still_missing and self.sweep_retry_delay_s > 0 \
+                and not self._sweep_retry_used_today:
+            self._sweep_retry_used_today = True
             logger.info(
                 f"ORB: post-open sweep — {len(still_missing)} candidates still "
                 f"rangeless ({','.join(still_missing[:8])}"
@@ -1405,6 +1429,9 @@ class ORBEngine:
                 features['gap_pct'] = (ref_open - pc) / pc * 100.0
             if ph > pl > 0:
                 features['prev_day_close_position'] = (pc - pl) / (ph - pl)
+            pdr = compute_prev_day_range_pct(ph, pl, pc)
+            if pdr is not None:
+                features['prev_day_range_pct'] = pdr
         # 20d features
         if daily_stats_20d:
             h20 = float(daily_stats_20d.get('high_20d', 0.0))
@@ -1502,8 +1529,16 @@ class ORBEngine:
         # BT-winners (CRCD +$15.8K 6/30, RGNX 6/22, FABC 6/11) were locked
         # out for the day. Only gates when NOTHING has been placed yet —
         # once the first burst happens the day's selection is committed.
-        pool_syms = list(symbols) if symbols is not None else list(self.candidates.keys())
-        if not symbols_entered_today and self._should_defer_first_rank(pool_syms):
+        # NOTE (2026-07-04 review fix): the gate inspects the FULL candidate
+        # pool internally — NOT the `symbols` subset. The day's first burst
+        # usually arrives via the WS drain with symbols=<ready subset>, whose
+        # members by construction all have ranges; scoping the rangeless
+        # check to that subset made the gate blind on exactly the racing
+        # path. When deferring, re-arm the post-open sweep so stragglers are
+        # actively re-fetched (WS alone can't complete them — it lacks the
+        # 9:30 anchor bar), otherwise the defer is pure entry delay.
+        if not symbols_entered_today and self._should_defer_first_rank():
+            self._post_open_range_sweep_done = False
             return []
 
         # 1. Build candidate set
@@ -1653,6 +1688,11 @@ class ORBEngine:
         submitted: List[str] = []
         for sym in top_syms:
             cand = self.candidates[sym]
+            # PDR veto — post-ranking, NO backfill: this pick already
+            # consumed its slot/dedup place; the slot stays empty (refill
+            # form is toxic — trading/orb_pdr_veto.py docstring).
+            if self._pdr_veto_reject(cand):
+                continue
             spread_bps = self._get_spread_bps(sym)
             plan = self.planner.build(
                 symbol=sym,
@@ -1683,15 +1723,48 @@ class ORBEngine:
                 submitted.append(sym)
         return submitted
 
-    def _should_defer_first_rank(self, pool_syms) -> bool:
+    def _pdr_veto_reject(self, cand: CandidateState) -> bool:
+        """PDR veto decision for one SELECTED pick (2026-07-04 ship).
+
+        True -> skip submission; the slot stays EMPTY (no backfill — the
+        refill form is toxic, see trading/orb_pdr_veto.py). Fail-open with
+        a WARNING when the feature is unavailable: missing prev-day data
+        drops the candidate at BT's feature stage, so fail-open cannot
+        diverge from BT on any candidate BT actually traded.
+        """
+        if not self.pdr_veto_enabled:
+            return False
+        pdr = (cand.features or {}).get('prev_day_range_pct')
+        if pdr is None:
+            logger.warning(
+                f"[ORB] PDR VETO: {cand.symbol} prev_day_range_pct "
+                f"unavailable — fail-open (no veto)")
+            return False
+        if pdr_veto_applies(pdr, self.pdr_veto_min_pct):
+            logger.info(
+                f"[ORB] PDR VETO: {cand.symbol} prev-day range {pdr:.2f}% "
+                f"<= {self.pdr_veto_min_pct:.1f}% — quiet prev day, "
+                f"slot left empty (no backfill)")
+            cand.rejected_reason = 'pdr_veto'
+            return True
+        return False
+
+    def _should_defer_first_rank(self) -> bool:
         """First-rank grace gate (2026-07-03 selection-race fix).
 
         True iff the day's FIRST placement burst should be deferred because
-        pool candidates are still rangeless (their 9:34 bar hadn't
-        consolidated when the sweep ran) AND we are within
+        candidates in the FULL universe pool are still rangeless (their
+        9:34 bar hadn't consolidated when the sweep ran) AND we are within
         `entry.first_rank_grace_s` seconds after the range end. Callers only
         invoke this when nothing has been placed today — once the first
         burst happens the day's selection is committed.
+
+        2026-07-04 review fix: the rangeless check runs over
+        `self.candidates` (the full pool), NEVER a caller-supplied subset.
+        The racing path is the WS drain calling
+        check_entries(symbols=<ready subset>) — every member of that subset
+        has a range by construction, so a subset-scoped check was always
+        empty and the gate never fired where it mattered.
 
         Pre-fix, the 9:35:01 ranking burned all max_concurrent daily slots
         on the ready subset; late-consolidating BT-winners (CRCD +$15.8K
@@ -1700,9 +1773,8 @@ class ORBEngine:
         """
         if self.first_rank_grace_s <= 0:
             return False
-        rangeless = [s for s in pool_syms
-                     if self.candidates.get(s) is not None
-                     and self.candidates[s].range_data is None]
+        rangeless = [s for s, cand in self.candidates.items()
+                     if cand.range_data is None]
         if not rangeless:
             return False
         now_utc = datetime.now(timezone.utc)
@@ -2126,9 +2198,41 @@ class ORBEngine:
                                     f"sync_positions orphan-detect is the "
                                     f"only backstop"
                                 )
-                        self._confirm_fill(pos, order_status)
+                        # 2026-07-04 review fix: shares can fill between the
+                        # poll above and the cancel-ack. Confirming from the
+                        # stale snapshot would leave those shares outside the
+                        # StopMonitor watch (naked overnight on a gap). Re-
+                        # fetch once and confirm from the freshest payload.
+                        final_status = order_status
+                        try:
+                            refetched = self.alpaca.get_order(pos.order_id)
+                            if refetched:
+                                final_status = refetched
+                        except Exception as e:
+                            logger.warning(
+                                f"ORB: {sym} post-cancel re-fetch failed: {e} "
+                                f"— confirming from pre-cancel snapshot"
+                            )
+                        self._confirm_fill(pos, final_status)
                 elif status in ('canceled', 'cancelled', 'expired', 'rejected',
                                  'done_for_day', 'suspended'):
+                    # 2026-07-04 review fix: since the FABC partial-fill fix,
+                    # order_id stays set during partials — so a broker-side
+                    # cancel/expiry CAN now carry filled_qty > 0. Those shares
+                    # are held; dropping tracking would leave them unmanaged
+                    # (no watch, no open DB row). Route through _confirm_fill.
+                    try:
+                        _fq = int(order_status.get('filled_qty', 0) or 0)                             if isinstance(order_status, dict)                             else int(getattr(order_status, 'filled_qty', 0) or 0)
+                    except (TypeError, ValueError):
+                        _fq = 0
+                    if _fq > 0:
+                        logger.warning(
+                            f"ORB: {sym} order {pos.order_id} terminal "
+                            f"'{status}' WITH {_fq} sh filled — confirming "
+                            f"partial as final position (not dropping)"
+                        )
+                        self._confirm_fill(pos, order_status)
+                        continue
                     logger.warning(
                         f"ORB: {sym} order {pos.order_id} terminal status '{status}' — "
                         f"clearing tracking"
@@ -2373,6 +2477,26 @@ class ORBEngine:
                         f"ORB TIME-STOP CANCEL: {sym} unfilled after "
                         f"{age_min:.0f}min — cancelling order {pos.order_id}"
                     )
+                    # 2026-07-04 review fix: since the FABC partial-fill fix
+                    # order_id stays set during partials, so a time-stopped
+                    # order can carry filled shares. Check once post-cancel;
+                    # if any filled, keep the position (confirm at final qty)
+                    # instead of dropping held shares from management.
+                    try:
+                        final = self.alpaca.get_order(pos.order_id)
+                        _fq = int((final or {}).get('filled_qty', 0) or 0)                             if isinstance(final, dict)                             else int(getattr(final, 'filled_qty', 0) or 0)
+                    except Exception:
+                        _fq = 0
+                    if _fq > 0:
+                        logger.warning(
+                            f"ORB TIME-STOP CANCEL: {sym} had {_fq} sh "
+                            f"already filled — confirming partial as final "
+                            f"position (not dropping)"
+                        )
+                        self._confirm_fill(pos, final)
+                        cand.order_id = None
+                        self.daily_n_time_stop_canceled += 1
+                        continue
                     self.db.update_trade(pos.trade_id, {'order_status': 'time_stop_canceled'})
                     self.open_positions.pop(sym, None)
                     cand.rejected_reason = 'time_stop'
@@ -3312,6 +3436,7 @@ class ORBEngine:
         self.daily_summary_sent = False
         self._late_entry_cutoff_logged = False
         self._post_open_range_sweep_done = False
+        self._sweep_retry_used_today = False
         # Drain any leftover bar events from yesterday
         try:
             while True:
@@ -3785,8 +3910,27 @@ def _first_session_open_ts_utc(bars_df: pd.DataFrame) -> Optional[pd.Timestamp]:
 
 
 def _et_offset_hours(now_utc: datetime) -> int:
-    """Approximate ET offset from UTC. EDT (Mar-Nov) = 4h. EST (Nov-Mar) = 5h."""
-    m = now_utc.month
-    if 3 <= m <= 10:
-        return ET_OFFSET_EDT_HOURS
-    return ET_OFFSET_EST_HOURS
+    """ET offset from UTC for the GIVEN instant — DST-transition-accurate.
+
+    2026-07-04 review fix: the previous month-granularity approximation
+    (Mar-Oct = EDT) was wrong for ~2 weeks/year — Mar 1 to the 2nd Sunday
+    (still EST) and Nov 1 to the 1st Sunday (still EDT). Callers use this
+    to locate the 9:30 ET session-open bar; a wrong offset made the mask
+    match NOTHING, so ranges never completed and ORB silently placed zero
+    entries on those days. ZoneInfo is authoritative; the month heuristic
+    survives only as the fallback if tzdata is unavailable.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        if now_utc.tzinfo is None:
+            now_utc = now_utc.replace(tzinfo=timezone.utc)
+        off = now_utc.astimezone(ZoneInfo('America/New_York')).utcoffset()
+        return int(-off.total_seconds() // 3600)
+    except Exception as e:
+        logger.warning(
+            f"ORB: _et_offset_hours ZoneInfo failed ({e}) — falling back to "
+            f"month-granularity DST approximation (wrong near transitions)")
+        m = now_utc.month
+        if 3 <= m <= 10:
+            return ET_OFFSET_EDT_HOURS
+        return ET_OFFSET_EST_HOURS

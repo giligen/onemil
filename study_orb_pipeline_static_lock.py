@@ -233,6 +233,30 @@ def main():
     sel['date'] = pd.to_datetime(sel['date'])
     sel['month'] = sel['date'].dt.to_period('M').astype(str)
 
+    # PDR veto (ships 2026-07-04; matches trading/orb_engine.py). Applied
+    # POST-selection with NO refill — a vetoed pick's slot stays empty,
+    # exactly like live (backfill form tested toxic; see
+    # trading/orb_pdr_veto.py docstring for evidence + thresholds).
+    # Env: ORB_PDR_VETO=0 disables; ORB_PDR_VETO_MIN_PCT overrides threshold.
+    from trading.orb_pdr_veto import DEFAULT_MIN_PDR_PCT, pdr_veto_applies
+    _pdr_env = os.environ.get('ORB_PDR_VETO', '1').strip().lower()
+    pdr_veto_on = _pdr_env not in ('0', 'false', 'no', 'off', '')
+    if pdr_veto_on and 'prev_day_range_pct' in sel.columns:
+        pdr_min = float(os.environ.get('ORB_PDR_VETO_MIN_PCT',
+                                       str(DEFAULT_MIN_PDR_PCT)))
+        veto_mask = sel['prev_day_range_pct'].apply(
+            lambda v: pdr_veto_applies(None if pd.isna(v) else float(v),
+                                       pdr_min))
+        n_veto = int(veto_mask.sum())
+        veto_pnl = float(sel.loc[veto_mask, '_sized_pnl'].sum())
+        sel = sel[~veto_mask].copy()
+        print(f"PDR veto: dropped {n_veto} pick(s) with prev_day_range_pct "
+              f"<= {pdr_min} (their P&L would have been {veto_pnl:+,.0f}; "
+              f"set ORB_PDR_VETO=0 to disable)")
+    elif pdr_veto_on:
+        print("PDR veto: WARNING prev_day_range_pct column missing from "
+              "features CSV — veto skipped (fail-open)")
+
     # 2026-05-08: fill-rate haircut. Pre-fix, BT assumed every qualified
     # signal filled — no model of buy-stop misses. LIVE Mon-Thu 5/4-5/7
     # observed 9 fills out of 16 buy-stops (56%). The cross_time_min

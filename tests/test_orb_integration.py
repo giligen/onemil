@@ -220,8 +220,10 @@ class TestFullEntryFlow:
         )
         # Wide spread: bid 9.80, ask 10.00 on $10 stock = 200bps
         mock_alpaca.get_latest_quote.return_value = {'bid_price': 9.80, 'ask_price': 10.00}
+        # Explosive prev day (range 16.8% > 8%) so the PDR veto passes and
+        # the spread gate is what this test actually exercises.
         providers = {'TSLA': {
-            'prev_day_bar': {'close': 9.50, 'high': 10.00, 'low': 9.40, 'open': 9.50},
+            'prev_day_bar': {'close': 9.50, 'high': 11.00, 'low': 9.40, 'open': 9.50},
             'daily_stats_20d': {'high_20d': 12.00},
         }}
         with patch.object(engine, '_past_last_entry_time', return_value=False):

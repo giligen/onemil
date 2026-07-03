@@ -320,6 +320,14 @@ ORB analysis; the older ones have warning headers pointing to the shipped varian
 - **Monitor**: `journalctl -u onemil-trader | grep -E "TAG_BB|TAG_B1|touchgo"`. Expect ~3 firings/day (BT prevalence 26% of fills × ~12 daily entries).
 - **Rollback**: `filter.touchgo.enabled: false` + `sudo systemctl restart onemil-trader` (zero-state — filter only fires within first 2min post-fill).
 
+**PDR veto — prev-day-range (shipped 2026-07-04, default ON)**: skips selected picks whose PREVIOUS day's range was quiet (`prev_day_range_pct <= 8.0`). ORB monetizes continuation — "day-2 of the fireworks, not day-1"; quiet-prev-day gappers are fresh pops that mean-revert.
+- **NO-REFILL invariant**: applied POST-ranking inside the submit loop — a vetoed pick's slot stays EMPTY. The refill form was tested and is TOXIC (2025H2 → ~$0, MDD −$29K→−$50K; same failure mode as the refuted ETF exclusion). Never "improve" this by backfilling.
+- **BT evidence** (defended replica, Jan'25–Jul'26): TOT $155K→$210K (+35%), MDD −$29.3K→−$20.1K, WR 35.8→40.2%, trades/day 3.3→1.6, all 3 eras positive (25H1/25H2/2026), monotone across thresholds 6–10, ALL top-10 giants kept.
+- **Shared helper**: `trading/orb_pdr_veto.py` (imported by live `orb_engine._pdr_veto_reject` + BT `study_orb_pipeline_static_lock.py` — parity by construction). Feature def matches `study_orb_features.py:287`.
+- **Config**: `orb.yaml::filter.prev_day_range_veto.{enabled,min_prev_day_range_pct}`. Env: `ORB_PDR_VETO=0` (disable), `ORB_PDR_VETO_MIN_PCT` (threshold override).
+- **Monitor**: `journalctl -u onemil-trader | grep "PDR VETO"` — one line per vetoed pick (or per fail-open on missing prev-day data).
+- **Rollback**: flip `enabled: false` + restart (zero state). Tests: `tests/test_orb_pdr_veto.py` (27).
+
 **Touchgo breakout-bar re-keying + late-fill guard (shipped 2026-06-04, default ON)**: fixes a BT↔LIVE parity gap discovered comparing paper(dev) vs live(prod).
 - **Bug**: live keyed Rule M/D to the minute of the actual *fill* (`breakout_bar_ts = minute(fill)`), but BT keys to the *market breakout bar* (first 1-min bar with `high > range_high`). When a stop-limit fill lagged the breakout, live evaluated a different bar → **23% of live fills (7/31, May 19–Jun 3) flipped the `tag_bb` decision**, skewed toward spurious early exits.
 - **Fix**: live now captures the market breakout bar during the pending phase (`_ensure_breakout_bar_ts` from `_ingest_bars`) via the shared `trading.orb_touchgo_filter.find_breakout_bar_ts` (BT calls the same helper — parity by construction). Robust to late fills (captured while the bar is still in the streamed window).

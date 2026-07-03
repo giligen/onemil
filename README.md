@@ -916,6 +916,51 @@ systemctl list-timers onemil-orb-backtest.timer
 journalctl -u onemil-orb-backtest.service -n 200 --no-pager   # latest run
 ```
 
+### PDR veto — prev-day-range filter (shipped 2026-07-04, default ON)
+
+Skips selected picks whose PREVIOUS day's high-low range was quiet
+(`prev_day_range_pct = (prev_high − prev_low)/prev_close × 100 ≤ 8.0`).
+Economic mechanism: ORB monetizes **continuation** of an already-explosive
+move — "day-2 of the fireworks". A quiet-prev-day name gapping up is a
+day-1 fresh pop with no established momentum; those mean-revert against
+the breakout.
+
+**NO-REFILL invariant (critical):** the veto runs POST-ranking, inside the
+submit loop over the day's top-K picks — a vetoed pick's slot stays
+**empty**. The refill variant (veto candidates pre-ranking so slots
+backfill with next-ranked names) was explicitly tested and is **toxic**:
+2025-H2 P&L collapses from +$51K to ~$0 and MDD balloons −$29K→−$50K,
+the same below-cutline-junk failure mode that refuted the ETF exclusion.
+
+**BT evidence** (defended pipeline, Jan'25–Jul'26, production-parity run
+verified dollar-exact against the replica):
+
+| metric | base | PDR veto 8.0 |
+|---|---|---|
+| Cum P&L | $154,892 | **$209,734 (+35%)** |
+| Max DD | −$29,297 | **−$20,129 (−31%)** |
+| Win rate | 35.8% | 40.2% |
+| Trades/day | 3.30 | 1.57 |
+| Eras (25H1/25H2/2026) | +$28K/+$36K/+$91K | **+$53K/+$51K/+$106K** |
+
+Monotone across thresholds 6–10; ALL top-10 giants kept (ANNA/QCLS/ASST/
+BKKT/CRNC/HERE/CRCD/BNAI/XNDU/NAMM); vetoed mass = 623 picks carrying
+−$54,842. Search honesty: found as 1 of 418 stump rules, but survived
+dose-response monotonicity, three-era consistency, and monsters-kept —
+the neighboring rule families (`price_vs_20d_high` etc.) failed OOS with
+sign flips, which is the expected signature of a real effect vs mining.
+
+- Shared helper: `trading/orb_pdr_veto.py` — imported by live
+  (`orb_engine._pdr_veto_reject`) and BT (`study_orb_pipeline_static_lock.py`);
+  parity by construction. Feature def matches `study_orb_features.py:287`.
+- Config: `orb.yaml::filter.prev_day_range_veto.{enabled,min_prev_day_range_pct}`.
+  Env: `ORB_PDR_VETO=0`, `ORB_PDR_VETO_MIN_PCT`.
+- Fail-open: missing prev-day data → no veto + WARNING (BT drops such
+  candidates at the feature stage, so fail-open cannot cause divergence).
+- Monitor: `journalctl -u onemil-trader | grep "PDR VETO"`.
+- Rollback: `enabled: false` + restart (zero state).
+- Tests: `tests/test_orb_pdr_veto.py` (27).
+
 ### Touchgo filter — Rule M + Rule D (shipped 2026-05-16, default ON)
 
 Two post-fill exit rules that catch failed breakouts within the first 1–2

@@ -66,6 +66,19 @@ filter:
   # BT lift: +$8,556 combined OOS (VAL +$5,151, HOQ1+ +$3,405). See
   # study_orb_q1q2_filter.py for walk-forward validation.
   skip_q1: true
+  # PDR veto — skip picks whose PREVIOUS day's range was quiet. ORB monetizes
+  # continuation ("day-2 of the fireworks"); quiet-prev-day names gapping up
+  # are day-1 fresh pops that mean-revert. Applied POST-ranking with NO
+  # refill — a vetoed pick's slot stays EMPTY (backfill form tested toxic:
+  # 2025H2 collapses to ~$0, MDD -$29K -> -$50K — same failure mode as the
+  # refuted ETF exclusion). Replica evidence Jan'25-Jul'26 at threshold 8.0:
+  # TOT $155K -> $210K (+35%), MDD -$29.3K -> -$20.1K, WR 35.8% -> 40.2%,
+  # all 3 eras positive, ALL top-10 giants kept, monotone across thr 6-10.
+  # Shared helper: trading/orb_pdr_veto.py (BT + live import it — parity by
+  # construction). Env overrides: ORB_PDR_VETO=0, ORB_PDR_VETO_MIN_PCT.
+  prev_day_range_veto:
+    enabled: true
+    min_prev_day_range_pct: 8.0
   # Touch-and-go filter (Rule M + Rule D). Default-on, walk-forward validated
   # on Jan'25-May'26 (924 trades, 8/11 OOS months helped, +$27K OOS,
   # +$44K full-timeline lift, WR 47.8% → 52.1%, cumulative max DD -16%).
