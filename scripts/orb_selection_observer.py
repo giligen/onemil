@@ -122,10 +122,32 @@ def main():
     t0 = time.time()
     kept, rejected, missing = bt_parity_filter(client, seed)
     audit['expected_candidates'] = kept
+    audit['rejected_931'] = rejected
     audit['snapshot_missing'] = missing
     audit['snapshot_secs'] = round(time.time() - t0, 1)
     log(f"EXPECTED candidates (BT-parity): {len(kept)} — {sorted(kept)}")
     log(f"snapshot coverage: {len(seed)-len(missing)}/{len(seed)} in {audit['snapshot_secs']}s")
+
+    # SECOND capture at ~9:35:03 — the instant live ranks — including
+    # bid/ask so the live-only spread gate (>150bps skip) is attributable.
+    wait_until_utc(13, 35, 3)
+    try:
+        snaps935 = client.get_snapshots(sorted(kept))
+        audit['snap_935'] = {
+            s2: {'open': v.get('open'), 'prev_close': v.get('prev_close'),
+                 'bid': v.get('bid_price'), 'ask': v.get('ask_price'),
+                 'spread_bps': (round((v.get('ask_price', 0) - v.get('bid_price', 0))
+                                / v.get('bid_price') * 10000, 1)
+                                if v.get('bid_price') else None)}
+            for s2, v in (snaps935 or {}).items()
+        }
+        wide = [s2 for s2, v in audit['snap_935'].items()
+                if v['spread_bps'] is not None and v['spread_bps'] > 150]
+        log(f"9:35 spreads captured for {len(audit['snap_935'])} expected; "
+            f">150bps (live spread-gate would skip): {wide}")
+        audit['spread_gate_would_skip'] = wide
+    except Exception as e:
+        log(f"9:35 snapshot capture failed: {e}")
 
     # give live until 9:36:30 to complete ranges + score
     wait_until_utc(13, 36, 30)
