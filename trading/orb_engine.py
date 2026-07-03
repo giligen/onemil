@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional, Set
@@ -267,6 +268,17 @@ class ORBEngine:
         self.partial_fill_stall_seconds_max = int(
             fill_handling_cfg.get('partial_fill_stall_seconds_max', 60)
         )
+        # 2026-07-03 selection-race fix (CRCD/AVEX/FABC/RGNX): the 9:35:01
+        # first-ranking event must see the FULL candidate field, not just the
+        # subset whose 9:34 bars happened to have consolidated. Two layers:
+        #   sweep_retry_delay_s  — post-open sweep re-fetches still-rangeless
+        #                          candidates once after this delay (0=off).
+        #   first_rank_grace_s   — check_entries defers the day's FIRST
+        #                          placement burst while pool candidates are
+        #                          still rangeless within this many seconds
+        #                          after the range end (backstop; 0=off).
+        self.sweep_retry_delay_s = float(entry_cfg.get('sweep_retry_delay_s', 4.0))
+        self.first_rank_grace_s = float(entry_cfg.get('first_rank_grace_s', 25.0))
 
         self.range_minutes = int(entry_cfg.get('range_minutes', 5))
         self.entry_slip_bps = float(entry_cfg.get('entry_slip_bps', 30))
@@ -702,25 +714,67 @@ class ORBEngine:
             logger.warning(f"ORB: post-open sweep bar fetch failed: {e}")
 
         filled_syms: Set[str] = set()
-        for sym in missing:
-            bars = bars_by_sym.get(sym)
-            if bars is None or bars.empty:
-                continue
+
+        def _ingest_batch(sym_list, bars_map):
+            for sym in sym_list:
+                bars = bars_map.get(sym)
+                if bars is None or bars.empty:
+                    continue
+                try:
+                    b = bars.copy()
+                    b['timestamp'] = pd.to_datetime(b['timestamp'], utc=True)
+                    b = b.sort_values('timestamp').reset_index(drop=True)
+                    self._ingest_bars(sym, b)
+                    if self.candidates.get(sym) and self.candidates[sym].range_data is not None:
+                        filled_syms.add(sym)
+                except Exception as e:
+                    logger.warning(f"ORB: post-open sweep ingest({sym}) failed: {e}")
+
+        _ingest_batch(missing, bars_by_sym)
+
+        # 2026-07-03 selection-race fix (CRCD/AVEX/FABC/RGNX incidents): the
+        # 9:34 bar consolidates at the vendor with 2-10s lag, so the first
+        # sweep routinely leaves ~20% of candidates rangeless (7/2: 21/27
+        # filled). check_entries then ranked the READY subset and burned all
+        # max_concurrent daily slots within 3s — late-consolidating names
+        # (BT-selected winners: CRCD +$15.8K on 6/30) were locked out for the
+        # day. Retry the unfilled remainder ONCE after a short delay so the
+        # first ranking sees the full field. Bounded: adds <= retry_delay+
+        # fetch time (~5s) to the opening tick, only when stragglers exist.
+        still_missing = [s for s in missing if s not in filled_syms]
+        if still_missing and self.sweep_retry_delay_s > 0:
+            logger.info(
+                f"ORB: post-open sweep — {len(still_missing)} candidates still "
+                f"rangeless ({','.join(still_missing[:8])}"
+                f"{'...' if len(still_missing) > 8 else ''}); retrying once in "
+                f"{self.sweep_retry_delay_s:.0f}s (bar-consolidation lag)"
+            )
+            time.sleep(self.sweep_retry_delay_s)
+            retry_bars: Dict[str, pd.DataFrame] = {}
             try:
-                bars = bars.copy()
-                bars['timestamp'] = pd.to_datetime(bars['timestamp'], utc=True)
-                bars = bars.sort_values('timestamp').reset_index(drop=True)
-                self._ingest_bars(sym, bars)
-                if self.candidates.get(sym) and self.candidates[sym].range_data is not None:
-                    filled_syms.add(sym)
+                if hasattr(self.alpaca, 'get_1min_bars_multi'):
+                    retry_bars = self.alpaca.get_1min_bars_multi(
+                        still_missing, lookback_minutes=minutes_since_open
+                    ) or {}
+                else:
+                    for sym in still_missing:
+                        try:
+                            b = self.alpaca.get_1min_bars(sym, lookback_minutes=minutes_since_open)
+                            if b is not None and not b.empty:
+                                retry_bars[sym] = b
+                        except Exception:
+                            continue
             except Exception as e:
-                logger.warning(f"ORB: post-open sweep ingest({sym}) failed: {e}")
+                logger.warning(f"ORB: post-open sweep retry fetch failed: {e}")
+            _ingest_batch(still_missing, retry_bars)
 
         logger.info(
             f"ORB: post-open range sweep — filled {len(filled_syms)}/{len(missing)} ranges"
         )
         # Mark done even if some failed — next tick's WS bars will handle
-        # any stragglers through the normal flow.
+        # any stragglers through the normal flow (and the first-rank grace
+        # gate in check_entries holds the daily cap until they arrive or
+        # the grace window expires).
         self._post_open_range_sweep_done = True
         return filled_syms
 
@@ -1439,6 +1493,19 @@ class ORBEngine:
         if len(symbols_entered_today) >= self.max_concurrent:
             return []  # daily cap exhausted (restart-safe via DB)
 
+        # 2026-07-03 first-rank grace gate (selection-race fix): before the
+        # day's FIRST placement burst, if any pool candidate is still
+        # rangeless (its 9:34 bar hadn't consolidated when the sweep ran),
+        # DEFER ranking until the field completes or the grace window
+        # expires. Without this, the 9:35:01 ranking burned all
+        # max_concurrent slots on the ready subset and late-consolidating
+        # BT-winners (CRCD +$15.8K 6/30, RGNX 6/22, FABC 6/11) were locked
+        # out for the day. Only gates when NOTHING has been placed yet —
+        # once the first burst happens the day's selection is committed.
+        pool_syms = list(symbols) if symbols is not None else list(self.candidates.keys())
+        if not symbols_entered_today and self._should_defer_first_rank(pool_syms):
+            return []
+
         # 1. Build candidate set
         eligible: List[CandidateState] = []
         cand_pool = symbols if symbols is not None else self.candidates.keys()
@@ -1576,6 +1643,12 @@ class ORBEngine:
             by_super_group=self.dedup_by_super_group,
         )
 
+        # 2026-07-03 selection audit: persist the full ranked field at every
+        # placement-burst so any future BT↔live selection divergence
+        # (CRCD/AVEX/FABC/RGNX class) is post-mortemable from disk instead of
+        # racing journald rotation. One JSON line per burst; ~1-3/day.
+        self._audit_selection(ranked_symbols, top_syms, scored)
+
         # 5. For each kept candidate, build plan + submit
         submitted: List[str] = []
         for sym in top_syms:
@@ -1609,6 +1682,85 @@ class ORBEngine:
                 cand.plan_submitted = True
                 submitted.append(sym)
         return submitted
+
+    def _should_defer_first_rank(self, pool_syms) -> bool:
+        """First-rank grace gate (2026-07-03 selection-race fix).
+
+        True iff the day's FIRST placement burst should be deferred because
+        pool candidates are still rangeless (their 9:34 bar hadn't
+        consolidated when the sweep ran) AND we are within
+        `entry.first_rank_grace_s` seconds after the range end. Callers only
+        invoke this when nothing has been placed today — once the first
+        burst happens the day's selection is committed.
+
+        Pre-fix, the 9:35:01 ranking burned all max_concurrent daily slots
+        on the ready subset; late-consolidating BT-winners (CRCD +$15.8K
+        model 6/30, RGNX 6/22, FABC 6/11, AVEX 6/30) were locked out for
+        the day. BT ranks the full field, so this was pure live drift.
+        """
+        if self.first_rank_grace_s <= 0:
+            return False
+        rangeless = [s for s in pool_syms
+                     if self.candidates.get(s) is not None
+                     and self.candidates[s].range_data is None]
+        if not rangeless:
+            return False
+        now_utc = datetime.now(timezone.utc)
+        try:
+            from zoneinfo import ZoneInfo
+            et_now = now_utc.astimezone(ZoneInfo('America/New_York'))
+        except Exception:
+            et_now = now_utc - timedelta(hours=_et_offset_hours(now_utc))
+        range_end_et = (
+            datetime.combine(et_now.date(), dtime(9, 30))
+            .replace(tzinfo=et_now.tzinfo)
+            + timedelta(minutes=int(self.range_minutes))
+        )
+        grace_end = range_end_et + timedelta(seconds=self.first_rank_grace_s)
+        if range_end_et <= et_now < grace_end:
+            logger.info(
+                f"ORB: first-rank GRACE — {len(rangeless)} pool candidate(s) "
+                f"still rangeless ({','.join(rangeless[:6])}"
+                f"{'...' if len(rangeless) > 6 else ''}); deferring ranking "
+                f"until field completes or {grace_end.strftime('%H:%M:%S')} ET"
+            )
+            return True
+        return False
+
+    def _audit_selection(self, ranked_symbols, top_syms, scored) -> None:
+        """Append one JSON line describing this placement-burst's full field.
+
+        Written to logs/orb_selection_audit.jsonl (gitignored runtime data).
+        Captures: every scored candidate (composite/quintile/range), the
+        post-dedup picks, and which pool candidates were still rangeless —
+        the exact evidence that was unrecoverable for the 6/11, 6/22 and
+        6/30 missed-winner incidents. Best-effort: never raises.
+        """
+        try:
+            import json as _json
+            from pathlib import Path as _Path
+            rangeless = sorted(
+                s for s, c in self.candidates.items()
+                if c is not None and c.range_data is None
+            )
+            rec = {
+                'ts_utc': datetime.now(timezone.utc).isoformat(),
+                'ranked': [
+                    {'sym': c.symbol, 'comp': round(float(c.composite), 4),
+                     'q': c.quintile}
+                    for c in scored
+                ],
+                'picks': list(top_syms),
+                'rangeless_pool': rangeless,
+                'open_positions': sorted(self.open_positions.keys()),
+                'universe_n': len(self.universe),
+            }
+            p = _Path(__file__).resolve().parent.parent / 'logs' / 'orb_selection_audit.jsonl'
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, 'a', encoding='utf-8') as fh:
+                fh.write(_json.dumps(rec, separators=(',', ':')) + '\n')
+        except Exception as e:
+            logger.debug(f"ORB: selection audit write failed: {e}")
 
     def _submit_entry(self, plan: OrbTradePlan) -> Optional[str]:
         """Submit stop-limit buy bracket for a plan.

@@ -41,6 +41,11 @@ entry:
   time_stop_minutes: 60     # cancel unfilled buy-stop at 10:35 ET (per-order clock, from submit)
   max_spread_bps: 150       # skip entry + telegram warning if (ask-bid)/price > 150bps
   stop_limit_buffer_bps: 30 # stop-limit buy: limit = range_high × (1 + buffer/10000)
+  # 2026-07-03 selection-race fix (CRCD/AVEX/FABC/RGNX missed winners):
+  # the 9:34 bar consolidates with 2-10s vendor lag, so the 9:35:01 ranking
+  # used to see only ~80% of the field and burn all daily slots on it.
+  sweep_retry_delay_s: 4     # post-open sweep re-fetches still-rangeless candidates once after N s (0=off)
+  first_rank_grace_s: 25     # defer the day's FIRST placement burst while pool candidates are rangeless (0=off)
   # BT picks top-K once at 9:35 ET. Live allows a short window for late bar-
   # stream / backfill / candidates arriving slowly, then HARD-BLOCKS new
   # submissions. Fix shipped 2026-04-20 after QBTZ/BATL slipped through at
