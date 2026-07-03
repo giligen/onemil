@@ -39,7 +39,12 @@ load_dotenv(str(ROOT / ".env"))
 sys.path.insert(0, str(ROOT))
 
 WINDOW_START = "2026-06-29"
-WINDOW_END = "2026-07-03"
+# Extended 2026-07-03: the breakout-bar keying fix (range_end_ts on
+# OpenPosition + strict session-open anchor + negative-age tripwire) ships
+# today. Keep the daily BT-vs-prod verdicts running through the following
+# week to CONFIRM the fix live: expect REKEY count = 0 and 'breakout bar
+# keyed ... source=pos_range' journal lines on every ORB fill.
+WINDOW_END = "2026-07-10"
 
 AUDIT_PATH = Path(os.getenv("ORB_TOUCHGO_AUDIT_PATH", str(ROOT / "logs" / "touchgo_audit.jsonl")))
 DEBUG_LOG = ROOT / "logs" / "touchgo_daily_debug.log"
@@ -98,11 +103,33 @@ def _bar_at(df, ts_iso):
     return m.iloc[0] if len(m) else None
 
 
+def _range_end_utc(day: str) -> datetime:
+    """9:35 ET as UTC for `day` (EDT Mar–Oct → 13:35Z, EST → 14:35Z).
+
+    Month-approximation mirrors trading.orb_engine._et_offset_hours. The
+    original checker searched from 13:00Z (9:00 ET), which let PRE-MARKET
+    spikes above range_high masquerade as the 'true' breakout bar — that
+    false-flagged CAST 6/30 (correctly keyed) as REKEY."""
+    d0 = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    hour = 13 if 3 <= d0.month <= 10 else 14
+    return d0 + timedelta(hours=hour, minutes=35)
+
+
 def analyze(day: str):
-    """Return (records, flips) where flips is a list of dicts with verdict tags."""
+    """Return (records, flips) where flips is a list of dicts with verdict tags.
+
+    Consolidated decisions are recomputed with the SHARED rule helpers
+    (evaluate_rule_m/d) so degenerate-bar guards match live + BT exactly —
+    the naive `close_pos < thr` comparison false-flagged SHNY 7/2 (degenerate
+    breakout bar: live correctly held, checker said FLIP)."""
     recs = _read_records(day)
     if not recs:
         return recs, []
+    from trading.orb_touchgo_filter import (
+        evaluate_rule_d, evaluate_rule_m, find_breakout_bar_ts,
+        load_touchgo_config,
+    )
+    tg_cfg = load_touchgo_config({})
     client = _orb_client()
     cache = {}
 
@@ -115,6 +142,7 @@ def analyze(day: str):
             cache[sym] = df
         return cache[sym]
 
+    rng_end = _range_end_utc(day)
     flips = []
     for r in recs:
         sym, rule = r["symbol"], r["rule"]
@@ -125,30 +153,34 @@ def analyze(day: str):
             live_v = r.get("bb_close_pos")
             bb = _bar_at(df, r.get("breakout_bar_ts"))
             if bb is not None:
-                h, l, c = float(bb["high"]), float(bb["low"]), float(bb["close"])
+                o, h, l, c = (float(bb["open"]), float(bb["high"]),
+                              float(bb["low"]), float(bb["close"]))
                 consol_v = (c - l) / (h - l) if h > l else 0.0
-                thr = r.get("rule_m_threshold", 0.5)
                 if live_v is not None and abs(live_v - consol_v) > EPS:
                     tags.append("MISMATCH")
-                if bool(r.get("fired")) != (consol_v < thr):
+                consol_fire, _ = evaluate_rule_m(o, h, l, c, tg_cfg)
+                if bool(r.get("fired")) != bool(consol_fire):
                     tags.append("FLIP")
+            # REKEY: the true breakout bar via the SAME shared finder,
+            # anchored at the real range end (excludes pre-market bars).
             if df is not None and not df.empty:
-                bo = df[df["high"] > r.get("range_high")].head(1)
-                if len(bo):
-                    true_ts = bo.iloc[0]["timestamp"].tz_convert("UTC").floor("min")
+                true_ts = find_breakout_bar_ts(df, r.get("range_high"), rng_end)
+                if true_ts is not None:
+                    true_min = true_ts.tz_convert("UTC").floor("min")
                     keyed = datetime.fromisoformat(r["breakout_bar_ts"]).astimezone(timezone.utc).replace(second=0, microsecond=0)
-                    if true_ts != keyed:
-                        tags.append("REKEY")
+                    if true_min != keyed:
+                        tags.append(f"REKEY(true={true_min.strftime('%H:%M')}Z)")
         else:
             live_v = r.get("b1_revert_R")
             b1 = _bar_at(df, r.get("b1_ts"))
             rs = r.get("range_size") or 0
             if b1 is not None and rs > 0:
-                consol_v = (r["entry_price"] - float(b1["low"])) / rs
-                thr = r.get("rule_d_revert_R", 0.75)
+                b1_low = float(b1["low"])
+                consol_v = (r["entry_price"] - b1_low) / rs
                 if live_v is not None and abs(live_v - consol_v) > 0.05:
                     tags.append("MISMATCH")
-                if bool(r.get("fired")) != (consol_v >= thr):
+                consol_fire, _ = evaluate_rule_d(r["entry_price"], b1_low, rs, tg_cfg)
+                if bool(r.get("fired")) != bool(consol_fire):
                     tags.append("FLIP")
         if tags:
             flips.append({"symbol": sym, "rule": rule, "fired": r.get("fired"),
@@ -158,17 +190,31 @@ def analyze(day: str):
 
 
 def verdict(flips):
+    """REKEY is first-class bug evidence: a mis-keyed breakout bar means the
+    rule evaluated the wrong bar — whether the decision happened to match is
+    luck (KOLD 6/29 fired tag_bb an hour in on a 14:35Z bar and made money;
+    TSDD 6/23 did the same and forfeited +$1,392). Root cause localized
+    2026-07-03: orb_engine._first_session_open_ts_utc accepts a 14:30Z bar
+    as the '9:30 anchor' during EDT (hour.isin([13,14])), so windows missing
+    the true 13:30Z bar anchor an hour late -> range_end 14:35Z -> Rule M/D
+    keyed to ~14:35Z bars."""
+    rekey = [f for f in flips
+             if any(str(t).startswith("REKEY") for t in f["tags"])]
     real = [f for f in flips if "FLIP" in f["tags"]]
-    if not real:
-        return "no_divergence", "No FLIP — prod touchgo matches BT/consolidated."
+    if not real and not rekey:
+        return "no_divergence", "No FLIP/REKEY — prod touchgo matches BT/consolidated."
     causes = set()
+    if rekey:
+        causes.add(
+            "wrong breakout bar keyed — false 9:30 anchor "
+            "(orb_engine._first_session_open_ts_utc hour.isin([13,14]) "
+            "accepts 14:30Z=10:30 ET during EDT)"
+        )
     for f in real:
         if "MISMATCH" in f["tags"]:
             causes.add("streamed-vs-consolidated close gap (live real-time bar ≠ official bar)")
-        elif "REKEY" in f["tags"]:
-            causes.add("wrong breakout bar keyed (re-keying miss)")
-        else:
-            causes.add("threshold-boundary rounding")
+        elif not any(str(t).startswith("REKEY") for t in f["tags"]):
+            causes.add("decision divergence on correctly-keyed bar (guard/threshold)")
     return "bug_found", " / ".join(sorted(causes))
 
 
@@ -193,14 +239,18 @@ def main():
     nM = sum(1 for r in recs if r["rule"] == "M")
     nD = sum(1 for r in recs if r["rule"] == "D")
     status, cause = verdict(flips)
-    real_flips = [f for f in flips if "FLIP" in f["tags"]]
+    # Everything flagged (FLIP or REKEY) is reportable — a mis-keyed bar is
+    # the bug even when the decision coincidentally matched.
+    flagged = [f for f in flips
+               if "FLIP" in f["tags"]
+               or any(str(t).startswith("REKEY") for t in f["tags"])]
 
     # Persist finding
     FINDINGS.parent.mkdir(parents=True, exist_ok=True)
     with open(FINDINGS, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"day": today, "evals": len(recs), "flips": len(real_flips),
+        fh.write(json.dumps({"day": today, "evals": len(recs), "flips": len(flagged),
                              "status": status, "cause": cause,
-                             "detail": real_flips}, default=str) + "\n")
+                             "detail": flagged}, default=str) + "\n")
 
     # Build Telegram conclusion
     if not recs:
@@ -213,12 +263,12 @@ def main():
                f"✅ prod touchgo matches BT/consolidated today. No bug surfaced.")
     else:
         lines = [f"<b>[TOUCHGO-DEBUG] {today}</b>",
-                 f"Evals: {len(recs)} (M:{nM} D:{nD}) | <b>FLIPs: {len(real_flips)}</b>"]
-        for f in real_flips:
+                 f"Evals: {len(recs)} (M:{nM} D:{nD}) | <b>flagged: {len(flagged)}</b>"]
+        for f in flagged:
             lv = f"{f['live']:.3f}" if isinstance(f['live'], (int, float)) else "?"
             cv = f"{f['consol']:.3f}" if isinstance(f['consol'], (int, float)) else "?"
             lines.append(f"⚠️ {f['symbol']} ({f['rule']}) prod_fired={f['fired']} "
-                         f"live={lv} vs consol={cv}  [{','.join(f['tags'])}]")
+                         f"live={lv} vs consol={cv}  [{','.join(str(t) for t in f['tags'])}]")
         lines.append(f"\n<b>🐞 VERDICT: {cause}</b>")
         msg = "\n".join(lines)
 

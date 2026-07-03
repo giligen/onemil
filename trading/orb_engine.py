@@ -178,6 +178,16 @@ class OpenPosition:
     # "broker stalled mid-fill, time to cancel + accept the partial". None
     # until first partial observed; reset on terminal-state transition.
     first_partial_at: Optional[datetime] = None
+    # KOLD/PLTU/TSDD 2026-07-03 fix: the position's own range-end timestamp
+    # (range_start + range_minutes), captured at entry submit from the
+    # candidate's range_data. Breakout-bar keying uses THIS as the search
+    # anchor instead of re-deriving a "session open" from the current bars
+    # window — streamed windows usually lack the 9:30 bar (Alpaca WS delivers
+    # from subscribe-time forward), which made the old anchor heuristic fall
+    # through to the 14:30Z bar (10:30 ET during EDT) and key Rule M/D one
+    # hour late. None on rehydrated positions → capture declines (touchgo
+    # correctly inert for positions recovered mid-session).
+    range_end_ts: Optional[datetime] = None
     # Highest filled_qty observed so far on this order. Used by the
     # partial-fill polling loop to suppress duplicate INFO logs when the
     # broker reports the same qty across multiple polls.
@@ -872,19 +882,39 @@ class ORBEngine:
 
         Runs on every bar event for pending or filled positions. No-op in
         legacy breakout_bar_source='fill' mode, once breakout_bar_ts is set, or
-        when there's no position. Because it runs from the pending phase, the
-        breakout bar is captured while still in the streamed window — so even a
-        late fill (whose breakout bar would have rolled out of the window by
-        fill time) gets the correct, BT-parity bar.
+        when there's no position.
+
+        2026-07-03 fix (KOLD/PLTU/TSDD false tag exits): the search anchor is
+        the POSITION'S OWN range_end_ts (stored at entry submit), passed
+        straight to the shared find_breakout_bar_ts. The old path re-derived a
+        "session open" from the current bars window — but streamed windows
+        usually lack the 9:30 bar (Alpaca WS delivers from subscribe-time
+        forward), so the anchor heuristic fell through to the first :30 bar it
+        saw (14:30Z = 10:30 ET during EDT) and keyed Rule M/D to a bar an hour
+        after the real breakout (tag_bb firings at 14:36:2xZ on KOLD 6/29,
+        PLTU 7/1, TSDD 6/23). The window-anchor path remains only as a
+        fallback for positions without range_end_ts (rehydrated after a
+        restart), where declining is the correct conservative outcome.
         """
         if self.touchgo_cfg.breakout_bar_source != 'market':
             return
         pos = self.open_positions.get(symbol)
         if pos is None or pos.breakout_bar_ts is not None:
             return
-        bb_ts = self._market_breakout_bar_ts(bars_df, pos.range_high)
+        if pos.range_end_ts is not None:
+            bb_ts = find_breakout_bar_ts(bars_df, pos.range_high, pos.range_end_ts)
+            source = 'pos_range'
+        else:
+            bb_ts = self._market_breakout_bar_ts(bars_df, pos.range_high)
+            source = 'window_anchor'
         if bb_ts is not None:
             pos.breakout_bar_ts = bb_ts
+            # Confirmation log — one line per position, greppable:
+            # journalctl -u onemil-trader | grep "breakout bar keyed"
+            logger.info(
+                f"ORB: {symbol} breakout bar keyed {bb_ts} "
+                f"(range_end={pos.range_end_ts}, source={source})"
+            )
 
     def _evaluate_touchgo(self, symbol: str, bars_df: pd.DataFrame) -> None:
         """Evaluate Rule M and Rule D for any open position on this symbol.
@@ -940,6 +970,25 @@ class ORBEngine:
                         f"by {age_min:.0f}min (> {self.touchgo_cfg.max_breakout_age_min:.0f}min "
                         f"cap); stale entry, no retroactive tag exit"
                     )
+                pos.rule_m_evaluated = True
+                pos.rule_d_evaluated = True
+                return
+            # Negative-age tripwire (2026-07-03): a breakout bar can never
+            # meaningfully POSTDATE the fill — our stop-limit fill IS in (or
+            # within a few minutes of) the bar that broke the range. A large
+            # negative age means the keying is insane (the KOLD/PLTU/TSDD
+            # incidents keyed bars 53-84min after the fill via the false
+            # 14:30Z anchor). Decline touchgo loudly rather than fire a
+            # first-2-minute rule on a random mid-session bar. Tolerance
+            # -5min allows the rare touch-without-exceed fill where the true
+            # breakout bar legitimately closes a few minutes after entry.
+            if age_min < -5.0:
+                logger.warning(
+                    f"ORB: {symbol} touchgo DECLINED — breakout_bar_ts "
+                    f"{bb_ts} postdates fill {et} by {-age_min:.0f}min; "
+                    f"keying is invalid (see 2026-07-03 false-anchor "
+                    f"incident). No tag exit for this position."
+                )
                 pos.rule_m_evaluated = True
                 pos.rule_d_evaluated = True
                 return
@@ -1720,6 +1769,26 @@ class ORBEngine:
 
         # Track pending position (cleared once fill confirmed in _process_pending_fills)
 
+        # Range end for breakout-bar keying (2026-07-03 fix): derived from the
+        # candidate's range_data, which was computed at range-completion time
+        # from a df that HAD the 9:30 anchor (WS-early or backfill). Entries
+        # gate at 10:00 ET, so any entered position's range is true-anchored.
+        _range_end_ts = None
+        _cand = self.candidates.get(plan.symbol)
+        if _cand is not None and _cand.range_data is not None:
+            try:
+                _rst = _cand.range_data.range_start_ts
+                if _rst is not None:
+                    _range_end_ts = (pd.Timestamp(_rst).tz_localize('UTC')
+                                     if pd.Timestamp(_rst).tzinfo is None
+                                     else pd.Timestamp(_rst)) \
+                        + timedelta(minutes=self.range_minutes)
+            except Exception as e:
+                logger.warning(
+                    f"ORB: {plan.symbol} range_end_ts derivation failed ({e}) — "
+                    f"breakout-bar keying will use window-anchor fallback"
+                )
+
         self.open_positions[plan.symbol] = OpenPosition(
             symbol=plan.symbol,
             entry_price=plan.entry_price,  # placeholder — overwritten on fill
@@ -1737,9 +1806,10 @@ class ORBEngine:
             bar_close_price=plan.range_high,
             order_submitted_at=submit_time,
             entry_quote_ask=entry_quote_ask,
+            range_end_ts=_range_end_ts,
         )
         # Track on CandidateState too for clean time-stop cancellation
-        cand = self.candidates.get(plan.symbol)
+        cand = _cand
         if cand is not None:
             cand.order_id = order_id
             cand.order_submitted_at = submit_time
@@ -3517,6 +3587,16 @@ def _first_session_open_ts_utc(bars_df: pd.DataFrame) -> Optional[pd.Timestamp]:
     (e.g. when bars arrive from the StopMonitor WebSocket with raw python
     datetime objects, which happens in the scanner's drain_bar_events path).
     Coerce via pd.to_datetime before using the .dt accessor.
+
+    2026-07-03 fix: the 9:30 ET bar is 13:30Z during EDT and 14:30Z during
+    EST — ONE of those per date, never both. The previous
+    `hour.isin([13, 14])` tolerance accepted a 14:30Z bar (10:30 ET!) as the
+    session open during EDT whenever the window was missing the true 13:30Z
+    bar (Alpaca WS delivers from subscribe-time forward, so post-9:31
+    subscriptions never see it). That false anchor shifted the breakout-bar
+    search one hour late and mis-keyed touchgo (KOLD/PLTU/TSDD tag_bb at
+    14:36:2xZ). Derive the single correct hour from the bars' own date via
+    _et_offset_hours.
     """
     if bars_df is None or len(bars_df) == 0:
         return None
@@ -3526,7 +3606,12 @@ def _first_session_open_ts_utc(bars_df: pd.DataFrame) -> Optional[pd.Timestamp]:
     try:
         if not pd.api.types.is_datetime64_any_dtype(ts_col):
             ts_col = pd.to_datetime(ts_col, utc=True, errors='coerce')
-        mask = (ts_col.dt.minute == 30) & (ts_col.dt.hour.isin([13, 14]))
+        first_valid = ts_col.dropna()
+        if len(first_valid) == 0:
+            return None
+        # 9:30 ET in UTC for THIS date: 13:30Z (EDT) / 14:30Z (EST).
+        open_hour_utc = 9 + _et_offset_hours(first_valid.iloc[0].to_pydatetime())
+        mask = (ts_col.dt.minute == 30) & (ts_col.dt.hour == open_hour_utc)
     except (AttributeError, TypeError, ValueError) as e:
         logger.debug(f"ORB: _first_session_open_ts_utc timestamp parse failed: {e}")
         return None
