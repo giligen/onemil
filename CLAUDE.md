@@ -341,7 +341,12 @@ ORB analysis; the older ones have warning headers pointing to the shipped varian
 
 **Do NOT**:
 - Enable with `ALPACA_ORB_API_KEY` empty — main.py will warn + disable
-- Refit z-score / quintile / adaptive params without running `study_orb_refit.py` first (quarterly cadence)
+- Refit z-score / quintile / adaptive params AT ALL without a walk-forward harness proving the new fit OOS.
+  **The quarterly-refit cadence is CANCELLED (2026-07-03 audit)**: quarterly refits tested $34–47K WORSE
+  OOS than the frozen H1-2025 fit across 4 quarters (static +$126.8K vs expanding-refit +$79.5K vs
+  rolling-12mo +$92.7K) — refits chase the recent regime and get whipsawed. The frozen fit is an
+  accidental regularizer. See research/money_machine_audit_jul2026.md #4 +
+  research/scripts/orb_pipeline_replica.py (the harness).
 - Remove Q5 cap from `orb.yaml::adaptive_mults.Q5: 1.5` — it's the anti-overfit guard
 - Disable Q1 filter (`filter.skip_q1`) without revisiting `docs/orb_research_apr_2026.md` first
 - Skip Pre-Stage-0 LIVE phase before formal Stage 0 — paper data has structural limits (synthetic fills don't capture real venue queue)

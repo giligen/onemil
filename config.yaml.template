@@ -356,7 +356,9 @@ trading:
   # OOS improvement: H2 +$8K, Q1 +$33K (Q1 from -$41K to -$9K)
   conviction_scoring:
     enabled: true                      # V4 model: scales risk_per_trade via planner (not shares post-hoc)
-    min_threshold: 1.4                 # Skip trades when conviction_mult < this (0.0 = filter disabled)
+    min_threshold: 1.8                 # Skip trades when conviction_mult < this (0.0 = filter disabled)
+                                        # 2026-07-03: 1.4 -> 1.8 (thin-supply junk guard; 2026 BT +74%;
+                                        # research/money_machine_audit_jul2026.md #8)
                                         # V2_clean (2026-04-15): 1.4 lifts canonical 16mo +$52K (+15.5%)
                                         # Walk-forward OOS: mean +$28K, worst split +$19K (3 splits)
                                         # COUPLED to 7 conviction rules (V1 + Rules 7+8) — re-validate if rules change
