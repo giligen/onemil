@@ -2394,6 +2394,28 @@ class TradingEngine:
             # poll fill on these is useless: the StopMonitor already
             # exhausted its retries. The orphan reconciler handles them.
             if not getattr(event, 'confirmed', True):
+                # 2026-07-04 review fix: if the trade is ALREADY closed
+                # (sync's Layer-2 order-history recovery beat this event
+                # during a slow escalation), do NOT clobber the correct
+                # row with pending-verification state.
+                already_closed = False
+                if event.trade_db_id:
+                    try:
+                        open_ids = {t.get('id') for t in
+                                    self.db.get_open_trades(
+                                        date.today().isoformat())}
+                        already_closed = event.trade_db_id not in open_ids
+                    except Exception as e:
+                        logger.warning(
+                            f"{event.symbol}: open-trade check before "
+                            f"unconfirmed write failed: {e} — writing anyway")
+                if already_closed:
+                    logger.warning(
+                        f"{event.symbol}: UNCONFIRMED EXIT event arrived but "
+                        f"trade {event.trade_db_id} is already closed "
+                        f"(recovered via order history) — skipping "
+                        f"pending-verification write")
+                    continue
                 logger.error(
                     f"{event.symbol}: UNCONFIRMED EXIT — writing "
                     f"order_status=exit_pending_verification, "

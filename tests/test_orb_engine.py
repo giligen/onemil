@@ -111,11 +111,15 @@ def _make_bars(symbol_prices, date_str='2026-04-20'):
 # =========================================================================
 
 class TestInit:
-    def test_loads_from_real_yaml(self, engine):
+    def test_loads_from_real_yaml(self, engine, orb_cfg):
         assert engine.range_minutes == 5
         assert engine.max_concurrent == 4
-        assert engine.planner.risk_per_trade_usd == 3000
-        assert engine.planner.per_pos_cap_usd == 25_000
+        # Risk/budget are ramp-stage-dependent (instance orb.yaml changes per
+        # docs/orb_rollout_plan.md) — assert the CONFIG PATH, not a stage value.
+        sizing = orb_cfg['sizing']
+        assert engine.planner.risk_per_trade_usd == float(sizing['risk_per_trade_usd'])
+        assert engine.planner.per_pos_cap_usd == pytest.approx(
+            float(sizing['account_budget_usd']) / int(sizing['max_concurrent']))
         assert engine.force_close_hour_et == 15
         assert engine.force_close_minute_et == 45
 
@@ -295,16 +299,18 @@ class TestCheckEntries:
 # =========================================================================
 
 class TestDailyLossLimit:
+    # The limit is ramp-stage-dependent (instance orb.yaml) — test relative
+    # to the engine's loaded value, not a hardcoded stage number.
     def test_below_limit_does_not_block(self, engine):
-        engine.daily_pnl = -4999.0  # just above the -5K limit
+        engine.daily_pnl = engine.daily_loss_limit_usd + 1.0  # just inside
         assert engine._daily_loss_limit_hit() is False
 
     def test_at_limit_blocks(self, engine):
-        engine.daily_pnl = -5000.0
+        engine.daily_pnl = engine.daily_loss_limit_usd
         assert engine._daily_loss_limit_hit() is True
 
     def test_below_limit_blocks(self, engine):
-        engine.daily_pnl = -5100.0
+        engine.daily_pnl = engine.daily_loss_limit_usd - 100.0
         assert engine._daily_loss_limit_hit() is True
 
     def test_only_logs_once(self, engine):

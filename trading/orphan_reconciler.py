@@ -32,6 +32,7 @@ tests/test_*_engine_*_reconciler.py (integration with each engine).
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -51,7 +52,9 @@ STALE_EXIT_REASONS: frozenset = frozenset({
 PENDING_VERIFICATION_STATUS = 'exit_pending_verification'
 
 # Once a row has been reconciled, this exit_reason marks it as terminal.
-ORPHAN_RECOVERED_EXIT_REASON = 'orphan_recovered_force_close'
+from trading.exit_reasons import ExitReason
+
+ORPHAN_RECOVERED_EXIT_REASON = ExitReason.ORPHAN_RECOVERED_FORCE_CLOSE.value
 
 
 @dataclass(frozen=True)
@@ -428,6 +431,48 @@ def _poll_for_fill(
     return (fill_price, fill_qty)
 
 
+def _cancel_open_orders_for_symbol(alpaca, symbol: str) -> int:
+    """Cancel any OPEN orders for a symbol; returns count cancelled.
+
+    2026-07-04 review fix: Alpaca rejects close_position with
+    "40310000 insufficient qty available" while shares are held for open
+    orders — and the OWNED orphans this module recovers frequently carry
+    an expired-DAY emergency stop or leftover bracket leg. Pre-reconciler
+    code (trading_engine._cancel_open_orders_for_symbol) always cancelled
+    first; the reconciler must too or its close fails every cycle and the
+    position rides naked into the overnight gap.
+
+    Best-effort: per-order failures log WARNING and don't raise.
+    """
+    try:
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+        req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol])
+        open_orders = alpaca.trading_client.get_orders(filter=req)
+    except Exception as e:
+        logger.warning(
+            f"orphan reconciler: open-order query before close({symbol}) "
+            f"failed: {e} — attempting close anyway")
+        return 0
+    cancelled = 0
+    for o in (open_orders or []):
+        try:
+            alpaca.cancel_order(str(o.id))
+            cancelled += 1
+            logger.info(
+                f"orphan reconciler: cancelled open order {o.id} on {symbol} "
+                f"before close")
+        except Exception as ce:
+            logger.warning(
+                f"orphan reconciler: cancel {getattr(o, 'id', '?')} on "
+                f"{symbol} failed: {ce}")
+    return cancelled
+
+
+# Backoffs (seconds) between close retries while cancelled shares release.
+_CLOSE_HELD_QTY_BACKOFFS_S = (0.5, 1.5)
+
+
 def reconcile_strategy_orphans(
     *,
     strategy: str,
@@ -577,7 +622,31 @@ def reconcile_strategy_orphans(
 
         close = close_position_fn or alpaca.close_position
         try:
-            result = close(sym)
+            # Release broker-held shares first (open bracket legs / expired
+            # emergency stops hold qty and make close_position fail with
+            # 40310000). Then close, with a short backoff retry while the
+            # cancel propagates. 2026-07-04 review fix.
+            if close_position_fn is None:
+                _cancel_open_orders_for_symbol(alpaca, sym)
+            result = None
+            last_err = None
+            for attempt, backoff_s in enumerate(
+                    (0.0,) + _CLOSE_HELD_QTY_BACKOFFS_S):
+                if backoff_s:
+                    time.sleep(backoff_s)
+                try:
+                    result = close(sym)
+                    last_err = None
+                    break
+                except Exception as ce:
+                    last_err = ce
+                    if 'insufficient qty' not in str(ce).lower():
+                        raise
+                    logger.warning(
+                        f"orphan reconciler [{strategy}]: close({sym}) "
+                        f"held-qty retry {attempt + 1} — {ce}")
+            if last_err is not None:
+                raise last_err
             order_id = (result or {}).get('id', '')
         except Exception as e:
             logger.error(

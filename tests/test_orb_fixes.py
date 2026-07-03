@@ -45,7 +45,7 @@ def mock_alpaca():
     c = MagicMock(spec=AlpacaClient)
     c.get_open_positions.return_value = []
     c.get_account_info.return_value = {'buying_power': 100_000.0}
-    c.get_latest_quote.return_value = {'bid_price': 9.98, 'ask_price': 10.00}
+    c.get_latest_quote.return_value = {'bid_price': 9.90, 'ask_price': 9.92}  # ask < range_high so the buy-stop guard submits AS-IS (rebump path has its own tests)
     c.submit_stop_bracket_order.return_value = {'id': 'o-1', 'status': 'accepted'}
     c.cancel_order.return_value = True
     c.close_position.return_value = {'id': 'c-1'}
@@ -352,6 +352,8 @@ class TestCancelStalePending:
             range_high=10, range_low=9.5, lock_arm_at_r=1.5, lock_stop_r=1.0,
             composite_score=0.5, quintile='Q4',
         )
+        # Post-cancel filled_qty check (2026-07-04): order was never filled.
+        mock_alpaca.get_order.return_value = {'filled_qty': 0}
         engine._cancel_stale_pending_orders()
         mock_alpaca.cancel_order.assert_called_once_with('o1')
         assert 'A' not in engine.open_positions

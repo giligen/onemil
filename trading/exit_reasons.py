@@ -161,6 +161,13 @@ class ExitReason(str, Enum):
     STOPMONITOR_EXIT = "stopmonitor_exit"
     """MACD wave: StopMonitor (not the bracket) closed the position."""
 
+    ORPHAN_RECOVERED_FORCE_CLOSE = "orphan_recovered_force_close"
+    """Written by `trading/orphan_reconciler.py` when an OWNED orphan
+    (broker holds shares, engine lost track — e.g. after a mid-day
+    restart or an unconfirmed exit) is force-closed by the reconciler.
+    Attributed: we know exactly why it closed. The row it annotates was
+    previously in `exit_pending_verification`."""
+
     # ---- Historical (no current writer; kept for query compat) --------
     SYNC_RECONCILE = "sync_reconcile"
     """**Historical only**. Written on 2026-04-02 (6 macd_wave rows)
@@ -198,6 +205,7 @@ _ATTRIBUTED_EXITS = frozenset({
     ExitReason.HARD_STOP.value,
     ExitReason.STOPMONITOR_EXIT.value,
     ExitReason.POST_FILL_EXIT.value,
+    ExitReason.ORPHAN_RECOVERED_FORCE_CLOSE.value,
 })
 
 _NEEDS_RECONCILE = frozenset({
@@ -213,22 +221,40 @@ _HISTORICAL = frozenset({
 })
 
 
+def _strip_exhaust_prefix(value: str) -> str:
+    """Normalize the `exhaust+<reason>` composite convention.
+
+    `trading_engine.py` prefixes the final exit reason with `exhaust+`
+    when an exhaustion partial-sell happened earlier in the trade's life
+    (e.g. `exhaust+trail_stop`). The suffix is the real exit branch; the
+    prefix is trade-lifecycle metadata. Catalog checks classify on the
+    suffix (2026-07-04 review fix — previously these healthy exits read
+    as unknown)."""
+    if value.startswith('exhaust+'):
+        return value[len('exhaust+'):]
+    return value
+
+
 def is_known(value: Optional[str]) -> bool:
-    """True iff `value` matches a defined ExitReason member string.
+    """True iff `value` matches a defined ExitReason member string
+    (including the `exhaust+<reason>` composite convention).
 
     Use at every DB read / Telegram event where an unknown reason should
     be loudly flagged for catalog update (it usually means a new code
     path is emitting an undocumented string)."""
     if value is None:
         return False
-    return value in {er.value for er in ExitReason}
+    return _strip_exhaust_prefix(value) in {er.value for er in ExitReason}
 
 
 def is_attributed(value: Optional[str]) -> bool:
     """True iff this exit has a clearly attributed trigger (we know WHY
     the position closed). False for UNKNOWN_EXIT, *_unconfirmed, and the
-    historical reconcile values."""
-    return value in _ATTRIBUTED_EXITS
+    historical reconcile values. Handles the `exhaust+<reason>` composite
+    convention (classifies on the suffix)."""
+    if value is None:
+        return False
+    return _strip_exhaust_prefix(value) in _ATTRIBUTED_EXITS
 
 
 def needs_reconcile(value: Optional[str]) -> bool:

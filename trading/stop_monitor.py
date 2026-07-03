@@ -1091,16 +1091,19 @@ class StopMonitor:
     # Returns True only when an exit is BOTH flagged in-progress AND started
     # less than `stale_after_s` seconds ago. A flag older than that is treated
     # as stuck — sync is allowed to take over so a true leak still surfaces.
-    def is_exit_in_progress(self, symbol: str, stale_after_s: float = 60.0) -> bool:
+    def is_exit_in_progress(self, symbol: str, stale_after_s: float = 90.0) -> bool:
         """Whether an exit flow is currently active for `symbol`.
 
         Args:
             symbol: Stock symbol.
             stale_after_s: Max age of the in-progress flag. Older = treated as
-                stuck (caller can take over). Default 60s — bigger than the
-                worst observed StopMonitor escalation (limit poll 10s +
-                market-close poll 60s), small enough that a truly stuck flow
-                doesn't suppress reconciliation forever.
+                stuck (caller can take over). Default 90s — the worst-case
+                legitimate escalation is limit poll (10s) + cancel + held-qty
+                backoffs (~2.2s) + market-close poll (60s) ≈ 73s, so 60s (the
+                old default) could go stale MID-escalation and let sync's
+                fallback race the real exit event (2026-07-04 review fix).
+                90s covers it with margin while still letting a truly stuck
+                flow surface within intraday reconciliation time.
 
         Returns: True iff caller should DEFER any reconcile-style fallback
             write for this symbol. False otherwise (no exit in flight, or

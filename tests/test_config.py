@@ -75,8 +75,15 @@ def yaml_file(tmp_path):
 class TestConfigLoading:
     """Tests for Config initialisation and validation."""
 
-    def test_load_valid_config(self, env_file, yaml_file):
-        """Config loads successfully when both .env and config.yaml are valid."""
+    def test_load_valid_config(self, env_file, yaml_file, monkeypatch):
+        """Config loads successfully when both .env and config.yaml are valid.
+
+        Hermetic vs test-order pollution: other suites import modules that
+        load_dotenv() the REAL .env into os.environ, and load_dotenv inside
+        Config does not override pre-set vars — so scrub them first.
+        """
+        monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+        monkeypatch.delenv("ALPACA_API_SECRET", raising=False)
         cfg = Config(env_path=env_file, yaml_path=yaml_file)
         assert cfg.alpaca_api_key == "test-key"
         assert cfg.alpaca_api_secret == "test-secret"

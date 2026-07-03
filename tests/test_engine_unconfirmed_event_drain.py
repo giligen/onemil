@@ -142,6 +142,9 @@ class TestBullFlagDrainUnconfirmed:
         from trading.trading_engine import TradingEngine
         eng = TradingEngine.__new__(TradingEngine)
         eng.db = MagicMock()
+        # 2026-07-04 already-closed guard: the trade must appear OPEN or the
+        # unconfirmed write is (correctly) skipped as a stale event.
+        eng.db.get_open_trades.return_value = [{'id': 42}]
         eng.alpaca = MagicMock()
         # Mark event for bull_flag so the drain filter passes it through.
         ev = _unconfirmed_event(symbol='Y')
@@ -260,3 +263,28 @@ class TestMACDWaveDrainUnconfirmed:
         assert eng.daily_pnl == 0.0
         # Position stays in open_positions because exit is unconfirmed
         assert 'X' in eng.open_positions
+
+
+class TestBullFlagUnconfirmedAlreadyClosed:
+    def test_unconfirmed_event_skipped_when_trade_already_closed(self):
+        """2026-07-04 review fix: during a slow (>stale_after_s) escalation,
+        sync's Layer-2 order-history recovery can close the trade before the
+        BRANCH_LAST_RESORT unconfirmed event drains. The event must NOT
+        clobber the correctly-closed row back to pending-verification."""
+        from trading.trading_engine import TradingEngine
+        from unittest.mock import MagicMock
+        eng = TradingEngine.__new__(TradingEngine)
+        eng.db = MagicMock()
+        eng.db.get_open_trades.return_value = []   # trade 42 already closed
+        eng.alpaca = MagicMock()
+        ev = _unconfirmed_event(symbol='Y')
+        ev.strategy = 'bull_flag'
+        eng.stop_monitor = _FakeStopMonitor([ev])
+        eng._pending_stop_exits = {}
+        eng.STOP_EXIT_TIMEOUT_SECONDS = 30
+        eng._try_get_fill = MagicMock()
+        eng._check_pending_stop_exit_timeouts = MagicMock()
+
+        eng._process_stop_monitor_exits()
+
+        eng.db.update_trade.assert_not_called()

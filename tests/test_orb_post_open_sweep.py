@@ -120,16 +120,30 @@ class TestPostOpenSweep:
         engine.alpaca.get_1min_bars_multi.assert_not_called()
 
     def test_idempotent_within_day(self, engine):
-        """Second call same day is a no-op even past 9:35."""
+        """Second call same day is a no-op even past 9:35.
+
+        Since the 2026-07-03 selection-race fix, the FIRST invocation may
+        fetch twice (initial + one consolidation-lag retry when candidates
+        stay rangeless) — so the idempotency contract is: exactly one
+        initial fetch + at most one retry per DAY, regardless of how many
+        times the sweep is invoked."""
         engine.build_universe(source_loader=lambda: ['AAA'])
         engine.alpaca.get_1min_bars_multi = MagicMock(return_value={})
+        engine.sweep_retry_delay_s = 0.01  # keep the retry, skip the 4s sleep
         with patch('trading.orb_engine.datetime') as MockDT:
             MockDT.now = lambda tz=None: datetime(2026, 4, 21, 13, 36, tzinfo=timezone.utc)
             engine._ensure_ranges_post_open()
             engine._ensure_ranges_post_open()
             engine._ensure_ranges_post_open()
-        # Only called ONCE despite 3 invocations
-        assert engine.alpaca.get_1min_bars_multi.call_count == 1
+        # initial + 1 retry on first invocation; invocations 2-3 no-op
+        assert engine.alpaca.get_1min_bars_multi.call_count == 2
+        # Even if the grace gate re-arms the sweep, the retry stays
+        # once-per-day (no repeated sleep storms on the drain thread).
+        engine._post_open_range_sweep_done = False
+        with patch('trading.orb_engine.datetime') as MockDT:
+            MockDT.now = lambda tz=None: datetime(2026, 4, 21, 13, 36, tzinfo=timezone.utc)
+            engine._ensure_ranges_post_open()
+        assert engine.alpaca.get_1min_bars_multi.call_count == 3  # re-sweep fetch, NO extra retry
 
     def test_skips_candidates_that_already_have_range(self, engine):
         """Symbols with range_data should be excluded from batch fetch."""

@@ -91,10 +91,13 @@ class TestFirstRankGraceGate:
         return datetime(2026, 7, 6, et_hh + 4, et_mm, et_ss, tzinfo=timezone.utc)
 
     def _gate(self, engine, pool, at):
+        # `pool` kept in the helper signature to document each scenario's
+        # calling context, but the gate inspects engine.candidates directly
+        # (2026-07-04 fix: subset-scoping made it blind on the WS-drain path).
         with patch('trading.orb_engine.datetime') as mdt:
             mdt.now.return_value = at
             mdt.combine = datetime.combine
-            return engine._should_defer_first_rank(pool)
+            return engine._should_defer_first_rank()
 
     def test_defers_within_grace_when_field_incomplete(self, engine, mock_alpaca):
         """9:35:05, CRCD still rangeless -> defer (the incident scenario)."""
@@ -220,3 +223,67 @@ class TestSelectionAudit:
         """Unwritable path must not break the trade path."""
         with patch('trading.orb_engine.__file__', '/dev/null/x/orb_engine.py'):
             engine._audit_selection([], [], [])   # must not raise
+
+
+class TestGateFullPoolScope:
+    """2026-07-04 review fix: the gate must inspect the FULL candidate pool,
+    not the caller's subset. The day's first burst arrives via the WS drain
+    as check_entries(symbols=<ready subset>) — every member has a range by
+    construction, so a subset-scoped rangeless check never fired on exactly
+    the racing path (the original CRCD/AVEX/FABC/RGNX failure survived the
+    'fix')."""
+
+    def _at(self, et_hh, et_mm, et_ss):
+        return datetime(2026, 7, 6, et_hh + 4, et_mm, et_ss, tzinfo=timezone.utc)
+
+    def test_gate_fires_even_when_caller_scope_is_ready_subset(self, engine):
+        """WS-drain scenario: CRCD rangeless in the pool; the drain calls
+        with only the ready names. Gate must still defer."""
+        engine.build_universe(source_loader=lambda: ['AAA', 'BBB', 'CRCD'])
+        engine.candidates['AAA'].range_data = _rng('AAA')
+        engine.candidates['BBB'].range_data = _rng('BBB')
+        # CRCD rangeless — WS drain would call check_entries(['AAA','BBB'])
+        engine._audit_selection = MagicMock()
+        with patch('trading.orb_engine.datetime') as mdt:
+            mdt.now.return_value = self._at(9, 35, 5)
+            mdt.combine = datetime.combine
+            mdt.strptime = datetime.strptime
+            out = engine.check_entries(symbols=['AAA', 'BBB'])
+        assert out == []
+        engine._audit_selection.assert_not_called()
+
+    def test_defer_rearms_post_open_sweep(self, engine):
+        """Deferral must re-arm the sweep so stragglers get actively
+        re-fetched (WS alone lacks the 9:30 anchor bar — without re-arm the
+        defer is pure entry delay and the field can never complete)."""
+        engine.build_universe(source_loader=lambda: ['AAA', 'CRCD'])
+        engine.candidates['AAA'].range_data = _rng('AAA')
+        engine._post_open_range_sweep_done = True
+        with patch('trading.orb_engine.datetime') as mdt:
+            mdt.now.return_value = self._at(9, 35, 5)
+            mdt.combine = datetime.combine
+            mdt.strptime = datetime.strptime
+            engine.check_entries(symbols=['AAA'])
+        assert engine._post_open_range_sweep_done is False
+
+
+class TestEtOffsetDstAccuracy:
+    """2026-07-04 review fix: month-granularity DST offsets zeroed ORB
+    entries for the Mar-1→2nd-Sunday and Nov-1→1st-Sunday windows (the 9:30
+    session-open mask matched nothing). ZoneInfo is now authoritative."""
+
+    def test_transition_weeks(self):
+        from trading.orb_engine import _et_offset_hours
+        cases = [
+            # 2027: DST Mar 14 → Nov 7
+            (datetime(2027, 3, 10, 14, 30, tzinfo=timezone.utc), 5),  # pre-spring: EST
+            (datetime(2027, 3, 15, 13, 30, tzinfo=timezone.utc), 4),  # post-spring: EDT
+            (datetime(2027, 11, 3, 13, 30, tzinfo=timezone.utc), 4),  # pre-fall: still EDT
+            (datetime(2027, 11, 8, 14, 30, tzinfo=timezone.utc), 5),  # post-fall: EST
+        ]
+        for dt, expected in cases:
+            assert _et_offset_hours(dt) == expected, dt
+
+    def test_naive_datetime_treated_as_utc(self):
+        from trading.orb_engine import _et_offset_hours
+        assert _et_offset_hours(datetime(2027, 7, 6, 14, 0)) == 4

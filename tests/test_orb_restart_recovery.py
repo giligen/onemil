@@ -180,6 +180,8 @@ class TestPendingOrderRegisteredOnCandidatesAfterRestart(unittest.TestCase):
         engine.sync_positions()
         self.assertIn('CORD', engine.candidates)
 
+        # Post-cancel filled_qty check (2026-07-04): never filled.
+        engine.alpaca.get_order.return_value = {'filled_qty': 0}
         # Simulate now() at 85 min after submit
         with patch('trading.orb_engine.datetime') as mock_dt:
             mock_dt.now.return_value = datetime(2026, 5, 7, 15, 0, 0, tzinfo=timezone.utc)
