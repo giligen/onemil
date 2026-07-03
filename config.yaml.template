@@ -3,6 +3,31 @@
 # Logging
 log_level: INFO
 
+# Orphan reconciler (added 2026-06-05 after the SMU/QBTZ 10-day orphan
+# incident). Detects broker positions our engines don't track and
+# either closes them (when the multi-signal predicate proves ownership)
+# or alerts Telegram (when foreign). See trading/orphan_reconciler.py.
+orphan_reconciler:
+  # Master kill switch. Flip to false to run in OBSERVE-MODE — detects,
+  # alerts, and logs, but never closes. Use for the first 3-5 days of
+  # rollout to confirm the predicate's decisions before going active.
+  auto_close_enabled: true
+  # Days backward to search for matching strategy rows. SMU sat for 10
+  # days before we caught it; 14 gives a healthy margin.
+  lookback_days: 14
+  # Avg-entry-price match tolerance: max(abs_min, fill_price * pct).
+  # 5 bps fractional with a $0.005 absolute floor. Tight by design —
+  # any deviation means "not ours; someone else added or holds it".
+  avg_entry_match_pct: 0.0005
+  avg_entry_match_abs_min: 0.005
+  # Blast-radius cap. Per-strategy cap on auto-closes per rolling hour.
+  # If breached → reconciler stops closing and switches to alert-only
+  # for the rest of the hour. Telegram screams.
+  max_closes_per_hour: 3
+  # Per-(strategy, symbol) Telegram alert cooldown. Without this, the
+  # every-few-seconds sync cycle would spam chat with the same orphan.
+  alert_cooldown_minutes: 60
+
 # Scanner thresholds
 scanner:
   # Price range filter (universe watchlist — wider to catch stocks drifting in/out)

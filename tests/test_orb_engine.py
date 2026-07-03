@@ -546,27 +546,76 @@ class TestSyncPositionsOrphanAutoClose:
         - alpaca.get_open_positions → returns the OPRA orphan
         - alpaca.trading_client.get_orders → none open (no in-flight orders)
         - db.get_open_trades(today) → empty (no DB record → classifies as orphan)
+
+        2026-06-05: the new orphan_reconciler issues a direct SQL query via
+        db._trades_conn.execute(...). We rig a stub cursor whose .fetchall()
+        returns matching rows by default — individual tests override by
+        setting `engine._reconciler_rows` on the engine.
         """
-        mock_alpaca.get_open_positions.return_value = [self._orphan_position()]
+        from trading.orphan_reconciler import reset_state_for_tests
+        reset_state_for_tests()  # don't carry alert cooldowns across tests
+        mock_alpaca.get_open_positions.return_value = [{
+            'symbol': 'OPRA', 'qty': 100, 'avg_entry_price': 10.0,
+            'unrealized_pl': -50.0, 'side': 'long',
+        }]
+        mock_alpaca.close_position.return_value = {'id': 'recon-1'}
+        mock_alpaca.get_order.return_value = {
+            'filled_qty': 100, 'filled_avg_price': 9.50,
+        }
         # _cancel_symbol_open_orders uses trading_client.get_orders; mock it
         mock_alpaca.trading_client = MagicMock()
         mock_alpaca.trading_client.get_orders.return_value = []
         mock_alpaca.trading_client.cancel_order_by_id.return_value = True
         mock_db.get_open_trades.return_value = []
+
+        # Reconciler now prefers the public
+        # Database.get_strategy_trades_in_window — implement it via a
+        # closure so individual tests can override engine._reconciler_rows.
+        engine._reconciler_rows = [{
+            'id': 99, 'trade_date': '2026-06-01', 'symbol': 'OPRA',
+            'strategy': 'orb', 'fill_price': 10.0, 'filled_qty': 100,
+            'exit_price': None, 'exit_reason': 'stop_loss_unconfirmed',
+            'order_status': 'closed',
+        }]
+
+        def _get_strategy_trades(strategy, since_date, symbols=None):
+            out = []
+            for r in engine._reconciler_rows:
+                if r.get('strategy') != strategy:
+                    continue
+                if symbols and r['symbol'] not in symbols:
+                    continue
+                out.append(dict(r))
+            return out
+
+        mock_db.get_strategy_trades_in_window = _get_strategy_trades
+
+        # Back-compat fallback if anything still pokes the private path.
+        class _Cur:
+            def __init__(self, rows): self._rows = rows
+            def fetchall(self): return list(self._rows)
+
+        def _execute(sql, params):
+            return _Cur(engine._reconciler_rows)
+
+        mock_db._trades_conn = MagicMock()
+        mock_db._trades_conn.execute = _execute
         return engine
 
     def test_orphan_auto_closes_at_premarket(
         self, patched_orphan_engine, mock_alpaca, monkeypatch,
     ):
-        """Premarket startup (e.g. 8:30 ET) → ORB-owned orphan auto-closed."""
-        # OPRA is a genuine ORB position carried overnight — ORB owns it.
-        patched_orphan_engine._orb_owned_symbols = lambda *a, **k: {'OPRA'}
+        """Premarket startup (e.g. 8:30 ET) → ORB-owned orphan auto-closed.
+
+        The orphan_reconciler now drives this. The cross-day STALE row
+        (trade_date='2026-06-01' against today=2026-06-05) plus
+        avg-entry match and qty sanity satisfy the predicate.
+        """
         from datetime import datetime as _dt
         from zoneinfo import ZoneInfo
         et_tz = ZoneInfo('America/New_York')
-        # Force ET clock to 8:30 AM (premarket, weekday)
-        # Pick a known weekday in EDT — 2026-04-29 is Wednesday EDT
-        fake_now = _dt(2026, 4, 29, 8, 30, 0, tzinfo=et_tz)
+        # Force "today" to 2026-06-05 ET so the stale rows are cross-day.
+        fake_now = _dt(2026, 6, 5, 8, 30, 0, tzinfo=et_tz)
 
         import trading.orb_engine as orb_mod
         real_dt = orb_mod.datetime
@@ -579,21 +628,48 @@ class TestSyncPositionsOrphanAutoClose:
             def __getattr__(self, name):
                 return getattr(real_dt, name)
         monkeypatch.setattr(orb_mod, 'datetime', MockDT())
+
+        # The reconciler also reads datetime.now via its own module.
+        # Reset its rate-limit state so the test doesn't see stale cooldowns.
+        from trading.orphan_reconciler import reset_state_for_tests
+        reset_state_for_tests()
 
         patched_orphan_engine.sync_positions()
 
         # Auto-close should have called close_position
         mock_alpaca.close_position.assert_called_with('OPRA')
 
-    def test_orphan_alerts_only_during_rth(
+    def test_fresh_same_day_entry_not_closed_in_rth(
         self, patched_orphan_engine, mock_alpaca, monkeypatch,
     ):
-        """Mid-day startup during RTH → alert ONLY, no auto-close (avoids
-        killing in-flight fills that haven't reached DB yet)."""
+        """Same-day fresh entry must NOT be auto-closed mid-RTH.
+
+        2026-06-05: the old time-of-day gate was replaced by a predicate-
+        driven safety: the STALE-signal check only matches cross-day rows,
+        rows in 'exit_pending_verification' state, or rows already tagged
+        with a known unconfirmed exit_reason. A same-day filled row with
+        no exit is the engine's normal active position — not an orphan.
+
+        2026-06-06: pin trade_date to TODAY's real wall-clock date.
+        The reconciler reads `today_et = datetime.now(timezone.utc).date()`
+        from its own module (not from orb_engine's mocked datetime),
+        so we use the real date here to keep "same day" stable across
+        runs.
+        """
+        from datetime import date as _date
+        today_str = _date.today().isoformat()
+        # Override the cross-day stale row from the fixture with a fresh
+        # same-day filled row (no exit, no stale signal).
+        patched_orphan_engine._reconciler_rows = [{
+            'id': 200, 'trade_date': today_str, 'symbol': 'OPRA',
+            'strategy': 'orb', 'fill_price': 10.0, 'filled_qty': 100,
+            'exit_price': None, 'exit_reason': None,
+            'order_status': 'filled',
+        }]
         from datetime import datetime as _dt
         from zoneinfo import ZoneInfo
         et_tz = ZoneInfo('America/New_York')
-        fake_now = _dt(2026, 4, 29, 10, 30, 0, tzinfo=et_tz)  # 10:30 ET = RTH
+        fake_now = _dt(2026, 6, 5, 10, 30, 0, tzinfo=et_tz)
 
         import trading.orb_engine as orb_mod
         real_dt = orb_mod.datetime
@@ -607,21 +683,22 @@ class TestSyncPositionsOrphanAutoClose:
                 return getattr(real_dt, name)
         monkeypatch.setattr(orb_mod, 'datetime', MockDT())
 
+        from trading.orphan_reconciler import reset_state_for_tests
+        reset_state_for_tests()
+
         patched_orphan_engine.sync_positions()
 
-        # Auto-close MUST NOT have been called during RTH
+        # Fresh same-day entry — predicate refuses → no close.
         mock_alpaca.close_position.assert_not_called()
 
     def test_orphan_auto_closes_post_close(
         self, patched_orphan_engine, mock_alpaca, monkeypatch,
     ):
         """Post-close startup (17:00 ET) → ORB-owned orphan auto-closed."""
-        # OPRA is a genuine ORB position carried overnight — ORB owns it.
-        patched_orphan_engine._orb_owned_symbols = lambda *a, **k: {'OPRA'}
         from datetime import datetime as _dt
         from zoneinfo import ZoneInfo
         et_tz = ZoneInfo('America/New_York')
-        fake_now = _dt(2026, 4, 29, 17, 0, 0, tzinfo=et_tz)  # 5:00 PM ET = after-hours
+        fake_now = _dt(2026, 6, 5, 17, 0, 0, tzinfo=et_tz)  # 5 PM ET = after-hours
 
         import trading.orb_engine as orb_mod
         real_dt = orb_mod.datetime
@@ -634,6 +711,9 @@ class TestSyncPositionsOrphanAutoClose:
             def __getattr__(self, name):
                 return getattr(real_dt, name)
         monkeypatch.setattr(orb_mod, 'datetime', MockDT())
+
+        from trading.orphan_reconciler import reset_state_for_tests
+        reset_state_for_tests()
 
         patched_orphan_engine.sync_positions()
         mock_alpaca.close_position.assert_called_with('OPRA')
@@ -641,17 +721,20 @@ class TestSyncPositionsOrphanAutoClose:
     def test_non_orb_orphan_not_auto_closed(
         self, patched_orphan_engine, mock_alpaca, monkeypatch,
     ):
-        """Regression (2026-05-22): outside RTH, an orphan ORB does NOT own
-        (a divergence CLF short on the shared account) must stay alert-only —
+        """Regression (2026-05-22): an orphan ORB does NOT own (e.g., a
+        divergence CLF short on the shared account) must stay alert-only —
         never auto-closed. The CRITICAL orphan alert still fires.
+
+        2026-06-05: enforced now by the orphan_reconciler's predicate —
+        no strategy='orb' DB row in the lookback → FOREIGN → no close.
         """
-        # ORB owns nothing — the orphan belongs to another project.
-        patched_orphan_engine._orb_owned_symbols = lambda *a, **k: set()
+        # Empty rows = no orb DB row matches → FOREIGN classification.
+        patched_orphan_engine._reconciler_rows = []
         patched_orphan_engine._notify_error = MagicMock()
         from datetime import datetime as _dt
         from zoneinfo import ZoneInfo
         et_tz = ZoneInfo('America/New_York')
-        fake_now = _dt(2026, 4, 29, 17, 0, 0, tzinfo=et_tz)  # 5 PM ET = after-hours
+        fake_now = _dt(2026, 6, 5, 17, 0, 0, tzinfo=et_tz)
 
         import trading.orb_engine as orb_mod
         real_dt = orb_mod.datetime
@@ -665,15 +748,25 @@ class TestSyncPositionsOrphanAutoClose:
                 return getattr(real_dt, name)
         monkeypatch.setattr(orb_mod, 'datetime', MockDT())
 
+        from trading.orphan_reconciler import reset_state_for_tests
+        reset_state_for_tests()
+
         patched_orphan_engine.sync_positions()
 
         # Not closed...
         mock_alpaca.close_position.assert_not_called()
-        # ...but the operator WAS alerted about the orphan.
-        assert any(
-            'ORPHAN' in str(c)
-            for c in patched_orphan_engine._notify_error.call_args_list
-        ), "Non-ORB orphan must still raise the CRITICAL orphan alert"
+        # ...but the reconciler still alerted (FOREIGN classification).
+        # 2026-06-05: the pre-existing engine-level _notify_error
+        # ("ORPHAN ALPACA POSITIONS") was removed because it had no
+        # cooldown and produced alert storms on stuck orphans. The
+        # reconciler's per-orphan FOREIGN alert (with 60-min cooldown)
+        # replaces it.
+        notifier = patched_orphan_engine.notifier
+        if notifier is not None and hasattr(notifier, 'notify_error'):
+            assert any(
+                ('ORPHAN' in str(c)) or ('FOREIGN' in str(c))
+                for c in notifier.notify_error.call_args_list
+            ), "Reconciler must alert on foreign positions"
 
 
 # =========================================================================

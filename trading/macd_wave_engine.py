@@ -23,6 +23,10 @@ from dateutil.parser import isoparse
 from trading.exit_reasons import ExitReason
 
 from trading.macd_conviction import compute_conviction_score
+from trading.orphan_reconciler import (
+    ReconcilerConfig, reconcile_strategy_orphans,
+)
+from trading.stop_monitor import build_exit_update
 from trading.macd_cross_detector import (
     compute_macd_histogram,
     count_consecutive_positive_ending_at,
@@ -282,6 +286,15 @@ class MACDWaveEngine:
             fill_price = trade.get('fill_price')
             if not fill_price:
                 continue
+            # Race-A fix (2026-06-06): an exit_pending_verification row was
+            # emitted by StopMonitor.BRANCH_LAST_RESORT — the orphan_reconciler
+            # owns it from this point. The engine must NOT re-rehydrate it
+            # into open_positions / StopMonitor; doing so would spawn a fresh
+            # watch with a stale hard_stop AND bypass the reconciler (which
+            # would then skip any symbol back in open_positions). See plan
+            # mellow-sniffing-abelson + L1/L2 in the orphan-fix series.
+            if trade.get('order_status') == 'exit_pending_verification':
+                continue
 
             if sym in alpaca_positions:
                 # Position still open on Alpaca — ensure we're tracking it
@@ -465,6 +478,40 @@ class MACDWaveEngine:
                 f"[{self.STRATEGY_NAME}] sync: RECOVERED orphan {sym} "
                 f"({qty}sh @ ${avg_price:.2f}) — DB back-filled, "
                 f"MACD/trail monitoring resumed"
+            )
+
+        # Phase 3 (added 2026-06-05): cross-strategy orphan reconciliation.
+        # Handles the case the pending_new recovery above CAN'T handle:
+        # broker still holds a position despite our DB marking it as
+        # exited via 'stop_loss_unconfirmed' (the SMU 10-day orphan was
+        # this exact pattern). Strictly more conservative than the old
+        # per-engine "warning + skip" branch — closes only when the
+        # hardened predicate proves ownership.
+        try:
+            cfg = getattr(self, 'orphan_reconciler_cfg', None) or ReconcilerConfig()
+            # alpaca_positions above maps symbol → SDK Position object;
+            # convert to the dict shape the reconciler expects so it
+            # doesn't have to re-hit Alpaca.
+            broker_snapshot = [
+                {
+                    'symbol': p.symbol,
+                    'qty': int(p.qty),
+                    'avg_entry_price': float(p.avg_entry_price),
+                    'unrealized_pl': float(getattr(p, 'unrealized_pl', 0) or 0),
+                }
+                for p in alpaca_positions.values()
+            ]
+            reconcile_strategy_orphans(
+                strategy=self.STRATEGY_NAME, alpaca=self.alpaca, db=self.db,
+                notifier=self.notifier,
+                tracked_symbols=set(self.open_positions.keys()),
+                cfg=cfg,
+                broker_positions=broker_snapshot,
+            )
+        except Exception as e:
+            logger.error(
+                f"[{self.STRATEGY_NAME}] orphan reconciler raised: {e} — "
+                f"sync_positions continues"
             )
 
     # ------------------------------------------------------------------
@@ -1915,20 +1962,21 @@ class MACDWaveEngine:
                 exit_price = event.exit_price
                 pnl = (exit_price - pos.entry_price) * pos.shares
                 pnl_pct = (exit_price - pos.entry_price) / pos.entry_price * 100 if pos.entry_price > 0 else 0
-                self.daily_pnl += pnl
-
-                self.db.update_trade(pos.trade_id, {
-                    'exit_price': exit_price,
-                    'exit_reason': event.exit_reason,
-                    'exited_at': datetime.now(timezone.utc),
-                    'pnl': pnl,
-                    'pnl_pct': pnl_pct,
-                    'exit_trigger_price': event.exit_trigger_price,
-                    'exit_quote_bid': event.exit_quote_bid,
-                    'exit_quote_ask': event.exit_quote_ask,
-                    'exit_limit_price': event.exit_limit_price,
-                    'exit_pricing_method': event.pricing_method,
-                })
+                # Unconfirmed-exit branch: do NOT mutate daily_pnl or write
+                # confirmed exit columns. Orphan reconciler picks it up.
+                update = build_exit_update(event)
+                if event.confirmed:
+                    self.daily_pnl += pnl
+                    update['pnl'] = pnl
+                    update['pnl_pct'] = pnl_pct
+                else:
+                    logger.error(
+                        f"[{self.STRATEGY_NAME}] {sym}: UNCONFIRMED EXIT — "
+                        f"order_status=exit_pending_verification, "
+                        f"exit_reason={event.exit_reason}. Orphan reconciler "
+                        f"will retry. Position remains OPEN on broker."
+                    )
+                self.db.update_trade(pos.trade_id, update)
 
                 emoji = '✅' if pnl > 0 else '❌'
                 logger.info(
@@ -2235,13 +2283,15 @@ class MACDWaveEngine:
                 sym = event.symbol
                 if sym in self.open_positions:
                     pos = self.open_positions[sym]
-                    pnl = (event.exit_price - pos.entry_price) * pos.shares
-                    self.db.update_trade(pos.trade_id, {
-                        'exit_price': event.exit_price,
-                        'exit_reason': event.exit_reason,
-                        'exited_at': datetime.now(timezone.utc),
-                        'pnl': pnl,
-                    })
+                    update = build_exit_update(event)
+                    if event.confirmed:
+                        update['pnl'] = (event.exit_price - pos.entry_price) * pos.shares
+                    else:
+                        logger.error(
+                            f"[{self.STRATEGY_NAME}] {sym}: UNCONFIRMED EXIT "
+                            f"during force-close drain — reconciler will retry"
+                        )
+                    self.db.update_trade(pos.trade_id, update)
                     del self.open_positions[sym]
                     self.invalidated.add(sym)
                     logger.info(f"[{self.STRATEGY_NAME}] {sym}: drained StopMonitor exit before force close")

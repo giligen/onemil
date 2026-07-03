@@ -16,7 +16,7 @@ import queue
 import threading
 import time as time_mod
 from datetime import date, datetime, timedelta, timezone
-from typing import Set, Optional, Dict, Any, List
+from typing import Set, Optional, Dict, Any, List, Tuple
 
 import pandas as pd
 import pytz
@@ -28,6 +28,10 @@ from trading.pattern_detector import BullFlagDetector
 from trading.trade_planner import TradePlanner, TradePlan
 from trading.news_kill_guard import news_kill_decision
 from trading.order_executor import OrderExecutor
+from trading.orphan_reconciler import (
+    ReconcilerConfig, reconcile_strategy_orphans,
+)
+from trading.stop_monitor import build_exit_update
 from trading.position_manager import PositionManager
 from notifications.telegram_notifier import TelegramNotifier
 
@@ -2385,6 +2389,27 @@ class TradingEngine:
             if event.exit_reason == 'exhaustion_partial':
                 continue
 
+            # Unconfirmed exits (BRANCH_LAST_RESORT — no broker fill report)
+            # short-circuit to the pending-verification state. Trying to
+            # poll fill on these is useless: the StopMonitor already
+            # exhausted its retries. The orphan reconciler handles them.
+            if not getattr(event, 'confirmed', True):
+                logger.error(
+                    f"{event.symbol}: UNCONFIRMED EXIT — writing "
+                    f"order_status=exit_pending_verification, "
+                    f"exit_reason={event.exit_reason}. Reconciler will retry."
+                )
+                if event.trade_db_id:
+                    try:
+                        self.db.update_trade(event.trade_db_id,
+                                             build_exit_update(event))
+                    except Exception as e:
+                        logger.error(
+                            f"{event.symbol}: pending-verification DB "
+                            f"write failed: {e}"
+                        )
+                continue
+
             logger.info(
                 f"{event.symbol}: StopMonitor exit — "
                 f"stop=${event.stop_price:.2f}, exit=${event.exit_price:.2f}, "
@@ -2661,6 +2686,99 @@ class TradingEngine:
                     f"{event.symbol}: Failed to process exhaustion partial: {e}"
                 )
 
+    def _recover_exit_from_order_history(
+        self, symbol: str, fill_price: float,
+        planned_stop: Optional[float] = None,
+    ) -> Tuple[Optional[float], Optional[str]]:
+        """Query Alpaca's recent closed orders for ``symbol`` and return
+        ``(exit_price, exit_reason)`` for the actual sell that closed the
+        position.
+
+        Mirrors the proven MACD wave pattern
+        (``macd_wave_engine.py:339-381``). Used by
+        ``_sync_closed_positions`` when the bracket-leg lookup can't find
+        a fill (e.g., StopMonitor's market close fired AFTER we cancelled
+        both legs — GLXG 2026-06-11 case). Pre-fix this path wrote
+        ``exit_reason='unknown_exit'`` with ``pnl=$0`` placeholder,
+        silently losing the real P&L.
+
+        Classification of ``exit_reason``:
+          - ``order_class in {bracket, oto, oco}`` → ``'bracket_sl_tp'``
+          - solo sell within 0.5% of planned_stop (or below) → ``'stop_loss'``
+          - solo sell ≥ fill_price (small win / breakeven) → ``'trail_stop'``
+          - solo sell between fill_price and stop → ``'stop_loss_market_fallback'``
+          - planned_stop unknown → ``'stopmonitor_exit'``
+
+        Returns ``(None, None)`` when no filled sell can be recovered
+        (API error, empty list, or only cancelled/expired orders).
+        Caller should fall through to the ``unknown_exit`` placeholder
+        only in that case.
+        """
+        try:
+            from alpaca.trading.requests import GetOrdersRequest
+            from alpaca.trading.enums import QueryOrderStatus
+            orders = self.alpaca.trading_client.get_orders(
+                GetOrdersRequest(
+                    status=QueryOrderStatus.CLOSED,
+                    symbols=[symbol], limit=10,
+                )
+            )
+        except Exception as e:
+            logger.warning(
+                f"{symbol}: order-history fetch failed: {e}"
+            )
+            return None, None
+
+        classified_sell = None
+        for o in orders or []:
+            try:
+                if (o.side.value == 'sell'
+                        and o.status.value == 'filled'
+                        and o.filled_avg_price):
+                    classified_sell = o
+                    break
+            except Exception:
+                continue
+
+        if classified_sell is None:
+            return None, None
+
+        try:
+            exit_price = float(classified_sell.filled_avg_price)
+        except Exception:
+            return None, None
+
+        # Classify exit_reason — same shape as MACD wave's discriminator.
+        try:
+            oc = (classified_sell.order_class.value
+                   if classified_sell.order_class else None)
+        except Exception:
+            oc = None
+
+        if oc in ('bracket', 'oto', 'oco'):
+            exit_reason = 'bracket_sl_tp'
+        elif (planned_stop and planned_stop > 0
+                and fill_price and fill_price > 0):
+            # Solo sell — discriminate by where exit landed relative to
+            # the planned stop. Tolerance: 0.5% of stop covers normal
+            # slippage on a marketable limit fill.
+            tolerance = planned_stop * 0.005
+            if exit_price <= planned_stop + tolerance:
+                exit_reason = 'stop_loss'
+            elif exit_price >= fill_price:
+                # Sold at or above entry — trail caught a small win or
+                # breakeven exit.
+                exit_reason = 'trail_stop'
+            else:
+                # Between planned stop and entry: limit didn't fill,
+                # escalate-to-market caught at a worse price than entry
+                # but better than the planned stop.
+                exit_reason = 'stop_loss_market_fallback'
+        else:
+            exit_reason = 'stopmonitor_exit'
+
+        return exit_price, exit_reason
+
     def _sync_closed_positions(self) -> None:
         """Detect bracket exits (SL/TP hit) and update DB + circuit breaker."""
         # Process StopMonitor exits first — updates DB with exit_price.
@@ -2742,28 +2860,90 @@ class TradingEngine:
                             f"P&L ${pnl:+,.2f} ({pnl_pct:+.1f}%)"
                         )
                     else:
-                        # GLXG 2026-06-11 race guard: if StopMonitor is
-                        # currently mid-exit on this symbol (limit poll,
-                        # market-close escalation, SL-leg recovery), DEFER
-                        # the UNKNOWN_EXIT fallback. Next sync iteration
-                        # will either pick up the real exit event from the
-                        # queue, or — if 60s elapses — proceed with the
-                        # fallback so a true leak still surfaces.
+                        # GLXG 2026-06-11 — two complementary layers, merged
+                        # 2026-07-03 from parallel fixes to the same incident:
+                        #
+                        # Layer 1 (race guard): if StopMonitor is currently
+                        # mid-exit on this symbol (limit poll, market-close
+                        # escalation, SL-leg recovery), DEFER entirely. The
+                        # real exit event lands with the ACTUAL fill price —
+                        # better than any reconstruction. 60s staleness cutoff
+                        # inside is_exit_in_progress keeps a stuck flow from
+                        # suppressing reconciliation forever.
                         if (self.stop_monitor is not None
                                 and self.stop_monitor.is_exit_in_progress(symbol)):
                             logger.info(
                                 f"{symbol}: Position closed but StopMonitor exit "
-                                f"in-progress — deferring unknown_exit fallback "
+                                f"in-progress — deferring reconcile "
                                 f"(retry next sync iteration)"
                             )
                             continue
-                        # Use fill_price as fallback exit to prevent infinite re-check
-                        # (exit_price IS NULL keeps this trade in get_open_trades forever)
+                        # Layer 2 (order-history recovery): the position
+                        # closed via a path we didn't attribute (StopMonitor
+                        # flow already finished, manual sell, external close).
+                        # Mirror MACD wave's sync external-close pattern
+                        # (macd_wave_engine.py:339-381) and query Alpaca's
+                        # recent closed orders for the actual sell fill.
+                        # Pre-fix this branch wrote exit_reason='unknown_exit'
+                        # / pnl=$0, losing the real P&L (GLXG 2026-06-11).
+                        recovered_price, recovered_reason = (
+                            self._recover_exit_from_order_history(
+                                symbol,
+                                trade['fill_price'],
+                                planned_stop=trade.get('stop_loss_price'),
+                            )
+                        )
+                        if recovered_price is not None:
+                            total_shares = (trade.get('filled_qty')
+                                              or trade['shares'])
+                            partial_shares = trade.get('partial_exit_shares') or 0
+                            remainder_shares = (
+                                total_shares - partial_shares
+                                if partial_shares else total_shares
+                            )
+                            remainder_pnl = (
+                                (recovered_price - trade['fill_price'])
+                                * remainder_shares
+                            )
+                            partial_pnl = trade.get('partial_exit_pnl') or 0.0
+                            pnl_recovered = remainder_pnl + partial_pnl
+                            pnl_pct = (
+                                (pnl_recovered
+                                  / (trade['fill_price'] * total_shares))
+                                * 100
+                            )
+                            final_reason = (
+                                f"exhaust+{recovered_reason}"
+                                if partial_pnl != 0.0 else recovered_reason
+                            )
+                            self.db.update_trade(trade['id'], {
+                                'exit_price': recovered_price,
+                                'exit_reason': final_reason,
+                                'exited_at': datetime.now(timezone.utc),
+                                'pnl': pnl_recovered,
+                                'pnl_pct': pnl_pct,
+                            })
+                            self.position_manager.record_trade_pnl(
+                                pnl_recovered)
+                            if self.stop_monitor:
+                                self.stop_monitor.remove_watch(symbol)
+                            logger.info(
+                                f"{symbol}: {final_reason} — exit "
+                                f"${recovered_price:.2f} (recovered from "
+                                f"order history), P&L ${pnl_recovered:+,.2f} "
+                                f"({pnl_pct:+.1f}%)"
+                            )
+                            continue
+
+                        # Truly unrecoverable. Use fill_price as fallback
+                        # exit to prevent infinite re-check (exit_price IS
+                        # NULL keeps this trade in get_open_trades forever).
                         fallback_exit = trade['fill_price']
                         pnl_est = 0.0  # Assume breakeven if unknown
                         error_msg = (
                             f"{symbol}: Position closed but exit price unknown — "
-                            f"using fill_price ${fallback_exit:.2f} as estimate"
+                            f"using fill_price ${fallback_exit:.2f} as estimate "
+                            f"(order-history recovery also failed)"
                         )
                         logger.warning(error_msg)
                         if self.notifier:
@@ -4250,7 +4430,30 @@ class TradingEngine:
                             f"StopMonitor watch: {e} (safety-net SL active)"
                         )
 
-        # Detect orphan positions from prior days
+        # 2026-06-05: cross-strategy orphan reconciler. Run BEFORE the
+        # _close_orphan_positions registration step so the reconciler
+        # sees prior-day broker positions as candidates (not as already-
+        # tracked). _close_orphan_positions then registers any survivors
+        # in _traded_symbols to prevent same-day re-entry.
+        try:
+            # tracked = symbols the engine is ACTIVELY managing right now.
+            # At startup we have no in-flight bull flag positions, so any
+            # broker position belongs in the orphan candidates pool. Past
+            # this point, anything still on the broker is either ours and
+            # got close-submitted, or foreign and got alerted.
+            today_symbols = {t['symbol'] for t in trades_today
+                             if t.get('fill_price') is not None}
+            reconcile_strategy_orphans(
+                strategy='bull_flag', alpaca=self.alpaca, db=self.db,
+                notifier=self.notifier, tracked_symbols=today_symbols,
+                cfg=getattr(self, 'orphan_reconciler_cfg',
+                             None) or ReconcilerConfig(),
+            )
+        except Exception as e:
+            logger.error(f"bull_flag orphan reconciler raised: {e}")
+
+        # Detect orphan positions from prior days (registration only —
+        # close decisions are the reconciler's job, see above).
         self._close_orphan_positions(trades_today)
 
         logger.info(
@@ -4390,14 +4593,19 @@ class TradingEngine:
         return cancelled
 
     def _close_orphan_positions(self, trades_today: List[Dict]) -> None:
-        """Detect and close positions from prior days opened by THIS node.
+        """Register prior-day positions in `_traded_symbols` so we don't
+        re-trade them today. ACTUAL close is delegated to the shared
+        orphan_reconciler (called separately from _sync_startup_state),
+        which applies the hardened predicate so we never accidentally
+        flatten another strategy's identical-symbol position.
 
-        An orphan is an Alpaca position that THIS node opened (has a record
-        in our trades DB) but failed to close (e.g., service crashed after
-        market close without running force_close).
-
-        Positions with NO record in our DB are assumed to belong to another
-        node/strategy sharing the same Alpaca account — leave them alone.
+        Before 2026-06-05 this method ALSO called close_position. That
+        path had the same vulnerability the SMU/QBTZ post-mortem
+        exposed in ORB: any DB row tagged strategy='bull_flag' within
+        the lookback window claimed ownership regardless of avg-entry
+        match or stale signal. An unknown-strategy or manual position
+        could match by symbol coincidence and get flattened. The
+        reconciler does not have this hole.
 
         Args:
             trades_today: Today's trades from DB (already fetched)
@@ -4417,44 +4625,12 @@ class TradingEngine:
             symbol = pos['symbol']
             if symbol in today_symbols:
                 continue  # Known today — handled by startup sync
-
-            # Check if THIS node has any record of this position in our DB
-            # (open trade from today or any prior day). 2026-05-19 fix: filter
-            # by strategy='bull_flag' so we don't mis-claim ORB or MACD-wave
-            # positions as ours. Pre-fix, BF orphan-cleanup tried to close
-            # today's ORB CORD/LMRI/PURR/WAY positions, which (separately)
-            # also failed on held_for_orders from ORB's own bracket legs.
-            our_trade = None
-            if self.db:
-                # Scan today + the last 4 days of trades, bull_flag only.
-                from datetime import timedelta
-                for days_back in range(5):
-                    _check_date = (date.today() - timedelta(days=days_back)).isoformat()
-                    _trades = self.db.get_trades_by_date(_check_date)
-                    if any(
-                        t['symbol'] == symbol
-                        and t.get('strategy', 'bull_flag') == 'bull_flag'
-                        for t in _trades
-                    ):
-                        our_trade = True
-                        break
-
-            if our_trade:
-                # We opened it but didn't close — orphan from prior day.
-                # 2026-05-19 fix: cancel any open orders for the symbol FIRST
-                # to release held_for_orders (e.g., bracket SL/TP legs from
-                # a prior bracket entry). Without this step, close_position
-                # fails with "insufficient qty available" because Alpaca is
-                # holding the shares for the still-open legs.
-                logger.warning(f"{symbol}: Orphan position from prior day (ours) — closing")
-                self._cancel_open_orders_for_symbol(symbol)
-                try:
-                    self.alpaca.close_position(symbol)
-                    self._traded_symbols.add(symbol)
-                    logger.info(f"{symbol}: Orphan position closed")
-                except Exception as e:
-                    logger.error(f"{symbol}: Failed to close orphan position: {e}")
-            else:
-                # Not ours — belongs to another node/strategy
-                logger.info(f"{symbol}: Position exists but not ours — skipping (other node/strategy)")
-                self._traded_symbols.add(symbol)  # Prevent this node from trading it
+            # Register the symbol either way so bull flag doesn't try to
+            # take a fresh setup on a symbol the broker already holds —
+            # whether it's ours or not. The reconciler handles the
+            # close decision separately.
+            self._traded_symbols.add(symbol)
+            logger.info(
+                f"{symbol}: pre-existing broker position registered with "
+                f"_traded_symbols (close decision deferred to reconciler)"
+            )

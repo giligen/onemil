@@ -29,7 +29,8 @@ import queue
 import threading
 import time as time_mod
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Optional
 
 from data_sources.alpaca_client import AlpacaClient
 from trading.exit_reasons import ExitReason
@@ -162,6 +163,17 @@ class StopExitEvent:
     exit_limit_price: float = 0.0  # limit price we submitted
     exit_ofi: float = 0.0  # OFI at exit time (negative = selling pressure)
     strategy: str = 'bull_flag'  # copied from the originating WatchEntry
+    # Exit-confirmation flag (added 2026-06-05 after the SMU/QBTZ orphan
+    # incident — 8-10 days of unmanaged broker exposure because the BRANCH_
+    # LAST_RESORT path wrote a "confirmed" exit_price + pnl + exited_at into
+    # the DB when the actual broker fill was never acknowledged).
+    # True  → fill was confirmed (either by _poll_order_fill or by recovering
+    #         from the SL leg). Consumer writes the full exit payload.
+    # False → fill NOT confirmed (BRANCH_LAST_RESORT exhausted all retries).
+    #         Consumer writes order_status='exit_pending_verification',
+    #         leaves exit_price/exited_at/pnl NULL, sets exit_attempted_at.
+    #         The orphan reconciler picks it up on the next sync cycle.
+    confirmed: bool = True
 
 
 @dataclass
@@ -190,6 +202,71 @@ class QuoteWatch:
     _prev_ask: float = 0.0
     _prev_bid_size: int = 0
     _prev_ask_size: int = 0
+
+
+def build_exit_update(event: 'StopExitEvent') -> Dict[str, Any]:
+    """Build the DB update payload for a StopExitEvent.
+
+    Centralizes the "confirmed vs unconfirmed" branching so every engine
+    (bull_flag, macd_wave, orb) writes the SAME shape — preventing the
+    divergence that produced the SMU/QBTZ orphans, where the unconfirmed
+    path used to write a fake confirmed exit (exit_price + pnl + exited_at
+    all populated despite the broker never acknowledging the fill).
+
+    Confirmed path (the common case): full exit payload including
+    exit_price, exited_at, pnl, pnl_pct, status='closed', and exit
+    microstructure (bid/ask/limit/slippage).
+
+    Unconfirmed path (`event.confirmed == False`): a SAFE-DEFAULT payload
+    that leaves exit_price / exited_at / pnl NULL and sets order_status
+    to 'exit_pending_verification' so the orphan reconciler picks it up
+    on the next sync. exit_reason is still recorded ('stop_loss_unconfirmed')
+    for forensics, along with the trigger price + quote context that the
+    StopMonitor saw at the time.
+
+    Pnl / pnl_pct are caller-provided because the engine knows
+    pos.entry_price and pos.shares; in the unconfirmed branch the caller
+    can pass any values — they will be discarded.
+    """
+    # Defensive coercion for test doubles + legacy callers:
+    # - getattr fallbacks so callers without the new `confirmed` field
+    #   still work (default = confirmed = True).
+    # - _numf/_numi/_strs reject MagicMock + zero-ish values so loose
+    #   mocks in test_orb_telemetry / test_orb_integration produce
+    #   None instead of MagicMock leaking through to the DB write.
+    def _numf(v):
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None
+        f = float(v)
+        return f if f > 0 else None
+
+    def _numi(v):
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None
+        i = int(v)
+        return i if i > 0 else None
+
+    def _strs(v):
+        return v if isinstance(v, str) and v else None
+
+    base: Dict[str, Any] = {
+        'exit_reason': _strs(getattr(event, 'exit_reason', None)),
+        'exit_trigger_price': _numf(getattr(event, 'exit_trigger_price', None)),
+        'exit_quote_bid': _numf(getattr(event, 'exit_quote_bid', None)),
+        'exit_quote_ask': _numf(getattr(event, 'exit_quote_ask', None)),
+        'exit_quote_bid_size': _numi(getattr(event, 'exit_quote_bid_size', None)),
+        'exit_quote_ask_size': _numi(getattr(event, 'exit_quote_ask_size', None)),
+        'exit_limit_price': _numf(getattr(event, 'exit_limit_price', None)),
+        'exit_pricing_method': _strs(getattr(event, 'pricing_method', None)),
+    }
+    if not getattr(event, 'confirmed', True):
+        # Pending verification — the orphan reconciler is the next layer.
+        base['order_status'] = 'exit_pending_verification'
+        return base
+    base['exit_price'] = float(event.exit_price)
+    base['exited_at'] = datetime.now(timezone.utc)
+    base['order_status'] = 'closed'
+    return base
 
 
 class StopMonitor:
@@ -265,6 +342,103 @@ class StopMonitor:
         # Exhausted retries — re-raise so caller can place emergency SL
         assert last_err is not None
         raise last_err
+
+    async def _place_emergency_stop_fallback(
+        self,
+        loop,
+        client,
+        symbol: str,
+        trigger_price: float,
+        watch: Optional['WatchEntry'] = None,
+        reason: str = '',
+    ) -> Optional[str]:
+        """Last-resort broker-side safety net: place a stop-market sell at
+        ``min(trigger_price, watch.stop_price) * 0.99`` so the broker has
+        SOMETHING to fire on when our primary exit paths have failed.
+
+        Returns the emergency order id on success, None on failure. Sends
+        CRITICAL log + Telegram error in both cases. Idempotent under
+        held_for_orders (uses _submit_with_held_qty_retry); gracefully
+        handles "position already flat" (logger.info, no Telegram noise
+        because the bracket-SL-won-race is expected after a successful
+        bracket exit).
+
+        FABC 2026-06-09 fix: previously inline in _execute_stop_exit's
+        outer except branch only. The escalate path now also calls this
+        helper, ensuring NO BRANCH_LAST_RESORT exits leave a naked
+        position.
+        """
+        qty = int(getattr(watch, 'shares', 0) or 0) if watch else 0
+        notifier = getattr(self, 'notifier', None)
+        if qty <= 0:
+            logger.error(
+                f"StopMonitor: {symbol} cannot place emergency stop — "
+                f"unknown qty (watch={watch}). reason={reason}"
+            )
+            if notifier:
+                try:
+                    notifier.notify_error(
+                        f"{symbol} POSITION NAKED — emergency stop skipped "
+                        f"(unknown qty). reason={reason}",
+                        component="StopMonitor",
+                    )
+                except Exception:
+                    pass
+            return None
+
+        watch_stop = float(getattr(watch, 'stop_price', trigger_price) or trigger_price)
+        emergency_stop_price = round(min(trigger_price, watch_stop) * 0.99, 2)
+
+        try:
+            em_result = await self._submit_with_held_qty_retry(
+                loop,
+                lambda: client.submit_stop_sell_order(
+                    symbol=symbol, qty=qty,
+                    stop_price=emergency_stop_price,
+                ),
+                label=f"{symbol} emergency_stop",
+            )
+            em_id = (em_result or {}).get('id', '') if em_result else ''
+            logger.critical(
+                f"StopMonitor: {symbol} placed EMERGENCY stop-market @ "
+                f"${emergency_stop_price:.2f} (order={em_id}). "
+                f"reason={reason}. VERIFY POSITION."
+            )
+            if notifier:
+                try:
+                    notifier.notify_error(
+                        f"🛡️ {symbol} EMERGENCY STOP placed @ "
+                        f"${emergency_stop_price:.2f} after exit failure "
+                        f"({reason}). Manual review recommended.",
+                        component="StopMonitor",
+                    )
+                except Exception:
+                    pass
+            return em_id
+        except Exception as em_err:
+            # Distinguish "position already flat" (expected, no alert) from
+            # everything else (true naked position, page operator).
+            if self._is_race_condition_error(em_err):
+                logger.info(
+                    f"StopMonitor: {symbol} emergency stop unnecessary — "
+                    f"position already flat (likely bracket SL won race)"
+                )
+                return None
+            logger.critical(
+                f"StopMonitor: {symbol} POSITION NAKED — emergency stop "
+                f"ALSO failed. reason={reason}; emergency_err={em_err}. "
+                f"USER ACTION REQUIRED."
+            )
+            if notifier:
+                try:
+                    notifier.notify_error(
+                        f"🚨 {symbol} POSITION NAKED — all exit paths "
+                        f"failed. URGENT manual close on Alpaca.",
+                        component="StopMonitor",
+                    )
+                except Exception:
+                    pass
+            return None
 
     @staticmethod
     def _r_baseline_and_unit(watch: 'WatchEntry') -> 'tuple[float, float]':
@@ -2414,6 +2588,7 @@ class StopMonitor:
     async def _escalate_to_market_close(
         self, client, symbol: str, stale_limit_order_id: str,
         trigger_price: float, sl_leg_id: Optional[str] = None,
+        watch: Optional['WatchEntry'] = None,
     ) -> tuple:
         """Cancel a stale limit, submit a market close, poll for its fill.
 
@@ -2460,12 +2635,21 @@ class StopMonitor:
         except Exception:
             pass
 
-        # Submit market close
+        # Submit market close.
+        # FABC 2026-06-09 fix: wrap close_position in
+        # _submit_with_held_qty_retry. The bulk-cancel above is async at the
+        # broker; if it hasn't fully released held_for_orders by the time we
+        # call close_position, Alpaca returns 40310000. Pre-fix, that error
+        # fell through to BRANCH_LAST_RESORT with no emergency stop — FABC
+        # bled -$7,439 vs planned -$3,294. Retry budget = 2.2s cumulative
+        # (0.2s, 0.5s, 1.5s); empirically enough for cancel propagation.
         try:
-            close_result = await loop.run_in_executor(
-                None, client.close_position, symbol
+            close_result = await self._submit_with_held_qty_retry(
+                loop,
+                lambda: client.close_position(symbol),
+                label=f"{symbol} escalate close",
             )
-            mkt_order_id = close_result.get('id', '') or ''
+            mkt_order_id = (close_result or {}).get('id', '') or ''
             logger.info(
                 f"StopMonitor: {symbol} market close submitted order={mkt_order_id} "
                 f"— awaiting fill confirmation"
@@ -2491,14 +2675,25 @@ class StopMonitor:
                     f"VERIFY POSITION MANUALLY on Alpaca."
                 )
             else:
+                # Includes 40310000 / held_for_orders after retry exhaust.
+                # The position is ON the broker, not flat. Emergency stop
+                # placed below before we return LAST_RESORT.
                 logger.error(
-                    f"StopMonitor: {symbol} market close failed: {e}"
+                    f"StopMonitor: {symbol} market close failed after retry: {e}"
                 )
+            await self._place_emergency_stop_fallback(
+                loop, client, symbol, trigger_price, watch=watch,
+                reason=f"market close failed: {e}",
+            )
             return trigger_price, '', self.BRANCH_LAST_RESORT
 
         if not mkt_order_id:
             logger.error(
                 f"StopMonitor: {symbol} market close returned no order id"
+            )
+            await self._place_emergency_stop_fallback(
+                loop, client, symbol, trigger_price, watch=watch,
+                reason="close_position returned no order_id",
             )
             return trigger_price, '', self.BRANCH_LAST_RESORT
 
@@ -2788,6 +2983,7 @@ class StopMonitor:
                     exit_price, mkt_order_id, branch = await self._escalate_to_market_close(
                         client, symbol, order_id, trigger_price,
                         sl_leg_id=watch.sl_leg_id,
+                        watch=watch,
                     )
                     if mkt_order_id:
                         order_id = mkt_order_id
@@ -2946,61 +3142,16 @@ class StopMonitor:
                                     self._exit_in_progress[symbol] = False
                                 return
                         else:
-                            # CORD 5/8 fix: previous behaviour was to return
-                            # silently — but the bracket OCO is gone (cancel
-                            # bulk above already killed both legs), so the
-                            # position is NAKED. Place an emergency stop-
-                            # market sell at trigger_price so the broker has
-                            # something to fire on. If even THAT fails (no
-                            # qty, API down), log CRITICAL + Telegram so the
-                            # user can intervene. Don't silently return.
-                            emergency_stop_price = round(
-                                min(trigger_price, watch.stop_price) * 0.99,
-                                2,
+                            # CORD 5/8: bracket OCO gone (bulk-cancel killed
+                            # both legs), position naked. FABC 2026-06-09:
+                            # consolidated into _place_emergency_stop_fallback
+                            # so the same safety net fires from EVERY failed
+                            # exit branch.
+                            await self._place_emergency_stop_fallback(
+                                loop, client, symbol, trigger_price,
+                                watch=watch,
+                                reason=f"limit_err={e}; close_err={e2}",
                             )
-                            try:
-                                em_result = await self._submit_with_held_qty_retry(
-                                    loop,
-                                    lambda: client.submit_stop_sell_order(
-                                        symbol=symbol, qty=watch.shares,
-                                        stop_price=emergency_stop_price,
-                                    ),
-                                    label=f"{symbol} emergency_stop",
-                                )
-                                em_id = em_result.get('id', '') if em_result else ''
-                                logger.critical(
-                                    f"StopMonitor: {symbol} EXIT FAILED — "
-                                    f"placed EMERGENCY stop-market @ "
-                                    f"${emergency_stop_price:.2f} "
-                                    f"(order={em_id}). limit_err={e}; "
-                                    f"close_err={e2}. VERIFY POSITION."
-                                )
-                                if self.notifier:
-                                    try:
-                                        self.notifier.notify_error(
-                                            f"{symbol} exit failed — emergency SL "
-                                            f"placed @ ${emergency_stop_price:.2f}. "
-                                            f"VERIFY POSITION on Alpaca.",
-                                            component="StopMonitor",
-                                        )
-                                    except Exception:
-                                        pass
-                            except Exception as em_err:
-                                logger.critical(
-                                    f"StopMonitor: {symbol} POSITION NAKED — "
-                                    f"limit, close, AND emergency-SL all failed. "
-                                    f"limit_err={e}; close_err={e2}; "
-                                    f"emergency_err={em_err}. USER ACTION REQUIRED."
-                                )
-                                if self.notifier:
-                                    try:
-                                        self.notifier.notify_error(
-                                            f"{symbol} POSITION NAKED — all exit "
-                                            f"paths failed. Manual close required.",
-                                            component="StopMonitor",
-                                        )
-                                    except Exception:
-                                        pass
                             with self._watch_lock:
                                 self._watches.pop(symbol, None)
                             with self._exit_lock:
@@ -3031,6 +3182,11 @@ class StopMonitor:
             # reconciled broker qty), not watch.shares, so downstream P&L
             # math reflects the ACTUAL qty closed (catches APT/MLTX-class
             # orphans where watch.shares lagged the broker view).
+            #
+            # confirmed=False ONLY for BRANCH_LAST_RESORT (stop_loss_unconfirmed)
+            # — that's the path where every retry failed and we have NO actual
+            # fill report from the broker. Consumer must NOT write a confirmed
+            # exit_price/pnl/exited_at — the orphan reconciler picks it up.
             event = StopExitEvent(
                 symbol=symbol,
                 stop_price=watch.stop_price,
@@ -3049,6 +3205,7 @@ class StopMonitor:
                 exit_limit_price=limit_price,
                 exit_ofi=watch.ofi_cumulative,
                 strategy=watch.strategy,
+                confirmed=(exit_reason != 'stop_loss_unconfirmed'),
             )
             self._exit_events.put(event)
 

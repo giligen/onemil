@@ -42,6 +42,10 @@ from trading.orb_touchgo_filter import (
 )
 from trading.exit_reasons import ExitReason
 from trading import touchgo_audit as _tg_audit
+from trading.orphan_reconciler import (
+    ReconcilerConfig, reconcile_strategy_orphans,
+)
+from trading.stop_monitor import build_exit_update
 
 
 logger = logging.getLogger(__name__)
@@ -1740,6 +1744,28 @@ class ORBEngine:
                 logger.error(f"ORB: {plan.symbol} alpaca submit returned empty")
                 return None
             order_id = result.get('id') or ''
+            # 2026-06-09 (FABC fix): extract bracket leg IDs so StopMonitor's
+            # BRANCH_SL_LEG_RACE recovery path can query the SL leg fill.
+            # alpaca_client.submit_bracket_order now returns 'legs' list
+            # (mirroring get_order's leg shape). Pick TP by limit_price,
+            # SL by stop_price.
+            _legs = result.get('legs') or []
+            tp_leg_id = next(
+                (str(leg.get('id', '')) for leg in _legs
+                 if leg.get('limit_price') is not None and leg.get('side') == 'sell'),
+                '',
+            )
+            sl_leg_id = next(
+                (str(leg.get('id', '')) for leg in _legs
+                 if leg.get('stop_price') is not None and leg.get('side') == 'sell'),
+                '',
+            )
+            if _legs and not (tp_leg_id and sl_leg_id):
+                logger.warning(
+                    f"ORB: {plan.symbol} bracket leg extraction incomplete "
+                    f"(tp={bool(tp_leg_id)}, sl={bool(sl_leg_id)}, "
+                    f"n_legs={len(_legs)}) — SL race recovery degraded"
+                )
         except Exception as e:
             logger.error(f"ORB: {plan.symbol} submit_entry failed: {e}")
             return None
@@ -1807,6 +1833,8 @@ class ORBEngine:
             order_submitted_at=submit_time,
             entry_quote_ask=entry_quote_ask,
             range_end_ts=_range_end_ts,
+            tp_leg_id=tp_leg_id,
+            sl_leg_id=sl_leg_id,
         )
         # Track on CandidateState too for clean time-stop cancellation
         cand = _cand
@@ -2215,7 +2243,11 @@ class ORBEngine:
     def check_exits(self) -> List[str]:
         """Drain StopMonitor exit events tagged strategy='orb'.
 
-        Updates DB + in-memory state for each exit.
+        Updates DB + in-memory state for each exit. Orphan reconciliation
+        is NOT triggered here — the L7 periodic intraday hook
+        (2026-06-05) introduced race A with the sync_positions recovery
+        loop and was bypassed in practice. Reconciler is startup-only:
+        cross-day orphans get caught at the next reset_daily.
 
         Returns:
             list of symbols that exited on this tick.
@@ -2241,14 +2273,11 @@ class ORBEngine:
         if pos is None:
             logger.warning(f"ORB: exit event for {symbol} but no tracked position — orphan?")
             return
+        confirmed = getattr(ev, 'confirmed', True)
         exit_price = float(ev.exit_price)
         pnl = (exit_price - pos.entry_price) * pos.shares
         pnl_pct = (exit_price - pos.entry_price) / pos.entry_price * 100.0
-        self.daily_pnl += pnl
 
-        # Exit microstructure from StopMonitor event (parity with bull flag + MACD wave).
-        # exit_slippage convention: exit_limit_price - actual_exit_price.
-        # Positive = we got a better price than our limit; negative = we paid slip.
         def _numf(v):
             """Coerce to float if real numeric (not MagicMock), else None."""
             if isinstance(v, bool) or not isinstance(v, (int, float)):
@@ -2256,37 +2285,26 @@ class ORBEngine:
             f = float(v)
             return f if f > 0 else None
 
-        def _numi(v):
-            if isinstance(v, bool) or not isinstance(v, (int, float)):
-                return None
-            i = int(v)
-            return i if i > 0 else None
-
-        def _strs(v):
-            if isinstance(v, str) and v:
-                return v
-            return None
-
-        exit_limit_price = _numf(getattr(ev, 'exit_limit_price', None))
-        exit_slippage = (
-            exit_limit_price - exit_price if exit_limit_price is not None else None
-        )
-        exit_update = {
-            'exit_price': exit_price,
-            'exit_reason': ev.exit_reason,
-            'exited_at': datetime.now(timezone.utc),
-            'pnl': pnl,
-            'pnl_pct': pnl_pct,
-            'order_status': 'closed',
-            'exit_trigger_price': _numf(getattr(ev, 'exit_trigger_price', None)),
-            'exit_quote_bid': _numf(getattr(ev, 'exit_quote_bid', None)),
-            'exit_quote_ask': _numf(getattr(ev, 'exit_quote_ask', None)),
-            'exit_quote_bid_size': _numi(getattr(ev, 'exit_quote_bid_size', None)),
-            'exit_quote_ask_size': _numi(getattr(ev, 'exit_quote_ask_size', None)),
-            'exit_limit_price': exit_limit_price,
-            'exit_pricing_method': _strs(getattr(ev, 'pricing_method', None)),
-            'exit_slippage': exit_slippage,
-        }
+        # Shared build_exit_update gives us the confirmed/unconfirmed-correct
+        # base payload; ORB adds its own exit_slippage + qty fields on top.
+        exit_update = build_exit_update(ev)
+        exit_limit_price = exit_update.get('exit_limit_price')
+        if confirmed:
+            self.daily_pnl += pnl
+            exit_update['pnl'] = pnl
+            exit_update['pnl_pct'] = pnl_pct
+            exit_update['exit_slippage'] = (
+                exit_limit_price - exit_price if exit_limit_price is not None else None
+            )
+        else:
+            # Unconfirmed: no daily_pnl mutation, no exit_price/pnl write.
+            # The orphan reconciler will retry. Keep the position visible to
+            # ORB's per-day caps (exit_pending_verification stays "open").
+            logger.error(
+                f"ORB: {symbol} UNCONFIRMED EXIT (BRANCH_LAST_RESORT) — "
+                f"order_status=exit_pending_verification, "
+                f"exit_reason={ev.exit_reason}. Reconciler will retry."
+            )
         try:
             self.db.update_trade(pos.trade_id, exit_update)
         except Exception as e:
@@ -2901,6 +2919,15 @@ class ORBEngine:
             db_status = t.get('order_status') or ''
             alp_pos = alp_pos_by_sym.get(sym)
 
+            # Race-A fix (2026-06-06): an exit_pending_verification row was
+            # emitted by StopMonitor.BRANCH_LAST_RESORT — the orphan_reconciler
+            # owns it from this point. Skip the State A/B/C rehydrate paths;
+            # re-creating a StopMonitor watch with a stale hard_stop would
+            # bypass the reconciler (which would then skip the symbol because
+            # it's back in open_positions).
+            if db_status == 'exit_pending_verification':
+                continue
+
             # State B: order still pending on Alpaca + DB shows pending
             if alp_pos is None and order_id and order_id in alp_pending_by_id:
                 # Parse pattern_data for lock params
@@ -3043,7 +3070,11 @@ class ORBEngine:
             if sym not in self.open_positions
         ]
         if orphans:
-            # Gather per-orphan info for the alert
+            # Summary log (no Telegram) — the reconciler's per-orphan
+            # alerts below ARE rate-limited (alert_cooldown_minutes).
+            # Pre-2026-06-05 we Telegram'd this summary unconditionally,
+            # which produced a duplicate alert per sync cycle for any
+            # long-lived orphan (e.g., 10 days × 1 alert/min = ~14k spam).
             details = []
             for sym in orphans:
                 p = alp_pos_by_sym[sym]
@@ -3056,71 +3087,52 @@ class ORBEngine:
                     details.append(f"{sym} qty={qty} avg=${avg:.2f} upl=${upl:+.0f}")
                 except Exception:
                     details.append(f"{sym} (parse-failed)")
-            self._notify_error(
-                f"ORPHAN ALPACA POSITIONS ({len(orphans)}) not tracked by ORB — "
-                f"{'; '.join(details)}. Likely from a failed force-close or "
-                f"cross-day state drift."
+            logger.error(
+                f"ORB: orphan(s) detected — {'; '.join(details)} — "
+                f"deferring to reconciler for classification + action"
             )
 
-            # 2026-04-29: auto-close orphans IF we're outside regular session
-            # hours. Inside RTH (9:30-16:00 ET) we keep alert-only behavior
-            # because mid-day startup may be racing with an in-flight fill
-            # that just hasn't reached the DB yet — closing it would kill a
-            # legitimate trade.
-            #
-            # 2026-05-22: STRATEGY-SCOPED. Only orphans ORB actually owns
-            # (an open ORB trade row in the last 5 days — covers a position
-            # carried past a day boundary by a failed force-close) are
-            # auto-closed. Other positions on this shared account belong to
-            # bull flag / other projects and stay alert-only.
+            # 2026-06-05: orphan reconciler replaces the old in-engine
+            # ownership check (_orb_owned_symbols → get_open_trades), which
+            # excluded the exact rows we need to reconcile (rows where
+            # exit_reason='stop_loss_unconfirmed' had a fake exit_price
+            # written). That deadlock hid QBTZ for 4 days. The hardened
+            # multi-signal predicate (strategy + stale + avg-entry + qty)
+            # is safe to run any time of day — same-day fresh entries are
+            # excluded by the cross-day stale-signal check.
             try:
-                from zoneinfo import ZoneInfo
-                et_now = datetime.now(ZoneInfo('America/New_York'))
-                in_rth = (
-                    et_now.weekday() < 5
-                    and dtime(9, 30) <= et_now.time() < dtime(16, 0)
-                )
-            except Exception:
-                in_rth = True  # fail safe — assume in-hours, alert-only
-            if in_rth:
-                logger.warning(
-                    "ORB sync: orphan(s) detected during RTH — alert-only, "
-                    "manual review required (auto-close gated to off-hours "
-                    "to avoid killing in-flight fills)."
-                )
-            else:
-                logger.warning(
-                    f"ORB sync: orphan(s) detected outside RTH "
-                    f"(et={et_now.strftime('%H:%M')}) — auto-closing now"
-                )
-                import time as _time_mod
-                orb_owned = self._orb_owned_symbols(lookback_days=4)
-                for sym in orphans:
-                    if sym not in orb_owned:
-                        logger.warning(
-                            f"ORB sync: orphan {sym} is NOT an ORB position "
-                            f"(no open ORB trade row in the last 5 days) — "
-                            f"alert-only, NOT auto-closing. Shared account: "
-                            f"{sym} belongs to another strategy/project."
-                        )
-                        continue
+                cfg = getattr(self, 'orphan_reconciler_cfg', None) or ReconcilerConfig()
+                # alp_pos_by_sym was built at the top of sync_positions —
+                # pass it in instead of re-hitting Alpaca.
+                broker_snapshot = []
+                for p in alp_pos_by_sym.values():
                     try:
-                        self._cancel_symbol_open_orders(sym)
-                        _time_mod.sleep(0.5)
-                        result = self.alpaca.close_position(sym)
-                        logger.warning(
-                            f"ORB sync auto-close: orphan {sym} closed "
-                            f"(order={(result or {}).get('id', '?')})"
-                        )
-                        self._notify(
-                            f"{self.tg_prefix} ✅ Auto-closed orphan {sym} "
-                            f"at off-hours startup"
-                        )
-                    except Exception as e:
-                        self._notify_error(
-                            f"Auto-close orphan {sym} FAILED at startup: {e}. "
-                            f"Manual action required."
-                        )
+                        broker_snapshot.append({
+                            'symbol': getattr(p, 'symbol', None) or p.get('symbol'),
+                            'qty': int(getattr(p, 'qty', 0) or
+                                       (p.get('qty', 0) if isinstance(p, dict) else 0)),
+                            'avg_entry_price': float(
+                                getattr(p, 'avg_entry_price', 0) or
+                                (p.get('avg_entry_price', 0) if isinstance(p, dict) else 0)
+                            ),
+                            'unrealized_pl': float(
+                                getattr(p, 'unrealized_pl', 0) or
+                                (p.get('unrealized_pl', 0) if isinstance(p, dict) else 0)
+                            ),
+                        })
+                    except Exception:
+                        continue
+                reconcile_strategy_orphans(
+                    strategy=STRATEGY_NAME, alpaca=self.alpaca, db=self.db,
+                    notifier=self.notifier,
+                    tracked_symbols=set(self.open_positions.keys()),
+                    cfg=cfg,
+                    broker_positions=broker_snapshot,
+                )
+            except Exception as e:
+                logger.error(
+                    f"ORB: orphan reconciler raised: {e} — sync continues"
+                )
 
         logger.info(
             f"ORB.sync_positions: {recovered} filled + {recovered_pending} pending rehydrated; "
