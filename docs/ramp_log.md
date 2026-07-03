@@ -99,3 +99,19 @@ diff is recorded inline here.
 
             Re-advance to S1 on standard gates ($5K cushion + clean days +
             no demote flag). Hard stop remains the only override-proof line.
+
+## 2026-07-06 — RAMP POLICY REVISION (owner-approved 2026-07-04)
+
+Cushion (profit-target) advancement gates RETIRED. New gates:
+operational-green x10 sessions + loss floor (-1x weekly loss budget) +
+slippage parity + min days. Demotion: operational failure OR -2x weekly
+loss budget; BT-consistent drawdown explicitly NOT a trigger (codifies
+the 6/12 and 6/19 overrides). Full rationale:
+docs/ramp_policy_proposal_jul2026.md. Trigger for revisiting the policy:
+PDR veto (2026-07-04) halves trade count — cushion accrual slows while
+per-trade quality doubles; a profit gate would read improvement as
+"ramp slower".
+
+Status at revision: Stage 0, day 35, stage P&L -$2,587 (above -$7.5K
+floor). Path to Stage 1 = 10 clean sessions from Monday 7/6 with all
+July fixes live.

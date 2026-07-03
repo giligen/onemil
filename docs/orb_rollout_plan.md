@@ -1,7 +1,7 @@
 # ORB Live Roll-Out Plan — Cushion-Gated Capital Ramp
 
 **Last updated:** 2026-04-24  
-**Status:** Active playbook. Follow mechanically. Advance on cushion, not vibes.
+**Status:** Active playbook. Follow mechanically. Advance on operational gates + loss floor (revised 2026-07-06), not vibes.
 
 ---
 
@@ -169,33 +169,66 @@ Capacity questions wait for Stage 3-4 actual scaling.
 
 ---
 
-## Advancement gates
+## Advancement gates — REVISED 2026-07-06 (owner-approved)
+
+> Policy change record: the original cushion (profit-target) gates below
+> were REPLACED by operational gates + a loss floor. Rationale in
+> `docs/ramp_policy_proposal_jul2026.md`: cushion punished BT-consistent
+> variance (two June-2026 demotion flags, both overridden as false
+> alarms), and the PDR veto (2026-07-04) halves trade count while
+> doubling per-trade quality — cushion accrual slows exactly as the
+> strategy improves. We scale unless performing WORSE than the validated
+> loss distribution, not once profitability is proven at the size where
+> the edge is smallest.
 
 **ALL** of these must be true to advance to the next stage:
 
-| Advance to → | Cushion needed | Min trading days in current stage | Health check |
-|:-:|---:|---:|---|
-| Pre-0 → 0 | ≥ **+$1,000** realized at half-size | 10 | Slippage ≤ 1.5× BT, no P0 incidents, drift < 0.05 |
-| 0 → 1 | ≥ **+$5,000** realized since live-ramp start | 10 | No operational incidents in last 5 days |
-| 1 → 2 | ≥ **+$10,000** realized cumulative | 10 | Current drawdown < 8% of peak equity |
-| 2 → 3 | ≥ **+$18,000** realized cumulative | 15 | Same |
-| 3 → 4 | ≥ **+$30,000** realized cumulative | 20 | Same |
+1. **Operational green — 10 consecutive sessions** with:
+   - 0 unexplained BT↔live selection diffs (observer + `logs/orb_selection_audit.jsonl`)
+   - 0 touchgo REKEY / negative-age tripwires
+   - 0 order-fill mismatches (DB vs broker; reconciler clean)
+   - all exits attributed (no `unknown_exit` / stale `exit_pending_verification` rows)
+2. **Loss floor** (replaces cushion): cumulative realized stage P&L ≥
+   **−1 × (stage daily loss limit × 5)** — i.e. hold only if doing worse
+   than a full losing week at stage size (Stage 0: −$7.5K floor).
+3. **Slippage parity**: median entry slippage ≤ BT model + 10 bps over
+   the stage (`analyze_orb_slippage.py`).
+4. **Min trading days in stage**: 10 (Stages Pre-0→0→1→2), 15 (2→3),
+   20 (3→4) — unchanged from original plan.
 
-**Cushion definition**: cumulative **realized** P&L from ORB trades since live-ramp start. Unrealized is ignored (ORB closes intraday — but also, unrealized can round-trip).
+Budget/risk ladder per stage and daily loss limits: **unchanged**.
 
 **Operational incidents** include: stranded limit orders, SL/TP desyncs, missed fills > 5 bps slippage from expected, data-cache pollution requiring manual cleanup, restart loops, Telegram alerts with ERROR level. Any ONE blocks advancement for 5 days after resolution.
 
+<details>
+<summary>Superseded cushion gates (pre-2026-07-06, for reference)</summary>
+
+| Advance to → | Cushion needed | Min days | Health check |
+|:-:|---:|---:|---|
+| Pre-0 → 0 | ≥ +$1,000 realized at half-size | 10 | Slippage ≤ 1.5× BT, no P0 incidents |
+| 0 → 1 | ≥ +$5,000 realized | 10 | No operational incidents in last 5 days |
+| 1 → 2 | ≥ +$10,000 cumulative | 10 | DD < 8% of peak |
+| 2 → 3 | ≥ +$18,000 cumulative | 15 | Same |
+| 3 → 4 | ≥ +$30,000 cumulative | 20 | Same |
+
+</details>
+
 ---
 
-## Demotion triggers
+## Demotion triggers — REVISED 2026-07-06
 
 **ANY** of these → step DOWN one stage immediately:
 
-- Realized P&L drops **≥20% from peak**  
-  _(e.g., peak cumulative $25K → now $20K → demote)_
-- 3 consecutive red days at current stage
-- Any critical bug, data desync, stranded position, or missed fill
-- Live daily P&L variance > 2× BT's monthly variance at same scale (indicates regime mismatch)
+- **Operational failure**: unexplained selection diff, fill mismatch,
+  unattributed exit, stranded position, data desync, critical bug
+- Cumulative stage P&L < **−2 × (stage daily loss limit × 5)**
+  (Stage 0: −$15K)
+
+**Explicitly NOT a demotion trigger** (codifies the two June-2026
+overrides): P&L drawdown consistent with the BT's own percentile bands
+at stage scale. The strategy is lottery-with-edge — 60% of trades lose
+by design; drawdowns that match the validated distribution are the cost
+of the tickets, not a malfunction.
 
 **TWO simultaneous triggers** → drop 2 stages AND halt 24h to investigate before resuming.
 

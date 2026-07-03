@@ -38,20 +38,28 @@ TRADES_DB = ROOT / 'data' / 'trades.db'
 # precedes the formal ramp. It uses scripts/orb_pre0_daily.py for its
 # own monitoring; the standard ramp script recognizes it but applies
 # different gates.
+# 2026-07-06 policy revision (owner-approved; see
+# docs/ramp_policy_proposal_jul2026.md + docs/orb_rollout_plan.md):
+# cushion_to_advance is RETIRED. Advancement = operational-green sessions
+# + LOSS FLOOR (stage P&L >= -1 x weekly loss budget) + min days +
+# slippage parity. Demotion = operational failure OR stage P&L <
+# -2 x weekly loss budget. BT-consistent drawdown is NOT a demotion
+# trigger (codifies the two June-2026 overrides).
 STAGES = [
     # (stage_idx, account_budget_usd, risk_per_trade_usd, daily_loss_limit_usd,
-    #  cushion_to_advance, min_days_in_stage)
-    (-1, 15000,  500, -750,    1000, 10),  # Pre-0 — see orb_pre0_daily.py for richer gating
-    (0,  30000, 1000, -1500,   5000, 10),
-    (1,  50000, 1500, -2500,  10000, 10),
-    (2,  80000, 2400, -4000,  18000, 15),
-    (3, 120000, 3600, -6000,  30000, 20),
-    (4, 174000, 5200, -8800,   None, None),  # terminal
+    #  min_days_in_stage)
+    (-1, 15000,  500, -750,  10),  # Pre-0 — see orb_pre0_daily.py for richer gating
+    (0,  30000, 1000, -1500, 10),
+    (1,  50000, 1500, -2500, 10),
+    (2,  80000, 2400, -4000, 15),
+    (3, 120000, 3600, -6000, 20),
+    (4, 174000, 5200, -8800, None),  # terminal
 ]
 
-HARD_STOP_PCT_OF_CASH = -0.15     # halt if realized ≤ -15% of starting cash
-DEMOTE_DD_PCT_OF_PEAK = -0.20     # demote if realized drops 20% from peak
-DEMOTE_CONSEC_RED_DAYS = 3        # demote on 3 consecutive red days
+HARD_STOP_PCT_OF_CASH = -0.15      # halt if realized ≤ -15% of starting cash
+LOSS_FLOOR_WEEKS = 1.0             # advance-blocker floor: -1 x (daily limit x 5)
+DEMOTE_LOSS_WEEKS = 2.0            # demotion floor: -2 x (daily limit x 5)
+OPERATIONAL_GREEN_SESSIONS = 10    # consecutive clean sessions to advance
 
 
 @dataclass
@@ -60,8 +68,20 @@ class Stage:
     account_budget_usd: int
     risk_per_trade_usd: int
     daily_loss_limit_usd: int
-    cushion_to_advance: Optional[int]
     min_days_in_stage: Optional[int]
+
+    @property
+    def weekly_loss_budget(self) -> float:
+        """One full losing week at stage size (daily limit x 5, negative)."""
+        return self.daily_loss_limit_usd * 5
+
+    @property
+    def advance_loss_floor(self) -> float:
+        return LOSS_FLOOR_WEEKS * self.weekly_loss_budget
+
+    @property
+    def demote_loss_floor(self) -> float:
+        return DEMOTE_LOSS_WEEKS * self.weekly_loss_budget
 
 
 PRE_STAGE_IDX = -1  # Pre-Stage-0 LIVE half-size data-collection phase
@@ -252,33 +272,40 @@ def main():
     # Stage idx semantics: -1 (Pre-0) → 0 (Stage 0) → 1 → 2 → 3 → 4 (terminal).
     next_stage = _stage_by_idx(stage.idx + 1) if stage.idx < TERMINAL_STAGE_IDX else None
     advance_blockers = []
-    if next_stage is not None and stage.cushion_to_advance is not None:
-        if cushion < stage.cushion_to_advance:
+    if next_stage is not None and stage.min_days_in_stage is not None:
+        # Loss floor (replaces cushion): block only if performing WORSE
+        # than one full losing week at stage size.
+        if cushion < stage.advance_loss_floor:
             advance_blockers.append(
-                f"cushion ${cushion:,.0f} < required ${stage.cushion_to_advance:,}"
+                f"stage P&L ${cushion:,.0f} below loss floor "
+                f"${stage.advance_loss_floor:,.0f} (-1x weekly loss budget)"
             )
         if stage.min_days_in_stage and days_in_stage < stage.min_days_in_stage:
             advance_blockers.append(
                 f"{days_in_stage} trading day(s) in stage < required "
                 f"{stage.min_days_in_stage}"
             )
-        if peak > 0 and drawdown_from_peak / peak <= -0.08:
-            advance_blockers.append(
-                f"current DD {drawdown_from_peak / peak * 100:.1f}% "
-                f"from peak > 8% health-check ceiling"
-            )
-
-    # --- Demotion triggers ---
-    demote_triggers = []
-    if peak > 0 and (drawdown_from_peak / peak) <= DEMOTE_DD_PCT_OF_PEAK:
-        demote_triggers.append(
-            f"realized P&L down {drawdown_from_peak / peak * 100:.1f}% "
-            f"from peak ${peak:,.0f} (threshold: {DEMOTE_DD_PCT_OF_PEAK*100:.0f}%)"
+        advance_blockers.append(
+            f"MANUAL CHECKS (script cannot verify): "
+            f"{OPERATIONAL_GREEN_SESSIONS} consecutive operational-green "
+            f"sessions (observer 0 drops, REKEY=0, fills reconciled, all "
+            f"exits attributed) + median entry slippage <= BT+10bps "
+            f"(analyze_orb_slippage.py)"
         )
-    if consec_red >= DEMOTE_CONSEC_RED_DAYS:
+
+    # --- Demotion triggers (2026-07-06: operational failures OR deep
+    # loss floor ONLY — BT-consistent drawdown is NOT a trigger) ---
+    demote_triggers = []
+    if cushion < stage.demote_loss_floor:
         demote_triggers.append(
-            f"{consec_red} consecutive red days "
-            f"(threshold: {DEMOTE_CONSEC_RED_DAYS})"
+            f"stage P&L ${cushion:,.0f} below demotion floor "
+            f"${stage.demote_loss_floor:,.0f} (-2x weekly loss budget)"
+        )
+    if consec_red >= 5:
+        demote_triggers.append(
+            f"{consec_red} consecutive red days — not an auto-demote under "
+            f"the 2026-07-06 policy, but check the BT percentile bands "
+            f"before dismissing"
         )
 
     # --- Hard stop ---
