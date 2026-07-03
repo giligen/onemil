@@ -56,8 +56,10 @@ from trading.orb_touchgo_filter import (
     evaluate_rule_m, evaluate_rule_d, load_touchgo_config,
 )
 
-BAND_MIN, BAND_MAX = 30.0, 60.0
-GAP_MIN_PCT, GAP_CAP_PCT = 5.0, 50.0
+BAND_MIN = float(os.environ.get('ORB_BAND_MIN', 30.0))
+BAND_MAX = float(os.environ.get('ORB_BAND_MAX', 60.0))
+GAP_MIN_PCT = 5.0
+GAP_CAP_PCT = float(os.environ.get('ORB_BAND_GAP_CAP', 50.0))
 PREV_VOL_MIN = 500_000
 START, END = '2025-01-01', '2026-07-02'
 
@@ -70,8 +72,8 @@ Q_CAPS = {'Q1': 3.0, 'Q2': 3.0, 'Q3': 3.0, 'Q4': 3.0, 'Q5': 1.5}
 Q_ORDER = {'Q4': 0, 'Q5': 1, 'Q3': 2, 'Q2': 3, 'Q1': 4}
 LOCK_TRIGGER_R = 1.75
 LOCK_STOP_R = 0.5
-ENTRY_SLIP_BPS = 30.0
-EXIT_SLIP_BPS = 10.0
+ENTRY_SLIP_BPS = float(os.environ.get('ORB_BAND_ENTRY_SLIP_BPS', 30.0))
+EXIT_SLIP_BPS = float(os.environ.get('ORB_BAND_EXIT_SLIP_BPS', 10.0))
 PDR_VETO_THR = 8.0
 TOUCHGO_CFG = load_touchgo_config({})
 
@@ -384,7 +386,8 @@ def main():
         except Exception:
             continue
     band = pd.DataFrame(built)
-    band.to_csv('/tmp/orb_band_30_60_candidates.csv', index=False)
+    tag = f"{BAND_MIN:g}_{BAND_MAX:g}_slip{ENTRY_SLIP_BPS:g}"
+    band.to_csv(f'/tmp/orb_band_{tag}_candidates.csv', index=False)
     log(f"built {len(band)} band candidates with entries "
         f"({len(band) / max(len(cand_rows), 1) * 100:.0f}% of discovered broke out)")
     log()
@@ -449,7 +452,7 @@ def main():
             log(f"  B1-BASE {era}: ${e:+,.0f}")
 
     log(f"\nruntime: {(datetime.now() - t0).total_seconds() / 60:.1f} min")
-    with open('/tmp/orb_band_study_report.txt', 'w') as f:
+    with open(f'/tmp/orb_band_study_report_{tag}.txt', 'w') as f:
         f.write('\n'.join(REPORT_LINES))
 
 
