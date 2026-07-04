@@ -287,7 +287,7 @@ ORB analysis; the older ones have warning headers pointing to the shipped varian
 - Family + super-group dedup (14 families, 91 symbols, `lev_short`/`lev_long` super-groups)
 - Max 4 concurrent positions, per-pos cap $25K ($100K budget / 4)
 - Risk-parity sizing: $3K risk/trade, applied adaptive quintile mult (Q5 capped at 1.5x — anti-overfit)
-- Spread gate: skip entries with spread > 150bps + Telegram warning
+- Spread gate: skip entries with spread > 300bps + Telegram warning (loosened from 150 on 2026-07-04 — the 150 gate skipped monsters BKKT/XNDU; NEVER tighten below 150 without rereading research/orb_spread_gate_verdict.md: 100-150bps is the richest per-trade bucket)
 
 **Exit mechanics**:
 - Initial stop: `range_low`
