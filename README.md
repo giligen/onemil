@@ -916,6 +916,50 @@ systemctl list-timers onemil-orb-backtest.timer
 journalctl -u onemil-orb-backtest.service -n 200 --no-pager   # latest run
 ```
 
+### July 2026 assumption audit (owner-mandated full-machine pass)
+
+Every parameter in the machine now carries an evidence status in
+**`research/assumption_ledger.md`** — validated / shipped / dead /
+untestable-monitored. A ship without a ledger-row update is incomplete.
+Key outcomes (full details in the ledger + research/ verdict docs):
+
+- **Spread gate loosened 150 → 300bps** (`entry.max_spread_bps`): first
+  NBBO validation showed the 150 gate skipped monsters (BKKT +$20.8K at
+  153bps, XNDU +$11.9K at 267bps); 100–150bps is the richest per-trade
+  bucket. +$24.7K/18mo with honest exit-cost penalties. NEVER tighten
+  below 150. `research/orb_spread_gate_verdict.md`.
+- **BT force-close parity (15:45)**: the BT's last-bar (~15:59) EOD exit
+  understated the book — live's 15:45 is the sweep optimum. Authoritative
+  baseline moved $209.7K → **$258.3K** (pre-PM-mult).
+  `ORB_BT_FORCE_CLOSE_ET=15:59` reproduces older studies.
+- **Entry stop-limit buffer (30bps) validated** — 97% of BT-assumed fills
+  genuinely fillable, all top-10 monsters fillable, knob insensitive
+  10–150bps. The BT fill assumption holds.
+- **Price band $3–30 is final**: $2–3, $30–60, and a $4 floor all fail
+  pre-declared bars. `research/orb_price_band_verdicts_jul2026.md`.
+- Slippage models (30/10bps) confirmed conservative vs live telemetry;
+  time-stop 60min re-confirmed (90min is worse); `min_stop_pct` dead.
+
+### Premarket dollar-volume sizing mult (shipped 2026-07-04, default ON)
+
+Picks whose premarket (4:00–9:29 ET) dollar volume exceeds the H1-2025
+TRAIN upper tercile (**$5,816,688 — frozen**) get **1.5× sizing**.
+Upsize-only by design: the PM$ gradient's value is at the top
+(+$792/trade high tercile vs −$17 low), monsters can only be boosted,
+and a boosted loser's damage is capped by its stop while a boosted
+winner is uncapped.
+
+- BT (walk-forward): **+$76.8K/18mo** — ΔTRAIN +$19.6K / Δ25H2 +$14.7K /
+  Δ2026 +$42.5K, all eras positive; 0 giants downsized; worst month
+  −$2.6K; corr(PM$, composite) = 0.05 → genuinely orthogonal channel.
+- Shared math: `trading/orb_pm_mult.py` (live planner + BT pipeline stack
+  it exactly like the quintile mult — parity by construction).
+- Live: one batched premarket-bars fetch per day at first entry check;
+  fail-open ×1.0 on missing data. Monitor: `grep "PM MULT" journal`.
+- Config: `orb.yaml::sizing.pm_dollar_vol_mult`; env `ORB_PM_MULT=0`.
+- Historical PM data: `data/research/orb_premarket_dollar_vol_*.csv`
+  (nightly appends needed for future BT parity — see ledger).
+
 ### PDR veto — prev-day-range filter (shipped 2026-07-04, default ON)
 
 Skips selected picks whose PREVIOUS day's high-low range was quiet
@@ -1093,6 +1137,31 @@ unwind):
   `adaptive_mults` / `filter.features` blocks without running
   `study_orb_refit.py` first (quarterly cadence).
 - **`docs/orb_rollout_plan.md`** — live capital ramp (next section).
+
+## Reporting stack (shipped 2026-07-04)
+
+Three layers, all external observers (broker/DB truth, zero prod-code risk):
+
+1. **Hourly holdings pulse** (`scripts/holdings_pulse.py`, cron :05
+   market hours): open positions with unrealized $ + R-multiple vs actual
+   stop; silent when flat. Ownership-filtered on the shared MAIN account.
+2. **Daily green check** (`scripts/daily_green_check.py`, 21:30 UTC):
+   computes the day's operational-green verdict (exits attributed, no
+   pending-verification, BT-selection parity vs the nightly BT with a
+   staleness guard) → `logs/green_streak.json`. One line when green,
+   loud block on red. **The streak IS the ramp advancement gate.**
+3. **Weekly report** (`scripts/weekly_report.py`, Fri 21:45 UTC): P&L per
+   day per strategy, gate progress + loss-floor headroom, BT-vs-live edge
+   capture + runner-capture, monster watch, flags.
+
+## Ramp policy (revised 2026-07-06, owner-approved)
+
+Cushion (profit-target) gates are RETIRED. Advance = 10 consecutive
+operational-green sessions + loss floor (−1× weekly loss budget) +
+slippage parity + min days. Demote = operational failure or −2× weekly
+budget; **BT-consistent drawdown is NOT a demotion trigger**. Full
+rationale: `docs/ramp_policy_proposal_jul2026.md`; gates implemented in
+`scripts/orb_ramp_check.py` (reads the green streak).
 
 ## ORB Live Roll-Out
 
