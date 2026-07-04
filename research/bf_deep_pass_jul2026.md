@@ -14,8 +14,16 @@ OLD stack — the interaction with the new stack is UNTESTED.
 ## In flight
 - Loose-envelope Stage-1 cache building to /tmp/bf_cache_loose.csv
   (pullback10/pole2/gain2/retr70/green3/vol1.0; FVRR strict unchanged).
-  Build log /tmp/bf_loose_build.log ('LOOSE BUILD DONE' sentinel).
+  Build log /tmp/bf_loose_build2.log ('LOOSE BUILD DONE' sentinel).
   Rebuild: /tmp/bf_loose_build.sh. NEVER touches prod cache.
+
+## ⚠ METHODOLOGY TRAP (cost one 2.5h build, 2026-07-04)
+`--build-cache` WITHOUT `--no-cache` runs the auto-build path that
+applies PRODUCTION FILTERS (regime, max_trades/day=5, circuit breakers)
+DURING cache construction → produced a 201-trade 'raw' cache. A raw
+build MUST mirror scripts/nightly_bt_update.sh exactly:
+`--build-cache --no-cache --cache-file X --capital 5000 --risk 60
+--max-shares 15000`. First (invalid) comparison discarded.
 - Comparison harness READY: /tmp/bf_loose_compare.sh — strict vs loose
   through full Stage-2, eras 2025 / 2026 / recent-3mo / full.
 
