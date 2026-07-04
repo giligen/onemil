@@ -72,6 +72,23 @@ build MUST mirror scripts/nightly_bt_update.sh exactly:
   rebuild. Ship the MINIMAL loosening that captures the gain.
 - Monsters-kept + monthly consistency as usual.
 
+## 🏆 GOLDEN FIND — trail activation 1.5R → 2.0R SHIPPED (2026-07-05)
+The one never-swept BF domain (exits) delivered. Replay harness on the
+67 Stage-2 defended trades (validated: 58/67 exit prices within 2% of
+cache, median diff 0.05%):
+- A=2.0/T=1.0: 13 trades changed, **13 improved, 0 hurt**, 19/19 months
+  ≥0, top gain only 26% of delta. ≈ **+$12.3K on the $35.6K book (+35%)**.
+- Monotone 1.5→1.75→2.0 in BOTH eras (2025 +105→+133 sum-ret%, 2026
+  +50→+75); plateau at 2.25.
+- REVERSES 2026-04-13 (2.0→1.5, +$9.3K then): that verdict was on the
+  pre-floor-1.8/pre-TTF population where OPTX-class (peak 1.5-2R →
+  full reverse) was common; in the modern selected book that class
+  occurred ZERO times in 18mo. Upstream filters moved the exit optimum —
+  the recurring lesson of this audit.
+- Caveats: replay skips vol-guard + exhaustion-partial interplay (the
+  9/67 validation outliers); revert trigger documented in config.yaml.
+- Harness: research/scripts/bf_exit_sweep.py.
+
 ## Queued next (after detection verdict)
 1. Conviction re-weighting: cache stores per-rule components (conv_*);
    walk-forward re-weight THROUGH Stage-2 (per feedback memory: lever
