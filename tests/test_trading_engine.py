@@ -2007,9 +2007,12 @@ class TestGracefulShutdown:
         """
         shutdown_event = threading.Event()
         engine.shutdown_event = shutdown_event
-        # Force_close_time = 15:45 ET — simulate mid-session (before that)
-        engine.force_close_hour = 15
-        engine.force_close_minute = 45
+        # Simulate mid-session: force-close time strictly in the future of
+        # the REAL clock (23:59). The old hardcoded 15:45 made this test
+        # time-of-day dependent — it failed when the suite ran after 15:45
+        # ET (latent flake found 2026-07-05).
+        engine.force_close_hour = 23
+        engine.force_close_minute = 59
 
         shutdown_event.set()
         mock_alpaca.get_open_positions.return_value = []
