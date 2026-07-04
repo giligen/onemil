@@ -90,9 +90,11 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
 ## Rules of the ledger
 - A ship without a ledger row update is incomplete.
 - Any knob touched by a fix gets its status re-checked, not assumed.
-- Baseline note: with the 15:45 parity fix the defended-book baseline is
-  **$258,298** (Jan'25–Jul'26, veto + parity; was $209,734 under the old
-  last-bar/15:59 convention — the fix helps twice, both live-true: EOD
+- Baseline note: the authoritative defended-book baseline is
+  **$344,766** (Jan'25–Jul'26: veto + 15:45 parity + PM sizing mult,
+  pipeline-confirmed 2026-07-04). Decomposition: $209,734 (veto,
+  old 15:59 convention) → $258,298 (+15:45 parity) → $344,766 (+PM mult).
+  (was $209,734 under the old last-bar/15:59 convention — the fix helps twice, both live-true: EOD
   holds skip the closing fade AND stops in the 15:45-15:59 window never
   fire live). Studies dated before 2026-07-04 quote the 15:59 convention;
   reproduce them with ORB_BT_FORCE_CLOSE_ET=15:59.
