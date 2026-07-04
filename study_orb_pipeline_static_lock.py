@@ -58,6 +58,9 @@ def _session_open_timestamp(bars):
     return None
 
 
+FORCE_CLOSE_ET = os.environ.get('ORB_BT_FORCE_CLOSE_ET', '15:45')
+
+
 def simulate_static_lock(bars, entry_price, range_high, range_low, entry_time):
     """Simulate ORB static_lock exit with Rule M / Rule D touchgo filter.
 
@@ -71,12 +74,24 @@ def simulate_static_lock(bars, entry_price, range_high, range_low, entry_time):
            reason='tag_b1'.
         3. Static lock loop (existing): scans remaining bars for lock trigger
            (entry + 1.75R) and stop (range_low) with mid-trade lock_stop ratchet.
-        4. EOD (no exit hit): close of last bar.
+        4. EOD (no exit hit): close of the last bar at/before FORCE_CLOSE_ET
+           (default 15:45 — LIVE PARITY, fixed 2026-07-04: the old last-bar
+           (~15:59) exit understated the book by ~$20K/18mo because the final
+           14min into the close are systematically adverse for gapper holds;
+           a 15:00/15:30/15:45/15:59 sweep peaks AT 15:45 — live's existing
+           force-close time is accidentally optimal. ORB_BT_FORCE_CLOSE_ET
+           env restores legacy for old-study reproduction).
 
     Touchgo rules can be globally disabled via env var ORB_TOUCHGO_ENABLED=0
     (re-imports happen at startup; restart needed).
     """
     range_size = range_high - range_low
+    # LIVE PARITY (2026-07-04): truncate at the 15:45 ET force-close, like
+    # production. See docstring item 4.
+    _et = bars['timestamp'].dt.tz_convert('America/New_York').dt.time
+    _fc_h, _fc_m = (int(x) for x in FORCE_CLOSE_ET.split(':'))
+    from datetime import time as _dtime
+    bars = bars[_et <= _dtime(_fc_h, _fc_m)]
     trigger_lvl = entry_price + LOCK_TRIGGER_R * range_size
     lock_stop = entry_price + LOCK_STOP_R * range_size
     stop_price = range_low
