@@ -19,7 +19,7 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
 | price band | $3–30 | ✅ | Jul'26: $2–3 NO-GO (−$44..75K), $30–60 NO-GO, $4 floor fragile — orb_price_band_verdicts_jul2026.md |
 | stop_limit_buffer | 30bps | ✅ | Jul'26 quote-path study: 97% of BT fills genuinely fillable at +30bps, ALL top-10 monsters fillable (min-ask 35-315bps BELOW trigger), knob insensitive 10-150bps. BT fill assumption VALID. /tmp/orb_entry_buffer.csv |
 | spread gate | 300bps | 🔧 | NBBO study Jul'26: 150 skipped monsters (BKKT 153, XNDU 267); orb_spread_gate_verdict.md. NEVER tighten <150 |
-| entry window (time_stop) | 60min | ✅(dated) | Apr'26 variants (time_30 worse); GLXU 6/8 ran post-window → re-sweep 60/90 QUEUED |
+| entry window (time_stop) | 60min | ✅ | Apr'26 (30 worse) + Jul'26 re-sweep (90 worse by $6.3K, late breakouts net-negative) |
 | 9:35 one-shot top-K | — | ✅ | BT-parity by construction; race-fixed 7/3-4 |
 | composite threshold | 0.0 | ✅ | original TRAIN sweep (−1.5..0.5 grid) |
 | frozen H1-25 z-fit | — | ✅ | refits $34-47K WORSE OOS (audit #4); mandate cancelled |
@@ -55,7 +55,12 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
 | BF entry slip model | — | ⚠ stale — recalibrate from trades DB quarterly (README note) |
 
 ## Standing debt — CLEANUP PASS 2026-07-04 (all four attacked)
-1. time_stop 60 vs 90 — sweep RUNNING (background; verdict pending)
+1. time_stop 60 vs 90 — ✅ CLOSED, 60 STAYS: full-universe rediscovery
+   (11,491 symbol-days) found +282 late breakouts (65-95min) but the
+   pipeline is $6.3K WORSE with them ($85.1K→$78.8K, no era-consistent
+   gain). Late breakouts are net-negative; GLXU 6/8 was an outlier, not
+   a signal. (Within-methodology comparison; reports
+   /tmp/orb_band_study_report_3_30_slip30_w{60,90}.txt)
 2. BF entry-slip: ✅ VALIDATED — live median +40-54bps vs 50bps model
    (n=29, thin); re-check at n>=60
 3. Monster-detection channels:
@@ -67,8 +72,13 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
      18/19). Live-implementable via 9:30 snapshot volume. Re-evaluate
      next quarterly review or if live PM telemetry accumulates.
      Data: /tmp/orb_premarket_features.csv (100% coverage).
-   - float (dirty read, current-float contaminated): RUNNING background.
-     Point-in-time float remains a purchase decision.
+   - float (dirty read, current-float CONTAMINATED, 66% symbol coverage):
+     HIGH float is the bad zone — Q4 bucket −$117/trade mean (only
+     negative bucket; −$194 in 2025), low-float Q1 +$982 with 13/31
+     monsters. Non-monotone middle (Q2/Q3 flip) + contamination =
+     NOT shippable from this data. Suggestive enough to put the
+     point-in-time float data PURCHASE on the owner-decision list.
+     Data: /tmp/orb_float_dirty.csv.
 4. Stage-2 regime sizing: ✅ SHIPPED — day-level A/B/C1/C2 mult + C2 skip
    in batch_backtest Stage-2 (BT_REGIME_SIZING=0 = pre-fix, verified
    byte-identical). A/B on 2025-01→2026-07: $31.9K/74tr → $35.6K/67tr.
