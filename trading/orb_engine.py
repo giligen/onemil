@@ -37,6 +37,10 @@ from trading.orb_filter import (
     FeatureParam, assign_quintile, composite_score, load_feature_params,
 )
 from trading.orb_conviction import apply_adaptive_mult, load_adaptive_mults
+from trading.orb_pm_mult import (
+    DEFAULT_HIGH_CUT_USD, DEFAULT_HIGH_MULT, compute_pm_dollar_vol,
+    pm_size_multiplier,
+)
 from trading.orb_pdr_veto import (
     DEFAULT_MIN_PDR_PCT, compute_prev_day_range_pct, pdr_veto_applies,
 )
@@ -329,6 +333,18 @@ class ORBEngine:
         _pdr_min_env = os.environ.get('ORB_PDR_VETO_MIN_PCT')
         if _pdr_min_env:
             self.pdr_veto_min_pct = float(_pdr_min_env)
+        # Premarket dollar-volume sizing mult (2026-07-04, upsize-only).
+        # Shared math: trading/orb_pm_mult.py. Cut frozen from H1-2025 TRAIN.
+        sizing_pm_cfg = (cfg.get('sizing', {}) or {}).get('pm_dollar_vol_mult', {}) or {}
+        self.pm_mult_enabled = bool(sizing_pm_cfg.get('enabled', True))
+        self.pm_mult_high_cut = float(sizing_pm_cfg.get('high_cut_usd', DEFAULT_HIGH_CUT_USD))
+        self.pm_mult_high = float(sizing_pm_cfg.get('high_mult', DEFAULT_HIGH_MULT))
+        _pm_env = os.environ.get('ORB_PM_MULT')
+        if _pm_env is not None:
+            self.pm_mult_enabled = _pm_env.strip().lower() not in (
+                '0', 'false', 'no', 'off', '')
+        self._pm_dollar_vols: Dict[str, Optional[float]] = {}
+        self._pm_fetch_done_day: Optional[date] = None
         # Touchgo filter (Rule M = entry-bar close-pos < 0.5; Rule D = bar-1
         # revert ≥ 0.75R → exit at entry -0.5R). Shared module
         # trading/orb_touchgo_filter.py imported by both LIVE and BT for parity.
@@ -1703,6 +1719,7 @@ class ORBEngine:
                 quintile=cand.quintile,
                 adaptive_mult=apply_adaptive_mult(cand.quintile, self.adaptive_mults),
                 spread_bps=spread_bps,
+                pm_mult=self._get_pm_mult(sym),
             )
             if isinstance(plan, PlannerReject):
                 cand.rejected_reason = plan.reason
@@ -1722,6 +1739,44 @@ class ORBEngine:
                 cand.plan_submitted = True
                 submitted.append(sym)
         return submitted
+
+    def _get_pm_mult(self, symbol: str) -> float:
+        """Premarket dollar-volume sizing mult for a pick (2026-07-04).
+
+        Lazily batch-fetches premarket 1-min bars (4:00-9:29 ET) for ALL
+        current candidates once per day on first use — one API call.
+        Fail-open: fetch failure or no premarket prints → 1.0 + WARNING
+        (never blocks or blindly boosts a trade).
+        """
+        if not self.pm_mult_enabled:
+            return 1.0
+        today = datetime.now(timezone.utc).date()
+        if self._pm_fetch_done_day != today:
+            self._pm_fetch_done_day = today
+            self._pm_dollar_vols = {}
+            syms = list(self.candidates.keys())
+            try:
+                if hasattr(self.alpaca, 'get_1min_bars_multi'):
+                    # lookback spans 4:00 ET premarket from ~9:35 ET call time
+                    bars_map = self.alpaca.get_1min_bars_multi(
+                        syms, lookback_minutes=340) or {}
+                    for sym, b in bars_map.items():
+                        self._pm_dollar_vols[sym] = compute_pm_dollar_vol(b)
+            except Exception as e:
+                logger.warning(
+                    f"ORB: premarket bars fetch failed ({e}) — PM mult "
+                    f"fail-open at 1.0 for today")
+        pm = self._pm_dollar_vols.get(symbol)
+        mult = pm_size_multiplier(pm, self.pm_mult_high_cut, self.pm_mult_high)
+        if mult != 1.0:
+            logger.info(
+                f"[ORB] PM MULT: {symbol} premarket ${pm:,.0f} > "
+                f"${self.pm_mult_high_cut:,.0f} — sizing x{mult}")
+        elif pm is None:
+            logger.warning(
+                f"[ORB] PM MULT: {symbol} premarket volume unavailable — "
+                f"fail-open x1.0")
+        return mult
 
     def _pdr_veto_reject(self, cand: CandidateState) -> bool:
         """PDR veto decision for one SELECTED pick (2026-07-04 ship).

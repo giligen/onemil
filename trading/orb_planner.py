@@ -110,6 +110,7 @@ class OrbTradePlanner:
         adaptive_mult: float,
         range_open: float = 0.0,
         spread_bps: Optional[float] = None,
+        pm_mult: float = 1.0,
     ):
         """Build a plan or return PlannerReject.
 
@@ -162,8 +163,11 @@ class OrbTradePlanner:
         # Cap at per-position limit BEFORE adaptive mult (matches BT study_orb_100k_defended.py)
         position_before_mult = min(uncapped_position, self.per_pos_cap_usd)
 
-        # Apply adaptive multiplier (may push above per-pos cap — BT behavior)
-        position_dollars = position_before_mult * adaptive_mult
+        # Apply adaptive multiplier (may push above per-pos cap — BT behavior),
+        # then the premarket dollar-volume sizing mult (2026-07-04, upsize-only
+        # ×1.5 above the TRAIN-frozen cut — trading/orb_pm_mult.py). Stacks
+        # exactly like the quintile mult so BT and live agree by construction.
+        position_dollars = position_before_mult * adaptive_mult * pm_mult
 
         shares = int(math.floor(position_dollars / entry_price))
         if shares < 1:

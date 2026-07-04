@@ -218,8 +218,9 @@ class TestFullEntryFlow:
             range_avg_bar_range_pct=1.0, range_close=10.25,
             range_start_ts=pd.Timestamp.utcnow(),
         )
-        # Wide spread: bid 9.80, ask 10.00 on $10 stock = 200bps
-        mock_alpaca.get_latest_quote.return_value = {'bid_price': 9.80, 'ask_price': 10.00}
+        # Wide spread: bid 9.60, ask 10.00 = ~417bps — above the 300bps gate
+        # (gate loosened 150->300 on 2026-07-04; 200bps is now ADMITTED)
+        mock_alpaca.get_latest_quote.return_value = {'bid_price': 9.60, 'ask_price': 10.00}
         # Explosive prev day (range 16.8% > 8%) so the PDR veto passes and
         # the spread gate is what this test actually exercises.
         providers = {'TSLA': {

@@ -248,6 +248,39 @@ def main():
     sel['date'] = pd.to_datetime(sel['date'])
     sel['month'] = sel['date'].dt.to_period('M').astype(str)
 
+    # PM dollar-volume sizing mult (ships 2026-07-04; matches
+    # trading/orb_engine.py via shared trading/orb_pm_mult.py). Upsize-only
+    # x1.5 above the TRAIN-frozen cut. PM data: data/research CSV for the
+    # historical book + nightly appends; unknown symbol-days fail-open at
+    # 1.0 (logged count). Env: ORB_PM_MULT=0 disables.
+    from trading.orb_pm_mult import (
+        DEFAULT_HIGH_CUT_USD, DEFAULT_HIGH_MULT, pm_size_multiplier,
+    )
+    _pm_env = os.environ.get('ORB_PM_MULT', '1').strip().lower()
+    if _pm_env not in ('0', 'false', 'no', 'off', ''):
+        import glob as _glob
+        _pm_paths = sorted(_glob.glob('data/research/orb_premarket_dollar_vol_*.csv'))
+        if _pm_paths:
+            _pm = pd.concat([pd.read_csv(x) for x in _pm_paths], ignore_index=True)
+            _pm = _pm.dropna(subset=['pm_dollar_vol'])                 .drop_duplicates(subset=['symbol', 'day'], keep='last')
+            _pm_map = {(r['symbol'], r['day']): r['pm_dollar_vol']
+                       for _, r in _pm.iterrows()}
+            sel['_pm_key'] = list(zip(sel['symbol'],
+                                      sel['date'].dt.strftime('%Y-%m-%d')))
+            sel['_pm_mult'] = sel['_pm_key'].map(
+                lambda k: pm_size_multiplier(_pm_map.get(k),
+                                             DEFAULT_HIGH_CUT_USD,
+                                             DEFAULT_HIGH_MULT))
+            n_boost = int((sel['_pm_mult'] > 1.0).sum())
+            n_unknown = int(sum(1 for k in sel['_pm_key'] if k not in _pm_map))
+            sel['_sized_pnl'] = sel['_sized_pnl'] * sel['_pm_mult']
+            sel = sel.drop(columns=['_pm_key'])
+            print(f"PM sizing mult: {n_boost} picks boosted x{DEFAULT_HIGH_MULT}, "
+                  f"{n_unknown} unknown->1.0 (set ORB_PM_MULT=0 to disable)")
+        else:
+            print("PM sizing mult: WARNING no data/research/orb_premarket_dollar_vol_*.csv "
+                  "— all mults 1.0 (fail-open)")
+
     # PDR veto (ships 2026-07-04; matches trading/orb_engine.py). Applied
     # POST-selection with NO refill — a vetoed pick's slot stays empty,
     # exactly like live (backfill form tested toxic; see

@@ -188,6 +188,16 @@ dedup:
 
 # Sizing — risk-parity within per-position cap.
 sizing:
+  # Premarket dollar-volume sizing mult (2026-07-04, upsize-only). Picks
+  # whose 4:00-9:29 ET dollar volume exceeds the TRAIN-frozen cut get 1.5x
+  # sizing. Evidence: +$76.8K/18mo, all 3 eras positive, 0 giants downsized,
+  # corr(PM$, composite)=0.05 (orthogonal). Worst month -$2.6K (downside
+  # capped by stops, upside uncapped). Shared math: trading/orb_pm_mult.py.
+  # Env override: ORB_PM_MULT=0. DO NOT refit the cut without walk-forward.
+  pm_dollar_vol_mult:
+    enabled: true
+    high_cut_usd: 5816688    # H1-2025 TRAIN upper tercile — frozen
+    high_mult: 1.5
   account_budget_usd: 100000    # ORB's carved pool (shared account later)
   max_concurrent: 4             # top-N picks per day
   risk_per_trade_usd: 3000      # validated value; lower to $1000 for Phase 2 live ramp
