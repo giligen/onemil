@@ -41,8 +41,18 @@ Implications:
   in the starved regime**). Era asymmetry hypothesis: the strict detector
   was implicitly shaped for 2025 flags; 2026 flags are structurally
   different — rigidity binds exactly where supply died.
-- When twin lands: Stage-2 loose vs strict-twin, eras 2025/2026/recent-3mo,
-  monsters + monthly per decision rules below.
+- VERDICT (2026-07-04 22:00): **REFUTED, decisively.** Stage-2 twins:
+  STRICT wins 2025 (+$27.3K vs +$16.1K), 2026 (+$14.2K vs +$8.3K), full
+  (+$41.4K/64.5%WR vs +$24.4K/52.6%). The 100 incremental setups are
+  +$21/trade raw, NEGATIVE in 2026 (−$1.3K/45tr), and in Stage-2 they
+  DISPLACE winners via concurrency/daily-loss sequencing (the ORB-B1
+  displacement lesson). The June 3x-setups preview was supply, not edge.
+  May's rejection re-confirmed on clean twin methodology. The strict
+  detector is load-bearing — do not loosen. Third consecutive refutation
+  tonight (knobs, conviction re-weights [hand weights beat ridge/ensemble
+  OOS at every pass rate], detection loosening): BF per-setup selection
+  is at its information ceiling. Remaining levers: EXITS (never swept)
+  and capital allocation (structural, post-ramp).
 
 ## ⚠ METHODOLOGY TRAP (cost one 2.5h build, 2026-07-04)
 `--build-cache` WITHOUT `--no-cache` runs the auto-build path that
