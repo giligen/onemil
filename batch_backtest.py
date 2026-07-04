@@ -233,8 +233,19 @@ def filter_bull_flag_trades(
     daily_loss_limit: float = 0,
     universe_vol_map: Optional[Dict[str, int]] = None,
     min_intraday_change_at_entry: float = 0,
+    regime_lookup: Optional[Dict[str, str]] = None,
+    regime_multipliers: Optional[Dict] = None,
 ) -> List[Dict]:
-    """Apply regime, max trades/day, consecutive loss, threshold, concurrent, and loss limit filters."""
+    """Apply regime, max trades/day, consecutive loss, threshold, concurrent, and loss limit filters.
+
+    2026-07-04 parity fix (assumption ledger): Stage-2 now applies the
+    Phase-1.4b A/B/C1/C2 regime sizing that live has had since 4/18 —
+    previously a documented live-only layer, so Stage-2 numbers diverged
+    from the live stack. Day-level: C2 days skip entirely (mult 0), other
+    regimes scale each trade's pnl BEFORE the daily-loss accumulator,
+    matching live order-of-operations. Pass regime_lookup=None (or
+    BT_REGIME_SIZING=0 at the CLI layer) for pre-fix relative comparisons.
+    """
     from collections import defaultdict
     from datetime import datetime as _dt
     from data_sources.alpaca_client import AlpacaClient
@@ -594,6 +605,17 @@ def filter_bull_flag_trades(
             continue
 
         day_trades = by_date[d]
+
+        # Regime sizing (live parity — see docstring). Day-level multiplier.
+        _regime_mult = 1.0
+        if regime_lookup is not None:
+            from trading.regime_helpers import get_regime_multiplier
+            _day_regime = regime_lookup.get(d, 'unknown')
+            _regime_mult = get_regime_multiplier(_day_regime, regime_multipliers)
+            if _regime_mult == 0.0:
+                logger.debug(f"{d}: regime {_day_regime} mult=0 — day skipped")
+                continue
+
         day_count = 0
         consec_losses = 0
         daily_pnl = 0.0
@@ -629,6 +651,8 @@ def filter_bull_flag_trades(
                     except (ValueError, TypeError):
                         pass  # Can't parse times, allow trade
 
+            if _regime_mult != 1.0:
+                t['pnl'] = float(t.get('pnl', 0.0)) * _regime_mult
             filtered.append(t)
             day_count += 1
             daily_pnl += t['pnl']
@@ -3033,6 +3057,33 @@ def main():
         _daily_loss = float(trading_cfg.get("daily_loss_limit", -5000))
         # Build volume map for min_daily_volume filter
         _vol_map = {s['symbol']: s.get('avg_volume_daily', 0) or 0 for s in db.get_active_universe()}
+        # Regime-sizing parity (2026-07-04): build the day->regime lookup
+        # from SPY cache unless disabled (config flag off or BT_REGIME_SIZING=0
+        # for pre-fix relative comparisons).
+        _regime_lookup = None
+        _regime_mults = None
+        _rs_env = os.environ.get('BT_REGIME_SIZING', '1').strip().lower()
+        if _rs_env not in ('0', 'false', 'no', 'off'):
+            try:
+                from config import Config as _Cfg
+                _rs_cfg = _Cfg().regime_sizing_cfg or {}
+                if _rs_cfg.get('enabled', False):
+                    import sqlite3 as _sq
+                    from trading.regime_helpers import build_regime_lookup
+                    _conn = _sq.connect('data/cache.db')
+                    _spy = pd.read_sql_query(
+                        "SELECT bar_date, close FROM daily_bars "
+                        "WHERE symbol='SPY' ORDER BY bar_date", _conn)
+                    _conn.close()
+                    _regime_lookup = build_regime_lookup(_spy)
+                    _regime_mults = _rs_cfg.get('multipliers')
+                    logger.info(
+                        f"Stage-2 regime sizing ON — {len(_regime_lookup)} "
+                        f"dates classified (BT_REGIME_SIZING=0 to disable)")
+            except Exception as _e:
+                logger.warning(
+                    f"Stage-2 regime sizing unavailable ({_e}) — running "
+                    f"without it (pre-fix behavior)")
         filtered_trades = filter_bull_flag_trades(
             cached_trades,
             market_regime=market_regime if market_regime.enabled else None,
@@ -3044,6 +3095,8 @@ def main():
             daily_loss_limit=_daily_loss,
             universe_vol_map=_vol_map,
             min_intraday_change_at_entry=_stage2_threshold,
+            regime_lookup=_regime_lookup,
+            regime_multipliers=_regime_mults,
         )
         # Write output CSV — pass through all cache columns
         trade_count = 0

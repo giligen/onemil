@@ -237,9 +237,12 @@ def build_candidate(sym, ds, row, bars_df, sym_daily):
     if range_size <= 0 or open_p <= 0:
         return None
 
-    # Entry: first bar 9:35-10:35 whose high crosses range_high
+    # Entry: first bar whose high crosses range_high within the entry window
+    # (default 60min post-range = BT convention; ORB_BAND_ENTRY_WINDOW_MIN
+    # env for the time-stop sweep — ledger debt #1).
+    _win_min = int(os.environ.get('ORB_BAND_ENTRY_WINDOW_MIN', 60))
     win = bars_df[(bars_df['timestamp'] >= ots + timedelta(minutes=5)) &
-                  (bars_df['timestamp'] < ots + timedelta(minutes=65))]
+                  (bars_df['timestamp'] < ots + timedelta(minutes=5 + _win_min))]
     hit = win[win['high'] > range_high]
     if hit.empty:
         return None
@@ -386,7 +389,7 @@ def main():
         except Exception:
             continue
     band = pd.DataFrame(built)
-    tag = f"{BAND_MIN:g}_{BAND_MAX:g}_slip{ENTRY_SLIP_BPS:g}"
+    tag = f"{BAND_MIN:g}_{BAND_MAX:g}_slip{ENTRY_SLIP_BPS:g}_w{os.environ.get('ORB_BAND_ENTRY_WINDOW_MIN', 60)}"
     band.to_csv(f'/tmp/orb_band_{tag}_candidates.csv', index=False)
     log(f"built {len(band)} band candidates with entries "
         f"({len(band) / max(len(cand_rows), 1) * 100:.0f}% of discovered broke out)")

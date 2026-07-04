@@ -54,12 +54,25 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
 | trail vol guard min_vol_ratio | — | ✅ Exp D |
 | BF entry slip model | — | ⚠ stale — recalibrate from trades DB quarterly (README note) |
 
-## Standing debt (queued, in priority order)
-1. time_stop 60 vs 90 re-sweep on current book (GLXU class) — cheap, bars cached
-2. BF entry-slip recalibration from live telemetry
-3. Monster-detection data acquisition: point-in-time float, premarket volume
-   (only unrefuted channels; node-oracle ceiling +135R quantified Jul'26)
-4. Stage-2 BF parity gaps (regime sizing + UD scaling live-only) — documented, unmodeled
+## Standing debt — CLEANUP PASS 2026-07-04 (all four attacked)
+1. time_stop 60 vs 90 — sweep RUNNING (background; verdict pending)
+2. BF entry-slip: ✅ VALIDATED — live median +40-54bps vs 50bps model
+   (n=29, thin); re-check at n>=60
+3. Monster-detection channels:
+   - premarket volume: TESTED — real gradients (high-PM$ +$792/trade vs
+     low −$17; all-era-consistent tercile). Walk-forward veto
+     (pm_dollar_vol <= TRAIN-p20 ≈ $357K): +$15.7K/18mo, all eras >=0,
+     0 monsters hit — but only 11/19 months and best-month = 44% of
+     benefit → **PARKED as validated-direction candidate** (PDR bar is
+     18/19). Live-implementable via 9:30 snapshot volume. Re-evaluate
+     next quarterly review or if live PM telemetry accumulates.
+     Data: /tmp/orb_premarket_features.csv (100% coverage).
+   - float (dirty read, current-float contaminated): RUNNING background.
+     Point-in-time float remains a purchase decision.
+4. Stage-2 regime sizing: ✅ SHIPPED — day-level A/B/C1/C2 mult + C2 skip
+   in batch_backtest Stage-2 (BT_REGIME_SIZING=0 = pre-fix, verified
+   byte-identical). A/B on 2025-01→2026-07: $31.9K/74tr → $35.6K/67tr.
+   UD scaling remains live-only (documented).
 
 ## Rules of the ledger
 - A ship without a ledger row update is incomplete.

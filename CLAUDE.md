@@ -390,12 +390,16 @@ python batch_backtest.py --start 2026-01-01 --end 2026-03-31
 - Takes <1 second (reads from cache), so there is ZERO reason to skip this step
 
 **Stage 2 is a RELATIVE tool, not a P&L forecast.** It models *some* of the
-live sizing/filter stack but NOT all of it. Known parity gaps as of
-2026-05-14: Stage 2 does **not** apply **regime sizing** (A/B/C1/C2 per-day
-multipliers) or **UD scaling** (SPY up/down-volume euphoria guard) — both
-are live-only. Plus the 6 structural BT/LIVE drift sources in the
-`project_bull_flag_drift_findings` memory (20% threshold mismatch,
-scan_results bug, entry latency, exit divergence, …).
+live sizing/filter stack but NOT all of it. Parity status:
+- **Regime sizing (A/B/C1/C2)**: MODELED as of 2026-07-04 (assumption-ledger
+  fix) — day-level multiplier + C2-day skip via `trading/regime_helpers`,
+  applied before the daily-loss accumulator like live. `BT_REGIME_SIZING=0`
+  restores pre-fix behavior for old relative comparisons (verified
+  byte-identical: $31,864.54/74 trades on 2025-01→2026-07-02).
+- **UD scaling** (SPY up/down-volume euphoria guard): still live-only.
+- Plus the 6 structural BT/LIVE drift sources in the
+  `project_bull_flag_drift_findings` memory (20% threshold mismatch,
+  scan_results bug, entry latency, exit divergence, …).
 
 → Stage 2 is valid for **feature A/B comparisons** ("does filter X help vs
 not-X?") — the unmodeled layers cancel in the diff. It is **NOT** valid as
