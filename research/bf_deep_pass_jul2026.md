@@ -17,6 +17,33 @@ OLD stack — the interaction with the new stack is UNTESTED.
   Build log /tmp/bf_loose_build2.log ('LOOSE BUILD DONE' sentinel).
   Rebuild: /tmp/bf_loose_build.sh. NEVER touches prod cache.
 
+## 🚨 FOUNDATIONAL FINDING (2026-07-04): the Stage-1 cache is IRREPRODUCIBLE
+Full rebuilds CANNOT reproduce the prod cache (March-25: 16 vs 83; June-26:
+7 vs 24) because `find_big_movers` applies `float_max=10M` using the
+CURRENT universe table's float_shares — floats mutate (dilution), so a
+rebuild time-travels today's floats onto history (survivorship drift).
+Implications:
+- The prod cache (nightly same-day appends) is POINT-IN-TIME TRUTH and
+  must NEVER be rebuilt — the no-overwrite rule is about correctness,
+  not just cost. The 171→39/mo supply collapse is REAL (market), since
+  the prod cache is point-in-time.
+- ANY study comparing a full rebuild to the prod cache is invalid.
+  Valid comparisons: rebuild-vs-rebuild TWINS (identical drift both arms).
+- Long-term fix candidate: snapshot float_shares per date (the cache rows
+  already capture point-in-time implicitly; a universe history table
+  would let rebuilds be honest).
+
+## Loose-detection experiment, redesigned (twin builds)
+- /tmp/bf_cache_loose.csv (loose envelope) DONE: 201 trades.
+- /tmp/bf_cache_strict_twin.csv building (no env overrides, same flags).
+- PREVIEW (loose vs strict-control months): March-25 16 = 16 (loosening
+  adds NOTHING in 2025-style months); June-26 22 vs 7 (**3x more setups
+  in the starved regime**). Era asymmetry hypothesis: the strict detector
+  was implicitly shaped for 2025 flags; 2026 flags are structurally
+  different — rigidity binds exactly where supply died.
+- When twin lands: Stage-2 loose vs strict-twin, eras 2025/2026/recent-3mo,
+  monsters + monthly per decision rules below.
+
 ## ⚠ METHODOLOGY TRAP (cost one 2.5h build, 2026-07-04)
 `--build-cache` WITHOUT `--no-cache` runs the auto-build path that
 applies PRODUCTION FILTERS (regime, max_trades/day=5, circuit breakers)

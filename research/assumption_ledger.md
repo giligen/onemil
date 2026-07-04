@@ -52,7 +52,9 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
 | TTF / V-rev bonus / per-tier MACD / regime mults | various | ✅ (2026 Q2 ships, each with BT + parity tests) |
 | pattern detector (pole 3, retrace 50, …) | — | ✅ rejected changes 5/15 (recency-negative) |
 | trail vol guard min_vol_ratio | — | ✅ Exp D |
-| BF entry slip model | — | ⚠ stale — recalibrate from trades DB quarterly (README note) |
+| BF entry slip model | — | ✅ Jul'26: live +40-54bps vs 50 model (n=29, recheck n>=60) |
+| BF Stage-1 cache reproducibility | — | 🚨 Jul'26: IRREPRODUCIBLE — mover screen float gate time-travels (current floats on history). Prod cache = point-in-time truth, NEVER rebuild. Studies must use rebuild twins. |
+| BF detector era-fit | strict rules | ⚠ TESTING — twin-build preview: loose=strict in Mar-25, loose 3x strict in Jun-26; strict rules may bind exactly in the 2026 regime |
 
 ## Standing debt — CLEANUP PASS 2026-07-04 (all four attacked)
 1. time_stop 60 vs 90 — ✅ CLOSED, 60 STAYS: full-universe rediscovery
