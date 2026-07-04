@@ -17,7 +17,7 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
 | universe gap min | 5% | 📌 | untestable below 5 (capture bias); monitored via selection audit |
 | universe prev_vol | 500K | 📌 | same capture bias; monitor |
 | price band | $3–30 | ✅ | Jul'26: $2–3 NO-GO (−$44..75K), $30–60 NO-GO, $4 floor fragile — orb_price_band_verdicts_jul2026.md |
-| stop_limit_buffer | 30bps | ⚠→testing | inherited from BF; quote-path study running (orb_entry_buffer_study.py) — also tests BT fill assumption |
+| stop_limit_buffer | 30bps | ✅ | Jul'26 quote-path study: 97% of BT fills genuinely fillable at +30bps, ALL top-10 monsters fillable (min-ask 35-315bps BELOW trigger), knob insensitive 10-150bps. BT fill assumption VALID. /tmp/orb_entry_buffer.csv |
 | spread gate | 300bps | 🔧 | NBBO study Jul'26: 150 skipped monsters (BKKT 153, XNDU 267); orb_spread_gate_verdict.md. NEVER tighten <150 |
 | entry window (time_stop) | 60min | ✅(dated) | Apr'26 variants (time_30 worse); GLXU 6/8 ran post-window → re-sweep 60/90 QUEUED |
 | 9:35 one-shot top-K | — | ✅ | BT-parity by construction; race-fixed 7/3-4 |
@@ -55,16 +55,18 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
 | BF entry slip model | — | ⚠ stale — recalibrate from trades DB quarterly (README note) |
 
 ## Standing debt (queued, in priority order)
-1. entry buffer 30bps — study RUNNING (also validates BT fill assumption)
-2. time_stop 60 vs 90 re-sweep on current book (GLXU class) — cheap, bars cached
-3. BF entry-slip recalibration from live telemetry
-4. Monster-detection data acquisition: point-in-time float, premarket volume
+1. time_stop 60 vs 90 re-sweep on current book (GLXU class) — cheap, bars cached
+2. BF entry-slip recalibration from live telemetry
+3. Monster-detection data acquisition: point-in-time float, premarket volume
    (only unrefuted channels; node-oracle ceiling +135R quantified Jul'26)
-5. Stage-2 BF parity gaps (regime sizing + UD scaling live-only) — documented, unmodeled
+4. Stage-2 BF parity gaps (regime sizing + UD scaling live-only) — documented, unmodeled
 
 ## Rules of the ledger
 - A ship without a ledger row update is incomplete.
 - Any knob touched by a fix gets its status re-checked, not assumed.
-- Baseline note: with the 15:45 parity fix the defended-book baseline
-  moves from $209,734 — rerun in progress; update here and in CLAUDE.md
-  when the new number lands. Older studies quote the 15:59 convention.
+- Baseline note: with the 15:45 parity fix the defended-book baseline is
+  **$258,298** (Jan'25–Jul'26, veto + parity; was $209,734 under the old
+  last-bar/15:59 convention — the fix helps twice, both live-true: EOD
+  holds skip the closing fade AND stops in the 15:45-15:59 window never
+  fire live). Studies dated before 2026-07-04 quote the 15:59 convention;
+  reproduce them with ORB_BT_FORCE_CLOSE_ET=15:59.
