@@ -64,21 +64,24 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
 2. BF entry-slip: ✅ VALIDATED — live median +40-54bps vs 50bps model
    (n=29, thin); re-check at n>=60
 3. Monster-detection channels:
-   - premarket volume: TESTED — real gradients (high-PM$ +$792/trade vs
-     low −$17; all-era-consistent tercile). Walk-forward veto
-     (pm_dollar_vol <= TRAIN-p20 ≈ $357K): +$15.7K/18mo, all eras >=0,
-     0 monsters hit — but only 11/19 months and best-month = 44% of
-     benefit → **PARKED as validated-direction candidate** (PDR bar is
-     18/19). Live-implementable via 9:30 snapshot volume. Re-evaluate
-     next quarterly review or if live PM telemetry accumulates.
-     Data: /tmp/orb_premarket_features.csv (100% coverage).
-   - float (dirty read, current-float CONTAMINATED, 66% symbol coverage):
-     HIGH float is the bad zone — Q4 bucket −$117/trade mean (only
-     negative bucket; −$194 in 2025), low-float Q1 +$982 with 13/31
-     monsters. Non-monotone middle (Q2/Q3 flip) + contamination =
-     NOT shippable from this data. Suggestive enough to put the
-     point-in-time float data PURCHASE on the owner-decision list.
-     Data: /tmp/orb_float_dirty.csv.
+   - premarket volume: ✅ **SHIPPED as SIZING (2026-07-04)** — the veto
+     form tested the wrong end; the monotone-positive gradient's value is
+     at the TOP. Upsize-only x1.5 above the TRAIN-frozen upper tercile
+     ($5.82M): +$76.8K/18mo, ALL eras positive, 0 giants downsized,
+     worst month −$2.6K, corr(PM$, composite)=0.05 (orthogonal).
+     trading/orb_pm_mult.py; sizing.pm_dollar_vol_mult; ORB_PM_MULT=0.
+     Data: data/research/orb_premarket_dollar_vol_20260704.csv.
+   - float: ✅ RESOLVED WITHOUT PURCHASE — SEC EDGAR shares-outstanding
+     (free, point-in-time by filing date) decontaminated the test:
+     LOW-shares cohort is real (+$1,301/trade, 9/26 monsters — the
+     low-float thesis holds point-in-time) but the gradient is only
+     monotone in 2026 (2025 muddled: Q3 −$317, Q4 +$356) → fails
+     era-consistency, NOT shippable. The dirty read's "high float bad"
+     was partially lookahead (PIT Q4 = +$269, not negative). NO paid
+     float data needed — EDGAR proxy suffices and the answer is 'not
+     yet'. Do NOT stack a shares-based mult on the PM mult without
+     joint validation. Data: /tmp/orb_pit_shares.csv,
+     /tmp/edgar_shares_hist.csv (fetcher /tmp/edgar_shares_study.py).
 4. Stage-2 regime sizing: ✅ SHIPPED — day-level A/B/C1/C2 mult + C2 skip
    in batch_backtest Stage-2 (BT_REGIME_SIZING=0 = pre-fix, verified
    byte-identical). A/B on 2025-01→2026-07: $31.9K/74tr → $35.6K/67tr.
