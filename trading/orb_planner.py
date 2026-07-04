@@ -83,7 +83,7 @@ class OrbTradePlanner:
         sizing_cfg = cfg.get('sizing', {})
 
         self.entry_slip_bps = float(entry_cfg.get('entry_slip_bps', 30))
-        self.max_spread_bps = float(entry_cfg.get('max_spread_bps', 150))
+        self.max_spread_bps = float(entry_cfg.get('max_spread_bps', 300))
 
         self.lock_arm_at_r = float(exit_cfg.get('lock_arm_at_r', 1.5))
         self.lock_stop_r = float(exit_cfg.get('lock_stop_r', 1.0))

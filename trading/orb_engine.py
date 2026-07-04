@@ -287,7 +287,7 @@ class ORBEngine:
         self.range_minutes = int(entry_cfg.get('range_minutes', 5))
         self.entry_slip_bps = float(entry_cfg.get('entry_slip_bps', 30))
         self.time_stop_minutes = int(entry_cfg.get('time_stop_minutes', 60))
-        self.max_spread_bps = float(entry_cfg.get('max_spread_bps', 150))
+        self.max_spread_bps = float(entry_cfg.get('max_spread_bps', 300))
 
         # Universe criteria (BT-parity: gap >= 5%, vol >= 500K, price $3-30)
         self.universe_source = uni.get('source', 'bull_flag_cache')

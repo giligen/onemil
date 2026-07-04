@@ -39,7 +39,15 @@ entry:
   entry_mode: touch         # 'touch' | 'close_above'
   entry_slip_bps: 30        # calibrated from bull flag live data; measured in Phase 1
   time_stop_minutes: 60     # cancel unfilled buy-stop at 10:35 ET (per-order clock, from submit)
-  max_spread_bps: 150       # skip entry + telegram warning if (ask-bid)/price > 150bps
+  # 2026-07-04 loosened 150 -> 300 (owner-approved, NBBO study on the 570-
+  # trade defended book): the 150 gate was skipping monsters — BKKT +$20.8K
+  # quoted 153bps, XNDU +$11.9K at 267bps; 100-150bps is the richest
+  # per-trade bucket ($1,299 avg). Sweep w/ spread/2 exit penalty: gate 300
+  # = +$24.7K/18mo vs 150; >300 tail is net-negative after costs (keep the
+  # gate, just wider). Entry price is still capped by the +30bps stop-limit;
+  # fill quality on wide names monitored via entry_quote_spread telemetry.
+  # Evidence: research/orb_spread_gate_verdict.md.
+  max_spread_bps: 300       # skip entry + telegram warning above this
   stop_limit_buffer_bps: 30 # stop-limit buy: limit = range_high × (1 + buffer/10000)
   # 2026-07-03 selection-race fix (CRCD/AVEX/FABC/RGNX missed winners):
   # the 9:34 bar consolidates with 2-10s vendor lag, so the 9:35:01 ranking
