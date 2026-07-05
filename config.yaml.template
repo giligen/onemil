@@ -287,7 +287,11 @@ trading:
     min_pole_candles: 3
     min_pole_gain_pct: 3.0
     max_retracement_pct: 50.0
-    max_pullback_candles: 5
+    # 2026-07-05: 5 -> 10. Kill-table showed 'pullback too long' = 66% of
+    # 2026 detector rejections (2026 flags consolidate slower). Single-knob
+    # twin BT: +$3.8K/18mo, BOTH eras positive, 12 incremental setups at
+    # 50% WR, zero Stage-2 displacement. Modest but harm-free supply.
+    max_pullback_candles: 10
     min_breakout_volume_ratio: 1.5
     require_macd_positive: false
     max_green_in_flag: 2

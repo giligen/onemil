@@ -68,7 +68,7 @@ class BullFlagDetector:
         min_pole_candles: int = 3,
         min_pole_gain_pct: float = 3.0,
         max_retracement_pct: float = 50.0,
-        max_pullback_candles: int = 5,
+        max_pullback_candles: int = 10,  # 2026-07-05: 5->10 (single-knob twin: +$3.8K/18mo, both eras +, harm-free; 'pullback too long' was 66% of 2026 rejections — flags slowed)
         min_breakout_volume_ratio: float = 1.5,
         require_macd_positive: bool = False,
         macd_fast: int = 12,

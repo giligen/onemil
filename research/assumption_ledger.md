@@ -55,6 +55,8 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
 | BF trail activate_at_r | 2.0 | 🔧 Jul'26: 1.5→2.0 (reverses Apr'13 ship — population changed). 13/13 improved, 0 hurt, 19/19 months, monotone both eras, ≈+35% book. Revert trigger in config comment. |
 | BF conviction rule weights | hand-tuned | ✅ Jul'26: hand weights BEAT ridge/sign-ensemble OOS at every pass rate (n=249 w/ components) — do not ML-refit at this sample size |
 | BF detector strictness | pole3/retr50/… | ✅ Jul'26 twin-rebuild: loosening REFUTED (incrementals +$21/trade raw, negative 2026, displace winners in Stage-2). Strict detector is load-bearing. |
+| BF max_pullback_candles | 10 | 🔧 Jul'26: 5→10 single-knob twin (+$3.8K/18mo, both eras +, harm-free). Was 66% of 2026 rejections + NEVER tested alone (bundling lesson). Most long consolidations still die — modest supply, not a jackpot. |
+| BF supply ceiling | — | ✅ Jul'26: MARKET-limited, not code — eligible movers GREW (2068→2702/mo) while flag-formation collapsed 8%→1.4%. Monitor monthly via research/scripts/bf_rejection_histogram.py. |
 | BF entry slip model | — | ✅ Jul'26: live +40-54bps vs 50 model (n=29, recheck n>=60) |
 | BF Stage-1 cache reproducibility | — | 🚨 Jul'26: IRREPRODUCIBLE — mover screen float gate time-travels (current floats on history). Prod cache = point-in-time truth, NEVER rebuild. Studies must use rebuild twins. |
 | BF detector era-fit | strict rules | ⚠ TESTING — twin-build preview: loose=strict in Mar-25, loose 3x strict in Jun-26; strict rules may bind exactly in the 2026 regime |

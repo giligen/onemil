@@ -140,7 +140,7 @@ class TestConfigLoading:
         assert cfg.min_pole_candles == 3
         assert cfg.min_pole_gain_pct == 3.0
         assert cfg.max_retracement_pct == 50.0
-        assert cfg.max_pullback_candles == 5
+        assert cfg.max_pullback_candles == 10   # 2026-07-05 ship (5->10)
         assert cfg.min_breakout_volume_ratio == 1.5
         assert cfg.min_risk_per_share == 0.02
 

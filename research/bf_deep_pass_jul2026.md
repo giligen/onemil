@@ -105,9 +105,26 @@ Owner: "BF is nothing — what are we missing?" Answer found in three steps:
    pullback-only cell; the loose envelope bundled it with junk-admitting
    knobs whose earlier intraday matches SHADOW pullback-admitted setups
    (detector is first-match-wins). Twice missed by bundling.
-IN FLIGHT: single-knob twin BF_MAX_PULLBACK_CANDLES=10
-(/tmp/bf_cache_pullback10.csv) vs strict twin through Stage-2.
-Kill-table script: /tmp/bf_rejection_histogram.py (reusable).
+VERDICT (2026-07-05): **SHIPPED, modest.** Single-knob twin: full
++$45.2K vs +$41.4K (+$3.8K/18mo), BOTH eras positive, 12 incrementals
+at 50% WR, ZERO Stage-2 displacement. But only +12 raw setups/19mo —
+most 'pullback too long' rejections are consolidations that ran far past
+10 candles or died: **2026's slow flags are mostly breakdowns, not
+flags-in-waiting. BF's ceiling is largely the market's, not the code's.**
+Ship: max_pullback_candles 5→10 in detector default + config.py default
++ both yamls. Kill-table script: /tmp/bf_rejection_histogram.py (copied
+to research/scripts/).
+
+## STRATEGIC CLOSE (the owner's 'BF is nothing' question, answered)
+BF's per-trade edge is real (58-65% WR); its throughput is market-limited
+(eligible movers grew but flag-formation collapsed 8%→1.4%). After this
+weekend BF's stack is fully audited: floor 1.8 + trail 2.0 + pullback 10
+≈ $20K/yr model-scale in the 2026 regime — a solid SECONDARY engine, not
+a money machine. The money machine is ORB ($182K 2026 model-scale). BF's
+correct posture: maintenance mode (it's cheap to run, diversifies entry
+mechanics, and will re-expand if flag-formation returns — the kill-table
+script makes that measurable monthly). Concentrate new research tokens
+on ORB + capital scaling (the ramp).
 
 ## Queued next (after detection verdict)
 1. Conviction re-weighting: cache stores per-rule components (conv_*);

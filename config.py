@@ -456,7 +456,7 @@ class Config:
     @property
     def max_pullback_candles(self) -> int:
         """Maximum pullback candles before pattern is rejected."""
-        return int(self._get_yaml("trading", "bull_flag", "max_pullback_candles", default=5))
+        return int(self._get_yaml("trading", "bull_flag", "max_pullback_candles", default=10))  # 2026-07-05: 5->10
 
     @property
     def min_breakout_volume_ratio(self) -> float:
