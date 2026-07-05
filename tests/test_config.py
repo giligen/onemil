@@ -113,7 +113,7 @@ class TestConfigLoading:
 
         assert cfg.log_level == "INFO"
         assert cfg.price_min == 2.0
-        assert cfg.price_max == 20.0
+        assert cfg.price_max == 30.0   # 2026-07-05 ship (20->30)
         assert cfg.float_max == 10_000_000
         assert cfg.gap_pct_min == 2.0
         assert cfg.intraday_change_pct_min == 10.0

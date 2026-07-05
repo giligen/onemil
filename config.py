@@ -236,7 +236,7 @@ class Config:
     @property
     def price_max(self) -> float:
         """Maximum stock price for universe."""
-        return float(self._get_yaml("scanner", "price_max", default=20.0))
+        return float(self._get_yaml("scanner", "price_max", default=30.0))  # 2026-07-05: 20->30
 
     @property
     def float_max(self) -> int:

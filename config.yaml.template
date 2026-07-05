@@ -33,7 +33,13 @@ scanner:
   # Price range filter (universe watchlist — wider to catch stocks drifting in/out)
   # Trade-time min_price ($2) in trading section still prevents entries below $2
   price_min: 1.0
-  price_max: 23.0    # $20-23 profitable (PF 2.75+), $24+ is death zone (0-14% WR)
+  # 2026-07-05: 23 -> 30. Twin BT through the MODERN stack (floor 1.8 +
+  # TTF + regime + trail 2.0): +$6.4K/18mo, BOTH eras positive, 22
+  # incremental trades at 41% WR in the $23-30 band. NOTE: supersedes the
+  # older "$24+ is death zone (0-14% WR)" finding — that was measured on
+  # the pre-modern stack; the quality stack changed the band's economics
+  # (same lesson as trail activation). Evidence: research/bf_deep_pass_jul2026.md.
+  price_max: 30
 
   # Float filter (shares)
   float_max: 50_000_000

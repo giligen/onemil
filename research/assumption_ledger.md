@@ -57,6 +57,8 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
 | BF detector strictness | pole3/retr50/… | ✅ Jul'26 twin-rebuild: loosening REFUTED (incrementals +$21/trade raw, negative 2026, displace winners in Stage-2). Strict detector is load-bearing. |
 | BF max_pullback_candles | 10 | 🔧 Jul'26: 5→10 single-knob twin (+$3.8K/18mo, both eras +, harm-free). Was 66% of 2026 rejections + NEVER tested alone (bundling lesson). Most long consolidations still die — modest supply, not a jackpot. |
 | BF supply ceiling | — | ✅ Jul'26: MARKET-limited, not code — eligible movers GREW (2068→2702/mo) while flag-formation collapsed 8%→1.4%. Monitor monthly via research/scripts/bf_rejection_histogram.py. |
+| BF detector timeframe | 1-min | ✅ Jul'26: multiframe test (1/2/5-min) — the literature's ~10 raw flags/day EXIST at every TF but carry ZERO edge (WR 32-37%, avg R −0.28..0.00; 5-min WORST). The shape has no edge; selection is the edge. |
+| BF price_max | 30 | 🔧 Jul'26: 23→30 twin (+$6.4K/18mo, BOTH eras +, 22 incr @41% WR). SUPERSEDES the old "$24+ death zone" note (pre-modern-stack measurement). Combo with pullback-10 not twin-tested — expect ≈additive, verify live. |
 | BF entry slip model | — | ✅ Jul'26: live +40-54bps vs 50 model (n=29, recheck n>=60) |
 | BF Stage-1 cache reproducibility | — | 🚨 Jul'26: IRREPRODUCIBLE — mover screen float gate time-travels (current floats on history). Prod cache = point-in-time truth, NEVER rebuild. Studies must use rebuild twins. |
 | BF detector era-fit | strict rules | ⚠ TESTING — twin-build preview: loose=strict in Mar-25, loose 3x strict in Jun-26; strict rules may bind exactly in the 2026 regime |
