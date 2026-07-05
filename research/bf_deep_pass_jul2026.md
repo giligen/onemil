@@ -115,6 +115,25 @@ Ship: max_pullback_candles 5→10 in detector default + config.py default
 + both yamls. Kill-table script: /tmp/bf_rejection_histogram.py (copied
 to research/scripts/).
 
+## THE LITERATURE QUESTION, ANSWERED WITH DATA (2026-07-05)
+Owner: "literature is full of BF setups — we're missing big pieces; want
+1-2 good/day." Tested the biggest untouched assumption — TIMEFRAME
+(detector is 1-min-only; literature flags live on 2/5/15-min; the 66%
+'pullback too long' rejections = higher-TF flags squeezed through 1-min
+glasses). Result (research/scripts/bf_multiframe_test.py, all eligible
+movers, June-26 + Mar-25, entries next-1min-bar, trail-2.0 replay):
+- Raw flag-shaped setups: **~10/DAY at every timeframe** — the
+  literature's abundance is REAL and we can see all of it.
+- Their raw edge: **WR 32-37%, avg R −0.28..0.00 — ZERO, every
+  timeframe, both regimes. 5-min was WORST.**
+CONCLUSION: the missing piece never existed. The flag SHAPE carries no
+edge; 100% of BF's P&L comes from the selection stack refining ~10
+zero-EV patterns/day into ~0.2 positive-EV trades/day (58-65% WR).
+Every loosening fails identically because it admits zero-EV soup.
+The educators sell the shape; the edge was always the selection.
+LAST LEVER in flight: price_max 20→30 twin (584 movers/mo in the
+ORB-validated $20-30 band) — /tmp/bf_cache_price30.csv.
+
 ## STRATEGIC CLOSE (the owner's 'BF is nothing' question, answered)
 BF's per-trade edge is real (58-65% WR); its throughput is market-limited
 (eligible movers grew but flag-formation collapsed 8%→1.4%). After this
