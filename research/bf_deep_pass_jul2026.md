@@ -89,6 +89,26 @@ cache, median diff 0.05%):
   9/67 validation outliers); revert trigger documented in config.yaml.
 - Harness: research/scripts/bf_exit_sweep.py.
 
+## 🔍 THE MISSED GATE (2026-07-05, owner challenge "what are we missing")
+Owner: "BF is nothing — what are we missing?" Answer found in three steps:
+1. BF's per-trade edge is FINE (58-65% WR, ~$600/trade w/ trail 2.0);
+   the problem is THROUGHPUT: 4.3 trades/mo vs ORB's ~33.
+2. Universe gates are NOT the choke: the eligible mover field GREW in
+   2026 (2,068 → 2,702/mo passing float+price gates). Detection RATE
+   collapsed 8% → 1.4% of eligible movers.
+3. Sampled kill-table (250 eligible movers/year through the live
+   detector with debug capture): **"Pullback too long (max 5 candles)"
+   is the terminal blocker for 53% (2025) → 66% (2026) of rejections.**
+   2026 movers still flag — they consolidate LONGER than 5 one-minute
+   candles. The pattern slowed; the cap can't see it.
+   AND: max_pullback_candles was NEVER tested alone — May's sweep had no
+   pullback-only cell; the loose envelope bundled it with junk-admitting
+   knobs whose earlier intraday matches SHADOW pullback-admitted setups
+   (detector is first-match-wins). Twice missed by bundling.
+IN FLIGHT: single-knob twin BF_MAX_PULLBACK_CANDLES=10
+(/tmp/bf_cache_pullback10.csv) vs strict twin through Stage-2.
+Kill-table script: /tmp/bf_rejection_histogram.py (reusable).
+
 ## Queued next (after detection verdict)
 1. Conviction re-weighting: cache stores per-rule components (conv_*);
    walk-forward re-weight THROUGH Stage-2 (per feedback memory: lever
