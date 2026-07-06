@@ -114,18 +114,44 @@ class TestEngineWiring:
             'open': 5.0, 'high': 5.0, 'low': 5.0, 'close': 5.0,
             'volume': 2_000_000,
         }])
-        engine.alpaca.get_1min_bars_multi = MagicMock(
+        engine.alpaca.get_premarket_1min_bars_multi = MagicMock(
             return_value={'AAA': pm_bars, 'BBB': pm_bars.iloc[:0]})
         m1 = engine._get_pm_mult('AAA')   # 2M sh x $5 = $10M > cut -> 1.5
         m2 = engine._get_pm_mult('BBB')   # empty bars -> None -> 1.0
         m3 = engine._get_pm_mult('AAA')
         assert m1 == 1.5 and m2 == 1.0 and m3 == 1.5
-        assert engine.alpaca.get_1min_bars_multi.call_count == 1
+        assert engine.alpaca.get_premarket_1min_bars_multi.call_count == 1
 
     def test_fetch_failure_fails_open(self, engine):
         engine.build_universe(source_loader=lambda: ['AAA'])
-        engine.alpaca.get_1min_bars_multi = MagicMock(side_effect=RuntimeError('api down'))
+        engine.alpaca.get_premarket_1min_bars_multi = MagicMock(side_effect=RuntimeError('api down'))
         assert engine._get_pm_mult('AAA') == 1.0
+
+    def test_uses_premarket_method_not_clamped_one(self, engine):
+        """2026-07-06 incident: get_1min_bars_multi clamps to 9:30 open by
+        design, silently starving PM mult. The engine must use the
+        premarket-specific method."""
+        engine.build_universe(source_loader=lambda: ['AAA'])
+        engine.alpaca.get_premarket_1min_bars_multi = MagicMock(return_value={})
+        engine.alpaca.get_1min_bars_multi = MagicMock(return_value={})
+        engine._get_pm_mult('AAA')
+        engine.alpaca.get_premarket_1min_bars_multi.assert_called_once()
+        engine.alpaca.get_1min_bars_multi.assert_not_called()
+
+    def test_prefetch_gated_by_et_time(self, engine, monkeypatch):
+        """_maybe_prefetch_pm fires at >=9:31 ET, not before — so the 9:35
+        burst finds the cache warm without an early-morning fetch storm."""
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+        engine.build_universe(source_loader=lambda: ['AAA'])
+        engine.alpaca.get_premarket_1min_bars_multi = MagicMock(return_value={})
+        with patch('trading.orb_engine.datetime') as mdt:
+            mdt.now.return_value = datetime(2026, 7, 7, 13, 25, 0, tzinfo=timezone.utc)  # 9:25 ET
+            engine._maybe_prefetch_pm()
+            engine.alpaca.get_premarket_1min_bars_multi.assert_not_called()
+            mdt.now.return_value = datetime(2026, 7, 7, 13, 32, 0, tzinfo=timezone.utc)  # 9:32 ET
+            engine._maybe_prefetch_pm()
+            engine.alpaca.get_premarket_1min_bars_multi.assert_called_once()
 
     def test_planner_receives_pm_mult(self, engine):
         """Source-level pin: the submit loop passes pm_mult to planner.build

@@ -1479,6 +1479,13 @@ class ORBEngine:
             logger.warning("ORBEngine.check_entries: no filter params loaded — skipping")
             return []
 
+        # PM-mult prefetch (2026-07-06): warm the premarket dollar-volume
+        # cache on early ticks (>=9:31 ET) so the 9:35 burst never blocks.
+        try:
+            self._maybe_prefetch_pm()
+        except Exception as e:
+            logger.warning(f"ORB: PM prefetch failed: {e} — lazy path remains")
+
         # Process pending fills BEFORE evaluating new entries. This transitions
         # pending_new trades to filled state + adds StopMonitor watches.
         self._process_pending_fills()
@@ -1752,20 +1759,7 @@ class ORBEngine:
             return 1.0
         today = datetime.now(timezone.utc).date()
         if self._pm_fetch_done_day != today:
-            self._pm_fetch_done_day = today
-            self._pm_dollar_vols = {}
-            syms = list(self.candidates.keys())
-            try:
-                if hasattr(self.alpaca, 'get_1min_bars_multi'):
-                    # lookback spans 4:00 ET premarket from ~9:35 ET call time
-                    bars_map = self.alpaca.get_1min_bars_multi(
-                        syms, lookback_minutes=340) or {}
-                    for sym, b in bars_map.items():
-                        self._pm_dollar_vols[sym] = compute_pm_dollar_vol(b)
-            except Exception as e:
-                logger.warning(
-                    f"ORB: premarket bars fetch failed ({e}) — PM mult "
-                    f"fail-open at 1.0 for today")
+            self._fetch_pm_dollar_vols()
         pm = self._pm_dollar_vols.get(symbol)
         mult = pm_size_multiplier(pm, self.pm_mult_high_cut, self.pm_mult_high)
         if mult != 1.0:
@@ -1777,6 +1771,57 @@ class ORBEngine:
                 f"[ORB] PM MULT: {symbol} premarket volume unavailable — "
                 f"fail-open x1.0")
         return mult
+
+    def _fetch_pm_dollar_vols(self) -> None:
+        """Batch-fetch premarket dollar volumes for all candidates (once/day).
+
+        2026-07-06 fixes:
+        - Uses get_premarket_1min_bars_multi (get_1min_bars_multi clamps to
+          the 9:30 session open BY DESIGN for range math, which silently
+          starved the PM mult — pm_dollar_vol was None on every symbol).
+        - Called EARLY via _maybe_prefetch_pm (any tick >= 9:31 ET) so the
+          latency-critical 9:35 submit burst never blocks on this fetch;
+          the lazy call inside _get_pm_mult remains as a fallback.
+        """
+        self._pm_fetch_done_day = datetime.now(timezone.utc).date()
+        self._pm_dollar_vols = {}
+        syms = list(self.candidates.keys())
+        if not syms:
+            return
+        try:
+            if hasattr(self.alpaca, 'get_premarket_1min_bars_multi'):
+                bars_map = self.alpaca.get_premarket_1min_bars_multi(syms) or {}
+                for sym, b in bars_map.items():
+                    self._pm_dollar_vols[sym] = compute_pm_dollar_vol(b)
+                n_ok = sum(1 for v in self._pm_dollar_vols.values() if v)
+                logger.info(
+                    f"[ORB] PM MULT prefetch: dollar-vol computed for "
+                    f"{n_ok}/{len(syms)} candidates")
+            else:
+                logger.warning(
+                    "ORB: alpaca client lacks get_premarket_1min_bars_multi "
+                    "— PM mult fail-open at 1.0 for today")
+        except Exception as e:
+            logger.warning(
+                f"ORB: premarket bars fetch failed ({e}) — PM mult "
+                f"fail-open at 1.0 for today")
+
+    def _maybe_prefetch_pm(self) -> None:
+        """Prefetch PM dollar volumes on any tick at/after 9:31 ET so the
+        9:35 burst doesn't pay the fetch latency. No-op when disabled,
+        already fetched today, or before 9:31."""
+        if not self.pm_mult_enabled:
+            return
+        if self._pm_fetch_done_day == datetime.now(timezone.utc).date():
+            return
+        now_utc = datetime.now(timezone.utc)
+        try:
+            from zoneinfo import ZoneInfo
+            et = now_utc.astimezone(ZoneInfo('America/New_York'))
+        except Exception:
+            et = now_utc - timedelta(hours=_et_offset_hours(now_utc))
+        if et.time() >= dtime(9, 31):
+            self._fetch_pm_dollar_vols()
 
     def _pdr_veto_reject(self, cand: CandidateState) -> bool:
         """PDR veto decision for one SELECTED pick (2026-07-04 ship).
