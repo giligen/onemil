@@ -10,6 +10,7 @@ Requires .env with ALPACA_API_KEY and ALPACA_API_SECRET.
 """
 
 import argparse
+import os
 import signal
 import sys
 import logging
@@ -381,6 +382,24 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
             )
         except Exception as e:
             logger.error(f"Pre-start account validation failed: {e}")
+            # 2026-07-06 incident: the async TelegramErrorHandler dies at
+            # interpreter shutdown ("cannot schedule new futures"), so a
+            # crash-looping pre-start failure was SILENT for 4h. Send the
+            # alert SYNCHRONOUSLY (blocking HTTP) before exiting.
+            try:
+                import urllib.parse, urllib.request
+                _tok = os.getenv('TELEGRAM_BOT_TOKEN')
+                _chat = os.getenv('TELEGRAM_CHAT_ID')
+                if _tok and _chat:
+                    _msg = urllib.parse.quote(
+                        f"🔴 onemil-trader CANNOT START — pre-start account "
+                        f"validation failed: {e}. Service will crash-loop "
+                        f"until fixed.")
+                    urllib.request.urlopen(
+                        f"https://api.telegram.org/bot{_tok}/sendMessage"
+                        f"?chat_id={_chat}&text={_msg}", timeout=10)
+            except Exception:
+                pass
             sys.exit(1)
 
     analyzer = _create_news_analyzer(config)

@@ -1266,11 +1266,22 @@ class AlpacaClient:
                 "get_account_info"
             )
 
+            # 2026-07-06 incident: Alpaca returned daytrade_count=None on an
+            # otherwise-ACTIVE account (post-holiday API quirk) and the bare
+            # int() crashed pre-start validation -> SILENT 4h crash-loop on
+            # the first live day after the weekend ships. Parse defensively;
+            # None -> 0 with a WARNING (CLAUDE.md fallback rule).
+            _dtc = account.daytrade_count
+            if _dtc is None:
+                logger.warning(
+                    "get_account_info: daytrade_count is None from Alpaca "
+                    "— defaulting to 0 (account status: %s)", account.status)
+                _dtc = 0
             return {
                 'equity': float(account.equity),
                 'buying_power': float(account.buying_power),
                 'cash': float(account.cash),
-                'daytrade_count': int(account.daytrade_count),
+                'daytrade_count': int(_dtc),
                 'pattern_day_trader': account.pattern_day_trader,
             }
 

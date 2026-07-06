@@ -1151,3 +1151,24 @@ class TestGet1MinBarsMarketOpenClamp:
             result = client.get_1min_bars("AAPL", lookback_minutes=30)
 
         assert isinstance(result, pd.DataFrame)
+
+
+class TestAccountInfoNoneFields:
+    """2026-07-06 incident: Alpaca returned daytrade_count=None on an ACTIVE
+    account; bare int() crashed pre-start validation -> silent 4h crash-loop
+    on the first live day after the weekend ships."""
+
+    def test_daytrade_count_none_defaults_to_zero(self, caplog):
+        import logging
+        from unittest.mock import MagicMock, patch
+        from data_sources.alpaca_client import AlpacaClient
+        c = AlpacaClient.__new__(AlpacaClient)
+        acct = MagicMock()
+        acct.equity = "75833.14"; acct.buying_power = "219825.84"
+        acct.cash = "117586.50"; acct.daytrade_count = None
+        acct.pattern_day_trader = None; acct.status = "ACTIVE"
+        with patch.object(AlpacaClient, '_call_with_timeout', return_value=acct):
+            with caplog.at_level(logging.WARNING):
+                info = c.get_account_info()
+        assert info['daytrade_count'] == 0
+        assert any('daytrade_count is None' in r.message for r in caplog.records)
