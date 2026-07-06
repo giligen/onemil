@@ -1783,11 +1783,14 @@ class ORBEngine:
           latency-critical 9:35 submit burst never blocks on this fetch;
           the lazy call inside _get_pm_mult remains as a fallback.
         """
-        self._pm_fetch_done_day = datetime.now(timezone.utc).date()
-        self._pm_dollar_vols = {}
         syms = list(self.candidates.keys())
         if not syms:
+            # Do NOT stamp the day: if this tick ran before the universe
+            # built (or a build failed), a premature stamp would kill PM
+            # mult for the whole day with no retry (review 2026-07-06).
             return
+        self._pm_fetch_done_day = datetime.now(timezone.utc).date()
+        self._pm_dollar_vols = {}
         try:
             if hasattr(self.alpaca, 'get_premarket_1min_bars_multi'):
                 bars_map = self.alpaca.get_premarket_1min_bars_multi(syms) or {}

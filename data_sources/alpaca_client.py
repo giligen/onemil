@@ -1322,17 +1322,20 @@ class AlpacaClient:
             # int() crashed pre-start validation -> SILENT 4h crash-loop on
             # the first live day after the weekend ships. Parse defensively;
             # None -> 0 with a WARNING (CLAUDE.md fallback rule).
-            _dtc = account.daytrade_count
-            if _dtc is None:
-                logger.warning(
-                    "get_account_info: daytrade_count is None from Alpaca "
-                    "— defaulting to 0 (account status: %s)", account.status)
-                _dtc = 0
+            def _num(name, cast, default):
+                v = getattr(account, name, None)
+                if v is None:
+                    logger.warning(
+                        "get_account_info: %s is None from Alpaca — "
+                        "defaulting to %s (account status: %s)",
+                        name, default, account.status)
+                    return default
+                return cast(v)
             return {
-                'equity': float(account.equity),
-                'buying_power': float(account.buying_power),
-                'cash': float(account.cash),
-                'daytrade_count': int(_dtc),
+                'equity': _num('equity', float, 0.0),
+                'buying_power': _num('buying_power', float, 0.0),
+                'cash': _num('cash', float, 0.0),
+                'daytrade_count': _num('daytrade_count', int, 0),
                 'pattern_day_trader': account.pattern_day_trader,
             }
 
