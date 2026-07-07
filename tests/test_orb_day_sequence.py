@@ -100,3 +100,36 @@ class TestPmLateBatchCoverage:
         assert engine._pm_fetch_done_day is None or \
             engine._pm_dollar_vols == {}
         engine.alpaca.get_premarket_1min_bars_multi.assert_not_called()
+
+
+class TestBurstPickBudget:
+    """2026-07-07 review: max_keep must subtract entered+vetoed slots, not
+    just open positions — else a mid-window restart or multi-burst morning
+    replays the IREZ backfill within one burst."""
+
+    def test_pick_budget_counts_vetoed_and_entered(self, engine):
+        """Restart replay: BEZ entered (DB), 3 re-vetoed, position closed.
+        Pick budget must be 0 — the next-ranked name may NOT slide in."""
+        import inspect
+        src = inspect.getsource(type(engine).check_entries)
+        assert 'symbols_entered_today | self._pdr_vetoed_today' in src \
+            and 'set(self.open_positions)' in src
+
+    def test_dedup_handles_zero_budget(self):
+        from trading.orb_correlation import dedup_candidates
+        assert dedup_candidates(['IREZ', 'AMPG'], max_keep=0) == []
+        assert dedup_candidates(['IREZ'], max_keep=-1) == []
+
+
+class TestPmFailurePoisoning:
+    def test_fetch_failure_does_not_retry_every_tick(self, engine):
+        """A dead premarket endpoint must cost ONE blocking call, not one
+        per tick in the entry hot path."""
+        engine.build_universe(source_loader=lambda: ['AAA', 'BBB'])
+        engine.alpaca.get_premarket_1min_bars_multi = MagicMock(
+            side_effect=RuntimeError('endpoint down'))
+        engine._fetch_pm_dollar_vols()
+        # symbols poisoned with None -> no missing set -> no re-trigger
+        engine._fetch_pm_dollar_vols()
+        assert engine.alpaca.get_premarket_1min_bars_multi.call_count == 1
+        assert engine._get_pm_mult('AAA') == 1.0   # fail-open preserved

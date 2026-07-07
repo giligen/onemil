@@ -1709,10 +1709,17 @@ class ORBEngine:
         scored.sort(key=lambda c: (q_rank.get(c.quintile, 99), -c.composite))
         ranked_symbols = [c.symbol for c in scored]
 
-        # 4. Dedup by family + super-group
+        # 4. Dedup by family + super-group.
+        # 2026-07-07 review fix: the pick budget must subtract ENTERED and
+        # VETOED slots too, not just open positions — otherwise a mid-window
+        # restart (vetoed set is in-memory) or a multi-burst morning can
+        # overshoot the daily slot invariant and replay the IREZ backfill
+        # within a single burst.
         top_syms = dedup_candidates(
             ranked_symbols,
-            max_keep=self.max_concurrent - len(self.open_positions),
+            max_keep=self.max_concurrent - len(
+                symbols_entered_today | self._pdr_vetoed_today
+                | set(self.open_positions)),
             by_family=self.dedup_by_family,
             by_super_group=self.dedup_by_super_group,
         )
@@ -1830,10 +1837,17 @@ class ORBEngine:
                 logger.warning(
                     "ORB: alpaca client lacks get_premarket_1min_bars_multi "
                     "— PM mult fail-open at 1.0 for today")
+                for sym in syms:
+                    self._pm_dollar_vols.setdefault(sym, None)
         except Exception as e:
             logger.warning(
                 f"ORB: premarket bars fetch failed ({e}) — PM mult "
                 f"fail-open at 1.0 for today")
+            # Poison the attempted symbols with None (fail-open) so a
+            # persistent API failure doesn't re-trigger this BLOCKING call
+            # on every tick in the entry hot path (review 2026-07-07).
+            for sym in syms:
+                self._pm_dollar_vols.setdefault(sym, None)
 
     def _maybe_prefetch_pm(self) -> None:
         """Prefetch PM dollar volumes on any tick at/after 9:31 ET so the
