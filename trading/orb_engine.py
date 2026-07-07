@@ -1640,6 +1640,14 @@ class ORBEngine:
                 cand.rejected_reason = 'feature_missing'
                 continue
             if score < self.filter_threshold:
+                # 2026-07-07: was SILENT — TDTH (+65% gap, composite-penalized)
+                # vanished without a line and cost an hour of forensics. Every
+                # candidate exit must leave a trace. DEBUG: re-scored per tick.
+                if cand.rejected_reason != 'below_filter_threshold':
+                    logger.info(
+                        f"ORB: {cand.symbol} below filter threshold — "
+                        f"comp={score:.4f} < {self.filter_threshold} "
+                        f"(gap={feats.get('gap_pct', float('nan')):.1f}%)")
                 cand.rejected_reason = 'below_filter_threshold'
                 continue
             cand.composite = score
