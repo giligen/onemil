@@ -178,6 +178,21 @@ def green_verdict(day: str) -> Dict:
     rekey = journal_grep('REKEY', day) + journal_grep('negative-age', day)
     checks['touchgo_tripwires'] = 'OK' if not rekey else f"{len(rekey)} tripwire line(s)"
 
+    # Service-uptime context (2026-07-06 incident follow-up): if the trader
+    # was crash-looping / restarting around the 9:35 ET entry window, say so
+    # in the red-day reasons — a missed pick from an outage is a different
+    # investigation than a selection bug.
+    starts = journal_grep('Started onemil-trader', day)
+    fatal = journal_grep('Pre-start account validation failed', day)
+    if unexplained and (len(starts) > 2 or fatal):
+        reasons.append(
+            f"CONTEXT: trader restarted {len(starts)}x today"
+            + (", pre-start validation failures present" if fatal else "")
+            + " — missed picks likely due to service outage, not selection")
+        checks['service_uptime'] = f"{len(starts)} starts, fatal={bool(fatal)}"
+    else:
+        checks['service_uptime'] = 'OK'
+
     return {
         'day': day,
         'green': not reasons,

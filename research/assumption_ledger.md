@@ -96,6 +96,16 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
    byte-identical). A/B on 2025-01→2026-07: $31.9K/74tr → $35.6K/67tr.
    UD scaling remains live-only (documented).
 
+## Methodology notes (hard-won)
+- **Same-day BT counterfactuals are INVALID before the ~20:30 UTC nightly**
+  regen: intraday daily-bar fetches are incomplete (2026-07-06: 16:33 read
+  showed 0 candidates; 20:30 full data showed 4 — all would have stopped
+  out, so the outage that day accidentally saved ~$362 at Stage-0).
+- Rebuild-vs-prod-cache comparisons are invalid (float-gate time travel);
+  twins only.
+- The most-binding gate in any funnel must get a SOLO test cell — bundles
+  shadow it (BF pullback lesson).
+
 ## Rules of the ledger
 - A ship without a ledger row update is incomplete.
 - Any knob touched by a fix gets its status re-checked, not assumed.
