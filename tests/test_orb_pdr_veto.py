@@ -234,3 +234,28 @@ class TestNoBackfillWiring:
                 continue
             submitted.append(sym)
         assert submitted == ['LOUD']
+
+
+class TestVetoConsumesSlot:
+    """2026-07-07 IREZ incident: a vetoed pick must consume its daily slot.
+    Pre-fix, slot math recounted after an exit and backfilled the
+    next-ranked name cross-tick — the refill form the BT proved toxic."""
+
+    def test_veto_records_and_marks_submitted(self, engine):
+        c = _cand('QUIET', 5.0)
+        assert engine._pdr_veto_reject(c) is True
+        assert 'QUIET' in engine._pdr_vetoed_today
+        assert c.plan_submitted is True   # no per-tick rescoring/re-picking
+
+    def test_daily_cap_counts_vetoed(self, engine):
+        """entered=1 + vetoed=3 -> cap(4) hit -> no cross-tick backfill."""
+        engine._symbols_entered_today_db = lambda: {'BEZ'}
+        for s in ('TECS', 'SSG', 'MUD'):
+            engine._pdr_veto_reject(_cand(s, 5.0))
+        out = engine.check_entries(symbols=['IREZ'])
+        assert out == []
+
+    def test_reset_daily_clears_vetoed(self, engine):
+        engine._pdr_vetoed_today.add('TECS')
+        engine.reset_daily()
+        assert engine._pdr_vetoed_today == set()

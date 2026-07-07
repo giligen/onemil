@@ -333,6 +333,7 @@ class ORBEngine:
         _pdr_min_env = os.environ.get('ORB_PDR_VETO_MIN_PCT')
         if _pdr_min_env:
             self.pdr_veto_min_pct = float(_pdr_min_env)
+        self._pdr_vetoed_today: Set[str] = set()
         # Premarket dollar-volume sizing mult (2026-07-04, upsize-only).
         # Shared math: trading/orb_pm_mult.py. Cut frozen from H1-2025 TRAIN.
         sizing_pm_cfg = (cfg.get('sizing', {}) or {}).get('pm_dollar_vol_mult', {}) or {}
@@ -1540,8 +1541,15 @@ class ORBEngine:
         # in-memory flags → BMNZ/SKYQ re-entered after stopping out, and
         # QBTZ/BATL slipped in as brand-new entries at 12:30 / 1:11 PM ET.
         symbols_entered_today = self._symbols_entered_today_db()
-        if len(symbols_entered_today) >= self.max_concurrent:
-            return []  # daily cap exhausted (restart-safe via DB)
+        # Daily cap counts ENTERED plus PDR-VETOED picks: BT's selection is
+        # one-shot top-K, and a vetoed pick's slot is dead for the day
+        # (2026-07-07 IREZ fix). The vetoed set is in-memory; after a
+        # mid-day restart it self-heals — the same names re-rank, re-veto,
+        # and re-consume their slots on the first post-restart burst.
+        _slots_used = len(symbols_entered_today
+                          | getattr(self, '_pdr_vetoed_today', set()))
+        if _slots_used >= self.max_concurrent:
+            return []  # daily cap exhausted (restart-safe via DB + re-veto)
 
         # 2026-07-03 first-rank grace gate (selection-race fix): before the
         # day's FIRST placement burst, if any pool candidate is still
@@ -1783,19 +1791,29 @@ class ORBEngine:
           latency-critical 9:35 submit burst never blocks on this fetch;
           the lazy call inside _get_pm_mult remains as a fallback.
         """
-        syms = list(self.candidates.keys())
+        # 2026-07-07 fix (BEZ/IREZ fail-opens): the universe builds in
+        # BATCHES (31 at 9:30:36, +21 at 9:31:43 today) and the old
+        # once-per-day fetch missed every late-batch symbol. Fetch only
+        # the MISSING symbols and merge, so each batch gets covered.
+        today = datetime.now(timezone.utc).date()
+        if self._pm_fetch_done_day != today:
+            self._pm_dollar_vols = {}
+        syms = [s for s in self.candidates.keys()
+                if s not in self._pm_dollar_vols]
         if not syms:
-            # Do NOT stamp the day: if this tick ran before the universe
-            # built (or a build failed), a premature stamp would kill PM
-            # mult for the whole day with no retry (review 2026-07-06).
+            # Do NOT stamp the day on an empty pool: a pre-universe tick
+            # would kill PM mult for the whole day (review 2026-07-06).
+            if self._pm_dollar_vols:
+                self._pm_fetch_done_day = today
             return
-        self._pm_fetch_done_day = datetime.now(timezone.utc).date()
-        self._pm_dollar_vols = {}
+        self._pm_fetch_done_day = today
         try:
             if hasattr(self.alpaca, 'get_premarket_1min_bars_multi'):
                 bars_map = self.alpaca.get_premarket_1min_bars_multi(syms) or {}
                 for sym, b in bars_map.items():
                     self._pm_dollar_vols[sym] = compute_pm_dollar_vol(b)
+                for sym in syms:
+                    self._pm_dollar_vols.setdefault(sym, None)
                 n_ok = sum(1 for v in self._pm_dollar_vols.values() if v)
                 logger.info(
                     f"[ORB] PM MULT prefetch: dollar-vol computed for "
@@ -1815,8 +1833,10 @@ class ORBEngine:
         already fetched today, or before 9:31."""
         if not self.pm_mult_enabled:
             return
-        if self._pm_fetch_done_day == datetime.now(timezone.utc).date():
-            return
+        if (self._pm_fetch_done_day == datetime.now(timezone.utc).date()
+                and not (set(self.candidates.keys())
+                         - set(self._pm_dollar_vols.keys()))):
+            return  # fetched today and no late-batch symbols missing
         now_utc = datetime.now(timezone.utc)
         try:
             from zoneinfo import ZoneInfo
@@ -1849,6 +1869,14 @@ class ORBEngine:
                 f"<= {self.pdr_veto_min_pct:.1f}% — quiet prev day, "
                 f"slot left empty (no backfill)")
             cand.rejected_reason = 'pdr_veto'
+            # 2026-07-07 fix (IREZ incident): a vetoed pick must CONSUME its
+            # daily slot like BT's one-shot top-K. Pre-fix, the slot math
+            # (max_keep = cap - open_positions) recounted after an exit and
+            # backfilled the NEXT-ranked name across ticks (IREZ entered 94s
+            # after BEZ stopped) — the refill form the veto study proved
+            # toxic. plan_submitted also stops per-tick rescoring spam.
+            self._pdr_vetoed_today.add(cand.symbol)
+            cand.plan_submitted = True
             return True
         return False
 
@@ -3540,6 +3568,7 @@ class ORBEngine:
         self._late_entry_cutoff_logged = False
         self._post_open_range_sweep_done = False
         self._sweep_retry_used_today = False
+        self._pdr_vetoed_today = set()
         # Drain any leftover bar events from yesterday
         try:
             while True:
