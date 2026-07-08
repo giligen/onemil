@@ -1829,10 +1829,12 @@ class ORBEngine:
                     self._pm_dollar_vols[sym] = compute_pm_dollar_vol(b)
                 for sym in syms:
                     self._pm_dollar_vols.setdefault(sym, None)
-                n_ok = sum(1 for v in self._pm_dollar_vols.values() if v)
+                n_batch = sum(1 for s2 in syms if self._pm_dollar_vols.get(s2))
                 logger.info(
-                    f"[ORB] PM MULT prefetch: dollar-vol computed for "
-                    f"{n_ok}/{len(syms)} candidates")
+                    f"[ORB] PM MULT prefetch: batch {n_batch}/{len(syms)} "
+                    f"with premarket data (total covered "
+                    f"{sum(1 for v in self._pm_dollar_vols.values() if v)}"
+                    f"/{len(self._pm_dollar_vols)})")
             else:
                 logger.warning(
                     "ORB: alpaca client lacks get_premarket_1min_bars_multi "
