@@ -96,6 +96,25 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
    byte-identical). A/B on 2025-01→2026-07: $31.9K/74tr → $35.6K/67tr.
    UD scaling remains live-only (documented).
 
+## Live-telemetry learnings (2026-07-09 read, ~2.5wk of quote data)
+- Exit ESCALATIONS are the one expensive channel: stop_loss_market_fallback
+  (limit unfilled in 10s → market) costs +80..222bps vs clean stops that
+  fill 12-36bps BETTER than bid. 5 events/2.5wk ≈ $125/event ≈ $626 total.
+  QUEUED STUDY: spread-aware re-price (chase bid−spread once) before
+  market escalation. Worst case observed: EHGO +222bps.
+- FAST fills (<2min after 9:35) avg −$215/trade vs RESTING fills −$36
+  (n=19/10, buggy-era sample): immediate triggers may be spent momentum —
+  consistent with touchgo philosophy. CANDIDATE, needs proper BT test
+  (evaluate marketable-path entries as a cohort); do NOT act on n=29.
+- Tag exits systematically BEAT their next-bar-open estimates (PLTZ est
+  −$21→actual +$87; AAOX est −$30→+$449): the sell limit fills at
+  market-or-better in fast tape. Estimate copy fixed 7/9.
+- entry_quote_ofi: NO signal at n=29 (corr −0.07) — honest null, keep
+  collecting.
+- Entry spreads median 15bps, p90 92bps — the 300bps gate rarely binds
+  (as intended); ask runs +43-67bps submit→fill (momentum confirmation,
+  not a cost — resting stop-limits fill AT plan price).
+
 ## Methodology notes (hard-won)
 - **Same-day BT counterfactuals are INVALID before the ~20:30 UTC nightly**
   regen: intraday daily-bar fetches are incomplete (2026-07-06: 16:33 read
