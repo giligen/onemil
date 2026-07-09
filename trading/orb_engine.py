@@ -1277,13 +1277,21 @@ class ORBEngine:
                     if reason == ExitReason.TAG_BB.value
                     else 'Bar-1 reverted deep'
                 )
+                # 2026-07-09 copy fix (PLTZ/AAOX): the old message headlined
+                # "Est P&L: $-20" and the fill then printed +$87 — one exit,
+                # two contradicting numbers (the estimate is next-bar-open
+                # based and systematically pessimistic: the sell limit fills
+                # at market-or-better). Frame this message as a CUT IN
+                # PROGRESS; the real P&L arrives with the fill message.
                 msg = (
-                    f"[ORB] {rule_label}: {pos.symbol}\n"
+                    f"[ORB] {rule_label}: {pos.symbol} — cutting failed "
+                    f"breakout\n"
                     f"{rule_desc} ({detail})\n"
-                    f"Entry: ${pos.entry_price:.2f}  Exit: ${exit_price:.2f}  "
-                    f"Stop was: ${pos.stop_price:.2f}\n"
-                    f"Est P&L: ${est_exit_pnl:+,.2f}  "
-                    f"Saved vs full stop: ${saved_vs_stop:+,.2f}"
+                    f"Entry ${pos.entry_price:.2f} → exit order placed "
+                    f"(limit ≈${exit_price:.2f}; fills at market-or-better)\n"
+                    f"Avoids riding to stop ${pos.stop_price:.2f} "
+                    f"(≈${saved_vs_stop:+,.0f} protected)\n"
+                    f"Final P&L follows on fill confirmation."
                 )
                 self._notify(msg)
             except Exception as e:
