@@ -132,9 +132,14 @@ class TestInit:
     def test_quintile_cutoffs_correct_length(self, engine):
         assert len(engine.quintile_cutoffs) == 4
 
-    def test_adaptive_mults_loaded_with_q5_cap(self, engine):
-        # Q5 capped at 1.5 per orb_conviction.load_adaptive_mults
-        assert engine.adaptive_mults['Q5'] == 1.5
+    def test_adaptive_mults_loaded_with_q5_cap(self, engine, orb_cfg):
+        # 2026-07-10: mults corrected to the SHRUNK fit (clip [0.5,1.5]) on
+        # 15:45-parity physics — assert the CONFIG PATH loads and the 1.5
+        # anti-overfit cap holds for every quintile, not a stage value.
+        assert engine.adaptive_mults == {
+            k: float(v) for k, v in orb_cfg['adaptive_mults'].items()}
+        assert all(m <= 1.5 or k == 'Q1'
+                   for k, m in engine.adaptive_mults.items())
 
     def test_disabled_by_default(self, disabled_engine):
         assert disabled_engine.enabled is False

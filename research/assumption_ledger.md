@@ -27,7 +27,9 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
 | PDR veto | ≤8% | 🔧 | +35% P&L, MDD −31%, 18/19mo — orb_pdr_veto.py docstring |
 | slots (max_concurrent) | 4 | ✅ | W1: 3/5 worse-or-noise |
 | family/super dedup | on | ✅ | W1: loosening ≈ flat |
-| quintile mults + Q5 cap 1.5 | frozen | ✅ | anti-overfit guard; do not touch |
+| quintile mults | Q2 1.5/Q3 1.4/Q4 0.5/Q5 0.5 | 🔧 Jul'10: CORRECTED — old fit (Q4=1.842) was on 15:59-exit physics live never traded; inverts under correct 15:45 exits (leave-out-stable, era-consistent; old config 2026=−$21K). SHRUNK clip [0.5,1.5] per Q5-cap doctrine. research/orb_selection_reaudit_jul2026.md |
+| quintile ranking order | Q4-first | ✅ Jul'10 re-audit: ordering is NOT the lever (slots rarely bind); Q2-first doubles MDD. Unchanged. |
+| BT pipeline mult source | orb.yaml literals | 🔧 Jul'10 parity fix: per-run refit silently diverged from live after the 15:45 fix. BASELINE REBASED: ~$251K/18mo shipped-config (retire the $344,766 refit-mults number). |
 
 ## ORB — exit chain
 | knob | value | status | evidence |

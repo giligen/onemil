@@ -169,11 +169,25 @@ quintile_cutoffs: [0.1082, 0.1959, 0.2893, 0.4081]
 # is $200K so it fits, but this is the validated BT behavior — Q4 is the
 # alpha bucket and the pipeline leans into it).
 adaptive_mults:
+  # 2026-07-10 CORRECTED (owner-mandated fresh selection audit). The old
+  # values (Q4=1.842 amplified, Q2/Q3=0.25 floored) were fit on 15:59-exit
+  # physics that live never traded; under the CORRECT 15:45 exits the
+  # structure INVERTS: Q2/Q3 are the money buckets (leave-out-stable at
+  # every depth, era-consistent 25H1/25H2/2026), Q4's TRAIN mean is
+  # NEGATIVE. Old config on corrected physics: 2026 = -$21K, negMo 9/19.
+  # Shipped values are the anti-overfit SHRUNK fit (clip [0.5,1.5], same
+  # doctrine as the old Q5 cap): 2026 +$109K, MDD -$18.8K, negMo 6/19.
+  # Raw refit (Q2=3.0) makes +$85K more but almost all of it is top-3
+  # monster amplification — rejected per the Q5-cap precedent.
+  # Ranking order stays Q4-first: counterfactuals show ordering is NOT
+  # the lever (slots rarely bind) and current order has the best MDD.
+  # Revert values (fit on wrong physics): Q1 0.502, Q2 0.25, Q3 0.25,
+  # Q4 1.842, Q5 1.5. Evidence: research/orb_selection_reaudit_jul2026.md
   Q1: 0.502
-  Q2: 0.250    # floored at MIN_MULT=0.25 (raw < 0.25)
-  Q3: 0.250    # floored at MIN_MULT=0.25 (raw < 0.25)
-  Q4: 1.842    # primary alpha bucket — sized aggressively
-  Q5: 1.500    # CAPPED at 1.5 (raw 2.462 pre-cap)
+  Q2: 1.5
+  Q3: 1.4
+  Q4: 0.5
+  Q5: 0.5
 
 # Ranking — Q4-preferred, then composite DESC.
 # Q4 empirically best bucket across all 3 walk-forward splits.

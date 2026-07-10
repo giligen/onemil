@@ -201,11 +201,28 @@ def main():
     cutoffs = fit_quintile_cutoffs(train_k['_composite'])
     train_k['_quintile'] = assign_quintile(train_k['_composite'], cutoffs)
     avg = float(train_k['_rp_pnl'].mean())
-    mults = {}
-    for q in ['Q1', 'Q2', 'Q3', 'Q4', 'Q5']:
-        sub = train_k[train_k['_quintile'] == q]
-        mults[q] = max(ADAPTIVE_MULT_MIN, min(Q_CAPS[q], float(sub['_rp_pnl'].mean()) / avg))
-    print(f"Mults: {mults}")
+    # 2026-07-10 PARITY FIX: use orb.yaml's frozen adaptive_mults literals —
+    # the same values LIVE trades — instead of refitting per run. The
+    # per-run refit silently DIVERGED from live when the 15:45 parity fix
+    # changed the features CSV's pnl (BT ran Q2=3.0/Q4=0.25 while live ran
+    # Q4=1.842/Q2=0.25 — nobody noticed until the selection re-audit).
+    # Refit retained as fallback only when the yaml is absent.
+    mults = None
+    try:
+        import yaml as _yaml
+        _cfg = _yaml.safe_load(open('orb.yaml'))
+        _am = _cfg.get('adaptive_mults') or {}
+        if all(q in _am for q in ('Q1', 'Q2', 'Q3', 'Q4', 'Q5')):
+            mults = {q: float(_am[q]) for q in ('Q1', 'Q2', 'Q3', 'Q4', 'Q5')}
+            print(f"Mults (orb.yaml literals — LIVE PARITY): {mults}")
+    except Exception as _e:
+        print(f"Mults: orb.yaml read failed ({_e}) — falling back to refit")
+    if mults is None:
+        mults = {}
+        for q in ['Q1', 'Q2', 'Q3', 'Q4', 'Q5']:
+            sub = train_k[train_k['_quintile'] == q]
+            mults[q] = max(ADAPTIVE_MULT_MIN, min(Q_CAPS[q], float(sub['_rp_pnl'].mean()) / avg))
+        print(f"Mults (REFIT fallback — not live parity): {mults}")
 
     # Apply to full timeline
     kept = df[df['_composite'] >= FILTER_THRESHOLD].copy()
