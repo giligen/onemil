@@ -269,6 +269,52 @@ class TestEngineWiring:
             engine.alpaca.get_premarket_1min_bars_multi.assert_called_once()
             engine.alpaca.get_premarket_news_multi.assert_called_once()
 
+    def test_933_lag_refresh_upgrades_no_news_only(self, engine):
+        """Benzinga indexing-lag pass: at >=9:33, no-news symbols are
+        re-fetched ONCE; upgrades are applied, downgrades impossible."""
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+        engine.build_universe(source_loader=lambda: ['AAA', 'BBB'])
+        _mock_feeds(engine,
+                    pm_map={'AAA': PM_BARS_10M, 'BBB': PM_BARS_10M},
+                    news_map={'AAA': {'n_articles': 0, 'headline': ''},
+                              'BBB': {'n_articles': 1, 'headline': 'x'}})
+        with patch('trading.orb_engine.datetime') as mdt:
+            mdt.now.return_value = datetime(2026, 7, 7, 13, 32, 0,
+                                            tzinfo=timezone.utc)  # 9:32 ET
+            engine._maybe_prefetch_pm()
+            assert engine._get_has_news('AAA') is False
+            # 9:33: AAA's article has now indexed
+            engine.alpaca.get_premarket_news_multi = MagicMock(
+                return_value={'AAA': {'n_articles': 1, 'headline': 'late'}})
+            mdt.now.return_value = datetime(2026, 7, 7, 13, 33, 30,
+                                            tzinfo=timezone.utc)  # 9:33 ET
+            engine._maybe_prefetch_pm()
+            assert engine._get_has_news('AAA') is True
+            assert engine._get_has_news('BBB') is True   # untouched
+            # only stale symbols re-fetched, and only once per day
+            engine.alpaca.get_premarket_news_multi.assert_called_once_with(
+                ['AAA'])
+            engine._maybe_prefetch_pm()
+            engine.alpaca.get_premarket_news_multi.assert_called_once()
+
+    def test_933_refresh_failure_keeps_931_flags(self, engine):
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+        engine.build_universe(source_loader=lambda: ['AAA'])
+        _mock_feeds(engine, pm_map={'AAA': PM_BARS_10M},
+                    news_map={'AAA': {'n_articles': 0, 'headline': ''}})
+        with patch('trading.orb_engine.datetime') as mdt:
+            mdt.now.return_value = datetime(2026, 7, 7, 13, 32, 0,
+                                            tzinfo=timezone.utc)
+            engine._maybe_prefetch_pm()
+            engine.alpaca.get_premarket_news_multi = MagicMock(
+                side_effect=RuntimeError('down'))
+            mdt.now.return_value = datetime(2026, 7, 7, 13, 34, 0,
+                                            tzinfo=timezone.utc)
+            engine._maybe_prefetch_pm()   # must not raise
+            assert engine._get_has_news('AAA') is False
+
     def test_planner_receives_pm_mult(self, engine):
         """Source-level pin: the submit loop passes pm_mult to planner.build
         and the planner stacks it into position_dollars."""

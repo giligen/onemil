@@ -50,6 +50,10 @@ class OrbTradePlan:
     adaptive_mult: float    # multiplier applied to position_dollars
     # BT-parity metadata (optional — defaults to 0 when not set by planner)
     range_open: float = 0.0  # 9:30 bar open — denominator for stop_pct (BT parity)
+    # PM$/news sizing mult ACTUALLY applied to this plan (2026-07-10).
+    # Persisted to pattern_data so EoD attribution validates the value that
+    # sized the order, not a recomputation that could diverge.
+    pm_mult: float = 1.0
 
 
 # Skip reasons (returned in place of a plan when gate fails; used for telegram/logs)
@@ -198,4 +202,5 @@ class OrbTradePlanner:
             composite_score=composite_score,
             quintile=quintile,
             adaptive_mult=adaptive_mult,
+            pm_mult=pm_mult,
         )

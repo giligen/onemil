@@ -136,9 +136,16 @@ class TestMorningSequence:
         assert out == ['LOUD']
         assert engine.alpaca.submit_stop_bracket_order.call_count == 1
         assert engine._pdr_vetoed_today == {'Q1', 'Q2', 'Q3'}
-        # PM mult applied to the survivor: shares reflect 1.5x sizing
         kw = engine.alpaca.submit_stop_bracket_order.call_args.kwargs
         assert kw['qty'] > 0
+        # sizing attribution persisted for EoD validation: the DB record's
+        # pattern_data must carry the mult that sized the order + its inputs
+        import json as _json
+        rec = engine.db.save_trade.call_args.args[0]
+        pdata = _json.loads(rec['pattern_data'])
+        assert pdata['pm_mult'] == 2.0          # $9M + news -> boosted
+        assert pdata['has_news'] is True
+        assert pdata['pm_dollar_vol'] == pytest.approx(9_000_000)
 
         # ---- 9:36 burst: slots saturated (1 entered + 3 vetoed = 4) ----
         engine._symbols_entered_today_db = MagicMock(return_value={'LOUD'})

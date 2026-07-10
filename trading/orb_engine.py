@@ -362,6 +362,8 @@ class ORBEngine:
         # symbol -> {'n_articles': int, 'headline': str} | None (fetch failed)
         self._news_flags: Dict[str, Optional[Dict]] = {}
         self._news_fetch_done_day: Optional[date] = None
+        # 9:33 indexing-lag second pass (once/day, upgrade-only)
+        self._news_refresh_done_day: Optional[date] = None
         # Touchgo filter (Rule M = entry-bar close-pos < 0.5; Rule D = bar-1
         # revert ≥ 0.75R → exit at entry -0.5R). Shared module
         # trading/orb_touchgo_filter.py imported by both LIVE and BT for parity.
@@ -1959,8 +1961,13 @@ class ORBEngine:
         news_done = ((not self.pm_news_gate)
                      or (self._news_fetch_done_day == today
                          and not (cands - set(self._news_flags.keys()))))
-        if pm_done and news_done:
-            return  # fetched today and no late-batch symbols missing
+        # 9:33 lag pass still owed? (must not be short-circuited by the
+        # fetched-everything early return — review bug 2026-07-10)
+        refresh_pending = (self.pm_news_gate
+                           and self._news_fetch_done_day == today
+                           and self._news_refresh_done_day != today)
+        if pm_done and news_done and not refresh_pending:
+            return  # fetched today, no late-batch symbols, refresh done
         now_utc = datetime.now(timezone.utc)
         try:
             from zoneinfo import ZoneInfo
@@ -1972,6 +1979,33 @@ class ORBEngine:
                 self._fetch_pm_dollar_vols()
             if not news_done:
                 self._fetch_news_flags()
+        # Indexing-lag second pass (2026-07-10 review): Benzinga articles can
+        # index minutes after publication; a symbol wrongly flagged no-news at
+        # 9:31 would trade UNboosted (worst grid row: -$62K/18mo vs baseline
+        # if systematic). One bounded re-fetch at >=9:33 for no-news/failed
+        # symbols, UPGRADE-ONLY (an article cannot be untagged), still ahead
+        # of the 9:35 submit burst and off its latency-critical path.
+        if (self.pm_news_gate and et.time() >= dtime(9, 33)
+                and self._news_fetch_done_day == today
+                and self._news_refresh_done_day != today):
+            self._news_refresh_done_day = today
+            stale = [s for s, f in self._news_flags.items()
+                     if f is None or not (f or {}).get('n_articles')]
+            if stale:
+                try:
+                    news_map = self.alpaca.get_premarket_news_multi(stale) or {}
+                    n_new = 0
+                    for sym in stale:
+                        nf = news_map.get(sym)
+                        if nf and nf.get('n_articles'):
+                            self._news_flags[sym] = nf
+                            n_new += 1
+                    logger.info(
+                        f"[ORB] NEWS refresh (9:33 lag pass): {n_new}/"
+                        f"{len(stale)} no-news symbols flipped to newsy")
+                except Exception as e:
+                    logger.warning(
+                        f"ORB: news refresh failed ({e}) — keeping 9:31 flags")
 
     def _pdr_veto_reject(self, cand: CandidateState) -> bool:
         """PDR veto decision for one SELECTED pick (2026-07-04 ship).
@@ -3882,7 +3916,9 @@ class ORBEngine:
                                else _news.get('n_articles', 0)),
                 'news_headline': ('' if _news is None
                                   else _news.get('headline', '')),
-                'pm_mult': self._get_pm_mult(plan.symbol),
+                # the mult that ACTUALLY sized this plan (carried on the
+                # plan — never recomputed here, so recorded == applied)
+                'pm_mult': plan.pm_mult,
             })
             now_utc = submit_time or datetime.now(timezone.utc)
             record = {

@@ -52,6 +52,11 @@ DEFAULT_API_TIMEOUT = 90       # was 60; bumped after 2026-04-27 observed
                                 # market-open congestion. 60s was inside the
                                 # natural response distribution → spurious
                                 # timeouts. 90s is at p98 of observed latency.
+NEWS_API_TIMEOUT = 8           # premarket news fetch: best-effort call in
+                                # the 9:31-9:35 tick path — fail-open callers,
+                                # 9:33 lag pass is the retry. Normal response
+                                # <1s (stupid-money telemetry); a hanging
+                                # gateway must never stall the open.
 MAX_RATE_LIMIT_RETRIES = 5
 INITIAL_BACKOFF_SECONDS = 1.0
 MAX_TIMEOUT_RETRIES = 1        # 2026-04-27: retry once on FuturesTimeoutError —
@@ -113,13 +118,27 @@ class AlpacaClient:
         """Whether this client is connected to Alpaca paper trading."""
         return self._paper
 
-    def _call_with_timeout(self, func: Callable[[], T], operation: str) -> T:
+    def _call_with_timeout(self, func: Callable[[], T], operation: str,
+                           timeout: Optional[float] = None,
+                           timeout_retries: Optional[int] = None,
+                           rate_limit_retries: Optional[int] = None) -> T:
         """
         Execute API call with timeout and rate limit retry.
 
         Args:
             func: Callable to execute
             operation: Description for logging
+            timeout: Per-call override of self._api_timeout (seconds).
+                Use a SHORT value for best-effort calls in latency-critical
+                windows (e.g. the premarket news fetch: a hanging news
+                gateway must cost seconds, not the 90s x retries default,
+                because callers fail-open and trades must never wait).
+            timeout_retries: Per-call override of MAX_TIMEOUT_RETRIES
+                (0 = raise on first timeout).
+            rate_limit_retries: Per-call override of MAX_RATE_LIMIT_RETRIES
+                (0 = raise on first 429 — no backoff sleeps; the default
+                ladder sleeps up to ~31s, unacceptable for best-effort
+                calls in the entry window).
 
         Returns:
             Result of the function call
@@ -131,49 +150,54 @@ class AlpacaClient:
         backoff = INITIAL_BACKOFF_SECONDS
         last_exception = None
         timeout_attempts = 0
+        eff_timeout = timeout if timeout is not None else self._api_timeout
+        eff_retries = (timeout_retries if timeout_retries is not None
+                       else MAX_TIMEOUT_RETRIES)
+        eff_rl_retries = (rate_limit_retries if rate_limit_retries is not None
+                          else MAX_RATE_LIMIT_RETRIES)
 
-        for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
+        for attempt in range(eff_rl_retries + 1):
             try:
                 with ThreadPoolExecutor(max_workers=1) as executor:
                     future = executor.submit(func)
-                    return future.result(timeout=self._api_timeout)
+                    return future.result(timeout=eff_timeout)
             except FuturesTimeoutError:
                 # 2026-04-27: retry once on timeout. Alpaca REST occasionally
                 # has 60-90s response latency during 9:30-10:00 ET congestion.
                 # A second attempt 5s later usually succeeds. Without this,
                 # transient slowness becomes a hard error and the scanner
                 # cycle skips an entire minute of work.
-                if timeout_attempts < MAX_TIMEOUT_RETRIES:
+                if timeout_attempts < eff_retries:
                     timeout_attempts += 1
                     logger.warning(
-                        f"API call timed out after {self._api_timeout}s on {operation}, "
+                        f"API call timed out after {eff_timeout}s on {operation}, "
                         f"retrying in {TIMEOUT_RETRY_BACKOFF_SECONDS}s "
-                        f"(attempt {timeout_attempts}/{MAX_TIMEOUT_RETRIES})"
+                        f"(attempt {timeout_attempts}/{eff_retries})"
                     )
                     time_mod.sleep(TIMEOUT_RETRY_BACKOFF_SECONDS)
                     continue
                 logger.error(
-                    f"API call timed out after {self._api_timeout}s + "
-                    f"{MAX_TIMEOUT_RETRIES} retry: {operation}"
+                    f"API call timed out after {eff_timeout}s + "
+                    f"{eff_retries} retry: {operation}"
                 )
                 raise AlpacaAPITimeoutError(
-                    f"API call timed out ({self._api_timeout}s × "
-                    f"{1 + MAX_TIMEOUT_RETRIES} attempts): {operation}"
+                    f"API call timed out ({eff_timeout}s × "
+                    f"{1 + eff_retries} attempts): {operation}"
                 )
             except Exception as e:
                 error_str = str(e).lower()
                 if '429' in str(e) or 'rate limit' in error_str or 'too many requests' in error_str:
                     last_exception = e
-                    if attempt < MAX_RATE_LIMIT_RETRIES:
+                    if attempt < eff_rl_retries:
                         logger.warning(
-                            f"Rate limited on {operation} (attempt {attempt + 1}/{MAX_RATE_LIMIT_RETRIES + 1}), "
+                            f"Rate limited on {operation} (attempt {attempt + 1}/{eff_rl_retries + 1}), "
                             f"retrying in {backoff:.1f}s..."
                         )
                         time_mod.sleep(backoff)
                         backoff *= 2
                         continue
                     else:
-                        logger.error(f"Rate limit exhausted after {MAX_RATE_LIMIT_RETRIES + 1} attempts: {operation}")
+                        logger.error(f"Rate limit exhausted after {eff_rl_retries + 1} attempts: {operation}")
                         raise AlpacaAPIError(f"Rate limit exhausted: {operation}") from e
                 raise
 
@@ -969,9 +993,16 @@ class AlpacaClient:
                 start=start_et.astimezone(timezone.utc),
                 end=now_utc,
                 limit=50, sort='desc', page_token=page_token)
+            # Short timeout, NO retries: the news gateway is a separate,
+            # observably-flakier backend (stupid-money May'26 incident) and
+            # this call sits in the 9:31-9:35 tick path. Callers fail-open
+            # (no boost) and the 9:33 lag pass IS the retry — a hanging
+            # gateway must cost ~8s once, never 90s x retries.
             news_set = self._call_with_timeout(
                 lambda: self.news_client.get_news(request),
-                f"get_premarket_news_multi({len(symbols)} symbols)")
+                f"get_premarket_news_multi({len(symbols)} symbols)",
+                timeout=NEWS_API_TIMEOUT, timeout_retries=0,
+                rate_limit_retries=0)
             news_data = news_set.data if hasattr(news_set, 'data') else {}
             news_list = news_data.get('news', []) \
                 if isinstance(news_data, dict) else []

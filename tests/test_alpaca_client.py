@@ -1231,3 +1231,28 @@ class TestGetPremarketNewsMulti:
         mock_sdk_clients['news_client'].get_news.side_effect = RuntimeError('down')
         with pytest.raises(Exception):
             client.get_premarket_news_multi(['AAA'])
+
+    def test_uses_short_timeout_no_retries(self, client, mock_sdk_clients):
+        """The news gateway is a flakier backend sitting in the 9:31-9:35
+        tick path: the fetch must use NEWS_API_TIMEOUT with zero timeout
+        retries so a hang costs ~8s once, never 90s x retries."""
+        from unittest.mock import patch
+        from data_sources.alpaca_client import NEWS_API_TIMEOUT
+        mock_sdk_clients['news_client'].get_news.return_value = \
+            _make_news_set([])
+        with patch.object(client, '_call_with_timeout',
+                          wraps=client._call_with_timeout) as spy:
+            client.get_premarket_news_multi(['AAA'])
+        assert spy.call_args.kwargs['timeout'] == NEWS_API_TIMEOUT == 8
+        assert spy.call_args.kwargs['timeout_retries'] == 0
+
+    def test_429_fails_immediately_no_backoff_sleep(self, client, mock_sdk_clients):
+        """A 429 on the news call must raise instantly (rate_limit_retries=0)
+        — the default ladder sleeps up to ~31s inside the entry window."""
+        import time as _t
+        mock_sdk_clients['news_client'].get_news.side_effect = \
+            Exception('429 too many requests')
+        t0 = _t.monotonic()
+        with pytest.raises(Exception):
+            client.get_premarket_news_multi(['AAA'])
+        assert _t.monotonic() - t0 < 2.0   # no backoff sleeps happened
