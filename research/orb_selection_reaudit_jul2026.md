@@ -47,3 +47,36 @@ only as fallback). **Rebased baseline** with shipped mults: ~$251K/18mo
 - Composite features/threshold: quintile CUTOFFS retained; feature-level
   re-examination deferred — the mult correction captures the first-order
   error; feature surgery needs its own walk-forward campaign.
+
+## PART 2 (2026-07-10 evening): the owner's split hypothesis — tested to the bottom
+Owner: "Q2 has monsters AND garbage — split it (Q2a/b/c), cut DD, max profit."
+
+**The bench audit vindicated the intuition**: 17 monsters >$5K each
+(~$115K: SLDP 12.9K, RGTU 8.3K...) were benched on crowded days while
+Q4/Q5 seat-takers earned +$14.8K. BUT the crowded-day Q2 bench nets
+−$38K/268 trades — monsters swim in a junk river.
+
+**The split EXISTS — PM dollar volume is Q2a/b/c**: within Q2+Q3, PM$
+terciles (TRAIN cuts $416K/$4.3M) are monotone in ALL THREE eras
+(lo −180/−145/+23 per trade; hi +376/+223/+380). The ONLY
+era-consistent within-zone separator (six price/volume features all
+flip: crowding, pdr, gap, rtv, range size, vol20).
+
+**But every conversion beyond sizing FAILS the owner's own rule
+(profit up AND MDD down)**:
+- low-PM filter (cut Q*c): −$21K TOT, MDD worse — the low tercile still
+  hides monsters (4 found); exclusion pays capped savings for uncapped
+  forfeits. Monsters-kept violated.
+- 2 PM-gated extra slots (full PM data): −$2.3K, MDD worse — benched
+  hot names bring balancing junk.
+- PM ladder 0.75/1.0/1.5 sizing: −$5.4K, MDD −$1.6K better — a wash.
+- (Earlier: reorderings flat-to-worse; 6 slots worse; EV-order doubles MDD.)
+
+**VERDICT: the gradient is real and is ALREADY fully monetized by the
+shipped binary PM mult (upsize-only 1.5×)** — the one mechanism that
+harvests it with zero exclusion risk. The selection layer is at its
+information ceiling; further separation requires NEW information
+(point-in-time float, catalysts, tape), same frontier as BF.
+Data asset: full-universe PM coverage now exists
+(/tmp/orb_pm_universe_extra.csv + data/research CSV, 6,221 pairs) —
+persist and append nightly.
