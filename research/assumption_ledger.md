@@ -107,11 +107,16 @@ defect. Guard-skips do NOT consume daily slots (unlike PDR vetoes)
 because they are transient microstructure, not deterministic selection.
 
 ## Live-telemetry learnings (2026-07-09 read, ~2.5wk of quote data)
-- Exit ESCALATIONS are the one expensive channel: stop_loss_market_fallback
-  (limit unfilled in 10s → market) costs +80..222bps vs clean stops that
-  fill 12-36bps BETTER than bid. 5 events/2.5wk ≈ $125/event ≈ $626 total.
-  QUEUED STUDY: spread-aware re-price (chase bid−spread once) before
-  market escalation. Worst case observed: EHGO +222bps.
+- Exit ESCALATIONS: ✅ STUDIED 2026-07-10 — **NO-SHIP.** NBBO-tape replay
+  of ALL 7 events ever: the re-price ladder (limit at bid−0.3×spread with
+  6s patience before market) recovers just **+$133 TOTAL, with 4/7 events
+  made WORSE** — the tape keeps falling during the extra seconds, so the
+  'tax' vs the T+10 bid is mostly REAL market movement, not recoverable
+  spread-crossing. Expected value ≈ $19/event optimistic-fill-assumption,
+  against added complexity in the single most safety-critical path.
+  The 10s→market ladder STAYS AS IS. research/scripts/
+  orb_escalation_reprice_study.py (rerunnable as events accumulate;
+  re-look only if event count 5x's or per-event tax structurally grows).
 - FAST fills (<2min after 9:35) avg −$215/trade vs RESTING fills −$36
   (n=19/10, buggy-era sample): immediate triggers may be spent momentum —
   consistent with touchgo philosophy. CANDIDATE, needs proper BT test
