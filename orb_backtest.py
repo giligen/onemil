@@ -388,9 +388,32 @@ def regen_features(
     return new[-1] if new else _latest_features_csv()
 
 
+def append_pm_news_data() -> None:
+    """Append missing PM$ + news pairs so the pipeline's sizing mults see
+    current data (2026-07-10: without this, every day after the backfill
+    date fail-opens to mult 1.0 in BT while live boosts — silently skewing
+    BT-vs-live on exactly the boosted trades). Fail-soft: a fetch failure
+    logs loudly and the pipeline still runs (mults fail-open like live)."""
+    _log("appending PM$/news data (orb_pm_news_nightly_append.py)...")
+    try:
+        result = subprocess.run(
+            [sys.executable, 'research/scripts/orb_pm_news_nightly_append.py'],
+            cwd=ROOT, capture_output=True, text=True, timeout=600,
+        )
+        print(result.stdout)
+        if result.returncode != 0:
+            _log(f"WARNING: PM$/news append failed (rc={result.returncode}) "
+                 f"— BT sizing mults will fail-open on uncovered days: "
+                 f"{(result.stderr or '').strip()[-300:]}")
+    except Exception as e:
+        _log(f"WARNING: PM$/news append crashed: {e} — BT sizing mults "
+             f"will fail-open on uncovered days")
+
+
 def run_pipeline_bt(slice_dates: List[str]) -> None:
     """Run study_orb_pipeline_static_lock on the latest features CSV.
     If slice_dates is non-empty, also print a day-by-day table for those dates."""
+    append_pm_news_data()
     _log("running pipeline BT (study_orb_pipeline_static_lock.py)...")
     result = subprocess.run(
         [sys.executable, 'study_orb_pipeline_static_lock.py'],
