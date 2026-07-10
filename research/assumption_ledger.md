@@ -96,6 +96,16 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
    byte-identical). A/B on 2025-01→2026-07: $31.9K/74tr → $35.6K/67tr.
    UD scaling remains live-only (documented).
 
+## Placement-latency residual (2026-07-10, quantified live)
+IQMX 7/9: broke out during the 44s ranking window; the buy-stop guard
+correctly refused to chase (ask ran 60bps past limit). BT fills these
+(assumes resting order from 9:35:00); measured tail ≈3% of picks
+(entry-buffer study). Cost of THIS instance: BT made +$5 on it. The
+substitution channel (freed slot refilled with CCXI, never triggered,
+$0) is self-limiting. ACCEPTED live-only divergence — documented, not a
+defect. Guard-skips do NOT consume daily slots (unlike PDR vetoes)
+because they are transient microstructure, not deterministic selection.
+
 ## Live-telemetry learnings (2026-07-09 read, ~2.5wk of quote data)
 - Exit ESCALATIONS are the one expensive channel: stop_loss_market_fallback
   (limit unfilled in 10s → market) costs +80..222bps vs clean stops that

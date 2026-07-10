@@ -89,15 +89,25 @@ def load_live_rows(day: str, strategy: Optional[str] = None) -> List[Dict]:
 
 
 def journal_grep(pattern: str, day: str) -> List[str]:
-    """Journald lines for onemil-trader on a UTC date (best effort —
-    retention is ~2 days; empty result is not proof of absence)."""
+    """Journald lines matching `pattern` for onemil-trader on a UTC date.
+
+    2026-07-10 fix: the old version piped the FULL day (DEBUG logging =
+    hundreds of MB) through python and hit its 30s timeout, silently
+    returning [] — which made every explained-miss check unreliable (the
+    7/9 false-alarm red: IQMX's guard-skip line existed but was never
+    seen). Filtering now happens journald-side (-g) — ~14s worst case —
+    with a 60s ceiling and a WARNING (not silence) on failure.
+    """
     try:
-        out = subprocess.run(
+        res = subprocess.run(
             ['journalctl', '-u', 'onemil-trader', '--since', f'{day} 00:00',
-             '--until', f'{day} 23:59', '--no-pager'],
-            capture_output=True, text=True, timeout=30).stdout
-        return [ln for ln in out.splitlines() if pattern in ln]
-    except Exception:
+             '--until', f'{day} 23:59', '-g', pattern, '--no-pager'],
+            capture_output=True, text=True, timeout=60)
+        return [ln for ln in res.stdout.splitlines()
+                if not ln.startswith('-- ')]   # drop journald banners
+    except Exception as e:
+        print(f"WARNING: journal_grep({pattern!r}, {day}) failed: {e} — "
+              f"treating as no matches (checks may over-flag)", flush=True)
         return []
 
 
@@ -158,11 +168,19 @@ def green_verdict(day: str) -> Dict:
         audited = set()
         for rec in audit:
             audited |= {e.get('sym') for e in rec.get('ranked', [])}
-        explained_lines = journal_grep('skipped —', day) + \
-            journal_grep('spread', day)
+        # Live-only gates BT cannot model. 2026-07-10: added the buy-stop
+        # guard skip ('breakout extended past limit ... Not chasing') — on
+        # 7/9 IQMX broke out during the 44s ranking window, the guard
+        # correctly refused to chase, and the checker scored a correctly-
+        # explained miss as unexplained (false-alarm red; BT made +$5 on
+        # the missed trade while live beat BT by ~$570 that day).
+        explained_lines = (journal_grep('skipped —', day)
+                           + journal_grep('spread', day)
+                           + journal_grep('ENTRY SKIPPED', day))
         for sym in sorted(missing):
             if any(sym in ln and any(k in ln for k in
-                   ('spread', 'buying power', 'other strategy', 'halted'))
+                   ('spread', 'buying power', 'other strategy', 'halted',
+                    'breakout extended past limit', 'Not chasing'))
                    for ln in explained_lines):
                 continue
             unexplained.append(sym)
