@@ -93,6 +93,21 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
      yet'. Do NOT stack a shares-based mult on the PM mult without
      joint validation. Data: /tmp/orb_pit_shares.csv,
      /tmp/edgar_shares_hist.csv (fetcher /tmp/edgar_shares_study.py).
+   - pre-market NEWS (2026-07-10, owner-prompted): 🎯 STRONGEST separator
+     found since PM$ — but ONLY as the interaction news×pm_hi. Combo cell
+     per-trade mean +$1,580/+$1,569/+$935 across TRAIN/25H2/2026 (era-
+     consistent); monster rate 28/15/13% vs 6/7/8% rest; survives the
+     continuous-PM$ control. News alone = negative; pm_hi WITHOUT news
+     ≈ flat (the shipped PM mult's lift lives in the news subset).
+     Zero lookahead (all articles ≤09:30 ET). LLM/keyword catalyst-quality
+     classification REFUTED for longs (recaps = catalysts; recap-only holds
+     AMCI+BNAI $36.6K — do NOT port stupid-money's classifier). Slot
+     promotion refuted (benched 2026 combo −$3K). Sizing variant A2
+     (combo-only 2.0×) passes owner rule: TOT $250K→$301.5K, all eras +,
+     MDD −$18.8K→−$18.2K — but lift is top-5-concentrated & combo big-loser
+     rate rising (3→8→10%/era). AWAITING OWNER SHIP DECISION; capture-only
+     wiring is the safe first step. research/orb_news_catalyst_jul2026.md;
+     data/research/orb_news_catalyst_20260710.csv.
 4. Stage-2 regime sizing: ✅ SHIPPED — day-level A/B/C1/C2 mult + C2 skip
    in batch_backtest Stage-2 (BT_REGIME_SIZING=0 = pre-fix, verified
    byte-identical). A/B on 2025-01→2026-07: $31.9K/74tr → $35.6K/67tr.
