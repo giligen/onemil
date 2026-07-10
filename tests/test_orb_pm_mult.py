@@ -298,6 +298,27 @@ class TestEngineWiring:
             engine._maybe_prefetch_pm()
             engine.alpaca.get_premarket_news_multi.assert_called_once()
 
+    def test_933_pass_dumps_snapshot_for_eod_audit(self, engine, tmp_path,
+                                                   monkeypatch):
+        """After the lag pass the live news view must be on disk — it is
+        the EoD lag audit's ground truth."""
+        import json
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+        engine._news_snapshot_dir = str(tmp_path / 'logs')
+        (tmp_path / 'logs').mkdir()
+        engine.build_universe(source_loader=lambda: ['AAA'])
+        _mock_feeds(engine, pm_map={'AAA': PM_BARS_10M},
+                    news_map={'AAA': {'n_articles': 0, 'headline': ''}})
+        with patch('trading.orb_engine.datetime') as mdt:
+            mdt.now.return_value = datetime(2026, 7, 7, 13, 34, 0,
+                                            tzinfo=timezone.utc)  # 9:34 ET
+            engine._maybe_prefetch_pm()
+        snap = json.loads(
+            (tmp_path / 'logs' / 'orb_news_flags_2026-07-07.json').read_text())
+        assert snap['flags'] == {'AAA': 0}
+        assert snap['pm_dollar_vols']['AAA'] == pytest.approx(10_000_000)
+
     def test_933_refresh_failure_keeps_931_flags(self, engine):
         from datetime import datetime, timezone
         from unittest.mock import patch

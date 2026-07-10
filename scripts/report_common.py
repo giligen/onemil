@@ -258,6 +258,11 @@ def eod_news_recheck(symbols: List[str], day: str) -> Dict[str, bool]:
     try:
         import pandas as pd
         import requests
+        # Cron runs with a bare env — load .env like send_telegram does,
+        # or the drift/lag tripwires silently no-op every night
+        # (final-review find 2026-07-10).
+        from dotenv import load_dotenv
+        load_dotenv(str(ROOT / '.env'))
         k = os.environ.get('ALPACA_API_KEY')
         s = os.environ.get('ALPACA_API_SECRET')
         if not k or not s:
@@ -389,6 +394,59 @@ def sizing_attribution(day: str) -> Dict:
             'news_drift': news_drift, 'cum': cum}
 
 
+def news_lag_audit(day: str) -> Dict:
+    """Pool-level Benzinga indexing-lag audit (2026-07-10).
+
+    The engine snapshots its live news view (logs/orb_news_flags_<day>.json,
+    written after the 9:33 lag pass). Hours later the news API is fully
+    indexed — any symbol whose snapshot says no-news but whose EoD re-query
+    (window ending 09:31 ET) finds articles had a premarket article that
+    was NOT VISIBLE while trading decisions were made. Persistent lag =
+    live silently trading the worst sizing row (−$62K/18mo grid floor) —
+    this audit is the tripwire, across the WHOLE candidate pool (not just
+    the day's ~4 trades, so evidence accumulates ~10x faster).
+
+    Returns {available, n_checked, lag_symbols: [...], material: [...]}.
+    """
+    snap_path = ROOT / 'logs' / f'orb_news_flags_{day}.json'
+    if not snap_path.exists():
+        return {'available': False, 'n_checked': 0,
+                'lag_symbols': [], 'material': []}
+    try:
+        snap = json.loads(snap_path.read_text())
+    except Exception as e:
+        print(f"WARNING: unreadable news snapshot {snap_path}: {e}",
+              flush=True)
+        return {'available': False, 'n_checked': 0,
+                'lag_symbols': [], 'material': []}
+    flags = snap.get('flags', {})
+    pm_vols = snap.get('pm_dollar_vols', {})
+    no_news = [s for s, n in flags.items() if not n]   # 0 or None
+    eod = eod_news_recheck(no_news, day)
+    from trading.orb_pm_mult import DEFAULT_HIGH_CUT_USD
+    cfg = _orb_sizing_cfg()
+    high_cut = float(cfg.get('high_cut_usd', DEFAULT_HIGH_CUT_USD))
+    lag = sorted(s for s, newsy in eod.items() if newsy)
+    material = [s for s in lag if (pm_vols.get(s) or 0) > high_cut]
+    return {'available': True, 'n_checked': len(flags),
+            'lag_symbols': lag, 'material': material}
+
+
+def news_lag_line(audit: Dict) -> str:
+    """One Telegram line for the lag audit ('' pre-ship / no snapshot)."""
+    if not audit['available']:
+        return ''
+    if not audit['lag_symbols']:
+        return (f"news-lag audit: clean — 0 late-indexed premarket articles "
+                f"({audit['n_checked']} symbols)")
+    mat = (f" — SIZING-MATERIAL (above PM$ cut): {audit['material']}"
+           if audit['material'] else " (none above PM$ cut)")
+    return (f"⚠ NEWS LAG: {len(audit['lag_symbols'])} symbol(s) had "
+            f"premarket articles invisible to live: "
+            f"{audit['lag_symbols']}{mat}. Persistent lag → consider "
+            f"direct Benzinga feed.")
+
+
 def sizing_block(attr: Dict) -> str:
     """Compact Telegram block for the sizing attribution."""
     lines = []
@@ -420,12 +478,19 @@ def sizing_block(attr: Dict) -> str:
 # ---------------------------------------------------------------------------
 
 def streak_update(day: str, green: bool, reasons: List[str],
-                  path: Path = STREAK_PATH) -> int:
+                  path: Path = STREAK_PATH,
+                  allow_downgrade: bool = False) -> int:
     """Record the day's verdict; return the current consecutive-green count.
 
     Streak counts consecutive green TRADING days (weekend/holiday gaps
     don't break it — only a recorded red does). Re-running the same day
-    overwrites that day's record (idempotent).
+    overwrites that day's record (idempotent) — EXCEPT green→red, which is
+    blocked unless allow_downgrade: the parity checks lean on journald
+    evidence that ROTATES OUT, so a later re-run of an already-green day
+    can false-red purely from evidence decay (2026-07-10 incident: a
+    smoke re-run of 7/9 reset the real ramp streak after IQMX's
+    'Not chasing' line expired from the journal). Red→green re-adjudication
+    stays allowed — that direction requires FINDING evidence, not losing it.
     """
     records: List[Dict] = []
     if path.exists():
@@ -433,6 +498,18 @@ def streak_update(day: str, green: bool, reasons: List[str],
             records = json.loads(path.read_text()).get('days', [])
         except Exception:
             records = []
+    prior = next((r for r in records if r.get('day') == day), None)
+    if (prior and prior.get('green') and not green and not allow_downgrade):
+        print(f"WARNING: refusing green→red re-adjudication of {day} "
+              f"(journal evidence decays; pass allow_downgrade to force). "
+              f"New reasons were: {reasons}", flush=True)
+        streak = 0
+        for r in reversed(sorted(records, key=lambda r: r['day'])):
+            if r['green']:
+                streak += 1
+            else:
+                break
+        return streak
     records = [r for r in records if r.get('day') != day]
     records.append({'day': day, 'green': bool(green), 'reasons': reasons})
     records.sort(key=lambda r: r['day'])

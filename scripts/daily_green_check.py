@@ -48,6 +48,13 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--date', default=None, help='YYYY-MM-DD (default: last weekday)')
     ap.add_argument('--no-telegram', action='store_true')
+    ap.add_argument('--dry-run', action='store_true',
+                    help='compute + print only: no streak write, no telegram '
+                         '(use for smoke tests / re-inspection of past days)')
+    ap.add_argument('--force-downgrade', action='store_true',
+                    help='allow a green→red re-adjudication of an already-'
+                         'recorded day (normally blocked: journal evidence '
+                         'decays and false-reds the streak)')
     args = ap.parse_args()
 
     day = args.date or rc.prev_trading_day_utc()
@@ -64,11 +71,23 @@ def main() -> int:
         v['reasons'].append(
             f"pm_mult drift vs recompute: {attr['mult_mismatches']}")
         v['green'] = False
-    streak = rc.streak_update(day, v['green'], v['reasons'])
+    if args.dry_run:
+        existing = rc.read_streak()
+        streak = existing.get('streak', 0) if existing else 0
+        print(f"DRY RUN — streak file untouched (currently {streak})",
+              flush=True)
+    else:
+        streak = rc.streak_update(day, v['green'], v['reasons'],
+                                  allow_downgrade=args.force_downgrade)
     pnl = rc.realized_pnl(day)
-    msg = build_message(v, streak, pnl, sizing_txt=rc.sizing_block(attr))
+    # Pool-level Benzinga indexing-lag audit (soft — vendor latency is not
+    # an operational bug, but persistent lag erodes the news-gate edge and
+    # must be visible the same evening).
+    lag_txt = rc.news_lag_line(rc.news_lag_audit(day))
+    sizing_txt = '\n'.join(x for x in (rc.sizing_block(attr), lag_txt) if x)
+    msg = build_message(v, streak, pnl, sizing_txt=sizing_txt)
     print(msg, flush=True)
-    if not args.no_telegram:
+    if not args.no_telegram and not args.dry_run:
         rc.send_telegram(msg)
     return 0 if v['green'] else 1
 

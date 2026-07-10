@@ -364,6 +364,10 @@ class ORBEngine:
         self._news_fetch_done_day: Optional[date] = None
         # 9:33 indexing-lag second pass (once/day, upgrade-only)
         self._news_refresh_done_day: Optional[date] = None
+        # EoD lag-audit snapshot target (cwd-independent; tests override)
+        self._news_snapshot_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'logs')
         # Touchgo filter (Rule M = entry-bar close-pos < 0.5; Rule D = bar-1
         # revert ≥ 0.75R → exit at entry -0.5R). Shared module
         # trading/orb_touchgo_filter.py imported by both LIVE and BT for parity.
@@ -2006,6 +2010,35 @@ class ORBEngine:
                 except Exception as e:
                     logger.warning(
                         f"ORB: news refresh failed ({e}) — keeping 9:31 flags")
+            self._dump_news_snapshot()
+
+    def _dump_news_snapshot(self) -> None:
+        """Persist the live news/PM view for the EoD indexing-lag audit
+        (2026-07-10). The audit re-queries the news API hours later (fully
+        indexed) and diffs against THIS file: any article with a premarket
+        created_at that live never saw = a lag event — the failure mode
+        that would silently ship the worst sizing row. Fail-soft: a write
+        failure only degrades the audit, never trading."""
+        try:
+            import json as _json
+            day = datetime.now(timezone.utc).date().isoformat()
+            path = os.path.join(self._news_snapshot_dir,
+                                f'orb_news_flags_{day}.json')
+            snap = {
+                'day': day,
+                'written_at_utc': datetime.now(timezone.utc).isoformat(),
+                'flags': {s: (None if f is None else int(f.get('n_articles')
+                                                         or 0))
+                          for s, f in self._news_flags.items()},
+                'pm_dollar_vols': {s: v for s, v
+                                   in self._pm_dollar_vols.items()},
+            }
+            with open(path, 'w') as fh:
+                _json.dump(snap, fh)
+        except Exception as e:
+            logger.warning(
+                f"ORB: news snapshot write failed ({e}) — EoD lag audit "
+                f"will be unavailable for today")
 
     def _pdr_veto_reject(self, cand: CandidateState) -> bool:
         """PDR veto decision for one SELECTED pick (2026-07-04 ship).

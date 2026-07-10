@@ -36,6 +36,32 @@ class TestStreakUpdate:
         rc.streak_update('2026-07-10', True, [], path=p)   # Friday
         assert rc.streak_update('2026-07-13', True, [], path=p) == 2  # Monday
 
+    def test_green_to_red_downgrade_blocked(self, tmp_path):
+        """Journal evidence decays — a re-run must not false-red a day
+        already adjudicated green (2026-07-10 smoke-test incident)."""
+        p = tmp_path / 's.json'
+        assert rc.streak_update('2026-07-09', True, [], path=p) == 1
+        # later re-run: journald rotated the explaining line away
+        s = rc.streak_update('2026-07-09', False,
+                             ["BT picks never ordered live: ['IQMX']"], path=p)
+        assert s == 1                       # streak preserved
+        rec = rc.read_streak(p)
+        assert rec['days'][-1]['green'] is True   # record untouched
+
+    def test_green_to_red_downgrade_forced(self, tmp_path):
+        p = tmp_path / 's.json'
+        rc.streak_update('2026-07-09', True, [], path=p)
+        s = rc.streak_update('2026-07-09', False, ['real bug found'],
+                             path=p, allow_downgrade=True)
+        assert s == 0
+
+    def test_red_to_green_readjudication_allowed(self, tmp_path):
+        """The 7/9 false-alarm direction: finding evidence flips red→green
+        without force."""
+        p = tmp_path / 's.json'
+        rc.streak_update('2026-07-09', False, ['x'], path=p)
+        assert rc.streak_update('2026-07-09', True, [], path=p) == 1
+
     def test_same_day_rerun_idempotent(self, tmp_path):
         p = tmp_path / 's.json'
         rc.streak_update('2026-07-06', False, ['x'], path=p)
@@ -215,6 +241,39 @@ class TestSizingAttribution:
         self._patch(monkeypatch, rows)
         attr = rc.sizing_attribution('2026-07-01')
         assert attr['mult_mismatches'] == []
+
+    def test_lag_audit_clean_and_flagged(self, monkeypatch, tmp_path):
+        """Pool-level Benzinga indexing-lag audit: snapshot no-news symbols
+        that the fully-indexed EoD re-query finds newsy = lag events;
+        sizing-material when above the PM$ cut."""
+        import json
+        snap = {'day': '2026-07-13', 'flags': {'AAA': 0, 'BBB': 2, 'CCC': None},
+                'pm_dollar_vols': {'AAA': 9e6, 'BBB': 9e6, 'CCC': 1e6}}
+        logs = tmp_path / 'logs'
+        logs.mkdir()
+        (logs / 'orb_news_flags_2026-07-13.json').write_text(json.dumps(snap))
+        monkeypatch.setattr(rc, 'ROOT', tmp_path)
+        # fully-indexed EoD view: AAA's premarket article is now visible
+        monkeypatch.setattr(rc, 'eod_news_recheck',
+                            lambda syms, day: {s: s == 'AAA' for s in syms})
+        audit = rc.news_lag_audit('2026-07-13')
+        assert audit['available'] and audit['n_checked'] == 3
+        assert audit['lag_symbols'] == ['AAA']
+        assert audit['material'] == ['AAA']     # $9M > cut -> mis-sized
+        line = rc.news_lag_line(audit)
+        assert 'NEWS LAG' in line and 'AAA' in line and 'MATERIAL' in line
+        # clean day
+        monkeypatch.setattr(rc, 'eod_news_recheck',
+                            lambda syms, day: {s: False for s in syms})
+        clean = rc.news_lag_audit('2026-07-13')
+        assert clean['lag_symbols'] == []
+        assert 'clean' in rc.news_lag_line(clean)
+
+    def test_lag_audit_no_snapshot_silent(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(rc, 'ROOT', tmp_path)
+        audit = rc.news_lag_audit('2026-07-13')
+        assert audit['available'] is False
+        assert rc.news_lag_line(audit) == ''
 
     def test_mismatch_turns_day_red_in_main_wiring(self):
         """Source-level pin: daily_green_check main() appends mult
