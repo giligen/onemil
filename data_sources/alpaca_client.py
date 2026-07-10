@@ -935,6 +935,61 @@ class AlpacaClient:
             logger.warning(f"Failed to parse news response for {symbol}: {e}")
             return []
 
+    def get_premarket_news_multi(self, symbols: List[str]) -> Dict[str, Dict]:
+        """Batched pre-market news for the news-gated PM sizing mult
+        (2026-07-10 ship, research/orb_news_catalyst_jul2026.md).
+
+        Window: previous CALENDAR day 15:00 ET → now. Matches the BT
+        backfill window (research/scripts/orb_news_backfill.py) so live
+        has_news and BT has_news are the same measurement by construction.
+        Weekend/holiday gaps are intentional: the BT evidence was built
+        with the same prev-calendar-day window, and a Monday candidate's
+        Fri/Sat/Sun news lands in the [Sun 15:00 ET, Mon 09:3x] window
+        only if fresh — stale Friday news correctly doesn't count in
+        either system.
+
+        Returns dict symbol -> {'n_articles': int, 'headline': str}.
+        Raises on API failure (callers implement fail-open + poisoning,
+        mirroring the PM dollar-volume fetch).
+        """
+        if not symbols:
+            return {}
+        import pytz
+        et_tz = pytz.timezone('US/Eastern')
+        now_utc = datetime.now(timezone.utc)
+        now_et = now_utc.astimezone(et_tz)
+        start_et = (now_et - timedelta(days=1)).replace(
+            hour=15, minute=0, second=0, microsecond=0)
+        result: Dict[str, Dict] = {
+            s: {'n_articles': 0, 'headline': ''} for s in symbols}
+        page_token = None
+        for _page in range(6):  # 6 pages × 50 = 300 articles, ample
+            request = NewsRequest(
+                symbols=','.join(symbols),
+                start=start_et.astimezone(timezone.utc),
+                end=now_utc,
+                limit=50, sort='desc', page_token=page_token)
+            news_set = self._call_with_timeout(
+                lambda: self.news_client.get_news(request),
+                f"get_premarket_news_multi({len(symbols)} symbols)")
+            news_data = news_set.data if hasattr(news_set, 'data') else {}
+            news_list = news_data.get('news', []) \
+                if isinstance(news_data, dict) else []
+            for article in news_list:
+                for sym in (getattr(article, 'symbols', None) or []):
+                    if sym in result:
+                        result[sym]['n_articles'] += 1
+                        if not result[sym]['headline']:
+                            result[sym]['headline'] = str(
+                                getattr(article, 'headline', '') or '')[:200]
+            page_token = getattr(news_set, 'next_page_token', None)
+            if not page_token:
+                break
+        n_newsy = sum(1 for v in result.values() if v['n_articles'] > 0)
+        logger.debug(
+            f"Premarket news: {n_newsy}/{len(symbols)} symbols with articles")
+        return result
+
     # =========================================================================
     # 1-Minute Bars (for pattern detection)
     # =========================================================================

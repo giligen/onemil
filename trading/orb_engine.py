@@ -38,8 +38,8 @@ from trading.orb_filter import (
 )
 from trading.orb_conviction import apply_adaptive_mult, load_adaptive_mults
 from trading.orb_pm_mult import (
-    DEFAULT_HIGH_CUT_USD, DEFAULT_HIGH_MULT, compute_pm_dollar_vol,
-    pm_size_multiplier,
+    DEFAULT_HIGH_CUT_USD, DEFAULT_HIGH_MULT, DEFAULT_HIGH_MULT_NEWS,
+    compute_pm_dollar_vol, pm_size_multiplier,
 )
 from trading.orb_pdr_veto import (
     DEFAULT_MIN_PDR_PCT, compute_prev_day_range_pct, pdr_veto_applies,
@@ -346,6 +346,22 @@ class ORBEngine:
                 '0', 'false', 'no', 'off', '')
         self._pm_dollar_vols: Dict[str, Optional[float]] = {}
         self._pm_fetch_done_day: Optional[date] = None
+        # News gate on the PM mult (2026-07-10 A2 ship,
+        # research/orb_news_catalyst_jul2026.md): above-cut trades WITH
+        # premarket news → high_mult_news (2.0); WITHOUT news → high_mult
+        # (de-boosted to 1.0 — the flat bucket). Fail-open: news fetch
+        # failure → has_news None → no news boost. Rollback:
+        # news_gate: false + high_mult: 1.5 (legacy), or ORB_PM_NEWS_GATE=0.
+        self.pm_news_gate = bool(sizing_pm_cfg.get('news_gate', True))
+        self.pm_mult_high_news = float(
+            sizing_pm_cfg.get('high_mult_news', DEFAULT_HIGH_MULT_NEWS))
+        _ng_env = os.environ.get('ORB_PM_NEWS_GATE')
+        if _ng_env is not None:
+            self.pm_news_gate = _ng_env.strip().lower() not in (
+                '0', 'false', 'no', 'off', '')
+        # symbol -> {'n_articles': int, 'headline': str} | None (fetch failed)
+        self._news_flags: Dict[str, Optional[Dict]] = {}
+        self._news_fetch_done_day: Optional[date] = None
         # Touchgo filter (Rule M = entry-bar close-pos < 0.5; Rule D = bar-1
         # revert ≥ 0.75R → exit at entry -0.5R). Shared module
         # trading/orb_touchgo_filter.py imported by both LIVE and BT for parity.
@@ -1791,17 +1807,88 @@ class ORBEngine:
         today = datetime.now(timezone.utc).date()
         if self._pm_fetch_done_day != today:
             self._fetch_pm_dollar_vols()
+        if self.pm_news_gate and self._news_fetch_done_day != today:
+            self._fetch_news_flags()
         pm = self._pm_dollar_vols.get(symbol)
-        mult = pm_size_multiplier(pm, self.pm_mult_high_cut, self.pm_mult_high)
+        has_news = self._get_has_news(symbol) if self.pm_news_gate else None
+        mult = pm_size_multiplier(
+            pm, self.pm_mult_high_cut, self.pm_mult_high,
+            has_news=has_news, high_mult_news=self.pm_mult_high_news,
+            news_gate=self.pm_news_gate)
         if mult != 1.0:
             logger.info(
                 f"[ORB] PM MULT: {symbol} premarket ${pm:,.0f} > "
-                f"${self.pm_mult_high_cut:,.0f} — sizing x{mult}")
+                f"${self.pm_mult_high_cut:,.0f}, news={has_news} — "
+                f"sizing x{mult}")
         elif pm is None:
             logger.warning(
                 f"[ORB] PM MULT: {symbol} premarket volume unavailable — "
                 f"fail-open x1.0")
+        elif (self.pm_news_gate and has_news is None
+              and pm > self.pm_mult_high_cut):
+            logger.warning(
+                f"[ORB] PM MULT: {symbol} above PM$ cut but news "
+                f"UNAVAILABLE — fail-open, no news boost (x{mult})")
         return mult
+
+    def _get_has_news(self, symbol: str) -> Optional[bool]:
+        """Tri-state news presence for a symbol: True/False, or None when
+        the news fetch failed for it (fail-open — no boost)."""
+        flags = self._news_flags.get(symbol)
+        if flags is None:
+            return None
+        try:
+            return int(flags.get('n_articles') or 0) > 0
+        except (TypeError, ValueError, AttributeError) as e:
+            logger.warning(
+                f"[ORB] NEWS: malformed flags for {symbol} ({e}) — "
+                f"treating as unknown (no boost)")
+            return None
+
+    def _fetch_news_flags(self) -> None:
+        """Batch-fetch premarket news flags for all candidates (2026-07-10).
+
+        Mirrors _fetch_pm_dollar_vols exactly: per-batch merge for late
+        universe batches, empty-pool no-stamp, and failure poisoning with
+        None (fail-open = no news boost) so a persistent API failure never
+        re-blocks the 9:35 submit burst.
+        """
+        today = datetime.now(timezone.utc).date()
+        if self._news_fetch_done_day != today:
+            self._news_flags = {}
+        syms = [s for s in self.candidates.keys()
+                if s not in self._news_flags]
+        if not syms:
+            if self._news_flags:
+                self._news_fetch_done_day = today
+            return
+        self._news_fetch_done_day = today
+        try:
+            if hasattr(self.alpaca, 'get_premarket_news_multi'):
+                news_map = self.alpaca.get_premarket_news_multi(syms) or {}
+                for sym in syms:
+                    self._news_flags[sym] = news_map.get(
+                        sym, {'n_articles': 0, 'headline': ''})
+                n_newsy = sum(
+                    1 for s2 in syms
+                    if (self._news_flags.get(s2) or {}).get('n_articles', 0))
+                logger.info(
+                    f"[ORB] NEWS prefetch: batch {n_newsy}/{len(syms)} with "
+                    f"premarket news (total covered "
+                    f"{sum(1 for v in self._news_flags.values() if v is not None)}"
+                    f"/{len(self._news_flags)})")
+            else:
+                logger.warning(
+                    "ORB: alpaca client lacks get_premarket_news_multi — "
+                    "news gate fail-open (no boost) for today")
+                for sym in syms:
+                    self._news_flags.setdefault(sym, None)
+        except Exception as e:
+            logger.warning(
+                f"ORB: premarket news fetch failed ({e}) — news gate "
+                f"fail-open (no boost) for today")
+            for sym in syms:
+                self._news_flags.setdefault(sym, None)
 
     def _fetch_pm_dollar_vols(self) -> None:
         """Batch-fetch premarket dollar volumes for all candidates (once/day).
@@ -1865,9 +1952,14 @@ class ORBEngine:
         already fetched today, or before 9:31."""
         if not self.pm_mult_enabled:
             return
-        if (self._pm_fetch_done_day == datetime.now(timezone.utc).date()
-                and not (set(self.candidates.keys())
-                         - set(self._pm_dollar_vols.keys()))):
+        today = datetime.now(timezone.utc).date()
+        cands = set(self.candidates.keys())
+        pm_done = (self._pm_fetch_done_day == today
+                   and not (cands - set(self._pm_dollar_vols.keys())))
+        news_done = ((not self.pm_news_gate)
+                     or (self._news_fetch_done_day == today
+                         and not (cands - set(self._news_flags.keys()))))
+        if pm_done and news_done:
             return  # fetched today and no late-batch symbols missing
         now_utc = datetime.now(timezone.utc)
         try:
@@ -1876,7 +1968,10 @@ class ORBEngine:
         except Exception:
             et = now_utc - timedelta(hours=_et_offset_hours(now_utc))
         if et.time() >= dtime(9, 31):
-            self._fetch_pm_dollar_vols()
+            if not pm_done:
+                self._fetch_pm_dollar_vols()
+            if not news_done:
+                self._fetch_news_flags()
 
     def _pdr_veto_reject(self, cand: CandidateState) -> bool:
         """PDR veto decision for one SELECTED pick (2026-07-04 ship).
@@ -3766,6 +3861,11 @@ class ORBEngine:
         """
         import json as _json
         try:
+            # Sizing attribution (2026-07-10): persist the PM$/news inputs
+            # + final pm_mult so the EoD green-check can recompute the
+            # expected mult and flag drift (scripts/daily_green_check.py).
+            _pm_dv = self._pm_dollar_vols.get(plan.symbol)
+            _news = self._news_flags.get(plan.symbol)
             pattern_data = _json.dumps({
                 'range_high': plan.range_high,
                 'range_low': plan.range_low,
@@ -3775,6 +3875,14 @@ class ORBEngine:
                 'adaptive_mult': plan.adaptive_mult,
                 'lock_arm_at_r': plan.lock_arm_at_r,
                 'lock_stop_r': plan.lock_stop_r,
+                'pm_dollar_vol': _pm_dv,
+                'has_news': (None if _news is None
+                             else _news.get('n_articles', 0) > 0),
+                'n_articles': (None if _news is None
+                               else _news.get('n_articles', 0)),
+                'news_headline': ('' if _news is None
+                                  else _news.get('headline', '')),
+                'pm_mult': self._get_pm_mult(plan.symbol),
             })
             now_utc = submit_time or datetime.now(timezone.utc)
             record = {

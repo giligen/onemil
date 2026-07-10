@@ -22,20 +22,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import report_common as rc
 
 
-def build_message(v: dict, streak: int, pnl: dict) -> str:
+def build_message(v: dict, streak: int, pnl: dict,
+                  sizing_txt: str = '') -> str:
     day = v['day']
     pnl_txt = '  '.join(f"{k} ${x:+,.0f}" for k, x in sorted(pnl.items())) or 'no closed trades'
     if v['green']:
         parity = (f"BT parity clean ({v['n_bt_selected']} BT picks)"
                   if not v.get('bt_stale')
                   else "⚠ BT parity SKIPPED (nightly BT data stale)")
-        return (f"✅ <b>[GREEN {streak}/{rc.GREEN_SESSIONS_NEEDED}] {day}</b> — "
-                f"exits attributed, {parity}. {pnl_txt}")
+        msg = (f"✅ <b>[GREEN {streak}/{rc.GREEN_SESSIONS_NEEDED}] {day}</b> — "
+               f"exits attributed, {parity}. {pnl_txt}")
+        return msg + (f"\n{sizing_txt}" if sizing_txt else '')
     lines = [f"🔴 <b>[RED DAY] {day} — streak reset</b>"]
     for r in v['reasons']:
         lines.append(f"• {r}")
     lines.append(f"checks: {v['checks']}")
     lines.append(f"P&L: {pnl_txt}")
+    if sizing_txt:
+        lines.append(sizing_txt)
     lines.append("Ramp streak reset to 0 — investigate before next session.")
     return '\n'.join(lines)
 
@@ -52,9 +56,17 @@ def main() -> int:
         print(f"{day}: no live rows and no BT picks — non-trading day, "
               f"not recorded", flush=True)
         return 0
+    # Sizing attribution (2026-07-13 mult ships): a recorded pm_mult that
+    # doesn't recompute from its recorded inputs is a code bug — HARD gate.
+    # News drift (live fetch gap) is soft: fail-open is correct behavior.
+    attr = rc.sizing_attribution(day)
+    if attr['mult_mismatches']:
+        v['reasons'].append(
+            f"pm_mult drift vs recompute: {attr['mult_mismatches']}")
+        v['green'] = False
     streak = rc.streak_update(day, v['green'], v['reasons'])
     pnl = rc.realized_pnl(day)
-    msg = build_message(v, streak, pnl)
+    msg = build_message(v, streak, pnl, sizing_txt=rc.sizing_block(attr))
     print(msg, flush=True)
     if not args.no_telegram:
         rc.send_telegram(msg)

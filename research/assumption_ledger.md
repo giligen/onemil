@@ -105,8 +105,14 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
      promotion refuted (benched 2026 combo −$3K). Sizing variant A2
      (combo-only 2.0×) passes owner rule: TOT $250K→$301.5K, all eras +,
      MDD −$18.8K→−$18.2K — but lift is top-5-concentrated & combo big-loser
-     rate rising (3→8→10%/era). AWAITING OWNER SHIP DECISION; capture-only
-     wiring is the safe first step. research/orb_news_catalyst_jul2026.md;
+     rate rising (3→8→10%/era). ✅ **SHIPPED 2026-07-10 (owner: "flip
+     both")** — news_gate in trading/orb_pm_mult.py (high_mult 1.5→1.0,
+     high_mult_news 2.0), live news fetch at 9:31 prefetch (fail-open),
+     BT pipeline models it (legacy byte-identical via ORB_PM_NEWS_GATE=0:
+     $250,276; gated: $301,518 verified). EoD green-check now HARD-gates
+     on pm_mult recompute drift + soft-flags news drift + tracks combo
+     cumulative. Live 2026-07-13 with the quintile-mult correction.
+     research/orb_news_catalyst_jul2026.md;
      data/research/orb_news_catalyst_20260710.csv.
 4. Stage-2 regime sizing: ✅ SHIPPED — day-level A/B/C1/C2 mult + C2 skip
    in batch_backtest Stage-2 (BT_REGIME_SIZING=0 = pre-fix, verified

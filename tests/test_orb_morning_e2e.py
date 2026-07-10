@@ -66,6 +66,12 @@ def engine(monkeypatch):
         'id': 'ord-1', 'status': 'pending_new'}
     alpaca.get_premarket_1min_bars_multi = MagicMock(
         return_value={s: PM_BARS for s in ('LOUD', 'Q1', 'Q2', 'Q3')})
+    # News gate (2026-07-10): LOUD has premarket news -> $9M + news = 2.0x
+    alpaca.get_premarket_news_multi = MagicMock(
+        return_value={'LOUD': {'n_articles': 2, 'headline': 'LOUD wins deal'},
+                      'Q1': {'n_articles': 0, 'headline': ''},
+                      'Q2': {'n_articles': 0, 'headline': ''},
+                      'Q3': {'n_articles': 0, 'headline': ''}})
     alpaca.get_open_positions.return_value = []
     alpaca.get_account_info.return_value = {'buying_power': 100_000.0,
                                             'equity': 100_000.0, 'cash': 100_000.0,
@@ -100,6 +106,10 @@ class TestMorningSequence:
         _at(engine, 9, 32, 0, engine._maybe_prefetch_pm)
         assert engine.alpaca.get_premarket_1min_bars_multi.call_count == 1
         assert set(engine._pm_dollar_vols) == {'LOUD', 'Q1', 'Q2', 'Q3'}
+        # news prefetch fires in the same tick (news-gated PM mult)
+        assert engine.alpaca.get_premarket_news_multi.call_count == 1
+        assert engine._get_has_news('LOUD') is True
+        assert engine._get_has_news('Q2') is False
 
         # ---- ranges: Q3 is the straggler ----
         for s in ('LOUD', 'Q1', 'Q2'):
@@ -139,7 +149,8 @@ class TestMorningSequence:
         engine._process_pending_fills.assert_called_once()  # fills keep running
 
     def test_pm_mult_actually_sized_up(self, engine):
-        """The survivor's position must be 1.5x the unboosted plan."""
+        """The newsy survivor's position must be 2.0x the unboosted plan
+        (news-gated PM mult, 2026-07-10 A2 ship)."""
         engine.build_universe(source_loader=lambda: ['LOUD'])
         engine.candidates['LOUD'].range_data = _rng('LOUD')
         providers = {'LOUD': _providers(pdr_pct=20.0)}
@@ -147,7 +158,6 @@ class TestMorningSequence:
         _at(engine, 9, 36, 0, engine.check_entries, feature_providers=providers)
         qty_boosted = engine.alpaca.submit_stop_bracket_order.call_args.kwargs['qty']
         # rebuild fresh engine with PM disabled -> baseline qty
-        import copy
         engine2_alpaca = engine.alpaca
         with open(Path(__file__).parent.parent / 'orb.yaml') as f:
             cfg = yaml.safe_load(f)
@@ -164,4 +174,14 @@ class TestMorningSequence:
         engine2_alpaca.submit_stop_bracket_order.reset_mock()
         _at(eng2, 9, 36, 0, eng2.check_entries, feature_providers=providers)
         qty_base = engine2_alpaca.submit_stop_bracket_order.call_args.kwargs['qty']
-        assert qty_boosted == pytest.approx(qty_base * 1.5, rel=0.02)
+        assert qty_boosted == pytest.approx(qty_base * 2.0, rel=0.02)
+
+    def test_pm_mult_no_news_not_boosted(self, engine):
+        """Same $9M premarket volume WITHOUT news -> no boost (the flat
+        bucket, de-boosted from legacy 1.5 to 1.0)."""
+        engine.alpaca.get_premarket_news_multi = MagicMock(
+            return_value={'LOUD': {'n_articles': 0, 'headline': ''}})
+        engine.build_universe(source_loader=lambda: ['LOUD'])
+        engine.candidates['LOUD'].range_data = _rng('LOUD')
+        _at(engine, 9, 32, 0, engine._maybe_prefetch_pm)
+        assert _at(engine, 9, 36, 0, engine._get_pm_mult, 'LOUD') == 1.0

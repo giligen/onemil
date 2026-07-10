@@ -138,3 +138,89 @@ class TestMessage:
              'checks': {'bt_parity': 'x'}, 'n_live_rows': 2, 'n_bt_selected': 3}
         msg = build_message(v, streak=0, pnl={})
         assert 'RED DAY' in msg and 'CRCD' in msg and 'reset' in msg
+
+    def test_sizing_block_appended_to_green(self):
+        v = {'day': '2026-07-13', 'green': True, 'reasons': [], 'checks': {},
+             'n_live_rows': 1, 'n_bt_selected': 1}
+        msg = build_message(v, streak=1, pnl={'orb': 50.0},
+                            sizing_txt='sizing: AAA Q2 q1.5×pm2.0 (news✓ $9.0M)')
+        assert 'sizing: AAA' in msg and 'GREEN' in msg
+
+
+class TestSizingAttribution:
+    """EoD validation of the 2026-07-13 mult ships (quintile correction +
+    news-gated PM mult): recorded pm_mult must recompute from recorded
+    inputs via the SHARED helper; news drift is soft-flagged."""
+
+    def _row(self, sym, pm_mult, has_news, pm_dv, pnl=100.0, quintile='Q2'):
+        import json
+        return {'symbol': sym, 'strategy': 'orb', 'pnl': pnl,
+                'fill_price': 10.0,
+                'pattern_data': json.dumps({
+                    'quintile': quintile, 'adaptive_mult': 1.5,
+                    'pm_mult': pm_mult, 'has_news': has_news,
+                    'n_articles': 2 if has_news else 0,
+                    'pm_dollar_vol': pm_dv})}
+
+    def _patch(self, monkeypatch, rows, eod_newsy=None):
+        monkeypatch.setattr(rc, 'load_live_rows',
+                            lambda day, strategy=None: list(rows))
+        monkeypatch.setattr(rc, 'eod_news_recheck',
+                            lambda syms, day: eod_newsy or {})
+        # hermetic cum query: empty DB slice
+        import sqlite3
+        class _FakeConn:
+            row_factory = None
+            def execute(self, *a): return []
+            def close(self): pass
+        monkeypatch.setattr(sqlite3, 'connect', lambda *a, **k: _FakeConn())
+
+    def test_correct_mults_no_mismatch(self, monkeypatch):
+        rows = [self._row('AAA', 2.0, True, 9e6),     # news+pm -> 2.0 ✓
+                self._row('BBB', 1.0, False, 9e6),    # pm only -> 1.0 ✓
+                self._row('CCC', 1.0, True, 1e6)]     # news only -> 1.0 ✓
+        self._patch(monkeypatch, rows)
+        attr = rc.sizing_attribution('2026-07-13')
+        assert attr['mult_mismatches'] == []
+
+    def test_wrong_mult_flagged(self, monkeypatch):
+        rows = [self._row('BAD', 1.5, False, 9e6)]    # should be 1.0
+        self._patch(monkeypatch, rows)
+        attr = rc.sizing_attribution('2026-07-13')
+        assert len(attr['mult_mismatches']) == 1
+        assert 'BAD' in attr['mult_mismatches'][0]
+
+    def test_fail_open_none_news_is_valid(self, monkeypatch):
+        """has_news=None + pm_mult=1.0 is CORRECT fail-open, not a bug."""
+        rows = [self._row('FOP', 1.0, None, 9e6)]
+        self._patch(monkeypatch, rows)
+        attr = rc.sizing_attribution('2026-07-13')
+        assert attr['mult_mismatches'] == []
+
+    def test_news_drift_soft_flagged(self, monkeypatch):
+        """Live said no news, EoD re-query finds pre-9:31 articles."""
+        rows = [self._row('DRF', 1.0, False, 9e6)]
+        self._patch(monkeypatch, rows, eod_newsy={'DRF': True})
+        attr = rc.sizing_attribution('2026-07-13')
+        assert len(attr['news_drift']) == 1
+        assert 'DRF' in attr['news_drift'][0]
+        assert attr['mult_mismatches'] == []   # drift is soft, not hard
+
+    def test_pre_ship_rows_skipped(self, monkeypatch):
+        """Rows without pm_mult in pattern_data (pre-ship) don't false-flag."""
+        import json
+        rows = [{'symbol': 'OLD', 'strategy': 'orb', 'pnl': 5.0,
+                 'fill_price': 9.0,
+                 'pattern_data': json.dumps({'quintile': 'Q4'})}]
+        self._patch(monkeypatch, rows)
+        attr = rc.sizing_attribution('2026-07-01')
+        assert attr['mult_mismatches'] == []
+
+    def test_mismatch_turns_day_red_in_main_wiring(self):
+        """Source-level pin: daily_green_check main() appends mult
+        mismatches to reasons and flips green."""
+        import inspect
+        import daily_green_check as dgc
+        src = inspect.getsource(dgc.main)
+        assert 'mult_mismatches' in src
+        assert "v['green'] = False" in src

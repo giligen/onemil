@@ -1172,3 +1172,62 @@ class TestAccountInfoNoneFields:
                 info = c.get_account_info()
         assert info['daytrade_count'] == 0
         assert any('daytrade_count is None' in r.message for r in caplog.records)
+
+
+# ===================================================================
+# Premarket news (news-gated PM mult, 2026-07-10)
+# ===================================================================
+
+def _make_news_set(articles, next_token=None):
+    """Mock NewsSet: .data['news'] list + .next_page_token."""
+    ns = MagicMock()
+    items = []
+    for a in articles:
+        art = MagicMock()
+        art.symbols = a.get('symbols', [])
+        art.headline = a.get('headline', '')
+        items.append(art)
+    ns.data = {'news': items}
+    ns.next_page_token = next_token
+    return ns
+
+
+class TestGetPremarketNewsMulti:
+    def test_counts_articles_per_symbol(self, client, mock_sdk_clients):
+        mock_sdk_clients['news_client'].get_news.return_value = _make_news_set([
+            {'symbols': ['AAA'], 'headline': 'AAA wins contract'},
+            {'symbols': ['AAA', 'BBB'], 'headline': 'movers recap'},
+        ])
+        out = client.get_premarket_news_multi(['AAA', 'BBB', 'CCC'])
+        assert out['AAA']['n_articles'] == 2
+        assert out['AAA']['headline'] == 'AAA wins contract'
+        assert out['BBB']['n_articles'] == 1
+        assert out['CCC'] == {'n_articles': 0, 'headline': ''}
+
+    def test_paginates_until_token_exhausted(self, client, mock_sdk_clients):
+        mock_sdk_clients['news_client'].get_news.side_effect = [
+            _make_news_set([{'symbols': ['AAA'], 'headline': 'p1'}],
+                           next_token='tok'),
+            _make_news_set([{'symbols': ['AAA'], 'headline': 'p2'}]),
+        ]
+        out = client.get_premarket_news_multi(['AAA'])
+        assert out['AAA']['n_articles'] == 2
+        assert mock_sdk_clients['news_client'].get_news.call_count == 2
+
+    def test_ignores_symbols_outside_request(self, client, mock_sdk_clients):
+        mock_sdk_clients['news_client'].get_news.return_value = _make_news_set([
+            {'symbols': ['ZZZ'], 'headline': 'unrelated'},
+        ])
+        out = client.get_premarket_news_multi(['AAA'])
+        assert out['AAA']['n_articles'] == 0
+
+    def test_empty_symbols_no_call(self, client, mock_sdk_clients):
+        assert client.get_premarket_news_multi([]) == {}
+        mock_sdk_clients['news_client'].get_news.assert_not_called()
+
+    def test_api_error_raises_for_caller_fail_open(self, client, mock_sdk_clients):
+        """Engine implements the fail-open + poisoning — the client must
+        RAISE, not swallow, so the engine's WARNING path fires."""
+        mock_sdk_clients['news_client'].get_news.side_effect = RuntimeError('down')
+        with pytest.raises(Exception):
+            client.get_premarket_news_multi(['AAA'])

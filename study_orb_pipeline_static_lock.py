@@ -271,12 +271,33 @@ def main():
     # historical book + nightly appends; unknown symbol-days fail-open at
     # 1.0 (logged count). Env: ORB_PM_MULT=0 disables.
     from trading.orb_pm_mult import (
-        DEFAULT_HIGH_CUT_USD, DEFAULT_HIGH_MULT, pm_size_multiplier,
+        DEFAULT_HIGH_CUT_USD, DEFAULT_HIGH_MULT, DEFAULT_HIGH_MULT_NEWS,
+        LEGACY_HIGH_MULT, pm_size_multiplier,
     )
     _pm_env = os.environ.get('ORB_PM_MULT', '1').strip().lower()
     if _pm_env not in ('0', 'false', 'no', 'off', ''):
         import glob as _glob
         _pm_paths = sorted(_glob.glob('data/research/orb_premarket_dollar_vol_*.csv'))
+        # News gate on the PM mult (ships 2026-07-10; matches
+        # trading/orb_engine.py via the SAME shared helper). has_news comes
+        # from the backfill CSVs (research/scripts/orb_news_backfill.py);
+        # unknown symbol-days -> None (fail-open, no news boost — same as
+        # live's failed-fetch path). ORB_PM_NEWS_GATE=0 restores the legacy
+        # ungated x1.5 for old relative comparisons.
+        _ng_env = os.environ.get('ORB_PM_NEWS_GATE', '1').strip().lower()
+        news_gate_on = _ng_env not in ('0', 'false', 'no', 'off', '')
+        _news_map = {}
+        if news_gate_on:
+            _news_paths = sorted(_glob.glob('data/research/orb_news_catalyst_*.csv'))
+            if _news_paths:
+                _nw = pd.concat([pd.read_csv(x) for x in _news_paths],
+                                ignore_index=True) \
+                    .drop_duplicates(subset=['symbol', 'day'], keep='last')
+                _news_map = {(r['symbol'], r['day']): (r['n_articles'] or 0) > 0
+                             for _, r in _nw.iterrows()}
+            else:
+                print("PM news gate: WARNING no data/research/orb_news_catalyst_*.csv "
+                      "— has_news unknown everywhere (fail-open, no news boosts)")
         if _pm_paths:
             _pm = pd.concat([pd.read_csv(x) for x in _pm_paths], ignore_index=True)
             _pm = _pm.dropna(subset=['pm_dollar_vol'])                 .drop_duplicates(subset=['symbol', 'day'], keep='last')
@@ -284,16 +305,35 @@ def main():
                        for _, r in _pm.iterrows()}
             sel['_pm_key'] = list(zip(sel['symbol'],
                                       sel['date'].dt.strftime('%Y-%m-%d')))
-            sel['_pm_mult'] = sel['_pm_key'].map(
-                lambda k: pm_size_multiplier(_pm_map.get(k),
-                                             DEFAULT_HIGH_CUT_USD,
-                                             DEFAULT_HIGH_MULT))
+            if news_gate_on:
+                sel['_pm_mult'] = sel['_pm_key'].map(
+                    lambda k: pm_size_multiplier(
+                        _pm_map.get(k), DEFAULT_HIGH_CUT_USD,
+                        DEFAULT_HIGH_MULT,
+                        has_news=_news_map.get(k),
+                        high_mult_news=DEFAULT_HIGH_MULT_NEWS,
+                        news_gate=True))
+            else:
+                sel['_pm_mult'] = sel['_pm_key'].map(
+                    lambda k: pm_size_multiplier(
+                        _pm_map.get(k), DEFAULT_HIGH_CUT_USD,
+                        LEGACY_HIGH_MULT, news_gate=False))
             n_boost = int((sel['_pm_mult'] > 1.0).sum())
             n_unknown = int(sum(1 for k in sel['_pm_key'] if k not in _pm_map))
+            n_above_cut = int(sum(
+                1 for k in sel['_pm_key']
+                if (_pm_map.get(k) or 0) > DEFAULT_HIGH_CUT_USD))
             sel['_sized_pnl'] = sel['_sized_pnl'] * sel['_pm_mult']
             sel = sel.drop(columns=['_pm_key'])
-            print(f"PM sizing mult: {n_boost} picks boosted x{DEFAULT_HIGH_MULT}, "
-                  f"{n_unknown} unknown->1.0 (set ORB_PM_MULT=0 to disable)")
+            if news_gate_on:
+                print(f"PM sizing mult (news-gated): {n_boost} picks boosted "
+                      f"x{DEFAULT_HIGH_MULT_NEWS} (news+PM$), "
+                      f"{n_above_cut - n_boost} above-cut without news at "
+                      f"x{DEFAULT_HIGH_MULT}, {n_unknown} PM-unknown->1.0 "
+                      f"(ORB_PM_NEWS_GATE=0 for legacy)")
+            else:
+                print(f"PM sizing mult (LEGACY ungated): {n_boost} picks boosted "
+                      f"x{LEGACY_HIGH_MULT}, {n_unknown} unknown->1.0")
         else:
             print("PM sizing mult: WARNING no data/research/orb_premarket_dollar_vol_*.csv "
                   "— all mults 1.0 (fail-open)")

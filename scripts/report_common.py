@@ -223,6 +223,199 @@ def green_verdict(day: str) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# Sizing attribution (2026-07-10 ship: quintile-mult correction + news-gated
+# PM mult both go live 2026-07-13 — this is their EoD validation)
+# ---------------------------------------------------------------------------
+
+MULT_SHIP_DAY = '2026-07-13'   # first live day of corrected quintile mults
+                               # + news-gated PM mult (A2)
+
+
+def _orb_sizing_cfg() -> Dict:
+    """Live sizing knobs from orb.yaml (for expected-mult recompute)."""
+    import yaml
+    try:
+        with open(ROOT / 'orb.yaml') as f:
+            cfg = yaml.safe_load(f) or {}
+        return (cfg.get('sizing', {}) or {}).get('pm_dollar_vol_mult', {}) or {}
+    except Exception as e:
+        print(f"WARNING: orb.yaml unreadable for sizing recompute: {e}",
+              flush=True)
+        return {}
+
+
+def eod_news_recheck(symbols: List[str], day: str) -> Dict[str, bool]:
+    """Re-query the news API EoD for the day's traded symbols.
+
+    Window: prev calendar day 15:00 ET → trade day 09:31 ET — a SUBSET of
+    what live could have seen (live fetches 9:31+), so `EoD says news but
+    live recorded none` = a real live fetch gap, while the reverse is just
+    the timing tail and is NOT flagged. Returns {} on API failure (soft
+    check — never blocks the green verdict on a news-API blip).
+    """
+    if not symbols:
+        return {}
+    try:
+        import pandas as pd
+        import requests
+        k = os.environ.get('ALPACA_API_KEY')
+        s = os.environ.get('ALPACA_API_SECRET')
+        if not k or not s:
+            print("WARNING: eod_news_recheck skipped — no Alpaca creds in env",
+                  flush=True)
+            return {}
+        d = pd.Timestamp(day)
+        st = ((d - pd.Timedelta(days=1)).tz_localize('America/New_York')
+              + pd.Timedelta(hours=15)).tz_convert('UTC').isoformat()
+        en = (d.tz_localize('America/New_York')
+              + pd.Timedelta(hours=9, minutes=31)).tz_convert('UTC').isoformat()
+        newsy: Dict[str, bool] = {sym: False for sym in symbols}
+        token = None
+        for _ in range(6):
+            params = {'symbols': ','.join(symbols), 'start': st, 'end': en,
+                      'limit': 50, 'sort': 'desc'}
+            if token:
+                params['page_token'] = token
+            r = requests.get('https://data.alpaca.markets/v1beta1/news',
+                             params=params,
+                             headers={'APCA-API-KEY-ID': k,
+                                      'APCA-API-SECRET-KEY': s},
+                             timeout=(5, 30))
+            r.raise_for_status()
+            j = r.json()
+            for a in j.get('news', []):
+                for sym in a.get('symbols', []):
+                    if sym in newsy:
+                        newsy[sym] = True
+            token = j.get('next_page_token')
+            if not token:
+                break
+        return newsy
+    except Exception as e:
+        print(f"WARNING: eod_news_recheck failed: {e} — news drift check "
+              f"skipped today", flush=True)
+        return {}
+
+
+def sizing_attribution(day: str) -> Dict:
+    """Per-trade mult attribution + drift checks for the day's ORB trades.
+
+    Returns:
+      trades:          [{symbol, quintile, adaptive_mult, pm_mult, has_news,
+                         n_articles, pm_dollar_vol, pnl}]
+      mult_mismatches: recorded pm_mult != recompute from recorded inputs
+                       via the SHARED helper (HARD — that is a code bug)
+      news_drift:      live recorded has_news=False/None but the EoD
+                       re-query finds pre-9:31 articles (SOFT — fetch gap)
+      cum:             realized P&L since MULT_SHIP_DAY by quintile group
+                       + the news-boosted cell (the forward watch)
+    """
+    from trading.orb_pm_mult import (
+        DEFAULT_HIGH_CUT_USD, DEFAULT_HIGH_MULT, DEFAULT_HIGH_MULT_NEWS,
+        pm_size_multiplier,
+    )
+    cfg = _orb_sizing_cfg()
+    high_cut = float(cfg.get('high_cut_usd', DEFAULT_HIGH_CUT_USD))
+    high_mult = float(cfg.get('high_mult', DEFAULT_HIGH_MULT))
+    high_mult_news = float(cfg.get('high_mult_news', DEFAULT_HIGH_MULT_NEWS))
+    news_gate = bool(cfg.get('news_gate', True))
+
+    trades, mult_mismatches = [], []
+    for r in load_live_rows(day, strategy='orb'):
+        try:
+            pdata = json.loads(r.get('pattern_data') or '{}')
+        except Exception:
+            pdata = {}
+        t = {'symbol': r['symbol'],
+             'quintile': pdata.get('quintile'),
+             'adaptive_mult': pdata.get('adaptive_mult'),
+             'pm_mult': pdata.get('pm_mult'),
+             'has_news': pdata.get('has_news'),
+             'n_articles': pdata.get('n_articles'),
+             'pm_dollar_vol': pdata.get('pm_dollar_vol'),
+             'pnl': r.get('pnl'),
+             'filled': r.get('fill_price') is not None}
+        trades.append(t)
+        if t['pm_mult'] is None:
+            continue   # pre-ship row (no attribution recorded)
+        expected = pm_size_multiplier(
+            t['pm_dollar_vol'], high_cut, high_mult,
+            has_news=t['has_news'], high_mult_news=high_mult_news,
+            news_gate=news_gate)
+        if abs(float(t['pm_mult']) - expected) > 1e-9:
+            mult_mismatches.append(
+                f"{t['symbol']}: recorded pm_mult {t['pm_mult']} != "
+                f"expected {expected} (pm$={t['pm_dollar_vol']}, "
+                f"news={t['has_news']})")
+
+    news_drift = []
+    check_syms = [t['symbol'] for t in trades
+                  if t['pm_mult'] is not None and t['has_news'] is not True]
+    eod_newsy = eod_news_recheck(check_syms, day)
+    for t in trades:
+        if (t['symbol'] in eod_newsy and eod_newsy[t['symbol']]
+                and t['has_news'] is not True and t['pm_mult'] is not None):
+            news_drift.append(
+                f"{t['symbol']}: live recorded has_news={t['has_news']} but "
+                f"EoD re-query finds pre-9:31 articles — live fetch gap"
+                + ("" if (t['pm_dollar_vol'] or 0) > high_cut
+                   else " (below PM$ cut, sizing unaffected)"))
+
+    # Forward watch: realized P&L since the mult ship, by quintile group +
+    # the news-boosted cell.
+    conn = sqlite3.connect(ROOT / 'data' / 'trades.db', timeout=15)
+    conn.row_factory = sqlite3.Row
+    rows = [dict(x) for x in conn.execute(
+        "SELECT symbol, pnl, pattern_data FROM trades WHERE strategy='orb' "
+        "AND trade_date >= ? AND pnl IS NOT NULL", [MULT_SHIP_DAY])]
+    conn.close()
+    cum = {'Q2/Q3': [0.0, 0], 'Q4/Q5': [0.0, 0], 'news-boosted': [0.0, 0]}
+    for x in rows:
+        try:
+            pdata = json.loads(x.get('pattern_data') or '{}')
+        except Exception:
+            pdata = {}
+        q = pdata.get('quintile') or ''
+        grp = 'Q2/Q3' if q in ('Q2', 'Q3') else \
+              'Q4/Q5' if q in ('Q4', 'Q5') else None
+        if grp:
+            cum[grp][0] += float(x['pnl'])
+            cum[grp][1] += 1
+        if (pdata.get('pm_mult') or 1.0) > 1.0 and pdata.get('has_news'):
+            cum['news-boosted'][0] += float(x['pnl'])
+            cum['news-boosted'][1] += 1
+
+    return {'trades': trades, 'mult_mismatches': mult_mismatches,
+            'news_drift': news_drift, 'cum': cum}
+
+
+def sizing_block(attr: Dict) -> str:
+    """Compact Telegram block for the sizing attribution."""
+    lines = []
+    per = []
+    for t in attr['trades']:
+        if t['pm_mult'] is None:
+            continue
+        nf = ('news✓' if t['has_news'] is True
+              else 'news✗' if t['has_news'] is False else 'news?')
+        pm = (f"${t['pm_dollar_vol'] / 1e6:.1f}M"
+              if t['pm_dollar_vol'] else 'pm?')
+        pnl = f" ${t['pnl']:+,.0f}" if t['pnl'] is not None else ''
+        per.append(f"{t['symbol']} {t['quintile']} "
+                   f"q{t['adaptive_mult']}×pm{t['pm_mult']} ({nf} {pm}){pnl}")
+    if per:
+        lines.append("sizing: " + ' | '.join(per))
+    for d in attr['news_drift']:
+        lines.append(f"⚠ {d}")
+    c = attr['cum']
+    if any(v[1] for v in c.values()):
+        lines.append(
+            f"since {MULT_SHIP_DAY}: " + '  '.join(
+                f"{k} ${v[0]:+,.0f}(n={v[1]})" for k, v in c.items()))
+    return '\n'.join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Streak persistence — the number the ramp gate reads
 # ---------------------------------------------------------------------------
 

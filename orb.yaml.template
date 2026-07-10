@@ -211,7 +211,14 @@ sizing:
   pm_dollar_vol_mult:
     enabled: true
     high_cut_usd: 5816688    # H1-2025 TRAIN upper tercile — frozen
-    high_mult: 1.5
+    # 2026-07-10 NEWS GATE (owner-approved A2, research/orb_news_catalyst_jul2026.md):
+    # above-cut WITH premarket news -> high_mult_news; WITHOUT news -> high_mult
+    # (that bucket is ~flat per-trade in all 3 eras). BT: TOT $250K->$301.5K,
+    # all eras +, MDD improves. Fail-open: news fetch failure -> no news boost.
+    # ROLLBACK: news_gate: false + high_mult: 1.5 (legacy), restart. Env: ORB_PM_NEWS_GATE=0.
+    high_mult: 1.0           # was 1.5 pre news-gate
+    high_mult_news: 2.0
+    news_gate: true
   account_budget_usd: 100000    # ORB's carved pool (shared account later)
   max_concurrent: 4             # top-N picks per day
   risk_per_trade_usd: 3000      # validated value; lower to $1000 for Phase 2 live ramp
