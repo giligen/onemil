@@ -893,6 +893,22 @@ class BacktestRunner:
             self.last_entry_time_et = (int(_h), int(_m))
         else:
             self.last_entry_time_et = last_entry_time_et
+        # Research env overrides (2026-07-11 session-structure study —
+        # mirrors the BF_* pattern in pattern_detector.py: default OFF,
+        # no behavior change without explicit env). Used by twin cache
+        # rebuilds to /tmp; NEVER set in production.
+        _le_env = os.environ.get('BF_LAST_ENTRY')
+        if _le_env:
+            _h, _m = _le_env.split(':')
+            self.last_entry_time_et = (int(_h), int(_m))
+            logger.warning(f"BF_LAST_ENTRY override active: {_le_env} "
+                           f"(research twin — not production behavior)")
+        _sm_env = os.environ.get('BF_SKIP_MIDDAY')
+        if _sm_env is not None:
+            self.skip_midday = _sm_env.strip().lower() not in (
+                '0', 'false', 'no', 'off', '')
+            logger.warning(f"BF_SKIP_MIDDAY override active: "
+                           f"{self.skip_midday} (research twin)")
         self.entry_slippage_pct = entry_slippage if entry_slippage is not None else float(
             trading_cfg.get("entry_slippage_pct", 0.0)
         )
