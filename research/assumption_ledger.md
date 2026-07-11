@@ -114,6 +114,16 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
      cumulative. Live 2026-07-13 with the quintile-mult correction.
      research/orb_news_catalyst_jul2026.md;
      data/research/orb_news_catalyst_20260710.csv.
+   - ETF→underlying news mapping (2026-07-11, owner-prompted): ❌ REFUTED.
+     45% of universe = leveraged wrappers (own-ticker news rate 1.1%);
+     mapping to the underlying (40.2% news rate) INVERTS the signal —
+     und-news×pm_hi is NEGATIVE for wrappers in all 3 eras (−324/−125/−27
+     per trade), gate-with-mapping worse in every era. Wrapper monsters
+     are mostly NEWSLESS momentum (only 3/11 had und news). The news edge
+     is a COMMON-STOCK edge; the shipped own-ticker gate is correct as-is.
+     Do NOT re-propose underlying or industry mapping without new
+     evidence. Parked: wrapper-with-und-news VETO (negative cell, needs
+     no-refill study). research/orb_news_catalyst_jul2026.md addendum.
 4. Stage-2 regime sizing: ✅ SHIPPED — day-level A/B/C1/C2 mult + C2 skip
    in batch_backtest Stage-2 (BT_REGIME_SIZING=0 = pre-fix, verified
    byte-identical). A/B on 2025-01→2026-07: $31.9K/74tr → $35.6K/67tr.

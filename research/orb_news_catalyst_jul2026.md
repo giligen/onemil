@@ -84,3 +84,46 @@ qmult×pm_mult precedent).
 
 Artifacts: `data/research/orb_news_catalyst_20260710.csv`,
 `/tmp/news_backfill.py` (regen script), this doc.
+
+## Addendum 2026-07-11: ETF underlying-mapping REFUTED (owner-prompted)
+
+**Observation (correct)**: 45% of the qualified universe (614/1,359) are
+leveraged ETF wrappers (Tradr/T-Rex/Direxion/ProShares/GraniteShares 2x
+products on PLTR/MSTR/TSLA/CRCL/...). Their own-ticker news rate is 1.1%
+vs 33% for common stocks — Benzinga tags the UNDERLYING. The week of
+7/6-7/10 (5 of 6 fills were wrappers, zero news) and CRCD (+$14.7K
+"no-news monster" = 2x inverse CRCL) are this cohort, not detection
+failures. 93/97 shipped combo-cell trades are common stocks: **the news
+edge is a stock edge.**
+
+**Hypothesis tested**: map wrapper → underlying (448/614 resolvable from
+asset names), query news on the underlying, extend the gate.
+`research/scripts/orb_und_news_study.py`;
+`data/research/orb_underlying_news_20260711.csv`. Mapped news rate: 40.2%.
+
+**REFUTED — the interaction INVERTS for wrappers.** Underlying-news ×
+pm_hi within the ETF cohort is NEGATIVE in all 3 eras (TRAIN −$324/trade
+n=20, 25H2 −$125 n=26, 2026 −$27 n=43; WR 20-37%), while no-news
+wrapper moves are the cohort's best trades (2026 "neither" cell:
++$526 mean, n=127). Gate-with-mapping on the selected book: WORSE in
+every era (−$1.4K/−$2.0K/−$0.4K, MDD −$18.2K→−$18.4K); the 36
+newly-boosted trades average −$182. Blind-spot check: only 3/11 wrapper
+monsters had underlying news — wrapper monsters are mostly newsless
+momentum (SMCX/OKLL/RGTZ class).
+
+**Mechanism (interpretive)**: for a stock, premarket news+volume = fresh
+catalyst → continuation. For a 2x wrapper, underlying-news days are
+widely-known stories with late retail crowding into the derivative —
+crowded/mean-reverting; wrapper volume WITHOUT news is the mechanical
+momentum ORB monetizes (rhymes with the PDR "day-2 not day-1" and
+crowded-day-junk findings).
+
+**Verdicts**: (1) shipped own-ticker gate is CORRECT as-is — wrappers
+almost never boost, and that's the profitable behavior, not a gap;
+(2) do NOT map to underlying; industry-level mapping is strictly weaker
+— dead on arrival; (3) live news hit-rate expectations: ~19% of
+candidates overall, ~0% on wrapper-heavy days — the EoD lag audit must
+not be read as broken on such days; (4) parked candidate for a future
+proper study: VETO/downsize wrapper picks whose UNDERLYING has premarket
+news (cell is negative all 3 eras but only ~−$11K/18mo raw and needs
+no-refill slot analysis — not shipped).
