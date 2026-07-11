@@ -37,6 +37,10 @@ from trading.orb_filter import (
     FeatureParam, assign_quintile, composite_score, load_feature_params,
 )
 from trading.orb_conviction import apply_adaptive_mult, load_adaptive_mults
+from trading.orb_asset_class import (
+    UNKNOWN as CLASS_UNKNOWN, classify_asset, effective_has_news,
+    load_class_map,
+)
 from trading.orb_pm_mult import (
     DEFAULT_HIGH_CUT_USD, DEFAULT_HIGH_MULT, DEFAULT_HIGH_MULT_NEWS,
     compute_pm_dollar_vol, pm_size_multiplier,
@@ -368,6 +372,11 @@ class ORBEngine:
         self._news_snapshot_dir = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             'logs')
+        # Asset-class rule (2026-07-11): news boost requires POSITIVE
+        # identification as a common stock — wrappers/unknown are
+        # structurally ineligible (trading/orb_asset_class.py).
+        self._asset_class: Dict[str, str] = {}
+        self._class_map: Optional[Dict[str, str]] = None
         # Touchgo filter (Rule M = entry-bar close-pos < 0.5; Rule D = bar-1
         # revert ≥ 0.75R → exit at entry -0.5R). Shared module
         # trading/orb_touchgo_filter.py imported by both LIVE and BT for parity.
@@ -1816,7 +1825,13 @@ class ORBEngine:
         if self.pm_news_gate and self._news_fetch_done_day != today:
             self._fetch_news_flags()
         pm = self._pm_dollar_vols.get(symbol)
-        has_news = self._get_has_news(symbol) if self.pm_news_gate else None
+        has_news_raw = self._get_has_news(symbol) if self.pm_news_gate else None
+        # Deliberate class rule (2026-07-11): news counts only for
+        # identified common stocks — wrappers have no company events and
+        # their newsy days are the crowding cell (negative all 3 eras).
+        cls = self._classify_symbol(symbol) if has_news_raw else CLASS_UNKNOWN
+        has_news = effective_has_news(has_news_raw, cls) \
+            if self.pm_news_gate else None
         mult = pm_size_multiplier(
             pm, self.pm_mult_high_cut, self.pm_mult_high,
             has_news=has_news, high_mult_news=self.pm_mult_high_news,
@@ -1824,8 +1839,12 @@ class ORBEngine:
         if mult != 1.0:
             logger.info(
                 f"[ORB] PM MULT: {symbol} premarket ${pm:,.0f} > "
-                f"${self.pm_mult_high_cut:,.0f}, news={has_news} — "
-                f"sizing x{mult}")
+                f"${self.pm_mult_high_cut:,.0f}, news={has_news} "
+                f"class={cls} — sizing x{mult}")
+        elif has_news_raw and has_news is False:
+            logger.info(
+                f"[ORB] PM MULT: {symbol} newsy but class={cls} — news "
+                f"boost structurally out of scope (deliberate wrapper rule)")
         elif pm is None:
             logger.warning(
                 f"[ORB] PM MULT: {symbol} premarket volume unavailable — "
@@ -1836,6 +1855,34 @@ class ORBEngine:
                 f"[ORB] PM MULT: {symbol} above PM$ cut but news "
                 f"UNAVAILABLE — fail-open, no news boost (x{mult})")
         return mult
+
+    def _classify_symbol(self, symbol: str) -> str:
+        """Asset class for the news-gate rule: 'stock' | 'wrapper' |
+        'unknown'. Resolution order: cache → lev-family sets / offline
+        class map (no I/O) → asset-name API fetch (8s bounded, only for
+        symbols the 14K map doesn't know — new listings). Failure →
+        'unknown' (not news-boost eligible — never boost blind)."""
+        cached = self._asset_class.get(symbol)
+        if cached is not None:
+            return cached
+        # lev-family fast path first (curated sets, zero I/O)
+        if classify_asset(symbol, None) == 'wrapper':
+            self._asset_class[symbol] = 'wrapper'
+            return 'wrapper'
+        if self._class_map is None:
+            self._class_map = load_class_map()
+        cls = self._class_map.get(symbol)
+        if cls is None:
+            name = None
+            if hasattr(self.alpaca, 'get_asset_name'):
+                name = self.alpaca.get_asset_name(symbol)
+            cls = classify_asset(symbol, name)
+            if cls == CLASS_UNKNOWN:
+                logger.warning(
+                    f"[ORB] CLASS: {symbol} unresolvable (no name) — "
+                    f"'unknown', news boost ineligible")
+        self._asset_class[symbol] = cls
+        return cls
 
     def _get_has_news(self, symbol: str) -> Optional[bool]:
         """Tri-state news presence for a symbol: True/False, or None when
@@ -1883,6 +1930,11 @@ class ORBEngine:
                     f"premarket news (total covered "
                     f"{sum(1 for v in self._news_flags.values() if v is not None)}"
                     f"/{len(self._news_flags)})")
+                # Pre-warm the class rule for newsy symbols (9:31, off the
+                # 9:35 hot path) — only they need classification
+                for s2 in syms:
+                    if (self._news_flags.get(s2) or {}).get('n_articles', 0):
+                        self._classify_symbol(s2)
             else:
                 logger.warning(
                     "ORB: alpaca client lacks get_premarket_news_multi — "
@@ -3949,6 +4001,7 @@ class ORBEngine:
                                else _news.get('n_articles', 0)),
                 'news_headline': ('' if _news is None
                                   else _news.get('headline', '')),
+                'asset_class': self._asset_class.get(plan.symbol),
                 # the mult that ACTUALLY sized this plan (carried on the
                 # plan — never recomputed here, so recorded == applied)
                 'pm_mult': plan.pm_mult,

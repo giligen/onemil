@@ -1459,6 +1459,23 @@ class AlpacaClient:
             logger.warning(f"{symbol}: Failed to check marginable: {e}")
             return False  # Assume not marginable on error
 
+    def get_asset_name(self, symbol: str) -> Optional[str]:
+        """Asset's registered name (for wrapper-vs-stock classification in
+        the ORB news gate). Short timeout, no retries — called near the
+        open for newly-listed symbols the offline class map doesn't cover;
+        callers treat None as 'unknown' (not news-boost eligible)."""
+        try:
+            asset = self._call_with_timeout(
+                lambda: self.trading_client.get_asset(symbol),
+                f"get_asset_name({symbol})",
+                timeout=NEWS_API_TIMEOUT, timeout_retries=0,
+                rate_limit_retries=0)
+            return getattr(asset, 'name', None)
+        except Exception as e:
+            logger.warning(f"{symbol}: asset name fetch failed: {e} — "
+                           f"class unknown (no news boost)")
+            return None
+
     def cancel_order(self, order_id: str) -> bool:
         """
         Cancel an open order.

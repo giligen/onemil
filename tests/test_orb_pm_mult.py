@@ -140,11 +140,17 @@ def engine(monkeypatch):
     return _make_engine()
 
 
-def _mock_feeds(engine, pm_map=None, news_map=None):
+def _mock_feeds(engine, pm_map=None, news_map=None,
+                asset_name='Test Industries Inc Common Stock'):
     engine.alpaca.get_premarket_1min_bars_multi = MagicMock(
         return_value=pm_map or {})
     engine.alpaca.get_premarket_news_multi = MagicMock(
         return_value=news_map or {})
+    # class rule: newsy symbols get classified; default mock = plain stock.
+    # Blank the offline map so tests are hermetic from the shipped 33K CSV
+    # (mock symbols like AAA collide with real tickers in it).
+    engine._class_map = {}
+    engine.alpaca.get_asset_name = MagicMock(return_value=asset_name)
 
 
 class TestEngineWiring:
@@ -268,6 +274,47 @@ class TestEngineWiring:
             engine._maybe_prefetch_pm()
             engine.alpaca.get_premarket_1min_bars_multi.assert_called_once()
             engine.alpaca.get_premarket_news_multi.assert_called_once()
+
+    def test_newsy_wrapper_not_boosted_deliberate_rule(self, engine):
+        """2026-07-11 class rule: a wrapper with articles tagged to its
+        own ticker must NOT get the news boost — wrappers' newsy days are
+        the crowding cell (negative all 3 eras)."""
+        engine.build_universe(source_loader=lambda: ['WRPX'])
+        _mock_feeds(engine, pm_map={'WRPX': PM_BARS_10M},
+                    news_map={'WRPX': {'n_articles': 3, 'headline': 'x'}},
+                    asset_name='Tradr 2X Long WRAP Daily ETF')
+        assert engine._get_pm_mult('WRPX') == 1.0
+        assert engine._asset_class['WRPX'] == 'wrapper'
+
+    def test_newsy_unknown_class_not_boosted(self, engine):
+        """Name fetch fails -> unknown -> never boost blind."""
+        engine.build_universe(source_loader=lambda: ['NEWCO'])
+        _mock_feeds(engine, pm_map={'NEWCO': PM_BARS_10M},
+                    news_map={'NEWCO': {'n_articles': 1, 'headline': 'x'}})
+        engine.alpaca.get_asset_name = MagicMock(return_value=None)
+        assert engine._get_pm_mult('NEWCO') == 1.0
+        assert engine._asset_class['NEWCO'] == 'unknown'
+
+    def test_lev_family_wrapper_needs_no_api(self, engine):
+        """Known leveraged-family symbols classify without a name fetch."""
+        from trading.orb_correlation import LEVERAGED_SHORT_ALL
+        sym = LEVERAGED_SHORT_ALL[0]
+        engine.build_universe(source_loader=lambda: [sym])
+        _mock_feeds(engine, pm_map={sym: PM_BARS_10M},
+                    news_map={sym: {'n_articles': 2, 'headline': 'x'}})
+        engine.alpaca.get_asset_name = MagicMock(return_value=None)
+        assert engine._get_pm_mult(sym) == 1.0
+        engine.alpaca.get_asset_name.assert_not_called()
+
+    def test_class_map_hit_needs_no_api(self, engine):
+        """Symbols in the shipped 33K map classify offline (CRCA)."""
+        engine.build_universe(source_loader=lambda: ['CRCA'])
+        _mock_feeds(engine, pm_map={'CRCA': PM_BARS_10M},
+                    news_map={'CRCA': {'n_articles': 2, 'headline': 'x'}})
+        engine._class_map = None   # use the REAL shipped map (that's the test)
+        engine.alpaca.get_asset_name = MagicMock(return_value=None)
+        assert engine._get_pm_mult('CRCA') == 1.0        # wrapper via map
+        engine.alpaca.get_asset_name.assert_not_called()
 
     def test_933_lag_refresh_upgrades_no_news_only(self, engine):
         """Benzinga indexing-lag pass: at >=9:33, no-news symbols are

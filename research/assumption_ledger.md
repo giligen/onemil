@@ -124,6 +124,21 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
      Do NOT re-propose underlying or industry mapping without new
      evidence. Parked: wrapper-with-und-news VETO (negative cell, needs
      no-refill study). research/orb_news_catalyst_jul2026.md addendum.
+   - Asset-class rule (2026-07-11, deliberate-rules mandate): ✅ SHIPPED —
+     news boost requires POSITIVE stock identification
+     (trading/orb_asset_class.py; lev sets → 33K map → API → unknown
+     never boosts). Book $301,518→$295,896 (−$5.6K = 4 lucky wrapper
+     recap-tag trades; MDD identical) — the price of immunity to a
+     Benzinga tagging change flipping the gate into the crowding cell.
+     Full machine rulebook: research/orb_machine_rules.md.
+   - News WINDOW study (owner's prev-day question, 2026-07-11): fresh
+     premarket news (today 4:00-9:35) is the payload (+$1.8K/+$1.6K/
+     +$1.0K per era, monster 31/12/11%). Yesterday-SESSION news as boost
+     extension: ❌ NO-SHIP — payload = ASST+PONY (H1-25), 2026 n=4 +$54
+     (pole=2 recency pattern). Wrappers: NO window works in any direction
+     (prev-day und-catalyst does NOT carry day-2: −$129/−$177).
+     PM$ remains TODAY 4:00-9:29 premarket $ (deliberate: is the crowd
+     here THIS morning); prev-day-run is PDR's job, not PM's.
 4. Stage-2 regime sizing: ✅ SHIPPED — day-level A/B/C1/C2 mult + C2 skip
    in batch_backtest Stage-2 (BT_REGIME_SIZING=0 = pre-fix, verified
    byte-identical). A/B on 2025-01→2026-07: $31.9K/74tr → $35.6K/67tr.

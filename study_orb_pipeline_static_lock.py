@@ -293,8 +293,26 @@ def main():
                 _nw = pd.concat([pd.read_csv(x) for x in _news_paths],
                                 ignore_index=True) \
                     .drop_duplicates(subset=['symbol', 'day'], keep='last')
-                _news_map = {(r['symbol'], r['day']): (r['n_articles'] or 0) > 0
-                             for _, r in _nw.iterrows()}
+                # Deliberate class rule (2026-07-11, matches live): the
+                # news boost requires positive identification as a common
+                # stock — wrappers/unknown are structurally ineligible
+                # (trading/orb_asset_class.py; the crowding-inversion
+                # evidence is in research/orb_news_catalyst_jul2026.md).
+                from trading.orb_asset_class import (
+                    STOCK as _CLS_STOCK, effective_has_news as _eff_news,
+                    load_class_map as _load_cmap)
+                _cmap = _load_cmap()
+                _news_map = {
+                    (r['symbol'], r['day']): _eff_news(
+                        (r['n_articles'] or 0) > 0,
+                        _cmap.get(r['symbol'], 'unknown'))
+                    for _, r in _nw.iterrows()}
+                n_class_blocked = sum(
+                    1 for k, v in _news_map.items()
+                    if v is False and _cmap.get(k[0], 'unknown') != _CLS_STOCK)
+                print(f"PM news gate: class rule active — "
+                      f"{n_class_blocked} newsy non-stock symbol-days "
+                      f"structurally ineligible")
             else:
                 print("PM news gate: WARNING no data/research/orb_news_catalyst_*.csv "
                       "— has_news unknown everywhere (fail-open, no news boosts)")

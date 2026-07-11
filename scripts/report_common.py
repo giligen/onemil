@@ -315,6 +315,7 @@ def sizing_attribution(day: str) -> Dict:
       cum:             realized P&L since MULT_SHIP_DAY by quintile group
                        + the news-boosted cell (the forward watch)
     """
+    from trading.orb_asset_class import effective_has_news
     from trading.orb_pm_mult import (
         DEFAULT_HIGH_CUT_USD, DEFAULT_HIGH_MULT, DEFAULT_HIGH_MULT_NEWS,
         pm_size_multiplier,
@@ -338,14 +339,19 @@ def sizing_attribution(day: str) -> Dict:
              'has_news': pdata.get('has_news'),
              'n_articles': pdata.get('n_articles'),
              'pm_dollar_vol': pdata.get('pm_dollar_vol'),
+             'asset_class': pdata.get('asset_class'),
              'pnl': r.get('pnl'),
              'filled': r.get('fill_price') is not None}
         trades.append(t)
         if t['pm_mult'] is None:
             continue   # pre-ship row (no attribution recorded)
+        # Class rule mirror (2026-07-11): news counts only for identified
+        # stocks. Rows without a recorded class (pre-rule) pass through.
+        eff_news = (effective_has_news(t['has_news'], t['asset_class'])
+                    if t['asset_class'] is not None else t['has_news'])
         expected = pm_size_multiplier(
             t['pm_dollar_vol'], high_cut, high_mult,
-            has_news=t['has_news'], high_mult_news=high_mult_news,
+            has_news=eff_news, high_mult_news=high_mult_news,
             news_gate=news_gate)
         if abs(float(t['pm_mult']) - expected) > 1e-9:
             mult_mismatches.append(
@@ -456,6 +462,8 @@ def sizing_block(attr: Dict) -> str:
             continue
         nf = ('news✓' if t['has_news'] is True
               else 'news✗' if t['has_news'] is False else 'news?')
+        if t.get('asset_class') == 'wrapper':
+            nf += '/wrap'
         pm = (f"${t['pm_dollar_vol'] / 1e6:.1f}M"
               if t['pm_dollar_vol'] else 'pm?')
         pnl = f" ${t['pnl']:+,.0f}" if t['pnl'] is not None else ''

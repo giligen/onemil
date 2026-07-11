@@ -72,6 +72,9 @@ def engine(monkeypatch):
                       'Q1': {'n_articles': 0, 'headline': ''},
                       'Q2': {'n_articles': 0, 'headline': ''},
                       'Q3': {'n_articles': 0, 'headline': ''}})
+    # class rule: LOUD is a common stock -> news-boost eligible
+    alpaca.get_asset_name = MagicMock(
+        return_value='Loud Industries Inc Common Stock')
     alpaca.get_open_positions.return_value = []
     alpaca.get_account_info.return_value = {'buying_power': 100_000.0,
                                             'equity': 100_000.0, 'cash': 100_000.0,
