@@ -80,6 +80,11 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
 | BF price_max | 30 | 🔧 Jul'26: 23→30 twin (+$6.4K/18mo, BOTH eras +, 22 incr @41% WR). SUPERSEDES the old "$24+ death zone" note (pre-modern-stack measurement). Combo with pullback-10 not twin-tested — expect ≈additive, verify live. |
 | BF entry slip model | — | ✅ Jul'26: live +40-54bps vs 50 model (n=29, recheck n>=60) |
 | BF Stage-1 cache reproducibility | — | 🚨 Jul'26: IRREPRODUCIBLE — mover screen float gate time-travels (current floats on history). Prod cache = point-in-time truth, NEVER rebuild. Studies must use rebuild twins. |
+| BF last_entry 10:45 + midday skip + EOD-flat | session structure | ✅ Jul'11 VALIDATED (first time): 18mo afternoon twin (last_entry 15:30, midday on) — post-10:45 = −\$12.7K raw at WR 28-32%, NEGATIVE both eras, in EVERY sub-session (pre-midday −\$4.7K, midday −\$1.5K, afternoon −\$6.5K); conviction cannot rescue (conv≥2.2 still −\$6.6K). Morning open session = +\$383/trade. The 10:45 wall is load-bearing. Twin: /tmp/bf_twin_afternoon.csv; BF_LAST_ENTRY/BF_SKIP_MIDDAY env overrides. |
+| BF re-entry (multi/day) | off | ✅ Jul'11 RE-REFUTED under current stack: 2nd entries −\$81/trade (n=30), 3rd −\$89 (n=3). Confirms −\$1,299/yr finding. |
+| BF conviction floor | 1.8 | ✅ Jul'11 re-validated: 1.5-1.7 floors add 2025-only money, 2026 WORSENS (recency-negative, pole=2 pattern). |
+| BF trade caps (5/day,3conc,DLL) | — | ✅ Jul'11: NEVER BIND on shipped book — not the supply constraint. |
+| BF regime C2 skip | 0.0x | ✅ Jul'11: half-size C2 adds +\$3.3K but ALL 2025, 2026 flat — skip stays. |
 | BF detector era-fit | strict rules | ⚠ TESTING — twin-build preview: loose=strict in Mar-25, loose 3x strict in Jun-26; strict rules may bind exactly in the 2026 regime |
 
 ## Standing debt — CLEANUP PASS 2026-07-04 (all four attacked)
