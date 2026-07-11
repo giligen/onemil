@@ -1,4 +1,21 @@
-# Assumption ledger — every parameter, its evidence status (2026-07-04)
+# Assumption ledger — every parameter, its evidence status
+   - Bar-level 1R-moment predictors (2026-07-11, owner insisted): ❌ NO
+     PREDICTOR SURVIVES correct path accounting. First pass showed
+     speed/pullback/greenness separating monsters — an ARTIFACT of two
+     path bugs (tag-exited trades counted as alive; stop-before-1R
+     counted as reachers). Corrected (212 clean 1R-reachers):
+     P(>=3R | impulse@1R) = P(>=3R | grind@1R) = 16%, era-flipping.
+     At 1R, monsters are still camouflaged — in speed, volume, pullback,
+     and bar-shape space. Volume era-flips (again).
+   - BYPRODUCT — BE-stop-at-1R for grinders (first real consistency
+     lever found): flat-exit grinders that round-trip to entry before
+     arming. −$8.8K/18mo total (−3%) for MDD −$18.2K→−$14.6K (−20%) and
+     worst month −$7.3K→−$4.8K (−34%); 46 round-trips flatted, 3
+     monsters killed incl CMCT 31.8R. Unconditional version much worse
+     (−$60K, kills BNAI 12.6R). FAILS the profit-up rule → NOT shipped;
+     documented as the honest consistency price list (owner preference
+     call). Needs BE-fill slippage modeling + StopMonitor wiring if ever
+     approved. /tmp/monster_1r_v2.csv, research/scripts pending. (2026-07-04)
 
 Owner mandate: "don't take any assumption for granted — fine-tune the
 entire machine." This ledger is the standing inventory. Every knob gets a
