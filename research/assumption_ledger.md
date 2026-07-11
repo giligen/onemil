@@ -158,6 +158,22 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
      Consistency levers that remain: portfolio allocation (BF corr
      +0.21, 0/19 joint-negative months) + monster-rate tripwire
      (18 monsters/18mo, median gap 19d, max 127d — drought vs broken).
+   - In-flight monster prediction at 1R/1.5R (2026-07-11, owner-prompted):
+     ✅ CONFIRMED as the best signal in the trade's life — P(>=3R) jumps
+     ~7% unconditional -> 26% once armed (~1.75R), 55% for 2.0x-flagged
+     stocks (runners mean +10.6R true-R). BUT the machine already acts on
+     exactly this: the static lock converts 'armed' into a free-roll
+     (locked floor, uncapped top) — the arm IS the monster-recognition
+     trigger. Conditional lock levels per cohort: ❌ DIES with true-R
+     units (initial analysis had a scaling error: 1R != \$3K when the
+     \$25K position cap binds; true median risk \$843). Wrapper armed
+     continuation is 23% >=3R (not ~0 as mis-scaled) — tightening their
+     lock bounds NET NEGATIVE (-\$24K worst / +\$18K impossible-best).
+     Era-stable continuation: unflagged stocks 21/21/19%, wrappers
+     42/24/16%. PARKED (needs bar-level resim + appetite decision):
+     add-to-winners at arm on 2.0x-flagged only (n=20/18mo, rough EV
+     +\$40-60K model) — NOTE it INCREASES skew, anti-consistency; a
+     news-gated variant of the Apr-2026 parked add-to-winners.
 4. Stage-2 regime sizing: ✅ SHIPPED — day-level A/B/C1/C2 mult + C2 skip
    in batch_backtest Stage-2 (BT_REGIME_SIZING=0 = pre-fix, verified
    byte-identical). A/B on 2025-01→2026-07: $31.9K/74tr → $35.6K/67tr.
