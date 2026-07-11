@@ -139,6 +139,25 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
      (prev-day und-catalyst does NOT carry day-2: −$129/−$177).
      PM$ remains TODAY 4:00-9:29 premarket $ (deliberate: is the crowd
      here THIS morning); prev-day-run is PDR's job, not PM's.
+   - Monster bottom-up study + two-regime design (2026-07-11, owner-
+     prompted "predict monsters, consistent otherwise"): ❌ REFUTED both.
+     (a) PREDICTION CEILING: all 47 selected-book monsters dossiered —
+     at entry they are feature-camouflaged (medians ≈ rest: gap 6.3 vs
+     6.9, PM$ 2.7M vs 2.1M, composite 0.33 vs 0.32). Best deliberate
+     flag union captures 83% of monsters only by flagging 71% of the
+     book (no discrimination). The predictable subset (fresh-news×PM$
+     stocks, 21% capture at 22% precision) is EXACTLY what the shipped
+     2.0x gate already boosts. Ceiling reached.
+     (b) TWO-REGIME (target exits on unflagged): CANNOT deliver its
+     goal — capping winners doesn't touch red months. Even ALL-target
+     +1.5R (max consistency, −63% total to $110K) keeps IDENTICAL
+     negMo 6/19, worst month −$7,291, MDD −$18,174. Consistency in
+     this machine is LOSS-SIDE-bound and the loss side is already
+     optimized (stops/touchgo/vetoes/Q1/PDR). Do not re-propose
+     conditional exits without new loss-side evidence.
+     Consistency levers that remain: portfolio allocation (BF corr
+     +0.21, 0/19 joint-negative months) + monster-rate tripwire
+     (18 monsters/18mo, median gap 19d, max 127d — drought vs broken).
 4. Stage-2 regime sizing: ✅ SHIPPED — day-level A/B/C1/C2 mult + C2 skip
    in batch_backtest Stage-2 (BT_REGIME_SIZING=0 = pre-fix, verified
    byte-identical). A/B on 2025-01→2026-07: $31.9K/74tr → $35.6K/67tr.
