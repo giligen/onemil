@@ -154,6 +154,45 @@ def _append(out_path: Path, rows: list, dry: bool) -> None:
     print(f"appended {len(df)} rows to {out_path.name}")
 
 
+def refresh_class_map(symbols, dry: bool) -> None:
+    """Append newly-listed symbols to the asset-class map so BT classifies
+    them like live does (live has an API fallback; BT is map-only — without
+    this, a newsy new listing boosts live but not in BT ground truth)."""
+    import csv as _csv
+    from trading.orb_asset_class import DEFAULT_CLASS_MAP, classify_asset
+    import requests
+    known = set()
+    try:
+        with open(DEFAULT_CLASS_MAP, newline='') as fh:
+            known = {r['symbol'] for r in _csv.DictReader(fh)}
+    except Exception as e:
+        print(f"WARNING: class map unreadable ({e}) — skipping refresh")
+        return
+    missing = sorted(set(symbols) - known)
+    if not missing:
+        print(f"class map: coverage complete ({len(known)} symbols)")
+        return
+    hdr = {'APCA-API-KEY-ID': os.environ['ALPACA_API_KEY'],
+           'APCA-API-SECRET-KEY': os.environ['ALPACA_API_SECRET']}
+    rows = []
+    for sym in missing:
+        try:
+            r = requests.get(f'https://api.alpaca.markets/v2/assets/{sym}',
+                             headers=hdr, timeout=(5, 15))
+            name = r.json().get('name', '') if r.ok else ''
+        except Exception:
+            name = ''
+        rows.append([sym, classify_asset(sym, name), (name or '')[:90]])
+    if dry:
+        print(f"DRY RUN: would append {len(rows)} class-map rows: "
+              f"{[r[:2] for r in rows[:10]]}")
+        return
+    with open(DEFAULT_CLASS_MAP, 'a', newline='') as fh:
+        _csv.writer(fh).writerows(rows)
+    print(f"class map: appended {len(rows)} new symbols "
+          f"({sum(1 for r in rows if r[1] == 'unknown')} unknown)")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--dry-run', action='store_true')
@@ -162,6 +201,7 @@ def main() -> int:
     feats = pd.read_csv(_latest_features_csv(), usecols=['symbol', 'date'])
     feats['day'] = feats['date'].astype(str).str[:10]
     all_pairs = set(zip(feats['symbol'], feats['day']))
+    refresh_class_map({s for s, _ in all_pairs}, args.dry_run)
 
     for label, pattern, out, fetch in (
             ('PM$', PM_GLOB, PM_OUT, fetch_pm),
