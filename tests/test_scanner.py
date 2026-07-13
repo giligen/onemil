@@ -1264,3 +1264,24 @@ class TestNextAlignedWakeup:
             assert target > now, f"target {target} not > now {now} (sub={sub})"
             # And target is within (0, 60] seconds away
             assert 0 < target - now <= 60.0, f"unexpected delta {target - now} (sub={sub})"
+
+
+class TestPostWindowCadenceDrop:
+    """2026-07-13 overrun fix: after BF last-entry the broad per-minute
+    scan drops to every-5th-minute (source-level pins — the loop is not
+    unit-runnable, but the gating logic must stay wired)."""
+
+    def test_skip_logic_wired_in_loop(self):
+        import inspect
+        from scanner import realtime_scanner as rs
+        src = inspect.getsource(rs.RealtimeScanner)
+        assert '_is_past_last_entry_time' in src
+        assert '_skip_scan_this_minute' in src
+        # boundary consumed WITHOUT running the cycle when skipping
+        assert 'consume the boundary, no scan' in src
+
+    def test_cycle_timing_line_present(self):
+        import inspect
+        from scanner import realtime_scanner as rs
+        src = inspect.getsource(rs.RealtimeScanner._run_intraday_cycle)
+        assert 'CYCLE TIMING' in src and 'fetch=' in src

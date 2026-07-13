@@ -110,6 +110,8 @@ class AlpacaClient:
         self.trading_client = TradingClient(api_key, api_secret, paper=self._paper)
         self.news_client = NewsClient(api_key, api_secret)
         self._api_timeout = DEFAULT_API_TIMEOUT
+        # rate-limit state for None-field warnings (per field name)
+        self._none_field_warn_ts: Dict[str, float] = {}
 
         logger.info(f"AlpacaClient initialized (paper={self._paper})")
 
@@ -1411,10 +1413,21 @@ class AlpacaClient:
             def _num(name, cast, default):
                 v = getattr(account, name, None)
                 if v is None:
-                    logger.warning(
-                        "get_account_info: %s is None from Alpaca — "
-                        "defaulting to %s (account status: %s)",
-                        name, default, account.status)
+                    # Rate-limit to once/hour per field (2026-07-13): the
+                    # per-minute scanner cycle was emitting this every 60s
+                    # all day (daytrade_count None is a persistent Alpaca
+                    # quirk on this account), burying real warnings.
+                    now = time_mod.monotonic()
+                    if not hasattr(self, '_none_field_warn_ts'):
+                        self._none_field_warn_ts = {}   # lazy (rehydrated clients)
+                    last = self._none_field_warn_ts.get(name, 0.0)
+                    if now - last > 3600:
+                        self._none_field_warn_ts[name] = now
+                        logger.warning(
+                            "get_account_info: %s is None from Alpaca — "
+                            "defaulting to %s (account status: %s; this "
+                            "warning is rate-limited to once/hour)",
+                            name, default, account.status)
                     return default
                 return cast(v)
             return {

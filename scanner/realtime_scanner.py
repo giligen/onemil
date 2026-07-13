@@ -329,7 +329,25 @@ class RealtimeScanner:
                 force_closed = True
 
             # Scanner intraday cycle every minute (matches backtest bar-by-bar qualification)
+            #
+            # Cadence drop (2026-07-13 overrun fix): after BF's last-entry
+            # time (+5min grace) the broad per-minute scan serves NOTHING
+            # that needs minute cadence — BF cannot enter, ORB is WebSocket-
+            # bar-driven, exits live in StopMonitor. The 5,628-symbol
+            # bars+trades fetch (30-90s under hot-tape congestion) was
+            # blowing the 60s budget every ~3min all afternoon (145 overruns
+            # 7/10, 92 on 7/13). Post-window: scan every 5th minute only;
+            # engine ticks/force-close checks still run every second.
             current_bucket = f"{now_et.hour:02d}:{now_et.minute:02d}"
+            _past_entry_window = (
+                engine is not None and engine.enabled
+                and engine._is_past_last_entry_time()
+            )
+            _skip_scan_this_minute = (
+                _past_entry_window and now_et.minute % 5 != 0
+            )
+            if current_bucket != last_bucket and _skip_scan_this_minute:
+                last_bucket = current_bucket   # consume the boundary, no scan
             if current_bucket != last_bucket:
                 if engine is not None:
                     engine.clear_qualified_symbols()   # Bug #4 fix
@@ -990,6 +1008,7 @@ class RealtimeScanner:
         # The drain is the same code as the sleep-loop path; mid-cycle is safe
         # because engine ticks haven't started yet (they run AFTER this method
         # returns), so there's no concurrent run_pattern_check / check_entries.
+        _t_fetch0 = time_mod.time()
         with ThreadPoolExecutor(
             max_workers=2, thread_name_prefix='cycle-fetch'
         ) as ex:
@@ -1000,6 +1019,8 @@ class RealtimeScanner:
                 time_mod.sleep(0.5)
             bars = bars_future.result()
             trades = trades_future.result()
+        _t_fetch = time_mod.time() - _t_fetch0
+        _t_loop0 = time_mod.time()
 
         qualified = []
         close_calls = []
@@ -1198,6 +1219,15 @@ class RealtimeScanner:
         # Output
         self._print_intraday_output(bucket, symbols, vol_5x_count, move_10pct_count,
                                      news_count, qualified, close_calls, hot_stocks)
+        # Cycle phase attribution (2026-07-13 overrun investigation): one
+        # line per cycle so overruns are diagnosable from the journal —
+        # fetch = the broad bars+trades API round-trip (network, 30-90s on
+        # hot days), loop = criteria/close-call/persist work (CPU).
+        logger.info(
+            f"CYCLE TIMING: fetch={_t_fetch:.1f}s "
+            f"loop={time_mod.time() - _t_loop0:.1f}s "
+            f"universe={len(symbols)} qualified={len(qualified)} "
+            f"close_calls={len(close_calls)}")
 
     def _print_intraday_output(
         self,

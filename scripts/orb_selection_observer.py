@@ -154,8 +154,17 @@ def main():
     live_range = sorted({l.split('ORB: ')[1].split(' range complete')[0]
                          for l in journal_lines('range complete')
                          if 'ORB: ' in l and ' range complete' in l})
-    live_scored = sorted({l.split('ORB SCORED: ')[1].split()[0]
-                          for l in journal_lines('ORB SCORED')})
+    # 2026-07-13 fix: since the 7/10 below-threshold logging change,
+    # composite-rejected candidates log as "ORB: X below filter threshold"
+    # instead of "ORB SCORED: X" — they WERE scored (correct rejection).
+    # The old parser counted them as dropped and false-alarmed
+    # "CAUGHT 10 dropped" on 7/13 (8 of the 10 were threshold rejects).
+    live_scored = sorted(
+        {l.split('ORB SCORED: ')[1].split()[0]
+         for l in journal_lines('ORB SCORED')}
+        | {l.split('ORB: ')[1].split()[0]
+           for l in journal_lines('below filter threshold')
+           if 'ORB: ' in l})
     live_submitted = sorted({l.split('ORB ENTRY SUBMITTED: ')[1].split()[0]
                              for l in journal_lines('ORB ENTRY SUBMITTED')})
     seed_lines = journal_lines('ORB universe seed')[-2:]
