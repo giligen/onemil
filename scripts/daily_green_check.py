@@ -71,6 +71,15 @@ def main() -> int:
         v['reasons'].append(
             f"pm_mult drift vs recompute: {attr['mult_mismatches']}")
         v['green'] = False
+    # Field-level decision parity (2026-07-17, z-param desync class):
+    # live composites must NUMERICALLY match the BT code path — a scoring
+    # divergence is a code/param bug and HARD-fails the day.
+    dp = rc.decision_parity(day)
+    if dp['mismatches']:
+        v['reasons'].append(
+            f"composite drift BT vs live ({len(dp['mismatches'])} of "
+            f"{dp['n_compared']}): {dp['mismatches'][:4]}")
+        v['green'] = False
     if args.dry_run:
         existing = rc.read_streak()
         streak = existing.get('streak', 0) if existing else 0

@@ -283,3 +283,50 @@ class TestSizingAttribution:
         src = inspect.getsource(dgc.main)
         assert 'mult_mismatches' in src
         assert "v['green'] = False" in src
+
+
+class TestDecisionParity:
+    """Field-level BT↔live composite comparison (2026-07-17 z-param class)."""
+
+    def _setup(self, monkeypatch, tmp_path, live_comp, csv_gap):
+        import yaml
+        # real yaml params, fake features CSV with one candidate
+        (tmp_path / 'analysis_results').mkdir()
+        real = yaml.safe_load(open('orb.yaml'))
+        feats = real['filter']['features']
+        row = {k: feats[k]['mean'] for k in feats}   # all-mean -> comp 0
+        row['gap_pct'] = csv_gap
+        import pandas as pd
+        pd.DataFrame([{**row, 'symbol': 'TST', 'date': '2026-07-16'}]).to_csv(
+            tmp_path / 'analysis_results' / 'orb_features_20260716.csv',
+            index=False)
+        (tmp_path / 'orb.yaml').write_text(open('orb.yaml').read())
+        monkeypatch.setattr(rc, 'ROOT', tmp_path)
+        monkeypatch.setattr(rc, 'journal_grep', lambda pat, day:
+            [f'x ORB SCORED: TST comp={live_comp:.4f} Q4 | rest']
+            if pat == 'ORB SCORED' else [])
+
+    def test_matching_composites_clean(self, monkeypatch, tmp_path):
+        import yaml
+        feats = yaml.safe_load(open('orb.yaml'))['filter']['features']
+        self._setup(monkeypatch, tmp_path, live_comp=0.0,
+                    csv_gap=feats['gap_pct']['mean'])
+        dp = rc.decision_parity('2026-07-16')
+        assert dp['available'] and dp['n_compared'] == 1
+        assert dp['mismatches'] == []
+
+    def test_param_drift_flagged(self, monkeypatch, tmp_path):
+        """Live logging a different composite than the shared code path
+        computes = the ASPI 7/14 bug — must be caught."""
+        import yaml
+        feats = yaml.safe_load(open('orb.yaml'))['filter']['features']
+        self._setup(monkeypatch, tmp_path, live_comp=0.0931,   # drifted
+                    csv_gap=feats['gap_pct']['mean'])
+        dp = rc.decision_parity('2026-07-16')
+        assert len(dp['mismatches']) == 1 and 'TST' in dp['mismatches'][0]
+
+    def test_wired_as_hard_gate(self):
+        import inspect
+        import daily_green_check as dgc
+        src = inspect.getsource(dgc.main)
+        assert 'decision_parity' in src and 'composite drift' in src

@@ -400,6 +400,66 @@ def sizing_attribution(day: str) -> Dict:
             'news_drift': news_drift, 'cum': cum}
 
 
+def decision_parity(day: str) -> Dict:
+    """Field-level BT↔live decision parity (2026-07-17, born from the
+    z-param desync): compare every composite LIVE actually computed
+    (journal 'ORB SCORED' + 'below filter threshold' lines) against the
+    composite the LIVE code path produces from the nightly features CSV
+    for the same symbol-day. Any |Δ| > 0.005 = the two systems are
+    scoring with different math/params = the 7/10 and 7/17 bug class —
+    a HARD red-day reason. Picks matching is not enough; NUMBERS must.
+
+    Returns {available, n_compared, mismatches: [str]}.
+    """
+    import re
+    live: Dict[str, float] = {}
+    for ln in journal_grep('ORB SCORED', day):
+        m = re.search(r'ORB SCORED: (\S+) comp=(-?[\d.]+)', ln)
+        if m:
+            live[m.group(1)] = float(m.group(2))
+    for ln in journal_grep('below filter threshold', day):
+        m = re.search(r'ORB: (\S+) below filter threshold — comp=(-?[\d.]+)', ln)
+        if m:
+            live[m.group(1)] = float(m.group(2))
+    if not live:
+        return {'available': False, 'n_compared': 0, 'mismatches': []}
+    try:
+        import glob as _glob
+        import pandas as pd
+        import yaml as _yaml
+        from trading.orb_filter import composite_score, load_feature_params
+        paths = [p for p in sorted(_glob.glob(
+            str(ROOT / 'analysis_results' / 'orb_features_*.csv')))
+            if 'corrmatrix' not in p]
+        if not paths:
+            return {'available': False, 'n_compared': 0, 'mismatches': []}
+        feats = pd.read_csv(paths[-1])
+        feats = feats[feats['date'].astype(str).str.startswith(day)]
+        cfg = _yaml.safe_load(open(ROOT / 'orb.yaml'))
+        params = load_feature_params((cfg.get('filter') or {}))
+        mismatches = []
+        n = 0
+        for sym, comp_live in live.items():
+            row = feats[feats['symbol'] == sym]
+            if row.empty:
+                continue   # universe coverage gaps are bt_parity's job
+            fdict = {k: row.iloc[0][k] for k in params.keys()
+                     if k in row.columns}
+            comp_bt = composite_score(fdict, params)
+            if comp_bt is None:
+                continue
+            n += 1
+            if abs(comp_bt - comp_live) > 0.005:
+                mismatches.append(
+                    f"{sym}: live comp {comp_live:.4f} vs BT {comp_bt:.4f} "
+                    f"(Δ{comp_bt - comp_live:+.4f})")
+        return {'available': True, 'n_compared': n, 'mismatches': mismatches}
+    except Exception as e:
+        print(f"WARNING: decision_parity failed: {e} — check skipped",
+              flush=True)
+        return {'available': False, 'n_compared': 0, 'mismatches': []}
+
+
 def news_lag_audit(day: str) -> Dict:
     """Pool-level Benzinga indexing-lag audit (2026-07-10).
 
