@@ -66,7 +66,18 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
      (c) news×PM gate evidence SURVIVES (quintile-free cells);
      (d) monster/window/session studies' conclusions survive (label-free);
      the July universe CSV quintile columns are drifted — do not reuse.
-     OWNER DECISION PENDING: flat mults vs keep shipped.
+     RESOLVED 7/17: owner approved FLAT mults (live same day).
+   - Parameterless (per-day percentile) selector (2026-07-17, owner
+     mandate): ❌ REFUTED — pure day-rank $161K / MDD −$67K (no absolute
+     floor → trades best-of-bad-lot days); with ≥0.5 floor $226K / MDD
+     −$25K; baseline frozen-composite stack $293,568 / MDD −$16,334 wins
+     era-consistently and leave-out-robustly at every depth. The frozen
+     ABSOLUTE quality scale is load-bearing; relative ranking destroys
+     it. Drift risk is instead covered by: yaml-pinned BT params,
+     hard-fail on silent refits (BT_ALLOW_REFIT), and the nightly
+     field-level decision-parity gate. CANONICAL BASELINE: $293,568
+     (frozen z + thr 0 + Q1 skip + flat mults + news-gated PM 2.0).
+     research/scripts/orb_dayrank_selector_study.py.
 
 ## ORB — exit chain
 | knob | value | status | evidence |

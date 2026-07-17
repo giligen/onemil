@@ -192,6 +192,15 @@ def main():
     df['_rp_position'] = uncap.clip(upper=per_pos_cap)
     df['_rp_pnl'] = df['pnl'] * df['_rp_position'] / OLD_POS
 
+    # Research hook (2026-07-17): dump the FULL resimmed candidate set
+    # (all candidates, production exit physics, pre-selection) so selector
+    # experiments run on identical physics without re-walking bars.
+    _dump = os.environ.get('ORB_BT_DUMP_CANDIDATES')
+    if _dump:
+        df.to_csv(_dump, index=False)
+        print(f"Candidates dumped (post-resim, pre-selection): {_dump} "
+              f"({len(df)} rows)")
+
     # Z-params + quintile cutoffs (2026-07-17 PARITY FIX — same class as
     # the 7/10 mult desync, one layer up): LIVE scores with the frozen
     # April-fit constants in orb.yaml (filter.features + quintile_cutoffs).
