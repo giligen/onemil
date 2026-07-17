@@ -219,16 +219,33 @@ def main():
             print("Z-params + quintile cutoffs: orb.yaml literals (LIVE PARITY)")
     except Exception as _e:
         print(f"Z-params: orb.yaml read failed ({_e}) — falling back to refit")
+    # HARD FAIL on missing yaml constants (2026-07-17): BOTH parity bugs
+    # (mults 7/10, z-params 7/17) survived because the refit fallback ran
+    # silently. A book computed on refit params is NOT ground truth for
+    # live and must never be produced by accident. BT_ALLOW_REFIT=1 is
+    # the explicit research escape hatch.
     train = df[(df['date'] >= '2025-01-01') & (df['date'] <= '2025-06-30')]
+    _allow_refit = os.environ.get('BT_ALLOW_REFIT', '').strip().lower() in (
+        '1', 'true', 'yes')
     if params is None:
+        if not _allow_refit:
+            raise SystemExit(
+                "FATAL: orb.yaml lacks filter.features z-params — refusing "
+                "to silently refit (that is how the 7/10 and 7/17 parity "
+                "bugs happened). Fix orb.yaml or set BT_ALLOW_REFIT=1 for "
+                "explicit research use.")
         params = fit_z_params(train, FILTER_FEATURES)
-        print("Z-params: TRAIN REFIT (yaml missing keys) — NOT live parity")
+        print("Z-params: TRAIN REFIT (BT_ALLOW_REFIT) — NOT live parity")
     df['_composite'] = composite_score(df, params)
     train = df[(df['date'] >= '2025-01-01') & (df['date'] <= '2025-06-30')]
     train_k = train[train['_composite'] >= FILTER_THRESHOLD].copy()
     if cutoffs is None:
+        if not _allow_refit:
+            raise SystemExit(
+                "FATAL: orb.yaml lacks quintile_cutoffs — refusing to "
+                "silently refit. Fix orb.yaml or set BT_ALLOW_REFIT=1.")
         cutoffs = fit_quintile_cutoffs(train_k['_composite'])
-        print("Quintile cutoffs: TRAIN REFIT (yaml missing) — NOT live parity")
+        print("Quintile cutoffs: TRAIN REFIT (BT_ALLOW_REFIT) — NOT live parity")
     train_k['_quintile'] = assign_quintile(train_k['_composite'], cutoffs)
     avg = float(train_k['_rp_pnl'].mean())
     # 2026-07-10 PARITY FIX: use orb.yaml's frozen adaptive_mults literals —
@@ -246,7 +263,13 @@ def main():
             mults = {q: float(_am[q]) for q in ('Q1', 'Q2', 'Q3', 'Q4', 'Q5')}
             print(f"Mults (orb.yaml literals — LIVE PARITY): {mults}")
     except Exception as _e:
-        print(f"Mults: orb.yaml read failed ({_e}) — falling back to refit")
+        print(f"Mults: orb.yaml read failed ({_e})")
+    if mults is None and os.environ.get('BT_ALLOW_REFIT', '').strip().lower() \
+            not in ('1', 'true', 'yes'):
+        raise SystemExit(
+            "FATAL: orb.yaml lacks adaptive_mults — refusing to silently "
+            "refit (7/10 parity-bug class). Fix orb.yaml or set "
+            "BT_ALLOW_REFIT=1 for explicit research use.")
     if mults is None:
         mults = {}
         for q in ['Q1', 'Q2', 'Q3', 'Q4', 'Q5']:
