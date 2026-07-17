@@ -531,6 +531,14 @@ class RealtimeScanner:
             # HH:MM:01 → first-cross detection happens within ~1-2s of the closing bar
             # instead of drifting 0-60s with start-time offset. Bar events still drained
             # every 1s for sub-second reaction on already-subscribed crossed_stocks.
+            #
+            # WORK time ends here — everything below is deliberate sleep.
+            # (2026-07-17 fix: the overrun warning measured to the END of the
+            # sleep loop, so any re-aligned iteration reported exactly 60.0s
+            # of "work" — 121/129 of 7/16's warnings were this artifact, and
+            # the entire Fri-7/10 "145 overruns" alarm was ~95% noise. Real
+            # slow cycles (66.8s Tue 13:35) are the varied-duration minority.)
+            _work_dur = time_mod.time() - _cycle_start
             _target = self._next_aligned_wakeup(offset_secs=1.0)
             _shutdown = False
             # Iterate up to 60 chunks (matches the original 60s sleep budget).
@@ -584,10 +592,9 @@ class RealtimeScanner:
             # Cycle-overrun warning: if cycle work took longer than the 60s budget
             # we skipped at least one minute boundary (alignment dropped a tick).
             # Surfaced so we can investigate slow scans (universe-poll spikes etc).
-            _cycle_dur = time_mod.time() - _cycle_start
-            if _cycle_dur > 60.0:
+            if _work_dur > 60.0:
                 logger.warning(
-                    f"Cycle overrun: work took {_cycle_dur:.1f}s (>60s budget) — "
+                    f"Cycle overrun: WORK took {_work_dur:.1f}s (>60s budget) — "
                     f"skipped a minute boundary, re-aligning"
                 )
 

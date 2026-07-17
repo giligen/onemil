@@ -192,13 +192,43 @@ def main():
     df['_rp_position'] = uncap.clip(upper=per_pos_cap)
     df['_rp_pnl'] = df['pnl'] * df['_rp_position'] / OLD_POS
 
-    # Fit pipeline on H1 2025 TRAIN
+    # Z-params + quintile cutoffs (2026-07-17 PARITY FIX — same class as
+    # the 7/10 mult desync, one layer up): LIVE scores with the frozen
+    # April-fit constants in orb.yaml (filter.features + quintile_cutoffs).
+    # The per-run TRAIN refit here silently DIVERGED once the band-study
+    # full-universe rebuilds added TRAIN-era rows to the features CSV
+    # (1,836 TRAIN rows vs the original fit's universe) — identical ASPI
+    # features scored 0.410 live vs 0.317 BT on 7/14, flipping quintiles
+    # and the selected book, and false-flagging live in the green check.
+    # Doctrine: the FROZEN fit (what live trades) is canonical; BT must
+    # match it. Refit retained as fallback only when yaml lacks the keys.
+    params = None
+    cutoffs = None
+    try:
+        import yaml as _yaml
+        _cfg0 = _yaml.safe_load(open('orb.yaml'))
+        _feats = (_cfg0.get('filter', {}) or {}).get('features') or {}
+        _qcuts = _cfg0.get('quintile_cutoffs') or []
+        _fnames = [f for f, _sgn in FILTER_FEATURES]
+        if (all(f in _feats for f in _fnames) and len(_qcuts) == 4):
+            params = {f: {'mean': float(_feats[f]['mean']),
+                          'std': float(_feats[f]['std']),
+                          'sign': int(_feats[f]['sign'])}
+                      for f in _fnames}
+            cutoffs = [float(x) for x in _qcuts]
+            print("Z-params + quintile cutoffs: orb.yaml literals (LIVE PARITY)")
+    except Exception as _e:
+        print(f"Z-params: orb.yaml read failed ({_e}) — falling back to refit")
     train = df[(df['date'] >= '2025-01-01') & (df['date'] <= '2025-06-30')]
-    params = fit_z_params(train, FILTER_FEATURES)
+    if params is None:
+        params = fit_z_params(train, FILTER_FEATURES)
+        print("Z-params: TRAIN REFIT (yaml missing keys) — NOT live parity")
     df['_composite'] = composite_score(df, params)
     train = df[(df['date'] >= '2025-01-01') & (df['date'] <= '2025-06-30')]
     train_k = train[train['_composite'] >= FILTER_THRESHOLD].copy()
-    cutoffs = fit_quintile_cutoffs(train_k['_composite'])
+    if cutoffs is None:
+        cutoffs = fit_quintile_cutoffs(train_k['_composite'])
+        print("Quintile cutoffs: TRAIN REFIT (yaml missing) — NOT live parity")
     train_k['_quintile'] = assign_quintile(train_k['_composite'], cutoffs)
     avg = float(train_k['_rp_pnl'].mean())
     # 2026-07-10 PARITY FIX: use orb.yaml's frozen adaptive_mults literals —

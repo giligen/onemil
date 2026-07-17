@@ -47,6 +47,26 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
 | quintile mults | Q2 1.5/Q3 1.4/Q4 0.5/Q5 0.5 | 🔧 Jul'10: CORRECTED — old fit (Q4=1.842) was on 15:59-exit physics live never traded; inverts under correct 15:45 exits (leave-out-stable, era-consistent; old config 2026=−$21K). SHRUNK clip [0.5,1.5] per Q5-cap doctrine. research/orb_selection_reaudit_jul2026.md |
 | quintile ranking order | Q4-first | ✅ Jul'10 re-audit: ordering is NOT the lever (slots rarely bind); Q2-first doubles MDD. Unchanged. |
 | BT pipeline mult source | orb.yaml literals | 🔧 Jul'10 parity fix: per-run refit silently diverged from live after the 15:45 fix. BASELINE REBASED: ~$251K/18mo shipped-config (retire the $344,766 refit-mults number). |
+   - Z-params + quintile cutoffs BT source (2026-07-17): 🚨 P0 PARITY FIX —
+     pipeline refit z-params/cutoffs per run from the features CSV whose
+     TRAIN slice GREW (band-study full-universe rebuilds: 1,836 rows vs
+     original fit) → BT scored on different params than live's frozen
+     orb.yaml constants (ASPI 7/14: identical features, comp 0.410 live vs
+     0.317 BT → quintile flip → false RED day). Pipeline now reads
+     filter.features + quintile_cutoffs from orb.yaml (live parity),
+     same pattern as the 7/10 mult fix. CONSEQUENCES:
+     (a) live-parity book = $210,190 shipped-mults / MDD −$14,727
+     (retire $295,896 — drifted);
+     (b) the Jul-10 QUINTILE MULT CORRECTION IS INVALIDATED: derived on
+     drifted quintile labels. Under live cutoffs NO mult scheme passes
+     leave-out (old +$207K→−$11K@top5; flat-vs-shipped +$83K→+$1.5K@top5;
+     era ex-top3 flips everywhere). The quintile layer carries no robust
+     sizing signal — monsters move buckets with the param set.
+     FLAT 1.0 = the null: $293,568 / MDD −$16,334.
+     (c) news×PM gate evidence SURVIVES (quintile-free cells);
+     (d) monster/window/session studies' conclusions survive (label-free);
+     the July universe CSV quintile columns are drifted — do not reuse.
+     OWNER DECISION PENDING: flat mults vs keep shipped.
 
 ## ORB — exit chain
 | knob | value | status | evidence |
