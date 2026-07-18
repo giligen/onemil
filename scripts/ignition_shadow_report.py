@@ -132,7 +132,7 @@ def main() -> int:
                 # is meaningless; surface instead of emitting nonsense
                 pnl_lines.append(
                     f"• {r['symbol']}: SKIPPED resim — entry "
-                    f"{entry} <= stop {stop} (bad quote at capture)")
+                    f"{entry} ≤ stop {stop} (bad quote at capture)")
                 continue
             # complex_late triggers become actionable at confirm time,
             # not first sighting — resim exits from minute_final_et
@@ -158,12 +158,12 @@ def main() -> int:
                    f"{len(trigs)}/day (pass {PASS['trig_lo']}-{PASS['trig_hi']})"))
     if med_sp is not None:
         checks.append(('spread median', med_sp <= PASS['spread_med'],
-                       f"{med_sp:.0f}bps (pass<= {PASS['spread_med']})"))
+                       f"{med_sp:.0f}bps (pass≤{PASS['spread_med']})"))
         checks.append(('spread p90', p90_sp <= PASS['spread_p90'],
-                       f"{p90_sp:.0f}bps (pass<= {PASS['spread_p90']})"))
+                       f"{p90_sp:.0f}bps (pass≤{PASS['spread_p90']})"))
     if p90_lat is not None:
         checks.append(('latency p90', p90_lat <= PASS['latency_p90'],
-                       f"{p90_lat:.0f}s (pass<= {PASS['latency_p90']})"))
+                       f"{p90_lat:.0f}s (pass≤{PASS['latency_p90']})"))
     if fetches:
         checks.append(('shadow overhead', max(fetches) <= 6.5,
                        f"max bars fetch {max(fetches):.1f}s"))

@@ -512,6 +512,17 @@ class ORBEngine:
             f"per_pos_cap=${self.planner.per_pos_cap_usd:,.0f}, "
             f"filter_features={list(self.z_params.keys())}"
         )
+        # veto arming is grep-verifiable at boot (deliberate-rules
+        # doctrine: a silently-disarmed gate must be visible)
+        logger.info(
+            f"ORBEngine gates: catalyst_veto={self.catalyst_veto_enabled} "
+            f"(min_cohort={self.catalyst_min_cohort}), "
+            f"pdr_veto={self.pdr_veto_enabled}, "
+            f"touchgo={self.touchgo_cfg.master_enabled}, "
+            f"skip_q1={self.skip_q1}, "
+            f"pm_mult={self.pm_mult_enabled} "
+            f"(news_gate={self.pm_news_gate})"
+        )
 
     # =====================================================================
     # Universe management
