@@ -87,6 +87,12 @@ filter:
   prev_day_range_veto:
     enabled: true
     min_prev_day_range_pct: 8.0
+  # Catalyst-required veto (2026-07-18): entry needs own-ticker news OR
+  # complex confirmation (>= min_cohort same-anchor candidates). See
+  # trading/orb_catalyst_veto.py. Env: ORB_CATALYST_VETO=0.
+  catalyst_veto:
+    enabled: true
+    min_cohort: 2
   # Touch-and-go filter (Rule M + Rule D). Default-on, walk-forward validated
   # on Jan'25-May'26 (924 trades, 8/11 OOS months helped, +$27K OOS,
   # +$44K full-timeline lift, WR 47.8% → 52.1%, cumulative max DD -16%).

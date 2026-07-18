@@ -39,7 +39,10 @@ from trading.orb_filter import (
 from trading.orb_conviction import apply_adaptive_mult, load_adaptive_mults
 from trading.orb_asset_class import (
     UNKNOWN as CLASS_UNKNOWN, classify_asset, effective_has_news,
-    load_class_map,
+    load_class_map, underlying_anchor,
+)
+from trading.orb_catalyst_veto import (
+    DEFAULT_MIN_COHORT, anchor_cohort_counts, catalyst_veto_applies,
 )
 from trading.orb_pm_mult import (
     DEFAULT_HIGH_CUT_USD, DEFAULT_HIGH_MULT, DEFAULT_HIGH_MULT_NEWS,
@@ -377,6 +380,19 @@ class ORBEngine:
         # structurally ineligible (trading/orb_asset_class.py).
         self._asset_class: Dict[str, str] = {}
         self._class_map: Optional[Dict[str, str]] = None
+        # Catalyst-required veto (2026-07-18, owner-approved −$36K):
+        # newsless-and-alone picks vetoed, slot consumed. Rollback:
+        # filter.catalyst_veto.enabled: false or ORB_CATALYST_VETO=0.
+        _cv_cfg = (filter_cfg.get('catalyst_veto', {}) or {})
+        self.catalyst_veto_enabled = bool(_cv_cfg.get('enabled', True))
+        self.catalyst_min_cohort = int(
+            _cv_cfg.get('min_cohort', DEFAULT_MIN_COHORT))
+        _cv_env = os.environ.get('ORB_CATALYST_VETO')
+        if _cv_env is not None:
+            self.catalyst_veto_enabled = _cv_env.strip().lower() not in (
+                '0', 'false', 'no', 'off', '')
+        self._anchor_cache: Dict[str, Optional[str]] = {}
+        self._class_names: Dict[str, str] = {}
         # Touchgo filter (Rule M = entry-bar close-pos < 0.5; Rule D = bar-1
         # revert ≥ 0.75R → exit at entry -0.5R). Shared module
         # trading/orb_touchgo_filter.py imported by both LIVE and BT for parity.
@@ -1778,6 +1794,11 @@ class ORBEngine:
             # form is toxic — trading/orb_pdr_veto.py docstring).
             if self._pdr_veto_reject(cand):
                 continue
+            # Catalyst-required veto (2026-07-18): newsless AND alone
+            # (no same-morning complex confirmation) — no catalyst, no
+            # trade. Same no-refill slot semantics as PDR.
+            if self._catalyst_veto_reject(cand):
+                continue
             spread_bps = self._get_spread_bps(sym)
             plan = self.planner.build(
                 symbol=sym,
@@ -2091,6 +2112,68 @@ class ORBEngine:
             logger.warning(
                 f"ORB: news snapshot write failed ({e}) — EoD lag audit "
                 f"will be unavailable for today")
+
+    def _anchor_for(self, symbol: str) -> Optional[str]:
+        """Underlying-complex anchor for the catalyst veto. Cached per
+        symbol; resolves via the class map name (offline) or the asset-
+        name API fallback. None = no anchor (index/commodity wrapper or
+        unresolvable) -> can never be complex-confirmed."""
+        if symbol in self._anchor_cache:
+            return self._anchor_cache[symbol]
+        if self._class_map is None:
+            self._class_map = load_class_map()
+        name = self._class_names.get(symbol)
+        if name is None:
+            name = self._load_class_name(symbol)
+        a = underlying_anchor(symbol, name, self._class_map)
+        self._anchor_cache[symbol] = a
+        return a
+
+    def _load_class_name(self, symbol: str) -> Optional[str]:
+        """Asset name for anchor parsing: class-map CSV names first (no
+        I/O beyond first load), then the get_asset_name API fallback."""
+        if not self._class_names and self._class_map is not None:
+            try:
+                import csv as _csv
+                from trading.orb_asset_class import DEFAULT_CLASS_MAP
+                with open(DEFAULT_CLASS_MAP, newline='') as fh:
+                    for row in _csv.DictReader(fh):
+                        self._class_names[row['symbol']] = row.get('name', '')
+            except Exception as e:
+                logger.warning(f"[ORB] anchor: class-map names unavailable "
+                               f"({e}) — API fallback per symbol")
+        nm = self._class_names.get(symbol)
+        if nm:
+            return nm
+        if hasattr(self.alpaca, 'get_asset_name'):
+            nm = self.alpaca.get_asset_name(symbol)
+            self._class_names[symbol] = nm or ''
+            return nm
+        return None
+
+    def _catalyst_veto_reject(self, cand: CandidateState) -> bool:
+        """Catalyst-required veto (2026-07-18, owner-approved −$36K):
+        newsless-and-alone picks are vetoed; slot consumed, no refill.
+        Fail-open on UNKNOWN news (None). Evidence + semantics:
+        trading/orb_catalyst_veto.py."""
+        if not self.catalyst_veto_enabled:
+            return False
+        has_news = self._get_has_news(cand.symbol)
+        anchor = self._anchor_for(cand.symbol)
+        cohort = anchor_cohort_counts(
+            self._anchor_for(s) for s in self.candidates.keys())
+        if catalyst_veto_applies(has_news, anchor, cohort,
+                                 self.catalyst_min_cohort):
+            logger.info(
+                f"[ORB] CATALYST VETO: {cand.symbol} newsless and alone "
+                f"(anchor={anchor}, cohort="
+                f"{cohort.get(anchor, 0) if anchor else 0}) — no catalyst, "
+                f"slot left empty (no backfill)")
+            cand.rejected_reason = 'catalyst_veto'
+            self._pdr_vetoed_today.add(cand.symbol)   # same slot accounting
+            cand.plan_submitted = True
+            return True
+        return False
 
     def _pdr_veto_reject(self, cand: CandidateState) -> bool:
         """PDR veto decision for one SELECTED pick (2026-07-04 ship).
@@ -4002,6 +4085,10 @@ class ORBEngine:
                 'news_headline': ('' if _news is None
                                   else _news.get('headline', '')),
                 'asset_class': self._asset_class.get(plan.symbol),
+                'anchor': self._anchor_cache.get(plan.symbol),
+                'anchor_cohort': (anchor_cohort_counts(
+                    self._anchor_for(s) for s in self.candidates.keys())
+                    .get(self._anchor_cache.get(plan.symbol) or '', 0)),
                 # the mult that ACTUALLY sized this plan (carried on the
                 # plan — never recomputed here, so recorded == applied)
                 'pm_mult': plan.pm_mult,

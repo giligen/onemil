@@ -67,6 +67,12 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
      (d) monster/window/session studies' conclusions survive (label-free);
      the July universe CSV quintile columns are drifted — do not reuse.
      RESOLVED 7/17: owner approved FLAT mults (live same day).
+   - Catalyst-required veto (2026-07-18): ✅ SHIPPED (owner-approved −$36K
+     budget) — news OR complex-confirmation required; newsless-and-alone
+     vetoed, slot consumed. Book $253-257K, MDD −$14.0K, worstMo −$7.8K,
+     negMo 9/19 (disclosed). Further sub-cuts REFUTED (every candidate
+     cut era-flips: news+pmLO improving cell, complex2 2026-positive).
+     trading/orb_catalyst_veto.py; live 2026-07-20.
    - Parameterless (per-day percentile) selector (2026-07-17, owner
      mandate): ❌ REFUTED — pure day-rank $161K / MDD −$67K (no absolute
      floor → trades best-of-bad-lot days); with ≥0.5 floor $226K / MDD
@@ -92,7 +98,7 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
      62 trades (3.4/mo), WR 52%, MDD −$11.0K, worst month −$6.6K; cuts a
      July-like month's bleed 77%; keeps the news monsters (AMCI/ANNA/
      CRNC/QCLS/BNAI), forfeits newsless ones (CMCT class, −$86K/18mo).
-     NOT SHIPPED — parked as the deliberate consistency-mode option.
+     SUPERSEDED by the catalyst-required veto (SHIPPED 2026-07-18, below).
    - ORACLE FEATURE HUNT (2026-07-18, owner mandate): 🎯 FOUND the missing
      information class — UNDERLYING-COMPLEX CO-MOVEMENT (und_cohort =
      count of same-underlying wrappers qualifying the same morning;

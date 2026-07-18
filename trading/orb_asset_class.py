@@ -104,6 +104,47 @@ def load_class_map(path: str = DEFAULT_CLASS_MAP) -> Dict[str, str]:
     return out
 
 
+# Fund-brand / structure tokens that are NOT underlying tickers (shared
+# by underlying_anchor; grown from the 7/11 + 7/18 studies).
+_ANCHOR_STOP = {
+    'ETF', 'ETN', 'TRUST', 'DAILY', 'TARGET', 'SHORT', 'LONG', 'BULL',
+    'BEAR', 'INVERSE', 'ULTRA', 'ULTRASHORT', 'ULTRAPRO', 'SHARES',
+    'FUND', 'II', 'III', '2X', 'X', 'REX', 'FANG', 'SPDR', 'NYSE',
+    'AMEX', 'VS', 'PLUS', 'INDEX', 'CAP'}
+
+
+def underlying_anchor(symbol: str, name: Optional[str],
+                      class_map: Optional[Dict[str, str]] = None
+                      ) -> Optional[str]:
+    """The complex anchor for catalyst confirmation (2026-07-18 veto):
+    a STOCK anchors its own complex (returns its own symbol); a wrapper
+    anchors its single-stock underlying (parsed from the fund name);
+    index/commodity wrappers anchor nothing (None).
+
+    Anchor tokens are VALIDATED against class_map (token must be a known
+    common stock) — without this, fund-brand words ('AI', 'GS'-like
+    fragments) become fake anchors. Pass load_class_map(); when absent,
+    validation is skipped (research fallback only).
+
+    Two candidates sharing an anchor the same morning = the underlying
+    move is dragging its whole listing complex = complex confirmation
+    (era-consistent: +$353/+$150/+$94 per trade vs negative for
+    unconfirmed newsless — see ledger 2026-07-18)."""
+    import re as _re
+    nm = name if isinstance(name, str) else ''
+    if not nm.strip():
+        return None
+    if not WRAPPER_RE.search(nm):
+        return symbol
+    for tok in _re.findall(r'\b[A-Z]{2,5}\b', nm):
+        if tok in _ANCHOR_STOP or tok == symbol:
+            continue
+        if class_map is not None and class_map.get(tok) != STOCK:
+            continue
+        return tok
+    return None
+
+
 def effective_has_news(has_news: Optional[bool],
                        asset_class: str) -> Optional[bool]:
     """The deliberate gate input: news counts ONLY for identified common

@@ -331,6 +331,13 @@ ORB analysis; the older ones have warning headers pointing to the shipped varian
 - **Rollback to pre-gate legacy**: `news_gate: false` + `high_mult: 1.5` + restart (zero state).
 - **Monitor**: `journalctl -u onemil-trader | grep -E "PM MULT|NEWS prefetch"`. EoD: the daily green check now prints per-trade sizing attribution (quintile × pm_mult × news flag), HARD-fails the day on recorded-vs-recomputed pm_mult drift, soft-flags live-vs-EoD news drift, and tracks Q2/Q3 vs Q4/Q5 vs news-boosted cumulative P&L since 2026-07-13 (`scripts/report_common.py::sizing_attribution`).
 
+**Catalyst-required veto (shipped 2026-07-18, live 2026-07-20, default ON)**: every ORB entry needs a CATALYST — own-ticker premarket news OR complex confirmation (≥2 same-morning candidates sharing the underlying anchor: a stock + its wrappers, or sibling wrappers of one underlying). Newsless-and-alone picks are vetoed POST-ranking, slot consumed, NO refill (refill re-tested toxic: MDD +42%).
+- **Evidence** (live-parity resim): book $293,568→$253-257K (−$36K, owner-approved budget), MDD −$16.3K→−$14.0K, worst month −$10.3K→−$7.8K, July-26 bleed −62%, trades −67%. Cost era-consistent. Disclosed trade-off: negative months 6→9 (all shallow). Newsless-alone universe cohort NEGATIVE all 3 eras; complex-confirmed newsless positive all 3.
+- **Shared helper**: `trading/orb_catalyst_veto.py` + `orb_asset_class.underlying_anchor` (BT pipeline + live engine — parity by construction). Fail-open on unknown news (fetch failure never vetoes).
+- **Config**: `orb.yaml::filter.catalyst_veto.{enabled,min_cohort}`. Env: `ORB_CATALYST_VETO=0`.
+- **Monitor**: `journalctl -u onemil-trader | grep "CATALYST VETO"`; pattern_data records anchor + anchor_cohort per trade.
+- **Rollback**: `enabled: false` + restart (zero state). Tests: `tests/test_orb_catalyst_veto.py` (22).
+
 **PDR veto — prev-day-range (shipped 2026-07-04, default ON)**: skips selected picks whose PREVIOUS day's range was quiet (`prev_day_range_pct <= 8.0`). ORB monetizes continuation — "day-2 of the fireworks, not day-1"; quiet-prev-day gappers are fresh pops that mean-revert.
 - **NO-REFILL invariant**: applied POST-ranking inside the submit loop — a vetoed pick's slot stays EMPTY. The refill form was tested and is TOXIC (2025H2 → ~$0, MDD −$29K→−$50K; same failure mode as the refuted ETF exclusion). Never "improve" this by backfilling.
 - **BT evidence** (defended replica, Jan'25–Jul'26): TOT $155K→$210K (+35%), MDD −$29.3K→−$20.1K, WR 35.8→40.2%, trades/day 3.3→1.6, all 3 eras positive (25H1/25H2/2026), monotone across thresholds 6–10, ALL top-10 giants kept.

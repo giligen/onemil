@@ -442,6 +442,59 @@ def main():
         print("PDR veto: WARNING prev_day_range_pct column missing from "
               "features CSV — veto skipped (fail-open)")
 
+    # Catalyst-required veto (ships 2026-07-18; matches orb_engine via
+    # trading/orb_catalyst_veto.py). Newsless-and-alone selected picks
+    # dropped, slot stays empty (post-selection, like PDR — no refill).
+    # News source: orb_news_catalyst_*.csv; anchors from the class map
+    # names via the SAME underlying_anchor helper live uses.
+    # Env: ORB_CATALYST_VETO=0 disables.
+    _cv_env = os.environ.get('ORB_CATALYST_VETO', '1').strip().lower()
+    if _cv_env not in ('0', 'false', 'no', 'off', ''):
+        from trading.orb_asset_class import (DEFAULT_CLASS_MAP,
+                                             underlying_anchor)
+        from trading.orb_catalyst_veto import (
+            DEFAULT_MIN_COHORT, anchor_cohort_counts, catalyst_veto_applies)
+        import csv as _csv
+        _names = {}
+        try:
+            with open(DEFAULT_CLASS_MAP, newline='') as _fh:
+                for _row in _csv.DictReader(_fh):
+                    _names[_row['symbol']] = _row.get('name', '')
+        except Exception as _e:
+            print(f"Catalyst veto: class-map names unavailable ({_e})")
+        _cmap2 = {s: c for s, c in _cmap.items()} if '_cmap' in dir() else None
+        if _cmap2 is None:
+            from trading.orb_asset_class import load_class_map as _lcm
+            _cmap2 = _lcm()
+        _anchors = {s: underlying_anchor(s, _names.get(s), _cmap2)
+                    for s in set(df['symbol'])}
+        sel['_anchor'] = sel['symbol'].map(_anchors)
+        # cohort from the FULL candidate universe that morning (df),
+        # matching live (engine counts over its candidate dict)
+        _day_anchor = df.assign(_a=df['symbol'].map(_anchors))
+        _cohorts = {day: anchor_cohort_counts(g['_a'])
+                    for day, g in _day_anchor.groupby(
+                        _day_anchor['date'].dt.strftime('%Y-%m-%d'))}
+        # RAW own-ticker news (tri-state: absent pair -> None -> fail-open),
+        # NOT the class-gated effective map used by the sizing gate.
+        _raw_news = {}
+        for _p in sorted(_glob.glob('data/research/orb_news_catalyst_*.csv')):
+            for _, _r in pd.read_csv(_p).iterrows():
+                _raw_news[(_r['symbol'], _r['day'])] = (_r['n_articles'] or 0) > 0
+        _sel_day = sel['date'].dt.strftime('%Y-%m-%d')
+        _has_news_sel = [_raw_news.get((s, d))
+                         for s, d in zip(sel['symbol'], _sel_day)]
+        cv_mask = [catalyst_veto_applies(hn, a, _cohorts.get(d, {}),
+                                         DEFAULT_MIN_COHORT)
+                   for hn, a, d in zip(_has_news_sel, sel['_anchor'], _sel_day)]
+        cv_mask = pd.Series(cv_mask, index=sel.index)
+        n_cv = int(cv_mask.sum())
+        cv_pnl = float(sel.loc[cv_mask, '_sized_pnl'].sum())
+        sel = sel[~cv_mask].copy()
+        print(f"Catalyst veto: dropped {n_cv} newsless-and-alone pick(s) "
+              f"(their P&L would have been {cv_pnl:+,.0f}; "
+              f"ORB_CATALYST_VETO=0 to disable)")
+
     # 2026-05-08: fill-rate haircut. Pre-fix, BT assumed every qualified
     # signal filled — no model of buy-stop misses. LIVE Mon-Thu 5/4-5/7
     # observed 9 fills out of 16 buy-stops (56%). The cross_time_min
