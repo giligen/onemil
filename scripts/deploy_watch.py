@@ -53,6 +53,7 @@ class Report:
     def __init__(self) -> None:
         self.status = GREEN
         self.lines: list[str] = []
+        self.silent_ok = False   # storm checkpoint: healthy -> no send
 
     def add(self, level: int, text: str) -> None:
         self.status = max(self.status, level)
@@ -182,8 +183,38 @@ def _shadow_journal(r: Report, minimum_expected: int) -> None:
                  f'{verdicts}')
 
 
+def check_storm(r: Report) -> None:
+    """Hourly error-storm backstop (silent when healthy, like
+    trader_watchdog). Thresholds calibrated on Fri 7/17 baseline:
+    0 ERROR, 0 Traceback, 2-11 WARNING per hour."""
+    since = '65 minutes ago'
+    tb = jgrep('Traceback', since=since)
+    er = jgrep(r'\| ERROR', since=since)
+    wa = jgrep(r'\| WARNING', since=since)
+    state = sh('systemctl is-active onemil-trader')
+    hh = datetime.now(timezone.utc).hour
+    market = 12 <= hh < 20
+    if market and state != 'active':
+        r.add(RED, f"service state='{state}' during market hours")
+    if tb >= 1:
+        r.add(RED, f'{tb} traceback(s) in last 65min (baseline 0): '
+                   + jtail('Traceback', 1, since=since))
+    if er >= 5:
+        r.add(RED, f'{er} ERROR lines in last 65min (baseline 0): '
+                   + jtail(r'\| ERROR', 2, since=since))
+    if wa >= 25:
+        r.add(ORANGE, f'{wa} WARNING lines in last 65min '
+                      f'(baseline max 11): '
+                      + jtail(r'\| WARNING', 2, since=since))
+    if not r.lines:
+        r.add(GREEN, f'quiet: tb={tb} err={er} warn={wa} '
+                     f"state={state}")
+        r.silent_ok = True   # healthy -> no telegram
+
+
 CHECKS = {'boot': check_boot, 'open': check_open,
-          'midday': check_midday, 'eod': check_eod}
+          'midday': check_midday, 'eod': check_eod,
+          'storm': check_storm}
 
 
 def main() -> int:
@@ -200,7 +231,7 @@ def main() -> int:
     msg = (f"{ICON[r.status]} <b>[DEPLOY WATCH {args.checkpoint}]</b> "
            f"{day} UTC\n" + '\n'.join(r.lines))
     print(msg)
-    if not args.no_telegram:
+    if not args.no_telegram and not r.silent_ok:
         try:
             import report_common as rc
             rc.send_telegram(msg)
