@@ -1,108 +1,35 @@
-# OneMil Scanner Configuration
-
-# Logging
 log_level: INFO
-
-# Orphan reconciler (added 2026-06-05 after the SMU/QBTZ 10-day orphan
-# incident). Detects broker positions our engines don't track and
-# either closes them (when the multi-signal predicate proves ownership)
-# or alerts Telegram (when foreign). See trading/orphan_reconciler.py.
 orphan_reconciler:
-  # Master kill switch. Flip to false to run in OBSERVE-MODE — detects,
-  # alerts, and logs, but never closes. Use for the first 3-5 days of
-  # rollout to confirm the predicate's decisions before going active.
   auto_close_enabled: true
-  # Days backward to search for matching strategy rows. SMU sat for 10
-  # days before we caught it; 14 gives a healthy margin.
   lookback_days: 14
-  # Avg-entry-price match tolerance: max(abs_min, fill_price * pct).
-  # 5 bps fractional with a $0.005 absolute floor. Tight by design —
-  # any deviation means "not ours; someone else added or holds it".
   avg_entry_match_pct: 0.0005
   avg_entry_match_abs_min: 0.005
-  # Blast-radius cap. Per-strategy cap on auto-closes per rolling hour.
-  # If breached → reconciler stops closing and switches to alert-only
-  # for the rest of the hour. Telegram screams.
   max_closes_per_hour: 3
-  # Per-(strategy, symbol) Telegram alert cooldown. Without this, the
-  # every-few-seconds sync cycle would spam chat with the same orphan.
   alert_cooldown_minutes: 60
-
-# Scanner thresholds
 scanner:
-  # Price range filter (universe watchlist — wider to catch stocks drifting in/out)
-  # Trade-time min_price ($2) in trading section still prevents entries below $2
   price_min: 1.0
-  # 2026-07-05: 23 -> 30. Twin BT through the MODERN stack (floor 1.8 +
-  # TTF + regime + trail 2.0): +$6.4K/18mo, BOTH eras positive, 22
-  # incremental trades at 41% WR in the $23-30 band. NOTE: supersedes the
-  # older "$24+ is death zone (0-14% WR)" finding — that was measured on
-  # the pre-modern stack; the quality stack changed the band's economics
-  # (same lesson as trail activation). Evidence: research/bf_deep_pass_jul2026.md.
   price_max: 30
-
-  # Float filter (shares)
-  float_max: 50_000_000
-
-  # Minimum daily share volume — filters untradeable garbage
-  # <50K vol: 25% WR (garbage), 200K+: 53% WR. Filters 30% of trades, keeps 90% of PnL.
-  min_daily_volume: 200_000
-
-  # Minimum daily dollar volume — filters untradeable micro-caps
-  # $3M = catches EUDA ($1M), GLND ($1M), keeps BEX ($20M), CORD ($28M)
+  float_max: 50000000
+  min_daily_volume: 200000
   min_dollar_volume: 0
-
-  # Pre-market gap threshold
   gap_pct_min: 2.0
-
-  # Intraday move threshold — 15% structural floor (2026-05-01 analysis):
-  # BT at 20%: $+237K / 108 trades.  BT at 15%: $+302K / 111 trades.
-  # The +$65K lift comes from 3 trades — all entered between ic=16.55% and 19.34%.
-  # 15% sits 1.55pp below the lowest empirical Extras winner (SKBL @16.55%) — provably
-  # inert in BT (10-16% band has 0 trades after Stage-2 stack), captures all 3 historical
-  # winners, excludes 10-14% noise. See scripts/study_threshold_10_vs_20.py.
   intraday_change_pct_min: 15.0
-
-  # News catalyst requirement — disabled: pattern detector already filters quality
-  # Backtest without news: +$902K. With news: ~50% of trades rejected.
   require_news: false
-
-  # Relative volume threshold (0 = disabled)
-  # 15-month backtest showed rvol filtering HURTS performance:
-  #   no_rvol: $247K, Sharpe 3.72 | cumulative 5x: $170K, Sharpe 2.89 | bucket 5x: $104K, Sharpe 2.01
   relative_volume_min: 0
-
-  # Volume profile lookback days
   volume_profile_days: 50
-
-# Timing
 timing:
-  # Pre-market polling interval (seconds)
   premarket_poll_interval: 60
-
-  # Intraday scan interval (minutes) - aligned to 15-min buckets
   intraday_scan_interval: 15
-
-  # Market hours (Eastern Time)
-  premarket_start: "04:00"
-  market_open: "09:30"
-  market_close: "16:00"
-
-# Database (split: cache is shareable, trades is per-node)
+  premarket_start: 04:00
+  market_open: 09:30
+  market_close: '16:00'
 database:
-  cache_path: data/cache.db  # Bars, universe, profiles — disposable, shareable
-  trades_path: data/trades.db # Trades, scans, summaries — precious, per-node
-
-# Float caching
+  cache_path: data/cache.db
+  trades_path: data/trades.db
 float_cache:
-  # Refresh float data if older than N days — floats rarely change
   refresh_days: 7
-
-# News analyzer (optional - requires ANTHROPIC_API_KEY in .env)
 news_analyzer:
   model: claude-haiku-4-5-20251001
-
-# Telegram notifications
 notifications:
   telegram:
     enabled: true
@@ -112,38 +39,30 @@ notifications:
     send_on_trade: true
     send_on_close: true
     send_daily_report: true
-
-# Trading (Phase 2 - automated paper trading)
-# To scale for $1K live: capital=1000, risk_per_trade=40, max_shares=500, daily_loss_limit=-40
 trading:
   enabled: true
   sizing_mode: fixed_risk
   capital: 50000
   risk_per_trade: 2000
   position_size_dollars: 50000
-  max_shares: 15000            # ~$50K position at $3/share. Conviction 3x → 45K shares max via planner
-  bt_buying_power_usd: 200000  # BT-only: Stage-2 clamps each position to this BP ceiling, matching
-                               # the live BF paper account ($100K cash × 2x margin). Pre-2026-05-14
-                               # Stage-2 had no account model and sized positions LIVE can't hold.
-                               # Set 0 to disable the BT BP ceiling. Does NOT affect live sizing.
-  max_adv_participation_pct: 0.02    # 2% of 20d ADV — prod fills on >200K ADV stocks are 0.1-3.8%
-  max_bar_participation_pct: 0       # Disabled — waiting for real L2 depth data
-  max_positions: 7         # 2026-05-02: bumped 3→7 (cross-strategy slot collision; ORB+BF+MACD)
+  max_shares: 15000
+  bt_buying_power_usd: 200000
+  max_adv_participation_pct: 0.02
+  max_bar_participation_pct: 0
+  max_positions: 7
   daily_loss_limit: -5000.0
-  min_risk_pct: 0.01           # 1% min risk — filters degenerate thin-risk setups
-  max_risk_pct: 0.04           # 4% max risk — sloppy wide patterns have 30% WR
+  min_risk_pct: 0.01
+  max_risk_pct: 0.04
   min_risk_reward: 2.5
-  min_price: 2.00
-  min_stop_distance: 0.09       # Reject setups with stop < $0.09 from entry (tick-noise filter)
-  last_entry_time: "10:45"      # ET — with all filters active, 10:30-10:45 is best bucket (+$4.2K avg)
-  force_close_time: "15:45"     # ET — close all positions
-  setup_expiry_bars: 10         # cancel pending buy-stop after N bars
-  pattern_poll_interval: 5              # 5s — breakout fills are time-critical (was 15s)
-  skip_midday: false            # Disabled — 10:45 cutoff makes it redundant
-  skip_fridays: false           # Disabled for paper testing (re-enable for live)
-  max_consecutive_losses: 0     # Disabled — trailing stops handle risk adaptively
-  # Risk tiers: scale risk on high-conviction setups (higher price + right volume)
-  # 15mo backtest: 2x on $10-15 validated (PF 2.16, $3.2K/trade). 3x on $15-20 killed (PF 0.65, -$47K).
+  min_price: 2.0
+  min_stop_distance: 0.09
+  last_entry_time: '10:45'
+  force_close_time: '15:45'
+  setup_expiry_bars: 10
+  pattern_poll_interval: 5
+  skip_midday: false
+  skip_fridays: false
+  max_consecutive_losses: 0
   risk_tiers:
     enabled: true
     tier1_min_price: 10.0
@@ -156,169 +75,84 @@ trading:
     tier2_min_volume: 500000
     tier2_max_volume: 5000000
     tier2_multiplier: 1.0
-  max_trades_per_day: 5         # 15mo optimal with 10:45 cutoff
+  max_trades_per_day: 5
   market_regime:
-    enabled: true               # Vol-only mode: blocks extreme chaos (SPY vol>5%), dormant 87% of days
-    vol_threshold: 5.0         # 5-day avg daily range % — validated 16mo: +$21K, -30% Max DD
-    sma_period: 50             # SPY below SMA(50) — downtrend signal
-    min_spy_volume_ratio: 0.70 # SPY T-1 volume / SMA20 — thin liquidity threshold
-    thin_liquidity_breakout_vol_ratio: 2.0  # Stricter breakout vol ratio on thin days
-    sma_slope_filter: false            # Disabled — replaced by UD risk scaling (faster recovery)
+    enabled: true
+    vol_threshold: 5.0
+    sma_period: 50
+    min_spy_volume_ratio: 0.7
+    thin_liquidity_breakout_vol_ratio: 2.0
+    sma_slope_filter: false
     sma_slope_threshold: -0.5
-    euphoria_filter: false             # Disabled — replaced by UD risk scaling (half size, not skip)
+    euphoria_filter: false
     euphoria_ud_threshold: 1.2
     euphoria_rsi_threshold: 60.0
-  # Regime-aware sizing (Phase 1.4b ship, 2026-04-18). Classifies each
-  # trading day into A/B/C1/C2 using SPY features (vol_20, above_sma_50,
-  # sma_50_slope_10d) from T-1 close. Applies per-regime sizing mult on
-  # top of conviction × macd_zone. Grid winner validated +$27,321 across
-  # 2025+Q1 2026 (TRAIN/VAL/HOQ1 all positive). Feb 2026 flips from −$1,159
-  # to +$483 via C2-skip. See research/regime_*.md.
   regime_sizing:
     enabled: true
-    vol_threshold_pct: 22.0         # B-regime when vol_20_ann >= this
-    slope_threshold_pct: 0.15       # C1 if slope_10d <= this, else C2
+    vol_threshold_pct: 22.0
+    slope_threshold_pct: 0.15
     multipliers:
       A: 1.25
-      B: 1.00
-      C1: 1.50
-      C2: 0.00                      # skip (shallow dip in uptrend)
-  # UD risk scaling: when SPY 10-day up/down volume ratio > threshold,
-  # reduce position size to ud_scale_factor (0.5 = half size).
-  # Replaces binary euphoria skip — keeps trades at reduced risk.
+      B: 1.0
+      C1: 1.5
+      C2: 0.0
   ud_risk_scaling:
     enabled: true
-    ud_threshold: 1.2                  # SPY UD ratio above this = euphoric market
-    scale_factor: 0.5                  # Risk multiplier on euphoric days (stacks with MACD zones)
-  # SPY MACD afternoon cutoff: block new entries when SPY intraday momentum is bullish
-  # When SPY 1-min MACD histogram > 0 after cutoff_time, small-cap momentum stocks
-  # lose their edge (30% WR, -$36K over 15 months). Removing these = +13.5% P&L.
-  # Dynamic: if SPY MACD flips negative, trading resumes. Only blocks NEW entries.
+    ud_threshold: 1.2
+    scale_factor: 0.5
   spy_macd_cutoff:
-    enabled: false            # Disabled — last_entry_time 11:00 is strictly better (+$48K, Sharpe 1.84→2.48)
-    cutoff_time: "11:30"
-  # Self-managed stops: WebSocket price monitoring + marketable limit sell exits
-  # Replaces bracket stop-market with real-time monitoring to cap exit slippage
+    enabled: false
+    cutoff_time: '11:30'
   self_managed_stops:
-    enabled: true                       # WebSocket SIP for live + paper (REST polling only if sharing WS slot)
-    safety_net_sl_pct: 0.05             # 5% wide SL on Alpaca (crash protection)
-    marketable_limit_offset: 0.03       # $0.03 min offset below price (legacy/fallback path)
-    marketable_limit_offset_pct: 0.005  # 0.5% offset (legacy/fallback path)
-    # FABC 2026-06-09 fix: spread-aware exit limit pricing. When the WS
-    # cache (or REST fallback) has a fresh ask, compute_limit_price uses
-    # offset = max(exit_min_offset, spread × exit_spread_offset_factor)
-    # instead of the legacy max($0.03, 0.5%). On a 3¢ spread the new path
-    # gives a 1¢ buffer; the old path gave 3¢ = full-spread slippage.
-    exit_min_offset: 0.01               # floor on offset, prevents 0¢ buffer
-    exit_spread_offset_factor: 0.30     # fraction of spread used as offset
-  # Trailing stop: replace fixed TP with trailing stop that lets winners run
-  # Trail 1R below highest high, activates after +2R from entry
-  # Backtest: +55% P&L improvement over fixed 2.5R TP across 15 months
+    enabled: true
+    safety_net_sl_pct: 0.05
+    marketable_limit_offset: 0.03
+    marketable_limit_offset_pct: 0.005
+    exit_min_offset: 0.01
+    exit_spread_offset_factor: 0.3
   trailing_stop:
-    enabled: true                        # ACTIVE — paper testing
-    trail_r: 1.0                        # trail distance in R units below high
-    # 2026-07-05: 1.5 -> 2.0 (REVERSES the 2026-04-13 move 2.0->1.5).
-    # That April verdict was measured on the pre-floor-1.8/pre-TTF population
-    # where peak-1.5-2R-then-reverse (OPTX-class) trades were common. On the
-    # MODERN defended selection (67 Stage-2 trades, 18mo replay): that class
-    # occurred ZERO times; A=2.0 changed 13 trades, improved 13, hurt 0,
-    # 19/19 months >=0, monotone 1.5->1.75->2.0 in BOTH eras (~+35% on the
-    # BF book). REVERT TRIGGER: if live trades that peak >=1.5R then exit
-    # <=+0.2R reappear (check after ~20 affected live trades), re-run
-    # /tmp/bf_exit_sweep.py logic and reconsider.
+    enabled: true
+    trail_r: 1.0
     activate_at_r: 2.0
-    tighten_at_r: 0                   # tighten trail after +2.5R (+33% P&L vs no tightening)
-    tightened_trail_r: 0.5              # 0.5R trail after 2.5R (was 1R)
-    # Experiment D (2026-04-17) — volume-confirmed trail exit.
-    # When the trailing stop triggers on a bar, require that bar's volume
-    # >= min_vol_ratio × flag_avg_volume to actually fire the exit.
-    # Low-volume drift-downs are skipped (treated as noise; hold the position);
-    # only active selling confirms the exit. Initial hard stop (pre-trailing)
-    # is never skipped.
-    #
-    # BT lift (TTF on, r=1.0):
-    #   2025:    +$3,764 (+5.8%) vs baseline — same trades, same DD, better avg_win
-    #   Q1 2026: +$1,836 (+18%) HOLDOUT
-    # Sweep [0.5..1.5] → flat surface, ratio is a noisy knob. 1.0 is safe default.
-    # Shipping ON — Pareto improvement, same trades / same DD / bigger avg_win.
-    # Set enabled: false to roll back to naive trail behavior.
+    tighten_at_r: 0
+    tightened_trail_r: 0.5
     vol_confirmed_exit:
       enabled: true
       min_vol_ratio: 1.0
-  # Post-fill gate (IREZ post-mortem 2026-05-08).
-  # Kills positions immediately after fill if SPY 3d range AND breakout volume
-  # are BOTH below their thresholds. 16-mo BT (Jan 2025-May 2026) showed the
-  # original 0.8/1.0 thresholds destroyed $24K of net P&L via a non-discriminating
-  # winner/loser kill (5W/4L of 9 kills) and walk-forward sign-flip (gate net-helped
-  # in train, hurt in test). At 0.5/0.5 zero kills fired — equivalent to disabled
-  # in observable behavior, but retains a defense for severely hostile market events.
-  # See docs/post_fill_gate_variant_analysis.md for the full memo.
   post_fill_gate:
-    enabled: true                        # set false to short-circuit the kill switch entirely
-    spy_3d_threshold: 0.5                # was 0.8 — tightened (V1)
-    bk_ratio_threshold: 0.5              # was 1.0 — tightened (V1)
-  # Buy stop-limit rejection workaround (IREZ+TTGT post-mortem 2026-05-08;
-  # extended 2026-05-14 after KPTI/TRT). Alpaca live REJECTS a buy stop-limit
-  # whenever stop_price <= current ASK (immediately marketable, not a real
-  # stop). Paper Alpaca skips this validation — the parity gap. Two sub-cases:
-  #   bid >= stop       → breakout confirmed → submit a marketable LIMIT BUY.
-  #   bid < stop <= ask → spread straddles the breakout → re-bump the stop to
-  #                       ask + rebump_buffer (stays a real stop) if within
-  #                       limit_price; else skip (don't chase).
-  # Set enabled: false to revert to the legacy stop-limit-only path.
+    enabled: true
+    spy_3d_threshold: 0.5
+    bk_ratio_threshold: 0.5
   marketable_limit_fallback:
     enabled: true
-    rebump_buffer: 0.02                   # cents above ask; config.py floors at 0.02
-  # Exhaustion exit: sell partial into strength on exhaustion signals
-  # Reduces slippage by selling while buyers are still aggressive
-  # Production: polls 1-min bars every 60s, matches backtest signal logic
+    rebump_buffer: 0.02
   exhaustion_exit:
-    enabled: true                      # testing exhaustion signals
-    partial_fraction: 0.5              # sell 50% on signal
-    tighter_trail_r: 0.5              # 0.5R trail on remainder (vs 1R)
-    min_profit_r: 3.0                 # only check signals when +3R profitable
+    enabled: true
+    partial_fraction: 0.5
+    tighter_trail_r: 0.5
+    min_profit_r: 3.0
     signals:
       volume_divergence: false
       climax_candle: true
       shrinking_bodies: false
       shooting_star: true
-  # Slippage model (percentage of price, applied in backtest)
-  entry_slippage_pct: 0.005  # 0.50% — production avg is 0.48% on buy-stops
-  exit_slippage_pct: 0.003   # 0.30% — tick gap + spread on self-managed stop exits
+  entry_slippage_pct: 0.005
+  exit_slippage_pct: 0.003
   bull_flag:
-    # 2026-05-15: tested lowering 3→2. 2025 OOS positive (+$63K/12mo) but 2026
-    # Jan-Apr OOS negative (3 of 4 months worse, total −$16K). NOT SHIPPED.
-    # See scripts/study_bf_wide_sweep_2025.sh + CLAUDE.md "min_pole_candles"
-    # block for details. Reconsider if 2026 Q2+ live data flips supportive.
     min_pole_candles: 3
     min_pole_gain_pct: 3.0
     max_retracement_pct: 50.0
-    # 2026-07-05: 5 -> 10. Kill-table showed 'pullback too long' = 66% of
-    # 2026 detector rejections (2026 flags consolidate slower). Single-knob
-    # twin BT: +$3.8K/18mo, BOTH eras positive, 12 incremental setups at
-    # 50% WR, zero Stage-2 displacement. Modest but harm-free supply.
     max_pullback_candles: 10
     min_breakout_volume_ratio: 1.5
     require_macd_positive: false
     max_green_in_flag: 2
-    # Pattern-quality filter: reject "tired" long poles. Cache-delta units
-    # (off-by-one from pole_candle_count) matches qf_pole_bars cache convention.
-    # max_pole_bars=3 means reject 5+ candle poles (pole_candle_count > 4).
-    # 2025 OOS (pole<=3): WR 54%→60%, PF 2.41→3.50, max DD $4.5K→$2.5K (halved)
-    # 0 = disabled.
     max_pole_bars: 3
-    # Two-tier filter: classify trades by max intraday change at entry (A >=20,
-    # Extras 10-19, edge <10). Keep A + edge unfiltered. Apply surgical drop +
-    # composite z-score gate on Extras only. BT numbers (O + f6 + this filter):
-    # 2025 +$57,679 (beats A_f6 +$54,572); Q1 2026 +$8,450 (beats A_f6 +$4,495).
     two_tier_filter:
-      enabled: true                        # shipping ON — validated +$10.5K on 2025 OOS, +$5.4K on Q1 2026 vs A_f6
-      extras_lower: 10.0                   # % intraday threshold: Extras floor
-      a_tier_lower: 20.0                   # % intraday threshold: A-tier floor
-      drop_extras_macd_below: 1.25         # surgical drop: reject Extras where macd_zone_mult < this
-      composite_threshold: -0.50           # reject Extras with composite z-score below this
-      # Frozen TRAIN-fit params (O_f6 2025-Jan..Jul Extras, n=83). sign=-1 means
-      # lower raw value contributes positive (good) to the composite score.
+      enabled: true
+      extras_lower: 10.0
+      a_tier_lower: 20.0
+      drop_extras_macd_below: 1.25
+      composite_threshold: -0.5
       composite_features:
         conviction_mult:
           mean: 1.789
@@ -336,83 +170,52 @@ trading:
           mean: 603.614
           std: 20.195
           sign: -1
-  # MACD zone filter: tier-aware risk multiplier based on MACD histogram
-  # strength at entry, split by intraday_change tier (A-tier ≥20%, Extras
-  # 10-20%). Per-tier optimization 2026-04-18 (S2-max): BT +28.7% across
-  # 2025+Q1 2026, HOQ1 holdout positive every quarter (research/S2_proposal.md).
   macd_zones:
-    enabled: true                     # dead zone blocks garbage trades (-$120K baseline impact)
-    dead_zone_min_pct: -0.2           # skip trades with MACD% in [-0.2%, +0.1%]
+    enabled: true
+    dead_zone_min_pct: -0.2
     dead_zone_max_pct: 0.1
-    strong_neg_threshold_pct: -0.5    # MACD% below this = deep pullback (loaded spring)
-    strong_pos_threshold_pct: 0.5     # MACD% above this = strong momentum
-    # A-tier defaults (applied when intraday_change ≥ 20% OR <10%=edge).
-    strong_neg_multiplier: 1.8         # A-tier strong bucket (was 1.5 pre-S2)
-    strong_pos_multiplier: 1.8         # A-tier strong bucket (was 1.5 pre-S2)
-    normal_multiplier: 1.0             # A-tier neutral zone (unchanged)
-    # Extras-tier (10% ≤ intraday_change < 20%) overrides. MACD-neutral
-    # E-tier trades are a consistent loser (-$14,734 baseline); amplifying
-    # strong E-tier captures +0.32R edge on HOLDOUT.
+    strong_neg_threshold_pct: -0.5
+    strong_pos_threshold_pct: 0.5
+    strong_neg_multiplier: 1.8
+    strong_pos_multiplier: 1.8
+    normal_multiplier: 1.0
     extras_tier:
-      normal_multiplier: 0.0            # skip E-tier MACD-neutral (landmine)
+      normal_multiplier: 0.0
       strong_pos_multiplier: 2.0
       strong_neg_multiplier: 2.0
-  # Quality filter: skip low-probability setups based on pre-entry features
-  # Validated on 15mo data: removes 48% of trades (73% losers), PF 1.15→1.80, Sharpe 0.27→0.90
   quality_filter:
-    enabled: false                     # VWAP filter conflicts with 2x tier — removes the big winners. Features logged for research.
-    # 1. VWAP overextension — entry too far above VWAP = overextended, likely to reverse
-    max_vwap_distance_pct: 6.0         # skip if breakout_level > VWAP * 1.06 (BT computes VWAP at setup bar, ~1.5% lower than at entry)
-    # 2. Gap fading — stock gapped 15%+ but pulled back below open = failed gap, trap
-    gap_fade_threshold_pct: 15.0       # skip if gap >= 15% AND breakout < open
-    # 3. SPY down — risk-off environment, momentum doesn't stick
-    min_spy_return_pct: -0.3           # skip if SPY return at entry < -0.3%
-    # 4. Slow weak pole — pattern took too long with too little gain = no real momentum
-    slow_pole_max_bars: 15             # combined: pole_bars > 15 AND pole_gain < 5%
+    enabled: false
+    max_vwap_distance_pct: 6.0
+    gap_fade_threshold_pct: 15.0
+    min_spy_return_pct: -0.3
+    slow_pole_max_bars: 15
     slow_pole_min_gain_pct: 5.0
-  # Conviction scoring: scale position size based on setup quality
-  # Validated on 15mo walk-forward: $61K → $208K, Sharpe 0.22 → 0.55
-  # OOS improvement: H2 +$8K, Q1 +$33K (Q1 from -$41K to -$9K)
   conviction_scoring:
-    enabled: true                      # V4 model: scales risk_per_trade via planner (not shares post-hoc)
-    min_threshold: 1.8                 # Skip trades when conviction_mult < this (0.0 = filter disabled)
-                                        # 2026-07-03: 1.4 -> 1.8 (thin-supply junk guard; 2026 BT +74%;
-                                        # research/money_machine_audit_jul2026.md #8)
-                                        # V2_clean (2026-04-15): 1.4 lifts canonical 16mo +$52K (+15.5%)
-                                        # Walk-forward OOS: mean +$28K, worst split +$19K (3 splits)
-                                        # COUPLED to 7 conviction rules (V1 + Rules 7+8) — re-validate if rules change
-    # V-reversal bonus (Rule 9) — gap-down + range≥20% + pole≥5% fires bonus.
-    # A-tier-exclusive by construction (intraday_range≥20% ⇒ A-tier). Bonus
-    # was 0.4 (Experiment V 2026-04-17); bumped to 1.0 in S2-max ship
-    # 2026-04-18 — β = +0.839R stable across TRAIN/VAL/HOLDOUT, the most
-    # consistent signal in the conviction system. Bonus clamps to [0.25, 3.0].
+    enabled: true
+    min_threshold: 1.8
     v_reversal_bonus:
-      enabled: true                    # shipping ON
-      bonus: 1.0                       # S2-max ship (was 0.4)
-      gap_pct_max: 0.0                 # fires only when qf_gap_pct < this (gap-down)
-      intraday_range_min: 20.0         # fires only when intraday range (%) >= this
-      pole_gain_min: 5.0               # fires only when pole gain (%) >= this
-    # Marginal-conviction defensive scaling (Experiment H, 2026-04-17). After
-    # min_threshold filter passes, trades with conviction in [min_threshold,
-    # upper_bound) get their SIZING (not their stored conviction value) scaled
-    # by scale_factor. Protects against marginal-quality trades that barely
-    # clear the threshold but disproportionately contribute to mid-losers.
-    # BT: Q1 2026 +$851 on 47 trades (no change in count). cuts avg loss 16%.
+      enabled: true
+      bonus: 1.0
+      gap_pct_max: 0.0
+      intraday_range_min: 20.0
+      pole_gain_min: 5.0
     marginal_scaling:
       enabled: false
-      scale_factor: 0.5                # size multiplier for marginal-conv trades
-      upper_bound: 1.7                 # trades with conviction < this are scaled
+      scale_factor: 0.5
+      upper_bound: 1.7
   news_gate:
-    enabled: false                     # Full gate kills Q1 2025. Use news_kill_rules instead.
-  # News kill rules: block trades in specific LOSER segments.
-  # Validated: $175K → $333K (+90%), all quarters positive, walk-forward passes.
+    enabled: false
   news_kill_rules:
     enabled: true
-    catalyst_exemption: false          # shipped 2026-05-21: segment rules apply to
-                                       # EVERY trade. The 2026-05 news-classifier A/B
-                                       # found exempting catalyst trades is value-
-                                       # destroying. true = legacy exempt-on-catalyst.
-    max_avg_vol_no_news: 3000000       # avg daily vol >= 3M → kill (22% WR, -$101K)
-    min_price_no_news: 3.0             # price < $3 → kill (20% WR, -$11K)
-    max_float_no_news: 30000000        # float >= 30M → kill (19% WR, -$14K)
-    # Rule 4: $5-12 + pole 8-15% → kill (27% WR, -$32K) — in news_kill_guard.py
+    catalyst_exemption: false
+    max_avg_vol_no_news: 3000000
+    min_price_no_news: 3.0
+    max_float_no_news: 30000000
+ignition_shadow:
+  enabled: true
+  trigger_pct: 10.0
+  max_trigger_min_et: 630
+  min_r_pct: 5.0
+  gap_max_pct: 5.0
+  min_cohort: 2
+  max_evals_per_day: 25

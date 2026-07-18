@@ -115,6 +115,19 @@ class RealtimeScanner:
         self.shutdown_event = shutdown_event
         self.macd_engine = macd_engine
         self.orb_engine = orb_engine
+        # Ignition S1 signal shadow (2026-07-19): journal-only, zero
+        # orders, hard-isolated — any failure inside it is swallowed and
+        # can NEVER perturb BF/ORB. IGNITION_SHADOW=0 to disable.
+        self.ignition_shadow = None
+        try:
+            from config import Config
+            from trading.ignition_shadow import IgnitionShadow
+            _icfg = Config._load_yaml_only()
+            self.ignition_shadow = IgnitionShadow(alpaca_client, _icfg)
+            if not self.ignition_shadow.enabled:
+                self.ignition_shadow = None
+        except Exception as _e:
+            logger.warning(f"IgnitionShadow init failed ({_e}) — shadow off")
         # Throttle repeated bar-drain errors: the 1s sleep chunk loop can
         # otherwise log the same exception 60× per minute if something stays
         # broken. Track last-seen error signature + timestamp.
@@ -1102,6 +1115,20 @@ class RealtimeScanner:
                 vol_5x_count += 1
             if intraday_change_pct >= self.criteria.intraday_change_pct_min:
                 move_10pct_count += 1
+                # Ignition shadow sighting (journal-only; double-guarded —
+                # on_mover never raises, and this wrapper catches anyway)
+                if self.ignition_shadow is not None:
+                    try:
+                        self.ignition_shadow.on_mover(
+                            symbol,
+                            intraday_change_pct=intraday_change_pct,
+                            gap_pct=gap_pct,
+                            price=current_price,
+                            has_news=None,   # resolved EoD by the report
+                            bar_ts_utc=bar_ts if isinstance(
+                                bar_ts, datetime) else None)
+                    except Exception:
+                        pass
 
             # Only check news for stocks that pass volume + price criteria
             has_news = False
