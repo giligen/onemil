@@ -78,6 +78,22 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
      field-level decision-parity gate. CANONICAL BASELINE: $293,568
      (frozen z + thr 0 + Q1 skip + flat mults + news-gated PM 2.0).
      research/scripts/orb_dayrank_selector_study.py.
+   - "Turn July-2026 positive" challenge (2026-07-18, owner): ❌ CLOSED —
+     NO real setup flips it. (a) EXITS: bar-accurate ladder sim on all
+     680 trades — July reach-1R rate 36% < the 50% a 1:1 target needs;
+     best ladder (tgt1R+BE@0.5) July −$6.5K, and ladders destroy the
+     18mo book ($288K→$22-61K, every monster → ~$1K). (b) ENTRY subsets:
+     combo-only July −$3.7K (JLHL 7/17 was a 2.0x combo LOSER); stocks-
+     only/news-only worse; July winners are feature-camouflaged (NBIZ =
+     Q1!). (c) ORACLE best-4/day hindsight = +$41.9K — the month was
+     winnable only with information our ~30 tested features don't carry.
+     BYPRODUCT — the researched DROUGHT-MODE candidate: COMBO-ONLY
+     (news×PM×stock cell as sole strategy): $202K/18mo (70% of book) from
+     62 trades (3.4/mo), WR 52%, MDD −$11.0K, worst month −$6.6K; cuts a
+     July-like month's bleed 77%; keeps the news monsters (AMCI/ANNA/
+     CRNC/QCLS/BNAI), forfeits newsless ones (CMCT class, −$86K/18mo).
+     NOT SHIPPED — parked as the deliberate consistency-mode option.
+     /tmp/exit_ladder_study.py, orb_dayrank_selector_study.py dump.
 
 ## ORB — exit chain
 | knob | value | status | evidence |
