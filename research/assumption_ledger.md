@@ -93,6 +93,26 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
      July-like month's bleed 77%; keeps the news monsters (AMCI/ANNA/
      CRNC/QCLS/BNAI), forfeits newsless ones (CMCT class, −$86K/18mo).
      NOT SHIPPED — parked as the deliberate consistency-mode option.
+   - ORACLE FEATURE HUNT (2026-07-18, owner mandate): 🎯 FOUND the missing
+     information class — UNDERLYING-COMPLEX CO-MOVEMENT (und_cohort =
+     count of same-underlying wrappers qualifying the same morning;
+     mechanical, point-in-time, no curation). Universe-level: uc>=2 mean
+     +$353/+$150/+$94 per era (vs −$25..−$178 for uc=1), monster rate
+     2-3x base, ERA-CONSISTENT — first new all-era feature since PM$.
+     Hand-curated SECTOR buckets era-flip (25H1 inverts) → sector-aware
+     forms NOT robust; underlying-level is. Oracle days explained: 7/16 =
+     four 2X-SHORT wrappers of one crashing complex; 7/06 = 3 long-IREN
+     wrappers won together while the book picked losers.
+     SHIPPABILITY: sizing boost on selected uc>=2 FAILS leave-out (n=54);
+     bench promotion FAILS era (25H2 benched −$30 mean). PARKED as
+     taxonomy, not a lever. CATALYST TAXONOMY (selected book, 18mo):
+     news $232.6K/162tr (81% of book) · newsless+complex $21.3K/54tr ·
+     newsless+ALONE $33.9K/464tr (12% of book from 68% of trades, mean
+     $38-110, holds ASST/PONY/HERE/BKKT monsters). Veto-newsless-alone
+     book = $253.9K from 216 trades — the fine-grained drought-mode.
+     Note for sector-news idea: news does NOT transfer via underlying
+     (refuted 7/11); PRICE confirmation (uc>=2) is what transfers.
+     /tmp/theme_feature_study.py -> research/scripts.
      /tmp/exit_ladder_study.py, orb_dayrank_selector_study.py dump.
 
 ## ORB — exit chain
