@@ -94,8 +94,10 @@ Artifacts: /tmp/market_monsters.csv, /tmp/flat_open_monsters.csv,
 3. Era-consistent structure found (filters for v1): trigger ≤10:30
    (+$199 vs +$60 later), consolidation R ≥5% (+$174 vs +$27, 2026
    negative below) — both all-era-positive. vol-surge mild.
-4. Sample bias note: cached-86% skews toward machine-relevant names;
-   complete-river rerun (incl. 3,994 least-traded) in flight.
+4. COMPLETE RIVER (incl. the 3,994 least-traded names, 2026-07-19):
+   **17,925 trades, mean +$115/trade, WR 45% — STILL positive all three
+   eras (+$39/+$150/+$135)**. The edge survives the full honest sample;
+   the softening (132→115) came, as expected, from the thin tail.
 
 **Program gates to ship**: (G2) participation-based fill model;
 (G3) v1 selector (early-window + min-R + quality rank, slot-capped) with
