@@ -141,3 +141,29 @@ design needed (8 combined slots vs budget — shared pool decision).
 INTRADAY QUALIFIED stream + planner/exits reuse), yaml-pinned constants,
 decision-parity hooks, paper-shadow period. The research says the engine
 is real; the shadow says when to trust it with money.
+
+
+## Checkpoint 3 — latency-honest + shadow architecture (2026-07-19)
+
+**LATENCY TEST (entry at NEXT bar open — models the 60s scan cadence —
++ 5% chase guard): $245,824/19mo, eras +$94.9K/+$24.1K/+$126.9K (all
+positive; 25H1 per-trade mean IMPROVES to +$277), 12/19 monster months,
+negMo 6/19.** 85% of the instant-entry book survives a full minute of
+latency — the moves run 30+ min, so detection cadence is NOT a blocker;
+the chase guard doubles as a natural worst-slippage filter (drops 129
+runaway entries).
+
+**The book is now proven under**: full junk river ✓, participation-
+scaled fills ✓, 2x slippage stress ✓, 1-minute latency ✓, out-of-domain
+catalyst prior ✓, leave-out (58% ex-top-10) ✓, all-era consistency ✓.
+
+**Shadow architecture (validation-fidelity principle: each environment
+validates only what it exercises):**
+- S1 signal shadow, LIVE node, no orders (1-2wk): true detection
+  latency, real NBBO spread/depth at trigger, quote-implied fill cost,
+  hypothetical book vs harness (decision parity pre-trading).
+- S2 paper node in parallel: ORDER-LIFECYCLE ONLY (paper fills are
+  synthetic — explicitly not fill evidence; the ORB Pre-Stage-0 lesson).
+- S3 micro-live (Pre-Stage-0 pattern): $250-500 risk, ≤2/day, −$750
+  daily stop, 2-4wk → 20-40 REAL fills → recalibrate the participation
+  model → staged ramp under green-check machinery.
