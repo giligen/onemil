@@ -113,6 +113,25 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
      Note for sector-news idea: news does NOT transfer via underlying
      (refuted 7/11); PRICE confirmation (uc>=2) is what transfers.
      /tmp/theme_feature_study.py -> research/scripts.
+   - BOTTOM-UP MARKET-MONSTER CENSUS (2026-07-18, owner: "market has
+     monsters weekly — find them"): CONFIRMED — 2,744 market monster-days
+     in 19mo (open→high ≥30%, $2-50, ≥$5M day-vol) = ~34/WEEK, every week.
+     FUNNEL LEAK TABLE: universe screen admits only 16% (gap≥5 kills 63%
+     — HALF of all market monsters open flat/down and build intraday);
+     of 428 admitted: 331 became candidates, 34 selected = $279K = 97% of
+     the whole book. 297 BENCHED candidate-monsters worth +$700K raw —
+     BUT unreachable: per-gate full-cohort economics (live-parity):
+     threshold-failers −$323K net (KEEP), PDR cohort −$162K (KEEP),
+     Q1 re-admit +$4.9K but MDD +50% (KEEP filter), slots 4→5/6 WORSE
+     (cap dilution). Selection layer fully re-validated post-param-fix;
+     the gapper-architecture book ≈$293K is at its information ceiling.
+     THE STRUCTURAL ANSWER: the untouched pool = FLAT-OPEN INTRADAY
+     IGNITERS: 1,380 monsters (~17/wk), median run +42%, median day
+     $vol $24M — invisible to ORB by design (gap gate) and to BF (flags
+     stopped forming). 'Monsters weekly' requires a THIRD detector:
+     intraday ignition breakout (any-hour consolidation→volume-surge).
+     PROPOSED as the next major program. /tmp/market_monsters.csv,
+     /tmp/flat_open_monsters.csv.
      /tmp/exit_ladder_study.py, orb_dayrank_selector_study.py dump.
 
 ## ORB — exit chain
