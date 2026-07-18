@@ -72,6 +72,19 @@ class IgnitionShadow:
         self._evals_today = 0
         # no-catalyst skips wait for late complex confirmation
         self._await_confirm: Dict[str, dict] = {}
+        # WORKER-THREAD DESIGN (2026-07-19 pre-deploy review): all API
+        # work (bars/quote, up to ~12s bounded per eval) happens on this
+        # daemon worker — the scanner's on_mover() only ENQUEUES
+        # (microseconds). The worker owns ALL mutable state; the scanner
+        # thread never touches it. A wedged worker loses shadow data,
+        # never scanner time.
+        import queue as _q
+        import threading as _t
+        self._queue: '_q.Queue' = _q.Queue(maxsize=500)
+        self._worker = _t.Thread(target=self._worker_loop, daemon=True,
+                                 name='ignition-shadow')
+        if self.enabled:
+            self._worker.start()
         if self.enabled:
             logger.info(
                 f"IgnitionShadow ACTIVE (journal-only, zero orders): "
@@ -119,19 +132,46 @@ class IgnitionShadow:
                  gap_pct: float, price: float,
                  has_news: Optional[bool],
                  bar_ts_utc: Optional[datetime] = None) -> None:
-        """Called by the scanner for every 10%+ intraday mover it sees.
-        Journals a shadow trigger on first qualifying sight. NEVER raises
-        (shadow must not perturb the scanner)."""
+        """Scanner-thread entry point: ENQUEUE ONLY (microseconds).
+        All evaluation/API/journal work happens on the shadow worker.
+        NEVER raises; drops the sighting if the queue is full."""
         if not self.enabled:
             return
         try:
-            self._eval(symbol, intraday_change_pct, gap_pct, price,
-                       has_news, bar_ts_utc)
-        except Exception as e:
-            logger.warning(f"ignition-shadow: {symbol} eval failed: {e}")
+            self._queue.put_nowait(
+                (symbol, intraday_change_pct, gap_pct, price, has_news,
+                 bar_ts_utc, datetime.now(timezone.utc)))
+        except Exception:
+            pass   # full queue -> drop; shadow data loss only
 
-    def _eval(self, symbol, chg, gap, price, has_news, bar_ts_utc):
-        now = datetime.now(timezone.utc)
+    def _worker_loop(self) -> None:
+        while True:
+            try:
+                item = self._queue.get(timeout=2.0)
+            except Exception:
+                continue
+            try:
+                sym, chg, gap, price, hn, bts, seen_at = item
+                self._eval(sym, chg, gap, price, hn, bts, seen_at)
+            except Exception as e:
+                logger.warning(f"ignition-shadow: worker eval failed: {e}")
+            finally:
+                self._queue.task_done()
+
+    def drain(self, timeout_s: float = 10.0) -> bool:
+        """Block until every enqueued sighting has been processed.
+        Tests/ops only — never called from the scanner thread."""
+        import time as _t
+        deadline = _t.monotonic() + timeout_s
+        while _t.monotonic() < deadline:
+            if self._queue.unfinished_tasks == 0:
+                return True
+            _t.sleep(0.02)
+        return False
+
+    def _eval(self, symbol, chg, gap, price, has_news, bar_ts_utc,
+              seen_at=None):
+        now = seen_at or datetime.now(timezone.utc)
         try:
             from zoneinfo import ZoneInfo
             et = now.astimezone(ZoneInfo('America/New_York'))
@@ -165,6 +205,15 @@ class IgnitionShadow:
                'gap_pct': round(gap, 2), 'price': price,
                'has_news': has_news, 'anchor': a,
                'anchor_cohort': self._day_anchor_counts.get(a or '', 0)}
+        # detection latency: scanner sighting time vs the bar that made
+        # the move — the S1 pass bar (p90 <= 90s) reads this field
+        if bar_ts_utc is not None:
+            try:
+                rec['latency_s'] = round(
+                    (now - bar_ts_utc).total_seconds(), 1)
+            except Exception as e:
+                logger.warning(
+                    f"ignition-shadow: latency calc failed ({e})")
         # NOTE: no gap gate here — the scanner's gap_pct is current-vs-
         # prev-close (>=10 for every mover by construction). The TRUE
         # open-gap gate runs in _finalize from the day's own bars.

@@ -1956,6 +1956,23 @@ class ORBEngine:
                 for s2 in syms:
                     if (self._news_flags.get(s2) or {}).get('n_articles', 0):
                         self._classify_symbol(s2)
+                # Pre-warm underlying ANCHORS for ALL candidates (the
+                # catalyst veto's cohort needs every symbol; doing this
+                # here keeps get_asset_name API fallbacks OUT of the
+                # 9:35 submit loop — 2026-07-19 pre-deploy review).
+                # 20s total budget: unmapped new listings each cost a
+                # bounded API name lookup; past budget they resolve as
+                # no-anchor in the submit loop (fail-open, logged there).
+                import time as _t
+                _warm_t0 = _t.monotonic()
+                for s2 in syms:
+                    if _t.monotonic() - _warm_t0 > 20.0:
+                        logger.warning(
+                            "[ORB] anchor pre-warm budget exhausted "
+                            f"({sum(1 for x in syms if x in self._anchor_cache)}"
+                            f"/{len(syms)} warmed) — rest resolve offline")
+                        break
+                    self._anchor_for(s2)
             else:
                 logger.warning(
                     "ORB: alpaca client lacks get_premarket_news_multi — "
@@ -2113,35 +2130,56 @@ class ORBEngine:
                 f"ORB: news snapshot write failed ({e}) — EoD lag audit "
                 f"will be unavailable for today")
 
-    def _anchor_for(self, symbol: str) -> Optional[str]:
+    def _anchor_for(self, symbol: str,
+                    allow_api: bool = True) -> Optional[str]:
         """Underlying-complex anchor for the catalyst veto. Cached per
         symbol; resolves via the class map name (offline) or the asset-
         name API fallback. None = no anchor (index/commodity wrapper or
-        unresolvable) -> can never be complex-confirmed."""
+        unresolvable) -> can never be complex-confirmed.
+
+        allow_api=False (submit-loop path): NEVER hits the network — an
+        unwarmed unmapped symbol resolves to None with a WARNING. The
+        prefetch pre-warms all candidates so this is a rare fallback."""
         if symbol in self._anchor_cache:
             return self._anchor_cache[symbol]
         if self._class_map is None:
             self._class_map = load_class_map()
         name = self._class_names.get(symbol)
         if name is None:
-            name = self._load_class_name(symbol)
+            if allow_api:
+                name = self._load_class_name(symbol)
+            else:
+                if not self._class_names:
+                    self._load_class_names_offline()
+                name = self._class_names.get(symbol)
+                if name is None:
+                    logger.warning(
+                        f"[ORB] anchor: {symbol} unwarmed in submit loop "
+                        f"— treated as no-anchor (no API in hot path)")
+                    self._anchor_cache[symbol] = None
+                    return None
         a = underlying_anchor(symbol, name, self._class_map)
         self._anchor_cache[symbol] = a
         return a
 
+    def _load_class_names_offline(self) -> None:
+        """One-time load of the class-map CSV's names column (no API)."""
+        try:
+            import csv as _csv
+            from trading.orb_asset_class import DEFAULT_CLASS_MAP
+            with open(DEFAULT_CLASS_MAP, newline='') as fh:
+                for row in _csv.DictReader(fh):
+                    self._class_names[row['symbol']] = row.get('name', '')
+        except Exception as e:
+            logger.warning(f"[ORB] anchor: class-map names unavailable "
+                           f"({e}) — API fallback per symbol")
+            self._class_names['__load_failed__'] = ''
+
     def _load_class_name(self, symbol: str) -> Optional[str]:
         """Asset name for anchor parsing: class-map CSV names first (no
         I/O beyond first load), then the get_asset_name API fallback."""
-        if not self._class_names and self._class_map is not None:
-            try:
-                import csv as _csv
-                from trading.orb_asset_class import DEFAULT_CLASS_MAP
-                with open(DEFAULT_CLASS_MAP, newline='') as fh:
-                    for row in _csv.DictReader(fh):
-                        self._class_names[row['symbol']] = row.get('name', '')
-            except Exception as e:
-                logger.warning(f"[ORB] anchor: class-map names unavailable "
-                               f"({e}) — API fallback per symbol")
+        if not self._class_names:
+            self._load_class_names_offline()
         nm = self._class_names.get(symbol)
         if nm:
             return nm
@@ -2159,9 +2197,10 @@ class ORBEngine:
         if not self.catalyst_veto_enabled:
             return False
         has_news = self._get_has_news(cand.symbol)
-        anchor = self._anchor_for(cand.symbol)
+        anchor = self._anchor_for(cand.symbol, allow_api=False)
         cohort = anchor_cohort_counts(
-            self._anchor_for(s) for s in self.candidates.keys())
+            self._anchor_for(s, allow_api=False)
+            for s in self.candidates.keys())
         if catalyst_veto_applies(has_news, anchor, cohort,
                                  self.catalyst_min_cohort):
             logger.info(
@@ -4087,7 +4126,8 @@ class ORBEngine:
                 'asset_class': self._asset_class.get(plan.symbol),
                 'anchor': self._anchor_cache.get(plan.symbol),
                 'anchor_cohort': (anchor_cohort_counts(
-                    self._anchor_for(s) for s in self.candidates.keys())
+                    self._anchor_for(s, allow_api=False)
+                    for s in self.candidates.keys())
                     .get(self._anchor_cache.get(plan.symbol) or '', 0)),
                 # the mult that ACTUALLY sized this plan (carried on the
                 # plan — never recomputed here, so recorded == applied)

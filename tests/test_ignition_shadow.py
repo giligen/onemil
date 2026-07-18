@@ -21,11 +21,15 @@ def _shadow(tmp_path, **cfg):
     return s,a
 
 def _fire(s,sym='IGNI',chg=15.0,gap=12.0,news=None,minute=(9,50)):
+    # seen_at is captured at ENQUEUE time (inside on_mover, under the
+    # patch); the worker evaluates with that timestamp, so draining
+    # after the patch exits is deterministic and time-correct
     with patch('trading.ignition_shadow.datetime') as md:
         md.now.return_value=datetime(2026,7,20,minute[0]+4,minute[1],
                                      tzinfo=timezone.utc)
         s.on_mover(sym,intraday_change_pct=chg,gap_pct=gap,price=10.35,
                    has_news=news,bar_ts_utc=None)
+    assert s.drain(10.0), 'shadow worker failed to drain queue'
 
 def _recs(tmp_path):
     f=list(tmp_path.glob('ignition_shadow_*.jsonl'))
@@ -87,6 +91,44 @@ class TestShadow:
         monkeypatch.setenv('IGNITION_SHADOW','0')
         s,_=_shadow(tmp_path)
         assert s.enabled is False
+
+    def test_on_mover_enqueues_only_never_blocks(self, tmp_path):
+        """Scanner-thread isolation: on_mover must not do API work —
+        even with every API call hung, enqueue returns instantly and a
+        full queue drops silently instead of raising."""
+        import time
+        s,a=_shadow(tmp_path)
+        def _hang(*args,**kw):
+            time.sleep(30)
+        a.get_1min_bars.side_effect=_hang
+        a.get_latest_quote.side_effect=_hang
+        t0=time.monotonic()
+        with patch('trading.ignition_shadow.datetime') as md:
+            md.now.return_value=datetime(2026,7,20,13,50,
+                                         tzinfo=timezone.utc)
+            s.on_mover('HUNG',intraday_change_pct=15.0,gap_pct=12.0,
+                       price=10.35,has_news=True,bar_ts_utc=None)
+        assert time.monotonic()-t0 < 0.5   # enqueue-only, no API wait
+        # full-queue drop path never raises
+        import queue as q
+        s2,_=_shadow(tmp_path)
+        s2._queue=q.Queue(maxsize=1)
+        s2._queue.put_nowait(('X',0,0,0,None,None,None))
+        s2.on_mover('DROP',intraday_change_pct=15.0,gap_pct=12.0,
+                    price=10.35,has_news=True,bar_ts_utc=None)
+
+    def test_latency_journaled_from_bar_ts(self, tmp_path):
+        s,a=_shadow(tmp_path)
+        seen=datetime(2026,7,20,13,50,30,tzinfo=timezone.utc)
+        with patch('trading.ignition_shadow.datetime') as md:
+            md.now.return_value=seen
+            s.on_mover('LATN',intraday_change_pct=15.0,gap_pct=12.0,
+                       price=10.35,has_news=True,
+                       bar_ts_utc=datetime(2026,7,20,13,49,45,
+                                           tzinfo=timezone.utc))
+        assert s.drain(10.0)
+        r=_recs(tmp_path)
+        assert r[-1]['latency_s']==45.0
 
     def test_module_has_no_order_code(self):
         import inspect
