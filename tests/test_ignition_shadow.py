@@ -29,7 +29,7 @@ def _fire(s,sym='IGNI',chg=15.0,gap=12.0,news=None,minute=(9,50)):
         md.now.return_value=datetime(2026,7,20,minute[0]+4,minute[1],
                                      tzinfo=timezone.utc)
         s.on_mover(sym,intraday_change_pct=chg,gap_pct=gap,price=10.35,
-                   has_news=news,bar_ts_utc=None)
+                   has_news=news,price_ts_utc=None)
     assert s.drain(10.0), 'shadow worker failed to drain queue'
 
 def _recs(tmp_path):
@@ -146,7 +146,7 @@ class TestShadow:
             md.now.return_value=datetime(2026,7,20,13,50,
                                          tzinfo=timezone.utc)
             s.on_mover('HUNG',intraday_change_pct=15.0,gap_pct=12.0,
-                       price=10.35,has_news=True,bar_ts_utc=None)
+                       price=10.35,has_news=True,price_ts_utc=None)
         assert time.monotonic()-t0 < 0.5   # enqueue-only, no API wait
         # full-queue drop path never raises
         import queue as q
@@ -154,7 +154,7 @@ class TestShadow:
         s2._queue=q.Queue(maxsize=1)
         s2._queue.put_nowait(('X',0,0,0,None,None,None))
         s2.on_mover('DROP',intraday_change_pct=15.0,gap_pct=12.0,
-                    price=10.35,has_news=True,bar_ts_utc=None)
+                    price=10.35,has_news=True,price_ts_utc=None)
 
     def test_latency_journaled_from_bar_ts(self, tmp_path):
         s,a=_shadow(tmp_path)
@@ -163,11 +163,66 @@ class TestShadow:
             md.now.return_value=seen
             s.on_mover('LATN',intraday_change_pct=15.0,gap_pct=12.0,
                        price=10.35,has_news=True,
-                       bar_ts_utc=datetime(2026,7,20,13,49,45,
+                       price_ts_utc=datetime(2026,7,20,13,49,45,
                                            tzinfo=timezone.utc))
         assert s.drain(10.0)
         r=_recs(tmp_path)
         assert r[-1]['latency_s']==45.0
+
+    def test_day_rollover_resets_state(self, tmp_path):
+        """New ET day: seen/cohort/news caches reset — same symbol gets
+        re-evaluated (fresh news fetch) into a NEW journal file."""
+        s,a=_shadow(tmp_path)
+        for day in (20,21):
+            with patch('trading.ignition_shadow.datetime') as md:
+                md.now.return_value=datetime(2026,7,day,13,50,
+                                             tzinfo=timezone.utc)
+                s.on_mover('ROLL',intraday_change_pct=15.0,gap_pct=12.0,
+                           price=10.35,has_news=None,price_ts_utc=None)
+            assert s.drain(10.0)
+        files=sorted(tmp_path.glob('ignition_shadow_*.jsonl'))
+        assert len(files)==2
+        assert a.get_premarket_news_multi.call_count==2  # cache reset
+        assert s._evals_today==1                          # day-2 count
+
+    def test_worker_survives_malformed_item(self, tmp_path):
+        s,a=_shadow(tmp_path)
+        s._queue.put_nowait(('BAD',))   # unpack error inside worker
+        assert s.drain(10.0)
+        _fire(s,news=True)              # worker still alive + working
+        r=_recs(tmp_path)
+        assert r[-1]['verdict']=='SHADOW_TRIGGER'
+
+    def test_eval_cap_never_burns_news_api(self, tmp_path):
+        """The cap bounds ALL API work — a capped sighting must journal
+        skip_eval_cap without a news fetch."""
+        s,a=_shadow(tmp_path,max_evals_per_day=0)
+        _fire(s,news=None)
+        r=_recs(tmp_path)
+        assert r[-1]['verdict']=='skip_eval_cap'
+        a.get_premarket_news_multi.assert_not_called()
+        a.get_1min_bars.assert_not_called()
+
+    def test_no_late_confirm_after_cutoff(self, tmp_path):
+        """A sibling sighted after 10:30 ET cannot retroactively confirm
+        a parked symbol — the researched trigger window is closed."""
+        s,a=_shadow(tmp_path)
+        s._anchors={'LATX':'LATE','LATZ':'LATE'}
+        _fire(s,sym='LATX',news=None,minute=(10,15))
+        _fire(s,sym='LATZ',news=None,minute=(10,35))   # past 630 cutoff
+        r=_recs(tmp_path)
+        assert r[-1]['verdict']=='skip_no_catalyst'    # only LATX's park
+        assert not any('complex_late' in str(x.get('catalyst','')) for x in r)
+
+    def test_queue_full_drop_counted(self, tmp_path):
+        import queue as q
+        s,_=_shadow(tmp_path)
+        s._queue=q.Queue(maxsize=1)
+        s._queue.put_nowait(('X',0,0,0,None,None,None))
+        for _ in range(3):
+            s.on_mover('DROPME',intraday_change_pct=15.0,gap_pct=12.0,
+                       price=10.35,has_news=True,price_ts_utc=None)
+        assert s._dropped==3
 
     def test_module_has_no_order_code(self):
         import inspect
@@ -175,3 +230,97 @@ class TestShadow:
         src=inspect.getsource(m)
         for word in ('submit_order','submit_stop','bracket','sell','buy_stop'):
             assert word not in src
+
+
+class TestScannerHook:
+    """The scanner->shadow seam: a regression here silently disconnects
+    the shadow and a dead week looks like a quiet market."""
+
+    def _scanner(self):
+        from data_sources.news_provider import NewsProvider
+        from persistence.database import Database
+        from scanner.criteria import ScannerCriteria
+        from scanner.realtime_scanner import RealtimeScanner
+        alpaca=MagicMock(spec=AlpacaClient)
+        news=MagicMock(spec=NewsProvider)
+        news.has_interesting_news.return_value=(False,'')
+        news.classify_news.return_value={'has_news':False,'catalyst':None,
+                                         'headline':'','reason':''}
+        db=MagicMock(spec=Database)
+        sc=RealtimeScanner(alpaca_client=alpaca,news_provider=news,db=db,
+                           criteria=ScannerCriteria(),verbose=False)
+        return sc,alpaca
+
+    def _wire_mover(self,sc,alpaca,trade_ts):
+        import pytz
+        from datetime import datetime as rdt
+        sc._universe=[{'symbol':'MOMO','price_close':4.0,
+                       'company_name':'Momo Co','float_shares':2_000_000}]
+        trade={'price':5.0}          # +25% vs prev close -> mover
+        if trade_ts is not None:
+            trade['timestamp']=trade_ts
+        alpaca.get_latest_trades.return_value={'MOMO':trade}
+        now_et=rdt.now(pytz.timezone('US/Eastern'))
+        bar_ts=now_et.replace(minute=(now_et.minute//15)*15,second=0,
+                              microsecond=0)
+        alpaca.get_current_bars.return_value={
+            'MOMO':{'volume':100_000,'timestamp':bar_ts,
+                    'high':5.0,'low':4.8}}
+        bucket=f"{now_et.hour:02d}:{(now_et.minute//15)*15:02d}"
+        sc._volume_profiles={'MOMO':{bucket:10_000}}
+
+    def test_mover_reaches_shadow_with_trade_ts(self):
+        sc,alpaca=self._scanner()
+        ts=datetime(2026,7,20,13,49,45,tzinfo=timezone.utc)
+        self._wire_mover(sc,alpaca,ts)
+        sc.ignition_shadow=MagicMock(spec=IgnitionShadow)
+        sc._run_intraday_cycle()
+        sc.ignition_shadow.on_mover.assert_called_once()
+        args,kw=sc.ignition_shadow.on_mover.call_args
+        assert args[0]=='MOMO'
+        assert kw['intraday_change_pct']==pytest.approx(25.0)
+        assert kw['gap_pct']==pytest.approx(25.0)
+        assert kw['price']==5.0
+        assert kw['has_news'] is None
+        assert kw['price_ts_utc']==ts     # trade ts, NOT 15-min bar ts
+
+    def test_naive_trade_ts_coerced_to_utc(self):
+        sc,alpaca=self._scanner()
+        self._wire_mover(sc,alpaca,datetime(2026,7,20,13,49,45))
+        sc.ignition_shadow=MagicMock(spec=IgnitionShadow)
+        sc._run_intraday_cycle()
+        _,kw=sc.ignition_shadow.on_mover.call_args
+        assert kw['price_ts_utc'].tzinfo is not None
+
+    def test_missing_trade_ts_passes_none(self):
+        sc,alpaca=self._scanner()
+        self._wire_mover(sc,alpaca,None)
+        sc.ignition_shadow=MagicMock(spec=IgnitionShadow)
+        sc._run_intraday_cycle()
+        _,kw=sc.ignition_shadow.on_mover.call_args
+        assert kw['price_ts_utc'] is None
+
+    def _make_qualifiable(self,sc):
+        # full qualification (news catalyst) so save_scan_result is the
+        # cycle-completed marker downstream of the shadow hook
+        sc.news.has_interesting_news.return_value=(True,'Big news')
+        sc.news.classify_news.return_value={'has_news':True,'catalyst':True,
+                                            'headline':'Big news',
+                                            'reason':'test'}
+
+    def test_raising_shadow_never_breaks_cycle(self):
+        sc,alpaca=self._scanner()
+        self._wire_mover(sc,alpaca,None)
+        self._make_qualifiable(sc)
+        sc.ignition_shadow=MagicMock(spec=IgnitionShadow)
+        sc.ignition_shadow.on_mover.side_effect=RuntimeError('shadow bug')
+        sc._run_intraday_cycle()      # must not raise
+        sc.db.save_scan_result.assert_called()   # work AFTER hook ran
+
+    def test_none_shadow_cycle_still_works(self):
+        sc,alpaca=self._scanner()
+        self._wire_mover(sc,alpaca,None)
+        self._make_qualifiable(sc)
+        sc.ignition_shadow=None
+        sc._run_intraday_cycle()
+        sc.db.save_scan_result.assert_called()

@@ -1116,9 +1116,16 @@ class RealtimeScanner:
             if intraday_change_pct >= self.criteria.intraday_change_pct_min:
                 move_10pct_count += 1
                 # Ignition shadow sighting (journal-only; double-guarded —
-                # on_mover never raises, and this wrapper catches anyway)
+                # on_mover never raises, and this wrapper catches anyway).
+                # Latency anchor is the LATEST TRADE ts (real-time price
+                # that made the move) — NOT bar_ts: bars here are 15-MIN
+                # windows whose start ts would read as ~900s of fake lag.
                 if self.ignition_shadow is not None:
                     try:
+                        _price_ts = trade.get('timestamp')
+                        if isinstance(_price_ts, datetime) \
+                                and _price_ts.tzinfo is None:
+                            _price_ts = _price_ts.replace(tzinfo=pytz.utc)
                         self.ignition_shadow.on_mover(
                             symbol,
                             intraday_change_pct=intraday_change_pct,
@@ -1126,8 +1133,8 @@ class RealtimeScanner:
                             price=current_price,
                             has_news=None,   # shadow worker resolves
                                              # (bounded news fetch)
-                            bar_ts_utc=bar_ts if isinstance(
-                                bar_ts, datetime) else None)
+                            price_ts_utc=_price_ts if isinstance(
+                                _price_ts, datetime) else None)
                     except Exception:
                         pass
 

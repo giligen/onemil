@@ -31,6 +31,10 @@ PASS = {'trig_lo': 1, 'trig_hi': 8, 'spread_med': 60, 'spread_p90': 150,
 
 
 def resim_exit(bars, entry, stop, entry_min):
+    """Harness-physics exit resim (static lock ARM/LOCK, 15:45 flat).
+    Conservative intrabar ordering: stop checked before arming. A bar
+    that OPENS below the live stop fills near its open, not at the stop
+    (gap-down realism — stop-price fills there would overstate P&L)."""
     cur = stop
     armed = False
     R = entry - stop
@@ -39,7 +43,8 @@ def resim_exit(bars, entry, stop, entry_min):
         if r['m'] >= 945:
             return (r['open'] - entry) / R, 'eod'
         if r['low'] <= cur:
-            return (cur * 0.999 - entry) / R, 'lock' if armed else 'stop'
+            fill = min(cur, r['open'])
+            return (fill * 0.999 - entry) / R, 'lock' if armed else 'stop'
         if not armed and r['high'] >= entry + ARM * R:
             armed = True
             cur = entry + LOCK * R
@@ -92,7 +97,16 @@ def main() -> int:
     day = args.date or rc.prev_trading_day_utc()
     path = rc.ROOT / 'logs' / f'ignition_shadow_{day}.jsonl'
     if not path.exists():
-        print(f'{day}: no shadow journal — nothing to report')
+        # A dead shadow must be VISIBLE, not silent — no journal on a
+        # weekday means shadow dead/disabled, holiday, or (rare) a day
+        # with zero +10% movers before 10:30. Telegram either way.
+        msg = (f"🟠 <b>[IGNITION SHADOW] {day}</b> — NO journal file. "
+               f"Shadow dead/disabled, market holiday, or zero "
+               f"qualifying movers? Check: journalctl | grep "
+               f"IgnitionShadow")
+        print(msg)
+        if not args.no_telegram:
+            rc.send_telegram(msg)
         return 0
     recs = [json.loads(ln) for ln in path.read_text().splitlines() if ln]
     trigs = [r for r in recs if r.get('verdict') == 'SHADOW_TRIGGER']
@@ -113,6 +127,13 @@ def main() -> int:
                 continue
             entry = float(r.get('hypo_entry') or r['price'])
             stop = float(r['hypo_stop'])
+            if entry <= stop:
+                # inverted/stale quote at capture -> R<=0, resim math
+                # is meaningless; surface instead of emitting nonsense
+                pnl_lines.append(
+                    f"• {r['symbol']}: SKIPPED resim — entry "
+                    f"{entry} <= stop {stop} (bad quote at capture)")
+                continue
             # complex_late triggers become actionable at confirm time,
             # not first sighting — resim exits from minute_final_et
             rr, reason = resim_exit(

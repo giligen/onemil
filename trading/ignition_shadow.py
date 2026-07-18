@@ -134,7 +134,7 @@ class IgnitionShadow:
     def on_mover(self, symbol: str, *, intraday_change_pct: float,
                  gap_pct: float, price: float,
                  has_news: Optional[bool],
-                 bar_ts_utc: Optional[datetime] = None) -> None:
+                 price_ts_utc: Optional[datetime] = None) -> None:
         """Scanner-thread entry point: ENQUEUE ONLY (microseconds).
         All evaluation/API/journal work happens on the shadow worker.
         NEVER raises; drops the sighting if the queue is full."""
@@ -143,7 +143,7 @@ class IgnitionShadow:
         try:
             self._queue.put_nowait(
                 (symbol, intraday_change_pct, gap_pct, price, has_news,
-                 bar_ts_utc, datetime.now(timezone.utc)))
+                 price_ts_utc, datetime.now(timezone.utc)))
         except Exception:
             # full queue -> drop (shadow data loss only, never scanner
             # time); throttled so a wedged worker can't spam the log
@@ -178,7 +178,7 @@ class IgnitionShadow:
             _t.sleep(0.02)
         return False
 
-    def _eval(self, symbol, chg, gap, price, has_news, bar_ts_utc,
+    def _eval(self, symbol, chg, gap, price, has_news, price_ts_utc,
               seen_at=None):
         now = seen_at or datetime.now(timezone.utc)
         try:
@@ -216,12 +216,14 @@ class IgnitionShadow:
                'gap_pct': round(gap, 2), 'price': price,
                'has_news': has_news, 'anchor': a,
                'anchor_cohort': self._day_anchor_counts.get(a or '', 0)}
-        # detection latency: scanner sighting time vs the bar that made
-        # the move — the S1 pass bar (p90 <= 90s) reads this field
-        if bar_ts_utc is not None:
+        # detection latency: scanner sighting time vs the latest-trade
+        # timestamp that showed the move (NOT a bar-window start — the
+        # scanner's bars are 15-min) — the S1 pass bar (p90<=90s) reads
+        # this field
+        if price_ts_utc is not None:
             try:
                 rec['latency_s'] = round(
-                    (now - bar_ts_utc).total_seconds(), 1)
+                    (now - price_ts_utc).total_seconds(), 1)
             except Exception as e:
                 logger.warning(
                     f"ignition-shadow: latency calc failed ({e})")
