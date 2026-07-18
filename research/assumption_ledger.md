@@ -137,6 +137,15 @@ Legend: ✅ validated (walk-forward or live-data study, cited) ·
      stopped forming). 'Monsters weekly' requires a THIRD detector:
      intraday ignition breakout (any-hour consolidation→volume-surge).
      PROPOSED as the next major program. /tmp/market_monsters.csv,
+   - IGNITION PROGRAM (2026-07-18, owner-approved): design + anatomy done
+     (research/ignition_program_design.md). Flat-open monster anatomy
+     (n=322 bar-level): 73% ignite INSIDE the ORB session window (50% in
+     9:xx) — excluded ONLY by the gap>=5 screen; after the +10% cross,
+     median +28% further, 97% continue >=15%, peak >=30min later in 86%.
+     Trigger reuses the scanner's existing INTRADAY QUALIFIED stream.
+     ⚠ stats monster-conditioned — full junk-river harness is the next
+     step (10-20K symbol-day backfill + bar-accurate sim, era+leave-out,
+     live-parity discipline from day one). NOTHING ships without it.
      /tmp/flat_open_monsters.csv.
      /tmp/exit_ladder_study.py, orb_dayrank_selector_study.py dump.
 
