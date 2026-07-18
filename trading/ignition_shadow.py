@@ -61,6 +61,8 @@ class IgnitionShadow:
         self._seen_today: Set[str] = set()
         self._anchors: Dict[str, Optional[str]] = {}
         self._day_anchor_counts: Dict[str, int] = {}
+        self._news_cache: Dict[str, Optional[bool]] = {}
+        self._dropped = 0
         self._day: Optional[str] = None
         self._log_dir = log_dir or os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -98,6 +100,7 @@ class IgnitionShadow:
             self._day = day
             self._seen_today = set()
             self._day_anchor_counts = {}
+            self._news_cache = {}
             self._evals_today = 0
             self._await_confirm = {}
 
@@ -142,7 +145,13 @@ class IgnitionShadow:
                 (symbol, intraday_change_pct, gap_pct, price, has_news,
                  bar_ts_utc, datetime.now(timezone.utc)))
         except Exception:
-            pass   # full queue -> drop; shadow data loss only
+            # full queue -> drop (shadow data loss only, never scanner
+            # time); throttled so a wedged worker can't spam the log
+            self._dropped += 1
+            if self._dropped == 1 or self._dropped % 100 == 0:
+                logger.warning(
+                    f"ignition-shadow: queue full — {self._dropped} "
+                    f"sighting(s) dropped (worker slow or wedged)")
 
     def _worker_loop(self) -> None:
         while True:
@@ -175,7 +184,9 @@ class IgnitionShadow:
         try:
             from zoneinfo import ZoneInfo
             et = now.astimezone(ZoneInfo('America/New_York'))
-        except Exception:
+        except Exception as e:
+            logger.warning(f"ignition-shadow: ET conversion failed ({e}) "
+                           f"— sighting dropped")
             return
         day = et.strftime('%Y-%m-%d')
         self._roll_day(day)
@@ -221,6 +232,15 @@ class IgnitionShadow:
             rec['verdict'] = 'skip_eval_cap'
             return self._journal(rec)
         self._evals_today += 1
+        # The scanner has NO news knowledge (always passes None) — the
+        # news catalyst channel is resolved HERE, on the worker thread
+        # (2026-07-19 review: without this, only complex-confirmation
+        # could ever trigger and the S1 week would measure the wrong
+        # universe). Bounded fetch, cached per symbol per day, capped by
+        # max_evals_per_day.
+        if has_news is None:
+            has_news = self._resolve_news(symbol, rec)
+            rec['has_news'] = has_news
         catalyst = (has_news is True) or (
             a is not None
             and self._day_anchor_counts.get(a, 0) >= self.min_cohort)
@@ -232,6 +252,33 @@ class IgnitionShadow:
             return self._journal(rec)
         self._finalize(rec, catalyst_kind='news' if has_news
                        else f'complex({a})')
+
+    def _resolve_news(self, symbol: str,
+                      rec: dict) -> Optional[bool]:
+        """Own-ticker news, worker-thread only. Same helper + window as
+        the ORB news gate (prev-day 15:00 ET -> fetch time, 8s bound,
+        no retries); at an Ignition trigger this additionally counts
+        same-morning breaking news — for an igniter that IS the
+        catalyst. Tri-state: True/False known; None = fetch failed,
+        which degrades THIS symbol to complex-confirmation only
+        (fail-open on the catalyst it can still prove)."""
+        if symbol in self._news_cache:
+            return self._news_cache[symbol]
+        try:
+            res = self._bounded(
+                lambda: self.alpaca.get_premarket_news_multi([symbol]),
+                8.0) or {}
+            info = res.get(symbol) or {}
+            hn: Optional[bool] = bool(info.get('n_articles', 0))
+            if hn:
+                rec['news_headline'] = str(info.get('headline', ''))[:120]
+        except Exception as e:
+            logger.warning(f"ignition-shadow: news({symbol}) failed: {e} "
+                           f"— complex-confirmation only for this symbol")
+            rec['news_error'] = str(e)[:80]
+            hn = None
+        self._news_cache[symbol] = hn
+        return hn
 
     def _bounded(self, fn, timeout_s: float = 6.0):
         """Run an API call with a hard 6s bound (thread-join): a hanging
@@ -274,6 +321,18 @@ class IgnitionShadow:
         rec = dict(rec)
         rec['ts_final_utc'] = now.isoformat()
         rec['catalyst'] = catalyst_kind
+        # actionable minute (== sighting minute except for complex_late
+        # confirmations) — the resim must key exits to THIS, and the
+        # bars lookback must be computed from NOW, not the stale
+        # sighting minute (else a late-confirm fetch window starts
+        # mid-morning and iloc[0] is not the 9:30 open)
+        try:
+            from zoneinfo import ZoneInfo
+            _et_now = now.astimezone(ZoneInfo('America/New_York'))
+            minute_now = _et_now.hour * 60 + _et_now.minute
+        except Exception:
+            minute_now = rec['minute_et']
+        rec['minute_final_et'] = minute_now
         # full-day bars: recompute the TRUE harness gates (chg-from-OPEN,
         # OPEN gap) — the scanner's hot-loop values are approximations
         # (its intraday_change is max(vs-prev-close, range), not vs-open)
@@ -282,7 +341,9 @@ class IgnitionShadow:
         try:
             import time as _t
             _t0 = _t.monotonic()
-            mins_since_open = max(rec['minute_et'] - 570 + 2, 35)
+            # over-asking is free: the client clamps the window start to
+            # the 9:30 open, so this guarantees iloc[0] IS the open bar
+            mins_since_open = max(minute_now - 570 + 5, 40)
             bars = self._bounded(lambda: self.alpaca.get_1min_bars(
                 symbol, lookback_minutes=int(mins_since_open)))
             rec['bars_fetch_s'] = round(_t.monotonic() - _t0, 2)

@@ -16,6 +16,7 @@ def _shadow(tmp_path, **cfg):
                        'low':[8.9]+[9.4]*40,'close':[9.05]+[10.2]*40,
                        'volume':[10000]*41})
     a.get_1min_bars.return_value=bars
+    a.get_premarket_news_multi.return_value={}   # default: known-newsless
     s=IgnitionShadow(a,{'ignition_shadow':{'enabled':True,**cfg}},
                      log_dir=str(tmp_path))
     return s,a
@@ -91,6 +92,44 @@ class TestShadow:
         monkeypatch.setenv('IGNITION_SHADOW','0')
         s,_=_shadow(tmp_path)
         assert s.enabled is False
+
+    def test_worker_resolves_news_itself(self, tmp_path):
+        """The scanner always passes has_news=None — the WORKER must
+        resolve the news catalyst channel or it is dead (2026-07-19
+        review finding: only complex-confirmation could ever fire)."""
+        s,a=_shadow(tmp_path)
+        a.get_premarket_news_multi.return_value={
+            'IGNI':{'n_articles':3,'headline':'FDA approval'}}
+        _fire(s,news=None)
+        r=_recs(tmp_path)
+        assert r[-1]['verdict']=='SHADOW_TRIGGER'
+        assert r[-1]['catalyst']=='news'
+        assert r[-1]['has_news'] is True
+        assert 'FDA' in r[-1]['news_headline']
+        a.get_premarket_news_multi.assert_called_once_with(['IGNI'])
+
+    def test_news_fetch_failure_degrades_to_complex_only(self, tmp_path):
+        s,a=_shadow(tmp_path)
+        a.get_premarket_news_multi.side_effect=RuntimeError('gateway dead')
+        _fire(s,news=None)
+        r=_recs(tmp_path)
+        assert r[-1]['verdict']=='skip_no_catalyst'
+        assert r[-1]['has_news'] is None
+        assert 'news_error' in r[-1]
+
+    def test_known_newsless_parks_with_resolved_flag(self, tmp_path):
+        s,a=_shadow(tmp_path)     # fixture: fetch returns {} = no news
+        _fire(s,news=None)
+        r=_recs(tmp_path)
+        assert r[-1]['verdict']=='skip_no_catalyst'
+        assert r[-1]['has_news'] is False
+
+    def test_finalize_journals_actionable_minute(self, tmp_path):
+        s,a=_shadow(tmp_path)
+        _fire(s,news=True)
+        r=_recs(tmp_path)
+        assert r[-1]['verdict']=='SHADOW_TRIGGER'
+        assert 'minute_final_et' in r[-1]
 
     def test_on_mover_enqueues_only_never_blocks(self, tmp_path):
         """Scanner-thread isolation: on_mover must not do API work —

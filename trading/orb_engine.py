@@ -1542,6 +1542,15 @@ class ORBEngine:
         except Exception as e:
             logger.warning(f"ORB: PM prefetch failed: {e} — lazy path remains")
 
+        # Catalyst-veto anchor pre-warm — deliberately INDEPENDENT of the
+        # PM prefetch above (the veto must not degrade if pm sizing or the
+        # news gate is ever disabled).
+        try:
+            self._prewarm_anchors()
+        except Exception as e:
+            logger.warning(f"ORB: anchor pre-warm failed: {e} — "
+                           f"submit loop resolves offline (no-anchor)")
+
         # Process pending fills BEFORE evaluating new entries. This transitions
         # pending_new trades to filled state + adds StopMonitor watches.
         self._process_pending_fills()
@@ -1956,23 +1965,6 @@ class ORBEngine:
                 for s2 in syms:
                     if (self._news_flags.get(s2) or {}).get('n_articles', 0):
                         self._classify_symbol(s2)
-                # Pre-warm underlying ANCHORS for ALL candidates (the
-                # catalyst veto's cohort needs every symbol; doing this
-                # here keeps get_asset_name API fallbacks OUT of the
-                # 9:35 submit loop — 2026-07-19 pre-deploy review).
-                # 20s total budget: unmapped new listings each cost a
-                # bounded API name lookup; past budget they resolve as
-                # no-anchor in the submit loop (fail-open, logged there).
-                import time as _t
-                _warm_t0 = _t.monotonic()
-                for s2 in syms:
-                    if _t.monotonic() - _warm_t0 > 20.0:
-                        logger.warning(
-                            "[ORB] anchor pre-warm budget exhausted "
-                            f"({sum(1 for x in syms if x in self._anchor_cache)}"
-                            f"/{len(syms)} warmed) — rest resolve offline")
-                        break
-                    self._anchor_for(s2)
             else:
                 logger.warning(
                     "ORB: alpaca client lacks get_premarket_news_multi — "
@@ -2045,19 +2037,29 @@ class ORBEngine:
     def _maybe_prefetch_pm(self) -> None:
         """Prefetch PM dollar volumes on any tick at/after 9:31 ET so the
         9:35 burst doesn't pay the fetch latency. No-op when disabled,
-        already fetched today, or before 9:31."""
-        if not self.pm_mult_enabled:
+        already fetched today, or before 9:31.
+
+        The NEWS side also feeds the catalyst veto (2026-07-19 review):
+        news_needed below keeps the fetch + 9:33 lag pass alive when the
+        veto is on even with pm sizing (or its news gate) disabled —
+        otherwise _news_flags would stay empty, _get_has_news would
+        return None for everything, and the veto would silently fail
+        open into a no-op (accidental behavior; forbidden)."""
+        news_needed = ((self.pm_mult_enabled and self.pm_news_gate)
+                       or self.catalyst_veto_enabled)
+        if not self.pm_mult_enabled and not news_needed:
             return
         today = datetime.now(timezone.utc).date()
         cands = set(self.candidates.keys())
-        pm_done = (self._pm_fetch_done_day == today
-                   and not (cands - set(self._pm_dollar_vols.keys())))
-        news_done = ((not self.pm_news_gate)
+        pm_done = ((not self.pm_mult_enabled)
+                   or (self._pm_fetch_done_day == today
+                       and not (cands - set(self._pm_dollar_vols.keys()))))
+        news_done = ((not news_needed)
                      or (self._news_fetch_done_day == today
                          and not (cands - set(self._news_flags.keys()))))
         # 9:33 lag pass still owed? (must not be short-circuited by the
         # fetched-everything early return — review bug 2026-07-10)
-        refresh_pending = (self.pm_news_gate
+        refresh_pending = (news_needed
                            and self._news_fetch_done_day == today
                            and self._news_refresh_done_day != today)
         if pm_done and news_done and not refresh_pending:
@@ -2079,7 +2081,7 @@ class ORBEngine:
         # if systematic). One bounded re-fetch at >=9:33 for no-news/failed
         # symbols, UPGRADE-ONLY (an article cannot be untagged), still ahead
         # of the 9:35 submit burst and off its latency-critical path.
-        if (self.pm_news_gate and et.time() >= dtime(9, 33)
+        if (news_needed and et.time() >= dtime(9, 33)
                 and self._news_fetch_done_day == today
                 and self._news_refresh_done_day != today):
             self._news_refresh_done_day = today
@@ -2129,6 +2131,36 @@ class ORBEngine:
             logger.warning(
                 f"ORB: news snapshot write failed ({e}) — EoD lag audit "
                 f"will be unavailable for today")
+
+    def _prewarm_anchors(self) -> None:
+        """Warm underlying anchors for every candidate ahead of the 9:35
+        submit burst so the catalyst veto's cohort computation is pure
+        cache lookups (allow_api=False there). 20s budget per tick;
+        unwarmed symbols retry next tick — each symbol costs at most ONE
+        bounded API name lookup ever (results, including failures, are
+        memoized in _anchor_cache / _class_names)."""
+        if not self.catalyst_veto_enabled:
+            return
+        todo = [s for s in self.candidates.keys()
+                if s not in self._anchor_cache]
+        if not todo:
+            return
+        import time as _t
+        _t0 = _t.monotonic()
+        warmed = 0
+        for s2 in todo:
+            if _t.monotonic() - _t0 > 20.0:
+                logger.warning(
+                    f"[ORB] anchor pre-warm budget hit "
+                    f"({warmed}/{len(todo)} this tick) — rest next tick")
+                break
+            try:
+                self._anchor_for(s2)
+            except Exception as e:
+                logger.warning(f"[ORB] anchor pre-warm {s2} failed ({e}) "
+                               f"— treated as no-anchor")
+                self._anchor_cache[s2] = None
+            warmed += 1
 
     def _anchor_for(self, symbol: str,
                     allow_api: bool = True) -> Optional[str]:
@@ -4124,7 +4156,7 @@ class ORBEngine:
                 'news_headline': ('' if _news is None
                                   else _news.get('headline', '')),
                 'asset_class': self._asset_class.get(plan.symbol),
-                'anchor': self._anchor_cache.get(plan.symbol),
+                'anchor': self._anchor_for(plan.symbol, allow_api=False),
                 'anchor_cohort': (anchor_cohort_counts(
                     self._anchor_for(s, allow_api=False)
                     for s in self.candidates.keys())

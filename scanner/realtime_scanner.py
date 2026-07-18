@@ -1124,7 +1124,8 @@ class RealtimeScanner:
                             intraday_change_pct=intraday_change_pct,
                             gap_pct=gap_pct,
                             price=current_price,
-                            has_news=None,   # resolved EoD by the report
+                            has_news=None,   # shadow worker resolves
+                                             # (bounded news fetch)
                             bar_ts_utc=bar_ts if isinstance(
                                 bar_ts, datetime) else None)
                     except Exception:

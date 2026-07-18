@@ -113,7 +113,11 @@ def main() -> int:
                 continue
             entry = float(r.get('hypo_entry') or r['price'])
             stop = float(r['hypo_stop'])
-            rr, reason = resim_exit(b, entry, stop, r['minute_et'])
+            # complex_late triggers become actionable at confirm time,
+            # not first sighting — resim exits from minute_final_et
+            rr, reason = resim_exit(
+                b, entry, stop,
+                r.get('minute_final_et') or r['minute_et'])
             pos = float(r.get('hypo_position_usd') or 0)
             pnl = rr * (entry - stop) / entry * pos
             tot += pnl
