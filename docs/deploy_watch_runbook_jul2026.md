@@ -27,14 +27,17 @@ it without a 🔴 emergency.
    sign-off, the Claude session died — layer 1 still detects.
 
 ## Timeline (UTC)
+Claude sessions trimmed to 3/day (2026-07-18, owner credit-cost ask):
+T+5 boot triage, post-burst open audit, EOD wrap. All mechanical
+telegrams + the 2-min sentinel (zero credit cost while quiet)
+unchanged — detection coverage identical, Claude only wakes where
+judgment is needed or when the sentinel fires.
 - 12:30 service auto-starts (deploys current tree)
-- 12:35 Claude T+5 quick glance (boot-or-P1)
-- 12:38 mechanical boot check → 12:41 Claude boot checkpoint
-- 13:03 Claude T+30 quick glance
-- 13:30 market open; 13:31 Claude T+60 glance; 13:31 news prefetch;
-  13:33 lag pass; 13:35 ORB burst
-- 13:44 mechanical open check → 13:47 Claude open checkpoint
-- 16:33 mechanical midday → 16:36 Claude midday
+- 12:35 Claude T+5 boot triage (P1 clock starts here if red)
+- 12:38 mechanical boot check; 12:40 trader_watchdog
+- 13:30 market open; 13:31 news prefetch; 13:33 lag pass; 13:35 ORB burst
+- 13:44 mechanical open check → 13:47 Claude open checkpoint (veto audit)
+- 16:33 mechanical midday check (Telegram only, no Claude)
 - hourly :07 (13:07-20:07) mechanical error-storm backstop
   (silent-when-healthy; thresholds vs Fri 7/17 baseline: 0 ERROR,
   0 Traceback, 2-11 WARNING/hr)
