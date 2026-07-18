@@ -73,3 +73,33 @@ exits, StopMonitor, attribution, green-check) is reusable.
 Artifacts: /tmp/market_monsters.csv, /tmp/flat_open_monsters.csv,
 /tmp/ignition_bars.csv, /tmp/ignition_anatomy.csv,
 /tmp/fetch_ignition_bars.py.
+
+
+## Checkpoint 1 — full junk-river v0 numbers (2026-07-19, cached 86% sample)
+
+**15,466 trades** (every +10% cross, gap<5, 9:35–13:00, no filters):
+- **Mean +$132/trade (+0.062R), WR 46% — POSITIVE IN ALL THREE ERAS**
+  (25H1 +$35 / 25H2 +$159 / 2026 +$184). The naked trigger carries edge
+  on the full river — ORB's raw river is negative-mean by comparison.
+- Naive 4-slot FCFS book: $654K/19mo model — NOT bookable as-is
+  (worstMo −$51K, MDD −$55K; FCFS is the dumbest possible selector).
+
+**Honest caveats (the program's next gates):**
+1. LOTTERY CONCENTRATION: median trade −$174; top ~300 of 15,466 carry
+   everything (drop-top-300 → negative). Familiar texture, magnified.
+2. **EXECUTION IS THE EDGE'S BUDGET**: at 0.6% entry slip 25H1 goes
+   negative; at 1.0% the river flips negative overall. Fill realism
+   (participation-scaled slippage, minute-volume capacity) is gate #2 —
+   nothing ships on 30bps assumptions for fast movers.
+3. Era-consistent structure found (filters for v1): trigger ≤10:30
+   (+$199 vs +$60 later), consolidation R ≥5% (+$174 vs +$27, 2026
+   negative below) — both all-era-positive. vol-surge mild.
+4. Sample bias note: cached-86% skews toward machine-relevant names;
+   complete-river rerun (incl. 3,994 least-traded) in flight.
+
+**Program gates to ship**: (G2) participation-based fill model;
+(G3) v1 selector (early-window + min-R + quality rank, slot-capped) with
+era + leave-out + monthly texture; (G4) catalyst/complex/news filters;
+(G5) ORB-overlap and account-level interaction; (G6) walk-forward halves
++ live-parity constants pinned in yaml from day one; (G7) paper-shadow
+period before real size.
