@@ -105,3 +105,39 @@ era + leave-out + monthly texture; (G4) catalyst/complex/news filters;
 (G5) ORB-overlap and account-level interaction; (G6) walk-forward halves
 + live-parity constants pinned in yaml from day one; (G7) paper-shadow
 period before real size.
+
+
+## Checkpoint 2 — GATES 2-5 COMPLETE (2026-07-19): the proven candidate book
+
+**G2 (execution realism)**: participation model (position ≤15% of
+trigger-minute $vol; slippage 30→150bps scaled by participation;
+sub-$2K capacity dropped). VERDICT: the naked river's edge DIES
+(+$115→−$1/trade) — execution is the gate everything must pass.
+
+**G3 (price/volume selectors)**: NO 2025-consistent rule exists in
+price/volume space under realistic fills. The 2026-only cells are
+regime bait — refused.
+
+**G4 (catalyst taxonomy — transferred from ORB as an out-of-domain
+prior)**: THE RESCUE, same as ORB's own history:
+- complex-confirmed (uc≥2): +$321/trade, WR 56%, ALL ERAS (+573/+160/+294)
+- catalyst (news|uc≥2): +$154/trade all eras; 'neither' cell −$45 (junk river confirmed)
+
+**THE CANDIDATE BOOK** (catalyst-required, trig≤10:30, R≥5%, 4-slot
+FCFS, REALISTIC fills): **$288,546/19mo — a second ORB-sized engine from
+a DISJOINT universe (gap<5)**:
+- **11 of 19 months ≥ $10K — monster months MOST months** (owner's goal)
+- **leave-out ROBUST: drop top-10 trades → +$166,680 (58% remains)** —
+  NOT a lottery book; WR 50%, ~70 trades/mo
+- eras +$107K/+$19K/+$163K (all positive); 2x-impact stress $274K
+- July-2026: +$23,420 (the drought month, positive)
+- disclosed: MDD −$44K model (2.7× ORB's), worst month −$29.6K,
+  early/R thresholds chosen on full sample (catalyst prior is clean)
+
+**G5**: zero symbol-overlap with ORB (disjoint by construction); capital
+design needed (8 combined slots vs budget — shared pool decision).
+
+**REMAINING before live**: implementation (new consumer of the
+INTRADAY QUALIFIED stream + planner/exits reuse), yaml-pinned constants,
+decision-parity hooks, paper-shadow period. The research says the engine
+is real; the shadow says when to trust it with money.
