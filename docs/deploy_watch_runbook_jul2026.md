@@ -28,14 +28,29 @@ it without a 🔴 emergency.
 
 ## Timeline (UTC)
 - 12:30 service auto-starts (deploys current tree)
+- 12:35 Claude T+5 quick glance (boot-or-P1)
 - 12:38 mechanical boot check → 12:41 Claude boot checkpoint
-- 13:30 market open; 13:31 news prefetch; 13:33 lag pass; 13:35 ORB burst
+- 13:03 Claude T+30 quick glance
+- 13:30 market open; 13:31 Claude T+60 glance; 13:31 news prefetch;
+  13:33 lag pass; 13:35 ORB burst
 - 13:44 mechanical open check → 13:47 Claude open checkpoint
 - 16:33 mechanical midday → 16:36 Claude midday
+- hourly :07 (13:07-20:07) mechanical error-storm backstop
+  (silent-when-healthy; thresholds vs Fri 7/17 baseline: 0 ERROR,
+  0 Traceback, 2-11 WARNING/hr)
 - 20:00 service exits (market close)
 - 21:30 green check, 21:40 shadow report (pre-existing crons)
 - 21:52 mechanical eod → 21:56 Claude eod checkpoint
 - Wed 06:52 Claude two-day digest for the owner's return
+
+## Error-storm sentinel (continuous)
+A persistent journal monitor runs in the Claude session polling every
+2 minutes during Mon/Tue 12:00-20:00: wakes Claude within ~2min on ANY
+traceback, >=3 ERROR lines in 2min, or service death after 12:35.
+Detection latency for a storm is minutes, not checkpoint gaps. If the
+Claude session dies the sentinel dies with it — the hourly mechanical
+storm backstop (crontab, Claude-independent) still telegrams within
+the hour.
 
 ## Rollback ladder (in order — never skip a rung)
 1. **Feature flags (designed, zero-state)** — keeps all fixed code:
