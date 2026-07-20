@@ -34,7 +34,7 @@ def sh(cmd: str) -> str:
         return f'__CMD_ERROR__ {e}'
 
 
-def jgrep(pattern: str, since: str = 'today 12:00') -> int:
+def jgrep(pattern: str, since: str = '12:00') -> int:
     out = sh(f"journalctl -u onemil-trader --since '{since}' --no-pager "
              f"| grep -cE {pattern!r} || true")
     try:
@@ -43,7 +43,7 @@ def jgrep(pattern: str, since: str = 'today 12:00') -> int:
         return -1
 
 
-def jtail(pattern: str, n: int = 3, since: str = 'today 12:00') -> str:
+def jtail(pattern: str, n: int = 3, since: str = '12:00') -> str:
     out = sh(f"journalctl -u onemil-trader --since '{since}' --no-pager "
              f"| grep -E {pattern!r} | tail -{n}")
     return out[:500]
@@ -115,7 +115,7 @@ def check_midday(r: Report) -> None:
         r.add(RED, 'service NOT active during session')
     tb = jgrep('Traceback')
     r.add(RED if tb > 0 else GREEN, f'tracebacks: {tb}')
-    n_restart = jgrep('Started onemil-trader', since='today 12:20')
+    n_restart = jgrep('Started onemil-trader', since='12:20')
     if n_restart > 2:
         r.add(RED, f'{n_restart} service starts today — crash-loop '
                    f'(runbook P2)')
@@ -146,7 +146,7 @@ def check_eod(r: Report) -> None:
           f"(runbook P5)")
     _shadow_journal(r, minimum_expected=0)
     n_veto = jgrep('CATALYST VETO')
-    n_trades = jgrep('ORB.*fill|FILLED', since='today 13:30')
+    n_trades = jgrep('ORB.*fill|FILLED', since='13:30')
     r.add(GREEN, f'day counts: vetoes={n_veto} fill-log-lines={n_trades}')
     try:
         import sqlite3

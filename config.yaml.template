@@ -427,4 +427,4 @@ ignition_shadow:
   min_r_pct: 5.0
   gap_max_pct: 5.0            # open-gap >=5% = ORB territory (disjoint)
   min_cohort: 2
-  max_evals_per_day: 25
+  max_evals_per_day: 60

@@ -1123,6 +1123,15 @@ class RealtimeScanner:
                 if self.ignition_shadow is not None:
                     try:
                         _price_ts = trade.get('timestamp')
+                        if isinstance(_price_ts, str):
+                            # get_latest_trades serializes to ISO string
+                            # (found live 7/20: latency_s was empty all
+                            # morning — mocked seam test used datetime)
+                            try:
+                                _price_ts = datetime.fromisoformat(
+                                    _price_ts)
+                            except ValueError:
+                                _price_ts = None
                         if isinstance(_price_ts, datetime) \
                                 and _price_ts.tzinfo is None:
                             _price_ts = _price_ts.replace(tzinfo=pytz.utc)

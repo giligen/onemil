@@ -70,7 +70,12 @@ class IgnitionShadow:
         self._class_map = None
         self._class_names: Dict[str, str] = {}
         # safety rails: bounded API work inside the scanner cycle
-        self.max_evals_per_day = int(cfg.get('max_evals_per_day', 25))
+        # 60 (was 25, live 7/20 finding): the 9:35 first-cycle flood of
+        # premarket gappers consumed the whole cap in one cycle and
+        # starved the actual flat-open igniters into skip_eval_cap.
+        # Worker API work stays bounded: 60 x (8s news + 6s bars) worst
+        # case, async on the shadow worker, scanner unaffected.
+        self.max_evals_per_day = int(cfg.get('max_evals_per_day', 60))
         self._evals_today = 0
         # no-catalyst skips wait for late complex confirmation
         self._await_confirm: Dict[str, dict] = {}
@@ -349,7 +354,11 @@ class IgnitionShadow:
             bars = self._bounded(lambda: self.alpaca.get_1min_bars(
                 symbol, lookback_minutes=int(mins_since_open)))
             rec['bars_fetch_s'] = round(_t.monotonic() - _t0, 2)
-            if bars is not None and len(bars) >= 10:
+            # >=6 bars matches the harness minimum (5-bar pre-window +
+            # trigger bar); 10 was over-strict and turned every 9:35-39
+            # early trigger into no_bars before the gap gate could even
+            # classify it (live 7/20 finding: 15 such records)
+            if bars is not None and len(bars) >= 6:
                 day_open = float(bars.iloc[0]['open'])
                 rec['day_open'] = day_open
                 rec['chg_from_open'] = round(

@@ -284,6 +284,26 @@ class TestScannerHook:
         assert kw['has_news'] is None
         assert kw['price_ts_utc']==ts     # trade ts, NOT 15-min bar ts
 
+    def test_iso_string_trade_ts_parsed(self):
+        """get_latest_trades serializes timestamp via .isoformat() — the
+        hook must parse the STRING (live 7/20: latency_s was empty all
+        morning because the seam test mocked a datetime object)."""
+        sc,alpaca=self._scanner()
+        self._wire_mover(sc,alpaca,'2026-07-20T13:49:45+00:00')
+        sc.ignition_shadow=MagicMock(spec=IgnitionShadow)
+        sc._run_intraday_cycle()
+        _,kw=sc.ignition_shadow.on_mover.call_args
+        assert kw['price_ts_utc']==datetime(2026,7,20,13,49,45,
+                                            tzinfo=timezone.utc)
+
+    def test_garbage_trade_ts_passes_none(self):
+        sc,alpaca=self._scanner()
+        self._wire_mover(sc,alpaca,'not-a-timestamp')
+        sc.ignition_shadow=MagicMock(spec=IgnitionShadow)
+        sc._run_intraday_cycle()
+        _,kw=sc.ignition_shadow.on_mover.call_args
+        assert kw['price_ts_utc'] is None
+
     def test_naive_trade_ts_coerced_to_utc(self):
         sc,alpaca=self._scanner()
         self._wire_mover(sc,alpaca,datetime(2026,7,20,13,49,45))
