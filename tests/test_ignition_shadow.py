@@ -88,6 +88,35 @@ class TestShadow:
         r=_recs(tmp_path)
         assert r[-1]['verdict']=='no_bars'
 
+    def test_sub_2_dollar_price_floor(self, tmp_path):
+        """BT parity: research book has zero sub-$2 trades (CPHI 7/21
+        fantasy-trigger incident). No journal, no eval burn."""
+        s,a=_shadow(tmp_path)
+        with patch('trading.ignition_shadow.datetime') as md:
+            md.now.return_value=datetime(2026,7,20,13,50,
+                                         tzinfo=timezone.utc)
+            s.on_mover('PNNY',intraday_change_pct=18.0,gap_pct=15.0,
+                       price=0.96,has_news=True,price_ts_utc=None)
+        assert s.drain(10.0)
+        assert _recs(tmp_path)==[]
+        assert s._evals_today==0
+        a.get_premarket_news_multi.assert_not_called()
+
+    def test_participation_cap_bounds_position(self, tmp_path):
+        """BT parity: position <= 15% of latest-bar $vol (CPHI's $906
+        bar => $136 cap, not $19.7K)."""
+        s,a=_shadow(tmp_path)
+        bars=pd.DataFrame({'open':[9.0]+[10.0]*40,'high':[9.1]+[10.4]*40,
+                           'low':[8.9]+[9.4]*40,'close':[9.05]+[10.2]*40,
+                           'volume':[10000]*40+[50]})   # last bar: $510
+        a.get_1min_bars.return_value=bars
+        _fire(s,news=True)
+        r=_recs(tmp_path)
+        assert r[-1]['verdict']=='skip_illiquid'
+        assert r[-1]['hypo_position_usd']<2000
+        assert r[-1]['participation_cap_usd']==pytest.approx(
+            0.15*50*10.2,abs=1)
+
     def test_disabled_by_env(self, tmp_path, monkeypatch):
         monkeypatch.setenv('IGNITION_SHADOW','0')
         s,_=_shadow(tmp_path)

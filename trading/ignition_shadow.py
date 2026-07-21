@@ -199,6 +199,13 @@ class IgnitionShadow:
         if chg < self.trigger_pct or minute > self.max_trigger_min \
                 or minute < 575:
             return
+        # $2 price floor — BT PARITY (live 7/21: sub-$2 CPHI journaled a
+        # +52R/$160K fantasy trigger; the research book contains ZERO
+        # trades under $2, floor is 2.0 across all 1,331). Cheap gate
+        # before any eval/API burn; sub-$2 movers also polluted the S1
+        # spread stats (467bps on a $0.96 stock).
+        if price < 2.0:
+            return
         # cohort updates on EVERY sighting (siblings confirm each other)
         a = self._anchor(symbol)
         first_sight = symbol not in self._seen_today
@@ -390,6 +397,23 @@ class IgnitionShadow:
             rec['verdict'] = 'skip_r_too_small'
         else:
             pos = min(MODEL_RISK_USD / (r_pct / 100.0), POS_CAP_USD)
+            # participation cap — BT PARITY (live 7/21: CPHI's next bar
+            # traded $906 total; harness caps at 15% of bar $vol, the
+            # journaled $19.7K position was pure fantasy). Use the
+            # latest fetched bar's dollar volume as the liquidity proxy.
+            try:
+                lb = bars.iloc[-1]
+                cap = 0.15 * float(lb['volume']) * float(lb['close'])
+                rec['participation_cap_usd'] = round(cap, 0)
+                pos = min(pos, cap)
+            except Exception as e:
+                logger.warning(f"ignition-shadow: participation cap "
+                               f"failed for {symbol}: {e}")
+            if pos < 2000:
+                rec['verdict'] = 'skip_illiquid'
+                rec['hypo_position_usd'] = round(pos, 0)
+                self._capture_quote(rec)
+                return self._journal(rec)
             rec['verdict'] = 'SHADOW_TRIGGER'
             rec['hypo_entry'] = rec.get('ask') or rec['price']
             rec['hypo_stop'] = round(
