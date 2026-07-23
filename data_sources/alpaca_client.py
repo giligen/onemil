@@ -677,6 +677,16 @@ class AlpacaClient:
                             result['low'] = float(bar.low) if bar.low else 0
                             result['close'] = float(bar.close) if bar.close else 0
                             result['volume'] = int(bar.volume) if bar.volume else 0
+                            # daily-bar DATE (ET) — staleness detector for
+                            # vendor corpses: delisted/dead symbols keep
+                            # months-old snapshots (CUK's was 2026-05-06 on
+                            # 2026-07-23) and phantom-gap into the universe
+                            if bar.timestamp:
+                                import pytz as _pytz
+                                result['daily_bar_date'] = (
+                                    bar.timestamp.astimezone(
+                                        _pytz.timezone('US/Eastern'))
+                                    .date().isoformat())
                         prev_bar = snap.previous_daily_bar
                         if prev_bar:
                             result['prev_close'] = float(prev_bar.close) if prev_bar.close else 0

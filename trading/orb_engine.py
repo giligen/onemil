@@ -609,6 +609,27 @@ class ORBEngine:
                     continue
                 prev_close = float(snap.get('prev_close', 0) or 0) if isinstance(snap, dict) else 0
                 prev_volume = int(snap.get('prev_volume', 0) or 0) if isinstance(snap, dict) else 0
+                # Vendor-corpse gate (2026-07-23: ORIS/CUK/MIGI entered on
+                # snapshots whose daily bar was WEEKS old — dead symbols
+                # can't trade, but they consumed news/PM/anchor prefetch
+                # work and false-alarmed the selection observer). A daily
+                # bar dated before today = no market data today = skip.
+                # Fail-open: missing date field passes (older client).
+                bar_date = snap.get('daily_bar_date') if isinstance(snap, dict) else None
+                if bar_date:
+                    try:
+                        from zoneinfo import ZoneInfo
+                        today_et = datetime.now(timezone.utc).astimezone(
+                            ZoneInfo('America/New_York')).date().isoformat()
+                    except Exception:
+                        _n = datetime.now(timezone.utc)
+                        today_et = (_n - timedelta(
+                            hours=_et_offset_hours(_n))).date().isoformat()
+                    if bar_date < today_et:
+                        logger.info(
+                            f"ORB: {sym} stale-snapshot reject — daily bar "
+                            f"dated {bar_date} (vendor corpse, no data today)")
+                        continue
                 # Apply BT criteria
                 if not (self.universe_min_price <= open_price <= self.universe_max_price):
                     continue

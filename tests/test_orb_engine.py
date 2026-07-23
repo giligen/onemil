@@ -1147,3 +1147,45 @@ class TestTouchgoBreakoutBarReKey:
         engine._evaluate_touchgo(sym, bars)
         # 13:39 bar closed strong (pos 0.9) -> no fire (the divergence the fix removes).
         assert not mock_stop_monitor.force_exit.called
+
+
+class TestStaleSnapshotGate:
+    """Vendor-corpse gate (2026-07-23: ORIS/CUK/MIGI phantom candidates
+    from weeks-old snapshots)."""
+
+    def _engine(self):
+        import yaml
+        from pathlib import Path
+        from unittest.mock import MagicMock
+        from data_sources.alpaca_client import AlpacaClient
+        from persistence.database import Database
+        from trading.stop_monitor import StopMonitor
+        with open(Path(__file__).parent.parent / 'orb.yaml') as f:
+            cfg = yaml.safe_load(f)
+        cfg['strategy']['enabled'] = True
+        a = MagicMock(spec=AlpacaClient)
+        return ORBEngine(alpaca_client=a, db=MagicMock(spec=Database),
+                         stop_monitor=MagicMock(spec=StopMonitor),
+                         config=cfg), a
+
+    def _snap(self, bar_date, gap_open=10.5, prev_close=9.0):
+        return {'open': gap_open, 'volume': 900_000,
+                'prev_close': prev_close, 'prev_volume': 2_000_000,
+                'latest_price': gap_open,
+                **({'daily_bar_date': bar_date} if bar_date else {})}
+
+    def test_stale_daily_bar_rejected(self):
+        from datetime import datetime, timezone
+        eng, a = self._engine()
+        today = datetime.now(timezone.utc).date().isoformat()
+        a.get_snapshots.return_value = {
+            'LIVE1': self._snap(today),
+            'CORPSE': self._snap('2026-05-06')}
+        keep = eng.build_orb_universe_from_snapshots(["LIVE1", "CORPSE"])
+        assert 'LIVE1' in keep and 'CORPSE' not in keep
+
+    def test_missing_date_fails_open(self):
+        eng, a = self._engine()
+        a.get_snapshots.return_value = {'NODATE': self._snap(None)}
+        keep = eng.build_orb_universe_from_snapshots(["NODATE"])
+        assert 'NODATE' in keep

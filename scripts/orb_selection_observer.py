@@ -180,6 +180,38 @@ def main():
     audit['dropped_by_live'] = dropped
     audit['live_only'] = extra
 
+    # Classify drops before alarming (2026-07-23: 6/6 "CAUGHT" symbols
+    # were benign — 3 vendor-stale phantoms with months-old snapshots
+    # (ORIS/CUK/MIGI), 3 thin names with gappy 5-min windows dropped BY
+    # DESIGN in both live and BT via the 5-bar rule, orb_engine.py:977
+    # == study_orb_features.py:237). Only unexplained drops alarm.
+    def _classify_drop(sym: str) -> str:
+        try:
+            import requests as _rq
+            h = {'APCA-API-KEY-ID': os.environ['ALPACA_API_KEY'],
+                 'APCA-API-SECRET-KEY': os.environ['ALPACA_API_SECRET']}
+            day = audit['date']
+            r = _rq.get('https://data.alpaca.markets/v2/stocks/bars',
+                        params={'symbols': sym, 'timeframe': '1Min',
+                                'feed': 'sip', 'limit': 10,
+                                'start': f'{day}T13:30:00Z',
+                                'end': f'{day}T13:35:00Z'},
+                        headers=h, timeout=(5, 15))
+            n_bars = len((r.json().get('bars') or {}).get(sym, []))
+        except Exception as e:
+            return f'UNKNOWN (bars query failed: {e})'
+        if n_bars == 0:
+            return 'benign: vendor-stale phantom (zero bars in 9:30-9:35)'
+        if n_bars < 5:
+            return (f'benign: gappy 5-min window ({n_bars}/5 bars) — '
+                    f'dropped by design (5-bar rule, BT parity)')
+        return f'REAL DROP ({n_bars}/5 range bars present — investigate)'
+
+    drop_class = {s: _classify_drop(s) for s in dropped}
+    real_drops = [s for s, c in drop_class.items() if c.startswith('REAL')
+                  or c.startswith('UNKNOWN')]
+    audit['drop_classification'] = drop_class
+
     log("=" * 60)
     log(f"LIVE ranged: {len(live_range)} | scored: {len(live_scored)} | submitted: {live_submitted}")
     log(f"*** DROPPED BY LIVE (expected but never scored): {dropped}")
@@ -189,7 +221,8 @@ def main():
         in_range = s in live_range
         log(f"   {s}: open={info['open']} gap={info['gap']}% pv={info['prev_vol']:,} "
             f"| live_range_complete={in_range} -> died at "
-            f"{'SCORING' if in_range else 'UNIVERSE/RANGE layer'}")
+            f"{'SCORING' if in_range else 'UNIVERSE/RANGE layer'} "
+            f"| {drop_class[s]}")
 
     OUT.write_text(json.dumps(audit, indent=1))
     log(f"full audit -> {OUT}")
@@ -198,16 +231,22 @@ def main():
     try:
         from notifications.telegram_notifier import TelegramNotifier
         n = TelegramNotifier(os.getenv('TELEGRAM_BOT_TOKEN'), os.getenv('TELEGRAM_CHAT_ID'), enabled=True)
-        if dropped:
-            det = "\n".join(f"• {s}: gap {kept[s]['gap']}%, ranged={s in live_range}" for s in dropped[:6])
+        if real_drops:
+            det = "\n".join(f"• {s}: gap {kept[s]['gap']}%, "
+                            f"ranged={s in live_range} — {drop_class[s]}"
+                            for s in real_drops[:6])
             n.send_message_sync(
-                f"<b>[ORB-SELECTION] {audit['date']} — CAUGHT {len(dropped)} dropped candidate(s)</b>\n"
+                f"<b>[ORB-SELECTION] {audit['date']} — CAUGHT {len(real_drops)} REAL dropped candidate(s)</b>\n"
                 f"{det}\nExpected {len(exp)}, live scored {len(live_scored)}. "
                 f"Full: logs/{OUT.name}", parse_mode='HTML')
         else:
+            benign = len(dropped) - len(real_drops)
+            extra_txt = (f" ({benign} benign drop(s): stale phantoms / "
+                         f"gappy-window by-design)") if benign else ""
             n.send_message_sync(
-                f"<b>[ORB-SELECTION] {audit['date']}</b>\nNo drops today — live scored all "
-                f"{len(exp)} BT-parity candidates. Observer stays on duty.", parse_mode='HTML')
+                f"<b>[ORB-SELECTION] {audit['date']}</b>\nNo REAL drops — live scored all "
+                f"tradeable BT-parity candidates{extra_txt}. Observer on duty.",
+                parse_mode='HTML')
     except Exception as e:
         log(f"telegram failed: {e}")
 
