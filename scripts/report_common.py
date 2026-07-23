@@ -61,10 +61,27 @@ def load_bt_selected(day: str) -> List[Dict]:
 
 
 def bt_data_max_date() -> Optional[str]:
-    """Latest date present in the BT trades CSV — staleness detector.
-    The nightly orb-backtest regenerates it; if its max date < the day
-    under check, BT-parity is UNKNOWN (skipped), not clean."""
+    """Latest date the nightly BT pipeline PROCESSED — staleness detector.
+
+    Keys on the features CSV (regenerated nightly, one row per evaluated
+    symbol-day) NOT the trades CSV: a zero-selection day (like 2026-07-22,
+    quiet tape, BT picked nothing) leaves the trades CSV max date behind
+    while the pipeline genuinely ran — reading that as 'stale' skipped
+    parity on exactly the days it should trivially pass (7/22 incident).
+    Falls back to the trades CSV when no features files exist."""
+    import glob as _glob
+
     import pandas as pd
+    feat_paths = [p for p in sorted(_glob.glob(
+        str(ROOT / 'analysis_results' / 'orb_features_*.csv')))
+        if 'corrmatrix' not in p]
+    if feat_paths:
+        try:
+            return str(pd.read_csv(
+                feat_paths[-1], usecols=['date'])['date'].max())[:10]
+        except Exception as e:
+            print(f"WARNING: features CSV unreadable for staleness "
+                  f"({e}) — falling back to trades CSV", flush=True)
     path = latest_bt_trades_csv()
     if not path:
         return None
@@ -400,16 +417,51 @@ def sizing_attribution(day: str) -> Dict:
             'news_drift': news_drift, 'cum': cum}
 
 
+COMPOSITE_DRIFT_TOL = 0.005      # below this: measurement noise, ignore
+NEAR_THRESHOLD_BAND = 0.5        # |comp| inside this band -> drift is
+                                 # decision-RELEVANT (ASPI class: 0.317
+                                 # vs 0.410 near the 0.0 gate)
+HARD_DRIFT_ABS = 0.15            # drift this large means the feature
+                                 # pipeline itself broke — hard even on
+                                 # deep rejects
+
+
+def classify_composite_drift(comp_live: float,
+                             comp_bt: float) -> Optional[str]:
+    """'hard' | 'soft' | None for a live-vs-BT composite pair.
+
+    hard  -> red-day (z-param-desync class): selection flip across the
+             0.0 threshold, either side near-threshold, or a drift too
+             large to be a data revision.
+    soft  -> warn-only (2026-07-21 VIVK class): tiny drift on a symbol
+             both systems reject by a wide margin — vendor bar revisions
+             on extreme movers land here; zero decisions changed, so it
+             must not reset the ramp streak (owner-approved 2026-07-23).
+    None  -> within tolerance.
+    """
+    delta = abs(comp_bt - comp_live)
+    if delta <= COMPOSITE_DRIFT_TOL:
+        return None
+    if (comp_live >= 0) != (comp_bt >= 0):
+        return 'hard'
+    if min(abs(comp_live), abs(comp_bt)) < NEAR_THRESHOLD_BAND:
+        return 'hard'
+    if delta > HARD_DRIFT_ABS:
+        return 'hard'
+    return 'soft'
+
+
 def decision_parity(day: str) -> Dict:
     """Field-level BT↔live decision parity (2026-07-17, born from the
     z-param desync): compare every composite LIVE actually computed
     (journal 'ORB SCORED' + 'below filter threshold' lines) against the
     composite the LIVE code path produces from the nightly features CSV
-    for the same symbol-day. Any |Δ| > 0.005 = the two systems are
-    scoring with different math/params = the 7/10 and 7/17 bug class —
-    a HARD red-day reason. Picks matching is not enough; NUMBERS must.
+    for the same symbol-day. Decision-RELEVANT drift (see
+    classify_composite_drift) = the 7/10 and 7/17 bug class — a HARD
+    red-day reason; decision-irrelevant drift on deep rejects is a soft
+    warning. Picks matching is not enough; NUMBERS must.
 
-    Returns {available, n_compared, mismatches: [str]}.
+    Returns {available, n_compared, mismatches: [str], warnings: [str]}.
     """
     import re
     live: Dict[str, float] = {}
@@ -422,7 +474,8 @@ def decision_parity(day: str) -> Dict:
         if m:
             live[m.group(1)] = float(m.group(2))
     if not live:
-        return {'available': False, 'n_compared': 0, 'mismatches': []}
+        return {'available': False, 'n_compared': 0, 'mismatches': [],
+                'warnings': []}
     try:
         import glob as _glob
         import pandas as pd
@@ -432,12 +485,14 @@ def decision_parity(day: str) -> Dict:
             str(ROOT / 'analysis_results' / 'orb_features_*.csv')))
             if 'corrmatrix' not in p]
         if not paths:
-            return {'available': False, 'n_compared': 0, 'mismatches': []}
+            return {'available': False, 'n_compared': 0, 'mismatches': [],
+                    'warnings': []}
         feats = pd.read_csv(paths[-1])
         feats = feats[feats['date'].astype(str).str.startswith(day)]
         cfg = _yaml.safe_load(open(ROOT / 'orb.yaml'))
         params = load_feature_params((cfg.get('filter') or {}))
         mismatches = []
+        warnings = []
         n = 0
         for sym, comp_live in live.items():
             row = feats[feats['symbol'] == sym]
@@ -449,15 +504,18 @@ def decision_parity(day: str) -> Dict:
             if comp_bt is None:
                 continue
             n += 1
-            if abs(comp_bt - comp_live) > 0.005:
-                mismatches.append(
-                    f"{sym}: live comp {comp_live:.4f} vs BT {comp_bt:.4f} "
-                    f"(Δ{comp_bt - comp_live:+.4f})")
-        return {'available': True, 'n_compared': n, 'mismatches': mismatches}
+            sev = classify_composite_drift(comp_live, comp_bt)
+            if sev:
+                txt = (f"{sym}: live comp {comp_live:.4f} vs BT "
+                       f"{comp_bt:.4f} (Δ{comp_bt - comp_live:+.4f})")
+                (mismatches if sev == 'hard' else warnings).append(txt)
+        return {'available': True, 'n_compared': n,
+                'mismatches': mismatches, 'warnings': warnings}
     except Exception as e:
         print(f"WARNING: decision_parity failed: {e} — check skipped",
               flush=True)
-        return {'available': False, 'n_compared': 0, 'mismatches': []}
+        return {'available': False, 'n_compared': 0, 'mismatches': [],
+                'warnings': []}
 
 
 def news_lag_audit(day: str) -> Dict:

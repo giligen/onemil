@@ -330,3 +330,62 @@ class TestDecisionParity:
         import daily_green_check as dgc
         src = inspect.getsource(dgc.main)
         assert 'decision_parity' in src and 'composite drift' in src
+
+
+class TestCompositeDriftClassification:
+    """Decision-relevance refinement (2026-07-23, owner-approved after
+    the 7/21 VIVK streak-reset: vendor bar revision on a 174% gapper,
+    3.5σ deep reject both sides, zero decisions changed, streak burned
+    at 10/10)."""
+
+    def test_within_tolerance_ignored(self):
+        assert rc.classify_composite_drift(-3.5203, -3.5180) is None
+        assert rc.classify_composite_drift(0.30, 0.301) is None
+
+    def test_vivk_class_is_soft(self):
+        # deep reject both sides, small drift -> warn, never red
+        assert rc.classify_composite_drift(-3.5203, -3.5016) == 'soft'
+
+    def test_aspi_class_stays_hard(self):
+        # the P0 the gate was built for: near-threshold drift
+        assert rc.classify_composite_drift(0.410, 0.317) == 'hard'
+
+    def test_selection_flip_always_hard(self):
+        assert rc.classify_composite_drift(0.010, -0.010) == 'hard'
+        # even a deep drift that crosses zero
+        assert rc.classify_composite_drift(0.6, -0.6) == 'hard'
+
+    def test_near_threshold_band_hard_both_signs(self):
+        assert rc.classify_composite_drift(-0.30, -0.28) == 'hard'
+        assert rc.classify_composite_drift(0.45, 0.48) == 'hard'
+
+    def test_huge_drift_on_deep_reject_still_hard(self):
+        # pipeline-broken magnitude: not explainable by data revision
+        assert rc.classify_composite_drift(-3.5, -3.2) == 'hard'
+
+    def test_band_boundary(self):
+        # exactly at band edge (0.5): outside band -> soft
+        assert rc.classify_composite_drift(0.52, 0.55) == 'soft'
+
+
+class TestBtStalenessOnFeatures:
+    def test_features_date_wins_over_trades(self, tmp_path, monkeypatch):
+        """Zero-selection day (7/22 incident): features CSV covers the
+        day, trades CSV doesn't -> NOT stale."""
+        ar = tmp_path / 'analysis_results'
+        ar.mkdir()
+        (ar / 'orb_features_x.csv').write_text(
+            'date,symbol\n2026-07-22,AAA\n')
+        (ar / 'orb_features_corrmatrix_x.csv').write_text('date\njunk\n')
+        tr = tmp_path / 'orb_static_lock_trades.csv'
+        tr.write_text('date,symbol\n2026-07-21,BBB\n')
+        monkeypatch.setattr(rc, 'ROOT', tmp_path)
+        monkeypatch.setattr(rc, 'latest_bt_trades_csv', lambda: str(tr))
+        assert rc.bt_data_max_date() == '2026-07-22'
+
+    def test_falls_back_to_trades_csv(self, tmp_path, monkeypatch):
+        tr = tmp_path / 'orb_static_lock_trades.csv'
+        tr.write_text('date,symbol\n2026-07-21,BBB\n')
+        monkeypatch.setattr(rc, 'ROOT', tmp_path)   # no analysis_results
+        monkeypatch.setattr(rc, 'latest_bt_trades_csv', lambda: str(tr))
+        assert rc.bt_data_max_date() == '2026-07-21'

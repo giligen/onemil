@@ -72,14 +72,19 @@ def main() -> int:
             f"pm_mult drift vs recompute: {attr['mult_mismatches']}")
         v['green'] = False
     # Field-level decision parity (2026-07-17, z-param desync class):
-    # live composites must NUMERICALLY match the BT code path — a scoring
-    # divergence is a code/param bug and HARD-fails the day.
+    # live composites must NUMERICALLY match the BT code path — a
+    # decision-RELEVANT divergence is a code/param bug and HARD-fails
+    # the day. Decision-irrelevant drift on deep rejects (vendor bar
+    # revisions, 7/21 VIVK class) warns without resetting the streak.
     dp = rc.decision_parity(day)
     if dp['mismatches']:
         v['reasons'].append(
             f"composite drift BT vs live ({len(dp['mismatches'])} of "
             f"{dp['n_compared']}): {dp['mismatches'][:4]}")
         v['green'] = False
+    if dp.get('warnings'):
+        print(f"soft composite drift (deep rejects, no decision impact): "
+              f"{dp['warnings'][:4]}", flush=True)
     if args.dry_run:
         existing = rc.read_streak()
         streak = existing.get('streak', 0) if existing else 0
