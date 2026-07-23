@@ -280,6 +280,15 @@ def main():
                 f"stage P&L ${cushion:,.0f} below loss floor "
                 f"${stage.advance_loss_floor:,.0f} (-1x weekly loss budget)"
             )
+        # Above-water rule (owner decision 2026-07-23): never advance a
+        # stage while realized stage P&L is negative — advance on proof,
+        # and proof includes being ahead. Stricter than the loss floor;
+        # both checked so the blocker messages stay specific.
+        if cushion < 0:
+            advance_blockers.append(
+                f"stage P&L ${cushion:,.0f} under water — hold until "
+                f"realized cushion > 0 (owner rule 2026-07-23)"
+            )
         if stage.min_days_in_stage and days_in_stage < stage.min_days_in_stage:
             advance_blockers.append(
                 f"{days_in_stage} trading day(s) in stage < required "
