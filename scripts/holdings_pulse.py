@@ -57,14 +57,15 @@ def our_main_symbols() -> set:
 
 
 def open_entry_meta() -> dict:
-    """(symbol -> {strategy, entry_price, stop_price, entered_at}) for open rows."""
+    """(symbol -> {strategy, entry_price, stop_price, entered_at}) for
+    OPEN onemil rows — any date, so overnight holds keep their tag."""
     conn = sqlite3.connect(ROOT / 'data' / 'trades.db', timeout=15)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         """SELECT symbol, strategy, entry_price,
                   COALESCE(real_stop_loss_price, stop_loss_price) AS stop_price,
                   created_at
-           FROM trades WHERE trade_date = date('now') AND exit_price IS NULL
+           FROM trades WHERE exit_price IS NULL
              AND entry_price IS NOT NULL""").fetchall()
     conn.close()
     return {r['symbol']: dict(r) for r in rows}
@@ -125,8 +126,12 @@ def build_message(positions: list, realized: float, meta: dict,
         r_txt = f"  {p['upl'] / risk:+.1f}R" if risk and risk > 0 else ""
         chg = (p['current'] - p['avg_entry']) / p['avg_entry'] * 100 \
             if p['avg_entry'] else 0.0
+        # a position with no onemil trade row is NOT ours — the shared
+        # account also carries other services' positions (2026-07-24:
+        # wulf-late-day's WULF short printed '(orb)' via the account-tag
+        # fallback and read as an impossible ORB short)
         lines.append(
-            f"• {p['symbol']} ({m.get('strategy', p['account'].lower())}) "
+            f"• {p['symbol']} ({m.get('strategy') or 'external'}) "
             f"{p['qty']:.0f}sh @{p['avg_entry']:.2f} → {p['current']:.2f} "
             f"({chg:+.1f}%)  <b>${p['upl']:+,.0f}</b>{r_txt}")
     lines.append(f"unrealized ${total_upl:+,.0f} | realized today ${realized:+,.0f} "
