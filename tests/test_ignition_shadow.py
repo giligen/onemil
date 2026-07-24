@@ -117,6 +117,24 @@ class TestShadow:
         assert r[-1]['participation_cap_usd']==pytest.approx(
             0.15*50*10.2,abs=1)
 
+    def test_chase_guard_skips_extended_entry(self, tmp_path):
+        """BT parity (7/24 audit): ask > open*1.155 -> the BT harness
+        refuses the entry (chase guard 5% past the +10% level)."""
+        s,a=_shadow(tmp_path)
+        # open 9.0 -> max entry 10.395; ask fixture 10.05 passes, so
+        # raise the quote to force a chase violation
+        a.get_latest_quote.return_value={'bid_price':10.60,
+            'ask_price':10.65,'bid_size':5,'ask_size':7}
+        _fire(s,news=True)
+        r=_recs(tmp_path)
+        assert r[-1]['verdict']=='skip_chase_guard'
+        assert r[-1]['chase_ratio']==pytest.approx(10.65/9.0,abs=1e-3)
+
+    def test_within_chase_bound_still_triggers(self, tmp_path):
+        s,a=_shadow(tmp_path)   # ask 10.05 vs open 9.0 = 1.117x -> OK
+        _fire(s,news=True)
+        assert _recs(tmp_path)[-1]['verdict']=='SHADOW_TRIGGER'
+
     def test_disabled_by_env(self, tmp_path, monkeypatch):
         monkeypatch.setenv('IGNITION_SHADOW','0')
         s,_=_shadow(tmp_path)

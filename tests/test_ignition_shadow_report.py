@@ -135,6 +135,16 @@ class TestMainEndToEnd:
         assert len(sent) == 1
         assert 'NO journal' in sent[0]
 
+    def test_chase_violation_excluded_from_tally(self, monkeypatch, tmp_path):
+        """Pre-guard journals (7/20-24): the report reclassifies entries
+        past 1.155x open instead of tallying a trade the BT refuses."""
+        recs = [_trig(day_open=8.0, hypo_entry=10.0)]   # 1.25x open
+        code, out, sent = _run_main(
+            monkeypatch, tmp_path, '2026-07-20', recs)
+        assert 'chase-skip' in sent[0]
+        assert '0 trigger' not in sent[0]   # still counted as a trigger
+        assert '$+0' in sent[0]             # but zero P&L tallied
+
     def test_inverted_quote_skips_resim(self, monkeypatch, tmp_path):
         code, out, sent = _run_main(
             monkeypatch, tmp_path, '2026-07-20',

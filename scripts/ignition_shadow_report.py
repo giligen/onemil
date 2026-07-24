@@ -127,6 +127,15 @@ def main() -> int:
                 continue
             entry = float(r.get('hypo_entry') or r['price'])
             stop = float(r['hypo_stop'])
+            # belt-and-braces BT chase guard (also enforced at journal
+            # time from 7/25): pre-guard journals get reclassified here
+            # so the scoreboard never tallies entries the BT refuses
+            day_open = r.get('day_open')
+            if day_open and entry > float(day_open) * 1.10 * 1.05:
+                pnl_lines.append(
+                    f"• {r['symbol']}: chase-skip (entry "
+                    f"{entry/float(day_open):.3f}x open > 1.155x BT max)")
+                continue
             if entry <= stop:
                 # inverted/stale quote at capture -> R<=0, resim math
                 # is meaningless; surface instead of emitting nonsense

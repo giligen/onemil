@@ -391,6 +391,16 @@ class IgnitionShadow:
         self._capture_quote(rec)
         if not gates_ok:
             return self._journal(rec)
+        # BT chase guard (2026-07-24 audit: never ported from the
+        # latency-honest harness — 4/16 week-1 triggers were entries the
+        # BT refuses): entry must not exceed 5% past the +10% level,
+        # i.e. ask <= day_open * 1.10 * 1.05.
+        _ask = rec.get('ask') or rec['price']
+        _open = rec.get('day_open')
+        if _open and _ask > _open * 1.10 * 1.05:
+            rec['verdict'] = 'skip_chase_guard'
+            rec['chase_ratio'] = round(_ask / _open, 4)
+            return self._journal(rec)
         if r_pct is None:
             rec['verdict'] = 'no_bars'
         elif r_pct < self.min_r_pct:
