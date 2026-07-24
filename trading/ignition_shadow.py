@@ -28,6 +28,10 @@ import os
 from datetime import datetime, timezone
 from typing import Dict, Optional, Set
 
+import pandas as pd
+
+from trading import ignition_rules as _rules
+
 logger = logging.getLogger(__name__)
 
 # Researched constants (pinned; config.yaml may override, same values)
@@ -199,28 +203,14 @@ class IgnitionShadow:
         if chg < self.trigger_pct or minute > self.max_trigger_min \
                 or minute < 575:
             return
-        # $2 price floor — BT PARITY (live 7/21: sub-$2 CPHI journaled a
-        # +52R/$160K fantasy trigger; the research book contains ZERO
-        # trades under $2, floor is 2.0 across all 1,331). Cheap gate
-        # before any eval/API burn; sub-$2 movers also polluted the S1
-        # spread stats (467bps on a $0.96 stock).
-        if price < 2.0:
+        # rough pre-floor on sighting price (cheap junk cut; the BT-
+        # parity floor on DAY OPEN runs in _finalize via ignition_rules)
+        if price < _rules.PRICE_FLOOR:
             return
-        # cohort updates on EVERY sighting (siblings confirm each other)
         a = self._anchor(symbol)
         first_sight = symbol not in self._seen_today
         if first_sight:
             self._seen_today.add(symbol)
-            if a:
-                self._day_anchor_counts[a] = \
-                    self._day_anchor_counts.get(a, 0) + 1
-        # late complex confirmation: a prior no-catalyst skip whose anchor
-        # cohort just reached threshold re-fires (the 7/06 IREN-trio shape)
-        for wsym, wrec in list(self._await_confirm.items()):
-            wa = wrec.get('anchor')
-            if wa and self._day_anchor_counts.get(wa, 0) >= self.min_cohort:
-                del self._await_confirm[wsym]
-                self._finalize(wrec, catalyst_kind=f'complex_late({wa})')
         if not first_sight:
             return
         rec = {'ts_utc': now.isoformat(), 'symbol': symbol, 'day': day,
@@ -246,26 +236,14 @@ class IgnitionShadow:
             rec['verdict'] = 'skip_eval_cap'
             return self._journal(rec)
         self._evals_today += 1
-        # The scanner has NO news knowledge (always passes None) — the
-        # news catalyst channel is resolved HERE, on the worker thread
-        # (2026-07-19 review: without this, only complex-confirmation
-        # could ever trigger and the S1 week would measure the wrong
-        # universe). Bounded fetch, cached per symbol per day, capped by
-        # max_evals_per_day.
-        if has_news is None:
-            has_news = self._resolve_news(symbol, rec)
-            rec['has_news'] = has_news
-        catalyst = (has_news is True) or (
-            a is not None
-            and self._day_anchor_counts.get(a, 0) >= self.min_cohort)
-        if not catalyst:
-            # quote-only journal (S1 spread data) + park for late confirm
-            self._capture_quote(rec)
-            rec['verdict'] = 'skip_no_catalyst'
-            self._await_confirm[symbol] = rec
-            return self._journal(rec)
-        self._finalize(rec, catalyst_kind='news' if has_news
-                       else f'complex({a})')
+        # GATE ORDER (2026-07-24 parity refactor): STRUCTURE first
+        # (bars — floor on day open, open gap, level-crossed, R, chase,
+        # participation), news/catalyst LAST inside _finalize. Pre-24
+        # the news fetch ran before any bar work, so the 9:35 junk
+        # flood burned the eval budget resolving news for symbols
+        # structure would reject — the starvation that cost ONDL/ONDG
+        # (7/21) and NBIG (7/23) vs the BT replay.
+        self._finalize(rec, catalyst_kind=None)
 
     def _resolve_news(self, symbol: str,
                       rec: dict) -> Optional[bool]:
@@ -327,9 +305,12 @@ class IgnitionShadow:
         except Exception as e:
             rec['quote_error'] = str(e)[:80]
 
-    def _finalize(self, rec: dict, catalyst_kind: str) -> None:
-        """Full evaluation of a catalyst-confirmed trigger: bars for R,
-        fresh NBBO, hypothetical trade. Journal-only."""
+    def _finalize(self, rec: dict, catalyst_kind: Optional[str]) -> None:
+        """Full evaluation via the SHARED rules (trading/ignition_rules —
+        2026-07-24 parity refactor): structure gates first from bars,
+        catalyst LAST. catalyst_kind is None on the first pass (resolved
+        here); a string only for complex_late re-fires of parked recs
+        (structure already passed for those). Journal-only."""
         symbol = rec['symbol']
         now = datetime.now(timezone.utc)
         rec = dict(rec)
@@ -375,15 +356,36 @@ class IgnitionShadow:
                 prev_close = rec['price'] / (1 + rec['gap_pct'] / 100.0)
                 rec['open_gap_pct'] = round(
                     (day_open / prev_close - 1) * 100, 2)
-                if rec['open_gap_pct'] >= self.gap_max:
-                    rec['verdict'] = 'skip_gap_orb_territory'
+                urej = _rules.universe_reject(day_open, prev_close)
+                if urej:
+                    rec['verdict'] = urej
                     gates_ok = False
-                elif rec['chg_from_open'] < self.trigger_pct:
-                    rec['verdict'] = 'skip_true_chg_below_trigger'
-                    gates_ok = False
+                else:
+                    # BOOK trigger semantics: the +10% LEVEL was crossed
+                    # by a bar HIGH in the window — NOT price-at-sighting
+                    # (a pullback after the cross still counts; the 7/21
+                    # BIYA parity miss)
+                    try:
+                        _ts = pd.to_datetime(bars['timestamp'], utc=True)
+                        _m = (_ts.dt.tz_convert('America/New_York')
+                              .dt.hour * 60
+                              + _ts.dt.tz_convert('America/New_York')
+                              .dt.minute)
+                        win = bars[( _m >= _rules.TRIGGER_MIN_START)
+                                   & (_m <= _rules.TRIGGER_MIN_END)]
+                        crossed = _rules.level_crossed(
+                            win['high'].tolist(), day_open)
+                    except Exception as e:
+                        logger.warning(f"ignition-shadow: level check "
+                                       f"failed for {symbol}: {e}")
+                        crossed = rec['chg_from_open'] >= self.trigger_pct
+                    if not crossed:
+                        rec['verdict'] = 'skip_level_not_crossed'
+                        gates_ok = False
                 pre = bars.tail(31)
-                stop = float(pre['low'].min())
-                r_pct = max((rec['price'] - stop) / rec['price'] * 100.0,
+                stop = _rules.stop_from_pre_lows(
+                    float(pre['low'].min()), rec['price'])
+                r_pct = max(_rules.r_pct_from_stop(rec['price'], stop),
                             1.0)
         except Exception as e:
             rec['bars_error'] = str(e)[:80]
@@ -403,39 +405,75 @@ class IgnitionShadow:
             return self._journal(rec)
         if r_pct is None:
             rec['verdict'] = 'no_bars'
-        elif r_pct < self.min_r_pct:
+            return self._journal(rec)
+        if r_pct < self.min_r_pct:
             rec['verdict'] = 'skip_r_too_small'
-        else:
-            pos = min(MODEL_RISK_USD / (r_pct / 100.0), POS_CAP_USD)
-            # participation cap — BT PARITY (live 7/21: CPHI's next bar
-            # traded $906 total; harness caps at 15% of bar $vol, the
-            # journaled $19.7K position was pure fantasy). Use the
-            # latest fetched bar's dollar volume as the liquidity proxy.
-            try:
-                lb = bars.iloc[-1]
-                cap = 0.15 * float(lb['volume']) * float(lb['close'])
-                rec['participation_cap_usd'] = round(cap, 0)
-                pos = min(pos, cap)
-            except Exception as e:
-                logger.warning(f"ignition-shadow: participation cap "
-                               f"failed for {symbol}: {e}")
-            if pos < 2000:
-                rec['verdict'] = 'skip_illiquid'
-                rec['hypo_position_usd'] = round(pos, 0)
-                self._capture_quote(rec)
-                return self._journal(rec)
-            rec['verdict'] = 'SHADOW_TRIGGER'
-            rec['hypo_entry'] = rec.get('ask') or rec['price']
-            rec['hypo_stop'] = round(
-                rec['price'] * (1 - r_pct / 100.0), 4)
+            return self._journal(rec)
+        # sizing via shared rules (participation-capped; the book's live
+        # proxy for its EOD day-dollar universe gate)
+        try:
+            lb = bars.iloc[-1]
+            bar_dollar = float(lb['volume']) * float(lb['close'])
+        except Exception as e:
+            logger.warning(f"ignition-shadow: bar dollar failed for "
+                           f"{symbol}: {e}")
+            bar_dollar = 0.0
+        pos = _rules.position_usd(r_pct, bar_dollar)
+        rec['participation_cap_usd'] = round(
+            _rules.PARTICIPATION * bar_dollar, 0)
+        if _rules.position_reject(pos):
+            rec['verdict'] = 'skip_illiquid'
             rec['hypo_position_usd'] = round(pos, 0)
-            logger.info(
-                f"[IGNITION-SHADOW] TRIGGER {symbol} "
-                f"+{rec['intraday_change_pct']:.1f}% R={r_pct:.1f}% "
-                f"catalyst={catalyst_kind} "
-                f"spread={rec.get('spread_bps', '?')}bps "
-                f"pos=${rec.get('hypo_position_usd', 0):,.0f} "
-                f"(journal-only, no order)")
+            return self._journal(rec)
+        # STRUCTURE PASSED — this symbol counts toward the day's
+        # TRIGGER cohort (book `uc` semantics: cohort over candidate
+        # triggers, NOT raw sightings — 7/24 parity audit: sighting-
+        # cohort wrongly confirmed APLX/CIFU)
+        a = rec.get('anchor')
+        if catalyst_kind is None and a:
+            self._day_anchor_counts[a] = \
+                self._day_anchor_counts.get(a, 0) + 1
+        rec['anchor_cohort'] = self._day_anchor_counts.get(a or '', 0)
+        # late complex confirmation: parked structure-passed recs whose
+        # anchor cohort just reached threshold re-fire
+        for wsym, wrec in list(self._await_confirm.items()):
+            wa = wrec.get('anchor')
+            if wa and wsym != symbol and \
+                    self._day_anchor_counts.get(wa, 0) >= self.min_cohort:
+                del self._await_confirm[wsym]
+                self._trigger(wrec, f'complex_late({wa})',
+                              wrec['r_pct'], wrec['hypo_position_usd'])
+        # catalyst LAST (news fetch only for structure-passed symbols)
+        if catalyst_kind is None:
+            has_news = rec.get('has_news')
+            if has_news is None:
+                has_news = self._resolve_news(symbol, rec)
+                rec['has_news'] = has_news
+            if not _rules.catalyst_confirmed(
+                    has_news, a, self._day_anchor_counts.get(a or '', 0)):
+                rec['verdict'] = 'skip_no_catalyst'
+                rec['r_pct'] = round(r_pct, 2)
+                rec['hypo_position_usd'] = round(pos, 0)
+                self._await_confirm[symbol] = rec
+                return self._journal(rec)
+            catalyst_kind = 'news' if has_news is True else f'complex({a})'
+        self._trigger(rec, catalyst_kind, r_pct, pos)
+
+    def _trigger(self, rec: dict, catalyst_kind: str, r_pct: float,
+                 pos: float) -> None:
+        rec = dict(rec)
+        rec['catalyst'] = catalyst_kind
+        rec['verdict'] = 'SHADOW_TRIGGER'
+        rec['hypo_entry'] = rec.get('ask') or rec['price']
+        rec['hypo_stop'] = round(rec['price'] * (1 - r_pct / 100.0), 4)
+        rec['hypo_position_usd'] = round(pos, 0)
+        logger.info(
+            f"[IGNITION-SHADOW] TRIGGER {rec['symbol']} "
+            f"+{rec['intraday_change_pct']:.1f}% R={r_pct:.1f}% "
+            f"catalyst={catalyst_kind} "
+            f"spread={rec.get('spread_bps', '?')}bps "
+            f"pos=${rec.get('hypo_position_usd', 0):,.0f} "
+            f"(journal-only, no order)")
         self._journal(rec)
 
     def _journal(self, rec: dict) -> None:

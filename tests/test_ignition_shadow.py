@@ -12,9 +12,11 @@ def _shadow(tmp_path, **cfg):
     a=MagicMock(spec=AlpacaClient)
     a.get_latest_quote.return_value={'bid_price':10.0,'ask_price':10.05,
                                      'bid_size':5,'ask_size':7}
-    bars=pd.DataFrame({'open':[9.0]+[10.0]*40,'high':[9.1]+[10.4]*40,
-                       'low':[8.9]+[9.4]*40,'close':[9.05]+[10.2]*40,
-                       'volume':[10000]*41})
+    ts=pd.date_range('2026-07-20 13:30','2026-07-20 14:10',freq='1min',
+                     tz='UTC')[:41]
+    bars=pd.DataFrame({'timestamp':ts,'open':[9.0]+[10.0]*40,
+                       'high':[9.1]+[10.4]*40,'low':[8.9]+[9.4]*40,
+                       'close':[9.05]+[10.2]*40,'volume':[10000]*41})
     a.get_1min_bars.return_value=bars
     a.get_premarket_news_multi.return_value={}   # default: known-newsless
     s=IgnitionShadow(a,{'ignition_shadow':{'enabled':True,**cfg}},
@@ -57,7 +59,7 @@ class TestShadow:
         assert r[-1]['verdict']=='skip_no_catalyst'
         _fire(s,sym='IREZ',news=None,minute=(9,52))
         r=_recs(tmp_path)
-        assert any(x.get('catalyst','').startswith('complex_late')
+        assert any((x.get('catalyst') or '').startswith('complex_late')
                    and x['symbol']=='IREX' for x in r)
 
     def test_true_open_gap_gate_in_finalize(self, tmp_path):

@@ -1,0 +1,132 @@
+"""Ignition strategy rules — SINGLE SOURCE OF TRUTH (2026-07-24).
+
+Born from the 7/24 parity audit: the shadow and the BT replay each
+carried their own copies of the gates and drifted (shadow floored on
+sighting price vs book's day-open, counted catalyst cohort over raw
+sightings vs book's triggers, had no day-dollar rule, gated on
+chg-at-sighting vs book's level-crossed). Every gate the validated
+book applies lives HERE and both consumers import it:
+  - trading/ignition_shadow.py   (live S1 measurement)
+  - research/scripts/ignition_bt_replay.py (nightly/on-demand replay)
+
+Gate provenance — extracted from the research artifacts and verified
+against the 1,331-trade book (all values audited 2026-07-24):
+  universe: day_open >= $2.00 (book open min 2.0), TRUE open gap < 5%
+    (universe gap max 4.9999 — ORB disjointness), day dollar volume
+    >= $2M (universe dollar min 2,000,069 — EOD figure, BT-ONLY
+    LOOKAHEAD: live cannot know it at 9:35; the live proxy is the
+    participation cap + pos floor, and the nightly replay applies the
+    real gate so the parity line quantifies the residual gap)
+  trigger:  first 1-min bar HIGH >= day_open*1.10, minute 575..630
+  entry:    next bar open * 1.003; CHASE GUARD entry <= level*1.05
+            (book max entry/level = 1.0030)
+  stop:     min(pre-30min low, entry*0.99); R >= 5% of entry
+            (book R min 5.04)
+  sizing:   min($3,000 / R%, $25,000, 15% x next-bar dollar volume);
+            skip if < $2,000 (book pos min 2,022)
+  exits:    static lock ARM +1.75R -> stop to +0.5R; 15:45 flat
+  catalyst: own-ticker news OR >= 2 same-day TRIGGERS sharing the
+            underlying anchor (book `uc` counts candidate triggers,
+            NOT raw sightings)
+"""
+from __future__ import annotations
+
+from typing import Optional
+
+PRICE_FLOOR = 2.0            # on DAY OPEN (not sighting price)
+OPEN_GAP_MAX_PCT = 5.0       # ORB disjointness, true open vs prev close
+DAY_DOLLAR_MIN = 2_000_000   # BT-only (EOD lookahead) — see docstring
+TRIGGER_PCT = 10.0
+TRIGGER_MIN_START = 575      # 9:35 ET
+TRIGGER_MIN_END = 630        # 10:30 ET
+CHASE_MAX_RATIO = 1.05       # entry <= level * this
+ENTRY_SLIP = 1.003
+PRE_BARS_MIN = 5
+R_MIN_PCT = 5.0
+RISK_USD = 3000.0
+POS_CAP_USD = 25000.0
+PARTICIPATION = 0.15
+POS_MIN_USD = 2000.0
+ARM_R = 1.75
+LOCK_R = 0.5
+EOD_FLAT_MIN = 945           # 15:45 ET
+MIN_COHORT = 2
+FRICTION_BPS = 0.0012        # participation-scaled slip adder
+
+
+def universe_reject(day_open: float,
+                    prev_close: Optional[float]) -> Optional[str]:
+    """Universe gates computable live at trigger time. Returns a skip
+    reason or None. (day-dollar is deliberately NOT here — lookahead.)"""
+    if day_open < PRICE_FLOOR:
+        return 'skip_price_floor'
+    if prev_close and prev_close > 0:
+        gap = (day_open - prev_close) / prev_close * 100.0
+        if gap >= OPEN_GAP_MAX_PCT:
+            return 'skip_gap_orb_territory'
+    return None
+
+
+def level(day_open: float) -> float:
+    return day_open * (1 + TRIGGER_PCT / 100.0)
+
+
+def level_crossed(window_highs, day_open: float) -> bool:
+    """The book's trigger: any bar HIGH in the 9:35-10:30 window touched
+    the +10% level — NOT price-at-sighting (a pullback after the cross
+    still counts; 7/21 BIYA parity miss)."""
+    lv = level(day_open)
+    return any(h >= lv for h in window_highs)
+
+
+def chase_reject(entry: float, day_open: float) -> bool:
+    return entry > level(day_open) * CHASE_MAX_RATIO
+
+
+def r_pct_from_stop(entry: float, stop: float) -> float:
+    return (entry - stop) / entry * 100.0
+
+
+def stop_from_pre_lows(pre_low: float, entry: float) -> float:
+    return min(pre_low, entry * 0.99)
+
+
+def position_usd(r_pct: float, bar_dollar_vol: float) -> float:
+    """BT sizing: risk-parity capped by account cap AND participation."""
+    pos = min(RISK_USD / (r_pct / 100.0), POS_CAP_USD)
+    return min(pos, PARTICIPATION * bar_dollar_vol)
+
+
+def position_reject(pos_usd: float) -> bool:
+    return pos_usd < POS_MIN_USD
+
+
+def catalyst_confirmed(has_news: Optional[bool], anchor: Optional[str],
+                       trigger_cohort: int) -> bool:
+    """news True confirms; else >= MIN_COHORT same-day TRIGGERS sharing
+    the anchor. has_news None (fetch failed) never confirms by itself —
+    complex confirmation is still available."""
+    if has_news is True:
+        return True
+    return bool(anchor) and trigger_cohort >= MIN_COHORT
+
+
+def resim_exit(bars, entry: float, stop: float, entry_min: int):
+    """Harness exit physics on a df with columns m/open/high/low/close.
+    Conservative: stop before arm; gap-down fills at min(stop, open)."""
+    cur = stop
+    armed = False
+    R = entry - stop
+    post = bars[bars['m'] > entry_min]
+    for _, r in post.iterrows():
+        if r['m'] >= EOD_FLAT_MIN:
+            return (r['open'] - entry) / R, 'eod'
+        if r['low'] <= cur:
+            fill = min(cur, r['open'])
+            return (fill * 0.999 - entry) / R, 'lock' if armed else 'stop'
+        if not armed and r['high'] >= entry + ARM_R * R:
+            armed = True
+            cur = entry + LOCK_R * R
+    if len(post):
+        return (post.iloc[-1]['close'] - entry) / R, 'eod'
+    return 0.0, 'none'
