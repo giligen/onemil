@@ -60,9 +60,21 @@ def main() -> int:
     day = args.date or rc.prev_trading_day_utc()
     v = rc.green_verdict(day)
     if v['n_live_rows'] == 0 and v['n_bt_selected'] == 0:
-        print(f"{day}: no live rows and no BT picks — non-trading day, "
-              f"not recorded", flush=True)
-        return 0
+        # Zero fills + zero BT picks is NOT the same as a holiday
+        # (2026-07-30 finding: 7/23, 7/24 and 7/28 were live trading
+        # days with scored candidates and vetoes but zero fills — the
+        # old bail skipped ALL operational checks incl. decision parity
+        # on exactly those days and left holes in the streak record).
+        # If the engine scored anything that day, it traded — proceed.
+        scored = len(rc.journal_grep('ORB SCORED', day)) \
+            + len(rc.journal_grep('below filter threshold', day))
+        if scored == 0:
+            print(f"{day}: no live rows, no BT picks, no scored "
+                  f"candidates — genuine non-trading day, not recorded",
+                  flush=True)
+            return 0
+        print(f"{day}: zero-fill trading day ({scored} scored lines) — "
+              f"running operational checks anyway", flush=True)
     # Sizing attribution (2026-07-13 mult ships): a recorded pm_mult that
     # doesn't recompute from its recorded inputs is a code bug — HARD gate.
     # News drift (live fetch gap) is soft: fail-open is correct behavior.
