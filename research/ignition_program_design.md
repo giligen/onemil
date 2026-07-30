@@ -167,3 +167,32 @@ validates only what it exercises):**
 - S3 micro-live (Pre-Stage-0 pattern): $250-500 risk, ≤2/day, −$750
   daily stop, 2-4wk → 20-40 REAL fills → recalibrate the participation
   model → staged ramp under green-check machinery.
+
+## S1 EXTENSION — week 2 (owner-approved 2026-07-24)
+
+Week 1 verdict: instrument validated (parity by construction via
+trading/ignition_rules.py + nightly BT-replay agreement line); strategy
+unjudgeable at n=15 BT-legal trades — honest week ≈ −$8.8K at BT sizing,
+and the BT replay loses the same money on the same days (tape, not
+implementation). S1 runs a second week, 7/27–7/31, first week with a
+clean instrument from day 1.
+
+**Decision gates (owner-approved, written before the data arrives):**
+- GO to S3 micro-live ($100–150 risk/trade, ≤2/day, −$300 daily /
+  −$750 weekly kills) when EITHER:
+  (a) a cumulative-positive 5-trading-day window exists, OR
+  (b) the first ≥+3R trigger prints (the monster the book depends on),
+  AND the nightly BT-replay line is clean (no unexplained drift).
+- ABANDON (back to research, no live $) if the cumulative honest
+  shadow book since 7/20 breaches −$23,000 (worse than the BT's
+  worst-ever month, −$22.7K).
+- NO parameter changes while measuring. ARM/LOCK question is closed
+  (plateau; scratchpad arm_lock_sweep.csv): revisit 1.65 only with 50+
+  affected live triggers.
+- Known residual parity gap (documented, not a bug): BT sizes on the
+  next-bar-after-cross, shadow on its own later entry bar — affects
+  marginal-liquidity triggers only (RADX 7/24 class); the nightly
+  parity line quantifies it.
+
+Cumulative tracker starts at: −$8.8K (BT-parity, 7/20–7/24).
+Decision review: Friday 2026-07-31, ~21:55 UTC, on the week-2 digest.
