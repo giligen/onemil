@@ -115,7 +115,13 @@ def main() -> int:
         v = r.get('verdict', '?')
         if v != 'SHADOW_TRIGGER':
             skips[v] = skips.get(v, 0) + 1
-    spreads = [r.get('spread_bps') for r in recs if r.get('spread_bps')]
+    # spread pass-bar grades TRIGGERS (the tradeable subset) — grading
+    # the whole junk river kept the bar permanently red on names the
+    # strategy never touches (week-1 lesson: river med 112bps vs
+    # trigger spreads 31-105bps). Falls back to all records on
+    # zero-trigger days so the day still reports spread reality.
+    spreads = [r.get('spread_bps') for r in trigs if r.get('spread_bps')] \
+        or [r.get('spread_bps') for r in recs if r.get('spread_bps')]
     lats = [r.get('latency_s') for r in recs if r.get('latency_s')]
     fetches = [r.get('bars_fetch_s') for r in recs if r.get('bars_fetch_s')]
     pnl_lines = []
@@ -178,11 +184,33 @@ def main() -> int:
                        f"max bars fetch {max(fetches):.1f}s"))
     ok = all(c[1] for c in checks) if checks else False
     icon = '🟢' if ok else '🟠'
+    # nightly BT-parity line (2026-07-24): replay the day through the
+    # shared rules and report agreement — the question "is the shadow
+    # measuring the real strategy" answers itself every evening.
+    # Fail-soft: a replay error degrades to a warning, never kills the
+    # report.
+    try:
+        sys.path.insert(0, str(rc.ROOT / 'research' / 'scripts'))
+        from ignition_bt_replay import replay_day
+        rp = replay_day(day, verbose=False)
+        if rp is None:
+            bt_line = 'BT replay: no journal to replay'
+        else:
+            n_sh = len(trigs)
+            drift = ((f" bt-only {rp['bt_only']}" if rp['bt_only'] else '')
+                     + (f" sh-only {rp['sh_only']}" if rp['sh_only'] else ''))
+            mark = '✓' if not drift else '⚠'
+            bt_line = (f"{mark} BT replay: ${rp['pnl']:+,.0f}, "
+                       f"{rp['both']}/{max(n_sh, len(rp['kept']))} trades "
+                       f"shared{drift or ' — full agreement'}")
+    except Exception as e:
+        bt_line = f'⚠ BT replay failed: {str(e)[:80]}'
     msg = (f"{icon} <b>[IGNITION SHADOW] {day}</b> — "
            f"{len(trigs)} trigger(s), hypothetical ${tot:+,.0f}\n"
            + '\n'.join(pnl_lines[:8]) + ('\n' if pnl_lines else '')
            + 'checks: ' + '  '.join(
                f"{'✓' if c1 else '✗'}{c0}={c2}" for c0, c1, c2 in checks)
+           + f"\n{bt_line}"
            + f"\nskips: {skips}")
     print(msg)
     if not args.no_telegram:
