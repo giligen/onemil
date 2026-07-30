@@ -196,3 +196,12 @@ clean instrument from day 1.
 
 Cumulative tracker starts at: −$8.8K (BT-parity, 7/20–7/24).
 Decision review: Friday 2026-07-31, ~21:55 UTC, on the week-2 digest.
+
+### Cumulative tracker update (2026-07-30 EOD)
+BT-parity daily: 7/27 +$1,171 | 7/28 +$596 | 7/29 -$4,298 | 7/30 -$104.
+Cumulative since 7/20: **-$11.4K** (abandon gate -$23K: 49% consumed).
+GO gates: no positive 5-day window yet; best trigger +0.49R (RADX) — no
+>=+3R monster. Known-gap note: ADVB 7/30 (-$786 shadow-only) is the $2M
+EOD-dollar universe lookahead — calibrate a live cum-dollar-at-trigger
+proxy from the book (task: 7/31). Eval cap 60->150 after 71 capped on
+the hot 7/30 tape.

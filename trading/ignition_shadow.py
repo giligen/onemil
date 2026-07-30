@@ -73,13 +73,12 @@ class IgnitionShadow:
             'logs')
         self._class_map = None
         self._class_names: Dict[str, str] = {}
-        # safety rails: bounded API work inside the scanner cycle
-        # 60 (was 25, live 7/20 finding): the 9:35 first-cycle flood of
-        # premarket gappers consumed the whole cap in one cycle and
-        # starved the actual flat-open igniters into skip_eval_cap.
-        # Worker API work stays bounded: 60 x (8s news + 6s bars) worst
-        # case, async on the shadow worker, scanner unaffected.
-        self.max_evals_per_day = int(cfg.get('max_evals_per_day', 60))
+        # eval cap 150 (60 was exhausted on the hot 7/30 tape: 131
+        # sightings, 71 capped). Post gate-reorder evals are cheap (bars
+        # fetch only; news runs solely for structure-passers), so the
+        # cap is a runaway backstop, not a budget.
+        # (history: 25 starved on 7/20, 60 on 7/30)
+        self.max_evals_per_day = int(cfg.get('max_evals_per_day', 150))
         self._evals_today = 0
         # no-catalyst skips wait for late complex confirmation
         self._await_confirm: Dict[str, dict] = {}
