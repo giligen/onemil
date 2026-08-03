@@ -205,3 +205,16 @@ GO gates: no positive 5-day window yet; best trigger +0.49R (RADX) — no
 EOD-dollar universe lookahead — calibrate a live cum-dollar-at-trigger
 proxy from the book (task: 7/31). Eval cap 60->150 after 71 capped on
 the hot 7/30 tape.
+
+### GATE EVENT — 2026-08-03 (week 3, day 1)
+BT-parity day: **+$25,510 (13 trades)** — the complex-cluster cohort
+delivering as researched (CRWV/IONQ/ONDS/NBIS/IREN complexes).
+- GO gate (a) MET: 5-day BT-parity window 7/28-8/3 = +$16,609.
+- GO gate (b) MET on the BT-parity ledger: CRWU +3.23R.
+- Cumulative since 7/20: **+$8,977** (was -$16,533).
+- Caveat: shadow captured 9/13 (+$16,843) — 4 misses were the ONE-SHOT
+  EVALUATION bug (sighted before level cross, never re-checked:
+  NBIG/NBIL/IREX/IREG ≈ $9.0K). Fixed same day (_await_level re-eval,
+  +2 tests); deploys 8/4 12:30.
+- Recommendation: conditional GO — S3 micro-live from 8/5 if 8/4's
+  replay shows clean capture under the fix. Owner decides.

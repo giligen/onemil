@@ -137,6 +137,44 @@ class TestShadow:
         _fire(s,news=True)
         assert _recs(tmp_path)[-1]['verdict']=='SHADOW_TRIGGER'
 
+    def test_level_park_reevaluates_on_later_sighting(self, tmp_path):
+        """8/3 NBIG class: sighted BEFORE the +10% level cross ->
+        skip_level_not_crossed, then the cross happens and the scanner
+        re-sights — the shadow must re-finalize and trigger (the BT
+        window is continuous; one-shot sampling missed $9K on 8/3)."""
+        s,a=_shadow(tmp_path)
+        # bars where the level (9.0*1.10=9.90) is NOT yet crossed
+        flat=pd.DataFrame({'timestamp':pd.date_range(
+            '2026-07-20 13:30',periods=10,freq='1min',tz='UTC'),
+            'open':[9.0]*10,'high':[9.5]*10,'low':[8.9]*10,
+            'close':[9.4]*10,'volume':[10000]*10})
+        a.get_1min_bars.return_value=flat
+        _fire(s,news=True,minute=(9,40))
+        r=_recs(tmp_path)
+        assert r[-1]['verdict']=='skip_level_not_crossed'
+        # later: the cross has happened (fixture default bars cross 9.9)
+        ts=pd.date_range('2026-07-20 13:30',periods=41,freq='1min',tz='UTC')
+        crossed=pd.DataFrame({'timestamp':ts,'open':[9.0]+[10.0]*40,
+            'high':[9.1]+[10.4]*40,'low':[8.9]+[9.4]*40,
+            'close':[9.05]+[10.2]*40,'volume':[10000]*41})
+        a.get_1min_bars.return_value=crossed
+        _fire(s,news=True,minute=(9,55))   # re-sighting, same symbol
+        r=_recs(tmp_path)
+        assert r[-1]['verdict']=='SHADOW_TRIGGER'
+        assert r[-1]['minute_et']==595   # re-eval minute, not first
+
+    def test_level_park_expires_at_cutoff(self, tmp_path):
+        s,a=_shadow(tmp_path)
+        flat=pd.DataFrame({'timestamp':pd.date_range(
+            '2026-07-20 13:30',periods=10,freq='1min',tz='UTC'),
+            'open':[9.0]*10,'high':[9.5]*10,'low':[8.9]*10,
+            'close':[9.4]*10,'volume':[10000]*10})
+        a.get_1min_bars.return_value=flat
+        _fire(s,news=True,minute=(9,40))
+        n_before=len(_recs(tmp_path))
+        _fire(s,news=True,minute=(10,45))  # past 10:30 cutoff
+        assert len(_recs(tmp_path))==n_before   # no re-eval, no journal
+
     def test_disabled_by_env(self, tmp_path, monkeypatch):
         monkeypatch.setenv('IGNITION_SHADOW','0')
         s,_=_shadow(tmp_path)

@@ -82,6 +82,8 @@ class IgnitionShadow:
         self._evals_today = 0
         # no-catalyst skips wait for late complex confirmation
         self._await_confirm: Dict[str, dict] = {}
+        # level-not-crossed-yet parks awaiting re-evaluation (8/3 fix)
+        self._await_level: Dict[str, dict] = {}
         # WORKER-THREAD DESIGN (2026-07-19 pre-deploy review): all API
         # work (bars/quote, up to ~12s bounded per eval) happens on this
         # daemon worker — the scanner's on_mover() only ENQUEUES
@@ -111,6 +113,7 @@ class IgnitionShadow:
             self._news_cache = {}
             self._evals_today = 0
             self._await_confirm = {}
+            self._await_level = {}
 
     def _anchor(self, symbol: str) -> Optional[str]:
         if symbol in self._anchors:
@@ -211,6 +214,23 @@ class IgnitionShadow:
         if first_sight:
             self._seen_today.add(symbol)
         if not first_sight:
+            # RE-EVALUATION of level-parked symbols (8/3 finding: the BT
+            # trigger window is CONTINUOUS 9:35-10:30 but the shadow
+            # sampled each symbol ONCE at first sighting — NBIG/NBIL/
+            # IREX were sighted before their +10% level cross, parked
+            # skip_level_not_crossed, and never looked at again: $9K of
+            # BT profit invisible to the shadow. The scanner re-sights
+            # every cycle while a mover holds; a level-parked symbol
+            # re-finalizes on each sighting until cross or cutoff.
+            if (symbol in self._await_level
+                    and minute <= self.max_trigger_min
+                    and self._evals_today < self.max_evals_per_day):
+                wrec = dict(self._await_level.pop(symbol))
+                wrec['minute_et'] = minute
+                wrec['price'] = price
+                wrec['intraday_change_pct'] = round(chg, 2)
+                self._evals_today += 1
+                self._finalize(wrec, catalyst_kind=None)
             return
         rec = {'ts_utc': now.isoformat(), 'symbol': symbol, 'day': day,
                'minute_et': minute, 'intraday_change_pct': round(chg, 2),
@@ -381,6 +401,9 @@ class IgnitionShadow:
                     if not crossed:
                         rec['verdict'] = 'skip_level_not_crossed'
                         gates_ok = False
+                        # park for re-evaluation on later sightings —
+                        # the cross may come any time before 10:30
+                        self._await_level[symbol] = rec
                 pre = bars.tail(31)
                 stop = _rules.stop_from_pre_lows(
                     float(pre['low'].min()), rec['price'])
