@@ -225,10 +225,19 @@ class IgnitionShadow:
             if (symbol in self._await_level
                     and minute <= self.max_trigger_min
                     and self._evals_today < self.max_evals_per_day):
+                # cheap precondition (8/4: blind re-fetch burned 24
+                # bar-fetches on ASTN which never crossed): only pay a
+                # re-finalize when the SIGHTING PRICE has reached the
+                # +10% level — price at/above level implies the bars
+                # will show the cross
+                _do = self._await_level[symbol].get('day_open')
+                if _do and price < _rules.level(_do):
+                    return
                 wrec = dict(self._await_level.pop(symbol))
                 wrec['minute_et'] = minute
                 wrec['price'] = price
                 wrec['intraday_change_pct'] = round(chg, 2)
+                wrec['level_reeval'] = True
                 self._evals_today += 1
                 self._finalize(wrec, catalyst_kind=None)
             return
@@ -403,6 +412,8 @@ class IgnitionShadow:
                         gates_ok = False
                         # park for re-evaluation on later sightings —
                         # the cross may come any time before 10:30
+                        # (spam control lives in _eval: re-finalize only
+                        # fires when sighting price >= level)
                         self._await_level[symbol] = rec
                 pre = bars.tail(31)
                 stop = _rules.stop_from_pre_lows(
