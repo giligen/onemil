@@ -218,3 +218,11 @@ delivering as researched (CRWV/IONQ/ONDS/NBIS/IREN complexes).
   +2 tests); deploys 8/4 12:30.
 - Recommendation: conditional GO — S3 micro-live from 8/5 if 8/4's
   replay shows clean capture under the fix. Owner decides.
+
+### 8/4 — conditional-GO test PASSED
+Level-park fix live: parked symbols re-evaluated every sighting; BT
+replay shows ZERO BT-only misses (only diffs = the 2 known benign
+classes LNAI pos_lt_2k / SEAT u_dollar_2M). Day: BT -$2,216 (DFNS
+stop, shared). Cumulative: **+$6,761**. Gates remain met (5-day window
++$18,095). Efficiency patch same day: price-precondition before
+re-fetch (deploys 8/5). **S3 micro-live READY — awaiting owner GO.**
