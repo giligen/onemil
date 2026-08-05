@@ -226,3 +226,10 @@ classes LNAI pos_lt_2k / SEAT u_dollar_2M). Day: BT -$2,216 (DFNS
 stop, shared). Cumulative: **+$6,761**. Gates remain met (5-day window
 +$18,095). Efficiency patch same day: price-precondition before
 re-fetch (deploys 8/5). **S3 micro-live READY — awaiting owner GO.**
+
+### 8/5 — first PERFECT parity day
+BT +$5,288, 4/4 trades shared (FUBO/CRCT/ZTG/OSS) after fixing the
+replay's first-record-wins info-staleness (ZTG's parked record carried
+has_news=None; merge fix in ignition_bt_replay.py). Level re-eval
+price-gate verified: 2 gated re-evals (vs 90 blind 8/4), one converted
+(ZTG trigger). Cumulative: **+$12,049**. Gates met. S3 awaiting GO.

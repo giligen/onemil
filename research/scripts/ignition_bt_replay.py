@@ -22,9 +22,16 @@ def replay_day(day: str, verbose: bool = True):
     seen, shadow_verdict = {}, {}
     for r in recs:
         s = r['symbol']
-        seen.setdefault(s, {'news': r.get('has_news'),
-                            'anchor': r.get('anchor'),
-                            'gap': r.get('gap_pct'), 'price': r.get('price')})
+        info = seen.setdefault(s, {'news': None, 'anchor': None,
+                                   'gap': r.get('gap_pct'),
+                                   'price': r.get('price')})
+        # MERGE across a symbol's records — a parked first sighting has
+        # has_news=None; resolution lands on a later record (8/5 ZTG:
+        # first-record-wins wrongly catalyst-dropped a news trigger)
+        if r.get('has_news') is not None:
+            info['news'] = r.get('has_news')
+        if r.get('anchor') is not None:
+            info['anchor'] = r.get('anchor')
         shadow_verdict[s] = r.get('verdict', shadow_verdict.get(s))
     trades, gate_log = [], {}
     for sym, info in seen.items():
