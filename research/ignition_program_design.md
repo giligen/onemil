@@ -233,3 +233,11 @@ replay's first-record-wins info-staleness (ZTG's parked record carried
 has_news=None; merge fix in ignition_bt_replay.py). Level re-eval
 price-gate verified: 2 gated re-evals (vs 90 blind 8/4), one converted
 (ZTG trigger). Cumulative: **+$12,049**. Gates met. S3 awaiting GO.
+
+### 8/6 — red day, parity holds
+BT -$3,168 (5 kept, ALL shared). Shadow extras: 3x pos_lt_2k (known
+sizing-moment class — S3 will size at its own entry like the shadow,
+so shadow semantics are the live-honest ones) + IREX catalyst-drop =
+CASCADE of same class (cohort partner IREG was the pos_lt_2k). No new
+bug classes. Cumulative: **+$8,881**. Gates met (5-day +$20,319).
+S3 awaiting GO, day 3.
