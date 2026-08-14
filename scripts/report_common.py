@@ -218,6 +218,26 @@ def green_verdict(day: str) -> Dict:
     else:
         checks['bt_parity'] = 'OK'
 
+    # Fill-parity (2026-08-14, IREX 7/30 lesson): a BT-FILLED pick that
+    # live ORDERED but never FILLED passed the gate above silently — on
+    # 7/30 that was the only >=$3K monster in 4 months (bar-1 breakout
+    # outran the ~73s placement latency; the stop-limit was born
+    # unfillable and hit time_stop_canceled while the BT rode +$4,361).
+    # The edge is the tail: an unfilled BT-filled pick is a hard flag.
+    if bt_stale:
+        checks['fill_parity'] = 'SKIPPED — BT data stale'
+    else:
+        unfilled = sorted({
+            r['symbol'] for r in rows
+            if r.get('strategy') == 'orb' and r['symbol'] in bt_syms
+            and r.get('fill_price') is None
+            and r.get('order_status') not in ('filled', 'closed')})
+        checks['fill_parity'] = ('OK' if not unfilled else
+                                 f"BT filled, live unfilled: {unfilled}")
+        if unfilled:
+            reasons.append(f"fill-parity: BT FILLED but live order never "
+                           f"filled (tail-capture risk): {unfilled}")
+
     rekey = journal_grep('REKEY', day) + journal_grep('negative-age', day)
     checks['touchgo_tripwires'] = 'OK' if not rekey else f"{len(rekey)} tripwire line(s)"
 

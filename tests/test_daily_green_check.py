@@ -389,3 +389,47 @@ class TestBtStalenessOnFeatures:
         monkeypatch.setattr(rc, 'ROOT', tmp_path)   # no analysis_results
         monkeypatch.setattr(rc, 'latest_bt_trades_csv', lambda: str(tr))
         assert rc.bt_data_max_date() == '2026-07-21'
+
+
+class TestFillParity:
+    """8/14 IREX lesson: BT-FILLED pick that live ORDERED but never
+    FILLED must be a red flag (the old gate only required ORDERED —
+    the 7/30 monster passed silently as time_stop_canceled)."""
+
+    def _patch(self, monkeypatch, rows=(), bt=(), bt_max='2099-01-01'):
+        monkeypatch.setattr(rc, 'load_live_rows',
+                            lambda day, strategy=None: list(rows))
+        monkeypatch.setattr(rc, 'load_bt_selected', lambda day: list(bt))
+        monkeypatch.setattr(rc, 'bt_data_max_date', lambda: bt_max)
+        monkeypatch.setattr(rc, 'journal_grep', lambda pat, day: [])
+        monkeypatch.setattr(rc, 'read_selection_audit', lambda day: [])
+
+    def test_bt_filled_live_unfilled_is_red(self, monkeypatch):
+        rows = [{'symbol': 'IREX', 'strategy': 'orb', 'entry_price': 10.97,
+                 'fill_price': None, 'exit_price': None, 'shares': 683,
+                 'exit_reason': None, 'order_status': 'time_stop_canceled'}]
+        self._patch(monkeypatch, rows=rows, bt=[{'symbol': 'IREX'}])
+        v = rc.green_verdict('2026-07-30')
+        assert v['green'] is False
+        assert any('fill-parity' in r for r in v['reasons'])
+
+    def test_filled_row_passes(self, monkeypatch):
+        rows = [{'symbol': 'AAA', 'strategy': 'orb', 'entry_price': 10.0,
+                 'fill_price': 10.01, 'exit_price': 10.5, 'shares': 100,
+                 'exit_reason': 'lock_stop', 'order_status': 'closed',
+                 'pnl': 49.0}]
+        self._patch(monkeypatch, rows=rows, bt=[{'symbol': 'AAA'}])
+        assert rc.green_verdict('2026-07-30')['green'] is True
+
+    def test_live_only_cancel_not_flagged(self, monkeypatch):
+        # live ordered something BT never filled — legitimate no-trigger
+        rows = [{'symbol': 'NOPE', 'strategy': 'orb', 'entry_price': 5.0,
+                 'fill_price': None, 'exit_price': None, 'shares': 100,
+                 'exit_reason': None, 'order_status': 'time_stop_canceled'}]
+        self._patch(monkeypatch, rows=rows, bt=[])
+        assert rc.green_verdict('2026-07-30')['green'] is True
+
+    def test_stale_bt_skips_fill_parity(self, monkeypatch):
+        self._patch(monkeypatch, rows=[], bt=[], bt_max='2026-07-01')
+        v = rc.green_verdict('2026-07-30')
+        assert v['checks']['fill_parity'].startswith('SKIPPED')
