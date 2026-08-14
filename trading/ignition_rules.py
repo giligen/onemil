@@ -120,7 +120,10 @@ def trigger_entry_stop(g, day_open: float) -> dict:
     THE single source of trigger truth (2026-08-14): the shadow used to
     compute chase/stop/R from the scanner SIGHTING price/minute, which
     mis-evaluated late-sighted movers (8/13 CRWU/CWVX chase-skipped,
-    SMCL/SMCX r-too-small — 4 monster trades the BT kept, ~$8K). The BT
+    SMCL/SMCX r-too-small — 4 BT-kept trades the shadow missed; they
+    happened to sum −$4,896 that day, but the bug is DECISION drift, not
+    the day's sign — 8/14 audit corrected the earlier "+$8K monsters"
+    narrative). The BT
     keys everything to the ACTUAL trigger bar (first window bar whose
     high crossed the +10% level), not to when the scanner noticed."""
     lvl = level(day_open)

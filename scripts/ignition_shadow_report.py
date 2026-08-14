@@ -24,33 +24,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import report_common as rc
-
-ARM, LOCK = 1.75, 0.5
+# single-source exit physics + lock params (8/14 audit: local copies
+# were a drift vector vs trading/ignition_rules)
+from trading.ignition_rules import ARM_R as ARM, LOCK_R as LOCK
+from trading.ignition_rules import resim_exit as _shared_resim
 PASS = {'trig_lo': 1, 'trig_hi': 8, 'spread_med': 60, 'spread_p90': 150,
         'latency_p90': 90}
 
 
 def resim_exit(bars, entry, stop, entry_min):
-    """Harness-physics exit resim (static lock ARM/LOCK, 15:45 flat).
-    Conservative intrabar ordering: stop checked before arming. A bar
-    that OPENS below the live stop fills near its open, not at the stop
-    (gap-down realism — stop-price fills there would overstate P&L)."""
-    cur = stop
-    armed = False
-    R = entry - stop
-    post = bars[bars['m'] > entry_min]
-    for _, r in post.iterrows():
-        if r['m'] >= 945:
-            return (r['open'] - entry) / R, 'eod'
-        if r['low'] <= cur:
-            fill = min(cur, r['open'])
-            return (fill * 0.999 - entry) / R, 'lock' if armed else 'stop'
-        if not armed and r['high'] >= entry + ARM * R:
-            armed = True
-            cur = entry + LOCK * R
-    if len(post):
-        return (post.iloc[-1]['close'] - entry) / R, 'eod'
-    return 0.0, 'none'
+    """Delegates to the SHARED harness physics (trading/ignition_rules
+    .resim_exit) — 8/14 audit killed the local copy (drift vector)."""
+    return _shared_resim(bars, entry, stop, entry_min)
 
 
 def day_bars(symbol, day):

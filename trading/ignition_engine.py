@@ -32,6 +32,7 @@ import threading
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional
+from zoneinfo import ZoneInfo
 
 from trading import ignition_rules as _rules
 from trading.stop_monitor import build_exit_update
@@ -39,6 +40,15 @@ from trading.stop_monitor import build_exit_update
 logger = logging.getLogger(__name__)
 
 STRATEGY_NAME = 'ignition'
+_ET = ZoneInfo('America/New_York')
+
+
+def _et_now() -> datetime:
+    """Market-clock now. Kill windows / trade_date / day rolls key on the
+    ET date (8/14 audit P3): the UTC date rolls at 20:00 ET, so a UTC-
+    dated 'today' silently splits the post-8pm evening into tomorrow's
+    kill window and mislabels late-boot syncs."""
+    return datetime.now(timezone.utc).astimezone(_ET)
 LOCK_ARM_AT_R = _rules.ARM_R      # 1.75
 LOCK_STOP_R = _rules.LOCK_R       # 0.5
 
@@ -73,6 +83,7 @@ class _Open:
         self.shares = shares
         self.tp_leg_id = tp_leg_id
         self.sl_leg_id = sl_leg_id
+        self.eod_sell_order_id = ''
 
 
 class IgnitionEngine:
@@ -106,6 +117,7 @@ class IgnitionEngine:
         # the scanner thread (process_tick/check_exits/force_close) —
         # one lock covers all check-then-act sequences
         self._lock = threading.RLock()
+        self._eod_closing: Dict[str, _Open] = {}
         self._entered_today: set = set()
         self._day: Optional[str] = None
         self._daily_kill_notified = False
@@ -157,8 +169,7 @@ class IgnitionEngine:
     # gates + sizing + submission
     # ------------------------------------------------------------------
     def _roll_day(self) -> None:
-        # UTC date is fine: the worker only sees triggers during RTH
-        day = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        day = _et_now().strftime('%Y-%m-%d')
         if day != self._day:
             self._day = day
             self._entered_today = set()
@@ -182,10 +193,10 @@ class IgnitionEngine:
             return -1e9   # fail-closed: no new entries if we can't know
 
     def _kill_blocked(self) -> Optional[str]:
-        today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-        week_start = (datetime.now(timezone.utc)
-                      - timedelta(days=datetime.now(timezone.utc)
-                                  .weekday())).strftime('%Y-%m-%d')
+        now_et = _et_now()
+        today = now_et.strftime('%Y-%m-%d')
+        week_start = (now_et - timedelta(days=now_et.weekday())
+                      ).strftime('%Y-%m-%d')
         wk = self._realized_pnl(week_start)
         if wk <= self.weekly_kill_usd:
             if not self._weekly_kill_notified:
@@ -286,7 +297,7 @@ class IgnitionEngine:
         # and any EXTRA key is SILENTLY DROPPED — telemetry therefore
         # goes through update_trade immediately after the insert.
         record = {
-            'trade_date': datetime.now(timezone.utc).strftime('%Y-%m-%d'),
+            'trade_date': _et_now().strftime('%Y-%m-%d'),
             'symbol': symbol, 'side': 'buy', 'strategy': STRATEGY_NAME,
             'shares': shares, 'entry_price': entry,
             'stop_loss_price': round(stop * 0.90, 2),
@@ -348,6 +359,7 @@ class IgnitionEngine:
     def process_tick(self) -> None:
         if not self.enabled or self.dry_run:
             return
+        self.process_eod_fills()
         for symbol in list(self.pending.keys()):
             p = self.pending[symbol]
             try:
@@ -478,29 +490,41 @@ class IgnitionEngine:
     # 15:45 force-flat + boot resume
     # ------------------------------------------------------------------
     def force_close_all(self) -> int:
+        """EOD flat. IDEMPOTENT (8/14 independent audit P1: the scanner
+        calls this EVERY tick after 15:45 — the first version re-sold
+        the same shares each cycle and never recorded the exit, blinding
+        the realized-P&L kills to the most common exit path). Positions
+        move to _eod_closing; process_eod_fills() confirms the sell and
+        writes the exit row with pnl."""
         if not self.enabled or self.dry_run:
             return 0
         n = 0
-        for symbol in list(self.pending.keys()):
-            p = self.pending[symbol]
+        with self._lock:
+            pend = list(self.pending.values())
+            opens = list(self.open_positions.values())
+        for p in pend:
             try:
                 self.alpaca.cancel_order(p.order_id)
             except Exception as e:
                 logger.warning(f"[IGNITION] force-close cancel failed "
-                               f"{symbol}: {e}")
+                               f"{p.symbol}: {e}")
             self._mark_cancelled(p, 'eod_canceled')
             n += 1
-        for symbol in list(self.open_positions.keys()):
-            pos = self.open_positions[symbol]
+        for pos in opens:
+            symbol = pos.symbol
+            with self._lock:
+                # move OUT of open_positions FIRST -> re-entrant calls
+                # see nothing to close (idempotency)
+                if symbol not in self.open_positions:
+                    continue
+                del self.open_positions[symbol]
+                self._eod_closing[symbol] = pos
             try:
                 self.stop_monitor.remove_watch(symbol)
             except Exception as e:
                 logger.warning(f"[IGNITION] EOD remove_watch failed "
                                f"{symbol}: {e}")
-            # CANCEL BRACKET LEGS FIRST (8/14 review P0): active TP/SL
-            # legs hold the shares — an independent sell would be
-            # rejected for insufficient available qty. cancel_order is
-            # a cheap no-op on already-dead legs.
+            # cancel bracket legs FIRST — they hold the shares
             for leg_id in (pos.tp_leg_id, pos.sl_leg_id):
                 if leg_id:
                     try:
@@ -511,27 +535,83 @@ class IgnitionEngine:
             try:
                 q = self.alpaca.get_latest_quote(symbol) or {}
                 bid = float(q.get('bid_price') or 0)
-                # marketable limit slightly below bid; deep fallback if
-                # the quote is missing (must not fail to flatten)
                 limit = round(bid * 0.995, 4) if bid \
                     else round(pos.entry_price * 0.90, 2)
-                self.alpaca.submit_limit_sell_order(
+                res = self.alpaca.submit_limit_sell_order(
                     symbol, pos.shares, limit)
+                pos.eod_sell_order_id = (res or {}).get('id', '')
                 logger.info(f"[IGNITION] EOD flat: selling {pos.shares} "
-                            f"{symbol} @>={limit}")
+                            f"{symbol} @>={limit} "
+                            f"order={pos.eod_sell_order_id}")
                 n += 1
             except Exception as e:
                 logger.error(f"[IGNITION] EOD close failed {symbol}: "
                              f"{e}")
-                self._notify(f"[IGNITION] ⚠ EOD close FAILED {symbol}: "
-                             f"{str(e)[:80]} — MANUAL CHECK")
+                self._mark_exit_unverified(pos, f'eod submit: {e}')
         return n
+
+    def process_eod_fills(self) -> None:
+        """Confirm EOD sells and RECORD the exits (pnl included) — the
+        realized-P&L kills depend on these rows. Called from
+        process_tick each cycle."""
+        for symbol in list(self._eod_closing.keys()):
+            pos = self._eod_closing[symbol]
+            oid = getattr(pos, 'eod_sell_order_id', '')
+            if not oid:
+                self._mark_exit_unverified(pos, 'eod sell has no order id')
+                self._eod_closing.pop(symbol, None)
+                continue
+            try:
+                od = self.alpaca.get_order(oid) or {}
+            except Exception as e:
+                logger.warning(f"[IGNITION] EOD fill poll failed "
+                               f"{symbol}: {e}")
+                continue
+            status = od.get('status', '')
+            if status == 'filled':
+                exit_price = float(od.get('filled_avg_price')
+                                   or pos.entry_price)
+                pnl = (exit_price - pos.entry_price) * pos.shares
+                try:
+                    self.db.update_trade(pos.trade_id, {
+                        'exit_price': exit_price,
+                        'exit_reason': 'eod_flat',
+                        'exited_at': datetime.now(
+                            timezone.utc).isoformat(),
+                        'order_status': 'closed',
+                        'pnl': pnl,
+                        'pnl_pct': (exit_price - pos.entry_price)
+                        / pos.entry_price * 100.0,
+                    })
+                except Exception as e:
+                    logger.error(f"[IGNITION] EOD exit DB update "
+                                 f"failed {symbol}: {e}")
+                self._eod_closing.pop(symbol, None)
+                self._notify(f"[IGNITION] EOD FLAT {symbol} @ "
+                             f"{exit_price:.3f} PnL ${pnl:+,.0f}")
+            elif status in ('canceled', 'cancelled', 'expired',
+                            'rejected'):
+                self._mark_exit_unverified(
+                    pos, f'eod sell {status}')
+                self._eod_closing.pop(symbol, None)
+
+    def _mark_exit_unverified(self, pos, why: str) -> None:
+        logger.error(f"[IGNITION] {pos.symbol} exit UNVERIFIED ({why}) "
+                     f"— order_status=exit_pending_verification")
+        try:
+            self.db.update_trade(pos.trade_id, {
+                'order_status': 'exit_pending_verification'})
+        except Exception as e:
+            logger.error(f"[IGNITION] unverified-mark failed: {e}")
+        self._notify(f"[IGNITION] ⚠ {pos.symbol} EOD exit UNVERIFIED "
+                     f"({why}) — MANUAL CHECK; kills may under-count "
+                     f"until reconciled")
 
     def sync_positions(self) -> None:
         """Boot/mid-session-restart rehydration (mirrors ORB)."""
         if not self.enabled or self.dry_run:
             return
-        today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        today = _et_now().strftime('%Y-%m-%d')
         try:
             rows = self.db.get_open_trades(today, strategy=STRATEGY_NAME)
         except Exception as e:
@@ -612,6 +692,57 @@ class IgnitionEngine:
             self._entered_today.add(sym)
         logger.info(f"[IGNITION] sync_positions: {n_watch} watches "
                     f"re-added, {n_pend} pending resumed")
+        self._run_orphan_reconciler(broker)
+
+    def _run_orphan_reconciler(self, broker: dict) -> None:
+        """Boot-time orphan pass (8/14 audit P2 — same machinery as ORB/
+        bull-flag). SHARED-ACCOUNT NUANCE: ignition trades the MAIN
+        account alongside bull flag, so sibling strategies' open
+        positions must count as tracked — otherwise every bull-flag
+        position gets a spurious 'foreign orphan' alert on each boot
+        (and vice versa). Ownership stays safe regardless: the OWNED
+        predicate requires a matching ignition DB row."""
+        try:
+            from trading.orphan_reconciler import (
+                ReconcilerConfig, reconcile_strategy_orphans)
+            sibling_open = set()
+            try:
+                import sqlite3
+                since = (_et_now() - timedelta(days=14)
+                         ).strftime('%Y-%m-%d')
+                conn = sqlite3.connect(str(self.db._trades_path),
+                                       timeout=10)
+                sibling_open = {r[0] for r in conn.execute(
+                    "SELECT DISTINCT symbol FROM trades WHERE "
+                    "strategy != ? AND trade_date >= ? AND "
+                    "fill_price IS NOT NULL AND exit_price IS NULL",
+                    (STRATEGY_NAME, since))}
+                conn.close()
+            except Exception as e:
+                logger.warning(f"[IGNITION] reconciler sibling query "
+                               f"failed ({e}) — proceeding without "
+                               f"sibling exclusion (alert-only risk)")
+            snapshot = []
+            for p in broker.values():
+                try:
+                    snapshot.append({
+                        'symbol': p.get('symbol'),
+                        'qty': int(float(p.get('qty') or 0)),
+                        'avg_entry_price': float(
+                            p.get('avg_entry_price') or 0),
+                        'unrealized_pl': float(
+                            p.get('unrealized_pl') or 0)})
+                except Exception:
+                    continue
+            tracked = (set(self.open_positions) | set(self.pending)
+                       | sibling_open)
+            reconcile_strategy_orphans(
+                strategy=STRATEGY_NAME, alpaca=self.alpaca, db=self.db,
+                notifier=self.notifier, tracked_symbols=tracked,
+                cfg=ReconcilerConfig(), broker_positions=snapshot)
+        except Exception as e:
+            logger.error(f"[IGNITION] orphan reconciler raised: {e} — "
+                         f"sync continues")
 
     # ------------------------------------------------------------------
     def _notify(self, msg: str) -> None:

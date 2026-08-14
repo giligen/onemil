@@ -4465,6 +4465,20 @@ class TradingEngine:
             # got close-submitted, or foreign and got alerted.
             today_symbols = {t['symbol'] for t in trades_today
                              if t.get('fill_price') is not None}
+            # Shared-account exclusion (2026-08-14): ignition trades the
+            # SAME Alpaca account. Its open positions are tracked by its
+            # own engine/reconciler — without this, a mid-session restart
+            # while ignition holds positions fires a spurious 'foreign
+            # orphan' alert per ignition symbol.
+            try:
+                today_symbols |= {
+                    t['symbol'] for t in self.db.get_open_trades(
+                        date.today().isoformat(), strategy='ignition')
+                    if t.get('exit_price') is None}
+            except Exception as e:
+                logger.warning(
+                    f"bull_flag reconciler: ignition sibling query "
+                    f"failed ({e}) — foreign-alert noise possible")
             reconcile_strategy_orphans(
                 strategy='bull_flag', alpaca=self.alpaca, db=self.db,
                 notifier=self.notifier, tracked_symbols=today_symbols,

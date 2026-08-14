@@ -280,3 +280,19 @@ take-all) and destroys the 1:1 fill-vs-shadow comparison S3 exists for.
   latency), NOT on P&L.
 - Start condition unchanged: 3 consecutive clean-capture days under the
   8/14 trigger-bar fix, then owner GO. Earliest: Wed 2026-08-19.
+
+### 8/14 INDEPENDENT AUDIT (fresh-agent, zero context) — corrections
+Audit VERIFIED to the dollar: 8/3 gate event (+$25,510/13/CRWU +3.23R),
++$16,609 GO window, per-day replays, ORB code parity + frozen-fit,
+engine dry-run safety + fail-closed kills. CORRECTION it caught: the
+8/13 level/late-sighting misses were NOT "~$8K missed monsters" — the 4
+trades sum **-$4,896** (CRWU -2,988, CWVX -3,034, SMCL +490, SMCX +636);
+the parity fix was right but the magnitude narrative was wrong-signed.
+Fixed same-day from its findings: (1) engine force_close_all idempotency
++ EOD exit recording (P1 — was re-selling every tick post-15:45 and
+never writing eod pnl, blinding the kills); (2) green-check 'spread'
+keyword false-explain neutering the BT-picks gate (reproduced on 8/11
+CIFU); (3) de-duplicated replay/report rule copies onto ignition_rules.
+Open (pre-Wed): ignition orphan-reconciler wiring; ET kill windows.
+New ORB drift class documented: BT features universe missing a live
+candidate (ACVA 8/11) shifted a veto slot -> CIFU divergence.

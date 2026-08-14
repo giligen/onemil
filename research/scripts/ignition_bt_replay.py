@@ -47,28 +47,21 @@ def replay_day(day: str, verbose: bool = True):
         day_dollar = float((g['volume'] * g['close']).sum())
         if day_dollar < R.DAY_DOLLAR_MIN:
             gate_log[sym] = 'u_dollar_2M'; continue
-        lvl = R.level(o)
-        trig = g[(g['high'] >= lvl) & (g['m'] >= R.TRIGGER_MIN_START)
-                 & (g['m'] <= R.TRIGGER_MIN_END)]
-        if trig.empty: gate_log[sym] = 'no_trigger_in_window'; continue
-        ti = trig.index[0]
-        nxt = g[g.index > ti]
-        if nxt.empty: gate_log[sym] = 'no_next_bar'; continue
-        nb = nxt.iloc[0]
-        entry = float(nb['open']) * R.ENTRY_SLIP
-        if R.chase_reject(entry, o): gate_log[sym] = 'chase_guard'; continue
-        pre = g[(g['m'] >= g.loc[ti, 'm'] - 30) & (g['m'] < g.loc[ti, 'm'])]
-        if len(pre) < R.PRE_BARS_MIN: gate_log[sym] = 'pre_lt5_bars'; continue
-        stop = R.stop_from_pre_lows(float(pre['low'].min()), entry)
-        rp = R.r_pct_from_stop(entry, stop)
-        if rp < R.R_MIN_PCT: gate_log[sym] = f'r_lt5({rp:.1f})'; continue
-        rr, reason = R.resim_exit(g[g.index > nb.name].assign(
-            m=g[g.index > nb.name]['m']), entry, stop, int(nb['m']) - 1)
-        pos = R.position_usd(rp, float(nb['volume']) * entry)
+        # SINGLE-SOURCE trigger mechanics (8/14 independent audit: this
+        # block used to re-implement the gate sequence inline — a drift
+        # vector; now the same helper the shadow uses)
+        tr = R.trigger_entry_stop(g, o)
+        if 'reject' in tr:
+            gate_log[sym] = tr['reject']; continue
+        entry, stop, rp = tr['entry'], tr['stop'], tr['r_pct']
+        post = g[g.index > tr['next_idx']]
+        rr, reason = R.resim_exit(post.assign(m=post['m']), entry, stop,
+                                  tr['trigger_m'])
+        pos = R.position_usd(rp, tr['bar_dollar'])
         if R.position_reject(pos): gate_log[sym] = 'pos_lt_2k'; continue
-        part = pos / max(float(nb['volume']) * entry, 1)
+        part = pos / max(tr['bar_dollar'], 1)
         pnl = pos * (rr * rp / 100.0) - pos * R.FRICTION_BPS * min(part / R.PARTICIPATION, 1.0)
-        trades.append({'sym': sym, 'trig_m': int(g.loc[ti, 'm']),
+        trades.append({'sym': sym, 'trig_m': tr['trigger_m'],
                        'rr': round(rr, 2), 'reason': reason,
                        'pnl': round(pnl), 'news': info['news'],
                        'anchor': info['anchor']})

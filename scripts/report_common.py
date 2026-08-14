@@ -191,13 +191,21 @@ def green_verdict(day: str) -> Dict:
         # correctly refused to chase, and the checker scored a correctly-
         # explained miss as unexplained (false-alarm red; BT made +$5 on
         # the missed trade while live beat BT by ~$570 that day).
+        # 2026-08-14 independent audit: the old 'spread' keyword matched
+        # routine quote-DEBUG lines ("CIFU: quote bid=.. spread=$0.11"),
+        # silently explaining ANY never-ordered pick that ever got a
+        # quote logged — the gate was neutralized (reproduced on the
+        # 8/11 CIFU miss). Explanations now require an ACTUAL skip
+        # phrase, not a keyword coincidence.
         explained_lines = (journal_grep('skipped —', day)
-                           + journal_grep('spread', day)
-                           + journal_grep('ENTRY SKIPPED', day))
+                           + journal_grep('spread skip', day)
+                           + journal_grep('ENTRY SKIPPED', day)
+                           + journal_grep('Not chasing', day))
+        _SKIP_PHRASES = ('spread skip', 'buying power', 'other strategy',
+                         'halted', 'breakout extended past limit',
+                         'Not chasing', 'ENTRY SKIPPED', 'skipped —')
         for sym in sorted(missing):
-            if any(sym in ln and any(k in ln for k in
-                   ('spread', 'buying power', 'other strategy', 'halted',
-                    'breakout extended past limit', 'Not chasing'))
+            if any(sym in ln and any(k in ln for k in _SKIP_PHRASES)
                    for ln in explained_lines):
                 continue
             unexplained.append(sym)

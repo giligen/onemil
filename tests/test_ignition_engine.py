@@ -399,3 +399,111 @@ class TestShadowWiring:
         for word in ('submit_order', 'submit_stop', 'bracket', 'sell',
                      'buy_stop'):
             assert word not in src
+
+
+class TestEodFlat:
+    """8/14 independent-audit P1: the scanner calls force_close_all
+    EVERY tick after 15:45 — it must be idempotent, and the EOD exit
+    must be RECORDED with pnl (the realized-P&L kills read those rows)."""
+
+    def _filled(self, tmp_path, **cfg_over):
+        eng, a, db, sm = _engine(tmp_path, **cfg_over)
+        a.submit_limit_sell_order.return_value = {'id': 'eod-1'}
+        eng._handle_trigger(_rec())
+        a.get_order.return_value = {'status': 'filled',
+                                    'filled_avg_price': 10.0,
+                                    'filled_qty': 50}
+        eng.process_tick()
+        assert 'IGNI' in eng.open_positions
+        return eng, a, db, sm
+
+    def test_force_close_is_idempotent(self, tmp_path):
+        eng, a, db, sm = self._filled(tmp_path)
+        n1 = eng.force_close_all()
+        n2 = eng.force_close_all()          # next scanner tick
+        n3 = eng.force_close_all()
+        assert n1 == 1 and n2 == 0 and n3 == 0
+        assert a.submit_limit_sell_order.call_count == 1   # ONE sell
+        assert 'IGNI' in eng._eod_closing
+        assert 'IGNI' not in eng.open_positions
+
+    def test_eod_fill_recorded_with_pnl(self, tmp_path):
+        eng, a, db, sm = self._filled(tmp_path)
+        eng.force_close_all()
+        a.get_order.return_value = {'status': 'filled',
+                                    'filled_avg_price': 9.90}
+        eng.process_eod_fills()
+        upd = db.update_trade.call_args.args[1]
+        assert upd['exit_reason'] == 'eod_flat'
+        assert upd['order_status'] == 'closed'
+        assert upd['pnl'] == pytest.approx((9.90 - 10.0) * 50)
+        assert 'IGNI' not in eng._eod_closing
+        # subsequent cycles: nothing left to poll or sell
+        calls_before = a.get_order.call_count
+        eng.process_eod_fills()
+        assert a.get_order.call_count == calls_before
+        assert a.submit_limit_sell_order.call_count == 1
+
+    def test_eod_sell_killed_marks_unverified(self, tmp_path):
+        eng, a, db, sm = self._filled(tmp_path)
+        eng.force_close_all()
+        a.get_order.return_value = {'status': 'canceled'}
+        eng.process_eod_fills()
+        upd = db.update_trade.call_args.args[1]
+        assert upd['order_status'] == 'exit_pending_verification'
+        assert 'IGNI' not in eng._eod_closing
+
+    def test_eod_submit_failure_marks_unverified(self, tmp_path):
+        eng, a, db, sm = self._filled(tmp_path)
+        a.submit_limit_sell_order.side_effect = RuntimeError('reject')
+        eng.force_close_all()
+        upd = db.update_trade.call_args.args[1]
+        assert upd['order_status'] == 'exit_pending_verification'
+
+    def test_eod_poll_failure_retries_next_cycle(self, tmp_path):
+        eng, a, db, sm = self._filled(tmp_path)
+        eng.force_close_all()
+        a.get_order.side_effect = RuntimeError('api down')
+        eng.process_eod_fills()
+        assert 'IGNI' in eng._eod_closing      # kept for retry
+        a.get_order.side_effect = None
+        a.get_order.return_value = {'status': 'filled',
+                                    'filled_avg_price': 9.95}
+        eng.process_eod_fills()
+        assert 'IGNI' not in eng._eod_closing
+        upd = db.update_trade.call_args.args[1]
+        assert upd['exit_reason'] == 'eod_flat'
+
+
+class TestOrphanReconcilerWiring:
+    def test_sync_runs_reconciler_with_sibling_exclusion(
+            self, tmp_path, monkeypatch):
+        """8/14 audit P2: reconciler wired at boot — and because ignition
+        SHARES the main account with bull flag, sibling open positions
+        must be passed as tracked (else spurious foreign-orphan alerts)."""
+        eng, a, db, sm = _engine(tmp_path)
+        import sqlite3
+        from datetime import datetime, timezone
+        from zoneinfo import ZoneInfo
+        today = datetime.now(timezone.utc).astimezone(
+            ZoneInfo('America/New_York')).strftime('%Y-%m-%d')
+        conn = sqlite3.connect(db._trades_path)
+        conn.execute("DROP TABLE trades")
+        conn.execute("CREATE TABLE trades (strategy TEXT, trade_date "
+                     "TEXT, pnl REAL, symbol TEXT, fill_price REAL, "
+                     "exit_price REAL)")
+        conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?)",
+                     ('bull_flag', today, None, 'BFPOS', 10.0, None))
+        conn.commit(); conn.close()
+        a.get_open_positions.return_value = [
+            {'symbol': 'BFPOS', 'qty': 5, 'avg_entry_price': 10.0,
+             'unrealized_pl': 0.0}]
+        captured = {}
+        import trading.orphan_reconciler as orc
+        monkeypatch.setattr(
+            orc, 'reconcile_strategy_orphans',
+            lambda **kw: captured.update(kw) or [])
+        eng.sync_positions()
+        assert 'BFPOS' in captured['tracked_symbols']
+        assert captured['strategy'] == STRATEGY_NAME
+        assert captured['broker_positions'][0]['symbol'] == 'BFPOS'
