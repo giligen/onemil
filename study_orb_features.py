@@ -316,12 +316,17 @@ def extract_features(
 
     # --- SPY features ---
     spy_open_ts = None
-    # Match SPY 9:30 ET open on same date
+    # Match SPY 9:30 ET open on same date. 2026-08-14 DST fix (same class
+    # as study_orb._session_open_timestamp, 3fab1f9): the old hour-in-
+    # {13,14} UTC mask grabbed 13:30 UTC = 8:30 ET PREMARKET in EST
+    # season — winter rows' spy_range_pct_5min / spy_return_5min_pct
+    # were premarket. Not in the shipped composite, but any candidate
+    # using SPY 5-min features needs a features regen AFTER this fix.
     dtx_date = dtx.date()
+    spy_et = spy_intraday['timestamp'].dt.tz_convert('America/New_York')
     spy_day_mask = (
         (spy_intraday['timestamp'].dt.date == dtx_date) &
-        (spy_intraday['timestamp'].dt.minute == 30) &
-        (spy_intraday['timestamp'].dt.hour.isin([13, 14]))
+        (spy_et.dt.hour == 9) & (spy_et.dt.minute == 30)
     )
     if spy_day_mask.any():
         spy_open_ts = spy_intraday.loc[spy_day_mask, 'timestamp'].iloc[0]
