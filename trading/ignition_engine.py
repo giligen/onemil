@@ -64,12 +64,15 @@ class _Open:
     """A filled position under StopMonitor management."""
 
     def __init__(self, symbol: str, trade_id: int, entry_price: float,
-                 stop: float, shares: int):
+                 stop: float, shares: int,
+                 tp_leg_id: str = '', sl_leg_id: str = ''):
         self.symbol = symbol
         self.trade_id = trade_id
         self.entry_price = entry_price
         self.stop = stop
         self.shares = shares
+        self.tp_leg_id = tp_leg_id
+        self.sl_leg_id = sl_leg_id
 
 
 class IgnitionEngine:
@@ -99,6 +102,10 @@ class IgnitionEngine:
 
         self.pending: Dict[str, _Pending] = {}
         self.open_positions: Dict[str, _Open] = {}
+        # state is touched from the engine worker (trigger handling) AND
+        # the scanner thread (process_tick/check_exits/force_close) —
+        # one lock covers all check-then-act sequences
+        self._lock = threading.RLock()
         self._entered_today: set = set()
         self._day: Optional[str] = None
         self._daily_kill_notified = False
@@ -201,16 +208,19 @@ class IgnitionEngine:
     def _handle_trigger(self, rec: dict) -> None:
         self._roll_day()
         symbol = rec['symbol']
-        if symbol in self._entered_today or symbol in self.pending \
-                or symbol in self.open_positions:
-            logger.info(f"[IGNITION] {symbol} dedup — already "
-                        f"traded/pending today")
-            return
-        if len(self.pending) + len(self.open_positions) \
-                >= self.max_concurrent:
-            logger.warning(f"[IGNITION] {symbol} skipped — "
-                           f"max_concurrent {self.max_concurrent}")
-            return
+        with self._lock:
+            if symbol in self._entered_today or symbol in self.pending \
+                    or symbol in self.open_positions:
+                logger.info(f"[IGNITION] {symbol} dedup — already "
+                            f"traded/pending today")
+                return
+            if len(self.pending) + len(self.open_positions) \
+                    >= self.max_concurrent:
+                logger.warning(f"[IGNITION] {symbol} skipped — "
+                               f"max_concurrent {self.max_concurrent}")
+                return
+            # reserve the slot before the (slow) submit path
+            self._entered_today.add(symbol)
         blocked = self._kill_blocked()
         if blocked:
             logger.info(f"[IGNITION] {symbol} blocked by {blocked}")
@@ -242,7 +252,6 @@ class IgnitionEngine:
                 f"cat={rec.get('catalyst')}")
             logger.info(f"[IGNITION DRY] {symbol} {shares}sh "
                         f"limit={limit} stop={stop}")
-            self._entered_today.add(symbol)
             return
         self._submit(rec, symbol, shares, limit, entry, stop)
 
@@ -272,24 +281,23 @@ class IgnitionEngine:
         except Exception as e:
             logger.warning(f"[IGNITION] {symbol} entry quote fetch "
                            f"failed: {e}")
+        # save_trade's INSERT binds a FIXED named-parameter list (verified
+        # empirically 8/14): every listed key MUST be present (None ok)
+        # and any EXTRA key is SILENTLY DROPPED — telemetry therefore
+        # goes through update_trade immediately after the insert.
         record = {
             'trade_date': datetime.now(timezone.utc).strftime('%Y-%m-%d'),
             'symbol': symbol, 'side': 'buy', 'strategy': STRATEGY_NAME,
             'shares': shares, 'entry_price': entry,
             'stop_loss_price': round(stop * 0.90, 2),
-            'real_stop_loss_price': stop,
             'take_profit_price': round(entry * 3.0, 2),
             'risk_per_share': entry - stop,
             'total_risk': shares * (entry - stop),
             'risk_reward_ratio': 0.0,
             'order_id': order_id, 'order_status': 'pending_new',
-            'entry_quote_bid': q.get('bid_price'),
-            'entry_quote_ask': q.get('ask_price'),
-            'entry_quote_bid_size': q.get('bid_size'),
-            'entry_quote_ask_size': q.get('ask_size'),
-            'entry_quote_spread': (
-                (q['ask_price'] - q['bid_price'])
-                if q.get('ask_price') and q.get('bid_price') else None),
+            'fill_price': None, 'filled_at': None,
+            'exit_price': None, 'exit_reason': None, 'exited_at': None,
+            'pnl': None, 'pnl_pct': None,
             'pattern_data': json.dumps({
                 'catalyst': rec.get('catalyst'),
                 'r_pct': rec.get('r_pct'),
@@ -307,15 +315,26 @@ class IgnitionEngine:
                 'shadow_day': rec.get('day'),
             }),
         }
+        trade_id = None
         try:
             trade_id = self.db.save_trade(record)
+            self.db.update_trade(trade_id, {
+                'real_stop_loss_price': stop,
+                'entry_quote_bid': q.get('bid_price'),
+                'entry_quote_ask': q.get('ask_price'),
+                'entry_quote_bid_size': q.get('bid_size'),
+                'entry_quote_ask_size': q.get('ask_size'),
+                'entry_quote_spread': (
+                    (q['ask_price'] - q['bid_price'])
+                    if q.get('ask_price') and q.get('bid_price')
+                    else None),
+            })
         except Exception as e:
             logger.error(f"[IGNITION] {symbol} DB save failed: {e}")
-            trade_id = None
-        self.pending[symbol] = _Pending(
-            symbol, order_id, trade_id, entry, stop, shares,
-            tp_leg, sl_leg, time.time())
-        self._entered_today.add(symbol)
+        with self._lock:
+            self.pending[symbol] = _Pending(
+                symbol, order_id, trade_id, entry, stop, shares,
+                tp_leg, sl_leg, time.time())
         self._notify(f"[IGNITION] ENTRY SUBMITTED {shares} {symbol} "
                      f"@≤{limit} stop {stop:.2f} "
                      f"(risk ${shares * (entry - stop):.0f}, "
@@ -386,9 +405,11 @@ class IgnitionEngine:
             lock_arm_at_r=LOCK_ARM_AT_R, lock_stop_r=LOCK_STOP_R,
             lock_r_unit=p.entry - p.stop,
             skip_exits_until_ts=float(now_min_end))
-        self.open_positions[p.symbol] = _Open(
-            p.symbol, p.trade_id, fill_price, p.stop, filled_qty)
-        del self.pending[p.symbol]
+        with self._lock:
+            self.open_positions[p.symbol] = _Open(
+                p.symbol, p.trade_id, fill_price, p.stop, filled_qty,
+                tp_leg_id=p.tp_leg_id, sl_leg_id=p.sl_leg_id)
+            self.pending.pop(p.symbol, None)
         self._notify(f"[IGNITION] FILLED {filled_qty} {p.symbol} "
                      f"@ {fill_price:.3f} (planned {p.entry:.3f}, "
                      f"slip {(fill_price - p.entry) / p.entry * 1e4:+.0f}"
@@ -476,6 +497,17 @@ class IgnitionEngine:
             except Exception as e:
                 logger.warning(f"[IGNITION] EOD remove_watch failed "
                                f"{symbol}: {e}")
+            # CANCEL BRACKET LEGS FIRST (8/14 review P0): active TP/SL
+            # legs hold the shares — an independent sell would be
+            # rejected for insufficient available qty. cancel_order is
+            # a cheap no-op on already-dead legs.
+            for leg_id in (pos.tp_leg_id, pos.sl_leg_id):
+                if leg_id:
+                    try:
+                        self.alpaca.cancel_order(leg_id)
+                    except Exception as e:
+                        logger.warning(f"[IGNITION] EOD leg cancel "
+                                       f"failed {symbol}/{leg_id}: {e}")
             try:
                 q = self.alpaca.get_latest_quote(symbol) or {}
                 bid = float(q.get('bid_price') or 0)
@@ -538,10 +570,24 @@ class IgnitionEngine:
                              or row.get('stop_loss_price'))
                 entry = float(row.get('fill_price')
                               or row.get('entry_price'))
+                # recover bracket leg IDs from the broker so exits (both
+                # StopMonitor's and EOD flat) can cancel them — empty
+                # leg IDs after a restart would strand held shares
+                tp_leg = sl_leg = ''
+                try:
+                    od = self.alpaca.get_order(row.get('order_id')) or {}
+                    for leg in (od.get('legs') or []):
+                        if leg.get('type') == 'limit':
+                            tp_leg = leg.get('id', '')
+                        else:
+                            sl_leg = leg.get('id', '')
+                except Exception as e:
+                    logger.warning(f"[IGNITION] sync: leg recovery "
+                                   f"failed {sym}: {e}")
                 self.stop_monitor.add_watch(
                     symbol=sym, stop_price=stop,
                     shares=int(row.get('filled_qty') or row['shares']),
-                    tp_leg_id='', sl_leg_id='',
+                    tp_leg_id=tp_leg, sl_leg_id=sl_leg,
                     trade_db_id=row['id'], entry_price=entry,
                     risk_per_share=max(entry - stop, 0.01),
                     strategy=STRATEGY_NAME,
@@ -552,7 +598,8 @@ class IgnitionEngine:
                     lock_r_unit=max(entry - stop, 0.01))
                 self.open_positions[sym] = _Open(
                     sym, row['id'], entry, stop,
-                    int(row.get('filled_qty') or row['shares']))
+                    int(row.get('filled_qty') or row['shares']),
+                    tp_leg_id=tp_leg, sl_leg_id=sl_leg)
                 n_watch += 1
             elif status == 'pending_new' and row.get('order_id'):
                 self.pending[sym] = _Pending(

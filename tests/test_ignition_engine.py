@@ -151,18 +151,25 @@ class TestGates:
 
 class TestOrderLifecycle:
     def test_submit_persists_full_contract(self, tmp_path):
+        """INSERT carries the fixed required key set (incl. None exit
+        fields — save_trade binds them); telemetry goes via the
+        follow-up update_trade (extras are silently dropped by INSERT,
+        verified empirically 8/14)."""
         eng, a, db, sm = _engine(tmp_path)
         eng._handle_trigger(_rec())
         rec = db.save_trade.call_args.args[0]
         assert rec['strategy'] == STRATEGY_NAME
         assert rec['order_status'] == 'pending_new'
-        assert rec['real_stop_loss_price'] == 9.0
         assert rec['total_risk'] == pytest.approx(50.0)
-        assert rec['entry_quote_bid'] == 9.95
+        for k in ('fill_price', 'exit_price', 'pnl', 'exit_reason'):
+            assert k in rec and rec[k] is None   # required bindings
         pd = json.loads(rec['pattern_data'])
         assert pd['catalyst'] == 'news'
         assert pd['lock_arm_at_r'] == 1.75
         assert pd['hypo_entry'] == 10.0
+        upd = db.update_trade.call_args.args[1]
+        assert upd['real_stop_loss_price'] == 9.0
+        assert upd['entry_quote_bid'] == 9.95
 
     def test_fill_adds_watch_with_lock(self, tmp_path):
         eng, a, db, sm = _engine(tmp_path)
@@ -212,7 +219,9 @@ class TestOrderLifecycle:
         assert upd['order_status'] == 'closed'
         assert 'IGNI' not in eng.open_positions
 
-    def test_force_close_cancels_and_sells(self, tmp_path):
+    def test_force_close_cancels_legs_before_selling(self, tmp_path):
+        """8/14 review P0: active bracket legs hold the shares — the EOD
+        sell MUST be preceded by leg cancels or the broker rejects it."""
         eng, a, db, sm = _engine(tmp_path)
         eng._handle_trigger(_rec('PEND'))
         eng._handle_trigger(_rec('OPEN'))
@@ -223,9 +232,61 @@ class TestOrderLifecycle:
         eng.process_tick()
         n = eng.force_close_all()
         assert n == 2
-        a.cancel_order.assert_called()            # pending cancelled
-        a.submit_limit_sell_order.assert_called() # open sold
+        cancelled = [c.args[0] for c in a.cancel_order.call_args_list]
+        assert 'ord-1' in cancelled              # pending entry
+        assert 'tp-1' in cancelled and 'sl-1' in cancelled  # legs FIRST
+        a.submit_limit_sell_order.assert_called()
         sm.remove_watch.assert_called_with('OPEN')
+
+    def test_real_database_persistence_roundtrip(self, tmp_path):
+        """The 8/14 P0 the mocks hid: save_trade's INSERT requires a
+        fixed key set and SILENTLY DROPS extras. Drive the REAL Database
+        through submit -> fill -> exit and verify every field lands."""
+        import os
+        from persistence.database import Database
+        real_db = Database(cache_path=str(tmp_path / 'c.db'),
+                           trades_path=str(tmp_path / 't.db'))
+        a = MagicMock(spec=AlpacaClient)
+        a.submit_bracket_order.return_value = {
+            'id': 'ord-1', 'status': 'pending_new',
+            'legs': [{'id': 'tp-1', 'type': 'limit'},
+                     {'id': 'sl-1', 'type': 'stop'}]}
+        a.get_latest_quote.return_value = {'bid_price': 9.95,
+                                           'ask_price': 10.0,
+                                           'bid_size': 5, 'ask_size': 5}
+        sm = MagicMock(spec=StopMonitor)
+        real_db._trades_path = tmp_path / 't.db'
+        eng = IgnitionEngine(a, real_db, sm, cfg=_cfg())
+        eng._handle_trigger(_rec())
+        import sqlite3
+        conn = sqlite3.connect(tmp_path / 't.db')
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM trades").fetchone()
+        assert row['strategy'] == STRATEGY_NAME
+        assert row['order_status'] == 'pending_new'
+        assert row['real_stop_loss_price'] == 9.0      # via update_trade
+        assert row['entry_quote_bid'] == 9.95           # via update_trade
+        assert json.loads(row['pattern_data'])['catalyst'] == 'news'
+        # fill
+        a.get_order.return_value = {'status': 'filled',
+                                    'filled_avg_price': 10.02,
+                                    'filled_qty': 50}
+        eng.process_tick()
+        row = conn.execute("SELECT * FROM trades").fetchone()
+        assert row['order_status'] == 'filled'
+        assert row['fill_price'] == 10.02
+        # exit
+        ev = MagicMock()
+        ev.symbol = 'IGNI'; ev.exit_price = 10.52; ev.shares = 50
+        ev.exit_reason = 'lock_stop'; ev.confirmed = True
+        ev.trade_db_id = row['id']; ev.filled_qty = 50
+        ev.exit_limit_price = 10.51; ev.pricing_method = 'stop_bid'
+        sm.drain_exit_events.return_value = [ev]
+        eng.check_exits()
+        row = conn.execute("SELECT * FROM trades").fetchone()
+        assert row['order_status'] == 'closed'
+        assert row['pnl'] == pytest.approx((10.52 - 10.02) * 50)
+        conn.close()
 
 
 class TestResume:
