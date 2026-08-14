@@ -67,6 +67,10 @@ class IgnitionShadow:
         self._day_anchor_counts: Dict[str, int] = {}
         self._news_cache: Dict[str, Optional[bool]] = {}
         self._dropped = 0
+        # S3 live-engine callback (2026-08-14 plan): invoked with the
+        # trigger rec AFTER journaling. The shadow stays order-free —
+        # execution lives entirely in trading/ignition_engine.py.
+        self.on_trigger = None
         self._day: Optional[str] = None
         self._log_dir = log_dir or os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -517,6 +521,14 @@ class IgnitionShadow:
             f"pos=${rec.get('hypo_position_usd', 0):,.0f} "
             f"(journal-only, no order)")
         self._journal(rec)
+        # journal FIRST, callback SECOND — engine errors can never
+        # block the measurement
+        if self.on_trigger is not None:
+            try:
+                self.on_trigger(rec)
+            except Exception as e:
+                logger.error(f"ignition-shadow: on_trigger callback "
+                             f"failed for {rec['symbol']}: {e}")
 
     def _journal(self, rec: dict) -> None:
         try:

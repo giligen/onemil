@@ -705,6 +705,26 @@ class Config:
             "composite_features": cfg.get("composite_features") or {},
         }
 
+    @property
+    def ignition_live_cfg(self) -> dict:
+        """Ignition S3 live micro-execution config (2026-08-14 plan).
+
+        Defaults are the FAIL-SAFE state: disabled + dry_run. The Wed
+        GO flips enabled:true / dry_run:false in config.yaml.
+        """
+        cfg = self._get_yaml("ignition_live", default={}) or {}
+        return {
+            "enabled": bool(cfg.get("enabled", False)),
+            "dry_run": bool(cfg.get("dry_run", True)),
+            "risk_usd": float(cfg.get("risk_usd", 50.0)),
+            "daily_kill_usd": float(cfg.get("daily_kill_usd", -300.0)),
+            "weekly_kill_usd": float(cfg.get("weekly_kill_usd", -750.0)),
+            "max_concurrent": int(cfg.get("max_concurrent", 15)),
+            "max_notional_usd": float(cfg.get("max_notional_usd", 1500.0)),
+            "entry_buffer_bps": float(cfg.get("entry_buffer_bps", 20.0)),
+            "entry_timeout_s": float(cfg.get("entry_timeout_s", 90.0)),
+        }
+
     # =========================================================================
     # MACD Zone Filter
     # =========================================================================

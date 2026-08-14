@@ -87,6 +87,7 @@ class RealtimeScanner:
         shutdown_event=None,
         macd_engine=None,
         orb_engine=None,
+        ignition_engine=None,
     ):
         """
         Initialize RealtimeScanner.
@@ -115,6 +116,7 @@ class RealtimeScanner:
         self.shutdown_event = shutdown_event
         self.macd_engine = macd_engine
         self.orb_engine = orb_engine
+        self.ignition_engine = ignition_engine
         # Ignition S1 signal shadow (2026-07-19): journal-only, zero
         # orders, hard-isolated — any failure inside it is swallowed and
         # can NEVER perturb BF/ORB. IGNITION_SHADOW=0 to disable.
@@ -332,6 +334,13 @@ class RealtimeScanner:
                         logger.error(
                             f"MACD wave force-close raised: {e}", exc_info=True
                         )
+                if self.ignition_engine is not None:
+                    try:
+                        self.ignition_engine.force_close_all()
+                    except Exception as e:
+                        logger.error(
+                            f"Ignition force-close raised: {e}",
+                            exc_info=True)
                 if self.orb_engine is not None:
                     try:
                         self.orb_engine.force_close_all()
@@ -640,6 +649,11 @@ class RealtimeScanner:
                 self.macd_engine.force_close_all()
             if self.orb_engine is not None:
                 self.orb_engine.force_close_all()
+            if self.ignition_engine is not None:
+                try:
+                    self.ignition_engine.force_close_all()
+                except Exception as e:
+                    logger.error(f"Ignition shutdown close raised: {e}")
 
     def _macd_wave_tick(self) -> None:
         """One MACD wave engine cycle (scan + entries + exits).
@@ -671,6 +685,16 @@ class RealtimeScanner:
         self.orb_engine.check_exits()
         if self.orb_engine.is_force_close_time():
             self.orb_engine.force_close_all()
+        # Ignition S3 tick (fills/exits/15:45 flat) — piggybacks ORB's
+        # cadence and force-close clock; hard-isolated like the shadow
+        if self.ignition_engine is not None:
+            try:
+                self.ignition_engine.process_tick()
+                self.ignition_engine.check_exits()
+                if self.orb_engine.is_force_close_time():
+                    self.ignition_engine.force_close_all()
+            except Exception as e:
+                logger.error(f"Ignition tick raised: {e}", exc_info=True)
 
     def _orb_universe_source(self) -> List[str]:
         """Seed ORB with a BROAD candidate pool, then apply ORB's own BT-parity

@@ -428,3 +428,18 @@ ignition_shadow:
   gap_max_pct: 5.0            # open-gap >=5% = ORB territory (disjoint)
   min_cohort: 2
   max_evals_per_day: 150
+
+# Ignition S3 live micro-execution (2026-08-14 plan; amended spec).
+# Thin consumer of shadow triggers — selection parity by construction.
+# dry_run=true: full pipeline + [IGNITION DRY] telegrams, ZERO orders.
+# GO procedure (Wed 8/19, owner word): enabled: true + dry_run: false.
+ignition_live:
+  enabled: false
+  dry_run: true
+  risk_usd: 50
+  daily_kill_usd: -300
+  weekly_kill_usd: -750
+  max_concurrent: 15
+  max_notional_usd: 1500
+  entry_buffer_bps: 20
+  entry_timeout_s: 90

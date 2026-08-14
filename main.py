@@ -688,6 +688,20 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
             f"master_flag={orb_engine.enabled}, dry_run={orb_engine.dry_run}"
         )
 
+    # Ignition S3 live engine (2026-08-14 plan): thin consumer of shadow
+    # triggers — construction is unconditional (gates are internal:
+    # enabled/dry_run/IGNITION_LIVE), so flipping config needs no code.
+    ignition_engine = None
+    try:
+        from trading.ignition_engine import IgnitionEngine
+        ignition_engine = IgnitionEngine(
+            alpaca_client=alpaca, db=db, stop_monitor=stop_monitor,
+            notifier=notifier, cfg=config.ignition_live_cfg)
+        ignition_engine.sync_positions()
+    except Exception as e:
+        logger.error(f"IgnitionEngine init failed ({e}) — engine off; "
+                     f"shadow unaffected")
+
     mode_label = "paper" if alpaca.is_paper else "LIVE"
     strategies = []
     if enable_flag:
@@ -696,6 +710,9 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
         strategies.append("MACD Wave")
     if enable_orb and orb_engine is not None:
         strategies.append("ORB (paper)")
+    if ignition_engine is not None and ignition_engine.enabled:
+        strategies.append(
+            "Ignition (DRY)" if ignition_engine.dry_run else "Ignition")
     logger.info(f"Trading mode ACTIVE — {mode_label}, strategies: {', '.join(strategies)}")
 
     # Fix 4: Graceful shutdown via SIGTERM/SIGINT
@@ -729,7 +746,14 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
         shutdown_event=shutdown_event,
         macd_engine=macd_engine,
         orb_engine=orb_engine,
+        ignition_engine=ignition_engine,
     )
+
+    # Wire the shadow -> engine trigger callback (journal-first inside
+    # the shadow; engine errors can never block measurement)
+    if ignition_engine is not None and scanner.ignition_shadow is not None:
+        scanner.ignition_shadow.on_trigger = ignition_engine.enqueue_trigger
+        logger.info("Ignition: shadow->engine trigger callback wired")
 
     # Enable async news classification (non-blocking LLM calls)
     scanner.enable_async_news()
