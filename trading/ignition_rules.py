@@ -111,6 +111,43 @@ def catalyst_confirmed(has_news: Optional[bool], anchor: Optional[str],
     return bool(anchor) and trigger_cohort >= MIN_COHORT
 
 
+def trigger_entry_stop(g, day_open: float) -> dict:
+    """Reconstruct the BT trigger mechanics from an intraday df `g`
+    (columns m/open/high/low/close/volume, sorted, index reset, from
+    the 9:30 open). Returns a dict with either {'reject': reason} or
+    {'trigger_m','entry','stop','r_pct','next_idx','bar_dollar'}.
+
+    THE single source of trigger truth (2026-08-14): the shadow used to
+    compute chase/stop/R from the scanner SIGHTING price/minute, which
+    mis-evaluated late-sighted movers (8/13 CRWU/CWVX chase-skipped,
+    SMCL/SMCX r-too-small — 4 monster trades the BT kept, ~$8K). The BT
+    keys everything to the ACTUAL trigger bar (first window bar whose
+    high crossed the +10% level), not to when the scanner noticed."""
+    lvl = level(day_open)
+    trig = g[(g['high'] >= lvl) & (g['m'] >= TRIGGER_MIN_START)
+             & (g['m'] <= TRIGGER_MIN_END)]
+    if trig.empty:
+        return {'reject': 'skip_level_not_crossed'}
+    ti = trig.index[0]
+    nxt = g[g.index > ti]
+    if nxt.empty:
+        return {'reject': 'no_next_bar'}
+    nb = nxt.iloc[0]
+    entry = float(nb['open']) * ENTRY_SLIP
+    if chase_reject(entry, day_open):
+        return {'reject': 'skip_chase_guard'}
+    pre = g[(g['m'] >= g.loc[ti, 'm'] - 30) & (g['m'] < g.loc[ti, 'm'])]
+    if len(pre) < PRE_BARS_MIN:
+        return {'reject': 'skip_pre_bars'}
+    stop = stop_from_pre_lows(float(pre['low'].min()), entry)
+    rp = r_pct_from_stop(entry, stop)
+    if rp < R_MIN_PCT:
+        return {'reject': 'skip_r_too_small'}
+    return {'trigger_m': int(g.loc[ti, 'm']), 'entry': entry,
+            'stop': stop, 'r_pct': rp, 'next_idx': nb.name,
+            'bar_dollar': float(nb['volume']) * entry}
+
+
 def resim_exit(bars, entry: float, stop: float, entry_min: int):
     """Harness exit physics on a df with columns m/open/high/low/close.
     Conservative: stop before arm; gap-down fills at min(stop, open)."""

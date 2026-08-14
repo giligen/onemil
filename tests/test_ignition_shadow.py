@@ -104,36 +104,43 @@ class TestShadow:
         assert s._evals_today==0
         a.get_premarket_news_multi.assert_not_called()
 
+    def _tsbars(self, opens, highs, lows, closes, vols):
+        n=len(opens)
+        ts=pd.date_range('2026-07-20 13:30',periods=n,freq='1min',tz='UTC')
+        return pd.DataFrame({'timestamp':ts,'open':opens,'high':highs,
+                             'low':lows,'close':closes,'volume':vols})
+
     def test_participation_cap_bounds_position(self, tmp_path):
-        """BT parity: position <= 15% of latest-bar $vol (CPHI's $906
-        bar => $136 cap, not $19.7K)."""
+        """BT parity: position <= 15% of the trigger's NEXT-bar $vol
+        (2026-08-14: keyed to the trigger bar, not the last bar)."""
         s,a=_shadow(tmp_path)
-        bars=pd.DataFrame({'open':[9.0]+[10.0]*40,'high':[9.1]+[10.4]*40,
-                           'low':[8.9]+[9.4]*40,'close':[9.05]+[10.2]*40,
-                           'volume':[10000]*40+[50]})   # last bar: $510
-        a.get_1min_bars.return_value=bars
+        # all thin volume -> next-bar dollar tiny -> participation floors
+        a.get_1min_bars.return_value=self._tsbars(
+            [9.0]+[10.0]*40,[9.1]+[10.4]*40,[8.9]+[9.4]*40,
+            [9.05]+[10.2]*40,[50]*41)
         _fire(s,news=True)
         r=_recs(tmp_path)
         assert r[-1]['verdict']=='skip_illiquid'
         assert r[-1]['hypo_position_usd']<2000
-        assert r[-1]['participation_cap_usd']==pytest.approx(
-            0.15*50*10.2,abs=1)
 
     def test_chase_guard_skips_extended_entry(self, tmp_path):
-        """BT parity (7/24 audit): ask > open*1.155 -> the BT harness
-        refuses the entry (chase guard 5% past the +10% level)."""
+        """BT parity: chase is keyed to the TRIGGER bar's next-bar open,
+        not the sighting ask (2026-08-14 fix). Level=9.9, 1.05x=10.395;
+        next bar opens 11.0 -> entry 11.03 -> chase skip."""
         s,a=_shadow(tmp_path)
-        # open 9.0 -> max entry 10.395; ask fixture 10.05 passes, so
-        # raise the quote to force a chase violation
-        a.get_latest_quote.return_value={'bid_price':10.60,
-            'ask_price':10.65,'bid_size':5,'ask_size':7}
+        # bar5 (m575) crosses; bar6 opens 11.0 (a gap past the cap)
+        opens=[9.0]+[9.5]*4+[9.6,11.0]+[11.0]*34
+        highs=[9.1]+[9.6]*4+[9.95,11.2]+[11.2]*34
+        lows=[8.9]+[9.4]*4+[9.5,10.9]+[10.9]*34
+        closes=[9.05]+[9.55]*4+[9.9,11.1]+[11.1]*34
+        a.get_1min_bars.return_value=self._tsbars(
+            opens,highs,lows,closes,[10000]*41)
         _fire(s,news=True)
         r=_recs(tmp_path)
         assert r[-1]['verdict']=='skip_chase_guard'
-        assert r[-1]['chase_ratio']==pytest.approx(10.65/9.0,abs=1e-3)
 
     def test_within_chase_bound_still_triggers(self, tmp_path):
-        s,a=_shadow(tmp_path)   # ask 10.05 vs open 9.0 = 1.117x -> OK
+        s,a=_shadow(tmp_path)   # default bars: next-bar entry within cap
         _fire(s,news=True)
         assert _recs(tmp_path)[-1]['verdict']=='SHADOW_TRIGGER'
 

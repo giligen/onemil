@@ -241,3 +241,16 @@ so shadow semantics are the live-honest ones) + IREX catalyst-drop =
 CASCADE of same class (cohort partner IREG was the pos_lt_2k). No new
 bug classes. Cumulative: **+$8,881**. Gates met (5-day +$20,319).
 S3 awaiting GO, day 3.
+
+### 8/14 — WEEK-3 RECONCILE + LATE-SIGHTING PARITY FIX
+Gap: Claude EOD deep-dives went dark 8/10-8/13 (session idle); mechanical
+reports ran throughout. Reconcile found a NEW parity bug on 8/13: shadow
+missed 4 BT monsters (CRWU/CWVX chase-skip, SMCL/SMCX r-too-small, ~$8K)
+because it computed chase/stop/R from the SCANNER SIGHTING price/minute,
+while the BT keys to the ACTUAL trigger bar. Fixed: trigger mechanics
+extracted to ignition_rules.trigger_entry_stop() (shared by shadow +
+replay logic); shadow _finalize now reconstructs the trigger bar from
+fetched bars. Verified: all 4 now trigger. Deploys 8/14 12:30.
+BT-parity cumulative since 7/20: ~+$1,300 (abandon gate -$23K NOT
+breached; the 8/13 -$8K was mostly the now-fixed miss + a genuine red).
+Gates still met. S3 STILL awaiting owner GO (never started — no live $).

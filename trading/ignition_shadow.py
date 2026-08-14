@@ -415,42 +415,46 @@ class IgnitionShadow:
                         # (spam control lives in _eval: re-finalize only
                         # fires when sighting price >= level)
                         self._await_level[symbol] = rec
-                pre = bars.tail(31)
-                stop = _rules.stop_from_pre_lows(
-                    float(pre['low'].min()), rec['price'])
-                r_pct = max(_rules.r_pct_from_stop(rec['price'], stop),
-                            1.0)
+                if gates_ok:
+                    # TRIGGER-BAR mechanics via the shared rules (2026-
+                    # 08-14): chase/stop/R keyed to the ACTUAL trigger
+                    # bar, NOT the scanner sighting price — a late
+                    # sighting no longer mis-skips a monster the BT
+                    # takes (8/13 CRWU/CWVX/SMCL/SMCX, ~$8K).
+                    try:
+                        # FULL RTH bars (not the [575,630] window slice):
+                        # the trigger bar's 30-min pre-window looks back
+                        # before 9:35, and the exit resim runs forward
+                        _g = bars.copy()
+                        _g['m'] = _m
+                        _g = _g[(_g['m'] >= 570) & (_g['m'] < 960)] \
+                            .sort_values('m').reset_index(drop=True)
+                        tr = _rules.trigger_entry_stop(_g, day_open)
+                    except Exception as e:
+                        logger.warning(f"ignition-shadow: trigger recon "
+                                       f"failed {symbol}: {e}")
+                        tr = {'reject': 'no_bars'}
+                    if 'reject' in tr:
+                        rec['verdict'] = tr['reject']
+                        gates_ok = False
+                    else:
+                        r_pct = tr['r_pct']
+                        rec['_entry'] = round(tr['entry'], 4)
+                        rec['_stop'] = round(tr['stop'], 4)
+                        rec['trigger_m'] = tr['trigger_m']
+                        _bar_dollar = tr['bar_dollar']
         except Exception as e:
             rec['bars_error'] = str(e)[:80]
         rec['r_pct'] = round(r_pct, 2) if r_pct else None
         self._capture_quote(rec)
         if not gates_ok:
             return self._journal(rec)
-        # BT chase guard (2026-07-24 audit: never ported from the
-        # latency-honest harness — 4/16 week-1 triggers were entries the
-        # BT refuses): entry must not exceed 5% past the +10% level,
-        # i.e. ask <= day_open * 1.10 * 1.05.
-        _ask = rec.get('ask') or rec['price']
-        _open = rec.get('day_open')
-        if _open and _ask > _open * 1.10 * 1.05:
-            rec['verdict'] = 'skip_chase_guard'
-            rec['chase_ratio'] = round(_ask / _open, 4)
-            return self._journal(rec)
         if r_pct is None:
             rec['verdict'] = 'no_bars'
             return self._journal(rec)
-        if r_pct < self.min_r_pct:
-            rec['verdict'] = 'skip_r_too_small'
-            return self._journal(rec)
         # sizing via shared rules (participation-capped; the book's live
         # proxy for its EOD day-dollar universe gate)
-        try:
-            lb = bars.iloc[-1]
-            bar_dollar = float(lb['volume']) * float(lb['close'])
-        except Exception as e:
-            logger.warning(f"ignition-shadow: bar dollar failed for "
-                           f"{symbol}: {e}")
-            bar_dollar = 0.0
+        bar_dollar = locals().get('_bar_dollar', 0.0) or 0.0
         pos = _rules.position_usd(r_pct, bar_dollar)
         rec['participation_cap_usd'] = round(
             _rules.PARTICIPATION * bar_dollar, 0)
@@ -497,8 +501,13 @@ class IgnitionShadow:
         rec = dict(rec)
         rec['catalyst'] = catalyst_kind
         rec['verdict'] = 'SHADOW_TRIGGER'
-        rec['hypo_entry'] = rec.get('ask') or rec['price']
-        rec['hypo_stop'] = round(rec['price'] * (1 - r_pct / 100.0), 4)
+        # trigger-bar entry/stop (BT-parity) when reconstruction ran;
+        # fall back to sighting-derived for late-confirm re-fires that
+        # carry a pre-computed r_pct only
+        rec['hypo_entry'] = rec.get('_entry') or rec.get('ask') \
+            or rec['price']
+        rec['hypo_stop'] = rec.get('_stop') or round(
+            rec['price'] * (1 - r_pct / 100.0), 4)
         rec['hypo_position_usd'] = round(pos, 0)
         logger.info(
             f"[IGNITION-SHADOW] TRIGGER {rec['symbol']} "
