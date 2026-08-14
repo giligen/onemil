@@ -254,3 +254,12 @@ fetched bars. Verified: all 4 now trigger. Deploys 8/14 12:30.
 BT-parity cumulative since 7/20: ~+$1,300 (abandon gate -$23K NOT
 breached; the 8/13 -$8K was mostly the now-fixed miss + a genuine red).
 Gates still met. S3 STILL awaiting owner GO (never started — no live $).
+
+### 8/14 — FULL LEDGER RE-MEASUREMENT (owner asked "reset due to bug?")
+All 19 days re-run through the FINAL instrument: **+$7,790** cumulative
+(vs +$5,350 running tally). Gates re-evaluated on clean ledger: GO(a)
++$23.4K window MET, GO(b) CRWU +3.23R MET, abandon trough -$16.5K never
+near -$23K. VERDICT: no strategy-ledger reset (evidence is replay-based,
+instrument-independent). CAPTURE CLOCK RESET instead: S3 GO now requires
+3 consecutive days with ZERO unexplained bt-only misses under the
+trigger-bar fix (deployed 8/14). Earliest S3: Wed 8/19.
