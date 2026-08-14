@@ -159,3 +159,38 @@ def test_missing_range_bars_returns_no_trade():
     t = simulate_orb_trade(bars, 'T', '2026-03-15', 'test', range_minutes=5,
                            entry_slip_bps=0, exit_slip_bps=0, position_size_usd=10000)
     assert not t.entered
+
+
+class TestSessionOpenTimestampDST:
+    """8/14 P0: winter (EST) days must anchor the range at 9:30 ET, not
+    the 8:30 ET premarket bar (13:30 UTC in EST == premarket; the old
+    hour-in-{13,14} mask grabbed it whenever premarket bars were cached
+    — contaminated ~$155K of the $251K book across both winters)."""
+
+    def _bars(self, utc_times):
+        import pandas as pd
+        return pd.DataFrame({
+            'timestamp': pd.to_datetime(utc_times, utc=True),
+            'open': 10.0, 'high': 10.5, 'low': 9.5, 'close': 10.2,
+            'volume': 1000})
+
+    def test_est_day_picks_930_not_premarket(self):
+        from study_orb import _session_open_timestamp
+        # 2025-01-03 (EST): 13:30 UTC = 8:30 ET premarket, 14:30 UTC = 9:30 ET
+        bars = self._bars(['2025-01-03 13:30:00', '2025-01-03 13:31:00',
+                           '2025-01-03 14:30:00', '2025-01-03 14:31:00'])
+        ts = _session_open_timestamp(bars)
+        assert str(ts) == '2025-01-03 14:30:00+00:00'
+
+    def test_edt_day_picks_1330_utc(self):
+        from study_orb import _session_open_timestamp
+        # 2025-06-02 (EDT): 13:30 UTC = 9:30 ET
+        bars = self._bars(['2025-06-02 12:30:00', '2025-06-02 13:30:00',
+                           '2025-06-02 13:31:00'])
+        ts = _session_open_timestamp(bars)
+        assert str(ts) == '2025-06-02 13:30:00+00:00'
+
+    def test_no_rth_bars_returns_none(self):
+        from study_orb import _session_open_timestamp
+        bars = self._bars(['2025-01-03 13:30:00'])   # premarket only
+        assert _session_open_timestamp(bars) is None

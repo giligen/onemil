@@ -141,19 +141,23 @@ def _bars_to_df(bars: List[dict]) -> pd.DataFrame:
 def _session_open_timestamp(bars_df: pd.DataFrame) -> Optional[pd.Timestamp]:
     """Find the bar timestamp for 9:30 ET (the first regular-session bar).
 
-    Alpaca timestamps are UTC and bar-START. 9:30 ET = 13:30 or 14:30 UTC
-    (EDT vs EST). The bars we cache include premarket, so we pick the FIRST
-    bar at minute 30 past the hour that corresponds to market open.
+    2026-08-14 P0 FIX (found by the bar-1 fill study): the old mask took
+    the FIRST bar with minute==30 and hour in {13,14} UTC. In EDT season
+    13:30 UTC = 9:30 ET (correct), but in EST season 13:30 UTC = 8:30 ET
+    PREMARKET — and because cached bars include premarket, every winter
+    day silently used the 8:30-8:34 premarket bars as its "opening
+    range" (verified: CRNC 2025-01-03 book entry 10.42 = premarket high
+    10.39 x 1.003; the TRUE 9:30 range high was 11.76). ~40/236 book
+    trades (~$155K of the $251K book, 10/24 monsters) were computed off
+    ranges live can never see. Fix: exact 09:30 ET wall time via tz
+    conversion (the logic study_orb_pipeline_static_lock.py always
+    had). Requires `orb_backtest.py --force-full-regen` to purge the
+    contaminated feature rows.
     """
     if bars_df.empty:
         return None
-    # Market open ET = 9:30. In UTC:
-    #   EDT (Mar-Nov): 13:30
-    #   EST (Nov-Mar): 14:30
-    # Pick the first bar where hour+minute matches either.
-    mask = (bars_df['timestamp'].dt.minute == 30) & (
-        bars_df['timestamp'].dt.hour.isin([13, 14])
-    )
+    et = bars_df['timestamp'].dt.tz_convert('America/New_York')
+    mask = (et.dt.hour == 9) & (et.dt.minute == 30)
     if not mask.any():
         return None
     return bars_df.loc[mask, 'timestamp'].iloc[0]
