@@ -263,3 +263,20 @@ near -$23K. VERDICT: no strategy-ledger reset (evidence is replay-based,
 instrument-independent). CAPTURE CLOCK RESET instead: S3 GO now requires
 3 consecutive days with ZERO unexplained bt-only misses under the
 trigger-bar fix (deployed 8/14). Earliest S3: Wed 8/19.
+
+## S3 SPEC — AMENDED (owner-approved 2026-08-14)
+Supersedes the 7/24 "$100-150 risk, <=2/day" proposal. Rationale: any
+trade-count truncation breaks parity with the shadow/BT (first-2 missed
+CRWU +3.23R by 60s on 8/3; 2wk micro P&L +$224 truncated vs +$624
+take-all) and destroys the 1:1 fill-vs-shadow comparison S3 exists for.
+- Selection: take ALL catalyst-confirmed triggers — IDENTICAL rule to
+  shadow and BT (parity by construction; no truncation).
+- Risk: $50/trade (position = $50 / stop-distance%; typically ~$300-
+  $1,000 notional per stock, ~$420 at the median R of 12%).
+- Kills: -$300 daily (EMERGENCY brake = 6 consecutive full stops, not a
+  designed truncation), -$750 weekly. 15:45 force-flat unchanged.
+- Expected P&L character: book / 60 by construction. S3 is judged on
+  FILL QUALITY vs shadow-journaled quotes (slippage, fill rate,
+  latency), NOT on P&L.
+- Start condition unchanged: 3 consecutive clean-capture days under the
+  8/14 trigger-bar fix, then owner GO. Earliest: Wed 2026-08-19.
