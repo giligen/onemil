@@ -142,18 +142,30 @@ def _ramp_start_date() -> Optional[date]:
 
 
 def _last_ramp_commit_date() -> Optional[date]:
-    """Date of the most recent commit touching orb.yaml with 'ORB ramp:' prefix.
-    Used to compute days-in-current-stage."""
+    """Date of the most recent 'ORB ramp:' commit — the stage-entry marker.
+    Used to compute days-in-current-stage AND the stage P&L window.
+
+    8/14 audit fix: the old version filtered by path `-- orb.yaml`, but
+    orb.yaml is GITIGNORED — no commit ever touches it, so this always
+    returned None and the 'stage' silently became the whole ramp. That
+    blended Pre-0 profit into Stage-0 P&L (+$2,057 flattering a true
+    −$6,973 to −$4,917) — pro-advancement bias on the above-water rule."""
     try:
         out = subprocess.check_output(
-            ['git', 'log', '--format=%ci', '--grep=ORB ramp:', '-n', '1',
-             '--', str(ORB_YAML)],
+            ['git', 'log', '--format=%ci|%s', '--grep=ORB ramp:', '-n', '20'],
             cwd=ROOT, text=True, stderr=subprocess.DEVNULL,
         ).strip()
         if not out:
             return None
-        # '%ci' = "2026-04-24 15:30:00 +0000" — take the date portion
-        return date.fromisoformat(out.split()[0])
+        for line in out.splitlines():
+            ci, _, subject = line.partition('|')
+            # Only STAGE-TRANSITION commits mark stage entry ('→ Stage N'
+            # / 'Stage N (live launch)') — 'ORB ramp:' policy commits
+            # (e.g. 9669c02 operational-gate adoption) do not.
+            if '→ Stage' in subject or 'live launch' in subject:
+                # '%ci' = "2026-06-04 06:33:05 +0000" — date portion
+                return date.fromisoformat(ci.split()[0])
+        return None
     except Exception:
         return None
 
@@ -249,6 +261,11 @@ def main():
 
     trades = _realized_pnl_series(ramp_start)
     cushion = sum(pnl for _, pnl in trades)
+    # STAGE-scoped P&L for the advancement/demotion gates (8/14 audit
+    # fix: gating on the whole-ramp cushion blended Pre-0 profit into
+    # "stage P&L" — pro-advancement bias on the above-water rule).
+    # Whole-ramp cushion is still what the hard stop keys on.
+    stage_pnl = sum(pnl for d, pnl in trades if d >= stage_change_date)
 
     # Aggregate to per-day for consecutive-red and peak tracking
     by_day: dict = {}
@@ -275,19 +292,19 @@ def main():
     if next_stage is not None and stage.min_days_in_stage is not None:
         # Loss floor (replaces cushion): block only if performing WORSE
         # than one full losing week at stage size.
-        if cushion < stage.advance_loss_floor:
+        if stage_pnl < stage.advance_loss_floor:
             advance_blockers.append(
-                f"stage P&L ${cushion:,.0f} below loss floor "
+                f"stage P&L ${stage_pnl:,.0f} below loss floor "
                 f"${stage.advance_loss_floor:,.0f} (-1x weekly loss budget)"
             )
         # Above-water rule (owner decision 2026-07-23): never advance a
         # stage while realized stage P&L is negative — advance on proof,
         # and proof includes being ahead. Stricter than the loss floor;
         # both checked so the blocker messages stay specific.
-        if cushion < 0:
+        if stage_pnl < 0:
             advance_blockers.append(
-                f"stage P&L ${cushion:,.0f} under water — hold until "
-                f"realized cushion > 0 (owner rule 2026-07-23)"
+                f"stage P&L ${stage_pnl:,.0f} under water — hold until "
+                f"realized stage P&L > 0 (owner rule 2026-07-23)"
             )
         if stage.min_days_in_stage and days_in_stage < stage.min_days_in_stage:
             advance_blockers.append(
@@ -320,9 +337,9 @@ def main():
     # --- Demotion triggers (2026-07-06: operational failures OR deep
     # loss floor ONLY — BT-consistent drawdown is NOT a trigger) ---
     demote_triggers = []
-    if cushion < stage.demote_loss_floor:
+    if stage_pnl < stage.demote_loss_floor:
         demote_triggers.append(
-            f"stage P&L ${cushion:,.0f} below demotion floor "
+            f"stage P&L ${stage_pnl:,.0f} below demotion floor "
             f"${stage.demote_loss_floor:,.0f} (-2x weekly loss budget)"
         )
     if consec_red >= 5:
@@ -345,7 +362,8 @@ def main():
           f"(budget=${stage.account_budget_usd:,}, risk=${stage.risk_per_trade_usd:,}/trade)")
     print(f"Stage entered:          {stage_change_date} "
           f"({days_in_stage} trading days ago)")
-    print(f"Realized P&L (cushion): ${cushion:+,.2f}")
+    print(f"Realized P&L (ramp):    ${cushion:+,.2f}")
+    print(f"Realized P&L (STAGE):   ${stage_pnl:+,.2f}  <- gates key on this")
     print(f"Peak realized:          ${peak:+,.2f}")
     print(f"Current DD from peak:   ${drawdown_from_peak:+,.2f}  "
           f"({drawdown_from_peak / peak * 100 if peak else 0:+.1f}%)")

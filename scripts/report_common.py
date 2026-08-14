@@ -674,13 +674,30 @@ def read_streak(path: Path = STREAK_PATH) -> Optional[Dict]:
 # P&L helpers
 # ---------------------------------------------------------------------------
 
+def _row_pnl(r: Dict) -> Optional[float]:
+    """One closed row's realized P&L. Prefer the recorded `pnl`; else
+    recompute from the FILL price and filled qty. 8/14 audit P2: the old
+    `(exit-entry_price)*shares` used the PLANNED entry — every daily
+    Telegram P&L line was off by entry slippage (8/13 LUNL: reported
+    +$34 for a −$29.44 trade) and ignored partial fills."""
+    if r.get('pnl') is not None:
+        return float(r['pnl'])
+    if r.get('exit_price') is None:
+        return None
+    entry = r.get('fill_price') or r.get('entry_price')
+    if entry is None:
+        return None
+    qty = r.get('filled_qty') or r.get('shares') or 0
+    return (float(r['exit_price']) - float(entry)) * qty
+
+
 def realized_pnl(day: str) -> Dict[str, float]:
     """Realized P&L per strategy for a date (closed rows only)."""
     out: Dict[str, float] = {}
     for r in load_live_rows(day):
-        if r.get('exit_price') is None or r.get('entry_price') is None:
+        pnl = _row_pnl(r)
+        if pnl is None:
             continue
-        pnl = (r['exit_price'] - r['entry_price']) * (r.get('shares') or 0)
         out[r.get('strategy') or '?'] = out.get(r.get('strategy') or '?', 0.0) + pnl
     return out
 
@@ -688,7 +705,10 @@ def realized_pnl(day: str) -> Dict[str, float]:
 def cumulative_orb_since(start: str) -> float:
     conn = sqlite3.connect(ROOT / 'data' / 'trades.db', timeout=15)
     row = conn.execute(
-        """SELECT COALESCE(SUM((exit_price-entry_price)*shares), 0)
+        """SELECT COALESCE(SUM(
+                 COALESCE(pnl,
+                          (exit_price - COALESCE(fill_price, entry_price))
+                          * COALESCE(filled_qty, shares))), 0)
            FROM trades WHERE strategy='orb' AND trade_date >= ?
              AND exit_price IS NOT NULL""", (start,)).fetchone()
     conn.close()
