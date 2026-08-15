@@ -291,7 +291,7 @@ ORB analysis; the older ones have warning headers pointing to the shipped varian
 
 **Exit mechanics**:
 - Initial stop: `range_low`
-- **Static lock**: after price touches +1.5R, stop moves to +1R forever (no trailing). StopMonitor has new `lock_arm_at_r` + `lock_stop_r` fields on WatchEntry.
+- **Static lock**: after price touches +1.75R, stop moves to +0.5R forever (no trailing; orb.yaml `exit.lock_arm_at_r: 1.75` / `lock_stop_r: 0.5` — 2026-05-08 BT-validated upgrade from the earlier 1.5R/1R). StopMonitor has `lock_arm_at_r` + `lock_stop_r` fields on WatchEntry.
 - No fixed target: hold until stop/lock hit OR 15:45 ET force close
 
 **Feature flag + rollback**:

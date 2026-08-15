@@ -59,6 +59,10 @@ def engine(monkeypatch):
     with open(Path(__file__).parent.parent / 'orb.yaml') as f:
         cfg = yaml.safe_load(f)
     cfg['strategy']['enabled'] = True
+    # This e2e exercises the PM/news-gated sizing path (LOUD -> 2.0x). B+
+    # 2026-08-15 ships PM OFF by default; enable it here so the feature-under-
+    # test runs (the pm-disabled scenario has its own test below).
+    cfg['sizing']['pm_dollar_vol_mult']['enabled'] = True
     alpaca = MagicMock(spec=AlpacaClient)
     alpaca.get_latest_quote.return_value = {'bid_price': 9.80, 'ask_price': 9.82,
                                             'bid_size': 10, 'ask_size': 10}
@@ -135,10 +139,12 @@ class TestMorningSequence:
         out = _at(engine, 9, 35, 20, engine.check_entries,
                   feature_providers=providers)
 
-        # exactly one submission (LOUD); the three quiet-prev-day picks vetoed
+        # exactly one submission (LOUD). B+ 2026-08-15: max_concurrent=3, so
+        # the top-3 by composite are LOUD/Q3/Q2 (all Q5); Q1 doesn't make the
+        # cut (never reaches the veto). Q2/Q3 (quiet prev day) are PDR-vetoed.
         assert out == ['LOUD']
         assert engine.alpaca.submit_stop_bracket_order.call_count == 1
-        assert engine._pdr_vetoed_today == {'Q1', 'Q2', 'Q3'}
+        assert engine._pdr_vetoed_today == {'Q2', 'Q3'}
         kw = engine.alpaca.submit_stop_bracket_order.call_args.kwargs
         assert kw['qty'] > 0
         # sizing attribution persisted for EoD validation: the DB record's
@@ -150,7 +156,7 @@ class TestMorningSequence:
         assert pdata['has_news'] is True
         assert pdata['pm_dollar_vol'] == pytest.approx(9_000_000)
 
-        # ---- 9:36 burst: slots saturated (1 entered + 3 vetoed = 4) ----
+        # ---- 9:36 burst: slots saturated (1 entered + 2 vetoed = 3 = N) ----
         engine._symbols_entered_today_db = MagicMock(return_value={'LOUD'})
         engine._process_pending_fills = MagicMock()
         out = _at(engine, 9, 36, 0, engine.check_entries,

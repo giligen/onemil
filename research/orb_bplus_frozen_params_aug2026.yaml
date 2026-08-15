@@ -1,0 +1,149 @@
+# =============================================================================
+# FROZEN parameter set — B+ + G1+STAG+MID combo book at $10K
+# Authoritative source: drag-program synthesis run of 2026-08-15
+# (research/orb_drag_program_aug2026.md; book = +$11,609.77 / 81 trades,
+# verified reproducible from these constants on repaired data).
+# These values are FROZEN. They may be LOOSENED but never TIGHTENED without a
+# new walk-forward (sensitivity asymmetry, synthesis report section 3).
+# NO refits at deploy time: the z-params, threshold and quintile cutoffs below
+# are constants, not procedures.
+# =============================================================================
+
+meta:
+  derived_from: analysis_results/orb_features_20260814_1741.csv  # DST-clean, post 12-pair repair
+  train_window: {start: 2025-01-01, end: 2025-06-30}   # 1,864 candidate rows
+  book_verified: {total_usd: 11609.77, trades: 81, mdd_usd: -657, months_green: 13, months_total: 20}
+  resim_harness: research/scripts/orb_clean_harness.py  # + scratchpad midflight_harness.py overlays
+
+# -----------------------------------------------------------------------------
+# 1. SELECTION — TRAIN-refit composite (replaces the shipped orb.yaml z-fit)
+# -----------------------------------------------------------------------------
+selection:
+  # composite = mean over the 7 features of sign * (x - mean) / std
+  # (equal weights 1/7 — there are NO per-feature weights beyond sign)
+  features:
+    gap_pct:                 {mean: 133.273200161459,    std: 1515.341490804868,   sign: -1}
+    range_total_volume:      {mean: 971724.893776823999, std: 2202032.830765132792, sign: -1}
+    range_avg_bar_range_pct: {mean: 2.001194835481,      std: 1.567884658140,      sign: -1}
+    range_size_pct:          {mean: 5.006307894562,      std: 4.087268230365,      sign: -1}
+    price_vs_20d_high_pct:   {mean: 13.345822987901,     std: 276.546640900593,    sign: -1}
+    prev_day_close_position: {mean: 0.498689946893,      std: 0.296628703453,      sign: -1}
+    range_close_position:    {mean: 0.579094891028,      std: 0.297908189023,      sign: 1}
+  # std fitted with ddof=0, floored at 1e-9; candidates with any NaN among the
+  # 7 features (or pnl/date/range_size_pct/entry_price) are dropped pre-scoring.
+  composite_threshold: 0.012081536791   # the FROZEN q40-of-TRAIN value. keep if composite >= this
+  # Quintile logic STILL APPLIES on top of the threshold:
+  #  - cutoffs fitted on TRAIN composites >= threshold (20/40/60/80th pct):
+  quintile_cutoffs: [0.107384942420, 0.194230490420, 0.287618573598, 0.397035743689]
+  # Q1 = composite < cutoff[0] ... Q5 = >= cutoff[3]  (assign: first cutoff x < c)
+  skip_q1: true                 # keep_quintiles = [Q2, Q3, Q4, Q5]
+  ranking: q4_first             # per-day order: Q4 bucket first, then Q5, Q3, Q2, Q1;
+                                # composite DESC within bucket (shipped ranking, unchanged)
+  dedup: family_and_super_group # shipped family + lev_short/lev_long dedup, unchanged
+
+# -----------------------------------------------------------------------------
+# 2. B+ BOOK CONFIG (deltas vs current orb.yaml explicitly marked)
+# -----------------------------------------------------------------------------
+account:
+  budget_usd: 10000
+  risk_per_trade_usd: 375
+  max_concurrent: 3             # N=3: top-3 picks/day after dedup (orb.yaml has 4)
+  per_position_cap_usd: 3333.33 # budget / N (harness: account/n_per_day, then shares=floor(cap_or_risk_position/entry))
+  min_stop_pct_for_sizing: 1.0  # position = risk / max(range_size_pct,1.0)%, capped at per_position_cap
+sizing:
+  adaptive_quintile_mults: uniform_1.0   # ALL quintiles 1.0 (orb.yaml adaptive mults OFF)
+  pm_dollar_vol_mult: OFF                # entire PM/news mult stack disabled (mult = 1.0 always)
+vetoes:
+  prev_day_range_veto: {enabled: true, min_prev_day_range_pct: 11.0}  # orb.yaml has 8.0
+  catalyst_veto: {enabled: true, min_cohort: 2}                       # unchanged from shipped
+  # both remain post-ranking, slot consumed, NO refill
+
+# -----------------------------------------------------------------------------
+# 3. G1 VOLATILITY-FINGERPRINT VETO (new)
+# -----------------------------------------------------------------------------
+g1_veto:
+  return_volatility_20d_min: 7.106   # stddev(prior-20d close-to-close returns)*100, study_orb_features.py:312
+  prev_day_range_pct_min: 9.226      # same feature the PDR veto uses
+  logic: AND                         # veto unless BOTH >= their minimum
+  stage: post_ranking_pre_submit     # CONFIRMED: after ranking/dedup, before order submit;
+  refill: false                      # slot consumed — NO refill (same invariant as PDR/catalyst)
+  fail_open:                         # these conditions PASS the trade (never veto on unknown):
+    - return_volatility_20d is NaN/missing
+    - prev_day_range_pct is NaN/missing
+    - return_volatility_20d == 0.0   # zero-filled = history too short to certify
+  # NOTE: prev_day_range_pct == 0.0 is treated as REAL (vetoed) — only rv20==0 is a missing-marker.
+  # NOTE: under pdr_veto 11.0 the PDR>=9.226 leg is subsumed; keep both coded anyway
+  # (deliberate-rules principle; protects against future pdr_veto changes).
+
+# -----------------------------------------------------------------------------
+# 4. STAG — stagnation time-stop (new; exactly as simulated)
+# -----------------------------------------------------------------------------
+stagnation_stop:
+  mfe_required_R: 0.25
+  window_min: 20
+  R_definition: range_high - range_low   # the 9:30-9:35 opening range (rsize), NOT entry-stop distance
+  entry_price_definition: range_high * 1.003   # BT entry (30bps stop-limit band)
+  mfe_source: bar_highs                  # running max of 1-min bar HIGHS, INCLUDING the
+                                         # breakout bar's high and INCLUDING the evaluation bar's high
+  clock_start: market_breakout_bar       # BT semantics: bar-start minute of the FIRST 1-min bar
+                                         # with high > range_high (strict >) in the 9:35-10:35 window.
+                                         # LIVE DEVIATION (required): key to ACTUAL FILL time and reuse
+                                         # the touchgo late-fill guard (max_breakout_age_min pattern);
+                                         # parity test mandatory before enable.
+  evaluation: first_bar_close_at_or_after_boundary  # single check, one-shot:
+      # at each 1-min bar close, if (bar_start_minute - clock_start_minute) >= 20  [INCLUSIVE >=]
+      # and the check has not run yet: if running_MFE < entry + 0.25*R -> exit; else disarm forever.
+  precedence_within_bar: [lock_arm_on_high, stop_on_low, mfe_update, stag_check]
+      # if the bar's low hits the stop, the stop exit wins; stag never evaluated that bar
+  exit_mechanics: market_at_evaluation_bar_close   # simulated fill = that bar's close * (1 - 0.0010)
+  interaction: only_reached_if_touchgo_did_not_fire  # touchgo rules M/D evaluated first (bars 0/1)
+
+# -----------------------------------------------------------------------------
+# 5. MID — SPY context stop-tighten (new; exactly as simulated)
+# -----------------------------------------------------------------------------
+spy_stop_tighten:
+  drop_pct: 0.75
+  anchor: open_of_first_SPY_1min_bar_at_or_after_0935_ET   # normally the 09:35:00 bar's OPEN
+  trigger: first_SPY_bar_low <= anchor * (1 - 0.0075)      # bar LOW, not close
+  evaluation_window_ET: {start: "09:35", end: "15:59"}
+  effect: stop = max(current_stop, entry_fill_price)       # per-share raw fill price, NO fees/slippage added;
+                                                           # never lowers a stop
+  applies_to: all_open_ORB_positions_from_trigger_minute_onward   # including positions opened AFTER the
+                                                           # trigger (BE floor from their first evaluated bar)
+  lock_interaction: no_op_if_lock_armed                    # armed 1.75R lock stop (entry+0.5R) > entry, max() keeps it
+  arming: one_shot_per_day_latched                         # single trigger minute per day; once applied to a
+                                                           # position it is permanent; no re-arm, no reset
+  data: SPY 1-min SIP bars (live: stream subscription; BT gap-filled 136 missing cache days from Alpaca)
+
+# -----------------------------------------------------------------------------
+# 6. EXIT BASE (unchanged from shipped orb.yaml — NOT 1.5/1.0)
+# -----------------------------------------------------------------------------
+exit_base:
+  static_lock: {arm_at_R: 1.75, locked_stop_R: 0.5}   # orb.yaml 2026-05-08 values the book used
+  initial_stop: range_low
+  force_close_ET: "15:45"    # eod exit = close of last 1-min bar with start-minute <= 15:45, *(1-0.0010)
+  touchgo:                   # shipped defaults, ON
+    rule_m: {enabled: true, threshold: 0.5}     # breakout-bar close_pos < 0.5 -> exit at that bar close
+    rule_d: {enabled: true, revert_R: 0.75, exit_R: -0.5}  # bar-1 low <= entry-0.75R -> exit at entry-0.5R
+    breakout_bar_source: market
+  entry_window: {start_ET: "09:35", auto_cancel_after_min: 60}   # breakout searched 09:35-10:35
+
+# -----------------------------------------------------------------------------
+# 7. SIMULATION ASSUMPTIONS live must replicate or consciously deviate from
+# -----------------------------------------------------------------------------
+simulation_assumptions:
+  bars: 1-min SIP (cache.db), evaluation at completed-bar granularity only
+  entry_fill: range_high * (1 + 0.0030)   # fills whenever any bar high > range_high in the window
+                                          # (no queue/partial-fill modeling; live uses stop-limit at same band)
+  exit_slippage_bps: 10                   # applied to EVERY exit price (stop/lock/eod/touchgo/stag/timecut)
+  entry_slippage: none_beyond_30bps_band
+  fees_commissions: none
+  shares: floor(position_usd / entry_price), integer, no fractional
+  intrabar_precedence: arm_before_stop    # same-bar lock-arm honored before the stop check (mildly optimistic);
+                                          # stag/MID raises happen before the stop check on their bar
+  concurrency: selection-level top-3/day  # no intraday slot dynamics; killed/vetoed picks never refill
+  known_gaps_for_live:
+    - stag clock keyed to market breakout bar in BT; live must key to fill + late-fill guard (parity test)
+    - MID assumes stop amendment is instantaneous at SPY bar close; live path via StopMonitor amend
+    - BT news source for catalyst veto = data/research/orb_news_catalyst_*.csv; live = Alpaca/Benzinga fetch
+    - G1 rv20/pdr computed from the same daily-bars fetch the PDR veto uses; fail-open on fetch failure (loud WARNING)

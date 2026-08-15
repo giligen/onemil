@@ -158,3 +158,15 @@ class); pool-level Benzinga lag audit; news-boost frequency by class.
    with a WARNING; nothing in the sizing stack may delay entry >8s.
 6. **Era-consistency over magnitude**: a smaller edge in all 3 eras
    beats a bigger edge in 2 of 3.
+
+## OWNER ORDER 2026-08-14: ORB LIVE = ZERO
+Owner: "Go to zero" (after the DST session-open bug voided all BT-derived
+param evidence — see research/orb_clean_rederivation_aug2026.md).
+Executed 2026-08-14 21:03 UTC: orb.yaml strategy.enabled=false, service
+restarted, engine verified enabled=False (bar intake + entry submission
+hard-gated at orb_engine.py:932/:1564). Positions flat, zero ORB rows 8/14.
+RE-ENTRY BAR: owner-approved rebuilt param set at $10K budget, derived on
+clean data with walk-forward evidence (candidates: B+/D+ per the clean
+re-derivation; drag-reduction program running). Preconditions for any live
+dollar: <=5s order-latency fix, 1 month forward validation, Nov-2026
+first-EST-week live-vs-BT parity audit.

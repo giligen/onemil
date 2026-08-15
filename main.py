@@ -683,6 +683,13 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
             logger.info("ORB: bar handler registered on shared StopMonitor")
         # Restart-safe: rehydrate any open ORB positions on the paper account.
         orb_engine.sync_positions()
+        # PDT guard (B+ 2026-08-15): read the ORB account type once at boot so
+        # the account type is logged in the init lines and the day-trade counter
+        # is armed before the first 9:35 entry check (never raises).
+        try:
+            orb_engine.init_account_guards()
+        except Exception as e:
+            logger.warning(f"ORB init_account_guards failed at boot: {e}")
         logger.info(
             f"ORB strategy ENABLED — "
             f"master_flag={orb_engine.enabled}, dry_run={orb_engine.dry_run}"

@@ -220,7 +220,7 @@ below. The single source of truth is `trading/exit_reasons.py::ExitReason`
 | **Shared** | `stop_loss` | StopMonitor's stop level hit + sell filled cleanly |
 | | `take_profit` | TP leg filled (pre-trail BF; rare under current config) |
 | | `trail_stop` | Trailing stop ratcheted past last high then triggered |
-| | `lock_stop` | ORB static-lock: stop locked at +1R after touching +1.5R, then hit |
+| | `lock_stop` | ORB static-lock: stop locked at +0.5R after touching +1.75R, then hit |
 | | `force_close` | End-of-day force flat (15:45 ET for ORB; configurable per strategy) |
 | | `unknown_exit` | **Leak signal** — every row of this type is a bug. See `needs_reconcile()`. |
 | | `post_fill_exit` | Post-fill filter (BT gap check; BF thin-liquidity check) |
@@ -767,8 +767,9 @@ pytest tests/ -q          # quick summary
 
 Runs as a module inside the same `onemil-trader` systemd service alongside
 Bull Flag and MACD Wave. Fires at 9:35 ET on gap-up stocks that break
-above their 9:30–9:34 opening-range high. Uses the `static_lock_1R` exit
-(stop at range_low, lock at entry+1R after price touches +1.5R).
+above their 9:30–9:34 opening-range high. Uses the `static_lock` exit
+(stop at range_low, lock at entry+0.5R after price touches +1.75R;
+orb.yaml `exit.lock_arm_at_r: 1.75` / `lock_stop_r: 0.5`).
 
 **Validated Jan 2025 → Apr 2026** (`study_orb_pipeline_static_lock.py`,
 production-parity):

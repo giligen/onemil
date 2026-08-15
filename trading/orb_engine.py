@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional, Set
 
+import numpy as np
 import pandas as pd
 
 from trading.buy_stop_guard import (
@@ -50,6 +51,11 @@ from trading.orb_pm_mult import (
 )
 from trading.orb_pdr_veto import (
     DEFAULT_MIN_PDR_PCT, compute_prev_day_range_pct, pdr_veto_applies,
+)
+from trading.orb_g1_veto import (
+    DEFAULT_PDR_MIN as G1_DEFAULT_PDR_MIN,
+    DEFAULT_RV20_MIN as G1_DEFAULT_RV20_MIN,
+    g1_reject,
 )
 from trading.orb_planner import OrbTradePlan, OrbTradePlanner, PlannerReject
 from trading.orb_touchgo_filter import (
@@ -312,6 +318,61 @@ class ORBEngine:
         self.daily_loss_limit_usd = float(risk_cfg.get('daily_loss_limit_usd', -5000))
         self.safety_sl_pct = float(safety_cfg.get('sl_pct', 0.10))
 
+        # Pre-committed kill rails (B+ 2026-08-15, design §5). ALL DB-derived
+        # (restart-safe), ET-dated, realized-ORB-P&L only. Daily gates the LIVE
+        # entry path; weekly flattens + pings; month pings ABANDON. Mirrors the
+        # ignition _kill_blocked pattern incl. fail-closed on query error.
+        # Env kill: ORB_KILL_RAILS=0.
+        kr_cfg = risk_cfg.get('kill_rails', {}) or {}
+        self.kill_rails_enabled = bool(kr_cfg.get('enabled', True))
+        self.kill_daily_usd = float(kr_cfg.get('daily_usd', -500))
+        self.kill_weekly_usd = float(kr_cfg.get('weekly_usd', -750))
+        self.kill_month_abandon_usd = float(kr_cfg.get('month_abandon_usd', -1500))
+        _kr_env = os.environ.get('ORB_KILL_RAILS')
+        if _kr_env is not None:
+            self.kill_rails_enabled = _kr_env.strip().lower() not in (
+                '0', 'false', 'no', 'off', '')
+        # Notify/act-once latches (reset on period roll in reset_daily; reset
+        # on restart => at most one re-notify per still-breached period, like
+        # ignition). _kill_query_fail_notified rate-limits the fail-safe log.
+        self._kill_daily_notified = False
+        self._kill_weekly_notified = False
+        self._kill_weekly_flattened = False
+        self._kill_month_notified = False
+        self._kill_query_fail_notified = False
+        self._kill_week_key: Optional[str] = None
+        self._kill_month_key: Optional[str] = None
+
+        # PDT guard (B+ 2026-08-15, design §P1-10). Every ORB trade is a same-day
+        # round trip = 1 day trade. On a MARGIN account with equity < threshold,
+        # block the entry that would be the 4th day-trade in a rolling
+        # 5-business-day window (DB-derived count, restart-safe). Account type +
+        # multiplier read once at first entry check (init_account_guards).
+        # Env kill: ORB_PDT_GUARD=0.
+        pdt_cfg = risk_cfg.get('pdt_guard', {}) or {}
+        self.pdt_guard_enabled = bool(pdt_cfg.get('enabled', True))
+        self.pdt_max_daytrades_5d = int(pdt_cfg.get('max_daytrades_5d', 3))
+        self.pdt_equity_threshold_usd = float(
+            pdt_cfg.get('equity_threshold_usd', 25000))
+        _pdt_env = os.environ.get('ORB_PDT_GUARD')
+        if _pdt_env is not None:
+            self.pdt_guard_enabled = _pdt_env.strip().lower() not in (
+                '0', 'false', 'no', 'off', '')
+        # Resolved at boot from the Alpaca account (multiplier + equity):
+        #   None  -> not yet read; True/False -> PDT counter active this session.
+        self._pdt_active: Optional[bool] = None
+        self._pdt_account_type: Optional[str] = None   # 'cash'|'margin'|'unknown'
+        self._pdt_block_notified = False
+
+        # Latency tripwire (B+ 2026-08-15, design precondition #1 / item H).
+        # WARNING + Telegram if the FIRST ORB order submit lands > this many
+        # seconds after 09:35:00 ET. The PM/news prefetch is off the entry path
+        # (B+ disables PM sizing), so the 32-73s regression should be gone —
+        # this is the tripwire that proves it.
+        self.latency_warn_secs = float(
+            (cfg.get('entry', {}) or {}).get('first_submit_latency_warn_secs', 10.0))
+        self._first_submit_latency_logged = False
+
         self.dedup_by_family = bool(dedup_cfg.get('by_family', True))
         self.dedup_by_super_group = bool(dedup_cfg.get('by_super_group', True))
 
@@ -341,6 +402,21 @@ class ORBEngine:
         if _pdr_min_env:
             self.pdr_veto_min_pct = float(_pdr_min_env)
         self._pdr_vetoed_today: Set[str] = set()
+        # G1 volatility-fingerprint veto (B+ 2026-08-15, frozen yaml §3).
+        # KEEP iff BOTH return_volatility_20d >= rv20_min AND prev_day_range_pct
+        # >= pdr_min; fail-open (keep) on rv20 None/NaN/0.0 or pdr None/NaN.
+        # Post-ranking, slot consumed, NO refill (same as PDR). Shared math:
+        # trading/orb_g1_veto.py. Env kill: ORB_G1_VETO=0.
+        g1_cfg = filter_cfg.get('g1_veto', {}) or {}
+        self.g1_veto_enabled = bool(g1_cfg.get('enabled', True))
+        self.g1_rv20_min = float(
+            g1_cfg.get('return_volatility_20d_min', G1_DEFAULT_RV20_MIN))
+        self.g1_pdr_min = float(
+            g1_cfg.get('prev_day_range_pct_min', G1_DEFAULT_PDR_MIN))
+        _g1_env = os.environ.get('ORB_G1_VETO')
+        if _g1_env is not None:
+            self.g1_veto_enabled = _g1_env.strip().lower() not in (
+                '0', 'false', 'no', 'off', '')
         # Premarket dollar-volume sizing mult (2026-07-04, upsize-only).
         # Shared math: trading/orb_pm_mult.py. Cut frozen from H1-2025 TRAIN.
         sizing_pm_cfg = (cfg.get('sizing', {}) or {}).get('pm_dollar_vol_mult', {}) or {}
@@ -517,7 +593,9 @@ class ORBEngine:
         logger.info(
             f"ORBEngine gates: catalyst_veto={self.catalyst_veto_enabled} "
             f"(min_cohort={self.catalyst_min_cohort}), "
-            f"pdr_veto={self.pdr_veto_enabled}, "
+            f"pdr_veto={self.pdr_veto_enabled} (min={self.pdr_veto_min_pct:.1f}), "
+            f"g1_veto={self.g1_veto_enabled} "
+            f"(rv20>={self.g1_rv20_min}, pdr>={self.g1_pdr_min}), "
             f"touchgo={self.touchgo_cfg.master_enabled}, "
             f"skip_q1={self.skip_q1}, "
             f"pm_mult={self.pm_mult_enabled} "
@@ -1480,10 +1558,23 @@ class ORBEngine:
             # 20d high + avg volume over the most recent 20 bars (excluding today)
             window = bars_list[-20:] if len(bars_list) >= 20 else bars_list
             highs = [_get(b, 'high') for b in window]
+            # return_volatility_20d — EXACT BT parity with
+            # study_orb_features.py:308-314: std(ddof=0) of the prior-20-day
+            # close-to-close returns, *100. < 5 bars -> 0.0 (the
+            # "history too short" marker at :294,299,314 that G1 fail-opens on).
+            # numpy .std() defaults to ddof=0, matching `rets.std()` there.
+            rv20 = 0.0
+            if len(window) >= 5:
+                closes = np.array([_get(b, 'close') for b in window],
+                                  dtype=float)
+                if len(closes) > 1 and np.all(closes[:-1] != 0):
+                    rets = np.diff(closes) / closes[:-1]
+                    rv20 = float(rets.std() * 100.0)
             ctx['daily_stats_20d'] = {
                 'high_20d': max(highs) if highs else 0.0,
                 'volume_20d': (sum(_get(b, 'volume') for b in window) / len(window))
                     if window else 0.0,
+                'return_volatility_20d': rv20,
             }
         except Exception as e:
             logger.warning(f"ORB: _get_feature_context({symbol}) failed: {e}")
@@ -1541,6 +1632,12 @@ class ORBEngine:
             h20 = float(daily_stats_20d.get('high_20d', 0.0))
             if h20 > 0:
                 features['price_vs_20d_high_pct'] = (ref_open - h20) / h20 * 100.0
+            # return_volatility_20d feeds the G1 veto (B+ 2026-08-15). Emitted
+            # whenever the 20d context was fetched — including the 0.0
+            # history-too-short marker, on which G1 fail-opens (keeps).
+            if 'return_volatility_20d' in daily_stats_20d:
+                features['return_volatility_20d'] = float(
+                    daily_stats_20d['return_volatility_20d'])
         return features
 
     # =====================================================================
@@ -1611,6 +1708,18 @@ class ORBEngine:
             symbols = set(symbols) | sweep_filled
 
         if self._daily_loss_limit_hit():
+            return []
+
+        # Pre-committed kill rails (B+ 2026-08-15, design §5): DB-derived
+        # realized-ORB-P&L gates. Daily/weekly/month breach or a fail-closed
+        # pnl-query error blocks all new entries (weekly also flattens).
+        if self._kill_rails_blocked():
+            return []
+
+        # PDT guard (B+ 2026-08-15): on a margin account under the equity
+        # threshold, never submit the entry that would be the 4th day-trade in
+        # a rolling 5-business-day window (would flag the account).
+        if self._pdt_would_block():
             return []
 
         # Hard time-of-day cutoff on NEW entry submissions. BT picks top-K
@@ -1835,6 +1944,11 @@ class ORBEngine:
             # form is toxic — trading/orb_pdr_veto.py docstring).
             if self._pdr_veto_reject(cand):
                 continue
+            # G1 volatility-fingerprint veto (B+ 2026-08-15): post-ranking,
+            # slot consumed, NO refill (same invariant as PDR). Shared math
+            # trading/orb_g1_veto.py — BT parity by construction.
+            if self._g1_veto_reject(cand):
+                continue
             # Catalyst-required veto (2026-07-18): newsless AND alone
             # (no same-morning complex confirmation) — no catalyst, no
             # trade. Same no-refill slot semantics as PDR.
@@ -1869,7 +1983,58 @@ class ORBEngine:
             if order_id:
                 cand.plan_submitted = True
                 submitted.append(sym)
+                self._check_first_submit_latency()
         return submitted
+
+    def _check_first_submit_latency(self) -> None:
+        """Latency tripwire (B+ 2026-08-15, design precondition #1 / item H).
+
+        WARNING + Telegram once/day if the FIRST ORB order submit lands more
+        than `latency_warn_secs` after 09:35:00 ET. B+ disables the PM/news
+        mult so the 32-73s blocking-news-prefetch regression should be gone;
+        this proves it (and catches any relapse) without adding any blocking
+        call to the entry path."""
+        if self._first_submit_latency_logged:
+            return
+        self._first_submit_latency_logged = True
+        try:
+            et = self._et_now()
+            target = et.replace(hour=9, minute=35, second=0, microsecond=0)
+            delay = (et - target).total_seconds()
+            if delay > self.latency_warn_secs:
+                logger.warning(
+                    f"[ORB] LATENCY TRIPWIRE: first order submit at "
+                    f"{et.strftime('%H:%M:%S')} ET = {delay:.1f}s after "
+                    f"09:35:00 (> {self.latency_warn_secs:.0f}s) — investigate "
+                    f"entry-path blocking (news prefetch should be OFF in B+)")
+                self._notify(
+                    f"{self.tg_prefix} ⚠ LATENCY: first submit {delay:.0f}s "
+                    f"after 09:35 ET (> {self.latency_warn_secs:.0f}s threshold)")
+            else:
+                logger.info(
+                    f"[ORB] first order submit {delay:.1f}s after 09:35 ET "
+                    f"(within {self.latency_warn_secs:.0f}s tripwire)")
+        except Exception as e:
+            logger.warning(f"[ORB] latency tripwire check failed ({e})")
+
+    def _news_fetch_needed(self) -> bool:
+        """Single source of truth for whether to fetch premarket news flags.
+
+        News flags feed TWO independent consumers:
+          * the PM news-gate sizing mult (only when pm sizing is enabled), and
+          * the catalyst-required veto (default ON, independent of PM sizing).
+
+        Fetch whenever EITHER is active. This is the fix for the B+ config
+        interaction bug (2026-08-15): B+ turns the PM/news mult OFF but keeps
+        the catalyst veto ON — if the news fetch were gated on the PM path
+        alone, `_get_has_news` would return None for everything and the veto
+        would silently fail-open into complex-confirmation-only, diverging
+        from the B+ book (which simulated the veto WITH news). The fetch stays
+        OFF the 9:35 critical path: it is driven by `_maybe_prefetch_pm` at
+        >=9:31 ET, never the submit burst.
+        """
+        return ((self.pm_mult_enabled and self.pm_news_gate)
+                or self.catalyst_veto_enabled)
 
     def _get_pm_mult(self, symbol: str) -> float:
         """Premarket dollar-volume sizing mult for a pick (2026-07-04).
@@ -1884,6 +2049,10 @@ class ORBEngine:
         today = datetime.now(timezone.utc).date()
         if self._pm_fetch_done_day != today:
             self._fetch_pm_dollar_vols()
+        # SIZING's own news need is the news-gate only (this method is reached
+        # only when pm sizing is enabled). The catalyst veto's independent news
+        # need is served by _maybe_prefetch_pm via _news_fetch_needed() — NOT
+        # here — so news sizing with the gate off never triggers a fetch.
         if self.pm_news_gate and self._news_fetch_done_day != today:
             self._fetch_news_flags()
         pm = self._pm_dollar_vols.get(symbol)
@@ -2077,8 +2246,7 @@ class ORBEngine:
         otherwise _news_flags would stay empty, _get_has_news would
         return None for everything, and the veto would silently fail
         open into a no-op (accidental behavior; forbidden)."""
-        news_needed = ((self.pm_mult_enabled and self.pm_news_gate)
-                       or self.catalyst_veto_enabled)
+        news_needed = self._news_fetch_needed()
         if not self.pm_mult_enabled and not news_needed:
             return
         today = datetime.now(timezone.utc).date()
@@ -2311,6 +2479,33 @@ class ORBEngine:
             cand.plan_submitted = True
             return True
         return False
+
+    def _g1_veto_reject(self, cand: CandidateState) -> bool:
+        """G1 volatility-fingerprint veto for one SELECTED pick (B+ 2026-08-15).
+
+        True -> skip submission; the slot stays EMPTY (no backfill — same
+        no-refill invariant as PDR). KEEP iff BOTH return_volatility_20d and
+        prev_day_range_pct clear their frozen minimums. Fail-open (keep) when
+        rv20 is None/NaN/0.0 (history-too-short marker) or pdr is None/NaN.
+        Shared decision math: trading/orb_g1_veto.py (BT parity).
+        """
+        if not self.g1_veto_enabled:
+            return False
+        feats = cand.features or {}
+        rv20 = feats.get('return_volatility_20d')
+        pdr = feats.get('prev_day_range_pct')
+        reason = g1_reject(rv20, pdr, self.g1_rv20_min, self.g1_pdr_min)
+        if reason is None:
+            return False
+        logger.info(
+            f"[ORB] G1 VETO {cand.symbol}: rv={rv20} pdr={pdr} — {reason}, "
+            f"slot left empty (no backfill)")
+        cand.rejected_reason = 'g1_veto'
+        # Consume the daily slot exactly like PDR/catalyst (BT one-shot top-K;
+        # the refill form is toxic). plan_submitted stops per-tick rescoring.
+        self._pdr_vetoed_today.add(cand.symbol)
+        cand.plan_submitted = True
+        return True
 
     def _should_defer_first_rank(self) -> bool:
         """First-rank grace gate (2026-07-03 selection-race fix).
@@ -4001,6 +4196,24 @@ class ORBEngine:
         self._post_open_range_sweep_done = False
         self._sweep_retry_used_today = False
         self._pdr_vetoed_today = set()
+        self._first_submit_latency_logged = False
+        # Roll kill-rail notify latches: daily every day; weekly on ISO-week
+        # change; month on month change. P&L itself is DB-derived, so the
+        # latches only gate re-notification (breach persists across the roll
+        # until P&L recovers). PDT block re-notifies once per day.
+        et = self._et_now()
+        self._kill_daily_notified = False
+        self._kill_query_fail_notified = False
+        self._pdt_block_notified = False
+        wk = (et - timedelta(days=et.weekday())).strftime('%Y-%m-%d')
+        mo = et.strftime('%Y-%m')
+        if wk != self._kill_week_key:
+            self._kill_week_key = wk
+            self._kill_weekly_notified = False
+            self._kill_weekly_flattened = False
+        if mo != self._kill_month_key:
+            self._kill_month_key = mo
+            self._kill_month_notified = False
         # Drain any leftover bar events from yesterday
         try:
             while True:
@@ -4026,6 +4239,224 @@ class ORBEngine:
                         f"(${self.daily_pnl:+,.2f}) — no new entries today"
                     )
                 self.daily_loss_limit_logged = True
+            return True
+        return False
+
+    # =====================================================================
+    # Kill rails (B+ 2026-08-15, design §5) — DB-derived, ET-dated
+    # =====================================================================
+
+    def _et_now(self) -> datetime:
+        """Market-clock now (ET). Kill windows + trade_date roll key on the ET
+        session date, not the box's UTC wall clock."""
+        now_utc = datetime.now(timezone.utc)
+        try:
+            from zoneinfo import ZoneInfo
+            return now_utc.astimezone(ZoneInfo('America/New_York'))
+        except Exception:
+            return now_utc - timedelta(hours=_et_offset_hours(now_utc))
+
+    def _realized_orb_pnl(self, since_date: str) -> float:
+        """Realized ORB P&L (closed rows) with trade_date >= since_date.
+
+        DB-derived so it survives restarts (zero extra state). FAIL-CLOSED:
+        any query error returns the -1e9 sentinel so the caller blocks new
+        entries rather than trading blind (ignition lesson). Mirrors
+        ignition_engine._realized_pnl."""
+        path = getattr(self.db, '_trades_path', None)
+        if path is None:
+            # No real trades DB configured (e.g. a mock) — nothing to check;
+            # stay INERT rather than read some default file (fail-open, logged).
+            logger.warning("[ORB] realized-pnl: db has no _trades_path — "
+                           "kill rail inert (no block)")
+            return 0.0
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(path), timeout=10)
+            cur = conn.execute(
+                "SELECT COALESCE(SUM(pnl),0) FROM trades WHERE "
+                "strategy=? AND trade_date>=? AND pnl IS NOT NULL",
+                (STRATEGY_NAME, since_date))
+            v = float(cur.fetchone()[0] or 0.0)
+            conn.close()
+            return v
+        except Exception as e:
+            logger.error(f"[ORB] realized-pnl query failed ({e}) — "
+                         f"FAIL-SAFE: treating as kill-breached")
+            return -1e9
+
+    def _kill_rails_blocked(self) -> Optional[str]:
+        """Return a kill-rail reason blocking NEW entries, or None.
+
+        Order of severity: month abandon > weekly > daily. Each rail
+        Telegram-notifies once per still-breached period. Weekly additionally
+        FLATTENS open ORB positions once. A pnl-query failure fails CLOSED
+        (blocks) WITHOUT escalating to the abandon/flat actions (a transient
+        DB error must not fire a MONTH ABANDON ping)."""
+        if not self.kill_rails_enabled:
+            return None
+        et = self._et_now()
+        today = et.strftime('%Y-%m-%d')
+        week_start = (et - timedelta(days=et.weekday())).strftime('%Y-%m-%d')
+        month_start = et.strftime('%Y-%m-01')
+        dy = self._realized_orb_pnl(today)
+        wk = self._realized_orb_pnl(week_start)
+        mo = self._realized_orb_pnl(month_start)
+        _SENTINEL = -1e8   # -1e9 fail-closed marker (well below any real loss)
+        if min(dy, wk, mo) <= _SENTINEL:
+            if not self._kill_query_fail_notified:
+                self._kill_query_fail_notified = True
+                logger.error("[ORB] kill-rail P&L query failed — FAIL-SAFE "
+                             "blocking new entries until it recovers")
+            return 'pnl_query_failed'
+        if mo <= self.kill_month_abandon_usd:
+            if not self._kill_month_notified:
+                self._kill_month_notified = True
+                logger.error(
+                    f"[ORB] MONTH ABANDON — realized ${mo:+,.0f} <= "
+                    f"${self.kill_month_abandon_usd:,.0f}; no new entries")
+                self._notify(
+                    f"{self.tg_prefix} MONTH ABANDON — realized ${mo:+,.0f} "
+                    f"<= ${self.kill_month_abandon_usd:,.0f}. ORB back to zero; "
+                    f"owner action required (restart needs approval, stopping "
+                    f"does not). No new entries.")
+            return 'month_abandon'
+        if wk <= self.kill_weekly_usd:
+            if not self._kill_weekly_notified:
+                self._kill_weekly_notified = True
+                logger.warning(
+                    f"[ORB] WEEKLY KILL — realized ${wk:+,.0f} <= "
+                    f"${self.kill_weekly_usd:,.0f}; flat + no new entries")
+                self._notify(
+                    f"{self.tg_prefix} WEEKLY KILL — realized ${wk:+,.0f} <= "
+                    f"${self.kill_weekly_usd:,.0f}. Flattening + no new entries "
+                    f"this week.")
+            if not self._kill_weekly_flattened:
+                self._kill_weekly_flattened = True
+                try:
+                    n = self.force_close_all()
+                    logger.warning(f"[ORB] WEEKLY KILL flat: closed {n} "
+                                   f"open ORB position(s)")
+                except Exception as e:
+                    logger.error(f"[ORB] WEEKLY KILL flat failed ({e}) — "
+                                 f"positions keep their stops")
+            return 'weekly_kill'
+        if dy <= self.kill_daily_usd:
+            if not self._kill_daily_notified:
+                self._kill_daily_notified = True
+                logger.warning(
+                    f"[ORB] DAILY KILL — realized ${dy:+,.0f} <= "
+                    f"${self.kill_daily_usd:,.0f}; no new entries today")
+                self._notify(
+                    f"{self.tg_prefix} DAILY KILL — realized ${dy:+,.0f} <= "
+                    f"${self.kill_daily_usd:,.0f}. No new entries today "
+                    f"(open positions keep their stops).")
+            return 'daily_kill'
+        return None
+
+    # =====================================================================
+    # PDT guard (B+ 2026-08-15, design §P1-10)
+    # =====================================================================
+
+    def init_account_guards(self) -> None:
+        """Read the ORB account's type once (multiplier + equity) to decide
+        whether the PDT day-trade counter is active this session. Called at
+        boot (main.py) and lazily on the first entry check. Never raises —
+        an account-read failure logs and leaves PDT DORMANT (fail-open: the
+        broker still enforces PDT server-side; we lose only the pre-block)."""
+        if self._pdt_active is not None:
+            return
+        if not self.pdt_guard_enabled:
+            self._pdt_active = False
+            self._pdt_account_type = 'guard_disabled'
+            logger.info("[ORB] PDT guard disabled (config/env)")
+            return
+        try:
+            info = self.alpaca.get_account_info()
+            mult = float(info.get('multiplier', 1.0) or 1.0)
+            equity = float(info.get('equity', 0.0) or 0.0)
+            dtc = info.get('daytrade_count')
+            # multiplier 1 == cash / no Reg-T margin; >1 == margin account.
+            is_margin = mult > 1.0
+            self._pdt_account_type = 'margin' if is_margin else 'cash'
+            self._pdt_active = bool(
+                is_margin and equity < self.pdt_equity_threshold_usd)
+            logger.info(
+                f"[ORB] PDT guard: account={self._pdt_account_type} "
+                f"(multiplier={mult}, equity=${equity:,.0f}), "
+                f"broker daytrade_count={dtc}, "
+                f"counter_active={self._pdt_active} "
+                f"(threshold ${self.pdt_equity_threshold_usd:,.0f}, "
+                f"max {self.pdt_max_daytrades_5d}/5bd)")
+            if self._pdt_account_type == 'cash':
+                logger.info(
+                    "[ORB] PDT: cash account — PDT does not apply, but T+1 "
+                    "settlement does; $ deployed today is not reusable "
+                    "tomorrow (monitor for good-faith violations)")
+        except Exception as e:
+            self._pdt_active = False
+            self._pdt_account_type = 'unknown'
+            logger.error(
+                f"[ORB] PDT guard: account read failed ({e}) — counter "
+                f"DORMANT this session (broker still enforces PDT server-side)")
+
+    def _count_orb_daytrades_5d(self) -> int:
+        """DB-derived count of ORB day-trades in the rolling 5-business-day
+        window ending today (ET). Every filled ORB entry is a same-day round
+        trip = 1 day trade, so we count filled ORB entries by trade_date over
+        the last 5 business days. Restart-safe (no in-memory state)."""
+        try:
+            import sqlite3
+            et = self._et_now()
+            # 5 business days back inclusive of today: walk back over weekdays.
+            days = []
+            d = et.date()
+            while len(days) < self.pdt_max_daytrades_5d + 2:
+                if d.weekday() < 5:
+                    days.append(d.isoformat())
+                d -= timedelta(days=1)
+            window_start = days[-1]   # oldest business day in the window
+            path = getattr(self.db, '_trades_path', None)
+            if path is None:
+                logger.warning("[ORB] PDT count: db has no _trades_path — "
+                               "counter inert (0 day-trades)")
+                return 0
+            conn = sqlite3.connect(str(path), timeout=10)
+            cur = conn.execute(
+                "SELECT COUNT(*) FROM trades WHERE strategy=? "
+                "AND trade_date>=? AND fill_price IS NOT NULL",
+                (STRATEGY_NAME, window_start))
+            n = int(cur.fetchone()[0] or 0)
+            conn.close()
+            return n
+        except Exception as e:
+            # Fail-CLOSED for PDT: if we can't count, assume the cap is hit so
+            # we never accidentally flag the account (a 90-day restriction is
+            # far costlier than a skipped entry).
+            logger.error(f"[ORB] PDT day-trade count failed ({e}) — "
+                         f"FAIL-SAFE: treating cap as reached")
+            return self.pdt_max_daytrades_5d
+
+    def _pdt_would_block(self) -> bool:
+        """True iff submitting a NEW ORB entry now would be the (max+1)th
+        day-trade in the rolling 5-business-day window on a PDT-restricted
+        account. No-op on cash accounts / equity >= threshold / guard off."""
+        if self._pdt_active is None:
+            self.init_account_guards()
+        if not self._pdt_active:
+            return False
+        n = self._count_orb_daytrades_5d()
+        if n >= self.pdt_max_daytrades_5d:
+            if not self._pdt_block_notified:
+                self._pdt_block_notified = True
+                logger.warning(
+                    f"[ORB] PDT BLOCK — {n} day-trade(s) in the rolling "
+                    f"5-business-day window >= cap {self.pdt_max_daytrades_5d}; "
+                    f"blocking new entries to avoid the 4th (PDT flag)")
+                self._notify(
+                    f"{self.tg_prefix} PDT BLOCK — {n} day-trades in 5bd "
+                    f">= {self.pdt_max_daytrades_5d}; skipping new entries "
+                    f"to keep the account off the PDT list.")
             return True
         return False
 

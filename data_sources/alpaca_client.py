@@ -1446,6 +1446,10 @@ class AlpacaClient:
                 'cash': _num('cash', float, 0.0),
                 'daytrade_count': _num('daytrade_count', int, 0),
                 'pattern_day_trader': account.pattern_day_trader,
+                # Reg-T buying-power multiplier: '1' = cash / no margin,
+                # '2' = Reg-T margin, '4' = PDT-approved margin. Used by the
+                # ORB PDT guard to detect margin accounts (B+ 2026-08-15).
+                'multiplier': _num('multiplier', float, 1.0),
             }
 
         except AlpacaAPIError:

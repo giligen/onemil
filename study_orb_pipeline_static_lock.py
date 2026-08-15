@@ -29,6 +29,12 @@ from trading.orb_touchgo_filter import (
 )
 
 
+# Sizing constants. B+ RESTART 2026-08-15: ACCOUNT/N/RISK are now READ FROM
+# orb.yaml (sizing.account_budget_usd / max_concurrent / risk_per_trade_usd) so
+# the nightly BT book simulates the SAME config live trades — see load_bt_config()
+# (review P1-4). The literals below are legacy fallbacks only (used iff orb.yaml
+# lacks the keys). Q_CAPS is consulted ONLY by the mults REFIT fallback, which
+# never runs when orb.yaml carries adaptive_mults (B+ ships uniform-1.0).
 ACCOUNT = 100_000.0
 N = 4
 RISK = 3000.0
@@ -39,6 +45,69 @@ Q_ORDER = {'Q4': 0, 'Q5': 1, 'Q3': 2, 'Q2': 3, 'Q1': 4}
 LOCK_TRIGGER_R = 1.75   # 2026-05-08: BT-validated upgrade from 1.5
 LOCK_STOP_R = 0.5       # 2026-05-08: BT-validated upgrade from 1.0
 EXIT_SLIP_BPS = 10.0
+
+# Default book path — B+ RESTART 2026-08-15. The pipeline WRITES and
+# report_common READS this same path (single source of truth). The legacy
+# analysis_results/orb_static_lock_trades.csv is preserved untouched for history.
+DEFAULT_BOOK_CSV = 'analysis_results/orb_bplus_book.csv'
+
+
+def load_bt_config(yaml_path: str = 'orb.yaml') -> dict:
+    """Read the B+ sizing / threshold / G1 / book-path constants from orb.yaml.
+
+    Parity by construction (review P1-4): the nightly BT ground-truth book must
+    simulate the SAME config live trades. Falls back to the module-level legacy
+    literals for any missing key (with a printed WARNING) so old research runs
+    without a B+ orb.yaml still work. Env overrides win over yaml:
+      ORB_BT_ACCOUNT / ORB_BT_N / ORB_BT_RISK / ORB_BT_THRESHOLD / ORB_BT_BOOK_OUT.
+    """
+    import yaml as _yaml
+    cfg = {}
+    try:
+        cfg = _yaml.safe_load(open(yaml_path)) or {}
+    except Exception as e:
+        print(f"WARNING: load_bt_config could not read {yaml_path} ({e}) — "
+              f"using legacy literals ACCOUNT={ACCOUNT} N={N} RISK={RISK}")
+    sizing = (cfg.get('sizing') or {})
+    filt = (cfg.get('filter') or {})
+    g1 = (filt.get('g1_veto') or {})
+    bt = (cfg.get('backtest') or {})
+    pm = (sizing.get('pm_dollar_vol_mult') or {})
+
+    def _f(env, val, default):
+        v = os.environ.get(env)
+        return float(v) if v not in (None, '') else float(
+            val if val is not None else default)
+
+    from study_orb_sizing import FILTER_THRESHOLD as _DEF_THR
+    from trading.orb_g1_veto import (DEFAULT_PDR_MIN as _G1_PDR,
+                                     DEFAULT_RV20_MIN as _G1_RV)
+    from trading.orb_pdr_veto import DEFAULT_MIN_PDR_PCT as _DEF_PDR
+    pdr_cfg = (filt.get('prev_day_range_veto') or {})
+    out = {
+        'account': _f('ORB_BT_ACCOUNT', sizing.get('account_budget_usd'), ACCOUNT),
+        'n': int(_f('ORB_BT_N', sizing.get('max_concurrent'), N)),
+        'risk': _f('ORB_BT_RISK', sizing.get('risk_per_trade_usd'), RISK),
+        'threshold': _f('ORB_BT_THRESHOLD', filt.get('threshold'), _DEF_THR),
+        # PDR veto threshold also from orb.yaml (B+ = 11.0). Env
+        # ORB_PDR_VETO_MIN_PCT still wins (handled at the veto call site).
+        'pdr_min': float(pdr_cfg.get('min_prev_day_range_pct', _DEF_PDR)),
+        'g1_rv20_min': float(g1.get('return_volatility_20d_min', _G1_RV)),
+        'g1_pdr_min': float(g1.get('prev_day_range_pct_min', _G1_PDR)),
+        'g1_enabled': bool(g1.get('enabled', True)),
+        # PM/news mult stack: B+ turns it OFF (sizing.pm_dollar_vol_mult.enabled
+        # = false). The pipeline must honor the yaml flag so the BT book matches
+        # live; env ORB_PM_MULT=0 still forces off at the call site.
+        'pm_enabled': bool(pm.get('enabled', True)),
+        'book_csv': (os.environ.get('ORB_BT_BOOK_OUT')
+                     or bt.get('nightly_book_csv') or DEFAULT_BOOK_CSV),
+    }
+    print(f"BT config (B+ parity): account=${out['account']:,.0f} N={out['n']} "
+          f"risk=${out['risk']:,.0f} threshold={out['threshold']:.12f} "
+          f"pdr_veto>={out['pdr_min']} g1({out['g1_enabled']}, "
+          f"rv20>={out['g1_rv20_min']}, pdr>={out['g1_pdr_min']}) "
+          f"book={out['book_csv']}")
+    return out
 
 # Touch-and-go filter (Rule M + Rule D). Default-on; env-var overrides via
 # ORB_TOUCHGO_* (see trading/orb_touchgo_filter.py::load_touchgo_config).
@@ -131,8 +200,15 @@ def simulate_static_lock(bars, entry_price, range_high, range_low, entry_time):
 
 
 def main():
-    csv = sorted(glob.glob('analysis_results/orb_features_*.csv'))
-    csv = [p for p in csv if 'corrmatrix' not in p][-1]
+    bt_cfg = load_bt_config()
+    # Features CSV: env override (ORB_BT_FEATURES_CSV) else latest non-corrmatrix
+    # glob. B+ ground-truth regen points this at the frozen
+    # orb_features_20260814_1741.csv; the nightly uses the latest.
+    csv = os.environ.get('ORB_BT_FEATURES_CSV')
+    if not csv:
+        csv = sorted(p for p in glob.glob('analysis_results/orb_features_*.csv')
+                     if 'corrmatrix' not in p)[-1]
+    print(f"Features CSV: {csv}")
     df = pd.read_csv(csv)
     needed = [f for f, _ in FILTER_FEATURES]
     df = df.dropna(subset=needed + ['pnl', 'date', 'pnl_pct', 'range_size_pct', 'entry_price'])
@@ -185,10 +261,13 @@ def main():
     df['pnl_pct'] = new_pnl_pcts
     df['exit_reason'] = new_reasons
 
-    # Risk-parity sizing
-    per_pos_cap = ACCOUNT / N
+    # Risk-parity sizing (B+ 2026-08-15: account/N/risk from orb.yaml via bt_cfg)
+    account = bt_cfg['account']
+    n_per_day = bt_cfg['n']
+    risk = bt_cfg['risk']
+    per_pos_cap = account / n_per_day
     stop = df['range_size_pct'].clip(lower=MIN_STOP_PCT)
-    uncap = RISK / (stop / 100.0)
+    uncap = risk / (stop / 100.0)
     df['_rp_position'] = uncap.clip(upper=per_pos_cap)
     df['_rp_pnl'] = df['pnl'] * df['_rp_position'] / OLD_POS
 
@@ -246,8 +325,11 @@ def main():
         params = fit_z_params(train, FILTER_FEATURES)
         print("Z-params: TRAIN REFIT (BT_ALLOW_REFIT) — NOT live parity")
     df['_composite'] = composite_score(df, params)
+    # B+ 2026-08-15: threshold from orb.yaml (filter.threshold) via bt_cfg, NOT
+    # the imported study_orb_sizing.FILTER_THRESHOLD constant (review P1-4).
+    threshold = bt_cfg['threshold']
     train = df[(df['date'] >= '2025-01-01') & (df['date'] <= '2025-06-30')]
-    train_k = train[train['_composite'] >= FILTER_THRESHOLD].copy()
+    train_k = train[train['_composite'] >= threshold].copy()
     if cutoffs is None:
         if not _allow_refit:
             raise SystemExit(
@@ -287,7 +369,7 @@ def main():
         print(f"Mults (REFIT fallback — not live parity): {mults}")
 
     # Apply to full timeline
-    kept = df[df['_composite'] >= FILTER_THRESHOLD].copy()
+    kept = df[df['_composite'] >= threshold].copy()
     kept['_quintile'] = assign_quintile(kept['_composite'], cutoffs)
 
     # Q1 filter (ships on by default; matches trading/orb_engine.py skip_q1).
@@ -320,7 +402,7 @@ def main():
             if fam: seen_fam.add(fam)
             if sup: seen_sup.add(sup)
             kept_today.append(r)
-            if len(kept_today) >= N: break
+            if len(kept_today) >= n_per_day: break
         sel_rows.extend(kept_today)
     sel = pd.DataFrame(sel_rows)
     sel['_sized_pnl'] = sel.apply(lambda r: r['_rp_pnl'] * mults[r['_quintile']], axis=1)
@@ -337,7 +419,13 @@ def main():
         LEGACY_HIGH_MULT, pm_size_multiplier,
     )
     _pm_env = os.environ.get('ORB_PM_MULT', '1').strip().lower()
-    if _pm_env not in ('0', 'false', 'no', 'off', ''):
+    # B+ 2026-08-15: honor orb.yaml sizing.pm_dollar_vol_mult.enabled (bt_cfg).
+    # B+ ships PM OFF; env ORB_PM_MULT=0 also forces off. When disabled the
+    # whole PM/news mult stack is skipped and every mult stays 1.0 (live parity).
+    if not bt_cfg['pm_enabled']:
+        print("PM sizing mult: DISABLED via orb.yaml "
+              "(sizing.pm_dollar_vol_mult.enabled=false) — all mults 1.0")
+    if bt_cfg['pm_enabled'] and _pm_env not in ('0', 'false', 'no', 'off', ''):
         import glob as _glob
         _pm_paths = sorted(_glob.glob('data/research/orb_premarket_dollar_vol_*.csv'))
         # News gate on the PM mult (ships 2026-07-10; matches
@@ -423,12 +511,14 @@ def main():
     # exactly like live (backfill form tested toxic; see
     # trading/orb_pdr_veto.py docstring for evidence + thresholds).
     # Env: ORB_PDR_VETO=0 disables; ORB_PDR_VETO_MIN_PCT overrides threshold.
-    from trading.orb_pdr_veto import DEFAULT_MIN_PDR_PCT, pdr_veto_applies
+    from trading.orb_pdr_veto import pdr_veto_applies
     _pdr_env = os.environ.get('ORB_PDR_VETO', '1').strip().lower()
     pdr_veto_on = _pdr_env not in ('0', 'false', 'no', 'off', '')
     if pdr_veto_on and 'prev_day_range_pct' in sel.columns:
+        # B+ 2026-08-15: threshold from orb.yaml (bt_cfg, = 11.0) so the BT
+        # book matches live; env ORB_PDR_VETO_MIN_PCT still wins.
         pdr_min = float(os.environ.get('ORB_PDR_VETO_MIN_PCT',
-                                       str(DEFAULT_MIN_PDR_PCT)))
+                                       str(bt_cfg['pdr_min'])))
         veto_mask = sel['prev_day_range_pct'].apply(
             lambda v: pdr_veto_applies(None if pd.isna(v) else float(v),
                                        pdr_min))
@@ -441,6 +531,34 @@ def main():
     elif pdr_veto_on:
         print("PDR veto: WARNING prev_day_range_pct column missing from "
               "features CSV — veto skipped (fail-open)")
+
+    # G1 volatility-fingerprint veto (B+ RESTART 2026-08-15; matches
+    # trading/orb_engine.py via the SAME shared trading/orb_g1_veto.py — parity
+    # by construction). Applied POST-selection with NO refill, exactly like PDR.
+    # KEEP iff BOTH return_volatility_20d and prev_day_range_pct clear their
+    # frozen minimums; fail-open on rv20 NaN/0.0 or pdr NaN. Env: ORB_G1_VETO=0.
+    from trading.orb_g1_veto import g1_reject as _g1_reject
+    _g1_env = os.environ.get('ORB_G1_VETO', '1').strip().lower()
+    g1_veto_on = (bt_cfg['g1_enabled']
+                  and _g1_env not in ('0', 'false', 'no', 'off', ''))
+    if g1_veto_on and {'return_volatility_20d',
+                       'prev_day_range_pct'} <= set(sel.columns):
+        g1_mask = pd.Series(
+            [_g1_reject(rv, pdr, bt_cfg['g1_rv20_min'], bt_cfg['g1_pdr_min'])
+             is not None
+             for rv, pdr in zip(sel['return_volatility_20d'],
+                                sel['prev_day_range_pct'])],
+            index=sel.index)
+        n_g1 = int(g1_mask.sum())
+        g1_pnl = float(sel.loc[g1_mask, '_sized_pnl'].sum())
+        sel = sel[~g1_mask].copy()
+        print(f"G1 veto: dropped {n_g1} pick(s) failing the volatility "
+              f"fingerprint (rv20>={bt_cfg['g1_rv20_min']} AND "
+              f"pdr>={bt_cfg['g1_pdr_min']}); their P&L would have been "
+              f"{g1_pnl:+,.0f} (set ORB_G1_VETO=0 to disable)")
+    elif g1_veto_on:
+        print("G1 veto: WARNING return_volatility_20d/prev_day_range_pct "
+              "column missing from features CSV — veto skipped (fail-open)")
 
     # Catalyst-required veto (ships 2026-07-18; matches orb_engine via
     # trading/orb_catalyst_veto.py). Newsless-and-alone selected picks
@@ -455,6 +573,10 @@ def main():
         from trading.orb_catalyst_veto import (
             DEFAULT_MIN_COHORT, anchor_cohort_counts, catalyst_veto_applies)
         import csv as _csv
+        # Self-sufficient glob import: the PM-mult block (which used to define
+        # `_glob`) is now SKIPPED when orb.yaml disables PM sizing (B+), so this
+        # section must import it itself instead of leaning on that side effect.
+        import glob as _glob
         _names = {}
         try:
             with open(DEFAULT_CLASS_MAP, newline='') as _fh:
@@ -516,8 +638,13 @@ def main():
               f"→ kept {n_after}/{n_before} trades "
               f"(${sel_pre_haircut_pnl:+,.0f} → ${sel_post_haircut_pnl:+,.0f})")
 
-    # Save trade-level CSV for further analysis
-    sel.to_csv('analysis_results/orb_static_lock_trades.csv', index=False)
+    # Save trade-level CSV for further analysis. B+ 2026-08-15: write to the
+    # config-driven book path (bt_cfg['book_csv'] = orb_bplus_book.csv) that
+    # report_common reads for the nightly parity gates. The legacy
+    # orb_static_lock_trades.csv is left UNTOUCHED for history.
+    book_csv = bt_cfg['book_csv']
+    os.makedirs(os.path.dirname(book_csv) or '.', exist_ok=True)
+    sel.to_csv(book_csv, index=False)
 
     # Per-day → per-month
     daily = sel.groupby('date').agg(
@@ -579,7 +706,7 @@ def main():
     print(f"Cum P&L:          ${out['pnl'].sum():+,.0f}")
 
     out.to_csv('analysis_results/orb_monthly_static_lock.csv', index=False)
-    print("\nSaved: analysis_results/orb_monthly_static_lock.csv + orb_static_lock_trades.csv")
+    print(f"\nSaved: analysis_results/orb_monthly_static_lock.csv + {book_csv}")
 
 
 if __name__ == '__main__':

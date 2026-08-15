@@ -95,8 +95,10 @@ class TestNewsNeededGating:
         assert 'BBB' in stale_arg and 'AAA' not in stale_arg
 
     def test_current_config_behavior_unchanged(self, engine):
-        """Today's config (pm on, gate on, veto on): one news fetch +
-        one pm fetch at 9:32 — byte-identical to pre-fix."""
+        """The pm-ON config (gate on, veto on): one news fetch + one pm fetch
+        at 9:32. B+ 2026-08-15 ships pm OFF by default, so enable it here to
+        exercise the pm-on path (byte-identical to the pre-B+ behavior)."""
+        engine.pm_mult_enabled = True
         _at(engine, 9, 32, engine._maybe_prefetch_pm)
         engine.alpaca.get_premarket_news_multi.assert_called_once()
         engine.alpaca.get_premarket_1min_bars_multi.assert_called_once()

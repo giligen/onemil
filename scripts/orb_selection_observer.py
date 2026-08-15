@@ -129,7 +129,9 @@ def main():
     log(f"snapshot coverage: {len(seed)-len(missing)}/{len(seed)} in {audit['snapshot_secs']}s")
 
     # SECOND capture at ~9:35:03 — the instant live ranks — including
-    # bid/ask so the live-only spread gate (>150bps skip) is attributable.
+    # bid/ask so the live-only spread gate (>300bps skip) is attributable.
+    # (Gate is 300bps since 2026-07-04 — orb.yaml entry.max_spread_bps; the
+    # observer previously flagged >150, over-flagging by construction.)
     wait_until_utc(13, 35, 3)
     try:
         snaps935 = client.get_snapshots(sorted(kept))
@@ -142,9 +144,9 @@ def main():
             for s2, v in (snaps935 or {}).items()
         }
         wide = [s2 for s2, v in audit['snap_935'].items()
-                if v['spread_bps'] is not None and v['spread_bps'] > 150]
+                if v['spread_bps'] is not None and v['spread_bps'] > 300]
         log(f"9:35 spreads captured for {len(audit['snap_935'])} expected; "
-            f">150bps (live spread-gate would skip): {wide}")
+            f">300bps (live spread-gate would skip): {wide}")
         audit['spread_gate_would_skip'] = wide
     except Exception as e:
         log(f"9:35 snapshot capture failed: {e}")

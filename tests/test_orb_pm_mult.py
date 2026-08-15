@@ -126,6 +126,10 @@ def _make_engine(monkeypatch=None, **cfg_overrides):
     with open(Path(__file__).parent.parent / 'orb.yaml') as f:
         cfg = yaml.safe_load(f)
     cfg['strategy']['enabled'] = True
+    # This file tests the PM/news mult behavior, which B+ 2026-08-15 ships
+    # DISABLED by default. Force it ON here (overrides still win) so the
+    # feature-under-test is exercised; test_env_disable etc. re-disable it.
+    cfg['sizing']['pm_dollar_vol_mult']['enabled'] = True
     for k, v in cfg_overrides.items():
         cfg['sizing']['pm_dollar_vol_mult'][k] = v
     return ORBEngine(alpaca_client=MagicMock(spec=AlpacaClient),

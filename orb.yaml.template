@@ -18,7 +18,9 @@
 
 strategy:
   name: orb
-  enabled: true           # MASTER KILL SWITCH. Restart to flip.
+  enabled: false          # MASTER KILL SWITCH. Restart to flip. (B+ 2026-08-15:
+                          # ships FALSE; the Monday pre-boot cron flips it after
+                          # the weekend rehearsal is green.)
 
 # Universe — BT-parity criteria (study_orb_broad.py::load_broad_universe):
 # gap >= 5%, prev-day volume >= 500K, price $3-30.
@@ -61,10 +63,13 @@ entry:
   # lower toward "09:45" for strict BT-exact behavior.
   last_entry_submit_time_et: "10:00"
 
-# Composite filter — 7-feature signed z-score, threshold >= 0.
-# Params baked from H1 2025 TRAIN fit (1090 trades). Refit quarterly via study_orb_refit.py.
+# Composite filter — 7-feature signed z-score.
+# B+ RESTART 2026-08-15 (research/orb_bplus_frozen_params_aug2026.yaml):
+# TRAIN-refit (clean 2025H1) z-params + threshold below REPLACE the prior
+# contaminated April fit. FROZEN constants — may be LOOSENED but never
+# TIGHTENED without a new walk-forward. NO deploy-time refits.
 filter:
-  threshold: 0.0
+  threshold: 0.012081536791   # frozen q40-of-TRAIN value; keep if composite >= this
   # Drop Q1 (bottom quintile) candidates at ranking time. Q1 is TRAIN-positive
   # but OOS-negative (VAL -$5.1K, HOQ1+ -$3.4K) — classic overfit. Reduces
   # trade frequency from 3.25 → 2.96/day with no DD impact. Note: slots do
@@ -86,7 +91,16 @@ filter:
   # construction). Env overrides: ORB_PDR_VETO=0, ORB_PDR_VETO_MIN_PCT.
   prev_day_range_veto:
     enabled: true
-    min_prev_day_range_pct: 8.0
+    min_prev_day_range_pct: 11.0   # B+ 2026-08-15 (was 8.0); frozen yaml §2
+  # G1 volatility-fingerprint veto (B+ 2026-08-15, frozen yaml §3). Post-
+  # ranking, slot consumed, NO refill. KEEP iff BOTH return_volatility_20d >=
+  # 7.106 AND prev_day_range_pct >= 9.226. FAIL-OPEN (keep) when rv20 is
+  # NaN/missing OR rv20 == 0.0 (history-too-short marker); pdr == 0.0 is REAL
+  # (vetoable). Shared helper: trading/orb_g1_veto.py. Env kill: ORB_G1_VETO=0.
+  g1_veto:
+    enabled: true
+    return_volatility_20d_min: 7.106
+    prev_day_range_pct_min: 9.226
   # Catalyst-required veto (2026-07-18): entry needs own-ticker news OR
   # complex confirmation (>= min_cohort same-anchor candidates). See
   # trading/orb_catalyst_veto.py. Env: ORB_CATALYST_VETO=0.
@@ -132,39 +146,39 @@ filter:
     # minutes after the market breakout bar (stale entry — no retroactive tag
     # exit). Env override: ORB_TOUCHGO_MAX_BREAKOUT_AGE_MIN
     max_breakout_age_min: 15
+  # B+ RESTART 2026-08-15: TRAIN-refit (clean 2025H1) z-params, frozen yaml §1.
   features:
     gap_pct:
       sign: -1              # lower gap = better
-      mean: 187.905162
-      std: 1749.630103
+      mean: 133.273200161459
+      std: 1515.341490804868
     range_total_volume:
       sign: -1              # lower early volume = less exhausted
-      mean: 1032481.678899
-      std: 2236111.090560
+      mean: 971724.893776823999
+      std: 2202032.830765132792
     range_avg_bar_range_pct:
       sign: -1              # narrower bars = better breakout
-      mean: 2.481485
-      std: 1.721792
+      mean: 2.001194835481
+      std: 1.567884658140
     range_size_pct:
       sign: -1              # tighter 5-min range = cleaner continuation
-      mean: 6.304430
-      std: 4.482915
+      mean: 5.006307894562
+      std: 4.087268230365
     price_vs_20d_high_pct:
       sign: -1              # further from 20d high = fresher
-      mean: 26.814918
-      std: 339.841711
+      mean: 13.345822987901
+      std: 276.546640900593
     prev_day_close_position:
       sign: -1              # prev closed low in range = less tired
-      mean: 0.488915
-      std: 0.303208
+      mean: 0.498689946893
+      std: 0.296628703453
     range_close_position:
       sign: +1              # close high in range = real momentum
-      mean: 0.580629
-      std: 0.303179
+      mean: 0.579094891028
+      std: 0.297908189023
 
-# Quintile cutoffs on composite score (H1 2025 TRAIN kept, n=670).
-# Used to assign Q1-Q5 bucket → feed adaptive mult.
-quintile_cutoffs: [0.1082, 0.1959, 0.2893, 0.4081]
+# Quintile cutoffs on composite score — B+ RESTART 2026-08-15 (frozen yaml §1).
+quintile_cutoffs: [0.107384942420, 0.194230490420, 0.287618573598, 0.397035743689]
 
 # Adaptive position-size multipliers per quintile — fit from H1 2025 TRAIN
 # using the SHIPPED static_lock_1R exit (not the old fixed +2R/-1R simulation
@@ -182,10 +196,9 @@ adaptive_mults:
   # consistency in either direction — the quintile layer carries no
   # robust sizing signal. FLAT 1.0 = the honest null (live-parity book
   # $293,568 / MDD -$16,334). Q1 stays 0.502 (skip_q1 governs).
-  # Sizing edge lives in the news-gated PM mult (quintile-free evidence).
-  # Historical: 7/10-7/16 {Q2 1.5,Q3 1.4,Q4 0.5,Q5 0.5}; pre-7/13
-  # {Q2 0.25,Q3 0.25,Q4 1.842,Q5 1.5}. See ledger 2026-07-17 P0 entry.
-  Q1: 0.502
+  # B+ RESTART 2026-08-15 (frozen yaml §2): ALL quintiles 1.0 (uniform_1.0 —
+  # adaptive mults OFF). Q1 also 1.0 (skip_q1 governs whether Q1 ever trades).
+  Q1: 1.0
   Q2: 1.0
   Q3: 1.0
   Q4: 1.0
@@ -210,20 +223,18 @@ sizing:
   # corr(PM$, composite)=0.05 (orthogonal). Worst month -$2.6K (downside
   # capped by stops, upside uncapped). Shared math: trading/orb_pm_mult.py.
   # Env override: ORB_PM_MULT=0. DO NOT refit the cut without walk-forward.
+  # B+ RESTART 2026-08-15 (frozen yaml §2): PM/news mult stack DISABLED (mult =
+  # 1.0 always). The catalyst veto stays ON and still uses news flags — the
+  # engine fetches news when EITHER consumer is active (_news_fetch_needed).
   pm_dollar_vol_mult:
-    enabled: true
+    enabled: false           # B+ 2026-08-15 (was true)
     high_cut_usd: 5816688    # H1-2025 TRAIN upper tercile — frozen
-    # 2026-07-10 NEWS GATE (owner-approved A2, research/orb_news_catalyst_jul2026.md):
-    # above-cut WITH premarket news -> high_mult_news; WITHOUT news -> high_mult
-    # (that bucket is ~flat per-trade in all 3 eras). BT: TOT $250K->$301.5K,
-    # all eras +, MDD improves. Fail-open: news fetch failure -> no news boost.
-    # ROLLBACK: news_gate: false + high_mult: 1.5 (legacy), restart. Env: ORB_PM_NEWS_GATE=0.
-    high_mult: 1.0           # was 1.5 pre news-gate
+    high_mult: 1.0
     high_mult_news: 2.0
     news_gate: true
-  account_budget_usd: 100000    # ORB's carved pool (shared account later)
-  max_concurrent: 4             # top-N picks per day
-  risk_per_trade_usd: 3000      # validated value; lower to $1000 for Phase 2 live ramp
+  account_budget_usd: 10000    # B+ 2026-08-15 (was 100000) — owner-approved live budget
+  max_concurrent: 3             # B+ 2026-08-15 (was 4) — per-pos cap = 10000/3 = 3333.33
+  risk_per_trade_usd: 375       # B+ 2026-08-15 (was 3000)
   min_stop_pct: 1.0             # floor on stop distance (% of entry) to prevent inf sizing
   old_position_reference_usd: 50000  # BT base for _rp_scale math — do not change
 
@@ -246,8 +257,25 @@ safety_net:
 
 # Risk management
 risk:
-  daily_loss_limit_usd: -5000   # once hit, skip new entries for the day
+  daily_loss_limit_usd: -1500   # in-memory intraday daily_pnl gate (legacy, secondary)
   max_consecutive_losing_days: 0  # 0 = disabled (we tested and it didn't help on OOS)
+  # Pre-committed kill rails (B+ RESTART 2026-08-15, design §5). DB-derived
+  # (restart-safe), ET-dated, realized-ORB-P&L only. Env kill: ORB_KILL_RAILS=0.
+  kill_rails:
+    enabled: true
+    daily_usd: -500
+    weekly_usd: -750
+    month_abandon_usd: -1500
+  # PDT guard (B+ RESTART 2026-08-15, design §P1-10). Env kill: ORB_PDT_GUARD=0.
+  pdt_guard:
+    enabled: true
+    max_daytrades_5d: 3
+    equity_threshold_usd: 25000
+
+# Nightly BT ground-truth book (B+ RESTART 2026-08-15). Single source of truth
+# for the path the pipeline WRITES and report_common READS. Env: ORB_BT_BOOK_OUT.
+backtest:
+  nightly_book_csv: analysis_results/orb_bplus_book.csv
 
 # Cross-strategy conflict: FCFS — skip if any strategy has symbol open today.
 conflict:

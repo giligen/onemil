@@ -44,9 +44,35 @@ EXPLAINED_LIVE_REJECTS = {'spread_gate', 'insufficient_bp',
 # Loaders (monkeypatch points)
 # ---------------------------------------------------------------------------
 
+def bt_book_csv_path() -> str:
+    """Config-driven path to the nightly BT ground-truth book (B+ 2026-08-15).
+
+    Single source of truth: orb.yaml::backtest.nightly_book_csv — the SAME key
+    study_orb_pipeline_static_lock.py writes to, so the file the pipeline WRITES
+    is always the file report_common READS (review P1-1: the old fixed glob on
+    orb_static_lock_trades.csv would silently compare live-B+ against the stale
+    $100K/N4/pdr8/no-G1 book). Falls back to the B+ book name if orb.yaml is
+    unreadable or lacks the key."""
+    default = str(ROOT / 'analysis_results' / 'orb_bplus_book.csv')
+    try:
+        import yaml
+        cfg = yaml.safe_load(open(ROOT / 'orb.yaml')) or {}
+        rel = (cfg.get('backtest') or {}).get('nightly_book_csv')
+        if not rel:
+            print("WARNING: orb.yaml lacks backtest.nightly_book_csv — "
+                  "defaulting to orb_bplus_book.csv", flush=True)
+            return default
+        p = Path(rel)
+        return str(p if p.is_absolute() else ROOT / p)
+    except Exception as e:
+        print(f"WARNING: bt_book_csv_path could not read orb.yaml ({e}) — "
+              f"defaulting to orb_bplus_book.csv", flush=True)
+        return default
+
+
 def latest_bt_trades_csv() -> Optional[str]:
-    paths = sorted(glob.glob(str(ROOT / 'analysis_results' / 'orb_static_lock_trades.csv')))
-    return paths[-1] if paths else None
+    path = bt_book_csv_path()
+    return path if Path(path).exists() else None
 
 
 def load_bt_selected(day: str) -> List[Dict]:
@@ -404,9 +430,16 @@ def sizing_attribution(day: str) -> Dict:
                 f"expected {expected} (pm$={t['pm_dollar_vol']}, "
                 f"news={t['has_news']})")
 
+    # News-drift soft check only makes sense when news actually SIZES a trade.
+    # B+ 2026-08-15 disables the PM/news mult (pm_dollar_vol_mult.enabled=false)
+    # — news feeds only the catalyst veto then, which fail-opens on missing
+    # news (a drift there cannot mis-size anything), so gate the check off to
+    # avoid meaningless nightly noise (review P2).
+    pm_enabled = bool(cfg.get('enabled', True))
     news_drift = []
-    check_syms = [t['symbol'] for t in trades
-                  if t['pm_mult'] is not None and t['has_news'] is not True]
+    check_syms = ([t['symbol'] for t in trades
+                   if t['pm_mult'] is not None and t['has_news'] is not True]
+                  if pm_enabled else [])
     eod_newsy = eod_news_recheck(check_syms, day)
     for t in trades:
         if (t['symbol'] in eod_newsy and eod_newsy[t['symbol']]

@@ -113,7 +113,7 @@ def _make_bars(symbol_prices, date_str='2026-04-20'):
 class TestInit:
     def test_loads_from_real_yaml(self, engine, orb_cfg):
         assert engine.range_minutes == 5
-        assert engine.max_concurrent == 4
+        assert engine.max_concurrent == 3   # B+ 2026-08-15 (was 4)
         # Risk/budget are ramp-stage-dependent (instance orb.yaml changes per
         # docs/orb_rollout_plan.md) — assert the CONFIG PATH, not a stage value.
         sizing = orb_cfg['sizing']

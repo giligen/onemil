@@ -68,9 +68,10 @@ class ExitReason(str, Enum):
     The winning-trade exit path under the trailing_stop feature."""
 
     LOCK_STOP = "lock_stop"
-    """ORB static-lock variant: after price touched +1.5R, the stop locked
-    at +1R and was later hit. See docs/orb_rollout_plan.md and CLAUDE.md
-    ORB section."""
+    """ORB static-lock variant: after price touched +1.75R, the stop locked
+    at +0.5R and was later hit (orb.yaml exit.lock_arm_at_r/lock_stop_r —
+    2026-05-08 BT-validated upgrade from the earlier 1.5R/1R). See
+    docs/orb_rollout_plan.md and CLAUDE.md ORB section."""
 
     FORCE_CLOSE = "force_close"
     """End-of-day force close (15:45 ET for ORB; configurable per strategy).

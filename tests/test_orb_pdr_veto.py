@@ -116,7 +116,7 @@ def _cand(sym, pdr):
 class TestEngineConfig:
     def test_yaml_knobs_loaded(self, engine):
         assert engine.pdr_veto_enabled is True
-        assert engine.pdr_veto_min_pct == 8.0
+        assert engine.pdr_veto_min_pct == 11.0   # B+ 2026-08-15 (was 8.0)
 
     def test_env_master_disable(self, orb_cfg, monkeypatch):
         monkeypatch.setenv('ORB_PDR_VETO', '0')
