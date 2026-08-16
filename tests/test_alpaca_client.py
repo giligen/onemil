@@ -1173,6 +1173,28 @@ class TestAccountInfoNoneFields:
         assert info['daytrade_count'] == 0
         assert any('daytrade_count is None' in r.message for r in caplog.records)
 
+    def test_none_warning_fires_within_first_hour_of_host_uptime(self, caplog):
+        """2026-08-16 regression: the rate-limiter used last=0.0 as its
+        "never warned" sentinel, so with monotonic() < 3600 (host uptime
+        under an hour, e.g. right after a reboot) `now - 0.0 > 3600` was
+        False and the FIRST warning after boot was silently suppressed —
+        violating the all-fallbacks-must-log rule exactly at boot."""
+        import logging
+        from unittest.mock import MagicMock, patch
+        from data_sources.alpaca_client import AlpacaClient
+        import data_sources.alpaca_client as ac_mod
+        c = AlpacaClient.__new__(AlpacaClient)
+        acct = MagicMock()
+        acct.equity = "75833.14"; acct.buying_power = "219825.84"
+        acct.cash = "117586.50"; acct.daytrade_count = None
+        acct.pattern_day_trader = None; acct.status = "ACTIVE"
+        with patch.object(AlpacaClient, '_call_with_timeout', return_value=acct), \
+             patch.object(ac_mod.time_mod, 'monotonic', return_value=120.0):
+            with caplog.at_level(logging.WARNING):
+                info = c.get_account_info()
+        assert info['daytrade_count'] == 0
+        assert any('daytrade_count is None' in r.message for r in caplog.records)
+
 
 # ===================================================================
 # Premarket news (news-gated PM mult, 2026-07-10)

@@ -1430,8 +1430,13 @@ class AlpacaClient:
                     now = time_mod.monotonic()
                     if not hasattr(self, '_none_field_warn_ts'):
                         self._none_field_warn_ts = {}   # lazy (rehydrated clients)
-                    last = self._none_field_warn_ts.get(name, 0.0)
-                    if now - last > 3600:
+                    # Sentinel must be None, not 0.0: monotonic() starts at
+                    # host BOOT, so `now - 0.0 > 3600` is False for the first
+                    # hour of uptime — which silently suppressed the very
+                    # first warning after a reboot (found 2026-08-16 when the
+                    # instance crash-rebooted and the rehearsal suite failed).
+                    last = self._none_field_warn_ts.get(name)
+                    if last is None or now - last > 3600:
                         self._none_field_warn_ts[name] = now
                         logger.warning(
                             "get_account_info: %s is None from Alpaca — "
