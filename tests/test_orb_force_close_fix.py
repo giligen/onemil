@@ -591,14 +591,13 @@ class TestFCDBQueryFallback:
 
 
 class TestSyncOrphanDetection:
-    def test_orphan_alpaca_position_telegrams(self, engine, mock_alpaca, notifier):
-        """Alpaca has ANNA open, but no DB row for today → orphan alert.
+    def test_orphan_alpaca_position_stays_silent(self, engine, mock_alpaca, notifier):
+        """Alpaca has ANNA open, but no DB row → FOREIGN → SILENT.
 
-        Post-2026-06-05 the pre-existing 'ORPHAN ALPACA POSITIONS'
-        summary _notify_error was removed (it had no cooldown and fired
-        every sync cycle on stuck orphans → alert storm). The reconciler
-        now sends a per-orphan structured alert with a 60-min cooldown
-        and a clear FOREIGN vs OWNED classification.
+        Owner directive 2026-08-17 (BMNR incident): foreign positions on
+        the shared account are the owner's own manual trades — log-only,
+        no Telegram, never closed. (Pre-8/17 this asserted a per-orphan
+        FOREIGN alert; that alert spammed the owner about his own trades.)
         """
         from trading.orphan_reconciler import reset_state_for_tests
         reset_state_for_tests()
@@ -630,11 +629,11 @@ class TestSyncOrphanDetection:
             m for m in all_msgs
             if 'ANNA' in m and ('FOREIGN' in m or 'ORPHAN' in m)
         ]
-        assert len(any_orphan_alert) >= 1, (
-            "Reconciler must send at least one alert per detected orphan; "
-            f"notifier.notify_error calls: {notify_msgs}; "
-            f"notifier.send_message calls: {send_msgs}"
+        assert len(any_orphan_alert) == 0, (
+            "Foreign positions must be SILENT (owner directive 8/17); "
+            f"got alerts: {any_orphan_alert}"
         )
+        mock_alpaca.close_position.assert_not_called()
 
     def test_no_orphan_alert_when_all_positions_tracked(self, engine, mock_alpaca, notifier):
         """All Alpaca positions are in our open_positions → no alert."""

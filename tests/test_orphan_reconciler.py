@@ -268,8 +268,10 @@ class TestReconcileEndToEnd:
         assert actions == []
         a.close_position.assert_not_called()
 
-    def test_foreign_position_alerts_no_close(self):
-        # Broker has SOMETHING we don't track, no DB row for our strategy
+    def test_foreign_position_silent_no_close(self):
+        # Owner directive 2026-08-17 (BMNR incident): foreign positions are
+        # the owner's own manual trades — log-only, NEVER close, NEVER
+        # telegram. (Previously alert_only with a Telegram notify.)
         a = _stub_alpaca(positions=[_broker(symbol='UNKNOWN')])
         n = MagicMock()
         actions = reconcile_strategy_orphans(
@@ -278,9 +280,9 @@ class TestReconcileEndToEnd:
         )
         assert len(actions) == 1
         assert actions[0].classification == 'foreign'
-        assert actions[0].action == 'alert_only'
+        assert actions[0].action == 'log_only'
         a.close_position.assert_not_called()
-        n.notify_error.assert_called_once()
+        n.notify_error.assert_not_called()
 
     def test_owned_orphan_gets_closed(self):
         broker_pos = _broker(symbol='SMU', qty=5976,
@@ -367,21 +369,22 @@ class TestReconcileEndToEnd:
 
 class TestAlertCooldown:
 
-    def test_same_orphan_twice_only_one_alert(self):
+    def test_foreign_orphan_never_alerts(self):
+        # Owner directive 2026-08-17: foreign positions never telegram at
+        # all — repeated reconcile cycles stay silent (was: one alert per
+        # cooldown window, which spammed the owner about his own trades).
         broker_pos = _broker(symbol='UNKNOWN')
         a = _stub_alpaca(positions=[broker_pos])
         n = MagicMock()
-        # First call → alert
         reconcile_strategy_orphans(
             strategy='orb', alpaca=a, db=_stub_db(),
             notifier=n, tracked_symbols=set(),
         )
-        # Second call within cooldown → no alert
         reconcile_strategy_orphans(
             strategy='orb', alpaca=a, db=_stub_db(),
             notifier=n, tracked_symbols=set(),
         )
-        assert n.notify_error.call_count == 1
+        assert n.notify_error.call_count == 0
 
 
 class TestDBRecoveryRowWritten:

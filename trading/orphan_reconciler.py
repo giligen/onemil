@@ -237,18 +237,26 @@ def _closes_in_last_hour(strategy: str) -> int:
     return len(bucket)
 
 
-def _should_alert(strategy: str, symbol: str, cooldown_minutes: int) -> bool:
-    """True iff no alert has been sent for (strategy, symbol) within the
-    cooldown window. Also prunes expired entries so the dict can't grow
-    unbounded across long-running processes."""
+def _prune_alert_cache(cooldown_minutes: int) -> None:
+    """Drop expired alert-cooldown entries so the dict can't grow unbounded
+    across long-running processes. Called every reconcile cycle (not just
+    on alert sends — foreign positions no longer alert)."""
+    if len(_state.last_alert) <= 64:
+        return
     now = datetime.now(timezone.utc)
     cooldown = timedelta(minutes=cooldown_minutes)
-    # Prune expired entries opportunistically — bounds memory.
-    if len(_state.last_alert) > 64:
-        expired = [k for k, t in _state.last_alert.items()
-                   if (now - t) >= cooldown]
-        for k in expired:
-            _state.last_alert.pop(k, None)
+    expired = [k for k, t in _state.last_alert.items()
+               if (now - t) >= cooldown]
+    for k in expired:
+        _state.last_alert.pop(k, None)
+
+
+def _should_alert(strategy: str, symbol: str, cooldown_minutes: int) -> bool:
+    """True iff no alert has been sent for (strategy, symbol) within the
+    cooldown window."""
+    now = datetime.now(timezone.utc)
+    cooldown = timedelta(minutes=cooldown_minutes)
+    _prune_alert_cache(cooldown_minutes)
     key = (strategy, symbol)
     last = _state.last_alert.get(key)
     if last is not None and (now - last) < cooldown:
@@ -531,6 +539,12 @@ def reconcile_strategy_orphans(
             )
             return actions
 
+    # Prune the alert-cooldown cache every cycle. This used to happen only
+    # inside _alert via _should_alert, but foreign positions no longer
+    # alert at all (owner directive 8/17) — without this, a quiet account
+    # with many owner positions would never prune the cache.
+    _prune_alert_cache(cfg.alert_cooldown_minutes)
+
     # 2. Filter to candidates: broker has it, engine doesn't track it,
     #    and we don't have a close already in flight for this symbol.
     candidates = [
@@ -582,13 +596,20 @@ def reconcile_strategy_orphans(
             action = OrphanAction(
                 symbol=sym, qty=qty, avg_entry=avg_entry,
                 classification='foreign',
-                action='alert_only',
+                action='log_only',
                 note='No matching strategy row with all OWNED predicates',
             )
             actions.append(action)
-            _alert(notifier, strategy, sym,
-                   _format_foreign_alert(strategy, action),
-                   cfg.alert_cooldown_minutes)
+            # Owner directive 2026-08-17 (post-BMNR incident): the owner
+            # trades manually — shorts, brackets, any size — on this same
+            # live account. Foreign positions are ROUTINE, not anomalies:
+            # log at INFO, never Telegram, never touch. (Was: _alert with
+            # a repeating cooldown, which spammed the owner about his own
+            # trades every reconcile cycle.)
+            logger.info(
+                f"orphan reconciler [{strategy}]: foreign position "
+                f"{sym} ({qty} sh @ ${avg_entry:.4f}) — owner's manual "
+                f"trade, ignored (no alert by owner directive 8/17)")
             continue
 
         db_fill = float(owned_row.get('fill_price') or 0.0)
