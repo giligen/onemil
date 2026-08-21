@@ -460,6 +460,31 @@ class TestEodFlat:
         upd = db.update_trade.call_args.args[1]
         assert upd['order_status'] == 'exit_pending_verification'
 
+    def test_finalize_eod_confirms_fill_during_grace(self, tmp_path):
+        """2026-08-21 DFNS incident: shutdown killed the EOD poll mid-
+        flight — finalize_eod must grace-poll and record the fill."""
+        eng, a, db, sm = self._filled(tmp_path)
+        eng.force_close_all()
+        a.get_order.return_value = {'status': 'filled',
+                                    'filled_avg_price': 9.90}
+        eng.finalize_eod(timeout_s=5.0, poll_interval_s=0.01)
+        upd = db.update_trade.call_args.args[1]
+        assert upd['order_status'] == 'closed'
+        assert upd['pnl'] == pytest.approx((9.90 - 10.0) * 50)
+        assert not eng._eod_closing
+
+    def test_finalize_eod_timeout_marks_unverified(self, tmp_path):
+        """If the fill never confirms within the grace window, the row
+        must be flagged exit_pending_verification — never left silently
+        open (the kills read these rows)."""
+        eng, a, db, sm = self._filled(tmp_path)
+        eng.force_close_all()
+        a.get_order.return_value = {'status': 'new'}   # never fills
+        eng.finalize_eod(timeout_s=0.05, poll_interval_s=0.01)
+        upd = db.update_trade.call_args.args[1]
+        assert upd['order_status'] == 'exit_pending_verification'
+        assert not eng._eod_closing
+
     def test_eod_poll_failure_retries_next_cycle(self, tmp_path):
         eng, a, db, sm = self._filled(tmp_path)
         eng.force_close_all()
@@ -473,6 +498,36 @@ class TestEodFlat:
         assert 'IGNI' not in eng._eod_closing
         upd = db.update_trade.call_args.args[1]
         assert upd['exit_reason'] == 'eod_flat'
+
+
+class TestSyncLookback:
+    def test_prior_day_stuck_row_marked_unverified(self, tmp_path):
+        """2026-08-21 DFNS incident, part 2: a row stuck 'filled' by a
+        shutdown race is a PRIOR-day row at next boot. sync_positions
+        must look back (5d), see it gone at the broker, and mark it
+        exit_pending_verification — a today-only sync left the loss
+        invisible to the realized-P&L kills."""
+        eng, a, db, sm = _engine(tmp_path)
+        from datetime import datetime, timezone, timedelta
+        from zoneinfo import ZoneInfo
+        yday = (datetime.now(timezone.utc).astimezone(
+            ZoneInfo('America/New_York')) - timedelta(days=1)
+        ).strftime('%Y-%m-%d')
+        stuck = {'id': 349, 'symbol': 'DFNS', 'order_status': 'filled',
+                 'fill_price': 23.70, 'entry_price': 22.07,
+                 'stop_loss_price': 20.10, 'real_stop_loss_price': 20.10,
+                 'filled_qty': 25, 'shares': 25, 'pattern_data': '{}',
+                 'order_id': 'oid-349', 'trade_date': yday}
+        db.get_open_trades = lambda d, strategy=None: (
+            [stuck] if d == yday else [])
+        a.get_open_positions.return_value = []   # gone at broker
+        eng.sync_positions()
+        marked = [c.args for c in db.update_trade.call_args_list
+                  if c.args[0] == 349 and
+                  c.args[1].get('order_status') == 'exit_pending_verification']
+        assert marked, (
+            f"prior-day stuck row not flagged; update calls: "
+            f"{db.update_trade.call_args_list}")
 
 
 class TestOrphanReconcilerWiring:

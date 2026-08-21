@@ -429,6 +429,25 @@ class IgnitionEngine:
         logger.info(f"[IGNITION] FILLED {p.symbol} {filled_qty}sh "
                     f"@{fill_price} — watch added (lock "
                     f"{LOCK_ARM_AT_R}R/{LOCK_STOP_R}R)")
+        # FILL QUALITY line (8/21, owner ask): the S3 verdict metric,
+        # derived once here so EOD/weekly audits grep it instead of
+        # recomputing from quote telemetry. chase = fill vs the shadow
+        # trigger level (the BT book's assumed entry); vs_ask = fill vs
+        # the ask at submit (execution quality proper).
+        try:
+            ask_at_submit = float(q.get('ask_price') or 0.0)
+            chase_bps = (fill_price - p.entry) / p.entry * 1e4
+            vs_ask_bps = ((fill_price - ask_at_submit) / ask_at_submit
+                          * 1e4) if ask_at_submit > 0 else float('nan')
+            latency_s = time.time() - p.submitted_ts
+            risk_realized = (fill_price - p.stop) * filled_qty
+            logger.info(
+                f"[IGNITION] FILL QUALITY {p.symbol}: chase={chase_bps:+.0f}bps "
+                f"vs_ask={vs_ask_bps:+.0f}bps latency={latency_s:.1f}s "
+                f"risk_realized=${risk_realized:.0f} "
+                f"(planned ${self.risk_usd:.0f})")
+        except Exception as e:
+            logger.warning(f"[IGNITION] fill-quality line failed: {e}")
 
     def _mark_cancelled(self, p: _Pending, reason: str) -> None:
         if p.trade_id:
@@ -595,6 +614,30 @@ class IgnitionEngine:
                     pos, f'eod sell {status}')
                 self._eod_closing.pop(symbol, None)
 
+    def finalize_eod(self, timeout_s: float = 45.0,
+                     poll_interval_s: float = 3.0) -> None:
+        """Final grace-poll for pending EOD sell confirmations at shutdown.
+
+        2026-08-21 incident (DFNS id=349): the service's clean 20:00 UTC
+        exit killed process_eod_fills mid-poll — the broker fill landed but
+        the DB row stayed 'filled' (open) with NO unverified mark, making
+        the loss invisible to the realized-P&L kills until a manual
+        reconcile. Called from the scanner shutdown sequence right after
+        force_close_all(): poll until confirmations land or timeout, then
+        mark anything still pending as exit_pending_verification so the
+        green check and the next boot's reconciler see it.
+        """
+        deadline = time.monotonic() + timeout_s
+        while self._eod_closing and time.monotonic() < deadline:
+            self.process_eod_fills()
+            if not self._eod_closing:
+                break
+            time.sleep(poll_interval_s)
+        for symbol in list(self._eod_closing.keys()):
+            pos = self._eod_closing.pop(symbol)
+            self._mark_exit_unverified(
+                pos, f'shutdown before fill confirm ({timeout_s:.0f}s grace)')
+
     def _mark_exit_unverified(self, pos, why: str) -> None:
         logger.error(f"[IGNITION] {pos.symbol} exit UNVERIFIED ({why}) "
                      f"— order_status=exit_pending_verification")
@@ -611,12 +654,22 @@ class IgnitionEngine:
         """Boot/mid-session-restart rehydration (mirrors ORB)."""
         if not self.enabled or self.dry_run:
             return
-        today = _et_now().strftime('%Y-%m-%d')
-        try:
-            rows = self.db.get_open_trades(today, strategy=STRATEGY_NAME)
-        except Exception as e:
-            logger.error(f"[IGNITION] sync: DB read failed: {e}")
-            return
+        # Look back 5 calendar days, not just today: a row stuck 'filled'
+        # by a shutdown race (2026-08-21 DFNS incident — EOD fill landed
+        # at the broker but the poll died with the service) is a PRIOR-day
+        # row by the next boot, and a today-only sync never sees it, so
+        # the loss stays invisible to the realized-P&L kills.
+        now_et = _et_now()
+        rows = []
+        for back in range(5):
+            d = (now_et - timedelta(days=back)).strftime('%Y-%m-%d')
+            try:
+                rows.extend(
+                    self.db.get_open_trades(d, strategy=STRATEGY_NAME))
+            except Exception as e:
+                logger.error(f"[IGNITION] sync: DB read failed ({d}): {e}")
+        # NOTE: no early return on empty rows — the orphan reconciler
+        # below must run at every boot regardless (8/14 audit P2).
         try:
             broker = {p['symbol']: p for p in
                       (self.alpaca.get_open_positions() or [])}

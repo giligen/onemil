@@ -654,6 +654,14 @@ class RealtimeScanner:
                     self.ignition_engine.force_close_all()
                 except Exception as e:
                     logger.error(f"Ignition shutdown close raised: {e}")
+                # Grace-poll pending EOD sell confirmations before the
+                # process exits — without this, a fill landing at the
+                # broker during shutdown leaves the DB row open and the
+                # loss invisible to the kills (2026-08-21 DFNS incident).
+                try:
+                    self.ignition_engine.finalize_eod()
+                except Exception as e:
+                    logger.error(f"Ignition finalize_eod raised: {e}")
 
     def _macd_wave_tick(self) -> None:
         """One MACD wave engine cycle (scan + entries + exits).
