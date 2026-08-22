@@ -293,6 +293,18 @@ trading:
   entry_slippage_pct: 0.005  # 0.50% — production avg is 0.48% on buy-stops
   exit_slippage_pct: 0.003   # 0.30% — tick gap + spread on self-managed stop exits
   bull_flag:
+    # BF kill rails (Discipline Program Phase 1, 2026-08-22, docs/
+    # bf_discipline_program_aug2026.md). DB-derived, ET-dated, realized
+    # bull_flag P&L gates — mirrors ORB kill rails. Env kill: BF_KILL_RAILS=0.
+    #   daily  breach -> no new entries rest of day
+    #   weekly breach -> flatten BF + no entries rest of ISO week
+    #   month  breach -> PAUSE latch + data/bf_month_pause.flag +
+    #                    [BF] ABANDON-GATE telegram (owner keep/kill decision)
+    kill_rails:
+      enabled: true
+      daily_usd: -800
+      weekly_usd: -1200
+      month_pause_usd: -2500
     # 2026-05-15: tested lowering 3→2. 2025 OOS positive (+$63K/12mo) but 2026
     # Jan-Apr OOS negative (3 of 4 months worse, total −$16K). NOT SHIPPED.
     # See scripts/study_bf_wide_sweep_2025.sh + CLAUDE.md "min_pole_candles"

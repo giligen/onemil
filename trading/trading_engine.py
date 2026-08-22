@@ -12,10 +12,12 @@ Flow:
 """
 
 import logging
+import os
 import queue
 import threading
 import time as time_mod
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Set, Optional, Dict, Any, List, Tuple
 
 import pandas as pd
@@ -377,6 +379,56 @@ class TradingEngine:
         _ch, _cm = _cutoff_str.split(':')
         self._spy_macd_cutoff_time = (int(_ch), int(_cm))
         self._spy_macd_cache: Optional[float] = None  # latest SPY MACD histogram value
+
+        # BF kill rails (Discipline Program Phase 1, docs/
+        # bf_discipline_program_aug2026.md, 2026-08-22). Mirrors the ORB
+        # kill-rail pattern (trading/orb_engine.py): DB-derived (restart-safe),
+        # ET-dated, realized bull_flag P&L only, fail-closed on query error.
+        #   daily  <= daily_usd   -> no NEW entries rest of day
+        #   weekly <= weekly_usd  -> flatten BF + no entries rest of ISO week
+        #   month  <= month_pause_usd -> PAUSE latch + persistent flag file
+        #     (data/bf_month_pause.flag, honored at boot, cleared only by
+        #     owner removing the file) + [BF] ABANDON-GATE telegram.
+        # Env kill: BF_KILL_RAILS=0. Grep: journalctl | grep "BF RAIL".
+        _bf_kr_cfg = (_cfg.get("trading", {}).get("bull_flag", {}) or {}) \
+            .get("kill_rails", {}) or {}
+        self.kill_rails_enabled = bool(_bf_kr_cfg.get("enabled", True))
+        self.kill_daily_usd = float(_bf_kr_cfg.get("daily_usd", -800))
+        self.kill_weekly_usd = float(_bf_kr_cfg.get("weekly_usd", -1200))
+        self.kill_month_pause_usd = float(
+            _bf_kr_cfg.get("month_pause_usd", -2500))
+        _bf_kr_env = os.environ.get("BF_KILL_RAILS")
+        if _bf_kr_env is not None:
+            self.kill_rails_enabled = _bf_kr_env.strip().lower() not in (
+                '0', 'false', 'no', 'off', '')
+            if not self.kill_rails_enabled:
+                logger.warning(
+                    "BF RAIL: kill rails DISABLED via BF_KILL_RAILS env")
+        # Notify/act-once latches (rolled in reset_daily; reset on restart =>
+        # at most one re-notify per still-breached period, like ORB).
+        self._kill_daily_notified = False
+        self._kill_weekly_notified = False
+        self._kill_weekly_flattened = False
+        self._kill_query_fail_notified = False
+        self._kill_pause_logged = False
+        self._kill_week_key: Optional[str] = None
+        self._kill_month_key: Optional[str] = None
+        # Month pause: runtime latch + persistent marker file. Path override
+        # via BF_MONTH_PAUSE_FLAG env (tests/drills) or config key.
+        _flag_default = str(
+            Path(__file__).resolve().parent.parent / 'data'
+            / 'bf_month_pause.flag')
+        self.month_pause_flag_path = Path(
+            os.environ.get('BF_MONTH_PAUSE_FLAG')
+            or _bf_kr_cfg.get('month_pause_flag_path', _flag_default))
+        self._bf_month_paused = False
+        self._sync_month_pause_from_flag(at_boot=True)
+        if self.kill_rails_enabled:
+            logger.info(
+                f"BF RAIL: kill rails ENABLED — daily ${self.kill_daily_usd:,.0f} "
+                f"/ weekly ${self.kill_weekly_usd:,.0f} "
+                f"/ month-pause ${self.kill_month_pause_usd:,.0f} "
+                f"(flag: {self.month_pause_flag_path})")
 
         self.shutdown_event = None  # Set by caller for graceful shutdown
         # Bar event queue: WebSocket thread enqueues (symbol, bars_df), main thread drains
@@ -1274,6 +1326,11 @@ class TradingEngine:
             _flush_queue()
             return None
         if self.market_regime and self.market_regime.max_trades_per_day > 0 and self._daily_trade_count >= self.market_regime.max_trades_per_day:
+            _flush_queue()
+            return None
+        # BF kill rails — RT bar entries must respect the same gates as the
+        # polling path (Discipline Program Phase 1).
+        if self._kill_rails_blocked():
             _flush_queue()
             return None
 
@@ -3022,6 +3079,13 @@ class TradingEngine:
         self._sync_closed_positions()
         fill_result = self._manage_pending_orders()
 
+        # BF kill rails (Discipline Program Phase 1): DB-derived realized-P&L
+        # gates. Daily/weekly/month breach or a fail-closed pnl-query error
+        # blocks all NEW entries (weekly also flattens, month pauses).
+        # Placed AFTER sync/fill management so exits are never blocked.
+        if self._kill_rails_blocked():
+            return fill_result
+
         # Friday filter — blocks NEW order placement only
         if self.skip_fridays and date.today().weekday() == 4:
             logger.info("FRIDAY FILTER: skipping new trades (30% WR on Fridays)")
@@ -3952,6 +4016,213 @@ class TradingEngine:
                 exit_reason=exit_reason,
             )
 
+    # =====================================================================
+    # BF kill rails (Discipline Program Phase 1, 2026-08-22) — DB-derived,
+    # ET-dated, fail-closed. Mirrors trading/orb_engine kill rails.
+    # =====================================================================
+
+    def _et_now(self) -> datetime:
+        """Market-clock now (ET). Kill-rail windows key on the ET session
+        date, not the box's UTC wall clock (mirrors ORBEngine._et_now)."""
+        return datetime.now(ET)
+
+    def _sync_month_pause_from_flag(self, at_boot: bool = False) -> None:
+        """Sync the month-pause runtime latch from the persistent flag file.
+
+        Called at boot (__init__) and every reset_daily. The flag is set by a
+        month-rail breach and cleared ONLY by the owner removing the file —
+        a month roll does NOT clear it. Owner may also pause BF manually by
+        creating the file. Logs every transition (no silent state changes)."""
+        exists = self.month_pause_flag_path.exists()
+        if exists and not self._bf_month_paused:
+            self._bf_month_paused = True
+            logger.error(
+                f"BF RAIL: MONTH-PAUSE flag present "
+                f"({self.month_pause_flag_path})"
+                f"{' at boot' if at_boot else ''} — bull flag entries DISABLED "
+                f"until owner removes the file")
+        elif not exists and self._bf_month_paused:
+            self._bf_month_paused = False
+            logger.warning(
+                f"BF RAIL: month-pause flag removed "
+                f"({self.month_pause_flag_path}) — owner cleared the pause; "
+                f"bull flag entries re-enabled")
+
+    def _realized_bf_pnl(self, since_date: str) -> float:
+        """Realized bull_flag P&L (closed rows) with trade_date >= since_date.
+
+        DB-derived so it survives restarts (zero extra state). FAIL-CLOSED:
+        any query error returns the -1e9 sentinel so the caller blocks new
+        entries rather than trading blind. Mirrors
+        ORBEngine._realized_orb_pnl."""
+        path = getattr(self.db, '_trades_path', None)
+        if path is None:
+            # No real trades DB configured (e.g. a bare mock) — nothing to
+            # check; stay INERT rather than read some default file
+            # (fail-open, logged).
+            logger.warning("BF RAIL: realized-pnl: db has no _trades_path — "
+                           "kill rail inert (no block)")
+            return 0.0
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(path), timeout=10)
+            cur = conn.execute(
+                "SELECT COALESCE(SUM(pnl),0) FROM trades WHERE "
+                "strategy='bull_flag' AND trade_date>=? AND pnl IS NOT NULL",
+                (since_date,))
+            v = float(cur.fetchone()[0] or 0.0)
+            conn.close()
+            return v
+        except Exception as e:
+            logger.error(f"BF RAIL: realized-pnl query failed ({e}) — "
+                         f"FAIL-SAFE: treating as kill-breached")
+            return -1e9
+
+    def _bf_month_trades(self, month_start: str) -> List[Tuple[str, str, float]]:
+        """Closed bull_flag trades (trade_date, symbol, pnl) for the month —
+        the evidence list attached to the ABANDON-GATE telegram. Best-effort:
+        a query error returns [] with an ERROR log (the pause itself is
+        decided by _realized_bf_pnl, never by this list)."""
+        path = getattr(self.db, '_trades_path', None)
+        if path is None:
+            logger.error("BF RAIL: month trade list unavailable "
+                         "(db has no _trades_path)")
+            return []
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(path), timeout=10)
+            rows = conn.execute(
+                "SELECT trade_date, symbol, pnl FROM trades WHERE "
+                "strategy='bull_flag' AND trade_date>=? AND pnl IS NOT NULL "
+                "ORDER BY trade_date, symbol",
+                (month_start,)).fetchall()
+            conn.close()
+            return [(str(d), str(s), float(p)) for d, s, p in rows]
+        except Exception as e:
+            logger.error(f"BF RAIL: month trade list query failed ({e}) — "
+                         f"sending ABANDON-GATE without the list")
+            return []
+
+    def _bf_notify(self, msg: str) -> None:
+        """Send a rail Telegram (never raises — notifier failure must not
+        break the trading loop; failure is logged per fallback rule)."""
+        if not self.notifier:
+            return
+        try:
+            self.notifier.send_message_sync(msg)
+        except Exception as e:
+            logger.error(f"BF RAIL: telegram send failed ({e}) — "
+                         f"rail action already applied, notification lost")
+
+    def _fire_month_pause(self, mo: float, month_start: str) -> None:
+        """Month rail breach: set the runtime pause latch, write the
+        persistent flag file, and send the [BF] ABANDON-GATE telegram with
+        the month's closed-trade list attached (owner decision evidence)."""
+        self._bf_month_paused = True
+        logger.error(
+            f"BF RAIL: MONTH PAUSE — realized ${mo:+,.0f} breached "
+            f"${self.kill_month_pause_usd:,.0f}; bull flag PAUSED "
+            f"(no new entries) until owner clears "
+            f"{self.month_pause_flag_path}")
+        try:
+            self.month_pause_flag_path.parent.mkdir(parents=True,
+                                                    exist_ok=True)
+            self.month_pause_flag_path.write_text(
+                f"paused_at={self._et_now().isoformat()}\n"
+                f"month_start={month_start}\n"
+                f"month_realized_usd={mo:.2f}\n"
+                f"threshold_usd={self.kill_month_pause_usd:.2f}\n"
+                f"clear: owner deletes this file (docs/"
+                f"bf_discipline_program_aug2026.md Phase 1)\n")
+        except Exception as e:
+            logger.error(
+                f"BF RAIL: could not write month-pause flag file ({e}) — "
+                f"runtime latch still set; pause will NOT survive restart "
+                f"unless P&L still breaches")
+        trades = self._bf_month_trades(month_start)
+        lines = [f"{d[5:]} {s} ${p:+,.0f}" for d, s, p in trades[:40]]
+        if len(trades) > 40:
+            lines.append(f"...and {len(trades) - 40} more")
+        trade_block = "\n".join(lines) if lines else "(trade list unavailable)"
+        self._bf_notify(
+            f"[BF] ABANDON-GATE — month realized ${mo:+,.0f} breached "
+            f"${self.kill_month_pause_usd:,.0f}.\n"
+            f"Bull flag PAUSED (no new entries; open positions keep their "
+            f"stops). Clear: remove {self.month_pause_flag_path.name} + "
+            f"restart or wait for daily reset.\n"
+            f"Month trades ({len(trades)}):\n{trade_block}")
+
+    def _kill_rails_blocked(self) -> Optional[str]:
+        """Return a kill-rail reason blocking NEW bull_flag entries, or None.
+
+        Order of severity: month pause > weekly > daily (mirrors ORB). Each
+        rail Telegram-notifies once per still-breached period. Weekly
+        additionally FLATTENS open BF positions once (real
+        _force_close_all path). Month breach latches the pause + writes the
+        persistent flag file. A pnl-query failure fails CLOSED (blocks)
+        WITHOUT escalating to pause/flatten (a transient DB error must not
+        fire the ABANDON-GATE). Rails only gate/flatten — they never place
+        orders."""
+        if not self.kill_rails_enabled:
+            return None
+        if self._bf_month_paused:
+            if not self._kill_pause_logged:
+                self._kill_pause_logged = True
+                logger.warning(
+                    f"BF RAIL: month-pause latch active "
+                    f"({self.month_pause_flag_path}) — no new entries")
+            return 'month_pause'
+        et = self._et_now()
+        today = et.strftime('%Y-%m-%d')
+        week_start = (et - timedelta(days=et.weekday())).strftime('%Y-%m-%d')
+        month_start = et.strftime('%Y-%m-01')
+        dy = self._realized_bf_pnl(today)
+        wk = self._realized_bf_pnl(week_start)
+        mo = self._realized_bf_pnl(month_start)
+        _SENTINEL = -1e8   # -1e9 fail-closed marker (well below any real loss)
+        if min(dy, wk, mo) <= _SENTINEL:
+            if not self._kill_query_fail_notified:
+                self._kill_query_fail_notified = True
+                logger.error("BF RAIL: P&L query failed — FAIL-SAFE blocking "
+                             "new entries until it recovers")
+            return 'pnl_query_failed'
+        if mo <= self.kill_month_pause_usd:
+            self._fire_month_pause(mo, month_start)
+            return 'month_pause'
+        if wk <= self.kill_weekly_usd:
+            if not self._kill_weekly_notified:
+                self._kill_weekly_notified = True
+                logger.warning(
+                    f"BF RAIL: WEEKLY KILL — realized ${wk:+,.0f} breached "
+                    f"${self.kill_weekly_usd:,.0f}; flat + no new entries "
+                    f"this ISO week")
+                self._bf_notify(
+                    f"[BF] WEEKLY KILL — realized ${wk:+,.0f} breached "
+                    f"${self.kill_weekly_usd:,.0f}. Flattening + no new "
+                    f"entries this week.")
+            if not self._kill_weekly_flattened:
+                self._kill_weekly_flattened = True
+                try:
+                    self._force_close_all()
+                    logger.warning("BF RAIL: WEEKLY KILL flat — "
+                                   "_force_close_all completed")
+                except Exception as e:
+                    logger.error(f"BF RAIL: WEEKLY KILL flat failed ({e}) — "
+                                 f"positions keep their stops")
+            return 'weekly_kill'
+        if dy <= self.kill_daily_usd:
+            if not self._kill_daily_notified:
+                self._kill_daily_notified = True
+                logger.warning(
+                    f"BF RAIL: DAILY KILL — realized ${dy:+,.0f} breached "
+                    f"${self.kill_daily_usd:,.0f}; no new entries today")
+                self._bf_notify(
+                    f"[BF] DAILY KILL — realized ${dy:+,.0f} breached "
+                    f"${self.kill_daily_usd:,.0f}. No new entries today "
+                    f"(open positions keep their stops).")
+            return 'daily_kill'
+        return None
+
     def _force_close_all(self) -> None:
         """
         Cancel all pending orders and close all open positions.
@@ -4308,6 +4579,25 @@ class TradingEngine:
         self._margin_cache = {}  # marginability cache is per-day (Fix 4)
         self._margin_persisted = set()  # DB-write tracker, per-day
         self.position_manager.reset_daily()
+        # Roll BF kill-rail notify latches: daily every day; weekly on
+        # ISO-week change; month key on month change. P&L itself is
+        # DB-derived, so the latches only gate re-notification (a breach
+        # persists across the roll until P&L recovers). The month-pause
+        # latch is NOT rolled — it re-syncs from the persistent flag file
+        # (cleared only by the owner removing it).
+        et = self._et_now()
+        self._kill_daily_notified = False
+        self._kill_query_fail_notified = False
+        self._kill_pause_logged = False
+        _wk = (et - timedelta(days=et.weekday())).strftime('%Y-%m-%d')
+        _mo = et.strftime('%Y-%m')
+        if _wk != self._kill_week_key:
+            self._kill_week_key = _wk
+            self._kill_weekly_notified = False
+            self._kill_weekly_flattened = False
+        if _mo != self._kill_month_key:
+            self._kill_month_key = _mo
+        self._sync_month_pause_from_flag()
         self._refresh_spy_data()
         self._sync_startup_state()
         logger.info("Trading engine: daily state reset")

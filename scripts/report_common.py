@@ -887,6 +887,90 @@ def cumulative_orb_since(start: str) -> float:
     return float(row[0])
 
 
+BF_RAIL_DEFAULTS = {'daily_usd': -800.0, 'weekly_usd': -1200.0,
+                    'month_pause_usd': -2500.0}
+BF_MONTH_PAUSE_FLAG = ROOT / 'data' / 'bf_month_pause.flag'
+
+
+def _bf_rails_cfg() -> Dict:
+    """BF kill-rail thresholds from config.yaml (trading.bull_flag.kill_rails).
+
+    Falls back to the shipped defaults with a printed WARNING if the config
+    is unreadable or lacks the block (fallback rule: never silent)."""
+    try:
+        import yaml
+        cfg = yaml.safe_load(open(ROOT / 'config.yaml')) or {}
+        kr = ((cfg.get('trading') or {}).get('bull_flag') or {}) \
+            .get('kill_rails') or {}
+        if not kr:
+            print("WARNING: config.yaml lacks trading.bull_flag.kill_rails — "
+                  "using shipped defaults", flush=True)
+        return {**BF_RAIL_DEFAULTS, **kr}
+    except Exception as e:
+        print(f"WARNING: _bf_rails_cfg could not read config.yaml ({e}) — "
+              f"using shipped defaults", flush=True)
+        return dict(BF_RAIL_DEFAULTS)
+
+
+def bf_rails_status(day: str) -> Dict:
+    """BF kill-rail state for the EoD dive (Discipline Program Phase 1).
+
+    Reads the SAME sums the live rails read (trades.db, strategy='bull_flag',
+    pnl IS NOT NULL, ET trade_date keys: day / ISO-week Monday / month first)
+    plus the persistent month-pause flag file. FAIL-CLOSED presentation: a DB
+    error reports all rails breached with query_failed=True (mirrors the
+    engine's -1e9 sentinel) rather than a green line on unknown data."""
+    from datetime import date as _date
+    kr = _bf_rails_cfg()
+    d = _date.fromisoformat(day)
+    week_start = (d - timedelta(days=d.weekday())).isoformat()
+    month_start = day[:8] + '01'
+    out = {'enabled': bool(kr.get('enabled', True)),
+           'daily_limit': float(kr['daily_usd']),
+           'weekly_limit': float(kr['weekly_usd']),
+           'month_pause_limit': float(kr['month_pause_usd']),
+           'month_pause_flag': BF_MONTH_PAUSE_FLAG.exists(),
+           'query_failed': False}
+    try:
+        conn = sqlite3.connect(ROOT / 'data' / 'trades.db', timeout=15)
+        sums = {}
+        for key, since in (('daily', day), ('weekly', week_start),
+                           ('monthly', month_start)):
+            row = conn.execute(
+                "SELECT COALESCE(SUM(pnl),0) FROM trades WHERE "
+                "strategy='bull_flag' AND trade_date>=? AND pnl IS NOT NULL",
+                (since,)).fetchone()
+            sums[key] = float(row[0] or 0.0)
+        conn.close()
+        out.update(sums)
+    except Exception as e:
+        print(f"WARNING: bf_rails_status query failed ({e}) — reporting "
+              f"FAIL-CLOSED (all rails breached)", flush=True)
+        out.update({'daily': -1e9, 'weekly': -1e9, 'monthly': -1e9,
+                    'query_failed': True})
+    out['daily_breached'] = out['daily'] <= out['daily_limit']
+    out['weekly_breached'] = out['weekly'] <= out['weekly_limit']
+    out['month_breached'] = out['monthly'] <= out['month_pause_limit']
+    out['month_paused'] = out['month_pause_flag'] or out['month_breached']
+    return out
+
+
+def bf_rails_line(st: Dict) -> str:
+    """One EoD-dive line for the BF kill-rail state (grep: 'BF RAILS')."""
+    if st.get('query_failed'):
+        return "BF RAILS QUERY FAILED — fail-closed (assume all breached)"
+    def _cell(val, limit, breached):
+        return f"${val:+,.0f}/{limit:,.0f}{' BREACH' if breached else ''}"
+    parts = [
+        f"BF RAILS{'' if st['enabled'] else ' (DISABLED)'}",
+        f"day {_cell(st['daily'], st['daily_limit'], st['daily_breached'])}",
+        f"wk {_cell(st['weekly'], st['weekly_limit'], st['weekly_breached'])}",
+        f"mo {_cell(st['monthly'], st['month_pause_limit'], st['month_breached'])}",
+        f"pause={'YES' if st['month_paused'] else 'no'}",
+    ]
+    return ' | '.join(parts)
+
+
 def send_telegram(msg: str) -> bool:
     """Send unless running under pytest. Returns True on success."""
     if os.environ.get('PYTEST_CURRENT_TEST'):

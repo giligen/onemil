@@ -110,7 +110,13 @@ def main() -> int:
     # an operational bug, but persistent lag erodes the news-gate edge and
     # must be visible the same evening).
     lag_txt = rc.news_lag_line(rc.news_lag_audit(day))
-    sizing_txt = '\n'.join(x for x in (rc.sizing_block(attr), lag_txt) if x)
+    # BF kill-rail state (Discipline Program Phase 1) — same DB sums the
+    # live rails read + the month-pause flag file. Always shown (EoD-dive
+    # visibility); a breach reads loudly but is not a RED — the rails
+    # firing is the system working, not an operational bug.
+    bf_txt = rc.bf_rails_line(rc.bf_rails_status(day))
+    sizing_txt = '\n'.join(
+        x for x in (rc.sizing_block(attr), lag_txt, bf_txt) if x)
     msg = build_message(v, streak, pnl, sizing_txt=sizing_txt)
     print(msg, flush=True)
     if not args.no_telegram and not args.dry_run:
