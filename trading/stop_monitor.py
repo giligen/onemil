@@ -138,6 +138,22 @@ class WatchEntry:
     # from the latest quote. Consumed (set to None) at exit-submit time.
     # Used by ORB touchgo filter to exit at the helper-computed price.
     force_exit_limit_price: Optional[float] = None
+    # ORB winner-stack scale-out (2026-08-22, flag exit.scale_out — see
+    # docs/orb_winner_stack_design_aug2026.md §2 + trading/orb_winner_stack).
+    # Armed by the ENGINE (arm_scale_out) only after the touchgo bars 0/1
+    # are resolved (review P1-1). Inert while scale_at_px <= 0 or
+    # scale_qty < 1. Trigger: tick/poll price >= scale_at_px, evaluated
+    # AFTER the stop checks (live is conservative vs BT's same-bar
+    # scale-fills-first convention — P0-1 documented deviation). On
+    # trigger: safety legs resized to runner qty, an independent LIMIT
+    # sell for scale_qty rests at scale_at_px, fill polled ASYNC (the
+    # _exit_in_progress latch is NOT held across the wait — P0-5.1).
+    scale_at_px: float = 0.0       # entry + level_r × range_size
+    scale_qty: int = 0             # floor(frac × shares) at arm time
+    scale_done: bool = False       # latched once the scale leg is booked
+    scale_order_id: str = ''       # resting limit-sell id while working
+    scale_in_flight: bool = False  # submission critical-section (short)
+    scale_last_poll_ts: float = 0.0  # poll-mode fill-check throttle
 
 
 @dataclass
@@ -906,6 +922,9 @@ class StopMonitor:
         skip_exits_until_ts: float = 0.0,
         planned_entry_price: float = 0.0,
         planned_risk_per_share: float = 0.0,
+        scale_at_px: float = 0.0,
+        scale_qty: int = 0,
+        scale_done: bool = False,
     ) -> bool:
         """
         Register a symbol for stop-price monitoring.
@@ -968,6 +987,13 @@ class StopMonitor:
             skip_exits_until_ts=skip_exits_until_ts,
             planned_entry_price=planned_entry_price,
             planned_risk_per_share=planned_risk_per_share,
+            # ORB winner-stack rehydration path (P0-4): a restart with a
+            # filled scale re-adds the watch with runner shares + scale_done
+            # so the leg can never double-sell. Fresh arming goes through
+            # arm_scale_out instead (engine gates it on the touchgo window).
+            scale_at_px=scale_at_px,
+            scale_qty=scale_qty,
+            scale_done=scale_done,
         )
         with self._watch_lock:
             existing = self._watches.get(symbol)
@@ -1286,6 +1312,369 @@ class StopMonitor:
             return False
 
     # ------------------------------------------------------------------
+    # ORB winner-stack scale-out (2026-08-22)
+    # docs/orb_winner_stack_design_aug2026.md §2 + review P0-2..P0-5.
+    # ------------------------------------------------------------------
+
+    # Scale fill-poll cadence. The +3R limit is marketable at trigger time,
+    # so most fills confirm on the first poll; a resting (touch-no-fill)
+    # order keeps being polled at this cadence until it fills or a final
+    # exit adopts/cancels it.
+    _SCALE_FILL_POLL_INTERVAL_S = 2.0
+
+    def arm_scale_out(self, symbol: str, scale_px: float,
+                      scale_qty: int) -> bool:
+        """Arm the scale-out trigger on an existing watch (engine-called).
+
+        The ENGINE decides when to arm (winner-stack flag on + touchgo bars
+        0/1 resolved — review P1-1); this just installs the trigger fields.
+        Returns False (with WARNING) when the symbol is not watched or the
+        qty is < 1 (frozen tiny-qty rule = all-runner).
+        """
+        if scale_qty < 1 or scale_px <= 0:
+            logger.warning(
+                f"StopMonitor: arm_scale_out({symbol}) rejected — "
+                f"qty={scale_qty} px={scale_px} (tiny-qty/invalid => all-runner)"
+            )
+            return False
+        with self._watch_lock:
+            watch = self._watches.get(symbol)
+            if watch is None:
+                logger.warning(
+                    f"StopMonitor: arm_scale_out({symbol}) — no active watch")
+                return False
+            if watch.scale_done:
+                logger.warning(
+                    f"StopMonitor: arm_scale_out({symbol}) — scale already "
+                    f"done; ignored")
+                return False
+            watch.scale_at_px = float(scale_px)
+            watch.scale_qty = int(scale_qty)
+        logger.info(
+            f"StopMonitor: {symbol} SCALE OUT armed — {scale_qty}sh limit at "
+            f"${scale_px:.2f} on touch (runner keeps stop)"
+        )
+        return True
+
+    def _scale_submit_core(self, symbol: str, watch: WatchEntry) -> bool:
+        """Synchronous scale submission: resize safety legs to runner qty,
+        then submit an INDEPENDENT limit sell for the scale qty (P0-5.5 —
+        never convert the OCO TP leg). Called with _exit_in_progress held
+        by the caller for the (short) duration of these REST calls only.
+
+        Compensation (P0-5.2): if a leg resize succeeded but the scale
+        submit fails, the legs are restored to full qty — WARNING both ways.
+        replace_order_qty returns a NEW order id (Alpaca replace =
+        cancel+create); it is captured back onto the watch (P0-5.3).
+
+        Returns True when the scale order is resting (watch.scale_order_id
+        set); False = nothing submitted, state unchanged, retry next trigger.
+        """
+        client = self._client_for(watch.strategy)
+        runner_qty = watch.shares - watch.scale_qty
+        if runner_qty < 0:
+            logger.error(
+                f"StopMonitor: {symbol} scale qty {watch.scale_qty} exceeds "
+                f"shares {watch.shares} — scale disarmed (state drift?)"
+            )
+            watch.scale_qty = 0
+            return False
+        resized: list = []   # [(attr_name, original_id)] successfully resized
+        for attr in ('sl_leg_id', 'tp_leg_id'):
+            leg_id = getattr(watch, attr, '')
+            if not leg_id:
+                continue
+            try:
+                if runner_qty > 0:
+                    res = client.replace_order_qty(leg_id, runner_qty)
+                    new_id = (res or {}).get('id') or ''
+                    if new_id:
+                        setattr(watch, attr, new_id)   # P0-5.3: NEW id
+                    resized.append((attr, leg_id))
+                    logger.info(
+                        f"StopMonitor: {symbol} scale-out resized {attr} "
+                        f"{leg_id[:8]} -> {new_id[:8] or '?'} qty={runner_qty}"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"StopMonitor: {symbol} scale-out leg resize failed "
+                    f"({attr}={leg_id[:8]}): {e} — skipping scale this "
+                    f"cycle, will retry on next trigger (never strand shares)"
+                )
+                # Roll back any leg already resized before this failure.
+                self._restore_scale_legs(symbol, watch, client, resized)
+                return False
+        try:
+            result = client.submit_limit_sell_order(
+                symbol=symbol,
+                qty=watch.scale_qty,
+                limit_price=round(watch.scale_at_px, 2),
+            )
+            order_id = (result or {}).get('id', '') or ''
+            if not order_id:
+                raise RuntimeError("empty order id from submit")
+        except Exception as e:
+            logger.warning(
+                f"StopMonitor: {symbol} scale-out limit submit FAILED: {e} — "
+                f"compensating: restoring safety-leg qty to {watch.shares} "
+                f"(P0-5.2)"
+            )
+            self._restore_scale_legs(symbol, watch, client, resized)
+            return False
+        watch.scale_order_id = order_id
+        logger.info(
+            f"StopMonitor: {symbol} SCALE OUT submitted — {watch.scale_qty}sh "
+            f"limit ${watch.scale_at_px:.2f} order={order_id[:8]} "
+            f"(runner {runner_qty}sh keeps stop ${watch.stop_price:.2f}); "
+            f"fill polled async"
+        )
+        return True
+
+    def _restore_scale_legs(self, symbol: str, watch: WatchEntry, client,
+                            resized: list) -> None:
+        """P0-5.2 compensation: put successfully-resized legs back to full
+        position qty after a downstream failure. Every failure path logs —
+        a leg left at runner qty under-covers the position (the client-side
+        stop still covers the WHOLE position, so this only degrades the
+        crash safety net, loudly)."""
+        for attr, _orig_id in resized:
+            cur_id = getattr(watch, attr, '')
+            if not cur_id:
+                continue
+            try:
+                res = client.replace_order_qty(cur_id, watch.shares)
+                new_id = (res or {}).get('id') or ''
+                if new_id:
+                    setattr(watch, attr, new_id)
+                logger.warning(
+                    f"StopMonitor: {symbol} scale-out compensation — {attr} "
+                    f"restored to qty={watch.shares} (id {new_id[:8] or '?'})"
+                )
+            except Exception as e:
+                logger.error(
+                    f"StopMonitor: {symbol} scale-out compensation FAILED "
+                    f"for {attr} ({cur_id[:8]}): {e} — safety leg covers "
+                    f"only the runner qty until the next exit; client-side "
+                    f"stop still covers the full position"
+                )
+
+    def _execute_scale_out_sync(self, symbol: str, watch: WatchEntry) -> bool:
+        """Trigger-side wrapper: hold _exit_in_progress ONLY across the
+        submission REST calls (never across a fill wait — P0-5.1), then
+        release. Used directly by the poll loop; the WS path wraps it in
+        run_in_executor via _execute_scale_out."""
+        with self._exit_lock:
+            if self._exit_in_progress.get(symbol, False):
+                logger.debug(
+                    f"StopMonitor: {symbol} scale-out skipped — exit in "
+                    f"progress")
+                return False
+            self._exit_in_progress[symbol] = True
+            self._exit_started_at[symbol] = time_mod.time()
+        watch.scale_in_flight = True
+        try:
+            return self._scale_submit_core(symbol, watch)
+        except Exception as e:
+            logger.error(f"StopMonitor: {symbol} scale-out submission error: {e}")
+            return False
+        finally:
+            watch.scale_in_flight = False
+            with self._exit_lock:
+                self._exit_in_progress[symbol] = False
+
+    async def _execute_scale_out(self, symbol: str, watch: WatchEntry) -> None:
+        """WS-path scale execution: submission in an executor (never blocks
+        the event loop), then an async fill-watcher task. After the latch
+        clears, an immediate stop re-check runs (P0-5.1) so a collapse
+        during the submission window exits promptly."""
+        loop = asyncio.get_event_loop()
+        ok = await loop.run_in_executor(
+            None, self._execute_scale_out_sync, symbol, watch)
+        if ok:
+            asyncio.ensure_future(self._scale_fill_watcher(symbol))
+        # P0-5.1 immediate stop re-check: if price collapsed through the stop
+        # while we were submitting, fire the exit now instead of waiting for
+        # the next tick.
+        with self._watch_lock:
+            w = self._watches.get(symbol)
+        if w is not None and 0 < w.latest_bid <= w.stop_price:
+            reason = (ExitReason.LOCK_STOP.value if w.lock_armed
+                      else ExitReason.STOP_LOSS.value)
+            logger.info(
+                f"StopMonitor: {symbol} post-scale stop re-check — bid "
+                f"${w.latest_bid:.2f} <= stop ${w.stop_price:.2f}, firing "
+                f"{reason}"
+            )
+            await self._execute_stop_exit(symbol, w.latest_bid, w, reason)
+
+    async def _scale_fill_watcher(self, symbol: str) -> None:
+        """Async fill poll for a resting scale order (WS mode). Bounded by
+        construction: ends when the order reaches a terminal state, the
+        watch disappears (final exit adopted it), or the monitor stops."""
+        while self._running:
+            with self._watch_lock:
+                watch = self._watches.get(symbol)
+            if watch is None or watch.scale_done or not watch.scale_order_id:
+                return
+            loop = asyncio.get_event_loop()
+            try:
+                status = await loop.run_in_executor(
+                    None, self._check_scale_fill_once, symbol)
+            except Exception as e:
+                logger.warning(
+                    f"StopMonitor: {symbol} scale fill watcher error: {e}")
+                status = 'error'
+            if status not in ('resting', 'error'):
+                return
+            await asyncio.sleep(self._SCALE_FILL_POLL_INTERVAL_S)
+
+    def _check_scale_fill_once(self, symbol: str) -> str:
+        """One synchronous fill check on the resting scale order.
+
+        Returns 'resting' | 'filled' | 'partial_adopted' | 'aborted' |
+        'gone' | 'error'. Terminal fills book via _book_scale_fill (the
+        single idempotent booking latch). A cancelled/rejected order with
+        zero fill clears scale_order_id so a later touch can retry."""
+        with self._watch_lock:
+            watch = self._watches.get(symbol)
+        if watch is None or not watch.scale_order_id or watch.scale_done:
+            return 'gone'
+        client = self._client_for(watch.strategy)
+        try:
+            o = client.get_order(watch.scale_order_id)
+        except Exception as e:
+            logger.warning(
+                f"StopMonitor: {symbol} scale order poll failed: {e}")
+            return 'error'
+        status = str((o or {}).get('status', '')).lower()
+        try:
+            filled_qty = int(float((o or {}).get('filled_qty') or 0))
+        except (TypeError, ValueError):
+            filled_qty = 0
+        try:
+            avg = float((o or {}).get('filled_avg_price') or 0.0)
+        except (TypeError, ValueError):
+            avg = 0.0
+        watch.scale_last_poll_ts = time_mod.time()
+        if status == 'filled' and filled_qty > 0:
+            self._book_scale_fill(symbol, filled_qty,
+                                  avg if avg > 0 else watch.scale_at_px)
+            return 'filled'
+        if status in ('canceled', 'cancelled', 'rejected', 'expired',
+                      'done_for_day'):
+            if filled_qty > 0:
+                # Partial fill then terminal cancel — book what filled
+                # (P0-5.4 class: those shares must not be booked nowhere).
+                logger.warning(
+                    f"StopMonitor: {symbol} scale order {status} with "
+                    f"partial fill {filled_qty}sh — booking the partial leg"
+                )
+                self._book_scale_fill(symbol, filled_qty,
+                                      avg if avg > 0 else watch.scale_at_px)
+                return 'partial_adopted'
+            logger.warning(
+                f"StopMonitor: {symbol} scale order {status} unfilled — "
+                f"clearing; a later touch of ${watch.scale_at_px:.2f} may "
+                f"retry"
+            )
+            watch.scale_order_id = ''
+            return 'aborted'
+        return 'resting'
+
+    def _book_scale_fill(self, symbol: str, filled_qty: int,
+                         avg_price: float) -> bool:
+        """Book a (partial or full) scale fill: reduce watch shares to the
+        runner, latch scale_done, emit the scale event for the engine's DB
+        branch (P0-2: the engine must NOT close the row on this event).
+
+        Idempotent: the scale_done latch under _watch_lock guarantees a
+        racing fill-watcher + exit-path adoption book the leg exactly once.
+        """
+        with self._watch_lock:
+            watch = self._watches.get(symbol)
+            if watch is None:
+                logger.warning(
+                    f"StopMonitor: {symbol} scale fill to book but watch "
+                    f"gone — leg may be unbooked; reconciler will see the "
+                    f"broker qty")
+                return False
+            if watch.scale_done:
+                return False   # already booked by the other racer
+            watch.scale_done = True
+            watch.scale_order_id = ''
+            sold = min(filled_qty, watch.shares)
+            if sold < filled_qty:
+                logger.error(
+                    f"StopMonitor: {symbol} scale fill {filled_qty}sh exceeds "
+                    f"watch shares {watch.shares} — clamping (state drift)")
+            watch.shares -= sold
+            trade_db_id = watch.trade_db_id
+            strategy = watch.strategy
+            scale_at_px = watch.scale_at_px
+            runner = watch.shares
+        logger.info(
+            f"StopMonitor: {symbol} SCALE OUT FILLED — {sold}sh @ "
+            f"${avg_price:.4f} (level ${scale_at_px:.2f}); runner {runner}sh "
+            f"keeps stop"
+        )
+        self._exit_events.put(StopExitEvent(
+            symbol=symbol,
+            stop_price=0.0,             # not a stop exit
+            exit_price=avg_price,
+            shares=sold,
+            order_id='',
+            exit_reason=ExitReason.SCALE_OUT.value,
+            trade_db_id=trade_db_id,
+            submitted_at=time_mod.time(),
+            pricing_method='scale_limit',
+            filled_qty=sold,
+            exit_limit_price=scale_at_px,
+            strategy=strategy,
+            confirmed=True,
+        ))
+        return True
+
+    def adopt_resting_scale(self, symbol: str) -> None:
+        """Cancel-confirm-or-adopt a resting scale order before a full exit
+        (P0-5.4). Public sync entry — used by the engine's force-close and
+        by _execute_stop_exit after its bulk-cancel. Cancels the order
+        (no-op if the bulk-cancel already did), then books any filled qty
+        so the final row's runner math is right."""
+        with self._watch_lock:
+            watch = self._watches.get(symbol)
+        if watch is None or not watch.scale_order_id or watch.scale_done:
+            return
+        client = self._client_for(watch.strategy)
+        order_id = watch.scale_order_id
+        try:
+            client.cancel_order(order_id)
+        except Exception as e:
+            logger.debug(
+                f"StopMonitor: {symbol} scale cancel ({order_id[:8]}) — "
+                f"{e} (may already be terminal)")
+        try:
+            o = client.get_order(order_id)
+            status = str((o or {}).get('status', '')).lower()
+            filled_qty = int(float((o or {}).get('filled_qty') or 0))
+            avg = float((o or {}).get('filled_avg_price') or 0.0)
+        except Exception as e:
+            logger.warning(
+                f"StopMonitor: {symbol} scale adopt query failed: {e} — "
+                f"broker-qty reconciliation in the exit path covers the "
+                f"share count; scale columns may lag until reconcile")
+            watch.scale_order_id = ''
+            return
+        if filled_qty > 0:
+            logger.info(
+                f"StopMonitor: {symbol} adopt_resting_scale — order "
+                f"{order_id[:8]} {status} with {filled_qty}sh filled; "
+                f"booking before final exit")
+            self._book_scale_fill(symbol, filled_qty,
+                                  avg if avg > 0 else watch.scale_at_px)
+        else:
+            watch.scale_order_id = ''
+
+    # ------------------------------------------------------------------
     # Passive quote monitoring for pending buy-stop orders
     # ------------------------------------------------------------------
 
@@ -1499,6 +1888,11 @@ class StopMonitor:
                 'latest_ask_size': w.latest_ask_size,
                 'latest_quote_ts': w.latest_quote_ts,
                 'ofi_cumulative': w.ofi_cumulative,
+                # ORB winner-stack scale-out state (2026-08-22)
+                'scale_at_px': w.scale_at_px,
+                'scale_qty': w.scale_qty,
+                'scale_done': w.scale_done,
+                'scale_order_id': w.scale_order_id,
             }
 
     def execute_partial_exit(
@@ -2187,6 +2581,27 @@ class StopMonitor:
                             exit_limit_price=watch.latest_bid,
                             strategy=watch.strategy,
                         ))
+                        continue
+
+                    # ORB winner-stack scale-out (poll path) — AFTER the stop
+                    # check, same as the tick path. Submission is synchronous
+                    # here (no event loop in poll mode); the fill check below
+                    # runs on the poll cadence instead of an async watcher.
+                    if (watch.scale_at_px > 0 and watch.scale_qty > 0
+                            and not watch.scale_done
+                            and not watch.scale_in_flight
+                            and not watch.scale_order_id
+                            and price >= watch.scale_at_px):
+                        logger.info(
+                            f"StopMonitor poll: {sym} price ${price:.2f} >= "
+                            f"scale ${watch.scale_at_px:.2f} — submitting "
+                            f"scale-out"
+                        )
+                        self._execute_scale_out_sync(sym, watch)
+                    if (watch.scale_order_id and not watch.scale_done
+                            and (time_mod.time() - watch.scale_last_poll_ts
+                                 >= self._SCALE_FILL_POLL_INTERVAL_S)):
+                        self._check_scale_fill_once(sym)
 
                 time_mod.sleep(self._polling_interval)
             except Exception as e:
@@ -2536,6 +2951,22 @@ class StopMonitor:
                 f"<= stop ${watch.stop_price:.2f} — triggering {exit_reason}"
             )
             await self._execute_stop_exit(symbol, price, watch, exit_reason=exit_reason)
+            return
+
+        # ORB winner-stack scale-out trigger — deliberately AFTER the stop
+        # check (live is conservative vs BT's frozen same-bar convention
+        # where the scale fills first on a both-hit bar — P0-1 documented
+        # deviation, EoD dive attributes any such trade). Behind the same
+        # skip_exits_until_ts gate as everything above (P1-1).
+        if (watch.scale_at_px > 0 and watch.scale_qty > 0
+                and not watch.scale_done and not watch.scale_in_flight
+                and not watch.scale_order_id
+                and price >= watch.scale_at_px):
+            logger.info(
+                f"StopMonitor: {symbol} price ${price:.2f} >= scale level "
+                f"${watch.scale_at_px:.2f} — submitting scale-out"
+            )
+            await self._execute_scale_out(symbol, watch)
 
     # Shared constants for fill-confirmation polling. Short and aggressive —
     # on a stop we prefer getting flat fast over holding out for price.
@@ -2938,6 +3369,24 @@ class StopMonitor:
                         pass
             except Exception as cancel_err:
                 logger.warning(f"StopMonitor: {symbol} cancel bracket legs: {cancel_err}")
+
+            # ORB winner-stack P0-5.4: the bulk-cancel above also killed any
+            # RESTING scale limit — but it may have (partially) filled first.
+            # Cancel-confirm-or-adopt: book the filled scale leg NOW (reduces
+            # watch.shares to the true runner qty and queues the scale event
+            # ahead of this exit's event) before the qty reconciliation +
+            # final sell below.
+            if watch.scale_order_id and not watch.scale_done:
+                try:
+                    await loop.run_in_executor(
+                        None, self.adopt_resting_scale, symbol)
+                except Exception as e:
+                    logger.warning(
+                        f"StopMonitor: {symbol} resting-scale adoption "
+                        f"failed: {e} — broker-qty requery below still "
+                        f"rights the share count; scale columns reconcile "
+                        f"later"
+                    )
 
             # Defense-in-depth qty reconciliation (APT/MLTX 2026-05-11 class):
             # Query the broker for the symbol's actual position qty right

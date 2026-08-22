@@ -58,6 +58,10 @@ from trading.orb_g1_veto import (
     g1_reject,
 )
 from trading.orb_planner import OrbTradePlan, OrbTradePlanner, PlannerReject
+from trading.orb_winner_stack import (
+    DEFAULT_ATR_K, DEFAULT_SCALE_FRAC, DEFAULT_SCALE_LEVEL_R,
+    FLOOR_BOUND, atr14_t1, floored_stop, scale_params,
+)
 from trading.orb_touchgo_filter import (
     TouchgoConfig, evaluate_rule_d, evaluate_rule_m, find_breakout_bar_ts,
     load_touchgo_config,
@@ -218,6 +222,25 @@ class OpenPosition:
     # partial-fill polling loop to suppress duplicate INFO logs when the
     # broker reports the same qty across multiple polls.
     last_observed_filled_qty: int = 0
+    # --- ORB winner stack (2026-08-22) ---------------------------------
+    # ATR14 ending T-1 (shared trading/orb_winner_stack.atr14_t1), computed
+    # at SUBMIT time (T-1 data — fill-independent); the floored stop itself
+    # anchors on the ACTUAL FILL price at _confirm_fill (review P1-3).
+    # None = unavailable => floor fail-open to range_low.
+    atr14: Optional[float] = None
+    # Scale-out lifecycle. `pos.shares` is reduced to the runner qty when a
+    # scale fill books (P0-2); the final exit writes pnl ONCE as
+    # scale_pnl + runner leg (P0-3). scaled_at != None means a scale leg is
+    # booked — this drives FLAG-INDEPENDENT rehydration (review P1-7).
+    scale_armed: bool = False
+    scale_qty: int = 0
+    scale_price: Optional[float] = None
+    scale_pnl: float = 0.0
+    scaled_at: Optional[datetime] = None
+    # Touchgo retry payload when force_exit was no-op'd by an in-flight
+    # scale submission (P1-1 race): (reason, exit_price, detail) retried on
+    # the next bar event instead of silently losing the cut.
+    touchgo_retry: Optional[tuple] = None
 
 
 class ORBEngine:
@@ -476,6 +499,35 @@ class ORBEngine:
         self.touchgo_cfg: TouchgoConfig = load_touchgo_config(
             filter_cfg.get('touchgo', {})
         )
+        # ORB winner stack (2026-08-22): TWO independent default-OFF exit
+        # flags — SZ1 ATR stop-floor + 40%@+3R scale-out. Frozen semantics in
+        # trading/orb_winner_stack.py (shared with the BT pipeline — parity
+        # by construction). Env kills: ORB_ATR_FLOOR=0 / ORB_SCALE_OUT=0.
+        # Flags OFF = byte-identical legacy behavior (validation gate 3.1).
+        ws_atr_cfg = (exit_cfg.get('atr_stop_floor') or {})
+        self.atr_floor_enabled = bool(ws_atr_cfg.get('enabled', False))
+        self.atr_floor_k = float(ws_atr_cfg.get('k', DEFAULT_ATR_K))
+        _af_env = os.environ.get('ORB_ATR_FLOOR')
+        if _af_env is not None:
+            self.atr_floor_enabled = _af_env.strip().lower() not in (
+                '0', 'false', 'no', 'off', '')
+        ws_sc_cfg = (exit_cfg.get('scale_out') or {})
+        self.scale_out_enabled = bool(ws_sc_cfg.get('enabled', False))
+        self.scale_frac = float(ws_sc_cfg.get('frac', DEFAULT_SCALE_FRAC))
+        self.scale_level_r = float(
+            ws_sc_cfg.get('level_r', DEFAULT_SCALE_LEVEL_R))
+        _sc_env = os.environ.get('ORB_SCALE_OUT')
+        if _sc_env is not None:
+            self.scale_out_enabled = _sc_env.strip().lower() not in (
+                '0', 'false', 'no', 'off', '')
+        if self.atr_floor_enabled or self.scale_out_enabled:
+            logger.info(
+                f"[ORB] WINNER STACK: atr_stop_floor="
+                f"{'ON' if self.atr_floor_enabled else 'off'} "
+                f"(k={self.atr_floor_k}) scale_out="
+                f"{'ON' if self.scale_out_enabled else 'off'} "
+                f"(frac={self.scale_frac}, level_r={self.scale_level_r})"
+            )
         # Buy-stop rejection guard (shared with bull flag via
         # trading/buy_stop_guard.py — parity by construction). Reads
         # config.yaml::trading.marketable_limit_fallback for enabled flag +
@@ -1062,6 +1114,29 @@ class ORBEngine:
         except Exception as e:
             logger.warning(f"ORB: _evaluate_touchgo({symbol}) failed: {e}")
 
+        # Winner stack: retry a touchgo cut that was no-op'd by an in-flight
+        # scale submission (P1-1 race), then (re-)attempt scale arming once
+        # the touchgo bars are resolved.
+        pos_ws = self.open_positions.get(symbol)
+        if pos_ws is not None:
+            if pos_ws.touchgo_retry is not None and pos_ws.order_id == '':
+                reason, exit_price, detail = pos_ws.touchgo_retry
+                pos_ws.touchgo_retry = None
+                logger.warning(
+                    f"ORB: {symbol} retrying touchgo {reason} exit that was "
+                    f"blocked by an in-flight scale submission"
+                )
+                try:
+                    self._fire_touchgo_exit(pos_ws, reason=reason,
+                                            exit_price=exit_price,
+                                            detail=detail + ' (retry)')
+                except Exception as e:
+                    logger.error(f"ORB: {symbol} touchgo retry failed: {e}")
+            try:
+                self._maybe_arm_scale(pos_ws)
+            except Exception as e:
+                logger.warning(f"ORB: _maybe_arm_scale({symbol}) failed: {e}")
+
         cand = self.candidates.get(symbol)
         if cand is None or cand.range_data is not None:
             return  # already processed or not in universe
@@ -1317,6 +1392,82 @@ class ORBEngine:
             except Exception as e:
                 logger.warning(f"ORB: Rule D eval failed for {symbol}: {e}")
 
+    # Fallback for _maybe_arm_scale: if touchgo hasn't resolved this many
+    # minutes after fill, arm anyway — bars 0/1 have long closed; a touchgo
+    # that still hasn't evaluated by now is stalled bar delivery, and the
+    # retry path above covers the residual late-fire race.
+    _SCALE_ARM_FALLBACK_MIN = 3.0
+
+    def _maybe_arm_scale(self, pos: 'OpenPosition') -> None:
+        """Arm the StopMonitor scale-out trigger once it is safe (P1-1).
+
+        Frozen rule: BT's scale search starts at bar 1 and touchgo prefire
+        pre-empts any scale — so live must not evaluate the scale until the
+        touchgo bars (0/1) are resolved. Resolution = both rules evaluated,
+        touchgo structurally inert for this position (disabled / no breakout
+        bar on a rehydrated position), or the time fallback above. One-shot
+        per position (scale_armed latch); the tiny-qty rule (scale_params
+        qty < 1) leaves the trade all-runner with an INFO line.
+        """
+        if not getattr(self, 'scale_out_enabled', False) \
+                or self.stop_monitor is None:
+            return
+        if pos.scale_armed or pos.order_id != '':
+            return
+        if pos.scaled_at is not None:
+            # Rehydrated already-scaled position — nothing to arm (P1-7:
+            # scale STATE handling is flag-independent; this latch is only
+            # about NEW arming).
+            pos.scale_armed = True
+            return
+        touchgo_inert = (not self.touchgo_cfg.master_enabled
+                         or pos.breakout_bar_ts is None)
+        resolved = (pos.rule_m_evaluated and pos.rule_d_evaluated)
+        if not (resolved or touchgo_inert):
+            # Time fallback: bars 0/1 are 2 minutes of trade life.
+            try:
+                et = pos.entry_time
+                if getattr(et, 'tzinfo', None) is None:
+                    et = et.replace(tzinfo=timezone.utc)
+                age_min = (datetime.now(timezone.utc) - et).total_seconds() / 60.0
+            except Exception:
+                age_min = 0.0
+            if age_min < self._SCALE_ARM_FALLBACK_MIN:
+                return
+            logger.info(
+                f"[ORB] SCALE OUT {pos.symbol}: touchgo unresolved "
+                f"{age_min:.1f}min after fill — arming on time fallback"
+            )
+        range_size = max(pos.range_high - pos.range_low, 0.0)
+        if range_size <= 0:
+            logger.warning(
+                f"[ORB] SCALE OUT {pos.symbol}: degenerate range_size "
+                f"({pos.range_high}/{pos.range_low}) — not arming")
+            pos.scale_armed = True
+            return
+        scale_px, scale_qty = scale_params(
+            pos.entry_price, range_size, self.scale_frac,
+            self.scale_level_r, pos.shares)
+        pos.scale_armed = True
+        if scale_qty < 1:
+            logger.info(
+                f"[ORB] SCALE OUT {pos.symbol}: qty<1 "
+                f"({self.scale_frac}x{pos.shares}sh) — all-runner (frozen "
+                f"tiny-qty rule)")
+            return
+        try:
+            ok = self.stop_monitor.arm_scale_out(
+                pos.symbol, scale_px, scale_qty)
+        except Exception as e:
+            logger.error(f"[ORB] SCALE OUT {pos.symbol}: arm failed: {e}")
+            return
+        if ok:
+            logger.info(
+                f"[ORB] SCALE OUT ARMED {pos.symbol}: {scale_qty}/{pos.shares}"
+                f"sh at ${scale_px:.2f} (+{self.scale_level_r}R, "
+                f"frac={self.scale_frac})"
+            )
+
     def _audit_touchgo(self, pos: 'OpenPosition', rule: str, fired: bool,
                        exit_p, last_ts, bb_ts, range_size: float,
                        bb_ohlc=None, bb_close_pos=None,
@@ -1410,11 +1561,23 @@ class ORBEngine:
         # Route exit through StopMonitor's force_exit (new public wrapper).
         if self.stop_monitor is not None:
             try:
-                self.stop_monitor.force_exit(
+                scheduled = self.stop_monitor.force_exit(
                     symbol=pos.symbol,
                     reason=reason,
                     limit_price=exit_price,
                 )
+                if not scheduled:
+                    # Winner stack P1-1 race: an in-flight scale submission
+                    # holds _exit_in_progress briefly and force_exit no-ops.
+                    # Do NOT silently lose the cut — queue a retry for the
+                    # next bar event (_ingest_bars drains touchgo_retry).
+                    pos.touchgo_retry = (reason, exit_price, detail)
+                    logger.warning(
+                        f"ORB: {pos.symbol} touchgo {reason} force_exit "
+                        f"no-op'd (exit in progress — likely scale "
+                        f"submission); retry queued for next bar event"
+                    )
+                    return
             except Exception as e:
                 logger.error(
                     f"ORB: {pos.symbol} touchgo exit force_exit failed: {e}"
@@ -1576,11 +1739,38 @@ class ORBEngine:
                     if window else 0.0,
                 'return_volatility_20d': rv20,
             }
+            # Winner stack (2026-08-22): keep the RAW bar list — the ATR14
+            # stop-floor needs the full ~26-bar history (>= 15 bars before
+            # today), which the derived stats above discard. Same fetch, no
+            # extra I/O; bars are all strictly before today (end_d = T-1).
+            ctx['daily_bars_raw'] = bars_list
         except Exception as e:
             logger.warning(f"ORB: _get_feature_context({symbol}) failed: {e}")
 
         self._feature_context_cache[symbol] = ctx
         return ctx
+
+    def _atr14_for(self, symbol: str) -> Optional[float]:
+        """ATR14 ending T-1 for the SZ1 stop floor (shared atr14_t1 over the
+        feature-context daily bars — all strictly before today). Returns
+        None (fail-open, WARNING) when history is short or the fetch failed;
+        the caller then keeps stop = range_low per the frozen §1.1 rule."""
+        ctx = self._get_feature_context(symbol)
+        bars = ctx.get('daily_bars_raw')
+        if not bars:
+            logger.warning(
+                f"[ORB] ATR FLOOR {symbol}: no daily-bar history in feature "
+                f"context — ATR unavailable, floor fail-open (stop=range_low)"
+            )
+            return None
+        atr = atr14_t1(bars)
+        if atr is None:
+            logger.warning(
+                f"[ORB] ATR FLOOR {symbol}: <15 daily bars before today "
+                f"({len(bars)} fetched) — ATR unavailable, floor fail-open "
+                f"(stop=range_low)"
+            )
+        return atr
 
     def _compute_features(self, cand: CandidateState,
                           prev_day_bar: Optional[dict] = None,
@@ -2752,6 +2942,13 @@ class ORBEngine:
             logger.error(f"ORB: {plan.symbol} submit_entry failed: {e}")
             return None
 
+        # Winner stack: ATR14 is T-1 data — computable at submit time. The
+        # floored stop itself anchors on the ACTUAL fill in _confirm_fill
+        # (P1-3); we compute + persist the ATR input here so the EoD drift
+        # check can recompute the floor from recorded inputs.
+        _atr14 = (self._atr14_for(plan.symbol)
+                  if getattr(self, 'atr_floor_enabled', False) else None)
+
         # Single submit_time used for both DB persistence AND the in-memory position.
         # This ensures sync_positions on restart can recover the exact original
         # submit time from DB (vs the prior bug where rehydration used now()).
@@ -2761,6 +2958,7 @@ class ORBEngine:
             submit_time=submit_time,
             submit_bid=submit_bid, submit_ask=submit_ask,
             submit_bid_size=submit_bid_size, submit_ask_size=submit_ask_size,
+            atr14=_atr14,
         )
         if trade_id is None:
             # Order was accepted by Alpaca but we failed to persist tracking.
@@ -2817,6 +3015,7 @@ class ORBEngine:
             range_end_ts=_range_end_ts,
             tp_leg_id=tp_leg_id,
             sl_leg_id=sl_leg_id,
+            atr14=_atr14,
         )
         # Track on CandidateState too for clean time-stop cancellation
         cand = _cand
@@ -3075,6 +3274,31 @@ class ORBEngine:
         # Fill-rate telemetry
         self.daily_n_filled += 1
 
+        # Winner stack — SZ1 ATR stop-floor (2026-08-22). Anchored on the
+        # ACTUAL FILL price (deliberate BT deviation, review P1-3 — BT
+        # anchors on its modeled entry). The floored stop becomes THE stop:
+        # written to pos.stop_price, the StopMonitor watch below, and BOTH
+        # stop_loss_price + real_stop_loss_price in the DB (P0-4 — restart
+        # rehydration reads stop_loss_price, so a restart can never silently
+        # revert the stop to range_low). Flag off => untouched legacy path.
+        floor_status = None
+        if getattr(self, 'atr_floor_enabled', False):
+            _atr = pos.atr14 if pos.atr14 is not None \
+                else self._atr14_for(pos.symbol)
+            _base_stop = pos.stop_price   # plan stop = range_low
+            _new_stop, floor_status = floored_stop(
+                _base_stop, fill_price, _atr, self.atr_floor_k)
+            _new_stop = round(_new_stop, 4)
+            _log = (logger.warning
+                    if floor_status in ('no_atr', 'degenerate') else logger.info)
+            _log(
+                f"[ORB] ATR FLOOR {pos.symbol}: range_low={_base_stop:.4f} "
+                f"atr14={_atr if _atr is None else round(_atr, 4)} "
+                f"k={self.atr_floor_k} entry={fill_price:.4f} "
+                f"floored_stop={_new_stop:.4f} ({floor_status})"
+            )
+            pos.stop_price = _new_stop
+
         # Risk-per-share recomputed from ACTUAL fill
         risk_per_share = max(pos.entry_price - pos.stop_price, 0.0)
 
@@ -3093,6 +3317,12 @@ class ORBEngine:
             'shares': shares,
             'filled_qty': shares,
         }
+        if getattr(self, 'atr_floor_enabled', False):
+            # P0-4: BOTH columns get the (possibly floored) stop so restart
+            # rehydration (reads stop_loss_price) and the EoD drift check
+            # (reads real_stop_loss_price) see the stop actually monitored.
+            fill_update['stop_loss_price'] = pos.stop_price
+            fill_update['real_stop_loss_price'] = pos.stop_price
         if pos.order_submitted_at is not None:
             fill_update['order_submitted_at'] = pos.order_submitted_at
             try:
@@ -3215,6 +3445,12 @@ class ORBEngine:
         if cand:
             cand.order_id = None
 
+        # Winner stack: scale-out arming is gated on the touchgo window
+        # (P1-1) — this call arms immediately only when touchgo is disabled
+        # for this position; otherwise _ingest_bars re-tries as bars 0/1
+        # resolve.
+        self._maybe_arm_scale(pos)
+
     def _cancel_stale_pending_orders(self) -> None:
         """Cancel any stop-buy orders still pending past the 10:35 ET time stop
         (range_end + time_stop_minutes). Matches BT behavior — BT's simulator
@@ -3301,16 +3537,34 @@ class ORBEngine:
         return exited
 
     def _handle_exit_event(self, ev) -> None:
-        """Update DB + open_positions from a StopMonitor exit event."""
+        """Update DB + open_positions from a StopMonitor exit event.
+
+        Winner stack (P0-2/P0-3): a SCALE_OUT event is a PARTIAL — it routes
+        to _handle_scale_fill_event, which updates the scale_* columns and
+        pos.shares but must NOT pop the position, close the row, or touch
+        daily_pnl. Every FINAL exit below writes `pnl` exactly once as
+        stored scale_pnl + runner leg ((exit − entry) × remaining shares).
+        """
         symbol = ev.symbol
+        if getattr(ev, 'exit_reason', '') == ExitReason.SCALE_OUT.value:
+            self._handle_scale_fill_event(ev)
+            return
         pos = self.open_positions.pop(symbol, None)
         if pos is None:
             logger.warning(f"ORB: exit event for {symbol} but no tracked position — orphan?")
             return
         confirmed = getattr(ev, 'confirmed', True)
         exit_price = float(ev.exit_price)
-        pnl = (exit_price - pos.entry_price) * pos.shares
-        pnl_pct = (exit_price - pos.entry_price) / pos.entry_price * 100.0
+        # pos.shares is the RUNNER qty when a scale leg booked earlier
+        # (reduced in _handle_scale_fill_event); scale_pnl is 0.0 otherwise.
+        # getattr defaults: position doubles in older tests predate the
+        # winner-stack fields — an unscaled position composes identically.
+        _scale_pnl = float(getattr(pos, 'scale_pnl', 0.0) or 0.0)
+        _scale_qty = int(getattr(pos, 'scale_qty', 0) or 0)
+        pnl = (exit_price - pos.entry_price) * pos.shares + _scale_pnl
+        entry_qty = pos.shares + _scale_qty
+        entry_notional = pos.entry_price * entry_qty
+        pnl_pct = (pnl / entry_notional * 100.0) if entry_notional > 0 else 0.0
 
         def _numf(v):
             """Coerce to float if real numeric (not MagicMock), else None."""
@@ -3352,6 +3606,72 @@ class ORBEngine:
         logger.info(
             f"ORB EXIT: {symbol} {ev.exit_reason} @ ${exit_price:.2f} "
             f"pnl=${pnl:+,.2f} daily_pnl=${self.daily_pnl:+,.2f}"
+            + (f" (incl. scale leg ${_scale_pnl:+,.2f} on "
+               f"{_scale_qty}sh)"
+               if getattr(pos, 'scaled_at', None) is not None else "")
+        )
+
+    def _handle_scale_fill_event(self, ev) -> None:
+        """Book a scale-out partial fill (P0-2): update scale_* columns +
+        in-memory shares, leave the row OPEN.
+
+        Explicitly does NOT: pop the position, write exit_price /
+        order_status / pnl, or touch daily_pnl (realized-at-close
+        convention — kill rails see the scale leg only when the final exit
+        writes the combined pnl, P0-3).
+        """
+        symbol = ev.symbol
+        qty = int(getattr(ev, 'filled_qty', 0) or ev.shares or 0)
+        price = float(ev.exit_price)
+        pos = self.open_positions.get(symbol)
+        if pos is None:
+            # Orphan scale event (restart race). Best-effort: write the
+            # scale columns straight to the row so the reconciler's final
+            # write can compose the combined pnl.
+            logger.error(
+                f"ORB: SCALE OUT fill event for {symbol} but no tracked "
+                f"position — writing scale columns by trade_db_id only"
+            )
+            if getattr(ev, 'trade_db_id', None):
+                try:
+                    self.db.update_trade(ev.trade_db_id, {
+                        'scale_qty': qty,
+                        'scale_price': price,
+                        'scale_pnl': None,   # entry unknown here — reconciler
+                        'scaled_at': datetime.now(timezone.utc),
+                    })
+                except Exception as e:
+                    logger.error(f"ORB: {symbol} orphan scale DB write "
+                                 f"failed: {e}")
+            return
+        leg_pnl = (price - pos.entry_price) * qty
+        pos.scale_qty += qty
+        pos.scale_price = price
+        pos.scale_pnl += leg_pnl
+        pos.scaled_at = datetime.now(timezone.utc)
+        pos.shares = max(0, pos.shares - qty)
+        try:
+            self.db.update_trade(pos.trade_id, {
+                'scale_qty': pos.scale_qty,
+                'scale_price': pos.scale_price,
+                'scale_pnl': pos.scale_pnl,
+                'scaled_at': pos.scaled_at,
+            })
+        except Exception as e:
+            logger.error(f"ORB: {symbol} scale DB update failed: {e} — "
+                         f"in-memory state holds; final exit rewrites "
+                         f"nothing scale-side (columns lag until reconcile)")
+        if self.notify_on_exit and self.notifier:
+            self._notify(
+                f"{self.tg_prefix} SCALE OUT {symbol}: {qty}sh @ "
+                f"${price:.2f} banked ${leg_pnl:+,.0f} — runner "
+                f"{pos.shares}sh keeps stop ${pos.stop_price:.2f} "
+                f"(realized at final close)"
+            )
+        logger.info(
+            f"ORB SCALE OUT: {symbol} {qty}sh @ ${price:.2f} "
+            f"leg_pnl=${leg_pnl:+,.2f} runner={pos.shares}sh (row stays OPEN; "
+            f"pnl written once at final close)"
         )
 
     # GLWG 2026-05-11 FC: bracket cancel ACK can take 1-5s+ on busy Alpaca
@@ -3602,6 +3922,17 @@ class ORBEngine:
         # order submission, NOT a fill confirmation.
         for sym, pos in list(self.open_positions.items()):
             try:
+                # Winner stack P0-5.4: cancel-confirm-or-adopt any RESTING
+                # scale limit BEFORE the bulk cancel, so a just-filled scale
+                # leg books its columns and the close covers the true runner.
+                if self.stop_monitor is not None and hasattr(
+                        self.stop_monitor, 'adopt_resting_scale'):
+                    try:
+                        self.stop_monitor.adopt_resting_scale(sym)
+                    except Exception as e:
+                        logger.warning(
+                            f"ORB FC: {sym} resting-scale adoption failed: "
+                            f"{e} — close proceeds on broker qty")
                 n_legs = self._cancel_symbol_open_orders(sym)
                 if n_legs > 0:
                     logger.info(
@@ -4056,22 +4387,66 @@ class ORBEngine:
                     pdata = {}
             if not isinstance(pdata, dict):
                 pdata = {}
-            # Rehydrate
+            # Rehydrate. Winner stack (P0-4 + review P1-7):
+            #   * stop comes from stop_loss_price, which _confirm_fill now
+            #     writes as the FLOORED stop when the ATR floor is on — a
+            #     restart can no longer silently revert to range_low.
+            #   * scale state is DATA-driven (scaled_at IS NOT NULL), never
+            #     flag-gated: shares -= scale_qty, scale_pnl/scaled_at
+            #     restored, watch re-added with scale_done=True. Rollback
+            #     (flag off + restart) with an open scaled position stays
+            #     correct because none of this consults the flags.
+            #   * lock param defaults come from config (planner), not the
+            #     stale 1.5/1.0 literals (P0-4 note: don't add state to a
+            #     path that forgets state — pdata carries the real values
+            #     for all post-2026-04 trades; the default is a last resort).
+            #     Known pre-existing limitation (unchanged): lock_armed is
+            #     not persisted, so an armed lock re-arms on the next touch.
+            db_scale_qty = int(t.get('scale_qty') or 0)
+            db_scaled_at = t.get('scaled_at')
+            db_shares = int(t.get('shares') or 0)
+            runner_shares = db_shares - (db_scale_qty if db_scaled_at else 0)
+            if runner_shares < 0:
+                logger.error(
+                    f"ORB.sync: {sym} scale_qty {db_scale_qty} > shares "
+                    f"{db_shares} — clamping runner to 0 (row needs manual "
+                    f"review)")
+                runner_shares = 0
             pos = OpenPosition(
                 symbol=sym,
                 entry_price=float(t.get('fill_price') or t.get('entry_price') or 0.0),
                 stop_price=float(t.get('stop_loss_price') or 0.0),
-                shares=int(t.get('shares') or 0),
+                shares=runner_shares,
                 trade_id=int(t['id']),
                 order_id=str(t.get('order_id') or ''),
                 entry_time=t.get('filled_at') or datetime.now(timezone.utc),
                 range_high=float(pdata.get('range_high', 0.0)),
                 range_low=float(pdata.get('range_low', 0.0)),
-                lock_arm_at_r=float(pdata.get('lock_arm_at_r', 1.5)),
-                lock_stop_r=float(pdata.get('lock_stop_r', 1.0)),
+                lock_arm_at_r=float(pdata.get(
+                    'lock_arm_at_r',
+                    getattr(getattr(self, 'planner', None),
+                            'lock_arm_at_r', 1.75))),
+                lock_stop_r=float(pdata.get(
+                    'lock_stop_r',
+                    getattr(getattr(self, 'planner', None),
+                            'lock_stop_r', 0.5))),
                 composite_score=float(pdata.get('composite_score', 0.0)),
                 quintile=str(pdata.get('quintile', 'Q3')),
+                atr14=pdata.get('atr14'),
             )
+            if db_scaled_at:
+                pos.scale_qty = db_scale_qty
+                pos.scale_price = (float(t['scale_price'])
+                                   if t.get('scale_price') else None)
+                pos.scale_pnl = float(t.get('scale_pnl') or 0.0)
+                pos.scaled_at = db_scaled_at
+                pos.scale_armed = True
+                logger.info(
+                    f"ORB.sync: {sym} rehydrated MID-SCALE — runner "
+                    f"{runner_shares}sh (scale leg {db_scale_qty}sh @ "
+                    f"{t.get('scale_price')}, banked "
+                    f"${pos.scale_pnl:+,.2f}), stop ${pos.stop_price:.2f}"
+                )
             self.open_positions[sym] = pos
             # Re-register StopMonitor watch
             if self.stop_monitor is not None:
@@ -4089,7 +4464,13 @@ class ORBEngine:
                         strategy=STRATEGY_NAME,
                         lock_arm_at_r=pos.lock_arm_at_r,
                         lock_stop_r=pos.lock_stop_r,
+                        lock_r_unit=max(pos.range_high - pos.range_low, 0.0),
+                        scale_done=bool(db_scaled_at),
                     )
+                    # Un-scaled position + flag on: arm the scale trigger now
+                    # (touchgo is inert for rehydrated positions — resolved
+                    # by definition; _maybe_arm_scale handles tiny-qty).
+                    self._maybe_arm_scale(pos)
                 except Exception as e:
                     logger.error(f"ORB.sync: re-watch {sym} failed: {e}")
             recovered += 1
@@ -4584,6 +4965,7 @@ class ORBEngine:
         submit_ask: float = 0.0,
         submit_bid_size: int = 0,
         submit_ask_size: int = 0,
+        atr14: Optional[float] = None,
     ) -> Optional[int]:
         """Insert pending_new trade record with strategy='orb'.
 
@@ -4627,6 +5009,13 @@ class ORBEngine:
                 # the mult that ACTUALLY sized this plan (carried on the
                 # plan — never recomputed here, so recorded == applied)
                 'pm_mult': plan.pm_mult,
+                # Winner stack (2026-08-22): recorded ATR-floor inputs so the
+                # EoD drift check recomputes floored_stop from what live SAW
+                # (research/orb rule: recorded == applied, pm_mult pattern).
+                'atr14': atr14,
+                'atr_floor_k': (self.atr_floor_k
+                                if getattr(self, 'atr_floor_enabled', False)
+                                else None),
             })
             now_utc = submit_time or datetime.now(timezone.utc)
             record = {
@@ -4727,6 +5116,14 @@ class ORBEngine:
         """
         if not symbols:
             return
+        # Winner stack: drain any queued SCALE_OUT events FIRST so the
+        # scale_* columns are on the rows before the final pnl composes
+        # them (the FC adoption in force_close_all queues the event; the
+        # main loop's next drain would be too late for this pass).
+        try:
+            self.check_exits()
+        except Exception as e:
+            logger.warning(f"FC DB SYNC: pre-drain of exit events failed: {e}")
         try:
             from alpaca.trading.requests import GetOrdersRequest
             from alpaca.trading.enums import QueryOrderStatus
@@ -4784,12 +5181,31 @@ class ORBEngine:
                 )
                 continue
             entry_price = float(t.get('fill_price') or 0)
-            shares = int(t.get('filled_qty') or t.get('shares') or 0)
-            if entry_price <= 0 or shares <= 0:
+            entry_qty = int(t.get('filled_qty') or t.get('shares') or 0)
+            if entry_price <= 0 or entry_qty <= 0:
                 continue
+            # Winner stack (P0-3.2): a scaled row's FC close order covers
+            # only the RUNNER qty — prefer the sell's own filled qty, else
+            # entry qty minus the recorded scale leg. `pnl` composes the
+            # stored scale_pnl exactly once, here at final close.
+            # Data-driven (scaled_at), never flag-gated (review P1-7).
+            scale_qty = int(t.get('scale_qty') or 0)
+            scale_pnl = float(t.get('scale_pnl') or 0.0)
+            try:
+                sell_qty = int(float(getattr(sell, 'filled_qty', 0) or 0))
+            except (TypeError, ValueError):
+                sell_qty = 0
+            shares = sell_qty if sell_qty > 0 else max(0, entry_qty - scale_qty)
+            if t.get('scaled_at') and sell_qty > 0 \
+                    and sell_qty != entry_qty - scale_qty:
+                logger.warning(
+                    f"FC DB SYNC {sym}: runner qty mismatch — close filled "
+                    f"{sell_qty}sh vs entry {entry_qty} - scale {scale_qty}; "
+                    f"using the close order's qty")
             exit_price = float(sell.filled_avg_price)
-            pnl = (exit_price - entry_price) * shares
-            pnl_pct = (exit_price - entry_price) / entry_price * 100
+            pnl = (exit_price - entry_price) * shares + scale_pnl
+            entry_notional = entry_price * entry_qty
+            pnl_pct = (pnl / entry_notional * 100) if entry_notional > 0 else 0.0
             try:
                 self.db.update_trade(t['id'], {
                     'exit_price': exit_price,

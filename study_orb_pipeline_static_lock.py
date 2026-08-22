@@ -27,6 +27,10 @@ from study_orb_correlation_filter import symbol_family, symbol_super_group
 from trading.orb_touchgo_filter import (
     evaluate_rule_m, evaluate_rule_d, find_breakout_bar_ts, load_touchgo_config,
 )
+from trading.orb_winner_stack import (
+    DEFAULT_ATR_K, DEFAULT_SCALE_FRAC, DEFAULT_SCALE_LEVEL_R,
+    atr14_t1, floored_stop, scale_params,
+)
 
 
 # Sizing constants. B+ RESTART 2026-08-15: ACCOUNT/N/RISK are now READ FROM
@@ -79,6 +83,13 @@ def load_bt_config(yaml_path: str = 'orb.yaml') -> dict:
         return float(v) if v not in (None, '') else float(
             val if val is not None else default)
 
+    def _env_bool(env: str, yaml_val: bool) -> bool:
+        """Env override wins when set ('0'/'false'/... = off); else yaml."""
+        v = os.environ.get(env)
+        if v is None or v == '':
+            return bool(yaml_val)
+        return v.strip().lower() not in ('0', 'false', 'no', 'off')
+
     from study_orb_sizing import FILTER_THRESHOLD as _DEF_THR
     from trading.orb_g1_veto import (DEFAULT_PDR_MIN as _G1_PDR,
                                      DEFAULT_RV20_MIN as _G1_RV)
@@ -102,11 +113,29 @@ def load_bt_config(yaml_path: str = 'orb.yaml') -> dict:
         'book_csv': (os.environ.get('ORB_BT_BOOK_OUT')
                      or bt.get('nightly_book_csv') or DEFAULT_BOOK_CSV),
     }
+    # Winner stack (2026-08-22, docs/orb_winner_stack_design_aug2026.md):
+    # TWO independent default-OFF exit flags. Absent yaml keys = OFF (byte-
+    # identical legacy behavior — validation gate 3.1). Env kills win:
+    # ORB_ATR_FLOOR=0 / ORB_SCALE_OUT=0 (or =1 to force-on for research).
+    exit_cfg = (cfg.get('exit') or {})
+    atr_cfg = (exit_cfg.get('atr_stop_floor') or {})
+    sc_cfg = (exit_cfg.get('scale_out') or {})
+    out['atr_floor_enabled'] = _env_bool(
+        'ORB_ATR_FLOOR', atr_cfg.get('enabled', False))
+    out['atr_floor_k'] = float(atr_cfg.get('k', DEFAULT_ATR_K))
+    out['scale_enabled'] = _env_bool(
+        'ORB_SCALE_OUT', sc_cfg.get('enabled', False))
+    out['scale_frac'] = float(sc_cfg.get('frac', DEFAULT_SCALE_FRAC))
+    out['scale_level_r'] = float(sc_cfg.get('level_r', DEFAULT_SCALE_LEVEL_R))
     print(f"BT config (B+ parity): account=${out['account']:,.0f} N={out['n']} "
           f"risk=${out['risk']:,.0f} threshold={out['threshold']:.12f} "
           f"pdr_veto>={out['pdr_min']} g1({out['g1_enabled']}, "
           f"rv20>={out['g1_rv20_min']}, pdr>={out['g1_pdr_min']}) "
           f"book={out['book_csv']}")
+    print(f"BT config (winner stack): atr_floor="
+          f"{'ON' if out['atr_floor_enabled'] else 'off'} k={out['atr_floor_k']} "
+          f"scale_out={'ON' if out['scale_enabled'] else 'off'} "
+          f"frac={out['scale_frac']} level_r={out['scale_level_r']}")
     return out
 
 # Touch-and-go filter (Rule M + Rule D). Default-on; env-var overrides via
@@ -199,6 +228,154 @@ def simulate_static_lock(bars, entry_price, range_high, range_low, entry_time):
     return float(last['close']) * (1 - EXIT_SLIP_BPS/10000), 'eod'
 
 
+def simulate_winner_stack(bars, entry_price, range_high, range_low, entry_time,
+                          shares, atr14=None,
+                          atr_floor_enabled=False, atr_floor_k=DEFAULT_ATR_K,
+                          scale_enabled=False, scale_frac=DEFAULT_SCALE_FRAC,
+                          scale_level_r=DEFAULT_SCALE_LEVEL_R):
+    """Winner-stack exit walk: static lock + optional SZ1 ATR stop-floor +
+    optional 40%@+3R scale-out. Frozen semantics from
+    research/stability/phaseB_frontier.py::variant_scale_sz1 (the validated
+    C-point composition) via the shared trading/orb_winner_stack helpers —
+    see docs/orb_winner_stack_design_aug2026.md §1/§1b.
+
+    With both flags off this is behaviour-identical to simulate_static_lock,
+    but main() still routes flags-off runs through simulate_static_lock for
+    BYTE-identity (validation gate 3.1).
+
+    Composition rules (all frozen):
+      * touchgo (Rule M/D) prefires the WHOLE position — scale never happens
+        on touchgo trades.
+      * stop floor applies to the protective stop only; lock/arm R levels
+        keep range-R; the runner keeps the SAME (floored) initial stop.
+      * same-bar stop+scale: the scale FILLS (stop check gated
+        `low<=stop AND high<scale_px`) — P0-1 corrected reading, NCNA
+        2025-08-21 golden.
+      * scale qty = floor(frac×shares), <1 → all-runner (shared scale_params);
+        the blended return uses the EFFECTIVE fraction qty/shares (sub-0.01%
+        from the harness' exact 0.40 at BT share counts).
+      * 15:45 force-close covers the runner (same truncation as static lock).
+
+    Returns (effective_exit_price, reason) where effective_exit_price is the
+    price whose (px−entry)×shares equals the blended two-leg P&L (keeps the
+    caller's pnl plumbing unchanged).
+    """
+    range_size = range_high - range_low
+    slip = 1 - EXIT_SLIP_BPS / 10000
+    _et = bars['timestamp'].dt.tz_convert('America/New_York').dt.time
+    _fc_h, _fc_m = (int(x) for x in FORCE_CLOSE_ET.split(':'))
+    from datetime import time as _dtime
+    bars = bars[_et <= _dtime(_fc_h, _fc_m)]
+    post = bars[bars['timestamp'] >= entry_time].reset_index(drop=True)
+    if len(post) == 0:
+        return entry_price, 'no_bars'
+
+    # Touchgo prefire — whole position, no scale (frozen §1.3).
+    if len(post) >= 1:
+        eb = post.iloc[0]
+        fire_m, exit_m = evaluate_rule_m(
+            float(eb['open']), float(eb['high']), float(eb['low']),
+            float(eb['close']), TOUCHGO_CFG)
+        if fire_m and exit_m is not None:
+            return exit_m * slip, 'tag_bb'
+    if len(post) >= 2:
+        b1 = post.iloc[1]
+        fire_d, exit_d = evaluate_rule_d(
+            entry_price, float(b1['low']), range_size, TOUCHGO_CFG)
+        if fire_d and exit_d is not None:
+            return exit_d * slip, 'tag_b1'
+
+    # SZ1 stop floor on the protective stop only (shared helper).
+    stop0 = range_low
+    if atr_floor_enabled:
+        stop0, floor_status = floored_stop(
+            range_low, entry_price, atr14, atr_floor_k)
+        if floor_status in ('no_atr', 'degenerate'):
+            # Fail-open path must be loud (CLAUDE.md); print (BT context).
+            print(f"WARNING: winner-stack floor fail-open ({floor_status}) "
+                  f"entry={entry_price} atr14={atr14} — stop stays range_low")
+
+    # Scale params via the shared helper (tiny-qty rule included).
+    scale_px = None
+    frac_eff = 0.0
+    if scale_enabled and shares >= 1:
+        px, qty = scale_params(entry_price, range_size,
+                               scale_frac, scale_level_r, shares)
+        if qty >= 1:
+            scale_px = px
+            frac_eff = qty / float(shares)
+
+    trig = entry_price + LOCK_TRIGGER_R * range_size
+    lock = entry_price + LOCK_STOP_R * range_size
+    highs = post['high'].to_numpy(dtype=float)
+    lows = post['low'].to_numpy(dtype=float)
+    closes = post['close'].to_numpy(dtype=float)
+    n = len(post)
+
+    # Phase 1: search for stop-out or scale touch (frozen gated stop check).
+    stop = stop0
+    armed = False
+    scale_i = None
+    for i in range(1, n):
+        if not armed and highs[i] >= trig:
+            armed = True
+            stop = max(stop, lock)
+        if lows[i] <= stop and (scale_px is None or highs[i] < scale_px):
+            return stop * slip, ('lock' if armed else 'stop')
+        if scale_px is not None and highs[i] >= scale_px:
+            scale_i = i
+            break
+    if scale_i is None:
+        return float(closes[-1]) * slip, 'eod'
+
+    # Phase 2: runner from the scale bar with the SAME floored initial stop;
+    # re-derive armed state including the scale bar (harness convention).
+    stop2 = stop0
+    armed2 = bool(highs[1:scale_i + 1].max() >= trig) if scale_i >= 1 else False
+    if armed2:
+        stop2 = max(stop2, lock)
+    run_px = None
+    run_rsn = 'eod'
+    for i in range(scale_i, n):
+        if not armed2 and highs[i] >= trig:
+            armed2 = True
+            stop2 = max(stop2, lock)
+        if lows[i] <= stop2:
+            run_px = stop2 * slip
+            run_rsn = 'lock' if armed2 else 'stop'
+            break
+    if run_px is None:
+        run_px = float(closes[-1]) * slip
+    ret = (frac_eff * (scale_px * slip / entry_price - 1)
+           + (1 - frac_eff) * (run_px / entry_price - 1))
+    return entry_price * (1 + ret), f'scale_{run_rsn}'
+
+
+def build_atr14_lookup(pairs, db_path='data/cache.db'):
+    """{(symbol, 'YYYY-MM-DD') -> Optional[float]} — ATR14 ending T−1 from
+    cache daily_bars, via the SHARED trading.orb_winner_stack.atr14_t1 (the
+    frozen ≥15-bars/fail-open rule; P0-6.1). One daily-history load per
+    symbol; per-date slice = bars strictly before the trade date."""
+    import sqlite3 as _sqlite3
+    out = {}
+    con = _sqlite3.connect(db_path)
+    by_sym = {}
+    for sym, day in pairs:
+        by_sym.setdefault(sym, set()).add(day)
+    for sym, days in sorted(by_sym.items()):
+        d = pd.read_sql(
+            "SELECT bar_date, high, low, close FROM daily_bars "
+            "WHERE symbol=? ORDER BY bar_date", con, params=(sym,))
+        dates = d['bar_date'].astype(str).tolist()
+        import bisect as _bisect
+        for day in days:
+            idx = _bisect.bisect_left(dates, day)   # bars strictly before day
+            sl = d.iloc[max(0, idx - 40):idx]
+            out[(sym, day)] = atr14_t1(sl)
+    con.close()
+    return out
+
+
 def main():
     bt_cfg = load_bt_config()
     # Features CSV: env override (ORB_BT_FEATURES_CSV) else latest non-corrmatrix
@@ -222,7 +399,27 @@ def main():
     db.close()
     bars_cache = {k: _bars_to_df(v) for k, v in raw_bars.items()}
 
-    print("Re-simulating with static_lock_1R exit...")
+    # Winner stack (2026-08-22): with BOTH flags off, route through the
+    # legacy simulate_static_lock for BYTE-identity with the validated book
+    # (gate 3.1). With either flag on, the shared-module walk runs and the
+    # book regenerates as the C/B-point (gate 3.2).
+    winner_stack_on = bt_cfg['atr_floor_enabled'] or bt_cfg['scale_enabled']
+    atr_lookup = {}
+    if bt_cfg['atr_floor_enabled']:
+        print("Winner stack: building ATR14 lookup (shared atr14_t1, "
+              "cache daily_bars)...")
+        atr_lookup = build_atr14_lookup(pairs)
+        n_avail = sum(1 for v in atr_lookup.values() if v is not None)
+        print(f"Winner stack: ATR14 available for {n_avail}/{len(atr_lookup)} "
+              f"symbol-days (missing => floor fail-open to range_low)")
+
+    print("Re-simulating with "
+          + ("winner-stack exit (static lock"
+             + (" + ATR floor" if bt_cfg['atr_floor_enabled'] else "")
+             + (" + scale-out" if bt_cfg['scale_enabled'] else "") + ")..."
+             if winner_stack_on else "static_lock_1R exit..."))
+    n_floor_bound = 0
+    n_scaled = 0
     new_pnls = []; new_pnl_pcts = []; new_reasons = []
     for _, row in df.reset_index(drop=True).iterrows():
         key = (row['symbol'], row['date'].strftime('%Y-%m-%d'))
@@ -250,8 +447,27 @@ def main():
             new_pnls.append(row['pnl']); new_pnl_pcts.append(row['pnl_pct'])
             new_reasons.append(row['exit_reason']); continue
         entry_p = float(row['entry_price'])
-        exit_p, reason = simulate_static_lock(bars, entry_p, rh, rl, entry_ts)
         shares = max(1, int(OLD_POS / entry_p))
+        if winner_stack_on:
+            _atr = atr_lookup.get(key) if bt_cfg['atr_floor_enabled'] else None
+            if bt_cfg['atr_floor_enabled'] and _atr is not None:
+                _fs, _fst = floored_stop(rl, entry_p, _atr,
+                                         bt_cfg['atr_floor_k'])
+                if _fst == 'bound':
+                    n_floor_bound += 1
+            exit_p, reason = simulate_winner_stack(
+                bars, entry_p, rh, rl, entry_ts, shares,
+                atr14=_atr,
+                atr_floor_enabled=bt_cfg['atr_floor_enabled'],
+                atr_floor_k=bt_cfg['atr_floor_k'],
+                scale_enabled=bt_cfg['scale_enabled'],
+                scale_frac=bt_cfg['scale_frac'],
+                scale_level_r=bt_cfg['scale_level_r'],
+            )
+            if reason.startswith('scale_'):
+                n_scaled += 1
+        else:
+            exit_p, reason = simulate_static_lock(bars, entry_p, rh, rl, entry_ts)
         new_pnls.append((exit_p - entry_p) * shares)
         new_pnl_pcts.append((exit_p - entry_p) / entry_p * 100)
         new_reasons.append(reason)
@@ -260,6 +476,10 @@ def main():
     df['pnl'] = new_pnls
     df['pnl_pct'] = new_pnl_pcts
     df['exit_reason'] = new_reasons
+    if winner_stack_on:
+        print(f"Winner stack: floor bound on {n_floor_bound} resimmed rows; "
+              f"{n_scaled} rows scaled 40%@+{bt_cfg['scale_level_r']}R "
+              f"(counts are pre-selection, whole candidate set)")
 
     # Risk-parity sizing (B+ 2026-08-15: account/N/risk from orb.yaml via bt_cfg)
     account = bt_cfg['account']

@@ -267,6 +267,18 @@ def green_verdict(day: str) -> Dict:
     rekey = journal_grep('REKEY', day) + journal_grep('negative-age', day)
     checks['touchgo_tripwires'] = 'OK' if not rekey else f"{len(rekey)} tripwire line(s)"
 
+    # Winner stack: floored-stop drift (HARD when a mismatch exists —
+    # live monitored a stop the book wasn't validated on; review P0-6.2).
+    # Inert while exit.atr_stop_floor is off (available=False).
+    fsd = floored_stop_drift(day)
+    if not fsd['available']:
+        checks['floored_stop_drift'] = 'SKIPPED (flag off or check error)'
+    elif fsd['mismatches']:
+        checks['floored_stop_drift'] = f"DRIFT: {fsd['mismatches']}"
+        reasons.append(f"floored-stop drift: {fsd['mismatches']}")
+    else:
+        checks['floored_stop_drift'] = f"OK ({fsd['n_checked']} checked)"
+
     # Service-uptime context (2026-07-06 incident follow-up): if the trader
     # was crash-looping / restarting around the 9:35 ET entry window, say so
     # in the red-day reasons — a missed pick from an outage is a different
@@ -412,7 +424,12 @@ def sizing_attribution(day: str) -> Dict:
              'pm_dollar_vol': pdata.get('pm_dollar_vol'),
              'asset_class': pdata.get('asset_class'),
              'pnl': r.get('pnl'),
-             'filled': r.get('fill_price') is not None}
+             'filled': r.get('fill_price') is not None,
+             # Winner-stack scale attribution (2026-08-22). pnl above is
+             # already COMBINED (single-writer) — these are display-only.
+             'scaled': bool(r.get('scaled_at')),
+             'scale_qty': r.get('scale_qty'),
+             'scale_pnl': r.get('scale_pnl')}
         trades.append(t)
         if t['pm_mult'] is None:
             continue   # pre-ship row (no attribution recorded)
@@ -476,6 +493,86 @@ def sizing_attribution(day: str) -> Dict:
 
     return {'trades': trades, 'mult_mismatches': mult_mismatches,
             'news_drift': news_drift, 'cum': cum}
+
+
+# ---------------------------------------------------------------------------
+# Winner stack: EoD floored-stop drift check (2026-08-22, review P0-6.2 —
+# same spirit as the pm_mult recompute gate: recorded vs recomputed, HARD
+# flag on mismatch)
+# ---------------------------------------------------------------------------
+
+FLOORED_STOP_DRIFT_TOL = 0.01    # $ — recorded stop vs BT recompute
+
+
+def _winner_stack_cfg() -> Dict:
+    """orb.yaml exit.atr_stop_floor (+scale_out) for the drift check."""
+    import yaml
+    try:
+        with open(ROOT / 'orb.yaml') as f:
+            cfg = yaml.safe_load(f) or {}
+        return (cfg.get('exit') or {})
+    except Exception as e:
+        print(f"WARNING: orb.yaml unreadable for winner-stack cfg: {e}",
+              flush=True)
+        return {}
+
+
+def floored_stop_drift(day: str) -> Dict:
+    """Per-trade recorded `real_stop_loss_price` vs the BT-recomputed
+    ATR floor (shared trading/orb_winner_stack over cache daily_bars,
+    entry = recorded fill price).
+
+    HARD mismatches (returned in `mismatches`) mean live monitored a
+    different stop than the book was validated on — the P0-6.2 cache-gap
+    class. Skipped (available=False) when the flag is off or on any
+    infrastructure error (soft — never red a day on a cache blip; the
+    mismatch itself IS red)."""
+    exit_cfg = _winner_stack_cfg()
+    atr_cfg = (exit_cfg.get('atr_stop_floor') or {})
+    if not atr_cfg.get('enabled', False):
+        return {'available': False, 'n_checked': 0, 'mismatches': []}
+    try:
+        from trading.orb_winner_stack import (DEFAULT_ATR_K, atr14_t1,
+                                              floored_stop)
+        k = float(atr_cfg.get('k', DEFAULT_ATR_K))
+        import pandas as pd
+        con = sqlite3.connect(ROOT / 'data' / 'cache.db', timeout=15)
+        mismatches = []
+        n = 0
+        for r in load_live_rows(day, strategy='orb'):
+            if r.get('fill_price') is None:
+                continue
+            try:
+                pdata = json.loads(r.get('pattern_data') or '{}')
+            except Exception:
+                pdata = {}
+            range_low = pdata.get('range_low')
+            if range_low is None:
+                continue
+            d = pd.read_sql(
+                "SELECT bar_date, high, low, close FROM daily_bars "
+                "WHERE symbol=? AND bar_date < ? ORDER BY bar_date",
+                con, params=(r['symbol'], day))
+            atr = atr14_t1(d.tail(40))
+            expected, status = floored_stop(
+                float(range_low), float(r['fill_price']), atr, k)
+            recorded = r.get('real_stop_loss_price')
+            n += 1
+            if recorded is None:
+                mismatches.append(
+                    f"{r['symbol']}: no real_stop_loss_price recorded with "
+                    f"ATR floor enabled (expected {expected:.4f}, {status})")
+            elif abs(float(recorded) - expected) > FLOORED_STOP_DRIFT_TOL:
+                mismatches.append(
+                    f"{r['symbol']}: recorded stop {float(recorded):.4f} != "
+                    f"BT recompute {expected:.4f} ({status}, atr={atr}, "
+                    f"k={k}) — live drifted from the validated floor")
+        con.close()
+        return {'available': True, 'n_checked': n, 'mismatches': mismatches}
+    except Exception as e:
+        print(f"WARNING: floored_stop_drift failed: {e} — check skipped",
+              flush=True)
+        return {'available': False, 'n_checked': 0, 'mismatches': []}
 
 
 COMPOSITE_DRIFT_TOL = 0.005      # below this: measurement noise, ignore
@@ -646,8 +743,14 @@ def sizing_block(attr: Dict) -> str:
         pm = (f"${t['pm_dollar_vol'] / 1e6:.1f}M"
               if t['pm_dollar_vol'] else 'pm?')
         pnl = f" ${t['pnl']:+,.0f}" if t['pnl'] is not None else ''
+        scale = ''
+        if t.get('scaled'):
+            sp = t.get('scale_pnl')
+            scale = (f" [scaled {t.get('scale_qty')}sh"
+                     + (f" ${sp:+,.0f}" if sp is not None else '') + "]")
         per.append(f"{t['symbol']} {t['quintile']} "
-                   f"q{t['adaptive_mult']}×pm{t['pm_mult']} ({nf} {pm}){pnl}")
+                   f"q{t['adaptive_mult']}×pm{t['pm_mult']} ({nf} {pm})"
+                   f"{pnl}{scale}")
     if per:
         lines.append("sizing: " + ' | '.join(per))
     for d in attr['news_drift']:
@@ -732,7 +835,13 @@ def _row_pnl(r: Dict) -> Optional[float]:
     recompute from the FILL price and filled qty. 8/14 audit P2: the old
     `(exit-entry_price)*shares` used the PLANNED entry — every daily
     Telegram P&L line was off by entry slippage (8/13 LUNL: reported
-    +$34 for a −$29.44 trade) and ignored partial fills."""
+    +$34 for a −$29.44 trade) and ignored partial fills.
+
+    Winner stack (2026-08-22, P0-3 defense-in-depth): on a SCALED row
+    (scaled_at set) the exit covered only the runner qty — the recompute
+    subtracts scale_qty and adds the banked scale_pnl. The recorded `pnl`
+    is already combined (single-writer rule), so this only matters for the
+    NULL-pnl fallback path."""
     if r.get('pnl') is not None:
         return float(r['pnl'])
     if r.get('exit_price') is None:
@@ -741,7 +850,11 @@ def _row_pnl(r: Dict) -> Optional[float]:
     if entry is None:
         return None
     qty = r.get('filled_qty') or r.get('shares') or 0
-    return (float(r['exit_price']) - float(entry)) * qty
+    scale_pnl = 0.0
+    if r.get('scaled_at'):
+        qty = max(0, qty - int(r.get('scale_qty') or 0))
+        scale_pnl = float(r.get('scale_pnl') or 0.0)
+    return (float(r['exit_price']) - float(entry)) * qty + scale_pnl
 
 
 def realized_pnl(day: str) -> Dict[str, float]:
@@ -756,12 +869,18 @@ def realized_pnl(day: str) -> Dict[str, float]:
 
 
 def cumulative_orb_since(start: str) -> float:
+    """Cumulative realized ORB P&L. The NULL-pnl fallback is scale-aware
+    (winner stack P0-3c): runner qty = filled_qty − scale_qty and the
+    banked scale_pnl is added — non-scaled rows are unchanged
+    (COALESCE(scale_qty,0)=0)."""
     conn = sqlite3.connect(ROOT / 'data' / 'trades.db', timeout=15)
     row = conn.execute(
         """SELECT COALESCE(SUM(
                  COALESCE(pnl,
                           (exit_price - COALESCE(fill_price, entry_price))
-                          * COALESCE(filled_qty, shares))), 0)
+                          * (COALESCE(filled_qty, shares)
+                             - COALESCE(scale_qty, 0))
+                          + COALESCE(scale_pnl, 0))), 0)
            FROM trades WHERE strategy='orb' AND trade_date >= ?
              AND exit_price IS NOT NULL""", (start,)).fetchone()
     conn.close()

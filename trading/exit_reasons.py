@@ -119,6 +119,16 @@ class ExitReason(str, Enum):
     reversal candle after a big run). Not a full close — the remaining
     shares stay watched. See partial_exit_* DB columns."""
 
+    SCALE_OUT = "scale_out"
+    """ORB winner-stack partial: 40% of the position sold via limit at
+    entry + 3.0R (orb.yaml exit.scale_out, 2026-08-22). NOT a full close —
+    the event routes to the engine's scale-fill branch, which updates the
+    scale_* DB columns and leaves the row OPEN; the runner's final exit
+    keeps its OWN reason and writes the combined `pnl` once (P0-2/P0-3 in
+    docs/orb_winner_stack_design_aug2026.md). This value should never land
+    in `trades.exit_reason` in normal flow — it is catalogued so any
+    reconciler/FC path that does write it stays attributed (review P1-5)."""
+
     # ---- Bull flag specific -------------------------------------------
     GAP_OVER_REJECTION = "gap_over_rejection"
     """BF rejected at fill time because the gap up was too large per the
@@ -210,6 +220,7 @@ _ATTRIBUTED_EXITS = frozenset({
     ExitReason.STOP_LOSS_BRACKET_SL_RACE.value,
     ExitReason.STOP_LOSS_FALLBACK.value,
     ExitReason.EXHAUSTION_PARTIAL.value,
+    ExitReason.SCALE_OUT.value,
     ExitReason.GAP_OVER_REJECTION.value,
     ExitReason.GAP_ADJUST_FAILED.value,
     ExitReason.THIN_LIQUIDITY_REJECT.value,

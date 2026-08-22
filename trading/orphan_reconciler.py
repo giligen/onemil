@@ -375,6 +375,14 @@ def _write_recovery_row(
     'orphan_recovered_force_close')."""
     try:
         pnl = (fill_price - avg_entry) * fill_qty
+        # ORB winner stack (P0-3.3): a scaled row's recovery close covers
+        # only the runner qty — the banked scale leg composes into the final
+        # pnl exactly once, here. Data-driven on scaled_at (never
+        # flag-gated, review P1-7); non-scaled rows are byte-identical.
+        scale_pnl = 0.0
+        if db_row.get('scaled_at'):
+            scale_pnl = float(db_row.get('scale_pnl') or 0.0)
+            pnl += scale_pnl
         pnl_pct = (fill_price - avg_entry) / avg_entry * 100.0 if avg_entry > 0 else 0.0
         update = {
             'exit_price': fill_price,

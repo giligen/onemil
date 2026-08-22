@@ -249,6 +249,33 @@ exit:
   lock_stop_r: 0.5              # stop level after lock armed (entry + 0.5R)
   force_close_time_et: "15:45"  # matches bull flag + MACD wave policy
   exit_slip_bps: 10             # calibrated from live exit telemetry
+  # -------------------------------------------------------------------------
+  # ORB "winner stack" (2026-08-22, owner order 8/22) — TWO independent
+  # default-OFF flags. Flags off = byte-identical legacy behavior (validated
+  # gate 3.1). Shared physics: trading/orb_winner_stack.py (BT + live).
+  # Design: docs/orb_winner_stack_design_aug2026.md; review (P0/P1 binding):
+  # docs/orb_winner_stack_review_aug2026.md.
+  # Env kills: ORB_ATR_FLOOR=0 / ORB_SCALE_OUT=0.
+  # -------------------------------------------------------------------------
+  # SZ1 ATR stop-floor: initial protective stop = max(range_low,
+  # entry − k×ATR14(T-1)). Sizing + lock machinery UNCHANGED. <15 daily
+  # bars of history → floor fail-open to range_low (WARNING).
+  # Evidence: research/stability/phaseB_regime_atr.md (B-point $11,004/13
+  # green alone — a TAIL-SHAPING device, not alpha; "did nothing again" is
+  # the expected monitoring reading). Combined with scale_out = the
+  # validated C-point ($455/mo avg, 15/20 green, MDD −700, worst −309;
+  # research/stability/_frontier_monthly.json 'SCALE 40%@3.0R+SZ1k0.25').
+  atr_stop_floor:
+    enabled: false
+    k: 0.25                     # FROZEN (may be LOOSENED never tightened)
+  # Scale-out: sell frac of the position via limit at entry + level_r×R
+  # (range-R) on touch; runner keeps the same stop/lock. Touchgo prefire
+  # exits the WHOLE position (no scale on touchgo trades). qty<1 → all-
+  # runner. Owner accepted −$81/mo avg for +3 green months (8/22).
+  scale_out:
+    enabled: false
+    frac: 0.40                  # FROZEN
+    level_r: 3.0                # FROZEN
 
 # Safety-net bracket stop-loss sent to Alpaca (wide, backup if service crashes).
 # Real stop is monitored client-side via StopMonitor; this fires only in disaster cases.

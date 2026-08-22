@@ -615,6 +615,50 @@ class Database:
         except Exception as e:
             logger.warning(f"Migration 13 (reject_reason column) failed (non-fatal): {e}")
 
+        # Migration 14: ORB winner-stack scale-out columns (2026-08-22).
+        # One row = one trade; a 40%@+3R scale-out books its leg into these
+        # nullable columns while the row STAYS OPEN (order_status unchanged,
+        # pnl stays NULL); the final exit writes `pnl` exactly ONCE as
+        # scale_pnl + runner-leg P&L (P0-2/P0-3 single-writer rule in
+        # docs/orb_winner_stack_design_aug2026.md). `filled_qty` keeps the
+        # ENTRY qty forever. absent/NULL scaled_at = no scale happened.
+        #
+        # Deliberately a SEPARATE family from Migration 4's partial_exit_*
+        # (review P1-4, justified): the exhaustion columns carry bull-flag
+        # semantics — the partial books into daily P&L at partial time and
+        # exit_reason composes as 'exhaust+<reason>' — while the ORB scale is
+        # realized-at-close with the runner's plain exit_reason, and its
+        # presence drives flag-INDEPENDENT rehydration (shares -= scale_qty,
+        # scale_done restore — review P1-7). Overloading partial_exit_reason
+        # to discriminate two lifecycles would force every report consumer to
+        # branch on the reason string; a dedicated family keeps each
+        # convention single-meaning. Report consumers of scale_*:
+        # scripts/report_common.py (_row_pnl, cumulative_orb_since,
+        # sizing_attribution) + orb_engine (_handle_exit_event,
+        # _sync_db_after_fc, sync_positions rehydration).
+        scale_cols = {
+            'scale_qty': 'INTEGER',    # shares sold in the scale leg
+            'scale_price': 'REAL',     # avg fill price of the scale leg
+            'scale_pnl': 'REAL',       # (scale_price - fill_price) * scale_qty
+            'scaled_at': 'TIMESTAMP',  # scale-leg fill time (NULL = no scale)
+        }
+        try:
+            columns = [row[1] for row in self._trades_conn.execute(
+                "PRAGMA table_info(trades)").fetchall()]
+            added = []
+            for col_name, col_type in scale_cols.items():
+                if col_name not in columns:
+                    self._trades_conn.execute(
+                        f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+                    added.append(col_name)
+            if added:
+                self._trades_conn.commit()
+                logger.info(f"Migration 14: added ORB scale-out columns to "
+                            f"trades: {added}")
+        except Exception as e:
+            logger.warning(f"Migration 14 (scale-out columns) failed "
+                           f"(non-fatal): {e}")
+
     # =========================================================================
     # News cache (halt detection + per-article classification)
     # =========================================================================

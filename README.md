@@ -1006,6 +1006,50 @@ sign flips, which is the expected signature of a real effect vs mining.
 - Rollback: `enabled: false` + restart (zero state).
 - Tests: `tests/test_orb_pdr_veto.py` (27).
 
+### Winner stack — SZ1 ATR stop-floor + 40%@+3R scale-out (built 2026-08-22, default OFF)
+
+Two independent exit flags (owner order 8/22); flags off = byte-identical
+legacy behavior. Combined = the validated frontier C-point on the B+ book:
+**$455/mo avg, 15/20 green months, MDD −$700, worst month −$309**
+(`research/stability/_frontier_monthly.json`; owner accepted −$81/mo avg for
++3 greens). SZ1 alone = B-point ($11,004/13 green) — a TAIL-shaping device,
+not alpha ("it did nothing again" is the expected monitoring reading).
+
+- **SZ1 ATR stop-floor**: initial protective stop = max(range_low,
+  fill − 0.25×ATR14(T-1)). Sizing + lock machinery untouched. <15 daily bars
+  of history → fail-open to range_low (WARNING). Written to BOTH
+  `stop_loss_price` + `real_stop_loss_price` at fill (restart-safe, P0-4).
+- **Scale-out**: on touch of fill + 3.0R (range-R), safety legs resize to the
+  runner qty and an independent limit sell for floor(0.40×shares) rests at the
+  level (fill polled async — the exit latch is never held across the wait).
+  Runner keeps the same (floored) stop + static lock. Touchgo prefire exits
+  the WHOLE position (no scale). The scale leg books into nullable
+  `scale_qty/scale_price/scale_pnl/scaled_at` columns while the row stays
+  OPEN; the final exit writes the combined `pnl` exactly once (single-writer).
+- **Shared module**: `trading/orb_winner_stack.py` (BT pipeline + live engine
+  + StopMonitor — parity by construction). Frozen semantics incl. the
+  corrected same-bar rule: a bar hitting both the stop and +3R FILLS the
+  scale (NCNA 2025-08-21 golden); live tick ordering is conservative vs BT.
+- Config: `orb.yaml::exit.atr_stop_floor.{enabled,k}` +
+  `exit.scale_out.{enabled,frac,level_r}`. Env kills: `ORB_ATR_FLOOR=0`,
+  `ORB_SCALE_OUT=0`. Constants FROZEN (amendment appended to
+  `research/orb_bplus_frozen_params_aug2026.yaml`).
+- Data: `scripts/backfill_daily_bars_gaps.py` (INSERT-only) closed the
+  daily_bars cache gaps (P0-6); reference regen:
+  `research/stability/regen_winner_stack_reference.py` — the Monday flip is
+  GATED on the regen reproducing the C-point and the flags-on pipeline
+  matching it to <$5/month.
+- Monitor: `journalctl -u onemil-trader | grep -E "ATR FLOOR|SCALE OUT"`;
+  EoD green check gains a floored-stop drift check (recorded vs BT recompute,
+  HARD flag) via `scripts/report_common.floored_stop_drift`.
+- Rollback: each flag independently to `false` + restart. Rehydration and
+  P&L composition are DATA-driven (`scaled_at IS NOT NULL`), never
+  flag-gated — an open scaled position stays correct through a rollback.
+- Design/review: `docs/orb_winner_stack_design_aug2026.md` (v2) +
+  `docs/orb_winner_stack_review_aug2026.md` (P0/P1 binding). Tests:
+  `tests/test_orb_winner_stack*.py`, `tests/test_orb_scale_out_monitor.py`,
+  `tests/test_report_common_scale.py`.
+
 ### Touchgo filter — Rule M + Rule D (shipped 2026-05-16, default ON)
 
 Two post-fill exit rules that catch failed breakouts within the first 1–2

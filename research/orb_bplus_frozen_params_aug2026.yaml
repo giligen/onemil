@@ -147,3 +147,51 @@ simulation_assumptions:
     - MID assumes stop amendment is instantaneous at SPY bar close; live path via StopMonitor amend
     - BT news source for catalyst veto = data/research/orb_news_catalyst_*.csv; live = Alpaca/Benzinga fetch
     - G1 rv20/pdr computed from the same daily-bars fetch the PDR veto uses; fail-open on fetch failure (loud WARNING)
+
+# =============================================================================
+# AMENDMENT — 2026-08-22: ORB "winner stack" (SZ1 ATR stop-floor + scale-out)
+# Owner order 8/22 ("design go deep on 1 and 2, implement after design, add
+# test, validate roll out"). Constants below are FROZEN under the same rule as
+# the rest of this file: may be LOOSENED, never TIGHTENED, no deploy refits.
+# =============================================================================
+# winner_stack:
+#   atr_stop_floor: {k: 0.25}          # stop = max(range_low, entry − k*ATR14(T-1));
+#                                      # ATR = simple rolling(14) mean of TR, ≥15 daily
+#                                      # bars else fail-open (frozen boundary, P0-6.1);
+#                                      # degenerate clamp: floor must sit ≤ entry*(1-0.005)
+#   scale_out:      {frac: 0.40, level_r: 3.0}   # limit sell frac at entry+3R (range-R),
+#                                      # runner keeps the floored stop + static lock;
+#                                      # touchgo prefire = whole position, no scale;
+#                                      # floor(frac*shares) < 1 => all-runner
+#
+# Evidence (research/stability/):
+#   phaseB_regime_atr.md      — SZ1 alone (B-point): $536→$550/mo, greens 12→13,
+#                               MDD −1,185→−966, worst −407→−330, zero monster cost.
+#   phaseB_frontier.py + _frontier_monthly.json — composed C-point
+#                               'SCALE 40%@3.0R+SZ1k0.25': $9,093 total, $455/mo avg,
+#                               15/20 green, MDD −700, worst −309. Owner accepted the
+#                               −$81/mo average cost for +3 green months (8/22).
+#   resim_exit.py::variant_scale — frozen scale semantics INCLUDING the corrected
+#                               same-bar reading (P0-1): a bar hitting both the stop
+#                               and +3R FILLS THE SCALE (stop check gated
+#                               low<=stop AND high<scale_px); NCNA 2025-08-21 golden.
+#
+# P1-8 caveat carried VERBATIM from phaseB_regime_atr.md (do not mistake the
+# floor for alpha): "NO-GO standalone… classic overfit shape (TRAIN 6/6,
+# VAL/OOS flat), flips exactly one red, zero monster cost." The floor is a
+# tail-shaping device whose measurable value appears only in worst months;
+# most months it must do nothing, and "it did nothing again" is the EXPECTED
+# monitoring reading.
+#
+# Composition debt (P1-6): the C-point was validated on static-lock+touchgo
+# physics ONLY — STAG and MID (sections 4-5 above) are NOT in the live
+# engine/BT/resim yet. Ship ORDER: winner stack first; when STAG/MID ship,
+# the winner-stack expectation set ($455/mo, 15/20 green) is STALE and the
+# combined book MUST be re-derived through the same harness before enable.
+# Two "validated separately" amendments must never compose unvalidated.
+#
+# Implementation: trading/orb_winner_stack.py (shared BT+live);
+# flags orb.yaml::exit.atr_stop_floor.enabled / exit.scale_out.enabled
+# (both default false; env kills ORB_ATR_FLOOR=0 / ORB_SCALE_OUT=0).
+# Design: docs/orb_winner_stack_design_aug2026.md (v2, §1b P0 resolutions);
+# adversarial review (binding): docs/orb_winner_stack_review_aug2026.md.
