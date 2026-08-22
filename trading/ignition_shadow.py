@@ -71,6 +71,14 @@ class IgnitionShadow:
         # trigger rec AFTER journaling. The shadow stays order-free —
         # execution lives entirely in trading/ignition_engine.py.
         self.on_trigger = None
+        # Prestage hooks (2026-08-22 build, trading/ignition_prestage):
+        # on_price(symbol, price, minute_et) fires for EVERY sighting
+        # (feeds the proximity ranks + feed watchdog); on_candidate(rec)
+        # fires once day_open is known (universe-passing names only).
+        # Both are guarded at the call site — hook errors never block
+        # the shadow's measurement.
+        self.on_price = None
+        self.on_candidate = None
         self._day: Optional[str] = None
         self._log_dir = log_dir or os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -213,6 +221,11 @@ class IgnitionShadow:
         # parity floor on DAY OPEN runs in _finalize via ignition_rules)
         if price < _rules.PRICE_FLOOR:
             return
+        if self.on_price is not None:
+            try:
+                self.on_price(symbol, price, minute)
+            except Exception as e:
+                logger.error(f"ignition-shadow: on_price hook failed: {e}")
         a = self._anchor(symbol)
         first_sight = symbol not in self._seen_today
         if first_sight:
@@ -393,6 +406,15 @@ class IgnitionShadow:
                     rec['verdict'] = urej
                     gates_ok = False
                 else:
+                    # prestage candidate intake (universe-passing names
+                    # with a computable level — crossed names included:
+                    # the prestage owns its own P0-6 routing)
+                    if self.on_candidate is not None:
+                        try:
+                            self.on_candidate(rec)
+                        except Exception as e:
+                            logger.error(f"ignition-shadow: on_candidate"
+                                         f" hook failed: {e}")
                     # BOOK trigger semantics: the +10% LEVEL was crossed
                     # by a bar HIGH in the window — NOT price-at-sighting
                     # (a pullback after the cross still counts; the 7/21

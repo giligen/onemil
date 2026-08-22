@@ -124,6 +124,24 @@ class OrderStreamWatcher:
         with self._lock:
             return self._statuses.get(order_id)
 
+    def snapshot_by_client_prefix(self, prefix: str) -> Dict[str, Dict[str, Any]]:
+        """Latest-known statuses for orders whose client_order_id starts
+        with `prefix`, keyed by client_order_id.
+
+        Ignition prestage (2026-08-22, P0-4): staged stop-limit fills are
+        consumed from THIS stream by the `ign-stage-` client_order_id
+        prefix instead of per-order REST polling — at 100-310 staged
+        orders/day, per-order polling would burn the shared 200/min
+        trading-API budget instantly. Returns copies (thread-safe reads).
+        """
+        out: Dict[str, Dict[str, Any]] = {}
+        with self._lock:
+            for s in self._statuses.values():
+                coid = s.get('client_order_id') or ''
+                if coid.startswith(prefix):
+                    out[coid] = dict(s)
+        return out
+
     def get_open_order_symbols(self) -> Set[str]:
         """
         Set of symbols currently holding a non-terminal order, per the stream
@@ -320,6 +338,9 @@ def _order_to_status(order, event: str = '') -> Dict[str, Any]:
     )
     return {
         'id': str(getattr(order, 'id', '') or ''),
+        # client_order_id: prestage fill routing keys on the ign-stage-
+        # prefix (see snapshot_by_client_prefix); '' when absent.
+        'client_order_id': str(getattr(order, 'client_order_id', '') or ''),
         'symbol': str(getattr(order, 'symbol', '') or ''),
         'status': _s(getattr(order, 'status', '')),
         'filled_avg_price': _f(getattr(order, 'filled_avg_price', None)),

@@ -699,11 +699,25 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
     # triggers — construction is unconditional (gates are internal:
     # enabled/dry_run/IGNITION_LIVE), so flipping config needs no code.
     ignition_engine = None
+    ignition_prestage = None
     try:
         from trading.ignition_engine import IgnitionEngine
+        _ign_cfg = config.ignition_live_cfg
+        # Prestage subsystem (2026-08-22): default-off + shadow. Init
+        # failure degrades to the plain chase path — never blocks S3.
+        try:
+            from trading.ignition_prestage import PrestageManager
+            ignition_prestage = PrestageManager(
+                alpaca_client=alpaca, db=db, stop_monitor=stop_monitor,
+                order_stream=order_stream, notifier=notifier,
+                cfg=_ign_cfg.get('prestage'))
+        except Exception as e:
+            logger.error(f"PrestageManager init failed ({e}) — "
+                         f"prestage off, chase path unaffected")
         ignition_engine = IgnitionEngine(
             alpaca_client=alpaca, db=db, stop_monitor=stop_monitor,
-            notifier=notifier, cfg=config.ignition_live_cfg)
+            notifier=notifier, cfg=_ign_cfg,
+            prestage=ignition_prestage)
         ignition_engine.sync_positions()
     except Exception as e:
         logger.error(f"IgnitionEngine init failed ({e}) — engine off; "
@@ -761,6 +775,15 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
     if ignition_engine is not None and scanner.ignition_shadow is not None:
         scanner.ignition_shadow.on_trigger = ignition_engine.enqueue_trigger
         logger.info("Ignition: shadow->engine trigger callback wired")
+        # prestage intake hooks (guarded inside the shadow — hook errors
+        # never block measurement; no-ops when prestage disabled)
+        if ignition_prestage is not None:
+            scanner.ignition_shadow.on_price = ignition_prestage.on_price
+            scanner.ignition_shadow.on_candidate = \
+                ignition_prestage.on_candidate
+            logger.info("Ignition: shadow->prestage intake hooks wired "
+                        f"(enabled={ignition_prestage.enabled}, "
+                        f"shadow={ignition_prestage.shadow})")
 
     # Enable async news classification (non-blocking LLM calls)
     scanner.enable_async_news()

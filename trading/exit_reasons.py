@@ -143,6 +143,21 @@ class ExitReason(str, Enum):
     """ORB touchgo Rule D: the bar after entry reverted ≥0.75R below
     entry → exit at entry - 0.5R. Catches fast reversals."""
 
+    # ---- Ignition prestage disposition exits (2026-08-22 build) -------
+    STAGE_REJECT_STRUCTURE = "stage_reject_structure"
+    """Ignition prestage P0-1 disposition: a pre-staged stop-limit BUY
+    filled, but the AT-FILL structure validation (shared
+    `ignition_rules.structure_gates_at_fill`) rejected the name — the
+    fill is NOT a book trade. Exited immediately via StopMonitor
+    force_exit; the scratch cost is the price of pre-commitment and is
+    counted in prestage telemetry. See
+    docs/ignition_prestage_design_aug2026.md §3b P0-1."""
+
+    STAGE_FORCE_FLAT = "stage_force_flat"
+    """Ignition prestage watchdog/sweep-driven force-flat of an adopted
+    staged fill (e.g. feed-stale sweep with an unmanageable position, or
+    max-staged-fills breach cleanup). Attributed: we know why it closed."""
+
     # ---- MACD wave specific -------------------------------------------
     MACD_FLIP = "macd_flip"
     """MACD histogram flipped sign — momentum reversal exit signal."""
@@ -200,6 +215,8 @@ _ATTRIBUTED_EXITS = frozenset({
     ExitReason.THIN_LIQUIDITY_REJECT.value,
     ExitReason.TAG_BB.value,
     ExitReason.TAG_B1.value,
+    ExitReason.STAGE_REJECT_STRUCTURE.value,
+    ExitReason.STAGE_FORCE_FLAT.value,
     ExitReason.MACD_FLIP.value,
     ExitReason.BRACKET_EXIT.value,
     ExitReason.BRACKET_SL_TP.value,

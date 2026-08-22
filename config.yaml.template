@@ -102,6 +102,13 @@ float_cache:
 news_analyzer:
   model: claude-haiku-4-5-20251001
 
+# Real-time news stream (Alpaca v1beta1 news WebSocket).
+# Standalone shadow module (data_sources/news_stream.py) for latency
+# measurement — NOT yet wired into the trader. Enable only once the
+# integration task lands.
+news_stream:
+  enabled: false
+
 # Telegram notifications
 notifications:
   telegram:
@@ -443,3 +450,29 @@ ignition_live:
   max_notional_usd: 1500
   entry_buffer_bps: 20
   entry_timeout_s: 90
+  # Pre-staged entry subsystem (2026-08-22 build, docs/
+  # ignition_prestage_design_aug2026.md). FAIL-SAFE defaults:
+  # enabled:false (subsystem off) + shadow:true (even when enabled,
+  # full decisions but ZERO orders — the Mon-Tue mode). Env kill:
+  # IGNITION_PRESTAGE=0.
+  prestage:
+    enabled: false
+    shadow: true
+    risk_usd: 50
+    cap_bps: 300              # limit = level*(1+cap) — RESTING_MODEL ship pick
+    stop_offset_bps: 15       # frozen 8/22 (SIBLING_OFFSET.md P1-8 sweep: 30 was mid-downslope; 0 fails leg-2; never above 30)
+    heap_k: 400               # take-all depth (K-study: small-K refuted)
+    promote_rank_slack: 2
+    demote_rank_slack: 3
+    promote_distance_pct: 20.0   # D_in
+    demote_distance_pct: 25.0    # D_out
+    promote_consecutive: 2
+    ops_per_min: 100          # order-op churn limiter (§E15)
+    bp_frac: 0.25             # staging budget = min(frac*DTBP, abs)
+    bp_abs_usd: 30000
+    stage_start_min: 575      # 9:35 ET — never stage earlier
+    cancel_all_min: 780       # 13:00 ET sweep
+    gap_through_cancel_min: 60  # P1-5 FROZEN (harness-validated inert)
+    watchdog_stale_s: 60
+    max_staged_fills: 10      # P1-6 adoption-side concurrency rail
+    pdt_equity_min: 25000

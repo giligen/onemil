@@ -1362,6 +1362,61 @@ class AlpacaClient:
             self._log_order_op_failure("submit bracket order", symbol, e)
             raise AlpacaAPIError(f"Failed to submit bracket order for {symbol}: {e}")
 
+    def get_open_orders(self) -> List[Dict]:
+        """
+        List all OPEN (non-terminal) orders at the broker.
+
+        One batched REST call (never per-order polling — the 200/min
+        trading-API budget is shared with bull flag). Used by ignition
+        prestage boot reconciliation to find resting `ign-stage-*`
+        stop-limits after a restart (§A1 BMNR/DFNS class).
+
+        Returns:
+            List of dicts: id, client_order_id, symbol, status, side,
+            qty, filled_qty, filled_avg_price, stop_price, limit_price.
+
+        Raises:
+            AlpacaAPIError: If the API call fails.
+        """
+        try:
+            from alpaca.trading.requests import GetOrdersRequest
+            from alpaca.trading.enums import QueryOrderStatus
+            req = GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500)
+            orders = self._call_with_timeout(
+                lambda: self.trading_client.get_orders(filter=req),
+                "get_open_orders"
+            )
+            result = []
+            for o in (orders or []):
+                def _f(v):
+                    try:
+                        return float(v) if v is not None else None
+                    except (TypeError, ValueError):
+                        return None
+                result.append({
+                    'id': str(getattr(o, 'id', '') or ''),
+                    'client_order_id': str(
+                        getattr(o, 'client_order_id', '') or ''),
+                    'symbol': str(getattr(o, 'symbol', '') or ''),
+                    'status': str(getattr(getattr(o, 'status', ''),
+                                          'value', getattr(o, 'status', ''))),
+                    'side': str(getattr(getattr(o, 'side', ''),
+                                        'value', getattr(o, 'side', ''))),
+                    'qty': _f(getattr(o, 'qty', None)),
+                    'filled_qty': _f(getattr(o, 'filled_qty', None)) or 0.0,
+                    'filled_avg_price': _f(
+                        getattr(o, 'filled_avg_price', None)),
+                    'stop_price': _f(getattr(o, 'stop_price', None)),
+                    'limit_price': _f(getattr(o, 'limit_price', None)),
+                })
+            logger.debug(f"Open orders: {len(result)}")
+            return result
+        except AlpacaAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to get open orders: {e}")
+            raise AlpacaAPIError(f"Failed to get open orders: {e}")
+
     def get_open_positions(self) -> List[Dict]:
         """
         Get all current open positions from Alpaca.
@@ -1792,6 +1847,8 @@ class AlpacaClient:
         side: str,
         stop_price: float,
         limit_price: float,
+        client_order_id: Optional[str] = None,
+        tick_rounding: bool = False,
     ) -> Dict:
         """
         Submit a simple stop-limit order (no bracket legs).
@@ -1805,6 +1862,14 @@ class AlpacaClient:
             side: 'buy' or 'sell'
             stop_price: Trigger price
             limit_price: Max fill price after trigger
+            client_order_id: Optional idempotency/attribution id (broker
+                rejects duplicates — used by ignition prestage
+                `ign-stage-{day}-{sym}` scheme).
+            tick_rounding: When True, round prices per SEC tick rules
+                (penny at >= $1, 4 decimals below $1 — prestage §F17;
+                the legacy default 2-decimal rounding REJECTS sub-$1
+                stop-limits). Default False keeps existing callers'
+                behavior byte-identical.
 
         Returns:
             Dict with order details (id, status, symbol, qty)
@@ -1817,16 +1882,26 @@ class AlpacaClient:
 
             order_side = OrderSide.BUY if side == 'buy' else OrderSide.SELL
 
-            request = StopLimitOrderRequest(
+            if tick_rounding:
+                stop_r = round(stop_price, 4 if stop_price < 1.0 else 2)
+                limit_r = round(limit_price, 4 if limit_price < 1.0 else 2)
+            else:
+                stop_r = round(stop_price, 2)
+                limit_r = round(limit_price, 2)
+
+            request_kwargs = dict(
                 symbol=symbol,
                 qty=qty,
                 side=order_side,
                 type=OrderType.STOP_LIMIT,
                 time_in_force=TimeInForce.DAY,
-                stop_price=round(stop_price, 2),
-                limit_price=round(limit_price, 2),
+                stop_price=stop_r,
+                limit_price=limit_r,
                 order_class=OrderClass.SIMPLE,
             )
+            if client_order_id:
+                request_kwargs['client_order_id'] = client_order_id
+            request = StopLimitOrderRequest(**request_kwargs)
 
             order = self._call_with_timeout(
                 lambda: self.trading_client.submit_order(request),

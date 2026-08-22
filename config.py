@@ -713,6 +713,7 @@ class Config:
         GO flips enabled:true / dry_run:false in config.yaml.
         """
         cfg = self._get_yaml("ignition_live", default={}) or {}
+        pre = cfg.get("prestage") or {}
         return {
             "enabled": bool(cfg.get("enabled", False)),
             "dry_run": bool(cfg.get("dry_run", True)),
@@ -723,6 +724,37 @@ class Config:
             "max_notional_usd": float(cfg.get("max_notional_usd", 1500.0)),
             "entry_buffer_bps": float(cfg.get("entry_buffer_bps", 20.0)),
             "entry_timeout_s": float(cfg.get("entry_timeout_s", 90.0)),
+            # Pre-staged entry subsystem (2026-08-22 build). FAIL-SAFE
+            # defaults: disabled + shadow (zero orders even when enabled).
+            # See docs/ignition_prestage_design_aug2026.md.
+            "prestage": {
+                "enabled": bool(pre.get("enabled", False)),
+                "shadow": bool(pre.get("shadow", True)),
+                "risk_usd": float(pre.get("risk_usd", 50.0)),
+                "cap_bps": float(pre.get("cap_bps", 300.0)),
+                "stop_offset_bps": float(pre.get("stop_offset_bps", 30.0)),
+                "heap_k": int(pre.get("heap_k", 400)),
+                "promote_rank_slack": int(pre.get("promote_rank_slack", 2)),
+                "demote_rank_slack": int(pre.get("demote_rank_slack", 3)),
+                "promote_distance_pct": float(
+                    pre.get("promote_distance_pct", 20.0)),
+                "demote_distance_pct": float(
+                    pre.get("demote_distance_pct", 25.0)),
+                "promote_consecutive": int(
+                    pre.get("promote_consecutive", 2)),
+                "ops_per_min": int(pre.get("ops_per_min", 100)),
+                "bp_frac": float(pre.get("bp_frac", 0.25)),
+                "bp_abs_usd": float(pre.get("bp_abs_usd", 30000.0)),
+                "stage_start_min": int(pre.get("stage_start_min", 575)),
+                "cancel_all_min": int(pre.get("cancel_all_min", 780)),
+                "gap_through_cancel_min": int(
+                    pre.get("gap_through_cancel_min", 60)),
+                "watchdog_stale_s": float(
+                    pre.get("watchdog_stale_s", 60.0)),
+                "max_staged_fills": int(pre.get("max_staged_fills", 10)),
+                "pdt_equity_min": float(
+                    pre.get("pdt_equity_min", 25000.0)),
+            },
         }
 
     # =========================================================================

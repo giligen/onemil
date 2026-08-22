@@ -906,11 +906,22 @@ class StopMonitor:
         skip_exits_until_ts: float = 0.0,
         planned_entry_price: float = 0.0,
         planned_risk_per_share: float = 0.0,
-    ) -> None:
+    ) -> bool:
         """
         Register a symbol for stop-price monitoring.
 
         Called from main thread when a buy-stop order fills.
+
+        Returns True if the watch was installed. Returns False on a
+        CROSS-STRATEGY COLLISION (P1-2, 2026-08-22 prestage review): a
+        watch for the same symbol already exists under a DIFFERENT
+        strategy. Watches are keyed by symbol only, so overwriting would
+        silently orphan the earlier strategy's position (its exit events
+        would never drain — drain_exit_events filters by the surviving
+        entry's strategy). The add is REJECTED loudly instead; the caller
+        must handle its own position (alert + manual/reconciler path).
+        Same-strategy re-adds (restart resume, partial re-register) keep
+        the legacy overwrite behavior.
 
         Args:
             symbol: Stock symbol
@@ -959,6 +970,18 @@ class StopMonitor:
             planned_risk_per_share=planned_risk_per_share,
         )
         with self._watch_lock:
+            existing = self._watches.get(symbol)
+            if existing is not None and existing.strategy != strategy:
+                # P1-2 cross-strategy collision: REJECT, never overwrite.
+                logger.error(
+                    f"StopMonitor: add_watch({symbol}, strategy={strategy}) "
+                    f"REJECTED — symbol already watched by strategy="
+                    f"{existing.strategy} (trade_db_id="
+                    f"{existing.trade_db_id}). Overwriting would orphan "
+                    f"the existing position's exit management. Caller must "
+                    f"resolve the collision (see prestage review P1-2)."
+                )
+                return False
             self._watches[symbol] = entry
             already_subscribed = symbol in self._quote_watches
         # Clear any stale exit-in-progress flag from previous trade of same symbol
@@ -979,6 +1002,7 @@ class StopMonitor:
             f"StopMonitor: watching {symbol} — "
             f"stop=${stop_price:.2f}, shares={shares}{trail_msg}"
         )
+        return True
 
     def upgrade_quote_to_stop_watch(
         self,
@@ -1061,6 +1085,19 @@ class StopMonitor:
         # already route _on_trade/_on_quote to this StopMonitor, and
         # they look up symbols in self._watches (post-swap) automatically.
         with self._watch_lock:
+            existing = self._watches.get(symbol)
+            if existing is not None and existing.strategy != strategy:
+                # P1-2 cross-strategy collision (same rule as add_watch):
+                # REJECT the promotion rather than orphaning the earlier
+                # strategy's position. The quote-watch stays untouched.
+                logger.error(
+                    f"StopMonitor: upgrade_quote_to_stop_watch({symbol}, "
+                    f"strategy={strategy}) REJECTED — symbol already "
+                    f"watched by strategy={existing.strategy} "
+                    f"(trade_db_id={existing.trade_db_id}). Caller must "
+                    f"resolve the collision (prestage review P1-2)."
+                )
+                return
             had_quote_watch = self._quote_watches.pop(symbol, None) is not None
             self._watches[symbol] = entry
         with self._exit_lock:
@@ -1159,6 +1196,11 @@ class StopMonitor:
     _FORCE_EXIT_REASON_WHITELIST = frozenset({
         ExitReason.TAG_BB.value,   # ORB Rule M (breakout-bar close in bottom half)
         ExitReason.TAG_B1.value,   # ORB Rule D (bar-1 deep revert)
+        # Ignition prestage staged-disposition exits (P1-3, 2026-08-22):
+        # without these, every P0-1 at-fill structure reject would be
+        # SILENTLY ignored (logged, no exit) — a naked position.
+        ExitReason.STAGE_REJECT_STRUCTURE.value,
+        ExitReason.STAGE_FORCE_FLAT.value,
     })
 
     def force_exit(

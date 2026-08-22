@@ -151,6 +151,73 @@ def trigger_entry_stop(g, day_open: float) -> dict:
             'bar_dollar': float(nb['volume']) * entry}
 
 
+def structure_gates_at_fill(bars_to_fill, fill_price: float) -> dict:
+    """AT-FILL structure validation for a pre-staged stop-limit fill
+    (prestage P0-1/P0-5, 2026-08-22 — SINGLE SOURCE shared by
+    trading/ignition_prestage.py and any BT/replay consumer).
+
+    A staged order fills on EVERY universe crosser; the book keeps only
+    structure-passers. This helper re-runs the SAME gates the book runs
+    (`trigger_entry_stop` mechanics), keyed to the ACTUAL fill:
+      - trigger bar = first window bar whose high crossed the +10% level
+        (no such bar => 'stage_fill_no_trigger': odd-print/pre-window
+        election — §B7 flag class)
+      - chase guard on the FILL price (fill <= level * CHASE_MAX_RATIO)
+      - pre-bars count >= PRE_BARS_MIN in the 30min before the trigger
+      - stop = min(pre-30min low, fill*0.99); R >= R_MIN_PCT
+      - participation sizing floor (POS_MIN_USD) from the trigger's
+        next-bar dollar volume when available
+
+    Args:
+        bars_to_fill: intraday df with columns m/open/high/low/close/
+            volume, sorted by m, index reset, FROM the 9:30 open UP TO
+            (and including) the fill minute's bar.
+        fill_price: actual broker fill price.
+
+    Returns:
+        {'reject': reason} on any gate failure, else
+        {'ok': True, 'stop': float, 'r_pct': float, 'trigger_m': int,
+         'level': float, 'pos_cap_usd': float}. Catalyst state is NOT
+        checked here — the caller owns news/anchor-cohort state.
+    """
+    g = bars_to_fill
+    if g is None or len(g) < 2:
+        return {'reject': 'no_bars'}
+    day_open = float(g.iloc[0]['open'])
+    if day_open <= 0:
+        return {'reject': 'no_bars'}
+    lvl = level(day_open)
+    if chase_reject(fill_price, day_open):
+        return {'reject': 'skip_chase_guard'}
+    trig = g[(g['high'] >= lvl) & (g['m'] >= TRIGGER_MIN_START)
+             & (g['m'] <= TRIGGER_MIN_END)]
+    if trig.empty:
+        return {'reject': 'stage_fill_no_trigger'}
+    ti = trig.index[0]
+    trig_m = int(g.loc[ti, 'm'])
+    pre = g[(g['m'] >= trig_m - 30) & (g['m'] < trig_m)]
+    if len(pre) < PRE_BARS_MIN:
+        return {'reject': 'skip_pre_bars'}
+    stop = stop_from_pre_lows(float(pre['low'].min()), fill_price)
+    rp = r_pct_from_stop(fill_price, stop)
+    if rp < R_MIN_PCT:
+        return {'reject': 'skip_r_too_small'}
+    # participation floor: book proxy for the EOD day-dollar gate. Uses
+    # the bar AFTER the trigger bar when present (BT convention); when
+    # the fill IS the trigger bar's minute (no next bar yet) the check
+    # is skipped — the caller's sizing is already frozen at $risk.
+    nxt = g[g.index > ti]
+    pos_cap = float('inf')
+    if not nxt.empty:
+        bar_dollar = float(nxt.iloc[0]['volume']) * fill_price
+        pos = position_usd(rp, bar_dollar)
+        pos_cap = PARTICIPATION * bar_dollar
+        if position_reject(pos):
+            return {'reject': 'skip_illiquid'}
+    return {'ok': True, 'stop': stop, 'r_pct': rp, 'trigger_m': trig_m,
+            'level': lvl, 'pos_cap_usd': pos_cap}
+
+
 def resim_exit(bars, entry: float, stop: float, entry_min: int):
     """Harness exit physics on a df with columns m/open/high/low/close.
     Conservative: stop before arm; gap-down fills at min(stop, open)."""

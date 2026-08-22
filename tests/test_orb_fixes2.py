@@ -355,7 +355,10 @@ class TestLockRUnit:
         tr = MagicMock()
         tr.symbol = 'X'
         tr.price = 10.78  # exactly at BT's arm level
-        asyncio.get_event_loop().run_until_complete(monitor._on_trade(tr))
+        # asyncio.run (not get_event_loop): Python 3.11 raises when a
+        # prior test file left no current loop on the main thread —
+        # test-order pollution surfaced in the 2026-08-22 full-suite run
+        asyncio.run(monitor._on_trade(tr))
 
         # Lock should be ARMED (range_size path); if using risk_per_share, it would NOT arm yet
         w = monitor._watches['X']

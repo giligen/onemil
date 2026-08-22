@@ -90,8 +90,12 @@ class IgnitionEngine:
     """Executes shadow triggers at micro size. Zero detection logic."""
 
     def __init__(self, alpaca_client, db, stop_monitor, notifier=None,
-                 cfg: Optional[dict] = None):
+                 cfg: Optional[dict] = None, prestage=None):
+        """`prestage`: optional trading.ignition_prestage.PrestageManager.
+        Every touchpoint is guarded — a None/disabled prestage leaves the
+        engine byte-identical to the pre-prestage build (2026-08-22)."""
         cfg = cfg or {}
+        self.prestage = prestage
         self.enabled = bool(cfg.get('enabled', False))
         env = os.environ.get('IGNITION_LIVE')
         if env is not None:
@@ -142,6 +146,15 @@ class IgnitionEngine:
     # ------------------------------------------------------------------
     def enqueue_trigger(self, rec: dict) -> None:
         """Callback target for IgnitionShadow.on_trigger. NEVER raises."""
+        # prestage parity ledger + P0-2 reactive sibling staging fires
+        # for EVERY shadow trigger, before the engine's own enabled gate
+        # (the prestage shadow must see triggers even in engine dry-run)
+        if self.prestage is not None:
+            try:
+                self.prestage.notify_trigger(rec)
+            except Exception as e:
+                logger.error(f"[IGNITION] prestage notify_trigger "
+                             f"failed: {e}")
         if not self.enabled:
             return
         try:
@@ -204,6 +217,7 @@ class IgnitionEngine:
                 self._notify(f"[IGNITION] WEEKLY KILL — realized "
                              f"${wk:+,.0f} ≤ ${self.weekly_kill_usd:,.0f}"
                              f"; no new entries this week")
+            self._prestage_kill_sweep('weekly')
             return 'weekly_kill'
         dy = self._realized_pnl(today)
         if dy <= self.daily_kill_usd:
@@ -213,8 +227,20 @@ class IgnitionEngine:
                              f"${dy:+,.0f} ≤ ${self.daily_kill_usd:,.0f};"
                              f" no new entries today (open positions "
                              f"keep their stops)")
+            self._prestage_kill_sweep('daily')
             return 'daily_kill'
         return None
+
+    def _prestage_kill_sweep(self, kind: str) -> None:
+        """§C10: kills only block NEW entries, but staged stop-limits
+        ARE entries already armed — sweep them in the SAME call path
+        that raises the kill (idempotent inside PrestageManager)."""
+        if self.prestage is None:
+            return
+        try:
+            self.prestage.notify_kill(kind)
+        except Exception as e:
+            logger.error(f"[IGNITION] prestage kill sweep failed: {e}")
 
     def _handle_trigger(self, rec: dict) -> None:
         self._roll_day()
@@ -236,6 +262,23 @@ class IgnitionEngine:
         if blocked:
             logger.info(f"[IGNITION] {symbol} blocked by {blocked}")
             return
+        # P0-3: chase entry for a staged symbol ONLY after broker-
+        # confirmed terminal-and-unfilled disposition. 'adopted' means
+        # the stage filled (position exists) — the chase MUST NOT enter;
+        # 'blocked' means disposition unprovable — a double position is
+        # strictly worse than a missed chase.
+        if self.prestage is not None:
+            try:
+                disp = self.prestage.resolve_for_chase(symbol)
+            except Exception as e:
+                logger.error(f"[IGNITION] {symbol} prestage disposition "
+                             f"check FAILED ({e}) — chase blocked "
+                             f"(fail-closed, no double entry)")
+                disp = 'blocked'
+            if disp != 'chase_ok':
+                logger.warning(f"[IGNITION] {symbol} chase skipped — "
+                               f"prestage disposition={disp}")
+                return
         entry = float(rec.get('_entry') or rec.get('ask')
                       or rec['price'])
         stop = float(rec.get('_stop')
@@ -346,6 +389,12 @@ class IgnitionEngine:
             self.pending[symbol] = _Pending(
                 symbol, order_id, trade_id, entry, stop, shares,
                 tp_leg, sl_leg, time.time())
+        if self.prestage is not None:
+            try:
+                self.prestage.notify_chase_entry(symbol)
+            except Exception as e:
+                logger.warning(f"[IGNITION] prestage chase-entry ledger "
+                               f"failed: {e}")
         self._notify(f"[IGNITION] ENTRY SUBMITTED {shares} {symbol} "
                      f"@≤{limit} stop {stop:.2f} "
                      f"(risk ${shares * (entry - stop):.0f}, "
@@ -357,6 +406,13 @@ class IgnitionEngine:
     # tick processing (called from the scanner loop, like ORB)
     # ------------------------------------------------------------------
     def process_tick(self) -> None:
+        # prestage scheduler runs regardless of the engine's dry_run —
+        # its own gates (enabled/shadow/IGNITION_PRESTAGE) govern it
+        if self.prestage is not None:
+            try:
+                self.prestage.process_tick()
+            except Exception as e:
+                logger.error(f"[IGNITION] prestage tick failed: {e}")
         if not self.enabled or self.dry_run:
             return
         self.process_eod_fills()
@@ -441,8 +497,13 @@ class IgnitionEngine:
                           * 1e4) if ask_at_submit > 0 else float('nan')
             latency_s = time.time() - p.submitted_ts
             risk_realized = (fill_price - p.stop) * filled_qty
+            # path=chase tag (P1-7, 2026-08-22): staged fills log their
+            # own FILL QUALITY line (path=staged, metric fill-vs-level)
+            # from PrestageManager — aggregation MUST split by path or
+            # the S3 fill ledger pools two different metrics.
             logger.info(
-                f"[IGNITION] FILL QUALITY {p.symbol}: chase={chase_bps:+.0f}bps "
+                f"[IGNITION] FILL QUALITY {p.symbol}: path=chase "
+                f"chase={chase_bps:+.0f}bps "
                 f"vs_ask={vs_ask_bps:+.0f}bps latency={latency_s:.1f}s "
                 f"risk_realized=${risk_realized:.0f} "
                 f"(planned ${self.risk_usd:.0f})")
@@ -627,6 +688,14 @@ class IgnitionEngine:
         mark anything still pending as exit_pending_verification so the
         green check and the next boot's reconciler see it.
         """
+        # stage sweep FIRST (§A2 shutdown-race class): resting
+        # stop-limits must be cancelled before the process exits
+        if self.prestage is not None:
+            try:
+                self.prestage.shutdown_sweep()
+            except Exception as e:
+                logger.error(f"[IGNITION] prestage shutdown sweep "
+                             f"failed: {e}")
         deadline = time.monotonic() + timeout_s
         while self._eod_closing and time.monotonic() < deadline:
             self.process_eod_fills()
@@ -652,6 +721,15 @@ class IgnitionEngine:
 
     def sync_positions(self) -> None:
         """Boot/mid-session-restart rehydration (mirrors ORB)."""
+        # prestage boot reconciliation runs BEFORE anything trades and
+        # regardless of the engine's dry_run — a previous non-shadow run
+        # may have left resting ign-stage-* orders at the broker (§A1)
+        if self.prestage is not None:
+            try:
+                self.prestage.boot_reconcile()
+            except Exception as e:
+                logger.error(f"[IGNITION] prestage boot reconcile "
+                             f"failed: {e}")
         if not self.enabled or self.dry_run:
             return
         # Look back 5 calendar days, not just today: a row stuck 'filled'
