@@ -732,7 +732,7 @@ class Config:
                 "shadow": bool(pre.get("shadow", True)),
                 "risk_usd": float(pre.get("risk_usd", 50.0)),
                 "cap_bps": float(pre.get("cap_bps", 300.0)),
-                "stop_offset_bps": float(pre.get("stop_offset_bps", 30.0)),
+                "stop_offset_bps": float(pre.get("stop_offset_bps", 15.0)),  # frozen 8/22 (SIBLING_OFFSET.md P1-8; keep in sync with ignition_prestage default)
                 "heap_k": int(pre.get("heap_k", 400)),
                 "promote_rank_slack": int(pre.get("promote_rank_slack", 2)),
                 "demote_rank_slack": int(pre.get("demote_rank_slack", 3)),
