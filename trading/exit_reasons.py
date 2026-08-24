@@ -68,6 +68,10 @@ class ExitReason(str, Enum):
     The winning-trade exit path under the trailing_stop feature."""
 
     LOCK_STOP = "lock_stop"
+    # Ignition EOD force-flat (process_eod_fills writes this since 8/14;
+    # missing from the enum until 8/24 — the green check false-flagged the
+    # first properly-closed eod_flat row as an unattributed exit).
+    EOD_FLAT = "eod_flat"
     """ORB static-lock variant: after price touched +1.75R, the stop locked
     at +0.5R and was later hit (orb.yaml exit.lock_arm_at_r/lock_stop_r —
     2026-05-08 BT-validated upgrade from the earlier 1.5R/1R). See
