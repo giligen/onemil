@@ -743,8 +743,20 @@ class Config:
                 "promote_consecutive": int(
                     pre.get("promote_consecutive", 2)),
                 "ops_per_min": int(pre.get("ops_per_min", 100)),
+                # DEPRECATED 8/24 (INERT): %xDTBP of the co-mingled
+                # account is meaningless — the divergence agent trades
+                # the same account. Read for back-compat only.
                 "bp_frac": float(pre.get("bp_frac", 0.25)),
                 "bp_abs_usd": float(pre.get("bp_abs_usd", 30000.0)),
+                # Divergence-reserve BP guard (8/24): stage_budget =
+                # min(bp_abs_usd, max(0, BP - divergence_reserve_usd)).
+                # $150K reserve OWNER-CONFIRMED 8/24.
+                "divergence_reserve_usd": float(
+                    pre.get("divergence_reserve_usd", 150000.0)),
+                "account_refresh_s": float(
+                    pre.get("account_refresh_s", 60.0)),
+                "account_stale_s": float(
+                    pre.get("account_stale_s", 180.0)),
                 "stage_start_min": int(pre.get("stage_start_min", 575)),
                 "cancel_all_min": int(pre.get("cancel_all_min", 780)),
                 "gap_through_cancel_min": int(

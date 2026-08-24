@@ -39,6 +39,30 @@ INVARIANTS (each has a named test in tests/test_ignition_prestage.py)
 
 Kill switches: config `ignition_live.prestage.enabled` (default false),
 env `IGNITION_PRESTAGE=0`, and `shadow: true` (zero orders).
+
+2026-08-24 shadow-day-1 fixes:
+  - SKIP OBSERVABILITY: every scheduler skip class emits a once-per-
+    (symbol, day) event + parity reason (news_unknown / no_news /
+    already_crossed / bp_budget / bp_reserve / account_stale /
+    rate-budget deferral / window_closed) and a per-class counter in
+    telemetry_snapshot()['skip_counts']. Day 1 produced only
+    'candidate' events because the news and BP skips were SILENT.
+  - DISCOVERY LATENCY: each candidate records discovery_ts +
+    discovery_minute (ET) at FIRST intake; notify_trigger emits a
+    'candidate_late' event when first intake happened at/after the
+    trigger's own ET minute (rec['trigger_m'] from the shadow's
+    trigger-bar reconstruction; falls back to the notify-arrival
+    minute when absent). EOD joins discovery_ts vs shadow trigger
+    times for the sub-minute picture.
+  - DIVERGENCE-RESERVE BP GUARD: a separate divergence agent trades
+    BIG size on the SAME account, so %xDTBP of a co-mingled account is
+    meaningless (bp_frac is still read but INERT — back-compat).
+    stage_budget = min(bp_abs_usd, max(0, available_BP −
+    divergence_reserve_usd)); available_BP re-read every
+    account_refresh_s (~60s, never per-tick). Below-reserve or a stale
+    account read (> account_stale_s without a successful read) =>
+    stage NOTHING (chase-only), one WARNING + telemetry flag per
+    transition, never per tick.
 """
 from __future__ import annotations
 
@@ -154,6 +178,10 @@ class PrestageCandidate:
     promote_streak: int = 0
     last_update_ts: float = 0.0
     rank: int = 10 ** 6
+    # discovery latency (2026-08-24): stamped at FIRST intake only —
+    # the EOD analysis joins these against shadow trigger times
+    discovery_ts: float = 0.0       # epoch of first intake
+    discovery_minute: int = -1      # ET minute of first intake
 
     @property
     def distance_pct(self) -> float:
@@ -188,6 +216,12 @@ class PrestageTelemetry:
     feed_stale_events: int = 0
     fills_without_trigger: int = 0
     rank_at_trigger: List[int] = field(default_factory=list)
+    # 2026-08-24: per-class once-per-(symbol, day) skip/event counters
+    # ('stage_skip_no_news', 'candidate_late', ...) — the EOD answer to
+    # "why did nothing stage?"
+    skip_counts: Dict[str, int] = field(default_factory=dict)
+    bp_below_reserve_transitions: int = 0
+    account_stale_events: int = 0
 
 
 class PrestageManager:
@@ -221,8 +255,17 @@ class PrestageManager:
             cfg.get('demote_distance_pct', 25.0))
         self.promote_consecutive = int(cfg.get('promote_consecutive', 2))
         self.ops_per_min = int(cfg.get('ops_per_min', 100))
+        # DEPRECATED 2026-08-24 (INERT): %xDTBP of the co-mingled
+        # account is meaningless — the divergence agent trades BIG size
+        # on the SAME account. Read for back-compat, never used.
         self.bp_frac = float(cfg.get('bp_frac', 0.25))
         self.bp_abs_usd = float(cfg.get('bp_abs_usd', 30000.0))
+        # BP held back for the divergence agent (shared account):
+        # stage_budget = min(bp_abs_usd, max(0, BP − reserve))
+        self.divergence_reserve_usd = float(
+            cfg.get('divergence_reserve_usd', 150000.0))
+        self.account_refresh_s = float(cfg.get('account_refresh_s', 60.0))
+        self.account_stale_s = float(cfg.get('account_stale_s', 180.0))
         self.stage_start_min = int(cfg.get('stage_start_min', 575))
         self.cancel_all_min = int(cfg.get('cancel_all_min', 780))
         self.gap_through_cancel_min = int(
@@ -247,10 +290,19 @@ class PrestageManager:
         self._chase_only_mode = False
         self._kill_active = False
         self._midday_swept = False
-        self._dtbp: Optional[float] = None
+        # account snapshot (refreshed every account_refresh_s — the
+        # divergence agent moves BP intraday, init-only reads are stale)
+        self._bp_available: Optional[float] = None
         self._equity: Optional[float] = None
+        self._account_attempt_ts = 0.0   # last fetch ATTEMPT (rate gate)
+        self._account_ok_ts = 0.0        # last SUCCESSFUL fetch
+        self._account_stale_mode = False
+        self._bp_below_reserve = False
+        self._bp_alerted = False
         self._pdt_halved = False
         self.telemetry = PrestageTelemetry()
+        # once-per-(symbol, day) event dedup: {(symbol, reason)}
+        self._once_emitted: Set[tuple] = set()
         # parity ledger (§B8): sets keyed by symbol for today
         self._parity_triggers: Set[str] = set()
         self._parity_staged_fills: Set[str] = set()
@@ -265,8 +317,9 @@ class PrestageManager:
                 f"risk=${self.risk_usd:.0f}, cap={self.cap_bps:.0f}bps, "
                 f"stop_offset={self.stop_offset_bps:.0f}bps, "
                 f"K={self.heap_k}, ops/min={self.ops_per_min}, "
-                f"bp_budget=min({self.bp_frac:.0%}xDTBP, "
-                f"${self.bp_abs_usd:,.0f}), window "
+                f"bp_budget=min(${self.bp_abs_usd:,.0f}, "
+                f"BP-${self.divergence_reserve_usd:,.0f} reserve), "
+                f"account refresh {self.account_refresh_s:.0f}s, window "
                 f"{self.stage_start_min}->{self.cancel_all_min} ET min")
 
     # ------------------------------------------------------------------
@@ -290,9 +343,15 @@ class PrestageManager:
         self._chase_only_mode = False
         self._kill_active = False
         self._midday_swept = False
-        self._dtbp = None
+        self._bp_available = None
         self._equity = None
+        self._account_attempt_ts = 0.0
+        self._account_ok_ts = 0.0
+        self._account_stale_mode = False
+        self._bp_below_reserve = False
         self._pdt_halved = False
+        self._bp_alerted = False
+        self._once_emitted = set()
         self.telemetry = PrestageTelemetry()
         self._parity_triggers = set()
         self._parity_staged_fills = set()
@@ -316,6 +375,27 @@ class PrestageManager:
                      'shadow': self.shadow, **kw}, default=str) + '\n')
         except Exception as e:
             logger.warning(f"[PRESTAGE] event journal write failed: {e}")
+
+    def _once(self, symbol: str, reason: str, parity: bool = True,
+              **kw) -> None:
+        """Once-per-(symbol, day) observability event (2026-08-24).
+
+        Emits the event, bumps telemetry.skip_counts[reason], and (when
+        `parity`) records the parity-ledger explicit reason — first
+        reason per symbol wins via setdefault. Every scheduler skip
+        class routes through here so no skip is ever silent again
+        (shadow-day-1 lesson: only 'candidate' events, zero staging
+        telemetry, cause unknowable)."""
+        with self._lock:
+            key = (symbol, reason)
+            if key in self._once_emitted:
+                return
+            self._once_emitted.add(key)
+            self.telemetry.skip_counts[reason] = \
+                self.telemetry.skip_counts.get(reason, 0) + 1
+            if parity:
+                self._parity_explicit.setdefault(symbol, reason)
+        self._event(symbol, reason, **kw)
 
     def _state_file(self, day: Optional[str] = None) -> str:
         return os.path.join(self._log_dir,
@@ -429,16 +509,24 @@ class PrestageManager:
                 lvl = _rules.level(day_open)
                 c = self._candidates.get(symbol)
                 if c is None:
+                    now_dt = self._now_et()
                     c = PrestageCandidate(
                         symbol=symbol, day_open=day_open, level=lvl,
                         last=float(rec.get('price') or 0.0),
                         has_news=rec.get('has_news'),
                         anchor=rec.get('anchor'),
-                        stop_est=float(rec.get('_stop') or 0.0))
+                        stop_est=float(rec.get('_stop') or 0.0),
+                        discovery_ts=time.time(),
+                        discovery_minute=self._et_minute(now_dt))
                     self._candidates[symbol] = c
+                    # discovery_ts in the event => the EOD analysis can
+                    # join first-intake vs shadow trigger times to the
+                    # second (candidate_late covers minute granularity)
                     self._event(symbol, 'candidate',
                                 level=round(lvl, 4),
-                                news=c.has_news, anchor=c.anchor)
+                                news=c.has_news, anchor=c.anchor,
+                                discovery_ts=round(c.discovery_ts, 3),
+                                discovery_minute=c.discovery_minute)
                 else:
                     c.day_open, c.level = day_open, lvl
                     if rec.get('has_news') is not None:
@@ -510,10 +598,44 @@ class PrestageManager:
                     c = self._candidates.get(symbol)
                     if c is not None:
                         self.telemetry.rank_at_trigger.append(c.rank)
+                    self._check_candidate_late(symbol, c, rec)
                 if anchor:
                     self._activate_siblings(anchor, first=symbol or '')
         except Exception as e:
             logger.error(f"[PRESTAGE] notify_trigger failed: {e}")
+
+    def _check_candidate_late(self, symbol: str,
+                              c: Optional[PrestageCandidate],
+                              rec: dict) -> None:
+        """Discovery-latency tripwire (2026-08-24, ZJK class): emit
+        'candidate_late' when the candidate's FIRST intake happened
+        at/after its own trigger minute — a name we could never have
+        pre-staged in time.
+
+        Trigger minute source: rec['trigger_m'] (the shadow's
+        trigger-BAR reconstruction, ET minute) when present; else the
+        notify_trigger arrival minute (logged as src=notify_arrival —
+        an upper bound on the true trigger minute, honest but coarser).
+        Sub-minute analysis joins the candidate event's discovery_ts
+        against the shadow journal's trigger times at EOD."""
+        trig_m = rec.get('trigger_m')
+        src = 'trigger_bar'
+        if trig_m is None:
+            trig_m = self._et_minute(self._now_et())
+            src = 'notify_arrival'
+        trig_m = int(trig_m)
+        if c is None:
+            # trigger for a name never seen by candidate intake —
+            # maximally late (or intake path broken: check the shadow's
+            # on_candidate hook)
+            self._once(symbol, 'candidate_late', parity=False,
+                       trigger_m=trig_m, discovery_minute=None,
+                       detail='no_candidate_at_trigger', src=src)
+        elif c.discovery_minute >= trig_m:
+            self._once(symbol, 'candidate_late', parity=False,
+                       trigger_m=trig_m,
+                       discovery_minute=c.discovery_minute,
+                       late_min=c.discovery_minute - trig_m, src=src)
 
     def notify_chase_entry(self, symbol: str) -> None:
         """A chase-path entry was submitted — parity ledger + telemetry."""
@@ -573,6 +695,8 @@ class PrestageManager:
                 if not self._midday_swept:
                     self._midday_swept = True
                     self._sweep_all(reason='cancel_all_1300')
+                # every-tick call is safe: _once dedups per symbol/day
+                self._window_close_skips()
                 return
             self._gap_through_cancels()
             if minute < self.stage_start_min:
@@ -585,6 +709,22 @@ class PrestageManager:
         except Exception as e:
             logger.error(f"[PRESTAGE] process_tick failed: {e}",
                          exc_info=True)
+
+    def _window_close_skips(self) -> None:
+        """Skip observability backstop (2026-08-24): any candidate that
+        reached the 13:00 window close with no stage record AND no
+        recorded skip reason gets 'stage_skip_window_closed' — kill /
+        chase-only / pre-window residue included. Guarantees every
+        tracked name ends the day with either a stage record or an
+        explicit reason."""
+        with self._lock:
+            reasoned = {s for s, _ in self._once_emitted}
+            unexplained = [
+                s for s in self._candidates
+                if s not in self._stages and s not in reasoned
+                and s not in self._parity_explicit]
+        for sym in unexplained:
+            self._once(sym, 'stage_skip_window_closed')
 
     def _watchdog_check(self) -> None:
         """§D12 feed watchdog: no heap update for watchdog_stale_s while
@@ -647,16 +787,24 @@ class PrestageManager:
                 if c.symbol in self._stages:
                     continue   # one stage per (symbol, day) EVER (§A5)
                 if not (c.news_eligible or c.sibling_eligible):
-                    continue   # P0-2: news leg at 9:35; siblings reactive
+                    # P0-2: news leg at 9:35; siblings reactive. NEVER
+                    # silent (shadow-day-1): distinguish "news fetch
+                    # never resolved" from "resolved to no-news" —
+                    # different fixes (fetch latency vs universe).
+                    # A later news/sibling update still stages; the
+                    # skip event just records the state at this pass.
+                    self._once(c.symbol,
+                               'stage_skip_news_unknown'
+                               if c.has_news is None
+                               else 'stage_skip_no_news',
+                               news=c.has_news,
+                               sibling=c.sibling_eligible)
+                    continue
                 if c.last >= c.level:
                     # P0-6: already crossed — buy-stop would reject;
                     # route to chase with an explicit parity reason
-                    if self._parity_explicit.get(c.symbol) is None:
-                        self._parity_explicit[c.symbol] = \
-                            'stage_skip_already_crossed'
-                        self._event(c.symbol,
-                                    'stage_skip_already_crossed',
-                                    last=c.last, level=round(c.level, 4))
+                    self._once(c.symbol, 'stage_skip_already_crossed',
+                               last=c.last, level=round(c.level, 4))
                     continue
                 # dual-threshold hysteresis: promote only inside D_in
                 # AND rank inside K - slack, for N consecutive updates
@@ -670,13 +818,23 @@ class PrestageManager:
                     continue
                 if not self._op_allowed():
                     self.telemetry.churn_limiter_activations += 1
-                    self._event(c.symbol, 'stage_deferred_rate_budget')
+                    # transient deferral (retried next tick) — counted
+                    # in skip_counts but NOT a parity reason
+                    self._once(c.symbol, 'stage_deferred_rate_budget',
+                               parity=False)
                     return   # deferred is safe — chase path covers
                 if not self._bp_allows(c):
-                    # budgeter engaged: chase covers; visible in parity
-                    self._parity_explicit.setdefault(
-                        c.symbol, 'stage_skip_bp_budget')
-                    self._event(c.symbol, 'stage_skip_bp_budget')
+                    # budgeter engaged: chase covers; visible in parity.
+                    # Reason names the ACTIVE guard — stale account
+                    # read, divergence reserve breach, or the plain
+                    # watermark budget.
+                    if self._account_stale_mode:
+                        reason = 'stage_skip_account_stale'
+                    elif self._bp_below_reserve:
+                        reason = 'stage_skip_bp_reserve'
+                    else:
+                        reason = 'stage_skip_bp_budget'
+                    self._once(c.symbol, reason)
                     continue
             self._stage(c, minute)
 
@@ -715,26 +873,79 @@ class PrestageManager:
         return True
 
     def _refresh_account(self) -> None:
-        """Fetch DTBP + equity once per day (fail => abs cap, WARNING)."""
-        if self._dtbp is not None:
+        """Fetch BP + equity every account_refresh_s (2026-08-24).
+
+        The divergence agent trades BIG size on the SAME account, so an
+        init-only read goes stale within minutes. Attempts (success OR
+        failure) are rate-gated to the refresh cadence — never per-tick
+        API hammering. A failed fetch keeps the last good read;
+        staleness is judged in _bp_budget against account_stale_s."""
+        now = time.time()
+        if self._account_attempt_ts and \
+                now - self._account_attempt_ts < self.account_refresh_s:
             return
+        self._account_attempt_ts = now
         try:
             info = self.alpaca.get_account_info() or {}
-            self._dtbp = float(info.get('buying_power') or 0.0)
+            self._bp_available = float(info.get('buying_power') or 0.0)
             self._equity = float(info.get('equity') or 0.0)
+            self._account_ok_ts = now
         except Exception as e:
-            logger.warning(f"[PRESTAGE] account fetch failed ({e}) — "
-                           f"using abs BP cap ${self.bp_abs_usd:,.0f} "
-                           f"only")
-            self._dtbp = 0.0
-            self._equity = None
+            age = now - self._account_ok_ts if self._account_ok_ts \
+                else float('inf')
+            logger.warning(
+                f"[PRESTAGE] account fetch failed ({e}) — last good "
+                f"read {age:.0f}s ago; staging halts if it exceeds "
+                f"{self.account_stale_s:.0f}s (chase path unaffected)")
+
+    def _account_is_stale(self) -> bool:
+        return (self._account_ok_ts <= 0
+                or time.time() - self._account_ok_ts
+                > self.account_stale_s)
 
     def _bp_budget(self) -> float:
+        """Divergence-reserve staging budget (2026-08-24):
+
+            stage_budget = min(bp_abs_usd,
+                               max(0, available_BP − divergence_reserve))
+
+        The pre-8/24 %xDTBP leg is REMOVED — a percentage of co-mingled
+        DTBP is meaningless (bp_frac read but inert). Stale account
+        read OR below-reserve => budget 0 (stage nothing, chase-only)
+        with ONE WARNING + telemetry flag per transition, not per tick.
+        """
         self._refresh_account()
-        if self._dtbp and self._dtbp > 0:
-            budget = min(self.bp_frac * self._dtbp, self.bp_abs_usd)
-        else:
-            budget = self.bp_abs_usd
+        stale = self._account_is_stale()
+        if stale and not self._account_stale_mode:
+            self._account_stale_mode = True
+            self.telemetry.account_stale_events += 1
+            logger.warning(
+                f"[PRESTAGE] account read STALE (no successful read in "
+                f"{self.account_stale_s:.0f}s) — staging halted "
+                f"(budget=0, chase-only); chase path unaffected")
+        elif not stale and self._account_stale_mode:
+            self._account_stale_mode = False
+            logger.warning("[PRESTAGE] account read recovered — "
+                           "staging budget restored")
+        if self._account_stale_mode:
+            self.telemetry.bp_budget_usd = 0.0
+            return 0.0
+        bp = self._bp_available or 0.0
+        headroom = max(0.0, bp - self.divergence_reserve_usd)
+        below = headroom <= 0.0
+        if below and not self._bp_below_reserve:
+            self._bp_below_reserve = True
+            self.telemetry.bp_below_reserve_transitions += 1
+            logger.warning(
+                f"[PRESTAGE] available BP ${bp:,.0f} <= divergence "
+                f"reserve ${self.divergence_reserve_usd:,.0f} — "
+                f"staging halted (budget=0, chase-only); the "
+                f"divergence agent owns the account's BP")
+        elif not below and self._bp_below_reserve:
+            self._bp_below_reserve = False
+            logger.info(f"[PRESTAGE] BP ${bp:,.0f} back above the "
+                        f"divergence reserve — staging resumes")
+        budget = min(self.bp_abs_usd, headroom)
         self.telemetry.bp_budget_usd = budget
         return budget
 
@@ -764,8 +975,10 @@ class PrestageManager:
             self.telemetry.bp_high_watermark_usd = hw
         # 80% alert BEFORE the hard stop: a single stage can jump the
         # watermark from below-80% straight past 100% — the alert must
-        # still fire on the attempt (§C9: alert at 80, hard stop at 100)
-        if reserved + add > 0.8 * budget and not getattr(
+        # still fire on the attempt (§C9: alert at 80, hard stop at
+        # 100). budget<=0 (stale/below-reserve) has its own transition
+        # WARNING — the watermark alert would be noise there.
+        if budget > 0 and reserved + add > 0.8 * budget and not getattr(
                 self, '_bp_alerted', False):
             self._bp_alerted = True
             self._notify(f"[PRESTAGE] ⚠ BP watermark "
@@ -1408,6 +1621,14 @@ class PrestageManager:
             'would_fill': t.would_fill,
             'bp_high_watermark_usd': t.bp_high_watermark_usd,
             'bp_budget_usd': t.bp_budget_usd,
+            'bp_available_usd': self._bp_available,
+            'divergence_reserve_usd': self.divergence_reserve_usd,
+            'bp_below_reserve': self._bp_below_reserve,
+            'bp_below_reserve_transitions':
+                t.bp_below_reserve_transitions,
+            'account_stale': self._account_stale_mode,
+            'account_stale_events': t.account_stale_events,
+            'skip_counts': dict(t.skip_counts),
             'gap_through_count': t.gap_through_count,
             'scratch_count': t.scratch_count,
             'scratch_cost_usd': t.scratch_cost_usd,

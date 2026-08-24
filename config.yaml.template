@@ -480,8 +480,15 @@ ignition_live:
     demote_distance_pct: 25.0    # D_out
     promote_consecutive: 2
     ops_per_min: 100          # order-op churn limiter (§E15)
-    bp_frac: 0.25             # staging budget = min(frac*DTBP, abs)
-    bp_abs_usd: 30000
+    bp_frac: 0.25             # DEPRECATED 2026-08-24 (INERT): % of co-mingled DTBP is meaningless — the divergence agent trades BIG on the SAME account; read for back-compat only
+    bp_abs_usd: 30000         # spec cap 30000; day-1 live value 15000
+    # Divergence-reserve BP guard (2026-08-24): stage_budget =
+    # min(bp_abs_usd, max(0, available_BP - divergence_reserve_usd)).
+    # Below reserve OR stale account read => stage NOTHING (chase-only),
+    # one WARNING + telemetry flag per transition.
+    divergence_reserve_usd: 150000  # OWNER-CONFIRMED 8/24 (not a guess)
+    account_refresh_s: 60     # BP re-read cadence (shared account moves intraday; never per-tick)
+    account_stale_s: 180      # no successful account read for this long => budget 0 + WARNING
     stage_start_min: 575      # 9:35 ET — never stage earlier
     cancel_all_min: 780       # 13:00 ET sweep
     gap_through_cancel_min: 60  # P1-5 FROZEN (harness-validated inert)

@@ -88,11 +88,18 @@ class TestConfigFlags:
                          stop_monitor=sm, config=cfg)
 
     def test_real_orb_yaml_flags_default_off(self, monkeypatch):
-        """The LIVE orb.yaml has no winner-stack keys — flags must be OFF
-        (Monday rollout flips them, not this build)."""
+        """Absent winner-stack keys => flags OFF (fail-safe default).
+
+        Originally asserted the LIVE orb.yaml carried no winner-stack
+        keys; the 8/24 rollout flipped them ON in the instance config
+        (owner-ordered, commit 89d3497), so the default is now proven
+        by stripping the keys from the real yaml — the engine must
+        fail-safe OFF when a node's config predates the feature."""
         monkeypatch.delenv('ORB_ATR_FLOOR', raising=False)
         monkeypatch.delenv('ORB_SCALE_OUT', raising=False)
         cfg = yaml.safe_load(open(Path(__file__).parent.parent / 'orb.yaml'))
+        (cfg.get('exit') or {}).pop('atr_stop_floor', None)
+        (cfg.get('exit') or {}).pop('scale_out', None)
         eng = self._engine(cfg)
         assert eng.atr_floor_enabled is False
         assert eng.scale_out_enabled is False

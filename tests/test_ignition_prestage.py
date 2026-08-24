@@ -91,6 +91,8 @@ def _cfg(tmp_path, **over):
          'promote_distance_pct': 20.0, 'demote_distance_pct': 25.0,
          'promote_consecutive': 1, 'ops_per_min': 100,
          'bp_frac': 0.25, 'bp_abs_usd': 30000.0,
+         'divergence_reserve_usd': 150000.0,
+         'account_refresh_s': 60.0, 'account_stale_s': 180.0,
          'stage_start_min': 575, 'cancel_all_min': 780,
          'gap_through_cancel_min': 60, 'watchdog_stale_s': 60.0,
          'max_staged_fills': 10, 'pdt_equity_min': 25000.0,
@@ -128,6 +130,14 @@ def _feed_and_tick(m, recs, when, ticks=1):
         m.on_candidate(r)
     for _ in range(ticks):
         m.process_tick(now_et=when)
+
+
+def _events(tmp_path, day=DAY):
+    """Read the day's prestage event journal."""
+    path = Path(tmp_path) / f'prestage_events_{day}.jsonl'
+    if not path.exists():
+        return []
+    return [json.loads(l) for l in path.read_text().splitlines()]
 
 
 def _fill_status(sym, qty=68, price=11.05, status='filled',
@@ -402,9 +412,11 @@ class TestBudgets:
         assert staged | pruned == {r['symbol'] for r in rows}
 
     def test_pdt_guard_halves_staging_depth(self, tmp_path, monkeypatch):
-        """§C11: equity < $25K halves the staging depth."""
+        """§C11: equity < $25K halves the staging depth (reserve zeroed
+        here so the BP guard doesn't mask the PDT rail)."""
         m, a, *_ = _mgr(tmp_path, monkeypatch, heap_k=4,
-                        promote_rank_slack=0)
+                        promote_rank_slack=0,
+                        divergence_reserve_usd=0.0)
         a.get_account_info.return_value = {
             'equity': 20000.0, 'buying_power': 80000.0}
         recs = [_cand(sym=f'SYM{i}', price=10.5 + i * 0.01)
@@ -413,15 +425,340 @@ class TestBudgets:
         # effective K = 2 => at most 2 staged
         assert a.submit_stop_limit_order.call_count <= 2
 
-    def test_account_fetch_failure_falls_back_to_abs_cap(self, tmp_path,
-                                                         monkeypatch,
-                                                         caplog):
+    def test_account_fetch_failure_stale_stages_nothing(self, tmp_path,
+                                                        monkeypatch,
+                                                        caplog):
+        """2026-08-24 divergence guard: with NO successful account read
+        the BP picture is unknowable on a shared account => stage
+        NOTHING (chase-only) + loud WARNING. Replaces the pre-guard
+        'fall back to abs cap' behavior — an abs cap without knowing
+        available BP could double-spend the divergence agent's BP."""
         m, a, *_ = _mgr(tmp_path, monkeypatch)
         a.get_account_info.side_effect = RuntimeError('api dead')
         with caplog.at_level('WARNING'):
             _feed_and_tick(m, [_cand()], _et(DAY, 9, 40))
         assert 'account fetch failed' in caplog.text
-        a.submit_stop_limit_order.assert_called_once()   # abs cap holds
+        assert 'account read STALE' in caplog.text
+        a.submit_stop_limit_order.assert_not_called()
+        assert m._parity_explicit['PSTG'] == 'stage_skip_account_stale'
+        assert m.chase_allowed('PSTG')
+
+
+# ===========================================================================
+# 2026-08-24 skip observability: every scheduler skip class emits ONCE
+# per (symbol, day) + parity reason + per-class counter (shadow-day-1
+# produced only 'candidate' events — cause unknowable)
+# ===========================================================================
+class TestSkipObservability:
+    def _skip_events(self, tmp_path, reason, day=DAY):
+        return [e for e in _events(tmp_path, day) if e['event'] == reason]
+
+    def test_news_unknown_skip_once_per_symbol_day(self, tmp_path,
+                                                   monkeypatch):
+        """has_news=None => 'stage_skip_news_unknown' exactly once
+        across many ticks, parity reason set, counter in snapshot."""
+        m, a, *_ = _mgr(tmp_path, monkeypatch)
+        _feed_and_tick(m, [_cand(news=None)], _et(DAY, 9, 40), ticks=3)
+        a.submit_stop_limit_order.assert_not_called()
+        assert len(self._skip_events(
+            tmp_path, 'stage_skip_news_unknown')) == 1
+        assert m._parity_explicit['PSTG'] == 'stage_skip_news_unknown'
+        snap = m.telemetry_snapshot()
+        assert snap['skip_counts']['stage_skip_news_unknown'] == 1
+
+    def test_no_news_skip_once_per_symbol_day(self, tmp_path,
+                                              monkeypatch):
+        """has_news=False => 'stage_skip_no_news' exactly once —
+        distinct class from news_unknown (different fixes)."""
+        m, a, *_ = _mgr(tmp_path, monkeypatch)
+        _feed_and_tick(m, [_cand(news=False)], _et(DAY, 9, 40), ticks=3)
+        a.submit_stop_limit_order.assert_not_called()
+        assert len(self._skip_events(tmp_path, 'stage_skip_no_news')) == 1
+        assert m._parity_explicit['PSTG'] == 'stage_skip_no_news'
+        assert m.telemetry_snapshot()['skip_counts'][
+            'stage_skip_no_news'] == 1
+
+    def test_news_skip_never_blocks_later_staging(self, tmp_path,
+                                                  monkeypatch):
+        """The skip event records state, it is NOT a veto: news arriving
+        on a later intake still stages the name."""
+        m, a, *_ = _mgr(tmp_path, monkeypatch)
+        _feed_and_tick(m, [_cand(news=None)], _et(DAY, 9, 40))
+        a.submit_stop_limit_order.assert_not_called()
+        _feed_and_tick(m, [_cand(news=True)], _et(DAY, 9, 41))
+        a.submit_stop_limit_order.assert_called_once()
+
+    def test_already_crossed_skip_counted_once(self, tmp_path,
+                                               monkeypatch):
+        m, a, *_ = _mgr(tmp_path, monkeypatch)
+        _feed_and_tick(m, [_cand(price=11.5)], _et(DAY, 9, 40), ticks=3)
+        assert len(self._skip_events(
+            tmp_path, 'stage_skip_already_crossed')) == 1
+        assert m.telemetry_snapshot()['skip_counts'][
+            'stage_skip_already_crossed'] == 1
+
+    def test_bp_budget_skip_counted(self, tmp_path, monkeypatch):
+        m, a, *_ = _mgr(tmp_path, monkeypatch, bp_abs_usd=2000.0)
+        _feed_and_tick(m, [_cand(sym=f'SYM{i}') for i in range(6)],
+                       _et(DAY, 9, 40), ticks=2)
+        snap = m.telemetry_snapshot()
+        assert snap['skip_counts'].get('stage_skip_bp_budget', 0) >= 1
+        pruned = [s for s, v in m._parity_explicit.items()
+                  if v == 'stage_skip_bp_budget']
+        for sym in pruned:
+            assert len([e for e in _events(tmp_path)
+                        if e['event'] == 'stage_skip_bp_budget'
+                        and e['symbol'] == sym]) == 1
+
+    def test_rate_budget_deferral_counted_not_parity(self, tmp_path,
+                                                     monkeypatch):
+        """Churn deferral is transient (retried next tick): counted in
+        skip_counts but NEVER a parity reason."""
+        m, a, *_ = _mgr(tmp_path, monkeypatch, ops_per_min=2)
+        _feed_and_tick(m, [_cand(sym=f'SYM{i}') for i in range(5)],
+                       _et(DAY, 9, 40))
+        snap = m.telemetry_snapshot()
+        assert snap['skip_counts'].get(
+            'stage_deferred_rate_budget', 0) >= 1
+        assert 'stage_deferred_rate_budget' not in \
+            m._parity_explicit.values()
+
+    def test_window_closed_backstop_labels_unstaged(self, tmp_path,
+                                                    monkeypatch):
+        """A candidate reaching 13:00 with no stage AND no recorded
+        reason gets 'stage_skip_window_closed' — every tracked name
+        ends the day with a stage record or an explicit reason."""
+        m, a, *_ = _mgr(tmp_path, monkeypatch)
+        m.on_candidate(_cand(sym='LATEC'))
+        m.process_tick(now_et=_et(DAY, 13, 5))
+        m.process_tick(now_et=_et(DAY, 13, 6))
+        assert len(self._skip_events(
+            tmp_path, 'stage_skip_window_closed')) == 1
+        assert m._parity_explicit['LATEC'] == 'stage_skip_window_closed'
+
+    def test_window_closed_not_emitted_when_reason_exists(self, tmp_path,
+                                                          monkeypatch):
+        """The backstop never shadows a more specific reason recorded
+        earlier in the day."""
+        m, a, *_ = _mgr(tmp_path, monkeypatch)
+        _feed_and_tick(m, [_cand(news=False)], _et(DAY, 9, 40))
+        m.process_tick(now_et=_et(DAY, 13, 5))
+        assert self._skip_events(tmp_path, 'stage_skip_window_closed') \
+            == []
+        assert m._parity_explicit['PSTG'] == 'stage_skip_no_news'
+
+    def test_skip_counts_dict_in_snapshot(self, tmp_path, monkeypatch):
+        m, *_ = _mgr(tmp_path, monkeypatch)
+        snap = m.telemetry_snapshot()
+        assert snap['skip_counts'] == {}
+        _feed_and_tick(m, [_cand(sym='NN1', news=None),
+                           _cand(sym='NF1', news=False),
+                           _cand(sym='XED1', news=True, price=11.5)],
+                       _et(DAY, 9, 40))
+        snap = m.telemetry_snapshot()
+        assert snap['skip_counts'] == {
+            'stage_skip_news_unknown': 1,
+            'stage_skip_no_news': 1,
+            'stage_skip_already_crossed': 1}
+
+    # --- discovery latency (ZJK class): candidate_late --------------------
+    def test_candidate_late_when_intake_at_trigger_minute(self, tmp_path,
+                                                          monkeypatch):
+        """First intake in the same ET minute as the trigger bar =>
+        'candidate_late' (the name could never have been pre-staged)."""
+        m, *_ = _mgr(tmp_path, monkeypatch)
+        m.on_candidate(_cand(sym='ZJK'))
+        disc_m = m._candidates['ZJK'].discovery_minute
+        m.notify_trigger({'symbol': 'ZJK', 'day': DAY,
+                          'trigger_m': disc_m})
+        m.notify_trigger({'symbol': 'ZJK', 'day': DAY,
+                          'trigger_m': disc_m})   # dedup: once per day
+        evts = self._skip_events(tmp_path, 'candidate_late')
+        assert len(evts) == 1
+        assert evts[0]['late_min'] == 0
+        assert evts[0]['src'] == 'trigger_bar'
+        assert m.telemetry_snapshot()['skip_counts'][
+            'candidate_late'] == 1
+
+    def test_candidate_not_late_when_discovered_before_trigger(
+            self, tmp_path, monkeypatch):
+        m, *_ = _mgr(tmp_path, monkeypatch)
+        m.on_candidate(_cand(sym='ERLY'))
+        disc_m = m._candidates['ERLY'].discovery_minute
+        m.notify_trigger({'symbol': 'ERLY', 'day': DAY,
+                          'trigger_m': disc_m + 5})
+        assert self._skip_events(tmp_path, 'candidate_late') == []
+        assert 'candidate_late' not in \
+            m.telemetry_snapshot()['skip_counts']
+
+    def test_candidate_late_on_trigger_without_any_intake(self, tmp_path,
+                                                          monkeypatch):
+        """Trigger for a name candidate intake NEVER saw — maximally
+        late (or the intake hook is broken)."""
+        m, *_ = _mgr(tmp_path, monkeypatch)
+        m.notify_trigger({'symbol': 'GHOST', 'day': DAY,
+                          'trigger_m': 580})
+        evts = self._skip_events(tmp_path, 'candidate_late')
+        assert len(evts) == 1
+        assert evts[0]['detail'] == 'no_candidate_at_trigger'
+
+    def test_candidate_late_falls_back_to_notify_arrival_minute(
+            self, tmp_path, monkeypatch):
+        """No trigger_m on the rec => the notify-arrival minute is the
+        (upper-bound) trigger minute, tagged src=notify_arrival."""
+        m, *_ = _mgr(tmp_path, monkeypatch)
+        monkeypatch.setattr(PrestageManager, '_now_et',
+                            staticmethod(lambda: _et(DAY, 9, 50)))
+        m.on_candidate(_cand(sym='NOTM'))
+        m.notify_trigger({'symbol': 'NOTM', 'day': DAY})
+        evts = self._skip_events(tmp_path, 'candidate_late')
+        assert len(evts) == 1                 # same wall-clock minute
+        assert evts[0]['src'] == 'notify_arrival'
+
+    def test_candidate_event_carries_discovery_fields(self, tmp_path,
+                                                      monkeypatch):
+        """EOD joins discovery_ts (seconds) vs shadow trigger times —
+        the sub-minute half of the latency question."""
+        m, *_ = _mgr(tmp_path, monkeypatch)
+        m.on_candidate(_cand())
+        cand_evts = [e for e in _events(tmp_path)
+                     if e['event'] == 'candidate']
+        assert len(cand_evts) == 1
+        assert cand_evts[0]['discovery_ts'] > 0
+        assert cand_evts[0]['discovery_minute'] == \
+            m._candidates['PSTG'].discovery_minute
+
+
+# ===========================================================================
+# 2026-08-24 divergence-reserve BP guard: stage_budget =
+# min(bp_abs_usd, max(0, available_BP − divergence_reserve_usd))
+# ===========================================================================
+class TestDivergenceReserve:
+    def test_budget_formula_plenty_bp(self, tmp_path, monkeypatch):
+        """BP 292K − reserve 150K = 142K headroom, capped at abs 30K."""
+        m, a, *_ = _mgr(tmp_path, monkeypatch)
+        _feed_and_tick(m, [_cand()], _et(DAY, 9, 40))
+        a.submit_stop_limit_order.assert_called_once()
+        snap = m.telemetry_snapshot()
+        assert snap['bp_budget_usd'] == 30000.0
+        assert snap['bp_available_usd'] == 292000.0
+        assert snap['divergence_reserve_usd'] == 150000.0
+        assert snap['bp_below_reserve'] is False
+        assert snap['account_stale'] is False
+
+    def test_budget_formula_headroom_below_abs_cap(self, tmp_path,
+                                                   monkeypatch):
+        m, a, *_ = _mgr(tmp_path, monkeypatch, bp_abs_usd=200000.0)
+        _feed_and_tick(m, [_cand()], _et(DAY, 9, 40))
+        assert m.telemetry_snapshot()['bp_budget_usd'] == 142000.0
+
+    def test_exactly_at_reserve_stages_nothing(self, tmp_path,
+                                               monkeypatch, caplog):
+        """BP == reserve => headroom 0 => stage nothing, chase-only."""
+        m, a, *_ = _mgr(tmp_path, monkeypatch)
+        a.get_account_info.return_value = {'equity': 73000.0,
+                                           'buying_power': 150000.0}
+        with caplog.at_level('WARNING'):
+            _feed_and_tick(m, [_cand()], _et(DAY, 9, 40))
+        a.submit_stop_limit_order.assert_not_called()
+        assert 'divergence' in caplog.text
+        assert m._parity_explicit['PSTG'] == 'stage_skip_bp_reserve'
+        assert m.chase_allowed('PSTG')
+        snap = m.telemetry_snapshot()
+        assert snap['bp_budget_usd'] == 0.0
+        assert snap['bp_below_reserve'] is True
+        assert snap['bp_below_reserve_transitions'] == 1
+
+    def test_below_reserve_warning_once_per_transition(self, tmp_path,
+                                                       monkeypatch,
+                                                       caplog):
+        """The WARNING + telemetry flag fire on the TRANSITION, never
+        per tick."""
+        m, a, *_ = _mgr(tmp_path, monkeypatch)
+        a.get_account_info.return_value = {'equity': 73000.0,
+                                           'buying_power': 100000.0}
+        with caplog.at_level('WARNING'):
+            _feed_and_tick(m, [_cand()], _et(DAY, 9, 40), ticks=4)
+        warns = [r for r in caplog.records
+                 if 'divergence' in r.getMessage()
+                 and 'staging halted' in r.getMessage()]
+        assert len(warns) == 1
+        assert m.telemetry_snapshot()[
+            'bp_below_reserve_transitions'] == 1
+
+    def test_reserve_recovery_resumes_staging(self, tmp_path,
+                                              monkeypatch):
+        m, a, *_ = _mgr(tmp_path, monkeypatch)
+        a.get_account_info.return_value = {'equity': 73000.0,
+                                           'buying_power': 100000.0}
+        _feed_and_tick(m, [_cand()], _et(DAY, 9, 40))
+        a.submit_stop_limit_order.assert_not_called()
+        # BP frees up (divergence agent flattened); force the next
+        # refresh window open instead of sleeping 60s
+        a.get_account_info.return_value = {'equity': 73000.0,
+                                           'buying_power': 292000.0}
+        m._account_attempt_ts -= 61.0
+        _feed_and_tick(m, [_cand(sym='SECON')], _et(DAY, 9, 45))
+        # the reserve skip was never a day-veto: PSTG stages too
+        staged = {c.kwargs['symbol'] for c in
+                  a.submit_stop_limit_order.call_args_list}
+        assert staged == {'PSTG', 'SECON'}
+        assert m.telemetry_snapshot()['bp_below_reserve'] is False
+
+    def test_stale_account_read_stages_nothing_warns_once(
+            self, tmp_path, monkeypatch, caplog):
+        """No successful account read => budget 0 + ONE 'account read
+        STALE' WARNING per transition + telemetry flag."""
+        m, a, *_ = _mgr(tmp_path, monkeypatch)
+        a.get_account_info.side_effect = RuntimeError('api dead')
+        with caplog.at_level('WARNING'):
+            _feed_and_tick(m, [_cand()], _et(DAY, 9, 40), ticks=4)
+        a.submit_stop_limit_order.assert_not_called()
+        stale_warns = [r for r in caplog.records
+                       if 'account read STALE' in r.getMessage()]
+        assert len(stale_warns) == 1
+        snap = m.telemetry_snapshot()
+        assert snap['account_stale'] is True
+        assert snap['account_stale_events'] == 1
+        assert snap['bp_budget_usd'] == 0.0
+
+    def test_stale_recovery_restores_budget(self, tmp_path, monkeypatch,
+                                            caplog):
+        m, a, *_ = _mgr(tmp_path, monkeypatch)
+        a.get_account_info.side_effect = RuntimeError('api dead')
+        _feed_and_tick(m, [_cand()], _et(DAY, 9, 40))
+        assert m._account_stale_mode
+        a.get_account_info.side_effect = None
+        m._account_attempt_ts -= 61.0
+        with caplog.at_level('WARNING'):
+            _feed_and_tick(m, [_cand(sym='RCVR1')], _et(DAY, 9, 45))
+        assert 'account read recovered' in caplog.text
+        # the stale skip was never a day-veto: PSTG stages too
+        staged = {c.kwargs['symbol'] for c in
+                  a.submit_stop_limit_order.call_args_list}
+        assert staged == {'PSTG', 'RCVR1'}
+        assert m.telemetry_snapshot()['account_stale'] is False
+
+    def test_account_refresh_cadence_never_per_tick(self, tmp_path,
+                                                    monkeypatch):
+        """One account fetch per refresh window regardless of tick
+        count — the shared account is polled, never hammered."""
+        m, a, *_ = _mgr(tmp_path, monkeypatch)
+        _feed_and_tick(m, [_cand(sym=f'SYM{i}') for i in range(5)],
+                       _et(DAY, 9, 40), ticks=5)
+        assert a.get_account_info.call_count == 1
+        m._account_attempt_ts -= 61.0        # window elapses
+        m.process_tick(now_et=_et(DAY, 9, 46))
+        assert a.get_account_info.call_count == 2
+
+    def test_bp_frac_is_inert(self, tmp_path, monkeypatch):
+        """DEPRECATED leg: a bp_frac that would have zeroed the old
+        %xDTBP budget changes NOTHING (owner: a percentage of
+        co-mingled DTBP is meaningless)."""
+        m, a, *_ = _mgr(tmp_path, monkeypatch, bp_frac=0.000001)
+        _feed_and_tick(m, [_cand()], _et(DAY, 9, 40))
+        a.submit_stop_limit_order.assert_called_once()
+        assert m.telemetry_snapshot()['bp_budget_usd'] == 30000.0
 
 
 # ===========================================================================
@@ -1437,3 +1774,39 @@ class TestExitReasonCatalog:
         assert er.is_attributed('stage_reject_structure')
         assert er.is_known('stage_force_flat')
         assert er.is_attributed('stage_force_flat')
+
+
+# ===========================================================================
+# config plumbing: divergence-reserve keys (2026-08-24)
+# ===========================================================================
+class TestPrestageConfigPlumbing:
+    def _cfg_obj(self, tmp_path, yaml_body=''):
+        from config import Config
+        env = tmp_path / '.env'
+        env.write_text(
+            'ALPACA_API_KEY=test-key\n'
+            'ALPACA_API_SECRET=test-secret\n'
+            'ALPACA_BASE_URL=https://paper-api.alpaca.markets/v2\n')
+        yp = tmp_path / 'config.yaml'
+        yp.write_text(yaml_body)
+        return Config(env_path=str(env), yaml_path=str(yp))
+
+    def test_prestage_defaults(self, tmp_path):
+        pre = self._cfg_obj(tmp_path).ignition_live_cfg['prestage']
+        assert pre['divergence_reserve_usd'] == 150000.0
+        assert pre['bp_abs_usd'] == 30000.0
+        assert pre['account_refresh_s'] == 60.0
+        assert pre['account_stale_s'] == 180.0
+        assert pre['bp_frac'] == 0.25    # DEPRECATED: read, inert
+
+    def test_prestage_yaml_overrides(self, tmp_path):
+        body = ('ignition_live:\n'
+                '  prestage:\n'
+                '    divergence_reserve_usd: 150000\n'
+                '    bp_abs_usd: 15000\n'
+                '    account_refresh_s: 30\n')
+        pre = self._cfg_obj(tmp_path, body).ignition_live_cfg['prestage']
+        assert pre['divergence_reserve_usd'] == 150000.0
+        assert pre['bp_abs_usd'] == 15000.0
+        assert pre['account_refresh_s'] == 30.0
+        assert pre['account_stale_s'] == 180.0   # untouched default
