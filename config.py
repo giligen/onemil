@@ -757,6 +757,12 @@ class Config:
                     pre.get("account_refresh_s", 60.0)),
                 "account_stale_s": float(
                     pre.get("account_stale_s", 180.0)),
+                # Approach-band intake lower edge (2026-08-26,
+                # shadow-day-2 fix): scanner feeds the shadow from this
+                # intraday-change %, so pre-cross candidates exist to
+                # stage. None/absent would disable; default 6.0.
+                "approach_min_pct": float(
+                    pre.get("approach_min_pct", 6.0)),
                 "stage_start_min": int(pre.get("stage_start_min", 575)),
                 "cancel_all_min": int(pre.get("cancel_all_min", 780)),
                 "gap_through_cancel_min": int(

@@ -474,6 +474,7 @@ ignition_live:
     cap_bps: 300              # limit = level*(1+cap) — RESTING_MODEL ship pick
     stop_offset_bps: 15       # frozen 8/22 (SIBLING_OFFSET.md P1-8 sweep: 30 was mid-downslope; 0 fails leg-2; never above 30)
     heap_k: 400               # take-all depth (K-study: small-K refuted)
+    approach_min_pct: 6.0     # 2026-08-26: scanner feeds shadow from +6% intraday so pre-cross candidates exist to stage (shadow-day-2: discovery was AT the trigger bar — 0 staged in 2 days)
     promote_rank_slack: 2
     demote_rank_slack: 3
     promote_distance_pct: 20.0   # D_in

@@ -91,6 +91,15 @@ class IgnitionShadow:
         # cap is a runaway backstop, not a budget.
         # (history: 25 starved on 7/20, 60 on 7/30)
         self.max_evals_per_day = int(cfg.get('max_evals_per_day', 150))
+        # Approach-band intake (2026-08-26, shadow-day-2 finding: every
+        # trigger's candidate was discovered AT/AFTER its cross —
+        # nothing was ever stageable). None = OFF (byte-identical
+        # trigger-only gate). Set by main.py wiring ONLY when a prestage
+        # consumer exists; the pre-cross sighting has no other use.
+        self.approach_min_pct: Optional[float] = None
+        self.max_approach_evals = int(
+            cfg.get('max_approach_evals_per_day', 150))
+        self._approach_evals_today = 0
         self._evals_today = 0
         # no-catalyst skips wait for late complex confirmation
         self._await_confirm: Dict[str, dict] = {}
@@ -124,6 +133,7 @@ class IgnitionShadow:
             self._day_anchor_counts = {}
             self._news_cache = {}
             self._evals_today = 0
+            self._approach_evals_today = 0
             self._await_confirm = {}
             self._await_level = {}
 
@@ -154,6 +164,15 @@ class IgnitionShadow:
         return a
 
     # ------------------------------------------------------------------
+    @property
+    def feed_min_pct(self) -> Optional[float]:
+        """Scanner feed threshold: the approach band's lower edge when
+        prestage intake is wired, else None (scanner then feeds only
+        its own >=10% movers — the pre-2026-08-26 behavior)."""
+        if self.approach_min_pct is None or self.on_candidate is None:
+            return None
+        return min(float(self.approach_min_pct), self.trigger_pct)
+
     def on_mover(self, symbol: str, *, intraday_change_pct: float,
                  gap_pct: float, price: float,
                  has_news: Optional[bool],
@@ -214,8 +233,14 @@ class IgnitionShadow:
         day = et.strftime('%Y-%m-%d')
         self._roll_day(day)
         minute = et.hour * 60 + et.minute
-        if chg < self.trigger_pct or minute > self.max_trigger_min \
-                or minute < 575:
+        if minute > self.max_trigger_min or minute < 575:
+            return
+        approach = chg < self.trigger_pct
+        if approach and (self.approach_min_pct is None
+                         or chg < self.approach_min_pct
+                         or self.on_candidate is None):
+            # no prestage consumer (or below the approach band) —
+            # original trigger-only gate, byte-identical
             return
         # rough pre-floor on sighting price (cheap junk cut; the BT-
         # parity floor on DAY OPEN runs in _finalize via ignition_rules)
@@ -277,10 +302,19 @@ class IgnitionShadow:
         # NOTE: no gap gate here — the scanner's gap_pct is current-vs-
         # prev-close (>=10 for every mover by construction). The TRUE
         # open-gap gate runs in _finalize from the day's own bars.
-        if self._evals_today >= self.max_evals_per_day:
+        if approach:
+            # separate budget: the approach band must never starve the
+            # trigger evals (the 7/21 ONDL/ONDG + 7/23 NBIG lesson)
+            rec['approach_intake'] = True
+            if self._approach_evals_today >= self.max_approach_evals:
+                rec['verdict'] = 'skip_approach_eval_cap'
+                return self._journal(rec)
+            self._approach_evals_today += 1
+        elif self._evals_today >= self.max_evals_per_day:
             rec['verdict'] = 'skip_eval_cap'
             return self._journal(rec)
-        self._evals_today += 1
+        else:
+            self._evals_today += 1
         # GATE ORDER (2026-07-24 parity refactor): STRUCTURE first
         # (bars — floor on day open, open gap, level-crossed, R, chase,
         # participation), news/catalyst LAST inside _finalize. Pre-24
@@ -441,6 +475,23 @@ class IgnitionShadow:
                         # (spam control lives in _eval: re-finalize only
                         # fires when sighting price >= level)
                         self._await_level[symbol] = rec
+                        # PRE-CROSS candidate: resolve news and re-fire
+                        # intake — staging is news-gated and the first
+                        # on_candidate ran before catalyst resolution
+                        # (shadow-day-2: 23/25 candidates died
+                        # news_unknown). Cached + 8s-bounded; runs AFTER
+                        # structure gates so the 7/24 budget-order
+                        # lesson holds.
+                        if self.on_candidate is not None:
+                            try:
+                                rec['has_news'] = self._resolve_news(
+                                    symbol, rec)
+                                self.on_candidate(rec)
+                            except Exception as e:
+                                logger.error(
+                                    f"ignition-shadow: parked-candidate"
+                                    f" news refire failed {symbol}: "
+                                    f"{e}")
                 if gates_ok:
                     # TRIGGER-BAR mechanics via the shared rules (2026-
                     # 08-14): chase/stop/R keyed to the ACTUAL trigger

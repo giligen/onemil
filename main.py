@@ -781,9 +781,16 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
             scanner.ignition_shadow.on_price = ignition_prestage.on_price
             scanner.ignition_shadow.on_candidate = \
                 ignition_prestage.on_candidate
+            # approach-band intake (2026-08-26): only meaningful with a
+            # prestage consumer — wire the threshold AFTER the hooks so
+            # feed_min_pct activates atomically with them
+            scanner.ignition_shadow.approach_min_pct = \
+                config.ignition_live_cfg['prestage']['approach_min_pct']
             logger.info("Ignition: shadow->prestage intake hooks wired "
                         f"(enabled={ignition_prestage.enabled}, "
-                        f"shadow={ignition_prestage.shadow})")
+                        f"shadow={ignition_prestage.shadow}, "
+                        f"approach_min="
+                        f"{scanner.ignition_shadow.approach_min_pct}%)")
 
     # Enable async news classification (non-blocking LLM calls)
     scanner.enable_async_news()

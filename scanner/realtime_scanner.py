@@ -1145,8 +1145,19 @@ class RealtimeScanner:
 
             if relative_volume >= self.criteria.relative_volume_min:
                 vol_5x_count += 1
-            if intraday_change_pct >= self.criteria.intraday_change_pct_min:
+            _is_mover = (intraday_change_pct
+                         >= self.criteria.intraday_change_pct_min)
+            if _is_mover:
                 move_10pct_count += 1
+            # Approach-band feed (2026-08-26): when prestage intake is
+            # wired the shadow exposes feed_min_pct below the mover bar
+            # so pre-cross candidates exist to stage (shadow-day-2:
+            # discovery AT the trigger bar = nothing stageable). The
+            # shadow's own approach gate + budget owns the routing.
+            _feed_min = (self.ignition_shadow.feed_min_pct
+                         if self.ignition_shadow is not None else None)
+            if _is_mover or (_feed_min is not None
+                             and intraday_change_pct >= _feed_min):
                 # Ignition shadow sighting (journal-only; double-guarded —
                 # on_mover never raises, and this wrapper catches anyway).
                 # Latency anchor is the LATEST TRADE ts (real-time price
