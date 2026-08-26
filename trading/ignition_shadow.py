@@ -98,7 +98,10 @@ class IgnitionShadow:
         # consumer exists; the pre-cross sighting has no other use.
         self.approach_min_pct: Optional[float] = None
         self.max_approach_evals = int(
-            cfg.get('max_approach_evals_per_day', 150))
+            cfg.get('max_approach_evals_per_day', 400))
+        # 400 (day-3 recalibration): 330 distinct approach first-sights
+        # observed vs the 150 estimate — the cap exhausted by mid-
+        # morning and 173 sightings went unevaluated
         self._approach_evals_today = 0
         self._evals_today = 0
         # no-catalyst skips wait for late complex confirmation
@@ -241,6 +244,13 @@ class IgnitionShadow:
                          or self.on_candidate is None):
             # no prestage consumer (or below the approach band) —
             # original trigger-only gate, byte-identical
+            return
+        if approach and minute < 577:
+            # <6 RTH bars exist before ~9:36 — the whole 9:35 flood
+            # would burn the approach budget on no_bars (day-3 finding:
+            # 92/150 slots gone in the first minutes, cap starved
+            # late-morning candidates). Return WITHOUT marking seen;
+            # the next sighting evaluates with bars available.
             return
         # rough pre-floor on sighting price (cheap junk cut; the BT-
         # parity floor on DAY OPEN runs in _finalize via ignition_rules)

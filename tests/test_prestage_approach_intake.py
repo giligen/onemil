@@ -96,6 +96,28 @@ class TestApproachGate:
         assert _recs(tmp_path) == []
         s.on_candidate.assert_not_called()
 
+    def test_open_flood_deferred_not_consumed(self, tmp_path):
+        """Day-3 recalibration: approach sightings before 9:37 (<6 RTH
+        bars -> guaranteed no_bars) are deferred WITHOUT marking seen or
+        consuming budget; the re-sighting at 9:37+ evaluates normally."""
+        s, a = _shadow(tmp_path)
+        s.approach_min_pct = 6.0
+        s.on_candidate = MagicMock()
+        a.get_1min_bars.return_value = _flat_bars()
+        _fire(s, chg=7.0, minute=(9, 35))
+        assert _recs(tmp_path) == []
+        assert 'IGNI' not in s._seen_today
+        assert s._approach_evals_today == 0
+        a.get_1min_bars.assert_not_called()
+        _fire(s, chg=7.0, minute=(9, 40))      # re-sighting, bars exist
+        r = _recs(tmp_path)
+        assert r[-1]['verdict'] == 'skip_level_not_crossed'
+        assert s._approach_evals_today == 1
+
+    def test_default_approach_budget_is_400(self, tmp_path):
+        s, _ = _shadow(tmp_path)
+        assert s.max_approach_evals == 400
+
     def test_feed_min_pct_property(self, tmp_path):
         s, _ = _shadow(tmp_path)
         assert s.feed_min_pct is None            # no threshold
