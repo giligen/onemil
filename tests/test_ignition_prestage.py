@@ -1810,3 +1810,80 @@ class TestPrestageConfigPlumbing:
         assert pre['bp_abs_usd'] == 15000.0
         assert pre['account_refresh_s'] == 30.0
         assert pre['account_stale_s'] == 180.0   # untouched default
+
+
+# ===========================================================================
+class TestStagedFillExitChain:
+    """2026-08-28 (owner: 'who puts the sell orders?'): the 15:45 flat
+    and the exit-event DB write were UNWIRED for staged fills — a fill
+    that never hit stop/lock held OVERNIGHT, and any exit drained by the
+    engine was dropped as an orphan (row open, pnl invisible to kills)."""
+
+    def _filled(self, tmp_path, monkeypatch, **over):
+        m, a, db, sm, osw = _mgr(tmp_path, monkeypatch, **over)
+        _feed_and_tick(m, [_cand()], _et(DAY, 9, 40))
+        osw.snapshot_by_client_prefix.return_value = _fill_status('PSTG')
+        m.process_tick(now_et=_et(DAY, 9, 42))
+        assert m._stages['PSTG']['state'] == STATE_FILLED
+        return m, a, db, sm, osw
+
+    def test_eod_flat_fires_at_1545(self, tmp_path, monkeypatch):
+        m, a, db, sm, osw = self._filled(tmp_path, monkeypatch)
+        sm.force_exit.reset_mock()
+        m.process_tick(now_et=_et(DAY, 15, 44))
+        sm.force_exit.assert_not_called()          # not before 15:45
+        m.process_tick(now_et=_et(DAY, 15, 45))
+        sm.force_exit.assert_called_once_with(
+            'PSTG', reason='stage_force_flat')
+        m.process_tick(now_et=_et(DAY, 15, 46))    # idempotent
+        assert sm.force_exit.call_count == 1
+
+    def test_eod_flat_retries_on_submit_failure(self, tmp_path,
+                                                monkeypatch):
+        m, a, db, sm, osw = self._filled(tmp_path, monkeypatch)
+        sm.force_exit.reset_mock()
+        sm.force_exit.side_effect = RuntimeError('api down')
+        m.process_tick(now_et=_et(DAY, 15, 45))
+        sm.force_exit.side_effect = None
+        sm.force_exit.return_value = True
+        m.process_tick(now_et=_et(DAY, 15, 46))    # retry succeeds
+        assert sm.force_exit.call_count == 2
+
+    def test_exit_event_adopted_writes_pnl(self, tmp_path, monkeypatch):
+        from trading.stop_monitor import StopExitEvent
+        m, a, db, sm, osw = self._filled(tmp_path, monkeypatch)
+        trade_id = m._stages['PSTG'].get('trade_db_id')
+        assert trade_id is not None
+        db.update_trade.reset_mock()
+        ev = StopExitEvent(symbol='PSTG', stop_price=10.9,
+                           exit_price=11.55, shares=68,
+                           order_id='x1', exit_reason='stage_force_flat',
+                           trade_db_id=trade_id, filled_qty=68)
+        assert m.handle_exit_event(ev) is True
+        upd = db.update_trade.call_args.args[1]
+        # fill was 11.05 x 68sh -> exit 11.55 = +$34
+        assert upd['pnl'] == pytest.approx((11.55 - 11.05) * 68)
+        assert upd['exit_reason'] == 'stage_force_flat'
+        # second delivery is a no-op (already exited)
+        assert m.handle_exit_event(ev) is False
+
+    def test_exit_event_unknown_symbol_not_adopted(self, tmp_path,
+                                                   monkeypatch):
+        from trading.stop_monitor import StopExitEvent
+        m, a, db, sm, osw = _mgr(tmp_path, monkeypatch)
+        ev = StopExitEvent(symbol='NOPE', stop_price=1, exit_price=1,
+                           shares=1, order_id='x', exit_reason='stop_loss')
+        assert m.handle_exit_event(ev) is False
+
+    def test_eod_flat_skips_already_exited(self, tmp_path, monkeypatch):
+        from trading.stop_monitor import StopExitEvent
+        m, a, db, sm, osw = self._filled(tmp_path, monkeypatch)
+        ev = StopExitEvent(symbol='PSTG', stop_price=10.9,
+                           exit_price=10.9, shares=68, order_id='x',
+                           exit_reason='stop_loss',
+                           trade_db_id=m._stages['PSTG']['trade_db_id'],
+                           filled_qty=68)
+        m.handle_exit_event(ev)                    # stop fired earlier
+        sm.force_exit.reset_mock()
+        m.process_tick(now_et=_et(DAY, 15, 45))
+        sm.force_exit.assert_not_called()

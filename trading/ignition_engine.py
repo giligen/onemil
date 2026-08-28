@@ -537,6 +537,16 @@ class IgnitionEngine:
     def _handle_exit_event(self, ev) -> None:
         pos = self.open_positions.pop(ev.symbol, None)
         if pos is None:
+            # staged fills live in the PRESTAGE book, not ours — without
+            # this delegation their exits were dropped as orphans and the
+            # DB row stayed open, pnl invisible to the kills (2026-08-28)
+            if self.prestage is not None:
+                try:
+                    if self.prestage.handle_exit_event(ev):
+                        return
+                except Exception as e:
+                    logger.error(f"[IGNITION] prestage exit delegation "
+                                 f"failed for {ev.symbol}: {e}")
             logger.warning(f"[IGNITION] exit event for {ev.symbol} but "
                            f"no tracked position — orphan?")
             return

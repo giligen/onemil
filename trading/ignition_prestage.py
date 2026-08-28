@@ -82,6 +82,7 @@ import logging
 
 from trading import ignition_rules as _rules
 from trading.exit_reasons import ExitReason
+from trading.stop_monitor import build_exit_update
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,8 @@ STATE_STAGED = 'STAGED'
 STATE_CANCEL_PENDING = 'CANCEL_PENDING'
 STATE_CANCEL_CONFIRMED = 'CANCEL_CONFIRMED'
 STATE_FILLED = 'FILLED'
+# 15:45 ET — staged-fill force-flat minute (matches the engine's EOD flat)
+EOD_FLAT_MIN = 945
 STATE_REJECTED = 'REJECTED'
 
 # Legal transitions. Absence of a record == never staged == chase-eligible.
@@ -691,6 +694,7 @@ class PrestageManager:
                 self._roll_day(day)
             self._watchdog_check()
             self._consume_fills()
+            self._eod_flat_pass(minute)
             if minute >= self.cancel_all_min:
                 if not self._midday_swept:
                     self._midday_swept = True
@@ -709,6 +713,83 @@ class PrestageManager:
         except Exception as e:
             logger.error(f"[PRESTAGE] process_tick failed: {e}",
                          exc_info=True)
+
+    def _eod_flat_pass(self, minute: int) -> None:
+        """15:45 ET force-flat for staged FILLS (2026-08-28, found by the
+        owner asking 'who puts the sell orders?'): the engine's EOD flat
+        only covers ITS book — staged fills live HERE. Without this, a
+        staged fill that never hit stop/lock HELD OVERNIGHT. Routes
+        through stop_monitor.force_exit with STAGE_FORCE_FLAT (the rail
+        existed in the whitelist; the caller did not). Idempotent per
+        position; a submit failure retries next tick."""
+        if minute < EOD_FLAT_MIN or self.stop_monitor is None:
+            return
+        with self._lock:
+            syms = [s for s, r in self._stages.items()
+                    if r['state'] == STATE_FILLED
+                    and not r.get('exited')
+                    and not r.get('eod_flat_fired')]
+        for s in syms:
+            try:
+                ok = self.stop_monitor.force_exit(
+                    s, reason=ExitReason.STAGE_FORCE_FLAT.value)
+            except Exception as e:
+                logger.error(f"[PRESTAGE] {s} EOD flat force_exit "
+                             f"failed: {e} — retrying next tick")
+                continue
+            with self._lock:
+                rec = self._stages.get(s)
+                if rec is not None:
+                    # ok False = an exit is already in progress for the
+                    # symbol (stop/lock racing us) — that exit completes
+                    # and drains normally; either way we are done here
+                    rec['eod_flat_fired'] = True
+            self._event(s, 'stage_eod_flat', submitted=bool(ok))
+            logger.info(f"[PRESTAGE] EOD flat {s}: force_exit "
+                        f"submitted={ok}")
+
+    def handle_exit_event(self, ev) -> bool:
+        """Adopt a StopExitEvent for a prestage-owned staged fill.
+
+        Called by the engine's drain when the symbol is not in ITS book
+        (2026-08-28: staged exits were dropped as engine 'orphans' — the
+        broker sold, but the DB row stayed open and the pnl was invisible
+        to the realized-P&L kills; the DFNS 8/21 class, structurally).
+        Returns True when the event belonged to us and was recorded."""
+        with self._lock:
+            rec = self._stages.get(ev.symbol)
+            if rec is None or rec['state'] != STATE_FILLED \
+                    or rec.get('exited'):
+                return False
+            rec['exited'] = True
+            fill_price = float(rec.get('fill_price') or 0.0)
+            qty = int(rec.get('filled_qty') or rec.get('qty') or 0)
+            trade_id = rec.get('trade_db_id')
+        exit_price = float(ev.exit_price)
+        pnl = (exit_price - fill_price) * qty if fill_price > 0 else None
+        upd = build_exit_update(ev)
+        if getattr(ev, 'confirmed', True) and pnl is not None:
+            upd['pnl'] = pnl
+            upd['pnl_pct'] = ((exit_price - fill_price) / fill_price
+                              * 100.0)
+        if self.db is not None and trade_id is not None:
+            try:
+                self.db.update_trade(trade_id, upd)
+            except Exception as e:
+                logger.error(f"[PRESTAGE] {ev.symbol} staged-exit DB "
+                             f"update failed: {e} — row needs manual "
+                             f"reconcile (trade_id={trade_id})")
+        elif trade_id is None:
+            logger.error(f"[PRESTAGE] {ev.symbol} staged exit has no "
+                         f"trade_db_id — DB row not updated, reconcile "
+                         f"manually")
+        pnl_txt = 'n/a' if pnl is None else f"${pnl:+.0f}"
+        logger.info(f"[IGNITION] STAGED EXIT {ev.symbol} @ "
+                    f"{exit_price:.3f} reason={ev.exit_reason} "
+                    f"PnL {pnl_txt}")
+        self._notify(f"[PRESTAGE] STAGED EXIT {ev.symbol} @ "
+                     f"{exit_price:.3f} ({ev.exit_reason}) PnL {pnl_txt}")
+        return True
 
     def _window_close_skips(self) -> None:
         """Skip observability backstop (2026-08-24): any candidate that

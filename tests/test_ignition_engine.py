@@ -562,3 +562,40 @@ class TestOrphanReconcilerWiring:
         assert 'BFPOS' in captured['tracked_symbols']
         assert captured['strategy'] == STRATEGY_NAME
         assert captured['broker_positions'][0]['symbol'] == 'BFPOS'
+
+
+class TestPrestageExitDelegation:
+    """2026-08-28: staged-fill exits drained by the engine were dropped
+    as orphans (DB row stayed open). Unknown-symbol events must now be
+    offered to the prestage before the orphan warning."""
+
+    def test_unknown_symbol_delegates_to_prestage(self, tmp_path):
+        eng, a, db, sm = _engine(tmp_path)
+        eng.prestage = MagicMock()
+        eng.prestage.handle_exit_event.return_value = True
+        ev = MagicMock()
+        ev.symbol = 'STGD'; ev.exit_price = 5.0
+        sm.drain_exit_events.return_value = [ev]
+        eng.check_exits()
+        eng.prestage.handle_exit_event.assert_called_once_with(ev)
+
+    def test_unclaimed_event_still_warns_orphan(self, tmp_path, caplog):
+        eng, a, db, sm = _engine(tmp_path)
+        eng.prestage = MagicMock()
+        eng.prestage.handle_exit_event.return_value = False
+        ev = MagicMock()
+        ev.symbol = 'NOPE'; ev.exit_price = 1.0
+        sm.drain_exit_events.return_value = [ev]
+        import logging
+        with caplog.at_level(logging.WARNING):
+            eng.check_exits()
+        assert any('orphan' in r.message for r in caplog.records)
+
+    def test_delegation_exception_never_breaks_drain(self, tmp_path):
+        eng, a, db, sm = _engine(tmp_path)
+        eng.prestage = MagicMock()
+        eng.prestage.handle_exit_event.side_effect = RuntimeError('boom')
+        ev = MagicMock()
+        ev.symbol = 'STGD'; ev.exit_price = 5.0
+        sm.drain_exit_events.return_value = [ev]
+        eng.check_exits()   # must not raise
