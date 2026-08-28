@@ -458,6 +458,22 @@ def overall_status(bt_stale: bool, cache_max_date: Optional[str],
 # Report assembly / rendering
 # ---------------------------------------------------------------------------
 
+def coverage_covers(day: str) -> bool:
+    """True iff the nightly cache build confirmed coverage through `day`.
+
+    data/bull_flag_cache_coverage.txt is written by nightly_bt_update.sh
+    on every SUCCESSFUL run (including zero-row quiet days). It
+    distinguishes 'built, produced 0 rows' (KNOWN-zero BT side) from
+    'job failed / never ran' (stale, unknowable). Missing/unreadable
+    sentinel -> False (conservative: stays BT_STALE)."""
+    p = production_cache_path().parent / 'bull_flag_cache_coverage.txt'
+    try:
+        covered = p.read_text().strip()
+    except OSError:
+        return False
+    return bool(covered) and day <= covered
+
+
 def build_report(day: str,
                  db_path: Optional[Path] = None,
                  bt_output_csv: Optional[Path] = None) -> Dict:
@@ -465,12 +481,23 @@ def build_report(day: str,
     cache_path = production_cache_path()
     cache_max_date, day_symbols = scan_cache(cache_path, day)
     bt_stale = cache_max_date is None or day > cache_max_date
-    if bt_stale:
+    if bt_stale and coverage_covers(day):
+        # 2026-08-28 fix: the nightly build RAN for this day and produced
+        # ZERO raw rows (1/3 of trading days do) — BT side is KNOWN-zero,
+        # not unknowable. Before this, every quiet day past cache max_date
+        # was thrown away as BT_STALE (8/25-8/27: three clean 0==0 parity
+        # days mislabeled UNKNOWABLE).
+        logger.info(
+            f"coverage sentinel covers {day} with 0 cache rows — BT side "
+            f"KNOWN (0 Stage-1 rows -> 0 Stage-2 trades)")
+        bt_stale = False
+        bt_trades: List[Dict] = []
+    elif bt_stale:
         logger.warning(
             f"BT side UNKNOWABLE for {day}: production cache ends "
             f"{cache_max_date} — reporting BT_STALE, live side only "
             f"(no clean-parity claim is possible)")
-        bt_trades: List[Dict] = []
+        bt_trades = []
     else:
         out_csv = bt_output_csv or (PARITY_DIR / f'bf_parity_bt_{day}.csv')
         out_csv.parent.mkdir(parents=True, exist_ok=True)

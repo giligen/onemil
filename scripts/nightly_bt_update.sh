@@ -34,6 +34,12 @@ set -uo pipefail
 REPO=/home/ec2-user/onemil
 LOG="${REPO}/logs/nightly_bt_update.log"
 CACHE_PATH="${REPO}/data/bull_flag_cache_e50_x30.csv"
+# Coverage sentinel (2026-08-28): written on every SUCCESSFUL run —
+# including zero-row quiet days — so bf_decision_parity can distinguish
+# "built, produced 0 rows" (BT side KNOWN-zero) from "job failed/stale"
+# (BT side unknowable). 1/3 of trading days produce zero raw rows; before
+# this, every such day was thrown away as BT_STALE.
+COVERAGE_SENTINEL="${REPO}/data/bull_flag_cache_coverage.txt"
 TMP_CACHE="/tmp/nightly_bt_$(date -u +%s).csv"
 
 cd "$REPO" || exit 1
@@ -78,6 +84,7 @@ echo "TODAY=$TODAY  LAST_CACHED=$LAST_CACHED" >> "$LOG"
 # pre-market run produced no rows for TODAY, the next run still attempts.
 if [[ ! "$TODAY" > "$LAST_CACHED" ]]; then
     echo "TODAY ($TODAY) is not after LAST_CACHED ($LAST_CACHED) — nothing to build." >> "$LOG"
+    echo "$TODAY" > "$COVERAGE_SENTINEL"
     mark_log "no-op (nothing to build)"
     exit 0
 fi
@@ -169,5 +176,7 @@ NEW_LAST=$(awk -F, 'NR>1 {print $2}' "$CACHE_PATH" | sort -u | tail -1)
 NEW_TOTAL=$(($(wc -l < "$CACHE_PATH") - 1))
 echo "Cache now has $NEW_TOTAL rows; last cached date: $NEW_LAST" >> "$LOG"
 
+# Success (incl. zero-row builds): the gap NEW_START..TODAY was built.
+echo "$TODAY" > "$COVERAGE_SENTINEL"
 mark_log "completed (added $NEW_ROWS rows)"
 exit 0
