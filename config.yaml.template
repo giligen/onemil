@@ -478,7 +478,7 @@ ignition_live:
     promote_rank_slack: 2
     demote_rank_slack: 3
     promote_distance_pct: 20.0   # D_in
-    demote_distance_pct: 25.0    # D_out
+    demote_distance_pct: 4.5     # D_out — cancel stage when stock fades below ~+5% from open, freeing watermark for fresher candidates (owner 8/28; 25.0 was inert for the 6-10% band)
     promote_consecutive: 2
     ops_per_min: 100          # order-op churn limiter (§E15)
     bp_frac: 0.25             # DEPRECATED 2026-08-24 (INERT): % of co-mingled DTBP is meaningless — the divergence agent trades BIG on the SAME account; read for back-compat only
