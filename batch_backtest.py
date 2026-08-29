@@ -1829,6 +1829,14 @@ def run_batch_backtest_fast(
             # before absolute Stage-2 numbers are trusted (owner-gated,
             # never overwrite the production cache in place).
             runner.regime_sizing_enabled = False
+            # 2026-08-29: the build-mode comment always CLAIMED the
+            # conviction filter was disabled for cache builds — it never
+            # was, so cache rows baked whatever min_threshold the config
+            # had at build time (1.2 -> 1.4 -> 1.8 across eras: the old
+            # cache has sub-1.8 rows, a fresh build would cull at 1.8).
+            # Cache = RAW per the two-stage doctrine; Stage-2 applies the
+            # CURRENT threshold at query time (batch_backtest.py:353).
+            runner.conviction_min_threshold = 0.0
         if os.environ.get("BT_ALLOW_REENTRY") == "1":
             runner.early_exit_after_trade = False
             logger.info("BT_ALLOW_REENTRY=1 — multi-trade-per-day enabled")
