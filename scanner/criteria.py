@@ -144,8 +144,15 @@ class ScannerCriteria:
         candidate.criteria_met['relative_volume'] = (
             candidate.relative_volume >= self.relative_volume_min
         )
-        candidate.criteria_met['intraday_change'] = (
-            candidate.intraday_change_pct >= self.intraday_change_pct_min
+        # Shared BF selection semantics (2026-08-29 alignment): the same
+        # threshold test the BT cache build runs — one predicate, one
+        # file (trading/bf_selection.py). candidate.intraday_change_pct
+        # is already max(gap%, range%) computed upstream.
+        from trading.bf_selection import intraday_qualifies
+        candidate.criteria_met['intraday_change'] = intraday_qualifies(
+            gap_pct=candidate.intraday_change_pct,
+            range_pct=candidate.intraday_change_pct,
+            threshold_pct_points=self.intraday_change_pct_min,
         )
         candidate.criteria_met['has_news'] = candidate.has_news or not self.require_news
         candidate.criteria_met['dollar_volume'] = (

@@ -25,6 +25,8 @@ import pandas as pd
 import pytz
 from dotenv import load_dotenv
 
+from trading.bf_selection import mover_day_qualifies as _mover_day_qualifies
+
 from backtest import BacktestRunner, BacktestResult
 from data_sources.alpaca_client import AlpacaClient, AlpacaAPIError
 from persistence.database import Database, get_database
@@ -728,43 +730,30 @@ def find_big_movers(
             prev_close_map[str(sorted_bars[j]['date'])] = sorted_bars[j - 1]['close']
 
         for bar in bars:
-            low = bar['low']
-            high = bar['high']
-            if low <= 0:
-                continue
-            move = (high - low) / low
-            if move < threshold:
-                continue
-
-            # Direction filter: qualify gap-ups OR V-reversals.
-            # Gap-up: high >= prev_close * (1 + threshold) — stock UP from yesterday
-            # V-reversal: range >= threshold AND close > open — big intraday range, closed green
-            # Without either, crashing stocks with wide ranges would qualify.
-            prev_close = prev_close_map.get(str(bar['date']))
+            # SHARED screen (2026-08-29 alignment): trading/bf_selection
+            # — the SAME predicate the live scanner routes through. The
+            # old inline version had two EOD-lookahead terms (close>open
+            # direction gate, closing-price band) that made red-close
+            # spike days BT-invisible while live traded them (~50%
+            # selection overlap; see research/bf_drift_quantification_
+            # aug2026.md). Cache rows built before this change carry the
+            # old screen — regen owner-gated.
             bar_close = bar.get('close', 0)
-            bar_open = bar.get('open', 0)
-            if prev_close and prev_close > 0:
-                upside = (high - prev_close) / prev_close
-                is_v_reversal = move >= threshold and bar_close > bar_open  # big range + green close
-                if upside < threshold and not is_v_reversal:
+            verdict = _mover_day_qualifies(
+                high=bar['high'], low=bar['low'],
+                prev_close=prev_close_map.get(str(bar['date'])),
+                price_ref=bar_close,
+                volume=bar.get('volume', 0),
+                threshold_pct=threshold,
+                price_min=price_min, price_max=price_max,
+                min_dollar_volume=min_dollar_volume)
+            if not verdict.qualifies:
+                if verdict.reason in ('price_below_min',
+                                      'price_above_max'):
+                    skipped_price += 1
+                elif verdict.reason == 'direction':
                     skipped_direction += 1
-                    continue
-
-            # Price filter: use closing price as proxy for tradeable range
-            bar_close = bar.get('close', 0)
-            if price_min > 0 and bar_close < price_min:
-                skipped_price += 1
                 continue
-            if price_max > 0 and bar_close > price_max:
-                skipped_price += 1
-                continue
-
-            # Dollar volume filter: close * volume
-            if min_dollar_volume > 0:
-                bar_vol = bar.get('volume', 0)
-                dollar_vol = bar_close * bar_vol
-                if dollar_vol < min_dollar_volume:
-                    continue
 
             bar_date = bar['date'] if isinstance(bar['date'], date) else date.fromisoformat(str(bar['date']))
             # Only include movers within the requested date range
@@ -773,7 +762,13 @@ def find_big_movers(
                 continue
             if end_date and bar_date > end_date:
                 continue
-            movers.append((symbol, bar_date, prev_close or 0.0, upside if prev_close else move))
+            prev_close = prev_close_map.get(str(bar['date']))
+            low, high = bar['low'], bar['high']
+            move = (high - low) / low
+            upside = ((high - prev_close) / prev_close
+                      if prev_close and prev_close > 0 else move)
+            movers.append((symbol, bar_date, prev_close or 0.0,
+                           upside if prev_close else move))
             logger.debug(
                 f"  {symbol} {bar_date}: move {move:.1%} "
                 f"(low=${low:.2f}, high=${high:.2f})"
@@ -1824,6 +1819,16 @@ def run_batch_backtest_fast(
         runner = BacktestRunner()
         if build_cache:
             runner.risk_tiers_enabled = False  # Cache at 1x — tiers applied at query time
+            # 2026-08-29 double-regime fix: Stage-1 scaled SHARES by the
+            # regime mult AND Stage-2 multiplies pnl by the same mult per
+            # day (filter_bull_flag_trades) — A-days got 1.25^2, C1 1.5^2.
+            # Cache at 1x; the day-level Stage-2 application is the single
+            # source of regime sizing (assumption-ledger design). NOTE:
+            # cache rows built between 2026-04-18 and this fix carry the
+            # Stage-1 scaling baked in — a clean-cache regen is required
+            # before absolute Stage-2 numbers are trusted (owner-gated,
+            # never overwrite the production cache in place).
+            runner.regime_sizing_enabled = False
         if os.environ.get("BT_ALLOW_REENTRY") == "1":
             runner.early_exit_after_trade = False
             logger.info("BT_ALLOW_REENTRY=1 — multi-trade-per-day enabled")
