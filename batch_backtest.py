@@ -2655,7 +2655,14 @@ def main():
         # Expand universe with daily_bars cache for normal runs (catches
         # historical movers no longer in active universe). Skip for --build-cache
         # to ensure deterministic output regardless of DB state.
-        if not args.build_cache:
+        # 2026-08-29: BT_BUILD_FULL_HISTORY=1 enables the expansion in
+        # build mode too — a HISTORICAL rebuild against today's active
+        # universe is survivorship-biased (delisted movers vanish; the
+        # canonical regen built 2026 months ~2x under the era-accumulated
+        # cache). Nightly single-day appends keep the deterministic
+        # active-universe default (live-matching).
+        if not args.build_cache \
+                or os.environ.get('BT_BUILD_FULL_HISTORY') == '1':
             import sqlite3
             conn = sqlite3.connect(db.db_path)
             all_cached = [r[0] for r in conn.execute(
