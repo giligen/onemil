@@ -127,6 +127,29 @@ def load_bt_config(yaml_path: str = 'orb.yaml') -> dict:
         'ORB_SCALE_OUT', sc_cfg.get('enabled', False))
     out['scale_frac'] = float(sc_cfg.get('frac', DEFAULT_SCALE_FRAC))
     out['scale_level_r'] = float(sc_cfg.get('level_r', DEFAULT_SCALE_LEVEL_R))
+    # 8/30 audit (defect class: silent yaml desync): exit/sizing constants
+    # that LIVE reads from orb.yaml but this pipeline hardcoded — same
+    # incident class as mults (7/10) and z-params (7/17), closed here for
+    # the remaining six. main() hard-syncs module globals from these.
+    out['min_stop_pct'] = float(sizing.get('min_stop_pct', MIN_STOP_PCT))
+    out['old_pos_ref'] = float(
+        sizing.get('old_position_reference_usd', OLD_POS))
+    out['lock_arm_r'] = float(exit_cfg.get('lock_arm_at_r', LOCK_TRIGGER_R))
+    out['lock_stop_r'] = float(exit_cfg.get('lock_stop_r', LOCK_STOP_R))
+    out['exit_slip_bps'] = float(
+        exit_cfg.get('exit_slip_bps', EXIT_SLIP_BPS))
+    out['force_close_et'] = (os.environ.get('ORB_BT_FORCE_CLOSE_ET')
+                             or str(exit_cfg.get('force_close_time_et',
+                                                 '15:45')))
+    for _name, _key, _legacy in (
+            ('min_stop_pct', 'min_stop_pct', MIN_STOP_PCT),
+            ('old_position_reference_usd', 'old_pos_ref', OLD_POS),
+            ('lock_arm_at_r', 'lock_arm_r', LOCK_TRIGGER_R),
+            ('lock_stop_r', 'lock_stop_r', LOCK_STOP_R),
+            ('exit_slip_bps', 'exit_slip_bps', EXIT_SLIP_BPS)):
+        if abs(out[_key] - _legacy) > 1e-9:
+            print(f"BT config DRIFT-SYNC: {_name} yaml={out[_key]} "
+                  f"(legacy literal was {_legacy}) — yaml wins")
     print(f"BT config (B+ parity): account=${out['account']:,.0f} N={out['n']} "
           f"risk=${out['risk']:,.0f} threshold={out['threshold']:.12f} "
           f"pdr_veto>={out['pdr_min']} g1({out['g1_enabled']}, "
@@ -378,6 +401,17 @@ def build_atr14_lookup(pairs, db_path='data/cache.db'):
 
 def main():
     bt_cfg = load_bt_config()
+    # Hard-sync module constants to orb.yaml (8/30 audit): the sim
+    # functions read these globals at call time — without this, a yaml
+    # edit changed LIVE behavior while the BT book kept the old literals.
+    global MIN_STOP_PCT, OLD_POS, LOCK_TRIGGER_R, LOCK_STOP_R, \
+        EXIT_SLIP_BPS, FORCE_CLOSE_ET
+    MIN_STOP_PCT = bt_cfg['min_stop_pct']
+    OLD_POS = bt_cfg['old_pos_ref']
+    LOCK_TRIGGER_R = bt_cfg['lock_arm_r']
+    LOCK_STOP_R = bt_cfg['lock_stop_r']
+    EXIT_SLIP_BPS = bt_cfg['exit_slip_bps']
+    FORCE_CLOSE_ET = bt_cfg['force_close_et']
     # Features CSV: env override (ORB_BT_FEATURES_CSV) else latest non-corrmatrix
     # glob. B+ ground-truth regen points this at the frozen
     # orb_features_20260814_1741.csv; the nightly uses the latest.

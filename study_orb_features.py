@@ -395,6 +395,41 @@ def _parse_args():
     return p.parse_args()
 
 
+# 8/30 audit: BUMP THIS on ANY change to feature formulas/semantics.
+# IncrementalSchemaDrift catches column-set changes but NOT a changed
+# formula for an existing column — exactly the DST-bug class (8/14),
+# which needed a manual full regen someone had to remember. The stamp
+# is persisted in a sidecar; a mismatch on incremental runs hard-fails
+# with instructions instead of silently appending mixed-era rows.
+FEATURES_CODE_VERSION = '2026-08-14.dst2'
+_VERSION_SIDECAR = os.path.join('analysis_results',
+                                'orb_features_CODE_VERSION.txt')
+
+
+def _check_features_version(incremental: bool) -> None:
+    """Full regen: write the sidecar. Incremental: hard-fail on drift."""
+    try:
+        recorded = open(_VERSION_SIDECAR).read().strip()
+    except OSError:
+        recorded = None
+    if not incremental:
+        with open(_VERSION_SIDECAR, 'w') as fh:
+            fh.write(FEATURES_CODE_VERSION + '\n')
+        return
+    if recorded is None:
+        # legacy CSV predates the stamp — adopt current version once
+        with open(_VERSION_SIDECAR, 'w') as fh:
+            fh.write(FEATURES_CODE_VERSION + '\n')
+        print(f"[features] version sidecar adopted: {FEATURES_CODE_VERSION}")
+        return
+    if recorded != FEATURES_CODE_VERSION:
+        raise SystemExit(
+            f"[features] CODE VERSION DRIFT: CSV built by '{recorded}', "
+            f"code is '{FEATURES_CODE_VERSION}' — incremental append "
+            f"would mix feature eras (the DST-bug class). Run with "
+            f"--force-full-regen to rebuild coherently.")
+
+
 def _resolve_incremental_plan(
     args,
 ) -> Tuple[pd.DataFrame, Optional[_date]]:
@@ -445,6 +480,7 @@ def main() -> None:
     print(f"[{t0.isoformat(timespec='seconds')}] ORB feature study — ORB_5_vanilla")
 
     existing_df, start_date = _resolve_incremental_plan(args)
+    _check_features_version(incremental=not existing_df.empty)
 
     print("\nLoading broad universe...")
     # Env-var toggle: include today's provisional row from daily_bars_provisional.
