@@ -613,8 +613,13 @@ class IgnitionShadow:
                 logger.error(f"ignition-shadow: on_trigger callback "
                              f"failed for {rec['symbol']}: {e}")
 
+    RULES_VERSION = '2026-08-30.1'   # bump on ANY rules/semantics change
+    # (8/30 audit: 30 journals span 6 rule eras with NO version field —
+    # era reconstruction needed commit archaeology; never again)
+
     def _journal(self, rec: dict) -> None:
         try:
+            rec.setdefault('rules_version', self.RULES_VERSION)
             path = os.path.join(self._log_dir,
                                 f"ignition_shadow_{rec['day']}.jsonl")
             with open(path, 'a') as fh:

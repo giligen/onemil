@@ -428,7 +428,12 @@ def run_pipeline_bt(slice_dates: List[str]) -> None:
     if result.returncode != 0:
         return
     # Optional date-slice day-by-day
-    trades_csv = os.path.join(ROOT, 'analysis_results', 'orb_static_lock_trades.csv')
+    # 8/30 audit: this read the FROZEN pre-B+ book (orb_static_lock_
+    # trades.csv, stale since 8/14) — every --slice output silently
+    # served the old era. Resolve via the same config-driven path the
+    # green check uses.
+    from scripts.report_common import bt_book_csv_path
+    trades_csv = bt_book_csv_path()
     if not slice_dates or not os.path.exists(trades_csv):
         return
     t = pd.read_csv(trades_csv)
