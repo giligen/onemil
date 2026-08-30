@@ -2517,6 +2517,17 @@ def main():
     if args.monthly and not args.no_monthly:
         from batch.monthly_runner import MonthlyBacktestRunner
 
+        # 2026-08-30: the monthly path constructs its OWN BacktestRunner
+        # per month — the build-mode overrides applied to the main-flow
+        # runner (risk_tiers/regime/conviction at :1826+) NEVER reached
+        # it, so every cache ever built via --build-cache (which auto-
+        # enables --monthly) baked the config-era conviction threshold,
+        # Stage-1 regime scaling and risk tiers into "raw" rows. The env
+        # flag is honored at runner-construction inside monthly_runner
+        # (and propagates to scan-worker subprocesses).
+        if args.build_cache:
+            os.environ['BT_CACHE_BUILD'] = '1'
+
         runner = MonthlyBacktestRunner(
             max_workers=args.workers,
             scan_workers=args.scan_workers,

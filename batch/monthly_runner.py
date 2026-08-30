@@ -450,8 +450,13 @@ class MonthlyBacktestRunner:
                 _conn = _sq.connect(db.db_path)
                 _extra = [r[0] for r in _conn.execute(
                     "SELECT DISTINCT symbol FROM daily_bars "
-                    "WHERE bar_date >= ? AND bar_date <= ?",
+                    "WHERE bar_date >= ? AND bar_date <= ? "
+                    "AND symbol NOT LIKE '%.%' AND symbol NOT LIKE '%+%' "
+                    "AND LENGTH(symbol) <= 5",
                     (str(month_start), str(month_end))).fetchall()]
+                # dot/plus suffixes = warrants/units/rights (BBAI.WS was
+                # getting bar-fetched in regen-4) — untradeable for the
+                # book, excluded from the expansion
                 _conn.close()
                 _added = sorted(set(_extra) - set(symbols))
                 symbols = sorted(set(symbols + _extra))
@@ -560,6 +565,20 @@ class MonthlyBacktestRunner:
                 import os as _os
                 if _os.environ.get("BT_ALLOW_REENTRY") == "1":
                     runner.early_exit_after_trade = False
+                if _os.environ.get("BT_CACHE_BUILD") == "1":
+                    # RAW cache doctrine (2026-08-30): Stage-1 must bake
+                    # NO query-time-refilterable effects. Set by
+                    # batch_backtest when --build-cache; the old
+                    # build-mode overrides lived on a main-flow runner
+                    # this path never used, so historical caches baked
+                    # era-conviction + Stage-1 regime + risk tiers.
+                    runner.risk_tiers_enabled = False
+                    runner.regime_sizing_enabled = False
+                    runner.conviction_min_threshold = 0.0
+                    logger.info(
+                        f"{progress} BT_CACHE_BUILD: RAW-cache overrides "
+                        f"applied (risk_tiers=off, stage1_regime=off, "
+                        f"conviction_threshold=0)")
                 results = run_batch_backtest(movers, client, runner, db=db,
                                             universe_dict=universe_dict,
                                             volume_profiles=volume_profiles,
