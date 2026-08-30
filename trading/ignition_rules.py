@@ -146,9 +146,14 @@ def trigger_entry_stop(g, day_open: float) -> dict:
     rp = r_pct_from_stop(entry, stop)
     if rp < R_MIN_PCT:
         return {'reject': 'skip_r_too_small'}
+    # bar_dollar for the participation/illiquidity gate: use the TRIGGER
+    # bar's volume — complete when the entry bar opens. 8/30 audit: this
+    # used the ENTRY bar's full volume, unknowable at its open (lookahead
+    # selecting the book via skip_illiquid; same class the at-fill gates
+    # already guard against at :205-216).
     return {'trigger_m': int(g.loc[ti, 'm']), 'entry': entry,
             'stop': stop, 'r_pct': rp, 'next_idx': nb.name,
-            'bar_dollar': float(nb['volume']) * entry}
+            'bar_dollar': float(g.loc[ti, 'volume']) * entry}
 
 
 def structure_gates_at_fill(bars_to_fill, fill_price: float) -> dict:

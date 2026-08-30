@@ -135,10 +135,14 @@ def main() -> int:
                     f"{entry} ≤ stop {stop} (bad quote at capture)")
                 continue
             # complex_late triggers become actionable at confirm time,
-            # not first sighting — resim exits from minute_final_et
+            # resim exits from the TRIGGER bar when known (8/30 audit:
+            # this used the sighting minute, so the 8/14 trigger-bar
+            # re-key never reached the nightly P&L — the cron and the
+            # replay disagreed by construction)
             rr, reason = resim_exit(
                 b, entry, stop,
-                r.get('minute_final_et') or r['minute_et'])
+                r.get('trigger_m') or r.get('minute_final_et')
+                or r['minute_et'])
             pos = float(r.get('hypo_position_usd') or 0)
             pnl = rr * (entry - stop) / entry * pos
             tot += pnl

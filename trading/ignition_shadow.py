@@ -591,10 +591,14 @@ class IgnitionShadow:
         # trigger-bar entry/stop (BT-parity) when reconstruction ran;
         # fall back to sighting-derived for late-confirm re-fires that
         # carry a pre-computed r_pct only
-        rec['hypo_entry'] = rec.get('_entry') or rec.get('ask') \
-            or rec['price']
+        # 8/30 audit: entry and stop MUST fall back from the SAME anchor —
+        # the old mix (entry from ask, stop from price) broke the R
+        # cancellation on 64/103 pre-8/14 triggers (implied R vs journaled
+        # r_pct drifting up to ~±11% in the nightly P&L).
+        _anchor_px = rec.get('ask') or rec['price']
+        rec['hypo_entry'] = rec.get('_entry') or _anchor_px
         rec['hypo_stop'] = rec.get('_stop') or round(
-            rec['price'] * (1 - r_pct / 100.0), 4)
+            _anchor_px * (1 - r_pct / 100.0), 4)
         rec['hypo_position_usd'] = round(pos, 0)
         logger.info(
             f"[IGNITION-SHADOW] TRIGGER {rec['symbol']} "
@@ -613,7 +617,8 @@ class IgnitionShadow:
                 logger.error(f"ignition-shadow: on_trigger callback "
                              f"failed for {rec['symbol']}: {e}")
 
-    RULES_VERSION = '2026-08-30.1'   # bump on ANY rules/semantics change
+    RULES_VERSION = '2026-08-30.2'   # bump on ANY rules/semantics change
+    # .2: bar_dollar -> trigger-bar volume (causal); hypo anchor unified
     # (8/30 audit: 30 journals span 6 rule eras with NO version field —
     # era reconstruction needed commit archaeology; never again)
 
