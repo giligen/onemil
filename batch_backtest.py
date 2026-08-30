@@ -1282,6 +1282,20 @@ def _backtest_worker(args: Tuple) -> Optional[dict]:
             runner.set_db_path(db_path)
             if os.environ.get("BT_ALLOW_REENTRY") == "1":
                 runner.early_exit_after_trade = False
+            if os.environ.get("BT_CACHE_BUILD") == "1":
+                # RAW cache doctrine — THE actual execution site (8/30,
+                # wrong-layer instance #5): scan_workers<=0 becomes
+                # cpu_count() at arg-parse (:2453), so the PARALLEL
+                # worker path always runs and the sequential-branch
+                # override in monthly_runner never executes. Workers are
+                # subprocesses; env inherits (BT_ALLOW_REENTRY above
+                # proves the pattern).
+                runner.risk_tiers_enabled = False
+                runner.regime_sizing_enabled = False
+                runner.conviction_min_threshold = 0.0
+                logger.info("BT_CACHE_BUILD: RAW-cache overrides applied "
+                            "in scan worker (risk_tiers=off, "
+                            "stage1_regime=off, conviction_threshold=0)")
 
             # Fetch prev day bars for MACD warm-up
             prev_day_bars = None
