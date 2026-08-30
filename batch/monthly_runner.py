@@ -437,6 +437,29 @@ class MonthlyBacktestRunner:
             symbols = [s['symbol'] for s in universe]
             universe_dict = {s['symbol']: s for s in universe}
 
+            # 2026-08-30: BT_BUILD_FULL_HISTORY=1 — expand with every
+            # symbol that has daily bars in this month's window. A
+            # historical rebuild pinned to TODAY's active universe is
+            # survivorship-biased (the warning below has said so all
+            # along); the expansion restores delisted/rotated-out movers
+            # whose bars are already cached. The 8/29 defect-#5 fix
+            # patched batch_backtest's main flow, but --build-cache
+            # routes through THIS monthly runner — same gate here.
+            if os.environ.get('BT_BUILD_FULL_HISTORY') == '1':
+                import sqlite3 as _sq
+                _conn = _sq.connect(db.db_path)
+                _extra = [r[0] for r in _conn.execute(
+                    "SELECT DISTINCT symbol FROM daily_bars "
+                    "WHERE bar_date >= ? AND bar_date <= ?",
+                    (str(month_start), str(month_end))).fetchall()]
+                _conn.close()
+                _added = sorted(set(_extra) - set(symbols))
+                symbols = sorted(set(symbols + _extra))
+                logger.info(
+                    f"{progress} BT_BUILD_FULL_HISTORY: universe "
+                    f"expanded by {len(_added)} bar-cached symbols "
+                    f"(total {len(symbols)})")
+
             if not symbols:
                 logger.warning(f"{progress} No active symbols in universe")
                 return MonthResult(
