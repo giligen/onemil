@@ -42,6 +42,11 @@ BULL_FLAG_CACHE = 'data/bull_flag_cache_e50_x30.csv'
 # Broad universe filter
 MIN_GAP_PCT = 5.0           # today.open vs yesterday.close
 MIN_PREV_DAY_VOL = 500_000  # yesterday's volume floor
+# Calibrated 8/31 on 110 live-scored pairs (validation month): min
+# cached RTH-9:35 volume among LIVE picks was 15,428 — 15K keeps all
+# of them while dropping dead-open names. Interim until the premarket
+# backfill enables the true 500K@9:35 gate (see load_broad_universe).
+MIN_935_VOL_FLOOR = 15_000
 MIN_OPEN_PRICE = 3.0
 MAX_OPEN_PRICE = 30.0
 DATE_START = '2025-01-01'
@@ -106,8 +111,47 @@ def load_broad_universe(
         (DATE_START, DATE_END, MIN_GAP_PCT, MIN_PREV_DAY_VOL,
          MIN_OPEN_PRICE, MAX_OPEN_PRICE),
     )
-    for symbol, bar_date in cur.fetchall():
-        grouped.setdefault(str(bar_date), []).append(symbol)
+    candidates = [(symbol, str(bar_date)) for symbol, bar_date
+                  in cur.fetchall()]
+    # 2026-08-31 (the PFSA red day) — INTERIM 9:35-volume floor.
+    # Live's snapshot gates on volume traded by 9:35 INCLUDING premarket
+    # from 4:00 ET; the bars cache holds premarket inconsistently, so
+    # live's quantity is NOT reproducible historically (calibration on
+    # 110 live-scored pairs proved ordering inversion: PFSA 135K cached
+    # was live-EXCLUDED while SHMD 101K cached was live-INCLUDED on
+    # premarket volume). Until the premarket backfill (queued bulk job)
+    # enables the true 500K@9:35 gate on both sides:
+    #   prev-day gate stays (status quo) + a calibrated 15K RTH-9:35
+    #   floor (keeps 110/110 observed live picks, drops dead-open
+    #   names). PFSA-class reds (prev-liquid, quiet open) remain
+    #   POSSIBLE and are pre-adjudicated as this known class.
+    # Cutoff computed PER DATE in ET (a hardcoded UTC hour is the DST
+    # bug class, 3fab1f9/35e9935).
+    from zoneinfo import ZoneInfo
+    from datetime import datetime as _dt
+    _et = ZoneInfo('America/New_York')
+    _utc = ZoneInfo('UTC')
+    _cut_cache: Dict[str, str] = {}
+    kept = dropped_935 = 0
+    for symbol, ds in candidates:
+        cut = _cut_cache.get(ds)
+        if cut is None:
+            y, m, d = (int(x) for x in ds.split('-'))
+            cut = _dt(y, m, d, 9, 35, tzinfo=_et).astimezone(_utc) \
+                .strftime('%Y-%m-%dT%H:%M')
+            _cut_cache[ds] = cut
+        row = conn.execute(
+            "SELECT COALESCE(SUM(volume),0) FROM intraday_bars_1min "
+            "WHERE symbol=? AND bar_date=? AND timestamp < ?",
+            (symbol, ds, cut)).fetchone()
+        if (row[0] or 0) >= MIN_935_VOL_FLOOR:
+            grouped.setdefault(ds, []).append(symbol)
+            kept += 1
+        else:
+            dropped_935 += 1
+    print(f"[broad universe] 9:35-volume floor (interim live-parity): "
+          f"{kept} kept, {dropped_935} dropped "
+          f"(floor {MIN_935_VOL_FLOOR:,.0f} RTH-cached by 9:35 ET)")
 
     # Mid-day overlay: use today's provisional row. Prev-close / prev-vol
     # come from the most-recent row in daily_bars strictly before today.
