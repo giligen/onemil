@@ -511,6 +511,16 @@ class RealtimeScanner:
             if self.orb_engine is not None and not force_closed:
                 _engine_futures.append(
                     _engine_pool.submit(self._orb_tick))
+            # Ignition ticks INDEPENDENTLY of force_closed (2026-09-01
+            # SWVL incident): it used to piggyback _orb_tick, which is
+            # skipped once force_closed is set at 15:45 — so the
+            # prestage staged-fill EOD flat (and the exit-event drain
+            # that writes the DB row) died exactly when needed and a
+            # staged fill was held overnight, naked, after its dead-man
+            # stop expired. Cheap tick: no scanning, own internal gates.
+            if self.ignition_engine is not None:
+                _engine_futures.append(
+                    _engine_pool.submit(self._ignition_tick))
             # Wait for engine futures, polling shutdown_event every 1s.
             # Previously this used a single blocking `f.result(timeout=50)`
             # which kept the scanner unresponsive to SIGTERM for up to
@@ -675,6 +685,29 @@ class RealtimeScanner:
         if self.macd_engine.is_force_close_time():
             self.macd_engine.force_close_all()
 
+    def _ignition_tick(self) -> None:
+        """Ignition + prestage tick — runs EVERY cycle, force-close or not.
+
+        2026-09-01 SWVL incident: this logic lived inside _orb_tick, which
+        the scanner stops submitting once `force_closed` is set at 15:45.
+        The prestage staged-fill EOD flat (_eod_flat_pass, reached only via
+        prestage.process_tick) therefore never fired, the exit-event drain
+        never ran, and a filled staged position was carried overnight with
+        its broker dead-man stop expired. Independent submission means the
+        flat fires at 15:45 and KEEPS retrying until the exit is confirmed
+        and written. Hard-isolated: never raises into the scanner cycle.
+        """
+        if self.ignition_engine is None:
+            return
+        try:
+            self.ignition_engine.process_tick()   # drives prestage flat too
+            self.ignition_engine.check_exits()
+            if self.orb_engine is not None \
+                    and self.orb_engine.is_force_close_time():
+                self.ignition_engine.force_close_all()
+        except Exception as e:
+            logger.error(f"Ignition tick raised: {e}", exc_info=True)
+
     def _orb_tick(self) -> None:
         """One ORB engine cycle (re-seed universe + entries + exits).
 
@@ -693,16 +726,8 @@ class RealtimeScanner:
         self.orb_engine.check_exits()
         if self.orb_engine.is_force_close_time():
             self.orb_engine.force_close_all()
-        # Ignition S3 tick (fills/exits/15:45 flat) — piggybacks ORB's
-        # cadence and force-close clock; hard-isolated like the shadow
-        if self.ignition_engine is not None:
-            try:
-                self.ignition_engine.process_tick()
-                self.ignition_engine.check_exits()
-                if self.orb_engine.is_force_close_time():
-                    self.ignition_engine.force_close_all()
-            except Exception as e:
-                logger.error(f"Ignition tick raised: {e}", exc_info=True)
+        # (Ignition moved OUT of _orb_tick 2026-09-01 — see _ignition_tick;
+        # piggybacking here meant it stopped at force_close time.)
 
     def _orb_universe_source(self) -> List[str]:
         """Seed ORB with a BROAD candidate pool, then apply ORB's own BT-parity

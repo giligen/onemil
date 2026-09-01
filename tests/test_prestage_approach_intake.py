@@ -290,3 +290,63 @@ class TestScannerApproachFeed:
         sc.ignition_shadow.feed_min_pct = None
         sc._run_intraday_cycle()
         sc.ignition_shadow.on_mover.assert_called_once()
+
+
+class TestIgnitionTickIndependence:
+    """2026-09-01 SWVL incident: the prestage staged-fill EOD flat lived
+    inside _orb_tick, which the scanner stops submitting once
+    force_closed is set at 15:45 — so the flat died exactly when needed
+    and a filled staged position was carried overnight, naked (dead-man
+    stop expired). These pin the independence."""
+
+    def _scanner(self):
+        from data_sources.news_provider import NewsProvider
+        from persistence.database import Database
+        from scanner.criteria import ScannerCriteria
+        from scanner.realtime_scanner import RealtimeScanner
+        alpaca = MagicMock(spec=AlpacaClient)
+        news = MagicMock(spec=NewsProvider)
+        db = MagicMock(spec=Database)
+        return RealtimeScanner(alpaca_client=alpaca, news_provider=news,
+                               db=db, criteria=ScannerCriteria(),
+                               verbose=False)
+
+    def test_ignition_tick_drives_prestage_and_force_close(self):
+        from trading.ignition_engine import IgnitionEngine
+        from trading.orb_engine import ORBEngine
+        sc = self._scanner()
+        sc.ignition_engine = MagicMock(spec=IgnitionEngine)
+        sc.orb_engine = MagicMock(spec=ORBEngine)
+        sc.orb_engine.is_force_close_time.return_value = True
+        sc._ignition_tick()
+        # process_tick is what reaches prestage._eod_flat_pass
+        sc.ignition_engine.process_tick.assert_called_once()
+        sc.ignition_engine.check_exits.assert_called_once()
+        sc.ignition_engine.force_close_all.assert_called_once()
+
+    def test_ignition_tick_never_raises(self):
+        from trading.ignition_engine import IgnitionEngine
+        sc = self._scanner()
+        sc.ignition_engine = MagicMock(spec=IgnitionEngine)
+        sc.ignition_engine.process_tick.side_effect = RuntimeError('boom')
+        sc.orb_engine = None
+        sc._ignition_tick()   # must not raise into the scanner cycle
+
+    def test_orb_tick_no_longer_owns_ignition(self):
+        """The piggyback is GONE — _orb_tick must not touch ignition."""
+        import inspect
+        from scanner.realtime_scanner import RealtimeScanner
+        src = inspect.getsource(RealtimeScanner._orb_tick)
+        assert 'ignition_engine.process_tick' not in src
+        assert 'ignition_engine.force_close_all' not in src
+
+    def test_submission_not_gated_on_force_closed(self):
+        """The engine-futures block must submit _ignition_tick WITHOUT a
+        `not force_closed` guard (the incident's root cause)."""
+        import inspect, re
+        from scanner.realtime_scanner import RealtimeScanner
+        src = inspect.getsource(RealtimeScanner)
+        m = re.search(r'if self\.ignition_engine is not None[^\n]*\n\s+'
+                      r'_engine_futures\.append', src)
+        assert m, 'ignition tick submission not found'
+        assert 'force_closed' not in m.group(0)
