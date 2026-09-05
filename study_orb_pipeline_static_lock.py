@@ -1005,8 +1005,12 @@ def main():
     print(f"Mean month:       ${out['pnl'].mean():+,.0f}")
     print(f"Cum P&L:          ${out['pnl'].sum():+,.0f}")
 
-    out.to_csv('analysis_results/orb_monthly_static_lock.csv', index=False)
-    print(f"\nSaved: analysis_results/orb_monthly_static_lock.csv + {book_csv}")
+    # ORB_BT_MONTHLY_OUT (2026-09-05): side path for research runs (point-in-
+    # time top-up) so they never overwrite the nightly monthly table.
+    monthly_csv = os.environ.get('ORB_BT_MONTHLY_OUT',
+                                 'analysis_results/orb_monthly_static_lock.csv')
+    out.to_csv(monthly_csv, index=False)
+    print(f"\nSaved: {monthly_csv} + {book_csv}")
 
 
 if __name__ == '__main__':

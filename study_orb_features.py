@@ -45,7 +45,11 @@ from study_orb_broad import load_broad_universe
 from trading.trading_hours import today_et
 
 
-CACHE_DB = 'data/cache.db'
+# ORB_CACHE_DB / ORB_FEATURES_OUT_DIR (2026-09-05): side cache + side output
+# dir for the point-in-time survivorship top-up, so a research run can never
+# land in analysis_results/ as "latest features" for the nightly pipeline.
+CACHE_DB = os.environ.get('ORB_CACHE_DB', 'data/cache.db')
+FEATURES_OUT_DIR = os.environ.get('ORB_FEATURES_OUT_DIR', OUT_DIR)
 RANGE_MINUTES = 5  # locked to 5-min ORB for the feature study
 FEATURES_GLOB = os.path.join(OUT_DIR, 'orb_features_*.csv')
 
@@ -674,11 +678,11 @@ def main() -> None:
     feat_corr = df[feature_cols].corr().round(2)
 
     # --- Write artifacts ---
-    os.makedirs(OUT_DIR, exist_ok=True)
+    os.makedirs(FEATURES_OUT_DIR, exist_ok=True)
     ts = datetime.now().strftime('%Y%m%d_%H%M')
-    csv_path = f"{OUT_DIR}/orb_features_{ts}.csv"
-    md_path = f"{OUT_DIR}/orb_features_{ts}.md"
-    mat_path = f"{OUT_DIR}/orb_features_corrmatrix_{ts}.csv"
+    csv_path = f"{FEATURES_OUT_DIR}/orb_features_{ts}.csv"
+    md_path = f"{FEATURES_OUT_DIR}/orb_features_{ts}.md"
+    mat_path = f"{FEATURES_OUT_DIR}/orb_features_corrmatrix_{ts}.csv"
     # Atomic write — .tmp + os.replace. A crashed run cannot leave a
     # half-written CSV that the next incremental run would misread.
     _atomic_write_csv(df, csv_path)

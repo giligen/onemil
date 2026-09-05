@@ -62,3 +62,10 @@ research/1011.6402
 analysis_results/
 backtest_results_*.csv
 macd_wave_results*.csv
+
+# Databento point-in-time raw pulls + side DBs (research, rebuildable, large)
+data/research/databento/*.dbn.zst
+data/research/databento/*.parquet
+data/research/databento/*.db
+data/research/databento/alpaca_assets_all_*.csv
+research/ignition_capcheck/topup.db

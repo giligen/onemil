@@ -36,7 +36,10 @@ from study_orb import (
     _verdict,
 )
 
-CACHE_DB = 'data/cache.db'
+# ORB_CACHE_DB (2026-09-05): point the study at a side cache with the same
+# schema — used for the point-in-time survivorship top-up
+# (research/scripts/build_pit_cache_db.py). Default = the production cache.
+CACHE_DB = os.environ.get('ORB_CACHE_DB', 'data/cache.db')
 BULL_FLAG_CACHE = 'data/bull_flag_cache_e50_x30.csv'
 
 # Broad universe filter
