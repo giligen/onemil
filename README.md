@@ -540,6 +540,72 @@ pytest tests/test_stop_monitor.py::TestVolConfirmedTrailExit -v   # 5 live path 
 - Live: `WatchEntry.last_bar_volume` updated by `_on_bar()` callback on every closed bar. Both tick path (`_on_trade`) and poll path (`_process_bar_snapshot`) call the shared helper.
 - Only trail exits are gated — initial hard stop (before trail activation) never skips (capital-preservation path).
 - Crash-recovery path: watches re-registered from DB pass `avg_flag_volume=0.0` (not stored), so vol-conf falls back to naive trail until next fresh trade.
+- **2026-09-05**: the guard now reads the PREVIOUS closed bar on BOTH sides (BT used the triggering bar's own volume — lookahead). See "BF trail unification".
+
+### BF trail unification — ONE exit spec for BT and live (2026-09-05)
+
+**Trigger**: CWVX 2026-08-03. Live +$313 (`trail_stop` at 09:58 @14.76);
+the reference cache +$2,381 at BT sizing (`exhaust+trail_stop` 13:32
+@15.92). Same entry, same bars. An Explore diff of `StopMonitor` vs
+`TradeSimulator.simulate` found 21 divergences; five moved money:
+
+| # | Dimension | LIVE (before) | BT (before) | Now (both) |
+|---|---|---|---|---|
+| 1 | R basis | plan-R (Bug 5, 2026-05-08) | fill-R (`use_planned_r` never wired) | `trading.trailing_stop.r_basis` (default `plan`) via `bf_trail.r_baseline_and_unit` |
+| 2 | Ratchet source | every tick, ratchet-then-check in one tick | closed-bar highs, check-then-ratchet | closed bars only via `bf_trail.arm_and_ratchet`; ticks just trigger |
+| 3 | Vol-guard bar | previous closed bar | the triggering bar itself (lookahead) | previous closed bar |
+| 4 | Entry bar | stops from first tick after fill | excluded (loop starts entry+1) | excluded (`skip_exits_until_ts` = end of fill minute) |
+| 5 | `highest_since_entry` | max(tick, bar.high) | bar.high | bar.high |
+
+CWVX under the unified spec: plan-R R=$0.2095 → 09:55 close arms
+(14.79 ≥ 14.3985), stop 14.5805; 09:56 close → 14.7505; 09:57 low 14.68
+trips. **Both sides exit on the 09:57 bar** (`tests/test_bf_trail.py::
+TestBtLiveParity::test_cwvx_golden_plan_r_exits_0957`). So the live exit
+was the SPEC, and the cache had been booking a ride that the live spec
+never takes.
+
+**Shared module** `trading/bf_trail.py`:
+`normalize_r_basis`, `r_baseline_and_unit(planned_entry, planned_stop,
+fill, fill_stop, r_basis)`, `arm_and_ratchet(bar_high, highest, stop,
+active, r_baseline, r_unit, activate_at_r, trail_r) → TrailStep`,
+`entry_bar_excluded(bar_start_ts, skip_exits_until_ts)`. Imported by
+`backtest.py::TradeSimulator.simulate` and
+`trading/stop_monitor.py::_maybe_ratchet_from_bar_high` /
+`_r_baseline_and_unit`. Pct trails (MACD wave) and the ORB/ignition
+static lock are untouched.
+
+**Honest book, unified spec** (regen-6 cache, exits re-simulated with
+`python batch_backtest.py --start 2025-01-01 --end 2026-08-28 --resim-exits OUT.csv`
+with `BT_CACHE_PATH_OVERRIDE=data/bull_flag_cache_causal_full_20260830.csv`,
+then Stage-2 at $50K/$2K/10K):
+
+| | fill-R (8/30 reference) | plan-R unified spec |
+|---|---|---|
+| Stage-2 P&L / trades / WR | $198,276 / 106 / 44.3% | **$191,142 / 105 / 46.7%** |
+| Max drawdown | −$58,049 | **−$52,741** |
+| Worst / best month | −$27,354 / +$76,772 | −$23,793 / +$83,641 |
+| Green months | 15/20 | 14/20 |
+| Stage-1 raw Σ (829 rows) | −$62,853 | +$15,066 |
+
+Same 106 trade set; the swings cancel (NEGG −$22.0K, CWVX −$20.2K,
+VELO −$11.3K vs AQMS +$14.5K, RDAC +$12.2K, INDP +$8.5K). Planned entry
+is approximated as fill/(1+0.5%) until the regen-7 rebuild writes the
+new `planned_entry` cache column (exact for gap-through fills, which
+only tightens the trail further). Still a RELATIVE tool — never a
+forecast.
+
+**Config**: `trading.trailing_stop.r_basis: plan` (config.yaml +
+template). Invalid values raise at boot and at simulator construction.
+**Rollback**: `r_basis: fill` + regen restores the retired basis; the
+bar-only ratchet, entry-bar exclusion and previous-bar vol guard have no
+flag — they are the spec on both sides.
+**Monitor**: `journalctl -u onemil-trader | grep "StopMonitor (bar)"`.
+**Tests**: `tests/test_bf_trail.py` (22: unit, BT↔live parity on one
+tape, CWVX golden, fill-R rides to 10:01 on both, entry-bar, vol-guard);
+`tests/test_stop_monitor.py::TestTrailingStop` rewritten to the bar
+contract (+ `test_tick_does_not_arm_or_ratchet_r_trail`).
+**Known deviation**: poll-mode StopMonitor (paper nodes only) still
+ratchets R-trails per snapshot.
 
 ### Per-tier MACD zone scaling (S2-max, shipped 2026-04-18)
 
@@ -1358,6 +1424,13 @@ all R-multiples derived from it shifted away from entry.
 `WatchEntry`. When set, R-trail math uses these (the SETUP's structural
 values) instead of fill-based. Hard stop and broker safety SL stay at
 fill-based levels — only trail/lock thresholds move.
+
+**2026-09-05 follow-up**: this fix shipped LIVE only — the BT cache
+builder kept simulating fill-R (`use_planned_r` was never wired from
+config), so the reference book and the live machine ran two exit specs
+for four months (CWVX 2026-08-03: live +$313 vs cache +$2,381). Both
+sides now share `trading/bf_trail.py` and the `trading.trailing_stop.r_basis`
+knob — see "BF trail unification" below.
 
 **BT validation** (`study_planned_r_realistic_slippage.py`): plan-R wins
 HOLDOUT P&L at every slippage level tested. At LIVE-realistic slippage

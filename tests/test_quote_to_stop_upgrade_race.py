@@ -27,6 +27,17 @@ from unittest.mock import MagicMock
 from trading.stop_monitor import StopMonitor
 
 
+def _deliver_bar(mon, symbol, high, ts='2026-05-08T14:07:00Z'):
+    """2026-09-05 BF trail unification: the R-trail arms/ratchets on CLOSED
+    BAR highs only (shared trading/bf_trail.py, BT parity). Tests that used
+    to fire a tick at the peak now deliver the peak's closed bar."""
+    import asyncio
+    mon._bar_symbols.add(symbol)
+    bar = MagicMock(symbol=symbol, timestamp=ts, open=high - 0.02, high=high,
+                    low=high - 0.05, close=high - 0.01, volume=250_000)
+    asyncio.run(mon._on_bar(bar))
+
+
 class _FakeStream:
     """Minimal stand-in for alpaca-py's StockDataStream `_handlers` dict.
 
@@ -210,21 +221,25 @@ class TestUpgradeRaceProof(unittest.TestCase):
             strategy='bull_flag',
         )
 
-        # Fire a trade tick at $6.32 — TTGT's actual peak. r_gain = (6.32-5.7863)/0.2162 = 2.47 >= 1.5
-        trade = MagicMock(symbol=symbol, price=6.32)
-        asyncio.run(mon._on_trade(trade))
+        # 2026-09-05 BF trail unification: the R-trail arms/ratchets on
+        # CLOSED-BAR highs only (BT parity). Deliver the 10:07 bar with
+        # TTGT's actual peak high $6.32. r_gain = (6.32-5.7863)/0.2162 = 2.47 >= 1.5
+        mon._bar_symbols.add(symbol)
+        bar = MagicMock(symbol=symbol, timestamp='2026-05-08T14:07:00Z',
+                        open=6.10, high=6.32, low=6.08, close=6.28, volume=250_000)
+        asyncio.run(mon._on_bar(bar))
 
         with mon._watch_lock:
             watch = mon._watches[symbol]
         # Trail must be active and stop ratcheted (high - 1R = 6.32 - 0.2162 = 6.10)
         self.assertTrue(
             watch.trailing_active,
-            "FIX: tick at +2.4R must activate the trail (was the missing behavior on TTGT)"
+            "FIX: bar high at +2.4R must activate the trail (was the missing behavior on TTGT)"
         )
         expected_stop = 6.32 - 0.2162
         self.assertAlmostEqual(
             watch.stop_price, expected_stop, places=2,
-            msg="FIX: trail ratchet must fire on tick at new high"
+            msg="FIX: trail ratchet must fire on the closed bar at the new high"
         )
 
 
@@ -267,8 +282,7 @@ class TestPlanRTrail(unittest.TestCase):
         )
         fill_mon._stream._handlers["trades"]['IREZ'] = fill_mon._on_trade
 
-        trade = MagicMock(symbol='IREZ', price=7.13)
-        asyncio.run(fill_mon._on_trade(trade))
+        _deliver_bar(fill_mon, 'IREZ', 7.13)
         with fill_mon._watch_lock:
             self.assertFalse(
                 fill_mon._watches['IREZ'].trailing_active,
@@ -287,8 +301,7 @@ class TestPlanRTrail(unittest.TestCase):
         )
         plan_mon._stream._handlers["trades"]['IREZ'] = plan_mon._on_trade
 
-        trade = MagicMock(symbol='IREZ', price=7.13)
-        asyncio.run(plan_mon._on_trade(trade))
+        _deliver_bar(plan_mon, 'IREZ', 7.13)
         with plan_mon._watch_lock:
             w = plan_mon._watches['IREZ']
         self.assertTrue(
@@ -316,8 +329,7 @@ class TestPlanRTrail(unittest.TestCase):
 
         # planned activation: 5.715 + 1.5×0.145 = $5.93
         # peak $6.32 → arms easily (would also arm under fill-R since 6.32 > 6.12)
-        trade = MagicMock(symbol='TTGT', price=6.32)
-        asyncio.run(mon._on_trade(trade))
+        _deliver_bar(mon, 'TTGT', 6.32)
         with mon._watch_lock:
             w = mon._watches['TTGT']
         self.assertTrue(w.trailing_active)
@@ -341,8 +353,7 @@ class TestPlanRTrail(unittest.TestCase):
         mon._stream._handlers["trades"]['X'] = mon._on_trade
 
         # Need price > 6.0 + 1.5×1.0 = 7.5 to arm
-        trade = MagicMock(symbol='X', price=7.6)
-        asyncio.run(mon._on_trade(trade))
+        _deliver_bar(mon, 'X', 7.6)
         with mon._watch_lock:
             w = mon._watches['X']
         self.assertTrue(w.trailing_active)

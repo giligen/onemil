@@ -194,6 +194,16 @@ journalctl -u onemil-trader -f           # Live logs
 - Rollback: flip flag to `false` + restart (pure config flip)
 - Full details in README.md "Volume-Confirmed Trail Exit" section
 
+### BF trail unification — ONE exit spec for BT and live (shipped 2026-09-05, default-on)
+- **Why**: CWVX 2026-08-03 — live +$313 (trail_stop 9:58) vs the cache +$2,381 (rode to 13:32). Same trade, two specs: live trailed on **plan-R** (R=$0.21, README Bug 5) while the cache builder simulated **fill-R** (R=$0.46; `use_planned_r` was never wired from config). Live also ratcheted the R-trail on every TICK while BT ratchets on closed-bar highs; BT's vol-guard read the triggering bar's own volume (lookahead); live checked stops inside the fill minute while BT starts at entry+1.
+- **Shared module**: `trading/bf_trail.py` (`r_baseline_and_unit`, `arm_and_ratchet`, `entry_bar_excluded`) — imported by `backtest.py::TradeSimulator.simulate` AND `trading/stop_monitor.py::_maybe_ratchet_from_bar_high`. Parity by construction, enforced by `tests/test_bf_trail.py` (same bar tape → identical stop path/exit bar on both sides; CWVX golden day; vol-guard; entry-bar).
+- **Contract**: R basis from ONE knob `trading.trailing_stop.r_basis: plan|fill` (default `plan`); the R-trail advances ONLY on closed 1-min bars (ticks just trigger the exit — like the BOBS 5/8 pct-trail fix, finally applied to the R-trail); entry bar excluded on both sides (`skip_exits_until_ts` = end of fill minute, set in `trading_engine.py`); trail-stop volume confirmation reads the PREVIOUS closed bar on both sides.
+- **Honest book under the unified spec** (regen-6 cache `data/bull_flag_cache_causal_full_20260830.csv`, exits re-simulated with `batch_backtest.py --resim-exits`): **$191,142 / 105 tr / WR 46.7% / MDD −$52.7K** vs $198,276 / 106 / 44.3% / −$58.0K fill-R. Worst month −$23.8K (was −$27.4K). Relative tool only — never a forecast. Approximate planned entry (fill/1.005) until the regen-7 rebuild writes the new `planned_entry` cache column (exact).
+- **`--resim-exits OUT.csv`**: re-simulates exits of a Stage-1 cache with the current simulator in minutes (entries untouched; exits never feed entries). Source via `BT_CACHE_PATH_OVERRIDE`; Stage-2 on the result with the same env var.
+- **Rollback**: `r_basis: fill` restores the retired cache's basis (needs a regen for BT); bar-only ratchet / entry-bar exclusion / prev-bar vol guard have no flag — they ARE the spec.
+- **Monitor**: `journalctl -u onemil-trader | grep "StopMonitor (bar)"` — `trail ACTIVATED via bar.high … (r_basis=plan)` and `trail ratchet … (bar.high=…, R=…)`; `entry-bar excluded` at debug.
+- **Known deviation**: the poll-mode StopMonitor path (paper nodes only) still ratchets R-trails per snapshot.
+
 ### `min_pole_candles` tested 3 → 2 — **NOT SHIPPED** (2026-05-15)
 - Motivation: live this week 3,234 "Pole too short (2 candles, need 3+)" rejections. AIIO 2026-05-13 rejected as 2-candle pole at 14:14, ran +52% intraday. Same pattern killed SMX/MASK/KPTI live wins.
 - **2025 OOS (12 months)** with pole=2: **+$63,172 (+18.3%)**, WR 46.8%→47.9%, 267→338 trades. 8 better months, 4 worse.

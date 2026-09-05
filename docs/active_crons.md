@@ -6,9 +6,10 @@ with zero warning. On resuming a session, read this file and re-arm every job be
 VERBATIM via `CronCreate` before doing anything else, then update this file to match
 whatever the fresh `CronList` shows.
 
-Last synced: 2026-09-05 (before a planned session reload)
+Last synced: 2026-09-05 12:00 UTC (ids: weekly ddb3b4ae, EOD dive b41ff3c0, ORB gate a861a834,
+prestage comparison db52f8d3, owner brief e44ae2db; stale duplicate weekly 5e74feb2 deleted)
 
-## 1. Weekly Retirement-Validation Review
+## 1. Weekly Retirement-Validation Review (re-armed 2026-09-05, id ddb3b4ae)
 - **Cron**: `23 9 * * 6` (every Saturday 9:23 AM local)
 - **Recurring**: true
 - **Prompt**:
@@ -56,6 +57,15 @@ ORB SCALE GATE RECOMMENDATION (one-shot Sat 9/12 13:37 UTC — owner-ordered 8/2
 ```
 PRESTAGE LIVE DAILY COMPARISON (recurring weekdays 20:50 UTC, after close — the owner-requested staged-vs-chase evaluation; armed 8/28 launch day, 7-day auto-expiry: re-arm VERBATIM at the Saturday weekly review). Working dir /home/ec2-user/onemil. Skip with a one-line telegram if prestage is back in shadow mode. Compute from logs/prestage_events_<today>.jsonl + journalctl FILL QUALITY lines + trades.db: (1) staged orders: placed/filled/canceled counts with cancel-reason mix (window_close vs demoted — fade-demotion at distance 4.5 activated 8/28, expect intraday cancels now, verify freed watermark got reused by later stages); (2) fill quality by path: path=staged fills (bps vs level; expect 0-30) vs path=chase fills (chase bps; historically 150-750) — per-fill list + medians; (3) P&L by path from trades.db (staged rows have pattern_data path=staged; untagged ignition rows = chase) — realized P&L, WR, per-trade avg for each path, cumulative since 8/28; (4) staged fills WITHOUT shadow-trigger twins (JEM 8/27 class — intra-minute crosses; EXPECTED, list them, their P&L is the fills-on-spikes cost to track vs the 19mo BT assumption); (5) BP: watermark peak vs $15K cap, bp_budget/bp_reserve skip counts, any divergence-agent contention; (6) errors/anomalies in prestage lines. ONE [STAGED vs CHASE] telegram via scripts/report_common.send_telegram with the numbers + a one-line verdict (staging paying for itself? on what sample size — refuse conclusions below ~10 fills/path, say 'accumulating'). Never modify configs.
 ```
+
+## 5. Daily Owner Brief (armed 2026-09-05, id e44ae2db)
+- **Cron**: `37 10 * * 1-5` (weekdays 10:37 AM local = pre-boot)
+- **Recurring**: true, 7-day auto-expiry — re-arm at each Saturday weekly review
+- **Prompt**:
+```
+DAILY OWNER BRIEF (weekdays 10:37 UTC = pre-boot; owner directive 9/5: "act as an OWNER, my PARTNER — think daily where we are across all three, share whether we are on track to make money, and FIX what needs fixing"). Working dir /home/ec2-user/onemil. Read memory feedback_act_as_owner_daily.md + project_book_verdict_frameworks.md. Then, from PRIMARY data (trades.db, green_streak.json, prestage events, books): (1) P&L: yesterday, week-to-date, month-to-date, lifetime-live per book + total; (2) ON TRACK TO MAKE MONEY? one honest line per book against its honest monthly projection (ORB ~$319/mo at $10K; BF ~$9.9K/mo at $2K risk but live at $60; ignition $0 basis) and against the recovery staircase; (3) BROKEN: any book running with a diagnosed money-losing defect? If yes: FIX IT NOW before the 12:30 boot, or PAUSE its entries (exits stay alive) — no third option; (4) what I am fixing/building TODAY, in $-impact order; (5) gates/verdict dates approaching. Telegram [OWNER BRIEF] under 20 lines, numbers first, no research narration. Then DO the fix. If the fix needs a restart, do it before 12:25 UTC. Re-arm this cron weekly at the Saturday review (7-day expiry) and keep docs/active_crons.md in sync.
+```
+(Note 9/5: BF projection in the prompt predates the trail unification — unified-spec honest book is $191K/20mo ≈ $9.6K/mo at $2K risk; still a relative number, not a forecast.)
 
 ---
 ## Protocol for future sessions

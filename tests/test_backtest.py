@@ -1498,12 +1498,17 @@ class TestVolConfirmedTrailExit:
             vol_confirmed_trail_enabled=vol_conf_enabled,
             vol_confirmed_trail_min_ratio=vol_conf_ratio,
         )
-        # Bars: entry, ratchet to +2R (push trail to +1R = 5.10), then dip below stop
+        # Bars: entry, ratchet to +2R (push trail to +1R = 5.10), then dip below stop.
+        # 2026-09-05 parity fix: the guard reads the PREVIOUS closed bar's
+        # volume (what live's `last_bar_volume` holds when the tick crosses
+        # the stop), not the dip bar's own — so `bar_dip_volume` goes on
+        # bar 2. The dip bar's volume is deliberately huge to prove it is
+        # NOT what the guard looks at.
         bars = _make_bars([
             (5.00, 5.05, 4.95, 5.02, 5000),    # 0 entry bar
             (5.02, 5.15, 5.01, 5.14, 5000),    # 1 high 5.15 (+1.5R), activate trail
-            (5.14, 5.20, 5.12, 5.18, 5000),    # 2 push high to 5.20 → trail stop=5.10
-            (5.18, 5.18, 5.05, 5.08, bar_dip_volume),  # 3 dip low=5.05 crosses stop 5.10
+            (5.14, 5.20, 5.12, 5.18, bar_dip_volume),  # 2 push high to 5.20 → stop=5.10; last closed bar before the trip
+            (5.18, 5.18, 5.05, 5.08, 10_000_000),      # 3 dip low=5.05 crosses stop 5.10
         ])
         return sim.simulate(plan, bars, entry_bar_idx=0)
 

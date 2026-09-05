@@ -224,6 +224,12 @@ trading:
   trailing_stop:
     enabled: true                        # ACTIVE — paper testing
     trail_r: 1.0                        # trail distance in R units below high
+    # 2026-09-05 BF trail unification: ONE knob for the R the trail measures
+    # in, read by BOTH the live StopMonitor and backtest.TradeSimulator via
+    # trading/bf_trail.py. 'plan' = planned_entry - planned_stop (slippage-
+    # immune; live since 2026-05-08, README Bug 5). 'fill' = fill - stop.
+    # Change ONLY together with a --build-cache regen.
+    r_basis: plan
     # 2026-07-05: 1.5 -> 2.0 (REVERSES the 2026-04-13 move 2.0->1.5).
     # That April verdict was measured on the pre-floor-1.8/pre-TTF population
     # where peak-1.5-2R-then-reverse (OPTX-class) trades were common. On the

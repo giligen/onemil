@@ -19,7 +19,7 @@ import os
 import sys
 from collections import defaultdict
 from datetime import datetime, timezone, date, timedelta
-from typing import List, Tuple, Dict, Optional, Set
+from typing import List, Tuple, Dict, Optional, Set, Any
 
 import pandas as pd
 import pytz
@@ -86,6 +86,13 @@ CSV_HEADERS = [
     # at fill time when conviction_enabled, regardless of whether the gate
     # actually fired. Lets post-hoc analysis replay alternative gate variants.
     "bk_ratio_at_fill", "spy_3d_at_fill",
+    # 2026-09-05 BF trail unification: the PLANNED breakout level. The
+    # trail's R basis is plan-R (shared trading/bf_trail.py) and needs
+    # this to re-simulate exits without re-detecting patterns
+    # (`--resim-exits`). `entry_price` is the slipped fill. Empty on
+    # pre-unification rows → resim falls back to fill/(1+entry_slip)
+    # with a WARNING (exact only when the fill bar did not gap over).
+    "planned_entry",
 ]
 
 def _trade_to_cache_row(trade) -> Optional[Dict]:
@@ -143,6 +150,10 @@ def _trade_to_cache_row(trade) -> Optional[Dict]:
                 f"{getattr(trade, 'spy_3d_at_fill', None):.3f}"
                 if getattr(trade, 'spy_3d_at_fill', None) is not None
                 else ''
+            ),
+            'planned_entry': (
+                f"{trade.planned_entry:.4f}"
+                if getattr(trade, 'planned_entry', None) else ''
             ),
         }
     except Exception as e:
@@ -219,6 +230,8 @@ def load_bull_flag_cache(cache_path: str, start_date: date, end_date: date,
             row['daily_range_pct'] = float(row.get('daily_range_pct', 100))
             _avg_vol = row.get('avg_volume_20d', '0') or '0'
             row['avg_volume_20d'] = int(float(_avg_vol))
+            _pe = row.get('planned_entry')
+            row['planned_entry'] = float(_pe) if _pe else None
             trades.append(row)
     logger.info(f"Loaded {len(trades)} cached trades from {cache_path} ({start_date} to {end_date})")
     return trades
@@ -2322,6 +2335,171 @@ def print_summary(
 # ---------------------------------------------------------------------------
 
 
+def resim_cache_exits(
+    src_cache: str,
+    out_path: str,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    bars_db_path: str = 'data/cache.db',
+) -> Dict[str, Any]:
+    """Re-simulate EXITS for every row of a Stage-1 cache with the CURRENT
+    production TradeSimulator, writing a new cache to `out_path`.
+
+    2026-09-05 BF trail unification. Entries (pattern detection, fill
+    price, shares, all feature columns) are copied verbatim — only the
+    exit columns (exit_time_et, exit_price, exit_reason, pnl, pnl_pct,
+    partial_*) are recomputed from the cached 1-min bars. This is exact
+    for exit-rule changes (R basis, trail semantics, vol guard) because a
+    row's exit never feeds another row's entry (one trade per symbol-day;
+    concurrency and daily-loss limits are Stage-2 concerns).
+
+    Planned entry: uses the `planned_entry` column when present. Older
+    rows lack it → approximated as fill / (1 + entry_slippage_pct), which
+    equals the breakout level only when the fill bar did not gap over it.
+    A WARNING with the count is logged; the exact number needs a full
+    `--build-cache` regen (which now writes the column).
+
+    Never touches `src_cache`. Refuses to write over it.
+    """
+    import sqlite3
+    from trading.trade_planner import TradePlan
+    from trading.pattern_detector import BullFlagPattern
+
+    if os.path.abspath(out_path) == os.path.abspath(src_cache):
+        raise ValueError("--resim-exits output must differ from the source cache")
+
+    runner = BacktestRunner(realistic=True)
+    sim = runner.simulator
+    entry_slip = float(runner.entry_slippage_pct)
+    logger.info(
+        f"RESIM EXITS: src={src_cache} out={out_path} r_basis={sim.r_basis} "
+        f"trail={sim.trailing_stop_r}R@+{sim.trailing_activate_at_r}R "
+        f"vol_conf={sim.vol_confirmed_trail_enabled} entry_slip={entry_slip:.3%}"
+    )
+
+    with open(src_cache) as f:
+        rows = list(csv.DictReader(f))
+    logger.info(f"RESIM EXITS: {len(rows)} source rows")
+
+    conn = sqlite3.connect(bars_db_path)
+    stats = {'rows': len(rows), 'resimmed': 0, 'no_bars': 0, 'no_entry_bar': 0,
+             'approx_planned': 0, 'exact_planned': 0, 'skipped_range': 0,
+             'pnl_before': 0.0, 'pnl_after': 0.0}
+    out_rows: List[Dict] = []
+    warned_approx = False
+
+    for n, row in enumerate(rows, 1):
+        d = date.fromisoformat(row['date'])
+        if (start_date and d < start_date) or (end_date and d > end_date):
+            out_rows.append(row)
+            stats['skipped_range'] += 1
+            continue
+        symbol = row['symbol']
+        fill = float(row['entry_price'])
+        stop = float(row['stop_loss'])
+        target = float(row['target'])
+        shares = int(row['shares'])
+        pe_raw = row.get('planned_entry') or ''
+        if pe_raw:
+            planned_entry = float(pe_raw)
+            stats['exact_planned'] += 1
+        else:
+            planned_entry = fill / (1.0 + entry_slip)
+            stats['approx_planned'] += 1
+            if not warned_approx:
+                logger.warning(
+                    "RESIM EXITS: cache rows lack `planned_entry` — approximating "
+                    "as fill/(1+entry_slip). Exact only when the fill bar did not "
+                    "gap over the breakout level; run --build-cache for the exact "
+                    "column. (Warning printed once; count in summary.)"
+                )
+                warned_approx = True
+
+        cur = conn.execute(
+            'SELECT timestamp, open, high, low, close, volume FROM intraday_bars_1min '
+            'WHERE symbol=? AND bar_date=? ORDER BY timestamp ASC',
+            (symbol, row['date']),
+        )
+        recs = cur.fetchall()
+        if not recs:
+            stats['no_bars'] += 1
+            logger.warning(f"RESIM EXITS: {symbol} {row['date']}: no 1-min bars cached — row kept as-is")
+            out_rows.append(row)
+            continue
+        bars = pd.DataFrame(recs, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        bars['timestamp'] = pd.to_datetime(bars['timestamp'], utc=True)
+
+        # Entry bar = the bar whose ET wall time equals entry_time_et
+        et_times = bars['timestamp'].dt.tz_convert('America/New_York').dt.strftime('%H:%M:%S')
+        matches = et_times[et_times == row['entry_time_et']].index
+        if len(matches) == 0 or matches[0] >= len(bars) - 1:
+            stats['no_entry_bar'] += 1
+            logger.warning(f"RESIM EXITS: {symbol} {row['date']}: entry bar {row['entry_time_et']} "
+                           f"not found in {len(bars)} bars — row kept as-is")
+            out_rows.append(row)
+            continue
+        entry_idx = int(matches[0])
+
+        avg_vol_20d = int(float(row.get('avg_volume_20d') or 0))
+        avg_flag_vol = max(int(avg_vol_20d / 78), 1)
+        pattern = BullFlagPattern(
+            symbol=symbol, pole_start_idx=0, pole_end_idx=0,
+            flag_start_idx=0, flag_end_idx=0,
+            pole_low=stop, pole_high=planned_entry,
+            pole_height=planned_entry - stop, pole_gain_pct=0.0,
+            flag_low=stop, flag_high=planned_entry,
+            retracement_pct=0.0, pullback_candle_count=1,
+            avg_pole_volume=avg_flag_vol, avg_flag_volume=avg_flag_vol,
+            breakout_level=planned_entry,
+        )
+        rps = planned_entry - stop
+        rws = target - planned_entry
+        plan = TradePlan(
+            symbol=symbol, entry_price=planned_entry, stop_loss_price=stop,
+            take_profit_price=target, risk_per_share=rps, reward_per_share=rws,
+            risk_reward_ratio=(rws / rps) if rps > 0 else 1.0,
+            shares=shares, total_risk=rps * shares, pattern=pattern,
+        )
+        trade = sim.simulate(plan, bars, entry_idx, entry_price_override=fill)
+
+        new = dict(row)
+        new['exit_time_et'] = utc_to_et_str(trade.exit_time)
+        new['exit_price'] = f"{trade.exit_price:.2f}" if trade.exit_price else ''
+        new['exit_reason'] = trade.exit_reason or ''
+        new['pnl'] = f"{trade.pnl:.2f}"
+        new['pnl_pct'] = f"{trade.pnl_pct:.2f}"
+        new['partial_taken'] = trade.partial_exit_taken
+        new['partial_price'] = f"{trade.partial_exit_price:.2f}" if trade.partial_exit_price else ''
+        new['partial_shares'] = trade.partial_shares
+        new['partial_pnl'] = f"{trade.partial_pnl:.2f}"
+        if not pe_raw:
+            new['planned_entry'] = ''  # keep honest: approximated, not recorded
+        out_rows.append(new)
+        stats['resimmed'] += 1
+        stats['pnl_before'] += float(row['pnl'])
+        stats['pnl_after'] += float(trade.pnl)
+        if n % 250 == 0:
+            logger.info(f"RESIM EXITS: {n}/{len(rows)} rows … Σpnl before "
+                        f"${stats['pnl_before']:,.0f} → after ${stats['pnl_after']:,.0f}")
+
+    conn.close()
+    tmp = out_path + '.tmp'
+    with open(tmp, 'w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=CSV_HEADERS, extrasaction='ignore')
+        w.writeheader()
+        for r in out_rows:
+            w.writerow({h: r.get(h, '') for h in CSV_HEADERS})
+    os.replace(tmp, out_path)
+    logger.info(
+        f"RESIM EXITS DONE: {stats['resimmed']}/{stats['rows']} rows re-simulated "
+        f"(no_bars={stats['no_bars']}, no_entry_bar={stats['no_entry_bar']}, "
+        f"planned exact={stats['exact_planned']} approx={stats['approx_planned']}); "
+        f"Stage-1 Σpnl ${stats['pnl_before']:,.0f} → ${stats['pnl_after']:,.0f}; "
+        f"wrote {out_path}"
+    )
+    return stats
+
+
 def main():
     """CLI entry point for batch backtesting."""
     parser = argparse.ArgumentParser(
@@ -2452,7 +2630,30 @@ def main():
         "--min-relative-vol-rate", type=float, default=0,
         help="Volume gate: min relative volume rate (vol_rate / expected_rate)"
     )
+    parser.add_argument(
+        "--resim-exits", type=str, default=None, metavar="OUT_CSV",
+        help="Re-simulate EXITS of the production Stage-1 cache with the current "
+             "TradeSimulator (trail R-basis / semantics / vol-guard) and write a new "
+             "cache to OUT_CSV. Entries untouched. Never overwrites the source. "
+             "Honors --start/--end (rows outside are copied verbatim). "
+             "Use BT_CACHE_PATH_OVERRIDE=OUT_CSV for the Stage-2 run.",
+    )
     args = parser.parse_args()
+
+    if args.resim_exits:
+        from config import Config as _RCfg
+        _rtc = _RCfg._load_yaml_only().get("trading", {})
+        _src = _get_bull_flag_cache_path(
+            float(_rtc.get('entry_slippage_pct', 0.005)),
+            float(_rtc.get('exit_slippage_pct', 0.003)),
+        )
+        _stats = resim_cache_exits(
+            src_cache=_src, out_path=args.resim_exits,
+            start_date=date.fromisoformat(args.start) if args.start else None,
+            end_date=date.fromisoformat(args.end) if args.end else None,
+        )
+        print(f"RESIM EXITS: {_stats}")
+        return
 
     # Apply --config override BEFORE anything reads config. Inherited by forked
     # workers. Never touches the real config.yaml — tools pass --config <tmp>.

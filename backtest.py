@@ -199,6 +199,12 @@ class TradeSimulator:
         # planned breakout level doesn't push the activation gate further
         # away. Hard stop stays at plan.stop_loss_price either way.
         use_planned_r: bool = False,
+        # 2026-09-05 BF trail unification: ONE R-basis knob shared with live
+        # (`trading.trailing_stop.r_basis`, default 'plan'). `use_planned_r`
+        # is kept for the two legacy studies; True forces 'plan'. When
+        # neither is given the simulator uses the shared default — the
+        # basis live has traded since 2026-05-08 (README Bug 5).
+        r_basis: Optional[str] = None,
     ):
         """
         Initialize TradeSimulator.
@@ -270,8 +276,12 @@ class TradeSimulator:
         # Static lock (ORB-style)
         self.static_lock_arm_r = static_lock_arm_r
         self.static_lock_at_r = static_lock_at_r
-        # Planned-R variant
-        self.use_planned_r = use_planned_r
+        # R basis — shared contract with live (trading/bf_trail.py).
+        from trading.bf_trail import normalize_r_basis, R_BASIS_PLAN
+        if r_basis is None:
+            r_basis = R_BASIS_PLAN if use_planned_r else None
+        self.r_basis = normalize_r_basis(r_basis)
+        self.use_planned_r = (self.r_basis == R_BASIS_PLAN)
 
     # ------------------------------------------------------------------
     # Exhaustion signal detectors (delegated to shared module)
@@ -359,17 +369,19 @@ class TradeSimulator:
         static_locked = False
         highest_since_entry = actual_entry
         current_stop = trade.stop_loss
-        # Planned-R variant: decouple trail-math from fill slippage. R is
-        # the SETUP's structural risk (planned_entry - planned_stop), and
-        # r_gain / activation / lock thresholds are measured from
-        # planned_entry instead of fill price. Hard stop is unchanged
-        # (still trade.stop_loss = plan.stop_loss_price).
-        if self.use_planned_r:
-            risk = plan.entry_price - plan.stop_loss_price
-            r_baseline = plan.entry_price
-        else:
-            risk = actual_entry - plan.stop_loss_price
-            r_baseline = actual_entry
+        # R basis via the SHARED helper (trading/bf_trail.py) — same call
+        # live makes in StopMonitor._r_baseline_and_unit. 'plan': R is the
+        # SETUP's structural risk (planned_entry - planned_stop) measured
+        # from planned_entry; 'fill': legacy fill-based. Hard stop is
+        # unchanged either way (trade.stop_loss = plan.stop_loss_price).
+        from trading.bf_trail import r_baseline_and_unit, arm_and_ratchet
+        r_baseline, risk = r_baseline_and_unit(
+            planned_entry=plan.entry_price,
+            planned_stop=plan.stop_loss_price,
+            fill_price=actual_entry,
+            fill_stop=plan.stop_loss_price,
+            r_basis=self.r_basis,
+        )
 
         # Exhaustion exit state
         exhaust_partial_taken = False
@@ -420,7 +432,12 @@ class TradeSimulator:
                     and self.vol_confirmed_trail_enabled):
                 from trading.trail_vol_guard import should_skip_trail_exit_on_low_vol
                 flag_vol = plan.pattern.avg_flag_volume if plan.pattern else None
-                cur_vol = bar['volume']
+                # 2026-09-05 parity fix: confirm on the PREVIOUS closed bar,
+                # exactly what live's `watch.last_bar_volume` holds when the
+                # tick crosses the stop. Using this bar's own volume was
+                # lookahead — the volume of the minute the stop trips is
+                # not known until the minute ends.
+                cur_vol = bars.iloc[i - 1]['volume']
                 if should_skip_trail_exit_on_low_vol(
                     bar_volume=cur_vol,
                     flag_avg_volume=flag_vol,
@@ -478,10 +495,26 @@ class TradeSimulator:
                             f"stop ${lock_target:.2f} (+{self.static_lock_at_r}R, NO TRAIL)"
                         )
 
-                # Stage 2: Activate trailing after +NR (skipped when static-locked)
-                if not static_locked and risk > 0:
-                    if r_gain >= self.trailing_activate_at_r and self.trailing_stop_r > 0:
-                        trailing_active = True
+                # Stage 2: arm + ratchet via the SHARED state machine
+                # (trading/bf_trail.py::arm_and_ratchet — live's closed-bar
+                # path calls the identical function). Runs AFTER this bar's
+                # stop check, so the stop it produces is live from the next
+                # bar on. Skipped when static-locked (one-shot lock is final).
+                if not static_locked and risk > 0 and self.trailing_stop_r > 0:
+                    step = arm_and_ratchet(
+                        bar_high=bar_high,
+                        highest_since_entry=highest_since_entry,
+                        current_stop=current_stop,
+                        trailing_active=trailing_active,
+                        r_baseline=r_baseline,
+                        r_unit=risk,
+                        activate_at_r=self.trailing_activate_at_r,
+                        trail_r=effective_trail_r,
+                    )
+                    highest_since_entry = step.highest
+                    trailing_active = step.trailing_active
+                    if step.ratcheted:
+                        current_stop = step.stop
 
                 # Stage 2.5: Tighten trail after passing threshold (e.g., 2.5R)
                 # Locks in more profit on runners without capping them
@@ -494,12 +527,22 @@ class TradeSimulator:
                             f"{effective_trail_r}R trail"
                         )
 
-                # Ratchet stop up (uses tighter trail after exhaustion partial)
-                # Skipped when static-locked — the lock is one-shot and final.
+                # Re-ratchet after a Stage-2.5 tighten on this same bar
+                # (effective_trail_r may have just shrunk). Same shared
+                # function; a no-op when nothing changed.
                 if trailing_active and not static_locked and risk > 0 and self.trailing_stop_r > 0:
-                    new_stop = highest_since_entry - risk * effective_trail_r
-                    if new_stop > current_stop:
-                        current_stop = new_stop
+                    step = arm_and_ratchet(
+                        bar_high=bar_high,
+                        highest_since_entry=highest_since_entry,
+                        current_stop=current_stop,
+                        trailing_active=True,
+                        r_baseline=r_baseline,
+                        r_unit=risk,
+                        activate_at_r=self.trailing_activate_at_r,
+                        trail_r=effective_trail_r,
+                    )
+                    if step.ratcheted:
+                        current_stop = step.stop
 
                 # Exhaustion exit: check signals when profitable, sell partial
                 if (self.exhaustion_exit_enabled and not exhaust_partial_taken
@@ -1024,6 +1067,12 @@ class BacktestRunner:
                 trail_exit_slippage_pct=trail_exit_slippage_pct,
                 vol_confirmed_trail_enabled=bool(trail_cfg.get("vol_confirmed_exit", {}).get("enabled", False)),
                 vol_confirmed_trail_min_ratio=float(trail_cfg.get("vol_confirmed_exit", {}).get("min_vol_ratio", 1.0)),
+                # 2026-09-05: ONE R-basis knob read by BT and live alike.
+                r_basis=trail_cfg.get("r_basis"),
+            )
+            logger.info(
+                f"Trail R-basis: {self.simulator.r_basis} "
+                f"(trading.trailing_stop.r_basis; shared with live via trading/bf_trail.py)"
             )
         # Volume qualification gates (for live/backtest alignment testing)
         self.min_cum_dollar_vol = min_cum_dollar_vol

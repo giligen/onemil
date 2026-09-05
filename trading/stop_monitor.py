@@ -127,6 +127,11 @@ class WatchEntry:
     # — many trades never reach +1.5R activation despite real profit.
     planned_entry_price: float = 0.0     # planned breakout level
     planned_risk_per_share: float = 0.0  # planned_entry - planned_stop
+    # 2026-09-05 BF trail unification: which R the trail measures in —
+    # 'plan' (default; planned fields above) or 'fill'. ONE config knob
+    # (`trading.trailing_stop.r_basis`) feeds this AND the BT simulator via
+    # trading/bf_trail.py, so both sides cannot drift again.
+    r_basis: str = 'plan'
     # Entry-bar skip (ORB BT parity, 2026-04-19): in BT simulate_orb_trade,
     # `for row in sim_bars.iloc[1:]` skips the entry bar entirely for exit
     # checks. PROD matches by skipping all stop/lock checks for ticks before
@@ -466,10 +471,17 @@ class StopMonitor:
         decouples the R-trail from entry slippage. Falls back to fill-based
         when planned fields are zero (legacy behavior).
         """
-        if (watch.planned_entry_price > 0
-                and watch.planned_risk_per_share > 0):
-            return watch.planned_entry_price, watch.planned_risk_per_share
-        return watch.entry_price, watch.risk_per_share
+        # 2026-09-05: delegated to the SHARED helper (trading/bf_trail.py)
+        # — the BT simulator calls the same function with the same knob.
+        from trading.bf_trail import r_baseline_and_unit
+        planned_stop = watch.planned_entry_price - watch.planned_risk_per_share
+        return r_baseline_and_unit(
+            planned_entry=watch.planned_entry_price,
+            planned_stop=planned_stop,
+            fill_price=watch.entry_price,
+            fill_stop=watch.entry_price - watch.risk_per_share,
+            r_basis=watch.r_basis,
+        )
 
     @staticmethod
     def _maybe_arm_pct_trail(watch: 'WatchEntry', observed_high: float) -> bool:
@@ -770,11 +782,14 @@ class StopMonitor:
             # print over the closed minute; using it for trail-state updates
             # is honest and monotone (only ratchets UP).
             bar_high = bar_dict['high']
+            bar_start_ts = self._bar_start_epoch(bar_dict['timestamp'])
             with self._watch_lock:
                 watch = self._watches.get(symbol)
                 if watch is not None:
                     watch.last_bar_volume = bar_dict['volume']
-                    self._maybe_ratchet_from_bar_high(symbol, watch, bar_high)
+                    self._maybe_ratchet_from_bar_high(
+                        symbol, watch, bar_high, bar_start_ts=bar_start_ts,
+                    )
 
             # Snapshot handlers under lock, then fire outside lock so a slow handler
             # doesn't block registration/unregistration on another thread.
@@ -797,51 +812,110 @@ class StopMonitor:
         except Exception as e:
             logger.error(f"StopMonitor: _on_bar error: {e}")
 
+    @staticmethod
+    def _bar_start_epoch(ts) -> float:
+        """Unix epoch of a bar's START from whatever the stream hands us
+        (aware datetime, naive-UTC datetime, ISO string). 0.0 when it
+        cannot be parsed — logged, because 0.0 disables the entry-bar
+        exclusion for that bar (fail-open toward BT's pre-fix behaviour)."""
+        try:
+            if hasattr(ts, 'timestamp'):
+                if getattr(ts, 'tzinfo', None) is None:
+                    from datetime import timezone as _tz
+                    ts = ts.replace(tzinfo=_tz.utc)
+                return float(ts.timestamp())
+            if isinstance(ts, str):
+                from datetime import datetime as _dt, timezone as _tz
+                s = ts.replace('Z', '+00:00')
+                d = _dt.fromisoformat(s)
+                if d.tzinfo is None:
+                    d = d.replace(tzinfo=_tz.utc)
+                return float(d.timestamp())
+        except Exception as e:
+            logger.warning(f"StopMonitor: unparseable bar timestamp {ts!r}: {e} — "
+                           f"entry-bar exclusion disabled for this bar")
+        else:
+            logger.warning(f"StopMonitor: bar timestamp of unknown type {type(ts).__name__} — "
+                           f"entry-bar exclusion disabled for this bar")
+        return 0.0
+
     def _maybe_ratchet_from_bar_high(
         self, symbol: str, watch: "WatchEntry", bar_high: float,
+        bar_start_ts: float = 0.0,
     ) -> None:
-        """Ratchet trail state off the closed-bar high.
+        """Advance trail state off a CLOSED bar's high.
 
-        Called from `_on_bar` under `_watch_lock`. Mirrors the tick-path
-        update (`_on_trade` line ~1685) but uses `bar.high` as the price
-        signal. Idempotent and monotone — bar high never moves
-        `highest_since_entry` down, so calling repeatedly is safe.
+        Called from `_on_bar` under `_watch_lock`. This is the ONLY place
+        an R-trail (bull flag) arms or ratchets — 2026-09-05 unification:
+        the math is `trading.bf_trail.arm_and_ratchet`, the same function
+        the BT simulator runs per bar, so a bar tape produces the identical
+        stop path on both sides. Idempotent and monotone.
 
-        Does NOT trigger an exit by itself. The exit fires on the next
-        tick that crosses the (now-ratcheted) stop_price, in `_on_trade`
-        at line ~1748. This keeps exit-execution single-sourced
-        (tick-path) while making trail-state robust to tick gaps.
+        Entry-bar exclusion (BT parity — the simulate loop starts at
+        entry+1): when `watch.skip_exits_until_ts` > 0 and this bar
+        STARTED before it, the bar is the fill minute and is ignored.
 
-        See: OPTX 2026-04-13 incident. BT/LIVE divergence root cause —
-        `highest_since_entry` was tick-only.
+        Does NOT trigger an exit by itself. The exit fires on the next tick
+        that crosses the (now-ratcheted) stop_price in `_on_trade`, which
+        is exactly BT's "next bar's low <= stop" check.
+
+        History: OPTX 2026-04-13 (bar-high added alongside ticks), BOBS
+        5/8 (pct trails bar-only), CWVX 2026-08-03 (R-trail bar-only +
+        shared R basis).
         """
         if bar_high <= 0:
             return
+        has_r_trail = watch.trail_r > 0 and watch.risk_per_share > 0
+        has_pct_trail = watch.trail_pct > 0
+
+        if has_r_trail and not has_pct_trail:
+            from trading.bf_trail import arm_and_ratchet, entry_bar_excluded
+            if entry_bar_excluded(bar_start_ts, watch.skip_exits_until_ts):
+                logger.debug(
+                    f"StopMonitor (bar): {symbol} entry-bar excluded from trail "
+                    f"state (bar_start={bar_start_ts:.0f} < "
+                    f"skip_until={watch.skip_exits_until_ts:.0f})"
+                )
+                return
+            r_baseline, r_unit = self._r_baseline_and_unit(watch)
+            step = arm_and_ratchet(
+                bar_high=bar_high,
+                highest_since_entry=watch.highest_since_entry,
+                current_stop=watch.stop_price,
+                trailing_active=watch.trailing_active,
+                r_baseline=r_baseline,
+                r_unit=r_unit,
+                activate_at_r=watch.activate_at_r,
+                trail_r=watch.trail_r,
+            )
+            watch.highest_since_entry = step.highest
+            if step.armed_now:
+                watch.trailing_active = True
+                logger.info(
+                    f"StopMonitor (bar): {symbol} trail ACTIVATED via bar.high — "
+                    f"high=${step.highest:.2f}, +{step.r_gain:.1f}R from "
+                    f"r_baseline=${r_baseline:.2f} (r_basis={watch.r_basis})"
+                )
+            if step.ratcheted:
+                old_stop = watch.stop_price
+                watch.stop_price = step.stop
+                logger.info(
+                    f"StopMonitor (bar): {symbol} trail ratchet "
+                    f"${old_stop:.2f} → ${step.stop:.2f} "
+                    f"(bar.high=${bar_high:.2f}, R=${r_unit:.3f}×{watch.trail_r})"
+                )
+            return
+
+        # Pct-trail path (MACD wave) — unchanged semantics below.
         # Update highest if bar high is a new peak. Don't early-return when
         # equal — even if a tick already pushed `highest_since_entry` to
         # this level, the bar handler is the ONLY ratchet source for pct
         # trails post-BOBS-5/8, so we must let the ratchet block run.
         if bar_high > watch.highest_since_entry:
             watch.highest_since_entry = bar_high
-
-        has_r_trail = watch.trail_r > 0 and watch.risk_per_share > 0
-        has_pct_trail = watch.trail_pct > 0
         if not (has_r_trail or has_pct_trail):
             return
-
-        # Activate (R-based only — pct-based already active at watch creation
-        # OR gated by trail_arm_pct, handled via _maybe_arm_pct_trail below).
-        # TTGT/IREZ 2026-05-08 fix: R math uses planned baseline+unit when set.
         r_baseline, r_unit = self._r_baseline_and_unit(watch)
-        if not watch.trailing_active and has_r_trail:
-            r_gain = (bar_high - r_baseline) / r_unit
-            if r_gain >= watch.activate_at_r:
-                watch.trailing_active = True
-                logger.info(
-                    f"StopMonitor (bar): {symbol} trail ACTIVATED via bar.high — "
-                    f"high=${bar_high:.2f}, +{r_gain:.1f}R from "
-                    f"r_baseline=${r_baseline:.2f} (planned={'yes' if watch.planned_entry_price > 0 else 'no'})"
-                )
         # CORD 5/8 fix: pct-trail arming gate. When trail_arm_pct > 0, only
         # activate after high crosses entry × (1 + arm_pct).
         if has_pct_trail and self._maybe_arm_pct_trail(watch, bar_high):
@@ -922,6 +996,7 @@ class StopMonitor:
         skip_exits_until_ts: float = 0.0,
         planned_entry_price: float = 0.0,
         planned_risk_per_share: float = 0.0,
+        r_basis: str = 'plan',
         scale_at_px: float = 0.0,
         scale_qty: int = 0,
         scale_done: bool = False,
@@ -987,6 +1062,7 @@ class StopMonitor:
             skip_exits_until_ts=skip_exits_until_ts,
             planned_entry_price=planned_entry_price,
             planned_risk_per_share=planned_risk_per_share,
+            r_basis=r_basis,
             # ORB winner-stack rehydration path (P0-4): a restart with a
             # filled scale re-adds the watch with runner shares + scale_done
             # so the leg can never double-sell. Fresh arming goes through
@@ -1054,6 +1130,7 @@ class StopMonitor:
         skip_exits_until_ts: float = 0.0,
         planned_entry_price: float = 0.0,
         planned_risk_per_share: float = 0.0,
+        r_basis: str = 'plan',
     ) -> None:
         """Atomic quote-watch → stop-watch promotion.
 
@@ -1102,6 +1179,7 @@ class StopMonitor:
             skip_exits_until_ts=skip_exits_until_ts,
             planned_entry_price=planned_entry_price,
             planned_risk_per_share=planned_risk_per_share,
+            r_basis=r_basis,
         )
 
         # Atomic swap under one lock: pop quote-watch, install stop-watch.
@@ -2828,14 +2906,20 @@ class StopMonitor:
         # ::TestPercentTrailingStop for the regression contract.
         has_r_trail = watch.trail_r > 0 and watch.risk_per_share > 0
         has_pct_trail = watch.trail_pct > 0
-        if has_r_trail or has_pct_trail:
+        # 2026-09-05 BF trail unification: the R-trail (bull flag) advances
+        # its state ONLY on closed 1-min bars (`_maybe_ratchet_from_bar_high`
+        # → shared trading/bf_trail.arm_and_ratchet), exactly like the BT
+        # simulator. Ticks no longer raise highest_since_entry, arm, or
+        # ratchet an R-trail — they only TRIGGER the exit against the
+        # bar-derived stop. Pct trails (MACD wave) keep their existing
+        # tick semantics (BOBS 5/8: bar-only ratchet, tick-updated high).
+        if has_pct_trail:
             if price > watch.highest_since_entry:
                 watch.highest_since_entry = price
 
             # Activate trail. %-based trails activate immediately
             # (set at watch creation already, but re-confirm here for
-            # clarity); R-based trails wait for the +activate_at_r
-            # threshold.
+            # clarity).
             if not watch.trailing_active:
                 if has_pct_trail:
                     # CORD 5/8 fix: respect trail_arm_pct gate. Legacy
@@ -2850,42 +2934,14 @@ class StopMonitor:
                             f"arm=${arm_level:.2f} "
                             f"(entry=${watch.entry_price:.2f})"
                         )
-                elif has_r_trail:
-                    # plan-R fix: use planned baseline+unit when set
-                    _r_base, _r_unit = self._r_baseline_and_unit(watch)
-                    r_gain = (watch.highest_since_entry - _r_base) / _r_unit
-                    if r_gain >= watch.activate_at_r:
-                        watch.trailing_active = True
-                        logger.info(
-                            f"StopMonitor: {symbol} trailing stop ACTIVATED — "
-                            f"high=${watch.highest_since_entry:.2f}, "
-                            f"+{r_gain:.1f}R from r_base=${_r_base:.2f} "
-                            f"(planned={'yes' if watch.planned_entry_price > 0 else 'no'})"
-                        )
-
-            if watch.trailing_active:
-                # BOBS/ASPN 5/8 fix: pct trails (MACD wave) ratchet stop_price
-                # ONLY on closed-bar highs, matching BT behavior. Tick-based
-                # ratchet caused whipsaw — BOBS tripped 7s after fill from a
-                # mid-bar tick high. BT runs on 1-min bars only, so BT trail
-                # is bar-based; live must match for BT/LIVE parity. Tick path
-                # still UPDATES highest_since_entry (for arming check) and
-                # still TRIGGERS the exit when price ≤ stop_price (so we
-                # exit promptly when a closed-bar-ratcheted stop is hit).
-                # See _maybe_ratchet_from_bar_high for the ratchet path.
-                if has_r_trail:
-                    # plan-R fix: trail distance uses planned R unit when set
-                    _r_base, _r_unit = self._r_baseline_and_unit(watch)
-                    new_stop = watch.highest_since_entry - _r_unit * watch.trail_r
-                    if new_stop > watch.stop_price:
-                        old_stop = watch.stop_price
-                        watch.stop_price = new_stop
-                        logger.debug(
-                            f"StopMonitor: {symbol} trail ratchet "
-                            f"${old_stop:.2f} → ${new_stop:.2f} "
-                            f"(high=${watch.highest_since_entry:.2f})"
-                        )
-                # has_pct_trail: NO tick-based stop ratchet (bar-only).
+            # BOBS/ASPN 5/8: pct trails ratchet stop_price ONLY on
+            # closed-bar highs (see _maybe_ratchet_from_bar_high). The tick
+            # path updates highest_since_entry (arming) and TRIGGERS the
+            # exit below when price <= the bar-derived stop.
+        elif has_r_trail:
+            # Bull-flag R-trail: no tick-side state change at all (bar-only,
+            # BT parity). Exit trigger below is the only tick action.
+            pass
 
         # Static-lock arming (ORB strategy). When price first reaches
         # entry + lock_arm_at_r × R, move stop UP to entry + lock_stop_r × R

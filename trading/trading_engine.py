@@ -57,6 +57,33 @@ ET = pytz.timezone('US/Eastern')
 _SIMPLE_ORDER_TYPES = frozenset(('stop_simple', 'marketable_limit_fallback'))
 
 
+def _end_of_minute_epoch(ts) -> float:
+    """Unix epoch at the END of the minute containing `ts` (aware datetime,
+    naive-UTC datetime, or ISO string). Used as `skip_exits_until_ts` on
+    bull-flag watches so the fill minute is excluded from trail state and
+    stop checks — BT parity (simulate loop starts at entry+1), 2026-09-05.
+
+    Returns 0.0 (= no exclusion) when `ts` is missing or unparseable; that
+    fallback is logged because it silently reverts the watch to the
+    pre-fix semantics for one minute.
+    """
+    import math
+    if ts is None:
+        logger.warning("_end_of_minute_epoch: no fill timestamp — entry-bar "
+                       "exclusion disabled for this watch")
+        return 0.0
+    try:
+        if isinstance(ts, str):
+            ts = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+        if getattr(ts, 'tzinfo', None) is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return float(math.floor(ts.timestamp() / 60.0) * 60 + 60)
+    except Exception as e:
+        logger.warning(f"_end_of_minute_epoch: unparseable fill timestamp {ts!r}: {e} "
+                       f"— entry-bar exclusion disabled for this watch")
+        return 0.0
+
+
 def _is_simple_order(pending: dict) -> bool:
     """True if the pending order has no broker-level bracket legs.
 
@@ -159,6 +186,11 @@ class TradingEngine:
         self.trailing_stop_enabled = bool(trail_cfg.get("enabled", False))
         self.trailing_stop_r = float(trail_cfg.get("trail_r", 1.0))
         self.trailing_activate_at_r = float(trail_cfg.get("activate_at_r", 2.0))
+        # 2026-09-05 BF trail unification: ONE R-basis knob shared with the
+        # BT simulator (trading/bf_trail.py). Invalid value raises — must
+        # not silently pick a side of the parity contract.
+        from trading.bf_trail import normalize_r_basis
+        self.trail_r_basis = normalize_r_basis(trail_cfg.get("r_basis"))
         # Experiment D: volume-confirmed trail exit. When enabled, StopMonitor
         # skips trail exits on bars where last-closed-bar volume is below
         # `flag_avg_volume × min_vol_ratio`. See trading/trail_vol_guard.py.
@@ -1994,6 +2026,13 @@ class TradingEngine:
                             vol_confirmed_trail_min_ratio=self.vol_confirmed_trail_min_ratio,
                             planned_entry_price=_planned_entry,
                             planned_risk_per_share=_planned_R,
+                            r_basis=self.trail_r_basis,
+                            # BT parity (2026-09-05): the fill minute is
+                            # excluded from trail state AND stop checks —
+                            # the simulate loop starts at entry+1. Broker
+                            # safety-net SL still covers the minute.
+                            skip_exits_until_ts=_end_of_minute_epoch(
+                                datetime.now(timezone.utc)),
                         )
 
                         # Cancel TP leg when trailing stop is active (bracket path only)
@@ -4730,6 +4769,11 @@ class TradingEngine:
                             vol_confirmed_trail_min_ratio=self.vol_confirmed_trail_min_ratio,
                             planned_entry_price=_planned_entry_db,
                             planned_risk_per_share=_planned_R_db,
+                            r_basis=self.trail_r_basis,
+                            # Crash recovery: exclude the original fill
+                            # minute (usually long past → no-op).
+                            skip_exits_until_ts=_end_of_minute_epoch(
+                                trade.get('filled_at')),
                         )
                         logger.info(
                             f"{symbol}: Crash recovery — re-registered StopMonitor watch "

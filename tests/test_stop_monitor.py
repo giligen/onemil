@@ -767,32 +767,51 @@ class TestTrailingStop:
         assert w.trailing_active is False
         assert w.stop_price == 4.29  # unchanged
 
+    # 2026-09-05 BF trail unification (CWVX 2026-08-03): the R-trail
+    # arms/ratchets on CLOSED-BAR highs only — the shared
+    # trading/bf_trail.arm_and_ratchet the BT simulator runs. Ticks only
+    # trigger the exit. These tests drive bars for state and ticks for
+    # the exit, mirroring the pct-trail contract (TestPctTrailBarOnlyRatchet).
+
+    def _bar(self, mon, high, low=None, ts='2026-08-03T13:56:00Z', vol=40_000):
+        return MagicMock(symbol='PLYX', timestamp=ts, open=high - 0.02,
+                         high=high, low=low if low is not None else high - 0.05,
+                         close=high - 0.01, volume=vol)
+
+    @pytest.mark.asyncio
+    async def test_tick_does_not_arm_or_ratchet_r_trail(self, trail_monitor):
+        """A tick above +2R must NOT arm or move the R-trail (bar-only).
+
+        CWVX-class contract: intra-minute prints cannot produce a stop that
+        the same minute then trips. State advances at bar close only.
+        """
+        t = MagicMock(); t.symbol = 'PLYX'; t.price = 4.80
+        await trail_monitor._on_trade(t)
+        with trail_monitor._watch_lock:
+            w = trail_monitor._watches['PLYX']
+        assert w.trailing_active is False
+        assert w.stop_price == 4.29
+        assert w.highest_since_entry == 4.40  # ticks don't raise the high either
+
     @pytest.mark.asyncio
     async def test_trail_activates_at_threshold(self, trail_monitor):
-        """Trail activates at +2R."""
+        """Closed bar high at +2R arms the trail and ratchets."""
+        trail_monitor._bar_symbols.add('PLYX')
         # +2R = 4.40 + 0.22 = 4.62, use 4.63 to clear float precision
-        trade = MagicMock()
-        trade.symbol = 'PLYX'
-        trade.price = 4.63
-        await trail_monitor._on_trade(trade)
-
+        await trail_monitor._on_bar(self._bar(trail_monitor, high=4.63))
         with trail_monitor._watch_lock:
             w = trail_monitor._watches['PLYX']
         assert w.trailing_active is True
-        # New stop = 4.62 - 0.11 * 1.0 = 4.51
-        assert w.stop_price == pytest.approx(4.51, abs=0.01)
+        # New stop = 4.63 - 0.11 * 1.0 = 4.52
+        assert w.stop_price == pytest.approx(4.52, abs=0.01)
 
     @pytest.mark.asyncio
     async def test_trail_ratchets_up(self, trail_monitor):
-        """Trail ratchets stop up as price climbs."""
-        # Activate at +2R
-        t1 = MagicMock(); t1.symbol = 'PLYX'; t1.price = 4.62
-        await trail_monitor._on_trade(t1)
-
-        # Price climbs to 4.80 — stop should follow
-        t2 = MagicMock(); t2.symbol = 'PLYX'; t2.price = 4.80
-        await trail_monitor._on_trade(t2)
-
+        """Trail ratchets stop up as closed-bar highs climb."""
+        trail_monitor._bar_symbols.add('PLYX')
+        await trail_monitor._on_bar(self._bar(trail_monitor, high=4.62))
+        await trail_monitor._on_bar(self._bar(trail_monitor, high=4.80,
+                                              ts='2026-08-03T13:57:00Z'))
         with trail_monitor._watch_lock:
             w = trail_monitor._watches['PLYX']
         # New stop = 4.80 - 0.11 = 4.69
@@ -801,36 +820,55 @@ class TestTrailingStop:
 
     @pytest.mark.asyncio
     async def test_trail_never_ratchets_down(self, trail_monitor):
-        """Trail stop never moves down when price drops."""
-        # Activate and ratchet up
-        t1 = MagicMock(); t1.symbol = 'PLYX'; t1.price = 4.80
-        await trail_monitor._on_trade(t1)
-
+        """Trail stop never moves down when a later bar is lower."""
+        trail_monitor._bar_symbols.add('PLYX')
+        await trail_monitor._on_bar(self._bar(trail_monitor, high=4.80))
         with trail_monitor._watch_lock:
             stop_after_up = trail_monitor._watches['PLYX'].stop_price
-
-        # Price drops — stop should NOT move down
-        t2 = MagicMock(); t2.symbol = 'PLYX'; t2.price = 4.72
-        await trail_monitor._on_trade(t2)
-
+        await trail_monitor._on_bar(self._bar(trail_monitor, high=4.72,
+                                              ts='2026-08-03T13:57:00Z'))
+        t = MagicMock(); t.symbol = 'PLYX'; t.price = 4.72
+        await trail_monitor._on_trade(t)
         with trail_monitor._watch_lock:
             w = trail_monitor._watches['PLYX']
         assert w.stop_price == stop_after_up  # unchanged
 
     @pytest.mark.asyncio
     async def test_trail_exit_reason_is_trail_stop(self, trail_monitor, mock_alpaca):
-        """Exit reason is 'trail_stop' when trailing is active."""
-        # Activate trailing
-        t1 = MagicMock(); t1.symbol = 'PLYX'; t1.price = 4.80
-        await trail_monitor._on_trade(t1)
-
-        # Price drops below trail stop level (4.80 - 0.11 = ~4.69)
+        """Exit reason is 'trail_stop' when the bar-armed trail is hit by a tick."""
+        trail_monitor._bar_symbols.add('PLYX')
+        await trail_monitor._on_bar(self._bar(trail_monitor, high=4.80))
+        # Next-minute tick below trail stop level (4.80 - 0.11 = ~4.69)
         t2 = MagicMock(); t2.symbol = 'PLYX'; t2.price = 4.68
         await trail_monitor._on_trade(t2)
 
         events = trail_monitor.drain_exit_events()
         assert len(events) == 1
         assert events[0].exit_reason == 'trail_stop'
+
+    @pytest.mark.asyncio
+    async def test_entry_bar_excluded_from_trail_state(self, trail_monitor):
+        """The fill minute's bar must not arm/ratchet (BT loop starts at entry+1)."""
+        trail_monitor._bar_symbols.add('PLYX')
+        with trail_monitor._watch_lock:
+            w = trail_monitor._watches['PLYX']
+            # fill minute = 13:56 UTC → skip until 13:57:00
+            from datetime import datetime as _dt, timezone as _tz
+            w.skip_exits_until_ts = _dt(2026, 8, 3, 13, 57, tzinfo=_tz.utc).timestamp()
+        # Entry bar (starts 13:56) with a +2R high → ignored
+        await trail_monitor._on_bar(self._bar(trail_monitor, high=4.90,
+                                              ts='2026-08-03T13:56:00Z'))
+        with trail_monitor._watch_lock:
+            w = trail_monitor._watches['PLYX']
+        assert w.trailing_active is False
+        assert w.stop_price == 4.29
+        # Next bar (starts 13:57) counts
+        await trail_monitor._on_bar(self._bar(trail_monitor, high=4.90,
+                                              ts='2026-08-03T13:57:00Z'))
+        with trail_monitor._watch_lock:
+            w = trail_monitor._watches['PLYX']
+        assert w.trailing_active is True
+        assert w.stop_price == pytest.approx(4.79, abs=0.01)
 
     @pytest.mark.asyncio
     async def test_fixed_stop_exit_reason_without_trail(self, monitor, mock_alpaca):
@@ -1055,17 +1093,21 @@ class TestPercentTrailingStop:
             entry_price=4.40, risk_per_share=0.11,
             trail_r=1.0, activate_at_r=2.0,
         )
+        # 2026-09-05: R-trail state advances on CLOSED BARS only (BT parity).
+        mon._bar_symbols.add('PLYX')
         # +1R = $4.51 — below threshold, trail must not activate
-        t1 = MagicMock(); t1.symbol = 'PLYX'; t1.price = 4.51
-        await mon._on_trade(t1)
+        b1 = MagicMock(symbol='PLYX', timestamp='2026-08-03T13:56:00Z',
+                       open=4.45, high=4.51, low=4.44, close=4.50, volume=1000)
+        await mon._on_bar(b1)
         with mon._watch_lock:
             w = mon._watches['PLYX']
         assert w.trailing_active is False, "R-trail activated before threshold"
         assert w.stop_price == 4.29
 
         # +2R = $4.62 — use 4.63 to clear float precision (matches existing tests)
-        t2 = MagicMock(); t2.symbol = 'PLYX'; t2.price = 4.63
-        await mon._on_trade(t2)
+        b2 = MagicMock(symbol='PLYX', timestamp='2026-08-03T13:57:00Z',
+                       open=4.52, high=4.63, low=4.51, close=4.62, volume=1000)
+        await mon._on_bar(b2)
         with mon._watch_lock:
             w = mon._watches['PLYX']
         assert w.trailing_active is True
@@ -1545,8 +1587,11 @@ class TestVolConfirmedTrailExit:
     async def test_vol_conf_low_vol_skips_trail_exit(self, vol_mon):
         """Trail would fire, but last bar volume < threshold → skip, keep holding."""
         # Push high to activate trail: +3R = 4.40 + 0.33 = 4.73
-        t1 = MagicMock(); t1.symbol = 'PLYX'; t1.price = 4.80
-        await vol_mon._on_trade(t1)
+        # 2026-09-05: arm via a CLOSED BAR (R-trail is bar-only, BT parity)
+        vol_mon._bar_symbols.add('PLYX')
+        b1 = MagicMock(symbol='PLYX', timestamp='2026-08-03T13:56:00Z',
+                       open=4.70, high=4.80, low=4.69, close=4.79, volume=60_000)
+        await vol_mon._on_bar(b1)
 
         # Simulate last closed bar volume: 5_000 < 50_000 × 1.0 → low-vol
         with vol_mon._watch_lock:
@@ -1563,8 +1608,11 @@ class TestVolConfirmedTrailExit:
     @pytest.mark.asyncio
     async def test_vol_conf_high_vol_fires_trail_exit(self, vol_mon):
         """Trail fires normally when last bar volume >= threshold."""
-        t1 = MagicMock(); t1.symbol = 'PLYX'; t1.price = 4.80
-        await vol_mon._on_trade(t1)
+        # 2026-09-05: arm via a CLOSED BAR (R-trail is bar-only, BT parity)
+        vol_mon._bar_symbols.add('PLYX')
+        b1 = MagicMock(symbol='PLYX', timestamp='2026-08-03T13:56:00Z',
+                       open=4.70, high=4.80, low=4.69, close=4.79, volume=60_000)
+        await vol_mon._on_bar(b1)
 
         with vol_mon._watch_lock:
             vol_mon._watches['PLYX'].last_bar_volume = 100_000  # 2× baseline
@@ -1591,8 +1639,11 @@ class TestVolConfirmedTrailExit:
             vol_confirmed_trail_enabled=False,  # OFF
             vol_confirmed_trail_min_ratio=1.0,
         )
-        t1 = MagicMock(); t1.symbol = 'PLYX'; t1.price = 4.80
-        await mon._on_trade(t1)
+        # 2026-09-05: arm via a CLOSED BAR (R-trail is bar-only, BT parity)
+        mon._bar_symbols.add('PLYX')
+        b1 = MagicMock(symbol='PLYX', timestamp='2026-08-03T13:56:00Z',
+                       open=4.70, high=4.80, low=4.69, close=4.79, volume=60_000)
+        await mon._on_bar(b1)
 
         with mon._watch_lock:
             mon._watches['PLYX'].last_bar_volume = 100  # very low
