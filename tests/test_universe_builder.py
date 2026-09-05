@@ -320,8 +320,12 @@ class TestBuild:
 
         result = builder.build()
 
-        # Verify pipeline was called
-        mock_alpaca.get_all_tradeable_assets.assert_called_once()
+        # Verify pipeline was called. Since the 2026-09-05 wrapper rule, the
+        # asset list is fetched twice: Step 1 (bull-flag universe, leveraged
+        # excluded) and Step 9 (ORB/ignition seed pool, exclude_leveraged=False).
+        # Here both return the same symbols, so no extra wrapper daily-bar fetch.
+        assert mock_alpaca.get_all_tradeable_assets.call_count == 2
+        mock_alpaca.get_all_tradeable_assets.assert_called_with(exclude_leveraged=False)
         mock_alpaca.get_daily_bars.assert_called_once()
         mock_float_provider.get_stock_info_batch.assert_called_once()
 

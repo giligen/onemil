@@ -258,11 +258,7 @@ class UniverseBuilder:
         # the volume floor at read time, so persisting extra rows is safe
         # (~3K symbols vs avg-filtered ~2K). Failure logs ERROR but does
         # NOT abort the build.
-        broad_symbols = [
-            sym for sym, bar in (daily_bars or {}).items()
-            if bar
-            and BROAD_BARS_MIN_CLOSE <= bar.get('close', 0) <= BROAD_BARS_MAX_CLOSE
-        ]
+        broad_symbols = self._orb_broad_symbols(daily_bars)
         self._refresh_broad_daily_bars(broad_symbols, BROAD_BARS_LOOKBACK_DAYS)
 
         # Summary
@@ -410,6 +406,60 @@ class UniverseBuilder:
             f"{sorted(set(b['symbol'] for b in flat_bars))}"
         )
         return len(flat_bars)
+
+    def _orb_broad_symbols(self, daily_bars: Dict) -> List[str]:
+        """ORB/ignition seed pool for Step 9: every tradeable equity in the
+        close band — common stocks from Step 2 PLUS leveraged/inverse
+        wrappers (2026-09-05 universe rule, owner GO).
+
+        Until 9/5 Step 9 inherited the bull-flag asset filter (Step 1 drops
+        leveraged wrappers), so wrappers listed after the filter shipped
+        (2026-04-04) never entered `daily_bars` — the table BOTH live ORB and
+        the ORB backtest seed from — while older wrappers stayed from earlier
+        cache builds: an accidental "old in, new out" rule. Evidence for IN
+        (four-way pipeline test, research/orb_entered_inclusive/wrapper_rule/
+        summary.csv): $7,085 vs OUT $4,998, MDD −$509 vs −$684, OUT negative
+        in 25H2, wrappers = 42% of picks.
+
+        The wrapper list is fetched separately (`exclude_leveraged=False`)
+        and their last close comes from a second get_daily_bars call; any
+        failure logs ERROR and falls back to the common-stock pool so the
+        universe build never aborts here.
+        """
+        broad = [
+            sym for sym, bar in (daily_bars or {}).items()
+            if bar
+            and BROAD_BARS_MIN_CLOSE <= bar.get('close', 0) <= BROAD_BARS_MAX_CLOSE
+        ]
+        try:
+            all_assets = self.alpaca.get_all_tradeable_assets(exclude_leveraged=False)
+            wrappers = sorted(
+                a['symbol'] for a in all_assets
+                if a['symbol'] not in (daily_bars or {})
+            )
+            if not wrappers:
+                logger.info("Step 9: no leveraged wrappers beyond the common-stock pool")
+                return broad
+            wrapper_bars = self.alpaca.get_daily_bars(wrappers)
+            kept = [
+                sym for sym, bar in (wrapper_bars or {}).items()
+                if bar
+                and BROAD_BARS_MIN_CLOSE <= bar.get('close', 0) <= BROAD_BARS_MAX_CLOSE
+            ]
+            logger.info(
+                f"Step 9: wrapper rule IN — {len(wrappers)} leveraged wrappers "
+                f"fetched, {len(kept)} in the ${BROAD_BARS_MIN_CLOSE}-"
+                f"${BROAD_BARS_MAX_CLOSE} band added to the ORB seed pool "
+                f"({len(broad)} common stocks)"
+            )
+            return sorted(set(broad) | set(kept))
+        except Exception as e:
+            logger.error(
+                f"Step 9: wrapper pool fetch FAILED ({e}) — ORB seed pool falls "
+                f"back to the {len(broad)} common stocks; new wrappers will be "
+                f"missing from daily_bars until the next successful build"
+            )
+            return broad
 
     def _refresh_broad_daily_bars(
         self, symbols: List[str], lookback_days: int

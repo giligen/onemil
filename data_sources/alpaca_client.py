@@ -311,12 +311,22 @@ class AlpacaClient:
     }
 
     @classmethod
-    def _is_common_stock(cls, symbol: str, name: str) -> bool:
+    def _is_common_stock(cls, symbol: str, name: str,
+                         exclude_leveraged: bool = True) -> bool:
         """
         Filter out warrants, units, preferred shares, rights, SPACs,
-        and leveraged/inverse ETFs.
+        and (by default) leveraged/inverse ETFs.
 
         Only keeps common stocks suitable for momentum day trading.
+
+        `exclude_leveraged=False` keeps leveraged/inverse wrappers (2x/3x
+        single-stock and index ETFs) while still dropping warrants, units,
+        preferred and rights. That is the ORB/ignition universe rule
+        (2026-09-05, owner GO): wrappers are ~42% of the ORB book's picks
+        and the catalyst-confirmation design assumes they exist — the
+        four-way test (research/orb_entered_inclusive/wrapper_rule/) put
+        wrappers-IN at $7,085 vs wrappers-OUT $4,998 with a negative era.
+        The bull-flag universe keeps the default (leveraged excluded).
         """
         name_upper = (name or '').upper()
 
@@ -333,6 +343,9 @@ class AlpacaClient:
         if symbol.endswith('U') and (name_upper.endswith('UNIT') or name_upper.endswith('UNITS')):
             return False
 
+        if not exclude_leveraged:
+            return True
+
         # Leveraged/inverse ETFs: explicit symbol list
         if symbol in cls._LEVERAGED_ETF_SYMBOLS:
             return False
@@ -344,11 +357,13 @@ class AlpacaClient:
 
         return True
 
-    def get_all_tradeable_assets(self) -> List[Dict]:
+    def get_all_tradeable_assets(self, exclude_leveraged: bool = True) -> List[Dict]:
         """
         Get all tradeable US common stock assets.
 
-        Filters out warrants, units, preferred shares, and rights.
+        Filters out warrants, units, preferred shares, and rights, and (by
+        default) leveraged/inverse wrappers. `exclude_leveraged=False` is the
+        ORB/ignition universe rule (see `_is_common_stock`).
 
         Returns:
             List of dicts with symbol, name, exchange info
@@ -375,7 +390,8 @@ class AlpacaClient:
                     continue
                 total_tradeable += 1
 
-                if not self._is_common_stock(asset.symbol, asset.name or ''):
+                if not self._is_common_stock(asset.symbol, asset.name or '',
+                                             exclude_leveraged=exclude_leveraged):
                     excluded_count += 1
                     continue
 
