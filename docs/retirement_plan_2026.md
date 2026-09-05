@@ -156,6 +156,30 @@ $285K). The $10K path stays the same; it just needs ~20% less capital than
 the sum-of-drawdowns estimate. Caveat: 20 months, one shared bad summer —
 the factor gets re-measured from live data at each step.
 
+## 7b. RE-BASE 2026-09-05 23:55 — the BF leg is smaller than this document assumed
+
+The bull-flag reference used above ($191K / 19.5 mo at $2K risk) was inflated by
+an approximate planned-entry in the exit re-simulation. The exact rebuild
+(regen-7) under the live exit spec and the live universe rule is
+**$107,351 / 79 trades / MDD −$27.5K / worst month −$11.2K — 2025 +$118K,
+2026 year-to-date −$10.9K.** Per $100 risk: **$270/mo, MDD −$1,375.** The
+ORB reference is $290/mo per $10K stage (wrapper rule, production regen).
+
+| Configuration | P&L / mo (reference) | Haircut (BF ×0.3 while 2026 is negative, IGN ×0.7) |
+|---|---|---|
+| ORB $50K + BF $500 + IGN $500 | $1.45K + $1.35K + $3.2K = $6.0K | $1.45K + $0.4K + $2.2K = **$4.1K** |
+| ORB $100K + BF $1K + IGN $500 | $2.9K + $2.7K + $3.2K = $8.8K | **$5.8K** |
+| ORB $174K + BF $2K + IGN $500 | $5.0K + $5.4K + $3.2K = $13.6K | **$8.9K** |
+
+**What this does to the $10K path:** without BF the ceiling is ORB at full
+DTBP plus ignition ≈ $8.2K/mo at reference, so $10K/mo needs BF to contribute
+≥ $2K/mo net, which it has not done in 2026. The plan's Phase A gate for BF is
+therefore the decisive one: BF stays KEEP-TOKEN at $60 with the sizing ladder
+frozen until a live quarter is positive and in band; if BF fails by 11/15,
+the honest target with ORB + ignition alone is ~$8K/mo at ~$250K dedicated,
+and $10K needs either ORB proving above its reference live or a fourth book.
+Nothing here changes the method: capital follows evidence, gate by gate.
+
 ## 8. What "winning" means, measured
 
 Trust is earned by these, nothing else: live P&L inside the BT band per
