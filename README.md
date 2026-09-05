@@ -851,6 +851,12 @@ orb.yaml `exit.lock_arm_at_r: 1.75` / `lock_stop_r: 0.5`).
 > `research/orb_entered_inclusive/`. The earlier "BT prev-day vs live
 > 9:35-volume gate" diagnosis was wrong: both gate on prev-day volume
 > ≥ 500K (`orb_engine.build_orb_universe_from_snapshots`).
+> **Rebuilt 2026-09-05 (Jan-25→Sep-26, $10K stage sizing): $6,394 /
+> 119 picks (66 filled + 53 no-fill, 55.5% fill rate) / WR 39.4% /
+> MDD −$509 / worst month −$198 / 6 red months of 21 / +$304 per
+> month** — vs $9,282 / 85 picks under the entered-only lookahead
+> (−31%). Every ORB CSV is read through `trading/orb_csv.read_orb_csv`
+> (the ticker `NA` was parsed as NaN and crashed the pipeline).
 
 **Validated Jan 2025 → Apr 2026** (`study_orb_pipeline_static_lock.py`,
 production-parity):
