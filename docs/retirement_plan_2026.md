@@ -91,11 +91,52 @@ data", and then capital follows evidence under a fixed drawdown rule. The
 2-year floor is what makes this affordable: it buys evidence time, not
 leverage.
 
-## 6. Owner inputs needed (only you know these)
+## 6. Owner inputs (answered 2026-09-05)
 
-1. Target monthly income I (what "retirement" has to pay).
-2. Capital you would dedicate at Phase B if 11/15 says secured, and the
-   drawdown you can sit through without intervening (I proposed 25%).
-3. Whether a dedicated account at Phase B is acceptable.
+1. Target income: **$10K/month.**
+2. Capital: **not the constraint — capital follows trust that we can win**,
+   i.e. it is unlocked by evidence, gate by gate. Drawdown rule: 25% of
+   dedicated capital (proposed, not contested).
+3. Dedicated account at Phase B: **yes.**
 
-Everything else in this plan is testable and I will keep it current.
+## 7. The $10K/month path (capital unlocked by evidence)
+
+What $10K/mo needs at the honest per-unit edge, with and without the live
+haircut (BF ×0.5, ignition ×0.7 until proven):
+
+| Configuration | Reference P&L / mo | Haircut P&L / mo | Worst-case DD | Capital at 25% rule |
+|---|---|---|---|---|
+| ORB $100K + BF $1K + IGN $500 | $11.1K | $7.7K | −$53K | ~$210K |
+| ORB $174K + BF $1.5K + IGN $500 | $15.9K | $11.2K | −$71K | ~$285K |
+| ORB $174K + BF $2K + IGN $500 | $18.3K | $12.4K | −$84K | ~$340K |
+
+So: **$10K/mo needs either row 2 at today's haircut (~$285K dedicated) or
+row 1 with the haircut earned back to 1.0× (~$210K).** Ignition is capped
+near $500 risk by the participation rule; ORB is capped by day-trading
+buying power (4× equity, so $174K needs ≥ $45K equity in the account); BF
+is the book with the most headroom and the least live proof.
+
+Evidence → capital schedule (each step requires the previous one to hold
+live for the stated window; a failed step drops back one, never two up):
+
+| Step | When (earliest) | Unlock | Evidence required |
+|---|---|---|---|
+| 0 | now → 11/15/26 | ORB $25K→$50K, BF $250, IGN $250 | the 8/14 gates: in-band, parity, monster captured, gated advances |
+| 1 | 11/15/26 | dedicated account, ORB $50K + BF $500 + IGN $500 (haircut ≈ $5K/mo, DD −$38K → ~$150K) | "secured" on all four criteria |
+| 2 | +1 quarter live in band (~Feb 2027) | ORB $100K + BF $1K (≈ $7.7K/mo haircut, ~$210K) | each book's live P&L within its band; BF parity streak intact at $500 |
+| 3 | +1 more quarter (~May 2027) | ORB $174K + BF $1.5K (≈ $11K/mo haircut, ~$285K) | haircuts revised from live data; drawdown stayed inside the 25% rule |
+| 4 | by ~Q3 2027 | **$10K/mo run-rate confirmed from live data**, not BT | two consecutive quarters ≥ $10K/mo, or one quarter with haircut = 1.0× |
+
+That lands the $10K run-rate around 12 months from now, comfortably inside
+the 2-year job floor, with capital committed only after each proof. If a
+book fails a gate, the path narrows to the survivors: ORB alone tops out
+near $5K/mo at full DTBP; ORB + ignition near $7K; **BF is the difference
+between $7K and $10K+, which is why its live parity ladder matters more
+than any other single item.**
+
+## 8. What "winning" means, measured
+
+Trust is earned by these, nothing else: live P&L inside the BT band per
+book per quarter; parity AGREE streaks; drawdown inside the 25% rule; every
+size change through a gate; the per-unit table re-estimated from live data
+each quarter and the plan re-run against it.
