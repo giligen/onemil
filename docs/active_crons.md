@@ -76,3 +76,13 @@ DAILY OWNER BRIEF (weekdays 10:37 UTC = pre-boot; owner directive 9/5: "act as a
    the session might end — don't wait for a "re-arm" prompt to notice drift.
 5. This file itself must be committed to git (or otherwise durable) — it is the ONLY
    thing that survives a Claude reload for this purpose.
+
+## Ignition BT roll-forward (system crontab, weekdays 21:15 UTC, added 2026-09-05)
+`scripts/ignition_bt_rollforward.sh` → `logs/ignition_bt_rollforward.log`. Extends the
+capsim + resting-model BT from 2026-08-15 through today every night (resumable per
+day) and prints the live-vs-shadow-vs-BT reconciliation
+(`research/ignition_capcheck/live_window_compare.py`, CSV `live_window_compare.csv`).
+Why: the 19-month study was frozen at 8/14 while live started 8/21 — the EOD dive
+compared live only to the shadow twin. The EOD dive should quote this table
+(matched trades, live R vs BT R, live fill vs BT entry in bps, BT triggers not
+taken live and their BT P&L).
