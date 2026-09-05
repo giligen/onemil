@@ -479,7 +479,7 @@ def main():
     # Flags default OFF => this block is inert and the book is byte-identical.
     from trading.orb_experimental_rules import (
         range_direction_keep_mask as _rcp_keep, ratr_keep_mask as _ratr_keep,
-        rvol_keep_mask as _rvol_keep, rvol_rank_key as _rvol_key)
+        rvol_keep_mask as _rvol_keep, rvol_max_keep_mask as _rvol_max_keep, rvol_rank_key as _rvol_key)
     if EXP.any_on:
         print(f"EXPERIMENTAL flags: {EXP.describe()} — NOT a production book")
     # Sidecar columns (rvol_open5, ratr, ...) joined on (symbol, date); comma-
@@ -783,6 +783,12 @@ def main():
         _m = _rvol_keep(kept['rvol_open5'], EXP.rvol_veto)
         print(f"EXP C1a rvol veto < {EXP.rvol_veto}: dropped {int((~_m).sum())} of {len(kept)} "
               f"(NaN kept: {int(kept['rvol_open5'].isna().sum())})")
+        kept = kept[_m].copy()
+    if EXP.rvol_max is not None:
+        if 'rvol_open5' not in kept.columns:
+            raise SystemExit("FATAL: ORB_EXP_RVOL_MAX needs the rvol sidecar (ORB_BT_SIDECAR_CSV)")
+        _m = _rvol_max_keep(kept['rvol_open5'], EXP.rvol_max)
+        print(f"EXP C1c (post-hoc) rvol veto > {EXP.rvol_max}: dropped {int((~_m).sum())} of {len(kept)}")
         kept = kept[_m].copy()
     if EXP.rcp_gate == 'pre':
         _m = _rcp_keep(kept, EXP.rcp_form)

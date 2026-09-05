@@ -1,0 +1,285 @@
+{
+ "done": {
+  "baseline": "/home/ec2-user/onemil/research/orb_signal_study/books/book_baseline.csv",
+  "c5_read": [
+   "normal"
+  ]
+ },
+ "verdicts": {
+  "C1a": {
+   "verdict": "REJECT",
+   "checks": {
+    "1_pnl_+5%": false,
+    "2_mdd": true,
+    "3_neg_months": false,
+    "4_eras": false,
+    "5_giants_kept>=8": true,
+    "6_picks_not_halved": true,
+    "7_L1_effect": false
+   },
+   "env": {
+    "ORB_EXP_RVOL_VETO": "0.5"
+   },
+   "oos": {
+    "window": "OOS",
+    "picks": 88,
+    "fills": 51,
+    "pnl": 2285,
+    "mdd": -824,
+    "neg_months": 8,
+    "months": 15,
+    "worst_month": -290,
+    "picks_per_day": 0.292,
+    "pnl_TRAIN": 1830,
+    "pnl_OOS1": 831,
+    "pnl_OOS2": 1454
+   },
+   "l1_ok": false
+  },
+  "C1b": {
+   "verdict": "REJECT",
+   "checks": {
+    "1_pnl_+5%": true,
+    "2_mdd": false,
+    "3_neg_months": true,
+    "4_eras": true,
+    "5_giants_kept>=8": false,
+    "6_picks_not_halved": true,
+    "7_L1_effect": false
+   },
+   "env": {
+    "ORB_EXP_RVOL_RANK": "1"
+   },
+   "oos": {
+    "window": "OOS",
+    "picks": 83,
+    "fills": 45,
+    "pnl": 5187,
+    "mdd": -972,
+    "neg_months": 5,
+    "months": 15,
+    "worst_month": -400,
+    "picks_per_day": 0.27,
+    "pnl_TRAIN": 807,
+    "pnl_OOS1": 1388,
+    "pnl_OOS2": 3800
+   },
+   "l1_ok": false
+  },
+  "C2_green_pre": {
+   "verdict": "REJECT",
+   "checks": {
+    "1_pnl_+5%": true,
+    "2_mdd": true,
+    "3_neg_months": true,
+    "4_eras": true,
+    "5_giants_kept>=8": true,
+    "6_picks_not_halved": true,
+    "7_L1_effect": false
+   },
+   "env": {
+    "ORB_EXP_RCP_GATE": "pre",
+    "ORB_EXP_RCP_FORM": "green"
+   },
+   "oos": {
+    "window": "OOS",
+    "picks": 94,
+    "fills": 62,
+    "pnl": 7183,
+    "mdd": -828,
+    "neg_months": 6,
+    "months": 15,
+    "worst_month": -414,
+    "picks_per_day": 0.308,
+    "pnl_TRAIN": 1979,
+    "pnl_OOS1": 2041,
+    "pnl_OOS2": 5142
+   },
+   "l1_ok": false
+  },
+  "C2_green_post": {
+   "verdict": "REJECT",
+   "checks": {
+    "1_pnl_+5%": false,
+    "2_mdd": true,
+    "3_neg_months": true,
+    "4_eras": false,
+    "5_giants_kept>=8": true,
+    "6_picks_not_halved": true,
+    "7_L1_effect": false
+   },
+   "env": {
+    "ORB_EXP_RCP_GATE": "post",
+    "ORB_EXP_RCP_FORM": "green"
+   },
+   "oos": {
+    "window": "OOS",
+    "picks": 68,
+    "fills": 41,
+    "pnl": 3220,
+    "mdd": -564,
+    "neg_months": 6,
+    "months": 15,
+    "worst_month": -178,
+    "picks_per_day": 0.228,
+    "pnl_TRAIN": 2021,
+    "pnl_OOS1": 1419,
+    "pnl_OOS2": 1801
+   },
+   "l1_ok": false
+  },
+  "C2_upper_pre": {
+   "verdict": "REJECT",
+   "checks": {
+    "1_pnl_+5%": true,
+    "2_mdd": false,
+    "3_neg_months": false,
+    "4_eras": true,
+    "5_giants_kept>=8": true,
+    "6_picks_not_halved": true,
+    "7_L1_effect": false
+   },
+   "env": {
+    "ORB_EXP_RCP_GATE": "pre",
+    "ORB_EXP_RCP_FORM": "upper"
+   },
+   "oos": {
+    "window": "OOS",
+    "picks": 95,
+    "fills": 62,
+    "pnl": 5407,
+    "mdd": -1098,
+    "neg_months": 7,
+    "months": 15,
+    "worst_month": -479,
+    "picks_per_day": 0.315,
+    "pnl_TRAIN": 2621,
+    "pnl_OOS1": 1151,
+    "pnl_OOS2": 4256
+   },
+   "l1_ok": false
+  },
+  "C2_upper_post": {
+   "verdict": "REJECT",
+   "checks": {
+    "1_pnl_+5%": false,
+    "2_mdd": true,
+    "3_neg_months": false,
+    "4_eras": false,
+    "5_giants_kept>=8": true,
+    "6_picks_not_halved": true,
+    "7_L1_effect": false
+   },
+   "env": {
+    "ORB_EXP_RCP_GATE": "post",
+    "ORB_EXP_RCP_FORM": "upper"
+   },
+   "oos": {
+    "window": "OOS",
+    "picks": 78,
+    "fills": 49,
+    "pnl": 3163,
+    "mdd": -779,
+    "neg_months": 7,
+    "months": 14,
+    "worst_month": -236,
+    "picks_per_day": 0.261,
+    "pnl_TRAIN": 2484,
+    "pnl_OOS1": 1281,
+    "pnl_OOS2": 1882
+   },
+   "l1_ok": false
+  },
+  "C3": {
+   "verdict": "REJECT",
+   "checks": {
+    "1_pnl_+5%": true,
+    "2_mdd": true,
+    "3_neg_months": true,
+    "4_eras": true,
+    "5_giants_kept>=8": true,
+    "6_picks_not_halved": true,
+    "7_L1_effect": false
+   },
+   "env": {
+    "ORB_EXP_MID_KILL": "1"
+   },
+   "oos": {
+    "window": "OOS",
+    "picks": 98,
+    "fills": 56,
+    "pnl": 3881,
+    "mdd": -730,
+    "neg_months": 6,
+    "months": 15,
+    "worst_month": -221,
+    "picks_per_day": 0.326,
+    "pnl_TRAIN": 2528,
+    "pnl_OOS1": 1256,
+    "pnl_OOS2": 2625
+   },
+   "l1_ok": false
+  },
+  "C4": {
+   "verdict": "REJECT",
+   "checks": {
+    "1_pnl_+5%": false,
+    "2_mdd": true,
+    "3_neg_months": true,
+    "4_eras": false,
+    "5_giants_kept>=8": true,
+    "6_picks_not_halved": true,
+    "7_L1_effect": false
+   },
+   "env": {
+    "ORB_EXP_REARM": "1"
+   },
+   "oos": {
+    "window": "OOS",
+    "picks": 98,
+    "fills": 56,
+    "pnl": 3674,
+    "mdd": -687,
+    "neg_months": 5,
+    "months": 15,
+    "worst_month": -469,
+    "picks_per_day": 0.326,
+    "pnl_TRAIN": 2510,
+    "pnl_OOS1": 841,
+    "pnl_OOS2": 2834
+   },
+   "l1_ok": false
+  },
+  "C1c": {
+   "verdict": "EXPLORATORY-PARK",
+   "checks": {
+    "1_pnl_+5%": false,
+    "2_mdd": true,
+    "3_neg_months": true,
+    "4_eras": true,
+    "5_giants_kept>=8": true,
+    "6_picks_not_halved": true,
+    "7_L1_effect": true
+   },
+   "env": {
+    "ORB_EXP_RVOL_MAX": "2.0"
+   },
+   "oos": {
+    "window": "OOS",
+    "picks": 125,
+    "fills": 75,
+    "pnl": 3595,
+    "mdd": -555,
+    "neg_months": 5,
+    "months": 15,
+    "worst_month": -318,
+    "picks_per_day": 0.41,
+    "pnl_TRAIN": 2864,
+    "pnl_OOS1": 1282,
+    "pnl_OOS2": 2313
+   },
+   "l1_ok": true,
+   "posthoc": true
+  }
+ }
+}

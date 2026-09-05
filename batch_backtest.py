@@ -265,12 +265,15 @@ def filter_bull_flag_trades(
     from datetime import datetime as _dt
     from data_sources.alpaca_client import AlpacaClient
 
-    # Pre-filter: remove leveraged/inverse ETFs (synthetic, not real stocks)
-    before_lev = len(trades)
-    trades = [t for t in trades if t['symbol'] not in AlpacaClient._LEVERAGED_ETF_SYMBOLS]
-    lev_removed = before_lev - len(trades)
-    if lev_removed:
-        logger.info(f"Leveraged ETF filter: {before_lev} → {len(trades)} trades ({lev_removed} removed)")
+    # Pre-filter: the LIVE bull-flag universe rule, by NAME (2026-09-05).
+    # Live BF trades only what UniverseBuilder Step 1 admits (common stocks:
+    # no warrants/units/preferred/rights/leveraged wrappers). The old symbol-
+    # list check was enough while daily_bars itself excluded new wrappers;
+    # since the ORB wrapper rule (9/5) daily_bars carries every leveraged
+    # wrapper, so a BT_BUILD_FULL_HISTORY regen scans them — Stage-2 must
+    # apply the same predicate live uses (trading/bf_universe_filter.py).
+    from trading.bf_universe_filter import filter_trades as _bf_universe_filter
+    trades = _bf_universe_filter(trades)
 
     # Pre-filter by universe
     if universe_symbols is not None:

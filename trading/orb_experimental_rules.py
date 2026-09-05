@@ -10,6 +10,8 @@ PROPOSES graduates to its own shared module + parity test before any ship.
 Flags (study_orb_pipeline_static_lock.py reads them):
   ORB_EXP_RVOL_VETO=<t>      C1a  pre-ranking: drop candidates with rvol_open5 < t (NaN kept)
   ORB_EXP_RVOL_RANK=1        C1b  pre-ranking: order the day's candidates by rvol_open5 desc first
+  ORB_EXP_RVOL_MAX=<t>       C1c  POST-HOC (not pre-registered; hypothesis from the C1 data: the
+                                  signal is INVERTED on our universe) pre-ranking: drop rvol_open5 > t
   ORB_EXP_RCP_GATE=pre|post  C2   range-candle direction gate, pre-ranking or post-selection (no refill)
   ORB_EXP_RCP_FORM=green|upper    green: range_return_pct > 0 ; upper: range_close_position >= 0.5
   ORB_EXP_RATR_MIN / _MAX    C5   pre-ranking veto on range/ATR14 (NaN kept)
@@ -39,6 +41,7 @@ def _env_on(name: str) -> bool:
 class ExpFlags:
     """Snapshot of the study flags (read once per process)."""
     rvol_veto: Optional[float]
+    rvol_max: Optional[float]
     rvol_rank: bool
     rcp_gate: Optional[str]       # 'pre' | 'post' | None
     rcp_form: str                 # 'green' | 'upper'
@@ -49,12 +52,12 @@ class ExpFlags:
 
     @property
     def any_on(self) -> bool:
-        return any([self.rvol_veto is not None, self.rvol_rank, self.rcp_gate,
+        return any([self.rvol_veto is not None, self.rvol_max is not None, self.rvol_rank, self.rcp_gate,
                     self.ratr_min is not None, self.ratr_max is not None,
                     self.mid_kill, self.rearm])
 
     def describe(self) -> str:
-        return (f"rvol_veto={self.rvol_veto} rvol_rank={self.rvol_rank} rcp_gate={self.rcp_gate}"
+        return (f"rvol_veto={self.rvol_veto} rvol_max={self.rvol_max} rvol_rank={self.rvol_rank} rcp_gate={self.rcp_gate}"
                 f"/{self.rcp_form} ratr=[{self.ratr_min},{self.ratr_max}] mid_kill={self.mid_kill} "
                 f"rearm={self.rearm}")
 
@@ -70,7 +73,7 @@ def load_flags() -> ExpFlags:
     form = _env('ORB_EXP_RCP_FORM').lower() or 'green'
     if form not in ('green', 'upper'):
         raise ValueError(f"ORB_EXP_RCP_FORM must be green|upper, got {form!r}")
-    return ExpFlags(rvol_veto=_f('ORB_EXP_RVOL_VETO'), rvol_rank=_env_on('ORB_EXP_RVOL_RANK'),
+    return ExpFlags(rvol_veto=_f('ORB_EXP_RVOL_VETO'), rvol_max=_f('ORB_EXP_RVOL_MAX'), rvol_rank=_env_on('ORB_EXP_RVOL_RANK'),
                     rcp_gate=gate, rcp_form=form, ratr_min=_f('ORB_EXP_RATR_MIN'),
                     ratr_max=_f('ORB_EXP_RATR_MAX'), mid_kill=_env_on('ORB_EXP_MID_KILL'),
                     rearm=_env_on('ORB_EXP_REARM'))
@@ -84,6 +87,11 @@ def rvol_keep_mask(rvol: pd.Series, threshold: float) -> pd.Series:
     """True = keep. NaN rvol (no 14-day history) is kept — fail-open, like
     every other ORB gate; the caller counts the NaNs."""
     return rvol.isna() | (rvol >= threshold)
+
+
+def rvol_max_keep_mask(rvol: pd.Series, threshold: float) -> pd.Series:
+    """C1c (post-hoc): True = keep rows with rvol_open5 <= threshold; NaN kept."""
+    return rvol.isna() | (rvol <= threshold)
 
 
 def rvol_rank_key(rvol: pd.Series) -> pd.Series:

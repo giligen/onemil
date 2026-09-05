@@ -1,3 +1,3 @@
-# ORB signal study — live status (rewritten at every step; the pinger posts the last STATUS: line hourly)
+# ORB signal study — live status
 
-STATUS: 20:10 UTC — PRE-PHASE. ORB production book regenerated under the wrapper rule: $6,085 / 130 picks / 73 fills / MDD −$818 (correction sent to owner: the 4-way test saw 35 wrapper rows, production sees 320; rule still resolves IN inside the noise band). features_base.csv frozen for the study (12,851 rows). C5 sidecar done; C1 volume history: cache passes done, Alpaca top-up running. BF regen-7 month 16/21 (~22:15 UTC) → BF chain → study starts.
+STATUS: 23:58 UTC — ORB study: all 8 pre-registered singles REJECTED under the rules (C1 RVOL is INVERTED on our universe; C4 re-arm was flat P&L / better MDD); post-hoc C1c (high-rvol veto) grid running, then pairs/report → REPORT.md. BF: regen-7 done (896 tr); its Stage-1 exits lacked the exhaustion partials live runs (producer defect, being pinned); live-spec resim + live universe rule (258 wrapper trades removed) = $197,775 / 77 tr / WR 53.2%. BF point-in-time Stage-1 running (~40 min), then union Stage-2 → BF verdict → 3-book telegram.

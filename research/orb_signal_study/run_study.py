@@ -289,7 +289,7 @@ def phase_c5_read(st: dict) -> None:
     status("C5 read — range/ATR14 tiers: L1 by tier and era, L2 book by tier")
     dump = load_dump('baseline')
     sc = read_orb_csv(f'{D}/sidecar_ratr.csv'); sc['date'] = pd.to_datetime(sc['date']).dt.strftime('%Y-%m-%d')
-    d = dump.merge(sc, on=['symbol', 'date'], how='left')
+    d = dump if 'ratr_tier' in dump.columns else dump.merge(sc, on=['symbol', 'date'], how='left')
     e = d[d['entered'] == 1]
     rows = []
     for tier in ('narrow', 'normal', 'wide', 'unknown'):
@@ -297,7 +297,9 @@ def phase_c5_read(st: dict) -> None:
             s = e[(e['ratr_tier'] == tier) & (e['era'] == era)]
             rows.append({'tier': tier, 'era': era, 'n': len(s), 'mean_pnl_pct': round(float(s['pnl_pct'].mean()), 3) if len(s) else None,
                          'wr%': round(float((s['pnl_pct'] > 0).mean() * 100), 1) if len(s) else None})
-    b = load_book(st['done']['baseline']).merge(sc, on=['symbol', 'date'], how='left')
+    b = load_book(st['done']['baseline'])
+    if 'ratr_tier' not in b.columns:
+        b = b.merge(sc, on=['symbol', 'date'], how='left')
     brows = []
     for tier in ('narrow', 'normal', 'wide', 'unknown'):
         for era in ('TRAIN', 'OOS1', 'OOS2'):
@@ -347,7 +349,7 @@ def train_fit_threshold(st: dict, prefix: str, env_key: str, grid: list, extra_e
 def phase_singles(st: dict) -> None:
     dump = load_dump('baseline')
     rv = read_orb_csv(f'{D}/sidecar_rvol.csv'); rv['date'] = pd.to_datetime(rv['date']).dt.strftime('%Y-%m-%d')
-    dr = dump.merge(rv[['symbol', 'date', 'rvol_open5']], on=['symbol', 'date'], how='left')
+    dr = dump if 'rvol_open5' in dump.columns else dump.merge(rv[['symbol', 'date', 'rvol_open5']], on=['symbol', 'date'], how='left')
     report("\n## Singles\n")
     # --- C1a rvol veto ---
     if 'C1a' not in st['verdicts']:
@@ -394,8 +396,10 @@ def phase_singles(st: dict) -> None:
         env = {}
         if lo is not None: env['ORB_EXP_RATR_MIN'] = str(lo)
         if hi is not None: env['ORB_EXP_RATR_MAX'] = str(hi)
-        sc = read_orb_csv(f'{D}/sidecar_ratr.csv'); sc['date'] = pd.to_datetime(sc['date']).dt.strftime('%Y-%m-%d')
-        dd = dump.merge(sc, on=['symbol', 'date'], how='left')
+        dd = dump
+        if 'ratr_tier' not in dd.columns:
+            sc = read_orb_csv(f'{D}/sidecar_ratr.csv'); sc['date'] = pd.to_datetime(sc['date']).dt.strftime('%Y-%m-%d')
+            dd = dump.merge(sc, on=['symbol', 'date'], how='left')
         keep = dd['ratr_tier'] != tier
         l1 = l1_threshold(dd, keep, f"drop tier {tier}")
         eval_single(st, name, env, l1)
@@ -411,6 +415,26 @@ def phase_singles(st: dict) -> None:
         run_variant('C4', {'ORB_EXP_REARM': '1'}, use_cache=False)
         l1 = l1_exit_delta(dump, load_dump('C4'), "rows where a re-arm fired: variant − baseline pnl")
         eval_single(st, 'C4', {'ORB_EXP_REARM': '1'}, l1, use_cache=False)
+
+
+def phase_posthoc(st: dict) -> None:
+    """POST-HOC (not pre-registered): C1c high-rvol veto, the hypothesis the C1
+    data generated (signal inverted on our universe). Reported as EXPLORATORY —
+    its best outcome this round is 'EXPLORATORY-PROMISING' (re-test on a fresh
+    era before any proposal), never PROPOSE."""
+    if 'C1c' in st['verdicts']:
+        return
+    status("C1c POST-HOC — high-rvol veto grid {2,3,4,6} (exploratory; cannot PROPOSE this round)")
+    dump = load_dump('baseline')
+    t = train_fit_threshold(st, 'C1c', 'ORB_EXP_RVOL_MAX', [2.0, 3.0, 4.0, 6.0], {})
+    keep = dump['rvol_open5'].isna() | (dump['rvol_open5'] <= t)
+    l1 = l1_threshold(dump, keep, f"rvol_open5 <= {t} (kept) vs > {t} (dropped) — POST-HOC")
+    v = eval_single(st, 'C1c', {'ORB_EXP_RVOL_MAX': str(t)}, l1, note=f"POST-HOC high-rvol veto > {t} (TRAIN-fit)")
+    lab = 'EXPLORATORY-PROMISING' if v['verdict'] == 'PROPOSE' else ('EXPLORATORY-PARK' if v['verdict'] == 'PARK' else 'REJECT')
+    st['verdicts']['C1c']['verdict'] = lab
+    st['verdicts']['C1c']['posthoc'] = True
+    save_state(st)
+    report(f"\n**C1c is POST-HOC: relabelled {lab}. A promising exploratory result needs its own pre-registration and a fresh era before it can be proposed.**\n")
 
 
 def phase_pairs(st: dict) -> None:
@@ -480,6 +504,8 @@ def main() -> None:
     if phase in ('singles', 'all'):
         phase_c5_read(st)
         phase_singles(st)
+    if phase in ('posthoc', 'all'):
+        phase_posthoc(st)
     if phase in ('pairs', 'all'):
         phase_pairs(st)
     if phase in ('report', 'all'):
