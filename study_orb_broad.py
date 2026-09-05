@@ -58,6 +58,42 @@ import datetime as _dt
 DATE_END = _dt.date.today().isoformat()
 
 
+def et_935_cutoff_utc_str(bar_date: str) -> str:
+    """'YYYY-MM-DDTHH:MM' UTC string for 09:35 ET on `bar_date` — computed
+    per date so DST is right (3fab1f9/35e9935 bug class). Bars with
+    `timestamp < cutoff` are the 9:30-9:34 opening range."""
+    from zoneinfo import ZoneInfo
+    from datetime import datetime as _dt
+    y, m, d = (int(x) for x in bar_date.split('-'))
+    return (_dt(y, m, d, 9, 35, tzinfo=ZoneInfo('America/New_York'))
+            .astimezone(ZoneInfo('UTC')).strftime('%Y-%m-%dT%H:%M'))
+
+
+def rth_volume_by_935_for_pairs(conn, pairs) -> Dict[tuple, int]:
+    """{(symbol, bar_date): cached 1-min volume with timestamp < 09:35 ET}
+    for every pair, in ONE grouped query (temp table of pairs + per-date
+    cutoffs, LEFT JOIN so pairs with no bars map to 0)."""
+    if not pairs:
+        return {}
+    cut = {}
+    for _, ds in pairs:
+        if ds not in cut:
+            cut[ds] = et_935_cutoff_utc_str(ds)
+    conn.execute("DROP TABLE IF EXISTS temp._orb_pairs")
+    conn.execute("CREATE TEMP TABLE _orb_pairs (symbol TEXT, bar_date TEXT, cut TEXT)")
+    conn.executemany("INSERT INTO temp._orb_pairs VALUES (?, ?, ?)",
+                     [(s, ds, cut[ds]) for s, ds in pairs])
+    rows = conn.execute("""
+        SELECT c.symbol, c.bar_date, COALESCE(SUM(i.volume), 0)
+        FROM temp._orb_pairs c
+        LEFT JOIN intraday_bars_1min i
+          ON i.symbol = c.symbol AND i.bar_date = c.bar_date AND i.timestamp < c.cut
+        GROUP BY c.symbol, c.bar_date
+    """).fetchall()
+    conn.execute("DROP TABLE IF EXISTS temp._orb_pairs")
+    return {(s, ds): int(v or 0) for s, ds, v in rows}
+
+
 def load_broad_universe(
     db_path: str = CACHE_DB,
     include_provisional_today=None,
@@ -131,24 +167,13 @@ def load_broad_universe(
     # it kept 110/110 observed live picks) — it is NOT a live gate twin.
     # Cutoff computed PER DATE in ET (a hardcoded UTC hour is the DST
     # bug class, 3fab1f9/35e9935).
-    from zoneinfo import ZoneInfo
-    from datetime import datetime as _dt
-    _et = ZoneInfo('America/New_York')
-    _utc = ZoneInfo('UTC')
-    _cut_cache: Dict[str, str] = {}
+    # 2026-09-05: ONE grouped query instead of one query per pair — the
+    # per-pair loop took 10+ minutes on a full regen under write contention
+    # (7K+ index range scans). Same sums, same cutoffs (unit-tested).
+    vol_935 = rth_volume_by_935_for_pairs(conn, candidates)
     kept = dropped_935 = 0
     for symbol, ds in candidates:
-        cut = _cut_cache.get(ds)
-        if cut is None:
-            y, m, d = (int(x) for x in ds.split('-'))
-            cut = _dt(y, m, d, 9, 35, tzinfo=_et).astimezone(_utc) \
-                .strftime('%Y-%m-%dT%H:%M')
-            _cut_cache[ds] = cut
-        row = conn.execute(
-            "SELECT COALESCE(SUM(volume),0) FROM intraday_bars_1min "
-            "WHERE symbol=? AND bar_date=? AND timestamp < ?",
-            (symbol, ds, cut)).fetchone()
-        if (row[0] or 0) >= MIN_935_VOL_FLOOR:
+        if vol_935.get((symbol, ds), 0) >= MIN_935_VOL_FLOOR:
             grouped.setdefault(ds, []).append(symbol)
             kept += 1
         else:

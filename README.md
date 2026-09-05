@@ -837,6 +837,21 @@ above their 9:30–9:34 opening-range high. Uses the `static_lock` exit
 (stop at range_low, lock at entry+0.5R after price touches +1.75R;
 orb.yaml `exit.lock_arm_at_r: 1.75` / `lock_stop_r: 0.5`).
 
+> **Reference status (2026-09-05)** — the table below is the April-2026
+> full-timeline validation and is superseded by the B+ book
+> (`analysis_results/orb_bplus_book.csv`, `$10K` validation stage). That
+> book was itself built on an **entered-only** features CSV (only fired
+> breakouts) — a selection lookahead: live spends slots on stop-limits
+> that never fill (8/31: SHMD Q5 `time_stop_canceled`, BW Q4 PDR-vetoed
+> → PFSA Q3 ranked 4th; BT, blind to SHMD/BW, "took" PFSA). Fixed by the
+> **entered-inclusive book** (`study_orb_features.trade_row` emits
+> `entered=0` / `no_fill` rows; `study_orb_pipeline_static_lock.is_no_fill`
+> lets them win a slot at $0; `report_common.bt_filled_symbols` keys the
+> green-check's fill-parity on entered picks). Pre-rebuild snapshots in
+> `research/orb_entered_inclusive/`. The earlier "BT prev-day vs live
+> 9:35-volume gate" diagnosis was wrong: both gate on prev-day volume
+> ≥ 500K (`orb_engine.build_orb_universe_from_snapshots`).
+
 **Validated Jan 2025 → Apr 2026** (`study_orb_pipeline_static_lock.py`,
 production-parity):
 
