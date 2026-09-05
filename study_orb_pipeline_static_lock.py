@@ -190,6 +190,13 @@ def load_bt_config(yaml_path: str = 'orb.yaml') -> dict:
 # BT/LIVE parity by construction: trading/orb_engine.py imports the same helper.
 TOUCHGO_CFG = load_touchgo_config({})
 
+# 2026-09-05 signal study flags (research/orb_signal_study/DESIGN.md) — all
+# default OFF; read once at import so the exit walkers and main() agree.
+from trading.orb_experimental_rules import (  # noqa: E402
+    load_flags as _exp_load_flags, midpoint_kill_fires as _mid_kill_fires,
+    rearm_allowed as _rearm_allowed)
+EXP = _exp_load_flags()
+
 
 def _session_open_timestamp(bars):
     """ET 9:30 timestamp."""
@@ -263,14 +270,24 @@ def simulate_static_lock(bars, entry_price, range_high, range_low, entry_time):
         if fire_d and exit_d is not None:
             return exit_d * (1 - EXIT_SLIP_BPS / 10000), 'tag_b1'
 
-    # Static lock loop (existing).
-    for _, row in post.iloc[1:].iterrows():
+    # Static lock loop (existing). EXP C3 (study, default OFF): a closed
+    # post-entry bar below the range midpoint before +0.5R was touched exits
+    # at the NEXT bar's open (closed-bar rule; BT/live twins must agree).
+    _mh = float(post.iloc[0]['high']) if len(post) else entry_price
+    _opens = post['open'].to_numpy(dtype=float)
+    _n = len(post)
+    for _i, (_, row) in enumerate(post.iloc[1:].iterrows(), start=1):
         bar_high = float(row['high']); bar_low = float(row['low'])
         if not armed and bar_high >= trigger_lvl:
             armed = True
             stop_price = max(stop_price, lock_stop)
         if bar_low <= stop_price:
             return stop_price * (1 - EXIT_SLIP_BPS/10000), 'lock' if armed else 'stop'
+        _mh = max(_mh, bar_high)
+        if EXP.mid_kill and not armed and _mid_kill_fires(
+                float(row['close']), range_high, range_low, entry_price, _mh):
+            _px = _opens[_i + 1] if _i + 1 < _n else float(row['close'])
+            return _px * (1 - EXIT_SLIP_BPS/10000), 'mid_kill'
     last = post.iloc[-1]
     return float(last['close']) * (1 - EXIT_SLIP_BPS/10000), 'eod'
 
@@ -360,9 +377,13 @@ def simulate_winner_stack(bars, entry_price, range_high, range_low, entry_time,
     n = len(post)
 
     # Phase 1: search for stop-out or scale touch (frozen gated stop check).
+    # EXP C3 (study, default OFF): midpoint-reversal kill on a CLOSED bar
+    # before +0.5R was touched -> exit next open (see simulate_static_lock).
+    opens = post['open'].to_numpy(dtype=float)
     stop = stop0
     armed = False
     scale_i = None
+    _mh = float(highs[0])
     for i in range(1, n):
         if not armed and highs[i] >= trig:
             armed = True
@@ -372,6 +393,11 @@ def simulate_winner_stack(bars, entry_price, range_high, range_low, entry_time,
         if scale_px is not None and highs[i] >= scale_px:
             scale_i = i
             break
+        _mh = max(_mh, float(highs[i]))
+        if EXP.mid_kill and not armed and _mid_kill_fires(
+                float(closes[i]), range_high, range_low, entry_price, _mh):
+            _px = float(opens[i + 1]) if i + 1 < n else float(closes[i])
+            return _px * slip, 'mid_kill'
     if scale_i is None:
         return float(closes[-1]) * slip, 'eod'
 
@@ -449,12 +475,54 @@ def main():
     df = df.dropna(subset=needed + ['pnl', 'date', 'pnl_pct', 'range_size_pct', 'entry_price'])
     df['date'] = pd.to_datetime(df['date'])
 
-    pairs = list(df[['symbol', 'date']].drop_duplicates().apply(
+    # ---- 2026-09-05 signal study hooks (research/orb_signal_study/DESIGN.md) ----
+    # Flags default OFF => this block is inert and the book is byte-identical.
+    from trading.orb_experimental_rules import (
+        range_direction_keep_mask as _rcp_keep, ratr_keep_mask as _ratr_keep,
+        rvol_keep_mask as _rvol_keep, rvol_rank_key as _rvol_key)
+    if EXP.any_on:
+        print(f"EXPERIMENTAL flags: {EXP.describe()} — NOT a production book")
+    # Sidecar columns (rvol_open5, ratr, ...) joined on (symbol, date); comma-
+    # separated paths. Missing keys stay NaN (every hook is fail-open on NaN).
+    _sidecars = [p for p in (os.environ.get('ORB_BT_SIDECAR_CSV') or '').split(',') if p.strip()]
+    for _sp in _sidecars:
+        _sc = read_orb_csv(_sp.strip())
+        _sc['date'] = pd.to_datetime(_sc['date'])
+        _cols = [c for c in _sc.columns if c not in ('symbol', 'date')]
+        df = df.merge(_sc[['symbol', 'date'] + _cols].drop_duplicates(['symbol', 'date']),
+                      on=['symbol', 'date'], how='left')
+        print(f"Sidecar {_sp}: joined {_cols}; coverage "
+              + ", ".join(f"{c}={df[c].notna().mean() * 100:.1f}%" for c in _cols))
+    # Resim cache: a candidate dump from a previous pass with IDENTICAL exit
+    # physics (ORB_BT_DUMP_CANDIDATES) replaces the bar walk — selector-only
+    # variants run in seconds instead of ~35 min. Refuses a key mismatch.
+    _resim_cache = os.environ.get('ORB_BT_RESIM_CACHE')
+    _skip_resim = False
+    if _resim_cache:
+        _dump = read_orb_csv(_resim_cache)
+        _dump['date'] = pd.to_datetime(_dump['date'])
+        _k_df = set(zip(df['symbol'], df['date']))
+        _k_dump = set(zip(_dump['symbol'], _dump['date']))
+        if _k_df != _k_dump:
+            raise SystemExit(f"FATAL: ORB_BT_RESIM_CACHE keys differ from the features CSV "
+                             f"({len(_k_df - _k_dump)} missing, {len(_k_dump - _k_df)} extra) — "
+                             f"regenerate the dump on this features file.")
+        _sc_cols = [c for c in df.columns if c not in _dump.columns]
+        if _sc_cols:
+            _dump = _dump.merge(df[['symbol', 'date'] + _sc_cols], on=['symbol', 'date'], how='left')
+        df = _dump
+        _skip_resim = True
+        print(f"RESIM CACHE: {_resim_cache} ({len(df)} rows) — bar walk skipped; "
+              f"exit physics are the dump's (must match this run's config)")
+
+    pairs = [] if _skip_resim else list(df[['symbol', 'date']].drop_duplicates().apply(
         lambda r: (r['symbol'], r['date'].strftime('%Y-%m-%d')), axis=1))
     print(f"Loading bars for {len(pairs)} pairs...")
-    db = Database(db_path='data/cache.db')
-    raw_bars = db.get_intraday_bars_bulk(pairs)
-    db.close()
+    raw_bars = {}
+    if pairs:
+        db = Database(db_path='data/cache.db')
+        raw_bars = db.get_intraday_bars_bulk(pairs)
+        db.close()
     bars_cache = {k: _bars_to_df(v) for k, v in raw_bars.items()}
 
     # Winner stack (2026-08-22): with BOTH flags off, route through the
@@ -478,6 +546,7 @@ def main():
              if winner_stack_on else "static_lock_1R exit..."))
     n_floor_bound = 0
     n_scaled = 0
+    n_rearmed = 0
     new_pnls = []; new_pnl_pcts = []; new_reasons = []
     n_no_fill_rows = 0
     for _, row in df.reset_index(drop=True).iterrows():
@@ -513,28 +582,60 @@ def main():
             new_reasons.append(row['exit_reason']); continue
         entry_p = float(row['entry_price'])
         shares = max(1, int(OLD_POS / entry_p))
-        if winner_stack_on:
-            _atr = atr_lookup.get(key) if bt_cfg['atr_floor_enabled'] else None
-            if bt_cfg['atr_floor_enabled'] and _atr is not None:
-                _fs, _fst = floored_stop(rl, entry_p, _atr,
-                                         bt_cfg['atr_floor_k'])
-                if _fst == 'bound':
-                    n_floor_bound += 1
-            exit_p, reason = simulate_winner_stack(
-                bars, entry_p, rh, rl, entry_ts, shares,
-                atr14=_atr,
-                atr_floor_enabled=bt_cfg['atr_floor_enabled'],
-                atr_floor_k=bt_cfg['atr_floor_k'],
-                scale_enabled=bt_cfg['scale_enabled'],
-                scale_frac=bt_cfg['scale_frac'],
-                scale_level_r=bt_cfg['scale_level_r'],
-            )
-            if reason.startswith('scale_'):
-                n_scaled += 1
-        else:
-            exit_p, reason = simulate_static_lock(bars, entry_p, rh, rl, entry_ts)
-        new_pnls.append((exit_p - entry_p) * shares)
-        new_pnl_pcts.append((exit_p - entry_p) / entry_p * 100)
+        _atr = atr_lookup.get(key) if bt_cfg['atr_floor_enabled'] else None
+        if winner_stack_on and bt_cfg['atr_floor_enabled'] and _atr is not None:
+            _fs, _fst = floored_stop(rl, entry_p, _atr, bt_cfg['atr_floor_k'])
+            if _fst == 'bound':
+                n_floor_bound += 1
+
+        def _sim_exit(_entry_ts):
+            """One entry at `entry_p` from bar `_entry_ts`, production exit walk."""
+            if winner_stack_on:
+                return simulate_winner_stack(
+                    bars, entry_p, rh, rl, _entry_ts, shares,
+                    atr14=_atr,
+                    atr_floor_enabled=bt_cfg['atr_floor_enabled'],
+                    atr_floor_k=bt_cfg['atr_floor_k'],
+                    scale_enabled=bt_cfg['scale_enabled'],
+                    scale_frac=bt_cfg['scale_frac'],
+                    scale_level_r=bt_cfg['scale_level_r'],
+                )
+            return simulate_static_lock(bars, entry_p, rh, rl, _entry_ts)
+
+        exit_p, reason = _sim_exit(entry_ts)
+        if reason.startswith('scale_'):
+            n_scaled += 1
+        pnl_total = (exit_p - entry_p) * shares
+        # EXP C4 (study, default OFF): after an early tag/mid-kill exit inside
+        # the 60-min entry window, re-arm the stop-limit ONCE at the same level
+        # and take the second breakout (same slot, same day). The first
+        # trade's P&L stays; the second is added; live twin = a second
+        # stop-limit order, never a refill with another symbol.
+        if EXP.rearm and reason in ('tag_bb', 'tag_b1', 'mid_kill'):
+            _post = bars[bars['timestamp'] >= entry_ts].reset_index(drop=True)
+            if reason == 'tag_bb':
+                _exit_ts = _post.iloc[0]['timestamp']
+            elif reason == 'tag_b1':
+                _exit_ts = _post.iloc[1]['timestamp'] if len(_post) > 1 else None
+            else:  # mid_kill: first closed bar below mid before +0.5R
+                _exit_ts = None
+                _mh = float(_post.iloc[0]['high']) if len(_post) else entry_p
+                for _j in range(1, len(_post)):
+                    _mh = max(_mh, float(_post.iloc[_j]['high']))
+                    if _mid_kill_fires(float(_post.iloc[_j]['close']), rh, rl, entry_p, _mh):
+                        _exit_ts = _post.iloc[_j]['timestamp']
+                        break
+            _win_end = range_end + timedelta(minutes=60)
+            if _rearm_allowed(reason, _exit_ts, _win_end, rearmed_already=False):
+                _search2 = bars[(bars['timestamp'] > _exit_ts) & (bars['timestamp'] < _win_end)]
+                _entry2_ts = find_breakout_bar_ts(_search2, rh)
+                if _entry2_ts is not None:
+                    _exit2, _reason2 = _sim_exit(_entry2_ts)
+                    pnl_total += (_exit2 - entry_p) * shares
+                    reason = f"{reason}+rearm_{_reason2}"
+                    n_rearmed += 1
+        new_pnls.append(pnl_total)
+        new_pnl_pcts.append(pnl_total / (entry_p * shares) * 100)
         new_reasons.append(reason)
 
     df = df.reset_index(drop=True)
@@ -545,6 +646,9 @@ def main():
         print(f"Winner stack: floor bound on {n_floor_bound} resimmed rows; "
               f"{n_scaled} rows scaled 40%@+{bt_cfg['scale_level_r']}R "
               f"(counts are pre-selection, whole candidate set)")
+    if EXP.mid_kill or EXP.rearm:
+        print(f"EXP exit hooks: mid_kill rows={int(sum(1 for r in new_reasons if str(r).startswith('mid_kill')))} "
+              f"re-armed rows={n_rearmed} (pre-selection, whole candidate set)")
 
     # Risk-parity sizing (B+ 2026-08-15: account/N/risk from orb.yaml via bt_cfg)
     account = bt_cfg['account']
@@ -672,12 +776,39 @@ def main():
         print(f"Q1 filter: dropped {n_q1} Q1 candidates "
               f"(set ORB_SKIP_Q1=0 to disable)")
 
+    # ---- signal-study PRE-RANKING hooks (universe/rank layer, like Q1) ----
+    if EXP.rvol_veto is not None:
+        if 'rvol_open5' not in kept.columns:
+            raise SystemExit("FATAL: ORB_EXP_RVOL_VETO needs the rvol sidecar (ORB_BT_SIDECAR_CSV)")
+        _m = _rvol_keep(kept['rvol_open5'], EXP.rvol_veto)
+        print(f"EXP C1a rvol veto < {EXP.rvol_veto}: dropped {int((~_m).sum())} of {len(kept)} "
+              f"(NaN kept: {int(kept['rvol_open5'].isna().sum())})")
+        kept = kept[_m].copy()
+    if EXP.rcp_gate == 'pre':
+        _m = _rcp_keep(kept, EXP.rcp_form)
+        print(f"EXP C2 range-direction gate PRE ({EXP.rcp_form}): dropped {int((~_m).sum())} of {len(kept)}")
+        kept = kept[_m].copy()
+    if EXP.ratr_min is not None or EXP.ratr_max is not None:
+        if 'ratr' not in kept.columns:
+            raise SystemExit("FATAL: ORB_EXP_RATR_* needs the ratr sidecar (ORB_BT_SIDECAR_CSV)")
+        _m = _ratr_keep(kept['ratr'], EXP.ratr_min, EXP.ratr_max)
+        print(f"EXP C5 range/ATR veto [{EXP.ratr_min},{EXP.ratr_max}]: dropped {int((~_m).sum())} of {len(kept)}")
+        kept = kept[_m].copy()
+    if EXP.rvol_rank and 'rvol_open5' not in kept.columns:
+        raise SystemExit("FATAL: ORB_EXP_RVOL_RANK needs the rvol sidecar (ORB_BT_SIDECAR_CSV)")
+
     # Top-K + dedup per day
     sel_rows = []
     for day, dg in kept.groupby('date'):
         d = dg.copy()
         d['_q_rank'] = d['_quintile'].map(Q_ORDER)
-        d = d.sort_values(['_q_rank', '_composite'], ascending=[True, False])
+        if EXP.rvol_rank:
+            # C1b: the paper's "top-N by opening relative volume"; quintile
+            # order and composite only break ties (sizing mults unchanged).
+            d['_rvol_key'] = _rvol_key(d['rvol_open5'])
+            d = d.sort_values(['_rvol_key', '_q_rank', '_composite'], ascending=[True, True, False])
+        else:
+            d = d.sort_values(['_q_rank', '_composite'], ascending=[True, False])
         seen_fam = set(); seen_sup = set()
         kept_today = []
         for _, r in d.iterrows():
@@ -901,6 +1032,14 @@ def main():
         print(f"Catalyst veto: dropped {n_cv} newsless-and-alone pick(s) "
               f"(their P&L would have been {cv_pnl:+,.0f}; "
               f"ORB_CATALYST_VETO=0 to disable)")
+
+    # ---- signal-study POST-SELECTION gate (no refill, like PDR/G1/catalyst) ----
+    if EXP.rcp_gate == 'post':
+        _m = _rcp_keep(sel, EXP.rcp_form)
+        _gp = float(sel.loc[~_m, '_sized_pnl'].sum())
+        print(f"EXP C2 range-direction gate POST ({EXP.rcp_form}): dropped {int((~_m).sum())} pick(s), "
+              f"their P&L would have been {_gp:+,.0f} (slot stays empty)")
+        sel = sel[_m].copy()
 
     # 2026-05-08: fill-rate haircut. Pre-fix, BT assumed every qualified
     # signal filled — no model of buy-stop misses. LIVE Mon-Thu 5/4-5/7

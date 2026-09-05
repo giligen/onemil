@@ -1,0 +1,3 @@
+# ORB signal study — live status (rewritten at every step; the pinger posts the last STATUS: line hourly)
+
+STATUS: 19:50 UTC — PRE-PHASE. Reports still running: ORB wrappers-in regen (features done in 78 min, pipeline running) and BF regen-7 (month 16/21, ~22:15 UTC). Study groundwork: pipeline hooks for C1/C2/C3/C5 written + 28 tests green (flags default OFF = production book unchanged); resim-cache bypass written (selector-only variants run in seconds); C1 first-5-min volume history build running (131,789 symbol-days: cache pass first, then Alpaca). Next: C4 re-arm hook, baseline identity check, then singles once the BF chain frees the disk.
