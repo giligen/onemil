@@ -1,0 +1,68 @@
+# Active session-cron manifest (in-session scheduler, does NOT survive Claude restart)
+
+**IMPORTANT**: These are Claude Code's in-session `CronCreate` jobs — they live only in
+this session's process memory. If the session exits/reloads, ALL of these are gone
+with zero warning. On resuming a session, read this file and re-arm every job below
+VERBATIM via `CronCreate` before doing anything else, then update this file to match
+whatever the fresh `CronList` shows.
+
+Last synced: 2026-09-05 (before a planned session reload)
+
+## 1. Weekly Retirement-Validation Review
+- **Cron**: `23 9 * * 6` (every Saturday 9:23 AM local)
+- **Recurring**: true
+- **Prompt**:
+```
+WEEKLY RETIREMENT-VALIDATION REVIEW (self-authored 8/14 per owner: "weekly analysis over telegram on how are we doing"). Ultrathink — this is the owner's main strategic touchpoint; one per week, make it count.
+
+STEP 0 — SELF-RENEWAL (critical): session crons expire 7 days after arming, so THIS run is likely the last from the current arming. Re-create this cron VERBATIM (CronCreate, "23 9 * * 6", recurring) before doing anything else, and confirm in the telegram footer. If you skip this the weekly dies silently.
+
+RESOURCE RULE (owner 8/21 relaxation): parallel agents OK for memory-light work; heavy bar-loading compute = single ulimit-capped process. This analysis is light — do it in-main-session with direct queries.
+
+CONTEXT: read /home/ec2-user/.claude/projects/-home-ec2-user-onemil/memory/project_retirement_validation_plan.md (the governing 3-month plan) and /home/ec2-user/.claude/projects/-home-ec2-user-onemil/memory/project_orb_stability_study_aug2026.md. Working dir /home/ec2-user/onemil.
+
+ANALYSIS (past Mon-Fri week, all from primary data — never memory):
+1. PER-BOOK WEEK LEDGER: live P&L per day from data/trades.db (ignition/orb/bull_flag) vs BT-expected (ORB: analysis_results/orb_bplus_book.csv at $10K stage sizing; Ignition: research/scripts/ignition_bt_replay.py; BF: no-parity caveat). Day-by-day live-vs-BT table; root-cause divergences beyond execution noise.
+2. VALIDATION SCOREBOARD vs SECURED criteria: (a) each book in BT band with parity? (b) live monster count (>= +2R) cumulative since 8/14; (c) size changes gate-earned, zero uncontrolled losses, kill firings; (d) program month + on/off-track one-liner.
+3. IGNITION: dry/live/ramp status + prestage phase (shadow/live); fill-quality stats vs shadow twins (path=staged|chase split once prestage is live) vs the 30-100bps expectation; capture cleanliness; prestage shadow telemetry (staged-coverage ratio, BP watermark, churn) if in shadow week.
+4. ORB: stage P&L vs above-water rule, green-check streak, veto tallies + counterfactuals.
+5. BF: floor-passed trades since 7/31, skips, parity-harness trigger status.
+6. HYGIENE: errors/tracebacks, report-layer bugs fixed, unresolved EOD flags, cron lattice health (EOD dive alive? this weekly re-armed?).
+7. TRAJECTORY: honest secured-by-Nov-15 status GREEN/YELLOW/RED with why. Never soften; the owner ordered "don't please me".
+
+TELEGRAM via scripts/report_common.send_telegram, prefix "[WEEKLY VALIDATION wk N]" (N = weeks since 8/17 start). 1-line verdict first; week table; scoreboard; per-book one-liners; decisions needed; next week plan; footer "cron re-armed ✓". Phone-crisp, under ~40 lines, no bare '<' or '<=' (breaks Telegram HTML). A gap in data IS a finding — say it, never silently narrow scope.
+```
+
+## 2. Daily EOD Deep Dive v5
+- **Cron**: `57 21 * * 1-5` (weekdays 9:57 PM local)
+- **Recurring**: true
+- **Prompt**:
+```
+DAILY EOD DEEP DIVE v5 (re-armed 8/29 at weekly review before 9/1 expiry; run in-main-session or 1 agent max). Working dir /home/ec2-user/onemil. Review today: (1) ORB B+ per-trade parity vs the C-BOOK reference (analysis_results/orb_bplus_book.csv = winner-stack book since 8/24: $455/mo expectation, 15/20 green) — selection/sizing/exits incl. any ATR FLOOR or SCALE OUT lines; (2) ignition: live fills with FILL QUALITY lines (chase bps, path=staged|chase once prestage is live) vs shadow twins; eod_flat closes recorded (the 8/21 fix); (3) PRESTAGE telemetry (shadow or live per current phase): skip_counts distribution, candidate_late events (discovery latency!), BP watermark + reserve transitions, would-stage/stage counts; (4) BF: trades + BF RAILS line state; (5) green check + streak (remember 8/24 RED = false positive, fixed b19ad99; 8/21 RED = real); (6) news-stream latency stats (grep recv_latency= from its log); (7) ERROR/Traceback sweep. ONE [EOD DIVE] telegram via scripts/report_common.send_telegram (under 30 lines, no bare '(' chars) with per-book status + ESCALATIONS. Never modify files/configs. NOTE: this recurring cron auto-expires ~7 days after 8/29 — re-arm it VERBATIM when the weekly review runs on the Saturday before expiry.
+```
+
+## 3. ORB Scale Gate Recommendation
+- **Cron**: `37 13 12 9 *` (one-shot, Sat 9/12 13:37 UTC)
+- **Recurring**: false (auto-deletes after firing once)
+- **Prompt**:
+```
+ORB SCALE GATE RECOMMENDATION (one-shot Sat 9/12 13:37 UTC — owner-ordered 8/29, revised 8/30 post-audit, ADJUDICATION NOTE added 8/31). Working dir /home/ec2-user/onemil. Reference = the corrected book (entered-inclusive rebuilt reference if it exists by then — check the bulk-queue outputs; else the fill-rate-0.56 estimate ~$5,427/20mo ~$319/mo at $10K). ADJUDICATED REDS (do NOT count against the gate): 8/31 PFSA red = BT-side universe-gate drift (prev-day vs 9:35 volume, root-caused + interim-fixed f3f93b6; live behaved to spec) — and any further PFSA-class reds (BT picks a prev-liquid/quiet-open name live's 9:35 volume gate excludes) BEFORE the premarket backfill lands are the same known class: verify each against the class signature (BT pick absent from live universe log with sub-500K 9:35 snapshot volume) then adjudicate BT-side. GO to $25K requires ALL: (1) weeks 8/31-9/4 + 9/8-9/12 green-or-adjudicated and parity-clean on live-behavior terms; (2) validation P&L since 8/17 positive (above-water rule); (3) live at/above corrected band pro-rata (~$80/wk; was +$113/2wk); (4) zero unexplained violations. If the entered-inclusive rebuild flipped the book negative: HOLD + reassess. GO = exact config diffs (orb.yaml budget 10000->25000, risk 375->937.50, N stays 3), applied ONLY on owner word; expectation at $25K ~= $800/mo corrected. Telegram [ORB SCALE GATE] with the two-week tape + recommendation + one-word ask. Remind: criterion #4 amendment still open.
+```
+
+## 4. Prestage Live Daily Comparison (re-armed 2026-09-05, id db52f8d3)
+- **Cron**: `50 20 * * 1-5` (weekdays 8:50 PM local)
+- **Recurring**: true, 7-day auto-expiry — re-arm at each Saturday weekly review
+- **Prompt**:
+```
+PRESTAGE LIVE DAILY COMPARISON (recurring weekdays 20:50 UTC, after close — the owner-requested staged-vs-chase evaluation; armed 8/28 launch day, 7-day auto-expiry: re-arm VERBATIM at the Saturday weekly review). Working dir /home/ec2-user/onemil. Skip with a one-line telegram if prestage is back in shadow mode. Compute from logs/prestage_events_<today>.jsonl + journalctl FILL QUALITY lines + trades.db: (1) staged orders: placed/filled/canceled counts with cancel-reason mix (window_close vs demoted — fade-demotion at distance 4.5 activated 8/28, expect intraday cancels now, verify freed watermark got reused by later stages); (2) fill quality by path: path=staged fills (bps vs level; expect 0-30) vs path=chase fills (chase bps; historically 150-750) — per-fill list + medians; (3) P&L by path from trades.db (staged rows have pattern_data path=staged; untagged ignition rows = chase) — realized P&L, WR, per-trade avg for each path, cumulative since 8/28; (4) staged fills WITHOUT shadow-trigger twins (JEM 8/27 class — intra-minute crosses; EXPECTED, list them, their P&L is the fills-on-spikes cost to track vs the 19mo BT assumption); (5) BP: watermark peak vs $15K cap, bp_budget/bp_reserve skip counts, any divergence-agent contention; (6) errors/anomalies in prestage lines. ONE [STAGED vs CHASE] telegram via scripts/report_common.send_telegram with the numbers + a one-line verdict (staging paying for itself? on what sample size — refuse conclusions below ~10 fills/path, say 'accumulating'). Never modify configs.
+```
+
+---
+## Protocol for future sessions
+1. On EVERY session start/resume, read this file FIRST (before other work).
+2. Run `CronList` to see what's actually alive.
+3. Diff against this manifest. Re-arm anything listed here but missing from `CronList`.
+4. If you create/modify/delete any cron mid-session, update this file to match before
+   the session might end — don't wait for a "re-arm" prompt to notice drift.
+5. This file itself must be committed to git (or otherwise durable) — it is the ONLY
+   thing that survives a Claude reload for this purpose.
