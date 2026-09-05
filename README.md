@@ -859,11 +859,14 @@ orb.yaml `exit.lock_arm_at_r: 1.75` / `lock_stop_r: 0.5`).
 > (the ticker `NA` was parsed as NaN and crashed the pipeline).
 > **2x-wrapper universe rule IN (2026-09-05, owner GO)**: the bull-flag
 > asset filter had kept post-April leveraged wrappers out of `daily_bars`
-> (live and BT both seed from it). Four-way test: IN **$7,085 / MDD −$509 /
-> 3 red months** vs OUT $4,998 / −$684 / a negative era; survivorship
-> (full point-in-time) +$395 — not load-bearing. `UniverseBuilder.
-> _orb_broad_symbols` now unions wrappers into the ORB/ignition seed pool;
-> `scripts/backfill_wrapper_universe.py` filled the history.
+> (live and BT both seed from it). Four-way test (35 wrapper rows, Databento
+> bars): IN $7,085 / MDD −$509 vs OUT $4,998 / −$684 / a negative era;
+> survivorship (full point-in-time) +$395 — not load-bearing. **Production
+> regen after the backfill (Alpaca bars, the full 320 wrapper rows):
+> $6,085 / 130 picks / 73 fills / MDD −$818 / +$290 per month — the honest
+> reference.** The rule still resolves IN (noise band; OUT fails an era).
+> `UniverseBuilder._orb_broad_symbols` unions wrappers into the ORB/ignition
+> seed pool; `scripts/backfill_wrapper_universe.py` filled the history.
 
 **Validated Jan 2025 → Apr 2026** (`study_orb_pipeline_static_lock.py`,
 production-parity):
