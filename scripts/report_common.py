@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from trading.exit_reasons import is_known, needs_reconcile  # noqa: E402
+from trading.orb_csv import read_orb_csv  # noqa: E402  ticker-safe CSV reader (NA/NAN/NULL are symbols)
 
 STREAK_PATH = ROOT / 'logs' / 'green_streak.json'
 SELECTION_AUDIT = ROOT / 'logs' / 'orb_selection_audit.jsonl'
@@ -101,7 +102,7 @@ def load_bt_selected(day: str) -> List[Dict]:
     path = latest_bt_trades_csv()
     if not path:
         return []
-    df = pd.read_csv(path)
+    df = read_orb_csv(path)
     df = df[df['date'].astype(str).str.startswith(day)]
     return df.to_dict('records')
 
@@ -123,7 +124,7 @@ def bt_data_max_date() -> Optional[str]:
         if 'corrmatrix' not in p]
     if feat_paths:
         try:
-            return str(pd.read_csv(
+            return str(read_orb_csv(
                 feat_paths[-1], usecols=['date'])['date'].max())[:10]
         except Exception as e:
             print(f"WARNING: features CSV unreadable for staleness "
@@ -132,7 +133,7 @@ def bt_data_max_date() -> Optional[str]:
     if not path:
         return None
     try:
-        return str(pd.read_csv(path, usecols=['date'])['date'].max())[:10]
+        return str(read_orb_csv(path, usecols=['date'])['date'].max())[:10]
     except Exception:
         return None
 
@@ -671,7 +672,7 @@ def decision_parity(day: str) -> Dict:
         if not paths:
             return {'available': False, 'n_compared': 0, 'mismatches': [],
                     'warnings': []}
-        feats = pd.read_csv(paths[-1])
+        feats = read_orb_csv(paths[-1])
         feats = feats[feats['date'].astype(str).str.startswith(day)]
         cfg = _yaml.safe_load(open(ROOT / 'orb.yaml'))
         params = load_feature_params((cfg.get('filter') or {}))

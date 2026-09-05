@@ -32,6 +32,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+from trading.orb_csv import read_orb_csv  # ticker-safe reader (NA/NAN/NULL are symbols)
 
 sys.path.insert(0, os.path.dirname(__file__))
 from persistence.database import Database
@@ -70,7 +71,7 @@ def _load_existing_features(path: Optional[str]) -> pd.DataFrame:
     if not path or not os.path.exists(path):
         return pd.DataFrame()
     try:
-        df = pd.read_csv(path)
+        df = read_orb_csv(path)
     except Exception as e:
         print(f"[features] WARN: couldn't read {path}: {e} — treating as empty")
         return pd.DataFrame()

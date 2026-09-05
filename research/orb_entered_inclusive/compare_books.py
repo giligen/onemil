@@ -10,11 +10,13 @@ that differ. Relative tool only — never a forecast.
 import sys
 
 import pandas as pd
+sys.path.insert(0, '/home/ec2-user/onemil')
+from trading.orb_csv import read_orb_csv  # noqa: E402  ticker-safe reader (NA/NAN/NULL are symbols)
 
 
 def load(path: str) -> pd.DataFrame:
     """Load a book CSV and normalise the columns this comparison needs."""
-    b = pd.read_csv(path)
+    b = read_orb_csv(path)
     b['date'] = pd.to_datetime(b['date']).dt.strftime('%Y-%m-%d')
     b['month'] = b['date'].str[:7]
     if '_sized_pnl' not in b.columns:

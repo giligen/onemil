@@ -14,6 +14,7 @@ import sys
 from datetime import timedelta
 
 import pandas as pd
+from trading.orb_csv import read_orb_csv  # ticker-safe reader (NA/NAN/NULL are symbols)
 
 sys.path.insert(0, os.path.dirname(__file__))
 from persistence.database import Database
@@ -443,7 +444,7 @@ def main():
         csv = sorted(p for p in glob.glob('analysis_results/orb_features_*.csv')
                      if 'corrmatrix' not in p)[-1]
     print(f"Features CSV: {csv}")
-    df = pd.read_csv(csv)
+    df = read_orb_csv(csv)
     needed = [f for f, _ in FILTER_FEATURES]
     df = df.dropna(subset=needed + ['pnl', 'date', 'pnl_pct', 'range_size_pct', 'entry_price'])
     df['date'] = pd.to_datetime(df['date'])
@@ -724,7 +725,7 @@ def main():
         if news_gate_on:
             _news_paths = sorted(_glob.glob('data/research/orb_news_catalyst_*.csv'))
             if _news_paths:
-                _nw = pd.concat([pd.read_csv(x) for x in _news_paths],
+                _nw = pd.concat([read_orb_csv(x) for x in _news_paths],
                                 ignore_index=True) \
                     .drop_duplicates(subset=['symbol', 'day'], keep='last')
                 # Deliberate class rule (2026-07-11, matches live): the
@@ -751,7 +752,7 @@ def main():
                 print("PM news gate: WARNING no data/research/orb_news_catalyst_*.csv "
                       "— has_news unknown everywhere (fail-open, no news boosts)")
         if _pm_paths:
-            _pm = pd.concat([pd.read_csv(x) for x in _pm_paths], ignore_index=True)
+            _pm = pd.concat([read_orb_csv(x) for x in _pm_paths], ignore_index=True)
             _pm = _pm.dropna(subset=['pm_dollar_vol'])                 .drop_duplicates(subset=['symbol', 'day'], keep='last')
             _pm_map = {(r['symbol'], r['day']): r['pm_dollar_vol']
                        for _, r in _pm.iterrows()}
@@ -885,7 +886,7 @@ def main():
         # NOT the class-gated effective map used by the sizing gate.
         _raw_news = {}
         for _p in sorted(_glob.glob('data/research/orb_news_catalyst_*.csv')):
-            for _, _r in pd.read_csv(_p).iterrows():
+            for _, _r in read_orb_csv(_p).iterrows():
                 _raw_news[(_r['symbol'], _r['day'])] = (_r['n_articles'] or 0) > 0
         _sel_day = sel['date'].dt.strftime('%Y-%m-%d')
         _has_news_sel = [_raw_news.get((s, d))

@@ -10,23 +10,24 @@ recomputed on the UNION (a new symbol can confirm an old one).
 import csv, sys
 import pandas as pd
 sys.path.insert(0, '/home/ec2-user/onemil')
+from trading.orb_csv import read_orb_csv  # noqa: E402  ticker-safe reader (NA/NAN/NULL are symbols)
 from trading.orb_asset_class import load_class_map, underlying_anchor
 sys.stdout.reconfigure(line_buffering=True)
 ROOT = '/home/ec2-user/onemil'; D = f'{ROOT}/research/ignition_capcheck'
-base = pd.read_csv(f'{D}/trades_all_annotated.csv', dtype={'symbol': str}, keep_default_na=False)
+base = read_orb_csv(f'{D}/trades_all_annotated.csv', dtype={'symbol': str}, keep_default_na=False)
 base = base.drop_duplicates(['day', 'symbol']).copy(); base['src'] = 'base'
-pit = pd.read_csv(f'{D}/trades_PIT.csv', dtype={'symbol': str}, keep_default_na=False); pit['src'] = 'pit'
+pit = read_orb_csv(f'{D}/trades_PIT.csv', dtype={'symbol': str}, keep_default_na=False); pit['src'] = 'pit'
 for df in (base, pit):
     for c in df.columns:
         if c not in ('day', 'symbol', 'reason', 'src', 'anchor', 'era'):
             df[c] = pd.to_numeric(df[c], errors='coerce')
-cls = pd.read_csv(f'{ROOT}/data/research/databento/pit_missing_classified.csv')
+cls = read_orb_csv(f'{ROOT}/data/research/databento/pit_missing_classified.csv')
 cls = cls[cls.book == 'ignition'].drop_duplicates(['symbol', 'bar_date']).set_index(['symbol', 'bar_date'])['cls']
 bucket = {'unknown_to_alpaca': 'survivorship', 'inactive_delisted': 'survivorship', 'active_tradable_common_ABSENT': 'ticker_reuse/vendor',
           'active_filtered_by_is_common_stock': 'wrapper_policy', 'active_not_tradable': 'correct_exclusion', 'test_ticker': 'correct_exclusion'}
 pit['bucket'] = [bucket.get(cls.get((s, d)), 'unclassified') for s, d in zip(pit.symbol, pit.day)]
 names = {r['symbol']: r['name'] for r in csv.DictReader(open(f'{ROOT}/data/research/orb_asset_class_map_20260711.csv', newline=''))}
-alp = pd.read_csv(f'{ROOT}/data/research/databento/alpaca_assets_all_20260905.csv', keep_default_na=False).drop_duplicates('symbol')
+alp = read_orb_csv(f'{ROOT}/data/research/databento/alpaca_assets_all_20260905.csv', keep_default_na=False).drop_duplicates('symbol')
 names = {**dict(zip(alp.symbol, alp.name)), **names}
 cmap = load_class_map()
 allt = pd.concat([base.drop(columns=[c for c in ('anchor', 'coh', 'complex_conf', 'era', 'ym', 'monster2', 'monster3') if c in base.columns]), pit], ignore_index=True)
