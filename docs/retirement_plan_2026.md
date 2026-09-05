@@ -134,6 +134,28 @@ near $5K/mo at full DTBP; ORB + ignition near $7K; **BF is the difference
 between $7K and $10K+, which is why its live parity ladder matters more
 than any other single item.**
 
+## 7a. Co-movement check (2026-09-05, research/portfolio_comovement_row2_20260905.csv)
+
+Row-2 sizes (ORB $50K, BF $500, IGN $500), Jan-25 → Aug-14-26, daily curves:
+
+| | ORB | BF | IGN | Portfolio |
+|---|---|---|---|---|
+| P&L | $34.3K | $47.0K | $63.1K | $144.4K |
+| MDD | −$2.5K | −$12.0K | −$22.3K | **−$30.3K** (sum −$36.9K, sqrt-sum −$25.5K) |
+
+Monthly correlations: ORB/BF 0.42, BF/IGN 0.15, ORB/IGN −0.17. The
+diversification is real but partial (portfolio MDD = 0.82 × sum): BF and
+ignition share their worst months (Jun–Jul 2026, −$15.1K together in July)
+while ORB was green both months; ORB's worst month (May 2026, −$1K) landed in
+the portfolio's best month (+$13.7K). Worst rolling quarter −$25.2K. 15 of 20
+months green, median +$5.2K.
+
+Capital rule applied with the measured 0.82 factor instead of the sum:
+row 1 ~$120K (was $150K), row 2 ~$175K (was $210K), row 3 ~$235K (was
+$285K). The $10K path stays the same; it just needs ~20% less capital than
+the sum-of-drawdowns estimate. Caveat: 20 months, one shared bad summer —
+the factor gets re-measured from live data at each step.
+
 ## 8. What "winning" means, measured
 
 Trust is earned by these, nothing else: live P&L inside the BT band per
