@@ -1214,6 +1214,57 @@ class AlpacaClient:
             logger.error(f"Failed to get premarket 1-min bars: {e}")
             return {}
 
+    def get_1min_bars_range_multi(self, symbols: list, start: datetime,
+                                  end: datetime) -> dict:
+        """Historical 1-min bars for MANY symbols over an explicit UTC
+        window, one batched SIP request (no session clamp — extended
+        hours included when the window covers them).
+
+        2026-09-05: added for the ORB premarket backfill
+        (`scripts/orb_premarket_backfill.py`) — the historical twin of
+        `get_premarket_1min_bars_multi`, which is hard-wired to TODAY.
+
+        Returns dict symbol -> DataFrame(timestamp, open, high, low, close,
+        volume); symbols with no prints map to an empty DataFrame.
+        Raises AlpacaAPIError on request failure (callers decide whether a
+        batch failure is retryable — a silent {} would look like "no
+        premarket prints" and poison the backfill's done-markers).
+        """
+        if not symbols:
+            return {}
+        try:
+            request = StockBarsRequest(
+                symbol_or_symbols=list(symbols),
+                timeframe=TimeFrame(1, TimeFrameUnit.Minute),
+                start=start,
+                end=end,
+                feed=DataFeed.SIP,
+            )
+            bars_raw = self._call_with_timeout(
+                lambda: self.data_client.get_stock_bars(request),
+                f"get_1min_bars_range_multi({len(symbols)} symbols, "
+                f"{start.isoformat()}..{end.isoformat()})"
+            )
+            bars = self._to_dict(bars_raw)
+        except Exception as e:
+            raise AlpacaAPIError(
+                f"get_1min_bars_range_multi failed for {len(symbols)} symbols "
+                f"{start.isoformat()}..{end.isoformat()}: {e}") from e
+        result = {}
+        for sym in symbols:
+            if sym not in bars or len(bars[sym]) == 0:
+                result[sym] = pd.DataFrame()
+                continue
+            records = [{
+                'timestamp': bar.timestamp,
+                'open': float(bar.open), 'high': float(bar.high),
+                'low': float(bar.low), 'close': float(bar.close),
+                'volume': int(bar.volume),
+            } for bar in bars[sym]]
+            result[sym] = pd.DataFrame(records)
+        logger.debug(f"Fetched range 1-min bars for {len(result)} symbols in one call")
+        return result
+
     def get_historical_1min_bars(self, symbol: str, start: datetime, end: datetime) -> pd.DataFrame:
         """
         Get historical 1-minute bars for a specific time range.

@@ -18,6 +18,29 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(__file__))
 from persistence.database import Database
 from study_orb import _bars_to_df, OUT_DIR, OrbTrade
+
+# 2026-09-05 entered-inclusive book (PFSA 8/31 lesson). The features CSV
+# now carries candidates whose breakout never fired (`entered=0`,
+# exit_reason='no_fill'). They rank like everything else, win slots like
+# everything else, and book $0 — exactly what live does with a stop-limit
+# that dies at time_stop_canceled. A CSV WITHOUT the column is the legacy
+# entered-only (lookahead) set: every row is treated as filled.
+NO_FILL_REASON = 'no_fill'
+
+
+def is_no_fill(row) -> bool:
+    """True when a features/book row is a modeled non-fill (`entered` == 0).
+    Missing column or NaN → False (legacy entered-only rows are filled)."""
+    try:
+        v = row['entered']
+    except (KeyError, IndexError, TypeError):
+        return False
+    try:
+        if v != v:  # NaN
+            return False
+        return int(v) == 0
+    except (TypeError, ValueError):
+        return False
 from study_orb_filter import FILTER_FEATURES, fit_z_params, composite_score
 from study_orb_sizing import (
     FILTER_THRESHOLD, fit_quintile_cutoffs, assign_quintile,
@@ -455,12 +478,19 @@ def main():
     n_floor_bound = 0
     n_scaled = 0
     new_pnls = []; new_pnl_pcts = []; new_reasons = []
+    n_no_fill_rows = 0
     for _, row in df.reset_index(drop=True).iterrows():
         key = (row['symbol'], row['date'].strftime('%Y-%m-%d'))
         bars = bars_cache.get(key)
         if bars is None or bars.empty:
             new_pnls.append(row['pnl']); new_pnl_pcts.append(row['pnl_pct'])
             new_reasons.append(row['exit_reason']); continue
+        # 2026-09-05 entered-inclusive: a candidate whose breakout never
+        # fired has no exit to simulate — it ranks, can win a slot, and
+        # books $0 (live: stop-limit born, time_stop_canceled after 60min).
+        if is_no_fill(row):
+            new_pnls.append(0.0); new_pnl_pcts.append(0.0)
+            new_reasons.append(NO_FILL_REASON); n_no_fill_rows += 1; continue
         open_ts = _session_open_timestamp(bars)
         if open_ts is None:
             new_pnls.append(row['pnl']); new_pnl_pcts.append(row['pnl_pct'])
@@ -879,6 +909,12 @@ def main():
     # Set ORB_BT_FILL_RATE=0.0 → no haircut (legacy). 0.56 → empirical.
     # 1.0 → full kill (debug). Default 0 = legacy behaviour preserved.
     fill_rate = float(os.environ.get('ORB_BT_FILL_RATE', '0') or 0)
+    if 0 < fill_rate < 1 and 'entered' in sel.columns:
+        print(f"Fill-rate haircut: WARNING ORB_BT_FILL_RATE={fill_rate:.2f} set on an "
+              f"ENTERED-INCLUSIVE features CSV — non-fills are already modeled "
+              f"explicitly (entered=0 rows book $0). Applying both DOUBLE-COUNTS "
+              f"non-fills; ignoring the haircut.")
+        fill_rate = 0.0
     if 0 < fill_rate < 1:
         import numpy as _np
         rng = _np.random.RandomState(42)  # deterministic
@@ -899,6 +935,16 @@ def main():
     book_csv = bt_cfg['book_csv']
     os.makedirs(os.path.dirname(book_csv) or '.', exist_ok=True)
     sel.to_csv(book_csv, index=False)
+    if 'entered' in sel.columns:
+        _n_nf = int((sel['entered'] == 0).sum())
+        print(f"Entered-inclusive book: {len(sel)} picks = {len(sel) - _n_nf} filled "
+              f"+ {_n_nf} no-fill (slot consumed, $0) — "
+              f"{(len(sel) - _n_nf) / max(len(sel), 1) * 100:.1f}% fill rate; "
+              f"{n_no_fill_rows} no-fill rows in the candidate set")
+    else:
+        print("WARNING: features CSV has no `entered` column — ENTERED-ONLY book "
+              "(selection lookahead: BT picks only from candidates whose breakout "
+              "fired). Rebuild features with --force-full-regen.")
 
     # Per-day → per-month
     daily = sel.groupby('date').agg(

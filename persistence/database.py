@@ -1549,6 +1549,46 @@ class Database:
         logger.debug(f"Cached {len(rows)} intraday 1-min bars for {symbol} on {bar_date}")
         return len(rows)
 
+    # ------------------------------------------------------------------
+    # ORB premarket backfill done-markers (2026-09-05).
+    # The 1-min cache holds premarket (4:00-9:30 ET) bars inconsistently
+    # (e.g. 2025-03-12: 626 premarket rows out of 138,862), so "no premarket
+    # rows" cannot be read as "no premarket prints". This table records
+    # which (symbol, bar_date) pairs were explicitly backfilled from the
+    # API, with the bar count (0 = fetched, genuinely no prints).
+    # ------------------------------------------------------------------
+    def ensure_premarket_backfill_table(self) -> None:
+        """Create the backfill done-marker table if missing (idempotent)."""
+        self._cache_conn.execute("""
+            CREATE TABLE IF NOT EXISTS orb_premarket_backfill_done (
+                symbol VARCHAR(10) NOT NULL,
+                bar_date DATE NOT NULL,
+                n_bars INTEGER NOT NULL,
+                fetched_at TIMESTAMP NOT NULL,
+                PRIMARY KEY (symbol, bar_date)
+            )
+        """)
+        self._cache_conn.commit()
+
+    def get_premarket_backfilled_symbols(self, bar_date: str) -> set:
+        """Symbols already backfilled for `bar_date` (resume support)."""
+        self.ensure_premarket_backfill_table()
+        cur = self._cache_conn.execute(
+            "SELECT symbol FROM orb_premarket_backfill_done WHERE bar_date = ?",
+            (bar_date,))
+        return {r[0] for r in cur.fetchall()}
+
+    def mark_premarket_backfilled(self, symbol: str, bar_date: str, n_bars: int) -> None:
+        """Record that (symbol, bar_date) premarket bars were fetched.
+        `n_bars` = 0 means the API returned no prints — a real observation,
+        distinct from 'never fetched' (row absent)."""
+        self._cache_conn.execute("""
+            INSERT OR REPLACE INTO orb_premarket_backfill_done
+                (symbol, bar_date, n_bars, fetched_at)
+            VALUES (?, ?, ?, ?)
+        """, (symbol, bar_date, int(n_bars), datetime.now(timezone.utc)))
+        self._cache_conn.commit()
+
     def get_intraday_bars_cached(self, symbol: str, bar_date: str) -> List[Dict]:
         """
         Retrieve cached 1-min intraday bars for a symbol/date.

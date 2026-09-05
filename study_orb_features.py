@@ -378,6 +378,50 @@ def extract_features(
 # Main: run ORB + extract features + analyze
 # ---------------------------------------------------------------------------
 
+NO_FILL_REASON = 'no_fill'
+
+
+def trade_row(symbol: str, date_str: str, trade, feats: Dict) -> Optional[Dict]:
+    """One features-CSV row for a simulated candidate — ENTERED OR NOT.
+
+    2026-09-05 entered-inclusive rebuild (the PFSA 8/31 red day): the CSV
+    used to keep only candidates whose breakout FIRED. The ranking then
+    never saw the candidates live actually spent slots on — 8/31 live
+    ranked SHMD (Q5) and BW (Q4) above PFSA (Q3); SHMD's stop-limit never
+    filled (time_stop_canceled) and BW was PDR-vetoed, so live's slots
+    were consumed while BT, blind to both, "took" PFSA. That is the
+    entered-only LOOKAHEAD: BT selected from the fired subset.
+
+    Now a non-entered candidate is emitted with `entered=0`, `pnl=0`,
+    `exit_reason='no_fill'`, `entry_price` = the order level (range_high —
+    the stop trigger live would have placed), and ALL its pre-entry
+    features, so the pipeline ranks it exactly like live and lets it
+    consume a slot at $0. Returns None only when no range could be built
+    (range_high <= 0) — live cannot order those either ("rangeless").
+    """
+    if trade.entered:
+        return {
+            'symbol': symbol, 'date': date_str,
+            'entry_price': trade.entry_price,
+            'pnl': trade.pnl, 'pnl_pct': trade.pnl_pct,
+            'exit_reason': trade.exit_reason,
+            'win': 1 if trade.pnl > 0 else 0,
+            'entered': 1,
+            **feats,
+        }
+    if not trade.range_high or trade.range_high <= 0:
+        return None
+    return {
+        'symbol': symbol, 'date': date_str,
+        'entry_price': float(trade.range_high),
+        'pnl': 0.0, 'pnl_pct': 0.0,
+        'exit_reason': NO_FILL_REASON,
+        'win': 0,
+        'entered': 0,
+        **feats,
+    }
+
+
 def _parse_args():
     p = argparse.ArgumentParser(
         description="ORB per-trade feature extraction (default: incremental)"
@@ -401,7 +445,7 @@ def _parse_args():
 # which needed a manual full regen someone had to remember. The stamp
 # is persisted in a sidecar; a mismatch on incremental runs hard-fails
 # with instructions instead of silently appending mixed-era rows.
-FEATURES_CODE_VERSION = '2026-08-14.dst2'
+FEATURES_CODE_VERSION = '2026-09-05.entered_inclusive'
 _VERSION_SIDECAR = os.path.join('analysis_results',
                                 'orb_features_CODE_VERSION.txt')
 
@@ -533,6 +577,7 @@ def main() -> None:
     rows: List[Dict] = []
     n_simulated = 0
     n_extracted = 0
+    n_no_fill = 0
     for date_str in sorted(universe.keys()):
         for symbol in universe[date_str]:
             bars_df = bars_cache.get((symbol, date_str))
@@ -552,23 +597,18 @@ def main() -> None:
                 target_mult=2.0, time_stop_minutes=60,
             )
             n_simulated += 1
-            if not trade.entered:
-                continue  # only analyze trades where entry actually fired
-
-            row = {
-                'symbol': symbol, 'date': date_str,
-                'entry_price': trade.entry_price,
-                'pnl': trade.pnl, 'pnl_pct': trade.pnl_pct,
-                'exit_reason': trade.exit_reason,
-                'win': 1 if trade.pnl > 0 else 0,
-                **feats,
-            }
+            row = trade_row(symbol, date_str, trade, feats)
+            if row is None:
+                continue
             rows.append(row)
-            n_extracted += 1
+            if row['entered']:
+                n_extracted += 1
+            else:
+                n_no_fill += 1
 
     print(f"  Simulated: {n_simulated:,} | Entered: {n_extracted:,} "
-          f"({n_extracted/max(n_simulated,1)*100:.1f}%) "
-          f"| existing preserved: {len(existing_df)}")
+          f"({n_extracted/max(n_simulated,1)*100:.1f}%) | No-fill rows kept: "
+          f"{n_no_fill:,} | existing preserved: {len(existing_df)}")
 
     df = _merge_new_with_existing(existing_df, rows)
     if df.empty:

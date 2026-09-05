@@ -75,6 +75,26 @@ def latest_bt_trades_csv() -> Optional[str]:
     return path if Path(path).exists() else None
 
 
+def bt_filled_symbols(bt_rows: List[Dict]) -> set:
+    """Symbols of BT picks whose breakout FIRED (`entered` != 0).
+
+    Entered-inclusive book (2026-09-05): rows with entered == 0 are picks
+    BT would have ordered but never filled (time_stop_canceled class);
+    they are NOT fill-parity subjects. Rows without the column (legacy
+    entered-only book) count as filled."""
+    out = set()
+    for r in bt_rows:
+        v = r.get('entered', 1)
+        try:
+            if v is None or v != v:      # None / NaN → legacy → filled
+                out.add(r['symbol']); continue
+            if int(v) != 0:
+                out.add(r['symbol'])
+        except (TypeError, ValueError):
+            out.add(r['symbol'])
+    return out
+
+
 def load_bt_selected(day: str) -> List[Dict]:
     """BT-defended selection rows (post Q1-filter, post PDR-veto) for a date."""
     import pandas as pd
@@ -202,7 +222,13 @@ def green_verdict(day: str) -> Dict:
 
     bt_max = bt_data_max_date()
     bt_stale = bt_max is None or bt_max < day
-    bt_syms = set() if bt_stale else {r['symbol'] for r in load_bt_selected(day)}
+    bt_rows = [] if bt_stale else load_bt_selected(day)
+    # BT picks = everything BT would have ORDERED (entered-inclusive book,
+    # 2026-09-05: no-fill picks included — live must show an order for
+    # them too, filled or time_stop_canceled). Fill-parity below keys on
+    # the ENTERED subset only.
+    bt_syms = {r['symbol'] for r in bt_rows}
+    bt_filled_syms = bt_filled_symbols(bt_rows)
     live_orb_syms = {r['symbol'] for r in rows if r.get('strategy') == 'orb'}
     missing = bt_syms - live_orb_syms
     unexplained = []
@@ -255,7 +281,7 @@ def green_verdict(day: str) -> Dict:
     else:
         unfilled = sorted({
             r['symbol'] for r in rows
-            if r.get('strategy') == 'orb' and r['symbol'] in bt_syms
+            if r.get('strategy') == 'orb' and r['symbol'] in bt_filled_syms
             and r.get('fill_price') is None
             and r.get('order_status') not in ('filled', 'closed')})
         checks['fill_parity'] = ('OK' if not unfilled else

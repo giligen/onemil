@@ -114,17 +114,21 @@ def load_broad_universe(
     candidates = [(symbol, str(bar_date)) for symbol, bar_date
                   in cur.fetchall()]
     # 2026-08-31 (the PFSA red day) — INTERIM 9:35-volume floor.
-    # Live's snapshot gates on volume traded by 9:35 INCLUDING premarket
-    # from 4:00 ET; the bars cache holds premarket inconsistently, so
-    # live's quantity is NOT reproducible historically (calibration on
-    # 110 live-scored pairs proved ordering inversion: PFSA 135K cached
-    # was live-EXCLUDED while SHMD 101K cached was live-INCLUDED on
-    # premarket volume). Until the premarket backfill (queued bulk job)
-    # enables the true 500K@9:35 gate on both sides:
-    #   prev-day gate stays (status quo) + a calibrated 15K RTH-9:35
-    #   floor (keeps 110/110 observed live picks, drops dead-open
-    #   names). PFSA-class reds (prev-liquid, quiet open) remain
-    #   POSSIBLE and are pre-adjudicated as this known class.
+    # CORRECTED 2026-09-05 (the 8/31 diagnosis above was WRONG — a
+    # wrong-layer fix): live's universe gate is `prev_volume >= 500K`
+    # (orb_engine.build_orb_universe_from_snapshots), the SAME prev-day
+    # rule as this query — there is no live 9:35-volume gate. PFSA 8/31
+    # WAS in live's universe (bars subscribed 13:31:29, scored Q3
+    # comp=0.246) and simply ranked 4th behind SHMD (Q5), WTI (Q4), BW
+    # (Q4); SHMD's stop-limit never filled (time_stop_canceled) and BW was
+    # PDR-vetoed, so live's slots were consumed while BT — whose features
+    # held only FIRED breakouts — never saw SHMD/BW and gave the slot to
+    # PFSA. That is the ENTERED-ONLY LOOKAHEAD, fixed in
+    # study_orb_features.trade_row (entered=0 rows) + the pipeline
+    # (no-fill picks consume a slot at $0). The 15K RTH-9:35 floor below
+    # is kept ONLY as a range-computability proxy (a name with no
+    # 9:30-9:35 prints is "rangeless" live and cannot be ordered either;
+    # it kept 110/110 observed live picks) — it is NOT a live gate twin.
     # Cutoff computed PER DATE in ET (a hardcoded UTC hour is the DST
     # bug class, 3fab1f9/35e9935).
     from zoneinfo import ZoneInfo
