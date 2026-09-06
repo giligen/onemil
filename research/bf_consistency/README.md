@@ -109,3 +109,17 @@ Read: the 86 trades F0 adds over TRI are worth +$34K over 21 months (+0.1R each)
 **Candidate consistency profile (proposal, joint decision)**: TRI + 50%@+2R partial + regime sizing OFF — the only profile that clears the pre-committed bar (worst month ≥ −$8K, MDD ≥ −$20K) while 2026 YTD is +$38K on $50K (76% in 8 months; 2026 has 22 trades, 13 winners). Cost: 2025 $118K → $93K. Alternative if we keep regime sizing: add a $4K per-trade risk cap (worst −$10.1K, MDD −$13.3K, 2026 +$51K) — needs the cap built as a real knob first. The Jul–Aug 2026 texture remains: 3 trades, −$5.3K.
 
 Walk-forward honesty: the three raw rules were chosen from the era-consistency scan on the full cache; §6e shows the same three are the three worst causal buckets on 2025 ALONE, so a 2025-only rule-picker would have shipped the same rules and 2026 is out-of-sample for them. The +2R partial and regime-off choices were made on the full window (in-sample). Live shadow (10 sessions, `profit_partial.shadow`, VWAP gate log-only is next) before any flag flips.
+
+### 6e. Would a 2025-only rule-picker have found the same rules? Mostly.
+Worst causal raw buckets ranked on **2025 alone** (n ≥ 40), with their 2026 out-of-sample mean R:
+
+| rank | bucket | 2025 meanR (n) | 2026 meanR (n) | holds OOS? |
+|---|---|---|---|---|
+| 1 | entry price > $20 | −0.31 (55) | −0.18 (69) | yes |
+| 2 | breakout at/below VWAP | −0.29 (92) | −0.41 (94) | yes |
+| 3 | gap +15–30% | −0.27 (40) | **+0.21** (44) | **no — flips** |
+| 4 | pole gain 3–5% | −0.19 (151) | −0.22 (184) | yes |
+| 5 | entry 10:00–10:15 | −0.15 (77) | −0.01 (94) | weak |
+| 6 | conviction ≤ 1.2 | −0.12 (174) | −0.15 (152) | yes (already gated) |
+
+Three of the top four 2025 buckets hold in 2026; the gap bucket flips sign and is NOT a rule (small n, no mechanism). So the three rules are the 2025-selected rules that survived 2026 — not perfectly pre-registered (the picker also had the gap rule available and would have carried one dud), which is the honest strength of the evidence: 2025-in-sample, 2026-out-of-sample for the rule set minus one flip.
