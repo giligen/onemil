@@ -37,6 +37,9 @@ class VwapGateConfig:
     vwap_dist_pct > min_dist_pct (0.0 = strictly above VWAP)."""
     enabled: bool = False
     min_dist_pct: float = 0.0
+    # shadow=True (live only): log what the gate WOULD do, never skip —
+    # the 10-session shadow window before the flag flips.
+    shadow: bool = False
 
 
 DISABLED = VwapGateConfig()
@@ -48,6 +51,7 @@ def load_vwap_gate_config(bull_flag_cfg: Optional[dict]) -> VwapGateConfig:
     return VwapGateConfig(
         enabled=bool(vg.get('enabled', False)),
         min_dist_pct=float(vg.get('min_dist_pct', 0.0)),
+        shadow=bool(vg.get('shadow', False)),
     )
 
 
@@ -55,7 +59,7 @@ def passes_vwap_gate(vwap_dist_pct: Optional[float],
                      cfg: VwapGateConfig) -> Tuple[bool, str]:
     """The decision. Unknown distance (no VWAP) FAILS OPEN — keep, but say so:
     a missing feature must never silently veto (CLAUDE.md fallback rule)."""
-    if not cfg.enabled:
+    if not cfg.enabled and not cfg.shadow:
         return True, 'vwap_gate disabled'
     if vwap_dist_pct is None:
         logger.warning("vwap_gate: vwap distance unknown — fail-open (kept)")
@@ -80,7 +84,7 @@ def filter_trades(trades: Iterable[dict], cfg: VwapGateConfig) -> List[dict]:
     """Stage-2: drop cached trades whose setup-time VWAP distance fails the gate."""
     trades = list(trades)
     if not cfg.enabled:
-        return trades
+        return trades  # shadow is a live-only concept; BT is on/off
     kept, removed = [], 0
     for t in trades:
         keep, _ = passes_vwap_gate(_feature_value(t), cfg)

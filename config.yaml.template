@@ -360,6 +360,7 @@ trading:
     vwap_gate:
       enabled: false
       min_dist_pct: 0.0
+      shadow: false     # true = log would-skips (gate + pole>=5 + price<=20), never skip
     two_tier_filter:
       enabled: true                        # shipping ON — validated +$10.5K on 2025 OOS, +$5.4K on Q1 2026 vs A_f6
       extras_lower: 10.0                   # % intraday threshold: Extras floor

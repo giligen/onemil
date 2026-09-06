@@ -113,3 +113,25 @@ def test_engine_source_wires_gate_before_conviction():
     i_conv = src.index('conviction_mult, _conv_brkdn = self._compute_conviction_score_setup(')
     assert i_gate < i_conv
     assert 'VWAP GATE skip' in src
+
+
+class TestShadow:
+    def test_shadow_decides_but_stage2_ignores(self):
+        cfg = VwapGateConfig(enabled=False, min_dist_pct=0.0, shadow=True)
+        assert passes_vwap_gate(-1.0, cfg)[0] is False   # the decision is computed
+        rows = [{'symbol': 'B', 'qf_vwap_dist_pct': -1.0}]
+        assert filter_trades(rows, cfg) == rows           # BT never acts on shadow
+
+    def test_config_load_shadow(self):
+        cfg = load_vwap_gate_config({'vwap_gate': {'enabled': False, 'shadow': True}})
+        assert cfg.shadow is True and cfg.enabled is False
+
+    def test_engine_shadow_never_returns_none(self):
+        import inspect
+        from trading.trading_engine import TradingEngine
+        src = inspect.getsource(TradingEngine)
+        assert 'VWAP GATE [SHADOW] would skip' in src
+        assert 'CONSISTENCY RULES [SHADOW] would skip' in src
+        blk = src[src.index('VWAP GATE [SHADOW]'):src.index('CONSISTENCY RULES [SHADOW]')]
+        # the shadow branch has no early return; only the enabled branch does
+        assert blk.count('return None') == 1 and 'elif not _vg_keep:' in blk

@@ -3512,17 +3512,35 @@ class TradingEngine:
 
         # Above-VWAP gate — same feature the BT caches as qf_vwap_dist_pct
         # (breakout_level vs cumulative VWAP through the setup bar).
-        if self.vwap_gate.enabled:
+        if self.vwap_gate.enabled or self.vwap_gate.shadow:
             _vg_vwap = self._compute_vwap(bars, up_to_idx=setup.flag_end_idx)
             _vg_dist = (
                 (setup.breakout_level - _vg_vwap) / _vg_vwap * 100
                 if _vg_vwap and _vg_vwap > 0 else None
             )
             _vg_keep, _vg_reason = passes_vwap_gate(_vg_dist, self.vwap_gate)
-            if not _vg_keep:
+            if not _vg_keep and not self.vwap_gate.enabled:
+                # shadow: say what the gate would do, keep going
+                logger.info(f"{symbol}: VWAP GATE [SHADOW] would skip — {_vg_reason}")
+            elif not _vg_keep:
                 logger.info(f"{symbol}: VWAP GATE skip — {_vg_reason}")
                 self._eod_skipped.append((symbol, "BELOW_VWAP", _vg_reason))
                 return None
+            # Consistency-profile shadow (2026-09-06, README §6): the two raw
+            # rules that live applies through EXISTING knobs (detector
+            # min_pole_gain_pct, scanner price_max) get a would-skip line too,
+            # so the shadow window measures the whole P1 rule set.
+            if self.vwap_gate.shadow:
+                _pole = float(getattr(setup, 'pole_gain_pct', 0.0) or 0.0)
+                _px = float(setup.breakout_level)
+                _would = []
+                if _pole < 5.0:
+                    _would.append(f"pole {_pole:.1f}% < 5%")
+                if _px > 20.0:
+                    _would.append(f"price ${_px:.2f} > $20")
+                if _would:
+                    logger.info(f"{symbol}: CONSISTENCY RULES [SHADOW] would skip — "
+                                + '; '.join(_would))
 
         # Conviction scoring: combine with risk tier, cap at 3x
         # Always compute breakdown (cheap, pure arithmetic) so we have it
