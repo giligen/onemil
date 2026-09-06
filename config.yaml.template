@@ -346,6 +346,13 @@ trading:
     # Extras 10-19, edge <10). Keep A + edge unfiltered. Apply surgical drop +
     # composite z-score gate on Extras only. BT numbers (O + f6 + this filter):
     # 2025 +$57,679 (beats A_f6 +$54,572); Q1 2026 +$8,450 (beats A_f6 +$4,495).
+    # 2026-09-06 above-VWAP gate (trading/bf_vwap_gate.py — ONE decision for
+    # BT Stage-2 and live): long only when the breakout level is above the
+    # session VWAP. Era-consistent worst bucket on the honest cache; see
+    # research/bf_consistency/README.md §6. OFF until the joint ship call.
+    vwap_gate:
+      enabled: false
+      min_dist_pct: 0.0
     two_tier_filter:
       enabled: true                        # shipping ON — validated +$10.5K on 2025 OOS, +$5.4K on Q1 2026 vs A_f6
       extras_lower: 10.0                   # % intraday threshold: Extras floor

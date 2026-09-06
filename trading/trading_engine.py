@@ -29,6 +29,7 @@ from trading.exit_reasons import ExitReason
 from trading.pattern_detector import BullFlagDetector
 from trading.trade_planner import TradePlanner, TradePlan
 from trading.news_kill_guard import news_kill_decision
+from trading.bf_vwap_gate import load_vwap_gate_config, passes_vwap_gate
 from trading.order_executor import OrderExecutor
 from trading.orphan_reconciler import (
     ReconcilerConfig, reconcile_strategy_orphans,
@@ -287,6 +288,14 @@ class TradingEngine:
             _extras_cfg.get("strong_neg_multiplier", self.macd_strong_neg_multiplier))
         self.macd_extras_normal_multiplier = float(
             _extras_cfg.get("normal_multiplier", self.macd_normal_multiplier))
+
+        # Above-VWAP gate (2026-09-06): ONE decision with BT Stage-2
+        # (trading/bf_vwap_gate.py). Default off until the joint ship call.
+        self.vwap_gate = load_vwap_gate_config(
+            _cfg.get("trading", {}).get("bull_flag", {}))
+        if self.vwap_gate.enabled:
+            logger.info(f"VWAP gate: ON — long only when breakout > VWAP"
+                        f"{self.vwap_gate.min_dist_pct:+.2f}%")
 
         # Quality filter: skip low-probability setups (validated on 15mo data)
         qf_cfg = _cfg.get("trading", {}).get("quality_filter", {})
@@ -3462,6 +3471,20 @@ class TradingEngine:
             if not _trade:
                 logger.info(f"{symbol}: NEWS KILL: {_reason}")
                 self._eod_skipped.append((symbol, _ncat, _reason))
+                return None
+
+        # Above-VWAP gate — same feature the BT caches as qf_vwap_dist_pct
+        # (breakout_level vs cumulative VWAP through the setup bar).
+        if self.vwap_gate.enabled:
+            _vg_vwap = self._compute_vwap(bars, up_to_idx=setup.flag_end_idx)
+            _vg_dist = (
+                (setup.breakout_level - _vg_vwap) / _vg_vwap * 100
+                if _vg_vwap and _vg_vwap > 0 else None
+            )
+            _vg_keep, _vg_reason = passes_vwap_gate(_vg_dist, self.vwap_gate)
+            if not _vg_keep:
+                logger.info(f"{symbol}: VWAP GATE skip — {_vg_reason}")
+                self._eod_skipped.append((symbol, "BELOW_VWAP", _vg_reason))
                 return None
 
         # Conviction scoring: combine with risk tier, cap at 3x

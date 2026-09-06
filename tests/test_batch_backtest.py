@@ -1051,12 +1051,12 @@ class TestConvictionFilterInBatch:
         trades = [
             self._make_trade('LOW', 1.0),     # below threshold
             self._make_trade('MID', 1.19),    # just below
-            self._make_trade('PASS', 1.20),   # at threshold (>=)
+            self._make_trade('ZZPASS', 1.20),   # at threshold (>=)
             self._make_trade('HIGH', 1.8),    # above
         ]
         result = filter_bull_flag_trades(trades)
         symbols = {t['symbol'] for t in result}
-        assert symbols == {'PASS', 'HIGH'}, f"Expected only PASS+HIGH, got {symbols}"
+        assert symbols == {'ZZPASS', 'HIGH'}, f"Expected only ZZPASS+HIGH, got {symbols}"
 
     def test_filter_disabled_keeps_all(self, monkeypatch):
         """conviction_scoring.enabled=False → no filtering."""

@@ -54,3 +54,38 @@ Built as ONE spec for BT and live (`trading/bf_profit_partial.py`, commit 5a8285
 The legacy-branch sweep's $132K / 2026 +$19K (section 2 of the partial sweep) does NOT survive the unified spec: its extra came from optimistic touch-fills on a fill-R level plus a fixed 2.5R runner target; every honest variant of those is worse than "partial at the bar close, remainder trails".
 
 **Honest verdict on exits**: the +2R partial flips 2026 positive (+$15.6K swing) for −$12K of total (2025 gives up $27K of tail), same green-month count, slightly better MDD. It fails the pre-committed bar on worst month (−$11.3K vs −$8K) and MDD (−$26K vs −$20K). It is a real, shippable improvement in consistency — not the whole answer. The month count is the trade count.
+
+## 6. The entry side (2026-09-06 evening): the raw detector has no edge in either year — the selection stack does, and it decayed
+
+Raw regen-7 cache (all 896 detections at the standard exits): **2025 mean −0.01R (463 trades, WR 42%), 2026 mean −0.07R (433, WR 41%)**. The Stage-2 stack picked +0.61R trades in 2025 (46, WR 59%) and +0.06R in 2026 (33, WR 45%). The raw material is the same in both years (9% of detections reach +2R in both); the fitted layers (conviction ≥1.8, TTF composite, MACD tiers, regime) stopped separating in 2026. Re-entry (lab L1, June 2026 Stage-1 with `BT_ALLOW_REENTRY=1`) adds 7 trades on 66 symbol-days (+10%) at −0.02R — not a frequency lever.
+
+Era-consistency scan of every causal raw feature by year (896 rows, both years must agree on sign). Three buckets are the worst in BOTH years; none of the fitted features are:
+
+| raw feature bucket | 2025 meanR / WR (n) | 2026 meanR / WR (n) | share of detections |
+|---|---|---|---|
+| **breakout at/below VWAP** (`qf_vwap_dist_pct ≤ 0`) | −0.29 / 35% (92) | −0.41 / 31% (94) | 21% |
+| pole gain 3–5% | −0.19 / 37% (151) | −0.22 / 37% (184) | 37% |
+| entry price > $20 | −0.31 / 35% (55) | −0.18 / 36% (69) | 14% |
+
+(`daily_range_pct` separates strongly but is the full-day range — look-ahead, rejected as in backtest.py Rule 6. Conviction buckets flip sign between years.)
+
+### 6a. The above-VWAP gate — built as ONE spec (`trading/bf_vwap_gate.py`, BT Stage-2 + live, `trading.bull_flag.vwap_gate`, default OFF)
+Mechanism: a flag below VWAP is a bounce into supply, not continuation; every BF rule book says long only above VWAP, and we only ever had an upper bound. Full Stage-2 runs with the gate ON ($2K risk, $50K capital):
+
+| profile | n | total | 2025 | 2026 | WR | green | worst mo | MDD |
+|---|---|---|---|---|---|---|---|---|
+| as-is | 79 | 107,351 | 118,292 | −10,941 | 53% | 14/20 | −11,186 | −27,487 |
+| gate | 65 | 196,074 | 180,221 | +15,853 | 60% | 15/20 | −11,186 | −15,928 |
+| gate + 50%@+2R partial | 64 | 173,398 | 142,967 | **+30,431** | 66% | **16/20** | −10,339 | −15,798 |
+| gate + partial + per-trade risk cap $4K (post-hoc) | 64 | 153,436 | 118,092 | **+35,344** | 66% | 15/20 | **−8,845** | **−13,297** |
+| gate + partial + risk cap $3K (post-hoc) | 64 | 130,656 | 98,673 | +31,983 | 66% | 15/20 | −6,146 | −11,966 |
+
+What the gate does: removes 16 of 79 Stage-2 trades — 11 losers / 5 winners, net **−$40.7K** (2025 −$13.9K over 8 trades, 2026 −$26.8K over 8). One knock-on: on 2025-03-20 the below-VWAP loser LSE (−$9K) had taken a slot; without it OM (+$24.5K) and TITN (+$23.5K) enter — that is $48K of the 2025 lift from ONE day and must not be counted as evidence. The evidence is the 16 losers and the raw-cache era consistency.
+
+Risk cap: per-trade risk runs $3.5K median, $8K max (conviction × MACD × regime × tier stack). The multipliers are the fitted layers; in 2026 they amplify losses. Capping at 2× base ($4K) costs 2025 $25K and buys worst month −$8.8K / MDD −$13.3K / 2026 +$35K. Post-hoc scaling is exact up to integer shares; a real knob (`max_total_risk_mult`) is the next build.
+
+### 6b. What 30–50% on capital in 2026 looks like on these numbers
+Capital normalization is $50K / $2K base risk. 2026 YTD (8 months): as-is −22%; +2R partial alone +9%; gate + partial + $4K cap **+71%** (+$35.3K), 2026 H1 +$46K, Jul–Aug −$11K (4 trades, 3 stopped — the trade count problem is untouched). None of this is a forecast: the gate was found today on the same cache it is measured on, though its rule is pre-registered by every BF practitioner and era-consistent on 896 raw rows, not fitted on the 79.
+
+### 6c. Frequency: the raw cohort that is positive in all four half-years
+Raw detections with pole > 5% AND above VWAP AND price ≤ $20: **405 of 896 (45%), mean +0.16R (2025, n=232) / +0.23R (2026, n=173), all four halves positive (+0.07 / +0.25 / +0.25 / +0.20)**. At a flat $2K risk with NO fitted layer: 15/21 green months, worst −$5.7K, 2026 +$80K — ~19 trades/month, one a day. This is the candidate "every day" book: the entry rule is three causal raw filters, no conviction threshold, no composite. It needs its own Stage-2 run (slots, daily-loss, BP, +2R partial) before it is more than a cohort statistic — queued behind the June lab (one bulk-bar process at a time).

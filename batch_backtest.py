@@ -431,6 +431,11 @@ def filter_bull_flag_trades(
                 f"Gap-fade filter: {before_gf} → {len(trades)} trades ({gf_removed} removed)"
             )
 
+    # Above-VWAP gate (2026-09-06). Shared decision with the live engine
+    # (trading/bf_vwap_gate.py); reads the cached setup-time feature.
+    from trading.bf_vwap_gate import load_vwap_gate_config, filter_trades as _vwap_gate
+    trades = _vwap_gate(trades, load_vwap_gate_config(bull_flag_cfg))
+
     # Two-tier filter (2026-04-17). A-tier (intraday>=20% at entry) and edge
     # (<10%) passthrough; Extras (10-19%) go through surgical-drop + composite
     # z-score gate. Live engine uses the same shared module, so BT/live parity
