@@ -1047,6 +1047,15 @@ def main():
               f"their P&L would have been {_gp:+,.0f} (slot stays empty)")
         sel = sel[_m].copy()
 
+    # ---- V1 feature vetoes (2026-09-06): POST-selection, no refill ----
+    if EXP.feat_veto:
+        from trading.orb_experimental_rules import feature_veto_keep_mask as _fv_keep
+        _m = _fv_keep(sel, EXP.feat_veto)
+        _gp = float(sel.loc[~_m, '_sized_pnl'].sum())
+        print(f"EXP V1 feature veto POST ({EXP.describe().split('feat_veto=')[1]}): dropped "
+              f"{int((~_m).sum())} pick(s), their P&L would have been {_gp:+,.0f} (slot stays empty)")
+        sel = sel[_m].copy()
+
     # 2026-05-08: fill-rate haircut. Pre-fix, BT assumed every qualified
     # signal filled — no model of buy-stop misses. LIVE Mon-Thu 5/4-5/7
     # observed 9 fills out of 16 buy-stops (56%). The cross_time_min

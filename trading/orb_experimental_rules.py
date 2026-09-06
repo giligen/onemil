@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Tuple, Optional
 
 import pandas as pd
 
@@ -49,17 +49,20 @@ class ExpFlags:
     ratr_max: Optional[float]
     mid_kill: bool
     rearm: bool
+    # V1 (2026-09-06 veto study): POST-selection, no-refill vetoes on EXISTING
+    # features CSV columns — "feature<=t" or "feature>=t", ';'-separated.
+    feat_veto: Tuple[Tuple[str, str, float], ...] = ()
 
     @property
     def any_on(self) -> bool:
         return any([self.rvol_veto is not None, self.rvol_max is not None, self.rvol_rank, self.rcp_gate,
                     self.ratr_min is not None, self.ratr_max is not None,
-                    self.mid_kill, self.rearm])
+                    self.mid_kill, self.rearm, bool(self.feat_veto)])
 
     def describe(self) -> str:
         return (f"rvol_veto={self.rvol_veto} rvol_max={self.rvol_max} rvol_rank={self.rvol_rank} rcp_gate={self.rcp_gate}"
                 f"/{self.rcp_form} ratr=[{self.ratr_min},{self.ratr_max}] mid_kill={self.mid_kill} "
-                f"rearm={self.rearm}")
+                f"rearm={self.rearm} feat_veto={';'.join(f'{f}{o}{t}' for f, o, t in self.feat_veto) or None}")
 
 
 def load_flags() -> ExpFlags:
@@ -76,7 +79,38 @@ def load_flags() -> ExpFlags:
     return ExpFlags(rvol_veto=_f('ORB_EXP_RVOL_VETO'), rvol_max=_f('ORB_EXP_RVOL_MAX'), rvol_rank=_env_on('ORB_EXP_RVOL_RANK'),
                     rcp_gate=gate, rcp_form=form, ratr_min=_f('ORB_EXP_RATR_MIN'),
                     ratr_max=_f('ORB_EXP_RATR_MAX'), mid_kill=_env_on('ORB_EXP_MID_KILL'),
-                    rearm=_env_on('ORB_EXP_REARM'))
+                    rearm=_env_on('ORB_EXP_REARM'), feat_veto=parse_feature_vetoes(_env('ORB_EXP_FEAT_VETO')))
+
+
+def parse_feature_vetoes(spec: str) -> Tuple[Tuple[str, str, float], ...]:
+    """'range_size_pct<=2.221;spy_3d_range_pct>=1.484' -> ((feature, op, t), ...).
+    A veto DROPS rows where `feature op t` holds. Empty spec -> ()."""
+    out = []
+    for part in (spec or '').split(';'):
+        part = part.strip()
+        if not part:
+            continue
+        for op in ('<=', '>='):
+            if op in part:
+                f, t = part.split(op, 1)
+                out.append((f.strip(), op, float(t)))
+                break
+        else:
+            raise ValueError(f"ORB_EXP_FEAT_VETO: '{part}' needs <= or >=")
+    return tuple(out)
+
+
+def feature_veto_keep_mask(df: pd.DataFrame, rules) -> pd.Series:
+    """True = keep. A row is dropped when ANY rule fires; NaN never fires
+    (fail-open, like every other veto in this file)."""
+    keep = pd.Series(True, index=df.index)
+    for f, op, t in rules:
+        if f not in df.columns:
+            raise KeyError(f"feature veto: column {f!r} not in the features CSV")
+        v = pd.to_numeric(df[f], errors='coerce')
+        fires = (v <= t) if op == '<=' else (v >= t)
+        keep &= ~fires.fillna(False)
+    return keep
 
 
 # ---------------------------------------------------------------------------

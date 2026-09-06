@@ -77,3 +77,40 @@ def test_rearm_rules():
     assert not X.rearm_allowed('stop', 5, 10, rearmed_already=False)      # not an early tag exit
     assert not X.rearm_allowed('tag_bb', 12, 10, rearmed_already=False)   # window closed
     assert not X.rearm_allowed('tag_bb', 5, 10, rearmed_already=True)     # once only
+
+
+class TestFeatureVeto:
+    """V1 (2026-09-06): post-selection, no-refill vetoes on existing features."""
+
+    def test_parse(self):
+        from trading.orb_experimental_rules import parse_feature_vetoes
+        assert parse_feature_vetoes('') == ()
+        assert parse_feature_vetoes('range_size_pct<=2.221; spy_3d_range_pct>=1.484') == (
+            ('range_size_pct', '<=', 2.221), ('spy_3d_range_pct', '>=', 1.484))
+        import pytest
+        with pytest.raises(ValueError):
+            parse_feature_vetoes('range_size_pct=2')
+
+    def test_keep_mask_any_rule_fires_nan_kept(self):
+        import pandas as pd
+        from trading.orb_experimental_rules import feature_veto_keep_mask, parse_feature_vetoes
+        df = pd.DataFrame({'range_size_pct': [1.0, 3.0, 3.0, None],
+                           'spy_3d_range_pct': [0.5, 2.0, 0.5, 0.5]})
+        rules = parse_feature_vetoes('range_size_pct<=2.221;spy_3d_range_pct>=1.484')
+        keep = feature_veto_keep_mask(df, rules)
+        assert keep.tolist() == [False, False, True, True]
+
+    def test_unknown_column_is_loud(self):
+        import pandas as pd, pytest
+        from trading.orb_experimental_rules import feature_veto_keep_mask
+        with pytest.raises(KeyError):
+            feature_veto_keep_mask(pd.DataFrame({'a': [1]}), (('nope', '<=', 1.0),))
+
+    def test_flags_env(self, monkeypatch):
+        from trading.orb_experimental_rules import load_flags
+        monkeypatch.setenv('ORB_EXP_FEAT_VETO', 'range_size_pct<=2.221')
+        fl = load_flags()
+        assert fl.feat_veto == (('range_size_pct', '<=', 2.221),) and fl.any_on
+        assert 'feat_veto=range_size_pct<=2.221' in fl.describe()
+        monkeypatch.delenv('ORB_EXP_FEAT_VETO')
+        assert load_flags().feat_veto == ()
