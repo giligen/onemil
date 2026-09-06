@@ -492,7 +492,8 @@ class TradeSimulator:
                         and _pp_fires(bar_high, pp_level)):
                     _psh = _pp_shares(active_shares, self.profit_partial.fraction)
                     if _psh > 0:
-                        _pfill = self._compute_stop_fill(float(bar['close']))
+                        _pfill = (pp_level if self.profit_partial.fill == 'level'
+                                  else self._compute_stop_fill(float(bar['close'])))
                         trade.partial_exit_taken = True
                         trade.partial_exit_time = bar['timestamp']
                         trade.partial_exit_price = _pfill
@@ -510,6 +511,14 @@ class TradeSimulator:
                             f"P&L ${trade.partial_pnl:.2f}, remaining {active_shares}sh, "
                             f"stop ${current_stop:.2f}"
                         )
+                # Runner target (shared spec): after the partial, a resting limit
+                # at r_baseline + runner_target_r × R takes the remainder on touch.
+                if (pp_taken and self.profit_partial.runner_target_r > 0 and risk > 0
+                        and bar_high >= r_baseline + self.profit_partial.runner_target_r * risk):
+                    _rt = r_baseline + self.profit_partial.runner_target_r * risk
+                    self._exit_trade(trade, bar, 'pp+target', _rt, active_shares=active_shares)
+                    logger.debug(f"  Bar {i}: pp+target at ${_rt:.2f} (+{self.profit_partial.runner_target_r}R)")
+                    return trade
 
                 # Stage 1: Move stop to breakeven (+ optional profit) after +breakeven_at_r.
                 # Levels are anchored at r_baseline (= planned_entry under planned-R,

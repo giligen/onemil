@@ -36,6 +36,15 @@ class ProfitPartialConfig:
     r_multiple: float = 1.5
     fraction: float = 0.5
     move_to_breakeven: bool = True
+    # fill='close': market sell after the trigger bar closes (BT: bar close via
+    # the stop-fill model; live: execute_partial_exit). fill='level': a RESTING
+    # LIMIT at the level (BT: fills at the level when the bar's high touches;
+    # live: a limit order placed at arming — needs the limit-leg plumbing).
+    fill: str = 'close'
+    # runner_target_r > 0: after the partial the remainder exits at
+    # r_baseline + runner_target_r × R via a resting limit (touch fill), else
+    # it keeps the unified trail.
+    runner_target_r: float = 0.0
 
 
 DISABLED = ProfitPartialConfig()
@@ -49,7 +58,11 @@ def load_profit_partial_config(trading_cfg: Optional[dict]) -> ProfitPartialConf
         r_multiple=float(pp.get('r_multiple', 1.5)),
         fraction=float(pp.get('fraction', 0.5)),
         move_to_breakeven=bool(pp.get('move_to_breakeven', True)),
+        fill=str(pp.get('fill', 'close')),
+        runner_target_r=float(pp.get('runner_target_r', 0.0)),
     )
+    if cfg.fill not in ('close', 'level'):
+        raise ValueError(f"trading.profit_partial.fill must be close|level, got {cfg.fill!r}")
     if cfg.enabled and not (0.0 < cfg.fraction < 1.0 and cfg.r_multiple > 0):
         raise ValueError(f"trading.profit_partial: fraction must be in (0,1) and r_multiple > 0, got {cfg}")
     return cfg

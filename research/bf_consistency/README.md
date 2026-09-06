@@ -37,3 +37,20 @@ Pre-committed bar (2026 ≥ 0, ≥ 70% green months, worst month ≥ −$8K, MDD
 3. **Sizing for month variance**: risk per trade sets the month swing (±$10K at $2K). The retirement plan sizes BF at $500–1K, which caps month swings at ±$2.5–5K while the frequency work runs.
 4. **Live**: BF stays at $60 with the trail fix from Monday; the consistency exit shadows for 10 sessions before it trades.
 5. **ORB next** with the same lens (it is already 15/21 green; its problem is size, and the signal study says its entries are not the lever).
+
+## 5. Profit partial built on the unified spec (2026-09-06 afternoon) — honest numbers
+
+Built as ONE spec for BT and live (`trading/bf_profit_partial.py`, commit 5a8285f; 241 tests incl. one-tape parity). Re-simulated on regen-7 (rich master), Stage-2 at $2K risk:
+
+| profile (unified spec) | total | 2025 | 2026 | green | worst mo | MDD | top-5 |
+|---|---|---|---|---|---|---|---|
+| as-is (no partial) | 107,351 | 118,292 | −10,941 | 14/20 | −11,186 | −27,487 | 80% |
+| 50% @ +1.5R, BE, trail | 56,101 | 55,433 | +668 | 12/20 | −7,672 | −25,330 | 127% |
+| **50% @ +2R, BE, trail** | **95,363** | 90,731 | **+4,631** | 14/20 | −11,305 | −26,234 | 84% |
+| 67% @ +2R, BE, trail | 88,185 | 84,010 | +4,175 | 14/20 | −11,463 | −25,923 | 84% |
+| 50% @ +2.5R, BE, trail | 94,679 | 96,899 | −2,220 | 14/20 | −11,305 | −25,901 | 89% |
+| 50% @ +2R, touch-fill at level, runner +3R limit | 87,204 | 91,526 | −4,322 | 14/20 | −12,416 | −25,513 | 82% |
+
+The legacy-branch sweep's $132K / 2026 +$19K (section 2 of the partial sweep) does NOT survive the unified spec: its extra came from optimistic touch-fills on a fill-R level plus a fixed 2.5R runner target; every honest variant of those is worse than "partial at the bar close, remainder trails".
+
+**Honest verdict on exits**: the +2R partial flips 2026 positive (+$15.6K swing) for −$12K of total (2025 gives up $27K of tail), same green-month count, slightly better MDD. It fails the pre-committed bar on worst month (−$11.3K vs −$8K) and MDD (−$26K vs −$20K). It is a real, shippable improvement in consistency — not the whole answer. The month count is the trade count.
