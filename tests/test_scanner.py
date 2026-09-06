@@ -376,12 +376,22 @@ class TestRunIntradayCycle:
         bar_ts = real_datetime(2026, 3, 13, 10, 0, 0,
                                tzinfo=pytz.timezone('US/Eastern'))
 
+        # Overlap is the proof, not wall-clock: record each call's window.
+        # (2026-09-06: the 0.9s wall-clock bound flaked under a loaded full
+        # suite run while passing 3/3 in isolation — thread scheduling delay,
+        # not a sequential regression.)
+        windows = {}
+
         def slow_bars(*_args, **_kw):
+            windows['bars'] = [_time.perf_counter()]
             _time.sleep(0.5)
+            windows['bars'].append(_time.perf_counter())
             return {'PARA': {'volume': 100_000, 'timestamp': bar_ts}}
 
         def slow_trades(*_args, **_kw):
+            windows['trades'] = [_time.perf_counter()]
             _time.sleep(0.5)
+            windows['trades'].append(_time.perf_counter())
             return {'PARA': {'price': 5.0}}
 
         mock_alpaca.get_current_bars.side_effect = slow_bars
@@ -393,13 +403,16 @@ class TestRunIntradayCycle:
         scanner._run_intraday_cycle()
         elapsed = _time.perf_counter() - t0
 
-        # Sequential would be ≥1.0s. Parallel is ~0.5s + thread overhead.
-        # 0.9s is the discrimination boundary. Sequential regression hits >1.0s.
-        assert elapsed < 0.9, (
-            f"Intraday cycle took {elapsed:.2f}s with two 0.5s API calls — "
-            f"this means bars + trades ran sequentially, not in parallel. "
-            f"Parallel execution should complete in ~0.5s + thread overhead."
+        assert set(windows) == {'bars', 'trades'}, "both API calls must run"
+        (b0, b1), (t0_, t1) = windows['bars'], windows['trades']
+        # Sequential execution: one call starts after the other ENDS (overlap <= 0).
+        overlap = min(b1, t1) - max(b0, t0_)
+        assert overlap > 0.25, (
+            f"bars/trades windows overlap {overlap:.2f}s (two 0.5s calls) — "
+            f"they ran sequentially, not in parallel. elapsed={elapsed:.2f}s"
         )
+        # Loose sanity bound: sequential is >= 1.0s; allow scheduling noise.
+        assert elapsed < 1.5, f"Intraday cycle took {elapsed:.2f}s"
 
     @patch('scanner.realtime_scanner.datetime')
     def test_intraday_cycle_propagates_bars_error(
