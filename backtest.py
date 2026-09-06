@@ -191,6 +191,11 @@ class TradeSimulator:
         # trailing after lock arms. Both fields > 0 to enable.
         static_lock_arm_r: float = 0.0,
         static_lock_at_r: float = 0.0,
+        # 2026-09-06 profit partial (trading/bf_profit_partial.py — ONE spec
+        # with live StopMonitor): sell `fraction` at +r_multiple R (plan-R
+        # baseline, closed-bar high), stop to the fill (breakeven), the
+        # remainder keeps trailing. None/disabled = byte-identical legacy.
+        profit_partial: Optional['ProfitPartialConfig'] = None,
         # Planned-R variant: when True, R-based math (activation, breakeven,
         # static lock, trail ratchet, r_gain) uses (plan.entry_price -
         # plan.stop_loss_price) — the SETUP's structural R — instead of
@@ -239,6 +244,8 @@ class TradeSimulator:
         self.partial_profit_r_multiple = partial_profit_r_multiple
         self.partial_profit_fraction = partial_profit_fraction
         self.exit_slippage_pct = exit_slippage_pct
+        from trading.bf_profit_partial import DISABLED as _PP_DISABLED
+        self.profit_partial = profit_partial or _PP_DISABLED
         self.marketable_limit_offset = marketable_limit_offset
         self.marketable_limit_offset_pct = marketable_limit_offset_pct
         self.trailing_stop_r = trailing_stop_r
@@ -387,6 +394,14 @@ class TradeSimulator:
         exhaust_partial_taken = False
         active_shares = trade.shares
         effective_trail_r = self.trailing_stop_r
+        # Profit partial state (shared spec; level anchored on the SAME
+        # r_baseline/risk the trail uses)
+        from trading.bf_profit_partial import (
+            breakeven_stop as _pp_breakeven, partial_level as _pp_level,
+            partial_shares as _pp_shares, profit_partial_fires as _pp_fires)
+        pp_taken = False
+        pp_level = (_pp_level(r_baseline, risk, self.profit_partial.r_multiple)
+                    if (self.profit_partial.enabled and risk > 0) else 0.0)
 
         for i in range(entry_bar_idx + 1, len(bars)):
             bar = bars.iloc[i]
@@ -395,9 +410,10 @@ class TradeSimulator:
             if self.force_close_time_et is not None:
                 bar_et = self._get_bar_time_et(bar['timestamp'])
                 if bar_et >= self.force_close_time_et:
-                    reason = 'exhaust+force_close' if exhaust_partial_taken else 'force_close'
+                    reason = ('exhaust+force_close' if exhaust_partial_taken
+                              else ('pp+force_close' if pp_taken else 'force_close'))
                     self._exit_trade(trade, bar, reason, bar['open'],
-                                     active_shares=active_shares if exhaust_partial_taken else None)
+                                     active_shares=active_shares if (exhaust_partial_taken or pp_taken) else None)
                     logger.debug(f"  Bar {i}: {reason} at ${bar['open']:.2f}")
                     return trade
 
@@ -415,8 +431,10 @@ class TradeSimulator:
                     reason = 'no_pop'
                     if exhaust_partial_taken:
                         reason = 'exhaust+no_pop'
+                    elif pp_taken:
+                        reason = 'pp+no_pop'
                     self._exit_trade(trade, bar, reason, bar['close'],
-                                     active_shares=active_shares if exhaust_partial_taken else None)
+                                     active_shares=active_shares if (exhaust_partial_taken or pp_taken) else None)
                     logger.debug(
                         f"  Bar {i}: NO-POP exit after {self.no_pop_exit_bars} bars — "
                         f"max +{max_move_pct:.2%} < {self.no_pop_exit_min_pct:.1%}"
@@ -458,10 +476,40 @@ class TradeSimulator:
                     reason = 'trail_stop' if trailing_active else 'stop'
                     if exhaust_partial_taken:
                         reason = 'exhaust+' + reason
+                    elif pp_taken:
+                        reason = 'pp+' + reason
                     self._exit_trade(trade, bar, reason, stop_fill,
-                                     active_shares=active_shares if exhaust_partial_taken else None)
+                                     active_shares=active_shares if (exhaust_partial_taken or pp_taken) else None)
                     logger.debug(f"  Bar {i}: {reason} at ${stop_fill:.2f}")
                     return trade
+
+                # Profit partial (2026-09-06, shared spec): closed bar's high
+                # reached +r_multiple R → sell `fraction` at this bar's close
+                # (market after the close; stop-fill model), stop → fill price
+                # (true breakeven) on the remainder. Same-bar stop+partial:
+                # the stop check above already ran — stop wins (conservative).
+                if (pp_level > 0 and not pp_taken and not exhaust_partial_taken
+                        and _pp_fires(bar_high, pp_level)):
+                    _psh = _pp_shares(active_shares, self.profit_partial.fraction)
+                    if _psh > 0:
+                        _pfill = self._compute_stop_fill(float(bar['close']))
+                        trade.partial_exit_taken = True
+                        trade.partial_exit_time = bar['timestamp']
+                        trade.partial_exit_price = _pfill
+                        trade.partial_shares = _psh
+                        trade.partial_pnl = (_pfill - actual_entry) * _psh
+                        trade.remaining_shares = active_shares - _psh
+                        active_shares -= _psh
+                        pp_taken = True
+                        if self.profit_partial.move_to_breakeven:
+                            current_stop = _pp_breakeven(current_stop, actual_entry)
+                            trade.breakeven_stop_active = True
+                        logger.debug(
+                            f"  Bar {i}: PROFIT PARTIAL {_psh}sh at ${_pfill:.2f} "
+                            f"(level ${pp_level:.2f} = +{self.profit_partial.r_multiple}R), "
+                            f"P&L ${trade.partial_pnl:.2f}, remaining {active_shares}sh, "
+                            f"stop ${current_stop:.2f}"
+                        )
 
                 # Stage 1: Move stop to breakeven (+ optional profit) after +breakeven_at_r.
                 # Levels are anchored at r_baseline (= planned_entry under planned-R,
@@ -546,7 +594,7 @@ class TradeSimulator:
 
                 # Exhaustion exit: check signals when profitable, sell partial
                 if (self.exhaustion_exit_enabled and not exhaust_partial_taken
-                        and risk > 0):
+                        and not pp_taken and risk > 0):
                     current_r = (bar['close'] - actual_entry) / risk
                     if current_r >= self.exhaustion_min_profit_r:
                         if self._check_exhaustion(bars, i):
@@ -608,9 +656,9 @@ class TradeSimulator:
 
         # End of day — exit at last bar's close
         last_bar = bars.iloc[last_bar_idx]
-        reason = 'exhaust+eod' if exhaust_partial_taken else 'eod'
+        reason = 'exhaust+eod' if exhaust_partial_taken else ('pp+eod' if pp_taken else 'eod')
         self._exit_trade(trade, last_bar, reason, last_bar['close'],
-                         active_shares=active_shares if exhaust_partial_taken else None)
+                         active_shares=active_shares if (exhaust_partial_taken or pp_taken) else None)
         logger.debug(f"  {reason} exit at ${last_bar['close']:.2f}")
         return trade
 
@@ -1036,6 +1084,17 @@ class BacktestRunner:
             'shooting_star': bool(exhaust_signals.get('shooting_star', True)),
         }
 
+        # Profit partial (2026-09-06): trading.profit_partial — the shared
+        # BT/live spec; default off (byte-identical books until flipped).
+        from trading.bf_profit_partial import load_profit_partial_config
+        self.profit_partial = load_profit_partial_config(trading_cfg)
+        if self.profit_partial.enabled:
+            logger.info(
+                f"Profit partial: {self.profit_partial.fraction:.0%} at "
+                f"+{self.profit_partial.r_multiple}R, breakeven="
+                f"{self.profit_partial.move_to_breakeven} (shared spec, trading/bf_profit_partial.py)"
+            )
+
         # Wire force_close, partial profit, exit slippage, marketable
         # limit offset, trailing stop, and exhaustion exit into the simulator
         if simulator is not None:
@@ -1062,6 +1121,7 @@ class BacktestRunner:
                 exhaustion_tighter_trail_r=float(exhaust_cfg.get("tighter_trail_r", 0.5)),
                 exhaustion_min_profit_r=float(exhaust_cfg.get("min_profit_r", 3.0)),
                 exhaustion_signals=self.exhaustion_signals,
+                profit_partial=self.profit_partial,
                 no_pop_exit_bars=no_pop_exit_bars,
                 no_pop_exit_min_pct=no_pop_exit_min_pct,
                 trail_exit_slippage_pct=trail_exit_slippage_pct,

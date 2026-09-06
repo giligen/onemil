@@ -204,6 +204,15 @@ class TradingEngine:
         self.exhaustion_partial_fraction = float(exhaust_cfg.get("partial_fraction", 0.5))
         self.exhaustion_tighter_trail_r = float(exhaust_cfg.get("tighter_trail_r", 0.5))
         self.exhaustion_min_profit_r = float(exhaust_cfg.get("min_profit_r", 3.0))
+        # 2026-09-06 profit partial — ONE spec with the BT simulator
+        # (trading/bf_profit_partial.py); default off.
+        from trading.bf_profit_partial import load_profit_partial_config
+        self.profit_partial = load_profit_partial_config(_cfg.get("trading", {}))
+        if self.profit_partial.enabled:
+            logger.info(
+                f"Profit partial ARMED: {self.profit_partial.fraction:.0%} at "
+                f"+{self.profit_partial.r_multiple}R, breakeven={self.profit_partial.move_to_breakeven}"
+            )
         self.exhaustion_signals = exhaust_cfg.get("signals", {
             'volume_divergence': False,
             'climax_candle': True,
@@ -2027,6 +2036,11 @@ class TradingEngine:
                             planned_entry_price=_planned_entry,
                             planned_risk_per_share=_planned_R,
                             r_basis=self.trail_r_basis,
+                            # 2026-09-06 profit partial (shared spec) — 0 = off
+                            pp_r_multiple=(self.profit_partial.r_multiple
+                                           if self.profit_partial.enabled else 0.0),
+                            pp_fraction=self.profit_partial.fraction,
+                            pp_breakeven=self.profit_partial.move_to_breakeven,
                             # BT parity (2026-09-05): the fill minute is
                             # excluded from trail state AND stop checks —
                             # the simulate loop starts at entry+1. Broker
@@ -2034,6 +2048,10 @@ class TradingEngine:
                             skip_exits_until_ts=_end_of_minute_epoch(
                                 datetime.now(timezone.utc)),
                         )
+
+                        if self.profit_partial.enabled:
+                            self.stop_monitor.arm_profit_partial(
+                                symbol, self.profit_partial.r_multiple)
 
                         # Cancel TP leg when trailing stop is active (bracket path only)
                         if trail_r > 0 and tp_leg_id:
@@ -2481,8 +2499,9 @@ class TradingEngine:
         # so MACD wave's events stay queued for its own engine to consume.
         events = self.stop_monitor.drain_exit_events(strategy='bull_flag')
         for event in events:
-            # Exhaustion partials are processed separately
-            if event.exit_reason == 'exhaustion_partial':
+            # Partials (exhaustion / profit) are processed by their own
+            # checkers, which receive the event directly — never as a full exit.
+            if event.exit_reason in ('exhaustion_partial', 'profit_partial'):
                 continue
 
             # Unconfirmed exits (BRANCH_LAST_RESORT — no broker fill report)
@@ -2667,6 +2686,33 @@ class TradingEngine:
                 f"{event.symbol}: Failed to finalize stop exit: {e}"
             )
 
+    def _check_profit_partials(self) -> None:
+        """Execute armed profit partials whose closed-bar high reached the
+        level (trading/bf_profit_partial.py — the BT simulator applies the
+        identical rule). Uses the same partial-sell executor as the
+        exhaustion rule; the stop then moves to the fill (breakeven).
+        Cadence: this cycle (~60s) after the bar closed — BT fills at that
+        bar's close, live at the next quote; the DECISION is identical."""
+        if not self.stop_monitor or not self.profit_partial.enabled:
+            return
+        for symbol in self.stop_monitor.pending_profit_partials('bull_flag'):
+            snapshot = self.stop_monitor.get_watch_snapshot(symbol)
+            if not snapshot:
+                continue
+            logger.info(
+                f"{symbol}: PROFIT PARTIAL fired — closed-bar high "
+                f"${snapshot.get('highest_since_entry', 0):.2f} >= level, "
+                f"selling {self.profit_partial.fraction:.0%}"
+            )
+            event = self.stop_monitor.execute_partial_exit(
+                symbol,
+                fraction=self.profit_partial.fraction,
+                tighter_trail_r=float(snapshot.get('trail_r') or 0.0),  # keep the trail
+                reason='profit_partial',
+            )
+            if event:
+                self._process_exhaustion_partial_event(event)
+
     def _check_exhaustion_exits(self) -> None:
         """
         Check active positions for exhaustion exit signals.
@@ -2775,7 +2821,8 @@ class TradingEngine:
                         'partial_exit_price': actual_exit_price,
                         'partial_exit_shares': event.shares,
                         'partial_exit_pnl': partial_pnl,
-                        'partial_exit_reason': 'exhaustion',  # partial-exit reason has its own column; ExitReason enum tracks full-exit only
+                        'partial_exit_reason': ('profit_partial' if event.exit_reason == 'profit_partial'
+                                            else 'exhaustion'),  # partial-exit reason has its own column; ExitReason enum tracks full-exit only
                         'partial_exited_at': datetime.now(timezone.utc),
                     })
                     logger.info(
@@ -2905,6 +2952,7 @@ class TradingEngine:
         self._process_stop_monitor_exits()
 
         # Check exhaustion exit signals on active positions (every 60s cycle)
+        self._check_profit_partials()
         self._check_exhaustion_exits()
 
         today = date.today().isoformat()
@@ -4770,11 +4818,19 @@ class TradingEngine:
                             planned_entry_price=_planned_entry_db,
                             planned_risk_per_share=_planned_R_db,
                             r_basis=self.trail_r_basis,
+                            # 2026-09-06 profit partial (shared spec) — 0 = off
+                            pp_r_multiple=(self.profit_partial.r_multiple
+                                           if self.profit_partial.enabled else 0.0),
+                            pp_fraction=self.profit_partial.fraction,
+                            pp_breakeven=self.profit_partial.move_to_breakeven,
                             # Crash recovery: exclude the original fill
                             # minute (usually long past → no-op).
                             skip_exits_until_ts=_end_of_minute_epoch(
                                 trade.get('filled_at')),
                         )
+                        if self.profit_partial.enabled:
+                            self.stop_monitor.arm_profit_partial(
+                                symbol, self.profit_partial.r_multiple)
                         logger.info(
                             f"{symbol}: Crash recovery — re-registered StopMonitor watch "
                             f"stop=${real_sl:.2f}"

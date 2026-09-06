@@ -123,6 +123,12 @@ class ExitReason(str, Enum):
     reversal candle after a big run). Not a full close — the remaining
     shares stay watched. See partial_exit_* DB columns."""
 
+    PROFIT_PARTIAL = "profit_partial"
+    """2026-09-06 profit partial (trading/bf_profit_partial.py — ONE spec with
+    the BT simulator): `fraction` sold when a CLOSED bar's high reaches
+    +r_multiple R, stop to the fill (breakeven). Not a full close; later
+    full exits carry the `pp+<reason>` prefix (like `exhaust+`)."""
+
     SCALE_OUT = "scale_out"
     """ORB winner-stack partial: 40% of the position sold via limit at
     entry + 3.0R (orb.yaml exit.scale_out, 2026-08-22). NOT a full close —
@@ -224,6 +230,7 @@ _ATTRIBUTED_EXITS = frozenset({
     ExitReason.STOP_LOSS_BRACKET_SL_RACE.value,
     ExitReason.STOP_LOSS_FALLBACK.value,
     ExitReason.EXHAUSTION_PARTIAL.value,
+    ExitReason.PROFIT_PARTIAL.value,
     ExitReason.SCALE_OUT.value,
     ExitReason.GAP_OVER_REJECTION.value,
     ExitReason.GAP_ADJUST_FAILED.value,
@@ -263,8 +270,9 @@ def _strip_exhaust_prefix(value: str) -> str:
     prefix is trade-lifecycle metadata. Catalog checks classify on the
     suffix (2026-07-04 review fix — previously these healthy exits read
     as unknown)."""
-    if value.startswith('exhaust+'):
-        return value[len('exhaust+'):]
+    for prefix in ('exhaust+', 'pp+'):   # 'pp+' = profit partial (2026-09-06)
+        if value.startswith(prefix):
+            return value[len(prefix):]
     return value
 
 

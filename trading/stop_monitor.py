@@ -71,6 +71,13 @@ class WatchEntry:
     trail_arm_pct: float = 0.0
     # Exhaustion exit: set True after partial sell into strength
     exhaustion_partial_taken: bool = False
+    # 2026-09-06 profit partial (trading/bf_profit_partial.py, shared with the
+    # BT simulator): level = r_baseline + r_multiple × R, armed at add_watch;
+    # fires when a CLOSED bar's high (highest_since_entry) reaches it.
+    pp_level: float = 0.0
+    pp_fraction: float = 0.0
+    pp_taken: bool = False
+    pp_breakeven: bool = True
     # Quote cache (updated by WebSocket quote stream)
     latest_bid: float = 0.0
     latest_ask: float = 0.0
@@ -1000,6 +1007,9 @@ class StopMonitor:
         scale_at_px: float = 0.0,
         scale_qty: int = 0,
         scale_done: bool = False,
+        pp_r_multiple: float = 0.0,
+        pp_fraction: float = 0.0,
+        pp_breakeven: bool = True,
     ) -> bool:
         """
         Register a symbol for stop-price monitoring.
@@ -1131,6 +1141,9 @@ class StopMonitor:
         planned_entry_price: float = 0.0,
         planned_risk_per_share: float = 0.0,
         r_basis: str = 'plan',
+        pp_r_multiple: float = 0.0,
+        pp_fraction: float = 0.0,
+        pp_breakeven: bool = True,
     ) -> None:
         """Atomic quote-watch → stop-watch promotion.
 
@@ -1180,6 +1193,8 @@ class StopMonitor:
             planned_entry_price=planned_entry_price,
             planned_risk_per_share=planned_risk_per_share,
             r_basis=r_basis,
+            pp_fraction=pp_fraction,
+            pp_breakeven=pp_breakeven,
         )
 
         # Atomic swap under one lock: pop quote-watch, install stop-watch.
@@ -1923,6 +1938,38 @@ class StopMonitor:
         with self._watch_lock:
             return list(self._watches.keys())
 
+    def pending_profit_partials(self, strategy: str) -> List[str]:
+        """Symbols whose profit partial is armed, not yet taken, and whose
+        closed-bar high (highest_since_entry) has reached the level —
+        the live twin of the BT `profit_partial_fires(bar_high, level)`
+        check (trading/bf_profit_partial.py). The engine executes them."""
+        from trading.bf_profit_partial import profit_partial_fires
+        out: List[str] = []
+        with self._watch_lock:
+            for sym, w in self._watches.items():
+                if (w.strategy == strategy and w.pp_level > 0 and not w.pp_taken
+                        and not w.exhaustion_partial_taken
+                        and profit_partial_fires(w.highest_since_entry, w.pp_level)):
+                    out.append(sym)
+        return out
+
+    def arm_profit_partial(self, symbol: str, r_multiple: float) -> float:
+        """Set the watch's profit-partial level from the SAME R baseline the
+        trail uses (r_baseline_and_unit via r_basis). Returns the level (0 = off)."""
+        from trading.bf_profit_partial import partial_level
+        with self._watch_lock:
+            w = self._watches.get(symbol)
+            if not w or r_multiple <= 0:
+                return 0.0
+            r_baseline, r_unit = self._r_baseline_and_unit(w)
+            if r_unit <= 0:
+                logger.warning(f"StopMonitor: {symbol} profit partial NOT armed — R unit <= 0")
+                return 0.0
+            w.pp_level = partial_level(r_baseline, r_unit, r_multiple)
+            logger.info(f"StopMonitor: {symbol} profit partial armed at ${w.pp_level:.2f} "
+                        f"(+{r_multiple}R on {w.r_basis}-R, {w.pp_fraction:.0%})")
+            return w.pp_level
+
     def watched_symbols_for(self, strategy: str) -> List[str]:
         """Currently watched symbols whose WatchEntry was tagged with the
         given strategy. Use this in any per-strategy loop that iterates
@@ -1978,9 +2025,12 @@ class StopMonitor:
         symbol: str,
         fraction: float,
         tighter_trail_r: float,
+        reason: str = 'exhaustion_partial',
     ) -> Optional['StopExitEvent']:
         """
-        Execute a partial exhaustion exit: sell fraction of shares, tighten trail.
+        Execute a partial exit: sell fraction of shares, tighten trail.
+        reason='exhaustion_partial' (legacy) or 'profit_partial' (2026-09-06,
+        trading/bf_profit_partial.py — moves the stop to breakeven after the fill).
 
         Thread-safe: reads watch under lock, releases for API call,
         re-acquires to update state.
@@ -2017,9 +2067,9 @@ class StopMonitor:
                 with self._exit_lock:
                     self._exit_in_progress[symbol] = False
                 return None
-            if watch.exhaustion_partial_taken:
+            if watch.exhaustion_partial_taken or watch.pp_taken:
                 logger.debug(
-                    f"StopMonitor: {symbol} exhaustion partial already taken"
+                    f"StopMonitor: {symbol} a partial was already taken (one per trade)"
                 )
                 with self._exit_lock:
                     self._exit_in_progress[symbol] = False
@@ -2195,10 +2245,21 @@ class StopMonitor:
 
             remaining = watch.shares - sell_shares
             watch.shares = remaining
-            watch.exhaustion_partial_taken = True
+            watch.exhaustion_partial_taken = True   # one partial per trade
             watch.trail_r = tighter_trail_r
             sl_leg_id = watch.sl_leg_id
             watch_strategy = watch.strategy
+            if reason == 'profit_partial':
+                # Shared spec (trading/bf_profit_partial.py): stop → the fill
+                # price (true breakeven) on the remainder, never lowered.
+                watch.pp_taken = True
+                if watch.pp_breakeven and watch.entry_price > watch.stop_price:
+                    logger.info(
+                        f"StopMonitor: {symbol} PROFIT PARTIAL {sell_shares}sh — stop "
+                        f"${watch.stop_price:.2f} → breakeven ${watch.entry_price:.2f}, "
+                        f"remaining {remaining}sh"
+                    )
+                    watch.stop_price = watch.entry_price
 
             # Ratchet stop with tighter trail
             if risk_per_share > 0:
@@ -2234,11 +2295,12 @@ class StopMonitor:
 
         event = StopExitEvent(
             symbol=symbol,
-            stop_price=0.0,  # Not a stop exit — exhaustion partial
+            stop_price=0.0,  # Not a stop exit — a partial
             exit_price=exit_price,
             shares=sell_shares,
             order_id=order_id,
-            exit_reason=ExitReason.EXHAUSTION_PARTIAL.value,
+            exit_reason=(ExitReason.PROFIT_PARTIAL.value if reason == 'profit_partial'
+                         else ExitReason.EXHAUSTION_PARTIAL.value),
             trade_db_id=trade_db_id,
             submitted_at=time_mod.time(),
             pricing_method=pricing_method,

@@ -285,6 +285,15 @@ trading:
   # Exhaustion exit: sell partial into strength on exhaustion signals
   # Reduces slippage by selling while buyers are still aggressive
   # Production: polls 1-min bars every 60s, matches backtest signal logic
+  # 2026-09-06 profit partial (trading/bf_profit_partial.py — ONE spec for the
+  # BT simulator and the live StopMonitor): sell `fraction` when a CLOSED
+  # 1-min bar's high reaches +r_multiple R (plan-R), stop to the fill
+  # (breakeven), remainder keeps trailing. Default OFF.
+  profit_partial:
+    enabled: false
+    r_multiple: 1.5
+    fraction: 0.5
+    move_to_breakeven: true
   exhaustion_exit:
     enabled: true                      # testing exhaustion signals
     partial_fraction: 0.5              # sell 50% on signal
