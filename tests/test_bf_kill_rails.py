@@ -59,6 +59,18 @@ def engine(tmp_db, tmp_path, monkeypatch):
     monkeypatch.delenv('BF_KILL_RAILS', raising=False)
     monkeypatch.setenv('BF_MONTH_PAUSE_FLAG',
                        str(tmp_path / 'bf_month_pause.flag'))
+    # Pin the Phase-1 rails (-800/-1200/-2500): the escalation tests are
+    # written in those dollars. The LIVE config carries the P1 ramp-stage
+    # rails (-5u/-7u/-8u of risk_per_trade, docs/bf_p1_ramp.md) which change
+    # with the stage — TestConfig checks that invariant instead.
+    from config import Config as _Cfg
+    _real = _Cfg._load_yaml_only
+    def _pinned():
+        c = _real()
+        c.setdefault('trading', {}).setdefault('bull_flag', {})['kill_rails'] = {
+            'enabled': True, 'daily_usd': -800, 'weekly_usd': -1200, 'month_pause_usd': -2500}
+        return c
+    monkeypatch.setattr(_Cfg, '_load_yaml_only', staticmethod(_pinned))
     eng = _build_engine(
         tmp_db, notifier=MagicMock(spec=TelegramNotifier))
     return eng
@@ -101,11 +113,24 @@ def _quiet_reset(monkeypatch, engine):
 
 class TestConfig:
     def test_yaml_knobs(self, engine):
-        """Live config.yaml ships the Phase-1 thresholds, enabled ON."""
+        """The fixture pins the Phase-1 thresholds; the engine reads them."""
         assert engine.kill_rails_enabled is True
         assert engine.kill_daily_usd == -800
         assert engine.kill_weekly_usd == -1200
         assert engine.kill_month_pause_usd == -2500
+
+    def test_live_rails_follow_the_ramp_stage(self):
+        """LIVE config.yaml: rails are -5u/-7u/-8u of risk_per_trade and
+        daily_loss_limit is -5u (docs/bf_p1_ramp.md — move them TOGETHER)."""
+        from config import Config
+        c = Config._load_yaml_only()
+        t = c['trading']; kr = t['bull_flag']['kill_rails']; base = float(t['risk_per_trade'])
+        assert kr['enabled'] is True
+        assert kr['daily_usd'] == -5 * base
+        assert kr['weekly_usd'] == -7 * base
+        assert kr['month_pause_usd'] == -8 * base
+        assert float(t['daily_loss_limit']) == -5 * base
+        assert kr['daily_usd'] > kr['weekly_usd'] > kr['month_pause_usd']
 
     def test_template_matches_live(self):
         """config.yaml.template carries the same kill_rails block."""
@@ -572,8 +597,14 @@ class TestBfRailsStatus:
         assert 'QUERY FAILED' in rc.bf_rails_line(st)
 
     def test_thresholds_from_live_config(self):
+        """report_common reads the SAME numbers the engine reads (live file)."""
         import scripts.report_common as rc
+        import yaml
+        from pathlib import Path
         kr = rc._bf_rails_cfg()
-        assert kr['daily_usd'] == -800
-        assert kr['weekly_usd'] == -1200
-        assert kr['month_pause_usd'] == -2500
+        live = yaml.safe_load(open(Path(rc.ROOT) / 'config.yaml'))['trading']['bull_flag']['kill_rails']
+        assert kr['daily_usd'] == live['daily_usd']
+        assert kr['weekly_usd'] == live['weekly_usd']
+        assert kr['month_pause_usd'] == live['month_pause_usd']
+        assert kr['daily_usd'] < 0 and kr['weekly_usd'] < kr['daily_usd'] \
+            and kr['month_pause_usd'] < kr['weekly_usd']

@@ -57,7 +57,9 @@ class TestConfigLoadedIdentically:
         shutil.copy("config.yaml.template", target)
         monkeypatch.chdir(tmp_path)
         cfg = Config().regime_sizing_cfg
-        assert cfg['enabled'] is True
+        # 2026-09-07 P1: regime sizing is OFF live (config decision, README §6f);
+        # the parity contract is that BOTH sides read the same flag, not its value.
+        assert isinstance(cfg['enabled'], bool)
         assert cfg['vol_threshold_pct'] == 22.0
         assert cfg['slope_threshold_pct'] == 0.15
         assert cfg['multipliers'] == {'A': 1.25, 'B': 1.0, 'C1': 1.5, 'C2': 0.0}
@@ -76,7 +78,8 @@ class TestConfigLoadedIdentically:
         monkeypatch.chdir(tmp_path)
         from backtest import BacktestRunner
         r = BacktestRunner()
-        assert r.regime_sizing_enabled is True
+        from config import Config as _C
+        assert r.regime_sizing_enabled is bool(_C._load_yaml_only()['trading']['regime_sizing']['enabled'])
         assert r.regime_vol_threshold == 22.0
         assert r.regime_slope_threshold == 0.15
         assert r.regime_multipliers == {'A': 1.25, 'B': 1.0, 'C1': 1.5, 'C2': 0.0}
