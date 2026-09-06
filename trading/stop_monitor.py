@@ -1970,6 +1970,13 @@ class StopMonitor:
                         f"(+{r_multiple}R on {w.r_basis}-R, {w.pp_fraction:.0%})")
             return w.pp_level
 
+    def mark_profit_partial_shadow(self, symbol: str) -> None:
+        """Shadow mode: record that the partial WOULD have fired (once), no order."""
+        with self._watch_lock:
+            w = self._watches.get(symbol)
+            if w:
+                w.pp_taken = True
+
     def watched_symbols_for(self, strategy: str) -> List[str]:
         """Currently watched symbols whose WatchEntry was tagged with the
         given strategy. Use this in any per-strategy loop that iterates

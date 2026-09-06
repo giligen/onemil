@@ -294,6 +294,7 @@ trading:
     r_multiple: 1.5
     fraction: 0.5
     move_to_breakeven: true
+    shadow: false     # true = log would-partials only (shadow window)
   exhaustion_exit:
     enabled: true                      # testing exhaustion signals
     partial_fraction: 0.5              # sell 50% on signal

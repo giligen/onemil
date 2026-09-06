@@ -167,3 +167,23 @@ def test_parity_same_tape_same_bar(monitor):
             fired_bar = i
     assert fired_bar == 3
     assert bt.partial_exit_time == _tape(ROWS)['timestamp'].iloc[fired_bar]
+
+
+def test_shadow_flag_loads_and_marks_without_selling():
+    """shadow=true: config parses; StopMonitor marks the partial taken (once)
+    without touching the position — the live 10-session shadow window."""
+    from trading.bf_profit_partial import load_profit_partial_config
+    cfg = load_profit_partial_config({'profit_partial': {
+        'enabled': True, 'r_multiple': 2.0, 'fraction': 0.5, 'shadow': True}})
+    assert cfg.shadow is True and cfg.enabled is True
+    from trading.stop_monitor import StopMonitor, WatchEntry
+    sm = StopMonitor.__new__(StopMonitor)
+    import threading
+    sm._watch_lock = threading.RLock()
+    sm._watches = {'ABC': WatchEntry(symbol='ABC', stop_price=9.5, shares=100, tp_leg_id='',
+                                     sl_leg_id='', entry_price=10.0, strategy='bull_flag')}
+    sm.mark_profit_partial_shadow('ABC')
+    assert sm._watches['ABC'].pp_taken is True
+    assert sm._watches['ABC'].shares == 100          # nothing sold
+    assert sm._watches['ABC'].stop_price == 9.5      # stop untouched
+    sm.mark_profit_partial_shadow('ZZZ')             # unknown symbol: no-op

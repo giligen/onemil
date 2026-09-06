@@ -2699,6 +2699,15 @@ class TradingEngine:
             snapshot = self.stop_monitor.get_watch_snapshot(symbol)
             if not snapshot:
                 continue
+            if self.profit_partial.shadow:
+                logger.info(
+                    f"{symbol}: PROFIT PARTIAL [SHADOW] would sell "
+                    f"{self.profit_partial.fraction:.0%} — closed-bar high "
+                    f"${snapshot.get('highest_since_entry', 0):.2f} reached +"
+                    f"{self.profit_partial.r_multiple}R (no order; shadow window)"
+                )
+                self.stop_monitor.mark_profit_partial_shadow(symbol)
+                continue
             logger.info(
                 f"{symbol}: PROFIT PARTIAL fired — closed-bar high "
                 f"${snapshot.get('highest_since_entry', 0):.2f} >= level, "

@@ -45,6 +45,9 @@ class ProfitPartialConfig:
     # r_baseline + runner_target_r × R via a resting limit (touch fill), else
     # it keeps the unified trail.
     runner_target_r: float = 0.0
+    # shadow=True: live LOGS the would-partial (and marks it taken) without
+    # selling — the 10-session shadow window before the flag flips.
+    shadow: bool = False
 
 
 DISABLED = ProfitPartialConfig()
@@ -60,6 +63,7 @@ def load_profit_partial_config(trading_cfg: Optional[dict]) -> ProfitPartialConf
         move_to_breakeven=bool(pp.get('move_to_breakeven', True)),
         fill=str(pp.get('fill', 'close')),
         runner_target_r=float(pp.get('runner_target_r', 0.0)),
+        shadow=bool(pp.get('shadow', False)),
     )
     if cfg.fill not in ('close', 'level'):
         raise ValueError(f"trading.profit_partial.fill must be close|level, got {cfg.fill!r}")
