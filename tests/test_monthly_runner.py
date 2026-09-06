@@ -230,6 +230,7 @@ class TestBuildRichRow:
         row_dict = dict(zip(RICH_CSV_HEADERS, row))
         assert row_dict["symbol"] == "TEST"
         assert row_dict["date"] == "2026-03-05"
+
         assert row_dict["entry_price"] == "5.50"
         assert row_dict["pnl"] == "36.00"
         assert row_dict["bars_held"] == 15
@@ -252,6 +253,22 @@ class TestBuildRichRow:
         # Derived
         assert row_dict["entry_minutes_from_open"] == 60  # 14:30 - 13:30
         assert row_dict["patterns_detected_that_day"] == 2
+
+    def test_planned_entry_written_from_the_original_plan(self):
+        """2026-09-05: the master must carry the detector's planned entry (the
+        plan-R baseline). It was missing, so cache resims could only
+        approximate it and inflated the BF book (IONX $3.3K vs $52K)."""
+        assert RICH_CSV_HEADERS[-1] == "planned_entry"
+        trade = _make_trade()
+        trade.planned_entry = 22.36
+        result = _make_result(trades=[trade])
+        row = build_rich_row(trade, result, {}, {})
+        assert len(row) == len(RICH_CSV_HEADERS)
+        assert dict(zip(RICH_CSV_HEADERS, row))["planned_entry"] == "22.3600"
+        # absent -> empty cell (old-style trade objects), never a crash
+        trade.planned_entry = None
+        row = build_rich_row(trade, result, {}, {})
+        assert dict(zip(RICH_CSV_HEADERS, row))["planned_entry"] == ""
 
     def test_row_with_missing_daily_bars(self):
         """Row handles missing daily bar data gracefully."""

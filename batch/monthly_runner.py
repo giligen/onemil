@@ -87,6 +87,14 @@ RICH_CSV_HEADERS = [
     # time when conviction_enabled — written to the monthly master CSV here
     # so the build-cache aggregator can pass them through to the cache CSV.
     "bk_ratio_at_fill", "spy_3d_at_fill",
+    # 2026-09-05: the detector's PLANNED entry (breakout level) — the R
+    # baseline under trading.trailing_stop.r_basis=plan. Without it a cache
+    # cannot be re-simulated exactly (`plan.risk_per_share` is fill-mutated;
+    # the fill/1.005 approximation moved trail activation by cents and
+    # inflated the regen-6 resim from $107K to $191K: IONX 2025-04-07 $3.3K
+    # vs $52K). Appended at END so old masters stay aligned; the cache
+    # aggregator maps it by name into CSV_HEADERS.planned_entry.
+    "planned_entry",
 ]
 
 
@@ -248,6 +256,13 @@ def build_rich_row(
         (
             f"{getattr(trade, 'spy_3d_at_fill', None):.3f}"
             if getattr(trade, 'spy_3d_at_fill', None) is not None
+            else ''
+        ),
+        # Planned entry (see RICH_CSV_HEADERS note) — set by the simulator at
+        # simulate time from the ORIGINAL plan, before any fill-gap mutation.
+        (
+            f"{getattr(trade, 'planned_entry', None):.4f}"
+            if getattr(trade, 'planned_entry', None) is not None
             else ''
         ),
     ]

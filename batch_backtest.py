@@ -2818,6 +2818,9 @@ def main():
                         # Post-fill gate inputs at fill time (IREZ post-mortem)
                         row.get('bk_ratio_at_fill', ''),
                         row.get('spy_3d_at_fill', ''),
+                        # 2026-09-05: planned entry (plan-R baseline) — masters
+                        # written before this date lack the column -> ''.
+                        row.get('planned_entry', ''),
                     ])
 
             # Determine new date range to merge
