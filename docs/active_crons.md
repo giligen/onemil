@@ -68,6 +68,16 @@ DAILY OWNER BRIEF (weekdays 10:37 UTC = pre-boot; owner directive 9/5: "act as a
 (9/6 00:30: cron RE-CREATED as v2 with the corrected references — ORB $290/mo at $10K (wrappers-in production book $6,085), BF $5.4K/mo at $2K risk with 2026 YTD negative = KEEP-TOKEN, ignition $0 basis — and the open owner questions. The old id e44ae2db is gone; the new id is printed by CronList; sync it here at the next review.)
 
 ---
+## 6. BF P1 behaviour watch + EOD BT-vs-live (OWNER-installed 2026-09-06, owner's own session)
+- Installed by the owner in THEIR Claude session (not visible in this session's CronList) after the P1 go-live decision: "watch and analyze behaviour + end of day report that looks at the new changes specifically and runs bt vs live".
+- What a P1-specific EOD check must cover (the pre-launch review's open items, docs/bf_p1_runbook.md + docs/bf_p1_ramp.md):
+  1. Every BF setup that reached the conviction stage has a rule decision line (`VWAP GATE skip` / `PRICE CAP skip` / detector pole ≥ 5) — and Stage-2 on the roll-forward cache with the live config.yaml agrees on every overlapping trade.
+  2. `PROFIT PARTIAL fired` lines vs the BT's `pp+` exits for the same trades (first live partial = first real test of the executor); no `exhaustion_partial` after a `profit_partial` on the same symbol (BT never does that — fixed 9/6).
+  3. Fill-timing note: live may sell the partial at the +2R touch, BT at the bar close — flag the price gap, it is expected.
+  4. `python scripts/bf_ramp_check.py` verdict + `python scripts/bf_shadow_report.py --day` (works live too: it lists PRICE CAP/VWAP GATE skips).
+  5. Rails: −750 daily / −1050 weekly / −1200 month-pause at $150 base; a hit = live outside the BT envelope → report, do not raise.
+- This session's EOD dive v6 (fcc1ce53) and owner brief v2 (63442e28) stay armed; the owner's cron is the P1-specific layer on top. Re-check both at the Saturday review.
+
 ## Protocol for future sessions
 1. On EVERY session start/resume, read this file FIRST (before other work).
 2. Run `CronList` to see what's actually alive.
