@@ -1157,3 +1157,41 @@ class TestCacheSchemaGuard:
             p = tmp_path / "cache.csv"
             p.write_bytes(hdr.encode())
             assert _cache_schema_ok(str(p), len(CSV_HEADERS)) is True
+
+
+class TestStage2LiveKnobs:
+    """Stage-2 re-applies scanner.price_max and bull_flag.min_pole_gain_pct
+    from CONFIG to the broad cache (2026-09-06) — same rule as live."""
+
+    @staticmethod
+    def _trade(symbol, price, pole):
+        return {
+            'symbol': symbol, 'date': '2026-01-15', 'entry_time_et': '09:35:00',
+            'exit_time_et': '09:40:00', 'entry_price': price, 'shares': 100,
+            'pnl': 50.0, 'pnl_pct': 1.0, 'conviction_mult': 2.0,
+            'avg_volume_20d': 1_000_000, 'daily_range_pct': 25.0,
+            'qf_pole_gain_pct': pole, 'stop_loss': price * 0.97,
+        }
+
+    def _run(self, monkeypatch, price_max, min_pole):
+        from batch_backtest import filter_bull_flag_trades
+        from config import Config
+        monkeypatch.setattr(Config, '_load_yaml_only', lambda: {
+            'scanner': {'min_daily_volume': 0, 'price_max': price_max},
+            'trading': {'risk_tiers': {'enabled': False},
+                        'conviction_scoring': {'enabled': False},
+                        'bull_flag': {'min_pole_gain_pct': min_pole}},
+        })
+        trades = [self._trade('ZZA', 10.0, 6.0), self._trade('ZZB', 25.0, 6.0),
+                  self._trade('ZZC', 10.0, 4.0), self._trade('ZZD', 10.0, '')]
+        return {t['symbol'] for t in filter_bull_flag_trades(trades)}
+
+    def test_price_and_pole_from_config(self, monkeypatch):
+        assert self._run(monkeypatch, 20.0, 5.0) == {'ZZA', 'ZZD'}  # missing pole kept
+
+    def test_zero_disables(self, monkeypatch):
+        assert self._run(monkeypatch, 0, 0) == {'ZZA', 'ZZB', 'ZZC', 'ZZD'}
+
+    def test_cache_build_values_are_identity(self, monkeypatch):
+        """price_max 30 / pole 3 = the cache's own build thresholds → no-op."""
+        assert self._run(monkeypatch, 30.0, 3.0) == {'ZZA', 'ZZB', 'ZZC', 'ZZD'}

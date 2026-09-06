@@ -300,6 +300,32 @@ def filter_bull_flag_trades(
         if vol_removed:
             logger.info(f"Volume filter (>={min_daily_vol:,}): {before_vol} → {len(trades)} trades ({vol_removed} removed)")
 
+    # Live universe/detector knobs the broad cache does NOT enforce (2026-09-06):
+    # the cache is built at price_max 30 / min_pole_gain 3 so research stays
+    # broad; Stage-2 re-applies the CONFIG's values so a config change is the
+    # same rule in BT and live (scanner.price_max is the live watchlist band,
+    # bull_flag.min_pole_gain_pct the live detector threshold).
+    _price_max_s2 = float(_cfg_vol.get("scanner", {}).get("price_max", 0) or 0)
+    if _price_max_s2 > 0:
+        before_px = len(trades)
+        trades = [t for t in trades if float(t.get('entry_price') or 0) <= _price_max_s2]
+        if before_px - len(trades):
+            logger.info(f"Price filter (entry <= ${_price_max_s2:.2f}): {before_px} → {len(trades)} trades ({before_px - len(trades)} removed)")
+    _min_pole_s2 = float(_cfg_vol.get("trading", {}).get("bull_flag", {}).get("min_pole_gain_pct", 0) or 0)
+    if _min_pole_s2 > 0:
+        before_pg = len(trades)
+        def _pole_ok(t):
+            raw = t.get('qf_pole_gain_pct')
+            if raw in (None, '', 'None'):
+                return True  # feature missing on old caches: cannot judge, keep
+            try:
+                return float(raw) >= _min_pole_s2
+            except (TypeError, ValueError):
+                return True
+        trades = [t for t in trades if _pole_ok(t)]
+        if before_pg - len(trades):
+            logger.info(f"Pole-gain filter (>= {_min_pole_s2:.1f}%): {before_pg} → {len(trades)} trades ({before_pg - len(trades)} removed)")
+
     # Conviction filter — mirror PROD (trading_engine.py:2461) and single-symbol
     # BT (backtest.py:2261). The cache (--build-cache mode) DISABLES the per-trade
     # filter to capture all signals, so Stage 2 must re-apply it here for honest

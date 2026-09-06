@@ -89,3 +89,23 @@ Capital normalization is $50K / $2K base risk. 2026 YTD (8 months): as-is −22%
 
 ### 6c. Frequency: the raw cohort that is positive in all four half-years
 Raw detections with pole > 5% AND above VWAP AND price ≤ $20: **405 of 896 (45%), mean +0.16R (2025, n=232) / +0.23R (2026, n=173), all four halves positive (+0.07 / +0.25 / +0.25 / +0.20)**. At a flat $2K risk with NO fitted layer: 15/21 green months, worst −$5.7K, 2026 +$80K — ~19 trades/month, one a day. This is the candidate "every day" book: the entry rule is three causal raw filters, no conviction threshold, no composite. It needs its own Stage-2 run (slots, daily-loss, BP, +2R partial) before it is more than a cohort statistic — queued behind the June lab (one bulk-bar process at a time).
+
+### 6d. The frequency book, run properly through Stage-2 (2026-09-06 18:00) — more trades, more variance, no more 2026 edge
+Stage-2 now re-applies `scanner.price_max` and `bull_flag.min_pole_gain_pct` from CONFIG to the broad cache (same knobs live uses; `tests/test_batch_backtest.py::TestStage2LiveKnobs`). Configs: **TRI** = current fitted stack + VWAP gate + pole ≥ 5% + price ≤ $20; **F0** = the three raw rules with the fitted layers OFF (conviction threshold 0, TTF off, risk tiers off); reg1/reg0 = regime sizing on/off. $2K base risk, $50K capital; the June lab's L2 (legacy 1R-partial quick exits) is worse than as-is on June 2026 (−0.22R, 4/19 green days) and is dead.
+
+| profile | trades (per mo) | total | 2025 | 2026 YTD | WR | green | worst mo | MDD |
+|---|---|---|---|---|---|---|---|---|
+| as-is | 79 (4.0) | 107,351 | 118,292 | −10,941 | 53% | 14/20 | −11,186 | −27,487 |
+| gate + pp2R | 64 (3.2) | 173,398 | 142,967 | +30,431 | 65% | 16/20 | −10,339 | −15,798 |
+| TRI + pp2R, regime on | 52 (2.6) | 168,417 | 116,681 | +51,736 | 69% | 15/20 | −11,471 (Feb-25) | −15,798 |
+| **TRI + pp2R, regime off** | 55 (2.8) | 131,377 | 93,382 | **+37,995** | 67% | 14/20 | **−7,600** | **−15,111** |
+| TRI + pp2R, regime on, $4K risk cap | 52 | 149,927 | 98,671 | +51,256 | 69% | 15/20 | −10,087 | −13,296 |
+| F0 (raw rules only) + pp2R, regime on | 138 (6.9) | 202,680 | 157,436 | +45,243 | 53% | 12/20 | −15,870 | −34,910 |
+| F0 + pp2R, regime on, $3K cap | 138 | 154,832 | 105,641 | +49,191 | 53% | 14/20 | −12,388 | −22,468 |
+| F0 as-is exits, regime on | 140 (7.0) | 229,761 | 208,506 | +21,254 | 52% | 15/20 | −16,080 | −36,282 |
+
+Read: the 86 trades F0 adds over TRI are worth +$34K over 21 months (+0.1R each) and **−$6.5K in 2026** — they add month variance (worst −$15.9K, MDD −$35K) and no 2026 edge. The fitted layers still separate *within* the raw-rule cohort; the "every day" book at positive 2026 R does not exist in this detector. Frequency is not the consistency lever; per-trade quality and bounded risk are.
+
+**Candidate consistency profile (proposal, joint decision)**: TRI + 50%@+2R partial + regime sizing OFF — the only profile that clears the pre-committed bar (worst month ≥ −$8K, MDD ≥ −$20K) while 2026 YTD is +$38K on $50K (76% in 8 months; 2026 has 22 trades, 13 winners). Cost: 2025 $118K → $93K. Alternative if we keep regime sizing: add a $4K per-trade risk cap (worst −$10.1K, MDD −$13.3K, 2026 +$51K) — needs the cap built as a real knob first. The Jul–Aug 2026 texture remains: 3 trades, −$5.3K.
+
+Walk-forward honesty: the three raw rules were chosen from the era-consistency scan on the full cache; §6e shows the same three are the three worst causal buckets on 2025 ALONE, so a 2025-only rule-picker would have shipped the same rules and 2026 is out-of-sample for them. The +2R partial and regime-off choices were made on the full window (in-sample). Live shadow (10 sessions, `profit_partial.shadow`, VWAP gate log-only is next) before any flag flips.
