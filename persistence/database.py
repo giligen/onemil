@@ -9,6 +9,7 @@ Tables:
 Handles concurrent access via WAL mode and busy timeouts.
 """
 
+import os
 import sqlite3
 import logging
 from datetime import datetime, timezone, timedelta, date as _date
@@ -1681,7 +1682,30 @@ class Database:
             result[current_key] = current_bars
 
         logger.debug(f"Bulk loaded {len(result)} bar sets")
+        self._release_cache_file_pages()
         return result
+
+    def _release_cache_file_pages(self) -> None:
+        """Tell the kernel it may drop cache.db's pages from the page cache.
+
+        2026-09-06: a monthly Stage-1 preload scans ~50 GB of
+        intraday_bars_1min; the page cache it leaves behind pushes MemFree to
+        ~100 MB (MemAvailable stays high), swaps idle process memory and
+        trips the tooling's low-memory watchdog. The data is read-only and
+        re-readable, so releasing it after the bulk scan costs nothing.
+        Best-effort: any failure is logged at DEBUG and ignored.
+        """
+        path = getattr(self, '_cache_path', None)
+        if not path or not hasattr(os, 'posix_fadvise'):
+            return
+        try:
+            fd = os.open(str(path), os.O_RDONLY)
+            try:
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            finally:
+                os.close(fd)
+        except OSError as e:
+            logger.debug(f"posix_fadvise(DONTNEED) on {path} failed: {e}")
 
     def close(self) -> None:
         """Close all database connections."""

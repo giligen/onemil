@@ -656,3 +656,34 @@ class TestGetOpenTrades:
         # And the ORB-scoped query also returns nothing (terminal row)
         orb_open = db.get_open_trades("2026-03-25", strategy="orb")
         assert orb_open == []
+
+
+class TestBulkLoadReleasesPageCache:
+    """get_intraday_bars_bulk hands cache.db's pages back to the kernel (2026-09-06)."""
+
+    def test_fadvise_called_after_bulk_load(self, tmp_path, monkeypatch):
+        import os
+        from persistence.database import Database
+        db = Database(cache_path=str(tmp_path / 'c.db'), trades_path=str(tmp_path / 't.db'))
+        calls = []
+        real = os.posix_fadvise
+        monkeypatch.setattr(os, 'posix_fadvise', lambda fd, off, ln, adv: calls.append((off, ln, adv)))
+        db.get_intraday_bars_bulk([('ZZ', '2026-01-05')])
+        assert calls == [(0, 0, os.POSIX_FADV_DONTNEED)]
+        monkeypatch.setattr(os, 'posix_fadvise', real)
+
+    def test_fadvise_failure_is_swallowed(self, tmp_path, monkeypatch):
+        import os
+        from persistence.database import Database
+        db = Database(cache_path=str(tmp_path / 'c.db'), trades_path=str(tmp_path / 't.db'))
+        def boom(*a, **k):
+            raise OSError("nope")
+        monkeypatch.setattr(os, 'posix_fadvise', boom)
+        assert db.get_intraday_bars_bulk([('ZZ', '2026-01-05')]) == {}
+
+    def test_empty_request_skips(self, tmp_path, monkeypatch):
+        import os
+        from persistence.database import Database
+        db = Database(cache_path=str(tmp_path / 'c.db'), trades_path=str(tmp_path / 't.db'))
+        monkeypatch.setattr(os, 'posix_fadvise', lambda *a: (_ for _ in ()).throw(AssertionError('should not run')))
+        assert db.get_intraday_bars_bulk([]) == {}

@@ -141,3 +141,12 @@ Read: the cap does what it says on the gate-only book (worst month −$10.3K →
 - **P1**: VWAP gate + pole ≥ 5% + price ≤ $20 + 50%@+2R partial + regime sizing OFF → $131K / 2026 +$38K / worst −$7.6K / MDD −$15.1K / 14/20 green / 2.8 trades per month.
 - **P2**: VWAP gate + 50%@+2R partial + risk cap 2× (regime on) → $121K / 2026 +$27.8K / worst −$6.7K / MDD −$13.1K / 13/20 green / 3.3 trades per month.
 P1 keeps more of 2026 and uses three raw rules with a 2025-selected / 2026-OOS pedigree (§6e); P2 keeps the regime layer and fewer rule changes. My recommendation is P1, with the cap kept available as the month-variance dial when base risk scales. Both flags exist in code today, default OFF; ship = joint decision after a 10-session shadow (`profit_partial.shadow: true`; gate/pole/price are log-only until enabled).
+
+### 6g. June-2026 Stage-1 lab closed (18:27 UTC) — all three frequency levers dead
+| run (June 2026 Stage-1, raw) | trades | WR | mean R | green days |
+|---|---|---|---|---|
+| regen-7 as-is (pole ≥ 3) | 67 | 40% | −0.20 | 6/19 |
+| L1: + re-entry | 73 | 42% | −0.12 | 7/19 |
+| L2: + re-entry + legacy quick exits (1R partial/BE/no-pop) | 75 | 43% | −0.22 | 4/19 |
+| L3: + re-entry + quick exits + 2-candle pole / 5-candle pullback | 101 | 45% | −0.22 | 3/20 |
+The 28 symbol-days only the looser detector finds average −0.28R. More detections, same or worse R. The consistency path is selection quality + exit + bounded risk (P1/P2), not frequency.
