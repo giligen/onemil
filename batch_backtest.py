@@ -300,12 +300,12 @@ def filter_bull_flag_trades(
         if vol_removed:
             logger.info(f"Volume filter (>={min_daily_vol:,}): {before_vol} → {len(trades)} trades ({vol_removed} removed)")
 
-    # Live universe/detector knobs the broad cache does NOT enforce (2026-09-06):
-    # the cache is built at price_max 30 / min_pole_gain 3 so research stays
-    # broad; Stage-2 re-applies the CONFIG's values so a config change is the
-    # same rule in BT and live (scanner.price_max is the live watchlist band,
-    # bull_flag.min_pole_gain_pct the live detector threshold).
-    _price_max_s2 = float(_cfg_vol.get("scanner", {}).get("price_max", 0) or 0)
+    # Live trade-time knobs the broad cache does NOT enforce (2026-09-06):
+    # the cache is built on the universe band (scanner.price_max 30) at
+    # min_pole_gain 3 so research stays broad; Stage-2 re-applies the CONFIG's
+    # bull_flag.max_entry_price (the engine's breakout-level cap) and
+    # bull_flag.min_pole_gain_pct (the live detector threshold).
+    _price_max_s2 = float(_cfg_vol.get("trading", {}).get("bull_flag", {}).get("max_entry_price", 0) or 0)
     if _price_max_s2 > 0:
         before_px = len(trades)
         trades = [t for t in trades if float(t.get('entry_price') or 0) <= _price_max_s2]

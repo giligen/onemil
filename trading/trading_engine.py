@@ -299,6 +299,16 @@ class TradingEngine:
             logger.info(f"Risk cap: ON — max ${self.risk_cap_usd:,.0f} per trade "
                         f"({self.risk_cap.max_risk_mult}x risk_per_trade)")
 
+        # BF entry-price cap (2026-09-06, P1): `bull_flag.max_entry_price` — a
+        # TRADE-TIME rule on the breakout level, deliberately separate from the
+        # universe band `scanner.price_max` (which the ignition shadow and the
+        # BF watchlist share; the BT cache is built on that band and Stage-2
+        # applies this same knob to entry_price). 0 = off.
+        self.trade_price_max = float(
+            _cfg.get("trading", {}).get("bull_flag", {}).get("max_entry_price", 0) or 0)
+        if self.trade_price_max > 0:
+            logger.info(f"BF entry-price cap: breakouts above ${self.trade_price_max:.2f} skipped")
+
         # Above-VWAP gate (2026-09-06): ONE decision with BT Stage-2
         # (trading/bf_vwap_gate.py). Default off until the joint ship call.
         self.vwap_gate = load_vwap_gate_config(
@@ -2801,6 +2811,11 @@ class TradingEngine:
 
             if snapshot['exhaustion_partial_taken']:
                 continue
+            if snapshot.get('pp_taken'):
+                # BT parity: after the +2R profit partial the remainder keeps
+                # the unified trail only — the simulator skips the exhaustion
+                # partial once pp_taken (backtest.py main walk).
+                continue
 
             entry_price = snapshot['entry_price']
             risk = snapshot['risk_per_share']
@@ -3509,6 +3524,13 @@ class TradingEngine:
                 logger.info(f"{symbol}: NEWS KILL: {_reason}")
                 self._eod_skipped.append((symbol, _ncat, _reason))
                 return None
+
+        # BF entry-price cap — Stage-2's `entry_price <= bull_flag.max_entry_price`.
+        if self.trade_price_max > 0 and float(setup.breakout_level) > self.trade_price_max:
+            logger.info(f"{symbol}: PRICE CAP skip — breakout ${setup.breakout_level:.2f} "
+                        f"> ${self.trade_price_max:.2f}")
+            self._eod_skipped.append((symbol, "PRICE_CAP", f"${setup.breakout_level:.2f}"))
+            return None
 
         # Above-VWAP gate — same feature the BT caches as qf_vwap_dist_pct
         # (breakout_level vs cumulative VWAP through the setup bar).

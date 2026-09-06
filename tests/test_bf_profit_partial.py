@@ -187,3 +187,89 @@ def test_shadow_flag_loads_and_marks_without_selling():
     assert sm._watches['ABC'].shares == 100          # nothing sold
     assert sm._watches['ABC'].stop_price == 9.5      # stop untouched
     sm.mark_profit_partial_shadow('ZZZ')             # unknown symbol: no-op
+
+
+class TestEngineLivePartialPath:
+    """P1 goes live 2026-09-07 with NO shadow: the engine's real path must
+    call the StopMonitor's partial executor with reason='profit_partial'."""
+
+    def _engine(self, shadow=False, enabled=True):
+        from trading.trading_engine import TradingEngine
+        from trading.stop_monitor import StopMonitor
+        from trading.bf_profit_partial import ProfitPartialConfig
+        eng = TradingEngine.__new__(TradingEngine)
+        eng.profit_partial = ProfitPartialConfig(enabled=enabled, r_multiple=2.0, fraction=0.5,
+                                                 move_to_breakeven=True, shadow=shadow)
+        sm = MagicMock(spec=StopMonitor)
+        sm.pending_profit_partials.return_value = ['ABCD']
+        sm.get_watch_snapshot.return_value = {'highest_since_entry': 5.40, 'trail_r': 1.0}
+        sm.execute_partial_exit.return_value = None
+        eng.stop_monitor = sm
+        eng._process_exhaustion_partial_event = MagicMock()
+        return eng, sm
+
+    def test_live_path_sells_half_with_profit_partial_reason(self):
+        eng, sm = self._engine()
+        eng._check_profit_partials()
+        sm.pending_profit_partials.assert_called_once_with('bull_flag')
+        sm.execute_partial_exit.assert_called_once_with(
+            'ABCD', fraction=0.5, tighter_trail_r=1.0, reason='profit_partial')
+        sm.mark_profit_partial_shadow.assert_not_called()
+
+    def test_event_is_processed(self):
+        eng, sm = self._engine()
+        sm.execute_partial_exit.return_value = {'symbol': 'ABCD', 'exit_reason': 'profit_partial'}
+        eng._check_profit_partials()
+        eng._process_exhaustion_partial_event.assert_called_once()
+
+    def test_shadow_marks_and_never_sells(self):
+        eng, sm = self._engine(shadow=True)
+        eng._check_profit_partials()
+        sm.execute_partial_exit.assert_not_called()
+        sm.mark_profit_partial_shadow.assert_called_once_with('ABCD')
+
+    def test_disabled_does_nothing(self):
+        eng, sm = self._engine(enabled=False)
+        eng._check_profit_partials()
+        sm.pending_profit_partials.assert_not_called()
+
+
+class TestLiveParityGuards:
+    """Found in the 9/6 pre-launch review: (A) the exhaustion rule must not
+    take a second partial after the +2R partial (BT skips it once pp_taken);
+    (B) the partial must not fire inside the entry bar (tick path raises
+    highest_since_entry during the fill minute; BT walks from entry+1)."""
+
+    def _sm(self):
+        import threading
+        from trading.stop_monitor import StopMonitor, WatchEntry
+        sm = StopMonitor.__new__(StopMonitor)
+        sm._watch_lock = threading.RLock()
+        sm._last_data_ts = 0.0
+        w = WatchEntry(symbol='ABCD', stop_price=9.5, shares=200, tp_leg_id='', sl_leg_id='',
+                       entry_price=10.0, risk_per_share=0.5, strategy='bull_flag')
+        w.pp_level = 11.0; w.pp_taken = False; w.highest_since_entry = 11.2
+        sm._watches = {'ABCD': w}
+        return sm, w
+
+    def test_snapshot_carries_pp_taken_and_exhaustion_skips(self):
+        sm, w = self._sm()
+        from trading.stop_monitor import StopMonitor
+        w.pp_taken = True
+        snap = StopMonitor.get_watch_snapshot(sm, 'ABCD')
+        assert snap['pp_taken'] is True
+        import inspect
+        from trading.trading_engine import TradingEngine
+        src = inspect.getsource(TradingEngine._check_exhaustion_exits)
+        assert "snapshot.get('pp_taken')" in src
+
+    def test_partial_waits_for_entry_bar_to_close(self):
+        sm, w = self._sm()
+        from trading.stop_monitor import StopMonitor
+        w.skip_exits_until_ts = 1000.0
+        sm._last_data_ts = 999.0                       # still inside the fill minute
+        assert StopMonitor.pending_profit_partials(sm, 'bull_flag') == []
+        sm._last_data_ts = 1000.0                      # entry bar closed
+        assert StopMonitor.pending_profit_partials(sm, 'bull_flag') == ['ABCD']
+        w.pp_taken = True
+        assert StopMonitor.pending_profit_partials(sm, 'bull_flag') == []

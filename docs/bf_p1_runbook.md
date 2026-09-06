@@ -1,5 +1,7 @@
 # BF consistency profile P1 — test and launch runbook (2026-09-06)
 
+> **DECISION 2026-09-06 (owner)**: P1 LIVE Monday 9/7, NO shadow, base risk $150 (ramp stage L0), gates on positive realized P&L — `docs/bf_p1_ramp.md`. §2 below (the shadow window) is superseded; §1 and §3 were executed 9/6 (config applied, engine rehearsal, suite green).
+
 P1 = above-VWAP gate + pole gain ≥ 5% + entry price ≤ $20 + 50% off at +2R
 (breakeven, remainder trails) + regime sizing OFF. Evidence:
 `research/bf_consistency/README.md` §6 (honest regen-7 cache, $50K / $2K base):
@@ -54,10 +56,9 @@ would-partial, the regime multiplier, and the P1-counterfactual P&L.
 
 ## 3. Launch (joint decision after the window)
 ```yaml
-scanner:
-  price_max: 20                      # was 30
 trading:
   bull_flag:
+    max_entry_price: 20.0            # BF trade-time cap on the breakout level (scanner.price_max stays 30 — shared with ignition)
     min_pole_gain_pct: 5.0           # was 3.0 (detector knob — same rule Stage-2 applies)
     vwap_gate: {enabled: true, min_dist_pct: 0.0, shadow: false}
   profit_partial: {enabled: true, r_multiple: 2.0, fraction: 0.5, move_to_breakeven: true, shadow: false}

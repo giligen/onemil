@@ -1949,6 +1949,11 @@ class StopMonitor:
             for sym, w in self._watches.items():
                 if (w.strategy == strategy and w.pp_level > 0 and not w.pp_taken
                         and not w.exhaustion_partial_taken
+                        # entry bar excluded on both sides (trading/bf_trail.py):
+                        # the tick path raises highest_since_entry inside the
+                        # fill minute; BT's walk starts at entry+1.
+                        and not (w.skip_exits_until_ts > 0
+                                 and self._last_data_ts < w.skip_exits_until_ts)
                         and profit_partial_fires(w.highest_since_entry, w.pp_level)):
                     out.append(sym)
         return out
@@ -2010,6 +2015,7 @@ class StopMonitor:
                 'highest_since_entry': w.highest_since_entry,
                 'shares': w.shares,
                 'exhaustion_partial_taken': w.exhaustion_partial_taken,
+                'pp_taken': w.pp_taken,
                 'trade_db_id': w.trade_db_id,
                 'stop_price': w.stop_price,
                 'trail_r': w.trail_r,

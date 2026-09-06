@@ -150,3 +150,6 @@ P1 keeps more of 2026 and uses three raw rules with a 2025-selected / 2026-OOS p
 | L2: + re-entry + legacy quick exits (1R partial/BE/no-pop) | 75 | 43% | −0.22 | 4/19 |
 | L3: + re-entry + quick exits + 2-candle pole / 5-candle pullback | 101 | 45% | −0.22 | 3/20 |
 The 28 symbol-days only the looser detector finds average −0.28R. More detections, same or worse R. The consistency path is selection quality + exit + bounded risk (P1/P2), not frequency.
+
+### 6h. Launch reference (2026-09-06 evening, owner: P1 live Monday, no shadow)
+Stage-2 run on the LIVE `config.yaml` (gate on, pole ≥ 5, `max_entry_price` 20, +2R partial, regime sizing off) at the $2K / $50K normalization with the ramp-consistent daily loss limit (−5u = −$10K): **$126,257 / 56 trades / WR 66%** (`stage2_P1_liveconfig_2k_dll5u.csv`). The §6d P1 row ($131,377 / 55) used the research config's −$5K limit (−2.5u); the one extra trade under the looser limit is a −$5K loser. Pre-launch review fixes (commit below): exhaustion partial skipped after the +2R partial (BT parity), partial cannot fire inside the entry bar, BF price cap moved to `bull_flag.max_entry_price` so the universe band shared with the ignition shadow stays at $30. Ramp: `docs/bf_p1_ramp.md`.

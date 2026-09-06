@@ -135,3 +135,25 @@ class TestShadow:
         blk = src[src.index('VWAP GATE [SHADOW]'):src.index('CONSISTENCY RULES [SHADOW]')]
         # the shadow branch has no early return; only the enabled branch does
         assert blk.count('return None') == 1 and 'elif not _vg_keep:' in blk
+
+
+class TestTradeTimePriceCap:
+    """P1: Stage-2 filters entry_price <= bull_flag.max_entry_price; live applies
+    the same cap on the breakout level before the gate (2026-09-06)."""
+
+    def test_source_order_cap_before_gate(self):
+        import inspect
+        from trading.trading_engine import TradingEngine
+        src = inspect.getsource(TradingEngine)
+        i_cap = src.index('PRICE CAP skip')
+        i_gate = src.index('passes_vwap_gate(_vg_dist, self.vwap_gate)')
+        assert i_cap < i_gate
+        assert '.get("bull_flag", {}).get("max_entry_price", 0)' in src
+
+    def test_cap_semantics_match_stage2(self):
+        """Same rule both sides: > price_max is out, == price_max stays in."""
+        price_max = 20.0
+        for level, expected in ((19.99, True), (20.0, True), (20.01, False)):
+            live_keep = not (price_max > 0 and level > price_max)
+            s2_keep = level <= price_max
+            assert live_keep is s2_keep is expected
