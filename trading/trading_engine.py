@@ -30,6 +30,7 @@ from trading.pattern_detector import BullFlagDetector
 from trading.trade_planner import TradePlanner, TradePlan
 from trading.news_kill_guard import news_kill_decision
 from trading.bf_vwap_gate import load_vwap_gate_config, passes_vwap_gate
+from trading.bf_risk_cap import load_risk_cap_config, cap_usd as _risk_cap_usd, capped_shares
 from trading.order_executor import OrderExecutor
 from trading.orphan_reconciler import (
     ReconcilerConfig, reconcile_strategy_orphans,
@@ -288,6 +289,15 @@ class TradingEngine:
             _extras_cfg.get("strong_neg_multiplier", self.macd_strong_neg_multiplier))
         self.macd_extras_normal_multiplier = float(
             _extras_cfg.get("normal_multiplier", self.macd_normal_multiplier))
+
+        # Per-trade risk cap (2026-09-06): ONE clamp with BT Stage-2
+        # (trading/bf_risk_cap.py). Default off until the joint ship call.
+        self.risk_cap = load_risk_cap_config(_cfg.get("trading", {}))
+        self.risk_cap_usd = _risk_cap_usd(
+            self.risk_cap, float(_cfg.get("trading", {}).get("risk_per_trade", 0) or 0))
+        if self.risk_cap_usd:
+            logger.info(f"Risk cap: ON — max ${self.risk_cap_usd:,.0f} per trade "
+                        f"({self.risk_cap.max_risk_mult}x risk_per_trade)")
 
         # Above-VWAP gate (2026-09-06): ONE decision with BT Stage-2
         # (trading/bf_vwap_gate.py). Default off until the joint ship call.
@@ -550,6 +560,33 @@ class TradingEngine:
                     tier['min_volume'] <= avg_volume <= tier['max_volume']):
                 return tier['multiplier']
         return 1.0
+
+    def _apply_risk_cap(self, plan: 'TradePlan', symbol: str) -> 'TradePlan':
+        """Clamp shares so total risk <= risk_per_trade × max_risk_mult.
+        Runs AFTER every multiplier (tier×conviction, MACD zone, regime, UD)
+        and BEFORE the BP ceiling — same order as BT Stage-2."""
+        cap = getattr(self, 'risk_cap_usd', None)
+        if not cap:
+            return plan
+        new_shares, scale = capped_shares(plan.shares, plan.risk_per_share, cap)
+        if scale >= 1.0:
+            return plan
+        logger.info(
+            f"{symbol}: RISK CAP ${cap:,.0f} — risk ${plan.shares * plan.risk_per_share:,.0f} "
+            f"→ shares {plan.shares} → {new_shares}"
+        )
+        return TradePlan(
+            symbol=plan.symbol,
+            entry_price=plan.entry_price,
+            stop_loss_price=plan.stop_loss_price,
+            take_profit_price=plan.take_profit_price,
+            risk_per_share=plan.risk_per_share,
+            reward_per_share=plan.reward_per_share,
+            risk_reward_ratio=plan.risk_reward_ratio,
+            shares=new_shares,
+            total_risk=plan.risk_per_share * new_shares,
+            pattern=plan.pattern,
+        )
 
     def _apply_bp_ceiling(self, plan: 'TradePlan', symbol: str) -> Optional['TradePlan']:
         """Clamp a plan's share count to what buying power allows.
@@ -3813,6 +3850,7 @@ class TradingEngine:
         # no later multiplier can re-violate. See _apply_bp_ceiling docstring
         # for the 2026-05-14 reorder rationale (TRT BP-replan bug + regime
         # re-violation).
+        plan = self._apply_risk_cap(plan, symbol)
         plan = self._apply_bp_ceiling(plan, symbol)
         if plan is None:
             return None

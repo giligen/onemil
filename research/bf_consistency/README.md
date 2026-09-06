@@ -77,8 +77,8 @@ Mechanism: a flag below VWAP is a bounce into supply, not continuation; every BF
 | as-is | 79 | 107,351 | 118,292 | −10,941 | 53% | 14/20 | −11,186 | −27,487 |
 | gate | 65 | 196,074 | 180,221 | +15,853 | 60% | 15/20 | −11,186 | −15,928 |
 | gate + 50%@+2R partial | 64 | 173,398 | 142,967 | **+30,431** | 66% | **16/20** | −10,339 | −15,798 |
-| gate + partial + per-trade risk cap $4K (post-hoc) | 64 | 153,436 | 118,092 | **+35,344** | 66% | 15/20 | **−8,845** | **−13,297** |
-| gate + partial + risk cap $3K (post-hoc) | 64 | 130,656 | 98,673 | +31,983 | 66% | 15/20 | −6,146 | −11,966 |
+| gate + partial + risk cap $4K (post-hoc — SUPERSEDED by §6f, real knob) | 64 | 153,436 | 118,092 | **+35,344** | 66% | 15/20 | **−8,845** | **−13,297** |
+| gate + partial + risk cap $3K (post-hoc — superseded by §6f) | 64 | 130,656 | 98,673 | +31,983 | 66% | 15/20 | −6,146 | −11,966 |
 
 What the gate does: removes 16 of 79 Stage-2 trades — 11 losers / 5 winners, net **−$40.7K** (2025 −$13.9K over 8 trades, 2026 −$26.8K over 8). One knock-on: on 2025-03-20 the below-VWAP loser LSE (−$9K) had taken a slot; without it OM (+$24.5K) and TITN (+$23.5K) enter — that is $48K of the 2025 lift from ONE day and must not be counted as evidence. The evidence is the 16 losers and the raw-cache era consistency.
 
@@ -99,9 +99,9 @@ Stage-2 now re-applies `scanner.price_max` and `bull_flag.min_pole_gain_pct` fro
 | gate + pp2R | 64 (3.2) | 173,398 | 142,967 | +30,431 | 65% | 16/20 | −10,339 | −15,798 |
 | TRI + pp2R, regime on | 52 (2.6) | 168,417 | 116,681 | +51,736 | 69% | 15/20 | −11,471 (Feb-25) | −15,798 |
 | **TRI + pp2R, regime off** | 55 (2.8) | 131,377 | 93,382 | **+37,995** | 67% | 14/20 | **−7,600** | **−15,111** |
-| TRI + pp2R, regime on, $4K risk cap | 52 | 149,927 | 98,671 | +51,256 | 69% | 15/20 | −10,087 | −13,296 |
+| TRI + pp2R, regime on, $4K risk cap (post-hoc — superseded by §6f) | 52 | 149,927 | 98,671 | +51,256 | 69% | 15/20 | −10,087 | −13,296 |
 | F0 (raw rules only) + pp2R, regime on | 138 (6.9) | 202,680 | 157,436 | +45,243 | 53% | 12/20 | −15,870 | −34,910 |
-| F0 + pp2R, regime on, $3K cap | 138 | 154,832 | 105,641 | +49,191 | 53% | 14/20 | −12,388 | −22,468 |
+| F0 + pp2R, regime on, $3K cap (post-hoc — superseded by §6f) | 138 | 154,832 | 105,641 | +49,191 | 53% | 14/20 | −12,388 | −22,468 |
 | F0 as-is exits, regime on | 140 (7.0) | 229,761 | 208,506 | +21,254 | 52% | 15/20 | −16,080 | −36,282 |
 
 Read: the 86 trades F0 adds over TRI are worth +$34K over 21 months (+0.1R each) and **−$6.5K in 2026** — they add month variance (worst −$15.9K, MDD −$35K) and no 2026 edge. The fitted layers still separate *within* the raw-rule cohort; the "every day" book at positive 2026 R does not exist in this detector. Frequency is not the consistency lever; per-trade quality and bounded risk are.
@@ -123,3 +123,21 @@ Worst causal raw buckets ranked on **2025 alone** (n ≥ 40), with their 2026 ou
 | 6 | conviction ≤ 1.2 | −0.12 (174) | −0.15 (152) | yes (already gated) |
 
 Three of the top four 2025 buckets hold in 2026; the gap bucket flips sign and is NOT a rule (small n, no mechanism). So the three rules are the 2025-selected rules that survived 2026 — not perfectly pre-registered (the picker also had the gap rule available and would have carried one dud), which is the honest strength of the evidence: 2025-in-sample, 2026-out-of-sample for the rule set minus one flip.
+
+### 6f. The risk cap as a real knob (`trading/bf_risk_cap.py`, `trading.risk_cap`, default OFF) — post-hoc numbers were too kind
+Built as ONE clamp: final shares ≤ (max_risk_mult × risk_per_trade) / risk_per_share, after every multiplier and before the BP ceiling, on both sides (`tests/test_bf_risk_cap.py`). Running it through Stage-2 disagrees with the post-hoc scaling above: the Stage-2 CSV's `shares` column is PRE-regime (Stage-2 multiplies pnl only), so the post-hoc cap under-measured risk on C1 days (1.5×) and clamped too little. Real runs (2× base = $4K, $2K base, regime on, +2R partial):
+
+| profile | n | total | 2025 | 2026 YTD | WR | green | worst mo | MDD |
+|---|---|---|---|---|---|---|---|---|
+| TRI + pp2R, regime on, no cap | 52 | 168,417 | 116,681 | +51,736 | 69% | 15/20 | −11,471 (Feb-25) | −15,798 |
+| TRI + pp2R, regime on, **cap 2× real** | 54 | 120,785 | 75,916 | +44,869 | 66% | 14/20 | −11,835 (Feb-25) | −14,251 |
+| TRI + pp2R, regime OFF, no cap | 55 | 131,377 | 93,382 | +37,995 | 67% | 14/20 | **−7,600** | −15,111 |
+| gate + pp2R, regime on, no cap | 64 | 173,398 | 142,967 | +30,431 | 65% | 16/20 | −10,339 (Aug-26) | −15,798 |
+| gate + pp2R, regime on, **cap 2× real** | 66 | 121,402 | 93,618 | +27,783 | 63% | 13/20 | **−6,684** | −13,120 |
+
+Read: the cap does what it says on the gate-only book (worst month −$10.3K → −$6.7K, MDD −$13.1K) at a $52K cost over 21 months, and it does NOT fix TRI's Feb-2025 (those losers are under the cap already; the regime C1 1.5× is what amplifies that month — regime OFF is the cleaner lever there). The two extra trades in each capped run are the daily-loss-limit no longer tripping. Regime-off rows are exact (no post-hoc involved).
+
+**Where this leaves the proposal**: two profiles clear the pre-committed bar (worst ≥ −$8K, MDD ≥ −$20K):
+- **P1**: VWAP gate + pole ≥ 5% + price ≤ $20 + 50%@+2R partial + regime sizing OFF → $131K / 2026 +$38K / worst −$7.6K / MDD −$15.1K / 14/20 green / 2.8 trades per month.
+- **P2**: VWAP gate + 50%@+2R partial + risk cap 2× (regime on) → $121K / 2026 +$27.8K / worst −$6.7K / MDD −$13.1K / 13/20 green / 3.3 trades per month.
+P1 keeps more of 2026 and uses three raw rules with a 2025-selected / 2026-OOS pedigree (§6e); P2 keeps the regime layer and fewer rule changes. My recommendation is P1, with the cap kept available as the month-variance dial when base risk scales. Both flags exist in code today, default OFF; ship = joint decision after a 10-session shadow (`profit_partial.shadow: true`; gate/pole/price are log-only until enabled).

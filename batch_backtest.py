@@ -335,6 +335,17 @@ def filter_bull_flag_trades(
     conv_enabled = bool(conv_cfg.get("enabled", False))
     conv_threshold = float(conv_cfg.get("min_threshold", 0.0))
 
+    # Per-trade risk cap (2026-09-06, trading/bf_risk_cap.py — ONE clamp with
+    # live). cap = risk_per_trade × max_risk_mult; applied in the day loop
+    # after the regime multiplier (the last multiplier live applies before
+    # its BP ceiling).
+    from trading.bf_risk_cap import load_risk_cap_config, cap_usd as _cap_usd, capped_shares
+    _risk_cap_cfg = load_risk_cap_config(_cfg_vol.get("trading", {}))
+    _risk_cap = _cap_usd(_risk_cap_cfg, float(_cfg_vol.get("trading", {}).get("risk_per_trade", 0) or 0))
+    if _risk_cap:
+        logger.info(f"Risk cap: ON — max ${_risk_cap:,.0f} per trade "
+                    f"({_risk_cap_cfg.max_risk_mult}x risk_per_trade)")
+
     # Ablation hook (study_spy_filter_ablation.py): BT_SPY_FEATURE_OFF=1
     # zeros out the SPY 3d range contribution at Stage-2 filter time and
     # rescales pnl/shares accordingly. The cache rows already have
@@ -645,6 +656,7 @@ def filter_bull_flag_trades(
     filtered = []
     concurrent_skipped = 0
     loss_limit_skipped = 0
+    risk_capped = 0
 
     for d in sorted(by_date):
         td = date.fromisoformat(d)
@@ -702,6 +714,19 @@ def filter_bull_flag_trades(
 
             if _regime_mult != 1.0:
                 t['pnl'] = float(t.get('pnl', 0.0)) * _regime_mult
+            if _risk_cap:
+                # shares in the row are pre-regime; risk after regime = shares×mult×R
+                try:
+                    _rps = float(t.get('entry_price') or 0) - float(t.get('stop_loss') or 0)
+                    _sh_eff = float(t.get('shares') or 0) * _regime_mult
+                except (TypeError, ValueError):
+                    _rps, _sh_eff = 0.0, 0.0
+                if _rps > 0 and _sh_eff > 0:
+                    _new_sh, _scale = capped_shares(int(_sh_eff), _rps, _risk_cap)
+                    if _scale < 1.0:
+                        t['pnl'] = float(t.get('pnl', 0.0)) * _scale
+                        t['shares'] = max(1, int(float(t.get('shares') or 0) * _scale))
+                        risk_capped += 1
             filtered.append(t)
             day_count += 1
             daily_pnl += t['pnl']
@@ -711,6 +736,8 @@ def filter_bull_flag_trades(
             else:
                 consec_losses += 1
 
+    if risk_capped:
+        logger.info(f"Risk cap: {risk_capped} trades clamped to ${_risk_cap:,.0f}")
     logger.info(f"Filter: {len(trades)} → {len(filtered)} trades "
                 f"(regime={'on' if market_regime and market_regime.enabled else 'off'}, "
                 f"max_trades={max_trades_per_day}, max_concurrent={max_concurrent}, "

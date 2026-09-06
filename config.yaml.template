@@ -127,6 +127,13 @@ trading:
   sizing_mode: fixed_risk
   capital: 50000
   risk_per_trade: 2000
+  # 2026-09-06 per-trade risk cap (trading/bf_risk_cap.py — ONE clamp for BT
+  # Stage-2 and live): final shares clamped so risk <= max_risk_mult ×
+  # risk_per_trade, after every multiplier, before the BP ceiling. OFF until
+  # the joint ship call (research/bf_consistency/README.md §6).
+  risk_cap:
+    enabled: false
+    max_risk_mult: 2.0
   position_size_dollars: 50000
   max_shares: 15000            # ~$50K position at $3/share. Conviction 3x → 45K shares max via planner
   bt_buying_power_usd: 200000  # BT-only: Stage-2 clamps each position to this BP ceiling, matching
