@@ -2344,6 +2344,7 @@ def resim_cache_exits(
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     bars_db_path: str = 'data/cache.db',
+    rich_csv: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Re-simulate EXITS for every row of a Stage-1 cache with the CURRENT
     production TradeSimulator, writing a new cache to `out_path`.
@@ -2390,6 +2391,17 @@ def resim_cache_exits(
              'pnl_before': 0.0, 'pnl_after': 0.0}
     out_rows: List[Dict] = []
     warned_approx = False
+    # 2026-09-06: rich master join — the REAL pattern fields (avg_flag_volume
+    # drives the vol-confirmed trail guard; flag_high IS the planned entry).
+    # Without them this tool rebuilt a placeholder pattern and diverged from
+    # the Stage-1 exits on 691/745 rows (exit reasons differed on 64).
+    rich: Dict[tuple, Dict] = {}
+    if rich_csv:
+        with open(rich_csv, newline='') as fh:
+            for rr in csv.DictReader(fh):
+                rich[(rr['symbol'], str(rr['date'])[:10], rr.get('entry_time_et', ''))] = rr
+        logger.info(f"RESIM EXITS: rich master {rich_csv}: {len(rich)} pattern rows")
+    stats['rich_rows'] = 0
 
     for n, row in enumerate(rows, 1):
         d = date.fromisoformat(row['date'])
@@ -2403,6 +2415,9 @@ def resim_cache_exits(
         target = float(row['target'])
         shares = int(row['shares'])
         pe_raw = row.get('planned_entry') or ''
+        rr = rich.get((symbol, str(row['date'])[:10], row.get('entry_time_et', '')))
+        if not pe_raw and rr and rr.get('flag_high'):
+            pe_raw = rr['flag_high']          # breakout_level == flag_high (pattern_detector)
         if pe_raw:
             planned_entry = float(pe_raw)
             stats['exact_planned'] += 1
@@ -2445,16 +2460,38 @@ def resim_cache_exits(
 
         avg_vol_20d = int(float(row.get('avg_volume_20d') or 0))
         avg_flag_vol = max(int(avg_vol_20d / 78), 1)
-        pattern = BullFlagPattern(
-            symbol=symbol, pole_start_idx=0, pole_end_idx=0,
-            flag_start_idx=0, flag_end_idx=0,
-            pole_low=stop, pole_high=planned_entry,
-            pole_height=planned_entry - stop, pole_gain_pct=0.0,
-            flag_low=stop, flag_high=planned_entry,
-            retracement_pct=0.0, pullback_candle_count=1,
-            avg_pole_volume=avg_flag_vol, avg_flag_volume=avg_flag_vol,
-            breakout_level=planned_entry,
-        )
+        if rr and rr.get('avg_flag_volume'):
+            def _f(k, default):
+                try:
+                    return float(rr.get(k) or default)
+                except ValueError:
+                    return default
+            stats['rich_rows'] += 1
+            pattern = BullFlagPattern(
+                symbol=symbol, pole_start_idx=0, pole_end_idx=0,
+                flag_start_idx=0, flag_end_idx=max(entry_idx - 1, 0),
+                pole_low=_f('pole_high', planned_entry) - _f('pole_height', planned_entry - stop),
+                pole_high=_f('pole_high', planned_entry),
+                pole_height=_f('pole_height', planned_entry - stop),
+                pole_gain_pct=_f('pole_gain_pct', 0.0),
+                flag_low=_f('flag_low', stop), flag_high=_f('flag_high', planned_entry),
+                retracement_pct=_f('retracement_pct', 0.0),
+                pullback_candle_count=int(_f('pullback_candles', 1)),
+                avg_pole_volume=_f('avg_pole_volume', avg_flag_vol),
+                avg_flag_volume=_f('avg_flag_volume', avg_flag_vol),
+                breakout_level=_f('flag_high', planned_entry),
+            )
+        else:
+            pattern = BullFlagPattern(
+                symbol=symbol, pole_start_idx=0, pole_end_idx=0,
+                flag_start_idx=0, flag_end_idx=0,
+                pole_low=stop, pole_high=planned_entry,
+                pole_height=planned_entry - stop, pole_gain_pct=0.0,
+                flag_low=stop, flag_high=planned_entry,
+                retracement_pct=0.0, pullback_candle_count=1,
+                avg_pole_volume=avg_flag_vol, avg_flag_volume=avg_flag_vol,
+                breakout_level=planned_entry,
+            )
         rps = planned_entry - stop
         rws = target - planned_entry
         plan = TradePlan(
@@ -2634,6 +2671,12 @@ def main():
         help="Volume gate: min relative volume rate (vol_rate / expected_rate)"
     )
     parser.add_argument(
+        "--resim-rich", type=str, default=None, metavar="RICH_CSV",
+        help="Rich monthly master (backtest_results/backtest_full_*.csv) whose pattern "
+             "fields (avg_flag_volume, flag_high=planned entry, ...) make --resim-exits "
+             "faithful to the Stage-1 exits; rows without a rich match fall back to the "
+             "placeholder pattern (counted).")
+    parser.add_argument(
         "--resim-exits", type=str, default=None, metavar="OUT_CSV",
         help="Re-simulate EXITS of the production Stage-1 cache with the current "
              "TradeSimulator (trail R-basis / semantics / vol-guard) and write a new "
@@ -2651,7 +2694,7 @@ def main():
             float(_rtc.get('exit_slippage_pct', 0.003)),
         )
         _stats = resim_cache_exits(
-            src_cache=_src, out_path=args.resim_exits,
+            src_cache=_src, out_path=args.resim_exits, rich_csv=args.resim_rich,
             start_date=date.fromisoformat(args.start) if args.start else None,
             end_date=date.fromisoformat(args.end) if args.end else None,
         )
