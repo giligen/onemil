@@ -581,7 +581,8 @@ then Stage-2 at $50K/$2K/10K):
 
 | | fill-R (8/30 reference) | plan-R unified spec |
 |---|---|---|
-| Stage-2 P&L / trades / WR | $198,276 / 106 / 44.3% | **$191,142 / 105 / 46.7%** |
+| Stage-2 P&L / trades / WR | $198,276 / 106 / 44.3% | ~~$191,142 / 105 / 46.7%~~ (resim with an APPROXIMATE planned entry — inflated) |
+| **Regen-7 exact plan + live universe rule (2026-09-05 23:55)** | | **$107,351 / 79 / 53.2%, MDD −$27.5K, worst month −$11.2K, 2026 YTD −$10.9K** |
 | Max drawdown | −$58,049 | **−$52,741** |
 | Worst / best month | −$27,354 / +$76,772 | −$23,793 / +$83,641 |
 | Green months | 15/20 | 14/20 |
