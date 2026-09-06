@@ -2686,6 +2686,17 @@ def main():
     )
     args = parser.parse_args()
 
+    # Apply --config override BEFORE anything reads config — including the
+    # --resim-exits dispatch below (2026-09-06: it used to run before this
+    # block, so exit-profile variants passed via --config were silently
+    # ignored and every resim came out identical to the baseline).
+    from config import Config as _CfgCls
+    if args.config:
+        if not os.path.exists(args.config):
+            print(f"ERROR: --config path does not exist: {args.config}", file=sys.stderr)
+            sys.exit(2)
+        _CfgCls.set_config_path(args.config)
+
     if args.resim_exits:
         from config import Config as _RCfg
         _rtc = _RCfg._load_yaml_only().get("trading", {})
@@ -2701,14 +2712,7 @@ def main():
         print(f"RESIM EXITS: {_stats}")
         return
 
-    # Apply --config override BEFORE anything reads config. Inherited by forked
-    # workers. Never touches the real config.yaml — tools pass --config <tmp>.
-    from config import Config as _CfgCls
-    if args.config:
-        if not os.path.exists(args.config):
-            print(f"ERROR: --config path does not exist: {args.config}", file=sys.stderr)
-            sys.exit(2)
-        _CfgCls.set_config_path(args.config)
+    # (--config override applied above, before the resim dispatch.)
 
     # Auto-detect worker count from CPU cores
     if args.scan_workers <= 0:
