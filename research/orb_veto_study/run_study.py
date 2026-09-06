@@ -7,7 +7,7 @@ import pandas as pd
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 OUT = os.path.dirname(os.path.abspath(__file__))
 FEATURES = 'analysis_results/orb_features_20260905_1940.csv'
-DUMP = 'research/orb_signal_study/features_base.csv'
+DUMP = 'research/orb_veto_study/candidates_static_lock_dump.csv'   # produced by a full bar walk with ORB_BT_DUMP_CANDIDATES (static-lock exits)
 RUNS = {
     'baseline': '',
     'V1a_range_size': 'range_size_pct<=2.221',
@@ -19,6 +19,8 @@ RUNS = {
 }
 
 def run(name, veto):
+    if not os.path.exists(os.path.join(ROOT, DUMP)):
+        sys.exit(f"FATAL: {DUMP} missing — run the full walk first: ORB_BT_DUMP_CANDIDATES={DUMP}")
     env = dict(os.environ, ORB_BT_FEATURES_CSV=FEATURES, ORB_BT_RESIM_CACHE=DUMP,
                ORB_BT_BOOK_OUT=f'{OUT}/{name}_book.csv', ORB_BT_MONTHLY_OUT=f'{OUT}/{name}_monthly.csv')
     if veto: env['ORB_EXP_FEAT_VETO'] = veto
@@ -30,7 +32,8 @@ def run(name, veto):
         print(f'{name}: FAILED rc={r.returncode} — see {name}.log', flush=True); return None
     b = pd.read_csv(f'{OUT}/{name}_book.csv'); m = pd.read_csv(f'{OUT}/{name}_monthly.csv')
     b['date'] = pd.to_datetime(b['date'])
-    era = lambda a, z: float(b[(b.date >= a) & (b.date <= z)].pnl.sum())
+    pcol = '_sized_pnl' if '_sized_pnl' in b.columns else 'pnl'   # stage-sized, same scale as the monthly table
+    era = lambda a, z: float(b[(b.date >= a) & (b.date <= z)][pcol].sum())
     cum = m.pnl.cumsum(); mdd = float((cum - cum.cummax()).min())
     s = dict(run=name, picks=len(b), entered=int(b.entered.sum()) if 'entered' in b else None,
              total=round(m.pnl.sum()), mdd=round(mdd), red=int((m.pnl < 0).sum()), months=len(m),
