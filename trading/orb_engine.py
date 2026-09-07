@@ -49,6 +49,9 @@ from trading.orb_pm_mult import (
     DEFAULT_HIGH_CUT_USD, DEFAULT_HIGH_MULT, DEFAULT_HIGH_MULT_NEWS,
     compute_pm_dollar_vol, pm_size_multiplier,
 )
+from trading.orb_range_size_veto import (
+    DEFAULT_MIN_RANGE_SIZE_PCT, range_size_veto_applies,
+)
 from trading.orb_pdr_veto import (
     DEFAULT_MIN_PDR_PCT, compute_prev_day_range_pct, pdr_veto_applies,
 )
@@ -440,6 +443,23 @@ class ORBEngine:
         if _g1_env is not None:
             self.g1_veto_enabled = _g1_env.strip().lower() not in (
                 '0', 'false', 'no', 'off', '')
+        # 2026-09-08 (V1 veto study): the rv20==0.0 short-history marker is
+        # vetoed when this is on; NaN/missing still fails open.
+        self.g1_short_history_veto = bool(g1_cfg.get('short_history_veto', False))
+        # Opening-range-size veto (2026-09-08, V1 veto study). Post-ranking,
+        # slot consumed, NO refill. Shared math: trading/orb_range_size_veto.py.
+        # Env: ORB_RANGE_SIZE_VETO=0 disables; ORB_RANGE_SIZE_VETO_MIN_PCT overrides.
+        rs_cfg = filter_cfg.get('range_size_veto', {}) or {}
+        self.range_size_veto_enabled = bool(rs_cfg.get('enabled', False))
+        self.range_size_veto_min_pct = float(
+            rs_cfg.get('min_range_size_pct', DEFAULT_MIN_RANGE_SIZE_PCT))
+        _rs_env = os.environ.get('ORB_RANGE_SIZE_VETO')
+        if _rs_env is not None:
+            self.range_size_veto_enabled = _rs_env.strip().lower() not in (
+                '0', 'false', 'no', 'off', '')
+        _rs_min_env = os.environ.get('ORB_RANGE_SIZE_VETO_MIN_PCT')
+        if _rs_min_env:
+            self.range_size_veto_min_pct = float(_rs_min_env)
         # Premarket dollar-volume sizing mult (2026-07-04, upsize-only).
         # Shared math: trading/orb_pm_mult.py. Cut frozen from H1-2025 TRAIN.
         sizing_pm_cfg = (cfg.get('sizing', {}) or {}).get('pm_dollar_vol_mult', {}) or {}
@@ -646,6 +666,8 @@ class ORBEngine:
             f"ORBEngine gates: catalyst_veto={self.catalyst_veto_enabled} "
             f"(min_cohort={self.catalyst_min_cohort}), "
             f"pdr_veto={self.pdr_veto_enabled} (min={self.pdr_veto_min_pct:.1f}), "
+            f"g1_short_history_veto={self.g1_short_history_veto}, "
+            f"range_size_veto={self.range_size_veto_enabled} (min={self.range_size_veto_min_pct:.3f}), "
             f"g1_veto={self.g1_veto_enabled} "
             f"(rv20>={self.g1_rv20_min}, pdr>={self.g1_pdr_min}), "
             f"touchgo={self.touchgo_cfg.master_enabled}, "
@@ -2139,6 +2161,10 @@ class ORBEngine:
             # trading/orb_g1_veto.py — BT parity by construction.
             if self._g1_veto_reject(cand):
                 continue
+            # Opening-range-size veto (2026-09-08): post-ranking, slot
+            # consumed, NO refill. Shared math trading/orb_range_size_veto.py.
+            if self._range_size_veto_reject(cand):
+                continue
             # Catalyst-required veto (2026-07-18): newsless AND alone
             # (no same-morning complex confirmation) — no catalyst, no
             # trade. Same no-refill slot semantics as PDR.
@@ -2684,7 +2710,8 @@ class ORBEngine:
         feats = cand.features or {}
         rv20 = feats.get('return_volatility_20d')
         pdr = feats.get('prev_day_range_pct')
-        reason = g1_reject(rv20, pdr, self.g1_rv20_min, self.g1_pdr_min)
+        reason = g1_reject(rv20, pdr, self.g1_rv20_min, self.g1_pdr_min,
+                           short_history_veto=self.g1_short_history_veto)
         if reason is None:
             return False
         logger.info(
@@ -2696,6 +2723,32 @@ class ORBEngine:
         self._pdr_vetoed_today.add(cand.symbol)
         cand.plan_submitted = True
         return True
+
+    def _range_size_veto_reject(self, cand: CandidateState) -> bool:
+        """Opening-range-size veto for one SELECTED pick (2026-09-08).
+
+        True -> skip submission; the slot stays EMPTY (no backfill — the
+        refill form is toxic). Fail-open with a WARNING when range_size_pct
+        is unavailable. Shared decision: trading/orb_range_size_veto.py.
+        """
+        if not self.range_size_veto_enabled:
+            return False
+        rs = (cand.features or {}).get('range_size_pct')
+        if rs is None:
+            logger.warning(
+                f"[ORB] RANGE-SIZE VETO: {cand.symbol} range_size_pct "
+                f"unavailable — fail-open (no veto)")
+            return False
+        if range_size_veto_applies(rs, self.range_size_veto_min_pct):
+            logger.info(
+                f"[ORB] RANGE-SIZE VETO: {cand.symbol} opening range {float(rs):.3f}% "
+                f"<= {self.range_size_veto_min_pct:.3f}% of price — noise trigger, "
+                f"slot left empty (no backfill)")
+            cand.rejected_reason = 'range_size_veto'
+            self._pdr_vetoed_today.add(cand.symbol)   # consume the slot like PDR/G1
+            cand.plan_submitted = True
+            return True
+        return False
 
     def _should_defer_first_rank(self) -> bool:
         """First-rank grace gate (2026-07-03 selection-race fix).

@@ -27,3 +27,9 @@ At the $10K stage these are hundreds of dollars over 21 months; the value is the
 
 ### Proposal (joint decision — a new live rule; NOT shipped)
 Add two no-refill post-selection vetoes to the ORB pipeline and live engine as ONE shared helper (the PDR-veto form): `range_size_pct <= 2.221` and `avg_daily_range_pct_20d` missing/0 (no 20-day history). Config `orb.yaml::filter.{min_range_size_pct, require_20d_history}`, env kill switches, parity tests, green-check line. Rollback = flags off.
+
+## Shipped 2026-09-07 (owner GO 9/6 "yes for both"), live from the Tuesday 9/8 boot
+- Range-size veto: `trading/orb_range_size_veto.py` + `orb_engine._range_size_veto_reject` + pipeline block; `orb.yaml::filter.range_size_veto {enabled: true, min_range_size_pct: 2.221}`.
+- Short-history: `g1_veto.short_history_veto: true` (the rv20==0.0 marker is vetoed; the 8/15 fail-open is the `false` setting).
+- Parity check: the pipeline on the shipped yaml knobs, no experiment flag, reproduces the a+b run to the dollar ($6,531 / 114 picks / 67 fills). NB the pipeline's per-veto print counts rows at the point of application (before slot/no-fill accounting), so "dropped 33 … +1,584" is not the book-level effect; the book diff (16 picks, −$445, 0 winners) is.
+- Monday 9/7 is Labor Day (market closed); first live session Tuesday 9/8 — same day as BF P1's first session. Separate strategies, separate log lines (`RANGE-SIZE VETO`, `G1 VETO`).

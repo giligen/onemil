@@ -232,9 +232,14 @@ class TestVetoSeam:
         assert engine._g1_veto_reject(c) is False
         assert c.rejected_reason is None
 
-    def test_rv_zero_fails_open(self, engine):
-        c = _cand('SHORT', 0.0, 5.0)
-        assert engine._g1_veto_reject(c) is False
+    def test_rv_zero_follows_the_short_history_switch(self, engine):
+        """2026-09-08: the rv20==0.0 marker is vetoed when
+        g1_veto.short_history_veto is on (the live yaml) and fails open when off."""
+        engine.g1_short_history_veto = False
+        assert engine._g1_veto_reject(_cand('SHORT', 0.0, 5.0)) is False
+        engine.g1_short_history_veto = True
+        c = _cand('SHORT2', 0.0, 5.0)
+        assert engine._g1_veto_reject(c) is True and c.rejected_reason == 'g1_veto'
 
     def test_disabled_passes_everything(self, engine):
         engine.g1_veto_enabled = False
@@ -281,7 +286,9 @@ class TestBTParity:
 
     def test_same_decision_both_sides(self, engine):
         """Identical inputs -> identical KEEP/VETO on the helper and the seam."""
-        for rv, pdr in [(7.2, 9.3), (7.0, 9.3), (0.0, 5.0), (7.2, 0.0)]:
-            helper_veto = g1_reject(rv, pdr, 7.106, 9.226) is not None
-            seam_veto = engine._g1_veto_reject(_cand(f'S{rv}{pdr}', rv, pdr))
-            assert helper_veto == seam_veto
+        for flag in (False, True):
+            engine.g1_short_history_veto = flag
+            for rv, pdr in [(7.2, 9.3), (7.0, 9.3), (0.0, 5.0), (7.2, 0.0)]:
+                helper_veto = g1_reject(rv, pdr, 7.106, 9.226, short_history_veto=flag) is not None
+                seam_veto = engine._g1_veto_reject(_cand(f'S{flag}{rv}{pdr}', rv, pdr))
+                assert helper_veto == seam_veto

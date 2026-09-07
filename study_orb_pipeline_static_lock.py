@@ -118,6 +118,7 @@ def load_bt_config(yaml_path: str = 'orb.yaml') -> dict:
     from trading.orb_g1_veto import (DEFAULT_PDR_MIN as _G1_PDR,
                                      DEFAULT_RV20_MIN as _G1_RV)
     from trading.orb_pdr_veto import DEFAULT_MIN_PDR_PCT as _DEF_PDR
+    from trading.orb_range_size_veto import DEFAULT_MIN_RANGE_SIZE_PCT as _RS_MIN
     pdr_cfg = (filt.get('prev_day_range_veto') or {})
     out = {
         'account': _f('ORB_BT_ACCOUNT', sizing.get('account_budget_usd'), ACCOUNT),
@@ -130,6 +131,10 @@ def load_bt_config(yaml_path: str = 'orb.yaml') -> dict:
         'g1_rv20_min': float(g1.get('return_volatility_20d_min', _G1_RV)),
         'g1_pdr_min': float(g1.get('prev_day_range_pct_min', _G1_PDR)),
         'g1_enabled': bool(g1.get('enabled', True)),
+        # 2026-09-08 V1 veto study (research/orb_veto_study/REPORT.md)
+        'g1_short_history_veto': bool(g1.get('short_history_veto', False)),
+        'rs_enabled': bool((filt.get('range_size_veto') or {}).get('enabled', False)),
+        'rs_min': float((filt.get('range_size_veto') or {}).get('min_range_size_pct', _RS_MIN)),
         # PM/news mult stack: B+ turns it OFF (sizing.pm_dollar_vol_mult.enabled
         # = false). The pipeline must honor the yaml flag so the BT book matches
         # live; env ORB_PM_MULT=0 still forces off at the call site.
@@ -177,7 +182,9 @@ def load_bt_config(yaml_path: str = 'orb.yaml') -> dict:
     print(f"BT config (B+ parity): account=${out['account']:,.0f} N={out['n']} "
           f"risk=${out['risk']:,.0f} threshold={out['threshold']:.12f} "
           f"pdr_veto>={out['pdr_min']} g1({out['g1_enabled']}, "
-          f"rv20>={out['g1_rv20_min']}, pdr>={out['g1_pdr_min']}) "
+          f"rv20>={out['g1_rv20_min']}, pdr>={out['g1_pdr_min']}, "
+          f"short_history_veto={out['g1_short_history_veto']}) "
+          f"range_size_veto({out['rs_enabled']}, <= {out['rs_min']}) "
           f"book={out['book_csv']}")
     print(f"BT config (winner stack): atr_floor="
           f"{'ON' if out['atr_floor_enabled'] else 'off'} k={out['atr_floor_k']} "
@@ -966,7 +973,8 @@ def main():
     if g1_veto_on and {'return_volatility_20d',
                        'prev_day_range_pct'} <= set(sel.columns):
         g1_mask = pd.Series(
-            [_g1_reject(rv, pdr, bt_cfg['g1_rv20_min'], bt_cfg['g1_pdr_min'])
+            [_g1_reject(rv, pdr, bt_cfg['g1_rv20_min'], bt_cfg['g1_pdr_min'],
+                        short_history_veto=bt_cfg['g1_short_history_veto'])
              is not None
              for rv, pdr in zip(sel['return_volatility_20d'],
                                 sel['prev_day_range_pct'])],
@@ -981,6 +989,25 @@ def main():
     elif g1_veto_on:
         print("G1 veto: WARNING return_volatility_20d/prev_day_range_pct "
               "column missing from features CSV — veto skipped (fail-open)")
+
+    # Range-size veto (ships 2026-09-08; matches trading/orb_engine.py via the
+    # SAME shared trading/orb_range_size_veto.py). POST-selection, NO refill.
+    # Env: ORB_RANGE_SIZE_VETO=0 disables; ORB_RANGE_SIZE_VETO_MIN_PCT overrides.
+    from trading.orb_range_size_veto import range_size_veto_applies as _rs_applies
+    _rs_env = os.environ.get('ORB_RANGE_SIZE_VETO')
+    rs_veto_on = (bt_cfg['rs_enabled'] if _rs_env in (None, '')
+                  else _rs_env.strip().lower() not in ('0', 'false', 'no', 'off'))
+    if rs_veto_on and 'range_size_pct' in sel.columns:
+        rs_min = float(os.environ.get('ORB_RANGE_SIZE_VETO_MIN_PCT', str(bt_cfg['rs_min'])))
+        rs_mask = sel['range_size_pct'].apply(lambda v: _rs_applies(v, rs_min))
+        n_rs = int(rs_mask.sum())
+        rs_pnl = float(sel.loc[rs_mask, '_sized_pnl'].sum())
+        sel = sel[~rs_mask].copy()
+        print(f"Range-size veto: dropped {n_rs} pick(s) with range_size_pct <= {rs_min} "
+              f"(their P&L would have been {rs_pnl:+,.0f}; set ORB_RANGE_SIZE_VETO=0 to disable)")
+    elif rs_veto_on:
+        print("Range-size veto: WARNING range_size_pct column missing from features CSV — "
+              "veto skipped (fail-open)")
 
     # Catalyst-required veto (ships 2026-07-18; matches orb_engine via
     # trading/orb_catalyst_veto.py). Newsless-and-alone selected picks
