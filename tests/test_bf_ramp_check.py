@@ -1,8 +1,8 @@
 """BF P1 ramp checker: pure gate logic (docs/bf_p1_ramp.md)."""
-import importlib.util, os
+import importlib.util, os, sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 spec = importlib.util.spec_from_file_location('bf_ramp_check', os.path.join(ROOT, 'scripts', 'bf_ramp_check.py'))
-m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m = importlib.util.module_from_spec(spec); sys.modules[spec.name] = m; spec.loader.exec_module(m)
 
 
 def T(day, pnl, flag=0):

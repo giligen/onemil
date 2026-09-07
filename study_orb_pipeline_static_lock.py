@@ -812,6 +812,7 @@ def main():
 
     # Top-K + dedup per day
     sel_rows = []
+    _ranked_rows = []
     for day, dg in kept.groupby('date'):
         d = dg.copy()
         d['_q_rank'] = d['_quintile'].map(Q_ORDER)
@@ -822,6 +823,12 @@ def main():
             d = d.sort_values(['_rvol_key', '_q_rank', '_composite'], ascending=[True, True, False])
         else:
             d = d.sort_values(['_q_rank', '_composite'], ascending=[True, False])
+        # Research hook (2026-09-07, slot-recycling study): dump the day's
+        # FULL ranked list (post-filter, pre-slot) with its rank so a
+        # selector/slot experiment can replay selection without the pipeline.
+        if os.environ.get('ORB_BT_DUMP_RANKED'):
+            _dr = d.copy(); _dr['_rank'] = range(1, len(_dr) + 1)
+            _ranked_rows.append(_dr)
         seen_fam = set(); seen_sup = set()
         kept_today = []
         for _, r in d.iterrows():
@@ -834,6 +841,12 @@ def main():
             if len(kept_today) >= n_per_day: break
         sel_rows.extend(kept_today)
     sel = pd.DataFrame(sel_rows)
+    if os.environ.get('ORB_BT_DUMP_RANKED') and _ranked_rows:
+        _rk = pd.concat(_ranked_rows, ignore_index=True)
+        _rk['_sized_pnl'] = _rk.apply(lambda r: r['_rp_pnl'] * mults[r['_quintile']], axis=1)
+        _rk.to_csv(os.environ['ORB_BT_DUMP_RANKED'], index=False)
+        print(f"Ranked candidates dumped (post-filter, pre-slot, per-day rank): "
+              f"{os.environ['ORB_BT_DUMP_RANKED']} ({len(_rk)} rows)")
     sel['_sized_pnl'] = sel.apply(lambda r: r['_rp_pnl'] * mults[r['_quintile']], axis=1)
     sel['date'] = pd.to_datetime(sel['date'])
     sel['month'] = sel['date'].dt.to_period('M').astype(str)
