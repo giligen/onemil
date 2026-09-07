@@ -92,7 +92,7 @@ def replay_day(d, cohorts, news, T=None, max_recycles=0):
     """Return list of (symbol, pnl, filled, recycled) for one day."""
     d = d.sort_values('_rank')
     seen_fam, seen_sup, picks = set(), set(), []
-    for row in d.itertuples():
+    for _, row in d.iterrows():          # iterrows: Series keeps _-prefixed names
         fam, sup = symbol_family(row.symbol), symbol_super_group(row.symbol)
         if (fam and fam in seen_fam) or (sup and sup in seen_sup):
             continue
@@ -123,7 +123,7 @@ def replay_day(d, cohorts, news, T=None, max_recycles=0):
             continue
         recycles += 1
         # next-ranked candidate not yet triggered (breakout_min >= T or never), not taken
-        for c in d.itertuples():
+        for _, c in d.iterrows():
             if c.symbol in taken:
                 continue
             fam, sup = symbol_family(c.symbol), symbol_super_group(c.symbol)
@@ -182,7 +182,7 @@ def main():
             b.to_csv(f'{D}/recycle_T{T}_max{mx}_book.csv', index=False)
     S = pd.DataFrame(rows)
     def verdict(x):
-        if x.T is None or pd.isna(x.T): return ''
+        if x['T'] is None or pd.isna(x['T']): return ''
         ok = (x.fills_mo >= base['fills_mo'] * 1.2 and x.total >= base['total'] and x.mdd >= base['mdd']
               and (np.isnan(x.rec_mean) or x.rec_mean >= 0.5 * base['first_mean'])
               and all(x[e] >= base[e] - 100 for e in ('e25H1', 'e25H2', 'e2026')))
