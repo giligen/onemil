@@ -46,12 +46,8 @@ PDR_MIN = float(cfg['prev_day_range_veto']['min_prev_day_range_pct'])
 G1 = cfg['g1_veto']; RS = cfg['range_size_veto']
 
 
-def load_inputs():
-    r = pd.read_csv(f'{D}/ranked_candidates.csv', low_memory=False)
-    r['date'] = pd.to_datetime(r['date']).dt.strftime('%Y-%m-%d')
-    bt = pd.read_csv(f'{D}/breakout_times.csv'); bt['date'] = bt['date'].astype(str).str[:10]
-    r = r.merge(bt[['symbol', 'date', 'breakout_min']], on=['symbol', 'date'], how='left')
-    # catalyst inputs
+def load_catalyst_inputs():
+    """anchors (symbol->anchor), cohorts (day->counts), news ((symbol, day)->bool)."""
     F = read_orb_csv(FEATURES); F['date'] = pd.to_datetime(F['date']).dt.strftime('%Y-%m-%d')
     names = {}
     with open(DEFAULT_CLASS_MAP, newline='') as fh:
@@ -64,6 +60,15 @@ def load_inputs():
     for p in sorted(glob.glob('data/research/orb_news_catalyst_*.csv')):
         for _, x in read_orb_csv(p).iterrows():
             news[(x['symbol'], x['day'])] = (x['n_articles'] or 0) > 0
+    return anchors, cohorts, news
+
+
+def load_inputs():
+    r = pd.read_csv(f'{D}/ranked_candidates.csv', low_memory=False)
+    r['date'] = pd.to_datetime(r['date']).dt.strftime('%Y-%m-%d')
+    bt = pd.read_csv(f'{D}/breakout_times.csv'); bt['date'] = bt['date'].astype(str).str[:10]
+    r = r.merge(bt[['symbol', 'date', 'breakout_min']], on=['symbol', 'date'], how='left')
+    anchors, cohorts, news = load_catalyst_inputs()
     r['_anchor'] = r['symbol'].map(anchors)
     return r, cohorts, news
 
