@@ -126,6 +126,12 @@ if [ ! -f "$TMP_CACHE" ]; then
     exit 0
 fi
 
+# 2026-09-08: the gap build chunks by MONTH, so a gap starting mid-month
+# re-walks the month's earlier days — never append a row already in the
+# production cache (the production row is the reference).
+/usr/bin/python3 scripts/cache_append_dedupe.py "$CACHE_PATH" "$TMP_CACHE" >> "$LOG" 2>&1 || {
+    echo "ERROR: cache_append_dedupe failed — leaving cache untouched." >> "$LOG"
+    rm -f "$TMP_CACHE"; mark_log "FAILED (dedupe step)"; alert_failure "dedupe step failed"; exit 4; }
 NEW_ROWS=$(($(wc -l < "$TMP_CACHE") - 1))
 echo "Temp cache has $NEW_ROWS new trade rows." >> "$LOG"
 
