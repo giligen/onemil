@@ -409,12 +409,9 @@ ORB analysis; the older ones have warning headers pointing to the shipped varian
 
 **Do NOT**:
 - Enable with `ALPACA_ORB_API_KEY` empty — main.py will warn + disable
-- Refit z-score / quintile / adaptive params AT ALL without a walk-forward harness proving the new fit OOS.
-  **The quarterly-refit cadence is CANCELLED (2026-07-03 audit)**: quarterly refits tested $34–47K WORSE
-  OOS than the frozen H1-2025 fit across 4 quarters (static +$126.8K vs expanding-refit +$79.5K vs
-  rolling-12mo +$92.7K) — refits chase the recent regime and get whipsawed. The frozen fit is an
-  accidental regularizer. See research/money_machine_audit_jul2026.md #4 +
-  research/scripts/orb_pipeline_replica.py (the harness).
+- Refit the **adaptive_mults** (sizing) — ever. 2026-09-08 walk-forward on the HONEST dump (`research/orb_refit_walkforward/REPORT.md`): refitting the mults is the whipsaw (the "expanding" gain was one ANNA fill sized 3×). The **selection** (z-params + quintile cutoffs) IS refit weekly on a rolling 26-week window by `scripts/orb_weekly_refit.py` (Sunday 20:00 UTC system cron, owner decision 9/8): 26w $7,588 vs frozen $5,669, MDD −223 vs −551, red months 4 vs 6, robust across windows ≥ 20w and refit days Mon/Wed/Fri. The 8-week window LOSES. The July "quarterly refits lose $34–47K" audit was measured on the lookahead-inflated features and is superseded.
+  (The 2026-07-03 "quarterly refits lose" audit — research/money_machine_audit_jul2026.md #4 — refit mults
+  AND selection on the inflated features; superseded by the 9/8 honest-dump walk-forward above.)
 - Remove Q5 cap from `orb.yaml::adaptive_mults.Q5: 1.5` — it's the anti-overfit guard
 - Disable Q1 filter (`filter.skip_q1`) without revisiting `docs/orb_research_apr_2026.md` first
 - Skip Pre-Stage-0 LIVE phase before formal Stage 0 — paper data has structural limits (synthetic fills don't capture real venue queue)

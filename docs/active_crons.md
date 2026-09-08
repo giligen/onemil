@@ -96,3 +96,8 @@ Why: the 19-month study was frozen at 8/14 while live started 8/21 — the EOD d
 compared live only to the shadow twin. The EOD dive should quote this table
 (matched trades, live R vs BT R, live fill vs BT entry in bps, BT triggers not
 taken live and their BT P&L).
+
+## ORB weekly SELECTION refit (system crontab, Sundays 20:00 UTC, installed 2026-09-08 — owner: "so 26 wks")
+- `0 20 * * 0 python3 scripts/orb_weekly_refit.py >> logs/orb_weekly_refit.log` (failure → 🔴 telegram, orb.yaml untouched).
+- Re-fits `orb.yaml::filter.features.{mean,std}` + `quintile_cutoffs` on the trailing 26 weeks of candidates; `adaptive_mults` NEVER (research/orb_refit_walkforward/REPORT.md). Backup `orb.yaml.bak.refit_<ts>`, history `logs/orb_refit_history.jsonl`. First write Sun 9/13 → live from the Mon 9/14 boot. Job-vs-harness parameter parity verified identical for the week of 9/7.
+- Survives Claude restarts (system crontab, not a session cron).
