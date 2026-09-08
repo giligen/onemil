@@ -6,8 +6,9 @@ import os, subprocess, sys
 import pandas as pd
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 OUT = os.path.dirname(os.path.abspath(__file__))
-FEATURES = 'analysis_results/orb_features_20260905_1940.csv'
-DUMP = 'research/orb_veto_study/candidates_static_lock_dump.csv'   # produced by a full bar walk with ORB_BT_DUMP_CANDIDATES (static-lock exits)
+FEATURES = os.environ.get('VETO_STUDY_FEATURES', 'analysis_results/orb_features_20260905_1940.csv')
+DUMP = os.environ.get('VETO_STUDY_DUMP', 'research/orb_veto_study/candidates_static_lock_dump.csv')   # full bar walk with ORB_BT_DUMP_CANDIDATES (static-lock exits)
+OUT = os.environ.get('VETO_STUDY_OUT', OUT)
 RUNS = {
     'baseline': '',
     'V1a_range_size': 'range_size_pct<=2.221',

@@ -27,8 +27,8 @@ sys.path.insert(0, os.path.join(ROOT, 'research', 'orb_slot_recycle'))
 import simulate as S                                              # noqa: E402  (vetoed(), load of news/cohorts)
 import yaml                                                       # noqa: E402
 
-DUMP = 'research/orb_veto_study/candidates_static_lock_dump.csv'
-OUT = 'research/orb_refit_walkforward'
+DUMP = os.environ.get('REFIT_DUMP', 'research/orb_veto_study/candidates_static_lock_dump.csv')
+OUT = os.environ.get('REFIT_OUT', 'research/orb_refit_walkforward')
 N = 3
 FEATS = P.FILTER_FEATURES
 Q_ORDER, Q_CAPS = P.Q_ORDER, P.Q_CAPS

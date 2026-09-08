@@ -132,7 +132,7 @@ def load_bt_config(yaml_path: str = 'orb.yaml') -> dict:
         'g1_pdr_min': float(g1.get('prev_day_range_pct_min', _G1_PDR)),
         'g1_enabled': bool(g1.get('enabled', True)),
         # 2026-09-08 V1 veto study (research/orb_veto_study/REPORT.md)
-        'g1_short_history_veto': bool(g1.get('short_history_veto', False)),
+        'g1_short_history_veto': _env_bool('ORB_G1_SHORT_HISTORY_VETO', g1.get('short_history_veto', False)),
         'rs_enabled': bool((filt.get('range_size_veto') or {}).get('enabled', False)),
         'rs_min': float((filt.get('range_size_veto') or {}).get('min_range_size_pct', _RS_MIN)),
         # PM/news mult stack: B+ turns it OFF (sizing.pm_dollar_vol_mult.enabled

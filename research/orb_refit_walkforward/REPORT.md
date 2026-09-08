@@ -36,3 +36,12 @@ Same harness, refit day moved. Selection-only refit, mults frozen:
 | Friday | 6,377 / −133 / 4 | **7,641 / −223 / 4** | 6,735 / −223 / 2 | 5,669 / −551 / 6 |
 
 Every phase, every window ≥ 20w beats frozen on total, MDD and red months; 26w is the best total on all three phases with both eras up. Passes the first evidence bar. Second bar = one live refit cycle checked for parity (build `scripts/orb_weekly_refit.py`, dry-run against the current features, compare to the harness's parameters for the same week) before the Sunday 9/13 first write.
+
+## Re-verification on the news-complete dump (2026-09-08 23:40 UTC, `rerun_20260908/`)
+| variant | fills | total | MDD | red | worst | 2025 | 2026 |
+|---|---|---|---|---|---|---|---|
+| frozen | 54 | 5,766 | −454 | 6 | −187 | 3,026 | 2,740 |
+| refit everything, 8w | 64 | 5,048 | −633 | 6 | −601 | 2,615 | 2,433 |
+| **selection only, 26w** | 67 | **7,798** | **−223** | **4** | −223 | 4,228 | 3,570 |
+| selection only, expanding | 64 | 7,944 | −223 | 3 | −223 | 3,577 | 4,367 |
+Same shape as on the fail-open dump: the 2-month refit loses, the 26-week selection refit is +35% with drawdown halved and both eras up. The Sunday 9/13 cron stands.

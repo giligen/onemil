@@ -33,3 +33,15 @@ Add two no-refill post-selection vetoes to the ORB pipeline and live engine as O
 - Short-history: `g1_veto.short_history_veto: true` (the rv20==0.0 marker is vetoed; the 8/15 fail-open is the `false` setting).
 - Parity check: the pipeline on the shipped yaml knobs, no experiment flag, reproduces the a+b run to the dollar ($6,531 / 114 picks / 67 fills). NB the pipeline's per-veto print counts rows at the point of application (before slot/no-fill accounting), so "dropped 33 … +1,584" is not the book-level effect; the book diff (16 picks, −$445, 0 winners) is.
 - Monday 9/7 is Labor Day (market closed); first live session Tuesday 9/8 — same day as BF P1's first session. Separate strategies, separate log lines (`RANGE-SIZE VETO`, `G1 VETO`).
+
+## Re-verification on the news-complete features (2026-09-08 23:30 UTC, `rerun_20260908/`)
+The nightly's PM$/news append had been crashing (NaN 'NA' ticker); the BT catalyst veto failed open on ~5.6K symbol-days. Fixed 9/8, history backfilled, features 20260908_2049, fresh static-lock dump (12,897 candidates). Both vetoes still pass the pre-committed rule; each alone and together:
+
+| variant | picks | fills | total | MDD | red | worst | 25H1 | 25H2 | 2026 |
+|---|---|---|---|---|---|---|---|---|---|
+| vetoes off | 85 | 66 | 6,220 | −551 | 6/21 | −198 | 2,442 | 1,135 | 2,643 |
+| range-size only | 81 | 63 | 6,391 | −485 | 6/20 | −187 | 2,442 | 1,241 | 2,709 |
+| short-history only | 82 | 63 | 6,522 | −454 | 6/21 | −187 | 2,442 | 1,341 | 2,740 |
+| **both (shipped)** | 79 | 61 | **6,627** | **−454** | 6/20 | −187 | 2,442 | 1,446 | 2,740 |
+
+The honest ORB reference is now **$6,627 / 79 picks / 61 fills / MDD −$454 / worst −$187 / 2026 YTD +$2,740** (nightly `analysis_results/orb_bplus_book.csv`, reproduced by the side walk to the dollar).
