@@ -52,7 +52,7 @@ def _covered(pattern: str) -> set:
     pairs = set()
     for p in glob.glob(pattern):
         try:
-            df = pd.read_csv(p, usecols=['symbol', 'day'])
+            df = pd.read_csv(p, usecols=['symbol', 'day'], keep_default_na=False, na_values=[''])
             pairs |= set(zip(df['symbol'], df['day']))
         except Exception as e:
             print(f"WARNING: unreadable {p}: {e}")
@@ -168,6 +168,10 @@ def refresh_class_map(symbols, dry: bool) -> None:
     except Exception as e:
         print(f"WARNING: class map unreadable ({e}) — skipping refresh")
         return
+    # 2026-09-08: a ticker literally named "NA" is read by pandas as NaN
+    # (float) and crashed sorted() with a TypeError — the same class the
+    # pipeline fixed with trading.orb_csv.read_orb_csv. Guard here too.
+    symbols = {s for s in symbols if isinstance(s, str) and s}
     missing = sorted(set(symbols) - known)
     if not missing:
         print(f"class map: coverage complete ({len(known)} symbols)")
@@ -198,7 +202,7 @@ def main() -> int:
     ap.add_argument('--dry-run', action='store_true')
     args = ap.parse_args()
 
-    feats = pd.read_csv(_latest_features_csv(), usecols=['symbol', 'date'])
+    feats = pd.read_csv(_latest_features_csv(), usecols=['symbol', 'date'], keep_default_na=False, na_values=[''])
     feats['day'] = feats['date'].astype(str).str[:10]
     all_pairs = set(zip(feats['symbol'], feats['day']))
     refresh_class_map({s for s, _ in all_pairs}, args.dry_run)
