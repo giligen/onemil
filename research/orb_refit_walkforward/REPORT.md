@@ -25,3 +25,14 @@ Harness: `run.py`. Every Monday from 2025-03-03 the composite's z-params, quinti
 
 ## Proposal (owner decision, not shipped)
 Weekly (Sunday) refit of `orb.yaml::filter.features` z-params and `quintile_cutoffs` on the trailing 26 weeks of candidates, `adaptive_mults` frozen; the nightly pipeline replays the same walk-forward so BT stays parity with live (the "frozen fit is canonical" doctrine becomes "the walk-forward fit is canonical, written to yaml and logged"). Kill switch = stop the weekly job (yaml keeps the last fit). Evidence bar before ship: the same plateau on a second seed of the week phase (refit on Wednesdays) and a live parity test of one refit cycle.
+
+## Week-phase robustness (2026-09-08, owner: "so 26 wks")
+Same harness, refit day moved. Selection-only refit, mults frozen:
+
+| refit day | 20w total / MDD / red | **26w total / MDD / red** | 39w total / MDD / red | frozen |
+|---|---|---|---|---|
+| Monday | 6,279 / −131 / 5 | **7,588 / −223 / 4** | 6,834 / −223 / 2 | 5,669 / −551 / 6 |
+| Wednesday | 6,227 / −136 / 5 | **7,146 / −223 / 3** | 6,894 / −223 / 2 | 5,669 / −551 / 6 |
+| Friday | 6,377 / −133 / 4 | **7,641 / −223 / 4** | 6,735 / −223 / 2 | 5,669 / −551 / 6 |
+
+Every phase, every window ≥ 20w beats frozen on total, MDD and red months; 26w is the best total on all three phases with both eras up. Passes the first evidence bar. Second bar = one live refit cycle checked for parity (build `scripts/orb_weekly_refit.py`, dry-run against the current features, compare to the harness's parameters for the same week) before the Sunday 9/13 first write.

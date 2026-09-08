@@ -122,14 +122,15 @@ def main():
     df = pd.read_csv(DUMP, low_memory=False); df['date'] = pd.to_datetime(df['date'])
     anchors, cohorts, news = S.load_catalyst_inputs()
     df['_anchor'] = df['symbol'].map(anchors)
-    weeks = pd.date_range('2025-03-03', '2026-09-04', freq='W-MON')
+    _freq = os.environ.get('REFIT_WEEK_FREQ', 'W-MON')   # week-phase robustness: W-WED etc.
+    weeks = pd.date_range('2025-03-03', '2026-09-04', freq=_freq)
     out = []
     modes = sys.argv[1:] or ['frozen', '8w', '13w', '26w', 'expanding']
     for mode in modes:
         s, b = run(df, cohorts, news, mode, weeks)
         b.to_csv(f'{OUT}/{mode}_book.csv', index=False)
         print(s, flush=True); out.append(s)
-    T = pd.DataFrame(out); T.to_csv(f'{OUT}/summary' + ('_' + '_'.join(modes) if sys.argv[1:] else '') + '.csv', index=False)
+    T = pd.DataFrame(out); T.to_csv(f'{OUT}/summary' + ('_' + '_'.join(modes) if sys.argv[1:] else '') + ('' if _freq == 'W-MON' else '_' + _freq) + '.csv', index=False)
     print('\n' + T.to_string(index=False))
 
 
