@@ -291,6 +291,7 @@ class PrestageManager:
         self._op_times: deque = deque()   # rate budget window (60s)
         self._last_feed_ts: float = 0.0
         self._chase_only_mode = False
+        self._feed_quiet_noted = False
         self._kill_active = False
         self._midday_swept = False
         # account snapshot (refreshed every account_refresh_s — the
@@ -344,6 +345,7 @@ class PrestageManager:
         self._stages = {}
         self._op_times.clear()
         self._chase_only_mode = False
+        self._feed_quiet_noted = False
         self._kill_active = False
         self._midday_swept = False
         self._bp_available = None
@@ -709,6 +711,14 @@ class PrestageManager:
                 return
             self._rank_candidates()
             self._demote_pass()
+            if self._feed_is_stale():
+                # fail-safe kept: never STAGE on stale prices (the watchdog
+                # no longer alarms when nothing is staged — see it)
+                with self._lock:
+                    syms = list(self._candidates.keys())
+                for sym in syms:
+                    self._once(sym, 'stage_skip_feed_stale')
+                return
             self._promote_pass(minute)
         except Exception as e:
             logger.error(f"[PRESTAGE] process_tick failed: {e}",
@@ -807,6 +817,13 @@ class PrestageManager:
         for sym in unexplained:
             self._once(sym, 'stage_skip_window_closed')
 
+    def _feed_is_stale(self) -> bool:
+        """True when no feed update for > watchdog_stale_s (0 = never fed)."""
+        with self._lock:
+            if self._last_feed_ts <= 0:
+                return False
+            return (time.time() - self._last_feed_ts) > self.watchdog_stale_s
+
     def _watchdog_check(self) -> None:
         """§D12 feed watchdog: no heap update for watchdog_stale_s while
         stages are live => sweep + chase-only mode + alert."""
@@ -820,6 +837,20 @@ class PrestageManager:
                 return
             any_staged = any(r['state'] == STATE_STAGED
                              for r in self._stages.values())
+            if not any_staged:
+                # 2026-09-09: the §D12 contract is "while stages are LIVE".
+                # With nothing staged there is nothing to protect — the
+                # shadow's intake window closes at 10:30 ET every day and
+                # the quiet feed tripped this ERROR + sweep at 14:33 UTC two
+                # days running (9/8, 9/9) for no reason. Staging on a stale
+                # feed is refused separately in process_tick (fail-safe
+                # kept); here we only note it once and stand down.
+                if not self._feed_quiet_noted:
+                    self._feed_quiet_noted = True
+                    logger.info(f"[PRESTAGE] feed quiet {stale:.0f}s with no "
+                                f"live stage — watchdog standing down (intake "
+                                f"window closed or no candidates moving)")
+                return
             self._chase_only_mode = True
             self.telemetry.feed_stale_events += 1
         logger.error(

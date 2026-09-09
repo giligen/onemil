@@ -1887,3 +1887,40 @@ class TestStagedFillExitChain:
         sm.force_exit.reset_mock()
         m.process_tick(now_et=_et(DAY, 15, 45))
         sm.force_exit.assert_not_called()
+
+
+class TestWatchdogStandsDownWithoutStages:
+    """2026-09-09: the daily 14:33 UTC FEED STALE ERROR was the 10:30 ET intake
+    window closing with nothing staged. §D12 is 'while stages are live'."""
+
+    def test_no_stage_no_alarm_no_chase_only(self, tmp_path, monkeypatch, caplog):
+        m, a, *_ = _mgr(tmp_path, monkeypatch, watchdog_stale_s=0.05)
+        m.on_candidate(_cand())               # a candidate exists, nothing staged yet
+        m.on_price('PSTG', 5.0)               # feed seen once
+        time.sleep(0.1)                       # then goes quiet
+        import logging
+        with caplog.at_level(logging.INFO):
+            m._watchdog_check()
+        assert not m._chase_only_mode
+        assert m.telemetry.feed_stale_events == 0
+        assert not any('FEED STALE' in r.message for r in caplog.records)
+        assert any('standing down' in r.message for r in caplog.records)
+
+    def test_staging_refused_while_feed_stale(self, tmp_path, monkeypatch):
+        m, a, *_ = _mgr(tmp_path, monkeypatch, watchdog_stale_s=0.05)
+        m.on_candidate(_cand())
+        m.on_price('PSTG', 5.0)
+        time.sleep(0.1)
+        m.process_tick(now_et=_et(DAY, 9, 41))
+        assert 'PSTG' not in m._stages
+        assert m.telemetry.skip_counts.get('stage_skip_feed_stale', 0) >= 1
+        assert not m._chase_only_mode
+
+    def test_live_stage_still_swept(self, tmp_path, monkeypatch):
+        """Unchanged §D12 path: a LIVE stage + stale feed => sweep + chase-only."""
+        m, a, *_ = _mgr(tmp_path, monkeypatch, watchdog_stale_s=0.05)
+        _feed_and_tick(m, [_cand()], _et(DAY, 9, 40))
+        assert m._stages['PSTG']['state'] == STATE_STAGED
+        time.sleep(0.1)
+        m.process_tick(now_et=_et(DAY, 9, 41))
+        assert m._chase_only_mode and m.telemetry.feed_stale_events == 1
