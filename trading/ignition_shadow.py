@@ -236,6 +236,17 @@ class IgnitionShadow:
         day = et.strftime('%Y-%m-%d')
         self._roll_day(day)
         minute = et.hour * 60 + et.minute
+        # 2026-09-10: price updates for the prestage consumer flow for the
+        # WHOLE session, before the intake-window gate below. Pre-fix the
+        # gate returned first, so after 10:30 ET the prestage got no prices
+        # for its LIVE stages, went blind, and its feed watchdog swept them
+        # at 14:33 UTC (TYRA/HGTY 9/10) — a design artifact, not a feed
+        # failure. Intake / trigger / journaling still stop at the window.
+        if self.on_price is not None and minute >= 575:
+            try:
+                self.on_price(symbol, price, minute)
+            except Exception as e:
+                logger.error(f"ignition-shadow: on_price hook failed: {e}")
         if minute > self.max_trigger_min or minute < 575:
             return
         approach = chg < self.trigger_pct
@@ -256,11 +267,6 @@ class IgnitionShadow:
         # parity floor on DAY OPEN runs in _finalize via ignition_rules)
         if price < _rules.PRICE_FLOOR:
             return
-        if self.on_price is not None:
-            try:
-                self.on_price(symbol, price, minute)
-            except Exception as e:
-                logger.error(f"ignition-shadow: on_price hook failed: {e}")
         a = self._anchor(symbol)
         first_sight = symbol not in self._seen_today
         if first_sight:

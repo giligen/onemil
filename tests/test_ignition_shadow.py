@@ -438,3 +438,28 @@ class TestScannerHook:
         sc.ignition_shadow=None
         sc._run_intraday_cycle()
         sc.db.save_scan_result.assert_called()
+
+
+class TestPricesFlowAfterIntakeWindow:
+    """2026-09-10: prestage price updates must continue after max_trigger_min_et
+    (its live stages need prices for demote/watchdog); intake still stops."""
+
+    def test_on_price_after_window_intake_not(self, tmp_path):
+        from datetime import datetime, timezone
+        s, a = _shadow(tmp_path, max_trigger_min_et=630)
+        seen, cand = [], []
+        s.on_price = lambda sym, price, minute: seen.append((sym, price, minute))
+        s.on_candidate = lambda *args, **kw: cand.append(args)
+        late = datetime(2026, 9, 10, 14, 45, tzinfo=timezone.utc)      # 10:45 ET, window closed at 10:30
+        s._eval('TYRA', 8.0, 1.0, 12.0, None, late, seen_at=late)
+        assert seen == [('TYRA', 12.0, 10 * 60 + 45)]
+        assert not cand and 'TYRA' not in getattr(s, '_seen_today', set())
+
+    def test_on_price_before_open_not_called(self, tmp_path):
+        from datetime import datetime, timezone
+        s, a = _shadow(tmp_path, max_trigger_min_et=630)
+        seen = []
+        s.on_price = lambda sym, price, minute: seen.append(sym)
+        early = datetime(2026, 9, 10, 13, 20, tzinfo=timezone.utc)     # 9:20 ET
+        s._eval('TYRA', 8.0, 1.0, 12.0, None, early, seen_at=early)
+        assert seen == []
