@@ -1924,3 +1924,31 @@ class TestWatchdogStandsDownWithoutStages:
         time.sleep(0.1)
         m.process_tick(now_et=_et(DAY, 9, 41))
         assert m._chase_only_mode and m.telemetry.feed_stale_events == 1
+
+
+class TestBrokerRejectReason:
+    """2026-09-11: a broker-rejected stage records the broker's reason text
+    (SST 9/10 was a bare 'broker_rejected')."""
+
+    def test_reject_reason_carried_into_state_and_log(self, tmp_path, monkeypatch, caplog):
+        import logging
+        m, a, db, sm, osw = _mgr(tmp_path, monkeypatch)
+        _feed_and_tick(m, [_cand()], _et(DAY, 9, 40))
+        st = _fill_status('PSTG', qty=0, status='rejected')
+        next(iter(st.values()))['reject_reason'] = 'insufficient buying power'
+        osw.snapshot_by_client_prefix.return_value = st
+        with caplog.at_level(logging.WARNING):
+            m.process_tick(now_et=_et(DAY, 9, 42))
+        rec = m._stages['PSTG']
+        assert rec['state'] == STATE_REJECTED
+        assert 'insufficient buying power' in (rec.get('reason') or rec.get('cancel_reason') or str(rec))
+        assert any('REJECTED by broker: insufficient buying power' in r.message for r in caplog.records)
+        assert m._parity_explicit.get('PSTG') == 'stage_submit_rejected'
+
+    def test_reject_without_reason_says_so(self, tmp_path, monkeypatch):
+        m, a, db, sm, osw = _mgr(tmp_path, monkeypatch)
+        _feed_and_tick(m, [_cand()], _et(DAY, 9, 40))
+        osw.snapshot_by_client_prefix.return_value = _fill_status('PSTG', qty=0, status='rejected')
+        m.process_tick(now_et=_et(DAY, 9, 42))
+        assert m._stages['PSTG']['state'] == STATE_REJECTED
+        assert 'no reason from broker' in str(m._stages['PSTG'])

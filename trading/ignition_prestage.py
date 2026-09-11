@@ -1319,11 +1319,17 @@ class PrestageManager:
                         and filled_qty > 0):
                 self._adopt_fill(sym, od)
             elif status == 'rejected':
+                # 2026-09-11: carry the broker's reason text (the order
+                # stream snapshot already captures Order.reject_reason) —
+                # SST 9/10 was logged as a bare 'broker_rejected'.
+                _why = od.get('reject_reason') or 'no reason from broker'
                 with self._lock:
                     self._transition(sym, STATE_REJECTED,
-                                     reason='broker_rejected')
+                                     reason=f'broker_rejected: {_why}')
                     self._parity_explicit.setdefault(
                         sym, 'stage_submit_rejected')
+                logger.warning(f"[PRESTAGE] {sym} staged order REJECTED by "
+                               f"broker: {_why}")
 
     def _adopt_fill(self, symbol: str, od: dict) -> None:
         """P0-1/P0-4/P0-5 adoption: dead-man SL first, then AT-FILL
