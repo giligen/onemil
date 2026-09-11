@@ -1181,8 +1181,24 @@ class RealtimeScanner:
             # shadow's own approach gate + budget owns the routing.
             _feed_min = (self.ignition_shadow.feed_min_pct
                          if self.ignition_shadow is not None else None)
-            if _is_mover or (_feed_min is not None
-                             and intraday_change_pct >= _feed_min):
+            # 2026-09-11: a symbol with a LIVE prestage stage is priced every
+            # cycle even when it is below the mover/approach band — the
+            # prestage's demote rule and feed watchdog need ITS price, not
+            # "some mover somewhere". Price-only: no intake, no journaling.
+            _in_band = _is_mover or (_feed_min is not None
+                                     and intraday_change_pct >= _feed_min)
+            if (not _in_band and self.ignition_shadow is not None
+                    and self.ignition_shadow.on_price is not None
+                    and self.ignition_shadow.live_symbols_fn is not None):
+                try:
+                    if symbol in self.ignition_shadow.live_symbols_fn():
+                        _now_et = datetime.now(pytz.timezone('US/Eastern'))
+                        self.ignition_shadow.on_price(
+                            symbol, current_price,
+                            _now_et.hour * 60 + _now_et.minute)
+                except Exception as _e:
+                    logger.error(f"{symbol}: live-stage price hook failed: {_e}")
+            if _in_band:
                 # Ignition shadow sighting (journal-only; double-guarded —
                 # on_mover never raises, and this wrapper catches anyway).
                 # Latency anchor is the LATEST TRADE ts (real-time price

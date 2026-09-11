@@ -1952,3 +1952,13 @@ class TestBrokerRejectReason:
         m.process_tick(now_et=_et(DAY, 9, 42))
         assert m._stages['PSTG']['state'] == STATE_REJECTED
         assert 'no reason from broker' in str(m._stages['PSTG'])
+
+
+class TestLiveSymbols:
+    def test_live_symbols_lists_staged_and_cancel_pending_only(self, tmp_path, monkeypatch):
+        m, a, db, sm, osw = _mgr(tmp_path, monkeypatch)
+        _feed_and_tick(m, [_cand()], _et(DAY, 9, 40))
+        assert m.live_symbols() == {'PSTG'}
+        osw.snapshot_by_client_prefix.return_value = _fill_status('PSTG')
+        m.process_tick(now_et=_et(DAY, 9, 42))
+        assert m.live_symbols() == set()          # filled = no longer a live stage

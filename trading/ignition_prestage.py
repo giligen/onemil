@@ -817,6 +817,15 @@ class PrestageManager:
         for sym in unexplained:
             self._once(sym, 'stage_skip_window_closed')
 
+    def live_symbols(self) -> set:
+        """Symbols with a LIVE stage (STAGED / CANCEL_PENDING) — the ones the
+        scanner must keep pricing regardless of the mover band (2026-09-11:
+        REF was swept at 10:48 ET because no symbol at all was above the
+        band for 159s, not because REF's own feed died)."""
+        with self._lock:
+            return {s for s, r in self._stages.items()
+                    if r['state'] in (STATE_STAGED, STATE_CANCEL_PENDING)}
+
     def _feed_is_stale(self) -> bool:
         """True when no feed update for > watchdog_stale_s (0 = never fed)."""
         with self._lock:

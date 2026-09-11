@@ -78,6 +78,9 @@ class IgnitionShadow:
         # Both are guarded at the call site — hook errors never block
         # the shadow's measurement.
         self.on_price = None
+        # 2026-09-11: optional provider of the prestage's live-stage symbols;
+        # the scanner prices those every cycle regardless of the mover band.
+        self.live_symbols_fn = None
         self.on_candidate = None
         self._day: Optional[str] = None
         self._log_dir = log_dir or os.path.join(

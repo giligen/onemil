@@ -779,6 +779,7 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
         # never block measurement; no-ops when prestage disabled)
         if ignition_prestage is not None:
             scanner.ignition_shadow.on_price = ignition_prestage.on_price
+            scanner.ignition_shadow.live_symbols_fn = ignition_prestage.live_symbols
             scanner.ignition_shadow.on_candidate = \
                 ignition_prestage.on_candidate
             # approach-band intake (2026-08-26): only meaningful with a

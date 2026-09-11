@@ -1298,3 +1298,50 @@ class TestPostWindowCadenceDrop:
         from scanner import realtime_scanner as rs
         src = inspect.getsource(rs.RealtimeScanner._run_intraday_cycle)
         assert 'CYCLE TIMING' in src and 'fetch=' in src
+
+
+class TestLiveStagePriceHook:
+    """2026-09-11: a symbol with a live prestage stage is priced every cycle
+    even below the mover/approach band (price-only, no intake)."""
+
+    def test_below_band_live_stage_gets_on_price(self, scanner, mock_alpaca, mock_news):
+        import pytz
+        from datetime import datetime as real_datetime
+        from unittest.mock import MagicMock
+        scanner._universe = [{'symbol': 'REF', 'price_close': 10.0,
+                              'company_name': 'Ref Co', 'float_shares': 2_000_000}]
+        bar_ts = real_datetime(2026, 9, 11, 10, 45, 0, tzinfo=pytz.timezone('US/Eastern'))
+        mock_alpaca.get_current_bars.return_value = {'REF': {'volume': 50_000, 'timestamp': bar_ts,
+                                                            'high': 10.2, 'low': 9.9}}
+        mock_alpaca.get_latest_trades.return_value = {'REF': {'price': 10.1}}   # +1%: below any band
+        scanner._volume_profiles = {'REF': {'10:45': 10_000}}
+        mock_news.has_interesting_news.return_value = (False, None)
+        shadow = MagicMock()
+        shadow.enabled = True
+        shadow.feed_min_pct = 6.0
+        shadow.live_symbols_fn = lambda: {'REF'}
+        seen = []
+        shadow.on_price = lambda sym, price, minute: seen.append((sym, price))
+        scanner.ignition_shadow = shadow
+        scanner._run_intraday_cycle()
+        assert seen and seen[0][0] == 'REF' and abs(seen[0][1] - 10.1) < 1e-9
+        shadow.on_mover.assert_not_called()      # price-only: no intake below the band
+
+    def test_below_band_not_live_no_price(self, scanner, mock_alpaca, mock_news):
+        import pytz
+        from datetime import datetime as real_datetime
+        from unittest.mock import MagicMock
+        scanner._universe = [{'symbol': 'REF', 'price_close': 10.0,
+                              'company_name': 'Ref Co', 'float_shares': 2_000_000}]
+        bar_ts = real_datetime(2026, 9, 11, 10, 45, 0, tzinfo=pytz.timezone('US/Eastern'))
+        mock_alpaca.get_current_bars.return_value = {'REF': {'volume': 50_000, 'timestamp': bar_ts,
+                                                            'high': 10.2, 'low': 9.9}}
+        mock_alpaca.get_latest_trades.return_value = {'REF': {'price': 10.1}}
+        scanner._volume_profiles = {'REF': {'10:45': 10_000}}
+        mock_news.has_interesting_news.return_value = (False, None)
+        shadow = MagicMock(); shadow.enabled = True; shadow.feed_min_pct = 6.0
+        shadow.live_symbols_fn = lambda: set()
+        seen = []; shadow.on_price = lambda *a: seen.append(a)
+        scanner.ignition_shadow = shadow
+        scanner._run_intraday_cycle()
+        assert seen == []
