@@ -375,7 +375,7 @@ def regen_features(
         cmd.append('--force-full-regen')
     result = subprocess.run(
         cmd,
-        cwd=ROOT, capture_output=True, text=True, timeout=900,
+        cwd=ROOT, capture_output=True, text=True, timeout=2400,
         env=sub_env,
     )
     if result.returncode != 0:
@@ -417,7 +417,7 @@ def run_pipeline_bt(slice_dates: List[str]) -> None:
     _log("running pipeline BT (study_orb_pipeline_static_lock.py)...")
     result = subprocess.run(
         [sys.executable, 'study_orb_pipeline_static_lock.py'],
-        cwd=ROOT, capture_output=True, text=True, timeout=900,
+        cwd=ROOT, capture_output=True, text=True, timeout=2400,
     )
     print(result.stdout)
     if result.stderr:
