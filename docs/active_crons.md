@@ -9,7 +9,7 @@ whatever the fresh `CronList` shows.
 Last synced: 2026-09-05 14:35 UTC (ids: weekly ddb3b4ae, EOD dive fcc1ce53, ORB gate 39658528 (re-armed, replaces a861a834),
 prestage comparison db52f8d3, owner brief 63442e28; stale duplicate weekly 5e74feb2 deleted)
 
-## 1. Weekly Retirement-Validation Review (re-armed 2026-09-05, id ddb3b4ae)
+## 1. Weekly Retirement-Validation Review (re-armed 2026-09-12, id e0655167; prior ddb3b4ae expires)
 - **Cron**: `23 9 * * 6` (every Saturday 9:23 AM local)
 - **Recurring**: true
 - **Prompt**:
@@ -34,7 +34,7 @@ ANALYSIS (past Mon-Fri week, all from primary data — never memory):
 TELEGRAM via scripts/report_common.send_telegram, prefix "[WEEKLY VALIDATION wk N]" (N = weeks since 8/17 start). 1-line verdict first; week table; scoreboard; per-book one-liners; decisions needed; next week plan; footer "cron re-armed ✓". Phone-crisp, under ~40 lines, no bare '<' or '<=' (breaks Telegram HTML). A gap in data IS a finding — say it, never silently narrow scope.
 ```
 
-## 2. Daily EOD Deep Dive v5
+## 2. Daily EOD Deep Dive v6 (re-armed 2026-09-12, id 1bdf606c; prior fcc1ce53 expires)
 - **Cron**: `57 21 * * 1-5` (weekdays 9:57 PM local)
 - **Recurring**: true
 - **Prompt**:
@@ -50,7 +50,7 @@ DAILY EOD DEEP DIVE v6 (re-armed 9/5 with the ORB entered-inclusive reference + 
 ORB SCALE GATE RECOMMENDATION (one-shot Sat 9/12 13:37 UTC — owner-ordered 8/29, revised 8/30 post-audit, RE-ARMED 9/5 with the corrected reference + corrected adjudication). Working dir /home/ec2-user/onemil. REFERENCE = the ENTERED-INCLUSIVE B+ book (analysis_results/orb_bplus_book.csv rebuilt 9/5: non-fill picks consume slots at $0 — the honest replacement for the fill-rate-0.56 estimate; read its monthly table in analysis_results/orb_monthly_static_lock.csv and research/orb_entered_inclusive/ for the before/after). ADJUDICATION (corrected 9/5): the 8/31 PFSA red was the ENTERED-ONLY LOOKAHEAD (BT never saw SHMD/BW which outranked PFSA live; SHMD's stop-limit died time_stop_canceled) — NOT a universe-gate drift; live and BT both gate on prev-day volume >= 500K. With the 9/5 rebuild that class is CLOSED: a BT pick never ordered live is now a REAL parity break unless the selection audit shows a live-only skip phrase. Do NOT pre-adjudicate reds as "PFSA-class" anymore. GO to $25K requires ALL: (1) weeks 8/31-9/4 + 9/8-9/12 green-or-explained and parity-clean on live-behavior terms (8/31 counts as explained by the now-fixed lookahead; 9/1 SWVL was an ignition incident, not ORB); (2) validation P&L since 8/17 positive (above-water rule, memory project_orb_ramp_above_water_rule); (3) live at/above the corrected book's band pro-rata at $10K; (4) zero unexplained violations. If the entered-inclusive rebuild flipped the book negative or its MDD at $10K exceeds ~1 month of expectation: HOLD + reassess. GO = exact config diffs (orb.yaml budget 10000->25000, risk 375->937.50, N stays 3), applied ONLY on owner word; state the $25K/mo expectation FROM THE REBUILT BOOK, not the old $800. Telegram [ORB SCALE GATE] with the two-week tape + recommendation + one-word ask. Remind: criterion #4 amendment still open.
 ```
 
-## 4. Prestage Live Daily Comparison (re-armed 2026-09-05, id db52f8d3)
+## 4. Prestage Live Daily Comparison (re-armed 2026-09-12, id 0e5aed2c; prior db52f8d3 expires)
 - **Cron**: `50 20 * * 1-5` (weekdays 8:50 PM local)
 - **Recurring**: true, 7-day auto-expiry — re-arm at each Saturday weekly review
 - **Prompt**:
@@ -58,7 +58,7 @@ ORB SCALE GATE RECOMMENDATION (one-shot Sat 9/12 13:37 UTC — owner-ordered 8/2
 PRESTAGE LIVE DAILY COMPARISON (recurring weekdays 20:50 UTC, after close — the owner-requested staged-vs-chase evaluation; armed 8/28 launch day, 7-day auto-expiry: re-arm VERBATIM at the Saturday weekly review). Working dir /home/ec2-user/onemil. Skip with a one-line telegram if prestage is back in shadow mode. Compute from logs/prestage_events_<today>.jsonl + journalctl FILL QUALITY lines + trades.db: (1) staged orders: placed/filled/canceled counts with cancel-reason mix (window_close vs demoted — fade-demotion at distance 4.5 activated 8/28, expect intraday cancels now, verify freed watermark got reused by later stages); (2) fill quality by path: path=staged fills (bps vs level; expect 0-30) vs path=chase fills (chase bps; historically 150-750) — per-fill list + medians; (3) P&L by path from trades.db (staged rows have pattern_data path=staged; untagged ignition rows = chase) — realized P&L, WR, per-trade avg for each path, cumulative since 8/28; (4) staged fills WITHOUT shadow-trigger twins (JEM 8/27 class — intra-minute crosses; EXPECTED, list them, their P&L is the fills-on-spikes cost to track vs the 19mo BT assumption); (5) BP: watermark peak vs $15K cap, bp_budget/bp_reserve skip counts, any divergence-agent contention; (6) errors/anomalies in prestage lines. ONE [STAGED vs CHASE] telegram via scripts/report_common.send_telegram with the numbers + a one-line verdict (staging paying for itself? on what sample size — refuse conclusions below ~10 fills/path, say 'accumulating'). Never modify configs.
 ```
 
-## 5. Daily Owner Brief (re-armed 2026-09-06, id 63442e28)
+## 5. Daily Owner Brief (re-armed 2026-09-12, id 28b924e7; prior 63442e28 expires)
 - **Cron**: `37 10 * * 1-5` (weekdays 10:37 AM local = pre-boot)
 - **Recurring**: true, 7-day auto-expiry — re-arm at each Saturday weekly review
 - **Prompt**:
@@ -101,3 +101,7 @@ taken live and their BT P&L).
 - `0 20 * * 0 python3 scripts/orb_weekly_refit.py >> logs/orb_weekly_refit.log` (failure → 🔴 telegram, orb.yaml untouched).
 - Re-fits `orb.yaml::filter.features.{mean,std}` + `quintile_cutoffs` on the trailing 26 weeks of candidates; `adaptive_mults` NEVER (research/orb_refit_walkforward/REPORT.md). Backup `orb.yaml.bak.refit_<ts>`, history `logs/orb_refit_history.jsonl`. First write Sun 9/13 → live from the Mon 9/14 boot. Job-vs-harness parameter parity verified identical for the week of 9/7.
 - Survives Claude restarts (system crontab, not a session cron).
+
+
+## Re-arm log
+- 2026-09-12 12:20 UTC (Saturday review): weekly e0655167, EOD dive 1bdf606c, prestage 0e5aed2c, owner brief 28b924e7. NOTE: the session was DOWN Fri 9/11 evening — the 20:50 and 21:57 crons did not fire; both reports were sent Sat morning. Session crons die with the session: the system-crontab jobs (green check 21:30, BF roll-forward 22:30, ORB nightly 20:30, ignition roll-forward 21:15, ORB refit Sun 20:00) are the durable layer.
