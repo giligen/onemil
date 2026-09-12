@@ -247,6 +247,14 @@ class PrestageManager:
                 '0', 'false', 'no', 'off', '')
         self.shadow = bool(cfg.get('shadow', True))
         self.risk_usd = float(cfg.get('risk_usd', 50.0))
+        # 2026-09-12 REALITY FIX: staged fills that gapped THROUGH the level
+        # adopted at 2x+ the planned risk (FLWS 9/10 $108 vs $50, HCAI 9/11
+        # $116 vs $50 — qty was sized at stage time, the at-fill stop landed
+        # far lower) and both stopped out. A fill whose realized risk exceeds
+        # planned x max_fill_risk_mult is scratched via the existing
+        # structure-reject path instead of being held at a size the model
+        # never assumed.
+        self.max_fill_risk_mult = float(cfg.get('max_fill_risk_mult', 1.5))
         self.cap_bps = float(cfg.get('cap_bps', 300.0))
         self.stop_offset_bps = float(cfg.get('stop_offset_bps', 15.0))
         self.heap_k = int(cfg.get('heap_k', 400))
@@ -1401,6 +1409,15 @@ class PrestageManager:
             self.telemetry.fills_without_trigger += 1
             self._event(symbol, 'fill_without_trigger_flag',
                         fill=fill_price)
+        if gates.get('ok'):
+            _realized = (fill_price - float(gates['stop'])) * filled_qty
+            if _realized > self.risk_usd * self.max_fill_risk_mult:
+                logger.warning(
+                    f"[PRESTAGE] {symbol} fill adopted at ${_realized:.0f} realized "
+                    f"risk vs ${self.risk_usd:.0f} planned "
+                    f"({_realized / self.risk_usd:.1f}x > {self.max_fill_risk_mult}x) "
+                    f"— scratching via structure reject (risk_overshoot)")
+                gates = {'reject': 'risk_overshoot', 'realized': round(_realized, 2)}
         if gates.get('ok'):
             stop = float(gates['stop'])
             r_pct = float(gates['r_pct'])

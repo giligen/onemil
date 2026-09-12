@@ -8,6 +8,17 @@ from unittest.mock import MagicMock
 
 import pytest
 
+@pytest.fixture(autouse=True)
+def _pin_market_clock(monkeypatch):
+    """2026-09-12: the chase seam now enforces the 10:30 ET trigger window on
+    the wall clock; pin the engine's clock to 09:50 ET so tests are
+    time-of-day independent (tests that need another time re-patch)."""
+    from datetime import datetime, timezone, timedelta
+    import trading.ignition_engine as _E
+    _ET = timezone(timedelta(hours=-4))
+    monkeypatch.setattr(_E, '_et_now', lambda: datetime.now(timezone.utc).astimezone(_ET).replace(hour=9, minute=50, second=0))
+
+
 from data_sources.alpaca_client import AlpacaClient
 from persistence.database import Database
 from trading.ignition_engine import IgnitionEngine, STRATEGY_NAME
@@ -599,3 +610,42 @@ class TestPrestageExitDelegation:
         ev.symbol = 'STGD'; ev.exit_price = 5.0
         sm.drain_exit_events.return_value = [ev]
         eng.check_exits()   # must not raise
+
+
+class TestChaseRealityGates:
+    """2026-09-12: the chase seam enforces the BT's trigger window and chase
+    price cap (ignition_rules.TRIGGER_MIN_END / CHASE_MAX_RATIO)."""
+
+    def _eng(self, tmp_path, monkeypatch, hour, minute):
+        from datetime import datetime, timezone, timedelta
+        import trading.ignition_engine as E
+        eng = _engine(tmp_path)
+        et = timezone(timedelta(hours=-4))
+        monkeypatch.setattr(E, '_et_now', lambda: datetime.now(timezone.utc).astimezone(et).replace(hour=hour, minute=minute, second=0))
+        return eng[0] if isinstance(eng, tuple) else eng
+
+    def test_after_window_no_order(self, tmp_path, monkeypatch):
+        eng = self._eng(tmp_path, monkeypatch, 11, 15)          # AEHL 8/28 class
+        r = _rec(entry=10.0, stop=9.0, ask=10.0); r['day_open'] = 9.0
+        eng._handle_trigger(r)
+        eng.alpaca.submit_bracket_order.assert_not_called()
+
+    def test_inside_window_orders(self, tmp_path, monkeypatch):
+        eng = self._eng(tmp_path, monkeypatch, 9, 50)
+        r = _rec(entry=10.0, stop=9.0, ask=10.0); r['day_open'] = 9.0   # level 9.90, ask +101 bps
+        eng._handle_trigger(r)
+        eng.alpaca.submit_bracket_order.assert_called_once()
+
+    def test_ask_above_cap_no_order(self, tmp_path, monkeypatch):
+        eng = self._eng(tmp_path, monkeypatch, 9, 50)
+        r = _rec(entry=10.6, stop=9.0, ask=10.6); r['day_open'] = 9.0   # level 9.90, ask +707 bps > 500
+        eng._handle_trigger(r)
+        eng.alpaca.submit_bracket_order.assert_not_called()
+
+    def test_no_day_open_fails_open_with_warning(self, tmp_path, monkeypatch, caplog):
+        import logging
+        eng = self._eng(tmp_path, monkeypatch, 9, 50)
+        with caplog.at_level(logging.WARNING):
+            eng._handle_trigger(_rec(entry=10.0, stop=9.0, ask=10.0))
+        eng.alpaca.submit_bracket_order.assert_called_once()
+        assert any('no day_open' in r.message for r in caplog.records)

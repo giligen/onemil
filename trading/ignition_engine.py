@@ -279,6 +279,30 @@ class IgnitionEngine:
                 logger.warning(f"[IGNITION] {symbol} chase skipped — "
                                f"prestage disposition={disp}")
                 return
+        # 2026-09-12 REALITY FIXES (live tape 8/17-9/11, 19 fills): the two
+        # chase fills taken AFTER the 10:30 ET trigger window (AEHL 11:15,
+        # SCTX 11:18) and the fills 500+ bps above the level (DFNS +742,
+        # WETO +510, SCTX +508) are outside the BT's own rules
+        # (TRIGGER_MIN_END, CHASE_MAX_RATIO) and were net losers. Enforce
+        # the validated rules at the chase seam — same constants as the BT.
+        _now = _et_now(); _minute = _now.hour * 60 + _now.minute
+        if _minute > _rules.TRIGGER_MIN_END:
+            logger.info(f"[IGNITION] {symbol} chase skipped — {_now:%H:%M} ET is "
+                        f"past the trigger window (> {_rules.TRIGGER_MIN_END // 60}:"
+                        f"{_rules.TRIGGER_MIN_END % 60:02d} ET); the BT never enters here")
+            return
+        _day_open = float(rec.get('day_open') or 0.0)
+        _ask_now = float(rec.get('ask') or rec.get('_entry') or rec['price'])
+        if _day_open > 0:
+            _level = _rules.level(_day_open)
+            if _ask_now > _level * _rules.CHASE_MAX_RATIO:
+                logger.info(f"[IGNITION] {symbol} chase skipped — ask {_ask_now:.3f} is "
+                            f"{(_ask_now / _level - 1) * 1e4:+.0f} bps above level {_level:.3f} "
+                            f"(cap {(_rules.CHASE_MAX_RATIO - 1) * 1e4:.0f} bps, the BT's chase model)")
+                return
+        else:
+            logger.warning(f"[IGNITION] {symbol} rec has no day_open — chase price cap "
+                           f"cannot be checked (fail-open)")
         entry = float(rec.get('_entry') or rec.get('ask')
                       or rec['price'])
         stop = float(rec.get('_stop')

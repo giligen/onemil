@@ -19,6 +19,17 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pytest
 
+@pytest.fixture(autouse=True)
+def _pin_market_clock(monkeypatch):
+    """2026-09-12: the chase seam now enforces the 10:30 ET trigger window on
+    the wall clock; pin the engine's clock to 09:50 ET so tests are
+    time-of-day independent (tests that need another time re-patch)."""
+    from datetime import datetime, timezone, timedelta
+    import trading.ignition_engine as _E
+    _ET = timezone(timedelta(hours=-4))
+    monkeypatch.setattr(_E, '_et_now', lambda: datetime.now(timezone.utc).astimezone(_ET).replace(hour=9, minute=50, second=0))
+
+
 from data_sources.alpaca_client import AlpacaClient
 from persistence.database import Database
 from trading.exit_reasons import ExitReason
@@ -1962,3 +1973,27 @@ class TestLiveSymbols:
         osw.snapshot_by_client_prefix.return_value = _fill_status('PSTG')
         m.process_tick(now_et=_et(DAY, 9, 42))
         assert m.live_symbols() == set()          # filled = no longer a live stage
+
+
+class TestRiskOvershootScratch:
+    """2026-09-12: a staged fill adopted at realized risk > planned x
+    max_fill_risk_mult is scratched via the structure-reject path."""
+
+    def test_overshoot_scratched(self, tmp_path, monkeypatch):
+        m, a, db, sm, osw = _mgr(tmp_path, monkeypatch, max_fill_risk_mult=0.01)
+        _feed_and_tick(m, [_cand()], _et(DAY, 9, 40))
+        osw.snapshot_by_client_prefix.return_value = _fill_status('PSTG')
+        m.process_tick(now_et=_et(DAY, 9, 42))
+        sm.force_exit.assert_called_once()
+        assert sm.force_exit.call_args.kwargs['reason'] == ExitReason.STAGE_REJECT_STRUCTURE.value
+        rec = db.save_trade.call_args.args[0]
+        assert json.loads(rec['pattern_data'])['structure_reject'] == 'risk_overshoot'
+        assert m.telemetry.scratch_count == 1
+
+    def test_within_tolerance_adopted(self, tmp_path, monkeypatch):
+        m, a, db, sm, osw = _mgr(tmp_path, monkeypatch, max_fill_risk_mult=100.0)
+        _feed_and_tick(m, [_cand()], _et(DAY, 9, 40))
+        osw.snapshot_by_client_prefix.return_value = _fill_status('PSTG')
+        m.process_tick(now_et=_et(DAY, 9, 42))
+        sm.force_exit.assert_not_called()
+        assert m._stages['PSTG']['state'] == STATE_FILLED

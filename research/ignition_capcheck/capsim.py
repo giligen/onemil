@@ -154,6 +154,15 @@ for di, day in enumerate(days):
                         sub[~sub['covered']]['symbol'].tolist())
     pcmap = dict(zip(sub['symbol'], sub['prev_close']))
     rows = []
+    if not frames:
+        # 2026-09-12: the nightly ran BEFORE the day's bars reached cache.db
+        # (ORB nightly writes only its candidates; the general 1-min fill
+        # lands with the 22:30 BF roll-forward) — every symbol-day read
+        # no_bars and the day was frozen as done with 0 trades (9/5-9/11).
+        # Leave the day undone so the next run retries it.
+        print(f"[{PART}] {day}: no bars loadable for {len(sub)} symbol-days — "
+              f"NOT marking done (retry next run)", flush=True)
+        continue
     for sym in sub['symbol']:
         g = frames.get(sym)
         if g is None or len(g) < 20:
