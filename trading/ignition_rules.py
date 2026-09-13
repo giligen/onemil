@@ -35,7 +35,7 @@ from typing import Optional
 
 PRICE_FLOOR = 2.0            # on DAY OPEN (not sighting price)
 OPEN_GAP_MAX_PCT = 5.0       # ORB disjointness, true open vs prev close
-DAY_DOLLAR_MIN = 2_000_000   # BT-only (EOD lookahead) — see docstring
+DAY_DOLLAR_MIN = 0           # BT-only EOD-lookahead gate, RETIRED 2026-09-13: live cannot apply it (HCAI 9/11 excluded only in BT) and it HURT the BT — 2026 without it: +616 trades worth +$29K (meanR +0.107, 24 monsters); complex-confirmed +$124K -> +$137K. 0 = off; BT universe == live universe.
 TRIGGER_PCT = 10.0
 TRIGGER_MIN_START = 575      # 9:35 ET
 TRIGGER_MIN_END = 630        # 10:30 ET
