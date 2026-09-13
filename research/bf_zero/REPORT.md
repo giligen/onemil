@@ -21,11 +21,14 @@ Pre-registration: `DESIGN.md` (written before any scan). Pipeline: `build_candid
   a stock ≥ 5% above its 09:30 open, relative volume 1–5× its normal pace, ≥ 5 one-minute bars
   within 4% of the high-of-day, then a break of the HOD. Capped limit entry (60 bps, no chase), stop
   at the consolidation low, fixed +2R target, first-come 8/day, 4 concurrent, flat 15:55.
-  Executable simulation (harsh fills, concurrency): **TRAIN +0.09R / VAL +0.15R / TEST +0.16R per
-  trade, 33–35 trades a week, VAL 17/22 and TEST 11/14 weeks green, worst TEST week −8R** (§5).
+  Study book (§5): TRAIN +0.09R / VAL +0.15R / TEST +0.16R at 33–35 trades a week. **Parity
+  simulation with the exact live fill rule (§6): TRAIN +0.21R / VAL +0.21R / TEST +0.23R at 35–37 a
+  week, TEST 12/15 weeks green, worst week −2.9R; with the $5 price floor adopted for live:
+  +0.30 / +0.27 / +0.33R at 19–27 a week, TEST 13/14 weeks green, worst −3.1R.**
 - **Built tonight, one spec for BT and live** (`trading/hod_break.py`, `trading/hod_break_engine.py`,
-  wired, tested, shipped DISABLED + dry_run). Parity simulation with the exact live fill model
-  running (§6, filled in when it lands). Unbiased-sample confirmation running (§7).
+  wired, 3,667 tests green, boot rehearsal on the real account, service restarted). **Shipped
+  enabled + dry_run for Mon 9/14** (zero orders). Go-live only after a POSITIVE dry-run day and the
+  owner's six gates (CLAUDE.md "Strategy 4"). Unbiased-sample confirmation running (§7).
 
 ## 1. What was built
 
