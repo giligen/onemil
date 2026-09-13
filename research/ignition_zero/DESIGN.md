@@ -70,3 +70,12 @@ Databento EQUS daily (delisted included): every symbol-day 2025-01-02 → 2026-0
 4. Write REPORT.md with every table, the failures included, and a shippable spec or the sentence "no valid strategy found".
 
 Telegram status hourly while it runs; questions for the owner recorded in memory, not blocking.
+
+## Data caveats found during the build (2026-09-13)
+- Sector: only 649 of 7,305 universe symbols carry a sector in the snapshot → theme heat (H13) is market-wide (all +10% first-crosses in the prior 30 min), not sector-scoped.
+- Float: 6,862 of 7,305 have a float_shares snapshot (not point-in-time; flagged on H7).
+- Premarket bars: sparse in cache (~half of symbol-days) → H16 reports coverage.
+- News: backfilled only for the BT-trade symbol-days (+10%, all eras); H14/H15 are scored on that covered subset with the base restricted to covered rows.
+- Short interest: FINRA 923,387 rows, 29,808 symbols, settlements 2024-11-15 → 2026-08-31, usable_from = settlement + 13 days.
+- H3 (first-pullback entry) needs a second entry simulation — not in pass 1; scheduled after the first read if anything else survives.
+- The Databento fetch covered 140,509 missing symbol-days (19.7M bars, 3.5 GB side DB, ~$50); no symbol-day is excluded for missing bars except where the vendor has none.
