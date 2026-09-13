@@ -1281,6 +1281,21 @@ unwind):
   `study_orb_refit.py` first (quarterly cadence).
 - **`docs/orb_rollout_plan.md`** — live capital ramp (next section).
 
+## HOD-break — Fourth Strategy (2026-09-13, DRY RUN from 2026-09-14)
+
+Born from the owner's clean-sheet order after the BF P1 book proved one-trade-dependent: a pre-registered
+whole-market study (`research/bf_zero/DESIGN.md`, `REPORT.md`) of 8 entry families × 4 exits on 647,796
+point-in-time symbol-days. The Cameron bull flag has no edge on the whole market at any exit; the
+**high-of-day break after a tight consolidation, on a stock already 5%+ above its open with relative
+volume 1–5× its normal pace**, is positive in TRAIN / VALIDATE / TEST at 33–35 trades a week with a
+fixed 1:2 exit (see CLAUDE.md "Strategy 4" for the rule, numbers, engine and rollback).
+
+One spec for backtest and live: `trading/hod_break.py` (pure functions) is imported by the study's
+parity simulator and by `trading/hod_break_engine.py`. Exits are the broker bracket legs (stop at the
+consolidation low, +2R target), polled by the engine. The nightly `scripts/build_hod_volume_profile.py`
+writes the same-clock cumulative-volume table (`cache.db hod_volume_profile`) the relative-volume
+feature is defined on. Shipped enabled + dry_run: full pipeline, `[HOD DRY]` Telegram lines, zero orders.
+
 ## Reporting stack (shipped 2026-07-04)
 
 Three layers, all external observers (broker/DB truth, zero prod-code risk):

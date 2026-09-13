@@ -416,6 +416,19 @@ ORB analysis; the older ones have warning headers pointing to the shipped varian
 - Disable Q1 filter (`filter.skip_q1`) without revisiting `docs/orb_research_apr_2026.md` first
 - Skip Pre-Stage-0 LIVE phase before formal Stage 0 — paper data has structural limits (synthetic fills don't capture real venue queue)
 
+## Strategy 4: HOD-break (built 2026-09-13 overnight from the clean-sheet study; DRY RUN from 2026-09-14)
+
+```bash
+journalctl -u onemil-trader | grep "\[HOD"          # [HOD] engine gates / [HOD DRY] WOULD BUY / BUY / FILLED / EXIT / FORCE CLOSE
+python3 scripts/build_hod_volume_profile.py         # nightly 23:00 UTC cron → cache.db hod_volume_profile
+```
+- **Origin**: owner 9/13 "start from scratch, clean sheet, 5+ trades/week, 1:2 R:R". Pre-registered study `research/bf_zero/` (DESIGN.md → REPORT.md): whole point-in-time market (647,796 symbol-days, delisted incl.), 8 entry families × 4 exits, old filters only as hypothesis splits. The Cameron flag has NO edge on the whole market at any exit. Survivor: the HOD-break.
+- **The rule (ONE spec, `trading/hod_break.py`, `HodBreakParams` = the config block)**: stock ≥ 5% above its 09:30 open; relative volume `rv_profile` = cum volume ÷ (ADV20 × clock fraction) in [1, 5); ≥ 5 closed 1-min bars all within 4% of the running high-of-day; a bar's high reaches the HOD → capped limit BUY at HOD × 1.006 (no chase: ask above cap = skip); stop = consolidation low (≥ 1% of price); target = +2R as a resting limit (fills on a bar CLOSE); first-come 8/day, 4 concurrent, no entries after 15:30, flat 15:55. No price cap (the $20 cap was wrong for this book: $10–50 scores +0.18R vs +0.06 under $5).
+- **Honest numbers (research/bf_zero/REPORT.md §5, executable sim with 60 bps cap, close-fill target, concurrency)**: TRAIN 2025 +0.091R (33/wk, 31/53 weeks green) / VAL Jan–May 26 +0.146R (35/wk, 17/22) / TEST Jun–Sep 26 +0.162R (35/wk, 11/14, worst week −8R). ~5.7R/week on TEST. Relative tool, never a forecast. The parity sim with the exact live fill model (`spec_sim.py`) and the unbiased 10%-symbol sample are the two confirmations (§6/§7).
+- **Live engine `trading/hod_break_engine.py`**: scanner mover hook on the TRUE 09:30 open (`scanner/realtime_scanner.py`, never `intraday_change_pct`), bar-stream handler id `hod_break`, backfill via `get_1min_bars_multi`; entry = `submit_bracket_order` (limit at the cap, TP +2R, SL consolidation low) — the broker legs ARE the exits, polled each tick (no StopMonitor watch → no cross-strategy collision); DB-derived per-day cap; kill rails from realized P&L (fail closed); 75 s unfilled → cancel; 15:55 flat cancels legs then `close_position`; `sync_positions()` at boot. Tick submitted UNCONDITIONALLY (outlives ORB's 15:45 latch — the SWVL lesson).
+- **Config** `config.yaml hod_break.{enabled, dry_run, risk_usd, daily_kill_usd, weekly_kill_usd, max_notional_usd, min_price, min_adv20, max_spread_bps, order_timeout_s, + the HodBreakParams knobs}`; `Config().hod_break_cfg`. Service runs `--hod`. **State 9/14: enabled + dry_run** → `[HOD DRY] WOULD BUY` telegrams, zero orders. Go-live = `dry_run: false` + restart, owner word only; start `risk_usd` 100.
+- **Rollback**: `enabled: false` + restart (zero state). Tests: `tests/test_hod_break.py` (17), `tests/test_hod_break_engine.py` (22), `tests/test_hod_break_parity.py`, `tests/test_hod_volume_profile.py`.
+
 # Running Backtests
 
 ## Bull Flag Backtests
