@@ -33,17 +33,40 @@ class TestFrozenValues:
     def test_threshold(self, cfg):
         assert cfg['filter']['threshold'] == 0.012081536791
 
-    def test_quintile_cutoffs(self, cfg):
-        assert cfg['quintile_cutoffs'] == pytest.approx(
-            [0.107384942420, 0.194230490420, 0.287618573598, 0.397035743689])
+    # 2026-09-08 (owner): the SELECTION (z-params + quintile cutoffs) is refit weekly on a
+    # rolling 26-week window by scripts/orb_weekly_refit.py (Sunday 20:00 UTC), which rewrites
+    # the INSTANCE orb.yaml and appends to logs/orb_refit_history.jsonl. So the instance file
+    # must match the LATEST refit; the template keeps the frozen 8/15 values.
+    FROZEN_CUTOFFS = [0.107384942420, 0.194230490420, 0.287618573598, 0.397035743689]
 
-    def test_zparams(self, cfg):
+    @staticmethod
+    def _latest_refit():
+        import json
+        hist = ROOT / 'logs' / 'orb_refit_history.jsonl'
+        if not hist.exists():
+            return None
+        lines = [ln for ln in hist.read_text().splitlines() if ln.strip()]
+        return json.loads(lines[-1]) if lines else None
+
+    def test_quintile_cutoffs(self, cfg, request):
+        ref = self._latest_refit()
+        if request.node.callspec.params['cfg'] == 'orb.yaml' and ref:
+            assert cfg['quintile_cutoffs'] == pytest.approx(ref['cutoffs'])
+        else:
+            assert cfg['quintile_cutoffs'] == pytest.approx(self.FROZEN_CUTOFFS)
+
+    def test_zparams(self, cfg, request):
         f = cfg['filter']['features']
-        assert f['gap_pct']['mean'] == 133.273200161459
-        assert f['gap_pct']['std'] == 1515.341490804868
-        assert f['range_total_volume']['mean'] == 971724.893776823999
+        ref = self._latest_refit()
+        if request.node.callspec.params['cfg'] == 'orb.yaml' and ref:
+            for feat, prm in ref['params'].items():
+                assert f[feat]['mean'] == pytest.approx(prm['mean']) and f[feat]['std'] == pytest.approx(prm['std'])
+        else:
+            assert f['gap_pct']['mean'] == 133.273200161459
+            assert f['gap_pct']['std'] == 1515.341490804868
+            assert f['range_total_volume']['mean'] == 971724.893776823999
+            assert f['prev_day_close_position']['mean'] == 0.498689946893
         assert f['range_close_position']['sign'] == 1
-        assert f['prev_day_close_position']['mean'] == 0.498689946893
 
     def test_adaptive_mults_uniform_1(self, cfg):
         assert cfg['adaptive_mults'] == {'Q1': 1.0, 'Q2': 1.0, 'Q3': 1.0,
