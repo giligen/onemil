@@ -150,7 +150,22 @@ ask, half a spread worse); stops at 10 bps through. Both are smallest above $5.
 
 ## 7. Unbiased sample (random 10% of tradable symbols, ALL their days, no range gate)
 
-_Fetch done 21:01 UTC (27.7M bars). The scan crashed on a missing column in my sample universe file, fixed and relaunched 21:15 UTC (~3h)._ Purpose: confirm
+Done 23:04 UTC (`sample_analysis.py`, `sample_analysis.log`). 959 symbols (10% of the 9,595 tradable ones), ALL their
+days: 346,721 symbol-days requested, bars for 66% (the missing third is vendor-absent or renamed tickers — reported,
+not hidden), 666,999 candidate rows. HOD-break F5 K5 X4%, fixed 1:2 exit:
+
+| population | TRAIN | VAL | TEST | trades/wk (10% sample) |
+|---|---|---|---|---|
+| A. raw, no floor — includes days the old universe never saw | +0.039 | +0.044 | **−0.014** | 830–960 |
+| B. causal floor: entry ≥ 5% above the open | +0.211 | +0.140 | +0.049 | 45–57 |
+| C. floor + rv 1–5× + stop ≥ 1% (the live filters) | **+0.296** | **+0.299** | **+0.255** | 15–20 |
+| C5. C + price ≥ $5 (the live cost rule) | +0.229 | +0.301 | **+0.316** (11/14 wks) | 6–14 |
+
+By distance from the open on this unbiased population: 0–2% +0.008 · 2–5% +0.068 · 5–10% +0.160 · 10–20% +0.162 ·
+20%+ +0.214. The days with a range under 5% (never in the main universe) hold 35,022 F5 rows at **−0.316R** — the
+exact population the biased universe rule had been excluding, and the causal floor excludes causally (6 rows survive
+the floor on those days, as arithmetic requires). Verdict: the main study's population numbers are reproduced on an
+unbiased sample; the relative-volume band is where the edge lives; the $5 floor holds. Purpose: confirm
 F5 on the full population without the 5% day-range universe rule (the causal floor already makes
 the population superset-exact; this is the independent check).
 
