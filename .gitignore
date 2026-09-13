@@ -69,3 +69,9 @@ data/research/databento/*.parquet
 data/research/databento/*.db
 data/research/databento/alpaca_assets_all_*.csv
 research/ignition_capcheck/topup.db
+# ignition-from-zero study bulk artifacts (regenerable; 120-145MB each)
+research/ignition_zero/candidates.csv
+research/ignition_zero/candidates_full.csv
+research/ignition_zero/short_interest.csv
+research/ignition_zero/missing_keys.csv
+research/ignition_zero/__pycache__/

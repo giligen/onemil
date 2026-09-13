@@ -25,6 +25,7 @@ from trading.orb_asset_class import DEFAULT_CLASS_MAP, load_class_map, underlyin
 D = 'research/ignition_zero'
 c = pd.read_csv(f'{D}/candidates.csv', low_memory=False)
 c = c.drop_duplicates(['day', 'symbol', 'level']).sort_values(['day', 'level', 'trig_m']).reset_index(drop=True)
+N0 = len(c)
 print('candidates', len(c), 'symbol-days', c[['day', 'symbol']].drop_duplicates().shape[0], flush=True)
 
 # --- anchors / wrappers ---
@@ -80,14 +81,16 @@ m = m[m.created_utc <= m.trig_utc]
 rec = m.groupby(['day', 'symbol', 'trig_utc']).agg(latest=('created_utc', 'max'), n_dil=('cls', lambda s: (s == 'dilution').sum()), n_pos=('cls', lambda s: (s == 'positive').sum())).reset_index()
 rec['news_recency_min'] = (rec.trig_utc - rec.latest).dt.total_seconds() / 60
 rec['headline_class'] = np.where(rec.n_dil > 0, 'dilution', np.where(rec.n_pos > 0, 'positive', 'other'))
-c = c.merge(rec[['day', 'symbol', 'news_recency_min', 'headline_class']], on=['day', 'symbol'], how='left')
+c = c.merge(rec[['day', 'symbol', 'trig_utc', 'news_recency_min', 'headline_class']], on=['day', 'symbol', 'trig_utc'], how='left')
 c['news_covered'] = c.has_news_pre.notna().astype(int)
 
 # --- short interest (point-in-time via usable_from) ---
 si = pd.read_csv(f'{D}/short_interest.csv', low_memory=False)
 si = si[['symbolCode', 'usable_from', 'currentShortPositionQuantity', 'daysToCoverQuantity']].rename(columns={'symbolCode': 'symbol'}).sort_values(['symbol', 'usable_from'])
-c = c.sort_values('day'); si = si.sort_values('usable_from')
-c = pd.merge_asof(c, si, left_on='day', right_on='usable_from', by='symbol', direction='backward')
+c['_day_dt'] = pd.to_datetime(c.day); si['_uf_dt'] = pd.to_datetime(si.usable_from)
+c = c.sort_values('_day_dt'); si = si.sort_values('_uf_dt')
+c = pd.merge_asof(c, si.drop(columns=['usable_from']), left_on='_day_dt', right_on='_uf_dt', by='symbol', direction='backward')
+c = c.drop(columns=['_day_dt', '_uf_dt'])
 c = c.rename(columns={'currentShortPositionQuantity': 'si_qty', 'daysToCoverQuantity': 'si_dtc'})
 c['si_ratio_adv20'] = c.si_qty / c.adv20.replace(0, np.nan)
 
@@ -95,5 +98,6 @@ c['si_ratio_adv20'] = c.si_qty / c.adv20.replace(0, np.nan)
 u = pd.read_sql("select symbol, sector, float_shares from universe", sqlite3.connect(f'file:{ROOT}/data/cache.db?mode=ro', uri=True))
 c = c.merge(u.drop_duplicates('symbol'), on='symbol', how='left')
 c = c.sort_values(['day', 'level', 'trig_m']).reset_index(drop=True)
+assert len(c) == N0, f'row fan-out {N0} -> {len(c)}'
 c.to_csv(f'{D}/candidates_full.csv', index=False)
 print('DONE candidates_full', len(c), '| news covered', int(c.news_covered.sum()), '| SI present', int(c.si_qty.notna().sum()), '| float present', int((c.float_shares > 0).sum()), flush=True)
