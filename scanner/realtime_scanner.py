@@ -88,6 +88,7 @@ class RealtimeScanner:
         macd_engine=None,
         orb_engine=None,
         ignition_engine=None,
+        hod_engine=None,
     ):
         """
         Initialize RealtimeScanner.
@@ -117,6 +118,7 @@ class RealtimeScanner:
         self.macd_engine = macd_engine
         self.orb_engine = orb_engine
         self.ignition_engine = ignition_engine
+        self.hod_engine = hod_engine
         # Ignition S1 signal shadow (2026-07-19): journal-only, zero
         # orders, hard-isolated — any failure inside it is swallowed and
         # can NEVER perturb BF/ORB. IGNITION_SHADOW=0 to disable.
@@ -521,6 +523,11 @@ class RealtimeScanner:
             if self.ignition_engine is not None:
                 _engine_futures.append(
                     _engine_pool.submit(self._ignition_tick))
+            # HOD-break ticks independently of force_closed too (its own
+            # 15:55 flat must outlive ORB's 15:45 latch).
+            if self.hod_engine is not None:
+                _engine_futures.append(
+                    _engine_pool.submit(self._hod_break_tick))
             # Wait for engine futures, polling shutdown_event every 1s.
             # Previously this used a single blocking `f.result(timeout=50)`
             # which kept the scanner unresponsive to SIGTERM for up to
@@ -619,6 +626,11 @@ class RealtimeScanner:
                             self.orb_engine.check_entries(symbols=orb_syms)
                     except Exception as e:
                         logger.error(f"ORB bar-drain error: {e}", exc_info=True)
+                if self.hod_engine is not None:
+                    try:
+                        self.hod_engine.drain_bar_events()
+                    except Exception as e:
+                        logger.error(f"HOD bar-drain error: {e}", exc_info=True)
             if _shutdown:
                 break  # exits while True (intraday loop)
             # Cycle-overrun warning: if cycle work took longer than the 60s budget
@@ -707,6 +719,15 @@ class RealtimeScanner:
                 self.ignition_engine.force_close_all()
         except Exception as e:
             logger.error(f"Ignition tick raised: {e}", exc_info=True)
+
+    def _hod_break_tick(self) -> None:
+        """HOD-break engine cycle — every cycle, force-close or not; never raises."""
+        if self.hod_engine is None:
+            return
+        try:
+            self.hod_engine.process_tick()
+        except Exception as e:
+            logger.error(f"HOD-break tick raised: {e}", exc_info=True)
 
     def _orb_tick(self) -> None:
         """One ORB engine cycle (re-seed universe + entries + exits).
@@ -1198,6 +1219,20 @@ class RealtimeScanner:
                             _now_et.hour * 60 + _now_et.minute)
                 except Exception as _e:
                     logger.error(f"{symbol}: live-stage price hook failed: {_e}")
+            # HOD-break mover hook (2026-09-13): the true 09:30 open from the
+            # day-running bar, NOT intraday_change_pct (= max(gap, range)).
+            if self.hod_engine is not None:
+                try:
+                    _o = float(bar.get('open') or 0.0)
+                    if _o > 0:
+                        _above = (current_price - _o) / _o * 100.0
+                        if _above >= self.hod_engine.params.min_dist_open_pct:
+                            self.hod_engine.on_mover(
+                                symbol, price=current_price, day_open=_o,
+                                cum_volume=float(bar.get('volume') or 0.0),
+                                above_open_pct=_above, ts=bar.get('timestamp'))
+                except Exception as _e:
+                    logger.error(f"{symbol}: HOD mover hook failed: {_e}")
             if _in_band:
                 # Ignition shadow sighting (journal-only; double-guarded —
                 # on_mover never raises, and this wrapper catches anyway).
@@ -1475,6 +1510,11 @@ class RealtimeScanner:
                 logger.error(
                     f"ORB mid-cycle bar-drain error: {e}", exc_info=True
                 )
+        if self.hod_engine is not None:
+            try:
+                self.hod_engine.drain_bar_events()
+            except Exception as e:
+                logger.error(f"HOD mid-cycle bar-drain error: {e}", exc_info=True)
 
     def _log_throttled_bar_drain_error(self, exc: Exception) -> None:
         """

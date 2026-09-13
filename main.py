@@ -103,6 +103,12 @@ def parse_args() -> argparse.Namespace:
              ' OFF by default — requires ALPACA_ORB_API_KEY/SECRET in .env and'
              ' strategy.enabled=true in orb.yaml to actually trade.'
     )
+    parser.add_argument(
+        '--hod', action='store_true',
+        help='Enable the HOD-break strategy (research/bf_zero, 2026-09-13).'
+             ' OFF by default — config.yaml hod_break.enabled must be true'
+             ' (and dry_run false) to actually trade.'
+    )
     args = parser.parse_args()
     # If neither --flag nor --macd specified, enable both (legacy default).
     # --orb stays opt-in even when unspecified.
@@ -349,7 +355,7 @@ def _create_trading_engine(config, alpaca, db, notifier=None, stop_monitor=None,
 
 def run_scan(config, verbose: bool = False, trade: bool = False,
              enable_flag: bool = True, enable_macd: bool = True,
-             enable_orb: bool = False) -> None:
+             enable_orb: bool = False, enable_hod: bool = False) -> None:
     """Run the real-time scanner with one or more strategies."""
     logger.info("Starting real-time scanner...")
 
@@ -695,6 +701,25 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
             f"master_flag={orb_engine.enabled}, dry_run={orb_engine.dry_run}"
         )
 
+    # HOD-break engine (2026-09-13, research/bf_zero): main account, broker
+    # bracket exits, gates internal (enabled/dry_run in config.yaml).
+    hod_engine = None
+    if trade and enable_hod:
+        try:
+            from trading.hod_break_engine import HodBreakEngine
+            hod_engine = HodBreakEngine(
+                alpaca_client=alpaca, db=db, stop_monitor=stop_monitor,
+                notifier=notifier, cfg=config.hod_break_cfg,
+                order_stream=order_stream)
+            if stop_monitor is not None and not stop_monitor.polling_mode:
+                hod_engine.register_on_stop_monitor()
+            hod_engine.sync_positions()
+            logger.info(f"HOD-break strategy loaded — master_flag={hod_engine.enabled}, "
+                        f"dry_run={hod_engine.dry_run}")
+        except Exception as e:
+            logger.error(f"HodBreakEngine init failed ({e}) — HOD-break off")
+            hod_engine = None
+
     # Ignition S3 live engine (2026-08-14 plan): thin consumer of shadow
     # triggers — construction is unconditional (gates are internal:
     # enabled/dry_run/IGNITION_LIVE), so flipping config needs no code.
@@ -734,6 +759,8 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
     if ignition_engine is not None and ignition_engine.enabled:
         strategies.append(
             "Ignition (DRY)" if ignition_engine.dry_run else "Ignition")
+    if hod_engine is not None and hod_engine.enabled:
+        strategies.append("HOD-break (DRY)" if hod_engine.dry_run else "HOD-break")
     logger.info(f"Trading mode ACTIVE — {mode_label}, strategies: {', '.join(strategies)}")
 
     # Fix 4: Graceful shutdown via SIGTERM/SIGINT
@@ -748,6 +775,8 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
             macd_engine.shutdown_requested = True
         if orb_engine:
             orb_engine.shutdown_requested = True
+        if hod_engine:
+            hod_engine.shutdown_requested = True
 
     signal.signal(signal.SIGTERM, handle_shutdown)
     signal.signal(signal.SIGINT, handle_shutdown)
@@ -768,6 +797,7 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
         macd_engine=macd_engine,
         orb_engine=orb_engine,
         ignition_engine=ignition_engine,
+        hod_engine=hod_engine,
     )
 
     # Wire the shadow -> engine trigger callback (journal-first inside
@@ -923,7 +953,7 @@ def main() -> None:
     if args.scan:
         run_scan(config, verbose=args.verbose, trade=args.trade,
                  enable_flag=args.flag, enable_macd=args.macd,
-                 enable_orb=args.orb)
+                 enable_orb=args.orb, enable_hod=args.hod)
 
     if args.test_cycle:
         run_test_cycle(config, trade=args.trade)
