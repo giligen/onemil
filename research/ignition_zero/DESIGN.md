@@ -55,6 +55,14 @@ Holding
 - H19 Structure trail: trail the stop under each new 1-min higher low after +1R instead of the fixed lock.
 - H20 Time stop keyed to velocity: fast igniters exit at +60 min, slow ones hold — the hold-vs-time rule as a function of H1.
 
+## Owner answers (2026-09-13)
+1. "Revisit all decisions, anything is game, don't exclude anything" → the open-gap ≥5% exclusion (ORB disjointness) is DROPPED for this study; open gap becomes a feature (H22: gap bucket ≤0 / 0–5 / 5–15 / >15%). Price floor lowered to $1 (price band is H6). No dollar-volume gate at any stage. The book boundary with ORB is decided AFTER the findings, not before.
+2. Size is irrelevant to the search: rank by expectancy ex-tail, WR, max drawdown (weeks), weeks green, n. Scale later on a proven book.
+3. Short interest: H21 — FINRA bi-monthly consolidated short interest (settlement-date data published ~9 trading days later; used ONLY from its publication date forward = point-in-time safe). Source access being verified; dropped with a note if unreachable.
+
+## Universe (from zero, point-in-time)
+Databento EQUS daily (delisted included): every symbol-day 2025-01-02 → 2026-09-11 with intraday high/open ≥ 1.05 and open ≥ $1 = **337,841 symbol-days**; 194,669 already have 1-min bars, **143,172 fetched from Databento (~$57)** into `data/research/databento/pit_bars_1min.db`. Nothing is dropped for missing bars — a symbol-day without bars is reported as a coverage gap, never silently excluded.
+
 ## Procedure
 1. Build ONE candidate table: every symbol-day with a +5% cross in 9:35–11:30 ET (superset of every H2 level), all H-features at the trigger minute, all exit variants re-simulated on bars. Single ulimit-capped process, resumable, verified against capsim on the +10% subset (must match to 4 decimals).
 2. Score each hypothesis on TRAIN; keep those with a sign; confirm on VALIDATE; only then look at TEST, once.
