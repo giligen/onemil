@@ -75,3 +75,11 @@ research/ignition_zero/candidates_full.csv
 research/ignition_zero/short_interest.csv
 research/ignition_zero/missing_keys.csv
 research/ignition_zero/__pycache__/
+# bf_zero study bulk artifacts (regenerable)
+research/bf_zero/universe.csv
+research/bf_zero/missing_keys.csv
+research/bf_zero/bars.db*
+research/bf_zero/candidates*.csv
+research/bf_zero/coverage_missing.csv*
+research/bf_zero/*.log
+research/bf_zero/*_state.json
