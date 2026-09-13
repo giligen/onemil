@@ -105,3 +105,5 @@ taken live and their BT P&L).
 
 ## Re-arm log
 - 2026-09-12 12:20 UTC (Saturday review): weekly e0655167, EOD dive 1bdf606c, prestage 0e5aed2c, owner brief 28b924e7. NOTE: the session was DOWN Fri 9/11 evening — the 20:50 and 21:57 crons did not fire; both reports were sent Sat morning. Session crons die with the session: the system-crontab jobs (green check 21:30, BF roll-forward 22:30, ORB nightly 20:30, ignition roll-forward 21:15, ORB refit Sun 20:00) are the durable layer.
+
+> **2026-09-13 — IGNITION KILLED (owner).** The PRESTAGE LIVE DAILY COMPARISON session cron is DELETED (do not re-arm). System crontab: ignition_shadow_report.py (21:40) and ignition_bt_rollforward.sh (23:15) REMOVED. Ignition sections in the EOD dive / weekly / owner brief prompts are moot: report 'ignition OFF' in one line. Session crons alive after 9/13 dedupe: weekly e0655167, EOD dive 1bdf606c, owner brief 28b924e7.
