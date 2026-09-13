@@ -135,3 +135,25 @@ right instrument and they are already in place (`docs/bf_p1_ramp.md`, `scripts/o
 `analysis_results/orb_bplus_book.csv` (ORB B+ honest book),
 `research/bf_refit_walkforward/summary.csv`, `research/orb_refit_walkforward/REPORT.md`,
 `research/ignition_zero/REPORT.md`.
+
+## 6. "Do we need to redo the params/rules?" (owner, 9/13 evening) — No. One check, one drop.
+
+Redoing the rules on the same 21 months would re-mine the data, not create evidence. Instead each
+ORB veto threshold was re-derived from 2025 ALONE (quintile edges of the raw entered candidates,
+R = pnl% / range-size%) and read once on 2026. Rule fixed before running: a rule whose 2025-only
+threshold does not isolate the worst bucket in 2026 is DROPPED, never re-tuned.
+
+| rule | 2025-only threshold vs live | 2026 vetoed / kept (mean R) | verdict |
+|---|---|---|---|
+| range-size veto | 2.206 vs 2.221 | −0.31 / +0.03 (Q1 worst in both years) | holds |
+| PDR veto | 2025 Q1 edge 4.75; live 8.0 sits between Q2/Q3 edges 7.34 / 11.12 | −0.20 / 0.00; 2026 monotone Q1→Q5 −0.20…+0.19 | holds |
+| G1 joint (rv20 ≥ 7.106 & pdr ≥ 9.226) | full-period fit; 2025 rv20 quintiles flat, 2026 monotone | kept +0.08 (n 1,479) / vetoed −0.11 (n 2,031) | holds |
+| G1 short-history marker (rv20 == 0) | — | 2025 n=30 −0.26R (worse than rest −0.18); **2026 n=29 +0.12R, WR 45% (better than rest −0.03)** | **fails → dropped** |
+| catalyst veto | not re-testable from the features CSV (no news columns) | veto study: newsless-alone negative all 3 eras | stands on prior evidence |
+
+BF: already done in the consistency study §6e (2025-only picker finds the same three rules).
+
+Action: `orb.yaml` (+ template) `filter.g1_veto.short_history_veto: false` — the 8/15 fail-open
+form is restored; the 9/8 flip rested on 4 pipeline fills. Dollar effect at stage size is
+negligible; the point is that a rule with no out-of-sample support does not run live. Backup
+`orb.yaml.bak.pre_shorthist_drop_20260913`. Effective at the Monday boot.

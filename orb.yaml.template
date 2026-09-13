@@ -105,7 +105,7 @@ filter:
     # 9/6): the rv20 == 0.0 "history too short" marker is now VETOED — on the
     # honest B+ book every short-history pick lost (4 fills, 0 winners). NaN /
     # missing rv20 still fails open. false = the 8/15 fail-open behaviour.
-    short_history_veto: true
+    short_history_veto: false   # DROPPED 2026-09-13: fails its own 2025->2026 check (raw candidates: 2025 n=30 -0.26R, 2026 n=29 +0.12R); the 9/8 evidence was 4 pipeline fills. Fail-open restored (8/15 form). research/books_deep_dive_20260913.md
   # Opening-range-size veto (2026-09-08, same study, owner GO 9/6): a pick
   # whose 5-min range is <= 2.221% of price is a noise trigger, not a
   # breakout — worst raw quintile in BOTH years; 10 picks removed on the
