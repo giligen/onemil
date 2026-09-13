@@ -1,0 +1,10 @@
+variant,n,meanR,WR,pnl,meanR_exMonster,pnl_exMonster,monsters,months_green,worst_mo,exits,verdict
+V0_baseline,2634,-0.084,35.5,-522350,-0.187,-877481,69,4/6,-537237,"{'eod': np.int64(2081), 'stop': np.int64(452), 'lock': np.int64(101)}",
+V1_lock1.0_0.3,2634,-0.094,37.8,-557260,-0.185,-880431,62,2/6,-544321,"{'eod': np.int64(1902), 'stop': np.int64(434), 'lock': np.int64(298)}",fail
+V2_partial1R_BE,2634,-0.087,37.9,-518534,-0.124,-642003,28,3/6,-515899,"{'eod': np.int64(1963), 'stop': np.int64(434), 'be': np.int64(144), 'lock': np.int64(93)}",fail
+V3_partial1R_trail1R,2634,-0.082,37.9,-492926,-0.106,-582481,24,3/6,-496133,"{'eod': np.int64(1802), 'stop': np.int64(434), 'be': np.int64(398)}",fail
+V4_cut30,2634,-0.118,14.8,-706668,-0.2,-988393,51,2/6,-710227,"{'cut': np.int64(2147), 'eod': np.int64(314), 'stop': np.int64(93), 'lock': np.int64(80)}",fail
+V5_cut60,2634,-0.1,18.0,-598154,-0.187,-896253,56,3/6,-593251,"{'cut': np.int64(1974), 'eod': np.int64(388), 'stop': np.int64(181), 'lock': np.int64(91)}",fail
+V6_hold60,2634,-0.089,35.2,-544663,-0.138,-695169,33,3/6,-517412,"{'hold': np.int64(2412), 'stop': np.int64(181), 'lock': np.int64(41)}",fail
+V7_partial1R_BE_cut30,2634,-0.12,18.8,-684429,-0.151,-787064,22,2/6,-655611,"{'cut': np.int64(2046), 'eod': np.int64(298), 'be': np.int64(123), 'stop': np.int64(93), 'lock': np.int64(74)}",fail
+V8_partial0.75R_trail0.75,2634,-0.089,41.0,-503992,-0.095,-528803,6,2/6,-461827,"{'eod': np.int64(1609), 'be': np.int64(614), 'stop': np.int64(411)}",fail
