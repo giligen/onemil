@@ -84,7 +84,9 @@ class TestEngineConfig:
     def test_yaml_knobs_loaded(self, engine):
         assert engine.range_size_veto_enabled is True
         assert engine.range_size_veto_min_pct == 2.221
-        assert engine.g1_short_history_veto is True
+        # 2026-09-13: the short-history veto was DROPPED (fails its own 2025-only→2026 check;
+        # research/books_deep_dive_20260913.md §6) — the instance yaml ships it False (fail-open).
+        assert engine.g1_short_history_veto is False
 
     def test_env_master_disable(self, orb_cfg, monkeypatch):
         monkeypatch.setenv('ORB_RANGE_SIZE_VETO', '0')
@@ -128,6 +130,9 @@ class TestEngineSeam:
     def test_g1_seam_vetoes_short_history(self, engine):
         c = CandidateState(symbol='NEWLIST')
         c.features = {'return_volatility_20d': 0.0, 'prev_day_range_pct': 15.0}
+        # knob OFF since 2026-09-13: the rv20 == 0.0 marker FAILS OPEN (kept), exactly the 8/15 form
+        assert engine._g1_veto_reject(c) is False and c.rejected_reason is None
+        engine.g1_short_history_veto = True                      # the knob still works when a future study re-enables it
         assert engine._g1_veto_reject(c) is True and c.rejected_reason == 'g1_veto'
 
     def test_call_order_after_g1_before_catalyst(self):

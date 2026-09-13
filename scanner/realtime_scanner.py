@@ -1209,8 +1209,8 @@ class RealtimeScanner:
             _in_band = _is_mover or (_feed_min is not None
                                      and intraday_change_pct >= _feed_min)
             if (not _in_band and self.ignition_shadow is not None
-                    and self.ignition_shadow.on_price is not None
-                    and self.ignition_shadow.live_symbols_fn is not None):
+                    and getattr(self.ignition_shadow, 'on_price', None) is not None
+                    and getattr(self.ignition_shadow, 'live_symbols_fn', None) is not None):
                 try:
                     if symbol in self.ignition_shadow.live_symbols_fn():
                         _now_et = datetime.now(pytz.timezone('US/Eastern'))
