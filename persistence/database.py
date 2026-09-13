@@ -1590,6 +1590,45 @@ class Database:
         """, (symbol, bar_date, int(n_bars), datetime.now(timezone.utc)))
         self._cache_conn.commit()
 
+    # ------------------------------------------------------------------
+    # HOD-break same-clock volume profile (owner 2026-09-13): cumulative RTH volume
+    # at fixed clock checkpoints per symbol-day. ONE definition with the research
+    # table (research/bf_zero/volume_profile.csv) and trading.hod_break.VP_CHECKPOINTS.
+    # ------------------------------------------------------------------
+    def ensure_hod_volume_profile_table(self) -> None:
+        """Idempotent DDL for hod_volume_profile (distinct from the 15-min `volume_profiles`)."""
+        self._cache_conn.execute("""
+            CREATE TABLE IF NOT EXISTS hod_volume_profile (
+                symbol TEXT NOT NULL, bar_date TEXT NOT NULL, cut_minute INTEGER NOT NULL,
+                cum_volume REAL NOT NULL, day_volume REAL, updated_at TIMESTAMP,
+                PRIMARY KEY (symbol, bar_date, cut_minute))
+        """)
+        self._cache_conn.commit()
+
+    def upsert_hod_volume_profile(self, rows: List[Dict]) -> int:
+        """rows: {symbol, bar_date, cut_minute, cum_volume, day_volume}. Returns rows written."""
+        if not rows:
+            return 0
+        self.ensure_hod_volume_profile_table()
+        now = datetime.now(timezone.utc)
+        self._cache_conn.executemany("""
+            INSERT OR REPLACE INTO hod_volume_profile (symbol, bar_date, cut_minute, cum_volume, day_volume, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, [(r['symbol'], r['bar_date'], int(r['cut_minute']), float(r['cum_volume']), r.get('day_volume'), now) for r in rows])
+        self._cache_conn.commit()
+        return len(rows)
+
+    def get_hod_volume_profile(self, symbol: str, cut_minute: int, before_date: str, n_days: int = 20) -> List[float]:
+        """Cumulative volume at `cut_minute` on the last `n_days` held days strictly before `before_date`
+        (newest first). Empty list when the table or rows are absent — callers must treat that as
+        'no own-history baseline', never as zero volume."""
+        self.ensure_hod_volume_profile_table()
+        cur = self._cache_conn.execute("""
+            SELECT cum_volume FROM hod_volume_profile
+            WHERE symbol = ? AND cut_minute = ? AND bar_date < ? ORDER BY bar_date DESC LIMIT ?
+        """, (symbol, int(cut_minute), before_date, int(n_days)))
+        return [float(r[0]) for r in cur.fetchall()]
+
     def get_intraday_bars_cached(self, symbol: str, bar_date: str) -> List[Dict]:
         """
         Retrieve cached 1-min intraday bars for a symbol/date.
