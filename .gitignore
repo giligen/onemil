@@ -83,3 +83,4 @@ research/bf_zero/candidates*.csv
 research/bf_zero/coverage_missing.csv*
 research/bf_zero/*.log
 research/bf_zero/*_state.json
+research/bf_zero/volume_profile.csv

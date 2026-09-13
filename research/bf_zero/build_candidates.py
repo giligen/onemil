@@ -15,6 +15,8 @@ import numpy as np, pandas as pd
 ROOT = '/home/ec2-user/onemil'; os.chdir(ROOT)
 D = 'research/bf_zero'
 STATE, OUT, MISS = f'{D}/build_state.json', f'{D}/candidates.csv', f'{D}/coverage_missing.csv'
+VPROF = f'{D}/volume_profile.csv'                      # owner 9/13: same-clock cumulative volume checkpoints per symbol-day
+VP_MIN = (575, 585, 600, 630, 660, 720, 780, 840, 900) # 9:35 9:45 10:00 10:30 11:00 12:00 13:00 14:00 15:00 ET
 RETRY = os.environ.get('BFZ_RETRY') == '1'
 COLS = ['day', 'symbol', 'fam', 'cfg', 'entry_m', 'entry', 'stop', 'r_pct', 'price', 'dist_open_pct', 'rv_adv', 'bar_vol_x', 'above_vwap',
         'gap_pct', 'prev_range_pct', 'adv20', 'dist_20d_high_pct', 'spy_5m_ret', 'spy_range3', 'pm_covered',
@@ -202,7 +204,7 @@ FAMS = ([('F1', dict(P=P)) for P in (0.05, 0.08, 0.12)] + [('F2', dict(P=P)) for
 
 
 def build_day(day, sub):
-    B = load_bars(day, sub.symbol.tolist()); rows = []; missing = []; spym = spy_by_day.get(day, {})
+    B = load_bars(day, sub.symbol.tolist()); rows = []; missing = []; spym = spy_by_day.get(day, {}); vprof = []
     for r in sub.itertuples():
         gg = B.get(r.symbol)
         if gg is None: missing.append(r.symbol); continue
@@ -210,6 +212,11 @@ def build_day(day, sub):
         if len(rth) < 30: missing.append(r.symbol); continue
         o, h, l, c, v = (rth[k].values.astype(float) for k in ('o', 'h', 'l', 'c', 'v')); m = rth.m.values.astype(int)
         o0 = o[0]; cumv = np.cumsum(v); vwap = np.cumsum(c * v) / np.maximum(cumv, 1)
+        vp = {'day': day, 'symbol': r.symbol, 'day_vol': float(cumv[-1]), 'pm_vol': float(gg[gg.m < OPEN_M].v.sum())}
+        for cm in VP_MIN:
+            k = np.searchsorted(m, cm, side='right') - 1           # last bar at or before the checkpoint
+            vp[f'cv_{cm}'] = float(cumv[k]) if k >= 0 else 0.0
+        vprof.append(vp)
         pm = gg[gg.m < OPEN_M]; pmh = float(pm.h.max()) if len(pm) else None
         for fam, cfg in FAMS:
             if fam == 'F1': res = fam_flag(h, l, cfg['P'], (2, 3, 4, 5, 6), micro=False)
@@ -236,6 +243,8 @@ def build_day(day, sub):
                        spy_5m_ret=((spym[int(m[i])] / spym[int(m[i]) - 5]) - 1) * 100 if spym.get(int(m[i])) and spym.get(int(m[i]) - 5) else np.nan,
                        spy_range3=float(spyd.range3.get(day, np.nan)), pm_covered=int(pmh is not None), **extra, **ex)
             rows.append(row)
+    if vprof:
+        pd.DataFrame(vprof).to_csv(VPROF, mode='a', header=not os.path.exists(VPROF), index=False)
     return rows, missing
 
 
