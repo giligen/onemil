@@ -780,6 +780,40 @@ class Config:
     # =========================================================================
 
     @property
+    def hod_break_cfg(self) -> dict:
+        """HOD-break book config (research/bf_zero, 2026-09-13). ONE spec with
+        trading/hod_break.py: the detection/fill/exit knobs here are the
+        HodBreakParams fields; the rest is execution/risk. FAIL-SAFE defaults:
+        disabled + dry_run (full pipeline, zero orders)."""
+        cfg = self._get_yaml("hod_break", default={}) or {}
+        return {
+            "enabled": bool(cfg.get("enabled", False)),
+            "dry_run": bool(cfg.get("dry_run", True)),
+            "risk_usd": float(cfg.get("risk_usd", 100.0)),
+            "daily_kill_usd": float(cfg.get("daily_kill_usd", -600.0)),
+            "weekly_kill_usd": float(cfg.get("weekly_kill_usd", -1500.0)),
+            "max_notional_usd": float(cfg.get("max_notional_usd", 5000.0)),
+            "min_price": float(cfg.get("min_price", 1.0)),
+            "min_adv20": float(cfg.get("min_adv20", 100_000.0)),
+            "max_spread_bps": float(cfg.get("max_spread_bps", 100.0)),
+            "order_timeout_s": float(cfg.get("order_timeout_s", 75.0)),
+            "params": {
+                "consol_bars": int(cfg.get("consol_bars", 5)),
+                "consol_pct": float(cfg.get("consol_pct", 0.04)),
+                "min_dist_open_pct": float(cfg.get("min_dist_open_pct", 5.0)),
+                "rv_lo": float(cfg.get("rv_lo", 1.0)),
+                "rv_hi": float(cfg.get("rv_hi", 5.0)),
+                "min_r_pct": float(cfg.get("min_r_pct", 1.0)),
+                "cap": float(cfg.get("cap", 0.006)),
+                "target_r": float(cfg.get("target_r", 2.0)),
+                "max_per_day": int(cfg.get("max_per_day", 8)),
+                "max_concurrent": int(cfg.get("max_concurrent", 4)),
+                "last_entry_minute": int(cfg.get("last_entry_minute", 930)),
+                "flat_minute": int(cfg.get("flat_minute", 955)),
+            },
+        }
+
+    @property
     def macd_zones_enabled(self) -> bool:
         """Whether MACD zone risk scaling is active."""
         return bool(self._get_yaml("trading", "macd_zones", "enabled", default=False))

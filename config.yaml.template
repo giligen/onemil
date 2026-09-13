@@ -528,3 +528,31 @@ ignition_live:
     watchdog_stale_s: 60
     max_staged_fills: 10      # P1-6 adoption-side concurrency rail
     pdt_equity_min: 25000
+
+# HOD-break book (research/bf_zero/REPORT.md, 2026-09-13) — ONE spec with trading/hod_break.py.
+# A stock >= 5% above its open with relative volume 1-5x its normal pace consolidates >= 5 bars within
+# 4% of the high-of-day, then breaks it: capped limit (60 bps, no chase), stop = consolidation low,
+# target = +2R on a bar close, first-come 8/day, 4 concurrent, flat 15:55. FAIL-SAFE: disabled + dry_run.
+hod_break:
+  enabled: false
+  dry_run: true
+  risk_usd: 100
+  daily_kill_usd: -600
+  weekly_kill_usd: -1500
+  max_notional_usd: 5000
+  min_price: 1.0
+  min_adv20: 100000
+  max_spread_bps: 100
+  order_timeout_s: 75
+  consol_bars: 5
+  consol_pct: 0.04
+  min_dist_open_pct: 5.0
+  rv_lo: 1.0
+  rv_hi: 5.0
+  min_r_pct: 1.0
+  cap: 0.006
+  target_r: 2.0
+  max_per_day: 8
+  max_concurrent: 4
+  last_entry_minute: 930
+  flat_minute: 955
