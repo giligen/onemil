@@ -16,7 +16,7 @@ ROOT='/home/ec2-user/onemil'; sys.path.insert(0, ROOT); os.chdir(ROOT)
 import trading.ignition_rules as R
 D='research/ignition_capcheck'; OUT='research/ignition_exit_study'
 PART=os.environ.get('PART','2026')
-TRADES={'2026': f'{D}/trades_NODOLLAR2026.csv', '25H2': f'{D}/trades_25H2.csv', '25H1': f'{D}/trades_25H1.csv'}[PART]
+TRADES={'2026': f'{D}/trades_NODOLLAR2026.csv', '25H2': f'{D}/trades_25H2.csv', '25H1': f'{D}/trades_25H1.csv', 'LIVEWIN': f'{D}/trades_LIVEWIN.csv'}[PART]
 cache=sqlite3.connect(f'file:{ROOT}/data/cache.db?mode=ro', uri=True, timeout=120)
 topup=sqlite3.connect(f'file:{D}/topup.db?mode=ro', uri=True, timeout=120)
 

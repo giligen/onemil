@@ -37,3 +37,24 @@ Read: the complex-confirmed entry has real per-trade edge (+0.10R on 700 trades 
 | 0.5R | hold | 46K / −66K | 53K / −35K | 104K / −162K | 90 / 85 / 310 |
 
 **Verdict: NO to 0.5R.** Total dollars: 2025H1 −52%, 2025H2 +16%, 2026 −28% vs the 1.0R partial book; and in ALL three eras the tighter stop makes the book tail-only (ex-tail negative everywhere). Stop-outs 3.4×; the structural low is doing real work — the tighter stop is hit by noise before the 2:1 payoff arrives. Per-unit-risk looks better only because a doubled position turns the same move into 2× R, and the position caps prevent deploying that risk (total $ falls). 0.75R is a strict middle: worse than 1.0R ex-tail in every era. The 1.0R stop + partial@1R/BE remains the only cell positive without the tail in all three eras.
+
+## The candidate book, week by week, Jun 1 → Sep 11 2026 (complex-confirmed, 1.0R stop, partial 50%@+1R/BE; tail = trade P&L >= 2x its $ risk)
+| week ending | trades | WR | P&L | tail trades | avg R ex-tail |
+|---|---|---|---|---|---|
+| 6/5 | 20 | 50% | +3.4K | 0 | +0.12 |
+| 6/12 | 42 | 24% | −30.1K | 0 | −0.34 |
+| 6/19 | 17 | 59% | +3.0K | 0 | +0.06 |
+| 6/26 | 47 | 34% | −17.5K | 0 | −0.17 |
+| 7/3 | 22 | 41% | −16.2K | 0 | −0.37 |
+| 7/10 | 24 | 54% | +10.7K | 0 | +0.22 |
+| 7/17 | 17 | 53% | +3.7K | 0 | +0.08 |
+| 7/24 | 40 | 8% | −33.3K | 0 | −0.44 |
+| 8/7 | 73 | 66% | +56.4K | 1 (CRWU +3.8K) | +0.19 |
+| 8/14 | 28 | 25% | −29.2K | 0 | −0.40 |
+| 8/21 | 6 | 33% | −3.6K | 0 | −0.40 |
+| 8/28 | 10 | 60% | +2.3K | 0 | −0.04 |
+| 9/4 | 4 | 75% | +2.2K | 0 | +0.24 |
+| 9/11 | 6 | 0% | −3.1K | 0 | −0.47 |
+| **Jun 1 → Sep 11** | **356** | **41%** | **−$51K** | **1** | **−0.12** |
+
+Jan–May 2026: 380 trades, WR 64%, +$187K, avg R ex-tail +0.25. The candidate's +0.09R for 2026 is a Jan–May book averaged with a losing summer; the last 14 weeks are 7 green / 7 red at −0.12R per trade and there is no in-advance regime signal in the data. Relaunch would be into the losing regime. **Recommendation withdrawn to "not now": ignition stays paused; the candidate spec is fully documented for a future relaunch when the nightly complex-confirmed roll-forward is positive over 8 consecutive weeks.**

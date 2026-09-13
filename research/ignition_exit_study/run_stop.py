@@ -32,7 +32,7 @@ for i,day in enumerate(days):
         rows.append(row)
     if i%25==0: print(f'[{PART}] {i+1}/{len(days)} days', flush=True)
 df=pd.DataFrame(rows); df.to_csv(f'{OUT}/stop_trades_{PART}.csv', index=False)
-ann=pd.read_csv(f'{D}/trades_NODOLLAR2026_annotated.csv' if PART=='2026' else f'{D}/trades_all_annotated.csv', low_memory=False)[['day','symbol','complex_conf']]
+ann=pd.read_csv({'2026': f'{D}/trades_NODOLLAR2026_annotated.csv', 'LIVEWIN': f'{D}/trades_LIVEWIN_annotated.csv'}.get(PART, f'{D}/trades_all_annotated.csv'), low_memory=False)[['day','symbol','complex_conf']]
 df=df.merge(ann,on=['day','symbol'],how='left'); df['cc']=df.complex_conf.astype(str).eq('True'); df['mo']=df.day.str[:7]
 def summ(d, label):
     out=[]
