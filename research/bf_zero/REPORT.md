@@ -110,13 +110,44 @@ TEST week by week (R): +12.4, +6.8, −5.0, +4.6, +9.5, +5.4, −8.3, +7.4, +2.5
 Money at this shape: ~5.7R/week on TEST at 35 trades. At $100 risk ≈ $2.3K/month; at $300 ≈ $7K
 with ~$2.9K weekly noise. Not a forecast — a relative tool with a live tape still at zero.
 
-## 6. Parity simulation (`spec_sim.py`, the exact live spec: fill at the NEXT bar's open if ≤ cap)
+## 6. Parity simulation (`spec_sim.py`, the exact live spec: fill at the NEXT bar's open if ≤ cap) — DONE 21:10 UTC
 
-_Pending — fills in when the run lands (started 20:30 UTC, ~3h)._
+`trading.hod_break.simulate` run over 189,830 symbol-days (every day with a break and a high ≥ 5% above the
+open); 38,953 spec signals. THE numbers for the live build:
+
+| book | split | trades | /wk | mean R | WR | PF | weekly R mean / sd | weeks green | worst week |
+|---|---|---|---|---|---|---|---|---|---|
+| population (no caps) | TRAIN | 20,872 | 394 | +0.231 | 46% | 1.42 | +91 / 149 | 45/53 | −37 |
+| population | VAL | 11,085 | 482 | +0.228 | 46% | 1.41 | +110 / 89 | 20/23 | −47 |
+| population | TEST | 6,996 | 466 | +0.214 | 45% | 1.38 | +100 / 128 | 13/15 | −23 |
+| **8/day, 4 concurrent** | TRAIN | 1,949 | 37 | +0.212 | 44% | 1.37 | +7.8 / 10.0 | 36/53 | −14.3 |
+| **8/day, 4 concurrent** | VAL | 813 | 35 | +0.206 | 45% | 1.35 | +7.3 / 10.6 | 17/23 | −12.9 |
+| **8/day, 4 concurrent** | TEST | 538 | 36 | +0.230 | 47% | 1.42 | +8.2 / 9.7 | 12/15 | −2.9 |
+| 5/day, 3 concurrent | TEST | 339 | 23 | +0.195 | 46% | 1.35 | +4.4 / 6.9 | 11/15 | −6.0 |
+| 12/day, 4 concurrent | TEST | 778 | 52 | +0.192 | 46% | 1.34 | +9.9 / 9.1 | 12/15 | −5.1 |
+
+TEST week by week (8/4 book, R): +2.5, +11.9, +10.7, +4.9, +0.1, +5.4, +5.5, −2.8, +17.5, +29.3, −2.9, +3.4,
++24.0, +14.0 (the 15th week has no data). Stronger and steadier than the study's book (§5) because the spec
+takes the first QUALIFYING break (a later break can qualify when the first fails the filters) and fills at
+the next open instead of paying the cap.
+
+Scrutiny: half the fills land below the break level (median entry = the level, IQR −42 to +21 bps) and the
+edge is NOT on one side (below/above: TRAIN +0.30/+0.13, VAL +0.13/+0.29, TEST +0.20/+0.25). Entry hour is
+flat (+0.21 to +0.23 from 9:30 to 14:00; the 16 trades after 14:00 are −0.21 → `last_entry_minute` 930 is
+generous, 840 would be tighter). Wrappers +0.13 vs common +0.24.
+
+**Price (cost rule adopted for live, `min_price: 5`)**: $1–2 +0.12 · $2–5 +0.08 · $5–10 +0.27 · $10–20
++0.16 · $20–50 +0.38 · >$50 +0.57. The sim cannot see spreads; under $5 the thin edge would not survive
+them. Book ≥ $5: **TRAIN +0.303 (19/wk, 39/53) / VAL +0.266 (23/wk, 19/22) / TEST +0.331 (27/wk, 13/14,
+worst −3.1R)**, WR 48–50%. Chosen after seeing all splits — disclosed; it is a tradability rule, and the live
+100 bps spread gate would have removed most of the same names causally.
+
+What the sim still assumes optimistically: a fill AT the next bar's open (a marketable limit fills at the
+ask, half a spread worse); stops at 10 bps through. Both are smallest above $5.
 
 ## 7. Unbiased sample (random 10% of tradable symbols, ALL their days, no range gate)
 
-_Pending — fetch 279,512 symbol-days (~$112), then `sample_chain.sh` scans them._ Purpose: confirm
+_Fetch done 21:01 UTC (27.7M bars). The scan crashed on a missing column in my sample universe file, fixed and relaunched 21:15 UTC (~3h)._ Purpose: confirm
 F5 on the full population without the 5% day-range universe rule (the causal floor already makes
 the population superset-exact; this is the independent check).
 
