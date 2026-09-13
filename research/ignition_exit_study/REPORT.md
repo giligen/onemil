@@ -27,3 +27,13 @@ Read: the complex-confirmed entry has real per-trade edge (+0.10R on 700 trades 
 - Whole book (no cohort gate): nothing passes in any era.
 
 **Relaunch candidate (owner decision)**: complex-confirmed entries only, resting orders at the level sized AT fill, exit = 50% at +1R with stop to breakeven and the remainder on the existing lock/EOD rule. Expectation at the model size: ~+0.09 R/trade on ~85 candidates/month in 2026 (live cohort rate is far lower — 2 fills in 4 weeks). This is a consistency book, not a monster book.
+
+## Stop tightening (owner 9/13: "R:R should be 1:2 — move risk to 0.5R?") — `run_stop.py`, three eras, complex-confirmed cell, dollars at equal $ risk
+| stop | exit | 25H1 P&L / ex-tail | 25H2 P&L / ex-tail | 2026 P&L / ex-tail | stop-outs (25H1/25H2/2026) |
+|---|---|---|---|---|---|
+| **1.0R** | **partial @+1R, BE** | **64K / +32K** | **48K / +43K** | **138K / +128K** | 24 / 29 / 91 |
+| 0.75R | partial @ old +1R | 49K / −2K | 60K / +31K | 128K / +69K | 48 / 53 / 187 |
+| 0.5R | partial @ old +1R (= +2R new) | 31K / −49K | 56K / −11K | 99K / −118K | 90 / 85 / 310 |
+| 0.5R | hold | 46K / −66K | 53K / −35K | 104K / −162K | 90 / 85 / 310 |
+
+**Verdict: NO to 0.5R.** Total dollars: 2025H1 −52%, 2025H2 +16%, 2026 −28% vs the 1.0R partial book; and in ALL three eras the tighter stop makes the book tail-only (ex-tail negative everywhere). Stop-outs 3.4×; the structural low is doing real work — the tighter stop is hit by noise before the 2:1 payoff arrives. Per-unit-risk looks better only because a doubled position turns the same move into 2× R, and the position caps prevent deploying that risk (total $ falls). 0.75R is a strict middle: worse than 1.0R ex-tail in every era. The 1.0R stop + partial@1R/BE remains the only cell positive without the tail in all three eras.
