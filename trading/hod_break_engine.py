@@ -179,7 +179,7 @@ class HodBreakEngine:
             logger.error(f"[HOD] {cand.symbol}: bar subscribe failed ({e}) — candidate dropped")
             self.candidates.pop(cand.symbol, None); return
         try:
-            got = self.alpaca.get_1min_bars_multi([cand.symbol], lookback_minutes=400)
+            got = self.alpaca.get_1min_bars_multi([cand.symbol], lookback_minutes=max(30, self._minute_of_day() - OPEN_MINUTE + 5))
             df = got.get(cand.symbol)
             if df is not None and len(df):
                 self._ingest_bars(cand.symbol, df)
@@ -210,14 +210,28 @@ class HodBreakEngine:
         a = np.array(rows, dtype=float)
         return a[:, 1], a[:, 2], a[:, 3], a[:, 4], a[:, 5], a[:, 0].astype(int)
 
+    @staticmethod
+    def _bar_key(b: dict):
+        ts = b.get('timestamp')
+        t = ts if isinstance(ts, datetime) else datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        return t.astimezone(timezone.utc).replace(second=0, microsecond=0)
+
     def _ingest_bars(self, symbol: str, bars_df) -> None:
+        """MERGE by minute — never replace. Found 2026-09-14 09:50 (DBI): the stream's DataFrame holds
+        only bars since SUBSCRIPTION, so replacing the backfilled day once the stream list grew longer
+        dropped the 09:30 open, the early high-of-day and the early volume → wrong open, wrong HOD,
+        wrong relative volume. The union keeps every bar seen from either source."""
         cand = self.candidates.get(symbol)
         if cand is None:
             return
         try:
             recs = bars_df.to_dict('records') if hasattr(bars_df, 'to_dict') else list(bars_df)
-            if len(recs) >= len(cand.bars):
-                cand.bars = recs
+            merged = {self._bar_key(b): b for b in cand.bars}
+            for b in recs:
+                merged[self._bar_key(b)] = b
+            cand.bars = [merged[k] for k in sorted(merged)]
         except Exception as e:
             logger.error(f"[HOD] {symbol}: bad bar payload ({e})"); return
         self._evaluate(cand)

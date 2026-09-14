@@ -223,3 +223,32 @@ def test_bar_handler_enqueues_only_for_candidates(engine):
     engine._on_bar_close('NOPE', bars_df(drive_then_consolidate())); assert engine._bar_queue.empty()
     admit(engine); engine._on_bar_close('ABC', bars_df(drive_then_consolidate())); assert not engine._bar_queue.empty()
     assert engine.drain_bar_events() == ['ABC']
+
+
+class TestBarMerge:
+    """2026-09-14 09:50 DBI defect: the stream only carries bars since subscription; ingest must MERGE."""
+
+    def test_stream_bars_do_not_replace_the_backfilled_open(self, engine):
+        admit(engine)
+        tape = drive_then_consolidate()
+        engine._ingest_bars('ABC', bars_df(tape[:3]))                       # backfill: 09:30-09:32
+        engine._ingest_bars('ABC', bars_df(tape[3:9], minute0=573))         # stream: 09:33-09:38 (longer than the backfill)
+        bars = engine.candidates['ABC'].bars
+        assert len(bars) == 9 and bars[0]['open'] == 10.0                  # the 09:30 open survived
+        assert [b['open'] for b in bars] == [t[0] for t in tape[:9]]
+
+    def test_duplicate_minutes_are_deduplicated(self, engine):
+        admit(engine)
+        tape = drive_then_consolidate()
+        engine._ingest_bars('ABC', bars_df(tape[:5]))
+        engine._ingest_bars('ABC', bars_df(tape[:5]))
+        assert len(engine.candidates['ABC'].bars) == 5
+
+    def test_merged_bars_give_the_true_open_and_hod(self, engine, mock_alpaca):
+        """with the early bars lost, the engine would see a lower open (wrong floor) and a lower HOD (false break)"""
+        admit(engine)
+        tape = drive_then_consolidate()
+        engine._ingest_bars('ABC', bars_df(tape[:3]))
+        engine._ingest_bars('ABC', bars_df(tape[3:9], minute0=573))          # ends on the break bar → signal
+        kw = mock_alpaca.submit_bracket_order.call_args.kwargs
+        assert kw['limit_price'] == pytest.approx(round(11.0 * 1.006, 2))   # HOD 11.0 from the EARLY bars, not from the stream
