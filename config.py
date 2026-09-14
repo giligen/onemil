@@ -796,6 +796,7 @@ class Config:
             "min_price": float(cfg.get("min_price", 1.0)),
             "min_adv20": float(cfg.get("min_adv20", 100_000.0)),
             "max_spread_bps": float(cfg.get("max_spread_bps", 100.0)),
+            "max_spread_frac_r": float(cfg.get("max_spread_frac_r", 0.0)),
             "order_timeout_s": float(cfg.get("order_timeout_s", 75.0)),
             "params": {
                 "consol_bars": int(cfg.get("consol_bars", 5)),

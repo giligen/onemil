@@ -84,6 +84,7 @@ class HodBreakEngine:
         self.weekly_kill_usd = float(cfg.get('weekly_kill_usd', -1500.0)); self.max_notional_usd = float(cfg.get('max_notional_usd', 5000.0))
         self.min_price = float(cfg.get('min_price', 1.0)); self.min_adv20 = float(cfg.get('min_adv20', 100_000.0))
         self.max_spread_bps = float(cfg.get('max_spread_bps', 100.0)); self.order_timeout_s = float(cfg.get('order_timeout_s', 75.0))
+        self.max_spread_frac_r = float(cfg.get('max_spread_frac_r', 0.0))   # 0 = off; e.g. 0.15 = skip when the spread is > 15% of R (9/14: 57% of signals)
         self.params = HodBreakParams(**(cfg.get('params') or {}))
         self.candidates: Dict[str, Candidate] = {}; self.positions: Dict[str, Position] = {}
         self.entered_today: set = set(); self.daily_pnl = 0.0; self.session_date: Optional[str] = None
@@ -287,6 +288,8 @@ class HodBreakEngine:
         r = entry_est - stop
         if r <= 0 or r / entry_est * 100.0 < p.min_r_pct:
             cand.rejected_reason = 'r_min'; logger.info(f"[HOD] {sym}: stop {stop:.2f} within {p.min_r_pct}% of the ask {entry_est:.2f} — skip"); return
+        if self.max_spread_frac_r > 0 and (ask - bid) / r > self.max_spread_frac_r:
+            cand.rejected_reason = 'spread_r'; logger.info(f"[HOD] {sym}: spread {spread_bps:.0f} bps = {(ask - bid) / r:.0%} of R {r:.2f} > {self.max_spread_frac_r:.0%} — skip"); return
         target = round(limit + p.target_r * r, 2)          # legs from the LIMIT (conservative: a fill below the limit makes the real target < 2R)
         shares = shares_for(self.risk_usd, entry_est, stop)
         shares = min(shares, int(self.max_notional_usd // limit))
