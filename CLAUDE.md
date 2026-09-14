@@ -416,6 +416,9 @@ ORB analysis; the older ones have warning headers pointing to the shipped varian
 - Disable Q1 filter (`filter.skip_q1`) without revisiting `docs/orb_research_apr_2026.md` first
 - Skip Pre-Stage-0 LIVE phase before formal Stage 0 — paper data has structural limits (synthetic fills don't capture real venue queue)
 
+## PAUSED 2026-09-14 (owner): Bull Flag and ORB
+- `config.yaml trading.enabled: false` (bull flag entries off; P1 config otherwise intact) and `orb.yaml strategy.enabled: false` (B+ config intact; backups `config.yaml.bak.pre_bf_pause_20260914`, `orb.yaml.bak.pre_pause_20260914`). Reason: at $150 / $375 risk and ~3 trades a month each, their P&L is noise and they share the account, symbols and StopMonitor with the HOD-break being validated. Resume = flip + restart. The ramp checkers and BF/ORB crons keep running but report zero activity.
+
 ## Strategy 4: HOD-break (built 2026-09-13 overnight from the clean-sheet study; DRY RUN from 2026-09-14)
 
 ```bash
