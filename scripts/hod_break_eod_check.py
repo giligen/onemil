@@ -78,7 +78,7 @@ def main() -> int:
     alpaca = AlpacaClient(cfg.alpaca_api_key, cfg.alpaca_api_secret, paper=cfg.alpaca_paper)
     B = bars_for(alpaca, syms, day)
     adv = {r['symbol']: float(r.get('avg_volume_daily') or 0) for r in __import__('persistence.database', fromlist=['Database']).Database().get_active_universe()}
-    tot_r = 0.0; n = 0; mism = 0
+    tot_r = 0.0; n = 0; mism = 0; book = []
     print(f"  {'sym':6s} {'live_lvl':>8s} {'spec_lvl':>8s} {'live_stop':>9s} {'spec_stop':>9s} {'spec_min':>8s} {'exit':>6s} {'R':>6s}  note")
     for sym in syms:
         m = dry.get(sym) or live.get(sym)
@@ -91,10 +91,19 @@ def main() -> int:
             mism += 1; print(f"  {sym:6s} {live_level:8.2f} {'none':>8s} {live_stop:9.2f} {'':>9s} {'':>8s} {'':>6s} {'':>6s}  SPEC HAS NO TRADE (rv/floor/r_min or later break) — live-side check"); continue
         o, h, l, c, v, mm = arr
         note = '' if abs(t.stop - live_stop) < 0.011 else 'STOP MISMATCH'
-        tot_r += t.rr; n += 1
+        tot_r += t.rr; n += 1; book.append((int(mm[t.entry_idx]), int(mm[t.exit_idx]), sym, t.rr))
         print(f"  {sym:6s} {live_level:8.2f} {t.entry / 1.0:8.2f} {live_stop:9.2f} {t.stop:9.2f} {mm[t.entry_idx] // 60:02d}:{mm[t.entry_idx] % 60:02d} {t.reason:>6s} {t.rr:+6.2f}  {note}")
     if n:
-        print(f"  would-be book (spec exits, ${risk:.0f} risk): {n} trades, {tot_r:+.1f}R = ${tot_r * risk:+,.0f} | spec-has-no-trade {mism}")
+        print(f"  all spec trades on signalled symbols: {n}, {tot_r:+.1f}R = ${tot_r * risk:+,.0f} | spec-has-no-trade {mism}")
+        # the EXECUTABLE would-be book: first-come, max_per_day, max_concurrent (dry mode never counts entries)
+        taken = []; open_exits = []
+        for em, xm, sym, rr in sorted(book):
+            open_exits = [e for e in open_exits if e > em]
+            if len(taken) >= p.max_per_day or len(open_exits) >= p.max_concurrent: continue
+            taken.append((sym, rr)); open_exits.append(xm)
+        br = sum(r for _, r in taken)
+        print(f"  EXECUTABLE would-be book (first {p.max_per_day}/day, {p.max_concurrent} concurrent, ${risk:.0f} risk): {len(taken)} trades, {br:+.1f}R = ${br * risk:+,.0f} | {[(s_, round(r, 2)) for s_, r in taken]}")
+        print(f"  GATE 6 (positive would-be day): {'PASS' if br > 0 else 'FAIL'}")
     return 0
 
 
