@@ -220,3 +220,17 @@ best trades are above it.
 TEST agrees). The $5 floor stays for now (the $5–20 bands are positive with the gate, VAL $10–20 marginal);
 the dry week logs price per signal and the $20 question is re-read on that. Today's dry book with the gate:
 7 trades +1.7R vs −4.2R ungated. Exit variants under real spreads (target +spread / both widened): §9.
+
+### 8a. Price floor decided on the history (9/14 19:40 UTC, owner: "why score tomorrow and not use historical data")
+The price split meets the same pre-registered rule as the spread gate → **`min_price: 20`** (config + template), live from
+the 9/15 boot. Capacity/weekly check on all 38,953 spec signals with the gate modeled as a cost filter independent of R
+(42% random pass; cost 8% of R when passing, 30% when not — the study medians), 12/day, 4 concurrent:
+
+| book | trades/wk | net R/trade T/V/T | weekly net R | weeks green | worst week |
+|---|---|---|---|---|---|
+| $5, no gate (today's book) | 51–54 | +0.06 / +0.01 / +0.05 | +3.3 / +0.7 / +2.6 | 28/53 · 13/22 · 9/14 | −22 / −26 / −16 |
+| $5 + gate | 44–50 | +0.14 / +0.19 / +0.22 | +6.2 / +9.5 / +10.7 | 35/53 · 17/22 · 12/14 | −21 / −7 / −7 |
+| **$20 + gate** | 24–36 (5–8/day) | **+0.25 / +0.28 / +0.34** | +6.1 / +10.1 / +10.8 | **40/53 · 20/22 · 14/14** | **−10 / −8 / +0.4** |
+
+Same weekly R as the $5 book with a third fewer, better trades; 4 concurrent is the binding constraint, not 12/day.
+The EOD check scores the dry book at both floors daily as the plumbing check, not the decision.
