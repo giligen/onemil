@@ -234,3 +234,16 @@ the 9/15 boot. Capacity/weekly check on all 38,953 spec signals with the gate mo
 
 Same weekly R as the $5 book with a third fewer, better trades; 4 concurrent is the binding constraint, not 12/day.
 The EOD check scores the dry book at both floors daily as the plumbing check, not the decision.
+
+## 9. Exit variants under real spreads (`spread_exit_variants.py`, 1,908 quoted signals re-walked from bars; costs charged identically)
+
+| book | V0 baseline (target +2R) | V1 target +2R+spread | V2 stop −spread, target +2(R+spread) |
+|---|---|---|---|
+| all ≥ $5, $ per $100 risk T/V/T | 11.9 / 7.6 / 6.9 | 13.2 / 7.4 / 7.3 | 19.2 / 13.7 / 13.6 |
+| spread ≤ 15% of R | 31.8 / 22.2 / 28.4 | 32.2 / 22.5 / 28.8 | 35.3 / 23.2 / 28.9 |
+| **gate + price ≥ $20 (the live book)** | **35.5 / 36.1 / 44.9** | 35.5 / 35.7 / 44.6 | 37.3 / 33.4 / 43.7 |
+
+V1 is a wash everywhere (fewer targets, bigger payoff). V2 helps a lot on the ungated population (stop-outs 50% → 43%)
+but NOT inside the gated $20 book (up in TRAIN, down in VAL and TEST): the widening only pays where the spread is wide
+relative to R, which the gate already excludes. **Exits unchanged.** The live book nets +0.35 to +0.45R per trade
+after realistic costs in every split.

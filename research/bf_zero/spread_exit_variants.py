@@ -17,8 +17,10 @@ ROOT = '/home/ec2-user/onemil'; os.chdir(ROOT); sys.path.insert(0, ROOT); sys.pa
 import build_candidates as B                      # bar loader over cache + side DBs
 from trading.hod_break import HodBreakParams, detect, OPEN_MINUTE, FLAT_MINUTE
 D = 'research/bf_zero'; P = HodBreakParams()
-d = pd.read_csv(f'{D}/spread_study.csv', dtype={'symbol': str}); d = d[d.n_quotes > 0].copy()
+d = pd.read_csv(f'{D}/spread_study_clean.csv', dtype={'symbol': str}); d = d[d.n_quotes > 0].copy()
 d['split'] = np.where(d.day < '2026-01-01', 'TRAIN', np.where(d.day < '2026-06-01', 'VAL', 'TEST'))
+spec = pd.read_csv(f'{D}/spec_trades.csv', dtype={'symbol': str})[['day', 'symbol', 'entry_m', 'adv20']]
+d = d.merge(spec, on=['day', 'symbol'], how='inner')
 print('quoted signals', len(d), flush=True)
 
 
@@ -38,8 +40,10 @@ for n, (day, sub) in enumerate(d.groupby('day')):
         if gg is None: continue
         rth = gg[(gg.m >= OPEN_MINUTE) & (gg.m < 960)].reset_index(drop=True)
         o, h, l, c, v = (rth[k].values.astype(float) for k in ('o', 'h', 'l', 'c', 'v')); m = rth.m.values.astype(int)
-        sig = detect(o, h, l, v, m, 0.0, HodBreakParams(rv_lo=0.0, rv_hi=1e9))   # rv already satisfied by construction; re-find the same break
-        if sig is None or sig.bar_idx + 1 >= len(o): continue
+        idx = np.flatnonzero(m == int(r.entry_m) - 1)                # the stored signal's break bar
+        if not len(idx): continue
+        i0 = int(idx[0]); sig = detect(o, h, l, v, m, float(r.adv20), P, start_idx=i0)   # the SAME break the study scored
+        if sig is None or sig.bar_idx != i0 or sig.bar_idx + 1 >= len(o): continue
         i = sig.bar_idx + 1; nxt = float(o[i]); sp = float(r.spread_last)
         if nxt > sig.level * (1 + P.cap): continue
         fill = nxt + sp / 2                                          # pay the ask
