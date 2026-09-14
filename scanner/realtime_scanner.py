@@ -671,6 +671,11 @@ class RealtimeScanner:
                 self.macd_engine.force_close_all()
             if self.orb_engine is not None:
                 self.orb_engine.force_close_all()
+            if self.hod_engine is not None:
+                try:
+                    self.hod_engine.force_close_all()
+                except Exception as e:
+                    logger.error(f"HOD-break shutdown close raised: {e}")
             if self.ignition_engine is not None:
                 try:
                     self.ignition_engine.force_close_all()

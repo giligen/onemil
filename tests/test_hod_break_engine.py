@@ -26,7 +26,7 @@ def cfg(**over):
 @pytest.fixture
 def trades_db(tmp_path):
     p = tmp_path / 'trades.db'
-    con = sqlite3.connect(p); con.execute("create table trades (id integer primary key, strategy text, trade_date text, pnl real)"); con.commit(); con.close()
+    con = sqlite3.connect(p); con.execute("create table trades (id integer primary key, strategy text, trade_date text, pnl real, symbol text, order_status text)"); con.commit(); con.close()
     return p
 
 
@@ -92,7 +92,7 @@ class TestGates:
         mock_alpaca.submit_bracket_order.assert_called_once()
         kw = mock_alpaca.submit_bracket_order.call_args.kwargs
         assert kw['symbol'] == 'ABC' and kw['side'] == 'buy' and kw['limit_price'] == pytest.approx(round(11.0 * 1.006, 2))
-        assert kw['sl_price'] == pytest.approx(10.7) and kw['tp_price'] == pytest.approx(round(kw['limit_price'] + 2 * (11.05 - 10.7), 2))   # R on the ask
+        assert kw['sl_price'] == pytest.approx(10.7) and kw['tp_price'] == pytest.approx(round(11.05 + 2 * (11.05 - 10.7), 2))   # R and target on the ask (expected fill)
         assert kw['qty'] == int(100.0 / (11.05 - 10.7))          # sized on the ask (the expected fill), not the limit
         rec = mock_db.save_trade.call_args.args[0]
         assert rec['strategy'] == STRATEGY_NAME and rec['order_status'] == 'pending_new' and json.loads(rec['pattern_data'])['tp_leg_id'] == 'tp1'
@@ -155,9 +155,22 @@ class TestLifecycle:
 
     def test_timeout_cancels_unfilled(self, engine, mock_alpaca, mock_db):
         pos = self._pending(engine); pos.submitted_at -= timedelta(seconds=100)
+        mock_alpaca.get_order.side_effect = [{'status': 'accepted', 'filled_qty': 0}, {'status': 'canceled', 'filled_qty': 0, 'filled_avg_price': None}]   # working → cancel → REST confirms
         engine._process_pending_fills()
         mock_alpaca.cancel_order.assert_called_with('o1'); assert 'ABC' not in engine.positions
         assert mock_db.update_trade.call_args.args[1]['order_status'] == 'time_stop_canceled'
+
+    def test_timeout_with_unconfirmed_cancel_keeps_the_order_pending(self, engine, mock_alpaca, mock_db):
+        pos = self._pending(engine); pos.submitted_at -= timedelta(seconds=100)
+        mock_alpaca.get_order.return_value = {'status': 'accepted', 'filled_qty': 0}      # cancel not (yet) confirmed
+        engine._process_pending_fills()
+        assert 'ABC' in engine.positions and engine.positions['ABC'].status == 'pending'   # never dropped on an unconfirmed cancel
+
+    def test_no_fill_frees_the_day_slot_but_not_the_symbol(self, engine, mock_alpaca):
+        pos = self._pending(engine); pos.submitted_at -= timedelta(seconds=100)
+        mock_alpaca.get_order.return_value = {'status': 'canceled', 'filled_qty': 0}
+        engine._process_pending_fills()
+        assert 'ABC' not in engine.entered_today and 'ABC' in engine.seen_today
 
     def test_timeout_with_partial_fill_keeps_the_shares(self, engine, mock_alpaca):
         pos = self._pending(engine); pos.submitted_at -= timedelta(seconds=100)
@@ -217,7 +230,7 @@ class TestRestart:
              'pattern_data': json.dumps({'level': 11.0, 'tp_leg_id': 'tpA', 'sl_leg_id': 'slA'})},
             {'id': 2, 'symbol': 'BBB', 'order_id': 'o8', 'order_status': 'pending_new', 'shares': 5, 'entry_price': 5.03, 'stop_loss_price': 4.9, 'take_profit_price': 5.3, 'pattern_data': '{}'},
         ]
-        mock_alpaca.get_open_positions.return_value = [{'symbol': 'AAA'}]
+        mock_alpaca.get_open_positions.return_value = [{'symbol': 'AAA', 'qty': 10}]
         assert e.sync_positions() == 2
         assert e.positions['AAA'].status == 'open' and e.positions['AAA'].tp_leg_id == 'tpA' and e.positions['BBB'].status == 'pending'
 
@@ -284,7 +297,7 @@ class TestRMinOnTheAsk:
 
 class TestRestartSafeCaps:
     def test_day_cap_counts_closed_rows_from_the_db(self, engine, trades_db):
-        con = sqlite3.connect(trades_db); con.execute("alter table trades add column symbol text"); con.execute("alter table trades add column order_status text")
+        con = sqlite3.connect(trades_db)
         for i in range(8): con.execute("insert into trades(strategy, trade_date, pnl, symbol, order_status) values (?,?,?,?,?)", (STRATEGY_NAME, engine.session_date, 1.0, f'S{i}', 'closed'))
         con.execute("insert into trades(strategy, trade_date, pnl, symbol, order_status) values (?,?,?,?,?)", (STRATEGY_NAME, engine.session_date, None, 'DEAD', 'time_stop_canceled'))
         con.commit(); con.close()
@@ -292,8 +305,24 @@ class TestRestartSafeCaps:
         assert engine._entered_today_count() == 8 and 'DEAD' not in engine.entered_today
 
     def test_symbol_closed_earlier_today_is_not_re_entered_after_restart(self, engine, mock_alpaca, trades_db):
-        con = sqlite3.connect(trades_db); con.execute("alter table trades add column symbol text"); con.execute("alter table trades add column order_status text")
+        con = sqlite3.connect(trades_db)
         con.execute("insert into trades(strategy, trade_date, pnl, symbol, order_status) values (?,?,?,?,?)", (STRATEGY_NAME, engine.session_date, -100.0, 'ABC', 'closed')); con.commit(); con.close()
         engine.candidates.clear(); engine.entered_today.clear()
         admit(engine)
         assert 'ABC' not in engine.candidates and not mock_alpaca.submit_bracket_order.called
+
+
+class TestBackfillGuard:
+    def test_not_evaluated_until_the_0930_bar_is_present(self, engine, mock_alpaca):
+        admit(engine)
+        tape = drive_then_consolidate()
+        engine._ingest_bars('ABC', bars_df(tape[3:9], minute0=573))           # stream only: starts 09:33, ends on the break bar
+        assert not mock_alpaca.submit_bracket_order.called and not engine.candidates['ABC'].backfill_ok
+        engine._ingest_bars('ABC', bars_df(tape[:3]))                          # the backfill arrives → merged from 09:30 → evaluated
+        assert engine.candidates['ABC'].backfill_ok and mock_alpaca.submit_bracket_order.called
+
+    def test_exit_cancels_the_sibling_leg(self, engine, mock_alpaca):
+        admit(engine); engine._ingest_bars('ABC', bars_df(drive_then_consolidate()[:-1])); pos = engine.positions['ABC']; pos.status = 'open'; pos.fill_price = 11.05
+        mock_alpaca.get_order.side_effect = lambda oid: {'status': 'filled', 'filled_qty': pos.shares, 'filled_avg_price': pos.target} if oid == 'tp1' else {'status': 'accepted', 'filled_qty': 0}
+        engine.check_exits()
+        assert 'sl1' in [c.args[0] for c in mock_alpaca.cancel_order.call_args_list]

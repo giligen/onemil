@@ -40,8 +40,13 @@ def journal(day: str) -> list:
 
 
 def bars_for(alpaca: AlpacaClient, symbols: list, day: str) -> dict:
-    """RTH 1-min bars for `day` as arrays (o,h,l,c,v,m) per symbol."""
-    got = alpaca.get_1min_bars_multi(symbols, lookback_minutes=420) if symbols else {}
+    """RTH 1-min bars for `day` as arrays (o,h,l,c,v,m) per symbol — explicit window (works for past days and after the close)."""
+    d0 = datetime.strptime(day, '%Y-%m-%d').replace(tzinfo=ET)
+    start = d0.replace(hour=9, minute=30).astimezone(timezone.utc); end = d0.replace(hour=16, minute=0).astimezone(timezone.utc)
+    got = {}
+    for sym in symbols:
+        try: got[sym] = alpaca.get_historical_1min_bars(sym, start, end)
+        except Exception as e: print(f'  {sym}: bar fetch failed ({e})')
     out = {}
     for sym, df in got.items():
         if df is None or not len(df):
@@ -112,8 +117,8 @@ def main() -> int:
         if arr is None: continue
         o, h, l, c, v, mm = arr
         level, limit, stop, target = (float(m.group(k)) for k in (2, 3, 4, 5))
-        hh, mn = int(m.string.split(' | ')[0].split(' ')[1][:2]) if False else (0, 0), 0
-        ts = re.search(r'(\d{2}):(\d{2}):\d{2} \|', m.string); sig_min = int(ts.group(1)) * 60 + int(ts.group(2)) - 4 * 60   # journal is UTC (ET+4 in Sept)
+        ts = re.match(r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4})', m.string)
+        t_et = datetime.strptime(ts.group(1), '%Y-%m-%dT%H:%M:%S%z').astimezone(ET); sig_min = t_et.hour * 60 + t_et.minute   # DST-safe
         idx = np.flatnonzero(mm >= sig_min)                   # the first bar at/after the signal minute = the next open
         if not len(idx): print(f"  {sym:6s} no bars after the signal"); continue
         i = int(idx[0]); nxt = float(o[i])
