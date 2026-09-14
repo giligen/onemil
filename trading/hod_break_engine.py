@@ -265,10 +265,8 @@ class HodBreakEngine:
         if len(self.positions) >= p.max_concurrent:
             logger.info(f"[HOD] {sym}: concurrency cap {p.max_concurrent} — skip (signal not re-armed)"); cand.rejected_reason = 'concurrency'; return
         limit = round(sig.level * (1.0 + p.cap), 2); stop = round(sig.stop, 2)
-        r = limit - stop
-        if r <= 0 or r / limit * 100.0 < p.min_r_pct:
+        if stop >= limit:
             cand.rejected_reason = 'r_min'; return
-        target = round(limit + p.target_r * r, 2)
         q = self._quote(sym)
         if q is None:
             cand.rejected_reason = 'no_quote'; logger.warning(f"[HOD] {sym}: no quote — fail closed, no order"); return
@@ -278,12 +276,19 @@ class HodBreakEngine:
             cand.rejected_reason = 'spread'; logger.info(f"[HOD] {sym}: spread {spread_bps:.0f} bps > {self.max_spread_bps:.0f} — skip"); return
         if ask > limit:
             cand.rejected_reason = 'no_chase'; logger.info(f"[HOD] {sym}: ask {ask:.2f} above cap {limit:.2f} — NO CHASE, skip"); return
-        shares = shares_for(self.risk_usd, limit, stop)
+        # R, the r_min gate and the size use the EXPECTED FILL = the ask (the spec uses the next bar's open, the price
+        # actually paid); measuring against the limit over-states R and let tight stops through (9/14 EOD parity: 11 of 35).
+        entry_est = round(ask, 2)
+        r = entry_est - stop
+        if r <= 0 or r / entry_est * 100.0 < p.min_r_pct:
+            cand.rejected_reason = 'r_min'; logger.info(f"[HOD] {sym}: stop {stop:.2f} within {p.min_r_pct}% of the ask {entry_est:.2f} — skip"); return
+        target = round(limit + p.target_r * r, 2)          # legs from the LIMIT (conservative: a fill below the limit makes the real target < 2R)
+        shares = shares_for(self.risk_usd, entry_est, stop)
         shares = min(shares, int(self.max_notional_usd // limit))
         if shares < 1:
             cand.rejected_reason = 'size'; return
-        msg = (f"{sym} level {sig.level:.2f} limit {limit:.2f} stop {stop:.2f} target {target:.2f} R {r:.2f} ({r / limit * 100:.1f}%) "
-               f"x{shares} | +{sig.dist_open_pct:.1f}% from open, rv {sig.rv_profile:.1f}, spread {spread_bps:.0f} bps")
+        msg = (f"{sym} level {sig.level:.2f} limit {limit:.2f} stop {stop:.2f} target {target:.2f} R {r:.2f} ({r / entry_est * 100:.1f}%) "
+               f"x{shares} | +{sig.dist_open_pct:.1f}% from open, rv {sig.rv_profile:.1f}, spread {spread_bps:.0f} bps, ask {entry_est:.2f}")
         if self.dry_run:
             if not cand.dry_logged:
                 cand.dry_logged = True; cand.rejected_reason = 'dry_run'

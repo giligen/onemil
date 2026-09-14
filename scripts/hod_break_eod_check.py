@@ -66,8 +66,12 @@ def main() -> int:
     day = sys.argv[1] if len(sys.argv) > 1 else datetime.now(timezone.utc).astimezone(ET).strftime('%Y-%m-%d')
     cfg = Config(); hb = cfg.hod_break_cfg; p = HodBreakParams(**hb['params']); risk = hb['risk_usd']
     lines = journal(day)
-    dry = {m.group(1): m for m in (RX_DRY.search(ln) for ln in lines) if m}
-    live = {m.group(2): m for m in (RX_BUY.search(ln) for ln in lines) if m}
+    dry = {}; live = {}
+    for ln in lines:                                    # FIRST signal per symbol (later re-breaks are by-products)
+        m = RX_DRY.search(ln)
+        if m and m.group(1) not in dry: dry[m.group(1)] = m
+        m = RX_BUY.search(ln)
+        if m and m.group(2) not in live: live[m.group(2)] = m
     errors = [ln for ln in lines if 'ERROR' in ln or 'Traceback' in ln or 'queue full' in ln]
     fills = [ln for ln in lines if '[HOD] FILLED' in ln]; exits = [ln for ln in lines if '[HOD] EXIT' in ln]
     print(f"HOD-BREAK EOD {day} — mode {'DRY' if hb['dry_run'] else 'LIVE'} | dry signals {len(dry)} | live orders {len(live)} | fills {len(fills)} | exits {len(exits)} | errors {len(errors)}")
@@ -88,13 +92,54 @@ def main() -> int:
             print(f"  {sym:6s} {live_level:8.2f} {'?':>8s} — no bars fetched"); continue
         t = simulate(*arr, adv.get(sym, 0.0), p)
         if t is None:
-            mism += 1; print(f"  {sym:6s} {live_level:8.2f} {'none':>8s} {live_stop:9.2f} {'':>9s} {'':>8s} {'':>6s} {'':>6s}  SPEC HAS NO TRADE (rv/floor/r_min or later break) — live-side check"); continue
+            from trading.hod_break import detect, entry_fill
+            sig = detect(*arr[:3], arr[4], arr[5], adv.get(sym, 0.0), p)
+            if sig is None: why = 'NO QUALIFYING BREAK on REST bars (rv/floor/consolidation differ from the engine bars)'
+            else:
+                nxt = arr[0][sig.bar_idx + 1] if sig.bar_idx + 1 < len(arr[0]) else None
+                why = f"first break {int(arr[5][sig.bar_idx]) // 60:02d}:{int(arr[5][sig.bar_idx]) % 60:02d} lvl {sig.level:.2f}: " + ('no next bar' if nxt is None else (f'NO-CHASE, next open {nxt:.2f} > cap' if entry_fill(nxt, sig.level, p) is None else 'stop >= entry or r_min'))
+            mism += 1; print(f"  {sym:6s} {live_level:8.2f} {'none':>8s} {live_stop:9.2f} {'':>9s} {'':>8s} {'':>6s} {'':>6s}  SPEC NO TRADE: {why}"); continue
         o, h, l, c, v, mm = arr
         note = '' if abs(t.stop - live_stop) < 0.011 else 'STOP MISMATCH'
         tot_r += t.rr; n += 1; book.append((int(mm[t.entry_idx]), int(mm[t.exit_idx]), sym, t.rr))
         print(f"  {sym:6s} {live_level:8.2f} {t.entry / 1.0:8.2f} {live_stop:9.2f} {t.stop:9.2f} {mm[t.entry_idx] // 60:02d}:{mm[t.entry_idx] % 60:02d} {t.reason:>6s} {t.rr:+6.2f}  {note}")
+    # ---- the DRY-RUN book: the engine's OWN logged signals (level/limit/stop/target) walked on today's bars ----
+    from trading.hod_break import STOP_FILL_SLIP
+    dbook = []
+    print("\n  DRY-RUN BOOK — the engine's own signals, filled at the next open if <= the logged limit, logged stop/target walked forward:")
+    for sym, m in dry.items():
+        arr = B.get(sym)
+        if arr is None: continue
+        o, h, l, c, v, mm = arr
+        level, limit, stop, target = (float(m.group(k)) for k in (2, 3, 4, 5))
+        hh, mn = int(m.string.split(' | ')[0].split(' ')[1][:2]) if False else (0, 0), 0
+        ts = re.search(r'(\d{2}):(\d{2}):\d{2} \|', m.string); sig_min = int(ts.group(1)) * 60 + int(ts.group(2)) - 4 * 60   # journal is UTC (ET+4 in Sept)
+        idx = np.flatnonzero(mm >= sig_min)                   # the first bar at/after the signal minute = the next open
+        if not len(idx): print(f"  {sym:6s} no bars after the signal"); continue
+        i = int(idx[0]); nxt = float(o[i])
+        if nxt > limit: print(f"  {sym:6s} {level:8.2f} next open {nxt:.2f} > limit {limit:.2f} — no fill, no chase"); continue
+        entry = nxt; r = entry - stop
+        if r <= 0: print(f"  {sym:6s} stop {stop:.2f} >= fill {entry:.2f} — no trade"); continue
+        why, px, k = 'OPEN', float(c[-1]), len(o) - 1
+        for j in range(i + 1, len(o)):
+            if int(mm[j]) >= p.flat_minute: why, px, k = 'eod', float(o[j]), j; break
+            if l[j] <= stop: why, px, k = 'stop', float(min(stop, o[j]) * (1 - STOP_FILL_SLIP)), j; break
+            if c[j] >= target: why, px, k = 'target', target, j; break
+        shares = int(m.group(8)); usd = shares * (px - entry)          # dollars = shares x move (the logged size), not R x risk
+        rr = (px - entry) / r; dbook.append((int(mm[i]), int(mm[k]), sym, rr, usd))
+        print(f"  {sym:6s} {level:8.2f} fill {entry:6.2f} stop {stop:6.2f} target {target:6.2f} {int(mm[i]) // 60:02d}:{int(mm[i]) % 60:02d} {why:>6s} {rr:+6.2f}")
+    if dbook:
+        taken = []; open_exits = []
+        for em, xm, sym, rr, usd in sorted(dbook):
+            open_exits = [e for e in open_exits if e > em]
+            if len(taken) >= p.max_per_day or len(open_exits) >= p.max_concurrent: continue
+            taken.append((sym, rr, usd)); open_exits.append(xm)
+        dr = sum(r for _, r, _ in taken); dusd = sum(u for _, _, u in taken); allr = sum(r for *_, r, _ in dbook); allusd = sum(u for *_, u in dbook)
+        print(f"  DRY-RUN all filled signals: {len(dbook)}, {allr:+.1f}R, ${allusd:+,.0f} at the logged sizes")
+        print(f"  DRY-RUN EXECUTABLE book (first {p.max_per_day}/day, {p.max_concurrent} concurrent, logged sizes): {len(taken)} trades, {dr:+.1f}R, ${dusd:+,.0f} | {[(s_, round(r, 2)) for s_, r, _ in taken]}")
+        print(f"  GATE 6 on the DRY-RUN book: {'PASS' if dr > 0 else 'FAIL'}")
     if n:
-        print(f"  all spec trades on signalled symbols: {n}, {tot_r:+.1f}R = ${tot_r * risk:+,.0f} | spec-has-no-trade {mism}")
+        print(f"\n  all spec trades on signalled symbols: {n}, {tot_r:+.1f}R = ${tot_r * risk:+,.0f} | spec-has-no-trade {mism}")
         # the EXECUTABLE would-be book: first-come, max_per_day, max_concurrent (dry mode never counts entries)
         taken = []; open_exits = []
         for em, xm, sym, rr in sorted(book):

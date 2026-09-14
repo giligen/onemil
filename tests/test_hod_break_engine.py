@@ -92,8 +92,8 @@ class TestGates:
         mock_alpaca.submit_bracket_order.assert_called_once()
         kw = mock_alpaca.submit_bracket_order.call_args.kwargs
         assert kw['symbol'] == 'ABC' and kw['side'] == 'buy' and kw['limit_price'] == pytest.approx(round(11.0 * 1.006, 2))
-        assert kw['sl_price'] == pytest.approx(10.7) and kw['tp_price'] == pytest.approx(round(kw['limit_price'] + 2 * (kw['limit_price'] - 10.7), 2))
-        assert kw['qty'] == int(100.0 / (kw['limit_price'] - 10.7))
+        assert kw['sl_price'] == pytest.approx(10.7) and kw['tp_price'] == pytest.approx(round(kw['limit_price'] + 2 * (11.05 - 10.7), 2))   # R on the ask
+        assert kw['qty'] == int(100.0 / (11.05 - 10.7))          # sized on the ask (the expected fill), not the limit
         rec = mock_db.save_trade.call_args.args[0]
         assert rec['strategy'] == STRATEGY_NAME and rec['order_status'] == 'pending_new' and json.loads(rec['pattern_data'])['tp_leg_id'] == 'tp1'
         assert engine.positions['ABC'].status == 'pending' and 'ABC' in engine.entered_today
@@ -252,3 +252,21 @@ class TestBarMerge:
         engine._ingest_bars('ABC', bars_df(tape[3:9], minute0=573))          # ends on the break bar → signal
         kw = mock_alpaca.submit_bracket_order.call_args.kwargs
         assert kw['limit_price'] == pytest.approx(round(11.0 * 1.006, 2))   # HOD 11.0 from the EARLY bars, not from the stream
+
+
+class TestRMinOnTheAsk:
+    """9/14 EOD parity: R must be measured on the expected fill (the ask), as the spec measures it on the next open."""
+
+    def test_tight_stop_vs_ask_is_rejected_even_if_ok_vs_limit(self, engine, mock_alpaca):
+        # level 11.0 → limit 11.07; stop 10.96 gives 1.0% vs the limit but only 0.9% vs an ask of 11.06
+        tape = drive_then_consolidate()
+        tape = tape[:3] + [(10.99, 10.995, 10.96, 10.97, 3000)] * 5 + [tape[-2]]
+        mock_alpaca.get_latest_quote.return_value = {'bid_price': 11.05, 'ask_price': 11.06}
+        admit(engine); engine._ingest_bars('ABC', bars_df(tape))
+        assert not mock_alpaca.submit_bracket_order.called and engine.candidates['ABC'].rejected_reason == 'r_min'
+
+    def test_size_uses_the_ask(self, engine, mock_alpaca):
+        mock_alpaca.get_latest_quote.return_value = {'bid_price': 11.00, 'ask_price': 11.02}
+        admit(engine); engine._ingest_bars('ABC', bars_df(drive_then_consolidate()[:-1]))
+        kw = mock_alpaca.submit_bracket_order.call_args.kwargs
+        assert kw['qty'] == int(100.0 / (11.02 - 10.7)) and kw['limit_price'] == pytest.approx(round(11.0 * 1.006, 2))
