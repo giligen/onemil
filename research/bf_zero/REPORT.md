@@ -195,3 +195,28 @@ the population superset-exact; this is the independent check).
   rule is an open question for the owner.
 - 34 trades/week × $100 risk is the proposed start; the ramp on positive realized P&L (like BF P1)
   is the path, never the backtest.
+
+## 8. Spread study (pre-registered 9/14, `spread_study.py` → `spread_study.md`; scoring `spread_score.py`)
+
+6,847 of 7,000 sampled spec signals (price ≥ $5, 2,266 / 2,278 / 2,303 per split) with the real NBBO at the
+signal minute (Alpaca SIP quotes). Spread as a fraction of R, quintiles cut on TRAIN.
+
+**The spread is a cost, not a signal**: raw mean R is flat across spread quintiles (+0.17 to +0.45, no order).
+Net of cost it is monotone in every split. Realistic cost = half a spread on entry (ask vs mid) + half a spread
+on the way out when the exit is not the target:
+
+| book | TRAIN | VAL | TEST | share of signals |
+|---|---|---|---|---|
+| no gate | +0.049 | −0.003 | +0.010 | 100% |
+| spread ≤ 15% of R | **+0.283** | **+0.195** | **+0.260** | 42% |
+| ≤ 15% and price ≥ $20 | +0.341 | +0.350 | +0.444 | 16% |
+
+By price band, net, with the gate: $5–10 +0.28 / +0.17 / +0.13 · $10–20 +0.20 / +0.04 / +0.20 · $20–50
++0.34 / +0.33 / +0.38 · $50+ +0.35 / +0.40 / +0.59. Spread in bps is FLAT across price (~39 bps everywhere);
+the price gradient is signal quality, not cost. The old $20 CAP was wrong in the strongest possible way: the
+best trades are above it.
+
+**Adopted**: `max_spread_frac_r: 0.15` (the pre-registered rule: excluded buckets negative on TRAIN and VAL,
+TEST agrees). The $5 floor stays for now (the $5–20 bands are positive with the gate, VAL $10–20 marginal);
+the dry week logs price per signal and the $20 question is re-read on that. Today's dry book with the gate:
+7 trades +1.7R vs −4.2R ungated. Exit variants under real spreads (target +spread / both widened): §9.

@@ -543,7 +543,7 @@ hod_break:
   min_price: 5.0        # 9/14: cost rule — under $5 the parity book is +0.08..0.12R and the sim is blind to spreads; >= $5: +0.30/+0.27/+0.33R (REPORT §6)
   min_adv20: 100000
   max_spread_bps: 100
-  max_spread_frac_r: 0      # 9/14: cost gate candidate — skip when spread > this fraction of R (0.15 proposed; 0 = off until the dry week decides)
+  max_spread_frac_r: 0.15   # 9/14 spread study (6,847 historical signals, real NBBO): net of cost the book is ~0 without a gate and +0.28/+0.20/+0.26R (TRAIN/VAL/TEST) with spread <= 15% of R; keeps 42% of signals. research/bf_zero/spread_study.md
   order_timeout_s: 75
   consol_bars: 5
   consol_pct: 0.04
