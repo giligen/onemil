@@ -144,14 +144,14 @@ def main() -> int:
         print(f"  DRY-RUN all filled signals: {len(dbook)}, {allr:+.1f}R, ${allusd:+,.0f} at the logged sizes")
         print(f"  DRY-RUN EXECUTABLE book (first {p.max_per_day}/day, {p.max_concurrent} concurrent, logged sizes): {len(taken)} trades, {dr:+.1f}R, ${dusd:+,.0f} | {[(s_, round(r, 2)) for s_, r, _ in taken]}")
         print(f"  GATE 6 on the DRY-RUN book: {'PASS' if dr > 0 else 'FAIL'}")
-        for frac in (0.15, 0.10):
+        for frac, floor in ((0.15, 5.0), (0.15, 20.0), (0.10, 20.0)):
             taken = []; open_exits = []
             for em, xm, sym, rr, usd, sf in sorted(gated):
-                if sf > frac: continue
+                if sf > frac or float(dry[sym].group(2)) < floor: continue
                 open_exits = [e for e in open_exits if e > em]
                 if len(taken) >= p.max_per_day or len(open_exits) >= p.max_concurrent: continue
                 taken.append((sym, rr, usd)); open_exits.append(xm)
-            print(f"  DRY-RUN book with spread <= {frac:.0%} of R: {len(taken)} trades, {sum(r for _, r, _ in taken):+.1f}R, ${sum(u for _, _, u in taken):+,.0f} | signals passing the gate {sum(1 for g in gated if g[5] <= frac)}/{len(gated)}")
+            print(f"  DRY-RUN book with spread <= {frac:.0%} of R and price >= ${floor:.0f}: {len(taken)} trades, {sum(r for _, r, _ in taken):+.1f}R, ${sum(u for _, _, u in taken):+,.0f} | signals passing {sum(1 for g in gated if g[5] <= frac and float(dry[g[2]].group(2)) >= floor)}/{len(gated)}")
     if n:
         print(f"\n  all spec trades on signalled symbols: {n}, {tot_r:+.1f}R = ${tot_r * risk:+,.0f} | spec-has-no-trade {mism}")
         # the EXECUTABLE would-be book: first-come, max_per_day, max_concurrent (dry mode never counts entries)

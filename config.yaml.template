@@ -540,7 +540,7 @@ hod_break:
   daily_kill_usd: -600
   weekly_kill_usd: -1500
   max_notional_usd: 5000
-  min_price: 5.0        # 9/14: cost rule — under $5 the parity book is +0.08..0.12R and the sim is blind to spreads; >= $5: +0.30/+0.27/+0.33R (REPORT §6)
+  min_price: 20.0       # 9/14 spread study (REPORT §8): with the 15% spread gate, net of cost $5-20 = +0.04..+0.28R vs $20-50 = +0.33..+0.38R and $50+ = +0.35..+0.59R in ALL three splits; the same pre-registered rule that adopted the spread gate. The old $20 CAP was backwards. EOD check scores the dry book at $5 and $20 floors daily.
   min_adv20: 100000
   max_spread_bps: 100
   max_spread_frac_r: 0.15   # 9/14 spread study (6,847 historical signals, real NBBO): net of cost the book is ~0 without a gate and +0.28/+0.20/+0.26R (TRAIN/VAL/TEST) with spread <= 15% of R; keeps 42% of signals. research/bf_zero/spread_study.md
