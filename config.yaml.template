@@ -554,5 +554,5 @@ hod_break:
   target_r: 2.0
   max_per_day: 8
   max_concurrent: 4
-  last_entry_minute: 930
+  last_entry_minute: 840    # 14:00 ET (owner 9/14; was 15:30 — the 16 study trades after 14:00 were negative)
   flat_minute: 955
