@@ -179,12 +179,22 @@ class TestLifecycle:
         engine.check_exits()
         assert mock_db.update_trade.call_args.args[1]['exit_reason'] == 'stop' and engine.daily_pnl < 0
 
-    def test_force_close_cancels_legs_and_closes(self, engine, mock_alpaca):
+    def test_force_close_sells_only_our_shares_and_retries_until_flat(self, engine, mock_alpaca):
         pos = self._pending(engine); pos.status = 'open'; pos.fill_price = 11.05
+        mock_alpaca.submit_limit_sell_order.return_value = {'id': 'c1', 'status': 'accepted'}
         with patch('trading.hod_break_engine.time.sleep'):
             n = engine.force_close_all()
-        assert n == 1 and mock_alpaca.cancel_order.call_count == 2 and mock_alpaca.close_position.called and pos.close_order_id == 'c1' and engine._flattened
-        mock_alpaca.get_order.side_effect = lambda oid: {'status': 'filled', 'filled_qty': pos.shares, 'filled_avg_price': 11.2} if oid == 'c1' else {'status': 'canceled', 'filled_qty': 0}
+        assert n == 1 and mock_alpaca.cancel_order.call_count == 2 and not mock_alpaca.close_position.called
+        kw = mock_alpaca.submit_limit_sell_order.call_args.args
+        assert kw[0] == 'ABC' and kw[1] == pos.shares and kw[2] == pytest.approx(round(11.00 * 0.99, 2))   # OUR qty, marketable limit off the bid
+        assert pos.close_order_id == 'c1' and not engine._flattened                                          # not flat until the sell fills
+        # the close order dies unfilled → re-submitted on the next force-close pass
+        mock_alpaca.get_order.side_effect = lambda oid: {'status': 'canceled', 'filled_qty': 0} if oid == 'c1' else {'status': 'accepted', 'filled_qty': 0}
+        mock_alpaca.submit_limit_sell_order.return_value = {'id': 'c2', 'status': 'accepted'}
+        with patch('trading.hod_break_engine.time.sleep'):
+            engine.force_close_all()
+        assert pos.close_order_id == 'c2'
+        mock_alpaca.get_order.side_effect = lambda oid: {'status': 'filled', 'filled_qty': pos.shares, 'filled_avg_price': 11.2} if oid == 'c2' else {'status': 'canceled', 'filled_qty': 0}
         engine.check_exits(); assert 'ABC' not in engine.positions
 
     def test_force_close_cancels_pending_entry(self, engine, mock_alpaca):
@@ -270,3 +280,20 @@ class TestRMinOnTheAsk:
         admit(engine); engine._ingest_bars('ABC', bars_df(drive_then_consolidate()[:-1]))
         kw = mock_alpaca.submit_bracket_order.call_args.kwargs
         assert kw['qty'] == int(100.0 / (11.02 - 10.7)) and kw['limit_price'] == pytest.approx(round(11.0 * 1.006, 2))
+
+
+class TestRestartSafeCaps:
+    def test_day_cap_counts_closed_rows_from_the_db(self, engine, trades_db):
+        con = sqlite3.connect(trades_db); con.execute("alter table trades add column symbol text"); con.execute("alter table trades add column order_status text")
+        for i in range(8): con.execute("insert into trades(strategy, trade_date, pnl, symbol, order_status) values (?,?,?,?,?)", (STRATEGY_NAME, engine.session_date, 1.0, f'S{i}', 'closed'))
+        con.execute("insert into trades(strategy, trade_date, pnl, symbol, order_status) values (?,?,?,?,?)", (STRATEGY_NAME, engine.session_date, None, 'DEAD', 'time_stop_canceled'))
+        con.commit(); con.close()
+        engine.entered_today.clear()
+        assert engine._entered_today_count() == 8 and 'DEAD' not in engine.entered_today
+
+    def test_symbol_closed_earlier_today_is_not_re_entered_after_restart(self, engine, mock_alpaca, trades_db):
+        con = sqlite3.connect(trades_db); con.execute("alter table trades add column symbol text"); con.execute("alter table trades add column order_status text")
+        con.execute("insert into trades(strategy, trade_date, pnl, symbol, order_status) values (?,?,?,?,?)", (STRATEGY_NAME, engine.session_date, -100.0, 'ABC', 'closed')); con.commit(); con.close()
+        engine.candidates.clear(); engine.entered_today.clear()
+        admit(engine)
+        assert 'ABC' not in engine.candidates and not mock_alpaca.submit_bracket_order.called

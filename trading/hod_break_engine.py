@@ -69,6 +69,7 @@ class Position:
     filled_at: Optional[datetime] = None
     status: str = 'pending'                               # pending | open
     close_order_id: Optional[str] = None
+    close_submitted_at: Optional[datetime] = None
 
 
 class HodBreakEngine:
@@ -153,7 +154,7 @@ class HodBreakEngine:
             self.drain_bar_events()
             self._process_pending_fills()
             self.check_exits()
-            if self.is_force_close_time() and not self._flattened:
+            if self.is_force_close_time() and (not self._flattened or any(p.status == 'open' for p in self.positions.values())):
                 self.force_close_all()
         except Exception as e:
             logger.error(f"[HOD] process_tick failed: {e}", exc_info=True)
@@ -164,11 +165,15 @@ class HodBreakEngine:
             symbol, price, day_open, cum_vol, above = self._mover_queue.get_nowait(); n += 1
             if symbol in self.candidates or symbol in self.entered_today or symbol in self.positions:
                 continue
+            if not self.candidates and not self.entered_today:        # first admission of the session: pull the DB set once
+                self.entered_today |= self._db_symbols_today()
+                if symbol in self.entered_today: continue
             adv = self._adv_map.get(symbol, 0.0)
             if price < self.min_price or adv < self.min_adv20 or day_open <= 0:
                 continue
             cand = Candidate(symbol=symbol, day_open=day_open, adv20=adv)
             self.candidates[symbol] = cand
+            logger.info(f"[HOD] candidate {symbol} admitted: {price:.2f} +{above:.1f}% from open {day_open:.2f}, adv20 {adv:,.0f} (#{len(self.candidates)} today)")
             self._subscribe_and_backfill(cand)
 
     def _subscribe_and_backfill(self, cand: Candidate) -> None:
@@ -416,9 +421,13 @@ class HodBreakEngine:
     def is_force_close_time(self) -> bool:
         return self._minute_of_day() >= self.params.flat_minute
 
+    FC_RESUBMIT_S = 60.0
+
     def force_close_all(self) -> int:
-        """Cancel pending entries, cancel legs, market-close open positions. Idempotent per session."""
-        n = 0
+        """Cancel pending entries; cancel legs; sell OUR shares (never `close_position`, which would liquidate a
+        position the owner or another strategy holds in the same symbol) with a marketable limit; re-check every
+        tick and re-submit until every position is gone. `_flattened` only when nothing is left."""
+        n = 0; now = datetime.now(timezone.utc)
         for sym, pos in list(self.positions.items()):
             if pos.status == 'pending':
                 try: self.alpaca.cancel_order(pos.order_id)
@@ -426,18 +435,32 @@ class HodBreakEngine:
                 st = self._order_status(pos.order_id) or {}
                 if int(st.get('filled_qty') or 0) > 0: self._confirm_fill(pos, st)
                 else: self._drop_pending(pos, 'time_stop_canceled'); continue
+            if pos.close_order_id:
+                st = self._order_status(pos.close_order_id) or {}
+                status = str(st.get('status', '')).lower(); age = (now - (pos.close_submitted_at or now)).total_seconds()
+                if status in ('filled',) or (status in _TERMINAL and int(st.get('filled_qty') or 0) >= pos.shares):
+                    continue                                       # check_exits records it
+                if status not in _TERMINAL and age < self.FC_RESUBMIT_S:
+                    continue                                       # still working
+                try: self.alpaca.cancel_order(pos.close_order_id)
+                except Exception: pass
+                logger.warning(f"[HOD] FORCE CLOSE {sym}: close order {pos.close_order_id} {status or 'unknown'} after {age:.0f}s — re-submitting")
             for leg in (pos.tp_leg_id, pos.sl_leg_id):
                 if leg:
                     try: self.alpaca.cancel_order(leg)
                     except Exception as e: logger.warning(f"[HOD] FC leg cancel {sym} failed: {e}")
             time.sleep(0.5)
+            q = self._quote(sym); ref = q[0] if q else (pos.fill_price or pos.limit_price)
+            limit = round(ref * 0.99, 2)
             try:
-                od = self.alpaca.close_position(sym); pos.close_order_id = str(od.get('id') or '') or None; n += 1
-                logger.info(f"[HOD] FORCE CLOSE {sym} submitted ({pos.close_order_id})")
+                od = self.alpaca.submit_limit_sell_order(sym, pos.shares, limit)
+                pos.close_order_id = str(od.get('id') or '') or None; pos.close_submitted_at = now; n += 1
+                logger.info(f"[HOD] FORCE CLOSE {sym} x{pos.shares} limit {limit:.2f} submitted ({pos.close_order_id})")
             except Exception as e:
                 logger.error(f"[HOD] FORCE CLOSE {sym} FAILED: {e}"); self._notify(f"[HOD] ERROR force close {sym}: {e}")
-        self._flattened = True
-        if n: self._notify(f"[HOD] flat at {self.params.flat_minute // 60:02d}:{self.params.flat_minute % 60:02d} ET — {n} position(s) closed")
+        remaining = [s_ for s_, p_ in self.positions.items() if p_.status == 'open']
+        self._flattened = not remaining
+        if n: self._notify(f"[HOD] flat at {self.params.flat_minute // 60:02d}:{self.params.flat_minute % 60:02d} ET — {n} close order(s) submitted, {len(remaining)} still open")
         return n
 
     # ------------------------------------------------------------------ rails / caps
@@ -460,14 +483,26 @@ class HodBreakEngine:
         if self._realized_pnl(today) <= self.daily_kill_usd: return 'daily_kill'
         return None
 
-    def _entered_today_count(self) -> int:
-        today = self.session_date or self._et_now().strftime('%Y-%m-%d'); n_db = 0
+    _DEAD = ('canceled', 'cancelled', 'expired', 'rejected', 'time_stop_canceled')
+
+    def _db_symbols_today(self) -> set:
+        """Symbols with ANY non-dead hod_break row today (open, closed, pending) — the restart-safe source of
+        truth for the per-day cap and once-per-symbol. Returns an empty set (memory only) on DB failure."""
+        today = self.session_date or self._et_now().strftime('%Y-%m-%d'); path = getattr(self.db, '_trades_path', None)
+        if not path: return set()
         try:
-            rows = self.db.get_open_trades(today, strategy=STRATEGY_NAME)
-            n_db = len({r['symbol'] for r in rows if r.get('order_status') in _OPEN_STATUSES + ('closed',)})
+            conn = sqlite3.connect(str(path), timeout=10)
+            try:
+                rows = conn.execute("SELECT DISTINCT symbol FROM trades WHERE strategy=? AND trade_date=? AND COALESCE(order_status,'') NOT IN (%s)"
+                                    % ','.join('?' * len(self._DEAD)), (STRATEGY_NAME, today, *self._DEAD)).fetchall()
+            finally: conn.close()
+            return {r[0] for r in rows}
         except Exception as e:
-            logger.warning(f"[HOD] entered-today DB count failed ({e}) — using memory only")
-        return max(n_db, len(self.entered_today))
+            logger.warning(f"[HOD] symbols-today DB query failed ({e}) — using memory only"); return set()
+
+    def _entered_today_count(self) -> int:
+        db_syms = self._db_symbols_today(); self.entered_today |= db_syms
+        return len(self.entered_today)
 
     # ------------------------------------------------------------------ restart
     def sync_positions(self) -> int:
