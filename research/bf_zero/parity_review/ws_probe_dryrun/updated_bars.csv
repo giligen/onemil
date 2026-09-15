@@ -1,1 +1,2 @@
-symbol
+symbol,ts,open,high,low,close,volume,trade_count,vwap,arrival
+BAC.PRM,2026-09-15 17:57:00+00:00,19.37,19.37,19.34,19.36,2208.0,37.0,19.362857,1789495110.0614877

@@ -232,6 +232,7 @@ class HodBreakEngine:
                 logger.warning(f"[HOD] EARLY CLOSE {d}: close {cm // 60:02d}:{cm % 60:02d} ET — flat at {self.flat_minute // 60:02d}:{self.flat_minute % 60:02d}, last entry {self.last_entry_minute // 60:02d}:{self.last_entry_minute % 60:02d}")
                 self._notify(f"[HOD] early close today: flat {self.flat_minute // 60:02d}:{self.flat_minute % 60:02d} ET")
             self.calendar_ok = True
+            logger.info(f"[HOD] session calendar {d}: close {self.close_minute // 60:02d}:{self.close_minute % 60:02d} ET, flat {self.flat_minute // 60:02d}:{self.flat_minute % 60:02d}, last entry {self.last_entry_minute // 60:02d}:{self.last_entry_minute % 60:02d}")
         except Exception as e:
             self.calendar_ok = False
             logger.error(f"[HOD] market calendar unavailable ({e}) — NO ENTRIES until it answers (the session close is unknown); retried every tick")
@@ -277,6 +278,7 @@ class HodBreakEngine:
             logger.error(f"[HOD] universe bar subscription failed ({e}) — scan admission remains as the fallback")
         logger.info(f"[HOD] streaming {len(syms)} universe symbols (prev close >= {self.universe_min_prev_close:.2f}, ADV20 >= {self.min_adv20:,.0f}){' — restart after the open: backfilling' if late else ''}")
         try:                                                   # the miss audit reads this to tell a streamed symbol from a scan-admitted one
+            if not self.session_date: raise ValueError('no session date')
             import os; os.makedirs(self.stream_list_dir, exist_ok=True)
             with open(os.path.join(self.stream_list_dir, f'hod_stream_universe_{self.session_date}.txt'), 'w') as f: f.write('\n'.join(syms) + '\n')
         except Exception as e:

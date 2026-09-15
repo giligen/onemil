@@ -1,9 +1,10 @@
-window 2026-09-15 13:54 .. 13:55 ET | symbols 1 (liquid 1, thin 0)
-ws bars in window 0 (dup keys 0) | rest bars 0 | per-minute ws [0] rest [0]
-both 0 | exact 0 (0.0%) | mismatched 0 (liquid 0) | field mismatches {'open': 0, 'high': 0, 'low': 0, 'close': 0, 'volume': 0, 'trade_count': 0}
+window 2026-09-15 13:57 .. 13:58 ET | symbols 300 (liquid 150, thin 150)
+ws bars in window 200 (dup keys 0) | rest bars 200 | per-minute ws [200] rest [200]
+both 200 | exact 199 (99.5%) | mismatched 1 (liquid 0) | field mismatches {'open': 0, 'high': 0, 'low': 0, 'close': 0, 'volume': 1, 'trade_count': 1}
 only ws 0 (liquid 0) | only rest 0 (liquid 0)
-arrival latency of bars (s after bar END): n=0 min 0.00 p50 nan p90 nan p99 nan max 0.00; late +25..+60 s: 0
-UPDATED bars in window: 0 messages on 0 (symbol,minute) keys | final REST == last updated bar: 0, != 0 | update differs from the original bar: 0, update without an original bar: 0 | ws-vs-rest mismatches that had an update: 0 of 0 | update arrival after bar END: n/a
+arrival latency of bars (s after bar END): n=200 min 0.07 p50 0.17 p90 0.18 p99 0.18 max 0.18; late +25..+60 s: 0
+UPDATED bars in window: 1 messages on 1 (symbol,minute) keys | final REST == last updated bar: 1, != 0 | update differs from the original bar: 1, update without an original bar: 0 | ws-vs-rest mismatches that had an update: 1 of 1 | update arrival after bar END: min 30.1 p50 30.1 max 30.1 s
 only-ws examples: 
 only-rest examples: 
 mismatch examples:
+BAC.PRM 13:57 ws=19.37/19.37/19.34/19.36/2108/36.0 rest=19.37/19.37/19.34/19.36/2208/37.0 diff=['volume', 'trade_count'] updated=19.37/19.37/19.34/19.36/2208

@@ -596,7 +596,7 @@ class TestUpdatedBars:
         assert calls == [2, 6]
 
     def test_boot_inside_the_opening_minute_backfills(self, mock_alpaca, mock_db, mock_sm):
-        e = HodBreakEngine(mock_alpaca, mock_db, mock_sm, cfg=cfg()); e._last_close = {'ABC': 30.0}; e._adv_map = {'ABC': 1_000_000}; e.universe_min_prev_close = 15
+        e = HodBreakEngine(mock_alpaca, mock_db, mock_sm, cfg=cfg()); e._last_close = {'ABC': 30.0}; e._adv_map = {'ABC': 1_000_000}; e.universe_min_prev_close = 15; e.stream_list_dir = '/tmp/claude-1000/-home-ec2-user-onemil/257c3e2d-cf38-45d5-94e7-4877f8170f44/scratchpad'
         with patch.object(HodBreakEngine, '_minute_of_day', return_value=570):
             e.stream_universe = True; e._stream_the_universe()
         assert not e.candidates['ABC'].backfill_ok
