@@ -34,7 +34,7 @@ def journal_events(since='12:29'):
             t = datetime.strptime(ts.group(1), '%Y-%m-%dT%H:%M:%S%z').astimezone(ET); m_et = t.hour * 60 + t.minute
         a = re.search(r'candidate (\S+) admitted', ln)
         if a and a.group(1) not in admitted: admitted[a.group(1)] = m_et
-        e = re.search(r'\[HOD(?: DRY)?\] (?:WOULD BUY |BUY |ENTRY SUBMITTED )?(\S+?):? (?:level|ask|spread|stop|per-day|concurrency|notional)', ln)
+        e = re.search(r'\[HOD(?: DRY)?\] (?:WOULD BUY |BUY |ENTRY SUBMITTED )?(\S+?):? (?:level|ask|spread|stop|per-day|concurrency|notional|no quote|quote is)', ln)
         if e: evaluated.setdefault(e.group(1), []).append(m_et)
         st = re.search(r'\[HOD\] (\S+): MISSED the spec\'s break at bar (\d+)', ln)
         if st: stale[st.group(1)] = m_et
@@ -61,7 +61,8 @@ def main() -> int:
     movers = [s for s, b in day.items() if b.get('open') and b['open'] > 0 and (b.get('high') or 0) >= b['open'] * (1 + p.min_dist_open_pct / 100.0) and (b.get('high') or 0) >= floor]
     no_adv = [s for s in movers if adv.get(s, 0) < hb['min_adv20']]
     print(f'symbols {len(syms)} | day-running movers with high >= +{p.min_dist_open_pct:.0f}% above open and high >= ${floor:.0f}: {len(movers)} | of which adv < {hb["min_adv20"]:,.0f} or missing (engine would NOT admit): {len(no_adv)} {no_adv[:12]}', flush=True)
-    bars = alp.get_1min_bars_multi(movers, lookback_minutes=420) if movers else {}
+    now_et = datetime.now(timezone.utc).astimezone(ET); lookback = max(30, now_et.hour * 60 + now_et.minute - OPEN_MINUTE + 10)   # the WHOLE day from 09:30 (a fixed 420 min lost the morning when run after 16:30 UTC — found at the 9/15 EOD)
+    bars = alp.get_1min_bars_multi(movers, lookback_minutes=lookback) if movers else {}
     admitted, evaluated, stale, stream_start = journal_events()
     today = datetime.now(timezone.utc).astimezone(ET).strftime('%Y-%m-%d'); streamed = streamed_symbols(today)
     ss = f'{stream_start // 60:02d}:{stream_start % 60:02d}' if stream_start is not None else 'n/a'
