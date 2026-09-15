@@ -64,15 +64,9 @@ print('TRAIN-only: meanR by r_pct bucket:', tr.groupby(pd.cut(tr.r_pct, [0, 1, 2
 
 
 def run_book(F):
-    """first-come, per-day cap, concurrency cap using exit minutes."""
-    out = []
-    for day, g in F.sort_values(['day', 'entry_m']).groupby('day'):
-        open_exits = []; taken = 0
-        for r in g.itertuples():
-            open_exits = [e for e in open_exits if e > r.entry_m]
-            if taken >= N_DAY or len(open_exits) >= N_CONC: continue
-            out.append(r); open_exits.append(r.exit_m); taken += 1
-    return pd.DataFrame(out)
+    """first-come, per-day cap, concurrency cap — the ONE rule in trading.hod_break.run_book (causal freeing, symbol tie-break)."""
+    from trading.hod_break import run_book as _rb
+    return F.loc[[t[4] for t in _rb([(r.day, r.entry_m, r.exit_m, r.symbol, r.Index) for r in F.itertuples()], N_DAY, N_CONC)]]
 
 
 bk = run_book(F)

@@ -188,12 +188,13 @@ def test_target_is_re_anchored_to_the_actual_fill(world):
     e.dry_run = False
     orders = run_day(e, alp, sm, state)
     pos = e.positions['ZZTA']; est_target = pos.target
-    alp.get_order.return_value = {'status': 'filled', 'filled_qty': pos.shares, 'filled_avg_price': pos.limit_price}   # filled at the cap, above the ask estimate
+    alp.replace_order_limit_price.return_value = {'id': 'tp2', 'status': 'new'}
+    alp.get_order.side_effect = lambda oid: {'status': 'filled', 'filled_qty': pos.shares, 'filled_avg_price': pos.limit_price} if oid == pos.order_id else {'status': 'new', 'filled_qty': 0}   # filled at the cap, above the ask estimate
     e._process_pending_fills()
     alp.replace_order_limit_price.assert_called_once()
     leg, new_target = alp.replace_order_limit_price.call_args.args
     assert leg == 'tp' and new_target == pytest.approx(round(pos.limit_price + 2 * (pos.limit_price - pos.stop), 2)) and new_target > est_target
-    assert e.positions['ZZTA'].target == new_target
+    assert e.positions['ZZTA'].target == new_target and e.positions['ZZTA'].tp_leg_id == 'tp2' and e.positions['ZZTA'].pattern_data['tp_leg_id'] == 'tp2'
 
 
 def test_drain_thread_evaluates_without_the_scan_cycle(streamed_world):
@@ -204,10 +205,44 @@ def test_drain_thread_evaluates_without_the_scan_cycle(streamed_world):
         e._roll_session(); e.start_drain_thread()
         try:
             for t in range(1, len(DAY['ZZTA']) + 1):
-                state['now'] = t; e._on_bar_close('ZZTA', df_of(DAY['ZZTA'], 0, t)); time.sleep(0.02)
+                state['now'] = t; e._on_bar_close('ZZTA', df_of(DAY['ZZTA'], 0, t)); time.sleep(0.5)   # one bar per 'minute': the drain batches a minute's bars for 0.4 s
             for _ in range(100):
                 if alp.submit_bracket_order.called: break
                 time.sleep(0.05)
         finally:
             e.shutdown_requested = True
     assert alp.submit_bracket_order.called and alp.submit_bracket_order.call_args.kwargs['symbol'] == 'ZZTA'
+
+
+def test_outage_seen_by_the_drain_path_blocks_evaluation_until_the_refill(streamed_world):
+    """9/15 reviews C/G: a reconnect after the open must stop evaluation at bar arrival (not at the next scanner tick), and
+    a failed REST refill must keep the day blocked — the 09:30-bar shortcut must not declare a gapped day complete"""
+    e, alp, sm, state = streamed_world
+    sm.ws_generation = 1
+    with patch.object(HodBreakEngine, '_minute_of_day', side_effect=lambda: 570 + state['now']):
+        e._roll_session(); e.process_tick()
+        for t in range(1, 6):
+            state['now'] = t; e._on_bar_close('ZZTA', df_of(DAY['ZZTA'], t - 1, t)); e.drain_bar_events()
+        sm.ws_generation = 2                                                     # the stream reconnected; bars 6..8 were never delivered
+        alp.get_1min_bars_multi.side_effect = lambda syms, lookback_minutes=30: {}   # and the REST refill fails
+        for t in range(9, len(DAY['ZZTA']) + 1):
+            state['now'] = t; e._on_bar_close('ZZTA', df_of(DAY['ZZTA'], t - 1, t)); e.drain_bar_events(); e.process_tick()
+        assert not alp.submit_bracket_order.called and e.candidates['ZZTA'].needs_refill, 'a gapped day must never be judged'
+        alp.get_1min_bars_multi.side_effect = lambda syms, lookback_minutes=30: {s: df_of(DAY[s], 0, state['now']) for s in syms}
+        e.process_tick()                                                        # the refill lands: the whole day is re-scanned from bar 0
+        assert not e.candidates['ZZTA'].needs_refill and e.candidates['ZZTA'].rejected_reason == 'stale_break'
+
+
+def test_a_late_earlier_bar_forces_a_rescan(streamed_world):
+    """9/15 review C: a bar that lands before already-scanned bars changes HOD/volume — detect must rescan from it"""
+    e, alp, sm, state = streamed_world
+    with patch.object(HodBreakEngine, '_minute_of_day', side_effect=lambda: 570 + state['now']):
+        e._roll_session()
+        bars = DAY['ZZTA']; n = len(bars)
+        order = [i for i in range(n) if i != 2] + [2]                           # bar index 2 (the drive bar) arrives last
+        for k, i in enumerate(order):
+            state['now'] = max(state['now'], i + 1); e._on_bar_close('ZZTA', df_of(bars, i, i + 1)); e.drain_bar_events()
+        cand = e.candidates['ZZTA']
+        assert cand.next_idx <= 2 or cand.rejected_reason is not None
+        spec = simulate(*arrays(bars), ADV['ZZTA'], HodBreakParams())
+        assert cand.rejected_reason in ('stale_break', 'ordered') and spec is not None

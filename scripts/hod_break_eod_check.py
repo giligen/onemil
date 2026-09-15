@@ -26,7 +26,7 @@ sys.path.insert(0, ROOT); os.chdir(ROOT)
 
 from config import Config                                  # noqa: E402
 from data_sources.alpaca_client import AlpacaClient        # noqa: E402
-from trading.hod_break import HodBreakParams, simulate, OPEN_MINUTE  # noqa: E402
+from trading.hod_break import HodBreakParams, simulate, OPEN_MINUTE, run_book  # noqa: E402
 
 ET = ZoneInfo('America/New_York')
 RX_DRY = re.compile(r'\[HOD DRY\] WOULD BUY (\S+) level ([\d.]+) limit ([\d.]+) stop ([\d.]+) target ([\d.]+) R ([\d.]+) \(([\d.]+)%\) x(\d+) \| \+([\d.]+)% from open, rv ([\d.]+), spread (\d+) bps')
@@ -67,6 +67,102 @@ def bars_for(alpaca: AlpacaClient, symbols: list, day: str) -> dict:
     return out
 
 
+MEASURABLES_SINCE = '2026-09-14'                       # first dry-run session: the rolling window of the DB-sourced rows
+RX_SPREAD = re.compile(r'(WOULD BUY|ENTRY SUBMITTED) (\S+) level ([\d.]+) .*spread (\d+) bps')
+JOURNAL_COUNTS = {'gate': r'of R [\d.]+ > \d+% — skip', 'nochase': r'NO CHASE', 'rmin': r'within [\d.]+% of the ask', 'spread100': r'spread \d+ bps > \d+ — skip',
+                  'daycap': r'per-day cap', 'conc': r'concurrency cap', 'missed': r"MISSED the spec's break", 'notional': r'notional cap'}
+
+
+def closed_trades(trades_db, since: str, day: str) -> list:
+    """HOD-break rows from the trades DB, read-only, trade_date in [since, day]; dicts with pattern_data decoded."""
+    import json, sqlite3
+    try:
+        con = sqlite3.connect(f'file:{trades_db}?mode=ro', uri=True, timeout=10); con.row_factory = sqlite3.Row
+        rows = [dict(r) for r in con.execute("select * from trades where strategy='hod_break' and trade_date between ? and ?", (since, day))]; con.close()
+    except Exception as e:
+        print(f'  trades DB read failed: {e}'); return []
+    for r in rows:
+        try: r['pd'] = json.loads(r.get('pattern_data') or '{}')
+        except Exception: r['pd'] = {}
+    return rows
+
+
+def _et_minute(iso: str):
+    try: t = datetime.fromisoformat(str(iso).replace('Z', '+00:00')).astimezone(ET); return t.hour * 60 + t.minute
+    except Exception: return None
+
+
+def _bar_open(bars: dict, sym: str, minute) -> float:
+    a = bars.get(sym)
+    if a is None or minute is None: return 0.0
+    idx = np.flatnonzero(a[5] == int(minute)); return float(a[0][idx[0]]) if len(idx) else 0.0
+
+
+def live_measurables(lines: list, day: str, dry_mode: bool, trades_db, bars: dict, flat_minute: int = 955, since: str = MEASURABLES_SINCE) -> list:
+    """REPORT §12 rows 1-16: [no, label, live value, spec band, verdict]. Journal rows are today's; DB rows carry the day and the
+    rolling value since `since`. Dry mode: rows 3-13 are n/a. No parentheses in the text: the cron builds the telegram from it."""
+    c = {k: sum(1 for ln in lines if re.search(rx, ln)) for k, rx in JOURNAL_COUNTS.items()}
+    sig = {m.group(2): int(m.group(4)) for m in (RX_SPREAD.search(ln) for ln in lines) if m}
+    n_ord = len(sig); reached = n_ord + c['gate'] + c['nochase'] + c['rmin'] + c['spread100'] + c['daycap'] + c['conc']
+    n_gate = n_ord + c['gate']; pass_rate = n_ord / n_gate * 100 if n_gate else float('nan')
+    spreads = sorted(sig.values()); med_spread = float(np.median(spreads)) if spreads else float('nan')
+    rmin_rate = c['rmin'] / reached * 100 if reached else float('nan')
+    rows = [[1, 'gate pass rate, $20+ signals', f'{n_ord}/{n_gate} = {pass_rate:.0f}%' if n_gate else 'no signal reached the gate', '43% · band 30-55% over >= 50 signals',
+             'WATCH n<20' if n_gate < 20 else ('OK' if 30 <= pass_rate <= 55 else ('ESCALATE' if n_gate >= 50 else 'WATCH'))],
+            [2, 'signals/day reaching the gates, $20+', f'{reached} today', 'median 11-25 · zero-signal days ~0', 'ESCALATE none reached' if reached == 0 else ('WATCH <5' if reached < 5 else 'OK')]]
+    na = 'n/a dry'
+    if dry_mode:
+        rows += [[k, lab, na, band, 'n/a'] for k, lab, band in ((3, 'fills/day', '4.6-6.6 per day, 22-32 per wk'), (4, 'fill rate of submitted orders', '~100% of ask<=cap · alert <85%'),
+                 (5, 'entry fill vs the open of the fill minute', 'median <= +8 bps, mean <= +15'), (6, 'ask at decision vs the next open', 'median +6 bps'),
+                 (7, 'TP-fill rate', '33-39% · live >= spec'), (8, 'stop rate / eod rate', '41-45% / 20-22%'), (9, 'stop fill vs stop price', 'modeled -18 bps · alert mean worse than -40'),
+                 (10, 'eod fill vs the 15:55 open', 'minus half spread, ~-8 bps'), (11, 'mean R per trade, net realized', '+0.25 to +0.35 · no verdict before 150 trades'),
+                 (12, 'WR', '48-53%'), (13, 'weekly R', '+6 to +10 · worst -8 to -12'))]
+    else:
+        T = closed_trades(trades_db, since, day); D = [r for r in T if r['trade_date'] == day]
+        filled = [r for r in T if r.get('fill_price')]; dfill = [r for r in D if r.get('fill_price')]
+        sessions = max(1, int(np.busday_count(since, day)) + 1)
+        closed = [r for r in filled if r.get('exit_price') and r.get('exit_reason')]
+        for r in closed:
+            fp, st = float(r['fill_price']), float(r['stop_loss_price'] or 0); q = float(r.get('filled_qty') or r.get('shares') or 0)
+            r['rr'] = float(r['pnl'] or 0) / ((fp - st) * q) if fp > st and q > 0 else float('nan')
+        rr = np.array([r['rr'] for r in closed if np.isfinite(r['rr'])]); n = len(rr)
+        ent = [(float(r['fill_price']) / _bar_open(bars, r['symbol'], _et_minute(r.get('filled_at'))) - 1) * 1e4 for r in dfill if _bar_open(bars, r['symbol'], _et_minute(r.get('filled_at')))]
+        ask = [(float(r['pd'].get('quote_ask') or 0) / _bar_open(bars, r['symbol'], _et_minute(r.get('filled_at'))) - 1) * 1e4 for r in dfill if r['pd'].get('quote_ask') and _bar_open(bars, r['symbol'], _et_minute(r.get('filled_at')))]
+        stp = [(float(r['exit_price']) / float(r['stop_loss_price']) - 1) * 1e4 for r in closed if r['exit_reason'] == 'stop' and r.get('stop_loss_price')]
+        eod = [(float(r['exit_price']) / _bar_open(bars, r['symbol'], flat_minute) - 1) * 1e4 for r in closed if r['exit_reason'] == 'eod' and r['trade_date'] == day and _bar_open(bars, r['symbol'], flat_minute)]
+        share = lambda why: 100 * sum(1 for r in closed if r['exit_reason'] == why) / len(closed) if closed else float('nan')
+        wk = {}
+        for r in closed:
+            if np.isfinite(r['rr']): wk[datetime.strptime(r['trade_date'], '%Y-%m-%d').isocalendar()[1]] = wk.get(datetime.strptime(r['trade_date'], '%Y-%m-%d').isocalendar()[1], 0.0) + r['rr']
+        cur_wk = wk.get(datetime.strptime(day, '%Y-%m-%d').isocalendar()[1], 0.0); worst_wk = min(wk.values()) if wk else 0.0
+        fr = 100 * len(dfill) / len(D) if D else float('nan'); per_day = len(filled) / sessions
+        mean_r = rr.mean() if n else float('nan'); wr = 100 * (rr > 0).mean() if n else float('nan')
+        mstat = lambda x: f'median {np.median(x):+.0f} mean {np.mean(x):+.0f} bps n={len(x)}' if x else 'no rows'
+        rows += [[3, 'fills/day', f'{len(dfill)} today · rolling {per_day:.1f}/day over {sessions} sessions', '4.6-6.6 per day, 22-32 per wk', 'OK' if 3 <= per_day <= 9 else 'WATCH'],
+                 [4, 'fill rate of submitted orders', f'{len(dfill)}/{len(D)} today = {fr:.0f}%' if D else 'no orders today', '~100% of ask<=cap · alert <85%', 'n/a' if not D else ('OK' if fr >= 95 else ('WATCH' if fr >= 85 else 'ESCALATE'))],
+                 [5, 'entry fill vs the open of the fill minute', mstat(ent), 'median <= +8 bps, mean <= +15', 'n/a' if not ent else ('OK' if np.mean(ent) <= 15 else ('WATCH' if np.mean(ent) <= 30 else 'ESCALATE'))],
+                 [6, 'ask at decision vs the next open', mstat(ask), 'median +6 bps', 'n/a' if not ask else ('OK' if np.mean(ask) <= 15 else 'WATCH')],
+                 [7, 'TP-fill rate', f'{share("target"):.0f}% of {len(closed)} closed', '33-39% · live >= spec', 'WATCH n<20' if len(closed) < 20 else ('OK' if share('target') >= 30 else ('ESCALATE' if len(closed) >= 30 and share('target') < 25 else 'WATCH'))],
+                 [8, 'stop rate / eod rate', f'{share("stop"):.0f}% / {share("eod"):.0f}%', '41-45% / 20-22%', 'WATCH n<20' if len(closed) < 20 else ('OK' if share('stop') <= 55 else 'WATCH')],
+                 [9, 'stop fill vs stop price', mstat(stp), 'modeled -18 bps · alert mean worse than -40', 'n/a' if not stp else ('OK' if np.mean(stp) >= -25 else ('WATCH' if np.mean(stp) >= -40 else 'ESCALATE'))],
+                 [10, 'eod fill vs the 15:55 open', mstat(eod), 'minus half spread, ~-8 bps', 'n/a' if not eod else ('OK' if np.mean(eod) >= -30 else 'WATCH')],
+                 [11, 'mean R per trade, net realized', f'{mean_r:+.3f}R over {n} trades' if n else 'no closed trades', '+0.25 to +0.35 · no verdict before 150 trades',
+                  'WATCH n<30' if n < 30 else ('ESCALATE' if mean_r < 0 or (n >= 150 and mean_r < 0.15) else ('OK' if mean_r >= 0.2 else 'WATCH'))],
+                 [12, 'WR', f'{wr:.0f}% over {n}' if n else 'no closed trades', '48-53%', 'WATCH n<30' if n < 30 else ('ESCALATE' if n >= 50 and wr < 40 else ('OK' if wr >= 44 else 'WATCH'))],
+                 [13, 'weekly R', f'this week {cur_wk:+.1f}R · worst week {worst_wk:+.1f}R', '+6 to +10 · worst -8 to -12', 'ESCALATE' if cur_wk <= -12 else ('WATCH' if cur_wk < 0 else 'OK')]]
+    rows += [[14, 'miss rate vs spec', f"{c['missed']} MISSED lines today · full audit: scripts/hod_break_miss_audit.py", '0', 'ESCALATE' if c['missed'] else 'OK'],
+             [15, 'spread at decision, passing $20+', f'median {med_spread:.0f} bps over {len(spreads)}' if spreads else 'no passing signal', 'median 17 bps · sfr median 0.082', 'n/a' if not spreads else ('OK' if med_spread <= 30 else 'WATCH')],
+             [16, 'r_min reject rate, $20+ signals', f"{c['rmin']}/{reached} = {rmin_rate:.0f}%" if reached else 'no signal reached', 'a few % · live r = ask - stop is LOOSER than the spec, the rejects are stops within 1% that simulate rejects too',
+              'n/a' if not reached else ('OK' if rmin_rate <= 25 else ('ESCALATE' if reached >= 10 and rmin_rate > 50 else 'WATCH'))]]
+    return rows
+
+
+def print_measurables(rows: list) -> None:
+    print('\n  LIVE MEASURABLES vs SPEC, REPORT §12:')
+    for no, lab, val, band, verdict in rows:
+        print(f'  {no:2d} {verdict:18s} {lab}: {val} | spec {band}')
+
+
 def main() -> int:
     day = sys.argv[1] if len(sys.argv) > 1 else datetime.now(timezone.utc).astimezone(ET).strftime('%Y-%m-%d')
     cfg = Config(); hb = cfg.hod_break_cfg; p = HodBreakParams(**hb['params']); risk = hb['risk_usd']
@@ -82,11 +178,16 @@ def main() -> int:
     print(f"HOD-BREAK EOD {day} — mode {'DRY' if hb['dry_run'] else 'LIVE'} | dry signals {len(dry)} | live orders {len(live)} | fills {len(fills)} | exits {len(exits)} | errors {len(errors)}")
     for ln in errors[:8]: print('  ERR', ln[-200:])
     syms = sorted(set(dry) | set(live))
+    Db = __import__('persistence.database', fromlist=['Database']).Database(); trades_db = Db._trades_path
     if not syms:
-        print('  no signals today'); return 0
+        print('  no signals today')
+        B = {} if hb['dry_run'] else bars_for(AlpacaClient(cfg.alpaca_api_key, cfg.alpaca_api_secret, paper=cfg.alpaca_paper), sorted({r['symbol'] for r in closed_trades(trades_db, day, day)}), day)
+        print_measurables(live_measurables(lines, day, hb['dry_run'], trades_db, B, p.flat_minute)); return 0
     alpaca = AlpacaClient(cfg.alpaca_api_key, cfg.alpaca_api_secret, paper=cfg.alpaca_paper)
     B = bars_for(alpaca, syms, day)
-    adv = {r['symbol']: float(r.get('avg_volume_daily') or 0) for r in __import__('persistence.database', fromlist=['Database']).Database().get_active_universe()}
+    if not hb['dry_run']:
+        B.update(bars_for(alpaca, sorted({r['symbol'] for r in closed_trades(trades_db, day, day)} - set(B)), day))
+    adv = {r['symbol']: float(r.get('avg_volume_daily') or 0) for r in Db.get_active_universe()}
     tot_r = 0.0; n = 0; mism = 0; book = []
     print(f"  {'sym':6s} {'live_lvl':>8s} {'spec_lvl':>8s} {'live_stop':>9s} {'spec_stop':>9s} {'spec_min':>8s} {'exit':>6s} {'R':>6s}  note")
     for sym in syms:
@@ -135,34 +236,23 @@ def main() -> int:
         spread_bps_logged = float(m.group(11)); r_pct_logged = float(m.group(7)); gated.append((int(mm[i]), int(mm[k]), sym, rr, usd, spread_bps_logged / (r_pct_logged * 100.0)))
         print(f"  {sym:6s} {level:8.2f} fill {entry:6.2f} stop {stop:6.2f} target {target:6.2f} {int(mm[i]) // 60:02d}:{int(mm[i]) % 60:02d} {why:>6s} {rr:+6.2f}")
     if dbook:
-        taken = []; open_exits = []
-        for em, xm, sym, rr, usd in sorted(dbook):
-            open_exits = [e for e in open_exits if e > em]
-            if len(taken) >= p.max_per_day or len(open_exits) >= p.max_concurrent: continue
-            taken.append((sym, rr, usd)); open_exits.append(xm)
+        taken = [(sym, rr, usd) for _, _, _, sym, rr, usd in run_book([(0, em, xm, sym, rr, usd) for em, xm, sym, rr, usd in dbook], p.max_per_day, p.max_concurrent)]
         dr = sum(r for _, r, _ in taken); dusd = sum(u for _, _, u in taken); allr = sum(r for *_, r, _ in dbook); allusd = sum(u for *_, u in dbook)
         print(f"  DRY-RUN all filled signals: {len(dbook)}, {allr:+.1f}R, ${allusd:+,.0f} at the logged sizes")
         print(f"  DRY-RUN EXECUTABLE book (first {p.max_per_day}/day, {p.max_concurrent} concurrent, logged sizes): {len(taken)} trades, {dr:+.1f}R, ${dusd:+,.0f} | {[(s_, round(r, 2)) for s_, r, _ in taken]}")
         print(f"  GATE 6 on the DRY-RUN book: {'PASS' if dr > 0 else 'FAIL'}")
         for frac, floor in ((0.15, 5.0), (0.15, 20.0), (0.10, 20.0)):
-            taken = []; open_exits = []
-            for em, xm, sym, rr, usd, sf in sorted(gated):
-                if sf > frac or float(dry[sym].group(2)) < floor: continue
-                open_exits = [e for e in open_exits if e > em]
-                if len(taken) >= p.max_per_day or len(open_exits) >= p.max_concurrent: continue
-                taken.append((sym, rr, usd)); open_exits.append(xm)
+            rows = [(0, em, xm, sym, rr, usd) for em, xm, sym, rr, usd, sf in gated if sf <= frac and float(dry[sym].group(2)) >= floor]
+            taken = [(sym, rr, usd) for _, _, _, sym, rr, usd in run_book(rows, p.max_per_day, p.max_concurrent)]
             print(f"  DRY-RUN book with spread <= {frac:.0%} of R and price >= ${floor:.0f}: {len(taken)} trades, {sum(r for _, r, _ in taken):+.1f}R, ${sum(u for _, _, u in taken):+,.0f} | signals passing {sum(1 for g in gated if g[5] <= frac and float(dry[g[2]].group(2)) >= floor)}/{len(gated)}")
     if n:
         print(f"\n  all spec trades on signalled symbols: {n}, {tot_r:+.1f}R = ${tot_r * risk:+,.0f} | spec-has-no-trade {mism}")
         # the EXECUTABLE would-be book: first-come, max_per_day, max_concurrent (dry mode never counts entries)
-        taken = []; open_exits = []
-        for em, xm, sym, rr in sorted(book):
-            open_exits = [e for e in open_exits if e > em]
-            if len(taken) >= p.max_per_day or len(open_exits) >= p.max_concurrent: continue
-            taken.append((sym, rr)); open_exits.append(xm)
+        taken = [(sym, rr) for _, _, _, sym, rr in run_book([(0, em, xm, sym, rr) for em, xm, sym, rr in book], p.max_per_day, p.max_concurrent)]
         br = sum(r for _, r in taken)
         print(f"  EXECUTABLE would-be book (first {p.max_per_day}/day, {p.max_concurrent} concurrent, ${risk:.0f} risk): {len(taken)} trades, {br:+.1f}R = ${br * risk:+,.0f} | {[(s_, round(r, 2)) for s_, r in taken]}")
         print(f"  GATE 6 (positive would-be day): {'PASS' if br > 0 else 'FAIL'}")
+    print_measurables(live_measurables(lines, day, hb['dry_run'], trades_db, B, p.flat_minute))
     return 0
 
 

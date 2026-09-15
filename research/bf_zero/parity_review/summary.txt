@@ -1,0 +1,13 @@
+window 2026-09-15 17:15Z .. 17:21Z  symbols 300 (liquid 150, thin 150)
+ws bars in window 1209 (dup keys 0; liquid 797) | rest bars 1209 (liquid 797)
+per-minute ws [203, 207, 204, 202, 193, 200] rest [203, 207, 204, 202, 193, 200]
+both 1209 | exact 1208 (99.9%) | mismatched 1 (liquid 1)
+field mismatches: {'open': 0, 'high': 0, 'low': 0, 'close': 0, 'volume': 1, 'trade_count': 1}
+  volume: ws>rest 0, rest>ws 1 | high: rest>ws 0, ws>rest 0 | low: rest<ws 0, ws<rest 0
+only ws 0 (liquid 0) | only rest 0 (liquid 0)
+arrival latency (s after bar END): n=1209 min 0.06 p50 0.17 p90 0.26 p99 0.28 max 0.28
+late arrivals (+25s..+60s after last minute end): 0
+only-ws examples: 
+only-rest examples: 
+mismatch examples:
+APP 17:15Z ws o/h/l/c/v/n=330.95/331.17/330.89/331.125/3504/114.0 rest=330.95/331.17/330.89/331.125/3544/115.0 diff=['volume', 'trade_count']

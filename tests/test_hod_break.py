@@ -116,3 +116,23 @@ class TestFillAndExit:
 def test_shares_for():
     assert shares_for(100.0, 11.05, 10.7) == int(100 / 0.35)
     assert shares_for(100.0, 10.0, 10.0) == 0
+
+
+class TestRunBook:
+    """the ONE executable-book rule (9/15 review F): causal slot freeing, symbol tie-break, per-day cap"""
+
+    def test_exit_on_an_earlier_bar_frees_the_slot_but_the_same_bar_does_not(self):
+        from trading.hod_break import run_book
+        rows = [('d', 600, 605, 'A'), ('d', 600, 700, 'B'), ('d', 605, 700, 'C'), ('d', 606, 700, 'D')]
+        taken = [r[3] for r in run_book(rows, 8, 2)]
+        assert taken == ['A', 'B', 'D']            # C at 605 collides with A's exit during bar 605 (not before it); D at 606 gets A's slot
+
+    def test_same_minute_ties_break_by_symbol_and_the_day_cap_counts_fills(self):
+        from trading.hod_break import run_book
+        rows = [('d', 600, 700, 'ZZ'), ('d', 600, 700, 'AA'), ('d', 600, 700, 'MM')]
+        assert [r[3] for r in run_book(rows, 2, 4)] == ['AA', 'MM']
+
+    def test_days_are_independent(self):
+        from trading.hod_break import run_book
+        rows = [('d1', 600, 700, 'A'), ('d2', 600, 700, 'A'), ('d2', 601, 700, 'B')]
+        assert [(r[0], r[3]) for r in run_book(rows, 1, 4)] == [('d1', 'A'), ('d2', 'A')]

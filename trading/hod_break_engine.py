@@ -24,6 +24,7 @@ import queue
 import sqlite3
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -43,7 +44,7 @@ _OPEN_STATUSES = ('filled', 'partially_filled', 'exit_pending_verification')
 STALE_DAYS = 7               # a symbol whose last daily bar is older than this is dead/halted/delisted: not streamed, not admitted
 
 
-def load_adv20_from_daily_bars(cache_path, min_rows: int = 10, stale_days: int = STALE_DAYS):
+def load_adv20_from_daily_bars(cache_path, min_rows: int = 5, stale_days: int = STALE_DAYS):
     """ADV20 = mean volume of the latest 20 daily_bars rows within 45 days (>= min_rows rows), plus each symbol's last
     close. Symbols whose LAST bar is older than `stale_days` (no trades for a week: acquired, delisted, halted) are
     dropped from both maps — they would only produce empty backfills. ONE definition for the engine's universe/ADV gate
@@ -52,9 +53,10 @@ def load_adv20_from_daily_bars(cache_path, min_rows: int = 10, stale_days: int =
     conn = sqlite3.connect(f'file:{cache_path}?mode=ro', uri=True, timeout=30)
     try:
         q = ("with d as (select symbol, bar_date, volume, close, row_number() over (partition by symbol order by bar_date desc) rn "
-             "from daily_bars where bar_date >= date('now', '-45 days')) "
+             "from daily_bars where bar_date >= date('now', '-45 days') and bar_date < ?) "        # T-1..T-20 only: never today's (provisional) row
              "select symbol, avg(volume), count(*), max(case when rn = 1 then close end), max(bar_date) from d where rn <= 20 group by symbol")
-        for sym, a, cnt, lc, last_date in conn.execute(q):
+        today = datetime.now(timezone.utc).astimezone(ET).strftime('%Y-%m-%d')
+        for sym, a, cnt, lc, last_date in conn.execute(q, (today,)):
             if not last_date or (datetime.now(timezone.utc).date() - datetime.strptime(str(last_date)[:10], '%Y-%m-%d').date()).days > stale_days:
                 continue
             if cnt and cnt >= min_rows and a: adv[sym] = float(a)
@@ -76,6 +78,8 @@ class Candidate:
     adv20: float
     subscribed: bool = False
     backfill_ok: bool = False                             # True once the bar set starts at the 09:30 bar
+    needs_refill: bool = False                            # set by an outage / a dropped bar; cleared ONLY by a non-empty REST backfill
+    reconciled: bool = False                              # the day's streamed bars were merged with REST once (review A: a silently dropped early bar)
     backfill_tries: int = 0
     next_idx: int = 0                                     # first bar index detect() has not scanned yet
     rejected_reason: Optional[str] = None
@@ -87,8 +91,20 @@ class Candidate:
         i = minute - OPEN_MINUTE
         if not (0 <= i < RTH_MINUTES):
             return False
-        self.ohlcv[i, 0] = o; self.ohlcv[i, 1] = h; self.ohlcv[i, 2] = l; self.ohlcv[i, 3] = c; self.ohlcv[i, 4] = v; self.have[i] = True
+        self.ohlcv[i, 0] = o; self.ohlcv[i, 1] = h; self.ohlcv[i, 2] = l; self.ohlcv[i, 3] = c; self.ohlcv[i, 4] = v
+        if not self.have[i]:
+            self.have[i] = True
+            # a bar that lands BEFORE bars already scanned (late/out-of-order delivery) changes the HOD, the cumulative
+            # volume and the consolidation of everything after it: detect must rescan from its compacted index
+            self.next_idx = min(self.next_idx, int(self.have[:i].sum()))
         return True
+
+    flags: set = field(default_factory=set)
+
+    def pattern_flag(self, name: str) -> bool:
+        """True if the flag was already set; sets it (once-only logging)."""
+        if name in self.flags: return True
+        self.flags.add(name); return False
 
     @property
     def n_bars(self) -> int:
@@ -119,6 +135,18 @@ class Position:
     status: str = 'pending'                               # pending | open
     close_order_id: Optional[str] = None
     close_submitted_at: Optional[datetime] = None
+    client_order_id: Optional[str] = None                 # our own id: the ONLY key an order is ever re-identified by
+    pattern_data: dict = field(default_factory=dict)      # the DB pattern_data JSON (leg ids live here)
+    fill_at_estimate_r: Optional[float] = None
+    leg_booked: Dict[str, int] = field(default_factory=dict)   # order id -> shares already booked as sold from it
+    closed_qty: int = 0                                   # shares sold so far (TP / SL / close order, partials included)
+    closed_notional: float = 0.0
+    last_close_reason: Optional[str] = None
+    fc_attempts: int = 0
+
+    @property
+    def open_qty(self) -> int:
+        return max(0, self.shares - self.closed_qty)
 
 
 class HodBreakEngine:
@@ -135,7 +163,9 @@ class HodBreakEngine:
         self.max_spread_bps = float(cfg.get('max_spread_bps', 100.0))
         # The spec fills at the NEXT bar's open or never (no chase). A resting limit that fills a minute later on a
         # pullback is a trade the backtest never took — so the order lives only long enough to cover submit latency.
-        self.order_timeout_s = float(cfg.get('order_timeout_s', 20.0))
+        self.order_timeout_s = float(cfg.get('order_timeout_s', 10.0))
+        self.max_quote_age_s = float(cfg.get('max_quote_age_s', 5.0))       # a quote older than this (halt, stale feed) = no order
+        self._last_pending_check = 0.0
         self.max_spread_frac_r = float(cfg.get('max_spread_frac_r', 0.0))   # 0 = off; e.g. 0.15 = skip when the spread is > 15% of R (9/14: 57% of signals)
         # ADMISSION threshold (9/15 CRWL miss): the scanner must start streaming a stock's bars BEFORE its break, so
         # candidates are admitted at a lower distance from the open than the spec's floor; the floor itself is
@@ -150,7 +180,8 @@ class HodBreakEngine:
         self.stream_list_dir = str(cfg.get('stream_list_dir', 'logs'))    # where the day's streamed-symbol list is written (tests point it elsewhere)
         self.candidates: Dict[str, Candidate] = {}; self.positions: Dict[str, Position] = {}
         self.entered_today: set = set(); self.daily_pnl = 0.0; self.session_date: Optional[str] = None
-        self._mover_queue: queue.Queue = queue.Queue(maxsize=5000); self._bar_queue: queue.Queue = queue.Queue(maxsize=5000)
+        self._mover_queue: queue.Queue = queue.Queue(maxsize=5000); self._bar_queue: queue.Queue = queue.Queue(maxsize=100_000)   # ~300 B per bar; 3,600 names × a few minutes must never drop
+        self._last_bar_ingest = 0.0; self._silence_alerted = False; self.calendar_ok = True
         self._adv_map: Dict[str, float] = {}; self._kill_notified: set = set(); self._flattened = False
         self.shutdown_requested = False; self._lock = threading.RLock()   # tick (engine pool) and drains (main thread) must not interleave
         self.seen_today: set = set()                                      # once-per-symbol (orders incl. no-fills); entered_today = the day-cap set (fills/working orders)
@@ -172,29 +203,58 @@ class HodBreakEngine:
         if self.session_date != today:
             self.session_date = today; self.candidates.clear(); self.entered_today.clear(); self.daily_pnl = 0.0
             self._kill_notified.clear(); self._flattened = False
+            self._apply_session_calendar()
             self._adv_map = self._load_adv_map()
             logger.info(f"[HOD] session {today}: adv map {len(self._adv_map)} symbols")
             if self.stream_universe:
                 self._stream_the_universe()
 
+    def _apply_session_calendar(self) -> None:
+        """Early closes (13:00 ET: the day after Thanksgiving, Christmas Eve): the spec's day ends at the last bar, live
+        must be flat 5 minutes before the close and stop entering an hour before. DAY bracket legs die at the close —
+        a flat at 15:55 on a 13:00 day would be an overnight position. Failure → the regular 15:55/14:00 with a WARNING."""
+        self.flat_minute = int(self.params.flat_minute); self.last_entry_minute = int(self.params.last_entry_minute); self.close_minute = 960
+        try:
+            d = self._et_now().date()
+            cal = self.alpaca.get_market_calendar(d, d) or []
+            row = next((c for c in cal if str(c.get('date'))[:10] == d.isoformat()), None)
+            if row is None:
+                logger.warning(f"[HOD] no market-calendar row for {d} (holiday?) — regular session assumed"); self.calendar_ok = True; return
+            close = row.get('close'); ct = close if isinstance(close, datetime) else None
+            if ct is None:
+                hh, mm = str(close)[:5].split(':'); cm = int(hh) * 60 + int(mm)
+            else:
+                cm = ct.hour * 60 + ct.minute
+            if 0 < cm < 960:
+                self.close_minute = cm; self.flat_minute = cm - 5; self.last_entry_minute = min(self.last_entry_minute, cm - 65)
+                logger.warning(f"[HOD] EARLY CLOSE {d}: close {cm // 60:02d}:{cm % 60:02d} ET — flat at {self.flat_minute // 60:02d}:{self.flat_minute % 60:02d}, last entry {self.last_entry_minute // 60:02d}:{self.last_entry_minute % 60:02d}")
+                self._notify(f"[HOD] early close today: flat {self.flat_minute // 60:02d}:{self.flat_minute % 60:02d} ET")
+            self.calendar_ok = True
+        except Exception as e:
+            self.calendar_ok = False
+            logger.error(f"[HOD] market calendar unavailable ({e}) — NO ENTRIES until it answers (the session close is unknown); retried every tick")
+            self._notify_once('calendar', f"[HOD] ERROR: market calendar unavailable — no entries until it answers")
+
     def _load_adv_map(self) -> Dict[str, float]:
         """True 20-session ADV from daily_bars (the study's definition), universe field as the fallback.
         Also records each symbol's last close for the streamed-universe screen."""
         adv: Dict[str, float] = {}
+        path = getattr(self.db, '_cache_path', None)
+        if path:
+            try:
+                adv20, last = load_adv20_from_daily_bars(path)
+                adv.update(adv20); self._last_close.update(last)
+                logger.info(f"[HOD] ADV20 from daily_bars for {len(adv20)} symbols")
+                return adv
+            except Exception as e:
+                logger.error(f"[HOD] daily_bars ADV20 unavailable ({e}) — falling back to the universe field (a single day's volume, NOT the spec's ADV20)")
+        else:
+            logger.warning("[HOD] db has no _cache_path — daily_bars ADV20 unavailable, using the universe field (tests only)")
         try:
             rows = self.db.get_active_universe()
             adv = {r['symbol']: float(r.get('avg_volume_daily') or 0.0) for r in rows}
         except Exception as e:
             logger.error(f"[HOD] universe ADV map unavailable ({e}) — every mover will fail the ADV gate today")
-        path = getattr(self.db, '_cache_path', None)
-        if not path:
-            logger.warning("[HOD] db has no _cache_path — daily_bars ADV20 unavailable, using the universe field"); return adv
-        try:
-            adv20, last = load_adv20_from_daily_bars(path)
-            adv.update(adv20); self._last_close.update(last)
-            logger.info(f"[HOD] ADV20 from daily_bars for {len(adv20)} symbols (universe field for the rest)")
-        except Exception as e:
-            logger.warning(f"[HOD] daily_bars ADV20 unavailable ({e}) — using the universe field")
         return adv
 
     def _stream_the_universe(self) -> None:
@@ -250,7 +310,8 @@ class HodBreakEngine:
         try:
             self._bar_queue.put_nowait((symbol, bar))
         except queue.Full:
-            logger.error(f"[HOD] bar queue full — dropped a bar for {symbol}")
+            logger.error(f"[HOD] bar queue full — dropped a bar for {symbol}; the day must be re-backfilled before any evaluation")
+            self.candidates[symbol].needs_refill = True
 
     # ------------------------------------------------------------------ main-thread work
     def process_tick(self) -> None:
@@ -260,7 +321,11 @@ class HodBreakEngine:
         with self._lock:
             try:
                 self._roll_session()
+                if not self.calendar_ok: self._apply_session_calendar()
                 self._check_stream_outage()
+                self._check_stream_silence()
+                if self._drain_thread is not None and not self._drain_thread.is_alive() and not self.shutdown_requested:
+                    logger.error("[HOD] bar drain thread is DEAD — restarting it"); self._drain_thread = None; self.start_drain_thread()
                 self._admit_movers()
                 self.drain_bar_events()
                 self._process_pending_fills()
@@ -269,6 +334,44 @@ class HodBreakEngine:
                     self.force_close_all()
             except Exception as e:
                 logger.error(f"[HOD] process_tick failed: {e}", exc_info=True)
+        try:
+            self._reconcile_stream_chunk()
+        except Exception as e:
+            logger.error(f"[HOD] stream reconcile failed: {e}", exc_info=True)
+
+    RECONCILE_FROM = OPEN_MINUTE + 6          # 09:36: the early bars are what a subscribe lag or a dropped frame would have cost
+    RECONCILE_CHUNK = 200
+
+    def _reconcile_stream_chunk(self) -> None:
+        """Once per day per streamed symbol, MERGE the REST truth into the streamed day (review A: nothing verified that
+        the 09:30 bar or any early bar actually arrived on the websocket — a dropped frame meant a silently wrong open,
+        HOD and volume). One chunk of symbols per tick, the REST call OUTSIDE the engine lock so evaluation never
+        waits; `set_bar` rewinds `next_idx` when a missing earlier bar is filled, so the merge is self-correcting."""
+        if self._minute_of_day() < self.RECONCILE_FROM or self._minute_of_day() >= 960:
+            return
+        with self._lock:
+            todo = [c for c in self.candidates.values() if c.subscribed and not c.reconciled][:self.RECONCILE_CHUNK]
+        if not todo: return
+        try:
+            got = self.alpaca.get_1min_bars_multi([c.symbol for c in todo], lookback_minutes=max(30, self._minute_of_day() - OPEN_MINUTE + 5))
+        except Exception as e:
+            logger.warning(f"[HOD] stream reconcile: REST failed for {len(todo)} symbols ({e}) — retried next tick"); return
+        fixed = 0
+        with self._lock:
+            for c in todo:
+                c.reconciled = True
+                df = (got or {}).get(c.symbol)
+                if df is None or not len(df): continue
+                before = c.n_bars; nxt = c.next_idx
+                cand = self._set_bars(c.symbol, df)
+                if cand is not None and (cand.n_bars != before or cand.next_idx < nxt):
+                    fixed += 1
+                    if cand.rejected_reason:
+                        logger.error(f"[HOD] {c.symbol}: streamed day was missing {cand.n_bars - before} bar(s) and the symbol was already judged ({cand.rejected_reason}) — a decision on an incomplete day (parity incident)")
+                    else:
+                        logger.warning(f"[HOD] {c.symbol}: streamed day was missing {cand.n_bars - before} bar(s) — merged from REST, rescanning from bar {cand.next_idx}")
+                        if cand.backfill_ok and not cand.needs_refill: self._evaluate(cand)
+        if fixed: logger.warning(f"[HOD] stream reconcile: {fixed} of {len(todo)} symbols had missing bars")
 
     def _check_stream_outage(self) -> None:
         """A WebSocket reconnect after the open means bars were missed: every live candidate's day (HOD, cumulative
@@ -281,9 +384,36 @@ class HodBreakEngine:
             return
         n = 0
         for c in self.candidates.values():
-            if c.subscribed and c.rejected_reason is None and c.backfill_ok:
-                c.backfill_ok = False; n += 1
+            if c.subscribed and c.rejected_reason is None:
+                c.needs_refill = True; n += 1
         logger.warning(f"[HOD] bar stream reconnected (generation {gen}) after the open — {n} candidates re-backfilled before any evaluation")
+        self._notify(f"[HOD] bar stream reconnected after the open — re-backfilling {n} names")
+
+    def _check_stream_silence(self) -> None:
+        """Liveness rail: during RTH a streamed universe of thousands of names produces bars every minute. Two minutes
+        without a single ingested bar means the subscription is gone (silent reconnect, auth drop) — re-send it,
+        re-backfill everything, and say so. Fail loud, never blind."""
+        if not self.candidates or not (OPEN_MINUTE + 3 <= self._minute_of_day() < 960):
+            return
+        since = time.time() - (self._last_bar_ingest or 0)
+        if self._last_bar_ingest and since < 120:
+            self._silence_alerted = False; return
+        if self._last_bar_ingest == 0 and self._minute_of_day() < OPEN_MINUTE + 5:
+            return
+        if not self._silence_alerted:
+            self._silence_alerted = True
+            logger.error(f"[HOD] NO BARS INGESTED for {since:.0f}s during RTH — re-subscribing and re-backfilling the universe")
+            self._notify(f"[HOD] ERROR: no bars for {since:.0f}s during RTH — re-subscribing")
+            try:
+                sm = self.stop_monitor
+                if sm is not None and hasattr(sm, 'subscribe_bars_many'):
+                    syms = [c.symbol for c in self.candidates.values() if c.subscribed]
+                    sm._bar_symbols.difference_update(syms) if hasattr(sm, '_bar_symbols') else None
+                    sm.subscribe_bars_many(syms)
+            except Exception as e:
+                logger.error(f"[HOD] re-subscribe failed: {e}")
+            for c in self.candidates.values():
+                if c.subscribed and c.rejected_reason is None: c.needs_refill = True
 
     def _admit_movers(self) -> None:
         n = 0; new: List[Candidate] = []
@@ -291,8 +421,8 @@ class HodBreakEngine:
             symbol, price, day_open, cum_vol, above = self._mover_queue.get_nowait(); n += 1
             if symbol in self.candidates or symbol in self.seen_today or symbol in self.positions:
                 continue
-            if not self.candidates and not self.seen_today:            # first admission of the session: pull the DB set once
-                db_syms = self._db_symbols_today(); self.seen_today |= db_syms; self.entered_today |= db_syms
+            if not self.seen_today:                                    # first admission of the session: pull the DB set once
+                db_syms = self._db_symbols_today(); self.seen_today |= db_syms | self._db_symbols_today(include_dead=True); self.entered_today |= db_syms
                 if symbol in self.seen_today: continue
             adv = self._adv_map.get(symbol, 0.0)
             if price < self.min_price or adv < self.min_adv20 or day_open <= 0:
@@ -301,7 +431,7 @@ class HodBreakEngine:
             self.candidates[symbol] = cand; new.append(cand)
             logger.info(f"[HOD] candidate {symbol} admitted: {price:.2f} +{above:.1f}% from open {day_open:.2f}, adv20 {adv:,.0f} (#{len(self.candidates)} today)")
             self._subscribe(cand)
-        retry = [c for c in self.candidates.values() if c.subscribed and not c.backfill_ok and c.rejected_reason is None]
+        retry = [c for c in self.candidates.values() if c.subscribed and (not c.backfill_ok or c.needs_refill) and c.rejected_reason is None]
         self._backfill([c for c in new if c.subscribed] + [c for c in retry if c not in new])
 
     def _subscribe(self, cand: Candidate) -> None:
@@ -319,7 +449,7 @@ class HodBreakEngine:
         open, a restart, a stream outage). The REST window starts at 09:30, so a non-empty result IS the complete day and
         marks the candidate evaluable; a symbol missing from the result is an ERROR and is retried next tick (never
         evaluated on stream-only bars — the DBI-09:50 class). Before the open there is nothing to fetch."""
-        cands = [c for c in cands if not c.backfill_ok]
+        cands = [c for c in cands if not c.backfill_ok or c.needs_refill]
         if not cands or self._minute_of_day() <= OPEN_MINUTE: return
         lookback = max(30, self._minute_of_day() - OPEN_MINUTE + 5)
         for i in range(0, len(cands), self.BACKFILL_CHUNK):
@@ -335,7 +465,7 @@ class HodBreakEngine:
                     c.backfill_tries += 1
                     if c.backfill_tries in (1, 5): empty.append(c.symbol)
                     continue
-                c.backfill_ok = True; c.next_idx = 0                # a (re)filled day is re-scanned from its first bar
+                c.backfill_ok = True; c.needs_refill = False; c.next_idx = 0   # a (re)filled day is re-scanned from its first bar
                 self._ingest_bars(c.symbol, df)
             if empty:                                          # a halted/dead name returns nothing all day (WARNING); a whole empty chunk is a REST failure (ERROR → Telegram)
                 (logger.error if len(empty) == len(chunk) else logger.warning)(
@@ -349,28 +479,58 @@ class HodBreakEngine:
         self._drain_thread = threading.Thread(target=self._drain_loop, name='hod-break-drain', daemon=True); self._drain_thread.start()
         logger.info("[HOD] bar drain thread started")
 
+    SETTLE_S = 0.4                                          # a minute's bars arrive within a few hundred ms; wait for the batch
+
     def _drain_loop(self) -> None:
+        """Bars of one minute are processed as a BATCH: collect for SETTLE_S after the first arrival, store them all,
+        resolve pending orders, then evaluate the touched candidates in SYMBOL order — the spec's tie-break
+        (`run_book`), instead of websocket arrival order."""
         while not self.shutdown_requested:
+            items = []
             try:
-                symbol, df = self._bar_queue.get(timeout=1.0)
+                items.append(self._bar_queue.get(timeout=1.0))
             except queue.Empty:
-                continue
+                pass
+            if items:
+                t0 = time.time()
+                while time.time() - t0 < self.SETTLE_S:
+                    try: items.append(self._bar_queue.get(timeout=0.05))
+                    except queue.Empty: pass
             try:
                 with self._lock:
-                    if symbol in self.candidates:
-                        self._ingest_bars(symbol, df)
-                    self.drain_bar_events()
+                    if items: self._ingest_batch(items)
+                    if any(p.status == 'pending' for p in self.positions.values()) and time.time() - self._last_pending_check >= 1.0:
+                        self._process_pending_fills()
             except Exception as e:
-                logger.error(f"[HOD] drain loop failed for {symbol}: {e}", exc_info=True)
+                logger.error(f"[HOD] drain loop failed: {e}", exc_info=True)
+
+    def _ingest_batch(self, items) -> List[str]:
+        """Store every bar of the batch, close the fill window of symbols whose next bar arrived, then evaluate the
+        touched candidates in symbol order. Used by the drain thread and by `drain_bar_events`."""
+        touched: Dict[str, Candidate] = {}
+        self._last_bar_ingest = time.time()
+        self._check_stream_outage()                                # the drain thread sees a reconnect before the next scanner tick
+        for symbol, payload in items:
+            cand = self._set_bars(symbol, payload)
+            if cand is not None: touched[symbol] = cand
+        for symbol in sorted(touched):
+            pos = self.positions.get(symbol)
+            if pos is not None and pos.status == 'pending':
+                self._process_pending_fills(force_timeout=symbol)   # the next bar closed: the spec's fill window is over
+        for symbol in sorted(touched):
+            self._evaluate(touched[symbol])
+        return sorted(touched)
 
     def drain_bar_events(self) -> List[str]:
-        touched = []
+        """Scanner-cycle drain — a no-op while the drain thread is alive (ONE consumer keeps bars in order; two
+        consumers of the same FIFO could ingest a symbol's later bar before its earlier one)."""
+        if self._drain_thread is not None and self._drain_thread.is_alive():
+            return []
         with self._lock:
+            items = []
             while not self._bar_queue.empty():
-                symbol, df = self._bar_queue.get_nowait()
-                if symbol in self.candidates:
-                    self._ingest_bars(symbol, df); touched.append(symbol)
-        return touched
+                items.append(self._bar_queue.get_nowait())
+            return self._ingest_batch(items) if items else []
 
     @staticmethod
     def _rth_arrays(cand: Candidate):
@@ -390,14 +550,14 @@ class HodBreakEngine:
         et = t.astimezone(ET)
         return et.hour * 60 + et.minute
 
-    def _ingest_bars(self, symbol: str, payload) -> None:
+    def _set_bars(self, symbol: str, payload) -> Optional[Candidate]:
         """MERGE by minute into the candidate's fixed array — never replace. Found 2026-09-14 09:50 (DBI): the stream
         carries only bars since SUBSCRIPTION; replacing the backfilled day with it dropped the 09:30 open, the early
         high-of-day and the early volume. `payload` = one bar dict (light stream handler), a DataFrame (backfill) or a
-        list of dicts. Bars outside 09:30-15:59 ET are ignored."""
+        list of dicts. Bars outside 09:30-15:59 ET are ignored. Returns the candidate (or None)."""
         cand = self.candidates.get(symbol)
         if cand is None:
-            return
+            return None
         try:
             if isinstance(payload, dict): recs = [payload]
             elif hasattr(payload, 'to_dict'): recs = payload.to_dict('records')
@@ -405,8 +565,12 @@ class HodBreakEngine:
             for b in recs:
                 cand.set_bar(self._bar_minute(b), float(b['open']), float(b['high']), float(b['low']), float(b['close']), float(b.get('volume') or 0))
         except Exception as e:
-            logger.error(f"[HOD] {symbol}: bad bar payload ({e})"); return
-        self._evaluate(cand)
+            logger.error(f"[HOD] {symbol}: bad bar payload ({e})"); return None
+        return cand
+
+    def _ingest_bars(self, symbol: str, payload) -> None:
+        """Store one symbol's bars and evaluate it (single-symbol path: backfill and tests)."""
+        self._ingest_batch([(symbol, payload)])
 
     def _evaluate(self, cand: Candidate) -> None:
         if cand.rejected_reason or cand.symbol in self.positions or cand.symbol in self.entered_today:
@@ -415,16 +579,20 @@ class HodBreakEngine:
         if arr is None:
             return
         o, h, l, c, v, m = arr; n = len(o)
+        if cand.needs_refill:
+            return                                         # a hole in the day (outage, dropped bar): nothing is judged until REST refilled it
         if not cand.backfill_ok:
             if int(m[0]) != OPEN_MINUTE:
                 return                                     # stream-only bars (no 09:30 open yet): wrong open/HOD/rv — wait for the backfill
             cand.backfill_ok = True                        # the set starts at the opening bar: complete from the open whatever the source
-        if cand.day_open > 0 and abs(float(o[0]) - cand.day_open) > 0.011:
-            cand.backfill_ok = False; cand.backfill_tries += 1
-            if cand.backfill_tries in (1, 5): logger.error(f"[HOD] {cand.symbol}: first bar open {float(o[0]):.2f} != day open {cand.day_open:.2f} — the day's first bar is missing, re-backfilling")
-            return
-        if cand.day_open <= 0: cand.day_open = float(o[0])
-        sig = detect(o, h, l, v, m, cand.adv20, self.params, start_idx=cand.next_idx)
+        if cand.day_open > 0 and abs(float(o[0]) - cand.day_open) > 0.011 and not cand.pattern_flag('open_mismatch_logged'):
+            logger.warning(f"[HOD] {cand.symbol}: first 1-min bar open {float(o[0]):.2f} != snapshot day open {cand.day_open:.2f} — the spec's o0 is the first bar; using it")
+        cand.day_open = float(o[0])                        # the spec's o0 = the first RTH bar's open, always
+        if not self.calendar_ok:
+            return                                         # no calendar = no session close known = no entries (fail closed)
+        params = self.params if getattr(self, 'last_entry_minute', self.params.last_entry_minute) == self.params.last_entry_minute \
+            else HodBreakParams(**{**self.params.__dict__, 'last_entry_minute': self.last_entry_minute})
+        sig = detect(o, h, l, v, m, cand.adv20, params, start_idx=cand.next_idx)
         if sig is None:
             cand.next_idx = n; return
         cand.next_idx = n
@@ -439,18 +607,22 @@ class HodBreakEngine:
     # ------------------------------------------------------------------ entry
     def _try_enter(self, cand: Candidate, sig, day_open: float) -> None:
         p = self.params; sym = cand.symbol
+        limit = round(sig.level * (1.0 + p.cap), 2); stop = round(sig.stop, 2)
+        if sig.level < self.min_price:                        # level-based rules first: the spec applies them before the book
+            cand.rejected_reason = 'price'; logger.info(f"[HOD] {sym}: level {sig.level:.2f} below the ${self.min_price:.0f} floor — skip"); return
+        if stop >= limit:
+            cand.rejected_reason = 'r_min'; return
         blocked = self._kill_rails_blocked()
         if blocked:
-            self._notify_once(blocked, f"[HOD] {blocked}: no new entries"); return
+            cand.rejected_reason = blocked; self._notify_once(blocked, f"[HOD] {blocked}: no new entries"); return
+        if self._entered_today_count() >= p.max_per_day or len(self.positions) >= p.max_concurrent:
+            # Resolve the book BEFORE judging the caps: an exit or a no-fill that already happened at the broker frees its
+            # slot now (the spec's causal rule: an exit on a bar strictly before this entry bar), not on the next 60 s tick.
+            self._process_pending_fills(); self.check_exits()
         if self._entered_today_count() >= p.max_per_day:
             cand.rejected_reason = 'day_cap'; logger.info(f"[HOD] {sym}: per-day cap {p.max_per_day} reached — skip"); return
         if len(self.positions) >= p.max_concurrent:
             logger.info(f"[HOD] {sym}: concurrency cap {p.max_concurrent} — skip (signal not re-armed)"); cand.rejected_reason = 'concurrency'; return
-        limit = round(sig.level * (1.0 + p.cap), 2); stop = round(sig.stop, 2)
-        if sig.level < self.min_price:
-            cand.rejected_reason = 'price'; logger.info(f"[HOD] {sym}: level {sig.level:.2f} below the ${self.min_price:.0f} floor — skip"); return
-        if stop >= limit:
-            cand.rejected_reason = 'r_min'; return
         q = self._quote(sym)
         if q is None:
             cand.rejected_reason = 'no_quote'; logger.warning(f"[HOD] {sym}: no quote — fail closed, no order"); return
@@ -483,60 +655,86 @@ class HodBreakEngine:
                 cand.dry_logged = True; cand.rejected_reason = 'dry_run'
                 logger.info(f"[HOD DRY] WOULD BUY {msg}"); self._notify(f"[HOD DRY] WOULD BUY {msg}")
             return
+        coid = f"hod-{sym}-{(self.session_date or '')[5:]}-{uuid.uuid4().hex[:8]}"[:48]   # OUR id: the only key we ever adopt by
         try:
-            od = self.alpaca.submit_bracket_order(symbol=sym, qty=shares, side='buy', limit_price=limit, tp_price=target, sl_price=stop)
+            od = self.alpaca.submit_bracket_order(symbol=sym, qty=shares, side='buy', limit_price=limit, tp_price=target, sl_price=stop, client_order_id=coid)
         except Exception as e:
-            od = self._adopt_open_buy(sym)                     # a client-side timeout may have left an accepted order at the broker
+            od = self._adopt_open_buy(sym, coid)               # a client-side timeout may have left OUR accepted order at the broker
             if od is None:
                 cand.rejected_reason = 'submit_failed'; logger.error(f"[HOD] {sym}: submit failed: {e}"); self._notify(f"[HOD] ERROR submit {sym}: {e}"); return
-            logger.warning(f"[HOD] {sym}: submit raised ({e}) but an open BUY order exists at the broker — adopted {od.get('id')}")
-        order_id = str(od.get('id', '')); tp_id = sl_id = None
+            logger.warning(f"[HOD] {sym}: submit raised ({e}) but our order {coid} exists at the broker — adopted {od.get('id')}")
+        order_id = str(od.get('id') or ''); tp_id = sl_id = None
         for leg in od.get('legs') or []:
             if leg.get('limit_price') is not None and leg.get('stop_price') is None: tp_id = str(leg.get('id'))
             elif leg.get('stop_price') is not None: sl_id = str(leg.get('id'))
         if not order_id:
-            logger.error(f"[HOD] {sym}: submit returned no order id — untracked order possible"); self._notify(f"[HOD] ERROR {sym}: order id missing")
+            od2 = self._adopt_open_buy(sym, coid)              # the broker may have it under our client id
+            order_id = str((od2 or {}).get('id') or '')
+            if not order_id:
+                cand.rejected_reason = 'submit_failed'
+                logger.error(f"[HOD] {sym}: submit returned no order id and {coid} is not at the broker — nothing tracked, no order assumed"); self._notify(f"[HOD] ERROR {sym}: order id missing"); return
         now = datetime.now(timezone.utc)
-        trade_id = self._save_pending_trade(sym, shares, limit, stop, target, order_id, tp_id, sl_id, sig, bid, ask)
+        pd_ = self._pattern_data(sig, tp_id, sl_id, bid, ask, limit, target, coid)
+        trade_id = self._save_pending_trade(sym, shares, limit, stop, target, order_id, pd_)
         self.positions[sym] = Position(symbol=sym, trade_id=trade_id, order_id=order_id, shares=shares, limit_price=limit, stop=stop, target=target,
-                                       level=sig.level, submitted_at=now, tp_leg_id=tp_id, sl_leg_id=sl_id)
+                                       level=sig.level, submitted_at=now, tp_leg_id=tp_id, sl_leg_id=sl_id, client_order_id=coid, pattern_data=pd_,
+                                       fill_at_estimate_r=r)
         self.entered_today.add(sym); self.seen_today.add(sym); cand.rejected_reason = 'ordered'
-        logger.info(f"[HOD] ENTRY SUBMITTED {msg} order {order_id}"); self._notify(f"[HOD] BUY {msg}")
+        logger.info(f"[HOD] ENTRY SUBMITTED {msg} order {order_id} ({coid})"); self._notify(f"[HOD] BUY {msg}")
 
-    def _adopt_open_buy(self, symbol: str) -> Optional[dict]:
+    def _adopt_open_buy(self, symbol: str, client_order_id: str) -> Optional[dict]:
+        """Find OUR order by client_order_id — never by symbol/side (the owner trades manually on the same account)."""
         try:
             for od in self.alpaca.get_open_orders() or []:
-                if od.get('symbol') == symbol and str(od.get('side', '')).lower() == 'buy':
+                if str(od.get('client_order_id') or '') == client_order_id:
                     return od
         except Exception as e:
             logger.warning(f"[HOD] {symbol}: open-orders reconcile failed ({e})")
         return None
 
     def _quote(self, symbol: str, tries: int = 3):
+        """Latest NBBO (bid, ask) or None. A quote older than max_quote_age_s (halted name, stalled feed) is refused:
+        the spec's fill is the next print, and a pre-halt NBBO would queue a limit for the reopen."""
         for k in range(tries):
             try:
                 q = self.alpaca.get_latest_quote(symbol)
                 bid = float(q.get('bid_price') or 0); ask = float(q.get('ask_price') or 0)
+                ts = q.get('timestamp')
+                if ts and self.max_quote_age_s > 0:
+                    t = ts if isinstance(ts, datetime) else datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
+                    if t.tzinfo is None: t = t.replace(tzinfo=timezone.utc)
+                    age = (datetime.now(timezone.utc) - t).total_seconds()
+                    if age > self.max_quote_age_s:
+                        logger.warning(f"[HOD] {symbol}: quote is {age:.0f}s old (halted or stalled feed) — refused"); return None
                 if bid > 0 and ask > 0: return (bid, ask)
             except Exception as e:
                 logger.warning(f"[HOD] {symbol}: quote failed ({e}) try {k + 1}/{tries}")
             if k + 1 < tries: time.sleep(0.5)
         return None
 
-    def _save_pending_trade(self, sym, shares, limit, stop, target, order_id, tp_id, sl_id, sig, bid, ask) -> Optional[int]:
+    def _pattern_data(self, sig, tp_id, sl_id, bid, ask, limit, target, coid) -> dict:
+        return {'level': sig.level, 'consol_low': sig.stop, 'dist_open_pct': sig.dist_open_pct, 'rv_profile': sig.rv_profile,
+                'cap': self.params.cap, 'target_r': self.params.target_r, 'tp_leg_id': tp_id, 'sl_leg_id': sl_id,
+                'quote_bid': bid, 'quote_ask': ask, 'limit': limit, 'target': target, 'client_order_id': coid}
+
+    def _save_pending_trade(self, sym, shares, limit, stop, target, order_id, pattern_data: dict) -> Optional[int]:
         rec = {
             'trade_date': self.session_date or self._et_now().strftime('%Y-%m-%d'), 'symbol': sym, 'side': 'buy', 'entry_price': limit,
             'stop_loss_price': stop, 'take_profit_price': target, 'shares': shares, 'risk_per_share': limit - stop, 'total_risk': (limit - stop) * shares,
             'risk_reward_ratio': self.params.target_r, 'order_id': order_id, 'order_status': 'pending_new', 'fill_price': None, 'filled_at': None,
             'exit_price': None, 'exit_reason': None, 'exited_at': None, 'pnl': None, 'pnl_pct': None, 'strategy': STRATEGY_NAME,
-            'pattern_data': json.dumps({'level': sig.level, 'consol_low': sig.stop, 'dist_open_pct': sig.dist_open_pct, 'rv_profile': sig.rv_profile,
-                                        'cap': self.params.cap, 'target_r': self.params.target_r, 'tp_leg_id': tp_id, 'sl_leg_id': sl_id,
-                                        'quote_bid': bid, 'quote_ask': ask, 'limit': limit, 'target': target}),
+            'pattern_data': json.dumps(pattern_data),
         }
         try:
             return int(self.db.save_trade(rec))
         except Exception as e:
             logger.error(f"[HOD] {sym}: save_trade failed ({e}) — order {order_id} is NOT in the DB"); self._notify(f"[HOD] ERROR DB {sym}: {e}"); return None
+
+    def _update_pattern_data(self, pos: Position, **kv) -> None:
+        pos.pattern_data.update(kv)
+        if pos.trade_id is not None:
+            try: self.db.update_trade(pos.trade_id, {'pattern_data': json.dumps(pos.pattern_data)})
+            except Exception as e: logger.error(f"[HOD] {pos.symbol}: pattern_data update failed: {e}")
 
     # ------------------------------------------------------------------ fills / exits
     def _order_status(self, order_id: str, rest: bool = False) -> Optional[dict]:
@@ -554,7 +752,11 @@ class HodBreakEngine:
                 logger.warning(f"[HOD] get_order {order_id} failed ({e})"); return None
         return st
 
-    def _process_pending_fills(self) -> None:
+    def _process_pending_fills(self, force_timeout: Optional[str] = None) -> None:
+        """Poll our working entry orders. Runs from the drain loop every ~1 s (not only from the scanner's 60 s cycle —
+        the order life must really be `order_timeout_s`). `force_timeout=symbol`: that symbol's next bar closed, so the
+        spec's fill window (the next bar's open) is over whatever the wall clock says."""
+        self._last_pending_check = time.time()
         for sym, pos in list(self.positions.items()):
             if pos.status != 'pending':
                 continue
@@ -567,7 +769,7 @@ class HodBreakEngine:
                 if fq > 0: self._confirm_fill(pos, st)
                 else: self._drop_pending(pos, status)
                 continue
-            if age >= self.order_timeout_s:
+            if age >= self.order_timeout_s or (force_timeout == sym and age >= 3.0):
                 try: self.alpaca.cancel_order(pos.order_id)
                 except Exception as e: logger.warning(f"[HOD] {sym}: cancel failed ({e})")
                 st2 = self._order_status(pos.order_id, rest=True) or {}
@@ -583,14 +785,23 @@ class HodBreakEngine:
             except Exception as e: logger.error(f"[HOD] {pos.symbol}: DB update ({status}) failed: {e}")
 
     def _confirm_fill(self, pos: Position, st: dict) -> None:
-        fq = int(st.get('filled_qty') or pos.shares) or pos.shares
-        px = float(st.get('filled_avg_price') or pos.limit_price)
+        fq = int(st.get('filled_qty') or 0)
+        if fq <= 0:
+            logger.warning(f"[HOD] {pos.symbol}: fill confirmed without filled_qty — assuming the full {pos.shares}"); fq = pos.shares
+        px = float(st.get('filled_avg_price') or 0)
+        if px <= 0:
+            logger.warning(f"[HOD] {pos.symbol}: fill confirmed without filled_avg_price — booking the limit {pos.limit_price:.2f} (worst case)"); px = pos.limit_price
         pos.fill_price = px; pos.filled_at = datetime.now(timezone.utc); pos.shares = fq; pos.status = 'open'
         self._anchor_target_to_fill(pos)
+        r_fill = px - pos.stop; fill_delay = (pos.filled_at - pos.submitted_at).total_seconds()
+        spec_no_trade = r_fill <= 0 or r_fill / px * 100.0 < self.params.min_r_pct   # the spec would have skipped this fill (r_min on the fill)
+        self._update_pattern_data(pos, fill_delay_s=round(fill_delay, 1), risk_at_fill=round(r_fill * fq, 2), spec_no_trade=bool(spec_no_trade))
         if pos.trade_id is not None:
-            try: self.db.update_trade(pos.trade_id, {'order_status': 'filled', 'fill_price': px, 'filled_at': pos.filled_at.isoformat(), 'shares': fq, 'take_profit_price': pos.target})
+            try: self.db.update_trade(pos.trade_id, {'order_status': 'filled', 'fill_price': px, 'filled_at': pos.filled_at.isoformat(), 'shares': fq, 'filled_qty': fq,
+                                                     'take_profit_price': pos.target, 'risk_per_share': r_fill, 'total_risk': r_fill * fq})
             except Exception as e: logger.error(f"[HOD] {pos.symbol}: DB fill update failed: {e}")
-        logger.info(f"[HOD] FILLED {pos.symbol} x{fq} @ {px:.2f} (limit {pos.limit_price:.2f}, slip {(px / pos.level - 1) * 1e4:.0f} bps vs level)")
+        logger.info(f"[HOD] FILLED {pos.symbol} x{fq} @ {px:.2f} after {fill_delay:.1f}s (limit {pos.limit_price:.2f}, slip {(px / pos.level - 1) * 1e4:.0f} bps vs level, "
+                    f"risk ${r_fill * fq:.0f} vs ${self.risk_usd:.0f} planned{', SPEC WOULD SKIP: r_min on the fill' if spec_no_trade else ''})")
         self._notify(f"[HOD] FILLED {pos.symbol} x{fq} @ {px:.2f} stop {pos.stop:.2f} target {pos.target:.2f}")
 
     def _anchor_target_to_fill(self, pos: Position) -> None:
@@ -601,30 +812,72 @@ class HodBreakEngine:
         t2 = round(pos.fill_price + self.params.target_r * (pos.fill_price - pos.stop), 2)
         if abs(t2 - pos.target) < 0.01:
             return
+        old_id = pos.tp_leg_id
         try:
-            self.alpaca.replace_order_limit_price(pos.tp_leg_id, t2)
-            logger.info(f"[HOD] {pos.symbol}: target re-anchored to the fill: {pos.target:.2f} → {t2:.2f} (fill {pos.fill_price:.2f}, stop {pos.stop:.2f})")
-            pos.target = t2
+            res = self.alpaca.replace_order_limit_price(old_id, t2) or {}
+            new_id = str(res.get('id') or '')
+            # Alpaca's replace creates a NEW order (the old one becomes 'replaced'): track the new id or every later
+            # target fill is invisible to check_exits and the 15:55 flat would sell shares we no longer hold.
+            st = self._order_status(new_id, rest=True) if new_id else None
+            status = str((st or {}).get('status', '')).lower()
+            if not new_id or status in ('rejected', 'canceled', 'cancelled', 'expired'):
+                logger.error(f"[HOD] {pos.symbol}: take-profit replace to {t2:.2f} not effective (new id {new_id or 'none'}, status {status or 'unknown'}) — leg {old_id} stays at {pos.target:.2f}")
+                return
+            pos.tp_leg_id = new_id; pos.target = t2
+            self._update_pattern_data(pos, tp_leg_id=new_id, tp_leg_replaced=old_id, target=t2)
+            logger.info(f"[HOD] {pos.symbol}: target re-anchored to the fill: {pos.target:.2f} (fill {pos.fill_price:.2f}, stop {pos.stop:.2f}); TP leg {old_id} → {new_id}")
         except Exception as e:
-            logger.error(f"[HOD] {pos.symbol}: take-profit re-anchor to {t2:.2f} FAILED ({e}) — leg stays at {pos.target:.2f} (target {'below' if t2 > pos.target else 'above'} the spec's)")
+            logger.error(f"[HOD] {pos.symbol}: take-profit re-anchor to {t2:.2f} FAILED ({e}) — leg {old_id} stays at {pos.target:.2f} (target {'below' if t2 > pos.target else 'above'} the spec's)")
 
-    def check_exits(self) -> List[str]:
-        """Poll the bracket legs (and the force-close order) of open positions; record exits."""
+    def _exit_legs(self, pos: Position):
+        return ((pos.close_order_id, 'eod'), (pos.tp_leg_id, 'target'), (pos.sl_leg_id, 'stop'))
+
+    def _leg_status(self, pos: Position, leg_id: str, reason: str, rest: bool = False):
+        """Status of an exit leg, following a replaced order to its successor (Alpaca's replace creates a new id)."""
+        st = self._order_status(leg_id, rest=rest)
+        if st and str(st.get('status', '')).lower() == 'replaced' and st.get('replaced_by'):
+            new_id = str(st['replaced_by']); logger.warning(f"[HOD] {pos.symbol}: {reason} leg {leg_id} was replaced by {new_id} — following it")
+            if reason == 'target': pos.tp_leg_id = new_id; self._update_pattern_data(pos, tp_leg_id=new_id)
+            elif reason == 'stop': pos.sl_leg_id = new_id; self._update_pattern_data(pos, sl_leg_id=new_id)
+            else: pos.close_order_id = new_id; self._update_pattern_data(pos, close_order_id=new_id)
+            st = self._order_status(new_id, rest=rest); leg_id = new_id
+        return leg_id, st
+
+    def _book_leg_fill(self, pos: Position, leg_id: str, st: dict, reason: str) -> int:
+        """Book the shares an exit order has sold so far (partials included) — qty-based, so a partial take-profit
+        followed by the stop, or a partially filled close order, is priced exactly as it happened. Returns the new shares
+        booked. When every share is sold the position is recorded as exited (blended price, reason = the last seller)."""
+        fq = int(st.get('filled_qty') or 0); px = float(st.get('filled_avg_price') or 0.0)
+        new = fq - pos.leg_booked.get(leg_id, 0)
+        if new <= 0 or px <= 0:
+            return 0
+        pos.leg_booked[leg_id] = fq; pos.closed_qty += new; pos.closed_notional += new * px; pos.last_close_reason = reason
+        if pos.closed_qty < pos.shares:
+            logger.info(f"[HOD] {pos.symbol}: {reason} sold {new} @ {px:.2f} — {pos.open_qty} still held (partial)")
+            self._update_pattern_data(pos, closed_qty=pos.closed_qty, closed_notional=round(pos.closed_notional, 2), partial_exit=reason)
+        else:
+            self._record_exit(pos, pos.closed_notional / pos.closed_qty, reason if len(set(pos.leg_booked)) == 1 else f'{reason}+partial')
+        return new
+
+    def check_exits(self, rest: bool = False) -> List[str]:
+        """Poll the bracket legs (and the force-close order) of open positions; book fills; record completed exits."""
         done = []
         for sym, pos in list(self.positions.items()):
             if pos.status != 'open':
                 continue
-            for leg_id, reason in ((pos.close_order_id, 'eod'), (pos.tp_leg_id, 'target'), (pos.sl_leg_id, 'stop')):
+            for leg_id, reason in self._exit_legs(pos):
                 if not leg_id:
                     continue
-                st = self._order_status(leg_id)
-                if st and str(st.get('status', '')).lower() == 'filled' and int(st.get('filled_qty') or 0) > 0:
-                    self._record_exit(pos, float(st.get('filled_avg_price') or 0.0), reason); done.append(sym)
-                    for other in (pos.tp_leg_id, pos.sl_leg_id):          # belt and braces: the OCO sibling must be dead
-                        if other and other != leg_id:
-                            try: self.alpaca.cancel_order(other)
-                            except Exception: pass
-                    break
+                leg_id, st = self._leg_status(pos, leg_id, reason, rest=rest)
+                if st and int(st.get('filled_qty') or 0) > 0:
+                    self._book_leg_fill(pos, leg_id, st, reason)
+                    if sym not in self.positions:
+                        done.append(sym)
+                        for other in (pos.tp_leg_id, pos.sl_leg_id, pos.close_order_id):   # belt and braces: nothing may keep selling
+                            if other and other != leg_id:
+                                try: self.alpaca.cancel_order(other)
+                                except Exception as e: logger.warning(f"[HOD] {sym}: sibling cancel {other} failed ({e})")
+                        break
         return done
 
     def _record_exit(self, pos: Position, exit_price: float, reason: str) -> None:
@@ -645,48 +898,140 @@ class HodBreakEngine:
 
     # ------------------------------------------------------------------ force close
     def is_force_close_time(self) -> bool:
-        return self._minute_of_day() >= self.params.flat_minute
+        return self._minute_of_day() >= getattr(self, 'flat_minute', self.params.flat_minute)
 
     FC_RESUBMIT_S = 60.0
+    FC_LEG_POLL_S = 3.0
+
+    def _cancel_pending_and_confirm(self, pos: Position, why: str) -> Optional[str]:
+        """Cancel a working entry and read its REST truth: 'filled' (partial or full — the position is now open),
+        'dropped' (nothing filled, terminal) or None (cancel not yet confirmed: keep it pending, never assume)."""
+        try: self.alpaca.cancel_order(pos.order_id)
+        except Exception as e: logger.warning(f"[HOD] {pos.symbol}: cancel failed ({e})")
+        st = self._order_status(pos.order_id, rest=True) or {}
+        status = str(st.get('status', '')).lower()
+        if int(st.get('filled_qty') or 0) > 0:
+            self._confirm_fill(pos, st); return 'filled'
+        if status in _TERMINAL:
+            self._drop_pending(pos, why); return 'dropped'
+        logger.warning(f"[HOD] {pos.symbol}: cancel not confirmed (status {status or 'unknown'}) — order kept as pending, retry next pass")
+        return None
+
+    def _settle_exit_legs(self, pos: Position) -> None:
+        """Cancel the bracket legs and READ them until terminal (≤ FC_LEG_POLL_S): a leg that filled in the meantime is
+        booked, never sold twice. Nothing is sold on assumptions."""
+        for leg, reason in ((pos.tp_leg_id, 'target'), (pos.sl_leg_id, 'stop')):
+            if not leg: continue
+            try: self.alpaca.cancel_order(leg)
+            except Exception as e: logger.warning(f"[HOD] FC leg cancel {pos.symbol} failed ({e}) — reading the leg")
+        deadline = time.time() + self.FC_LEG_POLL_S
+        while True:
+            pending = False
+            for leg, reason in ((pos.tp_leg_id, 'target'), (pos.sl_leg_id, 'stop')):
+                if not leg or pos.symbol not in self.positions: continue
+                leg, st = self._leg_status(pos, leg, reason, rest=True)
+                st = st or {}
+                if int(st.get('filled_qty') or 0) > 0: self._book_leg_fill(pos, leg, st, reason)
+                if str(st.get('status', '')).lower() not in _TERMINAL + ('filled', 'replaced'): pending = True
+            if not pending or pos.symbol not in self.positions or time.time() >= deadline: break
+            time.sleep(0.25)
+        if pending and pos.symbol in self.positions:
+            logger.warning(f"[HOD] FORCE CLOSE {pos.symbol}: a leg is still not terminal after {self.FC_LEG_POLL_S:.0f}s — selling only the {pos.open_qty} shares no leg has sold")
+
+    def _close_reference_price(self, pos: Position) -> float:
+        q = self._quote(pos.symbol)
+        if q: return q[0]
+        cand = self.candidates.get(pos.symbol)
+        if cand is not None and cand.n_bars:
+            last = cand.ohlcv[np.flatnonzero(cand.have)[-1]][3]
+            logger.warning(f"[HOD] FORCE CLOSE {pos.symbol}: no quote — using the last bar close {last:.2f}"); return float(last)
+        logger.warning(f"[HOD] FORCE CLOSE {pos.symbol}: no quote and no bars — using the fill {pos.fill_price or pos.limit_price:.2f}")
+        return float(pos.fill_price or pos.limit_price)
 
     def force_close_all(self) -> int:
-        """Cancel pending entries; cancel legs; sell OUR shares (never `close_position`, which would liquidate a
-        position the owner or another strategy holds in the same symbol) with a marketable limit; re-check every
-        tick and re-submit until every position is gone. `_flattened` only when nothing is left."""
+        """Flatten OUR shares at flat_minute: cancel working entries (REST-confirmed), cancel and READ the legs (a fill
+        in the race is booked, not sold again), then sell exactly the shares no exit has sold, with a marketable limit
+        whose id is persisted (a restart must not sell twice). Never `close_position` (the owner trades the same
+        account). Re-checked every pass; re-submitted after FC_RESUBMIT_S; a third attempt goes 3% through the bid."""
         n = 0; now = datetime.now(timezone.utc)
-        for sym, pos in list(self.positions.items()):
-            if pos.status == 'pending':
-                try: self.alpaca.cancel_order(pos.order_id)
-                except Exception as e: logger.warning(f"[HOD] FC cancel {sym} failed: {e}")
-                st = self._order_status(pos.order_id) or {}
-                if int(st.get('filled_qty') or 0) > 0: self._confirm_fill(pos, st)
-                else: self._drop_pending(pos, 'time_stop_canceled'); continue
-            if pos.close_order_id:
-                st = self._order_status(pos.close_order_id) or {}
-                status = str(st.get('status', '')).lower(); age = (now - (pos.close_submitted_at or now)).total_seconds()
-                if status in ('filled',) or (status in _TERMINAL and int(st.get('filled_qty') or 0) >= pos.shares):
-                    continue                                       # check_exits records it
-                if status not in _TERMINAL and age < self.FC_RESUBMIT_S:
-                    continue                                       # still working
-                try: self.alpaca.cancel_order(pos.close_order_id)
-                except Exception: pass
-                logger.warning(f"[HOD] FORCE CLOSE {sym}: close order {pos.close_order_id} {status or 'unknown'} after {age:.0f}s — re-submitting")
-            for leg in (pos.tp_leg_id, pos.sl_leg_id):
-                if leg:
-                    try: self.alpaca.cancel_order(leg)
-                    except Exception as e: logger.warning(f"[HOD] FC leg cancel {sym} failed: {e}")
-            time.sleep(0.5)
-            q = self._quote(sym); ref = q[0] if q else (pos.fill_price or pos.limit_price)
-            limit = round(ref * 0.99, 2)
+        with self._lock:
+            for sym, pos in list(self.positions.items()):
+                if pos.status == 'pending':
+                    if self._cancel_pending_and_confirm(pos, 'time_stop_canceled') != 'filled':
+                        continue
+                if pos.close_order_id:
+                    cid, st = self._leg_status(pos, pos.close_order_id, 'eod', rest=True); st = st or {}
+                    status = str(st.get('status', '')).lower(); age = (now - (pos.close_submitted_at or now)).total_seconds()
+                    if int(st.get('filled_qty') or 0) > 0: self._book_leg_fill(pos, cid, st, 'eod')
+                    if sym not in self.positions: continue
+                    if status not in _TERMINAL + ('filled',) and age < self.FC_RESUBMIT_S:
+                        continue                                       # still working
+                    if status not in _TERMINAL + ('filled',):
+                        try: self.alpaca.cancel_order(cid)
+                        except Exception: pass
+                        st2 = self._order_status(cid, rest=True) or {}
+                        if int(st2.get('filled_qty') or 0) > 0: self._book_leg_fill(pos, cid, st2, 'eod')
+                        if sym not in self.positions: continue
+                    logger.warning(f"[HOD] FORCE CLOSE {sym}: close order {cid} {status or 'unknown'} after {age:.0f}s — re-submitting the remaining {pos.open_qty}")
+                self._settle_exit_legs(pos)
+                if sym not in self.positions: continue
+                qty = pos.open_qty
+                if qty <= 0:
+                    logger.warning(f"[HOD] FORCE CLOSE {sym}: nothing left to sell after the legs were read"); continue
+                pos.fc_attempts += 1
+                ref = self._close_reference_price(pos); limit = round(ref * (0.97 if pos.fc_attempts >= 3 else 0.99), 2)
+                coid = f"hod-fc-{sym}-{(self.session_date or '')[5:]}-{uuid.uuid4().hex[:6]}"[:48]
+                try:
+                    od = self.alpaca.submit_limit_sell_order(sym, qty, limit, **({'client_order_id': coid} if self._client_supports_coid('submit_limit_sell_order') else {}))
+                    pos.close_order_id = str(od.get('id') or '') or None; pos.close_submitted_at = now; n += 1
+                    self._update_pattern_data(pos, close_order_id=pos.close_order_id, close_client_order_id=coid, close_submitted_at=now.isoformat(), closed_qty=pos.closed_qty)
+                    logger.info(f"[HOD] FORCE CLOSE {sym} x{qty} limit {limit:.2f} submitted ({pos.close_order_id}, attempt {pos.fc_attempts})")
+                except Exception as e:
+                    logger.error(f"[HOD] FORCE CLOSE {sym} FAILED: {e}"); self._notify(f"[HOD] ERROR force close {sym}: {e}")
+            remaining = [s_ for s_, p_ in self.positions.items() if p_.status == 'open']
+            self._flattened = not remaining
+        if n: self._notify(f"[HOD] flat at {getattr(self, 'flat_minute', self.params.flat_minute) // 60:02d}:{getattr(self, 'flat_minute', self.params.flat_minute) % 60:02d} ET — {n} close order(s) submitted, {len(remaining)} still open")
+        return n
+
+    def _client_supports_coid(self, method: str) -> bool:
+        import inspect
+        try: return 'client_order_id' in inspect.signature(getattr(self.alpaca, method)).parameters
+        except (TypeError, ValueError): return False
+
+    def reconcile_pending_exits(self, days: int = 7) -> int:
+        """Rows left `exit_pending_verification` (exit price unknown, broker held fewer shares, dead-man flat): read the
+        exit orders named in pattern_data from REST and write the truth — closed with P&L when the legs/close sold every
+        share, back to open (re-adopted) when the broker still holds them. Without this the kill rails never see those
+        losses."""
+        path = getattr(self.db, '_trades_path', None)
+        if not path: return 0
+        try:
+            conn = sqlite3.connect(str(path), timeout=10)
             try:
-                od = self.alpaca.submit_limit_sell_order(sym, pos.shares, limit)
-                pos.close_order_id = str(od.get('id') or '') or None; pos.close_submitted_at = now; n += 1
-                logger.info(f"[HOD] FORCE CLOSE {sym} x{pos.shares} limit {limit:.2f} submitted ({pos.close_order_id})")
-            except Exception as e:
-                logger.error(f"[HOD] FORCE CLOSE {sym} FAILED: {e}"); self._notify(f"[HOD] ERROR force close {sym}: {e}")
-        remaining = [s_ for s_, p_ in self.positions.items() if p_.status == 'open']
-        self._flattened = not remaining
-        if n: self._notify(f"[HOD] flat at {self.params.flat_minute // 60:02d}:{self.params.flat_minute % 60:02d} ET — {n} close order(s) submitted, {len(remaining)} still open")
+                rows = conn.execute("SELECT id, symbol, shares, fill_price, entry_price, pattern_data, trade_date FROM trades WHERE strategy=? AND order_status='exit_pending_verification' "
+                                    "AND trade_date >= date('now', ?)", (STRATEGY_NAME, f'-{days} days')).fetchall()
+            finally: conn.close()
+        except Exception as e:
+            logger.error(f"[HOD] reconcile: DB read failed ({e})"); return 0
+        n = 0
+        for tid, sym, shares, fill, entry, pdj, tdate in rows:
+            try: pd_ = json.loads(pdj or '{}')
+            except Exception: pd_ = {}
+            pos = Position(symbol=sym, trade_id=tid, order_id='', shares=int(shares or 0), limit_price=float(entry or 0), stop=0.0, target=0.0, level=0.0,
+                           submitted_at=datetime.now(timezone.utc), tp_leg_id=pd_.get('tp_leg_id'), sl_leg_id=pd_.get('sl_leg_id'), close_order_id=pd_.get('close_order_id'),
+                           fill_price=fill, pattern_data=dict(pd_), status='open')
+            self.positions[sym] = pos                              # _book_leg_fill records through the normal path
+            for leg, reason in self._exit_legs(pos):
+                if not leg or sym not in self.positions: continue
+                leg, st = self._leg_status(pos, leg, reason, rest=True)
+                if st and int(st.get('filled_qty') or 0) > 0: self._book_leg_fill(pos, leg, st, reason)
+            if sym in self.positions:
+                self.positions.pop(sym)
+                logger.error(f"[HOD] reconcile {sym} ({tdate}): {pos.closed_qty}/{pos.shares} shares accounted for by its exit orders — still exit_pending_verification, needs a human look")
+                self._notify(f"[HOD] UNRECONCILED {sym} {tdate}: {pos.closed_qty}/{pos.shares} shares sold by our orders")
+            else:
+                n += 1
+        if rows: logger.info(f"[HOD] reconcile: {n} of {len(rows)} exit_pending_verification rows resolved")
         return n
 
     # ------------------------------------------------------------------ rails / caps
@@ -703,24 +1048,40 @@ class HodBreakEngine:
         except Exception as e:
             logger.error(f"[HOD] realized-pnl query failed ({e}) — FAIL CLOSED"); return -1e9
 
+    def _unverified_exits(self, days: int = 7) -> int:
+        path = getattr(self.db, '_trades_path', None)
+        if not path: return 1
+        try:
+            conn = sqlite3.connect(str(path), timeout=10)
+            try:
+                return int(conn.execute("SELECT COUNT(*) FROM trades WHERE strategy=? AND order_status='exit_pending_verification' AND trade_date >= date('now', ?)",
+                                        (STRATEGY_NAME, f'-{days} days')).fetchone()[0])
+            finally: conn.close()
+        except Exception as e:
+            logger.error(f"[HOD] unverified-exit query failed ({e}) — FAIL CLOSED"); return 1
+
     def _kill_rails_blocked(self) -> Optional[str]:
         now = self._et_now(); today = now.strftime('%Y-%m-%d'); week = (now - timedelta(days=now.weekday())).strftime('%Y-%m-%d')
+        if self._unverified_exits() > 0: return 'unverified_exit'      # a loss the rails cannot see = no new risk until it is written
         if self._realized_pnl(week) <= self.weekly_kill_usd: return 'weekly_kill'
         if self._realized_pnl(today) <= self.daily_kill_usd: return 'daily_kill'
         return None
 
-    _DEAD = ('canceled', 'cancelled', 'expired', 'rejected', 'time_stop_canceled')
+    _DEAD = _TERMINAL + ('time_stop_canceled',)            # every no-fill status: never a day slot
 
-    def _db_symbols_today(self) -> set:
-        """Symbols with ANY non-dead hod_break row today (open, closed, pending) — the restart-safe source of
-        truth for the per-day cap and once-per-symbol. Returns an empty set (memory only) on DB failure."""
+    def _db_symbols_today(self, include_dead: bool = False) -> set:
+        """Symbols with a hod_break row today: non-dead rows (open, closed, pending) feed the per-day cap; with
+        `include_dead` every row (no-fills too) feeds once-per-symbol. Restart-safe. Empty set (memory only) on DB failure."""
         today = self.session_date or self._et_now().strftime('%Y-%m-%d'); path = getattr(self.db, '_trades_path', None)
         if not path: return set()
         try:
             conn = sqlite3.connect(str(path), timeout=10)
             try:
-                rows = conn.execute("SELECT DISTINCT symbol FROM trades WHERE strategy=? AND trade_date=? AND COALESCE(order_status,'') NOT IN (%s)"
-                                    % ','.join('?' * len(self._DEAD)), (STRATEGY_NAME, today, *self._DEAD)).fetchall()
+                if include_dead:
+                    rows = conn.execute("SELECT DISTINCT symbol FROM trades WHERE strategy=? AND trade_date=?", (STRATEGY_NAME, today)).fetchall()
+                else:
+                    rows = conn.execute("SELECT DISTINCT symbol FROM trades WHERE strategy=? AND trade_date=? AND COALESCE(order_status,'') NOT IN (%s)"
+                                        % ','.join('?' * len(self._DEAD)), (STRATEGY_NAME, today, *self._DEAD)).fetchall()
             finally: conn.close()
             return {r[0] for r in rows}
         except Exception as e:
@@ -737,9 +1098,9 @@ class HodBreakEngine:
         try: rows = self.db.get_open_trades(today, strategy=STRATEGY_NAME)
         except Exception as e:
             logger.error(f"[HOD] sync_positions: DB read failed ({e})"); return 0
-        broker: Dict[str, int] = {}
+        broker: Optional[Dict[str, int]] = None
         try: broker = {p.get('symbol'): int(float(p.get('qty') or 0)) for p in (self.alpaca.get_open_positions() or [])}
-        except Exception as e: logger.warning(f"[HOD] sync_positions: broker positions unavailable ({e})")
+        except Exception as e: logger.warning(f"[HOD] sync_positions: broker positions unavailable ({e}) — DB rows trusted as-is")
         for r in rows:
             sym = r['symbol']; pd_ = {}
             try: pd_ = json.loads(r.get('pattern_data') or '{}')
@@ -747,13 +1108,18 @@ class HodBreakEngine:
             pos = Position(symbol=sym, trade_id=r.get('id'), order_id=str(r.get('order_id') or ''), shares=int(r.get('shares') or 0), limit_price=float(r.get('entry_price') or 0),
                            stop=float(r.get('stop_loss_price') or 0), target=float(r.get('take_profit_price') or 0), level=float(pd_.get('level') or 0),
                            submitted_at=datetime.now(timezone.utc) - timedelta(seconds=self.order_timeout_s),   # a restored pending order is past its window: the next poll cancels-or-confirms it
-                           tp_leg_id=pd_.get('tp_leg_id'), sl_leg_id=pd_.get('sl_leg_id'), fill_price=r.get('fill_price'))
+                           tp_leg_id=pd_.get('tp_leg_id'), sl_leg_id=pd_.get('sl_leg_id'), fill_price=r.get('fill_price'),
+                           client_order_id=pd_.get('client_order_id'), pattern_data=dict(pd_), close_order_id=pd_.get('close_order_id'),
+                           closed_qty=int(pd_.get('closed_qty') or 0), closed_notional=float(pd_.get('closed_notional') or 0.0))
+            if pos.close_order_id and pd_.get('close_submitted_at'):
+                try: pos.close_submitted_at = datetime.fromisoformat(pd_['close_submitted_at'])
+                except Exception: pos.close_submitted_at = None
             status = r.get('order_status')
             if status == 'pending_new':
                 pos.status = 'pending'
             elif status in _OPEN_STATUSES:
                 pos.status = 'open'
-                if broker and broker.get(sym, 0) < int(r.get('shares') or 0):
+                if broker is not None and broker.get(sym, 0) < pos.open_qty:
                     logger.warning(f"[HOD] sync: {sym} open in DB ({r.get('shares')} sh) but broker holds {broker.get(sym, 0)} — exit pending verification")
                     try: self.db.update_trade(r['id'], {'order_status': 'exit_pending_verification'})
                     except Exception: pass
@@ -761,7 +1127,10 @@ class HodBreakEngine:
             else:
                 continue
             self.positions[sym] = pos; self.entered_today.add(sym); self.seen_today.add(sym); n += 1
+        self.seen_today |= self._db_symbols_today(include_dead=True); self.entered_today |= self._db_symbols_today()
         logger.info(f"[HOD] sync_positions: {n} position(s) rehydrated for {today}")
+        try: self.reconcile_pending_exits()
+        except Exception as e: logger.error(f"[HOD] reconcile_pending_exits failed: {e}")
         return n
 
     # ------------------------------------------------------------------ notify
@@ -776,7 +1145,7 @@ class HodBreakEngine:
                 try: loop = asyncio.get_event_loop(); loop.run_until_complete(res)
                 except RuntimeError: asyncio.run(res)
         except Exception as e:
-            logger.debug(f"[HOD] notifier failed (non-critical): {e}")
+            logger.warning(f"[HOD] Telegram notify FAILED ({e}): {msg[:80]}")
 
     def _notify_once(self, key: str, msg: str) -> None:
         if key in self._kill_notified: return

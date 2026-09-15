@@ -544,10 +544,11 @@ hod_break:
   min_adv20: 100000
   max_spread_bps: 100
   max_spread_frac_r: 0.15   # 9/14 spread study (6,847 historical signals, real NBBO): net of cost the book is ~0 without a gate and +0.28/+0.20/+0.26R (TRAIN/VAL/TEST) with spread <= 15% of R; keeps 42% of signals. research/bf_zero/spread_study.md
-  order_timeout_s: 20   # 9/15 parity: the spec fills at the next open or never — the limit lives only long enough to cover submit latency
+  order_timeout_s: 10   # 9/15 parity: the spec fills at the next open or never — 10 s covers submit latency; the order is also canceled when the symbol's next bar closes
+  max_quote_age_s: 5    # a quote older than this (halt, stalled feed) = no order
   admit_above_open_pct: 3.5   # 9/15 CRWL miss: start streaming bars at +3.5% so the +5% break is seen live; the 5% floor is enforced at the break
   stream_universe: true       # 9/15 core fix: stream every tradable name's bars from 09:30 (no admission step); the scan hook stays as a fallback
-  universe_min_prev_close: 17 # streamed-universe screen: prior close >= this (names can cross $20 intraday); the $20 floor is enforced at the break
+  universe_min_prev_close: 15 # streamed-universe screen: prior close >= this (names can cross $20 intraday); the $20 floor is enforced at the break. 9/15 review A: prev close < 17 with a level >= 20 was 0.3% of spec signals
   consol_bars: 5
   consol_pct: 0.04
   min_dist_open_pct: 5.0

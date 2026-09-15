@@ -223,17 +223,28 @@ the dry week logs price per signal and the $20 question is re-read on that. Toda
 
 ### 8a. Price floor decided on the history (9/14 19:40 UTC, owner: "why score tomorrow and not use historical data")
 The price split meets the same pre-registered rule as the spread gate → **`min_price: 20`** (config + template), live from
-the 9/15 boot. Capacity/weekly check on all 38,953 spec signals with the gate modeled as a cost filter independent of R
-(42% random pass; cost 8% of R when passing, 30% when not — the study medians), 12/day, 4 concurrent:
+the 9/15 boot. Capacity/weekly check on the spec signals with price ≥ $20 and the break bar ≤ 14:00 (8,606 of 38,953),
+the gate modeled as a cost filter INDEPENDENT of the outcome (each signal passes with p = 0.42, the study's pass rate;
+a passing signal is charged a flat 0.08R, the study's median spread/R of passing signals; failing signals are not traded),
+12/day, 4 concurrent, the shared book rule `trading.hod_break.run_book` (causal slot freeing), **20 random seeds —
+mean [min..max]**. Producer: `research/bf_zero/capacity_8a.py` (the 9/14 table had no script; its "14/14 green, worst
++0.4" TEST row was one favourable draw — replaced 9/15 by the parity review).
 
-| book | trades/wk | net R/trade T/V/T | weekly net R | weeks green | worst week |
-|---|---|---|---|---|---|
-| $5, no gate (today's book) | 51–54 | +0.06 / +0.01 / +0.05 | +3.3 / +0.7 / +2.6 | 28/53 · 13/22 · 9/14 | −22 / −26 / −16 |
-| $5 + gate | 44–50 | +0.14 / +0.19 / +0.22 | +6.2 / +9.5 / +10.7 | 35/53 · 17/22 · 12/14 | −21 / −7 / −7 |
-| **$20 + gate** | 24–36 (5–8/day) | **+0.25 / +0.28 / +0.34** | +6.1 / +10.1 / +10.8 | **40/53 · 20/22 · 14/14** | **−10 / −8 / +0.4** |
+| book | split | trades/wk | net R/trade | weekly net R | weeks green | worst week |
+|---|---|---|---|---|---|---|
+| $20, no gate (raw, reference) | TRAIN | 37.1 | +0.342 | +12.7 | 43/53 | −10.6 |
+| $20, no gate (raw, reference) | VAL | 41.3 | +0.365 | +15.1 | 21/23 | −5.5 |
+| $20, no gate (raw, reference) | TEST | 39.3 | +0.421 | +16.5 | 13/15 | −0.9 |
+| **$20 + gate (42% pass, −0.08R)** | TRAIN | 22.2 [21.4..23.1] | +0.263 [+0.198..+0.330] | +5.8 [+4.4..+7.3] | 39.5/53 [36..44] | −11.0 [−15.9..−5.7] |
+| **$20 + gate (42% pass, −0.08R)** | VAL | 31.7 [29.7..33.7] | +0.303 [+0.234..+0.359] | +9.6 [+7.5..+11.4] | 20.1/23 [18..21] | −4.2 [−9.8..−0.2] |
+| **$20 + gate (42% pass, −0.08R)** | TEST | 29.0 [28.0..30.5] | +0.360 [+0.252..+0.500] | +10.4 [+7.3..+14.2] | 12.8/15 [10..14] | −3.1 [−13.7..+5.1] |
 
-Same weekly R as the $5 book with a third fewer, better trades; 4 concurrent is the binding constraint, not 12/day.
-The EOD check scores the dry book at both floors daily as the plumbing check, not the decision.
+Gated fills are 4.6–6.6 per day (22–32/wk), not 5–8. 4 concurrent is the binding constraint, not 12/day (seed-0 rejections:
+concurrency 1,002 vs day-cap 298; without the concurrency cap the ungated weekly R rises +12.7→+14.1 / +15.1→+20.1 /
++16.5→+22.5). `run_book` causal (exit_m < entry_m) vs the old hindsight rule (exit_m > entry_m), gated seed means:
+TRAIN 22.2/wk +0.263R +5.8R/wk vs 22.3 +0.262 +5.8; VAL 31.7 +0.303 +9.6 vs 31.9 +0.305 +9.7; TEST 29.0 +0.360 +10.4 vs
+29.1 +0.366 +10.6 — immaterial at this book size. The EOD check scores the dry book at both floors daily as the plumbing
+check, not the decision.
 
 ## 9. Exit variants under real spreads (`spread_exit_variants.py`, 1,908 quoted signals re-walked from bars; costs charged identically)
 
@@ -245,8 +256,10 @@ The EOD check scores the dry book at both floors daily as the plumbing check, no
 
 V1 is a wash everywhere (fewer targets, bigger payoff). V2 helps a lot on the ungated population (stop-outs 50% → 43%)
 but NOT inside the gated $20 book (up in TRAIN, down in VAL and TEST): the widening only pays where the spread is wide
-relative to R, which the gate already excludes. **Exits unchanged.** The live book nets +0.35 to +0.45R per trade
-after realistic costs in every split.
+relative to R, which the gate already excludes. **Exits unchanged.** The +0.35 to +0.45R here is the per-SIGNAL
+population (1,170 quoted signals, no book caps); the executable book — 12/day, 4 concurrent, gate as a cost filter — nets
+**+0.26 / +0.30 / +0.36R per trade** (§8a seed means), ~0.1R lower: first-come on the $20 book LOWERS per-trade R vs the
+population on TRAIN/VAL (+0.342/+0.365 vs +0.422/+0.424; TEST the exception). The book number is the one to hold live to.
 
 ## 10. Live vs spec — every place the engine is NOT the backtest (9/15 review, owner: "1000% identical or tell me how the P&L is imaginary")
 
@@ -276,3 +289,61 @@ measures trade by trade. The numbers that were imaginary were not the P&L but th
 spec's world (rows 1-3, 10) and would have traded a different, smaller book. Parity is now tested end-to-end through the
 live seams (`tests/test_hod_break_replay.py`) and measured daily by `scripts/hod_break_miss_audit.py` (spec over the
 whole universe vs the engine's journal — the miss rate is THE number).
+
+## 11. Selection integrity (9/15 parity review of §8/§8a; probes in `research/bf_zero/parity_review/`)
+
+- **Both cuts were chosen with TEST on screen.** `spread_score.py:14-19` prints TRAIN/VAL/TEST in one table; commit
+  `628516b` (18:49 UTC) adopted `max_spread_frac_r: 0.15` with §8 already showing TEST; `2fa1f51` (18:55, six minutes
+  later) set `min_price: 20` from the price-band × split table with TEST visible. §6 already discloses that the $5 floor
+  was chosen after seeing all splits. There is no TEST-blind decision anywhere in the chain; "TEST read once" means
+  "TEST displayed in the same run as the decision".
+- **The pre-registered rule fails at 0.15 on VAL.** The rule (`spread_study.py:13-16`) was on RAW mean R: excluded
+  buckets worse than kept on TRAIN AND VAL. At ≤ 15% VAL kept +0.262 vs dropped +0.270 (`spread_study.md:31`). The
+  adoption switched to the after-cost criterion, which is monotone in the cost by construction. As a cost filter the
+  gate is legitimate; as a "pre-registered rule met" it is not.
+- **16 cells were visible**: 4 cuts (0.10/0.15/0.20/0.30) × 4 floors ($5/10/20/50). The chosen (0.15, $20) is the
+  maximum in no split — (0.10, $20) nets +0.294/+0.426/+0.571, (0.15, $50) +0.350/+0.395/+0.586. Per-split SE of the
+  gated $20 book is 0.067–0.078R (sd 1.41, n 331–437). Choosing a floor among ~4 with the scoring split visible costs
+  about one SE: **haircut −0.05 to −0.08R** off the pooled +0.38.
+- Inside the $20 band the gate is a cost filter, not a quality selector: raw R pass/fail TRAIN +0.402/+0.475,
+  VAL +0.418/+0.402, TEST +0.512/+0.384; the excluded 57% are still net ≈ +0.2R (median spread/R 0.306). The gate
+  trades frequency for per-trade quality; it is not what makes the sign.
+- **Costs live pays that §8 did not charge** (none flips the sign; the $20 gated book has median spread 16.6 bps and
+  median R 2.2% of price, so 10 bps = 0.045R): the ask moving in the 2–3 s between the bar close and the order (each
+  +10 bps on the fill = −0.05R/trade; historically the last ask of the signal minute is only +5.9 bps median above the
+  next open, so the modeled half-spread is about right IF the fill is at that ask); stop-market slippage beyond the
+  modeled 10 bps + half spread (each +10 bps on stops = −0.02R/trade; +50 bps still leaves +0.23/+0.26/+0.34); partial
+  or missed fills of the 20 s limit (unmeasured); kill rails (−6R day rail hits 1.6% of days, truncates ≈ +9R over
+  ~2,300 trades — negligible). The target moved to ask + 2(ask − stop) (1.5 spreads above the spec's) is already in
+  §9's V0 re-walk: ≤ 0.017R.
+
+**Honest expectation at $100 risk.** Net **+0.20 to +0.30R per trade** (point +0.25; pessimistic +0.10 with entry
++20 bps, stop +30 bps and the selection haircut; optimistic +0.40), **25–30 trades a week → +5 to +8R ≈ $500–$800 a
+week**, weekly sd ≈ $1,000, 25–30% red weeks, worst week −$1,000 to −$1,500. Range across assumptions $250–$1,100 a
+week. The sign rests on the ($20, ≤ 15%) cell chosen with TEST visible; it has to be earned by the live measurables
+below (rows 5, 9, 11 first), never by the backtest.
+
+## 12. Live measurables (the EOD check's spec — each must match for the §8a claim to transfer)
+
+| # | measurable | spec expectation / band | live source |
+|---|---|---|---|
+| 1 | gate pass rate, $20+ signals | 42.6% (48/39/40 by split); band 30–55% over ≥ 50 signals | count `[HOD]…of R … > 15% — skip` vs `WOULD BUY`/`ENTRY SUBMITTED` + `no_chase`/`spread` skips (`cand.rejected_reason`) |
+| 2 | signals/day ($20, ≤14:00, pre-gate) | 11–25 median; 0-signal days ≈ 0 | `_try_enter` reached, any reason ≠ price/day_cap/conc |
+| 3 | fills/day | 4.6–6.6 (22–32/wk); day-cap 12 rarely binds, concurrency binds ~30% of gated signals | `trades` rows `strategy='hod_break'` with `fill_price`; `concurrency cap — skip` count |
+| 4 | fill rate of submitted orders | ~100% of ask ≤ cap (spec); alert < 85% | `order_status` filled vs `time_stop_canceled`; `filled_qty`/`shares` for partials |
+| 5 | entry fill vs next-minute open | median ≤ +8 bps (half spread), mean ≤ +15; each +10 bps = −0.05R | `fill_price` (DB) vs REST 1-min bar open of the fill minute (EOD check already loads bars); `FILLED … slip … bps vs level` is vs level, not vs open — add the open |
+| 6 | ask at decision vs next open | median +6 bps | `pattern_data.quote_ask` vs REST open |
+| 7 | TP-fill rate | 33–39% of trades (V0 gated $20); live ≥ spec (wick fills, §10 row 6) | `exit_reason='target'` share |
+| 8 | stop rate / eod rate | 41–45% / 20–22% | `exit_reason` shares |
+| 9 | stop fill vs stop price | modeled −10 bps −half spread ≈ −18 bps; alert if mean worse than −40 bps (−0.09R/stop) | `exit_price` vs `stop_loss_price` on `exit_reason='stop'` |
+| 10 | eod fill vs 15:55 open | −half spread | `exit_price` vs REST 15:55 open |
+| 11 | mean R/trade (net, realized) | +0.25–0.35 book; SE 0.07 at n 350 → no verdict before ~150 trades (SE 0.12) | `EXIT … (±x.xxR)` / `pnl / (fill−stop)·shares` |
+| 12 | WR | 48–53% | `pnl > 0` share |
+| 13 | weekly R | +6 to +10R mean, sd 8–10; red weeks ~25%; worst −8 to −12 | weekly `pnl` sum / risk_usd |
+| 14 | miss rate vs spec | 0 | `scripts/hod_break_miss_audit.py` |
+| 15 | spread at decision, $20+ passing | median 17 bps, sfr median 0.082 | `WOULD BUY`/`ENTRY SUBMITTED … spread N bps`, `pattern_data.quote_bid/ask` |
+| 16 | `r_min` reject rate ($20+ signals) | a few % of signals; the live gate is on r = ask − stop, which is LARGER than level − stop when the ask is above the level, so it is looser than the spec's next-open basis, not tighter — the 7 rejections on 9/15 were stops genuinely within 1% that `simulate` rejects too (r/entry < 1% on the next open ≈ the ask) | `[HOD] … stop … within 1.0% of the ask … — skip` |
+
+Dry-run tape so far (journal 9/14–9/15): 9/14 gate OFF, $5 floor — 42 `WOULD BUY`, 11 `NO CHASE`, 10 `spread > 100 bps`;
+9/15 gate ON, $20 floor, engine restarted 16:49 UTC mid-session — 0 `WOULD BUY`, 7 `r_min`, 3 gate, 3 `NO CHASE`,
+1 `spread > 100 bps`. Zero live fills: every number above is still model-vs-model.

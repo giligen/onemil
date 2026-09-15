@@ -1,0 +1,15 @@
+=== spec book census: 3300 trades
+source x split:
+split                                  TEST  TRAIN  VAL
+source                                                 
+cache.db(Alpaca SIP)                    337   1791  655
+pit_bars_1min.db(Databento EQUS.MINI)    24     29    8
+topup.db(Databento EQUS.MINI)           177    129  150
+by source: n, meanR, rv median, first_minute!=09:30 count:
+                                          n  meanR  rv_med  rv_p90  no930
+source                                                                   
+cache.db(Alpaca SIP)                   2783  0.164   2.714   4.418      4
+pit_bars_1min.db(Databento EQUS.MINI)    61 -0.181   1.447   3.864     11
+topup.db(Databento EQUS.MINI)           456  0.565   3.000   4.601      7
+Databento-only symbol names (hyphen/space) in the book: 0 trades: []
+weekly R share from Databento-sourced trades: +246.6 of +704.0 total; TEST: +110.4 of +123.5

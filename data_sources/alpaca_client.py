@@ -1348,9 +1348,12 @@ class AlpacaClient:
         limit_price: float,
         tp_price: float,
         sl_price: float,
+        client_order_id: Optional[str] = None,
     ) -> Dict:
         """
         Submit a bracket order (entry + stop loss + take profit).
+        `client_order_id`: caller-generated id (≤ 48 chars) so an order can be re-identified after a client-side
+        timeout without adopting someone else's order on the shared account.
 
         Args:
             symbol: Stock symbol
@@ -1379,6 +1382,7 @@ class AlpacaClient:
                 order_class=OrderClass.BRACKET,
                 take_profit={'limit_price': round(tp_price, 2)},
                 stop_loss={'stop_price': round(sl_price, 2)},
+                **({'client_order_id': client_order_id} if client_order_id else {}),
             )
 
             order = self._call_with_timeout(
@@ -1696,6 +1700,8 @@ class AlpacaClient:
                 'qty': int(order.qty) if order.qty else 0,
                 'filled_qty': int(order.filled_qty) if order.filled_qty else 0,
                 'filled_avg_price': float(order.filled_avg_price) if order.filled_avg_price else None,
+                'replaced_by': str(getattr(order, 'replaced_by', '') or ''),
+                'client_order_id': str(getattr(order, 'client_order_id', '') or ''),
                 'side': str(order.side.value) if hasattr(order, 'side') else '',
                 'type': str(order.type.value) if hasattr(order, 'type') else '',
                 'legs': [
@@ -2117,7 +2123,7 @@ class AlpacaClient:
             raise AlpacaAPIError(f"Failed to submit limit buy order for {symbol}: {e}")
 
     def submit_limit_sell_order(
-        self, symbol: str, qty: int, limit_price: float
+        self, symbol: str, qty: int, limit_price: float, client_order_id: Optional[str] = None
     ) -> Dict:
         """
         Submit a plain limit sell order (no bracket).
@@ -2146,6 +2152,7 @@ class AlpacaClient:
                 time_in_force=TimeInForce.DAY,
                 limit_price=round(limit_price, 2),
                 order_class=OrderClass.SIMPLE,
+                **({'client_order_id': client_order_id} if client_order_id else {}),
             )
 
             order = self._call_with_timeout(

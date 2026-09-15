@@ -1,0 +1,33 @@
+tag,symbol,day,n_side,n_alpaca,exact,vol_ratio,hod_side,hod_alpaca,first_side,first_alpaca,sim_side,sim_alpaca,same_trade
+topup.db,TRAX,2026-07-10,357,357,357,1.0,38.4889,38.4889,570,570,entry_m 636 rr -1.04 stop,entry_m 636 rr -1.04 stop,True
+topup.db,AMDL,2026-07-22,382,382,382,1.0,74.0,74.0,570,570,entry_m 577 rr +0.91 eod,entry_m 577 rr +0.91 eod,True
+topup.db,CLOV,2026-06-09,389,389,389,1.0,4.44,4.44,570,570,entry_m 578 rr +1.11 eod,entry_m 578 rr +1.11 eod,True
+topup.db,EDIT,2026-06-29,359,359,359,1.0,3.23,3.23,570,570,entry_m 577 rr +2.00 target,entry_m 577 rr +2.00 target,True
+topup.db,PLTZ,2026-06-22,281,281,281,1.0,35.4199,35.4199,570,570,entry_m 655 rr +2.00 target,entry_m 655 rr +2.00 target,True
+topup.db,RCAT,2026-08-10,390,390,390,1.0,10.38,10.38,570,570,entry_m 577 rr -1.05 stop,entry_m 577 rr -1.05 stop,True
+topup.db,CRAI,2026-07-24,120,120,120,1.0,172.75,172.75,570,570,entry_m 586 rr -1.08 stop,entry_m 586 rr -1.08 stop,True
+topup.db,CRDO,2026-06-05,390,390,390,1.0,234.22,234.22,570,570,entry_m 607 rr -1.03 stop,entry_m 607 rr -1.03 stop,True
+topup.db,APPX,2026-07-14,225,225,225,1.0,30.81,30.81,570,570,entry_m 581 rr -0.10 eod,entry_m 581 rr -0.10 eod,True
+topup.db,FAC,2026-07-15,338,338,338,1.0,6.24,6.24,570,570,entry_m 613 rr -1.04 stop,entry_m 613 rr -1.04 stop,True
+pit_bars_1min.db,AXTU,2026-08-17,88,317,0,0.019,9.04,9.04,570,570,none,entry_m 589 rr +2.00 target,False
+pit_bars_1min.db,MUZ,2026-08-27,260,386,0,0.043,10.29,10.29,570,570,none,entry_m 580 rr +2.00 target,False
+pit_bars_1min.db,CBRX,2026-07-10,7,114,0,0.012,15.44,15.609,578,570,none,entry_m 584 rr -1.15 stop,False
+pit_bars_1min.db,HYNX,2026-08-20,42,283,1,0.017,24.0,24.16,570,570,none,entry_m 580 rr -1.20 stop,False
+pit_bars_1min.db,SPAX,2026-09-03,80,348,0,0.027,10.585,10.605,571,570,none,entry_m 578 rr +2.00 target,False
+pit_bars_1min.db,ANF,2026-08-26,389,390,0,0.038,154.5,154.58,570,570,entry_m 589 rr +2.00 target,none,False
+pit_bars_1min.db,SKDD,2026-08-12,136,379,0,0.015,13.33,13.4,570,570,none,entry_m 578 rr -1.02 stop,False
+pit_bars_1min.db,CBRG,2026-07-21,165,385,0,0.014,4.8,4.83,570,570,none,entry_m 577 rr -1.02 stop,False
+pit_bars_1min.db,CIEG,2026-07-09,30,204,2,0.03,9.005,9.11,571,570,none,entry_m 577 rr -1.02 stop,False
+pit_bars_1min.db,LITZ,2026-09-01,112,341,1,0.017,8.81,8.815,570,570,none,entry_m 586 rr +0.03 eod,False
+bars.db,FLGT,2026-06-15,151,144,0,0.081,18.9,18.87,614,570,none,none,True
+bars.db,DOCU,2026-06-15,388,390,0,0.059,46.5,46.5,570,570,none,none,True
+bars.db,AIRO,2026-06-15,246,223,0,0.054,8.43,8.45,570,570,none,none,True
+bars.db,CRSH,2026-06-15,2,19,0,0.012,21.015,21.07,631,570,none,none,True
+bars.db,SPLV,2026-06-15,378,389,0,0.098,74.58,74.59,570,570,none,none,True
+bars.db,UHAL.B,2026-06-15,230,278,0,0.078,55.94,56.0,570,570,none,none,True
+cache.db,BBBY,2026-06-18,379,379,379,1.0,6.29,6.29,570,570,entry_m 579 rr -1.05 stop,entry_m 579 rr -1.05 stop,True
+cache.db,FRMI,2026-06-23,390,390,390,1.0,8.895,8.895,570,570,entry_m 581 rr -1.04 stop,entry_m 581 rr -1.04 stop,True
+cache.db,RGTX,2026-07-23,295,295,295,1.0,11.27,11.27,570,570,entry_m 578 rr -1.04 stop,entry_m 578 rr -1.04 stop,True
+cache.db,HOOG,2026-08-07,197,197,197,1.0,25.7,25.7,570,570,entry_m 628 rr -1.09 stop,entry_m 628 rr -1.09 stop,True
+cache.db,AIIO,2026-06-23,296,296,296,1.0,3.51,3.51,570,570,entry_m 580 rr -1.03 stop,entry_m 580 rr -1.03 stop,True
+cache.db,ADBU,2026-07-02,104,104,104,1.0,19.5701,19.5701,570,570,entry_m 827 rr -1.17 stop,entry_m 827 rr -1.17 stop,True

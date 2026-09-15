@@ -800,7 +800,8 @@ class Config:
             "admit_above_open_pct": float(cfg.get("admit_above_open_pct", 3.5)),
             "stream_universe": bool(cfg.get("stream_universe", True)),
             "universe_min_prev_close": float(cfg.get("universe_min_prev_close", 17.0)),
-            "order_timeout_s": float(cfg.get("order_timeout_s", 20.0)),
+            "order_timeout_s": float(cfg.get("order_timeout_s", 10.0)),
+            "max_quote_age_s": float(cfg.get("max_quote_age_s", 5.0)),
             "params": {
                 "consol_bars": int(cfg.get("consol_bars", 5)),
                 "consol_pct": float(cfg.get("consol_pct", 0.04)),

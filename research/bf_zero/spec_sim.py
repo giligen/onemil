@@ -40,20 +40,16 @@ for n, day in enumerate(days):
     state['done'].append(day); json.dump(state, open(STATE, 'w'))
     if n % 20 == 0: print(f'{n + 1}/{len(days)} {day} +{len(rows)}', flush=True)
 
-T = pd.read_csv(OUT, dtype={'symbol': str})
+T = pd.read_csv(OUT, dtype={'symbol': str}, keep_default_na=False)   # the ticker NA is a ticker
 T['split'] = np.where(T.day < '2026-01-01', 'TRAIN', np.where(T.day < '2026-06-01', 'VAL', 'TEST')); T['wk'] = pd.to_datetime(T.day).dt.to_period('W-FRI').astype(str)
 NW = {s: len(pd.period_range(a, b, freq='W-FRI')) for s, (a, b) in {'TRAIN': ('2025-01-02', '2025-12-31'), 'VAL': ('2026-01-01', '2026-05-31'), 'TEST': ('2026-06-01', '2026-09-11')}.items()}
 
 
 def run_book(F, n_day, n_conc):
-    out = []
-    for day, g in F.sort_values(['day', 'entry_m']).groupby('day'):
-        open_exits = []; taken = 0
-        for r in g.itertuples():
-            open_exits = [e for e in open_exits if e > r.entry_m]
-            if taken >= n_day or len(open_exits) >= n_conc: continue
-            out.append(r); open_exits.append(r.exit_m); taken += 1
-    return pd.DataFrame(out)
+    """the ONE book rule (trading.hod_break.run_book): causal slot freeing, symbol tie-break"""
+    from trading.hod_break import run_book as _rb
+    idx = [r[0] for r in _rb([(r.day, r.entry_m, r.exit_m, r.symbol, r.Index) for r in F.itertuples()], n_day, n_conc)]
+    return F.loc[[t[4] for t in _rb([(r.day, r.entry_m, r.exit_m, r.symbol, r.Index) for r in F.itertuples()], n_day, n_conc)]]
 
 
 def report(bk, title):
@@ -70,6 +66,16 @@ print(f'\nspec signals (all): {len(T)} | fill model = next-open capped {P.cap:.2
 report(T, 'POPULATION (every spec signal, no caps)')
 bk = run_book(T, P.max_per_day, P.max_concurrent); bk.to_csv(f'{D}/spec_book.csv', index=False)
 report(bk, f'EXECUTABLE BOOK: first-come {P.max_per_day}/day, {P.max_concurrent} concurrent')
+# THE LIVE BOOK: the config's knobs (last entry, per-day cap, concurrency, price floor) applied to the same signals — what the
+# engine runs tomorrow, not the study defaults (review A/F, 9/15). Detection above is a superset (last entry 930 ≥ config).
+try:
+    from config import Config
+    LIVE = HodBreakParams(**(Config().hod_break_cfg.get('params') or {})); LIVE_FLOOR = float(Config().hod_break_cfg.get('min_price') or 0)
+    TL = T[(T.entry_m <= LIVE.last_entry_minute + 1) & (T.price >= LIVE_FLOOR)]
+    bkl = run_book(TL, LIVE.max_per_day, LIVE.max_concurrent); bkl.to_csv(f'{D}/spec_book_live_config.csv', index=False)
+    report(bkl, f'LIVE-CONFIG BOOK: last entry {LIVE.last_entry_minute}, price >= {LIVE_FLOOR:.0f}, first-come {LIVE.max_per_day}/day, {LIVE.max_concurrent} concurrent (spread gate NOT modeled here — see capacity_8a.py)')
+except Exception as e:
+    print(f'live-config book skipped: {e}')
 print('\nTEST week-by-week (R, n):'); d = bk[bk.split == 'TEST']; print(d.groupby('wk').rr.agg(['sum', 'count']).round(1).to_string())
 print('\nbook by price band:', bk.groupby(pd.cut(bk.price, [1, 2, 5, 10, 20, 50, 1e6]), observed=True).rr.agg(['mean', 'count']).round(3).to_dict('index'))
 print('book wrapper vs common:', bk.groupby('is_wrapper').rr.agg(['mean', 'count']).round(3).to_dict('index'))

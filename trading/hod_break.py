@@ -168,6 +168,30 @@ def simulate(o, h, l, c, v, m, adv20: float, p: HodBreakParams = HodBreakParams(
                          exit_idx=k, exit_price=px, reason=why, rr=(px - entry) / r)
 
 
+def run_book(rows, max_per_day: int, max_concurrent: int):
+    """THE executable-book rule, ONE copy for the backtest (spec_sim/book_sim), the EOD check and the live engine's
+    semantics. `rows`: iterable of tuples (day, entry_m, exit_m, symbol, payload...) — a trade per symbol-day whose
+    entry fills at the open of bar `entry_m` and exits during bar `exit_m`. First-come by entry minute, ties broken by
+    SYMBOL (alphabetical: the live engine evaluates a minute's bars in symbol order), at most `max_per_day` fills a
+    day, at most `max_concurrent` open at once. CAUSAL freeing: a slot is free for an entry at bar k only if the exit
+    happened on a bar STRICTLY BEFORE k (exit_m < entry_m). An exit during bar k itself is after that bar's open — the
+    old `>` rule freed it in hindsight (found 2026-09-15: 5% of the study's trades were admitted that way; live
+    cannot). Returns the taken rows in order."""
+    taken = []
+    by_day: dict = {}
+    for r in rows:
+        by_day.setdefault(r[0], []).append(r)
+    for day in sorted(by_day):
+        open_exits = []; n_day = 0
+        for r in sorted(by_day[day], key=lambda x: (int(x[1]), str(x[3]))):
+            entry_m, exit_m = int(r[1]), int(r[2])
+            open_exits = [e for e in open_exits if e >= entry_m]
+            if n_day >= max_per_day or len(open_exits) >= max_concurrent:
+                continue
+            taken.append(r); open_exits.append(exit_m); n_day += 1
+    return taken
+
+
 def shares_for(risk_usd: float, entry: float, stop: float) -> int:
     """Position size from dollar risk; 0 when the stop is not below the entry."""
     r = entry - stop

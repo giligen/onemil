@@ -768,8 +768,8 @@ class StopMonitor:
         new = [s for s in symbols if s not in self._bar_symbols]
         for s in new:
             self._bar_symbols.add(s); self._bulk_bar_symbols.add(s)   # NO rolling window: bulk symbols feed light handlers only (memory)
-        if new and self._loop and self._stream and self._ws_connected:
-            asyncio.run_coroutine_threadsafe(self._subscribe_bars_many_async(new), self._loop)
+        if new and self._loop and self._stream:
+            asyncio.run_coroutine_threadsafe(self._subscribe_bars_many_async(new), self._loop)   # the coroutine guards on _ws; a connect that comes later sends everything
         return len(new)
 
     async def _subscribe_bars_many_async(self, symbols) -> None:
@@ -2872,6 +2872,16 @@ class StopMonitor:
                 logger.info(f"StopMonitor: WebSocket connecting with {len(all_symbols)} symbols ({len(watched)} watched + SPY keepalive)...")
                 # Single connection attempt — don't use _run_forever (has uncontrollable internal retry)
                 await self._stream._start_ws()
+                # alpaca-py sends the subscribe message inside _run_forever, which this loop bypasses: after EVERY
+                # connect (first or re-) the server holds zero subscriptions until we send them ourselves. Found
+                # 2026-09-15 (review G): a reconnect left the bar stream silent for the rest of the day.
+                try:
+                    for s_ in list(self._bar_symbols):
+                        self._stream._handlers["bars"][s_] = self._on_bar
+                    await self._stream._send_subscribe_msg()
+                    logger.info(f"StopMonitor: subscriptions sent after connect ({len(self._bar_symbols)} bar symbols, {len(all_symbols)} trade/quote symbols)")
+                except Exception as e:
+                    logger.error(f"StopMonitor: sending subscriptions after connect FAILED ({e}) — the stream may be silent")
                 self._ws_connected = True
                 self._ws_generation += 1
                 self._last_data_ts = time_mod.time()
