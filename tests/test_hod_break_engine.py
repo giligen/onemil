@@ -326,3 +326,10 @@ class TestBackfillGuard:
         mock_alpaca.get_order.side_effect = lambda oid: {'status': 'filled', 'filled_qty': pos.shares, 'filled_avg_price': pos.target} if oid == 'tp1' else {'status': 'accepted', 'filled_qty': 0}
         engine.check_exits()
         assert 'sl1' in [c.args[0] for c in mock_alpaca.cancel_order.call_args_list]
+
+
+def test_admission_threshold_sits_below_the_floor(engine, mock_alpaca, mock_db, mock_sm):
+    """9/15 CRWL: bars must stream before the break — admit at floor − 1.5 by default, or the config knob."""
+    assert engine.admit_above_open_pct == pytest.approx(3.5)
+    e2 = HodBreakEngine(mock_alpaca, mock_db, mock_sm, cfg=cfg(admit_above_open_pct=2.0))
+    assert e2.admit_above_open_pct == pytest.approx(2.0) and e2.params.min_dist_open_pct == 5.0

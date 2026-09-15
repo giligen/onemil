@@ -1231,7 +1231,7 @@ class RealtimeScanner:
                     _o = float(bar.get('open') or 0.0)
                     if _o > 0:
                         _above = (current_price - _o) / _o * 100.0
-                        if _above >= self.hod_engine.params.min_dist_open_pct:
+                        if _above >= getattr(self.hod_engine, 'admit_above_open_pct', self.hod_engine.params.min_dist_open_pct):
                             self.hod_engine.on_mover(
                                 symbol, price=current_price, day_open=_o,
                                 cum_volume=float(bar.get('volume') or 0.0),

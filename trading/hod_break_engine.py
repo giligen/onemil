@@ -87,7 +87,11 @@ class HodBreakEngine:
         self.min_price = float(cfg.get('min_price', 1.0)); self.min_adv20 = float(cfg.get('min_adv20', 100_000.0))
         self.max_spread_bps = float(cfg.get('max_spread_bps', 100.0)); self.order_timeout_s = float(cfg.get('order_timeout_s', 75.0))
         self.max_spread_frac_r = float(cfg.get('max_spread_frac_r', 0.0))   # 0 = off; e.g. 0.15 = skip when the spread is > 15% of R (9/14: 57% of signals)
+        # ADMISSION threshold (9/15 CRWL miss): the scanner must start streaming a stock's bars BEFORE its break, so
+        # candidates are admitted at a lower distance from the open than the spec's floor; the floor itself is
+        # enforced at the break inside hod_break.detect (min_dist_open_pct). Default 1.5 pct-points below the floor.
         self.params = HodBreakParams(**(cfg.get('params') or {}))
+        self.admit_above_open_pct = float(cfg.get('admit_above_open_pct', max(0.0, self.params.min_dist_open_pct - 1.5)))
         self.candidates: Dict[str, Candidate] = {}; self.positions: Dict[str, Position] = {}
         self.entered_today: set = set(); self.daily_pnl = 0.0; self.session_date: Optional[str] = None
         self._mover_queue: queue.Queue = queue.Queue(maxsize=5000); self._bar_queue: queue.Queue = queue.Queue(maxsize=5000)
@@ -96,7 +100,7 @@ class HodBreakEngine:
         self.seen_today: set = set()                                      # once-per-symbol (orders incl. no-fills); entered_today = the day-cap set (fills/working orders)
         logger.info(f"[HOD] engine gates: enabled={self.enabled} dry_run={self.dry_run} risk=${self.risk_usd:.0f} "
                     f"kills={self.daily_kill_usd}/{self.weekly_kill_usd} cap={self.params.cap:.2%} target={self.params.target_r}R "
-                    f"per_day={self.params.max_per_day} concurrent={self.params.max_concurrent} flat={self.params.flat_minute}")
+                    f"per_day={self.params.max_per_day} concurrent={self.params.max_concurrent} flat={self.params.flat_minute} admit>={self.admit_above_open_pct:.1f}%")
 
     # ------------------------------------------------------------------ clock / session
     def _et_now(self) -> datetime:

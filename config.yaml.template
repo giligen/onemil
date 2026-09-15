@@ -545,6 +545,7 @@ hod_break:
   max_spread_bps: 100
   max_spread_frac_r: 0.15   # 9/14 spread study (6,847 historical signals, real NBBO): net of cost the book is ~0 without a gate and +0.28/+0.20/+0.26R (TRAIN/VAL/TEST) with spread <= 15% of R; keeps 42% of signals. research/bf_zero/spread_study.md
   order_timeout_s: 75
+  admit_above_open_pct: 3.5   # 9/15 CRWL miss: start streaming bars at +3.5% so the +5% break is seen live; the 5% floor is enforced at the break
   consol_bars: 5
   consol_pct: 0.04
   min_dist_open_pct: 5.0
