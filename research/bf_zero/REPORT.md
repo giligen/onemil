@@ -370,3 +370,53 @@ SIP-served half of the universe, and the population it excludes (~1.6% of the �
 engine WILL trade. The study population also excludes touch-only breaks (`h == level` without a 0.3% trade-through:
 2.1% of live signals on two sampled days, all −1R) — decision after the re-sim by the pre-registered rule: a
 `break_through` knob in `detect` on both sides, or none.
+
+**Re-simulated on the SIP tape (9/15 19:24 UTC, `refetch_thin_tape.py` → `bars_sip.db`, `spec_sim.py` seeded from the
+whole causal superset, `BFZ_SIP_STORE`).** Provenance (`parity_review/tape_provenance_check.py`, 50 keys per store vs
+Alpaca SIP): cache.db 99.7% exact PASS; topup.db 65.2% FAIL (mixed tape); pit_bars_1min.db 0.1% (median volume ratio
+0.050) and bars.db 0.2% (0.051) FAIL. Under the loader order those three stores had served **105,985 of the 235,454
+causal-superset symbol-days (45%; 39,459 of 61,479 at open ≥ $19 = 64%)**. All 105,985 were re-fetched from Alpaca REST
+SIP (1-min, raw, 04:00–20:00 ET): 104,845 served (31.8M bars, `bars_sip.db` 5.4 GB), 1,140 keys / 111 symbols unserved
+(delisted); 20/20 random keys verify bit-exact through `B.load_bars`. No consolidated Databento 1-min dataset exists on
+this account (listed: DBEQ.BASIC, EQUS.MINI, EQUS.SUMMARY, XNAS.ITCH, XNYS.PILLAR), so the 1,140 could not be quoted or
+bought; they stay out. Result — the SIP-served half reproduces bit-identically (38,807 of 38,807 old signals, same R),
+the newly visible half is where the book dies:
+
+| tape (SIP on both sides) | signals TRAIN / VAL / TEST | mean R TRAIN / VAL / TEST | ≥ $20 mean R |
+|---|---|---|---|
+| symbol-days the old caches held (movers a scanner had already cached) | 21,037 / 11,207 / 7,063 | +0.217 / +0.212 / +0.198 | +0.40 / +0.40 / +0.41 |
+| symbol-days only the thin stores held (now SIP) | 11,250 / 5,806 / 4,098 | **−0.553 / −0.618 / −0.623** | **−0.54 / −0.54 / −0.51** |
+
+POPULATION (60,461 signals): TRAIN −0.051R (WR 37%, PF 0.92, green 11/53) / VAL −0.071 (5/23) / TEST −0.103 (2/15).
+LIVE-CONFIG BOOK (last entry 14:00, ≥ $20, 12/day, 4 conc., no spread cost): TRAIN 44.1/wk −0.030R weekly −1.3 green
+24/53 worst −17.5 / VAL 45.0/wk −0.006R −0.3 9/23 −16.2 / TEST 43.7/wk +0.016R +0.7 9/15 −17.5. With the §8a gate model
+(`capacity_8a_sip.log`): −0.127 / −0.118 / −0.082R per trade, weekly −4.1 / −4.7 / −3.2R, green 16/53 · 6.5/23 · 4.9/15.
+Reading: the +0.34…+0.42R live-config book was the cache population's survivorship — those symbol-days were in the
+caches because a scanner had flagged them as the day's movers (a selection the engine cannot make at 09:30); on the
+whole market at the SIP tape the HOD-break has **no edge in any split**. The §6/§8a numbers above are superseded.
+
+### 6b. VERDICT 2026-09-15 23:40 UTC — the HOD-break edge was a look-ahead in the study population
+The SIP re-simulation (§6a, 235,454 causal-superset symbol-days, 60,461 signals) splits cleanly in two:
+
+| population | how it entered the study | signals ≥$20, ≤14:00 | mean R (T/V/T) | WR |
+|---|---|---|---|---|
+| symbol-days served by `data/cache.db` | the bull-flag scanner's intraday-bar cache: days the scanner had flagged as movers (≥10% intraday range and its other criteria — known only at the END of the day) | 4,330 / 2,498 / 1,702 | **+0.43 / +0.43 / +0.43** | 52–54% |
+| the same names on the OTHER days (pit store, now on the SIP tape) | the point-in-time top-up: every other +5%-above-open day | 3,299 / 2,260 / 1,849 | **−0.55 / −0.57 / −0.53** | 22% |
+
+The first row reproduces the old book bit for bit (38,807 identical signals). The second row was invisible before
+(the thin tape could not pass the volume gate) and is the ordinary case: SWKS, TSCO, IREN, GLW, HIMS on a
++5% morning — the break of the high stops out. The old +0.34..+0.42R live-config book was the average over days a
+scanner had already, in hindsight, selected as big movers. Nothing in the spec's causal inputs (rv 1–5, +5% from
+the open, the consolidation) separates the two rows: rv median 2.2 vs 2.0, ADV 1.4M vs 1.2M. The re-fetched bars
+were verified against daily bars (20/20 highs, 19/20 opens) and bit-identical through the loader vs REST (20/20).
+
+**Consequences.** (1) No go-live; the engine keeps running dry as instrumentation (the parity work stands: the
+engine now IS the spec — the spec is what has no edge). (2) The §8/§8a/§9/§11 numbers describe the cache
+population, not a tradable book; treat them as void. (3) The only honest open question is whether a CAUSAL filter
+reproduces what the scanner's day selection captured — a pre-registered study on THIS population (both rows,
+SIP tape): candidates are things known at the signal minute only (relative volume vs the same clock, gap size,
+pre-market volume, news presence, range so far, sector/ETF wrappers), chosen on TRAIN, confirmed on VAL, TEST once,
+and it must clear +0.15R net of the §8 cost model with ≥ 5 trades/week or the book is closed. This is the third
+"edge that was a look-ahead" in this repo (ignition day-cohort 9/13, ORB entered-only 9/5, HOD cache population
+9/15): every future study must seed from the whole point-in-time universe on a provenance-checked consolidated
+tape BEFORE any number is reported (`parity_review/tape_provenance_check.py` is the gate).

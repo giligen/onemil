@@ -38,7 +38,10 @@ def alpaca_bars(sym, day):
     d = datetime.strptime(day, '%Y-%m-%d')
     req = StockBarsRequest(symbol_or_symbols=[sym], timeframe=TimeFrame(1, TimeFrameUnit.Minute), feed=DataFeed.SIP, adjustment=Adjustment.RAW,
                            start=datetime(d.year, d.month, d.day, 9, 30, tzinfo=ET).astimezone(timezone.utc), end=datetime(d.year, d.month, d.day, 15, 59, 59, tzinfo=ET).astimezone(timezone.utc))
-    raw = client._to_dict(client.data_client.get_stock_bars(req)).get(sym) or []
+    try:
+        raw = client._to_dict(client.data_client.get_stock_bars(req)).get(sym) or []
+    except Exception as e:                       # e.g. Databento symbology Alpaca rejects ('CODI-A'): not an overlapping key
+        print(f'  {sym} {day}: Alpaca rejected ({str(e)[:60]}) — skipped', flush=True); raw = []
     rows = [dict(m=b.timestamp.astimezone(ET).hour * 60 + b.timestamp.astimezone(ET).minute, o=float(b.open), h=float(b.high), l=float(b.low), c=float(b.close), v=float(b.volume)) for b in raw]
     g = pd.DataFrame(rows)
     return g[(g.m >= 570) & (g.m < 960)].drop_duplicates('m').set_index('m').sort_index() if len(g) else g
@@ -47,10 +50,17 @@ def alpaca_bars(sym, day):
 def sample_keys(con, table, n):
     """n random (symbol, day) keys the store holds, drawn day-first (indexed) to avoid a full scan."""
     random.seed(SEED); keys = []; tries = 0
-    col_s, col_d = ('symbol', 'bar_date') if table == 'intraday_bars_1min' else ('symbol', 'day')
+    if table == 'intraday_bars_1min':
+        # cache.db is indexed on (symbol, bar_date) only: sample symbol-first from the study universe, then a held day
+        usyms = pd.read_csv(f'{ROOT}/research/bf_zero/universe.csv', usecols=['symbol'], dtype=str, keep_default_na=False).symbol.unique().tolist()
+        while len(keys) < n and tries < 400:
+            tries += 1; sym = random.choice(usyms)
+            days = [r[0] for r in con.execute("select distinct bar_date from intraday_bars_1min where symbol=? and bar_date>='2025-01-02'", (sym,)).fetchall()]
+            if days: keys.append((sym, random.choice(days)))
+        return keys
     while len(keys) < n and tries < 400:
         tries += 1; day = random.choice(DAYS)
-        syms = [r[0] for r in con.execute(f"select distinct {col_s} from {table} where {col_d}=?", (day,)).fetchall()]
+        syms = [r[0] for r in con.execute("select distinct symbol from bars where day=?", (day,)).fetchall()]
         if syms: keys.append((random.choice(syms), day))
     return keys
 

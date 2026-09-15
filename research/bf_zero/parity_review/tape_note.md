@@ -1,0 +1,5 @@
+# Tape provenance note (2026-09-15)
+
+- The study's side 1-min stores (`research/bf_zero/bars.db`, `data/research/databento/pit_bars_1min.db`; `topup.db` is a MIX) were fetched from Databento **EQUS.MINI** (one publisher, 1–10% of SIP volume — `tape_provenance_check.py`: cache.db 99.7% exact vs Alpaca SIP PASS; topup.db 65.2% FAIL; pit/bars.db see `provenance_run2.log`). The fetch script that wrote `bars.db` is not in the repo; the dataset name was recovered by reviewer B and by the volume ratios.
+- Datasets on this account (`Historical.metadata.list_datasets()` 9/15): `DBEQ.BASIC, EQUS.MINI, EQUS.SUMMARY, XNAS.ITCH, XNYS.PILLAR` — **no consolidated SIP dataset (no EQUS.ALL)**. For the symbol-days Alpaca cannot serve (delisted names) there is therefore NO consolidated 1-min source to buy; those symbol-days stay OUT of the SIP book (skipped by the loader under `BFZ_SIP_STORE`), not on a thin tape. Nothing was purchased.
+- Rule going forward: every store the loader reads must pass `tape_provenance_check.py` (≥ 99% exact bars on 50 random overlapping symbol-days vs Alpaca SIP) before any book number is published.

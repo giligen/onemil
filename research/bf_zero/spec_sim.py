@@ -14,11 +14,20 @@ from trading.hod_break import HodBreakParams, simulate, detect
 D = 'research/bf_zero'; P = HodBreakParams()
 STATE, OUT = f'{D}/spec_state.json', f'{D}/spec_trades.csv'
 
-c = pd.read_csv(f'{D}/candidates_full.csv', usecols=['day', 'symbol', 'fam', 'cfg', 'adv20', 'is_wrapper', 'price'], dtype={'symbol': str, 'fam': 'category', 'cfg': 'category'}, keep_default_na=False, na_values=[''])
-c = c[(c.fam == 'F5') & (c.cfg == '{"K": 5, "X": 0.04}')].drop(columns=['fam', 'cfg']).drop_duplicates(['day', 'symbol'])
-c['adv20'] = pd.to_numeric(c.adv20, errors='coerce'); c['is_wrapper'] = pd.to_numeric(c.is_wrapper, errors='coerce')
-u = B.uni[['symbol', 'bar_date', 'high', 'open']].rename(columns={'bar_date': 'day'})
-c = c.merge(u, on=['day', 'symbol'], how='left'); c = c[c.high >= c.open * (1 + P.min_dist_open_pct / 100)]   # exact causal superset: a level >= 5% above the open needs day high >= that
+# Symbol-days to simulate = the CAUSAL SUPERSET of the whole universe (day high >= open x 1.05): a level >= 5% above the open
+# needs that. Seeding from candidates_full's F5 rows (the pre-9/15 way) inherited the thin-tape detections: 24,171 symbol-days
+# re-fetched on the SIP tape had no F5 row and would never be simulated (review A, 9/15). is_wrapper comes from the
+# candidates where present, else 0.
+u = B.uni[['symbol', 'bar_date', 'high', 'open', 'adv20']].rename(columns={'bar_date': 'day'}).copy()
+u['adv20'] = pd.to_numeric(u.adv20, errors='coerce')
+c = u[u.high >= u.open * (1 + P.min_dist_open_pct / 100)].drop_duplicates(['day', 'symbol'])
+try:
+    w = pd.read_csv(f'{D}/candidates_full.csv', usecols=['day', 'symbol', 'is_wrapper'], dtype={'symbol': str}, keep_default_na=False, na_values=['']).drop_duplicates(['day', 'symbol'])
+    w['is_wrapper'] = pd.to_numeric(w.is_wrapper, errors='coerce')
+    c = c.merge(w, on=['day', 'symbol'], how='left')
+except Exception as e:
+    print(f'is_wrapper unavailable ({e}) — 0 for all', flush=True); c['is_wrapper'] = 0
+c['is_wrapper'] = c.is_wrapper.fillna(0)
 print('symbol-days to simulate', len(c), flush=True)
 state = json.load(open(STATE)) if os.path.exists(STATE) else {'done': []}; done = set(state['done'])
 days = [d for d in sorted(c.day.unique()) if d not in done]

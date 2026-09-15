@@ -419,7 +419,7 @@ ORB analysis; the older ones have warning headers pointing to the shipped varian
 ## PAUSED 2026-09-14 (owner): Bull Flag and ORB
 - `config.yaml trading.enabled: false` (bull flag entries off; P1 config otherwise intact) and `orb.yaml strategy.enabled: false` (B+ config intact; backups `config.yaml.bak.pre_bf_pause_20260914`, `orb.yaml.bak.pre_pause_20260914`). Reason: at $150 / $375 risk and ~3 trades a month each, their P&L is noise and they share the account, symbols and StopMonitor with the HOD-break being validated. Resume = flip + restart. The ramp checkers and BF/ORB crons keep running but report zero activity.
 
-## Strategy 4: HOD-break (built 2026-09-13 overnight from the clean-sheet study; DRY RUN from 2026-09-14)
+## Strategy 4: HOD-break (built 2026-09-13 overnight from the clean-sheet study; DRY RUN from 2026-09-14) — **EDGE REFUTED 2026-09-15 (REPORT §6b): the study population was a look-ahead (days the BF scanner's cache had flagged as movers); on the honest SIP-tape population the live-config book is −0.03/−0.01/+0.02R. No go-live. Engine stays dry as instrumentation; next = a pre-registered causal-filter study on the honest population, bar +0.15R net at ≥5/wk, else close.**
 
 ```bash
 journalctl -u onemil-trader | grep "\[HOD"          # [HOD] engine gates / [HOD DRY] WOULD BUY / BUY / FILLED / EXIT / FORCE CLOSE

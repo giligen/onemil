@@ -27,9 +27,15 @@ EOD_M = 955          # 15:55 ET force flat
 OPEN_M = 570
 
 cache = sqlite3.connect(f'file:{ROOT}/data/cache.db?mode=ro', uri=True, timeout=120)
-SIDE = [sqlite3.connect(f'file:{p}?mode=ro', uri=True, timeout=120) for p in
-        (f'{ROOT}/research/ignition_capcheck/topup.db', f'{ROOT}/data/research/databento/pit_bars_1min.db', f'{D}/bars.db')
-        if os.path.exists(p)]
+# Parity review 2026-09-15 (research/bf_zero/parity_review): the three side stores were Databento EQUS.MINI / mixed tape
+# (1-10% of SIP volume, opens and highs differ) — not the tape the engine streams. With BFZ_SIP_STORE set, the ONLY side
+# store is the Alpaca-SIP re-fetch (research/bf_zero/refetch_thin_tape.py → bars_sip.db); symbol-days it lacks are
+# skipped rather than read from a thin tape. Unset = the original stores (audit only).
+SIP_STORE = os.environ.get('BFZ_SIP_STORE')
+SIDE_PATHS = [SIP_STORE] if SIP_STORE else [f'{ROOT}/research/ignition_capcheck/topup.db', f'{ROOT}/data/research/databento/pit_bars_1min.db', f'{D}/bars.db']
+SIDE = [sqlite3.connect(f'file:{p}?mode=ro', uri=True, timeout=120) for p in SIDE_PATHS if os.path.exists(p)]
+if SIP_STORE and not SIDE:
+    raise FileNotFoundError(f'BFZ_SIP_STORE={SIP_STORE} does not exist')
 
 uni = pd.read_csv(f'{D}/universe.csv', dtype={'symbol': str}, keep_default_na=False)
 for _c in ('open', 'high', 'low', 'close', 'volume', 'adv20', 'prev_vol'): uni[_c] = pd.to_numeric(uni[_c], errors='coerce')
