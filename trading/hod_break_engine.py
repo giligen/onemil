@@ -85,22 +85,33 @@ class HodBreakEngine:
         self.risk_usd = float(cfg.get('risk_usd', 100.0)); self.daily_kill_usd = float(cfg.get('daily_kill_usd', -600.0))
         self.weekly_kill_usd = float(cfg.get('weekly_kill_usd', -1500.0)); self.max_notional_usd = float(cfg.get('max_notional_usd', 5000.0))
         self.min_price = float(cfg.get('min_price', 1.0)); self.min_adv20 = float(cfg.get('min_adv20', 100_000.0))
-        self.max_spread_bps = float(cfg.get('max_spread_bps', 100.0)); self.order_timeout_s = float(cfg.get('order_timeout_s', 75.0))
+        self.max_spread_bps = float(cfg.get('max_spread_bps', 100.0))
+        # The spec fills at the NEXT bar's open or never (no chase). A resting limit that fills a minute later on a
+        # pullback is a trade the backtest never took — so the order lives only long enough to cover submit latency.
+        self.order_timeout_s = float(cfg.get('order_timeout_s', 20.0))
         self.max_spread_frac_r = float(cfg.get('max_spread_frac_r', 0.0))   # 0 = off; e.g. 0.15 = skip when the spread is > 15% of R (9/14: 57% of signals)
         # ADMISSION threshold (9/15 CRWL miss): the scanner must start streaming a stock's bars BEFORE its break, so
         # candidates are admitted at a lower distance from the open than the spec's floor; the floor itself is
         # enforced at the break inside hod_break.detect (min_dist_open_pct). Default 1.5 pct-points below the floor.
         self.params = HodBreakParams(**(cfg.get('params') or {}))
         self.admit_above_open_pct = float(cfg.get('admit_above_open_pct', max(0.0, self.params.min_dist_open_pct - 1.5)))
+        # STREAM THE UNIVERSE (9/15 core fix for the CRWL class): every tradable name's bars flow from 09:30 through the
+        # websocket, exactly the spec's world — no snapshot admission, no threshold to cross, no backfill on a normal day.
+        self.stream_universe = bool(cfg.get('stream_universe', True))
+        self.universe_min_prev_close = float(cfg.get('universe_min_prev_close', self.min_price * 0.85))
+        self._last_close: Dict[str, float] = {}
+        self.stream_list_dir = str(cfg.get('stream_list_dir', 'logs'))    # where the day's streamed-symbol list is written (tests point it elsewhere)
         self.candidates: Dict[str, Candidate] = {}; self.positions: Dict[str, Position] = {}
         self.entered_today: set = set(); self.daily_pnl = 0.0; self.session_date: Optional[str] = None
         self._mover_queue: queue.Queue = queue.Queue(maxsize=5000); self._bar_queue: queue.Queue = queue.Queue(maxsize=5000)
         self._adv_map: Dict[str, float] = {}; self._kill_notified: set = set(); self._flattened = False
         self.shutdown_requested = False; self._lock = threading.RLock()   # tick (engine pool) and drains (main thread) must not interleave
         self.seen_today: set = set()                                      # once-per-symbol (orders incl. no-fills); entered_today = the day-cap set (fills/working orders)
+        self._ws_gen: Optional[int] = None                                # StopMonitor connect generation last seen (outage → re-backfill)
+        self._drain_thread: Optional[threading.Thread] = None
         logger.info(f"[HOD] engine gates: enabled={self.enabled} dry_run={self.dry_run} risk=${self.risk_usd:.0f} "
                     f"kills={self.daily_kill_usd}/{self.weekly_kill_usd} cap={self.params.cap:.2%} target={self.params.target_r}R "
-                    f"per_day={self.params.max_per_day} concurrent={self.params.max_concurrent} flat={self.params.flat_minute} admit>={self.admit_above_open_pct:.1f}%")
+                    f"per_day={self.params.max_per_day} concurrent={self.params.max_concurrent} flat={self.params.flat_minute} admit>={self.admit_above_open_pct:.1f}% stream_universe={self.stream_universe}")
 
     # ------------------------------------------------------------------ clock / session
     def _et_now(self) -> datetime:
@@ -116,14 +127,61 @@ class HodBreakEngine:
             self._kill_notified.clear(); self._flattened = False
             self._adv_map = self._load_adv_map()
             logger.info(f"[HOD] session {today}: adv map {len(self._adv_map)} symbols")
+            if self.stream_universe:
+                self._stream_the_universe()
 
     def _load_adv_map(self) -> Dict[str, float]:
+        """True 20-session ADV from daily_bars (the study's definition), universe field as the fallback.
+        Also records each symbol's last close for the streamed-universe screen."""
+        adv: Dict[str, float] = {}
         try:
             rows = self.db.get_active_universe()
-            return {r['symbol']: float(r.get('avg_volume_daily') or 0.0) for r in rows}
+            adv = {r['symbol']: float(r.get('avg_volume_daily') or 0.0) for r in rows}
         except Exception as e:
             logger.error(f"[HOD] universe ADV map unavailable ({e}) — every mover will fail the ADV gate today")
-            return {}
+        path = getattr(self.db, '_cache_path', None)
+        if not path:
+            logger.warning("[HOD] db has no _cache_path — daily_bars ADV20 unavailable, using the universe field"); return adv
+        try:
+            conn = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=30)
+            try:
+                q = ("with d as (select symbol, bar_date, volume, close, row_number() over (partition by symbol order by bar_date desc) rn "
+                     "from daily_bars where bar_date >= date('now', '-45 days')) "
+                     "select symbol, avg(volume), count(*), max(case when rn = 1 then close end) from d where rn <= 20 group by symbol")
+                n = 0
+                for sym, a, cnt, last in conn.execute(q):
+                    if cnt and cnt >= 10 and a: adv[sym] = float(a); n += 1
+                    if last: self._last_close[sym] = float(last)
+            finally: conn.close()
+            logger.info(f"[HOD] ADV20 from daily_bars for {n} symbols (universe field for the rest)")
+        except Exception as e:
+            logger.warning(f"[HOD] daily_bars ADV20 unavailable ({e}) — using the universe field")
+        return adv
+
+    def _stream_the_universe(self) -> None:
+        """Subscribe every tradable name at session start; each becomes a candidate whose bars stream from 09:30."""
+        syms = sorted(s for s, a in self._adv_map.items() if a >= self.min_adv20 and self._last_close.get(s, 0.0) >= self.universe_min_prev_close)
+        if not syms:
+            logger.error("[HOD] streamed universe is EMPTY (no last closes / ADV) — falling back to scan admission only"); return
+        late = self._minute_of_day() > OPEN_MINUTE + 1          # a restart after the open: the stream missed the early bars
+        for s in syms:
+            if s in self.candidates: continue
+            self.candidates[s] = Candidate(symbol=s, day_open=0.0, adv20=self._adv_map[s], subscribed=True, backfill_ok=not late)
+        try:
+            if self.stop_monitor is not None and hasattr(self.stop_monitor, 'subscribe_bars_many'):
+                self.stop_monitor.subscribe_bars_many(syms)
+            elif self.stop_monitor is not None and hasattr(self.stop_monitor, 'subscribe_bars'):
+                for s in syms: self.stop_monitor.subscribe_bars(s)
+        except Exception as e:
+            logger.error(f"[HOD] universe bar subscription failed ({e}) — scan admission remains as the fallback")
+        logger.info(f"[HOD] streaming {len(syms)} universe symbols (prev close >= {self.universe_min_prev_close:.2f}, ADV20 >= {self.min_adv20:,.0f}){' — restart after the open: backfilling' if late else ''}")
+        try:                                                   # the miss audit reads this to tell a streamed symbol from a scan-admitted one
+            import os; os.makedirs(self.stream_list_dir, exist_ok=True)
+            with open(os.path.join(self.stream_list_dir, f'hod_stream_universe_{self.session_date}.txt'), 'w') as f: f.write('\n'.join(syms) + '\n')
+        except Exception as e:
+            logger.warning(f"[HOD] could not write the streamed-universe list ({e}) — the miss audit will treat every symbol as scan-admitted")
+        if late:
+            self._backfill([self.candidates[s] for s in syms])
 
     # ------------------------------------------------------------------ scanner hooks (enqueue-only)
     def on_mover(self, symbol: str, *, price: float, day_open: float, cum_volume: float, above_open_pct: float, ts=None) -> None:
@@ -159,6 +217,7 @@ class HodBreakEngine:
         with self._lock:
             try:
                 self._roll_session()
+                self._check_stream_outage()
                 self._admit_movers()
                 self.drain_bar_events()
                 self._process_pending_fills()
@@ -167,6 +226,21 @@ class HodBreakEngine:
                     self.force_close_all()
             except Exception as e:
                 logger.error(f"[HOD] process_tick failed: {e}", exc_info=True)
+
+    def _check_stream_outage(self) -> None:
+        """A WebSocket reconnect after the open means bars were missed: every live candidate's day (HOD, cumulative
+        volume) is suspect until re-backfilled from REST. Pre-open reconnects lose nothing."""
+        gen = getattr(self.stop_monitor, 'ws_generation', None)
+        if gen is None or gen == self._ws_gen:
+            return
+        first = self._ws_gen is None; self._ws_gen = gen
+        if first or self._minute_of_day() <= OPEN_MINUTE:
+            return
+        n = 0
+        for c in self.candidates.values():
+            if c.subscribed and c.rejected_reason is None and c.backfill_ok:
+                c.backfill_ok = False; n += 1
+        logger.warning(f"[HOD] bar stream reconnected (generation {gen}) after the open — {n} candidates re-backfilled before any evaluation")
 
     def _admit_movers(self) -> None:
         n = 0; new: List[Candidate] = []
@@ -195,22 +269,52 @@ class HodBreakEngine:
             logger.error(f"[HOD] {cand.symbol}: bar subscribe failed ({e}) — candidate dropped")
             self.candidates.pop(cand.symbol, None)
 
+    BACKFILL_CHUNK = 200
+
     def _backfill(self, cands: List[Candidate]) -> None:
-        """ONE batched REST call for every candidate that still lacks the 09:30 open; a symbol missing from the
-        result is an ERROR and is retried next tick (never evaluated on stream-only bars — the DBI-09:50 class)."""
+        """Batched REST calls (chunks of BACKFILL_CHUNK) for every candidate whose day is incomplete (scan-admitted after the
+        open, a restart, a stream outage). The REST window starts at 09:30, so a non-empty result IS the complete day and
+        marks the candidate evaluable; a symbol missing from the result is an ERROR and is retried next tick (never
+        evaluated on stream-only bars — the DBI-09:50 class). Before the open there is nothing to fetch."""
         cands = [c for c in cands if not c.backfill_ok]
-        if not cands: return
-        try:
-            got = self.alpaca.get_1min_bars_multi([c.symbol for c in cands], lookback_minutes=max(30, self._minute_of_day() - OPEN_MINUTE + 5))
-        except Exception as e:
-            logger.error(f"[HOD] backfill call failed for {len(cands)} candidates ({e}) — retry next tick"); return
-        for c in cands:
-            df = (got or {}).get(c.symbol)
-            if df is None or not len(df):
-                c.backfill_tries += 1
-                if c.backfill_tries in (1, 5): logger.error(f"[HOD] {c.symbol}: backfill returned no bars (try {c.backfill_tries}) — not evaluated until the 09:30 open is present")
+        if not cands or self._minute_of_day() <= OPEN_MINUTE: return
+        lookback = max(30, self._minute_of_day() - OPEN_MINUTE + 5)
+        for i in range(0, len(cands), self.BACKFILL_CHUNK):
+            chunk = cands[i:i + self.BACKFILL_CHUNK]
+            try:
+                got = self.alpaca.get_1min_bars_multi([c.symbol for c in chunk], lookback_minutes=lookback)
+            except Exception as e:
+                logger.error(f"[HOD] backfill call failed for {len(chunk)} candidates ({e}) — retry next tick"); continue
+            for c in chunk:
+                df = (got or {}).get(c.symbol)
+                if df is None or not len(df):
+                    c.backfill_tries += 1
+                    if c.backfill_tries in (1, 5): logger.error(f"[HOD] {c.symbol}: backfill returned no bars (try {c.backfill_tries}) — not evaluated until the 09:30 open is present")
+                    continue
+                c.backfill_ok = True
+                self._ingest_bars(c.symbol, df)
+
+    def start_drain_thread(self) -> None:
+        """Evaluate bars the moment they close. The scanner's cycle can spend 10-30 s in its own work between drains;
+        the spec acts at the bar close, so a dedicated thread blocks on the bar queue instead."""
+        if self._drain_thread is not None and self._drain_thread.is_alive():
+            return
+        self._drain_thread = threading.Thread(target=self._drain_loop, name='hod-break-drain', daemon=True); self._drain_thread.start()
+        logger.info("[HOD] bar drain thread started")
+
+    def _drain_loop(self) -> None:
+        while not self.shutdown_requested:
+            try:
+                symbol, df = self._bar_queue.get(timeout=1.0)
+            except queue.Empty:
                 continue
-            self._ingest_bars(c.symbol, df)
+            try:
+                with self._lock:
+                    if symbol in self.candidates:
+                        self._ingest_bars(symbol, df)
+                    self.drain_bar_events()
+            except Exception as e:
+                logger.error(f"[HOD] drain loop failed for {symbol}: {e}", exc_info=True)
 
     def drain_bar_events(self) -> List[str]:
         touched = []
@@ -270,19 +374,26 @@ class HodBreakEngine:
         if arr is None:
             return
         o, h, l, c, v, m = arr; n = len(o)
-        if int(m[0]) != OPEN_MINUTE and abs(float(o[0]) - cand.day_open) > 0.011:
-            return                                         # the day's first bar is missing: wrong open/HOD/rv — wait for the backfill
-        cand.backfill_ok = True
-        start = cand.next_idx
-        while True:
-            sig = detect(o, h, l, v, m, cand.adv20, self.params, start_idx=start)
-            if sig is None:
-                cand.next_idx = n; return
-            if sig.bar_idx < n - 1:
-                # a break that already passed (backfill / late bar): its next-open fill is gone — skip, keep scanning
-                start = sig.bar_idx + 1; continue
-            cand.next_idx = n
-            self._try_enter(cand, sig, o[0]); return
+        if not cand.backfill_ok:
+            if int(m[0]) != OPEN_MINUTE:
+                return                                     # stream-only bars (no 09:30 open yet): wrong open/HOD/rv — wait for the backfill
+            cand.backfill_ok = True                        # the set starts at the opening bar: complete from the open whatever the source
+        if cand.day_open > 0 and abs(float(o[0]) - cand.day_open) > 0.011:
+            cand.backfill_ok = False; cand.backfill_tries += 1
+            if cand.backfill_tries in (1, 5): logger.error(f"[HOD] {cand.symbol}: first bar open {float(o[0]):.2f} != day open {cand.day_open:.2f} — the day's first bar is missing, re-backfilling")
+            return
+        if cand.day_open <= 0: cand.day_open = float(o[0])
+        sig = detect(o, h, l, v, m, cand.adv20, self.params, start_idx=cand.next_idx)
+        if sig is None:
+            cand.next_idx = n; return
+        cand.next_idx = n
+        if sig.bar_idx < n - 1:
+            # The spec trades a symbol's FIRST break only. This one already passed (late admission, restart, outage):
+            # its next-open fill is gone and any later break is a trade the backtest never took — the symbol is done.
+            cand.rejected_reason = 'stale_break'
+            logger.warning(f"[HOD] {cand.symbol}: MISSED the spec's break at bar {sig.bar_idx} (level {sig.level:.2f}, now {n - 1 - sig.bar_idx} bars old) — no later break is taken")
+            return
+        self._try_enter(cand, sig, o[0])
 
     # ------------------------------------------------------------------ entry
     def _try_enter(self, cand: Candidate, sig, day_open: float) -> None:
@@ -295,6 +406,8 @@ class HodBreakEngine:
         if len(self.positions) >= p.max_concurrent:
             logger.info(f"[HOD] {sym}: concurrency cap {p.max_concurrent} — skip (signal not re-armed)"); cand.rejected_reason = 'concurrency'; return
         limit = round(sig.level * (1.0 + p.cap), 2); stop = round(sig.stop, 2)
+        if sig.level < self.min_price:
+            cand.rejected_reason = 'price'; logger.info(f"[HOD] {sym}: level {sig.level:.2f} below the ${self.min_price:.0f} floor — skip"); return
         if stop >= limit:
             cand.rejected_reason = 'r_min'; return
         q = self._quote(sym)
@@ -316,7 +429,10 @@ class HodBreakEngine:
             cand.rejected_reason = 'spread_r'; logger.info(f"[HOD] {sym}: spread {spread_bps:.0f} bps = {(ask - bid) / r:.0%} of R {r:.2f} > {self.max_spread_frac_r:.0%} — skip"); return
         target = round(entry_est + p.target_r * r, 2)      # target from the EXPECTED fill (the spec's basis); a fill at the limit makes the real target slightly < 2R
         shares = shares_for(self.risk_usd, entry_est, stop)
-        shares = min(shares, int(self.max_notional_usd // limit))
+        cap_shares = int(self.max_notional_usd // limit)
+        if shares > cap_shares:
+            logger.warning(f"[HOD] {sym}: notional cap ${self.max_notional_usd:,.0f} binds — {shares} → {cap_shares} shares (risk ${cap_shares * r:.0f} of ${self.risk_usd:.0f}; the backtest sized by risk alone)")
+            shares = cap_shares
         if shares < 1:
             cand.rejected_reason = 'size'; return
         msg = (f"{sym} level {sig.level:.2f} limit {limit:.2f} stop {stop:.2f} target {target:.2f} R {r:.2f} ({r / entry_est * 100:.1f}%) "
@@ -429,11 +545,27 @@ class HodBreakEngine:
         fq = int(st.get('filled_qty') or pos.shares) or pos.shares
         px = float(st.get('filled_avg_price') or pos.limit_price)
         pos.fill_price = px; pos.filled_at = datetime.now(timezone.utc); pos.shares = fq; pos.status = 'open'
+        self._anchor_target_to_fill(pos)
         if pos.trade_id is not None:
-            try: self.db.update_trade(pos.trade_id, {'order_status': 'filled', 'fill_price': px, 'filled_at': pos.filled_at.isoformat(), 'shares': fq})
+            try: self.db.update_trade(pos.trade_id, {'order_status': 'filled', 'fill_price': px, 'filled_at': pos.filled_at.isoformat(), 'shares': fq, 'take_profit_price': pos.target})
             except Exception as e: logger.error(f"[HOD] {pos.symbol}: DB fill update failed: {e}")
         logger.info(f"[HOD] FILLED {pos.symbol} x{fq} @ {px:.2f} (limit {pos.limit_price:.2f}, slip {(px / pos.level - 1) * 1e4:.0f} bps vs level)")
         self._notify(f"[HOD] FILLED {pos.symbol} x{fq} @ {px:.2f} stop {pos.stop:.2f} target {pos.target:.2f}")
+
+    def _anchor_target_to_fill(self, pos: Position) -> None:
+        """The spec's target is entry + target_r × (entry − stop) on the ACTUAL fill. The bracket was submitted with the
+        target from the expected fill (the ask); once the real fill is known, move the take-profit leg to the spec's price."""
+        if not pos.fill_price or not pos.tp_leg_id or pos.fill_price <= pos.stop:
+            return
+        t2 = round(pos.fill_price + self.params.target_r * (pos.fill_price - pos.stop), 2)
+        if abs(t2 - pos.target) < 0.01:
+            return
+        try:
+            self.alpaca.replace_order_limit_price(pos.tp_leg_id, t2)
+            logger.info(f"[HOD] {pos.symbol}: target re-anchored to the fill: {pos.target:.2f} → {t2:.2f} (fill {pos.fill_price:.2f}, stop {pos.stop:.2f})")
+            pos.target = t2
+        except Exception as e:
+            logger.error(f"[HOD] {pos.symbol}: take-profit re-anchor to {t2:.2f} FAILED ({e}) — leg stays at {pos.target:.2f} (target {'below' if t2 > pos.target else 'above'} the spec's)")
 
     def check_exits(self) -> List[str]:
         """Poll the bracket legs (and the force-close order) of open positions; record exits."""

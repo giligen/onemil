@@ -247,3 +247,32 @@ V1 is a wash everywhere (fewer targets, bigger payoff). V2 helps a lot on the un
 but NOT inside the gated $20 book (up in TRAIN, down in VAL and TEST): the widening only pays where the spread is wide
 relative to R, which the gate already excludes. **Exits unchanged.** The live book nets +0.35 to +0.45R per trade
 after realistic costs in every split.
+
+## 10. Live vs spec — every place the engine is NOT the backtest (9/15 review, owner: "1000% identical or tell me how the P&L is imaginary")
+
+The spec (`trading/hod_break.py::simulate`) and the engine share `detect` byte-for-byte; the differences are in the
+WORLD the detector sees and in how fills happen. Each row says which side is favoured; nothing here was in the study's
+P&L except where marked "modeled".
+
+| # | spec (backtest) | engine (live) | status | who it favours |
+|---|---|---|---|---|
+| 1 | every universe symbol-day's bars from 09:30 | **streamed universe** (prev close ≥ $17, ADV20 ≥ 100K) from 09:30; scan hook admits the rest at +3.5% | fixed 9/15 (was: admission after the break = CRWL, 2 of 3 dry days) | — |
+| 2 | first break only per symbol-day | first break only; a break seen late (restart, outage) marks the symbol `stale_break`, never a later break | fixed 9/15 (was: engine could take a second break the spec never traded) | — |
+| 3 | acts at the bar close | dedicated drain thread evaluates at bar arrival (~1-3 s after the close); before 9/15 the scan cycle could delay by up to ~30 s | fixed 9/15 | — |
+| 4 | fill = next bar's OPEN if ≤ level×1.006, else no trade | limit at level×1.006 sent ~2 s into the next minute, only if the ask ≤ limit; fills at the ask ≈ the open; canceled after 20 s (was 75 s: a pullback fill a minute later is a trade the spec never took) | fixed 9/15 | live pays the ask (half-spread) — **modeled** as the entry cost in §8 |
+| 5 | R, size, target from the actual fill | R/size from the ask at submission; target re-anchored to the real fill via a take-profit replace after the fill | fixed 9/15 (was: target fixed from the estimate) | — |
+| 6 | target fills when a bar CLOSES ≥ target, at the target price | broker take-profit LIMIT leg: fills on any trade through the price (wicks included) | structural — cannot be identical | **live** (a wick touch that reverses is +2R live, a stop or less in the spec); never harms live |
+| 7 | stop fills at min(stop, open) × 0.999 when a bar's low ≤ stop | broker stop-market leg triggered by a trade ≤ stop; fills at the market | structural | slippage beyond 10 bps on thin names hurts live — measured per trade (`EXIT … (R)` lines) |
+| 8 | 15:55 flat at the bar's open | 15:55 marketable limit at bid × 0.99 | structural, minor | live pays the half-spread — modeled in §8 for non-target exits |
+| 9 | ADV20 = mean volume of the 20 prior sessions | daily_bars' latest 20 rows (≥ 10 rows) | same definition, nightly-refreshed table | — |
+| 10 | volume/HOD from SIP cached bars | SIP websocket bars (same feed); a reconnect after the open now re-backfills every candidate before any evaluation | fixed 9/15 (was: an outage silently shrank the day) | — |
+| 11 | no notional cap, size = risk / R | `max_notional_usd` 10,500: never binds at risk $100 / min_r 1%; binding is logged as a WARNING | fixed 9/15 (was 5,000: every trade with R < 2% was under-sized vs the backtest) | — |
+| 12 | no kill rails, no once-per-symbol rule (implicit), 12/day first-come, 4 concurrent | daily/weekly kill rails, once-per-symbol, 12/day, 4 concurrent (working orders count; a no-fill frees the slot) | rails are live-only risk controls | — |
+
+Verdict on the study's P&L: the only fill assumptions the live account cannot reproduce are rows 6-8. Row 6 is
+conservative in the study's favour (the study under-counts target exits relative to a real limit leg); rows 7-8 are
+costs the §8 cost model charges at half a spread — stop slippage beyond that is the residual the EOD parity line
+measures trade by trade. The numbers that were imaginary were not the P&L but the INPUT: the engine was not seeing the
+spec's world (rows 1-3, 10) and would have traded a different, smaller book. Parity is now tested end-to-end through the
+live seams (`tests/test_hod_break_replay.py`) and measured daily by `scripts/hod_break_miss_audit.py` (spec over the
+whole universe vs the engine's journal — the miss rate is THE number).

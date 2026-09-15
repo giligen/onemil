@@ -714,6 +714,8 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
             if stop_monitor is not None and not stop_monitor.polling_mode:
                 hod_engine.register_on_stop_monitor()
             hod_engine.sync_positions()
+            if hod_engine.enabled:
+                hod_engine.start_drain_thread()      # bars are evaluated the moment they close, not on the scan cycle
             logger.info(f"HOD-break strategy loaded — master_flag={hod_engine.enabled}, "
                         f"dry_run={hod_engine.dry_run}")
         except Exception as e:

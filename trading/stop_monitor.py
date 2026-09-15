@@ -598,6 +598,7 @@ class StopMonitor:
         self._bar_handlers: Dict[str, Callable] = {}
         self._bar_handler_lock = threading.Lock()
         self._bar_symbols: set = set()  # symbols subscribed to bar stream
+        self._ws_generation = 0  # +1 per successful WebSocket connect — consumers re-backfill bars missed across an outage
         self._bar_windows: Dict[str, list] = {}  # rolling bar window per symbol
 
     @property
@@ -730,6 +731,11 @@ class StopMonitor:
         )
         self.register_bar_handler('default', callback)
 
+    @property
+    def ws_generation(self) -> int:
+        """Number of successful WebSocket connects so far; a change means bars may have been missed."""
+        return self._ws_generation
+
     def subscribe_bars(self, symbol: str) -> None:
         """Subscribe to 1-min bar stream for a symbol (for pattern detection).
 
@@ -744,6 +750,28 @@ class StopMonitor:
             asyncio.run_coroutine_threadsafe(
                 self._subscribe_bars_async(symbol), self._loop
             )
+
+    def subscribe_bars_many(self, symbols) -> int:
+        """Subscribe MANY symbols to the 1-min bar stream with ONE subscribe message (HOD-break streams
+        the whole tradable universe from the open — per-symbol subscribe would resend the full list each
+        time). Thread-safe. Returns the number of new symbols."""
+        new = [s for s in symbols if s not in self._bar_symbols]
+        for s in new:
+            self._bar_symbols.add(s); self._bar_windows.setdefault(s, [])
+        if new and self._loop and self._stream and self._ws_connected:
+            asyncio.run_coroutine_threadsafe(self._subscribe_bars_many_async(new), self._loop)
+        return len(new)
+
+    async def _subscribe_bars_many_async(self, symbols) -> None:
+        if self._stream:
+            try:
+                for s in symbols:
+                    self._stream._handlers["bars"][s] = self._on_bar
+                if self._stream._ws:
+                    await self._stream._send_subscribe_msg()
+                    logger.info(f"StopMonitor: subscribed to {len(symbols)} symbols' bars in one message")
+            except Exception as e:
+                logger.error(f"StopMonitor: bulk bar subscribe failed for {len(symbols)} symbols: {e}")
 
     async def _subscribe_bars_async(self, symbol: str) -> None:
         """Subscribe to bar stream on the WebSocket (async, runs in WS thread)."""
@@ -2826,8 +2854,9 @@ class StopMonitor:
                 # Single connection attempt — don't use _run_forever (has uncontrollable internal retry)
                 await self._stream._start_ws()
                 self._ws_connected = True
+                self._ws_generation += 1
                 self._last_data_ts = time_mod.time()
-                logger.info("StopMonitor: WebSocket CONNECTED")
+                logger.info(f"StopMonitor: WebSocket CONNECTED (generation {self._ws_generation})")
                 await self._stream._consume()
 
             except Exception as e:
