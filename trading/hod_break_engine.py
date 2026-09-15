@@ -375,7 +375,8 @@ class HodBreakEngine:
                     else:
                         logger.warning(f"[HOD] {c.symbol}: streamed day was missing {cand.n_bars - before} bar(s) — merged from REST, rescanning from bar {cand.next_idx}")
                         if cand.backfill_ok and not cand.needs_refill: self._evaluate(cand)
-        if fixed: logger.warning(f"[HOD] stream reconcile: {fixed} of {len(todo)} symbols had missing bars")
+        left = sum(1 for c in self.candidates.values() if c.subscribed and not c.reconciled)
+        (logger.warning if fixed else logger.info)(f"[HOD] stream reconcile: {len(todo)} symbols checked against REST, {fixed} had missing bars, {left} to go")
 
     def _check_stream_outage(self) -> None:
         """A WebSocket reconnect after the open means bars were missed: every live candidate's day (HOD, cumulative
