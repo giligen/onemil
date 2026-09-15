@@ -40,6 +40,23 @@ _TERMINAL = ('canceled', 'cancelled', 'expired', 'rejected', 'done_for_day', 'su
 _OPEN_STATUSES = ('filled', 'partially_filled', 'exit_pending_verification')
 
 
+def load_adv20_from_daily_bars(cache_path, min_rows: int = 10):
+    """ADV20 = mean volume of the latest 20 daily_bars rows within 45 days (>= min_rows rows), plus each symbol's last
+    close. ONE definition for the engine's universe/ADV gate and the miss audit (the spec's ADV20 is the same rolling mean)."""
+    adv: Dict[str, float] = {}; last: Dict[str, float] = {}
+    conn = sqlite3.connect(f'file:{cache_path}?mode=ro', uri=True, timeout=30)
+    try:
+        q = ("with d as (select symbol, bar_date, volume, close, row_number() over (partition by symbol order by bar_date desc) rn "
+             "from daily_bars where bar_date >= date('now', '-45 days')) "
+             "select symbol, avg(volume), count(*), max(case when rn = 1 then close end) from d where rn <= 20 group by symbol")
+        for sym, a, cnt, lc in conn.execute(q):
+            if cnt and cnt >= min_rows and a: adv[sym] = float(a)
+            if lc: last[sym] = float(lc)
+    finally:
+        conn.close()
+    return adv, last
+
+
 @dataclass
 class Candidate:
     symbol: str
@@ -143,17 +160,9 @@ class HodBreakEngine:
         if not path:
             logger.warning("[HOD] db has no _cache_path — daily_bars ADV20 unavailable, using the universe field"); return adv
         try:
-            conn = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=30)
-            try:
-                q = ("with d as (select symbol, bar_date, volume, close, row_number() over (partition by symbol order by bar_date desc) rn "
-                     "from daily_bars where bar_date >= date('now', '-45 days')) "
-                     "select symbol, avg(volume), count(*), max(case when rn = 1 then close end) from d where rn <= 20 group by symbol")
-                n = 0
-                for sym, a, cnt, last in conn.execute(q):
-                    if cnt and cnt >= 10 and a: adv[sym] = float(a); n += 1
-                    if last: self._last_close[sym] = float(last)
-            finally: conn.close()
-            logger.info(f"[HOD] ADV20 from daily_bars for {n} symbols (universe field for the rest)")
+            adv20, last = load_adv20_from_daily_bars(path)
+            adv.update(adv20); self._last_close.update(last)
+            logger.info(f"[HOD] ADV20 from daily_bars for {len(adv20)} symbols (universe field for the rest)")
         except Exception as e:
             logger.warning(f"[HOD] daily_bars ADV20 unavailable ({e}) — using the universe field")
         return adv
@@ -285,14 +294,17 @@ class HodBreakEngine:
                 got = self.alpaca.get_1min_bars_multi([c.symbol for c in chunk], lookback_minutes=lookback)
             except Exception as e:
                 logger.error(f"[HOD] backfill call failed for {len(chunk)} candidates ({e}) — retry next tick"); continue
+            empty = []
             for c in chunk:
                 df = (got or {}).get(c.symbol)
                 if df is None or not len(df):
                     c.backfill_tries += 1
-                    if c.backfill_tries in (1, 5): logger.error(f"[HOD] {c.symbol}: backfill returned no bars (try {c.backfill_tries}) — not evaluated until the 09:30 open is present")
+                    if c.backfill_tries in (1, 5): empty.append(c.symbol)
                     continue
                 c.backfill_ok = True
                 self._ingest_bars(c.symbol, df)
+            if empty:                                          # dead/halted names return nothing all day; a live name here is a defect
+                logger.error(f"[HOD] backfill returned no bars for {len(empty)} of {len(chunk)} symbols — not evaluated until the 09:30 open is present: {empty[:20]}{'…' if len(empty) > 20 else ''}")
 
     def start_drain_thread(self) -> None:
         """Evaluate bars the moment they close. The scanner's cycle can spend 10-30 s in its own work between drains;

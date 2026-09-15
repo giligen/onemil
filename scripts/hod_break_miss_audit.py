@@ -20,12 +20,13 @@ from config import Config                                   # noqa: E402
 from data_sources.alpaca_client import AlpacaClient         # noqa: E402
 from persistence.database import Database                   # noqa: E402
 from trading.hod_break import HodBreakParams, detect, OPEN_MINUTE   # noqa: E402
+from trading.hod_break_engine import load_adv20_from_daily_bars     # noqa: E402  (the engine's own ADV/universe definition)
 ET = ZoneInfo('America/New_York')
 
 
 def journal_events(since='12:29'):
     out = subprocess.run(['bash', '-c', f'journalctl -u onemil-trader --since "{since}" --no-pager -o short-iso | grep -E "\\[HOD"'], capture_output=True, text=True).stdout.splitlines()
-    admitted, evaluated, stale = {}, {}, {}
+    admitted, evaluated, stale = {}, {}, {}; stream_start = None
     for ln in out:
         ts = re.match(r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4})', ln)
         m_et = None
@@ -37,7 +38,8 @@ def journal_events(since='12:29'):
         if e: evaluated.setdefault(e.group(1), []).append(m_et)
         st = re.search(r'\[HOD\] (\S+): MISSED the spec\'s break at bar (\d+)', ln)
         if st: stale[st.group(1)] = m_et
-    return admitted, evaluated, stale
+        if 'universe symbols' in ln and 'streaming' in ln: stream_start = m_et      # the LAST boot wins (a restart after the open)
+    return admitted, evaluated, stale, stream_start
 
 
 def streamed_symbols(day: str) -> set:
@@ -53,15 +55,18 @@ def main() -> int:
     cfg = Config(); hb = cfg.hod_break_cfg; p = HodBreakParams(**hb['params']); floor = floor or hb['min_price']
     alp = AlpacaClient(cfg.alpaca_api_key, cfg.alpaca_api_secret, paper=cfg.alpaca_paper); db = Database()
     uni = db.get_active_universe(); adv = {r['symbol']: float(r.get('avg_volume_daily') or 0) for r in uni}
-    syms = [r['symbol'] for r in uni]                       # NO stale price_close screen — the day's bars decide
+    adv20, _last = load_adv20_from_daily_bars(db._cache_path); adv.update(adv20)   # EXACTLY the engine's ADV map (daily_bars over the universe field)
+    syms = sorted(set(adv) | {r['symbol'] for r in uni})    # daily_bars names + the scanner universe; NO stale price screen — the day's bars decide
     day = alp.get_current_bars(syms)
     movers = [s for s, b in day.items() if b.get('open') and b['open'] > 0 and (b.get('high') or 0) >= b['open'] * (1 + p.min_dist_open_pct / 100.0) and (b.get('high') or 0) >= floor]
     no_adv = [s for s in movers if adv.get(s, 0) < hb['min_adv20']]
-    print(f'universe {len(uni)} | day-running movers with high >= +{p.min_dist_open_pct:.0f}% above open and high >= ${floor:.0f}: {len(movers)} | of which adv < {hb["min_adv20"]:,.0f} or missing (engine would NOT admit): {len(no_adv)} {no_adv[:12]}', flush=True)
+    print(f'symbols {len(syms)} | day-running movers with high >= +{p.min_dist_open_pct:.0f}% above open and high >= ${floor:.0f}: {len(movers)} | of which adv < {hb["min_adv20"]:,.0f} or missing (engine would NOT admit): {len(no_adv)} {no_adv[:12]}', flush=True)
     bars = alp.get_1min_bars_multi(movers, lookback_minutes=420) if movers else {}
-    admitted, evaluated, stale = journal_events()
+    admitted, evaluated, stale, stream_start = journal_events()
     today = datetime.now(timezone.utc).astimezone(ET).strftime('%Y-%m-%d'); streamed = streamed_symbols(today)
-    print(f'streamed from the open: {len(streamed)} symbols | scan-admitted today: {len(admitted)} | stale-break warnings: {len(stale)}')
+    ss = f'{stream_start // 60:02d}:{stream_start % 60:02d}' if stream_start is not None else 'n/a'
+    print(f'streamed universe: {len(streamed)} symbols from {ss} ET | scan-admitted today: {len(admitted)} | stale-break warnings: {len(stale)}')
+    outside = []
     rows = []
     for sym in movers:
         df = bars.get(sym)
@@ -76,9 +81,12 @@ def main() -> int:
         r.sort(); a = np.array(r, float); o, h, l, c, v, m = a[:, 1], a[:, 2], a[:, 3], a[:, 4], a[:, 5], a[:, 0].astype(int)
         sig = detect(o, h, l, v, m, adv.get(sym, 0.0), p)
         if sig is None or sig.level < floor: continue
+        if adv.get(sym, 0.0) < hb['min_adv20']:
+            outside.append(sym); continue                                # ADV20 below the universe floor: outside the spec's book too
         bm = int(m[sig.bar_idx]); adm = admitted.get(sym); ev = [x for x in evaluated.get(sym, []) if x is not None]
         at_break = [x for x in ev if bm <= x <= bm + 2]                  # the engine acts at the break bar's close (+0..2 min)
         if at_break: status = 'EVALUATED'
+        elif stream_start is not None and bm < stream_start and not ev: status = f'MISSED before the stream started ({ss} boot/restart)'
         elif ev: status = f'MISSED this break; engine evaluated a LATER break at {min(ev) // 60:02d}:{min(ev) % 60:02d} — ENGINE BUG (first break only)' + (f' (admitted {adm // 60:02d}:{adm % 60:02d})' if adm else '')
         elif sym in stale: status = f'MISSED stale_break (engine saw it {stale[sym] // 60:02d}:{stale[sym] % 60:02d}, after the fill window)' + (' — streamed: ENGINE BUG / stream outage' if sym in streamed else ' (scan-admitted late)')
         elif sym in streamed: status = 'MISSED streamed_never_evaluated — ENGINE BUG'
@@ -91,6 +99,8 @@ def main() -> int:
     for sym, bm, lvl, stp, rv, dist, st in rows:
         print(f"  {sym:6s} break {bm // 60:02d}:{bm % 60:02d} level {lvl:8.2f} stop {stp:8.2f} rv {rv:4.1f} +{dist:4.1f}%  {st}")
     n_miss = sum(1 for x in rows if x[6].startswith('MISSED')); n_bug = sum(1 for x in rows if 'ENGINE BUG' in x[6])
+    live = [x for x in rows if stream_start is None or x[1] >= stream_start]
+    print(f"since the stream started: {len(live)} spec signals, evaluated {sum(1 for x in live if x[6] == 'EVALUATED')}, missed {sum(1 for x in live if x[6].startswith('MISSED'))} | outside the universe (ADV20 < {hb['min_adv20']:,.0f}): {len(outside)} {outside[:10]}")
     print(f"\nMISS RATE {n_miss}/{len(rows)} = {(n_miss / len(rows) * 100) if rows else 0:.0f}% | engine-side bugs {n_bug} | engine-evaluated symbols not in the spec set: {sorted(set(evaluated) - {x[0] for x in rows})}")
     return 0
 
