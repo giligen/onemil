@@ -77,9 +77,10 @@ def fetch_day(client, day, symbols):
     return out
 
 
-def do_fetch(srcs, day_from, day_to):
-    K = pd.read_csv(KEYS, dtype={'symbol': str}, keep_default_na=False)
+def do_fetch(srcs, day_from, day_to, keys_path=None, min_open=None):
+    K = pd.read_csv(keys_path or KEYS, dtype={'symbol': str}, keep_default_na=False)
     K = K[K.src.isin(srcs)]
+    if min_open is not None: K = K[pd.to_numeric(K.open, errors='coerce') >= min_open]
     if day_from: K = K[K.bar_date >= day_from]
     if day_to: K = K[K.bar_date <= day_to]
     con = open_store(); done = set(con.execute("select symbol, day from fetch_log").fetchall())
@@ -158,9 +159,10 @@ if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('--fetch', action='store_true'); ap.add_argument('--src', default='topup.db,pit_bars_1min.db,bars.db,none')
     ap.add_argument('--days-from'); ap.add_argument('--days-to')
+    ap.add_argument('--keys', help='alternative key CSV (symbol, bar_date, open, src)'); ap.add_argument('--min-open', type=float)
     ap.add_argument('--copy-topup', action='store_true'); ap.add_argument('--verify', type=int); ap.add_argument('--cost')
     a = ap.parse_args()
-    if a.fetch: do_fetch(set(a.src.split(',')), a.days_from, a.days_to)
+    if a.fetch: do_fetch(set(a.src.split(',')), a.days_from, a.days_to, a.keys, a.min_open)
     elif a.copy_topup: do_copy_topup()
     elif a.verify: sys.exit(0 if do_verify(a.verify) else 1)
     elif a.cost: do_cost(a.cost)
