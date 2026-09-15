@@ -596,10 +596,12 @@ class StopMonitor:
         # Multi-consumer: multiple strategies may register; each gets (symbol, bars_df).
         # Keyed by handler_id so consumers can update/unregister cleanly.
         self._bar_handlers: Dict[str, Callable] = {}
+        self._bar_handler_window: Dict[str, bool] = {}  # handler_id -> wants the rolling-window DataFrame (True) or one bar dict (False)
         self._bar_handler_lock = threading.Lock()
         self._bar_symbols: set = set()  # symbols subscribed to bar stream
         self._ws_generation = 0  # +1 per successful WebSocket connect — consumers re-backfill bars missed across an outage
         self._bar_windows: Dict[str, list] = {}  # rolling bar window per symbol
+        self._bulk_bar_symbols: set = set()  # subscribed via subscribe_bars_many: NO rolling window, light handlers only
 
     @property
     def polling_mode(self) -> bool:
@@ -672,9 +674,12 @@ class StopMonitor:
         self._stream = None
         logger.info("StopMonitor stopped")
 
-    def register_bar_handler(self, handler_id: str, callback: Callable) -> None:
+    def register_bar_handler(self, handler_id: str, callback: Callable, window: bool = True) -> None:
         """
-        Register a bar-close handler: callback(symbol, bars_df).
+        Register a bar-close handler: callback(symbol, bars_df) when `window=True` (the rolling window of bars
+        since subscription as a DataFrame — bull flag / ORB / MACD), or callback(symbol, bar_dict) when
+        `window=False` (ONE closed bar, no DataFrame — the HOD-break engine, which keeps its own bar store for
+        thousands of bulk-subscribed symbols; building a DataFrame per bar for those would burn the WS thread).
 
         Multiple strategies may register under different handler_id keys.
         Registering with an existing id OVERWRITES the previous handler for that id
@@ -682,7 +687,8 @@ class StopMonitor:
 
         Args:
             handler_id: stable identifier, e.g. 'bull_flag', 'macd_wave'
-            callback: invoked for every bar event on every subscribed symbol
+            callback: invoked for every bar event on every subscribed symbol (window handlers: windowed symbols only)
+            window: True = DataFrame window, False = single bar dict
         """
         if self._polling_mode:
             # Handler is still stored so that a mode-switch later would wire it
@@ -695,6 +701,7 @@ class StopMonitor:
         with self._bar_handler_lock:
             existed = handler_id in self._bar_handlers
             self._bar_handlers[handler_id] = callback
+            self._bar_handler_window[handler_id] = bool(window)
         logger.info(
             f"StopMonitor: bar handler {'updated' if existed else 'registered'} "
             f"(id={handler_id}, total={len(self._bar_handlers)})"
@@ -704,6 +711,7 @@ class StopMonitor:
         """Remove a bar-close handler by id. No-op if not registered."""
         with self._bar_handler_lock:
             existed = self._bar_handlers.pop(handler_id, None) is not None
+            self._bar_handler_window.pop(handler_id, None)
         if existed:
             logger.info(f"StopMonitor: bar handler unregistered (id={handler_id})")
 
@@ -742,6 +750,8 @@ class StopMonitor:
         Thread-safe: can be called from main thread.
         """
         if symbol in self._bar_symbols:
+            self._bulk_bar_symbols.discard(symbol)      # a bulk-streamed symbol now also gets a window (no re-subscribe needed)
+            self._bar_windows.setdefault(symbol, [])
             return
         self._bar_symbols.add(symbol)
         self._bar_windows.setdefault(symbol, [])
@@ -757,7 +767,7 @@ class StopMonitor:
         time). Thread-safe. Returns the number of new symbols."""
         new = [s for s in symbols if s not in self._bar_symbols]
         for s in new:
-            self._bar_symbols.add(s); self._bar_windows.setdefault(s, [])
+            self._bar_symbols.add(s); self._bulk_bar_symbols.add(s)   # NO rolling window: bulk symbols feed light handlers only (memory)
         if new and self._loop and self._stream and self._ws_connected:
             asyncio.run_coroutine_threadsafe(self._subscribe_bars_many_async(new), self._loop)
         return len(new)
@@ -800,7 +810,9 @@ class StopMonitor:
                 'close': float(bar.close),
                 'volume': int(bar.volume),
             }
-            self._bar_windows.setdefault(symbol, []).append(bar_dict)
+            windowed = symbol not in self._bulk_bar_symbols   # individually subscribed (pattern engines) vs bulk-streamed (HOD-break)
+            if windowed:
+                self._bar_windows.setdefault(symbol, []).append(bar_dict)
             self._last_data_ts = time_mod.time()
 
             # Experiment D: stash last-closed-bar volume on the active watch so
@@ -829,15 +841,22 @@ class StopMonitor:
             # Snapshot handlers under lock, then fire outside lock so a slow handler
             # doesn't block registration/unregistration on another thread.
             with self._bar_handler_lock:
-                handlers = list(self._bar_handlers.items())
+                handlers = [(hid, cb, self._bar_handler_window.get(hid, True)) for hid, cb in self._bar_handlers.items()]
             if not handlers:
                 return
-            import pandas as pd
-            bars_df = pd.DataFrame(self._bar_windows[symbol])
-            # Defensive: each handler gets its own copy so in-place mutation
-            # by one consumer cannot corrupt state for the others.
-            for handler_id, cb in handlers:
+            bars_df = None
+            for handler_id, cb, wants_window in handlers:
                 try:
+                    if not wants_window:
+                        cb(symbol, dict(bar_dict))          # light handler: one bar, its own copy
+                        continue
+                    if not windowed:
+                        continue                            # window handlers never see bulk-only symbols
+                    if bars_df is None:
+                        import pandas as pd
+                        bars_df = pd.DataFrame(self._bar_windows[symbol])
+                    # Defensive: each handler gets its own copy so in-place mutation
+                    # by one consumer cannot corrupt state for the others.
                     cb(symbol, bars_df.copy())
                 except Exception as e:
                     logger.error(

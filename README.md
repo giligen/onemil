@@ -1296,6 +1296,18 @@ consolidation low, +2R target), polled by the engine. The nightly `scripts/build
 writes the same-clock cumulative-volume table (`cache.db hod_volume_profile`) the relative-volume
 feature is defined on. Shipped enabled + dry_run: full pipeline, `[HOD DRY]` Telegram lines, zero orders.
 
+**Input parity (2026-09-15)**: the engine's world must BE the spec's world, so it streams the whole tradable
+universe (~3,600 names with prev close ≥ $17 and ADV20 ≥ 100K from `daily_bars`) from 09:30 through one
+websocket subscription (`StopMonitor.subscribe_bars_many`; bulk symbols feed *light* bar handlers — one bar
+dict per event, no per-symbol DataFrame window — and the engine stores each day in a fixed 390×5 array).
+Snapshot-based admission is only a fallback. A dedicated drain thread evaluates each bar seconds after it
+closes; a break seen late is `stale_break` (the spec trades a symbol's FIRST break only); the entry limit
+lives 20 s (the spec fills at the next open or never); the take-profit leg is re-anchored to the actual
+fill; a websocket reconnect after the open re-backfills every candidate. `scripts/hod_break_miss_audit.py`
+runs the spec over the whole universe against the engine's journal every EOD — the miss rate is the parity
+number. What can never be identical is listed in `research/bf_zero/REPORT.md` §10 (broker take-profit
+fills on wicks, which favours live; stop-market and 15:55 slippage, which are costs).
+
 ## Reporting stack (shipped 2026-07-04)
 
 Three layers, all external observers (broker/DB truth, zero prod-code risk):

@@ -57,18 +57,41 @@ def load_adv20_from_daily_bars(cache_path, min_rows: int = 10):
     return adv, last
 
 
+RTH_MINUTES = 960 - OPEN_MINUTE      # 390 one-minute slots, 09:30 .. 15:59 ET
+
+
 @dataclass
 class Candidate:
+    """One symbol-day. Bars live in a fixed (390 × 5) array indexed by minute-of-session — O(1) merge per bar, no
+    per-bar dict/DataFrame churn (3,500 streamed names × 390 minutes must fit in ~70 MB, not a gigabyte)."""
     symbol: str
     day_open: float
     adv20: float
-    bars: List[dict] = field(default_factory=list)      # closed RTH 1-min bars (dicts with timestamp/o/h/l/c/v)
     subscribed: bool = False
     backfill_ok: bool = False                             # True once the bar set starts at the 09:30 bar
     backfill_tries: int = 0
     next_idx: int = 0                                     # first bar index detect() has not scanned yet
     rejected_reason: Optional[str] = None
     dry_logged: bool = False
+    ohlcv: np.ndarray = field(default_factory=lambda: np.full((RTH_MINUTES, 5), np.nan))
+    have: np.ndarray = field(default_factory=lambda: np.zeros(RTH_MINUTES, dtype=bool))
+
+    def set_bar(self, minute: int, o: float, h: float, l: float, c: float, v: float) -> bool:
+        i = minute - OPEN_MINUTE
+        if not (0 <= i < RTH_MINUTES):
+            return False
+        self.ohlcv[i, 0] = o; self.ohlcv[i, 1] = h; self.ohlcv[i, 2] = l; self.ohlcv[i, 3] = c; self.ohlcv[i, 4] = v; self.have[i] = True
+        return True
+
+    @property
+    def n_bars(self) -> int:
+        return int(self.have.sum())
+
+    @property
+    def bars(self) -> List[dict]:
+        """The closed RTH bars as dicts (diagnostics/tests; the hot path never builds this)."""
+        return [{'minute': int(i) + OPEN_MINUTE, 'open': float(r[0]), 'high': float(r[1]), 'low': float(r[2]), 'close': float(r[3]), 'volume': float(r[4])}
+                for i, r in zip(np.flatnonzero(self.have), self.ohlcv[self.have])]
 
 
 @dataclass
@@ -206,15 +229,19 @@ class HodBreakEngine:
         if self.stop_monitor is None or getattr(self.stop_monitor, 'polling_mode', False):
             logger.warning("[HOD] no websocket StopMonitor — bar stream unavailable, engine cannot detect breaks")
             return False
-        self.stop_monitor.register_bar_handler(STRATEGY_NAME, self._on_bar_close)
+        try:
+            self.stop_monitor.register_bar_handler(STRATEGY_NAME, self._on_bar_close, window=False)   # ONE bar dict per event, no DataFrame
+        except TypeError:
+            logger.warning("[HOD] StopMonitor has no light bar handlers — receiving full windows (slower)")
+            self.stop_monitor.register_bar_handler(STRATEGY_NAME, self._on_bar_close)
         return True
 
-    def _on_bar_close(self, symbol: str, bars_df) -> None:
-        """WS thread: zero work, enqueue only."""
+    def _on_bar_close(self, symbol: str, bar) -> None:
+        """WS thread: zero work, enqueue only. `bar` is one bar dict (light handler) or a DataFrame/list of bars."""
         if not self.enabled or symbol not in self.candidates:
             return
         try:
-            self._bar_queue.put_nowait((symbol, bars_df))
+            self._bar_queue.put_nowait((symbol, bar))
         except queue.Full:
             logger.error(f"[HOD] bar queue full — dropped a bar for {symbol}")
 
@@ -301,7 +328,7 @@ class HodBreakEngine:
                     c.backfill_tries += 1
                     if c.backfill_tries in (1, 5): empty.append(c.symbol)
                     continue
-                c.backfill_ok = True
+                c.backfill_ok = True; c.next_idx = 0                # a (re)filled day is re-scanned from its first bar
                 self._ingest_bars(c.symbol, df)
             if empty:                                          # dead/halted names return nothing all day; a live name here is a defect
                 logger.error(f"[HOD] backfill returned no bars for {len(empty)} of {len(chunk)} symbols — not evaluated until the 09:30 open is present: {empty[:20]}{'…' if len(empty) > 20 else ''}")
@@ -338,43 +365,37 @@ class HodBreakEngine:
         return touched
 
     @staticmethod
-    def _rth_arrays(bars: List[dict]):
-        rows = []
-        for b in bars:
-            ts = b.get('timestamp')
-            t = ts if isinstance(ts, datetime) else datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
-            if t.tzinfo is None: t = t.replace(tzinfo=timezone.utc)
-            et = t.astimezone(ET); m = et.hour * 60 + et.minute
-            if OPEN_MINUTE <= m < 960:
-                rows.append((m, float(b['open']), float(b['high']), float(b['low']), float(b['close']), float(b.get('volume') or 0)))
-        rows.sort(key=lambda r: r[0])
-        if not rows:
+    def _rth_arrays(cand: Candidate):
+        idx = np.flatnonzero(cand.have)
+        if not len(idx):
             return None
-        a = np.array(rows, dtype=float)
-        return a[:, 1], a[:, 2], a[:, 3], a[:, 4], a[:, 5], a[:, 0].astype(int)
+        a = cand.ohlcv[idx]
+        return a[:, 0], a[:, 1], a[:, 2], a[:, 3], a[:, 4], (idx + OPEN_MINUTE).astype(int)
 
     @staticmethod
-    def _bar_key(b: dict):
+    def _bar_minute(b: dict) -> int:
+        """ET minute-of-day of a bar's timestamp (aware/naive datetime or ISO string)."""
         ts = b.get('timestamp')
         t = ts if isinstance(ts, datetime) else datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
         if t.tzinfo is None:
             t = t.replace(tzinfo=timezone.utc)
-        return t.astimezone(timezone.utc).replace(second=0, microsecond=0)
+        et = t.astimezone(ET)
+        return et.hour * 60 + et.minute
 
-    def _ingest_bars(self, symbol: str, bars_df) -> None:
-        """MERGE by minute — never replace. Found 2026-09-14 09:50 (DBI): the stream's DataFrame holds
-        only bars since SUBSCRIPTION, so replacing the backfilled day once the stream list grew longer
-        dropped the 09:30 open, the early high-of-day and the early volume → wrong open, wrong HOD,
-        wrong relative volume. The union keeps every bar seen from either source."""
+    def _ingest_bars(self, symbol: str, payload) -> None:
+        """MERGE by minute into the candidate's fixed array — never replace. Found 2026-09-14 09:50 (DBI): the stream
+        carries only bars since SUBSCRIPTION; replacing the backfilled day with it dropped the 09:30 open, the early
+        high-of-day and the early volume. `payload` = one bar dict (light stream handler), a DataFrame (backfill) or a
+        list of dicts. Bars outside 09:30-15:59 ET are ignored."""
         cand = self.candidates.get(symbol)
         if cand is None:
             return
         try:
-            recs = bars_df.to_dict('records') if hasattr(bars_df, 'to_dict') else list(bars_df)
-            merged = {self._bar_key(b): b for b in cand.bars}
+            if isinstance(payload, dict): recs = [payload]
+            elif hasattr(payload, 'to_dict'): recs = payload.to_dict('records')
+            else: recs = list(payload)
             for b in recs:
-                merged[self._bar_key(b)] = b
-            cand.bars = [merged[k] for k in sorted(merged)]
+                cand.set_bar(self._bar_minute(b), float(b['open']), float(b['high']), float(b['low']), float(b['close']), float(b.get('volume') or 0))
         except Exception as e:
             logger.error(f"[HOD] {symbol}: bad bar payload ({e})"); return
         self._evaluate(cand)
@@ -382,7 +403,7 @@ class HodBreakEngine:
     def _evaluate(self, cand: Candidate) -> None:
         if cand.rejected_reason or cand.symbol in self.positions or cand.symbol in self.entered_today:
             return
-        arr = self._rth_arrays(cand.bars)
+        arr = self._rth_arrays(cand)
         if arr is None:
             return
         o, h, l, c, v, m = arr; n = len(o)

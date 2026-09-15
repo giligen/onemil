@@ -2059,3 +2059,28 @@ class TestHeldQtyRace:
             await monitor._submit_with_held_qty_retry(loop, fn, label='Z test')
         # 1 initial + 2 backoffs = 3 attempts
         assert len(attempts) == 3
+
+
+class TestBulkBarSubscription:
+    """HOD-break streams thousands of symbols: bulk symbols get NO rolling window and feed light handlers (one bar dict)."""
+
+    @pytest.mark.asyncio
+    async def test_bulk_symbol_feeds_light_handler_only_and_keeps_no_window(self, monitor):
+        light, heavy = [], []
+        monitor.register_bar_handler('hod', lambda s, b: light.append((s, b)), window=False)
+        monitor.register_bar_handler('bull_flag', lambda s, df: heavy.append(s))
+        assert monitor.subscribe_bars_many(['BULK1', 'BULK2']) == 2
+        bar = MagicMock(symbol='BULK1', timestamp='2026-09-15T14:00:00Z', open=10.0, high=10.1, low=9.95, close=10.05, volume=1000)
+        await monitor._on_bar(bar); await monitor._on_bar(bar)
+        assert [s for s, _ in light] == ['BULK1', 'BULK1'] and isinstance(light[0][1], dict) and light[0][1]['close'] == 10.05
+        assert heavy == [] and 'BULK1' not in monitor._bar_windows
+
+    @pytest.mark.asyncio
+    async def test_individually_subscribed_symbol_feeds_both(self, monitor):
+        light, heavy = [], []
+        monitor.register_bar_handler('hod', lambda s, b: light.append(s), window=False)
+        monitor.register_bar_handler('orb', lambda s, df: heavy.append(len(df)))
+        monitor.subscribe_bars_many(['XYZ']); monitor.subscribe_bars('XYZ')      # promoted to a windowed symbol
+        bar = MagicMock(symbol='XYZ', timestamp='2026-09-15T14:00:00Z', open=10.0, high=10.1, low=9.95, close=10.05, volume=1000)
+        await monitor._on_bar(bar); await monitor._on_bar(bar)
+        assert light == ['XYZ', 'XYZ'] and heavy == [1, 2]
