@@ -40,16 +40,23 @@ _TERMINAL = ('canceled', 'cancelled', 'expired', 'rejected', 'done_for_day', 'su
 _OPEN_STATUSES = ('filled', 'partially_filled', 'exit_pending_verification')
 
 
-def load_adv20_from_daily_bars(cache_path, min_rows: int = 10):
+STALE_DAYS = 7               # a symbol whose last daily bar is older than this is dead/halted/delisted: not streamed, not admitted
+
+
+def load_adv20_from_daily_bars(cache_path, min_rows: int = 10, stale_days: int = STALE_DAYS):
     """ADV20 = mean volume of the latest 20 daily_bars rows within 45 days (>= min_rows rows), plus each symbol's last
-    close. ONE definition for the engine's universe/ADV gate and the miss audit (the spec's ADV20 is the same rolling mean)."""
+    close. Symbols whose LAST bar is older than `stale_days` (no trades for a week: acquired, delisted, halted) are
+    dropped from both maps — they would only produce empty backfills. ONE definition for the engine's universe/ADV gate
+    and the miss audit (the spec's ADV20 is the same rolling mean)."""
     adv: Dict[str, float] = {}; last: Dict[str, float] = {}
     conn = sqlite3.connect(f'file:{cache_path}?mode=ro', uri=True, timeout=30)
     try:
         q = ("with d as (select symbol, bar_date, volume, close, row_number() over (partition by symbol order by bar_date desc) rn "
              "from daily_bars where bar_date >= date('now', '-45 days')) "
-             "select symbol, avg(volume), count(*), max(case when rn = 1 then close end) from d where rn <= 20 group by symbol")
-        for sym, a, cnt, lc in conn.execute(q):
+             "select symbol, avg(volume), count(*), max(case when rn = 1 then close end), max(bar_date) from d where rn <= 20 group by symbol")
+        for sym, a, cnt, lc, last_date in conn.execute(q):
+            if not last_date or (datetime.now(timezone.utc).date() - datetime.strptime(str(last_date)[:10], '%Y-%m-%d').date()).days > stale_days:
+                continue
             if cnt and cnt >= min_rows and a: adv[sym] = float(a)
             if lc: last[sym] = float(lc)
     finally:
@@ -330,8 +337,9 @@ class HodBreakEngine:
                     continue
                 c.backfill_ok = True; c.next_idx = 0                # a (re)filled day is re-scanned from its first bar
                 self._ingest_bars(c.symbol, df)
-            if empty:                                          # dead/halted names return nothing all day; a live name here is a defect
-                logger.error(f"[HOD] backfill returned no bars for {len(empty)} of {len(chunk)} symbols — not evaluated until the 09:30 open is present: {empty[:20]}{'…' if len(empty) > 20 else ''}")
+            if empty:                                          # a halted/dead name returns nothing all day (WARNING); a whole empty chunk is a REST failure (ERROR → Telegram)
+                (logger.error if len(empty) == len(chunk) else logger.warning)(
+                    f"[HOD] backfill returned no bars for {len(empty)} of {len(chunk)} symbols — not evaluated until the 09:30 open is present: {empty[:20]}{'…' if len(empty) > 20 else ''}")
 
     def start_drain_thread(self) -> None:
         """Evaluate bars the moment they close. The scanner's cycle can spend 10-30 s in its own work between drains;
