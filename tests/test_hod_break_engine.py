@@ -574,3 +574,29 @@ class TestStreamIntegrity:
         engine.seen_today.clear(); engine.candidates.clear()
         admit(engine)
         assert 'ABC' not in engine.candidates and not mock_alpaca.submit_bracket_order.called
+
+
+class TestUpdatedBars:
+    """9/15 review B: a late print that changes an already-scanned bar must trigger a rescan from that bar (the cache holds the final bar)"""
+
+    def test_an_updated_bar_rewinds_the_scan(self, engine, mock_alpaca):
+        engine._adv_map['ABC'] = 1_000_000
+        from trading.hod_break_engine import Candidate
+        engine.candidates['ABC'] = Candidate(symbol='ABC', day_open=0.0, adv20=1_000_000, subscribed=True, backfill_ok=True)
+        tape = drive_then_consolidate()
+        engine._ingest_bars('ABC', bars_df(tape[:6]))
+        assert engine.candidates['ABC'].next_idx == 6
+        upd = dict(bars_df(tape[2:3], minute0=572).iloc[0]); upd['high'] = float(upd['high']) + 0.5; upd['updated'] = True
+        calls = []
+        with patch('trading.hod_break_engine.detect', side_effect=lambda *a, **k: calls.append(k.get('start_idx')) or None):
+            engine._ingest_bars('ABC', upd)
+        assert calls == [2], 'the scan must restart at the updated bar'
+        with patch('trading.hod_break_engine.detect', side_effect=lambda *a, **k: calls.append(k.get('start_idx')) or None):
+            engine._ingest_bars('ABC', dict(bars_df(tape[2:3], minute0=572).iloc[0]) | {'high': upd['high']})   # the same bar again: no change, no rescan
+        assert calls == [2, 6]
+
+    def test_boot_inside_the_opening_minute_backfills(self, mock_alpaca, mock_db, mock_sm):
+        e = HodBreakEngine(mock_alpaca, mock_db, mock_sm, cfg=cfg()); e._last_close = {'ABC': 30.0}; e._adv_map = {'ABC': 1_000_000}; e.universe_min_prev_close = 15
+        with patch.object(HodBreakEngine, '_minute_of_day', return_value=570):
+            e.stream_universe = True; e._stream_the_universe()
+        assert not e.candidates['ABC'].backfill_ok

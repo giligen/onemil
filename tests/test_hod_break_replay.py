@@ -166,12 +166,13 @@ def test_stream_outage_after_the_open_re_backfills_every_candidate(streamed_worl
     """a WebSocket reconnect after 09:30 invalidates the streamed day; candidates are re-backfilled from REST before any evaluation"""
     e, alp, sm, state = streamed_world
     sm.ws_generation = 1
+    with patch.object(HodBreakEngine, '_minute_of_day', side_effect=lambda: 569):
+        e._roll_session(); e.process_tick()                    # pre-open roll: the stream will carry the day; first sight of the generation
+        assert all(c.backfill_ok and not c.needs_refill for c in e.candidates.values())
     with patch.object(HodBreakEngine, '_minute_of_day', side_effect=lambda: 570 + state['now']):
-        e._roll_session(); e.process_tick()                    # first sight of the generation: nothing to do
-        assert all(c.backfill_ok for c in e.candidates.values())
         state['now'] = 12; sm.ws_generation = 2; e.process_tick()
         assert alp.get_1min_bars_multi.called, 'the re-backfill must hit REST'
-        assert all(c.backfill_ok for c in e.candidates.values() if c.rejected_reason is None), 'complete again after the backfill'
+        assert all(not c.needs_refill for c in e.candidates.values() if c.rejected_reason is None), 'complete again after the backfill'
 
 
 def test_stream_outage_before_the_open_loses_nothing(streamed_world):

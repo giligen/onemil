@@ -777,6 +777,7 @@ class StopMonitor:
             try:
                 for s in symbols:
                     self._stream._handlers["bars"][s] = self._on_bar
+                    self._stream._handlers.setdefault("updatedBars", {})[s] = self._on_updated_bar   # late prints: the cache's FINAL bar
                 if self._stream._ws:
                     await self._stream._send_subscribe_msg()
                     logger.info(f"StopMonitor: subscribed to {len(symbols)} symbols' bars in one message")
@@ -793,6 +794,23 @@ class StopMonitor:
                     logger.info(f"StopMonitor: subscribed to {symbol} bars")
             except Exception as e:
                 logger.error(f"StopMonitor: failed to subscribe {symbol} bars: {e}")
+
+    async def _on_updated_bar(self, bar) -> None:
+        """An UPDATED minute bar (Alpaca re-emits a bar when late-reported prints change it — the historical/cached bar is
+        the updated one). Delivered to LIGHT handlers only (they merge by minute); rolling windows never see it (a duplicate
+        minute would corrupt the pattern engines' DataFrames)."""
+        try:
+            symbol = bar.symbol
+            if symbol not in self._bar_symbols:
+                return
+            bar_dict = {'timestamp': bar.timestamp, 'open': float(bar.open), 'high': float(bar.high), 'low': float(bar.low), 'close': float(bar.close), 'volume': int(bar.volume), 'updated': True}
+            with self._bar_handler_lock:
+                handlers = [(hid, cb) for hid, cb in self._bar_handlers.items() if not self._bar_handler_window.get(hid, True)]
+            for handler_id, cb in handlers:
+                try: cb(symbol, dict(bar_dict))
+                except Exception as e: logger.error(f"StopMonitor: updated-bar handler '{handler_id}' raised for {symbol}: {e}")
+        except Exception as e:
+            logger.error(f"StopMonitor: _on_updated_bar error: {e}")
 
     async def _on_bar(self, bar) -> None:
         """Handle 1-min bar close from WebSocket. Fans out to all registered handlers."""
@@ -2878,6 +2896,8 @@ class StopMonitor:
                 try:
                     for s_ in list(self._bar_symbols):
                         self._stream._handlers["bars"][s_] = self._on_bar
+                        if s_ in self._bulk_bar_symbols:
+                            self._stream._handlers.setdefault("updatedBars", {})[s_] = self._on_updated_bar
                     await self._stream._send_subscribe_msg()
                     logger.info(f"StopMonitor: subscriptions sent after connect ({len(self._bar_symbols)} bar symbols, {len(all_symbols)} trade/quote symbols)")
                 except Exception as e:

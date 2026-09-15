@@ -347,3 +347,26 @@ below (rows 5, 9, 11 first), never by the backtest.
 Dry-run tape so far (journal 9/14–9/15): 9/14 gate OFF, $5 floor — 42 `WOULD BUY`, 11 `NO CHASE`, 10 `spread > 100 bps`;
 9/15 gate ON, $20 floor, engine restarted 16:49 UTC mid-session — 0 `WOULD BUY`, 7 `r_min`, 3 gate, 3 `NO CHASE`,
 1 `spread > 100 bps`. Zero live fills: every number above is still model-vs-model.
+
+### 6a. Book re-run 2026-09-15 evening (causal slot rule, early-close days excluded, live config)
+`spec_sim.py` now (a) frees a concurrency slot only for an exit on a bar STRICTLY BEFORE the entry bar (the old rule
+freed it in hindsight for an exit during the entry bar — 5% of the study's trades were admitted that way, review F),
+(b) breaks same-minute ties by symbol (the live engine's order), (c) excludes the early-close days 2025-07-03,
+2025-11-28, 2025-12-24 (the cache carried after-hours prints; live never runs on them), and (d) reports the LIVE-CONFIG
+book: last entry 14:00, price ≥ $20, 12/day, 4 concurrent — the same signals, the engine's knobs:
+
+| book | TRAIN | VAL | TEST |
+|---|---|---|---|
+| executable 8/4 (study defaults, all prices) | 36.8/wk, +0.236R, weekly +8.7, green 42/53, worst −18.5 | 35.4/wk, +0.208R, +7.4, 16/23, −13.5 | 35.8/wk, +0.213R, +7.6, 12/15, −4.9 |
+| LIVE-CONFIG, spread cost NOT charged | 37.1/wk, +0.342R, +12.7, 43/53, −10.6 | 41.3/wk, +0.365R, +15.1, 21/23, −5.5 | 39.3/wk, +0.421R, +16.5, 13/15, −0.9 |
+| LIVE-CONFIG + the 15% gate as a 42% cost filter (§8a, 20 seeds, mean) | 22.2/wk, +0.263R, +5.8, 39.5/53, −11.0 | 31.7/wk, +0.303R, +9.6, 20.1/23, −4.2 | 29.0/wk, +0.360R, +10.4, 12.8/15, −3.1 |
+
+**Open on the study side (reviews A and B, 9/15)**: 45% of the study's symbol-days (`bars.db`, `pit_bars_1min.db`)
+were fetched from Databento EQUS.MINI — ONE publisher, 1–10% of consolidated volume, highs differ on 95% of
+symbol-days. Those days could never pass the rv ≥ 1 gate, so the book was scored on the other 55% (Alpaca SIP, byte-
+identical to live); the 61 book trades served by the pit store do not reproduce on SIP bars. A re-fetch from
+consolidated sources and a full re-simulation is running; until it lands, every number above is a book over the
+SIP-served half of the universe, and the population it excludes (~1.6% of the ≥$19 causal superset) is one the live
+engine WILL trade. The study population also excludes touch-only breaks (`h == level` without a 0.3% trade-through:
+2.1% of live signals on two sampled days, all −1R) — decision after the re-sim by the pre-registered rule: a
+`break_through` knob in `detect` on both sides, or none.

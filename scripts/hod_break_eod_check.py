@@ -163,6 +163,39 @@ def print_measurables(rows: list) -> None:
         print(f'  {no:2d} {verdict:18s} {lab}: {val} | spec {band}')
 
 
+RX_REJECT = re.compile(r'\[HOD\] (\S+): (stop [\d.]+ within [\d.]+% of the ask|ask [\d.]+ above cap|spread \d+ bps = \d+% of R|spread \d+ bps > \d+)')
+
+
+def rejection_parity(lines, day, cfg, p, hb) -> int:
+    """The engine's fill-level rejections (r_min on the ask, no-chase, the spread gates) are decisions the spec makes on the
+    NEXT OPEN (`simulate`: open <= cap, r/open >= min_r_pct; the spread gate on the historical NBBO). Re-run the spec for
+    every rejected symbol: 'spec also no trade' = parity; 'spec HAD a trade' = a live-only rejection to count."""
+    rej = {}
+    for ln in lines:
+        m = RX_REJECT.search(ln)
+        if m and m.group(1) not in rej: rej[m.group(1)] = m.group(2).split(' ')[0] if not m.group(2).startswith('stop') else 'r_min'
+    if not rej: return 0
+    alpaca = AlpacaClient(cfg.alpaca_api_key, cfg.alpaca_api_secret, paper=cfg.alpaca_paper)
+    B = bars_for(alpaca, sorted(rej), day)
+    try:
+        from trading.hod_break_engine import load_adv20_from_daily_bars
+        adv, _ = load_adv20_from_daily_bars(__import__('persistence.database', fromlist=['Database']).Database()._cache_path)
+    except Exception as e:
+        print(f'  rejection parity: ADV map unavailable ({e})'); adv = {}
+    n_dev = 0; print(f"\n  REJECTION PARITY, {len(rej)} symbols the engine rejected at the fill level:")
+    for sym, why in sorted(rej.items()):
+        arr = B.get(sym)
+        if arr is None: print(f"  {sym:6s} {why:8s} no bars"); continue
+        o, h, l, c, v, m = arr
+        tr = simulate(o, h, l, c, v, m, adv.get(sym, 0.0), p)
+        if tr is None: print(f"  {sym:6s} {why:8s} spec: no trade either  OK")
+        else:
+            n_dev += 1 if why in ('r_min', 'ask') else 0
+            print(f"  {sym:6s} {why:8s} spec HAD a trade: fill {tr.entry:.2f} stop {tr.stop:.2f} {tr.reason} {tr.rr:+.2f}R  {'DEVIATION' if why in ('r_min', 'ask') else 'gate'}")
+    print(f"  live-only fill rejections where the spec traded: {n_dev}")
+    return n_dev
+
+
 def main() -> int:
     day = sys.argv[1] if len(sys.argv) > 1 else datetime.now(timezone.utc).astimezone(ET).strftime('%Y-%m-%d')
     cfg = Config(); hb = cfg.hod_break_cfg; p = HodBreakParams(**hb['params']); risk = hb['risk_usd']
@@ -179,6 +212,7 @@ def main() -> int:
     for ln in errors[:8]: print('  ERR', ln[-200:])
     syms = sorted(set(dry) | set(live))
     Db = __import__('persistence.database', fromlist=['Database']).Database(); trades_db = Db._trades_path
+    rejected = rejection_parity(lines, day, cfg, p, hb)
     if not syms:
         print('  no signals today')
         B = {} if hb['dry_run'] else bars_for(AlpacaClient(cfg.alpaca_api_key, cfg.alpaca_api_secret, paper=cfg.alpaca_paper), sorted({r['symbol'] for r in closed_trades(trades_db, day, day)}), day)

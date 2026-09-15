@@ -91,11 +91,13 @@ class Candidate:
         i = minute - OPEN_MINUTE
         if not (0 <= i < RTH_MINUTES):
             return False
+        changed = (not self.have[i]) or bool(np.any(self.ohlcv[i, :4] != (o, h, l, c))) or self.ohlcv[i, 4] != v
         self.ohlcv[i, 0] = o; self.ohlcv[i, 1] = h; self.ohlcv[i, 2] = l; self.ohlcv[i, 3] = c; self.ohlcv[i, 4] = v
-        if not self.have[i]:
+        if changed:
+            # a bar that lands BEFORE bars already scanned (late/out-of-order delivery) or an UPDATED bar (a late print that
+            # moved a high or the volume — the cache's final bar) changes the HOD, the cumulative volume and the consolidation
+            # of everything after it: detect must rescan from its compacted index
             self.have[i] = True
-            # a bar that lands BEFORE bars already scanned (late/out-of-order delivery) changes the HOD, the cumulative
-            # volume and the consolidation of everything after it: detect must rescan from its compacted index
             self.next_idx = min(self.next_idx, int(self.have[:i].sum()))
         return True
 
@@ -262,7 +264,7 @@ class HodBreakEngine:
         syms = sorted(s for s, a in self._adv_map.items() if a >= self.min_adv20 and self._last_close.get(s, 0.0) >= self.universe_min_prev_close)
         if not syms:
             logger.error("[HOD] streamed universe is EMPTY (no last closes / ADV) — falling back to scan admission only"); return
-        late = self._minute_of_day() > OPEN_MINUTE + 1          # a restart after the open: the stream missed the early bars
+        late = self._minute_of_day() >= OPEN_MINUTE             # any roll at/after 09:30 may have missed the opening bar (emitted ~09:31:00.2): backfill
         for s in syms:
             if s in self.candidates: continue
             self.candidates[s] = Candidate(symbol=s, day_open=0.0, adv20=self._adv_map[s], subscribed=True, backfill_ok=not late)

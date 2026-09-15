@@ -2084,3 +2084,23 @@ class TestBulkBarSubscription:
         bar = MagicMock(symbol='XYZ', timestamp='2026-09-15T14:00:00Z', open=10.0, high=10.1, low=9.95, close=10.05, volume=1000)
         await monitor._on_bar(bar); await monitor._on_bar(bar)
         assert light == ['XYZ', 'XYZ'] and heavy == [1, 2]
+
+
+class TestSubscribeAfterConnect:
+    """9/15 review G: alpaca-py sends subscriptions only in _run_forever, which the reconnect loop bypasses — the
+    monitor must send them itself after EVERY connect (first and re-), or a reconnect leaves the stream silent."""
+
+    @pytest.mark.asyncio
+    async def test_subscriptions_are_sent_after_start_ws(self, monitor):
+        from unittest.mock import AsyncMock
+        import trading.stop_monitor as sm_mod
+        monitor._bar_symbols = {'AAA', 'BBB'}; monitor._running = True
+        fake = MagicMock(); fake._handlers = {'bars': {}, 'trades': {}, 'quotes': {}}; fake._ws = object()
+        fake._start_ws = AsyncMock(); fake._send_subscribe_msg = AsyncMock()
+        async def consume():
+            monitor._running = False; raise RuntimeError('socket closed')      # one iteration, then leave the loop
+        fake._consume = consume; fake.subscribe_trades = MagicMock(); fake.subscribe_quotes = MagicMock(); fake.subscribe_bars = MagicMock()
+        with patch.object(sm_mod, 'StockDataStream', return_value=fake, create=True), patch('alpaca.data.live.StockDataStream', return_value=fake):
+            await monitor._stream_with_reconnect()
+        fake._start_ws.assert_awaited_once(); fake._send_subscribe_msg.assert_awaited()
+        assert {'AAA', 'BBB'} <= set(fake._handlers['bars']) and monitor._ws_generation == 1

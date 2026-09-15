@@ -1,0 +1,9 @@
+window 2026-09-15 13:54 .. 13:55 ET | symbols 1 (liquid 1, thin 0)
+ws bars in window 0 (dup keys 0) | rest bars 0 | per-minute ws [0] rest [0]
+both 0 | exact 0 (0.0%) | mismatched 0 (liquid 0) | field mismatches {'open': 0, 'high': 0, 'low': 0, 'close': 0, 'volume': 0, 'trade_count': 0}
+only ws 0 (liquid 0) | only rest 0 (liquid 0)
+arrival latency of bars (s after bar END): n=0 min 0.00 p50 nan p90 nan p99 nan max 0.00; late +25..+60 s: 0
+UPDATED bars in window: 0 messages on 0 (symbol,minute) keys | final REST == last updated bar: 0, != 0 | update differs from the original bar: 0, update without an original bar: 0 | ws-vs-rest mismatches that had an update: 0 of 0 | update arrival after bar END: n/a
+only-ws examples: 
+only-rest examples: 
+mismatch examples:
