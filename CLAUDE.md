@@ -542,7 +542,12 @@ the OWNER pushing back, not by my own review. The rule that follows is not optio
 **Before ANY research number is put in front of the owner:**
 1. **Independent reimplementation.** A second implementation, written from a prose specification by someone (an agent)
    who has not read the first implementation, must reproduce the trade set and the P&L. Compare trade by trade on
-   (day, symbol), not in aggregate. Aggregates hide compensating errors.
+   (day, symbol), not in aggregate. Aggregates hide compensating errors. **This catches coding errors and CANNOT catch
+   specification errors** — on 2026-09-16 a faithful reimplementation reproduced a book to 1.6e-7 that was worthless,
+   because the spec it was given contained an unobtainable fill. It is necessary, not sufficient.
+1b. **Obtainability.** Every simulated fill must be a price the market actually offered: a fill inside the bar that fills
+   it (low <= fill <= high), and reachable by an order the live engine would have had resting. The engine's convention is
+   the next bar's open under a cap, never the touch of a level. Report the share of trades whose fill would differ.
 2. **Causality trace.** Every field used in a decision is traced back to its construction and shown to be computable from
    data at or before the decision bar — including the UNIVERSE the signal is evaluated on. A universe selected with
    end-of-day information (e.g. "day range >= 5%") needs a causal membership guarantee at the signal bar.

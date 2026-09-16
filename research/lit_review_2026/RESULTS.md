@@ -213,3 +213,21 @@ the causal floor and simultaneously halved the cost model, changed the book cap 
 printed price), `range_so_far` uses bars strictly before the signal, spreads are per price band measured on this
 population, and the file header states the scorer's contract — half spread in and out, `run_book(rows, 12, 4)`, and the
 pre-registered gates with TEST read once. Smoke-tested on three days; not yet run in full.
+
+### Fourth audit — the arithmetic is correct, and that is the lesson
+`research/bf_zero2/independent_r2g.py`. An agent that never read my implementation rebuilt the book from a prose spec.
+Two full 419-day runs. Result: **1,673 of 1,676 trades match**, and on the matched set the entry minute, exit minute, exit
+reason and net R agree to 1.6e-7. My published statistics are reproduced to 0.006R.
+
+Its own summary of what that certifies: **"arithmetic, not edge."** The reimplementation worked from MY specification, and
+my specification contained the impossible fill. So it faithfully reproduced a rule that cannot be traded. This is the
+limit of the technique and it must be written down: **an independent reimplementation catches coding errors and cannot
+catch specification errors.** Only a comparison against what the live engine can actually obtain catches those, which is
+what audits 1 to 3 did.
+
+Three small real defects it did find:
+- The $5 floor is applied in code to the day's 09:30 open, while the written spec says the entry price. A documentation
+  defect worth 0.006R, not a P&L defect — but the two must be made to agree.
+- The 5.000% causal-range test needs an explicit floating-point tolerance; two trades sit exactly on it.
+- The `NA` ticker was eaten by a default `pd.read_csv` in the auditor's own first run, the same defect class this repo has
+  now been bitten by three times. Every CSV read in the research tree needs `keep_default_na=False`.
