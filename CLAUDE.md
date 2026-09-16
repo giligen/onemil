@@ -533,6 +533,34 @@ Bull flag entry slippage on thin stocks runs multiples of the backtest model. Wh
 ## MACD wave P&L is outlier-dependent
 A small number of top trades can drive the majority of total MACD wave P&L. Miss one big winner in a quarter and results look very different — be careful quoting blended P&L without checking the contribution distribution.
 
+# CRITICAL: No research claim ships without an independent check
+
+Four false conclusions were reported to the owner in one week (2026-09-13 → 09-16): three "this book works" claims that
+were look-aheads, and one "nothing works" claim that was three bugs in my own scorer. Every one of them was caught by
+the OWNER pushing back, not by my own review. The rule that follows is not optional.
+
+**Before ANY research number is put in front of the owner:**
+1. **Independent reimplementation.** A second implementation, written from a prose specification by someone (an agent)
+   who has not read the first implementation, must reproduce the trade set and the P&L. Compare trade by trade on
+   (day, symbol), not in aggregate. Aggregates hide compensating errors.
+2. **Causality trace.** Every field used in a decision is traced back to its construction and shown to be computable from
+   data at or before the decision bar — including the UNIVERSE the signal is evaluated on. A universe selected with
+   end-of-day information (e.g. "day range >= 5%") needs a causal membership guarantee at the signal bar.
+3. **Price-scale check.** Any rule comparing a daily-file price (Databento, possibly adjusted) with intraday bars (Alpaca,
+   raw) must verify on the actual trades that the two agree for that symbol-day. Splits and dividends silently fabricate
+   setups otherwise.
+4. **Fill realism.** Entry when the bar gaps through the level; a stop hit inside the entry bar; stop slippage; whether the
+   simulated cost double-counts a slip already embedded in the fill price; auction-executed trades must NOT be charged a
+   quoted spread.
+5. **Tail dependence.** Report the result with the top 1% and 5% of trades removed and with winners capped. A book whose
+   edge disappears under a cap is a lottery ticket, and this owner has already rejected one.
+6. **Multiplicity.** Count and report every cell looked at across the whole program, not just the final script.
+
+**Phrasing rule.** "No edge exists" is never a supported conclusion. The supported conclusion is "no edge was detectable
+in THIS universe, at THIS horizon, at THIS book size, over THIS window, at THIS cost" — and the power of the test (the
+smallest effect it could have seen) must be stated alongside it. At 4 concurrent positions the standard error per trade
+is larger than most published effects; a null at 4 slots says almost nothing.
+
 # Interactive Sessions
 * I'm here for you to answer questions and clarify ambiguous points/logic
 * **Bug Prevention Protocol**:
