@@ -231,3 +231,36 @@ Three small real defects it did find:
 - The 5.000% causal-range test needs an explicit floating-point tolerance; two trades sit exactly on it.
 - The `NA` ticker was eaten by a default `pd.read_csv` in the auditor's own first run, the same defect class this repo has
   now been bitten by three times. Every CSV read in the research tree needs `keep_default_na=False`.
+
+## STAGE 2 RESULT — the cost curve. The search space was never viable, and now we can prove it per segment.
+`research/lit_review_2026/cost_curve.md`, from 2,570 real NBBO samples in the signal minute, stratified by price band ×
+time of day × liquidity. `min_edge_R` is the gross R per trade a strategy must earn in that segment merely to pay a round
+trip (half a spread in, half out).
+
+| price band | 09:30–09:35 | 09:35–10:00 | 10:00–11:00 | 11:00–13:00 | 13:00+ |
+|---|---|---|---|---|---|
+| $5–10 | 0.185 | 0.186 | 0.120 | **0.118** | 0.111 |
+| $10–20 | 0.220 | 0.229 | 0.125 | **0.105** | 0.140 |
+| $20–50 | 0.290 | 0.229 | 0.182 | 0.148 | 0.127 |
+| $50–200 | 0.364 | 0.348 | 0.182 | 0.141 | 0.143 |
+| $200+ | 0.323 | 0.425 | 0.412 | 0.219 | 0.317 |
+
+**The best honest gross edge this project has ever measured, across every family, study and literature replication, is
+about 0.1R.** Every segment in the table demands at least that much just to break even, and the segment where all of our
+"winning" books concentrated — the first five minutes — demands 0.19 to 0.36R. That is the whole story of the last month
+in one table: the entry fee exceeds the prize, so the only books that looked profitable were the ones whose fills were
+unobtainable.
+
+Two findings worth carrying:
+- **Expensive movers are worse, not better.** $200+ names show 54–76 bps spreads against 1.6–1.8% R, the worst ratio in
+  the table. These are volatile movers, not blue chips; price is not a proxy for liquidity here.
+- **The first five minutes is the worst window in every band.** Every strategy this project has built entered there.
+
+**What this implies for stage 3, quantitatively.** We need segments where spread/R is below roughly 0.05. Two routes:
+much tighter spreads (SPY's spread is under 1 bp; on a 0.5% move that is spread/R ≈ 0.003, forty times better than the
+best stock segment) or much larger R (multi-day holds, where R is measured in whole percent). Both point away from
+single-name intraday breakouts and toward liquid instruments or longer horizons — the same conclusion I reached from the
+QQQ noise-band sleeve, now with a number attached instead of an intuition.
+
+Caveat: this sample was drawn while the corrected scan was still writing, so it covers 2025-01 to 2025-08. It will be
+re-run over the full period when the scan finishes; spreads may differ in 2026 but not by enough to move a 2-to-4x gap.
