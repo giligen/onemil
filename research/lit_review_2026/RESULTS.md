@@ -98,3 +98,39 @@ the owner rejected on the bull-flag book, and it is not the one to ship.
 3. Stop fills are modelled 10 bps through the stop, which is optimistic on gap-downs; the 80 bps cost row partly covers it.
 4. Nothing is live-validated. The existing engine already does capped-limit entry with bracket exits, so this is a spec
    change, not a rebuild.
+
+## 2026-09-16 11:00 UTC — THE RED-TO-GREEN BOOK IS DEAD. The entry fill was not the engine's.
+
+An adversarial statistical audit (`research/bf_zero2/audit_stats/`) reproduced my numbers exactly from the trade file and
+then re-simulated the same 25,876 signals under the fill convention the LIVE engine actually uses. The sign flips.
+
+| entry convention | TRAIN | VAL | TEST | weeks green |
+|---|---|---|---|---|
+| fill at the touch, `level × 1.003` (what I reported) | +0.131R, +2.5/wk, t 2.95 | +0.326R, +6.1/wk, t 4.37 | +0.356R, +6.9/wk, t 3.90 | 34/53, 17/22, 12/14 |
+| stop order filled at the NEXT bar's open | −0.247R, −4.6/wk | −0.160R, −3.0/wk | −0.110R, −2.1/wk | 11/53, 8/22, 6/14 |
+| **live capped limit, no chase (`trading/hod_break_engine.py`)** | **−0.277R, −5.2/wk, t −7.0** | **−0.315R, −5.8/wk, t −4.8** | **−0.295R, −5.7/wk, t −3.5** | 11/53, 3/22, 2/14 |
+
+Why: one minute after the trigger the price is a median **+48 bps** above it (mean +69 to +79, p90 +209 to +255). Pass 1
+assumed +30 bps and assumed it was always obtainable. Only 57–60% of signals are obtainable at ≤ +60 bps, and on those
+that DO fill the mean is still **−0.112 / −0.066 / −0.157R** — so this is adverse selection, not a no-fill artefact. The
+signals you can actually buy at the level are the ones that did not continue.
+
+The mistake is precisely the one the project already knew about: `trading/hod_break.py::entry_fill` (the spec) fills at the
+NEXT bar's open or not at all, and `research/bf_zero/REPORT.md` §6 says so. But `build_candidates.py`, the pass-1 family
+scanner every one of these searches is built on, fills at the touch. Every number derived from pass 1 inherits an entry
+that cannot be obtained.
+
+Three further findings from the same audit, all of which stand independently:
+- **The "strategy" was the selection, not the setup.** Four RANDOM qualifying candidates a day return +0.015 / +0.049 /
+  −0.020R; the whole qualifying population returns −0.006 / +0.080 / +0.017R. Taking the FIRST four of the day was doing
+  100% of the work, and it was never counted as a search dimension — it entered as the book's queueing discipline.
+- **That selection is mostly a tight-stop proxy.** Median stop distance rises monotonically with entry rank; inside
+  stop-size strata the effect collapses. The 1–2% stop bucket is +0.32 / +0.49 / +0.47R and the 4.5–7% bucket is
+  −0.04 / +0.04 / −0.06R. A tight-R book is maximally leveraged to exactly the fill assumption that turned out to be wrong.
+- **97–100% of the trades are between 09:31 and 09:35.** The "entries until 14:00" rule was vacuous.
+- Multiplicity was NOT the problem (search-adjusted p = 0.0009 over ~1,200 cells, measured by permutation). TRAIN sat at
+  1.04× its own minimum detectable effect, so it was one underpowered observation and two short ones even before the fill.
+
+**Standing rule added:** pass 1 must be rebuilt with the live entry convention (capped limit, next-bar open, no chase) as
+the only fill model before any family search is run again. Until that rebuild exists, no number from
+`research/bf_zero2/candidates*.csv` may be reported.
