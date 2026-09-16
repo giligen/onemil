@@ -19,11 +19,20 @@ MAX_PER_DAY, MAX_CONC, LAST_ENTRY, PRICE_FLOOR = 12, 4, 840, 5.0
 NUM = ['entry_m', 'exit_m_e1c', 'price', 'r_pct', 'dist_open_pct', 'rv_adv', 'bar_vol_x', 'above_vwap', 'gap_pct', 'prev_range_pct', 'adv20',
        'dist_20d_high_pct', 'spy_5m_ret', 'spy_range3', 'rr_e1', 'rr_e2', 'rr_e3', 'rr_e4', 'rr_e1c', 'rv_clock', 'rv_profile', 'is_wrapper', 'coh_by_t',
        'pm_vol', 'pm_high_pct', 'range_so_far_pct', 'bars_per_min', 'n_bars_at_entry']
-c = pd.read_csv(f'{D}/candidates_full.csv', usecols=lambda k: k in set(['day', 'symbol', 'fam', 'cfg', 'why_e1c'] + NUM), dtype={'symbol': str, 'day': str},
+c = pd.read_csv(f'{D}/candidates_full.csv', usecols=lambda k: k in set(['day', 'symbol', 'fam', 'cfg', 'why_e1c'] + NUM),
+                dtype={'symbol': 'category', 'day': 'category', 'fam': 'category', 'cfg': 'category', 'why_e1c': 'category'},
                 keep_default_na=False, na_values=[''], low_memory=True)
+c['day'] = c.day.astype(str); c['symbol'] = c.symbol.astype(str)                     # the book needs plain strings; the rest stay categorical
 for k in NUM:
     if k in c.columns: c[k] = pd.to_numeric(c[k], errors='coerce').astype('float32')
-c = c[(c.price >= PRICE_FLOOR) & (c.entry_m <= LAST_ENTRY + 1)].reset_index(drop=True)
+c = c[(c.price >= PRICE_FLOOR) & (c.entry_m <= LAST_ENTRY + 1) & (c.r_pct >= 1.0)].reset_index(drop=True)   # the live spec's min_r_pct
+# CAUSAL FLOOR (the universe is "day range (high-low)/low >= 5%" — a HINDSIGHT filter). A pole/drive/VWAP entry (F1-F4)
+# implies it by construction; for F5-F10 only an entry >= 5% above the open guarantees it (open >= low). Without this the
+# first score2 run "found" quiet names that WILL have a 5% range after entry — the same look-ahead class as the cache
+# population (9/16 01:30 UTC; that run is void, tables kept as score_tables_VOID_no_floor.md).
+NEED = ~c.fam.isin(['F1', 'F2', 'F3', 'F4'])
+print(f'causal floor: {int((NEED & (c.dist_open_pct < 5)).sum()):,} rows dropped of {int(NEED.sum()):,} (F5-F10)', flush=True)
+c = c[~(NEED & ~(c.dist_open_pct >= 5))].reset_index(drop=True)
 c['split'] = np.where(c.day < '2026-01-01', 'TRAIN', np.where(c.day < '2026-06-01', 'VAL', 'TEST'))
 c['wk'] = pd.to_datetime(c.day).dt.to_period('W-FRI').astype(str)
 WEEKS = {s: c[c.split == s].wk.nunique() for s in ('TRAIN', 'VAL', 'TEST')}

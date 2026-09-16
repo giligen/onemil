@@ -84,3 +84,7 @@ research/bf_zero/coverage_missing.csv*
 research/bf_zero/*.log
 research/bf_zero/*_state.json
 research/bf_zero/volume_profile.csv
+research/bf_zero2/*.csv
+research/bf_zero2/*.log
+research/bf_zero2/build_state.json
+research/bf_zero2/__pycache__/
