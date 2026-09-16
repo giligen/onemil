@@ -304,3 +304,33 @@ an unobtainable fill flatters the result most and where real costs bite hardest.
 fall to 0.05–0.07R, and must accept the low target-hit rate that comes with it, meaning it lives on the 15:55 close
 rather than on a fixed target. That is a different strategy shape from anything this project has built, all of which used
 1–2% stops.
+
+## FINAL — score4, the first result with every correction applied. Nothing passes, and now the null is trustworthy.
+`research/bf_zero2/score4_tables.md`. Built on `candidates3.csv` (2.94M rows, rebuilt over 420 days with the live fill),
+446,012 of them in the scoring population after the causal universe rule, price ≥ $5, entry by 14:00 and R ≥ 1%.
+
+Every correction from the week is in this one number:
+- fill = the NEXT bar's open under the 0.6% cap, never the touch (audits 1–3);
+- cost per OUTCOME, measured: half a spread on entry always; a target exit rests on a limit and pays nothing; a stop pays
+  half a spread at 0.875× the entry spread; a 15:55 close at 0.412× (the owner's correction, `cost_by_outcome.md`);
+- spread = the measured per-price-band figure, not the 0.40% that had been assumed;
+- book = 12/day and 4 concurrent, as `DESIGN.md` pre-registered, not the 4/day that was acting as a selection rule;
+- causal range test on bars strictly before the signal.
+
+**Result: 0 of 52 cells clear gate 1.** The best family-config in the entire search is F8, the 30-minute opening-range
+break, at **−0.106R per trade and −2.2R per week on TRAIN**, with 23% of weeks green. Not one configuration is positive.
+TEST was never consulted, because nothing reached it.
+
+The realised exit mix on honest fills is 46% stops, 34% closes, 20% targets — against 33/34/33 under the old touch fill.
+Making the entry obtainable moves a third of the winners into the stop and close buckets, which is exactly the adverse
+selection audit 1 measured directly.
+
+**This is the honest answer to the question the project has been asking since 9/13.** Twenty-six entry families across
+ten shapes, on the whole point-in-time universe, on a provenance-checked consolidated tape, with fills the live engine
+can obtain and costs measured on the trades themselves: intraday long breakout and pullback books on ≥5%-range US equities
+do not pay. The earlier positive numbers were, in order, a hindsight universe, a one-publisher tape, an impossible fill,
+and a flat cost model. Each was found and each is now fixed in code.
+
+What remains true and useful: the cost curve and the stop-width table say where a viable book would have to live — a stop
+of 3–5% of price and an exit on the close rather than a fixed target, in instruments whose spread is a small fraction of
+R. That is a different shape from anything tested here, and it is testable with the machinery now built.
