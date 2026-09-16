@@ -164,3 +164,52 @@ identical to the published book, `rr_e1c` reproduced to 4.4e-6), then applied ea
 **Standing corrections for all future work**: (a) pass 1 must fill at the next bar's open under a cap, never at the touch;
 (b) the cost model for first-five-minutes books must use the measured spread for THAT population, not the 40 bps median
 from the HOD-break signal study, which was a different and more liquid population.
+
+### Third audit — the fill was not merely optimistic, it was impossible. And the book failed its own pre-registered gates.
+`research/bf_zero2/audit_data/` (the agent could not write REPORT.md; its narrative is reproduced in the commit and the
+supporting CSVs and scripts are on disk). It re-derived all 25,876 candidates from bars (25,876 of 25,876 reproduced).
+
+**Finding 1, FATAL, and nobody had seen it.** The family code gates on a bar's HIGH reaching the level and then books the
+fill at that level, with no requirement that the bar's LOW be at or below it. So a trade can be filled below the low of the
+bar that fills it — at a price the market never offered.
+
+| | all 1,676 trades | entry ≤ 09:32 |
+|---|---|---|
+| filled BELOW the signal bar's low (impossible) | **41.2%** | 43.6% |
+| level already traded through before the signal bar | 44.8% | 51.8% |
+| +2R target already exceeded by the signal bar | 18.4% | 21.0% |
+
+Possible fills earn −0.033 / +0.064 / +0.013R. Impossible fills earn +0.397 / +0.646 / +0.707R and are **101% of the
+book's total profit**. Example: SMX on 2026-02-10, the book's fifth largest winner, booked in at $13.94 with a $14.25
+target when the stock had already traded to $15.48. The defect is in shared code (`build_candidates.py` lines 110, 139,
+149, 159, 167) and therefore in EVERY candidate row in `research/bf_zero/` and `research/bf_zero2/`. F6 won the scan
+because its level, yesterday's close, is the stalest of all of them.
+
+**Finding 2, FATAL.** "4 concurrent" in `score3.py` also meant 4 trades per day, and it bound on every single day. The
+eligible population earns −0.006 / +0.080 / +0.017R. At the 12/day cap that `DESIGN.md` pre-registered, the book earns
++0.068 / +0.213 / +0.061R with TEST at t 1.03. The 4/day cap was a proxy for "take only 09:31–09:32", which is exactly
+where the fill defect is worst.
+
+**Finding 3, MAJOR.** The cost model in `score3.py` charges nothing on entry and 40 bps on exit. `DESIGN.md` pre-registered
+half a spread in AND out. At the repo's own measured mean spread of 57 bps, applied as pre-registered, TRAIN falls to
++0.014R (t 0.31) before any fill correction.
+
+**Finding 4, MAJOR.** The configuration fails the gates it was presented as surviving: `DESIGN.md` requires TRAIN ≥ +10R
+per week (actual +2.3) and VAL ≥ +7R (actual +5.9). And TEST was used as a filter — "positive on all three splits: 24",
+then the best of the 24 — which gate 3 forbids.
+
+**The honest number**, applying nothing but `DESIGN.md` as written: **−0.127 / −0.123 / −0.093 R per trade**, about −3.9,
+−3.9 and −3.2 R per week. Under the single most generous correction that merely makes the fills physically possible:
+−0.098 / +0.097 / +0.115R, TRAIN t −2.42.
+
+Clean: no price-scale mismatch (the daily open matches the 09:30 minute open; the 45 disagreeing trades are worth +5.6R of
++355.6R), no corporate-action artefact, no merge or ticker-reuse problem, survivorship residual 0.51% of the population.
+A real acausality was found and is minor: `range_so_far_pct` included the signal bar's own extremes.
+
+**The original bf_zero2 conclusion was right.** `score3` did not find an edge the first run missed. It correctly loosened
+the causal floor and simultaneously halved the cost model, changed the book cap and kept an impossible fill.
+
+`research/bf_zero2/build_candidates3.py` is the rebuilt pass 1: the fill is the next bar's open under the 0.6% cap (a real
+printed price), `range_so_far` uses bars strictly before the signal, spreads are per price band measured on this
+population, and the file header states the scorer's contract — half spread in and out, `run_book(rows, 12, 4)`, and the
+pre-registered gates with TEST read once. Smoke-tested on three days; not yet run in full.
