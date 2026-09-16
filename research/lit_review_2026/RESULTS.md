@@ -134,3 +134,33 @@ Three further findings from the same audit, all of which stand independently:
 **Standing rule added:** pass 1 must be rebuilt with the live entry convention (capped limit, next-bar open, no chase) as
 the only fill model before any family search is run again. Until that rebuild exists, no number from
 `research/bf_zero2/candidates*.csv` may be reported.
+
+### Second audit, independent — same verdict, plus a cost correction that affects everything
+`research/bf_zero2/audit_fills/REPORT.md`. It rebuilt the 25,876-candidate pool and re-walked every trade (1,641 of 1,676
+identical to the published book, `rr_e1c` reproduced to 4.4e-6), then applied each fill correction separately.
+
+| correction | TRAIN | VAL | TEST |
+|---|---|---|---|
+| base, as published | +0.124 | +0.320 | +0.353 |
+| **entry = max(level × 1.003, the entry bar's OPEN)** | **−0.150** | **+0.057** | **+0.086** |
+| stop slippage 50 bps | +0.069 | +0.264 | +0.305 |
+| exit cost at the MEASURED spread | +0.073 | +0.272 | +0.309 |
+| all corrections together | **−0.066 (t −1.7)** | +0.233 | **+0.050 (t 0.6)** |
+| all corrections + 75 bps entry slip + mean spread | −0.143 | +0.143 | −0.014 |
+
+- **55% of the book's trades have the entry bar OPENING above the fill price**, by a median 1.59% of price. That is a
+  median 0.58R of free entry edge per gapped trade, and those trades supply 93 / 73 / 85% of the book's total R. The
+  non-gapped candidates are flat to negative at pool level. This is the same defect the statistical audit found, measured
+  a different way and costing about 0.27R per trade on every split.
+- **Costs were understated by two to four times.** Fresh SIP NBBO pulled for 872 of the book's own trades, in their own
+  fill minute, gives a median full spread of **1.52% of price** (0.86% restricting to actively quoted names) against the
+  0.40% the scorer assumed. The 30 bps entry slip does not double-count the exit half-spread as I stated earlier; it
+  UNDER-charges the entry on 84% of trades. My "bug 2" correction was therefore wrong in direction, and the real cost
+  model for a 09:31–09:35 book on gap-down names is far harsher than 40 bps.
+- The target fill is genuinely conservative (zero impossible fills; a resting limit would have done ~0.06R/trade better).
+- Liquidity is harmless at $100 risk and fatal at scale: at $2,000 risk per trade, 88% of the book would exceed 1% of the
+  5-minute dollar volume.
+
+**Standing corrections for all future work**: (a) pass 1 must fill at the next bar's open under a cap, never at the touch;
+(b) the cost model for first-five-minutes books must use the measured spread for THAT population, not the 40 bps median
+from the HOD-break signal study, which was a different and more liquid population.
