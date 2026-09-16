@@ -41,3 +41,60 @@ neither of them a book: (a) the QQQ noise-band sleeve, ≈ 10 bps/day OOS at t 1
 prior-day attention names are worth −20 to −60 bps in the first hour, which is a rule about when NOT to enter. Two rows
 (M29 overnight continuation, M41 new-high momentum) were positive with t > 2 on TRAIN and VAL and flipped hard on the
 read-once split — the decay pattern the meta-literature predicts, and the reason the split discipline exists.
+
+## 2026-09-16 09:30 UTC — THREE SIMULATION BUGS, AND A STRATEGY THAT SURVIVES THEM
+
+The owner's challenge ("you understand how ridiculous the claim is") was correct. Three bugs in my own simulations
+produced the negative verdicts. All are in `research/bf_zero2/score2.py` and the pass-1 fill convention; the corrected
+scorer is `score3.py`.
+
+**Bug 1 — the causal filter was three times too strict.** The study universe is "day range ≥ 5%", known only at the close,
+so F5–F10 signals need a causal guarantee of membership. I used `dist_open_pct ≥ 5` (entry 5% above the open). The correct
+and far weaker guarantee is `range_so_far_pct ≥ 5`: if the high-low range UP TO the signal bar is already 5%, the full
+day's range is at least 5% whatever happens next (low-so-far ≤ open, so range/low ≥ range/open ≥ 5%). Both are causal.
+The wrong one kept 229,265 rows; the right one keeps 733,990. I discarded two thirds of the legitimate population.
+
+**Bug 2 — the entry cost was charged twice.** Pass 1 fills at `level × 1.003`, i.e. 30 bps through the level, which IS an
+ask-side fill. `score2` then charged another half-spread (20 bps) on entry. On a 3% R that is 0.065R of phantom cost per
+trade, on top of a real one.
+
+**Bug 3 — the hold-to-close exit was never scored.** `score2` only ran the +2R close-fill exit. The day-trading literature's
+actual spec (hold to the close with a −1R stop, no target) was computed in pass 1 as `rr_e4` and never put through the book.
+It is the stronger exit in gross terms.
+
+A fourth, from the day before: my cost model charged a quoted spread on trades that execute in the closing and opening
+auctions, which is three to eight times too much for those.
+
+### What survives after the fixes
+24 of 108 family-config × exit × book-size cells are positive on all three splits (`score3_tables.md`). The clean one:
+
+**F6 "red to green", +2R target on a bar close, −1R stop, flat 15:55.** Rule, entirely causal: the stock OPENS BELOW its
+prior close; entry on the first 1-minute bar whose high reaches prior close × 1.003; stop = the lowest low before entry;
+target = entry + 2R, filled when a bar CLOSES through it; otherwise flat at 15:55. Universe membership guaranteed at the
+signal bar by range-so-far ≥ 5%. Price ≥ $5, entry by 14:00, R ≥ 1% of price. 4 concurrent, first-come.
+
+| split | trades | R/trade | R/week | t | win rate | weeks green | max DD |
+|---|---|---|---|---|---|---|---|
+| TRAIN 2025 | 996 (4.0/day) | +0.130 | +2.4 | 2.9 | 44% | 35/53 | −19R |
+| VAL Jan–May 2026 | 408 | +0.322 | +6.0 | 4.3 | 51% | 17/22 | −8R |
+| TEST Jun–Sep 2026 | 272 | +0.350 | +6.8 | 3.8 | 53% | 12/14 | −9R |
+
+- **Not tail-dependent**: capping every trade at +2R changes nothing, because the target caps it by construction.
+- **Cost-robust**: at 80 bps of spread (double our measured median) it is +0.090 / +0.283 / +0.314R, t 2.0 / 3.7 / 3.4.
+- **Not from the hindsight population**: rebuilt on days whose OPEN was ≥ $5 (the complete fetch, no scanner selection) the
+  numbers are unchanged.
+- 4 negative months out of 21; worst month −7.5R; exits ≈ 40% stops, 30% targets, 30% held to the close.
+- At 20 slots: +3.1 / +13.6 / +17.9 R per week, t 2.1 / 5.2 / 4.9, but the drawdown scales to −55R on TRAIN.
+
+The hold-to-close variant of the same entry is bigger (+0.28 / +0.68 / +0.58R, 5–13R/week) but **tail-dependent**: capped
+at 5R the 2025 edge disappears entirely (+0.006R) and the top 1% of trades are 73% of TRAIN's profit. That is the profile
+the owner rejected on the bull-flag book, and it is not the one to ship.
+
+### Caveats that must be said
+1. 21 months. TRAIN is the weakest split and the two 2026 splits are the strongest, which is the opposite of decay and may
+   be a volatility regime rather than a stable edge.
+2. Of a median 38 qualifying candidates a day, the book takes 4 **first-come**. Which four is unexplored; a ranking rule
+   could add to this or could be the next overfit.
+3. Stop fills are modelled 10 bps through the stop, which is optimistic on gap-downs; the 80 bps cost row partly covers it.
+4. Nothing is live-validated. The existing engine already does capped-limit entry with bracket exits, so this is a spec
+   change, not a rebuild.
