@@ -264,3 +264,43 @@ QQQ noise-band sleeve, now with a number attached instead of an intuition.
 
 Caveat: this sample was drawn while the corrected scan was still writing, so it covers 2025-01 to 2025-08. It will be
 re-run over the full period when the scan finishes; spreads may differ in 2026 but not by enough to move a 2-to-4x gap.
+
+## STAGE 2b — the cost curve was wrong, and the correction changes the design constraint
+The owner's objection: "the spread on losers will be different." Correct, and the flat model was wrong twice — a winner
+exiting on a resting limit pays NO exit spread, and a loser crosses the spread at the exit minute, not the signal minute.
+Measured on 874 real trades with NBBO pulled at BOTH the entry and the actual exit minute
+(`research/lit_review_2026/cost_by_outcome.md`):
+
+| exit type | entry spread | exit spread | entry cost | exit cost | **total cost** |
+|---|---|---|---|---|---|
+| target (resting limit) | 40.0 bps | 27.8 bps | 0.126R | **0.000R** | 0.126R |
+| 15:55 close | 37.8 bps | 14.0 bps | 0.055R | 0.023R | **0.083R** |
+| stop | 40.1 bps | 29.2 bps | 0.115R | 0.073R | **0.194R** |
+
+**Blended cost 0.135R per trade, against the 0.191R I published. The flat model was 30% too harsh.** The conclusion does
+not flip — our best honest gross edge is about 0.1R — but the gap is 0.035R, not 0.09R, and I had overstated it.
+
+The owner's intuition is confirmed with a twist. Stops ARE the expensive outcome, 1.5× a target and 2.3× a close. But not
+because the spread widens into a stop: the exit-to-entry spread ratio is 0.875 for stops, 0.708 for targets, 0.412 for
+closes, so spreads narrow through the session for everything and stops merely narrow least. Stops are expensive because
+they pay an exit spread at all AND because stopped trades have small R.
+
+**Which exposes the real lever, and it is not the segment — it is the stop width.**
+
+| stop width | cost in R | P(stop) | P(target) |
+|---|---|---|---|
+| 1–2% of price | **0.190R** | 50.6% | 38.9% |
+| 2–3% | 0.115R | 42.3% | 21.2% |
+| 3–5% | 0.071R | 29.1% | 10.8% |
+| 5–8% | 0.053R | 17.1% | 5.4% |
+| 8%+ | **0.026R** | 12.5% | 4.0% |
+
+The spread in basis points is flat across all of them, 35 to 47 bps. What changes is the denominator. A tight stop is
+penalised twice: it costs seven times more in R *and* it is hit four times as often. That is the mechanism behind the
+audits' finding that our "edge" was a tight-stop proxy which evaporated under an honest fill — tight-R trades are where
+an unobtainable fill flatters the result most and where real costs bite hardest.
+
+**Design constraint for stage 3, restated:** a viable intraday book needs a stop of at least 3–5% of price, where costs
+fall to 0.05–0.07R, and must accept the low target-hit rate that comes with it, meaning it lives on the 15:55 close
+rather than on a fixed target. That is a different strategy shape from anything this project has built, all of which used
+1–2% stops.
