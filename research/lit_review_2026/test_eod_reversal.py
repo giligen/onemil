@@ -7,7 +7,9 @@ import os, sqlite3, numpy as np, pandas as pd
 ROOT = '/home/ec2-user/onemil'; os.chdir(ROOT)
 d = pd.read_parquet('research/lit_review_2026/daily_panel.parquet', columns=['symbol', 'bar_date', 'prev_close', 'low', 'high', 'close', 'dvol20'])
 d = d[(d.close >= 5) & (d.dvol20 >= 2e6) & (d.prev_close > 0)]
-d = d[~d.symbol.cat.categories[d.symbol.cat.codes].str.match(r'^Z[VWX]ZZ|^ZZ').values] if hasattr(d.symbol, 'cat') else d[~d.symbol.astype(str).str.match(r'^Z[VWX]ZZ|^ZZ')]
+import re
+bad = [c for c in d.symbol.cat.categories if re.match(r'^Z[VWX]ZZ|^ZZ', str(c))] if hasattr(d.symbol, 'cat') else []
+d = d[~d.symbol.isin(bad)] if bad else d
 cand = d[(d.low <= d.prev_close * 0.92) | (d.high >= d.prev_close * 1.08)]           # superset: the 15:00 return is checked on the bars
 print('candidate symbol-days', len(cand), flush=True)
 import sys
