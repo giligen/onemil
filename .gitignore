@@ -88,3 +88,8 @@ research/bf_zero2/*.csv
 research/bf_zero2/*.log
 research/bf_zero2/build_state.json
 research/bf_zero2/__pycache__/
+research/lit_review_2026/*.db
+research/lit_review_2026/*.parquet
+research/lit_review_2026/*.log
+research/lit_review_2026/*_trades.csv
+research/lit_review_2026/liquid_top20.csv
