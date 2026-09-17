@@ -234,9 +234,12 @@ class TestSyncIntegration:
         call_idx = src.find("self._recover_exit_from_order_history(")
         assert call_idx > 0, "no call site for recovery helper"
         # 2026-07-03 merge note: exit_reason literals were centralized into
-        # the ExitReason enum (trading/exit_reasons.py); the fallback write
-        # is now `'exit_reason': ExitReason.UNKNOWN_EXIT.value`.
-        unknown_idx = src.find("'exit_reason': ExitReason.UNKNOWN_EXIT.value")
+        # the ExitReason enum (trading/exit_reasons.py).
+        # 2026-09-17 (D3 FIX 7): the fallback no longer writes an exit at
+        # all — it calls `build_unknown_exit_update()`, which writes NO
+        # price, NO exited_at and NO pnl and parks the row in
+        # exit_pending_verification. See trading/unknown_exit.py.
+        unknown_idx = src.find("build_unknown_exit_update()")
         assert unknown_idx > 0
         # The call must precede the unknown_exit write
         assert call_idx < unknown_idx, (

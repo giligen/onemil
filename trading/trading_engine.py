@@ -36,6 +36,7 @@ from trading.orphan_reconciler import (
     ReconcilerConfig, reconcile_strategy_orphans,
 )
 from trading.stop_monitor import build_exit_update
+from trading.unknown_exit import build_unknown_exit_update
 from trading.position_manager import PositionManager
 from notifications.telegram_notifier import TelegramNotifier
 
@@ -152,6 +153,15 @@ class TradingEngine:
         self.pattern_poll_interval = pattern_poll_interval
         self.enabled = enabled
         self.notifier = notifier
+
+        # D3 FIX 7: trade ids we have already paged about as unattributed
+        # exits. The row now stays in `exit_pending_verification` (it is no
+        # longer closed with a fabricated $0 P&L), so `_sync_closed_positions`
+        # revisits it every cycle and would otherwise send one Telegram a
+        # minute. Alert once, then log at WARNING. Process-lifetime only —
+        # a restart re-alerts, which is the right default for a row that is
+        # still unreconciled.
+        self._unknown_exit_alerted: set = set()
 
         # Time controls
         last_h, last_m = last_entry_time_et.split(':')
@@ -3171,30 +3181,53 @@ class TradingEngine:
                             )
                             continue
 
-                        # Truly unrecoverable. Use fill_price as fallback
-                        # exit to prevent infinite re-check (exit_price IS
-                        # NULL keeps this trade in get_open_trades forever).
-                        fallback_exit = trade['fill_price']
-                        pnl_est = 0.0  # Assume breakeven if unknown
+                        # Truly unrecoverable.
+                        #
+                        # D3 FIX 7 (2026-09-17). This used to write
+                        # exit_price = fill_price and pnl = $0.00 — a
+                        # FABRICATED flat — "to prevent infinite re-check".
+                        # Four production rows carry that lie (BDMD
+                        # 2026-03-20; NPT / FBYD / SVRN 2026-03-30), hiding
+                        # between -$1,684 and -$6,800 of realized loss from
+                        # every book that reads trades.pnl. NPT alone was
+                        # -$4,818: entry $5.49, 16:52 close $4.96, booked
+                        # $0.00. See research/fuckup_audit/D3_exec/REPORT.md
+                        # §M7.
+                        #
+                        # We never observed a fill, so we write no price, no
+                        # exit time and no P&L. The row goes to
+                        # exit_pending_verification — the contract that
+                        # already existed for StopMonitor's unconfirmed
+                        # branch (trading/unknown_exit.py holds the ONE
+                        # spec). The loop does NOT spin: the orphan
+                        # reconciler owns the row, the order-history
+                        # recovery above retries each cycle and can still
+                        # heal it into a real P&L, and the daily green check
+                        # HARD-fails while it is stuck — which is exactly
+                        # the alarm the fake $0 used to silence.
                         error_msg = (
-                            f"{symbol}: Position closed but exit price unknown — "
-                            f"using fill_price ${fallback_exit:.2f} as estimate "
-                            f"(order-history recovery also failed)"
+                            f"{symbol}: Position closed but exit price unknown "
+                            f"(order-history recovery also failed) — row left "
+                            f"UNATTRIBUTED with NO price and NO P&L "
+                            f"(exit_pending_verification). Reconcile from "
+                            f"Alpaca order history."
                         )
-                        logger.warning(error_msg)
-                        if self.notifier:
-                            self.notifier.notify_error(error_msg, component="PositionSync")
+                        already_alerted = (
+                            trade['id'] in self._unknown_exit_alerted)
+                        if already_alerted:
+                            logger.warning(error_msg)
+                        else:
+                            logger.error(error_msg)
+                            self._unknown_exit_alerted.add(trade['id'])
+                            if self.notifier:
+                                self.notifier.notify_error(
+                                    error_msg, component="PositionSync")
                         # UNKNOWN_EXIT is the documented leak signal — every
                         # row in DB with this value means a code path failed
                         # to attribute the close. See trading/exit_reasons.py
                         # and needs_reconcile().
-                        self.db.update_trade(trade['id'], {
-                            'exit_price': fallback_exit,
-                            'exit_reason': ExitReason.UNKNOWN_EXIT.value,
-                            'exited_at': datetime.now(timezone.utc),
-                            'pnl': pnl_est,
-                            'pnl_pct': 0.0,
-                        })
+                        self.db.update_trade(
+                            trade['id'], build_unknown_exit_update())
                 except Exception as e:
                     error_msg = f"{symbol}: Failed to process closed position: {e}"
                     logger.error(error_msg)
