@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""HOD-break end-of-day check: live (or dry-run) signals vs the exact spec on the day's bars.
+"""HOD-break / red-to-green end-of-day check: live (or dry-run) signals vs the exact spec on the day's bars.
 
 For today's session:
   1. journal → every `[HOD DRY] WOULD BUY` / `[HOD] BUY` / `FILLED` / `EXIT` / `FORCE CLOSE` / ERROR line
-  2. for each signalled symbol, fetch today's RTH 1-min bars (Alpaca) and run `trading.hod_break.simulate`
-     with the shipped params → the spec's own signal minute, level, stop, target, exit and R
+  2. for each signalled symbol, fetch today's RTH 1-min bars (Alpaca) and run the book's spec
+     (`trading.hod_break.simulate` / `trading.red_to_green.detect` + the shared fill/walk) with the shipped
+     params → the spec's own signal minute, level, stop, target, exit and R
   3. parity: live level/stop vs spec level/stop (should match to the cent when the bar streams agree);
      signal-minute drift; symbols the spec would NOT have traded (a live-side defect) and vice versa
   4. the would-be book P&L at risk_usd (dry run) or the realized P&L (live) + the rolling weekly tally
 
-Usage: python3 scripts/hod_break_eod_check.py [YYYY-MM-DD]   → prints a report; exit 0 always
+Usage: python3 scripts/hod_break_eod_check.py [YYYY-MM-DD] [--book hod_break|red_to_green]
+`--book red_to_green` reads `Config().red_to_green_cfg`, greps the `[R2G` journal lines, runs the F6-PDR spec
+(prior close / prior-day range from daily_bars, the loader the engine itself uses) and prints the same sections
+with an `[R2G EOD]` header. Default `hod_break` — byte-identical to the pre-option script.
 (this is a reporting tool; it never modifies anything).
 """
 import os
@@ -22,21 +26,34 @@ from zoneinfo import ZoneInfo
 import numpy as np
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-sys.path.insert(0, ROOT); os.chdir(ROOT)
+sys.path.insert(0, ROOT); sys.path.insert(0, os.path.join(ROOT, 'scripts')); os.chdir(ROOT)
 
+from book_spec import book_from_argv, load_book            # noqa: E402
 from config import Config                                  # noqa: E402
 from data_sources.alpaca_client import AlpacaClient        # noqa: E402
-from trading.hod_break import HodBreakParams, simulate, OPEN_MINUTE, run_book  # noqa: E402
+from trading.hod_break import OPEN_MINUTE, run_book        # noqa: E402
 
 ET = ZoneInfo('America/New_York')
-RX_DRY = re.compile(r'\[HOD DRY\] WOULD BUY (\S+) level ([\d.]+) limit ([\d.]+) stop ([\d.]+) target ([\d.]+) R ([\d.]+) \(([\d.]+)%\) x(\d+) \| \+([\d.]+)% from open, rv ([\d.]+), spread (\d+) bps')
-RX_BUY = re.compile(r'\[HOD\] (BUY|ENTRY SUBMITTED) (\S+) level ([\d.]+) limit ([\d.]+) stop ([\d.]+) target ([\d.]+)')
 
 
-def journal(day: str) -> list:
+def rx_dry(tag: str = 'HOD'):
+    """The book's `WOULD BUY` line: symbol, level, limit, stop, target, R, R%, shares, dist, rv, spread."""
+    return re.compile(rf'\[{tag} DRY\] WOULD BUY (\S+) level ([\d.]+) limit ([\d.]+) stop ([\d.]+) target ([\d.]+) R ([\d.]+) \(([\d.]+)%\) x(\d+) \| \+([\d.]+)% from open, rv ([\d.]+), spread (\d+) bps')
+
+
+def rx_buy(tag: str = 'HOD'):
+    return re.compile(rf'\[{tag}\] (BUY|ENTRY SUBMITTED) (\S+) level ([\d.]+) limit ([\d.]+) stop ([\d.]+) target ([\d.]+)')
+
+
+RX_DRY = rx_dry(); RX_BUY = rx_buy()
+
+
+def journal(day: str, book=None) -> list:
     out = subprocess.run(['journalctl', '-u', 'onemil-trader', '--since', f'{day} 09:00', '--until', f'{day} 23:59', '--no-pager', '-o', 'short-iso'],
                          capture_output=True, text=True).stdout.splitlines()
-    return [ln for ln in out if '[HOD' in ln or ('hod_break' in ln and ('ERROR' in ln or 'Traceback' in ln))]
+    if book is None:
+        return [ln for ln in out if '[HOD' in ln or ('hod_break' in ln and ('ERROR' in ln or 'Traceback' in ln))]
+    return [ln for ln in out if book.journal_line(ln)]
 
 
 def bars_for(alpaca: AlpacaClient, symbols: list, day: str) -> dict:
@@ -68,17 +85,18 @@ def bars_for(alpaca: AlpacaClient, symbols: list, day: str) -> dict:
 
 
 MEASURABLES_SINCE = '2026-09-14'                       # first dry-run session: the rolling window of the DB-sourced rows
+R2G_MEASURABLES_SINCE = '2026-09-18'                   # the red-to-green book's first dry-run session (the 12:30 UTC boot)
 RX_SPREAD = re.compile(r'(WOULD BUY|ENTRY SUBMITTED) (\S+) level ([\d.]+) .*spread (\d+) bps')
 JOURNAL_COUNTS = {'gate': r'of R [\d.]+ > \d+% — skip', 'nochase': r'NO CHASE', 'rmin': r'within [\d.]+% of the ask', 'spread100': r'spread \d+ bps > \d+ — skip',
                   'daycap': r'per-day cap', 'conc': r'concurrency cap', 'missed': r"MISSED the spec's break", 'notional': r'notional cap'}
 
 
-def closed_trades(trades_db, since: str, day: str) -> list:
-    """HOD-break rows from the trades DB, read-only, trade_date in [since, day]; dicts with pattern_data decoded."""
+def closed_trades(trades_db, since: str, day: str, strategy: str = 'hod_break') -> list:
+    """The book's rows from the trades DB, read-only, trade_date in [since, day]; dicts with pattern_data decoded."""
     import json, sqlite3
     try:
         con = sqlite3.connect(f'file:{trades_db}?mode=ro', uri=True, timeout=10); con.row_factory = sqlite3.Row
-        rows = [dict(r) for r in con.execute("select * from trades where strategy='hod_break' and trade_date between ? and ?", (since, day))]; con.close()
+        rows = [dict(r) for r in con.execute("select * from trades where strategy=? and trade_date between ? and ?", (strategy, since, day))]; con.close()
     except Exception as e:
         print(f'  trades DB read failed: {e}'); return []
     for r in rows:
@@ -98,7 +116,32 @@ def _bar_open(bars: dict, sym: str, minute) -> float:
     idx = np.flatnonzero(a[5] == int(minute)); return float(a[0][idx[0]]) if len(idx) else 0.0
 
 
-def live_measurables(lines: list, day: str, dry_mode: bool, trades_db, bars: dict, flat_minute: int = 955, since: str = MEASURABLES_SINCE) -> list:
+# The REPORT §12 bands are the HOD-break book's. The red-to-green book has its own declared numbers and no live
+# history at all, so its rows carry the F6 figures where they exist and NO verdict where the band would be another
+# book's. Execution-quality rows — fill rate, fill vs the next open, stop/eod slippage, the miss rate — are
+# mechanical (they measure the engine, not the book) and keep their band and verdict.
+R2G_KEEP_VERDICT = {2, 4, 5, 6, 9, 10, 14}
+R2G_BANDS = {
+    1: 'no R2G band yet, first dry session 2026-09-18',
+    3: 'F6 declared ~1-3 fills a day at 12/day 4 concurrent',
+    7: 'no R2G band yet, target_r 2.0 books ~35% TP in the F6 study',
+    8: 'no R2G band yet',
+    11: 'F6 declared +0.058 TRAIN / +0.110 VAL / +0.003 TEST R per trade at 2R',
+    12: 'no R2G band yet',
+    13: 'no R2G band yet, F6 worst week -10.7R on TRAIN at 1R risk units',
+    15: 'no R2G band yet, the book is a $5+ universe not the HOD $20 floor',
+    16: 'no R2G band yet',
+}
+
+
+def r2g_bands(rows: list) -> list:
+    """Replace the HOD-break REPORT §12 bands with the F6 figures and drop the verdicts a HOD band would have set."""
+    return [[no, lab, val, R2G_BANDS.get(no, band), (verdict if no in R2G_KEEP_VERDICT else 'n/a')]
+            for no, lab, val, band, verdict in rows]
+
+
+def live_measurables(lines: list, day: str, dry_mode: bool, trades_db, bars: dict, flat_minute: int = 955, since: str = MEASURABLES_SINCE,
+                     strategy: str = 'hod_break', price_floor: float = 20.0) -> list:
     """REPORT §12 rows 1-16: [no, label, live value, spec band, verdict]. Journal rows are today's; DB rows carry the day and the
     rolling value since `since`. Dry mode: rows 3-13 are n/a. No parentheses in the text: the cron builds the telegram from it."""
     c = {k: sum(1 for ln in lines if re.search(rx, ln)) for k, rx in JOURNAL_COUNTS.items()}
@@ -107,9 +150,10 @@ def live_measurables(lines: list, day: str, dry_mode: bool, trades_db, bars: dic
     n_gate = n_ord + c['gate']; pass_rate = n_ord / n_gate * 100 if n_gate else float('nan')
     spreads = sorted(sig.values()); med_spread = float(np.median(spreads)) if spreads else float('nan')
     rmin_rate = c['rmin'] / reached * 100 if reached else float('nan')
-    rows = [[1, 'gate pass rate, $20+ signals', f'{n_ord}/{n_gate} = {pass_rate:.0f}%' if n_gate else 'no signal reached the gate', '43% · band 30-55% over >= 50 signals',
+    fl = f'${price_floor:.0f}+'                          # the book's price floor: the rows below count signals above it
+    rows = [[1, f'gate pass rate, {fl} signals', f'{n_ord}/{n_gate} = {pass_rate:.0f}%' if n_gate else 'no signal reached the gate', '43% · band 30-55% over >= 50 signals',
              'WATCH n<20' if n_gate < 20 else ('OK' if 30 <= pass_rate <= 55 else ('ESCALATE' if n_gate >= 50 else 'WATCH'))],
-            [2, 'signals/day reaching the gates, $20+', f'{reached} today', 'median 11-25 · zero-signal days ~0', 'ESCALATE none reached' if reached == 0 else ('WATCH <5' if reached < 5 else 'OK')]]
+            [2, f'signals/day reaching the gates, {fl}', f'{reached} today', 'median 11-25 · zero-signal days ~0', 'ESCALATE none reached' if reached == 0 else ('WATCH <5' if reached < 5 else 'OK')]]
     na = 'n/a dry'
     if dry_mode:
         rows += [[k, lab, na, band, 'n/a'] for k, lab, band in ((3, 'fills/day', '4.6-6.6 per day, 22-32 per wk'), (4, 'fill rate of submitted orders', '~100% of ask<=cap · alert <85%'),
@@ -118,7 +162,7 @@ def live_measurables(lines: list, day: str, dry_mode: bool, trades_db, bars: dic
                  (10, 'eod fill vs the 15:55 open', 'minus half spread, ~-8 bps'), (11, 'mean R per trade, net realized', '+0.25 to +0.35 · no verdict before 150 trades'),
                  (12, 'WR', '48-53%'), (13, 'weekly R', '+6 to +10 · worst -8 to -12'))]
     else:
-        T = closed_trades(trades_db, since, day); D = [r for r in T if r['trade_date'] == day]
+        T = closed_trades(trades_db, since, day, strategy); D = [r for r in T if r['trade_date'] == day]
         filled = [r for r in T if r.get('fill_price')]; dfill = [r for r in D if r.get('fill_price')]
         sessions = max(1, int(np.busday_count(since, day)) + 1)
         closed = [r for r in filled if r.get('exit_price') and r.get('exit_reason')]
@@ -150,9 +194,9 @@ def live_measurables(lines: list, day: str, dry_mode: bool, trades_db, bars: dic
                   'WATCH n<30' if n < 30 else ('ESCALATE' if mean_r < 0 or (n >= 150 and mean_r < 0.15) else ('OK' if mean_r >= 0.2 else 'WATCH'))],
                  [12, 'WR', f'{wr:.0f}% over {n}' if n else 'no closed trades', '48-53%', 'WATCH n<30' if n < 30 else ('ESCALATE' if n >= 50 and wr < 40 else ('OK' if wr >= 44 else 'WATCH'))],
                  [13, 'weekly R', f'this week {cur_wk:+.1f}R · worst week {worst_wk:+.1f}R', '+6 to +10 · worst -8 to -12', 'ESCALATE' if cur_wk <= -12 else ('WATCH' if cur_wk < 0 else 'OK')]]
-    rows += [[14, 'miss rate vs spec', f"{c['missed']} MISSED lines today · full audit: scripts/hod_break_miss_audit.py", '0', 'ESCALATE' if c['missed'] else 'OK'],
-             [15, 'spread at decision, passing $20+', f'median {med_spread:.0f} bps over {len(spreads)}' if spreads else 'no passing signal', 'median 17 bps · sfr median 0.082', 'n/a' if not spreads else ('OK' if med_spread <= 30 else 'WATCH')],
-             [16, 'r_min reject rate, $20+ signals', f"{c['rmin']}/{reached} = {rmin_rate:.0f}%" if reached else 'no signal reached', 'a few % · live r = ask - stop is LOOSER than the spec, the rejects are stops within 1% that simulate rejects too',
+    rows += [[14, 'miss rate vs spec', f"{c['missed']} MISSED lines today · full audit: scripts/hod_break_miss_audit.py" + ('' if strategy == 'hod_break' else f' --book {strategy}'), '0', 'ESCALATE' if c['missed'] else 'OK'],
+             [15, f'spread at decision, passing {fl}', f'median {med_spread:.0f} bps over {len(spreads)}' if spreads else 'no passing signal', 'median 17 bps · sfr median 0.082', 'n/a' if not spreads else ('OK' if med_spread <= 30 else 'WATCH')],
+             [16, f'r_min reject rate, {fl} signals', f"{c['rmin']}/{reached} = {rmin_rate:.0f}%" if reached else 'no signal reached', 'a few % · live r = ask - stop is LOOSER than the spec, the rejects are stops within 1% that simulate rejects too',
               'n/a' if not reached else ('OK' if rmin_rate <= 25 else ('ESCALATE' if reached >= 10 and rmin_rate > 50 else 'WATCH'))]]
     return rows
 
@@ -163,16 +207,20 @@ def print_measurables(rows: list) -> None:
         print(f'  {no:2d} {verdict:18s} {lab}: {val} | spec {band}')
 
 
-RX_REJECT = re.compile(r'\[HOD\] (\S+): (stop [\d.]+ within [\d.]+% of the ask|ask [\d.]+ above cap|spread \d+ bps = \d+% of R|spread \d+ bps > \d+)')
+def rx_reject(tag: str = 'HOD'):
+    return re.compile(rf'\[{tag}\] (\S+): (stop [\d.]+ within [\d.]+% of the ask|ask [\d.]+ above cap|spread \d+ bps = \d+% of R|spread \d+ bps > \d+)')
 
 
-def rejection_parity(lines, day, cfg, p, hb) -> int:
+RX_REJECT = rx_reject()
+
+
+def rejection_parity(lines, day, cfg, book) -> int:
     """The engine's fill-level rejections (r_min on the ask, no-chase, the spread gates) are decisions the spec makes on the
     NEXT OPEN (`simulate`: open <= cap, r/open >= min_r_pct; the spread gate on the historical NBBO). Re-run the spec for
     every rejected symbol: 'spec also no trade' = parity; 'spec HAD a trade' = a live-only rejection to count."""
     rej = {}
     for ln in lines:
-        m = RX_REJECT.search(ln)
+        m = rx_reject(book.tag).search(ln)
         if m and m.group(1) not in rej: rej[m.group(1)] = m.group(2).split(' ')[0] if not m.group(2).startswith('stop') else 'r_min'
     if not rej: return 0
     alpaca = AlpacaClient(cfg.alpaca_api_key, cfg.alpaca_api_secret, paper=cfg.alpaca_paper)
@@ -187,7 +235,7 @@ def rejection_parity(lines, day, cfg, p, hb) -> int:
         arr = B.get(sym)
         if arr is None: print(f"  {sym:6s} {why:8s} no bars"); continue
         o, h, l, c, v, m = arr
-        tr = simulate(o, h, l, c, v, m, adv.get(sym, 0.0), p)
+        tr = book.simulate(sym, o, h, l, c, v, m, adv.get(sym, 0.0))
         if tr is None: print(f"  {sym:6s} {why:8s} spec: no trade either  OK")
         else:
             n_dev += 1 if why in ('r_min', 'ask') else 0
@@ -197,32 +245,42 @@ def rejection_parity(lines, day, cfg, p, hb) -> int:
 
 
 def main() -> int:
-    day = sys.argv[1] if len(sys.argv) > 1 else datetime.now(timezone.utc).astimezone(ET).strftime('%Y-%m-%d')
-    cfg = Config(); hb = cfg.hod_break_cfg; p = HodBreakParams(**hb['params']); risk = hb['risk_usd']
-    lines = journal(day)
+    argv = list(sys.argv[1:]); book_name = book_from_argv(argv)
+    day = argv[0] if argv else datetime.now(timezone.utc).astimezone(ET).strftime('%Y-%m-%d')
+    cfg = Config()
+    Db = __import__('persistence.database', fromlist=['Database']).Database(); trades_db = Db._trades_path
+    book = load_book(book_name, cache_path=getattr(Db, '_cache_path', None))
+    hb = book.cfg; p = book.params; risk = hb['risk_usd']
+    since = R2G_MEASURABLES_SINCE if book.is_r2g else MEASURABLES_SINCE
+    lines = journal(day, book)
     dry = {}; live = {}
+    RX_D = rx_dry(book.tag); RX_B = rx_buy(book.tag)
     for ln in lines:                                    # FIRST signal per symbol (later re-breaks are by-products)
-        m = RX_DRY.search(ln)
+        m = RX_D.search(ln)
         if m and m.group(1) not in dry: dry[m.group(1)] = m
-        m = RX_BUY.search(ln)
+        m = RX_B.search(ln)
         if m and m.group(2) not in live: live[m.group(2)] = m
     errors = [ln for ln in lines if 'ERROR' in ln or 'Traceback' in ln or 'queue full' in ln]
-    fills = [ln for ln in lines if '[HOD] FILLED' in ln]; exits = [ln for ln in lines if '[HOD] EXIT' in ln]
-    print(f"HOD-BREAK EOD {day} — mode {'DRY' if hb['dry_run'] else 'LIVE'} | dry signals {len(dry)} | live orders {len(live)} | fills {len(fills)} | exits {len(exits)} | errors {len(errors)}")
+    fills = [ln for ln in lines if f'{book.live_tag} FILLED' in ln]; exits = [ln for ln in lines if f'{book.live_tag} EXIT' in ln]
+    header = 'HOD-BREAK EOD' if not book.is_r2g else '[R2G EOD]'
+    print(f"{header} {day} — mode {'DRY' if hb['dry_run'] else 'LIVE'} | dry signals {len(dry)} | live orders {len(live)} | fills {len(fills)} | exits {len(exits)} | errors {len(errors)}")
+    if book.is_r2g:
+        print(f"  book red_to_green (F6-PDR): prior day from daily_bars for {len(book.prev_day)} symbols | pdr >= {p.pdr_min_pct:.0f}% | level = prior close x {1 + p.level_buffer:.3f} | "
+              f"range floor {p.range_floor_pct:.0f}% | target {p.target_r}R | {p.max_per_day}/day {p.max_concurrent} concurrent | last entry {p.last_entry_minute // 60:02d}:{p.last_entry_minute % 60:02d}")
     for ln in errors[:8]: print('  ERR', ln[-200:])
     syms = sorted(set(dry) | set(live))
-    Db = __import__('persistence.database', fromlist=['Database']).Database(); trades_db = Db._trades_path
-    rejected = rejection_parity(lines, day, cfg, p, hb)
+    rejected = rejection_parity(lines, day, cfg, book)
     if not syms:
         print('  no signals today')
-        B = {} if hb['dry_run'] else bars_for(AlpacaClient(cfg.alpaca_api_key, cfg.alpaca_api_secret, paper=cfg.alpaca_paper), sorted({r['symbol'] for r in closed_trades(trades_db, day, day)}), day)
-        print_measurables(live_measurables(lines, day, hb['dry_run'], trades_db, B, p.flat_minute)); return 0
+        B = {} if hb['dry_run'] else bars_for(AlpacaClient(cfg.alpaca_api_key, cfg.alpaca_api_secret, paper=cfg.alpaca_paper), sorted({r['symbol'] for r in closed_trades(trades_db, day, day, book.strategy)}), day)
+        rows = live_measurables(lines, day, hb['dry_run'], trades_db, B, p.flat_minute, since=since, strategy=book.strategy, price_floor=hb['min_price'])
+        print_measurables(r2g_bands(rows) if book.is_r2g else rows); return 0
     alpaca = AlpacaClient(cfg.alpaca_api_key, cfg.alpaca_api_secret, paper=cfg.alpaca_paper)
     B = bars_for(alpaca, syms, day)
     if not hb['dry_run']:
-        B.update(bars_for(alpaca, sorted({r['symbol'] for r in closed_trades(trades_db, day, day)} - set(B)), day))
+        B.update(bars_for(alpaca, sorted({r['symbol'] for r in closed_trades(trades_db, day, day, book.strategy)} - set(B)), day))
     adv = {r['symbol']: float(r.get('avg_volume_daily') or 0) for r in Db.get_active_universe()}
-    tot_r = 0.0; n = 0; mism = 0; book = []
+    tot_r = 0.0; n = 0; mism = 0; specbook = []
     print(f"  {'sym':6s} {'live_lvl':>8s} {'spec_lvl':>8s} {'live_stop':>9s} {'spec_stop':>9s} {'spec_min':>8s} {'exit':>6s} {'R':>6s}  note")
     for sym in syms:
         m = dry.get(sym) or live.get(sym)
@@ -230,18 +288,19 @@ def main() -> int:
         arr = B.get(sym)
         if arr is None:
             print(f"  {sym:6s} {live_level:8.2f} {'?':>8s} — no bars fetched"); continue
-        t = simulate(*arr, adv.get(sym, 0.0), p)
+        t = book.simulate(sym, *arr, adv.get(sym, 0.0))
         if t is None:
-            from trading.hod_break import detect, entry_fill
-            sig = detect(*arr[:3], arr[4], arr[5], adv.get(sym, 0.0), p)
-            if sig is None: why = 'NO QUALIFYING BREAK on REST bars (rv/floor/consolidation differ from the engine bars)'
+            from trading.hod_break import entry_fill
+            sig = book.detect(sym, *arr[:3], arr[4], arr[5], adv.get(sym, 0.0))
+            if sig is None: why = ('NO QUALIFYING BREAK on REST bars (the gap-down/pdr precondition, the range floor or the level differ from the engine bars)'
+                                   if book.is_r2g else 'NO QUALIFYING BREAK on REST bars (rv/floor/consolidation differ from the engine bars)')
             else:
                 nxt = arr[0][sig.bar_idx + 1] if sig.bar_idx + 1 < len(arr[0]) else None
                 why = f"first break {int(arr[5][sig.bar_idx]) // 60:02d}:{int(arr[5][sig.bar_idx]) % 60:02d} lvl {sig.level:.2f}: " + ('no next bar' if nxt is None else (f'NO-CHASE, next open {nxt:.2f} > cap' if entry_fill(nxt, sig.level, p) is None else 'stop >= entry or r_min'))
             mism += 1; print(f"  {sym:6s} {live_level:8.2f} {'none':>8s} {live_stop:9.2f} {'':>9s} {'':>8s} {'':>6s} {'':>6s}  SPEC NO TRADE: {why}"); continue
         o, h, l, c, v, mm = arr
         note = '' if abs(t.stop - live_stop) < 0.011 else 'STOP MISMATCH'
-        tot_r += t.rr; n += 1; book.append((int(mm[t.entry_idx]), int(mm[t.exit_idx]), sym, t.rr))
+        tot_r += t.rr; n += 1; specbook.append((int(mm[t.entry_idx]), int(mm[t.exit_idx]), sym, t.rr))
         print(f"  {sym:6s} {live_level:8.2f} {t.entry / 1.0:8.2f} {live_stop:9.2f} {t.stop:9.2f} {mm[t.entry_idx] // 60:02d}:{mm[t.entry_idx] % 60:02d} {t.reason:>6s} {t.rr:+6.2f}  {note}")
     # ---- the DRY-RUN book: the engine's OWN logged signals (level/limit/stop/target) walked on today's bars ----
     from trading.hod_break import STOP_FILL_SLIP
@@ -275,18 +334,19 @@ def main() -> int:
         print(f"  DRY-RUN all filled signals: {len(dbook)}, {allr:+.1f}R, ${allusd:+,.0f} at the logged sizes")
         print(f"  DRY-RUN EXECUTABLE book (first {p.max_per_day}/day, {p.max_concurrent} concurrent, logged sizes): {len(taken)} trades, {dr:+.1f}R, ${dusd:+,.0f} | {[(s_, round(r, 2)) for s_, r, _ in taken]}")
         print(f"  GATE 6 on the DRY-RUN book: {'PASS' if dr > 0 else 'FAIL'}")
-        for frac, floor in ((0.15, 5.0), (0.15, 20.0), (0.10, 20.0)):
+        for frac, floor in (() if book.is_r2g else ((0.15, 5.0), (0.15, 20.0), (0.10, 20.0))):   # the HOD spread study's gates; the F6 book has neither
             rows = [(0, em, xm, sym, rr, usd) for em, xm, sym, rr, usd, sf in gated if sf <= frac and float(dry[sym].group(2)) >= floor]
             taken = [(sym, rr, usd) for _, _, _, sym, rr, usd in run_book(rows, p.max_per_day, p.max_concurrent)]
             print(f"  DRY-RUN book with spread <= {frac:.0%} of R and price >= ${floor:.0f}: {len(taken)} trades, {sum(r for _, r, _ in taken):+.1f}R, ${sum(u for _, _, u in taken):+,.0f} | signals passing {sum(1 for g in gated if g[5] <= frac and float(dry[g[2]].group(2)) >= floor)}/{len(gated)}")
     if n:
         print(f"\n  all spec trades on signalled symbols: {n}, {tot_r:+.1f}R = ${tot_r * risk:+,.0f} | spec-has-no-trade {mism}")
         # the EXECUTABLE would-be book: first-come, max_per_day, max_concurrent (dry mode never counts entries)
-        taken = [(sym, rr) for _, _, _, sym, rr in run_book([(0, em, xm, sym, rr) for em, xm, sym, rr in book], p.max_per_day, p.max_concurrent)]
+        taken = [(sym, rr) for _, _, _, sym, rr in run_book([(0, em, xm, sym, rr) for em, xm, sym, rr in specbook], p.max_per_day, p.max_concurrent)]
         br = sum(r for _, r in taken)
         print(f"  EXECUTABLE would-be book (first {p.max_per_day}/day, {p.max_concurrent} concurrent, ${risk:.0f} risk): {len(taken)} trades, {br:+.1f}R = ${br * risk:+,.0f} | {[(s_, round(r, 2)) for s_, r in taken]}")
         print(f"  GATE 6 (positive would-be day): {'PASS' if br > 0 else 'FAIL'}")
-    print_measurables(live_measurables(lines, day, hb['dry_run'], trades_db, B, p.flat_minute))
+    rows = live_measurables(lines, day, hb['dry_run'], trades_db, B, p.flat_minute, since=since, strategy=book.strategy, price_floor=hb['min_price'])
+    print_measurables(r2g_bands(rows) if book.is_r2g else rows)
     return 0
 
 
