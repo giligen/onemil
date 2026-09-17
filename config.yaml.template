@@ -233,6 +233,23 @@ trading:
     # on a position being liquidated precisely because it is falling.
     # false = the pre-2026-09-17 cancel-and-place path (rollback: flip+restart)
     prefer_sl_leg_exit: true
+    # D3 FIX 2 (2026-09-17) — sliced, re-priced exit ladder. DEFAULT OFF.
+    # research/fuckup_audit/D3_exec/REPORT.md §M2/§M3: the exit priced the
+    # WHOLE quantity in one order at bid - max($0.01, 30% of spread). In 9 of
+    # the 11 audited events the order was LARGER than the displayed bid (46.9x
+    # EEIQ, 14.2x RBNE, 7.1x IRE); a one-cent concession buys the top of book
+    # and nothing else, and the market-close escalation then walked the book
+    # (RBNE: 46.8% of the minute's volume, -1.30R on a $234-risk trade).
+    # Counterfactual on those events: +$1,081 gross / +$797 decidable.
+    # enabled: false keeps the pre-2026-09-17 single-order path byte for byte.
+    exit_ladder:
+      enabled: false
+      slice_to_bid_size: true   # cap each slice at the displayed bid size
+      min_slice: 100            # floor, so a 1-share bid isn't 2,841 orders
+      cross_factor: 0.25        # concede 25% of the spread below the bid
+      reprice_after_s: 2        # rest this long, then replace at the new bid
+      max_rounds: 3             # slices before escalating to a market close
+      hard_deadline_s: 10       # wall-clock budget for the whole ladder
   # Trailing stop: replace fixed TP with trailing stop that lets winners run
   # Trail 1R below highest high, activates after +2R from entry
   # Backtest: +55% P&L improvement over fixed 2.5R TP across 15 months

@@ -417,3 +417,71 @@ class TestPartialFillLifecycle:
         assert ev.exit_branch == ExitBranch.LIMIT.value
         assert ev.shares == 500
         assert not [c for c in broker.calls if c[0] == 'close_position']
+
+
+# ---------------------------------------------------------------------------
+# FIX 2 — RBNE 2026-07-16, the thin book
+# ---------------------------------------------------------------------------
+
+class TestExitLadderThinBook:
+    """RBNE 2026-07-16: 2,841 shares, bid $4.68 x 200, 128 bps spread, the
+    14:49 bar traded 6,075 shares in total. The old path showed all 2,841
+    at $4.66, stalled, and market-closed into the hole it had just made —
+    filling at $4.5727, -$304.91 vs the bid, **-1.30R on a trade whose
+    entire planned risk was $234** (REPORT §M3).
+
+    The fake broker fills a sell limit only up to what the bid can absorb
+    here, which is what makes the difference measurable.
+    """
+
+    LADDER = {'enabled': True, 'slice_to_bid_size': True, 'min_slice': 200,
+              'cross_factor': 0.25, 'reprice_after_s': 0.15, 'max_rounds': 3,
+              'hard_deadline_s': 2.0}
+
+    def _rbne(self, broker):
+        broker.positions['RBNE'] = 2841
+        broker.tick(bid=4.68, ask=4.74)
+        broker.calls.clear()
+
+    def test_stop_exit_ladder_e2e_thin_book(self, broker):
+        self._rbne(broker)
+        m = _monitor(broker, exit_ladder=self.LADDER)
+        w = _watch(m, 'RBNE', 4.685, 2841, 4.68, 4.74, bid_size=200)
+
+        asyncio.run(m._execute_stop_exit('RBNE', 4.68, w,
+                                         exit_reason='stop_loss'))
+
+        sells = [c for c in broker.calls if c[0] == 'submit_limit_sell_order']
+        assert sells, "the ladder must work the exit with limits"
+        assert sells[0][1]['qty'] == 200, (
+            "2,841 sh must not be shown against a 200-share bid")
+        ev = m.drain_exit_events()[0]
+        # The actual RBNE fill was 4.5727. The ladder's rungs rest at
+        # bid - 25% of spread and never walk the book.
+        assert ev.exit_price >= 4.63, (
+            f"blended {ev.exit_price} — no better than the -$305 market dump")
+        assert broker.positions.get('RBNE', 0) == 0
+
+    def test_close_position_is_not_the_first_move(self, broker):
+        """The market order is the LAST resort, not the second step."""
+        self._rbne(broker)
+        m = _monitor(broker, exit_ladder=self.LADDER)
+        w = _watch(m, 'RBNE', 4.685, 2841, 4.68, 4.74, bid_size=200)
+        asyncio.run(m._execute_stop_exit('RBNE', 4.68, w,
+                                         exit_reason='stop_loss'))
+        kinds = [c[0] for c in broker.calls]
+        if 'close_position' in kinds:
+            assert kinds.index('submit_limit_sell_order') < \
+                kinds.index('close_position')
+
+    def test_ladder_off_is_the_single_order_path(self, broker):
+        """The rollback contract, on a real broker: one order, full size."""
+        self._rbne(broker)
+        m = _monitor(broker, exit_ladder={'enabled': False})
+        w = _watch(m, 'RBNE', 4.685, 2841, 4.68, 4.74, bid_size=200)
+        asyncio.run(m._execute_stop_exit('RBNE', 4.68, w,
+                                         exit_reason='stop_loss'))
+        sells = [c for c in broker.calls if c[0] == 'submit_limit_sell_order']
+        assert len(sells) == 1 and sells[0][1]['qty'] == 2841
+        assert not [c for c in broker.calls
+                    if c[0] == 'replace_order_limit_price']

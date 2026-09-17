@@ -538,6 +538,7 @@ class StopMonitor:
         exit_min_offset: float = 0.01,
         exit_spread_offset_factor: float = 0.30,
         prefer_sl_leg_exit: bool = True,
+        exit_ladder: Optional[Dict[str, Any]] = None,
     ):
         """
         Initialize StopMonitor.
@@ -581,6 +582,20 @@ class StopMonitor:
         # exit, rather than cancelling it to make room for our own limit.
         # config: trading.self_managed_stops.prefer_sl_leg_exit (default True).
         self._prefer_sl_leg_exit = bool(prefer_sl_leg_exit)
+        # D3 FIX 2: the sliced, re-priced exit ladder. DEFAULT OFF —
+        # `enabled: false` is the pre-2026-09-17 single-order path byte for
+        # byte. config: trading.self_managed_stops.exit_ladder (see
+        # Config.exit_ladder_cfg for the key semantics + the evidence).
+        self._exit_ladder: Dict[str, Any] = dict(self._EXIT_LADDER_DEFAULTS)
+        self._exit_ladder.update(exit_ladder or {})
+        # Optional poll-budget overrides promoted out of the class constants
+        # (REPORT §FIX 2). 0 / absent keeps the shipped 10 s / 60 s.
+        if self._exit_ladder.get('fill_timeout_s', 0):
+            self._STOP_EXIT_FILL_TIMEOUT_S = float(
+                self._exit_ladder['fill_timeout_s'])
+        if self._exit_ladder.get('market_close_timeout_s', 0):
+            self._MARKET_CLOSE_FILL_TIMEOUT_S = float(
+                self._exit_ladder['market_close_timeout_s'])
         self._notifier = notifier
 
         self._watches: Dict[str, WatchEntry] = {}
@@ -3390,14 +3405,23 @@ class StopMonitor:
             f"{self._STOP_EXIT_FILL_TIMEOUT_S}s — cancel + market close "
             f"(bid moved through limit)"
         )
-        try:
-            await loop.run_in_executor(None, client.cancel_order, stale_limit_order_id)
-        except Exception as e:
-            logger.debug(
-                f"StopMonitor: {symbol} cancel after fill-timeout: {e}"
-            )
+        # D3 FIX 2: the ladder retires each rung as it goes, so it hands us
+        # NO stale order. Cancelling / race-checking an empty id would at
+        # best be a wasted REST call and at worst — with a loose test double
+        # or a broker that answers optimistically — report somebody else's
+        # fill as this exit's.
+        if stale_limit_order_id:
+            try:
+                await loop.run_in_executor(
+                    None, client.cancel_order, stale_limit_order_id)
+            except Exception as e:
+                logger.debug(
+                    f"StopMonitor: {symbol} cancel after fill-timeout: {e}"
+                )
         # Race: limit may have filled during cancel — check one more time.
         try:
+            if not stale_limit_order_id:
+                raise ValueError('no stale order to race against')
             status_info = await loop.run_in_executor(
                 None, client.get_order, stale_limit_order_id
             )
@@ -3511,6 +3535,237 @@ class StopMonitor:
             )
             return trigger_price, mkt_order_id, self.BRANCH_LAST_RESORT
         return price, mkt_order_id, self.BRANCH_MARKET_CLOSE
+
+    # ---- D3 FIX 2: the exit ladder -------------------------------------
+    # DEFAULT OFF. `enabled: false` is the pre-2026-09-17 single-order path
+    # byte for byte — that is the rollback contract, pinned by
+    # tests/test_stop_exit_ladder.py::test_ladder_disabled_is_byte_identical.
+    _EXIT_LADDER_DEFAULTS: Dict[str, Any] = {
+        'enabled': False,
+        'slice_to_bid_size': True,
+        'min_slice': 100,
+        'cross_factor': 0.25,
+        'reprice_after_s': 2.0,
+        'max_rounds': 3,
+        'hard_deadline_s': 10.0,
+        'fill_timeout_s': 0.0,
+        'market_close_timeout_s': 0.0,
+    }
+    _TICK = 0.01
+
+    @staticmethod
+    def ladder_slice_qty(remaining: int, bid_size: int,
+                         slice_to_bid_size: bool, min_slice: int) -> int:
+        """Shares to show on the next rung.
+
+        `min(remaining, max(bid_size, min_slice))` — REPORT §FIX 2. The
+        `min_slice` floor exists so a 1-share displayed bid does not turn
+        2,841 shares into 2,841 orders; the `remaining` cap exists so the
+        last rung is never larger than what is left. `slice_to_bid_size:
+        false` degenerates to one full-size order, which is today's
+        behaviour and makes the knob's effect measurable in isolation.
+        """
+        remaining = max(0, int(remaining))
+        if remaining == 0:
+            return 0
+        if not slice_to_bid_size:
+            return remaining
+        return min(remaining, max(int(bid_size or 0), max(1, int(min_slice))))
+
+    @classmethod
+    def ladder_limit_price(cls, bid: float, ask: float,
+                           cross_factor: float) -> float:
+        """`bid - max(tick, cross_factor x spread)`, floored at a cent.
+
+        The concession is proportional to the spread, so a penny-wide book
+        gives up a penny and a 128-bps book (RBNE) gives up proportionally
+        more rather than resting one cent under a bid that is about to
+        vanish. An absent or inverted ask degrades to one tick under the
+        bid — never ABOVE it (that is the EEIQ midpoint defect, §M5).
+        """
+        bid = float(bid)
+        spread = float(ask) - bid if (ask and float(ask) > bid) else 0.0
+        offset = max(cls._TICK, float(cross_factor) * spread)
+        return max(round(bid - offset, 2), 0.01)
+
+    def _ladder_quote(self, watch: 'WatchEntry') -> tuple:
+        """Freshest (bid, ask, bid_size) for the next rung — the WebSocket
+        quote cache, which the exit path already keeps current."""
+        return (float(watch.latest_bid or 0.0),
+                float(watch.latest_ask or 0.0),
+                int(watch.latest_bid_size or 0))
+
+    async def _execute_exit_ladder(
+        self, loop, client, symbol: str, watch: 'WatchEntry',
+        qty_to_sell: int, trigger_price: float,
+    ) -> Optional[tuple]:
+        """Work the exit in rungs sized to the book, re-pricing as it moves.
+
+        REPORT §M2/§M3. The old path put the WHOLE quantity into one order
+        priced a cent under the bid and, when it stalled, market-ordered
+        the rest into the hole the first slice had just made: RBNE sold
+        2,841 shares against a 200-share bid, 46.8% of the minute's volume,
+        -$304.91 vs the bid and -1.30R on a trade whose entire planned risk
+        was $234.
+
+        Returns ``(blended_price, filled_qty, order_id, branch)`` or
+        ``None`` when the ladder is disabled (the caller then runs the
+        legacy path unchanged). A ladder that ends with shares still held
+        hands the remainder to `_escalate_to_market_close`, exactly as
+        before — but only after `max_rounds` or `hard_deadline_s`, not on
+        the first unfilled poll.
+        """
+        cfg = self._exit_ladder
+        if not cfg.get('enabled'):
+            return None
+
+        deadline = time_mod.time() + float(cfg['hard_deadline_s'])
+        remaining = int(qty_to_sell)
+        filled_qty = 0
+        notional = 0.0
+        order_id = ''
+        rounds = 0
+
+        while (remaining > 0 and rounds < int(cfg['max_rounds'])
+                and time_mod.time() < deadline):
+            rounds += 1
+            bid, ask, bid_size = self._ladder_quote(watch)
+            if bid <= 0:
+                logger.warning(
+                    f"StopMonitor: {symbol} EXIT LADDER round {rounds} has no "
+                    f"usable bid — handing the {remaining} sh remainder to "
+                    f"the market-close escalation"
+                )
+                break
+            price = self.ladder_limit_price(bid, ask, cfg['cross_factor'])
+            slice_qty = self.ladder_slice_qty(
+                remaining, bid_size, cfg['slice_to_bid_size'],
+                cfg['min_slice'])
+            logger.info(
+                f"StopMonitor: {symbol} EXIT LADDER round {rounds}/"
+                f"{cfg['max_rounds']} — slice {slice_qty} of {remaining} sh "
+                f"@ ${price:.2f} (bid ${bid:.2f} x {bid_size}, "
+                f"q/bid={remaining / bid_size if bid_size else float('inf'):.1f}x)"
+            )
+            try:
+                res = await self._submit_with_held_qty_retry(
+                    loop,
+                    lambda: client.submit_limit_sell_order(
+                        symbol=symbol, qty=slice_qty, limit_price=price),
+                    label=f"{symbol} ladder r{rounds}",
+                )
+            except Exception as e:
+                logger.error(
+                    f"StopMonitor: {symbol} EXIT LADDER round {rounds} "
+                    f"submit failed: {e} — escalating the remainder"
+                )
+                break
+            order_id = str((res or {}).get('id') or '')
+            if not order_id:
+                logger.error(
+                    f"StopMonitor: {symbol} EXIT LADDER round {rounds} "
+                    f"returned no order id — escalating the remainder"
+                )
+                break
+
+            budget = max(0.05, min(float(cfg['reprice_after_s']),
+                                   deadline - time_mod.time()))
+            f_qty, f_px, status = await self._poll_order_fill(
+                client, order_id, fallback_price=price, timeout_s=budget)
+
+            if status != 'filled' and time_mod.time() < deadline:
+                # Re-price to the CURRENT bid rather than cancelling and
+                # re-queueing: a replace keeps the order's place in line
+                # and never opens a window with nothing working.
+                nbid, nask, _ = self._ladder_quote(watch)
+                new_price = (
+                    self.ladder_limit_price(nbid, nask, cfg['cross_factor'])
+                    if nbid > 0 else price)
+                if abs(new_price - price) >= (self._TICK / 2):
+                    try:
+                        rep = await loop.run_in_executor(
+                            None, client.replace_order_limit_price,
+                            order_id, new_price)
+                        order_id = str((rep or {}).get('id') or '') or order_id
+                        logger.info(
+                            f"StopMonitor: {symbol} EXIT LADDER re-priced "
+                            f"${price:.2f} → ${new_price:.2f} "
+                            f"(bid ${nbid:.2f}) order={order_id[:8]}"
+                        )
+                        price = new_price
+                    except Exception as e:
+                        logger.warning(
+                            f"StopMonitor: {symbol} EXIT LADDER re-price "
+                            f"failed ({e}) — leaving the rung at ${price:.2f}"
+                        )
+                budget = max(0.05, min(float(cfg['reprice_after_s']),
+                                       deadline - time_mod.time()))
+                f_qty, f_px, status = await self._poll_order_fill(
+                    client, order_id, fallback_price=price, timeout_s=budget)
+
+            if status != 'filled':
+                # Retire the rung before the next one, then re-read it —
+                # it may have completed during the cancel.
+                try:
+                    await loop.run_in_executor(
+                        None, client.cancel_order, order_id)
+                except Exception as e:
+                    logger.warning(
+                        f"StopMonitor: {symbol} EXIT LADDER cancel of rung "
+                        f"{order_id[:8]}: {e}"
+                    )
+                try:
+                    final = await loop.run_in_executor(
+                        None, client.get_order, order_id)
+                    fq = int(final.get('filled_qty') or 0)
+                    if fq > f_qty:
+                        f_qty = fq
+                        f_px = float(final.get('filled_avg_price') or price)
+                except Exception as e:
+                    logger.warning(
+                        f"StopMonitor: {symbol} EXIT LADDER final read of "
+                        f"rung {order_id[:8]} failed: {e}"
+                    )
+
+            if f_qty > 0 and f_px:
+                filled_qty += f_qty
+                notional += f_qty * float(f_px)
+                remaining -= f_qty
+
+        blended = (notional / filled_qty) if filled_qty > 0 else None
+
+        if remaining <= 0 and filled_qty > 0:
+            logger.info(
+                f"StopMonitor: {symbol} EXIT LADDER complete — {filled_qty} sh "
+                f"in {rounds} round(s), blended ${blended:.4f}"
+            )
+            return blended, filled_qty, order_id, ExitBranch.LIMIT.value
+
+        # Shares still held: hand the remainder to the existing escalation.
+        logger.warning(
+            f"StopMonitor: {symbol} EXIT LADDER exhausted after {rounds} "
+            f"round(s) / {cfg['hard_deadline_s']}s with {remaining} sh left — "
+            f"escalating to a market close"
+        )
+        # No stale order to hand over: every rung was either filled or
+        # cancelled above, and a completed rung must NOT be re-read as the
+        # whole exit's fill.
+        esc_price, esc_id, esc_branch = await self._escalate_to_market_close(
+            client, symbol, '', trigger_price,
+            sl_leg_id=watch.sl_leg_id, watch=watch,
+        )
+        branch = self._EXIT_BRANCH_BY_ESCALATION.get(
+            esc_branch, ExitBranch.MARKET_FALLBACK.value)
+        if esc_branch == self.BRANCH_LAST_RESORT and filled_qty == 0:
+            return esc_price, 0, (esc_id or order_id), branch
+        if esc_price and esc_price > 0 and esc_branch != self.BRANCH_LAST_RESORT:
+            notional += remaining * float(esc_price)
+            filled_qty += remaining
+            blended = notional / filled_qty
+            return blended, filled_qty, (esc_id or order_id), branch
+        # Escalation could not confirm: book only the rungs that did fill.
+        return (blended if filled_qty else esc_price), filled_qty, \
+            (esc_id or order_id), ExitBranch.LAST_RESORT.value
 
     # Order states in which a broker leg is still capable of protecting the
     # position. Anything else (filled / canceled / expired / rejected /
@@ -3999,6 +4254,38 @@ class StopMonitor:
             # a NULL exit_branch on a StopMonitor row would read as
             # "pre-split" in the histogram and hide a regression.
             exit_branch = ExitBranch.LIMIT.value
+
+            # D3 FIX 2 — the sliced, re-priced ladder. DEFAULT OFF; when
+            # disabled this returns None immediately and the single-order
+            # path below runs byte for byte as it did pre-2026-09-17.
+            ladder = await self._execute_exit_ladder(
+                loop, client, symbol, watch, qty_to_sell, trigger_price)
+            if ladder is not None:
+                lad_price, lad_qty, lad_order_id, lad_branch = ladder
+                if lad_branch == ExitBranch.SL_LEG_RACE.value:
+                    exit_reason = ExitReason.STOP_LOSS_BRACKET_SL_RACE.value
+                elif lad_branch == ExitBranch.LAST_RESORT.value:
+                    exit_reason = ExitReason.STOP_LOSS_UNCONFIRMED.value
+                if watch.sl_leg_id:
+                    try:
+                        await loop.run_in_executor(
+                            None, client.cancel_order, watch.sl_leg_id)
+                    except Exception as e:
+                        logger.warning(
+                            f"StopMonitor: {symbol} SL cancel after ladder "
+                            f"(may be filled): {e}"
+                        )
+                self._emit_stop_exit_event(
+                    symbol, watch,
+                    lad_price if lad_price is not None else trigger_price,
+                    qty=(lad_qty or qty_to_sell), order_id=lad_order_id,
+                    exit_reason=exit_reason, exit_branch=lad_branch,
+                    trigger_price=trigger_price, pricing_method=pricing_method,
+                    limit_price=limit_price, bid=bid, ask=ask,
+                    bid_size=bid_size, ask_size=ask_size,
+                )
+                return
+
             try:
                 # CORD 5/8 fix: retry-with-backoff on held_for_orders race
                 # (40310000) so we ride out Alpaca's async OCO release window

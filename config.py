@@ -1006,6 +1006,57 @@ class Config:
             "trading", "self_managed_stops", "prefer_sl_leg_exit",
             default=True))
 
+    @property
+    def exit_ladder_cfg(self) -> Dict[str, Any]:
+        """D3 FIX 2 — the sliced, re-priced exit ladder. DEFAULT OFF.
+
+        research/fuckup_audit/D3_exec/REPORT.md §M2/§M3: `compute_limit_price`
+        priced the WHOLE quantity in one order at `bid - max($0.01, 0.30 x
+        spread)`. In 9 of the 11 D3 events the order was larger than the
+        displayed bid — 46.9x (EEIQ), 14.2x (RBNE), 7.1x (IRE) — and a
+        one-cent concession buys the top of book and nothing else. When it
+        stalled, `close_position` market-ordered the rest: on RBNE that was
+        46.8% of the minute's volume, -$304.91 vs the bid, -1.30R on a trade
+        whose entire planned risk was $234.
+
+        The ladder instead slices to the displayed bid, prices each slice at
+        `bid - max(tick, cross_factor x spread)`, RE-PRICES via
+        `replace_order_limit_price` as the bid moves, and escalates to a
+        market close only after `max_rounds` or `hard_deadline_s`.
+
+        Counterfactual on the same 11 events (§4, C3): +$1,081 gross,
+        +$797 decidable, BF +$594 / ORB +$485. Upper bounds on 1-minute
+        bars, not a fill simulation.
+
+        Keys:
+            enabled:          master switch. FALSE = the pre-2026-09-17
+                              single-order path, byte for byte.
+            slice_to_bid_size: cap each slice at the displayed bid size.
+            min_slice:        floor so a 1-share bid doesn't produce 2,841
+                              orders.
+            cross_factor:     fraction of the spread conceded below the bid.
+            reprice_after_s:  how long a slice rests before it is re-priced.
+            max_rounds:       slices attempted before escalating.
+            hard_deadline_s:  wall-clock budget for the whole ladder.
+            fill_timeout_s / market_close_timeout_s: optional overrides for
+                              the legacy poll budgets (0 = keep the
+                              StopMonitor class defaults, 10 s / 60 s).
+        """
+        cfg = self._get_yaml(
+            "trading", "self_managed_stops", "exit_ladder", default={}) or {}
+        return {
+            'enabled': bool(cfg.get('enabled', False)),
+            'slice_to_bid_size': bool(cfg.get('slice_to_bid_size', True)),
+            'min_slice': int(cfg.get('min_slice', 100)),
+            'cross_factor': float(cfg.get('cross_factor', 0.25)),
+            'reprice_after_s': float(cfg.get('reprice_after_s', 2.0)),
+            'max_rounds': int(cfg.get('max_rounds', 3)),
+            'hard_deadline_s': float(cfg.get('hard_deadline_s', 10.0)),
+            'fill_timeout_s': float(cfg.get('fill_timeout_s', 0.0)),
+            'market_close_timeout_s': float(
+                cfg.get('market_close_timeout_s', 0.0)),
+        }
+
     # =========================================================================
     # Trailing Stop
     # =========================================================================
