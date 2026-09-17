@@ -419,23 +419,23 @@ ORB analysis; the older ones have warning headers pointing to the shipped varian
 ## PAUSED 2026-09-14 (owner): Bull Flag and ORB
 - `config.yaml trading.enabled: false` (bull flag entries off; P1 config otherwise intact) and `orb.yaml strategy.enabled: false` (B+ config intact; backups `config.yaml.bak.pre_bf_pause_20260914`, `orb.yaml.bak.pre_pause_20260914`). Reason: at $150 / $375 risk and ~3 trades a month each, their P&L is noise and they share the account, symbols and StopMonitor with the HOD-break being validated. Resume = flip + restart. The ramp checkers and BF/ORB crons keep running but report zero activity.
 
-## Strategy 5: Red-to-green (F6-PDR) — built 2026-09-17, DRY RUN from the 2026-09-18 boot (`--r2g`)
-- **Origin**: the bottom-up loser program `research/fuckup_audit/H/` (owner 9/17: "for each near-profitable strategy, analyse
-  the losers and introduce filters"). Loser-derived filters inverted on VAL for every book; the ONE rule that replicated is
-  ORB's prior-day-range ≥ 8% (day-2 continuation). Declared book `H/F6/f6_pdr_book.md`, TEST read once: hold-to-close
-  +0.078 / +0.251 / +0.104 R per trade (TRAIN/VAL/TEST), 2R target +0.058 / +0.110 / +0.003; 17/21 months green either way;
-  the 2R version cannot be a lottery by construction. Capacity (`H/F6_sizing`): the edge lives in $5–10 names, ≈ $250–400
-  risk per trade, ≈ $1.5–2K/month — a first-step book, not the $10K one.
-- **ONE spec** `trading/red_to_green.py` (`RedToGreenParams`, `eligible`, `detect` — same return type as `hod_break.detect`),
-  run through the SAME engine: `HodBreakEngine(cfg=Config().red_to_green_cfg)` with `book: red_to_green` → `[R2G]` log tag,
-  DB strategy `red_to_green`, handler id `red_to_green`, client-order prefix `r2g-`, universe = names with prior-day range ≥
-  8% (from `daily_bars`, `load_prev_day_from_daily_bars`) whose 09:30 open is below the prior close. Config block
-  `red_to_green:` (yaml + template); `target_r 2.0` = the 2R book, `target_r 50` = hold (TP leg becomes a safety leg).
-- **Tests**: `tests/test_red_to_green.py` (spec), `tests/test_red_to_green_engine.py` (the switch, universe screen, dry
-  WOULD BUY path, HOD book untouched). Engine spec: `H/F6/ENGINE_SPEC.md`. Independent rebuild: `H/F6_rebuild/`.
-- **Go-live** = `dry_run: false` + restart on the owner's word, `risk_usd 100`, ramp by the BF/ORB rule. Rollback:
-  `enabled: false` + restart (zero state). Monitor: `journalctl -u onemil-trader | grep "\[R2G"`; EOD parity:
-  `scripts/hod_break_eod_check.py --book red_to_green` (built 9/17).
+## Strategy 5: Red-to-green (F6-PDR) — built 2026-09-17, DISABLED the same evening (`--r2g` in the unit file is inert)
+- **What happened**: the bottom-up loser program (`research/fuckup_audit/H/`) found ONE rule that replicated on VAL for every
+  book — ORB's prior-day-range ≥ 8% — and the F6 red-to-green book under it read +0.078/+0.251/+0.104 R (TRAIN/VAL/TEST).
+  The independent rebuild disagreed on TEST; the reconciliation (`H/F6_reconcile/REPORT.md`) found: (1) the TEST profit was
+  **ZVZZT, a NASDAQ test ticker** in `research/bf_zero/universe.csv` (391 test-ticker symbol-days; +46.8R on one synthetic
+  day) — ex-test-ticker TEST = −0.032R; (2) the pass-1 builder's `BFZ_SLIP=0` broke at prior close × 1.000, not × 1.003;
+  (3) under the engine's own scan rule (`red_to_green.detect` keeps scanning after a floor-failing break; the studies took the
+  first break only) the book is **−0.027/−0.012/−0.102 R**, 9/21 months green. The first-break rule is +0.062/+0.207/−0.042,
+  carried by two months. Capacity would have been ~$500/month anyway (`H/F6_sizing`, `I/`).
+- **Standing rules from it**: exclude `^Z[A-Z]ZZT$` and any symbol absent from `daily_bars` from every research universe;
+  name the scan rule (first-break vs keep-scanning) on every level-break table; an independent rebuild is REQUIRED before an
+  engine is armed, even for a dry run.
+- **What exists**: `trading/red_to_green.py` (spec; ten tests), `HodBreakEngine(book='red_to_green')` (the book switch —
+  `[R2G]` tag, strategy `red_to_green`, PDR universe screen; `tests/test_red_to_green_engine.py`), `Config().red_to_green_cfg`,
+  `--r2g`, `scripts/hod_break_{eod_check,miss_audit,deadman_flat}.py --book red_to_green`. All inert while
+  `red_to_green.enabled: false`. Re-enable only after a NEW pre-registered study clears PLAN §1's gates AND its independent
+  rebuild agrees trade by trade.
 
 ## Strategy 4: HOD-break (built 2026-09-13 overnight from the clean-sheet study; DRY RUN from 2026-09-14) — **EDGE REFUTED 2026-09-15 (REPORT §6b): the study population was a look-ahead (days the BF scanner's cache had flagged as movers); on the honest SIP-tape population the live-config book is −0.03/−0.01/+0.02R. No go-live. Square-one study 9/16 (`research/bf_zero2/REPORT.md`, whole PIT universe on the SIP tape, 26 family configs, net of costs, causal floor): NOTHING positive beyond noise — no 1-minute breakout/pullback family has an edge on ≥5%-range days at 4 concurrent. Intraday-breakout line CLOSED on this universe; engine stays dry as instrumentation only.**
 

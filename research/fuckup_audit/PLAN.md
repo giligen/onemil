@@ -420,3 +420,10 @@ one of the two fill models, or only before the tail test, is reported as (b).
 | `research/orb_machine_rules.md` | the validated ORB selection features for H4 |
 | `research/lit_review_2026/RESULTS.md` | everything that was tried and how it died |
 
+
+**Standing rules from the F6-PDR reconciliation (2026-09-17 evening, `H/F6_reconcile/REPORT.md`):** (1) every research
+universe excludes NASDAQ test tickers `^Z[A-Z]ZZT$` and any symbol with no `daily_bars` row (`universe.csv` carries 391
+test-ticker symbol-days; ZVZZT was +46.8R of one book's TEST); (2) the level buffer of every family is asserted against
+its declared value (`BFZ_SLIP=0` silently made F6's level × 1.000); (3) every level-break table names its scan rule —
+first-break-only (the studies) vs keep-scanning (`red_to_green.detect`) — they had opposite signs; (4) an independent
+rebuild agreeing trade by trade is REQUIRED before an engine is armed, even for a dry run.

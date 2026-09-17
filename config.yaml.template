@@ -530,12 +530,10 @@ ignition_live:
     pdt_equity_min: 25000
 
 # Red-to-green book (research/fuckup_audit/H/F6, 2026-09-17) — ONE spec with trading/red_to_green.py, run through the
-# SAME engine as the HOD-break (HodBreakEngine, book: red_to_green). A stock that OPENS BELOW its prior close on a day
-# whose PRIOR day ranged >= 8% (ORB's day-2-continuation rule): once the day has ranged >= 5% (bars before the signal),
-# the first bar whose high reaches prior close x 1.003 signals; capped limit (60 bps, no chase) = next bar's open;
-# stop = the low of the day so far; target_r 2.0 = the +2R book (17/21 months green, TRAIN +0.058 / VAL +0.110 /
-# TEST +0.003 R per trade); target_r 50 = hold to the 15:55 flat (TRAIN +0.078 / VAL +0.251 / TEST +0.104, tail-heavy).
-# 12/day, 4 concurrent. Capacity ~$250-400 risk (H/F6_sizing). FAIL-SAFE: disabled + dry_run.
+# SAME engine as the HOD-break (HodBreakEngine, book: red_to_green). DISABLED 2026-09-17 evening after the independent
+# reconciliation (H/F6_reconcile/REPORT.md): the study's positive numbers were a NASDAQ test ticker (ZVZZT) in the universe
+# file plus a level-buffer bug; under the engine's own scan rule the book is -0.03/-0.01/-0.10 R per trade (TRAIN/VAL/TEST).
+# Code kept; enable only after a new pre-registered study clears the gates. FAIL-SAFE: disabled + dry_run.
 red_to_green:
   enabled: false
   dry_run: true
