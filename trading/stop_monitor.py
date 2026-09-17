@@ -2537,6 +2537,7 @@ class StopMonitor:
     def _verify_fill_qty(
         self, symbol: str, order_id: str, expected_qty: int,
         close_shortfall_only: bool = False,
+        client=None,
     ) -> tuple:
         """
         Verify an order's filled_qty matches expected. Handle partial fills.
@@ -2551,13 +2552,19 @@ class StopMonitor:
             close_shortfall_only: If True, only sell the shortfall qty
                 (not the entire position). Used for exhaustion partials
                 where we want to keep the remainder for trailing stop.
+            client: AlpacaClient to place the remainder through. Defaults
+                to `self._alpaca`. D3 FIX 3 added it because the stop-exit
+                path routes orders per strategy (`_client_for`) — closing
+                an ORB remainder through the bull-flag account would be a
+                wrong-account order, not just wrong telemetry.
 
         Returns:
             Tuple of (total_filled_qty, avg_fill_price) after handling
             any partial fill remainder. (0, 0.0) if unable to determine.
         """
+        cl = client if client is not None else self._alpaca
         try:
-            order = self._alpaca.get_order(order_id)
+            order = cl.get_order(order_id)
             filled_qty = int(order.get('filled_qty', 0) or 0)
             fill_price = float(order.get('filled_avg_price', 0) or 0)
 
@@ -2581,7 +2588,7 @@ class StopMonitor:
 
             # Verify actual position to use broker as source of truth
             try:
-                positions = self._alpaca.get_open_positions()
+                positions = cl.get_open_positions()
                 broker_qty = 0
                 for pos in positions:
                     if pos.get('symbol') == symbol:
@@ -2593,19 +2600,19 @@ class StopMonitor:
                     # for trailing stop. For full exits, close entire position.
                     sell_qty = remaining if close_shortfall_only else broker_qty
                     if close_shortfall_only:
-                        close_result = self._alpaca.submit_limit_sell_order(
+                        close_result = cl.submit_limit_sell_order(
                             symbol=symbol,
                             qty=min(sell_qty, broker_qty),
                             limit_price=round(fill_price * 0.95, 2),  # aggressive limit
                         )
                     else:
-                        close_result = self._alpaca.close_position(symbol)
+                        close_result = cl.close_position(symbol)
                     close_id = close_result.get('id', '')
                     # Poll for market fill
                     for _ in range(10):
                         time_mod.sleep(0.5)
                         try:
-                            close_order = self._alpaca.get_order(close_id)
+                            close_order = cl.get_order(close_id)
                             if close_order.get('status') == 'filled':
                                 close_fill = float(
                                     close_order.get('filled_avg_price', 0) or 0
@@ -3212,23 +3219,37 @@ class StopMonitor:
     async def _poll_order_fill(
         self, client, order_id: str, fallback_price: float,
         timeout_s: Optional[float] = None,
-    ) -> Optional[float]:
+    ) -> tuple:
         """Poll an Alpaca order until it fills, is cancelled, or timeout.
 
-        Returns the `filled_avg_price` on a confirmed fill, `None` if the poll
-        timed out or the order ended in a non-fill terminal state
-        (cancelled/rejected/expired). Caller decides how to recover (escalate
-        to market close, give up, etc.).
+        D3 FIX 3 (REPORT.md §M2). This used to return a price or `None`,
+        and ONLY `status == 'filled'` counted — "a brief `partially_filled`
+        window won't short-circuit us". On a book thinner than the order
+        that is not a brief window, it is the outcome: the order cleans out
+        the displayed bid and stalls. Judged a TOTAL failure, it was
+        cancelled and the WHOLE quantity was market-ordered into the hole
+        the first slice had just made — and the DB then booked the market
+        order's `filled_avg_price` against the full pre-cancel `shares`,
+        pricing the better slice out of the book (EHGO 2026-06-25: about
+        $67 of pessimism on top of -$301 of real slip).
 
-        Only `status == 'filled'` counts as success — a brief `partially_filled`
-        window won't short-circuit us; we wait for either full fill, a terminal
-        state, or timeout. `fallback_price` is returned in the exotic case
-        where Alpaca reports filled but with no `filled_avg_price`.
+        Returns:
+            ``(filled_qty, avg_price, status)``.
+            * ``filled_qty`` — shares filled so far (0 when nothing did).
+            * ``avg_price``  — `filled_avg_price`, or `fallback_price` in
+              the exotic case where Alpaca reports a fill without one;
+              `None` when `filled_qty == 0`.
+            * ``status``     — the last status seen: 'filled',
+              'partially_filled', a terminal non-fill state, or 'timeout'.
+
+        A partial is a partial SUCCESS: the caller books what filled and
+        works only the remainder.
         """
         loop = asyncio.get_event_loop()
         deadline = time_mod.time() + (
             timeout_s if timeout_s is not None else self._STOP_EXIT_FILL_TIMEOUT_S
         )
+        last_qty, last_px, last_status = 0, None, 'timeout'
         while time_mod.time() < deadline:
             await asyncio.sleep(self._STOP_EXIT_POLL_INTERVAL_S)
             try:
@@ -3241,14 +3262,55 @@ class StopMonitor:
                 )
                 continue
             st = str(status_info.get('status', '')).lower()
+            try:
+                qty = int(status_info.get('filled_qty') or 0)
+            except (TypeError, ValueError):
+                qty = 0
+            px = status_info.get('filled_avg_price')
+            if qty > 0:
+                last_qty = qty
+                last_px = float(px) if px else float(fallback_price)
             if st == 'filled':
-                return float(status_info.get('filled_avg_price') or fallback_price)
+                return (last_qty or 0,
+                        float(px or fallback_price), 'filled')
             if st in ('canceled', 'cancelled', 'rejected', 'expired'):
                 logger.warning(
                     f"StopMonitor: order {order_id[:8]}... ended in state "
-                    f"'{st}' before fill"
+                    f"'{st}' with {last_qty} filled"
                 )
-                return None
+                return last_qty, last_px, st
+            last_status = st or 'timeout'
+        if last_qty > 0:
+            logger.warning(
+                f"StopMonitor: order {order_id[:8]}... timed out "
+                f"PARTIALLY FILLED — {last_qty} sh @ ${last_px:.4f}; "
+                f"the remainder is worked separately (D3 FIX 3)"
+            )
+            return last_qty, last_px, 'partially_filled'
+        return 0, None, last_status
+
+    async def _poll_fill_price(
+        self, client, order_id: str, fallback_price: float,
+        timeout_s: Optional[float] = None,
+    ) -> Optional[float]:
+        """`_poll_order_fill` reduced to the pre-FIX-3 contract: a price on
+        a COMPLETE fill, `None` otherwise.
+
+        Used by the paths that ask a yes/no question about somebody else's
+        order — "did the bracket SL leg win the race?", "did the market
+        close land?" — where a partial answer is not actionable at that
+        call site. The limit-sell path uses the full tuple.
+        """
+        qty, price, status = await self._poll_order_fill(
+            client, order_id, fallback_price, timeout_s)
+        if status == 'filled' and price is not None:
+            return price
+        if qty > 0:
+            logger.warning(
+                f"StopMonitor: order {order_id[:8]}... only PARTIALLY "
+                f"filled ({qty} sh, status={status}) — not accepted as a "
+                f"complete exit at this call site"
+            )
         return None
 
     async def _sl_leg_fill_price(
@@ -3411,7 +3473,7 @@ class StopMonitor:
             )
             return trigger_price, '', self.BRANCH_LAST_RESORT
 
-        price = await self._poll_order_fill(
+        price = await self._poll_fill_price(
             client, mkt_order_id, fallback_price=trigger_price,
             timeout_s=self._MARKET_CLOSE_FILL_TIMEOUT_S,
         )
@@ -3573,7 +3635,7 @@ class StopMonitor:
             f"(the broker leg IS the exit — naked_window_ms=0)"
         )
 
-        fill = await self._poll_order_fill(
+        fill = await self._poll_fill_price(
             client, new_id, fallback_price=target_stop)
         if fill is not None:
             return fill, new_id, ExitBranch.SL_LEG.value
@@ -3957,9 +4019,95 @@ class StopMonitor:
                     f"qty={qty_to_sell}, limit=${limit_price:.2f} ({pricing_method}), "
                     f"order={order_id} — awaiting fill confirmation"
                 )
-                exit_price = await self._poll_order_fill(
+                # D3 FIX 3 — a partial fill is a partial SUCCESS.
+                filled_qty, filled_px, fill_status = await self._poll_order_fill(
                     client, order_id, fallback_price=limit_price,
                 )
+                if fill_status == 'filled' and filled_px is not None:
+                    exit_price = filled_px
+                elif filled_qty > 0:
+                    # The limit took the top of book and stalled. Book what
+                    # filled, work ONLY the remainder, and emit the BLENDED
+                    # price. Pre-fix this was judged a total failure: the
+                    # whole quantity was market-ordered into the hole the
+                    # first slice had just made, and the DB priced the good
+                    # slice out of the book entirely.
+                    logger.error(
+                        f"StopMonitor: {symbol} limit PARTIAL — "
+                        f"{filled_qty}/{qty_to_sell} @ ${filled_px:.4f}; "
+                        f"cancelling the stale limit and working the "
+                        f"{qty_to_sell - filled_qty} sh remainder"
+                    )
+                    try:
+                        await loop.run_in_executor(
+                            None, client.cancel_order, order_id)
+                    except Exception as ce:
+                        logger.warning(
+                            f"StopMonitor: {symbol} stale-limit cancel "
+                            f"before remainder: {ce}"
+                        )
+                    # The limit may have completed during the cancel — read
+                    # its FINAL state before assuming a market order is
+                    # needed, so the branch histogram doesn't record a
+                    # market_fallback that never happened.
+                    final_qty, final_px = filled_qty, filled_px
+                    try:
+                        final = await loop.run_in_executor(
+                            None, client.get_order, order_id)
+                        final_qty = int(final.get('filled_qty') or filled_qty)
+                        final_px = float(
+                            final.get('filled_avg_price') or filled_px)
+                    except Exception as fe:
+                        logger.warning(
+                            f"StopMonitor: {symbol} final read of the stale "
+                            f"limit failed ({fe}) — using the last poll "
+                            f"snapshot {filled_qty} @ ${filled_px:.4f}"
+                        )
+                    if final_qty >= qty_to_sell:
+                        exit_price = final_px
+                        qty_to_sell = final_qty
+                        logger.info(
+                            f"StopMonitor: {symbol} limit completed during "
+                            f"the cancel — {final_qty} sh @ ${final_px:.4f}, "
+                            f"no market order needed"
+                        )
+                    else:
+                        # _verify_fill_qty (the partial-exit path's helper
+                        # since 2026-04) closes the broker's remaining
+                        # shares and returns the qty-weighted blend.
+                        # Reused, not reimplemented.
+                        total_qty, blended = await loop.run_in_executor(
+                            None, self._verify_fill_qty, symbol, order_id,
+                            qty_to_sell, False, client,
+                        )
+                        if total_qty >= qty_to_sell and blended and blended > 0:
+                            exit_price = blended
+                            qty_to_sell = total_qty
+                            exit_branch = ExitBranch.MARKET_FALLBACK.value
+                            logger.info(
+                                f"StopMonitor: {symbol} partial resolved — "
+                                f"{total_qty} sh, blended ${exit_price:.4f}"
+                            )
+                        else:
+                            # We know some shares left; we cannot prove the
+                            # rest did. Book only what is certain and let
+                            # the orphan reconciler own the row — a
+                            # confirmed full exit here would be the SMU/QBTZ
+                            # lie in a new costume.
+                            booked_qty = max(int(total_qty or 0), final_qty)
+                            booked_px = (blended if (blended and blended > 0)
+                                         else final_px)
+                            logger.error(
+                                f"StopMonitor: {symbol} partial remainder "
+                                f"NOT resolved (booked {booked_qty} of "
+                                f"{qty_to_sell}) — row goes to "
+                                f"exit_pending_verification. VERIFY THE "
+                                f"POSITION ON ALPACA."
+                            )
+                            exit_price = booked_px
+                            qty_to_sell = booked_qty
+                            exit_reason = ExitReason.STOP_LOSS_UNCONFIRMED.value
+                            exit_branch = ExitBranch.LAST_RESORT.value
                 if exit_price is None:
                     # Limit unfilled within timeout — escalate to market close.
                     # Pass sl_leg_id so we can recover the real price if the
@@ -4010,7 +4158,7 @@ class StopMonitor:
                     recovered = None
                     if watch.sl_leg_id:
                         try:
-                            recovered = await self._poll_order_fill(
+                            recovered = await self._poll_fill_price(
                                 client, watch.sl_leg_id,
                                 fallback_price=trigger_price,
                                 timeout_s=3.0,
@@ -4068,7 +4216,7 @@ class StopMonitor:
                             f"StopMonitor: {symbol} fallback close_position — "
                             f"order={order_id} — awaiting fill confirmation"
                         )
-                        exit_price = await self._poll_order_fill(
+                        exit_price = await self._poll_fill_price(
                             client, order_id, fallback_price=trigger_price,
                             timeout_s=self._MARKET_CLOSE_FILL_TIMEOUT_S,
                         )
@@ -4124,7 +4272,7 @@ class StopMonitor:
                             recovered2 = None
                             if watch.sl_leg_id:
                                 try:
-                                    recovered2 = await self._poll_order_fill(
+                                    recovered2 = await self._poll_fill_price(
                                         client, watch.sl_leg_id,
                                         fallback_price=trigger_price,
                                         timeout_s=3.0,

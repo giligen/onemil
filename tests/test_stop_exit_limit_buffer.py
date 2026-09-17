@@ -1128,3 +1128,199 @@ class TestPreferSlLegExit:
         assert ev.exit_branch == 'market_fallback'
         assert ev.exit_reason == 'trail_stop'
         assert mock_alpaca.close_position.call_count == 1
+
+
+# =========================================================================
+# D3 FIX 3 — a partial fill is a partial success
+# =========================================================================
+#
+# research/fuckup_audit/D3_exec/REPORT.md §M2: `_poll_order_fill` refused
+# to count `partially_filled` — "a brief partially_filled window won't
+# short-circuit us". On a book thinner than the order that is not a brief
+# window, it is the OUTCOME: in 9 of the 11 D3 events the order was larger
+# than the displayed bid (46.9x EEIQ, 14.2x RBNE, 7.1x IRE, 4.2x EHGO).
+# The order that cleaned out the bid and stalled was judged a TOTAL
+# failure, cancelled, and the whole quantity market-ordered into the hole
+# the first slice had just made — and the DB then booked the market
+# order's price against the full pre-cancel `shares`, pricing the better
+# slice out of the book (EHGO: about $67 on top of -$301 of real slip).
+
+class TestPollOrderFillTuple:
+    """The new contract of the poll itself."""
+
+    @pytest.mark.asyncio
+    async def test_full_fill_returns_qty_price_status(self, monitor,
+                                                      mock_alpaca):
+        mock_alpaca.get_order.return_value = {
+            'id': 'o1', 'status': 'filled', 'filled_qty': 500,
+            'filled_avg_price': 4.60}
+        assert await monitor._poll_order_fill(
+            mock_alpaca, 'o1', fallback_price=4.66) == (500, 4.60, 'filled')
+
+    @pytest.mark.asyncio
+    async def test_timeout_with_partial_returns_the_partial(self, monitor,
+                                                            mock_alpaca):
+        mock_alpaca.get_order.return_value = {
+            'id': 'o1', 'status': 'partially_filled', 'filled_qty': 700,
+            'filled_avg_price': 4.32}
+        qty, px, status = await monitor._poll_order_fill(
+            mock_alpaca, 'o1', fallback_price=4.32)
+        assert (qty, px, status) == (700, 4.32, 'partially_filled')
+
+    @pytest.mark.asyncio
+    async def test_nothing_filled_returns_zero(self, monitor, mock_alpaca):
+        mock_alpaca.get_order.return_value = {
+            'id': 'o1', 'status': 'new', 'filled_qty': 0,
+            'filled_avg_price': None}
+        qty, px, status = await monitor._poll_order_fill(
+            mock_alpaca, 'o1', fallback_price=4.66)
+        assert qty == 0 and px is None
+
+    @pytest.mark.asyncio
+    async def test_cancelled_after_partial_keeps_the_partial(self, monitor,
+                                                             mock_alpaca):
+        """The cancel race: shares really did leave."""
+        mock_alpaca.get_order.return_value = {
+            'id': 'o1', 'status': 'canceled', 'filled_qty': 300,
+            'filled_avg_price': 4.30}
+        qty, px, status = await monitor._poll_order_fill(
+            mock_alpaca, 'o1', fallback_price=4.66)
+        assert qty == 300 and px == 4.30 and status == 'canceled'
+
+    @pytest.mark.asyncio
+    async def test_fill_without_avg_price_uses_fallback(self, monitor,
+                                                        mock_alpaca):
+        mock_alpaca.get_order.return_value = {
+            'id': 'o1', 'status': 'filled', 'filled_qty': 500,
+            'filled_avg_price': None}
+        assert (await monitor._poll_order_fill(
+            mock_alpaca, 'o1', fallback_price=4.66))[1] == 4.66
+
+    @pytest.mark.asyncio
+    async def test_price_wrapper_rejects_a_partial(self, monitor,
+                                                   mock_alpaca):
+        """`_poll_fill_price` keeps the pre-FIX-3 yes/no contract for the
+        call sites that ask about somebody else's order."""
+        mock_alpaca.get_order.return_value = {
+            'id': 'o1', 'status': 'partially_filled', 'filled_qty': 700,
+            'filled_avg_price': 4.32}
+        assert await monitor._poll_fill_price(
+            mock_alpaca, 'o1', fallback_price=4.32) is None
+
+    @pytest.mark.asyncio
+    async def test_price_wrapper_accepts_a_full_fill(self, monitor,
+                                                     mock_alpaca):
+        mock_alpaca.get_order.return_value = {
+            'id': 'o1', 'status': 'filled', 'filled_qty': 500,
+            'filled_avg_price': 4.60}
+        assert await monitor._poll_fill_price(
+            mock_alpaca, 'o1', fallback_price=4.66) == 4.60
+
+
+class TestPartialIsBookedAndRemainderWorked:
+    """EHGO 2026-06-25 shape: 2,962 sh into a 700-share bid."""
+
+    def _partial(self, mock_alpaca, first=700, total=2962,
+                 first_px=4.32, close_px=4.24):
+        state = {'closed': False}
+
+        def _get_order(order_id):
+            if order_id == 'sell-order-123':
+                return {'id': order_id, 'status': 'partially_filled',
+                        'filled_qty': first, 'filled_avg_price': first_px}
+            return {'id': order_id, 'status': 'filled',
+                    'filled_qty': total - first, 'filled_avg_price': close_px}
+        mock_alpaca.get_order.side_effect = _get_order
+        mock_alpaca.get_open_positions.return_value = [
+            {'symbol': 'EHGO', 'qty': total - first}]
+        mock_alpaca.close_position.return_value = {
+            'id': 'mkt-1', 'status': 'accepted'}
+        return state
+
+    def _armed(self, monitor, shares=2962):
+        monitor.add_watch('EHGO', 4.33, shares, 'tp-1', '')
+        with monitor._watch_lock:
+            w = monitor._watches['EHGO']
+            w.latest_bid, w.latest_ask = 4.33, 4.37
+            w.latest_bid_size = 700
+            w.latest_quote_ts = time.time()
+        return w
+
+    @pytest.mark.asyncio
+    async def test_partially_filled_is_booked_and_remainder_worked(
+            self, monitor, mock_alpaca):
+        self._partial(mock_alpaca)
+        w = self._armed(monitor)
+        await monitor._execute_stop_exit('EHGO', 4.33, w,
+                                         exit_reason='stop_loss')
+        # The stale limit is cancelled, and only the 2,262-share remainder
+        # is worked — never the full 2,962 again.
+        assert 'sell-order-123' in [c.args[0] for c in
+                                    mock_alpaca.cancel_order.call_args_list]
+        assert mock_alpaca.close_position.call_count == 1
+        ev = monitor.drain_exit_events()[0]
+        assert ev.shares == 2962
+
+    @pytest.mark.asyncio
+    async def test_exit_event_carries_blended_price(self, monitor,
+                                                    mock_alpaca):
+        """700 @ $4.32 + 2,262 @ $4.24 -> the qty-weighted blend, not the
+        market order's price applied to all 2,962 shares."""
+        self._partial(mock_alpaca)
+        w = self._armed(monitor)
+        await monitor._execute_stop_exit('EHGO', 4.33, w,
+                                         exit_reason='stop_loss')
+        ev = monitor.drain_exit_events()[0]
+        expected = (4.32 * 700 + 4.24 * 2262) / 2962
+        assert ev.exit_price == pytest.approx(expected, abs=0.0005)
+        # And it is strictly better than booking everything at the market
+        # price — the accounting pessimism §M2 priced at about $67.
+        assert ev.exit_price > 4.24
+
+    @pytest.mark.asyncio
+    async def test_partial_that_completes_stays_branch_limit(
+            self, monitor, mock_alpaca):
+        """The limit filled the rest during our cancel — no market order
+        ran, so the histogram must not count a market_fallback."""
+        def _get_order(order_id):
+            if order_id == 'sell-order-123':
+                _get_order.n += 1
+                if _get_order.n <= 2:
+                    return {'id': order_id, 'status': 'partially_filled',
+                            'filled_qty': 700, 'filled_avg_price': 4.32}
+                return {'id': order_id, 'status': 'filled',
+                        'filled_qty': 2962, 'filled_avg_price': 4.30}
+            return {'id': order_id, 'status': 'filled', 'filled_qty': 0,
+                    'filled_avg_price': None}
+        _get_order.n = 0
+        mock_alpaca.get_order.side_effect = _get_order
+        mock_alpaca.get_open_positions.return_value = []
+        w = self._armed(monitor)
+        await monitor._execute_stop_exit('EHGO', 4.33, w,
+                                         exit_reason='stop_loss')
+        ev = monitor.drain_exit_events()[0]
+        assert ev.exit_branch == 'limit'
+        assert ev.shares == 2962
+        assert ev.exit_price == pytest.approx(4.30, abs=0.001)
+        mock_alpaca.close_position.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unresolvable_remainder_is_left_for_the_reconciler(
+            self, monitor, mock_alpaca):
+        """We booked 700 shares for certain and could not prove the rest —
+        that row must NOT claim a confirmed full exit."""
+        def _get_order(order_id):
+            if order_id == 'sell-order-123':
+                return {'id': order_id, 'status': 'partially_filled',
+                        'filled_qty': 700, 'filled_avg_price': 4.32}
+            raise Exception('order lookup exploded')
+        mock_alpaca.get_order.side_effect = _get_order
+        mock_alpaca.get_open_positions.side_effect = Exception('api down')
+        w = self._armed(monitor)
+        await monitor._execute_stop_exit('EHGO', 4.33, w,
+                                         exit_reason='stop_loss')
+        ev = monitor.drain_exit_events()[0]
+        assert ev.shares == 700
+        assert ev.exit_price == pytest.approx(4.32, abs=0.001)
+        assert ev.exit_branch == 'last_resort'
+        assert ev.confirmed is False

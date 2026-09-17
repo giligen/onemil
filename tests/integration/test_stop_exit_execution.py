@@ -356,3 +356,64 @@ class TestSlLegIsTheStop:
                     if c[0] == 'replace_order_stop_price']
         ev = m.drain_exit_events()[0]
         assert ev.shares == 900, "the legacy path sells the broker's view"
+
+
+# ---------------------------------------------------------------------------
+# FIX 3 — a partial fill is a partial success
+# ---------------------------------------------------------------------------
+
+class TestPartialFillLifecycle:
+    """EHGO 2026-06-25 shape, on a broker that really reserves shares.
+
+    The fake rejects a sell larger than the shares NOT already reserved by
+    a working sell — which is exactly why the pre-fix "cancel everything
+    and market the full quantity" path double-counted: the stale limit had
+    already taken 700 of them.
+    """
+
+    def test_partial_is_booked_and_only_the_remainder_is_worked(self, broker):
+        broker.positions['EHGO'] = 2962
+        broker.tick(bid=4.33, ask=4.37)
+        broker.auto_fill = False          # the limit rests instead of filling
+        broker.calls.clear()
+
+        m = _monitor(broker)
+        w = _watch(m, 'EHGO', 4.33, 2962, 4.33, 4.37, bid_size=700)
+
+        async def _go():
+            task = asyncio.create_task(m._execute_stop_exit(
+                'EHGO', 4.33, w, exit_reason='stop_loss'))
+            await asyncio.sleep(0.08)
+            # 700 shares — the whole displayed bid — and then nothing.
+            resting = broker.sells_for('EHGO')[0]
+            broker.partial_fill(resting['id'], 700, price=4.32)
+            # The tape keeps falling underneath us — set it WITHOUT
+            # settling, so the market close is what trades at the new bid.
+            broker.bid, broker.ask = 4.24, 4.28
+            await task
+        asyncio.run(_go())
+
+        ev = m.drain_exit_events()[0]
+        assert broker.positions.get('EHGO', 0) == 0, "position must be flat"
+        assert ev.shares == 2962
+        # 700 @ 4.32 blended with 2,262 @ 4.24 — NOT 2,962 @ 4.24.
+        expected = (4.32 * 700 + 4.24 * 2262) / 2962
+        assert ev.exit_price == pytest.approx(expected, abs=0.002)
+        assert ev.exit_price > 4.24
+        assert ev.exit_branch == ExitBranch.MARKET_FALLBACK.value
+        assert ev.exit_reason == 'stop_loss'
+
+    def test_full_fill_is_unaffected(self, broker):
+        """Control: when the book is there, nothing about the happy path
+        changes."""
+        broker.positions['EHGO'] = 500
+        broker.tick(bid=4.33, ask=4.37)
+        broker.calls.clear()
+        m = _monitor(broker)
+        w = _watch(m, 'EHGO', 4.33, 500, 4.33, 4.37)
+        asyncio.run(m._execute_stop_exit('EHGO', 4.33, w,
+                                         exit_reason='stop_loss'))
+        ev = m.drain_exit_events()[0]
+        assert ev.exit_branch == ExitBranch.LIMIT.value
+        assert ev.shares == 500
+        assert not [c for c in broker.calls if c[0] == 'close_position']
