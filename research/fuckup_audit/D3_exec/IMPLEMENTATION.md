@@ -7,7 +7,19 @@ deploy word; the weekend rehearsal protocol
 no order submitted, and the only config flipped ON is the one that has no
 plausible way to be worse (FIX 1, with a kill switch).
 
-Branch `fix/spy-regime-shared-helper`, six commits, one per fix.
+Branch `fix/spy-regime-shared-helper`, six commits, one per fix, pushed.
+
+> **One caveat that is not optional to read.** `onemil-trader` runs FROM this
+> working tree and auto-restarts on failure. The process currently in memory
+> still holds the old code, but **any restart — an operator's, or a crash —
+> now loads the new code**, and `config.yaml` (gitignored) already carries
+> `prefer_sl_leg_exit: true` and the dormant `exit_ladder` block. Bull flag
+> and ORB are both paused (`trading.enabled: false`, `orb.yaml
+> strategy.enabled: false`), so nothing new can open a position; the exposure
+> is limited to an exit on a position that is already open. If the owner
+> wants the old exit path to survive an unplanned restart before the deploy
+> word, the one-line hold is `prefer_sl_leg_exit: false` in `config.yaml`
+> (the ladder is already off, and FIX 6/7/3/5 have no flag).
 
 ---
 
