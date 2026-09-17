@@ -262,7 +262,12 @@ class TestStopExitFillConfirmation:
         assert len(events) == 1
         # exit_price = market close fill ($3.95), NOT the unfilled limit
         assert events[0].exit_price == pytest.approx(3.95, abs=0.01)
-        assert events[0].exit_reason == 'stop_loss_market_fallback'
+        # D3 FIX 6 (2026-09-17): the escalation no longer overwrites the
+        # REASON — it records the BRANCH. Pre-fix this asserted
+        # exit_reason == 'stop_loss_market_fallback', which is exactly how
+        # FJET's winning trail exit ended up in the stop-loss book.
+        assert events[0].exit_reason == 'stop_loss'
+        assert events[0].exit_branch == 'market_fallback'
 
     @pytest.mark.asyncio
     async def test_explicit_sl_leg_cancel_deferred_until_after_fill(self, monitor, mock_alpaca):
@@ -549,7 +554,10 @@ class TestExitReasonPerBranch:
         await monitor._execute_stop_exit('PLYX', 4.25, w, exit_reason='stop_loss')
         events = monitor.drain_exit_events()
         assert len(events) == 1
-        assert events[0].exit_reason == 'stop_loss_market_fallback'
+        # D3 FIX 6: branch, not reason (see test_exit_reasons.py
+        # ::TestEscalationPreservesReason for the FJET/HCAI cases).
+        assert events[0].exit_reason == 'stop_loss'
+        assert events[0].exit_branch == 'market_fallback'
 
     @pytest.mark.asyncio
     async def test_sl_leg_race_branch_sets_sl_race_reason(
@@ -578,6 +586,7 @@ class TestExitReasonPerBranch:
         events = monitor.drain_exit_events()
         assert len(events) == 1
         assert events[0].exit_reason == 'stop_loss_bracket_sl_race'
+        assert events[0].exit_branch == 'sl_leg_race'
         # order_id should point at the SL leg that actually filled
         assert events[0].order_id == 'sl-1'
 
@@ -603,6 +612,8 @@ class TestExitReasonPerBranch:
         events = monitor.drain_exit_events()
         assert len(events) == 1
         assert events[0].exit_reason == 'stop_loss_unconfirmed'
+        assert events[0].exit_branch == 'last_resort'
+        assert events[0].confirmed is False
 
     @pytest.mark.asyncio
     async def test_limit_race_branch_keeps_plain_stop_loss_reason(
@@ -745,8 +756,10 @@ class TestMarketCloseExtendedTimeout:
         ev = events[0]
         # Final retry recovered the real fill.
         assert ev.exit_price == pytest.approx(10.31, abs=0.01)
-        # Branch is MARKET_CLOSE (not LAST_RESORT)
-        assert ev.exit_reason == 'stop_loss_market_fallback'
+        # Branch is MARKET_CLOSE (not LAST_RESORT) — D3 FIX 6 puts that
+        # in exit_branch and leaves the reason saying what fired.
+        assert ev.exit_reason == 'stop_loss'
+        assert ev.exit_branch == 'market_fallback'
 
     @pytest.mark.asyncio
     async def test_market_close_giveup_logs_warning_not_error(

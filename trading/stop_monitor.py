@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from data_sources.alpaca_client import AlpacaClient
-from trading.exit_reasons import ExitReason
+from trading.exit_reasons import ExitBranch, ExitReason
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +178,13 @@ class StopExitEvent:
     shares: int
     order_id: str
     exit_reason: str  # 'stop_loss' or 'stop_loss_fallback'
+    # D3 FIX 6 — the EXECUTION BRANCH, split out of exit_reason. One of
+    # trading.exit_reasons.ExitBranch ('limit', 'market_fallback',
+    # 'sl_leg', 'sl_leg_race', 'last_resort'); '' for non-StopMonitor
+    # writers and for events built by legacy callers. `exit_reason` keeps
+    # saying WHAT fired, so a trailing-stop exit on a winner is no longer
+    # booked as 'stop_loss_market_fallback' (FJET 2026-06-12).
+    exit_branch: str = ''
     trade_db_id: Optional[int] = None
     submitted_at: float = 0.0  # time.time() when exit order was submitted
     pricing_method: str = 'fixed_offset'  # quote_tight, quote_medium, quote_wide, fixed_offset
@@ -279,6 +286,12 @@ def build_exit_update(event: 'StopExitEvent') -> Dict[str, Any]:
 
     base: Dict[str, Any] = {
         'exit_reason': _strs(getattr(event, 'exit_reason', None)),
+        # D3 FIX 6: the execution branch travels alongside the reason for
+        # EVERY engine, because every engine drains through this one
+        # helper. None (not '') when the writer didn't set one — a NULL
+        # exit_branch means "pre-split row / non-StopMonitor writer",
+        # which is a legitimate state, not drift.
+        'exit_branch': _strs(getattr(event, 'exit_branch', None)),
         'exit_trigger_price': _numf(getattr(event, 'exit_trigger_price', None)),
         'exit_quote_bid': _numf(getattr(event, 'exit_quote_bid', None)),
         'exit_quote_ask': _numf(getattr(event, 'exit_quote_ask', None)),
@@ -3270,6 +3283,16 @@ class StopMonitor:
     BRANCH_SL_LEG_RACE = 'sl_leg_race'
     BRANCH_LAST_RESORT = 'last_resort'
 
+    # D3 FIX 6 — map the internal escalation tag onto the DB-visible
+    # `exit_branch` vocabulary (trading/exit_reasons.ExitBranch). A
+    # limit that filled during our cancel attempt is still a LIMIT fill.
+    _EXIT_BRANCH_BY_ESCALATION = {
+        BRANCH_LIMIT_RACE: ExitBranch.LIMIT.value,
+        BRANCH_MARKET_CLOSE: ExitBranch.MARKET_FALLBACK.value,
+        BRANCH_SL_LEG_RACE: ExitBranch.SL_LEG_RACE.value,
+        BRANCH_LAST_RESORT: ExitBranch.LAST_RESORT.value,
+    }
+
     async def _escalate_to_market_close(
         self, client, symbol: str, stale_limit_order_id: str,
         trigger_price: float, sl_leg_id: Optional[str] = None,
@@ -3655,6 +3678,11 @@ class StopMonitor:
             # closed while Alpaca was still long — a silent desync that cost
             # us $288 extra loss on BMNZ before we noticed it manually.
             exit_price: Optional[float] = None
+            # D3 FIX 6: assume the intended path (our limit filled) and let
+            # each recovery branch below overwrite it. Never left unset —
+            # a NULL exit_branch on a StopMonitor row would read as
+            # "pre-split" in the histogram and hide a regression.
+            exit_branch = ExitBranch.LIMIT.value
             try:
                 # CORD 5/8 fix: retry-with-backoff on held_for_orders race
                 # (40310000) so we ride out Alpaca's async OCO release window
@@ -3690,16 +3718,28 @@ class StopMonitor:
                     )
                     if mkt_order_id:
                         order_id = mkt_order_id
-                    # Each branch maps to a distinct exit_reason so analytics
-                    # can separate a clean fallback fill from an SL-race
-                    # recovery or a last-resort trigger-price estimate.
-                    if branch == self.BRANCH_MARKET_CLOSE:
-                        exit_reason = ExitReason.STOP_LOSS_MARKET_FALLBACK.value
-                    elif branch == self.BRANCH_LIMIT_RACE:
-                        # Original limit filled during our cancel — keep the
-                        # plain STOP_LOSS reason since the limit did work.
-                        pass
-                    elif branch == self.BRANCH_SL_LEG_RACE:
+                    # D3 FIX 6 — the branch is recorded in `exit_branch`;
+                    # `exit_reason` keeps saying WHAT fired. Pre-fix this
+                    # block overwrote the reason with
+                    # 'stop_loss_market_fallback' for every escalation, so
+                    # FJET's +$122.84 trail_stop and HCAI's
+                    # stage_force_flat were booked as stop losses.
+                    #
+                    # Two branches still SET the reason, deliberately:
+                    #   sl_leg_race  — the broker's SL leg, not our order,
+                    #                  executed the sale; that is a
+                    #                  different exit, not just a
+                    #                  different route to the same one.
+                    #   last_resort  — "we never saw a fill" is a fact
+                    #                  about the reason, and
+                    #                  'stop_loss_unconfirmed' is what the
+                    #                  orphan reconciler
+                    #                  (orphan_reconciler.STALE_EXIT_REASONS)
+                    #                  and scripts/report_common read to
+                    #                  know the row needs follow-up.
+                    exit_branch = self._EXIT_BRANCH_BY_ESCALATION.get(
+                        branch, ExitBranch.MARKET_FALLBACK.value)
+                    if branch == self.BRANCH_SL_LEG_RACE:
                         exit_reason = ExitReason.STOP_LOSS_BRACKET_SL_RACE.value
                     elif branch == self.BRANCH_LAST_RESORT:
                         exit_reason = ExitReason.STOP_LOSS_UNCONFIRMED.value
@@ -3735,6 +3775,7 @@ class StopMonitor:
                         exit_price = recovered
                         order_id = watch.sl_leg_id
                         exit_reason = ExitReason.STOP_LOSS_BRACKET_SL_RACE.value
+                        exit_branch = ExitBranch.SL_LEG_RACE.value
                         # FALL THROUGH to the exit-event emit path below
                     else:
                         logger.error(
@@ -3762,7 +3803,13 @@ class StopMonitor:
                             label=f"{symbol} close_position",
                         )
                         order_id = fallback.get("id", "")
-                        exit_reason = ExitReason.STOP_LOSS_FALLBACK.value
+                        # D3 FIX 6: the limit could not even be SUBMITTED
+                        # and close_position took over — that is a
+                        # market_fallback BRANCH, not a new reason. Pre-fix
+                        # this overwrote the reason with
+                        # 'stop_loss_fallback', erasing the trigger the
+                        # same way the escalation path did.
+                        exit_branch = ExitBranch.MARKET_FALLBACK.value
                         logger.info(
                             f"StopMonitor: {symbol} fallback close_position — "
                             f"order={order_id} — awaiting fill confirmation"
@@ -3803,6 +3850,18 @@ class StopMonitor:
                                     f"reconcile from order history."
                                 )
                                 exit_price = trigger_price
+                                # D3 FIX 6/7: we never observed a fill, so
+                                # this is the LAST_RESORT branch — same
+                                # contract as the escalation path. Pre-fix
+                                # this wrote a CONFIRMED exit at
+                                # trigger_price (reason 'stop_loss_fallback'
+                                # ≠ 'stop_loss_unconfirmed'), i.e. a
+                                # fabricated fill price + P&L, exactly the
+                                # SMU/QBTZ failure the confirmed=False
+                                # contract exists to prevent.
+                                exit_reason = (
+                                    ExitReason.STOP_LOSS_UNCONFIRMED.value)
+                                exit_branch = ExitBranch.LAST_RESORT.value
                     except Exception as e2:
                         # Race condition: bracket closed the position before our
                         # fallback ran. Try the same SL-leg recovery used by the
@@ -3830,6 +3889,7 @@ class StopMonitor:
                                 exit_price = recovered2
                                 order_id = watch.sl_leg_id
                                 exit_reason = ExitReason.STOP_LOSS_BRACKET_SL_RACE.value
+                                exit_branch = ExitBranch.SL_LEG_RACE.value
                                 # Fall through to exit-event emit
                             else:
                                 logger.error(
@@ -3897,6 +3957,7 @@ class StopMonitor:
                 shares=qty_to_sell,
                 order_id=order_id,
                 exit_reason=exit_reason,
+                exit_branch=exit_branch,
                 trade_db_id=watch.trade_db_id,
                 submitted_at=time_mod.time(),
                 pricing_method=pricing_method,
@@ -3908,7 +3969,16 @@ class StopMonitor:
                 exit_limit_price=limit_price,
                 exit_ofi=watch.ofi_cumulative,
                 strategy=watch.strategy,
-                confirmed=(exit_reason != 'stop_loss_unconfirmed'),
+                # D3 FIX 6: key confirmation on the BRANCH, not on the
+                # reason string. The reason now survives escalation, so
+                # `exit_reason != 'stop_loss_unconfirmed'` would have
+                # reported a last-resort trail_stop as a confirmed fill.
+                confirmed=(exit_branch != ExitBranch.LAST_RESORT.value),
+            )
+            logger.info(
+                f"StopMonitor: {symbol} EXIT BRANCH {exit_branch} "
+                f"reason={exit_reason} qty={qty_to_sell} "
+                f"fill=${exit_price:.4f} confirmed={event.confirmed}"
             )
             self._exit_events.put(event)
 

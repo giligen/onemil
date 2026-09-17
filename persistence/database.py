@@ -660,6 +660,38 @@ class Database:
             logger.warning(f"Migration 14 (scale-out columns) failed "
                            f"(non-fatal): {e}")
 
+        # Migration 15: exit_branch — split the execution BRANCH out of the
+        # exit REASON (D3 FIX 6, research/fuckup_audit/D3_exec/REPORT.md §M6).
+        #
+        # `exit_reason` says WHAT fired (stop_loss / trail_stop / lock_stop /
+        # stage_force_flat); `exit_branch` says HOW the shares left (limit /
+        # market_fallback / sl_leg / sl_leg_race / last_resort — see
+        # trading/exit_reasons.ExitBranch). Before this split the escalation
+        # path overwrote the reason with 'stop_loss_market_fallback' for ANY
+        # watch that escalated, so the bucket held a +$122.84 trailing-stop
+        # WINNER (FJET 6/12) and an ignition EOD force-flat (HCAI 9/11)
+        # alongside real stops — every GROUP BY exit_reason number in the
+        # tree was wrong in both numerator and denominator.
+        #
+        # Historic rows keep their strings untouched (they are load-bearing —
+        # trading/exit_reasons.py) and get exit_branch = NULL, which
+        # `is_known_branch` reads as "predates the split", NOT as drift.
+        # Idempotent (PRAGMA-guarded ADD COLUMN, the same shape as every
+        # migration above) and safe on the live WAL DB: ADD COLUMN with no
+        # default is an O(1) header rewrite that never touches a page of
+        # row data and never blocks a reader.
+        try:
+            columns = [row[1] for row in self._trades_conn.execute(
+                "PRAGMA table_info(trades)").fetchall()]
+            if 'exit_branch' not in columns:
+                self._trades_conn.execute(
+                    "ALTER TABLE trades ADD COLUMN exit_branch VARCHAR(24)")
+                self._trades_conn.commit()
+                logger.info("Migration 15: added exit_branch column to trades")
+        except Exception as e:
+            logger.warning(f"Migration 15 (exit_branch column) failed "
+                           f"(non-fatal): {e}")
+
     # =========================================================================
     # News cache (halt detection + per-article classification)
     # =========================================================================

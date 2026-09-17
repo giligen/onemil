@@ -98,9 +98,17 @@ class ExitReason(str, Enum):
     # ---- StopMonitor recovery branches (any StopMonitor-driven exit) --
     STOP_LOSS_MARKET_FALLBACK = "stop_loss_market_fallback"
     """The marketable-limit sell didn't fill within timeout → escalated
-    to `close_position` market order, which filled. Distinct from plain
-    STOP_LOSS so analytics can separate "clean stop" from "limit got
-    stranded but recovery worked"."""
+    to `close_position` market order, which filled.
+
+    **Retired as a StopMonitor writer on 2026-09-17 (D3 FIX 6).** That
+    information is now `trades.exit_branch = 'market_fallback'`, and
+    `exit_reason` keeps saying what fired — because this value had been
+    overwriting the truth: FJET 2026-06-12 was a trailing-stop exit on a
+    WINNER (+$122.84) and HCAI 2026-09-11 was an ignition EOD force-flat,
+    both filed here as stop losses. Still written by
+    `trading_engine._recover_exit_from_order_history` (which classifies
+    from order history and genuinely cannot tell what fired) and by every
+    historic row — never rename it."""
 
     STOP_LOSS_BRACKET_SL_RACE = "stop_loss_bracket_sl_race"
     """`close_position` raced with Alpaca's bracket SL leg and reported
@@ -116,7 +124,12 @@ class ExitReason(str, Enum):
     STOP_LOSS_FALLBACK = "stop_loss_fallback"
     """Generic stop-loss recovery (older synonym; treated as a superset of
     the market_fallback / bracket_sl_race / unconfirmed branches for
-    BF-only paths that haven't been split out yet)."""
+    BF-only paths that haven't been split out yet).
+
+    **Retired as a writer on 2026-09-17 (D3 FIX 6)** — the path that wrote
+    it (limit sell could not be SUBMITTED, close_position took over) now
+    keeps the trigger reason and records
+    `exit_branch = 'market_fallback'`. Historic rows keep the string."""
 
     EXHAUSTION_PARTIAL = "exhaustion_partial"
     """Partial-position sell driven by exhaustion candle detection (large
@@ -216,6 +229,68 @@ class ExitReason(str, Enum):
     """**Historical only**. Single row 2026-03-26 EEIQ BF. Superseded by
     STOP_LOSS_UNCONFIRMED + the test in `test_stop_exit_limit_buffer.py
     ::TestExitReasonPerBranch`. No current writer."""
+
+
+class ExitBranch(str, Enum):
+    """Stable string contract for the `trades.exit_branch` column (D3 FIX 6).
+
+    `exit_reason` answers **what fired** (`stop_loss`, `trail_stop`,
+    `lock_stop`, `stage_force_flat`, …). `exit_branch` answers **how the
+    shares actually left** — which execution path filled them.
+
+    Until 2026-09-17 the two were conflated: `_execute_stop_exit`
+    overwrote `exit_reason` with `stop_loss_market_fallback` for ANY
+    watch that escalated, so the bucket contained a trailing-stop exit on
+    a WINNER (FJET 2026-06-12, +$122.84), an ignition EOD force-flat
+    (HCAI 2026-09-11) and three real stops. Every downstream number that
+    grouped on `exit_reason` was wrong in both numerator and denominator
+    — see `research/fuckup_audit/D3_exec/REPORT.md` §M6.
+
+    The `ExitReason` strings above are LOAD-BEARING for historic rows and
+    are never rewritten; from 2026-09-17 forward the escalation path
+    stops OVERWRITING the reason and records the branch here instead.
+    """
+
+    LIMIT = "limit"
+    """Our own marketable limit sell filled it — the intended path. This
+    includes the `limit_race` case (the limit filled while we were
+    cancelling it to escalate): the limit still did the work."""
+
+    MARKET_FALLBACK = "market_fallback"
+    """The limit did not fill inside its budget (or could not be
+    submitted) and `close_position` — an unpriced market sell — closed
+    it. The bucket the D3 audit priced at −$1,352 of slip across 11
+    events. Monitoring target: this must fall toward zero."""
+
+    SL_LEG_RACE = "sl_leg_race"
+    """The broker-side bracket SL leg won the race: our sell landed on an
+    already-flat position (Alpaca 40410000 / 42210000) and the real fill
+    price was recovered from the SL leg's order record."""
+
+    SL_LEG = "sl_leg"
+    """(D3 FIX 1) The broker-side SL leg WAS the exit by design: instead
+    of cancelling it to place our own limit, its stop price was replaced
+    and the broker filled it. No naked window."""
+
+    LAST_RESORT = "last_resort"
+    """No recovery path confirmed a fill. The event is emitted with
+    `confirmed=False` → `exit_pending_verification`, no price, no P&L;
+    the orphan reconciler owns the row from there."""
+
+
+_EXIT_BRANCHES = frozenset(b.value for b in ExitBranch)
+
+
+def is_known_branch(value: Optional[str]) -> bool:
+    """True iff `value` is a defined ExitBranch member string.
+
+    `None` / `''` are NOT branches — they mean "this row predates FIX 6
+    (2026-09-17) or was written by a path that does not go through
+    StopMonitor", which is a legitimate state and must not be reported as
+    drift."""
+    if not value:
+        return False
+    return value in _EXIT_BRANCHES
 
 
 # Categorization helpers ----------------------------------------------------

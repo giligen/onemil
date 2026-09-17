@@ -250,6 +250,11 @@ class TestMACDWaveDrainUnconfirmed:
 
         eng.db.update_trade.assert_called_once_with(42, {
             'exit_reason': 'stop_loss_unconfirmed',
+            # D3 FIX 6 (2026-09-17): the execution BRANCH rides along in
+            # every payload. None here because this synthetic event
+            # doesn't set one — a legitimate "pre-split / not written by
+            # StopMonitor" value.
+            'exit_branch': None,
             'exit_trigger_price': 10.0,
             'exit_quote_bid': None,
             'exit_quote_ask': None,

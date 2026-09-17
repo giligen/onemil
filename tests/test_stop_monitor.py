@@ -438,7 +438,12 @@ class TestFallback:
 
         events = monitor.drain_exit_events()
         assert len(events) == 1
-        assert events[0].exit_reason == 'stop_loss_fallback'
+        # D3 FIX 6 (2026-09-17): "the limit couldn't be submitted and
+        # close_position took over" is a BRANCH fact, not a reason. Pre-fix
+        # this overwrote the reason with 'stop_loss_fallback', erasing the
+        # trigger the same way the escalation path erased FJET's trail.
+        assert events[0].exit_reason == 'stop_loss'
+        assert events[0].exit_branch == 'market_fallback'
         assert events[0].order_id == 'close-order-456'
 
     @pytest.mark.asyncio
