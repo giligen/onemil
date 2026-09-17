@@ -69,6 +69,16 @@ before the signal (unless a hypothesis says otherwise — H6).
 - Every candidate that clears G2 also gets: the permutation search-adjusted p over all cells of that stage, tail
   removal (top 1%/5%), winner cap at +3R, and a per-month table.
 
+**Availability audit (standing rule from D1, 2026-09-17).** Every feature with < 100% coverage gets a missingness
+table per split and per time-of-day band BEFORE it is used; coverage built from another stage's key set is a look-ahead
+even when the value is causal (D1: premarket dollars backfilled only for symbol-days that signalled later → +0.415R on
+VAL at t 5.1, pure artefact; the tail test cannot catch a cohort leak, only the missingness audit did).
+
+**Pre-registered from D1 (2026-09-17), to be tested ONLY on Stage E's causal key set (100% news and premarket
+coverage):** bucket `news_only` = pre-09:30 news present AND premarket $ ≤ $5.82M, vs the rest, hold exit, per
+family and per time band. Adopt only under the H3 sign-agreement rule (TRAIN ≥ +0.05R, t ≥ 2, VAL sign agrees); the
+opposite of the shipped ORB gate's logic, so it must be explained before it is believed.
+
 **Reporting.** One `REPORT.md` per stage: pre-registration block (what will be run, the decision rule, written BEFORE
 the run), then the tables, then "what it means", then the cell count. Failures are reported at the same length as
 successes.

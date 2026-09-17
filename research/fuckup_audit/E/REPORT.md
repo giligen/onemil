@@ -317,3 +317,351 @@ already causal (prev-day 15:00 ET -> 09:30) and throttled; ~200K keys, expect ~3
 | `E/build_candidates_causal.py` | Part 3, importing `B/build_candidates4.py` |
 | `E/parity_causal.py`, `E/parity_causal_smoke.md` | the parity evidence |
 | `E/candidates_causal_smoke.csv` | the 3-day smoke output |
+
+---
+
+## 7. FREEZE (written 2026-09-17 00:45 UTC, BEFORE TEST was read)
+
+The 60 pre-registered cells produced **0 G1 passes**, so the pre-registered selection is empty and
+TEST is not owed to it. One cell in the stage clears the G1 and G2 arithmetic. It is **post-hoc** —
+it came out of follow-up A, the H6 diagnostic that splits the causal population by the old floor —
+and it is frozen here, exactly and in full, before `E_READ_TEST=1` is run:
+
+> **The frozen cell.** Family `F6 {}` (red-to-green: the first 1-min bar whose close crosses back
+> above the prior day's close, as implemented in `B/build_candidates4.py`), fill `entry_next`
+> (the next bar's open under the +0.6% cap), exit **hold to 15:55**, universe **U1 u U2** (gap >= +3%
+> at the 09:30 open, or prior-day range >= 8%; open >= $5, adv20 >= 100K shares — all knowable at
+> 09:30), population **all** AND **`range_so_far_pct >= 5`** (the day's high-low range on bars
+> STRICTLY BEFORE the signal bar, i.e. causal and live-computable), entry window 09:30-14:01,
+> price >= $5 at the fill, R >= 1% of price, cost contract (c), book `run_book(12, 4)`.
+> No news leg, no premarket-dollar leg, no other filter.
+
+Its TRAIN and VAL numbers, its tail tests and its permutation p are already recorded in
+`E/score_e_f6floor.md` and are repeated in §8 below; **they were computed before this freeze and
+are not changed by what TEST says.** Pre-committed reading of the TEST result: this cell is
+reported as a candidate ONLY if TEST is positive AND it survives the top-5% removal on TEST — it
+already FAILS top-5% removal on both TRAIN (-0.139) and VAL (-0.062), so the pre-committed
+expectation is that it is reported as a failure regardless of the TEST sign, and TEST is read for
+the record, not for selection.
+
+---
+
+# 8. SCORING RESULT (2026-09-17)
+
+_Everything above §7 is the pre-registration and was written before any cell was scored. This
+section is the result. Scripts: `E/e_avail.py` (step 0), `E/e_score.py` (the 60 cells + declared
+sensitivities), `E/e_follow.py` (the H6 diagnostic, `news_only` booked, the monotonicity and
+Simpson's checks, the Stage-C diff), `E/e_f6floor.py` (the one post-hoc gate pass, TEST), `E/e_headlines.py`.
+Tables: `score_e_availability.md`, `score_e_tables.md`, `score_e_follow.md`, `score_e_f6floor*.md`,
+`score_e_headlines.md`; per-cell CSVs `score_e_results*.csv`, `score_e_buckets.csv`,
+`score_e_newsonly.csv`._
+
+## 8.0 One page
+
+**The causal universe does not change the picture; it makes it worse, and it does so by removing
+the very rows the old design's floor was throwing away.** On the causal universe (U1 gap ≥ +3% ∪
+U2 prior-day range ≥ 8%, membership knowable at 09:30), **0 of the 60 pre-registered cells clear
+G1** — the best TRAIN cell is `F6 {}` next/hold/combo at **+0.018 R, t 0.15, 7.1 trades/week**, and
+a 500-draw day-label sign-flip null over the 54 scoreable cells puts the **observed max TRAIN t at
+0.15 against a null 95th percentile of 3.81, p = 1.000**. On the 18 family × fill × exit cells that
+Stage C also scored on the ≥5%-range universe, Stage E is **−0.066 R per trade worse on TRAIN**.
+
+**The H6 premise is refuted in the direction opposite to the hypothesis.** H6 said the ≥5%-range
+design "forces late entries" and discards the early window by construction. It does discard it —
+60–80% of the causal population never reaches a 5% pre-signal range — but the discarded rows are
+the LOSING rows, in every family and on both TRAIN and VAL. `F8 N=5`: floor-passing −0.005 vs
+below-floor −0.144 (TRAIN); `F6 {}`: +0.090 vs −0.114 (TRAIN), +0.209 vs −0.046 (VAL). The pre-signal
+range floor is not a bias to be removed — it is, on this tape, the single most effective causal
+filter in the stage.
+
+**Early window vs later.** Booked per band, the 09:30–10:00 window is the WORST band for every
+family (`F6 {}` 09:35–10:00 −0.130 R TRAIN at a 59% stop rate; `F8 N=5` −0.088; `F13` −0.273), and
+the later bands are flat to positive (`F8 N=15` 11:00–13:00 +0.007 TRAIN / −0.023 VAL). Stage A's and
+Stage H5's direction survives; the causal universe gives the early window a fair test and it fails it.
+
+**Fill and exit.** Next-open beats resting in all five families (by +0.013 to +0.063 R), and
+hold-to-close beats the +2R close-target in all five (by +0.005 to +0.072 R) — Stage C's two
+conclusions reproduce on a different universe and a different tape slice.
+
+**The ORB two-leg rule, in the 09:35 window on a gap-up universe that was built to give it its
+home, is negative.** All-day combo-minus-rest is negative on TRAIN in 5 of 5 families and on TEST
+in 5 of 5; in the 09:35–10:00 band it is negative on TRAIN in every family that has one. D0b's ≥10:00 finding and D1's
+all-day finding now hold in the one window where the rule had not yet been tested. **The rule is
+dead on this population, not merely untested.**
+
+**`news_only`** (news present AND premarket $ ≤ $5.82M) passes the pre-registered sign-agreement
+rule in **1 of 5 families** — `F8 N=5`, TRAIN +0.061 R (t 2.54), VAL +0.026 (sign agrees), TEST
++0.073 (t 2.15). It survives the pm-unknown ablation (+0.057 / +0.013 / +0.074) and is not a
+Simpson's artefact of one price or time slice. But it is **anti-monotone in PM$ inside the news
+bucket** (TRAIN decile rank correlation **−0.78**, VAL +0.09), the bucket itself is **negative in
+absolute R in every split** (−0.027 / −0.037 / −0.092), and **as a book it clears G1 in 0 of 9
+cells**. It is a weak relative veto, not an edge.
+
+**One cell cleared the G1/G2 arithmetic** — post-hoc, from the H6 diagnostic: `F6 {}` next/hold on
+the causal universe RESTRICTED to `range_so_far_pct ≥ 5`. TRAIN +0.090 R (t 2.03, 20.3 tr/wk, 55%
+green), VAL +0.209 (t 2.80, 77% green). It was frozen in writing in §7 and **TEST was then read
+once: +0.096 R, t 0.67, 43% of weeks green, 2 of 4 months negative**. It dies with the top 5%
+removed on **all three** splits (−0.139 / −0.062 / −0.227) and under a +3R winner cap on TEST
+(−0.071); its permutation p over this stage's cells is **0.936**. Reported as a failure, exactly as
+pre-committed.
+
+**Nothing in Stage E is a ship candidate.**
+
+## 8.1 Step 0 — verification (before any number)
+
+| check | result |
+|---|---|
+| build | `build_causal2.log` ends `DONE rows 506,195` + **`EXIT=0`**; the first run had written 57 days (77,574 rows) before its OOM, and 77,574 + 506,195 = **583,769 = the file's data rows exactly** |
+| days | `build_causal_state.json` 410 done, min 2025-01-17 max 2026-09-04; **410 distinct days in the file**; one header line, no mid-file header from the resume |
+| header | 88 columns, **byte-identical and in order** to `B4.COLS` (77) + the 11 declared extras |
+| overflow | `fetch_overflow.log` ends `DONE … EXIT=0`, 30,871 TRAIN keys of 2025-01..06 fetched — **TRAIN is NOT truncated**; §2's warning is discharged |
+| parity | `parity_causal.py` over the **full 410 days**: 542,876 symbol-days, 289,225 tape-identical with Stage B, **217,576 signal rows in both files**; `sig_m` / `stop` / `range_so_far_pct` / `next_entry` / `next_entry_m` / `next_rr_2r` **max abs diff 0.0, 0 rows over 1e-6** (the task's bar). Residual float32↔float64 noise on 13 of 217,576 `level` values (max 5e-4) and 3 `rest_entry` (3e-4, `rest_rr_2r` 3.1e-5) — 0.006% of rows, from the parquet store's float32 bar prices; it moves no decision. |
+| survivorship | 1,510 of 198,318 U1∪U2 keys have no usable tape = **0.76%**; of the fetched index, 1,067 of 124,875 = 0.85% returned zero bars (702 `badsym`, 661 `alpaca`-served-but-too-thin, 76 `none`). PLAN's ≥90% bar is passed by a wide margin. |
+
+## 8.2 Step 0 — the AVAILABILITY AUDIT (PLAN §1 standing rule, earned in D1)
+
+Coverage on the 314,288-row scoreable `next` population: `has_news` **100.00%**,
+`prev_day_range_pct` / `adv20` / `gap_pct` / `spread_cc_bps` / `range_so_far_pct` **100.00%**
+(8–10 rows of 314,288 missing), `pm_dollar_vol` **89.01%**.
+
+`has_news` carries **no missingness at all** — the whole point of `E/e_news.py` re-pointing the
+causal news pull at this key set — so the D1 failure mode cannot recur for the news leg.
+
+`pm_dollar_vol` is the one column with structure, and it is reported in full before it is used:
+
+| missing rate | 09:30–09:35 | 09:35–10:00 | 10:00–11:00 | 11:00–13:00 | 13:00–14:01 |
+|---|---:|---:|---:|---:|---:|
+| TRAIN | 8.7% | 8.9% | 13.3% | 18.0% | 19.4% |
+| VAL | 7.1% | 6.9% | 11.1% | 15.4% | 13.8% |
+| TEST | 5.0% | 5.8% | 9.6% | 13.5% | 17.1% |
+
+Outcome correlation of the missingness (mean net R, hold): missing −0.013 vs present −0.041 on
+TRAIN, −0.089 vs −0.040 on VAL, −0.166 vs −0.114 on TEST — **the sign flips across splits and the
+magnitude is 0.03–0.05 R.** That is NOT D1's signature (there the missing bucket was −0.28..−0.46 R
+at t −6..−16 in every family and every split, an availability indicator worth ~0.8 R). Provenance
+was checked as well: pm-missing runs 11.8% on keys served by the Stage-E parquet store (fetched
+04:00–15:59, so a missing value is a genuine "no premarket trades") and 13.6% on keys served from
+`bars_sip.db` — **close enough that pm-availability is not a proxy for "this key was in the old
+≥5%-range fetch"**, which is exactly the leak D1 found. `pm_dollar_vol` is therefore admitted, with
+two disclosures: (a) NaN is treated as BELOW the cut, so the `combo` and `pm_only` buckets contain
+only positively-established values while the complement mixes known-low with unknown; (b) every
+`news_only` result below is re-run with the 11% unknown rows dropped and does not change (§8.7).
+
+Bucket shares on the scoreable population (TRAIN / VAL / TEST): `neither` 72.8 / 73.6 / 74.6%,
+`pm_only` 11.0 / 12.0 / 12.7%, `news_only` 11.3 / 9.6 / 8.1%, `combo` 5.0 / 4.8 / 4.7%.
+
+## 8.3 The 60 pre-registered cells
+
+54 scoreable (6 structurally empty: F13 × `rest`, close-triggered by construction). Full table
+`score_e_tables.md`; per-cell CSV `score_e_results.csv`.
+
+**G1 (TRAIN mean net R > 0, t ≥ 2.0, ≥ 5 trades/week): 0 of 54. G2: 0. TEST not read for the grid.**
+
+Top of the ranking (TRAIN), with the gross column beside the net:
+
+| key | fill | exit | pop | TR n | tr/wk | **net R** | gross R | t | WR | stop% | VAL net R | VAL t | VAL green |
+|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| F6 {} | next | hold | combo | 362 | 7.1 | **+0.0177** | +0.1005 | 0.15 | 37.3 | 43.6 | +0.0775 | 0.73 | 0.59 |
+| F8 N=15 | next | hold | pm_only | 1311 | 25.7 | **+0.0008** | +0.0700 | 0.02 | 41.9 | 37.9 | −0.0279 | −0.60 | 0.45 |
+| F6 {} | rest | hold | combo | 440 | 8.6 | −0.0207 | +0.1390 | −0.21 | 34.3 | 44.8 | +0.0892 | 0.76 | 0.64 |
+| F8 N=15 | next | hold | all | 1368 | 26.8 | −0.0260 | +0.0352 | −0.76 | 41.9 | 35.4 | −0.0288 | −0.58 | 0.55 |
+| F8 N=30 | next | hold | all | 1200 | 23.5 | −0.0355 | +0.0144 | −1.20 | 43.8 | 26.2 | −0.0269 | −0.67 | 0.55 |
+| F8 N=5 | next | hold | all | 1656 | 32.5 | −0.0899 | −0.0052 | −2.35 | 37.4 | 48.6 | −0.1206 | −2.12 | 0.41 |
+| F13 | next | hold | all | 2247 | 44.1 | −0.2686 | −0.1023 | −4.91 | 21.2 | 76.1 | −0.1286 | −1.54 | 0.32 |
+
+Worst cell of the 54: `F13` rest-impossible, `next`/2r/combo at **−0.436 R**. The exit mix is the
+familiar one: hold-to-close books 43–81% `eod` exits and 19–76% stops with 0% targets by
+construction; the 2R variant converts 6–29% of trades into targets and is worse in every family.
+
+**Permutation, search-adjusted over all 54 cells (500 day-label sign-flip draws): observed max
+TRAIN t = 0.15, null 95th pct = 3.81, p = 1.000.** The grid contains no signal of the size it can
+detect, and the best cell in it is indistinguishable from a coin.
+
+**Declared sensitivities** (counted, none changes the verdict): universe **U1 only** 42 scoreable
+cells, G1 0 — best `F8 N=30` next/hold/all −0.018 R; universe **U2 only** 54 cells, G1 0; the
+**resting fill restricted to `rest_queue_ok == 1`** 24 cells, best −0.018 R, G1 0 (Stage C's
+finding that the queue check passes on too few rows to matter carries over).
+
+## 8.4 H6 answered: the old floor was keeping the better rows
+
+`score_e_follow.md` §A. Same table, same tape, same contract; each half booked on its own.
+
+| family | split | passed floor (net R, t) | below floor (net R, t) | % of family below floor |
+|---|---|---|---|---:|
+| F8 N=5 | TRAIN | **−0.005** (−0.13) | **−0.144** (−3.84) | 79.7% |
+| F8 N=5 | VAL | +0.033 (0.54) | −0.132 (−2.20) | |
+| F8 N=15 | TRAIN | −0.004 (−0.13) | −0.071 (−2.04) | 69.3% |
+| F8 N=15 | VAL | −0.074 (−1.92) | −0.034 (−0.67) | |
+| F8 N=30 | TRAIN | −0.032 (−1.29) | −0.073 (−2.38) | 60.4% |
+| F8 N=30 | VAL | +0.062 (1.71) | −0.047 (−1.01) | |
+| F6 {} | TRAIN | **+0.090** (2.03) | **−0.114** (−2.05) | 75.2% |
+| F6 {} | VAL | **+0.209** (2.80) | −0.046 (−0.61) | |
+| F13 | TRAIN | −0.225 (−3.44) | −0.227 (−3.98) | 60.7% |
+| F13 | VAL | −0.195 (−2.18) | −0.126 (−1.38) | |
+
+8 of 10 family × split comparisons favour the floor-passing half (7 of 10 by the booked mean and an 8th, F13 TRAIN, by a hair), and the two that do not (F8 N=15
+VAL, F13 VAL) are within one SE. The stop rate tells the mechanism: `F6 {}` stops on 28.2% of
+floor-passing trades and **58.9%** of below-floor trades; `F8 N=5` 39.6% vs 52.6%. A breakout on a
+name that has not yet moved 5% is a breakout with nothing behind it.
+
+## 8.5 Time bands (the H5/H6 crossing point)
+
+`score_e_follow.md` §A2, each band booked on its own, `all` population, next/hold.
+
+| family | 09:30–09:35 | 09:35–10:00 | 10:00–11:00 | 11:00–13:00 | 13:00–14:01 |
+|---|---:|---:|---:|---:|---:|
+| F8 N=5 TRAIN | — | −0.088 | −0.090 | −0.067 | −0.104 |
+| F8 N=15 TRAIN | — | −0.033 | −0.040 | **+0.007** | −0.042 |
+| F8 N=30 TRAIN | — | — | −0.041 | −0.025 | −0.016 |
+| F6 {} TRAIN | −0.100 | −0.130 | −0.014 | **+0.019** | **+0.035** |
+| F6 {} VAL | +0.021 | +0.005 | +0.121 | +0.052 | −0.006 |
+| F13 TRAIN | — | −0.273 | −0.250 | −0.317 | −0.241 |
+
+The early window is where the stop rate lives (F6 70.4% at 09:30–09:35, 58.9% at 09:35–10:00,
+against 4.3% at 13:00–14:01) and the cost per R is worst there. On the universe built specifically
+to let the early window compete, it does not.
+
+## 8.6 The ORB two-leg rule in its own window
+
+Combo (`has_news` AND `pm_dollar_vol > $5,816,688`) minus the rest, per trade, next/hold:
+
+| family | TRAIN | VAL | TEST | TRAIN 09:35–10:00 |
+|---|---:|---:|---:|---:|
+| F8 N=5 | −0.054 | −0.015 | −0.025 | −0.024 |
+| F8 N=15 | −0.087 | −0.039 | −0.032 | −0.056 |
+| F8 N=30 | −0.098 | +0.002 | −0.071 | — |
+| F6 {} | −0.019 | +0.091 | −0.109 | −0.168 |
+| F13 | −0.164 | −0.038 | −0.017 | −0.164 |
+
+Negative on TRAIN in 5 of 5, on TEST in 5 of 5, and negative on TRAIN in the 09:35–10:00 band in
+every family that has one. The booked form is the same: the 18 scoreable `combo` cells of the grid are all
+G1 failures and the best of them (`F6 {}` next/hold) runs 7.1 trades/week — under the gate's own
+5/week floor only because F6 is thin. **This closes the question D0b and D1 left open.** The
+`pm_only` leg alone is negative on TRAIN in 5 of 5 families as well (−0.003 to −0.161).
+
+## 8.7 `news_only` — the pre-registered bucket
+
+Per-trade, all-day, next/hold (`score_e_buckets.csv`):
+
+| family | TRAIN diff (t) | VAL diff (t) | TEST diff (t) | sign-agreement rule |
+|---|---|---|---|---|
+| F8 N=5 | **+0.061 (2.54)** | **+0.026 (0.78)** | +0.073 (2.15) | **PASS** |
+| F8 N=15 | +0.054 (2.99) | −0.021 (−1.01) | +0.008 (0.31) | fail (VAL sign) |
+| F8 N=30 | +0.041 (2.59) | −0.004 (−0.25) | +0.011 (0.50) | fail (< +0.05 R) |
+| F6 {} | +0.110 (1.91) | −0.017 (−0.23) | +0.183 (2.24) | fail (t < 2, VAL sign) |
+| F13 | −0.039 (−0.47) | −0.079 (−0.72) | +0.077 (0.57) | fail (sign) |
+
+For the one survivor, `F8 N=5`, the three required follow-ups:
+
+- **Monotone in PM$?** No, and the sign is the opposite of the shipped ORB gate's. Inside the
+  news-carrying rows, decile of `pm_dollar_vol` vs mean net R: **TRAIN rank correlation −0.78**
+  (decile 0 +0.025 → decile 9 −0.193), VAL +0.09. The premarket-unknown rows are the best decile on
+  both splits (+0.007 TRAIN, +0.037 VAL). Read plainly: within newsy names, MORE premarket dollars
+  is WORSE, which is why `news_only` beats `combo` — and it says the lift is a crowding penalty on
+  the high-PM$ tail, not a catalyst premium.
+- **Simpson's check.** The difference is positive in 5 of 5 price bands and 4 of 4 time bands on
+  TRAIN, so the all-day number is not one slice; but on VAL it is positive in 3 of 5 price bands and
+  2 of 4 time bands and negative in the $100+ band on both VAL and TEST. No single slice carries it;
+  no slice replicates it either.
+- **pm-unknown ablation.** Dropping the 11% of rows with no premarket value: TRAIN +0.057 (t 2.26),
+  VAL +0.013 (t 0.36), TEST +0.074 (t 2.11) — the effect is not an availability artefact.
+- **As a book: 0 of 9 G1 passes** (`score_e_newsonly.csv`), best `F8 N=30` next/hold at +0.0006 R
+  (t 0.02). The bucket's own level is negative on every split for `F8 N=5` (−0.027 / −0.037 / −0.092);
+  what is positive is only the *difference* to a worse remainder.
+- **Recaps vs company events** (30 random TRAIN trades of the bucket, 54 premarket articles, keyword
+  classifier fixed before the pull, `score_e_headlines.md`): 14 event-worded, 6 recap/list-worded, 3
+  both, 31 neither. Mean net R of the sampled trades by dominant class: **event-dominant −0.82
+  (n 9), recap-dominant +0.54 (n 3), neither +0.90 (n 17)**. Directionally the same as the ORB rule
+  book ("recaps performed EQUAL to real catalysts for longs" — here, if anything, better), but n = 30
+  symbol-days is descriptive and the classifier leaves 57% unclassified; this is a sanity check, not
+  evidence.
+
+## 8.8 The one post-hoc cell that cleared the arithmetic — frozen in §7, TEST read once
+
+`F6 {}` × next × hold × `range_so_far_pct ≥ 5` on the causal universe (`score_e_f6floor*.md`):
+
+| split | n | tr/wk | net R | gross R | t | WR | weeks green | top-1% off | top-5% off | +3R cap |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| TRAIN | 1034 | 20.3 | +0.0896 | +0.1182 | 2.03 | 45.1 | 0.55 | +0.006 | **−0.139** | +0.012 |
+| VAL | 512 | 23.3 | +0.2088 | +0.2398 | 2.80 | 46.7 | 0.77 | +0.098 | **−0.062** | +0.086 |
+| **TEST** | 372 | 26.6 | **+0.0958** | +0.1291 | **0.67** | 40.6 | **0.43** | **−0.065** | **−0.227** | **−0.071** |
+
+Per month on TEST: 2026-06 **−31.1 R**, 2026-07 −8.9 R, 2026-08 **+72.2 R**, 2026-09 +3.4 R — one
+month is the whole book. Permutation p over this stage's cells **0.936**. It fails the tail test on
+all three splits and the winner cap on TEST, its TEST t is 0.67 and fewer than half its TEST weeks
+are green. **Not a candidate.** The honest reading is that this is the same `F6 {}` shape Stage C
+already recorded as its closest miss (TRAIN +0.051 t 1.34, VAL +0.163 on the ≥5%-range universe),
+re-selected on a slightly different universe, with its t pushed over 2.0 by the extra gap-up and
+prior-day-range symbol-days — and it dies to the same tail test that killed it in Stage C.
+
+## 8.9 What it means, and the smallest effect each test could see
+
+1. **H6 is settled and it is settled against itself.** A universe knowable at 09:30 exists, it is
+   198,318 symbol-days, the tape for it is 99.06% served, the builder reproduces Stage B exactly on
+   shared keys — and the entry families are WORSE on it (−0.066 R/trade on TRAIN over 18 matched
+   cells) because the rows it adds are rows on which nothing has happened yet. The pre-signal range
+   floor stays, and it stays as a causal, live-computable FILTER rather than as a universe artefact.
+2. **The 09:35 gap-up window is not a hidden home for anything here** — not for the raw families,
+   not for the ORB two-leg rule, not for `news_only`. It is the highest-stop, highest-cost band on
+   a causal universe just as it was on the ≥5%-range one.
+3. **The news leg keeps producing a weak, wrong-signed relative effect.** `news_only` beat the rest
+   in D1 (not pre-registered) and beats the rest again here on one family of five, with the PM$
+   deciles running the wrong way for the shipped ORB logic. It is worth exactly one sentence in the
+   ORB rulebook — *within newsy names, high premarket dollars mark crowding* — and it is not worth a
+   book: 0 of 9 booked cells clear G1.
+4. **The cost constant is still the whole deficit.** Seven of the top ten cells are gross-POSITIVE
+   and net-negative; `F6 {}` next/hold/combo is +0.101 gross and +0.018 net, `F6 {}` rest/hold/combo
+   +0.139 gross and −0.021 net. Stage A's H7 correction is already in contract (c); what remains is
+   that at these R sizes a half-spread is still 0.10–0.15 R and no family clears it.
+
+**Smallest per-trade effect each headline cell could have seen** (2.8 × SE on the TRAIN book,
+≈ 80% power at 5% two-sided):
+
+| headline cell (next / hold / all) | TRAIN SE | MDE per trade | tr/wk | MDE in weekly R at 4 slots |
+|---|---:|---:|---:|---:|
+| F8 N=30 | 0.0296 | **0.083 R** | 23.5 | 1.95 R/wk |
+| F8 N=15 | 0.0344 | 0.096 R | 26.8 | 2.58 R/wk |
+| F8 N=5 | 0.0383 | 0.107 R | 32.5 | 3.49 R/wk |
+| F13 | 0.0548 | 0.153 R | 44.1 | 6.77 R/wk |
+| F6 {} | 0.0551 | 0.154 R | 36.2 | 5.58 R/wk |
+| F6 {} floor-passing (post-hoc) | 0.0442 | 0.124 R | 20.3 | 2.52 R/wk |
+| `news_only` difference, F8 N=5 | 0.0239 | 0.067 R | — | — |
+
+**Phrasing, per PLAN §1:** no edge was detectable **in this universe** (causal U1 ∪ U2 at 09:30),
+**at this horizon** (entries 09:30–14:01, exits hold-to-close or +2R on a close), **at this book
+size** (12 candidates/day, 4 concurrent), **over this window** (2025-01-17 → 2026-09-04, 410 days),
+**at this cost** (contract (c)); the smallest per-trade effect the headline tests could have seen is
+**0.083–0.154 R**, i.e. **2.0–6.8 R per week at 4 slots**. Effects smaller than that — including the
++0.02..+0.06 R that several cells actually show — are excluded by nothing here.
+
+## 8.10 Cells looked at in this stage
+
+| what | declared | scoreable / reported |
+|---|---:|---:|
+| the 60 pre-registered cells (5 families × 2 fills × 2 exits × 3 populations) | 60 | 54 |
+| sensitivity: universe U1 only | 60 | 42 |
+| sensitivity: universe U2 only | 60 | 54 |
+| sensitivity: resting fill restricted to `rest_queue_ok == 1` | 30 | 24 |
+| `news_only` booked (PLAN §1 pre-registration, hold exit) | 10 | 9 |
+| the D0b 2×2 per family × 6 scopes × 3 splits × 4 buckets (per-trade) | 360 | 296 |
+| H6 floor split, booked (5 families × 2 splits × 2 subsets) | 20 | 20 |
+| time bands, booked (5 families × 2 splits × 5 bands) | 50 | 40 |
+| PM$ decile monotonicity inside the news bucket (F8 N=5, 2 splits × 11 deciles) | 22 | 22 |
+| Simpson's slices (price band and time band × 3 splits) | 27 | 27 |
+| pm-unknown ablation | 3 | 3 |
+| Stage-C matched comparison | 18 | 18 |
+| the post-hoc `F6` floor cell (TRAIN / VAL / TEST) | 3 | 3 |
+| availability-audit diagnostic cells (missingness, provenance, bucket shares) | ~24 | ~24 |
+| headline classification sample (30 symbol-days, 54 articles) | 1 | 1 |
+| **total cell-instances** | **~748** | **~637** |
+
+Plus two 500-draw day-label sign-flip permutation nulls (over the 54 primary cells, and over those
+54 plus the post-hoc cell).
+
+## 8.11 Live implementability — moot, recorded anyway
+
+No candidate survives, so no engine delta is proposed. For the record, the two things Stage E
+established that ARE live-implementable and causal at the decision minute — `range_so_far_pct`
+computed on bars strictly before the signal, and a 09:30 universe membership from the previous
+day's daily bar plus the day's open — are both already computable in `trading/hod_break_engine.py`
+from the streamed bars and `daily_bars`; neither needs new data. They are filters, not a book.
