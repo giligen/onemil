@@ -780,6 +780,46 @@ class Config:
     # =========================================================================
 
     @property
+    def red_to_green_cfg(self) -> dict:
+        """Red-to-green (F6-PDR) book config (research/fuckup_audit/H/F6, 2026-09-17) — runs through the SAME engine as
+        the HOD-break (`HodBreakEngine(cfg=..., book='red_to_green')`); the knobs are the RedToGreenParams fields.
+        FAIL-SAFE defaults: disabled + dry_run (full pipeline, zero orders)."""
+        cfg = self._get_yaml("red_to_green", default={}) or {}
+        return {
+            "book": "red_to_green",
+            "enabled": bool(cfg.get("enabled", False)),
+            "dry_run": bool(cfg.get("dry_run", True)),
+            "risk_usd": float(cfg.get("risk_usd", 100.0)),
+            "daily_kill_usd": float(cfg.get("daily_kill_usd", -600.0)),
+            "weekly_kill_usd": float(cfg.get("weekly_kill_usd", -1200.0)),
+            "max_notional_usd": float(cfg.get("max_notional_usd", 10500.0)),
+            "min_price": float(cfg.get("min_price", 5.0)),
+            "min_adv20": float(cfg.get("min_adv20", 100_000.0)),
+            "max_spread_bps": float(cfg.get("max_spread_bps", 300.0)),
+            "max_spread_frac_r": float(cfg.get("max_spread_frac_r", 0.0)),
+            "admit_above_open_pct": float(cfg.get("admit_above_open_pct", 0.0)),
+            "stream_universe": bool(cfg.get("stream_universe", True)),
+            "universe_min_prev_close": float(cfg.get("universe_min_prev_close", 5.0)),
+            "stream_list_dir": str(cfg.get("stream_list_dir", "logs")),
+            "order_timeout_s": float(cfg.get("order_timeout_s", 10.0)),
+            "max_quote_age_s": float(cfg.get("max_quote_age_s", 60.0)),
+            "params": {
+                "pdr_min_pct": float(cfg.get("pdr_min_pct", 8.0)),
+                "range_floor_pct": float(cfg.get("range_floor_pct", 5.0)),
+                "level_buffer": float(cfg.get("level_buffer", 0.003)),
+                "cap": float(cfg.get("cap", 0.006)),
+                "min_r_pct": float(cfg.get("min_r_pct", 1.0)),
+                # exit shape: target_r 2.0 = the +2R book; a very large target_r (e.g. 50) = hold to the 15:55 flat with
+                # the SL leg only (the bracket's TP leg becomes a never-filled safety leg)
+                "target_r": float(cfg.get("target_r", 2.0)),
+                "max_per_day": int(cfg.get("max_per_day", 12)),
+                "max_concurrent": int(cfg.get("max_concurrent", 4)),
+                "last_entry_minute": int(cfg.get("last_entry_minute", 840)),
+                "flat_minute": int(cfg.get("flat_minute", 955)),
+            },
+        }
+
+    @property
     def hod_break_cfg(self) -> dict:
         """HOD-break book config (research/bf_zero, 2026-09-13). ONE spec with
         trading/hod_break.py: the detection/fill/exit knobs here are the

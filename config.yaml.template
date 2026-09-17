@@ -529,6 +529,36 @@ ignition_live:
     max_staged_fills: 10      # P1-6 adoption-side concurrency rail
     pdt_equity_min: 25000
 
+# Red-to-green book (research/fuckup_audit/H/F6, 2026-09-17) — ONE spec with trading/red_to_green.py, run through the
+# SAME engine as the HOD-break (HodBreakEngine, book: red_to_green). A stock that OPENS BELOW its prior close on a day
+# whose PRIOR day ranged >= 8% (ORB's day-2-continuation rule): once the day has ranged >= 5% (bars before the signal),
+# the first bar whose high reaches prior close x 1.003 signals; capped limit (60 bps, no chase) = next bar's open;
+# stop = the low of the day so far; target_r 2.0 = the +2R book (17/21 months green, TRAIN +0.058 / VAL +0.110 /
+# TEST +0.003 R per trade); target_r 50 = hold to the 15:55 flat (TRAIN +0.078 / VAL +0.251 / TEST +0.104, tail-heavy).
+# 12/day, 4 concurrent. Capacity ~$250-400 risk (H/F6_sizing). FAIL-SAFE: disabled + dry_run.
+red_to_green:
+  enabled: false
+  dry_run: true
+  risk_usd: 100
+  daily_kill_usd: -600
+  weekly_kill_usd: -1200
+  max_notional_usd: 10500
+  min_price: 5.0
+  min_adv20: 100000
+  max_spread_bps: 300
+  max_spread_frac_r: 0.0
+  universe_min_prev_close: 5.0
+  pdr_min_pct: 8.0
+  range_floor_pct: 5.0
+  level_buffer: 0.003
+  cap: 0.006
+  min_r_pct: 1.0
+  target_r: 2.0
+  max_per_day: 12
+  max_concurrent: 4
+  last_entry_minute: 840
+  flat_minute: 955
+
 # HOD-break book (research/bf_zero/REPORT.md, 2026-09-13) — ONE spec with trading/hod_break.py.
 # A stock >= 5% above its open with relative volume 1-5x its normal pace consolidates >= 5 bars within
 # 4% of the high-of-day, then breaks it: capped limit (60 bps, no chase), stop = consolidation low,

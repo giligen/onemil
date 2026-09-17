@@ -89,6 +89,7 @@ class RealtimeScanner:
         orb_engine=None,
         ignition_engine=None,
         hod_engine=None,
+        r2g_engine=None,
     ):
         """
         Initialize RealtimeScanner.
@@ -119,6 +120,7 @@ class RealtimeScanner:
         self.orb_engine = orb_engine
         self.ignition_engine = ignition_engine
         self.hod_engine = hod_engine
+        self.r2g_engine = r2g_engine            # red-to-green book (2026-09-17): same engine class, book=red_to_green
         # Ignition S1 signal shadow (2026-07-19): journal-only, zero
         # orders, hard-isolated — any failure inside it is swallowed and
         # can NEVER perturb BF/ORB. IGNITION_SHADOW=0 to disable.
@@ -528,6 +530,9 @@ class RealtimeScanner:
             if self.hod_engine is not None:
                 _engine_futures.append(
                     _engine_pool.submit(self._hod_break_tick))
+            if self.r2g_engine is not None:
+                _engine_futures.append(
+                    _engine_pool.submit(self._r2g_tick))
             # Wait for engine futures, polling shutdown_event every 1s.
             # Previously this used a single blocking `f.result(timeout=50)`
             # which kept the scanner unresponsive to SIGTERM for up to
@@ -631,6 +636,11 @@ class RealtimeScanner:
                         self.hod_engine.drain_bar_events()
                     except Exception as e:
                         logger.error(f"HOD bar-drain error: {e}", exc_info=True)
+                if self.r2g_engine is not None:
+                    try:
+                        self.r2g_engine.drain_bar_events()
+                    except Exception as e:
+                        logger.error(f"R2G bar-drain error: {e}", exc_info=True)
             if _shutdown:
                 break  # exits while True (intraday loop)
             # Cycle-overrun warning: if cycle work took longer than the 60s budget
@@ -676,6 +686,11 @@ class RealtimeScanner:
                     self.hod_engine.force_close_all()
                 except Exception as e:
                     logger.error(f"HOD-break shutdown close raised: {e}")
+            if self.r2g_engine is not None:
+                try:
+                    self.r2g_engine.force_close_all()
+                except Exception as e:
+                    logger.error(f"Red-to-green shutdown close raised: {e}")
             if self.ignition_engine is not None:
                 try:
                     self.ignition_engine.force_close_all()
@@ -733,6 +748,15 @@ class RealtimeScanner:
             self.hod_engine.process_tick()
         except Exception as e:
             logger.error(f"HOD-break tick raised: {e}", exc_info=True)
+
+    def _r2g_tick(self) -> None:
+        """Red-to-green engine cycle — same contract as the HOD-break tick; never raises."""
+        if self.r2g_engine is None:
+            return
+        try:
+            self.r2g_engine.process_tick()
+        except Exception as e:
+            logger.error(f"Red-to-green tick raised: {e}", exc_info=True)
 
     def _orb_tick(self) -> None:
         """One ORB engine cycle (re-seed universe + entries + exits).
