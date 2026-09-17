@@ -66,45 +66,54 @@ class TestComputeLimitPriceFromQuote:
     """Test spread-based pricing tiers."""
 
     def test_tight_spread_uses_midpoint(self):
-        """Spread < $0.05 → midpoint."""
-        price, method = StopMonitor.compute_limit_price_from_quote(9.98, 10.00)
+        """Spread < $0.05 → midpoint. NON-URGENT only since D3 FIX 5 —
+        an exit that is happening because price moved against us never
+        rests above the bid (see TestUrgentNeverPricesAboveBid)."""
+        price, method = StopMonitor.compute_limit_price_from_quote(
+            9.98, 10.00, urgent=False)
         assert price == 9.99  # mid of 9.98 and 10.00
         assert method == 'quote_tight'
 
     def test_tight_spread_penny(self):
         """$0.01 spread → midpoint rounds correctly."""
-        price, method = StopMonitor.compute_limit_price_from_quote(5.00, 5.01)
+        price, method = StopMonitor.compute_limit_price_from_quote(
+            5.00, 5.01, urgent=False)
         assert price == 5.0  # mid = 5.005, rounds to 5.00 (banker's rounding)
         assert method == 'quote_tight'
 
     def test_medium_spread_uses_bid_plus_penny(self):
         """Spread $0.05-$0.15 → bid + $0.01."""
-        price, method = StopMonitor.compute_limit_price_from_quote(9.90, 10.00)
+        price, method = StopMonitor.compute_limit_price_from_quote(
+            9.90, 10.00, urgent=False)
         assert price == 9.91  # bid + 0.01
         assert method == 'quote_medium'
 
     def test_medium_spread_boundary(self):
         """Exactly $0.05 spread → medium tier."""
-        price, method = StopMonitor.compute_limit_price_from_quote(9.95, 10.00)
+        price, method = StopMonitor.compute_limit_price_from_quote(
+            9.95, 10.00, urgent=False)
         assert price == 9.96
         assert method == 'quote_medium'
 
     def test_wide_spread_uses_bid(self):
         """Spread > $0.15 → bid price."""
-        price, method = StopMonitor.compute_limit_price_from_quote(9.80, 10.00)
+        price, method = StopMonitor.compute_limit_price_from_quote(
+            9.80, 10.00, urgent=False)
         assert price == 9.80
         assert method == 'quote_wide'
 
     def test_wide_spread_boundary(self):
         """$0.15 spread (float edge) → wide tier due to float precision."""
-        price, method = StopMonitor.compute_limit_price_from_quote(9.85, 10.00)
+        price, method = StopMonitor.compute_limit_price_from_quote(
+            9.85, 10.00, urgent=False)
         # 10.00 - 9.85 = 0.15000...036 (float), exceeds 0.15 → wide
         assert price == 9.85
         assert method == 'quote_wide'
 
     def test_very_wide_spread(self):
         """$0.50 spread → bid."""
-        price, method = StopMonitor.compute_limit_price_from_quote(4.50, 5.00)
+        price, method = StopMonitor.compute_limit_price_from_quote(
+            4.50, 5.00, urgent=False)
         assert price == 4.50
         assert method == 'quote_wide'
 
@@ -133,7 +142,8 @@ class TestComputeLimitPriceFromQuote:
 
     def test_high_price_stock_tight_spread(self):
         """$50 stock with $0.02 spread → midpoint saves $0.24 vs fixed offset."""
-        price, method = StopMonitor.compute_limit_price_from_quote(49.99, 50.01)
+        price, method = StopMonitor.compute_limit_price_from_quote(
+            49.99, 50.01, urgent=False)
         assert price == 50.00  # mid
         assert method == 'quote_tight'
         # Fixed offset would be 50.01 - max(0.03, 50.01*0.005) = 50.01 - 0.25 = $49.76
@@ -160,14 +170,14 @@ class TestComputeLimitPriceFromQuote:
     def test_ofi_neutral_uses_normal_tiers(self):
         """Neutral OFI → normal spread tiers."""
         price, method = StopMonitor.compute_limit_price_from_quote(
-            7.65, 7.75, ofi=-500
+            7.65, 7.75, ofi=-500, urgent=False
         )
         assert method == 'quote_medium'  # $0.10 spread = medium tier
 
     def test_ofi_positive_uses_normal_tiers(self):
         """Positive OFI (buying pressure) → normal spread tiers."""
         price, method = StopMonitor.compute_limit_price_from_quote(
-            9.98, 10.00, ofi=2000
+            9.98, 10.00, ofi=2000, urgent=False
         )
         assert method == 'quote_tight'  # tight spread, no OFI override
 
@@ -184,7 +194,7 @@ class TestComputeLimitPriceFromQuote:
     def test_size_normal_when_adequate_depth(self):
         """Selling 500 shares into 5000 bid depth → normal tiers."""
         price, method = StopMonitor.compute_limit_price_from_quote(
-            9.98, 10.00, shares=500, bid_size=5000
+            9.98, 10.00, shares=500, bid_size=5000, urgent=False
         )
         assert method == 'quote_tight'  # enough depth, use normal pricing
 
@@ -214,7 +224,8 @@ class TestSavingsVsFixedOffset:
 
     def test_savings_on_5_dollar_stock(self, monitor):
         """$5 stock: tight spread saves vs fixed offset."""
-        quote_price, _ = StopMonitor.compute_limit_price_from_quote(4.99, 5.01)
+        quote_price, _ = StopMonitor.compute_limit_price_from_quote(
+            4.99, 5.01, urgent=False)
         fixed_price = monitor.compute_limit_price(5.00)
         assert quote_price > fixed_price  # quote gets better price
         savings = quote_price - fixed_price
@@ -222,7 +233,8 @@ class TestSavingsVsFixedOffset:
 
     def test_savings_on_20_dollar_stock(self, monitor):
         """$20 stock: tight spread saves ~$0.08/share."""
-        quote_price, _ = StopMonitor.compute_limit_price_from_quote(19.99, 20.01)
+        quote_price, _ = StopMonitor.compute_limit_price_from_quote(
+            19.99, 20.01, urgent=False)
         fixed_price = monitor.compute_limit_price(20.00)
         savings = quote_price - fixed_price
         assert savings >= 0.05  # significant savings
@@ -293,3 +305,92 @@ class TestStopExitEventFields:
         )
         assert event.submitted_at == 1234567890.0
         assert event.pricing_method == 'quote_tight'
+
+
+# ---------------------------------------------------------------------------
+# D3 FIX 5 — a stop exit never prices off the midpoint
+# ---------------------------------------------------------------------------
+#
+# research/fuckup_audit/D3_exec/REPORT.md §M5. EEIQ 2026-03-26 was priced
+# by the tight tier: bid 7.67 / ask 7.72 -> limit $7.70, THREE CENTS ABOVE
+# THE BID — a non-marketable sell limit on a stock printing an 8.8% range
+# in its own entry minute. It sat 38.5 s; the 9,375-share position ($75K
+# notional on a $50K account) was then market-closed at 7.6552. The tier
+# was still in the file and still reachable.
+
+
+class TestUrgentNeverPricesAboveBid:
+
+    def test_urgent_is_the_default(self):
+        """A caller that says nothing gets the safe behaviour."""
+        price, method = StopMonitor.compute_limit_price_from_quote(7.67, 7.72)
+        assert price <= 7.67
+        assert method == 'quote_urgent'
+
+    def test_stop_path_never_prices_above_bid(self):
+        """The EEIQ quote: limit <= 7.67, never 7.70."""
+        price, _ = StopMonitor.compute_limit_price_from_quote(7.67, 7.72)
+        assert price == 7.67
+        assert price != 7.70
+
+    @pytest.mark.parametrize('bid,ask', [
+        (9.98, 10.00),    # tight  — was the midpoint
+        (9.90, 10.00),    # medium — was bid + 1c
+        (9.80, 10.00),    # wide   — already the bid
+        (49.99, 50.01),   # high price, tight
+        (5.00, 5.01),     # penny spread
+    ])
+    def test_urgent_is_at_or_below_the_bid_at_every_spread(self, bid, ask):
+        price, _ = StopMonitor.compute_limit_price_from_quote(bid, ask)
+        assert price <= bid, f"{price} rests above the bid {bid}"
+
+    def test_ofi_overrides_still_win(self):
+        """The OFI escape hatches are strictly more aggressive than the
+        urgent tier and must keep their precedence."""
+        assert StopMonitor.compute_limit_price_from_quote(
+            7.67, 7.72, ofi=-3623)[1] == 'ofi_urgent'
+        assert StopMonitor.compute_limit_price_from_quote(
+            7.67, 7.72, ofi=-1500)[1] == 'ofi_aggressive'
+        assert StopMonitor.compute_limit_price_from_quote(
+            7.67, 7.69, shares=10000, bid_size=200)[1] == 'size_aggressive'
+
+    def test_non_urgent_still_reaches_the_legacy_tiers(self):
+        """The tiers are gated, not deleted — a future caller that really
+        is willing to wait can still ask for them, explicitly."""
+        assert StopMonitor.compute_limit_price_from_quote(
+            9.98, 10.00, urgent=False)[1] == 'quote_tight'
+
+    def test_invalid_quotes_are_still_invalid(self):
+        assert StopMonitor.compute_limit_price_from_quote(
+            0.0, 10.0)[1] == 'invalid'
+        assert StopMonitor.compute_limit_price_from_quote(
+            10.0, 9.9)[1] == 'invalid'
+
+    def test_no_production_caller_asks_for_the_midpoint(self):
+        """Source guard: the midpoint tier must stay unreachable from the
+        live code. A new `urgent=False` call site is a decision that has
+        to come with its own justification — and will trip this test."""
+        import ast
+        from pathlib import Path
+        root = Path(__file__).resolve().parent.parent
+        offenders = []
+        for rel in ('trading/stop_monitor.py', 'trading/trading_engine.py',
+                    'trading/orb_engine.py', 'trading/macd_wave_engine.py',
+                    'trading/ignition_engine.py'):
+            tree = ast.parse((root / rel).read_text())
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                fn = node.func
+                name = getattr(fn, 'attr', getattr(fn, 'id', ''))
+                if name != 'compute_limit_price_from_quote':
+                    continue
+                for kw in node.keywords:
+                    if (kw.arg == 'urgent'
+                            and isinstance(kw.value, ast.Constant)
+                            and kw.value.value is False):
+                        offenders.append((rel, kw.value.lineno))
+        assert not offenders, (
+            f"production code asks compute_limit_price_from_quote for the "
+            f"midpoint tier at {offenders} — see D3 FIX 5 / REPORT.md §M5 "
+            f"(EEIQ 2026-03-26: limit $7.70 on a $7.67 bid, sat 38.5 s)")

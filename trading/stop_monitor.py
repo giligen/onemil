@@ -2221,7 +2221,11 @@ class StopMonitor:
             if quote:
                 bid = quote.get('bid_price', 0.0)
                 ask = quote.get('ask_price', 0.0)
-                limit_price, pricing_method = self.compute_limit_price_from_quote(bid, ask)
+                # D3 FIX 5: a partial that fires on an exhaustion candle is
+                # selling into a reversal — it is an urgent exit, so it
+                # never rests at or above the bid.
+                limit_price, pricing_method = self.compute_limit_price_from_quote(
+                    bid, ask, urgent=True)
                 if limit_price <= 0:
                     limit_price = self.compute_limit_price(highest)
                     pricing_method = 'fixed_offset'
@@ -2490,12 +2494,26 @@ class StopMonitor:
         ofi: float = 0.0,
         shares: int = 0,
         bid_size: int = 0,
+        urgent: bool = True,
     ) -> tuple:
         """
         Compute limit sell price from current NBBO quote using spread tiers,
         with OFI and size-awareness for urgent exits.
 
-        Spread tiers (base pricing):
+        D3 FIX 5 (REPORT.md §M5). The tight and medium tiers price AT or
+        ABOVE the bid — a NON-marketable sell limit. EEIQ 2026-03-26 was
+        priced by the tight tier: bid 7.67 / ask 7.72 -> limit **$7.70,
+        three cents ABOVE the bid**, on a stock printing an 8.8% range in
+        its own entry minute. It sat 38.5 s and the position (9,375 sh,
+        $75K notional on a $50K account) was market-closed at 7.6552.
+
+        `urgent` (DEFAULT TRUE) makes those tiers unreachable: an exit that
+        is happening because price went against us never rests above the
+        bid. Pass `urgent=False` only from a path that is genuinely willing
+        to wait for a better print — no production caller does today, and
+        adding one is a decision, not an accident.
+
+        Spread tiers (base pricing, `urgent=False` only):
         - Tight spread (<$0.05): sell at midpoint — liquid, saves vs fixed offset
         - Medium spread ($0.05-$0.15): sell at bid + $0.01 — fast fill, minimal give
         - Wide spread (>$0.15): sell at bid — take what's available on illiquid
@@ -2513,11 +2531,14 @@ class StopMonitor:
             ofi: Order Flow Imbalance (negative = selling pressure)
             shares: Number of shares to sell
             bid_size: Depth at top of bid book
+            urgent: True (default) = this is an exit that must fill; the
+                midpoint / bid+1c tiers are skipped and the limit rests AT
+                the bid ('quote_urgent'). False = the legacy spread tiers.
 
         Returns:
             Tuple of (limit_price, pricing_method) where pricing_method is
-            'quote_tight', 'quote_medium', 'quote_wide', 'ofi_urgent',
-            'ofi_aggressive', or 'size_aggressive'.
+            'quote_urgent', 'quote_tight', 'quote_medium', 'quote_wide',
+            'ofi_urgent', 'ofi_aggressive', or 'size_aggressive'.
             Returns (0.0, 'invalid') if quote data is invalid.
         """
         if bid <= 0 or ask <= 0 or ask < bid:
@@ -2536,7 +2557,11 @@ class StopMonitor:
         elif bid_size > 0 and shares > 5 * bid_size:
             limit = round(bid, 2)
             method = 'size_aggressive'
-        # Normal spread tiers
+        # D3 FIX 5: an urgent exit never rests at or above the bid.
+        elif urgent:
+            limit = round(bid, 2)
+            method = 'quote_urgent'
+        # Normal spread tiers (non-urgent callers only)
         elif spread < 0.05:
             limit = round((bid + ask) / 2, 2)
             method = 'quote_tight'
