@@ -6,7 +6,8 @@ Modeled (each one bit the HOD-break engine or its ancestors at least once):
   parent's fill; canceling the parent kills the held legs;
 - a marketable limit fills IMMEDIATELY (buy at the ask, sell at the bid); a stop sell elects when the bid <= stop;
 - OCO: a leg that fills completely cancels its sibling; a PARTIAL leg fill reduces the sibling's qty;
-- `replace_order_limit_price` creates a NEW order id — the old order becomes `replaced` with `replaced_by`;
+- `replace_order_limit_price` / `replace_order_stop_price` create a NEW order id — the old order becomes
+  `replaced` with `replaced_by` (D3 FIX 1 depends on the caller following the new id);
 - `cancel_order` returns False when the order is already filled / unknown (the client swallows 404/422);
   `defer_cancel(order_id)` makes the next cancel answer `pending_cancel` (the order can still fill);
 - a sell larger than the shares available (position minus shares reserved by live sell orders) is REJECTED while a
@@ -38,6 +39,7 @@ class FakeAlpacaBroker:
         self.orders: Dict[str, dict] = {}
         self.positions: Dict[str, int] = dict(positions or {})
         self.auto_fill = True
+        self.allow_close_position = False       # StopMonitor's escalation needs a real market close; HOD must never call it
         self._deferred_cancel: set = set()
         self.calls: List[tuple] = []
         self.trading_client = NS(_base_url='https://paper-api.alpaca.markets', get_order_by_id=self._raw_order, submit_order=self._submit_sdk,
@@ -178,18 +180,29 @@ class FakeAlpacaBroker:
         if sib and sib['status'] in OPEN: sib['status'] = 'canceled'                # OCO
         return True
 
-    def replace_order_limit_price(self, order_id: str, new_limit_price: float) -> dict:
-        self.calls.append(('replace_order_limit_price', {'order_id': order_id, 'new_limit_price': new_limit_price}))
+    def _replace(self, order_id: str, **fields) -> dict:
+        """Alpaca replace semantics: a NEW order id; the old one goes `replaced` with `replaced_by`."""
         o = self.orders.get(order_id)
         if o is None or o['status'] not in OPEN: raise AlpacaAPIError(f'order {order_id} is not replaceable')
-        n = self._new(symbol=o['symbol'], qty=o['qty'] - o['filled_qty'], side=o['side'], type=o['type'], order_class=o['order_class'], limit_price=round(new_limit_price, 2),
-                      status=o['status'], parent=o['parent'], sibling=o['sibling'], replaces=o['id'], client_order_id=o['client_order_id'])
+        kw = dict(symbol=o['symbol'], qty=o['qty'] - o['filled_qty'], side=o['side'], type=o['type'], order_class=o['order_class'],
+                  limit_price=o['limit_price'], stop_price=o['stop_price'], status=o['status'], parent=o['parent'], sibling=o['sibling'],
+                  replaces=o['id'], client_order_id=o['client_order_id'])
+        kw.update(fields)
+        n = self._new(**kw)
         if o['sibling'] and o['sibling'] in self.orders: self.orders[o['sibling']]['sibling'] = n['id']
         if o['parent'] and o['parent'] in self.orders:
             p = self.orders[o['parent']]; p['legs'] = [n['id'] if l == o['id'] else l for l in p['legs']]
         o['status'] = 'replaced'; o['replaced_by'] = n['id']
         self._settle()
         return {'id': n['id'], 'status': n['status']}
+
+    def replace_order_limit_price(self, order_id: str, new_limit_price: float) -> dict:
+        self.calls.append(('replace_order_limit_price', {'order_id': order_id, 'new_limit_price': new_limit_price}))
+        return self._replace(order_id, limit_price=round(new_limit_price, 2))
+
+    def replace_order_stop_price(self, order_id: str, new_stop_price: float) -> dict:
+        self.calls.append(('replace_order_stop_price', {'order_id': order_id, 'new_stop_price': new_stop_price}))
+        return self._replace(order_id, stop_price=round(new_stop_price, 2))
 
     def get_open_orders(self) -> List[dict]:
         self._settle()
@@ -209,5 +222,16 @@ class FakeAlpacaBroker:
         return {}
 
     def close_position(self, symbol: str) -> dict:
+        """A market close. OFF by default: the HOD-break engine must never call it (the broker legs ARE its
+        exits), so an unexpected call is a test failure. StopMonitor's escalation path legitimately calls it —
+        set `allow_close_position = True` to get the real behaviour (cancel the working sells, then market out)."""
         self.calls.append(('close_position', {'symbol': symbol}))
-        raise AssertionError(f'close_position({symbol}) must never be called by the HOD-break engine')
+        if not self.allow_close_position:
+            raise AssertionError(f'close_position({symbol}) must never be called by the HOD-break engine')
+        qty = self.positions.get(symbol, 0)
+        if qty <= 0: raise AlpacaAPIError('40410000: position not found')
+        for o in list(self.orders.values()):                                    # free the reserved shares first
+            if o['symbol'] == symbol and o['side'] == 'sell' and o['status'] in OPEN: self.cancel_order(o['id'])
+        o = self._new(symbol=symbol, qty=int(self.positions[symbol]), side='sell', type='market')
+        self._settle(force=True)
+        return {'id': o['id'], 'status': o['status']}

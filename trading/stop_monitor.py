@@ -537,6 +537,7 @@ class StopMonitor:
         alpaca_clients_by_strategy: Optional[Dict[str, AlpacaClient]] = None,
         exit_min_offset: float = 0.01,
         exit_spread_offset_factor: float = 0.30,
+        prefer_sl_leg_exit: bool = True,
     ):
         """
         Initialize StopMonitor.
@@ -575,6 +576,11 @@ class StopMonitor:
         # (force-exit override path, REST-failure last-resort).
         self._exit_min_offset = float(exit_min_offset)
         self._exit_spread_offset_factor = float(exit_spread_offset_factor)
+        # D3 FIX 1: when the watch has a LIVE bracket SL leg, REPLACE its stop
+        # price down to the marketable level and let the broker leg be the
+        # exit, rather than cancelling it to make room for our own limit.
+        # config: trading.self_managed_stops.prefer_sl_leg_exit (default True).
+        self._prefer_sl_leg_exit = bool(prefer_sl_leg_exit)
         self._notifier = notifier
 
         self._watches: Dict[str, WatchEntry] = {}
@@ -3444,6 +3450,215 @@ class StopMonitor:
             return trigger_price, mkt_order_id, self.BRANCH_LAST_RESORT
         return price, mkt_order_id, self.BRANCH_MARKET_CLOSE
 
+    # Order states in which a broker leg is still capable of protecting the
+    # position. Anything else (filled / canceled / expired / rejected /
+    # replaced) means the leg is gone and cannot be repriced.
+    _LIVE_ORDER_STATES = frozenset({
+        'new', 'accepted', 'held', 'pending_new', 'accepted_for_bidding',
+        'partially_filled', 'calculated', 'pending_replace',
+    })
+
+    async def _exit_via_sl_leg(
+        self, loop, client, symbol: str, watch: 'WatchEntry',
+        target_stop: float, trigger_price: float,
+    ) -> Optional[tuple]:
+        """D3 FIX 1 — make the LIVE broker SL leg the exit.
+
+        Instead of cancelling every open order for the symbol (the SL leg
+        included) and then racing to fill our own limit, we move the leg's
+        stop down to the marketable level and let the broker execute it.
+        The position is protected for the whole window; `naked_window_ms`
+        is 0 unless we later have to escalate.
+
+        Alpaca's replace creates a NEW order id — the old one goes to
+        `replaced`. We follow the new id (`watch.sl_leg_id` is updated in
+        place) because the HOD-break engine already learned what happens
+        when you keep polling the id you replaced: the fill is invisible
+        and the flat-the-book path sells shares you no longer hold.
+
+        Returns:
+            ``(fill_price, order_id, branch)`` when the leg took the exit
+            (or when escalating from it produced a terminal answer), or
+            ``None`` meaning "not applicable — use the legacy
+            cancel-and-place path". Every None return is logged with the
+            reason, per the fallback-logging rule.
+        """
+        if not self._prefer_sl_leg_exit:
+            return None
+        if not watch.sl_leg_id:
+            logger.info(
+                f"StopMonitor: {symbol} no sl_leg_id on the watch — "
+                f"cancel-and-place path (no broker stop to preserve)"
+            )
+            return None
+        if not (target_stop and target_stop > 0):
+            logger.warning(
+                f"StopMonitor: {symbol} no usable target stop "
+                f"({target_stop}) — cancel-and-place path"
+            )
+            return None
+
+        # Is the leg actually alive, and does it cover the whole position?
+        try:
+            leg = await loop.run_in_executor(
+                None, client.get_order, watch.sl_leg_id)
+        except Exception as e:
+            logger.warning(
+                f"StopMonitor: {symbol} SL leg {watch.sl_leg_id[:8]} lookup "
+                f"failed ({e}) — cancel-and-place path"
+            )
+            return None
+        status = str(leg.get('status', '')).lower()
+        if status not in self._LIVE_ORDER_STATES:
+            logger.info(
+                f"StopMonitor: {symbol} SL leg {watch.sl_leg_id[:8]} is "
+                f"'{status}', not live — cancel-and-place path"
+            )
+            return None
+        try:
+            leg_qty = int(leg.get('qty') or 0) - int(leg.get('filled_qty') or 0)
+        except (TypeError, ValueError):
+            leg_qty = 0
+
+        broker_qty = 0
+        try:
+            for _p in await loop.run_in_executor(None,
+                                                 client.get_open_positions):
+                if _p.get('symbol') == symbol:
+                    broker_qty = abs(int(float(_p.get('qty', 0) or 0)))
+                    break
+        except Exception as e:
+            logger.warning(
+                f"StopMonitor: {symbol} position re-query failed ({e}) — "
+                f"cancel-and-place path (cannot prove the SL leg covers "
+                f"the whole position)"
+            )
+            return None
+        if broker_qty <= 0:
+            logger.info(
+                f"StopMonitor: {symbol} broker shows no position — "
+                f"cancel-and-place path handles the race"
+            )
+            return None
+        if leg_qty != broker_qty:
+            # A leg that covers only part of the position would strand the
+            # rest with no exit. The legacy path re-queries the qty and
+            # sells the broker's view, so hand it over.
+            logger.warning(
+                f"StopMonitor: {symbol} SL leg covers {leg_qty} sh but the "
+                f"broker holds {broker_qty} — cancel-and-place path (a "
+                f"partial leg would strand {broker_qty - leg_qty} sh)"
+            )
+            return None
+
+        old_id = watch.sl_leg_id
+        try:
+            replaced = await loop.run_in_executor(
+                None, client.replace_order_stop_price, old_id, target_stop)
+        except Exception as e:
+            # The ORIGINAL leg is untouched and still protecting — this is
+            # the safe failure. Fall back to cancel-and-place.
+            logger.warning(
+                f"StopMonitor: {symbol} SL leg reprice to ${target_stop:.2f} "
+                f"failed ({e}) — leg {old_id[:8]} still live; "
+                f"cancel-and-place path"
+            )
+            return None
+
+        new_id = str((replaced or {}).get('id') or '') or old_id
+        watch.sl_leg_id = new_id
+        logger.info(
+            f"StopMonitor: {symbol} SL LEG REPLACED {old_id[:8]}→"
+            f"{new_id[:8]} stop→${target_stop:.2f} qty={broker_qty} "
+            f"(the broker leg IS the exit — naked_window_ms=0)"
+        )
+
+        fill = await self._poll_order_fill(
+            client, new_id, fallback_price=target_stop)
+        if fill is not None:
+            return fill, new_id, ExitBranch.SL_LEG.value
+
+        # The leg didn't elect inside the budget. Only NOW does protection
+        # lapse, and only for the escalation — `_escalate_to_market_close`
+        # cancels the leg, re-checks it for a fill race, then market-closes.
+        logger.warning(
+            f"StopMonitor: {symbol} SL leg {new_id[:8]} did not fill within "
+            f"{self._STOP_EXIT_FILL_TIMEOUT_S}s at stop ${target_stop:.2f} — "
+            f"escalating (naked window opens here, not at trigger)"
+        )
+        price, order_id, branch = await self._escalate_to_market_close(
+            client, symbol, new_id, trigger_price,
+            sl_leg_id=new_id, watch=watch,
+        )
+        if branch == self.BRANCH_LIMIT_RACE:
+            # The leg filled during our cancel — it WAS the exit.
+            return price, order_id, ExitBranch.SL_LEG.value
+        return price, order_id, self._EXIT_BRANCH_BY_ESCALATION.get(
+            branch, ExitBranch.MARKET_FALLBACK.value)
+
+    def _emit_stop_exit_event(
+        self, symbol: str, watch: 'WatchEntry', exit_price: float,
+        qty: int, order_id: str, exit_reason: str, exit_branch: str,
+        trigger_price: float, pricing_method: str, limit_price: float,
+        bid: float, ask: float, bid_size: int, ask_size: int,
+    ) -> None:
+        """Queue the exit event and retire the watch.
+
+        One emit site for both the SL-leg path and the cancel-and-place
+        path, so the `confirmed` rule and the telemetry payload cannot
+        drift between them.
+        """
+        event = StopExitEvent(
+            symbol=symbol,
+            stop_price=watch.stop_price,
+            exit_price=exit_price,
+            shares=qty,
+            order_id=order_id,
+            exit_reason=exit_reason,
+            exit_branch=exit_branch,
+            trade_db_id=watch.trade_db_id,
+            submitted_at=time_mod.time(),
+            pricing_method=pricing_method,
+            exit_trigger_price=trigger_price,
+            exit_quote_bid=bid,
+            exit_quote_ask=ask,
+            exit_quote_bid_size=bid_size,
+            exit_quote_ask_size=ask_size,
+            exit_limit_price=limit_price,
+            exit_ofi=watch.ofi_cumulative,
+            strategy=watch.strategy,
+            # D3 FIX 6: key confirmation on the BRANCH, not on the reason
+            # string. The reason now survives escalation, so
+            # `exit_reason != 'stop_loss_unconfirmed'` would have reported
+            # a last-resort trail_stop as a confirmed fill.
+            confirmed=(exit_branch != ExitBranch.LAST_RESORT.value),
+        )
+        # `slip_vs_bid_bps` is THE number the D3 fix is judged on (REPORT
+        # §6.1): median -58 bps today, worst -229 (RBNE), target >= -25.
+        # Defensive numeric coercion for the same reason build_exit_update
+        # has `_numf` — a stale/failed quote path can leave `bid` as a
+        # MagicMock in tests or a None from the broker in production, and
+        # a telemetry line must never break an exit.
+        slip_bps = None
+        try:
+            if (isinstance(bid, (int, float)) and not isinstance(bid, bool)
+                    and float(bid) > 0 and float(exit_price) > 0):
+                slip_bps = (float(exit_price) - float(bid)) / float(bid) * 1e4
+        except (TypeError, ValueError):
+            slip_bps = None
+        logger.info(
+            f"StopMonitor: {symbol} EXIT BRANCH {exit_branch} "
+            f"reason={exit_reason} qty={qty} fill={exit_price} "
+            f"slip_vs_bid_bps="
+            f"{'n/a' if slip_bps is None else format(slip_bps, '.1f')} "
+            f"confirmed={event.confirmed}"
+        )
+        self._exit_events.put(event)
+        with self._watch_lock:
+            self._watches.pop(symbol, None)
+        with self._exit_lock:
+            self._exit_in_progress[symbol] = False
+
     async def _execute_stop_exit(
         self, symbol: str, trigger_price: float, watch: WatchEntry,
         exit_reason: str = "stop_loss",
@@ -3479,20 +3694,6 @@ class StopMonitor:
         order_id = ""
 
         try:
-            # Cancel TP leg first (safe — doesn't protect downside)
-            if watch.tp_leg_id:
-                try:
-                    await loop.run_in_executor(
-                        None, client.cancel_order, watch.tp_leg_id
-                    )
-                    logger.info(
-                        f"StopMonitor: {symbol} cancelled TP leg {watch.tp_leg_id}"
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"StopMonitor: {symbol} TP cancel failed (may be filled): {e}"
-                    )
-
             # NOTE on naked-window: Alpaca holds shares inside active bracket
             # legs, blocking a separate limit sell. So the bulk-cancel below
             # (before submit) must kill the SL leg too, which means there's
@@ -3579,6 +3780,59 @@ class StopMonitor:
                     logger.warning(
                         f"StopMonitor: {symbol} quote failed ({e}) — "
                         f"fixed-offset limit=${limit_price:.2f}"
+                    )
+
+            # D3 FIX 1 — try the broker's own SL leg FIRST. It is already
+            # resting, it already holds the shares, and repricing it keeps
+            # the position protected for the whole exit. Only if there is
+            # no live leg (or it can't cover the position) do we fall
+            # through to the cancel-and-place path below, which is the
+            # pre-2026-09-17 behaviour byte for byte.
+            sl_exit = await self._exit_via_sl_leg(
+                loop, client, symbol, watch,
+                target_stop=limit_price, trigger_price=trigger_price,
+            )
+            if sl_exit is not None:
+                sl_price, sl_order_id, sl_branch = sl_exit
+                if sl_branch == ExitBranch.SL_LEG_RACE.value:
+                    exit_reason = ExitReason.STOP_LOSS_BRACKET_SL_RACE.value
+                elif sl_branch == ExitBranch.LAST_RESORT.value:
+                    exit_reason = ExitReason.STOP_LOSS_UNCONFIRMED.value
+                # The TP sibling is cancelled by the broker's own OCO when
+                # the SL leg fills; on an escalation the bulk cancel inside
+                # `_escalate_to_market_close` took it. Best-effort tidy-up
+                # only — never before the position is flat.
+                if watch.tp_leg_id:
+                    try:
+                        await loop.run_in_executor(
+                            None, client.cancel_order, watch.tp_leg_id)
+                    except Exception as e:
+                        logger.debug(
+                            f"StopMonitor: {symbol} post-exit TP cancel: {e}")
+                self._emit_stop_exit_event(
+                    symbol, watch, sl_price,
+                    qty=watch.shares, order_id=sl_order_id,
+                    exit_reason=exit_reason, exit_branch=sl_branch,
+                    trigger_price=trigger_price, pricing_method=pricing_method,
+                    limit_price=limit_price, bid=bid, ask=ask,
+                    bid_size=bid_size, ask_size=ask_size,
+                )
+                return
+
+            # ---- cancel-and-place path (legacy; also the fallback above)
+
+            # Cancel TP leg first (safe — doesn't protect downside)
+            if watch.tp_leg_id:
+                try:
+                    await loop.run_in_executor(
+                        None, client.cancel_order, watch.tp_leg_id
+                    )
+                    logger.info(
+                        f"StopMonitor: {symbol} cancelled TP leg {watch.tp_leg_id}"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"StopMonitor: {symbol} TP cancel failed (may be filled): {e}"
                     )
 
             # Cancel bracket legs BEFORE sell (they hold shares, blocking limit sell)
@@ -3950,43 +4204,14 @@ class StopMonitor:
             # — that's the path where every retry failed and we have NO actual
             # fill report from the broker. Consumer must NOT write a confirmed
             # exit_price/pnl/exited_at — the orphan reconciler picks it up.
-            event = StopExitEvent(
-                symbol=symbol,
-                stop_price=watch.stop_price,
-                exit_price=exit_price,
-                shares=qty_to_sell,
-                order_id=order_id,
-                exit_reason=exit_reason,
-                exit_branch=exit_branch,
-                trade_db_id=watch.trade_db_id,
-                submitted_at=time_mod.time(),
-                pricing_method=pricing_method,
-                exit_trigger_price=trigger_price,
-                exit_quote_bid=bid,
-                exit_quote_ask=ask,
-                exit_quote_bid_size=bid_size,
-                exit_quote_ask_size=ask_size,
-                exit_limit_price=limit_price,
-                exit_ofi=watch.ofi_cumulative,
-                strategy=watch.strategy,
-                # D3 FIX 6: key confirmation on the BRANCH, not on the
-                # reason string. The reason now survives escalation, so
-                # `exit_reason != 'stop_loss_unconfirmed'` would have
-                # reported a last-resort trail_stop as a confirmed fill.
-                confirmed=(exit_branch != ExitBranch.LAST_RESORT.value),
+            self._emit_stop_exit_event(
+                symbol, watch, exit_price,
+                qty=qty_to_sell, order_id=order_id,
+                exit_reason=exit_reason, exit_branch=exit_branch,
+                trigger_price=trigger_price, pricing_method=pricing_method,
+                limit_price=limit_price, bid=bid, ask=ask,
+                bid_size=bid_size, ask_size=ask_size,
             )
-            logger.info(
-                f"StopMonitor: {symbol} EXIT BRANCH {exit_branch} "
-                f"reason={exit_reason} qty={qty_to_sell} "
-                f"fill=${exit_price:.4f} confirmed={event.confirmed}"
-            )
-            self._exit_events.put(event)
-
-            # Remove from watch list and clear exit-in-progress
-            with self._watch_lock:
-                self._watches.pop(symbol, None)
-            with self._exit_lock:
-                self._exit_in_progress[symbol] = False
 
         except Exception as e:
             logger.error(f"StopMonitor: {symbol} exit execution error: {e}")

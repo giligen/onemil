@@ -951,3 +951,180 @@ class TestExitQtyReconciliation:
             if 'position re-query failed' in r.getMessage()
         ]
         assert len(fallback_logs) >= 1
+
+
+# =========================================================================
+# D3 FIX 1 — never cancel a live broker SL leg to place our own limit
+# =========================================================================
+#
+# research/fuckup_audit/D3_exec/REPORT.md §M1: `_execute_stop_exit`
+# bulk-cancelled EVERY open order for the symbol — the bracket SL leg
+# included — BEFORE submitting its own limit, so there was no broker-side
+# stop during the fill-poll + escalation window. Measured submit->booked
+# latency on the eleven D3 events: 23.4 / 38.6 / 50.6 / 52.6 / 55.5 /
+# 68.6 s, on a position being liquidated precisely because it is falling.
+#
+# The lifecycle lives in tests/integration/test_stop_exit_execution.py
+# against the stateful fake broker; these pin the decision logic.
+
+class TestPreferSlLegExit:
+
+    def _live_leg(self, mock_alpaca, qty=500, status='new'):
+        def _get_order(order_id):
+            if order_id == 'sl-1':
+                return {'id': 'sl-1', 'status': status, 'qty': qty,
+                        'filled_qty': 0, 'filled_avg_price': None}
+            return {'id': order_id, 'status': 'filled',
+                    'filled_avg_price': 4.60, 'filled_qty': qty}
+        mock_alpaca.get_order.side_effect = _get_order
+        mock_alpaca.get_open_positions.return_value = [
+            {'symbol': 'PLYX', 'qty': qty}]
+        mock_alpaca.replace_order_stop_price.return_value = {
+            'id': 'sl-2', 'status': 'new'}
+
+    def _armed(self, monitor, sl_leg='sl-1'):
+        monitor.add_watch('PLYX', 4.29, 500, 'tp-1', sl_leg)
+        with monitor._watch_lock:
+            w = monitor._watches['PLYX']
+            w.latest_bid, w.latest_ask = 4.26, 4.27
+            w.latest_quote_ts = time.time()
+        return w
+
+    @pytest.mark.asyncio
+    async def test_sl_leg_replaced_not_cancelled_when_live(
+            self, monitor, mock_alpaca):
+        self._live_leg(mock_alpaca)
+        w = self._armed(monitor)
+        await monitor._execute_stop_exit('PLYX', 4.25, w,
+                                         exit_reason='stop_loss')
+        mock_alpaca.replace_order_stop_price.assert_called_once()
+        args = mock_alpaca.replace_order_stop_price.call_args.args
+        assert args[0] == 'sl-1'
+        assert args[1] == pytest.approx(4.25, abs=0.005)   # bid - max(1c,30%)
+        # The SL leg is never cancelled before the fill, and we never place
+        # a competing sell of our own.
+        assert 'sl-1' not in [c.args[0] for c in
+                              mock_alpaca.cancel_order.call_args_list]
+        mock_alpaca.submit_limit_sell_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_watch_follows_the_replacement_order_id(
+            self, monitor, mock_alpaca):
+        """Alpaca's replace mints a NEW id; polling the old one makes the
+        fill invisible."""
+        self._live_leg(mock_alpaca)
+        w = self._armed(monitor)
+        await monitor._execute_stop_exit('PLYX', 4.25, w,
+                                         exit_reason='stop_loss')
+        assert w.sl_leg_id == 'sl-2'
+        assert monitor.drain_exit_events()[0].order_id == 'sl-2'
+
+    @pytest.mark.asyncio
+    async def test_branch_is_sl_leg_and_reason_survives(
+            self, monitor, mock_alpaca):
+        self._live_leg(mock_alpaca)
+        w = self._armed(monitor)
+        await monitor._execute_stop_exit('PLYX', 4.25, w,
+                                         exit_reason='lock_stop')
+        ev = monitor.drain_exit_events()[0]
+        assert ev.exit_branch == 'sl_leg'
+        assert ev.exit_reason == 'lock_stop'
+        assert ev.exit_price == pytest.approx(4.60, abs=0.001)
+
+    @pytest.mark.asyncio
+    async def test_no_sl_leg_falls_back_to_own_limit(
+            self, monitor, mock_alpaca):
+        """No sl_leg_id -> today's cancel-and-place path, unchanged."""
+        mock_alpaca.get_open_positions.return_value = [
+            {'symbol': 'PLYX', 'qty': 500}]
+        w = self._armed(monitor, sl_leg='')
+        await monitor._execute_stop_exit('PLYX', 4.25, w,
+                                         exit_reason='stop_loss')
+        mock_alpaca.replace_order_stop_price.assert_not_called()
+        mock_alpaca.submit_limit_sell_order.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_dead_leg_falls_back_to_own_limit(
+            self, monitor, mock_alpaca, caplog):
+        """The leg already filled / was cancelled — nothing to reprice."""
+        import logging as _logging
+        caplog.set_level(_logging.INFO, logger='trading.stop_monitor')
+        self._live_leg(mock_alpaca, status='canceled')
+        w = self._armed(monitor)
+        await monitor._execute_stop_exit('PLYX', 4.25, w,
+                                         exit_reason='stop_loss')
+        mock_alpaca.replace_order_stop_price.assert_not_called()
+        mock_alpaca.submit_limit_sell_order.assert_called_once()
+        assert any('not live' in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_leg_qty_shortfall_falls_back_and_warns(
+            self, monitor, mock_alpaca, caplog):
+        """A leg covering 500 of 900 shares would strand 400 with no exit.
+        Hand over to the path that re-queries the broker qty — loudly."""
+        import logging as _logging
+        caplog.set_level(_logging.WARNING, logger='trading.stop_monitor')
+        self._live_leg(mock_alpaca, qty=500)
+        mock_alpaca.get_open_positions.return_value = [
+            {'symbol': 'PLYX', 'qty': 900}]
+        w = self._armed(monitor)
+        await monitor._execute_stop_exit('PLYX', 4.25, w,
+                                         exit_reason='stop_loss')
+        mock_alpaca.replace_order_stop_price.assert_not_called()
+        assert monitor.drain_exit_events()[0].shares == 900
+        assert any('would strand 400' in r.getMessage()
+                   for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_replace_failure_leaves_the_leg_alive_and_falls_back(
+            self, monitor, mock_alpaca, caplog):
+        """The safe failure: the ORIGINAL leg is untouched and still
+        protecting, so the legacy path takes over."""
+        import logging as _logging
+        caplog.set_level(_logging.WARNING, logger='trading.stop_monitor')
+        self._live_leg(mock_alpaca)
+        mock_alpaca.replace_order_stop_price.side_effect = Exception(
+            '422 unprocessable')
+        w = self._armed(monitor)
+        await monitor._execute_stop_exit('PLYX', 4.25, w,
+                                         exit_reason='stop_loss')
+        mock_alpaca.submit_limit_sell_order.assert_called_once()
+        assert any('still live' in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_flag_off_is_the_pre_fix_path(self, mock_alpaca):
+        """The rollback contract."""
+        mon = StopMonitor(api_key='k', api_secret='s',
+                          alpaca_client=mock_alpaca,
+                          prefer_sl_leg_exit=False)
+        mon._STOP_EXIT_FILL_TIMEOUT_S = 0.2
+        mon._MARKET_CLOSE_FILL_TIMEOUT_S = 0.2
+        mon._STOP_EXIT_POLL_INTERVAL_S = 0.05
+        self._live_leg(mock_alpaca)
+        w = self._armed(mon)
+        await mon._execute_stop_exit('PLYX', 4.25, w, exit_reason='stop_loss')
+        mock_alpaca.replace_order_stop_price.assert_not_called()
+        mock_alpaca.submit_limit_sell_order.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_leg_that_never_elects_escalates(self, monitor,
+                                                   mock_alpaca):
+        """Protection lapses at ESCALATION, not at the trigger."""
+        mock_alpaca.get_order.side_effect = lambda oid: (
+            {'id': 'sl-1', 'status': 'new', 'qty': 500, 'filled_qty': 0,
+             'filled_avg_price': None} if oid == 'sl-1' else
+            {'id': 'sl-2', 'status': 'new', 'qty': 500, 'filled_qty': 0,
+             'filled_avg_price': None} if oid == 'sl-2' else
+            {'id': oid, 'status': 'filled', 'filled_avg_price': 4.10,
+             'filled_qty': 500})
+        mock_alpaca.get_open_positions.return_value = [
+            {'symbol': 'PLYX', 'qty': 500}]
+        mock_alpaca.replace_order_stop_price.return_value = {
+            'id': 'sl-2', 'status': 'new'}
+        w = self._armed(monitor)
+        await monitor._execute_stop_exit('PLYX', 4.25, w,
+                                         exit_reason='trail_stop')
+        ev = monitor.drain_exit_events()[0]
+        assert ev.exit_branch == 'market_fallback'
+        assert ev.exit_reason == 'trail_stop'
+        assert mock_alpaca.close_position.call_count == 1

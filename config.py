@@ -983,6 +983,29 @@ class Config:
         return float(self._get_yaml(
             "trading", "self_managed_stops", "exit_spread_offset_factor", default=0.30))
 
+    @property
+    def prefer_sl_leg_exit(self) -> bool:
+        """Whether a LIVE broker SL leg is repriced instead of cancelled.
+
+        D3 FIX 1 (research/fuckup_audit/D3_exec/REPORT.md §M1). The old
+        path bulk-cancelled EVERY open order for the symbol — the bracket
+        SL leg included — and only then submitted its own limit, leaving
+        the position with no broker-side stop for the whole fill-poll +
+        escalation window. Measured on the 11 D3 events: 23.4 / 38.6 /
+        50.6 / 52.6 / 55.5 / 68.6 s unprotected, on a position being
+        liquidated precisely because it is falling.
+
+        True (default) = replace the leg's stop price down to the
+        marketable level and let the BROKER leg be the exit — the design
+        the HOD-break engine already ships ("the broker legs ARE the
+        exits"). False = the pre-2026-09-17 cancel-and-place path.
+
+        Rollback is this flag + a restart; no state to unwind.
+        """
+        return bool(self._get_yaml(
+            "trading", "self_managed_stops", "prefer_sl_leg_exit",
+            default=True))
+
     # =========================================================================
     # Trailing Stop
     # =========================================================================

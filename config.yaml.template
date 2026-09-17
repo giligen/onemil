@@ -225,6 +225,14 @@ trading:
     # gives a 1¢ buffer; the old path gave 3¢ = full-spread slippage.
     exit_min_offset: 0.01               # floor on offset, prevents 0¢ buffer
     exit_spread_offset_factor: 0.30     # fraction of spread used as offset
+    # D3 FIX 1 (2026-09-17): when the watch has a LIVE bracket SL leg, replace
+    # its stop price down to the marketable level and let the BROKER leg be
+    # the exit, instead of cancelling it to make room for our own limit. The
+    # old path left the position with NO broker-side stop for 23-69 s on every
+    # one of the 11 events in research/fuckup_audit/D3_exec/REPORT.md §M1 —
+    # on a position being liquidated precisely because it is falling.
+    # false = the pre-2026-09-17 cancel-and-place path (rollback: flip+restart)
+    prefer_sl_leg_exit: true
   # Trailing stop: replace fixed TP with trailing stop that lets winners run
   # Trail 1R below highest high, activates after +2R from entry
   # Backtest: +55% P&L improvement over fixed 2.5R TP across 15 months

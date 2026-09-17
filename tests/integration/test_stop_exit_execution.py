@@ -52,31 +52,10 @@ def db(tmp_path):
 @pytest.fixture
 def broker():
     b = FakeAlpacaBroker()
-    # The HOD-break lifecycle tests assert close_position is never called;
-    # the StopMonitor's escalation path legitimately calls it, so make it
-    # behave like a market close here instead of raising.
-    b.close_position = _close_position_for(b)
+    # The HOD-break engine must never market out; StopMonitor's escalation
+    # legitimately does, so the real market-close behaviour is opted into.
+    b.allow_close_position = True
     return b
-
-
-def _close_position_for(b: FakeAlpacaBroker):
-    def close_position(symbol: str) -> dict:
-        b.calls.append(('close_position', {'symbol': symbol}))
-        qty = b.positions.get(symbol, 0)
-        if qty <= 0:
-            from data_sources.alpaca_client import AlpacaAPIError
-            raise AlpacaAPIError('40410000: position not found')
-        # Cancel whatever is working so the shares are free, then market out.
-        for o in list(b.orders.values()):
-            if (o['symbol'] == symbol and o['side'] == 'sell'
-                    and o['status'] in ('new', 'accepted', 'partially_filled',
-                                        'held')):
-                b.cancel_order(o['id'])
-        o = b._new(symbol=symbol, qty=int(b.positions[symbol]), side='sell',
-                   type='market')
-        b._settle(force=True)
-        return {'id': o['id'], 'status': o['status']}
-    return close_position
 
 
 def _monitor(broker, **kw) -> StopMonitor:
@@ -231,7 +210,12 @@ class TestSlLegIsTheStop:
     """Pre-fix, `_execute_stop_exit` bulk-cancelled EVERY open order for the
     symbol — the bracket SL leg included — and only then submitted its own
     limit. Measured naked window across the 11 D3 events: 23.4-68.6 s on a
-    position being liquidated precisely because it is falling."""
+    position being liquidated precisely because it is falling.
+
+    The market in these tests KEEPS FALLING after the trigger, which is the
+    only reason we are exiting at all; the repriced broker stop elects on
+    the next downtick.
+    """
 
     def _bracketed(self, broker, symbol='RBNE', qty=2841, entry=5.20,
                    stop=4.685):
@@ -243,58 +227,132 @@ class TestSlLegIsTheStop:
         legs = broker.orders[parent['id']]['legs']
         tp_id = next(l for l in legs if broker.orders[l]['type'] == 'limit')
         sl_id = next(l for l in legs if broker.orders[l]['type'] == 'stop')
+        broker.calls.clear()
         return tp_id, sl_id
 
-    def test_sl_leg_replaced_not_cancelled(self, broker):
+    def _exit_while_falling(self, monitor, broker, symbol, trigger, watch,
+                            reason='stop_loss', fall_to=None):
+        """Run the exit and let the tape keep dropping underneath it."""
+        async def _go():
+            task = asyncio.create_task(monitor._execute_stop_exit(
+                symbol, trigger, watch, exit_reason=reason))
+            await asyncio.sleep(0.08)
+            if fall_to is not None:
+                broker.tick(bid=fall_to, ask=fall_to + 0.06)
+            await task
+        asyncio.run(_go())
+
+    def test_sl_leg_replaced_not_cancelled_when_live(self, broker):
         tp_id, sl_id = self._bracketed(broker)
         m = _monitor(broker)
-        w = _watch(m, 'RBNE', 4.685, 2841, 4.68, 4.74, bid_size=200,
-                   tp_leg=tp_id, sl_leg=sl_id)
+        w = _watch(m, 'RBNE', 4.685, 2841, 4.68, 4.74, tp_leg=tp_id,
+                   sl_leg=sl_id)
 
-        asyncio.run(m._execute_stop_exit('RBNE', 4.68, w,
-                                         exit_reason='stop_loss'))
+        self._exit_while_falling(m, broker, 'RBNE', 4.68, w, fall_to=4.64)
 
         replaced = [c for c in broker.calls
                     if c[0] == 'replace_order_stop_price']
         assert replaced, "the live SL leg must be REPLACED, not cancelled"
         assert replaced[0][1]['order_id'] == sl_id
-        # The original SL id was never handed to cancel_order.
-        cancels = [c[1]['order_id'] for c in broker.calls
-                   if c[0] == 'cancel_order']
-        assert sl_id not in cancels
+        # bid 4.68 / ask 4.74 -> offset max($0.01, 0.30 x $0.06) = $0.018
+        assert replaced[0][1]['new_stop_price'] == pytest.approx(4.66, abs=0.005)
+        # The SL id was NEVER handed to cancel_order before the fill.
+        assert sl_id not in [c[1]['order_id'] for c in broker.calls
+                             if c[0] == 'cancel_order']
+        assert broker.positions.get('RBNE', 0) == 0
 
-    def test_no_window_without_a_stop_or_a_working_sell(self, broker):
-        """Walk the call log and assert protection never lapses."""
+    def test_never_cancels_the_stop_to_place_its_own_limit(self, broker):
+        """The mechanism, stated as a call-order invariant: no sell order
+        of ours is submitted while the broker stop is being taken away."""
         tp_id, sl_id = self._bracketed(broker)
         m = _monitor(broker)
         w = _watch(m, 'RBNE', 4.685, 2841, 4.68, 4.74, tp_leg=tp_id,
                    sl_leg=sl_id)
-        asyncio.run(m._execute_stop_exit('RBNE', 4.68, w,
-                                         exit_reason='stop_loss'))
-        # Position is flat and the SL chain is the thing that did it.
-        assert broker.positions.get('RBNE', 0) == 0
+        self._exit_while_falling(m, broker, 'RBNE', 4.68, w, fall_to=4.64)
+        assert not [c for c in broker.calls
+                    if c[0] == 'submit_limit_sell_order']
+        assert not [c for c in broker.calls if c[0] == 'close_position']
 
     def test_exit_event_branch_is_sl_leg(self, broker):
         tp_id, sl_id = self._bracketed(broker)
         m = _monitor(broker)
         w = _watch(m, 'RBNE', 4.685, 2841, 4.68, 4.74, tp_leg=tp_id,
                    sl_leg=sl_id)
-        asyncio.run(m._execute_stop_exit('RBNE', 4.68, w,
-                                         exit_reason='trail_stop'))
+        self._exit_while_falling(m, broker, 'RBNE', 4.68, w,
+                                 reason='trail_stop', fall_to=4.64)
         ev = m.drain_exit_events()[0]
         assert ev.exit_branch == ExitBranch.SL_LEG.value
         assert ev.exit_reason == 'trail_stop'
         assert ev.confirmed is True
+        assert ev.exit_price == pytest.approx(4.64, abs=0.01)
+        assert ev.shares == 2841
+
+    def test_follows_the_new_order_id_after_replace(self, broker):
+        """Alpaca's replace mints a NEW id. Polling the old one makes the
+        fill invisible — the bug the HOD-break engine already paid for."""
+        tp_id, sl_id = self._bracketed(broker)
+        m = _monitor(broker)
+        w = _watch(m, 'RBNE', 4.685, 2841, 4.68, 4.74, tp_leg=tp_id,
+                   sl_leg=sl_id)
+        self._exit_while_falling(m, broker, 'RBNE', 4.68, w, fall_to=4.64)
+        new_id = broker.orders[sl_id]['replaced_by']
+        assert new_id and new_id != sl_id
+        assert w.sl_leg_id == new_id
+        assert m.drain_exit_events()[0].order_id == new_id
+
+    def test_escalates_only_after_the_leg_fails_to_elect(self, broker):
+        """If the tape does NOT fall, the repriced stop rests. Protection
+        lapses only at escalation — not at the trigger."""
+        tp_id, sl_id = self._bracketed(broker)
+        m = _monitor(broker)
+        w = _watch(m, 'RBNE', 4.685, 2841, 4.68, 4.74, tp_leg=tp_id,
+                   sl_leg=sl_id)
+        self._exit_while_falling(m, broker, 'RBNE', 4.68, w, fall_to=None)
+        ev = m.drain_exit_events()[0]
+        assert ev.exit_branch == ExitBranch.MARKET_FALLBACK.value
+        assert ev.exit_reason == 'stop_loss'      # the reason still survives
+        assert broker.positions.get('RBNE', 0) == 0
 
     def test_no_sl_leg_falls_back_to_own_limit(self, broker):
         """No live SL leg (ORB time-stop cancel, a restart, a manual flat)
-        → today's cancel-and-place path, unchanged."""
+        -> today's cancel-and-place path, unchanged."""
         broker.positions['XYZ'] = 500
         broker.tick(bid=4.68, ask=4.74)
+        broker.calls.clear()
         m = _monitor(broker)
         w = _watch(m, 'XYZ', 4.685, 500, 4.68, 4.74)
         asyncio.run(m._execute_stop_exit('XYZ', 4.68, w,
                                          exit_reason='stop_loss'))
-        assert any(c[0] == 'submit_limit_sell_order' for c in broker.calls)
+        assert [c for c in broker.calls if c[0] == 'submit_limit_sell_order']
         assert not [c for c in broker.calls
                     if c[0] == 'replace_order_stop_price']
+        assert m.drain_exit_events()[0].exit_branch == ExitBranch.LIMIT.value
+
+    def test_disabled_flag_restores_cancel_and_place(self, broker):
+        """The rollback contract: prefer_sl_leg_exit=False is the
+        pre-2026-09-17 path even with a live leg."""
+        tp_id, sl_id = self._bracketed(broker)
+        m = _monitor(broker, prefer_sl_leg_exit=False)
+        w = _watch(m, 'RBNE', 4.685, 2841, 4.68, 4.74, tp_leg=tp_id,
+                   sl_leg=sl_id)
+        asyncio.run(m._execute_stop_exit('RBNE', 4.68, w,
+                                         exit_reason='stop_loss'))
+        assert not [c for c in broker.calls
+                    if c[0] == 'replace_order_stop_price']
+        assert sl_id in [c[1]['order_id'] for c in broker.calls
+                         if c[0] == 'cancel_order']
+
+    def test_partial_leg_coverage_hands_over_to_legacy(self, broker):
+        """A leg that covers only part of the position would strand the
+        rest. Log it and use the path that re-queries the broker qty."""
+        tp_id, sl_id = self._bracketed(broker, qty=500)
+        broker.positions['RBNE'] = 900        # an unprotected residual
+        m = _monitor(broker)
+        w = _watch(m, 'RBNE', 4.685, 500, 4.68, 4.74, tp_leg=tp_id,
+                   sl_leg=sl_id)
+        asyncio.run(m._execute_stop_exit('RBNE', 4.68, w,
+                                         exit_reason='stop_loss'))
+        assert not [c for c in broker.calls
+                    if c[0] == 'replace_order_stop_price']
+        ev = m.drain_exit_events()[0]
+        assert ev.shares == 900, "the legacy path sells the broker's view"
