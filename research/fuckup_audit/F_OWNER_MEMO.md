@@ -33,7 +33,32 @@ the 12/day 4-concurrent book, TRAIN 2025 / VAL Jan–May 26 / TEST Jun–Sep 26 
 2. F6 red-to-green with the range floor: +0.09/+0.21/+0.10R but August 2026 is the whole TEST book, dies ex-top-5%.
 3. Live ORB honest book: positive, 28% one month, 49% three trades — paused by the owner's rule.
 
-## Next (research only, no live change)
+## Stages G and Q (2026-09-17 03:00 UTC) — both closed
+- **Short side (G)**: 0 of 24 cells clear G1 (perm p 1.000); gross ≈ flat (+0.11..−0.01R by family), costs 0.05–0.12R.
+  Green-to-red and HOD-rejection shorts are destructive (−0.10..−0.16R): a consolidation break is where the stops are
+  in EITHER direction. SSR blocks 7–15% of signals, borrow ~0.02R — neither changes a verdict. Borrow availability is
+  not modelled. The M18 open fade does not survive into borrowable names at a 09:35 entry.
+- **QQQ noise sleeve (Q)**: fills are obtainable and unbiased, breakeven 2 bp/leg vs a 0.09 bp spread — but the OOS
+  return is 102% five days (2025-04-09 alone 45%), MDE 5.75 bps/day vs 2.6 observed. ≈ $320/month at $60K 1×,
+  worst month −$2,200. Dry-run spec written; not proposed for capital.
+- **The one direction-agnostic, live-computable filter this program found**: `range_so_far_pct ≥ 5` at the signal bar
+  beats its absence in 12/12 short pairs and 8/10 long pairs. It does not make a book; it makes every book less bad.
+
+## Conclusion
+The intraday 1-minute breakout/pullback line on US small caps — long and short, two universes, 19 families, two fills,
+seven stop/exit shapes, feature selection, day context, the ORB rule book — has no edge detectable at 4 slots over
+2025-01→2026-09 at the corrected cost, with the smallest visible effect 0.06–0.15R per trade. Effects smaller than
+that cannot fund $10K/month at this account size. Every number is on disk with its cell count; every positive number
+the program produced was a defect, and each defect is now a standing rule.
+
+## What would need the owner's money to test next (not started)
+1. Order-flow confirmation at the breakout minute (the CKS OFI plan the owner asked to remember): Databento MBP-1
+   windows for the F6/F8 signal minutes (~90K symbol-minutes; tens of dollars) + the NBBO proxy side by side. The only
+   feature family in the literature with a real short-horizon signal that this program has not touched.
+2. An earnings calendar (post-earnings drift on small caps): no free reliable source; a paid feed or a Databento
+   corporate-events add-on.
+3. Nothing else in this design space is worth another cell.
+
 - Stage G: the SHORT side of the same populations, mirrored families, borrowable names only (price ≥ $10, ADV20 ≥ $10M,
   no wrappers), same honest machinery, pre-registered — the data's sign points there in every first-hour cell.
 - QQQ noise-band sleeve: obtainability audit on the 1-min ETF store and a dry-run spec.
