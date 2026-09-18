@@ -5,6 +5,15 @@ Written 2026-09-18, while `research/multiday/data/` is still building, so anythi
 `research/multiday/LIT_REVIEW.md`, whose newest citation was 2022 — the gap the owner caught.
 No data was pulled, no code run, no config touched.
 
+> **SECOND PASS, 2026-09-18 (same day, still before any family was scored).** The six items §7 listed as
+> unclosed were worked; **five closed**, including all three previously unreadable abstracts and both
+> regulatory items. The results are in **§7 (rewritten)** and **AMENDMENT 3 (§6b)**. Headline: the cell
+> count stays at **26** and the run order is unchanged, but F4's prior drops, A1's age disclosure is
+> withdrawn, A4 gains a **verified two-regime ex-date rule** with a discontinuity **inside the TEST
+> split**, and the Reg NMS tick/fee reform is confirmed **NOT in force until November 2027** — so §2.2's
+> hypothesised spread-compression tailwind is **withdrawn**, not banked. Sections 1, 2.1, 2.2, 6(c),
+> 6(e), 7 and 8 were amended; §§3, 4, 5 are unchanged.
+
 Evidence standard is `research/fuckup_audit/PLAN.md` §1: every claim carries author, year, venue and a
 DOI/URL that was **fetched during this session**. Anything not fetched is marked **NOT VERIFIED** and
 decides nothing. The assistant's own recollection of 2023–2026 papers is not a citation and is not used.
@@ -37,6 +46,10 @@ Consequences, stated plainly because they bias every "no post-2022 evidence foun
    Robeco, AQR, exchange research), exchange-published closing-auction volume statistics, 0DTE market
    share data, and the **current status of the September-2024 Reg NMS compliance dates** (both dates
    are now in the past — see §2.2, this is the one gap I would close first).
+   **UPDATE, second pass 2026-09-18:** items 2 and 4's Reg NMS gap are **closed** — the three Elsevier
+   abstracts via the `colab.ws` Crossref mirror (secondary source, caveat in §7.1) and the Reg NMS status
+   from five Federal Register primary documents. The closing-auction volume share and the 0DTE and
+   practitioner gaps **remain open** and still need a general web search (§7.3).
 
 **The single most important number this review adds, and it is a discount, not an opportunity:**
 Chen & Velikov, *Zeroing In on the Expected Returns of Anomalies*, **JFQA** (published online 2022,
@@ -70,20 +83,36 @@ F6 1, A1 2, A2 2, A3 2, A4 2 = 26).
 | F1 | PEAD / SUE | *Earnings Autocorrelation and the PEAD: Experimental Evidence*, **JFQA**, DOI [10.1017/S0022109023000881](https://doi.org/10.1017/s0022109023000881) | 2023 | A **laboratory** study of the mechanism. Says nothing about whether the field effect is tradable in 2016–2026 US equities. | **No.** Martineau 2022 remains the decisive field cite. F1 stays 2 cells as a declared null-replication. |
 | F2 | earnings-**announcement-return** drift (CJL 1996) | Jegadeesh, Luo, Subrahmanyam & Titman, *Short-Term Reversals and Longer-Term Momentum around the World*, **RFS**, DOI [10.1093/rfs/hhaf057](https://doi.org/10.1093/rfs/hhaf057) — Crossref/OpenAlex agree, abstract exact | 2025 | Model + US and international evidence; novel prediction (a), supported: **reversals are attenuated after earnings announcements**. I.e. post-announcement returns behave less mean-reverting than the unconditional short-horizon pattern. | **No cell change — but it is the first post-2022 evidence pointing F2's way**, and it is indirect (it does not sort on the announcement return). F2 keeps 6 cells and the front of the run order. |
 | F3 | 12-1 momentum + residual momentum | Jensen, Kelly & Pedersen, **JF 2023**, DOI [10.1111/jofi.13249](https://doi.org/10.1111/jofi.13249); Chen & Velikov, **JFQA**, DOI [10.1017/S0022109022000874](https://doi.org/10.1017/s0022109022000874) | 2023 / 2022 | Factors incl. momentum replicate out-of-sample across 93 countries; and the average anomaly nets 4 bps/mo after costs. **No post-2022 study specific to US 12-1 decay was found. No post-2022 re-test of residual momentum was found** (Blitz, Hanauer & Vidojevic 2020 remains newest). | **No.** F3 stays at 6. The residual-momentum cells rest on 2020 evidence — say so in the report. |
-| F4 | short-term reversal, industry-adj. | Jegadeesh, Luo, Subrahmanyam & Titman, **RFS 2025**, DOI [10.1093/rfs/hhaf057](https://doi.org/10.1093/rfs/hhaf057) | 2025 | Reversals are **larger when there is more noise trading**, and there is a negative relation between monthly reversal and longer-term momentum profits across economies and time. Does **not** report costs and does **not** report the long leg separately. | **No.** F4 stays at 1 long-only cell. Newest evidence is a mechanism paper, not a net-of-cost tradability result. Also found but unreadable: *Maxing out short-term reversals in weekly stock returns*, JEF 2025, DOI [10.1016/j.jempfin.2025.101608](https://doi.org/10.1016/j.jempfin.2025.101608) — weekly, i.e. exactly our horizon, abstract **NOT VERIFIED**. |
+| F4 | short-term reversal, industry-adj. | **Chen, Cohen, Liang & Sun, *Maxing out short-term reversals in weekly stock returns*, Journal of Empirical Finance 82, 101608 (June 2025)**, DOI [10.1016/j.jempfin.2025.101608](https://doi.org/10.1016/j.jempfin.2025.101608) — abstract **CLOSED 2026-09-18 via the colab.ws Crossref mirror**, see §7.1 for the provenance caveat. Second verified item: *Evolution of short-term contrarian profits*, **Studies in Economics and Finance 2023**, DOI [10.1108/sef-12-2022-0599](https://doi.org/10.1108/sef-12-2022-0599). Third: Jegadeesh, Luo, Subrahmanyam & Titman, **RFS 2025**, DOI [10.1093/rfs/hhaf057](https://doi.org/10.1093/rfs/hhaf057) | **2025** / 2023 | JEF 2025 is **exactly our F4 horizon** (weekly, US). The reversal it finds is **conditional on MAX**: among high-MAX ("lottery-like", elevated recent maximum daily return) stocks, past 1-week losers/winners earn positive/negative next-week returns worth **≈1.66%/week**, vs **0.65%/week** applying the same strategy to low-MAX stocks; and the profit **"emerges exclusively during periods of highest retail order imbalance."** SEF 2023 says the *unconditional* US effect is gone: short-term contrarian profits **"have largely disappeared in past two decades"**, vanished since 2000, and the cause is a fall in the level of overreaction, not the cross-sectional or lead-lag components. RFS 2025 supplies the mechanism (reversals larger with more noise trading). | **No cell change — and the prior moves DOWN, not up.** The one live 2023–2026 form of weekly reversal is (a) **conditional on high MAX** — low-priced, high-volatility lottery names, which our raw-close ≥ $5 and $10M-ADV floors delete — and (b) **conditional on extreme retail order imbalance**. **Neither paper reports transaction costs; neither splits the long leg from the short leg** — and a 100%-per-week turnover strategy is the textbook case Detzel, Novy-Marx & Velikov (**JF 78(3) 1743–1775, 2023**, DOI [10.1111/jofi.13225](https://doi.org/10.1111/jofi.13225)) say inflates expensive factors when costs are neglected. F4 keeps **1** long-only cell and its second-to-last slot in the run order; see AMENDMENT 3(a) for the reporting requirement it now carries. |
 | F5 | 52-week high | **None.** A full 2022→2026 sweep returned only covariate work already in `LIT_REVIEW.md` (Byun & Jeon FAJ 2023; Chen, Stivers & Sun JEF 2024) plus anchoring/insider-behaviour studies. | — | **No post-2022 re-test of the George–Hwang return premium was found.** The newest direct evidence remains George, Hwang & Li 2018 (q-factors explain it). | **No.** F5 stays at 2 with the ex-January split. Note in the report that its evidence base is now 8 years old. |
-| F6 | overnight vs intraday | **None verified.** *Intraday and overnight return anomalies: Evidence from 11.6 million price observations*, Zirk-Sadowski & Hryckiewicz, **FRL 2025**, DOI [10.1016/j.frl.2025.108638](https://doi.org/10.1016/j.frl.2025.108638) — exists, authors confirmed, **abstract NOT VERIFIED**. | 2025 | Nothing readable. No post-2022 US cross-sectional re-test could be read. | **No.** F6 stays at 1 measurement cell. Its "do not trade this" verdict rests on 2022-and-earlier cost evidence plus our own `overnight_auction.md` — unchanged. |
-| A1 | earnings-announcement **premium** | **None.** Nearest: *Earnings announcement premium and return volatility*, Pacific-Basin Finance Journal 2023, DOI [10.1016/j.pacfin.2023.102029](https://doi.org/10.1016/j.pacfin.2023.102029) — **abstract NOT VERIFIED**, and not US. | — | **No post-2022 US evidence found.** Johnson & So 2018 remains the design-deciding cite (buy before, sell at the event). | **No.** A1 stays at 2 cells and rank 2 in the run order — but its evidence is now 8 years old and that must be stated when the cell is reported. |
+| F6 | overnight vs intraday | **Still none on-topic.** The flagged candidate — Zirk-Sadowski & Hryckiewicz, *Intraday and overnight return anomalies: Evidence from 11.6 million price observations*, **FRL 86, 108638 (Dec 2025)**, DOI [10.1016/j.frl.2025.108638](https://doi.org/10.1016/j.frl.2025.108638) — was **READ on 2026-09-18** and is **NOT about our question**. | 2025 | The FRL paper is a **time-of-day / day-of-week seasonality** study on **small-capitalisation NYSE stocks**, ~12M observations at 30-second-to-60-minute intervals, bootstrapped ANOVA: an 11 AM hour effect, anomalies persisting Tue–Thu, a reversed morning effect at 10 AM on Mondays. It contains **no cross-sectional overnight-vs-intraday return decomposition**, no Lou–Polk–Skouras replication, and no cost analysis. | **No — and one false lead is now retired.** F6 stays at 1 measurement cell. A **second, independent** 2023+ sweep for an LPS-style US cross-sectional re-test (overnight/intraday, tug-of-war, institutional-vs-retail) returned only China, Korea, sector-ETF and European-sentiment papers. **The post-2022 silence on F6 is now a searched-for absence across two sweeps, not an indexing gap.** |
+| A1 | earnings-announcement **premium** | **CLOSED 2026-09-18.** Tsafack, Becker & Han, *Earnings announcement premium and return volatility: Is it consistent with risk-return trade-off?*, **Pacific-Basin Finance Journal 79, 102029 (June 2023)**, DOI [10.1016/j.pacfin.2023.102029](https://doi.org/10.1016/j.pacfin.2023.102029) — abstract read via the colab.ws mirror (§7.1 caveat). Secondary: *Lottery Demand and Stock Returns Preceding Earnings Announcements*, **Journal of Business Finance & Accounting 2025**, DOI [10.1111/jbfa.70008](https://doi.org/10.1111/jbfa.70008) (OpenAlex, reconstructed). | **2023** / 2025 | PBFJ 2023: the earnings-announcement premium — positive average returns during announcements — **persists in post-financial-crisis data**; it is **positively** related to *expected* volatility (**"a risk-return tradeoff"**) and **inversely** related to *realized* volatility, on both positive and negative surprises. Despite the journal, the study is on the US sample and offers Asia-Pacific markets as **future** work. JBFA 2025: stocks with the most extreme returns around *past* announcements beat the least-extreme by **≈85 bps over the 10 days preceding** the current announcement — a lottery-demand channel in the pre-announcement window. | **YES — one disclosure is withdrawn; cells and rank unchanged.** A1 is no longer an "evidence is 8 years old" cell: it has 2023 evidence that the premium **survives post-crisis**, which supports its rank-2 placement. Two honest riders replace the age disclosure: (i) PBFJ frames the premium as **compensation for expected volatility risk**, not mispricing — a long-only harvester earns it *and bears the risk*, so it is not free alpha and must be reported next to its realized volatility; (ii) **neither paper reports transaction costs or a long-only implementation**, and JBFA's pre-announcement excess again lives in the **lottery/high-MAX** corner our floors delete. A1 keeps **2** cells. |
 | A2 | low short interest, liquid names (long side) | *Short Interest and Aggregate Stock Returns: International Evidence*, **Review of Asset Pricing Studies 2023**, DOI [10.1093/rapstu/raad007](https://doi.org/10.1093/rapstu/raad007) (reconstructed) | 2023 | Short interest **negatively predicts aggregate** returns in 24 of 32 countries, survives out-of-sample. This is the **time-series/market-level** signal (the Rapach–Ringgenberg–Zhou result, extended internationally). | **No.** It corroborates that short interest carries information; it does **not** re-test Boehmer–Huszár–Jordan's cross-sectional **long** leg, which remains 2010 evidence with **no post-2022 replication found**. A2 stays at 2 cells; the "decay status NOT VERIFIED" flag in `LIT_REVIEW.md` §3 stands and is now a deliberate, searched-for null. |
 | A3 | net share issuance | **None US.** Nearest: a **pre-registered** buyback-anomaly replication in **Japan**, Pacific-Basin Finance Journal 2025, DOI [10.1016/j.pacfin.2025.102666](https://doi.org/10.1016/j.pacfin.2025.102666) (reconstructed); and a risk-based explanation of composite equity issuance, IRFA 2024, DOI [10.1016/j.irfa.2024.103288](https://doi.org/10.1016/j.irfa.2024.103288) (**abstract NOT VERIFIED**). | 2024–25 | **No post-2022 US replication of the share-issuance premium was found.** | **No.** A3 stays at 2. |
 | A4 | dividend-month premium | **Hartzmark & Solomon, *Market-Wide Predictable Price Pressure*, American Economic Review 115(9) 3171–3213**, DOI [10.1257/aer.20231725](https://doi.org/10.1257/aer.20231725) (reconstructed; authors/venue/pages exact from Crossref) | **2025** | The **same authors**, same mechanism, in a top-5 journal: predictable uninformed cash flows (dividend payments announced weeks ahead) forecast returns; top-quintile payment days earn ~4× the bottom quintile; holds internationally; estimated market-level price multiplier 1.9. | **YES — rank change.** `PLAN.md` ranks A4 last with "run only if A1–A3 leave budget", justified by "no post-2016 replication found". That justification is now **false**: the mechanism has a 2025 AER publication. The *cross-sectional* dividend-month premium still has no post-2016 replication, so the cells stay at 2 — but the "run only if budget" rider should be removed and A4 moved up the run order. |
 
-**Two honest summary statements about Priority 1.** (i) For **five of the ten families — F1 (field),
-F5, F6, A1, A3 — no post-2022 evidence of any kind could be verified.** That is a finding: those cells
-are being run on evidence that is 6–20 years old, in a literature whose own meta-studies say to expect
-26%/58% haircuts, and the report must say so next to each number. (ii) The **one** genuine 2023–2026
-upgrade is A4's mechanism (AER 2025). The one genuine 2023–2026 *supportive* signal for the
-highest-priority family is indirect (RFS 2025's "attenuated reversals after earnings announcements").
+**Two honest summary statements about Priority 1 — REVISED 2026-09-18 after the second pass.**
+(i) The evidence-age finding shrinks from five families to **four**: for **F1 (field), F5, F6 and A3 no
+post-2022 evidence of any kind could be verified**, now across *two independent sweeps each* for F5, F6
+and A3 — a searched-for absence, not an indexing gap. **A1 leaves that list** (PBFJ 2023 verifies the
+premium persists post-crisis). Those four cells are still being run on evidence 6–20 years old, in a
+literature whose own meta-studies say to expect 26%/58% haircuts, and the report must say so next to each
+number. (ii) The genuine 2023–2026 upgrades are now **two**: A4's mechanism (AER 2025) and A1's
+persistence (PBFJ 2023). The one 2023–2026 *supportive* signal for the highest-priority family remains
+indirect (RFS 2025's "attenuated reversals after earnings announcements").
+
+**A third statement, new, and it is the most useful thing this second pass produced.**
+**Every live 2023–2026 form of the two effects we could finally read sits in the lottery / high-MAX /
+extreme-retail-order-imbalance corner of the cross-section** — JEF 2025 gets weekly reversal only in
+high-MAX names and only in the top retail-order-imbalance periods; JBFA 2025 gets the pre-announcement
+excess from extreme past-announcement returns. That corner is **low-priced, high-volatility, and exactly
+what `PLAN.md`'s raw-close ≥ $5 gate and the $10M-ADV liquidity floor delete.** It is the same shape as
+Avramov, Cheng & Metzker's finding that excluding microcaps and high-volatility names "considerably
+attenuates" ML profitability, and the same shape as Lopez-Lira & Tang's drift living in small stocks.
+**Pre-committed expectation, recorded before any cell was scored: our long-only, ≥ $5, liquid-name
+variants of F4 and A1 should measure materially LESS than the published magnitudes. A cell that measures
+close to the published number is evidence of a floor leak or a construction error first, and an
+exceptional result second.**
 
 ---
 
@@ -99,14 +128,24 @@ a function of the settlement cycle. But our sample spans the change, and two thi
 boundary:
 - Cash-account buying power recycles one day sooner from 2024-05-28 — relevant to the *engine build*
   (a long-only $50–66K book turning over monthly), not to the backtest's returns.
-- **The ex-dividend date / record date relationship changed mechanically when the cycle shortened**
-  (under T+2 the ex-date preceded the record date by one business day; under T+1 they coincide). I could
-  **not verify this from a primary source in this session** — it is marked **NOT VERIFIED** — but it is
-  a specific, checkable date-construction trap for **A4**, whose whole signal is a *predicted payment
-  month* built from prior-year dividend dates spanning 2024-05-28. **Action: A4's date rule must be
-  validated on both sides of 2024-05-28 before any A4 number is reported.**
+- **The ex-dividend date / record date relationship changed mechanically when the cycle shortened.**
+  **CLOSED 2026-09-18 from a primary source.** **FINRA Rule 11140(b)(1)**
+  ([finra.org rulebook](https://www.finra.org/rules-guidance/rulebooks/finra-rules/11140), fetched):
+  *"the date designated as the 'ex-dividend date' shall be the record date if the record date falls on a
+  business day"* (and the first business day preceding it if the record date is not a delivery day). The
+  rulebook page records the amendment as **SR-FINRA-2023-017, effective May 28, 2024** — the T+1
+  compliance date. So:
+  - **On and after 2024-05-28: ex-date = record date** (record date a business day).
+  - **Before 2024-05-28 (T+2): ex-date = one business day BEFORE the record date.**
 
-### 2.2 Reg NMS amendments — adopted 2024-09-18, compliance dates now PAST, status NOT VERIFIED
+  This is no longer a hypothesis. It is a **date-construction rule with a discontinuity inside our TEST
+  split** (TEST is 2024-01 → 2026-09, so the break falls four months into it), and **A4's whole signal is
+  a predicted payment month built from prior-year dividend dates that straddle it.** A single-formula
+  ex-date construction applied across 2024-05-28 mis-dates every pre-break event by one business day —
+  which, for a signal whose resolution *is* the ex-date, is a first-order error, not rounding. See
+  AMENDMENT 3(c) for the exact pre-registered rule.
+
+### 2.2 Reg NMS amendments — adopted 2024-09-18, **status CLOSED 2026-09-18: NOT IN FORCE, twice postponed**
 SEC press release [2024-137](https://www.sec.gov/newsroom/press-releases/2024-137) and rulemaking
 record **Release 34-101070, File S7-30-22**, both fetched. Adopted (quotes exact):
 - A new **$0.005 minimum pricing increment** for NMS stocks priced ≥ $1.00 that are tick-constrained,
@@ -117,16 +156,38 @@ record **Release 34-101070, File S7-30-22**, both fetched. Adopted (quotes exact
 - **Compliance: "the first business day of November 2025"** for Rule 612, Rule 610 and the round-lot
   definition; **"the first business day of May 2026"** for odd-lot information.
 
-**Both dates are in the past as of today (2026-09-18), and I could not verify from sec.gov whether they
-took effect as scheduled, were extended, or were stayed by litigation.** A query on file number
-S7-30-22 returned no entries. **This is the single most important unchecked item in this review** and
-it is listed in §6.
+**CLOSED 2026-09-18 from the Federal Register API and the SEC's own exemptive orders, read in full text.
+Neither compliance date took effect. Both were postponed by SEC temporary exemptive relief, and the tick
+/ access-fee package has now been postponed twice.** Status table, every row from a fetched primary
+document:
 
-**Implication if in force:** half-penny quoting compresses the quoted spread in tick-constrained
-names — which are the *liquid, higher-priced* names our $5 / $10M-ADV floors already push us into.
-That lowers the cost of any **continuous-market** leg. It does **not** change an auction fill, because
-an auction crosses at a single clearing price and pays no quoted spread. So the rule is good news for
-the secondary "5 bps/side flat" cost arm and neutral for the primary auction arm.
+| amended rule | what it does | original compliance date | current status |
+|---|---|---|---|
+| **Rule 612** ($0.005 min. pricing increment) | half-penny quoting for tick-constrained stocks ≥ $1 | first business day of **Nov 2025** | exempted to Nov 2026 (FR **2025-19926**, pub. 2025-11-17), then exempted again to the **first business day of November 2027** (FR **2026-11997**, pub. 2026-06-15). **NOT in force.** |
+| **Rule 610(c)** ($0.001 access fee cap) | cuts the cap from $0.003 | first business day of **Nov 2025** | same two orders → **first business day of November 2027**. **NOT in force.** |
+| **Rule 600(b)(89)(i)(F)** (round-lot tier) | new round-lot definition | first business day of **Nov 2025** | same two orders → **first business day of November 2027**. **NOT in force.** |
+| **Rule 610(d)** (fees determinable at execution) | fees must be knowable at execution | first business day of **Nov 2025** | extended only to the **first business day of February 2026** (FR 2025-19926) and **not** renewed in the June-2026 order, which covers only 610(c), 612 and 600(b)(89)(i)(F). **Inference: in force since ~2026-02-02.** Marked as inference — no document was fetched that affirmatively states it took effect. |
+| **Rule 600(b)(69)(ii)** (odd-lot information dissemination) | best-priced odd-lot data on the SIP | first business day of **May 2026** | exempted for the Plans' participants (19 exchanges + FINRA) to the **first business day of May 2028** (FR **2026-01013**, pub. 2026-01-21). **NOT in force.** |
+
+**Implication — this REVERSES the tentative "good news" reading above, and the correct direction is that
+a hypothesised tailwind is withdrawn, not that a cost is added.** The half-penny tick and the $0.001
+access-fee cap are the two changes that would have compressed quoted spreads in exactly the liquid,
+higher-priced names our $5 / $10M-ADV floors push us into. They are not in force, and on the current
+schedule they will not be before **November 2027** — which is **after** the last date in our TEST split
+(2026-09) and after any plausible live-trading window this program produces. Therefore:
+
+1. **The entire sample, 2016-01 → 2026-09, sits under the OLD regime**: $0.01 minimum increment,
+   $0.003 access-fee cap, 100-share round lots. **No regime break needs to be modelled inside the
+   backtest, and none may be assumed as an out-of-sample improvement.** The declared cost model is
+   unchanged by this section.
+2. The secondary "5 bps/side flat" continuous-market arm gets **no** discount for tick reform. A spread
+   estimate calibrated on the sample is valid for the sample *and* for live trading until Nov 2027.
+3. Unchanged either way: **an auction fill pays no quoted spread**, so the primary `cls` arm was never
+   exposed to this rule. §2.3 (Goyal–Jegadeesh–Wu) remains the binding cost evidence.
+4. Forward-looking, noted and **not** acted on: the SEC published a **proposed** rule on 2026-06-17
+   (FR **2026-12163**) to **rescind the trade-through rule (Rule 611) and the locked-and-crossed
+   provisions** of Reg NMS. Proposed only; it changes nothing in-sample and nothing in the cost model.
+   Flagged here so it is on the record before the runs, not discovered after them.
 
 ### 2.3 The finding that actually changes our plan: opening auctions are illiquid
 **Goyal, Jegadeesh & Wu, *Price Impact in Closing Auctions, Opening Auctions, and Continuous Markets:
@@ -478,18 +539,22 @@ exactly the kind of error that is cheap to fix now and expensive to fix after th
 > **F2 → A1 → F3 → A2 → A4 → A3 → F1 → F5 → F4 → F6.**
 > **Data check A4 must pass first:** the ex-dividend/record-date relationship changed with T+1 on
 > **2024-05-28** (SEC press release 2023-29). A4's predicted-payment-month rule is built from prior-year
-> dividend dates that straddle that boundary. **This is flagged as NOT VERIFIED
-> and must be validated on both sides of the date before any A4 number is reported.**
+> dividend dates that straddle that boundary. ~~This is flagged as NOT VERIFIED~~ — **SUPERSEDED
+> 2026-09-18: now VERIFIED from FINRA Rule 11140(b)(1) (amended SR-FINRA-2023-017, effective
+> 2024-05-28). The rule and the pre-registered date construction are in AMENDMENT 3(c) below.**
 >
 > **(d) Standing rule — no LLM may score a document dated before that model's training cutoff.**
 > Our 8-K corpus spans 2016→2026 and every frontier model's cutoff falls inside it. Look-ahead and the
 > documented "distraction effect" (JFDS 2023, DOI 10.3905/jfds.2023.1.143) make any such score
 > contaminated by construction. This applies to F2, A1 and anything else built on the EDGAR corpus.
 >
-> **(e) Evidence-age disclosure.** For **F1 (field), F5, F6, A1 and A3 no post-2022 evidence of any kind
-> could be verified.** Each of those cells must carry, in `REPORT.md`, the year of its newest verified
-> evidence next to its number. A 2018-vintage prior in a literature that documents 26%/58% haircuts is a
-> material fact about the cell.
+> **(e) Evidence-age disclosure.** For **F1 (field), F5, F6, ~~A1~~ and A3 no post-2022 evidence of any
+> kind could be verified.** Each of those cells must carry, in `REPORT.md`, the year of its newest
+> verified evidence next to its number. A 2018-vintage prior in a literature that documents 26%/58%
+> haircuts is a material fact about the cell. **AMENDED 2026-09-18: A1 is REMOVED from this list — it now
+> has 2023 verified evidence (PBFJ 79, 102029) that the premium persists post-crisis. A1 carries the two
+> riders in AMENDMENT 3(b) instead. F5, F6 and A3 stay, and their silence is now confirmed by a second
+> independent sweep each.**
 >
 > **(f) Cell count unchanged at 26.** N1 (market-wide predictable price pressure, AER 2025) is
 > **logged as a separate one-cell pre-registration**, dated today, to be run **after** the 26 with its own
@@ -505,25 +570,143 @@ mandatory columns stand; the rejected list stands in full (§5 found zero revers
 splits and TEST-once discipline are untouched. "No change" was a legitimate outcome and it is what
 Priorities 1, 3 and 4 delivered — the amendment exists almost entirely because of Priority 2.
 
+### 6b. AMENDMENT 3 — added 2026-09-18 after the gap-closing pass, still BEFORE any family was scored
+
+The six items §7 listed as unclosed were worked. **Five closed.** Nothing found adds or removes a family,
+and **the cell count stays at 26**. Three things change, and one hypothesised tailwind is withdrawn.
+
+> **(a) F4 — one mandatory reporting split, because the only live published form is below our floors.**
+> The JEF 2025 weekly-reversal result (our exact horizon) is **conditional on high MAX and on extreme
+> retail order imbalance**; the unconditional US effect is reported dead since 2000 (SEF 2023). Neither
+> reports costs; neither splits the long leg. Therefore F4's single cell must report, alongside its
+> number: (i) the result **split by MAX quintile** of the entry universe, (ii) the **share of its P&L
+> from names that would fail a $10 price floor**, and (iii) its **break-even cost against the ~100%/week
+> turnover it requires**. F4 keeps **1** cell and its second-to-last run slot. If the cell's profit is
+> concentrated in the top MAX quintile, that is a **negative** result for this account, not a positive
+> one, and must be reported as such.
+>
+> **(b) A1 — age disclosure withdrawn, two riders added.** A1 no longer reports "newest evidence 2018".
+> It reports **PBFJ 79, 102029 (2023): the premium persists in post-crisis data.** The two riders, both
+> from that paper and from JBFA 2025, are mandatory in `REPORT.md`: (i) the premium is framed there as
+> **compensation for expected volatility**, so A1's number must be reported **next to the realized
+> volatility of the position**, not as free alpha; (ii) the 2025 pre-announcement excess is a
+> **lottery-demand** effect, so A1 carries the same **MAX-quintile split** as F4(a). Cells: **2**,
+> unchanged. Run order: **unchanged at rank 2** — this evidence supports the existing placement.
+>
+> **(c) A4 — the ex-date rule is now VERIFIED and is hereby pre-registered as a two-regime construction.**
+> Per FINRA Rule 11140(b)(1) as amended by SR-FINRA-2023-017 effective **2024-05-28**:
+> - for a record date **on or after 2024-05-28**: **ex-date = record date** (first preceding business day
+>   if the record date is not a business day);
+> - for a record date **before 2024-05-28**: **ex-date = record date − 1 business day.**
+>
+> A4's predicted-payment-month construction must implement **both branches**, and `DATA.md` must report a
+> **reconciliation on both sides of 2024-05-28** — the count of events whose ex-date shifts by one
+> business day under the wrong single-formula rule — before any A4 return is looked at. The break falls
+> **four months inside the TEST split**, so a single-formula implementation silently mis-dates the
+> majority of TEST events. This replaces the NOT VERIFIED flag in AMENDMENT 2(c).
+>
+> **(d) Cost model — the Reg NMS tick/fee reform is NOT in force and may not be assumed.** Rule 612's
+> $0.005 increment, Rule 610(c)'s $0.001 access-fee cap and the new round-lot tier were postponed twice
+> and now carry a **November 2027** compliance date; odd-lot dissemination is postponed to **May 2028**
+> (§2.2, five primary documents). **Consequence, pre-committed: the whole sample 2016-01 → 2026-09 is one
+> regime — $0.01 tick, $0.003 cap, 100-share round lots. No regime break is modelled, and no
+> out-of-sample spread compression may be credited to tick reform in any break-even-cost statement.**
+> The §2.2 sentence "good news for the secondary cost arm" is **withdrawn**. AMENDMENT 2(a) and (b) are
+> otherwise untouched: the auction arm was never exposed to this rule and §2.3 remains binding.
+>
+> **(e) Pre-committed magnitude expectation for F4 and A1 (§1, third summary statement).** Both families'
+> live 2023–2026 evidence sits in the lottery / high-MAX / high-retail-order-imbalance corner that our
+> ≥ $5 raw-close gate and $10M-ADV floor delete. **Our long-only, liquid-name variants are therefore
+> expected to measure materially LESS than the published magnitudes. A cell landing near the published
+> number is to be treated as a floor leak or construction error first and an exceptional result second**,
+> and the report must say which checks were run before it was believed. This is the same discipline as
+> AMENDMENT 2(b), applied to two specific families with a specific reason.
+>
+> **(f) Nothing else moves.** No family added or dropped. **26 cells.** Run order unchanged from
+> AMENDMENT 2(c): **F2 → A1 → F3 → A2 → A4 → A3 → F1 → F5 → F4 → F6.** The rejected list still stands —
+> the 2023–2026 re-sweep found **zero** reversals (§5, and §7.2 below for the two items re-checked here).
+> The three mandatory columns, the frequency/additivity column, the gates, the splits and TEST-once are
+> untouched.
+
 ---
 
-## 7. Open items this review could not close (ranked by how much they matter)
+## 7. Gap-closing pass, 2026-09-18 — what closed, and what genuinely remains
 
-1. **Did the September-2024 Reg NMS amendments actually take effect?** Compliance was set for the first
-   business day of **November 2025** (ticks, access fees, round lots) and **May 2026** (odd-lot info);
-   both are past. Litigation, stay or extension status **NOT VERIFIED** — an S7-30-22 query on sec.gov
-   returned no entries. Matters for the secondary (continuous-market) cost arm, not the auction arm.
-2. **The ex-date/record-date mechanics under T+1** — NOT VERIFIED, and it is a live trap for A4 (§6c).
-3. **Three readable-abstract failures on our own families**: *Maxing out short-term reversals in weekly
-   stock returns* (JEF 2025 — our exact F4 horizon), *Intraday and overnight return anomalies* (FRL 2025
-   — F6), *Earnings announcement premium and return volatility* (PBFJ 2023 — A1). All exist, none could
-   be read. These are the three highest-value fetches for whoever has a search budget next.
-4. **0DTE spillover to single-stock equity liquidity** — no verified evidence either way.
-5. **Closing-auction volume share 2024–2026** — only the academic ~10% figure is verified.
-6. **Order Competition Rule and Reg Best Execution status** — the Order Competition Rule was confirmed
-   *absent* from the September-2024 adopted set; its current status and Reg Best Ex's are **NOT VERIFIED**.
-7. **PFOF-era retail execution quality in US equities, 2023–2026** — nothing verifiable found.
-8. **Transformer vs gradient boosting, head to head, US cross-section** — no such study found; NOT VERIFIED.
+Same constraint as the first pass: **zero WebSearch budget.** Everything below was fetched through
+bibliographic and government APIs, plus two Crossref-mirror sites. ~25 fetches.
+
+### 7.1 CLOSED — five of the six items, with the provenance of each
+
+| # | item | status | what it turned out to be | what it changes |
+|---|---|---|---|---|
+| 1 | **JEF 2025 weekly reversal** (our exact F4 horizon) | **CLOSED** | Chen, Cohen, Liang & Sun, JEF 82, 101608. Weekly US reversal exists **only conditional on high MAX** (≈1.66%/wk vs 0.65%/wk low-MAX) and **only in the top retail-order-imbalance periods**. Corroborated by SEF 2023 (10.1108/sef-12-2022-0599): unconditional US contrarian profits **vanished since 2000**. | **F4's prior goes DOWN.** AMENDMENT 3(a): mandatory MAX-quintile split, price-floor P&L share, and break-even cost at ~100%/wk turnover. |
+| 2 | **FRL 2025 overnight** (F6) | **CLOSED — and it was a false lead** | Zirk-Sadowski & Hryckiewicz, FRL 86, 108638: a **time-of-day/day-of-week seasonality** study on small-cap NYSE stocks at 30 s–60 min intervals. **No cross-sectional overnight-vs-intraday decomposition at all.** | Nothing for F6 except the retirement of a "highest-value fetch". A **second** independent sweep for an LPS-style US re-test returned only China/Korea/ETF/Europe papers: **the F6 silence is real.** |
+| 3 | **PBFJ 2023 earnings-announcement premium** (A1) | **CLOSED** | Tsafack, Becker & Han, PBFJ 79, 102029: the premium **persists in post-crisis data**; positively related to *expected* volatility (**a risk-return trade-off**), inversely to *realized* volatility. US sample; Asia-Pacific offered as future work. Plus JBFA 2025 (10.1111/jbfa.70008): ≈85 bps in the 10 days **before** announcements, from lottery demand. | **A1 leaves the "evidence is 8 years old" list.** AMENDMENT 3(b): report next to realized volatility; MAX-quintile split. Cells and rank 2 unchanged. |
+| 4 | **Reg NMS 2024 compliance dates** | **CLOSED, five primary documents** | **Neither date took effect.** Rule 612 / 610(c) / round lot: Nov 2025 → Nov 2026 (FR 2025-19926) → **Nov 2027** (FR 2026-11997). Odd-lot info: May 2026 → **May 2028** (FR 2026-01013). Rule 610(d) alone ran to Feb 2026 and was not renewed (**inference** that it is in force). Also found: a **proposed** June-2026 rescission of the trade-through rule (FR 2026-12163). | **AMENDMENT 3(d): a tailwind is withdrawn.** The sample is ONE regime ($0.01 tick, $0.003 cap); no spread compression may be credited. §2.2's "good news" sentence is withdrawn. Auction arm untouched. |
+| 5 | **T+1 ex-date / record-date mechanics** (A4) | **CLOSED, primary source** | **FINRA Rule 11140(b)(1)**, amended **SR-FINRA-2023-017, effective 2024-05-28**: *"the 'ex-dividend date' shall be the record date if the record date falls on a business day."* Under T+2 it was one business day earlier. | **AMENDMENT 3(c): a pre-registered two-regime ex-date construction**, plus a mandatory `DATA.md` reconciliation across 2024-05-28. The break falls **four months inside TEST**. |
+
+**Provenance caveat, stated because it is the weak link in items 1–3.** Elsevier deposits no abstracts to
+Crossref, OpenAlex, OpenAIRE or Semantic Scholar for these three DOIs (all four checked, all four
+returned null), ScienceDirect and `ouci.dntb.gov.ua` both return **HTTP 403** to this tool, and SSRN is
+still 403. The three abstracts were finally read from **`colab.ws`**, a Crossref-metadata mirror that
+renders a summary of the publisher abstract. **That is a secondary source and its rendering is
+paraphrase-risk.** Phrases inside quotation marks in §1 and §7 are as the mirror presented them in
+quotation marks; everything else is that mirror's summary, not the authors' words. **Treated as
+VERIFIED-VIA-MIRROR, not as a publisher-verbatim abstract.** Nothing in AMENDMENT 3 depends on a single
+word of these three: 3(a) is a *reporting split*, 3(b) is a *disclosure change*, and both are
+conservative — they make the cells harder to pass, not easier. **If a later session gets publisher access,
+re-read all three; the direction of 3(a)/3(b) should not flip, and if it does, this note is where to
+start.**
+
+### 7.2 Item 6 — rejected-family reversals and the remaining silences
+
+**Reversals: still zero.** The two items §5 could not check either way were re-swept.
+- **Pre-FOMC drift**: one peer-reviewed 2024 item found — *The pre-FOMC announcement drift: short-lived
+  or long-lasting?*, **Applied Economics 2024**, DOI
+  [10.1080/00036846.2024.2322573](https://doi.org/10.1080/00036846.2024.2322573) (OpenAlex,
+  reconstructed): a pre-announcement positive excess return **survives before press-conference
+  announcements but is "short-lived, becoming insignificant shortly after the disclosure,"** explicitly
+  contrasting with Lucca–Moench 2015. **Weaker and shorter, not reversed. The rejection STANDS**, now
+  with a peer-reviewed post-2022 cite rather than a thesis.
+- **Analyst-revision drift / failures-to-deliver / index addition / TSMOM / BAB / seasonality**: no new
+  evidence; §5 stands unchanged.
+
+**Silences, per family, and whether each is a real absence or an indexing gap:**
+
+| family | second sweep run 2026-09-18 | verdict on the silence |
+|---|---|---|
+| **F5** 52-week high | "52-week high momentum anomaly stock returns", 2023+ — 629 hits, **none** a US return-premium re-test. What exists is anchoring psychology (JBEF 2024), insider exploitation of the anchor (Financial Review 2023, 10.1111/fire.12371), fundamental-strength moderators (RQFA 2023), and a **corporate-bond** 52-week-high paper (SSRN 2024). | **REAL ABSENCE.** The topic is actively published; nobody is re-testing the George–Hwang *return premium* in US equities. Newest direct evidence stays George–Hwang–Li 2018. |
+| **F6** overnight vs intraday | "overnight intraday cross-section tug of war institutional retail", 2023+ — results are China (JEDC 2024), Korea (AFR 2025), sector ETFs (Risks 2026), EJF/JIFMIM sentiment "night and day" papers. **No US LPS re-test.** | **REAL ABSENCE** for the US cross-section; the international work is an indexing *presence*, which makes the US gap harder to explain away. |
+| **A3** net share issuance | "net share issuance anomaly … United States", 2023+ — returns anomaly-*aggregate* papers (Review of Finance 2023, 10.1093/rof/rfad025), global ML anomaly work, Forest-through-the-Trees (JF 2025). **No US issuance re-test.** | **REAL ABSENCE**, consistent with the first sweep's Japan-only and risk-explanation hits. A3 stays at 2 cells on 2008-vintage evidence and must say so. |
+| **A1** | — | **NO LONGER SILENT** (§7.1 item 3). |
+| **the crux column** (long-leg share of an L-S spread) | "long leg short leg decomposition … long-only implementable", 2023+ — the only long-only-with-costs hit is a **mutual-fund-selection** paper (JFE 2023, 10.1016/j.jfineco.2023.103737, ≈2.4%/yr net, long-only, but fund picking, not the stock cross-section). | **REAL ABSENCE, now across two sweeps.** `LIT_REVIEW.md` §1's requirement — **we must measure the long-leg share ourselves** — is confirmed as a searched-for gap. This is the single most load-bearing unknown in the program. |
+
+### 7.3 Genuinely still open, and why each could not be closed
+
+1. **The publisher-verbatim text of the three Elsevier abstracts** (JEF 2025, FRL 2025, PBFJ 2023).
+   Content is closed via a mirror; **wording is not**. Blocked by: no Elsevier deposit to any of the four
+   open aggregators, HTTP 403 from ScienceDirect, OUCI and SSRN. **Needs institutional access or a
+   general web search — not closable by any API route tried.** Risk is bounded (§7.1 caveat).
+2. **Rule 610(d)'s in-force status is an inference**, not a fetched statement. It was extended only to
+   Feb 2026 and omitted from the June-2026 order. Low stakes: 610(d) is a fee-disclosure rule and does
+   not enter our cost model.
+3. **0DTE spillover to single-stock equity liquidity** — still no verified evidence either way. The
+   literature is SSRN-only and SSRN is 403. Low priority for a long-only close-executed book, but
+   unchecked, not cleared.
+4. **Closing-auction volume share 2024–2026** — only Goyal–Jegadeesh–Wu's academic **~10%** is verified.
+   Exchange statistics need a general web search. Any 13%/15%/20% figure remains unusable.
+5. **Order Competition Rule and Reg Best Execution status** — not re-attempted this pass; the Federal
+   Register sweep was scoped to the S7-30-22 package. **NOT VERIFIED.** Neither bears on an auction fill.
+6. **PFOF-era retail execution quality, US equities 2023–2026** — nothing verifiable; SSRN-bound.
+7. **Transformer vs gradient boosting, head to head, US cross-section** — no such study found in either
+   sweep. **NOT VERIFIED**, and §4.2's "no cell" verdict does not depend on it.
+
+**Phrasing discipline, applied to this section.** None of the rows above supports "no such effect
+exists". Each supports: *no post-2022 evidence for this family was detectable in OpenAlex, Crossref,
+arXiv, OpenAIRE, Semantic Scholar or the Federal Register, searched on these terms, through an indexing
+layer that excludes SSRN entirely and carries no Elsevier abstracts.* For F5, F6, A3 and the long-leg
+column that null now rests on **two independent sweeps each**, which raises confidence in the absence
+without converting it into proof.
 
 ---
 
@@ -563,8 +746,36 @@ Metadata exact, abstract reconstructed from OpenAlex (paraphrase-risk, flagged i
 [Polish factor implementation costs, Bank i Kredyt 2025](https://doi.org/10.5604/01.3001.0055.3041)
 
 Existence confirmed, content NOT VERIFIED:
-[Maxing out short-term reversals, JEF 2025](https://doi.org/10.1016/j.jempfin.2025.101608) ·
-[Intraday and overnight return anomalies, FRL 2025](https://doi.org/10.1016/j.frl.2025.108638) ·
-[Earnings announcement premium and return volatility, PBFJ 2023](https://doi.org/10.1016/j.pacfin.2023.102029) ·
 [Japan buyback pre-registered replication, PBFJ 2025](https://doi.org/10.1016/j.pacfin.2025.102666) ·
 [composite equity issuance, IRFA 2024](https://doi.org/10.1016/j.irfa.2024.103288)
+
+### 8b. Added by the gap-closing pass, 2026-09-18
+
+**Primary regulatory documents, full text fetched (exact quotes):**
+[FINRA Rule 11140 — ex-dividend date, amended SR-FINRA-2023-017 eff. 2024-05-28](https://www.finra.org/rules-guidance/rulebooks/finra-rules/11140) ·
+[FR 2025-19926 — SEC temporary exemptive relief, Rules 600(b)(89)(i)(F), 610(c), 610(d), 612](https://www.federalregister.gov/documents/full_text/text/2025/11/17/2025-19926.txt) ·
+[FR 2026-11997 — SEC temporary exemptive relief to Nov 2027, Rules 600(b)(89)(i)(F), 610(c), 612](https://www.federalregister.gov/documents/full_text/text/2026/06/15/2026-11997.txt) ·
+[FR 2026-01013 — SEC temporary exemptive relief to May 2028, Rule 600(b)(69)(ii) odd-lot information](https://www.federalregister.gov/documents/full_text/text/2026/01/21/2026-01013.txt) ·
+[FR 2024-21867 — the adopting release as published](https://www.federalregister.gov/documents/2024/10/08/2024-21867/regulation-nms-minimum-pricing-increments-access-fees-and-transparency-of-better-priced-orders) ·
+FR 2026-12163 — **proposed** rescission of the trade-through rule, pub. 2026-06-17 (metadata only)
+
+**Metadata exact (Crossref/OpenAlex), abstract read via the `colab.ws` Crossref mirror — secondary
+source, paraphrase-risk, see §7.1:**
+[Chen, Cohen, Liang & Sun, JEF 82, 101608 (2025)](https://doi.org/10.1016/j.jempfin.2025.101608) ·
+[Zirk-Sadowski & Hryckiewicz, FRL 86, 108638 (2025)](https://doi.org/10.1016/j.frl.2025.108638) ·
+[Tsafack, Becker & Han, PBFJ 79, 102029 (2023)](https://doi.org/10.1016/j.pacfin.2023.102029)
+
+**Metadata exact, abstract reconstructed from OpenAlex (paraphrase-risk):**
+[Detzel, Novy-Marx & Velikov, *Model Comparison with Transaction Costs*, JF 78(3) 1743–1775 (2023)](https://doi.org/10.1111/jofi.13225) ·
+[*Evolution of short-term contrarian profits*, Studies in Economics and Finance 2023](https://doi.org/10.1108/sef-12-2022-0599) ·
+[*Lottery Demand and Stock Returns Preceding Earnings Announcements*, JBFA 2025](https://doi.org/10.1111/jbfa.70008) ·
+[*The pre-FOMC announcement drift: short-lived or long-lasting?*, Applied Economics 2024](https://doi.org/10.1080/00036846.2024.2322573) ·
+[*Corporate insiders' exploitation of investors' anchoring bias at the 52-week high and low*, Financial Review 2023](https://doi.org/10.1111/fire.12371) ·
+[*Machine learning and fund characteristics help to select mutual funds with positive alpha*, JFE 2023](https://doi.org/10.1016/j.jfineco.2023.103737)
+
+**Confirmed as returning no abstract for the three Elsevier DOIs** (so the mirror route was necessary,
+and so the next session does not repeat the attempt): Crossref `api.crossref.org/works/{doi}`,
+OpenAlex `api.openalex.org/works/doi:{doi}`, OpenAIRE `api.openaire.eu/search/publications?doi=`,
+Semantic Scholar `api.semanticscholar.org/graph/v1/paper/DOI:`. **HTTP 403 to this tool:**
+`sciencedirect.com`, `ouci.dntb.gov.ua`, SSRN. **Returned only the search form, no results:**
+`econpapers.repec.org/scripts/search.pf`.
