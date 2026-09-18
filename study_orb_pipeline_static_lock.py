@@ -874,13 +874,35 @@ def main():
     if EXP.rvol_rank and 'rvol_open5' not in kept.columns:
         raise SystemExit("FATAL: ORB_EXP_RVOL_RANK needs the rvol sidecar (ORB_BT_SIDECAR_CSV)")
 
+    # ---- meta-label hook (research/meta_label/PREREG.md, 2026-09-18) -------
+    # A secondary model may REORDER the day's ranked list and VETO a selected
+    # pick; it may never RESIZE one (the quintile mult and the per-position cap
+    # stay exactly as shipped). ORB_META_RANK_COL names a sidecar column that
+    # replaces (quintile, composite) as the primary sort key, DESC; NaN sorts
+    # to the shipped order because every row of an unscored day ties and the
+    # (quintile, composite) tie-break then decides. Inert unless set.
+    _meta_rank = (os.environ.get('ORB_META_RANK_COL') or '').strip()
+    if _meta_rank and _meta_rank not in kept.columns:
+        raise SystemExit(f"FATAL: ORB_META_RANK_COL={_meta_rank} is not a column "
+                         f"(join it with ORB_BT_SIDECAR_CSV)")
+    if _meta_rank:
+        print(f"META rank hook: day ranking by {_meta_rank} DESC "
+              f"(quintile/composite break ties); "
+              f"{int(kept[_meta_rank].isna().sum())}/{len(kept)} rows unscored "
+              f"-> shipped order")
+
     # Top-K + dedup per day
     sel_rows = []
     _ranked_rows = []
     for day, dg in kept.groupby('date'):
         d = dg.copy()
         d['_q_rank'] = d['_quintile'].map(Q_ORDER)
-        if EXP.rvol_rank:
+        if _meta_rank:
+            d['_meta_key'] = pd.to_numeric(d[_meta_rank], errors='coerce')
+            d = d.sort_values(['_meta_key', '_q_rank', '_composite'],
+                              ascending=[False, True, False],
+                              na_position='last', kind='mergesort')
+        elif EXP.rvol_rank:
             # C1b: the paper's "top-N by opening relative volume"; quintile
             # order and composite only break ties (sizing mults unchanged).
             d['_rvol_key'] = _rvol_key(d['rvol_open5'])
@@ -1226,6 +1248,22 @@ def main():
               f"{int(_vm.sum())} of {len(sel)} pick(s) (their P&L would have been "
               f"{_vp:+,.0f}; NaN kept: {int(sel[_n1_vf].isna().sum())}; slot stays empty)")
         sel = sel[~_vm].copy()
+
+    # ---- meta-label VETO hook (research/meta_label/PREREG.md) -------------
+    # POST-selection, NO refill — the PDR/G1/range-size/catalyst form. A pick
+    # whose sidecar score is below ORB_META_VETO_THR is dropped and its slot
+    # stays empty. NaN fails OPEN (kept). Inert unless ORB_META_VETO_COL is set.
+    _meta_veto = (os.environ.get('ORB_META_VETO_COL') or '').strip()
+    if _meta_veto:
+        if _meta_veto not in sel.columns:
+            raise SystemExit(f"FATAL: ORB_META_VETO_COL={_meta_veto} is not a column")
+        _mv_thr = float(os.environ.get('ORB_META_VETO_THR', '0.5'))
+        _mv = (pd.to_numeric(sel[_meta_veto], errors='coerce') < _mv_thr).fillna(False)
+        _mv_pnl = float(sel.loc[_mv, '_sized_pnl'].sum())
+        print(f"META veto: dropped {int(_mv.sum())} of {len(sel)} pick(s) with "
+              f"{_meta_veto} < {_mv_thr} (their P&L would have been {_mv_pnl:+,.0f}; "
+              f"{int(sel[_meta_veto].isna().sum())} unscored kept; slot stays empty)")
+        sel = sel[~_mv].copy()
 
     # 2026-05-08: fill-rate haircut. Pre-fix, BT assumed every qualified
     # signal filled — no model of buy-stop misses. LIVE Mon-Thu 5/4-5/7

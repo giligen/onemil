@@ -1,0 +1,32 @@
+{
+ "m1_f0": {
+  "depth": 5,
+  "trees": 200,
+  "train_r": 0.3848
+ },
+ "m1_f1": {
+  "depth": 5,
+  "trees": 200,
+  "train_r": 0.4148
+ },
+ "m2_f0": {
+  "depth": 3,
+  "trees": 500,
+  "train_r": 0.3209
+ },
+ "m2_f1": {
+  "depth": 5,
+  "trees": 200,
+  "train_r": 0.3997
+ },
+ "m3_f0": {
+  "depth": 5,
+  "trees": 200,
+  "train_r": 0.3839
+ },
+ "m3_f1": {
+  "depth": 5,
+  "trees": 200,
+  "train_r": 0.4006
+ }
+}

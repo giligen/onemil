@@ -1,0 +1,9 @@
+# Regenerable from meta_dataset.csv + walkforward.py + run_book.sh (minutes).
+meta_dataset.csv
+scores/
+logs/
+__pycache__/
+books/book_*_sel_*.csv
+books/monthly_*_sel_*.csv
+books/book_*_abl_*.csv
+books/monthly_*_abl_*.csv

@@ -1,0 +1,9 @@
+cell,arm,split,picks,fills,pnl,r_per_pick,t,mdd,worst_mo,red_mo,n_mo,n_days,d_pnl,d_mean_day,t_day
+M4b(base-rate cut) flags=0,meas_cost,TRAIN,58,49,3375.0,0.5465,2.41,-563.0,-419.0,2,9,53,-2317.0,-43.73,-1.87
+M4b(base-rate cut) flags=0,meas_cost,VAL,36,28,3838.0,0.6896,1.69,-477.0,-190.0,1,5,42,-93.0,-2.21,-0.17
+M4b(base-rate cut) flags=0,asis,TRAIN,58,49,3190.0,0.5332,2.39,-632.0,-456.0,3,9,53,-1839.0,-34.69,-1.49
+M4b(base-rate cut) flags=0,asis,VAL,36,28,4598.0,0.8857,2.0,-494.0,-203.0,1,5,42,-1789.0,-42.59,-1.05
+M4b(base-rate cut) flags=1,meas_cost,TRAIN,58,48,3410.0,0.5494,2.42,-508.0,-364.0,2,9,53,-2283.0,-43.07,-1.74
+M4b(base-rate cut) flags=1,meas_cost,VAL,36,28,4348.0,0.8081,1.94,-399.0,172.0,0,5,42,417.0,9.92,2.23
+M4b(base-rate cut) flags=1,asis,TRAIN,58,48,3243.0,0.5379,2.42,-568.0,-392.0,3,9,53,-1786.0,-33.7,-1.37
+M4b(base-rate cut) flags=1,asis,VAL,36,28,5130.0,1.0077,2.25,-415.0,163.0,0,5,42,-1256.0,-29.91,-0.77
