@@ -1,0 +1,20 @@
+ N   rule         split   pnl  picks  mdd  worst_month  neg_months
+ 8   asis    TRAIN 2025  6662    105 -528          -25           1
+ 8   asis VAL 26-01..05  6386     53 -489          159           0
+ 8   asis   TEST 26-06+  1380     57 -515         -148           1
+ 8   asis           ALL 14429    215 -576         -148           2
+ 8 anchor    TRAIN 2025  5267     90 -387         -221           1
+ 8 anchor VAL 26-01..05  6496     48 -489          159           0
+ 8 anchor   TEST 26-06+   947     48 -473         -148           1
+ 8 anchor           ALL 12710    186 -489         -221           2
+ 3   asis    TRAIN 2025  3650     47 -617         -203           3
+ 3   asis VAL 26-01..05  2681     19 -409         -223           2
+ 3   asis   TEST 26-06+   855     22 -193         -122           1
+ 3   asis           ALL  7187     88 -714         -223           6
+ 3 anchor    TRAIN 2025  3618     44 -480         -295           3
+ 3 anchor VAL 26-01..05  2782     18 -322         -223           2
+ 3 anchor   TEST 26-06+   855     22 -193         -122           1
+ 3 anchor           ALL  7254     84 -759         -295           6
+
+N=8: pnl 14429 -> 12710 (-11.9%) | MDD -576 -> -489 | worst -148 -> -221 | picks 215 -> 186
+N=3: pnl 7187 -> 7254 (+0.9%) | MDD -714 -> -759 | worst -223 -> -295 | picks 88 -> 84

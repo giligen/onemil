@@ -111,7 +111,8 @@ class TestBurstPickBudget:
         """Restart replay: BEZ entered (DB), 3 re-vetoed, position closed.
         Pick budget must be 0 — the next-ranked name may NOT slide in."""
         import inspect
-        src = inspect.getsource(type(engine).check_entries)
+        # body moved behind the lock wrapper (2026-09-18 entry drain thread)
+        src = inspect.getsource(type(engine)._check_entries_locked)
         assert 'symbols_entered_today | self._pdr_vetoed_today' in src \
             and 'set(self.open_positions)' in src
 

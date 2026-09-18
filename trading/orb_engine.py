@@ -629,6 +629,34 @@ class ORBEngine:
         self._bar_queue_full_logged = False
         self._bar_handler_registered = False
 
+        # --- 09:35 entry path: dedicated drain thread (2026-09-18) ---------
+        # The scanner's cycle owns its thread for 20-45s at 09:35 ET (broad
+        # 5,973-symbol bars+trades fetch, criteria pass, account poll) and
+        # _orb_tick then spends another ~15s inside the daily_bars universe
+        # query BEFORE it reaches check_entries. On 2026-09-18 that sequenced
+        # the day's first order submit to 09:35:48.9 ET (measured; see
+        # _check_first_submit_latency). ORB's 09:35 evaluation must never
+        # wait on either, so it runs on its own thread — the same pattern the
+        # HOD-break engine uses (hod_break_engine.start_drain_thread).
+        #
+        # `_lock` serialises candidate/position mutation between that thread
+        # and the scanner's engine-pool tick. It is deliberately NOT held
+        # across the slow universe source_loader() call (see build_universe).
+        self._lock = threading.RLock()
+        self._entry_drain_thread: Optional[threading.Thread] = None
+        # First-rank grace bookkeeping — the drain thread re-evaluates the
+        # moment the grace window expires (or the field completes). Before
+        # this, the ONLY trigger was a fresh websocket bar event, and the
+        # 09:35 bars had already been consumed by the deferring call, so the
+        # deferral silently became "wait for whatever ran next".
+        self._first_rank_defer_active: bool = False
+        self._first_rank_defer_started: Optional[float] = None
+        self._first_rank_grace_end_utc: Optional[datetime] = None
+        # Measured latency attribution for the tripwire (seconds per phase,
+        # accumulated until the day's first submit). Plain float adds — this
+        # is diagnostics, never a control input.
+        self._latency_phases: Dict[str, float] = {}
+
         # Rolling 1-min bars per symbol (kept in-memory; used to build range data)
         self._bar_windows: Dict[str, List[dict]] = {}
 
@@ -697,21 +725,29 @@ class ORBEngine:
         if source_loader is None:
             logger.warning("ORBEngine.build_universe: no source_loader — universe unchanged")
             return len(self.universe)
+        # The loader is the SLOW part (daily_bars window-function scan +
+        # a few-thousand-symbol snapshot call — measured 15.3s + 3.4s on
+        # 2026-09-18) and it touches no engine state, so it runs OUTSIDE
+        # `_lock`: the entry drain thread must never queue behind it.
+        _t0 = time.time()
         try:
             symbols = list(source_loader())
         except Exception as e:
             logger.error(f"ORBEngine.build_universe: loader failed: {e}")
             return len(self.universe)
+        finally:
+            self._record_latency_phase('universe_seed', time.time() - _t0)
 
-        new_syms = set(symbols) - self.universe
-        if not new_syms:
-            return len(self.universe)
+        with self._lock:
+            new_syms = set(symbols) - self.universe
+            if not new_syms:
+                return len(self.universe)
 
-        for sym in new_syms:
-            self.candidates[sym] = CandidateState(symbol=sym)
-            self._subscribe_bars(sym)
-        self.universe |= new_syms
-        self.universe_date = datetime.now(timezone.utc).date().isoformat()
+            for sym in new_syms:
+                self.candidates[sym] = CandidateState(symbol=sym)
+                self._subscribe_bars(sym)
+            self.universe |= new_syms
+            self.universe_date = datetime.now(timezone.utc).date().isoformat()
         logger.info(
             f"ORBEngine.build_universe: +{len(new_syms)} new candidates "
             f"(universe now {len(self.universe)}) for {self.universe_date}"
@@ -1095,20 +1131,109 @@ class ORBEngine:
                 )
                 self._bar_queue_full_logged = True
 
-    def drain_bar_events(self) -> Set[str]:
+    # Entry drain thread poll interval. Short enough that the first-rank
+    # grace expiry is serviced within a quarter second of the deadline;
+    # each idle pass is a queue poll and two in-memory checks.
+    ENTRY_DRAIN_INTERVAL_S = 0.25
+
+    def start_entry_drain_thread(self) -> None:
+        """Run ORB's bar drain + entry evaluation on a dedicated thread.
+
+        The scanner's cycle thread is busy 20-45s at 09:35 ET (broad-universe
+        fetch, criteria pass, account poll) and its engine tick then spends
+        ~15s in the daily_bars universe query before reaching check_entries.
+        ORB's 09:35 selection must act on the bar close, not on whatever the
+        scanner finishes next — so it blocks on its own queue here, exactly
+        like HodBreakEngine.start_drain_thread.
+        """
+        if self._entry_drain_thread is not None:
+            if self._entry_drain_thread.is_alive():
+                return
+            if not self.shutdown_requested:
+                # A dead drain thread means the 09:35 evaluation has silently
+                # fallen back to the scanner cycle — the exact regression this
+                # thread exists to prevent. Never fail quietly.
+                logger.error("ORB: entry drain thread is DEAD — restarting it "
+                             "(09:35 entries were falling back to the scan cycle)")
+        self._entry_drain_thread = threading.Thread(
+            target=self._entry_drain_loop, name='orb-entry-drain', daemon=True)
+        self._entry_drain_thread.start()
+        logger.info("ORB: entry drain thread started (09:35 evaluation "
+                    "runs off the scanner cycle)")
+
+    def _entry_drain_loop(self) -> None:
+        """Drain bars and evaluate entries independently of the scan cycle.
+
+        Two triggers, both off the scanner's thread:
+          * fresh bars -> targeted check_entries(symbols=touched)
+          * first-rank grace expiry (or the field completing) -> full
+            check_entries. Before 2026-09-18 the grace had NO timer: the only
+            re-entry into check_entries was another websocket bar event, and
+            the 09:35 bars were already consumed by the deferring call, so
+            the 25s grace became "until the scanner cycle happens to finish".
+        """
+        while not self.shutdown_requested:
+            try:
+                touched = self.drain_bar_events(_from_drain_thread=True)
+                if touched:
+                    self.check_entries(symbols=touched)
+                elif self._first_rank_grace_elapsed():
+                    # Disarm BEFORE the call: the deferral has now been
+                    # serviced whatever check_entries decides. Without this a
+                    # check_entries that returns early (kill rail, daily cap,
+                    # past last-entry time) would leave the flag set and this
+                    # loop would hammer the DB/broker 4x a second. The gate
+                    # re-arms itself if it defers again.
+                    self._first_rank_defer_active = False
+                    self.check_entries()
+            except Exception as e:
+                logger.error(f"ORB: entry drain loop failed: {e}", exc_info=True)
+            time.sleep(self.ENTRY_DRAIN_INTERVAL_S)
+
+    def _first_rank_grace_elapsed(self) -> bool:
+        """True iff a deferred first rank is now due (cheap, no I/O).
+
+        Due = the rangeless field completed, or the grace window ended.
+        """
+        if not self._first_rank_defer_active:
+            return False
+        if not any(c.range_data is None for c in self.candidates.values()):
+            return True
+        end = self._first_rank_grace_end_utc
+        return end is None or datetime.now(timezone.utc) >= end
+
+    def _record_latency_phase(self, phase: str, seconds: float) -> None:
+        """Accumulate measured seconds for the 09:35 latency tripwire.
+
+        Diagnostics only — never read by a trading decision. Stops
+        accumulating once the day's first submit has been reported.
+        """
+        if self._first_submit_latency_logged:
+            return
+        self._latency_phases[phase] = self._latency_phases.get(phase, 0.0) + seconds
+
+    def drain_bar_events(self, _from_drain_thread: bool = False) -> Set[str]:
         """Drain queued bar events; update range data + candidate state.
+
+        While the dedicated entry drain thread is alive this is a NO-OP for
+        the scanner-cycle caller: one consumer keeps a symbol's bars in
+        arrival order (two consumers could ingest a later bar first).
 
         Returns:
             Set of symbols with fresh bar data (caller may use for targeted re-eval).
         """
+        if not _from_drain_thread and self._entry_drain_thread is not None \
+                and self._entry_drain_thread.is_alive():
+            return set()
         touched: Set[str] = set()
-        while True:
-            try:
-                symbol, bars_df = self._bar_event_queue.get_nowait()
-            except queue.Empty:
-                break
-            self._ingest_bars(symbol, bars_df)
-            touched.add(symbol)
+        with self._lock:
+            while True:
+                try:
+                    symbol, bars_df = self._bar_event_queue.get_nowait()
+                except queue.Empty:
+                    break
+                self._ingest_bars(symbol, bars_df)
+                touched.add(symbol)
         return touched
 
     def _ingest_bars(self, symbol: str, bars_df: pd.DataFrame) -> None:
@@ -1858,7 +1983,20 @@ class ORBEngine:
 
     def check_entries(self, symbols: Optional[Iterable[str]] = None,
                       feature_providers: Optional[Dict[str, dict]] = None) -> List[str]:
-        """Evaluate candidates for entry.
+        """Evaluate candidates for entry (serialised against the drain thread).
+
+        Entry evaluation now runs from TWO threads — the scanner's engine
+        tick and ORB's own entry drain thread (start_entry_drain_thread) —
+        so candidate/position mutation is serialised on `_lock`. The lock is
+        re-entrant: check_exits and the drain take the same one.
+        """
+        with self._lock:
+            return self._check_entries_locked(symbols, feature_providers)
+
+    def _check_entries_locked(
+            self, symbols: Optional[Iterable[str]] = None,
+            feature_providers: Optional[Dict[str, dict]] = None) -> List[str]:
+        """Entry evaluation body — caller holds `_lock`.
 
         Args:
             symbols: Subset to check; if None, evaluates all candidates with
@@ -1915,7 +2053,9 @@ class ORBEngine:
         # collapses to whatever the WS happened to deliver. On 4/22 that
         # meant Q4 winners (ETHT/RDTL/NBIG/VNCE) were skipped and four Q5s
         # filled all 4 slots — against orb.yaml ranking.order=[Q4,Q5,...].
+        _t_sweep = time.time()
         sweep_filled = self._ensure_ranges_post_open()
+        self._record_latency_phase('post_open_range_sweep', time.time() - _t_sweep)
         if sweep_filled and symbols is not None:
             symbols = set(symbols) | sweep_filled
 
@@ -1988,7 +2128,18 @@ class ORBEngine:
         if not symbols_entered_today and self._should_defer_first_rank():
             self._post_open_range_sweep_done = False
             return []
+        # Gate passed (or never armed): close the grace window. The drain
+        # thread stops re-triggering, and the waited time is attributed to
+        # the tripwire so a slow 09:35 names the grace, not a guess.
+        if self._first_rank_defer_active:
+            self._first_rank_defer_active = False
+            if self._first_rank_defer_started is not None:
+                self._record_latency_phase(
+                    'first_rank_grace',
+                    time.time() - self._first_rank_defer_started)
+                self._first_rank_defer_started = None
 
+        _t_rank = time.time()
         # 1. Build candidate set
         eligible: List[CandidateState] = []
         cand_pool = symbols if symbols is not None else self.candidates.keys()
@@ -2199,6 +2350,7 @@ class ORBEngine:
             if order_id:
                 cand.plan_submitted = True
                 submitted.append(sym)
+                self._record_latency_phase('rank_and_submit', time.time() - _t_rank)
                 self._check_first_submit_latency()
         return submitted
 
@@ -2206,32 +2358,53 @@ class ORBEngine:
         """Latency tripwire (B+ 2026-08-15, design precondition #1 / item H).
 
         WARNING + Telegram once/day if the FIRST ORB order submit lands more
-        than `latency_warn_secs` after 09:35:00 ET. B+ disables the PM/news
-        mult so the 32-73s blocking-news-prefetch regression should be gone;
-        this proves it (and catches any relapse) without adding any blocking
-        call to the entry path."""
+        than `latency_warn_secs` after 09:35:00 ET.
+
+        2026-09-18: the message used to GUESS the blocker ("news prefetch
+        should be OFF in B+") and was wrong — the 48.9s that day was the
+        first-rank grace plus the scanner cycle plus the universe query, and
+        news prefetch was not in it. It now reports the MEASURED seconds per
+        phase (`_record_latency_phase`) and labels whatever is left over as
+        time spent outside ORB code — the scanner cycle / engine-pool wait.
+        """
         if self._first_submit_latency_logged:
             return
-        self._first_submit_latency_logged = True
         try:
             et = self._et_now()
             target = et.replace(hour=9, minute=35, second=0, microsecond=0)
             delay = (et - target).total_seconds()
+            phases = dict(self._latency_phases)
+            measured = sum(phases.values())
+            # Anything unaccounted for is wall time ORB did not spend in its
+            # own code: the scanner's cycle holding the thread, or the
+            # engine-pool queue. Never negative in a report.
+            outside = max(0.0, delay - measured)
+            breakdown = ', '.join(
+                f"{k} {v:.1f}s" for k, v in sorted(
+                    phases.items(), key=lambda kv: -kv[1]))
+            breakdown = (breakdown + ', ' if breakdown else '') + \
+                f"blocked_outside_orb {outside:.1f}s"
             if delay > self.latency_warn_secs:
                 logger.warning(
                     f"[ORB] LATENCY TRIPWIRE: first order submit at "
                     f"{et.strftime('%H:%M:%S')} ET = {delay:.1f}s after "
-                    f"09:35:00 (> {self.latency_warn_secs:.0f}s) — investigate "
-                    f"entry-path blocking (news prefetch should be OFF in B+)")
+                    f"09:35:00 (> {self.latency_warn_secs:.0f}s) — measured: "
+                    f"{breakdown}")
                 self._notify(
                     f"{self.tg_prefix} ⚠ LATENCY: first submit {delay:.0f}s "
-                    f"after 09:35 ET (> {self.latency_warn_secs:.0f}s threshold)")
+                    f"after 09:35 ET (> {self.latency_warn_secs:.0f}s threshold) "
+                    f"— {breakdown}")
             else:
                 logger.info(
                     f"[ORB] first order submit {delay:.1f}s after 09:35 ET "
-                    f"(within {self.latency_warn_secs:.0f}s tripwire)")
+                    f"(within {self.latency_warn_secs:.0f}s tripwire) — "
+                    f"{breakdown}")
         except Exception as e:
             logger.warning(f"[ORB] latency tripwire check failed ({e})")
+        finally:
+            # Set LAST so a raise above doesn't silently suppress the report
+            # on a later submit, and so phase accumulation stops here.
+            self._first_submit_latency_logged = True
 
     def _news_fetch_needed(self) -> bool:
         """Single source of truth for whether to fetch premarket news flags.
@@ -2791,6 +2964,15 @@ class ORBEngine:
         )
         grace_end = range_end_et + timedelta(seconds=self.first_rank_grace_s)
         if range_end_et <= et_now < grace_end:
+            # Arm the deferral so the entry drain thread re-evaluates the
+            # moment the window ends (or the field completes). Without this
+            # the only re-trigger was a fresh bar event — already consumed.
+            if self._first_rank_defer_started is None:
+                # First deferral of the day — start the measured clock. Kept
+                # across re-arms so the tripwire reports the WHOLE wait.
+                self._first_rank_defer_started = time.time()
+            self._first_rank_defer_active = True
+            self._first_rank_grace_end_utc = grace_end.astimezone(timezone.utc)
             logger.info(
                 f"ORB: first-rank GRACE — {len(rangeless)} pool candidate(s) "
                 f"still rangeless ({','.join(rangeless[:6])}"
@@ -3564,7 +3746,16 @@ class ORBEngine:
     # =====================================================================
 
     def check_exits(self) -> List[str]:
-        """Drain StopMonitor exit events tagged strategy='orb'.
+        """Drain StopMonitor exit events tagged strategy='orb' (lock-guarded).
+
+        Serialised with check_entries and the entry drain thread on `_lock`
+        so position bookkeeping is never interleaved between the two threads.
+        """
+        with self._lock:
+            return self._check_exits_locked()
+
+    def _check_exits_locked(self) -> List[str]:
+        """check_exits body — caller holds `_lock`.
 
         Updates DB + in-memory state for each exit. Orphan reconciliation
         is NOT triggered here — the L7 periodic intraday hook
@@ -3871,6 +4062,16 @@ class ORBEngine:
 
     def force_close_all(self) -> int:
         """15:45 ET: cancel pending ORB orders + market-close all ORB positions.
+
+        Lock-guarded (2026-09-18): the entry drain thread runs all session, so
+        the EOD flat must not interleave with a check_entries/check_exits pass
+        mutating the same open_positions.
+        """
+        with self._lock:
+            return self._force_close_all_locked()
+
+    def _force_close_all_locked(self) -> int:
+        """force_close_all body — caller holds `_lock`.
 
         Bracket legs (OCO SL + safety-net TP) hold shares as 'held_for_orders'
         on Alpaca. They MUST be canceled before close_position or Alpaca
@@ -4614,7 +4815,18 @@ class ORBEngine:
         """Clear day-scoped state. Called at day boundary BEFORE building the
         next day's universe. DOES NOT touch open_positions — those persist
         across day boundary if somehow not closed at 15:45.
+
+        Lock-guarded: the entry drain thread reads `candidates` continuously.
         """
+        with self._lock:
+            self._reset_daily_locked()
+
+    def _reset_daily_locked(self) -> None:
+        """reset_daily body — caller holds `_lock`."""
+        self._first_rank_defer_active = False
+        self._first_rank_defer_started = None
+        self._first_rank_grace_end_utc = None
+        self._latency_phases = {}
         self.candidates.clear()
         self.universe.clear()
         self.universe_date = None

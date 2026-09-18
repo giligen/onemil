@@ -879,6 +879,50 @@ def main():
     sel['date'] = pd.to_datetime(sel['date'])
     sel['month'] = sel['date'].dt.to_period('M').astype(str)
 
+    # ---- Anchor dedup (research/orb_anchor_dedup/PREREG.md) ---------------
+    # At most ONE pick per underlying anchor per day, survivor = best rank,
+    # NO REFILL. Applied HERE — after top-K, before PDR/G1/range-size/
+    # catalyst — so an anchor is marked seen at its rank position regardless
+    # of which vetoes fire later; the live engine applies the same shared
+    # helper as the FIRST check of its submit loop. Default OFF; orb.yaml
+    # `dedup.by_anchor` drives live, ORB_ANCHOR_DEDUP=1 drives the BT.
+    _ad_env = (os.environ.get('ORB_ANCHOR_DEDUP', '0') or '').strip().lower()
+    if _ad_env not in ('0', 'false', 'no', 'off', ''):
+        from trading.orb_anchor_dedup import reject_mask as _anchor_reject_mask
+        from trading.orb_asset_class import (DEFAULT_CLASS_MAP,
+                                             load_class_map as _load_cmap,
+                                             underlying_anchor)
+        import csv as _csv_ad
+        _ad_names = {}
+        try:
+            with open(DEFAULT_CLASS_MAP, newline='') as _fh:
+                for _row in _csv_ad.DictReader(_fh):
+                    _ad_names[_row['symbol']] = _row.get('name', '')
+        except Exception as _e:
+            print(f"Anchor dedup: class-map names unavailable ({_e}) — "
+                  f"anchors fall back to the family sets (fail-open)")
+        _ad_cmap = _load_cmap()
+        _ad_anchor = {s: underlying_anchor(s, _ad_names.get(s), _ad_cmap)
+                      for s in set(sel['symbol'])}
+        sel = sel.sort_values(['date', '_q_rank', '_composite'],
+                              ascending=[True, True, False]).reset_index(drop=True)
+        _ad_mask = []
+        for _day, _g in sel.groupby('date', sort=False):
+            _ad_mask.extend(_anchor_reject_mask(
+                [_ad_anchor.get(s) for s in _g['symbol']]))
+        _ad_mask = pd.Series(_ad_mask, index=sel.index)
+        _ad_n = int(_ad_mask.sum())
+        _ad_pnl = float(sel.loc[_ad_mask, '_sized_pnl'].sum())
+        _ad_dropped = sel.loc[_ad_mask, ['symbol', 'date', '_sized_pnl']]
+        sel = sel[~_ad_mask].copy()
+        print(f"Anchor dedup: dropped {_ad_n} pick(s) sharing an underlying "
+              f"anchor with a better-ranked pick the same day (their P&L "
+              f"would have been {_ad_pnl:+,.0f}; slot stays empty — "
+              f"ORB_ANCHOR_DEDUP=0 to disable)")
+        if os.environ.get('ORB_ANCHOR_DEDUP_DROPPED_OUT'):
+            _ad_dropped.to_csv(
+                os.environ['ORB_ANCHOR_DEDUP_DROPPED_OUT'], index=False)
+
     # PM dollar-volume sizing mult (ships 2026-07-04; matches
     # trading/orb_engine.py via shared trading/orb_pm_mult.py). Upsize-only
     # x1.5 above the TRAIN-frozen cut. PM data: data/research CSV for the

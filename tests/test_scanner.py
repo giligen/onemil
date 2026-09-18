@@ -1345,3 +1345,127 @@ class TestLiveStagePriceHook:
         scanner.ignition_shadow = shadow
         scanner._run_intraday_cycle()
         assert seen == []
+
+
+# =============================================================================
+# ORB 09:35 entry evaluation vs a slow scan cycle (2026-09-18 latency defect)
+# =============================================================================
+
+class TestOrbEntryEvalNotSequencedBehindScanCycle:
+    """The scan cycle must not be what decides when ORB's 09:35 picks go in.
+
+    On 2026-09-18 the scanner spent 20.5s in its broad-universe fetch +
+    criteria pass and _orb_tick then spent ~15s in the daily_bars universe
+    query, so the day's first ORB order was submitted 48.9s after 09:35:00 ET
+    (LATENCY TRIPWIRE). ORB now evaluates entries on its own drain thread.
+    """
+
+    SLOW_CYCLE_S = 1.5   # stands in for the measured 40s scanner cycle
+
+    def _orb_engine(self):
+        import yaml
+        from pathlib import Path
+        from unittest.mock import MagicMock as _MM
+        from data_sources.alpaca_client import AlpacaClient as _AC
+        from persistence.database import Database as _DB
+        from trading.stop_monitor import StopMonitor as _SM
+        from trading.orb_engine import ORBEngine
+        cfg = yaml.safe_load(
+            open(Path(__file__).parent.parent / 'orb.yaml'))
+        cfg['strategy'] = dict(cfg.get('strategy', {}))
+        cfg['strategy']['enabled'] = True
+        alpaca = _MM(spec=_AC)
+        alpaca.get_open_positions.return_value = []
+        alpaca.get_account_info.return_value = {'buying_power': 100_000.0}
+        db = _MM(spec=_DB)
+        db.get_open_trades.return_value = []
+        sm = _MM(spec=_SM)
+        sm.polling_mode = False
+        sm.drain_exit_events.return_value = []
+        return ORBEngine(alpaca_client=alpaca, db=db,
+                         stop_monitor=sm, config=cfg)
+
+    def _armed_engine_with_probe(self):
+        """Engine with a first-rank deferral already due + a call recorder."""
+        import time as _t
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        from unittest.mock import patch as _patch
+        engine = self._orb_engine()
+        engine._first_rank_defer_active = True
+        engine._first_rank_defer_started = _t.time()
+        engine._first_rank_grace_end_utc = _dt.now(_tz.utc) - _td(seconds=1)
+        stamps = []
+        patcher = _patch.object(
+            engine, '_check_entries_locked',
+            side_effect=lambda *a, **k: stamps.append(_t.time()) or [])
+        patcher.start()
+        return engine, stamps, patcher
+
+    def test_orb_evaluates_during_a_slow_scan_cycle(
+            self, mock_alpaca, mock_news, mock_db, criteria):
+        import time as _t
+        engine, stamps, patcher = self._armed_engine_with_probe()
+        scanner = RealtimeScanner(
+            alpaca_client=mock_alpaca, news_provider=mock_news, db=mock_db,
+            criteria=criteria, verbose=False, orb_engine=engine)
+        try:
+            # Disarm first: the deferral must come due DURING the cycle,
+            # which is the 2026-09-18 sequence (grace ended 09:35:25 while
+            # the scanner was mid-cycle).
+            engine._first_rank_defer_active = False
+            engine.start_entry_drain_thread()
+            cycle_start = _t.time()
+            stamps.clear()
+
+            def _slow_cycle():
+                engine._first_rank_defer_active = True   # grace comes due
+                _t.sleep(self.SLOW_CYCLE_S)
+
+            with patch.object(scanner, '_run_intraday_cycle',
+                              side_effect=_slow_cycle):
+                scanner._run_intraday_cycle()
+            cycle_end = _t.time()
+            mid = [s for s in stamps if cycle_start <= s < cycle_end - 0.5]
+            assert mid, (
+                f"ORB never evaluated entries during the "
+                f"{cycle_end - cycle_start:.2f}s scan cycle — it is still "
+                f"sequenced behind it (stamps={len(stamps)})")
+        finally:
+            engine.shutdown_requested = True
+            if engine._entry_drain_thread:
+                engine._entry_drain_thread.join(timeout=5)
+            patcher.stop()
+
+    def test_without_the_drain_thread_nothing_evaluates_mid_cycle(
+            self, mock_alpaca, mock_news, mock_db, criteria):
+        """Negative control — this is the 2026-09-18 behaviour."""
+        import time as _t
+        engine, stamps, patcher = self._armed_engine_with_probe()
+        scanner = RealtimeScanner(
+            alpaca_client=mock_alpaca, news_provider=mock_news, db=mock_db,
+            criteria=criteria, verbose=False, orb_engine=engine)
+        try:
+            with patch.object(scanner, '_run_intraday_cycle',
+                              side_effect=lambda: _t.sleep(self.SLOW_CYCLE_S)):
+                scanner._run_intraday_cycle()
+            assert stamps == []
+        finally:
+            patcher.stop()
+
+    def test_orb_tick_restarts_a_dead_drain_thread(
+            self, mock_alpaca, mock_news, mock_db, criteria):
+        engine = self._orb_engine()
+        scanner = RealtimeScanner(
+            alpaca_client=mock_alpaca, news_provider=mock_news, db=mock_db,
+            criteria=criteria, verbose=False, orb_engine=engine)
+        engine.build_universe = MagicMock(return_value=0)
+        engine.check_entries = MagicMock(return_value=[])
+        engine.check_exits = MagicMock(return_value=[])
+        engine.is_force_close_time = MagicMock(return_value=False)
+        try:
+            scanner._orb_tick()
+            assert engine._entry_drain_thread is not None
+            assert engine._entry_drain_thread.is_alive()
+        finally:
+            engine.shutdown_requested = True
+            engine._entry_drain_thread.join(timeout=5)

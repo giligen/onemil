@@ -765,6 +765,13 @@ class RealtimeScanner:
         and MACD wave — uses separate AlpacaClient (paper account in Phase 1).
         build_universe is idempotent — preserves candidate state across ticks.
         """
+        # The 09:35 entry evaluation belongs to ORB's own drain thread — this
+        # tick must never be what decides when the day's picks are submitted
+        # (2026-09-18: first submit 48.9s after 09:35:00, sequenced behind the
+        # scan cycle and this method's own universe query). Idempotent; logs
+        # an ERROR and restarts if the thread ever died.
+        if self.orb_engine.enabled:
+            self.orb_engine.start_entry_drain_thread()
         # Seed universe from BOTH pre-market gap candidates AND intraday
         # qualified stocks. Pre-market is critical so ORB has candidates by
         # 9:35 ET (the first range-close event); intraday keeps adding as

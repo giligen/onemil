@@ -704,6 +704,11 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
             orb_engine.init_account_guards()
         except Exception as e:
             logger.warning(f"ORB init_account_guards failed at boot: {e}")
+        # 09:35 entry evaluation runs on its own thread (2026-09-18): the
+        # scanner cycle owned the thread for 40s on 9/18 and the first order
+        # submit landed 48.9s after 09:35:00 ET.
+        if orb_engine.enabled:
+            orb_engine.start_entry_drain_thread()
         logger.info(
             f"ORB strategy ENABLED — "
             f"master_flag={orb_engine.enabled}, dry_run={orb_engine.dry_run}"

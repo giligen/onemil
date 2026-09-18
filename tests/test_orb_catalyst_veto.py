@@ -156,7 +156,7 @@ class TestEngineWiring:
     def test_called_after_pdr_in_submit_loop(self):
         import inspect
         from trading import orb_engine as em
-        src = inspect.getsource(em.ORBEngine.check_entries)
+        src = inspect.getsource(em.ORBEngine._check_entries_locked)   # body moved behind the lock wrapper (2026-09-18 drain thread)
         assert src.index('_pdr_veto_reject') < src.index(
             '_catalyst_veto_reject')
         assert 'top_syms.extend' not in src   # still no refill anywhere

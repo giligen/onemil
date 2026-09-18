@@ -11,6 +11,7 @@ Uses spec-based mocks per CLAUDE.md. Exercises the critical paths:
   * is_force_close_time flips at 15:45 ET
 """
 import queue as _q
+import time
 from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, AsyncMock
 from pathlib import Path
@@ -1190,3 +1191,171 @@ class TestStaleSnapshotGate:
         a.get_snapshots.return_value = {'NODATE': self._snap(None)}
         keep = eng.build_orb_universe_from_snapshots(["NODATE"])
         assert 'NODATE' in keep
+
+
+# =========================================================================
+# 09:35 entry latency (2026-09-18 defect: first submit 48.9s after 09:35:00)
+# =========================================================================
+
+class TestEntryDrainThread:
+    """ORB's 09:35 evaluation must never be sequenced behind the scan cycle.
+
+    Root cause on 2026-09-18: the first-rank grace deferred ranking to
+    09:35:25 ET, but the ONLY re-trigger into check_entries was a fresh
+    websocket bar event — already consumed by the deferring call — so the
+    day's picks waited for the scanner's 20s cycle plus _orb_tick's 15s
+    daily_bars universe query, submitting at 09:35:48.9.
+    """
+
+    def test_drain_thread_starts_and_is_idempotent(self, engine):
+        engine.start_entry_drain_thread()
+        t = engine._entry_drain_thread
+        assert t is not None and t.is_alive()
+        engine.start_entry_drain_thread()          # idempotent — same thread
+        assert engine._entry_drain_thread is t
+        engine.shutdown_requested = True
+        t.join(timeout=5)
+        assert not t.is_alive()
+
+    def test_scanner_drain_is_noop_while_thread_alive(self, engine):
+        """ONE consumer of the bar queue keeps a symbol's bars in order."""
+        engine.start_entry_drain_thread()
+        try:
+            assert engine.drain_bar_events() == set()
+        finally:
+            engine.shutdown_requested = True
+            engine._entry_drain_thread.join(timeout=5)
+
+    def test_grace_expiry_retriggers_check_entries_without_a_bar_event(self, engine):
+        """The deferred first rank is re-evaluated on TIME, not on a bar."""
+        from unittest.mock import patch as _patch
+        engine.build_universe(source_loader=lambda: ['AAA', 'BBB'])
+        engine.candidates['AAA'].range_data = RangeData(
+            symbol='AAA', range_high=10.5, range_low=10.0, range_volume=500_000,
+            range_avg_bar_range_pct=1.0, range_close=10.4,
+            range_start_ts=pd.Timestamp.utcnow(),
+        )
+        # BBB stays rangeless -> the grace gate arms.
+        assert engine.candidates['BBB'].range_data is None
+        engine._first_rank_defer_active = True
+        engine._first_rank_defer_started = 0.0
+        # Grace window still open -> nothing due.
+        engine._first_rank_grace_end_utc = (
+            datetime.now(timezone.utc) + timedelta(seconds=30))
+        assert engine._first_rank_grace_elapsed() is False
+        # Window expired -> due, with NO new bar event.
+        engine._first_rank_grace_end_utc = (
+            datetime.now(timezone.utc) - timedelta(seconds=1))
+        assert engine._first_rank_grace_elapsed() is True
+
+        calls = []
+        with _patch.object(engine, '_check_entries_locked',
+                           side_effect=lambda *a, **k: calls.append(a) or []):
+            engine.start_entry_drain_thread()
+            deadline = time.time() + 5
+            while not calls and time.time() < deadline:
+                time.sleep(0.05)
+            engine.shutdown_requested = True
+            engine._entry_drain_thread.join(timeout=5)
+        assert calls, "grace expiry did not re-trigger check_entries"
+
+    def test_field_completing_ends_the_grace_early(self, engine):
+        engine.build_universe(source_loader=lambda: ['AAA'])
+        engine.candidates['AAA'].range_data = RangeData(
+            symbol='AAA', range_high=10.5, range_low=10.0, range_volume=500_000,
+            range_avg_bar_range_pct=1.0, range_close=10.4,
+            range_start_ts=pd.Timestamp.utcnow(),
+        )
+        engine._first_rank_defer_active = True
+        engine._first_rank_grace_end_utc = (
+            datetime.now(timezone.utc) + timedelta(seconds=60))
+        # No rangeless candidate left -> due immediately, grace not waited out.
+        assert engine._first_rank_grace_elapsed() is True
+
+    def test_not_armed_means_no_retrigger(self, engine):
+        engine._first_rank_defer_active = False
+        assert engine._first_rank_grace_elapsed() is False
+
+    def test_build_universe_does_not_hold_the_lock_over_the_loader(self, engine):
+        """The 15.3s daily_bars query must not block the entry thread."""
+        held = {}
+
+        def _slow_loader():
+            held['locked'] = engine._lock.acquire(blocking=False)
+            if held['locked']:
+                engine._lock.release()
+            return ['ZZZ']
+
+        engine.build_universe(source_loader=_slow_loader)
+        assert held['locked'] is True, \
+            "build_universe held _lock across source_loader() — entry thread would queue behind it"
+        assert engine._latency_phases.get('universe_seed') is not None
+
+
+class TestLatencyTripwireMessage:
+    """The tripwire must NAME the measured blocker, never guess one."""
+
+    def test_message_reports_measured_phases(self, engine, caplog):
+        import logging as _logging
+        engine._first_submit_latency_logged = False
+        engine.latency_warn_secs = 10.0
+        engine._latency_phases = {
+            'post_open_range_sweep': 5.2,
+            'first_rank_grace': 20.3,
+            'universe_seed': 15.3,
+            'rank_and_submit': 3.5,
+        }
+        fixed_et = datetime(2026, 9, 18, 9, 35, 48, tzinfo=timezone.utc)
+        from unittest.mock import patch as _patch
+        with _patch.object(engine, '_et_now', return_value=fixed_et), \
+                caplog.at_level(_logging.WARNING):
+            engine._check_first_submit_latency()
+        msg = caplog.text
+        assert 'LATENCY TRIPWIRE' in msg
+        assert 'first_rank_grace 20.3s' in msg
+        assert 'universe_seed 15.3s' in msg
+        assert 'blocked_outside_orb' in msg
+        # The old text GUESSED the blocker and was wrong on 2026-09-18.
+        assert 'news prefetch' not in msg
+        assert engine._first_submit_latency_logged is True
+
+    def test_phases_stop_accumulating_after_report(self, engine):
+        engine._first_submit_latency_logged = True
+        engine._record_latency_phase('universe_seed', 9.9)
+        assert 'universe_seed' not in engine._latency_phases
+
+
+class TestEntryDrainThreadNoHotLoop:
+    """A check_entries that returns EARLY must not re-arm the drain trigger.
+
+    Kill rails, the daily cap and the last-entry cutoff all return before the
+    grace gate. If the deferral stayed armed the loop would call check_entries
+    (DB + broker work) four times a second for the rest of the session.
+    """
+
+    def test_early_return_does_not_retrigger(self, engine):
+        from unittest.mock import patch as _patch
+        engine._first_rank_defer_active = True
+        engine._first_rank_grace_end_utc = (
+            datetime.now(timezone.utc) - timedelta(seconds=1))
+        calls = []
+        with _patch.object(engine, '_check_entries_locked',
+                           side_effect=lambda *a, **k: calls.append(1) or []):
+            engine.start_entry_drain_thread()
+            time.sleep(1.2)          # ~5 loop passes at 0.25s
+            engine.shutdown_requested = True
+            engine._entry_drain_thread.join(timeout=5)
+        assert len(calls) == 1, f"drain loop hot-looped ({len(calls)} calls)"
+        assert engine._first_rank_defer_active is False
+
+    def test_gate_rearms_the_clock_only_once(self, engine):
+        """The measured grace window spans the WHOLE wait, not the last re-arm."""
+        engine._first_rank_defer_started = 123.0
+        engine._first_rank_defer_active = False
+        engine.candidates['X'] = CandidateState(symbol='X')   # rangeless
+        engine.first_rank_grace_s = 25.0
+        with_patch = engine._should_defer_first_rank()
+        # Whatever the wall clock says about the grace window, the start
+        # stamp must not be reset by a re-arm.
+        assert engine._first_rank_defer_started == 123.0
+        assert isinstance(with_patch, bool)
