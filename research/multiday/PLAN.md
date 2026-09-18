@@ -100,13 +100,29 @@ cell is now scored on it.
 | F1 PEAD | declared null-replication | n/a | n/a |
 | A4 dividend-month | monthly | 2–4 | FAIL standalone |
 
-**What FAIL means here — not deletion.** A monthly-rebalance family that shows a real long-leg edge is still worth
-knowing: it can be (a) stacked with others to raise the combined rate, or (b) run as a slow sleeve beside a fast
-book. But it may NOT be proposed as the answer to the owner's frequency problem, and it cannot qualify for the live
-exploration tier on its own (condition 4, resolution within a quarter, fails on arithmetic).
+### SOFTENED 2026-09-18 22:05 UTC (owner: "ok ok we can do less don't constraint it can be an additive strat")
+**The ≥10/week floor is a REPORTED COLUMN and a ranking factor — NOT a gate. No family is deleted for frequency.**
+A low-frequency book qualifies on ADDITIVITY instead, and the resolution problem is solved at the PORTFOLIO level,
+not per strategy: four uncorrelated sleeves at 3/week each give a 12/week portfolio that resolves inside a quarter
+even though no single sleeve could.
 
-**Revised order of execution — high-frequency families first, because only they can produce a live-testable book
-this quarter: F2 → A1 → F4 → F3 → F5 → A2 → A3 → F1 (null-replication) → F6 → A4.**
+**Additivity test, replacing the frequency gate — a slow family qualifies if:**
+1. **It does not compete with ORB for the binding resource.** ORB's constraint is intraday slots and same-morning
+   buying power at 09:35. A multi-day book that enters at the OPEN or CLOSE auction and holds overnight uses
+   different capital at a different time of day — genuinely additive. State the overlap explicitly per family.
+2. **Return correlation with the live ORB book is low** — compute it on overlapping months and report it; a sleeve
+   that merely re-expresses ORB's exposure adds variance, not diversification.
+3. **The COMBINED book** (ORB + the sleeve) is what must clear the exploration tier's condition 4, and the combined
+   trades/week is what gets reported alongside the family's own.
+4. Capacity is real at our size: $ per position at 1% of ADV, and the sleeve must not need more capital than the
+   account has spare after ORB's per-position caps.
+
+**Do NOT import Stage I's "stacking hurts" conclusion here without re-testing.** That result came from stacking
+SAME-DAY INTRADAY books competing for the same slots, capital and 09:35 attention. Auction-executed multi-day
+sleeves are a different structure and the interaction must be measured, not assumed — in either direction.
+
+**Revised order of execution — fast families first because they can produce a live-testable book THIS quarter, but
+every family is run: F2 → A1 → F4 → F3 → F5 → A2 → A3 → F1 (null-replication) → F6 → A4.**
 
 ## Splits, costs, gates
 - **Splits**: TRAIN 2016-01→2021-12 (6 yr), VAL 2022-01→2023-12 (2 yr), TEST 2024-01→2026-09 (sealed; opened once behind
