@@ -139,12 +139,15 @@ class TestMorningSequence:
         out = _at(engine, 9, 35, 20, engine.check_entries,
                   feature_providers=providers)
 
-        # exactly one submission (LOUD). B+ 2026-08-15: max_concurrent=3, so
-        # the top-3 by composite are LOUD/Q3/Q2 (all Q5); Q1 doesn't make the
-        # cut (never reaches the veto). Q2/Q3 (quiet prev day) are PDR-vetoed.
+        # exactly one submission (LOUD) at every ramp stage: the quiet-prev-day
+        # names are PDR-vetoed and the veto NEVER refills a slot. Which quiet
+        # names reach the veto is slot-dependent — at 3 slots (B+ 2026-08-15)
+        # the top-3 by composite are LOUD/Q3/Q2 and Q1 never gets ranked; from
+        # 4 slots up (8 from 2026-09-17) Q1 reaches the veto and is dropped.
         assert out == ['LOUD']
         assert engine.alpaca.submit_stop_bracket_order.call_count == 1
-        assert engine._pdr_vetoed_today == {'Q2', 'Q3'}
+        expected_vetoed = {'Q2', 'Q3'} | ({'Q1'} if engine.max_concurrent >= 4 else set())
+        assert engine._pdr_vetoed_today == expected_vetoed
         kw = engine.alpaca.submit_stop_bracket_order.call_args.kwargs
         assert kw['qty'] > 0
         # sizing attribution persisted for EoD validation: the DB record's

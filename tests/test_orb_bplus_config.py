@@ -89,8 +89,11 @@ class TestFrozenValues:
         assert cfg['sizing']['pm_dollar_vol_mult']['enabled'] is False
 
     def test_sizing(self, cfg):
-        assert cfg['sizing']['account_budget_usd'] == 10000
-        assert cfg['sizing']['max_concurrent'] == 3
+        # Slots + budget are the RAMP dimension (3 / $10,000 on B+ 2026-08-15;
+        # 8 / $26,666.67 from 2026-09-17 per the D1_orb slot dose-response).
+        # The frozen quantities are the per-position cap (asserted below) and
+        # the risk knob — never the stage's slot count.
+        assert cfg['sizing']['max_concurrent'] >= 3
         assert cfg['sizing']['risk_per_trade_usd'] == 375
 
     def test_per_pos_cap_derives_to_3333(self, cfg):
