@@ -1,0 +1,6 @@
+{
+ "train_max_abs_t": 6.2403,
+ "perm_p_6cells": 0.0005,
+ "n_sim_rows": 8598,
+ "cov_spread_measured_share": 0.9255
+}
