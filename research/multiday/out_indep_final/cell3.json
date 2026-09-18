@@ -1,0 +1,69 @@
+{
+  "era": {
+    "pre": {
+      "rows": 152893,
+      "wrong_minus1": 12277,
+      "wrong_same": 152408,
+      "wrong_month_minus1": 586,
+      "wrong_month_same": 8076,
+      "residual_two_regime": 12277,
+      "residual_two_regime_wrong_month": 586
+    },
+    "post": {
+      "rows": 24853,
+      "wrong_minus1": 24331,
+      "wrong_same": 590,
+      "wrong_month_minus1": 3362,
+      "wrong_month_same": 125,
+      "residual_two_regime": 590,
+      "residual_two_regime_wrong_month": 125
+    }
+  },
+  "months": {
+    "2024-04": {
+      "rows": 2387,
+      "wrong_minus1": 30,
+      "wrong_same": 2380,
+      "wrong_month_minus1": 4,
+      "wrong_month_same": 83,
+      "residual_two_regime": 30,
+      "residual_two_regime_wrong_month": 4
+    },
+    "2024-05 (1st-27th)": {
+      "rows": 2411,
+      "wrong_minus1": 109,
+      "wrong_same": 2409,
+      "wrong_month_minus1": 2,
+      "wrong_month_same": 2,
+      "residual_two_regime": 109,
+      "residual_two_regime_wrong_month": 2
+    },
+    "2024-05 (28th-31st)": {
+      "rows": 621,
+      "wrong_minus1": 581,
+      "wrong_same": 41,
+      "wrong_month_minus1": 1,
+      "wrong_month_same": 40,
+      "residual_two_regime": 41,
+      "residual_two_regime_wrong_month": 40
+    },
+    "2024-06": {
+      "rows": 4558,
+      "wrong_minus1": 4451,
+      "wrong_same": 112,
+      "wrong_month_minus1": 574,
+      "wrong_month_same": 2,
+      "residual_two_regime": 112,
+      "residual_two_regime_wrong_month": 2
+    },
+    "2024-07": {
+      "rows": 2336,
+      "wrong_minus1": 2326,
+      "wrong_same": 14,
+      "wrong_month_minus1": 562,
+      "wrong_month_same": 1,
+      "residual_two_regime": 14,
+      "residual_two_regime_wrong_month": 1
+    }
+  }
+}

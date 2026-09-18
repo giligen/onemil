@@ -225,3 +225,22 @@ Coverage: common 92.1%, fund 21.6%, wrapper 8.3%. Largest 2-digit buckets: 28 ch
    symbols** change $1M membership on at least one session. `panel_f3f4.npz` ships both series
    (`adv_raw`, `adv_adj_buggy`) so the bug stays measurable. **Every family from F4/F3 onward uses the
    RAW gate**; the F2/A1 cells were scored on the buggy one (their $10M arm reached the same verdict).
+12. **Unreverted REVERSE splits in the adjusted panel — a second, distinct population from gap 10,
+   and unlike gap 10 it CLEARS the $5 raw gate** (found 2026-09-18 by the independent rebuild of
+   F5/A4, quantified in `REPORT_FINAL.md` §9c). Alpaca's adjusted series sometimes applies a reverse
+   split forward and never back-propagates it: DCTH 2020-04-30 $0.0999 → 2020-05-01 **$7.66
+   (+7,568%, then flat)**, PFH +3,740% (2020-09-02), CRC +1,072% (2020-10-28). Magnitude on the full
+   2016→2026 panel: **335 unreverted one-day adjusted moves > +200% on 284 symbols, 203 of them with
+   a RAW close ≥ $5** — i.e. gap 10's reassurance ("the $5 raw-close and $1M ADV gates exclude these
+   names at the decision close") is TRUE for the Chapter-11 recycling jumps and FALSE for these.
+   Mechanism that matters: after such a break the trailing 252-session ADJUSTED max IS the post-break
+   level, so any "nearness to the 52-week high" signal reads ~1.0 and the name is a guaranteed
+   top-decile member for a year. A 252-session taint flag covers 0.56% of symbol-sessions; every cell
+   in `REPORT_FINAL.md` carries an `ex_taint` re-score and the tainted share never exceeds 2.2% nor
+   moves a point estimate by more than 8.7 bps/month. **Any family that keys on a trailing maximum,
+   or that relaxes the $5 raw gate, must screen these explicitly.**
+13. **`kind == 'common'` carries 39 dotted tickers**, including SPAC units (`AIIA.U`, `DGAC.U`,
+   `GLED.U`, `JACS.U`, …) and dual-class / ADR lines (`BRK.A/B`, `BF.A/B`, `AKO.A/B`, `CRD.A/B`).
+   SPAC units pinned near $10 with near-zero volatility are structural top-decile residents for any
+   nearness-to-high signal. 0.8% of the panel; the shared `AlpacaClient._is_common_stock` name rule
+   should learn the `.U` suffix.

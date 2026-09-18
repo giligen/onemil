@@ -1,0 +1,13 @@
+{
+  "pre": {
+    "rows": 152893,
+    "residual_two_regime_session_calendar": 5958,
+    "residual_foreign_share": 0.19251426653239342
+  },
+  "post": {
+    "rows": 24853,
+    "residual_two_regime_session_calendar": 590,
+    "residual_foreign_share": 0.4033898305084746
+  },
+  "foreign_share_all": 0.17182383851113386
+}

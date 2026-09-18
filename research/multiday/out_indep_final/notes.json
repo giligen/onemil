@@ -1,0 +1,35 @@
+{
+  "cells": {
+    "F5-LO": {
+      "hold": "6-month overlapping, month-end anchors",
+      "book_trades": 16056,
+      "bench_trades": 144827,
+      "exec_trades_total": 220,
+      "anchors_used": 77,
+      "mean_eligible_per_rebalance": 2089.3896103896104
+    },
+    "A4-LO": {
+      "hold": "1-month, month-end anchors",
+      "book_trades": 31153,
+      "bench_trades": 66627,
+      "exec_trades_total": 840,
+      "anchors_used": 83,
+      "anchors_skipped": 0,
+      "mean_eligible_per_rebalance": 2182.3373493975905,
+      "mean_predicted": 375.33734939759034,
+      "mean_benchmark": 802.7349397590361
+    }
+  },
+  "data": {
+    "duplicate_rows": [
+      0,
+      0
+    ],
+    "daily_returns_gt_200pct": 172,
+    "daily_returns_lt_neg90pct": 12,
+    "nonpositive_adj_close": 0,
+    "nonpositive_raw_close": 0,
+    "symbols_with_dot_in_name": 24,
+    "test_tickers": []
+  }
+}

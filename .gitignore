@@ -150,3 +150,10 @@ research/multiday/data/panel_f2a1.npz
 research/multiday/data/panel_f3f4.npz
 research/multiday/out_f4f3*/*.parquet
 research/multiday/out_indep_f4f3/*.parquet
+
+# multiday FINAL (F5/A2/A3/A4/F1/F6): keep the small result tables (cells.csv, extra.json,
+# f6_measurement.csv), ignore the per-trade dumps, the matrix panel and the EDGAR share checkpoints
+research/multiday/data/panel_final.npz
+research/multiday/data/shares_parts/
+research/multiday/out_final*/*.parquet
+research/multiday/out_indep_final/*.parquet
