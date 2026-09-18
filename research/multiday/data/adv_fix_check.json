@@ -1,0 +1,29 @@
+{
+ "n": 200,
+ "median": -0.010093215852975845,
+ "mean": -0.09037134796380997,
+ "p01": -0.5405369400978088,
+ "p99": 1.121066088671796e-05,
+ "mn": -1.0,
+ "mx": 2.4141450921888463e-05,
+ "understated": 112,
+ "exact": 82,
+ "overstated": 6,
+ "membership": {
+  "1M": {
+   "n_cells": 9157808,
+   "pass_raw": 6729292,
+   "pass_buggy": 6619488,
+   "only_raw": 109807,
+   "only_buggy": 3
+  },
+  "10M": {
+   "n_cells": 9157808,
+   "pass_raw": 4382433,
+   "pass_buggy": 4258644,
+   "only_raw": 123790,
+   "only_buggy": 1
+  }
+ },
+ "distinct_symbols_changed": 825
+}

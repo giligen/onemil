@@ -1,0 +1,112 @@
+{
+  "F4-LO": {
+    "TRAIN": {
+      "n_months": 72,
+      "mean_bps": 58.23,
+      "t": 1.335,
+      "pct_pos": 55.6,
+      "n_trades": 61717,
+      "mean_cost_bps": 0.501,
+      "ex_top1": {
+        "n_trades": 61099,
+        "mean_bps": -80.25,
+        "t": -2.202
+      },
+      "ex_top5": {
+        "n_trades": 58631,
+        "mean_bps": -350.7,
+        "t": -8.841
+      },
+      "max_quintiles_net_bps": {
+        "Q1": 21.48,
+        "Q2": 13.83,
+        "Q3": 23.07,
+        "Q4": 67.9,
+        "Q5": 122.19
+      },
+      "max_quintile_edges": [
+        0.0,
+        0.0283,
+        0.0412,
+        0.0589,
+        0.0931,
+        526.4765
+      ],
+      "sub10_share_of_net_pnl_pct": 25.2,
+      "sub10_n_trades": 11211
+    },
+    "VAL": {
+      "n_months": 24,
+      "mean_bps": -15.28,
+      "t": -0.197,
+      "pct_pos": 45.8,
+      "n_trades": 24099,
+      "mean_cost_bps": 0.482,
+      "ex_top1": {
+        "n_trades": 23858,
+        "mean_bps": -177.73,
+        "t": -2.694
+      },
+      "ex_top5": {
+        "n_trades": 22894,
+        "mean_bps": -456.74,
+        "t": -8.656
+      },
+      "max_quintiles_net_bps": {
+        "Q1": -7.27,
+        "Q2": -4.97,
+        "Q3": 6.45,
+        "Q4": 21.07,
+        "Q5": -50.88
+      },
+      "max_quintile_edges": [
+        0.0,
+        0.0333,
+        0.0485,
+        0.0668,
+        0.0994,
+        81.28
+      ],
+      "sub10_share_of_net_pnl_pct": 106.8,
+      "sub10_n_trades": 5644
+    }
+  },
+  "F3-LO-12-1": {
+    "TRAIN": {
+      "n_months": 59,
+      "mean_bps": 66.75,
+      "t": 1.349,
+      "pct_pos": 61.0,
+      "n_trades": 11507,
+      "mean_cost_bps": 0.48,
+      "ex_top1": {
+        "n_trades": 11391,
+        "mean_bps": -2.09,
+        "t": -0.048
+      },
+      "ex_top5": {
+        "n_trades": 10931,
+        "mean_bps": -138.73,
+        "t": -3.331
+      }
+    },
+    "VAL": {
+      "n_months": 24,
+      "mean_bps": 23.63,
+      "t": 0.34,
+      "pct_pos": 62.5,
+      "n_trades": 5367,
+      "mean_cost_bps": 0.472,
+      "ex_top1": {
+        "n_trades": 5313,
+        "mean_bps": -24.54,
+        "t": -0.377
+      },
+      "ex_top5": {
+        "n_trades": 5098,
+        "mean_bps": -129.31,
+        "t": -2.183
+      }
+    }
+  }
+}

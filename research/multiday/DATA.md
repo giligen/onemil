@@ -203,3 +203,25 @@ Coverage: common 92.1%, fund 21.6%, wrapper 8.3%. Largest 2-digit buckets: 28 ch
    day; the first raw pull was missing 530 symbol-rows for 2026-09-18 that the later adjusted pull had. Both
    panels were topped up (`fetch_prices.py --topup-from`) and are now row-identical. Any future re-pull on a
    live day must do the same or drop the last session.
+10. **Post-reorganisation / ticker-recycling jumps in the adjusted panel** (found 2026-09-18 by the
+   independent rebuild of F4/F3, quantified in `REPORT_F4_F3.md` §9c). Alpaca's adjusted series chains
+   straight through a Chapter-11 reorganisation onto a recycled ticker, producing single-session
+   "returns" of **+52,648% (GPOR 2021-05-18)**, +44,787% (LINE), +33,461% (CBL), +15,819% (AQB),
+   +15,059% (ASTI). Magnitude: **96 sessions on 89 symbols, 0.00104% of the 9.19M finite daily returns
+   in `panel_f3f4.npz`.** Direction: inflates any as-is mean and dominates any MAX/tail statistic that
+   does not floor on price and liquidity. Not load-bearing for F4/F3 — the $5 raw-close and $1M ADV
+   gates exclude these names at the decision close, and **zero** scored trades in any of the four
+   long-only books hold one through its jump (0.03–0.74% have one in the *formation* window and they
+   earn the book average). **Any family that relaxes the price or liquidity floor must screen them
+   explicitly.** The same jumps also mean `delisted_names.parquet` under-counts: a reorganised company
+   looks "still listed" under its recycled ticker (§7 gap 7, with a named mechanism).
+11. **`ADV20$` was built on the DIVIDEND-ADJUSTED panel until 2026-09-18** (`REPORT_F2_A1.md` §9
+   defect 6; fixed and measured in `REPORT_F4_F3.md` §0). Dollar volume is split-invariant, but the
+   dividend factor scales price down without touching volume and is a function of the future, so the
+   liquidity gate was mildly forward-looking. Measured on 200 random symbol-sessions: **112 of 200
+   understated, median −1.01%, p01 −54.1%, worst −100%** (BINI 2017-10-19 read an ADV of literally 0),
+   with the damage concentrated on MLPs/BDCs/high-payout names. Membership: the fix admits **+109,804
+   symbol-sessions (+1.66%)** at the $1M gate and **+123,789 (+2.91%)** at $10M, and **825 of 4,871
+   symbols** change $1M membership on at least one session. `panel_f3f4.npz` ships both series
+   (`adv_raw`, `adv_adj_buggy`) so the bug stays measurable. **Every family from F4/F3 onward uses the
+   RAW gate**; the F2/A1 cells were scored on the buggy one (their $10M arm reached the same verdict).
