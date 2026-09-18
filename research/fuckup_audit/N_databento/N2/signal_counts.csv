@@ -1,0 +1,3 @@
+universe,fam,train,val,test,train_per_week
+primary,K2,1076,1174,526,20.692307692307693
+secondary,K2,1160,1205,527,22.307692307692307
