@@ -97,3 +97,13 @@ research/fuckup_audit/N_databento/N1/tbbo/
 research/fuckup_audit/N_databento/N1/perm_tmp/
 research/fuckup_audit/N_databento/N1/__pycache__/
 research/fuckup_audit/N_databento/N2/daily_panel_2024H2_2026.parquet
+research/fuckup_audit/N_databento/N3/raw_daily/
+research/fuckup_audit/N_databento/N3/raw_1m/
+research/fuckup_audit/N_databento/N3/xnas_daily.parquet
+research/fuckup_audit/N_databento/N3/__pycache__/
+research/fuckup_audit/N_databento/N3/*.db
+
+# S1 LULD halt study — raw Databento status pulls (not redistributable, regenerable)
+research/fuckup_audit/O_halt/raw/
+research/fuckup_audit/O_halt/__pycache__/
+research/fuckup_audit/O_halt/ssr_rows.parquet

@@ -1,0 +1,16 @@
+{
+ "train_max_abs_t": 2.9013,
+ "perm_p_12cells": 0.0535,
+ "attrition": {
+  "no_bars": 30,
+  "no_daily": 3315,
+  "screen_price": 7432,
+  "screen_adv": 2735,
+  "no_ref": 326,
+  "no_entry_bar": 83,
+  "stale_entry": 429,
+  "flat_pre": 55,
+  "test_ticker": 4115
+ },
+ "n_trades": 2550
+}
