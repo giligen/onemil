@@ -122,3 +122,7 @@ research/bf_zero/causal_filter/*.csv
 research/bf_zero/causal_filter/*.log
 research/bf_zero/causal_filter/*.txt
 research/bf_zero/causal_filter/*_state.json
+research/fuckup_audit/R_daily/*.parquet
+research/fuckup_audit/R_daily/raw/
+research/fuckup_audit/R_daily/__pycache__/
+research/fuckup_audit/R_daily/trades/
