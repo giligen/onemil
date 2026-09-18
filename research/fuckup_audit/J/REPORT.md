@@ -268,3 +268,24 @@ is no candidate to carry into G2. VAL will be scored because the pre-registratio
 negative VAL on a cell that already failed G1 is still worth recording — not because anything here is
 waiting for confirmation. **If a VAL cell looks good, remember it was selected by nothing: G1 selected
 zero cells, so any VAL winner is a fresh look at 144 cells and must be treated as one.**
+
+---
+
+## CLOSED 2026-09-18 (owner GO on the disk reclaim)
+
+The stage is resolved by its OWN pre-registration, not by attrition: **G1 selected 0 of 144 cells on
+TRAIN**, and PREREG §gates makes VAL conditional on a G1 survivor and TEST conditional on a written
+`FREEZE.md` naming G2 survivors. Neither can ever exist for this cell set, so VAL and TEST were never
+built and **TEST remains unread** — the split is still clean for any future, separately pre-registered
+study on this universe.
+
+Deleted to reclaim 6.6 GB (owner approved 2026-09-18): `U3/bars_u3/` (the 410-day U3 1-minute tape) and
+`J/candidates_u3.csv` (the 3.0 GB signal/fill/exit file), plus the two `_partial` scoring CSVs superseded
+by the TRAIN finals. **Kept**: this report, `PREREG.md` + addenda, every script (`make_members_u3.py`,
+`build_candidates_u3.py`, `verify_rows.py`, `score_u3.py`), `members_u3.parquet`, `pop_j_TRAIN.parquet`
+and its availability JSON, the TRAIN scoring outputs, `build_u3_state.json` and the logs. The chain in
+`README.md` rebuilds the tape in ~7.1 h if a future study needs it.
+
+Verdict phrasing unchanged: no edge was detectable in THIS universe (U3 liquid names), at THIS horizon,
+at THIS book size, over THIS window, at THIS cost — with the MDE stated in §, which is larger than most
+published intraday effects.
