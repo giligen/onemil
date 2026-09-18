@@ -107,3 +107,4 @@ research/fuckup_audit/N_databento/N3/*.db
 research/fuckup_audit/O_halt/raw/
 research/fuckup_audit/O_halt/__pycache__/
 research/fuckup_audit/O_halt/ssr_rows.parquet
+data/research/databento/pit_definition/
