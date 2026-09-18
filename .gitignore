@@ -126,3 +126,16 @@ research/fuckup_audit/R_daily/*.parquet
 research/fuckup_audit/R_daily/raw/
 research/fuckup_audit/R_daily/__pycache__/
 research/fuckup_audit/R_daily/trades/
+
+# Multi-day program DATA stage. The bare `data/` rule above would swallow this
+# whole directory, so re-include it and ignore only the bulk artifacts (panels +
+# EDGAR checkpoints, regenerable from research/multiday/data/*.py). Code and the
+# small summary tables are committed.
+!research/multiday/data/
+research/multiday/data/prices/
+research/multiday/data/prices_by_year/
+research/multiday/data/edgar/
+research/multiday/data/edgar_eps/
+research/multiday/data/*.parquet
+research/multiday/data/*.log
+research/multiday/data/__pycache__/
