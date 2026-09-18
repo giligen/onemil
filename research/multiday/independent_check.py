@@ -24,7 +24,7 @@ import pyarrow.parquet as pq
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(BASE, "data")
-OUT = os.path.join(BASE, "out_indep")
+OUT = os.environ.get("INDEP_OUT", os.path.join(BASE, "out_indep"))
 
 # ---------------------------------------------------------------- constants
 NOTIONAL = 3300.0            # $66,000 book / 20 slots
@@ -225,17 +225,39 @@ def monthly(series: np.ndarray, sessions: np.ndarray) -> pd.Series:
     return s.groupby([s.index.year, s.index.month]).apply(lambda x: float(np.prod(1.0 + x.values) - 1.0))
 
 
-def excess_stats(m_book: pd.Series, m_bench: pd.Series) -> dict:
+def newey_west_t(x: np.ndarray, lag: int) -> float:
+    """t-stat of the mean with a Newey-West (Bartlett) HAC variance.
+
+    Overlapping holds make adjacent monthly returns correlated; the plain
+    iid t-stat in the spec is inflated.  Reported alongside it.
+    """
+    n = len(x)
+    if n < 3:
+        return np.nan
+    m = x.mean()
+    e = x - m
+    s = float(np.dot(e, e) / n)
+    for l in range(1, min(lag, n - 1) + 1):
+        g = float(np.dot(e[l:], e[:-l]) / n)
+        s += 2.0 * (1.0 - l / (lag + 1.0)) * g
+    if s <= 0:
+        return np.nan
+    return m / np.sqrt(s / n)
+
+
+def excess_stats(m_book: pd.Series, m_bench: pd.Series, nw_lag: int = 3) -> dict:
     ex = (m_book - m_bench).dropna()
     ex = ex[ex != 0.0]
     n = len(ex)
     if n == 0:
-        return dict(n_months=0, mean_bps=np.nan, t_stat=np.nan, pct_pos=np.nan)
+        return dict(n_months=0, mean_bps=np.nan, t_stat=np.nan, pct_pos=np.nan,
+                    t_nw=np.nan, series=ex)
     mean = ex.mean()
     sd = ex.std(ddof=1)
     t = mean / (sd / np.sqrt(n)) if n > 1 and sd > 0 else np.nan
     return dict(n_months=n, mean_bps=mean * 1e4, t_stat=t,
-                pct_pos=100.0 * float((ex > 0).mean()))
+                pct_pos=100.0 * float((ex > 0).mean()),
+                t_nw=newey_west_t(ex.to_numpy(), nw_lag), series=ex)
 
 
 def gross_return(r: np.ndarray, sym: int, a: int, b: int) -> float:
@@ -269,11 +291,24 @@ def build_f2(events, adj, raw, adv, r, sessions, sym_index, spy_idx, n_eff):
             & np.isfinite(advS) & np.isfinite(r2_abn)
             & (rawc >= PRICE_MIN) & (advS >= ADV_MIN))
 
-    ev = ev.loc[keep].copy()
-    ev["r2_abn"] = r2_abn[keep]
-    ev["adv_S"] = advS[keep]
+    # AMBIGUITY: the spec ranks against "every already-processed event".  Default
+    # reading = events that survived steps 1-2 (signal computable AND eligible).
+    # F2_REF_POP=all ranks against every event with a computable signal, gated or not.
+    ref_pop = os.environ.get("F2_REF_POP", "gated")
+    signal_ok = (ok & np.isfinite(a_S) & np.isfinite(a_S2) & np.isfinite(r2_abn))
+    if ref_pop == "all":
+        ranking_mask = signal_ok
+    else:
+        ranking_mask = keep
+
+    ev_all = ev.copy()
+    ev_all["r2_abn"] = r2_abn
+    ev_all["adv_S"] = advS
+    ev_all["eligible"] = keep
+    ev = ev_all.loc[ranking_mask].copy()
     ev = ev.sort_values(["s_idx", "symbol"], kind="mergesort").reset_index(drop=True)
-    log(f"F2: {len(ev)} events pass signal+eligibility")
+    log(f"F2: ranking population={ref_pop}, {int(keep.sum())} eligible, "
+        f"{len(ev)} in the ranking population")
 
     # step 3: causal decile assignment over a trailing 250-calendar-day window
     S = ev["s_idx"].to_numpy()
@@ -299,8 +334,8 @@ def build_f2(events, adj, raw, adv, r, sessions, sym_index, spy_idx, n_eff):
         grp_start = grp_end
 
     ev["decile"] = deciles
-    ev = ev[ev["decile"] >= 0].copy().reset_index(drop=True)
-    log(f"F2: {len(ev)} events ranked (reference >= {F2_MIN_REF})")
+    ev = ev[(ev["decile"] >= 0) & ev["eligible"]].copy().reset_index(drop=True)
+    log(f"F2: {len(ev)} events ranked+eligible (reference >= {F2_MIN_REF})")
 
     # step 4: entry at close of S+1, exit at close of S+1+60
     S = ev["s_idx"].to_numpy()
@@ -336,6 +371,9 @@ def build_f2(events, adj, raw, adv, r, sessions, sym_index, spy_idx, n_eff):
 def build_a1(events, adj, raw, adv, r, sessions, n_eff):
     dates = sessions
     rows = []
+    att = dict(candidates=0, drop_end=0, drop_entry_le_anchor=0,
+               drop_intervening_lt3=0, drop_intervening_gt3=0,
+               drop_missing=0, drop_gate=0, kept=0, ctrl_missing=0)
     for symbol, g in events.groupby("symbol", sort=True):
         g = g.sort_values("s_idx", kind="mergesort")
         S = g["s_idx"].to_numpy()
@@ -343,28 +381,36 @@ def build_a1(events, adj, raw, adv, r, sessions, n_eff):
         if len(S) < 5:
             continue
         for k in range(4, len(S)):
+            att["candidates"] += 1
             target = dates[S[k]] + np.timedelta64(A1_YEAR_DAYS, "D")
             ehat = int(np.searchsorted(dates, target, side="left"))
             if ehat > n_eff - 1 - 2:      # "within 2 sessions of the end"
+                att["drop_end"] += 1
                 continue
             entry = ehat - A1_LEAD
             if entry <= S[k]:
+                att["drop_entry_le_anchor"] += 1
                 continue
             # causality: exactly 3 of this symbol's events in (S[k], entry]
             nb = int(np.sum((S > S[k]) & (S <= entry)))
             if nb != A1_REQUIRED_INTERVENING:
+                att["drop_intervening_lt3" if nb < 3 else "drop_intervening_gt3"] += 1
                 continue
             rc = raw[sym, entry]
             av = adv[sym, entry]
             if not np.isfinite(rc) or not np.isfinite(av):
+                att["drop_missing"] += 1
                 continue
             if rc < PRICE_MIN or av < ADV_MIN:
+                att["drop_gate"] += 1
                 continue
+            att["kept"] += 1
             adv_out = adv[sym, ehat]
             cost = roundtrip_cost_bps(float(av), float(adv_out))
             gross = gross_return(r, sym, entry, ehat)
             ca, cb = entry - A1_CTRL_OFFSET, ehat - A1_CTRL_OFFSET
             if ca < 0:
+                att["ctrl_missing"] += 1
                 cgross, ca_o, cb_o = np.nan, -1, -1
             else:
                 cgross, ca_o, cb_o = gross_return(r, sym, ca, cb), ca, cb
@@ -374,6 +420,7 @@ def build_a1(events, adj, raw, adv, r, sessions, n_eff):
         "symbol", "sym_idx", "anchor_session_index", "entry_session_index",
         "exit_session_index", "entry_date", "exit_date", "gross", "cost_bps",
         "ctrl_entry_index", "ctrl_exit_index", "ctrl"])
+    log("A1 attrition: " + ", ".join(f"{k}={v}" for k, v in att.items()))
     return out
 
 
@@ -416,6 +463,8 @@ def main() -> None:
     log(f"events after dedup + calendar map: {len(ev)}")
 
     results = []
+    monthly_dump = []
+    tail_rows = []
     trades_f2_all, trades_a1_all = [], []
 
     for variant, n_eff in (("sealed", n_sealed), ("complete", n_all)):
@@ -441,11 +490,24 @@ def main() -> None:
                         zip(df["sym_idx"], df["entry_session_index"],
                             df["exit_session_index"], df["cost_bps"])]
 
+            # tail-dependence check: same book with the top 1% of winners removed
+            if len(d9):
+                cut = d9["gross"].quantile(0.99)
+                d9_trim = d9[d9["gross"] < cut]
+                st_t = excess_stats(monthly(daily_series(pos(d9_trim), r, n_all), sessions),
+                                    monthly(daily_series(pos(sub), r, n_all), sessions), 3)
+                tail_rows.append(dict(cell="F2-LO-60", split=split, variant=variant,
+                                      test="drop_top_1pct_winners", n_trades=len(d9_trim),
+                                      excess_mean_bps=st_t["mean_bps"], excess_t=st_t["t_stat"],
+                                      pct_months_pos=st_t["pct_pos"]))
+
             m_d9 = monthly(daily_series(pos(d9), r, n_all), sessions)
             m_d0 = monthly(daily_series(pos(d0), r, n_all), sessions)
             m_all = monthly(daily_series(pos(sub), r, n_all), sessions)
-            st = excess_stats(m_d9, m_all)
-            st0 = excess_stats(m_d0, m_all)
+            st = excess_stats(m_d9, m_all, nw_lag=3)
+            st0 = excess_stats(m_d0, m_all, nw_lag=3)
+            monthly_dump.append(st["series"].rename("excess").reset_index().assign(
+                cell="F2-LO-60", split=split, variant=variant))
             results.append(dict(
                 cell="F2-LO-60", split=split, variant=variant,
                 n_trades=len(d9), n_trades_bench=len(sub),
@@ -453,7 +515,8 @@ def main() -> None:
                 mean_cost_bps=d9["cost_bps"].mean() if len(d9) else np.nan,
                 mean_bench_gross_bps=sub["gross"].mean() * 1e4 if len(sub) else np.nan,
                 n_months=st["n_months"], excess_mean_bps=st["mean_bps"],
-                excess_t=st["t_stat"], pct_months_pos=st["pct_pos"],
+                excess_t=st["t_stat"], excess_t_nw=st["t_nw"],
+                pct_months_pos=st["pct_pos"],
                 d0_n_months=st0["n_months"], d0_excess_mean_bps=st0["mean_bps"],
                 d0_excess_t=st0["t_stat"], d0_pct_months_pos=st0["pct_pos"],
                 ctrl_mean_bps=np.nan, gross_minus_ctrl_bps=np.nan,
@@ -469,9 +532,33 @@ def main() -> None:
             ctrl_pos = [Position(int(s), int(a), int(b), float(c)) for s, a, b, c in
                         zip(cs["sym_idx"], cs["ctrl_entry_index"],
                             cs["ctrl_exit_index"], cs["cost_bps"])]
+            if len(sub):
+                diff = (sub["gross"] - sub["ctrl"]).fillna(sub["gross"])
+                keep_t = diff < diff.quantile(0.99)
+                st_t = excess_stats(
+                    monthly(daily_series([Position(int(s), int(a), int(b), float(c))
+                                          for s, a, b, c in
+                                          zip(sub.loc[keep_t, "sym_idx"],
+                                              sub.loc[keep_t, "entry_session_index"],
+                                              sub.loc[keep_t, "exit_session_index"],
+                                              sub.loc[keep_t, "cost_bps"])], r, n_all), sessions),
+                    monthly(daily_series([Position(int(s), int(a), int(b), float(c))
+                                          for s, a, b, c in
+                                          zip(sub.loc[keep_t, "sym_idx"],
+                                              sub.loc[keep_t, "ctrl_entry_index"],
+                                              sub.loc[keep_t, "ctrl_exit_index"],
+                                              sub.loc[keep_t, "cost_bps"])
+                                          if a >= 0], r, n_all), sessions), 1)
+                tail_rows.append(dict(cell="A1-b", split=split, variant=variant,
+                                      test="drop_top_1pct_winners", n_trades=int(keep_t.sum()),
+                                      excess_mean_bps=st_t["mean_bps"], excess_t=st_t["t_stat"],
+                                      pct_months_pos=st_t["pct_pos"]))
+
             m_real = monthly(daily_series(real_pos, r, n_all), sessions)
             m_ctrl = monthly(daily_series(ctrl_pos, r, n_all), sessions)
-            st = excess_stats(m_real, m_ctrl)
+            st = excess_stats(m_real, m_ctrl, nw_lag=1)
+            monthly_dump.append(st["series"].rename("excess").reset_index().assign(
+                cell="A1-b", split=split, variant=variant))
             results.append(dict(
                 cell="A1-b", split=split, variant=variant,
                 n_trades=len(sub), n_trades_bench=len(cs),
@@ -479,7 +566,8 @@ def main() -> None:
                 mean_cost_bps=sub["cost_bps"].mean() if len(sub) else np.nan,
                 mean_bench_gross_bps=np.nan,
                 n_months=st["n_months"], excess_mean_bps=st["mean_bps"],
-                excess_t=st["t_stat"], pct_months_pos=st["pct_pos"],
+                excess_t=st["t_stat"], excess_t_nw=st["t_nw"],
+                pct_months_pos=st["pct_pos"],
                 d0_n_months=np.nan, d0_excess_mean_bps=np.nan,
                 d0_excess_t=np.nan, d0_pct_months_pos=np.nan,
                 ctrl_mean_bps=sub["ctrl"].mean() * 1e4 if len(sub) else np.nan,
@@ -492,6 +580,12 @@ def main() -> None:
 
     res = pd.DataFrame(results)
     res.to_csv(os.path.join(OUT, "indep_cells.csv"), index=False)
+    if tail_rows:
+        pd.DataFrame(tail_rows).to_csv(os.path.join(OUT, "indep_tail_test.csv"), index=False)
+    if monthly_dump:
+        md = pd.concat(monthly_dump, ignore_index=True)
+        md.columns = ["year", "month", "excess", "cell", "split", "variant"][:len(md.columns)]
+        md.to_csv(os.path.join(OUT, "indep_monthly_excess.csv"), index=False)
 
     f2out = pd.concat(trades_f2_all, ignore_index=True)
     a1out = pd.concat(trades_a1_all, ignore_index=True)

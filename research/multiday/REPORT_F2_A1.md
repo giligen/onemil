@@ -12,7 +12,10 @@ close-to-close auction cost — and the smallest monthly effect this test could 
 families do not work"; it licenses only "this panel cannot see them."*
 
 **TEST (2024-01 -> 2026-09) was NOT opened. No `FREEZE.md` was written** — 0 of 8 cells cleared G2, and
-under the independent rebuild's sealed-split convention (§8) **0 of 8 clear even G1**.
+under the independent rebuild's sealed-split convention (§8) **0 of 8 clear even G1**. Removing the top
+**1%** of trades and rebuilding the books takes every cell to zero or below (§4). The independent rebuild
+matched trade-for-trade and found **seven specification defects** in my design (§9) — all of which push
+the verdict further null.
 
 ---
 
@@ -154,20 +157,40 @@ return is known) and it is **not executable**: a `cls` order must rest *before* 
 signal computed from close(S) cannot be filled at close(S). It is reported only to show that the
 one-session skip is not what kills F2 — the unobtainable version fails VAL too.
 
-**Tail dependence (PLAN §1 item 5).** Net, benchmark-adjusted, per trade:
-**removing the top 5% of trades turns EVERY one of the 8 cells negative** (F2-LO-60: +68.7 -> -313.2 bps;
-A1-b: +78.3 -> -70.2 bps). Capping winners at 3x the cell's median win: F2 goes negative at every hold
-(-80 to -359 bps); A1-b survives but shrinks to **+6.3 bps TRAIN / +50.6 VAL**. So even on the side that
-looked alive, essentially all of the point estimate is in the right tail. This owner has already rejected
-one lottery ticket; this is another.
+**Tail dependence (PLAN §1 item 5) — the most decisive table in the report.** Not just a trade-level
+average: the **portfolio is REBUILT** with the top 1% / 5% of trades removed and the monthly excess
+re-estimated. Independently reproduced by the rebuild of §8 (its numbers in brackets).
+
+| cell | split | as-is | **ex-top-1%** | ex-top-5% |
+|---|---|---|---|---|
+| F2-LO-60 | TRAIN | +44.3 bps, t 2.13 | **+16.8, t 0.89** [+14.9, t 0.70] | **-48.5, t -2.72** |
+| F2-LO-60 | VAL | -56.6, t -1.07 | -83.3, t -1.65 [-54.5, t -1.01] | -147.7, t -3.28 |
+| A1-a | TRAIN | +113.0, t 1.60 | **-27.4, t -0.36** | -289.0, t -3.93 |
+| A1-a | VAL | +57.4, t 0.56 | -90.9, t -0.98 | -312.4, t -2.95 |
+| A1-b | TRAIN | +136.2, t 1.77 | **-20.2, t -0.26** [+0.36, t 0.004] | **-339.3, t -4.22** |
+| A1-b | VAL | +63.3, t 0.58 | -122.8, t -1.17 [-85.9, t -0.88] | -426.5, t -4.18 |
+
+**Removing 1% of the trades — ~198 of A1-b's 19,790 — takes A1's entire announcement premium to zero or
+below, on both splits.** F2-LO-60's TRAIN t falls from 2.13 to 0.89, and both cells are *significantly
+negative* ex-top-5%. Capping winners at 3x the median win tells the same story (F2 -80 to -359 bps;
+A1-b +6.3 TRAIN / +50.6 VAL). There is no cell here whose point estimate is not a right-tail artifact.
+This owner has already rejected one lottery ticket; these are eight more.
 
 **Multiplicity.** 8 scored cells this stage. Block-bootstrap p on the TRAIN excess (5,000 resamples):
 best cell `F2-LO-60` p = 0.03, `A1-b` p = 0.08. **Sidak-adjusted across the 8 cells: 0.21 and 0.48.**
 Total distinct looks in this stage = 9 series x 4 execution/liquidity arms = **36**.
 Cumulative multi-day scored-cell count: K 20 + N2 4 + R_daily 20 + **8 here = 52**.
 
-**Survivorship (DATA.md §7 gap 1: longs biased UP 5–8.75%/yr ~= 42–73 bps/month).** The PIT Nasdaq
-re-run was **not triggered — there are no G2 survivors**. Two things must be said anyway:
+**Survivorship — worse than DATA.md §7 gap 1 says, and measured here.** DATA.md quotes 5-8.75%/yr of
+listed names disappearing. In the SCORED population that rate is effectively **zero by construction**:
+of the 3,807 symbols in this panel, **3,806 are still quoted in 2026** — exactly ONE has a last close
+before 2026-01. The 9,126 names in `delisted_names.parquet` have **no overlap** with `universe.parquet`
+and their prices were never fetched, so the delisting cohort here is not thinned, it is **absent**.
+Compounding it, the "missing price -> daily return 0.0 (frozen position)" convention makes the handful
+of in-sample delistings **break even instead of going to zero**. The PIT Nasdaq re-run was **not
+triggered — there are no G2 survivors** — but this is now a named blocker for any future survivor, and
+it is why the per-trade GROSS figures (F2-LO-60 TRAIN +474 bps) must not be quoted at all.
+Two things must still be said:
 - Every *scored* number is a **difference against a benchmark drawn from the same surviving population**
   (F2: the all-decile book of the same events; A1: the same stock, 31 sessions earlier). The 5–8.75%/yr
   long bias very largely cancels in that difference. **This is what makes the null credible rather than
@@ -297,3 +320,37 @@ count, how empty months are handled) moves A1-b's VAL point estimate from **+6.3
 a factor of 15 — and F2-LO-60's TRAIN t across the 2.0 line. **A real effect does not move by 15x on a
 bookkeeping convention.** This is independent confirmation of §3's conclusion by a different route: the
 estimates are noise-dominated at this book size, and the MDE column is the honest summary of the stage.
+
+---
+
+## 9. Specification defects the independent rebuild found (§8's part d), and what each does to the number
+
+The rail says an independent reimplementation catches CODE errors and **cannot** catch SPEC errors. It
+caught none of the former (§8a) and seven of the latter. None flips the verdict; **every one of them
+makes it more null**, which is the direction that matters. All are verified against my own artifacts.
+
+| # | defect | effect on the number | status |
+|---|---|---|---|
+| 1 | **The scored population is 100% survivors.** 3,806 of 3,807 symbols still quoted in 2026; the 9,126 delisted names were never priced. The "missing price -> 0% return" rule also lets in-sample delistings break even instead of going to zero. | Inflates every LONG level. Cancels largely in the differenced cells (same population both sides); does **not** cancel in the per-trade GROSS column, which is therefore withdrawn as a quotable number. | **Named blocker** for any future survivor; the PIT re-run is mandatory before any G2 pass is believed. |
+| 2 | **The book dies on the top 1%.** Rebuilding the portfolio without ~1% of trades: A1-b TRAIN +136 -> **-20 bps**, A1-a +113 -> **-27**, F2-LO-60 t 2.13 -> **0.89**. | The pre-registration asked for ex-top-5% only. Ex-top-1% is strictly more damning and is now in §4. | **Adopted**: ex-top-1% is a standing column for every future cell. |
+| 3 | **The $3,300 / 20-slot cost model does not describe the academic portfolio.** Measured mean concurrent positions: F2 all-decile **1,933** (max 3,624), F2 D10 **201**, A1-b **111** (median 37, max 669). | The impact charge is right for §3's executable 20-slot book and **fiction** for the §2 academic column. It is also why off-season A1 months are set by a handful of names — the mechanism behind #2. | **Disclosed.** §2 is a return estimate, §3 is the money estimate; only §3's cost is real. |
+| 4 | **Costs are charged to the benchmark too**, so the §2 excess is effectively **gross of cost**. | At 1.14-1.45 bps against an MDE of 40-200 bps, immaterial to the verdict — but "net" was the wrong word. | **Corrected here.** §3's book P&L does charge cost asymmetrically and is net. |
+| 5 | **The F2 benchmark contains the book**: D10 is ~10% of the all-decile benchmark, shrinking the measured spread. | Biases F2's long-only excess **DOWN** — conservative, so it cannot manufacture the TRAIN result. A D10-(D0..D8) contrast is the clean version. | **Disclosed**; clean contrast pre-registered for any F2 successor. |
+| 6 | **ADV20$ is computed on the split- AND dividend-adjusted panel.** Volume is split-invariant in dollar terms but the dividend factor is not offset, so the $1M gate uses a mildly forward-looking factor (AAPL 2019 reads 4.4% low). | Biased against dividend payers sitting near the threshold. The $10M arm (§4) is unaffected in direction and reaches the same verdict. | **Bug.** Fix before the next family: build ADV on the RAW panel, like the $5 gate. |
+| 7 | **A1's "exactly 3 intervening announcements" gate deletes 19,290 of 91,227 candidates** — every firm that reports even slightly earlier than 364 days later. And because the file starts 2016-01 and k>=4 needs five prior events, A1 has essentially no trades before 2018 (139 in 2017). | The cell silently conditions on a **stable annual reporting cadence** — a real, undisclosed selection on firm type — and its TRAIN window is really 4 years containing 2020. The 5-session window also frequently contains no announcement at all when the actual report lands after Ehat. | **Disclosed.** Any A1 successor must use a cadence-robust expected date and report the share of windows that actually contain the event. |
+
+**Two convention sensitivities of the same size as the effect**, which is the point:
+- **Overlapping monthly returns.** 60-session holds overlap, so the iid t overstates. Newey-West (lag 3)
+  takes F2-LO-60 TRAIN from 1.83 to **1.69**.
+- **The F2 decile reference population.** Ranking against all *signal-computable* events instead of all
+  *eligible* events moves TRAIN excess **42.6 -> 32.1 bps, t 1.83 -> 1.37** — a 25% swing on a one-word
+  reading of the spec.
+- **The sealed calendar, quantified.** The 218 D10 trades entered 2023-10-16..12-27 whose 60-session
+  holds run into 2024 average **+1,875 bps**. They are the difference between VAL gross -40 bps
+  ("complete") and -291 bps ("sealed"). My original VAL number was therefore **flattered by TEST-window
+  prices**; the sealed convention adopted in §8b removes that and makes VAL worse, not better.
+
+**What this section is actually evidence of.** Seven specification defects and three conventions, each
+individually worth 25-100% of the point estimate, in a stage whose best cell is t = 1.8 in-sample. That
+is the signature of a measurement dominated by its own bookkeeping. It is the same conclusion §3 reaches
+from the MDE and §4 reaches from the tails, by a third independent route.
