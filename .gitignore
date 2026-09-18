@@ -116,3 +116,9 @@ research/fuckup_audit/P_cost/__pycache__/
 
 research/fuckup_audit/Q_fill/dump_*.csv
 research/fuckup_audit/Q_fill/__pycache__/
+
+# bf_zero causal-filter study bulk artifacts (regenerable; the report + scripts are tracked)
+research/bf_zero/causal_filter/*.csv
+research/bf_zero/causal_filter/*.log
+research/bf_zero/causal_filter/*.txt
+research/bf_zero/causal_filter/*_state.json
