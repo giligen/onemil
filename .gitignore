@@ -139,3 +139,8 @@ research/multiday/data/edgar_eps/
 research/multiday/data/*.parquet
 research/multiday/data/*.log
 research/multiday/data/__pycache__/
+
+# multiday F2/A1: keep the small result tables, ignore the per-trade dumps and the matrix panel
+research/multiday/out_f2a1*/trades.csv
+research/multiday/out_indep/*trades*.csv
+research/multiday/data/panel_f2a1.npz

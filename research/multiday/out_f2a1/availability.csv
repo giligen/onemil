@@ -1,0 +1,18 @@
+field,rule,n,violations,pct_viol
+event_session,close(S) strictly after acceptanceDateTime,130891,0,0.0
+close_adj[S],observable at the close of S,130891,5648,4.315040759104904
+close_adj[S-2],observable at the close of S,130891,5660,4.324208692729065
+close_raw[S],observable at the close of S,130891,5648,4.315040759104904
+ADV20[S],observable at the close of S,130891,5832,4.455615741342033
+signal_complete|TRAIN|post_close,all 4 price fields finite,34797,2210,6.35112222318016
+signal_complete|TRAIN|pre_open,all 4 price fields finite,22759,1397,6.138231029482842
+signal_complete|TRAIN|intraday,all 4 price fields finite,6092,820,13.46027577150361
+signal_complete|TRAIN|ALL,all 4 price fields finite,63648,4427,6.9554424333836105
+signal_complete|VAL|post_close,all 4 price fields finite,15611,451,2.8889885337262187
+signal_complete|VAL|pre_open,all 4 price fields finite,9974,335,3.358732705033086
+signal_complete|VAL|intraday,all 4 price fields finite,1505,83,5.514950166112957
+signal_complete|VAL|ALL,all 4 price fields finite,27090,869,3.207825765965301
+signal_complete|TEST|post_close,all 4 price fields finite,23025,283,1.2290988056460368
+signal_complete|TEST|pre_open,all 4 price fields finite,15497,204,1.3163838162224946
+signal_complete|TEST|intraday,all 4 price fields finite,1631,50,3.065603923973023
+signal_complete|TEST|ALL,all 4 price fields finite,40153,537,1.3373845042711627
