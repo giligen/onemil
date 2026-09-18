@@ -44,8 +44,38 @@ different questions and get two different answers.
 - **F5 52-week-high** (George–Hwang 2004): monthly, L-S on nearness to the 52-week high; long-only leg.
 - **F6 Overnight-vs-intraday cross-section** (Lou–Polk–Skouras 2019): long past overnight winners / short past intraday
   winners, monthly; executable: hold overnight only (MOC buy, MOO sell) on the long leg.
-Cells: 6 families × {published L-S, executable long-only} × the declared holds (F1/F2: 20/40/60; F3: 12-1 and 6-1; F4: 1 wk;
-F5: 1 mo; F6: 1 mo) = **26 cells**, declared here; nothing added later.
+## AMENDED 2026-09-18 21:05 UTC by `research/multiday/LIT_REVIEW.md`, BEFORE any family was scored
+The adversarial review (≈45 verified citations) found two defects in the grid above: it enumerated **22** cells while
+claiming 26 (a wrong permutation denominator), and it omitted the crux column — the LONG-LEG SHARE, which the
+literature supplies for only one of the six. It also re-ranked the families on post-publication decay. The amended
+grid, budget unchanged at **26 cells**:
+
+| family | cells | change and the citation that decides it |
+|---|---|---|
+| F1 PEAD/SUE | 6 → **2** | Martineau 2022 CFR 11(3-4): no significant drift for all-but-microcap stocks **after 2006**. Demoted to a declared null-replication, not a candidate. |
+| **F2 announcement-return drift** | 6, **RUN FIRST** | Martineau explicitly does not test this measure; CJL 1996 stands and no verified post-2015 re-test exists either way. Now the highest-prior family. |
+| F3 12-1 momentum | 4 → **6** | Israel–Moskowitz 2013 JFE 108(2): the LONG leg is ≈ 50% of momentum profits and there is no reliable size relation; Fama–French 2008: pervasive in big caps. +2 residual-momentum cells (Blitz–Huij–Martens). |
+| F4 industry-adj. reversal | 2 → **1** long-only | Novy-Marx–Velikov: few >50%-turnover strategies survive costs; the published construction purges news with analyst revisions we do not have. Venue corrected to Mgmt Sci 60(3) 658-674 (2014). |
+| F5 52-week high | **2**, January split out | George–Hwang: 0.45%/mo raw vs 1.23% ex-January; George–Hwang–Li 2018 JFE 128(1): q-factors *explain* price-to-high. Re-labelled a factor tilt, not an anomaly. |
+| F6 overnight vs intraday | 2 → **1** measurement cell | Haghani–Ragulin–Dewey: 1 bp round-trip removes ~5 pts/yr from a 38%-gross overnight L-S; matches our own `overnight_auction.md` (+25/+15/**−12** bps) and M29 (+7.4/+6.7/**−13.4**). |
+| **A1 earnings-announcement premium** | **2** | Johnson–So 2018 JAR: the pre-announcement bias REVERSES — buy before / sell at the event, the opposite trade to F1. The only addition whose PUBLISHED form is long-only. Same 8-K table, zero new data. |
+| **A2 low short interest, liquid names** | **2** | Boehmer–Huszár–Jordan 2010 JFE 96(1): the significant abnormal return is on the **LONG** side and "often larger" than the short side, in liquid names. Free FINRA semi-monthly files — key on the DISSEMINATION date or it is a look-ahead. |
+| **A3 net share issuance** | **2** | Pontiff–Woodgate 2008; FF2008 pervasive in big caps; Goto et al. survive costs. One extra EDGAR `companyconcept`. Lowest turnover in the review. |
+| **A4 dividend-month premium** | **2** | Hartzmark–Solomon 2013; one extra Alpaca corporate-action type. Ranked last: **no post-2016 replication found** — run only if A1–A3 leave budget. |
+
+**Rejected additions, with the citation that kills each** (do not re-propose without new evidence): index addition
+(Greenwood–Sammon, 7.6% → 0.8%); pre-FOMC drift (Kurov et al. 2021, "essentially disappeared after 2015");
+TSMOM / ETF trend (Huang et al. 2020 JFE, "little evidence… in- and out-of-sample"); betting-against-beta long leg
+($1.05 per $1 sits in the bottom 1% of cap); failures-to-deliver (short side); analyst-revision drift (no vendor);
+seasonality as a standalone family.
+
+**Three columns are now MANDATORY on every cell** and a cell without them is not reportable: (1) the **long-leg share
+of the L-S spread** — we can only trade the long leg, so a family whose profit lives in the short leg is dead for this
+account whatever its t-stat; (2) the **break-even cost** (Stage O's rule: the charge at which the cell reaches zero,
+stated in bps and as a multiple of the honest auction cost); (3) the **ex-January result**, because F5 and the
+small-cap families are substantially a January effect.
+
+Order of execution: **F2 → A1 → F3 → A2 → A3 → F1 (null-replication) → F5 → F4 → F6 → A4.**
 
 ## Splits, costs, gates
 - **Splits**: TRAIN 2016-01→2021-12 (6 yr), VAL 2022-01→2023-12 (2 yr), TEST 2024-01→2026-09 (sealed; opened once behind
