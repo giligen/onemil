@@ -721,9 +721,37 @@ def main():
         params = fit_z_params(train, FILTER_FEATURES)
         print("Z-params: TRAIN REFIT (BT_ALLOW_REFIT) — NOT live parity")
     df['_composite'] = composite_score(df, params)
+    # ---- N1 hook (research/fuckup_audit/N_databento/N1/PREREG) ------------
+    # Add ONE sidecar column to the composite as an 8th signed z-score with
+    # params fit on TRAIN (2025 calendar year, the PLAN §1 split). Threshold
+    # and quintile cutoffs are rescaled by 7/8 — the same affine factor the
+    # composite mean picks up — so a column that is NaN everywhere reproduces
+    # the baseline book EXACTLY (that degenerate case is the parity test).
+    # NaN -> z 0 (neutral). Inert unless ORB_N1_COMPOSITE_FEATURE is set.
+    _n1_scale = 1.0
+    _n1_cf = (os.environ.get('ORB_N1_COMPOSITE_FEATURE') or '').strip()
+    if _n1_cf:
+        if _n1_cf not in df.columns:
+            raise SystemExit(f"FATAL: ORB_N1_COMPOSITE_FEATURE={_n1_cf} is not a "
+                             f"column (join it with ORB_BT_SIDECAR_CSV)")
+        _n1_sign = float(os.environ.get('ORB_N1_COMPOSITE_SIGN', '1'))
+        _n1_tr = df.loc[(df['date'] >= '2025-01-01') & (df['date'] <= '2025-12-31'),
+                        _n1_cf].astype(float)
+        _n1_mu = float(_n1_tr.mean())
+        _n1_sd = max(float(_n1_tr.std(ddof=0)), 1e-9)
+        _n1_z = (((df[_n1_cf].astype(float) - _n1_mu) / _n1_sd) * _n1_sign).fillna(0.0)
+        _nf = float(len(params))
+        df['_composite'] = (df['_composite'] * _nf + _n1_z) / (_nf + 1.0)
+        _n1_scale = _nf / (_nf + 1.0)
+        print(f"N1 composite hook: 8th feature {_n1_cf} sign={_n1_sign:+.0f}; "
+              f"TRAIN mean={_n1_mu:.6f} std={_n1_sd:.6f}; "
+              f"NaN->0 on {int(df[_n1_cf].isna().sum())}/{len(df)} rows; "
+              f"threshold+cutoffs rescaled x{_n1_scale:.8f}")
     # B+ 2026-08-15: threshold from orb.yaml (filter.threshold) via bt_cfg, NOT
     # the imported study_orb_sizing.FILTER_THRESHOLD constant (review P1-4).
-    threshold = bt_cfg['threshold']
+    threshold = bt_cfg['threshold'] * _n1_scale
+    if cutoffs is not None and _n1_scale != 1.0:
+        cutoffs = [c * _n1_scale for c in cutoffs]
     train = df[(df['date'] >= '2025-01-01') & (df['date'] <= '2025-06-30')]
     train_k = train[train['_composite'] >= threshold].copy()
     if cutoffs is None:
@@ -1095,6 +1123,29 @@ def main():
         print(f"EXP V1 feature veto POST ({EXP.describe().split('feat_veto=')[1]}): dropped "
               f"{int((~_m).sum())} pick(s), their P&L would have been {_gp:+,.0f} (slot stays empty)")
         sel = sel[_m].copy()
+
+    # ---- N1 hook: bottom-quintile veto on ONE sidecar column ---------------
+    # POST-ranking, NO refill (a vetoed pick's slot stays empty — the PDR/G1
+    # form). Cut = the 20th percentile of the column over the TRAIN candidate
+    # universe (2025 rows of df), so the rule is causal and frozen before VAL.
+    # NaN fails OPEN (kept). Inert unless ORB_N1_VETO_FEATURE is set.
+    _n1_vf = (os.environ.get('ORB_N1_VETO_FEATURE') or '').strip()
+    if _n1_vf:
+        if _n1_vf not in sel.columns:
+            raise SystemExit(f"FATAL: ORB_N1_VETO_FEATURE={_n1_vf} is not a column")
+        _n1_side = (os.environ.get('ORB_N1_VETO_SIDE') or 'low').strip().lower()
+        _n1_q = float(os.environ.get('ORB_N1_VETO_Q', '0.2'))
+        _n1_trv = df.loc[(df['date'] >= '2025-01-01') & (df['date'] <= '2025-12-31'),
+                         _n1_vf].astype(float)
+        _n1_cut = float(_n1_trv.quantile(_n1_q if _n1_side == 'low' else 1.0 - _n1_q))
+        _v = sel[_n1_vf].astype(float)
+        _vm = (_v <= _n1_cut) if _n1_side == 'low' else (_v >= _n1_cut)
+        _vm = _vm.fillna(False)
+        _vp = float(sel.loc[_vm, '_sized_pnl'].sum())
+        print(f"N1 veto: {_n1_vf} {_n1_side} q{_n1_q:.2f} cut={_n1_cut:.6f} — dropped "
+              f"{int(_vm.sum())} of {len(sel)} pick(s) (their P&L would have been "
+              f"{_vp:+,.0f}; NaN kept: {int(sel[_n1_vf].isna().sum())}; slot stays empty)")
+        sel = sel[~_vm].copy()
 
     # 2026-05-08: fill-rate haircut. Pre-fix, BT assumed every qualified
     # signal filled — no model of buy-stop misses. LIVE Mon-Thu 5/4-5/7

@@ -93,3 +93,6 @@ research/lit_review_2026/*.parquet
 research/lit_review_2026/*.log
 research/lit_review_2026/*_trades.csv
 research/lit_review_2026/liquid_top20.csv
+research/fuckup_audit/N_databento/N1/tbbo/
+research/fuckup_audit/N_databento/N1/perm_tmp/
+research/fuckup_audit/N_databento/N1/__pycache__/

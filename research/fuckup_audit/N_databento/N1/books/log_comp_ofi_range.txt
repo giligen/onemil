@@ -1,0 +1,68 @@
+BT config (B+ parity): account=$26,667 N=8 risk=$375 threshold=0.012081536791 pdr_veto>=11.0 g1(True, rv20>=7.106, pdr>=9.226, short_history_veto=False) range_size_veto(True, <= 2.221) book=research/fuckup_audit/N_databento/N1/books/book_comp_ofi_range.csv
+BT config (winner stack): atr_floor=ON k=0.25 scale_out=ON frac=0.4 level_r=3.0
+Features CSV: analysis_results/orb_features_20260916_2053.csv
+Sidecar research/fuckup_audit/N_databento/N1/sidecar.csv: joined ['ofi_range', 'tai_range', 'ofi_break60', 'tai_break60', 'spread_at_break_bps', 'n_trades_range', 'n_trades_break60']; coverage ofi_range=93.4%, tai_range=95.5%, ofi_break60=33.5%, tai_break60=36.1%, spread_at_break_bps=35.6%, n_trades_range=100.0%, n_trades_break60=100.0%
+RESIM CACHE: research/fuckup_audit/D1_orb/candidates_dump.csv (13033 rows) — bar walk skipped; exit physics are the dump's (must match this run's config)
+Loading bars for 0 pairs...
+Winner stack: building ATR14 lookup (shared atr14_t1, cache daily_bars)...
+Winner stack: ATR14 available for 0/0 symbol-days (missing => floor fail-open to range_low)
+Re-simulating with winner-stack exit (static lock + ATR floor + scale-out)...
+Winner stack: floor bound on 0 resimmed rows; 0 rows scaled 40%@+3.0R (counts are pre-selection, whole candidate set)
+Z-params + quintile cutoffs: orb.yaml literals (LIVE PARITY)
+N1 composite hook: 8th feature ofi_range sign=+1; TRAIN mean=-0.166409 std=27.746657; NaN->0 on 863/13033 rows; threshold+cutoffs rescaled x0.87500000
+Mults (orb.yaml literals — LIVE PARITY): {'Q1': 1.0, 'Q2': 1.0, 'Q3': 1.0, 'Q4': 1.0, 'Q5': 1.0}
+Q1 filter: dropped 1343 Q1 candidates (set ORB_SKIP_Q1=0 to disable)
+PM sizing mult: DISABLED via orb.yaml (sizing.pm_dollar_vol_mult.enabled=false) — all mults 1.0
+PDR veto: dropped 1883 pick(s) with prev_day_range_pct <= 11.0 (their P&L would have been -17,971; set ORB_PDR_VETO=0 to disable)
+G1 veto: dropped 200 pick(s) failing the volatility fingerprint (rv20>=7.106 AND pdr>=9.226); their P&L would have been -1,899 (set ORB_G1_VETO=0 to disable)
+Range-size veto: dropped 65 pick(s) with range_size_pct <= 2.221 (their P&L would have been +536; set ORB_RANGE_SIZE_VETO=0 to disable)
+Catalyst veto: dropped 408 newsless-and-alone pick(s) (their P&L would have been +3,046; ORB_CATALYST_VETO=0 to disable)
+Entered-inclusive book: 215 picks = 159 filled + 56 no-fill (slot consumed, $0) — 74.0% fill rate; 0 no-fill rows in the candidate set
+
+ORB defended pipeline + STATIC_LOCK_1R — monthly P&L (Jan'25-Apr'26)
+
+  month  days  green  red  day_wr_pct  picks  best_day  worst_day   pnl  cum_pnl  intra_dd
+2025-01     8      2    3          25      9       600       -315   249      249      -315
+2025-02     8      2    3          25      8       438       -161   365      614      -161
+2025-03     3      1    1          33      4        82        -96   -15      599         0
+2025-04     2      2    0         100      2       376        179   555    1,154         0
+2025-05     2      2    0         100      3     1,093        328 1,422    2,576         0
+2025-06     6      2    3          33     10       332        -60   487    3,063       -76
+2025-07     7      2    3          29      8        94       -118    17    3,080      -131
+2025-08     4      1    2          25      4       158       -237  -174    2,906       -95
+2025-09     9      3    5          33     17       868       -166   577    3,483      -307
+2025-10     7      3    1          43     10     1,676        -15 2,347    5,830       -15
+2025-11     8      2    5          25     13       451       -423  -152    5,677      -683
+2025-12    10      2    6          20     15       551       -257  -252    5,425      -472
+2026-01     7      3    3          43     10     1,255       -263   924    6,350      -263
+2026-02    10      2    5          20     13       743       -316   257    6,607      -351
+2026-03     8      5    2          62      9     1,883       -124 4,040   10,647      -158
+2026-04    12      2    7          17     14       498       -142   103   10,750      -437
+2026-05     5      1    3          20      6        41       -133  -146   10,604      -184
+2026-06    11      4    4          36     18       218       -239   235   10,838      -285
+2026-07    11      5    5          45     19     1,392       -232 1,373   12,212      -232
+2026-08    12      2    4          17     20       701       -139   434   12,646      -187
+2026-09     3      0    2           0      3         0       -113  -139   12,507       -26
+
+======================================================================
+Negative months
+======================================================================
+  2025-03  $-15  (3 days, 1G/1R, worst day $-96)
+  2025-08  $-174  (4 days, 1G/2R, worst day $-237)
+  2025-11  $-152  (8 days, 2G/5R, worst day $-423)
+  2025-12  $-252  (10 days, 2G/6R, worst day $-257)
+  2026-05  $-146  (5 days, 1G/3R, worst day $-133)
+  2026-09  $-139  (3 days, 0G/2R, worst day $-113)
+
+======================================================================
+Summary (STATIC LOCK)
+======================================================================
+Months tracked:   21
+Negative months:  6 (28.6%)
+Best month:       2026-03  $+4,040
+Worst month:      2025-12  $-252
+Median month:     $+257
+Mean month:       $+596
+Cum P&L:          $+12,507
+
+Saved: research/fuckup_audit/N_databento/N1/books/monthly_comp_ofi_range.csv + research/fuckup_audit/N_databento/N1/books/book_comp_ofi_range.csv

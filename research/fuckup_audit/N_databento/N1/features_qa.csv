@@ -1,0 +1,11 @@
+,0
+assert_range_ts,12451
+assert_break60_ts,4706
+price_scale_checked,200
+price_scale_outside,4
+candidates,13033
+no_tbbo_rows,582
+thin_lt20_range_trades,4446
+has_break,4706
+has_ofi_range,12170
+has_ofi_break60,4360
