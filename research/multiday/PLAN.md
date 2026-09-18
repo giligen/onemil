@@ -75,7 +75,38 @@ account whatever its t-stat; (2) the **break-even cost** (Stage O's rule: the ch
 stated in bps and as a multiple of the honest auction cost); (3) the **ex-January result**, because F5 and the
 small-cap families are substantially a January effect.
 
-Order of execution: **F2 → A1 → F3 → A2 → A3 → F1 (null-replication) → F5 → F4 → F6 → A4.**
+## AMENDED AGAIN 2026-09-18 21:55 UTC — the FREQUENCY FLOOR (owner: "looking for 10+ trades a wk imo")
+A fourth mandatory column, and it is a GATE, not a statistic: **expected trades per week at a $50–66K book**. The
+owner's floor is **≥ 10/week**, and the reason is not impatience — it is resolution time. At 3 trades/month a book
+cannot distinguish +0.2R from 0 inside a year; at 10+/week a quarter does it. Frequency is what converts a small
+honest edge into both money and evidence.
+
+This program's whole history is the two failure modes of that trade-off: **edge without frequency** (ORB, a real
+edge at ~2.5 trades/week; BF P1 at 0.65/week — neither can ever resolve or compound fast enough on its own) and
+**frequency without edge** (HOD-break at 25–30/week and −0.043R gross). The target is the intersection, and every
+cell is now scored on it.
+
+**Expected frequency per family** (stated BEFORE the runs, from universe size × event rate × the book's slots):
+| family | mechanism of frequency | expected trades/wk | vs the ≥10 floor |
+|---|---|---|---|
+| F2 announcement-return drift | ~8,000 names × quarterly earnings ≈ 600 events/wk market-wide; top-decile + liquidity filter | **10–40** | **PASS** |
+| A1 earnings-announcement premium | same event table, opposite side of the event | **10–40** | **PASS** |
+| F4 industry-adj. reversal | weekly rebalance, 10–20 positions | **10–20** | **PASS** |
+| A2 low short interest | FINRA semi-monthly dissemination → 2 rebalances/mo | 3–8 | FAIL as a standalone; keep as an overlay/filter on a passing family |
+| F3 12-1 momentum | monthly rebalance, 10–20 positions | 3–5 | FAIL standalone |
+| F5 52-week high | monthly rebalance | 3–5 | FAIL standalone |
+| A3 net share issuance | annual/quarterly signal, monthly rebalance | 1–3 | FAIL standalone |
+| F6 overnight | measurement cell only | n/a | n/a |
+| F1 PEAD | declared null-replication | n/a | n/a |
+| A4 dividend-month | monthly | 2–4 | FAIL standalone |
+
+**What FAIL means here — not deletion.** A monthly-rebalance family that shows a real long-leg edge is still worth
+knowing: it can be (a) stacked with others to raise the combined rate, or (b) run as a slow sleeve beside a fast
+book. But it may NOT be proposed as the answer to the owner's frequency problem, and it cannot qualify for the live
+exploration tier on its own (condition 4, resolution within a quarter, fails on arithmetic).
+
+**Revised order of execution — high-frequency families first, because only they can produce a live-testable book
+this quarter: F2 → A1 → F4 → F3 → F5 → A2 → A3 → F1 (null-replication) → F6 → A4.**
 
 ## Splits, costs, gates
 - **Splits**: TRAIN 2016-01→2021-12 (6 yr), VAL 2022-01→2023-12 (2 yr), TEST 2024-01→2026-09 (sealed; opened once behind
