@@ -51,8 +51,22 @@ from trading.trading_hours import today_et
 # land in analysis_results/ as "latest features" for the nightly pipeline.
 CACHE_DB = os.environ.get('ORB_CACHE_DB', 'data/cache.db')
 FEATURES_OUT_DIR = os.environ.get('ORB_FEATURES_OUT_DIR', OUT_DIR)
-RANGE_MINUTES = 5  # locked to 5-min ORB for the feature study
-FEATURES_GLOB = os.path.join(OUT_DIR, 'orb_features_*.csv')
+# ORB_RANGE_MINUTES (2026-09-18, research/orb_multiwindow/PREREG.md): the
+# opening-range width W. Production is 5 and MUST stay 5 — the whole shipped
+# selection stack (z-params, quintile cutoffs, range-size veto threshold) is
+# fit on W=5 features. A research run with W != 5 is REQUIRED to write to a
+# separate ORB_FEATURES_OUT_DIR (the code-version stamp below carries the
+# window, and the sidecar lives in that dir, so a W!=5 CSV can never be
+# incrementally appended to the production W=5 one).
+# Every opening-range feature scales with W — the symbol's range block AND the
+# SPY block (spy_range_pct_5min / spy_return_5min_pct keep their legacy column
+# names but cover [09:30, 09:30+W); neither is in FILTER_FEATURES, so they do
+# not touch selection).
+RANGE_MINUTES = int(os.environ.get('ORB_RANGE_MINUTES', '5'))
+# Incremental source = the directory this run WRITES to. In production
+# FEATURES_OUT_DIR == OUT_DIR so this is unchanged; a side-dir research run
+# (PIT top-up, W != 5) can no longer accidentally append to the production CSV.
+FEATURES_GLOB = os.path.join(FEATURES_OUT_DIR, 'orb_features_*.csv')
 
 
 # ---------------------------------------------------------------------------
@@ -451,12 +465,19 @@ def _parse_args():
 # is persisted in a sidecar; a mismatch on incremental runs hard-fails
 # with instructions instead of silently appending mixed-era rows.
 FEATURES_CODE_VERSION = '2026-09-05.entered_inclusive'
-_VERSION_SIDECAR = os.path.join('analysis_results',
+if RANGE_MINUTES != 5:
+    # A non-production opening-range width is a DIFFERENT feature era. The
+    # stamp carries it so the drift guard refuses to mix W=15/30 rows into a
+    # W=5 CSV (and vice versa), and the sidecar lives next to the CSV it
+    # describes (FEATURES_OUT_DIR) instead of in analysis_results/.
+    FEATURES_CODE_VERSION += f'.W{RANGE_MINUTES}'
+_VERSION_SIDECAR = os.path.join(FEATURES_OUT_DIR,
                                 'orb_features_CODE_VERSION.txt')
 
 
 def _check_features_version(incremental: bool) -> None:
     """Full regen: write the sidecar. Incremental: hard-fail on drift."""
+    os.makedirs(FEATURES_OUT_DIR, exist_ok=True)
     try:
         recorded = open(_VERSION_SIDECAR).read().strip()
     except OSError:
@@ -526,7 +547,15 @@ def _resolve_incremental_plan(
 def main() -> None:
     args = _parse_args()
     t0 = datetime.now()
-    print(f"[{t0.isoformat(timespec='seconds')}] ORB feature study — ORB_5_vanilla")
+    print(f"[{t0.isoformat(timespec='seconds')}] ORB feature study — "
+          f"ORB_{RANGE_MINUTES}_vanilla (opening range = 09:30 → 09:30+"
+          f"{RANGE_MINUTES}m, code version {FEATURES_CODE_VERSION})")
+    if RANGE_MINUTES != 5 and FEATURES_OUT_DIR == OUT_DIR:
+        raise SystemExit(
+            f"REFUSE: ORB_RANGE_MINUTES={RANGE_MINUTES} with "
+            f"ORB_FEATURES_OUT_DIR unset — a non-production opening range "
+            f"must never land in {OUT_DIR}/ where the nightly pipeline and "
+            f"scripts/orb_weekly_refit.py pick up the 'latest' features.")
 
     existing_df, start_date = _resolve_incremental_plan(args)
     _check_features_version(incremental=not existing_df.empty)
@@ -573,12 +602,20 @@ def main() -> None:
     print(f"  Got {len(raw):,} bar sets")
     db.close()
 
-    bars_cache: Dict[Tuple[str, str], pd.DataFrame] = {
-        k: _bars_to_df(v) for k, v in raw.items()
-    }
+    # Convert by POPPING: on a full regen `raw` holds every (symbol, date)'s
+    # bars as python lists at the same time as the DataFrames built from them,
+    # which doubles peak memory on a 2-CPU / 7.8 GB box shared with the live
+    # trader. Popping frees each source list as soon as its frame exists.
+    # Same keys, same frames — behaviour-neutral.
+    bars_cache: Dict[Tuple[str, str], pd.DataFrame] = {}
+    while raw:
+        k, v = raw.popitem()
+        bars_cache[k] = _bars_to_df(v)
+    del raw
 
     # Simulate + extract features
-    print("\nSimulating ORB_5_vanilla + extracting features per trade...")
+    print(f"\nSimulating ORB_{RANGE_MINUTES}_vanilla + extracting features "
+          f"per trade...")
     rows: List[Dict] = []
     n_simulated = 0
     n_extracted = 0
@@ -597,8 +634,9 @@ def main() -> None:
                 continue
             # Run simulator
             trade = simulate_orb_trade(
-                bars_df, symbol, date_str, 'ORB_5_vanilla',
-                range_minutes=5, entry_mode='touch', stop_mode='range_low',
+                bars_df, symbol, date_str, f'ORB_{RANGE_MINUTES}_vanilla',
+                range_minutes=RANGE_MINUTES,
+                entry_mode='touch', stop_mode='range_low',
                 target_mult=2.0, time_stop_minutes=60,
             )
             n_simulated += 1

@@ -219,6 +219,12 @@ def _session_open_timestamp(bars):
 
 FORCE_CLOSE_ET = os.environ.get('ORB_BT_FORCE_CLOSE_ET', '15:45')
 
+# ORB_RANGE_MINUTES (2026-09-18, research/orb_multiwindow/PREREG.md): the
+# opening-range width W used to rebuild range_high/range_low for the exit
+# re-simulation. MUST match the width the features CSV was built with
+# (study_orb_features.py reads the same env var). Production = 5.
+RANGE_MINUTES = int(os.environ.get('ORB_RANGE_MINUTES', '5'))
+
 
 def simulate_static_lock(bars, entry_price, range_high, range_low, entry_time):
     """Simulate ORB static_lock exit with Rule M / Rule D touchgo filter.
@@ -477,6 +483,9 @@ def main():
         csv = sorted(p for p in glob.glob('analysis_results/orb_features_*.csv')
                      if 'corrmatrix' not in p)[-1]
     print(f"Features CSV: {csv}")
+    print(f"Opening range: 09:30 → 09:30+{RANGE_MINUTES}m "
+          f"(ORB_RANGE_MINUTES; production = 5 — must match the window the "
+          f"features CSV was built with)")
     df = read_orb_csv(csv)
     needed = [f for f, _ in FILTER_FEATURES]
     df = df.dropna(subset=needed + ['pnl', 'date', 'pnl_pct', 'range_size_pct', 'entry_price'])
@@ -530,7 +539,14 @@ def main():
         db = Database(db_path='data/cache.db')
         raw_bars = db.get_intraday_bars_bulk(pairs)
         db.close()
-    bars_cache = {k: _bars_to_df(v) for k, v in raw_bars.items()}
+    # Pop while converting — see study_orb_features.py: holding the raw lists
+    # and their DataFrames simultaneously doubles peak memory on the full
+    # candidate walk. Behaviour-neutral.
+    bars_cache = {}
+    while raw_bars:
+        _k, _v = raw_bars.popitem()
+        bars_cache[_k] = _bars_to_df(_v)
+    del raw_bars
 
     # Winner stack (2026-08-22): with BOTH flags off, route through the
     # legacy simulate_static_lock for BYTE-identity with the validated book
@@ -572,9 +588,9 @@ def main():
         if open_ts is None:
             new_pnls.append(row['pnl']); new_pnl_pcts.append(row['pnl_pct'])
             new_reasons.append(row['exit_reason']); continue
-        range_end = open_ts + timedelta(minutes=5)
+        range_end = open_ts + timedelta(minutes=RANGE_MINUTES)
         range_bars = bars[(bars['timestamp'] >= open_ts) & (bars['timestamp'] < range_end)]
-        if len(range_bars) < 5:
+        if len(range_bars) < RANGE_MINUTES:
             new_pnls.append(row['pnl']); new_pnl_pcts.append(row['pnl_pct'])
             new_reasons.append(row['exit_reason']); continue
         rh = float(range_bars['high'].max()); rl = float(range_bars['low'].min())
@@ -688,6 +704,20 @@ def main():
     # match it. Refit retained as fallback only when yaml lacks the keys.
     params = None
     cutoffs = None
+    # ORB_BT_REFIT_ZPARAMS (2026-09-18, research/orb_multiwindow/PREREG.md):
+    # force the TRAIN refit of the z-params + quintile cutoffs even though
+    # orb.yaml carries literals. Needed when the candidate population is NOT
+    # the production one (a different opening-range width W has different
+    # range_* distributions, so the W=5 frozen fit is meaningless on it) —
+    # the refit is the SAME procedure scripts/orb_weekly_refit.py runs
+    # (study_orb_filter.fit_z_params + study_orb_sizing.fit_quintile_cutoffs,
+    # filter.threshold and adaptive_mults untouched). The TRAIN window is
+    # ORB_BT_TRAIN_START..ORB_BT_TRAIN_END (default = the legacy 2025H1 slice,
+    # so an unset env is byte-identical to before). Default OFF.
+    _refit_z = (os.environ.get('ORB_BT_REFIT_ZPARAMS', '') or '').strip().lower() \
+        in ('1', 'true', 'yes', 'on')
+    _train_start = os.environ.get('ORB_BT_TRAIN_START', '2025-01-01')
+    _train_end = os.environ.get('ORB_BT_TRAIN_END', '2025-06-30')
     try:
         import yaml as _yaml
         _cfg0 = _yaml.safe_load(open('orb.yaml'))
@@ -703,12 +733,18 @@ def main():
             print("Z-params + quintile cutoffs: orb.yaml literals (LIVE PARITY)")
     except Exception as _e:
         print(f"Z-params: orb.yaml read failed ({_e}) — falling back to refit")
+    if _refit_z:
+        params = None
+        cutoffs = None
+        print(f"Z-params + quintile cutoffs: FORCED TRAIN REFIT "
+              f"(ORB_BT_REFIT_ZPARAMS) on {_train_start}..{_train_end} — "
+              f"NOT live parity; threshold and adaptive_mults unchanged")
     # HARD FAIL on missing yaml constants (2026-07-17): BOTH parity bugs
     # (mults 7/10, z-params 7/17) survived because the refit fallback ran
     # silently. A book computed on refit params is NOT ground truth for
     # live and must never be produced by accident. BT_ALLOW_REFIT=1 is
     # the explicit research escape hatch.
-    train = df[(df['date'] >= '2025-01-01') & (df['date'] <= '2025-06-30')]
+    train = df[(df['date'] >= _train_start) & (df['date'] <= _train_end)]
     _allow_refit = os.environ.get('BT_ALLOW_REFIT', '').strip().lower() in (
         '1', 'true', 'yes')
     if params is None:
@@ -752,7 +788,7 @@ def main():
     threshold = bt_cfg['threshold'] * _n1_scale
     if cutoffs is not None and _n1_scale != 1.0:
         cutoffs = [c * _n1_scale for c in cutoffs]
-    train = df[(df['date'] >= '2025-01-01') & (df['date'] <= '2025-06-30')]
+    train = df[(df['date'] >= _train_start) & (df['date'] <= _train_end)]
     train_k = train[train['_composite'] >= threshold].copy()
     if cutoffs is None:
         if not _allow_refit:

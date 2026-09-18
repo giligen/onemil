@@ -1,0 +1,8 @@
+# Bulk outputs (features CSVs, candidate dumps, ranked dumps, books, logs).
+# Code (*.py, *.sh) and the reports (*.md) are committed.
+w5/
+w15/
+w30/
+w5check/
+*.csv
+*.log
