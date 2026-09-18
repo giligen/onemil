@@ -108,3 +108,8 @@ research/fuckup_audit/O_halt/raw/
 research/fuckup_audit/O_halt/__pycache__/
 research/fuckup_audit/O_halt/ssr_rows.parquet
 data/research/databento/pit_definition/
+research/fuckup_audit/P_cost/spreads.parquet
+research/fuckup_audit/P_cost/spread_rows.csv
+research/fuckup_audit/P_cost/exit_times.csv
+research/fuckup_audit/P_cost/dump_*.csv
+research/fuckup_audit/P_cost/__pycache__/

@@ -1,0 +1,70 @@
+BT config (B+ parity): account=$10,000 N=3 risk=$375 threshold=0.012081536791 pdr_veto>=11.0 g1(True, rv20>=7.106, pdr>=9.226, short_history_veto=False) range_size_veto(True, <= 2.221) book=/home/ec2-user/onemil/research/fuckup_audit/P_cost/book_strict_n3.csv
+BT config (winner stack): atr_floor=ON k=0.25 scale_out=ON frac=0.4 level_r=3.0
+Features CSV: analysis_results/orb_features_20260916_2053.csv
+RESIM CACHE: /home/ec2-user/onemil/research/fuckup_audit/P_cost/dump_strict.csv (13033 rows) — bar walk skipped; exit physics are the dump's (must match this run's config)
+Loading bars for 0 pairs...
+Winner stack: building ATR14 lookup (shared atr14_t1, cache daily_bars)...
+Winner stack: ATR14 available for 0/0 symbol-days (missing => floor fail-open to range_low)
+Re-simulating with winner-stack exit (static lock + ATR floor + scale-out)...
+Winner stack: floor bound on 0 resimmed rows; 0 rows scaled 40%@+3.0R (counts are pre-selection, whole candidate set)
+Z-params + quintile cutoffs: orb.yaml literals (LIVE PARITY)
+Mults (orb.yaml literals — LIVE PARITY): {'Q1': 1.0, 'Q2': 1.0, 'Q3': 1.0, 'Q4': 1.0, 'Q5': 1.0}
+Q1 filter: dropped 1454 Q1 candidates (set ORB_SKIP_Q1=0 to disable)
+PM sizing mult: DISABLED via orb.yaml (sizing.pm_dollar_vol_mult.enabled=false) — all mults 1.0
+PDR veto: dropped 845 pick(s) with prev_day_range_pct <= 11.0 (their P&L would have been -5,147; set ORB_PDR_VETO=0 to disable)
+G1 veto: dropped 88 pick(s) failing the volatility fingerprint (rv20>=7.106 AND pdr>=9.226); their P&L would have been +56 (set ORB_G1_VETO=0 to disable)
+Range-size veto: dropped 35 pick(s) with range_size_pct <= 2.221 (their P&L would have been +616; set ORB_RANGE_SIZE_VETO=0 to disable)
+Catalyst veto: dropped 175 newsless-and-alone pick(s) (their P&L would have been +2,222; ORB_CATALYST_VETO=0 to disable)
+Entered-inclusive book: 88 picks = 70 filled + 18 no-fill (slot consumed, $0) — 79.5% fill rate; 0 no-fill rows in the candidate set
+
+ORB defended pipeline + STATIC_LOCK_1R — monthly P&L (Jan'25-Apr'26)
+
+  month  days  green  red  day_wr_pct  picks  best_day  worst_day   pnl  cum_pnl  intra_dd
+2025-01     3      0    2           0      4         0       -155  -295     -295      -155
+2025-02     4      1    1          25      4       445        -73   372       77       -73
+2025-03     2      0    0           0      2         0          0     0       77         0
+2025-04     1      1    0         100      1       190        190   190      267         0
+2025-05     2      2    0         100      2       574        328   902    1,169         0
+2025-06     3      0    1           0      4         0        -33   -33    1,136       -33
+2025-07     2      0    1           0      2         0        -11   -11    1,125       -11
+2025-08     2      1    0          50      2       177          0   177    1,302         0
+2025-09     8      2    4          25      9       872       -199   545    1,847      -383
+2025-10     6      2    0          33      7       567          0 1,123    2,970         0
+2025-11     2      0    1           0      3         0       -129  -129    2,840      -129
+2025-12     5      1    2          20      7       576       -197   193    3,034      -197
+2026-01     3      0    2           0      3         0        -59   -98    2,936       -59
+2026-02     4      1    1          25      6       182       -211   -28    2,908         0
+2026-03     3      1    1          33      3       285       -116   168    3,076      -116
+2026-04     6      0    2           0      6         0       -103  -125    2,950      -125
+2026-05     1      0    1           0      1      -128       -128  -128    2,822         0
+2026-06     7      0    1           0      7         0        -21   -21    2,801       -21
+2026-07     7      2    3          29      7       168       -145    40    2,841      -156
+2026-08     6      1    2          17      6       151        -69    45    2,885       -69
+2026-09     2      0    1           0      2         0        -14   -14    2,871       -14
+
+======================================================================
+Negative months
+======================================================================
+  2025-01  $-295  (3 days, 0G/2R, worst day $-155)
+  2025-06  $-33  (3 days, 0G/1R, worst day $-33)
+  2025-07  $-11  (2 days, 0G/1R, worst day $-11)
+  2025-11  $-129  (2 days, 0G/1R, worst day $-129)
+  2026-01  $-98  (3 days, 0G/2R, worst day $-59)
+  2026-02  $-28  (4 days, 1G/1R, worst day $-211)
+  2026-04  $-125  (6 days, 0G/2R, worst day $-103)
+  2026-05  $-128  (1 days, 0G/1R, worst day $-128)
+  2026-06  $-21  (7 days, 0G/1R, worst day $-21)
+  2026-09  $-14  (2 days, 0G/1R, worst day $-14)
+
+======================================================================
+Summary (STATIC LOCK)
+======================================================================
+Months tracked:   21
+Negative months:  10 (47.6%)
+Best month:       2025-10  $+1,123
+Worst month:      2025-01  $-295
+Median month:     $+0
+Mean month:       $+137
+Cum P&L:          $+2,871
+
+Saved: /home/ec2-user/onemil/research/fuckup_audit/P_cost/monthly_strict_n3.csv + /home/ec2-user/onemil/research/fuckup_audit/P_cost/book_strict_n3.csv
