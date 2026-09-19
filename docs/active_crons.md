@@ -1,122 +1,51 @@
-# Active session-cron manifest (in-session scheduler, does NOT survive Claude restart)
+# Active cron manifest — rewritten 2026-09-19 (owner: "keep only what we want for daily and weekly reports")
 
-**IMPORTANT**: These are Claude Code's in-session `CronCreate` jobs — they live only in
-this session's process memory. If the session exits/reloads, ALL of these are gone
-with zero warning. On resuming a session, read this file and re-arm every job below
-VERBATIM via `CronCreate` before doing anything else, then update this file to match
-whatever the fresh `CronList` shows.
+Two layers. **Session crons** live only in the Claude session's memory, expire 7 days after arming, and die with the
+session — on resuming a session, read this file and re-arm every job in §1 VERBATIM via `CronCreate` before doing
+anything else, then update the ids here. **Durable crontab / systemd** jobs survive everything and are listed in §2
+so the weekly review can check that each one actually ran (log mtime).
 
-Last synced: 2026-09-05 14:35 UTC (ids: weekly ddb3b4ae, EOD dive fcc1ce53, ORB gate 39658528 (re-armed, replaces a861a834),
-prestage comparison db52f8d3, owner brief 63442e28; stale duplicate weekly 5e74feb2 deleted)
+Last synced: 2026-09-19 10:10 UTC. Removed today: the morning owner brief (its pre-boot test duty moved to a durable
+alert-only crontab line), the HOD-break EOD check and the HOD live-watch monitor + its arming cron (folded into the
+daily report; the monitor was relaying every routine skip line into chat), the superseded weekly (e0655167), the
+Friday `weekly_report.py` telegram (duplicate of the Saturday review), `touchgo_daily_debug.py` (a June bug-hunt),
+`go_backstop.py` (a one-shot dated 8/17). Principle: **reports are daily + weekly, once each; everything else that
+survives is alert-only (silent when clean) or infrastructure.**
 
-## 1. Weekly Retirement-Validation Review (re-armed 2026-09-12, id e0655167; prior ddb3b4ae expires)
-- **Cron**: `23 9 * * 6` (every Saturday 9:23 AM local)
-- **Recurring**: true
-- **Prompt**:
-```
-WEEKLY RETIREMENT-VALIDATION REVIEW (self-authored 8/14 per owner: "weekly analysis over telegram on how are we doing"). Ultrathink — this is the owner's main strategic touchpoint; one per week, make it count.
+## 1. Session crons — exactly two
 
-STEP 0 — SELF-RENEWAL (critical): session crons expire 7 days after arming, so THIS run is likely the last from the current arming. Re-create this cron VERBATIM (CronCreate, "23 9 * * 6", recurring) before doing anything else, and confirm in the telegram footer. If you skip this the weekly dies silently.
+### DAILY EOD REPORT v7 — id `989c1d20` — `57 21 * * 1-5`
+The one daily telegram, prefix `[EOD]`. Covers every book (ORB, BF, HOD-break dry), Gate-1 parity from the durable
+checkers, the stage tally against `docs/scaling_plan_2026.md` Gate 2, hygiene, and "what boots at 12:30 tomorrow and
+what must be fixed before then" (the only place a code fix is permitted — tests first, suite green, never a
+workaround). Prompt = the verbatim text used at arming (in the session transcript; re-create from this description
+if lost, keeping every numbered section).
 
-RESOURCE RULE (owner 8/21 relaxation): parallel agents OK for memory-light work; heavy bar-loading compute = single ulimit-capped process. This analysis is light — do it in-main-session with direct queries.
+### WEEKLY REVIEW v2 — id `69f28d67` — `23 9 * * 6`
+The one weekly telegram, prefix `[WEEKLY wk N]`. STEP 0 self-renews BOTH session crons and updates the ids here.
+Runs `scripts/orb_ramp_check.py` and `scripts/bf_ramp_check.py` (Gate 2 incl. ex-best-trade and the BT band), the
+week ledger vs the two-quarter BT path, HOD dry green weeks, research cells and dropped leads, hygiene incl. the
+durable-cron mtimes, and the GREEN/YELLOW/RED trajectory against the scaling plan's clock.
 
-CONTEXT: read /home/ec2-user/.claude/projects/-home-ec2-user-onemil/memory/project_retirement_validation_plan.md (the governing 3-month plan) and /home/ec2-user/.claude/projects/-home-ec2-user-onemil/memory/project_orb_stability_study_aug2026.md. Working dir /home/ec2-user/onemil.
+## 2. Durable crontab (user `ec2-user`) + systemd — infrastructure and alert-only
+| when (UTC) | job | role | telegram? |
+|---|---|---|---|
+| 10:30 Mon–Fri / 06:00 Sat | `main.py --batch` | universe build (BF + ORB daily_bars) | on failure only |
+| **11:27 Mon–Fri** | **pre-boot full test suite → `logs/preboot_tests.log`** | **NEW 9/19: the 12:30 boot must not load a tree with failing tests** | **on failure only** |
+| 12:40 Mon–Fri | `trader_watchdog.py` | did the 12:30 boot come up | on failure only |
+| 13:26 Mon–Fri | `orb_selection_observer.py` | live-vs-BT selection watch (owner 7/23) | on real drops only |
+| 14:05–21:05 hourly Mon–Fri | `holdings_pulse.py` | positions vs DB / orphans; **silent when flat** | only with open positions |
+| 19:57 Mon–Fri | `hod_break_deadman_flat.py` | HOD dead-man flat (no-op in dry mode) | on action only |
+| 20:30 daily | `onemil-orb-backtest.timer` → `orb_backtest.py` | ORB nightly features/book refresh (feeds the green check) | on failure |
+| 21:04 Mon–Fri | `stupid-money/scripts/eod_check.sh` | **a different project — not ours, untouched** | — |
+| 21:30 Mon–Fri | `daily_green_check.py` | ORB Gate-1 parity; sets the ramp FREEZE on a hard fail | on RED |
+| 21:58 Mon–Fri | journalctl session archive | log archival | no |
+| 22:30 Mon–Fri | `nightly_bt_update.sh` | BF cache append (Stage-1) | on failure |
+| 22:50 Mon–Fri | `bf_decision_parity.py` | BF Gate-1 parity; sets the ramp FREEZE on disagreement | on disagreement |
+| 23:00 Mon–Fri | `build_hod_volume_profile.py` | HOD rv_profile checkpoints (dry run needs it) | no |
+| Sun 20:00 | `orb_weekly_refit.py` | ORB selection refit, 26-week window (owner 9/8) | on failure |
 
-ANALYSIS (past Mon-Fri week, all from primary data — never memory):
-1. PER-BOOK WEEK LEDGER: live P&L per day from data/trades.db (ignition/orb/bull_flag) vs BT-expected (ORB: analysis_results/orb_bplus_book.csv at $10K stage sizing; Ignition: research/scripts/ignition_bt_replay.py; BF: no-parity caveat). Day-by-day live-vs-BT table; root-cause divergences beyond execution noise.
-2. VALIDATION SCOREBOARD vs SECURED criteria: (a) each book in BT band with parity? (b) live monster count (>= +2R) cumulative since 8/14; (c) size changes gate-earned, zero uncontrolled losses, kill firings; (d) program month + on/off-track one-liner.
-3. IGNITION: dry/live/ramp status + prestage phase (shadow/live); fill-quality stats vs shadow twins (path=staged|chase split once prestage is live) vs the 30-100bps expectation; capture cleanliness; prestage shadow telemetry (staged-coverage ratio, BP watermark, churn) if in shadow week.
-4. ORB: stage P&L vs above-water rule, green-check streak, veto tallies + counterfactuals.
-5. BF: floor-passed trades since 7/31, skips, parity-harness trigger status.
-6. HYGIENE: errors/tracebacks, report-layer bugs fixed, unresolved EOD flags, cron lattice health (EOD dive alive? this weekly re-armed?).
-7. TRAJECTORY: honest secured-by-Nov-15 status GREEN/YELLOW/RED with why. Never soften; the owner ordered "don't please me".
-
-TELEGRAM via scripts/report_common.send_telegram, prefix "[WEEKLY VALIDATION wk N]" (N = weeks since 8/17 start). 1-line verdict first; week table; scoreboard; per-book one-liners; decisions needed; next week plan; footer "cron re-armed ✓". Phone-crisp, under ~40 lines, no bare '<' or '<=' (breaks Telegram HTML). A gap in data IS a finding — say it, never silently narrow scope.
-```
-
-## 2. Daily EOD Deep Dive v6 (re-armed 2026-09-12, id 1bdf606c; prior fcc1ce53 expires)
-- **Cron**: `57 21 * * 1-5` (weekdays 9:57 PM local)
-- **Recurring**: true
-- **Prompt**:
-```
-DAILY EOD DEEP DIVE v6 (re-armed 9/5 with the ORB entered-inclusive reference + the ignition BT-vs-live layer; run in-main-session or 1 agent max). Working dir /home/ec2-user/onemil. Review today: (1) ORB B+ per-trade parity vs the ENTERED-INCLUSIVE reference (analysis_results/orb_bplus_book.csv, regenerated 9/5: $6,394/21mo at $10K stage sizing = $304/mo, 15/21 green, 55.5% fill rate — no-fill picks burn a slot at $0; report_common.bt_filled_symbols keys fill-parity on entered rows) — selection/sizing/exits incl. any ATR FLOOR or SCALE OUT lines; if the 2x-wrapper universe rule shipped (research/orb_entered_inclusive/wrapper_rule/summary.csv), the book is the regenerated one under that rule; (2) ignition: live fills with FILL QUALITY lines (chase bps, path=staged|chase) vs SHADOW twins AND vs BT twins: read research/ignition_capcheck/live_window_compare.csv (written by the 21:15 UTC crontab roll-forward scripts/ignition_bt_rollforward.sh; check logs/ignition_bt_rollforward.log ran clean) — quote matched-in-BT count, live R vs BT R vs resting R, live fill vs BT entry median bps (chase era was +461, prestage +78), and BT triggers not taken live with their BT P&L; eod_flat closes recorded; (3) PRESTAGE telemetry: skip_counts distribution, candidate_late events, BP watermark + reserve transitions, would-stage/stage counts, stage_reject_structure / stage_force_flat events with the model R they gave up; (4) BF: trades + BF RAILS line state + 'StopMonitor (bar)' trail lines (unified spec shipped 03b4b6d, first live session Mon 9/8 — entry-bar excluded, trail ratchets on closed bars only, r_basis=plan); (5) green check + streak (8/24 RED = false positive, fixed b19ad99; 8/21 RED = real); (6) news-stream latency stats (grep recv_latency= from its log); (7) ERROR/Traceback sweep. ONE [EOD DIVE] telegram via scripts/report_common.send_telegram (under 30 lines, no bare '(' chars) with per-book status + ESCALATIONS. Never modify files/configs. NOTE: this recurring cron auto-expires ~7 days after 9/5 — re-arm it VERBATIM at the Saturday weekly review before expiry and keep docs/active_crons.md in sync.
-```
-
-## 3. ORB Scale Gate Recommendation (re-armed 2026-09-05, id 39658528)
-- **Cron**: `37 13 12 9 *` (one-shot, Sat 9/12 13:37 UTC)
-- **Recurring**: false (auto-deletes after firing once)
-- **Prompt**:
-```
-ORB SCALE GATE RECOMMENDATION (one-shot Sat 9/12 13:37 UTC — owner-ordered 8/29, revised 8/30 post-audit, RE-ARMED 9/5 with the corrected reference + corrected adjudication). Working dir /home/ec2-user/onemil. REFERENCE = the ENTERED-INCLUSIVE B+ book (analysis_results/orb_bplus_book.csv rebuilt 9/5: non-fill picks consume slots at $0 — the honest replacement for the fill-rate-0.56 estimate; read its monthly table in analysis_results/orb_monthly_static_lock.csv and research/orb_entered_inclusive/ for the before/after). ADJUDICATION (corrected 9/5): the 8/31 PFSA red was the ENTERED-ONLY LOOKAHEAD (BT never saw SHMD/BW which outranked PFSA live; SHMD's stop-limit died time_stop_canceled) — NOT a universe-gate drift; live and BT both gate on prev-day volume >= 500K. With the 9/5 rebuild that class is CLOSED: a BT pick never ordered live is now a REAL parity break unless the selection audit shows a live-only skip phrase. Do NOT pre-adjudicate reds as "PFSA-class" anymore. GO to $25K requires ALL: (1) weeks 8/31-9/4 + 9/8-9/12 green-or-explained and parity-clean on live-behavior terms (8/31 counts as explained by the now-fixed lookahead; 9/1 SWVL was an ignition incident, not ORB); (2) validation P&L since 8/17 positive (above-water rule, memory project_orb_ramp_above_water_rule); (3) live at/above the corrected book's band pro-rata at $10K; (4) zero unexplained violations. If the entered-inclusive rebuild flipped the book negative or its MDD at $10K exceeds ~1 month of expectation: HOLD + reassess. GO = exact config diffs (orb.yaml budget 10000->25000, risk 375->937.50, N stays 3), applied ONLY on owner word; state the $25K/mo expectation FROM THE REBUILT BOOK, not the old $800. Telegram [ORB SCALE GATE] with the two-week tape + recommendation + one-word ask. Remind: criterion #4 amendment still open.
-```
-
-## 4. Prestage Live Daily Comparison (re-armed 2026-09-12, id 0e5aed2c; prior db52f8d3 expires)
-- **Cron**: `50 20 * * 1-5` (weekdays 8:50 PM local)
-- **Recurring**: true, 7-day auto-expiry — re-arm at each Saturday weekly review
-- **Prompt**:
-```
-PRESTAGE LIVE DAILY COMPARISON (recurring weekdays 20:50 UTC, after close — the owner-requested staged-vs-chase evaluation; armed 8/28 launch day, 7-day auto-expiry: re-arm VERBATIM at the Saturday weekly review). Working dir /home/ec2-user/onemil. Skip with a one-line telegram if prestage is back in shadow mode. Compute from logs/prestage_events_<today>.jsonl + journalctl FILL QUALITY lines + trades.db: (1) staged orders: placed/filled/canceled counts with cancel-reason mix (window_close vs demoted — fade-demotion at distance 4.5 activated 8/28, expect intraday cancels now, verify freed watermark got reused by later stages); (2) fill quality by path: path=staged fills (bps vs level; expect 0-30) vs path=chase fills (chase bps; historically 150-750) — per-fill list + medians; (3) P&L by path from trades.db (staged rows have pattern_data path=staged; untagged ignition rows = chase) — realized P&L, WR, per-trade avg for each path, cumulative since 8/28; (4) staged fills WITHOUT shadow-trigger twins (JEM 8/27 class — intra-minute crosses; EXPECTED, list them, their P&L is the fills-on-spikes cost to track vs the 19mo BT assumption); (5) BP: watermark peak vs $15K cap, bp_budget/bp_reserve skip counts, any divergence-agent contention; (6) errors/anomalies in prestage lines. ONE [STAGED vs CHASE] telegram via scripts/report_common.send_telegram with the numbers + a one-line verdict (staging paying for itself? on what sample size — refuse conclusions below ~10 fills/path, say 'accumulating'). Never modify configs.
-```
-
-## 5. Daily Owner Brief (re-armed 2026-09-12, id 28b924e7; prior 63442e28 expires)
-- **Cron**: `37 10 * * 1-5` (weekdays 10:37 AM local = pre-boot)
-- **Recurring**: true, 7-day auto-expiry — re-arm at each Saturday weekly review
-- **Prompt**:
-```
-DAILY OWNER BRIEF (weekdays 10:37 UTC = pre-boot; owner directive 9/5: "act as an OWNER, my PARTNER — think daily where we are across all three, share whether we are on track to make money, and FIX what needs fixing"). Working dir /home/ec2-user/onemil. Read memory feedback_act_as_owner_daily.md + project_book_verdict_frameworks.md. Then, from PRIMARY data (trades.db, green_streak.json, prestage events, books): (1) P&L: yesterday, week-to-date, month-to-date, lifetime-live per book + total; (2) ON TRACK TO MAKE MONEY? one honest line per book against its honest monthly projection (ORB ~$319/mo at $10K; BF ~$9.9K/mo at $2K risk but live at $60; ignition $0 basis) and against the recovery staircase; (3) BROKEN: any book running with a diagnosed money-losing defect? If yes: FIX IT NOW before the 12:30 boot, or PAUSE its entries (exits stay alive) — no third option; (4) what I am fixing/building TODAY, in $-impact order; (5) gates/verdict dates approaching. Telegram [OWNER BRIEF] under 20 lines, numbers first, no research narration. Then DO the fix. If the fix needs a restart, do it before 12:25 UTC. Re-arm this cron weekly at the Saturday review (7-day expiry) and keep docs/active_crons.md in sync.
-```
-(9/6 00:30: cron RE-CREATED as v2 with the corrected references — ORB $290/mo at $10K (wrappers-in production book $6,085), BF $5.4K/mo at $2K risk with 2026 YTD negative = KEEP-TOKEN, ignition $0 basis — and the open owner questions. The old id e44ae2db is gone; the new id is printed by CronList; sync it here at the next review.)
-
----
-## 6. BF P1 behaviour watch + EOD BT-vs-live (OWNER-installed 2026-09-06, owner's own session)
-- Installed by the owner in THEIR Claude session (not visible in this session's CronList) after the P1 go-live decision: "watch and analyze behaviour + end of day report that looks at the new changes specifically and runs bt vs live".
-- What a P1-specific EOD check must cover (the pre-launch review's open items, docs/bf_p1_runbook.md + docs/bf_p1_ramp.md):
-  1. Every BF setup that reached the conviction stage has a rule decision line (`VWAP GATE skip` / `PRICE CAP skip` / detector pole ≥ 5) — and Stage-2 on the roll-forward cache with the live config.yaml agrees on every overlapping trade.
-  2. `PROFIT PARTIAL fired` lines vs the BT's `pp+` exits for the same trades (first live partial = first real test of the executor); no `exhaustion_partial` after a `profit_partial` on the same symbol (BT never does that — fixed 9/6).
-  3. Fill-timing note: live may sell the partial at the +2R touch, BT at the bar close — flag the price gap, it is expected.
-  4. `python scripts/bf_ramp_check.py` verdict + `python scripts/bf_shadow_report.py --day` (works live too: it lists PRICE CAP/VWAP GATE skips).
-  5. Rails: −750 daily / −1050 weekly / −1200 month-pause at $150 base; a hit = live outside the BT envelope → report, do not raise.
-- This session's EOD dive v6 (fcc1ce53) and owner brief v2 (63442e28) stay armed; the owner's cron is the P1-specific layer on top. Re-check both at the Saturday review.
-
-## Protocol for future sessions
-1. On EVERY session start/resume, read this file FIRST (before other work).
-2. Run `CronList` to see what's actually alive.
-3. Diff against this manifest. Re-arm anything listed here but missing from `CronList`.
-4. If you create/modify/delete any cron mid-session, update this file to match before
-   the session might end — don't wait for a "re-arm" prompt to notice drift.
-5. This file itself must be committed to git (or otherwise durable) — it is the ONLY
-   thing that survives a Claude reload for this purpose.
-
-## Ignition BT roll-forward (system crontab, weekdays 21:15 UTC, added 2026-09-05)
-`scripts/ignition_bt_rollforward.sh` → `logs/ignition_bt_rollforward.log`. Extends the
-capsim + resting-model BT from 2026-08-15 through today every night (resumable per
-day) and prints the live-vs-shadow-vs-BT reconciliation
-(`research/ignition_capcheck/live_window_compare.py`, CSV `live_window_compare.csv`).
-Why: the 19-month study was frozen at 8/14 while live started 8/21 — the EOD dive
-compared live only to the shadow twin. The EOD dive should quote this table
-(matched trades, live R vs BT R, live fill vs BT entry in bps, BT triggers not
-taken live and their BT P&L).
-
-## ORB weekly SELECTION refit (system crontab, Sundays 20:00 UTC, installed 2026-09-08 — owner: "so 26 wks")
-- `0 20 * * 0 python3 scripts/orb_weekly_refit.py >> logs/orb_weekly_refit.log` (failure → 🔴 telegram, orb.yaml untouched).
-- Re-fits `orb.yaml::filter.features.{mean,std}` + `quintile_cutoffs` on the trailing 26 weeks of candidates; `adaptive_mults` NEVER (research/orb_refit_walkforward/REPORT.md). Backup `orb.yaml.bak.refit_<ts>`, history `logs/orb_refit_history.jsonl`. First write Sun 9/13 → live from the Mon 9/14 boot. Job-vs-harness parameter parity verified identical for the week of 9/7.
-- Survives Claude restarts (system crontab, not a session cron).
-
-
-## Re-arm log
-- 2026-09-12 12:20 UTC (Saturday review): weekly e0655167, EOD dive 1bdf606c, prestage 0e5aed2c, owner brief 28b924e7. NOTE: the session was DOWN Fri 9/11 evening — the 20:50 and 21:57 crons did not fire; both reports were sent Sat morning. Session crons die with the session: the system-crontab jobs (green check 21:30, BF roll-forward 22:30, ORB nightly 20:30, ignition roll-forward 21:15, ORB refit Sun 20:00) are the durable layer.
-
-> **2026-09-13 — IGNITION KILLED (owner).** The PRESTAGE LIVE DAILY COMPARISON session cron is DELETED (do not re-arm). System crontab: ignition_shadow_report.py (21:40) and ignition_bt_rollforward.sh (23:15) REMOVED. Ignition sections in the EOD dive / weekly / owner brief prompts are moot: report 'ignition OFF' in one line. Session crons alive after 9/13 dedupe: weekly e0655167, EOD dive 1bdf606c, owner brief 28b924e7.
-
-> **2026-09-13 — HOD-break (research/bf_zero).** System crontab: `0 23 * * 1-5 scripts/build_hod_volume_profile.py` writes cache.db `hod_volume_profile` (cum RTH volume at 09:35/09:45/10:00/10:30/11:00/12:00/13:00/14:00/15:00 per symbol-day; log `logs/hod_volume_profile.log`). The trader boots with `--hod`; `config.yaml hod_break.enabled/dry_run` gate it (shipped disabled + dry_run).
-
-> **2026-09-13 late — HOD-break session crons (owner: "EOD live vs BT, live performance, watch the first 30 min")**
-> - `1ad279d4` one-shot Mon 9/14 14:07 UTC — HOD-BREAK FIRST-30-MINUTES WATCH: boot line, every `[HOD DRY] WOULD BUY`, rejects, HOD-tick errors, spec parity on up to 3 signals via `trading.hod_break.simulate`; one `[HOD 30-MIN]` telegram; read-only.
-> - `35e6fd8d` recurring weekdays 21:52 UTC (7-day expiry, re-arm Saturday) — HOD-BREAK EOD CHECK v2 (re-armed 9/15): runs `scripts/hod_break_miss_audit.py` (the spec over the WHOLE universe vs the engine journal — the MISS RATE is the parity number; ENGINE BUG / streamed stale_break / streamed_never_evaluated rows are escalations) then `scripts/hod_break_eod_check.py` (journal signals → exact-spec re-run → level/stop/minute parity, spec exits + R, would-be/realized book P&L), rolling tally since 9/14 vs REPORT.md §8a (5–8 trades/day, +0.25..+0.34 net R), the §10 deviation rows measured on the day's tape (evaluation latency ≤ 5 s, fills vs next open and the cap, target re-anchor, stop slippage, 20 s cancels, notional-cap and reconnect warnings), 15:55 flat, `HOD-break tick raised` and `drain loop failed` must be 0, the `streaming N universe symbols` boot line must exist; one `[HOD EOD]` telegram with ESCALATIONS; read-only.
-> - The DAILY EOD DEEP DIVE (1bdf606c) and OWNER BRIEF (28b924e7) still cover BF/ORB; HOD-break has its own two crons above.
-> - `0e082762` recurring weekdays 12:29 UTC once per session (pattern tightened again 9/15: kill rail|daily_kill|weekly_kill only; was 2b442753) (replaced hourly e3f086dc on 9/14 — a persistent Monitor lives all session, hourly re-arms duplicated it; 7-day expiry) — ARM THE HOD-BREAK LIVE WATCH: starts ONE persistent Monitor if none is running on `journalctl -u onemil-trader -f` filtered to `[HOD`/tick errors/Tracebacks/force close/BF+ORB fills; a defect telegrams `[HOD WATCH]` immediately; first dry signal of the day telegrams once; read-only, never orders.
-> - System crontab `*/5 19-21 * * 1-5 scripts/hod_break_deadman_flat.py` (9/14; rewritten 9/15 after review E/G): every 5 min the SCRIPT decides from Alpaca's calendar whether it is the flat window (close − 5 min .. close + 30, so early closes and the November DST shift are handled) and acts only when the trader is NOT active: reads the exit orders in pattern_data, BOOKS shares they already sold (never sells twice), cancels the legs and reads them until terminal, sells only the remainder with a `hod-dm-` client id, marks exit_pending_verification (the engine reconciles at boot), telegrams `[HOD DEAD-MAN]`. Never touches other positions.
-> - `e912cc44` one-shot Tue 9/15 14:07 UTC — HOD-BREAK FIRST-30-MINUTES WATCH day 2 (fixed engine, new book: $20 floor, 15% spread gate, 12/day, 14:00 cutoff); one `[HOD 30-MIN]` telegram; read-only.
-> - **Re-arm note (9/14)**: at the Saturday review, rewrite the DAILY EOD DEEP DIVE and OWNER BRIEF prompts — ignition/prestage sections are retired (killed 9/13), BF and ORB are paused (report state only), and the HOD-break has its own watch/30-min/EOD crons. Do not re-arm the old text verbatim.
-> - **TWO BOOKS from 2026-09-17**: the red-to-green (F6-PDR) book runs through the same engine, so the EOD check and the miss audit must be run ONCE PER BOOK — `scripts/hod_break_eod_check.py` / `scripts/hod_break_miss_audit.py` (default `hod_break`) and again with `--book red_to_green` (`[R2G EOD]` header, `[R2G` journal lines, `red_to_green` DB rows); the dead-man flat takes the same `--book` and only flattens the book it is given. No cron has been added or changed — whoever re-arms the 21:52 UTC EOD cron at the Saturday review must add the second invocation.
-> - `ca74ce9e` ONE-SHOT 2026-09-16 13:28 UTC — WS-vs-REST bar probe at the open (`research/bf_zero/parity_review/ws_vs_rest_bars.py`, WS_PROBE_START=09:30, 6 min, 300 streamed names + updated bars); telegram [HOD PROBE] only if exact-match < 99% or one-sided bars.
+Backup of the crontab before today's edit: the session scratchpad `crontab.bak.20260919`; `crontab -l` is the
+truth. Retired scripts stay in the repo (`weekly_report.py`, `touchgo_daily_debug.py`, `go_backstop.py`,
+`hod_break_eod_check.py`, `hod_break_miss_audit.py` — the last two are still CALLED by the daily report, just not
+scheduled on their own).
