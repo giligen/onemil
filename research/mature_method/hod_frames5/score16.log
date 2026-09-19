@@ -1,0 +1,136 @@
+break rows 1188186 -> 1188186 | symbol-days 98203 | days 344
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+
+pre-book signals 7027 | anchors 1380 | venues 5 | ADV$ buckets 5
+
+== 0. reproduction + parity ==
+   slot-machine parity: book_portfolio(key=None) == book_ranked  (2328 == 2328 rows, identical set)  ASSERTED
+   B2 TRAIN n  1622  30.6/wk gross -0.039 net -0.107 green 32.1% total $-17,346
+   B2 VAL   n   706  30.7/wk gross +0.083 net +0.013 green 43.5% total $+893
+
+== F16-diag  THE CONCENTRATION DIAGNOSTIC (no bar) ==
+| split | occupied slot-minutes | >=2 share an anchor | >=2 a venue | >=2 an ADV$ bucket | max same-anchor conc | booked rows with a same-anchor sibling open |
+|------|------|------|------|------|------|------|
+| TRAIN | 84587 | 8.8% | 71.5% | 37.9% | 2 | 115/1622 (7.1%) |
+| VAL | 38050 | 9.9% | 78.1% | 61.8% | 3 | 53/706 (7.5%) |
+
+   top anchors in the BOOKED set:
+     TRAIN: {'TSLA': np.int64(48), 'SMCI': np.int64(37), 'MSTR': np.int64(33), 'IONQ': np.int64(32), 'PLTR': np.int64(30), 'HIMS': np.int64(30), 'CRWV': np.int64(29), 'COIN': np.int64(29)}
+     VAL: {'IREN': np.int64(20), 'ASTS': np.int64(16), 'AXTI': np.int64(15), 'PLTR': np.int64(13), 'IONQ': np.int64(13), 'AAOI': np.int64(12), 'SNDK': np.int64(12), 'BE': np.int64(11)}
+
+   pre-book composition: wrapper 38.6% | stock 61.0% | unknown 0.5%
+   booked   composition: wrapper 38.5% | stock 61.0%
+
+== F16 CELLS (admission untouched; only the slot allocator changes) ==
+| cell                                    | split | n     | /wk   | grossR | cost   | netR   |  t    | tc    | green | worst $  | total $   | MDD $    |
+|------|------|------|------|------|------|------|------|------|------|------|------|------|
+| F16-base  B2 (reference)                | TRAIN |  1622 |  30.6 | -0.039 | +0.068 | -0.107 | -3.42 | -2.99 |  32.1 |    -2231 |    -17346 |   -18929 |
+| F16-base  B2 (reference)                | VAL   |   706 |  30.7 | +0.083 | +0.070 | +0.013 | +0.27 | +0.26 |  43.5 |     -957 |       893 |    -2940 |
+    halves H1 -0.077 (n 789) | H2 -0.003 (n 833) | VAL +0.083 (n 706) -> same-signed POSITIVE in all three: False
+| F16-a1  1/anchor, 4 slots               | TRAIN |  1618 |  30.5 | -0.047 | +0.068 | -0.115 | -3.68 | -3.32 |  34.0 |    -2206 |    -18633 |   -19734 |
+| F16-a1  1/anchor, 4 slots               | VAL   |   710 |  30.9 | +0.068 | +0.071 | -0.002 | -0.05 | -0.05 |  47.8 |    -1308 |      -163 |    -4264 |
+    halves H1 -0.082 (n 779) | H2 -0.014 (n 839) | VAL +0.068 (n 710) -> same-signed POSITIVE in all three: False
+| F16-a2  2/anchor, 4 slots               | TRAIN |  1622 |  30.6 | -0.039 | +0.068 | -0.107 | -3.42 | -2.99 |  32.1 |    -2231 |    -17346 |   -18929 |
+| F16-a2  2/anchor, 4 slots               | VAL   |   708 |  30.8 | +0.084 | +0.070 | +0.014 | +0.30 | +0.29 |  43.5 |     -957 |       989 |    -2940 |
+    halves H1 -0.077 (n 789) | H2 -0.003 (n 833) | VAL +0.084 (n 708) -> same-signed POSITIVE in all three: False
+| F16-a1n 1/anchor, 4 slots, NO REFILL    | TRAIN |  1614 |  30.5 | -0.048 | +0.068 | -0.117 | -3.73 | -3.37 |  34.0 |    -2206 |    -18806 |   -19907 |
+| F16-a1n 1/anchor, 4 slots, NO REFILL    | VAL   |   704 |  30.6 | +0.073 | +0.071 | +0.002 | +0.05 | +0.04 |  47.8 |    -1308 |       157 |    -4094 |
+    halves H1 -0.085 (n 775) | H2 -0.014 (n 839) | VAL +0.073 (n 704) -> same-signed POSITIVE in all three: False
+| F16-a6  1/anchor, 6 slots               | TRAIN |  2106 |  39.7 | -0.049 | +0.069 | -0.118 | -4.28 | -3.54 |  26.4 |    -2586 |    -24833 |   -24833 |
+| F16-a6  1/anchor, 6 slots               | VAL   |   994 |  43.2 | +0.058 | +0.071 | -0.013 | -0.32 | -0.30 |  52.2 |    -1300 |     -1258 |    -5367 |
+    halves H1 -0.087 (n 996) | H2 -0.015 (n 1110) | VAL +0.058 (n 994) -> same-signed POSITIVE in all three: False
+| F16-a8  1/anchor, 8 slots               | TRAIN |  2335 |  44.1 | -0.045 | +0.069 | -0.114 | -4.32 | -3.42 |  30.2 |    -2494 |    -26516 |   -26516 |
+| F16-a8  1/anchor, 8 slots               | VAL   |  1140 |  49.6 | +0.036 | +0.071 | -0.035 | -0.93 | -0.82 |  30.4 |    -2324 |     -3950 |    -8391 |
+    halves H1 -0.077 (n 1088) | H2 -0.017 (n 1247) | VAL +0.036 (n 1140) -> same-signed POSITIVE in all three: False
+| F16-v2  2/venue, 4 slots                | TRAIN |  1487 |  28.1 | -0.032 | +0.067 | -0.100 | -3.04 | -2.69 |  37.7 |    -2179 |    -14801 |   -16869 |
+| F16-v2  2/venue, 4 slots                | VAL   |   690 |  30.0 | +0.047 | +0.069 | -0.022 | -0.46 | -0.45 |  39.1 |    -1189 |     -1502 |    -4108 |
+    halves H1 -0.081 (n 723) | H2 +0.013 (n 764) | VAL +0.047 (n 690) -> same-signed POSITIVE in all three: False
+| F16-b2  2/ADV$ bucket, 4 slots          | TRAIN |  1610 |  30.4 | -0.053 | +0.068 | -0.121 | -3.87 | -3.41 |  34.0 |    -2115 |    -19498 |   -19968 |
+| F16-b2  2/ADV$ bucket, 4 slots          | VAL   |   708 |  30.8 | +0.071 | +0.070 | +0.001 | +0.03 | +0.02 |  47.8 |     -974 |        86 |    -3712 |
+    halves H1 -0.077 (n 779) | H2 -0.031 (n 831) | VAL +0.071 (n 708) -> same-signed POSITIVE in all three: False
+| F16-m1  CONCENTRATED (causal sibling)   | TRAIN |   337 |   6.4 | -0.013 | +0.055 | -0.068 | -0.91 | -0.66 |  39.6 |    -2116 |     -2284 |    -3637 |
+| F16-m1  CONCENTRATED (causal sibling)   | VAL   |   223 |   9.7 | +0.154 | +0.060 | +0.094 | +1.09 | +0.85 |  52.2 |     -848 |      2099 |    -2044 |
+    halves H1 -0.120 (n 160) | H2 +0.084 (n 177) | VAL +0.154 (n 223) -> same-signed POSITIVE in all three: False
+| F16-m2  CONCENTRATED x 1/anchor         | TRAIN |   250 |   4.7 | -0.058 | +0.054 | -0.113 | -1.32 | -1.12 |  35.8 |    -1460 |     -2823 |    -3477 |
+| F16-m2  CONCENTRATED x 1/anchor         | VAL   |   184 |   8.0 | +0.099 | +0.059 | +0.040 | +0.41 | +0.37 |  47.8 |     -683 |       733 |    -1507 |
+    halves H1 -0.131 (n 115) | H2 +0.003 (n 135) | VAL +0.099 (n 184) -> same-signed POSITIVE in all three: False
+
+   [F16-m1 pre-committed expectation, hod_frames4 §3.3 causal row] gross -0.013 / +0.154, $-2,284 / $+2,099, H1 -0.120, 6.4 / 9.7 tr/wk
+
+== F16 week shape (the frame's own claim: shape, not gross) ==
+| cell | split | green % | red streak | worst wk $ | best wk $ | MDD $ | best wk share of total |
+|------|------|------|------|------|------|------|------|
+| F16-base  B2 (reference) | TRAIN | 32.1 | 5 | -2231 | 1815 | -18929 | nan% |
+| F16-base  B2 (reference) | VAL | 43.5 | 4 | -957 | 1411 | -2940 | 158% |
+| F16-a1  1/anchor, 4 slots | TRAIN | 34.0 | 5 | -2206 | 1497 | -19734 | nan% |
+| F16-a1  1/anchor, 4 slots | VAL | 47.8 | 4 | -1308 | 1357 | -4264 | nan% |
+| F16-a2  2/anchor, 4 slots | TRAIN | 32.1 | 5 | -2231 | 1815 | -18929 | nan% |
+| F16-a2  2/anchor, 4 slots | VAL | 43.5 | 4 | -957 | 1411 | -2940 | 143% |
+| F16-a1n 1/anchor, 4 slots, NO REFILL | TRAIN | 34.0 | 5 | -2206 | 1497 | -19907 | nan% |
+| F16-a1n 1/anchor, 4 slots, NO REFILL | VAL | 47.8 | 4 | -1308 | 1357 | -4094 | 864% |
+| F16-a6  1/anchor, 6 slots | TRAIN | 26.4 | 9 | -2586 | 2184 | -24833 | nan% |
+| F16-a6  1/anchor, 6 slots | VAL | 52.2 | 4 | -1300 | 1380 | -5367 | nan% |
+| F16-a8  1/anchor, 8 slots | TRAIN | 30.2 | 6 | -2494 | 2236 | -26516 | nan% |
+| F16-a8  1/anchor, 8 slots | VAL | 30.4 | 6 | -2324 | 2239 | -8391 | nan% |
+| F16-v2  2/venue, 4 slots | TRAIN | 37.7 | 6 | -2179 | 1381 | -16869 | nan% |
+| F16-v2  2/venue, 4 slots | VAL | 39.1 | 3 | -1189 | 1660 | -4108 | nan% |
+| F16-b2  2/ADV$ bucket, 4 slots | TRAIN | 34.0 | 6 | -2115 | 2041 | -19968 | nan% |
+| F16-b2  2/ADV$ bucket, 4 slots | VAL | 47.8 | 3 | -974 | 1161 | -3712 | 1356% |
+| F16-m1  CONCENTRATED (causal sibling) | TRAIN | 39.6 | 4 | -2116 | 1592 | -3637 | nan% |
+| F16-m1  CONCENTRATED (causal sibling) | VAL | 52.2 | 3 | -848 | 1623 | -2044 | 77% |
+| F16-m2  CONCENTRATED x 1/anchor | TRAIN | 35.8 | 5 | -1460 | 1070 | -3477 | nan% |
+| F16-m2  CONCENTRATED x 1/anchor | VAL | 47.8 | 3 | -683 | 1319 | -1507 | 180% |
+
+== count-matched permutation nulls (2,000 draws, pick count held fixed) ==
+| cell | split | green % | null mean | null p5 | null p95 | verdict |
+|---|---|---|---|---|---|---|
+| F16-base  B2 (reference) | TRAIN | 32.1 | 30.8 | 24.5 | 37.7 | inside |
+| F16-base  B2 (reference) | VAL | 43.5 | 49.5 | 39.1 | 60.9 | inside |
+| F16-a1  1/anchor, 4 slots | TRAIN | 34.0 | 29.5 | 22.6 | 35.8 | inside |
+| F16-a1  1/anchor, 4 slots | VAL | 47.8 | 46.9 | 34.8 | 56.5 | inside |
+| F16-a2  2/anchor, 4 slots | TRAIN | 32.1 | 30.8 | 24.5 | 37.7 | inside |
+| F16-a2  2/anchor, 4 slots | VAL | 43.5 | 49.6 | 39.1 | 60.9 | inside |
+| F16-a1n 1/anchor, 4 slots, NO REFILL | TRAIN | 34.0 | 29.3 | 22.6 | 35.8 | inside |
+| F16-a1n 1/anchor, 4 slots, NO REFILL | VAL | 47.8 | 47.8 | 39.1 | 56.5 | inside |
+| F16-a6  1/anchor, 6 slots | TRAIN | 26.4 | 26.8 | 20.8 | 34.0 | inside |
+| F16-a6  1/anchor, 6 slots | VAL | 52.2 | 44.7 | 34.8 | 52.4 | inside |
+| F16-a8  1/anchor, 8 slots | TRAIN | 30.2 | 26.7 | 20.8 | 34.0 | inside |
+| F16-a8  1/anchor, 8 slots | VAL | 30.4 | 39.7 | 30.4 | 47.8 | inside |
+| F16-v2  2/venue, 4 slots | TRAIN | 37.7 | 32.6 | 26.4 | 39.6 | inside |
+| F16-v2  2/venue, 4 slots | VAL | 39.1 | 43.6 | 34.8 | 52.2 | inside |
+| F16-b2  2/ADV$ bucket, 4 slots | TRAIN | 34.0 | 28.6 | 22.5 | 35.8 | inside |
+| F16-b2  2/ADV$ bucket, 4 slots | VAL | 47.8 | 47.3 | 39.1 | 56.5 | inside |
+| F16-m1  CONCENTRATED (causal sibling) | TRAIN | 39.6 | 40.6 | 34.0 | 47.2 | inside |
+| F16-m1  CONCENTRATED (causal sibling) | VAL | 52.2 | 53.5 | 43.5 | 65.2 | inside |
+| F16-m2  CONCENTRATED x 1/anchor | TRAIN | 35.8 | 36.9 | 30.2 | 43.4 | inside |
+| F16-m2  CONCENTRATED x 1/anchor | VAL | 47.8 | 47.5 | 39.1 | 56.5 | inside |
+
+null summary: {'inside': 20}
+
+cells -> /home/ec2-user/onemil/research/mature_method/hod_frames5/cells16.csv  (20 rows)
+
+== MDE (80 % power, net R/trade) and the tail ==
+| cell | split | n | net | MDE | ex-top5% net | ex-top1% net |
+|------|------|------|------|------|------|------|
+| F16-base  B2 (reference) | TRAIN | 1622 | -0.107 | 0.088 | -0.218 | -0.129 |
+| F16-base  B2 (reference) | VAL | 706 | +0.013 | 0.132 | -0.093 | -0.010 |
+| F16-a1  1/anchor, 4 slots | TRAIN | 1618 | -0.115 | 0.088 | -0.226 | -0.138 |
+| F16-a1  1/anchor, 4 slots | VAL | 710 | -0.002 | 0.132 | -0.108 | -0.025 |
+| F16-a2  2/anchor, 4 slots | TRAIN | 1622 | -0.107 | 0.088 | -0.218 | -0.129 |
+| F16-a2  2/anchor, 4 slots | VAL | 708 | +0.014 | 0.133 | -0.091 | -0.009 |
+| F16-a1n 1/anchor, 4 slots, NO REFILL | TRAIN | 1614 | -0.117 | 0.088 | -0.227 | -0.139 |
+| F16-a1n 1/anchor, 4 slots, NO REFILL | VAL | 704 | +0.002 | 0.133 | -0.104 | -0.021 |
+| F16-a6  1/anchor, 6 slots | TRAIN | 2106 | -0.118 | 0.077 | -0.229 | -0.140 |
+| F16-a6  1/anchor, 6 slots | VAL | 994 | -0.013 | 0.112 | -0.118 | -0.033 |
+| F16-a8  1/anchor, 8 slots | TRAIN | 2335 | -0.114 | 0.074 | -0.224 | -0.135 |
+| F16-a8  1/anchor, 8 slots | VAL | 1140 | -0.035 | 0.104 | -0.141 | -0.056 |
+| F16-v2  2/venue, 4 slots | TRAIN | 1487 | -0.100 | 0.092 | -0.210 | -0.121 |
+| F16-v2  2/venue, 4 slots | VAL | 690 | -0.022 | 0.134 | -0.129 | -0.042 |
+| F16-b2  2/ADV$ bucket, 4 slots | TRAIN | 1610 | -0.121 | 0.088 | -0.233 | -0.144 |
+| F16-b2  2/ADV$ bucket, 4 slots | VAL | 708 | +0.001 | 0.133 | -0.105 | -0.022 |
+| F16-m1  CONCENTRATED (causal sibling) | TRAIN | 337 | -0.068 | 0.209 | -0.177 | -0.093 |
+| F16-m1  CONCENTRATED (causal sibling) | VAL | 223 | +0.094 | 0.242 | -0.014 | +0.068 |
+| F16-m2  CONCENTRATED x 1/anchor | TRAIN | 250 | -0.113 | 0.240 | -0.228 | -0.138 |
+| F16-m2  CONCENTRATED x 1/anchor | VAL | 184 | +0.040 | 0.270 | -0.072 | +0.018 |
+
+DONE F16

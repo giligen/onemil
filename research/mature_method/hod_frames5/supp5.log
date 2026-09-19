@@ -1,0 +1,16 @@
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+== what the dedicated fetch changed (PREREG §4.3) ==
+  pre-book signals: as-is 7027 -> measured 6552
+    dropped by measurement 1391 | added by measurement 916 | common 5636
+  as-is: of 14697 gate-free rows, obtainable 13299 (90.5%); ask_dec present 65.6%
+  measured: of 14697 gate-free rows, obtainable 12389 (84.3%); ask_dec present 99.9%
+  (i)  obtainability flips: True->False 910 | False->True 0
+  (ii) spread-gate flips: pass->fail 1123 | fail->pass 951
+
+  booked rows: as-is 2328 | measured 2388 | in both 1566
+  (iii) on the 1566 rows in BOTH books, mean cost R falls by +0.0077 (as-is +0.0667 -> measured +0.0590); gross is unchanged by construction (+0.0016 vs +0.0016)
+   TRAIN: common rows $ -10,464 -> -9,543 (repricing +921) | as-is-only rows -6,881 (487 tr) | measured-only rows -3,084 (533 tr)
+   VAL: common rows $ +258 -> +545 (repricing +287) | as-is-only rows +635 (275 tr) | measured-only rows +1,882 (289 tr)
+
+DONE supp5

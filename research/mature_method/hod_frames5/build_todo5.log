@@ -1,0 +1,19 @@
+break rows 1188186 -> 1188186 | symbol-days 98203 | days 344
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+(a) $20 gates-OFF pre-book rows: 13299
+(b) all   floor     5 frac_r 0.15  bps 100.0  -> booked 2726
+(b) wrap  floor     5 frac_r 0.15  bps 100.0  -> booked 2047
+(b) all   floor    10 frac_r 0.15  bps 100.0  -> booked 2597
+(b) wrap  floor    10 frac_r 0.15  bps 100.0  -> booked 1942
+(b) all   floor    20 frac_r 0.15  bps 100.0  -> booked 2328
+(b) wrap  floor    20 frac_r 0.15  bps 100.0  -> booked 1677
+(b) all   floor    30 frac_r 0.15  bps 100.0  -> booked 2025
+(b) wrap  floor    30 frac_r 0.15  bps 100.0  -> booked 1308
+(b) all   floor    50 frac_r 0.15  bps 100.0  -> booked 1489
+(b) wrap  floor    50 frac_r 0.15  bps 100.0  -> booked 725
+(b) all   floor    20 frac_r 0.08  bps 100.0  -> booked 1800
+(b) all   floor    20 frac_r 0.25  bps 100.0  -> booked 2608
+(b) all   floor    20 frac_r 0.4   bps 100.0  -> booked 2815
+(b) all   floor    20 frac_r None  bps None   -> booked 2881
+
+union 15866 | already measured 8261 | TODO 7605 quote-minutes (~22 min at the pass-3 fetch rate)

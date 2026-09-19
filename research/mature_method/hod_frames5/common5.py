@@ -21,6 +21,47 @@ from common4 import (S, S2, SPLITS, RISK, D4, load_breaks4, book_ranked, book_or
 D5 = f'{ROOT}/research/mature_method/hod_frames5'
 
 
+def load_breaks5(extra_nbbo=(), verbose=True):
+    """`load_breaks4` with extra measured-NBBO files merged on (day, symbol, entry_m).
+
+    The base population is byte-identical to pass 4's (the reproduction gate).  Each path in
+    `extra_nbbo` adds quote-minutes the original fetch never covered; rows already measured are
+    NEVER overwritten, so the base book is unchanged where it was already measured and only gains
+    measurement where it had imputation.  Declared in PREREG §4.3: this CHANGES MEMBERSHIP in both
+    directions (a measured spread can fail a gate an imputed one passed; a measured `ask_dec` can
+    make a fill unobtainable where a missing quote defaulted to obtainable) and both effects are
+    counted in the report.
+    """
+    br = load_breaks4(verbose=verbose)
+    if not extra_nbbo:
+        return br
+    k = ['day', 'symbol', 'entry_m']
+    have = br[br.spread_mean.notna()].set_index(k).index
+    add = []
+    for p in extra_nbbo:
+        if not os.path.exists(p):
+            print(f'  WARNING extra NBBO file missing, skipped: {p}', flush=True)
+            continue
+        e = pd.read_csv(p, dtype={'symbol': str, 'day': str}, keep_default_na=False,
+                        na_values=['']).drop_duplicates(k)
+        add.append(e[['day', 'symbol', 'entry_m', 'spread_mean', 'ask_dec', 'bid_dec']])
+    if not add:
+        return br
+    e = pd.concat(add, ignore_index=True).drop_duplicates(k)
+    e['entry_m'] = e.entry_m.astype(int)
+    e = e[~e.set_index(k).index.isin(have)].rename(
+        columns={'spread_mean': '_sm', 'ask_dec': '_ad', 'bid_dec': '_bd'})
+    n0 = int(br.spread_mean.notna().sum())
+    br = br.merge(e, on=k, how='left')
+    for a, b in (('spread_mean', '_sm'), ('ask_dec', '_ad'), ('bid_dec', '_bd')):
+        br[a] = br[a].where(br[a].notna(), br[b])
+    br = br.drop(columns=['_sm', '_ad', '_bd'])
+    if verbose:
+        print(f'  extra NBBO merged: measured break rows {n0} -> {int(br.spread_mean.notna().sum())}',
+              flush=True)
+    return br
+
+
 # ------------------------------------------------------------------ the pre-book cascade
 def sigset5(d, min_price=20.0, r_min=1.0, max_bps=100.0, max_frac_r=0.15, last_m=840,
             obtain=True):
@@ -41,10 +82,12 @@ def sigset5(d, min_price=20.0, r_min=1.0, max_bps=100.0, max_frac_r=0.15, last_m
 
 # ------------------------------------------------------------------ F16: the portfolio slot machine
 def book_portfolio(s, nday=12, nconc=4, key=None, per_key=1, score=None, descending=True,
-                   rng=None):
+                   rng=None, consume_on_reject=False):
     """`book_ranked` plus a PORTFOLIO constraint: at most `per_key` OPEN positions sharing `key`.
 
     `key`: column name in `s` (e.g. 'anchor', 'venue', 'advb').  None -> identical to `book_ranked`.
+    `consume_on_reject`: a candidate rejected by the portfolio rule still spends one of the day's
+    `nday` (ORB's NO-REFILL invariant).  Default False = the slot may be refilled.
     The constraint is on CONCURRENTLY OPEN positions, exactly like the concurrency cap: a slot is
     free at bar k only if exit_m < k (`run_book`'s causal freeing).  Rows whose key is NaN are
     treated as their own unique key (never de-duplicated against anything) — the fail-open rule.
@@ -87,6 +130,8 @@ def book_portfolio(s, nday=12, nconc=4, key=None, per_key=1, score=None, descend
                 continue
             if key is not None and per_key is not None:
                 if sum(1 for e in open_ex if e[1] == k) >= per_key:
+                    if consume_on_reject:      # ORB's NO-REFILL invariant: the day-slot is spent
+                        n_day += 1
                     continue
             taken.append(r[4]); open_ex.append((exit_m, k)); n_day += 1
     b = s.loc[taken].copy()
@@ -95,6 +140,9 @@ def book_portfolio(s, nday=12, nconc=4, key=None, per_key=1, score=None, descend
 
 
 # ------------------------------------------------------------------ instrument attributes
+_INST = {}
+
+
 def attach_instrument(s):
     """asset_class / anchor / anchor_cohort — the two fields F16 and F18 need, cheaply.
 
@@ -103,13 +151,18 @@ def attach_instrument(s):
     to violate.
     """
     from trading.orb_asset_class import classify_asset, load_class_map, underlying_anchor
-    ass = pd.read_csv(f'{ROOT}/data/research/alpaca_assets_all_20260905.csv',
-                      dtype=str, keep_default_na=False, na_values=[''])
-    nm = dict(zip(ass.symbol, ass.name))
-    cmap = load_class_map()
-    uniq = sorted(s.symbol.astype(str).unique())
-    cls = {u: (cmap.get(u) or classify_asset(u, nm.get(u))) for u in uniq}
-    anc = {u: underlying_anchor(u, nm.get(u), cmap) for u in uniq}
+    if not _INST:
+        ass = pd.read_csv(f'{ROOT}/data/research/alpaca_assets_all_20260905.csv',
+                          dtype=str, keep_default_na=False, na_values=[''])
+        _INST['nm'] = dict(zip(ass.symbol, ass.name))
+        _INST['cmap'] = load_class_map()
+        _INST['cls'] = {}; _INST['anc'] = {}
+    nm, cmap = _INST['nm'], _INST['cmap']
+    cls, anc = _INST['cls'], _INST['anc']
+    for u in s.symbol.astype(str).unique():
+        if u not in cls:
+            cls[u] = cmap.get(u) or classify_asset(u, nm.get(u))
+            anc[u] = underlying_anchor(u, nm.get(u), cmap)
     s = s.copy()
     s['asset_class'] = s.symbol.map(cls)
     s['anchor'] = s.symbol.map(anc)

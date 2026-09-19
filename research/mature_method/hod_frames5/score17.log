@@ -1,0 +1,164 @@
+break rows 1188186 -> 1188186 | symbol-days 98203 | days 344
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+   B2 TRAIN n  1622 gross -0.039 net -0.107 total $-17,346
+   B2 VAL   n   706 gross +0.083 net +0.013 total $+893
+
+   exit-reason mix of the booked set: {'stop': np.int64(1162), 'eod': np.int64(686), 'target': np.int64(480)}
+   CARRIED (why == eod) share: TRAIN 27.9% | VAL 33.0%
+   daily panel: 337286 rows, 830 symbols, 2024-11-04 -> 2026-09-18
+
+== F17 CELLS ==
+| cell                                    | split | n     | /wk   | grossR | cost   | netR   |  t    | tc    | green | worst $  | total $   | MDD $    |
+|------|------|------|------|------|------|------|------|------|------|------|------|------|
+| F17-h0  15:55 flat [shipped, =B2]       | TRAIN |  1622 |  30.6 | -0.039 | +0.068 | -0.107 | -3.42 | -2.99 |  32.1 |    -2231 |    -17346 |   -18929 |
+| F17-h0  15:55 flat [shipped, =B2]       | VAL   |   706 |  30.7 | +0.083 | +0.070 | +0.013 | +0.27 | +0.26 |  43.5 |     -957 |       893 |    -2940 |
+    halves H1 -0.077 (n 789) | H2 -0.003 (n 833) | VAL +0.083 (n 706) -> same-signed POSITIVE in all three: False
+| F17-h1a  next OPEN                      | TRAIN |  1621 |  30.6 | -0.003 | +0.075 | -0.078 | -2.19 | -1.94 |  37.7 |    -3859 |    -12628 |   -15139 |
+| F17-h1a  next OPEN                      | VAL   |   706 |  30.7 | +0.035 | +0.079 | -0.044 | -0.82 | -0.76 |  34.8 |    -1946 |     -3090 |    -7059 |
+    halves H1 -0.043 (n 789) | H2 +0.036 (n 832) | VAL +0.035 (n 706) -> same-signed POSITIVE in all three: False
+| F17-h1b  next OPEN , prior-close stop   | TRAIN |  1621 |  30.6 | -0.003 | +0.075 | -0.078 | -2.19 | -1.94 |  37.7 |    -3859 |    -12628 |   -15139 |
+| F17-h1b  next OPEN , prior-close stop   | VAL   |   706 |  30.7 | +0.035 | +0.079 | -0.044 | -0.82 | -0.76 |  34.8 |    -1946 |     -3090 |    -7059 |
+    halves H1 -0.043 (n 789) | H2 +0.036 (n 832) | VAL +0.035 (n 706) -> same-signed POSITIVE in all three: False
+| F17-h2a  +1 session close               | TRAIN |  1621 |  30.6 | -0.062 | +0.075 | -0.137 | -3.57 | -3.22 |  35.8 |    -3519 |    -22246 |   -22955 |
+| F17-h2a  +1 session close               | VAL   |   706 |  30.7 | +0.114 | +0.079 | +0.035 | +0.57 | +0.54 |  43.5 |    -1638 |      2458 |    -5660 |
+    halves H1 -0.112 (n 789) | H2 -0.014 (n 832) | VAL +0.114 (n 706) -> same-signed POSITIVE in all three: False
+| F17-h2b  +1 session close , prior-close stop | TRAIN |  1621 |  30.6 | -0.026 | +0.075 | -0.101 | -2.81 | -2.50 |  35.8 |    -3920 |    -16362 |   -18432 |
+| F17-h2b  +1 session close , prior-close stop | VAL   |   706 |  30.7 | +0.058 | +0.079 | -0.021 | -0.36 | -0.33 |  39.1 |    -1999 |     -1450 |    -6801 |
+    halves H1 -0.073 (n 789) | H2 +0.019 (n 832) | VAL +0.058 (n 706) -> same-signed POSITIVE in all three: False
+| F17-h3a  +2 session close               | TRAIN |  1621 |  30.6 | -0.058 | +0.075 | -0.133 | -2.95 | -2.61 |  39.6 |    -4448 |    -21557 |   -22117 |
+| F17-h3a  +2 session close               | VAL   |   706 |  30.7 | +0.067 | +0.079 | -0.012 | -0.15 | -0.14 |  34.8 |    -2876 |      -830 |    -9878 |
+    halves H1 -0.117 (n 789) | H2 -0.001 (n 832) | VAL +0.067 (n 706) -> same-signed POSITIVE in all three: False
+| F17-h3b  +2 session close , prior-close stop | TRAIN |  1621 |  30.6 | -0.028 | +0.075 | -0.103 | -2.84 | -2.46 |  37.7 |    -3995 |    -16674 |   -18895 |
+| F17-h3b  +2 session close , prior-close stop | VAL   |   706 |  30.7 | +0.041 | +0.079 | -0.038 | -0.68 | -0.62 |  34.8 |    -1999 |     -2705 |    -7456 |
+    halves H1 -0.083 (n 789) | H2 +0.025 (n 832) | VAL +0.041 (n 706) -> same-signed POSITIVE in all three: False
+| F17-h5a  +5 session close               | TRAIN |  1621 |  30.6 | -0.043 | +0.075 | -0.119 | -2.03 | -1.77 |  41.5 |    -4729 |    -19261 |   -19648 |
+| F17-h5a  +5 session close               | VAL   |   706 |  30.7 | +0.051 | +0.079 | -0.027 | -0.26 | -0.25 |  43.5 |    -4692 |     -1936 |   -12109 |
+    halves H1 -0.070 (n 789) | H2 -0.018 (n 832) | VAL +0.051 (n 706) -> same-signed POSITIVE in all three: False
+| F17-h5b  +5 session close , prior-close stop | TRAIN |  1621 |  30.6 | -0.032 | +0.075 | -0.108 | -3.01 | -2.61 |  37.7 |    -3995 |    -17436 |   -19363 |
+| F17-h5b  +5 session close , prior-close stop | VAL   |   706 |  30.7 | +0.037 | +0.079 | -0.042 | -0.74 | -0.68 |  34.8 |    -1999 |     -2931 |    -7616 |
+    halves H1 -0.084 (n 789) | H2 +0.017 (n 832) | VAL +0.037 (n 706) -> same-signed POSITIVE in all three: False
+
+   price-scale / coverage drops (carried rows removed, PREREG rail 10):
+     F17-h1a  next OPEN: dropped 1 of 686 carried rows (0.1%)
+     F17-h1b  next OPEN , prior-close stop: dropped 1 of 686 carried rows (0.1%)
+     F17-h2a  +1 session close: dropped 1 of 686 carried rows (0.1%)
+     F17-h2b  +1 session close , prior-close stop: dropped 1 of 686 carried rows (0.1%)
+     F17-h3a  +2 session close: dropped 1 of 686 carried rows (0.1%)
+     F17-h3b  +2 session close , prior-close stop: dropped 1 of 686 carried rows (0.1%)
+     F17-h5a  +5 session close: dropped 1 of 686 carried rows (0.1%)
+     F17-h5b  +5 session close , prior-close stop: dropped 1 of 686 carried rows (0.1%)
+
+== net R per trade AND per calendar day held ==
+| cell | split | n | net R | mean days held | net R per day | gross R |
+|------|------|------|------|------|------|------|
+| F17-h0  15:55 flat [shipped, =B2] | TRAIN | 1622 | -0.107 | 0.00 | -0.1069 | -0.039 |
+| F17-h0  15:55 flat [shipped, =B2] | VAL | 706 | +0.013 | 0.00 | +0.0127 | +0.083 |
+| F17-h1a  next OPEN | TRAIN | 1621 | -0.078 | 0.28 | -0.0779 | -0.003 |
+| F17-h1a  next OPEN | VAL | 706 | -0.044 | 0.33 | -0.0438 | +0.035 |
+| F17-h1b  next OPEN , prior-close stop | TRAIN | 1621 | -0.078 | 0.28 | -0.0779 | -0.003 |
+| F17-h1b  next OPEN , prior-close stop | VAL | 706 | -0.044 | 0.33 | -0.0438 | +0.035 |
+| F17-h2a  +1 session close | TRAIN | 1621 | -0.137 | 0.28 | -0.1372 | -0.062 |
+| F17-h2a  +1 session close | VAL | 706 | +0.035 | 0.33 | +0.0348 | +0.114 |
+| F17-h2b  +1 session close , prior-close stop | TRAIN | 1621 | -0.101 | 0.28 | -0.1009 | -0.026 |
+| F17-h2b  +1 session close , prior-close stop | VAL | 706 | -0.021 | 0.33 | -0.0205 | +0.058 |
+| F17-h3a  +2 session close | TRAIN | 1621 | -0.133 | 0.56 | -0.1330 | -0.058 |
+| F17-h3a  +2 session close | VAL | 706 | -0.012 | 0.66 | -0.0118 | +0.067 |
+| F17-h3b  +2 session close , prior-close stop | TRAIN | 1621 | -0.103 | 0.33 | -0.1029 | -0.028 |
+| F17-h3b  +2 session close , prior-close stop | VAL | 706 | -0.038 | 0.38 | -0.0383 | +0.041 |
+| F17-h5a  +5 session close | TRAIN | 1621 | -0.119 | 1.39 | -0.0852 | -0.043 |
+| F17-h5a  +5 session close | VAL | 706 | -0.027 | 1.65 | -0.0166 | +0.051 |
+| F17-h5b  +5 session close , prior-close stop | TRAIN | 1621 | -0.108 | 0.34 | -0.1076 | -0.032 |
+| F17-h5b  +5 session close , prior-close stop | VAL | 706 | -0.042 | 0.39 | -0.0415 | +0.037 |
+
+== F17-D1  the two-cohort diagnostic (day_range_pct >= 10 % vs the rest) ==
+| cell | split | mover n | mover gross | mover net | quiet n | quiet gross | quiet net |
+|------|------|------|------|------|------|------|------|
+| F17-h0  15:55 flat [shipped, =B2] | TRAIN | 1033 | +0.262 | +0.196 | 589 | -0.567 | -0.639 |
+| F17-h0  15:55 flat [shipped, =B2] | VAL | 469 | +0.360 | +0.293 | 237 | -0.466 | -0.543 |
+| F17-h1a  next OPEN | TRAIN | 1032 | +0.293 | +0.220 | 589 | -0.520 | -0.600 |
+| F17-h1a  next OPEN | VAL | 469 | +0.323 | +0.248 | 237 | -0.536 | -0.621 |
+| F17-h1b  next OPEN , prior-close stop | TRAIN | 1032 | +0.293 | +0.220 | 589 | -0.520 | -0.600 |
+| F17-h1b  next OPEN , prior-close stop | VAL | 469 | +0.323 | +0.248 | 237 | -0.536 | -0.621 |
+| F17-h2a  +1 session close | TRAIN | 1032 | +0.238 | +0.165 | 589 | -0.587 | -0.667 |
+| F17-h2a  +1 session close | VAL | 469 | +0.404 | +0.328 | 237 | -0.460 | -0.545 |
+| F17-h2b  +1 session close , prior-close stop | TRAIN | 1032 | +0.271 | +0.199 | 589 | -0.546 | -0.626 |
+| F17-h2b  +1 session close , prior-close stop | VAL | 469 | +0.347 | +0.271 | 237 | -0.513 | -0.598 |
+| F17-h3a  +2 session close | TRAIN | 1032 | +0.240 | +0.167 | 589 | -0.578 | -0.658 |
+| F17-h3a  +2 session close | VAL | 469 | +0.372 | +0.297 | 237 | -0.537 | -0.622 |
+| F17-h3b  +2 session close , prior-close stop | TRAIN | 1032 | +0.279 | +0.206 | 589 | -0.565 | -0.644 |
+| F17-h3b  +2 session close , prior-close stop | VAL | 469 | +0.326 | +0.251 | 237 | -0.525 | -0.610 |
+| F17-h5a  +5 session close | TRAIN | 1032 | +0.262 | +0.190 | 589 | -0.580 | -0.659 |
+| F17-h5a  +5 session close | VAL | 469 | +0.250 | +0.175 | 237 | -0.342 | -0.427 |
+| F17-h5b  +5 session close , prior-close stop | TRAIN | 1032 | +0.276 | +0.204 | 589 | -0.573 | -0.653 |
+| F17-h5b  +5 session close , prior-close stop | VAL | 469 | +0.322 | +0.246 | 237 | -0.526 | -0.611 |
+
+== F17-D2  the WRAPPER DECAY, measured (not assumed) ==
+   wrapper-days measured: 38926 over 119 wrappers
+   mean daily drag (wrapper log-ret MINUS lev x underlying log-ret): -0.2423 %/day  (median -0.1821, sd 8.547)
+     lev -2.0: n 5174  mean drag -0.4280 %/day
+     lev -1.5: n 430  mean drag +0.1008 %/day
+     lev -1.0: n 860  mean drag +0.0081 %/day
+     lev +2.0: n 32032  mean drag -0.2331 %/day
+     lev +3.0: n 430  mean drag +0.4618 %/day
+   median R of a booked wrapper: 2.91 % of price -> the measured drag is 0.083 R per calendar day held.
+   NOTE: every multi-day cell above is priced from the WRAPPER'S OWN daily bars, so this drag is ALREADY inside those numbers; it is measured here to prove it is not being netted out.
+
+== count-matched permutation nulls (2,000 draws, pick count held fixed) ==
+| cell | split | green % | null mean | null p5 | null p95 | verdict |
+|---|---|---|---|---|---|---|
+| F17-h0  15:55 flat [shipped, =B2] | TRAIN | 32.1 | 30.8 | 24.5 | 37.7 | inside |
+| F17-h0  15:55 flat [shipped, =B2] | VAL | 43.5 | 49.5 | 39.1 | 60.9 | inside |
+| F17-h1a  next OPEN | TRAIN | 37.7 | 36.9 | 30.2 | 43.4 | inside |
+| F17-h1a  next OPEN | VAL | 34.8 | 41.0 | 30.4 | 52.2 | inside |
+| F17-h1b  next OPEN , prior-close stop | TRAIN | 37.7 | 36.9 | 30.2 | 43.4 | inside |
+| F17-h1b  next OPEN , prior-close stop | VAL | 34.8 | 41.0 | 30.4 | 52.2 | inside |
+| F17-h2a  +1 session close | TRAIN | 35.8 | 29.7 | 22.6 | 35.8 | inside |
+| F17-h2a  +1 session close | VAL | 43.5 | 51.7 | 43.5 | 60.9 | inside |
+| F17-h2b  +1 session close , prior-close stop | TRAIN | 35.8 | 33.5 | 26.4 | 39.6 | inside |
+| F17-h2b  +1 session close , prior-close stop | VAL | 39.1 | 44.4 | 34.8 | 52.2 | inside |
+| F17-h3a  +2 session close | TRAIN | 39.6 | 32.4 | 26.4 | 39.6 | inside |
+| F17-h3a  +2 session close | VAL | 34.8 | 45.4 | 34.8 | 56.5 | inside |
+| F17-h3b  +2 session close , prior-close stop | TRAIN | 37.7 | 33.3 | 26.4 | 39.6 | inside |
+| F17-h3b  +2 session close , prior-close stop | VAL | 34.8 | 41.7 | 30.4 | 52.2 | inside |
+| F17-h5a  +5 session close | TRAIN | 41.5 | 36.5 | 30.2 | 43.4 | inside |
+| F17-h5a  +5 session close | VAL | 43.5 | 42.6 | 34.8 | 52.2 | inside |
+| F17-h5b  +5 session close , prior-close stop | TRAIN | 37.7 | 32.5 | 26.4 | 39.6 | inside |
+| F17-h5b  +5 session close , prior-close stop | VAL | 34.8 | 41.3 | 30.4 | 52.2 | inside |
+
+null summary: {'inside': 18}
+
+cells -> /home/ec2-user/onemil/research/mature_method/hod_frames5/cells17.csv  (18 rows)
+
+== MDE and the tail ==
+| cell | split | n | net | MDE | ex-top5% | ex-top1% |
+|------|------|------|------|------|------|------|
+| F17-h0  15:55 flat [shipped, =B2] | TRAIN | 1622 | -0.107 | 0.088 | -0.218 | -0.129 |
+| F17-h0  15:55 flat [shipped, =B2] | VAL | 706 | +0.013 | 0.132 | -0.093 | -0.010 |
+| F17-h1a  next OPEN | TRAIN | 1621 | -0.078 | 0.100 | -0.216 | -0.123 |
+| F17-h1a  next OPEN | VAL | 706 | -0.044 | 0.149 | -0.164 | -0.076 |
+| F17-h1b  next OPEN , prior-close stop | TRAIN | 1621 | -0.078 | 0.100 | -0.216 | -0.123 |
+| F17-h1b  next OPEN , prior-close stop | VAL | 706 | -0.044 | 0.149 | -0.164 | -0.076 |
+| F17-h2a  +1 session close | TRAIN | 1621 | -0.137 | 0.108 | -0.301 | -0.194 |
+| F17-h2a  +1 session close | VAL | 706 | +0.035 | 0.172 | -0.167 | -0.028 |
+| F17-h2b  +1 session close , prior-close stop | TRAIN | 1621 | -0.101 | 0.101 | -0.247 | -0.153 |
+| F17-h2b  +1 session close , prior-close stop | VAL | 706 | -0.021 | 0.160 | -0.183 | -0.080 |
+| F17-h3a  +2 session close | TRAIN | 1621 | -0.133 | 0.126 | -0.343 | -0.215 |
+| F17-h3a  +2 session close | VAL | 706 | -0.012 | 0.217 | -0.281 | -0.112 |
+| F17-h3b  +2 session close , prior-close stop | TRAIN | 1621 | -0.103 | 0.101 | -0.254 | -0.159 |
+| F17-h3b  +2 session close , prior-close stop | VAL | 706 | -0.038 | 0.157 | -0.196 | -0.093 |
+| F17-h5a  +5 session close | TRAIN | 1621 | -0.119 | 0.164 | -0.432 | -0.240 |
+| F17-h5a  +5 session close | VAL | 706 | -0.027 | 0.292 | -0.415 | -0.189 |
+| F17-h5b  +5 session close , prior-close stop | TRAIN | 1621 | -0.108 | 0.100 | -0.254 | -0.160 |
+| F17-h5b  +5 session close , prior-close stop | VAL | 706 | -0.042 | 0.156 | -0.196 | -0.094 |
+
+== overnight risk actually taken (carried rows only) ==
+   F17-h1a  next OPEN: carried 685 | worst single trade -9.07 R | best +6.04 R | share worse than -1R (the intraday stop) 6.6%
+   F17-h1b  next OPEN , prior-close stop: carried 685 | worst single trade -9.07 R | best +6.04 R | share worse than -1R (the intraday stop) 6.6%
+   F17-h2a  +1 session close: carried 685 | worst single trade -6.00 R | best +8.15 R | share worse than -1R (the intraday stop) 16.8%
+   F17-h2b  +1 session close , prior-close stop: carried 685 | worst single trade -9.07 R | best +8.15 R | share worse than -1R (the intraday stop) 6.6%
+   F17-h3a  +2 session close: carried 685 | worst single trade -9.20 R | best +12.12 R | share worse than -1R (the intraday stop) 25.3%
+   F17-h3b  +2 session close , prior-close stop: carried 685 | worst single trade -9.07 R | best +7.85 R | share worse than -1R (the intraday stop) 6.9%
+   F17-h5a  +5 session close: carried 685 | worst single trade -14.87 R | best +33.05 R | share worse than -1R (the intraday stop) 33.3%
+   F17-h5b  +5 session close , prior-close stop: carried 685 | worst single trade -9.07 R | best +7.85 R | share worse than -1R (the intraday stop) 6.9%
+
+DONE F17

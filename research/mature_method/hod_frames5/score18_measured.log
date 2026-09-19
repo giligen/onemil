@@ -1,0 +1,172 @@
+break rows 1188186 -> 1188186 | symbol-days 98203 | days 344
+  extra NBBO merged: measured break rows 12001 -> 19514
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+
+=== F18 (MEASURED cost arm) ===
+
+== F18-R2 availability audit: `asset_class` on the enlarged populations ==
+| population | rows | identified | miss on winners | miss on losers | gap | verdict |
+|------|------|------|------|------|------|------|
+| floor $5 | 14178 | 99.2% | 0.8% | 0.8% | 0.1 pp | ok |
+| floor $10 | 9850 | 99.4% | 0.6% | 0.5% | 0.1 pp | ok |
+| floor $20 | 6552 | 99.7% | 0.5% | 0.2% | 0.2 pp | ok |
+| floor $30 | 4596 | 99.7% | 0.5% | 0.2% | 0.3 pp | ok |
+| floor $50 | 2683 | 99.7% | 0.4% | 0.3% | 0.2 pp | ok |
+
+== F18-R1 the BASE GROSS of every population choice, at the SIGNAL level, before any admission rule ==
+| population | TRAIN n | TRAIN gross | TRAIN net | VAL n | VAL gross | VAL net | H1 gross | H2 gross | era-consistent |
+|------|------|------|------|------|------|------|------|------|------|
+| mixed  $20 (B2 population) | 4205 | +0.016 | -0.042 | 2347 | +0.031 | -0.032 | +0.011 | +0.023 | True |
+| mixed  $5 | 9061 | +0.001 | -0.065 | 5117 | +0.010 | -0.061 | +0.024 | -0.023 | False |
+| mixed  $10 | 6238 | +0.014 | -0.049 | 3612 | +0.008 | -0.061 | +0.022 | +0.006 | True |
+| mixed  $30 | 2941 | +0.017 | -0.042 | 1655 | +0.046 | -0.019 | +0.004 | +0.033 | True |
+| mixed  $50 | 1671 | +0.035 | -0.026 | 1012 | +0.041 | -0.024 | +0.036 | +0.034 | True |
+| WRAP   $20 | 1773 | +0.009 | -0.049 | 929 | +0.097 | +0.031 | -0.052 | +0.081 | False |
+| COMMON $20 | 2417 | +0.018 | -0.041 | 1411 | -0.012 | -0.073 | +0.055 | -0.027 | False |
+| WRAP   $5 | 2292 | +0.011 | -0.048 | 1604 | +0.113 | +0.045 | -0.047 | +0.072 | False |
+| COMMON $5 | 6685 | -0.005 | -0.073 | 3484 | -0.036 | -0.107 | +0.049 | -0.061 | False |
+| WRAP   $10 | 2108 | +0.023 | -0.036 | 1281 | +0.105 | +0.038 | -0.029 | +0.077 | False |
+| COMMON $10 | 4090 | +0.007 | -0.059 | 2316 | -0.044 | -0.113 | +0.048 | -0.039 | False |
+| WRAP   $30 | 1267 | +0.017 | -0.043 | 627 | +0.077 | +0.009 | -0.052 | +0.097 | False |
+| WRAP   $50 | 661 | -0.036 | -0.100 | 307 | +0.044 | -0.027 | -0.130 | +0.063 | False |
+| mixed  $20 gates OFF | 7625 | +0.003 | -0.153 | 4764 | -0.028 | -0.216 | +0.005 | +0.001 | False |
+| mixed  $20 frac_r 0.08 | 2341 | +0.001 | -0.035 | 1171 | +0.048 | +0.011 | -0.028 | +0.039 | False |
+| mixed  $20 frac_r 0.25 | 5621 | +0.010 | -0.072 | 3350 | +0.008 | -0.082 | +0.021 | -0.001 | False |
+| mixed  $20 frac_r 0.40 | 6498 | +0.006 | -0.098 | 3935 | -0.004 | -0.117 | +0.012 | -0.001 | False |
+
+== F18 CELLS (booked 12/day x 4 concurrent, the shipped slot rule) ==
+| cell                                    | split | n     | /wk   | grossR | cost   | netR   |  t    | tc    | green | worst $  | total $   | MDD $    |
+|------|------|------|------|------|------|------|------|------|------|------|------|------|
+| F18-base  mixed $20 [=B2]               | TRAIN |  1668 |  31.5 | -0.017 | +0.059 | -0.076 | -2.39 | -1.99 |  41.5 |    -2409 |    -12627 |   -15116 |
+| F18-base  mixed $20 [=B2]               | VAL   |   720 |  31.3 | +0.097 | +0.063 | +0.034 | +0.72 | +0.61 |  56.5 |    -1590 |      2427 |    -3899 |
+    halves H1 -0.041 (n 812) | H2 +0.006 (n 856) | VAL +0.097 (n 720) -> same-signed POSITIVE in all three: False
+| F18-p1  WRAPPERS ONLY $20               | TRAIN |  1141 |  21.5 | -0.009 | +0.059 | -0.068 | -1.70 | -1.31 |  35.8 |    -1501 |     -7746 |   -10098 |
+| F18-p1  WRAPPERS ONLY $20               | VAL   |   613 |  26.7 | +0.144 | +0.066 | +0.078 | +1.43 | +1.15 |  52.2 |    -1098 |      4805 |    -4368 |
+    halves H1 -0.095 (n 549) | H2 +0.072 (n 592) | VAL +0.144 (n 613) -> same-signed POSITIVE in all three: False
+| F18-p2  COMMON ONLY $20                 | TRAIN |  1299 |  24.5 | -0.019 | +0.058 | -0.077 | -2.18 | -1.88 |  35.8 |    -1553 |     -9998 |   -14555 |
+| F18-p2  COMMON ONLY $20                 | VAL   |   646 |  28.1 | +0.017 | +0.061 | -0.044 | -0.91 | -0.79 |  43.5 |    -1867 |     -2858 |    -4369 |
+    halves H1 +0.022 (n 595) | H2 -0.053 (n 704) | VAL +0.017 (n 646) -> same-signed POSITIVE in all three: False
+| F18-f5  mixed floor $5                  | TRAIN |  1895 |  35.8 | -0.039 | +0.061 | -0.100 | -3.51 | -3.24 |  32.1 |    -2714 |    -18954 |   -19478 |
+| F18-f5  mixed floor $5                  | VAL   |   778 |  33.8 | -0.035 | +0.065 | -0.100 | -2.33 | -1.95 |  34.8 |    -2451 |     -7818 |    -8603 |
+    halves H1 -0.064 (n 904) | H2 -0.017 (n 991) | VAL -0.035 (n 778) -> same-signed POSITIVE in all three: False
+| F18-f10  mixed floor $10                | TRAIN |  1839 |  34.7 | -0.036 | +0.060 | -0.096 | -3.26 | -2.80 |  34.0 |    -2436 |    -17658 |   -18670 |
+| F18-f10  mixed floor $10                | VAL   |   745 |  32.4 | +0.047 | +0.065 | -0.018 | -0.40 | -0.32 |  52.2 |    -1662 |     -1358 |    -5521 |
+    halves H1 -0.056 (n 880) | H2 -0.018 (n 959) | VAL +0.047 (n 745) -> same-signed POSITIVE in all three: False
+| F18-f30  mixed floor $30                | TRAIN |  1411 |  26.6 | +0.003 | +0.059 | -0.056 | -1.61 | -1.37 |  41.5 |    -1627 |     -7881 |    -9448 |
+| F18-f30  mixed floor $30                | VAL   |   696 |  30.3 | +0.096 | +0.065 | +0.031 | +0.63 | +0.56 |  56.5 |    -1483 |      2143 |    -3765 |
+    halves H1 -0.026 (n 677) | H2 +0.030 (n 734) | VAL +0.096 (n 696) -> same-signed POSITIVE in all three: False
+| F18-f50  mixed floor $50                | TRAIN |   991 |  18.7 | +0.013 | +0.061 | -0.048 | -1.17 | -1.01 |  37.7 |    -1572 |     -4797 |    -8398 |
+| F18-f50  mixed floor $50                | VAL   |   593 |  25.8 | +0.046 | +0.065 | -0.019 | -0.36 | -0.32 |  47.8 |    -1645 |     -1122 |    -4899 |
+    halves H1 -0.088 (n 423) | H2 +0.087 (n 568) | VAL +0.046 (n 593) -> same-signed POSITIVE in all three: False
+| F18-w5  WRAPPERS floor $5               | TRAIN |  1315 |  24.8 | -0.025 | +0.059 | -0.084 | -2.28 | -1.72 |  30.2 |    -1410 |    -11029 |   -12457 |
+| F18-w5  WRAPPERS floor $5               | VAL   |   700 |  30.4 | +0.116 | +0.066 | +0.050 | +1.00 | +0.78 |  52.2 |    -1525 |      3530 |    -5440 |
+    halves H1 -0.100 (n 616) | H2 +0.041 (n 699) | VAL +0.116 (n 700) -> same-signed POSITIVE in all three: False
+| F18-w10  WRAPPERS floor $10             | TRAIN |  1267 |  23.9 | -0.013 | +0.058 | -0.071 | -1.88 | -1.44 |  34.0 |    -1536 |     -8988 |   -10062 |
+| F18-w10  WRAPPERS floor $10             | VAL   |   665 |  28.9 | +0.143 | +0.066 | +0.077 | +1.48 | +1.11 |  56.5 |    -1324 |      5122 |    -5370 |
+    halves H1 -0.078 (n 590) | H2 +0.044 (n 677) | VAL +0.143 (n 665) -> same-signed POSITIVE in all three: False
+| F18-w30  WRAPPERS floor $30             | TRAIN |   881 |  16.6 | +0.013 | +0.062 | -0.049 | -1.08 | -0.87 |  45.3 |    -1462 |     -4340 |    -7006 |
+| F18-w30  WRAPPERS floor $30             | VAL   |   499 |  21.7 | +0.127 | +0.068 | +0.059 | +0.96 | +0.81 |  39.1 |     -754 |      2935 |    -2329 |
+    halves H1 -0.084 (n 415) | H2 +0.099 (n 466) | VAL +0.127 (n 499) -> same-signed POSITIVE in all three: False
+| F18-w50  WRAPPERS floor $50             | TRAIN |   490 |   9.2 | -0.055 | +0.067 | -0.121 | -1.99 | -1.59 |  34.0 |    -1077 |     -5950 |    -6404 |
+| F18-w50  WRAPPERS floor $50             | VAL   |   283 |  12.3 | +0.068 | +0.071 | -0.003 | -0.03 | -0.03 |  34.8 |     -915 |       -77 |    -2759 |
+    halves H1 -0.225 (n 201) | H2 +0.064 (n 289) | VAL +0.068 (n 283) -> same-signed POSITIVE in all three: False
+| F18-s08  spread <= 8% of R              | TRAIN |  1321 |  24.9 | -0.060 | +0.037 | -0.097 | -2.81 | -2.37 |  32.1 |    -1603 |    -12801 |   -13353 |
+| F18-s08  spread <= 8% of R              | VAL   |   610 |  26.5 | +0.092 | +0.039 | +0.054 | +1.07 | +0.95 |  47.8 |     -947 |      3274 |    -3009 |
+    halves H1 -0.097 (n 648) | H2 -0.024 (n 673) | VAL +0.092 (n 610) -> same-signed POSITIVE in all three: False
+| F18-s25  spread <= 25% of R             | TRAIN |  1854 |  35.0 | -0.030 | +0.079 | -0.109 | -3.61 | -3.10 |  37.7 |    -2595 |    -20170 |   -20170 |
+| F18-s25  spread <= 25% of R             | VAL   |   791 |  34.4 | +0.031 | +0.090 | -0.059 | -1.30 | -1.20 |  43.5 |    -1905 |     -4663 |    -6758 |
+    halves H1 -0.058 (n 883) | H2 -0.004 (n 971) | VAL +0.031 (n 791) -> same-signed POSITIVE in all three: False
+| F18-s40  spread <= 40% of R             | TRAIN |  1989 |  37.5 | -0.060 | +0.102 | -0.162 | -5.51 | -4.84 |  32.1 |    -2460 |    -32168 |   -32301 |
+| F18-s40  spread <= 40% of R             | VAL   |   843 |  36.7 | +0.025 | +0.110 | -0.085 | -1.89 | -1.56 |  34.8 |    -2066 |     -7133 |   -10348 |
+    halves H1 -0.092 (n 927) | H2 -0.031 (n 1062) | VAL +0.025 (n 843) -> same-signed POSITIVE in all three: False
+| F18-soff  both spread gates OFF         | TRAIN |  2013 |  38.0 | -0.055 | +0.151 | -0.206 | -6.95 | -6.19 |  30.2 |    -3297 |    -41514 |   -41514 |
+| F18-soff  both spread gates OFF         | VAL   |   870 |  37.8 | +0.010 | +0.175 | -0.165 | -3.64 | -2.99 |  26.1 |    -3149 |    -14383 |   -14909 |
+    halves H1 -0.066 (n 951) | H2 -0.046 (n 1062) | VAL +0.010 (n 870) -> same-signed POSITIVE in all three: False
+
+== count-matched permutation nulls (2,000 draws, pick count held fixed) ==
+| cell | split | green % | null mean | null p5 | null p95 | verdict |
+|---|---|---|---|---|---|---|
+| F18-base  mixed $20 [=B2] | TRAIN | 41.5 | 35.8 | 28.3 | 43.4 | inside |
+| F18-base  mixed $20 [=B2] | VAL | 56.5 | 53.1 | 43.5 | 61.1 | inside |
+| F18-p1  WRAPPERS ONLY $20 | TRAIN | 35.8 | 39.3 | 32.1 | 45.3 | inside |
+| F18-p1  WRAPPERS ONLY $20 | VAL | 52.2 | 59.0 | 47.8 | 69.6 | inside |
+| F18-p2  COMMON ONLY $20 | TRAIN | 35.8 | 36.7 | 30.2 | 43.4 | inside |
+| F18-p2  COMMON ONLY $20 | VAL | 43.5 | 39.8 | 30.4 | 47.8 | inside |
+| F18-f5  mixed floor $5 | TRAIN | 32.1 | 30.4 | 24.5 | 37.7 | inside |
+| F18-f5  mixed floor $5 | VAL | 34.8 | 29.2 | 17.4 | 39.1 | inside |
+| F18-f10  mixed floor $10 | TRAIN | 34.0 | 31.6 | 24.5 | 37.7 | inside |
+| F18-f10  mixed floor $10 | VAL | 52.2 | 43.8 | 34.8 | 52.2 | inside |
+| F18-f30  mixed floor $30 | TRAIN | 41.5 | 39.7 | 33.9 | 47.2 | inside |
+| F18-f30  mixed floor $30 | VAL | 56.5 | 52.4 | 43.5 | 65.2 | inside |
+| F18-f50  mixed floor $50 | TRAIN | 37.7 | 41.9 | 35.8 | 49.1 | inside |
+| F18-f50  mixed floor $50 | VAL | 47.8 | 44.2 | 34.8 | 52.2 | inside |
+| F18-w5  WRAPPERS floor $5 | TRAIN | 30.2 | 36.3 | 28.3 | 43.4 | inside |
+| F18-w5  WRAPPERS floor $5 | VAL | 52.2 | 55.2 | 43.5 | 65.2 | inside |
+| F18-w10  WRAPPERS floor $10 | TRAIN | 34.0 | 38.5 | 32.1 | 45.3 | inside |
+| F18-w10  WRAPPERS floor $10 | VAL | 56.5 | 59.4 | 47.8 | 69.6 | inside |
+| F18-w30  WRAPPERS floor $30 | TRAIN | 45.3 | 42.3 | 35.8 | 49.1 | inside |
+| F18-w30  WRAPPERS floor $30 | VAL | 39.1 | 55.3 | 43.5 | 65.2 | below |
+| F18-w50  WRAPPERS floor $50 | TRAIN | 34.0 | 35.5 | 28.3 | 41.5 | inside |
+| F18-w50  WRAPPERS floor $50 | VAL | 34.8 | 46.8 | 34.8 | 56.5 | inside |
+| F18-s08  spread <= 8% of R | TRAIN | 32.1 | 33.6 | 26.4 | 39.6 | inside |
+| F18-s08  spread <= 8% of R | VAL | 47.8 | 56.3 | 47.8 | 65.2 | inside |
+| F18-s25  spread <= 25% of R | TRAIN | 37.7 | 29.8 | 22.6 | 35.8 | ABOVE |
+| F18-s25  spread <= 25% of R | VAL | 43.5 | 36.8 | 26.1 | 47.8 | inside |
+| F18-s40  spread <= 40% of R | TRAIN | 32.1 | 21.8 | 15.1 | 28.3 | ABOVE |
+| F18-s40  spread <= 40% of R | VAL | 34.8 | 32.2 | 21.7 | 43.5 | inside |
+| F18-soff  both spread gates OFF | TRAIN | 30.2 | 16.8 | 11.3 | 22.6 | ABOVE |
+| F18-soff  both spread gates OFF | VAL | 26.1 | 20.6 | 13.0 | 30.4 | inside |
+
+null summary: {'inside': 26, 'ABOVE': 3, 'below': 1}
+
+cells -> /home/ec2-user/onemil/research/mature_method/hod_frames5/cells18_measured.csv  (30 rows)
+
+== MDE, the tail, and the cost actually paid ==
+| cell | split | n | /wk | net | MDE | ex-top5% | ex-top1% | cost R | imputed % |
+|------|------|------|------|------|------|------|------|------|------|
+| F18-base  mixed $20 [=B2] | TRAIN | 1668 | 31.5 | -0.076 | 0.089 | -0.185 | -0.097 | +0.059 | 0% |
+| F18-base  mixed $20 [=B2] | VAL | 720 | 31.3 | +0.034 | 0.131 | -0.069 | +0.012 | +0.063 | 0% |
+| F18-p1  WRAPPERS ONLY $20 | TRAIN | 1141 | 21.5 | -0.068 | 0.112 | -0.176 | -0.090 | +0.059 | 0% |
+| F18-p1  WRAPPERS ONLY $20 | VAL | 613 | 26.7 | +0.078 | 0.154 | -0.023 | +0.056 | +0.066 | 0% |
+| F18-p2  COMMON ONLY $20 | TRAIN | 1299 | 24.5 | -0.077 | 0.099 | -0.186 | -0.098 | +0.058 | 1% |
+| F18-p2  COMMON ONLY $20 | VAL | 646 | 28.1 | -0.044 | 0.136 | -0.153 | -0.067 | +0.061 | 1% |
+| F18-f5  mixed floor $5 | TRAIN | 1895 | 35.8 | -0.100 | 0.080 | -0.210 | -0.121 | +0.061 | 24% |
+| F18-f5  mixed floor $5 | VAL | 778 | 33.8 | -0.100 | 0.121 | -0.210 | -0.122 | +0.065 | 23% |
+| F18-f10  mixed floor $10 | TRAIN | 1839 | 34.7 | -0.096 | 0.082 | -0.205 | -0.118 | +0.060 | 13% |
+| F18-f10  mixed floor $10 | VAL | 745 | 32.4 | -0.018 | 0.127 | -0.126 | -0.040 | +0.065 | 14% |
+| F18-f30  mixed floor $30 | TRAIN | 1411 | 26.6 | -0.056 | 0.097 | -0.164 | -0.078 | +0.059 | 0% |
+| F18-f30  mixed floor $30 | VAL | 696 | 30.3 | +0.031 | 0.136 | -0.073 | +0.011 | +0.065 | 0% |
+| F18-f50  mixed floor $50 | TRAIN | 991 | 18.7 | -0.048 | 0.116 | -0.156 | -0.069 | +0.061 | 0% |
+| F18-f50  mixed floor $50 | VAL | 593 | 25.8 | -0.019 | 0.147 | -0.125 | -0.039 | +0.065 | 0% |
+| F18-w5  WRAPPERS floor $5 | TRAIN | 1315 | 24.8 | -0.084 | 0.103 | -0.193 | -0.106 | +0.059 | 2% |
+| F18-w5  WRAPPERS floor $5 | VAL | 700 | 30.4 | +0.050 | 0.141 | -0.051 | +0.031 | +0.066 | 8% |
+| F18-w10  WRAPPERS floor $10 | TRAIN | 1267 | 23.9 | -0.071 | 0.105 | -0.180 | -0.092 | +0.058 | 2% |
+| F18-w10  WRAPPERS floor $10 | VAL | 665 | 28.9 | +0.077 | 0.146 | -0.026 | +0.057 | +0.066 | 7% |
+| F18-w30  WRAPPERS floor $30 | TRAIN | 881 | 16.6 | -0.049 | 0.128 | -0.156 | -0.070 | +0.062 | 0% |
+| F18-w30  WRAPPERS floor $30 | VAL | 499 | 21.7 | +0.059 | 0.171 | -0.043 | +0.039 | +0.068 | 0% |
+| F18-w50  WRAPPERS floor $50 | TRAIN | 490 | 9.2 | -0.121 | 0.171 | -0.234 | -0.143 | +0.067 | 0% |
+| F18-w50  WRAPPERS floor $50 | VAL | 283 | 12.3 | -0.003 | 0.222 | -0.114 | -0.024 | +0.071 | 0% |
+| F18-s08  spread <= 8% of R | TRAIN | 1321 | 24.9 | -0.097 | 0.097 | -0.207 | -0.119 | +0.037 | 0% |
+| F18-s08  spread <= 8% of R | VAL | 610 | 26.5 | +0.054 | 0.140 | -0.050 | +0.031 | +0.039 | 0% |
+| F18-s25  spread <= 25% of R | TRAIN | 1854 | 35.0 | -0.109 | 0.084 | -0.219 | -0.131 | +0.079 | 1% |
+| F18-s25  spread <= 25% of R | VAL | 791 | 34.4 | -0.059 | 0.127 | -0.168 | -0.080 | +0.090 | 1% |
+| F18-s40  spread <= 40% of R | TRAIN | 1989 | 37.5 | -0.162 | 0.082 | -0.275 | -0.184 | +0.102 | 1% |
+| F18-s40  spread <= 40% of R | VAL | 843 | 36.7 | -0.085 | 0.125 | -0.195 | -0.107 | +0.110 | 1% |
+| F18-soff  both spread gates OFF | TRAIN | 2013 | 38.0 | -0.206 | 0.083 | -0.322 | -0.229 | +0.151 | 1% |
+| F18-soff  both spread gates OFF | VAL | 870 | 37.8 | -0.165 | 0.127 | -0.279 | -0.188 | +0.175 | 1% |
+
+== the already-there / arrived-after diagnostic (reported, never an exclusion) ==
+   F18-base  mixed $20 [=B2] TRAIN: already-wide n 184 gross -0.003 | arrived-after n 1484 gross -0.019
+   F18-base  mixed $20 [=B2] VAL: already-wide n 112 gross +0.089 | arrived-after n 608 gross +0.099
+   F18-p1  WRAPPERS ONLY $20 TRAIN: already-wide n 134 gross -0.015 | arrived-after n 1007 gross -0.008
+   F18-p1  WRAPPERS ONLY $20 VAL: already-wide n 111 gross +0.138 | arrived-after n 502 gross +0.146
+   F18-p2  COMMON ONLY $20 TRAIN: already-wide n 134 gross -0.075 | arrived-after n 1165 gross -0.012
+   F18-p2  COMMON ONLY $20 VAL: already-wide n 79 gross -0.114 | arrived-after n 567 gross +0.035
+
+   weekly dollar path — F18-p1  WRAPPERS ONLY $20 (live sizing, $100 risk)
+     TRAIN last 26 weeks: -521 -831 +39 -563 +310 -797 -586 +408 -725 +1343 +1529 +730 -821 +262 -836 -87 +202 -516 -216 +1892 +176 -357 +318 -478 -319 -469
+     TRAIN green 19/53  mean -146  worst -1501  best +1892  total -7746
+     VAL last 26 weeks: -201 +1666 -827 -437 -212 +157 +508 -1098 +153 -925 -421 -608 -659 +2332 +31 +1386 -396 +234 +896 +1643 +1011 +571 +0
+     VAL green 12/23  mean +209  worst -1098  best +2332  total +4805
+
+DONE F18 measured
