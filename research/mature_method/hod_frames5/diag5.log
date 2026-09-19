@@ -1,0 +1,63 @@
+== 0. LOAD ==
+break rows 1188186 -> 1188186 | symbol-days 98203 | days 344
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+first-break rows 98203
+IMPUTE cells: ['$10-20', '$100+', '$20-30', '$30-50', '$50-100']
+== 1. REPRODUCTION GATE ==
+  B2 TRAIN n  1622  30.6/wk gross -0.039 net -0.107 green 32.1% total $-17,346
+  B2 VAL   n   706  30.7/wk gross +0.083 net +0.013 green 43.5% total $+893
+  reference (hod_frames4 §0): TRAIN 1,622 / 30.6 / -0.039 / -0.107 / 32.1% / -$17,346  |  VAL 706 / 30.7 / +0.083 / +0.013 / 43.5% / +$893
+
+== 2. LIVE-vs-STUDY PARITY: what does the dry run admit? ==
+   config.yaml hod_break.min_price                = 20.0
+   config.yaml hod_break.universe_min_prev_close  = 15
+   config.yaml hod_break.max_spread_bps           = 100
+   config.yaml hod_break.max_spread_frac_r        = 0.15
+   config.yaml hod_break.max_per_day              = 12
+   config.yaml hod_break.max_concurrent           = 4
+   config.yaml hod_break.last_entry_minute        = 840
+   config.yaml hod_break.cap                      = 0.006
+   config.yaml hod_break.min_dist_open_pct        = 5.0
+   config.yaml hod_break.rv_lo                    = 1.0
+   config.yaml hod_break.rv_hi                    = 5.0
+   config.yaml hod_break.min_r_pct                = 1.0
+   config.yaml hod_break.consol_bars              = 5
+   config.yaml hod_break.consol_pct               = 0.04
+   config.yaml hod_break.risk_usd                 = 100
+   config.yaml hod_break.dry_run                  = True
+   study floor (next_open >= 20): 7027 pre-book signals
+   engine floor (level    >= 20): 7024 pre-book signals
+   overlap 7016  |  in engine-not-study 8  |  in study-not-engine 11
+
+== 3. F18 POPULATION SIZES (fetch budget) ==
+   floor $    5 frac_r 0.15  bps 100.0  -> pre-book   15897 booked   2726  imputed(book)  82.2%  unmeasured booked rows   2240
+   floor $    5 frac_r 0.08  bps 100.0  -> pre-book    5824 booked   2305  imputed(book)  70.8%  unmeasured booked rows   1632
+   floor $    5 frac_r 0.25  bps 100.0  -> pre-book   25008 booked   2940  imputed(book)  85.4%  unmeasured booked rows   2510
+   floor $    5 frac_r 0.4   bps 100.0  -> pre-book   30340 booked   3089  imputed(book)  85.2%  unmeasured booked rows   2631
+   floor $    5 frac_r None  bps None   -> pre-book   31976 booked   3120  imputed(book)  83.4%  unmeasured booked rows   2603
+   floor $   10 frac_r 0.15  bps 100.0  -> pre-book   11045 booked   2597  imputed(book)  73.2%  unmeasured booked rows   1902
+   floor $   10 frac_r 0.08  bps 100.0  -> pre-book    4177 booked   2087  imputed(book)  50.7%  unmeasured booked rows   1059
+   floor $   10 frac_r 0.25  bps 100.0  -> pre-book   16969 booked   2807  imputed(book)  76.5%  unmeasured booked rows   2148
+   floor $   10 frac_r 0.4   bps 100.0  -> pre-book   20599 booked   3018  imputed(book)  75.6%  unmeasured booked rows   2281
+   floor $   10 frac_r None  bps None   -> pre-book   22235 booked   3040  imputed(book)  73.7%  unmeasured booked rows   2239
+   floor $   20 frac_r 0.15  bps 100.0  -> pre-book    7027 booked   2328  imputed(book)  51.5%  unmeasured booked rows   1200
+   floor $   20 frac_r 0.08  bps 100.0  -> pre-book    3223 booked   1800  imputed(book)  31.2%  unmeasured booked rows    562
+   floor $   20 frac_r 0.25  bps 100.0  -> pre-book   10116 booked   2608  imputed(book)  53.9%  unmeasured booked rows   1407
+   floor $   20 frac_r 0.4   bps 100.0  -> pre-book   11899 booked   2815  imputed(book)  52.4%  unmeasured booked rows   1475
+   floor $   20 frac_r None  bps None   -> pre-book   13299 booked   2881  imputed(book)  50.0%  unmeasured booked rows   1441
+   floor $   30 frac_r 0.15  bps 100.0  -> pre-book    4827 booked   2025  imputed(book)  48.2%  unmeasured booked rows    977
+   floor $   30 frac_r 0.08  bps 100.0  -> pre-book    2116 booked   1326  imputed(book)  28.1%  unmeasured booked rows    372
+   floor $   30 frac_r 0.25  bps 100.0  -> pre-book    7094 booked   2346  imputed(book)  52.0%  unmeasured booked rows   1219
+   floor $   30 frac_r 0.4   bps 100.0  -> pre-book    8414 booked   2571  imputed(book)  51.1%  unmeasured booked rows   1313
+   floor $   30 frac_r None  bps None   -> pre-book    9397 booked   2663  imputed(book)  48.1%  unmeasured booked rows   1282
+   floor $   50 frac_r 0.15  bps 100.0  -> pre-book    2804 booked   1489  imputed(book)  45.3%  unmeasured booked rows    674
+   floor $   50 frac_r 0.08  bps 100.0  -> pre-book    1170 booked    801  imputed(book)  28.3%  unmeasured booked rows    227
+   floor $   50 frac_r 0.25  bps 100.0  -> pre-book    4144 booked   1889  imputed(book)  50.2%  unmeasured booked rows    949
+   floor $   50 frac_r 0.4   bps 100.0  -> pre-book    4956 booked   2095  imputed(book)  50.6%  unmeasured booked rows   1061
+   floor $   50 frac_r None  bps None   -> pre-book    5555 booked   2228  imputed(book)  47.4%  unmeasured booked rows   1055
+
+== 4. F17 HORIZON FEASIBILITY: daily-bar coverage for the booked set ==
+   booked symbols 830 | in daily_bars 830 (100.0%)
+   daily_bars span 2024-06-03 -> 2026-09-18
+
+DONE (no cell scored)
