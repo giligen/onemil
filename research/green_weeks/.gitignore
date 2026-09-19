@@ -1,0 +1,5 @@
+# The 12 per-candidate dumps are 5 MB each and fully reproducible from
+# orb_exits.py (one ~25 min walk, parity-asserted against Stage M's dump_X0.csv).
+# The per-cell BOOKS, which are what the report is built from, ARE committed.
+dump_*.csv
+__pycache__/

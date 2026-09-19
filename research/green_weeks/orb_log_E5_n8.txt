@@ -1,0 +1,65 @@
+BT config (B+ parity): account=$26,667 N=8 risk=$375 threshold=0.012081536791 pdr_veto>=11.0 g1(True, rv20>=7.106, pdr>=9.226, short_history_veto=False) range_size_veto(True, <= 2.221) book=research/green_weeks/orb_book_E5_n8.csv
+BT config (winner stack): atr_floor=ON k=0.25 scale_out=ON frac=0.4 level_r=3.0
+Features CSV: analysis_results/orb_features_20260916_2053.csv
+Opening range: 09:30 → 09:30+5m (ORB_RANGE_MINUTES; production = 5 — must match the window the features CSV was built with)
+RESIM CACHE: research/green_weeks/dump_E5.csv (13033 rows) — bar walk skipped; exit physics are the dump's (must match this run's config)
+Loading bars for 0 pairs...
+Winner stack: building ATR14 lookup (shared atr14_t1, cache daily_bars)...
+Winner stack: ATR14 available for 0/0 symbol-days (missing => floor fail-open to range_low)
+Re-simulating with winner-stack exit (static lock + ATR floor + scale-out)...
+Winner stack: floor bound on 0 resimmed rows; 0 rows scaled 40%@+3.0R (counts are pre-selection, whole candidate set)
+Z-params + quintile cutoffs: orb.yaml literals (LIVE PARITY)
+Mults (orb.yaml literals — LIVE PARITY): {'Q1': 1.0, 'Q2': 1.0, 'Q3': 1.0, 'Q4': 1.0, 'Q5': 1.0}
+Q1 filter: dropped 1454 Q1 candidates (set ORB_SKIP_Q1=0 to disable)
+PM sizing mult: DISABLED via orb.yaml (sizing.pm_dollar_vol_mult.enabled=false) — all mults 1.0
+PDR veto: dropped 1860 pick(s) with prev_day_range_pct <= 11.0 (their P&L would have been -16,853; set ORB_PDR_VETO=0 to disable)
+G1 veto: dropped 197 pick(s) failing the volatility fingerprint (rv20>=7.106 AND pdr>=9.226); their P&L would have been -17 (set ORB_G1_VETO=0 to disable)
+Range-size veto: dropped 69 pick(s) with range_size_pct <= 2.221 (their P&L would have been +469; set ORB_RANGE_SIZE_VETO=0 to disable)
+Catalyst veto: dropped 403 newsless-and-alone pick(s) (their P&L would have been +2,545; ORB_CATALYST_VETO=0 to disable)
+Entered-inclusive book: 215 picks = 162 filled + 53 no-fill (slot consumed, $0) — 75.3% fill rate; 0 no-fill rows in the candidate set
+
+ORB defended pipeline + STATIC_LOCK_1R — monthly P&L (Jan'25-Apr'26)
+
+  month  days  green  red  day_wr_pct  picks  best_day  worst_day   pnl  cum_pnl  intra_dd
+2025-01     6      2    2          33      7       600       -226   565      565      -226
+2025-02     8      2    3          25      9       574       -161   501    1,065      -161
+2025-03     4      2    1          50      5       314         -3   392    1,457         0
+2025-04     3      1    1          33      3       179         -3   176    1,633         0
+2025-05     4      2    2          50      6     1,232       -127 1,347    2,981       -86
+2025-06     6      1    4          17     11       234       -170   -32    2,949      -207
+2025-07     6      2    2          33      6        94        -13   151    3,100       -17
+2025-08     3      1    1          33      3       158        -95    63    3,163       -95
+2025-09     9      2    6          22     16       868       -220   502    3,665      -382
+2025-10     6      2    2          33     10       652        -16   655    4,320       -15
+2025-11     7      2    4          29     14       504       -223   150    4,470      -392
+2025-12     9      1    6          11     15       551       -257   117    4,587      -260
+2026-01     8      1    6          12     12        15       -263  -550    4,037      -562
+2026-02     9      3    3          33     13       743       -338 1,229    5,266      -350
+2026-03     8      3    4          38      9     1,883       -124 3,935    9,201      -158
+2026-04    12      2    6          17     13       498       -118   307    9,508      -254
+2026-05     5      0    4           0      6         0       -133  -190    9,317      -190
+2026-06    11      4    3          36     16       218       -239   292    9,609      -239
+2026-07    12      5    6          42     20       901       -282   818   10,427      -515
+2026-08    12      3    4          25     17       701       -121   723   11,150      -169
+2026-09     4      0    3           0      4         0        -26   -44   11,106       -41
+
+======================================================================
+Negative months
+======================================================================
+  2025-06  $-32  (6 days, 1G/4R, worst day $-170)
+  2026-01  $-550  (8 days, 1G/6R, worst day $-263)
+  2026-05  $-190  (5 days, 0G/4R, worst day $-133)
+  2026-09  $-44  (4 days, 0G/3R, worst day $-26)
+
+======================================================================
+Summary (STATIC LOCK)
+======================================================================
+Months tracked:   21
+Negative months:  4 (19.0%)
+Best month:       2026-03  $+3,935
+Worst month:      2026-01  $-550
+Median month:     $+307
+Mean month:       $+529
+Cum P&L:          $+11,106
+
+Saved: research/green_weeks/orb_monthly_E5_n8.csv + research/green_weeks/orb_book_E5_n8.csv
