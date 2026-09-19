@@ -1,0 +1,5 @@
+# Regenerable, too large for git:
+#   pop.csv    (46 MB)  -> python3 prep_pop.py            ~1 min
+#   cands.csv  (95 MB)  -> python3 pass_r2g.py            ~15 min
+pop.csv
+cands.csv

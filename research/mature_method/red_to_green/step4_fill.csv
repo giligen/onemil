@@ -1,0 +1,13 @@
+scan,signals,filled,fill_rate,over_cap_bps_med,over_cap_bps_p90,split,pop,n,grossR,holdR,WR
+S1,7867.0,5734.0,72.9,67.0,296.0,,,,,,
+S1,,,,,,TRAIN,FILLED,3581.0,0.0555,0.0607,48.3
+S1,,,,,,TRAIN,UNFILLED cf,1325.0,-0.0122,-0.0005,40.9
+S1,,,,,,VAL,FILLED,2153.0,0.0484,0.0802,47.0
+S1,,,,,,VAL,UNFILLED cf,808.0,0.0507,0.0651,46.2
+S1,,,,,,,next-clock-minute share of fills,5734.0,86.1,,
+S2,24258.0,10073.0,41.5,162.0,382.0,,,,,,
+S2,,,,,,TRAIN,FILLED,6162.0,0.0648,0.0915,48.1
+S2,,,,,,TRAIN,UNFILLED cf,8689.0,0.1192,0.1652,49.9
+S2,,,,,,VAL,FILLED,3911.0,0.0191,0.0322,45.0
+S2,,,,,,VAL,UNFILLED cf,5496.0,0.0232,0.0401,45.8
+S2,,,,,,,next-clock-minute share of fills,10073.0,82.0,,

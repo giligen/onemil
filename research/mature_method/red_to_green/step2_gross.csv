@@ -1,0 +1,9 @@
+scan,population,split,n,tpw,grossR,se,t,MDE80,WR
+S1,every live-config signal,TRAIN,3581,67.6,0.0555,0.0136,4.09,0.038,48.3
+S1,the shipped 12/4 book,TRAIN,1125,21.2,0.1081,0.03,3.61,0.084,48.6
+S1,every live-config signal,VAL,2153,97.9,0.0484,0.0178,2.71,0.05,47.0
+S1,the shipped 12/4 book,VAL,604,27.5,0.1076,0.0428,2.51,0.12,49.5
+S2,every live-config signal,TRAIN,6162,116.3,0.0648,0.0118,5.47,0.033,48.1
+S2,the shipped 12/4 book,TRAIN,1597,30.1,0.0269,0.0277,0.97,0.078,43.5
+S2,every live-config signal,VAL,3911,177.8,0.0191,0.0148,1.29,0.041,45.0
+S2,the shipped 12/4 book,VAL,762,34.6,0.0013,0.0415,0.03,0.116,43.3

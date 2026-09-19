@@ -1,0 +1,56 @@
+## (a) REPRODUCTION GATE 2 - scan rule S1 vs the reconciliation ladder step L2 (an independent code path)
+L2 candidates 7755   this pass, L2 gates, honest population 7493
+shared 7489   L2-only 266   mine-only 4
+  |d sig_m   | max 0  n differing 0 of 7489
+  |d entry_m | max 0  n differing 0 of 7489
+  |d entry   | max 0  n differing 0 of 7489
+  |d stop    | max 0  n differing 0 of 7489
+  |d 2R gross R| max 5e-06  n differing 0
+  L2 applies 14:01 to the FILL bar and a $5 floor on the ENTRY; this pass applies 14:00 to the SIGNAL bar.
+
+## (b) cost models - the leg weights are the thing the verdict turns on
+measured, B0-eligible quotes n=241: full spread median 59.3 bps, direct (ask - modelled open fill) median 23.2 bps
+  -> the ENTRY leg actually costs 1.00 x half-spread; contract (c) charges 0.25 x half (4.0x too little)
+  share of B0-eligible sampled signals whose quoted spread exceeds the live max_spread_bps 300 gate: 8.7%
+  M1band = cost_curve.csv band, contract (c) legs (entry 0.25xhalf, stop/target 0.875, eod 0.412)
+  M2meas = measured NBBO curve, contract (c) legs           M3entry = M2 with the entry leg at the MEASURED 1.00 x half
+  M4live = M3 with the venue legs: TP is a resting limit (0), stop crosses (1.0), 15:55 flat (0.5)
+  M5cons = conservative bound: a full half-spread on BOTH legs
+   cost scan split    n  grossR    netR     t  green      tot   worst      mdd  greenmo
+ M1band   S1 TRAIN 1125  0.1081  0.0775  2.59   60.4   8713.0  -995.0  -1899.0     66.7
+ M1band   S1   VAL  604  0.1076  0.0740  1.73   86.4   4472.0 -1388.0  -2667.0    100.0
+ M1band   S2 TRAIN 1597  0.0269 -0.0198 -0.71   49.1  -3161.0 -1338.0  -4901.0     58.3
+ M1band   S2   VAL  762  0.0013 -0.0479 -1.15   54.5  -3647.0 -2481.0  -4996.0     20.0
+ M2meas   S1 TRAIN 1125  0.1081  0.0543  1.81   58.5   6107.0 -1046.0  -2015.0     66.7
+ M2meas   S1   VAL  604  0.1076  0.0510  1.20   77.3   3083.0 -1503.0  -2838.0     80.0
+ M2meas   S2 TRAIN 1597  0.0269 -0.0553 -1.98   39.6  -8833.0 -1445.0  -9883.0     16.7
+ M2meas   S2   VAL  762  0.0013 -0.0826 -1.98   54.5  -6295.0 -2684.0  -7314.0     20.0
+M3entry   S1 TRAIN 1125  0.1081  0.0109  0.36   47.2   1231.0 -1145.0  -2221.0     50.0
+M3entry   S1   VAL  604  0.1076  0.0059  0.14   54.5    354.0 -1682.0  -3297.0     40.0
+M3entry   S2 TRAIN 1597  0.0269 -0.1174 -4.18   30.2 -18750.0 -1671.0 -18825.0      0.0
+M3entry   S2   VAL  762  0.0013 -0.1462 -3.49   31.8 -11137.0 -2983.0 -11578.0      0.0
+ M4live   S1 TRAIN 1125  0.1081  0.0176  0.57   50.9   1976.0 -1146.0  -2230.0     50.0
+ M4live   S1   VAL  604  0.1076  0.0137  0.31   54.5    829.0 -1678.0  -3276.0     40.0
+ M4live   S2 TRAIN 1597  0.0269 -0.1074 -3.72   32.1 -17152.0 -1692.0 -17281.0      8.3
+ M4live   S2   VAL  762  0.0013 -0.1372 -3.19   36.4 -10453.0 -2983.0 -10981.0     20.0
+ M5cons   S1 TRAIN 1125  0.1081 -0.0074 -0.25   43.4   -835.0 -1183.0  -2344.0     50.0
+ M5cons   S1   VAL  604  0.1076 -0.0129 -0.30   54.5   -782.0 -1746.0  -3546.0     40.0
+ M5cons   S2 TRAIN 1597  0.0269 -0.1387 -4.95   26.4 -22156.0 -1742.0 -22216.0      0.0
+ M5cons   S2   VAL  762  0.0013 -0.1681 -4.02   31.8 -12812.0 -3070.0 -13023.0      0.0
+
+## (c) the S1 B0 dollar path at the live $100 risk (measured NBBO, contract c)
+TRAIN weekly $ (n): +0(0) +364(5) -912(23) +64(20) -275(20) +778(13) -77(23) -279(15) +783(26) +704(27) -946(18) -218(23) +129(16) -346(29) +1046(33) +184(17) +103(15) +158(19) +685(25) -411(20) +794(24) -594(14) -178(22) -517(24) +11(18) +827(22) -113(17) +821(31) +275(19) +440(23) -31(21) +22(28) +995(23) +32(22) +51(14) +71(17) +1289(23) +412(20) -145(25) +335(21) -89(24) -382(30) +124(26) -444(23) +397(27) -24(26) -184(28) +767(19) +1052(29) +569(26) -1046(25) +9(14) -977(13)
+TRAIN monthly $: 2025-01 -758 | 2025-02 +1204 | 2025-03 -413 | 2025-04 +1530 | 2025-05 +171 | 2025-06 +87 | 2025-07 +1110 | 2025-08 +1439 | 2025-09 +1740 | 2025-10 -569 | 2025-11 +955 | 2025-12 -392
+  green 31/53 weeks, 8/12 months, total +6106, mean month +508
+VAL weekly $ (n): +33(3) -9(31) +299(24) +958(24) -1503(36) -1325(31) -9(31) +456(21) +1001(28) +400(34) +128(29) +404(27) -1259(29) +1161(21) +201(29) +955(28) +167(24) +95(30) +50(29) +71(37) +80(34) +723(24)
+VAL monthly $: 2026-01 -220 | 2026-02 +122 | 2026-03 +222 | 2026-04 +1773 | 2026-05 +1185
+  green 17/22 weeks, 4/5 months, total +3082, mean month +616
+
+## (d) TEST - opened ONLY for the two cells that passed BOTH claim gates (FREEZE.md)
+cell scan split    n  grossR    netR     t  green     tot   worst     mdd  greenmo  tpw
+  P4   S1 TRAIN  932  0.1190  0.0696  2.09   56.6  6485.0  -944.0 -1744.0     66.7 17.6
+  P4   S1   VAL  544  0.0819  0.0303  0.68   63.6  1648.0 -1134.0 -1584.0     60.0 24.7
+  P4   S1  TEST  388 -0.0015 -0.0571 -1.06   35.7 -2217.0  -912.0 -2527.0     50.0 27.7
+ G1c   S1 TRAIN 1014  0.1146  0.0664  2.15   56.6  6732.0  -989.0 -1589.0     75.0 19.1
+ G1c   S1   VAL  567  0.0964  0.0441  1.01   68.2  2501.0 -1157.0 -1561.0     80.0 25.8
+ G1c   S1  TEST  388 -0.0178 -0.0713 -1.40   28.6 -2768.0 -1065.0 -3219.0     25.0 27.7
