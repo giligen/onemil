@@ -451,7 +451,17 @@ trading:
   # OOS improvement: H2 +$8K, Q1 +$33K (Q1 from -$41K to -$9K)
   conviction_scoring:
     enabled: true                      # V4 model: scales risk_per_trade via planner (not shares post-hoc)
-    min_threshold: 1.8                 # Skip trades when conviction_mult < this (0.0 = filter disabled)
+    min_threshold: 0.0                 # Skip trades when conviction_mult < this (0.0 = filter disabled)
+    # 2026-09-19 1.8 -> 0.0, BULL FLAG ONLY. The gate cut 57% of everything
+    # surviving the earlier filters and two studies agree it gates on NOISE:
+    # separation +0.205R at t 0.96 (research/bf_frequency), and
+    # rho(conviction, realized R) = -0.022 / -0.063, NEGATIVE both years
+    # (research/bf_sizing) -- the +0.205 was a tail artefact, not a ranking.
+    # With the ADV gate also dropped this is frontier cell F7: 4.2x trades,
+    # green weeks 30.2 -> 52.8, flat weeks 56.6 -> 9.4, worst month 3.1x
+    # better, zero red months on VAL. Disclosed cost: the sealed TEST quarter
+    # ran -$28,284 vs P1's +$52 (sizing, not selection -- both edgeless in R).
+    # Pre-committed stop: 5 consecutive red weeks live = revert to 1.8.
                                         # 2026-07-03: 1.4 -> 1.8 (thin-supply junk guard; 2026 BT +74%;
                                         # research/money_machine_audit_jul2026.md #8)
                                         # V2_clean (2026-04-15): 1.4 lifts canonical 16mo +$52K (+15.5%)
