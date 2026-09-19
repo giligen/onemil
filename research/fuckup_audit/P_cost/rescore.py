@@ -56,7 +56,12 @@ SCALE_FRAC = 0.40
 SCALE_LEVEL_R = 3.0
 RATIO = {'stop': 0.875, 'lock': 0.875, 'scale_stop': 0.875, 'scale_lock': 0.875,
          'eod': 0.412, 'scale_eod': 0.412, 'tag_bb': 0.875, 'tag_b1': 0.875}
-ENTRY_COEF = 0.25
+# 2026-09-19: corrected 0.25 -> 1.00.  The entry leg pays a FULL half-spread -- a buy that
+# elects at a level lifts the offer (measured: red_to_green/REPORT.md §3,
+# mature_method/entry_cost_audit/REPORT.md).  Only the `band` comparison arm uses this; the
+# `measured` arm was never a contract and is unaffected.
+ENTRY_COEF = 1.00
+LEGACY_ENTRY_COEF = 0.25   # reproduce-only: the pre-2026-09-19 contract
 ARMS = ('asis', 'zero', 'measured', 'strict', 'band')
 
 

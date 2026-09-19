@@ -6,7 +6,13 @@ Contracts (all in R units; half = 0.5 * spread_pct / max(r_pct, 0.05)):
   b  score4  : spread = the candidate's banded spread_pct (1.90/1.20/0.80/0.60/0.50 %)
                net = rr - half - half*{stop:.875, eod:.412, target:0}[why]
   c  corrected: spread = median signal-minute NBBO of THIS population per (price band x time band), cost_curve.csv
-               net = rr - 0.25*half_c - half_c*{stop:.875, eod:.412, target:.875}[why]
+               net = rr - ENTRY_COEF_C*half_c - half_c*{stop:.875, eod:.412, target:.875}[why]
+               ENTRY_COEF_C was 0.25 until 2026-09-19 on the theory that a next-bar-open fill is an
+               already-printed price and pays only a quarter of a half-spread.  MEASURED
+               (research/mature_method/red_to_green/REPORT.md §3, and re-confirmed on bull-flag
+               entries in research/mature_method/entry_cost_audit/REPORT.md): the obtainable price
+               at the election instant IS THE ASK -- 1.00 x half-spread.  The coefficient is now
+               1.00.  LEGACY_ENTRY_COEF_C reproduces the superseded reports.
   c' corrected, resting take-profit leg: as c but target pays 0
   d  = c  restricted to candidates with spread_pct_c / r_pct <= 0.15 (the live liquidity gate), applied BEFORE the book
   d' = c' restricted the same way
@@ -27,7 +33,11 @@ HB_EDGES = [569, 575, 600, 660, 780, 960]
 HB_LAB = ['09:30-09:35', '09:35-10:00', '10:00-11:00', '11:00-13:00', '13:00+']
 RATIO_B = {'stop': 0.875, 'eod': 0.412, 'target': 0.0}
 RATIO_C = {'stop': 0.875, 'eod': 0.412, 'target': 0.875}
-ENTRY_COEF_C = 0.25
+# The entry leg pays a FULL half-spread: a buy that elects at a level lifts the offer.
+# Measured, not assumed -- see the docstring.  Changing this supersedes every report that
+# was scored with the legacy value (listed in the entry_cost_audit REPORT).
+ENTRY_COEF_C = 1.00
+LEGACY_ENTRY_COEF_C = 0.25   # reproduce-only: the pre-2026-09-19 contract
 GATE_SP_OVER_R = 0.15
 
 
