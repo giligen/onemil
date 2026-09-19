@@ -1,0 +1,51 @@
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+== S1 — the SPY 09:35 gate ALONE on the base (the control C1 never had) ==
+  S1 base (= B2)                         TRAIN n  1622 /wk  30.6 gross -0.039 net -0.107 green  32.1% $   -17,346 tc -2.99
+  S1 base (= B2)                         VAL   n   706 /wk  30.7 gross +0.083 net +0.013 green  43.5% $      +893 tc +0.26
+      halves H1 -0.077 | H2 -0.003 | VAL +0.083 -> same-signed+: False
+  S1 base x spy_r5>0                     TRAIN n   829 /wk  15.6 gross +0.032 net -0.037 green  43.4% $    -3,059 tc -0.76
+  S1 base x spy_r5>0                     VAL   n   365 /wk  15.9 gross +0.165 net +0.094 green  65.2% $    +3,439 tc +1.42
+      halves H1 -0.062 | H2 +0.117 | VAL +0.165 -> same-signed+: False
+  S1 ge20 (R3)                           TRAIN n  1411 /wk  26.6 gross +0.028 net -0.041 green  34.0% $    -5,749 tc -0.91
+  S1 ge20 (R3)                           VAL   n   714 /wk  31.0 gross +0.050 net -0.023 green  47.8% $    -1,629 tc -0.40
+      halves H1 +0.005 | H2 +0.049 | VAL +0.050 -> same-signed+: True
+  S1 C1 = ge20 x spy_r5>0                TRAIN n   731 /wk  13.8 gross +0.100 net +0.033 green  43.4% $    +2,391 tc +0.54
+  S1 C1 = ge20 x spy_r5>0                VAL   n   368 /wk  16.0 gross +0.123 net +0.050 green  47.8% $    +1,827 tc +0.66
+      halves H1 +0.123 | H2 +0.082 | VAL +0.123 -> same-signed+: True
+  S1 clock590 x spy_r5>0                 TRAIN n   896 /wk  16.9 gross +0.048 net -0.019 green  49.1% $    -1,746 tc -0.36
+  S1 clock590 x spy_r5>0                 VAL   n   408 /wk  17.7 gross +0.112 net +0.042 green  47.8% $    +1,700 tc +0.57
+      halves H1 +0.094 | H2 +0.008 | VAL +0.112 -> same-signed+: True
+
+== S2 — what the ge20 ADMISSION changes: same break as the base, or a later one? ==
+  TRAIN: pre-book rows 2050 | SAME break as base 1487 (73%) gross -0.001 | LATER break 563 gross +0.028 | median minutes later 37
+  VAL: pre-book rows 1352 | SAME break as base 901 (67%) gross -0.056 | LATER break 451 gross +0.058 | median minutes later 38
+  TRAIN BOOKED: same 1005 gross +0.039 $ -2,158 | later 406 gross +0.001 $ -3,591
+  VAL BOOKED: same 473 gross +0.033 $ -1,456 | later 241 gross +0.084 $ -174
+
+== S3 — C1 weekly concentration and the tail ==
+  TRAIN: total $+2,391 | best week $+2,027 (85% of it) | net +0.033 -> ex-top-5% -0.071
+  VAL: total $+1,827 | best week $+1,215 (67% of it) | net +0.050 -> ex-top-5% -0.056
+
+== S4 — `consol_bars` as a CONTINUOUS ranker on the base first break (gross R) ==
+  TRAIN: Q1 n 1172 gross +0.128 | Q2 n 742 gross -0.091 | Q3 n 896 gross -0.043 | Q4 n 859 gross -0.144 | Q5 n 906 gross +0.080
+  VAL: Q1 n 609 gross +0.009 | Q2 n 397 gross +0.090 | Q3 n 477 gross +0.093 | Q4 n 484 gross +0.010 | Q5 n 485 gross -0.109
+
+== S5 — the ge20 admission split by whether SPY was up (the day gate) ==
+  TRAIN: SPY up n 1067 gross +0.112 | SPY down n 983 gross -0.108 | delta +0.219
+        base: SPY up n 2368 gross +0.185 | down n 2207 gross -0.203 | delta +0.388
+  VAL: SPY up n 767 gross +0.046 | SPY down n 585 gross -0.101 | delta +0.147
+        base: SPY up n 1341 gross +0.101 | down n 1111 gross -0.088 | delta +0.189
+
+== S6 — the four F11 components as CONTINUOUS rankers (base first break, gross R) ==
+  hl_n20      TRAIN Q1 +0.240 | Q2 +0.034 | Q3 -0.109 | Q4 -0.207 | Q5 -0.090
+  hl_n20      VAL   Q1 -0.103 | Q2 -0.209 | Q3 +0.078 | Q4 -0.019 | Q5 +0.174
+  lo_slope20  TRAIN Q1 +0.331 | Q2 +0.011 | Q3 -0.093 | Q4 -0.126 | Q5 -0.074
+  lo_slope20  VAL   Q1 -0.031 | Q2 -0.008 | Q3 -0.111 | Q4 -0.081 | Q5 +0.095
+  atr_ratio   TRAIN Q1 -0.064 | Q2 -0.038 | Q3 -0.151 | Q4 -0.202 | Q5 +0.557
+  atr_ratio   VAL   Q1 +0.034 | Q2 -0.195 | Q3 +0.040 | Q4 -0.124 | Q5 -0.118
+  break_m     TRAIN Q1 -0.012 | Q2 -0.009 | Q3 -0.483 | Q4 -0.072 | Q5 +0.578
+  break_m     VAL   Q1 +0.079 | Q2 +0.091 | Q3 +0.019 | Q4 -0.034 | Q5 -0.083
+  price       TRAIN Q1 +0.021 | Q2 -0.027 | Q3 -0.044 | Q4 +0.027 | Q5 +0.014
+  price       VAL   Q1 +0.027 | Q2 -0.029 | Q3 +0.054 | Q4 +0.002 | Q5 +0.022
+
+DONE

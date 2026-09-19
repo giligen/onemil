@@ -1,0 +1,43 @@
+== hod_frames3 / F12 — ADAPTIVE vs FROZEN ==
+
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+   R1/R2 B2 TRAIN: n 1622 /wk 30.6 gross -0.039 net -0.107 green 32.1% total $-17,346
+   R1/R2 B2 VAL: n 706 /wk 30.7 gross +0.083 net +0.013 green 43.5% total $893
+break rows 1188186 -> 1188186 after membership | symbol-days 98203 | days 344
+
+pre-book signals 7027 over 75 market weeks [2025-01-10 .. 2026-05-29]   (TEST sealed)
+
+-- L=20: 55 OOS weeks [2025-05-17/2025-05-23 .. 2026-05-30/2026-06-05] | churn 83% --
+   OOS-in-TRAIN (H2-2025)   refit $   -1,593 green  30.3% | frozen $   -8,873 green  36.4% | beats frozen: False
+   OOS-in-VAL               refit $     -967 green  45.5% | frozen $     +847 green  40.9% | beats frozen: False
+
+-- L=26: 49 OOS weeks [2025-06-28/2025-07-04 .. 2026-05-30/2026-06-05] | churn 81% --
+   OOS-in-TRAIN (H2-2025)   refit $   -2,870 green  18.5% | frozen $   -6,077 green  37.0% | beats frozen: False
+   OOS-in-VAL               refit $   -1,622 green  45.5% | frozen $     +847 green  40.9% | beats frozen: False
+
+-- L=34: 41 OOS weeks [2025-08-23/2025-08-29 .. 2026-05-30/2026-06-05] | churn 65% --
+   OOS-in-TRAIN (H2-2025)   refit $     -260 green  15.8% | frozen $     -684 green  36.8% | beats frozen: False
+   OOS-in-VAL               refit $   -1,753 green  45.5% | frozen $     +847 green  40.9% | beats frozen: False
+
+
+== F12 — the OOS books ==
+| cell | OOS weeks | trades | /wk | green % | red streak | worst $ | total $ | MDD $ | churn % | $ after a change | $ after no change |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| F12-r20 REFIT | 55 | 627 | 11.4 | 36.4 | 7 | -1,844 | -2,560 | -6,726 | 83 | -97 | +182 |
+| F12-f FROZEN (L=20 weeks) | 55 | 1745 | 31.7 | 38.2 | 5 | -2,136 | -8,026 | -10,639 | 0 | +nan | +nan |
+| F12-r26 REFIT | 49 | 537 | 11.0 | 30.6 | 8 | -1,606 | -4,491 | -8,174 | 81 | -90 | -99 |
+| F12-f FROZEN (L=26 weeks) | 49 | 1547 | 31.6 | 38.8 | 5 | -2,136 | -5,230 | -9,228 | 0 | +nan | +nan |
+| F12-s26 SIZING refit | 49 | 1547 | 31.6 | 36.7 | 9 | -2,584 | -3,890 | -9,482 | nan | +nan | +nan |
+| F12-r34 REFIT | 41 | 391 | 9.5 | 31.7 | 8 | -2,097 | -2,013 | -5,014 | 65 | +52 | -224 |
+| F12-f FROZEN (L=34 weeks) | 41 | 1302 | 31.8 | 39.0 | 5 | -2,018 | +163 | -6,319 | 0 | +nan | +nan |
+| F12-s34 SIZING refit | 41 | 1302 | 31.8 | 46.3 | 4 | -1,845 | +3,441 | -6,135 | nan | +nan | +nan |
+
+== PREREG READING RULE ==
+  L=20: beats frozen on $ AND green in BOTH OOS halves: False | >=10 tr/wk: True | clustered t -0.64 (>=2: False) | refit total $-2,560 vs frozen $-8,026
+  L=26: beats frozen on $ AND green in BOTH OOS halves: False | >=10 tr/wk: True | clustered t -1.32 (>=2: False) | refit total $-4,491 vs frozen $-5,230
+  L=34: beats frozen on $ AND green in BOTH OOS halves: False | >=10 tr/wk: False | clustered t -0.69 (>=2: False) | refit total $-2,013 vs frozen $+163
+
+  arms satisfying the rule: []
+  -> READING (ii) NOISE
+
+DONE

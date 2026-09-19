@@ -1,0 +1,95 @@
+== hod_frames3 / F10 — the footprint field `dollar_frac`, gate re-specified ==
+   splits scored: ('TRAIN', 'VAL')   (TEST sealed)
+
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+== R1/R2 REPRODUCTION (ref -17,346 | +893) ==
+| cell                               | split | n     | /wk   | grossR | cost   | netR   |  t    | tc    | green | rs | worst $  | total $   | MDD $    | ex5    | imp |
+|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|
+| R1/R2 B2 shipped (pop.csv)         | TRAIN |  1622 |  30.6 | -0.039 | +0.068 | -0.107 | -3.42 | -2.99 |  32.1 |  5 |    -2231 |    -17346 |   -18929 | -0.218 |  49 |
+| R1/R2 B2 shipped (pop.csv)         | VAL   |   706 |  30.7 | +0.083 | +0.070 | +0.013 | +0.27 | +0.26 |  43.5 |  4 |     -957 |       893 |    -2940 | -0.093 |  57 |
+    halves H1 -0.077 (n 789) | H2 -0.003 (n 833) | VAL +0.083 (n 706) -> same-signed POSITIVE in all three: False
+break rows 1188186 -> 1188186 after membership | symbol-days 98203 | days 344
+| R2b B2 rebuilt (this pass)         | TRAIN |  1605 |  30.3 | -0.049 | +0.067 | -0.116 | -3.71 | -3.28 |  30.2 |  6 |    -2144 |    -18668 |   -19858 | -0.228 |  43 |
+| R2b B2 rebuilt (this pass)         | VAL   |   698 |  30.3 | +0.088 | +0.069 | +0.019 | +0.40 | +0.39 |  43.5 |  4 |     -909 |      1327 |    -2202 | -0.084 |  50 |
+    halves H1 -0.080 (n 780) | H2 -0.020 (n 825) | VAL +0.088 (n 698) -> same-signed POSITIVE in all three: False
+
+== AVAILABILITY AUDIT — `dollar_frac` on the B2 pre-book set ==
+  TRAIN: cov 67.6%  miss win 35.2% loss 30.5%  (>5pp gap drops the field)
+  VAL: cov 96.2%  miss win 3.2% loss 4.2%  (>5pp gap drops the field)
+
+   TRAIN percentiles of dollar_frac (% of ADV$): p50 24.4 | p60 30.3 | p70 37.3 | p80 46.1 | p90 64.1
+   imputed-cost share on the TRAIN pre-book set: 40.4%
+
+== THE RE-SPECIFIED DOWNSTREAM DIAGNOSTIC (reported, NOT an exclusion) ==
+| rung | split | n top | P(EOD>=10%) top | rest | dP | d rng_sig | d rng_after | gross top | gross rest | §2.3 split inside the rung |
+|---|---|---|---|---|---|---|---|---|---|---|
+| dollar_frac>=p50 | TRAIN | 1509 | 62.8% | 61.0% | +1.7pp | +0.96pp | -1.14pp | +0.074 | -0.050 | already-wide -0.011 (WR 40%) / arrived-after +0.160 (WR 43%) |
+| dollar_frac>=p50 | VAL | 1010 | 59.0% | 58.0% | +1.0pp | +1.10pp | -0.53pp | -0.020 | +0.053 | already-wide +0.030 (WR 41%) / arrived-after -0.070 (WR 39%) |
+| dollar_frac>=p60 | TRAIN | 1207 | 64.7% | 60.0% | +4.7pp | +1.09pp | -1.27pp | +0.086 | -0.036 | already-wide +0.001 (WR 41%) / arrived-after +0.170 (WR 43%) |
+| dollar_frac>=p60 | VAL | 772 | 61.4% | 57.0% | +4.4pp | +1.33pp | -0.53pp | +0.013 | +0.025 | already-wide +0.050 (WR 42%) / arrived-after -0.024 (WR 40%) |
+| dollar_frac>=p70 | TRAIN | 906 | 67.8% | 59.4% | +8.4pp | +1.19pp | -1.02pp | +0.114 | -0.031 | already-wide +0.013 (WR 41%) / arrived-after +0.216 (WR 46%) |
+| dollar_frac>=p70 | VAL | 585 | 63.4% | 56.7% | +6.7pp | +1.62pp | -0.41pp | +0.001 | +0.028 | already-wide +0.097 (WR 44%) / arrived-after -0.095 (WR 38%) |
+| dollar_frac>=p80 | TRAIN | 604 | 68.9% | 60.1% | +8.7pp | +1.38pp | -1.00pp | +0.109 | -0.012 | already-wide -0.074 (WR 37%) / arrived-after +0.292 (WR 49%) |
+| dollar_frac>=p80 | VAL | 384 | 66.7% | 56.8% | +9.9pp | +2.10pp | -0.18pp | +0.093 | +0.006 | already-wide +0.194 (WR 48%) / arrived-after -0.007 (WR 42%) |
+| dollar_frac>=p90 | TRAIN | 302 | 74.2% | 60.5% | +13.6pp | +1.94pp | -1.16pp | +0.056 | +0.008 | already-wide -0.152 (WR 33%) / arrived-after +0.263 (WR 47%) |
+| dollar_frac>=p90 | VAL | 192 | 74.5% | 57.0% | +17.5pp | +3.40pp | +0.73pp | +0.132 | +0.011 | already-wide +0.205 (WR 48%) / arrived-after +0.059 (WR 44%) |
+
+
+================ F10 — THE LADDER (5 cells) ================
+| F10 dollar_frac>=p50 (24.4%)       | TRAIN |  1163 |  21.9 | +0.005 | +0.061 | -0.056 | -1.42 | -1.28 |  35.8 |  6 |    -1760 |     -6483 |    -9040 | -0.165 |  22 |
+| F10 dollar_frac>=p50 (24.4%)       | VAL   |   629 |  27.3 | -0.008 | +0.065 | -0.073 | -1.42 | -1.28 |  26.1 | 12 |     -996 |     -4576 |    -6467 | -0.183 |  28 |
+    halves H1 -0.010 (n 469) | H2 +0.015 (n 694) | VAL -0.008 (n 629) -> same-signed POSITIVE in all three: False
+| F10 dollar_frac>=p60 (30.3%)       | TRAIN |   977 |  18.4 | +0.007 | +0.059 | -0.052 | -1.21 | -1.12 |  30.2 |  8 |    -1459 |     -5084 |    -6731 | -0.160 |  19 |
+| F10 dollar_frac>=p60 (30.3%)       | VAL   |   556 |  24.2 | +0.028 | +0.063 | -0.036 | -0.64 | -0.59 |  34.8 |  6 |     -925 |     -1974 |    -3792 | -0.143 |  22 |
+    halves H1 -0.019 (n 386) | H2 +0.024 (n 591) | VAL +0.028 (n 556) -> same-signed POSITIVE in all three: False
+| F10 dollar_frac>=p70 (37.3%)       | TRAIN |   772 |  14.6 | +0.030 | +0.058 | -0.028 | -0.58 | -0.54 |  34.0 |  6 |    -1049 |     -2154 |    -4081 | -0.135 |  14 |
+| F10 dollar_frac>=p70 (37.3%)       | VAL   |   458 |  19.9 | +0.010 | +0.062 | -0.052 | -0.85 | -0.86 |  34.8 |  8 |    -1199 |     -2381 |    -4278 | -0.160 |  16 |
+    halves H1 -0.015 (n 296) | H2 +0.058 (n 476) | VAL +0.010 (n 458) -> same-signed POSITIVE in all three: False
+| F10 dollar_frac>=p80 (46.1%)       | TRAIN |   558 |  10.5 | +0.065 | +0.056 | +0.009 | +0.15 | +0.14 |  37.7 |  5 |     -628 |       490 |    -2126 | -0.096 |   3 |
+| F10 dollar_frac>=p80 (46.1%)       | VAL   |   343 |  14.9 | +0.096 | +0.062 | +0.034 | +0.48 | +0.45 |  60.9 |  4 |     -957 |      1175 |    -2609 | -0.074 |   5 |
+    halves H1 -0.024 (n 218) | H2 +0.121 (n 340) | VAL +0.096 (n 343) -> same-signed POSITIVE in all three: False
+| F10 dollar_frac>=p90 (64.1%)       | TRAIN |   302 |   5.7 | +0.056 | +0.055 | +0.001 | +0.01 | +0.01 |  39.6 |  5 |     -980 |        26 |    -2050 | -0.110 |   0 |
+| F10 dollar_frac>=p90 (64.1%)       | VAL   |   185 |   8.0 | +0.116 | +0.062 | +0.055 | +0.56 | +0.51 |  47.8 |  3 |     -472 |      1011 |     -965 | -0.055 |   1 |
+    halves H1 +0.014 (n 119) | H2 +0.083 (n 183) | VAL +0.116 (n 185) -> same-signed POSITIVE in all three: True
+   F10 dollar_frac>=p50 (24.4%): halves same-signed+ False  /wk 21.9/27.3 -> eligible False
+   F10 dollar_frac>=p60 (30.3%): halves same-signed+ False  /wk 18.4/24.2 -> eligible False
+   F10 dollar_frac>=p70 (37.3%): halves same-signed+ False  /wk 14.6/19.9 -> eligible False
+   F10 dollar_frac>=p80 (46.1%): halves same-signed+ False  /wk 10.5/14.9 -> eligible False
+   F10 dollar_frac>=p90 (64.1%): halves same-signed+ True  /wk 5.7/8.0 -> eligible False
+
+== PREREG SELECTOR (era-consistency only): eligible rungs []
+   NO rung is era-consistent -> F10 is DEAD; F10-6/7/8 are NOT scored, as declared.
+
+
+== count-matched permutation null on green weeks (2,000 draws) ==
+| cell | split | observed green % | null mean | [p5, p95] | outside? |
+|---|---|---|---|---|---|
+| R1/R2 B2 shipped (pop.csv) | TRAIN | 32.1 | 30.8 | [24.5, 37.7] | inside |
+| R1/R2 B2 shipped (pop.csv) | VAL | 43.5 | 49.5 | [39.1, 60.9] | inside |
+| R2b B2 rebuilt (this pass) | TRAIN | 30.2 | 29.6 | [22.6, 35.8] | inside |
+| R2b B2 rebuilt (this pass) | VAL | 43.5 | 50.8 | [39.1, 60.9] | inside |
+| F10 dollar_frac>=p50 (24.4%) | TRAIN | 35.8 | 37.9 | [32.1, 45.3] | inside |
+| F10 dollar_frac>=p50 (24.4%) | VAL | 26.1 | 35.6 | [26.1, 47.8] | inside |
+| F10 dollar_frac>=p60 (30.3%) | TRAIN | 30.2 | 39.1 | [32.1, 45.3] | below |
+| F10 dollar_frac>=p60 (30.3%) | VAL | 34.8 | 42.0 | [30.4, 52.2] | inside |
+| F10 dollar_frac>=p70 (37.3%) | TRAIN | 34.0 | 42.1 | [35.8, 49.1] | below |
+| F10 dollar_frac>=p70 (37.3%) | VAL | 34.8 | 40.0 | [30.4, 52.2] | inside |
+| F10 dollar_frac>=p80 (46.1%) | TRAIN | 37.7 | 45.7 | [39.6, 52.8] | below |
+| F10 dollar_frac>=p80 (46.1%) | VAL | 60.9 | 50.7 | [39.1, 60.9] | inside |
+| F10 dollar_frac>=p90 (64.1%) | TRAIN | 39.6 | 42.2 | [35.8, 49.1] | inside |
+| F10 dollar_frac>=p90 (64.1%) | VAL | 47.8 | 48.8 | [39.1, 60.9] | inside |
+
+== BOTH BARS ==
+G1: 0 of 7 -> []
+LIVE-EXPLORATION BAR: 0 -> []
+
+MDE (80% power, per trade, net):
+  R1/R2 B2 shipped (pop.csv)           TRAIN 0.088 VAL 0.132
+  R2b B2 rebuilt (this pass)           TRAIN 0.088 VAL 0.133
+  F10 dollar_frac>=p50 (24.4%)         TRAIN 0.110 VAL 0.144
+  F10 dollar_frac>=p60 (30.3%)         TRAIN 0.120 VAL 0.156
+  F10 dollar_frac>=p70 (37.3%)         TRAIN 0.135 VAL 0.170
+  F10 dollar_frac>=p80 (46.1%)         TRAIN 0.161 VAL 0.200
+  F10 dollar_frac>=p90 (64.1%)         TRAIN 0.216 VAL 0.274
+
+DONE
