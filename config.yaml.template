@@ -587,7 +587,7 @@ red_to_green:
 # 4% of the high-of-day, then breaks it: capped limit (60 bps, no chase), stop = consolidation low,
 # target = +2R on a bar close, first-come 8/day, 4 concurrent, flat 15:55. FAIL-SAFE: disabled + dry_run.
 hod_break:
-  enabled: false
+  enabled: true    # DRY RUN restored 2026-09-19 (owner) -- dry_run must stay true; zero orders. Going live needs a new pre-registration + owner word.
   dry_run: true
   risk_usd: 100
   daily_kill_usd: -600
