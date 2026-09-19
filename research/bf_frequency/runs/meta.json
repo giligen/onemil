@@ -1,0 +1,690 @@
+[
+ {
+  "id": "P1",
+  "desc": "shipped P1 (baseline = BT_STATUS run A)",
+  "block": "baseline",
+  "knobs": {
+   "conv": 1.8,
+   "vol": 200000,
+   "price": 20.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 3,
+   "mtd": 5
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/P1.csv"
+ },
+ {
+  "id": "CONV_1.5",
+  "desc": "conviction >= 1.5",
+  "block": "ladder_conviction",
+  "knobs": {
+   "conv": 1.5,
+   "vol": 200000,
+   "price": 20.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 3,
+   "mtd": 5
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/CONV_1.5.csv"
+ },
+ {
+  "id": "CONV_1.2",
+  "desc": "conviction >= 1.2",
+  "block": "ladder_conviction",
+  "knobs": {
+   "conv": 1.2,
+   "vol": 200000,
+   "price": 20.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 3,
+   "mtd": 5
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/CONV_1.2.csv"
+ },
+ {
+  "id": "CONV_1.0",
+  "desc": "conviction >= 1.0",
+  "block": "ladder_conviction",
+  "knobs": {
+   "conv": 1.0,
+   "vol": 200000,
+   "price": 20.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 3,
+   "mtd": 5
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/CONV_1.0.csv"
+ },
+ {
+  "id": "CONV_OFF",
+  "desc": "conviction gate off",
+  "block": "ladder_conviction",
+  "knobs": {
+   "conv": null,
+   "vol": 200000,
+   "price": 20.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 3,
+   "mtd": 5
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/CONV_OFF.csv"
+ },
+ {
+  "id": "VOL_100K",
+  "desc": "ADV20 >= 100K",
+  "block": "ladder_volume",
+  "knobs": {
+   "conv": 1.8,
+   "vol": 100000,
+   "price": 20.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 3,
+   "mtd": 5
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/VOL_100K.csv"
+ },
+ {
+  "id": "VOL_50K",
+  "desc": "ADV20 >= 50K",
+  "block": "ladder_volume",
+  "knobs": {
+   "conv": 1.8,
+   "vol": 50000,
+   "price": 20.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 3,
+   "mtd": 5
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/VOL_50K.csv"
+ },
+ {
+  "id": "VOL_OFF",
+  "desc": "ADV20 gate off",
+  "block": "ladder_volume",
+  "knobs": {
+   "conv": 1.8,
+   "vol": 0,
+   "price": 20.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 3,
+   "mtd": 5
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/VOL_OFF.csv"
+ },
+ {
+  "id": "PX_25",
+  "desc": "entry <= $25",
+  "block": "ladder_price",
+  "knobs": {
+   "conv": 1.8,
+   "vol": 200000,
+   "price": 25.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 3,
+   "mtd": 5
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/PX_25.csv"
+ },
+ {
+  "id": "PX_30",
+  "desc": "entry <= $30 (= off, cache band)",
+  "block": "ladder_price",
+  "knobs": {
+   "conv": 1.8,
+   "vol": 200000,
+   "price": 30.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 3,
+   "mtd": 5
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/PX_30.csv"
+ },
+ {
+  "id": "POLE_4",
+  "desc": "pole >= 4%",
+  "block": "ladder_pole",
+  "knobs": {
+   "conv": 1.8,
+   "vol": 200000,
+   "price": 20.0,
+   "pole": 4.0,
+   "macd": true,
+   "conc": 3,
+   "mtd": 5
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/POLE_4.csv"
+ },
+ {
+  "id": "POLE_3",
+  "desc": "pole >= 3% (= off, cache floor)",
+  "block": "ladder_pole",
+  "knobs": {
+   "conv": 1.8,
+   "vol": 200000,
+   "price": 20.0,
+   "pole": 3.0,
+   "macd": true,
+   "conc": 3,
+   "mtd": 5
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/POLE_3.csv"
+ },
+ {
+  "id": "MACD_OFF",
+  "desc": "two-tier MACD surgical-drop leg off",
+  "block": "ladder_macd",
+  "knobs": {
+   "conv": 1.8,
+   "vol": 200000,
+   "price": 20.0,
+   "pole": 5.0,
+   "macd": false,
+   "conc": 3,
+   "mtd": 5
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/MACD_OFF.csv"
+ },
+ {
+  "id": "BK_3x8",
+  "desc": "max_conc 3 / max_trades_day 8",
+  "block": "book",
+  "knobs": {
+   "conv": 1.8,
+   "vol": 200000,
+   "price": 20.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 3,
+   "mtd": 8
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/BK_3x8.csv"
+ },
+ {
+  "id": "BK_5x5",
+  "desc": "max_conc 5 / max_trades_day 5",
+  "block": "book",
+  "knobs": {
+   "conv": 1.8,
+   "vol": 200000,
+   "price": 20.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 5,
+   "mtd": 5
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/BK_5x5.csv"
+ },
+ {
+  "id": "BK_5x8",
+  "desc": "max_conc 5 / max_trades_day 8",
+  "block": "book",
+  "knobs": {
+   "conv": 1.8,
+   "vol": 200000,
+   "price": 20.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 5,
+   "mtd": 8
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/BK_5x8.csv"
+ },
+ {
+  "id": "BK_8x5",
+  "desc": "max_conc 8 / max_trades_day 5",
+  "block": "book",
+  "knobs": {
+   "conv": 1.8,
+   "vol": 200000,
+   "price": 20.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 8,
+   "mtd": 5
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/BK_8x5.csv"
+ },
+ {
+  "id": "BK_8x8",
+  "desc": "max_conc 8 / max_trades_day 8",
+  "block": "book",
+  "knobs": {
+   "conv": 1.8,
+   "vol": 200000,
+   "price": 20.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 8,
+   "mtd": 8
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/BK_8x8.csv"
+ },
+ {
+  "id": "F1",
+  "desc": "P1 + vol 100K [vol ladder rung 2]",
+  "block": "frontier",
+  "knobs": {
+   "conv": 1.8,
+   "vol": 100000,
+   "price": 20.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 8,
+   "mtd": 8
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/F1.csv"
+ },
+ {
+  "id": "F2",
+  "desc": "P1 + vol 100K + conv 1.5 [vol r2 + conv r2]",
+  "block": "frontier",
+  "knobs": {
+   "conv": 1.5,
+   "vol": 100000,
+   "price": 20.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 8,
+   "mtd": 8
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/F2.csv"
+ },
+ {
+  "id": "F3",
+  "desc": "P1 + vol 50K + conv 1.5 + price 25 [vol r3 + conv r2 + px r2]",
+  "block": "frontier",
+  "knobs": {
+   "conv": 1.5,
+   "vol": 50000,
+   "price": 25.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 8,
+   "mtd": 8
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/F3.csv"
+ },
+ {
+  "id": "F4",
+  "desc": "P1 + vol off + conv 1.5 + price 30 [vol r4 + conv r2 + px r3]",
+  "block": "frontier",
+  "knobs": {
+   "conv": 1.5,
+   "vol": 0,
+   "price": 30.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 8,
+   "mtd": 8
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/F4.csv"
+ },
+ {
+  "id": "F5",
+  "desc": "P1 + vol off + conv 1.2 + price 30 + pole 4 [vol r4 + conv r3 + px r3 + pole r2]",
+  "block": "frontier",
+  "knobs": {
+   "conv": 1.2,
+   "vol": 0,
+   "price": 30.0,
+   "pole": 4.0,
+   "macd": true,
+   "conc": 8,
+   "mtd": 8
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/F5.csv"
+ },
+ {
+  "id": "F6",
+  "desc": "all gates off except VWAP + two-tier [every ladder at its last rung]",
+  "block": "frontier",
+  "knobs": {
+   "conv": null,
+   "vol": 0,
+   "price": 30.0,
+   "pole": 3.0,
+   "macd": true,
+   "conc": 8,
+   "mtd": 8
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/F6.csv"
+ },
+ {
+  "id": "F7",
+  "desc": "P1 + vol off + conv off [vol ladder r4 + conv ladder r5]",
+  "block": "frontier",
+  "knobs": {
+   "conv": null,
+   "vol": 0,
+   "price": 20.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 8,
+   "mtd": 8
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/F7.csv"
+ },
+ {
+  "id": "F8",
+  "desc": "P1 + vol off + conv off + price 30 [vol r4 + conv r5 + px r3]",
+  "block": "frontier",
+  "knobs": {
+   "conv": null,
+   "vol": 0,
+   "price": 30.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 8,
+   "mtd": 8
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/F8.csv"
+ },
+ {
+  "id": "F3_L",
+  "desc": "F3 at the LIVE rails (max_conc 3 / max_trades_day 5)",
+  "block": "live_rails",
+  "knobs": {
+   "conv": 1.5,
+   "vol": 50000,
+   "price": 25.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 3,
+   "mtd": 5
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/F3_L.csv"
+ },
+ {
+  "id": "F4_L",
+  "desc": "F4 at the LIVE rails (max_conc 3 / max_trades_day 5)",
+  "block": "live_rails",
+  "knobs": {
+   "conv": 1.5,
+   "vol": 0,
+   "price": 30.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 3,
+   "mtd": 5
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/F4_L.csv"
+ },
+ {
+  "id": "F7_L",
+  "desc": "F7 at the LIVE rails (max_conc 3 / max_trades_day 5)",
+  "block": "live_rails",
+  "knobs": {
+   "conv": null,
+   "vol": 0,
+   "price": 20.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 3,
+   "mtd": 5
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/F7_L.csv"
+ },
+ {
+  "id": "F8_L",
+  "desc": "F8 at the LIVE rails (max_conc 3 / max_trades_day 5)",
+  "block": "live_rails",
+  "knobs": {
+   "conv": null,
+   "vol": 0,
+   "price": 30.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 3,
+   "mtd": 5
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/F8_L.csv"
+ },
+ {
+  "id": "F6_L",
+  "desc": "F6 at the LIVE rails (max_conc 3 / max_trades_day 5)",
+  "block": "live_rails",
+  "knobs": {
+   "conv": null,
+   "vol": 0,
+   "price": 30.0,
+   "pole": 3.0,
+   "macd": true,
+   "conc": 3,
+   "mtd": 5
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/F6_L.csv"
+ },
+ {
+  "id": "F4b",
+  "desc": "F4 + pole 4 (which F4\u2192F5 leg bends the curve?)",
+  "block": "bend_diag",
+  "knobs": {
+   "conv": 1.5,
+   "vol": 0,
+   "price": 30.0,
+   "pole": 4.0,
+   "macd": true,
+   "conc": 8,
+   "mtd": 8
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/F4b.csv"
+ },
+ {
+  "id": "F4c",
+  "desc": "F4 + conv 1.2 (which F4\u2192F5 leg bends the curve?)",
+  "block": "bend_diag",
+  "knobs": {
+   "conv": 1.2,
+   "vol": 0,
+   "price": 30.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 8,
+   "mtd": 8
+  },
+  "full_market": false,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/F4c.csv"
+ },
+ {
+  "id": "P1_FM",
+  "desc": "shipped P1 (baseline = BT_STATUS run A) + --full-market (no universe snapshot)",
+  "block": "pit_bracket",
+  "knobs": {
+   "conv": 1.8,
+   "vol": 200000,
+   "price": 20.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 3,
+   "mtd": 5
+  },
+  "full_market": true,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/P1_FM.csv"
+ },
+ {
+  "id": "F1_FM",
+  "desc": "P1 + vol 100K [vol ladder rung 2] + --full-market (no universe snapshot)",
+  "block": "pit_bracket",
+  "knobs": {
+   "conv": 1.8,
+   "vol": 100000,
+   "price": 20.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 8,
+   "mtd": 8
+  },
+  "full_market": true,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/F1_FM.csv"
+ },
+ {
+  "id": "F2_FM",
+  "desc": "P1 + vol 100K + conv 1.5 [vol r2 + conv r2] + --full-market (no universe snapshot)",
+  "block": "pit_bracket",
+  "knobs": {
+   "conv": 1.5,
+   "vol": 100000,
+   "price": 20.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 8,
+   "mtd": 8
+  },
+  "full_market": true,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/F2_FM.csv"
+ },
+ {
+  "id": "F3_FM",
+  "desc": "P1 + vol 50K + conv 1.5 + price 25 [vol r3 + conv r2 + px r2] + --full-market (no universe snapshot)",
+  "block": "pit_bracket",
+  "knobs": {
+   "conv": 1.5,
+   "vol": 50000,
+   "price": 25.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 8,
+   "mtd": 8
+  },
+  "full_market": true,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/F3_FM.csv"
+ },
+ {
+  "id": "F4_FM",
+  "desc": "P1 + vol off + conv 1.5 + price 30 [vol r4 + conv r2 + px r3] + --full-market (no universe snapshot)",
+  "block": "pit_bracket",
+  "knobs": {
+   "conv": 1.5,
+   "vol": 0,
+   "price": 30.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 8,
+   "mtd": 8
+  },
+  "full_market": true,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/F4_FM.csv"
+ },
+ {
+  "id": "F5_FM",
+  "desc": "P1 + vol off + conv 1.2 + price 30 + pole 4 [vol r4 + conv r3 + px r3 + pole r2] + --full-market (no universe snapshot)",
+  "block": "pit_bracket",
+  "knobs": {
+   "conv": 1.2,
+   "vol": 0,
+   "price": 30.0,
+   "pole": 4.0,
+   "macd": true,
+   "conc": 8,
+   "mtd": 8
+  },
+  "full_market": true,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/F5_FM.csv"
+ },
+ {
+  "id": "F6_FM",
+  "desc": "all gates off except VWAP + two-tier [every ladder at its last rung] + --full-market (no universe snapshot)",
+  "block": "pit_bracket",
+  "knobs": {
+   "conv": null,
+   "vol": 0,
+   "price": 30.0,
+   "pole": 3.0,
+   "macd": true,
+   "conc": 8,
+   "mtd": 8
+  },
+  "full_market": true,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/F6_FM.csv"
+ },
+ {
+  "id": "F7_FM",
+  "desc": "P1 + vol off + conv off [vol ladder r4 + conv ladder r5] + --full-market (no universe snapshot)",
+  "block": "pit_bracket",
+  "knobs": {
+   "conv": null,
+   "vol": 0,
+   "price": 20.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 8,
+   "mtd": 8
+  },
+  "full_market": true,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/F7_FM.csv"
+ },
+ {
+  "id": "F8_FM",
+  "desc": "P1 + vol off + conv off + price 30 [vol r4 + conv r5 + px r3] + --full-market (no universe snapshot)",
+  "block": "pit_bracket",
+  "knobs": {
+   "conv": null,
+   "vol": 0,
+   "price": 30.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 8,
+   "mtd": 8
+  },
+  "full_market": true,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/F8_FM.csv"
+ },
+ {
+  "id": "F7_L_FM",
+  "desc": "F7 at the LIVE rails (max_conc 3 / max_trades_day 5) + --full-market (no universe snapshot)",
+  "block": "pit_bracket",
+  "knobs": {
+   "conv": null,
+   "vol": 0,
+   "price": 20.0,
+   "pole": 5.0,
+   "macd": true,
+   "conc": 3,
+   "mtd": 5
+  },
+  "full_market": true,
+  "csv": "/home/ec2-user/onemil/research/bf_frequency/runs/F7_L_FM.csv"
+ }
+]
