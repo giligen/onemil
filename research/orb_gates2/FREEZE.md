@@ -18,8 +18,11 @@ TEST = **2026-06-01 → 2026-09-16** (~16 market weeks; ~57 picks at the shipped
 ## State
 
 - **Sealed at**: 2026-09-19, before any cell of this stage was scored. PREREG commit: *(recorded on commit — see git log for `research/orb_gates2/PREREG.md`)*.
-- **Recommendation commit**: *PENDING — filled in when REPORT.md's recommendation is committed.*
-- **Opened at**: *PENDING.*
+- **Recommendation commit**: `91137a8` (2026-09-19) — REPORT.md §7 committed before the seal was opened.
+- **Opened at**: 2026-09-19, immediately after `91137a8`, for exactly two cells: the shipped B+
+  baseline (G0, N=8) and — the recommendation being the null finding — the highest-green-week
+  cell, G5/G8 tied and broken by PREREG §4's tie-break on pooled total R -> **G8**. Both fill
+  models. Results in REPORT.md §8a and `test_reveal.csv`.
 
 ## Why this matters here
 

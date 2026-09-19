@@ -384,7 +384,37 @@ pooled flat, broken by PREREG §4's pre-committed tie-break (higher pooled total
 G5 117.2) -> **G8**. **TEST is 16 weeks; its green-week MDE80 is >= 38pp. It cannot select
 anything and it did not.**
 
-*(§8a is filled in after the recommendation commit.)*
+*(Opened after the recommendation commit `91137a8`.)*
+
+### 8a. TEST, scored once, two cells
+
+| cell | fill model | pk/wk | **green%** | own null mean (p5–p95) | **flat%** | red streak | worst wk | green mo% | MDD | $ | R/pick | ex-top5% R | t |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **G0** (baseline) | measured | 3.56 | **18.8** | 38.3 (25.0–50.0) | 31.2 | 2 | −315 | 50.0 | −667 | **+685** | +0.06 | −0.10 | 0.49 |
+| **G8** (highest green) | measured | 10.12 | **56.2** | 53.7 (43.8–68.8) | **0.0** | 3 | −773 | 75.0 | −1,931 | **+1,610** | +0.07 | −0.10 | 0.91 |
+| G0 (baseline) | as-is | 3.56 | 37.5 | 48.1 (37.5–62.5) | 18.8 | 2 | −315 | 75.0 | −515 | +1,380 | +0.17 | +0.01 | 1.26 |
+| G8 (highest green) | as-is | 10.12 | 62.5 | 63.7 (50.0–75.0) | 0.0 | 2 | −773 | 100.0 | −1,653 | +3,726 | +0.15 | −0.02 | 1.86 |
+
+TEST green-week MDE80 is **±38.6pp (G0) / ±49.1pp (G8)** on 16 weeks. It selected nothing and
+could not have.
+
+Three observations, reported as-is and changing nothing in §7:
+
+1. **The null verdict survives TEST.** Neither cell exceeds its own count-matched p95 on either
+   fill model. **G0 measured actually falls BELOW its own p5** (18.8 vs 25.0) — the third split
+   on which the shipped stack's week clustering is no better than a random reallocation of its
+   own trades, and the first on which it is arguably worse.
+2. **Unlike stage 1's survivor, the gates-open cell did NOT turn negative on TEST.** G8 is
+   **+$1,610 measured / +$3,726 as-is** against the baseline's +$685 / +$1,380, with **0% flat
+   weeks** vs 31.2%, 56.2% vs 18.8% green and 75% vs 50% green months — at 2.9× the drawdown
+   (−$1,931 vs −$667) and a 3-week red streak. Stage 1's F4 (which removed the *prev-day-range*
+   gates and kept catalyst) went negative on this same window; the catalyst-family cells did not.
+   **This is one 16-week window and it is consistent with §7's framing — more picks, more green
+   weeks, more drawdown — not with a discovery.**
+3. **Both cells are ~flat per pick on TEST** (R/pick +0.06 / +0.07 measured, ex-top-5% −0.10 for
+   both). 2026-06+ remains the weakest era for ORB in every configuration tested across both
+   stages, and the shipped stack's TRAIN t of 2.78 does not reappear here (t 0.49).
+
 
 ---
 
