@@ -1,0 +1,70 @@
+BT config (B+ parity): account=$53,333 N=16 risk=$375 threshold=0.012081536791 pdr_veto>=11.0 g1(True, rv20>=7.106, pdr>=9.226, short_history_veto=False) range_size_veto(True, <= 2.221) book=/home/ec2-user/onemil/research/orb_frequency/book_S16_F0_meas.csv
+BT config (winner stack): atr_floor=ON k=0.25 scale_out=ON frac=0.4 level_r=3.0
+Features CSV: /home/ec2-user/onemil/analysis_results/orb_features_20260916_2053.csv
+Opening range: 09:30 → 09:30+5m (ORB_RANGE_MINUTES; production = 5 — must match the window the features CSV was built with)
+RESIM CACHE: /home/ec2-user/onemil/research/fuckup_audit/Q_fill/dump_measured.csv (13033 rows) — bar walk skipped; exit physics are the dump's (must match this run's config)
+Loading bars for 0 pairs...
+Winner stack: building ATR14 lookup (shared atr14_t1, cache daily_bars)...
+Winner stack: ATR14 available for 0/0 symbol-days (missing => floor fail-open to range_low)
+Re-simulating with winner-stack exit (static lock + ATR floor + scale-out)...
+Winner stack: floor bound on 0 resimmed rows; 0 rows scaled 40%@+3.0R (counts are pre-selection, whole candidate set)
+Z-params + quintile cutoffs: orb.yaml literals (LIVE PARITY)
+Mults (orb.yaml literals — LIVE PARITY): {'Q1': 1.0, 'Q2': 1.0, 'Q3': 1.0, 'Q4': 1.0, 'Q5': 1.0}
+Q1 filter: dropped 1454 Q1 candidates (set ORB_SKIP_Q1=0 to disable)
+PM sizing mult: DISABLED via orb.yaml (sizing.pm_dollar_vol_mult.enabled=false) — all mults 1.0
+PDR veto: dropped 2571 pick(s) with prev_day_range_pct <= 11.0 (their P&L would have been -23,898; set ORB_PDR_VETO=0 to disable)
+G1 veto: dropped 286 pick(s) failing the volatility fingerprint (rv20>=7.106 AND pdr>=9.226); their P&L would have been -2,117 (set ORB_G1_VETO=0 to disable)
+Range-size veto: dropped 89 pick(s) with range_size_pct <= 2.221 (their P&L would have been +2,381; set ORB_RANGE_SIZE_VETO=0 to disable)
+Catalyst veto: dropped 589 newsless-and-alone pick(s) (their P&L would have been -700; ORB_CATALYST_VETO=0 to disable)
+Entered-inclusive book: 304 picks = 225 filled + 79 no-fill (slot consumed, $0) — 74.0% fill rate; 0 no-fill rows in the candidate set
+
+ORB defended pipeline + STATIC_LOCK_1R — monthly P&L (Jan'25-Apr'26)
+
+  month  days  green  red  day_wr_pct  picks  best_day  worst_day   pnl  cum_pnl  intra_dd
+2025-01     7      1    3          14      9       336       -226  -212     -212      -226
+2025-02     8      1    4          12      9       332       -161  -110     -322      -334
+2025-03     4      3    0          75      6       314          0   504      182         0
+2025-04     3      2    0          67      3       376          0   555      737         0
+2025-05     7      3    3          43      9     1,232       -210 1,509    2,246      -210
+2025-06     9      3    3          33     16       290       -160   444    2,690      -160
+2025-07     9      2    4          22     10        94       -115  -136    2,554      -304
+2025-08     4      1    2          25      5       158        -95     5    2,559       -95
+2025-09     9      4    4          44     18       868       -125 1,561    4,120      -141
+2025-10     9      2    5          22     15     1,670       -100 2,006    6,126      -210
+2025-11     8      2    6          25     20       354       -423  -793    5,333    -1,020
+2025-12    11      3    5          27     19       551       -410  -235    5,098      -414
+2026-01     8      3    4          38     15     1,255       -263   823    5,921      -361
+2026-02    11      3    4          27     20       952       -338   475    6,396      -438
+2026-03     8      4    2          50     13     1,883       -420 2,128    8,524      -454
+2026-04    13      2    7          15     19       498       -204   -98    8,426      -551
+2026-05     6      2    3          33      7       346       -133   223    8,649      -136
+2026-06    12      1    5           8     21       206       -239  -390    8,259      -285
+2026-07    14      7    5          50     32     1,406       -483 1,452    9,711      -913
+2026-08    14      2    7          14     29       701       -337   -44    9,668      -554
+2026-09     7      0    4           0      9         0       -107  -232    9,435      -125
+
+======================================================================
+Negative months
+======================================================================
+  2025-01  $-212  (7 days, 1G/3R, worst day $-226)
+  2025-02  $-110  (8 days, 1G/4R, worst day $-161)
+  2025-07  $-136  (9 days, 2G/4R, worst day $-115)
+  2025-11  $-793  (8 days, 2G/6R, worst day $-423)
+  2025-12  $-235  (11 days, 3G/5R, worst day $-410)
+  2026-04  $-98  (13 days, 2G/7R, worst day $-204)
+  2026-06  $-390  (12 days, 1G/5R, worst day $-239)
+  2026-08  $-44  (14 days, 2G/7R, worst day $-337)
+  2026-09  $-232  (7 days, 0G/4R, worst day $-107)
+
+======================================================================
+Summary (STATIC LOCK)
+======================================================================
+Months tracked:   21
+Negative months:  9 (42.9%)
+Best month:       2026-03  $+2,128
+Worst month:      2025-11  $-793
+Median month:     $+223
+Mean month:       $+449
+Cum P&L:          $+9,435
+
+Saved: /home/ec2-user/onemil/research/orb_frequency/monthly_S16_F0_meas.csv + /home/ec2-user/onemil/research/orb_frequency/book_S16_F0_meas.csv

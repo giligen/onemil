@@ -1,0 +1,5 @@
+BT config (B+ parity): account=$26,667 N=8 risk=$375 threshold=0.012081536791 pdr_veto>=11.0 g1(True, rv20>=7.106, pdr>=9.226, short_history_veto=False) range_size_veto(True, <= 2.221) book=research/orb_frequency/walkbook_tg_off.csv
+BT config (winner stack): atr_floor=ON k=0.25 scale_out=ON frac=0.4 level_r=3.0
+Features CSV: analysis_results/orb_features_20260916_2053.csv
+Opening range: 09:30 → 09:30+5m (ORB_RANGE_MINUTES; production = 5 — must match the window the features CSV was built with)
+Loading bars for 13033 pairs...

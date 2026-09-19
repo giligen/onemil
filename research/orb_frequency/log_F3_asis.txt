@@ -1,0 +1,63 @@
+BT config (B+ parity): account=$26,667 N=8 risk=$375 threshold=0.012081536791 pdr_veto>=11.0 g1(True, rv20>=7.106, pdr>=9.226, short_history_veto=False) range_size_veto(True, <= 2.221) book=/home/ec2-user/onemil/research/orb_frequency/book_F3_asis.csv
+BT config (winner stack): atr_floor=ON k=0.25 scale_out=ON frac=0.4 level_r=3.0
+Features CSV: /home/ec2-user/onemil/analysis_results/orb_features_20260916_2053.csv
+Opening range: 09:30 → 09:30+5m (ORB_RANGE_MINUTES; production = 5 — must match the window the features CSV was built with)
+RESIM CACHE: /home/ec2-user/onemil/research/fuckup_audit/D1_orb/candidates_dump.csv (13033 rows) — bar walk skipped; exit physics are the dump's (must match this run's config)
+Loading bars for 0 pairs...
+Winner stack: building ATR14 lookup (shared atr14_t1, cache daily_bars)...
+Winner stack: ATR14 available for 0/0 symbol-days (missing => floor fail-open to range_low)
+Re-simulating with winner-stack exit (static lock + ATR floor + scale-out)...
+Winner stack: floor bound on 0 resimmed rows; 0 rows scaled 40%@+3.0R (counts are pre-selection, whole candidate set)
+Z-params + quintile cutoffs: orb.yaml literals (LIVE PARITY)
+Mults (orb.yaml literals — LIVE PARITY): {'Q1': 1.0, 'Q2': 1.0, 'Q3': 1.0, 'Q4': 1.0, 'Q5': 1.0}
+Q1 filter: dropped 1454 Q1 candidates (set ORB_SKIP_Q1=0 to disable)
+PM sizing mult: DISABLED via orb.yaml (sizing.pm_dollar_vol_mult.enabled=false) — all mults 1.0
+PDR veto: dropped 1860 pick(s) with prev_day_range_pct <= 11.0 (their P&L would have been -17,056; set ORB_PDR_VETO=0 to disable)
+Catalyst veto: dropped 602 newsless-and-alone pick(s) (their P&L would have been +5,552; ORB_CATALYST_VETO=0 to disable)
+Entered-inclusive book: 282 picks = 213 filled + 69 no-fill (slot consumed, $0) — 75.5% fill rate; 0 no-fill rows in the candidate set
+
+ORB defended pipeline + STATIC_LOCK_1R — monthly P&L (Jan'25-Apr'26)
+
+  month  days  green  red  day_wr_pct  picks  best_day  worst_day   pnl  cum_pnl  intra_dd
+2025-01     7      2    2          29      8       600       -226   565      565      -226
+2025-02    10      2    6          20     13       574       -169   258      823      -350
+2025-03     5      3    1          60      7       314        -77   427    1,250         0
+2025-04     4      2    1          50      5       376        -52   503    1,752         0
+2025-05     9      2    4          22     11     1,232       -127 1,236    2,988      -179
+2025-06     8      3    3          38     13       237       -170   342    3,330      -263
+2025-07     8      3    2          38      8        94       -101   140    3,470      -114
+2025-08     6      2    2          33      6       158        -95    30    3,500      -169
+2025-09    10      2    7          20     17       868       -166   364    3,864      -448
+2025-10     9      3    4          33     14     1,670        -57 2,242    6,106       -85
+2025-11     8      2    5          25     16       504       -537   -97    6,009      -607
+2025-12    13      3    7          23     22       551       -296  -378    5,632      -510
+2026-01    11      4    7          36     17     1,255       -263   615    6,247      -310
+2026-02    11      3    5          27     21     1,049       -190 1,490    7,737      -209
+2026-03    11      5    5          45     14     1,883       -226 3,750   11,486      -289
+2026-04    12      2    7          17     15       498       -118   212   11,698      -401
+2026-05    10      1    7          10     12       346       -133   -88   11,610      -274
+2026-06    12      5    3          42     18       273       -239   565   12,175      -239
+2026-07    12      5    6          42     22     1,033       -282   809   12,983      -515
+2026-08    12      3    5          25     18       701       -121   615   13,599      -202
+2026-09     4      0    3           0      5         0       -107  -148   13,451       -41
+
+======================================================================
+Negative months
+======================================================================
+  2025-11  $-97  (8 days, 2G/5R, worst day $-537)
+  2025-12  $-378  (13 days, 3G/7R, worst day $-296)
+  2026-05  $-88  (10 days, 1G/7R, worst day $-133)
+  2026-09  $-148  (4 days, 0G/3R, worst day $-107)
+
+======================================================================
+Summary (STATIC LOCK)
+======================================================================
+Months tracked:   21
+Negative months:  4 (19.0%)
+Best month:       2026-03  $+3,750
+Worst month:      2025-12  $-378
+Median month:     $+427
+Mean month:       $+641
+Cum P&L:          $+13,451
+
+Saved: /home/ec2-user/onemil/research/orb_frequency/monthly_F3_asis.csv + /home/ec2-user/onemil/research/orb_frequency/book_F3_asis.csv
