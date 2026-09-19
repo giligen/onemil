@@ -18,8 +18,9 @@ TEST = **2026-06-01 → 2026-09-16** (~16 market weeks, ~50 picks at the shipped
 ## State
 
 - **Sealed at**: 2026-09-19, before any cell was scored.
-- **Recommendation commit**: _(filled in when the recommendation is committed)_
-- **Opened at**: _(filled in when `--reveal-test` is first used)_
+- **Recommendation commit**: `a12bc6e` (2026-09-19) — REPORT.md §8 committed before the seal was opened.
+- **Opened at**: 2026-09-19, immediately after `a12bc6e`, for exactly two cells:
+  the shipped B+ baseline (F0, N=8) and the rule's survivor (F4, N=8).
 
 ## Why this matters here
 

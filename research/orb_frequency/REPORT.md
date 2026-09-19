@@ -383,9 +383,30 @@ this book size.
 
 ## 9. TEST — the sealed split
 
-Sealed per `FREEZE.md`; opened once, after §8 was committed, for exactly two cells.
+Sealed per `FREEZE.md`; opened once, after §8 was committed at `a12bc6e`, for exactly the
+two cells the pre-registration named: the shipped B+ baseline and the rule's survivor.
+**TEST is 16 weeks and 57 baseline picks; its green-week MDE80 is +-38.6pp. It cannot
+select anything and it did not.**
 
-_(appended after the seal is opened)_
+| cell | fill model | picks/wk | **green%** | **flat%** | red streak | worst wk | MDD | $ | R/pick | ex-top5% R | t |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| shipped B+ (F0) | measured | 3.56 | **18.8** | 31.2 | 2 | -315 | -667 | **+685** | +0.062 | -0.104 | 0.49 |
+| shipped B+ (F0) | as-is | 3.56 | 37.5 | 18.8 | 2 | -315 | -515 | +1,380 | +0.166 | +0.005 | 1.26 |
+| F4 (the survivor) | measured | 10.81 | **37.5** | **0.0** | 3 | -698 | -1,225 | **-569** | -0.057 | -0.198 | -0.96 |
+| F4 (the survivor) | as-is | 10.81 | 43.8 | 0.0 | 3 | -698 | -1,173 | +101 | -0.026 | -0.164 | -0.42 |
+
+**TEST reproduces the study's central trade-off without ambiguity**: F4 **doubles the
+green-week share (18.8 -> 37.5%) and removes every flat week (31.2 -> 0.0%)** — and **turns
+the book negative** (+$685 -> -$569 measured; +$1,380 -> +$101 as-is). It is the §4 result
+again on a window nobody looked at.
+
+Two further honest observations on this split, neither of which changes §8:
+* The **shipped** book itself is close to edgeless on TEST under the measured fill model
+  (R/pick +0.062, ex-top-5% **-0.104**, t 0.49). The 2026-06+ era is the weakest of the
+  three for ORB in every configuration tested here.
+* F4's TEST result is **worse than its VAL result**, which is the ordinary decay pattern for
+  a cell selected as the maximum of a 45-cell grid. The recommendation in §8 — do not ship
+  F4 — stands, and TEST reinforces it rather than having chosen it.
 
 ### 9a. Touchgo exit walks
 
