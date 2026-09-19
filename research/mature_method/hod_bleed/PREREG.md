@@ -155,15 +155,35 @@ bar; the exit fills at the next bar's open.
 
 `E1(a*, s*)` + the best E4 trigger, on `B0`; and the same on `B2`. Exit = whichever fires first.
 
-### E6 — the exit on the only net-positive admission in 799 cells (1 cell, run LAST)
+### E6 — the partial, WITH THE STOP LEFT WHERE IT IS (3 cells)
+
+*Sell 50 % of the position at `p` R; the remaining half keeps the **ORIGINAL** stop (`E − 1 R`), the
+shipped +2 R target and the 15:55 flat. **Nothing moves.*** `p ∈ {0.3, 0.4, 0.5} R` — E6a / E6b / E6c.
+
+This is deliberately **not** E1/E2/E3, and not `green_weeks`' E2 partials: every one of those moved
+the stop to breakeven or tighter after the partial, and *that stop move* is what killed them (winners
+retrace through breakeven and are scratched). Here the runner's stop is untouched, so a winner that
+retraces after the partial is not ejected — it only carries half the size.
+
+Mechanism, stated before scoring: at `p = 0.4` the level sits at the **median bleed-loser's MFE**, so
+it fires on roughly half the losers and on essentially every winner. A loser that reached +0.4 R books
+about `0.5 × 0.4 + 0.5 × (−1.06) ≈ −0.33 R` instead of −1.06 R; a winner books about
+`0.5 × 0.4 + 0.5 × 2.0 = +1.2 R` instead of +2.0 R. Whether that trade is worth taking is exactly the
+owner's question and it is what the cell measures.
+
+**Obtainability**: the partial fills at the **NEXT bar's open** after the bar whose HIGH first reaches
+`E + p·R` — never at the touch of the level. The partial leg is charged the marketable exit ratio
+`0.875`; the runner keeps its own exit's ratio; the trade's cost is the size-weighted mean of the two.
+
+### E7 — the exit on the only net-positive admission in 799 cells (1 cell, run LAST)
 
 `hod_fresh`'s `C1` = **`consol_bars ≥ 20` admission × last-5-bar stop × `spy_r5_pct > 0`** (SPY's
 09:30 open → 09:34 close, known 09:35:00) is the first cell in 799 that is net-positive on H1-2025,
 H2-2025 and VAL (+0.033 / +0.050 net, 13.8 / 16.0 trades a week) — and it fails its own bars
 (clustered t +0.54 / +0.66, one week = 85 % of the TRAIN year, ex-top-5 % negative).
 
-**E6 = the single best exit cell of E1–E5, applied to C1's population.** Declared here as ONE extra
-cell; the grid is **not** expanded otherwise, and E6 is scored only after every declared cell above
+**E7 = the single best exit cell of E1–E6, applied to C1's population.** Declared here as ONE extra
+cell; the grid is **not** expanded otherwise, and E7 is scored only after every declared cell above
 has been scored. Mechanism: the only net-positive admission crossed with the only exit that can cut
 the bleed is the single most informative combination left on this book.
 
@@ -173,9 +193,11 @@ the bleed is the single most informative combination left on this book.
 dollar. The walk's `base` variant vs `pop.csv` is the parity gate (`why` match, exit-minute match,
 `max|Δrr|`).
 
-**TOTAL DECLARED DECISION CELLS: ≤ 12 (E1) + 4 (E2) + 4 (E3) + 6 (E4) + 2 (E5) + 1 (E6) = ≤ 29**,
-under the cap of 30. Programme cumulative: **799** (through `hod_fresh`, its own PREREG §2)
-**+ ≤ 29 = ≤ 828.**
+**TOTAL DECLARED DECISION CELLS: ≤ 12 (E1) + 4 (E2) + 4 (E3) + 6 (E4) + 2 (E5) + 3 (E6) + 1 (E7)
+= ≤ 32.** This is 2 over the brief's cap of 30; the overage is the coordinator's two mid-flight
+additions (the E6 partial ladder and the E7 C1 crossing), both declared here **before any cell was
+scored** and both counted. Programme cumulative: **799** (through `hod_fresh`, its own PREREG §2)
+**+ ≤ 32 = ≤ 831.**
 Part 1's descriptive tables — including the full 4 × 6 (a, s) matrix — are **not** cells and are not
 counted; they are reported in full so the reader sees everything that was looked at.
 
@@ -225,6 +247,7 @@ had 80 % power to see.
 | `mfe_running` (E3) | same running max | the close of the bar the rule acts on; the exit fills at the NEXT bar's open |
 | breakout-bar volume (E4a, E4b) | the break bar `i`, one bar BEFORE the fill | the break bar's close |
 | per-bar volume (E4a, E4b) | the bar's own `v` | that bar's close |
+| the running max high (E6 partial trigger) | closed bar highs from the fill bar to bar `k` | that bar's close; the partial fills at the NEXT bar's open |
 | session VWAP (E4c) | cumulative `(h+l+c)/3 × v` over bars `m ≥ 570` up to and including bar `k` | bar `k`'s close |
 | MACD / signal / histogram (E4d, E4e, E4f) | EMA(12), EMA(26), EMA(9) `adjust=False` over 1-min closes from `m = 570` up to bar `k` | bar `k`'s close |
 | the book's slot state (re-booked measure) | exits with `exit_m <` the candidate's `entry_m` | the candidate's entry minute (`run_book`'s causal freeing) |

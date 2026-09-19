@@ -158,6 +158,10 @@ def main():
                 't_vwap': (c[sl] < vwap[sl]),
                 't_hist': (hist[sl] < 0),
                 't_cross': xb[sl],
+                # exact float64 hit flags so the re-simulated `base` is BYTE-identical to the
+                # shipped walk above (a float32 R can round a price that exactly touched the stop)
+                'hit_stop': (l[sl] <= ST),
+                'hit_tgt': (c[sl] >= tgt),
             }))
             srows.append(dict(sid=int(r.sid), day=day, symbol=r.symbol, entry_m=int(r.entry_m),
                               break_m=int(r.break_m), E=E, ST=ST, Rd=Rd, e_over_rd=E / Rd,
