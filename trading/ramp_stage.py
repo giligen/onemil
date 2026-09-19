@@ -38,8 +38,10 @@ STAGE_STARTS: Dict[str, List[Dict[str, str]]] = {
         {'start': '2026-09-07',
          'reason': 'P1 live launch — L0 $150 (docs/bf_p1_ramp.md)'},
         {'start': '2026-09-21',
-         'reason': 'ADV-gate-off stage (min_daily_volume 0) — ZERO live '
-                   'trades under the config that boots Monday '
+         'reason': 'P1 resume after the 9/14 pause — ADV gate 200K and '
+                   'conviction 1.8 both RESTORED 9/19 (entry_cost_audit, '
+                   'bf_frequency week-by-week); ZERO live trades under P1 '
+                   'yet, so this is P1\'s first real stage '
                    '(docs/scaling_plan_2026.md)'},
     ],
     'orb': [

@@ -215,7 +215,8 @@ def main() -> int:
     all_sessions = session_dates(stage_start)
     fz = ramp_freeze.get('bf')
     live_sessions = ramp_freeze.unfrozen_sessions('bf', all_sessions)
-    ref = band_mod.bf_reference()
+    adv_gate = int(cfg.get('scanner', {}).get('min_daily_volume', 200_000))
+    ref = band_mod.bf_reference(adv_gate)
     bt_r = band_mod.load_reference_r(ref, 'bf')
     s = compute_stats(trades, base, len(live_sessions), bt_r=bt_r,
                       frozen=fz.frozen,

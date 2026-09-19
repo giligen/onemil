@@ -15,7 +15,8 @@ a live sample of n.
 References (the honest books — one per shipping config):
   ORB catalyst-veto ON : research/fuckup_audit/Q_fill/book_measured_n8.csv
   ORB catalyst-veto OFF: research/orb_gates2/book_G3_meas.csv   <- boots Monday
-  BF                   : research/bf_frequency/runs/VOL_OFF.csv (min_daily_volume 0)
+  BF ADV gate 200K     : research/bf_frequency/runs/P1.csv      <- shipped (reverted 9/19)
+  BF ADV gate 0        : research/bf_frequency/runs/VOL_OFF.csv
 
 R definitions (chosen so the live side is computable from trades.db):
   ORB  R = pnl_pct / range_size_pct  — entry range_high, stop range_low, so the
@@ -50,7 +51,9 @@ NO_DATA = 'NO-DATA'      # no live trades yet, or no usable BT reference
 
 ORB_REF_VETO_ON = ROOT / 'research' / 'fuckup_audit' / 'Q_fill' / 'book_measured_n8.csv'
 ORB_REF_VETO_OFF = ROOT / 'research' / 'orb_gates2' / 'book_G3_meas.csv'
-BF_REF = ROOT / 'research' / 'bf_frequency' / 'runs' / 'VOL_OFF.csv'
+BF_REF_P1 = ROOT / 'research' / 'bf_frequency' / 'runs' / 'P1.csv'
+BF_REF_ADV_OFF = ROOT / 'research' / 'bf_frequency' / 'runs' / 'VOL_OFF.csv'
+BF_REF = BF_REF_P1   # legacy name; the shipped config is P1 (ADV gate 200K)
 BF_BT_RISK_USD = 2000.0
 
 
@@ -90,10 +93,22 @@ def orb_reference(catalyst_veto_enabled: bool) -> Reference:
                                        'that boots Monday)')
 
 
-def bf_reference() -> Reference:
-    return Reference(BF_REF, 'bf_frequency/runs/VOL_OFF.csv '
-                             '(min_daily_volume 0 — the config that boots '
-                             'Monday, R = pnl/$2,000)')
+def bf_reference(min_daily_volume: int = 200_000) -> Reference:
+    """The BF book matching the config that is actually running.
+
+    2026-09-19: the ADV gate was dropped and reverted the same day
+    (research/mature_method/entry_cost_audit/REPORT.md — the gate's
+    "wrong-side" separation was a spread-blind artefact; the names it
+    removes carry a measured 250 bps spread). Follow the live knob like
+    orb_reference() follows the catalyst veto, so the band can never be
+    built on a book the engine is not running.
+    """
+    if min_daily_volume <= 0:
+        return Reference(BF_REF_ADV_OFF, 'bf_frequency/runs/VOL_OFF.csv '
+                                         '(min_daily_volume 0, R = pnl/$2,000)')
+    return Reference(BF_REF_P1, 'bf_frequency/runs/P1.csv '
+                                '(min_daily_volume 200000 — shipped P1, '
+                                'R = pnl/$2,000)')
 
 
 def _f(v) -> Optional[float]:

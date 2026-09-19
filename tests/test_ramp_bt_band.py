@@ -29,15 +29,22 @@ class TestReferences:
         assert off.path == bb.ORB_REF_VETO_OFF
         assert 'boots Monday' in off.label   # named in the checker output
 
-    def test_bf_reference_is_the_vol_off_book(self):
-        ref = bb.bf_reference()
-        assert ref.path == bb.BF_REF and 'min_daily_volume 0' in ref.label
+    def test_bf_reference_follows_the_adv_gate(self):
+        # 2026-09-19: the ADV gate was dropped and reverted the same day
+        # (entry_cost_audit). The band must follow the LIVE knob, like the
+        # ORB reference follows the catalyst veto.
+        on = bb.bf_reference(200_000)
+        off = bb.bf_reference(0)
+        assert on.path == bb.BF_REF_P1 and 'min_daily_volume 200000' in on.label
+        assert off.path == bb.BF_REF_ADV_OFF and 'min_daily_volume 0' in off.label
+        assert bb.bf_reference().path == bb.BF_REF_P1   # default = shipped P1
 
     def test_shipped_references_exist_and_parse(self):
         """The honest books must be on disk — a missing one silently kills the gate."""
         for ref, book in ((bb.orb_reference(True), 'orb'),
                           (bb.orb_reference(False), 'orb'),
-                          (bb.bf_reference(), 'bf')):
+                          (bb.bf_reference(200_000), 'bf'),
+                          (bb.bf_reference(0), 'bf')):
             assert ref.exists, f"missing BT reference {ref.path}"
             r = bb.load_reference_r(ref, book)
             assert len(r) > 30 and all(isinstance(x, float) for x in r)
@@ -131,9 +138,9 @@ class TestBand:
 
     def test_band_line_states_the_rule_and_the_reference(self):
         band = bb.bootstrap_band(self.dist, 8)
-        ref = bb.bf_reference()
+        ref = bb.bf_reference(200_000)
         line = bb.band_line(bb.IN_BAND, 0.4, band, ref)
-        assert 'IN-BAND' in line and 'n=8' in line and 'VOL_OFF' in line
+        assert 'IN-BAND' in line and 'n=8' in line and 'P1.csv' in line
         assert bb.BAND_RULE in line
         empty = bb.band_line(bb.NO_DATA, None, None, ref)
         assert 'NO-DATA' in empty and bb.BAND_RULE in empty

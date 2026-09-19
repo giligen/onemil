@@ -46,7 +46,7 @@ scanner:
 
   # Minimum daily share volume — filters untradeable garbage
   # <50K vol: 25% WR (garbage), 200K+: 53% WR. Filters 30% of trades, keeps 90% of PnL.
-  min_daily_volume: 0        # 2026-09-19 200_000 -> 0 (BULL FLAG ONLY -- trading_engine.py is the sole reader). The gate cut 41% of the field and separated NEGATIVE in both years (-0.033 pooled, t -0.29): the trades it rejected beat the ones it kept. research/bf_frequency/REPORT.md.
+  min_daily_volume: 200_000  # 2026-09-19: dropped to 0 and REVERTED the same day before it booted. The "wrong-side" separation (-0.033R) was a spread-blind artefact of Stage-2's flat 50 bps entry; the names the gate removes carry a MEASURED median spread of 250 bps and the delta re-prices to -$9,440 strict / +$1,162 signed. The gate's true separation is about +0.12R. research/mature_method/entry_cost_audit/REPORT.md. BULL FLAG ONLY (trading_engine.py).
 
   # Minimum daily dollar volume — filters untradeable micro-caps
   # $3M = catches EUDA ($1M), GLND ($1M), keeps BEX ($20M), CORD ($28M)
