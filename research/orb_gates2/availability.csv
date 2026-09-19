@@ -1,0 +1,31 @@
+field,split,n,missing_pct
+avg_daily_volume_20d,TRAIN,6736,0.0
+avg_daily_volume_20d,VAL,3456,0.0
+avg_daily_volume_20d,TEST,2841,0.0
+gap_pct,TRAIN,6736,0.0
+gap_pct,VAL,3456,0.0
+gap_pct,TEST,2841,0.0
+prev_day_range_pct,TRAIN,6736,0.0
+prev_day_range_pct,VAL,3456,0.0
+prev_day_range_pct,TEST,2841,0.0
+range_close_position,TRAIN,6736,0.0
+range_close_position,VAL,3456,0.0
+range_close_position,TEST,2841,0.0
+range_return_pct,TRAIN,6736,0.0
+range_return_pct,VAL,3456,0.0
+range_return_pct,TEST,2841,0.0
+range_size_pct,TRAIN,6736,0.0
+range_size_pct,VAL,3456,0.0
+range_size_pct,TEST,2841,0.0
+range_total_volume,TRAIN,6736,0.0
+range_total_volume,VAL,3456,0.0
+range_total_volume,TEST,2841,0.0
+return_volatility_20d,TRAIN,6736,0.0
+return_volatility_20d,VAL,3456,0.0
+return_volatility_20d,TEST,2841,0.0
+news pair (tri-state),TRAIN,6736,0.0
+underlying anchor,TRAIN,6736,10.302850356294536
+news pair (tri-state),VAL,3456,0.0
+underlying anchor,VAL,3456,9.25925925925926
+news pair (tri-state),TEST,2841,0.0
+underlying anchor,TEST,2841,12.284406898979233
