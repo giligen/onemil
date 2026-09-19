@@ -45,6 +45,12 @@ durable-cron mtimes, and the GREEN/YELLOW/RED trajectory against the scaling pla
 | 23:00 Mon–Fri | `build_hod_volume_profile.py` | HOD rv_profile checkpoints (dry run needs it) | no |
 | Sun 20:00 | `orb_weekly_refit.py` | ORB selection refit, 26-week window (owner 9/8) | on failure |
 
+Gate-1 freeze state (set by the two parity jobs above, read by both ramp checkers):
+`logs/ramp_freeze.json` — `{frozen, since, reason, by, frozen_dates}` per book. A freeze stops the stage clock and
+blocks ADVANCE; clearing is MANUAL and logged:
+`python3 scripts/bf_ramp_check.py --clear-freeze bf "<reason>"` (or `orb_ramp_check.py --clear-freeze orb ...`).
+No cron invocation changed for this — the jobs' own commands are unchanged.
+
 Backup of the crontab before today's edit: the session scratchpad `crontab.bak.20260919`; `crontab -l` is the
 truth. Retired scripts stay in the repo (`weekly_report.py`, `touchgo_daily_debug.py`, `go_backstop.py`,
 `hod_break_eod_check.py`, `hod_break_miss_audit.py` — the last two are still CALLED by the daily report, just not

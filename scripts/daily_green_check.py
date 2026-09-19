@@ -20,6 +20,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import report_common as rc
+from trading import ramp_freeze
+
+# Gate-1 HARD parity items (docs/scaling_plan_2026.md): a reason line that
+# starts with one of these means "we do not know what we are running" and
+# FREEZES the ORB ramp (size unchanged, entries continue, stage clock stops).
+# Everything else that reds a day (e.g. service-uptime CONTEXT) is a P&L /
+# operations event, not a parity breach.
+HARD_PARITY_MARKERS = (
+    'pm_mult drift vs recompute',      # recorded vs recomputed sizing mult
+    'BT picks never ordered live',     # selection parity
+    'fill-parity',                     # BT filled, live never filled
+    'unattributed exits',              # exit parity
+    'exit_pending_verification',       # unverified exit rows
+    'composite drift BT vs live',      # decision parity (z-param desync)
+    'floored-stop drift',              # live monitored an unvalidated stop
+)
+
+
+def parity_breaches(reasons) -> list:
+    """The subset of red-day reasons that are Gate-1 HARD parity breaches."""
+    return [r for r in reasons
+            if any(m in r for m in HARD_PARITY_MARKERS)]
 
 
 def build_message(v: dict, streak: int, pnl: dict,
@@ -117,6 +139,16 @@ def main() -> int:
     bf_txt = rc.bf_rails_line(rc.bf_rails_status(day))
     sizing_txt = '\n'.join(
         x for x in (rc.sizing_block(attr), lag_txt, bf_txt) if x)
+    # Gate-1: a HARD parity breach FREEZES the ORB ramp. Never automatic to
+    # clear — `orb_ramp_check.py --clear-freeze orb "<reason>"`.
+    breaches = parity_breaches(v['reasons'])
+    if breaches and not args.dry_run:
+        ramp_freeze.set_freeze('orb', '; '.join(breaches), day=day,
+                               notify=not args.no_telegram)
+        print(f"RAMP FREEZE set on ORB ({day}): {breaches}", flush=True)
+    elif breaches:
+        print(f"DRY RUN — would FREEZE ORB ramp ({day}): {breaches}",
+              flush=True)
     msg = build_message(v, streak, pnl, sizing_txt=sizing_txt)
     print(msg, flush=True)
     if not args.no_telegram and not args.dry_run:

@@ -74,6 +74,34 @@ participation checks exist to test. The November-15 milestone is not reachable o
 reaching it on evidence would have required.
 
 ## What this changes on Monday
-Nothing in size. What changes is that a parity breach now FREEZES the stage clock (it used to only turn a streak
-red), and the Saturday review scores Gate 2 items 3 and 4 (ex-monster and BT-band) which no ramp checker computes
-yet — `scripts/bf_ramp_check.py` and `scripts/orb_ramp_check.py` need those two columns added.
+Nothing in size. What changed is that a parity breach now FREEZES the stage clock (it used to only turn a streak
+red), and Gate-2 items 3 and 4 are now computed rather than eyeballed. **Built and shipped 2026-09-19** (tests
+first, suite green; no config, order, service or cron invocation touched):
+
+* **Both ramp checkers print the two new columns**, read-only over `data/trades.db` (`mode=ro`):
+  * `ex-monster:` stage P&L with the single best trade/fill removed, in u (BF) or % of budget (ORB), and whether it
+    is above water. ADVANCE now requires it.
+  * `BT band:` live mean R on n vs the bootstrap `[p5, p10, p90]` of the backtest's own per-trade R for that n
+    (2,000 draws, fixed seed — reproducible), with the classification BELOW-p5 / BELOW-p10 / IN-BAND / ABOVE-p90 and
+    the rule printed next to it. ADVANCE requires IN-BAND; DEMOTE now includes BELOW-p5 after ≥ 8 trades.
+    R is `pnl ÷ base risk` (BF, vs `research/bf_frequency/runs/VOL_OFF.csv` at its $2K normalization) and
+    `pnl ÷ total_risk` (ORB, vs `pnl_pct ÷ range_size_pct` in the book). The ORB reference FOLLOWS the running
+    config and is named in the output: `research/orb_gates2/book_G3_meas.csv` while the catalyst veto is OFF (the
+    variant that boots Monday), `research/fuckup_audit/Q_fill/book_measured_n8.csv` when it is ON.
+    A missing/unreadable reference reads NO-DATA and blocks ADVANCE — an unscored gate is never a passed gate.
+  * Shared modules: `trading/ramp_bt_band.py`, `trading/ramp_freeze.py` (one spec, both checkers).
+* **Parity FREEZE is state, not a memo**: `logs/ramp_freeze.json`, keyed by book, `{frozen, since, reason, by,
+  frozen_dates, history}`. `scripts/daily_green_check.py` freezes ORB on any HARD parity fail it already detects
+  (recorded-vs-recomputed mult drift, BT pick never ordered, fill-parity, unattributed exit,
+  `exit_pending_verification`, composite drift, floored-stop drift); `scripts/bf_decision_parity.py` freezes BF on a
+  decision/exit-type disagreement (BT_ONLY / LIVE_ONLY / exit_reason mismatch / pnl sign flip — fill drift stays the
+  soft flag the table above makes it, and a BT_STALE day never freezes). A `[RAMP FREEZE]` Telegram goes out on the
+  first freeze via `scripts/send_telegram_alert.py`. Both ramp checkers print `FROZEN since <date>: <reason>`,
+  refuse to emit ADVANCE regardless of P&L, and EXCLUDE frozen sessions from the stage clock — permanently, so a
+  cleared freeze never retro-credits the 15-session minimum. Clearing is MANUAL and logged (who/why):
+  `python scripts/{bf,orb}_ramp_check.py --clear-freeze {bf|orb} "<reason>"`.
+* **BF parity harness re-pointed at the config that boots**: `bf_decision_parity.py` read its Stage-2 sizing from a
+  hardcoded `--risk 60` while live had ramped to $150; it now reads `config.yaml` at RUN TIME (capital, risk,
+  max_shares) and prints the gate values it judged against (`trading.enabled`, `scanner.min_daily_volume`,
+  `conviction_scoring.min_threshold`) so a config change is visible in the report. The Stage-2 subprocess already
+  re-reads the gates itself, so the whole harness now follows the live config with nothing cached.

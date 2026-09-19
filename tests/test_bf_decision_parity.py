@@ -323,3 +323,140 @@ class TestRendering:
         assert 'BOTH  BEZ' in out and 'BT_ONLY   OESX' in out \
             and 'LIVE_ONLY LUNL' in out
         assert 'SIGN FLIP' in out
+
+
+class TestLiveConfigRepoint:
+    """2026-09-19: the harness must judge the config that BOOTS, not a
+    hardcoded snapshot of an older one (it was pinned at --risk 60 while
+    live ran $150 and the gates had moved to min_daily_volume 0 / conv 1.8)."""
+
+    def write_cfg(self, path, risk, vol, conv, enabled=True, capital=5000,
+                  max_shares=15000):
+        path.write_text(
+            f"trading:\n"
+            f"  enabled: {str(enabled).lower()}\n"
+            f"  capital: {capital}\n"
+            f"  risk_per_trade: {risk}\n"
+            f"  max_shares: {max_shares}\n"
+            f"  conviction_scoring:\n"
+            f"    min_threshold: {conv}\n"
+            f"scanner:\n"
+            f"  min_daily_volume: {vol}\n")
+        return path
+
+    def test_sizing_args_come_from_the_live_config(self, tmp_path):
+        p = self.write_cfg(tmp_path / 'c.yaml', 150, 0, 1.8)
+        assert bp.bt_sizing_args(p) == ['--capital', '5000', '--risk', '150',
+                                        '--max-shares', '15000']
+
+    def test_a_config_change_flows_through(self, tmp_path):
+        """The proof that nothing is cached: edit the file, re-read, see it."""
+        p = self.write_cfg(tmp_path / 'c.yaml', 150, 0, 1.8)
+        before = bp.live_trading_config(p)
+        assert (before['risk'], before['min_daily_volume'],
+                before['conviction_min_threshold']) == (150.0, 0, 1.8)
+        self.write_cfg(p, 400, 500000, 2.5, enabled=False, max_shares=9000)
+        after = bp.live_trading_config(p)
+        assert (after['risk'], after['min_daily_volume'],
+                after['conviction_min_threshold'],
+                after['enabled'], after['max_shares']) == \
+            (400.0, 500000, 2.5, False, 9000)
+        assert bp.bt_sizing_args(p)[3] == '400'
+
+    def test_the_booting_config_is_what_the_harness_reads(self):
+        """The real config.yaml: the Monday gate values must be visible."""
+        cfg = bp.live_trading_config()
+        assert cfg['min_daily_volume'] == 0
+        assert cfg['conviction_min_threshold'] == 1.8
+        assert cfg['enabled'] is True
+        assert cfg['risk'] > 0
+
+    def test_unreadable_config_is_loud_and_falls_back(self, tmp_path, caplog):
+        p = tmp_path / 'missing.yaml'
+        with caplog.at_level('ERROR'):
+            cfg = bp.live_trading_config(p)
+        assert cfg['risk'] == bp.BT_SIZING_FALLBACK['risk']
+        assert 'WRONG' in caplog.text
+
+    def test_config_line_names_the_gates(self, tmp_path):
+        cfg = bp.live_trading_config(
+            self.write_cfg(tmp_path / 'c.yaml', 150, 0, 1.8))
+        line = bp.config_line(cfg)
+        assert 'min_daily_volume=0' in line
+        assert 'conviction_min_threshold=1.8' in line and 'risk=$150' in line
+
+    def test_summary_shows_the_config(self, tmp_path):
+        rep = {'day': '2026-09-18', 'status': 'AGREE', 'cache_path': 'x',
+               'cache_max_date': '2026-09-18', 'n_bt_trades': 0,
+               'n_live_rows': 0, 'bt_stale': False, 'both': [], 'bt_only': [],
+               'live_only': [],
+               'live_config': bp.live_trading_config(
+                   self.write_cfg(tmp_path / 'c.yaml', 150, 0, 1.8))}
+        assert 'min_daily_volume=0' in bp.format_summary(rep)
+
+
+class TestHardParityBreaches:
+    """A decision / exit-type disagreement FREEZES the BF ramp."""
+
+    def rep(self, divergences, stale=False):
+        return {'bt_stale': stale, 'divergences': divergences}
+
+    def test_decision_and_exit_disagreements_are_breaches(self):
+        d = ['BEZ: exit_reason BT=stop vs live=trail_stop',
+             'BEZ: pnl SIGN FLIP: BT $-469.00 vs live $+221.00',
+             'ABC: BT_ONLY — live_missed (investigate) (BT $+10.00 stop)',
+             'LUNL: LIVE_ONLY — off_bt_universe $+5.00']
+        assert bp.hard_parity_breaches(self.rep(d)) == d
+
+    def test_fill_drift_alone_is_soft(self):
+        d = ['ABC: live order never filled (status=canceled) while BT '
+             'simulated $+10.00 (stop)']
+        assert bp.hard_parity_breaches(self.rep(d)) == []
+
+    def test_stale_bt_never_freezes(self):
+        d = ['ABC: BT_ONLY — live_missed (investigate)']
+        assert bp.hard_parity_breaches(self.rep(d, stale=True)) == []
+
+    def test_clean_day_has_no_breach(self):
+        assert bp.hard_parity_breaches(self.rep([])) == []
+
+
+class TestMainSetsTheFreeze:
+    def _report(self, divergences, stale=False):
+        return {'day': '2026-09-18', 'status': 'DIVERGE(1)',
+                'cache_path': 'x', 'cache_max_date': '2026-09-18',
+                'n_bt_trades': 1, 'n_live_rows': 1, 'bt_stale': stale,
+                'both': [], 'bt_only': [], 'live_only': [],
+                'divergences': divergences, 'n_divergent': len(divergences),
+                'live_config': bp.live_trading_config()}
+
+    def _patch(self, monkeypatch, tmp_path, rep):
+        from trading import ramp_freeze as rf
+        monkeypatch.setattr(rf, 'FREEZE_PATH', tmp_path / 'freeze.json')
+        monkeypatch.setattr(rf, 'send_freeze_telegram', lambda *a, **k: True)
+        monkeypatch.setattr(bp, 'build_report', lambda day: rep)
+        monkeypatch.setattr(bp.rc, 'send_telegram', lambda m: True)
+        monkeypatch.setattr(sys, 'argv',
+                            ['bf_decision_parity.py', '--date', '2026-09-18',
+                             '--no-telegram',
+                             '--json-out', str(tmp_path / 'out.json')])
+        return rf
+
+    def test_exit_type_disagreement_freezes_bf(self, monkeypatch, tmp_path):
+        rf = self._patch(monkeypatch, tmp_path, self._report(
+            ['BEZ: exit_reason BT=stop vs live=trail_stop']))
+        assert bp.main() == 0
+        st = rf.get('bf')
+        assert st.frozen and st.since == '2026-09-18' and 'BEZ' in st.reason
+
+    def test_agreeing_day_leaves_the_ramp_running(self, monkeypatch, tmp_path):
+        rf = self._patch(monkeypatch, tmp_path, self._report([]))
+        assert bp.main() == 0
+        assert not rf.is_frozen('bf')
+
+    def test_no_freeze_flag_reports_without_writing(self, monkeypatch, tmp_path):
+        rf = self._patch(monkeypatch, tmp_path, self._report(
+            ['ABC: BT_ONLY — live_missed (investigate)']))
+        monkeypatch.setattr(sys, 'argv', sys.argv + ['--no-freeze'])
+        assert bp.main() == 0
+        assert not rf.is_frozen('bf')

@@ -60,14 +60,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import report_common as rc  # noqa: E402  (prev_trading_day_utc, send_telegram)
+from trading import ramp_freeze  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 PARITY_DIR = ROOT / 'logs' / 'bf_parity'
+CONFIG_PATH = ROOT / 'config.yaml'
 
-# Sizing args MUST mirror scripts/nightly_bt_update.sh (which mirrors live
-# config.yaml) so cached/BT pnl is directly comparable to live trades.
-BT_SIZING_ARGS = ['--capital', '5000', '--risk', '60', '--max-shares', '15000']
+# Sizing defaults ONLY for a config.yaml that cannot be read. The real values
+# are read from the LIVE config at every run (see bt_sizing_args): on
+# 2026-09-19 these were hardcoded at `--risk 60` while live had ramped to
+# $150 and the gates had moved (min_daily_volume 0, conviction 1.8) — a
+# harness judging the wrong config cannot evaluate Gate 1.
+BT_SIZING_FALLBACK = {'capital': 5000.0, 'risk': 150.0, 'max_shares': 15000}
 BT_SUBPROCESS_TIMEOUT_S = 600
+
+# Gate-1 HARD parity items for BF (docs/scaling_plan_2026.md): a decision or
+# exit-type disagreement means we do not know what we are running -> FREEZE.
+# 'live order never filled' is deliberately NOT here: the doc makes fill drift
+# a SOFT flag (2 days -> freeze), not a same-day breach.
+HARD_PARITY_MARKERS = ('exit_reason BT=', 'pnl SIGN FLIP',
+                       'BT_ONLY —', 'LIVE_ONLY —')
 
 # Classification labels (LIVE_ONLY)
 LABEL_OFF_UNIVERSE = 'off_bt_universe'
@@ -110,6 +122,67 @@ def production_cache_path() -> Path:
     return ROOT / 'data' / (
         f"bull_flag_cache_e{int(entry_slip * 10000)}"
         f"_x{int(exit_slip * 10000)}.csv")
+
+
+def live_trading_config(cfg_path: Path = CONFIG_PATH) -> Dict:
+    """The live gate/sizing knobs, READ AT RUN TIME (never cached).
+
+    The Stage-2 subprocess re-reads config.yaml itself for the decision gates
+    (scanner.min_daily_volume, conviction_scoring.min_threshold), so the only
+    thing this harness must not hardcode is the SIZING it passes on the CLI
+    plus the gate values it reports. Reading them here every run is what makes
+    "the config that boots Monday" the thing being judged.
+    """
+    try:
+        import yaml
+        cfg = yaml.safe_load(cfg_path.read_text()) or {}
+    except Exception as e:  # noqa: BLE001 - report tool, must stay alive
+        logger.error(
+            f"config.yaml unreadable at {cfg_path} ({e}) — falling back to "
+            f"{BT_SIZING_FALLBACK}; the harness may be judging the WRONG "
+            f"config, treat its verdict as unproven")
+        cfg = {}
+    trading = cfg.get('trading', {}) or {}
+    scanner = cfg.get('scanner', {}) or {}
+    conv = trading.get('conviction_scoring', {}) or {}
+    return {
+        'capital': float(trading.get('capital', BT_SIZING_FALLBACK['capital'])),
+        'risk': float(trading.get('risk_per_trade', BT_SIZING_FALLBACK['risk'])),
+        'max_shares': int(trading.get('max_shares', BT_SIZING_FALLBACK['max_shares'])),
+        'enabled': bool(trading.get('enabled', False)),
+        'min_daily_volume': scanner.get('min_daily_volume'),
+        'conviction_min_threshold': conv.get('min_threshold'),
+    }
+
+
+def bt_sizing_args(cfg_path: Path = CONFIG_PATH) -> List[str]:
+    """`--capital/--risk/--max-shares` for the Stage-2 subprocess, from LIVE config."""
+    c = live_trading_config(cfg_path)
+    return ['--capital', f"{c['capital']:.0f}",
+            '--risk', f"{c['risk']:.0f}",
+            '--max-shares', str(c['max_shares'])]
+
+
+def config_line(cfg: Dict) -> str:
+    """One line naming the config this run judged (auditability)."""
+    return (f"  Config:        trading.enabled={cfg['enabled']} "
+            f"risk=${cfg['risk']:.0f} capital=${cfg['capital']:.0f} "
+            f"max_shares={cfg['max_shares']} | gates: "
+            f"min_daily_volume={cfg['min_daily_volume']} "
+            f"conviction_min_threshold={cfg['conviction_min_threshold']}")
+
+
+def hard_parity_breaches(rep: Dict) -> List[str]:
+    """Gate-1 breaches in a report: decision / exit-type disagreements.
+
+    BT_STALE days yield NONE — the BT side is unknowable, and "unknown BT" is
+    already refused as clean parity elsewhere; freezing on it would fire on
+    every cron hiccup rather than on a real engine/BT disagreement.
+    """
+    if rep.get('bt_stale'):
+        return []
+    return [d for d in rep.get('divergences', [])
+            if any(m in d for m in HARD_PARITY_MARKERS)]
 
 
 def scan_cache(cache_path: Path, day: str) -> Tuple[Optional[str], Set[str]]:
@@ -156,7 +229,7 @@ def run_stage2_backtest(day: str, output_csv: Path) -> List[Dict]:
     cmd = [sys.executable, str(ROOT / 'batch_backtest.py'),
            '--start', day, '--end', day,
            '--skip-missing',
-           '--output', str(output_csv)] + BT_SIZING_ARGS
+           '--output', str(output_csv)] + bt_sizing_args()
     logger.info(f"Running Stage-2 BT: {' '.join(cmd)}")
     t0 = time.time()
     res = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True,
@@ -503,6 +576,7 @@ def build_report(day: str,
         out_csv.parent.mkdir(parents=True, exist_ok=True)
         bt_trades = run_stage2_backtest(day, out_csv)
 
+    live_cfg = live_trading_config()
     live_rows = load_live_bf_rows(day, db_path=db_path)
     cls = classify_day(
         bt_trades, live_rows,
@@ -515,6 +589,7 @@ def build_report(day: str,
         'status': overall_status(bt_stale, cache_max_date,
                                  cls['n_divergent']),
         'bt_stale': bt_stale,
+        'live_config': live_cfg,
         'cache_path': str(cache_path),
         'cache_max_date': cache_max_date,
         'stage1_day_symbols': sorted(day_symbols),
@@ -536,8 +611,10 @@ def format_summary(rep: Dict) -> str:
         f"  BT trades:     {rep['n_bt_trades']}"
         + ("  [UNKNOWABLE — stale]" if rep['bt_stale'] else ""),
         f"  Live rows:     {rep['n_live_rows']} (all order_status)",
-        "-" * 70,
     ]
+    if rep.get('live_config'):
+        lines.append(config_line(rep['live_config']))
+    lines.append("-" * 70)
     for c in rep['both']:
         mark = 'DIVERGE' if c['divergent'] else 'ok'
         eb = (f"{c['entry_delta_bps']:+.1f}bps"
@@ -607,6 +684,10 @@ def main() -> int:
         '--no-telegram', action='store_true',
         help="Skip the Telegram send (validation/dev runs)")
     parser.add_argument(
+        '--no-freeze', action='store_true',
+        help="Do not set the BF ramp freeze on a hard parity breach "
+             "(validation/dev runs only)")
+    parser.add_argument(
         '--json-out', default=None,
         help="Override JSON output path "
              "(default: logs/bf_parity/bf_parity_<D>.json)")
@@ -631,6 +712,17 @@ def main() -> int:
     try:
         rep = build_report(day)
         print(format_summary(rep))
+        # Gate-1: a decision / exit-type disagreement FREEZES the BF ramp
+        # (size unchanged, entries continue, stage clock stops). Clearing is
+        # manual: `bf_ramp_check.py --clear-freeze bf "<reason>"`.
+        breaches = hard_parity_breaches(rep)
+        rep['hard_parity_breaches'] = breaches
+        if breaches and not args.no_freeze:
+            ramp_freeze.set_freeze('bf', '; '.join(breaches), day=day,
+                                   notify=not args.no_telegram)
+            print(f"RAMP FREEZE set on BF ({day}): {breaches}")
+        elif breaches:
+            print(f"--no-freeze: would FREEZE BF ({day}): {breaches}")
         json_path = (Path(args.json_out) if args.json_out
                      else PARITY_DIR / f'bf_parity_{day}.json')
         write_json(rep, json_path)

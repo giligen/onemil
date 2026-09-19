@@ -433,3 +433,83 @@ class TestFillParity:
         self._patch(monkeypatch, rows=[], bt=[], bt_max='2026-07-01')
         v = rc.green_verdict('2026-07-30')
         assert v['checks']['fill_parity'].startswith('SKIPPED')
+
+
+class TestParityFreeze:
+    """Gate-1 of docs/scaling_plan_2026.md: a HARD parity breach FREEZES the
+    ORB ramp (size unchanged, entries continue, stage clock stops)."""
+
+    def test_hard_markers_are_classified(self):
+        from daily_green_check import parity_breaches
+        hard = [
+            "pm_mult drift vs recompute: ['ABC 2.0 vs 1.0']",
+            "BT picks never ordered live: ['DEF']",
+            "fill-parity: BT FILLED but live order never filled: ['GHI']",
+            "unattributed exits: ['JKL']",
+            "exit_pending_verification: ['MNO']",
+            "composite drift BT vs live (1 of 4): ['PQR']",
+            "floored-stop drift: ['STU']",
+        ]
+        assert parity_breaches(hard) == hard
+
+    def test_non_parity_reds_do_not_freeze(self):
+        from daily_green_check import parity_breaches
+        assert parity_breaches([
+            "CONTEXT: trader restarted 3x today — missed picks likely due to "
+            "service outage, not selection",
+            "news drift vs EoD recheck: ['XYZ']",
+        ]) == []
+        assert parity_breaches([]) == []
+
+    def _patch_main(self, monkeypatch, tmp_path, reasons):
+        import daily_green_check as dgc
+        from trading import ramp_freeze as rf
+        monkeypatch.setattr(rf, 'FREEZE_PATH', tmp_path / 'freeze.json')
+        monkeypatch.setattr(rc, 'green_verdict', lambda d: {
+            'day': d, 'green': not reasons, 'reasons': list(reasons),
+            'checks': {}, 'n_live_rows': 1, 'n_bt_selected': 1,
+            'bt_stale': False})
+        monkeypatch.setattr(rc, 'sizing_attribution',
+                            lambda d: {'mult_mismatches': [], 'rows': []})
+        monkeypatch.setattr(rc, 'decision_parity',
+                            lambda d: {'mismatches': [], 'warnings': [],
+                                       'n_compared': 0})
+        monkeypatch.setattr(rc, 'streak_update', lambda *a, **k: 0)
+        monkeypatch.setattr(rc, 'read_streak', lambda *a, **k: {'streak': 0})
+        monkeypatch.setattr(rc, 'realized_pnl', lambda d: {})
+        monkeypatch.setattr(rc, 'news_lag_audit', lambda d: {})
+        monkeypatch.setattr(rc, 'news_lag_line', lambda a: '')
+        monkeypatch.setattr(rc, 'bf_rails_status', lambda d: {})
+        monkeypatch.setattr(rc, 'bf_rails_line', lambda a: '')
+        monkeypatch.setattr(rc, 'sizing_block', lambda a: '')
+        monkeypatch.setattr(rc, 'send_telegram', lambda m: True)
+        monkeypatch.setattr(rf, 'send_freeze_telegram', lambda *a, **k: True)
+        return dgc, rf
+
+    def test_main_freezes_orb_on_a_hard_breach(self, monkeypatch, tmp_path):
+        dgc, rf = self._patch_main(
+            monkeypatch, tmp_path, ["BT picks never ordered live: ['DEF']"])
+        monkeypatch.setattr(sys, 'argv',
+                            ['daily_green_check.py', '--date', '2026-09-18',
+                             '--no-telegram'])
+        assert dgc.main() == 1
+        st = rf.get('orb')
+        assert st.frozen and st.since == '2026-09-18'
+        assert 'never ordered' in st.reason
+
+    def test_main_does_not_freeze_a_green_day(self, monkeypatch, tmp_path):
+        dgc, rf = self._patch_main(monkeypatch, tmp_path, [])
+        monkeypatch.setattr(sys, 'argv',
+                            ['daily_green_check.py', '--date', '2026-09-18',
+                             '--no-telegram'])
+        assert dgc.main() == 0
+        assert not rf.is_frozen('orb')
+
+    def test_dry_run_never_writes_freeze_state(self, monkeypatch, tmp_path):
+        dgc, rf = self._patch_main(
+            monkeypatch, tmp_path, ["unattributed exits: ['JKL']"])
+        monkeypatch.setattr(sys, 'argv',
+                            ['daily_green_check.py', '--date', '2026-09-18',
+                             '--no-telegram', '--dry-run'])
+        assert dgc.main() == 1
+        assert not rf.is_frozen('orb')

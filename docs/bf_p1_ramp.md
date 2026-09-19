@@ -47,11 +47,30 @@ the stage — change all five numbers together.
    with the EOD BT-vs-live check (no gate/partial disagreement, no
    `exit_pending_verification`). One disagreement = fix first, then count.
 5. **No rail hit** in the last 10 sessions.
+6. **Above water EX-MONSTER** (2026-09-19, scaling plan Gate 2.3): stage P&L
+   > 0 with the single best trade removed. One +8R trade is not a stage.
+7. **Consistent with the backtest** (Gate 2.4): realized stage R/trade
+   (pnl ÷ the stage base risk) inside the bootstrap [p10, p90] band of the
+   BT's own per-trade R for that n — reference
+   `research/bf_frequency/runs/VOL_OFF.csv` (R = pnl/$2,000), the config that
+   boots Monday. Below p10 → no advance. ABOVE p90 → also no advance until n
+   grows: beating your own backtest is a leak or a bug before it is luck.
+8. **No open FREEZE** (Gate 1): `scripts/bf_decision_parity.py` freezes the BF
+   ramp on a decision/exit-type disagreement (`logs/ramp_freeze.json`). While
+   frozen the stage clock does not accrue — those sessions are excluded from
+   the 15-session minimum permanently — and no ADVANCE is emitted regardless
+   of P&L. Clearing is MANUAL:
+   `python scripts/bf_ramp_check.py --clear-freeze bf "<reason>"`.
+
+Items 6-8 are computed by `scripts/bf_ramp_check.py` (shared modules
+`trading/ramp_bt_band.py` and `trading/ramp_freeze.py`).
 
 ## Demote one stage — ANY, immediately
 - stage P&L ≤ −6u, or
 - 5 consecutive losers (BT max streak 4), or
-- a weekly rail hit.
+- a weekly rail hit, or
+- realized R/trade below the BT's p5 band for that n after ≥ 8 trades
+  (2026-09-19 — the edge is not there live).
 
 ## Pause and review together — ANY
 - stage P&L ≤ −8u (the month-pause rail; the backtest's whole-history drawdown), or

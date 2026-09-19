@@ -7,9 +7,18 @@ Stage = orb.yaml sizing.account_budget_usd. Reads trades.db (strategy='orb',
 closed fills since the stage start), logs/green_streak.json (fill-parity
 reasons per session) and the fills' own entry slippage vs the 30 bps model.
 
+Gate-2 of docs/scaling_plan_2026.md adds two columns on top of the P&L rules:
+  * above-water EX-MONSTER — stage P&L with the single best fill removed, and
+  * BT band — realized stage R/trade inside the backtest's bootstrap
+    [p5, p10, p90] band for this n (trading/ramp_bt_band.py; the reference
+    book follows orb.yaml's catalyst-veto state and is named in the output).
+A parity FREEZE (trading/ramp_freeze.py, set by daily_green_check.py) stops
+the stage clock and blocks ADVANCE regardless of P&L.
+
 Usage:
   python scripts/orb_ramp_check.py                        # stage started 2026-08-17 (B+ live)
   python scripts/orb_ramp_check.py --stage-start 2026-10-01 [--verbose]
+  python scripts/orb_ramp_check.py --clear-freeze orb "mult drift explained + fixed"
 """
 from __future__ import annotations
 
@@ -20,15 +29,19 @@ import sys
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 ORB_YAML = ROOT / 'orb.yaml'
 TRADES_DB = ROOT / 'data' / 'trades.db'
 GREEN = ROOT / 'logs' / 'green_streak.json'
 B_PLUS_LIVE = '2026-08-17'
+
+from trading import ramp_bt_band as band_mod  # noqa: E402  (needs ROOT on sys.path)
+from trading import ramp_freeze  # noqa: E402
 
 # KEEP IN SYNC with docs/orb_p1_style_ramp_proposal.md (budget, slots=3)
 STAGES = [
@@ -56,10 +69,26 @@ class StageStats:
     parity_defects: int
     mean_entry_slip_bps: Optional[float]
     slip_2x_fills: int
+    # Gate-2 additions (docs/scaling_plan_2026.md items 3 and 4)
+    pnl_ex_monster: float = 0.0
+    best_fill_pnl: float = 0.0
+    live_mean_r: Optional[float] = None
+    band: Optional[band_mod.Band] = None
+    band_status: str = band_mod.NO_DATA
+    frozen: bool = False
+    frozen_sessions: int = 0
 
     @property
     def pnl_pct(self) -> float:
         return self.pnl / self.budget * 100 if self.budget else 0.0
+
+    @property
+    def pnl_ex_monster_pct(self) -> float:
+        return self.pnl_ex_monster / self.budget * 100 if self.budget else 0.0
+
+    @property
+    def above_water_ex_monster(self) -> bool:
+        return self.pnl_ex_monster > 0
 
 
 def stage_for_budget(budget: float) -> Dict:
@@ -77,15 +106,34 @@ def next_stage(cur: Dict) -> Optional[Dict]:
 
 
 def compute_stats(fills: List[Dict], budget: float, daily_limit: Optional[float],
-                  sessions: int, session_dates: List[str], parity_reasons: Dict[str, List[str]]) -> StageStats:
-    """Pure. fills: dicts with trade_date, pnl, entry_price (trigger), fill_price.
-    parity_reasons: {day: [reason strings]} from green_streak.json."""
+                  sessions: int, session_dates: List[str], parity_reasons: Dict[str, List[str]],
+                  bt_r: Optional[Sequence[float]] = None,
+                  frozen: bool = False, frozen_sessions: int = 0) -> StageStats:
+    """Pure. fills: dicts with trade_date, pnl, entry_price (trigger), fill_price,
+    total_risk (shares x risk_per_share — the live 1R).
+    parity_reasons: {day: [reason strings]} from green_streak.json.
+
+    bt_r: the backtest's per-trade R distribution (trading/ramp_bt_band.py).
+          None/empty -> the BT-band gate reads NO-DATA, which blocks ADVANCE.
+    frozen / frozen_sessions: Gate-1 freeze state; `sessions` must already
+          EXCLUDE the frozen ones (the stage clock stops while frozen)."""
     pnl = sum(float(f.get('pnl') or 0) for f in fills)
     by_day: Dict[str, float] = {}
     streak = best = 0
     slips = []
+    pnls: List[float] = []
+    live_r: List[float] = []
     for f in sorted(fills, key=lambda x: (x['trade_date'], x.get('exited_at') or '')):
         p = float(f.get('pnl') or 0)
+        pnls.append(p)
+        # Live 1R = the planned dollar risk of the fill (entry - stop) x shares,
+        # the same normalization as the BT's pnl_pct / range_size_pct.
+        try:
+            risk = float(f.get('total_risk') or 0)
+            if risk > 0:
+                live_r.append(p / risk)
+        except (TypeError, ValueError):
+            pass
         by_day[f['trade_date']] = by_day.get(f['trade_date'], 0.0) + p
         streak = streak + 1 if p < 0 else 0
         best = max(best, streak)
@@ -100,32 +148,48 @@ def compute_stats(fills: List[Dict], budget: float, daily_limit: Optional[float]
     parity = sum(1 for d, rs in parity_reasons.items()
                  if d in set(session_dates) and any(m in r for r in rs for m in PARITY_MARKERS))
     mean_slip = sum(slips) / len(slips) if slips else None
+    best_fill = max(pnls) if pnls else 0.0
+    mean_r = sum(live_r) / len(live_r) if live_r else None
+    bnd = band_mod.bootstrap_band(bt_r or [], len(live_r)) if live_r else None
     return StageStats(
         budget=budget, pnl=pnl, fills=len(fills), sessions=sessions, losing_streak=best,
         limit_hits=len(hits), limit_hit_last10=any(d in last10 for d in hits),
         parity_defects=parity, mean_entry_slip_bps=mean_slip,
         slip_2x_fills=sum(1 for s in slips if s > 2 * ADVANCE['entry_slip_model_bps']),
+        pnl_ex_monster=pnl - best_fill, best_fill_pnl=best_fill,
+        live_mean_r=mean_r, band=bnd,
+        band_status=band_mod.classify(mean_r, bnd),
+        frozen=frozen, frozen_sessions=frozen_sessions,
     )
 
 
 def verdict(s: StageStats) -> str:
+    """HOLD / ADVANCE / DEMOTE / PAUSE per the ramp + scaling_plan_2026 Gate 2."""
     if s.pnl_pct <= PAUSE['pnl_pct_of_budget']:
         return 'PAUSE'
+    below_p5_after_8 = (s.band_status == band_mod.BELOW_P5
+                        and s.fills >= ADVANCE['min_fills'])
     if (s.pnl_pct <= DEMOTE['pnl_pct_of_budget'] or s.losing_streak >= DEMOTE['streak']
-            or s.limit_hits >= DEMOTE['limit_hits'] or s.slip_2x_fills >= DEMOTE['slip_2x_fills']):
+            or s.limit_hits >= DEMOTE['limit_hits'] or s.slip_2x_fills >= DEMOTE['slip_2x_fills']
+            or below_p5_after_8):
         return 'DEMOTE'
     slip_ok = (s.mean_entry_slip_bps is not None
                and s.mean_entry_slip_bps <= ADVANCE['entry_slip_model_bps'] + ADVANCE['slip_tolerance_bps'])
     if (s.pnl > 0 and s.fills >= ADVANCE['min_fills'] and s.sessions >= ADVANCE['min_sessions']
-            and s.parity_defects == 0 and not s.limit_hit_last10 and slip_ok):
+            and s.parity_defects == 0 and not s.limit_hit_last10 and slip_ok
+            and s.above_water_ex_monster and s.band_status == band_mod.IN_BAND
+            and not s.frozen):
         return 'ADVANCE'
     return 'HOLD'
 
 
 def load_fills(since: str) -> List[Dict]:
-    conn = sqlite3.connect(str(TRADES_DB)); conn.row_factory = sqlite3.Row
+    """Closed ORB fills since `since` — READ-ONLY (a checker never writes)."""
+    conn = sqlite3.connect(f"file:{TRADES_DB}?mode=ro", uri=True, timeout=15)
+    conn.row_factory = sqlite3.Row
     rows = conn.execute(
-        "SELECT trade_date, symbol, pnl, entry_price, fill_price, exited_at, exit_reason "
+        "SELECT trade_date, symbol, pnl, entry_price, fill_price, total_risk, "
+        "exited_at, exit_reason "
         "FROM trades WHERE strategy='orb' AND trade_date>=? AND pnl IS NOT NULL "
         "ORDER BY trade_date, exited_at", (since,)).fetchall()
     conn.close()
@@ -155,7 +219,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--stage-start', default=B_PLUS_LIVE)
     ap.add_argument('--verbose', action='store_true')
+    ramp_freeze.add_clear_freeze_arg(ap)
     a = ap.parse_args()
+    if a.clear_freeze:
+        print(ramp_freeze.handle_clear_freeze(a.clear_freeze))
+        return 0
     cfg = yaml.safe_load(open(ORB_YAML))
     budget = float(cfg['sizing']['account_budget_usd'])
     cur = stage_for_budget(budget)
@@ -165,7 +233,14 @@ def main() -> int:
     parity = load_parity(a.stage_start)
     if '__unknown__' in parity:
         parity = {d: parity['__unknown__'] for d in sess}
-    s = compute_stats(fills, budget, daily_limit, len(sess), sess, parity)
+    fz = ramp_freeze.get('orb')
+    live_sess = ramp_freeze.unfrozen_sessions('orb', sess)
+    veto_on = bool(cfg.get('filter', {}).get('catalyst_veto', {}).get('enabled'))
+    ref = band_mod.orb_reference(veto_on)
+    bt_r = band_mod.load_reference_r(ref, 'orb')
+    s = compute_stats(fills, budget, daily_limit, len(live_sess), sess, parity,
+                      bt_r=bt_r, frozen=fz.frozen,
+                      frozen_sessions=len(sess) - len(live_sess))
     v = verdict(s); nxt = next_stage(cur)
     slip = f"{s.mean_entry_slip_bps:.0f} bps" if s.mean_entry_slip_bps is not None else 'n/a (no fills)'
     print(f"ORB ramp — stage {cur['name']} (budget ${budget:,.0f}) since {a.stage_start}")
@@ -173,11 +248,25 @@ def main() -> int:
           f"losing streak {s.losing_streak} | entry slip mean {slip} (model {ADVANCE['entry_slip_model_bps']:.0f}) | "
           f">2x-model fills {s.slip_2x_fills}")
     print(f"  daily-limit hits {s.limit_hits} (last 10 sessions: {s.limit_hit_last10}) | parity defects {s.parity_defects}")
+    print(f"  ex-monster: ${s.pnl_ex_monster:,.0f} = {s.pnl_ex_monster_pct:+.2f}% of budget "
+          f"(best fill ${s.best_fill_pnl:,.0f} removed) → "
+          f"{'ABOVE WATER' if s.above_water_ex_monster else 'NOT above water'} "
+          f"(advance requires > 0)")
+    print(band_mod.band_line(s.band_status, s.live_mean_r, s.band, ref))
+    if s.frozen:
+        print(f"  {fz.line()}")
+    if s.frozen_sessions:
+        print(f"  stage clock: {s.frozen_sessions} frozen session(s) excluded "
+              f"({len(sess)} weekdays → {s.sessions} counted)")
     print(f"  VERDICT: {v}" + (f" → {nxt['name']} (${nxt['budget']:,.0f}, daily limit {nxt['daily_limit']}) — "
                               f"set sizing.account_budget_usd + risk.daily_loss_limit_usd together" if v == 'ADVANCE' and nxt else ''))
     if v == 'HOLD':
         need = []
+        if s.frozen: need.append('PARITY FREEZE cleared (manual)')
         if s.pnl <= 0: need.append('stage P&L > 0')
+        if not s.above_water_ex_monster: need.append('stage P&L ex-monster > 0')
+        if s.band_status != band_mod.IN_BAND:
+            need.append(f"BT band IN-BAND (now {s.band_status})")
         if s.fills < ADVANCE['min_fills']: need.append(f"fills {s.fills}/{ADVANCE['min_fills']}")
         if s.sessions < ADVANCE['min_sessions']: need.append(f"sessions {s.sessions}/{ADVANCE['min_sessions']}")
         if s.parity_defects: need.append(f"parity defects {s.parity_defects} → 0")
