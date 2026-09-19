@@ -1,0 +1,15 @@
+field,source,construction,known_at,cov_train,cov_val,causal
+spy_gap_pct,Alpaca SIP 1-min SPY,prev session 15:59 bar close; 09:30 bar OPEN,09:30:00,1.0,1.0,True
+spy_pm_ret_pct,Alpaca SIP 1-min SPY,"last premarket bar close, m_et <= 569",<= 09:29:59,1.0,1.0,True
+spy_r5_pct,Alpaca SIP 1-min SPY,09:30 bar open -> 09:34 bar close,09:35:00,1.0,1.0,True
+spy_prev_c2c_pct,Alpaca SIP 1-min SPY,T-1 and T-2 15:59 closes,T-1 16:00,1.0,1.0,True
+spy_vol20,cache.db daily_bars SPY,20 log returns ending T-1,T-1 16:00,1.0,1.0,True
+qqq_gap_pct,Alpaca SIP 1-min QQQ,prev session 15:59 close; 09:30 bar OPEN,09:30:00,1.0,1.0,True
+qqq_pm_ret_pct,Alpaca SIP 1-min QQQ,"last premarket bar close, m_et <= 569",<= 09:29:59,1.0,1.0,True
+qqq_r5_pct,Alpaca SIP 1-min QQQ,09:30 bar open -> 09:34 bar close,09:35:00,1.0,1.0,True
+qqq_prev_c2c_pct,Alpaca SIP 1-min QQQ,T-1 and T-2 15:59 closes,T-1 16:00,1.0,1.0,True
+qqq_vol20,cache.db daily_bars QQQ,20 log returns ending T-1,T-1 16:00,0.9230769230769231,1.0,True
+qqq_imb_ratio,Databento XNAS.ITCH imbalance,last type-O msg before 09:30,<= 09:29:59,1.0,1.0,True
+qqq_imb_signed,Databento XNAS.ITCH imbalance,last type-O msg before 09:30,<= 09:29:59,1.0,1.0,True
+dow,calendar,the date itself,T-1 or earlier,1.0,1.0,True
+spy_ret_0930_1000,causal_filter spy_1min,09:30 -> 10:00 (THE FAILED FIELD),10:00:00,1.0,1.0,False
