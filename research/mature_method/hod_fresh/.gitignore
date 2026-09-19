@@ -1,0 +1,4 @@
+sig3.csv
+*.pkl
+*.npy
+__pycache__/

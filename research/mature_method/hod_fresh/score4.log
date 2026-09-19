@@ -1,0 +1,219 @@
+== hod_fresh — the fresh-high admission + stop redesign ==
+   splits scored: ('TRAIN', 'VAL')   (TEST sealed: True)
+
+== STEP 1 — REPRODUCTION GATE ==
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+
+R1  B0 shipped (ref 1,688/-0.027/-0.088/41.5%/-14,835 | 820/+0.016/-0.050/43.5%/-4,128)
+| cell                         | split | n     | /wk   | grossR | netR   | net(b) |  t    | green | flat  | rs | worst $  | total $   | MDD $    | gr mo | ex5    | imp |
+|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|
+| R1 B0 shipped                | TRAIN |  1688 |  31.8 | -0.027 | -0.088 | -0.089 | -2.64 |  41.5 |   1.9 |  7 |    -2718 |    -14835 |   -17209 |  25.0 | -0.198 |    1 |
+| R1 B0 shipped                | VAL   |   820 |  35.7 | +0.016 | -0.050 | -0.051 | -1.06 |  43.5 |   4.3 |  6 |    -2076 |     -4128 |    -7519 |  40.0 | -0.158 |    1 |
+
+R2  P13 = B0 ^ consol_bars<8 (ref 297/5.6/-0.038/-0.104/35.8%/-3,099 | 219/9.5/+0.207/+0.136/52.2%/+2,977)
+| R2 P13 consol_bars<8         | TRAIN |   297 |   5.6 | -0.038 | -0.104 | -0.106 | -1.39 |  35.8 |   5.7 |  4 |    -1510 |     -3099 |    -3755 |  25.0 | -0.215 |    1 |
+| R2 P13 consol_bars<8         | VAL   |   219 |   9.5 | +0.207 | +0.136 | +0.135 | +1.44 |  52.2 |   8.7 |  5 |     -915 |     +2977 |    -1918 |  60.0 | +0.038 |    1 |
+
+loading sig3.csv ...
+membership: 150998 -> 143735 rows, 344 days
+
+R3  hod_fresh base rung x n5 stop == B2 (ref 1,622/-0.039/-0.107/32.1%/-17,346 | 706/+0.083/+0.013/43.5%/+893)
+| R3 base x n5 (= B2)          | TRAIN |  1622 |  30.6 | -0.039 | -0.107 | -0.140 | -3.42 |  32.1 |   1.9 |  5 |    -2231 |    -17346 |   -18929 |  25.0 | -0.218 |   49 |
+| R3 base x n5 (= B2)          | VAL   |   706 |  30.7 | +0.083 | +0.013 | -0.026 | +0.27 |  43.5 |   4.3 |  4 |     -957 |      +893 |    -2940 |  40.0 | -0.093 |   57 |
+    halves  H1 -0.077 (n 789) | H2 -0.003 (n 833) | VAL +0.083 (n 706)  -> same-signed POSITIVE in all three: False
+    TRAIN iid t -3.42  CLUSTERED t -2.99  cost/R 0.0680  medianR% 3.17  >=10%-range days 64%  MDE 0.088
+    VAL   iid t +0.27  CLUSTERED t +0.26  cost/R 0.0701  medianR% 3.72  >=10%-range days 66%  MDE 0.132
+
+== AVAILABILITY AUDIT (the two new decision fields, on the base pre-book set) ==
+  consol_bars    cov 100.0%  miss win   0.0%  miss loss   0.0%  
+  atr20d         cov  95.9%  miss win   3.2%  miss loss   4.8%  
+  consol_bars is computed from bars STRICTLY BEFORE the break bar; atr20d from the 20 DAILY sessions strictly before the day.
+  consol_bars distribution (base pre-book): p10=2 p25=3 p50=9 p75=27 p90=55
+
+== FAMILY A — ADMISSION LADDER (scan rule: KEEP-SCANNING; stop = last-5-bar low) ==
+| cell                         | split | n     | /wk   | grossR | netR   | net(b) |  t    | green | flat  | rs | worst $  | total $   | MDD $    | gr mo | ex5    | imp |
+|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|
+| A base [no age condition (= B2)] | TRAIN |  1622 |  30.6 | -0.039 | -0.107 | -0.140 | -3.42 |  32.1 |   1.9 |  5 |    -2231 |    -17346 |   -18929 |  25.0 | -0.218 |   49 |
+| A base [no age condition (= B2)] | VAL   |   706 |  30.7 | +0.083 | +0.013 | -0.026 | +0.27 |  43.5 |   4.3 |  4 |     -957 |      +893 |    -2940 |  40.0 | -0.093 |   57 |
+    halves  H1 -0.077 (n 789) | H2 -0.003 (n 833) | VAL +0.083 (n 706)  -> same-signed POSITIVE in all three: False
+    TRAIN iid t -3.42  CLUSTERED t -2.99  cost/R 0.0680  medianR% 3.17  >=10%-range days 64%  MDE 0.088
+    VAL   iid t +0.27  CLUSTERED t +0.26  cost/R 0.0701  medianR% 3.72  >=10%-range days 66%  MDE 0.132
+| A le3 [consol_bars <= 3]     | TRAIN |   809 |  15.3 | +0.007 | -0.060 | -0.117 | -1.45 |  35.8 |   1.9 |  7 |    -1117 |     -4850 |    -6546 |  41.7 | -0.168 |  100 |
+| A le3 [consol_bars <= 3]     | VAL   |   474 |  20.6 | +0.055 | -0.011 | -0.071 | -0.21 |  52.2 |   4.3 |  4 |     -903 |      -516 |    -2309 |  40.0 | -0.116 |  100 |
+    halves  H1 +0.017 (n 346) | H2 -0.000 (n 463) | VAL +0.055 (n 474)  -> same-signed POSITIVE in all three: False
+    TRAIN iid t -1.45  CLUSTERED t -1.30  cost/R 0.0672  medianR% 5.20  >=10%-range days 90%  MDE 0.116
+    VAL   iid t -0.21  CLUSTERED t -0.18  cost/R 0.0661  medianR% 5.29  >=10%-range days 88%  MDE 0.148
+| A le5 [consol_bars <= 5]     | TRAIN |  1021 |  19.3 | -0.011 | -0.083 | -0.142 | -2.26 |  32.1 |   1.9 |  6 |    -1506 |     -8460 |    -8685 |  33.3 | -0.191 |   95 |
+| A le5 [consol_bars <= 5]     | VAL   |   550 |  23.9 | +0.099 | +0.029 | -0.032 | +0.57 |  56.5 |   4.3 |  5 |     -819 |     +1568 |    -2066 |  40.0 | -0.076 |   94 |
+    halves  H1 -0.056 (n 446) | H2 +0.024 (n 575) | VAL +0.099 (n 550)  -> same-signed POSITIVE in all three: False
+    TRAIN iid t -2.26  CLUSTERED t -2.01  cost/R 0.0719  medianR% 4.71  >=10%-range days 82%  MDE 0.103
+    VAL   iid t +0.57  CLUSTERED t +0.53  cost/R 0.0707  medianR% 4.77  >=10%-range days 82%  MDE 0.141
+| A le8 [consol_bars <= 8]     | TRAIN |  1126 |  21.2 | -0.047 | -0.122 | -0.180 | -3.46 |  32.1 |   1.9 | 10 |    -1503 |    -13714 |   -14974 |  25.0 | -0.233 |   87 |
+| A le8 [consol_bars <= 8]     | VAL   |   599 |  26.0 | +0.069 | -0.005 | -0.067 | -0.10 |  34.8 |   4.3 |  5 |     -889 |      -299 |    -3229 |  60.0 | -0.109 |   89 |
+    halves  H1 -0.110 (n 511) | H2 +0.004 (n 615) | VAL +0.069 (n 599)  -> same-signed POSITIVE in all three: False
+    TRAIN iid t -3.46  CLUSTERED t -3.07  cost/R 0.0744  medianR% 4.41  >=10%-range days 80%  MDE 0.099
+    VAL   iid t -0.10  CLUSTERED t -0.10  cost/R 0.0745  medianR% 4.44  >=10%-range days 80%  MDE 0.137
+| A le12 [consol_bars <= 12]   | TRAIN |  1204 |  22.7 | -0.024 | -0.098 | -0.153 | -2.83 |  32.1 |   1.9 |  8 |    -1394 |    -11839 |   -13729 |  33.3 | -0.209 |   81 |
+| A le12 [consol_bars <= 12]   | VAL   |   615 |  26.7 | +0.092 | +0.017 | -0.043 | +0.34 |  43.5 |   4.3 |  8 |     -721 |     +1017 |    -2379 |  60.0 | -0.087 |   84 |
+    halves  H1 -0.076 (n 549) | H2 +0.020 (n 655) | VAL +0.092 (n 615)  -> same-signed POSITIVE in all three: False
+    TRAIN iid t -2.83  CLUSTERED t -2.49  cost/R 0.0742  medianR% 4.22  >=10%-range days 78%  MDE 0.097
+    VAL   iid t +0.34  CLUSTERED t +0.33  cost/R 0.0756  medianR% 4.25  >=10%-range days 78%  MDE 0.137
+| A ge20 [consol_bars >= 20 [CONTROL]] | TRAIN |  1411 |  26.6 | +0.028 | -0.041 | -0.067 | -1.10 |  34.0 |   1.9 |  7 |    -1612 |     -5749 |    -9690 |  33.3 | -0.148 |   26 |
+| A ge20 [consol_bars >= 20 [CONTROL]] | VAL   |   714 |  31.0 | +0.050 | -0.023 | -0.054 | -0.44 |  47.8 |   4.3 |  5 |    -1843 |     -1629 |    -6506 |  60.0 | -0.129 |   31 |
+    halves  H1 +0.005 (n 671) | H2 +0.049 (n 740) | VAL +0.050 (n 714)  -> same-signed POSITIVE in all three: True
+    TRAIN iid t -1.10  CLUSTERED t -0.91  cost/R 0.0692  medianR% 1.72  >=10%-range days 55%  MDE 0.103
+    VAL   iid t -0.44  CLUSTERED t -0.40  cost/R 0.0731  medianR% 1.92  >=10%-range days 53%  MDE 0.144
+
+  -- SELECTOR (family A) -- at >=10/wk both splits: ['A base [no age condition (= B2)]', 'A le3 [consol_bars <= 3]', 'A le5 [consol_bars <= 5]', 'A le8 [consol_bars <= 8]', 'A le12 [consol_bars <= 12]', 'A ge20 [consol_bars >= 20 [CONTROL]]']; of those half-consistent-positive: ['A ge20 [consol_bars >= 20 [CONTROL]]']
+  -- SELECTED A ge20 [consol_bars >= 20 [CONTROL]] (eligible)
+
+== FAMILY B — STOP DESIGN on the selected rung (ge20) ==
+| stop                              | split | n   | /wk  | med R% of px | cost/R  | grossR  | netR    | green | total $ |
+|   cascade: admitted 61347 -> stop computable & r>=1% 38650 -> after fill-cap/price/cost/obtainable 3402
+| last-5-bar low (the B2 stop)      | TRAIN | 1411 | 26.6 |         1.72 |  0.0692 |  +0.028 |  -0.041 |  34.0 |    -5749 |
+| last-5-bar low (the B2 stop)      | VAL   |  714 | 31.0 |         1.92 |  0.0731 |  +0.050 |  -0.023 |  47.8 |    -1629 |
+|   cascade: admitted 61347 -> stop computable & r>=1% 30164 -> after fill-cap/price/cost/obtainable 1882
+| last-3-bar low                    | TRAIN |  941 | 17.8 |         1.50 |  0.0703 |  -0.042 |  -0.112 |  35.8 |   -10554 |
+| last-3-bar low                    | VAL   |  559 | 24.3 |         1.64 |  0.0740 |  -0.001 |  -0.075 |  39.1 |    -4176 |
+|   cascade: admitted 61347 -> stop computable & r>=1% 38650 -> after fill-cap/price/cost/obtainable 3402
+| shipped consolidation low K5/X4%  | TRAIN | 1411 | 26.6 |         1.72 |  0.0692 |  +0.028 |  -0.041 |  34.0 |    -5749 |
+| shipped consolidation low K5/X4%  | VAL   |  714 | 31.0 |         1.92 |  0.0731 |  +0.050 |  -0.023 |  47.8 |    -1629 |
+|   cascade: admitted 61347 -> stop computable & r>=1% 6936 -> after fill-cap/price/cost/obtainable 70
+| the breakout bar's own low        | TRAIN |   46 |  0.9 |         1.68 |  0.0762 |  -0.107 |  -0.183 |  13.2 |     -842 |
+| the breakout bar's own low        | VAL   |   21 |  0.9 |         1.29 |  0.0733 |  +0.165 |  +0.092 |  21.7 |     +193 |
+|   cascade: admitted 61347 -> stop computable & r>=1% 59152 -> after fill-cap/price/cost/obtainable 12524
+| entry - 0.5 x ATR20d              | TRAIN | 1321 | 24.9 |         3.40 |  0.0611 |  +0.009 |  -0.052 |  45.3 |    -6815 |
+| entry - 0.5 x ATR20d              | VAL   |  566 | 24.6 |         3.38 |  0.0675 |  +0.022 |  -0.045 |  39.1 |    -2575 |
+|   cascade: admitted 61347 -> stop computable & r>=1% 59438 -> after fill-cap/price/cost/obtainable 17228
+| entry - 1.0 x ATR20d              | TRAIN | 1075 | 20.3 |         5.96 |  0.0426 |  +0.019 |  -0.024 |  43.4 |    -2545 |
+| entry - 1.0 x ATR20d              | VAL   |  460 | 20.0 |         6.26 |  0.0435 |  +0.022 |  -0.022 |  47.8 |    -1002 |
+
+| cell                         | split | n     | /wk   | grossR | netR   | net(b) |  t    | green | flat  | rs | worst $  | total $   | MDD $    | gr mo | ex5    | imp |
+|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|
+| B n5 [last-5-bar low (the B2 stop)] x ge20 | TRAIN |  1411 |  26.6 | +0.028 | -0.041 | -0.067 | -1.10 |  34.0 |   1.9 |  7 |    -1612 |     -5749 |    -9690 |  33.3 | -0.148 |   26 |
+| B n5 [last-5-bar low (the B2 stop)] x ge20 | VAL   |   714 |  31.0 | +0.050 | -0.023 | -0.054 | -0.44 |  47.8 |   4.3 |  5 |    -1843 |     -1629 |    -6506 |  60.0 | -0.129 |   31 |
+    halves  H1 +0.005 (n 671) | H2 +0.049 (n 740) | VAL +0.050 (n 714)  -> same-signed POSITIVE in all three: True
+    TRAIN iid t -1.10  CLUSTERED t -0.91  cost/R 0.0692  medianR% 1.72  >=10%-range days 55%  MDE 0.103
+    VAL   iid t -0.44  CLUSTERED t -0.40  cost/R 0.0731  medianR% 1.92  >=10%-range days 53%  MDE 0.144
+| B n3 [last-3-bar low] x ge20 | TRAIN |   941 |  17.8 | -0.042 | -0.112 | -0.135 | -2.43 |  35.8 |   1.9 |  6 |    -1514 |    -10554 |   -12193 |  41.7 | -0.222 |   21 |
+| B n3 [last-3-bar low] x ge20 | VAL   |   559 |  24.3 | -0.001 | -0.075 | -0.103 | -1.27 |  39.1 |   4.3 |  8 |    -1474 |     -4176 |    -7419 |  40.0 | -0.183 |   26 |
+    halves  H1 -0.079 (n 442) | H2 -0.009 (n 499) | VAL -0.001 (n 559)  -> same-signed POSITIVE in all three: False
+    TRAIN iid t -2.43  CLUSTERED t -2.11  cost/R 0.0703  medianR% 1.50  >=10%-range days 57%  MDE 0.129
+    VAL   iid t -1.27  CLUSTERED t -1.18  cost/R 0.0740  medianR% 1.64  >=10%-range days 52%  MDE 0.165
+| B b [shipped consolidation low K5/X4%] x ge20 | TRAIN |  1411 |  26.6 | +0.028 | -0.041 | -0.067 | -1.10 |  34.0 |   1.9 |  7 |    -1612 |     -5749 |    -9690 |  33.3 | -0.148 |   26 |
+| B b [shipped consolidation low K5/X4%] x ge20 | VAL   |   714 |  31.0 | +0.050 | -0.023 | -0.054 | -0.44 |  47.8 |   4.3 |  5 |    -1843 |     -1629 |    -6506 |  60.0 | -0.129 |   31 |
+    halves  H1 +0.005 (n 671) | H2 +0.049 (n 740) | VAL +0.050 (n 714)  -> same-signed POSITIVE in all three: True
+    TRAIN iid t -1.10  CLUSTERED t -0.91  cost/R 0.0692  medianR% 1.72  >=10%-range days 55%  MDE 0.103
+    VAL   iid t -0.44  CLUSTERED t -0.40  cost/R 0.0731  medianR% 1.92  >=10%-range days 53%  MDE 0.144
+| B bb [the breakout bar's own low] x ge20 | TRAIN |    46 |   0.9 | -0.107 | -0.183 | -0.216 | -0.89 |  13.2 |  54.7 |  6 |     -462 |      -842 |    -1105 |  27.3 | -0.334 |   28 |
+| B bb [the breakout bar's own low] x ge20 | VAL   |    21 |   0.9 | +0.165 | +0.092 | +0.066 | +0.28 |  21.7 |  60.9 |  2 |     -456 |      +193 |     -533 |  75.0 | -0.002 |   24 |
+    halves  H1 -0.088 (n 29) | H2 -0.138 (n 17) | VAL +0.165 (n 21)  -> same-signed POSITIVE in all three: False
+    TRAIN iid t -0.89  CLUSTERED t -0.83  cost/R 0.0762  medianR% 1.68  >=10%-range days 70%  MDE 0.576
+    VAL   iid t +0.28  CLUSTERED t +0.25  cost/R 0.0733  medianR% 1.29  >=10%-range days 62%  MDE 0.929
+| B a05 [entry - 0.5 x ATR20d] x ge20 | TRAIN |  1321 |  24.9 | +0.009 | -0.052 | -0.099 | -1.89 |  45.3 |   1.9 |  6 |    -1945 |     -6815 |    -8533 |  25.0 | -0.158 |   63 |
+| B a05 [entry - 0.5 x ATR20d] x ge20 | VAL   |   566 |  24.6 | +0.022 | -0.045 | -0.103 | -1.09 |  39.1 |   4.3 |  6 |    -1480 |     -2575 |    -3997 |  40.0 | -0.154 |   71 |
+    halves  H1 +0.028 (n 619) | H2 -0.007 (n 702) | VAL +0.022 (n 566)  -> same-signed POSITIVE in all three: False
+    TRAIN iid t -1.89  CLUSTERED t -1.51  cost/R 0.0611  medianR% 3.40  >=10%-range days 45%  MDE 0.076
+    VAL   iid t -1.09  CLUSTERED t -0.92  cost/R 0.0675  medianR% 3.38  >=10%-range days 40%  MDE 0.117
+| B a10 [entry - 1.0 x ATR20d] x ge20 | TRAIN |  1075 |  20.3 | +0.019 | -0.024 | -0.059 | -1.12 |  43.4 |   1.9 |  4 |    -1070 |     -2545 |    -4880 |  41.7 | -0.116 |   69 |
+| B a10 [entry - 1.0 x ATR20d] x ge20 | VAL   |   460 |  20.0 | +0.022 | -0.022 | -0.059 | -0.70 |  47.8 |   4.3 |  7 |     -901 |     -1002 |    -3283 |  40.0 | -0.106 |   73 |
+    halves  H1 +0.069 (n 494) | H2 -0.024 (n 581) | VAL +0.022 (n 460)  -> same-signed POSITIVE in all three: False
+    TRAIN iid t -1.12  CLUSTERED t -0.91  cost/R 0.0426  medianR% 5.96  >=10%-range days 40%  MDE 0.059
+    VAL   iid t -0.70  CLUSTERED t -0.55  cost/R 0.0435  medianR% 6.26  >=10%-range days 41%  MDE 0.087
+
+  -- SELECTOR (family B) -- at >=10/wk both splits: ['B n5 [last-5-bar low (the B2 stop)] x ge20', 'B n3 [last-3-bar low] x ge20', 'B b [shipped consolidation low K5/X4%] x ge20', 'B a05 [entry - 0.5 x ATR20d] x ge20', 'B a10 [entry - 1.0 x ATR20d] x ge20']; of those half-consistent-positive: ['B n5 [last-5-bar low (the B2 stop)] x ge20', 'B b [shipped consolidation low K5/X4%] x ge20']
+  -- SELECTED B n5 [last-5-bar low (the B2 stop)] x ge20 (eligible)
+
+== FAMILY C — D2 (SPY 09:30->09:35, known 09:35:00) on ge20 x n5 ==
+| cell                         | split | n     | /wk   | grossR | netR   | net(b) |  t    | green | flat  | rs | worst $  | total $   | MDD $    | gr mo | ex5    | imp |
+|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|
+| C1 spy_r5>0                  | TRAIN |   731 |  13.8 | +0.100 | +0.033 | +0.008 | +0.63 |  43.4 |   5.7 |  5 |    -1571 |     +2391 |    -4116 |  50.0 | -0.071 |   24 |
+| C1 spy_r5>0                  | VAL   |   368 |  16.0 | +0.123 | +0.050 | +0.020 | +0.69 |  47.8 |   8.7 |  4 |    -1067 |     +1827 |    -3290 |  60.0 | -0.056 |   30 |
+    halves  H1 +0.123 (n 334) | H2 +0.082 (n 397) | VAL +0.123 (n 368)  -> same-signed POSITIVE in all three: True
+    TRAIN iid t +0.63  CLUSTERED t +0.54  cost/R 0.0678  medianR% 1.67  >=10%-range days 54%  MDE 0.146
+    VAL   iid t +0.69  CLUSTERED t +0.66  cost/R 0.0730  medianR% 1.88  >=10%-range days 53%  MDE 0.202
+| C2 spy_r5>=+0.2%             | TRAIN |    95 |   1.8 | +0.046 | -0.024 | -0.045 | -0.16 |  11.3 |  73.6 |  2 |    -1056 |      -224 |    -1508 |  37.5 | -0.135 |   18 |
+| C2 spy_r5>=+0.2%             | VAL   |    64 |   2.8 | +0.033 | -0.040 | -0.062 | -0.24 |  17.4 |  69.6 |  1 |     -425 |      -259 |     -565 |  50.0 | -0.175 |   23 |
+    halves  H1 +0.011 (n 66) | H2 +0.125 (n 29) | VAL +0.033 (n 64)  -> same-signed POSITIVE in all three: True
+    TRAIN iid t -0.16  CLUSTERED t -0.14  cost/R 0.0698  medianR% 1.58  >=10%-range days 59%  MDE 0.409
+    VAL   iid t -0.24  CLUSTERED t -0.35  cost/R 0.0733  medianR% 1.64  >=10%-range days 50%  MDE 0.478
+| C3 spy_r5>=+0.4%             | TRAIN |    15 |   0.3 | +0.533 | +0.465 | +0.447 | +1.20 |   3.8 |  96.2 |  0 |       +0 |      +698 |       +0 | 100.0 | +nan |   20 |
+| C3 spy_r5>=+0.4%             | VAL   |     0 |   0.0 | +nan | +nan | +nan |  +nan |   0.0 | 100.0 |  0 |       +0 |        +0 |       +0 |   nan | +nan |  nan |
+    halves  H1 +0.533 (n 15) | H2 +nan (n 0) | VAL +nan (n 0)  -> same-signed POSITIVE in all three: False
+    TRAIN iid t +1.20  CLUSTERED t +1.87  cost/R 0.0676  medianR% 1.39  >=10%-range days 53%  MDE 1.088
+
+  -- SELECTOR (family C) -- at >=10/wk both splits: ['C1 spy_r5>0']; of those half-consistent-positive: ['C1 spy_r5>0']
+  -- SELECTED C1 spy_r5>0 (eligible)
+
+== FAMILY D — the two declared interactions ==
+| cell                         | split | n     | /wk   | grossR | netR   | net(b) |  t    | green | flat  | rs | worst $  | total $   | MDD $    | gr mo | ex5    | imp |
+|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|
+| D1 A x B x rv>=5             | TRAIN |   179 |   3.4 | -0.022 | -0.119 | -0.223 | -1.19 |  39.6 |   9.4 |  4 |     -698 |     -2138 |    -2625 |  25.0 | -0.229 |  100 |
+| D1 A x B x rv>=5             | VAL   |   115 |   5.0 | -0.007 | -0.106 | -0.211 | -0.85 |  43.5 |   8.7 |  2 |     -610 |     -1221 |    -1656 |  40.0 | -0.219 |  100 |
+    halves  H1 -0.098 (n 76) | H2 +0.035 (n 103) | VAL -0.007 (n 115)  -> same-signed POSITIVE in all three: False
+    TRAIN iid t -1.19  CLUSTERED t -1.09  cost/R 0.0977  medianR% 2.53  >=10%-range days 83%  MDE 0.280
+    VAL   iid t -0.85  CLUSTERED t -0.88  cost/R 0.0988  medianR% 2.50  >=10%-range days 83%  MDE 0.352
+| D2 A x B x C x spread<=8%R   | TRAIN |   369 |   7.0 | +0.023 | -0.015 | -0.015 | -0.20 |  43.4 |   5.7 |  8 |     -867 |      -540 |    -4293 |  50.0 | -0.123 |    1 |
+| D2 A x B x C x spread<=8%R   | VAL   |   229 |  10.0 | +0.107 | +0.069 | +0.068 | +0.78 |  47.8 |  13.0 |  5 |     -679 |     +1570 |    -2149 |  60.0 | -0.038 |    1 |
+    halves  H1 +0.002 (n 171) | H2 +0.041 (n 198) | VAL +0.107 (n 229)  -> same-signed POSITIVE in all three: True
+    TRAIN iid t -0.20  CLUSTERED t -0.17  cost/R 0.0377  medianR% 1.49  >=10%-range days 43%  MDE 0.201
+    VAL   iid t +0.78  CLUSTERED t +0.77  cost/R 0.0382  medianR% 1.48  >=10%-range days 37%  MDE 0.246
+
+== UNFILLED COUNTERFACTUAL (selected admission rung, before the cap gate) ==
+  TRAIN filled 6012 (87.4%) gross +0.044 | UNFILLED 864 gross-if-paid-anyway +0.080
+  VAL   filled 3972 (88.0%) gross -0.055 | UNFILLED 541 gross-if-paid-anyway -0.046
+
+== COUNT-MATCHED PERMUTATION NULL (2,000 draws, per-week pick count fixed) ==
+| cell | split | observed green % | null mean | [p5, p95] | outside? |
+| R3 base x n5 (= B2) | TRAIN | 32.1 | 30.8 | [24.5, 37.7] | inside |
+| R3 base x n5 (= B2) | VAL | 43.5 | 49.5 | [39.1, 60.9] | inside |
+| A base [no age condition (= B2)] | TRAIN | 32.1 | 30.8 | [24.5, 37.7] | inside |
+| A base [no age condition (= B2)] | VAL | 43.5 | 49.5 | [39.1, 60.9] | inside |
+| A le3 [consol_bars <= 3] | TRAIN | 35.8 | 40.3 | [34.0, 47.2] | inside |
+| A le3 [consol_bars <= 3] | VAL | 52.2 | 45.2 | [34.8, 56.5] | inside |
+| A le5 [consol_bars <= 5] | TRAIN | 32.1 | 36.4 | [30.2, 43.4] | inside |
+| A le5 [consol_bars <= 5] | VAL | 56.5 | 51.8 | [43.5, 60.9] | inside |
+| A le8 [consol_bars <= 8] | TRAIN | 32.1 | 30.5 | [24.5, 37.7] | inside |
+| A le8 [consol_bars <= 8] | VAL | 34.8 | 46.7 | [34.8, 56.5] | inside |
+| A le12 [consol_bars <= 12] | TRAIN | 32.1 | 33.5 | [28.2, 39.6] | inside |
+| A le12 [consol_bars <= 12] | VAL | 43.5 | 50.0 | [39.1, 60.9] | inside |
+| A ge20 [consol_bars >= 20 [CONTROL]] | TRAIN | 34.0 | 42.4 | [35.8, 49.1] | below |
+| A ge20 [consol_bars >= 20 [CONTROL]] | VAL | 47.8 | 43.6 | [34.8, 52.2] | inside |
+| B n5 [last-5-bar low (the B2 stop)] x ge20 | TRAIN | 34.0 | 42.4 | [35.8, 49.1] | below |
+| B n5 [last-5-bar low (the B2 stop)] x ge20 | VAL | 47.8 | 43.6 | [34.8, 52.2] | inside |
+| B n3 [last-3-bar low] x ge20 | TRAIN | 35.8 | 35.7 | [28.3, 43.4] | inside |
+| B n3 [last-3-bar low] x ge20 | VAL | 39.1 | 37.2 | [26.1, 47.8] | inside |
+| B b [shipped consolidation low K5/X4%] x ge20 | TRAIN | 34.0 | 42.4 | [35.8, 49.1] | below |
+| B b [shipped consolidation low K5/X4%] x ge20 | VAL | 47.8 | 43.6 | [34.8, 52.2] | inside |
+| B bb [the breakout bar's own low] x ge20 | TRAIN | 13.2 | 14.4 | [11.3, 18.9] | inside |
+| B bb [the breakout bar's own low] x ge20 | VAL | 21.7 | 18.4 | [13.0, 26.1] | inside |
+| B a05 [entry - 0.5 x ATR20d] x ge20 | TRAIN | 45.3 | 38.1 | [32.1, 45.3] | inside |
+| B a05 [entry - 0.5 x ATR20d] x ge20 | VAL | 39.1 | 38.3 | [30.4, 47.8] | inside |
+| B a10 [entry - 1.0 x ATR20d] x ge20 | TRAIN | 43.4 | 42.3 | [35.8, 49.1] | inside |
+| B a10 [entry - 1.0 x ATR20d] x ge20 | VAL | 47.8 | 41.5 | [30.4, 52.2] | inside |
+| C1 spy_r5>0 | TRAIN | 43.4 | 49.2 | [41.5, 56.6] | inside |
+| C1 spy_r5>0 | VAL | 47.8 | 50.0 | [39.1, 60.9] | inside |
+| C2 spy_r5>=+0.2% | TRAIN | 11.3 | 12.4 | [9.4, 17.0] | inside |
+| C2 spy_r5>=+0.2% | VAL | 17.4 | 13.8 | [8.7, 17.4] | inside |
+| C3 spy_r5>=+0.4% | TRAIN | 3.8 | 3.4 | [1.9, 3.8] | inside |
+| D1 A x B x rv>=5 | TRAIN | 39.6 | 38.8 | [32.1, 45.3] | inside |
+| D1 A x B x rv>=5 | VAL | 43.5 | 36.3 | [26.1, 47.8] | inside |
+| D2 A x B x C x spread<=8%R | TRAIN | 43.4 | 43.5 | [35.8, 50.9] | inside |
+| D2 A x B x C x spread<=8%R | VAL | 47.8 | 48.2 | [39.1, 56.5] | inside |
+
+== BOTH BARS ==
+G1 (TRAIN net>0, iid t>=2, CLUSTERED t>=2, >=10/wk, gross>=+0.25R): 0 of 17 cells pass -> []
+   best TRAIN net R +0.4655 (C3 spy_r5>=+0.4%); best TRAIN gross +0.5331 (C3 spy_r5>=+0.4%); best TRAIN clustered t +1.87
+SHIP BAR (gross>=+0.25R both splits, >=10/wk, VAL green>=50%, $>0 both, clustered t>=2 TRAIN): 0 pass -> []
+
+== MDE (80% power, two-sided 5%) ==
+  A ge20 [consol_bars >= 20 [CONTROL]]           TRAIN n  1411  MDE 0.103 R
+  A ge20 [consol_bars >= 20 [CONTROL]]           VAL   n   714  MDE 0.144 R
+  B n5 [last-5-bar low (the B2 stop)] x ge20     TRAIN n  1411  MDE 0.103 R
+  B n5 [last-5-bar low (the B2 stop)] x ge20     VAL   n   714  MDE 0.144 R
+  C1 spy_r5>0                                    TRAIN n   731  MDE 0.146 R
+  C1 spy_r5>0                                    VAL   n   368  MDE 0.202 R
+  pre-book base (rung=base, n5)                  TRAIN n  4575  MDE 0.051 R
+  pre-book base (rung=base, n5)                  VAL   n  2452  MDE 0.071 R
+
+DONE

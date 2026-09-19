@@ -1,0 +1,47 @@
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+
+== S1 — the +0.2151 R constant, located ==
+cost in R per trade = rr - net = half x (1 + exit ratio); the gates that remove the
+expensive trades are part of the shipped book, so the BOOKED cost is far below the
+POPULATION cost. Both are printed; only the booked one is a break-even for a cell.
+  B0 pre-book, NO cost gates       TRAIN n   7388  cost/R 0.1965  median R% 1.83  gross +0.0003
+  B0 pre-book, NO cost gates       VAL   n   4745  cost/R 0.2300  median R% 1.77  gross -0.0451
+  B0 pre-book, +100bps gate        TRAIN n   6568  cost/R 0.1458  median R% 1.77  gross +0.0060
+  B0 pre-book, +100bps gate        VAL   n   4137  cost/R 0.1580  median R% 1.74  gross -0.0292
+  B0 pre-book, +15%-of-R gate      TRAIN n   3387  cost/R 0.0623  median R% 2.02  gross +0.0041
+  B0 pre-book, +15%-of-R gate      VAL   n   1889  cost/R 0.0661  median R% 1.91  gross +0.0007
+  B0 pre-book, shipped (+obtain)   TRAIN n   3166  cost/R 0.0612  median R% 1.95  gross +0.0071
+  B0 pre-book, shipped (+obtain)   VAL   n   1775  cost/R 0.0650  median R% 1.85  gross +0.0012
+
+== S2 — admission ladder, pre-book signals (the frequency the ADMISSION creates) ==
+  base   TRAIN n  4575 ( 86.3/wk sig) gross -0.0017 | VAL n  2452 (106.6/wk sig) gross +0.0153
+  le3    TRAIN n  1850 ( 34.9/wk sig) gross +0.0643 | VAL n   892 ( 38.8/wk sig) gross +0.0402
+  le5    TRAIN n  2723 ( 51.4/wk sig) gross +0.0198 | VAL n  1249 ( 54.3/wk sig) gross +0.0703
+  le8    TRAIN n  3070 ( 57.9/wk sig) gross +0.0097 | VAL n  1455 ( 63.3/wk sig) gross +0.0502
+  le12   TRAIN n  3262 ( 61.5/wk sig) gross +0.0285 | VAL n  1577 ( 68.6/wk sig) gross +0.0438
+  ge20   TRAIN n  2050 ( 38.7/wk sig) gross +0.0066 | VAL n  1352 ( 58.8/wk sig) gross -0.0179
+
+== S3 — on the ge20 rung the SHIPPED consolidation low IS the last-5-bar low on 99.9900% of rows ==
+  (consol_bars >= 20 means the last 20 bar lows are all within 4% of the level, so the
+   shipped K5/X4% proximity test is satisfied by construction. B-i and B-ii5 are the
+   same cell on this rung — not a bug, a consequence of the admission.)
+
+== S4 — C1 (ge20 x last-5-bar low x SPY 09:35 up): weekly dollars at $100 risk ==
+  TRAIN:  +0(0) +0(0) -93(14) +2027(19) +543(6) +339(20) +973(22) -604(8) -891(14) +514(25) -227(8) +678(15) -267(4) +325(32) -1056(12) -220(2) -490(8) -307(8) -1571(15) +1172(15) -315(24) -100(2) +1451(23) +70(8) -101(9) +43(21) +558(6) +150(4) +239(6) -458(17) +275(3) -641(26) -550(18) -222(6) +348(18) -407(9) -489(29) +949(19) -270(24) +177(16) -142(15) -576(26) +1280(28) -147(7) -81(7) -24(9) +362(45) +305(18) +36(13) -204(9) -364(16) +394(3) +0(0)
+    green 23/53  total +2391  worst -1571  best +2027
+  VAL:  +0(0) +1215(19) +523(24) +405(16) +756(27) -84(15) -487(25) -951(21) +155(18) -41(20) -372(10) -954(12) -557(13) +1174(27) +193(1) +1154(29) -1067(12) -26(13) +223(29) -30(23) +392(9) +202(5) +0(0)
+    green 11/23  total +1827  worst -1067  best +1215
+
+== S4b — C1 ex-tail (diagnostic, never a rejection reason) ==
+  TRAIN net +0.0327 -> ex-top-1% +0.0110 -> ex-top-5% -0.0714
+  VAL net +0.0496 -> ex-top-1% +0.0283 -> ex-top-5% -0.0556
+
+== S5 — the D2 gate on the ge20 x n5 population: kept minus rejected ==
+  TRAIN: kept n 1067 gross +0.1119 | rejected n 983 gross -0.1076 | sep +0.2195  iid t +3.70  clustered t +2.18
+  VAL: kept n 767 gross +0.0457 | rejected n 585 gross -0.1013 | sep +0.1470  iid t +2.04  clustered t +1.54
+
+== S6 — green-week MDE (95% half-width of a binomial share) ==
+  TRAIN: 53 market weeks -> +/- 13.5 pp
+  VAL: 23 market weeks -> +/- 20.4 pp
+
+DONE
