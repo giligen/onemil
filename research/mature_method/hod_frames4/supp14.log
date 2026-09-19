@@ -1,0 +1,29 @@
+== S1 — why F14-d6 (breadth at 09:35) is VOID ==
+   pre-book signals with entry_m <= 576 (09:36): 0 of 7027; MIN entry_m in the population = 577 (09:37 ET).
+   The rule needs >= 5 closed bars holding within 4 % of a high that is already >= 5 % above the 09:30 open, so a break BEFORE 09:36 is structurally impossible. The field is identically 0 on every session and its terciles are 0/0. **F14-d6 is VOID by construction, not by data.**
+
+== S2 — the same breadth field at 10:00 and 10:30 (SUPPLEMENTARY, no decision) ==
+| clock | split | T1 day $ | T2 day $ | T3 day $ | T3 H1 | T3 H2 |
+|---|---|---|---|---|---|---|
+| 10:00 (cuts 4/8) | TRAIN | -132.6 | -47.0 | -19.0 | -54.6 | +1.7 |
+| 10:00 (cuts 4/8) | VAL | -179.3 | -113.3 | +103.0 | +nan | +nan |
+| 10:30 (cuts 7/12) | TRAIN | -108.4 | -54.3 | -37.6 | -74.7 | -17.8 |
+| 10:30 (cuts 7/12) | VAL | -170.2 | -83.0 | +69.4 | +nan | +nan |
+
+== S3 — the H1-2025 mirror of the d7 search (FRAMES.md F14 s own question) ==
+| state | H1 days | H1 day $ | H1 t | H1 green d % | H1 total $ | H2 day $ | VAL day $ |
+|---|---|---|---|---|---|---|---|
+| spy_r5>0 | 60 | -85.5 | -1.85 | 41.7 | -5130 | +32.4 | +66.1 |
+| spy_r5 T3 (most up) | 40 | -98.8 | -1.62 | 35.0 | -3953 | +6.7 | +69.1 |
+| qqq_r5>0 | 55 | -139.1 | -2.95 | 30.9 | -7652 | -68.1 | +42.4 |
+| spy_r5>0 AND qqq_r5>0 | 45 | -133.2 | -2.52 | 33.3 | -5992 | -6.1 | +63.8 |
+| spy_rng5_atr T3 (wild) | 37 | -57.7 | -0.81 | 43.2 | -2136 | -30.1 | +9.6 |
+| spy_rng5_atr T1 (quiet) | 50 | -122.0 | -2.52 | 36.0 | -6102 | +15.9 | +68.9 |
+| spy_gap>0 | 63 | -81.5 | -1.61 | 41.3 | -5132 | -34.2 | +42.3 |
+| spy_gap>0 AND spy_r5>0 | 30 | -52.4 | -0.73 | 46.7 | -1573 | +44.3 | +132.0 |
+
+== S4 — the day-level power statement on the D2 gate ==
+   TRAIN: 124 gated days, day mean -24.7, SE 32.8, day-level t -0.75, 80%-power MDE +92 $/day -> the point estimate is BELOW the MDE.
+   VAL: 52 gated days, day mean +66.1, SE 46.4, day-level t +1.43, 80%-power MDE +130 $/day -> the point estimate is BELOW the MDE.
+
+DONE

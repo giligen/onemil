@@ -1,0 +1,158 @@
+== hod_frames4 / F15 — WHO is breaking out ==  pre-book signals 7027
+
+== AVAILABILITY AUDIT (pre-book set) — coverage + missingness on winners vs losers ==
+| field | coverage | miss on winners | miss on losers | gap | verdict |
+|---|---|---|---|---|---|
+| `days_to_cover` | 98.8% | 1.0% | 1.3% | 0.3 pp | ok |
+| `si_ratio` | 98.8% | 1.0% | 1.3% | 0.3 pp | ok |
+| `shares_out` | 39.9% | 60.3% | 59.9% | 0.5 pp | ok |
+| `float_turn` | 39.9% | 60.4% | 59.9% | 0.5 pp | ok |
+| `venue` | 100.0% | 0.0% | 0.0% | 0.0 pp | ok |
+| `n_articles` | 3.3% | 96.7% | 96.7% | 0.0 pp | ok |
+| `asset_class` identified | 99.5% | — | — | — | ok |
+
+   SI report age at the signal: median 8 days, p95 14 (dissemination lag is IN the key: usable_from = settlement + 13 calendar days)
+   shares_out coverage 39.9% < 50 % -> **F15-b1 and F15-b2 VOID**, as the PREREG declared.
+   news-file coverage 3.3% — the ORB nightly file is keyed to the ORB candidate set, NOT this universe.  F15-e1/e2 are reported as DIAGNOSTICS with the covered subset named, not as clean cells.
+
+
+================ F15 — THE CELLS ================
+| cell                                  | split | n     | /wk   | grossR | cost   | netR   |  t    | tc    | green | worst $  | total $   | MDD $    | >=10% |
+|------|------|------|------|------|------|------|------|------|------|------|------|------|------|
+| F15-base (B2, every name)             | TRAIN |  1622 |  30.6 | -0.039 | +0.068 | -0.107 | -3.42 | -2.99 |  32.1 |    -2231 |    -17346 |   -18929 |    64 |
+| F15-base (B2, every name)             | VAL   |   706 |  30.7 | +0.083 | +0.070 | +0.013 | +0.27 | +0.26 |  43.5 |     -957 |       893 |    -2940 |    66 |
+      [2.3 diag TRAIN] already-wide n 257 gross -0.066 | arrived-after n 1365 gross -0.034
+      [2.3 diag VAL] already-wide n 143 gross +0.083 | arrived-after n 563 gross +0.083
+    halves H1 -0.077 (n 789) | H2 -0.003 (n 833) | VAL +0.083 (n 706) -> same-signed POSITIVE in all three: False
+   [TRAIN cuts] daysToCover median 1.49 p75 3.27 | si_ratio p75 2.991
+| F15-a1 daysToCover >= 1.49 [med]      | TRAIN |  1085 |  20.5 | -0.054 | +0.072 | -0.126 | -3.42 | -3.02 |  30.2 |    -1899 |    -13661 |   -15200 |    55 |
+| F15-a1 daysToCover >= 1.49 [med]      | VAL   |   585 |  25.4 | -0.031 | +0.073 | -0.105 | -2.12 | -1.92 |  26.1 |    -1369 |     -6135 |    -7514 |    55 |
+      [2.3 diag TRAIN] already-wide n 141 gross -0.013 | arrived-after n 944 gross -0.060
+      [2.3 diag VAL] already-wide n 86 gross -0.116 | arrived-after n 499 gross -0.017
+    halves H1 -0.095 (n 500) | H2 -0.018 (n 585) | VAL -0.031 (n 585) -> same-signed POSITIVE in all three: False
+| F15-a2 daysToCover >= 3.27 [p75]      | TRAIN |   733 |  13.8 | +0.006 | +0.075 | -0.069 | -1.54 | -1.49 |  45.3 |    -1204 |     -5023 |    -6411 |    57 |
+| F15-a2 daysToCover >= 3.27 [p75]      | VAL   |   449 |  19.5 | +0.007 | +0.075 | -0.067 | -1.19 | -1.15 |  43.5 |     -827 |     -3026 |    -3879 |    55 |
+      [2.3 diag TRAIN] already-wide n 117 gross +0.131 | arrived-after n 616 gross -0.017
+      [2.3 diag VAL] already-wide n 68 gross -0.175 | arrived-after n 381 gross +0.040
+    halves H1 -0.084 (n 325) | H2 +0.078 (n 408) | VAL +0.007 (n 449) -> same-signed POSITIVE in all three: False
+| F15-a3 si/adv20 >= 2.991 [p75]        | TRAIN |   682 |  12.9 | -0.015 | +0.076 | -0.091 | -2.02 | -1.99 |  43.4 |    -1037 |     -6200 |    -6603 |    54 |
+| F15-a3 si/adv20 >= 2.991 [p75]        | VAL   |   429 |  18.7 | -0.002 | +0.075 | -0.077 | -1.33 | -1.24 |  34.8 |    -1000 |     -3300 |    -3836 |    53 |
+      [2.3 diag TRAIN] already-wide n 98 gross +0.029 | arrived-after n 584 gross -0.022
+      [2.3 diag VAL] already-wide n 63 gross -0.129 | arrived-after n 366 gross +0.020
+    halves H1 -0.074 (n 310) | H2 +0.034 (n 372) | VAL -0.002 (n 429) -> same-signed POSITIVE in all three: False
+| F15-b1 float turnover >= p75            | VOID — shares_out coverage 39.9% < 50 % (PREREG §3) |
+| F15-b2 shares_out <= p25 [low float]    | VOID — same |
+| F15-c1 common stock only              | TRAIN |  1276 |  24.1 | -0.053 | +0.070 | -0.122 | -3.61 | -3.12 |  28.3 |    -1718 |    -15628 |   -17227 |    60 |
+| F15-c1 common stock only              | VAL   |   650 |  28.3 | -0.055 | +0.072 | -0.127 | -2.68 | -2.64 |  30.4 |    -1814 |     -8234 |    -9134 |    58 |
+      [2.3 diag TRAIN] already-wide n 209 gross -0.131 | arrived-after n 1067 gross -0.037
+      [2.3 diag VAL] already-wide n 126 gross -0.107 | arrived-after n 524 gross -0.043
+    halves H1 -0.060 (n 598) | H2 -0.046 (n 678) | VAL -0.055 (n 650) -> same-signed POSITIVE in all three: False
+| F15-c2 leveraged wrapper only         | TRAIN |  1083 |  20.4 | -0.005 | +0.064 | -0.069 | -1.66 | -1.31 |  41.5 |    -1697 |     -7434 |    -9846 |    68 |
+| F15-c2 leveraged wrapper only         | VAL   |   594 |  25.8 | +0.135 | +0.068 | +0.067 | +1.22 | +0.98 |  43.5 |     -977 |      3958 |    -4082 |    76 |
+      [2.3 diag TRAIN] already-wide n 161 gross -0.087 | arrived-after n 922 gross +0.010
+      [2.3 diag VAL] already-wide n 141 gross +0.151 | arrived-after n 453 gross +0.129
+    halves H1 -0.117 (n 497) | H2 +0.091 (n 586) | VAL +0.135 (n 594) -> same-signed POSITIVE in all three: False
+| F15-c3 anchor cohort >= 2             | TRAIN |   463 |   8.7 | +0.126 | +0.057 | +0.068 | +1.04 | +0.73 |  52.8 |    -2292 |      3167 |    -3306 |    72 |
+| F15-c3 anchor cohort >= 2             | VAL   |   295 |  12.8 | +0.380 | +0.062 | +0.318 | +4.07 | +3.30 |  60.9 |     -801 |      9389 |     -942 |    73 |
+      [2.3 diag TRAIN] already-wide n 74 gross +0.179 | arrived-after n 389 gross +0.115
+      [2.3 diag VAL] already-wide n 62 gross +0.414 | arrived-after n 233 gross +0.371
+    halves H1 +0.014 (n 220) | H2 +0.227 (n 243) | VAL +0.380 (n 295) -> same-signed POSITIVE in all three: True
+   [venues] {'XNAS': np.int64(3889), 'XNYS': np.int64(1578), 'BATS': np.int64(764), 'ARCX': np.int64(735), 'XASE': np.int64(61)}
+| F15-d1 venue NASDAQ                   | TRAIN |  1346 |  25.4 | -0.032 | +0.069 | -0.101 | -2.92 | -2.44 |  35.8 |    -1598 |    -13566 |   -13711 |    66 |
+| F15-d1 venue NASDAQ                   | VAL   |   614 |  26.7 | +0.009 | +0.073 | -0.064 | -1.31 | -1.20 |  39.1 |    -1578 |     -3952 |    -5897 |    64 |
+      [2.3 diag TRAIN] already-wide n 231 gross -0.021 | arrived-after n 1115 gross -0.034
+      [2.3 diag VAL] already-wide n 115 gross -0.128 | arrived-after n 499 gross +0.040
+    halves H1 -0.068 (n 646) | H2 +0.001 (n 700) | VAL +0.009 (n 614) -> same-signed POSITIVE in all three: False
+| F15-d2 venue NYSE/ARCA/AMEX           | TRAIN |  1062 |  20.0 | -0.024 | +0.066 | -0.090 | -2.27 | -2.03 |  35.8 |    -1349 |     -9592 |    -9798 |    57 |
+| F15-d2 venue NYSE/ARCA/AMEX           | VAL   |   600 |  26.1 | +0.073 | +0.066 | +0.006 | +0.12 | +0.11 |  47.8 |    -1608 |       374 |    -3794 |    66 |
+      [2.3 diag TRAIN] already-wide n 132 gross -0.148 | arrived-after n 930 gross -0.007
+      [2.3 diag VAL] already-wide n 137 gross +0.129 | arrived-after n 463 gross +0.056
+    halves H1 -0.069 (n 490) | H2 +0.014 (n 572) | VAL +0.073 (n 600) -> same-signed POSITIVE in all three: False
+| F15-e1 premarket news present         | TRAIN |    69 |   1.3 | -0.016 | +0.069 | -0.085 | -0.61 | -0.58 |  30.2 |     -424 |      -588 |    -1275 |    84 |
+| F15-e1 premarket news present         | VAL   |    36 |   1.6 | +0.034 | +0.062 | -0.028 | -0.13 | -0.11 |  39.1 |     -552 |      -102 |     -983 |    81 |
+      [2.3 diag TRAIN] already-wide n 36 gross +0.054 | arrived-after n 33 gross -0.093
+      [2.3 diag VAL] already-wide n 17 gross +0.059 | arrived-after n 19 gross +0.011
+    halves H1 +0.181 (n 25) | H2 -0.128 (n 44) | VAL +0.034 (n 36) -> same-signed POSITIVE in all three: False
+| F15-e2 news same morning              | TRAIN |    58 |   1.1 | -0.074 | +0.070 | -0.144 | -0.95 | -0.97 |  26.4 |     -318 |      -838 |    -1513 |    84 |
+| F15-e2 news same morning              | VAL   |    31 |   1.3 | +0.137 | +0.057 | +0.080 | +0.35 | +0.31 |  39.1 |     -439 |       248 |     -635 |    84 |
+      [2.3 diag TRAIN] already-wide n 32 gross -0.017 | arrived-after n 26 gross -0.146
+      [2.3 diag VAL] already-wide n 16 gross -0.009 | arrived-after n 15 gross +0.293
+    halves H1 +0.173 (n 18) | H2 -0.186 (n 40) | VAL +0.137 (n 31) -> same-signed POSITIVE in all three: False
+| [diag] news-file COVERED subset       | TRAIN |   149 |   2.8 | +0.010 | +0.062 | -0.053 | -0.50 | -0.46 |  41.5 |     -471 |      -784 |    -2400 |    79 |
+| [diag] news-file COVERED subset       | VAL   |    85 |   3.7 | +0.117 | +0.061 | +0.056 | +0.40 | +0.38 |  43.5 |     -667 |       474 |    -1977 |    88 |
+      [2.3 diag TRAIN] already-wide n 60 gross +0.254 | arrived-after n 89 gross -0.155
+      [2.3 diag VAL] already-wide n 35 gross +0.238 | arrived-after n 50 gross +0.032
+    halves H1 -0.084 (n 56) | H2 +0.066 (n 93) | VAL +0.117 (n 85) -> same-signed POSITIVE in all three: False
+| [diag] covered AND no news            | TRAIN |    80 |   1.5 | +0.032 | +0.056 | -0.025 | -0.16 | -0.17 |  35.8 |     -549 |      -196 |    -1572 |    74 |
+| [diag] covered AND no news            | VAL   |    49 |   2.1 | +0.178 | +0.061 | +0.118 | +0.62 | +0.62 |  39.1 |     -247 |       576 |    -1475 |    94 |
+      [2.3 diag TRAIN] already-wide n 24 gross +0.553 | arrived-after n 56 gross -0.191
+      [2.3 diag VAL] already-wide n 18 gross +0.408 | arrived-after n 31 gross +0.045
+    halves H1 -0.298 (n 31) | H2 +0.241 (n 49) | VAL +0.178 (n 49) -> same-signed POSITIVE in all three: False
+
+
+== count-matched permutation null on green weeks (2,000 draws) ==
+| cell | split | observed green % | null mean | [p5, p95] | outside? |
+|---|---|---|---|---|---|
+| F15-base (B2, every name) | TRAIN | 32.1 | 30.8 | [24.5, 37.7] | inside |
+| F15-base (B2, every name) | VAL | 43.5 | 49.5 | [39.1, 60.9] | inside |
+| F15-a1 daysToCover >= 1.49 [med] | TRAIN | 30.2 | 30.7 | [24.5, 37.7] | inside |
+| F15-a1 daysToCover >= 1.49 [med] | VAL | 26.1 | 30.4 | [21.7, 39.1] | inside |
+| F15-a2 daysToCover >= 3.27 [p75] | TRAIN | 45.3 | 39.9 | [32.1, 47.2] | inside |
+| F15-a2 daysToCover >= 3.27 [p75] | VAL | 43.5 | 37.5 | [26.1, 47.8] | inside |
+| F15-a3 si/adv20 >= 2.991 [p75] | TRAIN | 43.4 | 37.5 | [30.2, 43.4] | inside |
+| F15-a3 si/adv20 >= 2.991 [p75] | VAL | 34.8 | 36.4 | [26.1, 47.8] | inside |
+| F15-c1 common stock only | TRAIN | 28.3 | 29.9 | [22.6, 35.8] | inside |
+| F15-c1 common stock only | VAL | 30.4 | 26.7 | [17.4, 34.8] | inside |
+| F15-c2 leveraged wrapper only | TRAIN | 41.5 | 39.3 | [32.1, 45.3] | inside |
+| F15-c2 leveraged wrapper only | VAL | 43.5 | 57.0 | [47.8, 65.2] | below |
+| F15-c3 anchor cohort >= 2 | TRAIN | 52.8 | 50.7 | [43.4, 58.5] | inside |
+| F15-c3 anchor cohort >= 2 | VAL | 60.9 | 73.4 | [65.2, 82.6] | below |
+| F15-d1 venue NASDAQ | TRAIN | 35.8 | 33.2 | [26.4, 39.6] | inside |
+| F15-d1 venue NASDAQ | VAL | 39.1 | 36.4 | [26.1, 47.8] | inside |
+| F15-d2 venue NYSE/ARCA/AMEX | TRAIN | 35.8 | 36.3 | [30.1, 43.4] | inside |
+| F15-d2 venue NYSE/ARCA/AMEX | VAL | 47.8 | 48.1 | [39.1, 56.5] | inside |
+| F15-e1 premarket news present | TRAIN | 30.2 | 28.2 | [22.6, 34.0] | inside |
+| F15-e1 premarket news present | VAL | 39.1 | 31.2 | [21.7, 39.1] | inside |
+| F15-e2 news same morning | TRAIN | 26.4 | 24.9 | [20.8, 30.2] | inside |
+| F15-e2 news same morning | VAL | 39.1 | 32.5 | [26.1, 39.1] | inside |
+| [diag] news-file COVERED subset | TRAIN | 41.5 | 38.3 | [32.1, 45.3] | inside |
+| [diag] news-file COVERED subset | VAL | 43.5 | 45.7 | [34.8, 56.5] | inside |
+| [diag] covered AND no news | TRAIN | 35.8 | 33.2 | [28.3, 37.7] | inside |
+| [diag] covered AND no news | VAL | 39.1 | 41.4 | [30.4, 52.2] | inside |
+
+== F15 PRE-COMMITTED SELECTOR (era-consistency at >=10 trades/week) ==
+  F15-base (B2, every name)                H1 -0.077 H2 -0.003 VAL +0.083 | /wk 30.6/30.7 | era-consistent False
+  F15-a1 daysToCover >= 1.49 [med]         H1 -0.095 H2 -0.018 VAL -0.031 | /wk 20.5/25.4 | era-consistent False
+  F15-a2 daysToCover >= 3.27 [p75]         H1 -0.084 H2 +0.078 VAL +0.007 | /wk 13.8/19.5 | era-consistent False
+  F15-a3 si/adv20 >= 2.991 [p75]           H1 -0.074 H2 +0.034 VAL -0.002 | /wk 12.9/18.7 | era-consistent False
+  F15-c1 common stock only                 H1 -0.060 H2 -0.046 VAL -0.055 | /wk 24.1/28.3 | era-consistent False
+  F15-c2 leveraged wrapper only            H1 -0.117 H2 +0.091 VAL +0.135 | /wk 20.4/25.8 | era-consistent False
+  F15-c3 anchor cohort >= 2                H1 +0.014 H2 +0.227 VAL +0.380 | /wk 8.7/12.8 | era-consistent True
+  F15-d1 venue NASDAQ                      H1 -0.068 H2 +0.001 VAL +0.009 | /wk 25.4/26.7 | era-consistent False
+  F15-d2 venue NYSE/ARCA/AMEX              H1 -0.069 H2 +0.014 VAL +0.073 | /wk 20.0/26.1 | era-consistent False
+  F15-e1 premarket news present            H1 +0.181 H2 -0.128 VAL +0.034 | /wk 1.3/1.6 | era-consistent False
+  F15-e2 news same morning                 H1 +0.173 H2 -0.186 VAL +0.137 | /wk 1.1/1.3 | era-consistent False
+  [diag] news-file COVERED subset          H1 -0.084 H2 +0.066 VAL +0.117 | /wk 2.8/3.7 | era-consistent False
+  [diag] covered AND no news               H1 -0.298 H2 +0.241 VAL +0.178 | /wk 1.5/2.1 | era-consistent False
+  -> 0: NONE
+
+== BOTH BARS ==
+G1 (TRAIN net>0, iid t>=2, CLUSTERED t>=2, >=10/wk): 0 -> []
+LIVE-EXPLORATION BAR: 0 -> []
+
+MDE (80% power, per trade, net):
+  F15-base (B2, every name)                TRAIN 0.088 VAL 0.132
+  F15-a1 daysToCover >= 1.49 [med]         TRAIN 0.103 VAL 0.139
+  F15-a2 daysToCover >= 3.27 [p75]         TRAIN 0.124 VAL 0.158
+  F15-a3 si/adv20 >= 2.991 [p75]           TRAIN 0.126 VAL 0.162
+  F15-c1 common stock only                 TRAIN 0.095 VAL 0.132
+  F15-c2 leveraged wrapper only            TRAIN 0.116 VAL 0.153
+  F15-c3 anchor cohort >= 2                TRAIN 0.184 VAL 0.219
+  F15-d1 venue NASDAQ                      TRAIN 0.097 VAL 0.137
+  F15-d2 venue NYSE/ARCA/AMEX              TRAIN 0.111 VAL 0.146
+  F15-e1 premarket news present            TRAIN 0.394 VAL 0.590
+  F15-e2 news same morning                 TRAIN 0.426 VAL 0.644
+  [diag] news-file COVERED subset          TRAIN 0.294 VAL 0.393
+  [diag] covered AND no news               TRAIN 0.430 VAL 0.530
+
+DONE

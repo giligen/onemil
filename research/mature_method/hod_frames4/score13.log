@@ -1,0 +1,160 @@
+== hod_frames4 / F13 — the slot rule ==  pre-book signals 7027, days 344
+   splits scored: ('TRAIN', 'VAL')   (TEST sealed)
+
+| cell                                  | split | n     | /wk   | grossR | cost   | netR   |  t    | tc    | green | rs | worst $  | total $   | MDD $    | ex5    |
+|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|
+| F13-C0 first-come, symbol tie [=B2]   | TRAIN |  1622 |  30.6 | -0.039 | +0.068 | -0.107 | -3.42 | -2.99 |  32.1 |  5 |    -2231 |    -17346 |   -18929 | -0.218 |
+| F13-C0 first-come, symbol tie [=B2]   | VAL   |   706 |  30.7 | +0.083 | +0.070 | +0.013 | +0.27 | +0.26 |  43.5 |  4 |     -957 |       893 |    -2940 | -0.093 |
+    halves H1 -0.077 (n 789) | H2 -0.003 (n 833) | VAL +0.083 (n 706) -> same-signed POSITIVE in all three: False
+
+-- F13-C1: 200 seeded RANDOM tie-breaks within the minute (the alphabet s own noise) --
+| split | green % mean [p5,p95] | total $ mean [p5,p95] | gross mean [p5,p95] | C0 |
+|---|---|---|---|---|
+| TRAIN | 33.7 [30.2, 35.9] | -16951 [-18714, -15241] | -0.0366 [-0.0474, -0.0261] | 32.1 / -17346 / -0.0390 |
+| VAL | 46.8 [43.5, 52.2] | +672 [-898, +2089] | +0.0790 [+0.0574, +0.0986] | 43.5 / +893 / +0.0827 |
+
+
+================ F13 ORACLE CEILING (bounds, NOT strategies) ================
+| F13-O1 oracle top-4/day               | TRAIN |   957 |  18.1 | +1.160 | +0.048 | +1.112 | +29.62 | +19.61 |  90.6 |  2 |     -556 |    106466 |     -947 | +1.066 |
+| F13-O1 oracle top-4/day               | VAL   |   408 |  17.7 | +1.657 | +0.044 | +1.613 | +42.47 | +28.64 |  95.7 |  0 |        0 |     65815 |        0 | +1.593 |
+    halves H1 +1.031 (n 462) | H2 +1.280 (n 495) | VAL +1.657 (n 408) -> same-signed POSITIVE in all three: True
+| F13-O2 oracle top-8/day               | TRAIN |  1819 |  34.3 | +0.581 | +0.055 | +0.527 | +16.93 | +9.27 |  79.2 |  2 |    -1684 |     95820 |    -3017 | +0.450 |
+| F13-O2 oracle top-8/day               | VAL   |   811 |  35.3 | +1.144 | +0.052 | +1.092 | +27.32 | +13.95 |  95.7 |  0 |        0 |     88555 |        0 | +1.044 |
+    halves H1 +0.438 (n 865) | H2 +0.711 (n 954) | VAL +1.144 (n 811) -> same-signed POSITIVE in all three: True
+| F13-O3 oracle top-12/day              | TRAIN |  2454 |  46.3 | +0.306 | +0.059 | +0.247 | +9.13 | +4.68 |  64.2 |  4 |    -2484 |     60560 |    -5250 | +0.155 |
+| F13-O3 oracle top-12/day              | VAL   |  1187 |  51.6 | +0.763 | +0.056 | +0.707 | +19.38 | +8.96 |  95.7 |  0 |        0 |     83928 |        0 | +0.639 |
+    halves H1 +0.174 (n 1140) | H2 +0.420 (n 1314) | VAL +0.763 (n 1187) -> same-signed POSITIVE in all three: True
+| F13-O4 oracle top-12/day, 4 conc      | TRAIN |  1816 |  34.3 | +0.391 | +0.058 | +0.334 | +10.15 | +7.55 |  77.4 |  3 |    -1577 |     60604 |    -3074 | +0.246 |
+| F13-O4 oracle top-12/day, 4 conc      | VAL   |   896 |  39.0 | +0.565 | +0.058 | +0.507 | +10.64 | +9.11 |  95.7 |  0 |        0 |     45416 |        0 | +0.429 |
+    halves H1 +0.277 (n 873) | H2 +0.497 (n 943) | VAL +0.565 (n 896) -> same-signed POSITIVE in all three: True
+
+
+================ F13 CAUSAL RANKINGS (within-minute) ================
+   z-param (TRAIN) rv_profile   mean +4.7115 sd 8.7933 sign +1
+   z-param (TRAIN) dollar_frac  mean +37.0499 sd 60.6910 sign +1
+   z-param (TRAIN) dist_own     mean +0.7280 sd 0.2719 sign +1
+   z-param (TRAIN) spr_r        mean +0.0835 sd 0.0348 sign -1
+| F13-r1 rank rv_profile desc           | TRAIN |  1624 |  30.6 | -0.038 | +0.068 | -0.106 | -3.38 | -2.97 |  30.2 |  5 |    -2278 |    -17158 |   -18928 | -0.217 |
+| F13-r1 rank rv_profile desc           | VAL   |   709 |  30.8 | +0.076 | +0.070 | +0.006 | +0.13 | +0.12 |  43.5 |  4 |    -1146 |       429 |    -4251 | -0.099 |
+    halves H1 -0.064 (n 785) | H2 -0.013 (n 839) | VAL +0.076 (n 709) -> same-signed POSITIVE in all three: False
+| F13-r2 rank dollar_frac desc          | TRAIN |  1629 |  30.7 | -0.047 | +0.068 | -0.115 | -3.68 | -3.28 |  30.2 |  4 |    -2231 |    -18690 |   -20406 | -0.226 |
+| F13-r2 rank dollar_frac desc          | VAL   |   701 |  30.5 | +0.098 | +0.069 | +0.029 | +0.61 | +0.57 |  43.5 |  4 |     -950 |      2035 |    -2755 | -0.073 |
+    halves H1 -0.077 (n 788) | H2 -0.018 (n 841) | VAL +0.098 (n 701) -> same-signed POSITIVE in all three: False
+| F13-r3 rank dist_open/med_rng desc    | TRAIN |  1624 |  30.6 | -0.039 | +0.068 | -0.106 | -3.40 | -3.00 |  35.8 |  4 |    -2392 |    -17273 |   -19092 | -0.217 |
+| F13-r3 rank dist_open/med_rng desc    | VAL   |   705 |  30.7 | +0.089 | +0.069 | +0.020 | +0.43 | +0.41 |  47.8 |  4 |    -1543 |      1414 |    -2733 | -0.085 |
+    halves H1 -0.065 (n 789) | H2 -0.014 (n 835) | VAL +0.089 (n 705) -> same-signed POSITIVE in all three: False
+| F13-r4 rank spread/R asc [cheapest]   | TRAIN |  1617 |  30.5 | -0.030 | +0.067 | -0.097 | -3.10 | -2.69 |  35.8 |  4 |    -2231 |    -15711 |   -16783 | -0.207 |
+| F13-r4 rank spread/R asc [cheapest]   | VAL   |   708 |  30.8 | +0.080 | +0.067 | +0.012 | +0.26 | +0.25 |  47.8 |  4 |    -1543 |       869 |    -3885 | -0.093 |
+    halves H1 -0.059 (n 782) | H2 -0.004 (n 835) | VAL +0.080 (n 708) -> same-signed POSITIVE in all three: False
+| F13-r5 rank composite z desc          | TRAIN |  1618 |  30.5 | -0.034 | +0.067 | -0.101 | -3.22 | -2.88 |  35.8 |  4 |    -2231 |    -16313 |   -17565 | -0.211 |
+| F13-r5 rank composite z desc          | VAL   |   705 |  30.7 | +0.094 | +0.068 | +0.026 | +0.55 | +0.53 |  47.8 |  4 |    -1055 |      1841 |    -2717 | -0.079 |
+    halves H1 -0.056 (n 784) | H2 -0.012 (n 834) | VAL +0.094 (n 705) -> same-signed POSITIVE in all three: False
+
+-- F13-r6 SPY-state x entry-minute: within a (day, minute) the score takes 1 distinct value(s) -> **VOID by the availability rail** (it cannot order simultaneous candidates).  Declared and reported, not dropped silently.
+
+-- churn of the booked set vs first-come (share of C0 trades replaced) --
+   F13-r1 rank rv_profile desc            TRAIN kept 1541 of 1622 (95.0%), swapped   83
+   F13-r1 rank rv_profile desc            VAL   kept  621 of  706 (88.0%), swapped   88
+   F13-r2 rank dollar_frac desc           TRAIN kept 1549 of 1622 (95.5%), swapped   80
+   F13-r2 rank dollar_frac desc           VAL   kept  625 of  706 (88.5%), swapped   76
+   F13-r3 rank dist_open/med_rng desc     TRAIN kept 1555 of 1622 (95.9%), swapped   69
+   F13-r3 rank dist_open/med_rng desc     VAL   kept  618 of  706 (87.5%), swapped   87
+   F13-r4 rank spread/R asc [cheapest]    TRAIN kept 1544 of 1622 (95.2%), swapped   73
+   F13-r4 rank spread/R asc [cheapest]    VAL   kept  616 of  706 (87.3%), swapped   92
+   F13-r5 rank composite z desc           TRAIN kept 1542 of 1622 (95.1%), swapped   76
+   F13-r5 rank composite z desc           VAL   kept  608 of  706 (86.1%), swapped   97
+
+
+================ F13 SLOT COUNT / RESERVE ================
+   best causal ranker by TRAIN+VAL dollars = F13-r5 rank composite z desc (-14472)
+| F13-n8  F13-r5 rank composite z desc @ 8 conc | TRAIN |  2373 |  44.8 | -0.041 | +0.068 | -0.109 | -4.17 | -3.21 |  30.2 |  6 |    -2745 |    -25838 |   -25838 | -0.219 |
+| F13-n8  F13-r5 rank composite z desc @ 8 conc | VAL   |  1140 |  49.6 | +0.035 | +0.070 | -0.035 | -0.94 | -0.77 |  30.4 | 11 |    -2165 |     -3987 |    -9107 | -0.141 |
+    halves H1 -0.087 (n 1114) | H2 +0.000 (n 1259) | VAL +0.035 (n 1140) -> same-signed POSITIVE in all three: False
+| F13-n12 F13-r5 rank composite z desc @ 12 conc | TRAIN |  2454 |  46.3 | -0.047 | +0.068 | -0.116 | -4.53 | -3.30 |  28.3 |  7 |    -2629 |    -28430 |   -28430 | -0.226 |
+| F13-n12 F13-r5 rank composite z desc @ 12 conc | VAL   |  1187 |  51.6 | +0.065 | +0.072 | -0.006 | -0.18 | -0.12 |  39.1 |  5 |    -1749 |      -771 |    -9526 | -0.112 |
+    halves H1 -0.104 (n 1140) | H2 +0.002 (n 1314) | VAL +0.065 (n 1187) -> same-signed POSITIVE in all three: False
+| F13-rs1 reserve 1 of 4 until 10:30    | TRAIN |  1520 |  28.7 | -0.036 | +0.067 | -0.103 | -3.17 | -2.82 |  35.8 |  6 |    -2280 |    -15649 |   -16748 | -0.213 |
+| F13-rs1 reserve 1 of 4 until 10:30    | VAL   |   701 |  30.5 | +0.032 | +0.069 | -0.037 | -0.77 | -0.80 |  39.1 |  5 |    -1044 |     -2593 |    -3981 | -0.143 |
+    halves H1 -0.083 (n 743) | H2 +0.008 (n 777) | VAL +0.032 (n 701) -> same-signed POSITIVE in all three: False
+| F13-rs2 reserve 2 of 4 until 10:30    | TRAIN |  1376 |  26.0 | -0.018 | +0.065 | -0.082 | -2.36 | -2.19 |  41.5 |  4 |    -2370 |    -11307 |   -13798 | -0.191 |
+| F13-rs2 reserve 2 of 4 until 10:30    | VAL   |   651 |  28.3 | +0.008 | +0.068 | -0.059 | -1.19 | -1.13 |  43.5 |  3 |    -1166 |     -3870 |    -4817 | -0.168 |
+    halves H1 -0.069 (n 666) | H2 +0.030 (n 710) | VAL +0.008 (n 651) -> same-signed POSITIVE in all three: False
+
+
+== count-matched permutation null on green weeks (2,000 draws) ==
+| cell | split | observed green % | null mean | [p5, p95] | outside? |
+|---|---|---|---|---|---|
+| F13-C0 first-come, symbol tie [=B2] | TRAIN | 32.1 | 30.8 | [24.5, 37.7] | inside |
+| F13-C0 first-come, symbol tie [=B2] | VAL | 43.5 | 49.5 | [39.1, 60.9] | inside |
+| F13-O1 oracle top-4/day | TRAIN | 90.6 | 98.0 | [96.2, 98.1] | below |
+| F13-O1 oracle top-4/day | VAL | 95.7 | 95.6 | [95.7, 95.7] | inside |
+| F13-O2 oracle top-8/day | TRAIN | 79.2 | 96.9 | [94.3, 98.1] | below |
+| F13-O2 oracle top-8/day | VAL | 95.7 | 95.6 | [95.7, 95.7] | inside |
+| F13-O3 oracle top-12/day | TRAIN | 64.2 | 87.4 | [81.1, 92.5] | below |
+| F13-O3 oracle top-12/day | VAL | 95.7 | 95.5 | [95.7, 95.7] | inside |
+| F13-O4 oracle top-12/day, 4 conc | TRAIN | 77.4 | 89.7 | [84.9, 94.3] | below |
+| F13-O4 oracle top-12/day, 4 conc | VAL | 95.7 | 94.2 | [91.3, 95.7] | inside |
+| F13-r1 rank rv_profile desc | TRAIN | 30.2 | 31.1 | [24.5, 37.7] | inside |
+| F13-r1 rank rv_profile desc | VAL | 43.5 | 48.5 | [39.1, 56.5] | inside |
+| F13-r2 rank dollar_frac desc | TRAIN | 30.2 | 29.6 | [22.6, 35.8] | inside |
+| F13-r2 rank dollar_frac desc | VAL | 43.5 | 52.4 | [43.5, 60.9] | inside |
+| F13-r3 rank dist_open/med_rng desc | TRAIN | 35.8 | 30.8 | [24.5, 37.7] | inside |
+| F13-r3 rank dist_open/med_rng desc | VAL | 47.8 | 50.6 | [39.1, 60.9] | inside |
+| F13-r4 rank spread/R asc [cheapest] | TRAIN | 35.8 | 32.0 | [26.4, 39.6] | inside |
+| F13-r4 rank spread/R asc [cheapest] | VAL | 47.8 | 49.5 | [39.1, 60.9] | inside |
+| F13-r5 rank composite z desc | TRAIN | 35.8 | 31.8 | [24.5, 37.7] | inside |
+| F13-r5 rank composite z desc | VAL | 47.8 | 51.7 | [39.1, 60.9] | inside |
+| F13-n8  F13-r5 rank composite z desc @ 8 conc | TRAIN | 30.2 | 27.3 | [20.8, 34.0] | inside |
+| F13-n8  F13-r5 rank composite z desc @ 8 conc | VAL | 30.4 | 40.0 | [30.4, 47.8] | inside |
+| F13-n12 F13-r5 rank composite z desc @ 12 conc | TRAIN | 28.3 | 25.8 | [18.9, 32.1] | inside |
+| F13-n12 F13-r5 rank composite z desc @ 12 conc | VAL | 39.1 | 45.5 | [34.8, 56.5] | inside |
+| F13-rs1 reserve 1 of 4 until 10:30 | TRAIN | 35.8 | 31.8 | [24.5, 37.8] | inside |
+| F13-rs1 reserve 1 of 4 until 10:30 | VAL | 39.1 | 41.0 | [30.4, 52.2] | inside |
+| F13-rs2 reserve 2 of 4 until 10:30 | TRAIN | 41.5 | 36.0 | [30.2, 43.4] | inside |
+| F13-rs2 reserve 2 of 4 until 10:30 | VAL | 43.5 | 37.5 | [26.1, 47.8] | inside |
+
+== F13 PRE-COMMITTED SELECTOR (ranking beats the race?) ==
+| ranking | split | green vs C0 | $ vs C0 | outside the random tie-break band? | halves |
+|---|---|---|---|---|---|
+| F13-r1 rank rv_profile desc | TRAIN | 30.2 vs 32.1 | -17158 vs -17346 | $ inside | False |
+| F13-r1 rank rv_profile desc | VAL | 43.5 vs 43.5 | +429 vs +893 | $ inside | False |
+| F13-r2 rank dollar_frac desc | TRAIN | 30.2 vs 32.1 | -18690 vs -17346 | $ inside | False |
+| F13-r2 rank dollar_frac desc | VAL | 43.5 vs 43.5 | +2035 vs +893 | $ inside | False |
+| F13-r3 rank dist_open/med_rng desc | TRAIN | 35.8 vs 32.1 | -17273 vs -17346 | $ inside | False |
+| F13-r3 rank dist_open/med_rng desc | VAL | 47.8 vs 43.5 | +1414 vs +893 | $ inside | False |
+| F13-r4 rank spread/R asc [cheapest] | TRAIN | 35.8 vs 32.1 | -15711 vs -17346 | $ inside | False |
+| F13-r4 rank spread/R asc [cheapest] | VAL | 47.8 vs 43.5 | +869 vs +893 | $ inside | False |
+| F13-r5 rank composite z desc | TRAIN | 35.8 vs 32.1 | -16313 vs -17346 | $ inside | False |
+| F13-r5 rank composite z desc | VAL | 47.8 vs 43.5 | +1841 vs +893 | $ inside | False |
+| F13-n8  F13-r5 rank composite z desc @ 8 conc | TRAIN | 30.2 vs 32.1 | -25838 vs -17346 | $ below | False |
+| F13-n8  F13-r5 rank composite z desc @ 8 conc | VAL | 30.4 vs 43.5 | -3987 vs +893 | $ below | False |
+| F13-n12 F13-r5 rank composite z desc @ 12 conc | TRAIN | 28.3 vs 32.1 | -28430 vs -17346 | $ below | False |
+| F13-n12 F13-r5 rank composite z desc @ 12 conc | VAL | 39.1 vs 43.5 | -771 vs +893 | $ inside | False |
+| F13-rs1 reserve 1 of 4 until 10:30 | TRAIN | 35.8 vs 32.1 | -15649 vs -17346 | $ inside | False |
+| F13-rs1 reserve 1 of 4 until 10:30 | VAL | 39.1 vs 43.5 | -2593 vs +893 | $ below | False |
+| F13-rs2 reserve 2 of 4 until 10:30 | TRAIN | 41.5 vs 32.1 | -11307 vs -17346 | $ ABOVE | False |
+| F13-rs2 reserve 2 of 4 until 10:30 | VAL | 43.5 vs 43.5 | -3870 vs +893 | $ below | False |
+
+  -> cells beating first-come on BOTH splits, outside the tie-break band, halves same-signed positive: NONE
+
+== BOTH BARS ==
+G1 (TRAIN net>0, iid t>=2, CLUSTERED t>=2, >=10/wk; oracles excluded): 0 -> []
+LIVE-EXPLORATION BAR: 0 -> []
+
+MDE (80% power, per trade, net):
+  F13-C0 first-come, symbol tie [=B2]      TRAIN 0.088 VAL 0.132
+  F13-O1 oracle top-4/day                  TRAIN 0.105 VAL 0.106
+  F13-O2 oracle top-8/day                  TRAIN 0.087 VAL 0.112
+  F13-O3 oracle top-12/day                 TRAIN 0.076 VAL 0.102
+  F13-O4 oracle top-12/day, 4 conc         TRAIN 0.092 VAL 0.133
+  F13-r1 rank rv_profile desc              TRAIN 0.088 VAL 0.132
+  F13-r2 rank dollar_frac desc             TRAIN 0.087 VAL 0.133
+  F13-r3 rank dist_open/med_rng desc       TRAIN 0.088 VAL 0.132
+  F13-r4 rank spread/R asc [cheapest]      TRAIN 0.088 VAL 0.132
+  F13-r5 rank composite z desc             TRAIN 0.088 VAL 0.132
+  F13-n8  F13-r5 rank composite z desc @ 8 conc TRAIN 0.073 VAL 0.104
+  F13-n12 F13-r5 rank composite z desc @ 12 conc TRAIN 0.072 VAL 0.101
+  F13-rs1 reserve 1 of 4 until 10:30       TRAIN 0.091 VAL 0.134
+  F13-rs2 reserve 2 of 4 until 10:30       TRAIN 0.098 VAL 0.140
+
+DONE

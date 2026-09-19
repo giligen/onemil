@@ -1,0 +1,122 @@
+== hod_frames4 / F14 — the DAY as the unit ==
+   day universe 344 sessions: TRAIN 242 (H1 117 / H2 125), VAL 102;  book rows 2328; no-trade days 0
+   field coverage: spy_r5 100.0% | qqq_r5 100.0% | spy_rng5_atr 100.0% | breadth_0935 100.0%
+   IWM and the VIX open gap are NOT in this repo index tape (SPY/QQQ only) -> declared NOT SCORED.
+
+| cell                               | split | days | day $   |  t    | grn d | n     | /wk   | grossR | grn % | total $  | MDD $    |
+|------|------|------|------|------|------|------|------|------|------|------|------|
+| F14-d0 base (every day)            | TRAIN |  242 |    -71.7 | -2.97 |  38.8 |  1622 |  30.6 | -0.039 |  32.1 |   -17346 |   -18929 |
+| F14-d0 base (every day)            | VAL   |  102 |     +8.8 | +0.26 |  52.0 |   706 |  30.7 | +0.083 |  43.5 |     +893 |    -2940 |
+    day-mean halves  H1    -96.6 | H2    -48.3 | VAL     +8.8 -> same-signed POSITIVE: False
+| F14-d1 spy_r5>0 [D2]               | TRAIN |  124 |    -24.7 | -0.75 |  45.2 |   829 |  15.6 | +0.032 |  43.4 |    -3059 |    -7999 |
+| F14-d1 spy_r5>0 [D2]               | VAL   |   52 |    +66.1 | +1.43 |  65.4 |   365 |  15.9 | +0.165 |  65.2 |    +3439 |    -1885 |
+    day-mean halves  H1    -85.5 | H2    +32.4 | VAL    +66.1 -> same-signed POSITIVE: False
+   [TRAIN terciles spy_r5_pct: -0.0474 / +0.0392]
+| F14-d2a spy_r5 T1 (most down)      | TRAIN |   81 |    -94.1 | -2.08 |  34.6 |   556 |  10.5 | -0.070 |  28.3 |    -7625 |    -7625 |
+| F14-d2a spy_r5 T1 (most down)      | VAL   |   33 |    -63.0 | -1.07 |  36.4 |   233 |  10.1 | -0.019 |  39.1 |    -2078 |    -2394 |
+    day-mean halves  H1    -87.5 | H2   -101.3 | VAL    -63.0 -> same-signed POSITIVE: False
+| F14-d2b spy_r5 T2                  | TRAIN |   80 |    -75.5 | -1.87 |  43.8 |   539 |  10.2 | -0.045 |  39.6 |    -6040 |    -6830 |
+| F14-d2b spy_r5 T2                  | VAL   |   26 |     -0.1 | -0.00 |  46.2 |   174 |   7.6 | +0.069 |  30.4 |       -2 |    -1503 |
+    day-mean halves  H1   -105.0 | H2    -52.5 | VAL     -0.1 -> same-signed POSITIVE: False
+| F14-d2c spy_r5 T3 (most up)        | TRAIN |   81 |    -45.4 | -1.14 |  38.3 |   527 |   9.9 | +0.001 |  28.3 |    -3680 |    -7513 |
+| F14-d2c spy_r5 T3 (most up)        | VAL   |   43 |    +69.1 | +1.37 |  67.4 |   299 |  13.0 | +0.170 |  60.9 |    +2973 |    -1722 |
+    day-mean halves  H1    -98.8 | H2     +6.7 | VAL    +69.1 -> same-signed POSITIVE: False
+| F14-d3 qqq_r5>0                    | TRAIN |  114 |   -102.3 | -3.12 |  34.2 |   757 |  14.3 | -0.085 |  32.1 |   -11667 |   -12777 |
+| F14-d3 qqq_r5>0                    | VAL   |   52 |    +42.4 | +0.88 |  57.7 |   360 |  15.7 | +0.132 |  52.2 |    +2206 |    -2522 |
+    day-mean halves  H1   -139.1 | H2    -68.1 | VAL    +42.4 -> same-signed POSITIVE: False
+| F14-d4 spy_r5>0 AND qqq_r5>0       | TRAIN |   94 |    -67.0 | -1.90 |  38.3 |   617 |  11.6 | -0.032 |  34.0 |    -6294 |    -9396 |
+| F14-d4 spy_r5>0 AND qqq_r5>0       | VAL   |   40 |    +63.8 | +1.10 |  65.0 |   279 |  12.1 | +0.163 |  60.9 |    +2554 |    -1885 |
+    day-mean halves  H1   -133.2 | H2     -6.1 | VAL    +63.8 -> same-signed POSITIVE: False
+   [TRAIN terciles spy_rng5_atr: 0.1358 / 0.1940]
+| F14-d5a spy_rng5_atr T1 (quiet)    | TRAIN |   81 |    -69.3 | -1.70 |  40.7 |   489 |   9.2 | -0.046 |  28.3 |    -5610 |    -8034 |
+| F14-d5a spy_rng5_atr T1 (quiet)    | VAL   |   39 |    +68.9 | +1.22 |  59.0 |   279 |  12.1 | +0.165 |  43.5 |    +2687 |     -957 |
+    day-mean halves  H1   -122.0 | H2    +15.9 | VAL    +68.9 -> same-signed POSITIVE: False
+| F14-d5b spy_rng5_atr T2            | TRAIN |   80 |   -103.4 | -2.66 |  36.2 |   530 |  10.0 | -0.088 |  28.3 |    -8274 |    -8815 |
+| F14-d5b spy_rng5_atr T2            | VAL   |   28 |    -76.0 | -1.01 |  39.3 |   191 |   8.3 | -0.042 |  21.7 |    -2129 |    -3135 |
+    day-mean halves  H1   -102.2 | H2   -104.2 | VAL    -76.0 -> same-signed POSITIVE: False
+| F14-d5c spy_rng5_atr T3 (wild)     | TRAIN |   81 |    -42.7 | -0.93 |  39.5 |   603 |  11.4 | +0.010 |  24.5 |    -3462 |    -7190 |
+| F14-d5c spy_rng5_atr T3 (wild)     | VAL   |   35 |     +9.6 | +0.22 |  54.3 |   236 |  10.3 | +0.086 |  39.1 |     +335 |    -1518 |
+    day-mean halves  H1    -57.7 | H2    -30.1 | VAL     +9.6 -> same-signed POSITIVE: False
+   [TRAIN terciles breadth_0935: 0 / 0]
+| F14-d6a breadth T1 (narrow)        | TRAIN |  242 |    -71.7 | -2.97 |  38.8 |  1622 |  30.6 | -0.039 |  32.1 |   -17346 |   -18929 |
+| F14-d6a breadth T1 (narrow)        | VAL   |  102 |     +8.8 | +0.26 |  52.0 |   706 |  30.7 | +0.083 |  43.5 |     +893 |    -2940 |
+    day-mean halves  H1    -96.6 | H2    -48.3 | VAL     +8.8 -> same-signed POSITIVE: False
+| F14-d6b breadth T2                 | TRAIN |    0 |     +nan |  +nan |   nan |     0 |   0.0 | +nan |   0.0 |       +0 |       +0 |
+| F14-d6b breadth T2                 | VAL   |    0 |     +nan |  +nan |   nan |     0 |   0.0 | +nan |   0.0 |       +0 |       +0 |
+    day-mean halves  H1     +nan | H2     +nan | VAL     +nan -> same-signed POSITIVE: False
+| F14-d6c breadth T3 (broad)         | TRAIN |    0 |     +nan |  +nan |   nan |     0 |   0.0 | +nan |   0.0 |       +0 |       +0 |
+| F14-d6c breadth T3 (broad)         | VAL   |    0 |     +nan |  +nan |   nan |     0 |   0.0 | +nan |   0.0 |       +0 |       +0 |
+    day-mean halves  H1     +nan | H2     +nan | VAL     +nan -> same-signed POSITIVE: False
+/home/ec2-user/onemil/research/mature_method/hod_frames4/score14.py:147: RuntimeWarning: Mean of empty slice.
+  print(f'| {nm} | {len(y)} | {y.mean():+.1f} | {y.mean()/se if se else np.nan:+.2f} | '
+/home/ec2-user/.local/lib/python3.11/site-packages/numpy/_core/_methods.py:144: RuntimeWarning: invalid value encountered in scalar divide
+  ret = ret.dtype.type(ret / rcount)
+/home/ec2-user/onemil/research/mature_method/hod_frames4/score14.py:148: RuntimeWarning: Mean of empty slice.
+  f'{(y>0).mean()*100:.1f} | {y.sum():+.0f} | {d1.y.mean():+.1f} | {dv.y.mean():+.1f} |')
+
+
+== F14-d7 — THE H2-2025 QUESTION: is there ANY 09:35 state under which the flat half is positive? ==
+   SEARCH over 6 declared states, H2-2025 only; multiplicity = 6, stated before the read.
+| state | H2 days | H2 day $ | H2 t | H2 green d % | H2 total $ | H1 day $ | VAL day $ |
+|---|---|---|---|---|---|---|---|
+| spy_r5>0 | 64 | +32.4 | +0.71 | 48.4 | +2071 | -85.5 | +66.1 |
+| spy_r5 T3 (most up) | 41 | +6.7 | +0.13 | 41.5 | +273 | -98.8 | +69.1 |
+| qqq_r5>0 | 59 | -68.1 | -1.50 | 37.3 | -4016 | -139.1 | +42.4 |
+| spy_r5>0 AND qqq_r5>0 | 49 | -6.1 | -0.13 | 42.9 | -301 | -133.2 | +63.8 |
+| spy_rng5_atr T3 (wild) | 44 | -30.1 | -0.50 | 36.4 | -1326 | -57.7 | +9.6 |
+| breadth T3 (broad) | 0 | +nan | +nan | nan | +0 | +nan | +nan |
+
+   best H2-2025 state = spy_r5>0 (+2071 over the half).
+   its VAL read: 52 days, day mean +66.1, total +3439 -> the frame answers YES only if this is non-negative.
+
+
+== F14-d8 the day gate x F13 s best causal ranking; F14-d9 the ORACLE day set ==
+| cell                               | split | days | day $   |  t    | grn d | n     | /wk   | grossR | grn % | total $  | MDD $    |
+|------|------|------|------|------|------|------|------|------|------|------|------|
+| F14-d8 spy_r5>0 x rank composite   | TRAIN |  124 |    -16.8 | -0.54 |  48.4 |   826 |  15.6 | +0.043 |  43.4 |    -2088 |    -6295 |
+| F14-d8 spy_r5>0 x rank composite   | VAL   |   52 |    +87.2 | +1.85 |  67.3 |   359 |  15.6 | +0.194 |  60.9 |    +4534 |    -1201 |
+    day-mean halves  H1    -62.3 | H2    +25.8 | VAL    +87.2 -> same-signed POSITIVE: False
+| F14-d9 ORACLE day set (y>0) [bound] | TRAIN |   94 |   +290.1 | +11.43 | 100.0 |   606 |  11.4 | +0.512 |  83.0 |   +27269 |       +0 |
+| F14-d9 ORACLE day set (y>0) [bound] | VAL   |   53 |   +263.5 | +9.47 | 100.0 |   360 |  15.7 | +0.454 |  95.7 |   +13968 |       +0 |
+    day-mean halves  H1   +284.8 | H2   +295.0 | VAL   +263.5 -> same-signed POSITIVE: True
+
+
+== count-matched permutation null on green WEEKS (2,000 draws) ==
+| cell | split | observed green % | null mean | [p5, p95] | outside? |
+|---|---|---|---|---|---|
+| F14-d0 base (every day) | TRAIN | 32.1 | 30.8 | [24.5, 37.7] | inside |
+| F14-d0 base (every day) | VAL | 43.5 | 49.5 | [39.1, 60.9] | inside |
+| F14-d1 spy_r5>0 [D2] | TRAIN | 43.4 | 42.9 | [35.8, 50.9] | inside |
+| F14-d1 spy_r5>0 [D2] | VAL | 65.2 | 56.1 | [43.5, 65.2] | inside |
+| F14-d2c spy_r5 T3 (most up) | TRAIN | 28.3 | 33.1 | [26.4, 39.6] | inside |
+| F14-d2c spy_r5 T3 (most up) | VAL | 60.9 | 53.2 | [43.5, 61.1] | inside |
+| F14-d3 qqq_r5>0 | TRAIN | 32.1 | 27.8 | [20.8, 34.0] | inside |
+| F14-d3 qqq_r5>0 | VAL | 52.2 | 50.1 | [39.1, 60.9] | inside |
+| F14-d4 spy_r5>0 AND qqq_r5>0 | TRAIN | 34.0 | 32.5 | [26.4, 39.6] | inside |
+| F14-d4 spy_r5>0 AND qqq_r5>0 | VAL | 60.9 | 51.9 | [43.5, 60.9] | inside |
+| F14-d5c spy_rng5_atr T3 (wild) | TRAIN | 24.5 | 31.1 | [24.5, 37.7] | inside |
+| F14-d5c spy_rng5_atr T3 (wild) | VAL | 39.1 | 35.4 | [26.1, 43.5] | inside |
+| F14-d6c breadth T3 (broad) | TRAIN | nan | nan | [nan, nan] | inside |
+| F14-d6c breadth T3 (broad) | VAL | nan | nan | [nan, nan] | inside |
+
+== F14 PRE-COMMITTED SELECTOR (day-level mean positive in H1, H2 and VAL; day t>=2 on TRAIN; >=50% green weeks both splits) ==
+  -> 1: ['F14-d9 ORACLE day set (y>0) [bound]']
+
+== day-level MDE (80% power, $ per day) ==
+  F14-d0 base (every day)              TRAIN n 242 MDE $68 VAL n 102 MDE $94
+  F14-d1 spy_r5>0 [D2]                 TRAIN n 124 MDE $92 VAL n 52 MDE $130
+  F14-d2a spy_r5 T1 (most down)        TRAIN n 81 MDE $127 VAL n 33 MDE $165
+  F14-d2b spy_r5 T2                    TRAIN n 80 MDE $113 VAL n 26 MDE $191
+  F14-d2c spy_r5 T3 (most up)          TRAIN n 81 MDE $112 VAL n 43 MDE $142
+  F14-d3 qqq_r5>0                      TRAIN n 114 MDE $92 VAL n 52 MDE $136
+  F14-d4 spy_r5>0 AND qqq_r5>0         TRAIN n 94 MDE $99 VAL n 40 MDE $162
+  F14-d5a spy_rng5_atr T1 (quiet)      TRAIN n 81 MDE $114 VAL n 39 MDE $158
+  F14-d5b spy_rng5_atr T2              TRAIN n 80 MDE $109 VAL n 28 MDE $211
+  F14-d5c spy_rng5_atr T3 (wild)       TRAIN n 81 MDE $128 VAL n 35 MDE $122
+  F14-d6a breadth T1 (narrow)          TRAIN n 242 MDE $68 VAL n 102 MDE $94
+  F14-d6b breadth T2                   TRAIN n 0 MDE $nan VAL n 0 MDE $nan
+  F14-d6c breadth T3 (broad)           TRAIN n 0 MDE $nan VAL n 0 MDE $nan
+  F14-d8 spy_r5>0 x rank composite     TRAIN n 124 MDE $88 VAL n 52 MDE $132
+  F14-d9 ORACLE day set (y>0) [bound]  TRAIN n 94 MDE $71 VAL n 53 MDE $78
+
+DONE

@@ -1,0 +1,47 @@
+== C1 — does the declared field use the future? ==
+   F15-c3 signals 952; of these the sibling had ALREADY broken at our entry minute in 659 (69.2%) and broke LATER in 293 (30.8%).
+   -> the declared field is NOT computable at the decision bar for the second group. The causal cell below is the honest version.
+
+| cell                                     | split | n     | /wk   | grossR | netR   |  t    | tc    | green | total $  | MDD $    | ex5    |
+|------|------|------|------|------|------|------|------|------|------|------|------|
+| F15-c3 [declared] anchor_cohort>=2       | TRAIN |   463 |   8.7 | +0.126 | +0.068 | +1.04 | +0.73 |  52.8 |    +3167 |    -3306 | -0.037 |
+| F15-c3 [declared] anchor_cohort>=2       | VAL   |   295 |  12.8 | +0.380 | +0.318 | +4.07 | +3.30 |  60.9 |    +9389 |     -942 | +0.229 |
+     halves H1 +0.014 | H2 +0.227 | VAL +0.380 -> same-signed +: True
+| F15-c3c [CAUSAL] cohort_causal>=2        | TRAIN |   337 |   6.4 | -0.013 | -0.068 | -0.91 | -0.66 |  39.6 |    -2284 |    -3637 | -0.177 |
+| F15-c3c [CAUSAL] cohort_causal>=2        | VAL   |   223 |   9.7 | +0.154 | +0.094 | +1.09 | +0.85 |  52.2 |    +2099 |    -2044 | -0.014 |
+     halves H1 -0.120 | H2 +0.084 | VAL +0.154 -> same-signed +: False
+|   ... sibling broke LATER only           | TRAIN |   163 |   3.1 | +0.457 | +0.398 | +3.54 | +3.48 |  60.4 |    +6484 |     -640 | +0.305 |
+|   ... sibling broke LATER only           | VAL   |   125 |   5.4 | +0.839 | +0.774 | +6.43 | +5.46 |  82.6 |    +9677 |     -398 | +0.703 |
+     halves H1 +0.346 | H2 +0.542 | VAL +0.839 -> same-signed +: True
+|   ... cohort==1 (alone all session)      | TRAIN |  1449 |  27.3 | -0.083 | -0.154 | -4.79 | -4.56 |  26.4 |   -22342 |   -22342 | -0.267 |
+|   ... cohort==1 (alone all session)      | VAL   |   683 |  29.7 | +0.030 | -0.043 | -0.90 | -0.89 |  39.1 |    -2908 |    -5115 | -0.152 |
+     halves H1 -0.111 | H2 -0.059 | VAL +0.030 -> same-signed +: False
+| F15-c3c x stock rows only                | TRAIN |   113 |   2.1 | +0.047 | +0.004 | +0.03 | +0.03 |  32.1 |      +43 |    -1488 | -0.108 |
+| F15-c3c x stock rows only                | VAL   |   122 |   5.3 | +0.143 | +0.096 | +0.77 | +0.70 |  56.5 |    +1169 |     -597 | -0.019 |
+     halves H1 +0.147 | H2 -0.004 | VAL +0.143 -> same-signed +: False
+| F15-c3c x wrapper rows only              | TRAIN |   237 |   4.5 | -0.033 | -0.093 | -1.06 | -0.77 |  45.3 |    -2200 |    -3626 | -0.204 |
+| F15-c3c x wrapper rows only              | VAL   |   133 |   5.8 | +0.127 | +0.057 | +0.54 | +0.39 |  34.8 |     +757 |    -1986 | -0.049 |
+     halves H1 -0.196 | H2 +0.163 | VAL +0.127 -> same-signed +: False
+| F15-c3c x spy_r5>0                       | TRAIN |   176 |   3.3 | -0.011 | -0.070 | -0.68 | -0.49 |  32.1 |    -1231 |    -2224 | -0.181 |
+| F15-c3c x spy_r5>0                       | VAL   |   136 |   5.9 | +0.221 | +0.161 | +1.44 | +1.11 |  47.8 |    +2190 |    -1030 | +0.062 |
+     halves H1 +0.023 | H2 -0.040 | VAL +0.221 -> same-signed +: False
+
+== C2 — composition of the declared cell ==
+   TRAIN: rows 547 | stock 116 | wrapper 431 | distinct anchors 40 | top anchor {'TSLA': 72, 'PLTR': 52, 'NVDA': 41}
+   VAL: rows 405 | stock 133 | wrapper 272 | distinct anchors 45 | top anchor {'IONQ': 33, 'SNDK': 33, 'MU': 32}
+
+== C3 — concentration and the tail test (the causal cell) ==
+   TRAIN: total $-2284 | best week $+1592 (-70 % of it) | top-3 weeks $+3017 | net -0.068 -> ex-top-1 % -0.093 -> ex-top-5 % -0.177
+        months green 5/12 | worst month $-1810
+   VAL: total $+2099 | best week $+1623 (77 % of it) | top-3 weeks $+3115 | net +0.094 -> ex-top-1 % +0.068 -> ex-top-5 % -0.014
+        months green 3/5 | worst month $-1018
+
+== C4 — count-matched null on the causal cell ==
+   TRAIN: green 39.6 % vs null 40.6 [34.0, 47.2] -> inside
+   VAL: green 52.2 % vs null 53.5 [43.5, 65.2] -> inside
+
+== C5 — MDE of the causal cell ==
+   TRAIN: n 337, net -0.068, 80 %-power MDE 0.209 R/trade
+   VAL: n 223, net +0.094, 80 %-power MDE 0.242 R/trade
+
+DONE
