@@ -1,0 +1,241 @@
+== hod_filter_stack — stages 2/4/5/6/8 ==
+pop 147196 rows | days 412 | nbbo matched 10.5%
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+
+== STAGE 2 — BASE POPULATIONS ==
+| cell                         | split | n     | /wk   | grossR | netR   | net(b) |  t    | green | flat  | rs | worst $  | total $   | MDD $    | gr mo | ex5    | imp |
+|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|
+| B0                           | TRAIN |  1688 |  31.8 | -0.027 | -0.088 | -0.089 | -2.64 |  41.5 |   1.9 |  7 |    -2718 |    -14835 |   -17209 |  25.0 | -0.198 |    1 |
+| B0                           | VAL   |   820 |  35.7 | +0.016 | -0.050 | -0.051 | -1.06 |  43.5 |   4.3 |  6 |    -2076 |     -4128 |    -7519 |  40.0 | -0.158 |    1 |
+| B1L                          | TRAIN |  1475 |  27.8 | -0.108 | -0.175 | -0.189 | -4.88 |  34.0 |   1.9 |  6 |    -2130 |    -25788 |   -25788 |  16.7 | -0.289 |   18 |
+| B1L                          | VAL   |   797 |  34.7 | +0.031 | -0.041 | -0.061 | -0.83 |  43.5 |   4.3 |  4 |    -1673 |     -3254 |    -4846 |  40.0 | -0.148 |   26 |
+| B1                           | TRAIN |  1700 |  32.1 | -0.039 | -0.102 | -0.115 | -3.17 |  35.8 |   1.9 | 10 |    -2695 |    -17276 |   -20180 |  33.3 | -0.211 |   22 |
+| B1                           | VAL   |   777 |  33.8 | +0.044 | -0.024 | -0.047 | -0.52 |  43.5 |   4.3 |  4 |    -1578 |     -1876 |    -6281 |  40.0 | -0.130 |   34 |
+| B2                           | TRAIN |  1622 |  30.6 | -0.039 | -0.107 | -0.140 | -3.42 |  32.1 |   1.9 |  5 |    -2231 |    -17346 |   -18929 |  25.0 | -0.218 |   49 |
+| B2                           | VAL   |   706 |  30.7 | +0.083 | +0.013 | -0.026 | +0.27 |  43.5 |   4.3 |  4 |     -957 |      +893 |    -2940 |  40.0 | -0.093 |   57 |
+| B3                           | TRAIN |  1204 |  22.7 | -0.074 | -0.114 | -0.127 | -3.13 |  26.4 |   1.9 | 13 |    -1403 |    -13723 |   -14063 |   8.3 | -0.226 |   28 |
+| B3                           | VAL   |   596 |  25.9 | +0.047 | +0.005 | -0.013 | +0.10 |  47.8 |   4.3 |  6 |    -1450 |      +313 |    -5019 |  60.0 | -0.100 |   38 |
+  pre-book B0   TRAIN n=  3166 grossR +0.0071 +/- 0.0235
+  pre-book B0   VAL   n=  1775 grossR +0.0012 +/- 0.0315
+  pre-book B1L  TRAIN n=  2594 grossR -0.0093 +/- 0.0261
+  pre-book B1L  VAL   n=  1293 grossR +0.0110 +/- 0.0379
+  pre-book B1   TRAIN n=  3947 grossR +0.0166 +/- 0.0201
+  pre-book B1   VAL   n=  2140 grossR -0.0034 +/- 0.0279
+  pre-book B2   TRAIN n=  4575 grossR -0.0017 +/- 0.0182
+  pre-book B2   VAL   n=  2452 grossR +0.0153 +/- 0.0255
+  pre-book B3   TRAIN n=  2194 grossR -0.0456 +/- 0.0259
+  pre-book B3   VAL   n=  1029 grossR +0.0127 +/- 0.0388
+
+== AVAILABILITY AUDIT (B2 pre-book) ==
+  breadth_min            cov 100.0%  miss win   0.0% loss   0.0%
+  breadth_15m            cov 100.0%  miss win   0.0% loss   0.0%
+  breadth_day            cov 100.0%  miss win   0.0% loss   0.0%
+  cohort_rank_dist       cov 100.0%  miss win   0.0% loss   0.0%
+  rs_vs_cohort           cov 100.0%  miss win   0.0% loss   0.0%
+  spy_dist_hod_pct       cov 100.0%  miss win   0.0% loss   0.0%
+  spy_ret_30m            cov  55.9%  miss win  45.1% loss  43.4%
+  spy_ret_open_sig       cov 100.0%  miss win   0.0% loss   0.0%
+  ret_open_1000          cov  55.0%  miss win  45.7% loss  44.4%
+  ret_1000_sig           cov  55.0%  miss win  45.7% loss  44.4%
+  ret_open_sig           cov 100.0%  miss win   0.0% loss   0.0%
+  slope5                 cov 100.0%  miss win   0.0% loss   0.0%
+  slope_prior10          cov  75.0%  miss win  27.1% loss  23.5%
+  slope_accel            cov  75.0%  miss win  27.1% loss  23.5%
+  vol3_over_10           cov  77.7%  miss win  24.5% loss  20.7%
+  vwap_dist_pct          cov 100.0%  miss win   0.0% loss   0.0%
+  range_pos              cov  97.6%  miss win   2.6% loss   2.3%
+  atr14_pct              cov  76.2%  miss win  26.0% loss  22.2%
+  hod_age_bars           cov 100.0%  miss win   0.0% loss   0.0%
+  prev_close_pos         cov 100.0%  miss win   0.0% loss   0.0%
+  dow                    cov 100.0%  miss win   0.0% loss   0.0%
+  spy_vol20              cov 100.0%  miss win   0.0% loss   0.0%
+  breadth_by_1000        cov 100.0%  miss win   0.0% loss   0.0%
+  sym_prior_n            cov 100.0%  miss win   0.0% loss   0.0%
+  sym_prior_meanR        cov 100.0%  miss win   0.0% loss   0.0%
+  news_recency_min       cov  15.7%  miss win  83.7% loss  84.7%
+  news_n                 cov  73.4%  miss win  24.4% loss  28.2%
+  entry_m                cov 100.0%  miss win   0.0% loss   0.0%
+  rv_profile             cov 100.0%  miss win   0.0% loss   0.0%
+  dist_open_pct          cov 100.0%  miss win   0.0% loss   0.0%
+  gap_pct                cov 100.0%  miss win   0.0% loss   0.0%
+  prev_range_pct         cov 100.0%  miss win   0.0% loss   0.0%
+  dist_20d_high_pct      cov 100.0%  miss win   0.0% loss   0.0%
+  is_wrapper             cov 100.0%  miss win   0.0% loss   0.0%
+  has_news               cov  73.4%  miss win  24.4% loss  28.2%
+  above_vwap             cov 100.0%  miss win   0.0% loss   0.0%
+  n_prior                cov 100.0%  miss win   0.0% loss   0.0%
+  spy_5m_ret             cov 100.0%  miss win   0.0% loss   0.0%
+  spy_range3             cov 100.0%  miss win   0.0% loss   0.0%
+  bar_vol                cov 100.0%  miss win   0.0% loss   0.0%
+
+== STAGE 4 — TERCILE SEPARATION ON B2 (TRAIN edges) ==
+| feature              | fam | cov  | n best | n worst | mu best | mu worst | TRAIN spread | winsor | t     | halves | VAL spread | selectable |
+| entry_m              | OLD | 100% |   1523 |    1490 |  +0.344 |   -0.336 |       +0.681 | +0.681 | +15.51 | True   |     +0.060 | True       |
+| dow                  | NEW | 100% |   1234 |    1864 |  +0.329 |   -0.216 |       +0.545 | +0.545 | +12.67 | False  |     +0.037 | False      |
+| gap_pct              | OLD | 100% |   1524 |    1525 |  +0.198 |   -0.170 |       +0.368 | +0.368 | +8.47 | False  |     -0.045 | False      |
+| sym_prior_meanR      | NEW | 100% |   1525 |    1524 |  +0.146 |   -0.142 |       +0.288 | +0.288 | +6.61 | False  |     -0.079 | False      |
+| spy_ret_30m          | NEW |  56% |   1107 |     856 |  +0.126 |   -0.157 |       +0.283 | +0.284 | +5.49 | False  |       +nan | False      |
+| rv_profile           | OLD | 100% |   1525 |    1525 |  +0.173 |   -0.107 |       +0.280 | +0.279 | +6.38 | True   |     -0.096 | True       |
+| spy_dist_hod_pct     | NEW | 100% |   1525 |    1525 |  +0.087 |   -0.148 |       +0.235 | +0.234 | +5.32 | True   |     -0.014 | True       |
+| prev_range_pct       | OLD | 100% |   1525 |    1525 |  +0.069 |   -0.118 |       +0.187 | +0.188 | +4.13 | False  |     +0.109 | False      |
+| breadth_min          | NEW | 100% |   1513 |    1276 |  +0.099 |   -0.079 |       +0.178 | +0.177 | +3.96 | True   |     +0.062 | False      |
+| prev_close_pos       | NEW | 100% |   1525 |    1525 |  +0.095 |   -0.076 |       +0.171 | +0.171 | +3.86 | False  |     +0.030 | False      |
+| rs_vs_cohort         | NEW | 100% |   1525 |    1525 |  +0.076 |   -0.071 |       +0.147 | +0.148 | +3.36 | True   |     +0.007 | False      |
+| breadth_15m          | NEW | 100% |   1515 |    1520 |  +0.071 |   -0.074 |       +0.144 | +0.144 | +3.26 | True   |     +0.041 | False      |
+| spy_vol20            | NEW | 100% |   1521 |    1527 |  +0.070 |   -0.070 |       +0.140 | +0.139 | +3.19 | False  |     +0.151 | False      |
+| spy_5m_ret           | OLD | 100% |   1525 |    1526 |  +0.062 |   -0.071 |       +0.132 | +0.132 | +3.05 | True   |     +0.115 | False      |
+| breadth_day          | NEW | 100% |   1519 |    1536 |  +0.067 |   -0.038 |       +0.105 | +0.105 | +2.47 | True   |     -0.153 | False      |
+| dist_open_pct        | OLD | 100% |   1525 |    1525 |  +0.058 |   -0.045 |       +0.102 | +0.102 | +2.24 | True   |     -0.022 | False      |
+| ret_1000_sig         | NEW |  55% |    972 |     971 |  +0.063 |   -0.038 |       +0.101 | +0.103 | +1.74 | True   |     -0.032 | False      |
+| breadth_by_1000      | NEW | 100% |   1511 |    1445 |  +0.045 |   -0.052 |       +0.098 | +0.098 | +2.22 | True   |     +0.283 | False      |
+| ret_open_1000        | NEW |  55% |    972 |     972 |  +0.047 |   -0.041 |       +0.088 | +0.088 | +1.52 | True   |     -0.068 | False      |
+| spy_range3           | OLD | 100% |   1524 |    1525 |  +0.049 |   -0.037 |       +0.086 | +0.086 | +1.96 | True   |     +0.053 | False      |
+| spy_ret_open_sig     | NEW | 100% |   1522 |    1525 |  +0.045 |   -0.040 |       +0.085 | +0.084 | +1.93 | True   |     -0.047 | False      |
+| ret_open_sig         | NEW | 100% |   1525 |    1525 |  +0.045 |   -0.038 |       +0.083 | +0.084 | +1.88 | True   |     +0.140 | False      |
+| vwap_dist_pct        | NEW | 100% |   1525 |    1525 |  +0.053 |   -0.030 |       +0.082 | +0.082 | +1.87 | True   |     -0.015 | False      |
+| slope_prior10        | NEW |  75% |   1233 |    1232 |  +0.034 |   -0.045 |       +0.079 | +0.078 | +1.58 | True   |     +0.144 | False      |
+| bar_vol              | OLD | 100% |   1525 |    1525 |  +0.047 |   -0.028 |       +0.075 | +0.072 | +1.69 | False  |     +0.053 | False      |
+| cohort_rank_dist     | NEW | 100% |   1523 |    1526 |  +0.022 |   -0.043 |       +0.065 | +0.064 | +1.42 | True   |     -0.024 | False      |
+| range_pos            | NEW |  98% |   1493 |    1494 |  +0.032 |   -0.020 |       +0.052 | +0.051 | +1.15 | True   |     +0.049 | False      |
+| slope5               | NEW | 100% |   1525 |    1525 |  +0.027 |   -0.022 |       +0.049 | +0.049 | +1.10 | False  |     +0.213 | False      |
+| slope_accel          | NEW |  75% |   1233 |    1232 |  +0.020 |   -0.028 |       +0.048 | +0.048 | +0.98 | True   |     -0.113 | False      |
+| atr14_pct            | NEW |  76% |   1244 |    1243 |  +0.021 |   -0.026 |       +0.047 | +0.046 | +0.94 | False  |     +0.021 | False      |
+| hod_age_bars         | NEW | 100% |   3183 |     503 |  +0.004 |   -0.042 |       +0.046 | +0.047 | +0.81 | False  |     +0.041 | False      |
+| vol3_over_10         | NEW |  78% |   1256 |    1254 |  +0.020 |   -0.024 |       +0.044 | +0.044 | +0.88 | False  |     +0.077 | False      |
+| dist_20d_high_pct    | OLD | 100% |   1524 |    1525 |  +0.023 |   -0.014 |       +0.037 | +0.038 | +0.84 | True   |     -0.049 | False      |
+| sym_prior_n          | NEW | 100% |   1412 |    1660 |  +0.010 |   -0.019 |       +0.029 | +0.029 | +0.67 | True   |     +0.033 | False      |
+
+== STAGE 4 — THE SAME TABLE ON B0 (where the 4 merged OLD features are complete) ==
+| feature              | fam | cov  | n best | n worst | mu best | mu worst | TRAIN spread | winsor | t     | halves | VAL spread | selectable |
+| entry_m              | OLD | 100% |   1049 |    1035 |  +0.286 |   -0.232 |       +0.518 | +0.518 | +9.21 | True   |     -0.006 | True       |
+| drive_min            | OLD | 100% |   1055 |    1041 |  +0.276 |   -0.186 |       +0.462 | +0.461 | +8.13 | True   |     +0.081 | True       |
+| bar_vol_x            | OLD | 100% |   1055 |    1055 |  +0.188 |   -0.114 |       +0.302 | +0.301 | +5.29 | True   |     +0.022 | True       |
+| ret_1000_sig         | NEW |  69% |    785 |     785 |  +0.204 |   -0.053 |       +0.257 | +0.258 | +3.80 | True   |     -0.075 | True       |
+| rv_profile           | OLD | 100% |   1055 |    1056 |  +0.145 |   -0.106 |       +0.251 | +0.251 | +4.40 | True   |     -0.115 | True       |
+| ret_open_1000        | NEW |  69% |    785 |     786 |  +0.145 |   -0.067 |       +0.212 | +0.213 | +3.15 | True   |     -0.099 | True       |
+| dow                  | NEW | 100% |   1337 |    1236 |  +0.114 |   -0.096 |       +0.210 | +0.210 | +4.02 | True   |     +0.053 | True       |
+| breadth_day          | NEW | 100% |   1054 |    1057 |  +0.132 |   -0.074 |       +0.206 | +0.205 | +3.65 | True   |     -0.225 | True       |
+| rs_vs_cohort         | NEW | 100% |   1056 |    1055 |  +0.106 |   -0.084 |       +0.190 | +0.191 | +3.33 | True   |     -0.108 | False      |
+| breadth_min          | NEW | 100% |    948 |     860 |  +0.098 |   -0.086 |       +0.184 | +0.185 | +3.02 | True   |     -0.072 | False      |
+| gap_pct              | OLD | 100% |   1055 |    1055 |  +0.106 |   -0.057 |       +0.163 | +0.162 | +2.88 | False  |     -0.113 | False      |
+| slope_prior10        | NEW |  94% |   1017 |    1016 |  +0.090 |   -0.069 |       +0.159 | +0.159 | +2.72 | False  |     +0.172 | False      |
+| breadth_by_1000      | NEW | 100% |   1042 |    1055 |  +0.068 |   -0.086 |       +0.154 | +0.153 | +2.73 | True   |     +0.043 | False      |
+| vwap_dist_pct        | NEW | 100% |   1056 |    1054 |  +0.103 |   -0.047 |       +0.150 | +0.150 | +2.61 | True   |     +0.163 | False      |
+| cohort_rank_dist     | NEW | 100% |   1056 |    1055 |  +0.085 |   -0.064 |       +0.149 | +0.150 | +2.62 | True   |     -0.003 | False      |
+| slope5               | NEW | 100% |   1055 |    1055 |  +0.061 |   -0.085 |       +0.145 | +0.146 | +2.46 | True   |     +0.149 | False      |
+| ret_open_sig         | NEW | 100% |   1056 |    1054 |  +0.083 |   -0.062 |       +0.145 | +0.145 | +2.52 | True   |     +0.123 | False      |
+| breadth_15m          | NEW | 100% |   1044 |    1036 |  +0.083 |   -0.045 |       +0.128 | +0.127 | +2.24 | True   |     +0.083 | False      |
+| spy_5m_ret           | OLD | 100% |   1055 |    1055 |  +0.061 |   -0.057 |       +0.118 | +0.117 | +2.10 | True   |     +0.175 | False      |
+| dist_open_pct        | OLD | 100% |   1055 |    1056 |  +0.076 |   -0.035 |       +0.111 | +0.111 | +1.93 | True   |     +0.043 | False      |
+| bar_vol              | OLD | 100% |   1055 |    1056 |  +0.061 |   -0.045 |       +0.106 | +0.109 | +1.84 | True   |     -0.125 | False      |
+| sym_prior_meanR      | NEW | 100% |   1055 |     955 |  +0.061 |   -0.043 |       +0.104 | +0.104 | +1.74 | True   |     -0.070 | False      |
+| spy_range3           | OLD | 100% |   1056 |    1055 |  +0.068 |   -0.031 |       +0.099 | +0.100 | +1.75 | False  |     -0.038 | False      |
+| dist_20d_high_pct    | OLD | 100% |   1055 |    1055 |  +0.038 |   -0.047 |       +0.085 | +0.087 | +1.49 | True   |     +0.002 | False      |
+| spy_vol20            | NEW | 100% |   1049 |    1060 |  +0.049 |   -0.033 |       +0.082 | +0.082 | +1.45 | False  |     +0.193 | False      |
+| vol3_over_10         | NEW |  95% |   1026 |    1027 |  +0.040 |   -0.041 |       +0.082 | +0.082 | +1.41 | True   |     -0.110 | False      |
+| atr14_pct            | NEW |  95% |   1022 |    1022 |  +0.042 |   -0.039 |       +0.080 | +0.082 | +1.36 | False  |     -0.061 | False      |
+| spy_dist_hod_pct     | NEW | 100% |   1056 |    1055 |  +0.034 |   -0.044 |       +0.078 | +0.078 | +1.39 | True   |     -0.185 | False      |
+| rv_clock             | OLD |  95% |    943 |     943 |  +0.037 |   -0.035 |       +0.072 | +0.072 | +1.15 | True   |     -0.041 | False      |
+| slope_accel          | NEW |  94% |   1016 |    1016 |  +0.030 |   -0.035 |       +0.065 | +0.064 | +1.09 | True   |     -0.020 | False      |
+| hod_age_bars         | NEW | 100% |   1963 |     309 |  +0.021 |   -0.043 |       +0.065 | +0.066 | +0.79 | True   |     -0.064 | False      |
+| spy_ret_open_sig     | NEW | 100% |   1056 |    1055 |  +0.047 |   -0.013 |       +0.061 | +0.061 | +1.07 | False  |     -0.066 | False      |
+| spy_ret_30m          | NEW |  72% |    813 |     812 |  +0.068 |   +0.009 |       +0.059 | +0.059 | +0.93 | True   |     -0.078 | False      |
+| prev_range_pct       | OLD | 100% |   1056 |    1055 |  +0.032 |   -0.021 |       +0.054 | +0.054 | +0.92 | False  |     +0.138 | False      |
+| sym_prior_n          | NEW | 100% |   1097 |    1020 |  +0.038 |   -0.012 |       +0.049 | +0.051 | +0.87 | False  |     +0.135 | False      |
+| prev_close_pos       | NEW | 100% |   1055 |    1056 |  +0.029 |   -0.010 |       +0.039 | +0.038 | +0.69 | False  |     +0.064 | False      |
+| range_pos            | NEW |  98% |   1039 |    1040 |  +0.021 |   -0.005 |       +0.026 | +0.025 | +0.45 | False  |     +0.016 | False      |
+
+selected by the pre-committed rule (spread>=0.20R, n>=300 each side, same sign in both TRAIN halves, max 5): ['entry_m', 'rv_profile', 'spy_dist_hod_pct']
+
+== STAGE 4 — RULE CELLS ==
+| cell                         | split | n     | /wk   | grossR | netR   | net(b) |  t    | green | flat  | rs | worst $  | total $   | MDD $    | gr mo | ex5    | imp |
+|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|
+| R1 entry_m T2                | TRAIN |   842 |  15.9 | +0.049 | -0.010 | -0.016 | -0.20 |  35.8 |   1.9 |  5 |    -1382 |      -801 |    -5355 |  50.0 | -0.117 |   11 |
+| R1 entry_m T2                | VAL   |   470 |  20.4 | -0.010 | -0.073 | -0.082 | -1.19 |  43.5 |   4.3 |  3 |    -1189 |     -3432 |    -4877 |  20.0 | -0.184 |   13 |
+| R2 rv_profile T0             | TRAIN |   816 |  15.4 | -0.020 | -0.084 | -0.093 | -1.80 |  35.8 |   1.9 |  8 |    -1490 |     -6894 |    -7634 |  25.0 | -0.194 |   14 |
+| R2 rv_profile T0             | VAL   |   510 |  22.2 | +0.000 | -0.068 | -0.079 | -1.16 |  34.8 |   4.3 |  4 |    -1500 |     -3483 |    -4406 |  40.0 | -0.179 |   18 |
+| R3 spy_dist_hod_pct T2       | TRAIN |   612 |  11.5 | +0.033 | -0.035 | -0.066 | -0.67 |  45.3 |   3.8 |  5 |    -1947 |     -2131 |    -6706 |  33.3 | -0.142 |   45 |
+| R3 spy_dist_hod_pct T2       | VAL   |   351 |  15.3 | +0.097 | +0.027 | -0.009 | +0.40 |  43.5 |   4.3 |  4 |     -840 |      +956 |    -2244 |  40.0 | -0.079 |   52 |
+| R-AND2                       | TRAIN |   523 |   9.9 | +0.028 | -0.031 | -0.034 | -0.52 |  43.4 |   1.9 |  4 |     -787 |     -1620 |    -3854 |  41.7 | -0.141 |    6 |
+| R-AND2                       | VAL   |   314 |  13.7 | -0.029 | -0.093 | -0.096 | -1.24 |  47.8 |   4.3 |  3 |    -1064 |     -2908 |    -4124 |  20.0 | -0.204 |    6 |
+| R-AND3                       | TRAIN |    96 |   1.8 | -0.055 | -0.113 | -0.114 | -0.84 |  20.8 |  32.1 |  4 |     -391 |     -1084 |    -2039 |  25.0 | -0.228 |    4 |
+| R-AND3                       | VAL   |    64 |   2.8 | -0.251 | -0.316 | -0.321 | -2.01 |  26.1 |  13.0 |  5 |     -353 |     -2024 |    -2308 |  20.0 | -0.469 |    8 |
+
+== STAGE 4 — DECILE VETO CELLS (the veto CAUSAL_FILTER forbade itself) ==
+  V1 entry_m: worst TRAIN decile #5 edges [615, 621) -> -0.690 R on 345 rows; all deciles +0.04 -0.07 -0.01 -0.02 -0.36 -0.69 -0.24 +0.09 +0.60 +0.55
+| V1 veto entry_m d5           | TRAIN |  1609 |  30.4 | -0.029 | -0.097 | -0.130 | -3.08 |  35.8 |   1.9 |  4 |    -2333 |    -15619 |   -16695 |  25.0 | -0.207 |   49 |
+| V1 veto entry_m d5           | VAL   |   703 |  30.6 | +0.091 | +0.021 | -0.017 | +0.45 |  56.5 |   4.3 |  3 |    -1275 |     +1505 |    -3088 |  40.0 | -0.084 |   57 |
+  V2 dow: worst TRAIN decile #0 edges [0, 1) -> -0.216 R on 1864 rows; all deciles -0.22 +0.33 -0.01 -0.00
+| V2 veto dow d0               | TRAIN |  1309 |  24.7 | -0.054 | -0.123 | -0.156 | -3.56 |  28.3 |   1.9 |  7 |    -2116 |    -16045 |   -17868 |  25.0 | -0.234 |   50 |
+| V2 veto dow d0               | VAL   |   597 |  26.0 | +0.060 | -0.010 | -0.047 | -0.19 |  43.5 |   4.3 |  4 |    -1037 |      -577 |    -3339 |  60.0 | -0.115 |   56 |
+  V3 gap_pct: worst TRAIN decile #1 edges [-5.726, -3.59) -> -0.423 R on 457 rows; all deciles +0.17 -0.42 -0.32 +0.21 +0.31 +0.14 +0.02 -0.08 -0.04 -0.03
+| V3 veto gap_pct d1           | TRAIN |  1595 |  30.1 | -0.043 | -0.112 | -0.145 | -3.55 |  34.0 |   1.9 |  5 |    -2479 |    -17820 |   -17842 |  25.0 | -0.222 |   49 |
+| V3 veto gap_pct d1           | VAL   |   706 |  30.7 | +0.071 | +0.001 | -0.037 | +0.03 |  43.5 |   4.3 |  4 |    -1089 |       +90 |    -3912 |  60.0 | -0.105 |   57 |
+
+== STAGE 6 — DAY-LEVEL CELLS ==
+  TRAIN breadth_by_1000 terciles [ 80.  107.7] | spy_vol20 terciles [11.13 14.91] | weekday TRAIN gross 0:-0.312 1:-0.058 2:+0.329 3:-0.010 4:-0.005 -> worst weekday 0
+| cell                         | split | n     | /wk   | grossR | netR   | net(b) |  t    | green | flat  | rs | worst $  | total $   | MDD $    | gr mo | ex5    | imp |
+|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|
+| D-a breadth TOP tercile      | TRAIN |   531 |  10.0 | -0.033 | -0.107 | -0.146 | -2.01 |  32.1 |  28.3 |  4 |    -1916 |     -5670 |    -7538 |  41.7 | -0.218 |   59 |
+| D-a breadth TOP tercile      | VAL   |   450 |  19.6 | +0.087 | +0.017 | -0.024 | +0.29 |  43.5 |   4.3 |  4 |     -715 |      +754 |    -2059 |  40.0 | -0.089 |   60 |
+| D-b breadth BOT tercile      | TRAIN |   547 |  10.3 | -0.130 | -0.194 | -0.223 | -3.57 |  30.2 |  20.8 |  7 |    -1592 |    -10620 |   -11008 |  25.0 | -0.312 |   43 |
+| D-b breadth BOT tercile      | VAL   |    74 |   3.2 | -0.081 | -0.154 | -0.192 | -1.02 |  13.0 |  60.9 |  2 |    -1052 |     -1137 |    -2139 |  25.0 | -0.275 |   55 |
+| D-c SPY 0930-1000 up         | TRAIN |   875 |  16.5 | +0.034 | -0.035 | -0.069 | -0.82 |  37.7 |   3.8 |  7 |    -1617 |     -3077 |    -6400 |  33.3 | -0.142 |   52 |
+| D-c SPY 0930-1000 up         | VAL   |   372 |  16.2 | +0.207 | +0.137 | +0.099 | +2.08 |  73.9 |   4.3 |  3 |     -827 |     +5112 |    -1510 |  80.0 | +0.038 |   58 |
+| D-d spy_vol20 BOT tercile    | TRAIN |   531 |  10.0 | -0.057 | -0.127 | -0.162 | -2.38 |  13.2 |  64.2 |  4 |    -2136 |     -6749 |    -7507 |  28.6 | -0.240 |   52 |
+| D-d spy_vol20 BOT tercile    | VAL   |   293 |  12.7 | +0.076 | +0.008 | -0.030 | +0.11 |  13.0 |  56.5 |  5 |     -765 |      +233 |    -1090 |  33.3 | -0.098 |   58 |
+| D-e spy_vol20 TOP tercile    | TRAIN |   527 |   9.9 | -0.088 | -0.154 | -0.184 | -2.77 |  17.0 |  58.5 |  4 |    -2231 |     -8108 |    -9581 |  42.9 | -0.269 |   45 |
+| D-e spy_vol20 TOP tercile    | VAL   |   135 |   5.9 | +0.105 | +0.036 | -0.005 | +0.32 |  13.0 |  78.3 |  1 |     -467 |      +480 |     -467 | 100.0 | -0.071 |   60 |
+| D-f skip weekday 0           | TRAIN |  1309 |  24.7 | -0.054 | -0.123 | -0.156 | -3.56 |  28.3 |   1.9 |  7 |    -2116 |    -16045 |   -17868 |  25.0 | -0.234 |   50 |
+| D-f skip weekday 0           | VAL   |   597 |  26.0 | +0.060 | -0.010 | -0.047 | -0.19 |  43.5 |   4.3 |  4 |    -1037 |      -577 |    -3339 |  60.0 | -0.115 |   56 |
+| D-g SPY up AND breadth>=mid  | TRAIN |   677 |  12.8 | +0.038 | -0.033 | -0.069 | -0.68 |  41.5 |  11.3 |  4 |    -1617 |     -2213 |    -5323 |  41.7 | -0.139 |   54 |
+| D-g SPY up AND breadth>=mid  | VAL   |   358 |  15.6 | +0.204 | +0.135 | +0.097 | +2.01 |  78.3 |   4.3 |  3 |     -893 |     +4840 |    -1990 |  80.0 | +0.038 |   57 |
+| D-h AND(D-g SPY up AND breadth>=mid , D-c SPY 0930-1000 up) | TRAIN |   677 |  12.8 | +0.038 | -0.033 | -0.069 | -0.68 |  41.5 |  11.3 |  4 |    -1617 |     -2213 |    -5323 |  41.7 | -0.139 |   54 |
+| D-h AND(D-g SPY up AND breadth>=mid , D-c SPY 0930-1000 up) | VAL   |   358 |  15.6 | +0.204 | +0.135 | +0.097 | +2.01 |  78.3 |   4.3 |  3 |     -893 |     +4840 |    -1990 |  80.0 | +0.038 |   57 |
+
+== STAGE 8 — COUNT-MATCHED PERMUTATION NULL (2,000 draws) ==
+| cell | split | observed green % | null mean | [p5, p95] | outside? |
+| B0 | TRAIN | 41.5 | 34.7 | [28.3, 41.5] | inside |
+| B0 | VAL | 43.5 | 38.7 | [30.4, 47.8] | inside |
+| B1L | TRAIN | 34.0 | 24.8 | [18.9, 30.2] | ABOVE |
+| B1L | VAL | 43.5 | 40.7 | [30.4, 52.2] | inside |
+| B1 | TRAIN | 35.8 | 31.8 | [24.5, 37.7] | inside |
+| B1 | VAL | 43.5 | 43.1 | [34.8, 52.2] | inside |
+| B2 | TRAIN | 32.1 | 30.8 | [24.5, 37.7] | inside |
+| B2 | VAL | 43.5 | 49.5 | [39.1, 60.9] | inside |
+| B3 | TRAIN | 26.4 | 32.2 | [24.5, 39.6] | inside |
+| B3 | VAL | 47.8 | 48.0 | [39.1, 56.5] | inside |
+| R1 entry_m T2 | TRAIN | 35.8 | 46.9 | [39.6, 54.7] | below |
+| R1 entry_m T2 | VAL | 43.5 | 37.5 | [26.1, 47.8] | inside |
+| R2 rv_profile T0 | TRAIN | 35.8 | 38.9 | [32.1, 45.3] | inside |
+| R2 rv_profile T0 | VAL | 34.8 | 37.7 | [26.1, 47.8] | inside |
+| R3 spy_dist_hod_pct T2 | TRAIN | 45.3 | 43.4 | [37.7, 50.9] | inside |
+| R3 spy_dist_hod_pct T2 | VAL | 43.5 | 50.5 | [39.1, 60.9] | inside |
+| R-AND2 | TRAIN | 43.4 | 44.4 | [37.7, 50.9] | inside |
+| R-AND2 | VAL | 47.8 | 36.6 | [26.1, 47.8] | inside |
+| R-AND3 | TRAIN | 20.8 | 27.0 | [20.8, 32.1] | inside |
+| R-AND3 | VAL | 26.1 | 27.8 | [17.4, 39.1] | inside |
+| V1 veto entry_m d5 | TRAIN | 35.8 | 32.3 | [26.4, 39.6] | inside |
+| V1 veto entry_m d5 | VAL | 56.5 | 51.0 | [39.1, 60.9] | inside |
+| V2 veto dow d0 | TRAIN | 28.3 | 30.1 | [22.6, 35.9] | inside |
+| V2 veto dow d0 | VAL | 43.5 | 45.7 | [34.8, 56.5] | inside |
+| V3 veto gap_pct d1 | TRAIN | 34.0 | 30.1 | [22.6, 37.7] | inside |
+| V3 veto gap_pct d1 | VAL | 43.5 | 47.3 | [39.1, 56.5] | inside |
+| D-a breadth TOP tercile | TRAIN | 32.1 | 26.4 | [20.8, 32.1] | inside |
+| D-a breadth TOP tercile | VAL | 43.5 | 49.5 | [39.1, 60.9] | inside |
+| D-b breadth BOT tercile | TRAIN | 30.2 | 23.2 | [17.0, 30.2] | inside |
+| D-b breadth BOT tercile | VAL | 13.0 | 13.8 | [8.7, 21.7] | inside |
+| D-c SPY 0930-1000 up | TRAIN | 37.7 | 43.1 | [35.8, 50.9] | inside |
+| D-c SPY 0930-1000 up | VAL | 73.9 | 63.9 | [52.2, 73.9] | inside |
+| D-d spy_vol20 BOT tercile | TRAIN | 13.2 | 10.4 | [5.7, 15.1] | inside |
+| D-d spy_vol20 BOT tercile | VAL | 13.0 | 22.0 | [13.0, 30.4] | inside |
+| D-e spy_vol20 TOP tercile | TRAIN | 17.0 | 11.6 | [7.5, 17.0] | inside |
+| D-e spy_vol20 TOP tercile | VAL | 13.0 | 12.1 | [8.7, 17.4] | inside |
+| D-f skip weekday 0 | TRAIN | 28.3 | 30.1 | [22.6, 35.9] | inside |
+| D-f skip weekday 0 | VAL | 43.5 | 45.7 | [34.8, 56.5] | inside |
+| D-g SPY up AND breadth>=mid | TRAIN | 41.5 | 40.2 | [34.0, 47.2] | inside |
+| D-g SPY up AND breadth>=mid | VAL | 78.3 | 63.1 | [52.2, 73.9] | ABOVE |
+| D-h AND(D-g SPY up AND breadth>=mid , D-c SPY 0930-1000 up) | TRAIN | 41.5 | 40.2 | [34.0, 47.2] | inside |
+| D-h AND(D-g SPY up AND breadth>=mid , D-c SPY 0930-1000 up) | VAL | 78.3 | 63.1 | [52.2, 73.9] | ABOVE |
+
+DONE

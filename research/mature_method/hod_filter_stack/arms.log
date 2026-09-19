@@ -1,0 +1,27 @@
+OFI arm: pulled rows 7027; merged onto B2 7001 (79.1%); with >=20 quote updates in the window 6617 (74.7%)  <-- the declared coverage number
+
+-- CKS OFI, 5 min into the break, depth-normalised (bbo-1s proxy, EQUS.MINI) (ofi_5m) — coverage 74.7% of B2 (6617 rows) --
+   covered subset TRAIN: n=4330 gross -0.002 net -0.067
+   covered subset VAL: n=2287 gross +0.018 net -0.050
+   TRAIN terciles (<= 9.036, <= 29.83): gross +0.051 / +0.016 / -0.074  spread +0.124 (winsor +0.124, t +2.72), halves consistent True, VAL spread -0.172, selectable False
+| cell                         | split | n     | /wk   | grossR | netR   | net(b) |  t    | green | flat  | rs | worst $  | total $   | MDD $    | gr mo | ex5    | imp |
+| ARM ofi_5m T0                | TRAIN |   932 |  17.6 | -0.045 | -0.121 | -0.157 | -2.93 |  41.5 |   1.9 |  9 |    -2167 |    -11240 |   -11871 |  25.0 | -0.232 |   52 |
+| ARM ofi_5m T0                | VAL   |   565 |  24.6 | -0.050 | -0.127 | -0.167 | -2.50 |  21.7 |   4.3 |  8 |    -1425 |     -7183 |    -7667 |  20.0 | -0.241 |   57 |
+
+-- CKS OFI, the break minute only (bbo-1s proxy, EQUS.MINI) (ofi_1m) — coverage 74.6% of B2 (6609 rows) --
+   covered subset TRAIN: n=4322 gross -0.002 net -0.067
+   covered subset VAL: n=2287 gross +0.018 net -0.050
+   TRAIN terciles (<= 0.04917, <= 5.218): gross -0.036 / +0.009 / +0.020  spread +0.056 (winsor +0.056, t +1.21), halves consistent True, VAL spread +0.019, selectable False
+| cell                         | split | n     | /wk   | grossR | netR   | net(b) |  t    | green | flat  | rs | worst $  | total $   | MDD $    | gr mo | ex5    | imp |
+| ARM ofi_1m T2                | TRAIN |   944 |  17.8 | -0.036 | -0.095 | -0.114 | -2.20 |  39.6 |   1.9 |  6 |    -1972 |     -8983 |   -11078 |  33.3 | -0.207 |   27 |
+| ARM ofi_1m T2                | VAL   |   512 |  22.3 | +0.035 | -0.026 | -0.051 | -0.45 |  43.5 |   4.3 |  4 |    -1423 |     -1351 |    -4079 |  40.0 | -0.134 |   34 |
+
+-- minutes since the last own-ticker premarket headline (news_recency_min) — coverage 15.7% of B2 (1392 rows) --
+   covered subset TRAIN: n=675 gross +0.057 net -0.003
+   covered subset VAL: n=411 gross +0.040 net -0.021
+   insufficient
+
+-- own-ticker premarket article count (news_n) — coverage 73.4% of B2 (6499 rows) --
+   covered subset TRAIN: n=3260 gross +0.042 net -0.020
+   covered subset VAL: n=1822 gross +0.071 net +0.005
+   degenerate

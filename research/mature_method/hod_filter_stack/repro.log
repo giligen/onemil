@@ -1,0 +1,15 @@
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+== REPRODUCTION GATE — B0 from THIS pass vs hod_break/REPORT.md §6 ==
+| cell                         | split | n     | /wk   | grossR | netR   | net(b) |  t    | green | flat  | rs | worst $  | total $   | MDD $    | gr mo | ex5    | imp |
+| B0 (this pass)               | TRAIN |  1688 |  31.8 | -0.027 | -0.088 | -0.089 | -2.64 |  41.5 |   1.9 |  7 |    -2718 |    -14835 |   -17209 |  25.0 | -0.198 |    1 |
+| B0 (this pass)               | VAL   |   820 |  35.7 | +0.016 | -0.050 | -0.051 | -1.06 |  43.5 |   4.3 |  6 |    -2076 |     -4128 |    -7519 |  40.0 | -0.158 |    1 |
+  TRAIN: ref n=1688 gross=-0.027 net=-0.088 green=41.5 total=-14835  ->  MATCH (dn 0, dgross 0.0001, dnet 0.0001, dgreen 0.0, dtotal 0)
+  VAL: ref n=820 gross=+0.016 net=-0.050 green=43.5 total=-4128  ->  MATCH (dn 0, dgross 0.0003, dnet 0.0003, dgreen 0.0, dtotal 0)
+REPRODUCTION GATE: PASS
+
+== INDEPENDENT-PASS CHECK — sig2.csv vs hod_break/breaks.csv (separate bar passes) ==
+
+membership: break rows 2228304 -> minus early-close 2220273 -> minus test tickers 2219104 -> in daily_bars 2142177
+  symbol-days: new 15653  old 15653  shared 15653 (100.00% of new)
+  identical entry minute on shared symbol-days: 100.0000%
+  max |delta rr| on those: 4.441e-16   (n=15653)

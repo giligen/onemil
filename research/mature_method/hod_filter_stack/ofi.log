@@ -1,0 +1,61 @@
+signals 7027 | days 344 | todo 294
+1/294 2025-03-25 +1 spent $1.39
+/home/ec2-user/onemil/research/mature_method/hod_filter_stack/ofi.py:69: BentoWarning: The streaming request contained one or more days which have reduced quality: 2025-04-04 (degraded). See: https://databento.com/docs/api-reference-historical/metadata/metadata-get-dataset-condition
+  dfq = c.timeseries.get_range(**kw).to_df()
+11/294 2025-04-08 +25 spent $2.82
+21/294 2025-04-23 +17 spent $4.74
+/home/ec2-user/onemil/research/mature_method/hod_filter_stack/ofi.py:69: BentoWarning: The streaming request contained one or more days which have reduced quality: 2025-05-06 (degraded). See: https://databento.com/docs/api-reference-historical/metadata/metadata-get-dataset-condition
+  dfq = c.timeseries.get_range(**kw).to_df()
+31/294 2025-05-07 +9 spent $4.84
+41/294 2025-05-21 +14 spent $5.01
+/home/ec2-user/onemil/research/mature_method/hod_filter_stack/ofi.py:69: BentoWarning: The streaming request contained one or more days which have reduced quality: 2025-06-04 (degraded). See: https://databento.com/docs/api-reference-historical/metadata/metadata-get-dataset-condition
+  dfq = c.timeseries.get_range(**kw).to_df()
+51/294 2025-06-05 +10 spent $5.17
+/home/ec2-user/onemil/research/mature_method/hod_filter_stack/ofi.py:69: BentoWarning: The streaming request contained one or more days which have reduced quality: 2025-06-16 (degraded). See: https://databento.com/docs/api-reference-historical/metadata/metadata-get-dataset-condition
+  dfq = c.timeseries.get_range(**kw).to_df()
+61/294 2025-06-20 +12 spent $5.35
+71/294 2025-07-08 +15 spent $5.57
+/home/ec2-user/onemil/research/mature_method/hod_filter_stack/ofi.py:69: BentoWarning: The streaming request contained one or more days which have reduced quality: 2025-07-09 (degraded). See: https://databento.com/docs/api-reference-historical/metadata/metadata-get-dataset-condition
+  dfq = c.timeseries.get_range(**kw).to_df()
+81/294 2025-07-22 +9 spent $5.73
+91/294 2025-08-05 +18 spent $5.87
+/home/ec2-user/onemil/research/mature_method/hod_filter_stack/ofi.py:69: BentoWarning: The streaming request contained one or more days which have reduced quality: 2025-08-08 (degraded). See: https://databento.com/docs/api-reference-historical/metadata/metadata-get-dataset-condition
+  dfq = c.timeseries.get_range(**kw).to_df()
+/home/ec2-user/onemil/research/mature_method/hod_filter_stack/ofi.py:69: BentoWarning: The streaming request contained one or more days which have reduced quality: 2025-08-13 (degraded). See: https://databento.com/docs/api-reference-historical/metadata/metadata-get-dataset-condition
+  dfq = c.timeseries.get_range(**kw).to_df()
+/home/ec2-user/onemil/research/mature_method/hod_filter_stack/ofi.py:69: BentoWarning: The streaming request contained one or more days which have reduced quality: 2025-08-19 (degraded). See: https://databento.com/docs/api-reference-historical/metadata/metadata-get-dataset-condition
+  dfq = c.timeseries.get_range(**kw).to_df()
+101/294 2025-08-19 +8 spent $6.05
+/home/ec2-user/onemil/research/mature_method/hod_filter_stack/ofi.py:69: BentoWarning: The streaming request contained one or more days which have reduced quality: 2025-08-25 (degraded). See: https://databento.com/docs/api-reference-historical/metadata/metadata-get-dataset-condition
+  dfq = c.timeseries.get_range(**kw).to_df()
+/home/ec2-user/onemil/research/mature_method/hod_filter_stack/ofi.py:69: BentoWarning: The streaming request contained one or more days which have reduced quality: 2025-09-03 (degraded). See: https://databento.com/docs/api-reference-historical/metadata/metadata-get-dataset-condition
+  dfq = c.timeseries.get_range(**kw).to_df()
+111/294 2025-09-03 +7 spent $6.31
+/home/ec2-user/onemil/research/mature_method/hod_filter_stack/ofi.py:69: BentoWarning: The streaming request contained one or more days which have reduced quality: 2025-09-08 (degraded). See: https://databento.com/docs/api-reference-historical/metadata/metadata-get-dataset-condition
+  dfq = c.timeseries.get_range(**kw).to_df()
+/home/ec2-user/onemil/research/mature_method/hod_filter_stack/ofi.py:69: BentoWarning: The streaming request contained one or more days which have reduced quality: 2025-09-12 (degraded). See: https://databento.com/docs/api-reference-historical/metadata/metadata-get-dataset-condition
+  dfq = c.timeseries.get_range(**kw).to_df()
+121/294 2025-09-17 +10 spent $6.47
+131/294 2025-10-01 +27 spent $6.83
+/home/ec2-user/onemil/research/mature_method/hod_filter_stack/ofi.py:69: BentoWarning: The streaming request contained one or more days which have reduced quality: 2025-10-10 (degraded). See: https://databento.com/docs/api-reference-historical/metadata/metadata-get-dataset-condition
+  dfq = c.timeseries.get_range(**kw).to_df()
+/home/ec2-user/onemil/research/mature_method/hod_filter_stack/ofi.py:69: BentoWarning: The streaming request contained one or more days which have reduced quality: 2025-10-13 (degraded). See: https://databento.com/docs/api-reference-historical/metadata/metadata-get-dataset-condition
+  dfq = c.timeseries.get_range(**kw).to_df()
+141/294 2025-10-15 +27 spent $7.35
+151/294 2025-10-29 +19 spent $7.59
+161/294 2025-11-12 +12 spent $7.86
+171/294 2025-11-26 +10 spent $8.38
+181/294 2025-12-12 +11 spent $8.61
+191/294 2025-12-30 +6 spent $8.79
+201/294 2026-01-14 +17 spent $9.01
+211/294 2026-01-29 +11 spent $9.30
+221/294 2026-02-12 +25 spent $9.84
+231/294 2026-02-27 +19 spent $10.18
+241/294 2026-03-13 +12 spent $10.56
+251/294 2026-03-27 +20 spent $10.77
+261/294 2026-04-13 +32 spent $11.12
+271/294 2026-04-27 +20 spent $11.42
+281/294 2026-05-11 +66 spent $12.03
+291/294 2026-05-26 +34 spent $12.57
+OFI DONE spent $12.73
+EXIT=0

@@ -1,5 +1,6 @@
-breaks2.csv
+blite.csv
 sig2.csv
+pop.csv
 *.pkl
-__pycache__
-ofi/
+*.npy
+__pycache__/

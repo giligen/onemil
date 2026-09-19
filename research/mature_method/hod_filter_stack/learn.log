@@ -1,0 +1,55 @@
+/home/ec2-user/onemil/research/mature_method/hod_filter_stack/learn.py:79: FutureWarning: DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
+  keep = dd.groupby('day', group_keys=False).apply(lambda g: g.nlargest(k, 'p'))
+/home/ec2-user/onemil/research/mature_method/hod_filter_stack/learn.py:79: FutureWarning: DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
+  keep = dd.groupby('day', group_keys=False).apply(lambda g: g.nlargest(k, 'p'))
+/home/ec2-user/onemil/research/mature_method/hod_filter_stack/learn.py:79: FutureWarning: DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
+  keep = dd.groupby('day', group_keys=False).apply(lambda g: g.nlargest(k, 'p'))
+/home/ec2-user/onemil/research/mature_method/hod_filter_stack/learn.py:79: FutureWarning: DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
+  keep = dd.groupby('day', group_keys=False).apply(lambda g: g.nlargest(k, 'p'))
+/home/ec2-user/onemil/research/mature_method/hod_filter_stack/learn.py:79: FutureWarning: DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
+  keep = dd.groupby('day', group_keys=False).apply(lambda g: g.nlargest(k, 'p'))
+/home/ec2-user/onemil/research/mature_method/hod_filter_stack/learn.py:79: FutureWarning: DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
+  keep = dd.groupby('day', group_keys=False).apply(lambda g: g.nlargest(k, 'p'))
+/home/ec2-user/onemil/research/mature_method/hod_filter_stack/learn.py:79: FutureWarning: DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
+  keep = dd.groupby('day', group_keys=False).apply(lambda g: g.nlargest(k, 'p'))
+/home/ec2-user/onemil/research/mature_method/hod_filter_stack/learn.py:79: FutureWarning: DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
+  keep = dd.groupby('day', group_keys=False).apply(lambda g: g.nlargest(k, 'p'))
+/home/ec2-user/onemil/research/mature_method/hod_filter_stack/learn.py:79: FutureWarning: DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
+  keep = dd.groupby('day', group_keys=False).apply(lambda g: g.nlargest(k, 'p'))
+/home/ec2-user/onemil/research/mature_method/hod_filter_stack/learn.py:79: FutureWarning: DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
+  keep = dd.groupby('day', group_keys=False).apply(lambda g: g.nlargest(k, 'p'))
+/home/ec2-user/onemil/research/mature_method/hod_filter_stack/learn.py:79: FutureWarning: DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
+  keep = dd.groupby('day', group_keys=False).apply(lambda g: g.nlargest(k, 'p'))
+learner features (35): ['breadth_min', 'breadth_15m', 'breadth_day', 'cohort_rank_dist', 'rs_vs_cohort', 'breadth_by_1000', 'spy_dist_hod_pct', 'spy_ret_open_sig', 'spy_5m_ret', 'spy_range3', 'spy_vol20', 'spy_ret_0930_1000', 'ret_open_sig', 'slope5', 'bar_vol', 'rv_profile', 'cumv', 'vwap_dist_pct', 'range_pos', 'hod_age_bars', 'n_break', 'dist_open_pct', 'r_pct', 'level', 'price', 'gap_pct', 'prev_range_pct', 'prev_close_pos', 'dist_20d_high_pct', 'dow', 'adv20', 'sym_prior_n', 'sym_prior_meanR', 'entry_m', 'break_m']
+rows 7027 | months 17
+purged training rows: 0 (0 by construction — the outcome closes its own session)
+scored rows 6251 of 7027; scored weeks TRAIN 40 VAL 22
+
+| cell | split | n | /wk | grossR | netR | t | green% | rs | worst $ | total $ |
+| B2 (scored months only)    | TRAIN |  1255 |  31.4 | -0.041 | -0.109 | -3.06 |  32.5 |  5 |    -2231 |    -13666 |
+| B2 (scored months only)    | VAL   |   706 |  32.1 | +0.083 | +0.013 | +0.27 |  45.5 |  4 |     -957 |      +893 |
+| L-k4 top-4/day             | TRAIN |   740 |  18.5 | -0.046 | -0.114 | -2.55 |  32.5 |  5 |    -1430 |     -8443 |
+| L-k4 top-4/day             | VAL   |   408 |  18.5 | +0.011 | -0.058 | -0.91 |  50.0 |  6 |    -1122 |     -2349 |
+| L-k8 top-8/day             | TRAIN |  1100 |  27.5 | -0.047 | -0.115 | -3.05 |  27.5 |  9 |    -1871 |    -12704 |
+| L-k8 top-8/day             | VAL   |   595 |  27.0 | -0.038 | -0.109 | -2.15 |  31.8 |  6 |    -1582 |     -6486 |
+| L-k12 top-12/day           | TRAIN |  1173 |  29.3 | -0.046 | -0.114 | -3.12 |  35.0 |  6 |    -2004 |    -13351 |
+| L-k12 top-12/day           | VAL   |   642 |  29.2 | -0.055 | -0.127 | -2.64 |  27.3 |  6 |    -1652 |     -8179 |
+| L-t4 thr 0.428 (causal)    | TRAIN |   493 |  12.3 | +0.024 | -0.044 | -0.82 |  50.0 |  5 |    -1285 |     -2176 |
+| L-t4 thr 0.428 (causal)    | VAL   |   464 |  21.1 | -0.021 | -0.092 | -1.61 |  40.9 |  4 |    -1481 |     -4284 |
+| L-t8 thr 0.360 (causal)    | TRAIN |   800 |  20.0 | +0.032 | -0.037 | -0.83 |  45.0 |  3 |    -1504 |     -2954 |
+| L-t8 thr 0.360 (causal)    | VAL   |   604 |  27.5 | -0.005 | -0.077 | -1.54 |  40.9 |  5 |    -1334 |     -4643 |
+| L-t12 thr 0.299 (causal)   | TRAIN |  1014 |  25.4 | -0.028 | -0.097 | -2.47 |  40.0 |  4 |    -1307 |     -9800 |
+| L-t12 thr 0.299 (causal)   | VAL   |   666 |  30.3 | +0.063 | -0.008 | -0.16 |  40.9 |  4 |    -1083 |      -507 |
+
+== CONTROLS ==
+| SHUFFLED top-8 (must be ~0) | TRAIN |  1108 |  27.7 | -0.022 | -0.089 | -2.30 |  37.5 |  6 |    -1820 |     -9857 |
+| SHUFFLED top-8 (must be ~0) | VAL   |   614 |  27.9 | -0.028 | -0.097 | -1.90 |  27.3 |  8 |    -1523 |     -5938 |
+
+-- per-family ablation (top-8, VAL net R) --
+  drop breadth   -> TRAIN net -0.133 (n 1112)  VAL net -0.098 (n 591)
+  drop index     -> TRAIN net -0.117 (n 1085)  VAL net -0.113 (n 590)
+  drop accel     -> TRAIN net -0.133 (n 1101)  VAL net -0.078 (n 592)
+  drop voltrend  -> TRAIN net -0.128 (n 1111)  VAL net -0.085 (n 593)
+  drop shape     -> TRAIN net -0.113 (n 1096)  VAL net -0.121 (n 603)
+  drop day       -> TRAIN net -0.110 (n 1106)  VAL net -0.044 (n 592)
+  drop clock     -> TRAIN net -0.127 (n 1081)  VAL net -0.094 (n 589)
