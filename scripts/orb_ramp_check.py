@@ -16,8 +16,8 @@ A parity FREEZE (trading/ramp_freeze.py, set by daily_green_check.py) stops
 the stage clock and blocks ADVANCE regardless of P&L.
 
 Usage:
-  python scripts/orb_ramp_check.py                        # stage started 2026-08-17 (B+ live)
-  python scripts/orb_ramp_check.py --stage-start 2026-10-01 [--verbose]
+  python scripts/orb_ramp_check.py                        # stage start from trading/ramp_stage.py
+  python scripts/orb_ramp_check.py --stage-start 2026-10-01 [--verbose]   # override
   python scripts/orb_ramp_check.py --clear-freeze orb "mult drift explained + fixed"
 """
 from __future__ import annotations
@@ -38,10 +38,10 @@ sys.path.insert(0, str(ROOT))
 ORB_YAML = ROOT / 'orb.yaml'
 TRADES_DB = ROOT / 'data' / 'trades.db'
 GREEN = ROOT / 'logs' / 'green_streak.json'
-B_PLUS_LIVE = '2026-08-17'
 
 from trading import ramp_bt_band as band_mod  # noqa: E402  (needs ROOT on sys.path)
 from trading import ramp_freeze  # noqa: E402
+from trading import ramp_stage  # noqa: E402  (the stage-start table)
 
 # KEEP IN SYNC with docs/orb_p1_style_ramp_proposal.md (budget, slots=3)
 STAGES = [
@@ -217,20 +217,21 @@ def sessions_since(since: str) -> List[str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--stage-start', default=B_PLUS_LIVE)
+    ramp_stage.add_stage_start_arg(ap, 'orb')
     ap.add_argument('--verbose', action='store_true')
     ramp_freeze.add_clear_freeze_arg(ap)
     a = ap.parse_args()
     if a.clear_freeze:
         print(ramp_freeze.handle_clear_freeze(a.clear_freeze))
         return 0
+    stage_start, stage_reason = ramp_stage.resolve('orb', a.stage_start)
     cfg = yaml.safe_load(open(ORB_YAML))
     budget = float(cfg['sizing']['account_budget_usd'])
     cur = stage_for_budget(budget)
     daily_limit = float(cfg.get('risk', {}).get('daily_loss_limit_usd', cur['daily_limit'] or 0) or 0) or None
-    fills = load_fills(a.stage_start)
-    sess = sessions_since(a.stage_start)
-    parity = load_parity(a.stage_start)
+    fills = load_fills(stage_start)
+    sess = sessions_since(stage_start)
+    parity = load_parity(stage_start)
     if '__unknown__' in parity:
         parity = {d: parity['__unknown__'] for d in sess}
     fz = ramp_freeze.get('orb')
@@ -243,7 +244,8 @@ def main() -> int:
                       frozen_sessions=len(sess) - len(live_sess))
     v = verdict(s); nxt = next_stage(cur)
     slip = f"{s.mean_entry_slip_bps:.0f} bps" if s.mean_entry_slip_bps is not None else 'n/a (no fills)'
-    print(f"ORB ramp — stage {cur['name']} (budget ${budget:,.0f}) since {a.stage_start}")
+    print(f"ORB ramp — stage {cur['name']} (budget ${budget:,.0f}) since {stage_start}")
+    print(ramp_stage.line('orb', stage_start, stage_reason))
     print(f"  stage P&L ${s.pnl:,.0f} = {s.pnl_pct:+.2f}% of budget | fills {s.fills} | sessions {s.sessions} | "
           f"losing streak {s.losing_streak} | entry slip mean {slip} (model {ADVANCE['entry_slip_model_bps']:.0f}) | "
           f">2x-model fills {s.slip_2x_fills}")

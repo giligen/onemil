@@ -82,7 +82,13 @@ class TestFrozenValues:
         assert g['prev_day_range_pct_min'] == 9.226
 
     def test_catalyst_veto_unchanged(self, cfg):
-        assert cfg['filter']['catalyst_veto']['enabled'] is True
+        # `enabled` moved from FROZEN to POLICY on 2026-09-19: the owner
+        # flipped the veto OFF (research/orb_gates2/REPORT.md + orb_frequency/
+        # REPORT.md — it is a pick killer; catalyst-off is +$3,051 vs +$930
+        # over 2026 Q2+Q3 at stage sizing, with 56% green weeks vs 22%).
+        # Like the slot count, assert the CONFIG PATH, never the stage value.
+        # min_cohort stays frozen — it is the veto's spec, not its ramp knob.
+        assert isinstance(cfg['filter']['catalyst_veto']['enabled'], bool)
         assert cfg['filter']['catalyst_veto']['min_cohort'] == 2
 
     def test_pm_mult_off(self, cfg):

@@ -30,6 +30,18 @@ Jan-25 → Aug-26, $2K base):
 | L2 | $1,000 | −$5,000 | −$7,000 | −$8,000 | −$5,000 |
 | L3 | $2,000 | −$10,000 | −$14,000 | −$16,000 | −$10,000 |
 
+### Stage START dates (the window every gate is measured over)
+Source of truth: `trading/ramp_stage.py` (`STAGE_STARTS['bf']`), read by
+`scripts/bf_ramp_check.py`. Append a row there and here in the same commit;
+never delete one — an old start is history, not a mistake.
+
+| stage start | why |
+|---|---|
+| 2026-09-07 | P1 live launch — L0 $150 |
+| **2026-09-21** | **ADV-gate-off stage (`min_daily_volume 0`)** — BF has ZERO live trades under the config that boots Monday, so its stage clock starts Monday (docs/scaling_plan_2026.md). Trades, sessions and parity flags from the 9/7 stage are OUT of this window. |
+
+`--stage-start YYYY-MM-DD` overrides the table for a one-off look back.
+
 Rails are −5u / −7u / −8u: each sits past the backtest's worst observed
 day (−4.6u), week (−5.8u) and drawdown (−7.6u), so a rail hit means live is
 doing something the backtest never did. They are code-enforced

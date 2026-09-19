@@ -90,6 +90,11 @@ def engine(monkeypatch):
     with open(Path(__file__).parent.parent / 'orb.yaml') as f:
         cfg = yaml.safe_load(f)
     cfg['strategy']['enabled'] = True
+    # filter.catalyst_veto.enabled is a POLICY knob, not an invariant: the
+    # owner flipped it OFF on 2026-09-19 (research/orb_gates2/REPORT.md).
+    # This file tests the veto's LOGIC, so it must never inherit the live
+    # stage value — construct the ON config explicitly.
+    cfg['filter']['catalyst_veto']['enabled'] = True
     return ORBEngine(alpaca_client=MagicMock(spec=AlpacaClient),
                      db=MagicMock(spec=Database),
                      stop_monitor=MagicMock(spec=StopMonitor), config=cfg)
@@ -111,6 +116,7 @@ class TestEngineWiring:
         with open(Path(__file__).parent.parent / 'orb.yaml') as f:
             cfg = yaml.safe_load(f)
         cfg['strategy']['enabled'] = True
+        cfg['filter']['catalyst_veto']['enabled'] = True   # env must WIN over on
         eng = ORBEngine(alpaca_client=MagicMock(spec=AlpacaClient),
                         db=MagicMock(spec=Database),
                         stop_monitor=MagicMock(spec=StopMonitor), config=cfg)

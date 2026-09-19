@@ -41,6 +41,17 @@ mean +$97 = +2.9% of u; worst month −5.5% of u ×3 slots.
    advance regardless of P&L.
 6. No daily-loss-limit hit in the last 10 sessions.
 
+## Stage START dates (the window every gate is measured over)
+Source of truth: `trading/ramp_stage.py` (`STAGE_STARTS['orb']`), read by
+`scripts/orb_ramp_check.py`. Append a row there and here in the same commit.
+
+| stage start | why |
+|---|---|
+| 2026-08-17 | B+ live — 3 slots, $10,000 budget |
+| **2026-09-21** | **8-slot + catalyst-off + latency-fix + 50 bps stage** — four material config changes land on the same boot, so it is a new stage by the scaling plan's own definition. The 3 parity defects in `logs/green_streak.json` all belong to the old config (8/24 was a documented false positive fixed in b19ad99; 8/31 PFSA was the entered-inclusive lookahead fixed 9/5; the rest predate the 9/18 latency fix) — they STAY in the file (history is never rewritten) and simply fall outside this window. |
+
+`--stage-start YYYY-MM-DD` overrides the table for a one-off look back.
+
 ## Demote one stage — ANY
 Stage P&L ≤ −6% of budget; 5 consecutive losing fills; a daily limit hit
 twice in a stage; slippage > 2× the model on ≥ 3 fills.

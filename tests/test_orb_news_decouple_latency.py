@@ -29,6 +29,11 @@ from trading.stop_monitor import StopMonitor
 def base_cfg():
     cfg = yaml.safe_load(open(Path(__file__).parent.parent / 'orb.yaml'))
     cfg['strategy']['enabled'] = True
+    # filter.catalyst_veto.enabled is a POLICY knob (owner flipped it OFF on
+    # 2026-09-19, research/orb_gates2/REPORT.md). This file tests the
+    # _news_fetch_needed OR-logic, so the catalyst-ON leg is constructed here;
+    # the tests that need it OFF set it to False themselves.
+    cfg['filter']['catalyst_veto']['enabled'] = True
     return cfg
 
 

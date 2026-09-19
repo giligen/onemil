@@ -16,8 +16,8 @@ A parity FREEZE (trading/ramp_freeze.py) stops the stage clock and blocks
 ADVANCE regardless of P&L.
 
 Usage:
-  python scripts/bf_ramp_check.py                       # stage started at LAUNCH (2026-09-07)
-  python scripts/bf_ramp_check.py --stage-start 2026-10-01
+  python scripts/bf_ramp_check.py                       # stage start from trading/ramp_stage.py
+  python scripts/bf_ramp_check.py --stage-start 2026-10-01   # override the table
   python scripts/bf_ramp_check.py --verbose             # per-trade table
   python scripts/bf_ramp_check.py --clear-freeze bf "cache rebuilt, parity re-verified"
 """
@@ -35,10 +35,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 CONFIG = ROOT / 'config.yaml'
 TRADES_DB = ROOT / 'data' / 'trades.db'
-LAUNCH = '2026-09-07'
 
 from trading import ramp_bt_band as band_mod  # noqa: E402  (needs ROOT on sys.path)
 from trading import ramp_freeze  # noqa: E402
+from trading import ramp_stage  # noqa: E402  (the stage-start table)
 
 # KEEP IN SYNC with docs/bf_p1_ramp.md
 STAGES = [
@@ -200,18 +200,19 @@ def session_count(since: str) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--stage-start', default=LAUNCH)
+    ramp_stage.add_stage_start_arg(ap, 'bf')
     ap.add_argument('--verbose', action='store_true')
     ramp_freeze.add_clear_freeze_arg(ap)
     a = ap.parse_args()
     if a.clear_freeze:
         print(ramp_freeze.handle_clear_freeze(a.clear_freeze))
         return 0
+    stage_start, stage_reason = ramp_stage.resolve('bf', a.stage_start)
     cfg = yaml.safe_load(open(CONFIG))
     base = float(cfg['trading']['risk_per_trade'])
     cur = stage_for_risk(base)
-    trades = load_trades(a.stage_start)
-    all_sessions = session_dates(a.stage_start)
+    trades = load_trades(stage_start)
+    all_sessions = session_dates(stage_start)
     fz = ramp_freeze.get('bf')
     live_sessions = ramp_freeze.unfrozen_sessions('bf', all_sessions)
     ref = band_mod.bf_reference()
@@ -221,7 +222,8 @@ def main() -> int:
                       frozen_sessions=len(all_sessions) - len(live_sessions))
     v = verdict(s)
     nxt = next_stage(cur)
-    print(f"BF P1 ramp — stage {cur['name']} (base ${base:.0f}) since {a.stage_start}")
+    print(f"BF P1 ramp — stage {cur['name']} (base ${base:.0f}) since {stage_start}")
+    print(ramp_stage.line('bf', stage_start, stage_reason))
     print(f"  stage P&L ${s.pnl:,.0f} = {s.pnl_u:+.2f}u | trades {s.trades} | sessions {s.sessions} | "
           f"losing streak {s.losing_streak} | worst day ${s.worst_day:,.0f} | worst week ${s.worst_week:,.0f}")
     print(f"  rails: daily hits {s.daily_rail_hits} | weekly hit {s.weekly_rail_hit} | parity flags {s.parity_flags}")

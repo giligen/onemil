@@ -33,6 +33,10 @@ def engine(monkeypatch):
     with open(Path(__file__).parent.parent / 'orb.yaml') as f:
         cfg = yaml.safe_load(f)
     cfg['strategy']['enabled'] = True
+    # POLICY knob, not an invariant — owner flipped catalyst_veto OFF on
+    # 2026-09-19 (research/orb_gates2/REPORT.md). These are veto-LOGIC and
+    # news-wiring tests: build the ON config, never read the live stage value.
+    cfg['filter']['catalyst_veto']['enabled'] = True
     alpaca = MagicMock(spec=AlpacaClient)
     alpaca.get_premarket_1min_bars_multi = MagicMock(return_value={})
     alpaca.get_premarket_news_multi = MagicMock(return_value={
