@@ -29,6 +29,6 @@ trades and is correspondingly more informative — which is itself part of the f
 
 | when | cells revealed | committed before reveal |
 |---|---|---|
-| *(to be filled at the reveal — left empty at seal time)* | | |
+| 2026-09-19, after REPORT.md §11 was committed (`173c88f`) | shipped-P1 baseline; recommended point **F7** | `173c88f` — PREREG, FREEZE, grid, separation, frontier and REPORT §0–§11 all committed before `score.py --reveal-test` was run |
 
 Result of the reveal is recorded in REPORT.md. Nothing is re-ranked afterwards.

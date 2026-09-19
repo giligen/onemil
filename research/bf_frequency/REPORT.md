@@ -477,3 +477,62 @@ owner's word, per PLAN §1 and `feedback_independent_check_before_claims`.
 ## 12. TEST reveal
 
 Written after §11 was committed. See `FREEZE.md`.
+
+**Revealed 2026-09-19, once, for two cells only (P1 and F7), after §11 was committed
+as `173c88f`.** TEST = 2026-06-01 -> 2026-08-31, **14 market weeks**. Nothing below
+was re-ranked and §11 stands exactly as written.
+
+| | P1 shipped | **F7 (recommended)** |
+|---|---|---|
+| trades (per month) | 7 (2.33) | 42 (**14.0**) |
+| **green weeks** | **14.3%** | **35.7%** |
+| flat weeks | 64.3% | 7.1% |
+| red weeks | 21.4% | 57.1% |
+| longest red-week streak | 1 | **5** |
+| worst week | −$5,210 | **−$13,086** |
+| green months | 33.3% (1 of 3) | 33.3% (1 of 3) |
+| total $ | **+$52** | **−$28,284** |
+| total R | −0.06 | **+0.16** |
+| R/pick | −0.01 | **+0.004** |
+| win rate | 42.9% | 35.7% |
+| MDD | −$7,066 | −$45,010 |
+
+Monthly: P1 `Jun +$6,181 / Jul −$1,856 / Aug −$4,272` (4/1/2 trades);
+F7 `Jun +$2,409 (+1.7R, 12 tr) / Jul −$25,625 (−4.5R, 13 tr) / Aug −$5,068
+(**+3.0R**, 17 tr)`.
+
+**Read it honestly, in three parts.**
+
+1. **The primary metric direction HOLDS.** F7's green-week share is 35.7% vs P1's
+   14.3% — +21.4pp, the same direction and roughly the same magnitude as TRAIN
+   (+22.6pp) and VAL (+13.6pp). Flat weeks fall 64.3% -> 7.1%. On the metric the
+   owner named, F7 beats P1 on all three splits.
+2. **Everything else on TEST is worse, and the red-week streak is the real damage.**
+   F7 runs **5 consecutive red weeks** (P1's longest is 1, only because P1 is flat in
+   9 of 14 weeks), its worst week is 2.5x P1's, and it loses **$28.3K** ($2.1K at L0)
+   where P1 is flat. Red weeks are 57.1% — the first split where F7's red share
+   exceeds its green share. That is a genuine failure of the secondary criteria.
+3. **Neither book had any edge in this quarter, and that is the fairest reading.**
+   R/pick is **−0.01 (P1) and +0.004 (F7)** — both exactly zero. F7 did not select
+   worse than P1; it selected the same nothing, 6x more often. This is the same
+   quarter `bf_decay` §6 already flagged (2026H2 = 3 P1 picks, mean −0.588R,
+   t −1.06); F7 turns it into a 42-trade sample and confirms it is flat, not merely
+   noisy. The dollar gap between the two comes from **sizing, not selection**:
+   F7's Aug-26 is **+3.0R and −$5,068** — its small-risk added trades won while its
+   full-size trades lost, the same R-vs-$ divergence §1 documents.
+
+**What this does to the recommendation.** §11 stands as written (FREEZE.md forbids
+re-ranking after a reveal), but it must be put to the owner with this attached:
+**F7's week-shape claim survived the sealed quarter; its P&L and drawdown claims did
+not.** TEST is 3 months and 14 weeks — MDE80 on R/pick is ~0.62R against a point
+estimate of 0.004R, so it cannot refute the edge either. The defensible statement is:
+*F7 reliably converts flat weeks into traded weeks, with more green weeks than P1 on
+every split including the sealed one; whether those weeks are net profitable is
+undecided, and in the one quarter where the underlying book earned nothing, F7
+amplified the dollar loss and produced a 5-week red streak.*
+
+**Therefore the live-exploration framing in §9 is the only honest one, and it
+tightens:** if F7 is explored live, it should be at L0 ($150) with the existing
+rails, explicitly to measure the week shape, and a **5-consecutive-red-week
+observation is a pre-committed stop** — that is what TEST says the downside looks
+like, and it is already inside the ramp's demotion rules (5 losers in a row / <= −6u).
