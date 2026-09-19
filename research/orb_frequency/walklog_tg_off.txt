@@ -3,3 +3,28 @@ BT config (winner stack): atr_floor=ON k=0.25 scale_out=ON frac=0.4 level_r=3.0
 Features CSV: analysis_results/orb_features_20260916_2053.csv
 Opening range: 09:30 → 09:30+5m (ORB_RANGE_MINUTES; production = 5 — must match the window the features CSV was built with)
 Loading bars for 13033 pairs...
+Traceback (most recent call last):
+  File "/home/ec2-user/onemil/study_orb_pipeline_static_lock.py", line 1381, in <module>
+    main()
+  File "/home/ec2-user/onemil/study_orb_pipeline_static_lock.py", line 548, in main
+    bars_cache[_k] = _bars_to_df(_v)
+                     ^^^^^^^^^^^^^^^
+  File "/home/ec2-user/onemil/study_orb.py", line 138, in _bars_to_df
+    return df.sort_values('timestamp').reset_index(drop=True)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ec2-user/.local/lib/python3.11/site-packages/pandas/core/frame.py", line 6439, in reset_index
+    new_obj = self.copy(deep=None)
+              ^^^^^^^^^^^^^^^^^^^^
+  File "/home/ec2-user/.local/lib/python3.11/site-packages/pandas/core/generic.py", line 6833, in copy
+    data = self._mgr.copy(deep=deep)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ec2-user/.local/lib/python3.11/site-packages/pandas/core/internals/managers.py", line 612, in copy
+    res = self.apply("copy", deep=deep)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ec2-user/.local/lib/python3.11/site-packages/pandas/core/internals/managers.py", line 363, in apply
+    applied = getattr(b, f)(**kwargs)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ec2-user/.local/lib/python3.11/site-packages/pandas/core/internals/blocks.py", line 822, in copy
+    values = values.copy()
+             ^^^^^^^^^^^^^
+numpy._core._exceptions._ArrayMemoryError: Unable to allocate 12.2 KiB for an array with shape (4, 391) and data type float64

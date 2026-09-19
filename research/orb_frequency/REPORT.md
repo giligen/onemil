@@ -91,6 +91,26 @@ the live cascade**, per year and pooled, Welch t.
 ### S1 — the Q1 filter cuts the quintile that performs *best*
 The bottom composite quintile it drops returns **+0.001 R** against the **-0.061 R** it
 keeps, in 2025 **and** in 2026. It removes 1,454 of 7,225 (20%) of the post-threshold field.
+The sign survives the tails: ex-top-5% R, Q1-rejected vs kept, is **-0.193 vs -0.275 (2025)**
+and **-0.116 vs -0.183 (2026)**.
+
+**The mechanism, disclosed — part of it is the fill rate.** The composite predicts *whether
+the stop-limit fills* far better than it predicts the trade: fill rate runs monotonically
+**Q1 54.2% / Q2 61.2% / Q3 62.4% / Q4 71.0% / Q5 83.7%**, and under the entered-inclusive
+convention a non-fill books **R = 0**, which beats the average filled ORB pick. So some of
+Q1's per-pick advantage is simply that Q1 picks more often do nothing.
+
+**But the finding does not depend on it.** Conditioning on fills only, mean R by quintile:
+
+| fills only | Q1 | Q2 | Q3 | Q4 | Q5 |
+|---|---|---|---|---|---|
+| 2025 | **-0.137** | -0.195 | -0.166 | -0.171 | -0.133 |
+| 2026 | **+0.138** | -0.009 | -0.015 | +0.013 | -0.035 |
+
+Q1 is mid-pack in 2025 and **the best quintile in 2026, by a wide margin**, on filled trades.
+The Q1 filter is not removing bad trades; it is removing picks that were less likely to be
+ordered at all, and among those that *were* ordered it removes the best ones in 2026. Either
+way — per pick or per fill — **there is no year in which the Q1 filter is on the right side.**
 
 ### S2 — the quintiles do not order anything
 Mean R by quintile, post-threshold, post-Q1: **Q5 -0.069 / Q4 -0.054 / Q3 -0.058 /
@@ -333,9 +353,13 @@ Rules M and D are **exit** rules: they change the P&L of fills that already happ
 **cannot** change the number of picks, so they cannot move the flat-week share.
 `research/green_weeks/REPORT.md` established this empirically — ORB's flat-week share is
 identical across all 17 exit cells it tested. Their counterfactual needs a full bar-walk
-(`walk_touchgo.sh`, three ~35-minute walks under the node's memory rail); results are
-appended in §9a when the walks land. **They are not part of the recommendation either way**,
-and no frontier point in §4 depends on them.
+(`walk_touchgo.sh`). **That walk does not fit inside this node's memory rail**: under
+`ulimit -v 3000000` it raised `numpy._core._exceptions._ArrayMemoryError` while building the
+per-symbol bar frames (D1's own walk ran under a 5.2 GB rail). The counterfactual is
+therefore **NOT MEASURED in this stage** — said plainly rather than estimated — and the
+walks were killed and their partial outputs deleted. What can be said without the walk is
+descriptive only (§9a). **They are not part of the recommendation either way**, and no
+frontier point in §4 depends on them.
 
 ---
 
@@ -408,9 +432,29 @@ Two further honest observations on this split, neither of which changes §8:
   a cell selected as the maximum of a 45-cell grid. The recommendation in §8 — do not ship
   F4 — stands, and TEST reinforces it rather than having chosen it.
 
-### 9a. Touchgo exit walks
+### 9a. Touchgo — the descriptive row (no counterfactual)
 
-_(appended when the walks land)_
+The shipped B+ book, measured fill model: 215 picks / 162 fills. Exit mix and mean R:
+
+| exit reason | n | mean R | $ |
+|---|---|---|---|
+| `scale_eod` | 26 | **+3.540** | +13,139 |
+| `eod` | 19 | +0.849 | +2,569 |
+| `scale_lock` | 11 | +0.534 | +810 |
+| `lock` | 14 | +0.315 | +756 |
+| **`tag_bb` (touchgo Rule M)** | **46** | **-0.157** | **-1,041** |
+| **`tag_b1` (touchgo Rule D)** | **0** | — | — |
+| `stop` | 46 | -0.865 | -5,935 |
+
+**Rule D never fires in this book.** Zero of 162 fills exit `tag_b1` — the rule is inert at
+the shipped 8-slot gate set and has been carrying config surface, tests and a live code path
+for nothing. That is a fact, not an inference, and it needs no walk.
+
+Rule M fires on **28% of fills** (46 of 162; 18 in 2025 at mean R -0.057, 28 in 2026 at
+-0.221) against +0.668 / +0.692 for every other exit. **This is not evidence for or against
+Rule M**: the counterfactual for those 46 trades is unknown, and the only comparable bucket —
+`stop`, at -0.865 R — suggests Rule M may well be cutting losses it was designed to cut. The
+walk that would settle it is the one this node could not run.
 
 ---
 
