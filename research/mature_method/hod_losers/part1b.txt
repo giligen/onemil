@@ -1,0 +1,225 @@
+PARITY: path-walk exit vs pop.csv exit — why match 1.000000, minute match 1.000000, rows matched 4941/4941
+
+====================================================================================================
+4. LOSING TRADES — the path.  W = trade ended > 0R, L = trade ended <= 0R (booked, B0+B2)
+====================================================================================================
+
+[B0 TRAIN] n 1688  winners 622  losers 1066
+                                  LOSERS    WINNERS
+   MFE (R)                         0.452      2.104
+   MFE (R) mean                    0.591      1.973
+   minutes to MFE                  6.000     64.500
+   MAE (R)                        -1.064     -0.371
+   hold minutes                   31.500    101.000
+   entry-bar close pos             0.451      0.577
+   breakout-bar close pos          0.760      0.750
+   MFE ladder (median R)     
+     at + 1 min               0.094      0.126
+     at + 3 min               0.183      0.282
+     at + 5 min               0.218      0.412
+     at +10 min               0.282      0.655
+     at +15 min               0.338      0.818
+     at +30 min               0.413      1.262
+   MAE ladder (median R)     
+     at + 1 min              -0.137     -0.091
+     at + 3 min              -0.274     -0.174
+     at + 5 min              -0.369     -0.204
+     at +10 min              -0.554     -0.239
+     at +15 min              -0.667     -0.259
+     at +30 min              -0.979     -0.302
+   stops 992 (59%); of them WICK (bar closed back above the stop) 44%; median MFE before the stop +0.428R at +5 min; median time to stop 28 min
+     MFE@ 3min < 0.25R : n  950 gross -0.246 net -0.310 WR 30.1%  |  >= : n  738 gross +0.254 net +0.198 WR 45.5%
+     MFE@ 3min < 0.50R : n 1393 gross -0.163 net -0.225 WR 32.7%  |  >= : n  295 gross +0.613 net +0.558 WR 56.6%
+     MFE@ 5min < 0.25R : n  783 gross -0.359 net -0.424 WR 25.8%  |  >= : n  905 gross +0.260 net +0.203 WR 46.4%
+     MFE@ 5min < 0.50R : n 1227 gross -0.238 net -0.301 WR 29.7%  |  >= : n  461 gross +0.534 net +0.479 WR 55.7%
+     MFE@10min < 0.25R : n  601 gross -0.524 net -0.592 WR 20.3%  |  >= : n 1087 gross +0.248 net +0.191 WR 46.0%
+     MFE@10min < 0.50R : n  979 gross -0.428 net -0.492 WR 23.6%  |  >= : n  709 gross +0.527 net +0.470 WR 55.1%
+   -- entry-bar close pos --
+     < +0.30: n  566 gross -0.247 net -0.311 WR 29.5%  |  >= : n 1093 gross +0.088 net +0.029 WR 40.5%
+     < +0.50: n  826 gross -0.166 net -0.229 WR 32.4%  |  >= : n  833 gross +0.112 net +0.054 WR 41.1%
+     < +0.70: n 1056 gross -0.135 net -0.196 WR 33.2%  |  >= : n  603 gross +0.163 net +0.105 WR 43.0%
+   -- breakout-bar close pos (range_pos) --
+     < +0.30: n  286 gross -0.033 net -0.096 WR 37.1%  |  >= : n 1380 gross -0.019 net -0.079 WR 37.0%
+     < +0.50: n  479 gross +0.042 net -0.020 WR 39.5%  |  >= : n 1187 gross -0.047 net -0.107 WR 36.0%
+     < +0.70: n  729 gross +0.010 net -0.051 WR 38.5%  |  >= : n  937 gross -0.047 net -0.107 WR 35.8%
+   -- entry-bar low, R below entry --
+     < -0.50: n   60 gross -0.491 net -0.562 WR 20.0%  |  >= : n 1628 gross -0.010 net -0.070 WR 37.5%
+     < -0.25: n  398 gross -0.297 net -0.361 WR 26.9%  |  >= : n 1290 gross +0.056 net -0.004 WR 39.9%
+
+[B0 VAL] n 820  winners 330  losers 490
+                                  LOSERS    WINNERS
+   MFE (R)                         0.377      2.057
+   MFE (R) mean                    0.532      1.876
+   minutes to MFE                  4.000     75.000
+   MAE (R)                        -1.067     -0.452
+   hold minutes                   27.500    133.000
+   entry-bar close pos             0.428      0.625
+   breakout-bar close pos          0.746      0.720
+   MFE ladder (median R)     
+     at + 1 min               0.097      0.113
+     at + 3 min               0.151      0.259
+     at + 5 min               0.196      0.367
+     at +10 min               0.233      0.571
+     at +15 min               0.282      0.745
+     at +30 min               0.347      1.063
+   MAE ladder (median R)     
+     at + 1 min              -0.135     -0.100
+     at + 3 min              -0.295     -0.181
+     at + 5 min              -0.386     -0.215
+     at +10 min              -0.578     -0.278
+     at +15 min              -0.771     -0.301
+     at +30 min              -1.009     -0.329
+   stops 454 (55%); of them WICK (bar closed back above the stop) 45%; median MFE before the stop +0.355R at +4 min; median time to stop 25 min
+     MFE@ 3min < 0.25R : n  486 gross -0.207 net -0.277 WR 33.5%  |  >= : n  334 gross +0.340 net +0.279 WR 50.0%
+     MFE@ 3min < 0.50R : n  695 gross -0.082 net -0.149 WR 37.3%  |  >= : n  125 gross +0.558 net +0.500 WR 56.8%
+     MFE@ 5min < 0.25R : n  412 gross -0.289 net -0.359 WR 30.6%  |  >= : n  408 gross +0.324 net +0.261 WR 50.0%
+     MFE@ 5min < 0.50R : n  611 gross -0.156 net -0.224 WR 35.0%  |  >= : n  209 gross +0.517 net +0.458 WR 55.5%
+     MFE@10min < 0.25R : n  323 gross -0.521 net -0.593 WR 21.4%  |  >= : n  497 gross +0.364 net +0.302 WR 52.5%
+     MFE@10min < 0.50R : n  504 gross -0.338 net -0.408 WR 28.8%  |  >= : n  316 gross +0.580 net +0.521 WR 58.5%
+   -- entry-bar close pos --
+     < +0.30: n  259 gross -0.254 net -0.322 WR 30.5%  |  >= : n  542 gross +0.152 net +0.088 WR 45.0%
+     < +0.50: n  393 gross -0.193 net -0.260 WR 33.1%  |  >= : n  408 gross +0.227 net +0.163 WR 47.3%
+     < +0.70: n  518 gross -0.144 net -0.211 WR 34.6%  |  >= : n  283 gross +0.323 net +0.259 WR 50.9%
+   -- breakout-bar close pos (range_pos) --
+     < +0.30: n  146 gross +0.165 net +0.096 WR 44.5%  |  >= : n  663 gross -0.003 net -0.068 WR 39.7%
+     < +0.50: n  238 gross +0.080 net +0.012 WR 41.6%  |  >= : n  571 gross +0.005 net -0.059 WR 40.1%
+     < +0.70: n  371 gross +0.083 net +0.016 WR 42.0%  |  >= : n  438 gross -0.020 net -0.084 WR 39.3%
+   -- entry-bar low, R below entry --
+     < -0.50: n   25 gross -0.765 net -0.848 WR 12.0%  |  >= : n  795 gross +0.040 net -0.025 WR 41.1%
+     < -0.25: n  171 gross -0.302 net -0.373 WR 26.9%  |  >= : n  649 gross +0.099 net +0.035 WR 43.8%
+
+[B2 TRAIN] n 1622  winners 629  losers 993
+                                  LOSERS    WINNERS
+   MFE (R)                         0.404      2.025
+   MFE (R) mean                    0.538      1.733
+   minutes to MFE                  6.000     92.000
+   MAE (R)                        -1.048     -0.328
+   hold minutes                   45.000    219.000
+   entry-bar close pos             0.417      0.584
+   breakout-bar close pos          0.700      0.667
+   MFE ladder (median R)     
+     at + 1 min               0.087      0.121
+     at + 3 min               0.167      0.256
+     at + 5 min               0.206      0.352
+     at +10 min               0.272      0.539
+     at +15 min               0.306      0.701
+     at +30 min               0.354      0.948
+   MAE ladder (median R)     
+     at + 1 min              -0.120     -0.077
+     at + 3 min              -0.245     -0.140
+     at + 5 min              -0.343     -0.175
+     at +10 min              -0.491     -0.215
+     at +15 min              -0.605     -0.250
+     at +30 min              -0.852     -0.281
+   stops 839 (52%); of them WICK (bar closed back above the stop) 44%; median MFE before the stop +0.387R at +5 min; median time to stop 33 min
+     MFE@ 3min < 0.25R : n  963 gross -0.246 net -0.316 WR 32.1%  |  >= : n  659 gross +0.264 net +0.199 WR 48.6%
+     MFE@ 3min < 0.50R : n 1375 gross -0.142 net -0.211 WR 35.6%  |  >= : n  247 gross +0.534 net +0.471 WR 56.7%
+     MFE@ 5min < 0.25R : n  806 gross -0.332 net -0.403 WR 28.5%  |  >= : n  816 gross +0.251 net +0.185 WR 48.9%
+     MFE@ 5min < 0.50R : n 1227 gross -0.187 net -0.257 WR 33.8%  |  >= : n  395 gross +0.421 net +0.358 WR 54.2%
+     MFE@10min < 0.25R : n  625 gross -0.470 net -0.542 WR 23.4%  |  >= : n  997 gross +0.231 net +0.166 WR 48.4%
+     MFE@10min < 0.50R : n 1028 gross -0.351 net -0.422 WR 28.4%  |  >= : n  594 gross +0.501 net +0.438 WR 56.7%
+   -- entry-bar close pos --
+     < +0.30: n  566 gross -0.314 net -0.386 WR 29.2%  |  >= : n 1007 gross +0.121 net +0.056 WR 44.3%
+     < +0.50: n  797 gross -0.188 net -0.258 WR 33.6%  |  >= : n  776 gross +0.121 net +0.056 WR 44.2%
+     < +0.70: n 1005 gross -0.165 net -0.235 WR 34.6%  |  >= : n  568 gross +0.193 net +0.129 WR 46.3%
+   -- breakout-bar close pos (range_pos) --
+     < +0.30: n  355 gross -0.060 net -0.132 WR 37.7%  |  >= : n 1247 gross -0.029 net -0.096 WR 39.1%
+     < +0.50: n  552 gross +0.013 net -0.057 WR 40.8%  |  >= : n 1050 gross -0.062 net -0.129 WR 37.7%
+     < +0.70: n  821 gross -0.013 net -0.083 WR 40.1%  |  >= : n  781 gross -0.060 net -0.126 WR 37.4%
+   -- entry-bar low, R below entry --
+     < -0.50: n   47 gross -0.697 net -0.772 WR 12.8%  |  >= : n 1575 gross -0.019 net -0.087 WR 39.6%
+     < -0.25: n  322 gross -0.301 net -0.371 WR 27.3%  |  >= : n 1300 gross +0.026 net -0.042 WR 41.6%
+
+[B2 VAL] n 706  winners 318  losers 388
+                                  LOSERS    WINNERS
+   MFE (R)                         0.304      2.000
+   MFE (R) mean                    0.491      1.667
+   minutes to MFE                  4.000    110.000
+   MAE (R)                        -1.043     -0.395
+   hold minutes                   47.000    278.500
+   entry-bar close pos             0.465      0.574
+   breakout-bar close pos          0.649      0.667
+   MFE ladder (median R)     
+     at + 1 min               0.094      0.107
+     at + 3 min               0.138      0.244
+     at + 5 min               0.177      0.322
+     at +10 min               0.216      0.438
+     at +15 min               0.246      0.569
+     at +30 min               0.257      0.804
+   MAE ladder (median R)     
+     at + 1 min              -0.111     -0.091
+     at + 3 min              -0.253     -0.155
+     at + 5 min              -0.381     -0.189
+     at +10 min              -0.534     -0.241
+     at +15 min              -0.683     -0.269
+     at +30 min              -0.890     -0.308
+   stops 323 (46%); of them WICK (bar closed back above the stop) 44%; median MFE before the stop +0.254R at +2 min; median time to stop 30 min
+     MFE@ 3min < 0.25R : n  430 gross -0.122 net -0.195 WR 38.1%  |  >= : n  276 gross +0.402 net +0.336 WR 55.8%
+     MFE@ 3min < 0.50R : n  622 gross +0.017 net -0.055 WR 43.6%  |  >= : n   84 gross +0.573 net +0.511 WR 56.0%
+     MFE@ 5min < 0.25R : n  371 gross -0.182 net -0.256 WR 35.3%  |  >= : n  335 gross +0.376 net +0.310 WR 55.8%
+     MFE@ 5min < 0.50R : n  553 gross -0.050 net -0.122 WR 41.4%  |  >= : n  153 gross +0.562 net +0.499 WR 58.2%
+     MFE@10min < 0.25R : n  296 gross -0.380 net -0.455 WR 28.0%  |  >= : n  410 gross +0.417 net +0.350 WR 57.3%
+     MFE@10min < 0.50R : n  477 gross -0.191 net -0.265 WR 36.3%  |  >= : n  229 gross +0.653 net +0.591 WR 63.3%
+   -- entry-bar close pos --
+     < +0.30: n  241 gross -0.114 net -0.183 WR 38.2%  |  >= : n  447 gross +0.190 net +0.119 WR 49.0%
+     < +0.50: n  335 gross -0.035 net -0.106 WR 40.9%  |  >= : n  353 gross +0.196 net +0.127 WR 49.3%
+     < +0.70: n  440 gross -0.010 net -0.081 WR 42.3%  |  >= : n  248 gross +0.249 net +0.180 WR 50.4%
+   -- breakout-bar close pos (range_pos) --
+     < +0.30: n  167 gross +0.048 net -0.023 WR 41.9%  |  >= : n  529 gross +0.089 net +0.019 WR 45.9%
+     < +0.50: n  248 gross +0.067 net -0.003 WR 43.1%  |  >= : n  448 gross +0.085 net +0.015 WR 46.0%
+     < +0.70: n  370 gross +0.091 net +0.021 WR 44.6%  |  >= : n  326 gross +0.064 net -0.005 WR 45.4%
+   -- entry-bar low, R below entry --
+     < -0.25: n  118 gross -0.175 net -0.249 WR 33.1%  |  >= : n  588 gross +0.134 net +0.065 WR 47.4%
+
+====================================================================================================
+5. THE LEVEL — touches, consolidation duration, volume, multi-day highs (PRE-BOOK signal set)
+====================================================================================================
+
+  [B0] touch_n
+     TRAIN >=2: n2228 g+0.013 vs n938 g-0.008 (sep +0.021) | >=3: n1462 g-0.030 vs n1704 g+0.039 (sep -0.069) | >=5: n630 g-0.095 vs n2536 g+0.032 (sep -0.127)
+     VAL   >=2: n1300 g-0.049 vs n475 g+0.138 (sep -0.186) | >=3: n912 g-0.090 vs n863 g+0.098 (sep -0.188) | >=5: n408 g-0.072 vs n1367 g+0.023 (sep -0.095)
+
+  [B0] consol_bars
+     TRAIN >=8: n2607 g-0.016 vs n559 g+0.114 (sep -0.130) | >=12: n2256 g-0.026 vs n910 g+0.089 (sep -0.115) | >=20: n1614 g+0.003 vs n1552 g+0.011 (sep -0.008)
+     VAL   >=8: n1545 g-0.028 vs n230 g+0.198 (sep -0.226) | >=12: n1344 g-0.039 vs n431 g+0.126 (sep -0.164) | >=20: n1030 g-0.067 vs n745 g+0.095 (sep -0.162)
+
+  [B0] bar_vol_ratio
+     TRAIN >=0.5: n2469 g+0.018 vs n697 g-0.032 (sep +0.050) | >=1.0: n1270 g+0.074 vs n1896 g-0.037 (sep +0.111) | >=2.0: n358 g+0.031 vs n2808 g+0.004 (sep +0.027)
+     VAL   >=0.5: n1413 g+0.032 vs n362 g-0.118 (sep +0.150) | >=1.0: n725 g+0.025 vs n1050 g-0.015 (sep +0.040) | >=2.0: n186 g-0.117 vs n1589 g+0.015 (sep -0.132)
+
+  [B0] at_pdh
+     TRAIN >=1.0: n1904 g+0.011 vs n1262 g+0.001 (sep +0.010)
+     VAL   >=1.0: n1243 g-0.008 vs n532 g+0.024 (sep -0.032)
+
+  [B0] at_h5
+     TRAIN >=1.0: n1024 g+0.037 vs n2142 g-0.007 (sep +0.045)
+     VAL   >=1.0: n718 g+0.003 vs n1057 g+0.000 (sep +0.003)
+
+  [B0] distribution: touch_n median 2 p90 7; consol_bars median 21 p90 71; at_pdh 64%; at_h5 35%
+
+  [B2] touch_n
+     TRAIN >=2: n2332 g+0.015 vs n2243 g-0.019 (sep +0.033) | >=3: n1259 g-0.012 vs n3316 g+0.002 (sep -0.015) | >=5: n477 g-0.060 vs n4098 g+0.005 (sep -0.065)
+     VAL   >=2: n1328 g-0.040 vs n1124 g+0.081 (sep -0.121) | >=3: n773 g-0.098 vs n1679 g+0.068 (sep -0.166) | >=5: n282 g-0.140 vs n2170 g+0.035 (sep -0.175)
+
+  [B2] consol_bars
+     TRAIN >=5: n2891 g-0.040 vs n1684 g+0.064 (sep -0.103) | >=8: n2398 g-0.042 vs n2177 g+0.042 (sep -0.084) | >=12: n2080 g-0.052 vs n2495 g+0.040 (sep -0.092) | >=20: n1487 g-0.001 vs n3088 g-0.002 (sep +0.001)
+     VAL   >=5: n1617 g+0.001 vs n835 g+0.044 (sep -0.043) | >=8: n1385 g-0.007 vs n1067 g+0.045 (sep -0.052) | >=12: n1191 g-0.023 vs n1261 g+0.051 (sep -0.074) | >=20: n901 g-0.056 vs n1551 g+0.057 (sep -0.113)
+
+  [B2] bar_vol_ratio
+     TRAIN >=0.5: n3489 g+0.006 vs n1086 g-0.027 (sep +0.033) | >=1.0: n1801 g+0.024 vs n2774 g-0.019 (sep +0.043) | >=2.0: n529 g+0.005 vs n4046 g-0.003 (sep +0.008)
+     VAL   >=0.5: n1892 g+0.023 vs n560 g-0.012 (sep +0.035) | >=1.0: n965 g+0.015 vs n1487 g+0.015 (sep +0.000) | >=2.0: n273 g-0.096 vs n2179 g+0.029 (sep -0.126)
+
+  [B2] at_pdh
+     TRAIN >=1.0: n2492 g-0.046 vs n2083 g+0.052 (sep -0.098)
+     VAL   >=1.0: n1639 g+0.032 vs n813 g-0.019 (sep +0.051)
+
+  [B2] at_h5
+     TRAIN >=1.0: n1435 g+0.006 vs n3140 g-0.005 (sep +0.011)
+     VAL   >=1.0: n1021 g+0.026 vs n1431 g+0.007 (sep +0.019)
+
+  [B2] distribution: touch_n median 2 p90 5; consol_bars median 9 p90 55; at_pdh 59%; at_h5 35%
+
+====================================================================================================
+6. CONTEXT — why coh_by_t was degenerate, and the family/anchor cohort
+====================================================================================================
+  coh_by_t: cov 0.106  nunique 15  value counts {0.0: 14678, 1.0: 786, 2.0: 127, 3.0: 25, 16.0: 6, 11.0: 5}

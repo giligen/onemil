@@ -1,0 +1,182 @@
+====================================================================================================
+PART 1 — THE ANATOMY.  B0 = shipped population, B2 = corrected base (hod_filter_stack §2)
+====================================================================================================
+
+[B0] pre-book signals 6293   booked 3035
+   TRAIN n  1688  /wk  31.8  gross -0.027  net -0.088  green 41.5%  total $-14,835  worst $-2,718  rs 7
+   VAL   n   820  /wk  35.7  gross +0.016  net -0.050  green 43.5%  total $-4,128  worst $-2,076  rs 6
+
+[B2] pre-book signals 8856   booked 2778
+   TRAIN n  1622  /wk  30.6  gross -0.039  net -0.107  green 32.1%  total $-17,346  worst $-2,231  rs 5
+   VAL   n   706  /wk  30.7  gross +0.083  net +0.013  green 43.5%  total $+893  worst $-957  rs 4
+
+====================================================================================================
+1. CONCENTRATION — Lorenz of net $ (at $100 risk) by DAY / WEEK / SYMBOL / HOUR
+====================================================================================================
+base split unit        n   neg |  worst5% worst10% worst20% |  best5%  best10%  best20% |    total$
+B0   TRAIN DAY       242   140 |    20.3%    35.7%    59.4% |   31.9%    52.7%    80.4% |   -14,835
+B0   TRAIN WEEK       52    30 |    21.2%    32.1%    55.5% |   25.1%    40.9%    70.1% |   -14,835
+B0   TRAIN SYMBOL    464   271 |    31.1%    45.3%    65.5% |   29.3%    45.4%    71.5% |   -14,835
+B0   VAL   DAY       102    53 |    25.3%    43.7%    70.2% |   25.1%    43.4%    71.7% |    -4,128
+B0   VAL   WEEK       22    12 |    18.3%    36.3%    55.4% |   32.8%    53.8%    78.2% |    -4,128
+B0   VAL   SYMBOL    344   209 |    27.7%    41.6%    59.5% |   36.5%    53.6%    78.5% |    -4,128
+B2   TRAIN DAY       242   148 |    22.4%    39.0%    63.0% |   34.4%    55.5%    81.0% |   -17,346
+B2   TRAIN WEEK       52    35 |    22.0%    33.0%    55.6% |   42.7%    60.2%    87.1% |   -17,346
+B2   TRAIN SYMBOL    635   378 |    27.4%    42.0%    61.9% |   34.1%    51.0%    79.8% |   -17,346
+B2   VAL   DAY       102    49 |    28.6%    47.0%    71.6% |   23.9%    41.3%    68.6% |      +893
+B2   VAL   WEEK       22    12 |    16.2%    31.8%    59.3% |   20.8%    40.9%    70.1% |      +893
+B2   VAL   SYMBOL    384   212 |    23.5%    39.4%    58.5% |   27.4%    42.9%    71.3% |      +893
+
+-- per-trade Lorenz (the trade-level view of the same thing) --
+B0 TRAIN TRADE   n  1688 neg  1073 | worst5%   9.3% worst10%  18.1% worst20%  35.1% | best5%  16.6% best10%  33.2% best20%  66.0%
+B0 VAL   TRADE   n   820 neg   497 | worst5%  10.0% worst10%  19.2% worst20%  37.1% | best5%  16.5% best10%  32.8% best20%  65.2%
+B2 TRAIN TRADE   n  1622 neg  1008 | worst5%  10.1% worst10%  19.4% worst20%  37.7% | best5%  19.0% best10%  37.8% best20%  75.0%
+B2 VAL   TRADE   n   706 neg   398 | worst5%  11.1% worst10%  21.9% worst20%  42.4% | best5%  17.3% best10%  34.9% best20%  68.8%
+
+-- by HOUR of entry (net $ total, and mean R) --
+  [B0 TRAIN] 0930-0945: n119 $-1,728 g-0.08  0945-1000: n431 $-7,078 g-0.10  1000-1100: n657 $-9,492 g-0.08  1100-1200: n261 $+2,193 g+0.14  1200-1400: n220 $+1,270 g+0.12
+  [B0 VAL] 0930-0945: n111 $+1,331 g+0.19  0945-1000: n201 $+2,717 g+0.20  1000-1100: n316 $-3,252 g-0.04  1100-1200: n101 $-3,139 g-0.24  1200-1400: n91 $-1,784 g-0.13
+  [B2 TRAIN] 0930-0945: n644 $-5,061 g-0.00  0945-1000: n250 $-4,354 g-0.11  1000-1100: n383 $-7,274 g-0.13  1100-1200: n181 $-175 g+0.05  1200-1400: n164 $-481 g+0.03
+  [B2 VAL] 0930-0945: n357 $+2,536 g+0.15  0945-1000: n95 $+769 g+0.15  1000-1100: n124 $-936 g-0.01  1100-1200: n67 $+550 g+0.14  1200-1400: n63 $-2,026 g-0.26
+
+====================================================================================================
+2. LOSING DAYS — worst-20% vs best-20% of TRADED days
+====================================================================================================
+day_ctx columns: day, spy_ret_0930_1000, spy_vol20, breadth_by_1000
+
+[B0 TRAIN] traded days 242  worst20% k=48
+                              WORST20%          MID      BEST20%
+   net $ total              -30,559.30   -13,681.17    29,405.78
+   net $ / day                 -636.65       -93.71       612.62
+   trades / day                   8.29         6.18         8.08
+   gross R / trade               -0.74        -0.13         0.87
+   stop fraction                  0.85         0.60         0.31
+   median hold (min)             36.00        55.25        54.75
+   spy_ret_0930_1000            0.0215       0.0153       0.0467
+   spy_vol20                   12.9374      12.9745      13.4532
+   breadth_by_1000            101.0000      89.0000      94.5000
+   within-day win-rate ICC (rho)  +0.0735   (0 = trades independent; >0 = outcomes cluster by day)   days>=3tr 233
+      worst20%  WR 0.128  rho -0.0430
+      best20%   WR 0.644  rho -0.0545
+      worst20%  distinct 30-min entry buckets/day median 4.0; worst-bucket share of day pnl median 0.53
+      best20%   distinct 30-min entry buckets/day median 4.0; worst-bucket share of day pnl median -0.18
+      worst20%  stops/day 6.9; largest single 30-min EXIT bucket holds 39% of the day's stops
+      best20%   stops/day 3.0; largest single 30-min EXIT bucket holds 59% of the day's stops
+
+[B0 VAL] traded days 102  worst20% k=20
+                              WORST20%          MID      BEST20%
+   net $ total              -14,067.67    -1,467.19    11,406.98
+   net $ / day                 -703.38       -23.66       570.35
+   trades / day                   9.40         7.66         7.85
+   gross R / trade               -0.71         0.03         0.86
+   stop fraction                  0.83         0.50         0.31
+   median hold (min)             35.25        70.75        47.75
+   spy_ret_0930_1000           -0.0430       0.0489       0.2225
+   spy_vol20                   11.4613      12.2273      12.9892
+   breadth_by_1000             89.0000     140.0000     124.5000
+   within-day win-rate ICC (rho)  +0.0517   (0 = trades independent; >0 = outcomes cluster by day)   days>=3tr 101
+      worst20%  WR 0.144  rho -0.0001
+      best20%   WR 0.662  rho -0.0798
+      worst20%  distinct 30-min entry buckets/day median 4.5; worst-bucket share of day pnl median 0.47
+      best20%   distinct 30-min entry buckets/day median 4.0; worst-bucket share of day pnl median -0.19
+      worst20%  stops/day 7.7; largest single 30-min EXIT bucket holds 33% of the day's stops
+      best20%   stops/day 2.7; largest single 30-min EXIT bucket holds 61% of the day's stops
+
+====================================================================================================
+3. LOSING WEEKS — shape and red-streak structure
+====================================================================================================
+
+[B0 TRAIN] weeks 53 green 22 red 31; runs 27 vs E[26.7] z=+0.08 (runs~E => noise/alternating)
+   red runs [7, 4, 4, 3, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1]   green runs [5, 4, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+   worst5% of weeks carry 21.2% of all red-week $, worst10% 32.1%, worst20% 59.4%; best20% carry 74.7% of green-week $
+   weekly $ lag-1 autocorr -0.118; week-SIGN lag-1 autocorr -0.024
+
+[B0 VAL] weeks 23 green 10 red 13; runs 12 vs E[12.3] z=-0.13 (runs~E => noise/alternating)
+   red runs [6, 2, 2, 1, 1, 1]   green runs [5, 1, 1, 1, 1, 1]
+   worst5% of weeks carry 18.3% of all red-week $, worst10% 36.3%, worst20% 64.4%; best20% carry 86.1% of green-week $
+   weekly $ lag-1 autocorr -0.433; week-SIGN lag-1 autocorr -0.017
+
+[B2 TRAIN] weeks 53 green 17 red 36; runs 27 vs E[24.1] z=+0.93 (runs~E => noise/alternating)
+   red runs [5, 4, 4, 4, 3, 3, 3, 2, 2, 2, 1, 1, 1, 1]   green runs [3, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+   worst5% of weeks carry 22.0% of all red-week $, worst10% 33.0%, worst20% 59.4%; best20% carry 90.3% of green-week $
+   weekly $ lag-1 autocorr +0.097; week-SIGN lag-1 autocorr -0.136
+
+[B2 VAL] weeks 23 green 10 red 13; runs 14 vs E[12.3] z=+0.74 (runs~E => noise/alternating)
+   red runs [4, 3, 2, 1, 1, 1, 1]   green runs [2, 2, 2, 1, 1, 1, 1]
+   worst5% of weeks carry 16.2% of all red-week $, worst10% 31.8%, worst20% 72.3%; best20% carry 81.2% of green-week $
+   weekly $ lag-1 autocorr -0.100; week-SIGN lag-1 autocorr -0.203
+
+====================================================================================================
+5/6 (bar-free part) — the LEVEL and the STOCK CONTEXT, on fields already causal in pop.csv
+====================================================================================================
+
+  [B0] FIRST break of day (0) vs RE-break (1)
+     TRAIN 0: n2402 gross-0.020 net-0.080 wr38%   1: n764 gross+0.093 net+0.029 wr44%
+     VAL   0: n1359 gross+0.002 net-0.062 wr40%   1: n416 gross+0.000 net-0.070 wr38%
+
+  [B0] level within 5c of a round dollar
+     TRAIN 0: n2792 gross+0.007 net-0.054 wr40%   1: n374 gross+0.008 net-0.056 wr40%
+     VAL   0: n1552 gross+0.006 net-0.059 wr40%   1: n223 gross-0.030 net-0.095 wr39%
+
+  [B0] level at/above the 20-day high
+     TRAIN 0: n2559 gross-0.006 net-0.067 wr40%   1: n607 gross+0.060 net+0.002 wr39%
+     VAL   0: n1317 gross-0.019 net-0.085 wr39%   1: n458 gross+0.059 net-0.004 wr41%
+
+  [B0] leveraged/inverse wrapper
+     TRAIN 0: n1780 gross-0.022 net-0.084 wr39%   1: n1386 gross+0.044 net-0.015 wr41%
+     VAL   0: n1098 gross-0.046 net-0.110 wr38%   1: n677 gross+0.078 net+0.011 wr42%
+
+  [B0] level above session VWAP
+     TRAIN 1: n3166 gross+0.007 net-0.054 wr40%
+     VAL   1: n1775 gross+0.001 net-0.064 wr40%
+
+  [B0] dist_atr — TRAIN-cut quintiles, gross R both splits
+     TRAIN edges [ 7.362  9.375 12.022 16.828] | Q0 n713 -0.096  Q1 n613 +0.071  Q2 n613 -0.041  Q3 n613 +0.041  Q4 n614 +0.077
+     VAL   edges [ 7.362  9.375 12.022 16.828] | Q0 n415 +0.154  Q1 n290 -0.095  Q2 n299 +0.048  Q3 n371 +0.029  Q4 n400 -0.149
+
+  [B0] hod_age_bars — TRAIN-cut quintiles, gross R both splits
+     TRAIN edges [1. 6.] | Q1 n2494 +0.008  Q2 n672 +0.002
+     VAL   edges [1. 6.] | Q1 n1339 +0.017  Q2 n436 -0.046
+
+  [B0] dist_20d_high_pct — TRAIN-cut quintiles, gross R both splits
+     TRAIN edges [-26.564 -15.091  -7.977  -0.247] | Q0 n633 -0.119  Q1 n633 +0.061  Q2 n633 +0.012  Q3 n633 +0.051  Q4 n634 +0.030
+     VAL   edges [-26.564 -15.091  -7.977  -0.247] | Q0 n292 +0.038  Q1 n319 -0.097  Q2 n295 -0.060  Q3 n398 +0.021  Q4 n471 +0.066
+
+  [B0] n_break — TRAIN-cut quintiles, gross R both splits
+     TRAIN edges [0. 1.] | Q1 n2402 -0.020  Q2 n764 +0.093
+     VAL   edges [0. 1.] | Q1 n1359 +0.002  Q2 n416 +0.000
+
+  [B2] FIRST break of day (0) vs RE-break (1)
+     TRAIN 0: n4400 gross-0.011 net-0.076 wr41%   1: n175 gross+0.225 net+0.161 wr54%
+     VAL   0: n2383 gross+0.013 net-0.055 wr42%   1: n69 gross+0.080 net+0.012 wr39%
+
+  [B2] level within 5c of a round dollar
+     TRAIN 0: n3981 gross-0.002 net-0.067 wr41%   1: n594 gross-0.000 net-0.066 wr42%
+     VAL   0: n2109 gross+0.008 net-0.061 wr42%   1: n343 gross+0.063 net-0.005 wr43%
+
+  [B2] level at/above the 20-day high
+     TRAIN 0: n3639 gross-0.006 net-0.071 wr42%   1: n936 gross+0.015 net-0.053 wr41%
+     VAL   0: n1789 gross+0.001 net-0.067 wr41%   1: n663 gross+0.054 net-0.016 wr44%
+
+  [B2] leveraged/inverse wrapper
+     TRAIN 0: n2808 gross-0.019 net-0.085 wr41%   1: n1767 gross+0.025 net-0.038 wr42%
+     VAL   0: n1507 gross-0.042 net-0.111 wr40%   1: n945 gross+0.107 net+0.039 wr45%
+
+  [B2] level above session VWAP
+     TRAIN 1: n4575 gross-0.002 net-0.067 wr42%
+     VAL   1: n2452 gross+0.015 net-0.053 wr42%
+
+  [B2] dist_atr — TRAIN-cut quintiles, gross R both splits
+     TRAIN edges [ 6.747  8.678 10.864 15.105] | Q0 n1590 -0.003  Q1 n746 +0.040  Q2 n746 -0.031  Q3 n746 -0.016  Q4 n747 +0.003
+     VAL   edges [ 6.747  8.678 10.864 15.105] | Q0 n1110 +0.054  Q1 n271 -0.049  Q2 n280 +0.040  Q3 n377 +0.051  Q4 n414 -0.096
+
+  [B2] hod_age_bars — TRAIN-cut quintiles, gross R both splits
+     TRAIN edges [1. 2.] | Q1 n3183 +0.004  Q2 n1392 -0.015
+     VAL   edges [1. 2.] | Q1 n1670 +0.031  Q2 n782 -0.018
+
+  [B2] dist_20d_high_pct — TRAIN-cut quintiles, gross R both splits
+     TRAIN edges [-25.62  -14.498  -8.534   0.229] | Q0 n916 -0.039  Q1 n915 +0.047  Q2 n914 -0.009  Q3 n915 -0.024  Q4 n915 +0.017
+     VAL   edges [-25.62  -14.498  -8.534   0.229] | Q0 n445 +0.057  Q1 n419 -0.044  Q2 n346 -0.078  Q3 n595 +0.038  Q4 n647 +0.055
+
+  [B2] n_break — TRAIN-cut quintiles, gross R both splits
+     degenerate
