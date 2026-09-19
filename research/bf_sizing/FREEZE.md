@@ -5,7 +5,7 @@ recommendation in `REPORT.md` §6 is committed, and only for the cells named her
 
 ## Sealed recommendation
 
-Committed in `REPORT.md` §6 at commit **<RECOMMIT>** (`research/bf_sizing/REPORT.md`,
+Committed in `REPORT.md` §6 at commit **5cf2f84** (`research/bf_sizing/REPORT.md`,
 sections 0–6 complete, section 7 empty).
 
 **Verdict: (b) — the conviction score is NOISE as a sizer.**

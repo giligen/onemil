@@ -421,4 +421,86 @@ table in both years. The gate's mean separation is a **tail artefact**, not a ra
 
 ## 7. TEST reveal
 
-Written after §6 was committed. See `FREEZE.md`.
+Written after §6 was committed as `5cf2f84`. See `FREEZE.md`. TEST =
+**2026-06-01 → 2026-08-31, 14 market weeks**. Revealed once, with
+`python3 research/bf_sizing/part2.py --reveal-test`. **Nothing above was re-ranked and
+§0–§6 stand exactly as written.**
+
+### P1 arm — 7 trades (vacuous by construction, printed for completeness)
+
+| cell | green wk | red streak | worst wk | MDD | total $ | mean $ risk |
+|---|---|---|---|---|---|---|
+| **S0 shipped** | **14.3%** | 1 | −5,210 | −7,066 | **+52** | 3,395 |
+| S1 flat | **14.3%** | 1 | −8,043 | −9,794 | −7,442 | 3,945 |
+| S2 inverse | **14.3%** | 1 | −8,030 | −9,953 | −7,196 | 3,918 |
+| S3 vol-norm | **14.3%** | 1 | −10,955 | −11,913 | −8,061 | 3,303 |
+| S4 binary | **14.3%** | 1 | −5,212 | −6,346 | −4,485 | 3,070 |
+| S5 refit | 21.4% | 1 | −16,744 | −20,616 | −16,796 | 3,886 |
+| S6 regime | **14.3%** | 1 | −8,033 | −9,782 | −7,433 | 3,940 |
+| *S1b equal-$* | 21.4% | 1 | −1,312 | −2,481 | −70 | 1,086 |
+
+### F7 arm — 42 trades (the only TEST reading with any power)
+
+| cell | green wk | flat | red | red streak | worst wk | worst mo | MDD | total $ | mean $ risk |
+|---|---|---|---|---|---|---|---|---|---|
+| **S0 shipped** | **35.7%** | 7.1 | 57.1 | 5 | −13,086 | −25,625 | −45,009 | −28,283 | 2,061 |
+| S1 flat | **35.7%** | 7.1 | 57.1 | 5 | −14,182 | −25,777 | −49,173 | −30,105 | 2,370 |
+| S2 inverse | **35.7%** | 7.1 | 57.1 | 5 | −14,656 | −28,459 | −52,586 | −31,517 | 2,347 |
+| S3 vol-norm | 28.6% | 7.1 | 64.3 | 5 | −13,998 | −21,318 | −47,538 | −35,844 | 1,699 |
+| S4 binary | **35.7%** | 7.1 | 57.1 | 5 | −20,482 | −19,049 | −52,870 | −39,639 | 2,394 |
+| S5 refit | **35.7%** | 7.1 | 57.1 | 5 | −22,329 | −20,625 | −47,766 | −20,839 | 2,800 |
+| S6 regime | **35.7%** | 21.4 | **42.9** | **2** | −14,251 | **−12,004** | **−35,515** | **−16,353** | 2,058 |
+| *S1b equal-$* | **35.7%** | 7.1 | 57.1 | 4 | **−4,192** | **−4,260** | **−10,657** | **+152** | 946 |
+
+### Read it honestly, in four parts
+
+1. **The study's central claim is CONFIRMED, and more starkly than on the open splits.**
+   **Six of the eight cells post an identical green-week share** — 14.3% on P1 and 35.7%
+   on F7. Whatever the sizer does, it does not move the week shape. The exceptions are
+   S3 (28.6%, *worse*) and the two cells that change the *number* of live trades (S5 and
+   S6 on flat weeks). **On the owner's primary metric, sizing is inert on TEST.** This is
+   the same result as §3a, now on unseen data and on the powered arm.
+2. **The recommendation's DOLLAR claim is NOT confirmed.** In this quarter S0 beats S1 on
+   both arms: +$52 vs −$7,442 (P1) and −$28,283 vs −$30,105 (F7). Part of that is scale —
+   S1 carries 16% (P1) / 15% (F7) more mean dollar risk in this quarter because the TEST
+   picks' conviction ran *below* the TRAIN mean, and in a quarter where the book loses,
+   whichever cell happens to be smaller wins. Scale-adjusting S1 to S0's mean risk still
+   leaves S0 ahead on P1 (−$6,404) and roughly level on F7 (−$26,180 vs −$28,283). With
+   **R/pick of −0.01 (P1) and +0.004 (F7)** — the book earned nothing in this quarter,
+   exactly as `bf_frequency` §12 found — these dollar gaps are noise around zero, and
+   §6's own permutation evidence says a TRAIN-only dollar advantage is what a hand-tuned
+   score produces.
+3. **S3 (volatility-normalised) FAILS its TEST.** It is the only cell to *lose*
+   green weeks (35.7% → 28.6%), it posts 0% green months, and it is $7.6K worse than S0
+   on dollars. §6 named it "the pre-registered next candidate"; TEST says that
+   candidacy is weaker than the open splits suggested, and any future pre-registration
+   must carry this reveal.
+4. **The one thing that did work in this quarter is the one thing Part 1 pointed at, and
+   it is not conviction.** `S1b` — equal DOLLAR risk on every trade — is the only cell
+   that is **positive (+$152)**, with an MDD of **−$10,657 against S0's −$45,009** and a
+   worst week of **−$4,192 against −$13,086**. Scaled up to S0's mean risk it is still
+   +$347 with an MDD of −$24,298. That is the August-2026 mechanism (§2d) generalising:
+   **the dispersion in the BASE size — the 2% ADV cap and the stop distance, which §1
+   shows is 80% of all sizing variance — is where this book loses its money, not the
+   confidence score.**
+   **S1b is not obtainable** (you cannot put $2,000 of risk on a name whose 2% ADV cap
+   allows $74), so it is not a recommendation and FREEZE.md forbids promoting it here.
+   The obtainable form of the same idea is to **clamp the LARGE end** — which is exactly
+   `trading.risk_cap` (`trading/bf_risk_cap.py`, built, default OFF, and CLAUDE.md's P2
+   profile already measured a 2× variant at a better MDD). **That is the next
+   pre-registration this program should write**, and it must be pre-registered, not
+   inferred from this paragraph.
+
+**What TEST does to the recommendation.** §6 stands as written. It must be put to the
+owner with this attached: **the claim that sizing is inert on week shape survived the
+sealed quarter and got stronger; the claim that flat sizing buys a smaller left tail did
+NOT** — on TEST the shipped sizer's tail was the *second best* of the seven cells. TEST
+is 14 weeks and a quarter in which the book had no edge at all, so it can neither confirm
+nor refute a sizing effect of the size this study can see (MDE₈₀ ±14.9pp of green weeks
+on 14 weeks is ±18.8pp). The defensible statement is:
+
+> *The conviction score does not predict outcomes and does not move the shape of the
+> book's weeks — on TRAIN, on VAL, and on the sealed quarter. Removing it from sizing is
+> therefore free in week shape and unproven in dollars. The sizing variable that DOES
+> move dollars is the base size dispersion created by the ADV cap, and clamping its large
+> end is the next thing to pre-register.*
