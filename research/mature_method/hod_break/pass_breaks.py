@@ -48,7 +48,11 @@ D = 'research/mature_method/hod_break'
 STATE, OUT = f'{D}/pass_state.json', f'{D}/breaks.csv'
 P = HodBreakParams()
 OPEN_M, EOD_M, LAST_M = 570, 955, 930
-MIN_LEVEL = 19.0          # live universe screen (prev close >= 17, $20 floor at the break)
+# NO price floor at detection: `detect()` has none, and the engine applies `min_price` AFTER the
+# break and then RETIRES the symbol-day (hod_break_engine._try_enter -> rejected_reason 'price').
+# A sub-floor first break therefore KILLS the day, so every break at any price must be emitted or
+# the relaxation cells would silently promote a later break the engine would never take.
+MIN_LEVEL = float(os.environ.get('MM_MIN_LEVEL', '1.0'))
 K_B, X_B = 5, 0.04        # base consolidation (the shipped rule)
 K_L, X_L = 3, 0.08        # loose consolidation (the rejected side of the shape gate)
 SLIP = 0.001              # stop fills 10 bps through, as the spec
