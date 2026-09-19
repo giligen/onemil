@@ -1,0 +1,48 @@
+==============================================================================================================
+S1. WHY THE TIME STOP FAILS — the 0.77 R separation is real and un-monetisable
+==============================================================================================================
+  [B0 TRAIN] pre-book signals 3166; the time stop fires on 1117 (35%)
+     on the FIRED subset: gross under the shipped exit -0.554, gross at the fill+10 close -0.542  -> the rule SAVES +0.012 R a fired trade
+     the bleed is ALREADY BOOKED: median R at the fill+10 close -0.500; the stop is at -1.0 R, so the cut happens 0.46 R into a 1 R loss
+     freed slots: mean hold shrinks 97 -> 73 min, which is why the book grows 31.8 -> 34.5 trades a week
+  [B0 VAL] pre-book signals 1775; the time stop fires on 665 (37%)
+     on the FIRED subset: gross under the shipped exit -0.536, gross at the fill+10 close -0.521  -> the rule SAVES +0.016 R a fired trade
+     the bleed is ALREADY BOOKED: median R at the fill+10 close -0.463; the stop is at -1.0 R, so the cut happens 0.48 R into a 1 R loss
+     freed slots: mean hold shrinks 115 -> 82 min, which is why the book grows 31.8 -> 34.5 trades a week
+
+  the counterfactual that separates the two effects (pre-book, no slots): mean gross under each exit over the WHOLE signal set
+    B0 TRAIN n  3166  base +0.007  t10 +0.011  t5 -0.006  ruleD +0.011  shape +0.007  be -0.032  t10be -0.028
+    B0 VAL   n  1775  base +0.001  t10 +0.007  t5 +0.006  ruleD +0.004  shape +0.015  be -0.059  t10be -0.047
+    B2 TRAIN n  4575  base -0.002  t10 +0.002  t5 -0.001  ruleD -0.000  shape +0.006  be -0.009  t10be -0.003
+    B2 VAL   n  2452  base +0.015  t10 -0.002  t5 +0.002  ruleD +0.017  shape +0.026  be -0.034  t10be -0.039
+
+==============================================================================================================
+S2. THE ADDED TRADES — what the freed slots buy
+==============================================================================================================
+  [B0] the T10 book adds 355 trades the shipped book never took and drops 95
+    TRAIN ADDED n  182 gross +0.044 net -0.020 $ -357   |   DROPPED n   44 $ +998
+    VAL   ADDED n  173 gross +0.040 net -0.025 $ -429   |   DROPPED n   51 $ +257
+
+==============================================================================================================
+S3. MDE — the smallest per-trade effect this pass could have resolved (80 % power, two-sided 5 %)
+==============================================================================================================
+  B0 TRAIN pre-book n  3166 sd(rr) 1.323 -> MDE 0.066 R
+  B0 VAL   pre-book n  1775 sd(rr) 1.327 -> MDE 0.088 R
+  B2 TRAIN pre-book n  4575 sd(rr) 1.234 -> MDE 0.051 R
+  B2 VAL   pre-book n  2452 sd(rr) 1.261 -> MDE 0.071 R
+  B0 TRAIN P14 selected subset: n   607 -> MDE 0.157 R
+  B0 VAL   P14 selected subset: n   458 -> MDE 0.180 R
+  B0 TRAIN P11 selected subset: n  2536 -> MDE 0.073 R
+  B0 VAL   P11 selected subset: n  1367 -> MDE 0.100 R
+  B0 TRAIN P13 selected subset: n   559 -> MDE 0.143 R
+  B0 VAL   P13 selected subset: n   230 -> MDE 0.253 R
+
+  green-week MDE: +-19.0 pp over 53 TRAIN weeks, +-28.9 pp over 23 VAL weeks (unchanged from hod_break §10 / hod_filter_stack §10 -- same weeks, same book).
+
+==============================================================================================================
+S4. P14 — the one cell that improves week shape, against its own count-matched null
+==============================================================================================================
+  TRAIN observed 45.3 % vs null mean 46.7 % [39.6, 54.7]  -> BELOW the null MEAN
+  VAL   observed 47.8 % vs null mean 44.6 % [34.8, 56.5]  -> inside
+  i.e. the whole green-week gain of the 20-day-high gate is what cutting the pick count from
+  31.8 to 10.5 trades a week does to a book of this mean and variance. It is arithmetic.
