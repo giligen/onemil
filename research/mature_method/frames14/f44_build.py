@@ -147,5 +147,12 @@ def build(y, keys, spy):
 
 
 if __name__ == '__main__':
-    y = int(sys.argv[1])
-    build(y, a13_keys(), spy_day())
+    K, S = a13_keys(), spy_day()
+    if sys.argv[1] == 'all':
+        for y in range(Y0, Y1 + 1):
+            if not os.path.exists(f'{D14}/feat_{y}.parquet'):
+                build(y, K, S)
+            else:
+                print(f'  {y}: already on disk', flush=True)
+    else:
+        build(int(sys.argv[1]), K, S)

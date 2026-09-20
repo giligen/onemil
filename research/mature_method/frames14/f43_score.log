@@ -1,0 +1,40 @@
+  WARNING Cost: no measurement for price bands ['<$5', '$5-10']; they use the all-band median at every clock
+  cost surface: 14 clocks x 5 price bands, all-band median 0.333 % of price
+
+  population 288,174 detector-free control keys over 344 sessions (TRAIN 200,088 / VAL 88,086)
+
+GATE G-X1: F34 read the +2R bracket at s=2 % as GROSS -0.136 % TRAIN (net -0.389 % under the IMPUTED cost; this pass charges the MEASURED one, so only GROSS is a gate).
+   frames14 gross -0.1352 % | measured cost 0.3378 % | net -0.4730 % (TRAIN, n=200,088)
+   frames14 gross -0.1057 % | measured cost 0.3243 % | net -0.4300 % (VAL, n=88,086)
+   G-X1 PASSES
+
+### THE 12 SCORED CELLS — unconditional, no admission rule, % of ENTRY PRICE, cost MEASURED (F45)
+
+ cell geometry                                    s%        n    gross    cost      net       t    H1-25    H2-25      VAL    net R  ex5 ok
+ X1-2 +2R bracket, flat 15:55                      2  288,174   -0.126   0.334   -0.460   -11.0   -0.480   -0.467   -0.430   -0.230     n/a
+ X2-2 ORB static lock, flat 15:45                  2  288,174   -0.143   0.356   -0.499   -10.7   -0.508   -0.499   -0.490   -0.250     n/a
+ X3-2 BF R-trail, flat 15:45                       2  288,174   -0.137   0.357   -0.495   -11.5   -0.509   -0.501   -0.472   -0.247     n/a
+ X4-2 BF R-trail + 50%@2R partial, flat 15:45      2  288,174   -0.119   0.357   -0.476   -11.3   -0.492   -0.484   -0.450   -0.238     n/a
+ X5-2 bare stop, flat 15:55                        2  288,174   -0.147   0.350   -0.497   -10.1   -0.513   -0.493   -0.484   -0.248      no
+ X6-2 hold to NEXT OPEN                            2  286,739   -0.168   0.612   -0.780    -6.6   -1.179   -0.588   -0.573   -0.390      no
+ X7-2 MOC (official close)                         2  286,744   -0.223   0.199   -0.422    -5.8   -0.557   -0.431   -0.265   -0.211      no
+ X2-3 ORB static lock, flat 15:45                  3  288,174   -0.213   0.347   -0.560    -9.9   -0.596   -0.560   -0.522   -0.187     n/a
+ X4-3 BF R-trail + 50%@2R partial, flat 15:45      3  288,174   -0.203   0.347   -0.550   -10.2   -0.591   -0.556   -0.499   -0.183     n/a
+ X5-3 bare stop, flat 15:55                        3  288,174   -0.213   0.340   -0.552    -9.5   -0.590   -0.554   -0.509   -0.184      no
+ X6-3 hold to NEXT OPEN                            3  286,739   -0.168   0.612   -0.780    -6.6   -1.179   -0.588   -0.573   -0.260      no
+ X7-3 MOC (official close)                         3  286,744   -0.223   0.199   -0.422    -5.8   -0.557   -0.431   -0.265   -0.141      no
+
+  cells clearing the pre-committed bar (positive on BOTH TRAIN halves AND VAL, and ex-top-5 % positive where the geometry is uncapped): 0 of 12
+
+  DIAGNOSTIC — by entry-hour band (net % of price, s = 2 %):
+ geo  09:37-10:30  10:30-11:30  11:30-13:00  13:00-14:01
+  X1       -0.624       -0.471       -0.406       -0.374
+  X2       -0.719       -0.517       -0.421       -0.391
+  X3       -0.699       -0.511       -0.426       -0.390
+  X4       -0.657       -0.487       -0.417       -0.385
+  X5       -0.733       -0.516       -0.414       -0.379
+  X6       -1.136       -0.845       -0.662       -0.553
+  X7       -0.769       -0.482       -0.292       -0.227
+
+  DIAGNOSTIC — the auction-free variant of X6 (exit IN the opening cross, ratio 0):
+    net -0.367 %  H1 -0.760  H2 -0.173  VAL -0.170  | ex-top-5 % H1 -1.328 H2 -0.755 VAL -0.786

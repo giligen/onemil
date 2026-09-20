@@ -115,7 +115,8 @@ def join67():
     CH = 400
     for i in range(0, len(syms), CH):
         ch = syms[i:i + CH]
-        q = ('select symbol, date, open, close from daily_bars where date >= ? and date <= ? '
+        q = ('select symbol, bar_date as date, open, close from daily_bars '
+             'where bar_date >= ? and bar_date <= ? '
              f'and symbol in ({",".join("?" * len(ch))})')
         out.append(pd.read_sql(q, con, params=[d0, (pd.Timestamp(d1) + pd.Timedelta(days=10)
                                                     ).strftime('%Y-%m-%d')] + ch))
@@ -150,7 +151,12 @@ def load(cost):
     w = w[w.day < TEST_FROM]
     x = pd.read_csv(f'{D14}/x67.csv', dtype={'day': str, 'ctrl': str},
                     usecols=['day', 'ctrl', 'ctrl_entry_m', 'x6_pct', 'x7_pct'])
+    n0 = len(w)
+    # pd6 can carry the same (day, control, minute) twice (two signals matched to one control);
+    # the daily legs are a property of the key, so the join must not multiply rows.
+    x = x.drop_duplicates(['day', 'ctrl', 'ctrl_entry_m'])
     w = w.merge(x, on=['day', 'ctrl', 'ctrl_entry_m'], how='left')
+    assert len(w) == n0, f'the X6/X7 join changed the row count ({n0} -> {len(w)})'
     w['half'] = [half_of(d) for d in w.day]
     w['split'] = [split_of(d) for d in w.day]
     w['entry_cost'] = 0.5 * cost.sp(w.entry.values, w.ctrl_entry_m.values)

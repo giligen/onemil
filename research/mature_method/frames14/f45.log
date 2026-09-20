@@ -1,0 +1,97 @@
+
+GATE build_impute: measured rows 15,493  cells 23  global median 0.345 %   (score.py prints 0.345 %)
+  the FIT WINDOW of that table: entry_m 577 (09:37) -> 841 (14:01)
+
+### THE MINUTE-OF-DAY NBBO TABLE — 210 symbol-days of the imputation table's OWN population, 14 declared clocks, Alpaca SIP
+
+             clock     n    cov    med %   mean %  med bps  IMPUTED %  meas/imp
+             09:30   210 100.0%    0.815    1.439     81.5      0.578      1.41x
+             09:31   207  98.6%    0.690    1.148     69.0      0.578      1.19x
+  09:35*ORB submit   206  98.1%    0.525    0.866     52.5      0.578      0.91x
+             09:37   206  98.1%    0.485    0.778     48.5      0.578      0.84x
+             09:40   209  99.5%    0.484    0.766     48.4      0.578      0.84x
+             09:45   207  98.6%    0.454    0.705     45.4      0.383      1.19x
+             10:00   208  99.0%    0.387    0.558     38.7      0.317      1.22x
+             11:00   206  98.1%    0.278    0.403     27.8      0.283      0.98x
+             12:00   205  97.6%    0.259    0.368     25.9      0.283      0.91x
+             13:00   201  95.7%    0.245    0.353     24.5      0.357      0.69x
+             14:00   206  98.1%    0.270    0.362     27.0      0.357      0.76x
+             15:00   207  98.6%    0.233    0.338     23.3      0.357      0.65x
+    15:45*ORB flat   209  99.5%    0.174    0.317     17.4      0.357      0.49x
+ 15:55*HOD/BF flat   208  99.0%    0.172    0.285     17.2      0.357      0.48x
+
+  by price band (median % of price):
+      band   09:30   09:31   09:35   09:37   09:40   09:45   10:00   11:00   12:00   13:00   14:00   15:00   15:45   15:55
+    $10-20   2.849   1.434   1.593   1.291   1.156   1.553   0.964   0.817   0.867   0.552   0.925   0.704   0.683   0.521
+    $20-30   0.862   0.677   0.541   0.530   0.532   0.508   0.438   0.408   0.299   0.279   0.317   0.244   0.193   0.260
+    $30-50   0.853   0.693   0.505   0.454   0.436   0.413   0.356   0.237   0.217   0.205   0.216   0.245   0.174   0.152
+   $50-100   0.744   0.695   0.532   0.454   0.440   0.344   0.341   0.249   0.244   0.251   0.209   0.209   0.139   0.143
+     $100+   0.711   0.602   0.484   0.465   0.428   0.415   0.386   0.216   0.240   0.224   0.235   0.219   0.149   0.147
+
+  independent confirmations already on disk (not refetched):
+    frames13 openspread 09:30: median 0.786 % (n=499) | frames14 0.815 %
+    frames13 openspread 09:31: median 0.508 % (n=467) | frames14 0.690 %
+    frames13 openspread 15:55: median 0.168 % (n=474) | frames14 0.172 %
+
+### E1 — ORB at 09:35.  Stage P rows 7,402; entry quotes 7,202 (97.3%), exit quotes 7,377 (99.7%)
+  PROVENANCE (code-read, not assumed): P_cost/fetch_spreads.py pulls the SIP NBBO at the FILL INSTANT
+  (last quote at or before the first trade above range_high) and at the EXIT INSTANT — per trade,
+  never a table constant.  Stage Q then walked the whole order life.  So ORB is NOT priced by S.IMPUTE.
+  ORB entry instants landing in minute 09:35: n=2,200 (30.5% of fills) median 0.260 % (26.0 bps), mean 0.453 %
+  fresh 09:35 measurement on the HOD universe: 0.525 % | residual vs ORB's own = -0.265 pp (different universes; ORB screens 500K prev volume)
+
+### E2 — ORB at the 15:45 flat.  ORB charges a flat EXIT_SLIP_BPS = 10 bps.
+  ORB exit instants at 15:45 (the flat): n=1,033 median full spread 0.172 % = 17.2 bps, half 8.6 bps vs charged 10.0 bps -> residual -1.4 bps
+  ORB exit instants at 15:40-15:45: n=1,087 median full spread 0.178 % = 17.8 bps, half 8.9 bps vs charged 10.0 bps -> residual -1.1 bps
+  (closed-bar exits, all reasons: n=3,253)
+  ORB median r_pct = 4.03 % of price -> the 15:45 residual is -0.0028 R per force-closed trade
+
+### E3 — BF entry NBBO at its OWN detection minutes (the shipped model is a FLAT 50 bps, spread-blind)
+  896 raw regen-7 detections: measured 868/896 = 96.9%
+     full spread  median  113.8 bps  mean  169.7  p25   58.5  p75  222.9  p90  363.4
+     HALF spread  median-of-MEAN   56.9 bps | median-of-MEDIAN (= the fill instant, P_cost §3.2)   54.4 bps  vs the charged 50.0 bps -> 1.14x / 1.09x
+  56 P1 trades: measured 54/56 = 96.4%
+     full spread  median  186.9 bps  mean  231.9  p25  126.3  p75  331.3  p90  424.8
+     HALF spread  median-of-MEAN   93.5 bps | median-of-MEDIAN (= the fill instant, P_cost §3.2)   91.8 bps  vs the charged 50.0 bps -> 1.87x / 1.84x
+
+  BF's detection clock (the 896 raw detections):
+     0930-0945  n= 136 (15.7%)  median half-spread   50.2 bps
+     0945-1000  n= 229 (26.4%)  median half-spread   53.3 bps
+     1000-1100  n= 499 (57.5%)  median half-spread   61.9 bps
+     1100-1300  n=   4 ( 0.5%)  median half-spread  251.0 bps
+  exit minute (56 P1): measured 54/56  full spread MEAN 178.2 bps / MEDIAN 178.2 bps -> half 89.1 bps vs the shipped 30 bps exit slip (stop-type exits only)
+
+### E4 (PRIMARY: the minute MEDIAN, which P_cost §3.2 measured to equal the fill instant, ratio 1.000) — the honest BF P1 book under MEASURED cost [sp_med] (coverage 92.9%; uncovered rows keep their booked price)
+   split    n     booked $   measured $         d$      d%   R book   R meas  % px book  % px meas
+   H1-25   19       70,800       54,748    -16,052  -22.7%   +0.756   +0.513     +2.793     +1.946
+   H2-25   15       41,481       22,553    -18,928  -45.6%   +1.109   +0.686     +4.688     +3.003
+     VAL   22       26,833       -8,045    -34,878 -130.0%   +0.376   -0.115     +1.729     +0.140
+     ALL   56      139,114       69,255    -69,859  -50.2%   +0.701   +0.313     +2.883     +1.520
+
+  >>> BF honest number moves 50.2 % (MORE than the 10 % reporting threshold)
+
+### E4 (CONSERVATIVE: the minute MEAN, ~1.9x the median on this distribution) — the honest BF P1 book under MEASURED cost [sp_mean] (coverage 92.9%; uncovered rows keep their booked price)
+   split    n     booked $   measured $         d$      d%   R book   R meas  % px book  % px meas
+   H1-25   19       70,800       53,846    -16,954  -23.9%   +0.756   +0.503     +2.793     +1.897
+   H2-25   15       41,481       22,875    -18,606  -44.9%   +1.109   +0.691     +4.688     +3.022
+     VAL   22       26,833       -9,520    -36,353 -135.5%   +0.376   -0.130     +1.729     +0.054
+     ALL   56      139,114       67,201    -71,912  -51.7%   +0.701   +0.305     +2.883     +1.474
+
+  >>> BF honest number moves 51.7 % (MORE than the 10 % reporting threshold)
+
+### E5 — HOD dry: is the imputation right at the clocks it was FIT on (09:37-14:01)?
+    09:37  measured 0.485 %  imputed 0.578 %  ratio 0.84x  OK
+    09:40  measured 0.484 %  imputed 0.578 %  ratio 0.84x  OK
+    09:45  measured 0.454 %  imputed 0.383 %  ratio 1.19x  OK
+    10:00  measured 0.387 %  imputed 0.317 %  ratio 1.22x  OK
+    11:00  measured 0.278 %  imputed 0.283 %  ratio 0.98x  OK
+    12:00  measured 0.259 %  imputed 0.283 %  ratio 0.91x  OK
+    13:00  measured 0.245 %  imputed 0.357 %  ratio 0.69x  OUTSIDE +/-25 %
+    14:00  measured 0.270 %  imputed 0.357 %  ratio 0.76x  OK
+  verdict: NOT confirmed at [('13:00', 0.6855670464076455)]
+
+### E6 — HOD at the 15:55 flat.  The contract charges the EOD leg as 0.412 x the SIGNAL-minute half-spread.
+  measured 15:55 full spread 0.172 % -> half 8.6 bps
+  the contract charges 0.412 x half of the typical SIGNAL minute (0.333 %) = 6.9 bps
+  residual +1.8 bps per force-closed trade (+0.0177 pp of price)
+  HOD force-closes 27.9 % (TRAIN) / 33.0 % (VAL) of its trades (frames13 §3.2) -> +0.49 / +0.58 bps per trade

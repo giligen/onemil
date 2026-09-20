@@ -1,0 +1,28 @@
+  GATES on 250 control keys x 3 stops:
+    x1: max |diff| = 4.441e-16
+    x2: max |diff| = 0.000e+00
+    x3: max |diff| = 0.000e+00
+    x4: max |diff| = 0.000e+00
+  ALL GATES PASS
+  arm-d controls: 288,174 over 344 sessions (TEST cut off)
+  344 sessions to walk (0 already done)
+  1/344 2025-01-10 rows so far 495
+  21/344 2025-02-10 rows so far 17,185
+  41/344 2025-03-11 rows so far 34,045
+  61/344 2025-04-08 rows so far 50,125
+  81/344 2025-05-07 rows so far 65,814
+  101/344 2025-06-05 rows so far 82,484
+  121/344 2025-07-08 rows so far 100,414
+  141/344 2025-08-05 rows so far 116,013
+  161/344 2025-09-03 rows so far 130,102
+  181/344 2025-10-01 rows so far 146,392
+  201/344 2025-10-29 rows so far 166,007
+  221/344 2025-11-26 rows so far 183,088
+  241/344 2025-12-30 rows so far 199,838
+  261/344 2026-01-29 rows so far 217,827
+  281/344 2026-02-27 rows so far 234,697
+  301/344 2026-03-27 rows so far 251,572
+  321/344 2026-04-27 rows so far 268,445
+  341/344 2026-05-26 rows so far 285,549
+  344/344 2026-05-29 rows so far 288,174
+  DONE — 288,174 rows written

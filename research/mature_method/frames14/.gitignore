@@ -1,0 +1,9 @@
+# bulk artifacts, rebuildable from the scripts in this directory; the scored CSVs and every log
+# are committed.
+#   feat_<year>.parquet  -> `python3 f44_build.py all`   (~6 min)
+#   w43.csv              -> `python3 f43_walk.py`        (~35 min, checkpointed in w43_state.json)
+#   x67.csv              -> `python3 f43.py join`        (~1 min)
+feat_*.parquet
+w43.csv
+x67.csv
+f45_bf_book_*.csv

@@ -1,0 +1,48 @@
+  panel 3,310,743 A13 name-nights | feature join 100.0%
+
+GATE A13: n=3,310,743 (frames13: 3,310,743) | gross +0.0447 % (frames13 +0.045) | net +0.0306 % (frames13 +0.0306)
+  ex-top-5 % -0.1385 % (frames13 -0.1385)
+  GATE PASSES
+
+### THE 8 SCORED CELLS — top within-day quintile of each field, A13, % of price
+
+            cell   side         n  tail rate  null p50  null p95     mean   ex5 H1   ex5 H2   ex5 VAL  ex5+exec VAL
+      V1_day_ret    top   661,124     0.0643    0.0502    0.0505   +0.041   -0.289   -0.147    -0.238        -0.606
+      V1_day_ret    bot   661,124     0.0640    0.0502    0.0505   +0.037   -0.270   -0.062    -0.230        -0.598
+    V2_day_range    top   661,124     0.0940    0.0502    0.0505   +0.045   -0.380   -0.125    -0.281        -0.649
+    V2_day_range    bot   661,124     0.0229    0.0502    0.0505   +0.019   -0.168   -0.067    -0.139        -0.507
+    V3_close_pos    top   661,024     0.0478    0.0501    0.0505   +0.013   -0.277   -0.130    -0.219        -0.587
+    V3_close_pos    bot   661,024     0.0528    0.0501    0.0505   +0.051   -0.240   -0.053    -0.215        -0.583
+           V4_rv    top   661,124     0.0683    0.0502    0.0505   +0.046   -0.345   -0.166    -0.274        -0.642
+           V4_rv    bot   661,124     0.0456    0.0502    0.0505   +0.023   -0.252   -0.064    -0.215        -0.583
+  V5_dollar_frac    top   239,756     0.0719    0.0498    0.0504   +0.056   -0.344   -0.172    -0.274        -0.642
+  V5_dollar_frac    bot   239,756     0.0474    0.0498    0.0504   +0.028   -0.258   -0.064    -0.213        -0.581
+      V6_spy_day    top   661,124     0.0526    0.0502    0.0505   +0.031   -0.277   -0.099    -0.209        -0.577
+      V6_spy_day    bot   661,124     0.0502    0.0502    0.0505   +0.033   -0.255   -0.098    -0.227        -0.595
+          V7_gap    top   661,124     0.0666    0.0502    0.0505   +0.044   -0.252   -0.145    -0.238        -0.606
+          V7_gap    bot   661,124     0.0632    0.0502    0.0505   +0.033   -0.310   -0.078    -0.208        -0.576
+    V8_hi20_prox    top   661,124     0.0315    0.0502    0.0505   +0.014   -0.201   -0.117    -0.184        -0.552
+    V8_hi20_prox    bot   661,124     0.0818    0.0502    0.0505   +0.052   -0.322   -0.080    -0.246        -0.614
+
+  cells whose TAIL RATE clears its count-matched null p95: 10 of 16
+  cells whose EX-TOP-5 % is positive on both TRAIN halves AND VAL net of the measured execution (0.368 % of price): 0 of 16
+
+  DIAGNOSTIC — PRE (2016-2024) ex-top-5 %, margin only, by cell:
+          V1_day_ret  top n= 550,683  ex5 -0.1474 %  mean +0.0431 %
+          V1_day_ret  bot n= 550,683  ex5 -0.1532 %  mean +0.0348 %
+        V2_day_range  top n= 550,683  ex5 -0.2003 %  mean +0.0436 %
+        V2_day_range  bot n= 550,683  ex5 -0.0799 %  mean +0.0253 %
+        V3_close_pos  top n= 550,583  ex5 -0.1450 %  mean +0.0155 %
+        V3_close_pos  bot n= 550,583  ex5 -0.1120 %  mean +0.0543 %
+               V4_rv  top n= 550,683  ex5 -0.1815 %  mean +0.0477 %
+               V4_rv  bot n= 550,683  ex5 -0.1142 %  mean +0.0276 %
+      V5_dollar_frac  top n= 129,315  ex5 -0.1703 %  mean +0.0735 %
+      V5_dollar_frac  bot n= 129,315  ex5 -0.0952 %  mean +0.0520 %
+          V6_spy_day  top n= 550,683  ex5 -0.1319 %  mean +0.0353 %
+          V6_spy_day  bot n= 550,683  ex5 -0.1245 %  mean +0.0371 %
+              V7_gap  top n= 550,683  ex5 -0.1448 %  mean +0.0464 %
+              V7_gap  bot n= 550,683  ex5 -0.1532 %  mean +0.0329 %
+        V8_hi20_prox  top n= 550,683  ex5 -0.1103 %  mean +0.0172 %
+        V8_hi20_prox  bot n= 550,683  ex5 -0.1673 %  mean +0.0523 %
+
+  DIAGNOSTIC — wrapper vs common on the LIQUID panel (A13 with the common filter removed): see frames13 A11/A12 — wrapper +0.0515 %, common +0.0749 %, both negative ex-top-5 % (d4 -0.1863 %).
