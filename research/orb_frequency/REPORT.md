@@ -1,496 +1,136 @@
-# ORB — the gate separation map and the frequency frontier, ranked on GREEN WEEKS
+# ORB LONG — frequency without touching selection. Cells F1a / F1b / F2-10 / F2-15 (1,274–1,277)
 
-2026-09-19. Pre-registration `PREREG.md` (written and committed **before any cell was
-scored**, commit `53a5529`). TEST seal `FREEZE.md`. **Nothing ships from this stage.**
-A survivor needs its own pre-registration and the owner's word.
+PREREG committed first (c64da1e); FREEZE.md carries the hash + input md5s. **TEST (≥ 2026-06-01)
+never scored.** Baseline `analysis_results/orb_bplus_book.csv` — 218 ranked picks, 165 fills,
+8 shared slots, $10K stage. **Reproduction gate: my exit re-sim reproduces all 165 filled book
+rows' `pnl_pct` to max |Δ| = 0.000000** (`f1.py`), so every delta below is apples-to-apples.
 
-The method is `research/bf_frequency/` applied to ORB — the study that found two broken
-bull-flag gates (`min_daily_volume`, cutting 41% of the field with negative separation;
-the conviction gate, cutting 57% with none). The trigger is
-`research/green_weeks/REPORT.md`: **ORB's flat weeks are a PICK SHORTAGE, not an exit
-failure** — 13 of 19 flat TRAIN weeks had no pick at all, 6 had only non-fills, and the
-flat-week share is identical across all 17 exit cells. Nobody had ever measured ORB's
-gates this way.
+## 1. The no-fill split — and it kills the premise of F1a/F1b
 
----
+Range = [09:30,09:35); breakout bar = first bar in [09:35,10:35) with high > range_high;
+Cap-30 = range_high × 1.0030.
 
-## 0. Read this before any number below
-
-**This instrument cannot resolve a small green-week difference.** The green-week share is a
-proportion over 53 TRAIN weeks and 22 VAL weeks. The unpaired MDE80 is **+-25.8pp on TRAIN
-and +-39.3pp on VAL**. At BF's frequency the same figure was +-9.5pp; ORB, at 2.4 picks per
-week, is **three to four times worse**. VAL alone can only refute a catastrophe.
-
-**And the green-week share carries no timing information at all.** A 2,000-draw permutation
-that shuffles each book's own P&L across its own weeks, holding picks-per-week fixed:
-
-| book | split | observed green wk % | permuted mean | permuted p5-p95 |
-|---|---|---|---|---|
-| shipped B+ | TRAIN | **34.0** | 37.5 | 32.1 - 43.4 |
-| shipped B+ | VAL | **31.8** | 36.4 | 27.3 - 45.5 |
-| catalyst veto OFF | TRAIN | **47.2** | 50.4 | 43.4 - 56.6 |
-| catalyst veto OFF | VAL | **54.5** | 52.5 | 40.9 - 63.6 |
-
-Every observed value sits **inside** its permutation band, and the shipped book sits *below*
-its own mean on both splits. **Green weeks in this book are bought with pick COUNT and
-nothing else.** No gate confers week-level timing skill. That is the same conclusion
-`bf_frequency` reached, and it is the frame for everything that follows: the only lever on
-green weeks is how many weeks the book trades in.
-
----
-
-## 1. Instrument and the reproduction gate
-
-- **Engine**: the shipped `study_orb_pipeline_static_lock.py`, replayed off a candidate
-  dump with `ORB_BT_RESIM_CACHE` (selector-only; exit physics are the dump's). Every
-  constant — z-params, quintile cutoffs, adaptive mults, veto thresholds — comes from
-  `orb.yaml` as it stands today. **Nothing was refit.** Knobs moved only through documented
-  env overrides. Production config, `orb.yaml`, caches, orders, services and crons were
-  never written; every artifact is under `research/orb_frequency/`.
-- **Reproduction gate — PASSED before the pre-registration was written**: the as-is dump at
-  `N=8`, `account = 3333.33 x 8`, `risk = 375`, Q1 on reproduces
-  `research/fuckup_audit/D1_orb/book_n8_q1on.csv` **byte-identically** —
-  **215 picks / $14,428.616990972434** (`repro_n8_q1on.csv`, `DataFrame.equals` -> True).
-- **PRIMARY fill model**: Stage Q's **measured** arm
-  (`research/fuckup_audit/Q_fill/dump_measured.csv`) — the elected stop-limit rests as a bid
-  at the cap, fills at the cap the first time the walked SIP ask reaches it before the 10:35
-  time stop, $0 and a spent slot if it never does. **Secondary bracket**: the as-is dump.
-  Every headline below is given in both; they agree on sign everywhere.
-- **Population**: 13,033 entered-inclusive candidates (7,402 modelled fills + 5,631 modelled
-  non-fills) over 427 trading days / 90 market weeks, 2025-01-02 -> 2026-09-16. Non-fill
-  picks burn a slot at $0 and stay in the book.
-- **R** = `pnl_pct / max(range_size_pct, 1.0)` — the trade's own return over its own stop,
-  taken from the candidate row, so R is invariant to the quintile mult, the per-position cap
-  and the account size. (Q_fill's published R/pick is the *mult-weighted* variant; the
-  numbers differ by the mult and rank identically.)
-- Splits: **TRAIN 2025 (53 wk)** / **VAL 2026-01..05 (22 wk)** / **TEST 2026-06+ (§9)**.
-
----
-
-## 2. PART 1 — the separation map
-
-`separation.py` -> `separation.csv`. Kept-R minus rejected-R at each gate's **own position in
-the live cascade**, per year and pooled, Welch t.
-
-| # | gate | n kept / rej | R kept | R rej | sep 2025 (t) | sep 2026 (t) | **sep pooled (t)** | verdict |
-|---|---|---|---|---|---|---|---|---|
-| S0 | composite >= 0.012082 | 7,225 / 5,808 | -0.049 | -0.026 | -0.073 (-4.02) | +0.027 (1.31) | **-0.023 (-1.68)** | wrong-signed in 2025, and **inert in the book** (§3) |
-| **S1** | **Q1 quintile filter** | **5,771 / 1,454** | **-0.061** | **+0.001** | **-0.040 (-1.32)** | **-0.086 (-1.50)** | **-0.063 (-1.96)** | **WRONG SIDE IN BOTH YEARS — removal candidate** |
-| S2 | the quintile cutoffs themselves | — | — | — | — | — | — | **no ordering at all** (below) |
-| S3 | family / super-group dedup | 5,467 / 304 | -0.062 | -0.047 | +0.127 (1.80) | -0.226 (-1.93) | -0.016 (-0.24) | sign-flips by year; a *correlation* rule, not an edge rule |
-| S4 | top-8 slot cut (rank <= 8) | 2,744 / 2,723 | -0.068 | -0.056 | +0.047 (1.28) | -0.059 (-1.59) | -0.012 (-0.47) | the rank order carries no edge (below) |
-| S5 | PDR veto (prev-day range > 11.0) | 871 / 1,873 | +0.087 | -0.141 | +0.279 (3.51) | +0.169 (2.62) | **+0.228 (4.43)** | **real, era-consistent — earns its keep** |
-| S6 | G1 fingerprint (rv20 >= 7.106 & pdr >= 9.226) | 674 / 197 | +0.122 | -0.031 | +0.241 (1.65) | +0.044 (0.33) | +0.153 (1.53) | positive both years, weak in 2026 |
-| **S7** | **range-size veto (range <= 2.221% -> cut)** | **594 / 80** | **+0.095** | **+0.325** | **-0.261 (-0.56)** | **-0.156 (-0.51)** | **-0.231 (-0.76)** | **WRONG SIDE IN BOTH YEARS — removal candidate** |
-| S8 | catalyst veto (news or cohort >= 2) | 210 / 384 | +0.303 | -0.019 | +0.423 (2.44) | +0.224 (1.40) | **+0.323 (2.75)** | **real, era-consistent — earns its keep** |
-| S9/S10 | touchgo Rule M / Rule D | — | — | — | — | — | — | exit rules — §7 |
-| S11 | **WHOLE STACK picked vs rejected** | 210 / 12,823 | +0.303 | -0.044 | +0.483 (3.19) | +0.211 (1.42) | **+0.347 (3.27)** | intact |
-
-**Two gates come out on the wrong side in BOTH years — exactly the shape BF's two did.**
-
-### S1 — the Q1 filter cuts the quintile that performs *best*
-The bottom composite quintile it drops returns **+0.001 R** against the **-0.061 R** it
-keeps, in 2025 **and** in 2026. It removes 1,454 of 7,225 (20%) of the post-threshold field.
-The sign survives the tails: ex-top-5% R, Q1-rejected vs kept, is **-0.193 vs -0.275 (2025)**
-and **-0.116 vs -0.183 (2026)**.
-
-**The mechanism, disclosed — part of it is the fill rate.** The composite predicts *whether
-the stop-limit fills* far better than it predicts the trade: fill rate runs monotonically
-**Q1 54.2% / Q2 61.2% / Q3 62.4% / Q4 71.0% / Q5 83.7%**, and under the entered-inclusive
-convention a non-fill books **R = 0**, which beats the average filled ORB pick. So some of
-Q1's per-pick advantage is simply that Q1 picks more often do nothing.
-
-**But the finding does not depend on it.** Conditioning on fills only, mean R by quintile:
-
-| fills only | Q1 | Q2 | Q3 | Q4 | Q5 |
-|---|---|---|---|---|---|
-| 2025 | **-0.137** | -0.195 | -0.166 | -0.171 | -0.133 |
-| 2026 | **+0.138** | -0.009 | -0.015 | +0.013 | -0.035 |
-
-Q1 is mid-pack in 2025 and **the best quintile in 2026, by a wide margin**, on filled trades.
-The Q1 filter is not removing bad trades; it is removing picks that were less likely to be
-ordered at all, and among those that *were* ordered it removes the best ones in 2026. Either
-way — per pick or per fill — **there is no year in which the Q1 filter is on the right side.**
-
-### S2 — the quintiles do not order anything
-Mean R by quintile, post-threshold, post-Q1: **Q5 -0.069 / Q4 -0.054 / Q3 -0.058 /
-Q2 -0.065** (n ~ 1,420 each). There is no monotone relation between the composite quintile
-and R. The quintile is still the *primary sort key* of the day's ranking **and** the driver
-of the adaptive sizing mult.
-
-### S4 — and neither does the rank
-Mean R by rank band, post-dedup: **rank 1-3 -0.123 / rank 4 -0.031 / 5-6 -0.056 /
-7-8 +0.022 / 9-12 -0.112 / 13-16 -0.125 / 17+ -0.015.** The **best-ranked band is the
-worst-performing one.** Whatever the shipped book's edge is, the composite ranking is not
-where it comes from — it comes from the four post-ranking vetoes (S5-S8), which is why the
-whole stack separates at t = 3.3 while every layer above it does not.
-
-### The BF diagnostic — the sizer was already handling it
-BF's broken gate hid behind the sizer. So does ORB's:
-
-| gate | median $ risk kept | median $ risk rejected |
-|---|---|---|
-| S1 Q1 filter | $102 | **$140** |
-| **S7 range-size veto** | **$135** | **$60** |
-| S5 PDR veto (a real gate) | $125 | $83 |
-| S8 catalyst veto (a real gate) | $137 | $133 |
-
-The range-size veto cuts names the risk-parity sizer already puts **less than half** the
-dollar risk on: a tight opening range means a tight stop, `risk/stop%` slams into the
-per-position cap, and the realised dollar risk is $60 instead of $135. **The gate is
-removing trades the book was going to bet half as much on anyway** — the identical mechanism
-BF found on ADV20.
-
-### What could not be measured, said plainly
-- The **universe screens** (`prev_volume >= 500K`, the $3-30 price band, the 15K RTH-9:35
-  range-computability floor) are applied **upstream in `study_orb_broad.py`**. The candidate
-  dump has **zero rejected rows** on them, so their separation is **unmeasured here** and
-  measuring it needs a features rebuild. They are logged as a defect of coverage, exactly as
-  `bf_decay` had left BF's ADV20 gate unmeasured until `bf_frequency` measured it.
-- The **spread gate (300 bps)** is a live entry-time rule with **no BT counterpart at all**.
-  It cannot be measured on this instrument in either direction.
-- The cascade reconstruction lands on **210 picks against the book's 215** (97.7%). The
-  5-row gap is the pipeline's interleaved dedup/top-K loop (a duplicate family at a good
-  rank does not consume a slot, promoting a lower-ranked name), which the map applies as two
-  sequential steps. It does not affect any separation sign.
-
-### The cascade, per week
-```
-144.8 candidates/wk raw
- ->  80.3  composite threshold
- ->  64.1  Q1 filter            (-20%)   <- wrong side in both years
- ->  60.7  family/super dedup
- ->  30.5  top-8 slot cut
- ->   9.7  PDR veto             (-68%)   <- real
- ->   7.5  G1 fingerprint       (-23%)   <- real, weak in 2026
- ->   6.6  range-size veto      (-12%)   <- wrong side in both years
- ->   2.3  catalyst veto        (-65%)   <- real
-```
-**The pick shortage is two gates: the prev-day-range pair (PDR & G1) takes 30.5/wk down to
-7.5, and the catalyst veto takes 6.6 down to 2.3. Together they are 92% of the cut. Both
-have POSITIVE, era-consistent separation.** That is the whole tension of this study: the
-gates that cause the flat weeks are the gates that work.
-
----
-
-## 3. Two structural facts the ladders exposed
-
-**(a) The composite threshold is INERT.** `L_thr05` (threshold -> -0.5) and `L_thrall`
-(threshold off) are **byte-identical to the shipped book** — 105 TRAIN picks, $5,673. Q1 is
-`composite < 0.1059`, far above the threshold `0.0121`, so once Q1 has run the threshold
-never binds on anything that could win a slot. D1 said this about the pool; it is also true
-of the book. **`filter.threshold` is a dead knob at 8 slots.**
-
-**(b) The PDR veto is almost entirely REDUNDANT with the G1 veto.** PDR at 11.0 -> 8.0 -> 6.0
--> OFF are **all three identical** (117 TRAIN picks, $4,805). G1 keeps only `pdr >= 9.226`,
-and it runs *after* PDR, so relaxing PDR below 9.226 adds nothing. The whole PDR ladder is
-worth **+0.23 picks/week and -$868 on TRAIN**. The prev-day-range rule that actually binds is
-**G1's 9.226 leg**, not PDR's 11.0. Two shipped vetoes, one effective threshold.
-
-The same collapse hits the range-size ladder: 2.221 -> 1.5 -> 1.0 -> off are all identical
-(108 TRAIN picks), because every selected pick it rejects has `range_size_pct <= 1.0`, i.e.
-it sits on the `MIN_STOP_PCT` floor.
-
----
-
-## 4. PART 2 — the frontier, ranked on green weeks
-
-Measured fill model, N = 8. `grid_meas.csv` / `grid_asis.csv`. TR = TRAIN (53 wk),
-VA = VAL (22 wk). **Flat-week share is beside green-week share on every row, as asked.**
-
-| cell | TR pk/wk | VA pk/wk | **TR green%** | **VA green%** | TR flat% | VA flat% | TR streak | VA streak | TR $ | VA $ | TR R/pk | VA R/pk |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| **shipped B+ (F0)** | 1.98 | 2.41 | **34.0** | **31.8** | 37.7 | 22.7 | 3 | 3 | 5,673 | 3,939 | 0.410 | 0.469 |
-| Q1 filter OFF | 2.43 | 2.77 | 35.8 | 40.9 | 28.3 | 22.7 | 3 | 2 | 5,312 | 8,245 | 0.31 | 0.94 |
-| PDR 11->8 / 11->6 / OFF (identical) | 2.21 | 2.77 | 34.0 | 31.8 | 30.2 | 22.7 | 4 | 3 | 4,805 | 3,641 | 0.31 | 0.37 |
-| G1 fingerprint OFF | 2.45 | 3.41 | 35.8 | 36.4 | 26.4 | 9.1 | 5 | 4 | 4,791 | 3,450 | 0.29 | 0.26 |
-| range-size 2.221->1.5 / ->1.0 / OFF (identical) | 2.04 | 2.45 | 34.0 | 31.8 | 37.7 | 22.7 | 3 | 3 | 5,568 | 3,873 | 0.38 | 0.44 |
-| **catalyst veto OFF** | **5.32** | **8.05** | **47.2** | **54.5** | **7.5** | **4.5** | 4 | 2 | **6,515** | **4,287** | 0.175 | 0.149 |
-| composite threshold -0.5 / OFF | 1.98 | 2.41 | 34.0 | 31.8 | 37.7 | 22.7 | 3 | 3 | 5,673 | 3,939 | 0.410 | 0.469 |
-| F1 = -range-size | 2.04 | 2.45 | 34.0 | 31.8 | 37.7 | 22.7 | 3 | 3 | 5,568 | 3,873 | 0.38 | 0.44 |
-| F2 = -range-size, PDR 8 | 2.26 | 2.82 | 34.0 | 31.8 | 30.2 | 22.7 | 4 | 3 | 4,700 | 3,576 | 0.29 | 0.35 |
-| F3 = -range-size -G1 | 2.64 | 3.59 | 37.7 | 36.4 | 22.6 | 9.1 | 5 | 4 | 4,643 | 3,726 | 0.25 | 0.30 |
-| **F4 = -range-size -G1 -PDR** | 9.26 | 11.18 | **41.5** | **31.8** | **1.9** | **4.5** | 4 | 3 | 1,888 | 3,845 | 0.025 | 0.095 |
-| F5 = F4 - catalyst | 28.06 | 31.68 | 39.6 | 54.5 | 0.0 | 0.0 | **10** | 3 | **-5,555** | 2,219 | -0.07 | 0.01 |
-| **F6 = CEILING (every gate off)** | 37.19 | 37.09 | 35.8 | 63.6 | 0.0 | 0.0 | 8 | 2 | **-7,268** | 7,990 | -0.06 | 0.06 |
-
-### The structural ceiling, explicitly
-With **every** gate off (F6), the book takes **3,387 picks over 90 weeks = 37.6/week**
-against a hard slot ceiling of `8 slots x 427 days / 90 weeks = 38.0/week`. **F6 is at 99%
-of the slot ceiling: with the gates open the book is slot-bound, not candidate-bound**, and
-there are 144.8 raw candidates a week behind it. This is ORB's analogue of BF's 44/month raw
-ceiling — and like BF's, **the frontier bends before it**: F6 loses **-$7,268 on TRAIN** and
-its flat weeks are replaced by red ones (35.8% green, 8-week red streak), because the raw
-ORB breakout is edgeless (`orb_veto_study`: 2025 -0.18R, 2026 -0.04R). Flat weeks are not
-free to remove; past a point they convert to red, not green.
-
-### Ranked on the owner's metric (pooled TRAIN+VAL green-week %)
-
-| rank | cell | pooled green% | TR/VA flat% | survives PREREG §7? | failed rule |
-|---|---|---|---|---|---|
-| 1 | **catalyst veto OFF** | **49.3** | 7.5 / 4.5 | **no** | 5 (worst week) |
-| 2 | F6 ceiling | 44.0 | 0 / 0 | no | 3, 4, 5 |
-| 2 | F5 | 44.0 | 0 / 0 | no | 3, 4, 5 |
-| 4 | **F4** | **38.7** | 1.9 / 4.5 | **YES — the only survivor** | — |
-| 5 | F3 | 37.3 | 22.6 / 9.1 | no | 3 (red streak) |
-| 5 | Q1 filter OFF | 37.3 | 28.3 / 22.7 | no | 2 (flat week) |
-| 7 | G1 OFF | 36.0 | 26.4 / 9.1 | no | 3 |
-| 8 | everything else (PDR·, range-size·, threshold·) | 33.3 | >= 30.2 / 22.7 | no | 1, 2 |
-| — | shipped B+ baseline | 33.3 | 37.7 / 22.7 | — | — |
-
-**The pre-committed rule selects F4** (drop the range-size veto, the G1 fingerprint and the
-PDR veto; keep Q1, the ranking and the catalyst veto). And **F4 does not clear the claim
-bar**: PLAN §1 G1 asks for t >= 2 on TRAIN and F4's is **t = 0.57** (R/pick +0.025,
-**ex-top-5% R/pick -0.153**). Its green-week gain over the baseline is **+7.5pp TRAIN and
-0.0pp VAL**, against an MDE80 of +-25.8pp and +-39.3pp. **F4 is a maximum over a 45-cell
-grid, not a discovery**, and it costs two thirds of TRAIN's dollars ($5,673 -> $1,888) and
-triples the drawdown (-$560 -> -$1,469) to buy it.
-
-### The cell that actually matters, and why the rule blocked it
-**Dropping the catalyst veto is the only single change that moves every axis the owner named
-in the right direction — and it raises total P&L on both splits under both fill models.**
-
-| | TRAIN green% | VAL green% | TRAIN flat% | VAL flat% | TRAIN $ | VAL $ |
-|---|---|---|---|---|---|---|
-| shipped B+, measured | 34.0 | 31.8 | 37.7 | 22.7 | 5,673 | 3,939 |
-| catalyst OFF, measured | **47.2** | **54.5** | **7.5** | **4.5** | **6,515** | **4,287** |
-| shipped B+, as-is | 37.7 | 31.8 | 35.8 | 22.7 | 6,662 | 6,386 |
-| catalyst OFF, as-is | **45.3** | **63.6** | **7.5** | **4.5** | **8,307** | **7,293** |
-
-It fails the pre-committed rule on **one** clause and **one** split: worst TRAIN week
-**-$895** against the allowance of 1.5 x (-$418) = **-$628**. TRAIN MDD also goes
--$560 -> -$2,639 and green months 75% -> 58%. VAL passes every clause.
-
-So the honest sentence is: **the catalyst veto buys R/pick (+0.32 R, t 2.75, both years) and
-sells green weeks, flat weeks and total dollars.** Which of those the book should want is
-precisely the question the owner answered on 9/19 — green weeks — and the pre-committed rail
-that blocked it is a drawdown rail, not an edge rail. **It is not this stage's
-recommendation because the rule said no, and the rule was written first.** It is the
-hypothesis the next stage must pre-register.
-
-### Post-hoc combinations — reported, NOT eligible
-Declared after the separation map was read, so they are labelled post-hoc and cannot be
-recommended:
-
-| post-hoc cell | TR green% | VA green% | TR flat% | VA flat% | TR $ | VA $ | TR R/pk | VA R/pk |
-|---|---|---|---|---|---|---|---|---|
-| Q1 off + range-size off (the two wrong-side gates) | 35.8 | 40.9 | 28.3 | 22.7 | 5,207 | 8,180 | 0.290 | 0.905 |
-| · as-is bracket | 39.6 | 40.9 | 26.4 | 22.7 | 6,196 | **10,628** | 0.337 | 1.221 |
-| catalyst off + Q1 off + range-size off | 47.2 | **63.6** | 1.9 | 4.5 | 7,059 | 9,531 | 0.131 | 0.311 |
-| · as-is bracket | 41.5 | 63.6 | 1.9 | 4.5 | 8,603 | **12,537** | 0.155 | 0.424 |
-
-Dropping only the two wrong-side gates is nearly free on TRAIN and large on VAL — but VAL is
-a 22-week, 62-pick window whose top-5 picks are 103% of its P&L. **Not a finding. A
-hypothesis for a pre-registered test.**
-
-### Tail concentration — diagnostic only, never a penalty (owner's rule)
-Top-5 picks as a share of split P&L: shipped B+ **54.8% TRAIN / 118.2% VAL**; catalyst OFF
-**59.5% / 111.7%**; F4 **181.2% / 121.2%**. Every ORB book at this size is tail-carried —
-removing gates does not reduce the concentration, it adds losers underneath it. Reported
-because it was asked for; it did not enter the ranking.
-
----
-
-## 5. PART 3 — slots, re-read on green weeks
-
-`slots.py` -> `slots.csv`. Measured fill model. Per-position size is held at $3,333.33 for
-every N (the D1 convention), so only the slot count moves.
-
-| config | N | TR pk/wk | **TR green%** | **VA green%** | TR flat% | VA flat% | TR streak | TR worst wk | TR MDD | TR $ | VA $ | TR R/pk | max picks in a day | BP bind @ live $66K | capital used |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| shipped B+ | **3** | 0.89 | **22.6** | **18.2** | **58.5** | **50.0** | 2 | -357 | -617 | 2,904 | 1,938 | 0.401 | 2 | 0% | $6,667 |
-| shipped B+ | **8** | 1.98 | **34.0** | **31.8** | 37.7 | 22.7 | 3 | -418 | -560 | 5,673 | 3,939 | 0.410 | 4 | 64.7% | $13,333 |
-| shipped B+ | 12 | 2.43 | 34.0 | 31.8 | 32.1 | 22.7 | 3 | -532 | -1,031 | 5,730 | 4,184 | 0.315 | 5 | 91.4% | $16,667 |
-| shipped B+ | 16 | 2.62 | 32.1 | 36.4 | 30.2 | 18.2 | 4 | -532 | -1,535 | 5,098 | 3,551 | 0.261 | 6 | 99.3% | $20,000 |
-| catalyst OFF | 3 | 2.49 | 39.6 | 45.5 | 18.9 | 4.5 | 5 | -824 | -1,825 | 2,907 | 2,619 | 0.143 | 3 | 0% | $10,000 |
-| **catalyst OFF** | **8** | 5.32 | **47.2** | **54.5** | 7.5 | 4.5 | 4 | -895 | -2,639 | **6,515** | **4,287** | 0.175 | 8 | 61.5% | $26,667 |
-| catalyst OFF | 12 | 6.57 | **49.1** | 54.5 | 5.7 | **0.0** | **7** | -1,009 | -3,862 | 5,522 | 3,731 | 0.119 | 12 | 90.4% | $40,000 |
-| catalyst OFF | 16 | 7.38 | 47.2 | 54.5 | 5.7 | 0.0 | 8 | -1,192 | -4,321 | 4,035 | 3,115 | 0.081 | 14 | 98.8% | $46,667 |
-| F4 | 3 | 4.32 | 26.4 | 31.8 | 5.7 | 9.1 | 8 | -435 | -1,383 | 303 | 372 | -0.001 | 3 | 13.4% | $10,000 |
-| F4 | 8 | 9.26 | 41.5 | 31.8 | 1.9 | 4.5 | 4 | -543 | -1,469 | 1,888 | 3,845 | 0.025 | 7 | 71.2% | $23,333 |
-| F4 | 12 | 11.70 | 39.6 | 36.4 | 1.9 | 0.0 | 4 | -592 | -2,410 | 2,097 | 3,757 | 0.011 | 9 | 93.3% | $30,000 |
-| F4 | 16 | 12.66 | 35.8 | 36.4 | 1.9 | 0.0 | 4 | -863 | -2,847 | 1,624 | 3,200 | 0.006 | 11 | 99.6% | $36,667 |
-
-**The finding: the biggest green-week move in this entire study has already been made.**
-Going 3 -> 8 slots on the shipped gate set is **+11.4pp green TRAIN / +13.6pp VAL** and
-**-20.8pp / -27.3pp flat** — the pre-9/18 3-slot book left **58.5% of TRAIN weeks and 50% of
-VAL weeks completely empty**. Everything past 8 is flat-to-negative on green weeks and
-monotonically worse on drawdown: 8 -> 12 -> 16 buys 0 / -1.9pp green on TRAIN while the MDD
-goes -$560 -> -$1,031 -> -$1,535. **D1's "edge gone by rank 9" holds on the green-week metric
-too** — more slots do not convert flat weeks to green, because at the shipped gate set there
-are no candidates left to fill them (§2: 2.3 post-veto picks/week against 8 slots x 5 days).
-
-**Slots are not ORB's lever. Gates are.** The one place slots still bite is *with* a gate
-removed: catalyst-OFF at 12 slots reaches 49.1% / 54.5% green and **zero flat VAL weeks** —
-at a 7-week TRAIN red streak and a -$3,862 drawdown.
-
-**Buying power.** At the invariant $3,333.33 cap the per-position ceiling binds on **100% of
-picks at every N** — D1's finding, reconfirmed: `sizing.risk_per_trade_usd: 375` is an inert
-knob and the real sizing lever is `account_budget_usd / max_concurrent`. Against the **live
-~$66K account** the cap binds on **0% at N=3, ~62-71% at N=8, ~90-93% at N=12 and ~99% at
-N=16** — above 8 slots the account itself becomes the sizer. Capital actually deployed
-(max picks in one day x per-position cap) never exceeds **$26.7K at the shipped gate set and
-at catalyst-OFF/8 slots**, and reaches $40-47K only at 12-16 slots with the catalyst veto
-off. ORB's current `account_budget_usd: 26,666.67` across 8 is exactly the capital the
-catalyst-OFF 8-slot book would need.
-
----
-
-## 6. Multiplicity
-
-**45 pipeline runs, 90 scored cells on TRAIN+VAL, plus ~36 descriptive separation cells and
-3 exit walks.** Under a pure null the expected largest |t| over 45 cells is ~ 2.8-3.0.
-**Every "best" point in this report is a maximum over that grid, not a discovery.** No
-per-cell p-value was treated as evidence on its own; only the §7 rule of `PREREG.md`
-selected, and its survivor fails the claim bar. Zero thresholds, z-params, quintile cutoffs
-or adaptive mults were fitted anywhere in this stage.
-
----
-
-## 7. Touchgo Rule M and Rule D
-
-Rules M and D are **exit** rules: they change the P&L of fills that already happened and
-**cannot** change the number of picks, so they cannot move the flat-week share.
-`research/green_weeks/REPORT.md` established this empirically — ORB's flat-week share is
-identical across all 17 exit cells it tested. Their counterfactual needs a full bar-walk
-(`walk_touchgo.sh`). **That walk does not fit inside this node's memory rail**: under
-`ulimit -v 3000000` it raised `numpy._core._exceptions._ArrayMemoryError` while building the
-per-symbol bar frames (D1's own walk ran under a 5.2 GB rail). The counterfactual is
-therefore **NOT MEASURED in this stage** — said plainly rather than estimated — and the
-walks were killed and their partial outputs deleted. What can be said without the walk is
-descriptive only (§9a). **They are not part of the recommendation either way**, and no
-frontier point in §4 depends on them.
-
----
-
-## 8. THE RECOMMENDATION
-
-**Two ORB gates sit on the wrong side in both years and are defects to be fixed on their own
-terms. But on this stage's pre-committed rule NOTHING in the declared grid earns a ship —
-and the honest reading is that ORB's flat weeks are NOT irreducible: they are bought back by
-dropping the catalyst veto, at a drawdown cost the pre-committed rail refused.**
-
-In priority order:
-
-1. **The rule's survivor is F4** (drop range-size + G1 + PDR). Reported as the pre-committed
-   outcome, and **it should not ship**: t = 0.57 on TRAIN, ex-top-5% R/pick -0.153,
-   +7.5pp / 0.0pp green weeks inside a +-26pp / +-39pp MDE, at 67% of TRAIN's dollars.
-2. **The single most informative cell is `catalyst veto OFF`**: 34.0 -> 47.2% green TRAIN and
-   31.8 -> 54.5% green VAL, flat 37.7 -> 7.5% and 22.7 -> 4.5%, **with total P&L up on both
-   splits under both fill models**. It fails one pre-committed clause on one split (worst
-   TRAIN week -$895 vs -$628 allowed; TRAIN MDD -$560 -> -$2,639). **This is the next
-   pre-registration**, and it needs a drawdown-shaped mitigation declared in advance — the
-   obvious one being a *partial* catalyst rule (veto newsless-and-alone picks only below a
-   named liquidity or range floor) rather than the all-or-nothing switch.
-3. **The two wrong-side gates — the Q1 quintile filter and the range-size veto — should be
-   re-examined on their own terms**, not for frequency (range-size is worth 0.06 picks/week,
-   Q1 0.45) but because **they cut the wrong names**: Q1 drops the quintile with the *best*
-   mean R in both years, and the range-size veto cuts trades the sizer already bets half as
-   much on. Neither is a frequency lever; both are defects.
-4. **Slots are settled.** 3 -> 8 was the right call and 8 is the right number on this gate
-   set. Do not go to 12 or 16: no green weeks, 2-3x the drawdown, and at the live $66K
-   account 90-99% of positions become account-capped.
-5. **Two knobs are dead and should be documented as such**: `filter.threshold` is inert at 8
-   slots (Q1 sits far above it), and `filter.prev_day_range_veto` at 11.0 is ~97% redundant
-   with the G1 veto's 9.226 leg. Carrying both as separate shipped rules is exactly the
-   "accidental rule" the machine-rules doctrine forbids.
-
-**The frame the owner should hear first**: the permutation test says ORB's green-week share
-is fully explained by its pick count. There is no week-timing skill to find in this book.
-**Green weeks can only be bought with picks; ORB's gates are what withhold the picks; and the
-two gates that withhold the most (the prev-day-range pair and the catalyst veto) are the two
-with the strongest era-consistent edge.** That is a genuine trade-off, not a bug — and it is
-why "more green weeks" and "more R per pick" cannot both be maximised on this universe at
-this book size.
-
----
-
-## 9. TEST — the sealed split
-
-Sealed per `FREEZE.md`; opened once, after §8 was committed at `a12bc6e`, for exactly the
-two cells the pre-registration named: the shipped B+ baseline and the rule's survivor.
-**TEST is 16 weeks and 57 baseline picks; its green-week MDE80 is +-38.6pp. It cannot
-select anything and it did not.**
-
-| cell | fill model | picks/wk | **green%** | **flat%** | red streak | worst wk | MDD | $ | R/pick | ex-top5% R | t |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| shipped B+ (F0) | measured | 3.56 | **18.8** | 31.2 | 2 | -315 | -667 | **+685** | +0.062 | -0.104 | 0.49 |
-| shipped B+ (F0) | as-is | 3.56 | 37.5 | 18.8 | 2 | -315 | -515 | +1,380 | +0.166 | +0.005 | 1.26 |
-| F4 (the survivor) | measured | 10.81 | **37.5** | **0.0** | 3 | -698 | -1,225 | **-569** | -0.057 | -0.198 | -0.96 |
-| F4 (the survivor) | as-is | 10.81 | 43.8 | 0.0 | 3 | -698 | -1,173 | +101 | -0.026 | -0.164 | -0.42 |
-
-**TEST reproduces the study's central trade-off without ambiguity**: F4 **doubles the
-green-week share (18.8 -> 37.5%) and removes every flat week (31.2 -> 0.0%)** — and **turns
-the book negative** (+$685 -> -$569 measured; +$1,380 -> +$101 as-is). It is the §4 result
-again on a window nobody looked at.
-
-Two further honest observations on this split, neither of which changes §8:
-* The **shipped** book itself is close to edgeless on TEST under the measured fill model
-  (R/pick +0.062, ex-top-5% **-0.104**, t 0.49). The 2026-06+ era is the weakest of the
-  three for ORB in every configuration tested here.
-* F4's TEST result is **worse than its VAL result**, which is the ordinary decay pattern for
-  a cell selected as the maximum of a 45-cell grid. The recommendation in §8 — do not ship
-  F4 — stands, and TEST reinforces it rather than having chosen it.
-
-### 9a. Touchgo — the descriptive row (no counterfactual)
-
-The shipped B+ book, measured fill model: 215 picks / 162 fills. Exit mix and mean R:
-
-| exit reason | n | mean R | $ |
+| class | all | TRAIN | VAL |
 |---|---|---|---|
-| `scale_eod` | 26 | **+3.540** | +13,139 |
-| `eod` | 19 | +0.849 | +2,569 |
-| `scale_lock` | 11 | +0.534 | +810 |
-| `lock` | 14 | +0.315 | +756 |
-| **`tag_bb` (touchgo Rule M)** | **46** | **-0.157** | **-1,041** |
-| **`tag_b1` (touchgo Rule D)** | **0** | — | — |
-| `stop` | 46 | -0.865 | -5,935 |
+| (i) range_high **never broken** in 60 min | **53 (24.3%)** | 21 | 13 |
+| (ii) broken, breakout bar **opened above Cap-30** (gap-through) | **4 (1.8%)** | **0** | 2 |
+| (iii) broken, opened at/below Cap-30 — legitimate fill | 161 (73.9%) | 84 | 38 |
 
-**Rule D never fires in this book.** Zero of 162 fills exit `tag_b1` — the rule is inert at
-the shipped 8-slot gate set and has been carrying config surface, tests and a live code path
-for nothing. That is a fact, not an inference, and it needs no walk.
+Both consequences were declared in PREREG §3 *before* scoring:
 
-Rule M fires on **28% of fills** (46 of 162; 18 in 2025 at mean R -0.057, 28 in 2026 at
--0.221) against +0.668 / +0.692 for every other exit. **This is not evidence for or against
-Rule M**: the counterfactual for those 46 trades is unknown, and the only comparable bucket —
-`stop`, at -0.865 R — suggests Rule M may well be cutting losses it was designed to cut. The
-walk that would settle it is the one this node could not run.
+1. **Every `no_fill` row in the shipped book is class (i).** The BT entry model
+   (`study_orb_features.py:636` → `simulate_orb_trade(entry_mode='touch')`) fills on ANY bar whose
+   high exceeds range_high, at range_high × 1.003, **with no cap check**. The no-fill mass is not
+   "the limit was too tight" — it is "the 5-min high was never touched in the next hour".
+   **The cap is not the frequency constraint. The trigger is.**
+2. The book is mildly OPTIMISTIC on the 4 class-(ii) picks. Honest-30bps baseline **B30** reprices
+   them: VAL $6,387.04 → **$6,487.19** (+$100.15; MST 2026-02-13 −3.00% → $0); TRAIN unchanged.
+   The optimism *cost* money — it was filling a loser.
 
----
+**Independent confirmation from quotes:** `orb_multiwindow/REPORT.md` §6 (Stage Q, 9/18) measured
+NBBO at the trigger — ask > cap on **14.4%** of fills, **92% of those still fill at the cap, median
+21 s later** ⇒ ~1.2% truly lost. My bar-based 1.8% agrees in magnitude.
 
-## 10. Caveats
+## 2. F1a — widen the cap to 60 bps on gap-through picks
 
-1. **Power.** 53 TRAIN and 22 VAL weeks at 2.4 picks/week. Unpaired green-week MDE80
-   +-25.8pp / +-39.3pp. Nothing in §4 outside the catalyst row exceeds it.
-2. **Relative tool, never a forecast.** The ORB pipeline at $10K-stage sizing is a relative
-   instrument (CLAUDE.md standing rule). No dollar figure here is a projection.
-3. **Both fill models are simulations.** Stage Q's measured arm walked the real SIP quote
-   path for the 1,040 flagged orders and matched the live account's entry microstructure to
-   a couple of points, but it is still a model. As-is and measured bracket every headline.
-4. **The universe screens and the live spread gate are unmeasured** (§2). The separation map
-   is complete only for the gates that live *inside* the candidate population.
-5. **Exit rules are out of scope** beyond §7; `green_weeks/REPORT.md` already refuted the
-   exit thesis for ORB's flat weeks.
-6. **2026-09 is a partial month** and ORB has been paused (`strategy.enabled: false`) since
-   9/14, so its 2026-09 picks are BT-only.
-7. **The post-hoc combinations in §4 are post-hoc.** They were formed after reading the
-   separation map and are reported as hypotheses, never as results.
-8. **No independent rebuild of the pipeline was made** — the instrument IS the shipped
-   pipeline, byte-reproducing an already-independently-checked book (D1 -> Stage Q). The
-   separation map's cascade reconstruction is the one piece of new code that re-derives
-   shipped logic, and it agrees with the book to 210/215 picks (§2).
+After B30 the only unfilled picks are the two that opened above Cap-60 too (MST 87.2 bps;
+AAOG 65.4 bps, TEST). WNW (45.1) and AAOX (33.7) already fill under B30 — Cap-60 only makes their
+fill *worse*.
 
-## 11. Artifacts
+| split | added | net R | t | ex-top5% | fills/wk | stacked $ | stacked MDD |
+|---|---|---|---|---|---|---|---|
+| TRAIN | **0** | — | — | — | 1.65 → 1.65 (+0%) | 6,662.40 → 6,662.40 | −642 → −642 |
+| VAL | **0** | — | — | — | 2.02 → 2.02 (+0%) | 6,487.19 → 6,482.24 (−$4.95) | −489 → −489 |
 
-```
-research/orb_frequency/
-  PREREG.md FREEZE.md REPORT.md
-  repro.sh repro_n8_q1on.csv        the reproduction gate (byte-identical to D1)
-  separation.py separation.csv      PART 1
-  run_grid.py                       every cell (45 runs)
-  score.py                          the owner's metric, TEST-sealed
-  analyse.py grid_meas.csv grid_asis.csv survival.csv
-  slots.py slots.csv                PART 3
-  walk_touchgo.sh dump_tg*.csv      the exit walks (§7)
-  book_*.csv monthly_*.csv log_*.txt
-```
+$50K stage = ×5 on every $ figure (the per-position cap binds on ~100% of picks); no sign changes.
+**VERDICT: NO GO — no population.** MDE undefined at n=0; the cohort that could *ever* be affected
+is 4 picks in 21 months (0 in TRAIN) — ≤ ~2 extra fills per 21 months vs a +30% fills/week bar.
+
+## 3. F1b — passive re-arm at range_high after a gap-through
+
+Resting limit BUY at range_high (zero entry premium), live to 10:35, fills on a later bar with
+low ≤ range_high. Adds exactly what B30 leaves unfilled: **TRAIN n=0, VAL n=1.**
+
+| split | added | net R | t | ex-top5% | fills/wk | stacked $ | stacked MDD |
+|---|---|---|---|---|---|---|---|
+| TRAIN | 0 | — | — | — | 1.65 → 1.65 | 6,662.40 → 6,662.40 | −642 |
+| VAL | 1 | **−0.255** | n/a (n=1) | −0.255 | 2.02 → 2.07 (+2.6%) | 6,487.19 → **6,464.50** (−$22.69) | −489 → −489 |
+
+**MDE:** no t at n=1; with the cohort's sd ≈ 0.45 R the SE is 0.45 R ⇒ smallest detectable effect
+at t=2 is **+0.90 R/trade**, 6× the ship bar. A power failure, not a measured negative.
+
+### F1b deciding table (the F52 adverse-selection rule)
+TEST rows *italic* — shown for cohort completeness, used in **no** decision (PREREG §10 disclosure).
+
+| pick | split | gap bps | book (cap-30, optimistic) | B30 | F1a @cap-60 | F1b re-arm @range_high |
+|---|---|---|---|---|---|---|
+| MST 2026-02-13 | VAL | 87.2 | −3.005% | no fill | no fill | **−0.681%** |
+| WNW 2026-05-21 | VAL | 45.1 | −1.523% | −1.523% | −1.671% | (−2.609%) |
+| *AAOG 2026-07-09* | *TEST* | *65.4* | *+0.035%* | *+0.035%* | *no fill* | *(+2.185%)* |
+| *AAOX 2026-07-09* | *TEST* | *33.7* | *−0.256%* | *−0.256%* | *−0.293%* | *(−4.753%)* |
+
+VAL: the one re-armed fill (−0.681%) BEAT its gap-through counterfactual (−3.005%) — **no adverse
+selection detected**, the chase-guard-style limit got the better price. n=1 supports nothing.
+**VERDICT: NO GO — underpowered; fails criteria 1, 2, 3, 5, 7.**
+
+## 4. F2-10 (W=10) — run fresh here; and F2-15, already run 9/18
+
+W=10 built with the shipped plumbing (`ORB_RANGE_MINUTES`), full feature regen into
+`research/orb_multiwindow/w10/`, TRAIN-refit z-params/cutoffs, `combine.py` for the 8 shared slots
++ the shipped veto chain, symbol-level overlap, no refill. **New: the range-size veto does NOT
+transfer to W=10** — worst quintile Q2 in 2025, Q1 in 2026, so under the V1 rule it is not adopted
+at W=10 (it did transfer at W=15/30). Combined book 232 picks = 169 fills, $13,349.
+
+| cell | split | added picks | fills | added R/pick | t | MDE@t2 | book picks vs W5 |
+|---|---|---|---|---|---|---|---|
+| **5+10 (F2-10)** | TRAIN | 8 | 6 | **−0.329** | **−2.67** | +0.246 R | +7.3% |
+| **5+10 (F2-10)** | VAL | 3 | 1 | **−0.119** | −1.00 | +0.238 R | +5.9% |
+| 5+15 (F2-15, 9/18) | TRAIN | 10 | 7 | **−0.254** | −1.87 | +0.272 R | +7.8% |
+| 5+15 (F2-15, 9/18) | VAL | 7 | 4 | +0.497 | 1.07 | — | |
+| W15 alone (9/18) | TRAIN | 32 | 20 | **−0.220** | −2.75 | +0.160 R | |
+
+Stacked 5+10: TRAIN $6,208 → $5,706, MDD −609 → −663 (1.09×); VAL $5,403 → $5,320, MDD −597 →
+−681 (1.14×). Ex-top-5% R/pick 0.151 → 0.108 (worse). ×5 at $50K stage, same signs.
+**Structural finding that generalises to any W** (9/18): 53% of the W=15 book and 51% of the W=30
+book are symbol-days the 5-min book already owns, so a second window buys **+6 to +11% more
+picks, not +30%** — the ceiling is the post-veto candidate pool, not the slots.
+**F2-10 and F2-15: NO GO.** Power was adequate (MDE ≤ +0.27 R vs a +0.30 R bar) and the sign was
+negative on TRAIN in every cell.
+
+## 5. Pass bar, line by line
+
+| # | criterion | F1a | F1b | F2-10 | F2-15 |
+|---|---|---|---|---|---|
+| 1 | added ≥ +0.10 R on TRAIN and VAL | FAIL (n=0) | FAIL (VAL −0.255) | FAIL (−0.329 / −0.119) | FAIL (−0.254 TRAIN) |
+| 2 | day-clustered t ≥ 2 on VAL | FAIL | FAIL (n=1) | FAIL (−1.00) | FAIL (1.07) |
+| 3 | ex-top-5% ≥ 0 both splits | n/a | FAIL | FAIL (book ex-top5 falls) | FAIL |
+| 4 | TRAIN halves same-signed | n/a | n/a (n=0) | n/a (n=8, both halves −) | n/a |
+| 5 | stacked $ up in BOTH splits | FAIL (−$4.95) | FAIL (−$22.69) | FAIL (−$502 / −$83) | FAIL |
+| 6 | stacked MDD ≤ 1.25× baseline | pass | pass | pass (1.09× / 1.14×) | pass at 5+15 |
+| 7 | fills/week up ≥ 30% | FAIL (+0%) | FAIL (+2.6% VAL) | FAIL (+7.3%) | FAIL (+7.8%) |
+
+## 6. The ONE caveat per cell that alone could explain it
+
+* **F1a** — class (ii) is off 1-min bar OPENS, not quotes; Stage-Q's quote number (14.4%) is ~8×
+  my 1.8%, so n=0 may be an artefact of using bars. An NBBO walk would re-open it.
+* **F1b** — n=1; an anecdote with SE 0.45 R.
+* **F2-10** — composite TRAIN-refit then scored on TRAIN (in-sample for the selector), and the
+  veto non-transfer leaves W=10 one veto short of the shipped book: like-for-unlike.
+* **F2-15** — same refit caveat; its positive VAL (+0.497 R) is the shape TRAIN-first refuses.
+
+## 7. Mid-run changes, disclosed
+
+1. PREREG §3 (the B30 baseline) was written after reading the entry code but **before any scoring**.
+2. Four TEST rows appeared in a diagnostic print of the 4-pick class-(ii) cohort before I had
+   partitioned it; excluded from every number in §2/§3 and from the pass bar.
+3. F2-15 was found to be an already-executed cell (9/18). I report its result rather than re-run
+   it; the ledger counts it once. F2-10 was run fresh, and its range-size veto was re-derived
+   (and, per the V1 rule, not adopted) rather than inherited.
+
+## 8. What this pass establishes
+
+The binding constraint on ORB long frequency is **not** the 30-bps cap and **not** the 8 slots.
+24.3% of ranked picks never touch the 5-min high in the next hour, and a second, wider opening
+range re-selects mostly the same symbol-days at worse R. Future frequency work must move the
+TRIGGER or the POOL — both selection changes, each needing its own pre-registration.
+Program cell count through this pass: **1,277**.
