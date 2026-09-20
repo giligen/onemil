@@ -85,3 +85,30 @@ larger-n table for the market-wide claim.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01PKSsd3LjBkXYzPECLNYR5W
+
+## Correction (post-review) — Cell 1,289 dollar scale was wrong by 15x
+
+The original Δ$ (+$9,278 TRAIN / +$4,296 VAL) used shares backed out of the book's raw
+`pnl`/`pnl_pct` columns. `pnl_pct` checks out as a genuine price return (SMST stop-out:
+-4.38% vs (range_low-entry)/entry = -4.29%, matches) — but `pnl` itself is **exactly 15x**
+`_rp_pnl`/`_sized_pnl` for every one of the 122 fills (ratio 0.0666667 ± 3e-17, i.e. 1/15
+to float precision) — `pnl` is computed at a fixed, much larger notional than the book's
+actual sizing; `_sized_pnl` (sum $6,610 TRAIN / $6,437 VAL here) is the number that ties to
+the honest book ($6,085–$6,627/21mo cited elsewhere). Shares/notional must scale with
+`_sized_pnl`, not raw `pnl`.
+
+**Corrected Δ$** (delta_cost_share × shares×(1/15)):
+
+| split | Δ R/trade (unchanged) | net Δ$ corrected | net Δ$ (WRONG, retracted) | tail: drop top 5% |
+|---|---|---|---|---|
+| TRAIN | 0.058 R | **+$619** | ~~+$9,278~~ | +$469 |
+| VAL | 0.055 R | **+$286** | ~~+$4,296~~ | +$230 |
+
+Δ R/trade was never affected by the notional bug (it's a price-only ratio, no shares
+term) — cell 1,289 still PASSES both splits (net Δ$ up, tail-robust, no adverse selection
+finding unchanged), but at ~6.7% of the dollar magnitude first reported. At $10K-stage
+sizing this rule is worth roughly $600 (TRAIN) / $290 (VAL) over the sample, not
+$9K/$4K — material relative to the book's own $6,085–$6,627/21mo total, not free money.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01PKSsd3LjBkXYzPECLNYR5W
