@@ -469,3 +469,33 @@ F43 just relocated it), **then F47** (it re-prices both live books against their
 F46's decomposition to interpret the matched half), **then F48** (it is the only one of the three
 that could change a shipped rule, and it must be argued on F45's measured surface and F43's hour-band
 map rather than on an imputation).
+
+---
+
+## Queued after pass 15 (frames15, the owner's institutional-volume frame — 2026-09-20)
+
+Pass 15 was inserted ahead of F46-F48 on the owner's instruction and returned STAY-DRY on 23 cells.
+It leaves three frames of its own; the queue is now **F46, F47, F48 (from pass 14), then F49, F50,
+F51** — except that **F49 outranks them all on effect size** and is recommended first.
+
+**F49 — THE MIRROR CELL AS A SHORT.** frames15 B12: a name already >= 5 % above its open, trading
+>= 3x its own hourly normal, with a LARGE price move in that hour, books **−0.398 R TRAIN / −0.323 R
+VAL (day-clustered t −13.3 / −10.5)** on the long side, 3,601 trades, 27-32 a week, both halves. It
+is the largest |t| in 1,240 cells and has never been priced on its natural side. Price the short:
+borrow availability and fee from the broker's own list, locate rules, the short-sale circuit breaker
+on a −10 % day, hard-to-borrow exclusion, the measured NBBO at the short's own minutes. Pre-committed
+kill: no borrow on the names that carry it, OR fee >= the edge, OR the edge living in the same top
+5 % that kills every long cell.
+
+**F50 — THE MULTI-DAY COHORT AS A PORTFOLIO, NOT A 4-SLOT BOOK.** frames15's eight multi-day cells
+were forced through HOD's slot rule (12/day, 4 concurrent); at a 5-session hold that is 3.5 trades a
+week and one tail trade IS the book. Re-ask them as an equal-weight portfolio of 50-200 names
+rebalanced daily, in % of NAV, financing and auction legs measured, tail cap applied inside the
+portfolio. Settles whether `interest5` is worth anything at a size where the tail averages out.
+
+**F51 — A DENSE HOURLY PROFILE ON A SMALL UNIVERSE.** frames15's V1/V2 were VOID on arm A at 16.5 %
+coverage and their denominators rest on the symbol's *candidate-day* sessions, because the only
+intraday tape we own is the causal superset (day high >= open x 1.05). Buy the missing denominator
+for ~300 names, all sessions (about $0.0004 per symbol-day, ~$60 for two years), rebuild `share_h`
+on ALL sessions, re-run V1/V2/V4 where membership is unconditional. The only way to separate "the
+field is null" from "the denominator was built from the wrong days".
