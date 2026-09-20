@@ -46,3 +46,21 @@ Context only (not a touchgo A/B, current honest book): `analysis_results/orb_bpl
 2. Exit-leg realized cost is in line with or better than quoted for both live strategies.
 3. Touchgo on/off cost comparison unanswerable from existing logs — both walks OOM'd
    before writing a book; needs a memory-limit fix and re-run (out of scope here).
+
+## Correction — entry leg vs fill-time quote (2026-09-20)
+Original §1 compared fill to the quote at SUBMIT (~09:35, before the stop-limit triggers
+at range_high x 1.003) — most of the +49bps/+39bps was intended trigger distance, not
+execution cost. `trades` has `entry_fill_quote_bid/ask` (captured at fill confirmation).
+Recomputed realized = (fill - mid_at_fill)/mid_at_fill, quoted = half-spread at fill:
+
+| strategy | n | med quoted | med realized | diff | P75 realized | %worse |
+|---|---|---|---|---|---|---|
+| bull_flag | 23 | 33.92bps | 12.55bps | -21.37bps | 43.54bps | 26.1% |
+| orb | 96 | 13.50bps | 3.08bps | -10.42bps | 26.92bps | 31.2% |
+| ignition | 13 (6 missing) | 136.99bps | 0.00bps | -136.99bps | 166.96bps | 15.4% |
+
+**Restated verdict**: against the fill-time quote, realized entry cost is BELOW the quoted
+half-spread for both live strategies (ORB: 3.1 vs 13.5bps; bull_flag: 12.6 vs 33.9bps) —
+BT's measured-NBBO half-spread charge on the entry leg is **pessimistic** (overcharges), not
+optimistic. The earlier +49/+39bps "cost" was mostly the stop-limit trigger offset baked
+into submit-time quotes, not real slippage.
