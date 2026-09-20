@@ -51,3 +51,50 @@ SAME scorer (same PREREG above, unchanged) over the FULL wrapper-underlying univ
   this section was committed, but no P&L or signal-vs-control comparison was computed or
   viewed before this text was written and committed — only population sizes (row counts,
   coverage %) were seen, which this section already discloses.
+
+## Pass 3 — flow proxy correction, pre-registered before rescoring
+
+Pass 2's F was degenerate (TRAIN median F = 0.0 — most wrappers in the resolved universe
+have sparse/no `daily_bars` ADV20 history, so the numerator's wrapper-ADV20 term was zero
+for over half of qualified days) and the mechanism's true high-flow tail was never
+isolated. This pass replaces the numerator with same-day wrapper activity instead of
+20-day ADV, which is available far more often than a 20-day rolling window.
+
+- **F3 formula**: `F3 = 2 * |r_15:00| * (sum over the underlying's wrappers of the
+  wrapper's SAME-DAY dollar volume up to 15:00) / underlying dollar-ADV20`. Wrapper
+  same-day volume source, per wrapper per day: prefer the pulled 1-min bars
+  (`bars_1500_1600.db`) if that wrapper-day is present there (sum `close*volume` for bars
+  with `ts_et <= 15:00`); else fall back to the wrapper's FULL-DAY dollar volume
+  (`close*volume`) from `cache.db daily_bars` (read-only, `?mode=ro`) for that date — a
+  same-day but not strictly pre-15:00 proxy, used only because no wrapper intraday bars
+  exist in this study's db (verified before scoring: 0 of 1,705 referenced wrapper tickers
+  appear in `bars_1500_1600.db`, which was pulled for underlyings only — so this pass runs
+  entirely on the daily-bars fallback branch; stated here as the one structural
+  simplification, not discovered after seeing P&L). Point-in-time gating unchanged (a
+  wrapper's day only counts from its first `daily_bars` row).
+- **Underlying denominator**: dollar-ADV20 = `rolling(20, min_periods=20)` on prior-day
+  dollar volume; where that is NaN, fall back to `expanding(min_periods=5)` mean over
+  whatever prior days exist (so an underlying needs >=5 prior trading days of history to
+  get an F3 at all; fewer than 5 -> F3 missing, reported as the coverage caveat).
+- **Population**: the SAME pass-2 qualified signal population (`p2_signal_days_qualified.csv`
+  — |r|>=5%, price>=$5, usable bars both sides of 15:00), filtered to `sho_gate==True`
+  (same tradeability gate pass 2 applied before scoring P&L). No new candidate-day
+  selection, no re-pull. F3 replaces F on this fixed population; entries/exits/costs/MOC
+  unchanged from PREREG's original spec.
+- **Ranking and cells**: rank F3 within each split (TRAIN, VAL) separately for two
+  populations — LONG-only (`side==1`) and COMBINED (both sides) — take the TOP DECILE
+  (>=90th percentile of F3 within that split x population) vs the rest of that same
+  population. Cell 1,298 = LONG top-decile-vs-rest; cell 1,299 = COMBINED
+  top-decile-vs-rest. Quintile monotonicity table computed on the COMBINED population
+  (same convention as pass 2's F-quintile table) per split. Control is NOT re-run — this
+  question is "does ranking existing signal trades by flow intensity find a subset with
+  edge", not signal-vs-control.
+- **Pre-committed read**: mechanism lives iff top-decile net R >= +0.10 R with
+  day-clustered t >= 2 on BOTH splits (both cells, 1,298 and 1,299) AND the quintile table
+  is monotone (Q5 > Q4 > Q3 > Q2 > Q1 in mean net R) on both splits. Any miss on any of
+  these -> dead. Report per split: n, net R, % of price, t, the quintile table, the share
+  of qualified days where F3 could not be computed (missing wrapper daily bar for every
+  wrapper that day, or underlying ADV fallback unavailable), and the one caveat that most
+  weakens the read.
+- No P&L, comparison, or F3 value was computed or viewed before this section was written
+  and committed.
