@@ -123,3 +123,39 @@ beside every null. "No edge exists" is never the conclusion.
 ## 9. Freeze
 
 `FREEZE.md` carries the git hash of every script before the first scoring run.
+
+## Cell C — pre-registered before scoring
+
+**Cell count: 1,273.** Registered before any cell-C number was computed; committed alone, ahead of the score.
+
+**Motivation.** Under Stage A/B the entry was a mirrored no-chase stop-**limit** at
+`L = range_low × (1 − 30 bps)` that fills only if the next bar's open is `>= L`. 62.9 % of triggers were
+`gap_through` no-fills — the rule systematically **rejects the fast breakdowns and keeps the stalled ones**.
+Cell C tests whether the book is different when the fast breakdowns are allowed in.
+
+**The rule — everything identical to Stage B except the entry:**
+
+- Trigger unchanged: first post-09:35 bar with `low <= L`, within the 60-min window (`m <= 635`).
+- Entry = a **stop order**: fill at the **NEXT bar's OPEN** (obtainable — it is a price the market printed and
+  reachable by a resting stop), **capped** at `cap = range_low × (1 − 100 bps)`. If the next open is **below**
+  the cap (a gap of more than 1 % through the level), it is a **skip, not a chase** → no fill.
+- **SSR names**: fill only on the uptick proxy as before — the fill bar must have `open > that bar's low`,
+  else no fill.
+- **Stop = `range_high`, unchanged.** R = `range_high − fill`, so **R grows when the fill is lower**; every
+  R-denominated number is reported on the **actual fill**.
+- Static lock (1.75 R arm → 0.5 R stop), 15:45 cover, universe, features, controls, Stage-B composite /
+  sign rule / quintiles / vetoes / 8 slots / sizing: **all unchanged**.
+- Cost as before: measured NBBO half-spread per leg where available, minute-of-day median imputation
+  otherwise; the **imputed share is reported**.
+
+**Pass bar — identical to Stage B, evaluated on VAL, every line must hold:**
+
+1. VAL net **>= +0.15 R / trade**
+2. VAL **day-clustered t >= 2.0**
+3. VAL **ex-top-5 % net >= 0**
+4. TRAIN H1 and TRAIN H2 **same-signed**
+5. **>= 3 fills / week**
+6. green-week share **above** the count-matched null
+7. **Stage B − Stage A control >= +0.10 R**
+
+Anything short of all seven = **NO SHIP**. TEST (>= 2026-06-01) stays **SEALED**.
