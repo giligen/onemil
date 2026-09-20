@@ -1,0 +1,110 @@
+walked pond signals 2782 | arm b 23813 | arm u 22628
+  G-PARITY: 429 signals shared with frames8/w_sig.csv, max |delta rr| = 0.00e+00 — MATCH
+
+=== C0 — THE OVERLAP DIAGNOSTIC (does the HOD rule re-label the pond book's own picks?) ===
+  rung $  20 ORB:   317 pond signals,  22 on a (day, symbol) the ORB book itself takes = 6.9 % (the book has 618 picks in TRAIN+VAL+TEST)
+  rung $  20 BF :   136 pond signals,   0 on a (day, symbol) the BF book itself takes = 0.0 % (the book has 55 picks in TRAIN+VAL+TEST)
+  rung $  10 ORB:   736 pond signals,  46 on a (day, symbol) the ORB book itself takes = 6.2 % (the book has 618 picks in TRAIN+VAL+TEST)
+  rung $  10 BF :   754 pond signals,   4 on a (day, symbol) the BF book itself takes = 0.5 % (the book has 55 picks in TRAIN+VAL+TEST)
+  rung $   5 ORB:  1264 pond signals,  64 on a (day, symbol) the ORB book itself takes = 5.1 % (the book has 618 picks in TRAIN+VAL+TEST)
+  rung $   5 BF :  1663 pond signals,   7 on a (day, symbol) the BF book itself takes = 0.4 % (the book has 55 picks in TRAIN+VAL+TEST)
+
+=== C1-C9 — THE POND CELLS ===
+
+-- pond ORB  rung $20  signals 317 (TRAIN 195 / VAL 122) | imputed 59 % | arm b 3609 arm u 3525 --
+   X0 TRAIN n= 195 sig=+0.0045  b=-0.0710  POND BOUND u=-0.0877  | MARGIN sig-b=+0.0863 t=+0.84 (H1 +0.0324 H2 +0.1218) | sig-u=+0.1045 t=+1.01 | cov b/u 99/99 % mde=0.257
+   X0 VAL   n= 122 sig=+0.2432  b=+0.0262  POND BOUND u=-0.0124  | MARGIN sig-b=+0.2229 t=+1.85 (H1 +nan H2 +0.2229) | sig-u=+0.2533 t=+2.07 | cov b/u 100/100 % mde=0.314
+ORB/$20/X0             TRAIN n=  195 /wk=  3.7 gross=+0.0045 cost=0.0626 net=-0.0581 t=-0.57 green= 43.4 (null p95  45.3) wk$=   -21.4 tot=$   -1132 worst=   -561 ex5=-0.1682 H1=-0.0986 H2=-0.0311 imp=58% mde=0.257
+ORB/$20/X0             VAL   n=  119 /wk=  5.2 gross=+0.2245 cost=0.0622 net=+0.1622 t=+1.20 green= 52.2 (null p95  65.2) wk$=   +83.9 tot=$   +1931 worst=   -590 ex5=+0.0662 H1=+nan H2=+0.1622 imp=61% mde=0.335
+   G3 TRAIN n= 195 sig=-0.0372  b=-0.0310  POND BOUND u=-0.0437  | MARGIN sig-b=+0.0052 t=+0.03 (H1 -0.0910 H2 +0.0685) | sig-u=+0.0202 t=+0.13 | cov b/u 99/99 % mde=0.347
+   G3 VAL   n= 122 sig=+0.3171  b=+0.0673  POND BOUND u=+0.0574  | MARGIN sig-b=+0.2568 t=+1.87 (H1 +nan H2 +0.2568) | sig-u=+0.2529 t=+1.77 | cov b/u 100/100 % mde=0.395
+ORB/$20/G3             TRAIN n=  195 /wk=  3.7 gross=-0.0372 cost=0.0673 net=-0.1045 t=-0.71 green= 30.2 (null p95  37.7) wk$=   -38.4 tot=$   -2037 worst=   -787 ex5=-0.3853 H1=-0.2077 H2=-0.0357 imp=58% mde=0.336
+ORB/$20/G3             VAL   n=  119 /wk=  5.2 gross=+0.2647 cost=0.0679 net=+0.1968 t=+1.29 green= 43.5 (null p95  60.9) wk$=  +101.8 tot=$   +2342 worst=   -566 ex5=-0.0367 H1=+nan H2=+0.1968 imp=61% mde=0.413
+
+-- pond ORB  rung $10  signals 736 (TRAIN 437 / VAL 299) | imputed 82 % | arm b 8311 arm u 8133 --
+   X0 TRAIN n= 437 sig=-0.0363  b=-0.0573  POND BOUND u=-0.0712  | MARGIN sig-b=+0.0247 t=+0.37 (H1 -0.0513 H2 +0.0738) | sig-u=+0.0387 t=+0.59 | cov b/u 100/100 % mde=0.167
+   X0 VAL   n= 299 sig=+0.1425  b=+0.0149  POND BOUND u=-0.0057  | MARGIN sig-b=+0.1311 t=+1.82 (H1 +nan H2 +0.1311) | sig-u=+0.1468 t=+1.86 | cov b/u 100/100 % mde=0.196
+ORB/$10/X0             TRAIN n=  416 /wk=  7.8 gross=-0.0358 cost=0.0704 net=-0.1063 t=-1.50 green= 37.7 (null p95  45.3) wk$=   -83.4 tot=$   -4421 worst=   -923 ex5=-0.2170 H1=-0.1811 H2=-0.0561 imp=81% mde=0.172
+ORB/$10/X0             VAL   n=  272 /wk= 11.8 gross=+0.0924 cost=0.0699 net=+0.0225 t=+0.27 green= 47.8 (null p95  60.9) wk$=   +26.6 tot=$    +611 worst=   -769 ex5=-0.0833 H1=+nan H2=+0.0225 imp=85% mde=0.219
+   G3 TRAIN n= 437 sig=-0.0276  b=-0.0139  POND BOUND u=-0.0100  | MARGIN sig-b=-0.0107 t=-0.13 (H1 -0.1584 H2 +0.0846) | sig-u=-0.0138 t=-0.15 | cov b/u 100/100 % mde=0.219
+   G3 VAL   n= 299 sig=+0.2445  b=+0.0772  POND BOUND u=+0.0670  | MARGIN sig-b=+0.1717 t=+1.43 (H1 +nan H2 +0.1717) | sig-u=+0.1751 t=+1.33 | cov b/u 100/100 % mde=0.269
+ORB/$10/G3             TRAIN n=  410 /wk=  7.7 gross=-0.0716 cost=0.0751 net=-0.1467 t=-1.65 green= 35.8 (null p95  39.6) wk$=  -113.5 tot=$   -6015 worst=  -1161 ex5=-0.4123 H1=-0.2921 H2=-0.0487 imp=81% mde=0.220
+ORB/$10/G3             VAL   n=  270 /wk= 11.7 gross=+0.0941 cost=0.0754 net=+0.0188 t=+0.19 green= 52.2 (null p95  56.5) wk$=   +22.0 tot=$    +506 worst=   -955 ex5=-0.2338 H1=+nan H2=+0.0188 imp=85% mde=0.274
+
+-- pond ORB  rung $5  signals 1264 (TRAIN 808 / VAL 456) | imputed 90 % | arm b 14139 arm u 13970 --
+   X0 TRAIN n= 808 sig=-0.0818  b=-0.0786  POND BOUND u=-0.0679  | MARGIN sig-b=+0.0009 t=+0.02 (H1 -0.0297 H2 +0.0217) | sig-u=-0.0090 t=-0.19 | cov b/u 100/100 % mde=0.123
+   X0 VAL   n= 456 sig=+0.1620  b=+0.0195  POND BOUND u=+0.0000  | MARGIN sig-b=+0.1469 t=+2.28 (H1 +nan H2 +0.1469) | sig-u=+0.1616 t=+2.25 | cov b/u 100/100 % mde=0.164
+ORB/$5/X0              TRAIN n=  697 /wk= 13.2 gross=-0.0583 cost=0.0658 net=-0.1241 t=-2.43 green= 39.6 (null p95  41.5) wk$=  -163.2 tot=$   -8650 worst=  -1282 ex5=-0.2353 H1=-0.1642 H2=-0.0962 imp=91% mde=0.134
+ORB/$5/X0              VAL   n=  385 /wk= 16.7 gross=+0.0962 cost=0.0696 net=+0.0267 t=+0.37 green= 56.5 (null p95  60.9) wk$=   +44.6 tot=$   +1026 worst=   -712 ex5=-0.0801 H1=+nan H2=+0.0267 imp=89% mde=0.190
+   G3 TRAIN n= 808 sig=-0.0362  b=-0.0511  POND BOUND u=-0.0190  | MARGIN sig-b=+0.0194 t=+0.28 (H1 -0.0950 H2 +0.0969) | sig-u=-0.0127 t=-0.17 | cov b/u 100/100 % mde=0.165
+   G3 VAL   n= 456 sig=+0.2865  b=+0.0889  POND BOUND u=+0.0720  | MARGIN sig-b=+0.2031 t=+1.55 (H1 +nan H2 +0.2031) | sig-u=+0.2137 t=+1.47 | cov b/u 100/100 % mde=0.312
+ORB/$5/G3              TRAIN n=  680 /wk= 12.8 gross=-0.0359 cost=0.0702 net=-0.1062 t=-1.30 green= 35.8 (null p95  43.4) wk$=  -136.2 tot=$   -7221 worst=  -1630 ex5=-0.3858 H1=-0.2356 H2=-0.0156 imp=91% mde=0.180
+ORB/$5/G3              VAL   n=  374 /wk= 16.3 gross=+0.0448 cost=0.0753 net=-0.0305 t=-0.35 green= 52.2 (null p95  52.2) wk$=   -49.6 tot=$   -1140 worst=  -1038 ex5=-0.2826 H1=+nan H2=-0.0305 imp=90% mde=0.238
+
+-- pond BF  rung $20  signals 136 (TRAIN 90 / VAL 46) | imputed 91 % | arm b 1013 arm u 735 --
+   X0 TRAIN n=  90 sig=-0.0602  b=-0.1202  POND BOUND u=-0.0039  | MARGIN sig-b=+0.0485 t=+0.37 (H1 +0.1157 H2 -0.0187) | sig-u=-0.0556 t=-0.41 | cov b/u 100/100 % mde=0.365
+   X0 VAL   n=  46 sig=-0.1312  b=+0.1298  POND BOUND u=+0.1040  | MARGIN sig-b=-0.2437 t=-1.58 (H1 +nan H2 -0.2437) | sig-u=-0.2015 t=-1.04 | cov b/u 100/100 % mde=0.504
+BF/$20/X0              TRAIN n=   90 /wk=  1.7 gross=-0.0602 cost=0.0688 net=-0.1290 t=-0.98 green= 32.1 (null p95  35.8) wk$=   -21.9 tot=$   -1161 worst=   -331 ex5=-0.2526 H1=-0.0457 H2=-0.2123 imp=91% mde=0.363
+BF/$20/X0              VAL   n=   46 /wk=  2.0 gross=-0.1312 cost=0.0693 net=-0.2006 t=-1.17 green= 30.4 (null p95  39.1) wk$=   -40.1 tot=$    -923 worst=   -450 ex5=-0.3519 H1=+nan H2=-0.2006 imp=91% mde=0.519
+   G3 TRAIN n=  90 sig=+0.0673  b=-0.1322  POND BOUND u=+0.0359  | MARGIN sig-b=+0.1799 t=+0.83 (H1 +0.2706 H2 +0.0892) | sig-u=+0.0121 t=+0.05 | cov b/u 100/100 % mde=0.635
+   G3 VAL   n=  46 sig=+0.0586  b=+0.1785  POND BOUND u=+0.1385  | MARGIN sig-b=-0.1000 t=-0.39 (H1 +nan H2 -0.1000) | sig-u=-0.0385 t=-0.13 | cov b/u 100/100 % mde=0.801
+BF/$20/G3              TRAIN n=   90 /wk=  1.7 gross=+0.0673 cost=0.0727 net=-0.0054 t=-0.02 green= 30.2 (null p95  34.0) wk$=    -0.9 tot=$     -49 worst=   -331 ex5=-0.3824 H1=+0.0988 H2=-0.1097 imp=91% mde=0.646
+BF/$20/G3              VAL   n=   46 /wk=  2.0 gross=+0.0586 cost=0.0742 net=-0.0156 t=-0.06 green= 30.4 (null p95  39.1) wk$=    -3.1 tot=$     -72 worst=   -450 ex5=-0.3912 H1=+nan H2=-0.0156 imp=91% mde=0.777
+
+-- pond BF  rung $10  signals 754 (TRAIN 481 / VAL 273) | imputed 98 % | arm b 4839 arm u 3890 --
+   X0 TRAIN n= 481 sig=-0.0098  b=-0.0364  POND BOUND u=-0.0284  | MARGIN sig-b=+0.0268 t=+0.50 (H1 -0.0162 H2 +0.0598) | sig-u=+0.0245 t=+0.42 | cov b/u 100/100 % mde=0.164
+   X0 VAL   n= 273 sig=-0.0864  b=-0.0230  POND BOUND u=+0.0105  | MARGIN sig-b=-0.0450 t=-0.63 (H1 +nan H2 -0.0450) | sig-u=-0.0910 t=-1.19 | cov b/u 99/100 % mde=0.222
+BF/$10/X0              TRAIN n=  464 /wk=  8.8 gross=+0.0146 cost=0.0706 net=-0.0560 t=-0.95 green= 37.7 (null p95  49.1) wk$=   -49.0 tot=$   -2598 worst=   -756 ex5=-0.1667 H1=+0.0012 H2=-0.0985 imp=98% mde=0.166
+BF/$10/X0              VAL   n=  271 /wk= 11.8 gross=-0.0794 cost=0.0759 net=-0.1553 t=-2.09 green= 34.8 (null p95  43.5) wk$=  -183.0 tot=$   -4210 worst=   -851 ex5=-0.2711 H1=+nan H2=-0.1553 imp=99% mde=0.217
+   G3 TRAIN n= 481 sig=+0.1044  b=-0.0231  POND BOUND u=+0.0318  | MARGIN sig-b=+0.1304 t=+1.49 (H1 +0.0206 H2 +0.2147) | sig-u=+0.0524 t=+0.53 | cov b/u 100/100 % mde=0.261
+   G3 VAL   n= 273 sig=-0.0875  b=+0.0215  POND BOUND u=+0.1026  | MARGIN sig-b=-0.0888 t=-1.03 (H1 +nan H2 -0.0888) | sig-u=-0.1980 t=-2.07 | cov b/u 99/100 % mde=0.271
+BF/$10/G3              TRAIN n=  453 /wk=  8.5 gross=+0.1269 cost=0.0752 net=+0.0517 t=+0.55 green= 49.1 (null p95  50.9) wk$=   +44.2 tot=$   +2342 worst=   -755 ex5=-0.2889 H1=+0.0833 H2=+0.0289 imp=98% mde=0.267
+BF/$10/G3              VAL   n=  268 /wk= 11.7 gross=-0.0913 cost=0.0810 net=-0.1724 t=-2.03 green= 21.7 (null p95  39.1) wk$=  -200.9 tot=$   -4620 worst=   -995 ex5=-0.4128 H1=+nan H2=-0.1724 imp=99% mde=0.257
+
+-- pond BF  rung $5  signals 1663 (TRAIN 1106 / VAL 557) | imputed 99 % | arm b 9674 arm u 8658 --
+   X0 TRAIN n=1106 sig=+0.0020  b=-0.0346  POND BOUND u=-0.0465  | MARGIN sig-b=+0.0347 t=+0.85 (H1 +0.0163 H2 +0.0480) | sig-u=+0.0484 t=+1.17 | cov b/u 99/100 % mde=0.114
+   X0 VAL   n= 557 sig=-0.0673  b=-0.0210  POND BOUND u=+0.0235  | MARGIN sig-b=-0.0552 t=-0.99 (H1 +nan H2 -0.0552) | sig-u=-0.0910 t=-1.71 | cov b/u 99/100 % mde=0.156
+BF/$5/X0               TRAIN n= 1004 /wk= 18.9 gross=-0.0026 cost=0.0673 net=-0.0699 t=-1.71 green= 32.1 (null p95  45.3) wk$=  -132.5 tot=$   -7020 worst=  -1092 ex5=-0.1795 H1=-0.0670 H2=-0.0720 imp=99% mde=0.114
+BF/$5/X0               VAL   n=  489 /wk= 21.3 gross=-0.0650 cost=0.0735 net=-0.1385 t=-2.39 green= 26.1 (null p95  39.1) wk$=  -294.4 tot=$   -6772 worst=  -1217 ex5=-0.2522 H1=+nan H2=-0.1385 imp=99% mde=0.159
+   G3 TRAIN n=1106 sig=+0.1201  b=-0.0146  POND BOUND u=+0.0205  | MARGIN sig-b=+0.1333 t=+2.04 (H1 +0.0575 H2 +0.1881) | sig-u=+0.0934 t=+1.43 | cov b/u 99/100 % mde=0.179
+   G3 VAL   n= 557 sig=-0.0492  b=+0.0185  POND BOUND u=+0.0726  | MARGIN sig-b=-0.0719 t=-0.97 (H1 +nan H2 -0.0719) | sig-u=-0.1334 t=-1.81 | cov b/u 99/100 % mde=0.195
+BF/$5/G3               TRAIN n=  956 /wk= 18.0 gross=+0.1133 cost=0.0721 net=+0.0413 t=+0.60 green= 45.3 (null p95  54.7) wk$=   +74.4 tot=$   +3945 worst=  -1055 ex5=-0.3139 H1=+0.0082 H2=+0.0657 imp=99% mde=0.184
+BF/$5/G3               VAL   n=  464 /wk= 20.2 gross=-0.0788 cost=0.0790 net=-0.1578 t=-2.21 green= 26.1 (null p95  39.1) wk$=  -318.3 tot=$   -7320 worst=  -1341 ex5=-0.4009 H1=+nan H2=-0.1578 imp=99% mde=0.196
+
+-- pond UNION  rung $20  signals 429 (TRAIN 268 / VAL 161) | imputed 67 % | arm b 4612 arm u 4257 --
+   X0 TRAIN n= 268 sig=+0.0039  b=-0.0810  POND BOUND u=-0.0716  | MARGIN sig-b=+0.0866 t=+1.03 (H1 +0.0773 H2 +0.0935) | sig-u=+0.0744 t=+0.87 | cov b/u 100/100 % mde=0.218
+   X0 VAL   n= 161 sig=+0.1081  b=+0.0458  POND BOUND u=+0.0044  | MARGIN sig-b=+0.0644 t=+0.66 (H1 +nan H2 +0.0644) | sig-u=+0.0991 t=+0.92 | cov b/u 100/100 % mde=0.274
+UNION/$20/X0           TRAIN n=  268 /wk=  5.1 gross=+0.0039 cost=0.0645 net=-0.0606 t=-0.74 green= 43.4 (null p95  49.1) wk$=   -30.6 tot=$   -1624 worst=   -561 ex5=-0.1729 H1=-0.0689 H2=-0.0544 imp=67% mde=0.218
+UNION/$20/X0           VAL   n=  158 /wk=  6.9 gross=+0.0914 cost=0.0648 net=+0.0266 t=+0.24 green= 39.1 (null p95  56.5) wk$=   +18.3 tot=$    +421 worst=   -721 ex5=-0.0771 H1=+nan H2=+0.0266 imp=69% mde=0.286
+   G3 TRAIN n= 268 sig=+0.0126  b=-0.0532  POND BOUND u=-0.0283  | MARGIN sig-b=+0.0667 t=+0.59 (H1 +0.0611 H2 +0.0708) | sig-u=+0.0338 t=+0.29 | cov b/u 100/100 % mde=0.325
+   G3 VAL   n= 161 sig=+0.2095  b=+0.0883  POND BOUND u=+0.0691  | MARGIN sig-b=+0.1222 t=+1.03 (H1 +nan H2 +0.1222) | sig-u=+0.1347 t=+1.00 | cov b/u 100/100 % mde=0.361
+UNION/$20/G3           TRAIN n=  268 /wk=  5.1 gross=+0.0126 cost=0.0691 net=-0.0565 t=-0.45 green= 35.8 (null p95  43.4) wk$=   -28.6 tot=$   -1515 worst=  -1036 ex5=-0.3712 H1=-0.0791 H2=-0.0399 imp=67% mde=0.321
+UNION/$20/G3           VAL   n=  158 /wk=  6.9 gross=+0.1680 cost=0.0698 net=+0.0982 t=+0.76 green= 39.1 (null p95  56.5) wk$=   +67.5 tot=$   +1551 worst=   -697 ex5=-0.1515 H1=+nan H2=+0.0982 imp=69% mde=0.365
+
+-- pond UNION  rung $10  signals 1431 (TRAIN 882 / VAL 549) | imputed 90 % | arm b 13128 arm u 12016 --
+   X0 TRAIN n= 882 sig=-0.0176  b=-0.0484  POND BOUND u=-0.0562  | MARGIN sig-b=+0.0287 t=+0.62 (H1 -0.0309 H2 +0.0709) | sig-u=+0.0327 t=+0.71 | cov b/u 100/100 % mde=0.120
+   X0 VAL   n= 549 sig=+0.0310  b=+0.0019  POND BOUND u=-0.0005  | MARGIN sig-b=+0.0469 t=+0.91 (H1 +nan H2 +0.0469) | sig-u=+0.0310 t=+0.51 | cov b/u 100/100 % mde=0.150
+UNION/$10/X0           TRAIN n=  796 /wk= 15.0 gross=-0.0051 cost=0.0714 net=-0.0765 t=-1.63 green= 39.6 (null p95  45.3) wk$=  -114.9 tot=$   -6089 worst=  -1109 ex5=-0.1850 H1=-0.0854 H2=-0.0701 imp=90% mde=0.126
+UNION/$10/X0           VAL   n=  459 /wk= 20.0 gross=-0.0387 cost=0.0734 net=-0.1120 t=-1.85 green= 39.1 (null p95  43.5) wk$=  -223.6 tot=$   -5143 worst=  -1393 ex5=-0.2219 H1=+nan H2=-0.1120 imp=92% mde=0.165
+   G3 TRAIN n= 882 sig=+0.0499  b=-0.0167  POND BOUND u=+0.0047  | MARGIN sig-b=+0.0688 t=+1.12 (H1 -0.0540 H2 +0.1555) | sig-u=+0.0240 t=+0.34 | cov b/u 100/100 % mde=0.177
+   G3 VAL   n= 549 sig=+0.0900  b=+0.0584  POND BOUND u=+0.0779  | MARGIN sig-b=+0.0512 t=+0.67 (H1 +nan H2 +0.0512) | sig-u=-0.0023 t=-0.02 | cov b/u 100/100 % mde=0.196
+UNION/$10/G3           TRAIN n=  770 /wk= 14.5 gross=+0.0415 cost=0.0761 net=-0.0345 t=-0.50 green= 43.4 (null p95  47.2) wk$=   -50.2 tot=$   -2658 worst=  -1109 ex5=-0.3471 H1=-0.1161 H2=+0.0245 imp=90% mde=0.189
+UNION/$10/G3           VAL   n=  445 /wk= 19.3 gross=+0.0049 cost=0.0782 net=-0.0733 t=-1.01 green= 47.8 (null p95  47.8) wk$=  -141.8 tot=$   -3262 worst=  -1491 ex5=-0.3296 H1=+nan H2=-0.0733 imp=92% mde=0.211
+
+-- pond UNION  rung $5  signals 2782 (TRAIN 1809 / VAL 973) | imputed 95 % | arm b 23768 arm u 22615 --
+   X0 TRAIN n=1809 sig=-0.0294  b=-0.0595  POND BOUND u=-0.0592  | MARGIN sig-b=+0.0245 t=+0.72 (H1 +0.0064 H2 +0.0373) | sig-u=+0.0238 t=+0.70 | cov b/u 99/100 % mde=0.086
+   X0 VAL   n= 973 sig=+0.0289  b=+0.0040  POND BOUND u=+0.0087  | MARGIN sig-b=+0.0279 t=+0.62 (H1 +nan H2 +0.0279) | sig-u=+0.0147 t=+0.29 | cov b/u 100/100 % mde=0.115
+UNION/$5/X0            TRAIN n= 1356 /wk= 25.6 gross=-0.0328 cost=0.0674 net=-0.1002 t=-2.88 green= 37.7 (null p95  39.6) wk$=  -256.4 tot=$  -13590 worst=  -1579 ex5=-0.2099 H1=-0.0878 H2=-0.1097 imp=95% mde=0.097
+UNION/$5/X0            VAL   n=  647 /wk= 28.1 gross=-0.0499 cost=0.0720 net=-0.1220 t=-2.39 green= 26.1 (null p95  39.1) wk$=  -343.1 tot=$   -7891 worst=  -1378 ex5=-0.2346 H1=+nan H2=-0.1220 imp=95% mde=0.139
+   G3 TRAIN n=1809 sig=+0.0646  b=-0.0350  POND BOUND u=-0.0029  | MARGIN sig-b=+0.0928 t=+1.81 (H1 +0.0085 H2 +0.1522) | sig-u=+0.0545 t=+1.05 | cov b/u 99/100 % mde=0.129
+   G3 VAL   n= 973 sig=+0.1033  b=+0.0624  POND BOUND u=+0.0725  | MARGIN sig-b=+0.0490 t=+0.69 (H1 +nan H2 +0.0490) | sig-u=+0.0208 t=+0.25 | cov b/u 100/100 % mde=0.181
+UNION/$5/G3            TRAIN n= 1243 /wk= 23.5 gross=+0.0618 cost=0.0716 net=-0.0098 t=-0.16 green= 41.5 (null p95  50.9) wk$=   -22.9 tot=$   -1216 worst=  -1542 ex5=-0.3462 H1=-0.0367 H2=+0.0118 imp=96% mde=0.154
+UNION/$5/G3            VAL   n=  595 /wk= 25.9 gross=+0.0037 cost=0.0762 net=-0.0725 t=-0.83 green= 39.1 (null p95  43.5) wk$=  -187.4 tot=$   -4311 worst=  -1743 ex5=-0.3851 H1=+nan H2=-0.0725 imp=95% mde=0.249
+
+=== C10 — HOD's OWN baseline at the same rungs (no pond restriction) ===
+HOD/$20/X0             TRAIN n= 1622 /wk= 30.6 gross=-0.0390 cost=0.0680 net=-0.1069 t=-2.99 green= 32.1 (null p95  37.7) wk$=  -327.3 tot=$  -17346 worst=  -2231 ex5=-0.2182 H1=-0.1433 H2=-0.0725 imp=49% mde=0.088
+HOD/$20/X0             VAL   n=  706 /wk= 30.7 gross=+0.0827 cost=0.0701 net=+0.0127 t=+0.26 green= 43.5 (null p95  60.9) wk$=   +38.8 tot=$    +893 worst=   -957 ex5=-0.0930 H1=+nan H2=+0.0127 imp=57% mde=0.132
+HOD/$20/G3             TRAIN n= 1434 /wk= 27.1 gross=+0.0139 cost=0.0734 net=-0.0596 t=-1.04 green= 37.7 (null p95  45.3) wk$=  -161.2 tot=$   -8541 worst=  -2198 ex5=-0.3344 H1=-0.0917 H2=-0.0289 imp=54% mde=0.127
+HOD/$20/G3             VAL   n=  609 /wk= 26.5 gross=+0.0936 cost=0.0760 net=+0.0176 t=+0.26 green= 52.2 (null p95  56.5) wk$=   +46.5 tot=$   +1071 worst=  -1635 ex5=-0.2062 H1=+nan H2=+0.0176 imp=64% mde=0.169
+
+S9 DONE

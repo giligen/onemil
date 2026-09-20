@@ -1,0 +1,41 @@
+
+================ SUPP A — the ABSOLUTE book behind F29 (POST-HOC, 28 levels) ================
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+  stock    G3 TRAIN n= 976  signal gross=-0.0642  matched control=-0.1056  margin=+0.0414
+  stock    G3 VAL   n= 427  signal gross=+0.0587  matched control=-0.1158  margin=+0.1745
+stock/G3               TRAIN n=  951 /wk= 17.9 gross=-0.0493 cost=0.0742 net=-0.1235 t=-2.17 green= 32.1 (null p95  39.6) wk$=  -221.6 tot=$  -11744 worst=  -1707 ex5=-0.3602 H1=-0.1391 H2=-0.1089 imp=58% mde=0.136
+stock/G3               VAL   n=  409 /wk= 17.8 gross=+0.0623 cost=0.0746 net=-0.0123 t=-0.17 green= 43.5 (null p95  52.2) wk$=   -21.9 tot=$    -503 worst=  -1103 ex5=-0.2300 H1=+nan H2=-0.0123 imp=60% mde=0.199
+  stock    X0 TRAIN n= 976  signal gross=-0.0562  matched control=-0.1096  margin=+0.0533
+  stock    X0 VAL   n= 427  signal gross=+0.0342  matched control=-0.1087  margin=+0.1429
+stock/X0               TRAIN n=  976 /wk= 18.4 gross=-0.0562 cost=0.0702 net=-0.1265 t=-2.99 green= 30.2 (null p95  37.7) wk$=  -232.9 tot=$  -12346 worst=  -1677 ex5=-0.2378 H1=-0.1375 H2=-0.1161 imp=57% mde=0.108
+stock/X0               VAL   n=  427 /wk= 18.6 gross=+0.0342 cost=0.0710 net=-0.0368 t=-0.65 green= 34.8 (null p95  52.2) wk$=   -68.3 tot=$   -1570 worst=  -1083 ex5=-0.1462 H1=+nan H2=-0.0368 imp=58% mde=0.165
+  wrapper  G3 TRAIN n= 621  signal gross=+0.1242  matched control=-0.2693  margin=+0.3936
+  wrapper  G3 VAL   n= 276  signal gross=+0.1043  matched control=-0.2523  margin=+0.3566
+wrapper/G3             TRAIN n=  599 /wk= 11.3 gross=+0.1101 cost=0.0699 net=+0.0403 t=+0.35 green= 43.4 (null p95  50.9) wk$=   +45.5 tot=$   +2412 worst=  -1343 ex5=-0.2969 H1=+0.0386 H2=+0.0417 imp=37% mde=0.235
+wrapper/G3             VAL   n=  274 /wk= 11.9 gross=+0.0994 cost=0.0747 net=+0.0247 t=+0.26 green= 52.2 (null p95  56.5) wk$=   +29.4 tot=$    +677 worst=  -1244 ex5=-0.1986 H1=+nan H2=+0.0247 imp=55% mde=0.258
+  wrapper  X0 TRAIN n= 621  signal gross=-0.0175  matched control=-0.2445  margin=+0.2270
+  wrapper  X0 VAL   n= 276  signal gross=+0.1490  matched control=-0.2379  margin=+0.3869
+wrapper/X0             TRAIN n=  621 /wk= 11.7 gross=-0.0175 cost=0.0640 net=-0.0815 t=-1.23 green= 37.7 (null p95  45.3) wk$=   -95.5 tot=$   -5063 worst=  -1353 ex5=-0.1938 H1=-0.1527 H2=-0.0183 imp=36% mde=0.151
+wrapper/X0             VAL   n=  276 /wk= 12.0 gross=+0.1490 cost=0.0687 net=+0.0803 t=+1.02 green= 60.9 (null p95  65.2) wk$=   +96.4 tot=$   +2216 worst=   -720 ex5=-0.0213 H1=+nan H2=+0.0803 imp=55% mde=0.221
+
+================ SUPP B — the pond bound is a RATIO: bucket it by stop width and clock ================
+  arm u rows 22628 | r_pct median 4.18 % | entry minute median 591
+
+  -- pond bound by stop width r_pct (arm u, the pond's random name at the HOD clock) --
+  | bucket | n | bound G3 | H1 | H2 | VAL | bound X0 | eod % (G3) | stop % (G3) |
+  |---|---|---|---|---|---|---|---|---|
+  | <1.5% | 810 | +0.3162 | +0.5092 | -0.0269 | +0.4006 | +0.0569 | 36 % | 64 % |
+  | 1.5-3% | 5307 | +0.0240 | -0.1116 | +0.0382 | +0.0857 | -0.0465 | 44 % | 56 % |
+  | 3-6% | 10954 | +0.0104 | +0.0263 | -0.0533 | +0.0716 | -0.0456 | 58 % | 42 % |
+  | >=6% | 5557 | +0.0045 | +0.0259 | -0.0156 | +0.0092 | -0.0193 | 80 % | 20 % |
+
+  -- pond bound by clock (arm u, the pond's random name at the HOD clock) --
+  | bucket | n | bound G3 | H1 | H2 | VAL | bound X0 | eod % (G3) | stop % (G3) |
+  |---|---|---|---|---|---|---|---|---|
+  | 09:37-10:30 | 17418 | -0.0019 | -0.0145 | -0.0306 | +0.0408 | -0.0502 | 60 % | 40 % |
+  | 10:30-11:30 | 2536 | +0.1030 | +0.1186 | -0.0115 | +0.1915 | +0.0260 | 53 % | 47 % |
+  | 11:30-13:00 | 2091 | +0.1018 | +0.1394 | +0.0399 | +0.1296 | -0.0179 | 58 % | 42 % |
+  | 13:00-14:01 | 583 | +0.1385 | +0.2425 | -0.0144 | +0.2236 | +0.0657 | 73 % | 27 % |
+
+  the same arm u expressed in PRICE: mean move entry->exit = +0.045 % (median stop 4.18 %), TRAIN -0.049 % / VAL +0.220 %
