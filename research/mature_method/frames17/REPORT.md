@@ -78,3 +78,6 @@ this close to the market; k=0.6% VAL (n=295 filled) is thin.
 
 Studies: `frames17/passive_walk.py`, `frames17/nbbo17.py`, `frames17/score17.py`,
 `frames17/passive17.csv`, `frames17/cells17.csv`.
+
+## Process note (added by the reviewing session, 2026-09-20)
+The deciding table was first computed gross-vs-net (unfilled gross against filled net) and corrected mid-run to net-vs-net before any verdict was written. The PREREG text was not changed. Recorded here because an unrecorded mid-run change to the deciding table is exactly the kind of fact the owner has caught us omitting before.
