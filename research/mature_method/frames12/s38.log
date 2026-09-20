@@ -1,0 +1,101 @@
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+  GATE B2: 1,622 / -$17,346 (TRAIN), 706 / +$893 (VAL) — MATCH
+  GATE walk_from vs book6.rr on 120 booked trades: max |diff| = 2.22e-16
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+
+== F38 U1-U3 — THE FLOOR IN 14:00-15:30, walked BEFORE any detector ==
+| cell | split | n | gross % | cost % | net % | t | tc | H1 % | H2 % | MDE % |
+|---|---|---|---|---|---|---|---|---|---|---|
+| U1 floor 2% bracket | TRAIN | 116,010 | -0.132 | +0.284 | -0.416 | -107.92 | -7.30 | -0.449 | -0.383 | 0.011 |
+| U1 floor 2% bracket | VAL | 76,853 | +0.033 | +0.285 | -0.252 | -53.00 | -4.83 | -0.449 | -0.383 | 0.013 |
+    exit mix: eod:0.85 stop:0.13 target:0.01
+| U2 floor 3% bracket | TRAIN | 116,010 | -0.121 | +0.277 | -0.397 | -98.30 | -7.01 | -0.419 | -0.377 | 0.011 |
+| U2 floor 3% bracket | VAL | 76,853 | +0.044 | +0.280 | -0.236 | -47.05 | -4.36 | -0.419 | -0.377 | 0.014 |
+    exit mix: eod:0.95 stop:0.05 target:0.00
+| U3 floor 2% MOC | TRAIN | 116,010 | +0.237 | +0.220 | +0.017 | +0.30 | +0.17 | +0.338 | -0.298 | 0.160 |
+| U3 floor 2% MOC | VAL | 76,853 | +0.074 | +0.217 | -0.143 | -27.01 | -2.53 | +0.338 | -0.298 | 0.015 |
+    exit mix: moc:0.85 stop:0.15
+
+  F34's 13:00-14:01 cell at a 2 % stop, for the gradient: TRAIN -0.402 % / VAL -0.255 %
+
+== F38 L1-L5, O1-O2 — the last-hour detector ==
+
+| cell                                | split |    n |  /wk |  grossR |   costR |    netR | gross% |  net%  |    t  |   tc  | green | red | worst $ | total $ |  MDD $ | imp% |
+|-----|-----|-----|-----|-----|-----|-----|-----|-----|-----|-----|-----|-----|-----|-----|-----|-----|
+| L1 lasthour +2R                     | TRAIN |  121 |  2.3 |  +0.133 |  +0.082 |  +0.051 | +0.540 | +0.272 | +0.52 | +0.41 |  28.3 |   5 |    -362 |     612 |  -1104 |   99 |
+| L1 lasthour +2R                     | VAL   |   76 |  3.3 |  -0.025 |  +0.089 |  -0.114 | +0.344 | +0.069 | -1.03 | -0.81 |  39.1 |   4 |    -730 |    -869 |  -1305 |   99 |
+    halves H1 +0.355 (n 43) | H2 +0.010 (n 78) | VAL -0.025 (n 76) -> same-signed POSITIVE in all three: False
+| L2 lasthour bare                    | TRAIN |  121 |  2.3 |  +0.127 |  +0.086 |  +0.040 | +0.460 | +0.178 | +0.35 | +0.28 |  26.4 |   5 |    -673 |     489 |  -1381 |   99 |
+| L2 lasthour bare                    | VAL   |   75 |  3.3 |  +0.013 |  +0.091 |  -0.078 | +0.586 | +0.305 | -0.57 | -0.52 |  34.8 |   6 |    -730 |    -586 |  -1467 |   99 |
+    halves H1 +0.335 (n 43) | H2 +0.012 (n 78) | VAL +0.013 (n 75) -> same-signed POSITIVE in all three: True | ex-top-5 % TR -0.145 VAL -0.279
+| L3 lasthour nextopen                | TRAIN |  121 |  2.3 |  +0.216 |  +0.071 |  +0.144 | +0.865 | +0.633 | +0.56 | +0.53 |  35.8 |   3 |    -891 |    1745 |  -1337 |   99 |
+| L3 lasthour nextopen                | VAL   |   75 |  3.3 |  +0.133 |  +0.077 |  +0.057 | +0.278 | +0.044 | +0.23 | +0.23 |  34.8 |   3 |    -629 |     424 |  -1185 |   99 |
+    halves H1 -0.104 (n 43) | H2 +0.392 (n 78) | VAL +0.133 (n 75) -> same-signed POSITIVE in all three: False | ex-top-5 % TR -0.280 VAL -0.274
+| L4 lasthour MOC                     | TRAIN |  121 |  2.3 |  +0.071 |  +0.071 |  -0.001 | +0.269 | +0.038 | -0.01 | -0.01 |  30.2 |   4 |    -617 |      -9 |  -1423 |   99 |
+| L4 lasthour MOC                     | VAL   |   75 |  3.3 |  +0.042 |  +0.077 |  -0.035 | +0.633 | +0.399 | -0.24 | -0.21 |  34.8 |   4 |    -761 |    -263 |  -1112 |   99 |
+    halves H1 +0.260 (n 43) | H2 -0.034 (n 78) | VAL +0.042 (n 75) -> same-signed POSITIVE in all three: False | ex-top-5 % TR -0.199 VAL -0.248
+| L5 lasthour lock                    | TRAIN |  121 |  2.3 |  +0.159 |  +0.088 |  +0.071 | +0.581 | +0.294 | +0.66 | +0.52 |  28.3 |   5 |    -523 |     863 |   -966 |   99 |
+| L5 lasthour lock                    | VAL   |   75 |  3.3 |  +0.009 |  +0.092 |  -0.083 | +0.575 | +0.291 | -0.61 | -0.56 |  34.8 |   6 |    -730 |    -626 |  -1511 |   99 |
+    halves H1 +0.316 (n 43) | H2 +0.072 (n 78) | VAL +0.009 (n 75) -> same-signed POSITIVE in all three: True | ex-top-5 % TR -0.101 VAL -0.284
+| O1 orb1400 +2R                      | TRAIN |  585 | 11.0 |  +0.084 |  +0.084 |  -0.001 | +0.356 | +0.085 | -0.02 | -0.02 |  49.1 |   5 |    -650 |     -38 |  -2178 |  100 |
+| O1 orb1400 +2R                      | VAL   |  308 | 13.4 |  +0.053 |  +0.083 |  -0.029 | +0.136 | -0.137 | -0.60 | -0.51 |  43.5 |   4 |    -856 |    -903 |  -1977 |  100 |
+    halves H1 +0.061 (n 270) | H2 +0.103 (n 315) | VAL +0.053 (n 308) -> same-signed POSITIVE in all three: True
+| O2 orb1400 MOC                      | TRAIN |  582 | 11.0 |  +0.118 |  +0.067 |  +0.051 | +0.502 | +0.289 | +1.16 | +1.01 |  50.9 |   5 |    -627 |    2991 |  -1384 |  100 |
+| O2 orb1400 MOC                      | VAL   |  307 | 13.3 |  +0.050 |  +0.068 |  -0.017 | +0.111 | -0.112 | -0.34 | -0.29 |  47.8 |   4 |    -807 |    -536 |  -1572 |  100 |
+    halves H1 +0.118 (n 269) | H2 +0.118 (n 313) | VAL +0.050 (n 307) -> same-signed POSITIVE in all three: True | ex-top-5 % TR -0.105 VAL -0.126
+
+cells -> /home/ec2-user/onemil/research/mature_method/frames12/cells38.csv  (14 rows)
+
+== count-matched permutation nulls on GREEN WEEKS (2,000 draws) ==
+| cell | split | green % | null mean | p5 | p95 | verdict |
+|---|---|---|---|---|---|---|
+| L1 lasthour +2R | TRAIN | 28.3 | 37.6 | 32.1 | 43.4 | below |
+| L1 lasthour +2R | VAL | 39.1 | 34.8 | 26.1 | 43.5 | inside |
+| L2 lasthour bare | TRAIN | 26.4 | 33.9 | 28.3 | 39.6 | below |
+| L2 lasthour bare | VAL | 34.8 | 33.9 | 26.1 | 43.5 | inside |
+| L3 lasthour nextopen | TRAIN | 35.8 | 35.3 | 30.2 | 41.5 | inside |
+| L3 lasthour nextopen | VAL | 34.8 | 39.3 | 30.4 | 47.8 | inside |
+| L4 lasthour MOC | TRAIN | 30.2 | 31.6 | 24.5 | 37.7 | inside |
+| L4 lasthour MOC | VAL | 34.8 | 36.7 | 26.1 | 47.8 | inside |
+| L5 lasthour lock | TRAIN | 28.3 | 36.5 | 30.2 | 43.4 | below |
+| L5 lasthour lock | VAL | 34.8 | 33.6 | 21.7 | 43.5 | inside |
+| O1 orb1400 +2R | TRAIN | 49.1 | 47.8 | 41.5 | 54.7 | inside |
+| O1 orb1400 +2R | VAL | 43.5 | 42.6 | 30.4 | 52.2 | inside |
+| O2 orb1400 MOC | TRAIN | 50.9 | 51.8 | 45.3 | 58.5 | inside |
+| O2 orb1400 MOC | VAL | 47.8 | 44.4 | 34.8 | 52.2 | inside |
+
+== the four-row PLACEBO DECOMPOSITION (net R | net % of entry price) ==
+| cell | split | floor 14:00-15:30 % | matched non-signal | same name-day later min | THE SIGNAL | n |
+|---|---|---|---|---|---|---|
+| L1 lasthour +2R | TRAIN | -0.416 | -0.156 / -0.489 (n 897) | -0.052 / -0.204 (n 991) | +0.051 / +0.272 | 121 |
+| L1 lasthour +2R | VAL | -0.252 | -0.125 / -0.312 (n 488) | -0.152 / -0.219 (n 548) | -0.114 / +0.069 | 76 |
+| L2 lasthour bare | TRAIN | -0.416 | -0.158 / -0.496 (n 897) | -0.053 / -0.260 (n 991) | +0.040 / +0.178 | 121 |
+| L2 lasthour bare | VAL | -0.252 | -0.133 / -0.334 (n 479) | -0.157 / -0.222 (n 541) | -0.078 / +0.305 | 75 |
+| L3 lasthour nextopen | TRAIN | -0.416 | -0.156 / -0.489 (n 897) | -0.052 / -0.204 (n 991) | +0.144 / +0.633 | 121 |
+| L3 lasthour nextopen | VAL | -0.252 | -0.128 / -0.322 (n 479) | -0.153 / -0.220 (n 541) | +0.057 / +0.044 | 75 |
+| L4 lasthour MOC | TRAIN | +0.017 | -0.143 / -0.455 (n 897) | -0.096 / -0.409 (n 991) | -0.001 / +0.038 | 121 |
+| L4 lasthour MOC | VAL | -0.143 | -0.098 / -0.224 (n 479) | -0.090 / -0.058 (n 541) | -0.035 / +0.399 | 75 |
+| L5 lasthour lock | TRAIN | -0.416 | -0.156 / -0.489 (n 897) | -0.052 / -0.204 (n 991) | +0.071 / +0.294 | 121 |
+| L5 lasthour lock | VAL | -0.252 | -0.128 / -0.322 (n 479) | -0.153 / -0.220 (n 541) | -0.083 / +0.291 | 75 |
+| O1 orb1400 +2R | TRAIN | -0.416 | -0.496 / -1.893 (n 40) | +0.866 / +3.482 (n 40) | -0.001 / +0.085 | 585 |
+| O1 orb1400 +2R | VAL | -0.252 | -0.135 / -0.379 (n 17) | -0.068 / -0.018 (n 20) | -0.029 / -0.137 | 308 |
+| O2 orb1400 MOC | TRAIN | +0.017 | -0.459 / -1.749 (n 40) | +0.376 / +1.598 (n 40) | +0.051 / +0.289 | 582 |
+| O2 orb1400 MOC | VAL | -0.143 | -0.077 / -0.217 (n 17) | +0.021 / +0.208 (n 20) | -0.017 / -0.112 | 307 |
+
+== exit mix and cost, per book cell ==
+| cell | split | exit mix | cost R | cost % | r % | imputed % |
+|---|---|---|---|---|---|---|
+| L1 lasthour +2R | TRAIN | eod:0.57 stop:0.27 target:0.16 | +0.082 | +0.268 | 3.72 | 99 |
+| L1 lasthour +2R | VAL | eod:0.63 stop:0.29 target:0.08 | +0.089 | +0.275 | 3.53 | 99 |
+| L2 lasthour bare | TRAIN | eod:0.70 stop:0.30 | +0.086 | +0.282 | 3.72 | 99 |
+| L2 lasthour bare | VAL | eod:0.71 stop:0.29 | +0.091 | +0.281 | 3.53 | 99 |
+| L3 lasthour nextopen | TRAIN | nextopen:0.69 stop:0.31 | +0.071 | +0.231 | 3.72 | 99 |
+| L3 lasthour nextopen | VAL | nextopen:0.67 stop:0.33 | +0.077 | +0.234 | 3.53 | 99 |
+| L4 lasthour MOC | TRAIN | moc:0.69 stop:0.31 | +0.071 | +0.231 | 3.72 | 99 |
+| L4 lasthour MOC | VAL | moc:0.67 stop:0.33 | +0.077 | +0.234 | 3.53 | 99 |
+| L5 lasthour lock | TRAIN | eod:0.64 stop:0.26 lock:0.09 | +0.088 | +0.287 | 3.72 | 99 |
+| L5 lasthour lock | VAL | eod:0.68 stop:0.29 lock:0.03 | +0.092 | +0.283 | 3.53 | 99 |
+| O1 orb1400 +2R | TRAIN | eod:0.76 stop:0.18 target:0.06 | +0.084 | +0.271 | 3.47 | 100 |
+| O1 orb1400 +2R | VAL | eod:0.73 stop:0.21 target:0.05 | +0.083 | +0.273 | 3.68 | 100 |
+| O2 orb1400 MOC | TRAIN | moc:0.82 stop:0.18 | +0.067 | +0.214 | 3.47 | 100 |
+| O2 orb1400 MOC | VAL | moc:0.75 stop:0.25 | +0.068 | +0.223 | 3.68 | 100 |

@@ -1,0 +1,11 @@
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+  GATE B2: 1,622 / -$17,346 (TRAIN), 706 / +$893 (VAL) — MATCH
+  GATE walk_from vs book6.rr on 120 booked trades: max |diff| = 2.22e-16
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+break rows 1188186 -> 1188186 | symbol-days 98203 | days 344
+  F38 last-hour signals: 26582 raw -> 344 after the shipped cascade (129 sessions)
+    TRAIN: 263
+    VAL: 81
+  ctrl38.csv 6791 rows (CB 3440, CA 3351)
+  floor38.csv 250171 rows over 344 sessions (727/session)
+  orbpop38.csv 98203 symbol-days over 344 sessions

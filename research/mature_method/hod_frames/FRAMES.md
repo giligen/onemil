@@ -380,3 +380,32 @@ price-scale and overnight rails make it the most falsifiable), **then F38** (its
 the floor for 14:00–15:55 — is cheap and settles whether the frame is worth running at all),
 **then F37** (it is the closest to what eleven passes have already refuted, so it earns its turn
 only if the bar-size change moves the FLOOR, not the filter).
+
+---
+
+## THE QUEUE AFTER PASS 12
+
+Pass 12 ran F39, F38 and F37 (`research/mature_method/frames12/REPORT.md`) and all three are
+**STAY-DRY**: 0 of 31 cells clears the bar, programme count **1,161**. F38 and F37 are refuted on
+their own declared falsifiers (the clock gradient stops at 14:00; a coarser bar changes the
+frequency and the exit mix and not the edge). F39 is **not** refuted — it produced the programme's
+fifth both-splits-positive object — but its paired placebo says the positive part belongs to the
+**overnight session**, not the detector: a matched NON-signal name bought at the same minute and
+sold into the next opening auction books **+0.044 / +0.037 R net on both splits**, and the multi-day
+break adds only **+0.049 R (t +0.71) / +0.024 R (t +0.28)** against an MDE of 0.16–0.18.
+
+That is the first POSITIVE unconditional number in 1,161 cells, and it reframes the queue: for
+eleven passes every object has been an intraday object priced against an intraday floor of
+−0.39 % of price. The next three frames all follow from it.
+
+| # | frame | mechanism |
+|---|---|---|
+| **F40** | **THE OVERNIGHT FLOOR — price the session the programme has never owned** | Pass 12 found, unlooked-for, that the unconditional bracket held from a random intraday minute into the NEXT opening auction is **+0.037 to +0.044 R net on both splits** where the same bracket flat at 15:55 is **−0.39 % of price**. That is the overnight risk premium, and it is the only positive floor the programme has ever measured — but it was measured incidentally, on 6,223 / 3,759 controls matched to one detector's trades, at ONE entry clock, with the stop live intraday and dead overnight. It must now be mapped properly before any object is built on it, exactly as F34 mapped the intraday floor: the unconditional close-to-next-open return in **% of price** over the whole PIT panel by price band × ADV$ band × wrapper/common × day-of-week × VIX/SPY-regime, with the overnight leg priced at BOTH auctions (no quoted spread), the **gap-risk distribution reported in full** (F39's overnight leg ran −8.98 R to +8.54 R on a 4.3 % stop), and the capacity and margin cost of holding overnight stated in dollars. Mechanism: the premium is paid for bearing the risk no intraday book bears, so it is NOT free and the report must say what the risk costs. Pre-commit: the floor is read BEFORE any detector; a cell is only interesting if it beats the **measured** overnight borrow/margin cost at Alpaca; and the whole map is scored ex-top-5 % because an uncapped overnight hold is exactly where a tail lives. |
+| **F41** | **THE OVERNIGHT CONTROL AS THE DENOMINATOR — re-score every positive object the programme owns against the exit it actually uses** | F39's cell 8 read +0.079 R against F34's intraday floor of −0.39 % and +0.049 R against its own overnight control — the same trade, two bounds, one of them wrong by the entire size of the finding. The same mistake is available in every book this house runs: ORB's static lock, BF-P1's R-trail and HOD-break's +2 R are each measured against a floor built on a DIFFERENT exit geometry from the one the book trades. Concretely: for each of the three live books, rebuild the matched non-signal control **under that book's own exit spec, at that book's own clock, on that book's own universe**, and re-read the gate map and the frequency frontier as differences against it rather than against zero or against a borrowed floor. Mechanism: an exit geometry has its own unconditional return, so "the signal is worth X" is only defined once the control shares the geometry. Pre-commit: the control's own return is printed for every book before any difference is quoted; a book whose edge is smaller than its own control's exit-geometry return is reported as an exit finding, not a selection finding; and F35's cap rule applies (ex-top-5 % only where the exit is uncapped). |
+| **F42** | **THE CLOSING AUCTION AS AN EXIT LEG, PRICED HONESTLY AND THEN USED** | Pass 12 measured that an auction-executed exit removes **0.064–0.068 pp of the 0.284 % of price** the programme's cost model charges an intraday force-close — a real, mechanical, repeatable saving on every book that currently force-closes at 15:55 — and, in the same breath, that the rest of the MOC "gain" is a 15:55→16:00 tail whose **median is −0.006 %**. The saving is worth having and nobody has tried to collect it: BF flats at 15:55, ORB at 15:45, HOD-break at 15:55, and all three pay the marketable exit. Concretely: re-simulate each live book with its force-close leg moved to a **market-on-close order** (submitted before the 15:50 imbalance publication, filled at the official close), measure the change in net R and in % of price per book, and measure the execution risk the change buys — the distribution of (official close − 15:55 print), per book's own names, with the median and the 5th/95th percentiles, not the mean. Mechanism: the auction is a single-price cross with no quoted spread to pay; the cost model already prices it at ratio 0 and pass 12 verified the price scale (median daily-close / intraday-close ratio **1.000000** in all 17 months). Pre-commit: this is an EXIT change to live books and therefore needs the independent-rebuild rail before any engine diff; the MOC leg's own slippage-vs-print distribution is reported per book; and a book whose entire improvement is the mean rather than the median is reported as NOT improved. |
+
+**Recommended run order: F40 first** (it is the only frame in the ledger with a positive floor to
+map, and every claim F41 and F42 could make depends on that map being honest), **then F41** (it is
+pure re-scoring of objects that already exist — no new walk — and it can invalidate or confirm
+numbers three live books are currently judged by), **then F42** (it is the only one of the three
+that ends in an engine diff, so it runs last and behind an independent rebuild).

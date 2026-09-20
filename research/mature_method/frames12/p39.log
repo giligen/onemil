@@ -1,0 +1,7 @@
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+  price-scale check (daily close vs intraday last close): 370 of 50276 rows = 0.74% DROPPED
+  w39 rows 50,276 -> cascade-passing signal-cells 43,716
+    H5    pre-book signals  4368  TRAIN 2344  VAL 2024
+    H20   pre-book signals  2454  TRAIN 1205  VAL 1249
+    H252  pre-book signals    87  TRAIN 0  VAL 87
+  ctrl39.csv 99,075 rows (CB 49,650, CA 49,425) over 341 sessions

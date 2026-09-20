@@ -1,0 +1,6 @@
+THE 15:55 -> CLOSING-AUCTION LEG, floor rows that exited at neither a stop nor a target
+  TRAIN: n=95,508  mean +0.460 % of price  median -0.006  t +6.7
+  VAL: n=66,056  mean +0.048 % of price  median +0.036  t +29.4
+  TRAIN H1: n=46,647 mean +0.905 % median -0.007
+  TRAIN H2: n=48,861 mean +0.035 % median -0.006
+share of floor rows whose 15:55 bracket exit was a TARGET: 1.450%

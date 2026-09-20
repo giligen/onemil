@@ -1,0 +1,19 @@
+# the raw bar walks — regenerate with the scripts below (each resumable per session)
+#   w39.py   50,276 multi-day-high level-rows           (~14 MB, ~35 min)
+#   wc.py    81,726 F39 placebo controls                (~13 MB, ~12 min)
+#   w38.py   427,314 last-hour floor + detector + arms  (~61 MB, ~30 min)
+#   w37.py   1,225,431 coarse-bar signals + arms        (~177 MB, ~35 min)
+w39.csv
+w39_state.json
+w39c.csv
+w39c_state.json
+w38.csv
+w38_state.json
+w37.csv
+w37_state.json
+# the control-key files those walks consume (rebuilt by p38.py / p39.py in seconds)
+ctrl38.csv
+ctrl39.csv
+floor38.csv
+orbpop38.csv
+__pycache__/
