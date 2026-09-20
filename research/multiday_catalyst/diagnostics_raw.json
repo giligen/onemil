@@ -1,0 +1,31 @@
+{
+  "sig_meta": {
+    "split_excl": 7,
+    "corp_excl": 0,
+    "r_skip": 2,
+    "no_hold": 0,
+    "n_candidates": 246
+  },
+  "ctl_meta": {
+    "split_excl": 38,
+    "corp_excl": 0,
+    "r_skip": 9516,
+    "no_hold": 88,
+    "n_candidates": 57898
+  },
+  "price_scale_checked": 200,
+  "price_scale_mismatch": 174,
+  "news_coverage": [
+    "2025-01-02",
+    "2026-09-18"
+  ],
+  "pit_coverage": [
+    "202407",
+    "202609"
+  ],
+  "months_dropped_pit_coverage": [
+    "202406"
+  ],
+  "n_daily_bars_rows": 5022957,
+  "n_universe_rows": 1139372
+}
