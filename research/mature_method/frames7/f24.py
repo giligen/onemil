@@ -22,6 +22,7 @@ from c7 import (D7, ROOT, SPLITS, arrays, asset_class, clustered_t, daily_fallba
                 walk_bf, walk_orb, ORB_FLAT_M, BF_FLAT_M)
 
 NPOOL = 25
+TOL = 5                           # a missing minute bar may be filled by the next print within 5 min
 N_LATER = 10                      # random later non-signal minutes per booked trade (arm a')
 SEED = 20260920
 ORB_BOOK = f'{ROOT}/research/orb_gates2/book_G3_meas.csv'
@@ -158,9 +159,14 @@ def walk():
                     continue
                 em += 1                                   # the next bar's open — the convention
             else:
-                em = int(r.entry_m)
+                # OBTAINABILITY (rail 1b): the booked fill minute is the minute in which price
+                # ran UP THROUGH the breakout level, so that bar's OPEN is a price the engine
+                # could not have had.  Entry is the NEXT bar's open — the programme's convention
+                # and the same clock every control arm uses.  The bar-open version is kept as
+                # `p24_bfvoid.csv` and reported as the size of that bias.
+                em = int(r.entry_m) + 1
             e0 = idx_of_minute(m, em)
-            if e0 < 0:
+            if e0 < 0 or m[e0] > em + TOL:
                 continue
             key = (name, day, r.symbol, em, r.split)
             rr, why, xm = W(o, h, l, c, m, e0, float(r.r_pct))
@@ -183,7 +189,7 @@ def walk():
                         continue
                     bo, bh, bl, bc, bv, bm = B
                     k = idx_of_minute(bm, em)
-                    if k < 0:
+                    if k < 0 or bm[k] > em + TOL:
                         continue
                     rr, why, xm = W(bo, bh, bl, bc, bm, k, float(r.r_pct))
                     if rr == rr:
@@ -277,10 +283,10 @@ def score():
                     cols = [(w == 'stop').mean(), (w == 'lock').mean(),
                             (w == 'flat').mean(), (w == 'eod').mean()]
                 else:
-                    cols = [w.str.endswith('stop').mean() & 1 * (~w.str.contains('trail')).mean(),
-                            w.str.contains('trail').mean(),
-                            w.str.contains('flat').mean(), w.str.contains('eod').mean()]
-                    cols[0] = (w.str.endswith('stop') & ~w.str.contains('trail')).mean()
+                    cols = [float((w.str.endswith('stop') & ~w.str.contains('trail')).mean()),
+                            float(w.str.contains('trail').mean()),
+                            float(w.str.contains('flat').mean()),
+                            float(w.str.contains('eod').mean())]
                 print(f'| {arm} | {sp} | {len(a)} | {a.rr.mean():+.4f} | {(a.rr>0).mean()*100:.1f} % | '
                       + ' | '.join(f'{100*x:.1f} %' for x in cols) + ' |')
     pd.DataFrame(out).to_csv(f'{D7}/cells24.csv', index=False)

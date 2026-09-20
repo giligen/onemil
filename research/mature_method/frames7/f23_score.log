@@ -1,0 +1,39 @@
+== F23 — the mirror ==
+  rows walked 204,201 | TRAIN+VAL 204,201 | no-fill under the floor 1.8 % | Reg SHO 201 (tape <= -10 %) 5.18 % | borrow flags known for 98.8 % of control names, BORROWABLE 64.6 %
+
+| cell | split | n | /wk | gross R | net R | $ | green % | worst wk $ | clust t | null p95 green | MDE |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| S-base   arm-b clock, borrowable, ex-201 | TRAIN | 21857 | 412.4 | +0.1259 | +0.0125 | +27,232 | 54.7 | -15,127 | +0.33 | 66.0 | 0.020 |
+| S-base   arm-b clock, borrowable, ex-201 | VAL | 9582 | 435.5 | +0.0941 | -0.0193 | -18,523 | 45.5 | -13,967 | -0.51 | 45.5 | 0.029 |
+|   halves | | H1 +0.0216 | H2 +0.0030 | VAL -0.0193 | same-signed positive: False | | | | | | |
+| S-nm2    range-so-far <= 2 % | TRAIN | 4598 | 86.8 | +0.2004 | +0.0870 | +40,002 | 54.7 | -4,724 | +1.30 | 86.8 | 0.040 |
+| S-nm2    range-so-far <= 2 % | VAL | 2017 | 91.7 | +0.1128 | -0.0006 | -120 | 50.0 | -4,800 | -0.01 | 59.1 | 0.058 |
+|   halves | | H1 +0.0992 | H2 +0.0762 | VAL -0.0006 | same-signed positive: False | | | | | | |
+| S-nm3    range-so-far <= 3 % | TRAIN | 9329 | 176.0 | +0.1869 | +0.0735 | +68,601 | 62.3 | -9,396 | +1.40 | 88.7 | 0.030 |
+| S-nm3    range-so-far <= 3 % | VAL | 4150 | 188.6 | +0.1284 | +0.0150 | +6,243 | 54.5 | -7,415 | +0.29 | 68.2 | 0.041 |
+|   halves | | H1 +0.0785 | H2 +0.0686 | VAL +0.0150 | same-signed positive: True | | | | | | |
+| S-nm4    range-so-far <= 4 % | TRAIN | 13484 | 254.4 | +0.1652 | +0.0518 | +69,823 | 62.3 | -11,896 | +1.11 | 84.9 | 0.025 |
+| S-nm4    range-so-far <= 4 % | VAL | 5956 | 270.7 | +0.1227 | +0.0093 | +5,523 | 45.5 | -10,278 | +0.20 | 68.2 | 0.036 |
+|   halves | | H1 +0.0588 | H2 +0.0445 | VAL +0.0093 | same-signed positive: True | | | | | | |
+| S-c1000  entry 10:00 | TRAIN | 21994 | 415.0 | +0.1004 | -0.0130 | -28,566 | 52.8 | -20,462 | -0.34 | 47.2 | 0.021 |
+| S-c1000  entry 10:00 | VAL | 9658 | 439.0 | +0.0607 | -0.0527 | -50,928 | 40.9 | -17,541 | -1.27 | 22.7 | 0.030 |
+|   halves | | H1 -0.0514 | H2 +0.0270 | VAL -0.0527 | same-signed positive: False | | | | | | |
+| S-c1100  entry 11:00 | TRAIN | 22004 | 415.2 | +0.0612 | -0.0522 | -114,856 | 37.7 | -21,226 | -1.36 | 18.9 | 0.018 |
+| S-c1100  entry 11:00 | VAL | 9708 | 441.3 | +0.0472 | -0.0662 | -64,223 | 36.4 | -19,048 | -1.77 | 13.6 | 0.026 |
+|   halves | | H1 -0.0261 | H2 -0.0792 | VAL -0.0662 | same-signed positive: False | | | | | | |
+| S-c1200  entry 12:00 | TRAIN | 21918 | 413.5 | +0.0112 | -0.1022 | -223,903 | 18.9 | -18,831 | -2.90 | 3.8 | 0.017 |
+| S-c1200  entry 12:00 | VAL | 9684 | 440.2 | -0.0208 | -0.1342 | -129,946 | 13.6 | -16,944 | -4.28 | 0.0 | 0.023 |
+|   halves | | H1 -0.0975 | H2 -0.1070 | VAL -0.1342 | same-signed positive: False | | | | | | |
+| S-wrap   wrappers only | TRAIN | 2677 | 50.5 | +0.3189 | +0.2055 | +55,021 | 45.3 | -2,444 | +1.61 | 94.3 | 0.064 |
+| S-wrap   wrappers only | VAL | 1037 | 47.1 | +0.0881 | -0.0253 | -2,620 | 50.0 | -2,616 | -0.37 | 54.5 | 0.085 |
+|   halves | | H1 +0.2712 | H2 +0.1083 | VAL -0.0253 | same-signed positive: False | | | | | | |
+| S-stock  commons only | TRAIN | 19180 | 361.9 | +0.0989 | -0.0145 | -27,789 | 49.1 | -19,083 | -0.45 | 47.2 | 0.021 |
+| S-stock  commons only | VAL | 8545 | 388.4 | +0.0948 | -0.0186 | -15,903 | 45.5 | -13,344 | -0.48 | 45.5 | 0.031 |
+|   halves | | H1 -0.0201 | H2 -0.0089 | VAL -0.0186 | same-signed positive: False | | | | | | |
+| S-nb     DIAGNOSTIC: no borrow screen | TRAIN | 33117 | 624.8 | +0.1536 | +0.0402 | +133,151 | 58.5 | -17,517 | +1.32 | 88.7 | 0.017 |
+| S-nb     DIAGNOSTIC: no borrow screen | VAL | 14433 | 656.0 | +0.1353 | +0.0219 | +31,675 | 50.0 | -14,400 | +0.71 | 81.8 | 0.025 |
+|   halves | | H1 +0.0407 | H2 +0.0398 | VAL +0.0219 | same-signed positive: True | | | | | | |
+
+  cells clearing the pre-committed live-exploration bar: NONE (0 of 10)
+
+  exit mix, S-base: flat 58.3 % stop 29.4 % target 12.1 % eod 0.2 %

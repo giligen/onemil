@@ -1,3 +1,6 @@
-p24.csv
+# walked-trade dumps (regenerable from the committed scripts; large)
 p23.csv
+p23_badfloor.csv
+p24.csv
+p24_exactmin.csv
 *_state.json

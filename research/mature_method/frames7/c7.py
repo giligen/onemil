@@ -67,9 +67,19 @@ def arrays(gg, m_lo=OPEN_M, m_hi=960):
     return o, h, l, c, v, r.m.values.astype(int)
 
 
-def idx_of_minute(m, want):
-    """Index of bar `want` in the minute vector, or -1."""
+def idx_of_minute(m, want, exact=False):
+    """Index of the first EXISTING bar at or after minute `want`, or -1.
+
+    A missing 1-minute bar means nothing printed in that minute, so the next obtainable open is
+    the next bar that exists — that, not a dropped trade, is what the engine would get.  `exact`
+    restores the strict lookup for callers that need the minute itself.
+    """
     k = np.where(m == int(want))[0]
+    if len(k):
+        return int(k[0])
+    if exact:
+        return -1
+    k = np.where(m > int(want))[0]
     return int(k[0]) if len(k) else -1
 
 
@@ -158,12 +168,16 @@ def walk_short(o, h, l, c, m, e, r_pct, floor_bps=60.0, flat_m=HOD_FLAT_M):
     Returns (rr, why, exit_m) with rr in SHORT R (positive = the name fell).
     """
     n = len(o)
-    if e < 0 or e + 1 >= n:
+    if e < 1 or e + 1 >= n:
         return np.nan, 'nofill', -1
-    floor = float(o[e]) * (1.0 - floor_bps / 1e4)
-    if l[e] > floor:                       # the market never came down to our limit
+    # The mirror of the long's capped BUY: a FLOORED sell-limit is the worst price we will accept,
+    # and it is set from information available at the close of bar e-1 (the engine's decision bar).
+    # The bar opens at or above the floor -> our marketable sell fills at that open.  The bar gaps
+    # DOWN through the floor -> no fill, $0, never a loss.
+    floor = float(c[e - 1]) * (1.0 - floor_bps / 1e4)
+    if float(o[e]) < floor:
         return np.nan, 'nofill', -1
-    E = min(float(o[e]), floor)
+    E = float(o[e])
     R = E * (r_pct / 100.0)
     if not (R > 0) or not (E > 0):
         return np.nan, 'nofill', -1
