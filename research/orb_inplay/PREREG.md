@@ -147,3 +147,34 @@ halves same-signed; **≥ 3 fills/week**. Then `python scripts/cadence_bar.py --
 Reported: long / short / combined separately; iid and day-clustered SE; win rate; ex-top-1 % and
 ex-top-5 % as diagnostics (not pass/fail, per Amendment 1); MDE beside any null; the ONE caveat that
 alone could explain the headline. TEST (≥ 2026-06-01) stays sealed — not queried in this run.
+
+## Cell E — pre-registered before scoring
+
+SAME book, SAME exit (stop = 0.10 × ATR14, target = 10 R, time exit 15:55 — §1.6-1.9 of the base
+spec, `score.py`'s exit), SAME cost model (measured per-leg half-spread from `nbbo.csv` /
+`hs_table.json` + $0.0035/share commission, both legs) — DIFFERENT universe:
+
+- **Sub-universe**: restrict the daily universe, BEFORE ranking, to `prev_close ≥ $20` AND
+  `adv20 ≥ 5,000,000` shares (both already computed causally in `universe.parquet`). Everything else
+  is unchanged: RVOL over the same five 09:30-09:34 minutes vs the prior-14-session mean (≥ 10 of 14
+  present), top-20 by RVOL **re-ranked within the sub-universe**, RVOL ≥ 1.0 floor, direction from the
+  5-min candle, entry at the 09:35 open, Reg SHO 201 exclusion unchanged.
+- Sub-universe size/day, and the measured half-spread distribution (median, P90, % of price and in R)
+  of the picks actually drawn from it, are reported. If the new picks' price/clock cells are not
+  already covered by the existing `hs_table.json` measured sample (≥ 20 legs/cell), new NBBO legs are
+  fetched the same way `nbbo_sample.py` did (Alpaca SIP) and coverage (≥ 80 % rail) is reported.
+- **Sizing** (for $ numbers only): 1 % of $66,000 equity per trade; notional capped at **1 ×** equity
+  total across concurrently-open positions (admitted in RVOL rank order, same as the base book),
+  reported **alongside 2 ×**; positions/day reported for both.
+- Cell count for the programme: **1,284** (long, short, combined — same three cells as the base book
+  and Cell D, scored once more under this universe restriction).
+
+**Pass bar (VAL, combined book)**: net R/trade **≥ +0.10** with day-clustered **t ≥ 2.0**; TRAIN
+halves same-signed; **≥ 3 fills/week**. Then `python scripts/cadence_bar.py --trades <cellE.csv>
+--split VAL` and `--split TRAIN` are run on the cell-E trade list (columns `date`, `pnl_R`, `symbol`)
+and both blocks are pasted into the report.
+
+Reported: sub-universe size/day; measured half-spread distribution of picks (median, P90, % of
+price, R) and cost/trade in R; long / short / combined separately; iid and day-clustered SE; WR;
+ex-top-1 % and ex-top-5 % diagnostics; MDE beside any null; the ONE caveat that alone could explain
+the headline. TEST (≥ 2026-06-01) stays sealed — not queried in this run.
