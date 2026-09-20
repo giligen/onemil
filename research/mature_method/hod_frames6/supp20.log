@@ -1,0 +1,48 @@
+== S1  CAUSALITY OF THE CONTROL — arm a split at the break minute ==
+  A control minute BEFORE the break is selected using the knowledge that the day would
+  later produce a booked break.  A control minute AFTER it is not: at the break bar the
+  engine already knows the day qualified.  Only the AFTER half is a causal comparison.
+
+| arm | split | n trades | break grossR | control grossR | paired Δ | day-clust t | note |
+|---|---|---|---|---|---|---|---|
+| a ALL minutes | TRAIN | 1622 | -0.0390 | +0.2173 | -0.2563 | -7.50 | as scored (look-ahead in membership) |
+| a ALL minutes | VAL | 706 | +0.0827 | +0.2370 | -0.1543 | -3.59 | as scored (look-ahead in membership) |
+| a BEFORE the break | TRAIN | 1168 | -0.0705 | +0.9830 | -1.0535 | -26.83 | NOT causal — membership uses the future |
+| a BEFORE the break | VAL | 430 | +0.0778 | +1.0611 | -0.9833 | -22.63 | NOT causal — membership uses the future |
+| a AFTER the break | TRAIN | 1621 | -0.0385 | +0.0249 | -0.0634 | -1.88 | **CAUSAL** — day membership already established |
+| a AFTER the break | VAL | 705 | +0.0846 | +0.0590 | +0.0255 | +0.60 | **CAUSAL** — day membership already established |
+| a AFTER, within 30 min | TRAIN | 1621 | -0.0385 | +0.0077 | -0.0462 | -1.89 | causal + clock-matched |
+| a AFTER, within 30 min | VAL | 705 | +0.0846 | +0.1622 | -0.0776 | -2.24 | causal + clock-matched |
+
+== S2  arm c is NOT a placebo ==
+  The mark "entry_m - 15" exists only because a break happened at entry_m.  Its +1.2 R is
+  the value of buying 15 minutes before a run you already know is coming — an ORACLE, and
+  it is reported as one.  Coverage is also below the PREREG 80 % rail, so it is a
+  DIAGNOSTIC and not a cell:
+    TRAIN: 945/1622 = 58.3 % coverage, mean gross R +1.1964, target-hit 65.6 %
+    VAL: 332/706 = 47.0 % coverage, mean gross R +1.2432, target-hit 64.5 %
+
+== S3  TAIL DEPENDENCE and the time-of-day control (arm a AFTER, arm b) ==
+| arm | split | paired Δ all | ex-top-1 % ctrl | ex-top-5 % ctrl | median Δ | break WR | ctrl WR |
+|---|---|---|---|---|---|---|---|
+| a AFTER | TRAIN | -0.0634 | -0.0612 | -0.0612 | -0.0956 | 38.8 % | 46.1 % |
+| a AFTER | VAL | +0.0255 | +0.0279 | +0.0279 | -0.0125 | 45.1 % | 51.1 % |
+| b | TRAIN | +0.1228 | +0.1253 | +0.1253 | -0.3031 | 38.8 % | 37.5 % |
+| b | VAL | +0.2400 | +0.2420 | +0.2420 | -0.1888 | 45.0 % | 38.4 % |
+
+== S3b  the BREAK's own tail removed (CLAUDE.md rail 5, the version that matters) ==
+| arm | split | paired Δ all | ex-top-1 % of the BREAK | ex-top-5 % of the BREAK | n |
+|---|---|---|---|---|---|
+| a AFTER (causal) | TRAIN | -0.0634 | -0.0792 | -0.1446 | 1621 |
+| a AFTER (causal) | VAL | +0.0255 | +0.0124 | -0.0471 | 705 |
+| b | TRAIN | +0.1228 | +0.1044 | +0.0119 | 1605 |
+| b | VAL | +0.2400 | +0.2209 | +0.1398 | 705 |
+
+== S4  the decomposition, in one table (gross R per trade, matched design) ==
+| object | TRAIN | VAL | what it holds fixed |
+|---|---|---|---|
+| the BOOKED break | -0.0390 | +0.0827 | nothing — the book itself |
+| same symbol-day, any non-break minute | +0.2089 | +0.2291 | day + name (look-ahead in membership) |
+| same symbol-day, non-break minute AFTER the break | +0.0141 | +0.0725 | day + name, CAUSAL |
+| matched non-signal name, same minute | -0.1614 | -0.1596 | clock + price + ADV + asset class |
+| matched non-signal name, random non-break minute | -0.0579 | -0.0423 | nothing — the universe bound |

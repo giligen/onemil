@@ -1,0 +1,60 @@
+== F20 · 0. R3 independent-rebuild rail ==
+  placebo walker re-priced 2328 of 2328 booked trades from their own bar and own stop; max |Δrr| = 2.220e-16
+  R3: ASSERTED (the run aborts otherwise)
+
+== F20 · 1. coverage (availability rail) ==
+| arm | split | booked | matched | coverage | controls/trade (median) |
+|---|---|---|---|---|---|
+| a | TRAIN | 1622 | 1622 | 100.0 % | 237 |
+| a | VAL | 706 | 706 | 100.0 % | 234 |
+| b | TRAIN | 1622 | 1605 | 99.0 % | 24 |
+| b | VAL | 706 | 705 | 99.9 % | 24 |
+| c | TRAIN | 1622 | 945 | 58.3 % | 1 |
+| c | VAL | 706 | 332 | 47.0 % | 1 |
+| d | TRAIN | 1622 | 1605 | 99.0 % | 125 |
+| d | VAL | 706 | 705 | 99.9 % | 125 |
+
+== F20 · 2. the placebo cells ==
+| cell | split | break grossR | control mean | ctrl p5 | ctrl p95 | break pctile | paired Δ | iid t | day-clust t | n paired |
+|---|---|---|---|---|---|---|---|---|---|---|
+| F20-a same symbol-day, non-break minute | TRAIN | -0.0390 | +0.2167 | +0.1780 | +0.2569 | 0.0 | -0.2563 | -9.00 | -7.50 | 1622 |
+| F20-a same symbol-day, non-break minute | VAL | +0.0827 | +0.2379 | +0.1884 | +0.2975 | 0.0 | -0.1543 | -3.58 | -3.59 | 706 |
+| F20-b matched non-signal symbol, same minute | TRAIN | -0.0391 | -0.1592 | -0.1982 | -0.1198 | 100.0 | +0.1228 | +3.80 | +2.96 | 1605 |
+| F20-b matched non-signal symbol, same minute | VAL | +0.0821 | -0.1551 | -0.2132 | -0.0986 | 100.0 | +0.2400 | +5.06 | +4.74 | 705 |
+| F20-c same symbol, 15 min earlier | TRAIN | -0.0668 | +1.1950 | +1.1237 | +1.2624 | 0.0 | -1.2632 | -28.54 | -26.84 | 945 |
+| F20-c same symbol, 15 min earlier | VAL | +0.0389 | +1.2451 | +1.1472 | +1.3289 | 0.0 | -1.2044 | -16.73 | -19.43 | 332 |
+
+== F20 · 3. both TRAIN halves (arm a, the reading arm) ==
+| half | break grossR | control mean | break pctile | paired Δ | day-clust t | n |
+|---|---|---|---|---|---|---|
+| H1-2025 | -0.0767 | +0.2162 | 0.0 | -0.2945 | -5.82 | 789 |
+| H2-2025 | -0.0032 | +0.2170 | 0.0 | -0.2201 | -4.81 | 833 |
+| VAL | +0.0827 | +0.2377 | 0.0 | -0.1543 | -3.59 | 706 |
+
+== F20 · 4. F20-e  exit mix and win rate ==
+| arm | split | n | mean grossR | WR (R>0) | stop % | target % | eod % |
+|---|---|---|---|---|---|---|---|
+| BREAK | TRAIN | 1622 | -0.0390 | 38.8 % | 51.7 | 20.3 | 27.9 |
+| a | TRAIN | 360003 | +0.2089 | 51.1 % | 30.3 | 20.3 | 49.4 |
+| b | TRAIN | 35440 | -0.1614 | 37.5 % | 43.4 | 9.6 | 47.1 |
+| c | TRAIN | 945 | +1.1964 | 77.9 % | 18.9 | 65.6 | 15.4 |
+| d | TRAIN | 200088 | -0.0579 | 43.3 % | 29.5 | 8.3 | 62.2 |
+| BREAK | VAL | 706 | +0.0827 | 45.0 % | 45.8 | 21.2 | 33.0 |
+| a | VAL | 156105 | +0.2291 | 54.7 % | 26.7 | 17.6 | 55.7 |
+| b | VAL | 15611 | -0.1596 | 38.4 % | 41.0 | 7.9 | 51.1 |
+| c | VAL | 332 | +1.2432 | 80.4 % | 17.2 | 64.5 | 18.4 |
+| d | VAL | 88086 | -0.0423 | 45.3 % | 25.5 | 6.7 | 67.7 |
+
+== F20 · 5. F20-d  the universe bound (no break in symbol OR minute) ==
+  TRAIN: n 200088 over 242 sessions, mean gross R -0.0579 (day-clustered SE 0.0599)
+  VAL: n 88086 over 102 sessions, mean gross R -0.0423 (day-clustered SE 0.0862)
+
+== F20 · 6. THE PRE-COMMITTED READING ==
+  arm a percentiles: TRAIN 0.0 · VAL 0.0
+  arm a day-clustered paired t: TRAIN -7.50 · VAL -3.59
+  corroboration b: paired Δ +0.1228 / +0.2400 (pctile 100 / 100)
+  corroboration c: paired Δ -1.2632 / -1.2044 (pctile 0 / 0)
+
+  >>> READING: **WORSE** <<<
+
+cells20.csv written (9 rows)

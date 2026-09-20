@@ -1,0 +1,58 @@
+== F21 · building the point-in-time HOD universe ==
+  PIT HOD-universe symbol-days 1,159,397 (5,494 distinct symbols, 352 sessions)
+  today's `daily_bars` carries 13,620 distinct symbols
+
+== F21-1  share of PIT HOD-universe symbol-days ABSENT from today's daily_bars ==
+| period | symbol-days | absent | share | distinct symbols | absent symbols |
+|---|---|---|---|---|---|
+| 2025 | 796,800 | 27,082 | **3.40 %** | 4,867 | 300 |
+| 2026 | 362,597 | 4,128 | **1.14 %** | 4,654 | 112 |
+| ALL | 1,159,397 | 31,210 | **2.69 %** | 5,494 | 319 |
+
+  monthly absent share: min 0.70 % (2026-05), max 5.07 % (2025-01), median 2.71 %
+
+== F21-2  wrapper vs common, and by price / ADV$ band ==
+| cohort | symbol-days | absent | share |
+|---|---|---|---|
+| stock | 745,469 | 945 | 0.13 % |
+| unknown | 40,268 | 30,265 | 75.16 % |
+| wrapper | 373,660 | 0 | 0.00 % |
+| pb=<$20 | 76,131 | 6,029 | 7.92 % |
+| pb=$20-30 | 233,474 | 10,535 | 4.51 % |
+| pb=$30-50 | 274,613 | 6,200 | 2.26 % |
+| pb=$50-100 | 301,355 | 5,955 | 1.98 % |
+| pb=$100+ | 273,824 | 2,491 | 0.91 % |
+| ab=<$10M | 222,433 | 12,300 | 5.53 % |
+| ab=$10-50M | 382,378 | 10,598 | 2.77 % |
+| ab=$50-200M | 317,676 | 5,765 | 1.81 % |
+| ab=>=$200M | 236,910 | 2,547 | 1.08 % |
+
+== F21-3  DIRECTION — what the absent names' own sessions look like ==
+| cohort | n | mean open->close % | median | mean range % | share of days +5 % | share of days -5 % |
+|---|---|---|---|---|---|---|
+| PRESENT in daily_bars | 1,128,187 | +0.030 | +0.015 | 2.87 | 2.17 % | 2.15 % |
+| ABSENT from daily_bars | 31,210 | +0.010 | +0.000 | 2.45 | 1.94 % | 1.95 % |
+
+  absent minus present, mean open->close: -0.020 pp (SE 0.015, t -1.30)
+  Interpretation rail: a long-only book flat by 15:55 earns the INTRADAY path, not the overnight gap; a positive difference means the survivor filter dropped days that would have HELPED, a negative one means it dropped days that would have HURT.
+
+== F21-3b  the absent share among CANDIDATE-generating days (range >= 5 %) ==
+  Breaks come from movers, not from the average symbol-day, so the share that matters is
+  the one on days wide enough to produce a >= 5 %-above-open high.
+| cohort | symbol-days | absent | share | mean open->close % of the absent |
+|---|---|---|---|---|
+| all days | 1,159,296 | 31,135 | 2.69 % | +0.010 (present +0.030) |
+| range >= 5 % | 154,065 | 3,265 | 2.12 % | +0.006 (present +0.054) |
+| range >= 10 % | 29,902 | 852 | 2.85 % | +0.694 (present +0.658) |
+
+== F21-4  materiality — do the absent names have 1-minute bars at all? ==
+  319 distinct absent symbols; probing the study's own bar stores
+  1-min bars present for 0 of them in cache.db, 150 in bars_sip.db
+
+== F21 · THE PRE-COMMITTED MATERIALITY RULE ==
+  absent share 2025 3.40 % · 2026 1.14 % — both < 5 %: True
+  direction: absent minus present open->close -0.020 pp (t -1.30)
+
+  >>> SURVIVORSHIP: **NOT load-bearing** <<<
+
+cells21.csv written

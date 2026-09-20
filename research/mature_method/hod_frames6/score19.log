@@ -1,0 +1,57 @@
+== F19 · point-in-time listing sets (stage A artifact `pitsets6.csv`) ==
+  PIT definition coverage 202407..202609 — the whole TRAIN+VAL window is INSIDE it; the XNAS.ITCH 2018-2024 fallback is not needed and is not used.
+  H1-2025: listed throughout = 10765 symbols
+  H2-2025: listed throughout = 11207 symbols
+  VAL: listed throughout = 11926 symbols
+  INTERSECT (listed throughout all three eras) = 9755 symbols
+
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+== F19-0  structural report (per era, the candidate stream) ==
+| era | signals | distinct symbols | wrappers | commons | UNCHECKABLE (no PIT record) | median price | median ADV$ | listed-in-all-3 share of signals |
+|---|---|---|---|---|---|---|---|---|
+| H1-2025 | 2573 | 1248 | 376 | 863 | 0 (0.0 %) | $41.64 | $160M | 95.6 % |
+| H2-2025 | 2002 | 645 | 160 | 481 | 0 (0.0 %) | $38.75 | $102M | 72.1 % |
+| VAL | 2452 | 782 | 189 | 587 | 29 (3.7 %) | $41.74 | $131M | 69.0 % |
+
+  wrappers listed throughout all three eras vs first seen later:
+    wrapper: 524 distinct; in INTERSECT 407 (77.7 %); in H1 set 408 (77.9 %)
+    stock: 1378 distinct; in INTERSECT 1284 (93.2 %); in H1 set 1286 (93.3 %)
+
+== F19 · the cells (three-era table; the object is the UNIVERSE, not a new rule) ==
+| cell                               | H1-2025 n | /wk   | gross  | $        | H2-2025 n | /wk   | gross  | $        |   VAL n | /wk   | gross  | $        |
+|------|------|------|------|------|------|------|------|------|------|------|------|------|
+| F19-ref  base B2 (as-is)           |   789 |  29.2 | -0.077 |   -11303 |   833 |  30.9 | -0.003 |    -6043 |   706 |  32.1 | +0.083 |     +893 |
+| F19-b1   base, INTERSECT           |   757 |  28.0 | -0.097 |   -12314 |   754 |  27.9 | +0.033 |    -2545 |   656 |  29.8 | +0.002 |    -4486 |
+| F19-b2   base, NOT in INTERSECT    |   113 |   4.2 | -0.066 |    -1558 |   473 |  17.5 | -0.026 |    -4751 |   527 |  24.0 | +0.112 |    +2191 |
+| F19-o1   wrappers, INTERSECT       |   453 |  16.8 | -0.098 |    -7037 |   354 |  13.1 | +0.112 |    +1912 |   324 |  14.7 | -0.021 |    -2711 |
+| F19-o2   SPY 09:35 gate, INTERSECT |   368 |  13.6 | -0.082 |    -5537 |   408 |  15.1 | +0.114 |    +1925 |   347 |  15.8 | +0.066 |     -186 |
+| F19-o3   dollar_frac>=p80(48.9), INT |   208 |   7.7 | -0.043 |    -2139 |   277 |  10.3 | +0.108 |    +1267 |   272 |  12.4 | -0.037 |    -2807 |
+| F19-o4   price>=$30, INTERSECT     |   613 |  22.7 | -0.051 |    -7245 |   613 |  22.7 | +0.044 |    -1355 |   596 |  27.1 | +0.040 |    -1867 |
+| F19-o1r  wrappers, as-is           |   497 |  18.4 | -0.117 |    -8779 |   586 |  21.7 | +0.091 |    +1345 |   594 |  27.0 | +0.135 |    +3958 |
+| F19-o2r  SPY 09:35 gate, as-is     |   392 |  14.5 | -0.062 |    -5130 |   437 |  16.2 | +0.117 |    +2071 |   365 |  16.6 | +0.165 |    +3439 |
+| F19-o3r  dollar_frac>=p80, as-is   |   230 |   8.5 | -0.076 |    -3168 |   345 |  12.8 | +0.108 |    +1504 |   374 |  17.0 | +0.083 |     +646 |
+| F19-o4r  price>=$30, as-is         |   649 |  24.0 | -0.070 |    -8928 |   703 |  26.0 | +0.052 |    -1200 |   673 |  30.6 | +0.028 |    -2996 |
+
+== F19-x1  the H1 book on the H2-listed universe vs the H1-only names ==
+  H1, all names (reference)              n  789 (29.2/wk)  gross -0.0767  net -0.1433  $   -11303  green  26.9 %  clust t -2.79  MDE 0.158
+  H1, names listed throughout H2-2025    n  789 (29.2/wk)  gross -0.0767  net -0.1433  $   -11303  green  26.9 %  clust t -2.79  MDE 0.158
+  H1, names listed in all three eras     n  757 (28.0/wk)  gross -0.0966  net -0.1627  $   -12314  green  26.9 %  clust t -3.12  MDE 0.159
+  H1, names NOT listed throughout H2     n    0 ( 0.0/wk)  gross +nan  net +nan  $       +0  green   nan %  clust t +nan  MDE nan
+
+== F19 · THE PRE-COMMITTED RE-OPEN RULE ==
+  RE-OPEN iff on INTERSECT: (a) H1 gross >= 0, (b) H1/H2/VAL same-signed positive, (c) >= 10 tr/wk on BOTH splits.
+| object | H1 gross | H2 gross | VAL gross | min /wk | (a) | (b) | (c) | VERDICT |
+|---|---|---|---|---|---|---|---|---|
+| F19-ref  base B2 (as-is) | -0.077 | -0.003 | +0.083 | 29.2 | False | False | True | **stays dead** |
+| F19-b1   base, INTERSECT | -0.097 | +0.033 | +0.002 | 27.9 | False | False | True | **stays dead** |
+| F19-b2   base, NOT in INTERSECT | -0.066 | -0.026 | +0.112 | 4.2 | False | False | False | **stays dead** |
+| F19-o1   wrappers, INTERSECT | -0.098 | +0.112 | -0.021 | 13.1 | False | False | True | **stays dead** |
+| F19-o2   SPY 09:35 gate, INTERSECT | -0.082 | +0.114 | +0.066 | 13.6 | False | False | True | **stays dead** |
+| F19-o3   dollar_frac>=p80(48.9), INT | -0.043 | +0.108 | -0.037 | 7.7 | False | False | False | **stays dead** |
+| F19-o4   price>=$30, INTERSECT | -0.051 | +0.044 | +0.040 | 22.7 | False | False | True | **stays dead** |
+| F19-o1r  wrappers, as-is | -0.117 | +0.091 | +0.135 | 18.4 | False | False | True | **stays dead** |
+| F19-o2r  SPY 09:35 gate, as-is | -0.062 | +0.117 | +0.165 | 14.5 | False | False | True | **stays dead** |
+| F19-o3r  dollar_frac>=p80, as-is | -0.076 | +0.108 | +0.083 | 8.5 | False | False | False | **stays dead** |
+| F19-o4r  price>=$30, as-is | -0.070 | +0.052 | +0.028 | 24.0 | False | False | True | **stays dead** |
+
+cells19.csv written
