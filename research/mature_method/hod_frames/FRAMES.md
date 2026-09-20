@@ -409,3 +409,33 @@ map, and every claim F41 and F42 could make depends on that map being honest), *
 pure re-scoring of objects that already exist — no new walk — and it can invalidate or confirm
 numbers three live books are currently judged by), **then F42** (it is the only one of the three
 that ends in an engine diff, so it runs last and behind an independent rebuild).
+
+---
+
+## THE QUEUE AFTER PASS 13
+
+Pass 13 ran F40, F41 and F42 (`research/mature_method/frames13/REPORT.md`). **0 of 30 cells clears a
+bar; programme count 1,191.** F40 is not refuted — it CONFIRMED the overnight premium (+0.062 % of
+price a night unconditionally, era-stable over eleven years) and then disqualified every one of its
+16 cells on the pre-committed cap rule: **the premium is negative ex-top-5 % in every cell, every
+band and every era**, and the liquid cell's execution costs a measured 0.368 % of price round trip
+against a 0.045 % gross. F42 is refuted on its own falsifier on all three books (the mechanical
+auction saving is real at +0.084 % of price and the 15:45/15:55 -> 16:00 drift is larger and negative
+at the MEDIAN everywhere). F41 is the only one with a live consequence: **ORB is R-POS (51 % / 14 % of
+its headline R per pick is what a matched NON-signal name earns under ORB's own static lock at ORB's
+own clock), BF is R-ZERO but borderline (24 % / 21 % against a 25 % line)** — the ramp band is
+unaffected (the control cancels inside it), the gate maps are unaffected (differences cancel), and
+the attribution sentence "the pipeline's selection is the edge" is over-claimed.
+
+Three things pass 13 opened, and the next three frames follow from them.
+
+| # | frame | mechanism |
+|---|---|---|
+| **F45** | **THE COST MODEL AT THE CLOCKS THE BOOKS ACTUALLY TRADE** | F40 had to measure the opening minute rather than impute it, and the answer was **0.70 % of price over a stratified sample and 0.91 % on liquid common stock** — against an imputation table (`S.IMPUTE`) that was FIT on 09:37-14:01 and has since priced **1,191 cells**, including every cost number in six passes and both live books' band tables. An imputation is a hypothesis about a clock it was not measured at. Concretely: measure the SIP NBBO on each book's OWN names at **09:31, 09:35 (ORB's entry), the BF detection minute, 13:00, 15:45 and 15:55**, 400+ name-minutes per clock, and compare cell by cell with what the table imputes; then re-price every standing per-book cost number with the measured value and report which conclusions move. Pre-commit: the table is not "fixed", it is AUDITED — the deliverable is a measured-vs-imputed table with the sign and size of every gap, plus the list of prior verdicts whose sign would flip. Runs first because it is cheap, it is pure measurement, and it can invalidate numbers in every other frame. |
+| **F43** | **THE GEOMETRY FLOOR MAP — the object with no detector** | F41 measured that an exit geometry has a large unconditional return of its own: ORB's static lock on a matched NON-signal gap-up name at 09:35 books **+0.109 R / +0.43 % of price**, BF's trail-plus-partial **+0.147 R / +0.41 %**, while the HOD +2 R bracket's is **−0.16 R**. Those three numbers were produced incidentally, one per book, as controls. Map them properly, as F34 mapped the intraday floor and F40 the overnight one: the unconditional return of **each geometry** (bare stop / +2 R bracket / static lock / R-trail / R-trail + partial / MOC / next open) x **stop width** x **entry clock** x **liquidity band**, on a detector-free population, in R and in % of price. Mechanism: if a geometry alone earns +0.4 % of price on a name nobody selected, the geometry — not the detector — is the object, and this programme has spent thirteen passes filtering signals on top of geometries it never priced. Pre-commit: the map is read BEFORE any detector is attached; a geometry only counts if it is positive on both TRAIN halves AND VAL **and** survives ex-top-5 % (F40's lesson); and the cost is the one F45 measures, not the imputed one. |
+| **F44** | **IS THE OVERNIGHT TAIL SELECTABLE AT 15:55?** | F40's whole premium is the top 5 % of nights — that is a finding about SHAPE, and it leaves exactly one question open: is the tail predictable from information available at the closing cross? Candidates, all causally available before 16:00 and all already in the multiday panel: a scheduled earnings date (`earnings_events.parquet`), the same-day move, the prior-night gap history of the name, short interest, and index/ETF membership. Concretely: condition A13 and A2 on each, report the ex-top-5 % cell (the one that matters), the gap-risk p5, and the frequency. Mechanism: a risk premium is paid for a risk — if the nights that pay are the nights with a known scheduled event, the premium is not a free lottery, it is an event-risk fee with a conditioning variable. Pre-commit: the ONLY result that counts is **ex-top-5 % positive on both TRAIN halves and VAL**, net of the F45-measured execution and the margin; a conditioner that only lifts the uncapped mean is reported as NOT a finding, because that is what F40 already knows. Runs last: it is the only one of the three that could produce a new object, and it must be built on F45's cost and F40's map, not on an imputation. |
+
+**Recommended run order: F45 first** (cheapest, pure measurement, and it can move numbers in every
+frame including the two below), **then F43** (it re-uses F45's cost and it is the largest unexamined
+object the programme owns — thirteen passes of detectors on top of unpriced geometries), **then F44**
+(it needs both and it is the only one that could end in a new candidate).

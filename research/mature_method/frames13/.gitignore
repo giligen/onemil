@@ -1,0 +1,6 @@
+# bulk artifacts: 17.4M-row panel columns and the per-year files (rebuildable in ~10 min by
+# `_year.py <year>` for 2016..2026 then `_merge.py`); the scored CSVs are committed.
+on_*.parquet
+col_*.npy
+symbols.parquet
+p42.csv
