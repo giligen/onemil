@@ -99,6 +99,50 @@ Pass 2 artifacts: `universe_map.json`, `candidate_underlying_days.csv`, `need_pu
 `pull_bars.py`, `run_study2.py`, `compute_stats.py`. TEST (>=2026-06-01) was never
 queried — sealed by construction, and moot given the pass-2 null.
 
+## Pass 3 results — flow proxy correction (F3)
+
+**Verdict: DEAD.** Neither pre-committed condition clears. This closes the pass-2 caveat
+(the true high-flow tail was never isolated) — it now has been, and it has no edge either.
+
+F3 replaced pass-2's wrapper-ADV20 numerator with same-day wrapper dollar volume (from
+`cache.db daily_bars`, since 0 of 1,705 referenced wrapper tickers have any rows in this
+study's pulled `bars_1500_1600.db` — that db holds underlyings only, so F3 ran entirely
+on the daily-bars fallback branch, not the intraday-bars branch PREREG allowed for). Same
+pass-2 qualified, SHO-clean population (n=13,548), F3 re-ranked within each split.
+
+| Split | Cell | n trades (days) | top-decile net R | t | rest net R |
+|---|---|---|---|---|---|
+| TRAIN | 1,298 LONG top decile | 163 (92) | -0.004 | -0.05 | -0.067 |
+| TRAIN | 1,299 COMBINED top decile | 307 (156) | +0.047 (+0.093% price) | 0.82 | -0.031 |
+| VAL | 1,298 LONG top decile | 186 (64) | -0.017 | -0.21 | -0.041 |
+| VAL | 1,299 COMBINED top decile | 349 (94) | +0.003 (+0.007% price) | 0.05 | -0.085 |
+
+No cell reaches +0.10R, and none reaches t>=2 (max observed t=0.82, TRAIN COMBINED). The
+top decile is directionally less-bad than the rest in 3 of 4 cells (consistent with pass
+2's "big movers give some back" story softening at higher flow) but never crosses into a
+tradeable positive.
+
+**Quintile monotonicity (COMBINED population, mean pnl_R by F3 quintile)**:
+TRAIN: Q1 -0.075, Q2 +0.008, Q3 +0.055, Q4 +0.006, Q5 +0.038 — NOT monotone (Q3 > Q5).
+VAL: Q1 -0.090, Q2 -0.125, Q3 -0.099, Q4 -0.126, Q5 -0.036 — NOT monotone (no clean
+ordering; every bucket negative). Fails the pre-committed monotone-decreasing check on
+both splits.
+
+**F3-missing share**: 51.7% (7,000/13,548) of the qualified population — 6,984 because
+NONE of the underlying's wrappers had a `daily_bars` row for that specific date (not a
+20-day-history problem this time, a same-day-coverage problem: many resolved wrapper
+tickers simply don't trade, or aren't in `daily_bars`, on a given candidate day), 16
+because the underlying itself lacked 5 prior days for the ADV fallback.
+
+**The one caveat**: F3's numerator never used real intraday same-day volume (the
+"preferred" branch in the pre-registration never fired — no wrapper bars exist in this
+study's db) — it is same-day but end-of-day dollar volume, a same-day proxy for flow, not
+a 15:00-causal one; and over half the population still can't be scored at all, so the
+scored 48.3% is not guaranteed representative of the missing 51.7%. Given the DEAD verdict
+on the scored half, and no plausible mechanism for the missing half to look categorically
+different, this is not pursued further under CLAUDE.md's north-star ladder — no live rung
+to put this on. Pass 2's negative verdict stands, now without an open flow-tail caveat.
+
 ## Independent check status
 
 Full independent reimplementation (per CLAUDE.md's research-claim checklist) NOT
