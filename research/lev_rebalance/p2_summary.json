@@ -1,0 +1,13 @@
+{
+  "n_signal_candidate_days": 28462,
+  "n_signal_has_bars": 27539,
+  "coverage_signal": 0.9675707961492517,
+  "n_signal_qualified": 13806,
+  "f_thresh_train_median": 0.0,
+  "n_selected": 13362,
+  "n_sho_excluded": 1155,
+  "n_control_candidate_days": 3888,
+  "n_control_has_bars": 3078,
+  "coverage_control": 0.7916666666666666,
+  "n_control_qualified": 1326
+}

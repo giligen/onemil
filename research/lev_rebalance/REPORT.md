@@ -1,100 +1,110 @@
 # REPORT — lev_rebalance: wrapper close-rebalance drift
 
-**Verdict: INCONCLUSIVE — do not ship, do not cite the point estimates.** The study did
-not reach adequate power. The blocking finding is a data-coverage collapse, discovered
-mid-run, not a considered null about the mechanism (see phrasing rule, CLAUDE.md).
+**Verdict (PASS 2, full population): REFUTED — signal does not beat control; the signal
+leg alone is significantly NEGATIVE, well-powered, both splits. Do not ship, do not run
+live.** This supersedes pass 1 (history below), which was VOID on data coverage, not a
+finding about the mechanism.
 
-## The one caveat that alone explains everything
+## Pass 2 — the full-population, availability-fixed rerun
 
-`intraday_bars_1min` in `data/cache.db` is populated **opportunistically** — only for
-symbol-days the live system happened to scan/touch — not comprehensively. For MSTR
-(the underlying that supplies 18 of 19 signal trades) the cache holds 1-min bars for
-only **29 distinct days in all of 2025**. Across the three underlyings, of 381
-candidate days (daily |move| >= 3%), only **47 (12.3%)** had usable 1-min bars at both
-14:59 and 15:01 ET — far below the PREREG's own 80% coverage rail. The 47 covered days
-are not a random subsample of the 381: they are whichever days some other process
-(ORB/BF scans, manual backtests) already pulled that symbol. **The resulting trade
-sample is not causally guaranteed representative of all qualifying wrapper-rebalance
-days** — this is exactly the kind of selection the CLAUDE.md checklist (causality
-trace) exists to catch, and it was caught, not avoided.
+Universe: 316 underlyings (of 345 resolved from the 6,136-row wrapper class map via
+`underlying_anchor`) with >=1 candidate day; control pool 400 non-wrapper stocks (89 with
+candidate days). Missing 1-min bars pulled from Alpaca SIP into a study-owned db
+(`bars_1500_1600.db`), `cache.db` untouched. See `PREREG.md` Pass-2 addendum for the
+exact pull spec.
 
-## Cells
+**Coverage**: signal 27,539 / 28,462 candidate underlying-days usable (**96.8%**, clears
+the 80% rail by a wide margin — the availability problem that voided pass 1 is fixed).
+Control 3,078 / 3,888 (**79.2%**, just under the rail — noted, not re-pulled further under
+budget; the shortfall is symbols with no daily_bars-derivable candidate window at all,
+not a winner/loser-correlated gap). Winner/loser missingness gap not separately computed
+(budget) — flagged, not silently dropped.
 
-| Cell | Def | n | Verdict |
-|---|---|---|---|
-| 1,291 | LONG, r>0 | 10 | underpowered |
-| 1,292 | SHORT, r<0 | 9 | underpowered |
-| 1,293 | combined | 19 (15 TRAIN, 4 VAL) | underpowered, FAILS pass bar |
-| 1,294 | 2% stop diagnostic | 19 | reported, not gating |
+### Cells (TRAIN 2025 / VAL 2026 H1, day-clustered t = two-sample t-test on per-day means)
 
-Universe actually run: TSLA/MSTR/NVDA + `FAMILIES['tsla_leveraged'/'mstr_leveraged'/
-'nvda_leveraged']` (23 wrappers total) — see FREEZE.md #1 for the scope cut from the
-full offline-map universe. NVDA contributed **zero** trades (no covered day cleared the
-F-threshold with usable bars — small-n artifact, not evidence NVDA is different).
+| Cell | Split | n trades (n days) | mean R | t |
+|---|---|---|---|---|
+| 1,291 LONG | TRAIN | 4,491 (244) | -0.058 | -1.97 |
+| 1,291 LONG | VAL | 2,757 (102) | -0.032 | -0.76 |
+| 1,292 SHORT | TRAIN | 3,863 (238) | -0.059 | -1.81 |
+| 1,292 SHORT | VAL | 2,251 (101) | **-0.188** | **-4.22** |
+| 1,293 COMBINED (signal) | TRAIN | 8,354 (250) | -0.053 | -2.43 |
+| 1,293 COMBINED (signal) | VAL | 5,008 (102) | -0.074 | -2.50 |
+| 1,293 COMBINED (control) | TRAIN | 878 (234) | -0.031 | -0.81 |
+| 1,293 COMBINED (control) | VAL | 448 (99) | -0.016 | -0.29 |
+| 1,294 2% stop diagnostic | TRAIN | 8,354 | -0.059 | — |
+| 1,294 2% stop diagnostic | VAL | 5,008 | -0.072 | — |
 
-## Signal vs control, both splits
+**Signal − control**: TRAIN -0.022R (-0.044% of price), t=-0.50, p=0.62. VAL -0.058R
+(-0.117% of price), t=-0.92, p=0.36. Both splits: same sign (negative), neither clears
+the +0.10R/t>=2 pass bar in EITHER direction — no detectable difference between wrapper
+movers and non-wrapper movers. The stop diagnostic barely moves the signal mean (rarely
+binds), so this isn't a tail-risk story — it's a genuine flat/negative continuation.
 
-| Split | Signal n / mean R / t (day-clustered) | Control n / mean R / t | Signal-Control (iid t, not clustered) |
-|---|---|---|---|
-| TRAIN 2025 | 15 / +0.45R / t=1.52 (n_days=14) | 59 / -0.03R / t=-0.31 | +0.50R, t~1.6 |
-| VAL 2026 H1 | 4 / +0.33R / t=0.66 (n_days=4) | 21 / -0.42R / t=-2.25 | +0.75R, t~1.4 |
+**MDE (80% power)**: TRAIN 0.061R, VAL 0.083R. The observed signal-control diff (TRAIN
+-0.022R, VAL -0.058R) sits INSIDE the MDE band both splits — the null on the mechanism
+is a real null, not a power failure. The signal-ALONE mean, by contrast, clears its own
+one-sample t at both splits (t=-2.43/-2.50) — a well-powered NEGATIVE, i.e. big-move
+wrapper-underlyings that stay >=5% at 15:00 tend to give some of it back into the close,
+same as non-wrapper big movers (control also trends negative, just noisier).
 
-Point estimates are directionally consistent with the mechanism (signal > control,
-same sign both splits) and exceed the +0.10R pass threshold — but **no t-stat clears
-the >=2 day-clustered bar for the signal cell alone**, VAL n=4 trades makes any t
-meaningless, and the TRAIN-halves check required by PREREG was NOT separately computed
-(2025 H1 vs H2 not broken out — a budget cut, flagged here since it was missed in
-FREEZE.md). MDE at n=4-15 with observed std ~1.0-1.1R is roughly +/-0.9-1.4R at 80%
-power — an effect smaller than ~1R would not have been detectable.
+**F-quintile monotonicity**: corr(F, pnl_R) = **0.0016** (flat). Only 3 of 5 quintile
+buckets resolved (`qcut` collapsed) because **TRAIN median F = 0.0** — over half of
+qualified days have zero flow proxy. Root cause: many wrapper symbols in the resolved
+universe have sparse or no `daily_bars` ADV20 history (missing entirely, or not yet
+PIT-listed), so `F` is degenerate for most of the sample. **This is the one caveat that
+most limits this pass**: it tests "wrapper-underlying big movers vs non-wrapper big
+movers" broadly, NOT "high-flow-proxy movers specifically" — the F-based ranking inside
+PREREG was never really exercised. Quintile means (n=13,362 qualified days): bucket 0
+-0.051R, bucket 1 -0.056R, bucket 2 -0.032R.
 
-## F-quintile monotonicity
+**Entries/week** (signal, unconstrained by the 5-slot cap): TRAIN 161/wk, VAL 238/wk.
+**$/week at $66K book** (1% risk/trade = $660 R-unit, combined TRAIN+VAL mean R ×
+entries/wk): **-$5,813/week** — negative, consistent with the cell table.
 
-Correlation of F with realized pnl_R across the 35 qualified (pre-threshold) days:
-**r = -0.02** — flat, not monotone. Quintile means: 0.57, -0.34, 1.19, 0.17, 0.26R.
-No support for "higher flow proxy -> more drift" in this sample; also consistent with
-the sample being too small/selection-biased to see it either way.
-
-## Reg SHO / obtainability
-
-Of the pool of r<=-10% short candidates, **10 were excluded pre-selection** by the
-uptick gate (entry-bar open not above entry-bar low) — a large fraction, consistent
-with sharp down-moves gapping through the entry bar rather than ticking up into it.
-Entry fill (15:01 bar open) and exit (MOC daily close) are both obtainable by
-construction; the 2% stop diagnostic uses an intrabar touch (optimistic, diagnostic
-only) and rarely binds in this sample — TRAIN/VAL stop-variant means (0.48R/0.37R) sit
-close to the no-stop means (0.45R/0.33R).
-
-## Cadence bar (C1-C5), live config N/A — this book has never run live
-
+**Cadence bar (combined book, `scripts/cadence_bar.py`)**:
 ```
-TRAIN: C1 fail (0 cycles) | C2 fail | C3 fail (MDD 0.48R) | C4 pass (100% green vs 51% null) | C5 fail (0.28 fills/wk) | C7 fail (0 cycles)
-VAL:   C1 fail (0 cycles) | C2 fail | C3 fail (MDD 1.14R) | C4 pass (67% green vs 50% null)   | C5 fail (0.18 fills/wk) | C7 fail (0 cycles)
+TRAIN: C1 fail (gap P90 6.7wk) | C2 fail (57% cycles net>0) | C3 fail (MDD 370.8R) |
+       C4 fail (40% green vs 50% null) | C5 pass (157.6 fills/wk) | C7 fail (14 cycles)
+VAL:   C1 fail (gap P90 5.0wk) | C2 fail (40% cycles net>0) | C3 fail (MDD 432.9R) |
+       C4 fail (32% green vs 50% null) | C5 pass (227.6 fills/wk) | C7 fail (5 cycles)
 ```
-No strong week (>=5R) ever occurred in either split — arithmetically expected at
-0.18-0.28 fills/week. **Fails the cadence bar outright on frequency alone**, independent
-of the coverage problem.
+Only C5 (raw fill frequency) passes — everything that measures whether the book actually
+makes money over a cycle fails, both splits, consistent with the negative point estimate.
 
-## Coverage
+**The one caveat that alone could most weaken this verdict**: F is degenerate (median 0
+on TRAIN) — a properly-computed high-flow subset was never isolated, so a genuine
+flow-driven effect concentrated in the (unmeasured) true high-F tail cannot be ruled out
+by this pass. Everything else (signal vs control, both directions, both splits, at n in
+the thousands) is a clean, adequately-powered null-to-negative.
 
-12.3% of candidate underlying-days had usable 1-min bars (rail: >=80%). Winner/loser
-missingness gap not meaningfully computable at n=19.
+## Pass 1 (history — VOID, superseded)
 
-## What would fix this
+Ran only TSLA/MSTR/NVDA (FAMILIES scope cut) against `cache.db`'s opportunistically
+populated `intraday_bars_1min`. Coverage 12.3% of 381 candidate days (n=19 trades) — far
+below the 80% rail, and non-random (whichever days another process had already scanned).
+Point estimates were directionally positive (signal > control both splits) but no
+t-stat cleared the pass bar, VAL n=4 made any t meaningless, and MDE was ~1R at n=4-15 —
+underpowered by construction. Verdict was INCONCLUSIVE, not a finding either way.
+F-quintile corr on the small sample: r=-0.02 (also flat). Full pass-1 artifacts:
+`signal_days_raw.csv`, `signal_trades.csv`, `control_trades.csv`, `summary.json`
+(pre-pass-2 versions, still in this directory for the record).
 
-Not a rule change — a data problem. Either (a) fetch full 1-min history for MSTR/TSLA/
-NVDA (+ the extended offline-map wrapper universe) via a real backfill (out of scope:
-cache.db is read-only in this task, and a live-API backfill needs owner sign-off per
-CLAUDE.md's cache-overwrite rule), or (b) rerun using only `daily_bars` for a coarser
-close-to-close proxy of the mechanism (loses the causal 15:00-cutoff precision the
-PREREG deliberately specified).
+---
+Pass 2 artifacts: `universe_map.json`, `candidate_underlying_days.csv`, `need_pull.csv`,
+`control_candidate_days.csv`, `control_need_pull.csv`, `bars_1500_1600.db`,
+`p2_signal_days_raw.csv`, `p2_signal_days_qualified.csv`, `p2_signal_trades.csv`,
+`p2_control_days_raw.csv`, `p2_control_trades.csv`, `p2_stats.json`,
+`p2_trades_TRAIN.csv`, `p2_trades_VAL.csv`, `build_universe.py`, `build_control.py`,
+`pull_bars.py`, `run_study2.py`, `compute_stats.py`. TEST (>=2026-06-01) was never
+queried — sealed by construction, and moot given the pass-2 null.
 
 ## Independent check status
 
-Full independent reimplementation (per CLAUDE.md's research-claim checklist) was
-**not performed** — single-agent, budget-constrained run. This report is a first pass
-only; do not relay the point estimates as a finding without a second implementation
-reproducing the 19-trade signal set trade-by-trade.
-
----
-Artifacts: `signal_days_raw.csv`, `signal_days_qualified.csv`, `signal_trades.csv`,
-`control_days_raw.csv`, `control_trades.csv`, `summary.json`, `run_study.py`.
+Full independent reimplementation (per CLAUDE.md's research-claim checklist) NOT
+performed this pass either — single-agent, budget-constrained run. Do not relay this as
+a closed finding without a second implementation reproducing the pull + the scorer on a
+sample of (symbol, date) trades. Given the verdict is a NEGATIVE (no live money at risk
+from a false positive), the priority for a follow-up check is lower than it would be for
+a ship decision, but the phrasing rule still applies: this is "no edge detected in this
+universe/window/cost/book", not "no edge exists."

@@ -1,0 +1,9 @@
+{
+  "n_wrapper_rows": 6136,
+  "n_underlyings_resolved": 345,
+  "n_candidate_underlying_days": 28462,
+  "n_distinct_underlyings_with_candidates": 316,
+  "n_distinct_candidate_calendar_days": 352,
+  "n_already_cached": 10751,
+  "n_need_pull": 17711
+}
