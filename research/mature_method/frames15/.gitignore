@@ -1,0 +1,5 @@
+feat_*.parquet
+hourly_*.parquet
+*.csv.gz
+w15*.csv
+sig15*.csv
