@@ -12,3 +12,42 @@
 PASS BAR (VAL): signal net ≥ +0.10 R (= +0.20% of price) with day-clustered t ≥ 2; signal − control ≥ +0.10 R with t ≥ 2; TRAIN halves same-signed; ≥ 3 entries/week; cadence bar C1–C5 pass (run `python scripts/cadence_bar.py --trades <csv> --split VAL` and `--split TRAIN`, columns date,pnl_R,symbol; paste both). Diagnostics: gross, cost, WR, ex-top-1%/5%, top-5 share, MDD, F-quintile monotonicity (does higher F mean more late-day drift?), the 15:00→15:30 vs 15:30→close split of the move, MDE beside every null, iid and clustered SE.
 
 The ONE caveat that alone could explain the headline; any mid-run change recorded.
+
+## Pass 2 — data pull, pre-registered before rescoring
+
+Pass 1 was VOID on availability: `cache.db intraday_bars_1min` covered only 12.3% of
+candidate underlying-days and only TSLA/MSTR/NVDA were tried (the FAMILIES scope cut in
+FREEZE.md #1). This pass fixes availability by pulling the missing bars and running the
+SAME scorer (same PREREG above, unchanged) over the FULL wrapper-underlying universe.
+
+- **Pull filter (superset of the signal)**: `|daily high / prior_close - 1| >= 5% OR
+  |daily low / prior_close - 1| >= 5%` from `daily_bars` — any day whose price could have
+  been >=5% away from prior close at 15:00 gets an intraday pull, whether or not the
+  CLOSE ended up >=5% away. The signal itself is still computed at 15:00 from the pulled
+  bars exactly as PREREG specifies (`r = close_15:00/prior_close - 1`, `|r| >= 5%`) — the
+  pull filter only decides what gets FETCHED, never what qualifies as a trade.
+- **Universe**: every underlying resolvable from the full wrapper set in
+  `data/research/orb_asset_class_map_20260711.csv` (asset_class='wrapper', 6,136 rows) via
+  `trading/orb_asset_class.py::underlying_anchor` (parses each wrapper's fund name,
+  validates the anchor token against the class map's STOCK rows) — generalizing pass 1's
+  FAMILIES-only 3-name list to every complex the classifier can resolve. Point-in-time
+  wrapper listing: a wrapper's ADV contributes to F only from its first `daily_bars` row
+  (same proxy as pass 1 FREEZE.md #4 — `pit_listings` still lacks exact IPO dates).
+  Price >= $5 (prior close). Test tickers excluded (`is_test_ticker`).
+- **Data pull**: 1-min bars 14:55-16:00 ET for every (underlying, candidate day) not
+  already in `cache.db` (read-only), fetched from Alpaca SIP via
+  `AlpacaClient.get_1min_bars_range_multi`, batched per day, written to a NEW sqlite db
+  owned by this study (`research/lev_rebalance/bars_1500_1600.db`) — `cache.db` is never
+  written. Control pool sized up from pass 1's 60 symbols to 400 (the pull is cheap;
+  more power), same non-wrapper `stock`-class sampling, same seed family.
+- Everything else — signal/control definition, cost model, MOC exit, 2% stop diagnostic,
+  SHO uptick gate, splits, cadence bar, book — is UNCHANGED from the PREREG above. The
+  ONLY change from `run_study.py` to `run_study2.py` is the bars source (merged: this
+  study's own pulled db, falling back to `cache.db` where it already had the window) and
+  the universe (full wrapper map instead of TSLA/MSTR/NVDA). No analysis choice was
+  tuned after any result was read; the F-threshold rule (TRAIN median) and the pass bar
+  are exactly as stated above.
+- **Process note**: the data-engineering steps (universe build, Alpaca pull) ran before
+  this section was committed, but no P&L or signal-vs-control comparison was computed or
+  viewed before this text was written and committed — only population sizes (row counts,
+  coverage %) were seen, which this section already discloses.
