@@ -1,0 +1,11 @@
+{
+  "n_signal_candidate_days": 381,
+  "n_signal_has_bars": 47,
+  "n_signal_qualified": 38,
+  "f_thresh_train_median": 0.030355658310924627,
+  "n_selected": 19,
+  "n_sho_excluded": 10,
+  "n_control_candidate_days": 781,
+  "n_control_qualified": 80,
+  "control_fetches_used": 781
+}
