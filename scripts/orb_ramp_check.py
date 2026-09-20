@@ -40,6 +40,7 @@ TRADES_DB = ROOT / 'data' / 'trades.db'
 GREEN = ROOT / 'logs' / 'green_streak.json'
 
 from trading import ramp_bt_band as band_mod  # noqa: E402  (needs ROOT on sys.path)
+from trading import ramp_pool  # noqa: E402  (the pooled ADVISORY line)
 from trading import ramp_freeze  # noqa: E402
 from trading import ramp_stage  # noqa: E402  (the stage-start table)
 
@@ -255,6 +256,7 @@ def main() -> int:
           f"{'ABOVE WATER' if s.above_water_ex_monster else 'NOT above water'} "
           f"(advance requires > 0)")
     print(band_mod.band_line(s.band_status, s.live_mean_r, s.band, ref))
+    print(ramp_pool.advisory_line())
     if s.frozen:
         print(f"  {fz.line()}")
     if s.frozen_sessions:

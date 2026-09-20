@@ -42,6 +42,31 @@ Advance to the next stage when ALL hold, checked every Saturday:
 7. **No rail hit** in the last 10 sessions.
 Steps are ≤ 2× (ORB) / the existing L-ladder (BF). Never skip a stage. Move every rail with the size.
 
+**Pooled reading (ADVISORY, added 2026-09-20 — `trading/ramp_pool.py`, both checkers print it).**
+Gate-2 item 4 asks "is this book consistent with its backtest?" at each book's own frequency, and at
+ORB's 6.5 trades a week a 0.2 R question needs **1.66 years** at 80 % power (BF alone: 21.8 years;
+the two pooled: 1.55 — BF is 9 % of the trades). Pooling the live books with the **HOD-break dry
+run's ~27 paper trades a week** takes the same question to **10 weeks**, for free, because a dry book
+earns nothing and therefore risks nothing (`research/mature_method/frames9/REPORT.md` F30).
+
+The pooled statistic is `z_i = R_i / SD_b` — each book's realized R standardised by the per-trade SD
+of its OWN frozen BT reference — averaged with a **day-clustered** SE (one cluster per session across
+all books: they share the session, the account and the market factor), classified against a bootstrap
+of the same pooled statistic from the reference books (BELOW-p5 / BELOW-p10 / IN-BAND / ABOVE-p90).
+
+Pre-committed constraints, asserted in `tests/test_ramp_pool.py`:
+* The pooled z is a **precision** gate, never a P&L gate: it can only ever BLOCK. **The above-water
+  rule (owner 2026-07-23) is inviolable** — the pool can never lift a losing book on a winning
+  sibling's evidence, and a hot dry stream can never advance anything.
+* The **dry stream counts toward n and the band ONLY**; the printed line names its share so a reader
+  can see how much of the precision is paper.
+* Intended ADVANCE form (not yet in force): the book's existing gate **AND** the pooled z is not
+  BELOW-p10 — i.e. a stage that cleared on 8 trades while the portfolio runs a standard error below
+  its backtest is HELD. Intended DEMOTE form: pooled z below p5 with n ≥ 30 demotes every live book
+  one stage.
+* **Until the owner approves switching it on, the per-book verdict remains the decision** and the
+  pooled line is printed for information only.
+
 Demote ONE stage, immediately, on ANY: stage P&L ≤ −6u; 5 losers in a row; a weekly rail; 4 consecutive red
 weeks; or realized R/trade below the BT's p5 band for that n after ≥ 8 trades (the edge is not there live).
 Pause (size to the floor, entries on, owner decides) on stage P&L ≤ −8u or a monthly rail.

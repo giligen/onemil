@@ -1,0 +1,89 @@
+
+===== F32 (L) — LONG admission `wrapper`, the shipped cascade =====
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+  G-B2 reproduced (1,622 / -$17,346 TRAIN; 706 / +$893 VAL)
+  admitted signals 7027 -> walked 7027 (100.0 % availability)
+  wrapper share of the admitted set 38.6 % (2712 signals)
+L wrapper G3             TRAIN n=   982 /wk=  18.5 gross=+0.0988 cost=0.0704 net=+0.0284 t=+0.34 green= 39.6 (null p95  52.8) wk$=    +52.6 tot=$    +2789 ex5=-0.3008 H1=-0.0381 H2=+0.0858 mde=0.180 
+L wrapper G3             VAL   n=   531 /wk=  23.1 gross=+0.1265 cost=0.0748 net=+0.0517 t=+0.58 green= 52.2 (null p95  60.9) wk$=   +119.4 tot=$    +2746 ex5=-0.2106 H1=+nan H2=+0.0517 mde=0.202 
+L stock G3               TRAIN n=  1183 /wk=  22.3 gross=-0.0265 cost=0.0742 net=-0.1007 t=-1.97 green= 35.8 (null p95  39.7) wk$=   -224.8 tot=$   -11914 ex5=-0.3536 H1=-0.0923 H2=-0.1081 mde=0.126 
+L stock G3               VAL   n=   572 /wk=  24.9 gross=+0.0320 cost=0.0749 net=-0.0430 t=-0.60 green= 39.1 (null p95  47.8) wk$=   -106.9 tot=$    -2458 ex5=-0.2803 H1=+nan H2=-0.0430 mde=0.176 
+  -> L wrapper G3           FAILS: TRAIN green 39.6 %; TRAIN clustered t +0.34; TRAIN ex-top-5 % -0.301; VAL clustered t +0.58; VAL ex-top-5 % -0.211; TRAIN halves -0.038 / +0.086 opposite-signed
+L wrapper X0             TRAIN n=  1083 /wk=  20.4 gross=-0.0048 cost=0.0639 net=-0.0686 t=-1.31 green= 41.5 (null p95  45.3) wk$=   -140.3 tot=$    -7434 ex5=-0.1785 H1=-0.1766 H2=+0.0230 mde=0.116 
+L wrapper X0             VAL   n=   594 /wk=  25.8 gross=+0.1345 cost=0.0679 net=+0.0666 t=+0.98 green= 43.5 (null p95  65.2) wk$=   +172.1 tot=$    +3958 ex5=-0.0352 H1=+nan H2=+0.0666 mde=0.153 
+L stock X0               TRAIN n=  1276 /wk=  24.1 gross=-0.0528 cost=0.0697 net=-0.1225 t=-3.12 green= 28.3 (null p95  35.8) wk$=   -294.9 tot=$   -15628 ex5=-0.2335 H1=-0.1314 H2=-0.1146 mde=0.095 
+L stock X0               VAL   n=   650 /wk=  28.3 gross=-0.0551 cost=0.0716 net=-0.1267 t=-2.64 green= 30.4 (null p95  34.8) wk$=   -358.0 tot=$    -8234 ex5=-0.2392 H1=+nan H2=-0.1267 mde=0.132 
+  -> L wrapper X0           FAILS: TRAIN weekly $ -140; TRAIN green 41.5 %; TRAIN clustered t -1.31; TRAIN ex-top-5 % -0.179; VAL green 43.5 %; VAL clustered t +0.98; VAL ex-top-5 % -0.035; TRAIN halves -0.177 / +0.023 opposite-signed
+
+===== F32 (S) — SHORT the non-moving wrapper =====
+  rows walked 86,295 | TRAIN+VAL 86,295 | no-fill 6.2 % | stop<=0 3.1 % | Reg SHO 201 8.71 % | borrow flags known 100.0 % | BORROWABLE 5.3 %
+  BORROW, the rail that decides this frame: 103 of 418 wrapper names are shortable+easy-to-borrow
+    levered |L|>=2     rows   77364 borrowable   3.5 % | names  226 borrowable names    8
+    inverse/1x         rows    2502 borrowable   4.7 % | names   21 borrowable names    2
+    leverage unparsed  rows    6429 borrowable  26.3 % | names  171 borrowable names   93
+    TRAIN rows   45675 borrowable   6.8 %
+    VAL   rows   40620 borrowable   3.6 %
+  underlying move available on 58.6 % of rows (the availability rail floor is 80 %)
+  leverage parsed on 92.5 % of rows
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+  after fill + r_min + Reg SHO + borrow screens: 2,986 rows
+  DIAGNOSTIC arm (no borrow screen, NOT EXECUTABLE): 57,368 rows
+S 10:30 rng<=2%          n=12 — under the floor, not scored
+S 10:30 rng<=3%          TRAIN n=    23 /wk=   0.4 gross=+0.3955 cost=0.3040 net=+0.0915 t=+0.19 green=  7.5 (null p95  11.3) wk$=     +4.0 tot=$     +210 ex5=-0.0751 H1=-0.0268 H2=+0.5173 mde=0.967 executable
+  -> S 10:30 rng<=3%        NO-DATA (a split is missing)
+S 11:00 rng<=2%          TRAIN n=    66 /wk=   1.2 gross=+0.3870 cost=0.2687 net=+0.1183 t=+0.11 green=  3.8 (null p95   3.8) wk$=    +14.7 tot=$     +781 ex5=+0.0079 H1=+0.0391 H2=+1.7803 mde=0.553 executable
+  -> S 11:00 rng<=2%        NO-DATA (a split is missing)
+S 11:00 rng<=3%          TRAIN n=    92 /wk=   1.7 gross=+0.2122 cost=0.2589 net=-0.0468 t=-0.05 green=  5.7 (null p95   7.5) wk$=     -8.1 tot=$     -430 ex5=-0.1561 H1=-0.1571 H2=+1.2926 mde=0.457 executable
+  -> S 11:00 rng<=3%        NO-DATA (a split is missing)
+S 12:00 rng<=2%          TRAIN n=    53 /wk=   1.0 gross=+0.0645 cost=0.2836 net=-0.2190 t=-0.21 green=  1.9 (null p95   1.9) wk$=    -21.9 tot=$    -1161 ex5=-0.3435 H1=-0.2190 H2=+nan mde=0.612 executable
+  -> S 12:00 rng<=2%        NO-DATA (a split is missing)
+S 12:00 rng<=3%          TRAIN n=    83 /wk=   1.6 gross=+0.1589 cost=0.2610 net=-0.1021 t=-0.10 green=  3.8 (null p95   5.7) wk$=    -16.0 tot=$     -848 ex5=-0.2287 H1=-0.0851 H2=-1.4986 mde=0.490 executable
+  -> S 12:00 rng<=3%        NO-DATA (a split is missing)
+S* 10:30 rng<=2%         TRAIN n=    32 /wk=   0.6 gross=+0.4616 cost=0.3272 net=+0.1344 t=+0.27 green= 13.2 (null p95  17.0) wk$=     +8.1 tot=$     +430 ex5=+0.0219 H1=-0.0585 H2=+0.3825 mde=0.823 DIAGNOSTIC no-borrow
+S* 10:30 rng<=2%         VAL   n=     8 /wk=   0.3 gross=+0.4122 cost=0.3854 net=+0.0268 t=+0.04 green= 13.0 (null p95  17.4) wk$=     +0.9 tot=$      +21 ex5=+nan H1=+nan H2=+0.0268 mde=1.849 DIAGNOSTIC no-borrow
+  -> S* 10:30 rng<=2%       FAILS: TRAIN green 13.2 %; TRAIN 0.6 tr/wk; TRAIN clustered t +0.27; VAL green 13.0 %; VAL 0.3 tr/wk; VAL clustered t +0.04; TRAIN halves -0.059 / +0.383 opposite-signed
+S* 10:30 rng<=3%         TRAIN n=   133 /wk=   2.5 gross=+0.3598 cost=0.3120 net=+0.0478 t=+0.20 green= 34.0 (null p95  45.3) wk$=    +12.0 tot=$     +636 ex5=-0.0537 H1=-0.1436 H2=+0.2606 mde=0.397 DIAGNOSTIC no-borrow
+S* 10:30 rng<=3%         VAL   n=    48 /wk=   2.1 gross=+0.7109 cost=0.2813 net=+0.4295 t=+1.37 green= 43.5 (null p95  60.9) wk$=    +89.6 tot=$    +2062 ex5=+0.3330 H1=+nan H2=+0.4295 mde=0.644 DIAGNOSTIC no-borrow
+  -> S* 10:30 rng<=3%       FAILS: TRAIN green 34.0 %; TRAIN 2.5 tr/wk; TRAIN clustered t +0.20; VAL green 43.5 %; VAL 2.1 tr/wk; VAL clustered t +1.37; TRAIN halves -0.144 / +0.261 opposite-signed
+S* 11:00 rng<=2%         TRAIN n=    97 /wk=   1.8 gross=+0.4534 cost=0.2634 net=+0.1900 t=+0.19 green=  7.5 (null p95   9.4) wk$=    +34.8 tot=$    +1843 ex5=+0.0983 H1=+0.0034 H2=+1.8131 mde=0.459 DIAGNOSTIC no-borrow
+S* 11:00 rng<=2%         VAL   n=     5 /wk=   0.2 gross=+0.6973 cost=0.2260 net=+0.4713 t=+0.58 green=  8.7 (null p95  13.0) wk$=    +10.2 tot=$     +236 ex5=+nan H1=+nan H2=+0.4713 mde=2.239 DIAGNOSTIC no-borrow
+  -> S* 11:00 rng<=2%       FAILS: TRAIN green 7.5 %; TRAIN 1.8 tr/wk; TRAIN clustered t +0.19; VAL green 8.7 %; VAL 0.2 tr/wk; VAL clustered t +0.58
+S* 11:00 rng<=3%         TRAIN n=   182 /wk=   3.4 gross=+0.2669 cost=0.2440 net=+0.0229 t=+0.03 green= 22.6 (null p95  34.0) wk$=     +7.9 tot=$     +417 ex5=-0.0860 H1=-0.0871 H2=+0.5015 mde=0.325 DIAGNOSTIC no-borrow
+S* 11:00 rng<=3%         VAL   n=    21 /wk=   0.9 gross=+0.4585 cost=0.2348 net=+0.2237 t=+0.70 green= 30.4 (null p95  39.1) wk$=    +20.4 tot=$     +470 ex5=+0.0461 H1=+nan H2=+0.2237 mde=1.030 DIAGNOSTIC no-borrow
+  -> S* 11:00 rng<=3%       FAILS: TRAIN green 22.6 %; TRAIN 3.4 tr/wk; TRAIN clustered t +0.03; VAL green 30.4 %; VAL 0.9 tr/wk; VAL clustered t +0.70; TRAIN halves -0.087 / +0.501 opposite-signed
+S* 12:00 rng<=2%         TRAIN n=    75 /wk=   1.4 gross=+0.0965 cost=0.2820 net=-0.1855 t=-0.18 green=  5.7 (null p95   5.7) wk$=    -26.2 tot=$    -1391 ex5=-0.3007 H1=-0.2686 H2=+1.8109 mde=0.515 DIAGNOSTIC no-borrow
+  -> S* 12:00 rng<=2%       NO-DATA (a split is missing)
+S* 12:00 rng<=3%         TRAIN n=   140 /wk=   2.6 gross=+0.1238 cost=0.2568 net=-0.1330 t=-0.15 green= 15.1 (null p95  18.9) wk$=    -35.1 tot=$    -1862 ex5=-0.2397 H1=-0.1577 H2=+0.1080 mde=0.376 DIAGNOSTIC no-borrow
+S* 12:00 rng<=3%         VAL   n=     8 /wk=   0.3 gross=-0.5021 cost=0.3379 net=-0.8400 t=-2.71 green=  4.3 (null p95   8.7) wk$=    -29.2 tot=$     -672 ex5=+nan H1=+nan H2=-0.8400 mde=1.353 DIAGNOSTIC no-borrow
+  -> S* 12:00 rng<=3%       FAILS: TRAIN weekly $ -35; TRAIN green 15.1 %; TRAIN 2.6 tr/wk; TRAIN clustered t -0.15; VAL weekly $ -29; VAL green 4.3 %; VAL 0.3 tr/wk; VAL clustered t -2.71; TRAIN halves -0.158 / +0.108 opposite-signed
+
+===== F32 — THE MECHANISM TESTS =====
+  population: the DIAGNOSTIC arm (no borrow screen — the executable population is far too small to test a mechanism on), range <= 3 %, all three clocks: 2,289 rows, of which underlying-flat 532
+
+  (i) MONOTONICITY IN LEVERAGE — decay (wrapper open->15:55 %) and the short gross R
+   |L|  n days   decay %  VAL decay  n trades   gross R  VAL gross  all-days decay %
+     1      55   -0.4547    -1.9497        69   +0.5650    +1.0857           -0.7223
+     2      61   -1.3542    -2.8129        75   +0.0378    +0.6240           +0.4393
+     3 n=3 — under the floor
+
+  (i-secondary) by the variance-drag coefficient k = L(L-1)/2
+  k= 1.0 n_days=    90 decay= -1.4739 % n=   110 gross= +0.4381 R (lev [-1.0, 2.0])
+  k= 3.0 n_days=    17 decay= +2.5298 % n=    22 gross= -0.4230 R (lev [-2.0, 3.0])
+
+  (i) VERDICT: decay monotone False | short gross monotone False -> FAIL
+
+  (ii) MAXIMUM WHEN THE UNDERLYING IS FLAT — short gross R by |underlying move|
+        bucket       n   gross R     TRAIN       VAL     net R   decay %
+         <=1 %     532   +0.2885   +0.2500   +0.5160   +0.0197   +0.3884
+         1-3 %     265   +0.7993   +0.8417   +0.7011   +0.5654   -2.5430
+         >=3 %      46   +0.7330   +0.7988   +0.6209   +0.5248   -3.5193
+
+  (ii) VERDICT: FAIL (required: gross falls monotonically as |underlying move| rises)
+
+===== F32 (S) — the realism cut: run_book(12/day, 4 concurrent) =====
+S* booked 11:00 rng<=2%  TRAIN n=    18 /wk=   0.3 gross=+1.1470 cost=0.2327 net=+0.9143 t=+1.49 green=  7.5 (null p95   9.4) wk$=    +31.1 tot=$    +1646 ex5=+nan H1=+0.0238 H2=+1.8047 mde=0.967 12/day, 4 conc, DIAGNOSTIC no-borrow
+S* booked 11:00 rng<=2%  VAL   n=     5 /wk=   0.2 gross=+0.6973 cost=0.2260 net=+0.4713 t=+0.58 green=  8.7 (null p95  13.0) wk$=    +10.2 tot=$     +236 ex5=+nan H1=+nan H2=+0.4713 mde=2.239 12/day, 4 conc, DIAGNOSTIC no-borrow
+
+cells -> cells32_long.csv (8) / cells32_short.csv (18)
+mechanism: {'(i) leverage monotone': False, '(ii) flat is the max': False}

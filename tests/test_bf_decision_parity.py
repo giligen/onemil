@@ -364,12 +364,20 @@ class TestLiveConfigRepoint:
         assert bp.bt_sizing_args(p)[3] == '400'
 
     def test_the_booting_config_is_what_the_harness_reads(self):
-        """The real config.yaml: the Monday gate values must be visible."""
+        """The real config.yaml: whatever the booting gates ARE, the harness must show them.
+
+        Asserting a snapshot here goes stale the first time the owner moves a knob (it did, on the
+        9/19 ADV-gate revert: the test still demanded min_daily_volume 0 while live ran 200000).
+        The invariant is the REPOINT, not the value — so read config.yaml independently and require
+        the harness to agree with it."""
+        import yaml as _yaml
+        raw = _yaml.safe_load(open(bp.ROOT / 'config.yaml'))
         cfg = bp.live_trading_config()
-        assert cfg['min_daily_volume'] == 0
-        assert cfg['conviction_min_threshold'] == 1.8
-        assert cfg['enabled'] is True
-        assert cfg['risk'] > 0
+        assert cfg['min_daily_volume'] == int(raw['scanner']['min_daily_volume'])
+        assert cfg['conviction_min_threshold'] == float(
+            raw['trading']['conviction_scoring']['min_threshold'])
+        assert cfg['enabled'] is bool(raw['trading']['enabled'])
+        assert cfg['risk'] == float(raw['trading']['risk_per_trade']) > 0
 
     def test_unreadable_config_is_loud_and_falls_back(self, tmp_path, caplog):
         p = tmp_path / 'missing.yaml'

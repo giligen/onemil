@@ -1,0 +1,16 @@
+=== 2026-09-14
+HOD-BREAK EOD 2026-09-14 — mode DRY | dry signals 39 | live orders 0 | fills 0 | exits 0 | errors 0
+  DRY-RUN EXECUTABLE book (first 12/day, 4 concurrent, logged sizes): 11 trades, -4.6R, $-249 | [('IONX', 0.31), ('DBI', -1.14), ('GTBP', -1.02), ('WBTN', -1.38), ('BBNX', -1.05), ('NBIL', -1.04), ('DFDV', -1.07), ('BKSY', -1.07), ('USGG', 0.44), ('BUG', -1.25), ('EFOR', 3.67)]
+=== 2026-09-15
+HOD-BREAK EOD 2026-09-15 — mode DRY | dry signals 0 | live orders 0 | fills 0 | exits 0 | errors 42
+=== 2026-09-16
+HOD-BREAK EOD 2026-09-16 — mode DRY | dry signals 7 | live orders 0 | fills 0 | exits 0 | errors 0
+  DRY-RUN EXECUTABLE book (first 12/day, 4 concurrent, logged sizes): 7 trades, -4.2R, $-392 | [('TGTX', -0.03), ('QNT', 0.17), ('MVLL', -1.05), ('HUT', -1.08), ('SMST', -1.08), ('FPS', -0.07), ('NBIL', -1.06)]
+=== 2026-09-17
+HOD-BREAK EOD 2026-09-17 — mode DRY | dry signals 13 | live orders 0 | fills 0 | exits 0 | errors 0
+  DRY-RUN EXECUTABLE book (first 12/day, 4 concurrent, logged sizes): 7 trades, -4.5R, $-415 | [('SNDU', -1.04), ('CIEN', -1.04), ('MULL', -0.14), ('MUU', -0.06), ('MRNA', -1.08), ('CRSP', -0.03), ('AMDL', -1.09)]
+=== 2026-09-18
+HOD-BREAK EOD 2026-09-18 — mode DRY | dry signals 8 | live orders 0 | fills 0 | exits 0 | errors 0
+  DRY-RUN EXECUTABLE book (first 12/day, 4 concurrent, logged sizes): 6 trades, +9.4R, $+941 | [('SNDU', 2.18), ('ETHU', 1.92), ('MSTR', 2.02), ('APLZ', -1.07), ('COIN', 2.11), ('MXL', 2.23)]
+=== 2026-09-19
+HOD-BREAK EOD 2026-09-19 — mode DRY | dry signals 0 | live orders 0 | fills 0 | exits 0 | errors 0

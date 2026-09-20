@@ -335,7 +335,10 @@ def test_load_prev_day_reads_daily_bars(tmp_path):
     p = tmp_path / 'cache.db'; con = sqlite3.connect(p)
     con.execute('create table daily_bars (symbol text, bar_date text, open real, high real, low real, close real, volume real)')
     import datetime as dt
-    yday = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+    from trading.hod_break_engine import ET
+    # The loader's "today" is the ET date, not the box's UTC date — between 20:00 and 24:00 ET the
+    # two differ and a UTC-derived yesterday IS the ET today, which the loader excludes by design.
+    yday = (dt.datetime.now(dt.timezone.utc).astimezone(ET).date() - dt.timedelta(days=1)).isoformat()
     con.execute('insert into daily_bars values (?,?,?,?,?,?,?)', ('AAA', yday, 10.5, 11.0, 10.0, 10.0, 1e6))
     con.commit(); con.close()
     assert book_spec.load_prev_day(p)['AAA'] == (10.0, 11.0, 10.0)

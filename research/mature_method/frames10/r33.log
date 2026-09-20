@@ -1,0 +1,35 @@
+== frames10 / F33 — the pooled-statistic historical replay ==
+  dry stream: 31 simulated trades parsed from replay_dry.log
+  stage table: orb current 2026-09-21, previous 2026-08-17; bf current 2026-09-21, previous 2026-09-07
+
+  frozen BT references (SD and band from ONE distribution):
+    orb      n_ref   462  SD 1.431  (pass-9 walker SD 1.694 -> SUPERSEDES pass 9)
+    bf       n_ref    56  SD 3.151  (pass-9 walker SD 1.939 -> SUPERSEDES pass 9)
+    hod_dry  n_ref  2328  SD 1.260  (pass-9 walker SD 1.260 -> MATCHES pass 9)
+
+== CURRENT stage ==
+  ORB  since 2026-09-21: n=0 mean R n/a vs no band -> NO-DATA   [orb_gates2/book_G3_meas]
+  BF   since 2026-09-21: n=0 mean R n/a vs no band -> NO-DATA   [bf_frequency/runs/P1]
+  HOD-dry since 2026-09-14: n=31 mean R -0.125
+  [live books only ] POOLED z: NO-DATA (n=0, need 10; no books) — blocks nothing | advisory: pooled z BELOW-p10 holds a book its own gate would advance; pooled z below p5 with n >= 30 demotes every live book one stage; the dry stream counts toward n and the band ONLY
+      counterfactual: if ORB's own gate had said ADVANCE (its own band read NO-DATA), the pooled gate would say ADVANCE
+      counterfactual: if BF's own gate had said ADVANCE (its own band read NO-DATA), the pooled gate would say ADVANCE
+  [live + HOD-dry  ] POOLED z = -0.100 +/- 0.300 on n=31 (hod_dry 31; dry 31 of 31, 4 sessions) vs pooled BT band [p5 -0.34, p10 -0.28, p90 +0.18] [2328 BT trades, 2000 draws] -> IN-BAND (ADVISORY, the per-book verdict decides) | advisory: pooled z BELOW-p10 holds a book its own gate would advance; pooled z below p5 with n >= 30 demotes every live book one stage; the dry stream counts toward n and the band ONLY
+      band width p5..p90 = 0.527 z-units on n=31
+      counterfactual: if ORB's own gate had said ADVANCE (its own band read NO-DATA), the pooled gate would say ADVANCE
+      counterfactual: if BF's own gate had said ADVANCE (its own band read NO-DATA), the pooled gate would say ADVANCE
+
+== PREVIOUS stage ==
+  ORB  since 2026-08-17: n=5 mean R -0.463 vs [p5 -0.62, p10 -0.50, p90 +1.01] -> IN-BAND   [orb_gates2/book_G3_meas]
+  BF   since 2026-09-07: n=0 mean R n/a vs no band -> NO-DATA   [bf_frequency/runs/P1]
+  HOD-dry since 2026-09-14: n=31 mean R -0.125
+  [live books only ] POOLED z: NO-DATA (n=5, need 10; orb 5) — blocks nothing | advisory: pooled z BELOW-p10 holds a book its own gate would advance; pooled z below p5 with n >= 30 demotes every live book one stage; the dry stream counts toward n and the band ONLY
+      band width p5..p90 = 1.140 z-units on n=5
+      counterfactual: if ORB's own gate had said ADVANCE (its own band read IN-BAND), the pooled gate would say ADVANCE
+      counterfactual: if BF's own gate had said ADVANCE (its own band read NO-DATA), the pooled gate would say ADVANCE
+  [live + HOD-dry  ] POOLED z = -0.131 +/- 0.220 on n=36 (hod_dry 31, orb 5; dry 31 of 36, 6 sessions) vs pooled BT band [p5 -0.31, p10 -0.25, p90 +0.20] [2790 BT trades, 2000 draws] -> IN-BAND (ADVISORY, the per-book verdict decides) | advisory: pooled z BELOW-p10 holds a book its own gate would advance; pooled z below p5 with n >= 30 demotes every live book one stage; the dry stream counts toward n and the band ONLY
+      band width p5..p90 = 0.508 z-units on n=36
+      counterfactual: if ORB's own gate had said ADVANCE (its own band read IN-BAND), the pooled gate would say ADVANCE
+      counterfactual: if BF's own gate had said ADVANCE (its own band read NO-DATA), the pooled gate would say ADVANCE
+
+REPLAY DONE

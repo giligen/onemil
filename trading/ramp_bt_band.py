@@ -56,6 +56,18 @@ BF_REF_ADV_OFF = ROOT / 'research' / 'bf_frequency' / 'runs' / 'VOL_OFF.csv'
 BF_REF = BF_REF_P1   # legacy name; the shipped config is P1 (ADV gate 200K)
 BF_BT_RISK_USD = 2000.0
 
+# The HOD-break dry stream's reference: the B2 book six research passes are measured against
+# (research/mature_method/hod_frames6/REPORT.md). R = the book's own net R per trade. The dry
+# stream earns nothing, so this reference only ever feeds the POOLED band's n and width
+# (trading/ramp_pool.py) — never a P&L clause.
+HOD_REF_B2 = (ROOT / 'research' / 'mature_method' / 'hod_frames6' / 'book6.csv')
+
+#: Last-resort per-trade SDs, used ONLY when a reference file is unreadable (logged at WARNING).
+#: The live numbers come from `sd_of(load_reference_r(...))` so that the SD and the band are always
+#: computed from the SAME distribution — a band built on one distribution and an SD on another is
+#: the defect class this house keeps shipping.
+BOOK_SD_FALLBACK = {'orb': 1.431, 'bf': 3.151, 'hod_dry': 1.260}
+
 
 @dataclass(frozen=True)
 class Reference:
@@ -174,6 +186,60 @@ def load_reference_r(ref: Reference, book: str) -> List[float]:
         logger.error(f"BT reference {ref.path} unreadable ({e}) — BT-band "
                      f"gate NO-DATA (blocks ADVANCE)")
         return []
+
+
+def load_hod_bt_r(path: Path = HOD_REF_B2,
+                  splits: Sequence[str] = ('TRAIN', 'VAL')) -> List[float]:
+    """Per-trade R of the HOD-break B2 reference book: the book's own net R, TRAIN+VAL only.
+
+    TEST is excluded because it is sealed for the research programme
+    (research/mature_method/frames10/FREEZE.md); the band only needs the shape.
+    """
+    out: List[float] = []
+    skipped = 0
+    with open(path, newline='') as f:
+        for row in csv.DictReader(f):
+            if splits and (row.get('split') or '') not in splits:
+                continue
+            v = _f(row.get('net'))
+            if v is None:
+                skipped += 1
+                continue
+            out.append(v)
+    if skipped:
+        logger.warning(f"{path.name}: {skipped} row(s) without net R — excluded from the BT band")
+    return out
+
+
+def sd_of(r_values: Sequence[float]) -> Optional[float]:
+    """Per-trade SD of a reference R distribution (>= 2 values), else None."""
+    if not r_values or len(r_values) < 2:
+        return None
+    import statistics
+    sd = statistics.stdev(r_values)
+    return sd if sd > 0 else None
+
+
+def pool_reference_r(book: str, orb_catalyst_veto: bool = False,
+                     bf_min_daily_volume: int = 200_000) -> List[float]:
+    """The reference R distribution for a POOL member ('orb' | 'bf' | 'hod_dry')."""
+    if book == 'orb':
+        return load_reference_r(orb_reference(orb_catalyst_veto), 'orb')
+    if book == 'bf':
+        return load_reference_r(bf_reference(bf_min_daily_volume), 'bf')
+    if book == 'hod_dry':
+        ref = Reference(HOD_REF_B2, 'hod_frames6/book6.csv (B2 dry reference, net R)')
+        if not ref.exists:
+            logger.error(f"BT reference missing: {ref.path} — the HOD dry stream has no pooled "
+                         f"band contribution")
+            return []
+        try:
+            return load_hod_bt_r(ref.path)
+        except Exception as e:  # noqa: BLE001 - a decision aid must not crash
+            logger.error(f"BT reference {ref.path} unreadable ({e}) — HOD dry excluded")
+            return []
+    logger.error(f"pool_reference_r: unknown book {book!r} — no reference")
+    return []
 
 
 def bootstrap_band(r_values: Sequence[float], n: int, draws: int = DRAWS,

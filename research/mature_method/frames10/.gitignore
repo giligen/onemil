@@ -1,0 +1,3 @@
+# the raw walk (86,295 brackets, ~17 MB) — regenerate with `python3 w32.py walk`
+p32.csv
+w32_state.json
