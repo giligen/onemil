@@ -560,3 +560,11 @@ weakened reading; raw DBN kept on disk, which arm O did not do.
 
 *(Run order: F52 first — the only lever that can flip a measured sign, and it needs no new data;
 then F53, free and it touches a live book; then F54, which spends money.)*
+
+---
+
+## Pass 17 result (2026-09-20) — `research/mature_method/frames17/REPORT.md`
+
+| # | frame | cells | result |
+|---|---|---|---|
+| **F52** | **THE MIRROR SHORT ON A RESTING LIMIT** — a resting sell limit at `ref x (1+k)`, k in {0.3%, 0.6%}, live 5 min, filled AT THE LIMIT only on a later bar's HIGH touch; entry charged zero, exit unchanged from arm3 (measured NBBO half-spread, `swalk` imported verbatim) | **2** | **NEITHER CELL SHIPS.** k=0.3%: net TRAIN +0.114 (t +2.45) / VAL +0.138 (t +2.14) clears the +0.10 R bar and both TRAIN halves are positive, but the pre-committed DECIDING TABLE (unfilled scored at frames16 arm3's own reacting fill, NET of its own measured cost — a like-for-like comparison) shows **TRAIN unfilled NET +0.144 > filled NET +0.114 = ADVERSE SELECTION**, confirmed dead per PREREG §5 regardless of the net numbers; ex-top-5% is also negative both splits (frames16's kill #3). **k=0.6%: net TRAIN +0.129 (t +2.13) / VAL +0.320 (t +2.45), clears the deciding table on BOTH splits** (unfilled NET +0.127/+0.035 vs filled NET +0.129/+0.320 — TRAIN by a 0.002 R margin, noise), halves +0.169/+0.084, green% above the count-matched null both splits — but **ex-top-5% is still negative on TRAIN (-0.023)**, the SAME tail-concentration kill that has now killed every mirror-short cell in this programme. Fill rate 31.8-57.2%. **Verdict: k=0.6% is a LEAD (escapes adverse selection, still fails the tail kill), k=0.3% is REFUTED, nothing proposed for a dry run.** Programme count 1,252 -> 1,254.
