@@ -1,0 +1,150 @@
+=== STATUS MIX ===
+{'ok': 6409, 'regsho': 116, 'doji': 86, 'no_bars': 13}
+
+### 1x TRAIN combined
+  GROSS R/trade=+0.4309 (iid t +2.44)  |  avg cost 1.469R/trade
+  n=387 days=250 weeks=53 fills/day=1.5 fills/wk=7.3  net R/trade=-1.0376 (iid SE 0.2663, t -3.90 | clustered SE 0.2670, t -3.89) MDE=0.746R
+  WR=15.8% avgW=+7.10R avgL=-2.56R  ex-top1%=-1.1502R ex-top5%=-1.6092R top5 P&L share=35.5%
+  green weeks 32.1% vs null 50.0% (p=0.996)  P&L $-30,768  MDD $-32,231
+
+### 1x TRAIN long
+  GROSS R/trade=+0.4662 (iid t +1.91)  |  avg cost 1.512R/trade
+  n=198 days=154 weeks=53 fills/day=1.3 fills/wk=3.7  net R/trade=-1.0457 (iid SE 0.4289, t -2.44 | clustered SE 0.4375, t -2.39) MDE=1.202R
+  WR=16.7% avgW=+6.68R avgL=-2.59R  ex-top1%=-1.1563R ex-top5%=-1.6063R top5 P&L share=63.8%
+  green weeks 18.9% vs null 50.0% (p=1.000)  P&L $-14,637  MDD $-19,844
+
+### 1x TRAIN short
+  GROSS R/trade=+0.3940 (iid t +1.54)  |  avg cost 1.423R/trade
+  n=189 days=153 weeks=53 fills/day=1.2 fills/wk=3.6  net R/trade=-1.0291 (iid SE 0.3102, t -3.32 | clustered SE 0.3064, t -3.36) MDE=0.869R
+  WR=14.8% avgW=+7.59R avgL=-2.53R  ex-top1%=-1.1428R ex-top5%=-1.6123R top5 P&L share=47.4%
+  green weeks 26.4% vs null 49.7% (p=1.000)  P&L $-16,131  MDD $-16,577
+
+### 1x TRAIN_H1 combined
+  GROSS R/trade=+0.4391 (iid t +1.75)  |  avg cost 1.154R/trade
+  n=186 days=122 weeks=27 fills/day=1.5 fills/wk=6.9  net R/trade=-0.7149 (iid SE 0.2979, t -2.40 | clustered SE 0.3055, t -2.34) MDE=0.835R
+  WR=17.7% avgW=+6.56R avgL=-2.28R  ex-top1%=-0.8291R ex-top5%=-1.2947R top5 P&L share=44.6%
+  green weeks 44.4% vs null 50.1% (p=0.775)  P&L $-4,364  MDD $-11,955
+
+### 1x TRAIN_H1 long
+  GROSS R/trade=+0.7584 (iid t +2.00)  |  avg cost 0.997R/trade
+  n=97 days=74 weeks=26 fills/day=1.3 fills/wk=3.7  net R/trade=-0.2389 (iid SE 0.4165, t -0.57 | clustered SE 0.4244, t -0.56) MDE=1.167R
+  WR=21.6% avgW=+6.56R avgL=-2.12R  ex-top1%=-0.3436R ex-top5%=-0.7721R top5 P&L share=69.4%
+  green weeks 30.8% vs null 49.7% (p=0.985)  P&L $1,337  MDD $-9,554
+
+### 1x TRAIN_H1 short
+  GROSS R/trade=+0.0912 (iid t +0.28)  |  avg cost 1.325R/trade
+  n=89 days=73 weeks=27 fills/day=1.2 fills/wk=3.3  net R/trade=-1.2337 (iid SE 0.4218, t -2.93 | clustered SE 0.4413, t -2.80) MDE=1.182R
+  WR=13.5% avgW=+6.56R avgL=-2.45R  ex-top1%=-1.3573R ex-top5%=-1.8665R top5 P&L share=69.7%
+  green weeks 29.6% vs null 50.1% (p=0.990)  P&L $-5,702  MDD $-8,906
+
+### 1x TRAIN_H2 combined
+  GROSS R/trade=+0.4234 (iid t +1.71)  |  avg cost 1.760R/trade
+  n=201 days=128 weeks=27 fills/day=1.6 fills/wk=7.4  net R/trade=-1.3362 (iid SE 0.4320, t -3.09 | clustered SE 0.4282, t -3.12) MDE=1.210R
+  WR=13.9% avgW=+7.73R avgL=-2.80R  ex-top1%=-1.5019R ex-top5%=-1.9569R top5 P&L share=76.6%
+  green weeks 18.5% vs null 49.7% (p=1.000)  P&L $-26,404  MDD $-25,951
+
+### 1x TRAIN_H2 long
+  GROSS R/trade=+0.1855 (iid t +0.60)  |  avg cost 2.006R/trade
+  n=101 days=80 weeks=27 fills/day=1.3 fills/wk=3.7  net R/trade=-1.8205 (iid SE 0.7336, t -2.48 | clustered SE 0.7413, t -2.46) MDE=2.055R
+  WR=11.9% avgW=+6.89R avgL=-3.00R  ex-top1%=-2.0507R ex-top5%=-2.5146R top5 P&L share=100.0%
+  green weeks 7.4% vs null 50.2% (p=1.000)  P&L $-15,974  MDD $-15,521
+
+### 1x TRAIN_H2 short
+  GROSS R/trade=+0.6635 (iid t +1.71)  |  avg cost 1.511R/trade
+  n=100 days=80 weeks=27 fills/day=1.2 fills/wk=3.7  net R/trade=-0.8470 (iid SE 0.4515, t -1.88 | clustered SE 0.4270, t -1.98) MDE=1.265R
+  WR=16.0% avgW=+8.37R avgL=-2.60R  ex-top1%=-0.9522R ex-top5%=-1.3875R top5 P&L share=86.7%
+  green weeks 22.2% vs null 49.6% (p=1.000)  P&L $-10,430  MDD $-10,026
+
+### 1x VAL combined
+  GROSS R/trade=-0.0106 (iid t -0.04)  |  avg cost 1.359R/trade
+  n=160 days=102 weeks=22 fills/day=1.6 fills/wk=7.3  net R/trade=-1.3692 (iid SE 0.2968, t -4.61 | clustered SE 0.3107, t -4.41) MDE=0.832R
+  WR=11.2% avgW=+6.91R avgL=-2.42R  ex-top1%=-1.5090R ex-top5%=-1.9416R top5 P&L share=74.2%
+  green weeks 18.2% vs null 50.3% (p=1.000)  P&L $-11,481  MDD $-11,598
+
+### 1x VAL long
+  GROSS R/trade=+0.1539 (iid t +0.46)  |  avg cost 1.198R/trade
+  n=95 days=71 weeks=22 fills/day=1.3 fills/wk=4.3  net R/trade=-1.0441 (iid SE 0.3798, t -2.75 | clustered SE 0.3802, t -2.75) MDE=1.064R
+  WR=12.6% avgW=+7.07R avgL=-2.22R  ex-top1%=-1.1584R ex-top5%=-1.6376R top5 P&L share=88.2%
+  green weeks 18.2% vs null 50.3% (p=1.000)  P&L $-1,514  MDD $-6,651
+
+### 1x VAL short
+  GROSS R/trade=-0.2511 (iid t -0.79)  |  avg cost 1.593R/trade
+  n=65 days=55 weeks=21 fills/day=1.2 fills/wk=3.1  net R/trade=-1.8444 (iid SE 0.4724, t -3.90 | clustered SE 0.4710, t -3.92) MDE=1.324R
+  WR=9.2% avgW=+6.58R avgL=-2.70R  ex-top1%=-2.0218R ex-top5%=-2.5189R top5 P&L share=100.0%
+  green weeks 14.3% vs null 50.1% (p=1.000)  P&L $-9,967  MDD $-9,497
+
+1x admitted positions/day: mean=1.55 max=4  cap-zeroed rows=5862/6409
+
+### 2x TRAIN combined
+  GROSS R/trade=+0.2781 (iid t +1.78)  |  avg cost 1.414R/trade
+  n=449 days=250 weeks=53 fills/day=1.8 fills/wk=8.5  net R/trade=-1.1361 (iid SE 0.2346, t -4.84 | clustered SE 0.2377, t -4.78) MDE=0.657R
+  WR=14.0% avgW=+7.11R avgL=-2.48R  ex-top1%=-1.2586R ex-top5%=-1.7098R top5 P&L share=26.5%
+  green weeks 34.0% vs null 50.1% (p=0.994)  P&L $-49,447  MDD $-58,806
+
+### 2x TRAIN long
+  GROSS R/trade=+0.2189 (iid t +1.05)  |  avg cost 1.411R/trade
+  n=230 days=166 weeks=53 fills/day=1.4 fills/wk=4.3  net R/trade=-1.1919 (iid SE 0.3667, t -3.25 | clustered SE 0.3654, t -3.26) MDE=1.028R
+  WR=13.9% avgW=+6.53R avgL=-2.44R  ex-top1%=-1.3368R ex-top5%=-1.7785R top5 P&L share=53.4%
+  green weeks 20.8% vs null 49.9% (p=1.000)  P&L $-28,658  MDD $-40,287
+
+### 2x TRAIN short
+  GROSS R/trade=+0.3404 (iid t +1.46)  |  avg cost 1.418R/trade
+  n=219 days=168 weeks=52 fills/day=1.3 fills/wk=4.2  net R/trade=-1.0775 (iid SE 0.2890, t -3.73 | clustered SE 0.2932, t -3.67) MDE=0.810R
+  WR=14.2% avgW=+7.72R avgL=-2.53R  ex-top1%=-1.2266R ex-top5%=-1.6369R top5 P&L share=44.6%
+  green weeks 30.8% vs null 50.3% (p=0.998)  P&L $-20,789  MDD $-26,471
+
+### 2x TRAIN_H1 combined
+  GROSS R/trade=+0.3773 (iid t +1.64)  |  avg cost 1.045R/trade
+  n=218 days=122 weeks=27 fills/day=1.8 fills/wk=8.1  net R/trade=-0.6678 (iid SE 0.2672, t -2.50 | clustered SE 0.2819, t -2.37) MDE=0.749R
+  WR=16.5% avgW=+6.80R avgL=-2.15R  ex-top1%=-0.8130R ex-top5%=-1.2089R top5 P&L share=37.5%
+  green weeks 44.4% vs null 50.2% (p=0.790)  P&L $-1,861  MDD $-17,598
+
+### 2x TRAIN_H1 long
+  GROSS R/trade=+0.3661 (iid t +1.18)  |  avg cost 0.902R/trade
+  n=119 days=82 weeks=26 fills/day=1.5 fills/wk=4.6  net R/trade=-0.5361 (iid SE 0.3386, t -1.58 | clustered SE 0.3505, t -1.53) MDE=0.949R
+  WR=16.8% avgW=+6.59R avgL=-1.98R  ex-top1%=-0.7127R ex-top5%=-1.0705R top5 P&L share=59.9%
+  green weeks 34.6% vs null 50.2% (p=0.960)  P&L $4,741  MDD $-10,145
+
+### 2x TRAIN_H1 short
+  GROSS R/trade=+0.3908 (iid t +1.13)  |  avg cost 1.217R/trade
+  n=99 days=78 weeks=27 fills/day=1.3 fills/wk=3.7  net R/trade=-0.8260 (iid SE 0.4264, t -1.94 | clustered SE 0.4616, t -1.79) MDE=1.195R
+  WR=16.2% avgW=+7.07R avgL=-2.35R  ex-top1%=-0.9328R ex-top5%=-1.3748R top5 P&L share=67.7%
+  green weeks 33.3% vs null 49.7% (p=0.973)  P&L $-6,602  MDD $-13,625
+
+### 2x TRAIN_H2 combined
+  GROSS R/trade=+0.1845 (iid t +0.87)  |  avg cost 1.763R/trade
+  n=231 days=128 weeks=27 fills/day=1.8 fills/wk=8.6  net R/trade=-1.5780 (iid SE 0.3782, t -4.17 | clustered SE 0.3751, t -4.21) MDE=1.060R
+  WR=11.7% avgW=+7.53R avgL=-2.78R  ex-top1%=-1.7262R ex-top5%=-2.1827R top5 P&L share=68.8%
+  green weeks 22.2% vs null 49.9% (p=0.999)  P&L $-47,585  MDD $-49,501
+
+### 2x TRAIN_H2 long
+  GROSS R/trade=+0.0610 (iid t +0.22)  |  avg cost 1.956R/trade
+  n=111 days=84 weeks=27 fills/day=1.3 fills/wk=4.1  net R/trade=-1.8949 (iid SE 0.6630, t -2.86 | clustered SE 0.6582, t -2.88) MDE=1.858R
+  WR=10.8% avgW=+6.43R avgL=-2.90R  ex-top1%=-2.1065R ex-top5%=-2.5294R top5 P&L share=100.0%
+  green weeks 7.4% vs null 49.8% (p=1.000)  P&L $-33,399  MDD $-32,493
+
+### 2x TRAIN_H2 short
+  GROSS R/trade=+0.2988 (iid t +0.94)  |  avg cost 1.584R/trade
+  n=120 days=90 weeks=26 fills/day=1.3 fills/wk=4.6  net R/trade=-1.2850 (iid SE 0.3935, t -3.27 | clustered SE 0.3740, t -3.44) MDE=1.103R
+  WR=12.5% avgW=+8.40R avgL=-2.67R  ex-top1%=-1.4703R ex-top5%=-1.8530R top5 P&L share=81.3%
+  green weeks 26.9% vs null 49.6% (p=0.995)  P&L $-14,186  MDD $-18,095
+
+### 2x VAL combined
+  GROSS R/trade=+0.0946 (iid t +0.41)  |  avg cost 1.281R/trade
+  n=185 days=102 weeks=22 fills/day=1.8 fills/wk=8.4  net R/trade=-1.1865 (iid SE 0.2749, t -4.32 | clustered SE 0.2930, t -4.05) MDE=0.770R
+  WR=12.4% avgW=+6.96R avgL=-2.34R  ex-top1%=-1.3059R ex-top5%=-1.7967R top5 P&L share=69.8%
+  green weeks 18.2% vs null 49.5% (p=1.000)  P&L $-28,556  MDD $-27,965
+
+### 2x VAL long
+  GROSS R/trade=+0.2888 (iid t +0.89)  |  avg cost 1.124R/trade
+  n=113 days=77 weeks=22 fills/day=1.5 fills/wk=5.1  net R/trade=-0.8353 (iid SE 0.3483, t -2.40 | clustered SE 0.3589, t -2.33) MDE=0.976R
+  WR=14.2% avgW=+7.10R avgL=-2.14R  ex-top1%=-1.0256R ex-top5%=-1.4238R top5 P&L share=85.7%
+  green weeks 22.7% vs null 49.9% (p=0.998)  P&L $-8,852  MDD $-11,925
+
+### 2x VAL short
+  GROSS R/trade=-0.2100 (iid t -0.69)  |  avg cost 1.528R/trade
+  n=72 days=59 weeks=21 fills/day=1.2 fills/wk=3.4  net R/trade=-1.7379 (iid SE 0.4428, t -3.93 | clustered SE 0.4356, t -3.99) MDE=1.241R
+  WR=9.7% avgW=+6.63R avgL=-2.64R  ex-top1%=-1.8963R ex-top5%=-2.3367R top5 P&L share=100.0%
+  green weeks 14.3% vs null 49.9% (p=1.000)  P&L $-19,704  MDD $-18,764
+
+2x admitted positions/day: mean=1.80 max=4  cap-zeroed rows=5775/6409
