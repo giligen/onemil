@@ -1,0 +1,10 @@
+dataset,schema,cost,cached,path
+EQUS.MINI,mbp-1,0.072658091784,False,/home/ec2-user/onemil/research/mature_method/frames16/raw/EQUS.MINI_mbp-1_2026-05-11.dbn.zst
+EQUS.MINI,bbo-1s,0.011371076107,False,/home/ec2-user/onemil/research/mature_method/frames16/raw/EQUS.MINI_bbo-1s_2026-05-11.dbn.zst
+EQUS.MINI,tbbo,0.013597458601,False,/home/ec2-user/onemil/research/mature_method/frames16/raw/EQUS.MINI_tbbo_2026-05-11.dbn.zst
+XNAS.ITCH,mbp-1,0.076408177614,False,/home/ec2-user/onemil/research/mature_method/frames16/raw/XNAS.ITCH_mbp-1_2026-05-11.dbn.zst
+XNAS.ITCH,bbo-1s,0.016811788082,False,/home/ec2-user/onemil/research/mature_method/frames16/raw/XNAS.ITCH_bbo-1s_2026-05-11.dbn.zst
+XNAS.BASIC,cmbp-1,0.119068086147,False,/home/ec2-user/onemil/research/mature_method/frames16/raw/XNAS.BASIC_cmbp-1_2026-05-11.dbn.zst
+XNAS.BASIC,cbbo-1s,0.019175112247,False,/home/ec2-user/onemil/research/mature_method/frames16/raw/XNAS.BASIC_cbbo-1s_2026-05-11.dbn.zst
+XNYS.PILLAR,mbp-1,0.014321565628,False,/home/ec2-user/onemil/research/mature_method/frames16/raw/XNYS.PILLAR_mbp-1_2026-05-11.dbn.zst
+XNYS.PILLAR,bbo-1s,0.006448030472,False,/home/ec2-user/onemil/research/mature_method/frames16/raw/XNYS.PILLAR_bbo-1s_2026-05-11.dbn.zst

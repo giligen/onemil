@@ -1,0 +1,13 @@
+[nbbo] 2,473 trades -> 5,200 distinct (day, symbol, minute) legs
+[nbbo] already measured 2,000; todo 4,458
+  1/4458
+  501/4458
+  1001/4458
+  1501/4458
+  2001/4458
+  2501/4458
+  3001/4458
+  3501/4458
+  4001/4458
+[nbbo] DONE 6,458 legs · with quotes 6,358 (98.5 %)
+EXIT=0

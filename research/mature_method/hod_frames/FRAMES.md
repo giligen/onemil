@@ -499,3 +499,64 @@ intraday tape we own is the causal superset (day high >= open x 1.05). Buy the m
 for ~300 names, all sessions (about $0.0004 per symbol-day, ~$60 for two years), rebuild `share_h`
 on ALL sessions, re-run V1/V2/V4 where membership is unconditional. The only way to separate "the
 field is null" from "the denominator was built from the wrong days".
+
+---
+
+## Pass 16 result (2026-09-20) — `research/mature_method/frames16/REPORT.md`
+
+Pass 16 ran an instrument calibration (diagnostic), F49, and declared-but-did-not-run the lambda
+arm. **0 of 12 declared cells clears a bar; programme count 1,217 -> 1,240 (pass 15) -> 1,252.**
+Databento spend **$0.8225** of a $12 cap. TEST never opened.
+
+| # | frame | cells | result |
+|---|---|---|---|
+| **(arm 1)** | **INSTRUMENT CALIBRATION — is `hod_filter_stack` arm O a test of OFI at all?** | **0** (diagnostic) | **THE CODE IS RIGHT AND THE DATASET IS NOT.** Nine instruments priced then pulled on two 2026 sessions x three liquidity tiers (AAPL / FSLY / a HOD-band small cap), raw DBN **kept on disk**. Our CKS increments are byte-identical to `ofi.py::cks` (max\|diff\| 0 on 4,999 synthetic events) and on **XNAS.ITCH `mbp-1`** they reproduce the published contemporaneous relation exactly: **R2 0.649 / 0.619 (AAPL), 0.522 / 0.541 (mid), 0.562 / 0.174 (small)** against CKS's 0.6-0.7. On **EQUS.MINI `mbp-1` — the dataset arm O used — AAPL reads R2 0.006**, because EQUS.MINI quotes AAPL at **10.9 bps where the market quotes 1.0** and a HOD-band small cap at **12.3 % where the market quotes 0.88 %**. The 1-second clock loses **77-98 % of quote events** and costs ~35-40 % of R2 on a sound book (0.65 -> 0.40); the PUBLISHER costs 0.65 -> 0.006. **Verdict: arm O is WEAKENED, not a clean null — its `ofi_5m` (TRAIN +0.124, VAL -0.172) is a noisy reading attenuated by regression dilution, exactly the flat-and-sign-flipping shape it showed. STANDING RULE: EQUS.MINI quote schemas (`mbp-1`, `bbo-1s`, `tbbo`) must not be used for any spread, cost or order-flow measurement in this house** (EQUS.SUMMARY daily and the PIT definition feed are unaffected). |
+| **(arm 2)** | **THE LAMBDA RESIDUAL AT THE BREAK** (the reviewer's frame: raw OFI is range-restricted at a break, the discriminator is price move per unit of flow) | **4 declared, 0 scored** | **NOT RUN — UNRUNNABLE ON THE AFFORDABLE INSTRUMENT, measured rather than asserted.** Arm 1 left the gate a coin flip (the small cap reads R2 **0.406** on one session and **0.070** on the other), so the thing lambda actually is was measured directly from the stored DBN: **the 1-second instrument reproduces the full-depth FLOW at rho ~ 0.59 but the full-depth LAMBDA at rho ~ 0.26, agreeing even on the SIGN only 54-82 % of the time.** Lambda is a ratio with the noisy quantity in the denominator; a 77-98 % event loss is the worst possible place to accept it. (rho(lambda, return) is ~0 on the full instrument, so lambda is a genuinely distinct object, not a return in disguise.) **No lambda number is reported.** Priced over B2's own 344 sessions with exact `metadata.get_cost`: **XNAS.ITCH `bbo-1s` $11.23 · XNAS.ITCH `mbp-1` $80.15** — against the **$450** arm O quoted for EQUS.MINI `mbp-1`. **The real order-flow test on this book costs $80, not $450. Owner's call.** |
+| **F49** | **THE DISCOVERED MIRROR AS A SHORT** — frames15 B12 (already >= 5 % above the open, >= 3x its own hourly volume, a large price move in that hour) priced on its natural side | **8** | **DEAD ON COST — and it is the first frame in 1,252 cells whose pre-registered placebos came out FOR the signal.** 35,454 shorts walked; sell limit at `ref x (1 - 0.6 %)` filling at the next bar's open, never a touch; ETB-only (Alpaca `shortable AND easy_to_borrow`, absent = not shortable), Reg SHO 201 uptick modelled, wrappers and sub-$5 out. Gross (UP2, 2 % stop, bare): **+0.238 R TRAIN / +0.201 R VAL, day-clustered t +6.19 / +3.53, both halves, 15-20 trades a week, 1,726 trades** — against placebos of **+0.025 / +0.008** (high volume, NO price) and **+0.004 / +0.067** (a random other hour of the same name-days). The long mirror survives the same universe restriction (**-0.359 / -0.301 R**), so the object is real. **Then the cost was measured instead of imputed**: 6,458 SIP quote-minutes, 98.5 % covered, entry leg **0.379 % of price median** vs the frames14 F45 table's 0.278 -> the round trip is **0.194 / 0.199 R, 1.54-1.56x what F45 charges**, leaving net **+0.044 (t +1.10) / +0.002 (t +0.04)** with **ex-top-5 % NEGATIVE on both splits (-0.083 / -0.162)** = pre-committed kill #3. Green weeks INSIDE or BELOW the count-matched null on every cell and both splits. **Borrow is NOT the constraint (7.2 % unshortable), SSR is NOT the constraint (6.4 % of fills blocked, gross moves <= 0.006 R), the cap is NOT the constraint (2.9 % skipped).** The MDE is 0.108 / 0.167 R and the gross is far above it: **this is a cost verdict, not a null.** |
+
+**The one lead this pass opened, and it is in its own §3.4:** the measured ENTRY leg is **2.4x the
+exit leg** (0.379 % vs 0.161 % of price) because every fill in 1,252 cells is a *reacting* order at
+the next bar's open that crosses the spread by construction — and the unfilled counterfactual on
+this book runs the RIGHT way (**+0.241 R on cap-skipped signals vs +0.151 R on filled**), the
+opposite of the halt-resume dip-buy signature. A short is the one side that can rest a limit at the
+offer and be PAID the spread. That is F52.
+
+**Pass 16 rails**: reproduction EXACT (frames15 B12 -0.398 / -0.323 R, n 2,238 / 1,363, t -13.33 /
+-10.51, asserted raising); independent CKS rebuild EXACT (max\|diff\| 0); availability 100 % on
+borrow and prior close with a 0.0 pp winner/loser gap, 98.1-98.5 % on the measured entry spread with
+a 0.3 pp gap; every green-week claim against a 2,000-draw count-matched null; TEST never opened.
+
+---
+
+## Queued after pass 16 — the queue is now F46, F47, F48, F50, F51, then F52, F53, F54
+
+**F52 — THE ENTRY IS THE COST: the mirror short on a RESTING limit.** Pass 16's killer is the entry
+half-spread (0.379 % of price median, 2.4x the exit leg, 1.54-1.66x the F45 table) on a book that is
+gross-positive by +0.24 R = +0.48 % of price. Every fill in 1,252 cells has been a reacting order at
+the next bar's open. The short side can rest a sell limit at or above the offer and EARN the spread,
+and §3.4 already measured that the passive side here selects the BETTER half. Re-walk with a resting
+sell limit at the offer / the prior bar's high, take the fill only where a later bar actually traded
+at or above it (obtainability), and price the book earning half the spread instead of paying it. The
+swing is 0.2-0.4 R per trade against a +0.24 R gross — the only lever in pass 16 that can change a
+sign. Pre-commit: fill rate and unfilled counterfactual printed BEFORE the book; a passive fill that
+only happens on days the short loses is adverse selection, not an edge.
+
+**F53 — THE MIRROR AS A VETO FOR THE LIVE BOOKS (no new data, no new book).** The same object is
+**-0.359 / -0.301 R as a LONG** on exactly the universe bull flag trades. BF detects 57.5 % of its
+setups in the 10:00-11:00 hour — after the 09:30 hour's `hrv` exists — and has never been asked
+whether its own entry sits inside a mirror hour. Join `frames15/hourly15.parquet` onto BF's Stage-2
+cache at BF's own decision minute and score the mirror as a veto with the RUNBOOK step-5
+gate-separation map, frequency cost first. A veto is a config flag with zero state to unwind, and
+the live books are the only place an edge of this size compounds. Pre-commit: ORB is out of scope
+(09:35 entry, no hour has closed); era-consistent in 2025 and 2026 separately or it is not proposed.
+
+**F54 — THE FULL-DEPTH ORDER-FLOW TEST, SCOPED AND PRICED.** This house has never measured order
+flow on an instrument that reproduces the CKS relation. The definitive one (XNAS.ITCH `mbp-1`,
+R2 0.52-0.65) costs a measured **$80.15** for the whole B2 population. An owner-authorised $80 pull,
+then lambda, the residual, OFI at 1 and 5 minutes and the queue features, with arm 1's calibration
+re-run **per session as an acceptance gate** (a session whose large-cap R2 is below 0.30 is dropped,
+not scored). Cells = arm O's plus L1-L4 verbatim, so the result is directly comparable with the
+weakened reading; raw DBN kept on disk, which arm O did not do.
+
+*(Run order: F52 first — the only lever that can flip a measured sign, and it needs no new data;
+then F53, free and it touches a live book; then F54, which spends money.)*

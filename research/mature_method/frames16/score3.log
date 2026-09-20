@@ -1,0 +1,52 @@
+[REPRO] frames15 B12 TRAIN: n=2,238 gross -0.398 R (t -13.33)  MATCH
+[REPRO] frames15 B12 VAL: n=1,363 gross -0.323 R (t -10.51)  MATCH
+[avail] borrow list coverage 100.0% · ETB 83.2% · p_close coverage 100.0%
+[universe] 35,454 walked -> gate5 -> price>=$5 -> ex-wrapper = 6,737
+[avail] borrow flag absent: coverage 100.0% · miss winners 0.0% vs losers 0.0% (gap 0.0 pp)
+[avail] prior close missing: coverage 100.0% · miss winners 0.0% vs losers 0.0% (gap 0.0 pp)
+
+== ARM 3 cells (gate5 · price>=$5 · ex-wrapper · ETB only · SSR-aware fill) ==
+  S1 TRAIN n=1,269 gross +0.153 R (+0.306% of price) t_iid +5.12 t_clu +4.64 | cost 0.124 net +0.029 (t_clu +0.88) | ex5 +0.025 | book  887 (16.7/wk) green  52.8% (null p50 50.9 p95 58.5) $+1,971 wk $+37 worst $-790 streak 3
+  S1 VAL   n=  831 gross +0.129 R (+0.259% of price) t_iid +3.09 t_clu +2.55 | cost 0.125 net +0.004 (t_clu +0.08) | ex5 -0.032 | book  497 (21.6/wk) green  60.9% (null p50 52.2 p95 60.9) $+2,140 wk $+93 worst $-1,228 streak 5
+        halves gross +0.161 / +0.147  net +0.038 / +0.022  | unshortable 7.2% · SSR 10.6% (blocked 6.4%) · cap-skipped 2.9% (counterfactual: unfilled +0.241 R vs filled +0.151 R)
+  S2 TRAIN n=1,269 gross +0.174 R (+0.348% of price) t_iid +5.85 t_clu +5.33 | cost 0.126 net +0.048 (t_clu +1.47) | ex5 +0.173 | book  939 (17.7/wk) green  58.5% (null p50 54.7 p95 60.4) $+3,507 wk $+66 worst $-852 streak 3
+  S2 VAL   n=  831 gross +0.144 R (+0.287% of price) t_iid +3.68 t_clu +3.04 | cost 0.128 net +0.016 (t_clu +0.33) | ex5 +0.144 | book  553 (24.0/wk) green  60.9% (null p50 52.2 p95 60.9) $+1,873 wk $+81 worst $-1,193 streak 3
+        halves gross +0.172 / +0.176  net +0.046 / +0.049  | unshortable 7.2% · SSR 10.6% (blocked 6.4%) · cap-skipped 2.9% (counterfactual: unfilled +0.014 R vs filled +0.168 R)
+  S3 TRAIN n=1,071 gross +0.238 R (+0.475% of price) t_iid +7.23 t_clu +6.19 | cost 0.126 net +0.112 (t_clu +2.94) | ex5 +0.110 | book  803 (15.2/wk) green  58.5% (null p50 60.4 p95 67.9) $+6,902 wk $+130 worst $-737 streak 3
+  S3 VAL   n=  655 gross +0.201 R (+0.401% of price) t_iid +4.19 t_clu +3.53 | cost 0.128 net +0.073 (t_clu +1.28) | ex5 +0.038 | book  460 (20.0/wk) green  60.9% (null p50 56.5 p95 69.6) $+3,862 wk $+168 worst $-1,259 streak 3
+        halves gross +0.262 / +0.218  net +0.137 / +0.092  | unshortable 7.0% · SSR 8.9% (blocked 5.4%) · cap-skipped 3.1% (counterfactual: unfilled +0.280 R vs filled +0.238 R)
+  S4 TRAIN n=1,071 gross +0.260 R (+0.521% of price) t_iid +7.98 t_clu +6.85 | cost 0.128 net +0.132 (t_clu +3.52) | ex5 +0.259 | book  833 (15.7/wk) green  62.3% (null p50 62.3 p95 69.8) $+8,902 wk $+168 worst $-906 streak 3
+  S4 VAL   n=  655 gross +0.194 R (+0.389% of price) t_iid +4.41 t_clu +3.73 | cost 0.131 net +0.064 (t_clu +1.22) | ex5 +0.194 | book  499 (21.7/wk) green  56.5% (null p50 56.5 p95 69.6) $+3,371 wk $+147 worst $-893 streak 3
+        halves gross +0.272 / +0.251  net +0.144 / +0.122  | unshortable 7.0% · SSR 8.9% (blocked 5.4%) · cap-skipped 3.1% (counterfactual: unfilled +0.208 R vs filled +0.252 R)
+  S5 TRAIN n=1,269 gross +0.219 R (+0.206% of price) t_iid +5.21 t_clu +4.40 | cost 0.181 net +0.038 (t_clu +0.75) | ex5 -0.009 | book  918 (17.3/wk) green  50.9% (null p50 49.1 p95 56.6) $+2,628 wk $+50 worst $-1,807 streak 6
+  S5 VAL   n=  831 gross +0.193 R (+0.300% of price) t_iid +3.52 t_clu +3.02 | cost 0.169 net +0.025 (t_clu +0.38) | ex5 -0.061 | book  502 (21.8/wk) green  56.5% (null p50 56.5 p95 69.6) $+5,488 wk $+239 worst $-1,120 streak 4
+        halves gross +0.273 / +0.175  net +0.097 / -0.008  | unshortable 7.2% · SSR 10.6% (blocked 6.4%) · cap-skipped 2.9% (counterfactual: unfilled +0.306 R vs filled +0.205 R)
+  S6 TRAIN n=1,269 gross +0.207 R (+0.207% of price) t_iid +6.02 t_clu +5.43 | cost 0.188 net +0.019 (t_clu +0.49) | ex5 +0.206 | book 1001 (18.9/wk) green  43.4% (null p50 47.2 p95 52.8) $-1,349 wk $-25 worst $-1,751 streak 3
+  S6 VAL   n=  831 gross +0.147 R (+0.213% of price) t_iid +3.53 t_clu +3.42 | cost 0.175 net -0.028 (t_clu -0.65) | ex5 +0.147 | book  568 (24.7/wk) green  52.2% (null p50 47.8 p95 56.5) $+70 wk $+3 worst $-1,422 streak 5
+        halves gross +0.256 / +0.168  net +0.072 / -0.023  | unshortable 7.2% · SSR 10.6% (blocked 6.4%) · cap-skipped 2.9% (counterfactual: unfilled +0.253 R vs filled +0.185 R)
+  P1 TRAIN n=1,192 gross +0.025 R (+0.050% of price) t_iid +1.08 t_clu +0.87 | cost 0.110 net -0.084 (t_clu -2.91) | ex5 -0.076 | book  812 (15.3/wk) green  28.3% (null p50 34.0 p95 41.5) $-6,809 wk $-128 worst $-915 streak 12
+  P1 VAL   n=  751 gross +0.008 R (+0.016% of price) t_iid +0.24 t_clu +0.19 | cost 0.111 net -0.103 (t_clu -2.48) | ex5 -0.110 | book  434 (18.9/wk) green  26.1% (null p50 26.1 p95 39.1) $-4,712 wk $-205 worst $-1,190 streak 5
+        halves gross +0.008 / +0.036  net -0.102 / -0.073  | unshortable 6.4% · SSR 10.1% (blocked 6.3%) · cap-skipped 1.2% (counterfactual: unfilled -0.293 R vs filled +0.023 R)
+  P2 TRAIN n=1,092 gross +0.004 R (+0.008% of price) t_iid +0.18 t_clu +0.13 | cost 0.108 net -0.104 (t_clu -3.16) | ex5 -0.094 | book  778 (14.7/wk) green  30.2% (null p50 30.2 p95 37.7) $-7,714 wk $-146 worst $-925 streak 11
+  P2 VAL   n=  684 gross +0.067 R (+0.135% of price) t_iid +1.67 t_clu +1.39 | cost 0.109 net -0.042 (t_clu -0.86) | ex5 -0.078 | book  422 (18.3/wk) green  52.2% (null p50 52.2 p95 60.9) $+1,732 wk $+75 worst $-753 streak 4
+        halves gross -0.026 / +0.026  net -0.134 / -0.083  | unshortable 5.6% · SSR 10.3% (blocked 5.7%) · cap-skipped 1.2% (counterfactual: unfilled -0.037 R vs filled +0.031 R)
+
+== diagnostics: the rails switched OFF one at a time (S1) ==
+  S1-noETB TRAIN n=1,365 gross +0.177 R (+0.354% of price) t_iid +5.65 t_clu +4.93 | cost 0.124 net +0.054 (t_clu +1.50) | ex5 +0.035 | book  937 (17.7/wk) green  52.8% (null p50 54.7 p95 60.4) $+4,652 wk $+88 worst $-908 streak 3
+  S1-noETB VAL   n=  887 gross +0.116 R (+0.232% of price) t_iid +2.89 t_clu +2.23 | cost 0.125 net -0.009 (t_clu -0.16) | ex5 -0.045 | book  515 (22.4/wk) green  60.9% (null p50 52.2 p95 65.2) $+2,806 wk $+122 worst $-1,118 streak 5
+        halves gross +0.190 / +0.167  net +0.067 / +0.043  | unshortable 7.2% · SSR 10.6% (blocked 6.4%) · cap-skipped 2.9% (counterfactual: unfilled +0.241 R vs filled +0.151 R)
+  S1-noSSR TRAIN n=1,336 gross +0.147 R (+0.294% of price) t_iid +5.06 t_clu +4.54 | cost 0.124 net +0.023 (t_clu +0.71) | ex5 +0.020 | book  919 (17.3/wk) green  52.8% (null p50 50.9 p95 56.6) $+1,421 wk $+27 worst $-850 streak 3
+  S1-noSSR VAL   n=  904 gross +0.141 R (+0.283% of price) t_iid +3.47 t_clu +3.00 | cost 0.125 net +0.016 (t_clu +0.33) | ex5 -0.024 | book  506 (22.0/wk) green  60.9% (null p50 56.5 p95 69.6) $+4,245 wk $+185 worst $-859 streak 3
+        halves gross +0.165 / +0.133  net +0.041 / +0.008  | unshortable 7.2% · SSR 10.6% (blocked 6.4%) · cap-skipped 2.9% (counterfactual: unfilled +0.241 R vs filled +0.151 R)
+  S1-SSRwide TRAIN n=1,243 gross +0.155 R (+0.310% of price) t_iid +5.15 t_clu +4.61 | cost 0.124 net +0.031 (t_clu +0.92) | ex5 +0.027 | book  874 (16.5/wk) green  52.8% (null p50 52.8 p95 58.5) $+2,582 wk $+49 worst $-790 streak 3
+  S1-SSRwide VAL   n=  822 gross +0.133 R (+0.265% of price) t_iid +3.16 t_clu +2.62 | cost 0.125 net +0.007 (t_clu +0.14) | ex5 -0.029 | book  496 (21.6/wk) green  60.9% (null p50 52.2 p95 65.2) $+2,553 wk $+111 worst $-1,115 streak 5
+        halves gross +0.171 / +0.142  net +0.048 / +0.017  | unshortable 7.2% · SSR 12.5% (blocked 7.9%) · cap-skipped 2.9% (counterfactual: unfilled +0.241 R vs filled +0.151 R)
+
+== cap sensitivity on S1 (gross R on the FILLED set, ETB, SSR-aware) ==
+  cap 0.3%           n=1,995  TRAIN +0.160 (t +4.69, n=1,214)  VAL +0.136 (t +2.65, n=781)
+  cap 0.6% (shipped) n=2,100  TRAIN +0.153 (t +4.64, n=1,269)  VAL +0.129 (t +2.55, n=831)
+  cap 1.2%           n=2,144  TRAIN +0.168 (t +5.09, n=1,296)  VAL +0.123 (t +2.45, n=848)
+  cap none           n=2,148  TRAIN +0.167 (t +5.09, n=1,297)  VAL +0.123 (t +2.40, n=851)
+
+[arm3] wrote cells3.csv (11 rows)
+EXIT=0

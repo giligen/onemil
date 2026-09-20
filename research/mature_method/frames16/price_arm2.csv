@@ -1,0 +1,3 @@
+dataset,schema,sessions_priced,sampled_cost,est_full_cost
+XNAS.ITCH,bbo-1s,86,2.80629754067,11.22519016268
+XNAS.ITCH,mbp-1,86,20.036637425428005,80.14654970171202

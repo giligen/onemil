@@ -1,0 +1,28 @@
+== (a) the LONG mirror on the short arm's own universe ==
+  B12 as published (all prices, wrappers in)           | TRAIN n=2,238 -0.398 R (t -13.33) | VAL n=1,363 -0.323 R (t -10.51)
+  B12 on the short arm universe (>=$5, ex-wrapper)     | TRAIN n=1,439 -0.359 R (t -8.98) | VAL n=  977 -0.301 R (t -7.82)
+
+== (b) measured NBBO on 350 sampled S3 trades x 2 legs ==
+  1/350
+  26/350
+  51/350
+  76/350
+  101/350
+  126/350
+  151/350
+  176/350
+  201/350
+  226/350
+  251/350
+  276/350
+  301/350
+  326/350
+
+  coverage 688 of 700 legs fetched with quotes
+  entry n=  340  MEASURED median spread 0.379 % of price (mean 0.569)  vs F45 IMPUTED 0.278 %  -> ratio 1.36x
+  exit  n=  348  MEASURED median spread 0.161 % of price (mean 0.359)  vs F45 IMPUTED 0.172 %  -> ratio 0.93x
+  TRAIN measured/imputed median ratio 0.93x
+  VAL   measured/imputed median ratio 1.08x
+
+  cost in R on the sampled trades: MEASURED mean 0.227 (median 0.136)  vs IMPUTED mean 0.126 (median 0.113)  -> ratio 1.80x
+EXIT=0
