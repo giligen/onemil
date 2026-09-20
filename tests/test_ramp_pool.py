@@ -249,8 +249,8 @@ class TestLoaders:
         with open(p, 'w', newline='') as f:
             w = csv.writer(f)
             w.writerow(rp.DRY_POOL_HEADER)
-            w.writerow(['2026-09-15', 'AAA', 'not-a-number'])
-            w.writerow(['2026-09-15', 'BBB', '1.0'])
+            w.writerow(['2026-09-15', 'AAA', '600', 'not-a-number'])
+            w.writerow(['2026-09-15', 'BBB', '601', '1.0'])
         with caplog.at_level(logging.ERROR):
             t = rp.load_dry_trades(p)
         assert len(t) == 1 and 'without a usable R' in caplog.text
@@ -259,6 +259,144 @@ class TestLoaders:
         p = tmp_path / 'dry.csv'
         assert rp.append_dry_trades('2026-09-15', [], p) == 0
         assert not p.exists()
+
+
+# ------------------------------------------------------------------ frames11 F36: the producer
+class TestDryPoolIdempotence:
+    """The EOD check is a reporting tool the owner re-runs freely; the cron may fire twice.
+
+    A second run of the same session must append NOTHING, or the pooled n (and therefore the band
+    width the ramp gate reads) inflates on re-reads alone.
+    """
+
+    SESSION = [('AAPL', 1.5, 611), ('MSFT', -1.0, 640), ('NVDA', 0.25, 700)]
+
+    def test_a_rerun_of_the_same_session_appends_nothing(self, tmp_path):
+        p = tmp_path / 'dry.csv'
+        assert rp.append_dry_trades('2026-09-21', self.SESSION, p) == 3
+        before = p.read_text()
+        for _ in range(3):
+            assert rp.append_dry_trades('2026-09-21', self.SESSION, p) == 0
+        assert p.read_text() == before
+        assert len(rp.load_dry_trades(p)) == 3
+
+    def test_the_key_is_day_symbol_and_entry_minute(self, tmp_path):
+        p = tmp_path / 'dry.csv'
+        assert rp.append_dry_trades('2026-09-21', [('AAPL', 1.5, 611)], p) == 1
+        # same symbol, same day, DIFFERENT entry minute = a different trade (a re-break)
+        assert rp.append_dry_trades('2026-09-21', [('AAPL', -0.9, 705)], p) == 1
+        # same symbol and minute on another day = a different trade
+        assert rp.append_dry_trades('2026-09-22', [('AAPL', 0.4, 611)], p) == 1
+        # ...and the exact key again is a no-op
+        assert rp.append_dry_trades('2026-09-22', [('AAPL', 0.4, 611)], p) == 0
+        assert rp.dry_pool_keys(p) == {('2026-09-21', 'AAPL', '611'),
+                                       ('2026-09-21', 'AAPL', '705'),
+                                       ('2026-09-22', 'AAPL', '611')}
+
+    def test_duplicates_inside_one_call_are_collapsed(self, tmp_path):
+        p = tmp_path / 'dry.csv'
+        assert rp.append_dry_trades('2026-09-21', [('AAPL', 1.5, 611), ('AAPL', 1.5, 611)], p) == 1
+
+    def test_the_pooled_band_reads_the_appended_rows(self, tmp_path):
+        """The whole point: what the EOD check writes is what the ramp band widens on."""
+        p = tmp_path / 'dry.csv'
+        rows = [(f'S{i}', 0.5 if i % 2 else -0.5, 600 + i) for i in range(14)]
+        assert rp.append_dry_trades('2026-09-21', rows, p) == 14
+        trades = rp.load_dry_trades(p)
+        assert len(trades) == 14 and all(t.book == rp.BOOK_HOD_DRY for t in trades)
+        sds, rr = rp.reference_sds_and_r([rp.BOOK_HOD_DRY])
+        stat = rp.pooled_z(trades, sds)
+        band = rp.pooled_band(rr, sds, stat.per_book_n)
+        assert stat.n == 14 and stat.dry_n == 14 and stat.live_n == 0
+        assert band is not None and band.n == 14
+        assert rp.classify_pooled(stat, band) != bb.NO_DATA
+        # and a re-run of the session does not move the reading
+        assert rp.append_dry_trades('2026-09-21', rows, p) == 0
+        assert rp.pooled_z(rp.load_dry_trades(p), sds).n == 14
+
+    def test_the_legacy_three_column_file_still_appends_and_reads(self, tmp_path, caplog):
+        p = tmp_path / 'dry.csv'
+        with open(p, 'w', newline='') as f:
+            w = csv.writer(f)
+            w.writerow(rp.DRY_POOL_HEADER_LEGACY)
+            w.writerow(['2026-09-15', 'AAA', '1.0'])
+        with caplog.at_level(logging.WARNING):
+            assert rp.append_dry_trades('2026-09-15', [('AAA', 1.0), ('BBB', -0.5)], p) == 1
+        assert 'legacy 3-column schema' in caplog.text
+        assert [t.r for t in rp.load_dry_trades(p)] == [1.0, -0.5]
+
+    def test_two_tuples_without_a_minute_still_work(self, tmp_path):
+        p = tmp_path / 'dry.csv'
+        assert rp.append_dry_trades('2026-09-21', [('AAPL', 1.5)], p) == 1
+        assert rp.append_dry_trades('2026-09-21', [('AAPL', 1.5)], p) == 0
+
+    def test_a_non_finite_r_is_never_written(self, tmp_path):
+        p = tmp_path / 'dry.csv'
+        assert rp.append_dry_trades('2026-09-21', [('AAPL', float('nan'), 611),
+                                                   ('MSFT', float('inf'), 612)], p) == 0
+        assert not p.exists()
+
+    def test_keys_of_a_missing_file_are_empty(self, tmp_path):
+        assert rp.dry_pool_keys(tmp_path / 'nope.csv') == set()
+
+
+class TestEodCheckProducer:
+    """`scripts/hod_break_eod_check.append_to_pool` — the one call that makes the pool self-feeding."""
+
+    @staticmethod
+    def _mod():
+        import importlib.util
+        import sys as _sys
+        from pathlib import Path as _P
+        root = _P(__file__).resolve().parent.parent
+        if str(root) not in _sys.path:
+            _sys.path.insert(0, str(root))
+        spec = importlib.util.spec_from_file_location(
+            'hod_break_eod_check_f36', root / 'scripts' / 'hod_break_eod_check.py')
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    # run_book output for the DRY-RUN book: (day_key, entry_m, exit_m, symbol, rr, usd)
+    TAKEN = [(0, 611, 650, 'AAPL', 1.5, 150.0), (0, 640, 700, 'MSFT', -1.0, -100.0)]
+
+    def test_dry_mode_appends_once_and_the_rerun_is_a_noop(self, tmp_path, monkeypatch):
+        mod = self._mod()
+        p = tmp_path / 'dry.csv'
+        monkeypatch.setattr(rp, 'DRY_POOL_PATH', p)
+        first = mod.append_to_pool('2026-09-21', self.TAKEN, dry_run=True, is_r2g=False)
+        assert 'appended 2 of 2' in first
+        again = mod.append_to_pool('2026-09-21', self.TAKEN, dry_run=True, is_r2g=False)
+        assert 'appended 0 of 2' in again
+        assert [t.r for t in rp.load_dry_trades(p)] == [1.5, -1.0]
+        assert rp.dry_pool_keys(p) == {('2026-09-21', 'AAPL', '611'),
+                                       ('2026-09-21', 'MSFT', '640')}
+
+    def test_live_mode_writes_nothing(self, tmp_path, monkeypatch):
+        mod = self._mod()
+        p = tmp_path / 'dry.csv'
+        monkeypatch.setattr(rp, 'DRY_POOL_PATH', p)
+        assert 'nothing appended' in mod.append_to_pool('2026-09-21', self.TAKEN,
+                                                        dry_run=False, is_r2g=False)
+        assert not p.exists()
+
+    def test_red_to_green_is_not_a_pooled_book(self, tmp_path, monkeypatch):
+        mod = self._mod()
+        p = tmp_path / 'dry.csv'
+        monkeypatch.setattr(rp, 'DRY_POOL_PATH', p)
+        assert 'not a pooled book' in mod.append_to_pool('2026-09-21', self.TAKEN,
+                                                         dry_run=True, is_r2g=True)
+        assert not p.exists()
+
+    def test_a_broken_pool_write_never_breaks_the_eod_check(self, monkeypatch):
+        mod = self._mod()
+
+        def boom(*a, **k):
+            raise OSError('disk full')
+
+        monkeypatch.setattr(rp, 'append_dry_trades', boom)
+        assert 'append FAILED' in mod.append_to_pool('2026-09-21', self.TAKEN,
+                                                     dry_run=True, is_r2g=False)
 
 
 # --------------------------------------------------------------------------- the real references

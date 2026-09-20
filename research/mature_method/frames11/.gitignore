@@ -1,0 +1,5 @@
+# the raw F34 floor walk (285,485 brackets x 3 stop widths, ~29 MB) —
+# regenerate with `python3 w34.py` (resumable per session, ~6 min)
+w34.csv
+w34_state.json
+__pycache__/

@@ -163,3 +163,8 @@ research/mature_method/hod_frames4/short_interest.csv
 research/mature_method/hod_frames4/sig4.csv
 research/mature_method/hod_frames4/sig4_inst.csv
 research/mature_method/hod_frames4/__pycache__/
+
+# The HOD-break dry stream fed to the pooled ramp band (trading/ramp_pool.py).
+# A growing per-session journal, rebuildable by re-running scripts/hod_break_eod_check.py
+# per session; already covered by data/ above, named here so the intent is explicit.
+data/hod_dry_pool.csv

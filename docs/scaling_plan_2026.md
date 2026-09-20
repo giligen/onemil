@@ -37,6 +37,20 @@ Advance to the next stage when ALL hold, checked every Saturday:
 4. **Consistent with the backtest**: realized stage R/trade inside the BT's [p10, p90] band for that n. Below p10
    → not advancing (and see demote). ABOVE p90 → also not advancing until n grows — a live book beating its own
    backtest is a leak or a bug before it is luck.
+
+   **The R basis on both sides must be the same thing (fixed 2026-09-20, frames11 F36).** ORB always
+   was: `pnl_pct / range_size_pct` in the BT, `pnl / total_risk` live — both size-independent. **BF
+   was not.** Its BT band was built on `pnl / $2,000`, which is NOT a per-trade R: the reference
+   book's `shares` already embed the conviction / MACD-zone / regime multipliers, so the average BT
+   trade risks ~1.8× its nominal $2K (frames10 F31 §1.4.2 measured +1.651 book-R against +0.912
+   price-consistent R on TRAIN). Live divides by a **flat** `trading.risk_per_trade` — $150 at L0 —
+   so the gate was asking a flat-risk live book to clear a bar set by a multiplied one. The BF BT R
+   is now **`pnl / (shares × |entry − stop|)`**, that trade's own BT risk: the reference reads
+   **+0.701 mean R over 56 trades (was +1.242)**, and at a completed stage's n=30 the band moves from
+   `[p5 +0.29, p10 +0.50, p90 +1.99]` to `[p5 +0.23, p10 +0.32, p90 +1.07]`. A live book earning
+   +0.40 R/trade at flat risk now reads IN-BAND where it read BELOW-p10.
+   `BF_BAND_R_BASIS=notional` reproduces the retired band until **2026-09-27**, logging at WARNING;
+   `scripts/bf_ramp_check.py` prints both, labelled, until then.
 5. **Green weeks ≥ 50%** of the stage's weeks with a trade.
 6. **Minimums**: ≥ 15 sessions AND ≥ 8 trades in the stage (or ≥ 6 trades at ≥ +4u — the BF rule).
 7. **No rail hit** in the last 10 sessions.
@@ -66,6 +80,14 @@ Pre-committed constraints, asserted in `tests/test_ramp_pool.py`:
   one stage.
 * **Until the owner approves switching it on, the per-book verdict remains the decision** and the
   pooled line is printed for information only.
+* **The pool now feeds itself (2026-09-20, frames11 F36).** `scripts/hod_break_eod_check.py` — the
+  script the daily EOD cron already runs — appends the session's DRY-RUN EXECUTABLE book (the
+  engine's own logged signals walked forward, cut by `run_book(12, 4)`) to `data/hod_dry_pool.csv`
+  through `ramp_pool.append_dry_trades`. The append is **idempotent on (day, symbol, entry minute)**,
+  so re-running the check — or a cron that fires twice — adds nothing. Backfilled from the four dry
+  sessions to date: **31 trades, pooled z −0.099 ± 0.300 on n=31, band [p5 −0.34, p10 −0.28,
+  p90 +0.18] → IN-BAND** (an exact match to F33's replay). The file is gitignored and rebuildable by
+  re-running the check per session.
 
 Demote ONE stage, immediately, on ANY: stage P&L ≤ −6u; 5 losers in a row; a weekly rail; 4 consecutive red
 weeks; or realized R/trade below the BT's p5 band for that n after ≥ 8 trades (the edge is not there live).

@@ -244,6 +244,34 @@ def rejection_parity(lines, day, cfg, book) -> int:
     return n_dev
 
 
+def append_to_pool(day: str, taken_rows: list, dry_run: bool, is_r2g: bool) -> str:
+    """Feed the day's EXECUTABLE would-be book into the pooled ramp instrument (frames11 F36).
+
+    `taken_rows`: `run_book` output for the DRY-RUN EXECUTABLE book — the ENGINE's own logged
+    signals walked forward on the day's bars, tuples (day_key, entry_m, exit_m, symbol, rr, usd).
+    That is the stream frames10 F33 replayed (`r33.log`: 9/14 11 trades, 9/16 7, 9/17 7, 9/18 6),
+    and it is the right one: it measures what the engine actually signalled, not what the spec
+    would have signalled on REST bars.
+
+    Only the HOD-break book in DRY mode writes: `trading.ramp_pool` treats the dry stream as n and
+    band width ONLY (never a P&L clause), and a LIVE HOD book would enter the pool through
+    trades.db instead. The red-to-green book has its own reference and is not pooled.
+    Idempotent on (day, symbol, entry minute) — re-running this check appends nothing.
+    """
+    if is_r2g:
+        return 'POOL: red_to_green is not a pooled book — nothing appended'
+    if not dry_run:
+        return 'POOL: live mode — the pool reads trades.db, nothing appended from the sim book'
+    try:
+        from trading import ramp_pool
+        rows = [(r[3], r[4], r[1]) for r in taken_rows]     # (symbol, R, entry minute)
+        added = ramp_pool.append_dry_trades(day, rows)
+        return (f"POOL: appended {added} of {len(rows)} dry trade(s) to "
+                f"{ramp_pool.DRY_POOL_PATH.name} (idempotent on day+symbol+entry minute)")
+    except Exception as e:  # noqa: BLE001 - a reporting tool must never break on the pool write
+        return f'POOL: append FAILED ({e}) — the pooled ramp line will be short this session'
+
+
 def main() -> int:
     argv = list(sys.argv[1:]); book_name = book_from_argv(argv)
     day = argv[0] if argv else datetime.now(timezone.utc).astimezone(ET).strftime('%Y-%m-%d')
@@ -329,11 +357,13 @@ def main() -> int:
         spread_bps_logged = float(m.group(11)); r_pct_logged = float(m.group(7)); gated.append((int(mm[i]), int(mm[k]), sym, rr, usd, spread_bps_logged / (r_pct_logged * 100.0)))
         print(f"  {sym:6s} {level:8.2f} fill {entry:6.2f} stop {stop:6.2f} target {target:6.2f} {int(mm[i]) // 60:02d}:{int(mm[i]) % 60:02d} {why:>6s} {rr:+6.2f}")
     if dbook:
-        taken = [(sym, rr, usd) for _, _, _, sym, rr, usd in run_book([(0, em, xm, sym, rr, usd) for em, xm, sym, rr, usd in dbook], p.max_per_day, p.max_concurrent)]
+        taken_rows = run_book([(0, em, xm, sym, rr, usd) for em, xm, sym, rr, usd in dbook], p.max_per_day, p.max_concurrent)
+        taken = [(sym, rr, usd) for _, _, _, sym, rr, usd in taken_rows]
         dr = sum(r for _, r, _ in taken); dusd = sum(u for _, _, u in taken); allr = sum(r for *_, r, _ in dbook); allusd = sum(u for *_, u in dbook)
         print(f"  DRY-RUN all filled signals: {len(dbook)}, {allr:+.1f}R, ${allusd:+,.0f} at the logged sizes")
         print(f"  DRY-RUN EXECUTABLE book (first {p.max_per_day}/day, {p.max_concurrent} concurrent, logged sizes): {len(taken)} trades, {dr:+.1f}R, ${dusd:+,.0f} | {[(s_, round(r, 2)) for s_, r, _ in taken]}")
         print(f"  GATE 6 on the DRY-RUN book: {'PASS' if dr > 0 else 'FAIL'}")
+        print('  ' + append_to_pool(day, taken_rows, dry_run=hb['dry_run'], is_r2g=book.is_r2g))
         for frac, floor in (() if book.is_r2g else ((0.15, 5.0), (0.15, 20.0), (0.10, 20.0))):   # the HOD spread study's gates; the F6 book has neither
             rows = [(0, em, xm, sym, rr, usd) for em, xm, sym, rr, usd, sf in gated if sf <= frac and float(dry[sym].group(2)) >= floor]
             taken = [(sym, rr, usd) for _, _, _, sym, rr, usd in run_book(rows, p.max_per_day, p.max_concurrent)]

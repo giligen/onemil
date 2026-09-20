@@ -94,16 +94,26 @@ class TestLoaders:
             {'pnl_pct': '4.0', 'range_size_pct': '2.0', 'entered': '1'},
         ], ['pnl_pct', 'range_size_pct', 'entered'])
         assert bb.load_orb_bt_r(p) == [2.0]
-        b = write_csv(tmp_path / 'bf.csv', [{'pnl': 'oops'}, {'pnl': '1000'}],
-                      ['pnl'])
+        cols = ['pnl', 'shares', 'entry_price', 'stop_loss']
+        b = write_csv(tmp_path / 'bf.csv', [
+            {'pnl': 'oops', 'shares': '1000', 'entry_price': '10', 'stop_loss': '8'},
+            {'pnl': '1000', 'shares': '1000', 'entry_price': '10', 'stop_loss': '8'},
+        ], cols)
         assert bb.load_bf_bt_r(b) == [0.5]
 
-    def test_bf_r_is_pnl_over_the_2k_normalization(self, tmp_path):
-        p = write_csv(tmp_path / 'bf.csv',
-                      [{'pnl': '2000'}, {'pnl': '-1000'}, {'pnl': ''}],
-                      ['pnl'])
-        assert bb.load_bf_bt_r(p) == [1.0, -0.5]
-        assert bb.load_bf_bt_r(p, risk_usd=1000.0) == [2.0, -1.0]
+    def test_bf_r_is_pnl_over_the_trades_own_bt_risk(self, tmp_path):
+        """frames11 F36: the default basis is the trade's own risk, not the $2K notional."""
+        cols = ['pnl', 'shares', 'entry_price', 'stop_loss']
+        p = write_csv(tmp_path / 'bf.csv', [
+            {'pnl': '2000', 'shares': '1000', 'entry_price': '10', 'stop_loss': '8'},
+            {'pnl': '-1000', 'shares': '500', 'entry_price': '10', 'stop_loss': '8'},
+            {'pnl': '', 'shares': '500', 'entry_price': '10', 'stop_loss': '8'},
+        ], cols)
+        assert bb.load_bf_bt_r(p) == [1.0, -1.0]
+        # the retired basis, reachable for one week, ignores the trade's actual risk
+        assert bb.load_bf_bt_r(p, basis=bb.BF_R_BASIS_NOTIONAL) == [1.0, -0.5]
+        assert bb.load_bf_bt_r(p, risk_usd=1000.0,
+                               basis=bb.BF_R_BASIS_NOTIONAL) == [2.0, -1.0]
 
 
 class TestBand:

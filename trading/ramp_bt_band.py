@@ -21,8 +21,26 @@ References (the honest books — one per shipping config):
 R definitions (chosen so the live side is computable from trades.db):
   ORB  R = pnl_pct / range_size_pct  — entry range_high, stop range_low, so the
        5-min range IS 1R; size-independent, matching live pnl / total_risk.
-  BF   R = pnl / 2000 — the BT's canonical $2K risk normalization; live is
-       pnl / trading.risk_per_trade (the stage base).
+  BF   R = pnl / (shares x |entry_price - stop_loss|) — that trade's ACTUAL risk
+       in the BT. See BF_R_BASIS below: `pnl / $2,000` is NOT a per-trade R,
+       because the cache's stored `shares` embed the conviction / MACD-zone /
+       regime multipliers. Live is pnl / trading.risk_per_trade at a FLAT stage
+       base, so the notional basis compared a multiplied book with a flat one.
+
+The BF R-basis fix (2026-09-20, frames11 F36)
+---------------------------------------------
+frames10 F31 §1.4.2 measured the gap: on `bf_frequency/runs/P1.csv` the notional
+basis reads +1.651 mean R on TRAIN where the price-consistent basis reads +0.912
+— a 1.8x inflation that is the BT book's own share sizing, not price. A live
+trade at a flat $150 risk was being asked to clear a band built on a book that
+sized 1.8x its nominal risk on average, so an honest live sample read BELOW-p10.
+`pnl / (shares x |entry - stop|)` is identical arithmetic to F31's
+`pnl_pct / stop_pct` (both are per-share P&L over per-share risk) and reproduces
+F31's +0.9118 TRAIN / +0.5556 VAL to the fourth decimal.
+
+`BF_BAND_R_BASIS=notional` restores the old `pnl / $2,000` for one week (to
+2026-09-27) so a reader can reproduce any band printed before this change; it
+logs at WARNING every time it is used.
 
 Lives in `trading/` for the same reason as ramp_freeze: ONE spec shared by both
 ramp checkers, which already import from the repo root.
@@ -31,9 +49,10 @@ from __future__ import annotations
 
 import csv
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import List, Mapping, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +75,15 @@ BF_REF_ADV_OFF = ROOT / 'research' / 'bf_frequency' / 'runs' / 'VOL_OFF.csv'
 BF_REF = BF_REF_P1   # legacy name; the shipped config is P1 (ADV gate 200K)
 BF_BT_RISK_USD = 2000.0
 
+#: The two BF R bases. 'risk' is the fix (per-trade R = pnl / that trade's own BT risk);
+#: 'notional' is the retired `pnl / $2,000`, reachable for one week via BF_BAND_R_BASIS.
+BF_R_BASIS_RISK = 'risk'
+BF_R_BASIS_NOTIONAL = 'notional'
+BF_R_BASIS_DEFAULT = BF_R_BASIS_RISK
+BF_R_BASIS_ENV = 'BF_BAND_R_BASIS'
+#: The legacy basis is removed after this date (docs/scaling_plan_2026.md Gate 2).
+BF_R_BASIS_LEGACY_UNTIL = '2026-09-27'
+
 # The HOD-break dry stream's reference: the B2 book six research passes are measured against
 # (research/mature_method/hod_frames6/REPORT.md). R = the book's own net R per trade. The dry
 # stream earns nothing, so this reference only ever feeds the POOLED band's n and width
@@ -66,7 +94,9 @@ HOD_REF_B2 = (ROOT / 'research' / 'mature_method' / 'hod_frames6' / 'book6.csv')
 #: The live numbers come from `sd_of(load_reference_r(...))` so that the SD and the band are always
 #: computed from the SAME distribution — a band built on one distribution and an SD on another is
 #: the defect class this house keeps shipping.
-BOOK_SD_FALLBACK = {'orb': 1.431, 'bf': 3.151, 'hod_dry': 1.260}
+#: BF's 1.574 replaced 3.151 on 2026-09-20 with the R-basis fix (frames11 F36) — the legacy
+#: `pnl/$2,000` distribution carried the book's share multipliers, and so did its SD.
+BOOK_SD_FALLBACK = {'orb': 1.431, 'bf': 1.574, 'hod_dry': 1.260}
 
 
 @dataclass(frozen=True)
@@ -117,10 +147,10 @@ def bf_reference(min_daily_volume: int = 200_000) -> Reference:
     """
     if min_daily_volume <= 0:
         return Reference(BF_REF_ADV_OFF, 'bf_frequency/runs/VOL_OFF.csv '
-                                         '(min_daily_volume 0, R = pnl/$2,000)')
+                                         '(min_daily_volume 0, R = pnl / shares x |entry - stop|)')
     return Reference(BF_REF_P1, 'bf_frequency/runs/P1.csv '
                                 '(min_daily_volume 200000 — shipped P1, '
-                                'R = pnl/$2,000)')
+                                'R = pnl / shares x |entry - stop|)')
 
 
 def _f(v) -> Optional[float]:
@@ -156,24 +186,99 @@ def load_orb_bt_r(path: Path) -> List[float]:
     return out
 
 
-def load_bf_bt_r(path: Path, risk_usd: float = BF_BT_RISK_USD) -> List[float]:
-    """Per-trade R of a BF book CSV: pnl / the BT's $2K risk normalization."""
+def bf_r_basis(explicit: Optional[str] = None) -> str:
+    """Which BF R basis to use: the fix by default, the legacy one only via BF_BAND_R_BASIS."""
+    want = (explicit or os.environ.get(BF_R_BASIS_ENV) or BF_R_BASIS_DEFAULT).strip().lower()
+    if want == BF_R_BASIS_NOTIONAL:
+        logger.warning(
+            f"{BF_R_BASIS_ENV}={BF_R_BASIS_NOTIONAL}: the BF BT band is being built on "
+            f"pnl/${BF_BT_RISK_USD:,.0f}, which is NOT a per-trade R — the BT book's conviction / "
+            f"MACD-zone / regime share multipliers are inside it (frames10 F31 §1.4.2: +1.65 vs "
+            f"+0.91 on TRAIN). Reachable for reproduction only, removed after "
+            f"{BF_R_BASIS_LEGACY_UNTIL}.")
+        return BF_R_BASIS_NOTIONAL
+    if want != BF_R_BASIS_RISK:
+        logger.error(f"{BF_R_BASIS_ENV}={want!r} is not a known BF R basis — "
+                     f"falling back to {BF_R_BASIS_RISK!r} (the shipped one)")
+    return BF_R_BASIS_RISK
+
+
+def bf_trade_risk_usd(row: Mapping[str, object]) -> Optional[float]:
+    """That BF trade's ACTUAL dollar risk in the BT: shares x per-share risk.
+
+    Column preference, in order (the BF run CSVs differ by vintage — see the
+    availability note printed by `load_bf_bt_r`):
+      1. `risk_per_share` x `shares`     — carried by caches that store it directly
+      2. `shares` x |`planned_entry` - `stop_loss`|  — the planned (pre-slip) risk
+      3. `shares` x |`entry_price`  - `stop_loss`|   — the filled risk
+
+    `planned_entry` is preferred over `entry_price` because it is the level the
+    engine sized from; on `bf_frequency/runs/P1.csv` the column exists but is
+    EMPTY on all 56 rows, so that file resolves to (3).
+    """
+    shares = _f(row.get('shares'))
+    if not shares:
+        return None
+    rps = _f(row.get('risk_per_share'))
+    if rps is not None and rps > 0:
+        return abs(rps) * abs(shares)
+    stop = _f(row.get('stop_loss'))
+    if stop is None:
+        return None
+    for col in ('planned_entry', 'entry_price'):
+        entry = _f(row.get(col))
+        if entry is None:
+            continue
+        risk = abs(entry - stop) * abs(shares)
+        if risk > 0:
+            return risk
+    return None
+
+
+def load_bf_bt_r(path: Path, risk_usd: float = BF_BT_RISK_USD,
+                 basis: Optional[str] = None) -> List[float]:
+    """Per-trade R of a BF book CSV.
+
+    Default basis ('risk'): `pnl / bf_trade_risk_usd(row)` — the trade's own BT risk, so a live
+    trade at a flat stage base is compared on the same footing. Legacy basis ('notional'):
+    `pnl / risk_usd`, the retired `pnl/$2,000`.
+    """
+    use = bf_r_basis(basis)
     out: List[float] = []
     skipped = 0
-    with open(path, newline='') as f:
-        for row in csv.DictReader(f):
-            pnl = _f(row.get('pnl'))
-            if pnl is None:
-                skipped += 1
-                continue
+    no_risk = 0
+    for row in read_csv_rows(path):
+        pnl = _f(row.get('pnl'))
+        if pnl is None:
+            skipped += 1
+            continue
+        if use == BF_R_BASIS_NOTIONAL:
             out.append(pnl / risk_usd)
+            continue
+        risk = bf_trade_risk_usd(row)
+        if risk is None or risk <= 0:
+            no_risk += 1
+            continue
+        out.append(pnl / risk)
     if skipped:
         logger.warning(f"{path.name}: {skipped} row(s) without pnl — "
                        f"excluded from the BT band")
+    if no_risk:
+        logger.error(f"{path.name}: {no_risk} row(s) without a computable per-trade risk "
+                     f"(shares x |entry - stop|) — excluded from the BF BT band, never counted "
+                     f"as zero. Set {BF_R_BASIS_ENV}={BF_R_BASIS_NOTIONAL} only to reproduce a "
+                     f"band printed before 2026-09-20.")
     return out
 
 
-def load_reference_r(ref: Reference, book: str) -> List[float]:
+def read_csv_rows(path: Path) -> List[dict]:
+    """Every row of a reference CSV as a dict (one open, so callers can scan twice cheaply)."""
+    with open(path, newline='') as f:
+        return list(csv.DictReader(f))
+
+
+def load_reference_r(ref: Reference, book: str,
+                     bf_basis: Optional[str] = None) -> List[float]:
     """R distribution of a reference book; [] (loudly) when unreadable."""
     if not ref.exists:
         logger.error(f"BT reference missing: {ref.path} — the BT-band gate "
@@ -181,7 +286,7 @@ def load_reference_r(ref: Reference, book: str) -> List[float]:
         return []
     try:
         return (load_orb_bt_r(ref.path) if book == 'orb'
-                else load_bf_bt_r(ref.path))
+                else load_bf_bt_r(ref.path, basis=bf_basis))
     except Exception as e:  # noqa: BLE001 - a decision aid must not crash
         logger.error(f"BT reference {ref.path} unreadable ({e}) — BT-band "
                      f"gate NO-DATA (blocks ADVANCE)")
@@ -266,6 +371,32 @@ def classify(mean_r: Optional[float], band: Optional[Band]) -> str:
     if mean_r > band.p90:
         return ABOVE_P90
     return IN_BAND
+
+
+def bf_basis_comparison_line(ref: Reference, n: int,
+                             mean_r: Optional[float] = None) -> str:
+    """The ONE labelled side-by-side line: the fixed BF band beside the retired one.
+
+    Printed once per run by `scripts/bf_ramp_check.py` for this stage's n, so the owner can see
+    exactly what the 2026-09-20 basis change did to the bar the live book has to clear. Removed
+    with the legacy basis after BF_R_BASIS_LEGACY_UNTIL.
+    """
+    import statistics
+    parts = []
+    for label, basis in (('FIXED pnl/(shares x |entry-stop|)', BF_R_BASIS_RISK),
+                         ('LEGACY pnl/$2,000', BF_R_BASIS_NOTIONAL)):
+        vals = load_reference_r(ref, 'bf', bf_basis=basis)
+        if not vals:
+            parts.append(f"{label}: NO-DATA")
+            continue
+        bnd = bootstrap_band(vals, n) if n > 0 else None
+        mean_bt = statistics.mean(vals)
+        verdict = classify(mean_r, bnd) if (mean_r is not None and bnd) else NO_DATA
+        parts.append(f"{label}: BT mean {mean_bt:+.3f} over {len(vals)} trades"
+                     + (f", band {bnd.fmt()} on n={n} → live {verdict}" if bnd
+                        else ", band NO-DATA (n=0)"))
+    return ("  BF R-BASIS (frames11 F36, side by side for one week until "
+            f"{BF_R_BASIS_LEGACY_UNTIL}): " + '  ||  '.join(parts))
 
 
 def band_line(status: str, mean_r: Optional[float], band: Optional[Band],

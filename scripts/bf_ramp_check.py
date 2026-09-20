@@ -234,6 +234,8 @@ def main() -> int:
           f"{'ABOVE WATER' if s.above_water_ex_monster else 'NOT above water'} "
           f"(advance requires > 0)")
     print(band_mod.band_line(s.band_status, s.live_mean_r, s.band, ref))
+    print(band_mod.bf_basis_comparison_line(ref, s.band.n if s.band else s.trades,
+                                            s.live_mean_r))
     print(ramp_pool.advisory_line())
     if s.frozen:
         print(f"  {fz.line()}")

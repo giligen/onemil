@@ -22,7 +22,9 @@ reference (`trading/ramp_bt_band.py`, one source for both the SD and the band �
 distribution and a SD on another is exactly the class of defect this house keeps shipping).
 
     ORB      R = pnl / total_risk        (BT: pnl_pct / range_size_pct)
-    BF       R = pnl / risk_per_trade    (BT: pnl / $2,000)
+    BF       R = pnl / risk_per_trade    (BT: pnl / shares x |entry - stop|, that trade's own
+                                          BT risk — `pnl/$2,000` was NOT a per-trade R, the book's
+                                          share multipliers were inside it; frames11 F36)
     HOD dry  R = the simulated bracket's own R at risk_usd (BT: the B2 reference book's net R)
 
 The pooled estimate is ``z_bar`` with a **day-clustered** SE — one cluster per SESSION across all
@@ -62,10 +64,26 @@ MIN_POOLED_N = 10
 #: The pooled DEMOTE trigger needs this much n before the portfolio, not the book, is the story.
 DEMOTE_MIN_N = 30
 
-#: Where `scripts/hod_break_eod_check.py` appends the dry stream (day,symbol,r per closed sim
-#: trade). Absent = the dry stream is simply missing from the pool, logged at WARNING.
+#: Where `scripts/hod_break_eod_check.py` appends the dry stream. Absent = the dry stream is
+#: simply missing from the pool, logged at WARNING.
+#:
+#: SCHEMA of `data/hod_dry_pool.csv` (gitignored — it is a growing per-session journal, not a
+#: research artefact; rebuildable from the journal by re-running the EOD check per session):
+#:
+#:     day          ISO trade date of the session, 'YYYY-MM-DD'
+#:     symbol       the ticker of the simulated trade
+#:     entry_minute minutes past midnight ET of the bar the sim entered on (int, e.g. 611 = 10:11)
+#:     r            the simulated bracket's own R (exit - entry) / (entry - stop)
+#:
+#: One row per trade in the EOD check's EXECUTABLE would-be book (first `max_per_day`/day,
+#: `max_concurrent` at once — `trading.hod_break.run_book`), i.e. exactly the book F33 replayed.
+#: The natural key is (day, symbol, entry_minute): the EOD check is a reporting tool the owner
+#: re-runs freely, so `append_dry_trades` is IDEMPOTENT on that key and a re-run writes nothing.
+#: Files written before 2026-09-20 carry the old 3-column header and are read (and appended to)
+#: with entry_minute = ''.
 DRY_POOL_PATH = ROOT / 'data' / 'hod_dry_pool.csv'
-DRY_POOL_HEADER = ('day', 'symbol', 'r')
+DRY_POOL_HEADER = ('day', 'symbol', 'entry_minute', 'r')
+DRY_POOL_HEADER_LEGACY = ('day', 'symbol', 'r')
 
 POOL_RULE = ("advisory: pooled z BELOW-p10 holds a book its own gate would advance; "
              "pooled z below p5 with n >= 30 demotes every live book one stage; "
@@ -290,13 +308,13 @@ def load_live_trades(book: str, since: str, db_path: Path = TRADES_DB,
     return out
 
 
-def load_dry_trades(path: Path = DRY_POOL_PATH, since: Optional[str] = None) -> List[Trade]:
+def load_dry_trades(path: Optional[Path] = None, since: Optional[str] = None) -> List[Trade]:
     """The HOD-break dry stream: (day, symbol, r) rows appended by the EOD check.
 
     A missing file is not an error — the dry run may not have written yet — but it IS logged, so a
     pooled line that is thinner than expected always says why.
     """
-    p = Path(path)
+    p = Path(path) if path is not None else DRY_POOL_PATH
     if not p.exists():
         logger.warning(f"load_dry_trades: {p} missing — the HOD dry stream contributes nothing "
                        f"to the pooled band (the pooled reading is live-books only)")
@@ -326,24 +344,98 @@ def load_dry_trades(path: Path = DRY_POOL_PATH, since: Optional[str] = None) -> 
     return out
 
 
-def append_dry_trades(day: str, trades: Iterable[Tuple[str, float]],
-                      path: Path = DRY_POOL_PATH) -> int:
-    """Append one session's simulated dry trades to the pool file. Returns rows written.
+def _dry_pool_header(path: Path) -> Tuple[str, ...]:
+    """The header the file already has (legacy files keep theirs), else the current one."""
+    try:
+        with open(path, newline='') as f:
+            first = next(csv.reader(f), None)
+    except OSError as e:  # noqa: BLE001
+        logger.error(f"_dry_pool_header: {path} unreadable ({e}) — assuming the current schema")
+        return DRY_POOL_HEADER
+    if not first:
+        return DRY_POOL_HEADER
+    got = tuple(h.strip() for h in first)
+    if got == DRY_POOL_HEADER_LEGACY:
+        logger.warning(f"{path.name}: legacy 3-column schema {got} — appending without "
+                       f"entry_minute (the idempotency key degrades to day+symbol)")
+        return DRY_POOL_HEADER_LEGACY
+    if got != DRY_POOL_HEADER:
+        logger.error(f"{path.name}: unexpected header {got} (expected {DRY_POOL_HEADER}) — "
+                     f"appending in the file's own column order")
+    return got
+
+
+def dry_pool_keys(path: Optional[Path] = None) -> set:
+    """The (day, symbol, entry_minute) keys already in the pool file. Missing file -> empty."""
+    p = Path(path) if path is not None else DRY_POOL_PATH
+    if not p.exists():
+        return set()
+    keys = set()
+    try:
+        with open(p, newline='') as f:
+            for row in csv.DictReader(f):
+                keys.add((str(row.get('day') or '')[:10], str(row.get('symbol') or ''),
+                          _minute_key(row.get('entry_minute'))))
+    except OSError as e:  # noqa: BLE001
+        logger.error(f"dry_pool_keys: {p} unreadable ({e}) — treating the pool as empty, which "
+                     f"risks a duplicate append; fix the file before trusting the pooled n")
+        return set()
+    return keys
+
+
+def _minute_key(v) -> str:
+    """Normalise an entry minute to its key form ('' when absent — the legacy schema)."""
+    if v is None or str(v).strip() == '':
+        return ''
+    try:
+        return str(int(float(v)))
+    except (TypeError, ValueError):
+        return str(v).strip()
+
+
+def append_dry_trades(day: str, trades: Iterable[Sequence],
+                      path: Optional[Path] = None) -> int:
+    """Append one session's simulated dry trades to the pool file. Returns rows WRITTEN.
+
+    `trades`: an iterable of `(symbol, r)` or `(symbol, r, entry_minute)`.
 
     The producer is `scripts/hod_break_eod_check.py` (its EXECUTABLE would-be book). Writing the
     pool file is the ONLY write anything in this module performs, and it never touches trades.db.
+
+    IDEMPOTENT on (day, symbol, entry_minute): the EOD check is a reporting tool the owner re-runs
+    freely (and the daily cron may fire twice), so a re-run for a session already in the file
+    appends NOTHING and returns 0. Duplicates inside one call are collapsed the same way.
     """
-    p = Path(path)
-    rows = [(day, str(s), float(r)) for s, r in trades if math.isfinite(float(r))]
+    p = Path(path) if path is not None else DRY_POOL_PATH
+    header = _dry_pool_header(p) if p.exists() else DRY_POOL_HEADER
+    existing = dry_pool_keys(p)
+    seen = set()
+    rows: List[Tuple[str, str, str, float]] = []
+    skipped = 0
+    for t in trades:
+        sym, r = str(t[0]), float(t[1])
+        minute = _minute_key(t[2]) if len(t) > 2 else ''
+        if not math.isfinite(r):
+            continue
+        key = (day, sym, minute)
+        if key in existing or key in seen:
+            skipped += 1
+            continue
+        seen.add(key)
+        rows.append((day, sym, minute, r))
+    if skipped:
+        logger.info(f"append_dry_trades: {skipped} row(s) for {day} already in {p.name} — "
+                    f"not re-appended (idempotent on day+symbol+entry_minute)")
     if not rows:
         return 0
-    new = not p.exists()
     p.parent.mkdir(parents=True, exist_ok=True)
+    new = not p.exists()
     with open(p, 'a', newline='') as f:
         w = csv.writer(f)
         if new:
-            w.writerow(DRY_POOL_HEADER)
-        w.writerows(rows)
+            w.writerow(header)
+        for d, sym, minute, r in rows:
+            w.writerow([d, sym, minute, r] if 'entry_minute' in header else [d, sym, r])
     return len(rows)
 
 
@@ -372,7 +464,7 @@ def reading(since_by_book: Mapping[str, str],
             bf_risk_base: Optional[float] = None,
             orb_catalyst_veto: bool = False,
             bf_min_daily_volume: int = 200_000,
-            dry_path: Path = DRY_POOL_PATH,
+            dry_path: Optional[Path] = None,
             db_path: Path = TRADES_DB) -> Tuple[PooledStat, Optional[band_mod.Band], str, str]:
     """Everything a ramp checker needs for its one advisory line.
 
@@ -401,7 +493,7 @@ HOD_DRY_SINCE = '2026-09-14'
 
 def advisory_line(orb_since: Optional[str] = None, bf_since: Optional[str] = None,
                   dry_since: str = HOD_DRY_SINCE,
-                  dry_path: Path = DRY_POOL_PATH,
+                  dry_path: Optional[Path] = None,
                   db_path: Path = TRADES_DB) -> str:
     """The ONE line a ramp checker prints. Resolves the other book's stage itself; never raises.
 
