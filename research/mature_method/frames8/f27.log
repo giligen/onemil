@@ -1,0 +1,47 @@
+p24 columns: ['book', 'day', 'symbol', 'entry_m', 'split', 'arm', 'ctrl', 'ctrl_m', 'rr', 'why']
+book  arm  split
+bf    a2   TRAIN     330
+           VAL       150
+      b    TRAIN     628
+           VAL       274
+      sig  TRAIN      33
+           VAL        15
+      u    TRAIN     667
+           VAL       303
+orb   a2   TRAIN    2040
+           VAL      1352
+      b    TRAIN    4255
+           VAL      3105
+      sig  TRAIN     204
+           VAL       136
+      u    TRAIN    3595
+           VAL      2702
+dtype: int64
+
+=== per-trade dispersion, raw vs control-differenced ===
+book split   n  raw_mean   raw_sd  n_b   diff_b     sd_b  n_a   diff_a     sd_a  n_u   diff_u     sd_u
+ orb TRAIN 204  0.216116 1.693772  189 0.152701 1.698366  204 0.197762 1.453281  189 0.186563 1.795653
+ orb   VAL 136  0.469506 2.732066  133 0.435936 2.745403  136 0.323892 2.473759  133 0.478918 2.746088
+  bf TRAIN  33  0.691385 1.938618   32 0.507345 1.983438   33 0.646079 2.190422   32 0.563084 1.934345
+  bf   VAL  15  0.816309 2.127364   14 0.348676 2.120483   15 0.622047 2.031498   14 0.481492 2.018616
+
+=== the power floor ===
+orb  TRAIN raw     effect=+0.216 sd=1.694 n80=      482 weeks=       74 years=    1.4
+orb  TRAIN diff_b  effect=+0.153 sd=1.698 n80=      970 weeks=      149 years=    2.9
+orb  TRAIN diff_a  effect=+0.198 sd=1.453 n80=      423 weeks=       65 years=    1.3
+orb  VAL   raw     effect=+0.470 sd=2.732 n80=      265 weeks=       41 years=    0.8
+orb  VAL   diff_b  effect=+0.436 sd=2.745 n80=      311 weeks=       48 years=    0.9
+orb  VAL   diff_a  effect=+0.324 sd=2.474 n80=      457 weeks=       70 years=    1.4
+bf   TRAIN raw     effect=+0.691 sd=1.939 n80=       62 weeks=       95 years=    1.8
+bf   TRAIN diff_b  effect=+0.507 sd=1.983 n80=      120 weeks=      184 years=    3.5
+bf   TRAIN diff_a  effect=+0.646 sd=2.190 n80=       90 weeks=      139 years=    2.7
+bf   VAL   raw     effect=+0.816 sd=2.127 n80=       53 weeks=       82 years=    1.6
+bf   VAL   diff_b  effect=+0.349 sd=2.120 n80=      290 weeks=      446 years=    8.6
+bf   VAL   diff_a  effect=+0.622 sd=2.031 n80=       84 weeks=      129 years=    2.5
+
+=== pooled (BF + ORB share the account, the R unit and the session) ===
+POOL TRAIN raw     effect=+0.282 sd=1.733 n80=      296 weeks=       41 years=    0.8
+POOL TRAIN diff_b  effect=+0.204 sd=1.742 n80=      571 weeks=       80 years=    1.5
+POOL VAL   raw     effect=+0.504 sd=2.674 n80=      221 weeks=       31 years=    0.6
+POOL VAL   diff_b  effect=+0.428 sd=2.686 n80=      309 weeks=       43 years=    0.8
+F27 DONE

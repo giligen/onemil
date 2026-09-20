@@ -1,0 +1,58 @@
+cost model: measured NBBO on 15493 of 147196 break rows (10.5%); imputation cells 23, global median 0.345%
+walked signals in TRAIN+VAL: 7027  booked 2328
+
+=== F25 §1.3  THE BOOKED BOOK UNDER EACH GEOMETRY  (B2 set held fixed) ===
+X0        TRAIN n= 1622 /wk= 30.6 gross=-0.0390 cost=0.0680 net=-0.1069 t=-2.99 green= 32.1 (null p95  37.7) wk$=  -327.3 tot=$   -17346 worst=   -2231 rs= 5 ex5=-0.2182 H1=-0.1433 H2=-0.0725 mde=0.088 | tgt  20 lock   0 trl   0 stp  52 eod  28
+X0        VAL   n=  706 /wk= 30.7 gross=+0.0827 cost=0.0701 net=+0.0127 t=+0.26 green= 43.5 (null p95  60.9) wk$=   +38.8 tot=$     +893 worst=    -957 rs= 4 ex5=-0.0930 H1=+nan H2=+0.0127 mde=0.132 | tgt  21 lock   0 trl   0 stp  46 eod  33
+G1        TRAIN n= 1622 /wk= 30.6 gross=-0.0041 cost=0.0735 net=-0.0776 t=-1.45 green= 34.0 (null p95  41.5) wk$=  -237.5 tot=$   -12588 worst=   -2244 rs= 4 ex5=-0.3437 H1=-0.1014 H2=-0.0551 mde=0.112 | tgt   0 lock  12 trl   0 stp  50 eod  38
+G1        VAL   n=  706 /wk= 30.7 gross=+0.0891 cost=0.0760 net=+0.0131 t=+0.23 green= 47.8 (null p95  56.5) wk$=   +40.2 tot=$     +925 worst=   -1508 rs= 3 ex5=-0.1938 H1=+nan H2=+0.0131 mde=0.146 | tgt   0 lock  10 trl   0 stp  44 eod  45
+G2        TRAIN n= 1622 /wk= 30.6 gross=-0.0248 cost=0.0750 net=-0.0998 t=-2.43 green= 32.1 (null p95  39.6) wk$=  -305.5 tot=$   -16191 worst=   -2339 rs= 6 ex5=-0.2840 H1=-0.1303 H2=-0.0709 mde=0.094 | tgt   0 lock   0 trl  18 stp  51 eod  31
+G2        VAL   n=  706 /wk= 30.7 gross=+0.0848 cost=0.0780 net=+0.0067 t=+0.14 green= 52.2 (null p95  56.5) wk$=   +20.6 tot=$     +475 worst=   -1036 rs= 3 ex5=-0.1527 H1=+nan H2=+0.0067 mde=0.136 | tgt   0 lock   0 trl  18 stp  46 eod  36
+G2p       TRAIN n= 1622 /wk= 30.6 gross=-0.0244 cost=0.0753 net=-0.0997 t=-2.64 green= 34.0 (null p95  39.6) wk$=  -305.1 tot=$   -16168 worst=   -2318 rs= 6 ex5=-0.2472 H1=-0.1338 H2=-0.0673 mde=0.089 | tgt   0 lock   0 trl  18 stp  51 eod  31
+G2p       VAL   n=  706 /wk= 30.7 gross=+0.0961 cost=0.0785 net=+0.0175 t=+0.36 green= 56.5 (null p95  60.9) wk$=   +53.8 tot=$    +1238 worst=   -1015 rs= 3 ex5=-0.1150 H1=+nan H2=+0.0175 mde=0.133 | tgt   0 lock   0 trl  18 stp  46 eod  36
+G3        TRAIN n= 1622 /wk= 30.6 gross=+0.0142 cost=0.0721 net=-0.0579 t=-0.95 green= 35.8 (null p95  45.3) wk$=  -177.2 tot=$    -9392 worst=   -2198 rs= 4 ex5=-0.3388 H1=-0.0787 H2=-0.0382 mde=0.121 | tgt   0 lock   0 trl   0 stp  55 eod  45
+G3        VAL   n=  706 /wk= 30.7 gross=+0.0786 cost=0.0746 net=+0.0040 t=+0.07 green= 47.8 (null p95  56.5) wk$=   +12.2 tot=$     +281 worst=   -1576 rs= 6 ex5=-0.2144 H1=+nan H2=+0.0040 mde=0.155 | tgt   0 lock   0 trl   0 stp  48 eod  52
+G5        TRAIN n= 1622 /wk= 30.6 gross=-0.0212 cost=0.0701 net=-0.0913 t=-2.19 green= 35.8 (null p95  41.5) wk$=  -279.3 tot=$   -14805 worst=   -2131 rs= 4 ex5=-0.2546 H1=-0.1280 H2=-0.0565 mde=0.098 | tgt  11 lock   0 trl   0 stp  54 eod  36
+G5        VAL   n=  706 /wk= 30.7 gross=+0.1040 cost=0.0724 net=+0.0316 t=+0.60 green= 52.2 (null p95  60.9) wk$=   +96.9 tot=$    +2228 worst=   -1346 rs= 3 ex5=-0.1262 H1=+nan H2=+0.0316 mde=0.147 | tgt  10 lock   0 trl   0 stp  47 eod  43
+G6        TRAIN n= 1622 /wk= 30.6 gross=-0.0094 cost=0.0709 net=-0.0803 t=-1.74 green= 37.7 (null p95  43.4) wk$=  -245.9 tot=$   -13031 worst=   -2198 rs= 5 ex5=-0.2956 H1=-0.1155 H2=-0.0471 mde=0.105 | tgt   6 lock   0 trl   0 stp  54 eod  40
+G6        VAL   n=  706 /wk= 30.7 gross=+0.0888 cost=0.0737 net=+0.0151 t=+0.28 green= 60.9 (null p95  60.9) wk$=   +46.4 tot=$    +1067 worst=   -1576 rs= 3 ex5=-0.1898 H1=+nan H2=+0.0151 mde=0.150 | tgt   4 lock   0 trl   0 stp  48 eod  48
+G7        TRAIN n= 1622 /wk= 30.6 gross=+0.0010 cost=0.0717 net=-0.0707 t=-1.37 green= 34.0 (null p95  43.4) wk$=  -216.4 tot=$   -11469 worst=   -2198 rs= 5 ex5=-0.3344 H1=-0.1148 H2=-0.0290 mde=0.112 | tgt   2 lock   0 trl   0 stp  55 eod  43
+G7        VAL   n=  706 /wk= 30.7 gross=+0.0904 cost=0.0744 net=+0.0160 t=+0.28 green= 52.2 (null p95  60.9) wk$=   +49.1 tot=$    +1130 worst=   -1576 rs= 6 ex5=-0.2062 H1=+nan H2=+0.0160 mde=0.156 | tgt   1 lock   0 trl   0 stp  48 eod  51
+G1a       TRAIN n=  994 /wk= 18.8 gross=-0.0109 cost=0.0730 net=-0.0839 t=-2.07 green= 18.9 (null p95  28.3) wk$=  -157.3 tot=$    -8339 worst=   -1002 rs= 8 ex5=-0.2315 H1=-0.0627 H2=-0.1058 mde=0.080 | tgt   0 lock  34 trl   0 stp  62 eod   4
+G1a       VAL   n=  353 /wk= 15.3 gross=-0.0550 cost=0.0771 net=-0.1321 t=-3.86 green= 21.7 (null p95  21.7) wk$=  -202.7 tot=$    -4663 worst=    -643 rs= 6 ex5=-0.2389 H1=+nan H2=-0.1321 mde=0.100 | tgt   0 lock  32 trl   0 stp  64 eod   4
+G1b       TRAIN n= 1622 /wk= 30.6 gross=-0.0112 cost=0.0726 net=-0.0838 t=-1.81 green= 34.0 (null p95  41.5) wk$=  -256.5 tot=$   -13594 worst=   -2244 rs= 4 ex5=-0.3084 H1=-0.1121 H2=-0.0570 mde=0.101 | tgt   0 lock  12 trl   0 stp  50 eod  38
+G1b       VAL   n=  706 /wk= 30.7 gross=+0.1018 cost=0.0751 net=+0.0267 t=+0.49 green= 52.2 (null p95  60.9) wk$=   +82.0 tot=$    +1886 worst=   -1399 rs= 3 ex5=-0.1596 H1=+nan H2=+0.0267 mde=0.142 | tgt   0 lock  10 trl   0 stp  44 eod  45
+G2v       TRAIN n= 1622 /wk= 30.6 gross=-0.0147 cost=0.0744 net=-0.0892 t=-2.06 green= 30.2 (null p95  41.5) wk$=  -272.8 tot=$   -14461 worst=   -2325 rs= 5 ex5=-0.2907 H1=-0.1281 H2=-0.0523 mde=0.098 | tgt   0 lock   0 trl  15 stp  51 eod  34
+G2v       VAL   n=  706 /wk= 30.7 gross=+0.0730 cost=0.0772 net=-0.0042 t=-0.08 green= 39.1 (null p95  56.5) wk$=   -12.8 tot=$     -294 worst=   -1093 rs= 3 ex5=-0.1740 H1=+nan H2=-0.0042 mde=0.138 | tgt   0 lock   0 trl  14 stp  46 eod  40
+G2pl      TRAIN n= 1622 /wk= 30.6 gross=-0.0120 cost=0.0750 net=-0.0870 t=-2.19 green= 35.8 (null p95  39.6) wk$=  -266.3 tot=$   -14114 worst=   -2110 rs= 4 ex5=-0.2686 H1=-0.1126 H2=-0.0628 mde=0.093 | tgt   0 lock   0 trl  19 stp  51 eod  31
+G2pl      VAL   n=  706 /wk= 30.7 gross=+0.0810 cost=0.0781 net=+0.0029 t=+0.06 green= 52.2 (null p95  56.5) wk$=    +9.0 tot=$     +207 worst=   -1187 rs= 3 ex5=-0.1627 H1=+nan H2=+0.0029 mde=0.136 | tgt   0 lock   0 trl  19 stp  45 eod  37
+
+=== F25 RB  the RE-BOOKED honesty check (run_book on each geometry's own exit_m) ===
+RB_X0     TRAIN n= 1622 /wk= 30.6 gross=-0.0390 cost=0.0680 net=-0.1069 t=-2.99 green= 32.1 (null p95  37.7) wk$=  -327.3 tot=$   -17346 worst=   -2231 rs= 5 ex5=-0.2182 H1=-0.1433 H2=-0.0725 mde=0.088 | tgt  20 lock   0 trl   0 stp  52 eod  28
+RB_X0     VAL   n=  706 /wk= 30.7 gross=+0.0827 cost=0.0701 net=+0.0127 t=+0.26 green= 43.5 (null p95  60.9) wk$=   +38.8 tot=$     +893 worst=    -957 rs= 4 ex5=-0.0930 H1=+nan H2=+0.0127 mde=0.132 | tgt  21 lock   0 trl   0 stp  46 eod  33
+RB_G1     TRAIN n= 1500 /wk= 28.3 gross=-0.0162 cost=0.0743 net=-0.0904 t=-1.82 green= 35.8 (null p95  39.6) wk$=  -255.9 tot=$   -13562 worst=   -2244 rs= 4 ex5=-0.3445 H1=-0.1085 H2=-0.0733 mde=0.113 | tgt   0 lock  12 trl   0 stp  49 eod  39
+RB_G1     VAL   n=  636 /wk= 27.7 gross=+0.0752 cost=0.0773 net=-0.0021 t=-0.03 green= 43.5 (null p95  56.5) wk$=    -5.8 tot=$     -134 worst=   -1491 rs= 3 ex5=-0.2096 H1=+nan H2=-0.0021 mde=0.154 | tgt   0 lock  10 trl   0 stp  44 eod  46
+RB_G2     TRAIN n= 1557 /wk= 29.4 gross=-0.0210 cost=0.0753 net=-0.0964 t=-2.34 green= 35.8 (null p95  39.6) wk$=  -283.1 tot=$   -15003 worst=   -2339 rs= 5 ex5=-0.2809 H1=-0.1277 H2=-0.0666 mde=0.096 | tgt   0 lock   0 trl  18 stp  51 eod  31
+RB_G2     VAL   n=  675 /wk= 29.3 gross=+0.0618 cost=0.0784 net=-0.0166 t=-0.33 green= 56.5 (null p95  52.2) wk$=   -48.9 tot=$    -1124 worst=   -1580 rs= 3 ex5=-0.1742 H1=+nan H2=-0.0166 mde=0.137 | tgt   0 lock   0 trl  17 stp  46 eod  37
+RB_G3     TRAIN n= 1434 /wk= 27.1 gross=+0.0139 cost=0.0734 net=-0.0596 t=-1.04 green= 37.7 (null p95  45.3) wk$=  -161.2 tot=$    -8541 worst=   -2198 rs= 5 ex5=-0.3344 H1=-0.0917 H2=-0.0289 mde=0.127 | tgt   0 lock   0 trl   0 stp  53 eod  47
+RB_G3     VAL   n=  609 /wk= 26.5 gross=+0.0936 cost=0.0760 net=+0.0176 t=+0.26 green= 52.2 (null p95  56.5) wk$=   +46.5 tot=$    +1071 worst=   -1635 rs= 6 ex5=-0.2062 H1=+nan H2=+0.0176 mde=0.169 | tgt   0 lock   0 trl   0 stp  46 eod  54
+
+=== F25 §1.4  THE DECOMPOSITION UNDER EACH GEOMETRY (gross R) ===
+coverage: a' {'TRAIN': 16161, 'VAL': 7006}  b {'TRAIN': 35440, 'VAL': 15611}  d {'TRAIN': 200088, 'VAL': 88086}
+X0    TRAIN sig=-0.0390  a'=+0.0230  b=-0.1614  d=-0.0579 (H1 -0.0688 H2 -0.0477)  | sig-a'=-0.0638 t=-1.85  sig-b=+0.1228 t=+2.96  sig-d=+0.0187 t=+0.46  mde_a=0.080
+X0    VAL   sig=+0.0827  a'=+0.0538  b=-0.1596  d=-0.0423 (H1 +nan H2 -0.0423)  | sig-a'=+0.0287 t=+0.65  sig-b=+0.2400 t=+4.74  sig-d=+0.1244 t=+2.63  mde_a=0.121
+G1    TRAIN sig=-0.0041  a'=+0.0599  b=-0.1625  d=-0.0522 (H1 -0.0651 H2 -0.0402)  | sig-a'=-0.0660 t=-1.48  sig-b=+0.1589 t=+2.74  sig-d=+0.0478 t=+0.82  mde_a=0.092
+G1    VAL   sig=+0.0891  a'=+0.0435  b=-0.1700  d=-0.0470 (H1 +nan H2 -0.0470)  | sig-a'=+0.0481 t=+0.93  sig-b=+0.2565 t=+4.55  sig-d=+0.1355 t=+2.47  mde_a=0.127
+G2    TRAIN sig=-0.0248  a'=+0.0367  b=-0.1574  d=-0.0522 (H1 -0.0644 H2 -0.0409)  | sig-a'=-0.0636 t=-1.66  sig-b=+0.1341 t=+2.87  sig-d=+0.0280 t=+0.60  mde_a=0.085
+G2    VAL   sig=+0.0848  a'=+0.0446  b=-0.1608  d=-0.0421 (H1 +nan H2 -0.0421)  | sig-a'=+0.0410 t=+0.90  sig-b=+0.2436 t=+4.73  sig-d=+0.1263 t=+2.62  mde_a=0.123
+G2p   TRAIN sig=-0.0244  a'=+0.0375  b=-0.1531  d=-0.0494 (H1 -0.0602 H2 -0.0394)  | sig-a'=-0.0639 t=-1.76  sig-b=+0.1300 t=+2.97  sig-d=+0.0253 t=+0.58  mde_a=0.082
+G2p   VAL   sig=+0.0961  a'=+0.0556  b=-0.1543  d=-0.0377 (H1 +nan H2 -0.0377)  | sig-a'=+0.0409 t=+0.90  sig-b=+0.2485 t=+4.82  sig-d=+0.1331 t=+2.77  mde_a=0.122
+G3    TRAIN sig=+0.0142  a'=+0.0623  b=-0.1688  d=-0.0536 (H1 -0.0674 H2 -0.0408)  | sig-a'=-0.0499 t=-1.07  sig-b=+0.1829 t=+2.75  sig-d=+0.0671 t=+0.99  mde_a=0.097
+G3    VAL   sig=+0.0786  a'=+0.0428  b=-0.1707  d=-0.0488 (H1 +nan H2 -0.0488)  | sig-a'=+0.0388 t=+0.81  sig-b=+0.2452 t=+4.24  sig-d=+0.1268 t=+2.31  mde_a=0.132
+G5    TRAIN sig=-0.0212  a'=+0.0398  b=-0.1627  d=-0.0540 (H1 -0.0675 H2 -0.0414)  | sig-a'=-0.0625 t=-1.68  sig-b=+0.1423 t=+3.00  sig-d=+0.0330 t=+0.70  mde_a=0.086
+G5    VAL   sig=+0.1040  a'=+0.0508  b=-0.1650  d=-0.0422 (H1 +nan H2 -0.0422)  | sig-a'=+0.0563 t=+1.20  sig-b=+0.2650 t=+4.94  sig-d=+0.1456 t=+2.88  mde_a=0.131
+G6    TRAIN sig=-0.0094  a'=+0.0467  b=-0.1658  d=-0.0541 (H1 -0.0671 H2 -0.0420)  | sig-a'=-0.0578 t=-1.46  sig-b=+0.1565 t=+3.00  sig-d=+0.0444 t=+0.86  mde_a=0.090
+G6    VAL   sig=+0.0888  a'=+0.0456  b=-0.1672  d=-0.0443 (H1 +nan H2 -0.0443)  | sig-a'=+0.0463 t=+1.00  sig-b=+0.2524 t=+4.71  sig-d=+0.1326 t=+2.61  mde_a=0.132
+G7    TRAIN sig=+0.0010  a'=+0.0527  b=-0.1704  d=-0.0559 (H1 -0.0686 H2 -0.0441)  | sig-a'=-0.0535 t=-1.27  sig-b=+0.1699 t=+3.01  sig-d=+0.0554 t=+0.97  mde_a=0.094
+G7    VAL   sig=+0.0904  a'=+0.0441  b=-0.1702  d=-0.0482 (H1 +nan H2 -0.0482)  | sig-a'=+0.0493 t=+1.04  sig-b=+0.2566 t=+4.51  sig-d=+0.1380 t=+2.56  mde_a=0.135
+SCORE25 DONE

@@ -1,0 +1,23 @@
+BT config (B+ parity): account=$26,667 N=8 risk=$375 threshold=0.012081536791 pdr_veto>=11.0 g1(True, rv20>=7.106, pdr>=9.226, short_history_veto=False) range_size_veto(True, <= 2.221) book=analysis_results/orb_bplus_book.csv
+BT config (winner stack): atr_floor=ON k=0.25 scale_out=ON frac=0.4 level_r=3.0
+honest ORB fills with a measured entry quote: 7202  (TEST sealed: 1612 rows dropped)
+already marketable at 30 bps: 5023 (89.9%) — a wider cap CANNOT touch these (asserted)
+  [0] APM 2025-01-02 ask 3.45 cap30 3.44 rung 50
+  [100] HIND 2025-05-09 ask 7.28 cap30 7.22 rung 150
+  [200] SVV 2025-08-01 ask 11.18 cap30 11.17 rung 50
+  [300] QUBX 2025-10-27 ask 13.96 cap30 13.95 rung 50
+  [400] MSTP 2026-01-14 ask 3.85 cap30 3.84 rung 50
+  [500] XNDU 2026-04-14 ask 12.78 cap30 12.74 rung 100
+
+=== F26 — the CONVERTED subset, per rung (TEST sealed) ===
+cap  50 TRAIN n= 208 convR=-0.089 measR=-0.187 gain=+0.097 asisR=-0.037 WR=21.2% H1=-0.047 H2=-0.120 over= 43.4bps mde=0.198
+cap  50 VAL   n=  90 convR=+0.269 measR=+0.171 gain=+0.098 asisR=+0.288 WR=33.3% H1=+nan H2=+0.269 over= 44.0bps mde=0.496
+cap 100 TRAIN n= 121 convR=-0.051 measR=-0.087 gain=+0.036 asisR=+0.104 WR=24.0% H1=+0.012 H2=-0.110 over= 71.2bps mde=0.249
+cap 100 VAL   n=  71 convR=+0.255 measR=+0.077 gain=+0.179 asisR=+0.326 WR=29.6% H1=+nan H2=+0.255 over= 74.7bps mde=0.457
+cap 150 TRAIN n=  37 convR=-0.239 measR=-0.262 gain=+0.023 asisR=-0.119 WR=24.3% H1=-0.040 H2=-0.361 over=127.2bps mde=0.456
+cap 150 VAL   n=  15 convR=-0.297 measR=-0.280 gain=-0.017 asisR=-0.212 WR=13.3% H1=+nan H2=-0.297 over=130.6bps mde=0.327
+
+--- the discriminator: converted vs already-marketable (same book, same eras) ---
+TRAIN already-marketable n= 3336 R=-0.133 | converted (any rung) n= 366 R=-0.092 | still resting past 150 bps n= 17 measR=-0.172
+VAL   already-marketable n= 1687 R=+0.024 | converted (any rung) n= 176 R=+0.215 | still resting past 150 bps n=  8 measR=-0.089
+F26 DONE
