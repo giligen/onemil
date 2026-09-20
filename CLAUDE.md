@@ -1,599 +1,128 @@
 # CRITICAL - ALWAYS READ FIRST
 Since you have a memory of a chicken, you MUST stop every 10min and re-read CLAUDE.md AND DO THIS before every 10th prompt -- this is a must!!!
 
+**This file is the OPERATING RULES only.** The full per-strategy history (every feature flag's evidence, every
+rejected knob, every incident) lives verbatim in `docs/CLAUDE_HISTORY.md`. Read the relevant section of that file
+BEFORE touching a strategy's rules, and grep it before re-testing any knob — most have been tested and rejected.
+
 # Project: OneMil - Day Trading System
+Real-time scanner + automated trading on Alpaca (Ross Cameron momentum style). Live account, owner trades manually
+on the same account (his orders/positions are NEVER touched — report only). North star: $10K/month by compounding.
 
-Real-time stock scanner + automated trading system targeting Ross Cameron's momentum day trading strategy.
-
-## Goals
-1. Real-time stock scanner (gap ups, high relative volume, low float, $2-$20)
-2. Automated paper trading via Alpaca
-3. Go live
+# Token discipline (owner 2026-09-20)
+* One agent at a time, fresh context (never fork), prompt = a file pointer + a hard step budget (≤ 40 calls).
+* Agents write results to disk and RETURN ≤ 150 words. Never read an agent's log or transcript.
+* Never Read a file > 300 lines in full — grep / offset / head. Mechanical work on Sonnet, study logic on Opus,
+  Fable plans. Be short and crisp with the owner.
 
 # CRITICAL: Running Long Commands
-* **NEVER pipe long-running commands through `| tail`, `| head`, `| grep`** — this buffers ALL output and you see NOTHING until the process finishes. Run commands directly and let output stream.
-* **BAD**: `python batch_backtest.py --build-cache 2>&1 | tail -10` (buffered, blind for 30+ min)
-* **GOOD**: `python batch_backtest.py --build-cache` (output streams in real-time)
-* For background tasks, use `run_in_background=true` without piping
-* **NEVER overwrite or delete cache files (cache.db, CSV caches) without explicit user permission**
+* **NEVER pipe long-running commands through `| tail`, `| head`, `| grep`** — buffers everything, you see nothing.
+  Run directly; background tasks use `run_in_background=true` without piping.
+* **NEVER overwrite or delete cache files (cache.db, CSV caches) without explicit owner permission.** Never use
+  `--build-cache` for experiments — write experiment caches to the scratchpad.
+* Python `print()` inside `python3 -c` is buffered — run script files or flush.
 
 # Code Quality
-* When writing code you should behave as if you are Linus Torvalds -- partitioning, modular code, reusable code, extract common pieces to accessors, use meaningful names like Linus would
-* TDD approach -- never assume that what you wrote will work. use a tdd approach to test it
-* Code coverage MUST trend at ~90%, must! don't tell me you are done before code-coverage is complete
-* Always validate everything you wrote via running the specific unit-test that is located in the appropriate tests directory
-* Always validate everything you wrote via running a system test to ensure you didn't break anything and that the implemented functionality works
-* Use Verbose/Debug flags for extra logging for the sake of debugging. Don't guess issues, find in the logging the root-cause
-* Always solve the root cause, never apply work-arounds
-* Instead of writing 10s of bespoke scripts, strive to use the main code models with specific flags
-* Always push to github
-* Always keep dependency installation file up-to-date
-
-# Integration Testing for Multi-Component Flows
-
-**MANDATORY**: When implementing features that involve data flowing through multiple components, you MUST write integration tests that validate the FULL end-to-end flow.
-
-## When Integration Tests Are Required
-
-Integration tests are REQUIRED for any flow involving:
-- Database operations (save -> retrieve -> use)
-- Data transformations across boundaries (JSON <-> dict, serialization/deserialization)
-- Multi-step processes (input -> processing -> output)
-- External API calls -> internal processing -> storage
-- Configuration/state that affects multiple components
-
-## What Integration Tests Must Cover
-
-Integration tests MUST validate:
-1. **Data integrity through the entire pipeline** - verify data format at EACH boundary
-2. **Type transformations** - if data is serialized/deserialized, test both directions
-3. **Edge cases** - empty data, missing fields, null values
-4. **Actual component interactions** - use REAL instances, not mocks
-5. **The complete flow** - from entry point to final destination
-
-## Coverage Rule
-
-- Unit tests: Test components in isolation (mocked dependencies)
-- Integration tests: Test components working together (real dependencies)
-- System tests: Test entire system end-to-end (real environment)
-
-**You are NOT done** until you have all three levels for complex flows.
+* Linus-style: partitioned, modular, reusable, meaningful names, docstrings on every function, verbose progress on
+  long processes. Solve root causes, never work-arounds. Use the main code with flags, not bespoke scripts.
+* TDD. Coverage ~90%. Validate with the specific unit test in `tests/` AND a system test. Zero failing tests, ever —
+  fix the core issue even if someone else broke it.
+* **All fallback code paths MUST log ERROR or WARNING** explaining why they triggered. All errors reported
+  (missing API keys break execution). Production code never contains mock logic.
+* `MagicMock()` MUST use `spec=` for domain classes; `AsyncMock(spec=...)` for async; external SDK objects may omit.
+  Fixtures in `tests/conftest.py`.
+* Integration tests are REQUIRED for any multi-component flow (DB save→retrieve, serialization both ways, multi-step,
+  API→processing→storage, shared config/state): real instances, data checked at each boundary, edge cases. Three
+  levels: unit (mocked) / integration (real deps, paper) / system (real environment). Not done until all three.
+* Bug protocol: every bug gets BOTH a unit test and an integration test.
+* Keep README.md (latest architecture), MD docs and the dependency file up to date. Push to master when the owner
+  confirms things work. Commit messages end with the session attribution block.
 
 # CRITICAL: Testing & Deployment Protocol
-
-**NEVER commit changes to production without testing first!**
-
-## Required Testing Steps for External API Changes:
-1. **Research API documentation** - Don't assume capabilities, verify them
-2. **Create separate test file** - Build/test in isolation
-3. **Test with real API** - Unit tests with mocks are NOT sufficient for API integration
-4. **Verify success** - Check logs for actual success, not just "no errors"
-5. **System test** - Run full cycle
-6. **Monitor for errors** - Grep output for ERROR/exception before committing
-7. **Only then commit** - If all tests pass
-
-## Post-Incident Protocol:
-1. **Immediately revert** broken code to restore production
-2. **Document** what broke and why
-3. **Commit revert** with clear explanation
-4. **Don't rush the fix** - Take time to do it properly with testing
-
-**Remember: Breaking production wastes more time than proper testing takes!**
-
-# Code Standards
-
-* Add docstrings to all functions
-* Keep MD files up-to-date per model
-* Keep Readme.md file up-to-date
-* Unicode and emojis are supported (logging handlers must use UTF-8 encoding on Windows)
-* Code should be verbose enough to show progress throughout long processes
-* Use git source control and push to master every time I confirm things are working well
-* Use descriptive meaningful names always
-* No tests should ever be failing, always fix the core issue and don't work around it
-* All Errors must be reported, e.g., missing API Keys and execution should break
-* Always document latest architecture in readme.md and keep it up-to-date
-* **CRITICAL: All fallback code paths MUST log ERROR or WARNING** - Silent failures hide bugs. Every fallback (try/except, if/else with defaults, .get() with fallback values) MUST explain WHY it triggered via logger.error() or logger.warning()
-* **NEVER leave broken unit tests** - Even if the test was broken by someone else's code, fix it. Zero failing tests is mandatory. Every session should end with all tests passing.
+Never ship untested to production: research the API → isolated test file → real-API test (mocks are not enough) →
+verify success in logs → full system test → grep for ERROR/exception → only then commit. Post-incident: revert
+immediately, document, commit the revert, fix slowly. Unit tests are not deploy evidence: a weekend boot rehearsal on
+the exact ExecStart + real-API probes + a real report run are required before any live change.
 
 # System-in-dev
+DB may be locked by parallel processes. Batch processors are verbose. Assume nothing about a fix until the log shows
+it; use verbose/debug flags and find the root cause in the logging.
 
-* Assume DB might be locked by other process that are running in parallel to you
-* When building batch processors always make them verbose to show progress
-* Unit tests -> Mock external APIs
-* Integration tests -> Use real APIs (or testnet/paper)
-* Production code -> Never includes mock logic, always real implementations
+# ONE spec for backtest and live — every rule
+A rule is a mechanism + evidence + explicit code, shared by BT and live through ONE helper module (parity by
+construction, enforced by a parity test). Accidental behaviour is unacceptable even when profitable. No refill after
+a post-ranking veto (refill was tested toxic on every book). The rulebook: `research/orb_machine_rules.md`.
 
-# CRITICAL: MagicMock() MUST Use spec= Parameter
-
-**The Problem**: `MagicMock()` without `spec=` HIDES bugs by returning `MagicMock` for ANY attribute access, even non-existent ones.
-
-## MANDATORY RULES FOR MagicMock():
-
-### 1. ALWAYS Use spec= for Domain Classes
-```python
-# BAD - Hides AttributeErrors
-executor = MagicMock()
-
-# GOOD - Catches interface violations
-executor = MagicMock(spec=AlpacaExecutor)
-```
-
-### 2. Use AsyncMock for Async Classes
-```python
-# BAD
-notifier = MagicMock()
-
-# GOOD
-notifier = AsyncMock(spec=TelegramNotifier)
-```
-
-### 3. External SDK Objects Are OK Without spec=
-```python
-# OK - External SDK objects, not our domain
-mock_order = MagicMock()  # Alpaca Order object, OK without spec
-```
-
-### 4. Use conftest.py Fixtures
-Pre-configure fixtures with spec= in `tests/conftest.py`.
-
-# Three Trading Strategies (one systemd service: `onemil-trader`)
-
-Bull flag, MACD wave, and ORB all run as modules inside `main.py` under the
-`onemil-trader` service. Each is toggled via CLI flags: `--flag`, `--macd`, `--orb`.
-
-## Strategy 1: Bull Flag (`onemil-trader`)
+# Strategies — ONE systemd service `onemil-trader` (`python main.py --scan --trade --verbose` + flags)
 ```bash
-sudo systemctl status onemil-trader      # Check status
-sudo systemctl restart onemil-trader     # Restart
-sudo systemctl stop onemil-trader        # Stop
-journalctl -u onemil-trader -f           # Live logs
+sudo systemctl status|restart|stop onemil-trader ; journalctl -u onemil-trader -f
 ```
-- Systemd service: `/etc/systemd/system/onemil-trader.service`
-- Runs: `python main.py --scan --trade --verbose`
-- Auto-restarts on failure (30s delay)
-- Config: `config.yaml`
-- Logs: `logs/onemil.log`
-- Universe: pre-built via `python main.py --rebuild-universe` (nightly cron)
+State on 2026-09-20 (details, evidence, monitor greps and rollback for every flag: `docs/CLAUDE_HISTORY.md`):
+| Book | Flag / service | State | Reference |
+|---|---|---|---|
+| Bull flag (P1 profile) | `config.yaml trading.enabled` | **PAUSED 9/14**, P1 config intact, resumes 2026-09-21 at $150 risk, ramp L0→L3 on positive realized P&L (`docs/bf_p1_ramp.md`, `scripts/bf_ramp_check.py`) | honest book $107K/79 tr under the unified trail; **halves under measured NBBO cost** ($139K→$69K, VAL −$8K) — the ramp band must be rebuilt on the measured-cost book |
+| ORB B+ | `orb.yaml strategy.enabled`, `--orb` | **PAUSED 9/14**, resumes 2026-09-21 (catalyst-off, 8 slots, entry-drain thread, 50 bps) | honest $6,085 / 21 mo at $10K stage; weekly selection refit `scripts/orb_weekly_refit.py` (Sun 20:00 UTC); NEVER refit `adaptive_mults`, never drop the Q5 1.5 cap |
+| MACD wave | `onemil-macd-wave` service, `macd_wave.yaml` | running | outlier-dependent P&L; filters tuned in-sample |
+| HOD-break | `hod_break.enabled: false`, `--hod` inert | **CLOSED 9/18** (0/12 causal-filter cells, −0.04R gross, dry run −0.45R) | engine + tests stay as instrumentation; re-open only behind a NEW pre-registration |
+| Red-to-green | `red_to_green.enabled: false`, `--r2g` inert | DISABLED 9/17 (TEST profit was a NASDAQ test ticker) | exclude `^Z[A-Z]ZZT$` and any symbol absent from `daily_bars` from every universe |
+| Ignition | flags + crons OFF | OFF 9/13/14 | from-zero study found no edge |
 
-### Feature flag: two-tier filter (added 2026-04-17, shipping ON)
-- Config key: `trading.bull_flag.two_tier_filter.enabled`
-- Default: `true` (shipping ON). Set to `false` to revert to A_f6 behavior (byte-identical: $54,572.15 / 83 trades, verified).
-- When `true`: BT projects **+$10,455 on 2025 OOS and +$5,439 on Q1 2026 vs A_f6**
-- Shared module: `trading/two_tier_filter.py` (imported by both BT Stage-2 and live engine → parity by construction)
-- Enable: flip flag in `config.yaml`, run `python -c "from config import Config; print(Config().two_tier_filter_cfg)"` to verify, then `sudo systemctl restart onemil-trader`
-- Monitor: `journalctl -u onemil-trader | grep "TWO-TIER FILTER"` — shows rejected Extras with reason (`extras_macd_surgical_drop` or `extras_composite_below_threshold`)
-- Rollback: flip flag to `false` + restart (zero state to unwind — pure gate flip)
-- Full details in README.md "Two-Tier Filter" section
-- **Dormant companion change**: `BT_ALLOW_REENTRY=1` env var enables multi-trade-per-symbol-per-day in the backtest. Empirically −$1,299/yr — DO NOT enable in prod.
+Shared machinery: `StopMonitor` (one websocket, routes exits per strategy), `trades.strategy` column, `[ORB]`/
+`[HOD]` Telegram prefixes, `daily_bars` universe (2x wrappers IN since 9/5 for ORB, excluded for BF by name).
+`orb.yaml` is gitignored — new node: `cp orb.yaml.template orb.yaml`.
 
-### Feature flag: V-reversal conviction bonus (Experiment V, added 2026-04-17, shipping ON)
-- Config key: `trading.conviction_scoring.v_reversal_bonus.enabled`
-- Default: `true` (shipping ON). Set to `false` to revert to V2_clean 7-rule baseline.
-- When `true`: Rule 9 adds `bonus` (default 0.4) to raw conviction for gap-down V-reversal setups (gap<0 + intraday_range≥20% + pole_gain≥5%). Final score still clamped to [0.25, 3.0] — max sizing unchanged.
-- BT lift: 2025 +$4,396 (+6.4%), Q1 2026 +$2,284 (+19%). Stacks on TTF+D.
-- Shared between BT (`backtest.py`) and live (`trading/trading_engine.py`) conviction functions — parity by construction.
-- Live: no cache rebuild, just restart trader. Enable via `Config().v_reversal_bonus_cfg`.
-- Monitor: `journalctl -u onemil-trader | grep "v_reversal"` in log breakdown when conv trade fires.
-
-### Feature flag: marginal-conviction defensive scaling (Experiment H, added 2026-04-17, research artifact)
-- Config key: `trading.conviction_scoring.marginal_scaling.enabled`
-- Default: `false` — mixed BT signal. 2025 V+H: −$4,892 (hurts); Q1 2026 V+H: +$851 (helps). Net **−$4,041 across both periods**, so NOT shipping on.
-- Keep in codebase for future regime-aware activation (bucket is net-loser in some periods, net-winner in others).
-- When `true`: trades with conv in `[min_threshold, upper_bound)` have SIZING scaled by `scale_factor` (default 0.5). Stored conviction_mult unchanged (Stage-2 filters see raw).
-- Live: `journalctl -u onemil-trader | grep "MARGINAL CONV SCALE"`
-- Rollback: flip flag to `false`, restart.
-
-### Feature flag: volume-confirmed trail exit (Experiment D, added 2026-04-17, shipping ON)
-- Config key: `trading.trailing_stop.vol_confirmed_exit.enabled`
-- Default: `true` (shipping ON). Set to `false` to revert to naive trail behavior.
-- When `true` (stacked on top of TTF-on): BT projects **additional +$3,764 on 2025 and +$1,836 on Q1 2026** (Pareto improvement — same trades, same DD, bigger avg win)
-- Shared module: `trading/trail_vol_guard.py` (single helper used by BT simulator + live StopMonitor both tick and poll paths)
-- Logic: trail-stop triggering bar must have volume >= `min_vol_ratio × flag_avg_volume` to fire. Low-vol drift-downs are skipped. Hard stop (pre-trailing) always fires.
-- Enable: flip flag in `config.yaml`, verify via `python -c "from config import Config; print(Config().vol_confirmed_trail_cfg)"`, then `sudo systemctl restart onemil-trader`
-- Monitor: `journalctl -u onemil-trader | grep "VOL-CONF SKIP"` — shows each skipped trail exit with bar volume vs threshold
-- Rollback: flip flag to `false` + restart (pure config flip)
-- Full details in README.md "Volume-Confirmed Trail Exit" section
-
-### BF trail unification — ONE exit spec for BT and live (shipped 2026-09-05, default-on)
-- **Why**: CWVX 2026-08-03 — live +$313 (trail_stop 9:58) vs the cache +$2,381 (rode to 13:32). Same trade, two specs: live trailed on **plan-R** (R=$0.21, README Bug 5) while the cache builder simulated **fill-R** (R=$0.46; `use_planned_r` was never wired from config). Live also ratcheted the R-trail on every TICK while BT ratchets on closed-bar highs; BT's vol-guard read the triggering bar's own volume (lookahead); live checked stops inside the fill minute while BT starts at entry+1.
-- **Shared module**: `trading/bf_trail.py` (`r_baseline_and_unit`, `arm_and_ratchet`, `entry_bar_excluded`) — imported by `backtest.py::TradeSimulator.simulate` AND `trading/stop_monitor.py::_maybe_ratchet_from_bar_high`. Parity by construction, enforced by `tests/test_bf_trail.py` (same bar tape → identical stop path/exit bar on both sides; CWVX golden day; vol-guard; entry-bar).
-- **Contract**: R basis from ONE knob `trading.trailing_stop.r_basis: plan|fill` (default `plan`); the R-trail advances ONLY on closed 1-min bars (ticks just trigger the exit — like the BOBS 5/8 pct-trail fix, finally applied to the R-trail); entry bar excluded on both sides (`skip_exits_until_ts` = end of fill minute, set in `trading_engine.py`); trail-stop volume confirmation reads the PREVIOUS closed bar on both sides.
-- **Honest book under the unified spec — CORRECTED 2026-09-05 23:55 (regen-7, exact planned entry, live universe rule): `data/bull_flag_cache_causal_full_20260905.csv` (896 raw rows) → Stage-2 $107,351 / 79 tr / WR 53.2% / MDD −$27.5K / worst month −$11.2K (Aug-26) / 6 red months of 20; 2025 +$118K, 2026 YTD −$10.9K.** The earlier $191,142 (regen-6 exits re-simulated with the approximate planned entry fill/1.005) was INFLATED: the approximation shifts the trail-activation level by cents and on knife-edge trades (IONX 2025-04-07: $3.3K exact vs $52K approximate) the trail never arms before the run. Two producers of the exit, one wrong — class 7 again. `--resim-exits` is exact only when the cache carries `planned_entry`; until 2026-09-06 the monthly master (`batch/monthly_runner.RICH_CSV_HEADERS`) never carried it and `plan.risk_per_share` is fill-mutated, so NO existing cache can be re-simulated exactly — fixed (header + `build_rich_row` + the cache aggregator map it by name; `tests/test_monthly_runner.py`), effective from the next regen. Until then regen-7's own exits are the reference, never a resim; the resim'd artifacts were deleted. Stage-2 also applies the live BF universe rule by name (`trading/bf_universe_filter.py`, 258 leveraged-wrapper trades removed — live BF never sees them). Point-in-time top-up (2026-09-06, Databento bars for the symbol-days the cache universe never saw, side cache `data/research/databento/pit_cache.db`): union Stage-2 **$106,618 / 80 tr / MDD −$27.9K** — one added pick (BWEN −$733), survivorship not load-bearing. Relative tool only — never a forecast.
-- **`--resim-exits OUT.csv`**: re-simulates exits of a Stage-1 cache with the current simulator in minutes (entries untouched; exits never feed entries). Source via `BT_CACHE_PATH_OVERRIDE`; Stage-2 on the result with the same env var.
-- **Rollback**: `r_basis: fill` restores the retired cache's basis (needs a regen for BT); bar-only ratchet / entry-bar exclusion / prev-bar vol guard have no flag — they ARE the spec.
-- **Monitor**: `journalctl -u onemil-trader | grep "StopMonitor (bar)"` — `trail ACTIVATED via bar.high … (r_basis=plan)` and `trail ratchet … (bar.high=…, R=…)`; `entry-bar excluded` at debug.
-- **Known deviation**: the poll-mode StopMonitor path (paper nodes only) still ratchets R-trails per snapshot.
-
-### Feature flag: profit partial (built 2026-09-06, default OFF — the consistency exit)
-- Config key: `trading.profit_partial.{enabled, r_multiple, fraction, move_to_breakeven, fill, runner_target_r}` (config.yaml + template).
-- ONE spec for BT and live: `trading/bf_profit_partial.py`. Trigger = a CLOSED 1-min bar's high reaches `r_baseline + r_multiple × R` (the same plan-R baseline as the trail, `trading.trailing_stop.r_basis`); sell `fraction` of the active shares at that bar's close (BT: stop-fill model; live: `StopMonitor.execute_partial_exit(reason='profit_partial')`, the exhaustion rule's executor), stop → the fill price (true breakeven), remainder keeps the unified trail/exhaustion/vol-guard. One partial per trade. Later full exits carry the `pp+` prefix (`ExitReason.PROFIT_PARTIAL`, `pp+trail_stop`, …).
-- BT: `TradeSimulator(profit_partial=...)` in the MAIN walk (the legacy `trading.partial_profit` branch is fill-R/fixed-target and BT-only — never use it for a ship number). Live: `WatchEntry.pp_*`, `StopMonitor.arm_profit_partial` (called after every BF watch install), `pending_profit_partials`, engine `_check_profit_partials` each cycle (~60s after the bar closes; fill = next quote, decision identical). Tests: `tests/test_bf_profit_partial.py` (shared, BT walk, live twin, one-tape parity).
-- Honest evidence (regen-7 resim, live universe rule, $2K risk; `research/bf_consistency/README.md` §5): **50% at +2R, BE, trail → $95,363 / 2026 +$4,631 (from −$10,941) / 14/20 green / MDD −$26.2K / worst month −$11.3K** vs as-is $107,351. Flips 2026 positive for −$12K of 2025 tail; fails the pre-committed consistency bar on worst month and MDD. `fill: level` and `runner_target_r` variants are all worse — the legacy branch's $132K was optimistic touch-fills. Enable only after the shadow window; monitor `journalctl -u onemil-trader | grep "PROFIT PARTIAL"`.
-
-### BF consistency profile P1 — **LIVE from Monday 2026-09-07** (owner 9/6: "P1 is the way to go. no shadow, go live on Monday! run at low risk till we prove LIVE")
-- **Live config (config.yaml)**: `bull_flag.max_entry_price: 20` (the universe band `scanner.price_max` stays 30 — it is SHARED with the ignition shadow), `bull_flag.min_pole_gain_pct: 5.0`, `vwap_gate.enabled: true`, `profit_partial: enabled, r_multiple 2.0, fraction 0.5`, `regime_sizing.enabled: false`, `risk_per_trade: 150` (ramp stage L0), kill rails −750/−1050/−1200 + `daily_loss_limit −750` (−5u/−7u/−8u of base). The engine's `PRICE CAP skip` on the breakout level and Stage-2's `entry_price <= max_entry_price` are the same knob.
-- **Ramp on POSITIVE realized P&L** (`docs/bf_p1_ramp.md`, checker `scripts/bf_ramp_check.py`): L0 $150 → L1 $400 → L2 $1,000 → L3 $2,000. Advance = stage P&L > 0 AND (≥ 8 trades, or ≥ 6 with ≥ +4u) AND ≥ 15 sessions AND parity clean AND no rail hit in 10 sessions (BT: 98% of 8-trade windows positive vs 50% for a coin flip). Demote = ≤ −6u or 5 losers in a row or a weekly rail. Pause = ≤ −8u. Move `risk_per_trade` + the three rails + `daily_loss_limit` TOGETHER.
-- **Monitor**: `journalctl -u onemil-trader | grep -E "VWAP GATE|PRICE CAP|PROFIT PARTIAL|StopMonitor \(bar\)"`; daily `python scripts/bf_ramp_check.py`. Rollback = the pre-9/7 values (max_entry_price 0, pole 3.0, gate off, partial off, regime on, risk 60, rails −800/−1200/−2500, daily_loss_limit −5000) + restart.
-
-#### Build notes (2026-09-06) — the knobs, each ONE spec for BT Stage-2 and live
-- **Finding** (`research/bf_consistency/README.md` §6): the raw detector has no edge in either year (896 detections: −0.01R 2025, −0.07R 2026); the Stage-2 selection stack carried 2025 (+0.61R picks) and decayed in 2026 (+0.06R). Re-entry, legacy quick exits, and a raw-rule "frequency book" are DEAD as consistency levers (more trades = more variance, no 2026 edge).
-- **Three era-consistent raw rules** (worst buckets in BOTH years; 2025-only ranking would pick the same three): breakout at/below VWAP, pole gain < 5%, entry price > $20.
-- **Knobs, each ONE spec for BT Stage-2 and live**:
-  - `trading.bull_flag.vwap_gate.{enabled,min_dist_pct,shadow}` → `trading/bf_vwap_gate.py`. Live: `VWAP GATE skip` / `[SHADOW] would skip`; shadow also logs `CONSISTENCY RULES [SHADOW]` for pole/price. Tests `tests/test_bf_vwap_gate.py`.
-  - `trading.bull_flag.max_entry_price` + `trading.bull_flag.min_pole_gain_pct` are re-applied by Stage-2 to the broad cache (built on the $30 universe band at pole 3), so a config change is the same rule in BT and live (`tests/test_batch_backtest.py::TestStage2LiveKnobs`).
-  - `trading.profit_partial.{enabled,r_multiple,fraction,move_to_breakeven,shadow}` → `trading/bf_profit_partial.py` (see the flag section above). 9/6 review fixes: the exhaustion partial is skipped once `pp_taken` (BT parity) and the partial never fires inside the entry bar (`skip_exits_until_ts`). Known deviation: live raises `highest_since_entry` on ticks, so the partial can fill mid-bar at the touch (BT fills at that bar's close) — decision-equivalent, timing differs.
-  - `trading.risk_cap.{enabled,max_risk_mult}` → `trading/bf_risk_cap.py`: final shares clamped to max_risk_mult × risk_per_trade after every multiplier, before the BP ceiling. Live `RISK CAP` log line. Tests `tests/test_bf_risk_cap.py`. **Never measure a cap post-hoc on a Stage-2 CSV** — its `shares` are pre-regime; run the knob.
-- **Numbers ($50K / $2K base, regen-7, honest)**: as-is $107K / 2026 −$10.9K / worst −$11.2K / MDD −$27.5K. **P1** = gate + pole≥5 + price≤20 + 50%@+2R + regime sizing OFF → $131K / 2026 +$38K / worst −$7.6K / MDD −$15.1K / 14/20 green. **P2** = gate + 50%@+2R + risk cap 2× → $121K / 2026 +$27.8K / worst −$6.7K / MDD −$13.1K. Recommendation P1.
-- **Ship path**: `vwap_gate.shadow: true` + `profit_partial.shadow: true` for 10 sessions (log-only), then flip jointly. Rollback = flags to false + restart (zero state).
-
-### `min_pole_candles` tested 3 → 2 — **NOT SHIPPED** (2026-05-15)
-- Motivation: live this week 3,234 "Pole too short (2 candles, need 3+)" rejections. AIIO 2026-05-13 rejected as 2-candle pole at 14:14, ran +52% intraday. Same pattern killed SMX/MASK/KPTI live wins.
-- **2025 OOS (12 months)** with pole=2: **+$63,172 (+18.3%)**, WR 46.8%→47.9%, 267→338 trades. 8 better months, 4 worse.
-- **2026 OOS Jan-Apr (4 months)** per-month head-to-head: **3 of 4 months WORSE under pole=2**. Jan −$20K, Feb −$7K, Mar −$11K, Apr +$22K. Net 4mo: **−$16,007**.
-- **Combined 16 months**: net +$47K (+5%). Annualized ~$35K/yr — but 3-of-4 recent months negative + WR drop in 3/4 months reads as overfit to 2025 regime, not durable signal. Same "marginal positive with bad recency" pattern that justified rejecting the earlier `max_pullback 5→10` change.
-- Trade-level diff (2025): 79 new (symbol, date) added in pole=2, WR 48.1%. Top winners MSW +$2.2K / RYET +$1.3K / BQ +$1.2K (broad signal in 2025 only).
-- Other knobs tested and **rejected** in the same sweep: `max_retracement_pct 50→70` (−$24K 2025 alone), `max_green_in_flag 2→3` (−$119K!), `min_breakout_volume_ratio 1.5→1.0` (BT-inert), `min_pole_gain_pct 3→2` (+$28K but dominated by pole=2).
-- **Kept as research infrastructure**: env-var overrides in `trading/pattern_detector.py` (`BF_MIN_POLE_CANDLES`, `BF_MAX_PULLBACK_CANDLES`, `BF_FVRR_STRICT`, `BF_MIN_POLE_GAIN_PCT`, `BF_MAX_RETRACEMENT_PCT`, `BF_MAX_GREEN_IN_FLAG`, `BF_MIN_BREAKOUT_VOLUME_RATIO`) — default OFF, no behavior change without explicit env var. Also `fvrr_strict` constructor flag (default True, matches existing FVRR-on behavior).
-- Reconsider when: 2026 Q2+ accumulates 3+ months of live data that flips supportive, OR a regime model can predict which months favor 2-candle vs 3-candle poles.
-- Sweep artifacts: `scripts/study_bf_wide_sweep_2025.sh`, `scripts/diff_a_pole2_trades.py`.
-
-### Per-tier MACD scaling + V-rev bump (S2-max, shipped 2026-04-18, **default-on, no flag**)
-- Config: `trading.macd_zones.extras_tier.{strong_pos,strong_neg,normal}_multiplier` + bumped `strong_pos/neg_multiplier: 1.5→1.8` (A-tier) + `v_reversal_bonus.bonus: 0.4→1.0`
-- Ships with hardcoded values (no feature flag — per-tier analysis is the production baseline going forward)
-- BT: **+28.7% lift on 2025+Q1 2026** (baseline $81,911 → $105,420). Per-quarter breakdown: all 5 quarters positive. HOQ1 holdout +$4,737 (+36.0%).
-- Mechanism: A-tier (≥20% intraday) stays close to current behavior; Extras-tier (10-20%) amps strong MACD 2.0x and SKIPS MACD-neutral trades (the −$14,734 landmine bucket).
-- Shared classifier: `trading/two_tier_filter.py::classify_tier` (same as TTF). Both BT `backtest.py:_get_macd_zone_multiplier` and PROD `trading/trading_engine.py:_get_macd_zone_multiplier` take `intraday_change_pct` kwarg.
-- Parity: `tests/test_bt_prod_parity.py` (11 tests), `tests/test_per_tier_macd_zones.py` (19 tests). 1217 total tests pass.
-- Monitor: `journalctl -u onemil-trader | grep "tier="` — shows per-trade tier classification + applied multiplier.
-- Rollback: `git revert` the ship commit (single commit flips all 6 yaml values + 2 function signatures back). Or manual YAML revert of `strong_pos/neg_multiplier` to 1.5, `v_reversal_bonus.bonus` to 0.4, delete `extras_tier` block.
-- Full details in README.md "Per-tier MACD zone scaling (S2-max)" section.
-
-### Feature flag: regime-aware sizing (Phase 1.4b, shipped 2026-04-18, **default-on**)
-- Config key: `trading.regime_sizing.enabled`
-- Default: `true` (shipping ON). Set to `false` to revert to pre-regime S2-max behavior (byte-identical via `_get_regime_for_date` short-circuit when disabled).
-- Classifies each trading day as A/B/C1/C2 from SPY T-1 features (vol_20_ann, above_sma_50, sma_50_slope_10d). Applies per-regime mult on top of conviction × macd_zone.
-  - **A** (Clean Bull: above SMA, vol<22%) → 1.25×
-  - **B** (Volatile: vol≥22%) → 1.00×
-  - **C1** (True Defensive: below SMA, slope≤+0.15%) → 1.50×
-  - **C2** (Shallow-dip-in-uptrend: below SMA, slope>+0.15%) → **0.00× (skip)**
-- BT: **+$28,470 on Jan 2025 → Apr 17 2026 (+34% lift)**. Feb 2026 drawdown flips −$1,159 → +$1,570. Full monthly breakdown: `research/scripts/monthly_regime_report.py`.
-- All 3 CV splits positive (TRAIN +$6K, VAL +$6.1K, HOQ1 +$15.2K). MDD unchanged ($18.5K — Apr 2025 DD was all B-regime, mult=1.0).
-- Shared module: `trading/regime_helpers.py` — imported by both `backtest.py` (`_get_regime_for_date` + sizing stack) and `trading/trading_engine.py` (`_get_today_regime` + sizing stack). Parity by construction; enforced by `tests/test_regime_sizing_parity.py` (23 tests).
-- PROD classifier runs once per ET date at first trade attempt — fetches ~100 calendar days of SPY daily bars via `alpaca.get_daily_bars_range(['SPY'], today-100, today-1)`, classifies last row. Cached per-day; error path caches `'unknown'` (mult 1.0, no trade effect).
-- Monitor: `journalctl -u onemil-trader -f | grep REGIME` — one line per day ("REGIME today=YYYY-MM-DD classified as X") + one per trade that scales ("SYM: REGIME C1 mult=1.50 → shares A→B") or skips ("SYM: REGIME C2 skip — no trade").
-- Rollback: flip `trading.regime_sizing.enabled: false` + `sudo systemctl restart onemil-trader` (pure config flip, zero state to unwind).
-- Known cost: Jan 2025 lost $2,534 because 21/24 trades were C2-skipped on profitable days — C1/C2 threshold is a global optimum; accepts individual-month variance.
-
-## Strategy 2: MACD Wave (in `onemil-trader`)
-```bash
-sudo systemctl status onemil-macd-wave   # Check status
-sudo systemctl restart onemil-macd-wave  # Restart
-sudo systemctl stop onemil-macd-wave     # Stop
-journalctl -u onemil-macd-wave -f        # Live logs
-```
-- Systemd service: `/etc/systemd/system/onemil-macd-wave.service`
-- Runs: `python macd_wave.py`
-- Auto-restarts on failure (30s delay)
-- Config: `macd_wave.yaml` (validated filters: $15-30, cross<3m, MACD≥0.5%, vol<300K, 2% stop)
-- Logs: `logs/macd_wave.log`
-- Telegram: messages prefixed with `[MACD Wave]`
-- DB: trades table has `strategy` column ('bull_flag', 'macd_wave', or 'orb')
-- Universe: self-built at 8:30 AM ET each day from Alpaca snapshots (no pre-build needed)
-
-## Strategy 3: ORB — Opening Range Breakout (added 2026-04-19, OFF by default)
-
-```bash
-sudo systemctl restart onemil-trader           # Must restart after config change
-journalctl -u onemil-trader | grep "\[ORB\]"   # Monitor ORB-specific logs
-```
-
-Runs as a module inside `onemil-trader`. Fires at 9:35 ET on gap-up stocks that
-break above their first 5-min opening range high. Validated full-timeline on
-Jan'25-Apr'26 with the shipped static_lock_1R exit (`study_orb_pipeline_static_lock.py`):
-**$+342,565 P&L, $-18,126 max DD (trough 2025-11-13), Calmar 18.90x, 1,001 trades,
-daily WR 56.6%, only 1 red month (Aug 2025 at $-9,288)**.
-
-⚠️  IMPORTANT: earlier docs cited `$+239,853 / Calmar 15.68x` — those came from
-scripts that read `orb_features_*.csv::pnl` directly. That CSV was generated with
-fixed +2R target / -1R stop exits, NOT the shipped `static_lock_1R`. The numbers
-above are production-parity. Use the `*_static_lock*.py` scripts for any new
-ORB analysis; the older ones have warning headers pointing to the shipped variants.
-
-**Enable**:
-1. Set `ALPACA_ORB_API_KEY` + `ALPACA_ORB_API_SECRET` in `.env` (separate paper account in Phase 1)
-2. Flip `strategy.enabled: true` in `orb.yaml`
-3. Add `--orb` CLI flag to the service command (systemd unit file)
-4. Restart service
-
-**Architecture**:
-- Separate paper `AlpacaClient` for order execution (Phase 1)
-- SHARED `StopMonitor` routes exit orders to ORB via `alpaca_clients_by_strategy={'orb': orb_paper_client}` — uses main-account WebSocket for market data (free, account-agnostic) but ORB-account client for order submission
-- Separate `OrderStreamWatcher` for ORB's order events
-- Shared DB with `strategy='orb'` tag
-- `[ORB]` Telegram prefix
-
-**Entry mechanics**:
-- Pre-placed **stop-limit buy** at `range_high × (1 + 30bps)` at 9:35 ET, auto-cancel after 60min
-- 7-feature composite z-score filter (threshold ≥ 0.0, TRAIN-fit params in `orb.yaml`)
-- Q4-preferred ranking, then composite DESC
-- Family + super-group dedup (14 families, 91 symbols, `lev_short`/`lev_long` super-groups)
-- Max 4 concurrent positions, per-pos cap $25K ($100K budget / 4)
-- Risk-parity sizing: $3K risk/trade, applied adaptive quintile mult (Q5 capped at 1.5x — anti-overfit)
-- Spread gate: skip entries with spread > 300bps + Telegram warning (loosened from 150 on 2026-07-04 — the 150 gate skipped monsters BKKT/XNDU; NEVER tighten below 150 without rereading research/orb_spread_gate_verdict.md: 100-150bps is the richest per-trade bucket)
-
-**Exit mechanics**:
-- Initial stop: `range_low`
-- **Static lock**: after price touches +1.75R, stop moves to +0.5R forever (no trailing; orb.yaml `exit.lock_arm_at_r: 1.75` / `lock_stop_r: 0.5` — 2026-05-08 BT-validated upgrade from the earlier 1.5R/1R). StopMonitor has `lock_arm_at_r` + `lock_stop_r` fields on WatchEntry.
-- No fixed target: hold until stop/lock hit OR 15:45 ET force close
-
-**Feature flag + rollback**:
-- Master kill switch: `strategy.enabled` in `orb.yaml` (default `false`)
-- Runtime disable: flip to `false` + restart. Existing positions force-close on shutdown. Bull flag + MACD wave unaffected (separate accounts/tags).
-
-**Monitoring**:
-- `journalctl -u onemil-trader | grep '\[ORB\]'` for entries/exits/skips
-- `journalctl -u onemil-trader | grep 'LOCK ARMED'` for lock-state transitions
-- DB queries: `db.get_open_trades(today, strategy='orb')`
-
-**Rollout phases — see `docs/orb_rollout_plan.md` for the live cushion-gated ramp**:
-- Pre-Stage-0 LIVE (data collection): $15K budget / $500 risk / -$750 daily loss — half-size live to capture real fill quality vs paper. Hard stop -$3K cushion. Use `scripts/orb_pre0_daily.py` for daily monitoring.
-- Stage 0: $30K budget / $1K risk / -$1.5K daily — formal live launch
-- Stages 1-4: $50K → $174K (full DTBP). Cushion + days-in-stage gated.
-
-**Q1 filter (shipped 2026-04-25, default ON)**: drops bottom-quintile candidates at ranking time. BT lift +$8,556 OOS (no DD increase). Config: `orb.yaml::filter.skip_q1: true` (also via `ORB_SKIP_Q1=0` to disable in BT). Validated by `study_orb_q1q2_filter.py`. Slot mechanics: filter never refills slots (Q1 is last-priority — see `check_q1_refill_potential.py`). Monitor: `journalctl -u onemil-trader | grep "Q1 filter"`.
-
-**Touchgo filter (Rule M + Rule D) (shipped 2026-05-16, default ON)**: two post-fill exit rules that catch failed breakouts within the first 1-2 minutes of trade life.
-- **Rule M**: at the close of the breakout bar (the bar that triggered our stop-limit BUY), if its close was in the bottom half of its high-low range (`bb_close_pos < 0.5`), exit at next bar open. Catches "touch and go" failed breakouts.
-- **Rule D**: at the close of the first post-entry bar, if the bar's low went ≥0.75R below entry (R = range_high - range_low), exit at entry - 0.5R. Catches fast reversal patterns.
-- **BT validation**: walk-forward Jan'25-May'26 (924 trades, 8/11 OOS months helped, +$27K OOS lift, +$26K full-timeline pipeline-integrated lift, **WR 47.8% → 52.1%, negative months 4 → 2**). Threshold 0.5/0.75 stable across all rolling training windows.
-- **Shared module**: `trading/orb_touchgo_filter.py` (imported by both BT `study_orb_pipeline_static_lock.py` and live `trading/orb_engine.py` — parity by construction; enforced by `tests/test_orb_touchgo_parity.py`).
-- **Live wiring**: `_evaluate_touchgo` called from `_ingest_bars` on every bar event; on fire, calls `stop_monitor.force_exit(symbol, reason='tag_bb'/'tag_b1', limit_price=...)` (new public method on StopMonitor) which routes through the same exit machinery as autonomous stops. Sends `[ORB] TAG_BB/TAG_B1 EXIT` Telegram message with bb_close_pos or b1_revert_R, exit price, and saved-vs-full-stop estimate.
-- **Config**: `orb.yaml::filter.touchgo.{enabled,rule_m.{enabled,threshold},rule_d.{enabled,revert_R,exit_R}}`. Env-var overrides: `ORB_TOUCHGO_ENABLED=0` (master), `ORB_TOUCHGO_RULE_M_THRESH`, `ORB_TOUCHGO_RULE_D_R`, `ORB_TOUCHGO_RULE_D_EXIT_R`.
-- **Monitor**: `journalctl -u onemil-trader | grep -E "TAG_BB|TAG_B1|touchgo"`. Expect ~3 firings/day (BT prevalence 26% of fills × ~12 daily entries).
-- **Rollback**: `filter.touchgo.enabled: false` + `sudo systemctl restart onemil-trader` (zero-state — filter only fires within first 2min post-fill).
-
-**News-gated PM sizing mult (shipped 2026-07-10, live 2026-07-13, default ON)**: the premarket dollar-volume boost is gated on pre-market NEWS presence (Alpaca/Benzinga, window prev-day 15:00 ET → fetch time ~9:31).
-- **Semantics**: PM$ > $5.82M cut AND has_news **AND identified COMMON STOCK** → **2.0×**; everything else → 1.0×. PM$ high without news → 1.0 (flat bucket); news without PM$ → 1.0 (headline nobody trades is a dud). Fail-open both channels: fetch failure → no boost, loud WARNING.
-- **Asset-class rule (2026-07-11, deliberate)**: 45% of the universe are leveraged wrappers (2x/inverse single-stock ETFs). They have no company events; every news window tested fails for them (same-morning underlying news = crowding, NEGATIVE all 3 eras). The boost requires positive stock identification via `trading/orb_asset_class.py` (lev-family sets → 33K offline map `data/research/orb_asset_class_map_20260711.csv` → `get_asset_name` API → unknown never boosts). Cost vs the accidental gate: $5.6K/18mo; buys immunity to vendor tagging changes. Full rule book: `research/orb_machine_rules.md`. Do NOT map wrapper news to underlyings or industries (REFUTED); do NOT extend the window to prev-day session news (NO-SHIP, recency-dead).
-- **Cannot kill/delay trades (2026-07-10 edge-case audit)**: the whole PM/news stack can only size a trade 1.0-2.0× — no path skips/vetoes/zeroes one (min mult 1.0; shares can't floor to 0 at our price band). News fetch: 8s hard timeout, 0 timeout-retries, 0 rate-limit-retries (`NEWS_API_TIMEOUT`; the default 90s×2 + 429-backoff ladder ≈3min was unacceptable in the entry window), failure poisons the day's flags (one attempt, never re-blocks a tick). 9:33 upgrade-only second pass covers Benzinga indexing lag (a systematically missed newsy flag would ship the worst grid row: −$62K/18mo — the EoD news-drift check is the tripwire for residual lag).
-- **Evidence** (research/orb_news_catalyst_jul2026.md): news×PM$ combo cell +$1,580/+$1,569/+$935 per trade per era — strongest era-consistent separator since PM$ itself; monster rate 28/15/13% vs 6-8% rest; zero lookahead (all articles ≤9:30 ET). Pipeline: TOT $250,276→$301,518, all eras +, MDD improves −$18.8K→−$18.2K. Known texture: lift is monster-concentrated (top-5 = all of it) and combo big-loser rate rises era-over-era (3→8→10%) — expect a slow bleed punctuated by rare large wins; judge on monsters-included windows only.
-- **Do NOT** add an LLM/keyword catalyst-quality filter for longs: REFUTED — recap-only articles ("20 stocks moving premarket") perform equal to real catalysts and hold AMCI +$23K / BNAI +$13.6K. (Opposite of stupid-money's short-divergence use case.)
-- **Shared helper**: `trading/orb_pm_mult.py::pm_size_multiplier` (BT `study_orb_pipeline_static_lock.py` + live `orb_engine._get_pm_mult` — parity by construction; BT news source: `data/research/orb_news_catalyst_*.csv`, regen via `research/scripts/orb_news_backfill.py`).
-- **Config**: `orb.yaml::sizing.pm_dollar_vol_mult.{high_mult: 1.0, high_mult_news: 2.0, news_gate: true}`. Env: `ORB_PM_NEWS_GATE=0` (no news fetch, everything above cut at high_mult), `ORB_PM_MULT=0` (whole mult off).
-- **Rollback to pre-gate legacy**: `news_gate: false` + `high_mult: 1.5` + restart (zero state).
-- **Monitor**: `journalctl -u onemil-trader | grep -E "PM MULT|NEWS prefetch"`. EoD: the daily green check now prints per-trade sizing attribution (quintile × pm_mult × news flag), HARD-fails the day on recorded-vs-recomputed pm_mult drift, soft-flags live-vs-EoD news drift, and tracks Q2/Q3 vs Q4/Q5 vs news-boosted cumulative P&L since 2026-07-13 (`scripts/report_common.py::sizing_attribution`).
-
-**Catalyst-required veto (shipped 2026-07-18, live 2026-07-20, default ON)**: every ORB entry needs a CATALYST — own-ticker premarket news OR complex confirmation (≥2 same-morning candidates sharing the underlying anchor: a stock + its wrappers, or sibling wrappers of one underlying). Newsless-and-alone picks are vetoed POST-ranking, slot consumed, NO refill (refill re-tested toxic: MDD +42%).
-- **Evidence** (live-parity resim): book $293,568→$253-257K (−$36K, owner-approved budget), MDD −$16.3K→−$14.0K, worst month −$10.3K→−$7.8K, July-26 bleed −62%, trades −67%. Cost era-consistent. Disclosed trade-off: negative months 6→9 (all shallow). Newsless-alone universe cohort NEGATIVE all 3 eras; complex-confirmed newsless positive all 3.
-- **Shared helper**: `trading/orb_catalyst_veto.py` + `orb_asset_class.underlying_anchor` (BT pipeline + live engine — parity by construction). Fail-open on unknown news (fetch failure never vetoes).
-- **Config**: `orb.yaml::filter.catalyst_veto.{enabled,min_cohort}`. Env: `ORB_CATALYST_VETO=0`.
-- **Monitor**: `journalctl -u onemil-trader | grep "CATALYST VETO"`; pattern_data records anchor + anchor_cohort per trade.
-- **Rollback**: `enabled: false` + restart (zero state). Tests: `tests/test_orb_catalyst_veto.py` (22).
-
-**Range-size veto + G1 short-history veto (shipped 2026-09-08, owner GO 9/6, default ON)**: two POST-ranking, NO-REFILL vetoes from the V1 veto study (`research/orb_veto_study/{DESIGN,REPORT}.md` — the BF era-consistency method applied to ORB's raw candidates; the raw ORB breakout has no edge, 2025 −0.18R / 2026 −0.04R, the pipeline's selection is the edge). **Corrected attribution (frames13 F41, `research/mature_method/frames13/REPORT.md` §2.2/§2.5)**: measured against a matched NON-signal name walked under ORB's OWN exit spec, clock and universe, the static lock on a gap-up name at 09:35 earns **+0.109 R TRAIN / +0.066 R VAL (+0.43 % / +0.26 % of price) by itself** — so the pick adds only **+0.153 R (t +0.93) / +0.436 R (t +1.72)** on top, positive in all four cells and significant in none; the ramp band stays on the LEVEL because both of its sides share the geometry and the control cancels inside the gate.
-- **Range-size**: `range_size_pct <= 2.221` (5-min range as % of price; worst raw quintile in BOTH years) → veto. Shared helper `trading/orb_range_size_veto.py`; live `orb_engine._range_size_veto_reject` (after G1, before catalyst); pipeline block after G1. Config `orb.yaml::filter.range_size_veto.{enabled,min_range_size_pct}`; env `ORB_RANGE_SIZE_VETO=0`, `ORB_RANGE_SIZE_VETO_MIN_PCT`. Log `RANGE-SIZE VETO`.
-- **G1 short history**: the `return_volatility_20d == 0.0` marker (< 5 prior daily bars) is now VETOED via `g1_veto.short_history_veto: true` (`trading/orb_g1_veto.py::g1_reject(short_history_veto=)`); NaN/missing still fails open. The 8/15 G1 deliberately failed open on the marker — the honest book says every short-history pick lost (4 fills, 0 winners).
-- **Evidence (honest B+ book, $10K stage, 21 mo; re-verified 9/8 on news-complete features — the nightly's news append had been crashing, so the BT catalyst veto failed open on ~5.6K symbol-days until 9/8)**: vetoes off $6,220 / MDD −$551 → **both on $6,627 / 79 picks / 61 fills / MDD −$454 / worst −$187 / 2026 YTD +$2,740** — THIS is the honest ORB reference (`analysis_results/orb_bplus_book.csv`). Each veto passes alone. Small in dollars at stage size; the shape is the gain. Tests `tests/test_orb_range_size_veto.py`. Studies: `research/orb_veto_study/REPORT.md`.
-- **Rollback**: `range_size_veto.enabled: false` + `g1_veto.short_history_veto: false` + restart (zero state).
-
-**PDR veto — prev-day-range (shipped 2026-07-04, default ON)**: skips selected picks whose PREVIOUS day's range was quiet (`prev_day_range_pct <= 8.0`). ORB monetizes continuation — "day-2 of the fireworks, not day-1"; quiet-prev-day gappers are fresh pops that mean-revert.
-- **NO-REFILL invariant**: applied POST-ranking inside the submit loop — a vetoed pick's slot stays EMPTY. The refill form was tested and is TOXIC (2025H2 → ~$0, MDD −$29K→−$50K; same failure mode as the refuted ETF exclusion). Never "improve" this by backfilling.
-- **BT evidence** (defended replica, Jan'25–Jul'26): TOT $155K→$210K (+35%), MDD −$29.3K→−$20.1K, WR 35.8→40.2%, trades/day 3.3→1.6, all 3 eras positive (25H1/25H2/2026), monotone across thresholds 6–10, ALL top-10 giants kept.
-- **Shared helper**: `trading/orb_pdr_veto.py` (imported by live `orb_engine._pdr_veto_reject` + BT `study_orb_pipeline_static_lock.py` — parity by construction). Feature def matches `study_orb_features.py:287`.
-- **Config**: `orb.yaml::filter.prev_day_range_veto.{enabled,min_prev_day_range_pct}`. Env: `ORB_PDR_VETO=0` (disable), `ORB_PDR_VETO_MIN_PCT` (threshold override).
-- **Monitor**: `journalctl -u onemil-trader | grep "PDR VETO"` — one line per vetoed pick (or per fail-open on missing prev-day data).
-- **Rollback**: flip `enabled: false` + restart (zero state). Tests: `tests/test_orb_pdr_veto.py` (27).
-
-**Touchgo breakout-bar re-keying + late-fill guard (shipped 2026-06-04, default ON)**: fixes a BT↔LIVE parity gap discovered comparing paper(dev) vs live(prod).
-- **Bug**: live keyed Rule M/D to the minute of the actual *fill* (`breakout_bar_ts = minute(fill)`), but BT keys to the *market breakout bar* (first 1-min bar with `high > range_high`). When a stop-limit fill lagged the breakout, live evaluated a different bar → **23% of live fills (7/31, May 19–Jun 3) flipped the `tag_bb` decision**, skewed toward spurious early exits.
-- **Fix**: live now captures the market breakout bar during the pending phase (`_ensure_breakout_bar_ts` from `_ingest_bars`) via the shared `trading.orb_touchgo_filter.find_breakout_bar_ts` (BT calls the same helper — parity by construction). Robust to late fills (captured while the bar is still in the streamed window).
-- **Late-fill guard**: if the fill lagged the breakout bar by > `max_breakout_age_min` (default 15), touchgo is skipped — a stale entry (e.g. ASTN 2026-06-03 filled 34min late) is no longer a clean ORB and gets no retroactive tag exit.
-- **Counterfactual**: on the 33-trade live sample the fix nets **+$251.8** (7 flipped trades −$223 → +$29; e.g. re-enables the failed-breakout cut on LMRI −3.84%→tag_bb, drops spurious cuts on IHRT/PURR). Directionally restores the BT-validated +$27K touchgo edge; small sample, not an annual projection.
-- **Config**: `orb.yaml::filter.touchgo.{breakout_bar_source: market|fill, max_breakout_age_min: 15}`. Env: `ORB_TOUCHGO_BREAKOUT_BAR_SOURCE`, `ORB_TOUCHGO_MAX_BREAKOUT_AGE_MIN`.
-- **Rollback**: `filter.touchgo.breakout_bar_source: fill` + restart (restores legacy fill-bar behaviour, zero state). Audit scripts: `scripts/audit_touchgo_breakout_bar_gap.py`, `scripts/audit_touchgo_fix_pnl_delta.py`.
-- **Tests**: `tests/test_orb_touchgo_parity.py` (helper unit + BT/live parity), `tests/test_orb_engine.py::TestTouchgoBreakoutBarReKey` (capture, fire-on-breakout-bar, late-fill guard, legacy mode).
-
-**Entered-inclusive book (shipped 2026-09-05 — the honest ORB reference)**: the features CSV used to hold ONLY candidates whose breakout FIRED (`if not trade.entered: continue`), so the BT ranked from the fired subset — a selection LOOKAHEAD. Live spends slots on stop-limits that never fill (8/31: SHMD Q5 `time_stop_canceled`, BW Q4 PDR-vetoed → PFSA Q3 ranked 4th and was never ordered; BT, blind to SHMD/BW, "took" PFSA = the "PFSA red"). The 8/31 diagnosis "BT prev-day vs live 9:35-volume gate" was WRONG (a wrong-layer fix): live's universe gate is `prev_volume >= 500K`, identical to BT's. Now `study_orb_features.trade_row` emits non-fill rows (`entered=0`, `exit_reason='no_fill'`, `entry_price` = range_high order level, all pre-entry features) and the pipeline lets them win a slot at $0 (`is_no_fill`); the green-check's fill-parity keys on BT-ENTERED picks only (`report_common.bt_filled_symbols`), while "BT picks never ordered live" now includes no-fill picks (live must show an order, filled or canceled). `FEATURES_CODE_VERSION='2026-09-05.entered_inclusive'`; `ORB_BT_FILL_RATE` is ignored (with a WARNING) on an entered-inclusive CSV — it would double-count. Pre-rebuild snapshots: `research/orb_entered_inclusive/`. The 15K RTH-9:35 floor in `study_orb_broad.py` stays only as a range-computability proxy. Tests: `tests/test_orb_entered_inclusive.py`. **Rebuilt 2026-09-05 (Jan-25→Sep-26, $10K stage sizing): $6,394 / 119 picks = 66 filled + 53 no-fill (55.5% fill rate) / WR 39.4% / MDD −$509 / worst month −$198 / 6 red months of 21 / mean month +$304** — vs $9,282 / 85 picks under the entered-only lookahead (−31%). Goldens 11/11. Relative tool at stage sizing, never a forecast. On the way: the ticker `NA` read as NaN by `pd.read_csv` crashed the pipeline → every ORB CSV now goes through `trading/orb_csv.read_orb_csv` (`tests/test_orb_csv.py`). Survivorship (Databento point-in-time universe, 9/5): 7.3% of ORB candidate symbol-days were invisible to the cache universe (delisted names in 2025; NEW 2x wrappers dropped by `AlpacaClient._is_common_stock` in 2026 — a bull-flag filter ORB inherited via `daily_bars`; live shares it). The wrapper rule is decided by `research/orb_entered_inclusive/wrapper_rule_test.py` (pre-committed rule) and the point-in-time top-up runs on a side cache (`research/scripts/build_pit_cache_db.py`, `ORB_CACHE_DB` / `ORB_FEATURES_OUT_DIR` / `ORB_BT_MONTHLY_OUT`).
-
-**2x-wrapper universe rule — IN (shipped 2026-09-05, owner GO)**: `AlpacaClient._is_common_stock` (a bull-flag filter, 83472a4) dropped leveraged/inverse wrappers from the nightly asset list that refreshes `daily_bars`, the table live ORB AND the ORB BT seed from — wrappers listed before 2026-04-04 stayed from earlier builds, later ones never entered (accidental "old in, new out"). Four-way pipeline test on the entered-inclusive features (`research/orb_entered_inclusive/wrapper_rule/summary.csv`): as-is $6,394 / **IN $7,085, MDD −$509, 3 red months, all eras +** / OUT $4,998, MDD −$684, 25H2 negative / full point-in-time $6,789 (survivorship +$395 at book level = not load-bearing). Wrappers = 42% of picks. Ship: `_is_common_stock(..., exclude_leveraged=False)` + `get_all_tradeable_assets(exclude_leveraged=False)`; `UniverseBuilder._orb_broad_symbols` unions the wrappers in the $1–50 band into Step 9 (bull-flag universe unchanged — Step 1 still excludes them); `scripts/backfill_wrapper_universe.py` filled 307 wrappers / 17,474 daily rows + their ORB candidate 1-min days from Alpaca. Ignition inherits (same table). Tests: `tests/test_wrapper_universe_rule.py`. **CORRECTION (same day, after the production regen on Alpaca bars with the FULL wrapper set — 320 wrapper rows, not the test's 35): $6,085 / 130 picks / 73 fills / MDD −$818 / +$290 per month** (the 13 wrapper picks net −$164 and worsen MDD by $309). Standings: as-is $6,394/−$509 (the accident) > IN $6,085/−$818 > OUT $4,998/−$684 (negative era). The pre-committed rule still resolves IN (inside the noise band, OUT fails an era); the owner was told the corrected number and holds the reversal option (Step 9 `exclude_leveraged` back to default). THIS is the honest ORB reference: $6,085 / 21 mo at $10K stage. **Follow-up**: BF Stage-2's leveraged filter is a hand-kept symbol list (`batch_backtest.py:270`) — with wrappers now in `daily_bars`, a `BT_BUILD_FULL_HISTORY=1` BF regen must apply the name-based `_is_common_stock` at Stage-2 (do after regen-7 finishes; live BF never sees wrappers).
-
-**09:35 entry evaluation runs on ORB's OWN thread (built 2026-09-18, needs a restart to take effect)**: on 9/18 the tripwire fired — first order submit **09:35:48.9 ET, 48.9s late**. Measured: 5.2s ORB's own post-open range sweep (incl. its deliberate 4s retry) → the **first-rank GRACE** deferred ranking to 09:35:25 with NO timer to service the expiry (the only re-trigger into `check_entries` was a fresh websocket bar event, and the 09:35 bars had already been consumed by the deferring call) → the scanner's cycle owned its thread 09:35:05→09:35:25.5 (`CYCLE TIMING: fetch=19.6s loop=0.9s`, 5,973-symbol bars+trades + the 3,031-line criteria pass) → `_orb_tick` then spent ~20s more, **15.3s of it inside `_orb_universe_source`'s `daily_bars` window-function scan** (measured read-only on the 13.8 GB cache.db; 11s on 9/11) → snapshots + rank + submit 3.5s. The tripwire's old message BLAMED news prefetch — a guess, and wrong. Fix: `ORBEngine.start_entry_drain_thread()` (`orb-entry-drain`, the HOD-break `start_drain_thread` pattern) drains bars and re-runs `check_entries` every 0.25s, including **on grace expiry with no bar event**; `_lock` (RLock) serialises `check_entries`/`check_exits`/drain/`reset_daily` between that thread and the scanner tick, and `build_universe` deliberately does NOT hold it across the slow `source_loader()`. The scanner's `drain_bar_events()` is a no-op while the thread lives (ONE consumer keeps bars in order); `_orb_tick` restarts a dead thread with an ERROR. The tripwire now prints MEASURED seconds per phase (`post_open_range_sweep`, `first_rank_grace`, `universe_seed`, `rank_and_submit`, `blocked_outside_orb`) — never a guess. Started from `main.py` when `orb_engine.enabled`. History: exactly ONE tripwire firing since 2026-08-15 (9/18) — ORB rarely trades, so the path was rarely exercised; the 15s universe query is chronic, not new. Tests: `tests/test_orb_engine.py::TestEntryDrainThread` / `::TestLatencyTripwireMessage`, `tests/test_scanner.py::TestOrbEntryEvalNotSequencedBehindScanCycle` (a simulated slow cycle proves ORB evaluates mid-cycle). Rollback: revert the commit (zero config, zero state).
-
-**Anchor dedup (one pick per underlying per day) — TESTED, NOT SHIPPED (2026-09-18)**: 9/18 live filled CIFG **and** CIFU (both 2X CIFR wrappers) and both stopped in the same second — `orb.yaml dedup: by_family + by_super_group` uses the hand-kept 14-family table that predates those tickers, while the engine already computes `underlying_anchor` for the catalyst veto. Pre-registered (`research/orb_anchor_dedup/PREREG.md`) then run through `study_orb_pipeline_static_lock.py` (reproduction gate passed to the cent: $14,428.617 / 215 picks = `research/fuckup_audit/D1_orb/book_n8_q1on.csv`). Rule: one pick per anchor per day, best rank survives, NO refill. Result (`research/orb_anchor_dedup/REPORT.md`): **N=8 $14,429→$12,710 (−11.9%), worst month −$148→−$221; N=3 (live) $7,187→$7,254 (+0.9%), MDD −$714→−$759, worst month −$223→−$295** — fails the pre-committed bar at both slot counts, and makes the worst month WORSE (it keeps the best-RANKED sibling, not the better one). **Nothing in `trading/orb_engine.py`; no `dedup.by_anchor` knob exists.** Research infrastructure left default-OFF: `trading/orb_anchor_dedup.py` + the `ORB_ANCHOR_DEDUP=1` block in the pipeline (`tests/test_orb_anchor_dedup.py` pins the default-off guarantee). Do NOT re-litigate from the CIFG/CIFU anecdote; a shared-risk-budget form (halve both siblings) is untested and needs its own pre-registration.
-
-**ORB diagnostic scripts** (in `scripts/`):
-- `orb_ramp_check.py` — current stage + advancement eligibility (cushion + days)
-- `orb_pre0_daily.py` — Pre-Stage-0 daily monitor (cushion, slippage vs BT, promotion eligibility, demotion triggers). Refuses to run if orb.yaml ≠ Pre-0 spec unless `--launch-date` passed.
-- `analyze_orb_slippage.py` — per-trade entry/exit slippage vs BT 30/10 bps
-- `investigate_composite_drift.py` — diff live `ORB SCORED` log vs BT features CSV to find feature responsible for any composite drift
-
-**ORB research summary**: `docs/orb_research_apr_2026.md` (50+ exit/add-to-winners variants tested April 2026 — V0 confirmed Pareto-frontier; only Q1 filter shipped; bull-flag-gated add-to-winners parked due to small ~$10K/yr lift).
-
-**orb.yaml** is gitignored (instance-specific config). Use `orb.yaml.template` as base for new node setup: `cp orb.yaml.template orb.yaml`.
-
-**Do NOT**:
-- Enable with `ALPACA_ORB_API_KEY` empty — main.py will warn + disable
-- Refit the **adaptive_mults** (sizing) — ever. 2026-09-08 walk-forward on the HONEST dump (`research/orb_refit_walkforward/REPORT.md`): refitting the mults is the whipsaw (the "expanding" gain was one ANNA fill sized 3×). The **selection** (z-params + quintile cutoffs) IS refit weekly on a rolling 26-week window by `scripts/orb_weekly_refit.py` (Sunday 20:00 UTC system cron, owner decision 9/8): 26w $7,588 vs frozen $5,669, MDD −223 vs −551, red months 4 vs 6, robust across windows ≥ 20w and refit days Mon/Wed/Fri. The 8-week window LOSES. The July "quarterly refits lose $34–47K" audit was measured on the lookahead-inflated features and is superseded.
-  (The 2026-07-03 "quarterly refits lose" audit — research/money_machine_audit_jul2026.md #4 — refit mults
-  AND selection on the inflated features; superseded by the 9/8 honest-dump walk-forward above.)
-- Remove Q5 cap from `orb.yaml::adaptive_mults.Q5: 1.5` — it's the anti-overfit guard
-- Disable Q1 filter (`filter.skip_q1`) without revisiting `docs/orb_research_apr_2026.md` first
-- Skip Pre-Stage-0 LIVE phase before formal Stage 0 — paper data has structural limits (synthetic fills don't capture real venue queue)
-
-## PAUSED 2026-09-14 (owner): Bull Flag and ORB
-- `config.yaml trading.enabled: false` (bull flag entries off; P1 config otherwise intact) and `orb.yaml strategy.enabled: false` (B+ config intact; backups `config.yaml.bak.pre_bf_pause_20260914`, `orb.yaml.bak.pre_pause_20260914`). Reason: at $150 / $375 risk and ~3 trades a month each, their P&L is noise and they share the account, symbols and StopMonitor with the HOD-break being validated. Resume = flip + restart. The ramp checkers and BF/ORB crons keep running but report zero activity.
-
-## Strategy 5: Red-to-green (F6-PDR) — built 2026-09-17, DISABLED the same evening (`--r2g` in the unit file is inert)
-- **What happened**: the bottom-up loser program (`research/fuckup_audit/H/`) found ONE rule that replicated on VAL for every
-  book — ORB's prior-day-range ≥ 8% — and the F6 red-to-green book under it read +0.078/+0.251/+0.104 R (TRAIN/VAL/TEST).
-  The independent rebuild disagreed on TEST; the reconciliation (`H/F6_reconcile/REPORT.md`) found: (1) the TEST profit was
-  **ZVZZT, a NASDAQ test ticker** in `research/bf_zero/universe.csv` (391 test-ticker symbol-days; +46.8R on one synthetic
-  day) — ex-test-ticker TEST = −0.032R; (2) the pass-1 builder's `BFZ_SLIP=0` broke at prior close × 1.000, not × 1.003;
-  (3) under the engine's own scan rule (`red_to_green.detect` keeps scanning after a floor-failing break; the studies took the
-  first break only) the book is **−0.027/−0.012/−0.102 R**, 9/21 months green. The first-break rule is +0.062/+0.207/−0.042,
-  carried by two months. Capacity would have been ~$500/month anyway (`H/F6_sizing`, `I/`).
-- **Standing rules from it**: exclude `^Z[A-Z]ZZT$` and any symbol absent from `daily_bars` from every research universe;
-  name the scan rule (first-break vs keep-scanning) on every level-break table; an independent rebuild is REQUIRED before an
-  engine is armed, even for a dry run.
-- **What exists**: `trading/red_to_green.py` (spec; ten tests), `HodBreakEngine(book='red_to_green')` (the book switch —
-  `[R2G]` tag, strategy `red_to_green`, PDR universe screen; `tests/test_red_to_green_engine.py`), `Config().red_to_green_cfg`,
-  `--r2g`, `scripts/hod_break_{eod_check,miss_audit,deadman_flat}.py --book red_to_green`. All inert while
-  `red_to_green.enabled: false`. Re-enable only after a NEW pre-registered study clears PLAN §1's gates AND its independent
-  rebuild agrees trade by trade.
-
-## Strategy 4: HOD-break — **CLOSED 2026-09-18** (`hod_break.enabled: false`, effective next boot; `--hod` in the unit file is inert like `--r2g`)
-- The causal-filter study REPORT §6b(3) demanded (`research/bf_zero/CAUSAL_FILTER_PREREG.md` → `CAUSAL_FILTER_REPORT.md`, commit 1be436e): 13 signal-minute features, 5 survived the pre-committed tercile rule (entry minute, drive minutes, SPY 5-min return, rv_profile, breakout-bar volume), **0 of 12 cells past G1** — best cell −0.126R net (veto low breakout-bar volume) vs the +0.15R ship bar; TEST never read. The honest baseline is **−0.04R GROSS** on 15,656 live-config signals, so cost is not the story; permutation p 0.025 says the features carry ~+0.09R of real information where +0.36R is needed. Forward dry run (9/14–9/18, 68 signals → 31 booked): **−0.454R/trade, −14.1R**; the best filter makes it worse. MDE 0.06–0.23R → a measured negative, not a power failure. 439 cells cumulative on this line. The engine, tests and parity work stay in the tree as instrumentation; the OFI/order-flow confirmation plan is moot without a book to filter. Re-open only behind a NEW pre-registration (the one lead the PREREG forbade itself: a decile-level middle-bucket veto on entry minute — a post-hoc shape, treat with suspicion).
-- History below kept for the record. Built 2026-09-13 overnight from the clean-sheet study; DRY RUN from 2026-09-14 — **EDGE REFUTED 2026-09-15 (REPORT §6b): the study population was a look-ahead (days the BF scanner's cache had flagged as movers); on the honest SIP-tape population the live-config book is −0.03/−0.01/+0.02R. No go-live. Square-one study 9/16 (`research/bf_zero2/REPORT.md`, whole PIT universe on the SIP tape, 26 family configs, net of costs, causal floor): NOTHING positive beyond noise — no 1-minute breakout/pullback family has an edge on ≥5%-range days at 4 concurrent. Intraday-breakout line CLOSED on this universe; engine stays dry as instrumentation only.**
-
-```bash
-journalctl -u onemil-trader | grep "\[HOD"          # [HOD] engine gates / [HOD DRY] WOULD BUY / BUY / FILLED / EXIT / FORCE CLOSE
-python3 scripts/build_hod_volume_profile.py         # nightly 23:00 UTC cron → cache.db hod_volume_profile
-```
-- **Origin**: owner 9/13 "start from scratch, clean sheet, 5+ trades/week, 1:2 R:R". Pre-registered study `research/bf_zero/` (DESIGN.md → REPORT.md): whole point-in-time market (647,796 symbol-days, delisted incl.), 8 entry families × 4 exits, old filters only as hypothesis splits. The Cameron flag has NO edge on the whole market at any exit. Survivor: the HOD-break.
-- **The rule (ONE spec, `trading/hod_break.py`, `HodBreakParams` = the config block)**: stock ≥ 5% above its 09:30 open; relative volume `rv_profile` = cum volume ÷ (ADV20 × clock fraction) in [1, 5); ≥ 5 closed 1-min bars all within 4% of the running high-of-day; a bar's high reaches the HOD → capped limit BUY at HOD × 1.006 (no chase: ask above cap = skip); stop = consolidation low (≥ 1% of price); target = +2R as a resting limit (fills on a bar CLOSE); first-come 12/day (owner 9/14; study reference 8), 4 concurrent, no entries after 14:00 (owner 9/14), flat 15:55, price ≥ $20 (`hod_break.min_price: 20.0` — the 9/14 spread study: $20–50 +0.33..+0.38R vs $5–20 +0.04..+0.28R in all three splits; the old $20 CAP was backwards, a $20 FLOOR is the rule. "≥ $5" in earlier notes was stale — corrected 9/19 after hod_frames5 confirmed the dry run and every study share the $20 population).
-- **Honest numbers (REPORT.md §6, the EXACT live spec re-simulated: next-open capped fill, close-fill target, 8/day, 4 concurrent, price ≥ $5)**: TRAIN 2025 +0.30R (19/wk, 39/53 weeks green) / VAL Jan–May 26 +0.27R (23/wk, 19/22) / TEST Jun–Sep 26 +0.33R (27/wk, 13/14, worst week −3R), WR 48–50%. Without the $5 floor: +0.21/+0.21/+0.23R at 35–37/wk. ~9R/week on TEST. Relative tool, never a forecast. The parity sim with the exact live fill model (`spec_sim.py`) and the unbiased 10%-symbol sample are the two confirmations (§6/§7).
-- **Live engine `trading/hod_break_engine.py`**: scanner mover hook on the TRUE 09:30 open (`scanner/realtime_scanner.py`, never `intraday_change_pct`), bar-stream handler id `hod_break`, backfill via `get_1min_bars_multi`; entry = `submit_bracket_order` (limit at the cap, TP +2R, SL consolidation low) — the broker legs ARE the exits, polled each tick (no StopMonitor watch → no cross-strategy collision); DB-derived per-day cap; kill rails from realized P&L (fail closed); 75 s unfilled → cancel; 15:55 flat cancels legs then `close_position`; `sync_positions()` at boot. Tick submitted UNCONDITIONALLY (outlives ORB's 15:45 latch — the SWVL lesson).
-- **Config** `config.yaml hod_break.{enabled, dry_run, risk_usd, daily_kill_usd, weekly_kill_usd, max_notional_usd, min_price, min_adv20, max_spread_bps, order_timeout_s, + the HodBreakParams knobs}`; `Config().hod_break_cfg`. Service runs `--hod`. **State 9/14: enabled + dry_run** → `[HOD DRY] WOULD BUY` telegrams, zero orders. Go-live = `dry_run: false` + restart, owner word only; start `risk_usd` 100.
-- **Rollback**: `enabled: false` + restart (zero state). Tests: `tests/test_hod_break.py` (17), `tests/test_hod_break_engine.py`, `tests/test_hod_break_parity.py`, `tests/test_hod_break_replay.py` (the engine through the live seams vs the spec), `tests/test_hod_volume_profile.py`.
-- **Parity REVIEW 2026-09-15 evening (nine agents, one per backtest step; owner: "prove tomorrow's trade is identical")** — fixed the same evening: TP re-anchor now tracks the NEW order id (`replaced_by` followed everywhere; before, target fills were invisible and 15:55 would have sold shares we no longer held); order life 10 s enforced from the drain loop + canceled when the symbol's next bar closes (was really 60–120 s); orders adopted by OUR client_order_id only (never the owner's manual order); 15:55 flat cancels and READS the legs before selling only `open_qty` (a leg fill in the race is booked, never sold twice — no short, never the owner's shares), partial fills booked by quantity, close order id persisted, `reconcile_pending_exits` at boot, unverified exits block entries; ONE book rule `trading.hod_break.run_book` (causal slot freeing, symbol tie-break) for spec_sim/book_sim/EOD check and the engine (pending/exits resolved before the cap check, a minute's bars evaluated in symbol order); StopMonitor sends subscriptions after EVERY connect (alpaca-py only does it in `_run_forever`), `needs_refill` cleared only by a non-empty REST refill, outage seen at bar arrival, 120 s no-bars rail, once-a-day REST reconcile of every streamed symbol from 09:36, updated bars merged with a rescan, boot at/after 09:30 backfills; calendar-driven flat/last entry (early closes; fail closed without the calendar); dead-man cron every 5 min 19–21 UTC deciding from the calendar, booking leg fills first. Lifecycle e2e on a fake broker: `tests/fakes/fake_alpaca_broker.py`, `tests/integration/test_hod_break_paper_orders.py -m lifecycle` (a real paper run needs a PK paper key — none exists; the "ORB paper" keys are the live keys). STILL OPEN on the study side: 45% of the study's symbol-days came from Databento EQUS.MINI (one publisher, 1–10% of SIP volume) and could never signal → re-fetch + re-sim running (REPORT §6a); touch-only breaks (2.1% of live signals, all −1R) are outside the study population → `break_through` decision after the re-sim. Honest expectation (REPORT §11): +0.20..+0.30R/trade, 25–30 trades/wk, $500–800/wk at $100 risk; the live measurables in REPORT §12 are printed by the EOD check.
-- **Parity pass 2026-09-15 (owner: "1000% identical to the backtest")**: the engine STREAMS the universe — every daily_bars name with prev close ≥ `universe_min_prev_close` (17) and ADV20 ≥ 100K (from daily_bars, `load_adv20_from_daily_bars`, ONE definition shared with the audit) is subscribed at session start with one websocket message (`StopMonitor.subscribe_bars_many`, ~3,600 names, light handlers = one bar dict per event, no rolling window; the engine keeps a fixed 390×5 array per symbol). The scan hook (`admit_above_open_pct` 3.5) is a fallback only. First break only (`stale_break` — never a later break), dedicated bar-drain thread (seconds after the close), order life 20 s (spec: next open or never), take-profit re-anchored to the real fill, notional cap 10,500 (must not bind; a binding cap is a WARNING), websocket reconnect after the open re-backfills every candidate, backfill chunked by 200. `research/bf_zero/REPORT.md` §10 = the live-vs-spec deviation table (rows that cannot be identical: TP leg fills on wicks — favours live; stop/flat slippage — costs). Daily parity number: `python3 scripts/hod_break_miss_audit.py` (spec over the whole universe vs the journal; the "since the stream started" line). First live run 9/15: the pre-fix engine had missed 37 of 44 spec signals; streamed 4 of 4.
+**ORB do-NOTs**: enable with empty `ALPACA_ORB_API_KEY`; refit `adaptive_mults`; remove the Q5 cap; disable
+`filter.skip_q1` without `docs/orb_research_apr_2026.md`; tighten the spread gate below 150 bps
+(`research/orb_spread_gate_verdict.md`); add an LLM catalyst-quality filter (REFUTED); map wrapper news to
+underlyings (REFUTED); re-litigate anchor dedup from the CIFG/CIFU anecdote (tested, fails the bar).
 
 # Running Backtests
-
-## Bull Flag Backtests
-
-### Single symbol
+## Bull flag — TWO stages, ONLY Stage 2 is reportable
 ```bash
-python backtest.py PLYX 2026-03-13 --verbose
+python batch_backtest.py --start 2026-01-01 --end 2026-03-31 --build-cache   # Stage 1: raw movers → cache (NEVER report)
+python batch_backtest.py --start 2026-01-01 --end 2026-03-31                 # Stage 2: production filters (<1s)
+python backtest.py PLYX 2026-03-13 --verbose                                 # single symbol
 ```
+Always `--capital 50000 --risk 2000 --max-shares 10000`. Stage 2 is a RELATIVE tool for A/B comparisons, never a
+P&L forecast (UD scaling and 6 structural BT/live drifts are unmodeled; regime sizing modeled since 7/4,
+`BT_REGIME_SIZING=0` for old comparisons). The only honest forecast is accumulated LIVE data. If the numbers don't
+match what the owner expects, question YOUR methodology first. Never measure a sizing cap post-hoc on a Stage-2 CSV.
+Every ORB CSV goes through `trading/orb_csv.read_orb_csv` (ticker `NA`). ORB BT: `study_orb_pipeline_static_lock.py`
+on the entered-inclusive features CSV (older `orb_features_*.csv::pnl` scripts are NOT production-parity).
+MACD: `python macd_wave_backtest.py --start 2025-01-01 --end 2026-03-27`.
 
-### Batch backtest — TWO-STAGE WORKFLOW (CRITICAL)
-
-**The backtest is a two-stage process. You MUST run both stages and ONLY report Stage 2 numbers.**
-
-#### Stage 1: Build cache (broad, 10% threshold)
-```bash
-# --build-cache auto-enables --monthly chunking
-python batch_backtest.py --start 2026-01-01 --end 2026-03-31 --build-cache
-```
-- Finds ALL movers with 10%+ intraday range
-- Stores raw unfiltered trades in `data/bull_flag_cache_e50_x30.csv`
-- These numbers are RAW/UNFILTERED — **NEVER report these as backtest results**
-
-#### Stage 2: Run filtered backtest (RELATIVE tool — NOT a P&L forecast)
-```bash
-# Default behavior — reads from cache, applies production filters from config.yaml
-python batch_backtest.py --start 2026-01-01 --end 2026-03-31
-```
-- Reads from cache, applies: 20% threshold, 200K volume, leveraged ETF filter, max 3 concurrent, $5K daily loss limit, risk tiers, **buying-power ceiling** (`bt_buying_power_usd`, added 2026-05-14)
-- Takes <1 second (reads from cache), so there is ZERO reason to skip this step
-
-**Stage 2 is a RELATIVE tool, not a P&L forecast.** It models *some* of the
-live sizing/filter stack but NOT all of it. Parity status:
-- **Regime sizing (A/B/C1/C2)**: MODELED as of 2026-07-04 (assumption-ledger
-  fix) — day-level multiplier + C2-day skip via `trading/regime_helpers`,
-  applied before the daily-loss accumulator like live. `BT_REGIME_SIZING=0`
-  restores pre-fix behavior for old relative comparisons (verified
-  byte-identical: $31,864.54/74 trades on 2025-01→2026-07-02).
-- **UD scaling** (SPY up/down-volume euphoria guard): still live-only.
-- Plus the 6 structural BT/LIVE drift sources in the
-  `project_bull_flag_drift_findings` memory (20% threshold mismatch,
-  scan_results bug, entry latency, exit divergence, …).
-
-→ Stage 2 is valid for **feature A/B comparisons** ("does filter X help vs
-not-X?") — the unmodeled layers cancel in the diff. It is **NOT** valid as
-an absolute P&L projection. The only honest P&L forecast is accumulated
-**LIVE** data. Do not tell the user "BT says we'll make $X".
-
-**NEVER report Stage 1 numbers as results. ALWAYS run Stage 2 after Stage 1.**
-**If your numbers don't match what the user expects, question YOUR methodology first, not the user's memory.**
-
-### Single symbol
-```bash
-python backtest.py PLYX 2026-03-13 --verbose
-```
-
-### Backtest defaults
-- `BacktestRunner(min_price=0.0, skip_midday=True)` — skip midday is the only default filter
-- To override: pass `min_price=5.0` or `skip_midday=False` to `BacktestRunner`
-- Data is cached in SQLite (daily bars + 1-min bars) — first run fetches from Alpaca API, subsequent runs are instant
-
-## MACD Wave Backtests
-
-```bash
-# Default: March 2026
-python macd_wave_backtest.py
-
-# Full 15-month validation
-python macd_wave_backtest.py --start 2025-01-01 --end 2026-03-27
-
-# With winning filters (these are the defaults in macd_wave.yaml)
-python macd_wave_backtest.py --cross-time 3 --macd-min 0.5 --max-price 30 --max-vol 300000
-
-# Without slippage for comparison
-python macd_wave_backtest.py --no-slippage
-
-# W1 scout mode (paper W1, trade W2+)
-python macd_wave_backtest.py --w1-scout --w1-min 5 --max-waves 3
-```
-- Daily bars cached in `daily_bars` table (first run ~5min for full universe, subsequent instant)
-- 1-min bars cached in `intraday_bars_1min` table
-- All filter params configurable via CLI or `macd_wave.yaml`
-
-# Backtest Learnings & Anti-Patterns
-
-## Python output buffering
-When running backtests via `python3 -c "..."`, print() output is BUFFERED until script exits. Use `sys.stdout.flush()` after each print, or run as a script file instead of inline. This has wasted time repeatedly.
-
-## Gap threshold doesn't matter for bull flags
-Changing the intraday range threshold on the cache-build step (3%, 5%, 8%, 10%) produces essentially identical results. The bull flag pattern detector (min_pole_gain_pct) is the real filter, not the daily bar screen — don't waste time re-tuning the cache threshold.
-
-## Overfitting warning
-MACD wave filters were originally tuned on the same 15-month dataset used for validation, with no out-of-sample split. Expect real-world P&L to be a significant haircut off the backtest. When proposing filter changes, push for walk-forward validation (train on one split, test on another).
-
-## Slippage reality vs model
-Bull flag entry slippage on thin stocks runs multiples of the backtest model. When recalibrating, source numbers from the `trades` DB (entry/exit quote telemetry) rather than re-quoting memorized figures — they drift as trades accumulate. Authoritative numbers live in README.md.
-
-## MACD wave P&L is outlier-dependent
-A small number of top trades can drive the majority of total MACD wave P&L. Miss one big winner in a quarter and results look very different — be careful quoting blended P&L without checking the contribution distribution.
+## Backtest learnings
+Gap threshold on the cache build is irrelevant (the pattern detector is the filter). Entry slippage on thin stocks is
+multiples of the model — source numbers from the `trades` DB. Bull-flag and MACD P&L are top-trade dependent: always
+show the contribution distribution. More trades ≠ more edge (re-entry, pole=2, quick exits all rejected).
 
 # CRITICAL: No research claim ships without an independent check
-
-Four false conclusions were reported to the owner in one week (2026-09-13 → 09-16): three "this book works" claims that
-were look-aheads, and one "nothing works" claim that was three bugs in my own scorer. Every one of them was caught by
-the OWNER pushing back, not by my own review. The rule that follows is not optional.
-
+Five false conclusions were reported to the owner in one week (2026-09-13 → 09-18), every one caught by the OWNER.
 **Before ANY research number is put in front of the owner:**
-1. **Independent reimplementation.** A second implementation, written from a prose specification by someone (an agent)
-   who has not read the first implementation, must reproduce the trade set and the P&L. Compare trade by trade on
-   (day, symbol), not in aggregate. Aggregates hide compensating errors. **This catches coding errors and CANNOT catch
-   specification errors** — on 2026-09-16 a faithful reimplementation reproduced a book to 1.6e-7 that was worthless,
-   because the spec it was given contained an unobtainable fill. It is necessary, not sufficient.
-1b. **Obtainability.** Every simulated fill must be a price the market actually offered: a fill inside the bar that fills
-   it (low <= fill <= high), and reachable by an order the live engine would have had resting. The engine's convention is
-   the next bar's open under a cap, never the touch of a level. Report the share of trades whose fill would differ.
-2. **Causality trace.** Every field used in a decision is traced back to its construction and shown to be computable from
-   data at or before the decision bar — including the UNIVERSE the signal is evaluated on. A universe selected with
-   end-of-day information (e.g. "day range >= 5%") needs a causal membership guarantee at the signal bar.
-3. **Price-scale check.** Any rule comparing a daily-file price (Databento, possibly adjusted) with intraday bars (Alpaca,
-   raw) must verify on the actual trades that the two agree for that symbol-day. Splits and dividends silently fabricate
-   setups otherwise.
-4. **Fill realism.** Entry when the bar gaps through the level; a stop hit inside the entry bar; stop slippage; whether the
-   simulated cost double-counts a slip already embedded in the fill price; auction-executed trades must NOT be charged a
-   quoted spread.
-5. **Tail dependence.** Report the result with the top 1% and 5% of trades removed and with winners capped. A book whose
-   edge disappears under a cap is a lottery ticket, and this owner has already rejected one.
-6. **Multiplicity.** Count and report every cell looked at across the whole program, not just the final script.
+1. **Independent reimplementation** from a prose spec by an agent that has not read the first implementation; compare
+   trade by trade on (day, symbol). Catches coding errors, CANNOT catch spec errors.
+1b. **Obtainability.** Every fill is a price the market offered inside the bar that fills it, reachable by an order the
+   engine would have had resting: next bar's open under a cap, never the touch of a level. Report the share that differs.
+2. **Causality trace** for every decision field AND the universe — membership must be knowable at the signal bar.
+3. **Price-scale check** daily (possibly adjusted) vs intraday (raw) on the actual trades; unadjusted corporate actions
+   fabricate multi-day books. |t| > 6 on any daily cell, one trade > +500% / < −80%, "flagged, not adjusted" → NOT
+   reportable until resolved. Read every report's own caveats as an adversary before relaying its headline.
+4. **Fill realism and cost.** Gap-through entries, stops inside the entry bar, stop slippage, no double-charged slip,
+   no quoted spread on auction fills. **Cost is charged from measured per-trade NBBO at the entry minute, never a
+   band** (the band table turned a published +0.3R book into −0.62R; the minute-of-day half-spread table is valid
+   09:37–14:01 only). EQUS.MINI quote schemas are never used for spread, cost or order-flow work.
+5. **Tail dependence.** Report ex-top-1%/5% and winner-capped. Edge that dies under a cap is a lottery ticket.
+6. **Multiplicity.** Count every cell across the whole programme (1,252 on the HOD line as of frames16).
+7. **Statistics.** Day-clustered SE beside iid on any day-clustered book; TRAIN edge same-signed in both TRAIN halves;
+   count-matched green-week null; placebo decomposition (universe bound / same name-day other hour / signal);
+   availability rail (≥ 80% coverage, ≤ 5pp winner/loser missingness gap, else VOID); TEST sealed until the pass bar
+   is cleared on VAL. PREREG + FREEZE before scoring, always.
 
-**Phrasing rule.** "No edge exists" is never a supported conclusion. The supported conclusion is "no edge was detectable
-in THIS universe, at THIS horizon, at THIS book size, over THIS window, at THIS cost" — and the power of the test (the
-smallest effect it could have seen) must be stated alongside it. At 4 concurrent positions the standard error per trade
-is larger than most published effects; a null at 4 slots says almost nothing.
+**Phrasing rule.** "No edge exists" is never a conclusion; state universe, horizon, book size, window, cost, and the
+MDE. A null is a claim about MY test first — never report a closure without an adequacy review, never end a turn on
+one. A research gate is for claims, not capital: positive point estimate + mechanism + bounded downside + resolves in
+a quarter = run it live at minimum size; FREQUENCY, not confidence, is the gating quantity. Short is a valid move.
 
 # Interactive Sessions
-* I'm here for you to answer questions and clarify ambiguous points/logic
-* **Bug Prevention Protocol**:
-  - Whenever there's a bug, write BOTH unit tests AND integration tests
-  - Unit test: Isolate the specific component that failed
-  - Integration test: Validate the full data flow that exposed the bug
-  - This ensures bugs can NEVER happen again at any level
+The owner answers questions and clarifies logic. Decide testable questions yourself with a pre-committed rule; never
+hand the owner a menu. Daily brief across books. Fix money-losing defects immediately or pause the book.
