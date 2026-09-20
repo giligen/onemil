@@ -17,6 +17,11 @@ D = f'{ROOT}/research/orb_short'
 F7 = ['gap_pct', 'range_total_volume', 'range_avg_bar_range_pct', 'range_size_pct',
       'price_vs_20d_high_pct', 'prev_day_close_position', 'range_close_position']
 RISK, N_SLOT = 375.0, 8
+# Cell C (PREREG "Cell C"): chase-tolerant stop entry, fill = next bar's open capped at
+# range_low*(1-100bps).  --cell c reads sigC.csv (built by buildC.py); everything else identical.
+CELL = 'c' if '--cell' in sys.argv and sys.argv[sys.argv.index('--cell') + 1] == 'c' else 'ab'
+SIGF = 'sigC.csv' if CELL == 'c' else 'sig.csv'
+TAGN = ('1,273', '1,273') if CELL == 'c' else ('1,271', '1,272')
 
 
 def clus(x, days):
@@ -103,7 +108,8 @@ def green_null(d, reps=500, seed=7):
 
 
 def main():
-    s = read_orb_csv(f'{D}/sig.csv')
+    s = read_orb_csv(f'{D}/{SIGF}')
+    print(f'[cell] {CELL} · signals from {SIGF}', flush=True)
     c = read_orb_csv(f'{D}/ctl.csv')
     nb = pd.read_csv(f'{D}/nbbo_short.csv', dtype={'day': str, 'symbol': str},
                      keep_default_na=False, na_values=['']).drop_duplicates(['day', 'symbol', 'm'])
@@ -128,7 +134,7 @@ def main():
     c['cost'] = ce + cx
     c = book(c)
 
-    print('\n=== STAGE A (cell 1,271) — raw short breakdown vs matched control ===')
+    print(f'\n=== STAGE A (cell {TAGN[0]}) — raw short breakdown vs matched control ===')
     for sp in ('TRAIN', 'VAL'):
         print(line(f'A raw {sp}', f[f.split == sp]))
         print(line(f'A control {sp}', c[c.split == sp]))
@@ -185,7 +191,7 @@ def main():
     bsel = sel[(~sel.veto) & (sel.filled == 1)].copy()
     bsel = bsel.merge(f[['day', 'symbol', 'cost', 'imp']], on=['day', 'symbol'], how='left')
     bsel = book(bsel)
-    print('\n=== STAGE B (cell 1,272) — selection ===')
+    print(f'\n=== STAGE B (cell {TAGN[1]}) — selection ===')
     for sp in ('TRAIN', 'VAL'):
         print(line(f'B {sp}', bsel[bsel.split == sp]))
     for h in ('TRAIN_H1', 'TRAIN_H2'):
@@ -202,8 +208,9 @@ def main():
     ctlv = c[c.split == 'VAL']
     print(f'B VAL netR − A control VAL netR = '
           f'{bv.netR.mean() - ctlv.netR.mean():+.3f} R')
-    bsel.to_csv(f'{D}/book_stage_b.csv', index=False)
-    f.to_csv(f'{D}/book_stage_a.csv', index=False)
+    sfx = '_cellC' if CELL == 'c' else ''
+    bsel.to_csv(f'{D}/book_stage_b{sfx}.csv', index=False)
+    f.to_csv(f'{D}/book_stage_a{sfx}.csv', index=False)
 
 
 if __name__ == '__main__':

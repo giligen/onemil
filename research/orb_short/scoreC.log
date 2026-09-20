@@ -1,0 +1,29 @@
+[cell] c · signals from sigC.csv
+[cost] measured legs 3,732/3,742 · global median half-spread 11.9 bps
+
+=== STAGE A (cell 1,273) — raw short breakdown vs matched control ===
+A raw TRAIN                  n=1250 netR=+0.002 iid_se=0.043 cl_se=0.170 t=+0.01 MDE=0.475 ex1%=-0.070 ex5%=-0.228 cap3R=-0.069 $10k=-2,042 $50k=-10,150
+A control TRAIN              n= 932 netR=-1.481 iid_se=0.107 cl_se=0.156 t=-9.50 MDE=0.436 ex1%=-1.560 ex5%=-1.667 cap3R=-1.520 $10k=-24,335 $50k=-122,160
+A raw VAL                    n= 621 netR=+0.058 iid_se=0.059 cl_se=0.161 t=+0.36 MDE=0.450 ex1%=-0.013 ex5%=-0.175 cap3R=-0.016 $10k=+2,438 $50k=+12,244
+A control VAL                n= 475 netR=-1.602 iid_se=0.189 cl_se=0.235 t=-6.83 MDE=0.657 ex1%=-1.671 ex5%=-1.782 cap3R=-1.623 $10k=-12,172 $50k=-61,124
+A raw TRAIN_H1               n= 758 netR=+0.095 iid_se=0.055 cl_se=0.273 t=+0.35 MDE=0.764 ex1%=+0.027 ex5%=-0.127 cap3R=+0.029 $10k=+3,277 $50k=+16,517
+A raw TRAIN_H2               n= 492 netR=-0.142 iid_se=0.067 cl_se=0.120 t=-1.18 MDE=0.336 ex1%=-0.227 ex5%=-0.385 cap3R=-0.220 $10k=-5,319 $50k=-26,667
+A raw VAL no-SSR             n= 282 netR=-0.030 iid_se=0.094 cl_se=0.170 t=-0.18 MDE=0.475 ex1%=-0.100 ex5%=-0.271 cap3R=-0.112 $10k=-1,130 $50k=-5,705
+A raw VAL no-wrapper         n= 577 netR=+0.037 iid_se=0.058 cl_se=0.139 t=+0.26 MDE=0.388 ex1%=-0.027 ex5%=-0.180 cap3R=-0.020 $10k=+1,997 $50k=+10,038
+
+fill rate: 1871/2615 = 71.5%  | gap-through no-fills 677  | SSR share (signals) 58.3%  | SSR share (fills) 47.4%  | wrapper share (fills) 7.9%  | imputed-cost share 0.5%
+
+[stage B] TRAIN signs: {'gap_pct': -1, 'range_total_volume': 1, 'range_avg_bar_range_pct': -1, 'range_size_pct': -1, 'price_vs_20d_high_pct': 1, 'prev_day_close_position': 1, 'range_close_position': -1}
+[stage B] TRAIN quintile cutoffs: [-0.290465, -0.07304, 0.092122, 0.31831]
+[stage B] picks 1260 · vetoed 757 (pdr 631, range-size 147, g1 664) · no-fill picks 373
+
+=== STAGE B (cell 1,273) — selection ===
+B TRAIN                      n= 174 netR=-0.045 iid_se=0.130 cl_se=0.133 t=-0.33 MDE=0.373 ex1%=-0.159 ex5%=-0.318 cap3R=-0.147 $10k=-25 $50k=-96
+B VAL                        n= 138 netR=-0.139 iid_se=0.114 cl_se=0.146 t=-0.96 MDE=0.408 ex1%=-0.178 ex5%=-0.352 cap3R=-0.187 $10k=-885 $50k=-4,422
+B TRAIN_H1                   n=  70 netR=+0.114 iid_se=0.251 cl_se=0.250 t=+0.46 MDE=0.701 ex1%=-0.081 ex5%=-0.268 cap3R=-0.081 $10k=+629 $50k=+3,176
+B TRAIN_H2                   n= 104 netR=-0.151 iid_se=0.136 cl_se=0.142 t=-1.07 MDE=0.397 ex1%=-0.212 ex5%=-0.352 cap3R=-0.191 $10k=-654 $50k=-3,273
+B VAL no-SSR                 n=  67 netR=-0.219 iid_se=0.185 cl_se=0.227 t=-0.97 MDE=0.636 ex1%=-0.301 ex5%=-0.444 cap3R=-0.291 $10k=-812 $50k=-4,087
+B VAL no-wrapper             n= 134 netR=-0.134 iid_se=0.117 cl_se=0.146 t=-0.92 MDE=0.409 ex1%=-0.174 ex5%=-0.354 cap3R=-0.184 $10k=-794 $50k=-3,966
+
+VAL: fills 138 over 22 weeks = 6.27/wk · green-week 27.3% vs count-matched null 44.8% · $10k/wk -40 · $50k/wk -201 · wrapper 2.9% · SSR 51.4% · imputed-cost 1.4%
+B VAL netR − A control VAL netR = +1.463 R
