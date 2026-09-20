@@ -1,0 +1,146 @@
+=== STATUS MIX ===
+{'ok': 6315, 'regsho': 461, 'no_bars': 151, 'doji': 93}
+
+### 1x TRAIN combined
+  GROSS R/trade=+0.0668 (iid t +0.45)  |  avg cost 1.029R/trade
+  n=455 days=250 fills/day=1.8  net R/trade=-0.9620 (iid SE 0.1587, t -6.06 | clustered SE 0.1564, t -6.15) MDE=0.445R
+  WR=10.5% avgW=+7.80R avgL=-1.99R  ex-top1%=-1.1002R ex-top5%=-1.5337R top5 P&L share=46.0% longest gap between >=3R winners=5wk
+  green weeks 24.5% vs null 49.8% (p=1.000)  P&L $-58,747  MDD $-59,304
+
+### 1x TRAIN long
+  GROSS R/trade=+0.1365 (iid t +0.69)  |  avg cost 0.936R/trade
+  n=270 days=187 fills/day=1.4  net R/trade=-0.7991 (iid SE 0.1992, t -4.01 | clustered SE 0.2012, t -3.97) MDE=0.558R
+  WR=10.7% avgW=+8.13R avgL=-1.87R  ex-top1%=-0.9171R ex-top5%=-1.3549R top5 P&L share=65.9% longest gap between >=3R winners=12wk
+  green weeks 20.8% vs null 49.9% (p=1.000)  P&L $-35,870  MDD $-40,911
+
+### 1x TRAIN short
+  GROSS R/trade=-0.0350 (iid t -0.15)  |  avg cost 1.165R/trade
+  n=185 days=145 fills/day=1.3  net R/trade=-1.1998 (iid SE 0.2600, t -4.61 | clustered SE 0.2562, t -4.68) MDE=0.729R
+  WR=10.3% avgW=+7.29R avgL=-2.17R  ex-top1%=-1.3673R ex-top5%=-1.8549R top5 P&L share=82.0% longest gap between >=3R winners=8wk
+  green weeks 13.5% vs null 50.0% (p=1.000)  P&L $-22,878  MDD $-23,039
+
+### 1x TRAIN_H1 combined
+  GROSS R/trade=-0.0480 (iid t -0.24)  |  avg cost 0.995R/trade
+  n=222 days=122 fills/day=1.8  net R/trade=-1.0428 (iid SE 0.2153, t -4.84 | clustered SE 0.2108, t -4.95) MDE=0.603R
+  WR=9.9% avgW=+7.54R avgL=-1.99R  ex-top1%=-1.1890R ex-top5%=-1.6376R top5 P&L share=83.4% longest gap between >=3R winners=5wk
+  green weeks 25.9% vs null 49.6% (p=0.997)  P&L $-36,348  MDD $-36,905
+
+### 1x TRAIN_H1 long
+  GROSS R/trade=+0.0655 (iid t +0.25)  |  avg cost 0.936R/trade
+  n=137 days=93 fills/day=1.5  net R/trade=-0.8704 (iid SE 0.2697, t -3.23 | clustered SE 0.2575, t -3.38) MDE=0.756R
+  WR=10.9% avgW=+7.32R avgL=-1.88R  ex-top1%=-1.0268R ex-top5%=-1.4228R top5 P&L share=95.4% longest gap between >=3R winners=12wk
+  green weeks 19.2% vs null 49.8% (p=1.000)  P&L $-19,207  MDD $-24,248
+
+### 1x TRAIN_H1 short
+  GROSS R/trade=-0.2311 (iid t -0.76)  |  avg cost 1.090R/trade
+  n=85 days=64 fills/day=1.3  net R/trade=-1.3207 (iid SE 0.3566, t -3.70 | clustered SE 0.3507, t -3.77) MDE=0.999R
+  WR=8.2% avgW=+8.01R avgL=-2.16R  ex-top1%=-1.4491R ex-top5%=-1.9844R top5 P&L share=100.0% longest gap between >=3R winners=8wk
+  green weeks 11.5% vs null 49.7% (p=1.000)  P&L $-17,142  MDD $-16,573
+
+### 1x TRAIN_H2 combined
+  GROSS R/trade=+0.1761 (iid t +0.79)  |  avg cost 1.061R/trade
+  n=233 days=128 fills/day=1.8  net R/trade=-0.8850 (iid SE 0.2327, t -3.80 | clustered SE 0.2306, t -3.84) MDE=0.652R
+  WR=11.2% avgW=+8.02R avgL=-2.00R  ex-top1%=-1.0618R ex-top5%=-1.4830R top5 P&L share=64.0% longest gap between >=3R winners=4wk
+  green weeks 22.2% vs null 49.7% (p=1.000)  P&L $-22,399  MDD $-24,472
+
+### 1x TRAIN_H2 long
+  GROSS R/trade=+0.2095 (iid t +0.71)  |  avg cost 0.935R/trade
+  n=133 days=94 fills/day=1.4  net R/trade=-0.7257 (iid SE 0.2949, t -2.46 | clustered SE 0.3117, t -2.33) MDE=0.826R
+  WR=10.5% avgW=+9.00R avgL=-1.87R  ex-top1%=-0.8832R ex-top5%=-1.2848R top5 P&L share=91.0% longest gap between >=3R winners=5wk
+  green weeks 22.2% vs null 49.8% (p=0.999)  P&L $-16,663  MDD $-18,948
+
+### 1x TRAIN_H2 short
+  GROSS R/trade=+0.1317 (iid t +0.38)  |  avg cost 1.229R/trade
+  n=100 days=81 fills/day=1.2  net R/trade=-1.0969 (iid SE 0.3750, t -2.93 | clustered SE 0.3697, t -2.97) MDE=1.051R
+  WR=12.0% avgW=+6.87R avgL=-2.18R  ex-top1%=-1.2949R ex-top5%=-1.7459R top5 P&L share=95.3% longest gap between >=3R winners=7wk
+  green weeks 14.8% vs null 50.0% (p=1.000)  P&L $-5,736  MDD $-9,663
+
+### 1x VAL combined
+  GROSS R/trade=+0.5240 (iid t +2.07)  |  avg cost 1.107R/trade
+  n=204 days=102 fills/day=2.0  net R/trade=-0.5826 (iid SE 0.3306, t -1.76 | clustered SE 0.3573, t -1.63) MDE=0.926R
+  WR=16.7% avgW=+7.36R avgL=-2.17R  ex-top1%=-0.7368R ex-top5%=-1.1607R top5 P&L share=50.1% longest gap between >=3R winners=4wk
+  green weeks 40.9% vs null 50.0% (p=0.853)  P&L $11,375  MDD $-14,620
+
+### 1x VAL long
+  GROSS R/trade=+0.9543 (iid t +2.48)  |  avg cost 1.125R/trade
+  n=115 days=75 fills/day=1.5  net R/trade=-0.1711 (iid SE 0.4922, t -0.35 | clustered SE 0.5164, t -0.33) MDE=1.379R
+  WR=19.1% avgW=+8.38R avgL=-2.19R  ex-top1%=-0.3460R ex-top5%=-0.7105R top5 P&L share=60.7% longest gap between >=3R winners=6wk
+  green weeks 40.9% vs null 50.5% (p=0.855)  P&L $21,538  MDD $-7,593
+
+### 1x VAL short
+  GROSS R/trade=-0.0319 (iid t -0.11)  |  avg cost 1.083R/trade
+  n=89 days=65 fills/day=1.4  net R/trade=-1.1144 (iid SE 0.4084, t -2.73 | clustered SE 0.4110, t -2.71) MDE=1.144R
+  WR=13.5% avgW=+5.49R avgL=-2.14R  ex-top1%=-1.2386R ex-top5%=-1.7293R top5 P&L share=99.3% longest gap between >=3R winners=8wk
+  green weeks 13.6% vs null 50.0% (p=1.000)  P&L $-10,163  MDD $-19,251
+
+### 4x TRAIN combined
+  GROSS R/trade=+0.0127 (iid t +0.11)  |  avg cost 1.025R/trade
+  n=738 days=250 fills/day=3.0  net R/trade=-1.0127 (iid SE 0.1291, t -7.85 | clustered SE 0.1332, t -7.60) MDE=0.362R
+  WR=10.6% avgW=+7.60R avgL=-2.03R  ex-top1%=-1.1422R ex-top5%=-1.5779R top5 P&L share=17.7% longest gap between >=3R winners=4wk
+  green weeks 26.4% vs null 50.0% (p=1.000)  P&L $-183,761  MDD $-188,274
+
+### 4x TRAIN long
+  GROSS R/trade=+0.0259 (iid t +0.18)  |  avg cost 0.982R/trade
+  n=429 days=214 fills/day=2.0  net R/trade=-0.9563 (iid SE 0.1688, t -5.67 | clustered SE 0.1734, t -5.52) MDE=0.473R
+  WR=10.5% avgW=+7.67R avgL=-1.97R  ex-top1%=-1.0819R ex-top5%=-1.5149R top5 P&L share=25.7% longest gap between >=3R winners=8wk
+  green weeks 28.3% vs null 50.2% (p=1.000)  P&L $-107,995  MDD $-113,483
+
+### 4x TRAIN short
+  GROSS R/trade=-0.0056 (iid t -0.03)  |  avg cost 1.085R/trade
+  n=309 days=187 fills/day=1.7  net R/trade=-1.0908 (iid SE 0.2004, t -5.44 | clustered SE 0.2018, t -5.41) MDE=0.562R
+  WR=10.7% avgW=+7.50R avgL=-2.12R  ex-top1%=-1.2611R ex-top5%=-1.6999R top5 P&L share=41.6% longest gap between >=3R winners=7wk
+  green weeks 20.8% vs null 50.0% (p=1.000)  P&L $-75,765  MDD $-74,791
+
+### 4x TRAIN_H1 combined
+  GROSS R/trade=+0.0700 (iid t +0.43)  |  avg cost 0.863R/trade
+  n=371 days=122 fills/day=3.0  net R/trade=-0.7927 (iid SE 0.1709, t -4.64 | clustered SE 0.1790, t -4.43) MDE=0.479R
+  WR=11.3% avgW=+7.60R avgL=-1.86R  ex-top1%=-0.9066R ex-top5%=-1.3473R top5 P&L share=29.6% longest gap between >=3R winners=3wk
+  green weeks 25.9% vs null 49.9% (p=0.997)  P&L $-101,819  MDD $-106,332
+
+### 4x TRAIN_H1 long
+  GROSS R/trade=+0.1638 (iid t +0.76)  |  avg cost 0.828R/trade
+  n=219 days=105 fills/day=2.1  net R/trade=-0.6643 (iid SE 0.2197, t -3.02 | clustered SE 0.2222, t -2.99) MDE=0.616R
+  WR=12.3% avgW=+7.29R avgL=-1.78R  ex-top1%=-0.8076R ex-top5%=-1.1997R top5 P&L share=43.6% longest gap between >=3R winners=8wk
+  green weeks 26.9% vs null 50.1% (p=0.995)  P&L $-54,899  MDD $-60,386
+
+### 4x TRAIN_H1 short
+  GROSS R/trade=-0.0652 (iid t -0.27)  |  avg cost 0.913R/trade
+  n=152 days=89 fills/day=1.7  net R/trade=-0.9778 (iid SE 0.2717, t -3.60 | clustered SE 0.2916, t -3.35) MDE=0.761R
+  WR=9.9% avgW=+8.15R avgL=-1.98R  ex-top1%=-1.1191R ex-top5%=-1.5595R top5 P&L share=82.4% longest gap between >=3R winners=6wk
+  green weeks 14.8% vs null 49.9% (p=1.000)  P&L $-46,920  MDD $-45,946
+
+### 4x TRAIN_H2 combined
+  GROSS R/trade=-0.0452 (iid t -0.28)  |  avg cost 1.190R/trade
+  n=367 days=128 fills/day=2.9  net R/trade=-1.2350 (iid SE 0.1932, t -6.39 | clustered SE 0.1957, t -6.31) MDE=0.541R
+  WR=9.8% avgW=+7.60R avgL=-2.20R  ex-top1%=-1.3801R ex-top5%=-1.8399R top5 P&L share=35.2% longest gap between >=3R winners=4wk
+  green weeks 25.9% vs null 49.9% (p=0.995)  P&L $-81,942  MDD $-92,365
+
+### 4x TRAIN_H2 long
+  GROSS R/trade=-0.1179 (iid t -0.58)  |  avg cost 1.143R/trade
+  n=210 days=109 fills/day=1.9  net R/trade=-1.2609 (iid SE 0.2566, t -4.91 | clustered SE 0.2654, t -4.75) MDE=0.719R
+  WR=8.6% avgW=+8.24R avgL=-2.15R  ex-top1%=-1.4186R ex-top5%=-1.8416R top5 P&L share=59.9% longest gap between >=3R winners=5wk
+  green weeks 29.6% vs null 50.2% (p=0.988)  P&L $-53,097  MDD $-61,713
+
+### 4x TRAIN_H2 short
+  GROSS R/trade=+0.0520 (iid t +0.20)  |  avg cost 1.252R/trade
+  n=157 days=98 fills/day=1.6  net R/trade=-1.2002 (iid SE 0.2946, t -4.07 | clustered SE 0.2802, t -4.28) MDE=0.826R
+  WR=11.5% avgW=+6.95R avgL=-2.26R  ex-top1%=-1.3981R ex-top5%=-1.8354R top5 P&L share=67.2% longest gap between >=3R winners=7wk
+  green weeks 25.9% vs null 49.5% (p=0.997)  P&L $-28,845  MDD $-37,852
+
+### 4x VAL combined
+  GROSS R/trade=+0.7004 (iid t +3.39)  |  avg cost 1.145R/trade
+  n=330 days=102 fills/day=3.2  net R/trade=-0.4449 (iid SE 0.2546, t -1.75 | clustered SE 0.2891, t -1.54) MDE=0.714R
+  WR=18.2% avgW=+7.30R avgL=-2.17R  ex-top1%=-0.5695R ex-top5%=-0.9886R top5 P&L share=20.2% longest gap between >=3R winners=3wk
+  green weeks 50.0% vs null 50.4% (p=0.593)  P&L $8,422  MDD $-43,572
+
+### 4x VAL long
+  GROSS R/trade=+0.9314 (iid t +3.24)  |  avg cost 1.231R/trade
+  n=194 days=95 fills/day=2.0  net R/trade=-0.2998 (iid SE 0.3563, t -0.84 | clustered SE 0.3789, t -0.79) MDE=0.998R
+  WR=19.6% avgW=+7.62R avgL=-2.23R  ex-top1%=-0.4040R ex-top5%=-0.8363R top5 P&L share=26.7% longest gap between >=3R winners=3wk
+  green weeks 45.5% vs null 50.2% (p=0.746)  P&L $34,133  MDD $-25,029
+
+### 4x VAL short
+  GROSS R/trade=+0.3710 (iid t +1.29)  |  avg cost 1.023R/trade
+  n=136 days=82 fills/day=1.7  net R/trade=-0.6519 (iid SE 0.3522, t -1.85 | clustered SE 0.3792, t -1.72) MDE=0.987R
+  WR=16.2% avgW=+6.73R avgL=-2.08R  ex-top1%=-0.8064R ex-top5%=-1.2058R top5 P&L share=73.2% longest gap between >=3R winners=5wk
+  green weeks 19.0% vs null 49.6% (p=1.000)  P&L $-25,711  MDD $-45,553

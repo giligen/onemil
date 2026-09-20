@@ -91,7 +91,9 @@ def stats(t,label,f):
     t_iid=mu/se_iid; t_cl=mu/se_cl if se_cl and se_cl>0 else np.nan
     mde=2.802*sd/np.sqrt(n)
     w=t[t.net_r>0]; l=t[t.net_r<=0]
-    top5=t.nlargest(5,'pnl').pnl.sum()/t.pnl.sum() if t.pnl.sum()!=0 else np.nan
+    posp=t.pnl[t.pnl>0].sum()
+    top5=t.nlargest(5,'pnl').pnl.sum()/posp if posp>0 else np.nan
+    gr=t.gross_r.mean(); gse=t.gross_r.std(ddof=1)/np.sqrt(n)
     k1=max(1,int(np.ceil(0.01*n))); k5=max(1,int(np.ceil(0.05*n)))
     ex1=t.drop(t.nlargest(k1,'net_r').index).net_r.mean()
     ex5=t.drop(t.nlargest(k5,'net_r').index).net_r.mean()
@@ -113,13 +115,14 @@ def stats(t,label,f):
         s=rng.choice([-1,1],size=n)
         nulls.append((pd.Series(pv*s).groupby(wkc).sum()>0).mean())
     nulls=np.array(nulls)
-    d=dict(n=n,days=nd,fills_day=n/nd,net_r=mu,se_iid=se_iid,se_cl=se_cl,t_iid=t_iid,t_cl=t_cl,
+    d=dict(gross_r=gr,gross_t=gr/gse,n=n,days=nd,fills_day=n/nd,net_r=mu,se_iid=se_iid,se_cl=se_cl,t_iid=t_iid,t_cl=t_cl,
            mde=mde,wr=len(w)/n,avg_w=w.net_r.mean() if len(w) else np.nan,
            avg_l=l.net_r.mean() if len(l) else np.nan,top5_share=top5,ex1=ex1,ex5=ex5,
            max_gap_wk=int(gap),green_wk=gw,null_green=float(nulls.mean()),
            p_green=float((nulls>=gw).mean()),pnl=float(t.pnl.sum()),
            mdd=mdd(t.groupby('day').pnl.sum()))
     print(f'\n### {label}',file=f)
+    print(f'  GROSS R/trade={gr:+.4f} (iid t {gr/gse:+.2f})  |  avg cost {t.cost_ps.div(t.R).mean():.3f}R/trade',file=f)
     print(f'  n={n} days={nd} fills/day={d["fills_day"]:.1f}  net R/trade={mu:+.4f} '
           f'(iid SE {se_iid:.4f}, t {t_iid:+.2f} | clustered SE {se_cl:.4f}, t {t_cl:+.2f}) MDE={mde:.3f}R',file=f)
     print(f'  WR={d["wr"]:.1%} avgW={d["avg_w"]:+.2f}R avgL={d["avg_l"]:+.2f}R  '
@@ -144,6 +147,7 @@ def main():
                 x=s[(s.day>=a)&(s.day<=b)]
                 for side in ('combined','long','short'):
                     y=x if side=='combined' else x[x.side==side]
+                    y=y[y.shares>0]
                     res[f'{lev}x|{sp}|{side}']=stats(y,f'{lev}x {sp} {side}',f)
             s.to_csv(f'{D}/book_{lev}x.csv',index=False)
     json.dump(res,open(f'{D}/results.json','w'),indent=1,default=float)
