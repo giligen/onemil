@@ -126,3 +126,6 @@ a quarter = run it live at minimum size; FREQUENCY, not confidence, is the gatin
 # Interactive Sessions
 The owner answers questions and clarifies logic. Decide testable questions yourself with a pre-committed rule; never
 hand the owner a menu. Daily brief across books. Fix money-losing defects immediately or pause the book.
+
+# The cadence bar — the pass bar for every book (owner 2026-09-20)
+Weeks and cycles, not trades: strong week ≥ +5R with median gap ≤ 3 wk / P90 ≤ 6 wk, bleed between strong weeks ≥ −4R at P90, weekly P10 ≥ −2R, ≥ 55% green weeks above the null, ≥ 3 fills/week at the LIVE config, every ≥3R winner obtainable, ≥ 10 cycles per split. Fat tails allowed, rare tails not. Live tripwire pauses a book at the BT P90 gap + 2 weeks without a strong week. Spec: `docs/cadence_bar.md`; scorer `scripts/cadence_bar.py`. PREREG it on every study.
