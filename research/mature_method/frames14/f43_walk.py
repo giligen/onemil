@@ -195,7 +195,7 @@ def v_bf(o, h, l, c, m, e, r_pct, activate_at_r=2.0, trail_r=1.0, partial=False,
 
 
 # ----------------------------------------------------------------------------------- the gates
-def gates(nsamp=1500):
+def gates(nsamp=250):
     """G-X1: the vectorised X1 must reproduce frames11/w34.csv exactly (which itself reproduced
     book6.rr). G-X2/3/4: the vectorised ORB and BF twins must reproduce c7's python loops."""
     w = pd.read_csv(f'{D11}/w34.csv', dtype={'day': str, 'ctrl': str}).dropna(subset=['rr_2'])

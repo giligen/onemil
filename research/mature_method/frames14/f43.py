@@ -160,7 +160,7 @@ def load(cost):
 def geo_frame(w, cost, geo, s):
     """One geometry x one stop width -> a frame with gross %, cost %, net %, in % of ENTRY PRICE."""
     if geo in ('x6', 'x7'):
-        g = w[['day', 'ctrl', 'entry', 'half', 'split', 'entry_cost']].copy()
+        g = w[['day', 'ctrl', 'entry', 'half', 'split', 'entry_cost', 'ctrl_entry_m']].copy()
         g['gross'] = w[f'{geo}_pct']
         if geo == 'x7':
             g['exit_cost'] = 0.0                       # the closing cross: no quoted spread
@@ -172,7 +172,7 @@ def geo_frame(w, cost, geo, s):
         rr = w[f'{geo}_rr_{s}']
         why = w[f'{geo}_why_{s}'].astype(str)
         xm = w[f'{geo}_xm_{s}']
-        g = w[['day', 'ctrl', 'entry', 'half', 'split', 'entry_cost']].copy()
+        g = w[['day', 'ctrl', 'entry', 'half', 'split', 'entry_cost', 'ctrl_entry_m']].copy()
         g['gross'] = rr * s                            # rr x (R/E) x 100 = % of entry price
         g['why'] = why
         free = why.str.replace('pp+', '', regex=False).isin(FREE_WHY)
@@ -211,13 +211,17 @@ def score():
           flush=True)
     # ---- G-X1: the reproduction gate against F34
     g1 = geo_frame(w, cost, 'x1', 2)
-    print(f'\nGATE G-X1: F34 read the +2R bracket at s=2 % as net -0.389 % TRAIN / -0.360 % VAL '
-          f'(imputed cost).', flush=True)
-    for sp, lab in (('TRAIN', 'TRAIN'), ('VAL', 'VAL')):
+    print(f'\nGATE G-X1: F34 read the +2R bracket at s=2 % as GROSS -0.136 % TRAIN (net -0.389 % '
+          f'under the IMPUTED cost; this pass charges the MEASURED one, so only GROSS is a gate).',
+          flush=True)
+    gt = float(g1[g1.split == 'TRAIN'].gross.mean())
+    for sp in ('TRAIN', 'VAL'):
         z = g1[g1.split == sp]
-        print(f'   frames14 gross {z.gross.mean():+.3f} % | cost '
-              f'{(z.entry_cost + z.exit_cost).mean():.3f} % | net {z.net.mean():+.3f} % '
-              f'({lab}, n={len(z):,})', flush=True)
+        print(f'   frames14 gross {z.gross.mean():+.4f} % | measured cost '
+              f'{(z.entry_cost + z.exit_cost).mean():.4f} % | net {z.net.mean():+.4f} % '
+              f'({sp}, n={len(z):,})', flush=True)
+    assert abs(gt - (-0.136)) < 0.01, f'X1 does not reproduce F34 gross (-0.136 vs {gt:.4f})'
+    print('   G-X1 PASSES', flush=True)
     rows = []
     print(f'\n### THE 12 SCORED CELLS — unconditional, no admission rule, % of ENTRY PRICE, '
           f'cost MEASURED (F45)\n', flush=True)
@@ -255,9 +259,7 @@ def score():
              ('13:00-14:01', 780, 842)]
     print(f'{"geo":>4} ' + ' '.join(f'{b[0]:>12}' for b in bands), flush=True)
     for geo in ('x1', 'x2', 'x3', 'x4', 'x5', 'x6', 'x7'):
-        g = geo_frame(w, cost, geo, 2)
-        g['m'] = w.loc[g.index, 'ctrl_entry_m'] if len(g) == len(w) else np.nan
-        gm = w[['ctrl_entry_m']].join(g[['net']], how='inner')
+        gm = geo_frame(w, cost, geo, 2)
         cells = []
         for _, lo, hi in bands:
             z = gm[(gm.ctrl_entry_m >= lo) & (gm.ctrl_entry_m < hi)]

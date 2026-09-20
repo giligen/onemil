@@ -254,7 +254,11 @@ def bf_book(q, p1, col='sp_med', arm=''):
     # the partial leg is marketable and is charged NOTHING today; charge it the ENTRY-minute
     # half-spread (the wider of the two on this book -> conservative). Declared approximation.
     d_part = b.partial_shares.fillna(0).astype(float) * 0.5 * b.sp_e
-    b['pnl_meas'] = b.pnl - d_entry.fillna(0) - d_exit.fillna(0) - d_part.fillna(0)
+    b['d_entry'] = -d_entry.fillna(0)
+    b['d_exit'] = -d_exit.fillna(0)
+    b['d_part'] = -d_part.fillna(0)
+    b['pnl_meas'] = b.pnl + b.d_entry + b.d_exit + b.d_part
+    b['pnl_entry_only'] = b.pnl + b.d_entry
     b['covd'] = b.sp_e.notna() & b.sp_x.notna()
     b['R_booked'] = b.pnl / b.R_dollar
     b['R_meas'] = b.pnl_meas / b.R_dollar
@@ -276,6 +280,19 @@ def bf_book(q, p1, col='sp_med', arm=''):
               f'{z.R_meas.mean():+8.3f} {z.pct_booked.mean():+10.3f} {z.pct_meas.mean():+10.3f}',
               flush=True)
     b.to_csv(f'{D14}/f45_bf_book_{col}.csv', index=False)
+    print(f'  LEG DECOMPOSITION ($): entry {b.d_entry.sum():+,.0f} | exit {b.d_exit.sum():+,.0f} '
+          f'| partial {b.d_part.sum():+,.0f}', flush=True)
+    print(f'  ENTRY LEG ALONE (exit left exactly as shipped — the unambiguous half; a marketable '
+          f'buy at the\n  breakout level pays the ask, and nothing in the book already charges '
+          f'it beyond the flat 50 bps):', flush=True)
+    for sp in ('H1-25', 'H2-25', 'VAL', 'ALL'):
+        z = b if sp == 'ALL' else b[b.half == sp]
+        if not len(z):
+            continue
+        bk2, ms2 = float(z.pnl.sum()), float(z.pnl_entry_only.sum())
+        print(f'    {sp:>6} {len(z):3d}  booked {bk2:>10,.0f} -> entry-measured {ms2:>10,.0f} '
+              f'({(ms2-bk2)/abs(bk2)*100 if bk2 else np.nan:+.1f} %)  R '
+              f'{(z.pnl_entry_only/z.R_dollar).mean():+.3f}', flush=True)
     tot_b, tot_m = float(b.pnl.sum()), float(b.pnl_meas.sum())
     mv = abs(tot_m - tot_b) / abs(tot_b) * 100
     print(f'\n  >>> BF honest number moves {mv:.1f} % '
