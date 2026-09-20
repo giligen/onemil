@@ -115,3 +115,35 @@ loss, the top-5 trades' share of P&L, and the dollar book at **$66,000 equity at
 
 A null here is a claim about THIS test: this universe, this horizon, this book size, this window,
 this cost model. The MDE is printed beside it. TEST stays sealed unless VAL clears the bar.
+
+## Cell D — pre-registered before scoring
+
+SAME picks, SAME direction rule, SAME 09:35-open entry, SAME measured cost (per-leg half-spread
+from `nbbo.csv` / `hs_table.json` + $0.0035/share) — DIFFERENT exit:
+
+- **Stop** = the opposite side of the 09:30–09:35 range (long: range low; short: range high), taken
+  as the high/low of the same five 1-min bars (m 570–574, `open5.parquet`) used for the direction
+  candle. `R = |entry − stop|`.
+- **Skip** picks whose range is < 0.5 % of price (R would be smaller than the spread); the skipped
+  share is reported.
+- **Static lock**: once price reaches `entry ± 1.75 R`, the stop moves to `entry ± 0.5 R` and stays
+  there (never re-widens, never re-tightens further).
+- **No target.** Time exit at the **15:55 close** (m 955) if neither stop/lock is hit.
+- **Intrabar resolution**: identical convention to §1.8 (stop fills at the stop price; gap-through
+  fills at the bar's open if the open is already beyond the level; the lock re-arms only on a CLOSED
+  bar reaching the 1.75R trigger, then the moved stop is checked from the NEXT bar onward — no
+  same-bar arm-and-exit unless the bar's own high/low clears both the trigger and the moved stop).
+- **Sizing** (for $ numbers only): 1 % of $66,000 equity per trade, notional capped at **1×** equity
+  total across concurrently-open positions (admitted in RVOL rank order same as §1.10); positions/day
+  reported.
+- Cell count for the programme: **1,283** (long, short, combined — same three cells as the base
+  book, scored once more under this exit).
+
+**Pass bar (VAL, combined book)**: net R/trade **≥ +0.10** with day-clustered **t ≥ 2.0**; TRAIN
+halves same-signed; **≥ 3 fills/week**. Then `python scripts/cadence_bar.py --trades <cellD.csv>
+--split VAL` and `--split TRAIN` are run on the cell-D trade list (columns `date`, `pnl_R`,
+`symbol`) and both blocks are pasted into the report.
+
+Reported: long / short / combined separately; iid and day-clustered SE; win rate; ex-top-1 % and
+ex-top-5 % as diagnostics (not pass/fail, per Amendment 1); MDE beside any null; the ONE caveat that
+alone could explain the headline. TEST (≥ 2026-06-01) stays sealed — not queried in this run.
