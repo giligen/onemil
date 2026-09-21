@@ -154,8 +154,14 @@ def load_bt_config(yaml_path: str = 'orb.yaml') -> dict:
     out['atr_floor_k'] = float(atr_cfg.get('k', DEFAULT_ATR_K))
     out['scale_enabled'] = _env_bool(
         'ORB_SCALE_OUT', sc_cfg.get('enabled', False))
-    out['scale_frac'] = float(sc_cfg.get('frac', DEFAULT_SCALE_FRAC))
-    out['scale_level_r'] = float(sc_cfg.get('level_r', DEFAULT_SCALE_LEVEL_R))
+    # Research env overrides for the exit variants (2026-09-21, S1 exit pass):
+    # ORB_BT_SCALE_FRAC / ORB_BT_SCALE_LEVEL_R / ORB_BT_LOCK_ARM_R /
+    # ORB_BT_LOCK_STOP_R. Unset = orb.yaml (live parity); set = printed WARNING
+    # in the config banner so a variant book can never pass as production.
+    out['scale_frac'] = float(os.environ.get(
+        'ORB_BT_SCALE_FRAC', sc_cfg.get('frac', DEFAULT_SCALE_FRAC)))
+    out['scale_level_r'] = float(os.environ.get(
+        'ORB_BT_SCALE_LEVEL_R', sc_cfg.get('level_r', DEFAULT_SCALE_LEVEL_R)))
     # 8/30 audit (defect class: silent yaml desync): exit/sizing constants
     # that LIVE reads from orb.yaml but this pipeline hardcoded — same
     # incident class as mults (7/10) and z-params (7/17), closed here for
@@ -163,8 +169,16 @@ def load_bt_config(yaml_path: str = 'orb.yaml') -> dict:
     out['min_stop_pct'] = float(sizing.get('min_stop_pct', MIN_STOP_PCT))
     out['old_pos_ref'] = float(
         sizing.get('old_position_reference_usd', OLD_POS))
-    out['lock_arm_r'] = float(exit_cfg.get('lock_arm_at_r', LOCK_TRIGGER_R))
-    out['lock_stop_r'] = float(exit_cfg.get('lock_stop_r', LOCK_STOP_R))
+    out['lock_arm_r'] = float(os.environ.get(
+        'ORB_BT_LOCK_ARM_R', exit_cfg.get('lock_arm_at_r', LOCK_TRIGGER_R)))
+    out['lock_stop_r'] = float(os.environ.get(
+        'ORB_BT_LOCK_STOP_R', exit_cfg.get('lock_stop_r', LOCK_STOP_R)))
+    _exit_overrides = [k for k in ('ORB_BT_SCALE_FRAC', 'ORB_BT_SCALE_LEVEL_R',
+                                   'ORB_BT_LOCK_ARM_R', 'ORB_BT_LOCK_STOP_R')
+                       if os.environ.get(k)]
+    if _exit_overrides:
+        print(f"WARNING: exit env overrides active {_exit_overrides} — "
+              f"RESEARCH VARIANT, NOT live parity")
     out['exit_slip_bps'] = float(
         exit_cfg.get('exit_slip_bps', EXIT_SLIP_BPS))
     out['force_close_et'] = (os.environ.get('ORB_BT_FORCE_CLOSE_ET')
