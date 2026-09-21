@@ -14,10 +14,10 @@ import pandas as pd
 OUT = Path(__file__).resolve().parent / "out"
 WIDE = OUT / "orb_features_20260920_2142.csv"
 
-w = pd.read_csv(WIDE)
+w = pd.read_csv(WIDE, keep_default_na=False, na_values=[""])  # ticker "NA" is a real symbol
 price = w["entry_price"]
 s1_rebuilt = w[(w.gap_pct >= 3) & (w.gap_pct < 5) & (price >= 3) & (price <= 30)]
-s1_file = pd.read_csv(OUT / "runS1_features.csv")
+s1_file = pd.read_csv(OUT / "runS1_features.csv", keep_default_na=False, na_values=[""])
 key = lambda d: set(zip(d.symbol, d.date))  # noqa: E731
 overlap = len(key(s1_rebuilt) & key(s1_file))
 print(f"S1 reconstruction: rebuilt {len(s1_rebuilt)} file {len(s1_file)} overlap {overlap}")

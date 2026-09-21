@@ -775,3 +775,34 @@ class TestSubmitTimingTelemetry:
         assert slow_warns == []
 
 
+
+
+class TestUntradableSuppression:
+    """NXTT 2026-09-21: Alpaca 42210000 'asset is not tradable' — the scanner
+    re-planned the symbol every cycle and every submit failed (7 ERROR
+    telegrams in 20 min). After the first such rejection the symbol is
+    skipped for the session with one WARNING; other errors do not blacklist."""
+
+    NOT_TRADABLE = ('Failed to submit stop-limit order for NXTT: '
+                    '{"code":42210000,"message":"asset \\"NXTT\\" is not tradable"}')
+
+    def test_not_tradable_suppresses_resubmits(self, executor, mock_alpaca, caplog):
+        plan = _make_plan()
+        mock_alpaca.submit_stop_limit_order.side_effect = AlpacaAPIError(self.NOT_TRADABLE)
+        assert executor.submit_buy_stop_order(plan) is None
+        first_calls = mock_alpaca.submit_stop_limit_order.call_count
+        assert first_calls >= 1
+        assert plan.symbol in executor._untradable_today
+        assert executor.submit_buy_stop_order(plan) is None
+        assert mock_alpaca.submit_stop_limit_order.call_count == first_calls
+        assert any('NOT TRADABLE' in r.message and r.levelname == 'ERROR' for r in caplog.records)
+        assert any('skipped' in r.message and r.levelname == 'WARNING' for r in caplog.records)
+
+    def test_other_errors_do_not_blacklist(self, executor, mock_alpaca):
+        plan = _make_plan()
+        mock_alpaca.submit_stop_limit_order.side_effect = AlpacaAPIError("API down")
+        assert executor.submit_buy_stop_order(plan) is None
+        n1 = mock_alpaca.submit_stop_limit_order.call_count
+        assert plan.symbol not in executor._untradable_today
+        assert executor.submit_buy_stop_order(plan) is None
+        assert mock_alpaca.submit_stop_limit_order.call_count > n1

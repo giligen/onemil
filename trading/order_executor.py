@@ -57,6 +57,10 @@ class OrderExecutor:
         self.alpaca = alpaca_client
         self.db = db
         self.order_stream = order_stream
+        # Symbols Alpaca rejected as "not tradable" (code 42210000) today —
+        # NXTT 2026-09-21: the scanner re-planned it every cycle and every
+        # submit failed, 7 ERROR telegrams in 20 minutes. One ERROR, then skip.
+        self._untradable_today: Dict[str, str] = {}
 
         # Marketable-limit fallback config (IREZ+TTGT post-mortem 2026-05-08).
         # Read once at construction so submit_buy_stop_order's hot path doesn't
@@ -124,6 +128,20 @@ class OrderExecutor:
                 f"{symbol}: failed to persist timing telemetry: {e}"
             )
 
+    def _note_untradable(self, symbol: str, err: Exception) -> None:
+        """Remember a symbol Alpaca rejected as not tradable (code 42210000).
+
+        Every later submit for it today is skipped by _has_conflicting_orders
+        with one WARNING instead of a fresh ERROR per scan cycle.
+        """
+        msg = str(err)
+        if '42210000' in msg or 'not tradable' in msg.lower():
+            if symbol not in self._untradable_today:
+                logger.error(
+                    f"{symbol}: NOT TRADABLE at Alpaca (42210000) — further "
+                    f"entries for it are suppressed for this session")
+            self._untradable_today[symbol] = msg[:120]
+
     def _has_conflicting_orders(self, symbol: str) -> bool:
         """Check if symbol has existing open orders on Alpaca (any strategy).
 
@@ -133,6 +151,11 @@ class OrderExecutor:
         push-updated in-memory set. O(1). No network.
         Slow path: REST get_orders fallback (legacy behaviour).
         """
+        if symbol in self._untradable_today:
+            logger.warning(
+                f"{symbol}: skipped — Alpaca reported it not tradable today "
+                f"({self._untradable_today[symbol]}); no resubmit until restart")
+            return True
         # Fast path via the shared OrderStreamWatcher cache.
         if self.order_stream is not None and self.order_stream.is_healthy():
             try:
@@ -524,6 +547,7 @@ class OrderExecutor:
                     logger.error(
                         f"{plan.symbol}: stop-rebump submission failed: {e}"
                     )
+                    self._note_untradable(plan.symbol, e)
                     return None
             # else SUBMIT_AS_IS — fall through to the normal-submit block below.
 
@@ -538,6 +562,7 @@ class OrderExecutor:
                 )
             except Exception as e:
                 logger.error(f"{plan.symbol}: Buy-stop order submission failed: {e}")
+                self._note_untradable(plan.symbol, e)
                 return None
 
         if order is None:
