@@ -1192,6 +1192,24 @@ class TestStaleSnapshotGate:
         keep = eng.build_orb_universe_from_snapshots(["NODATE"])
         assert 'NODATE' in keep
 
+    def test_previous_session_bar_is_not_a_corpse(self):
+        """2026-09-21 defect: a symbol that has not printed in the first
+        seconds after the open still carries the previous session's daily
+        bar. That is a live symbol, not a corpse (AMCI/GOSS/GLNK rejected
+        with 5/5 range bars; ~2,950 rejects a day since 7/23)."""
+        from datetime import datetime, timezone, timedelta
+        eng, a = self._engine()
+        today = datetime.now(timezone.utc).date()
+        a.get_snapshots.return_value = {
+            'FRIDAY': self._snap((today - timedelta(days=3)).isoformat()),
+            'YDAY': self._snap((today - timedelta(days=1)).isoformat()),
+            'HOLIDAYWKND': self._snap((today - timedelta(days=4)).isoformat()),
+            'CORPSE5': self._snap((today - timedelta(days=5)).isoformat())}
+        keep = eng.build_orb_universe_from_snapshots(
+            ["FRIDAY", "YDAY", "HOLIDAYWKND", "CORPSE5"])
+        assert {'FRIDAY', 'YDAY', 'HOLIDAYWKND'} <= set(keep)
+        assert 'CORPSE5' not in keep
+
 
 # =========================================================================
 # 09:35 entry latency (2026-09-18 defect: first submit 48.9s after 09:35:00)

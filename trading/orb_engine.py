@@ -89,6 +89,10 @@ logger = logging.getLogger(__name__)
 # composite quintile and changes which symbols ORB trades (ASTN/PLTG on
 # 2026-05-29: prod's daily_bars were frozen at 05-22).
 _PREV_BAR_STALENESS_MAX_DAYS = 4
+# Vendor-corpse gate tolerance (2026-09-21): a snapshot daily bar older than
+# this many calendar days before today ET = dead symbol. Must cover a long
+# weekend plus one holiday; "< today" was wrong (see build_orb_universe_from_snapshots).
+STALE_SNAPSHOT_MAX_AGE_DAYS = 4
 
 
 def _newest_bar_date(bars) -> Optional[date]:
@@ -813,10 +817,19 @@ class ORBEngine:
                         _n = datetime.now(timezone.utc)
                         today_et = (_n - timedelta(
                             hours=_et_offset_hours(_n))).date().isoformat()
-                    if bar_date < today_et:
+                    # 2026-09-21 defect: at 09:30:36 ET the daily bar of any
+                    # symbol that has not printed yet is still dated the PREVIOUS
+                    # session, so "< today" rejected ~2,950 symbols a day incl.
+                    # real gappers (AMCI/GOSS/GLNK, 5/5 range bars) — the
+                    # selection observer's daily "CAUGHT n REAL dropped" since
+                    # 7/23 was this rule. A corpse is a bar older than the last
+                    # session: tolerance covers a long weekend + one holiday.
+                    cutoff = (date.fromisoformat(today_et)
+                              - timedelta(days=STALE_SNAPSHOT_MAX_AGE_DAYS)).isoformat()
+                    if bar_date < cutoff:
                         logger.info(
                             f"ORB: {sym} stale-snapshot reject — daily bar "
-                            f"dated {bar_date} (vendor corpse, no data today)")
+                            f"dated {bar_date} < {cutoff} (vendor corpse)")
                         continue
                 # Apply BT criteria
                 if not (self.universe_min_price <= open_price <= self.universe_max_price):
