@@ -110,3 +110,20 @@ found no usable lever either.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01PKSsd3LjBkXYzPECLNYR5W
+
+## Refit cells (1,303–1,306, 1,315) — scored by the main session from the walked books (agent died on the weekly limit)
+R = $375 stage risk; net R per fill; t = day-clustered; VAL = 2026-01..05; 2025 is IN-SAMPLE for the refit rows.
+| stratum | form | 2025 fills/wk | 2025 net R (t) | VAL fills/wk | VAL net R (t) | VAL $ | VAL MDD |
+|---|---|---|---|---|---|---|---|
+| S1 gap3–5 $3–30 | frozen | 4.04 | −0.026 (−0.87) | 6.58 | +0.040 (+0.95) | +2,119 | −1,210 |
+| S1 | refit | 3.29 | −0.007 (−0.20) | 5.79 | +0.016 (+0.37) | +767 | −1,560 |
+| S2 gap≥5 $30–50 | frozen | 0.77 | −0.091 (−1.74) | 1.82 | +0.018 (+0.24) | +263 | −997 |
+| S2 | refit | 0.62 | −0.095 (−1.48) | 1.31 | −0.043 (−0.82) | −453 | −694 |
+| S3 gap3–5 $30–50 | frozen | 0.58 | +0.128 (+1.25) | 0.75 | **+0.348 (+2.74)** | +2,088 | −232 |
+| S3 | refit | 0.38 | +0.276 (+1.95) | 0.75 | +0.284 (+2.19) | +1,705 | −207 |
+| S0 production | frozen | 1.63 | +0.206 (+2.36) | 1.96 | +0.406 (+2.15) | +6,398 | −566 |
+Verdicts: S1 FAIL (edge ≈ 0, refit does not help — the owner's per-stratum-params hypothesis is not supported here);
+S2 FAIL; S3 clears the VAL bar on 16 fills but was pre-registered REPORT-ONLY → a LEAD, not a pass. Combined
+S0+S3 ≈ 2.7 fills/wk, still under cadence C5 (3/wk). Era-consistency vetoes (1,305/1,306) not run.
+Next (needs its own PREREG): S3 as a cell — both 2025 halves, matched control, ≥3R tail audit; if it holds, widen
+the live seed to gap ≥ 3 % & open $30–50 only.
