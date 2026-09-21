@@ -111,8 +111,11 @@ class TestBurstPickBudget:
         """Restart replay: BEZ entered (DB), 3 re-vetoed, position closed.
         Pick budget must be 0 — the next-ranked name may NOT slide in."""
         import inspect
-        # body moved behind the lock wrapper (2026-09-18 entry drain thread)
-        src = inspect.getsource(type(engine)._check_entries_locked)
+        # 2026-09-21 PREREG_LIVE_UNION.md refactor: the pick-budget
+        # computation moved from _check_entries_locked into
+        # _run_pool_selection (recomputed per pool, per PREREG "Slot
+        # arithmetic" — shared cap, production first). Invariant unchanged.
+        src = inspect.getsource(type(engine)._run_pool_selection)
         assert 'symbols_entered_today | self._pdr_vetoed_today' in src \
             and 'set(self.open_positions)' in src
 

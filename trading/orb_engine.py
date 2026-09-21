@@ -343,6 +343,25 @@ class ORBEngine:
         self.universe_min_gap_pct = float(uni.get('min_gap_pct', 5.0))
         self.universe_min_prev_volume = int(uni.get('min_prev_volume', 500_000))
 
+        # Add-on pools (PREREG_LIVE_UNION.md, owner GO 2026-09-21): symbols the
+        # production gap/price thresholds exclude, admitted into their OWN
+        # pool and run through the unchanged selection chain SEPARATELY
+        # (never one shared pool — cell 1,327 showed a shared pool displaces
+        # production picks through a pool-dependent stage). Default OFF;
+        # dry_run defaults True so a new pool always ships silent first.
+        addon_cfg = uni.get('addon_pools', {}) or {}
+        self.addon_pools_enabled = bool(addon_cfg.get('enabled', False))
+        self.addon_pools_dry_run = bool(addon_cfg.get('dry_run', True))
+        self.addon_pools: List[Dict] = list(addon_cfg.get('pools', []) or [])
+        logger.info(
+            "ORB add-on pools: enabled=%s dry_run=%s pools=%s",
+            self.addon_pools_enabled, self.addon_pools_dry_run,
+            [p.get('name') for p in self.addon_pools],
+        )
+        # Day-scoped: symbol -> 'production' | pool.name (set by
+        # build_orb_universe_from_snapshots; cleared in reset_daily).
+        self._symbol_pool: Dict[str, str] = {}
+
         self.max_concurrent = int(sizing_cfg.get('max_concurrent', 4))
 
         self.daily_loss_limit_usd = float(risk_cfg.get('daily_loss_limit_usd', -5000))
@@ -831,16 +850,36 @@ class ORBEngine:
                             f"ORB: {sym} stale-snapshot reject — daily bar "
                             f"dated {bar_date} < {cutoff} (vendor corpse)")
                         continue
-                # Apply BT criteria
-                if not (self.universe_min_price <= open_price <= self.universe_max_price):
-                    continue
+                # Apply BT criteria (production) OR an add-on pool's own
+                # thresholds (PREREG_LIVE_UNION.md). Production admission is
+                # UNCHANGED: computed first, exactly as before, and always
+                # wins the pool tag when it matches. Add-on pools only ever
+                # catch symbols production rejects.
                 if prev_close <= 0:
                     continue
                 gap_pct = (open_price - prev_close) / prev_close * 100.0
-                if gap_pct < self.universe_min_gap_pct:
+                is_production = (
+                    self.universe_min_price <= open_price <= self.universe_max_price
+                    and gap_pct >= self.universe_min_gap_pct
+                    and prev_volume >= self.universe_min_prev_volume
+                )
+                matched_pool = None
+                if is_production:
+                    matched_pool = 'production'
+                elif self.addon_pools_enabled:
+                    for pool in self.addon_pools:
+                        p_min_price = float(pool.get('min_price', 0.0))
+                        p_max_price = float(pool.get('max_price', float('inf')))
+                        p_min_gap = float(pool.get('min_gap_pct', 0.0))
+                        p_max_gap = float(pool.get('max_gap_pct', float('inf')))
+                        if (p_min_price <= open_price <= p_max_price
+                                and p_min_gap <= gap_pct <= p_max_gap
+                                and prev_volume >= self.universe_min_prev_volume):
+                            matched_pool = pool.get('name', 'addon')
+                            break
+                if matched_pool is None:
                     continue
-                if prev_volume < self.universe_min_prev_volume:
-                    continue
+                self._symbol_pool[sym] = matched_pool
                 keep.append(sym)
             except Exception as e:
                 logger.debug(f"ORB: snapshot parse failed for {sym}: {e}")
@@ -2183,6 +2222,84 @@ class ORBEngine:
         if not eligible:
             return []
 
+        # PREREG_LIVE_UNION.md: the selection chain runs ONCE PER POOL, never
+        # one shared pool (cell 1,327 showed a shared pool displaces
+        # production picks through a pool-dependent stage). Production runs
+        # first with UNCHANGED logic/order; add-on pools (if enabled) each
+        # run afterward against the SAME shared slot cap, in config order.
+        # A symbol with no pool tag (candidates seeded outside
+        # build_orb_universe_from_snapshots, as most unit tests do) defaults
+        # to 'production' — backward compatible, byte-identical when
+        # addon_pools.enabled is False.
+        production_syms = [
+            c.symbol for c in eligible
+            if self._symbol_pool.get(c.symbol, 'production') == 'production'
+        ]
+        submitted: List[str] = list(self._run_pool_selection(
+            'production', production_syms, symbols_entered_today,
+            feature_providers, dry_run=False, t_rank=_t_rank))
+
+        if self.addon_pools_enabled:
+            for pool_cfg in self.addon_pools:
+                pname = pool_cfg.get('name')
+                if not pname:
+                    continue
+                pool_syms = [
+                    c.symbol for c in eligible
+                    if self._symbol_pool.get(c.symbol) == pname
+                ]
+                if not pool_syms:
+                    continue
+                submitted += self._run_pool_selection(
+                    pname, pool_syms, symbols_entered_today,
+                    feature_providers, dry_run=self.addon_pools_dry_run,
+                    t_rank=_t_rank)
+
+        return submitted
+
+    def _run_pool_selection(
+            self, pool_label: str, cand_syms: List[str],
+            symbols_entered_today: Set[str],
+            feature_providers: Optional[Dict[str, dict]],
+            dry_run: bool, t_rank: float) -> List[str]:
+        """Feature -> filter -> rank -> dedup -> veto -> plan -> submit chain
+        for ONE pool (production, or one add-on pool).
+
+        PREREG_LIVE_UNION.md: called once per pool with that pool's OWN
+        candidate subset. The chain, filters and ranking are byte-identical
+        to the pre-union code for `pool_label == 'production'`. Add-ons run
+        the SAME chain, separately, so a pool-dependent stage (the catalyst
+        "alone" cohort, `_catalyst_veto_reject`) never mixes symbols across
+        pools. The dedup slot budget is recomputed at call time from
+        `self.open_positions` / DB state, so an EARLIER pool's submissions
+        in the same burst reduce what's left for a LATER pool automatically
+        (production always runs first — the shared cap, PREREG "Slot
+        arithmetic").
+
+        Add-on picks (`pool_label != 'production'`) carry `plan.pool` (read
+        by `_save_pending_trade` into `pattern_data.pool` and by
+        `_submit_entry` for the `[ORB+]` telegram prefix). When `dry_run` is
+        True the pick is logged/telegrammed as `[ORB+ DRY] WOULD BUY ...`
+        and NO order is submitted (PREREG: the dry day must show zero
+        orders).
+        """
+        eligible = [self.candidates[s] for s in cand_syms if s in self.candidates]
+        if not eligible:
+            return []
+
+        # This pool's own gap floor for the phantom-gap re-validation below.
+        # PREREG_LIVE_UNION.md: an add-on pool's real gap can legitimately
+        # sit BELOW the production threshold (that's the whole point of the
+        # pool) — re-validating against `self.universe_min_gap_pct` here
+        # would phantom-gap-reject every genuine add-on pick.
+        if pool_label == 'production':
+            gap_floor = self.universe_min_gap_pct
+        else:
+            gap_floor = next(
+                (float(p.get('min_gap_pct', self.universe_min_gap_pct))
+                 for p in self.addon_pools if p.get('name') == pool_label),
+                self.universe_min_gap_pct)
+
         # 2. Compute composite + quintile for each
         scored: List[CandidateState] = []
         for cand in eligible:
@@ -2207,10 +2324,10 @@ class ORBEngine:
             # snapshot.open showed +5% gap, real bar1.open = prev_close,
             # yet LYG ranked Q5 in LIVE.
             real_gap_pct = feats.get('gap_pct', None)
-            if real_gap_pct is not None and real_gap_pct < self.universe_min_gap_pct:
+            if real_gap_pct is not None and real_gap_pct < gap_floor:
                 logger.info(
-                    f"ORB: {cand.symbol} phantom-gap reject — "
-                    f"real gap {real_gap_pct:.2f}% < {self.universe_min_gap_pct}% "
+                    f"ORB: {cand.symbol} phantom-gap reject ({pool_label}) — "
+                    f"real gap {real_gap_pct:.2f}% < {gap_floor}% "
                     f"(snapshot universe was satisfied via phantom snap.open)"
                 )
                 cand.rejected_reason = 'phantom_gap'
@@ -2296,11 +2413,14 @@ class ORBEngine:
         # restart (vetoed set is in-memory) or a multi-burst morning can
         # overshoot the daily slot invariant and replay the IREZ backfill
         # within a single burst.
+        budget = self.max_concurrent - len(
+            symbols_entered_today | self._pdr_vetoed_today
+            | set(self.open_positions))
+        if budget <= 0:
+            return []
         top_syms = dedup_candidates(
             ranked_symbols,
-            max_keep=self.max_concurrent - len(
-                symbols_entered_today | self._pdr_vetoed_today
-                | set(self.open_positions)),
+            max_keep=budget,
             by_family=self.dedup_by_family,
             by_super_group=self.dedup_by_super_group,
         )
@@ -2331,8 +2451,9 @@ class ORBEngine:
                 continue
             # Catalyst-required veto (2026-07-18): newsless AND alone
             # (no same-morning complex confirmation) — no catalyst, no
-            # trade. Same no-refill slot semantics as PDR.
-            if self._catalyst_veto_reject(cand):
+            # trade. Same no-refill slot semantics as PDR. Cohort is scoped
+            # to THIS pool's own candidates (see _run_pool_selection docstring).
+            if self._catalyst_veto_reject(cand, cohort_symbols=cand_syms):
                 continue
             spread_bps = self._get_spread_bps(sym)
             plan = self.planner.build(
@@ -2359,11 +2480,31 @@ class ORBEngine:
                 if self.notify_on_capital_exhausted and self.notifier:
                     self._notify(f"{self.tg_prefix} {sym} skipped — insufficient buying power")
                 continue
+            plan.pool = pool_label  # 'production' | addon pool name (not a dataclass field — set post-hoc)
+            if pool_label != 'production' and dry_run:
+                # PREREG_LIVE_UNION.md dry day: zero orders, telegram/log
+                # only. cand.plan_submitted still latches so the pick isn't
+                # re-logged every tick, but NO DB row / NO order exists.
+                logger.info(
+                    f"[ORB+ DRY] WOULD BUY {sym} pool={pool_label} "
+                    f"qty={plan.shares} @ stop-limit ${plan.entry_price:.2f} "
+                    f"(stop=${plan.stop_price:.2f}, {plan.quintile} "
+                    f"comp={plan.composite_score:+.2f})"
+                )
+                if self.notify_on_entry and self.notifier:
+                    self._notify(
+                        f"[ORB+ DRY] WOULD BUY {sym} x{plan.shares} "
+                        f"@ stop-limit ${plan.entry_price:.2f} "
+                        f"(stop ${plan.stop_price:.2f}, pool={pool_label})"
+                    )
+                cand.rejected_reason = 'addon_dry_run'
+                cand.plan_submitted = True
+                continue
             order_id = self._submit_entry(plan)
             if order_id:
                 cand.plan_submitted = True
                 submitted.append(sym)
-                self._record_latency_phase('rank_and_submit', time.time() - _t_rank)
+                self._record_latency_phase('rank_and_submit', time.time() - t_rank)
                 self._check_first_submit_latency()
         return submitted
 
@@ -2823,18 +2964,30 @@ class ORBEngine:
             return nm
         return None
 
-    def _catalyst_veto_reject(self, cand: CandidateState) -> bool:
+    def _catalyst_veto_reject(
+            self, cand: CandidateState,
+            cohort_symbols: Optional[Iterable[str]] = None) -> bool:
         """Catalyst-required veto (2026-07-18, owner-approved −$36K):
         newsless-and-alone picks are vetoed; slot consumed, no refill.
         Fail-open on UNKNOWN news (None). Evidence + semantics:
-        trading/orb_catalyst_veto.py."""
+        trading/orb_catalyst_veto.py.
+
+        `cohort_symbols` (PREREG_LIVE_UNION.md): the "alone" cohort count is
+        DAY-LEVEL state over `self.candidates` — pooled across production
+        AND every add-on pool by default. Per-pool selection must NOT let
+        an add-on pool's cohort borrow confirmation from production names
+        (or vice versa), so the per-pool chain passes its OWN symbol subset
+        here. None (production's call site) preserves prior behaviour
+        byte-identically.
+        """
         if not self.catalyst_veto_enabled:
             return False
         has_news = self._get_has_news(cand.symbol)
         anchor = self._anchor_for(cand.symbol, allow_api=False)
         cohort = anchor_cohort_counts(
             self._anchor_for(s, allow_api=False)
-            for s in self.candidates.keys())
+            for s in (cohort_symbols if cohort_symbols is not None
+                      else self.candidates.keys()))
         if catalyst_veto_applies(has_news, anchor, cohort,
                                  self.catalyst_min_cohort):
             logger.info(
@@ -3284,8 +3437,13 @@ class ORBEngine:
                 logger.debug(f"ORB: add_quote_watch({plan.symbol}) failed: {e}")
 
         if self.notify_on_entry and self.notifier:
+            # Add-on picks (PREREG_LIVE_UNION.md) carry a distinct prefix so
+            # the live ledger separates them from production from the first
+            # fill. Production plans never set .pool -> unchanged prefix.
+            _prefix = ('[ORB+]' if getattr(plan, 'pool', 'production') != 'production'
+                       else self.tg_prefix)
             self._notify(
-                f"{self.tg_prefix} ENTRY SUBMITTED {plan.symbol} x{plan.shares} "
+                f"{_prefix} ENTRY SUBMITTED {plan.symbol} x{plan.shares} "
                 f"@ stop-limit ${plan.entry_price:.2f} (stop ${plan.stop_price:.2f}, "
                 f"{plan.quintile} mult={plan.adaptive_mult:.2f}x, "
                 f"composite={plan.composite_score:+.2f})"
@@ -4842,6 +5000,7 @@ class ORBEngine:
         self._latency_phases = {}
         self.candidates.clear()
         self.universe.clear()
+        self._symbol_pool.clear()
         self.universe_date = None
         self._bar_windows.clear()
         self._feature_context_cache = {}  # re-fetched next day with T-1 = today
@@ -5294,6 +5453,10 @@ class ORBEngine:
                 'atr_floor_k': (self.atr_floor_k
                                 if getattr(self, 'atr_floor_enabled', False)
                                 else None),
+                # PREREG_LIVE_UNION.md: 'production' or the add-on pool name
+                # that selected this pick (set post-hoc on the plan by
+                # _run_pool_selection — not a planner-native field).
+                'pool': getattr(plan, 'pool', 'production'),
             })
             now_utc = submit_time or datetime.now(timezone.utc)
             record = {

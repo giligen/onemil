@@ -392,8 +392,9 @@ class TestEngineWiring:
         and the planner stacks it into position_dollars."""
         import inspect
         from trading import orb_engine as em, orb_planner as pm
-        # body moved behind the lock wrapper (2026-09-18 entry drain thread)
-        src = inspect.getsource(em.ORBEngine._check_entries_locked)
+        # body moved to _run_pool_selection (2026-09-21 PREREG_LIVE_UNION.md
+        # per-pool chain refactor; was behind the lock wrapper since 2026-09-18)
+        src = inspect.getsource(em.ORBEngine._run_pool_selection)
         assert 'pm_mult=self._get_pm_mult(sym)' in src
         psrc = inspect.getsource(pm.OrbTradePlanner.build)
         assert 'adaptive_mult * pm_mult' in psrc

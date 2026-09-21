@@ -214,7 +214,9 @@ class TestNoBackfillWiring:
     def test_veto_called_from_submit_loop_source(self):
         import inspect
         from trading import orb_engine as mod
-        src = inspect.getsource(mod.ORBEngine._check_entries_locked)   # body moved behind the lock wrapper (2026-09-18 drain thread)
+        # 2026-09-21 PREREG_LIVE_UNION.md: body moved to _run_pool_selection
+        # (per-pool chain refactor; was behind the lock wrapper since 2026-09-18)
+        src = inspect.getsource(mod.ORBEngine._run_pool_selection)
         loop_at = src.index('for sym in top_syms')
         veto_at = src.index('_pdr_veto_reject')
         assert veto_at > loop_at, (

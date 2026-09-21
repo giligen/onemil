@@ -260,8 +260,9 @@ class TestNoRefillWiring:
     def test_veto_runs_in_submit_loop_after_ranking(self):
         import inspect
         from trading import orb_engine as mod
-        # body moved behind the lock wrapper (2026-09-18 entry drain thread)
-        src = inspect.getsource(mod.ORBEngine._check_entries_locked)
+        # body moved to _run_pool_selection (2026-09-21 PREREG_LIVE_UNION.md
+        # per-pool chain refactor; was behind the lock wrapper since 2026-09-18)
+        src = inspect.getsource(mod.ORBEngine._run_pool_selection)
         loop_at = src.index('for sym in top_syms')
         g1_at = src.index('_g1_veto_reject')
         assert g1_at > loop_at

@@ -33,6 +33,27 @@ universe:
   max_price: 30.0
   min_gap_pct: 5.0
   min_prev_volume: 500000
+  # Add-on pools (PREREG_LIVE_UNION.md, owner GO 2026-09-21): symbols the
+  # thresholds above exclude, admitted into their OWN pool and run through
+  # the unchanged selection chain SEPARATELY, unioned with production
+  # subject to the shared slot cap. Default OFF; dry_run defaults True —
+  # the dry day (zero orders, `[ORB+ DRY]` telegrams) must pass before
+  # `enabled: true`. Never a shared pool; never refit z-params/quintiles
+  # on add-on-only data.
+  addon_pools:
+    enabled: false
+    dry_run: true
+    pools:
+      - name: addon_gap4
+        min_gap_pct: 4.0
+        max_gap_pct: 5.0
+        min_price: 3.0
+        max_price: 30.0
+      - name: addon_p30
+        min_gap_pct: 3.0
+        max_gap_pct: 5.0
+        min_price: 30.0
+        max_price: 50.0
 
 # Entry — 5-min opening range breakout.
 # Trigger mode: TOUCH (bar high > range_high). Production = pre-placed stop-limit buy.

@@ -162,9 +162,16 @@ class TestEngineWiring:
     def test_called_after_pdr_in_submit_loop(self):
         import inspect
         from trading import orb_engine as em
-        src = inspect.getsource(em.ORBEngine._check_entries_locked)   # body moved behind the lock wrapper (2026-09-18 drain thread)
-        assert src.index('_pdr_veto_reject') < src.index(
-            '_catalyst_veto_reject')
+        # 2026-09-21 PREREG_LIVE_UNION.md refactor: the veto/submit tail of
+        # the old _check_entries_locked body moved into _run_pool_selection
+        # so the chain can run once per pool (production + each add-on
+        # pool). The invariant itself (PDR before catalyst, no refill) is
+        # unchanged — just relocated with the rest of steps 2-5.
+        src = inspect.getsource(em.ORBEngine._run_pool_selection)
+        # Match the CALL sites, not the docstring's prose mention of the
+        # catalyst veto (which now precedes the real ordering in text).
+        assert src.index('self._pdr_veto_reject(') < src.index(
+            'self._catalyst_veto_reject(')
         assert 'top_syms.extend' not in src   # still no refill anywhere
 
 
