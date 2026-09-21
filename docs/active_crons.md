@@ -14,12 +14,13 @@ survives is alert-only (silent when clean) or infrastructure.**
 
 ## 1. Session crons — exactly two
 
-### DAILY EOD REPORT v7 — id `989c1d20` — `57 21 * * 1-5`
-The one daily telegram, prefix `[EOD]`. Covers every book (ORB, BF, HOD-break dry), Gate-1 parity from the durable
-checkers, the stage tally against `docs/scaling_plan_2026.md` Gate 2, hygiene, and "what boots at 12:30 tomorrow and
-what must be fixed before then" (the only place a code fix is permitted — tests first, suite green, never a
-workaround). Prompt = the verbatim text used at arming (in the session transcript; re-create from this description
-if lost, keeping every numbered section).
+### DAILY EOD REPORT — RETIRED as a session cron 2026-09-21 (was id `989c1d20`), now durable crontab
+`57 21 * * 1-5 scripts/eod_report.py` (owner: "move to haiku if no thinking is needed"). Every number is computed
+by the script (trades DB per strategy, green-check verdict, BF parity JSON, both ramp checkers, services, journal
+errors, pre-boot tests, disk, next-boot flags, today's research commits) and written to `logs/eod/<date>.md`; a
+headless `claude -p --model haiku` call only rephrases it into the `[EOD]` telegram and falls back to the raw
+summary (WARNING logged) if it fails. Code fixes are no longer part of the report — the report FLAGS (RED, NOT
+ACTIVE, failed, frozen first line) and the owner asks the interactive session. Tests: `tests/test_eod_report.py`.
 
 ### WEEKLY REVIEW v2 — id `69f28d67` — `23 9 * * 6`
 The one weekly telegram, prefix `[WEEKLY wk N]`. STEP 0 self-renews BOTH session crons and updates the ids here.

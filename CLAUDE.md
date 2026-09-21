@@ -63,7 +63,7 @@ State on 2026-09-20 (details, evidence, monitor greps and rollback for every fla
 | Bull flag (P1 profile) | `config.yaml trading.enabled` | **PAUSED 9/14**, P1 config intact, resumes 2026-09-21 at $150 risk, ramp L0→L3 on positive realized P&L (`docs/bf_p1_ramp.md`, `scripts/bf_ramp_check.py`) | honest book $107K/79 tr under the unified trail; **halves under measured NBBO cost** ($139K→$69K, VAL −$8K) — the ramp band must be rebuilt on the measured-cost book |
 | ORB B+ | `orb.yaml strategy.enabled`, `--orb` | **PAUSED 9/14**, resumes 2026-09-21 (catalyst-off, 8 slots, entry-drain thread, 50 bps) | honest $6,085 / 21 mo at $10K stage; weekly selection refit `scripts/orb_weekly_refit.py` (Sun 20:00 UTC); NEVER refit `adaptive_mults`, never drop the Q5 1.5 cap |
 | MACD wave | `onemil-macd-wave` service, `macd_wave.yaml` | running | outlier-dependent P&L; filters tuned in-sample |
-| HOD-break | `hod_break.enabled: false`, `--hod` inert | **CLOSED 9/18** (0/12 causal-filter cells, −0.04R gross, dry run −0.45R) | engine + tests stay as instrumentation; re-open only behind a NEW pre-registration |
+| HOD-break | `hod_break.enabled: true`, `dry_run: true` (ZERO orders), `--hod` | research **CLOSED 9/18** (0/12 causal-filter cells, −0.04R gross); dry run RESTORED 9/19 as a free forward instrument | dry_run MUST stay true; live needs a NEW pre-registration AND the owner's word |
 | Red-to-green | `red_to_green.enabled: false`, `--r2g` inert | DISABLED 9/17 (TEST profit was a NASDAQ test ticker) | exclude `^Z[A-Z]ZZT$` and any symbol absent from `daily_bars` from every universe |
 | Ignition | flags + crons OFF | OFF 9/13/14 | from-zero study found no edge |
 
