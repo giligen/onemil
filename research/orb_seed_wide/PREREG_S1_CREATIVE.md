@@ -37,3 +37,22 @@ from S3 + the corpse-gate fix (9/21), which itself widens the live universe tomo
 ## Not allowed
 Re-cutting thresholds after VAL; combining cells; scoring float or price buckets as cells; touching orb.yaml.
 Scorer `score_s1_creative.py`; builder `build_combined_seed.py`.
+
+## Addendum 2026-09-21 (after 1,327 was scored — disclosed as a follow-up, cell 1,328 PRIORITY SLOTS)
+1,327 failed on the pre-registered "production picks preserved ≥ 90 %" (78 % / 67 %) and TRAIN MDD, while $ rose
+on both splits and the added trades were positive on both. The failure mode is slot competition: the wider pool
+displaces production picks in the shared ranking. Cell 1,328 changes ONLY the allocation rule, not selection or
+exit: **production candidates (gap ≥ 5 %, open $3–30) have first claim on the 8 slots; add-on candidates (S3 and
+gap 4–5 %) fill leftover slots that day in composite order.** Reconstructed from the two walked books
+(`runB_true` for production picks — they had all 8 slots alone — and `runCOMB_true` for the add-on picks, each
+trade's own walked `_sized_pnl`; the compounding-sizing drift is the known approximation, reported). Pass bar:
+production picks preserved = 100 % by construction; total $ ≥ production on both splits; weekly MDD ≤ 1.25×
+production on both splits; fills/wk ≥ 3; added cohort mean R > 0 on both splits. A pass → pipeline knob
+`ORB_BT_PRIORITY_STRATUM` + live implementation under a live PREREG, never a live change from this
+reconstruction. Scorer `score_priority.py`.
+**Pre-scoring correction (same day, before `score_priority.py` was run):** the walked books show at most 4
+(production) / 6 (combined) picks per day — the 8 slots never bind, so "slot competition" is NOT the displacement
+mechanism; a pool-dependent veto is (identified in the report). Cell 1,328 is therefore scored as what the
+reconstruction actually is: the **UNION of two independently evaluated pools** (production rules on the production
+pool, unchanged; the add-on pool evaluated on its own), sharing 8 slots. Same pass bar. That is also the only
+live design that leaves the production book untouched.
