@@ -32,6 +32,13 @@ is shared. Production's pool, rules and picks are byte-identical to today.
 * Review at 40 add-on fills (~13 weeks): keep if cohort mean R > 0 and production cohort unchanged in mean R
   within 1 SE; otherwise disable and record the cell as a live null with its MDE.
 
+## Amendment 2026-09-21 evening (REPORT_QUARTER.md, TEST opened by the owner)
+The gap 4–5 % pool lost −$1,732 on 56 fills in the sealed quarter (−0.08 R) → `addon_gap4` is DRY-ONLY
+instrumentation, never enabled without a new PREREG. The $30–50 pool made +$1,654 on 11 fills (+0.40 R; positive
+in TRAIN, VAL and TEST) → `addon_p30` is the only pool eligible for real orders after the dry day and the owner's
+word. Kill rules above apply to the p30 cohort; expected frequency ~1.2 fills/wk, so the 40-fill review is ~8 months
+— the review is instead at 20 fills or 2026-12-31, whichever first.
+
 ## Not allowed
 Refitting z-params/quintiles on the add-on pools; any change to production thresholds; a shared pool; enabling
 without the dry day and the owner's word.
