@@ -79,7 +79,10 @@ class TestAddonPoolUniverse:
     """build_orb_universe_from_snapshots — universe extension only."""
 
     def test_disabled_is_byte_identical_to_no_addon_config(self):
+        # "No add-on config" must be explicit: the node's orb.yaml may carry
+        # the block armed (dry day 2026-09-22), and _base_cfg() reads it.
         cfg_off = _base_cfg()
+        cfg_off['universe'].pop('addon_pools', None)
         cfg_with_addon_off = _base_cfg()
         cfg_with_addon_off['universe']['addon_pools'] = {**ADDON_CFG, 'enabled': False}
         snaps = {
