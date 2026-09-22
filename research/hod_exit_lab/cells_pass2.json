@@ -1,0 +1,424 @@
+{
+  "cells": [
+    {
+      "id": "T1",
+      "name": "drop r_pct < 1.5% (cost-gate)",
+      "kind": "cohort",
+      "note": "",
+      "h1_dR": 0.043935287634047956,
+      "h2_dR": 0.030306604411019396,
+      "train_dR": 0.03987166802466396,
+      "train_n": 4865,
+      "dropped_R_train": -0.3003521942122538,
+      "val_dR": 0.05462578079945953,
+      "val_n": 2982,
+      "dropped_R_val": -0.39936925897596154,
+      "val_t_dR": -0.2738839047243775,
+      "val_t_ndays": 102,
+      "val_fills_wk": 135.54545454545453,
+      "extop5_variant_val": -0.3653060516197191,
+      "extop5_b0_val": -0.42186467528612354,
+      "extop5_variant_train": -0.29325595979534486,
+      "extop5_b0_train": -0.3346844622959829,
+      "extop5_ok": true,
+      "mdd_variant_train": 874.3259841711712,
+      "mdd_b0_train": 1613.6971006579636,
+      "mdd_variant_val": 744.0982117064003,
+      "mdd_b0_val": 1424.1329750122804,
+      "mdd_ok": true,
+      "pass": false,
+      "rule5_cohort": true
+    },
+    {
+      "id": "T2",
+      "name": "drop r_pct < 2.5% (cost-gate, dose check)",
+      "kind": "cohort",
+      "note": "",
+      "h1_dR": 0.07582545015955265,
+      "h2_dR": 0.004011901103352073,
+      "train_dR": 0.057235768210107535,
+      "train_n": 2102,
+      "dropped_R_train": -0.24425721512723977,
+      "val_dR": 0.12920787228298228,
+      "val_n": 1093,
+      "dropped_R_val": -0.34348355753670023,
+      "val_t_dR": 0.5660479393258776,
+      "val_t_ndays": 102,
+      "val_fills_wk": 49.68181818181818,
+      "extop5_variant_val": -0.28693730611541746,
+      "extop5_b0_val": -0.42186467528612354,
+      "extop5_variant_train": -0.2753450233410449,
+      "extop5_b0_train": -0.3346844622959829,
+      "extop5_ok": true,
+      "mdd_variant_train": 348.835060125673,
+      "mdd_b0_train": 1613.6971006579636,
+      "mdd_variant_val": 191.40081207492565,
+      "mdd_b0_val": 1424.1329750122804,
+      "mdd_ok": true,
+      "pass": false,
+      "rule5_cohort": true
+    },
+    {
+      "id": "M1",
+      "name": "symbol had >=1 HOD-break signal in prior 5 sessions (any outcome)",
+      "kind": "cohort",
+      "note": "",
+      "h1_dR": 0.11924754520561202,
+      "h2_dR": -3.708660234521804e-05,
+      "train_dR": 0.054720279123053335,
+      "train_n": 2580,
+      "dropped_R_train": -0.25099436052442897,
+      "val_dR": 0.10677562954872492,
+      "val_n": 1854,
+      "dropped_R_val": -0.3739567939020149,
+      "val_t_dR": 1.107948998889951,
+      "val_t_ndays": 102,
+      "val_fills_wk": 84.27272727272727,
+      "extop5_variant_val": -0.3100680435665805,
+      "extop5_b0_val": -0.42186467528612354,
+      "extop5_variant_train": -0.27738191563811165,
+      "extop5_b0_train": -0.3346844622959829,
+      "extop5_ok": true,
+      "mdd_variant_train": 452.7095705820345,
+      "mdd_b0_train": 1613.6971006579636,
+      "mdd_variant_val": 372.04078120298647,
+      "mdd_b0_val": 1424.1329750122804,
+      "mdd_ok": true,
+      "pass": false,
+      "rule5_cohort": true
+    },
+    {
+      "id": "M2",
+      "name": "symbol's prior-5-session signals net POSITIVE under B0",
+      "kind": "cohort",
+      "note": "",
+      "h1_dR": 0.0802077003261509,
+      "h2_dR": 0.00653952038829864,
+      "train_dR": 0.03908177737454448,
+      "train_n": 997,
+      "dropped_R_train": -0.22734567913147213,
+      "val_dR": 0.06443331709387481,
+      "val_n": 723,
+      "dropped_R_val": -0.31600481463808994,
+      "val_t_dR": 1.124661894050161,
+      "val_t_ndays": 101,
+      "val_fills_wk": 32.86363636363637,
+      "extop5_variant_val": -0.35698317462962875,
+      "extop5_b0_val": -0.42186467528612354,
+      "extop5_variant_train": -0.2939592451605057,
+      "extop5_b0_train": -0.3346844622959829,
+      "extop5_ok": true,
+      "mdd_variant_train": 194.2793066753829,
+      "mdd_b0_train": 1613.6971006579636,
+      "mdd_variant_val": 178.18426986256435,
+      "mdd_b0_val": 1424.1329750122804,
+      "mdd_ok": true,
+      "pass": false,
+      "rule5_cohort": true
+    },
+    {
+      "id": "E1",
+      "name": "retest entry within 15 min, else no trade",
+      "kind": "exit",
+      "note": "",
+      "train_n": 5870,
+      "val_n": 3682,
+      "train_dR": 0.13029386039024515,
+      "val_dR": 0.11781695463055666,
+      "h1_dR": 0.14821549537570516,
+      "h2_dR": 0.10913674449730609,
+      "val_t_dR": 18.82695914370325,
+      "val_t_ndays": 102,
+      "dropped_R_train": 0.13029386039024515,
+      "dropped_R_val": 0.11781695463055666,
+      "extop5_variant_val": -0.38791895808334736,
+      "extop5_b0_val": -0.49742152443517557,
+      "extop5_variant_train": -0.30114643192620727,
+      "extop5_b0_train": -0.42333644307997254,
+      "extop5_ok": true,
+      "mdd_variant_train": 1022.4135338320657,
+      "mdd_b0_train": 1786.2141636063689,
+      "mdd_variant_val": 947.1838382635991,
+      "mdd_b0_val": 1376.5569992094102,
+      "mdd_ok": true,
+      "pass": true,
+      "rule1_paired": true,
+      "rule2_halves": true
+    },
+    {
+      "id": "O1",
+      "name": "overnight hold on close-at-high strength (else B0)",
+      "kind": "exit",
+      "note": "eod_pop=2239 held=530 missing_daily_bar=0 gap_anomaly=0 (fell back to B0)",
+      "train_n": 7315,
+      "val_n": 4695,
+      "train_dR": -0.02291311066510163,
+      "val_dR": 0.006873904360633997,
+      "h1_dR": -0.040832047582153766,
+      "h2_dR": -0.002849716794487476,
+      "val_t_dR": 1.413577063285584,
+      "val_t_ndays": 102,
+      "dropped_R_train": -0.02291311066510163,
+      "dropped_R_val": 0.006873904360633997,
+      "extop5_variant_val": -0.4274935430657452,
+      "extop5_b0_val": -0.42186467528612354,
+      "extop5_variant_train": -0.3667295166910234,
+      "extop5_b0_train": -0.3346844622959829,
+      "extop5_ok": false,
+      "mdd_variant_train": 1781.306505173182,
+      "mdd_b0_train": 1613.6971006579636,
+      "mdd_variant_val": 1396.6776323637991,
+      "mdd_b0_val": 1424.1329750122804,
+      "mdd_ok": true,
+      "pass": false,
+      "rule1_paired": false,
+      "rule2_halves": false
+    },
+    {
+      "id": "O2",
+      "name": "O1 with exit at next day 10:00 open instead of 09:30",
+      "kind": "exit",
+      "note": "VOID -- not computable under permitted data: bars_sip.db is scoped to (symbol,day) pairs that had a HOD-break signal, not a full intraday market cache; the next trading day for a held symbol is essentially never itself a signal-day for that symbol, so 0/530 next-day 10:00 bars were found (100% miss). All 530 fell back to B0 (dR=0 everywhere), which is why train_dR/val_dR read exactly 0.0 -- this is a data-availability gap, not a tested negative.",
+      "train_n": 7315,
+      "val_n": 4695,
+      "train_dR": 0.0,
+      "val_dR": 0.0,
+      "h1_dR": 0.0,
+      "h2_dR": 0.0,
+      "val_t_dR": null,
+      "val_t_ndays": 102,
+      "dropped_R_train": 0.0,
+      "dropped_R_val": 0.0,
+      "extop5_variant_val": -0.42186467528612354,
+      "extop5_b0_val": -0.42186467528612354,
+      "extop5_variant_train": -0.3346844622959829,
+      "extop5_b0_train": -0.3346844622959829,
+      "extop5_ok": true,
+      "mdd_variant_train": 1613.6971006579636,
+      "mdd_b0_train": 1613.6971006579636,
+      "mdd_variant_val": 1424.1329750122804,
+      "mdd_b0_val": 1424.1329750122804,
+      "mdd_ok": true,
+      "pass": false,
+      "rule1_paired": false,
+      "rule2_halves": false,
+      "void": true
+    },
+    {
+      "id": "S1",
+      "name": "8 concurrent slots instead of 4 (same first-12/day cap)",
+      "kind": "cohort",
+      "note": "rule5 (dropped-cohort<0) NOT applied: PREREG scopes the D/W dropped clause to T/M cells; slot overflow is random-equivalent by mechanism.",
+      "h1_dR": -0.08998781078492744,
+      "h2_dR": -0.06748530398579367,
+      "train_dR": -0.08126089547948401,
+      "train_n": 2738,
+      "dropped_R_train": -0.17256750043313088,
+      "val_dR": -0.0003745201496397224,
+      "val_n": 1222,
+      "dropped_R_val": -0.3041446160210894,
+      "val_t_dR": 0.02378683266920332,
+      "val_t_ndays": 102,
+      "val_fills_wk": 55.54545454545455,
+      "extop5_variant_val": -0.42400530454942276,
+      "extop5_b0_val": -0.42186467528612354,
+      "extop5_variant_train": -0.42029184097052613,
+      "extop5_b0_train": -0.3346844622959829,
+      "extop5_ok": false,
+      "mdd_variant_train": 825.6108565673619,
+      "mdd_b0_train": 1613.6971006579636,
+      "mdd_variant_val": 367.4657553995932,
+      "mdd_b0_val": 1424.1329750122804,
+      "mdd_ok": true,
+      "pass": false,
+      "rule5_cohort": true
+    },
+    {
+      "id": "S2",
+      "name": "daily cap 20 instead of 12, 4 concurrent (same as baseline)",
+      "kind": "cohort",
+      "note": "rule5 (dropped-cohort<0) NOT applied: PREREG scopes the D/W dropped clause to T/M cells; slot overflow is random-equivalent by mechanism.",
+      "h1_dR": -0.03176199157221012,
+      "h2_dR": -0.05472650837919698,
+      "train_dR": -0.048202157833534966,
+      "train_n": 2491,
+      "dropped_R_train": -0.1962879942240414,
+      "val_dR": -0.015395967119009629,
+      "val_n": 1185,
+      "dropped_R_val": -0.2990786098553417,
+      "val_t_dR": 0.31416887568782964,
+      "val_t_ndays": 102,
+      "val_fills_wk": 53.86363636363637,
+      "extop5_variant_val": -0.4397043260711586,
+      "extop5_b0_val": -0.42186467528612354,
+      "extop5_variant_train": -0.3859983174097037,
+      "extop5_b0_train": -0.3346844622959829,
+      "extop5_ok": false,
+      "mdd_variant_train": 668.7432899628434,
+      "mdd_b0_train": 1613.6971006579636,
+      "mdd_variant_val": 377.56016370699115,
+      "mdd_b0_val": 1424.1329750122804,
+      "mdd_ok": true,
+      "pass": false,
+      "rule5_cohort": true
+    }
+  ],
+  "cadence": {
+    "B0": {
+      "returncode": 0,
+      "stdout": "CADENCE BAR  (unknown, VAL, live config: N/A slots, N/A, R = $N/A)\nC1 gap       median N/A wk  P90 N/A wk        [fail]   gaps: []\nC2 bleed     P90 N/A R     cycles net>0 0% [fail]\nC3 reds      P10 -103.61 R  min -163.06 R  MDD 1428.58 R   under-water max 22 wk   [fail]\nC4 green     5%  null 50%                   [fail]\nC5 fills/wk  213.41                             [pass]\nC6 tail      C6 not audited\nC7 power     cycles 0   bootstrap P90-gap 75% UB N/A wk    [fail]\ndiagnostics  ex-top-5% -1430.10 R   capped -1428.58 R   top-5 share -0.1%   weekly P&L histogram: [-163.1, -118.7, -103.9, -100.9, -98.4, -98.1, -90.2, -83.2, -76.6, -60.9, -58.2, -57.7, -53.6, -48.4, -48.2, -45.4, -35.8, -33.4, -32.1, -18.9, -4.4, 1.5]\n",
+      "stderr": ""
+    },
+    "E1": {
+      "returncode": 0,
+      "stdout": "CADENCE BAR  (unknown, VAL, live config: N/A slots, N/A, R = $N/A)\nC1 gap       median N/A wk  P90 N/A wk        [fail]   gaps: []\nC2 bleed     P90 N/A R     cycles net>0 0% [fail]\nC3 reds      P10 -71.78 R  min -119.25 R  MDD 950.07 R   under-water max 22 wk   [fail]\nC4 green     5%  null 50%                   [fail]\nC5 fills/wk  167.36                             [pass]\nC6 tail      C6 not audited\nC7 power     cycles 0   bootstrap P90-gap 75% UB N/A wk    [fail]\ndiagnostics  ex-top-5% -951.99 R   capped -950.07 R   top-5 share -0.2%   weekly P&L histogram: [-119.2, -79.6, -72.1, -69.0, -66.2, -64.6, -60.6, -50.2, -45.3, -44.6, -37.7, -37.5, -37.3, -33.0, -27.8, -25.1, -24.5, -22.7, -19.3, -12.8, -2.9, 1.9]\n",
+      "stderr": ""
+    }
+  },
+  "report_tables": {
+    "T_dose_curve_by_r_pct_decile": [
+      {
+        "decile": "(0.999, 1.129]",
+        "mean_net_R": -0.34140269062282397,
+        "n": 1202,
+        "mean_r_pct": 1.0622156630290318
+      },
+      {
+        "decile": "(1.129, 1.264]",
+        "mean_net_R": -0.4128778292362595,
+        "n": 1200,
+        "mean_r_pct": 1.193365674994655
+      },
+      {
+        "decile": "(1.264, 1.419]",
+        "mean_net_R": -0.27412315067241755,
+        "n": 1201,
+        "mean_r_pct": 1.3405843298493694
+      },
+      {
+        "decile": "(1.419, 1.599]",
+        "mean_net_R": -0.3324348244927764,
+        "n": 1201,
+        "mean_r_pct": 1.506898085550722
+      },
+      {
+        "decile": "(1.599, 1.802]",
+        "mean_net_R": -0.2520493402966757,
+        "n": 1201,
+        "mean_r_pct": 1.7000283594483139
+      },
+      {
+        "decile": "(1.802, 2.051]",
+        "mean_net_R": -0.20346614283107312,
+        "n": 1201,
+        "mean_r_pct": 1.9237645986621859
+      },
+      {
+        "decile": "(2.051, 2.38]",
+        "mean_net_R": -0.1939084946529985,
+        "n": 1201,
+        "mean_r_pct": 2.2065517952962086
+      },
+      {
+        "decile": "(2.38, 2.779]",
+        "mean_net_R": -0.17496304429763987,
+        "n": 1201,
+        "mean_r_pct": 2.5706210454515386
+      },
+      {
+        "decile": "(2.779, 3.352]",
+        "mean_net_R": -0.2063276365968181,
+        "n": 1201,
+        "mean_r_pct": 3.0511126858741586
+      },
+      {
+        "decile": "(3.352, 4.528]",
+        "mean_net_R": -0.14514087626256758,
+        "n": 1201,
+        "mean_r_pct": 3.769416098390976
+      }
+    ],
+    "M1_by_prior_signal_count": [
+      {
+        "prior_count": 0,
+        "mean_net_R": -0.2971052730410237,
+        "n": 7576
+      },
+      {
+        "prior_count": 1,
+        "mean_net_R": -0.1849489412258877,
+        "n": 2956
+      },
+      {
+        "prior_count": 2,
+        "mean_net_R": -0.14763984181266812,
+        "n": 1069
+      },
+      {
+        "prior_count": 3,
+        "mean_net_R": -0.12858239487110132,
+        "n": 337
+      },
+      {
+        "prior_count": 4,
+        "mean_net_R": -0.6376407695209947,
+        "n": 68
+      },
+      {
+        "prior_count": 5,
+        "mean_net_R": -1.1001514316395664,
+        "n": 4
+      }
+    ],
+    "E1_unfilled_counterfactual": {
+      "TRAIN": {
+        "n": 1426,
+        "mean_b0_net_R": 0.11867038101084523
+      },
+      "VAL": {
+        "n": 992,
+        "mean_b0_net_R": -0.03870339428393763
+      }
+    },
+    "E1_full_book_unpaired": {
+      "TRAIN": {
+        "e1_n": 5870,
+        "e1_mean_net_R": -0.17506323938612317,
+        "b0_n": 7315,
+        "b0_mean_net_R": -0.22117845342042106
+      },
+      "VAL": {
+        "e1_n": 3682,
+        "e1_mean_net_R": -0.2580308785108263,
+        "b0_n": 4695,
+        "b0_mean_net_R": -0.30427639362628944
+      }
+    },
+    "O1_overnight_gap": {
+      "n": 530,
+      "p1": -4.853559958024673,
+      "mean": -0.25535174253215437,
+      "worst_day": "2025-10-13",
+      "worst_symbol": "ETHT",
+      "worst_dR": -10.45175538461541
+    },
+    "O2_overnight_gap": {
+      "n": 0,
+      "p1": null,
+      "worst_day": null,
+      "worst_symbol": null,
+      "worst_dR": null,
+      "mean": null
+    },
+    "S_fills_and_weekly_P10": {
+      "S1": {
+        "val_fills_wk": 55.54545454545455,
+        "weekly_p10": -33.13816788809704
+      },
+      "S2": {
+        "val_fills_wk": 53.86363636363637,
+        "weekly_p10": -31.216979481857532
+      }
+    }
+  }
+}
