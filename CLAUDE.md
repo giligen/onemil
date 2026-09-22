@@ -14,6 +14,10 @@ on the same account (his orders/positions are NEVER touched — report only). No
 * Agents write results to disk and RETURN ≤ 150 words. Never read an agent's log or transcript.
 * Never Read a file > 300 lines in full — grep / offset / head. Mechanical work on Sonnet, study logic on Opus,
   Fable plans. Be short and crisp with the owner.
+* **Model cascade (owner 2026-09-22): Haiku first, Sonnet only if Haiku fails or the task needs real code, Opus
+  only if Sonnet fails. NEVER Fable for agent work** — Fable writes the PREREG/spec, reviews the diff and talks to
+  the owner; every execution step (fetch, walk, score, implement, summarise a long report) goes to the cascade.
+  A long report is read by a Haiku agent that returns ≤ 200 words, never by the main session.
 
 # CRITICAL: Running Long Commands
 * **NEVER pipe long-running commands through `| tail`, `| head`, `| grep`** — buffers everything, you see nothing.
