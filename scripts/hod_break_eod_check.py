@@ -48,9 +48,38 @@ def rx_buy(tag: str = 'HOD'):
 RX_DRY = rx_dry(); RX_BUY = rx_buy()
 
 
+_ARCHIVE_RX = re.compile(r'^\w{3} +\d{1,2} \d{2}:\d{2}:\d{2} \S+ (\S+\[\d+\]): (\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) (.*)$')
+
+
 def journal(day: str, book=None) -> list:
+    """Session lines for `day`: journald (short-iso) UNIONED with logs/session_archive/<day>.log.
+
+    2026-09-22 defect: journald's size cap had already dropped half of 2026-09-14's lines (20 left of 42
+    archived), so the dry-run book for a past day changed between runs (12 trades → 9). The nightly archive
+    (crontab 21:58) is the durable copy; its lines carry the default journald prefix, so they are rewritten
+    to the short-iso prefix the timestamp parser below expects (the app's own body timestamp is UTC).
+    De-duplicated on the message body.
+    """
     out = subprocess.run(['journalctl', '-u', 'onemil-trader', '--since', f'{day} 09:00', '--until', f'{day} 23:59', '--no-pager', '-o', 'short-iso'],
                          capture_output=True, text=True).stdout.splitlines()
+    arch = os.path.join(ROOT, 'logs', 'session_archive', f'{day}.log')
+    if os.path.exists(arch):
+        seen = {ln.split(']: ', 1)[-1] for ln in out}
+        added = 0
+        with open(arch, errors='replace') as fh:
+            arch_lines = fh.read().splitlines()
+        for ln in arch_lines:
+            m = _ARCHIVE_RX.match(ln)
+            if not m or m.group(2) != day:
+                continue
+            body = f'{m.group(2)} {m.group(3)} {m.group(4)}'
+            if body in seen:
+                continue
+            seen.add(body)
+            out.append(f'{m.group(2)}T{m.group(3)}+0000 archive {m.group(1)}: {body}')
+            added += 1
+        if added:
+            print(f'[journal] {day}: {added} line(s) restored from session_archive (journald had rotated them)')
     if book is None:
         return [ln for ln in out if '[HOD' in ln or ('hod_break' in ln and ('ERROR' in ln or 'Traceback' in ln))]
     return [ln for ln in out if book.journal_line(ln)]
