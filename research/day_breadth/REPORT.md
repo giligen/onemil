@@ -31,3 +31,10 @@ all three periods, including the one never touched before tonight. That is the w
   Clean out-of-sample evidence from day one, zero live risk, no engine change.
 * Exploration only, no claim: hedging the tape component (IWM) to isolate the stable +0.1–0.15 R increment.
 Programme count 1,412.
+
+## Exploration (no claim): an IWM hedge does not isolate the increment (`iwm_hedge.py`)
+Trade R vs IWM R over the same holding window: correlation +0.14 / +0.36 / +0.19 (TRAIN / VAL / TEST), TRAIN beta 0.42.
+Hedged: day std 13.1→12.0 / 26.7→23.9 / 17.1→15.3 R, worst day −82.6→−69.7 R, green weeks unchanged. The tape these
+gappers ride is gapper-specific (the speculative small-cap corner), not the index; no liquid instrument hedges it,
+and a short-gapper hedge would cost more than the +0.1–0.15 R increment it isolates. The forward ledger keeps
+measuring; this population is not a book on bars alone.
