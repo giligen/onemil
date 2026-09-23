@@ -901,11 +901,16 @@ def main():
     ap.add_argument('--smoke', type=int, default=0)
     ap.add_argument('--smoke-offset', type=int, default=0,
                     help='with --smoke: start at this candidate index (to smoke a VAL slice)')
+    ap.add_argument('--now', action='store_true',
+                    help='owner override of the market-hours DB blackout (run under nice 19 + ionice idle)')
     args = ap.parse_args()
     os.makedirs(TRADES_DIR, exist_ok=True)
 
     cands = load_candidates()
-    if not args.smoke:
+    if args.now:
+        log('[WARNING] market-hours DB blackout OVERRIDDEN by the owner (--now); expected to run under '
+            'nice -n 19 + ionice -c3 so the live engine keeps disk/CPU priority')
+    elif not args.smoke:
         wait_for_db_window()
 
     sig_rows, path_frames, pool_frames, stats = one_pass(cands, limit=args.smoke or None,
