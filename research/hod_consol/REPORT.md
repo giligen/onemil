@@ -48,3 +48,17 @@ HOD lab: after a break, the path is a random walk — the exit cannot add inform
 +0.3 R on breakers and loses 1.1 R on non-breakers. So the one lever left on this entry is to recognise the
 non-breakers by the clock and leave before the stop: exit if no close above the high within N minutes.
 Pre-registered as cells 1,403–1,405 (`PREREG_TIMESTOP.md`). Programme count 1,402 → 1,405.
+
+## Cells 1,403–1,405 — no-break time stop: FAIL, worse than no time stop (TIMESTOP.md)
+| N | TRAIN slotted | VAL slotted | vs C1 slotted (−0.020 / +0.045) |
+|---|---|---|---|
+| 15 min | −0.055 | −0.052 | worse both |
+| 30 min | −0.069 | +0.015 | worse both |
+| 60 min | −0.049 | +0.048 | worse TRAIN, flat VAL |
+Why: "no break yet" does not identify the failures. 78 % of bases break eventually, only 56 % of those within 15 min;
+of the bases with no break after 15 min, 61 % still break later (52 % after 30 min). Exiting them early gives up
+later breakers and pays the spread. Programme count 1,405.
+
+**Synthesis across ORB, HOD-break and this study:** entry timing and exit rules do not separate winners from losers
+in these gappers; the result concentrates on a few busy, market-wide days (top 10 % of days ≥ 100 % of the R). The
+remaining lever is DAY selection with a breadth measure knowable at the entry minute.
