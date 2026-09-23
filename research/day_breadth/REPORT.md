@@ -38,3 +38,15 @@ Hedged: day std 13.1→12.0 / 26.7→23.9 / 17.1→15.3 R, worst day −82.6→�
 gappers ride is gapper-specific (the speculative small-cap corner), not the index; no liquid instrument hedges it,
 and a short-gapper hedge would cost more than the +0.1–0.15 R increment it isolates. The forward ledger keeps
 measuring; this population is not a book on bars alone.
+
+## 2024H2 fresh holdout (cells 1,413–1,414, `y2024/REPORT_2024.md`) — REFUTED
+Survivorship-free EQUS universe, 100 % bar availability, frozen rule and code. 1,413 (all kept): n 388, net −0.131 R
+(t −1.97), kept − rest −0.105 R (the filter picked WORSE trades), random risk-on long −0.182 R, weekly Sharpe −0.37,
+green weeks 29 %. 1,414 (skip first four): −0.035 R (t −0.42). Adequacy: SE ≈ 0.07 R; the pre-registered expectation
+(kept − rest ≥ +0.10) is ~3 SE from the observed −0.105 — a powered reversal, not an underpowered null.
+**What this means:** the risk-on tape effect is a REGIME, not an edge: gappers holding their gains kept running in the
+2025–26 speculative small-cap market and mean-reverted in 2024H2. The +0.321 R on the 2026 quarter was that regime.
+The one quantity that kept its sign in all four periods is small: the base setup beats a random entry on the same
+stock by +0.115 / +0.102 / +0.152 / +0.051 R — real, but whether it pays depends on the regime, which nothing causal here
+predicts. Disclosed: universe parity edits after fetching, before scoring ('+' warrants → '.WS', preferreds out; 2 rows).
+Programme count 1,414.
