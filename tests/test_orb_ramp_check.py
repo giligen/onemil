@@ -26,6 +26,13 @@ def F(day, pnl, slip_bps=20.0, total_risk=100.0):
             'exited_at': f'{day}T15:00:00'}
 
 
+def forty(pnl=60, n=None, **kw):
+    """ADVANCE needs 40 live fills since 2026-09-24 (research/orb_2023/PREREG.md consequence): n fills spread over
+    the 15 sessions."""
+    n = m.ADVANCE['min_fills_advance'] if n is None else n
+    return [F(SESS[i % len(SESS)], pnl, **kw) for i in range(n)]
+
+
 def stats(fills, sessions=15, parity=None, budget=10000, limit=-750,
           bt_r=BT_R, **kw):
     """compute_stats with the BT band scored (an unscored band blocks ADVANCE)."""
@@ -39,8 +46,18 @@ def test_stage_lookup():
 
 
 def test_advance_all_gates():
-    fills = [F(d, 60) for d in SESS[:8]]
-    assert m.verdict(stats(fills)) == 'ADVANCE'
+    assert m.verdict(stats(forty())) == 'ADVANCE'
+
+
+def test_advance_needs_forty_fills_but_demote_still_triggers_at_eight():
+    """Out-of-regime ORB was FLAT (cells 1,418/1,415): realized profit on < 40 fills never advances; the
+    BT-band DEMOTE keeps its 8-fill trigger (risk reduction must not slow down)."""
+    assert m.ADVANCE['min_fills_advance'] == 40 and m.ADVANCE['min_fills'] == 8
+    assert m.verdict(stats(forty(n=39))) == 'HOLD'
+    assert m.verdict(stats(forty(n=40))) == 'ADVANCE'
+    pnls = [-30, 10, -30, 10, -30, 10, -30, 10]
+    s = stats([F(d, p) for d, p in zip(SESS, pnls)], bt_r=[2.0] * 40)
+    assert m.verdict(s) == 'DEMOTE'
 
 
 def test_hold_on_each_missing_gate():
@@ -55,7 +72,7 @@ def test_hold_on_each_missing_gate():
 
 
 def test_parity_outside_stage_ignored():
-    fills = [F(d, 60) for d in SESS[:8]]
+    fills = forty()
     assert m.verdict(stats(fills, parity={'2026-08-01': ['fill-parity: BT FILLED but live never']})) == 'ADVANCE'
 
 
@@ -69,7 +86,7 @@ def test_demote_and_pause():
 
 
 def test_units_hold_across_stages():
-    s0 = [F(d, 60) for d in SESS[:8]]; s1 = [F(d, 180) for d in SESS[:8]]
+    s0 = forty(60); s1 = forty(180, total_risk=300.0)   # 3x the stage budget = 3x the $ risk -> same R
     assert m.verdict(stats(s0)) == m.verdict(m.compute_stats(s1, 30000, -1500, 15, SESS, {}, bt_r=BT_R)) == 'ADVANCE'
 
 
@@ -131,7 +148,7 @@ def test_missing_bt_reference_blocks_advance():
 
 
 def test_freeze_blocks_advance_regardless_of_pnl():
-    fills = [F(d, 60) for d in SESS[:8]]
+    fills = forty()
     assert m.verdict(stats(fills, frozen=True)) == 'HOLD'
     assert m.verdict(stats(fills)) == 'ADVANCE'
 

@@ -42,3 +42,7 @@ word. Kill rules above apply to the p30 cohort; expected frequency ~1.2 fills/wk
 ## Not allowed
 Refitting z-params/quintiles on the add-on pools; any change to production thresholds; a shared pool; enabling
 without the dry day and the owner's word.
+
+## Amendment 2026-09-24 (research/orb_2023/REPORT.md)
+`addon_p30` was NEGATIVE on the point-in-time 2023-01..2024-06 test (−0.210 R/fill, n 10; out-of-regime with 2024H2
+≈ −0.02 R on 14 fills). Neither add-on pool is order-eligible any more; both stay dry-only as instrumentation.

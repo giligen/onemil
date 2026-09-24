@@ -51,7 +51,12 @@ STAGES = [
     {'name': 'S2', 'budget': 60000, 'daily_limit': -3000, 'month_pause': -6000},
     {'name': 'S3', 'budget': 100000, 'daily_limit': -5000, 'month_pause': -10000},
 ]
-ADVANCE = {'min_fills': 8, 'min_sessions': 15, 'limit_free_sessions': 10,
+# min_fills_advance 40 (2026-09-24, pre-committed consequence of research/orb_2023/PREREG.md): on 2023-01..2024-06
+# the live ORB config was FLAT (+0.089 R/fill, t 1.55, n 106; pooled out-of-regime 2023-24 +0.055 ± 0.046 R, n 165)
+# vs +0.272 in 2025. Outside the 2025-26 regime the edge is not distinguishable from zero, so realized stage profit
+# on a handful of fills is not evidence: no ADVANCE until 40 live fills at the stage. The DEMOTE-on-band rule keeps
+# its 8-fill trigger (min_fills) — risk reduction must not be slowed by the stricter advance gate.
+ADVANCE = {'min_fills': 8, 'min_fills_advance': 40, 'min_sessions': 15, 'limit_free_sessions': 10,
            'entry_slip_model_bps': 30.0, 'slip_tolerance_bps': 10.0}
 DEMOTE = {'pnl_pct_of_budget': -6.0, 'streak': 5, 'limit_hits': 2, 'slip_2x_fills': 3}
 PAUSE = {'pnl_pct_of_budget': -8.0}
@@ -176,7 +181,7 @@ def verdict(s: StageStats) -> str:
         return 'DEMOTE'
     slip_ok = (s.mean_entry_slip_bps is not None
                and s.mean_entry_slip_bps <= ADVANCE['entry_slip_model_bps'] + ADVANCE['slip_tolerance_bps'])
-    if (s.pnl > 0 and s.fills >= ADVANCE['min_fills'] and s.sessions >= ADVANCE['min_sessions']
+    if (s.pnl > 0 and s.fills >= ADVANCE['min_fills_advance'] and s.sessions >= ADVANCE['min_sessions']
             and s.parity_defects == 0 and not s.limit_hit_last10 and slip_ok
             and s.above_water_ex_monster and s.band_status == band_mod.IN_BAND
             and not s.frozen):
@@ -271,7 +276,7 @@ def main() -> int:
         if not s.above_water_ex_monster: need.append('stage P&L ex-monster > 0')
         if s.band_status != band_mod.IN_BAND:
             need.append(f"BT band IN-BAND (now {s.band_status})")
-        if s.fills < ADVANCE['min_fills']: need.append(f"fills {s.fills}/{ADVANCE['min_fills']}")
+        if s.fills < ADVANCE['min_fills_advance']: need.append(f"fills {s.fills}/{ADVANCE['min_fills_advance']}")
         if s.sessions < ADVANCE['min_sessions']: need.append(f"sessions {s.sessions}/{ADVANCE['min_sessions']}")
         if s.parity_defects: need.append(f"parity defects {s.parity_defects} → 0")
         if s.limit_hit_last10: need.append('no daily-limit hit in last 10 sessions')
