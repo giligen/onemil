@@ -38,10 +38,14 @@ def fetch_daily(symbols):
     cfg = Config()
     client = StockHistoricalDataClient(cfg.alpaca_api_key, cfg.alpaca_api_secret)
     start, end = datetime(2022, 11, 15, tzinfo=timezone.utc), datetime(2024, 7, 1, tzinfo=timezone.utc)
-    frames, dropped, t0 = [], [], time.time()
+    frames, dropped, lost, t0 = [], [], [], time.time()
     for i in range(0, len(symbols), BATCH):
         chunk = list(symbols[i:i + BATCH])
-        for attempt in range(8):
+        errors = 0
+        # 2026-09-24 fix: invalid-symbol removals no longer consume the retry budget. The first version gave each
+        # batch 8 attempts in total, so a batch holding > 8 unfetchable tickers exhausted them removing symbols and
+        # was DROPPED SILENTLY (NVDA, AAPL, LCID and ~5,000 others lost). Real errors get 5 tries, then a loud loss.
+        while chunk:
             try:
                 df = client.get_stock_bars(StockBarsRequest(symbol_or_symbols=chunk, timeframe=TimeFrame.Day,
                                                             start=start, end=end, feed='sip')).df
@@ -55,8 +59,13 @@ def fetch_daily(symbols):
                     chunk.remove(bad)
                     dropped.append(bad)
                     continue
-                print(f'[WARNING] batch {i // BATCH} attempt {attempt + 1}: {msg[:120]}', flush=True)
-                time.sleep(3 * (attempt + 1))
+                errors += 1
+                print(f'[WARNING] batch {i // BATCH} error {errors}: {msg[:120]}', flush=True)
+                if errors >= 5:
+                    print(f'[ERROR] batch {i // BATCH} LOST after 5 errors: {len(chunk)} symbols', flush=True)
+                    lost.extend(chunk)
+                    break
+                time.sleep(3 * errors)
         if (i // BATCH) % 10 == 0:
             print(f'[daily] {i + len(chunk)}/{len(symbols)} symbols, {time.time() - t0:.0f}s', flush=True)
     d = pd.concat(frames, ignore_index=True)
@@ -64,7 +73,10 @@ def fetch_daily(symbols):
     out = pd.DataFrame(dict(bar_date=ts.dt.strftime('%Y-%m-%d'), symbol=d.symbol, open=d.open, high=d.high,
                             low=d.low, close=d.close, volume=d.volume))
     print(f'[daily] {len(out):,} bars for {out.symbol.nunique():,} symbols; {len(dropped)} invalid symbols dropped '
-          f'(e.g. {dropped[:8]})', flush=True)
+          f'(e.g. {dropped[:8]}); {len(lost)} symbols LOST to errors', flush=True)
+    for must in ('AAPL', 'NVDA', 'LCID', 'PLUG', 'SPY'):
+        if must not in set(out.symbol):
+            raise SystemExit(f'[ERROR] completeness check failed: {must} has no daily bars')
     return out
 
 
@@ -73,7 +85,10 @@ def main():
     if 1325 <= now < 2005:
         sys.exit(f'refusing to fetch inside the market-hours blackout (UTC {now:04d})')
     syms = pd.read_parquet(XNAS, columns=['symbol']).symbol.dropna().unique()
-    syms = sorted(s for s in syms if '-' not in s and not TEST_TICKER.match(s))
+    # Parity with 2025-26 / 2024H2: '+' warrants -> Alpaca '.WS'; units ('='), rights ('^') and '-' preferreds never
+    # appear in those universes -> excluded before fetching (they are also what Alpaca rejects).
+    syms = sorted({(s[:-1] + '.WS' if s.endswith('+') else s) for s in syms
+                   if '-' not in s and '=' not in s and '^' not in s and not TEST_TICKER.match(s)})
     print(f'XNAS point-in-time tickers (preferreds / test tickers removed): {len(syms):,}', flush=True)
     daily = pd.read_parquet(DAILY) if DAILY.exists() else fetch_daily(syms)
     daily.to_parquet(DAILY, index=False)
