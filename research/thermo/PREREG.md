@@ -65,3 +65,11 @@ hot-cohort ex-top-5 % mean; fills/week in hot weeks; share of days hot per perio
 ## Not allowed
 Changing the window, minimums, cut, the outcome definition or the pass bars after any number exists; reading HOD
 TEST; refitting anything in the books.
+
+## Amendment 2026-09-24 ~22:05 UTC (before any thermometer number: the first run STOPPED at the consistency gate)
+The gate's reference `runB_true.csv` was built with the catalyst veto ON (`research/orb_seed_wide/REPORT.md` line 12,
+"catalyst veto at its code default = ON"); the 2023-24 books, the rebuild and LIVE (since 9/21) are veto OFF — so the
+rebuild (2025: 211 fills / $8,377) could never match it (85 / $6,561). The gate's purpose is to prove the rebuild
+MACHINERY, so it is re-pointed: a veto-ON rebuild of the same features CSV (`book_2025_26_vetoON.csv`) must match
+`runB_true` 2025 within 5 % on n and $; if it does, cell 1,420 is scored on the veto-OFF book exactly as frozen.
+Nothing else changes.

@@ -435,6 +435,11 @@ def main():
     parser.add_argument('--out', default=str(ROOT / 'research/thermo/REPORT.md'))
     parser.add_argument('--orb-book-2025-26', default=None,
                          help="Rebuilt 2025-26 ORB book. Omit for a 2023-24-only smoke run.")
+    parser.add_argument('--consistency-book', default=None,
+                         help="Book checked against runB_true.csv (default: the scored 2025-26 book). PREREG amendment "
+                              "2026-09-24: runB_true was built with the catalyst veto ON (orb_seed_wide/REPORT.md line 12), "
+                              "so the rebuild MACHINERY is checked on a veto-ON rebuild of the same features CSV; the "
+                              "SCORED book stays veto-OFF (the live config since 9/21 and the 2023-24 books' config).")
     parser.add_argument('--skip-consistency-check', action='store_true',
                          help="Skip the 2025 vs runB_true.csv consistency check (smoke mode only).")
     args = parser.parse_args()
@@ -446,7 +451,9 @@ def main():
     if args.orb_book_2025_26:
         book_2025_26 = read_orb_csv(args.orb_book_2025_26)
         if not args.skip_consistency_check:
-            ok, msg = check_2025_book_consistency(book_2025_26)
+            check_book = read_orb_csv(args.consistency_book) if args.consistency_book else book_2025_26
+            ok, msg = check_2025_book_consistency(check_book)
+            log.info(f"main: consistency checked on {args.consistency_book or args.orb_book_2025_26}")
             if not ok:
                 Path(args.out).write_text(f"# REPORT -- STOPPED\n\nConsistency check FAILED.\n\n{msg}\n")
                 log.error(f"main: STOP -- consistency check failed, wrote discrepancy to {args.out}")

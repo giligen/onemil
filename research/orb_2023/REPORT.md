@@ -29,3 +29,11 @@
 * **1,419 addon_p30: NEGATIVE** (−0.210 R/fill, n 10). With 2024H2 (+0.455, n 4): out-of-regime ≈ −0.02 R on 14 fills.
   → the $30–50 add-on pool is **no longer order-eligible**; it stays dry-only (PREREG_LIVE_UNION amended).
 Programme count 1,419.
+
+## Correction 2026-09-24 ~22:10 UTC (found by `research/thermo`'s pre-registered consistency gate)
+The "2025 +0.272 (n 127)" comparison above is `runB_true.csv`, a catalyst-veto-ON book covering 2025-01..2026-05;
+every out-of-regime book here is veto OFF, the live config since 9/21. Like for like (veto OFF, same code, rebuild
+validated against `runB_true` with the veto ON): **2025 +0.106 R/fill (n 211, t 2.45), 2026-01..09 +0.105 (n 262,
+t 2.29)**. The frozen FLAT verdict and its consequence are unchanged (they are absolute thresholds), but the reading
+"a coin flip outside 2025-26 vs +0.27 inside" was wrong: per fill ORB is ~+0.1 R wherever measured (2024H2 ≈ 0); the
+regime changes how OFTEN it trades.
