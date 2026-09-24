@@ -132,8 +132,8 @@ trading:
   # risk_per_trade, after every multiplier, before the BP ceiling. OFF until
   # the joint ship call (research/bf_consistency/README.md §6).
   risk_cap:
-    enabled: false
-    max_risk_mult: 2.0
+    enabled: true    # 2026-09-24 owner GO: flat $150 max risk per trade during the ramp (see config.yaml)
+    max_risk_mult: 1.0
   position_size_dollars: 50000
   max_shares: 15000            # ~$50K position at $3/share. Conviction 3x → 45K shares max via planner
   bt_buying_power_usd: 200000  # BT-only: Stage-2 clamps each position to this BP ceiling, matching
