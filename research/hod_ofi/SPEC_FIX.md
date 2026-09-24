@@ -43,6 +43,14 @@ NOT launch.
      listing defects 1–6 verbatim from this file.
    Unchanged: the three cells, the TRAIN-H1 median cut, lift ≥ +0.10 on TRAIN-H2 and VAL, VAL t ≥ 2, ≥ 3 fills/wk,
    ex-top-5 % lift ≥ 0, the 60 % / 80 % / 5 pp availability rail.
+7. **(Main-session amendment, 2026-09-24 ~19:55 UTC, before any corrected number.) The window end was a spec error.**
+   `SPEC.md` clarification 1 assumed an intra-bar stop at the level. The HOD-break book enters at the OPEN of bar
+   `entry_m` after the break bar (`entry_m − 1`) CLOSES (`research/bf_zero/spread_study.py:48`), so the decision
+   instant is S = the start of minute `entry_m` — exactly the PREREG's "before the break bar closes". Every signal
+   window now ends at S; `locate_fallback` is a diagnostic only (no XNAS print ≥ entry inside the entry minute). Found
+   by the window-causality lens: 58 % of signal windows have ROUND-LOT XNAS prints ≥ entry in the minute before
+   `entry_m` (natural for a next-open entry, impossible for a stop at the prior high), and the old end sat a median
+   ~6 s (up to 60 s) after the decision.
 
 ## Deliverables
 * Keep run 1: rename `REPORT.md`, `score_summary.json`, `window_features.csv` → `*_run1.*` (rename, never delete).

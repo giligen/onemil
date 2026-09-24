@@ -89,11 +89,15 @@ def build_windows(pop: pd.DataFrame) -> pd.DataFrame:
     for r in pop.itertuples():
         s = r.entry_m * 60
         rows.append(dict(day=r.day, symbol=r.symbol, kind='signal', entry_m=r.entry_m,
+                          sig_entry_m=r.entry_m,
                           entry_px=r.entry, split=r.split, half=r.half,
                           fetch_start_s=s - SIGNAL_PAD_BEFORE_S, fetch_end_s=s + SIGNAL_PAD_AFTER_S))
         mp = placebo_minute(r.day, r.symbol, r.entry_m)
         ps = mp * 60
+        # sig_entry_m ties this placebo back to the ONE signal it was drawn for --
+        # a name-day can have several signals, so (day, symbol) alone is ambiguous.
         rows.append(dict(day=r.day, symbol=r.symbol, kind='placebo', entry_m=mp,
+                          sig_entry_m=r.entry_m,
                           entry_px=np.nan, split=r.split, half=r.half,
                           fetch_start_s=ps - PLACEBO_LOOKBACK_S, fetch_end_s=ps))
     w = pd.DataFrame(rows)
@@ -282,6 +286,28 @@ def to_et_sec(ts: pd.Series) -> pd.Series:
     return t.dt.hour * 3600 + t.dt.minute * 60 + t.dt.second + t.dt.microsecond / 1e6
 
 
+def _coverage_frac(mbp: pd.DataFrame, feat_start: float, end: float) -> float:
+    """Share of the 300 window seconds s in [end-300, end) at whose end (instant
+    min(s+1, end)) the prevailing mbp-1 record -- the last record at or before that
+    instant, including records fetched before feat_start -- is two-sided (bid>0,
+    ask>0, ask>=bid). No prior record at all -> that second is unquoted."""
+    avail = mbp[mbp['sec'] <= end].sort_values('sec', kind='mergesort')
+    if len(avail) == 0:
+        return 0.0
+    secs = avail['sec'].to_numpy(dtype=float)
+    bid = avail['bid_px_00'].to_numpy(dtype=float)
+    ask = avail['ask_px_00'].to_numpy(dtype=float)
+    s_grid = feat_start + np.arange(300)
+    instants = np.minimum(s_grid + 1, end)
+    idx = np.searchsorted(secs, instants, side='right') - 1
+    quoted = idx >= 0
+    idx_c = np.clip(idx, 0, len(secs) - 1)
+    b = np.where(quoted, bid[idx_c], np.nan)
+    a = np.where(quoted, ask[idx_c], np.nan)
+    two_sided = quoted & (b > 0) & (a > 0) & (a >= b)
+    return float(two_sided.mean())
+
+
 def ofi_updates(mbp: pd.DataFrame) -> np.ndarray:
     """Cont-Kukanov-Stoikov L1 OFI per update; +ve = buy pressure."""
     b, a = mbp['bid_px_00'].to_numpy(), mbp['ask_px_00'].to_numpy()
@@ -289,7 +315,7 @@ def ofi_updates(mbp: pd.DataFrame) -> np.ndarray:
     b_p, a_p = np.roll(b, 1), np.roll(a, 1)
     bs_p, as_p = np.roll(bs, 1), np.roll(as_, 1)
     bid_e = np.where(b > b_p, bs, np.where(b == b_p, bs - bs_p, -bs_p))
-    ask_e = np.where(a > a_p, -as_p, np.where(a == a_p, as_ - as_p, as_p))
+    ask_e = np.where(a > a_p, as_p, np.where(a == a_p, as_p - as_, -as_))
     e = bid_e + ask_e
     if len(e):
         e[0] = 0.0
@@ -300,28 +326,25 @@ def compute_window_features(mbp: pd.DataFrame, trades: pd.DataFrame, kind: str, 
                              entry_px: float) -> dict:
     """Everything from [end-5min, end); nothing after (PREREG). end located per SPEC clarification 1."""
     S = entry_m * 60
+    # Decision instant = S for BOTH kinds (defect 7). The HOD-break book enters at the OPEN of bar entry_m after the
+    # break bar (entry_m - 1) CLOSES (research/bf_zero/spread_study.py:48); the PREREG window is "before the break
+    # bar closes". Run 1 ended at the first print >= entry inside minute entry_m -- up to 60 s after the decision.
+    end = float(S)
     locate_fallback = False
     if kind == 'signal':
-        cand = trades[(trades.sec >= S) & (trades.sec < S + 60) & (trades.price >= entry_px)]
-        if len(cand):
-            end = float(cand.sort_values('sec').iloc[0].sec)
-        else:
-            end = float(S + 60)
-            locate_fallback = True
-    else:
-        end = float(S)  # placebo: end = m_p's start, no search
+        # Diagnostic only, never moves `end`: no XNAS print at/through the entry price inside the entry minute.
+        locate_fallback = not bool(((trades.sec >= S) & (trades.sec < S + 60) & (trades.price >= entry_px)).any())
 
     feat_start = end - 300
     # Narrow to only the columns each schema owns: the raw parquet is a union-schema concat
     # (mbp-1 rows carry NaN price/size, trades rows carry NaN bid/ask), so an un-narrowed
     # merge_asof below would collide on bid_px_00/ask_px_00 and get silently suffixed.
-    mbp_w = mbp[(mbp.sec >= feat_start) & (mbp.sec < end)].sort_values('sec')[
+    mbp_w = mbp[(mbp.sec >= feat_start) & (mbp.sec < end)].sort_values('sec', kind='mergesort')[
         ['sec', 'bid_px_00', 'ask_px_00', 'bid_sz_00', 'ask_sz_00']]
-    trades_w = trades[(trades.sec >= feat_start) & (trades.sec < end)].sort_values('sec')[
+    trades_w = trades[(trades.sec >= feat_start) & (trades.sec < end)].sort_values('sec', kind='mergesort')[
         ['sec', 'price', 'size']]
 
-    n_win_s = 300
-    coverage_frac = mbp_w['sec'].astype(int).nunique() / n_win_s if len(mbp_w) else 0.0
+    coverage_frac = _coverage_frac(mbp, feat_start, end)
 
     if len(mbp_w) >= 2:
         e = ofi_updates(mbp_w)
@@ -334,7 +357,8 @@ def compute_window_features(mbp: pd.DataFrame, trades: pd.DataFrame, kind: str, 
         ofi_5 = ofi_1 = np.nan
 
     if len(trades_w) and len(mbp_w):
-        m = pd.merge_asof(trades_w, mbp_w[['sec', 'bid_px_00', 'ask_px_00']], on='sec', direction='backward')
+        m = pd.merge_asof(trades_w, mbp_w[['sec', 'bid_px_00', 'ask_px_00']], on='sec', direction='backward',
+                           allow_exact_matches=False)
         mid = (m['bid_px_00'] + m['ask_px_00']) / 2
         sign = np.select([m['price'] > mid, m['price'] < mid], [1, -1], default=0)
         tot = m['size'].sum()
@@ -342,7 +366,7 @@ def compute_window_features(mbp: pd.DataFrame, trades: pd.DataFrame, kind: str, 
     else:
         tsi_5 = np.nan
 
-    last_q = mbp[mbp.sec <= end].sort_values('sec').tail(1)
+    last_q = mbp[mbp.sec <= end].sort_values('sec', kind='mergesort').tail(1)
     if len(last_q):
         bid, ask = float(last_q['bid_px_00'].iloc[0]), float(last_q['ask_px_00'].iloc[0])
         mid = (bid + ask) / 2
@@ -357,6 +381,12 @@ def compute_window_features(mbp: pd.DataFrame, trades: pd.DataFrame, kind: str, 
 def cmd_features(args):
     pop = load_population()
     windows = build_windows(pop)
+    days_arg = (getattr(args, 'days', '') or '').strip()
+    if days_arg:
+        days_filter = [d.strip() for d in days_arg.split(',') if d.strip()]
+        windows = windows[windows['day'].isin(days_filter)].reset_index(drop=True)
+        log(f'features: SMOKE limited to days={days_filter} ({len(windows)} windows)')
+    out_path = (getattr(args, 'out', '') or '').strip() or FEATURES_OUT
     out_rows = []
     for day, day_windows in windows.groupby('day'):
         paths = sorted(glob.glob(f'{RAW_DIR}/{day}__*.parquet')) or \
@@ -364,6 +394,7 @@ def cmd_features(args):
         if not paths:
             for r in day_windows.itertuples():
                 out_rows.append(dict(day=day, symbol=r.symbol, kind=r.kind, entry_m=r.entry_m,
+                                      sig_entry_m=r.sig_entry_m,
                                       split=r.split, half=r.half, OFI_5=np.nan, OFI_1=np.nan,
                                       TSI_5=np.nan, spread_bps_at_break=np.nan, coverage_frac=0.0,
                                       locate_fallback=None, missing_raw=True))
@@ -375,18 +406,51 @@ def cmd_features(args):
             mbp = sub[sub.schema == 'mbp-1']
             trades = sub[sub.schema == 'trades']
             feat = compute_window_features(mbp, trades, r.kind, r.entry_m, r.entry_px)
-            feat.update(day=day, symbol=r.symbol, kind=r.kind, entry_m=r.entry_m,
+            feat.update(day=day, symbol=r.symbol, kind=r.kind, entry_m=r.entry_m, sig_entry_m=r.sig_entry_m,
                         split=r.split, half=r.half, missing_raw=(len(mbp) == 0 and len(trades) == 0))
             out_rows.append(feat)
         log(f'features {day}: {len(day_windows)} windows')
-    pd.DataFrame(out_rows).to_csv(FEATURES_OUT, index=False)
-    log(f'FEATURES_COMPLETE rows={len(out_rows)} -> {FEATURES_OUT}')
+    pd.DataFrame(out_rows).to_csv(out_path, index=False)
+    log(f'FEATURES_COMPLETE rows={len(out_rows)} -> {out_path}')
 
 
 # ---------------------------------------------------------------- score
+def _keep_lift_ols(d: pd.DataFrame) -> dict:
+    """net_R ~ 1 + keep by OLS; lift == keep coefficient (== keep_mean - drop_mean).
+    t_lift = day-clustered t (statsmodels cov_type='cluster', groups=day); t_iid beside it."""
+    import statsmodels.api as sm
+    d = d.dropna(subset=['net_R', '_keep', 'day'])
+    if len(d) < 3 or d['_keep'].nunique() < 2:
+        return dict(n=len(d), lift=np.nan, t_lift=np.nan, t_iid=np.nan)
+    X = sm.add_constant(d['_keep'].astype(float), has_constant='add')
+    y = d['net_R'].astype(float)
+    m_cluster = sm.OLS(y, X).fit(cov_type='cluster', cov_kwds={'groups': d['day']})
+    m_iid = sm.OLS(y, X).fit()
+    return dict(n=len(d), lift=float(m_cluster.params['_keep']),
+                t_lift=float(m_cluster.tvalues['_keep']), t_iid=float(m_iid.tvalues['_keep']))
+
+
+def _decile_table(d: pd.DataFrame, col: str) -> tuple:
+    """Decile-mean-net-R table (qcut of `col` within this holdout, duplicates='drop') and the
+    pass-bar Spearman: decile index (1..k) vs the decile's mean net R -- NOT the trade-level rho."""
+    dd = d.dropna(subset=[col, 'net_R']).copy()
+    if len(dd) < 10:
+        return pd.DataFrame(columns=['decile', 'n', 'mean_net_R']), np.nan
+    dd['decile'] = pd.qcut(dd[col], 10, labels=False, duplicates='drop') + 1
+    tbl = dd.groupby('decile').agg(n=('net_R', 'size'), mean_net_R=('net_R', 'mean')).reset_index()
+    rho = tbl['decile'].corr(tbl['mean_net_R'], method='spearman') if len(tbl) >= 3 else np.nan
+    return tbl, rho
+
+
+def _corrections_section() -> str:
+    """Verbatim defects-1-6 section from SPEC_FIX.md, for the REPORT.md header."""
+    spec = open(f'{OUT_DIR}/SPEC_FIX.md').read()
+    return spec[spec.index('## Defects'):spec.index('## Deliverables')].strip()
+
+
 def cmd_score(args):
+    from scipy.stats import spearmanr
     sys.path.insert(0, f'{ROOT}/research/hod_consol')
-    from adversarial_read import stats  # noqa: E402
     from run_consol import simulate_slots  # noqa: E402
 
     feat = pd.read_csv(FEATURES_OUT)
@@ -401,81 +465,92 @@ def cmd_score(args):
     miss_l = (~usable[~winners]).mean() if (~winners).any() else np.nan
     gap_pp = abs(miss_w - miss_l) * 100 if pd.notna(miss_w) and pd.notna(miss_l) else np.nan
     avail_status = 'OK' if (usable.mean() >= 0.80 and gap_pp <= 5) else 'VOID'
+    fallback_share = sig['locate_fallback'].mean()
     log(f'AVAILABILITY coverage_usable={usable.mean():.3f} miss_winner={miss_w:.3f} '
-        f'miss_loser={miss_l:.3f} gap_pp={gap_pp:.2f} status={avail_status}')
+        f'miss_loser={miss_l:.3f} gap_pp={gap_pp:.2f} status={avail_status} fallback_share={fallback_share:.3f}')
 
     sig_u = sig[usable].copy()
     cells = {'F1_OFI5': 'OFI_5', 'F2_OFI1': 'OFI_1', 'F3_TSI5': 'TSI_5'}
     report_lines = [f'# HOD-OFI REPORT\ncoverage_usable={usable.mean():.3f} avail={avail_status} '
-                     f'gap_pp={gap_pp:.2f} n_signal={len(sig)} n_usable={len(sig_u)}\n']
+                     f'gap_pp={gap_pp:.2f} fallback_share={fallback_share:.3f} '
+                     f'n_signal={len(sig)} n_usable={len(sig_u)}\n',
+                     '## Corrections vs run 1\n' + _corrections_section() + '\n']
     summary = []
     for cell, col in cells.items():
-        tr_h1 = sig_u[(sig_u.split == 'TRAIN') & (sig_u.half == 'H1')]
+        d_cell = sig_u.dropna(subset=[col]).copy()  # defect 6: drop NaN feature rows before cut/rank/Spearman
+        tr_h1 = d_cell[(d_cell.split == 'TRAIN') & (d_cell.half == 'H1')]
         cut = tr_h1[col].median()
-        sig_u['_keep'] = sig_u[col] >= cut
+        d_cell['_keep'] = d_cell[col] >= cut
 
-        def cohort_stat(df, keep_val):
-            sub = df[df['_keep'] == keep_val]
-            return sub, stats(sub['net_R'], sub['day']) if len(sub) >= 3 else dict(n=len(sub), mean=np.nan, t_cluster=np.nan)
-
-        rows = {}
-        for split_name, mask in [('TRAIN-H2', (sig_u.split == 'TRAIN') & (sig_u.half == 'H2')),
-                                  ('VAL', sig_u.split == 'VAL')]:
-            d = sig_u[mask]
-            keep_d, keep_s = cohort_stat(d, True)
-            drop_d, drop_s = cohort_stat(d, False)
-            lift = (keep_s.get('mean', np.nan) or np.nan) - (drop_s.get('mean', np.nan) or np.nan)
-            se_k = (keep_s['mean'] / keep_s['t_cluster']) if keep_s.get('t_cluster') else np.nan
-            se_d = (drop_s['mean'] / drop_s['t_cluster']) if drop_s.get('t_cluster') else np.nan
-            t_lift = lift / np.sqrt(se_k ** 2 + se_d ** 2) if pd.notna(se_k) and pd.notna(se_d) else np.nan
-            rho, _ = (np.nan, np.nan)
-            try:
-                from scipy.stats import spearmanr
-                rho, _ = spearmanr(d[col], d['net_R'])
-            except Exception:
-                pass
-            rows[split_name] = dict(n=len(d), keep_n=len(keep_d), drop_n=len(drop_d), lift=lift,
-                                     t_lift=t_lift, spearman=rho)
-        keep_all = sig_u[sig_u['_keep']][['day', 'entry_m', 'exit_m']].dropna()
-        n_weeks = sig_u['wk'].nunique() if 'wk' in sig_u else np.nan
+        rows, deciles = {}, {}
+        for split_name, mask in [('TRAIN-H2', (d_cell.split == 'TRAIN') & (d_cell.half == 'H2')),
+                                  ('VAL', d_cell.split == 'VAL')]:
+            d = d_cell[mask]
+            stat = _keep_lift_ols(d)
+            dec_tbl, dec_rho = _decile_table(d, col)
+            trade_rho, _ = spearmanr(d[col], d['net_R']) if len(d) > 5 else (np.nan, np.nan)
+            rows[split_name] = dict(n=stat['n'], keep_n=int(d['_keep'].sum()), drop_n=int((~d['_keep']).sum()),
+                                     lift=stat['lift'], t_lift=stat['t_lift'], t_iid=stat['t_iid'],
+                                     spearman=dec_rho, trade_rho=trade_rho)
+            deciles[split_name] = dec_tbl
+        n_weeks = d_cell['wk'].nunique() if 'wk' in d_cell else np.nan
         fills_wk = np.nan
-        if len(keep_all) and pd.notna(n_weeks) and n_weeks:
-            keep_trades = sig_u[sig_u['_keep']].dropna(subset=['exit_m'])
-            kept_slots = simulate_slots(keep_trades.rename(columns={'entry_m': 'entry_m', 'exit_m': 'exit_m'}))
-            fills_wk = kept_slots.sum() / n_weeks
-        val = sig_u[sig_u.split == 'VAL']
-        val_sorted = val[val['_keep']].sort_values('net_R', ascending=False)
+        if pd.notna(n_weeks) and n_weeks:
+            keep_trades = d_cell[d_cell['_keep']].dropna(subset=['exit_m'])
+            if len(keep_trades):
+                fills_wk = simulate_slots(keep_trades).sum() / n_weeks
+        val = d_cell[d_cell.split == 'VAL']
+        val_sorted = val[val['_keep']].sort_values('net_R', ascending=False, kind='mergesort')
         trim_n = max(1, int(round(0.05 * len(val_sorted))))
         ex_top5_mean = val_sorted.iloc[trim_n:]['net_R'].mean() if len(val_sorted) > trim_n else np.nan
         drop_val_mean = val[~val['_keep']]['net_R'].mean() if len(val[~val['_keep']]) else np.nan
         ex_top5_lift = ex_top5_mean - drop_val_mean if pd.notna(ex_top5_mean) and pd.notna(drop_val_mean) else np.nan
 
-        rho_pl, _ = (np.nan, np.nan)
-        try:
-            from scipy.stats import spearmanr
-            plc_j = plc.merge(sig[['day', 'symbol', 'net_R']], on=['day', 'symbol'], how='inner')
-            rho_pl, _ = spearmanr(plc_j[col], plc_j['net_R']) if len(plc_j) > 5 else (np.nan, np.nan)
-        except Exception:
-            pass
+        # placebo: cut at ITS OWN TRAIN-H1 median; lift = kept-dropped mean net R of the
+        # matched signal's trade (joined on day, symbol, sig_entry_m), TRAIN-H2 & VAL only.
+        plc_c = plc.dropna(subset=[col]).copy()
+        plc_tr_h1 = plc_c[(plc_c.split == 'TRAIN') & (plc_c.half == 'H1')]
+        plc_cut = plc_tr_h1[col].median()
+        plc_c['_keep'] = plc_c[col] >= plc_cut
+        plc_j = plc_c.merge(sig[['day', 'symbol', 'entry_m', 'net_R']].rename(columns={'entry_m': 'sig_entry_m'}),
+                             on=['day', 'symbol', 'sig_entry_m'], how='inner')
+        rho_pl, _ = spearmanr(plc_j[col], plc_j['net_R']) if len(plc_j) > 5 else (np.nan, np.nan)
+        placebo_lift = {}
+        for split_name, mask in [('TRAIN-H2', (plc_j.split == 'TRAIN') & (plc_j.half == 'H2')),
+                                  ('VAL', plc_j.split == 'VAL')]:
+            dd = plc_j[mask]
+            k = dd[dd['_keep']]['net_R'].mean() if dd['_keep'].any() else np.nan
+            dr = dd[~dd['_keep']]['net_R'].mean() if (~dd['_keep']).any() else np.nan
+            placebo_lift[split_name] = (k - dr) if pd.notna(k) and pd.notna(dr) else np.nan
 
         pass_bar = (rows['TRAIN-H2']['lift'] >= 0.10 and rows['VAL']['lift'] >= 0.10 and
-                    rows['VAL']['t_lift'] >= 2 and fills_wk >= 3 and
-                    rows['TRAIN-H2']['spearman'] >= 0.6 and rows['VAL']['spearman'] >= 0.6 and
-                    pd.notna(ex_top5_lift) and ex_top5_lift >= 0)
+                    rows['VAL']['t_lift'] >= 2 and pd.notna(fills_wk) and fills_wk >= 3 and
+                    pd.notna(rows['TRAIN-H2']['spearman']) and rows['TRAIN-H2']['spearman'] >= 0.6 and
+                    pd.notna(rows['VAL']['spearman']) and rows['VAL']['spearman'] >= 0.6 and
+                    pd.notna(ex_top5_lift) and ex_top5_lift >= 0 and
+                    pd.notna(placebo_lift.get('VAL')) and placebo_lift['VAL'] < 0.10)
         verdict = 'PASS' if pass_bar else 'FAIL'
         log(f'{cell} cut={cut:.4f} TRAINH2_lift={rows["TRAIN-H2"]["lift"]:.3f} VAL_lift={rows["VAL"]["lift"]:.3f} '
-            f'VAL_t={rows["VAL"]["t_lift"]:.2f} fills/wk={fills_wk:.2f} rho_TH2={rows["TRAIN-H2"]["spearman"]:.2f} '
-            f'rho_VAL={rows["VAL"]["spearman"]:.2f} placebo_rho={rho_pl:.2f} ex_top5_lift={ex_top5_lift:.3f} '
-            f'verdict={verdict}')
+            f'VAL_t_cluster={rows["VAL"]["t_lift"]:.2f} VAL_t_iid={rows["VAL"]["t_iid"]:.2f} fills/wk={fills_wk:.2f} '
+            f'decile_rho_TH2={rows["TRAIN-H2"]["spearman"]:.2f} decile_rho_VAL={rows["VAL"]["spearman"]:.2f} '
+            f'placebo_rho={rho_pl:.2f} placebo_VAL_lift={placebo_lift.get("VAL", np.nan):.3f} '
+            f'ex_top5_lift={ex_top5_lift:.3f} verdict={verdict}')
         summary.append(dict(cell=cell, cut=cut, **rows, fills_wk=fills_wk, placebo_rho=rho_pl,
-                             ex_top5_lift=ex_top5_lift, verdict=verdict))
-        report_lines.append(f'## {cell} ({col})\ncut(TRAIN-H1 median)={cut:.4f}\n'
-                             f'TRAIN-H2: n={rows["TRAIN-H2"]["n"]} lift={rows["TRAIN-H2"]["lift"]:.3f} '
-                             f'spearman={rows["TRAIN-H2"]["spearman"]:.3f}\n'
-                             f'VAL: n={rows["VAL"]["n"]} lift={rows["VAL"]["lift"]:.3f} '
-                             f't={rows["VAL"]["t_lift"]:.2f} spearman={rows["VAL"]["spearman"]:.3f}\n'
-                             f'fills/week={fills_wk:.2f} placebo_spearman={rho_pl:.3f} '
-                             f'ex_top5_lift={ex_top5_lift:.3f}\nVERDICT={verdict}\n')
+                             placebo_lift=placebo_lift, ex_top5_lift=ex_top5_lift, verdict=verdict))
+        report_lines.append(
+            f'## {cell} ({col})\ncut(TRAIN-H1 median)={cut:.4f}  placebo_cut(own TRAIN-H1 median)={plc_cut:.4f}\n'
+            f'TRAIN-H2: n={rows["TRAIN-H2"]["n"]} lift={rows["TRAIN-H2"]["lift"]:.3f} '
+            f'decile_spearman={rows["TRAIN-H2"]["spearman"]:.3f} trade_spearman(info)={rows["TRAIN-H2"]["trade_rho"]:.3f}\n'
+            f'VAL: n={rows["VAL"]["n"]} lift={rows["VAL"]["lift"]:.3f} t_cluster={rows["VAL"]["t_lift"]:.2f} '
+            f't_iid={rows["VAL"]["t_iid"]:.2f} decile_spearman={rows["VAL"]["spearman"]:.3f} '
+            f'trade_spearman(info)={rows["VAL"]["trade_rho"]:.3f}\n'
+            f'fills/week={fills_wk:.2f} placebo_trade_spearman={rho_pl:.3f} '
+            f'placebo_lift TRAIN-H2={placebo_lift.get("TRAIN-H2", np.nan):.3f} VAL={placebo_lift.get("VAL", np.nan):.3f} '
+            f'(PASS additionally needs placebo VAL lift < 0.10)\n'
+            f'ex_top5_lift={ex_top5_lift:.3f}\nVERDICT={verdict}\n')
+        for split_name in ('TRAIN-H2', 'VAL'):
+            report_lines.append(f'### {cell} decile table -- {split_name} (n, mean net R)\n' +
+                                 deciles[split_name].to_string(index=False) + '\n')
 
     with open(REPORT_MD, 'w') as f:
         f.write('\n'.join(report_lines))
@@ -489,7 +564,9 @@ def main():
     sub = ap.add_subparsers(dest='cmd', required=True)
     p1 = sub.add_parser('cost-gate'); p1.add_argument('--sample', type=int, default=40)
     p2 = sub.add_parser('fetch'); p2.add_argument('--limit', type=int, default=0)
-    sub.add_parser('features')
+    p3 = sub.add_parser('features')
+    p3.add_argument('--days', type=str, default='', help='comma-separated days, limits the run (smoke test)')
+    p3.add_argument('--out', type=str, default='', help='override output CSV path (smoke test)')
     sub.add_parser('score')
     args = ap.parse_args()
     fn = {'cost-gate': cmd_cost_gate, 'fetch': cmd_fetch, 'features': cmd_features,

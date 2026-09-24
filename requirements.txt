@@ -31,3 +31,6 @@ anthropic>=0.42.0
 
 # Telegram notifications
 aiohttp>=3.9.0
+
+# Research statistics (day-clustered OLS in research/hod_ofi, research/thermo)
+statsmodels>=0.14.0
