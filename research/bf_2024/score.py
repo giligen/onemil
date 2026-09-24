@@ -10,7 +10,7 @@ from pathlib import Path
 import pandas as pd
 
 ROOT = Path('/home/ec2-user/onemil')
-STAGE2_CSV = ROOT / 'research/bf_2024/stage2_2024.csv'
+STAGE2_CSV = Path(os.environ.get('BF24_STAGE2_OUT', str(ROOT / 'research/bf_2024/stage2_2024.csv')))
 P1_BOOK_CSV = ROOT / 'research/bf_frequency/runs/P1.csv'
 REPORT = ROOT / 'research/bf_2024/REPORT.md'
 
@@ -19,8 +19,10 @@ def _r_multiple(df: pd.DataFrame) -> pd.Series:
     """R = pnl / (shares * |entry - stop|), the ramp's R basis (PREREG.md). Falls back to whatever
     R/pnl columns the Stage-2 CSV actually has, logging which path was used (no silent fallback)."""
     cols = set(df.columns)
-    if {'pnl', 'shares', 'entry_price', 'stop_price'} <= cols:
-        risk_per_share = (df['entry_price'] - df['stop_price']).abs()
+    stop_col = 'stop_price' if 'stop_price' in cols else ('stop_loss' if 'stop_loss' in cols else None)
+    if stop_col and {'pnl', 'shares', 'entry_price'} <= cols:
+        # batch_backtest's Stage-2 CSV names the stop 'stop_loss' (main-session fix 2026-09-24)
+        risk_per_share = (df['entry_price'] - df[stop_col]).abs()
         denom = (df['shares'].astype(float) * risk_per_share).replace(0, pd.NA)
         r = df['pnl'].astype(float) / denom
         print(f"[score] R via pnl/(shares*|entry-stop|), {r.isna().sum()} NA denom rows dropped")
@@ -47,7 +49,7 @@ def _day_clustered_t(df: pd.DataFrame, date_col: str, val_col: str) -> float:
 def main():
     if not STAGE2_CSV.exists():
         raise SystemExit(f"[score] ERROR: {STAGE2_CSV} missing — Stage 2 did not run or produced nothing")
-    df = pd.read_csv(STAGE2_CSV)
+    df = pd.read_csv(STAGE2_CSV, keep_default_na=False, na_values=[''])
     lines = ["# REPORT — bull-flag P1 on 2024H2 (PREREG.md cell 1,417)", ""]
     n = len(df)
     lines.append(f"Stage-2 P1 trades: n={n}")

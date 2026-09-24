@@ -38,14 +38,39 @@ BARS_DB = BF_DIR / 'bars.db'
 Y2024_BARS_DB = ROOT / 'research/day_breadth/y2024/bars.db'
 DAILY_PARQUET = ROOT / 'data/research/databento/equs_daily_2024H2.parquet'
 JUNE_PARQUET = BF_DIR / 'daily_june.parquet'
-CACHE_CSV = str(BF_DIR / 'cache_2024.csv')
-STAGE2_CSV = str(BF_DIR / 'stage2_2024.csv')
-OUT_MONTHLY_DIR = str(BF_DIR / 'backtest_results_2024')
+CACHE_CSV = os.environ.get('BF24_CACHE', str(BF_DIR / 'cache_2024.csv'))
+STAGE2_CSV = os.environ.get('BF24_STAGE2_OUT', str(BF_DIR / 'stage2_2024.csv'))
+OUT_MONTHLY_DIR = os.environ.get('BF24_OUT_MONTHLY', str(BF_DIR / 'backtest_results_2024'))
 
 SMOKE = os.environ.get('BF24_SMOKE') == '1'
 STAGE = os.environ.get('BF24_STAGE', 'both')
-START = date(2024, 7, 2)
-END = date(2024, 7, 4) if SMOKE else date(2024, 12, 31)
+START = date.fromisoformat(os.environ['BF24_START']) if os.environ.get('BF24_START') else date(2024, 7, 2)
+END = (date.fromisoformat(os.environ['BF24_END']) if os.environ.get('BF24_END')
+       else date(2024, 7, 4) if SMOKE else date(2024, 12, 31))
+
+# 2026-09-24 repair (main session): months 2-3 (Aug, Sep) failed in the first chain with "cannot commit - no
+# transaction is active" — this harness shares one SQLite connection across the runner's parallel MONTH threads.
+# BF24_SEQ_MONTHS=1 forces one month at a time (production is unaffected: it opens a connection per month).
+if os.environ.get('BF24_SEQ_MONTHS') == '1':
+    import batch.monthly_runner as _mr
+    _orig_init = _mr.MonthlyBacktestRunner.__init__
+
+    def _seq_init(self, *a, **kw):
+        kw['max_workers'] = 1
+        _orig_init(self, *a, **kw)
+    _mr.MonthlyBacktestRunner.__init__ = _seq_init
+    print('[bf2024] WARNING month-level parallelism forced to 1 (BF24_SEQ_MONTHS=1)', flush=True)
+
+# PREREG 1,417 froze "config.yaml as it configures it on 2026-09-23" — risk_cap OFF. The owner turned the live cap on
+# 2026-09-24; Stage 2 here must keep the frozen setting unless BF24_RISK_CAP=live is set explicitly.
+if os.environ.get('BF24_RISK_CAP', 'prereg') != 'live':
+    import trading.bf_risk_cap as _rcap
+
+    def _prereg_cap(_trading_cfg):
+        return _rcap.RiskCapConfig(enabled=False, max_risk_mult=2.0)
+    _rcap.load_risk_cap_config = _prereg_cap
+    print('[bf2024] WARNING risk_cap forced OFF for this run (PREREG 1,417 froze the 2026-09-23 config); '
+          'set BF24_RISK_CAP=live for the capped diagnostic', flush=True)
 
 
 def _map_sym(s: str) -> str:
