@@ -36,6 +36,33 @@ def test_filter_trades_logs_and_keeps_order(caplog):
     assert any('no known name' in r.message and 'ZZZZ' in r.message for r in caplog.records)
 
 
+def test_rgtz_excluded_by_name():
+    """2026-09-24 parity defect: live BF bought RGTZ ('Tidal Trust II Defiance
+    Daily Target 2x Short RGTI ETF') on 9/23 and lost 4R — BT Stage-2 always
+    excluded it by name; this pins the regression at the shared predicate."""
+    assert not is_bf_eligible('RGTZ', {'RGTZ': 'Tidal Trust II Defiance Daily Target 2x Short RGTI ETF'})
+
+
+def test_common_stock_kept_by_name():
+    assert is_bf_eligible('JAGX', {'JAGX': 'Jaguar Health, Inc. Common Stock'})
+
+
+def test_unknown_name_legacy_symbol_excluded_with_warning(caplog):
+    """Fallback path: no name known, but the symbol is on the legacy list."""
+    with caplog.at_level(logging.WARNING):
+        assert not is_bf_eligible('SOXL', {})
+    assert any('SOXL' in r.message and 'no known name' in r.message
+               and r.levelname == 'WARNING' for r in caplog.records)
+
+
+def test_unknown_name_other_symbol_kept_with_warning(caplog):
+    """Fallback path: no name known, symbol not on the legacy list → kept, but logged."""
+    with caplog.at_level(logging.WARNING):
+        assert is_bf_eligible('ZQFAKEBF', {})
+    assert any('ZQFAKEBF' in r.message and 'no known name' in r.message
+               and r.levelname == 'WARNING' for r in caplog.records)
+
+
 def test_offline_name_sources_cover_the_new_wrappers():
     """The real dumps must know the post-April wrappers (the whole point)."""
     names = load_names()

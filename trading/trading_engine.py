@@ -29,6 +29,7 @@ from trading.exit_reasons import ExitReason
 from trading.pattern_detector import BullFlagDetector
 from trading.trade_planner import TradePlanner, TradePlan
 from trading.news_kill_guard import news_kill_decision
+from trading.bf_universe_filter import is_bf_eligible
 from trading.bf_vwap_gate import load_vwap_gate_config, passes_vwap_gate
 from trading.bf_risk_cap import load_risk_cap_config, cap_usd as _risk_cap_usd, capped_shares
 from trading.order_executor import OrderExecutor
@@ -264,6 +265,11 @@ class TradingEngine:
                     })
 
         self._qualified_symbols: Set[str] = set()
+        # BF wrapper-guard (2026-09-24, RGTZ parity defect): asset-name
+        # lookup cache and once-per-day exclusion-log dedup. See
+        # `_bf_wrapper_excluded`.
+        self._bf_name_cache: Dict[str, Optional[str]] = {}
+        self._bf_excluded_logged: Set[str] = set()
         self._traded_symbols: Set[str] = set()
         self._patterns_detected: int = 0
         self._patterns_traded: int = 0
@@ -1251,6 +1257,46 @@ class TradingEngine:
         except Exception as e:
             logger.error(f"Failed to refresh SPY regime data: {e}")
 
+    def _bf_wrapper_excluded(self, symbol: str) -> bool:
+        """True if `symbol` is a leveraged/inverse wrapper BF must not trade.
+
+        2026-09-24 parity fix: live BF bought RGTZ (a 2x short wrapper) and
+        lost 4R on 9/23 — the BT Stage-2 filter excludes wrappers by name
+        (`trading/bf_universe_filter`) but live never gated the universe.
+        This is the single choke point (`_qualified_symbols`, populated only
+        from `on_stock_qualified`) feeding both the batch pattern check and
+        the RT instant bar callback, so gating here covers both — ONE
+        predicate shared with the backtest, by construction.
+
+        The asset name comes from the live Alpaca lookup, cached per symbol
+        for the session (`_bf_name_cache`, cleared in `reset_daily`). A
+        lookup failure is logged (WARNING) by `AlpacaClient.get_asset_name`
+        itself and again by `is_bf_eligible`'s own fallback-to-symbol-list
+        path — both are fallback paths and both must log.
+        """
+        if symbol not in self._bf_name_cache:
+            try:
+                self._bf_name_cache[symbol] = self.alpaca.get_asset_name(symbol)
+            except Exception as e:
+                logger.warning(
+                    f"{symbol}: BF wrapper-name lookup raised {e} — "
+                    f"falling back to the legacy leveraged-ETF symbol list"
+                )
+                self._bf_name_cache[symbol] = None
+        name = self._bf_name_cache[symbol]
+        # Live name first; if the lookup failed (None), fall back to the BT's own offline name dumps (names=None ->
+        # bf_universe_filter.load_names(), the exact source Stage-2 uses) and only then to the legacy symbol list
+        # (is_bf_eligible logs that last fallback at WARNING).
+        if is_bf_eligible(symbol, {symbol: name} if name else None):
+            return False
+        if symbol not in self._bf_excluded_logged:
+            self._bf_excluded_logged.add(symbol)
+            logger.info(
+                f'BF UNIVERSE: {symbol} excluded — "{name}" is a leveraged/inverse '
+                f'wrapper (BT Stage-2 parity, bf_universe_filter)'
+            )
+        return True
+
     def on_stock_qualified(self, symbol: str, news_catalyst: bool = None,
                            news_headline: str = None, news_reason: str = None,
                            news_category: str = None,
@@ -1271,6 +1317,12 @@ class TradingEngine:
                 today. Used by the two-tier filter to classify A-tier vs Extras
                 at entry time. None = scanner didn't provide (older callers).
         """
+        # BF wrapper guard FIRST (2026-09-24, RGTZ parity defect) — a wrapper
+        # must never enter _qualified_symbols, so it never reaches the batch
+        # pattern check or the RT instant bar callback (both keyed off it).
+        if self._bf_wrapper_excluded(symbol):
+            return
+
         # Two-tier filter: keep running max across re-qualifications.
         if max_intraday_change_pct is not None:
             existing = self._qualified_max_intraday.get(symbol)
@@ -4808,6 +4860,8 @@ class TradingEngine:
         self._notified_setups.clear()
         self._margin_cache = {}  # marginability cache is per-day (Fix 4)
         self._margin_persisted = set()  # DB-write tracker, per-day
+        self._bf_name_cache = {}  # BF wrapper-guard name cache, per-day
+        self._bf_excluded_logged = set()  # once-per-symbol-per-day exclusion log
         self.position_manager.reset_daily()
         # Roll BF kill-rail notify latches: daily every day; weekly on
         # ISO-week change; month key on month change. P&L itself is

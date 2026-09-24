@@ -30,6 +30,7 @@ NAME_SOURCES = (
     os.path.join(ROOT, 'data', 'research', 'orb_asset_class_map_20260711.csv'),
 )
 _NAMES: Optional[Dict[str, str]] = None
+_WARNED_UNKNOWN: Set[str] = set()
 
 
 def load_names(paths=NAME_SOURCES) -> Dict[str, str]:
@@ -52,10 +53,24 @@ def load_names(paths=NAME_SOURCES) -> Dict[str, str]:
 
 
 def is_bf_eligible(symbol: str, names: Optional[Dict[str, str]] = None) -> bool:
-    """True if live BF could trade this symbol (common stock, not a wrapper)."""
+    """True if live BF could trade this symbol (common stock, not a wrapper).
+
+    ONE predicate shared by BT (offline name dumps) and live (the Alpaca
+    asset-name lookup, cached per symbol per session by the caller). Unknown
+    name (lookup failed, or the offline dump is stale) falls back to the
+    legacy `AlpacaClient._LEVERAGED_ETF_SYMBOLS` symbol list — a fallback
+    path, so it logs a WARNING once per symbol per process (CLAUDE.md: all
+    fallback code paths must log).
+    """
     names = names if names is not None else load_names()
     name = names.get(symbol)
     if name is None:
+        if symbol not in _WARNED_UNKNOWN:
+            _WARNED_UNKNOWN.add(symbol)
+            logger.warning(
+                f"bf_universe_filter: {symbol} has no known name — falling back to the "
+                f"legacy leveraged-ETF symbol list (on_list={symbol in AlpacaClient._LEVERAGED_ETF_SYMBOLS})"
+            )
         return symbol not in AlpacaClient._LEVERAGED_ETF_SYMBOLS
     return AlpacaClient._is_common_stock(symbol, name)
 
