@@ -37,3 +37,32 @@ validated against `runB_true` with the veto ON): **2025 +0.106 R/fill (n 211, t 
 t 2.29)**. The frozen FLAT verdict and its consequence are unchanged (they are absolute thresholds), but the reading
 "a coin flip outside 2025-26 vs +0.27 inside" was wrong: per fill ORB is ~+0.1 R wherever measured (2024H2 ≈ 0); the
 regime changes how OFTEN it trades.
+
+## RERUN 2026-09-25 under the live exit rule (bars-source defect fixed)
+`research/orb_verify/SPEC_RESIM_FIX.md`: the runs above were silently priced by the LEGACY 2R-target / range-low-stop
+/ time-stop simulator (old `book_141{8,9}.csv`, kept, exit_reason ∈ {stop, target, eod} only) because
+`study_orb_pipeline_static_lock.py` hardcoded `data/cache.db`, which has no bars before 2025-01-02 — every entered row
+silently fell back to the features CSV's pre-computed legacy `pnl`. Fixed: `ORB_BT_BARS_DB` / `ORB_BT_DAILY_SOURCE`
+env vars, missing-bars rows now EXCLUDED + logged ERROR, `RESIM:` counts printed, exits non-zero above a 2% miss rate
+(tests/test_orb_pipeline_bars_source.py 12/12). Re-run with `ORB_BT_BARS_DB=research/orb_2023/bars.db`,
+`ORB_BT_DAILY_SOURCE=research/orb_2023/daily_alpaca.parquet`, `ORB_CATALYST_VETO=0` → `book_141{8,9}_liveexit.csv`
+(frozen scorer `score_2023.py`, unchanged verdict logic, pointed at the new books via a `--book-suffix` argument).
+
+**Parity**: cell 1418 n_resimmed 2644/2644 entered rows (100%), atr14_hits 4508/4567 (98.7%); cell 1419 n_resimmed
+870/870 (100%), atr14_hits 1371/1378 (99.5%) — both clear the ≥98%/≥95% bar. `exit_reason` sets are now
+`{tag_bb, lock, scale_lock, scale_eod, tag_b1, stop, eod}` (1418) and `{tag_bb, scale_eod, stop}` (1419) — a subset of
+`research/thermo/book_2025_26.csv`'s live-rule set, not the legacy stop/target/eod-only set. Fill counts unchanged
+(106/171 and 10/10) since the resim only re-prices the exit, not entry/selection.
+
+| Cell | old (legacy exit) R/fill, t | new (live exit) R/fill, t | frozen verdict (unchanged) |
+|---|---|---|---|
+| 1418 | +0.089, t +1.55 | **+0.015, t +0.30** | FLAT |
+| 1419 | -0.210, t -1.42 | **-0.014, t -0.07** | FLAT (was NEGATIVE) |
+| Pooled 2023-01..2024-12 (1418 + 2024H2 book_1415) | +0.055 ± 0.046, t +1.19 | **+0.020 ± 0.043, t +0.48** | — |
+
+Both cells move toward zero under the live exit rule (static lock / ATR floor / scale-out cuts winners short relative
+to the legacy 2R target). **1419's verdict changes from NEGATIVE to FLAT** — the $30–50 add-on pool's live-rule
+out-of-regime read is now "no information" rather than "actively bad," though it stays dry-only per the 9/24 decision
+(n=10 is too small to move that call either way). 1418 stays FLAT; the live ramp's 40-live-fills-before-advance
+consequence (`orb_ramp_check.py`) is unaffected — it did not depend on the legacy-priced number. Full new report:
+`research/orb_2023/REPORT_liveexit.md`.

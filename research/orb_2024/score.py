@@ -1,6 +1,8 @@
 """Score cells 1,415-1,416 (PREREG.md) on the 2024H2 ORB book output, beside 2025 runB_true (cell 1,415 only).
 Usage: python3 research/orb_2024/score.py
 """
+import os
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -56,8 +58,12 @@ def fmt(s: dict) -> str:
 
 
 def main():
+    # ORB_VERIFY_BOOK_SUFFIX (e.g. "_liveexit") points the scorer at book_{cid}{suffix}.csv and writes
+    # REPORT{suffix}.md instead of the frozen REPORT.md. Verdict logic (verdict(), cell_stats()) is untouched.
+    suffix = sys.argv[1] if len(sys.argv) > 1 else os.environ.get('ORB_VERIFY_BOOK_SUFFIX', '')
+    out_name = f'REPORT{suffix}.md' if suffix else 'REPORT.md'
     lines = ['# REPORT — cells 1,415-1,416, 2024H2 ORB holdout (PREREG.md)', '']
-    for cid, path in (('1415', OUT / 'book_1415.csv'), ('1416', OUT / 'book_1416.csv')):
+    for cid, path in (('1415', OUT / f'book_1415{suffix}.csv'), ('1416', OUT / f'book_1416{suffix}.csv')):
         if not path.exists():
             lines.append(f'## Cell {cid}: MISSING {path}\n')
             continue
@@ -70,7 +76,7 @@ def main():
         s25 = cell_stats(df25, 'runB_true 2025 (beside cell 1,415)')
         lines.append(f'## 2025 comparison (runB_true, production seed)\n\n- {fmt(s25)}\n')
     report = '\n'.join(lines)
-    (OUT / 'REPORT.md').write_text(report + '\n')
+    (OUT / out_name).write_text(report + '\n')
     print(report)
 
 

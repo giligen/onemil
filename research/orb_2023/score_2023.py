@@ -7,6 +7,7 @@ Writes research/orb_2023/REPORT.md.
 
 Usage: python3 research/orb_2023/score_2023.py
 """
+import os
 import sys
 from pathlib import Path
 
@@ -41,10 +42,15 @@ def verdict(s, h_2023, h_2024):
 
 
 def main():
+    # ORB_VERIFY_BOOK_SUFFIX (e.g. "_liveexit") points the scorer at book_{cell}{suffix}.csv and the 2024
+    # pool reference at book_1415{suffix}.csv, writing REPORT{suffix}.md instead of the frozen REPORT.md.
+    # Verdict logic (verdict(), stats()) is untouched.
+    suffix = sys.argv[1] if len(sys.argv) > 1 else os.environ.get('ORB_VERIFY_BOOK_SUFFIX', '')
+    out_name = f'REPORT{suffix}.md' if suffix else 'REPORT.md'
     lines = ['# REPORT — live ORB on 2023-01 .. 2024-06, point-in-time universe (cells 1,418–1,419)', '']
     weeks = None
     for cell in ('1418', '1419'):
-        p = HERE / f'book_{cell}.csv'
+        p = HERE / f'book_{cell}{suffix}.csv'
         if not p.exists():
             lines.append(f'Cell {cell}: MISSING book ({p})')
             continue
@@ -67,13 +73,13 @@ def main():
                   f'green months {(m > 0).mean():.0%} of {len(m)}',
                   f'- **VERDICT (frozen): {v}**', '']
         if cell == '1418':
-            b24, _ = book(ROOT / 'research/orb_2024/book_1415.csv')
+            b24, _ = book(ROOT / f'research/orb_2024/book_1415{suffix}.csv')
             pool = pd.concat([e[['R', 'date']], b24[['R', 'date']]], ignore_index=True)
             ps = stats(pool.R, pool.date)
             se = ps['mean'] / ps['t_cluster'] if ps.get('t_cluster') else float('nan')
             lines += [f'- **Pooled out-of-regime ORB (2023-01 .. 2024-12, same code): n {ps["n"]}, {ps["mean"]:+.3f} R/fill '
                       f'± {se:.3f} (t {ps["t_cluster"]:+.2f})** — vs 2025 +0.272 (n 127)', '']
-    (HERE / 'REPORT.md').write_text('\n'.join(lines) + '\n')
+    (HERE / out_name).write_text('\n'.join(lines) + '\n')
     print('\n'.join(lines))
 
 

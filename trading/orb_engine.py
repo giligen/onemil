@@ -298,6 +298,14 @@ class ORBEngine:
 
         # Master kill switch — matches orb.yaml `strategy.enabled`
         self.enabled = bool(cfg.get('strategy', {}).get('enabled', False))
+        # Production dry-run mode (docs/orb_dry_run_spec_20260925.md, 9/25):
+        # full pipeline runs (universe/scoring/vetoes/ranking/slots) but at
+        # the submit call it logs `[ORB DRY] WOULD BUY ...` + ledger row
+        # instead of calling _submit_entry — zero orders, zero DB rows.
+        # Mirrors addon_pools_dry_run's mechanism (one submit call, dry
+        # branch), scoped to the 'production' pool. Requires `enabled: true`
+        # to have any effect (an engine that's off never reaches submit).
+        self.strategy_dry_run = bool(cfg.get('strategy', {}).get('dry_run', False))
 
         # Config sections
         uni = cfg.get('universe', {})
@@ -358,6 +366,19 @@ class ORBEngine:
             self.addon_pools_enabled, self.addon_pools_dry_run,
             [p.get('name') for p in self.addon_pools],
         )
+        # WARM-phase seed prewarming (docs/orb_latency_fix_spec_20260925.md).
+        # Default OFF until the owner's GO. When True, build_orb_universe_
+        # from_snapshots reuses snapshots already fetched on an earlier tick
+        # instead of re-fetching the FULL candidate list every ~60s tick —
+        # the 09:35 tick that gates the day's first submit measured 55-64s
+        # (LATENCY TRIPWIRE, 9/22-9/23) almost entirely inside that one
+        # bulk REST call. Flag false preserves the exact pre-9/25 behavior.
+        execution_cfg = cfg.get('execution', {}) if isinstance(cfg.get('execution', {}), dict) else {}
+        self.prewarm_seed_enabled = bool(execution_cfg.get('prewarm_seed', False))
+        self._snapshot_cache: Dict[str, Dict] = {}   # symbol -> raw snapshot dict
+        self._snapshot_cache_date: Optional[str] = None
+        logger.info(f"ORB WARM-phase seed prewarming: prewarm_seed={self.prewarm_seed_enabled}")
+
         # Day-scoped: symbol -> 'production' | pool.name (set by
         # build_orb_universe_from_snapshots; cleared in reset_daily).
         self._symbol_pool: Dict[str, str] = {}
@@ -777,6 +798,94 @@ class ORBEngine:
         )
         return len(self.universe)
 
+    def _get_snapshots_warm(self, candidate_symbols: List[str]) -> Dict[str, Dict]:
+        """WARM-phase snapshot cache (flag: orb.yaml execution.prewarm_seed).
+
+        docs/orb_latency_fix_spec_20260925.md: the 09:35 hot path must be
+        pure in-memory. ORB ticks run every ~60s from market open, and each
+        tick used to re-fetch Alpaca snapshots for the FULL candidate list —
+        including the 09:35 tick that gates the day's first submit (measured
+        55.3s and 64.1s on 9/22 and 9/23, LATENCY TRIPWIRE). This caches
+        every snapshot fetched on an earlier tick and fetches ONLY symbols
+        not yet warmed (new qualifiers). Byte-identical admission logic in
+        the caller (build_orb_universe_from_snapshots) is untouched — only
+        the SOURCE of the snapshot dict differs, so this cannot change which
+        symbols are admitted, only when their snapshot was captured.
+
+        Cache resets on a UTC date rollover so a stale prior-day snapshot can
+        never leak into today's admission decision.
+
+        A cached snapshot is reused ONLY if it is COMPLETE: open > 0 and its
+        daily_bar_date is today (ET). A symbol that had not printed yet when
+        first cached (pre-open snap: open == 0, or a daily bar still dated
+        yesterday) would otherwise keep that stale dict all day — the old
+        (flag-off) path re-fetches every tick and would have picked up the
+        real open once it printed; an incomplete cache entry must get the
+        same treatment, so it is put back in the re-fetch list every tick
+        until it completes (review finding, 2026-09-25).
+        """
+        today = datetime.now(timezone.utc).date().isoformat()
+        if self._snapshot_cache_date != today:
+            if self._snapshot_cache:
+                logger.info(
+                    f"ORB prewarm cache: day rolled ({self._snapshot_cache_date} "
+                    f"-> {today}), clearing {len(self._snapshot_cache)} cached snapshots"
+                )
+            self._snapshot_cache = {}
+            self._snapshot_cache_date = today
+
+        try:
+            from zoneinfo import ZoneInfo
+            today_et = datetime.now(timezone.utc).astimezone(
+                ZoneInfo('America/New_York')).date().isoformat()
+        except Exception:
+            _n = datetime.now(timezone.utc)
+            today_et = (_n - timedelta(hours=_et_offset_hours(_n))).date().isoformat()
+
+        def _is_complete(snap: Dict) -> bool:
+            if not isinstance(snap, dict):
+                return False
+            try:
+                open_price = float(snap.get('open', 0) or 0)
+            except (TypeError, ValueError):
+                return False
+            return open_price > 0 and snap.get('daily_bar_date') == today_et
+
+        stale_cached = [
+            s for s in candidate_symbols
+            if s in self._snapshot_cache and not _is_complete(self._snapshot_cache[s])
+        ]
+        if stale_cached:
+            logger.warning(
+                f"ORB prewarm cache STALE: {len(stale_cached)} cached snapshot(s) "
+                f"incomplete (open<=0 or daily_bar_date != {today_et}) — "
+                f"re-fetching this tick: {stale_cached[:10]}"
+                f"{'...' if len(stale_cached) > 10 else ''}"
+            )
+        uncached = [
+            s for s in candidate_symbols
+            if s not in self._snapshot_cache or s in stale_cached
+        ]
+        if uncached:
+            _t0 = time.time()
+            try:
+                fresh = self.alpaca.get_snapshots(uncached) \
+                    if hasattr(self.alpaca, 'get_snapshots') else {}
+            except Exception as e:
+                logger.warning(
+                    f"ORB prewarm: get_snapshots failed for {len(uncached)} "
+                    f"uncached symbols: {e}"
+                )
+                fresh = {}
+            elapsed = time.time() - _t0
+            logger.warning(
+                f"ORB prewarm cache MISS: {len(uncached)}/{len(candidate_symbols)} "
+                f"symbols not yet warmed — fetched fresh in {elapsed:.2f}s "
+                f"(cache already had {len(self._snapshot_cache)})"
+            )
+            self._snapshot_cache.update(fresh or {})
+        return {s: self._snapshot_cache[s] for s in candidate_symbols if s in self._snapshot_cache}
+
     def build_orb_universe_from_snapshots(self, candidate_symbols: Optional[List[str]] = None) -> List[str]:
         """Build ORB universe by querying Alpaca snapshots matching BT criteria.
 
@@ -795,8 +904,11 @@ class ORBEngine:
             logger.info("ORB: build_orb_universe_from_snapshots called with no candidates")
             return []
         try:
-            snapshots = self.alpaca.get_snapshots(list(candidate_symbols)) \
-                if hasattr(self.alpaca, 'get_snapshots') else {}
+            if self.prewarm_seed_enabled:
+                snapshots = self._get_snapshots_warm(list(candidate_symbols))
+            else:
+                snapshots = self.alpaca.get_snapshots(list(candidate_symbols)) \
+                    if hasattr(self.alpaca, 'get_snapshots') else {}
         except Exception as e:
             logger.warning(f"ORB: get_snapshots failed: {e}")
             return []
@@ -2237,7 +2349,7 @@ class ORBEngine:
         ]
         submitted: List[str] = list(self._run_pool_selection(
             'production', production_syms, symbols_entered_today,
-            feature_providers, dry_run=False, t_rank=_t_rank))
+            feature_providers, dry_run=self.strategy_dry_run, t_rank=_t_rank))
 
         if self.addon_pools_enabled:
             for pool_cfg in self.addon_pools:
@@ -2500,6 +2612,49 @@ class ORBEngine:
                 cand.rejected_reason = 'addon_dry_run'
                 cand.plan_submitted = True
                 continue
+            if pool_label == 'production' and dry_run:
+                # docs/orb_dry_run_spec_20260925.md: production dry-run —
+                # zero orders, zero DB rows, no StopMonitor registration.
+                # Same mechanism as the addon branch above (one submit
+                # call, dry branch at the point of submission), but the
+                # log/ledger carries the fields the latency rehearsal needs
+                # (quote + would-be submit timestamp) that addon dry-run
+                # does not.
+                bid, ask = 0.0, 0.0
+                try:
+                    quote = (self.alpaca.get_latest_quote(sym)
+                              if hasattr(self.alpaca, 'get_latest_quote') else None)
+                    if quote:
+                        bid = float(quote.get('bid_price', 0.0) or 0.0)
+                        ask = float(quote.get('ask_price', 0.0) or 0.0)
+                except Exception as e:
+                    logger.warning(f"[ORB DRY] {sym} quote fetch failed ({e}) — logging bid/ask=0")
+                et_now = self._et_now()
+                ts_et = et_now.strftime('%H:%M:%S.%f')[:-3]
+                logger.info(
+                    f"[ORB DRY] WOULD BUY {sym} stop ${plan.range_high:.2f} "
+                    f"limit ${plan.entry_price:.2f} shares {plan.shares} "
+                    f"risk ${plan.total_risk:.2f} | quote {bid:.2f}/{ask:.2f} "
+                    f"at {ts_et} ET"
+                )
+                if self.notify_on_entry and self.notifier:
+                    self._notify(
+                        f"[ORB DRY] WOULD BUY {sym} x{plan.shares} "
+                        f"@ stop-limit ${plan.entry_price:.2f} "
+                        f"(stop ${plan.range_high:.2f}, risk ${plan.total_risk:.2f})"
+                    )
+                self._append_dry_ledger_row(
+                    sym=sym, ts_et=et_now, trigger=plan.range_high,
+                    limit=plan.entry_price, shares=plan.shares,
+                    risk_usd=plan.total_risk, bid=bid, ask=ask,
+                    composite=plan.composite_score, quintile=plan.quintile,
+                    pool=pool_label,
+                )
+                cand.rejected_reason = 'production_dry_run'
+                cand.plan_submitted = True
+                self._record_latency_phase('rank_and_submit', time.time() - t_rank)
+                self._check_first_submit_latency()
+                continue
             order_id = self._submit_entry(plan)
             if order_id:
                 cand.plan_submitted = True
@@ -2559,6 +2714,35 @@ class ORBEngine:
             # Set LAST so a raise above doesn't silently suppress the report
             # on a later submit, and so phase accumulation stops here.
             self._first_submit_latency_logged = True
+
+    def _append_dry_ledger_row(
+            self, sym: str, ts_et: datetime, trigger: float, limit: float,
+            shares: int, risk_usd: float, bid: float, ask: float,
+            composite: float, quintile: str, pool: str) -> None:
+        """Append one row to logs/orb_dry_ledger.csv (docs/orb_dry_run_spec_20260925.md).
+
+        Never raises — a ledger-write failure must not block the (already
+        logged) WOULD BUY decision. Header written once if the file is new.
+        """
+        try:
+            import csv as _csv
+            from pathlib import Path as _Path
+            path = _Path(__file__).resolve().parent.parent / 'logs' / 'orb_dry_ledger.csv'
+            path.parent.mkdir(parents=True, exist_ok=True)
+            is_new = not path.exists()
+            with open(path, 'a', newline='', encoding='utf-8') as fh:
+                w = _csv.writer(fh)
+                if is_new:
+                    w.writerow(['date', 'symbol', 'would_submit_ts_et', 'trigger',
+                                'limit', 'shares', 'risk_usd', 'bid', 'ask',
+                                'composite', 'quintile', 'pool'])
+                w.writerow([
+                    ts_et.strftime('%Y-%m-%d'), sym, ts_et.strftime('%H:%M:%S.%f')[:-3],
+                    f"{trigger:.4f}", f"{limit:.4f}", shares, f"{risk_usd:.2f}",
+                    f"{bid:.4f}", f"{ask:.4f}", f"{composite:.4f}", quintile, pool,
+                ])
+        except Exception as e:
+            logger.warning(f"[ORB DRY] ledger write failed for {sym} ({e})")
 
     def _news_fetch_needed(self) -> bool:
         """Single source of truth for whether to fetch premarket news flags.
@@ -5004,6 +5188,8 @@ class ORBEngine:
         self.universe_date = None
         self._bar_windows.clear()
         self._feature_context_cache = {}  # re-fetched next day with T-1 = today
+        self._snapshot_cache = {}  # WARM-phase cache (prewarm_seed) — re-warmed next day
+        self._snapshot_cache_date = None
         self.daily_pnl = 0.0
         self.daily_loss_limit_logged = False
         self.daily_n_placed = 0

@@ -95,6 +95,20 @@ def bt_parity_filter(client, seed):
     return kept, rejected, missing
 
 
+def _live_submitted_symbols(submitted_lines, dry_lines):
+    """Union of real 'ORB ENTRY SUBMITTED' picks and dry-run
+    '[ORB DRY] WOULD BUY' picks for one day (docs/orb_dry_run_spec_20260925.md).
+
+    Pure function (no journalctl I/O) so the dry-line parsing is unit
+    testable directly. Addon-pool '[ORB+ DRY]' lines are never passed in
+    here (main() filters on the literal '[ORB DRY] WOULD BUY' prefix), so
+    they stay excluded exactly as before this mode existed.
+    """
+    return sorted(
+        {l.split('ORB ENTRY SUBMITTED: ')[1].split()[0] for l in submitted_lines}
+        | {l.split('WOULD BUY ')[1].split()[0] for l in dry_lines})
+
+
 def journal_lines(pattern, since='13:25'):
     today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     try:
@@ -167,8 +181,15 @@ def main():
         | {l.split('ORB: ')[1].split()[0]
            for l in journal_lines('below filter threshold')
            if 'ORB: ' in l})
-    live_submitted = sorted({l.split('ORB ENTRY SUBMITTED: ')[1].split()[0]
-                             for l in journal_lines('ORB ENTRY SUBMITTED')})
+    # docs/orb_dry_run_spec_20260925.md: a dry-run week never emits 'ORB
+    # ENTRY SUBMITTED' (no order is placed), so the parity observer must
+    # also count '[ORB DRY] WOULD BUY <sym> ...' lines as picks, or every
+    # dry day reads as zero live picks vs the BT book. '[ORB+ DRY]' (addon
+    # pools) lines do not match this literal prefix, so they stay excluded
+    # here exactly as before.
+    live_submitted = _live_submitted_symbols(
+        journal_lines('ORB ENTRY SUBMITTED'),
+        journal_lines('[ORB DRY] WOULD BUY'))
     seed_lines = journal_lines('ORB universe seed')[-2:]
     snap_lines = journal_lines('Fetched snapshots for')[-4:]
 

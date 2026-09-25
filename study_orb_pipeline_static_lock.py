@@ -9,7 +9,9 @@ pipeline on the corrected per-trade pnl.
 from __future__ import annotations
 
 import glob
+import logging
 import os
+import sqlite3
 import sys
 from datetime import timedelta
 
@@ -19,6 +21,74 @@ from trading.orb_csv import read_orb_csv  # ticker-safe reader (NA/NAN/NULL are 
 sys.path.insert(0, os.path.dirname(__file__))
 from persistence.database import Database
 from study_orb import _bars_to_df, OUT_DIR, OrbTrade
+
+logging.basicConfig(level=logging.INFO, format='%(levelname)s %(name)s: %(message)s')
+logger = logging.getLogger(__name__)
+
+# 2026-09-25 (research/orb_verify/SPEC_RESIM_FIX.md): the bars-source and
+# daily-ATR source are overridable so out-of-regime re-runs (research/orb_2023,
+# research/orb_2024) don't SILENTLY fall back to the legacy features-CSV pnl
+# when data/cache.db has no coverage for the symbol-day (cache.db starts
+# 2025-01-02). Default = production cache.db (byte-identical to before).
+BARS_DB_PATH = os.environ.get('ORB_BT_BARS_DB', 'data/cache.db')
+DAILY_SOURCE = os.environ.get('ORB_BT_DAILY_SOURCE')  # None => daily_bars table of BARS_DB_PATH
+MAX_MISSING_BARS_FRAC = 0.02
+ALLOW_MISSING_BARS = os.environ.get('ORB_BT_ALLOW_MISSING_BARS', '0') == '1'
+_MISSING_BARS_LOG_CAP = 20
+
+
+def missing_bars_gate_exceeded(n_missing_bars, n_entered, allow_override=False) -> bool:
+    """True => the bars source is too incomplete to trust this book (>2%
+    of entered symbol-days have no bars) and the pipeline must exit
+    non-zero, unless ORB_BT_ALLOW_MISSING_BARS=1 (allow_override)."""
+    if allow_override or not n_entered:
+        return False
+    return (n_missing_bars / n_entered) > MAX_MISSING_BARS_FRAC
+
+
+def _load_bars_bulk(pairs, bars_db_path):
+    """{(symbol, date) -> list[bar dict]} for 1-min bars, schema-detected.
+
+    Production `data/cache.db` -> Database.get_intraday_bars_bulk (table
+    intraday_bars_1min). Research dbs (research/orb_2023/bars.db,
+    research/orb_2024's y2024/bars.db) use the bars_sip.db/bars_rth.db
+    schema instead: bars(symbol, day, t ISO-UTC, o, h, l, c, v)
+    (research/orb_2023/fetch_minutes.py). Never touches data/cache.db
+    except read-only regardless of which path is used."""
+    if not pairs:
+        return {}
+    con = sqlite3.connect(f'file:{bars_db_path}?mode=ro', uri=True)
+    try:
+        tables = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+    finally:
+        con.close()
+    if 'intraday_bars_1min' in tables:
+        db = Database(db_path=bars_db_path)
+        raw = db.get_intraday_bars_bulk(pairs)
+        db.close()
+        return raw
+    if 'bars' not in tables:
+        raise SystemExit(
+            f"FATAL: {bars_db_path} has neither intraday_bars_1min nor bars "
+            f"table — cannot source minute bars (ORB_BT_BARS_DB)")
+    con = sqlite3.connect(f'file:{bars_db_path}?mode=ro', uri=True)
+    out = {}
+    try:
+        for sym, day in pairs:
+            cur = con.execute(
+                "SELECT t, o, h, l, c, v FROM bars WHERE symbol=? AND day=? ORDER BY t",
+                (sym, day))
+            rows = cur.fetchall()
+            if not rows:
+                continue
+            out[(sym, day)] = [
+                {'timestamp': t, 'open': o, 'high': h, 'low': l, 'close': c, 'volume': v}
+                for (t, o, h, l, c, v) in rows
+            ]
+    finally:
+        con.close()
+    return out
 
 # 2026-09-05 entered-inclusive book (PFSA 8/31 lesson). The features CSV
 # now carries candidates whose breakout never fired (`entered=0`,
@@ -451,28 +521,50 @@ def simulate_winner_stack(bars, entry_price, range_high, range_low, entry_time,
     return entry_price * (1 + ret), f'scale_{run_rsn}'
 
 
-def build_atr14_lookup(pairs, db_path='data/cache.db'):
+def build_atr14_lookup(pairs, db_path='data/cache.db', daily_source=None):
     """{(symbol, 'YYYY-MM-DD') -> Optional[float]} — ATR14 ending T−1 from
-    cache daily_bars, via the SHARED trading.orb_winner_stack.atr14_t1 (the
+    daily bars, via the SHARED trading.orb_winner_stack.atr14_t1 (the
     frozen ≥15-bars/fail-open rule; P0-6.1). One daily-history load per
-    symbol; per-date slice = bars strictly before the trade date."""
-    import sqlite3 as _sqlite3
+    symbol; per-date slice = bars strictly before the trade date.
+
+    `daily_source=None` (default): the daily_bars table of `db_path` (cache.db
+    parity, unchanged behaviour). A path ending .parquet (ORB_BT_DAILY_SOURCE,
+    2026-09-25 SPEC_RESIM_FIX.md): columns (bar_date, symbol, open, high,
+    low, close, volume) — for out-of-regime re-runs where the bars db has no
+    daily_bars table (e.g. research/orb_2023/daily_alpaca.parquet)."""
+    import bisect as _bisect
     out = {}
-    con = _sqlite3.connect(db_path)
     by_sym = {}
     for sym, day in pairs:
         by_sym.setdefault(sym, set()).add(day)
-    for sym, days in sorted(by_sym.items()):
-        d = pd.read_sql(
-            "SELECT bar_date, high, low, close FROM daily_bars "
-            "WHERE symbol=? ORDER BY bar_date", con, params=(sym,))
-        dates = d['bar_date'].astype(str).tolist()
-        import bisect as _bisect
-        for day in days:
-            idx = _bisect.bisect_left(dates, day)   # bars strictly before day
-            sl = d.iloc[max(0, idx - 40):idx]
-            out[(sym, day)] = atr14_t1(sl)
-    con.close()
+
+    if daily_source and str(daily_source).endswith('.parquet'):
+        daily_all = pd.read_parquet(daily_source, columns=[
+            'bar_date', 'symbol', 'high', 'low', 'close'])
+        daily_all['bar_date'] = daily_all['bar_date'].astype(str)
+        daily_all = daily_all.sort_values(['symbol', 'bar_date'])
+        for sym, days in sorted(by_sym.items()):
+            d = daily_all[daily_all['symbol'] == sym]
+            dates = d['bar_date'].tolist()
+            for day in days:
+                idx = _bisect.bisect_left(dates, day)
+                sl = d.iloc[max(0, idx - 40):idx]
+                out[(sym, day)] = atr14_t1(sl)
+        return out
+
+    con = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+    try:
+        for sym, days in sorted(by_sym.items()):
+            d = pd.read_sql(
+                "SELECT bar_date, high, low, close FROM daily_bars "
+                "WHERE symbol=? ORDER BY bar_date", con, params=(sym,))
+            dates = d['bar_date'].astype(str).tolist()
+            for day in days:
+                idx = _bisect.bisect_left(dates, day)   # bars strictly before day
+                sl = d.iloc[max(0, idx - 40):idx]
+                out[(sym, day)] = atr14_t1(sl)
+    finally:
+        con.close()
     return out
 
 
@@ -550,9 +642,7 @@ def main():
     print(f"Loading bars for {len(pairs)} pairs...")
     raw_bars = {}
     if pairs:
-        db = Database(db_path='data/cache.db')
-        raw_bars = db.get_intraday_bars_bulk(pairs)
-        db.close()
+        raw_bars = _load_bars_bulk(pairs, BARS_DB_PATH)
     # Pop while converting — see study_orb_features.py: holding the raw lists
     # and their DataFrames simultaneously doubles peak memory on the full
     # candidate walk. Behaviour-neutral.
@@ -571,7 +661,7 @@ def main():
     if bt_cfg['atr_floor_enabled']:
         print("Winner stack: building ATR14 lookup (shared atr14_t1, "
               "cache daily_bars)...")
-        atr_lookup = build_atr14_lookup(pairs)
+        atr_lookup = build_atr14_lookup(pairs, db_path=BARS_DB_PATH, daily_source=DAILY_SOURCE)
         n_avail = sum(1 for v in atr_lookup.values() if v is not None)
         print(f"Winner stack: ATR14 available for {n_avail}/{len(atr_lookup)} "
               f"symbol-days (missing => floor fail-open to range_low)")
@@ -584,20 +674,41 @@ def main():
     n_floor_bound = 0
     n_scaled = 0
     n_rearmed = 0
+    n_resimmed = 0
     new_pnls = []; new_pnl_pcts = []; new_reasons = []
     n_no_fill_rows = 0
+    n_entered = 0
+    n_missing_bars = 0
+    n_missing_logged = 0
+    missing_bars_mask = []
     for _, row in df.reset_index(drop=True).iterrows():
         key = (row['symbol'], row['date'].strftime('%Y-%m-%d'))
         bars = bars_cache.get(key)
-        if bars is None or bars.empty:
-            new_pnls.append(row['pnl']); new_pnl_pcts.append(row['pnl_pct'])
-            new_reasons.append(row['exit_reason']); continue
         # 2026-09-05 entered-inclusive: a candidate whose breakout never
         # fired has no exit to simulate — it ranks, can win a slot, and
         # books $0 (live: stop-limit born, time_stop_canceled after 60min).
+        # Checked BEFORE the missing-bars gate: a no-fill row needs no bars.
         if is_no_fill(row):
             new_pnls.append(0.0); new_pnl_pcts.append(0.0)
-            new_reasons.append(NO_FILL_REASON); n_no_fill_rows += 1; continue
+            new_reasons.append(NO_FILL_REASON); n_no_fill_rows += 1
+            missing_bars_mask.append(False); continue
+        n_entered += 1
+        if bars is None or bars.empty:
+            # 2026-09-25 SPEC_RESIM_FIX.md: this row used to SILENTLY keep
+            # the features CSV's legacy pnl (2R-target/range-low-stop/
+            # time-stop). That is a different, unvalidated exit rule from
+            # the live static-lock+touchgo+ATR-floor+scale-out+15:45 book —
+            # CLAUDE.md forbids a silent fallback. EXCLUDE the row instead.
+            n_missing_bars += 1
+            if n_missing_logged < _MISSING_BARS_LOG_CAP:
+                logger.error(
+                    f"RESIM: no bars for entered symbol-day {key} "
+                    f"(bars source={BARS_DB_PATH}) — row EXCLUDED from book")
+                n_missing_logged += 1
+            new_pnls.append(0.0); new_pnl_pcts.append(0.0)
+            new_reasons.append('missing_bars'); missing_bars_mask.append(True)
+            continue
+        missing_bars_mask.append(False)
         open_ts = _session_open_timestamp(bars)
         if open_ts is None:
             new_pnls.append(row['pnl']); new_pnl_pcts.append(row['pnl_pct'])
@@ -640,6 +751,7 @@ def main():
             return simulate_static_lock(bars, entry_p, rh, rl, _entry_ts)
 
         exit_p, reason = _sim_exit(entry_ts)
+        n_resimmed += 1
         if reason.startswith('scale_'):
             n_scaled += 1
         pnl_total = (exit_p - entry_p) * shares
@@ -679,6 +791,21 @@ def main():
     df['pnl'] = new_pnls
     df['pnl_pct'] = new_pnl_pcts
     df['exit_reason'] = new_reasons
+    assert len(missing_bars_mask) == len(df)
+    if n_missing_bars:
+        logger.error(f"RESIM: excluding {n_missing_bars} rows with missing bars "
+                     f"from the book (bars source={BARS_DB_PATH})")
+        df = df[[not m for m in missing_bars_mask]].reset_index(drop=True)
+    _atr14_hits = sum(1 for v in atr_lookup.values() if v is not None)
+    _atr14_total = len(atr_lookup)
+    print(f"RESIM: n_entered={n_entered} n_resimmed={n_resimmed} "
+          f"n_missing_bars={n_missing_bars} atr14_hits={_atr14_hits}/{_atr14_total}")
+    if missing_bars_gate_exceeded(n_missing_bars, n_entered, ALLOW_MISSING_BARS):
+        logger.error(f"RESIM: n_missing_bars/n_entered="
+                     f"{(n_missing_bars / n_entered):.4f} > {MAX_MISSING_BARS_FRAC} — "
+                     f"bars source is inadequate for this book "
+                     f"(set ORB_BT_ALLOW_MISSING_BARS=1 to override)")
+        sys.exit(1)
     if winner_stack_on:
         print(f"Winner stack: floor bound on {n_floor_bound} resimmed rows; "
               f"{n_scaled} rows scaled 40%@+{bt_cfg['scale_level_r']}R "

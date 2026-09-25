@@ -16,11 +16,24 @@
 # that read orb_features_*.csv pnl directly — that CSV uses fixed +2R/-1R
 # exits, NOT static_lock_1R. Those scripts are marked with warning headers.
 
+# WARM-phase seed prewarming (docs/orb_latency_fix_spec_20260925.md).
+# Default false until the owner's GO (weekend boot rehearsal required first,
+# per docs/CLAUDE_HISTORY.md protocol). When true, the 09:35 hot path reuses
+# Alpaca snapshots + the daily_bars prefilter already fetched on an earlier
+# ~60s tick instead of re-fetching the full candidate list every tick.
+execution:
+  prewarm_seed: false
+
 strategy:
   name: orb
   enabled: false          # MASTER KILL SWITCH. Restart to flip. (B+ 2026-08-15:
                           # ships FALSE; the Monday pre-boot cron flips it after
                           # the weekend rehearsal is green.)
+  dry_run: false          # docs/orb_dry_run_spec_20260925.md (9/25 latency rehearsal):
+                          # when true AND enabled true, runs the full production
+                          # pipeline but logs `[ORB DRY] WOULD BUY` + ledger row
+                          # at the submit call instead of submitting an order.
+                          # Zero orders, zero DB rows. Default false.
 
 # Universe — BT-parity criteria (study_orb_broad.py::load_broad_universe):
 # gap >= 5%, prev-day volume >= 500K, price $3-30.

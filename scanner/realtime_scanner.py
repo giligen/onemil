@@ -152,6 +152,14 @@ class RealtimeScanner:
         self._premarket_gap_symbols: Set[str] = set()
         self._premarket_gap_data: List[Dict] = []
         self._qualified_stock_data: List[Dict] = []
+        # ORB WARM-phase cache (docs/orb_latency_fix_spec_20260925.md, flag
+        # orb.yaml execution.prewarm_seed, default False). The daily_bars
+        # ROW_NUMBER() prefilter in _orb_universe_source scans the whole
+        # table (measured 18.7s offline, 2026-09-25) and used to rerun on
+        # EVERY ~60s ORB tick even though daily_bars does not change
+        # intraday. Cached once per calendar day; None = not yet warmed.
+        self._orb_sqlite_seed_cache: Optional[Set[str]] = None
+        self._orb_sqlite_seed_cache_date: Optional[str] = None
         self._day_highs: Dict[str, float] = {}  # Track intraday highs for V-reversal detection
         self._day_lows: Dict[str, float] = {}   # Track intraday lows for V-reversal detection
         # Running max of max(gap_pct, range_pct) per symbol — used by the two-tier
@@ -816,24 +824,46 @@ class RealtimeScanner:
         # Pre-filtering here keeps the snapshot call to ~1500-2500 symbols
         # (vs 4700+ if we passed all active universe → too slow at 9:35 ET).
         syms: Set[str] = set()
-        try:
-            # Most recent prev-day in daily_bars per symbol; one row per symbol.
-            cur = self.db._cache_conn.execute("""
-                SELECT symbol FROM (
-                    SELECT symbol, close, volume,
-                           ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY bar_date DESC) AS rn
-                    FROM daily_bars
-                ) WHERE rn = 1 AND close BETWEEN 1.0 AND 50.0 AND volume >= 500000
-            """) if hasattr(self, 'db') else []
-            for r in cur:
-                syms.add(r[0])
-            if syms:
-                logger.debug(
-                    f"ORB universe seed: {len(syms)} symbols from daily_bars "
-                    f"prev-day pre-filter (vol>=500K, close $1-50)"
-                )
-        except Exception as e:
-            logger.warning(f"ORB universe DB seed failed (falling back): {e}")
+        prewarm_on = bool(getattr(self.orb_engine, 'prewarm_seed_enabled', False))
+        today_iso = date.today().isoformat()
+        if prewarm_on and self._orb_sqlite_seed_cache is not None \
+                and self._orb_sqlite_seed_cache_date == today_iso:
+            # WARM-phase reuse: daily_bars does not change intraday, so a
+            # cache-hit here removes the 18.7s-measured full-table scan from
+            # every subsequent ~60s tick, including the 09:35 tick that
+            # gates the day's first submit.
+            syms = set(self._orb_sqlite_seed_cache)
+            logger.debug(
+                f"ORB universe seed: {len(syms)} symbols from WARM cache "
+                f"(prewarm_seed=True, date={today_iso})"
+            )
+        else:
+            try:
+                # Most recent prev-day in daily_bars per symbol; one row per symbol.
+                cur = self.db._cache_conn.execute("""
+                    SELECT symbol FROM (
+                        SELECT symbol, close, volume,
+                               ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY bar_date DESC) AS rn
+                        FROM daily_bars
+                    ) WHERE rn = 1 AND close BETWEEN 1.0 AND 50.0 AND volume >= 500000
+                """) if hasattr(self, 'db') else []
+                for r in cur:
+                    syms.add(r[0])
+                if syms:
+                    logger.debug(
+                        f"ORB universe seed: {len(syms)} symbols from daily_bars "
+                        f"prev-day pre-filter (vol>=500K, close $1-50)"
+                    )
+                if prewarm_on:
+                    self._orb_sqlite_seed_cache = set(syms)
+                    self._orb_sqlite_seed_cache_date = today_iso
+                    logger.warning(
+                        f"ORB prewarm cache MISS (sqlite_prefilter): recomputed "
+                        f"{len(syms)} symbols for {today_iso} — will be reused "
+                        f"for the rest of the day"
+                    )
+            except Exception as e:
+                logger.warning(f"ORB universe DB seed failed (falling back): {e}")
 
         # 2. Supplement with scanner's premarket + intraday state. Should
         # already be a subset of (1) but kept for defense-in-depth — if
