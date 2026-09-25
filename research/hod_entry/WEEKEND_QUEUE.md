@@ -1,0 +1,21 @@
+# Weekend research queue 2026-09-26/27 (owner 9/25: "run them all through this weekend 1 by 1; low-end agents run, Fable reviews and judges; by Monday we optimize")
+
+One cell at a time (2-CPU node). Every cell: PREREG frozen by the main session before any number, Sonnet (Haiku for
+mechanical steps) runs, main session reviews adversarially, VAL first, the sealed TEST read ONCE only on a VAL pass,
+result appended to `research/hod_entry/WEEKEND_RESULTS.md`. Base rule = `PREREG_1427.md` E1 (resting stop-limit at
+level + $0.01, limit 15 bps, NBBO ask at the first cross, B0 stop / 2 R / 15:55, measured half-spread); once cell
+1,438 reports, its causal-arming version replaces it as the base for every later cell.
+
+| # | cell | what | data | pass bar |
+|---|---|---|---|---|
+| 1 | 1,438 | causal arming (the live rule) | bars_sip.db + SIP ticks | PREREG_1438 |
+| 2 | 1,430 | exits on the winning fills: time stop 90 min, breakeven lock at +1 R, ORB-style lock, 50 % scale-out at +2 R, VWAP-loss exit, 14:30 vs 15:55 close — PAIRED on the fills | paths.parquet + fills | ΔR ≥ +0.05 on TRAIN-H2 and VAL, VAL t ≥ 2 |
+| 3 | 1,429 | fill-quality sizing: risk multiplier from the pre-trigger ask distance (≤ 5 bps 1.5×, 5–15 bps 1×) and from the trigger print size (round lot vs odd lot, report-only) | SIP quotes at the cross | book R per unit risk ≥ flat + 0.05 on both holdouts, worst week not worse |
+| 4 | 1,431 | no-fill cohort SHORT (break bar closed ≥ 15 bps above the level, E1 did not fill): short at the next open, stop = break-bar high + 1 tick, 2 R target, shortable names only | b0 population + tape | mean net R ≥ +0.10 both holdouts, VAL t ≥ 2, ≥ 60 % shortable |
+| 5 | 1,439 (NEW) | low-of-day mirror: the HOD-break spec mirrored (≥ 5 % below the open, 5-bar consolidation within 4 % of the running LOD, rv band), resting SELL stop-limit at LOD − $0.01, limit LOD × 0.9985, fill at the NBBO bid at the first print ≤ trigger, stop = consolidation high, 2 R target, 15:55 cover; shortable + borrow-fee-aware names | bars_sip.db + SIP ticks (new fetch) | fill mean net R ≥ +0.10 both holdouts, VAL t ≥ 2, ex-top-5 % > 0, coverage ≥ 80 %, gap ≤ 5 pp, ≥ 3 fills/wk |
+| 6 | 1,428 | gapper universe (gap ≥ 5 %, open $3–30, prior vol ≥ 500K), same order | orb universes' minute bars + SIP ticks (new fetch) | fill mean net R ≥ +0.15 both holdouts |
+| 7 | 1,435 / 1,432 / 1,441 (NEW) | other levels with the same order: pre-market high; opening-range high (ORB tick data exists); prior-day high | existing bars/ticks (+ PMH pre-market bars) | mean net R ≥ +0.10 both holdouts each |
+| 8 | 1,440 (NEW) | stop distance: floor / cap the consolidation-low stop at 0.8 % / 3 % of price; report cost in R and fill count | fills | ΔR ≥ +0.05 both holdouts |
+
+Programme count after this file: 1,441. Not allowed: reordering to chase a good number; changing E1 constants; reading
+TEST for any cell before its VAL bar; more than one heavy job at a time while the trader runs.
