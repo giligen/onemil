@@ -170,11 +170,11 @@ def _records(raw, symbol, kind):
     return []
 
 
-def fetch_tape(symbol, S_ns, retries=6):
+def fetch_tape(symbol, S_ns, retries=6, span_s=60):
     """SIP trades and quotes for [S-65 s, S). Returns (trades df[ts, price, size], quotes df[ts, bid, ask]).
     Retries with exponential backoff; raises after `retries` failures (the caller counts it LOST)."""
     from alpaca.data.requests import StockTradesRequest, StockQuotesRequest
-    start = pd.Timestamp(S_ns - (60 + QUOTE_LOOKBACK_S) * 10**9, unit='ns', tz='UTC').to_pydatetime()
+    start = pd.Timestamp(S_ns - (span_s + QUOTE_LOOKBACK_S) * 10**9, unit='ns', tz='UTC').to_pydatetime()
     end = pd.Timestamp(S_ns, unit='ns', tz='UTC').to_pydatetime()
     for attempt in range(retries):
         try:
