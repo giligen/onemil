@@ -134,6 +134,11 @@ def resting_engine(mock_alpaca, mock_db, mock_sm, tmp_path, **over):
     c['dry_ledger_path'] = str(tmp_path / 'hod_dry_entry_ledger.csv')
     e = HodBreakEngine(mock_alpaca, mock_db, mock_sm, cfg=c)
     e._roll_session()
+    # 2026-09-25 live_since fix: production sets live_since from the FIRST real websocket bar
+    # (HodBreakEngine._on_bar_close); these tests feed bars straight to _ingest_bars and never go through
+    # that handler, so without this every synthetic bar would be (correctly) treated as pre-live and skipped.
+    # Back-date live_since to before minute 0 of the session so the whole synthetic day counts as live.
+    e.live_since = e._bar_close_et(0)
     return e
 
 
@@ -204,3 +209,17 @@ class TestParityWithResearch:
             if mine is not None:
                 for k in ('level', 'trigger', 'limit', 'stop'):
                     assert mine[k] == pytest.approx(theirs[k]), f"{k} differs at j={j}: {mine[k]} vs {theirs[k]}"
+
+
+def test_config_accessor_passes_entry_mode_through(monkeypatch, tmp_path):
+    """2026-09-25 live finding: Config.hod_break_cfg whitelists keys; entry_mode must reach the engine."""
+    import config as cfgmod
+    c = cfgmod.Config()
+    monkeypatch.setattr(c, '_get_yaml', lambda *a, **k: {'enabled': True, 'dry_run': True,
+                                                          'entry_mode': 'resting_stop_limit',
+                                                          'dry_ledger_path': str(tmp_path / 'l.csv')})
+    out = c.hod_break_cfg
+    assert out['entry_mode'] == 'resting_stop_limit'
+    assert out['dry_ledger_path'].endswith('l.csv')
+    monkeypatch.setattr(c, '_get_yaml', lambda *a, **k: {})
+    assert c.hod_break_cfg['entry_mode'] == 'next_open'

@@ -829,6 +829,10 @@ class Config:
         return {
             "enabled": bool(cfg.get("enabled", False)),
             "dry_run": bool(cfg.get("dry_run", True)),
+            # 2026-09-25: resting stop-limit entry (docs/hod_resting_entry_spec_20260925.md). Found in the live dry
+            # session: this whitelist silently dropped the key, so the engine stayed in next_open.
+            "entry_mode": str(cfg.get("entry_mode", "next_open")),
+            "dry_ledger_path": str(cfg.get("dry_ledger_path", "logs/hod_dry_entry_ledger.csv")),
             "risk_usd": float(cfg.get("risk_usd", 100.0)),
             "daily_kill_usd": float(cfg.get("daily_kill_usd", -600.0)),
             "weekly_kill_usd": float(cfg.get("weekly_kill_usd", -1500.0)),
