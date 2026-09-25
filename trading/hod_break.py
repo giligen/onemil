@@ -41,6 +41,7 @@ class HodBreakParams:
     rv_hi: float = 5.0
     min_r_pct: float = 1.0           # stop distance as % of entry — tighter stops are noise + spread
     cap: float = 0.006               # limit cap above the HOD level (60 bps); no fill above it
+    entry_limit_pct: float = 0.0015  # resting-order limit above trigger (15 bps); cell 1,427/1,438 (docs/hod_resting_entry_spec_20260925.md)
     target_r: float = 2.0            # fixed take-profit in R
     max_per_day: int = 8             # first-come cap on fills per session
     max_concurrent: int = 4
@@ -96,6 +97,35 @@ def consolidation_low(l: Sequence[float], h: Sequence[float], j: int, p: HodBrea
     if lo >= hod * (1.0 - p.consol_pct) and lo < hod:
         return lo
     return None
+
+
+def arm_state(o: Sequence[float], h: Sequence[float], l: Sequence[float], v: Sequence[float], m: Sequence[int],
+              j: int, adv20: float, p: HodBreakParams = HodBreakParams()) -> Optional[dict]:
+    """Resting buy-stop-limit arming at the close of bar j, for the order that rests through bar j+1
+    (docs/hod_resting_entry_spec_20260925.md; cell 1,438, research/hod_entry/causal_arming.py's `arm_state`
+    is the research build of this same rule — PARITY enforced by tests/test_hod_resting_entry.py). Uses only
+    bars 0..j (closed data) — never anything from bar j+1 itself. Returns
+    dict(level, trigger, limit, stop) or None."""
+    o = np.asarray(o, dtype=float); h = np.asarray(h, dtype=float); l = np.asarray(l, dtype=float); v = np.asarray(v, dtype=float)
+    if j + 1 >= len(m) or int(m[j + 1]) > p.last_entry_minute:
+        return None
+    stop = consolidation_low(l, h, j, p)
+    if stop is None:
+        return None
+    level = float(np.max(h[: j + 1]))
+    if level < float(o[0]) * (1.0 + p.min_dist_open_pct / 100.0):
+        return None
+    rv = rv_profile(float(np.sum(v[: j + 1])), adv20, int(m[j]))
+    if not (p.rv_lo <= rv < p.rv_hi):
+        return None
+    trigger = round(level + 0.01, 6)
+    return dict(level=level, trigger=trigger, limit=round(level * (1.0 + p.entry_limit_pct), 6), stop=stop)
+
+
+def resting_entry_fill(ask: float, arm: dict) -> Optional[float]:
+    """Fill for a resting buy-stop-limit once a print/bar reaches `arm['trigger']`: the ask if it is at or
+    under `arm['limit']`, else no fill (no chase — the order simply keeps resting/re-arming)."""
+    return float(ask) if float(ask) <= arm['limit'] + 1e-9 else None
 
 
 def detect(o: Sequence[float], h: Sequence[float], l: Sequence[float], v: Sequence[float], m: Sequence[int],

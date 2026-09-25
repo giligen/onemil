@@ -32,7 +32,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
-from trading.hod_break import HodBreakParams, detect, shares_for, OPEN_MINUTE
+from trading.hod_break import HodBreakParams, arm_state, detect, resting_entry_fill, shares_for, OPEN_MINUTE
 from trading.red_to_green import RedToGreenParams, detect as r2g_detect, prior_day_range_pct
 
 logger = logging.getLogger(__name__)
@@ -107,6 +107,9 @@ class Candidate:
     dry_logged: bool = False
     ohlcv: np.ndarray = field(default_factory=lambda: np.full((RTH_MINUTES, 5), np.nan))
     have: np.ndarray = field(default_factory=lambda: np.zeros(RTH_MINUTES, dtype=bool))
+    resting_arm: Optional[dict] = None                     # current arm dict(level, trigger, limit, stop, idx) or None
+    resting_scanned_idx: int = -1                          # last bar index whose cross was already judged (no double fill/log)
+    resting_filled: bool = False                            # one fill per symbol-day (entry_mode='resting_stop_limit')
 
     def set_bar(self, minute: int, o: float, h: float, l: float, c: float, v: float) -> bool:
         i = minute - OPEN_MINUTE
@@ -205,6 +208,14 @@ class HodBreakEngine:
             self.tag = '[HOD]'; self.dry_tag = '[HOD DRY]'; self.coid_prefix = 'hod'
         else:
             raise ValueError(f"unknown book {self.book!r} — expected 'hod_break' or 'red_to_green'")
+        # entry_mode (docs/hod_resting_entry_spec_20260925.md, cell 1,438): 'next_open' (default) is today's
+        # behaviour, byte-identical. 'resting_stop_limit' arms a buy-stop-limit at the close of every bar and is
+        # DRY-ONLY today (see _evaluate_resting) — no order is ever submitted from that path regardless of dry_run.
+        self.entry_mode = str(cfg.get('entry_mode', 'next_open'))
+        if self.entry_mode not in ('next_open', 'resting_stop_limit'):
+            logger.warning(f"{self.tag} unknown entry_mode {self.entry_mode!r} — falling back to next_open")
+            self.entry_mode = 'next_open'
+        self.dry_ledger_path = str(cfg.get('dry_ledger_path', 'logs/hod_dry_entry_ledger.csv'))
         self._prev_day: Dict[str, tuple] = {}
         self.admit_above_open_pct = float(cfg.get('admit_above_open_pct', max(0.0, getattr(self.params, 'min_dist_open_pct', 5.0) - 1.5)))
         # STREAM THE UNIVERSE (9/15 core fix for the CRWL class): every tradable name's bars flow from 09:30 through the
@@ -643,6 +654,9 @@ class HodBreakEngine:
             return                                         # no calendar = no session close known = no entries (fail closed)
         params = self.params if getattr(self, 'last_entry_minute', self.params.last_entry_minute) == self.params.last_entry_minute \
             else type(self.params)(**{**self.params.__dict__, 'last_entry_minute': self.last_entry_minute})
+        if self.book == 'hod_break' and self.entry_mode == 'resting_stop_limit':
+            self._evaluate_resting(cand, o, h, l, v, m, params)
+            return
         if self.book == 'red_to_green':
             sig = r2g_detect(o, h, l, v, m, cand.adv20, cand.prior_close, cand.pdr_pct, params, start_idx=cand.next_idx)
         else:
@@ -657,6 +671,77 @@ class HodBreakEngine:
             logger.warning(f"{self.tag} {cand.symbol}: MISSED the spec's break at bar {sig.bar_idx} (level {sig.level:.2f}, now {n - 1 - sig.bar_idx} bars old) — no later break is taken")
             return
         self._try_enter(cand, sig, o[0])
+
+    # ------------------------------------------------------------------ resting entry (dry only, entry_mode='resting_stop_limit')
+    def _evaluate_resting(self, cand: Candidate, o, h, l, v, m, p: HodBreakParams) -> None:
+        """docs/hod_resting_entry_spec_20260925.md, cell 1,438: at the close of every bar, arm/re-arm a resting
+        buy-stop-limit for the NEXT bar via `trading.hod_break.arm_state` (the same rule research/hod_entry's
+        causal_arming.py walks offline — PARITY enforced by tests/test_hod_resting_entry.py), and resolve any
+        cross of a previously armed trigger. DRY ONLY: never submits an order regardless of `self.dry_run`. The
+        live engine has no trade-print stream (only closed 1-min bars), so a cross is resolved with the bar's
+        high plus the current quote — the spec's documented fallback — and logged WARNING (not tape-accurate)."""
+        n = len(o); sym = cand.symbol
+        # Bar-by-bar walk (not just the newest bar): a backfill/reconcile can hand several closed bars to one
+        # _evaluate call, and each must arm/resolve in order — exactly the causal_arming.py walk offline.
+        for j in range(cand.resting_scanned_idx + 1, n):
+            if cand.resting_filled:
+                break
+            if cand.resting_arm is not None and cand.resting_arm['idx'] + 1 == j:
+                arm = cand.resting_arm
+                if h[j] >= arm['trigger'] - 1e-9:
+                    logger.warning(f"{self.tag} {sym}: no live print stream — resolving the cross of {arm['trigger']:.2f} "
+                                    f"with the bar high and the current quote (not tape-accurate)")
+                    cross_ts = self._et_now()
+                    q = self._quote(sym)
+                    if q is None:
+                        logger.warning(f"{self.tag} {sym}: CROSS {arm['trigger']:.2f} but no quote — NO FILL (fail closed)")
+                        self._append_dry_ledger(cand, arm, cross_ts, ask=float('nan'), filled=False, fill_px=None, tape_accurate=False)
+                    else:
+                        _, ask = q
+                        fill_px = resting_entry_fill(ask, arm)
+                        filled = fill_px is not None
+                        logger.info(f"{self.dry_tag} CROSS {sym} at {cross_ts:%H:%M:%S}.{cross_ts.microsecond // 1000:03d} "
+                                    f"print {h[j]:.2f} ask {ask:.2f} -> " + (f"FILL {fill_px:.2f}" if filled else "NO FILL (ask > limit)"))
+                        if filled:
+                            cand.resting_filled = True
+                            self._notify(f"{self.dry_tag} FILL {sym} {fill_px:.2f} (level {arm['level']:.2f} stop {arm['stop']:.2f})")
+                        self._append_dry_ledger(cand, arm, cross_ts, ask=ask, filled=filled, fill_px=fill_px, tape_accurate=False)
+                cand.resting_arm = None
+            if cand.resting_filled:
+                break
+            new_arm = arm_state(o, h, l, v, m, j, cand.adv20, p)
+            if new_arm is not None:
+                new_arm = dict(new_arm, idx=j, arm_ts=self._et_now().isoformat())
+                logger.info(f"{self.dry_tag} ARMED {sym} level {new_arm['level']:.2f} trigger {new_arm['trigger']:.2f} "
+                            f"limit {new_arm['limit']:.2f} stop {new_arm['stop']:.2f}")
+            cand.resting_arm = new_arm
+        cand.resting_scanned_idx = max(cand.resting_scanned_idx, n - 1)
+
+    def _append_dry_ledger(self, cand: Candidate, arm: dict, cross_ts, ask: float, filled: bool,
+                            fill_px: Optional[float], tape_accurate: bool) -> None:
+        """Append one row to `self.dry_ledger_path` (docs/hod_resting_entry_spec_20260925.md); never raises —
+        a logging failure must never affect trading. ERROR on write failure."""
+        import csv, os
+        stop = arm['stop']
+        target = fill_px + self.params.target_r * (fill_px - stop) if filled and fill_px is not None else None
+        row = [self.session_date or '', cand.symbol, arm.get('arm_ts', ''), cross_ts.isoformat(),
+               f"{arm['level']:.4f}", f"{arm['trigger']:.4f}", f"{arm['limit']:.4f}",
+               '' if ask != ask else f"{ask:.4f}", int(bool(filled)), '' if fill_px is None else f"{fill_px:.4f}",
+               f"{stop:.4f}", '' if target is None else f"{target:.4f}", int(bool(tape_accurate))]
+        try:
+            path = self.dry_ledger_path
+            is_new = not os.path.exists(path)
+            d = os.path.dirname(path)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            with open(path, 'a', newline='') as fh:
+                w = csv.writer(fh)
+                if is_new:
+                    w.writerow(['date', 'symbol', 'arm_ts', 'cross_ts', 'level', 'trigger', 'limit', 'ask',
+                                'filled', 'fill_px', 'stop', 'target', 'tape_accurate'])
+                w.writerow(row)
+        except Exception as e:
+            logger.error(f"{self.tag} {cand.symbol}: failed to append dry entry ledger row to {self.dry_ledger_path}: {e}")
 
     # ------------------------------------------------------------------ entry
     def _try_enter(self, cand: Candidate, sig, day_open: float) -> None:
