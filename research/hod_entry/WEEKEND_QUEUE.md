@@ -23,3 +23,16 @@ level + $0.01, limit 15 bps, NBBO ask at the first cross, B0 stop / 2 R / 15:55,
 
 Programme count after this file: 1,443. Not allowed: reordering to chase a good number; changing E1 constants; reading
 TEST for any cell before its VAL bar; more than one heavy job at a time while the trader runs.
+
+## Final item — OWNER REPORT (`research/hod_entry/OWNER_REPORT_20260928.md`, ≤ 1 page, written last, Sunday evening)
+1. **Findings**: one table — every cell run this weekend (n, mean net R, t, ex-top-5 %, fills/wk, verdict) + the live
+   ledger from 9/25 (fills, tape-vs-broker bps, stop slip) in one row each.
+2. **What changes Monday** (config and code, each with its evidence line and rollback): sizing caps, exit bookkeeping,
+   OCO, any cell that passed.
+3. **Money view**: expected monthly $ at $50 / $100 / $375 risk under the numbers that survived, worst month beside,
+   the review's caveats that still apply, and where the $15K recovery stands on that path.
+4. **Questions for the owner**: only decisions that are genuinely his (size step, budget for data, short-side borrow
+   costs, anything touching his manual account use). No menus.
+5. **Recommendations**: the next three actions in priority order, each with the number it rests on.
+Think as an owner throughout the weekend: every fill review ends in a queue item, every failed cell states its MDE, and
+nothing reaches this report without its independent check.
