@@ -973,7 +973,7 @@ class HodBreakEngine:
                                stop=arm['stop'], qty=qty, booked_qty=0, arm_ts=arm.get('arm_ts', ''), tp_leg_id='', sl_leg_id='', trade_id=None)
         self._live_cap_slots.add(sym)
         logger.info(f"{self.tag} {sym}: LIVE ARMED stop {arm['trigger']:.2f} limit {arm['limit']:.2f} qty {qty} order {order_id}")
-        self._notify(f"{self.tag} LIVE ARM {sym} stop {arm['trigger']:.2f} limit {arm['limit']:.2f} x{qty}")
+        # No Telegram per arm (24 arms in a minute hit Telegram's 429 on 9/25): fills, cap events and errors only.
         self._persist_live_orders()
 
     def _cancel_live_order(self, cand: Candidate, reason: str) -> None:
