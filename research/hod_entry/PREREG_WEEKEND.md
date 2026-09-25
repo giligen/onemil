@@ -44,6 +44,13 @@ previous day) and scores TWO books: primary = non-SSR fills only (the pass bar a
 (report-only). Borrow: share of fills flagged `shortable` reported; the pass bar's ≥ 60 % shortable applies. Scorer =
 `research/hod_entry/score_1439.py`, written after this amendment, run once on the full CSV.
 
+### Amendment 2026-09-25 20:15 UTC (judge, before any 1,440 / 1,430 number) — base book
+Cell 1,427's E1 fills are VOID (levels from sparse cache.db) and cell 1,438 FAILED, so the pre-registered base
+("E1 fills, replaced by 1,438's on a PASS") no longer exists. For every paired cell not yet run (1,440, 1,430) the
+base = the 9,911 fills of cell 1,438 (`causal_arming_causal.csv`, status = fill; correct levels, the live rule).
+A paired lift on a base with raw R ≈ 0 is reported as a lift, never as a book: PASS ships the mechanism to the dry
+run only. The fill bar's stop check uses the minute low (conservative) where the tick instant is not in the CSV.
+
 ## 1,440 — stop distance
 Stop = consolidation low, but floored at 0.8 % of price and capped at 3 % (two variants: floor only; floor + cap). R and
 qty recomputed. Pass: ΔR ≥ +0.05 both holdouts, VAL t ≥ 2.
