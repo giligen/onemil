@@ -123,3 +123,28 @@ def test_script_runs_end_to_end_no_send_no_llm():
                        cwd=Path(__file__).resolve().parents[1])
     assert r.returncode == 0, r.stderr[-500:]
     assert r.stdout.startswith("[EOD]") and "RAMP:" in r.stdout and "NEXT BOOT" in r.stdout
+
+
+def test_journal_error_count_matches_inside_journalctl(monkeypatch):
+    """9/25: the Python-side filter over a full verbose day timed out at 20 s on the real EOD run. The
+    pattern must be passed to journalctl (-g) and the bound must be the 90 s one; blank lines not counted."""
+    import subprocess
+    from scripts import eod_report as er
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen['cmd'] = cmd; seen['timeout'] = kw.get('timeout')
+        return subprocess.CompletedProcess(cmd, 0, stdout="x | ERROR | a\n\nTraceback (most recent)\n", stderr="")
+    monkeypatch.setattr(er.subprocess, 'run', fake_run)
+    assert er.journal_error_count('onemil-trader', '2026-09-25 12:00') == '2'
+    assert seen['cmd'][-2:] == ['-g', er.JOURNAL_ERROR_PATTERN] and seen['timeout'] == 90
+
+
+def test_journal_error_count_timeout_is_a_warning_line(monkeypatch):
+    import subprocess
+    from scripts import eod_report as er
+
+    def fake_run(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, kw.get('timeout'))
+    monkeypatch.setattr(er.subprocess, 'run', fake_run)
+    assert er.journal_error_count('onemil-trader', '2026-09-25 12:00') == '(journal check timed out)'

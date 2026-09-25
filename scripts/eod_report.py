@@ -100,18 +100,23 @@ def ramp_section() -> str:
     return "\n".join(out)
 
 
-def journal_error_count(service: str, since: str, timeout: int = 20) -> str:
+JOURNAL_ERROR_PATTERN = "ERROR|Traceback"
+
+
+def journal_error_count(service: str, since: str, timeout: int = 90) -> str:
     """Count ERROR/Traceback lines in a service's journal since `since` (UTC, journalctl syntax).
 
-    Narrowed (`--since`, `-o cat`) and bounded (20s) so a big journal can never take the report
-    down: a timeout or any other failure becomes a WARNING line, never a crash or a hang that
-    eats the whole report (the hygiene section used to run an unbounded `--since today` scan
-    that timed out at 60s on a loaded node and blanked the rest of the report — 2026-09-25).
+    The match runs inside journalctl (`-g`, server-side regex) so the verbose scanner day (hundreds
+    of thousands of RelVol lines) is never piped through Python; measured 45 s for a full day on the
+    2-CPU node under research load, hence the 90 s bound. A timeout or any other failure becomes a
+    WARNING line, never a crash or a hang that eats the whole report (2026-09-25: the 20 s bound with
+    a Python-side filter reported "journal check timed out" on the real EOD run).
     """
     try:
         r = subprocess.run(["journalctl", "-u", service, "--since", since, "-o", "cat",
-                            "--no-pager", "-q"], capture_output=True, text=True, timeout=timeout)
-        return str(sum(1 for ln in r.stdout.splitlines() if "ERROR" in ln or "Traceback" in ln))
+                            "--no-pager", "-q", "-g", JOURNAL_ERROR_PATTERN],
+                           capture_output=True, text=True, timeout=timeout)
+        return str(sum(1 for ln in r.stdout.splitlines() if ln.strip()))
     except subprocess.TimeoutExpired:
         log.warning("journalctl -u %s timed out after %ss", service, timeout)
         return "(journal check timed out)"
