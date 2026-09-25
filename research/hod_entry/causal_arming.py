@@ -179,15 +179,34 @@ def load_population(p, floor, min_adv):
     return u[['day', 'symbol', 'adv20', 'split', 'wk']].reset_index(drop=True)
 
 
-def load_day_bars(con, day, syms):
-    """{symbol: RTH minute bars (m,o,h,l,c,v)} from data/cache.db intraday_bars_1min (read-only)."""
+BARS_SIP_URI = 'file:' + os.path.join(ROOT, 'research/bf_zero/bars_sip.db') + '?mode=ro'
+
+
+def _rth(g, tcol):
+    """RTH minute frame (m,o,h,l,c,v) from a raw bar frame with timestamp column `tcol`."""
+    ts = pd.to_datetime(g[tcol], utc=True).dt.tz_convert(sr.ET)
+    g = g.assign(m=(ts.dt.hour * 60 + ts.dt.minute).values).sort_values('m').drop_duplicates('m')
+    return g[(g.m >= sr.OPEN_M) & (g.m < 960)][['m', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
+
+
+def load_day_bars(con, day, syms, sipcon=None, counts=None):
+    """{symbol: RTH minute bars (m,o,h,l,c,v)}. Sources: data/cache.db intraday_bars_1min and the spec's SIP
+    re-fetch research/bf_zero/bars_sip.db (both read-only); per symbol the source with MORE RTH bars wins (SIP on
+    a tie). cache.db alone is sparse on ~64 % of the superset (first run: 21,701 symbol-days unsimulable; e.g.
+    ALGT 2025-07-01 has 6 cache.db bars while the spec traded it) — logged via `counts`."""
     q = (f"select symbol, timestamp as t, open as o, high as h, low as l, close as c, volume as v from "
          f"intraday_bars_1min where bar_date=? and symbol in ({','.join('?' * len(syms))})")
-    res = {}
-    for s, g in pd.read_sql(q, con, params=[day] + list(syms)).groupby('symbol'):
-        ts = pd.to_datetime(g.t, utc=True).dt.tz_convert(sr.ET)
-        g = g.assign(m=(ts.dt.hour * 60 + ts.dt.minute).values).sort_values('m').drop_duplicates('m')
-        res[s] = g[(g.m >= sr.OPEN_M) & (g.m < 960)][['m', 'o', 'h', 'l', 'c', 'v']].reset_index(drop=True)
+    res = {s: _rth(g, 't') for s, g in pd.read_sql(q, con, params=[day] + list(syms)).groupby('symbol')}
+    if sipcon is not None:
+        t = pd.read_sql('select symbol, t, o, h, l, c, v from bars where day=?', sipcon, params=[day])
+        for s, g in t[t.symbol.isin(set(syms))].groupby('symbol'):
+            b = _rth(g, 't')
+            if s not in res or len(b) >= len(res[s]):
+                res[s] = b
+                if counts is not None:
+                    counts['sip'] = counts.get('sip', 0) + 1
+            elif counts is not None:
+                counts['cache'] = counts.get('cache', 0) + 1
     return res
 
 
@@ -285,11 +304,12 @@ def run(workers):
     nb = pd.read_csv(NBBO_CSV, dtype={'symbol': str, 'day': str}, keep_default_na=False, na_values=[''])
     nbbo_half = (0.5 * nb.drop_duplicates(['day', 'symbol']).set_index(['day', 'symbol']).spread_mean).to_dict()
     con = sqlite3.connect(sr.CACHE_DB_URI, uri=True, timeout=120)
-    rows, n_nobars = [], 0
+    sipcon = sqlite3.connect(BARS_SIP_URI, uri=True, timeout=120)
+    rows, n_nobars, src = [], 0, {}
     days = sorted(pop.day.unique())
     for di, day in enumerate(days):
         sub = pop[pop.day == day]
-        bars = load_day_bars(con, day, sub.symbol.tolist())
+        bars = load_day_bars(con, day, sub.symbol.tolist(), sipcon, src)
         path = os.path.join(sr.CACHE_DIR, f'c1438_{day}.pkl.gz')
         cache = {}
         if os.path.exists(path):
@@ -325,6 +345,8 @@ def run(workers):
             log(f'[run] day {di + 1}/{len(days)} ({day}) | causal fills so far {nf} | new windows this day '
                 f'{len(new_all)}')
     con.close()
+    sipcon.close()
+    log(f'[run] minute-bar source per simulated symbol-day: {src}')
     if n_nobars:
         log(f'[run] WARNING: {n_nobars} superset symbol-days have no (or < K+2) cache.db minute bars — not simulable')
     res = pd.DataFrame(rows)

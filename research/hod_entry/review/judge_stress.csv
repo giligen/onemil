@@ -1,0 +1,51 @@
+cohort,slots,scenario,n,mean_R,day_t,share_draws_t_ge_2
+TEST,unslotted,base (as reported),972,0.33,2.12,1.0
+TEST,unslotted,plausible: slip 22.9bps + size -0.024,972,0.261,1.12,0.0
+TEST,unslotted,severe: slip 79bps + size -0.048,972,0.128,-0.71,0.0
+TEST,unslotted,plausible + latency 32%,658,0.262,0.98,0.01
+TEST,unslotted,severe + latency 32%,658,0.129,-0.57,0.0
+TEST,12/4 slots,base (as reported),479,0.261,2.64,1.0
+TEST,12/4 slots,plausible: slip 22.9bps + size -0.024,479,0.191,1.72,0.0
+TEST,12/4 slots,severe: slip 79bps + size -0.048,479,0.054,0.03,0.0
+TEST,12/4 slots,plausible + latency 32%,396,0.179,1.16,0.09
+TEST,12/4 slots,severe + latency 32%,396,0.043,-0.31,0.0
+TEST ex best week 2026-08-01/2026-08-07,unslotted,base (as reported),828,0.241,1.56,0.0
+TEST ex best week 2026-08-01/2026-08-07,unslotted,plausible: slip 22.9bps + size -0.024,828,0.169,0.58,0.0
+TEST ex best week 2026-08-01/2026-08-07,unslotted,severe: slip 79bps + size -0.048,828,0.029,-1.23,0.0
+TEST ex best week 2026-08-01/2026-08-07,unslotted,plausible + latency 32%,562,0.161,0.43,0.02
+TEST ex best week 2026-08-01/2026-08-07,unslotted,severe + latency 32%,562,0.02,-1.09,0.0
+TEST ex best week 2026-08-01/2026-08-07,12/4 slots,base (as reported),433,0.253,2.35,1.0
+TEST ex best week 2026-08-01/2026-08-07,12/4 slots,plausible: slip 22.9bps + size -0.024,433,0.183,1.48,0.0
+TEST ex best week 2026-08-01/2026-08-07,12/4 slots,severe: slip 79bps + size -0.048,433,0.046,-0.11,0.0
+TEST ex best week 2026-08-01/2026-08-07,12/4 slots,plausible + latency 32%,355,0.144,0.8,0.03
+TEST ex best week 2026-08-01/2026-08-07,12/4 slots,severe + latency 32%,355,0.005,-0.62,0.0
+TRAIN,unslotted,base (as reported),1165,0.285,3.45,1.0
+TRAIN,unslotted,plausible: slip 22.9bps + size -0.024,1165,0.209,2.14,1.0
+TRAIN,unslotted,severe: slip 79bps + size -0.048,1165,0.057,-0.2,0.0
+TRAIN,unslotted,plausible + latency 32%,791,0.212,1.8,0.4
+TRAIN,unslotted,severe + latency 32%,791,0.059,-0.22,0.0
+TRAIN,12/4 slots,base (as reported),822,0.237,3.85,1.0
+TRAIN,12/4 slots,plausible: slip 22.9bps + size -0.024,822,0.158,2.54,1.0
+TRAIN,12/4 slots,severe: slip 79bps + size -0.048,822,-0.0,0.19,0.0
+TRAIN,12/4 slots,plausible + latency 32%,632,0.16,2.01,0.52
+TRAIN,12/4 slots,severe + latency 32%,632,0.002,0.02,0.0
+VAL,unslotted,base (as reported),1443,0.238,3.53,1.0
+VAL,unslotted,plausible: slip 22.9bps + size -0.024,1443,0.162,2.01,1.0
+VAL,unslotted,severe: slip 79bps + size -0.048,1443,0.009,-0.72,0.0
+VAL,unslotted,plausible + latency 32%,979,0.162,1.68,0.26
+VAL,unslotted,severe + latency 32%,979,0.008,-0.61,0.0
+VAL,12/4 slots,base (as reported),824,0.193,3.39,1.0
+VAL,12/4 slots,plausible: slip 22.9bps + size -0.024,824,0.118,2.08,1.0
+VAL,12/4 slots,severe: slip 79bps + size -0.048,824,-0.032,-0.28,0.0
+VAL,12/4 slots,plausible + latency 32%,695,0.144,2.04,0.52
+VAL,12/4 slots,severe + latency 32%,695,-0.007,-0.12,0.0
+POOLED all splits,unslotted,base (as reported),3580,0.278,5.29,1.0
+POOLED all splits,unslotted,plausible: slip 22.9bps + size -0.024,3580,0.204,3.11,1.0
+POOLED all splits,unslotted,severe: slip 79bps + size -0.048,3580,0.057,-0.85,0.0
+POOLED all splits,unslotted,plausible + latency 32%,2420,0.206,2.61,0.91
+POOLED all splits,unslotted,severe + latency 32%,2420,0.059,-0.77,0.0
+POOLED all splits,12/4 slots,base (as reported),2125,0.225,5.77,1.0
+POOLED all splits,12/4 slots,plausible: slip 22.9bps + size -0.024,2125,0.15,3.71,1.0
+POOLED all splits,12/4 slots,severe: slip 79bps + size -0.048,2125,-0.0,-0.01,0.0
+POOLED all splits,12/4 slots,plausible + latency 32%,1723,0.162,3.03,0.97
+POOLED all splits,12/4 slots,severe + latency 32%,1723,0.012,-0.2,0.0
