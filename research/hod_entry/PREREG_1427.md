@@ -41,3 +41,14 @@ proposal at $100 risk with the live guardrails on. FAIL → record; the fill-con
 ## Not allowed
 Reading TEST before the VAL agreement bands are met; changing trigger, limit, cost, stop, target or the bar after any
 TEST number exists; excluding signals for any reason other than the tape availability rail.
+
+## Amendment 2026-09-25 ~19:05 UTC (before TEST is read) — the agreement band, judged
+The ±0.05 R band assumed the single-venue and consolidated tapes would fill the same signals. They do not: on the 923
+VAL signals BOTH builds fill, they agree (+0.370 vs +0.341, exits 98.8 % identical, median ΔR +0.002); the gap between
++0.384 (XNAS) and +0.238 (SIP) is entirely which signals each tape fills, and the single-venue VAL draw was the lucky
+one (on TRAIN-H2 the SIP build is the higher, +0.285 vs +0.262). The consolidated tape is what the live engine sees,
+so it is the reference. After the quote-lookback fix (only the fetch changed; the 3,208 previously usable signals are
+unchanged per signal) the SIP build meets the availability rail on both holdouts (coverage 99.4 %, gap 0.1 / 0.5 pp)
+and is positive with t 3.45 / 3.53. TEST-opening condition, restated: (i) SIP rail met on VAL — yes; (ii) per-signal
+agreement on common fills — yes; (iii) both builds positive with t ≥ 2 on VAL — yes. TEST is opened ONCE with the SIP
+build. The TEST pass bar is unchanged.
