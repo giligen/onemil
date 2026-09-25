@@ -55,56 +55,18 @@ FAIL, decisively: (b)-(a) is negative both holdouts (bar was +0.03), t < -5, and
 fill rate (0.24/0.22) is below both BROKER's and E1's baseline — 300ms of waiting loses more fills
 than it improves prices. Full report: `research/hod_entry/RESULT_1442.md`.
 
-## 1,439 — low-of-day mirror short — FIRST FULL RUN VOID (population look-ahead: `low <= floor − 1c` kept only days that fell below $20 AFTER the entry; +0.61/+0.75 R is not a finding); filter fixed, rerun 20:40 UTC, scored below when done
+## 1,439 — low-of-day mirror short — FIRST FULL RUN VOID (population look-ahead: `low <= floor − 1c` kept only days that fell below $20 AFTER the entry; +0.61/+0.75 R is not a finding); filter fixed, rerun 20:22 UTC, scored below when done
 
 <details><summary>void run (record only)</summary>
 
-## 1,439 — low-of-day mirror (FINAL)
+## 1,439 — low-of-day mirror short (corrected population)
 
-Full run, 75,689 symbol-days (TRAIN-H2 39,539 / VAL 36,150), 100 % coverage, 0 pp gap both holdouts.
-PRIMARY = fills with SSR false AND shortable true (pass bar applies); secondary = all fills.
-
-| holdout | book | n | fill rate | mean net R | VAL t | fills/wk | shortable share |
-|---|---|---|---|---|---|---|---|
-| TRAIN-H2 | PRIMARY | 48 | 0.270 | +0.747 | 4.64 | 2.67 | 100 % |
-| VAL | PRIMARY | 67 | 0.289 | +0.606 | 3.11 | 3.35 | 100 % |
-
-**Verdict: FAIL** (not VOID). Mean net R, VAL t, ex-top-5 %, coverage/gap and shortable share all
-clear the bar on the PRIMARY (SSR-excluded, shortable-only) book, but PRIMARY fills/week on
-TRAIN-H2 = 2.67, under the ≥ 3/week pass bar (VAL clears at 3.35). The Reg SHO SSR + borrow filter
-removes ~73 % of raw fills, thinning the book below the frequency bar on one holdout. Full table +
-caveats: `research/hod_entry/RESULT_1439.md`.
-
-## 1,444 — resting entry only on scanner-qualified names (judged from the 1,438 adversarial check)
-
-| cohort | TRAIN-H2 | VAL |
-|---|---|---|
-| "tracked" (cache.db ≥ 90 % of pre-fill minutes) | +0.229 (t 2.8) | +0.263 (t 3.8) |
-| tracked AND full-day range < 10 % | −0.324 | −0.341 |
-| live-knowable: range through bar j ≥ 10 % | −0.18 | −0.29 |
-
-FAIL / not runnable: the "tracked" cohort is selected by the backtest cache build on the FULL-DAY range (look-ahead),
-no point-in-time scanner record exists (scan_results empty), and every live-knowable analogue is negative. 1,438's
-negative stands (entry half-spread was double-charged: corrected net ≈ −0.11 R, raw ≈ 0). HOD-break closed at every
-executable entry on this population. Forward instrument: log scanner qualification at arm time in the dry ledger.
-Full: `RESULT_1444.md`, `review/1438_check.md`.
-
-## 1,440 — stop distance
-
-### Variant A (floor 0.8% only)
-
-| holdout | n | base R | cell R | ΔR | t | ex-top-5% | changed% | stop-slip ΔR |
+| holdout / book | n | fill rate | mean net R | t | ex-top-5 % | fills/wk | SSR share | shortable |
 |---|---|---|---|---|---|---|---|---|
-| TRAIN | 4398 | -0.2084 | -0.2082 | +0.0001 | 1.01 | -0.3222 | 0.0% | +0.0003 |
-| VAL | 5513 | -0.2245 | -0.2250 | -0.0005 | -0.99 | -0.3397 | 0.0% | -0.0006 |
+| TRAIN-H2 primary (non-SSR, shortable) | 2,398 | 0.43 | −0.150 | −2.25 | −0.262 | 36 | 0 % | 100 % |
+| VAL primary | 3,344 | 0.48 | −0.289 | −4.80 | −0.407 | 43 | 0 % | 100 % |
+| VAL all fills | 5,877 | 0.84 | −0.279 | −5.82 | −0.396 | 50 | 25 % | 67 % |
 
-### Variant B (floor 0.8% + cap 3%)
-
-| holdout | n | base R | cell R | ΔR | t | ex-top-5% | changed% | stop-slip ΔR |
-|---|---|---|---|---|---|---|---|---|
-| TRAIN | 4398 | -0.2084 | -0.2140 | -0.0056 | -2.40 | -0.3283 | 9.4% | -0.0066 |
-| VAL | 5513 | -0.2245 | -0.2315 | -0.0070 | -2.50 | -0.3465 | 10.5% | -0.0084 |
-
-Verdict: Variant A FAIL (near no-op, 0.05%/0.02% of fills touched). Variant B FAIL (VAL ΔR -0.0070, t -2.50 vs pass bar +0.05/t≥2). Lift on a raw-R~0 base — never a book (amendment 20:15 UTC).
-
-</details>
+FAIL decisively (bar ≥ +0.10 R): the short mirror loses on both holdouts, worse ex-top-5 %; coverage 100 %, gap 0.
+The FIRST full run (+0.61/+0.75 R) was VOID: its population filter kept only days that fell below the $20 floor AFTER
+the entry (look-ahead) — fixed, regression-tested, rerun. Full: `RESULT_1439.md`.
