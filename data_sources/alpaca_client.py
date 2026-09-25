@@ -724,7 +724,7 @@ class AlpacaClient:
         except AlpacaAPIError:
             raise
         except Exception as e:
-            logger.error(f"Failed to get snapshots: {e}")
+            logger.warning(f"Failed to get snapshots: {e}")
             raise AlpacaAPIError(f"Failed to get snapshots: {e}")
 
     def get_latest_quote(self, symbol: str, feed: DataFeed = DataFeed.SIP) -> Dict:
