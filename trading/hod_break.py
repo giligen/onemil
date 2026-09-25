@@ -43,8 +43,13 @@ class HodBreakParams:
     cap: float = 0.006               # limit cap above the HOD level (60 bps); no fill above it
     entry_limit_pct: float = 0.0015  # resting-order limit above trigger (15 bps); cell 1,427/1,438 (docs/hod_resting_entry_spec_20260925.md)
     target_r: float = 2.0            # fixed take-profit in R
-    max_per_day: int = 8             # first-come cap on fills per session
-    max_concurrent: int = 4
+    max_per_day: int = 8             # first-come cap on FILLED positions per session (never resting orders)
+    max_concurrent: int = 4          # cap on FILLED positions open at once (never resting orders)
+    max_resting: int = 60            # SAFETY CEILING on resting entry orders live at once, not a selection rule (owner 9/25:
+                                      # the backtest never capped resting orders, only fills — every armed name had one).
+                                      # separate from max_concurrent/max_per_day (9/25: with ~30 armed names only the first 2
+                                      # to arm got real orders when a resting slot also spent a max_concurrent slot). The real
+                                      # limiter on resting notional is the buying-power guard in _arm_live_order.
     last_entry_minute: int = 930     # no new entries after 15:30 ET
     flat_minute: int = FLAT_MINUTE
 

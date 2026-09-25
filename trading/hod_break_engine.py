@@ -233,6 +233,9 @@ class HodBreakEngine:
         self.live_parity_ledger_path = str(cfg.get('live_parity_ledger_path', 'logs/hod_live_parity_ledger.csv'))
         self.live_orders_state_path = str(cfg.get('live_orders_state_path', 'logs/hod_live_resting_orders_state.json'))
         self._live_cap_slots: set = set()
+        self._cap_logged: set = set()      # symbols already logged at 'LIVE cap reached' this session — dedup (9/25: was a WARNING every bar)
+        self._bp_cache_value: Optional[float] = None   # cached account buying power for the resting-notional guard (_buying_power_cached)
+        self._bp_cache_ts: float = 0.0                 # refreshed at most once/minute — read once per minute via the alpaca client
         self._live_cancel_swept_entry = False
         self._live_cancel_swept_flat = False
         self._live_reconciled = False
@@ -278,7 +281,8 @@ class HodBreakEngine:
             self.session_date = today; self.candidates.clear(); self.entered_today.clear(); self.daily_pnl = 0.0
             self.live_since = None
             self._kill_notified.clear(); self._flattened = False
-            self._live_cap_slots.clear(); self._live_cancel_swept_entry = False; self._live_cancel_swept_flat = False
+            self._live_cap_slots.clear(); self._cap_logged.clear(); self._bp_cache_value = None; self._bp_cache_ts = 0.0
+            self._live_cancel_swept_entry = False; self._live_cancel_swept_flat = False
             self._apply_session_calendar()
             self._adv_map = self._load_adv_map()
             logger.info(f"{self.tag} session {today}: adv map {len(self._adv_map)} symbols")
@@ -917,9 +921,11 @@ class HodBreakEngine:
 
     def _arm_live_order(self, cand: Candidate, arm: dict) -> None:
         """Place, or cancel + replace, the REAL resting buy-stop-limit for `cand` at `arm` — called once per bar
-        close from `_evaluate_resting`, never from the tape. Caps (max_per_day/max_concurrent) count a RESTING
-        order as a slot (spec's explicit choice — approximates, does not exactly reproduce, the backtest's
-        first-N-fills/day rule; reported, not fixed, since live concurrency truth is only known at the broker)."""
+        close from `_evaluate_resting`, never from the tape. 9/25 fix: a RESTING order counts only against
+        `max_resting` — with ~30 armed names only the first 2 to arm got a real order when a resting slot also
+        spent a max_concurrent slot. `max_per_day`/`max_concurrent` count FILLED positions only, exactly the
+        spec's slot rule, via `_entered_today_count`/`_open_position_count` (both DB-backed so a fill or an exit
+        made elsewhere is visible on the very next bar, not a stale poll)."""
         sym = cand.symbol
         prev = cand.live_order
         if prev is not None and abs(prev['trigger'] - arm['trigger']) < 1e-9 and abs(prev['limit'] - arm['limit']) < 1e-9:
@@ -929,14 +935,30 @@ class HodBreakEngine:
         blocked = self._kill_rails_blocked()
         if blocked:
             logger.warning(f"{self.tag} {sym}: LIVE order blocked by kill rail ({blocked}) — arm stays tape-only"); return
+        if self._entered_today_count() >= self.params.max_per_day:
+            self._log_cap_once(sym, f"day cap {self.params.max_per_day} reached"); return
+        if self._open_position_count() >= self.params.max_concurrent:
+            self._log_cap_once(sym, f"concurrency cap {self.params.max_concurrent} reached"); return
         live_today = len(self._live_cap_slots)
-        if self._entered_today_count() + live_today >= self.params.max_per_day or len(self.positions) + live_today >= self.params.max_concurrent:
-            logger.warning(f"{self.tag} {sym}: LIVE cap reached (entered {self._entered_today_count()} + resting {live_today} "
-                            f"vs max_per_day {self.params.max_per_day} / max_concurrent {self.params.max_concurrent}) — arm stays tape-only")
-            return
+        if live_today >= self.params.max_resting:
+            self._log_cap_once(sym, f"resting cap {self.params.max_resting} reached (resting {live_today})"); return
         qty = resting_order_qty(self.risk_usd, arm)
         if qty < 1:
             logger.warning(f"{self.tag} {sym}: LIVE qty < 1 share at risk ${self.risk_usd:.0f} (trigger {arm['trigger']:.2f} stop {arm['stop']:.2f}) — no real order")
+            return
+        # Owner 9/25: the backtest never capped resting-order COUNT, only fills — max_resting above is a safety
+        # ceiling, not a selection rule. The real limiter is NOTIONAL: skip a new resting order if the sum of
+        # limit_price x qty over every resting order we hold (this one included) would exceed 25% of buying power.
+        bp = self._buying_power_cached()
+        if bp is None:
+            self._log_cap_once(sym, "buying power unavailable — fail closed, no LIVE order"); return
+        existing_notional = sum(c2.live_order['limit'] * c2.live_order['qty']
+                                for s2, c2 in self.candidates.items() if s2 != sym and c2.live_order is not None)
+        new_notional = existing_notional + arm['limit'] * qty
+        bp_cap = 0.25 * bp
+        if new_notional > bp_cap:
+            self._log_cap_once(sym, f"buying-power guard: resting notional ${new_notional:,.0f} would exceed 25% of "
+                                    f"BP (${bp_cap:,.0f} of ${bp:,.0f})")
             return
         coid = f"{self.LIVE_COID_PREFIX}-{sym}-{(self.session_date or '')[5:]}-{uuid.uuid4().hex[:8]}"[:48]
         try:
@@ -970,6 +992,55 @@ class HodBreakEngine:
         cand.live_order = None
         self._live_cap_slots.discard(cand.symbol)
         self._persist_live_orders()
+
+    def _log_cap_once(self, sym: str, msg: str) -> None:
+        """Dedup the 'LIVE cap reached' line to once per symbol per session at INFO (was a WARNING every bar
+        while a name stayed armed-but-blocked — never paged, just flooded the log; _cap_logged cleared in
+        _roll_session)."""
+        if sym in self._cap_logged:
+            return
+        self._cap_logged.add(sym)
+        logger.info(f"{self.tag} {sym}: LIVE cap reached ({msg}) — arm stays tape-only")
+
+    def _buying_power_cached(self) -> Optional[float]:
+        """Account buying power for the resting-notional guard, refreshed at most once a minute via
+        `AlpacaClient.get_buying_power` (owner 9/25). None means unknown — a fetch failure with no prior
+        value; callers fail CLOSED on None (never risk an unbounded resting book on a monitoring hiccup)."""
+        now = self._et_now().timestamp()
+        if self._bp_cache_value is not None and (now - self._bp_cache_ts) < 60.0:
+            return self._bp_cache_value
+        try:
+            bp = float(self.alpaca.get_buying_power())
+            self._bp_cache_value = bp; self._bp_cache_ts = now
+            return bp
+        except Exception as e:
+            logger.error(f"{self.tag} buying-power fetch failed ({e}) — "
+                        f"{'using the last cached value' if self._bp_cache_value is not None else 'NONE cached, fail closed'}")
+            return self._bp_cache_value
+
+    def _open_position_count(self) -> int:
+        """Currently OPEN filled positions for this book. The resting-order path's real exit is owned by
+        StopMonitor off this engine (`_on_live_fill` never populates `self.positions`), so the DB is ground
+        truth here — re-queried on every cap check so a close is visible immediately, not on a stale poll."""
+        today = self.session_date or self._et_now().strftime('%Y-%m-%d')
+        try:
+            rows = self.db.get_open_trades(today, strategy=STRATEGY_NAME)
+            db_open = {r['symbol'] for r in rows}
+        except Exception as e:
+            logger.error(f"{self.tag} open-position DB query failed ({e}) — falling back to in-memory count only"); db_open = set()
+        return len(set(self.positions) | db_open)
+
+    def _cancel_all_resting(self, reason: str) -> None:
+        """Cancel every resting entry order with NOTHING booked yet (never one already carrying a partial fill —
+        _cancel_live_order's invariant) — called when a fill takes the open-position count to max_concurrent, or
+        entered_today to max_per_day. Re-arming is blocked naturally: the next `_arm_live_order` cap check re-reads
+        the DB and stays tape-only until a position actually closes."""
+        syms = [s for s, c in self.candidates.items()
+                if c.live_order is not None and int(c.live_order.get('booked_qty') or 0) == 0]
+        for s in syms:
+            self._cancel_live_order(self.candidates[s], reason)
+        if syms:
+            logger.info(f"{self.tag} {reason} — cancelled {len(syms)} resting orders")
 
     def _sweep_live_cutoffs(self) -> None:
         """Cancel ALL resting real entry orders at last_entry_minute and at flat_minute (15:55 ET) — Alpaca
@@ -1068,6 +1139,10 @@ class HodBreakEngine:
                 if self.stop_monitor is not None: self.stop_monitor.unsubscribe([sym])
             except Exception as e:
                 logger.error(f"{self.tag} {sym}: failed to unsubscribe print-watch after a LIVE fill: {e}")
+            if self._entered_today_count() >= self.params.max_per_day:
+                self._cancel_all_resting('day cap reached')
+            elif self._open_position_count() >= self.params.max_concurrent:
+                self._cancel_all_resting('fill cap reached')
         else:
             logger.warning(f"{self.tag} {sym}: PARTIAL fill {filled_qty}/{lo['qty']} — remainder stays resting, safety-net legs cover the filled qty only")
         self._persist_live_orders()

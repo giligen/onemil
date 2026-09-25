@@ -857,6 +857,10 @@ class Config:
                 "target_r": float(cfg.get("target_r", 2.0)),
                 "max_per_day": int(cfg.get("max_per_day", 8)),
                 "max_concurrent": int(cfg.get("max_concurrent", 4)),
+                # 9/25 live-resting fix: a resting order now counts only against max_resting (a SAFETY CEILING, never a
+                # selection rule — the backtest never capped resting orders, only fills), never max_per_day/max_concurrent
+                # (those count FILLED positions only) — docs/hod_live_resting_orders_spec_20260925.md.
+                "max_resting": int(cfg.get("max_resting", 60)),
                 "last_entry_minute": int(cfg.get("last_entry_minute", 930)),
                 "flat_minute": int(cfg.get("flat_minute", 955)),
             },

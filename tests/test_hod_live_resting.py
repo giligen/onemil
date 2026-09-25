@@ -163,33 +163,153 @@ class TestOneFillPerSymbolDay:
         assert cand.live_order is None
 
 
-# --------------------------------------------------------------------------------------------- item 6: caps count resting orders
-class TestCapsCountRestingOrders:
-    def test_concurrent_cap_blocks_a_second_resting_order(
+# --------------------------------------------------------------------------------------------- item 6: resting cap is
+# SEPARATE from max_concurrent/max_per_day (9/25 fix: with ~30 armed names only the first 2 to arm got a real
+# order when a resting slot also spent a max_concurrent slot — trading/hod_break_engine.py::_arm_live_order).
+class TestRestingCapSeparateFromFillCaps:
+    def test_12_armed_names_get_resting_orders_the_13th_is_tape_only(
             self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
         e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path,
-                        params=dict(cfg()['params'], max_concurrent=1, max_per_day=8))
+                        params=dict(cfg()['params'], max_concurrent=20, max_per_day=20, max_resting=12))
         admit(e)
-        cand1 = e.candidates['ABC']
-        cand2 = Candidate(symbol='DEF', day_open=10.0, adv20=1_000_000.0)
-        e.candidates['DEF'] = cand2
-        e._arm_live_order(cand1, dict(BIG_VOL_ARM))
-        e._arm_live_order(cand2, dict(BIG_VOL_ARM, level=12.0, trigger=12.01, limit=12.0173, stop=11.6))
-        assert hod_live_alpaca.submit_stop_limit_order.call_count == 1
-        assert cand2.live_order is None
+        cands = [e.candidates['ABC']] + [Candidate(symbol=f'S{i}', day_open=10.0, adv20=1_000_000.0) for i in range(1, 13)]
+        for c in cands[1:]:
+            e.candidates[c.symbol] = c
+        for c in cands:
+            e._arm_live_order(c, dict(BIG_VOL_ARM))
+        assert hod_live_alpaca.submit_stop_limit_order.call_count == 12
+        assert sum(1 for c in cands if c.live_order is not None) == 12
+        assert sum(1 for c in cands if c.live_order is None) == 1           # the 13th stays tape-only
 
-    def test_per_day_cap_blocks_a_second_resting_order(
+    def test_low_max_concurrent_or_max_per_day_does_NOT_block_a_second_resting_order(
             self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        # max_concurrent=1 and max_per_day=1 with ZERO fills today: both FILLED-position caps read 0, so
+        # a second resting order is still allowed — only max_resting governs resting-order count now.
         e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path,
-                        params=dict(cfg()['params'], max_concurrent=8, max_per_day=1))
+                        params=dict(cfg()['params'], max_concurrent=1, max_per_day=1, max_resting=12))
         admit(e)
         cand1 = e.candidates['ABC']
         cand2 = Candidate(symbol='DEF', day_open=10.0, adv20=1_000_000.0)
         e.candidates['DEF'] = cand2
         e._arm_live_order(cand1, dict(BIG_VOL_ARM))
         e._arm_live_order(cand2, dict(BIG_VOL_ARM, level=12.0, trigger=12.01, limit=12.0173, stop=11.6))
-        assert hod_live_alpaca.submit_stop_limit_order.call_count == 1
+        assert hod_live_alpaca.submit_stop_limit_order.call_count == 2
+        assert cand1.live_order is not None and cand2.live_order is not None
+
+
+# --------------------------------------------------------------------------------------------- item (2): a fill that
+# reaches a FILLED-position cap sweeps every other resting order immediately.
+class TestFillCapCancelsResting:
+    def test_fill_reaching_max_concurrent_cancels_the_other_resting_orders(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path, caplog):
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path,
+                        params=dict(cfg()['params'], max_concurrent=1, max_per_day=8, max_resting=12))
+        admit(e)
+        cand1 = e.candidates['ABC']
+        cand2 = Candidate(symbol='DEF', day_open=10.0, adv20=1_000_000.0)
+        e.candidates['DEF'] = cand2
+        e._arm_live_order(cand1, dict(BIG_VOL_ARM))
+        e._arm_live_order(cand2, dict(BIG_VOL_ARM, level=12.0, trigger=12.01, limit=12.0173, stop=11.6))
+        assert hod_live_alpaca.submit_stop_limit_order.call_count == 2      # both armed — resting cap is separate
+
+        coid = cand1.live_order['coid']
+        hod_live_db.get_open_trades.return_value = [{'symbol': 'ABC'}]      # DB now shows ABC open, post-fill
+        hod_live_stream.snapshot_by_client_prefix.return_value = {
+            coid: {'status': 'filled', 'filled_qty': 150, 'filled_avg_price': 11.02, 'client_order_id': coid}}
+        with caplog.at_level('INFO'):
+            e._poll_live_fills()
+        assert cand2.live_order is None                                      # swept immediately
+        assert any('fill cap reached' in r.message and 'cancelled 1 resting orders' in r.message for r in caplog.records)
+
+    def test_fill_reaching_max_per_day_cancels_resting_and_stops_new_arms(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path, caplog):
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path,
+                        params=dict(cfg()['params'], max_concurrent=8, max_per_day=1, max_resting=12))
+        admit(e)
+        cand1 = e.candidates['ABC']
+        cand2 = Candidate(symbol='DEF', day_open=10.0, adv20=1_000_000.0)
+        e.candidates['DEF'] = cand2
+        e._arm_live_order(cand1, dict(BIG_VOL_ARM))
+        e._arm_live_order(cand2, dict(BIG_VOL_ARM, level=12.0, trigger=12.01, limit=12.0173, stop=11.6))
+        assert hod_live_alpaca.submit_stop_limit_order.call_count == 2
+
+        coid = cand1.live_order['coid']
+        hod_live_stream.snapshot_by_client_prefix.return_value = {
+            coid: {'status': 'filled', 'filled_qty': 150, 'filled_avg_price': 11.02, 'client_order_id': coid}}
+        with caplog.at_level('INFO'):
+            e._poll_live_fills()
         assert cand2.live_order is None
+        assert any('day cap reached' in r.message for r in caplog.records)
+
+        cand3 = Candidate(symbol='GHI', day_open=10.0, adv20=1_000_000.0)
+        e.candidates['GHI'] = cand3
+        e._arm_live_order(cand3, dict(BIG_VOL_ARM, level=13.0, trigger=13.01, limit=13.0195, stop=12.6))
+        assert cand3.live_order is None                                      # per-day cap now blocks all new arming
+        assert hod_live_alpaca.submit_stop_limit_order.call_count == 2       # no third order placed
+
+
+# --------------------------------------------------------------------------------------------- item (3): the noisy
+# per-bar 'LIVE cap reached' line is deduped to once per symbol per session.
+class TestCapLogDedup:
+    def test_cap_reached_logs_once_per_symbol_per_session(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path, caplog):
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path,
+                        params=dict(cfg()['params'], max_concurrent=1, max_per_day=8, max_resting=12))
+        admit(e)
+        cand = e.candidates['ABC']
+        hod_live_db.get_open_trades.return_value = [{'symbol': 'XYZ'}]       # already at max_concurrent=1
+        with caplog.at_level('INFO'):
+            e._arm_live_order(cand, dict(BIG_VOL_ARM))
+            e._arm_live_order(cand, dict(BIG_VOL_ARM))
+        assert not hod_live_alpaca.submit_stop_limit_order.called
+        cap_logs = [r for r in caplog.records if 'LIVE cap reached' in r.message and r.levelname == 'INFO']
+        assert len(cap_logs) == 1
+        assert not any(r.levelname == 'WARNING' and 'LIVE cap reached' in r.message for r in caplog.records)
+
+
+# --------------------------------------------------------------------------------------------- owner 9/25: buying-power
+# notional guard (max_resting is a safety ceiling only — the backtest never capped resting-order COUNT).
+class TestBuyingPowerGuard:
+    def test_resting_order_skipped_when_notional_would_exceed_25pct_of_buying_power(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path, caplog):
+        hod_live_alpaca.get_buying_power.return_value = 1000.0        # 25% = $250; one order's notional ~= $2,677
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path,
+                        params=dict(cfg()['params'], max_concurrent=20, max_per_day=20, max_resting=20))
+        admit(e)
+        cand = e.candidates['ABC']
+        with caplog.at_level('INFO'):
+            e._arm_live_order(cand, dict(BIG_VOL_ARM))
+        assert not hod_live_alpaca.submit_stop_limit_order.called
+        assert cand.live_order is None
+        assert any('buying-power guard' in r.message for r in caplog.records)
+
+    def test_second_order_skipped_once_running_notional_would_cross_the_threshold(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        hod_live_alpaca.get_buying_power.return_value = 12_000.0      # 25% = $3,000: room for one ~$2,677 order, not two
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path,
+                        params=dict(cfg()['params'], max_concurrent=20, max_per_day=20, max_resting=20))
+        admit(e)
+        cand1 = e.candidates['ABC']
+        cand2 = Candidate(symbol='DEF', day_open=10.0, adv20=1_000_000.0)
+        e.candidates['DEF'] = cand2
+        e._arm_live_order(cand1, dict(BIG_VOL_ARM))
+        e._arm_live_order(cand2, dict(BIG_VOL_ARM, level=12.0, trigger=12.01, limit=12.0173, stop=11.6))
+        assert cand1.live_order is not None
+        assert cand2.live_order is None
+        assert hod_live_alpaca.submit_stop_limit_order.call_count == 1
+
+    def test_buying_power_fetch_failure_with_no_cache_fails_closed(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path, caplog):
+        hod_live_alpaca.get_buying_power.side_effect = Exception('boom')
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path,
+                        params=dict(cfg()['params'], max_concurrent=20, max_per_day=20, max_resting=20))
+        admit(e)
+        cand = e.candidates['ABC']
+        with caplog.at_level('ERROR'):
+            e._arm_live_order(cand, dict(BIG_VOL_ARM))
+        assert not hod_live_alpaca.submit_stop_limit_order.called
+        assert cand.live_order is None
+        assert any('buying-power fetch failed' in r.message for r in caplog.records)
 
 
 # --------------------------------------------------------------------------------------------- item 7: cutoff sweeps
