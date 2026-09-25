@@ -16,6 +16,7 @@ level + $0.01, limit 15 bps, NBBO ask at the first cross, B0 stop / 2 R / 15:55,
 | 6 | 1,428 | gapper universe (gap ≥ 5 %, open $3–30, prior vol ≥ 500K), same order | orb universes' minute bars + SIP ticks (new fetch) | fill mean net R ≥ +0.15 both holdouts |
 | 7 | 1,435 / 1,432 / 1,441 (NEW) | other levels with the same order: pre-market high; opening-range high (ORB tick data exists); prior-day high | existing bars/ticks (+ PMH pre-market bars) | mean net R ≥ +0.10 both holdouts each |
 | 8 | 1,440 (NEW) | stop distance: floor / cap the consolidation-low stop at 0.8 % / 3 % of price; report cost in R and fill count | fills | ΔR ≥ +0.05 both holdouts |
+| 9 | 1,442 (NEW) | tape-triggered override: the same E1 fills re-priced two ways, paired per fill — (a) the broker's rule: fill at the ask at the first ROUND-LOT print ≥ trigger (Alpaca's NBBO-filtered trigger, 9/25 VECO: +16 s, +14 bps), (b) our override: fill at the ask 300 ms after the first print of ANY size ≥ trigger, both capped at the 15 bps limit; report the fill-rate and mean-R difference, and the outcome of odd-lot-led crosses vs round-lot-led crosses | SIP ticks already fetched | override ΔR ≥ +0.03 per fill on both holdouts with no loss of fill rate → ship the 1-second override Monday; else keep the resting order as is |
 
-Programme count after this file: 1,441. Not allowed: reordering to chase a good number; changing E1 constants; reading
+Programme count after this file: 1,442. Not allowed: reordering to chase a good number; changing E1 constants; reading
 TEST for any cell before its VAL bar; more than one heavy job at a time while the trader runs.
