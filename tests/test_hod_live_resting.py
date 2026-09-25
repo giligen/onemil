@@ -528,8 +528,9 @@ class TestBootSequence:
         c['live_parity_ledger_path'] = str(tmp_path / 'ledger.csv')
         c['dry_ledger_path'] = str(tmp_path / 'dry_ledger.csv')
         e = HodBreakEngine(hod_live_alpaca, hod_live_db, hod_live_sm, cfg=c, order_stream=hod_live_stream)
-        assert e.session_date is None and e.candidates == {}      # fresh process, nothing rolled/reconciled yet
-        with caplog.at_level('INFO'):
+        e._minute_of_day = lambda: 600                             # pinned mid-session: the real clock past 15:30 ET
+        assert e.session_date is None and e.candidates == {}      # made _sweep_live_cutoffs cancel the adopted order
+        with caplog.at_level('INFO'):                              # in the same tick (failed 9/25 at 15:5x ET)
             e.process_tick()                                       # the real cold-boot sequence
         assert any('reconcile: persisted 1, adopted 1, cancelled 0' in r.message for r in caplog.records)
         assert e.candidates['HUM'].live_order is not None           # survived _roll_session's candidate rebuild
@@ -599,3 +600,13 @@ class TestGuardrailPausesHodBreak:
         above_band = _stats(book='hod_break', trailing_20_session_usd=-599.0)
         check2 = gr.evaluate_pause(above_band, stage_risk_usd=50.0, band_p5=None)
         assert not check2.should_pause
+
+
+def test_engine_defaults_never_touch_production_state_files(hod_live_alpaca, hod_live_db, hod_live_sm, tmp_path):
+    """9/25 defect: a cfg without ledger keys wrote fixture rows into logs/hod_live_parity_ledger.csv. Under the
+    conftest autouse fixture every module default resolves inside tmp_path, so no test can pollute the live files."""
+    import trading.hod_break_engine as hbe
+    e = hbe.HodBreakEngine(hod_live_alpaca, hod_live_db, hod_live_sm, cfg={"enabled": True, "dry_run": False})
+    for path in (e.dry_ledger_path, e.live_parity_ledger_path, e.live_orders_state_path):
+        assert path.startswith(str(tmp_path)), path
+        assert not path.startswith('logs/')

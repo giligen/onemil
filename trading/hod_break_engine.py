@@ -36,6 +36,13 @@ from trading.hod_break import HodBreakParams, arm_state, detect, resting_entry_f
 from trading.red_to_green import RedToGreenParams, detect as r2g_detect, prior_day_range_pct
 
 logger = logging.getLogger(__name__)
+
+# Production state files (overridable per book via cfg keys of the same name). Module-level so the test suite can
+# redirect ALL of them into tmp_path in one autouse fixture (tests/conftest.py::_isolated_hod_state) — on 9/25 the
+# engine tests appended fixture rows (symbol ZZZ, order o9) to the LIVE parity ledger through this default.
+DEFAULT_DRY_LEDGER_PATH = 'logs/hod_dry_entry_ledger.csv'
+DEFAULT_LIVE_PARITY_LEDGER_PATH = 'logs/hod_live_parity_ledger.csv'
+DEFAULT_LIVE_ORDERS_STATE_PATH = 'logs/hod_live_resting_orders_state.json'
 STRATEGY_NAME = 'hod_break'
 ET = ZoneInfo('America/New_York')
 _TERMINAL = ('canceled', 'cancelled', 'expired', 'rejected', 'done_for_day', 'suspended')
@@ -224,14 +231,14 @@ class HodBreakEngine:
             self.entry_mode = 'next_open'
         logger.info(f"{self.tag} entry_mode={self.entry_mode} (resting stop-limit: trigger level+0.01, "
                     f"limit {float(getattr(self.params, 'entry_limit_pct', 0.0015)):.4%})")
-        self.dry_ledger_path = str(cfg.get('dry_ledger_path', 'logs/hod_dry_entry_ledger.csv'))
+        self.dry_ledger_path = str(cfg.get('dry_ledger_path', DEFAULT_DRY_LEDGER_PATH))
         # LIVE resting-order state (docs/hod_live_resting_orders_spec_20260925.md): _live_cap_slots counts a
         # RESTING order as a slot (never just a fill) so a burst of fills can never exceed max_per_day/max_concurrent.
         # live_orders_state_path persists {symbol: live_order dict} so a crash/restart reconciles by TRACKED ORDER
         # ID (never a client_order_id-prefix guess — replace_order_by_id returns a NEW id/coid, so this engine never
         # calls it; a level change is always cancel + a brand-new order, keeping our prefix on every live order).
-        self.live_parity_ledger_path = str(cfg.get('live_parity_ledger_path', 'logs/hod_live_parity_ledger.csv'))
-        self.live_orders_state_path = str(cfg.get('live_orders_state_path', 'logs/hod_live_resting_orders_state.json'))
+        self.live_parity_ledger_path = str(cfg.get('live_parity_ledger_path', DEFAULT_LIVE_PARITY_LEDGER_PATH))
+        self.live_orders_state_path = str(cfg.get('live_orders_state_path', DEFAULT_LIVE_ORDERS_STATE_PATH))
         self._live_cap_slots: set = set()
         self._cap_logged: set = set()      # symbols already logged at 'LIVE cap reached' this session — dedup (9/25: was a WARNING every bar)
         self._sizing_logged: set = set()   # symbols already logged for which resting_order_qty cap bound, this session (9/25)

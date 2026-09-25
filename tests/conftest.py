@@ -34,6 +34,19 @@ def _isolated_guardrail_state(tmp_path, monkeypatch):
     monkeypatch.setenv("ONEMIL_GUARDRAIL_STATE", str(tmp_path / "guardrail_state_test.json"))
 
 
+@pytest.fixture(autouse=True)
+def _isolated_hod_state(tmp_path, monkeypatch):
+    """No test ever writes the PRODUCTION HOD ledgers or resting-order state.
+
+    9/25: engine tests that build HodBreakEngine with a cfg lacking the ledger keys appended fixture rows (ZZZ / o9)
+    to logs/hod_live_parity_ledger.csv — the file Monday's go/no-go reads. Redirect every module default to
+    tmp_path; a cfg that names a path explicitly still wins (those tests already use tmp_path)."""
+    import trading.hod_break_engine as hbe
+    monkeypatch.setattr(hbe, "DEFAULT_DRY_LEDGER_PATH", str(tmp_path / "hod_dry_entry_ledger.csv"))
+    monkeypatch.setattr(hbe, "DEFAULT_LIVE_PARITY_LEDGER_PATH", str(tmp_path / "hod_live_parity_ledger.csv"))
+    monkeypatch.setattr(hbe, "DEFAULT_LIVE_ORDERS_STATE_PATH", str(tmp_path / "hod_live_resting_orders_state.json"))
+
+
 @pytest.fixture
 def bf_db(tmp_path):
     """Real Database on a temp file, closed after the test."""
