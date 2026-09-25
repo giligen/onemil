@@ -30,9 +30,11 @@ def stage_risk_usd(book: str) -> float:
     """This book's current per-trade risk from its live config file.
 
     orb: orb.yaml sizing.risk_per_trade_usd. bull_flag: config.yaml
-    trading.risk_per_trade. hod_break: config.yaml trading.risk_per_trade too
-    (it shares the engine's base risk even though it trades zero orders) —
-    used only to size its reported ledger, never to pause it.
+    trading.risk_per_trade. hod_break: config.yaml hod_break.risk_usd — its OWN
+    per-trade risk (e.g. $50 for the first live week), NOT trading.risk_per_trade
+    (bull_flag's knob) — now that hod_break can place real orders
+    (docs/hod_live_resting_orders_spec_20260925.md) this value also sizes its
+    guardrail pause thresholds (PAUSABLE_BOOKS), not just its reported ledger.
     A missing/unreadable config logs ERROR and returns 0.0 (rule 2/3
     thresholds then collapse to 0, i.e. maximally conservative — any loss
     trips them — rather than silently skipping the check).
@@ -42,6 +44,8 @@ def stage_risk_usd(book: str) -> float:
             cfg = yaml.safe_load(ORB_YAML.read_text())
             return float(cfg['sizing']['risk_per_trade_usd'])
         cfg = yaml.safe_load(CONFIG_YAML.read_text())
+        if book == 'hod_break':
+            return float(cfg['hod_break']['risk_usd'])
         return float(cfg['trading']['risk_per_trade'])
     except Exception as e:  # noqa: BLE001 - a decision aid must not crash
         gr.logger.error(f"guardrail: could not read stage risk for {book} ({e}) — using $0")

@@ -15,8 +15,10 @@ import pytest
 from data_sources.alpaca_client import AlpacaClient
 from persistence.database import Database
 from trading.order_executor import OrderExecutor
+from trading.order_stream import OrderStreamWatcher
 from trading.pattern_detector import BullFlagDetector
 from trading.position_manager import PositionManager
+from trading.stop_monitor import StopMonitor
 from trading.trade_planner import TradePlanner
 from trading.trading_engine import TradingEngine
 
@@ -74,6 +76,55 @@ def guardrail_trades_db(tmp_path):
     db = Database(trades_path=str(path), cache_path=str(tmp_path / "guardrail_cache.db"))
     db.close()
     return path
+
+
+@pytest.fixture
+def hod_live_alpaca():
+    """Mocked AlpacaClient wired for the LIVE resting-order path
+    (docs/hod_live_resting_orders_spec_20260925.md, tests/test_hod_live_resting.py): a real submit/cancel/list
+    surface, plus the ask the DRY tape side also reads so the two never disagree by fixture accident."""
+    a = MagicMock(spec=AlpacaClient)
+    a.get_latest_quote.return_value = {'bid_price': 11.00, 'ask_price': 11.015, 'bid_size': 100, 'ask_size': 100}
+    a.get_1min_bars_multi.return_value = {}
+    a.get_open_positions.return_value = []
+    a.get_open_orders.return_value = []
+    a.submit_stop_limit_order.side_effect = lambda **kw: {'id': f"broker-{kw['client_order_id']}", 'status': 'accepted'}
+    a.cancel_order.return_value = True
+    a.submit_limit_sell_order.return_value = {'id': 'tp-1', 'status': 'accepted'}
+    a.submit_stop_sell_order.return_value = {'id': 'sl-1', 'status': 'accepted'}
+    return a
+
+
+@pytest.fixture
+def hod_live_db(tmp_path):
+    """A real trades table on a temp file (as `_trades_path` on a `MagicMock(spec=Database)`) so
+    `_entered_today_count`/day-cap bookkeeping runs unmocked, same pattern as tests/test_hod_break_engine.py."""
+    p = tmp_path / 'hod_live_trades.db'
+    con = sqlite3.connect(p)
+    con.execute("create table trades (id integer primary key, strategy text, trade_date text, pnl real, symbol text, order_status text)")
+    con.commit(); con.close()
+    d = MagicMock(spec=Database)
+    d._trades_path = str(p)
+    d.get_active_universe.return_value = [{'symbol': 'ABC', 'avg_volume_daily': 1_000_000}]
+    d.get_open_trades.return_value = []
+    d.save_trade.return_value = 7
+    return d
+
+
+@pytest.fixture
+def hod_live_sm():
+    s = MagicMock(spec=StopMonitor)
+    s.polling_mode = False
+    return s
+
+
+@pytest.fixture
+def hod_live_stream():
+    """Mocked OrderStreamWatcher (trading/order_stream.py) — the live fill-poll source
+    (`_poll_live_fills` -> `snapshot_by_client_prefix`); tests override `.return_value` per case."""
+    w = MagicMock(spec=OrderStreamWatcher)
+    w.snapshot_by_client_prefix.return_value = {}
+    return w
 
 
 @pytest.fixture

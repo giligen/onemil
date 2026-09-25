@@ -132,8 +132,17 @@ def resting_order_qty(risk_usd: float, arm: dict) -> int:
     """Live order size for a resting arm (docs/hod_live_resting_orders_spec_20260925.md item 1): floor(risk /
     (trigger - stop)) — the SAME formula as `shares_for`, keyed on the order's trigger (the broker's stop price,
     known at arm time) rather than the tape's expected ask (only known after a fill). ONE helper so the live
-    engine never re-derives this arithmetic."""
-    return shares_for(risk_usd, arm['trigger'], arm['stop'])
+    engine never re-derives this arithmetic. Also capped at 5% of the prior bar's volume (`arm['bar_volume']`,
+    the bar whose close armed this order — a thin-tape guard against sizing a real order off dollar risk alone
+    when the last minute barely traded); the cap is skipped (logged nowhere — it is simply absent) when the
+    caller has not threaded `bar_volume` through, e.g. offline/backtest callers of the same formula."""
+    qty = shares_for(risk_usd, arm['trigger'], arm['stop'])
+    bar_volume = arm.get('bar_volume')
+    if bar_volume is not None:
+        vol_cap = int(0.05 * float(bar_volume))
+        if vol_cap < qty:
+            qty = vol_cap
+    return qty
 
 
 def detect(o: Sequence[float], h: Sequence[float], l: Sequence[float], v: Sequence[float], m: Sequence[int],

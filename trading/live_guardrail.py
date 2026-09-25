@@ -32,10 +32,12 @@ State file: data/guardrail_state.json (override with env ONEMIL_GUARDRAIL_STATE,
      "bull_flag": {...}}
 
 Clearing a pause is MANUAL and logged: `scripts/guardrail.py --clear BOOK "reason"`.
-`hod_break` is reported (its ledger is computed like any other book) but never
-auto-paused here — it already trades with `dry_run: true` (zero orders), so a
-guardrail pause on it would be a no-op; `scripts/guardrail.py --check` never
-calls `evaluate_pause`/`pause_book` for it.
+`hod_break` is PAUSABLE (docs/hod_live_resting_orders_spec_20260925.md, 2026-09-25): its
+resting-order live path can place real orders, so the same G1 rule now applies to it,
+scaled to ITS OWN risk (scripts/guardrail.py stage_risk_usd reads hod_break.risk_usd, not
+bull_flag's trading.risk_per_trade). With zero live fills `LedgerStats.trailing_40_mean_r`
+is None and both $ thresholds are 0 vs 0 — the rule cannot fire until hod_break's first
+live fill, matching the spec's "pause-capable from its first fill" without a separate gate.
 """
 from __future__ import annotations
 
@@ -63,10 +65,14 @@ TELEGRAM_PREFIX = '[GUARDRAIL]'
 #: never auto-paused (see module docstring).
 BOOKS = ('orb', 'bull_flag', 'hod_break')
 #: Books `scripts/guardrail.py --check` is allowed to pause.
-PAUSABLE_BOOKS = ('orb', 'bull_flag')
+PAUSABLE_BOOKS = ('orb', 'bull_flag', 'hod_break')
 
-#: spec: "x8 (ORB) / x4 (BF)" in the trailing-20-session $ rule.
-SESSION_MULT = {'orb': 8, 'bull_flag': 4}
+#: spec: "x8 (ORB) / x4 (BF)" in the trailing-20-session $ rule. hod_break added 2026-09-25
+#: (docs/hod_live_resting_orders_spec_20260925.md): no session-count precedent of its own yet,
+#: so it uses bull_flag's x4 (its max_per_day=8/max_concurrent=4 caps are closer to bull_flag's
+#: cadence than ORB's 8-slot book) — a judgment call, not a backtested number; revisit once
+#: hod_break has its own live session history.
+SESSION_MULT = {'orb': 8, 'bull_flag': 4, 'hod_break': 4}
 TRAILING_R_WINDOW = 40
 TRAILING_R_MIN_FILLS = 20     # rule 1 only fires with >= this many R values in the window
 TRAILING_SESSION_WINDOW = 20
@@ -284,8 +290,7 @@ def evaluate_pause(stats: LedgerStats, stage_risk_usd: float,
                    band_p5: Optional[float]) -> PauseCheck:
     """The frozen pause rule (spec G1): OR of three thresholds, checked in order.
 
-    `hod_break` never pauses here (dry book, reported only) — callers should
-    not evaluate it, but a call is answered honestly (never pauses) rather
+    A book outside PAUSABLE_BOOKS is answered honestly (never pauses) rather
     than raising, so a reporting loop over all of BOOKS stays simple.
     """
     book = stats.book

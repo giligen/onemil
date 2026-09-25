@@ -8,8 +8,10 @@ ever submitted from this path.
 """
 import asyncio
 import logging
+import os
 import time
 import types
+from datetime import timedelta
 from unittest.mock import MagicMock
 
 import pytest
@@ -19,7 +21,8 @@ from trading.hod_break_engine import Candidate
 from tests.test_hod_resting_entry import (
     tape, ADV20, mock_alpaca, mock_db, mock_sm, trades_db, resting_engine, read_ledger,
 )
-from tests.test_hod_break_engine import admit
+from tests.test_hod_break import bars as bars_arrays
+from tests.test_hod_break_engine import admit, bars_df
 
 
 # --------------------------------------------------------------------------------------------- StopMonitor pool
@@ -198,3 +201,72 @@ class TestEntryModeNextOpenUnchanged:
         e = HodBreakEngine(mock_alpaca, mock_db, mock_sm, cfg=cfg())   # default entry_mode='next_open'
         e._on_trade_print('ABC', 999.0, 100, time.time())              # must not raise; no candidates dict needed
         mock_sm.get_print_quote.assert_not_called()
+
+
+# --------------------------------------------------------------------------------------------- live_since gating
+# 2026-09-25 live-dry defects (17:15-17:16 UTC): a day backfill/catch-up walked historical closed bars through
+# _evaluate_resting and 'filled' them against the CURRENT quote (AAON: fill 88.39 below trigger 89.47). Fix:
+# a bar may only arm if it closed after HodBreakEngine.live_since (set once, from the first real websocket bar).
+class TestLiveSinceGating:
+    def test_backfill_bars_never_arm_and_write_no_ledger_rows(self, mock_alpaca, mock_db, mock_sm, tmp_path, caplog):
+        """Startup catch-up: live_since is still None (no websocket bar has arrived yet) when a full historical
+        day is handed to _evaluate_resting — none of it may arm or touch the ledger."""
+        e = resting_engine(mock_alpaca, mock_db, mock_sm, tmp_path)
+        e.live_since = None                                            # undo the fixture's back-date: simulate pre-live startup
+        admit(e)
+        with caplog.at_level(logging.INFO):
+            e._ingest_bars('ABC', bars_df(tape()))
+        cand = e.candidates['ABC']
+        assert cand.resting_arm is None and cand.resting_filled is False
+        assert not os.path.exists(e.dry_ledger_path)
+        assert any('skipped' in r.message and 'backfill' in r.message for r in caplog.records)
+
+    def test_bar_closing_at_or_after_live_since_arms(self, mock_alpaca, mock_db, mock_sm, tmp_path):
+        e = resting_engine(mock_alpaca, mock_db, mock_sm, tmp_path)
+        e.live_since = e._bar_close_et(570 + 6)                        # == bar 6's own close time (boundary: not skipped)
+        admit(e)
+        df = bars_df(tape())
+        for i in range(7):
+            e._ingest_bars('ABC', df.iloc[i:i + 1])
+        cand = e.candidates['ABC']
+        assert cand.resting_arm is not None and cand.resting_arm['idx'] == 6
+
+    def test_bar_closing_before_live_since_is_skipped_not_armed(self, mock_alpaca, mock_db, mock_sm, tmp_path):
+        e = resting_engine(mock_alpaca, mock_db, mock_sm, tmp_path)
+        e.live_since = e._bar_close_et(570 + 6) + timedelta(minutes=1)  # one minute AFTER bar 6 closes
+        admit(e)
+        df = bars_df(tape())
+        for i in range(7):
+            e._ingest_bars('ABC', df.iloc[i:i + 1])
+        cand = e.candidates['ABC']
+        assert cand.resting_arm is None                                 # bar 6 would otherwise have armed it
+
+
+class TestFallbackFillFixes:
+    """Bug 2: the bar-level fallback (no print stream data) resolved a cross against 'the current quote'
+    unconditionally — if that ask sat below the trigger (stale/backfill quote) the dry ledger recorded a fill
+    BELOW the order's own trigger, which a real buy-stop-limit can never do. Fix: fill at max(ask, trigger),
+    and only when the quote is fresh (StopMonitor._quote already refuses one older than max_quote_age_s=5s)."""
+
+    def test_fallback_ask_below_trigger_fills_at_the_trigger(self, mock_alpaca, mock_db, mock_sm, tmp_path):
+        e, cand = armed_engine(mock_alpaca, mock_db, mock_sm, tmp_path)   # ARM: trigger 11.01, limit 11.0165
+        cand.resting_scanned_idx = 6
+        mock_alpaca.get_latest_quote.return_value = {'bid_price': 10.85, 'ask_price': 10.90, 'bid_size': 1, 'ask_size': 1}  # ask < trigger
+        o, h, l, c, v, m = bars_arrays(tape(n_consol=4))                  # 4 consol bars -> the break bar (h >= trigger) lands at index 7
+        e._evaluate_resting(cand, o, h, l, v, m, e.params)
+        assert cand.resting_filled is True
+        rows = read_ledger(e.dry_ledger_path)
+        assert len(rows) == 1 and rows[0]['filled'] == '1' and rows[0]['tape_accurate'] == '0'
+        assert float(rows[0]['fill_px']) == pytest.approx(ARM['trigger'])   # filled at the trigger, never below it
+        assert float(rows[0]['ask']) == pytest.approx(10.90)                # the raw ask is still logged, unmodified
+
+    def test_fallback_stale_quote_is_no_fill_fail_closed(self, mock_alpaca, mock_db, mock_sm, tmp_path):
+        e, cand = armed_engine(mock_alpaca, mock_db, mock_sm, tmp_path)
+        cand.resting_scanned_idx = 6
+        stale_ts = (e._et_now() - timedelta(seconds=30)).isoformat()
+        mock_alpaca.get_latest_quote.return_value = {'bid_price': 11.00, 'ask_price': 11.015, 'bid_size': 1, 'ask_size': 1, 'timestamp': stale_ts}
+        o, h, l, c, v, m = bars_arrays(tape(n_consol=4))
+        e._evaluate_resting(cand, o, h, l, v, m, e.params)
+        assert cand.resting_filled is False                                # no fill (fail closed) — a re-arm attempt for the next bar is separate behaviour
+        rows = read_ledger(e.dry_ledger_path)
+        assert len(rows) == 1 and rows[0]['filled'] == '0' and rows[0]['fill_px'] == ''

@@ -58,13 +58,16 @@ def test_check_leaves_healthy_book_unpaused(guardrail_trades_db, insert_trade, t
     sent.assert_not_called()
 
 
-def test_check_reports_hod_break_but_never_pauses(guardrail_trades_db, insert_trade, tmp_path, capsys):
+def test_check_pauses_hod_break_scaled_to_its_own_risk_usd(guardrail_trades_db, insert_trade, tmp_path, capsys):
+    """2026-09-25: hod_break is PAUSABLE now that it places real resting orders — thresholds scale to
+    stage_risk_usd (hod_break.risk_usd, not trading.risk_per_trade), same -3x/x4 trailing-20-session rule
+    as bull_flag. -5,000 on one fill <= -3*100*4 = -1,200 trips it."""
     insert_trade("hod_break", "2026-06-01", pnl=-5000.0)
     state_path = tmp_path / "guardrail_state.json"
     cli.run_check(db_path=guardrail_trades_db, state_path=state_path, notify=False)
-    assert gr.is_paused("hod_break", path=state_path) is False
+    assert gr.is_paused("hod_break", path=state_path) is True
     out = capsys.readouterr().out
-    assert "hod_break: n=1" in out
+    assert "hod_break: n=1" in out and "PAUSED" in out
 
 
 def test_clear_stores_reason(tmp_path, monkeypatch, capsys):

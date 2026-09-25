@@ -1,0 +1,299 @@
+"""docs/hod_live_resting_orders_spec_20260925.md item 5 — tests for the LIVE resting stop-limit order path
+(entry_mode='resting_stop_limit', dry_run=False): `HodBreakEngine._arm_live_order/_cancel_live_order/
+_sweep_live_cutoffs/_poll_live_fills/_on_live_fill/_append_live_parity_row/_persist_live_orders/
+_reconcile_live_orders_on_boot`, `trading.hod_break.resting_order_qty`, and the `hod_break`-pausable guardrail
+wiring (trading/live_guardrail.py, scripts/guardrail.py). All collaborators are MagicMock(spec=...); the DRY
+tape side (_evaluate_resting/_on_trade_print) is untouched by this file — see tests/test_hod_resting_entry.py.
+"""
+import csv
+import json
+from datetime import datetime, timezone
+
+import pytest
+
+from trading.hod_break import resting_order_qty
+from trading.hod_break_engine import Candidate, HodBreakEngine
+from trading import live_guardrail as gr
+from tests.test_hod_break_engine import cfg, bars_df, admit
+from tests.test_hod_resting_entry import tape
+from tests.test_live_guardrail import _stats
+
+
+def live_engine(alpaca, db, sm, stream, tmp_path, dry_run=False, **over):
+    """A resting_stop_limit engine (dry_run=False by default — the REAL live-order path is active)."""
+    c = cfg(dry_run=dry_run, entry_mode='resting_stop_limit', **over)
+    c.setdefault('live_parity_ledger_path', str(tmp_path / 'hod_live_parity_ledger.csv'))
+    c.setdefault('live_orders_state_path', str(tmp_path / 'hod_live_resting_orders_state.json'))
+    c.setdefault('dry_ledger_path', str(tmp_path / 'hod_dry_entry_ledger.csv'))
+    e = HodBreakEngine(alpaca, db, sm, cfg=c, order_stream=stream)
+    e._roll_session()
+    # Same live_since back-date as tests/test_hod_resting_entry.py's resting_engine(): these tests feed bars
+    # straight to _ingest_bars, never through _on_bar_close, so without this every synthetic bar is (correctly,
+    # 2026-09-25 fix) treated as pre-live backfill and skipped for arming.
+    e.live_since = e._bar_close_et(0)
+    return e
+
+
+def read_ledger(path):
+    with open(path) as fh:
+        return list(csv.DictReader(fh))
+
+
+# a stable arm dict for direct method-level tests; bar_volume 1e6 keeps the 5%-of-volume cap from binding
+# unless a test wants it to (matches tape()'s consolidation bar volume 3000, used in the qty tests below).
+BIG_VOL_ARM = dict(level=11.0, trigger=11.01, limit=11.0165, stop=10.6, idx=6, arm_ts='2026-09-28T09:36:00', bar_volume=1_000_000.0)
+
+
+# --------------------------------------------------------------------------------------------- item 1: qty formula
+class TestRestingOrderQty:
+    def test_uncapped_matches_the_risk_over_r_formula(self):
+        arm = dict(trigger=11.01, stop=10.6, bar_volume=1_000_000.0)
+        assert resting_order_qty(100.0, arm) == int(100.0 / 0.41)   # 243, far under 5% of 1e6
+
+    def test_capped_at_5pct_of_the_prior_bars_volume(self):
+        arm = dict(trigger=11.01, stop=10.6, bar_volume=3000.0)     # tape()'s consolidation-bar volume
+        assert resting_order_qty(100.0, arm) == 150                  # 5% of 3000 binds under 243
+
+
+# --------------------------------------------------------------------------------------------- item 1: arm -> ONE order
+class TestArmPlacesLiveOrder:
+    def test_arm_places_exactly_one_stop_limit_with_right_prices_qty_tif_and_coid(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path, risk_usd=100.0)
+        admit(e)
+        e._ingest_bars('ABC', bars_df(tape()[:7]))                   # bars 0..6: consolidation completes at j=6, no cross yet
+        assert hod_live_alpaca.submit_stop_limit_order.call_count == 1
+        kw = hod_live_alpaca.submit_stop_limit_order.call_args.kwargs
+        assert kw['symbol'] == 'ABC' and kw['side'] == 'buy'
+        assert kw['stop_price'] == pytest.approx(11.01)               # level 11.00 + 0.01
+        assert kw['limit_price'] == pytest.approx(11.0 * 1.0015)
+        assert kw['qty'] == 150                                        # 5%-of-bar-volume cap binds (bar_volume 3000)
+        assert kw['client_order_id'].startswith('hod-rest-ABC-')
+        # time-in-force is DAY inside AlpacaClient.submit_stop_limit_order itself — the engine passes no tif kwarg
+        assert 'time_in_force' not in kw
+        lo = e.candidates['ABC'].live_order
+        assert lo['order_id'] == f"broker-{kw['client_order_id']}"
+
+
+# --------------------------------------------------------------------------------------------- item 2: level change
+class TestLevelChange:
+    def test_level_change_cancels_and_places_a_brand_new_order_never_replace(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path)
+        admit(e)
+        cand = e.candidates['ABC']
+        e._arm_live_order(cand, dict(BIG_VOL_ARM))
+        first_id = cand.live_order['order_id']
+        e._arm_live_order(cand, dict(BIG_VOL_ARM, level=11.5, trigger=11.51, limit=11.5173, stop=10.9))
+        assert hod_live_alpaca.cancel_order.call_args_list[0].args[0] == first_id
+        assert hod_live_alpaca.submit_stop_limit_order.call_count == 2
+        assert cand.live_order['order_id'] != first_id
+        assert cand.live_order['trigger'] == pytest.approx(11.51)
+        assert not hod_live_alpaca.replace_order_stop_price.called
+        assert not hod_live_alpaca.replace_order_limit_price.called
+        assert not hod_live_alpaca.replace_order_qty.called
+
+    def test_unchanged_level_does_not_re_place(self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path)
+        admit(e)
+        cand = e.candidates['ABC']
+        e._arm_live_order(cand, dict(BIG_VOL_ARM))
+        e._arm_live_order(cand, dict(BIG_VOL_ARM))                    # same trigger/limit
+        assert hod_live_alpaca.submit_stop_limit_order.call_count == 1
+        assert not hod_live_alpaca.cancel_order.called
+
+
+# --------------------------------------------------------------------------------------------- item 3: disarm cancels
+class TestDisarmCancels:
+    def test_disarm_cancels_and_writes_a_parity_row(self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path)
+        admit(e)
+        cand = e.candidates['ABC']
+        e._arm_live_order(cand, dict(BIG_VOL_ARM))
+        order_id = cand.live_order['order_id']
+        e._cancel_live_order(cand, 'arm_lost')
+        hod_live_alpaca.cancel_order.assert_called_once_with(order_id)
+        assert cand.live_order is None and 'ABC' not in e._live_cap_slots
+        rows = read_ledger(e.live_parity_ledger_path)
+        assert len(rows) == 1 and rows[0]['broker_status'] == 'cancelled' and rows[0]['reason'] == 'arm_lost'
+
+
+# --------------------------------------------------------------------------------------------- item 4: fill registers StopMonitor
+class TestFillRegistersStopMonitor:
+    def test_fill_and_partial_top_up_update_the_cumulative_qty(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path)
+        admit(e)
+        cand = e.candidates['ABC']
+        e._arm_live_order(cand, dict(BIG_VOL_ARM))
+        coid = cand.live_order['coid']
+
+        hod_live_stream.snapshot_by_client_prefix.return_value = {
+            coid: {'status': 'partially_filled', 'filled_qty': 50, 'filled_avg_price': 11.02, 'client_order_id': coid}}
+        e._poll_live_fills()
+        hod_live_sm.add_watch.assert_called_once()
+        k1 = hod_live_sm.add_watch.call_args.kwargs
+        assert k1['shares'] == 50 and k1['stop_price'] == pytest.approx(10.6) and k1['strategy'] == 'hod_break'
+        assert cand.live_order['booked_qty'] == 50
+        assert cand.live_filled is False                              # still resting for the remainder
+
+        hod_live_stream.snapshot_by_client_prefix.return_value = {
+            coid: {'status': 'filled', 'filled_qty': 150, 'filled_avg_price': 11.02, 'client_order_id': coid}}
+        e._poll_live_fills()
+        assert hod_live_sm.add_watch.call_count == 2
+        k2 = hod_live_sm.add_watch.call_args.kwargs
+        assert k2['shares'] == 150                                     # cumulative, not the increment
+        assert hod_live_alpaca.cancel_order.call_count >= 2             # stale TP+SL legs from the partial were cancelled
+        assert cand.live_filled is True and cand.live_order is None
+        assert 'ABC' in e.entered_today
+
+
+# --------------------------------------------------------------------------------------------- item 5: one fill per symbol-day
+class TestOneFillPerSymbolDay:
+    def test_second_cross_after_a_live_fill_places_nothing(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path)
+        admit(e)
+        cand = e.candidates['ABC']
+        cand.live_filled = True                                       # broker already confirmed a fill today
+        from tests.test_hod_break import bars as bars_arrays
+        o, h, l, c, v, m = bars_arrays(tape() + [(11.05, 11.3, 11.0, 11.2, 2000)])
+        e._evaluate_resting(cand, o, h, l, v, m, e.params)
+        assert not hod_live_alpaca.submit_stop_limit_order.called
+        assert cand.live_order is None
+
+
+# --------------------------------------------------------------------------------------------- item 6: caps count resting orders
+class TestCapsCountRestingOrders:
+    def test_concurrent_cap_blocks_a_second_resting_order(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path,
+                        params=dict(cfg()['params'], max_concurrent=1, max_per_day=8))
+        admit(e)
+        cand1 = e.candidates['ABC']
+        cand2 = Candidate(symbol='DEF', day_open=10.0, adv20=1_000_000.0)
+        e.candidates['DEF'] = cand2
+        e._arm_live_order(cand1, dict(BIG_VOL_ARM))
+        e._arm_live_order(cand2, dict(BIG_VOL_ARM, level=12.0, trigger=12.01, limit=12.0173, stop=11.6))
+        assert hod_live_alpaca.submit_stop_limit_order.call_count == 1
+        assert cand2.live_order is None
+
+    def test_per_day_cap_blocks_a_second_resting_order(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path,
+                        params=dict(cfg()['params'], max_concurrent=8, max_per_day=1))
+        admit(e)
+        cand1 = e.candidates['ABC']
+        cand2 = Candidate(symbol='DEF', day_open=10.0, adv20=1_000_000.0)
+        e.candidates['DEF'] = cand2
+        e._arm_live_order(cand1, dict(BIG_VOL_ARM))
+        e._arm_live_order(cand2, dict(BIG_VOL_ARM, level=12.0, trigger=12.01, limit=12.0173, stop=11.6))
+        assert hod_live_alpaca.submit_stop_limit_order.call_count == 1
+        assert cand2.live_order is None
+
+
+# --------------------------------------------------------------------------------------------- item 7: cutoff sweeps
+class TestCutoffSweeps:
+    def test_last_entry_minute_and_flat_minute_sweep_all_resting_orders(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path)
+        admit(e)
+        cand1 = e.candidates['ABC']
+        cand2 = Candidate(symbol='DEF', day_open=10.0, adv20=1_000_000.0)
+        e.candidates['DEF'] = cand2
+        e._arm_live_order(cand1, dict(BIG_VOL_ARM))
+        e._arm_live_order(cand2, dict(BIG_VOL_ARM, level=12.0, trigger=12.01, limit=12.0173, stop=11.6))
+        assert hod_live_alpaca.submit_stop_limit_order.call_count == 2
+
+        e._minute_of_day = lambda: e.params.last_entry_minute
+        e._sweep_live_cutoffs()
+        assert cand1.live_order is None and cand2.live_order is None
+        assert hod_live_alpaca.cancel_order.call_count == 2
+
+        e._minute_of_day = lambda: e.params.flat_minute                 # nothing left resting - must not double-cancel
+        e._sweep_live_cutoffs()
+        assert hod_live_alpaca.cancel_order.call_count == 2
+
+
+# --------------------------------------------------------------------------------------------- item 8: boot reconciliation
+class TestBootReconciliation:
+    def test_adopts_only_still_open_persisted_ids_and_never_cancels_an_unknown_order(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        state_path = tmp_path / 'state.json'
+        persisted = {
+            'ABC': dict(order_id='open-1', coid='hod-rest-ABC-x', level=11.0, trigger=11.01, limit=11.0165,
+                       stop=10.6, qty=100, booked_qty=0, arm_ts='t', tp_leg_id='', sl_leg_id='', trade_id=None),
+            'DEF': dict(order_id='gone-1', coid='hod-rest-DEF-x', level=12.0, trigger=12.01, limit=12.0173,
+                       stop=11.6, qty=50, booked_qty=0, arm_ts='t', tp_leg_id='', sl_leg_id='', trade_id=None),
+        }
+        state_path.write_text(json.dumps(persisted))
+        hod_live_alpaca.get_open_orders.return_value = [{'id': 'open-1'}, {'id': 'owner-manual-1'}]
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path,
+                        live_orders_state_path=str(state_path))
+        e._reconcile_live_orders_on_boot()
+        assert e.candidates['ABC'].live_order['order_id'] == 'open-1'
+        assert 'ABC' in e._live_cap_slots
+        assert 'DEF' not in e.candidates or e.candidates['DEF'].live_order is None
+        assert not hod_live_alpaca.cancel_order.called                  # adopts/drops only, never cancels
+
+
+# --------------------------------------------------------------------------------------------- item 9: parity ledger rows
+class TestParityLedgerTapeColumns:
+    def test_fill_no_fill_no_cross_rows_with_tape_columns_populated_only_from_a_print_watch_cross(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path)
+        admit(e)
+        cand = e.candidates['ABC']
+        lo = dict(order_id='o1', coid='hod-rest-ABC-x', level=11.0, trigger=11.01, limit=11.0165, stop=10.6,
+                  qty=100, booked_qty=0, arm_ts='t')
+
+        # FILL: the print watch saw the cross and it filled.
+        cand.resting_filled = True
+        cand.tape_cross = {'ts': datetime(2026, 9, 28, 13, 36, tzinfo=timezone.utc), 'print': 11.02, 'ask': 11.015, 'nbbo_ok': True}
+        e._append_live_parity_row(cand, lo, broker_status='filled',
+                                  broker_fill_ts=datetime(2026, 9, 28, 13, 36, 5, tzinfo=timezone.utc),
+                                  broker_fill_px=11.02, broker_fill_qty=100)
+
+        # NO_FILL: the print watch saw a cross, but the ask was above the limit (no chase).
+        cand.resting_filled = False
+        cand.resting_tape_cross_idx = 6
+        cand.tape_cross = {'ts': datetime(2026, 9, 28, 13, 37, tzinfo=timezone.utc), 'print': 11.02, 'ask': 11.03, 'nbbo_ok': True}
+        e._append_live_parity_row(cand, lo, broker_status='cancelled', reason='last_entry_minute')
+
+        # NO_CROSS: never crossed — nothing for the print watch to see.
+        cand.resting_tape_cross_idx = None
+        cand.tape_cross = None
+        e._append_live_parity_row(cand, lo, broker_status='cancelled', reason='flat_minute')
+
+        rows = read_ledger(e.live_parity_ledger_path)
+        assert [r['tape_expected'] for r in rows] == ['FILL', 'NO_FILL', 'NO_CROSS']
+        assert rows[0]['tape_ask'] == '11.0150' and rows[0]['tape_print'] == '11.0200' and rows[0]['trigger_print_nbbo_ok'] == '1'
+        assert float(rows[0]['slippage_vs_tape_bps']) == pytest.approx((11.02 - 11.015) / 11.015 * 1e4, rel=1e-3)
+        assert rows[1]['tape_ask'] == '11.0300' and rows[1]['slippage_vs_tape_bps'] == ''
+        assert rows[2]['tape_ask'] == '' and rows[2]['tape_print'] == '' and rows[2]['trigger_print_nbbo_ok'] == ''
+
+
+# --------------------------------------------------------------------------------------------- item 10: dry_run places nothing
+class TestDryRunPlacesNothing:
+    def test_dry_run_never_calls_the_live_order_surface(self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path, dry_run=True)
+        admit(e)
+        e._ingest_bars('ABC', bars_df(tape()))                          # full tape: tape side arms AND fills
+        assert not hod_live_alpaca.submit_stop_limit_order.called
+        assert not hod_live_alpaca.cancel_order.called
+        assert e.candidates['ABC'].live_order is None
+        assert e.candidates['ABC'].resting_filled is True                # tape path unaffected — byte-identical
+
+
+# --------------------------------------------------------------------------------------------- item 11: guardrail pausable
+class TestGuardrailPausesHodBreak:
+    def test_hod_break_is_pausable_and_scales_to_its_own_risk_usd(self):
+        assert 'hod_break' in gr.PAUSABLE_BOOKS
+        # -3 x risk x SESSION_MULT['hod_break'] with risk_usd=50 (the first live week's config) = -600
+        stats = _stats(book='hod_break', trailing_20_session_usd=-600.0)
+        check = gr.evaluate_pause(stats, stage_risk_usd=50.0, band_p5=None)
+        assert check.should_pause and check.rule == gr.RULE_TRAILING_20_SESSION
+
+        above_band = _stats(book='hod_break', trailing_20_session_usd=-599.0)
+        check2 = gr.evaluate_pause(above_band, stage_risk_usd=50.0, band_p5=None)
+        assert not check2.should_pause

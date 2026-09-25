@@ -32,7 +32,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
-from trading.hod_break import HodBreakParams, arm_state, detect, resting_entry_fill, shares_for, OPEN_MINUTE
+from trading.hod_break import HodBreakParams, arm_state, detect, resting_entry_fill, resting_order_qty, shares_for, OPEN_MINUTE
 from trading.red_to_green import RedToGreenParams, detect as r2g_detect, prior_day_range_pct
 
 logger = logging.getLogger(__name__)
@@ -109,8 +109,12 @@ class Candidate:
     have: np.ndarray = field(default_factory=lambda: np.zeros(RTH_MINUTES, dtype=bool))
     resting_arm: Optional[dict] = None                     # current arm dict(level, trigger, limit, stop, idx) or None
     resting_scanned_idx: int = -1                          # last bar index whose cross was already judged (no double fill/log)
-    resting_filled: bool = False                            # one fill per symbol-day (entry_mode='resting_stop_limit')
+    resting_filled: bool = False                            # one fill per symbol-day (entry_mode='resting_stop_limit') — TAPE side only, never set by a broker fill
     resting_tape_cross_idx: Optional[int] = None            # arm['idx'] already resolved via a live trade print — skip the bar-level fallback for it
+    live_order: Optional[dict] = None                       # the REAL resting order at the broker (dry_run=false only): order_id, coid, level/trigger/limit/stop/qty/booked_qty/tp_leg_id/sl_leg_id/trade_id
+    live_filled: bool = False                                # broker CONFIRMED fill (distinct from resting_filled, the tape's prediction) — stops further arming for the day
+    tape_cross: Optional[dict] = None                         # the CURRENT arm's print-watch cross resolution: {ts, print, ask, nbbo_ok} — set only by _on_trade_print (a real
+                                                               # tape print), None for a bar-level fallback cross or no cross yet; read by _append_live_parity_row (item 9)
 
     def set_bar(self, minute: int, o: float, h: float, l: float, c: float, v: float) -> bool:
         i = minute - OPEN_MINUTE
@@ -210,13 +214,30 @@ class HodBreakEngine:
         else:
             raise ValueError(f"unknown book {self.book!r} — expected 'hod_break' or 'red_to_green'")
         # entry_mode (docs/hod_resting_entry_spec_20260925.md, cell 1,438): 'next_open' (default) is today's
-        # behaviour, byte-identical. 'resting_stop_limit' arms a buy-stop-limit at the close of every bar and is
-        # DRY-ONLY today (see _evaluate_resting) — no order is ever submitted from that path regardless of dry_run.
+        # behaviour, byte-identical. 'resting_stop_limit' arms a buy-stop-limit at the close of every bar; the tape
+        # side (_evaluate_resting/_on_trade_print) always runs and never submits an order. When dry_run is ALSO
+        # False, a REAL stop-limit order is placed/cancelled/replaced alongside the tape
+        # (docs/hod_live_resting_orders_spec_20260925.md) — see _arm_live_order/_poll_live_fills.
         self.entry_mode = str(cfg.get('entry_mode', 'next_open'))
         if self.entry_mode not in ('next_open', 'resting_stop_limit'):
             logger.warning(f"{self.tag} unknown entry_mode {self.entry_mode!r} — falling back to next_open")
             self.entry_mode = 'next_open'
+        logger.info(f"{self.tag} entry_mode={self.entry_mode} (resting stop-limit: trigger level+0.01, "
+                    f"limit {float(getattr(self.params, 'entry_limit_pct', 0.0015)):.4%})")
         self.dry_ledger_path = str(cfg.get('dry_ledger_path', 'logs/hod_dry_entry_ledger.csv'))
+        # LIVE resting-order state (docs/hod_live_resting_orders_spec_20260925.md): _live_cap_slots counts a
+        # RESTING order as a slot (never just a fill) so a burst of fills can never exceed max_per_day/max_concurrent.
+        # live_orders_state_path persists {symbol: live_order dict} so a crash/restart reconciles by TRACKED ORDER
+        # ID (never a client_order_id-prefix guess — replace_order_by_id returns a NEW id/coid, so this engine never
+        # calls it; a level change is always cancel + a brand-new order, keeping our prefix on every live order).
+        self.live_parity_ledger_path = str(cfg.get('live_parity_ledger_path', 'logs/hod_live_parity_ledger.csv'))
+        self.live_orders_state_path = str(cfg.get('live_orders_state_path', 'logs/hod_live_resting_orders_state.json'))
+        self._live_cap_slots: set = set()
+        self._live_cancel_swept_entry = False
+        self._live_cancel_swept_flat = False
+        self._live_reconciled = False
+        self.live_since: Optional[datetime] = None            # ET timestamp of the FIRST bar this engine received live over the websocket
+                                                                # (never a backfill/catch-up bar); reset each session in _roll_session
         self._prev_day: Dict[str, tuple] = {}
         self.admit_above_open_pct = float(cfg.get('admit_above_open_pct', max(0.0, getattr(self.params, 'min_dist_open_pct', 5.0) - 1.5)))
         # STREAM THE UNIVERSE (9/15 core fix for the CRWL class): every tradable name's bars flow from 09:30 through the
@@ -245,11 +266,19 @@ class HodBreakEngine:
     def _minute_of_day(self) -> int:
         n = self._et_now(); return n.hour * 60 + n.minute
 
+    def _bar_close_et(self, minute: int) -> datetime:
+        """Wall-clock ET close time of the bar that STARTS at `minute` (minutes since midnight) in the
+        current session — a bar labeled minute m covers [m, m+1) and closes at m+1."""
+        midnight = datetime.strptime(self.session_date, '%Y-%m-%d').replace(tzinfo=ET)
+        return midnight + timedelta(minutes=int(minute) + 1)
+
     def _roll_session(self) -> None:
         today = self._et_now().strftime('%Y-%m-%d')
         if self.session_date != today:
             self.session_date = today; self.candidates.clear(); self.entered_today.clear(); self.daily_pnl = 0.0
+            self.live_since = None
             self._kill_notified.clear(); self._flattened = False
+            self._live_cap_slots.clear(); self._live_cancel_swept_entry = False; self._live_cancel_swept_flat = False
             self._apply_session_calendar()
             self._adv_map = self._load_adv_map()
             logger.info(f"{self.tag} session {today}: adv map {len(self._adv_map)} symbols")
@@ -371,6 +400,9 @@ class HodBreakEngine:
         """WS thread: zero work, enqueue only. `bar` is one bar dict (light handler) or a DataFrame/list of bars."""
         if not self.enabled or symbol not in self.candidates:
             return
+        if self.live_since is None:
+            self.live_since = self._et_now()                  # first bar this engine ever saw over the websocket this session
+            logger.info(f"{self.tag} live_since={self.live_since.isoformat()} (first streamed bar) — earlier/backfilled bars will not arm")
         try:
             self._bar_queue.put_nowait((symbol, bar))
         except queue.Full:
@@ -384,6 +416,8 @@ class HodBreakEngine:
             return
         with self._lock:
             try:
+                if not self._live_reconciled and self.book == 'hod_break' and self.entry_mode == 'resting_stop_limit' and not self.dry_run:
+                    self._reconcile_live_orders_on_boot()
                 self._roll_session()
                 if not self.calendar_ok: self._apply_session_calendar()
                 self._check_stream_outage()
@@ -394,6 +428,9 @@ class HodBreakEngine:
                 self.drain_bar_events()
                 self._process_pending_fills()
                 self.check_exits()
+                if self.book == 'hod_break' and self.entry_mode == 'resting_stop_limit' and not self.dry_run:
+                    self._poll_live_fills()
+                    self._sweep_live_cutoffs()
                 if self.is_force_close_time() and (not self._flattened or any(p.status == 'open' for p in self.positions.values())):
                     self.force_close_all()
             except Exception as e:
@@ -687,7 +724,7 @@ class HodBreakEngine:
             return
         with self._lock:
             cand = self.candidates.get(symbol)
-            if cand is None or cand.resting_filled or cand.resting_arm is None:
+            if cand is None or cand.resting_filled or cand.live_filled or cand.resting_arm is None:
                 return
             arm = cand.resting_arm
             if cand.resting_tape_cross_idx == arm['idx'] or price < arm['trigger'] - 1e-9:
@@ -699,6 +736,10 @@ class HodBreakEngine:
             fill_px = resting_entry_fill(ask, arm)
             filled = fill_px is not None
             cross_ts = self._et_now()
+            # A real print resolved this cross — the parity ledger's tape_* columns (item 9) are populated ONLY
+            # here, never from the bar-level fallback (tape_accurate=False there): nbbo_ok=True because Alpaca's
+            # own stop trigger is itself NBBO-filtered consolidated-tape, and we only reach this branch on a print.
+            cand.tape_cross = {'ts': cross_ts, 'print': price, 'ask': ask, 'nbbo_ok': True}
             logger.info(f"{self.dry_tag} CROSS {symbol} (tape) at {cross_ts:%H:%M:%S}.{cross_ts.microsecond // 1000:03d} "
                         f"print {price:.2f} size {size} ask {ask:.2f} -> " + (f"FILL {fill_px:.2f}" if filled else "NO FILL (ask > limit)"))
             if filled:
@@ -724,12 +765,15 @@ class HodBreakEngine:
         path via `trading.hod_break.resting_entry_fill`). This walk only falls back to the bar's high + the
         current quote (logged WARNING, `tape_accurate=0`) when no print resolved the cross by the bar's close —
         i.e. no live print stream reached this symbol for that bar."""
-        n = len(o); sym = cand.symbol
+        n = len(o); sym = cand.symbol; skipped = 0
         # Bar-by-bar walk (not just the newest bar): a backfill/reconcile can hand several closed bars to one
         # _evaluate call, and each must arm/resolve in order — exactly the causal_arming.py walk offline.
         for j in range(cand.resting_scanned_idx + 1, n):
-            if cand.resting_filled:
+            if cand.resting_filled or cand.live_filled:
                 break
+            if self.live_since is None or self._bar_close_et(int(m[j])) < self.live_since:
+                skipped += 1                                    # backfill/catch-up bar (or pre-live): never arms, never resolves, never ledgered
+                continue
             if cand.resting_arm is not None and cand.resting_arm['idx'] + 1 == j:
                 arm = cand.resting_arm
                 if cand.resting_tape_cross_idx == arm['idx']:
@@ -738,13 +782,14 @@ class HodBreakEngine:
                     logger.warning(f"{self.tag} {sym}: no live print stream — resolving the cross of {arm['trigger']:.2f} "
                                     f"with the bar high and the current quote (not tape-accurate)")
                     cross_ts = self._et_now()
-                    q = self._quote(sym)
+                    q = self._quote(sym)                        # _quote() already refuses a quote older than max_quote_age_s (default 5 s) — fail closed
                     if q is None:
-                        logger.warning(f"{self.tag} {sym}: CROSS {arm['trigger']:.2f} but no quote — NO FILL (fail closed)")
+                        logger.warning(f"{self.tag} {sym}: CROSS {arm['trigger']:.2f} but no fresh quote — NO FILL (fail closed)")
                         self._append_dry_ledger(cand, arm, cross_ts, ask=float('nan'), filled=False, fill_px=None, tape_accurate=False)
                     else:
                         _, ask = q
-                        fill_px = resting_entry_fill(ask, arm)
+                        eff_ask = max(ask, arm['trigger'])      # a triggered buy-stop-limit never fills BELOW its own trigger
+                        fill_px = resting_entry_fill(eff_ask, arm)
                         filled = fill_px is not None
                         logger.info(f"{self.dry_tag} CROSS {sym} at {cross_ts:%H:%M:%S}.{cross_ts.microsecond // 1000:03d} "
                                     f"print {h[j]:.2f} ask {ask:.2f} -> " + (f"FILL {fill_px:.2f}" if filled else "NO FILL (ask > limit)"))
@@ -753,14 +798,25 @@ class HodBreakEngine:
                             self._notify(f"{self.dry_tag} FILL {sym} {fill_px:.2f} (level {arm['level']:.2f} stop {arm['stop']:.2f})")
                         self._append_dry_ledger(cand, arm, cross_ts, ask=ask, filled=filled, fill_px=fill_px, tape_accurate=False)
                 cand.resting_arm = None
-            if cand.resting_filled:
+            if cand.resting_filled or cand.live_filled:
                 break
             new_arm = arm_state(o, h, l, v, m, j, cand.adv20, p)
             if new_arm is not None:
-                new_arm = dict(new_arm, idx=j, arm_ts=self._et_now().isoformat())
+                # bar_volume = the arming bar's own volume (v[j]) — resting_order_qty's 5%-of-prior-bar-volume
+                # cap on the LIVE order size (docs/hod_live_resting_orders_spec_20260925.md item 1); unused by
+                # the tape/dry path, only read by _arm_live_order via resting_order_qty.
+                new_arm = dict(new_arm, idx=j, arm_ts=self._et_now().isoformat(), bar_volume=float(v[j]))
+                cand.tape_cross = None   # a fresh arm — any print-watch cross belongs to the arm just resolved above
                 logger.info(f"{self.dry_tag} ARMED {sym} level {new_arm['level']:.2f} trigger {new_arm['trigger']:.2f} "
                             f"limit {new_arm['limit']:.2f} stop {new_arm['stop']:.2f}")
+            if not self.dry_run and self.entry_mode == 'resting_stop_limit':
+                if new_arm is not None:
+                    self._arm_live_order(cand, new_arm)
+                elif cand.live_order is not None:
+                    self._cancel_live_order(cand, 'arm_lost')
             cand.resting_arm = new_arm
+        if skipped:
+            logger.info(f"{self.tag} {sym}: skipped {skipped} backfill bars for arming")
         cand.resting_scanned_idx = max(cand.resting_scanned_idx, n - 1)
         if self.stop_monitor is not None:                          # tape subscription tracks the FINAL state: armed now = live edge, streamed
             try:
@@ -772,16 +828,18 @@ class HodBreakEngine:
                 logger.error(f"{self.tag} {sym}: print-watch subscribe/unsubscribe failed: {e}")
 
     def _append_dry_ledger(self, cand: Candidate, arm: dict, cross_ts, ask: float, filled: bool,
-                            fill_px: Optional[float], tape_accurate: bool) -> None:
+                            fill_px: Optional[float], tape_accurate: bool, live: bool = True) -> None:
         """Append one row to `self.dry_ledger_path` (docs/hod_resting_entry_spec_20260925.md); never raises —
-        a logging failure must never affect trading. ERROR on write failure."""
+        a logging failure must never affect trading. ERROR on write failure. `live` MUST be True: only bars
+        that closed after this session's `live_since` ever reach an arm/resolve, so every row is a live row —
+        the column exists so a stray backfill row is instantly visible as a defect, never silently trusted."""
         import csv, os
         stop = arm['stop']
         target = fill_px + self.params.target_r * (fill_px - stop) if filled and fill_px is not None else None
         row = [self.session_date or '', cand.symbol, arm.get('arm_ts', ''), cross_ts.isoformat(),
                f"{arm['level']:.4f}", f"{arm['trigger']:.4f}", f"{arm['limit']:.4f}",
                '' if ask != ask else f"{ask:.4f}", int(bool(filled)), '' if fill_px is None else f"{fill_px:.4f}",
-               f"{stop:.4f}", '' if target is None else f"{target:.4f}", int(bool(tape_accurate))]
+               f"{stop:.4f}", '' if target is None else f"{target:.4f}", int(bool(tape_accurate)), int(bool(live))]
         try:
             path = self.dry_ledger_path
             is_new = not os.path.exists(path)
@@ -792,10 +850,262 @@ class HodBreakEngine:
                 w = csv.writer(fh)
                 if is_new:
                     w.writerow(['date', 'symbol', 'arm_ts', 'cross_ts', 'level', 'trigger', 'limit', 'ask',
-                                'filled', 'fill_px', 'stop', 'target', 'tape_accurate'])
+                                'filled', 'fill_px', 'stop', 'target', 'tape_accurate', 'live'])
                 w.writerow(row)
         except Exception as e:
             logger.error(f"{self.tag} {cand.symbol}: failed to append dry entry ledger row to {self.dry_ledger_path}: {e}")
+
+    # ------------------------------------------------------------------ LIVE resting order (real orders; entry_mode='resting_stop_limit', dry_run=false)
+    # docs/hod_live_resting_orders_spec_20260925.md. The tape above (_evaluate_resting/_on_trade_print) is
+    # UNCHANGED and always runs — it is the parity ledger's "expected" side. This block is the "actual" side.
+    # DECISION (docs/alpaca_stop_limit_probe_20260925.md): a level change is CANCEL + a brand-new order, never
+    # replace_order_by_id — the probe found replace returns a NEW order id AND a new random client_order_id (our
+    # prefix is lost), so every live order this engine ever places keeps its own client_order_id AND its id is
+    # tracked in `cand.live_order` and persisted to `live_orders_state_path` — restart reconciliation adopts by
+    # TRACKED ID, never by prefix-guessing, and never cancels an order that is not in that tracked set (the
+    # owner's manual orders on the shared account are never touched).
+    SAFETY_NET_PCT = 0.05   # broker stop-sell 5 % under the real stop (StopMonitor owns the real stop)
+    LIVE_COID_PREFIX = 'hod-rest'
+
+    def _persist_live_orders(self) -> None:
+        """Write {symbol: live_order} for every currently-resting or partially-filled live order. Never raises —
+        a logging/persist failure must never affect trading; restart reconciliation degrades to 'nothing adopted'
+        (logged WARNING there), never to touching an unknown order."""
+        import json, os
+        try:
+            path = self.live_orders_state_path
+            d = os.path.dirname(path)
+            if d: os.makedirs(d, exist_ok=True)
+            snap = {sym: c.live_order for sym, c in self.candidates.items() if c.live_order}
+            with open(path, 'w') as fh:
+                json.dump(snap, fh, default=str)
+        except Exception as e:
+            logger.error(f"{self.tag} failed to persist live order state to {self.live_orders_state_path}: {e}")
+
+    def _reconcile_live_orders_on_boot(self) -> None:
+        """Runs ONCE per process start (first process_tick). Adopts a persisted order iff its id is STILL OPEN at
+        the broker; a persisted id no longer open (filled/expired/cancelled while the process was down) is
+        dropped with a WARNING — never cancelled, since we cannot know if it already became a real position. An
+        open order at the broker that is NOT in the persisted set is left completely alone (may be the owner's
+        manual order): this reconciliation only ever ADOPTS, never cancels."""
+        self._live_reconciled = True
+        import json
+        try:
+            with open(self.live_orders_state_path) as fh:
+                persisted = json.load(fh)
+        except FileNotFoundError:
+            return
+        except Exception as e:
+            logger.error(f"{self.tag} live order state file unreadable ({e}) — starting with no adopted orders"); return
+        if not persisted:
+            return
+        try:
+            open_orders = {str(o.get('id')): o for o in (self.alpaca.get_open_orders() or [])}
+        except Exception as e:
+            logger.error(f"{self.tag} could not list open orders for live-order reconciliation ({e}) — nothing adopted this boot"); return
+        for sym, lo in persisted.items():
+            oid = str((lo or {}).get('order_id') or '')
+            if oid and oid in open_orders:
+                cand = self.candidates.get(sym)
+                if cand is None:
+                    cand = self.candidates[sym] = Candidate(symbol=sym, day_open=0.0, adv20=self._adv_map.get(sym, 0.0))
+                cand.live_order = lo; self._live_cap_slots.add(sym)
+                logger.warning(f"{self.tag} {sym}: ADOPTED resting order {oid} on restart (tracked id, still open at the broker)")
+            else:
+                logger.warning(f"{self.tag} {sym}: persisted order {oid or '(none)'} is no longer open — dropped untouched, not re-armed")
+        self._persist_live_orders()
+
+    def _arm_live_order(self, cand: Candidate, arm: dict) -> None:
+        """Place, or cancel + replace, the REAL resting buy-stop-limit for `cand` at `arm` — called once per bar
+        close from `_evaluate_resting`, never from the tape. Caps (max_per_day/max_concurrent) count a RESTING
+        order as a slot (spec's explicit choice — approximates, does not exactly reproduce, the backtest's
+        first-N-fills/day rule; reported, not fixed, since live concurrency truth is only known at the broker)."""
+        sym = cand.symbol
+        prev = cand.live_order
+        if prev is not None and abs(prev['trigger'] - arm['trigger']) < 1e-9 and abs(prev['limit'] - arm['limit']) < 1e-9:
+            return                                            # unchanged level — the resting order already covers it
+        if prev is not None:
+            self._cancel_live_order(cand, 'replace')
+        blocked = self._kill_rails_blocked()
+        if blocked:
+            logger.warning(f"{self.tag} {sym}: LIVE order blocked by kill rail ({blocked}) — arm stays tape-only"); return
+        live_today = len(self._live_cap_slots)
+        if self._entered_today_count() + live_today >= self.params.max_per_day or len(self.positions) + live_today >= self.params.max_concurrent:
+            logger.warning(f"{self.tag} {sym}: LIVE cap reached (entered {self._entered_today_count()} + resting {live_today} "
+                            f"vs max_per_day {self.params.max_per_day} / max_concurrent {self.params.max_concurrent}) — arm stays tape-only")
+            return
+        qty = resting_order_qty(self.risk_usd, arm)
+        if qty < 1:
+            logger.warning(f"{self.tag} {sym}: LIVE qty < 1 share at risk ${self.risk_usd:.0f} (trigger {arm['trigger']:.2f} stop {arm['stop']:.2f}) — no real order")
+            return
+        coid = f"{self.LIVE_COID_PREFIX}-{sym}-{(self.session_date or '')[5:]}-{uuid.uuid4().hex[:8]}"[:48]
+        try:
+            od = self.alpaca.submit_stop_limit_order(symbol=sym, qty=qty, side='buy', stop_price=arm['trigger'],
+                                                       limit_price=arm['limit'], client_order_id=coid)
+        except Exception as e:
+            logger.error(f"{self.tag} {sym}: LIVE stop-limit submit failed: {e}"); self._notify(f"{self.tag} ERROR live submit {sym}: {e}"); return
+        order_id = str((od or {}).get('id') or '')
+        if not order_id:
+            logger.error(f"{self.tag} {sym}: LIVE stop-limit submit returned no order id — nothing tracked"); return
+        cand.live_order = dict(order_id=order_id, coid=coid, level=arm['level'], trigger=arm['trigger'], limit=arm['limit'],
+                               stop=arm['stop'], qty=qty, booked_qty=0, arm_ts=arm.get('arm_ts', ''), tp_leg_id='', sl_leg_id='', trade_id=None)
+        self._live_cap_slots.add(sym)
+        logger.info(f"{self.tag} {sym}: LIVE ARMED stop {arm['trigger']:.2f} limit {arm['limit']:.2f} qty {qty} order {order_id}")
+        self._notify(f"{self.tag} LIVE ARM {sym} stop {arm['trigger']:.2f} limit {arm['limit']:.2f} x{qty}")
+        self._persist_live_orders()
+
+    def _cancel_live_order(self, cand: Candidate, reason: str) -> None:
+        """Cancel `cand`'s resting entry order (never called once it has ANY booked_qty — see _poll_live_fills).
+        Never raises. Writes the arm's parity-ledger row (NO_FILL/cancelled — the arm never got a broker fill)."""
+        lo = cand.live_order
+        if lo is None:
+            return
+        try:
+            self.alpaca.cancel_order(lo['order_id']); status = 'cancelled'
+            logger.info(f"{self.tag} {cand.symbol}: LIVE order {lo['order_id']} cancelled ({reason})")
+        except Exception as e:
+            status = 'cancel_failed'
+            logger.error(f"{self.tag} {cand.symbol}: LIVE cancel failed for {lo['order_id']} ({reason}): {e}")
+        self._append_live_parity_row(cand, lo, broker_status=status, reason=reason)
+        cand.live_order = None
+        self._live_cap_slots.discard(cand.symbol)
+        self._persist_live_orders()
+
+    def _sweep_live_cutoffs(self) -> None:
+        """Cancel ALL resting real entry orders at last_entry_minute and at flat_minute (15:55 ET) — Alpaca
+        auto-cancels an untriggered DAY order at 16:00 ET on its own, but the spec's window is tighter and this
+        must not depend on the broker's own cutoff. Each boundary sweeps exactly once per session."""
+        mnow = self._minute_of_day()
+        if not self._live_cancel_swept_entry and mnow >= getattr(self, 'last_entry_minute', self.params.last_entry_minute):
+            self._live_cancel_swept_entry = True
+            for cand in self.candidates.values():
+                if cand.live_order is not None:
+                    self._cancel_live_order(cand, 'last_entry_minute')
+        if not self._live_cancel_swept_flat and mnow >= getattr(self, 'flat_minute', self.params.flat_minute):
+            self._live_cancel_swept_flat = True
+            for cand in self.candidates.values():
+                if cand.live_order is not None:
+                    self._cancel_live_order(cand, 'flat_minute')
+
+    def _poll_live_fills(self) -> None:
+        """Main-thread poll of OrderStreamWatcher for our resting entry orders — the ignition-prestage pattern
+        (snapshot_by_client_prefix), not per-order REST calls (API budget: stagger, never > ~100 calls/min from
+        this engine). Alpaca's stop triggers on a CONSOLIDATED-TAPE print at/through the stop, NBBO-filtered;
+        partial fills arrive as discrete trade_updates events with a CUMULATIVE filled_qty per order id, which is
+        exactly what `get_status`'s latest-known snapshot already carries."""
+        if self.order_stream is None:
+            logger.warning(f"{self.tag} no OrderStreamWatcher attached — LIVE fills cannot be detected this tick"); return
+        try:
+            statuses = self.order_stream.snapshot_by_client_prefix(self.LIVE_COID_PREFIX)
+        except Exception as e:
+            logger.error(f"{self.tag} live fill poll failed: {e}"); return
+        for cand in self.candidates.values():
+            lo = cand.live_order
+            if lo is None:
+                continue
+            st = statuses.get(lo['coid'])
+            if st is None:
+                continue
+            status = str(st.get('status') or '').lower()
+            if status in ('filled', 'partially_filled'):
+                self._on_live_fill(cand, lo, st, status)
+            elif status in _TERMINAL:
+                logger.warning(f"{self.tag} {cand.symbol}: LIVE order {lo['order_id']} went {status} at the broker (not our cancel)")
+                self._append_live_parity_row(cand, lo, broker_status=status, reason='broker_terminal')
+                cand.live_order = None; self._live_cap_slots.discard(cand.symbol); self._persist_live_orders()
+
+    def _on_live_fill(self, cand: Candidate, lo: dict, st: dict, status: str) -> None:
+        """A real fill (full or partial) on `cand`'s resting entry order: submit safety-net TP/SL sized to the
+        FULL cumulative filled qty (cancelling the previous pair first — a partial top-up must never leave a
+        stale, undersized safety-net order resting) and register the position with StopMonitor exactly as the
+        self-managed-stops live path elsewhere in this codebase does, tagged `strategy=self.STRATEGY_NAME` so
+        scripts/hod_dry_ledger.py / EOD attribution see it as hod_break. On a PARTIAL fill the entry order is left
+        resting for the remainder (Alpaca does this automatically); it is cancelled by the next bar-close replace
+        or the cutoff sweep like any other resting order."""
+        sym = cand.symbol
+        filled_qty = int(st.get('filled_qty') or 0)
+        if filled_qty <= int(lo.get('booked_qty') or 0):
+            return                                            # no NEW shares since the last poll of this same status
+        fill_px = float(st.get('filled_avg_price') or lo['trigger'])
+        stop = lo['stop']; target = round(fill_px + self.params.target_r * (fill_px - stop), 2)
+        logger.info(f"{self.tag} {sym}: LIVE {status.upper()} {fill_px:.2f} cum {filled_qty}/{lo['qty']} (stop {stop:.2f} target {target:.2f})")
+        self._notify(f"{self.tag} LIVE {status.upper()} {sym} {fill_px:.2f} x{filled_qty}")
+        for old_leg in (lo.get('tp_leg_id'), lo.get('sl_leg_id')):
+            if old_leg:
+                try: self.alpaca.cancel_order(old_leg)
+                except Exception as e: logger.error(f"{self.tag} {sym}: could not cancel the stale safety-net leg {old_leg}: {e}")
+        tp_id = sl_id = ''
+        try:
+            tp = self.alpaca.submit_limit_sell_order(symbol=sym, qty=filled_qty, limit_price=target); tp_id = str((tp or {}).get('id') or '')
+        except Exception as e:
+            logger.error(f"{self.tag} {sym}: safety-net TP submit failed after a LIVE fill: {e}"); self._notify(f"{self.tag} ERROR TP {sym}: {e}")
+        try:
+            # Safety-net SL sits SAFETY_NET_PCT below the real stop (the bull-flag live pattern): StopMonitor sells at the
+            # real stop; a broker stop at the same price could fire on the same print and leave us SHORT.
+            sl_px = round(stop * (1.0 - self.SAFETY_NET_PCT), 2)
+            sl = self.alpaca.submit_stop_sell_order(symbol=sym, qty=filled_qty, stop_price=sl_px); sl_id = str((sl or {}).get('id') or '')
+        except Exception as e:
+            logger.error(f"{self.tag} {sym}: safety-net SL submit failed after a LIVE fill: {e}"); self._notify(f"{self.tag} ERROR SL {sym} — UNPROTECTED POSITION: {e}")
+        pattern_data = {'book': self.book, 'level': lo['level'], 'consol_low': stop, 'entry_mode': 'resting_stop_limit',
+                        'target_r': self.params.target_r, 'tp_leg_id': tp_id, 'sl_leg_id': sl_id, 'limit': lo['limit'],
+                        'target': target, 'client_order_id': lo['coid']}
+        trade_id = lo.get('trade_id') or self._save_pending_trade(sym, filled_qty, fill_px, stop, target, lo['order_id'], pattern_data)
+        lo['booked_qty'] = filled_qty; lo['tp_leg_id'] = tp_id; lo['sl_leg_id'] = sl_id; lo['trade_id'] = trade_id
+        if self.stop_monitor is not None:
+            try:
+                self.stop_monitor.add_watch(symbol=sym, stop_price=stop, shares=filled_qty, tp_leg_id=tp_id, sl_leg_id=sl_id,
+                                            trade_db_id=trade_id, entry_price=fill_px, risk_per_share=fill_px - stop, strategy=self.STRATEGY_NAME)
+            except Exception as e:
+                logger.error(f"{self.tag} {sym}: StopMonitor.add_watch failed after a LIVE fill — position is UNMANAGED: {e}")
+                self._notify(f"{self.tag} ERROR add_watch {sym} — UNMANAGED POSITION: {e}")
+        else:
+            logger.error(f"{self.tag} {sym}: no StopMonitor attached — LIVE fill has no exit management")
+        self.entered_today.add(sym); self.seen_today.add(sym)
+        if status == 'filled':
+            cand.live_filled = True; cand.live_order = None; self._live_cap_slots.discard(sym)
+            self._append_live_parity_row(cand, lo, broker_status='filled', broker_fill_ts=self._et_now(), broker_fill_px=fill_px, broker_fill_qty=filled_qty)
+            try:
+                if self.stop_monitor is not None: self.stop_monitor.unsubscribe([sym])
+            except Exception as e:
+                logger.error(f"{self.tag} {sym}: failed to unsubscribe print-watch after a LIVE fill: {e}")
+        else:
+            logger.warning(f"{self.tag} {sym}: PARTIAL fill {filled_qty}/{lo['qty']} — remainder stays resting, safety-net legs cover the filled qty only")
+        self._persist_live_orders()
+
+    def _append_live_parity_row(self, cand: Candidate, lo: dict, broker_status: str, broker_fill_ts=None,
+                                broker_fill_px: Optional[float] = None, broker_fill_qty: Optional[int] = None, reason: str = '') -> None:
+        """One row per armed signal per day in `self.live_parity_ledger_path` — EXPECTED (tape) vs ACTUAL (broker),
+        docs/hod_live_resting_orders_spec_20260925.md item 3. tape_cross_ts/tape_print/tape_ask/trigger_print_nbbo_ok
+        are threaded through from `cand.tape_cross` — set ONLY by `_on_trade_print` on a real tape print, so they
+        stay blank for a bar-level-fallback cross or a NO_CROSS arm (there was nothing for the print watch to see).
+        slippage_vs_tape_bps is computed only when both a broker fill and a tape ask are known. tape_expected is
+        read from the SAME flags the dry ledger already sets on `cand`. Never raises."""
+        import csv, os
+        tape_expected = 'FILL' if cand.resting_filled else ('NO_FILL' if cand.resting_tape_cross_idx is not None else 'NO_CROSS')
+        tc = cand.tape_cross or {}
+        tape_ask = tc.get('ask')
+        slippage_bps = '' if broker_fill_px is None or not tape_ask else f"{(broker_fill_px - tape_ask) / tape_ask * 1e4:.2f}"
+        row = [self.session_date or '', cand.symbol, lo.get('arm_ts', ''), f"{lo['level']:.4f}", f"{lo['trigger']:.4f}", f"{lo['limit']:.4f}",
+              lo.get('qty', ''), tape_expected,
+              tc['ts'].isoformat() if tc.get('ts') else '', '' if tc.get('print') is None else f"{tc['print']:.4f}",
+              '' if tape_ask is None else f"{tape_ask:.4f}", '' if tc.get('nbbo_ok') is None else int(bool(tc['nbbo_ok'])),
+              lo['order_id'], broker_status,
+              broker_fill_ts.isoformat() if broker_fill_ts else '', '' if broker_fill_px is None else f"{broker_fill_px:.4f}",
+              '' if broker_fill_qty is None else broker_fill_qty, slippage_bps, reason]
+        try:
+            path = self.live_parity_ledger_path
+            is_new = not os.path.exists(path)
+            d = os.path.dirname(path)
+            if d: os.makedirs(d, exist_ok=True)
+            with open(path, 'a', newline='') as fh:
+                w = csv.writer(fh)
+                if is_new:
+                    w.writerow(['date', 'symbol', 'arm_ts', 'level', 'trigger', 'limit', 'qty', 'tape_expected',
+                               'tape_cross_ts', 'tape_print', 'tape_ask', 'trigger_print_nbbo_ok', 'broker_order_id',
+                               'broker_status', 'broker_fill_ts', 'broker_fill_px', 'broker_fill_qty', 'slippage_vs_tape_bps', 'reason'])
+                w.writerow(row)
+        except Exception as e:
+            logger.error(f"{self.tag} {cand.symbol}: failed to append live parity ledger row to {self.live_parity_ledger_path}: {e}")
 
     # ------------------------------------------------------------------ entry
     def _try_enter(self, cand: Candidate, sig, day_open: float) -> None:

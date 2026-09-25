@@ -22,7 +22,7 @@ def test_live_record_three_books(guardrail_trades_db, insert_trade):
     insert_trade('orb', '2026-06-01', pnl=-50.0)
     insert_trade('orb', '2026-06-02', pnl=125.0)
     insert_trade('bull_flag', '2026-06-01', pnl=200.0)
-    insert_trade('hod_break', '2026-06-01', pnl=0.0)  # dry: reported, never pauses
+    insert_trade('hod_break', '2026-06-01', pnl=0.0)  # ledgered like any other book; pnl 0.0 trips no threshold
 
     orb = gr.live_record('orb', stage_risk_usd=100.0, db_path=guardrail_trades_db)
     bf = gr.live_record('bull_flag', stage_risk_usd=100.0, db_path=guardrail_trades_db)
@@ -130,10 +130,25 @@ def test_pause_rule_bull_flag_uses_x4_session_mult():
     assert check.should_pause and check.rule == gr.RULE_TRAILING_20_SESSION
 
 
-def test_hod_break_never_pauses_even_deep_negative():
+def test_hod_break_pauses_now_that_it_places_real_orders():
+    """2026-09-25: hod_break moved from reported-only to PAUSABLE_BOOKS (real resting orders,
+    docs/hod_live_resting_orders_spec_20260925.md) — deep negative trips the band-p5 rule same as any
+    other pausable book, scaled to hod_break's own risk_usd via SESSION_MULT['hod_break']."""
     stats = _stats(book='hod_break', trailing_40_mean_r=-5.0, trailing_40_n=100,
                    trailing_20_session_usd=-1_000_000.0, worst_session_usd=-1_000_000.0)
     check = gr.evaluate_pause(stats, stage_risk_usd=100.0, band_p5=-0.1)
+    assert check.should_pause and check.rule == gr.RULE_BAND_P5
+
+
+def test_hod_break_with_zero_live_fills_is_reported_but_not_paused(guardrail_trades_db):
+    """Before hod_break's first live fill: live_record still reports it like any other book (n_fills=0, not an
+    error), and at its real Monday config (risk_usd=50, docs/hod_live_resting_orders_spec_20260925.md item 4)
+    an empty trailing window trips nothing — "pause-capable from its first fill" without a separate empty-book
+    gate. (stage_risk_usd itself collapsing to $0 on a config-read failure is a separate, deliberately
+    maximally-conservative fail-safe — see scripts/guardrail.py stage_risk_usd's own docstring — not this case.)"""
+    stats = gr.live_record('hod_break', stage_risk_usd=50.0, db_path=guardrail_trades_db)
+    assert stats.n_fills == 0 and stats.book == 'hod_break'
+    check = gr.evaluate_pause(stats, stage_risk_usd=50.0, band_p5=None)
     assert not check.should_pause
 
 
