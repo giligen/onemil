@@ -355,6 +355,11 @@ class StopMonitor:
     # still leaving headroom inside the 10s fill-poll budget.
     _HELD_QTY_RETRY_BACKOFFS_S = (0.2, 0.5, 1.5)
 
+    # HOD-break tape-accurate resting entry (docs/hod_resting_entry_spec_20260925.md): cap on
+    # concurrently print-watched symbols. ARMED HOD candidates are a small, fast-turnover pool
+    # (unlike the whole-universe bar stream) — 200 is generous headroom over a busy day's count.
+    MAX_PRINT_WATCH_SYMBOLS = 200
+
     async def _submit_with_held_qty_retry(self, loop, fn, label: str):
         """Run a sync Alpaca submit (in executor) with backoff retry on the
         40310000 / 'insufficient qty available' transient race.
@@ -637,6 +642,15 @@ class StopMonitor:
         self._bar_windows: Dict[str, list] = {}  # rolling bar window per symbol
         self._bulk_bar_symbols: set = set()  # subscribed via subscribe_bars_many: NO rolling window, light handlers only
 
+        # Trade-print + quote streaming for tape-accurate resting-order fills (HOD-break
+        # entry_mode='resting_stop_limit', docs/hod_resting_entry_spec_20260925.md). A separate
+        # pool from _watches/_quote_watches: ARMED candidates, torn down per-fill/per-disarm, capped
+        # at MAX_PRINT_WATCH_SYMBOLS (a WARNING fires and the excess symbol is skipped, not queued).
+        self._print_watch_symbols: set = set()           # symbols subscribed via subscribe_trades_quotes()
+        self._print_quotes: Dict[str, tuple] = {}         # symbol -> (bid, ask, ts) latest quote
+        self._print_handlers: Dict[str, Callable] = {}    # handler_id -> callback(symbol, price, size, ts)
+        self._print_watch_lock = threading.Lock()
+
     @property
     def polling_mode(self) -> bool:
         """True if this monitor is in REST polling mode (no data WebSocket)."""
@@ -828,6 +842,70 @@ class StopMonitor:
                     logger.info(f"StopMonitor: subscribed to {symbol} bars")
             except Exception as e:
                 logger.error(f"StopMonitor: failed to subscribe {symbol} bars: {e}")
+
+    # ------------------------------------------------------------------
+    # Trade-print + quote streaming (HOD-break tape-accurate resting entry)
+    # ------------------------------------------------------------------
+
+    def register_trade_print_handler(self, handler_id: str, callback: Callable) -> None:
+        """Register callback(symbol, price, size, ts) fired on every trade print for a symbol
+        currently in the print-watch pool (subscribe_trades_quotes). Mirrors register_bar_handler."""
+        with self._print_watch_lock:
+            existed = handler_id in self._print_handlers
+            self._print_handlers[handler_id] = callback
+        logger.info(f"StopMonitor: {'re-' if existed else ''}registered trade-print handler '{handler_id}'")
+
+    def unregister_trade_print_handler(self, handler_id: str) -> None:
+        with self._print_watch_lock:
+            self._print_handlers.pop(handler_id, None)
+
+    def subscribe_trades_quotes(self, symbols) -> int:
+        """Subscribe symbols to trade prints + quotes for tape-accurate resting-order fills. Thread-safe.
+        Caps concurrently print-watched symbols at MAX_PRINT_WATCH_SYMBOLS: symbols beyond the cap are
+        WARNING-logged and skipped (never silently queued — the caller must retry after a fill/disarm frees
+        room). Returns the number newly subscribed."""
+        new = []
+        with self._print_watch_lock:
+            for s in symbols:
+                if s in self._print_watch_symbols:
+                    continue
+                if len(self._print_watch_symbols) + len(new) >= self.MAX_PRINT_WATCH_SYMBOLS:
+                    logger.warning(f"StopMonitor: print-watch cap ({self.MAX_PRINT_WATCH_SYMBOLS}) hit — "
+                                    f"NOT subscribing {s} (tape-accurate fills unavailable for it this arm)")
+                    continue
+                new.append(s)
+            self._print_watch_symbols.update(new)
+        if new and self._loop and self._stream and self._running:
+            for s in new:
+                with self._watch_lock:
+                    already_streamed = s in self._watches or s in self._quote_watches
+                if not already_streamed:
+                    asyncio.run_coroutine_threadsafe(self._subscribe_symbol(s), self._loop)
+            logger.info(f"StopMonitor: print-watch subscribed {len(new)} symbols ({len(self._print_watch_symbols)} total)")
+        return len(new)
+
+    def unsubscribe(self, symbols) -> None:
+        """Remove symbols from the print-watch pool. Only tears down the WebSocket subscription when no
+        other watch (_watches/_quote_watches) still needs the symbol streamed."""
+        dropped = []
+        with self._print_watch_lock:
+            for s in symbols:
+                if s in self._print_watch_symbols:
+                    self._print_watch_symbols.discard(s)
+                    self._print_quotes.pop(s, None)
+                    dropped.append(s)
+        if dropped and self._loop and self._stream and self._running:
+            for s in dropped:
+                with self._watch_lock:
+                    still_needed = s in self._watches or s in self._quote_watches
+                if not still_needed:
+                    asyncio.run_coroutine_threadsafe(self._unsubscribe_symbol(s), self._loop)
+            logger.debug(f"StopMonitor: print-watch unsubscribed {len(dropped)} symbols")
+
+    def get_print_quote(self, symbol: str) -> Optional[tuple]:
+        """Latest (bid, ask, ts) cached for a print-watched symbol, or None if none has arrived yet."""
+        with self._print_watch_lock:
+            return self._print_quotes.get(symbol)
 
     async def _on_updated_bar(self, bar) -> None:
         """An UPDATED minute bar (Alpaca re-emits a bar when late-reported prints change it — the historical/cached bar is
@@ -3036,7 +3114,8 @@ class StopMonitor:
         with self._watch_lock:
             watch = self._watches.get(symbol)
             qwatch = self._quote_watches.get(symbol)
-        if watch is None and qwatch is None:
+        in_print_watch = symbol in self._print_watch_symbols   # unlocked membership read, same pattern as _bar_symbols
+        if watch is None and qwatch is None and not in_print_watch:
             return
 
         bid = float(quote.bid_price)
@@ -3045,6 +3124,11 @@ class StopMonitor:
         ask_size = int(quote.ask_size)
         now = time_mod.time()
         self._last_data_ts = now  # heartbeat — quotes flow even when no trades
+
+        if in_print_watch:
+            with self._print_watch_lock:
+                if symbol in self._print_watch_symbols:      # re-check under lock: may have unsubscribed since
+                    self._print_quotes[symbol] = (bid, ask, now)
 
         # Update all matching watches (stop watch and/or quote watch)
         for w in [watch, qwatch]:
@@ -3097,7 +3181,18 @@ class StopMonitor:
         """
         symbol = trade.symbol
         price = float(trade.price)
-        self._last_data_ts = time_mod.time()
+        now = time_mod.time()
+        self._last_data_ts = now
+
+        if symbol in self._print_watch_symbols:   # unlocked membership read, same pattern as _bar_symbols
+            size = int(getattr(trade, 'size', 0) or 0)
+            with self._print_watch_lock:
+                handlers = list(self._print_handlers.items())
+            for handler_id, cb in handlers:
+                try:
+                    cb(symbol, price, size, now)
+                except Exception as e:
+                    logger.error(f"StopMonitor: trade-print handler '{handler_id}' raised for {symbol}: {e}")
 
         with self._watch_lock:
             watch = self._watches.get(symbol)
@@ -4737,6 +4832,9 @@ class StopMonitor:
                 logger.warning(f"StopMonitor: error closing stream: {e}")
 
     def _get_watched_symbols(self) -> list:
-        """Get all symbols needing WebSocket subscription (stop + quote watches)."""
+        """Get all symbols needing WebSocket subscription (stop + quote + print watches)."""
         with self._watch_lock:
-            return list(set(self._watches.keys()) | set(self._quote_watches.keys()))
+            syms = set(self._watches.keys()) | set(self._quote_watches.keys())
+        with self._print_watch_lock:
+            syms |= set(self._print_watch_symbols)
+        return list(syms)

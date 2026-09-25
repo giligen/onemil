@@ -107,7 +107,7 @@ def arm_state(o: Sequence[float], h: Sequence[float], l: Sequence[float], v: Seq
     bars 0..j (closed data) — never anything from bar j+1 itself. Returns
     dict(level, trigger, limit, stop) or None."""
     o = np.asarray(o, dtype=float); h = np.asarray(h, dtype=float); l = np.asarray(l, dtype=float); v = np.asarray(v, dtype=float)
-    if j + 1 >= len(m) or int(m[j + 1]) > p.last_entry_minute:
+    if int(m[j]) + 1 > p.last_entry_minute:   # RTH minutes are consecutive — next minute is derived, never read from bar j+1
         return None
     stop = consolidation_low(l, h, j, p)
     if stop is None:
@@ -126,6 +126,14 @@ def resting_entry_fill(ask: float, arm: dict) -> Optional[float]:
     """Fill for a resting buy-stop-limit once a print/bar reaches `arm['trigger']`: the ask if it is at or
     under `arm['limit']`, else no fill (no chase — the order simply keeps resting/re-arming)."""
     return float(ask) if float(ask) <= arm['limit'] + 1e-9 else None
+
+
+def resting_order_qty(risk_usd: float, arm: dict) -> int:
+    """Live order size for a resting arm (docs/hod_live_resting_orders_spec_20260925.md item 1): floor(risk /
+    (trigger - stop)) — the SAME formula as `shares_for`, keyed on the order's trigger (the broker's stop price,
+    known at arm time) rather than the tape's expected ask (only known after a fill). ONE helper so the live
+    engine never re-derives this arithmetic."""
+    return shares_for(risk_usd, arm['trigger'], arm['stop'])
 
 
 def detect(o: Sequence[float], h: Sequence[float], l: Sequence[float], v: Sequence[float], m: Sequence[int],

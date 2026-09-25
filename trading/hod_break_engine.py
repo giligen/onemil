@@ -110,6 +110,7 @@ class Candidate:
     resting_arm: Optional[dict] = None                     # current arm dict(level, trigger, limit, stop, idx) or None
     resting_scanned_idx: int = -1                          # last bar index whose cross was already judged (no double fill/log)
     resting_filled: bool = False                            # one fill per symbol-day (entry_mode='resting_stop_limit')
+    resting_tape_cross_idx: Optional[int] = None            # arm['idx'] already resolved via a live trade print — skip the bar-level fallback for it
 
     def set_bar(self, minute: int, o: float, h: float, l: float, c: float, v: float) -> bool:
         i = minute - OPEN_MINUTE
@@ -362,6 +363,8 @@ class HodBreakEngine:
         except TypeError:
             logger.warning(f"{self.tag} StopMonitor has no light bar handlers — receiving full windows (slower)")
             self.stop_monitor.register_bar_handler(self.STRATEGY_NAME, self._on_bar_close)
+        if hasattr(self.stop_monitor, 'register_trade_print_handler'):
+            self.stop_monitor.register_trade_print_handler(self.STRATEGY_NAME, self._on_trade_print)   # tape-accurate resting fills, entry_mode='resting_stop_limit' only
         return True
 
     def _on_bar_close(self, symbol: str, bar) -> None:
@@ -673,13 +676,54 @@ class HodBreakEngine:
         self._try_enter(cand, sig, o[0])
 
     # ------------------------------------------------------------------ resting entry (dry only, entry_mode='resting_stop_limit')
+    def _on_trade_print(self, symbol: str, price: float, size: int, ts: float) -> None:
+        """WS thread: resolve an armed resting order against a REAL trade print — the tape-accurate path
+        (docs/hod_resting_entry_spec_20260925.md). Same fill rule as the bar-level fallback
+        (`trading.hod_break.resting_entry_fill`), just fed a real print + the quote cached at that instant
+        instead of a closed bar's high. Only the FIRST print >= trigger resolves the arm; on NO FILL the
+        arm is left in place (`resting_tape_cross_idx` marks it resolved) so `_evaluate_resting` skips its
+        own bar-level fallback for this cross and, at the bar's close, re-evaluates from scratch."""
+        if not self.enabled or self.book != 'hod_break' or self.entry_mode != 'resting_stop_limit':
+            return
+        with self._lock:
+            cand = self.candidates.get(symbol)
+            if cand is None or cand.resting_filled or cand.resting_arm is None:
+                return
+            arm = cand.resting_arm
+            if cand.resting_tape_cross_idx == arm['idx'] or price < arm['trigger'] - 1e-9:
+                return                                       # already resolved this arm, or print below trigger — do nothing
+            q = self.stop_monitor.get_print_quote(symbol) if self.stop_monitor is not None else None
+            if q is None:
+                return                                        # no quote cached yet — the bar-level fallback resolves it at the bar's close
+            bid, ask, qts = q
+            fill_px = resting_entry_fill(ask, arm)
+            filled = fill_px is not None
+            cross_ts = self._et_now()
+            logger.info(f"{self.dry_tag} CROSS {symbol} (tape) at {cross_ts:%H:%M:%S}.{cross_ts.microsecond // 1000:03d} "
+                        f"print {price:.2f} size {size} ask {ask:.2f} -> " + (f"FILL {fill_px:.2f}" if filled else "NO FILL (ask > limit)"))
+            if filled:
+                cand.resting_filled = True
+                cand.resting_arm = None
+                self._notify(f"{self.dry_tag} FILL {symbol} {fill_px:.2f} (level {arm['level']:.2f} stop {arm['stop']:.2f})")
+            else:
+                cand.resting_tape_cross_idx = arm['idx']       # arm stays in place — bar close re-evaluates it
+            self._append_dry_ledger(cand, arm, cross_ts, ask=ask, filled=filled, fill_px=fill_px, tape_accurate=True)
+        if filled and self.stop_monitor is not None:
+            try:
+                self.stop_monitor.unsubscribe([symbol])
+            except Exception as e:
+                logger.error(f"{self.tag} {symbol}: failed to unsubscribe print-watch after fill: {e}")
+
     def _evaluate_resting(self, cand: Candidate, o, h, l, v, m, p: HodBreakParams) -> None:
         """docs/hod_resting_entry_spec_20260925.md, cell 1,438: at the close of every bar, arm/re-arm a resting
         buy-stop-limit for the NEXT bar via `trading.hod_break.arm_state` (the same rule research/hod_entry's
         causal_arming.py walks offline — PARITY enforced by tests/test_hod_resting_entry.py), and resolve any
-        cross of a previously armed trigger. DRY ONLY: never submits an order regardless of `self.dry_run`. The
-        live engine has no trade-print stream (only closed 1-min bars), so a cross is resolved with the bar's
-        high plus the current quote — the spec's documented fallback — and logged WARNING (not tape-accurate)."""
+        cross of a previously armed trigger. DRY ONLY: never submits an order regardless of `self.dry_run`. While
+        armed, `_on_trade_print` (WS thread) resolves crosses tape-accurately against the live print stream
+        (`StopMonitor.subscribe_trades_quotes`/`.unsubscribe`, capped and shared with the eventual live order
+        path via `trading.hod_break.resting_entry_fill`). This walk only falls back to the bar's high + the
+        current quote (logged WARNING, `tape_accurate=0`) when no print resolved the cross by the bar's close —
+        i.e. no live print stream reached this symbol for that bar."""
         n = len(o); sym = cand.symbol
         # Bar-by-bar walk (not just the newest bar): a backfill/reconcile can hand several closed bars to one
         # _evaluate call, and each must arm/resolve in order — exactly the causal_arming.py walk offline.
@@ -688,7 +732,9 @@ class HodBreakEngine:
                 break
             if cand.resting_arm is not None and cand.resting_arm['idx'] + 1 == j:
                 arm = cand.resting_arm
-                if h[j] >= arm['trigger'] - 1e-9:
+                if cand.resting_tape_cross_idx == arm['idx']:
+                    cand.resting_tape_cross_idx = None            # already resolved tape-accurately — no fallback double-resolution
+                elif h[j] >= arm['trigger'] - 1e-9:
                     logger.warning(f"{self.tag} {sym}: no live print stream — resolving the cross of {arm['trigger']:.2f} "
                                     f"with the bar high and the current quote (not tape-accurate)")
                     cross_ts = self._et_now()
@@ -716,6 +762,14 @@ class HodBreakEngine:
                             f"limit {new_arm['limit']:.2f} stop {new_arm['stop']:.2f}")
             cand.resting_arm = new_arm
         cand.resting_scanned_idx = max(cand.resting_scanned_idx, n - 1)
+        if self.stop_monitor is not None:                          # tape subscription tracks the FINAL state: armed now = live edge, streamed
+            try:
+                if cand.resting_arm is not None and not cand.resting_filled:
+                    self.stop_monitor.subscribe_trades_quotes([sym])
+                else:
+                    self.stop_monitor.unsubscribe([sym])
+            except Exception as e:
+                logger.error(f"{self.tag} {sym}: print-watch subscribe/unsubscribe failed: {e}")
 
     def _append_dry_ledger(self, cand: Candidate, arm: dict, cross_ts, ask: float, filled: bool,
                             fill_px: Optional[float], tape_accurate: bool) -> None:
