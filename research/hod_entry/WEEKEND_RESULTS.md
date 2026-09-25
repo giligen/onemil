@@ -54,3 +54,17 @@ column existed in the PREREG's named asset file; used `borrow_flags.csv` instead
 FAIL, decisively: (b)-(a) is negative both holdouts (bar was +0.03), t < -5, and OVERRIDE's own
 fill rate (0.24/0.22) is below both BROKER's and E1's baseline — 300ms of waiting loses more fills
 than it improves prices. Full report: `research/hod_entry/RESULT_1442.md`.
+
+## 1,444 — resting entry only on scanner-qualified names (judged from the 1,438 adversarial check)
+
+| cohort | TRAIN-H2 | VAL |
+|---|---|---|
+| "tracked" (cache.db ≥ 90 % of pre-fill minutes) | +0.229 (t 2.8) | +0.263 (t 3.8) |
+| tracked AND full-day range < 10 % | −0.324 | −0.341 |
+| live-knowable: range through bar j ≥ 10 % | −0.18 | −0.29 |
+
+FAIL / not runnable: the "tracked" cohort is selected by the backtest cache build on the FULL-DAY range (look-ahead),
+no point-in-time scanner record exists (scan_results empty), and every live-knowable analogue is negative. 1,438's
+negative stands (entry half-spread was double-charged: corrected net ≈ −0.11 R, raw ≈ 0). HOD-break closed at every
+executable entry on this population. Forward instrument: log scanner qualification at arm time in the dry ledger.
+Full: `RESULT_1444.md`, `review/1438_check.md`.

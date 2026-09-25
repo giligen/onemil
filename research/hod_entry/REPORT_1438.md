@@ -11,3 +11,8 @@
 * Scope: superset symbol-days with >= 1 armed bar whose next bar crosses; minute bars cache.db + bars_sip.db (amendment); 127 superset symbol-days had < K+2 bars in both. Coverage / gap use a proxy winner (fill at the trigger on the first crossing armed bar).
 
 * **1,427 level check vs bars_sip.db (all 1,427 signals, TRAIN-H2/VAL/TEST):** fills 3528/3580 match; NO-FILLS 2751/8115 match, 5364 have a 1,427 level BELOW the true HOD (cache.db sparse, e.g. FUN 2025-07-01: 7 cache.db bars, level 30.77 vs true 31.84). With the true level these signals' first cross mostly fills: 1,611 TRAIN-H2/VAL fills in 1,427's own break bar that 1,427 scored as ask-above-limit no-fills earn −0.687 R here. The 1,427 fill condition was largely selecting symbol-days where cache.db had the correct level; 1,427's TEST PASS is therefore compromised.
+
+## Adversarial check 2026-09-25 (`review/1438_check.md`) — the negative stands
+Levels and fills reproduce 9,911/9,911. The entry half-spread was charged twice (0.10 R): corrected net ≈ −0.11 R,
+raw R ≈ 0. The +0.25 R "both-fill" cohort is selected on the full-day range through the cache.db build (look-ahead);
+no causal feature bin (35 report-only cells) is positive on both splits. Cell 1,444 judged from this: `RESULT_1444.md`.
