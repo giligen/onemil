@@ -574,7 +574,8 @@ class HodBreakEngine:
                 c.backfill_ok = True; c.needs_refill = False; c.next_idx = 0   # a (re)filled day is re-scanned from its first bar
                 self._ingest_bars(c.symbol, df)
             if empty:                                          # a halted/dead name returns nothing all day (WARNING); a whole empty chunk is a REST failure (ERROR → Telegram)
-                (logger.error if len(empty) == len(chunk) else logger.warning)(
+                logger.warning(  # never ERROR: data availability, not a failure (owner 9/25: no harmless errors on Telegram)
+                (
                     f"{self.tag} backfill returned no bars for {len(empty)} of {len(chunk)} symbols — not evaluated until the 09:30 open is present: {empty[:20]}{'…' if len(empty) > 20 else ''}")
 
     def start_drain_thread(self) -> None:
