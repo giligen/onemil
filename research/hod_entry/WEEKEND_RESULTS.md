@@ -16,3 +16,16 @@ cell as it completes; full detail in each cell's own RESULT_*.md.
 
 Parenthetical ΔR = without the new 30 bps stop-slip charge. All six FAIL; (d) closest (see
 `RESULT_1430.md`). Full report: `research/hod_entry/RESULT_1430.md`.
+
+## 1,429 — fill-quality sizing
+
+| holdout | charge | n | weighted R/risk | flat R | ΔR | VAL t (diff) | worst wk (weighted/flat) |
+|---|---|---|---|---|---|---|---|
+| TRAIN-H2 | no stop-slip | 1165 | +0.299 | +0.285 | +0.013 | 4.13 | -1.11 / -1.11 |
+| TRAIN-H2 | +30bps slip | 1165 | +0.220 | +0.207 | +0.013 | 3.01 | -1.19 / -1.19 |
+| VAL | no stop-slip | 1443 | +0.255 | +0.238 | +0.017 | 4.42 | -0.22 / -0.24 |
+| VAL | +30bps slip | 1443 | +0.177 | +0.161 | +0.017 | 3.19 | -0.32 / -0.34 |
+
+FAIL: ΔR positive with strong day-clustered t (3.0–4.4) but under the +0.05 pass bar on both
+holdouts. Report-only: VAL odd-lot trigger prints (n=917) mean net_R +0.332 vs round-lot (n=526)
++0.074. Full report: `research/hod_entry/RESULT_1429.md`.
