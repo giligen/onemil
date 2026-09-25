@@ -1105,18 +1105,30 @@ class HodBreakEngine:
             if old_leg:
                 try: self.alpaca.cancel_order(old_leg)
                 except Exception as e: logger.error(f"{self.tag} {sym}: could not cancel the stale safety-net leg {old_leg}: {e}")
+        # Safety-net SL sits SAFETY_NET_PCT below the real stop (the bull-flag live pattern): StopMonitor sells at the
+        # real stop; a broker stop at the same price could fire on the same print and leave us SHORT.
+        sl_px = round(stop * (1.0 - self.SAFETY_NET_PCT), 2)
         tp_id = sl_id = ''
         try:
-            tp = self.alpaca.submit_limit_sell_order(symbol=sym, qty=filled_qty, limit_price=target); tp_id = str((tp or {}).get('id') or '')
+            # ONE OCO order for both legs — Alpaca rejects two independent sell orders resting on the same shares
+            # (2026-09-25 VECO live defect: separate TP limit + SL stop, the second submit failed with
+            # "insufficient qty available" once the first was resting).
+            oco = self.alpaca.submit_oco_sell_order(symbol=sym, qty=filled_qty, limit_price=target, stop_price=sl_px)
+            legs = (oco or {}).get('legs') or []
+            tp_id = str(next((l['id'] for l in legs if l.get('type') == 'limit'), '') or '')
+            sl_id = str(next((l['id'] for l in legs if l.get('type') == 'stop'), '') or '')
+            if not tp_id or not sl_id:
+                logger.error(f"{self.tag} {sym}: OCO submit returned no leg ids (legs={legs}) — falling back to a stop-only safety net")
+                self._notify(f"{self.tag} ERROR OCO {sym}: no leg ids in response")
         except Exception as e:
-            logger.error(f"{self.tag} {sym}: safety-net TP submit failed after a LIVE fill: {e}"); self._notify(f"{self.tag} ERROR TP {sym}: {e}")
-        try:
-            # Safety-net SL sits SAFETY_NET_PCT below the real stop (the bull-flag live pattern): StopMonitor sells at the
-            # real stop; a broker stop at the same price could fire on the same print and leave us SHORT.
-            sl_px = round(stop * (1.0 - self.SAFETY_NET_PCT), 2)
-            sl = self.alpaca.submit_stop_sell_order(symbol=sym, qty=filled_qty, stop_price=sl_px); sl_id = str((sl or {}).get('id') or '')
-        except Exception as e:
-            logger.error(f"{self.tag} {sym}: safety-net SL submit failed after a LIVE fill: {e}"); self._notify(f"{self.tag} ERROR SL {sym} — UNPROTECTED POSITION: {e}")
+            logger.error(f"{self.tag} {sym}: safety-net OCO submit failed after a LIVE fill: {e} — falling back to a stop-only safety net")
+        if not sl_id:
+            # Fallback: never leave the position without a broker-side stop, even without a TP leg.
+            try:
+                sl = self.alpaca.submit_stop_sell_order(symbol=sym, qty=filled_qty, stop_price=sl_px); sl_id = str((sl or {}).get('id') or '')
+                logger.warning(f"{self.tag} {sym}: OCO unavailable — placed a stop-only safety net at {sl_px:.2f} (no broker TP leg)")
+            except Exception as e:
+                logger.error(f"{self.tag} {sym}: safety-net SL submit failed after a LIVE fill: {e}"); self._notify(f"{self.tag} ERROR SL {sym} — UNPROTECTED POSITION: {e}")
         pattern_data = {'book': self.book, 'level': lo['level'], 'consol_low': stop, 'entry_mode': 'resting_stop_limit',
                         'target_r': self.params.target_r, 'tp_leg_id': tp_id, 'sl_leg_id': sl_id, 'limit': lo['limit'],
                         'target': target, 'client_order_id': lo['coid']}

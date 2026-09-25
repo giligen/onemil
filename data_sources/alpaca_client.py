@@ -2065,6 +2065,86 @@ class AlpacaClient:
             self._log_order_op_failure("submit stop sell order", symbol, e)
             raise AlpacaAPIError(f"Failed to submit stop sell order for {symbol}: {e}")
 
+    def submit_oco_sell_order(
+        self,
+        symbol: str,
+        qty: int,
+        limit_price: float,
+        stop_price: float,
+    ) -> Dict:
+        """
+        Submit ONE OCO (one-cancels-other) sell order for an EXISTING position: a take-profit limit leg and a
+        stop-loss stop leg on the same shares. Alpaca rejects two independent sell orders resting on shares
+        already covered by another open sell order ("insufficient qty available") — OCO is the broker-native way
+        to rest both a target and a safety-net stop on one position at once (2026-09-25: VECO live defect, the
+        HOD-break safety-net TP+SL pair submitted as two separate orders).
+
+        Args:
+            symbol: Stock symbol
+            qty: Number of shares to sell (must match, or be <=, the held qty)
+            limit_price: Take-profit limit price
+            stop_price: Stop-loss trigger price
+
+        Returns:
+            Dict with order details (id, status, symbol) and `legs` — [{id, side, type, stop_price, limit_price}]
+            so the caller can pull the TP leg id and SL leg id out of `legs` (matched by `type`).
+
+        Raises:
+            AlpacaAPIError: If order submission fails
+        """
+        try:
+            request = LimitOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.DAY,
+                order_class=OrderClass.OCO,
+                take_profit={'limit_price': round(limit_price, 2)},
+                stop_loss={'stop_price': round(stop_price, 2)},
+            )
+
+            order = self._call_with_timeout(
+                lambda: self.trading_client.submit_order(request),
+                f"submit_oco_sell_order({symbol})"
+            )
+
+            result = {
+                'id': str(order.id) if hasattr(order, 'id') else '',
+                'status': str(order.status.value) if hasattr(order, 'status') else 'unknown',
+                'symbol': symbol,
+                'qty': qty,
+                'limit_price': limit_price,
+                'stop_price': stop_price,
+                'legs': [
+                    {
+                        'id': str(leg.id),
+                        'side': (str(leg.side.value) if hasattr(leg, 'side')
+                                  and leg.side else ''),
+                        'type': (str(leg.type.value) if hasattr(leg, 'type')
+                                  and leg.type else ''),
+                        'stop_price': (float(leg.stop_price)
+                                        if leg.stop_price else None),
+                        'limit_price': (float(leg.limit_price)
+                                         if leg.limit_price else None),
+                    }
+                    for leg in (getattr(order, 'legs', None) or [])
+                ],
+            }
+
+            logger.info(
+                f"OCO sell order submitted: {symbol} SELL {qty} "
+                f"TP ${limit_price:.2f} / SL ${stop_price:.2f} "
+                f"— ID: {result['id']}, status: {result['status']}, "
+                f"legs={len(result['legs'])}"
+            )
+            return result
+
+        except AlpacaAPIError:
+            raise
+        except Exception as e:
+            self._log_order_op_failure("submit OCO sell order", symbol, e)
+            raise AlpacaAPIError(f"Failed to submit OCO sell order for {symbol}: {e}")
+
     def submit_limit_buy_order(
         self, symbol: str, qty: int, limit_price: float
     ) -> Dict:

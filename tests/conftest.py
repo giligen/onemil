@@ -92,6 +92,10 @@ def hod_live_alpaca():
     a.cancel_order.return_value = True
     a.submit_limit_sell_order.return_value = {'id': 'tp-1', 'status': 'accepted'}
     a.submit_stop_sell_order.return_value = {'id': 'sl-1', 'status': 'accepted'}
+    a.submit_oco_sell_order.return_value = {
+        'id': 'oco-1', 'status': 'accepted',
+        'legs': [{'id': 'tp-1', 'type': 'limit', 'side': 'sell'}, {'id': 'sl-1', 'type': 'stop', 'side': 'sell'}],
+    }
     a.get_buying_power.return_value = 1_000_000.0   # large enough that the 25%-of-BP notional guard never binds by default
     return a
 

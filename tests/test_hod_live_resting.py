@@ -148,6 +148,76 @@ class TestFillRegistersStopMonitor:
         assert 'ABC' in e.entered_today
 
 
+# --------------------------------------------------------------------------------------- item 4b: OCO safety net (2026-09-25 VECO fix)
+class TestOcoSafetyNet:
+    def test_fill_places_one_oco_order_with_right_prices_qty_and_stores_both_leg_ids(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path)
+        admit(e)
+        cand = e.candidates['ABC']
+        e._arm_live_order(cand, dict(BIG_VOL_ARM))
+        coid = cand.live_order['coid']
+        hod_live_stream.snapshot_by_client_prefix.return_value = {
+            coid: {'status': 'filled', 'filled_qty': 150, 'filled_avg_price': 11.02, 'client_order_id': coid}}
+        e._poll_live_fills()
+        assert hod_live_alpaca.submit_oco_sell_order.call_count == 1
+        assert not hod_live_alpaca.submit_limit_sell_order.called
+        assert not hod_live_alpaca.submit_stop_sell_order.called
+        kw = hod_live_alpaca.submit_oco_sell_order.call_args.kwargs
+        assert kw['symbol'] == 'ABC' and kw['qty'] == 150
+        assert kw['limit_price'] == pytest.approx(11.02 + e.params.target_r * (11.02 - BIG_VOL_ARM['stop']))
+        assert kw['stop_price'] == pytest.approx(round(BIG_VOL_ARM['stop'] * (1.0 - e.SAFETY_NET_PCT), 2))
+        watch = hod_live_sm.add_watch.call_args.kwargs
+        assert watch['tp_leg_id'] == 'tp-1' and watch['sl_leg_id'] == 'sl-1'
+
+    def test_oco_submit_failure_falls_back_to_stop_only_safety_net(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path)
+        admit(e)
+        cand = e.candidates['ABC']
+        e._arm_live_order(cand, dict(BIG_VOL_ARM))
+        coid = cand.live_order['coid']
+        hod_live_alpaca.submit_oco_sell_order.side_effect = Exception('order_class oco not supported')
+        hod_live_stream.snapshot_by_client_prefix.return_value = {
+            coid: {'status': 'filled', 'filled_qty': 150, 'filled_avg_price': 11.02, 'client_order_id': coid}}
+        e._poll_live_fills()
+        hod_live_alpaca.submit_stop_sell_order.assert_called_once()
+        sk = hod_live_alpaca.submit_stop_sell_order.call_args.kwargs
+        assert sk['symbol'] == 'ABC' and sk['qty'] == 150
+        assert sk['stop_price'] == pytest.approx(round(BIG_VOL_ARM['stop'] * (1.0 - e.SAFETY_NET_PCT), 2))
+        watch = hod_live_sm.add_watch.call_args.kwargs
+        assert watch['sl_leg_id'] == 'sl-1' and watch['tp_leg_id'] == ''    # no TP leg — stop-only fallback
+        # position is never left unprotected: the fallback stop is always placed
+        assert cand.live_order is None and 'ABC' in e.entered_today
+
+    def test_partial_fill_top_up_cancels_the_old_oco_and_places_a_new_one_at_cumulative_qty(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path)
+        admit(e)
+        cand = e.candidates['ABC']
+        e._arm_live_order(cand, dict(BIG_VOL_ARM))
+        coid = cand.live_order['coid']
+        hod_live_stream.snapshot_by_client_prefix.return_value = {
+            coid: {'status': 'partially_filled', 'filled_qty': 50, 'filled_avg_price': 11.02, 'client_order_id': coid}}
+        e._poll_live_fills()
+        assert hod_live_alpaca.submit_oco_sell_order.call_count == 1
+        assert not hod_live_alpaca.cancel_order.called                 # nothing to cancel on the first fill
+
+        hod_live_alpaca.submit_oco_sell_order.return_value = {
+            'id': 'oco-2', 'status': 'accepted',
+            'legs': [{'id': 'tp-2', 'type': 'limit'}, {'id': 'sl-2', 'type': 'stop'}]}
+        hod_live_stream.snapshot_by_client_prefix.return_value = {
+            coid: {'status': 'filled', 'filled_qty': 150, 'filled_avg_price': 11.02, 'client_order_id': coid}}
+        e._poll_live_fills()
+        assert hod_live_alpaca.submit_oco_sell_order.call_count == 2
+        assert hod_live_alpaca.cancel_order.call_args_list[0].args[0] == 'tp-1'   # stale OCO legs cancelled first
+        assert hod_live_alpaca.cancel_order.call_args_list[1].args[0] == 'sl-1'
+        second_kw = hod_live_alpaca.submit_oco_sell_order.call_args.kwargs
+        assert second_kw['qty'] == 150                                  # cumulative, not the increment
+        watch = hod_live_sm.add_watch.call_args.kwargs
+        assert watch['tp_leg_id'] == 'tp-2' and watch['sl_leg_id'] == 'sl-2'
+
+
 # --------------------------------------------------------------------------------------------- item 5: one fill per symbol-day
 class TestOneFillPerSymbolDay:
     def test_second_cross_after_a_live_fill_places_nothing(
