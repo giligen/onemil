@@ -8,6 +8,7 @@ level + $0.01, limit 15 bps, NBBO ask at the first cross, B0 stop / 2 R / 15:55,
 
 | # | cell | what | data | pass bar |
 |---|---|---|---|---|
+| 0 | live sizing fix (Monday, code) | `trading/hod_break.py::resting_order_qty` must enforce ALL of: qty ≤ risk_usd / (trigger − stop); qty × trigger ≤ max_notional_usd (bypassed 9/25: CDNA $3,708 on a $2,000 cap); and a liquidity cap that is not the prior bar's 5 % (VECO 11 shares on a $50 risk) — use min(25 % of the prior bar's volume, displayed ask size × 3) with a WARNING when it binds; test each cap binding alone; parity test with the backtest's size assumptions reported (the BT has no notional cap) | code | tests + rehearsal before Monday's boot |
 | 1 | 1,438 | causal arming (the live rule) | bars_sip.db + SIP ticks | PREREG_1438 |
 | 2 | 1,430 | exits on the winning fills: time stop 90 min, breakeven lock at +1 R, ORB-style lock, 50 % scale-out at +2 R, VWAP-loss exit, 14:30 vs 15:55 close — PAIRED on the fills | paths.parquet + fills | ΔR ≥ +0.05 on TRAIN-H2 and VAL, VAL t ≥ 2 |
 | 3 | 1,429 | fill-quality sizing: risk multiplier from the pre-trigger ask distance (≤ 5 bps 1.5×, 5–15 bps 1×) and from the trigger print size (round lot vs odd lot, report-only) | SIP quotes at the cross | book R per unit risk ≥ flat + 0.05 on both holdouts, worst week not worse |
