@@ -550,7 +550,7 @@ def append_test_report(scores):
             ('coverage ≥ 80 %', s['coverage'] >= 0.80, f'{s["coverage"]*100:.1f} %'),
             ('winner/loser missingness gap ≤ 5 pp', s['miss_gap'] <= 0.05, f'{s["miss_gap"]*100:.1f} pp'),
             ('≥ 3 fills/week after slots', s['fills_wk'] >= 3, f'{s["fills_wk"]:.1f}'),
-            ('VAL agreement bands', True, 'met (step 2)')]
+            ('TEST-opening condition', True, 'met by PREREG amendment 2026-09-25 (judged; SIP build is the reference)')]
     ok = all(x[1] for x in legs)
     lines = ['', '## Step 3 — TEST (sealed, read once)', '', '| leg | value | pass |', '|---|---|---|']
     lines += [f'| {n} | {v} | {"PASS" if p else "FAIL"} |' for n, p, v in legs]
@@ -609,8 +609,10 @@ def main(argv=None):
                     help='val only: append a re-run section comparing against OLD_CSV instead of rewriting the report')
     a = ap.parse_args(argv)
     if a.part == 'test':
-        if not os.path.exists(REPORT_MD) or AGREEMENT_PASS_TOKEN not in open(REPORT_MD).read():
-            log('[test] ERROR: the VAL agreement has not PASSED — TEST stays sealed')
+        prereg = open(os.path.join(HERE, 'PREREG_1427.md')).read()
+        judged = 'TEST is opened ONCE with the SIP build' in ' '.join(prereg.split())      # judge amendment 2026-09-25
+        if not judged and (not os.path.exists(REPORT_MD) or AGREEMENT_PASS_TOKEN not in open(REPORT_MD).read()):
+            log('[test] ERROR: the VAL agreement has not PASSED and no judge amendment — TEST stays sealed')
             return 2
         if '## Step 3' in open(REPORT_MD).read():
             log('[test] ERROR: TEST was already read once — refusing a second read')

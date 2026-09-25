@@ -61,3 +61,24 @@ Only the quote fetch changed (`extend_quotes`: a signal whose cached window has 
 * VAL: previously-usable signals identical per signal (status and net R): YES
 * VAL vs cell 1,423 bands (informational): mean +0.238 vs +0.384 (diff -0.146), fill rate 30.6 % vs 29.9 % (diff +0.7 pp)
 
+
+## Step 3 — TEST (sealed, read once)
+
+| leg | value | pass |
+|---|---|---|
+| mean net R ≥ +0.10 | +0.330 | PASS |
+| day-clustered t ≥ 2 | 2.12 (68 days) | PASS |
+| ex-top-5 % > 0 | +0.243 | PASS |
+| coverage ≥ 80 % | 99.3 % | PASS |
+| winner/loser missingness gap ≤ 5 pp | 0.5 pp | PASS |
+| ≥ 3 fills/week after slots | 34.2 | PASS |
+| TEST-opening condition | met by PREREG amendment 2026-09-25 (judged; SIP build is the reference) | PASS |
+
+**TEST VERDICT: PASS**
+
+| cohort | signals | usable (coverage) | lost | missing win / lose | fills (rate of usable) | mean net R | day-clust t | ex-top-5 % | stopped in break bar | fills/wk after slots (mean R) | no-fill cohort B0 net R |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| E1 15 bps (frozen) — TEST | 3521 | 3497 (99.3 %) | 0 | 0.2 / 0.7 (gap 0.5 pp) | 972 (27.8 %) | +0.330 | 2.12 (68 d) | +0.243 | 3 | 34.2 (+0.261) | -0.571 (n 2525) vs fills +0.325 |
+| limit 5 bps — TEST | 3521 | 3497 (99.3 %) | 0 | 0.2 / 0.7 (gap 0.5 pp) | 503 (14.4 %) | +0.415 | 1.63 (64 d) | +0.330 | 2 | 23.0 (+0.276) | -0.443 (n 2994) vs fills +0.403 |
+| limit 30 bps — TEST | 3521 | 3497 (99.3 %) | 0 | 0.2 / 0.7 (gap 0.5 pp) | 1295 (37.0 %) | +0.242 | 1.76 (68 d) | +0.152 | 5 | 37.1 (+0.199) | -0.661 (n 2202) vs fills +0.254 |
+| 15 bps, fill ask + 1 tick — TEST | 3521 | 3497 (99.3 %) | 0 | 0.2 / 0.7 (gap 0.5 pp) | 972 (27.8 %) | +0.311 | 1.85 (68 d) | +0.223 | 3 | 34.0 (+0.238) | -0.571 (n 2525) vs fills +0.325 |
