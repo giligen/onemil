@@ -82,3 +82,12 @@ Only the quote fetch changed (`extend_quotes`: a signal whose cached window has 
 | limit 5 bps — TEST | 3521 | 3497 (99.3 %) | 0 | 0.2 / 0.7 (gap 0.5 pp) | 503 (14.4 %) | +0.415 | 1.63 (64 d) | +0.330 | 2 | 23.0 (+0.276) | -0.443 (n 2994) vs fills +0.403 |
 | limit 30 bps — TEST | 3521 | 3497 (99.3 %) | 0 | 0.2 / 0.7 (gap 0.5 pp) | 1295 (37.0 %) | +0.242 | 1.76 (68 d) | +0.152 | 5 | 37.1 (+0.199) | -0.661 (n 2202) vs fills +0.254 |
 | 15 bps, fill ask + 1 tick — TEST | 3521 | 3497 (99.3 %) | 0 | 0.2 / 0.7 (gap 0.5 pp) | 972 (27.8 %) | +0.311 | 1.85 (68 d) | +0.223 | 3 | 34.0 (+0.238) | -0.571 (n 2525) vs fills +0.325 |
+
+## VOID NOTICE 2026-09-25 19:50 UTC (main session)
+Cell 1,438 (`REPORT_1438.md`) showed that the HOD levels used here were computed from `data/cache.db`, which is
+sparse: 5,364 of the 8,115 "no-fill" signals had a level BELOW the true HOD (bars_sip.db), so their "ask above the
+limit" classification was a level error, not a tape fact. With true levels 1,611 of them fill at −0.687 R. The TEST
+PASS above (+0.330 R) is therefore VOID as a statement about a rule the live engine can run; the causal rule with
+correct levels is −0.21 R net (t −8). The both-fill cohort (+0.24 / +0.28 R) is real but not isolable by the live rule
+unless the adversarial check (`review/1438_check.md`) finds a causal sub-rule. Nothing in this file is reportable to the
+owner as an edge.
