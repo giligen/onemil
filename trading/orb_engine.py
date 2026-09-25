@@ -323,7 +323,7 @@ class ORBEngine:
         # live_guardrail.is_paused itself (logs its own ERROR there).
         if live_guardrail.is_paused('orb'):
             self.strategy_dry_run = True
-            logger.error(
+            logger.warning(
                 "[ORB] guardrail: book is PAUSED (data/guardrail_state.json) "
                 "— booting in DRY mode (zero real orders) until "
                 "`scripts/guardrail.py --clear orb \"<reason>\"`")
