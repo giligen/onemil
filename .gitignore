@@ -168,3 +168,7 @@ research/mature_method/hod_frames4/__pycache__/
 # A growing per-session journal, rebuildable by re-running scripts/hod_break_eod_check.py
 # per session; already covered by data/ above, named here so the intent is explicit.
 data/hod_dry_pool.csv
+research/hod_entry/bars_sip_gapper.db
+research/hod_entry/sip_cache/
+research/hod_entry/sip_cache_lod/
+research/hod_entry/sip_cache_gapper/
