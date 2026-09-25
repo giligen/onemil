@@ -11,8 +11,10 @@ import pytest
 from data_sources.alpaca_client import AlpacaClient
 from persistence.database import Database
 from trading.stop_monitor import StopMonitor
-from trading.hod_break_engine import HodBreakEngine, STRATEGY_NAME
+from trading.hod_break_engine import HodBreakEngine, STRATEGY_NAME, Candidate
 from trading.hod_break import HodBreakParams
+from trading.stop_monitor import StopExitEvent
+from trading.exit_reasons import ExitReason
 from tests.test_hod_break import drive_then_consolidate
 
 
@@ -342,6 +344,63 @@ class TestBackfillGuard:
         mock_alpaca.get_order.side_effect = lambda oid: {'status': 'filled', 'filled_qty': pos.shares, 'filled_avg_price': pos.target} if oid == 'tp1' else {'status': 'accepted', 'filled_qty': 0}
         engine.check_exits()
         assert 'sl1' in [c.args[0] for c in mock_alpaca.cancel_order.call_args_list]
+
+
+class TestLiveFillExitDraining:
+    """9/25 VECO/CDNA incident: a broker-side OCO leg fill or a StopMonitor stop on the resting-entry live
+    path never closed the DB row or dropped the watch. Root-cause fix: _on_live_fill now registers a Position
+    so the tested check_exits()/_record_exit() path covers it, plus draining + a phantom-watch sync."""
+
+    def _live_fill_position(self, engine, mock_alpaca, mock_db, sym='VECO'):
+        engine.entry_mode = 'resting_stop_limit'; engine.book = 'hod_break'; engine.dry_run = False
+        cand = Candidate(symbol=sym, day_open=10.0, adv20=1_000_000)
+        lo = {'order_id': 'o9', 'coid': f'c-{sym}', 'level': 11.0, 'trigger': 11.0, 'limit': 11.1, 'stop': 10.7,
+              'qty': 100, 'booked_qty': 0, 'arm_ts': '', 'tp_leg_id': '', 'sl_leg_id': '', 'trade_id': None}
+        cand.live_order = lo
+        mock_alpaca.submit_oco_sell_order.return_value = {'legs': [{'id': f'tp-{sym}', 'type': 'limit'}, {'id': f'sl-{sym}', 'type': 'stop'}]}
+        st = {'status': 'filled', 'filled_qty': 100, 'filled_avg_price': 11.02}
+        engine._on_live_fill(cand, lo, st, 'filled')
+        return engine.positions[sym]
+
+    def test_target_leg_fill_records_exit_removes_watch_cancels_sibling(self, engine, mock_alpaca, mock_db, mock_sm):
+        pos = self._live_fill_position(engine, mock_alpaca, mock_db)
+        assert pos.tp_leg_id == 'tp-VECO' and pos.sl_leg_id == 'sl-VECO'
+        mock_alpaca.get_order.side_effect = lambda oid: (
+            {'status': 'filled', 'filled_qty': 100, 'filled_avg_price': 11.76} if oid == 'tp-VECO' else {'status': 'accepted', 'filled_qty': 0})
+        engine.check_exits()
+        assert 'VECO' not in engine.positions
+        mock_sm.remove_watch.assert_called_with('VECO')
+        assert 'sl-VECO' in [c.args[0] for c in mock_alpaca.cancel_order.call_args_list]
+        upd = mock_db.update_trade.call_args
+        assert upd.args[0] == pos.trade_id and upd.args[1]['order_status'] == 'closed' and upd.args[1]['exit_price'] == pytest.approx(11.76)
+
+    def test_stop_monitor_exit_closes_row(self, engine, mock_alpaca, mock_db, mock_sm):
+        pos = self._live_fill_position(engine, mock_alpaca, mock_db, sym='CDNA')
+        ev = StopExitEvent(symbol='CDNA', stop_price=10.7, exit_price=10.6, shares=100, order_id='',
+                            exit_reason=ExitReason.STOP_LOSS.value, trade_db_id=pos.trade_id, confirmed=True)
+        mock_sm.drain_exit_events.return_value = [ev]
+        engine._drain_stop_monitor_exits()
+        mock_sm.drain_exit_events.assert_called_with(strategy=STRATEGY_NAME)
+        assert 'CDNA' not in engine.positions
+        upd = mock_db.update_trade.call_args
+        assert upd.args[0] == pos.trade_id and upd.args[1]['exit_price'] == pytest.approx(10.6) and upd.args[1]['order_status'] == 'closed'
+
+    def test_phantom_watch_dropped_by_sync(self, engine, mock_alpaca, mock_db, mock_sm):
+        self._live_fill_position(engine, mock_alpaca, mock_db, sym='ZZZ')
+        mock_sm.watched_symbols_for.return_value = ['ZZZ']
+        mock_alpaca.get_open_positions.return_value = []   # broker holds nothing — the watch is a phantom
+        engine._sync_phantom_watches()
+        mock_sm.remove_watch.assert_called_with('ZZZ')
+        assert 'ZZZ' not in engine.positions
+
+    def test_sync_is_rate_limited(self, engine, mock_alpaca, mock_db, mock_sm):
+        self._live_fill_position(engine, mock_alpaca, mock_db, sym='ZZZ')
+        mock_sm.watched_symbols_for.return_value = ['ZZZ']
+        mock_alpaca.get_open_positions.return_value = []
+        engine._sync_phantom_watches()
+        mock_alpaca.get_open_positions.reset_mock()
+        engine._sync_phantom_watches()                     # same tick window — must NOT hit the broker again
+        assert not mock_alpaca.get_open_positions.called
 
 
 def test_admission_threshold_sits_below_the_floor(engine, mock_alpaca, mock_db, mock_sm):

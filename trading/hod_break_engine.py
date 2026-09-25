@@ -440,6 +440,11 @@ class HodBreakEngine:
                 if self.book == 'hod_break' and self.entry_mode == 'resting_stop_limit' and not self.dry_run:
                     self._poll_live_fills()
                     self._sweep_live_cutoffs()
+                    # 9/25 VECO/CDNA incident: neither a broker-side leg fill (caught above by check_exits, now
+                    # that _on_live_fill registers a Position) nor StopMonitor's own price-triggered stop was
+                    # ever drained into the DB — rows stayed open and StopMonitor kept a phantom watch.
+                    self._drain_stop_monitor_exits()
+                    self._sync_phantom_watches()
                 if self.is_force_close_time() and (not self._flattened or any(p.status == 'open' for p in self.positions.values())):
                     self.force_close_all()
             except Exception as e:
@@ -1186,6 +1191,15 @@ class HodBreakEngine:
                         'target': target, 'client_order_id': lo['coid']}
         trade_id = lo.get('trade_id') or self._save_pending_trade(sym, filled_qty, fill_px, stop, target, lo['order_id'], pattern_data)
         lo['booked_qty'] = filled_qty; lo['tp_leg_id'] = tp_id; lo['sl_leg_id'] = sl_id; lo['trade_id'] = trade_id
+        # Register a Position so the EXISTING check_exits()/_book_leg_fill()/_record_exit() bracket-leg poll
+        # (already tested against tp_leg_id/sl_leg_id fills for the direct-bracket path) also covers a fill on
+        # THIS safety-net OCO — the only path that was closing VECO's TP leg (9/25: it filled at the broker but
+        # nothing polled it, row 380 stayed open). ONE shared close path for both entry styles, not a second one.
+        now_ts = datetime.now(timezone.utc)
+        self.positions[sym] = Position(symbol=sym, trade_id=trade_id, order_id=lo['order_id'], shares=filled_qty,
+                                        limit_price=lo['limit'], stop=stop, target=target, level=lo['level'], submitted_at=now_ts,
+                                        tp_leg_id=tp_id, sl_leg_id=sl_id, fill_price=fill_px, filled_at=now_ts, status='open',
+                                        client_order_id=lo['coid'], pattern_data=pattern_data)
         if self.stop_monitor is not None:
             try:
                 self.stop_monitor.add_watch(symbol=sym, stop_price=stop, shares=filled_qty, tp_leg_id=tp_id, sl_leg_id=sl_id,
@@ -1525,6 +1539,12 @@ class HodBreakEngine:
 
     def _record_exit(self, pos: Position, exit_price: float, reason: str) -> None:
         self.positions.pop(pos.symbol, None)
+        if self.stop_monitor is not None:
+            # The resting-entry live path (_on_live_fill) registers a StopMonitor watch alongside the
+            # Position; once this leg-fill path closes the row the watch must go too, or StopMonitor keeps
+            # a phantom watch on shares no longer held (9/25 VECO incident).
+            try: self.stop_monitor.remove_watch(pos.symbol)
+            except Exception as e: logger.error(f"{self.tag} {pos.symbol}: StopMonitor.remove_watch failed after exit: {e}")
         entry = pos.fill_price or pos.limit_price
         pnl = (exit_price - entry) * pos.shares if exit_price > 0 else None
         upd = {'order_status': 'closed', 'exit_price': exit_price, 'exit_reason': reason, 'exited_at': datetime.now(timezone.utc).isoformat()}
@@ -1538,6 +1558,58 @@ class HodBreakEngine:
         rr = (exit_price - entry) / (entry - pos.stop) if entry > pos.stop and exit_price > 0 else float('nan')
         logger.info(f"{self.tag} EXIT {pos.symbol} {reason} @ {exit_price:.2f} pnl {pnl if pnl is None else round(pnl, 2)} ({rr:+.2f}R) day {self.daily_pnl:+.0f}")
         self._notify(f"{self.tag} EXIT {pos.symbol} {reason} @ {exit_price:.2f} pnl {'?' if pnl is None else f'{pnl:+.0f}'} ({rr:+.2f}R) | day {self.daily_pnl:+.0f}")
+
+    PHANTOM_SYNC_INTERVAL_S = 60.0
+
+    def _drain_stop_monitor_exits(self) -> None:
+        """Close the DB row + drop `self.positions` when StopMonitor executes ITS OWN stop (the real stop for
+        the resting-entry live path; the broker OCO SL leg is a safety net only — see `_on_live_fill`).
+        StopMonitor already cancels the sibling leg and pops its own watch before emitting the event
+        (`_emit_stop_exit_event`); this only closes OUR side. 9/25 incident: CDNA's StopMonitor stop fired at
+        14:55 ET but nothing ever drained this queue — row 381 stayed open. Never raises."""
+        if self.stop_monitor is None:
+            return
+        try:
+            events = self.stop_monitor.drain_exit_events(strategy=STRATEGY_NAME)
+        except Exception as e:
+            logger.error(f"{self.tag} drain_exit_events failed: {e}"); return
+        for ev in events:
+            sym = ev.symbol
+            pos = self.positions.get(sym)
+            if pos is None:
+                logger.warning(f"{self.tag} {sym}: StopMonitor exit event ({ev.exit_reason}) but no tracked position — orphan, DB not updated")
+                continue
+            for leg in (pos.tp_leg_id, pos.sl_leg_id):                # belt and braces: StopMonitor already tried this
+                if leg:
+                    try: self.alpaca.cancel_order(leg)
+                    except Exception: pass
+            self._record_exit(pos, float(ev.exit_price), str(ev.exit_reason or 'stop_monitor'))
+
+    def _sync_phantom_watches(self) -> None:
+        """Drop any StopMonitor watch for this strategy whose broker position is zero (a leg fill or manual
+        close the normal exit paths above missed) within PHANTOM_SYNC_INTERVAL_S, with a WARNING — the last
+        line of defence behind `_drain_stop_monitor_exits`/`check_exits`. Rate-limited: one REST positions call
+        per interval, never per tick. Never raises."""
+        if self.stop_monitor is None:
+            return
+        now = time.time()
+        if now - getattr(self, '_last_phantom_sync', 0.0) < self.PHANTOM_SYNC_INTERVAL_S:
+            return
+        self._last_phantom_sync = now
+        watched = self.stop_monitor.watched_symbols_for(STRATEGY_NAME)
+        if not watched:
+            return
+        try:
+            broker_positions = self.alpaca.get_open_positions()
+        except Exception as e:
+            logger.error(f"{self.tag} phantom-watch sync: broker snapshot failed: {e}"); return
+        qty_by_symbol = {p.get('symbol'): abs(int(float(p.get('qty', 0) or 0))) for p in broker_positions}
+        for sym in watched:
+            if qty_by_symbol.get(sym, 0) == 0:
+                logger.warning(f"{self.tag} {sym}: StopMonitor watch active but broker position is zero — dropping phantom watch")
+                try: self.stop_monitor.remove_watch(sym)
+                except Exception as e: logger.error(f"{self.tag} {sym}: remove_watch failed during phantom sync: {e}")
+                self.positions.pop(sym, None)
 
     # ------------------------------------------------------------------ force close
     def is_force_close_time(self) -> bool:
