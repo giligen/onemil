@@ -29,3 +29,14 @@ Parenthetical ΔR = without the new 30 bps stop-slip charge. All six FAIL; (d) c
 FAIL: ΔR positive with strong day-clustered t (3.0–4.4) but under the +0.05 pass bar on both
 holdouts. Report-only: VAL odd-lot trigger prints (n=917) mean net_R +0.332 vs round-lot (n=526)
 +0.074. Full report: `research/hod_entry/RESULT_1429.md`.
+
+## 1,442 — tape-triggered override
+
+| holdout | (a) BROKER n / mean R (slip) | (b) OVERRIDE n / mean R (slip) | fill rate base/a/b | (b)−(a) paired n | ΔR | VAL t |
+|---|---|---|---|---|---|---|
+| TRAIN-H2 | 994 / +0.236 | 813 / +0.278 | 0.335 / 0.292 / 0.240 | 723 | -0.016 | -5.77 |
+| VAL | 1233 / +0.183 | 985 / +0.226 | 0.306 / 0.270 / 0.215 | 879 | -0.016 | -5.13 |
+
+FAIL, decisively: (b)-(a) is negative both holdouts (bar was +0.03), t < -5, and OVERRIDE's own
+fill rate (0.24/0.22) is below both BROKER's and E1's baseline — 300ms of waiting loses more fills
+than it improves prices. Full report: `research/hod_entry/RESULT_1442.md`.
