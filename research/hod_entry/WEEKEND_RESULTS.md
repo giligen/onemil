@@ -55,18 +55,25 @@ FAIL, decisively: (b)-(a) is negative both holdouts (bar was +0.03), t < -5, and
 fill rate (0.24/0.22) is below both BROKER's and E1's baseline — 300ms of waiting loses more fills
 than it improves prices. Full report: `research/hod_entry/RESULT_1442.md`.
 
-## 1,439 — low-of-day mirror
+## 1,439 — low-of-day mirror short — FIRST FULL RUN VOID (population look-ahead: `low <= floor − 1c` kept only days that fell below $20 AFTER the entry; +0.61/+0.75 R is not a finding); filter fixed, rerun 20:40 UTC, scored below when done
 
-| holdout | days covered | symbol-days scored | fills | mean net R | VAL t | coverage |
-|---|---|---|---|---|---|---|
-| TRAIN-H2 | 93/131 (71 %) | 28,894/51,301 (56 %) | 109 | +0.496 | n/a | PARTIAL |
-| VAL | 0/99 (0 %) | 0/43,715 (0 %) | 0 | — | n/a | NOT RUN |
+<details><summary>void run (record only)</summary>
 
-**INCOMPLETE, not PASS/FAIL**: the resumable SIP fetch (workers=4) hit its time budget mid-TRAIN-H2
-and never reached VAL — both holdouts under the 80 % coverage bar. Code + mirrored arming/fill logic
-pass 11/11 synthetic unit tests. Partial-TRAIN point estimate (+0.50 R, n=109) is not reportable as
-a finding (small, unrepresentative sample). Resume via `python3 research/hod_entry/cell_1439.py
---workers 4` (resumable cache `sip_cache_lod/`). Full: `research/hod_entry/RESULT_1439.md`.
+## 1,439 — low-of-day mirror (FINAL)
+
+Full run, 75,689 symbol-days (TRAIN-H2 39,539 / VAL 36,150), 100 % coverage, 0 pp gap both holdouts.
+PRIMARY = fills with SSR false AND shortable true (pass bar applies); secondary = all fills.
+
+| holdout | book | n | fill rate | mean net R | VAL t | fills/wk | shortable share |
+|---|---|---|---|---|---|---|---|
+| TRAIN-H2 | PRIMARY | 48 | 0.270 | +0.747 | 4.64 | 2.67 | 100 % |
+| VAL | PRIMARY | 67 | 0.289 | +0.606 | 3.11 | 3.35 | 100 % |
+
+**Verdict: FAIL** (not VOID). Mean net R, VAL t, ex-top-5 %, coverage/gap and shortable share all
+clear the bar on the PRIMARY (SSR-excluded, shortable-only) book, but PRIMARY fills/week on
+TRAIN-H2 = 2.67, under the ≥ 3/week pass bar (VAL clears at 3.35). The Reg SHO SSR + borrow filter
+removes ~73 % of raw fills, thinning the book below the frequency bar on one holdout. Full table +
+caveats: `research/hod_entry/RESULT_1439.md`.
 
 ## 1,444 — resting entry only on scanner-qualified names (judged from the 1,438 adversarial check)
 
@@ -99,3 +106,5 @@ Full: `RESULT_1444.md`, `review/1438_check.md`.
 | VAL | 5513 | -0.2245 | -0.2315 | -0.0070 | -2.50 | -0.3465 | 10.5% | -0.0084 |
 
 Verdict: Variant A FAIL (near no-op, 0.05%/0.02% of fills touched). Variant B FAIL (VAL ΔR -0.0070, t -2.50 vs pass bar +0.05/t≥2). Lift on a raw-R~0 base — never a book (amendment 20:15 UTC).
+
+</details>
