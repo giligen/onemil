@@ -35,6 +35,15 @@ universe ∩ shortable. Data: `research/bf_zero/bars_sip.db` minute bars for the
 bars (new). Pass: fill mean net R ≥ +0.10 both holdouts, VAL t ≥ 2, ex-top-5 % > 0, coverage ≥ 80 %, gap ≤ 5 pp, ≥ 3
 fills/week.
 
+### Amendment 2026-09-25 20:10 UTC (judge, before the full run's number; the partial TRAIN-H2 run was unscored)
+Obtainability rail for the short: under Reg SHO's short-sale restriction a stock that traded ≥ 10 % below the prior
+close (that day, or the day before) can be sold short only above the national best bid, so a SELL stop-limit filling
+AT THE BID at a new low is not obtainable on SSR days. The cell reports the SSR share of its fills (prior close from
+`daily_bars`; SSR = any print ≤ 0.9 × prior close before the fill instant on that day, or the SSR having triggered the
+previous day) and scores TWO books: primary = non-SSR fills only (the pass bar applies to it), secondary = all fills
+(report-only). Borrow: share of fills flagged `shortable` reported; the pass bar's ≥ 60 % shortable applies. Scorer =
+`research/hod_entry/score_1439.py`, written after this amendment, run once on the full CSV.
+
 ## 1,440 — stop distance
 Stop = consolidation low, but floored at 0.8 % of price and capped at 3 % (two variants: floor only; floor + cap). R and
 qty recomputed. Pass: ΔR ≥ +0.05 both holdouts, VAL t ≥ 2.
