@@ -71,6 +71,7 @@ from trading.orb_touchgo_filter import (
 )
 from trading.exit_reasons import ExitReason
 from trading import touchgo_audit as _tg_audit
+from trading import live_guardrail
 from trading.orphan_reconciler import (
     ReconcilerConfig, reconcile_strategy_orphans,
 )
@@ -306,6 +307,25 @@ class ORBEngine:
         # branch), scoped to the 'production' pool. Requires `enabled: true`
         # to have any effect (an engine that's off never reaches submit).
         self.strategy_dry_run = bool(cfg.get('strategy', {}).get('dry_run', False))
+        # Config baseline `strategy_dry_run` reverts to at each reset_daily —
+        # the latency tripwire (below) or a guardrail pause may force True
+        # mid-session/at boot, and that override must NOT survive into a day
+        # where neither condition holds (docs/live_guardrails_spec_20260925.md G2).
+        self._strategy_dry_run_cfg = self.strategy_dry_run
+        self._tripwire_forced_dry_today = False
+
+        # G1 pre-open check (docs/live_guardrails_spec_20260925.md): a book
+        # the guardrail has PAUSED (data/guardrail_state.json) boots straight
+        # into dry mode — zero real orders — until the owner clears it with
+        # scripts/guardrail.py --clear orb "<reason>". Fail-open (never
+        # raises): an unreadable state file is treated as UNPAUSED by
+        # live_guardrail.is_paused itself (logs its own ERROR there).
+        if live_guardrail.is_paused('orb'):
+            self.strategy_dry_run = True
+            logger.error(
+                "[ORB] guardrail: book is PAUSED (data/guardrail_state.json) "
+                "— booting in DRY mode (zero real orders) until "
+                "`scripts/guardrail.py --clear orb \"<reason>\"`")
 
         # Config sections
         uni = cfg.get('universe', {})
@@ -375,6 +395,16 @@ class ORBEngine:
         # bulk REST call. Flag false preserves the exact pre-9/25 behavior.
         execution_cfg = cfg.get('execution', {}) if isinstance(cfg.get('execution', {}), dict) else {}
         self.prewarm_seed_enabled = bool(execution_cfg.get('prewarm_seed', False))
+        # G2 (docs/live_guardrails_spec_20260925.md): 'warn' is today's
+        # behaviour (LATENCY TRIPWIRE logs + telegrams, orders keep flowing —
+        # this is the defect the spec fixes: it fired for weeks as only a log
+        # line). 'dry' forces the REST OF THE SESSION into strategy_dry_run.
+        self.tripwire_action = str(execution_cfg.get('tripwire_action', 'warn')).strip().lower()
+        if self.tripwire_action not in ('warn', 'dry'):
+            logger.warning(
+                f"ORB execution.tripwire_action={self.tripwire_action!r} is not "
+                f"'warn'/'dry' — falling back to 'warn' (today's behaviour)")
+            self.tripwire_action = 'warn'
         self._snapshot_cache: Dict[str, Dict] = {}   # symbol -> raw snapshot dict
         self._snapshot_cache_date: Optional[str] = None
         logger.info(f"ORB WARM-phase seed prewarming: prewarm_seed={self.prewarm_seed_enabled}")
@@ -1375,6 +1405,20 @@ class ORBEngine:
         if self._first_submit_latency_logged:
             return
         self._latency_phases[phase] = self._latency_phases.get(phase, 0.0) + seconds
+
+    def _log_order_submit_latency(self, sym: str, t_rank: float) -> None:
+        """Per-order submit latency (rank-pass-start -> submit), every order,
+        both dry and real (docs/live_guardrails_spec_20260925.md G2 bullet 2).
+
+        `t_rank` is captured once per tick at the top of `_rank_and_submit` —
+        the rank pass starts immediately after that tick's bars are ingested,
+        so this is a lower bound on bar-close-to-submit, not the same
+        09:35-anchored number as the first-submit tripwire. Tagged
+        `ORB SUBMIT LATENCY` so the EOD report can grep the day's log for the
+        median/p90 distribution across all orders, not just the first.
+        """
+        latency = time.time() - t_rank
+        logger.info(f"[ORB] SUBMIT LATENCY sym={sym} seconds={latency:.2f}")
 
     def drain_bar_events(self, _from_drain_thread: bool = False) -> Set[str]:
         """Drain queued bar events; update range data + candidate state.
@@ -2653,6 +2697,7 @@ class ORBEngine:
                 cand.rejected_reason = 'production_dry_run'
                 cand.plan_submitted = True
                 self._record_latency_phase('rank_and_submit', time.time() - t_rank)
+                self._log_order_submit_latency(sym, t_rank)
                 self._check_first_submit_latency()
                 continue
             order_id = self._submit_entry(plan)
@@ -2660,6 +2705,7 @@ class ORBEngine:
                 cand.plan_submitted = True
                 submitted.append(sym)
                 self._record_latency_phase('rank_and_submit', time.time() - t_rank)
+                self._log_order_submit_latency(sym, t_rank)
                 self._check_first_submit_latency()
         return submitted
 
@@ -2703,6 +2749,22 @@ class ORBEngine:
                     f"{self.tg_prefix} ⚠ LATENCY: first submit {delay:.0f}s "
                     f"after 09:35 ET (> {self.latency_warn_secs:.0f}s threshold) "
                     f"— {breakdown}")
+                if self.tripwire_action == 'dry' and not self.strategy_dry_run:
+                    # G2 (docs/live_guardrails_spec_20260925.md): the same
+                    # code path as strategy.dry_run (_rank_and_submit reads
+                    # self.strategy_dry_run fresh every tick), so every
+                    # submit for the REST OF TODAY takes the
+                    # `[ORB DRY] WOULD BUY` branch instead of a real order.
+                    self.strategy_dry_run = True
+                    self._tripwire_forced_dry_today = True
+                    logger.error(
+                        f"[ORB] LATENCY TRIPWIRE: tripwire_action=dry — "
+                        f"forcing DRY mode for the rest of "
+                        f"{et.strftime('%Y-%m-%d')} ET (first submit "
+                        f"{delay:.1f}s late)")
+                    self._notify(
+                        f"{self.tg_prefix} TRIPWIRE → DRY for today: "
+                        f"first submit {delay:.0f}s late")
             else:
                 logger.info(
                     f"[ORB] first order submit {delay:.1f}s after 09:35 ET "
@@ -5201,6 +5263,12 @@ class ORBEngine:
         self._sweep_retry_used_today = False
         self._pdr_vetoed_today = set()
         self._first_submit_latency_logged = False
+        # A prior day's tripwire-forced dry mode must not carry over
+        # (docs/live_guardrails_spec_20260925.md G2) — revert to the config
+        # baseline every reset_daily; re-evaluated fresh if the tripwire
+        # fires again today.
+        self.strategy_dry_run = self._strategy_dry_run_cfg
+        self._tripwire_forced_dry_today = False
         # Roll kill-rail notify latches: daily every day; weekly on ISO-week
         # change; month on month change. P&L itself is DB-derived, so the
         # latches only gate re-notification (breach persists across the roll

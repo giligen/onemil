@@ -23,6 +23,13 @@
 # ~60s tick instead of re-fetching the full candidate list every tick.
 execution:
   prewarm_seed: false
+  # G2 latency tripwire action (docs/live_guardrails_spec_20260925.md).
+  # 'warn' (default) = today's behaviour: LATENCY TRIPWIRE logs + telegrams,
+  # orders keep flowing — this is what let a defect run for five months.
+  # 'dry' = same detection, but the engine drops into dry mode (zero real
+  # orders, `[ORB DRY] WOULD BUY` logging) for the rest of that session the
+  # moment the first submit lands > first_submit_latency_warn_secs late.
+  tripwire_action: warn
 
 strategy:
   name: orb

@@ -25,7 +25,10 @@ from typing import Dict, List
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from persistence.database import Database  # noqa: E402
+import guardrail as guardrail_cli  # noqa: E402  (scripts/guardrail.py: stage_risk_usd, band_p5)
+from trading import live_guardrail as gr  # noqa: E402
 
 log = logging.getLogger("eod_report")
 LLM_MODEL = "haiku"
@@ -146,10 +149,34 @@ def research_section() -> str:
     return "RESEARCH today: " + ("; ".join(lines) if lines else "no research commits")
 
 
+def guardrail_section() -> str:
+    """G1 cumulative live ledger + pause flag per book (docs/live_guardrails_spec_20260925.md).
+
+    Read-only: reuses trading/live_guardrail.py (via scripts/guardrail.py's own
+    stage_risk_usd/band_p5 config wiring, so this never re-derives the rules) —
+    the cron's `scripts/guardrail.py --check` is what actually pauses a book;
+    this section only surfaces the number that was missing for five months.
+    """
+    # db_path/path passed explicitly (gr.TRADES_DB / gr.STATE_PATH read at CALL
+    # time) rather than left to live_record()/is_paused()'s default args, which
+    # bind at trading.live_guardrail import time and would ignore a monkeypatch.
+    lines = ["GUARDRAIL:"]
+    for book in gr.BOOKS:
+        risk = guardrail_cli.stage_risk_usd(book)
+        stats = gr.live_record(book, stage_risk_usd=risk, db_path=gr.TRADES_DB)
+        band_txt = "n/a"
+        if book in gr.PAUSABLE_BOOKS:
+            p5 = guardrail_cli.band_p5(book, stats.trailing_40_n)
+            band_txt = f"{p5:+.3f}" if p5 is not None else "NO-DATA"
+        flag = " [PAUSED_BY_GUARDRAIL]" if gr.is_paused(book, path=gr.STATE_PATH) else ""
+        lines.append(f"  {stats.line()} | band p5 {band_txt}{flag}")
+    return "\n".join(lines)
+
+
 def assemble(day: str, trades: List[Dict]) -> str:
     """The deterministic summary: every section, plain text."""
     return "\n".join([books_section(trades, day), parity_section(day), ramp_section(),
-                      hygiene_section(), boot_section(day), research_section()])
+                      guardrail_section(), hygiene_section(), boot_section(day), research_section()])
 
 
 def phrase_with_llm(summary: str) -> str:
