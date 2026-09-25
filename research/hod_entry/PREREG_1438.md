@@ -38,3 +38,11 @@ at $100 risk with guardrails. FAIL → the fill-condition edge was an artefact o
 ## Not allowed
 Changing any constant of `HodBreakParams` or the 15 bps limit; excluding symbol-days for any reason other than the
 tape rail; reading TEST before VAL passes.
+
+## Amendment 2026-09-25 ~18:20 UTC (before any VAL number of the corrected run) — minute-bar source
+`data/cache.db intraday_bars_1min` is sparse on this superset: the first run left 21,701 of 33,979 symbol-days
+unsimulable (fewer than K+2 RTH bars; e.g. ALGT 2025-07-01 has 6 bars in cache.db while B0 traded it), including
+3,763 of the 8,248 TRAIN-H2/VAL symbol-days B0 trades — an exclusion the "Not allowed" section forbids. The minute
+bars therefore come from cache.db AND `research/bf_zero/bars_sip.db` (the Alpaca-SIP re-fetch that is the B0
+walker's own bar source), per symbol-day the source with more RTH bars (SIP on a tie). No rule constant changes. The
+first run's numbers (cache.db only) are kept as `REPORT_1438_cachedb_only.md` for the record and are not the cell.
