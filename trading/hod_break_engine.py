@@ -254,6 +254,7 @@ class HodBreakEngine:
         self._mover_queue: queue.Queue = queue.Queue(maxsize=5000); self._bar_queue: queue.Queue = queue.Queue(maxsize=100_000)   # ~300 B per bar; 3,600 names × a few minutes must never drop
         self._last_bar_ingest = 0.0; self._silence_alerted = False; self.calendar_ok = True
         self._adv_map: Dict[str, float] = {}; self._kill_notified: set = set(); self._flattened = False
+        self._last_notify_warn = 0.0
         self.shutdown_requested = False; self._lock = threading.RLock()   # tick (engine pool) and drains (main thread) must not interleave
         self.seen_today: set = set()                                      # once-per-symbol (orders incl. no-fills); entered_today = the day-cap set (fills/working orders)
         self._ws_gen: Optional[int] = None                                # StopMonitor connect generation last seen (outage → re-backfill)
@@ -1761,6 +1762,15 @@ class HodBreakEngine:
 
     # ------------------------------------------------------------------ notify
     def _notify(self, msg: str) -> None:
+        """Send a Telegram message. Thread-safe and loop-agnostic: the WS
+        print-watch thread (_on_trade_print) already has an asyncio loop
+        running when it calls this, so asyncio.run()/run_until_complete()
+        would raise 'cannot be called from a running event loop'. Detect
+        that case and hand the coroutine to the running loop via
+        run_coroutine_threadsafe instead (fire-and-forget, matches the
+        StopMonitor/order_stream pattern); otherwise fall back to
+        asyncio.run() as before. Never raises; failure logs at most once/min.
+        """
         if not self.notifier: return
         try:
             send = getattr(self.notifier, 'send_message', None)
@@ -1768,10 +1778,19 @@ class HodBreakEngine:
             import asyncio
             res = send(msg)
             if asyncio.iscoroutine(res):
-                try: loop = asyncio.get_event_loop(); loop.run_until_complete(res)
-                except RuntimeError: asyncio.run(res)
+                try:
+                    running_loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    running_loop = None
+                if running_loop is not None:
+                    asyncio.run_coroutine_threadsafe(res, running_loop)
+                else:
+                    asyncio.run(res)
         except Exception as e:
-            logger.warning(f"{self.tag} Telegram notify FAILED ({e}): {msg[:80]}")
+            now = time.time()
+            if now - self._last_notify_warn >= 60:
+                logger.warning(f"{self.tag} Telegram notify FAILED ({e}): {msg[:80]}")
+                self._last_notify_warn = now
 
     def _notify_once(self, key: str, msg: str) -> None:
         if key in self._kill_notified: return

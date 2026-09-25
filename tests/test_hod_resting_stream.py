@@ -7,6 +7,7 @@ fed a real print + the quote cached at that instant instead of a bar's high). St
 ever submitted from this path.
 """
 import asyncio
+import threading
 import logging
 import os
 import time
@@ -270,3 +271,45 @@ class TestFallbackFillFixes:
         assert cand.resting_filled is False                                # no fill (fail closed) — a re-arm attempt for the next bar is separate behaviour
         rows = read_ledger(e.dry_ledger_path)
         assert len(rows) == 1 and rows[0]['filled'] == '0' and rows[0]['fill_px'] == ''
+
+
+class TestNotifyThreadSafety:
+    """2026-09-25 live defect: _on_trade_print runs on the WS print-watch thread, which already
+    has an asyncio loop running — asyncio.run()/run_until_complete() raise 'cannot be called
+    from a running event loop' there. _notify must detect a running loop and hand the coroutine
+    to it via run_coroutine_threadsafe instead (fire-and-forget), never raise, and rate-limit its
+    own failure warning to once/min."""
+
+    def test_notify_from_thread_with_running_loop_delivers_without_warning(self, mock_alpaca, mock_db, mock_sm, tmp_path, caplog):
+        from notifications.telegram_notifier import TelegramNotifier
+        e = resting_engine(mock_alpaca, mock_db, mock_sm, tmp_path)
+        e.notifier = MagicMock(spec=TelegramNotifier)
+        result_holder = {}
+
+        def worker():
+            async def runner():
+                e._notify('[HOD] test message')          # called synchronously from inside a running loop
+                await asyncio.sleep(0.05)                 # let the fire-and-forget scheduled coroutine run
+            try:
+                asyncio.run(runner())
+            except Exception as exc:                       # pragma: no cover - assertion surface
+                result_holder['error'] = exc
+
+        with caplog.at_level(logging.WARNING):
+            t = threading.Thread(target=worker); t.start(); t.join(timeout=5)
+
+        assert 'error' not in result_holder
+        e.notifier.send_message.assert_called_once_with('[HOD] test message')
+        assert not any('notify FAILED' in r.message for r in caplog.records)
+
+    def test_notify_failure_logs_once_per_minute(self, mock_alpaca, mock_db, mock_sm, tmp_path, caplog):
+        e = resting_engine(mock_alpaca, mock_db, mock_sm, tmp_path)
+        broken = MagicMock()
+        broken.send_message.side_effect = RuntimeError('boom')            # raises synchronously, no running loop here
+        e.notifier = broken
+
+        with caplog.at_level(logging.WARNING):
+            e._notify('[HOD] first'); e._notify('[HOD] second')
+
+        warnings = [r for r in caplog.records if 'notify FAILED' in r.message]
+        assert len(warnings) == 1                                          # second call suppressed by the 60s rate limit
