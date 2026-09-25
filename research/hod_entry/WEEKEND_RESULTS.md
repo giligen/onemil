@@ -30,6 +30,20 @@ FAIL: ΔR positive with strong day-clustered t (3.0–4.4) but under the +0.05 p
 holdouts. Report-only: VAL odd-lot trigger prints (n=917) mean net_R +0.332 vs round-lot (n=526)
 +0.074. Full report: `research/hod_entry/RESULT_1429.md`.
 
+## 1,431 — no-fill cohort short
+
+| holdout | D (post break-bar-close filter) | scored n | mean net R (no-slip) | mean net R (30bps slip) | VAL t | share shortable | fills/wk |
+|---|---|---|---|---|---|---|---|
+| TRAIN-H2 | 237 | 64 | -1.375 | -1.866 | -9.42 | 0.375 | 2.67 |
+| VAL | 324 | 93 | -1.058 | -1.438 | -7.90 | 0.376 | 4.43 |
+
+FAIL, decisively: mean net R deeply negative both holdouts (bar +0.10), VAL t strongly negative
+(bar +2), shortable share 0.375/0.376 misses the 60% bar too. R had to be floored at 0.5% of price
+(unfloored PREREG text let R collapse to 1-2 ticks for signals whose next-bar open passed the
+break-bar high, exploding R-multiples to ±10^13 — 501 rows dropped, WARNING-logged). No shortable
+column existed in the PREREG's named asset file; used `borrow_flags.csv` instead (documented in
+`RESULT_1431.md`). Full report: `research/hod_entry/RESULT_1431.md`.
+
 ## 1,442 — tape-triggered override
 
 | holdout | (a) BROKER n / mean R (slip) | (b) OVERRIDE n / mean R (slip) | fill rate base/a/b | (b)−(a) paired n | ΔR | VAL t |
