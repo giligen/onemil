@@ -1,0 +1,11 @@
+{
+  "sampled": 30,
+  "n_ok": 28,
+  "n_unresolved": 2,
+  "avg_per_fill": 0.0009039363690357142,
+  "total_fills": 638,
+  "projected": 0.5767114034447857,
+  "budget": 15.0,
+  "verdict": "PASS",
+  "ts": "2026-09-25T15:05:48.633997+00:00"
+}
