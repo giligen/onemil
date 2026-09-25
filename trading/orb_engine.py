@@ -23,6 +23,7 @@ import queue
 import threading
 import time
 import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional, Set
@@ -407,7 +408,15 @@ class ORBEngine:
             self.tripwire_action = 'warn'
         self._snapshot_cache: Dict[str, Dict] = {}   # symbol -> raw snapshot dict
         self._snapshot_cache_date: Optional[str] = None
-        logger.info(f"ORB WARM-phase seed prewarming: prewarm_seed={self.prewarm_seed_enabled}")
+        # Latency pass 2 (docs/orb_latency_pass2_spec_20260925.md), default
+        # OFF — byte-identical to pre-9/25 behaviour when False. When True:
+        # (1) the post-open range sweep never falls back to a REST bars
+        # call — WS-delivered bars only, stragglers logged WARNING and left
+        # rangeless for this burst; (2) ranked picks submit concurrently
+        # (small thread pool) instead of serially.
+        self.fast_submit_enabled = bool(execution_cfg.get('fast_submit', False))
+        logger.info(f"ORB WARM-phase seed prewarming: prewarm_seed={self.prewarm_seed_enabled} "
+                    f"fast_submit={self.fast_submit_enabled}")
 
         # Day-scoped: symbol -> 'production' | pool.name (set by
         # build_orb_universe_from_snapshots; cleared in reset_daily).
@@ -1191,6 +1200,24 @@ class ORBEngine:
             f"{','.join(missing[:10])}{'...' if len(missing) > 10 else ''}"
         )
 
+        if self.fast_submit_enabled:
+            # docs/orb_latency_pass2_spec_20260925.md item 2: the sweep must
+            # never issue a REST bars call at 09:35 — WS-delivered bars
+            # (drain_bar_events -> _ingest_bars) are the only source. A
+            # symbol still missing range_data here simply hasn't had its
+            # 09:34 bar consolidate at the vendor yet; log it and move on —
+            # do NOT block the sweep on stragglers. The WS drain thread
+            # will fill it (and widen the eligible set) on a later tick if
+            # it arrives before the first-rank grace expires.
+            logger.warning(
+                f"ORB: fast_submit — REST fallback disabled, {len(missing)} "
+                f"candidate(s) still missing WS bars at "
+                f"{et_now.time().strftime('%H:%M:%S')} ET: "
+                f"{','.join(missing[:10])}{'...' if len(missing) > 10 else ''}"
+            )
+            self._post_open_range_sweep_done = True
+            return set()
+
         # Batch fetch: 1 API call for all missing symbols. Lookback covers
         # 9:30 ET → now with headroom. Generous (60 min) is fine — we only
         # look at the 9:30-9:34 slice for range computation; extra bars are
@@ -1434,6 +1461,7 @@ class ORBEngine:
                 and self._entry_drain_thread.is_alive():
             return set()
         touched: Set[str] = set()
+        _t0 = time.time()
         with self._lock:
             while True:
                 try:
@@ -1442,6 +1470,10 @@ class ORBEngine:
                     break
                 self._ingest_bars(symbol, bars_df)
                 touched.add(symbol)
+        # Latency pass 2: cost of draining + ingesting whatever bars the WS
+        # thread queued since the last drain — the "bar arrival" leg of the
+        # 09:35 breakdown (docs/orb_latency_pass2_spec_20260925.md).
+        self._record_latency_phase('bar_arrival', time.time() - _t0)
         return touched
 
     def _ingest_bars(self, symbol: str, bars_df: pd.DataFrame) -> None:
@@ -2457,6 +2489,7 @@ class ORBEngine:
                 self.universe_min_gap_pct)
 
         # 2. Compute composite + quintile for each
+        _t_scoring = time.time()
         scored: List[CandidateState] = []
         for cand in eligible:
             # Feature-provider precedence: explicit override > DB fetch.
@@ -2532,9 +2565,11 @@ class ORBEngine:
                 cand.range_data.range_open if cand.range_data else 0.0,
             )
 
+        self._record_latency_phase('scoring', time.time() - _t_scoring)
         if not scored:
             return []
 
+        _t_ranking = time.time()
         # 3a. Q1 filter — drop bottom-quintile candidates if configured.
         # Q1 is net-negative OOS (see filter.skip_q1 comment in orb.yaml).
         # Single-pass partition keeps semantics identical to the prior two-pass
@@ -2586,30 +2621,36 @@ class ORBEngine:
         # (CRCD/AVEX/FABC/RGNX class) is post-mortemable from disk instead of
         # racing journald rotation. One JSON line per burst; ~1-3/day.
         self._audit_selection(ranked_symbols, top_syms, scored)
+        self._record_latency_phase('ranking', time.time() - _t_ranking)
 
-        # 5. For each kept candidate, build plan + submit
+        # 5. For each kept candidate, build plan + submit (vetoes are pure
+        # in-memory — timed separately below, excluding plan build / buying
+        # power / the REST submit call itself, which already have their own
+        # phases: 'rank_and_submit' + the per-order SUBMIT LATENCY line).
+        _t_vetoes = 0.0
+        # fast_submit only (docs/orb_latency_pass2_spec_20260925.md item 4):
+        # (sym, cand, plan) for real (non-dry) picks whose REST submit is
+        # deferred to the concurrent pool below, in ranked order.
+        _pending_submits = []
         submitted: List[str] = []
         for sym in top_syms:
             cand = self.candidates[sym]
-            # PDR veto — post-ranking, NO backfill: this pick already
+            # Vetoes — post-ranking, NO backfill: a vetoed pick already
             # consumed its slot/dedup place; the slot stays empty (refill
-            # form is toxic — trading/orb_pdr_veto.py docstring).
-            if self._pdr_veto_reject(cand):
-                continue
-            # G1 volatility-fingerprint veto (B+ 2026-08-15): post-ranking,
-            # slot consumed, NO refill (same invariant as PDR). Shared math
-            # trading/orb_g1_veto.py — BT parity by construction.
-            if self._g1_veto_reject(cand):
-                continue
-            # Opening-range-size veto (2026-09-08): post-ranking, slot
-            # consumed, NO refill. Shared math trading/orb_range_size_veto.py.
-            if self._range_size_veto_reject(cand):
-                continue
-            # Catalyst-required veto (2026-07-18): newsless AND alone
-            # (no same-morning complex confirmation) — no catalyst, no
-            # trade. Same no-refill slot semantics as PDR. Cohort is scoped
-            # to THIS pool's own candidates (see _run_pool_selection docstring).
-            if self._catalyst_veto_reject(cand, cohort_symbols=cand_syms):
+            # form is toxic — trading/orb_pdr_veto.py docstring). All four
+            # are pure in-memory checks (PDR, G1 fingerprint, range-size,
+            # catalyst); `or` short-circuits at the first True, identical
+            # to the prior sequential-if form. Timed together as 'vetoes'
+            # (docs/orb_latency_pass2_spec_20260925.md item 3).
+            _t_v0 = time.time()
+            vetoed = (
+                self._pdr_veto_reject(cand)
+                or self._g1_veto_reject(cand)
+                or self._range_size_veto_reject(cand)
+                or self._catalyst_veto_reject(cand, cohort_symbols=cand_syms)
+            )
+            _t_vetoes += time.time() - _t_v0
+            if vetoed:
                 continue
             spread_bps = self._get_spread_bps(sym)
             plan = self.planner.build(
@@ -2700,10 +2741,42 @@ class ORBEngine:
                 self._log_order_submit_latency(sym, t_rank)
                 self._check_first_submit_latency()
                 continue
+            if self.fast_submit_enabled:
+                # Slot is assigned now (plan built, all vetoes/buying-power
+                # cleared, position in top_syms fixes its ranking order) —
+                # only the REST round-trip itself is deferred to the
+                # concurrent pool below.
+                _pending_submits.append((sym, cand, plan))
+                continue
             order_id = self._submit_entry(plan)
             if order_id:
                 cand.plan_submitted = True
                 submitted.append(sym)
+                self._record_latency_phase('rank_and_submit', time.time() - t_rank)
+                self._log_order_submit_latency(sym, t_rank)
+                self._check_first_submit_latency()
+        self._record_latency_phase('vetoes', _t_vetoes)
+
+        if _pending_submits:
+            # Concurrent submit (<= 8 workers, one REST call each). Ranking
+            # order is preserved by iterating `_pending_submits` in order —
+            # NOT completion order — so slot arithmetic (submitted list,
+            # first-submit latency) matches what a serial pass would have
+            # produced. A failed submit (order_id falsy) simply leaves its
+            # slot empty; no refill (same invariant as every post-ranking
+            # veto above).
+            _t_submit0 = time.time()
+            workers = min(8, len(_pending_submits))
+            with ThreadPoolExecutor(
+                    max_workers=workers, thread_name_prefix='orb-submit') as pool:
+                futures = [pool.submit(self._submit_entry, plan)
+                           for _, _, plan in _pending_submits]
+                results = [f.result() for f in futures]
+            self._record_latency_phase('concurrent_submit', time.time() - _t_submit0)
+            for (sym, cand, _plan), order_id in zip(_pending_submits, results):
+                if order_id:
+                    cand.plan_submitted = True
+                    submitted.append(sym)
                 self._record_latency_phase('rank_and_submit', time.time() - t_rank)
                 self._log_order_submit_latency(sym, t_rank)
                 self._check_first_submit_latency()

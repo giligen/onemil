@@ -30,6 +30,12 @@ execution:
   # orders, `[ORB DRY] WOULD BUY` logging) for the rest of that session the
   # moment the first submit lands > first_submit_latency_warn_secs late.
   tripwire_action: warn
+  # Latency pass 2 (docs/orb_latency_pass2_spec_20260925.md). Default false
+  # (byte-identical to pre-9/25 behaviour). When true: post-open range sweep
+  # never falls back to REST (WS bars only, stragglers WARNING); ranked
+  # picks submit concurrently instead of serially. Owner GO required before
+  # true, after the weekend boot rehearsal.
+  fast_submit: false
 
 strategy:
   name: orb

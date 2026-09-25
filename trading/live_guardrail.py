@@ -25,7 +25,8 @@ Pause rule (frozen, spec G1): PAUSE iff, of the three, ANY fires:
      (8 for orb, 4 for bull_flag).
   3. any single session <= -6 x stage_risk_usd.
 
-State file: data/guardrail_state.json
+State file: data/guardrail_state.json (override with env ONEMIL_GUARDRAIL_STATE,
+    e.g. tests — see tests/conftest.py's autouse fixture)
     {"orb": {"paused_by_guardrail": true, "rule": "...", "reason": "...",
              "at_utc": "...", "numbers": {...}, "history": [...]},
      "bull_flag": {...}}
@@ -336,8 +337,23 @@ def current_user() -> str:
         return 'unknown'
 
 
-def load_state(path: Path = STATE_PATH) -> Dict[str, Dict]:
+def resolve_state_path(path: Optional[Path]) -> Path:
+    """Resolve the state-file path for a call.
+
+    Explicit `path` wins. Else `ONEMIL_GUARDRAIL_STATE` (set by tests via
+    `tests/conftest.py` so no test ever reads/writes production state). Else
+    the current `STATE_PATH` module attribute (read at CALL time, not bound
+    as a def-time default, so `monkeypatch.setattr(gr, 'STATE_PATH', ...)`
+    still works)."""
+    if path is not None:
+        return Path(path)
+    env = os.environ.get('ONEMIL_GUARDRAIL_STATE')
+    return Path(env) if env else Path(STATE_PATH)
+
+
+def load_state(path: Optional[Path] = None) -> Dict[str, Dict]:
     """Read the whole guardrail state file. Missing/corrupt -> no books paused."""
+    path = resolve_state_path(path)
     try:
         return json.loads(Path(path).read_text())
     except FileNotFoundError:
@@ -348,16 +364,16 @@ def load_state(path: Path = STATE_PATH) -> Dict[str, Dict]:
         return {}
 
 
-def save_state(state: Dict[str, Dict], path: Path = STATE_PATH) -> None:
+def save_state(state: Dict[str, Dict], path: Optional[Path] = None) -> None:
     """Persist the whole state file (write temp, replace — atomic-ish)."""
-    p = Path(path)
+    p = resolve_state_path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(p.suffix + '.tmp')
     tmp.write_text(json.dumps(state, indent=1, sort_keys=True))
     tmp.replace(p)
 
 
-def is_paused(book: str, path: Path = STATE_PATH) -> bool:
+def is_paused(book: str, path: Optional[Path] = None) -> bool:
     """True if `book`'s pre-open check must refuse real orders."""
     book = _normalize_book(book)
     return bool(load_state(path).get(book, {}).get('paused_by_guardrail', False))
@@ -378,7 +394,7 @@ def send_guardrail_telegram(text: str, script: Path = TELEGRAM_SCRIPT) -> bool:
         return False
 
 
-def pause_book(check: PauseCheck, stage_risk_usd: float, path: Path = STATE_PATH,
+def pause_book(check: PauseCheck, stage_risk_usd: float, path: Optional[Path] = None,
                notify: bool = True) -> Dict:
     """Latch a PAUSE into the state file, log ERROR, send the Telegram.
 
@@ -419,7 +435,7 @@ def pause_book(check: PauseCheck, stage_risk_usd: float, path: Path = STATE_PATH
 
 
 def clear_pause(book: str, reason: str, by: Optional[str] = None,
-                path: Path = STATE_PATH) -> Dict:
+                path: Optional[Path] = None) -> Dict:
     """MANUAL pause clear — logs who and why. Never called automatically."""
     book = _normalize_book(book)
     if not (reason or '').strip():

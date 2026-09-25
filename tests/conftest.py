@@ -21,6 +21,17 @@ from trading.trade_planner import TradePlanner
 from trading.trading_engine import TradingEngine
 
 
+@pytest.fixture(autouse=True)
+def _isolated_guardrail_state(tmp_path, monkeypatch):
+    """No test ever reads or writes the PRODUCTION guardrail state file.
+
+    trading/live_guardrail.py's boot-time `is_paused()` (called by every
+    live engine at init) defaults to `data/guardrail_state.json` unless
+    `ONEMIL_GUARDRAIL_STATE` is set. Point every test at a fresh temp file
+    so engine tests are never gated by today's real pause state."""
+    monkeypatch.setenv("ONEMIL_GUARDRAIL_STATE", str(tmp_path / "guardrail_state_test.json"))
+
+
 @pytest.fixture
 def bf_db(tmp_path):
     """Real Database on a temp file, closed after the test."""

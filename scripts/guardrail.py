@@ -78,7 +78,7 @@ def run_check(db_path: Optional[Path] = None, state_path: Optional[Path] = None,
     (not as default-arg values bound at import), so tests can monkeypatch
     those module attributes and still exercise main()."""
     db_path = db_path if db_path is not None else gr.TRADES_DB
-    state_path = state_path if state_path is not None else gr.STATE_PATH
+    state_path = gr.resolve_state_path(state_path)
     any_new_pause = False
     for book in gr.BOOKS:
         risk = stage_risk_usd(book)

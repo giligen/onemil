@@ -88,6 +88,15 @@ def test_clear_stores_reason(tmp_path, monkeypatch, capsys):
     assert gr.load_state(state_path)["orb"]["cleared_reason"] == "latency fix rehearsed"
 
 
+def test_resolve_state_path_uses_production_default_when_env_unset(monkeypatch):
+    """gr.resolve_state_path(None): with ONEMIL_GUARDRAIL_STATE unset and
+    STATE_PATH untouched, scripts/guardrail.py --check resolves to the real
+    production file — the env override never silently changes prod behavior."""
+    monkeypatch.delenv("ONEMIL_GUARDRAIL_STATE", raising=False)
+    assert gr.resolve_state_path(None) == gr.STATE_PATH
+    assert gr.resolve_state_path(None) == gr.ROOT / "data" / "guardrail_state.json"
+
+
 def test_eod_guardrail_section_renders(guardrail_trades_db, insert_trade, tmp_path, monkeypatch):
     """scripts/eod_report.py's guardrail_section() reuses trading/live_guardrail.py
     (via scripts/guardrail.py's own stage_risk_usd/band_p5) — no duplicated logic.

@@ -138,9 +138,15 @@ class TestEngineSeam:
     def test_call_order_after_g1_before_catalyst(self):
         import inspect
         src = inspect.getsource(ORBEngine)
-        i_g1 = src.index('if self._g1_veto_reject(cand):')
-        i_rs = src.index('if self._range_size_veto_reject(cand):')
-        i_cat = src.index('if self._catalyst_veto_reject(cand):')
+        # 2026-09-25 latency pass 2: the four post-ranking vetoes collapsed
+        # into one short-circuiting `or` chain (docs/orb_latency_pass2_spec_
+        # 20260925.md item 3), shared by both the serial and fast_submit
+        # concurrent paths — only the deferred REST submit differs.
+        i_g1 = src.index('self._g1_veto_reject(cand)')
+        i_rs = src.index('self._range_size_veto_reject(cand)')
+        # 2026-09-21 PREREG_LIVE_UNION.md: catalyst veto now takes an
+        # explicit per-pool cohort_symbols arg (see _run_pool_selection).
+        i_cat = src.index('self._catalyst_veto_reject(cand, cohort_symbols=cand_syms)')
         assert i_g1 < i_rs < i_cat
 
 
