@@ -15,7 +15,7 @@ engine feeds them the same closed bars. Parity is by construction and enforced b
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -133,21 +133,41 @@ def resting_entry_fill(ask: float, arm: dict) -> Optional[float]:
     return float(ask) if float(ask) <= arm['limit'] + 1e-9 else None
 
 
-def resting_order_qty(risk_usd: float, arm: dict) -> int:
-    """Live order size for a resting arm (docs/hod_live_resting_orders_spec_20260925.md item 1): floor(risk /
-    (trigger - stop)) — the SAME formula as `shares_for`, keyed on the order's trigger (the broker's stop price,
-    known at arm time) rather than the tape's expected ask (only known after a fill). ONE helper so the live
-    engine never re-derives this arithmetic. Also capped at 5% of the prior bar's volume (`arm['bar_volume']`,
-    the bar whose close armed this order — a thin-tape guard against sizing a real order off dollar risk alone
-    when the last minute barely traded); the cap is skipped (logged nowhere — it is simply absent) when the
-    caller has not threaded `bar_volume` through, e.g. offline/backtest callers of the same formula."""
-    qty = shares_for(risk_usd, arm['trigger'], arm['stop'])
+def resting_order_qty(risk_usd: float, arm: dict, max_notional_usd: float) -> Tuple[int, str]:
+    """Live order size for a resting arm (docs/hod_live_resting_orders_spec_20260925.md item 1), THREE
+    independent caps, tightest wins — ONE helper so the live engine never re-derives this arithmetic:
+
+    1) risk: floor(risk_usd / (trigger - stop)) — the SAME formula as `shares_for`, keyed on the order's
+       trigger (the broker's stop price, known at arm time) rather than the tape's expected ask.
+    2) notional: floor(max_notional_usd / trigger) — the fill is never below trigger, so this is the worst
+       case. Fixed 9/25: CDNA bought $3,708 on a $2,000 cap because the cap was enforced only on the
+       next_open path, never here.
+    3) liquidity: max(25% of the prior bar's volume `arm['bar_volume']`, 3x the displayed ask size
+       `arm['ask_size']` at arm time) — whichever input(s) the caller threads through; a cap with no input
+       present is skipped. Replaces the flat 5%-of-bar-volume rule (fixed 9/25: VECO got 11 sh off a quiet
+       minute although the ask could support far more).
+
+    Returns (qty, bound) where bound in {'risk', 'notional', 'liquidity'} names the tightest cap, for the
+    caller to log."""
+    risk_qty = shares_for(risk_usd, arm['trigger'], arm['stop'])
+    qty, bound = risk_qty, 'risk'
+    trigger = float(arm['trigger'])
+    if trigger > 0:
+        notional_qty = int(max_notional_usd // trigger)
+        if notional_qty < qty:
+            qty, bound = notional_qty, 'notional'
+    liq_inputs = []
     bar_volume = arm.get('bar_volume')
     if bar_volume is not None:
-        vol_cap = int(0.05 * float(bar_volume))
-        if vol_cap < qty:
-            qty = vol_cap
-    return qty
+        liq_inputs.append(0.25 * float(bar_volume))
+    ask_size = arm.get('ask_size')
+    if ask_size is not None:
+        liq_inputs.append(3.0 * float(ask_size))
+    if liq_inputs:
+        liq_qty = int(max(liq_inputs))
+        if liq_qty < qty:
+            qty, bound = liq_qty, 'liquidity'
+    return max(qty, 0), bound
 
 
 def detect(o: Sequence[float], h: Sequence[float], l: Sequence[float], v: Sequence[float], m: Sequence[int],

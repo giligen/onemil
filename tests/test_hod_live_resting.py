@@ -45,14 +45,35 @@ BIG_VOL_ARM = dict(level=11.0, trigger=11.01, limit=11.0165, stop=10.6, idx=6, a
 
 
 # --------------------------------------------------------------------------------------------- item 1: qty formula
+# 9/25 CDNA ($3,708 bought on a $2,000 cap, cap enforced only on next_open never resting_order_qty) / VECO (11 sh
+# on a quiet-minute 5%-of-bar-volume cap): THREE independent caps, tightest wins — risk, notional, liquidity.
 class TestRestingOrderQty:
     def test_uncapped_matches_the_risk_over_r_formula(self):
         arm = dict(trigger=11.01, stop=10.6, bar_volume=1_000_000.0)
-        assert resting_order_qty(100.0, arm) == int(100.0 / 0.41)   # 243, far under 5% of 1e6
+        assert resting_order_qty(100.0, arm, max_notional_usd=1e9) == (int(100.0 / 0.41), 'risk')   # 243
 
-    def test_capped_at_5pct_of_the_prior_bars_volume(self):
-        arm = dict(trigger=11.01, stop=10.6, bar_volume=3000.0)     # tape()'s consolidation-bar volume
-        assert resting_order_qty(100.0, arm) == 150                  # 5% of 3000 binds under 243
+    def test_liquidity_cap_binds_at_25pct_of_the_prior_bars_volume(self):
+        arm = dict(trigger=11.01, stop=10.6, bar_volume=800.0)       # risk qty 243; 25% of 800 = 200 binds under it
+        assert resting_order_qty(100.0, arm, max_notional_usd=1e9) == (200, 'liquidity')
+
+    def test_liquidity_cap_binds_at_3x_the_displayed_ask_size(self):
+        arm = dict(trigger=11.01, stop=10.6, ask_size=50.0)           # 3x50=150 < risk qty 243
+        assert resting_order_qty(100.0, arm, max_notional_usd=1e9) == (150, 'liquidity')
+
+    def test_liquidity_cap_is_the_max_of_volume_and_ask_size_inputs(self):
+        arm = dict(trigger=11.01, stop=10.6, bar_volume=800.0, ask_size=200.0)   # 25%*800=200 vs 3*200=600 -> 600 wins, still no bind (243 < 600)
+        assert resting_order_qty(100.0, arm, max_notional_usd=1e9) == (int(100.0 / 0.41), 'risk')
+
+    def test_notional_cap_binds_cdna(self):
+        arm = dict(trigger=65.06, stop=64.19)                         # risk qty floor(50/0.87)=57
+        qty, bound = resting_order_qty(50.0, arm, max_notional_usd=2000.0)
+        assert (qty, bound) == (30, 'notional')                       # floor(2000/65.06)=30 < 57
+
+    def test_risk_binds_under_a_generous_liquidity_cap_veco(self):
+        arm = dict(trigger=48.89, stop=48.68, bar_volume=220.0, ask_size=300.0)
+        qty, bound = resting_order_qty(50.0, arm, max_notional_usd=1e9)
+        # risk qty = floor(50/0.21) = 238; liquidity = max(0.25*220, 3*300) = max(55, 900) = 900 -> risk binds
+        assert (qty, bound) == (238, 'risk')
 
 
 # --------------------------------------------------------------------------------------------- item 1: arm -> ONE order
@@ -67,7 +88,7 @@ class TestArmPlacesLiveOrder:
         assert kw['symbol'] == 'ABC' and kw['side'] == 'buy'
         assert kw['stop_price'] == pytest.approx(11.01)               # level 11.00 + 0.01
         assert kw['limit_price'] == pytest.approx(11.0 * 1.0015)
-        assert kw['qty'] == 150                                        # 5%-of-bar-volume cap binds (bar_volume 3000)
+        assert kw['qty'] == 243                                        # risk qty floor(100/0.41); none of the 3 caps bind here (bar_volume 3000 -> 25%=750, notional 5000/11.01=454)
         assert kw['client_order_id'].startswith('hod-rest-ABC-')
         # time-in-force is DAY inside AlpacaClient.submit_stop_limit_order itself — the engine passes no tif kwarg
         assert 'time_in_force' not in kw

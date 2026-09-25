@@ -234,6 +234,7 @@ class HodBreakEngine:
         self.live_orders_state_path = str(cfg.get('live_orders_state_path', 'logs/hod_live_resting_orders_state.json'))
         self._live_cap_slots: set = set()
         self._cap_logged: set = set()      # symbols already logged at 'LIVE cap reached' this session — dedup (9/25: was a WARNING every bar)
+        self._sizing_logged: set = set()   # symbols already logged for which resting_order_qty cap bound, this session (9/25)
         self._bp_cache_value: Optional[float] = None   # cached account buying power for the resting-notional guard (_buying_power_cached)
         self._bp_cache_ts: float = 0.0                 # refreshed at most once/minute — read once per minute via the alpaca client
         self._live_cancel_swept_entry = False
@@ -282,7 +283,7 @@ class HodBreakEngine:
             self.session_date = today; self.candidates.clear(); self.entered_today.clear(); self.daily_pnl = 0.0
             self.live_since = None
             self._kill_notified.clear(); self._flattened = False
-            self._live_cap_slots.clear(); self._cap_logged.clear(); self._bp_cache_value = None; self._bp_cache_ts = 0.0
+            self._live_cap_slots.clear(); self._cap_logged.clear(); self._sizing_logged.clear(); self._bp_cache_value = None; self._bp_cache_ts = 0.0
             self._live_cancel_swept_entry = False; self._live_cancel_swept_flat = False
             self._apply_session_calendar()
             self._adv_map = self._load_adv_map()
@@ -810,9 +811,9 @@ class HodBreakEngine:
                 break
             new_arm = arm_state(o, h, l, v, m, j, cand.adv20, p)
             if new_arm is not None:
-                # bar_volume = the arming bar's own volume (v[j]) — resting_order_qty's 5%-of-prior-bar-volume
-                # cap on the LIVE order size (docs/hod_live_resting_orders_spec_20260925.md item 1); unused by
-                # the tape/dry path, only read by _arm_live_order via resting_order_qty.
+                # bar_volume = the arming bar's own volume (v[j]) — resting_order_qty's 25%-of-prior-bar-volume
+                # liquidity cap on the LIVE order size (docs/hod_live_resting_orders_spec_20260925.md item 1);
+                # unused by the tape/dry path, only read by _arm_live_order via resting_order_qty.
                 new_arm = dict(new_arm, idx=j, arm_ts=self._et_now().isoformat(), bar_volume=float(v[j]))
                 cand.tape_cross = None   # a fresh arm — any print-watch cross belongs to the arm just resolved above
                 logger.info(f"{self.dry_tag} ARMED {sym} level {new_arm['level']:.2f} trigger {new_arm['trigger']:.2f} "
@@ -978,10 +979,11 @@ class HodBreakEngine:
         live_today = len(self._live_cap_slots)
         if live_today >= self.params.max_resting:
             self._log_cap_once(sym, f"resting cap {self.params.max_resting} reached (resting {live_today})"); return
-        qty = resting_order_qty(self.risk_usd, arm)
+        qty, qty_bound = resting_order_qty(self.risk_usd, arm, self.max_notional_usd)
         if qty < 1:
             logger.warning(f"{self.tag} {sym}: LIVE qty < 1 share at risk ${self.risk_usd:.0f} (trigger {arm['trigger']:.2f} stop {arm['stop']:.2f}) — no real order")
             return
+        self._log_sizing_cap_once(sym, qty, qty_bound, arm)
         # Owner 9/25: the backtest never capped resting-order COUNT, only fills — max_resting above is a safety
         # ceiling, not a selection rule. The real limiter is NOTIONAL: skip a new resting order if the sum of
         # limit_price x qty over every resting order we hold (this one included) would exceed 25% of buying power.
@@ -1037,6 +1039,20 @@ class HodBreakEngine:
             return
         self._cap_logged.add(sym)
         logger.info(f"{self.tag} {sym}: LIVE cap reached ({msg}) — arm stays tape-only")
+
+    def _log_sizing_cap_once(self, sym: str, qty: int, bound: str, arm: dict) -> None:
+        """Once per symbol per session (dedup set cleared in _roll_session, same as _cap_logged): which of the
+        THREE resting_order_qty caps bound the placed qty and by how much (9/25 CDNA/VECO fix — risk alone is
+        never enough, sizing must show its work in the log)."""
+        if sym in self._sizing_logged:
+            return
+        self._sizing_logged.add(sym)
+        if bound == 'risk':
+            return                       # the common case — nothing capped it, no need to log
+        risk_qty = shares_for(self.risk_usd, arm['trigger'], arm['stop'])
+        logger.info(f"{self.tag} {sym}: LIVE sizing {bound}-bound — {qty} sh (risk-only would be {risk_qty} sh; "
+                    f"trigger {arm['trigger']:.2f} stop {arm['stop']:.2f} max_notional ${self.max_notional_usd:,.0f} "
+                    f"bar_volume={arm.get('bar_volume')} ask_size={arm.get('ask_size')})")
 
     def _buying_power_cached(self) -> Optional[float]:
         """Account buying power for the resting-notional guard, refreshed at most once a minute via
