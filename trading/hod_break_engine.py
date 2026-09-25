@@ -420,9 +420,12 @@ class HodBreakEngine:
             return
         with self._lock:
             try:
+                self._roll_session()
+                # MUST run after _roll_session: on the first tick of a session, _roll_session clears
+                # self.candidates (new-day reset) — reconciling before it wiped every adopted attachment the
+                # instant it was made (HUM/LABX, 2026-09-25 17:53 boot: adopted then silently orphaned).
                 if not self._live_reconciled and self.book == 'hod_break' and self.entry_mode == 'resting_stop_limit' and not self.dry_run:
                     self._reconcile_live_orders_on_boot()
-                self._roll_session()
                 if not self.calendar_ok: self._apply_session_calendar()
                 self._check_stream_outage()
                 self._check_stream_silence()
@@ -870,6 +873,11 @@ class HodBreakEngine:
     # owner's manual orders on the shared account are never touched).
     SAFETY_NET_PCT = 0.05   # broker stop-sell 5 % under the real stop (StopMonitor owns the real stop)
     LIVE_COID_PREFIX = 'hod-rest'
+    # every field _on_live_fill/_cancel_live_order/_arm_live_order read off an adopted record — 'stop' above all
+    # (9/25 incident: an adopted order with no stop would KeyError inside _on_live_fill on its first fill, i.e.
+    # the position becomes unmanaged at the worst possible moment). A record missing any of these cannot be
+    # managed and must be cancelled at boot, never adopted blind.
+    REQUIRED_LIVE_ORDER_FIELDS = ('coid', 'level', 'trigger', 'limit', 'stop', 'qty')
 
     def _persist_live_orders(self) -> None:
         """Write {symbol: live_order} for every currently-resting or partially-filled live order. Never raises —
@@ -887,36 +895,63 @@ class HodBreakEngine:
             logger.error(f"{self.tag} failed to persist live order state to {self.live_orders_state_path}: {e}")
 
     def _reconcile_live_orders_on_boot(self) -> None:
-        """Runs ONCE per process start (first process_tick). Adopts a persisted order iff its id is STILL OPEN at
-        the broker; a persisted id no longer open (filled/expired/cancelled while the process was down) is
-        dropped with a WARNING — never cancelled, since we cannot know if it already became a real position. An
-        open order at the broker that is NOT in the persisted set is left completely alone (may be the owner's
-        manual order): this reconciliation only ever ADOPTS, never cancels."""
+        """Runs ONCE per process start, and MUST run after `_roll_session()` has already populated
+        `self.candidates` for the day (process_tick — `_roll_session` clears/rebuilds the candidate map on the
+        first tick of a session; reconciling before that wipes every attachment this makes, 2026-09-25 17:53 boot:
+        HUM/LABX were adopted then silently orphaned by the very next line). Adopts a persisted order iff its id
+        is STILL OPEN at the broker AND carries every field `_on_live_fill`/`_cancel_live_order` need to manage a
+        fill (REQUIRED_LIVE_ORDER_FIELDS) — creating a Candidate for the symbol if the day's universe build did
+        not already make one, so adoption is never blocked by 'no candidate'. A persisted id no longer open
+        (filled/expired/cancelled while the process was down) is dropped with a WARNING, never cancelled (we
+        cannot know if it already became a real position). A record that IS still open but cannot be safely
+        managed (missing fields) is CANCELLED at boot rather than left an orphan. An open order at the broker
+        that is NOT in the persisted set is left completely alone (may be the owner's manual order): this
+        reconciliation only ever adopts-or-cancels ITS OWN tracked ids, never touches an unknown one. Always logs
+        one INFO summary line — including when the state file is empty or absent — so a boot with zero reconcile
+        activity is still visible in the journal."""
         self._live_reconciled = True
         import json
+        path = self.live_orders_state_path
+        adopted = cancelled = 0
         try:
-            with open(self.live_orders_state_path) as fh:
+            with open(path) as fh:
                 persisted = json.load(fh)
         except FileNotFoundError:
-            return
+            persisted = {}
         except Exception as e:
-            logger.error(f"{self.tag} live order state file unreadable ({e}) — starting with no adopted orders"); return
-        if not persisted:
-            return
-        try:
-            open_orders = {str(o.get('id')): o for o in (self.alpaca.get_open_orders() or [])}
-        except Exception as e:
-            logger.error(f"{self.tag} could not list open orders for live-order reconciliation ({e}) — nothing adopted this boot"); return
-        for sym, lo in persisted.items():
-            oid = str((lo or {}).get('order_id') or '')
-            if oid and oid in open_orders:
-                cand = self.candidates.get(sym)
-                if cand is None:
-                    cand = self.candidates[sym] = Candidate(symbol=sym, day_open=0.0, adv20=self._adv_map.get(sym, 0.0))
-                cand.live_order = lo; self._live_cap_slots.add(sym)
-                logger.warning(f"{self.tag} {sym}: ADOPTED resting order {oid} on restart (tracked id, still open at the broker)")
-            else:
-                logger.warning(f"{self.tag} {sym}: persisted order {oid or '(none)'} is no longer open — dropped untouched, not re-armed")
+            logger.error(f"{self.tag} live order state file unreadable ({e}) — starting with no adopted orders")
+            persisted = {}
+        if persisted:
+            try:
+                open_orders = {str(o.get('id')): o for o in (self.alpaca.get_open_orders() or [])}
+            except Exception as e:
+                logger.error(f"{self.tag} could not list open orders for live-order reconciliation ({e}) — nothing adopted this boot")
+                open_orders = None
+            if open_orders is not None:
+                for sym, lo in persisted.items():
+                    oid = str((lo or {}).get('order_id') or '')
+                    if not (oid and oid in open_orders):
+                        logger.warning(f"{self.tag} {sym}: persisted order {oid or '(none)'} is no longer open — dropped untouched, not re-armed")
+                        continue
+                    missing = [f for f in self.REQUIRED_LIVE_ORDER_FIELDS if (lo or {}).get(f) is None]
+                    if missing:
+                        logger.warning(f"{self.tag} {sym}: persisted order {oid} is missing {missing} — cannot manage a fill "
+                                        f"safely (no blind adopt), cancelling at boot instead")
+                        try:
+                            self.alpaca.cancel_order(oid); cancelled += 1
+                        except Exception as e:
+                            logger.error(f"{self.tag} {sym}: boot cancel of unmanageable order {oid} failed: {e}")
+                        continue
+                    lo.setdefault('booked_qty', 0); lo.setdefault('arm_ts', ''); lo.setdefault('tp_leg_id', '')
+                    lo.setdefault('sl_leg_id', ''); lo.setdefault('trade_id', None)
+                    cand = self.candidates.get(sym)
+                    if cand is None:
+                        cand = self.candidates[sym] = Candidate(symbol=sym, day_open=0.0, adv20=self._adv_map.get(sym, 0.0))
+                    cand.live_order = lo; cand.live_filled = False; self._live_cap_slots.add(sym)
+                    adopted += 1
+                    logger.warning(f"{self.tag} {sym}: ADOPTED resting order {oid} on restart (tracked id, still open at the broker) "
+                                   f"— re-attached to live_order, covered by the cutoff sweep, the fill-cap cancel-all and the fill poll")
+        logger.info(f"{self.tag} reconcile: persisted {len(persisted)}, adopted {adopted}, cancelled {cancelled} (file {path})")
         self._persist_live_orders()
 
     def _arm_live_order(self, cand: Candidate, arm: dict) -> None:

@@ -426,6 +426,97 @@ class TestBootReconciliation:
         assert 'DEF' not in e.candidates or e.candidates['DEF'].live_order is None
         assert not hod_live_alpaca.cancel_order.called                  # adopts/drops only, never cancels
 
+    def test_record_missing_stop_is_cancelled_at_boot_not_adopted(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path, caplog):
+        state_path = tmp_path / 'state.json'
+        persisted = {'HUM': dict(order_id='open-1', coid='hod-rest-HUM-x', level=11.0, trigger=11.01,
+                                 limit=11.0165, qty=100, booked_qty=0)}   # no 'stop' — cannot manage a fill
+        state_path.write_text(json.dumps(persisted))
+        hod_live_alpaca.get_open_orders.return_value = [{'id': 'open-1'}]
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path,
+                        live_orders_state_path=str(state_path))
+        with caplog.at_level('WARNING'):
+            e._reconcile_live_orders_on_boot()
+        assert 'HUM' not in e.candidates or e.candidates['HUM'].live_order is None
+        hod_live_alpaca.cancel_order.assert_called_once_with('open-1')
+        assert any('missing' in r.message and 'stop' in r.message for r in caplog.records)
+
+    def test_adopted_order_is_cancelled_by_the_fill_cap_cancel_all(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        state_path = tmp_path / 'state.json'
+        persisted = {'LABX': dict(order_id='open-1', coid='hod-rest-LABX-x', level=11.0, trigger=11.01,
+                                  limit=11.0165, stop=10.6, qty=100, booked_qty=0)}
+        state_path.write_text(json.dumps(persisted))
+        hod_live_alpaca.get_open_orders.return_value = [{'id': 'open-1'}]
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path,
+                        live_orders_state_path=str(state_path))
+        e._reconcile_live_orders_on_boot()
+        assert e.candidates['LABX'].live_order is not None
+        e._cancel_all_resting('fill cap reached')                       # the path _cancel_all_resting exercises
+        assert e.candidates['LABX'].live_order is None
+        hod_live_alpaca.cancel_order.assert_called_once_with('open-1')
+
+    def test_adopted_order_is_cancelled_by_the_cutoff_sweep(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        state_path = tmp_path / 'state.json'
+        persisted = {'LABX': dict(order_id='open-1', coid='hod-rest-LABX-x', level=11.0, trigger=11.01,
+                                  limit=11.0165, stop=10.6, qty=100, booked_qty=0)}
+        state_path.write_text(json.dumps(persisted))
+        hod_live_alpaca.get_open_orders.return_value = [{'id': 'open-1'}]
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path,
+                        live_orders_state_path=str(state_path))
+        e._reconcile_live_orders_on_boot()
+        e._minute_of_day = lambda: e.params.last_entry_minute
+        e._sweep_live_cutoffs()
+        assert e.candidates['LABX'].live_order is None
+        hod_live_alpaca.cancel_order.assert_called_once_with('open-1')
+
+    def test_fill_on_an_adopted_order_registers_the_position(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        state_path = tmp_path / 'state.json'
+        persisted = {'LABX': dict(order_id='open-1', coid='hod-rest-LABX-x', level=11.0, trigger=11.01,
+                                  limit=11.0165, stop=10.6, qty=100, booked_qty=0)}
+        state_path.write_text(json.dumps(persisted))
+        hod_live_alpaca.get_open_orders.return_value = [{'id': 'open-1'}]
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path,
+                        live_orders_state_path=str(state_path))
+        e._reconcile_live_orders_on_boot()
+        hod_live_stream.snapshot_by_client_prefix.return_value = {
+            'hod-rest-LABX-x': {'status': 'filled', 'filled_qty': 100, 'filled_avg_price': 11.02,
+                                'client_order_id': 'hod-rest-LABX-x'}}
+        e._poll_live_fills()
+        assert hod_live_sm.add_watch.called                              # _poll_live_fills DID see the fill
+        assert e.candidates['LABX'].live_filled is True
+        assert e.candidates['LABX'].live_order is None
+
+
+class TestBootSequence:
+    """2026-09-25 17:53 boot: `_reconcile_live_orders_on_boot` ran BEFORE `_roll_session`, which clears
+    `self.candidates` on a fresh process's first tick — wiping the adoption it had just made (HUM/LABX left
+    orphaned, no adopt/reconcile log line at all, no persisted-file evidence of the adoption surviving). Exercises
+    the real `process_tick()` sequence, not the two methods called directly in test order."""
+    def test_process_tick_reconcile_survives_the_session_roll_and_is_swept_by_cancel_all(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path, caplog):
+        state_path = tmp_path / 'state.json'
+        persisted = {'HUM': dict(order_id='open-1', coid='hod-rest-HUM-x', level=11.0, trigger=11.01,
+                                 limit=11.0165, stop=10.6, qty=100, booked_qty=0)}
+        state_path.write_text(json.dumps(persisted))
+        hod_live_alpaca.get_open_orders.return_value = [{'id': 'open-1'}]
+        c = cfg(dry_run=False, entry_mode='resting_stop_limit')
+        c['live_orders_state_path'] = str(state_path)
+        c['live_parity_ledger_path'] = str(tmp_path / 'ledger.csv')
+        c['dry_ledger_path'] = str(tmp_path / 'dry_ledger.csv')
+        e = HodBreakEngine(hod_live_alpaca, hod_live_db, hod_live_sm, cfg=c, order_stream=hod_live_stream)
+        assert e.session_date is None and e.candidates == {}      # fresh process, nothing rolled/reconciled yet
+        with caplog.at_level('INFO'):
+            e.process_tick()                                       # the real cold-boot sequence
+        assert any('reconcile: persisted 1, adopted 1, cancelled 0' in r.message for r in caplog.records)
+        assert e.candidates['HUM'].live_order is not None           # survived _roll_session's candidate rebuild
+        assert 'HUM' in e._live_cap_slots
+        e._cancel_all_resting('fill cap reached')
+        assert e.candidates['HUM'].live_order is None
+        hod_live_alpaca.cancel_order.assert_called_once_with('open-1')
+
 
 # --------------------------------------------------------------------------------------------- item 9: parity ledger rows
 class TestParityLedgerTapeColumns:
