@@ -23,3 +23,12 @@ changes in any rung; rungs ADD to it or apply it elsewhere.
 ## Not allowed
 Running any rung before 1,427 PASSES; changing the E1 rule inside a rung; adopting a filter from 1,436; reading TEST
 for any rung before its VAL bar is met. Programme count after this file: 1,437.
+
+## Engineering rung (owner 9/25, second-order — not a research cell): ranked resting set with a rolling refresh
+When per-order notional grows (≥ $300 risk), buying power cannot carry a resting order on every armed name. Design to
+build before that size: each bar close (or every few seconds from the print watch), rank the armed names by a
+PRE-REGISTERED score (relative volume, distance above the open, spread in R), keep resting orders on the top N (N from
+the buying-power guard), cancel those that fell out, place those that entered — with hysteresis watermarks (enter at
+rank ≤ N, leave only at rank > N + k) so orders are not churned by rank noise, and a rate budget (< 100 API calls/min).
+Its backtest twin (a cell on the ladder) simulates the same top-N constraint bar by bar on the historical book and
+must show the top-N fills keep the edge. Until then, live runs the all-armed rule at ≤ $100 risk.
