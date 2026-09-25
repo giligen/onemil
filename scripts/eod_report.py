@@ -100,10 +100,31 @@ def ramp_section() -> str:
     return "\n".join(out)
 
 
+def journal_error_count(service: str, since: str, timeout: int = 20) -> str:
+    """Count ERROR/Traceback lines in a service's journal since `since` (UTC, journalctl syntax).
+
+    Narrowed (`--since`, `-o cat`) and bounded (20s) so a big journal can never take the report
+    down: a timeout or any other failure becomes a WARNING line, never a crash or a hang that
+    eats the whole report (the hygiene section used to run an unbounded `--since today` scan
+    that timed out at 60s on a loaded node and blanked the rest of the report — 2026-09-25).
+    """
+    try:
+        r = subprocess.run(["journalctl", "-u", service, "--since", since, "-o", "cat",
+                            "--no-pager", "-q"], capture_output=True, text=True, timeout=timeout)
+        return str(sum(1 for ln in r.stdout.splitlines() if "ERROR" in ln or "Traceback" in ln))
+    except subprocess.TimeoutExpired:
+        log.warning("journalctl -u %s timed out after %ss", service, timeout)
+        return "(journal check timed out)"
+    except Exception as e:  # noqa: BLE001
+        log.warning("journalctl -u %s failed: %s", service, e)
+        return "(journal check failed)"
+
+
 def hygiene_section() -> str:
     """Services, journal errors today, pre-boot test result, disk."""
     svc = {s: run(["systemctl", "is-active", s], timeout=20) for s in ("onemil-trader", "onemil-macd-wave")}
-    err = run(["bash", "-c", 'journalctl -u onemil-trader --since today --no-pager 2>/dev/null | grep -c -E "ERROR|Traceback"'], timeout=60)
+    since = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d") + " 12:00:00"
+    err = journal_error_count("onemil-trader", since)
     preboot = last_matching_line(ROOT / "logs/preboot_tests.log", ("passed", "failed", "error"))
     disk = shutil.disk_usage("/")
     flags = [f"{k}={v}" for k, v in svc.items()]

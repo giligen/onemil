@@ -78,6 +78,34 @@ def test_main_falls_back_to_raw_summary_and_writes_file(tmp_path, monkeypatch, c
     assert "falling back" in caplog.text and sent == []
 
 
+def test_hygiene_section_survives_journal_timeout(monkeypatch, caplog):
+    """journalctl timing out on a huge journal must not take the report down (2026-09-25 incident)."""
+    def fake_run(cmd, **kwargs):
+        if cmd and cmd[0] == "journalctl":
+            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 20))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="active", stderr="")
+    monkeypatch.setattr(er.subprocess, "run", fake_run)
+    txt = er.hygiene_section()
+    assert "(journal check timed out)" in txt
+    assert "timed out" in caplog.text
+
+
+def test_assemble_renders_ramp_and_boot_despite_all_subprocess_timeouts(tmp_path, monkeypatch):
+    """Every subprocess (journalctl, systemctl, ramp scripts) timing out still yields RAMP: and NEXT BOOT."""
+    monkeypatch.setattr(er, "ROOT", tmp_path)
+    monkeypatch.setattr(er, "parity_section", lambda day: "PARITY: ok")
+    monkeypatch.setattr(er, "guardrail_section", lambda: "GUARDRAIL: ok")
+    monkeypatch.setattr(er, "research_section", lambda: "RESEARCH: ok")
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 20))
+    monkeypatch.setattr(er.subprocess, "run", fake_run)
+
+    out = er.assemble("2026-09-18", [])
+    assert "RAMP:" in out
+    assert "NEXT BOOT" in out
+
+
 def test_parity_section_reads_bf_json(tmp_path, monkeypatch):
     monkeypatch.setattr(er, "ROOT", tmp_path)
     (tmp_path / "logs/bf_parity").mkdir(parents=True)
