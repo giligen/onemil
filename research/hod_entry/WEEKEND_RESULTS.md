@@ -100,3 +100,27 @@ Population: 7487 symbol-days requested, 0 LOST (0.0 %), 3 unsimulable (< K+2 min
 * Population: base superset (universe.csv, date range, adv20 >= min_adv20, test tickers excluded) = 350,694 symbol-days; 259,238 (74 %) had no prior-session `bars_sip.db` data -> `no_pdh`, excluded (never backfilled from cache.db/daily_bars per spec); of the 91,456 with a known PDH, 2,096 symbol-days clear day-high >= PDH+1c, PDH >= open x 1.05, PDH >= floor+1c.
 * Coverage 100 %, gap 0 pp on both holdouts — the population, not tape availability, is what's small; ex-top-5 % more negative than the raw mean means the loss is NOT winner-capped, it is broad.
 * Verdict: FAIL, both holdouts negative-signed and VAL strongly so (t -3.37) — the PDH level (fixed at the prior day's high) does not reproduce cell 1,438's running-HOD edge; a level fixed a day stale is a worse entry, not an equivalent one.
+
+## 1,443 — stop slippage on the tape
+
+Base = 1,438's fills (`causal_arming_causal.csv`); 1,427 fills are VOID; TEST not read (never run for 1,438). Coverage 4879/7096 tape windows (68.8%; gaps: no_valid_quote 1154, no_print_le_stop 999, no_tape 64, zero fetch_error).
+
+| holdout | kind | n meas/req | mean bps | median | p75 | p90 | >30bps | >100bps | mean slip R |
+|---|---|---|---|---|---|---|---|---|---|
+| TRAIN-H2 | stop | 1831/2565 | 35.9 | 23.7 | 46.4 | 82.6 | 41.7% | 6.3% | 0.209 |
+| TRAIN-H2 | eod | 332/567 | 11.5 | 10.3 | 25.4 | 39.5 | — | — | — |
+| VAL | stop | 2291/3210 | 34.8 | 22.4 | 47.2 | 81.9 | 40.3% | 6.5% | 0.199 |
+| VAL | eod | 425/754 | 9.7 | 6.5 | 22.0 | 46.7 | — | — | — |
+
+| cell | holdout | n stops | slip bps | net R before | net R after |
+|---|---|---|---|---|---|
+| 1438 | TRAIN-H2 | 2565 (1831 meas) | 35.9 | -0.208 | -0.295 |
+| 1438 | VAL | 3210 (2291 meas) | 34.8 | -0.224 | -0.307 |
+| 1439 | TRAIN-H2 | 2702 | 35.9 | -0.129 | -0.263 |
+| 1439 | VAL | 3618 | 34.8 | -0.279 | -0.414 |
+| 1428 | TRAIN-H2 | 209 | 35.9 | -0.067 | -0.185 |
+| 1428 | VAL | 244 | 34.8 | +0.109 | +0.002 |
+| 1441 | TRAIN-H2 | 74 | 35.9 | +0.016 | -0.089 |
+| 1441 | VAL | 139 | 34.8 | -0.168 | -0.286 |
+
+Live 9/25 had no stop exit (VECO hit target, CDNA hit EOD); the only live-tape number is ENTRY slip: VECO +14.3 bps, CDNA -2.0 bps (n=2). VAL mean measured stop slip 34.8 bps < the 40 bps size gate: PASS, no block, but every restated cell's net R got worse under the measured tape than under the flat 30 bps assumption. Full detail: `research/hod_entry/RESULT_1443.md`.

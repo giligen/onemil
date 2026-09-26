@@ -18,11 +18,21 @@ check. Programme count on the HOD line: 1,444 cells. Every number below is net o
 | 1,439 | low-of-day mirror SHORT (non-SSR, shortable) | 3,344 | −0.29 | −4.8 | −0.41 | 43 | FAIL (first run +0.6 R was VOID: population look-ahead, fixed and rerun) |
 | 1,428 | same order on the gapper universe (gap ≥ 5 %, $3–30, PIT) | 444 | +0.11 | 0.5 | +0.01 | 17 | FAIL (bar +0.15, t 2); TRAIN-H2 −0.07 |
 | 1,441 | prior-day-high as the level | 239 | −0.17 | −3.4 | −0.28 | 10 | FAIL (population = day after a mover day, 74 % had no prior-session bars) |
-| 1,443 | stop slippage measured on the tape | see §1a | | | | | report-only |
+| 1,443 | stop slippage measured on the tape | 2,291 stops | mean 35 bps, median 22, p90 82 | | | | report-only: below the 40 bps size gate; every book worse than the flat 30 bps assumption |
 | LIVE 9/25 | real orders 13:38–15:00 ET at $50 risk | 2 fills / 28 armed no-cross | VECO +$5.5 (target), CDNA −$88 (15:55 exit) | | | | entry vs tape: +14.3 bps (16 s after the cross), −2.0 bps (43 s); no stop exit yet |
 
-### 1a. Stop slippage (cell 1,443)
-PENDING — filled in when the cell reports.
+### 1a. Stop slippage (cell 1,443, measured on the tape: NBBO bid 250 ms after the first print at or below the stop)
+
+| holdout | stops measured | mean | median | p90 | 1,438 net R before → with measured slip |
+|---|---|---|---|---|---|
+| TRAIN-H2 | 1,831 / 2,565 | 35.9 bps | — | — | −0.208 → −0.29 |
+| VAL | 2,291 / 3,210 | 34.8 bps | 22.4 bps | 81.9 bps | −0.224 → −0.307 |
+
+Below the 40 bps size gate, so the gate itself does not block size — moot, since no book passed. Measurement coverage
+69 % (1,154 windows without a valid quote, 999 where the tape never printed at or below the bar-low stop). Every cell
+restated with the measured slip is worse than under the flat 30 bps assumption. Live comparator: none yet (no stop
+exit on 9/25; entry slippage vs tape VECO +14.3 bps, CDNA −2.0 bps). Corrected live expectation for the HOD rule =
+−0.22 R (1,438 −0.31 with measured slip, +0.10 for the double-charged half-spread).
 
 **Reading.** Long or short, $20+ or gapper universe, running high or prior-day high, any exit, any stop, any size rule:
 the resting stop-limit at the break earns raw ≈ 0 and loses the spread. The two positive numbers of the week (+0.33 R
@@ -45,8 +55,8 @@ month of dry data resolves ±0.15 R at t 2; nothing smaller is worth a live doll
 | research never in RTH, one process, ≤ 2 workers | scanner cycle overruns 75–78 s every 5 min from 15:00 UTC | operating rule (no code) |
 
 ## 3. Money view (what survives = nothing on this population)
-At the corrected live expectation (−0.11 R net, ≈ 40 fills/wk under the 4/12 caps): $50 risk ≈ −$950/month,
-$100 ≈ −$1.9K, $375 ≈ −$7.1K. There is no path on HOD-break as defined that recovers the $15K; the honest statement is
+At the corrected live expectation (−0.22 R net with measured stop slip, ≈ 40 fills/wk under the 4/12 caps): $50 risk
+≈ −$1.9K/month, $100 ≈ −$3.8K, $375 ≈ −$14K. There is no path on HOD-break as defined that recovers the $15K; the honest statement is
 that the recovery has to come from a different signal. BF: paused (no out-of-sample edge, ~0.8 trades/wk). ORB: closed
 as a money book (tape replay +0.03 R/fill out of sample at zero latency, ≈ $11/trade at $375).
 
@@ -65,7 +75,7 @@ as a money book (tape replay +0.03 R/fill out of sample at zero latency, ≈ $11
 1. **Monday runs dry, and the next research dollar goes to a NEW signal with gross edge first**, not another HOD-break
    variant: 1,444 cells, 0 pass, every executable entry −0.1 to −0.3 R; the exit lab (35 cells), OFI (3), rank (4),
    fill-filter (18) and this weekend (10) all land inside ±0.05 R of each other. Number it rests on: raw R ≈ 0 on 9,911
-   fills with correct levels.
+   fills with correct levels; −0.22 R net with measured stop slip.
 2. **Add `scanner_qualified_at_arm` to the dry ledger (Monday engineering item, ~40 lines)** so the one untested
    hypothesis is measured on point-in-time records; decision rule pre-committed: qualified-cohort ≥ +0.15 R, t ≥ 2 on
    ≥ 100 dry fills → a $50 exploration run. Number it rests on: +0.26 R in the (non-causal) proxy cohort, t 3.8.
