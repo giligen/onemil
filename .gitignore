@@ -188,3 +188,9 @@ research/overnight_high/fetch_run.log
 research/overnight_high/*_nights.csv
 research/overnight_high/symbol_universe.csv
 research/overnight_high/__pycache__/
+research/edgar_desk/submissions/
+research/edgar_desk/*.csv
+research/edgar_desk/*.json
+research/edgar_desk/*.log
+research/edgar_desk/*.out
+research/edgar_desk/__pycache__/
