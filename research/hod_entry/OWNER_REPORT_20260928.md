@@ -109,7 +109,7 @@ Two populations never tested here were frozen and run with independent rebuilds:
 | population | verdict |
 |---|---|
 | Crypto trend (BTC/ETH/SOL weekly, long/flat) | FAIL on all four cells: t ≤ 1.1, fewer green weeks than random scheduling, drawdown 42–54 % vs buy-and-hold BTC 25 %, return carried by the top 5 % of weeks. Closed. |
-| Insider open-market purchases (Form 4 cluster / officer / opportunistic, 2016–2023 point-in-time) | clears TRAIN (+1.3–1.8 % per 20-session trade, t 2.6–3.1) and FAILS VAL 2022–23 (+0.1–0.6 %, t 0.2–1.3; 20-slot book −0.3 to +1.2 %/month). The survivorship check could not run (the panel has no delisted names for these symbols), so even TRAIN is upward-uncertain. 13D pending. |
+| Insider open-market purchases (Form 4 cluster / officer / opportunistic, 2016–2023 point-in-time) | clears TRAIN (+1.3–1.8 % per 20-session trade, t 2.6–3.1) and FAILS VAL 2022–23 (+0.1–0.6 %, t 0.2–1.3; 20-slot book −0.3 to +1.2 %/month). The survivorship check could not run (the panel has no delisted names for these symbols), so even TRAIN is upward-uncertain. Initial 13D filings: FAIL (TRAIN +0.7 % t 0.9; VAL −1.8 % or +0.1 % depending on an eligibility reading, both fail). Independent rebuild confirms the VAL magnitudes on I1–I3 within 0.07 pp. Closed. |
 
 **Answer:** none of the populations reachable with this account's data and execution produced a book that clears a
 $1–2K/month bar on an untouched window. The pattern across 1,477 cells is consistent: gross effects exist (movers, insider

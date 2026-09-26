@@ -162,3 +162,12 @@ book at every filter and every exit tried on this population — no further cell
 | C3 4-week momentum | +0.47 | 0.48 | 27 % / 44 % | 42 % | −0.59 | FAIL |
 | C4 C1 ∧ C3 | +0.05 | 0.05 | 22 % / 42 % | 46 % | −0.83 | FAIL |
 Buy-and-hold BTC over VAL: +1.43 %/wk, DD 25 %. Rebuild 100 % on C1/C3/C4 (C2 76 %, spec ambiguity, same verdict).
+
+## Information events (cells 1,474–1,477, `research/insider_events/`) — FAIL on VAL, closed
+| cell | TRAIN mean % / t | VAL mean % / t (builder · rebuild) | book VAL %/mo | verdict |
+|---|---|---|---|---|
+| I1 cluster | +1.83 / 3.1 | +0.12 / 0.2 · +0.18 | −0.3 | FAIL |
+| I2 officer | +1.31 / 2.6 | +0.25 / 0.6 · +0.23 | +0.4 | FAIL |
+| I3 opportunistic | +1.60 / 3.1 | +0.61 / 1.3 · +0.60 | +1.2 | FAIL |
+| I4 13D | +0.74 / 0.9 | −1.81 / −1.0 · +0.06 | −1.4 | FAIL |
+Survivorship arm VOID (panel has no delisted prices for these names); rebuild Jaccard 0.85–0.94 (spec under-specified), returns 100 % on common trades.
