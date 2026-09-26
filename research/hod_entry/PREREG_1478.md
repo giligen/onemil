@@ -78,3 +78,18 @@ FAIL on all → the "predict the big day" question is answered with a measured A
 ## Not allowed
 Any feature using data after bar j (the labels are the ONLY look-ahead, and only as training targets); tuning outside
 the fixed grid; choosing the threshold on VAL; reading TEST for more than one cell; dropping NaN rows selectively.
+
+## Amendment 2026-09-26 (before any model is fit; the first execution attempt built only feature sets B and C)
+1. **Single-source bar store (closes a leak the adequacy critic named).** In cell 1,438 each fill's bars came from
+   whichever store held more bars, and store identity IS the look-ahead cohort (cache.db-complete ⇒ builder-selected ⇒ big
+   day). Every bar-derived feature is therefore recomputed from ONE fresh store, `research/hod_entry/bars_fills_1478.db`:
+   Alpaca SIP 1-minute bars (04:00–20:00 ET) fetched for all 9,911 fill symbol-days with a completeness gate (LOST count,
+   ERROR if > 2 % lost); no cache.db or bars_sip.db bar enters any feature. Items 1's bar-derived columns (rv at j, range
+   to j, bar density, $ volume to j, PM $ volume, arm index) are recomputed from it; the tick features (C) and the crowd
+   features (B, a property of the day) stand. A METADATA-ONLY decoy model (features: store served in 1,438, its RTH bar
+   count, the tick-window coverage flags) is fit first: if its VAL AUC > 0.55 the pipeline leaks the label and the cell is
+   VOID; the real model excludes those columns and its kept set's cache-only share must be within 5 pp of the base 19.5 %.
+2. **1,480 short R floor:** short stop = max(break-bar high + $0.01, entry × 1.01) (a doji break bar made R ≈ 0).
+3. **Numbers seen before this amendment (disclosed):** an independent rebuilder ran its own sample of 1,479 (ΔR −0.05 /
+   −0.02 R, under its reading of the add-leg cost) and of 1,480 (500-fetch sample, median short −1.79 R, mean undefined
+   by the R ≈ 0 defect). No model number exists. The bars and thresholds above are unchanged.
