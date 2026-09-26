@@ -1,6 +1,6 @@
 # PREREG — cells 1,445–1,456: reviving the resting-order fill book by a CAUSAL restatement of its positive cohort
 
-FROZEN 2026-09-26 02:20 UTC, before any cell number is computed (the two marginal splits disclosed below are the only
+FROZEN 2026-09-26 04:38 UTC, before any cell number is computed (the two marginal splits disclosed below are the only
 numbers seen). Owner's instruction 9/26: "go back to the resting order cell that you thought was good and find the way to
 revive it." Programme count on the HOD line: 1,444 → 1,456.
 
