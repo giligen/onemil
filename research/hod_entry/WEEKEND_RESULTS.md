@@ -153,3 +153,12 @@ book at every filter and every exit tried on this population — no further cell
 * **Index intraday momentum (first half-hour → last half-hour, SPY/QQQ) — NOT funded.** `research/lit_review_2026/etf_intraday_results.csv`: the rule is −2.3 bps/day 2016–23 (t −3.1) and −2.0 bps/day 2024–26 (t −2.4); vol-gated and noise-band variants ≈ 0. The published effect has reversed.
 * **Multi-day price anomalies — closed by the 26-cell programme** (`research/multiday/REPORT_FINAL.md`): PEAD, announcement drift, momentum, reversal, 52-week high, short interest, issuance, dividend month, overnight cross-section; MDE 7–121× the published effect at this book; the report advises against re-running at any size. Catalyst-day continuation (news + top-decile $ volume + green day, 3-day hold): REFUTED at VAL (`research/multiday_catalyst/REPORT.md`). Overnight index ETFs: FAIL (`research/overnight/REPORT.md`).
 * **What has never been tested here: information events** — Form 4 insider open-market purchases (published alpha ≈ 0.8–1.6 %/month, persistent post-publication because it is information, not behaviour) and Schedule 13D activist filings (post-filing drift). Auction fills, weeks-long holds, point-in-time by SEC acceptance timestamp, and the multiday programme's adjusted panel, PIT universe and cost model are reusable. Scoped next as its own PREREG. Crypto trend (Alpaca, no survivorship, weekly rebalance) is the second untested population.
+
+## Crypto trend (cells 1,470–1,473, `research/crypto_trend/`) — FAIL, closed
+| cell | VAL mean %/wk | t (NW) | green share / null | max DD | ex-top-5 % wks | verdict |
+|---|---|---|---|---|---|---|
+| C1 100-day MA | +3.98 | 1.06 | 35 % / 48 % | 54 % | −0.59 | FAIL |
+| C2 Donchian 20/10 | +0.32 | 0.36 | 23 % / 38 % | 43 % | −0.69 | FAIL |
+| C3 4-week momentum | +0.47 | 0.48 | 27 % / 44 % | 42 % | −0.59 | FAIL |
+| C4 C1 ∧ C3 | +0.05 | 0.05 | 22 % / 42 % | 46 % | −0.83 | FAIL |
+Buy-and-hold BTC over VAL: +1.43 %/wk, DD 25 %. Rebuild 100 % on C1/C3/C4 (C2 76 %, spec ambiguity, same verdict).
