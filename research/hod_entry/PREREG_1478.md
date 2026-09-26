@@ -93,3 +93,13 @@ the fixed grid; choosing the threshold on VAL; reading TEST for more than one ce
 3. **Numbers seen before this amendment (disclosed):** an independent rebuilder ran its own sample of 1,479 (ΔR −0.05 /
    −0.02 R, under its reading of the add-leg cost) and of 1,480 (500-fetch sample, median short −1.79 R, mean undefined
    by the R ≈ 0 defect). No model number exists. The bars and thresholds above are unchanged.
+
+## Amendment 2 (2026-09-26 13:40 UTC, after the model log's AUC lines and before any kept-set number was read)
+Seen so far (`run_1478.log`): decoy VAL AUC 0.62 (L1) / 0.79 (L2) → the metadata columns are void as specified; real
+models L1 VAL AUC 0.88, L2 0.94; placebo 0.51; cell 1,479 ΔR +0.02 / +0.04, t 0.7 / 1.8 (FAIL). Diagnosis before reading
+the kept means: L1 is PARTLY REALISED at bar j (a name 8 % off its low needs 2 % more; `range_to_j` is a feature) and two
+of L2's three terms (price ≥ $10, prior-day volume ≥ 1M) are themselves features, so both AUCs mostly measure the label's
+own construction, and the check already showed fills with a large realised range are bad trades. Corrective label, same
+features, same grid/seed/threshold rule, same pass bar, run as cell 1,478-L3: **L3 = the break EXTENDS: the day's high
+after bar j ≥ level × 1.05** (the future part of the big day; nothing at bar j realises it). L1/L2 are reported as
+specified; only L3's kept set can pass the AUC gate meaningfully. TEST unchanged.
