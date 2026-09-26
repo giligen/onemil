@@ -120,5 +120,32 @@ def test_halt_proxy_detects_gap():
     assert feat_ok['halt_proxy'] == 0
 
 
+def test_amendment3_fractional_fill_min_arm_bar():
+    """Amendment 3 (PREREG_1478.md): fill_min is fractional (minute + seconds). Bars at RTH minutes
+    603, 604, 605; fill_min = 605.31 (fill lands inside the m=605 bar, 31s after its open).
+    Old rule (arm_bar_closed=False, default): m < 605.31 keeps bars 603,604,605 -> arm bar j=605,
+    i.e. the FILL bar itself (the look-ahead this amendment fixes).
+    Corrected rule (arm_bar_closed=True): m <= floor(605.31) - 1 = 604 keeps bars 603,604 ->
+    arm bar j=604, the last bar fully closed before the fill minute.
+    """
+    rows = [(603, 10.0, 10.05, 9.95, 10.00, 500.0),
+            (604, 10.0, 10.10, 9.95, 10.02, 600.0),
+            (605, 10.0, 10.20, 9.95, 10.15, 700.0)]
+    bars = make_bars(rows)
+
+    feat_old = bar_features_for_fill(bars, fill_min=605.31, level=10.0, arm_bar_closed=False)
+    assert feat_old['arm_m'] == 605
+    assert feat_old['n_bars_j'] == 3
+
+    feat_new = bar_features_for_fill(bars, fill_min=605.31, level=10.0, arm_bar_closed=True)
+    assert feat_new['arm_m'] == 604
+    assert feat_new['n_bars_j'] == 2
+
+    # default (no arg) must match the OLD behaviour -- nothing else that imports this module changes
+    feat_default = bar_features_for_fill(bars, fill_min=605.31, level=10.0)
+    assert feat_default['arm_m'] == feat_old['arm_m']
+    assert feat_default['n_bars_j'] == feat_old['n_bars_j']
+
+
 if __name__ == '__main__':
     sys.exit(pytest.main([__file__, '-v']))

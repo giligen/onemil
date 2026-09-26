@@ -119,3 +119,26 @@ only new information source); (2) whether to fund the one thing that would chang
 delisting-inclusive daily file (≈ $150) — before any further population; (3) whether the system's next job is to
 measure and support YOUR manual trading on this account (your fills are in the order history; I have never scored them),
 since the automated books cannot show an edge and you believe money is being made.
+
+## Addendum 3 — Saturday 9/26 evening: the population is closed, on the record
+
+Cells 1,478–1,547 today, each with an independent rebuild and refuters. Every number is net of the corrected cost
+standard (half-spread once, stop-limit exit slip measured 2.9/3.2 bps + 12 % no-fill tail, EOD at the bid).
+| cell | idea | VAL result |
+|---|---|---|
+| 1,478 / L3 v2 | predict the big day / the ≥ 5 % extension at the arm bar | extension AUC 0.72 survives the fill-bar-leak fix (0.715) but its top tercile is −0.10 R; worked in 2025H2 (+0.32 R) not 2026H1 — regime |
+| 1,481 / 1,482 | buy the retest one tick (0.2 %) under the level | −0.09 / −0.07 R; +0.2 R better than the break on the same fills (the immediacy cost), still a loser; real-SIP rows −0.14 R |
+| 1,486 | retest ∧ extension model | −0.09 R |
+| 1,487 / 1,488 | buy after 15 min without a dip / pyramid | −0.05 R (real-SIP −0.22); pyramid −0.57 R vs holding |
+| 1,489 / 1,490 | classifier at the pullback instant (75 features from the tape) | AUC 0.515 = chance; short side void |
+| 1,491 / 1,492 | shallow stops 0.25–0.75 % under the level | all worse than the consolidation low |
+| 1,493–1,547 | the whole exit surface from the retest (6 stops × 9 exits + the mirror of the short) | 0 of 55 positive; best −0.08 %, real-SIP −0.15 %; zero-cost gross +0.03 % |
+| 1,483–1,485 | news catalyst class / cash runway | void (own-name news exists for 17 % of fills); runway flat |
+Also: insider events (Form 4 / 13D) FAIL on VAL; crypto trend FAIL; overnight 52-week-high leg positive on TRAIN/VAL,
+negative on TEST. Deduction on record: the high-of-day break of an in-play small cap has zero gross expectancy at every
+entry, exit and filter measured (1,547 cells), the base loss is the 0.2–0.3 % immediacy cost, the path after the break
+is noise around the level, and the in-play name does not drift after its break. Two of my own claims were withdrawn
+the same evening by the refuters (the "bounce" and the "adverse timing"), which is what the loop is for.
+Where positive expectancy exists today: ORB at the live config (+0.105 R/fill, t 3.3, n 473) once its execution is
+repaired (prewarm fix, boot rehearsal, dry week); the variance-risk-premium sleeve (your options decision); the EDGAR
+event desk on its own population (next PREREG). Monday: HOD stays dry with counterfactual logging as a free instrument.

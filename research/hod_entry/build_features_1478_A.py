@@ -18,6 +18,7 @@ Output: research/hod_entry/features_1478_A.csv, research/hod_entry/FEATURES_A.md
 """
 from __future__ import annotations
 
+import argparse
 import logging
 import os
 import sqlite3
@@ -53,6 +54,15 @@ RTH_CLOSE_M = 959           # 15:59 ET
 PM_OPEN_M = 240             # 04:00 ET
 CONSOL_K = HodBreakParams().consol_bars   # 5 -- the live rule's own K, reused for item 2's "last K bars"
 LEVEL_TOUCH_PCT = 0.002     # 0.2%, PREREG item 2's touch band
+
+# Amendment 3 (2026-09-26, PREREG_1478.md): the original arm-bar rule used `rth.m < fill_min` with
+# a FRACTIONAL fill_min (minute + seconds) -- since every bar's m is an integer minute, m < fill_min
+# includes the fill bar itself in 98.4% of rows (a look-ahead: bar j was the FILL bar, not the bar
+# before it). ARM_BAR_CLOSED=True selects bar j = the last RTH bar with m <= floor(fill_min) - 1,
+# i.e. the last bar FULLY CLOSED before the fill minute. Default False preserves the original
+# (leaky) behaviour so nothing else that imports this module changes; only build_features_1478_A_v2
+# (main() with --arm-bar-closed) flips it.
+ARM_BAR_CLOSED = False
 
 
 # ================================================================================================
@@ -128,13 +138,26 @@ def batched_bar_counts(db_path, table, symbol_col, day_col, symbol_days, rth_onl
 # Bar-derived features (Feature Set A items 1 + 2's bar parts) -- bars_fills_1478.db ONLY
 # ================================================================================================
 
-def bar_features_for_fill(bars, fill_min, level):
+def bar_features_for_fill(bars, fill_min, level, arm_bar_closed=None):
     """bars: (m,o,h,l,c,v) for ONE (symbol,day) across the whole 04:00-20:00 ET fetch window.
-    fill_min: ET minute of the fill bar (arm bar j = the last RTH bar with m < fill_min, same
-    convention as cell_1445.arm_bar_features). Uses only bars 0..j -- never bar j+1 or later.
-    Returns {} (all-NaN row, counted by the caller) if no RTH bar exists before fill_min."""
+    fill_min: ET minute of the fill bar. arm_bar_closed (defaults to the module-level
+    ARM_BAR_CLOSED) selects the rule:
+      False (original, same convention as cell_1445.arm_bar_features): arm bar j = the last RTH
+        bar with m < fill_min. Since fill_min is FRACTIONAL (minute + seconds) and every bar's m
+        is an integer minute, this includes the fill bar itself in ~98% of rows -- a look-ahead
+        (Amendment 3, PREREG_1478.md).
+      True (corrected): arm bar j = the last RTH bar with m <= floor(fill_min) - 1, i.e. the last
+        bar FULLY CLOSED before the fill minute.
+    Uses only bars 0..j -- never bar j+1 or later. Returns {} (all-NaN row, counted by the caller)
+    if no RTH bar exists before fill_min under the selected rule."""
+    if arm_bar_closed is None:
+        arm_bar_closed = ARM_BAR_CLOSED
     rth = bars[(bars.m >= RTH_OPEN_M) & (bars.m <= RTH_CLOSE_M)].reset_index(drop=True)
-    b = rth[rth.m < fill_min].reset_index(drop=True)
+    if arm_bar_closed:
+        cutoff_m = int(np.floor(fill_min)) - 1
+        b = rth[rth.m <= cutoff_m].reset_index(drop=True)
+    else:
+        b = rth[rth.m < fill_min].reset_index(drop=True)
     if not len(b):
         return {}
     j = len(b) - 1
@@ -271,7 +294,12 @@ def attach_volume_panel(df, instr_by_sd):
 # Main
 # ================================================================================================
 
-def main():
+def main(arm_bar_closed=None, out_csv=None):
+    if arm_bar_closed is None:
+        arm_bar_closed = ARM_BAR_CLOSED
+    if out_csv is None:
+        out_csv = OUT_CSV
+    log(f'main: arm_bar_closed={arm_bar_closed}, out_csv={out_csv}')
     t_start = time.time()
     fills = load_fills()
     n = len(fills)
@@ -282,7 +310,8 @@ def main():
     n_missing = 0
     for i, r in enumerate(fills.itertuples()):
         bars = bar_groups.get((r.symbol, r.day))
-        feat = bar_features_for_fill(bars, r.fill_min, r.level) if bars is not None else {}
+        feat = bar_features_for_fill(bars, r.fill_min, r.level, arm_bar_closed=arm_bar_closed) \
+            if bars is not None else {}
         if not feat:
             n_missing += 1
         recs.append(feat)
@@ -383,8 +412,8 @@ def main():
                     ['status', 'fill', 'stop', 'level', 'exit_m', 'exit_price', 'why', 'R', 'raw_R',
                      'cost_R', 'net_R', 'exit_half_src', 'wk', 'half', 'variant', 'n_cross', 'b0_net_R']]
     final_cols = keep_meta + feature_cols
-    out[final_cols].to_csv(OUT_CSV, index=False)
-    log(f'WROTE {OUT_CSV}: {len(out)} rows, {len(feature_cols)} feature columns')
+    out[final_cols].to_csv(out_csv, index=False)
+    log(f'WROTE {out_csv}: {len(out)} rows, {len(feature_cols)} feature columns')
 
     cov = {c: float(out[c].notna().mean()) for c in feature_cols}
     log('coverage per feature:')
@@ -394,5 +423,15 @@ def main():
     return cov
 
 
+def _parse_args():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--arm-bar-closed', action='store_true', default=None,
+                    help='Amendment 3 fix: arm bar j = last RTH bar fully closed before fill_min '
+                         '(m <= floor(fill_min) - 1). Default: old leaky rule (m < fill_min).')
+    p.add_argument('--out-csv', default=None, help=f'Output CSV path (default {OUT_CSV}).')
+    return p.parse_args()
+
+
 if __name__ == '__main__':
-    main()
+    args = _parse_args()
+    main(arm_bar_closed=args.arm_bar_closed, out_csv=args.out_csv)
