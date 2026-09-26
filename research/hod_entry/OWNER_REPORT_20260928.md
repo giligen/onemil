@@ -98,3 +98,24 @@ the 0.25 R cost but not the book. What survives and ships to the dry run on Mond
 the stop-limit exit (worth ≈ 20 bps per stop on ANY book), the R-floor and stop-limit counterfactual columns, and the
 scanner-qualified column. Money view: unchanged. Recommendations: #1 stands (new signal, gross edge first); #2 becomes
 the stop-limit exit rehearsal (it applies to every book you run); #3 the free forward columns.
+
+## Addendum 2 (2026-09-26, your instruction: "Find a different population or something else. Make it work")
+Screened on existing evidence and NOT funded (details `research/hod_entry/WEEKEND_RESULTS.md`, 9/26 screen): ORB restated
+with the stop-limit exit and zero-latency entries (≈ +0.04 R/fill, ≈ $300/month); index intraday momentum (the effect has
+reversed, −2 bps/day both windows); the 26-cell multi-day programme's anomalies; catalyst days; overnight ETFs.
+
+Two populations never tested here were frozen and run with independent rebuilds:
+
+| population | verdict |
+|---|---|
+| Crypto trend (BTC/ETH/SOL weekly, long/flat) | FAIL on all four cells: t ≤ 1.1, fewer green weeks than random scheduling, drawdown 42–54 % vs buy-and-hold BTC 25 %, return carried by the top 5 % of weeks. Closed. |
+| Insider open-market purchases (Form 4 cluster / officer / opportunistic, 2016–2023 point-in-time) | clears TRAIN (+1.3–1.8 % per 20-session trade, t 2.6–3.1) and FAILS VAL 2022–23 (+0.1–0.6 %, t 0.2–1.3; 20-slot book −0.3 to +1.2 %/month). The survivorship check could not run (the panel has no delisted names for these symbols), so even TRAIN is upward-uncertain. 13D pending. |
+
+**Answer:** none of the populations reachable with this account's data and execution produced a book that clears a
+$1–2K/month bar on an untouched window. The pattern across 1,477 cells is consistent: gross effects exist (movers, insider
+buys), and at $65K with retail execution they are worth $0–500/month before their own variance. What I recommend you
+decide (the three decisions are yours): (1) keep the free forward instruments running (they cost nothing and are the
+only new information source); (2) whether to fund the one thing that would change the evidence base — a split-adjusted,
+delisting-inclusive daily file (≈ $150) — before any further population; (3) whether the system's next job is to
+measure and support YOUR manual trading on this account (your fills are in the order history; I have never scored them),
+since the automated books cannot show an edge and you believe money is being made.
