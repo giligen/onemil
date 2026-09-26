@@ -37,3 +37,31 @@ mode first (zero orders), so 10 sessions of live fills/no-fills can be compared 
 * Write `docs/hod_resting_entry_REPORT.md`: files, config keys, the grep lines for the dry sessions, the rehearsal plan
   (weekend boot with `entry_mode: resting_stop_limit`, `dry_run: true`), and the daily comparison the main session
   runs (live fill rate and fill mean vs TEST's 27.8 % / +0.33 R). Return ≤ 150 words.
+
+## Forward-instrument counterfactuals (2026-09-26, `hod_break.log_counterfactuals`, default OFF)
+Research closed the resting-order HOD-break book as money (2026-09-26, 23 cells 1,445-1,467); the dry run stays open
+purely to keep collecting point-in-time evidence. Three columns, zero effect on any gate/size/order:
+1. `scanner_qualified_at_arm` (0/1/blank) — was the symbol already in the live scanner's `_qualified_symbols` when
+   this book armed it. Wired via an `is_qualified: Callable[[str], bool]` constructor kwarg on `HodBreakEngine`
+   (`trading/hod_break_engine.py`); `main.py` passes `lambda s: trading_engine is not None and s in
+   trading_engine._qualified_symbols` — a late-binding closure since `trading_engine` may not exist yet when the HOD
+   engine is constructed. `is_qualified=None` while the flag is on logs one WARNING at boot and leaves the column blank.
+2. `cf_floor_stop_px` — `min(consolidation-low stop, fill × 0.975)`, computed at every fill (dry AND live).
+3. `cf_floor_stop_hit` (0/1) and `cf_stoplimit_exit_px` — from a `CFWatch` (module `trading/hod_break_engine.py`)
+   that rides the SAME print-watch subscription used to arm/resolve the resting order, kept open past a DRY fill
+   until that fill's own recorded exit (its ACTUAL target or ACTUAL stop) is reached. `cf_floor_stop_hit` = any
+   print at or below `cf_floor_stop_px` before that exit. The stop-limit counterfactual arms
+   `actual_stop × (1 − 0.0020)` the instant a print first touches the actual stop; `cf_stoplimit_exit_px` is the
+   first SUBSEQUENT print at or above that limit within 60s, else the last print seen at the 60s deadline (the
+   no-fill tail, swept once per bar close — `_sweep_cf_watch_timeouts`, so resolution is bounded to roughly ±1 min
+   of the true deadline). LIVE fills only get column 2 — a live fill already has a real broker bracket managing its
+   exit, so no print-watch is opened for it.
+
+Items 1-2 are appended to BOTH `hod_dry_entry_ledger.csv` and `hod_live_parity_ledger.csv` (blank when the flag is
+off). Item 3 goes to a separate file, `hod_break.cf_ledger_path` (default `logs/hod_dry_counterfactuals.csv`):
+date, symbol, fill_ts, fill_px, actual_stop, actual_target, cf_floor_stop_px, cf_floor_stop_hit, cf_stoplimit_px,
+cf_stoplimit_exit_px, exit_px, exit_reason. Backward compatibility: an existing ledger file whose header predates
+the two shared columns is NEVER rewritten — its rows keep the OLD shape and one WARNING fires per path (not per
+row); only a brand-new file gets the new header. Tests: `tests/test_hod_counterfactuals.py` (flag off, is_qualified
+wiring, `cf_floor_stop_px` formula, header backward-compatibility, and an integration test driving a dry fill
+through synthetic prints to both a target exit and a stop/stop-limit exit).

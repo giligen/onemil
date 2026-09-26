@@ -833,6 +833,10 @@ class Config:
             # session: this whitelist silently dropped the key, so the engine stayed in next_open.
             "entry_mode": str(cfg.get("entry_mode", "next_open")),
             "dry_ledger_path": str(cfg.get("dry_ledger_path", "logs/hod_dry_entry_ledger.csv")),
+            # 2026-09-26: forward-instrument counterfactuals for the dry run (docs/hod_resting_entry_spec_20260925.md
+            # 'forward instruments'). Default OFF — pure research logging, zero effect on gates/sizing/orders.
+            "log_counterfactuals": bool(cfg.get("log_counterfactuals", False)),
+            "cf_ledger_path": str(cfg.get("cf_ledger_path", "logs/hod_dry_counterfactuals.csv")),
             "risk_usd": float(cfg.get("risk_usd", 100.0)),
             "daily_kill_usd": float(cfg.get("daily_kill_usd", -600.0)),
             "weekly_kill_usd": float(cfg.get("weekly_kill_usd", -1500.0)),

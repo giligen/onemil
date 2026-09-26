@@ -720,10 +720,15 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
     if trade and enable_hod:
         try:
             from trading.hod_break_engine import HodBreakEngine
+            # Late-binding closure (not a direct `trading_engine._qualified_symbols` reference): trading_engine may
+            # still be None here depending on which branches ran above, and Python looks up a free variable in an
+            # enclosing scope at CALL time, not at lambda-creation time, so this reads whatever `trading_engine`
+            # is bound to when the HOD engine actually evaluates it (item 1, hod_break.log_counterfactuals).
             hod_engine = HodBreakEngine(
                 alpaca_client=alpaca, db=db, stop_monitor=stop_monitor,
                 notifier=notifier, cfg=config.hod_break_cfg,
-                order_stream=order_stream)
+                order_stream=order_stream,
+                is_qualified=lambda s: trading_engine is not None and s in trading_engine._qualified_symbols)
             if stop_monitor is not None and not stop_monitor.polling_mode:
                 hod_engine.register_on_stop_monitor()
             hod_engine.sync_positions()

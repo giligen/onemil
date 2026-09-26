@@ -15,6 +15,17 @@ under the cap = no chase) → size. dry_run runs the whole pipeline and logs `[H
 
 Every fallback logs WARNING/ERROR. Restart-safe: `sync_positions()` rebuilds open/pending
 state from the trades DB (leg ids live in pattern_data).
+
+Forward-instrument counterfactuals (`hod_break.log_counterfactuals`, default OFF, docs/hod_resting_entry_spec_20260925.md
+'forward instruments'): three point-in-time columns collected on the dry run, never affecting a gate, a size or an
+order. (1) `scanner_qualified_at_arm` — was the symbol already in the live scanner's qualified set when this book
+armed it (wired via the `is_qualified` constructor callable); (2) `cf_floor_stop_px` — min(consolidation-low stop,
+fill x 0.975), computed at every fill (dry and live); (3) `cf_floor_stop_hit` / `cf_stoplimit_exit_px` — from a
+`CFWatch` that rides the same print-watch used to arm/resolve a resting order, kept open past a DRY fill until this
+fill's own recorded exit (its actual target or actual stop) is known. Written to a separate file,
+`hod_break.cf_ledger_path` (default `logs/hod_dry_counterfactuals.csv`); items 1-2 are also appended to the dry
+entry ledger and the live parity ledger. All three columns are blank when the flag is off. An existing ledger file
+whose header predates these columns is NEVER rewritten — rows keep the old shape and one WARNING fires per path.
 """
 from __future__ import annotations
 
@@ -27,7 +38,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -43,6 +54,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_DRY_LEDGER_PATH = 'logs/hod_dry_entry_ledger.csv'
 DEFAULT_LIVE_PARITY_LEDGER_PATH = 'logs/hod_live_parity_ledger.csv'
 DEFAULT_LIVE_ORDERS_STATE_PATH = 'logs/hod_live_resting_orders_state.json'
+DEFAULT_CF_LEDGER_PATH = 'logs/hod_dry_counterfactuals.csv'   # forward-instrument counterfactuals (log_counterfactuals), docs/hod_resting_entry_spec_20260925.md
+# The two columns appended to BOTH the dry entry ledger and the live parity ledger when log_counterfactuals is
+# wired (blank when it isn't): scanner_qualified_at_arm (item 1) and cf_floor_stop_px (item 2). Kept as a module
+# constant so both ledger writers and the backward-compatibility check share ONE definition.
+CF_ROW_COLUMNS = ('scanner_qualified_at_arm', 'cf_floor_stop_px')
 STRATEGY_NAME = 'hod_break'
 ET = ZoneInfo('America/New_York')
 _TERMINAL = ('canceled', 'cancelled', 'expired', 'rejected', 'done_for_day', 'suspended')
@@ -122,6 +138,8 @@ class Candidate:
     live_filled: bool = False                                # broker CONFIRMED fill (distinct from resting_filled, the tape's prediction) — stops further arming for the day
     tape_cross: Optional[dict] = None                         # the CURRENT arm's print-watch cross resolution: {ts, print, ask, nbbo_ok} — set only by _on_trade_print (a real
                                                                # tape print), None for a bar-level fallback cross or no cross yet; read by _append_live_parity_row (item 9)
+    scanner_qualified_at_arm: Optional[bool] = None            # counterfactual instrument (log_counterfactuals): live scanner's _qualified_symbols membership at arm time
+    cf_floor_stop_px: Optional[float] = None                   # counterfactual instrument: min(consolidation stop, fill x 0.975), set at fill (dry and live)
 
     def set_bar(self, minute: int, o: float, h: float, l: float, c: float, v: float) -> bool:
         i = minute - OPEN_MINUTE
@@ -187,11 +205,42 @@ class Position:
         return max(0, self.shares - self.closed_qty)
 
 
+@dataclass
+class CFWatch:
+    """Counterfactual instrument for one DRY fill (`log_counterfactuals` only, module docstring 'forward
+    instruments'). Rides the same print-watch used to arm/resolve a resting order, kept subscribed past the fill —
+    never places or simulates any order. Resolves, and is written + dropped, once this fill's own recorded exit
+    (its ACTUAL target or ACTUAL stop, the same levels the dry ledger already writes) is known, and — only when
+    that exit was the actual stop — once the stop-limit counterfactual leg has also resolved (filled or timed out
+    60s after the actual stop was first touched), OR at session flat if neither the target nor the actual stop
+    was ever touched (`exit_reason='eod'`) — EVERY DRY fill gets exactly one row here regardless of how its day
+    ends, so this file joins to the dry ledger without needing the (possibly old-shape) ledger files at all."""
+    symbol: str
+    date: str
+    fill_ts: str
+    fill_px: float
+    arm_level: float
+    arm_trigger: float
+    actual_stop: float
+    actual_target: float
+    floor_stop_px: float
+    scanner_qualified_at_arm: Optional[bool] = None       # item 1, carried onto the row so this file is self-sufficient
+    floor_hit: bool = False
+    stoplimit_px: Optional[float] = None                 # armed the instant a print first touches actual_stop: actual_stop * (1 - 0.0020)
+    stoplimit_deadline: Optional[datetime] = None         # 60s after stoplimit_px armed; past this, the no-fill tail resolves it
+    stoplimit_exit_px: Optional[float] = None
+    last_print_px: Optional[float] = None
+    exit_px: Optional[float] = None                       # this fill's own recorded exit (target, actual stop, or EOD/flat), first print to reach either
+    exit_reason: Optional[str] = None                     # 'target' | 'stop' | 'eod'
+    exit_ts: Optional[str] = None
+
+
 class HodBreakEngine:
     """See module docstring. Construct with `Config().hod_break_cfg`."""
     STRATEGY_NAME = STRATEGY_NAME
 
-    def __init__(self, alpaca_client, db, stop_monitor=None, notifier=None, cfg: Optional[dict] = None, order_stream=None):
+    def __init__(self, alpaca_client, db, stop_monitor=None, notifier=None, cfg: Optional[dict] = None, order_stream=None,
+                 is_qualified: Optional[Callable[[str], bool]] = None):
         cfg = cfg or {}
         self.alpaca = alpaca_client; self.db = db; self.stop_monitor = stop_monitor; self.notifier = notifier; self.order_stream = order_stream
         self.enabled = bool(cfg.get('enabled', False)); self.dry_run = bool(cfg.get('dry_run', True))
@@ -232,6 +281,15 @@ class HodBreakEngine:
         logger.info(f"{self.tag} entry_mode={self.entry_mode} (resting stop-limit: trigger level+0.01, "
                     f"limit {float(getattr(self.params, 'entry_limit_pct', 0.0015)):.4%})")
         self.dry_ledger_path = str(cfg.get('dry_ledger_path', DEFAULT_DRY_LEDGER_PATH))
+        # Forward-instrument counterfactuals (module docstring): default OFF, pure research logging.
+        self.log_counterfactuals = bool(cfg.get('log_counterfactuals', False))
+        self.cf_ledger_path = str(cfg.get('cf_ledger_path', DEFAULT_CF_LEDGER_PATH))
+        self.is_qualified = is_qualified                # Callable[[str], bool] or None — item 1, wired by main.py (late-binding closure)
+        self._cf_watches: Dict[str, CFWatch] = {}        # symbol -> open CFWatch (log_counterfactuals only)
+        self._cf_header_warned: set = set()               # ledger paths already warned about a pre-existing (old-shape) header
+        if self.log_counterfactuals and self.is_qualified is None:
+            logger.warning(f"{self.tag} log_counterfactuals=True but no is_qualified callable was wired — "
+                            f"scanner_qualified_at_arm will be blank for every row")
         # LIVE resting-order state (docs/hod_live_resting_orders_spec_20260925.md): _live_cap_slots counts a
         # RESTING order as a slot (never just a fill) so a burst of fills can never exceed max_per_day/max_concurrent.
         # live_orders_state_path persists {symbol: live_order dict} so a crash/restart reconciles by TRACKED ORDER
@@ -744,6 +802,10 @@ class HodBreakEngine:
         if not self.enabled or self.book != 'hod_break' or self.entry_mode != 'resting_stop_limit':
             return
         with self._lock:
+            if self.log_counterfactuals and symbol in self._cf_watches:
+                # Runs regardless of resting_filled/resting_arm below — a CFWatch is only opened AFTER a dry fill
+                # and needs every subsequent print, exactly the ones the early-return below would otherwise skip.
+                self._update_cf_watch(self._cf_watches[symbol], price, self._et_now())
             cand = self.candidates.get(symbol)
             if cand is None or cand.resting_filled or cand.live_filled or cand.resting_arm is None:
                 return
@@ -767,10 +829,12 @@ class HodBreakEngine:
                 cand.resting_filled = True
                 cand.resting_arm = None
                 self._notify(f"{self.dry_tag} FILL {symbol} {fill_px:.2f} (level {arm['level']:.2f} stop {arm['stop']:.2f})")
+                if self.log_counterfactuals:
+                    self._start_cf_watch(cand, arm, fill_px, cross_ts)
             else:
                 cand.resting_tape_cross_idx = arm['idx']       # arm stays in place — bar close re-evaluates it
             self._append_dry_ledger(cand, arm, cross_ts, ask=ask, filled=filled, fill_px=fill_px, tape_accurate=True)
-        if filled and self.stop_monitor is not None:
+        if filled and self.stop_monitor is not None and symbol not in self._cf_watches:
             try:
                 self.stop_monitor.unsubscribe([symbol])
             except Exception as e:
@@ -786,6 +850,8 @@ class HodBreakEngine:
         path via `trading.hod_break.resting_entry_fill`). This walk only falls back to the bar's high + the
         current quote (logged WARNING, `tape_accurate=0`) when no print resolved the cross by the bar's close —
         i.e. no live print stream reached this symbol for that bar."""
+        if self.log_counterfactuals:
+            self._sweep_cf_watch_timeouts()      # bar cadence bounds the 60s stop-limit no-fill tail to +/-1 min
         n = len(o); sym = cand.symbol; skipped = 0
         # Bar-by-bar walk (not just the newest bar): a backfill/reconcile can hand several closed bars to one
         # _evaluate call, and each must arm/resolve in order — exactly the causal_arming.py walk offline.
@@ -817,6 +883,8 @@ class HodBreakEngine:
                         if filled:
                             cand.resting_filled = True
                             self._notify(f"{self.dry_tag} FILL {sym} {fill_px:.2f} (level {arm['level']:.2f} stop {arm['stop']:.2f})")
+                            if self.log_counterfactuals:
+                                self._start_cf_watch(cand, arm, fill_px, cross_ts)
                         self._append_dry_ledger(cand, arm, cross_ts, ask=ask, filled=filled, fill_px=fill_px, tape_accurate=False)
                 cand.resting_arm = None
             if cand.resting_filled or cand.live_filled:
@@ -827,6 +895,8 @@ class HodBreakEngine:
                 # liquidity cap on the LIVE order size (docs/hod_live_resting_orders_spec_20260925.md item 1);
                 # unused by the tape/dry path, only read by _arm_live_order via resting_order_qty.
                 new_arm = dict(new_arm, idx=j, arm_ts=self._et_now().isoformat(), bar_volume=float(v[j]))
+                if self.log_counterfactuals:      # item 1: evaluated at arm time, stored on the candidate, written with the row
+                    cand.scanner_qualified_at_arm = bool(self.is_qualified(sym)) if self.is_qualified is not None else None
                 cand.tape_cross = None   # a fresh arm — any print-watch cross belongs to the arm just resolved above
                 logger.info(f"{self.dry_tag} ARMED {sym} level {new_arm['level']:.2f} trigger {new_arm['trigger']:.2f} "
                             f"limit {new_arm['limit']:.2f} stop {new_arm['stop']:.2f}")
@@ -843,7 +913,7 @@ class HodBreakEngine:
             try:
                 if cand.resting_arm is not None and not cand.resting_filled:
                     self.stop_monitor.subscribe_trades_quotes([sym])
-                else:
+                elif sym not in self._cf_watches:                  # an open CFWatch (log_counterfactuals) still needs prints past the fill
                     self.stop_monitor.unsubscribe([sym])
             except Exception as e:
                 logger.error(f"{self.tag} {sym}: print-watch subscribe/unsubscribe failed: {e}")
@@ -854,27 +924,172 @@ class HodBreakEngine:
         a logging failure must never affect trading. ERROR on write failure. `live` MUST be True: only bars
         that closed after this session's `live_since` ever reach an arm/resolve, so every row is a live row —
         the column exists so a stray backfill row is instantly visible as a defect, never silently trusted."""
-        import csv, os
         stop = arm['stop']
         target = fill_px + self.params.target_r * (fill_px - stop) if filled and fill_px is not None else None
         row = [self.session_date or '', cand.symbol, arm.get('arm_ts', ''), cross_ts.isoformat(),
                f"{arm['level']:.4f}", f"{arm['trigger']:.4f}", f"{arm['limit']:.4f}",
                '' if ask != ask else f"{ask:.4f}", int(bool(filled)), '' if fill_px is None else f"{fill_px:.4f}",
                f"{stop:.4f}", '' if target is None else f"{target:.4f}", int(bool(tape_accurate)), int(bool(live))]
+        self._append_csv_row(
+            self.dry_ledger_path,
+            ['date', 'symbol', 'arm_ts', 'cross_ts', 'level', 'trigger', 'limit', 'ask',
+             'filled', 'fill_px', 'stop', 'target', 'tape_accurate', 'live'],
+            row, cand.symbol, self._cf_row(cand),
+            err_ctx=f"dry entry ledger row to {self.dry_ledger_path}")
+
+    def _cf_row(self, cand: Candidate) -> list:
+        """The two counterfactual columns (item 1, item 2) shared by the dry entry ledger and the live parity
+        ledger — blank whenever `log_counterfactuals` is off or the value isn't known yet."""
+        return [
+            '' if not self.log_counterfactuals or cand.scanner_qualified_at_arm is None else int(bool(cand.scanner_qualified_at_arm)),
+            '' if not self.log_counterfactuals or cand.cf_floor_stop_px is None else f"{cand.cf_floor_stop_px:.4f}",
+        ]
+
+    def _append_csv_row(self, path: str, base_header: list, base_row: list, symbol: str, cf_row: list,
+                         err_ctx: str) -> None:
+        """Shared ledger writer for `_append_dry_ledger`/`_append_live_parity_row`: appends `base_row` to `path`,
+        adding the counterfactual columns (`CF_ROW_COLUMNS`) for a NEW file, or for an EXISTING file whose header
+        already carries them. An EXISTING file whose header predates the counterfactual columns is NEVER
+        rewritten — its rows keep the OLD shape (byte-identical to pre-9/26 behaviour) and one WARNING fires per
+        path, not per row. Never raises — a logging failure must never affect trading."""
+        import csv, os
+        is_new = not os.path.exists(path)
+        include_cf = True
+        if not is_new:
+            try:
+                with open(path, 'r', newline='') as fh:
+                    first_line = fh.readline()
+                include_cf = all(col in first_line for col in CF_ROW_COLUMNS)
+            except Exception as e:
+                logger.error(f"{self.tag} {symbol}: failed to read existing header of {path}: {e}"); include_cf = False
+            if not include_cf and path not in self._cf_header_warned:
+                self._cf_header_warned.add(path)
+                logger.warning(f"{self.tag} {path}: existing header predates the counterfactual columns {CF_ROW_COLUMNS} — "
+                               f"appending rows in the OLD shape; rotate/delete the file to pick up the new schema")
         try:
-            path = self.dry_ledger_path
-            is_new = not os.path.exists(path)
             d = os.path.dirname(path)
             if d:
                 os.makedirs(d, exist_ok=True)
             with open(path, 'a', newline='') as fh:
                 w = csv.writer(fh)
                 if is_new:
-                    w.writerow(['date', 'symbol', 'arm_ts', 'cross_ts', 'level', 'trigger', 'limit', 'ask',
-                                'filled', 'fill_px', 'stop', 'target', 'tape_accurate', 'live'])
-                w.writerow(row)
+                    w.writerow(base_header + list(CF_ROW_COLUMNS))
+                w.writerow(base_row + (cf_row if include_cf else []))
         except Exception as e:
-            logger.error(f"{self.tag} {cand.symbol}: failed to append dry entry ledger row to {self.dry_ledger_path}: {e}")
+            logger.error(f"{self.tag} {symbol}: failed to append {err_ctx}: {e}")
+
+    # ------------------------------------------------------------------ counterfactual instruments (log_counterfactuals only)
+    def _start_cf_watch(self, cand: Candidate, arm: dict, fill_px: float, cross_ts) -> None:
+        """Open a CFWatch on a DRY fill (item 2 + item 3, module docstring). Computes `cf_floor_stop_px` (item 2,
+        also read by `_cf_row` at fill time) and keeps the print-watch subscription alive past the fill via
+        `self._cf_watches` (see the subscribe/unsubscribe guards in `_evaluate_resting`/`_on_trade_print`)."""
+        stop = arm['stop']
+        target = fill_px + self.params.target_r * (fill_px - stop)
+        cand.cf_floor_stop_px = min(stop, fill_px * 0.975)
+        self._cf_watches[cand.symbol] = CFWatch(
+            symbol=cand.symbol, date=self.session_date or '', fill_ts=cross_ts.isoformat(), fill_px=fill_px,
+            arm_level=arm['level'], arm_trigger=arm['trigger'], actual_stop=stop, actual_target=target,
+            floor_stop_px=cand.cf_floor_stop_px, scanner_qualified_at_arm=cand.scanner_qualified_at_arm)
+        logger.info(f"{self.tag} {cand.symbol}: counterfactual watch armed (floor {cand.cf_floor_stop_px:.4f}, "
+                    f"actual stop {stop:.4f} target {target:.4f})")
+
+    def _update_cf_watch(self, w: CFWatch, price: float, now: datetime) -> None:
+        """Advance one CFWatch on a live print (called from `_on_trade_print` on EVERY print of a watched symbol,
+        including after the dry fill that opened it). Never places or simulates an order. A pre-existing
+        stop-limit arm is resolved BEFORE a brand-new arm is considered, so the print that first touches the
+        actual stop only arms the counterfactual limit — item 3(b)'s 'first SUBSEQUENT print' can never be the
+        same print that armed it."""
+        if not w.floor_hit and price <= w.floor_stop_px + 1e-9:
+            w.floor_hit = True                                            # item 3(a)
+        if w.stoplimit_px is not None and w.stoplimit_exit_px is None and price >= w.stoplimit_px - 1e-9:
+            w.stoplimit_exit_px = price
+        elif w.stoplimit_px is None and price <= w.actual_stop + 1e-9:
+            w.stoplimit_px = round(w.actual_stop * (1.0 - 0.0020), 4)      # item 3(b): armed the instant the ACTUAL stop is first touched
+            w.stoplimit_deadline = now + timedelta(seconds=60)
+            logger.info(f"{self.tag} {w.symbol}: counterfactual stop-limit armed at {w.stoplimit_px:.4f} (actual stop {w.actual_stop:.4f} touched)")
+        w.last_print_px = price
+        if w.exit_px is None and (price >= w.actual_target - 1e-9 or price <= w.actual_stop + 1e-9):
+            w.exit_px = price; w.exit_reason = 'target' if price >= w.actual_target - 1e-9 else 'stop'; w.exit_ts = now.isoformat()
+        self._maybe_resolve_cf_watch(w, now)
+
+    def _maybe_resolve_cf_watch(self, w: CFWatch, now: datetime) -> None:
+        """Write + drop a CFWatch once this fill's own recorded exit is known AND (only when that exit was the
+        actual stop) the stop-limit leg has also resolved — filled, or timed out 60s after the actual stop was
+        first touched (the no-fill tail, last print seen at the deadline)."""
+        if w.exit_px is None:
+            return
+        if w.stoplimit_px is not None and w.stoplimit_exit_px is None:
+            if w.stoplimit_deadline is not None and now >= w.stoplimit_deadline:
+                w.stoplimit_exit_px = w.last_print_px
+            else:
+                return                                                    # still inside the 60s window — keep watching
+        self._close_cf_watch(w)
+
+    def _close_cf_watch(self, w: CFWatch) -> None:
+        """Write the resolved row and drop the watch — the ONE place every CFWatch exit path (target, stop,
+        stop-limit no-fill tail, EOD/flat) funnels through, so every DRY fill gets EXACTLY one row here."""
+        self._write_cf_row(w)
+        self._cf_watches.pop(w.symbol, None)
+        if self.stop_monitor is not None:
+            try:
+                self.stop_monitor.unsubscribe([w.symbol])
+            except Exception as e:
+                logger.error(f"{self.tag} {w.symbol}: print-watch unsubscribe failed after the counterfactual watch resolved: {e}")
+
+    def _sweep_cf_watch_timeouts(self) -> None:
+        """Called once per bar close (`_evaluate_resting`): (a) resolves any CFWatch whose exit is already known
+        but whose 60s stop-limit deadline has passed with no further print (a quiet tape); (b) at session flat
+        (`is_force_close_time`, item 3's EOD/flat path) force-closes EVERY remaining CFWatch, target or actual
+        stop touched or not — a fill that never reaches either all day still gets exactly one row,
+        `exit_reason='eod'`, using the last print seen (or the entry fill price if no print ever arrived) — so
+        every DRY fill is guaranteed one row regardless of how its day ends. Bar cadence bounds both to roughly
+        +/-1 minute of the true deadline. Never raises."""
+        if not self._cf_watches:
+            return
+        now = self._et_now()
+        eod = self.is_force_close_time()
+        for w in list(self._cf_watches.values()):
+            stoplimit_pending = w.stoplimit_px is not None and w.stoplimit_exit_px is None
+            deadline_passed = stoplimit_pending and w.stoplimit_deadline is not None and now >= w.stoplimit_deadline
+            if not eod and not deadline_passed:
+                continue
+            if w.exit_px is None:
+                if not eod:
+                    continue                                              # deadline passed but no exit yet and not EOD — nothing to force
+                logger.warning(f"{self.tag} {w.symbol}: counterfactual watch never reached its target or actual stop by session flat — closing EOD")
+                w.exit_px = w.last_print_px if w.last_print_px is not None else w.fill_px
+                w.exit_reason = 'eod'; w.exit_ts = now.isoformat()
+            if stoplimit_pending:
+                w.stoplimit_exit_px = w.last_print_px                     # the no-fill tail: 60s elapsed, or the day simply ended first
+            self._close_cf_watch(w)
+
+    def _write_cf_row(self, w: CFWatch) -> None:
+        """Append one resolved CFWatch to `self.cf_ledger_path` (item 3, module docstring); never raises — a
+        logging failure must never affect trading."""
+        import csv, os
+        row = [w.date, w.symbol, w.fill_ts, f"{w.fill_px:.4f}",
+               '' if w.scanner_qualified_at_arm is None else int(bool(w.scanner_qualified_at_arm)),
+               f"{w.arm_level:.4f}", f"{w.arm_trigger:.4f}", f"{w.actual_stop:.4f}", f"{w.actual_target:.4f}",
+               f"{w.floor_stop_px:.4f}", int(bool(w.floor_hit)),
+               '' if w.stoplimit_px is None else f"{w.stoplimit_px:.4f}",
+               '' if w.stoplimit_exit_px is None else f"{w.stoplimit_exit_px:.4f}",
+               '' if w.exit_px is None else f"{w.exit_px:.4f}", w.exit_reason or '', w.exit_ts or '']
+        try:
+            path = self.cf_ledger_path
+            is_new = not os.path.exists(path)
+            d = os.path.dirname(path)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            with open(path, 'a', newline='') as fh:
+                wtr = csv.writer(fh)
+                if is_new:
+                    wtr.writerow(['date', 'symbol', 'fill_ts', 'fill_px', 'scanner_qualified_at_arm', 'arm_level',
+                                  'arm_trigger', 'actual_stop', 'actual_target',
+                                  'cf_floor_stop_px', 'cf_floor_stop_hit', 'cf_stoplimit_px', 'cf_stoplimit_exit_px',
+                                  'exit_px', 'exit_reason', 'exit_ts'])
+                wtr.writerow(row)
+        except Exception as e:
+            logger.error(f"{self.tag} {w.symbol}: failed to append counterfactual ledger row to {self.cf_ledger_path}: {e}")
 
     # ------------------------------------------------------------------ LIVE resting order (real orders; entry_mode='resting_stop_limit', dry_run=false)
     # docs/hod_live_resting_orders_spec_20260925.md. The tape above (_evaluate_resting/_on_trade_print) is
@@ -1163,6 +1378,8 @@ class HodBreakEngine:
             return                                            # no NEW shares since the last poll of this same status
         fill_px = float(st.get('filled_avg_price') or lo['trigger'])
         stop = lo['stop']; target = round(fill_px + self.params.target_r * (fill_px - stop), 2)
+        if self.log_counterfactuals:      # item 2: computed at fill, dry AND live — no print-watch tracking for a live fill (a real broker exit already manages it)
+            cand.cf_floor_stop_px = min(stop, fill_px * 0.975)
         logger.info(f"{self.tag} {sym}: LIVE {status.upper()} {fill_px:.2f} cum {filled_qty}/{lo['qty']} (stop {stop:.2f} target {target:.2f})")
         self._notify(f"{self.tag} LIVE {status.upper()} {sym} {fill_px:.2f} x{filled_qty}")
         for old_leg in (lo.get('tp_leg_id'), lo.get('sl_leg_id')):
@@ -1239,8 +1456,8 @@ class HodBreakEngine:
         are threaded through from `cand.tape_cross` — set ONLY by `_on_trade_print` on a real tape print, so they
         stay blank for a bar-level-fallback cross or a NO_CROSS arm (there was nothing for the print watch to see).
         slippage_vs_tape_bps is computed only when both a broker fill and a tape ask are known. tape_expected is
-        read from the SAME flags the dry ledger already sets on `cand`. Never raises."""
-        import csv, os
+        read from the SAME flags the dry ledger already sets on `cand`. `log_counterfactuals` items 1-2
+        (`_cf_row`) are appended the same way as the dry ledger. Never raises."""
         tape_expected = 'FILL' if cand.resting_filled else ('NO_FILL' if cand.resting_tape_cross_idx is not None else 'NO_CROSS')
         tc = cand.tape_cross or {}
         tape_ask = tc.get('ask')
@@ -1252,20 +1469,13 @@ class HodBreakEngine:
               lo['order_id'], broker_status,
               broker_fill_ts.isoformat() if broker_fill_ts else '', '' if broker_fill_px is None else f"{broker_fill_px:.4f}",
               '' if broker_fill_qty is None else broker_fill_qty, slippage_bps, reason]
-        try:
-            path = self.live_parity_ledger_path
-            is_new = not os.path.exists(path)
-            d = os.path.dirname(path)
-            if d: os.makedirs(d, exist_ok=True)
-            with open(path, 'a', newline='') as fh:
-                w = csv.writer(fh)
-                if is_new:
-                    w.writerow(['date', 'symbol', 'arm_ts', 'level', 'trigger', 'limit', 'qty', 'tape_expected',
-                               'tape_cross_ts', 'tape_print', 'tape_ask', 'trigger_print_nbbo_ok', 'broker_order_id',
-                               'broker_status', 'broker_fill_ts', 'broker_fill_px', 'broker_fill_qty', 'slippage_vs_tape_bps', 'reason'])
-                w.writerow(row)
-        except Exception as e:
-            logger.error(f"{self.tag} {cand.symbol}: failed to append live parity ledger row to {self.live_parity_ledger_path}: {e}")
+        self._append_csv_row(
+            self.live_parity_ledger_path,
+            ['date', 'symbol', 'arm_ts', 'level', 'trigger', 'limit', 'qty', 'tape_expected',
+             'tape_cross_ts', 'tape_print', 'tape_ask', 'trigger_print_nbbo_ok', 'broker_order_id',
+             'broker_status', 'broker_fill_ts', 'broker_fill_px', 'broker_fill_qty', 'slippage_vs_tape_bps', 'reason'],
+            row, cand.symbol, self._cf_row(cand),
+            err_ctx=f"live parity ledger row to {self.live_parity_ledger_path}")
 
     # ------------------------------------------------------------------ entry
     def _try_enter(self, cand: Candidate, sig, day_open: float) -> None:
