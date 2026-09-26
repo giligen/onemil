@@ -81,3 +81,20 @@ as a money book (tape replay +0.03 R/fill out of sample at zero latency, ≈ $11
    ≥ 100 dry fills → a $50 exploration run. Number it rests on: +0.26 R in the (non-causal) proxy cohort, t 3.8.
 3. **Buy the PIT minute bars (question 1)** before any new population study; every VOID this week traced to a bar
    source that selected on the outcome. Number it rests on: 2 of 2 positive results this week were that artifact.
+
+## Revival addendum (2026-09-26, your instruction: "find the way to revive it")
+Three rounds, 23 cells (1,445–1,467), every one with an independent rebuild and refuters (`PREREG_1445/1457/1466.md`,
+`RESULT_*.md`, `review/1445_*.md`):
+
+| round | what | result |
+|---|---|---|
+| 1 | the live scanner's own predicate replayed at the arm bar, multi-day highs, liquidity at arm; builder-terms placebo | all FAIL; the placebo failed too → the +0.24/+0.28 R cohort was traced to cache-builder selection on the FULL-DAY range (foresight through the bar cache); levels reliable; cost reconciled: R is 1.6 % of price, so 35 bps stop slip = 0.21 R per stop; the exact cohort under full cost = +0.23 / +0.06 R |
+| 2 | perfect-foresight ceiling; pre-market volume, ATR, prior-day range, news; R floor 2.5 %; stop-limit exit | ceiling +0.17 R VAL (a predictor would have to be near-perfect); every causal predictor negative; R floor +0.13 R paired lift; stop-limit needed an unbiased measure |
+| 3 | verification + one joint cell | stop-limit VERIFIED (slip 35 → ≈ 13 bps); R floor NOT verified (aggregate agrees, rows do not; the lift sits in 5 % of fills = rescued noise stop-outs); joint +0.05 R t 1.1 FAIL; whole book with both fixes −0.05 / −0.08 FAIL |
+
+**Answer:** there is no way to revive it on this population. The number you were shown was day-range foresight; under
+honest execution the entry carries no information a live order can use, and fixing execution recovers about 0.17 R of
+the 0.25 R cost but not the book. What survives and ships to the dry run on Monday, all behind flags with tests:
+the stop-limit exit (worth ≈ 20 bps per stop on ANY book), the R-floor and stop-limit counterfactual columns, and the
+scanner-qualified column. Money view: unchanged. Recommendations: #1 stands (new signal, gross edge first); #2 becomes
+the stop-limit exit rehearsal (it applies to every book you run); #3 the free forward columns.

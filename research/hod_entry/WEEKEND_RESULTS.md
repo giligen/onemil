@@ -124,3 +124,26 @@ Base = 1,438's fills (`causal_arming_causal.csv`); 1,427 fills are VOID; TEST no
 | 1441 | VAL | 139 | 34.8 | -0.168 | -0.286 |
 
 Live 9/25 had no stop exit (VECO hit target, CDNA hit EOD); the only live-tape number is ENTRY slip: VECO +14.3 bps, CDNA -2.0 bps (n=2). VAL mean measured stop slip 34.8 bps < the 40 bps size gate: PASS, no block, but every restated cell's net R got worse under the measured tape than under the flat 30 bps assumption. Full detail: `research/hod_entry/RESULT_1443.md`.
+
+## Round 3 (1,463 verified / 1,464 verified / 1,466 / 1,467)
+
+1,463 (20 bps stop-limit): taken as verified per the round-3 PREREG, holdout-mean slip 2.9 bps TRAIN-H2 / 3.2 bps
+VAL (vs the 35.9/34.8 bps pooled stop-market fallback it replaces). 1,464 (R floor 2.5 % of price): the independent
+rebuild does **NOT_REPRODUCE** the builder's `net_R_1464` at the PREREG's own bar (49.9 % of fills within 0.01 R,
+need ≥99 %; VAL paired Δ -0.0088 R was inside ±0.02) — a disclosed pooled-vs-measured stop-slip decomposition
+choice in the rebuild, not a bug — so 1,466/1,467 compose on the independent rebuild's per-fill re-walk
+(`cell_1464_rebuild.csv`), stated explicitly since PREREG_1466.md's fallback rule points there whenever the verdict
+is NOT_REPRODUCED.
+
+| cell | holdout | n_kept | n_dropped | kept_mean | dropped_mean | t_kept | ex_top5 | fills/wk | week_p10 | green_wk % | null_pctile | passes_bar |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1466 | TRAIN-H2 | 1061 | 3337 | +0.122 | -0.107 | 2.21 | +0.023 | 25.0 | -7.94 | 63.0 % | 100.0 | FALSE |
+| 1466 | VAL | 1223 | 4290 | +0.054 | -0.114 | 1.08 | -0.047 | 27.0 | -10.28 | 54.5 % | 100.0 | FALSE |
+| 1467 | TRAIN-H2 | 4398 | 0 | -0.051 | n/a | -1.28 | -0.159 | 39.7 | -36.96 | 37.0 % | 95.9 | n/a (report-only) |
+| 1467 | VAL | 5513 | 0 | -0.076 | n/a | -1.90 | -0.185 | 41.0 | -51.23 | 22.7 % | 70.9 | n/a (report-only) |
+
+1,466 (spread ≤10 bps ∧ R floor ∧ verified stop-limit) FAILS the pass bar on VAL (kept mean +0.054 R, t 1.08,
+ex-top-5 % negative — all three miss the bar; TRAIN-H2 t and both holdouts' dropped<kept clauses do pass). 1,467
+(whole book, report-only, both execution fixes applied) is still clearly negative on both holdouts (-0.05/-0.08 R).
+Per PREREG_1466.md's pre-committed consequence, **1,466 FAIL closes the resting-order HOD-break book as a money
+book at every filter and every exit tried on this population — no further cell.** Full detail: `RESULT_1466.md`.
