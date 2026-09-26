@@ -54,3 +54,21 @@ honest map at this size has it.
 2. Leg D: owner decision (options on the account); if yes, the passive-income plan's E1 sleeve gets its engine.
 3. Leg C: tape-measurement PREREG once A's classifier exists.
 4. Leg E: the predictor verdict tonight, with its measured AUC.
+
+## 6. Literature update (from `research/lit_review_2026/SOTA_AI_TRADING_2023_2026.md`, 49 items, 2023–2026)
+* **Leg A survives with two design changes**: strip entity names before scoring (Glasserman & Lin 2023: the named
+  version is contaminated by what the model knows about the company, not only by look-ahead) and score only post-cutoff
+  news (Sarkar & Vafa 2024, ICML 2025). Lopez-Lira & Tang's own updates show the drift decaying as adoption spread and
+  concentrated in small-cap negative news — the short side, where borrow and cost bite. Expect a fraction of the published
+  effect; the VAL window decides.
+* **The most-cited "GPT beats analysts" paper (Kim, Muhn & Nikolaev 2024) was withdrawn by its authors in Feb 2025**
+  after a co-author could not replicate it. Nothing in this plan rests on it; it is the reason every number here needs
+  an independent rebuild before it reaches the owner.
+* **The only AI mechanism with real live evidence is augmentation, not selection**: AI reads faster and wider (Cao et al.
+  JFE 2024; Sheng et al. RFS). That is legs A and B. Leg E (a model picking the big day from price features) gets no
+  support anywhere: Avramov, Cheng & Metzker 2023 — ML return edges live in illiquid names and vanish net of costs;
+  Nagel 2025 — the "virtue of complexity" gain is volatility-timed momentum in disguise.
+* **Never deploy an LLM agent framework or pick a model by leaderboard**: independent re-tests fail 80 % of published
+  multi-agent schemes; live arenas show GPT-5-class agents losing to buy-and-hold. Real AI money (Eurekahedge AI index
+  2009–24: 9.8 %/yr vs S&P 13.7 %; AIEQ) underperforms passive equity — the base rate for "AI trading bot" is below the
+  index. Leg D (the variance risk premium) remains the only leg whose premium does not depend on beating anyone.
