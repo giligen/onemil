@@ -184,3 +184,13 @@ itself) to a column it took for the causal ATR %, and separately computed an ATR
 both leaked the label. With the two columns removed and the same grid/seed refit, its mover-day kept set is −0.07 R (HGB)
 / −0.02 R (LR) on VAL — the builder's −0.04 / −0.03 within noise. The builder is right; the sign flip was a label leak in
 the check itself, caught by the reconciliation. Verdict unchanged: FAIL (decoy VOID, kept sets negative). L3 pending.
+
+## Judge's verdict on L3 (2026-09-26 16:40 UTC) — the owner's question, measured
+L3 = "the break extends ≥ 5 % beyond the level after the arm bar" (base rate 26 % / 28 %). Decoy AUC 0.58 (void by the
+letter of the amendment: the old store identity still carries ≈ 0.03 of AUC). Real models: VAL AUC 0.72 (HGB) / 0.71
+(LR), placebo 0.48 — the extension IS partly predictable at the arm bar, and the kept top tercile raises the extension
+rate from 28 % to 46 %. It does not convert into money under the break entry: kept mean +0.14 R on TRAIN-H2 (t 2.1)
+and −0.09 R on VAL (t −1.6). FAIL. Reading: a fill at the ask above the level loses even on many days the break later
+extends, because 87 % of breaks first dip back under the level (cell 1,480) and the consolidation-low stop sits 1.6 %
+below. The predictability lives in the extension; the loss lives in the entry. That points at exactly one joint,
+pre-declared in `PREREG_1481.md` amendment 1 before any retest number is read.
