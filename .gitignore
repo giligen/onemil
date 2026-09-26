@@ -182,3 +182,9 @@ research/hod_entry/sip_cache_1463/
 research/hod_entry/sip_cache_pdh/
 research/hod_entry/news_1483/
 research/hod_entry/xbrl_1484/
+research/overnight_high/*.parquet
+research/overnight_high/_fetch_state/
+research/overnight_high/fetch_run.log
+research/overnight_high/*_nights.csv
+research/overnight_high/symbol_universe.csv
+research/overnight_high/__pycache__/
