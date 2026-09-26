@@ -31,3 +31,6 @@ Median R′ 1.5–2.2 % of price (rail clear). Frozen bar (VAL mean ≥ +0.15, t
 The dip-depth table of cell 1,491 says where the loss is: base fills whose pullback exceeds 75 bps (30 %) earn −0.46 R,
 those under 25 bps −0.02 R. The retest bid fills on all of them; whether the pullback's tape at the fill instant can
 separate the two is cell 1,489 (running). Programme count 1,486 on this line.
+
+Addendum (18:20 UTC, from the 1,489 refuter): by bar store, the VAL retest book is −0.14 R on real-SIP rows (83 %) and
++0.15 R on cache-only rows (17 %, the store-identity look-ahead cohort); the paired lift is the same on both.

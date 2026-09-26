@@ -103,3 +103,12 @@ own construction, and the check already showed fills with a large realised range
 features, same grid/seed/threshold rule, same pass bar, run as cell 1,478-L3: **L3 = the break EXTENDS: the day's high
 after bar j ≥ level × 1.05** (the future part of the big day; nothing at bar j realises it). L1/L2 are reported as
 specified; only L3's kept set can pass the AUC gate meaningfully. TEST unchanged.
+
+## Amendment 3 (2026-09-26 18:20 UTC) — the arm bar must precede the fill minute
+Found by the 1,489 look-ahead refuter: `build_features_1478_A.bar_features_for_fill` takes bar j = the last RTH bar with
+m < fill_min, and fill_min is fractional (minute + seconds), so bar j is the FILL bar in 98.4 % of rows. Correction:
+bar j = the last RTH bar with m ≤ floor(fill_min) − 1 (the bar fully closed before the fill minute). Re-run, same
+protocol, same grid, same seed, same thresholds rule (TRAIN top tercile): features_1478_A_v2.csv → the L3 model only
+(the L1/L2 verdicts were negative and a leak can only inflate them). Report VAL AUC, placebo, decoy, kept mean. The
+original AUC 0.72 is withdrawn until this reads. Every number that used features_1478_A (1,478, 1,486, 1,489 arm_
+features, the 1,493 L3 stratum) inherits the caveat; none of them is positive.
