@@ -87,3 +87,16 @@ Population: 7487 symbol-days requested, 0 LOST (0.0 %), 3 unsimulable (< K+2 min
 * Spread bps is derived from cost_R * R (approx, assumes entry and exit half-spreads are close) — not an independent NBBO measurement for this pool; read as indicative.
 * Small caps: R must exceed the spread — see the R %-of-price and spread-bps columns above per CLAUDE.md.
 * Population: point-in-time Databento EQUS.SUMMARY daily bars, gap >= 5 %, open $3-30, prior-day volume >= 500K, 2025-07-01..2026-05-31, test tickers excluded; TEST not read.
+
+## 1,441 — prior-day-high level
+
+| split | fills (rate) | mean net R | day-clust t | ex-top-5 % | fills/wk | coverage / gap | verdict |
+|---|---|---|---|---|---|---|---|
+| TRAIN-H2 | 145 (61.2 %) | +0.016 | -0.44 | -0.098 | 5.3 | 100.0 % / 0.0 pp | report-only |
+| VAL | 239 (70.9 %) | -0.168 | -3.37 | -0.281 | 10.1 | 100.0 % / 0.0 pp | FAIL: mean ≥ +0.10, t ≥ 2, ex-top-5 % > 0 |
+
+* Same order/arming as cell 1,438 (causal_arming.py) with the level SUBSTITUTED: PDH = prior session's RTH high from `bars_sip.db` (not the running HOD); one entry/day at the first cross since a break permanently disarms the running-high guard.
+* 30 bps stop-slip: mean net R TRAIN-H2 -0.072, VAL -0.270 (worse in both — not a tail effect).
+* Population: base superset (universe.csv, date range, adv20 >= min_adv20, test tickers excluded) = 350,694 symbol-days; 259,238 (74 %) had no prior-session `bars_sip.db` data -> `no_pdh`, excluded (never backfilled from cache.db/daily_bars per spec); of the 91,456 with a known PDH, 2,096 symbol-days clear day-high >= PDH+1c, PDH >= open x 1.05, PDH >= floor+1c.
+* Coverage 100 %, gap 0 pp on both holdouts — the population, not tape availability, is what's small; ex-top-5 % more negative than the raw mean means the loss is NOT winner-capped, it is broad.
+* Verdict: FAIL, both holdouts negative-signed and VAL strongly so (t -3.37) — the PDH level (fixed at the prior day's high) does not reproduce cell 1,438's running-HOD edge; a level fixed a day stale is a worse entry, not an equivalent one.
