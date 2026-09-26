@@ -1,6 +1,6 @@
 # PREREG — cells 1,457–1,465: the last round on the resting-order fill book — perfect-foresight ceiling, causal big-day predictors, and the cost side
 
-FROZEN 2026-09-26 07:05 UTC, before any cell number. Programme count on the HOD line: 1,456 → 1,465. Disclosed as
+FROZEN 2026-09-26 05:49 UTC (commit time), before any cell number. Programme count on the HOD line: 1,456 → 1,465. Disclosed as
 motivated AFTER cells 1,445–1,456 and the three diagnostics (`review/1445_*.md`); the kill switch below is what makes
 this round honest rather than a chase.
 
