@@ -194,3 +194,5 @@ research/edgar_desk/*.json
 research/edgar_desk/*.log
 research/edgar_desk/*.out
 research/edgar_desk/__pycache__/
+research/orb_retest/*_fills.csv
+research/orb_retest/__pycache__/
