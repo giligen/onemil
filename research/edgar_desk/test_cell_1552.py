@@ -10,8 +10,10 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cell_1552 import (  # noqa: E402
+    build_serial_index,
     classify_from_row,
     entry_session,
+    is_serial_issuer,
     is_test_ticker,
     score_event,
 )
@@ -109,6 +111,79 @@ class TestClassAssignment:
     def test_multi_item_filing_can_carry_several_classes(self):
         classes = classify_from_row("8-K", "4.01,5.02")
         assert set(classes) == {"AUDITOR", "OFFICER_EXIT"}
+
+
+class TestAmendment1SerialIssuerCap:
+    """Amendment 1 (PREREG_1552.md, 2026-09-27 04:25 UTC): 424B2 is never an OFFERING trigger,
+    and a serial note issuer (> 12 424B* filings in the trailing 365 days) is excluded from BOTH
+    OFFERING and SHELF regardless of which form/item matched."""
+
+    def test_424b2_alone_is_never_offering(self):
+        """424B2 (bank structured-note pricing supplement) carries no OFFERING class even when
+        not a serial issuer -- it was simply removed from the trigger set, not gated on volume."""
+        assert classify_from_row("424B2", "", serial_issuer=False) == []
+
+    def test_other_424b_forms_still_offering_when_not_serial(self):
+        for form in ("424B1", "424B3", "424B4", "424B5"):
+            assert classify_from_row(form, "", serial_issuer=False) == ["OFFERING"]
+
+    def test_item_302_still_offering_when_not_serial(self):
+        assert classify_from_row("8-K", "3.02", serial_issuer=False) == ["OFFERING"]
+
+    def test_serial_issuer_blocks_offering_from_424b_form(self):
+        assert classify_from_row("424B3", "", serial_issuer=True) == []
+
+    def test_serial_issuer_blocks_offering_from_item_302(self):
+        assert classify_from_row("8-K", "3.02", serial_issuer=True) == []
+
+    def test_serial_issuer_blocks_shelf(self):
+        assert classify_from_row("S-3", "", serial_issuer=True) == []
+        assert classify_from_row("S-3ASR", "", serial_issuer=True) == []
+
+    def test_serial_flag_does_not_touch_unrelated_classes(self):
+        """The serial-issuer cap is scoped to OFFERING/SHELF only (Amendment 1: 'every other
+        class unchanged') -- it must never suppress e.g. AUDITOR or REVERSE_SPLIT."""
+        assert classify_from_row("8-K", "4.01", serial_issuer=True) == ["AUDITOR"]
+        assert classify_from_row("8-K", "5.03", serial_issuer=True) == ["REVERSE_SPLIT"]
+
+    def test_is_serial_issuer_true_over_cap(self):
+        # 13 424B filings for CIK 'X' inside one trailing year -> serial (cap is 12).
+        dates = pd.date_range("2025-01-01", periods=13, freq="20D")
+        idx = build_serial_index(
+            cik_series=["X"] * 13, form_series=["424B2"] * 13, filing_date_series=dates,
+        )
+        assert is_serial_issuer("X", dates[-1], idx) is True
+
+    def test_is_serial_issuer_false_at_cap(self):
+        # exactly 12 in the trailing year (the cap is "> 12", not ">= 12") -> not serial.
+        dates = pd.date_range("2025-01-01", periods=12, freq="28D")
+        idx = build_serial_index(
+            cik_series=["X"] * 12, form_series=["424B2"] * 12, filing_date_series=dates,
+        )
+        assert is_serial_issuer("X", dates[-1], idx) is False
+
+    def test_is_serial_issuer_window_excludes_filings_older_than_365_days(self):
+        # 20 old filings (>365d back) plus 3 recent ones -> only the 3 recent count, not serial.
+        old = pd.date_range("2020-01-01", periods=20, freq="10D")
+        recent = pd.date_range("2025-06-01", periods=3, freq="5D")
+        dates = old.append(recent)
+        idx = build_serial_index(
+            cik_series=["X"] * len(dates), form_series=["424B2"] * len(dates),
+            filing_date_series=dates,
+        )
+        assert is_serial_issuer("X", recent[-1], idx) is False
+
+    def test_is_serial_issuer_unknown_cik_is_not_serial(self):
+        idx = build_serial_index(cik_series=["X"], form_series=["424B2"],
+                                  filing_date_series=[pd.Timestamp("2025-01-01")])
+        assert is_serial_issuer("Y", pd.Timestamp("2025-06-01"), idx) is False
+
+    def test_serial_cap_does_not_count_non_424b_forms(self):
+        # 20 unrelated 8-Ks for the same CIK must not trip the cap -- only 424B* counts.
+        dates = pd.date_range("2025-01-01", periods=20, freq="10D")
+        idx = build_serial_index(cik_series=["X"] * 20, form_series=["8-K"] * 20,
+                                  filing_date_series=dates)
+        assert is_serial_issuer("X", dates[-1], idx) is False
 
 
 class TestTestTickerExclusion:
