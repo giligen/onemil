@@ -89,3 +89,10 @@ reduced to what the premium supports after slippage: Δ ∈ {0.20, 0.30}, W = $1
 cells; selection on TRAIN by monthly Sharpe with ≥ 12 cycles and ≥ 55 % green months (calendar months, zeros
 included), one VAL read, the same pass bar; (5) the paper run may start in parallel once the account has Level 3 — it
 is the forward test regardless of which cell v2 selects (the engine runs the TRAIN-selected cell).
+Amendment 2a (15:30 UTC): OPRA quotes are NOT available on the data plan (GET /v1beta1/options/quotes → 404; trades →
+200). v2 therefore prices each leg from TICK TRADES: entry = the last trade of each leg in 10:00:00–10:00:30 ET on the
+entry Monday (a leg with no trade in 10:00:00–10:05:00 → the cycle is VOID and counted; the VOID rail stays at 10 %),
+fill = that price − $0.03/leg for the sold leg and + $0.03 for the bought leg; sensitivity rails at $0.05 and $0.10 per
+leg reported beside; daily marks from the cached option daily closes (liquid 20–30-delta legs); management-A exits at
+the last trade in 10:00:00–10:00:30 of the next session (same VOID rule → exit at the daily open as the fallback,
+counted). Everything else as Amendment 2.
