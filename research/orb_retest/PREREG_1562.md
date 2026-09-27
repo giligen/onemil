@@ -62,3 +62,16 @@ the chase entry; the withdrawal share and the paired number stay on record.
 ## Not allowed
 Moving the tick, the windows or the stop after seeing a number; reusing HOD's numbers as ORB evidence; any read of the
 live parity ledger as a research input.
+
+## Amendment 1 (2026-09-27 05:50 UTC, before any number) — population and splits as the tape actually is
+`population.csv` holds 638 entered backtest fills 2023-01-12..2026-09-23 (not only 2025–26). At zero latency the replay
+finds a trigger print inside [09:35, 09:40) ET for 410 of them (301 filled + 109 skipped by the chase guard); 207 have
+no trigger print in that window and 21 lack tick data. Population of this cell = the 410 signals with a trigger print
+(the chase-guard skips are exactly the signals a resting bid could still take); the 228 others are excluded and
+counted. Splits by entry date: TRAIN = 2023-01-12..2025-06-30, VAL = 2025-07-01..2026-09-23 (≈ halves). The base for
+the paired test on the 109 guard-skipped signals is a zero trade (the chase rule did not enter) — reported separately
+from the 301 paired against the replay fill. The exit rule: replay.py does not walk exits (it re-prices the BT's own
+P&L); the builder walks the live ORB exit rule (`trading/orb_engine.py` exit logic as documented in
+`research/orb_2023/REPORT_liveexit.md` and the BT walker `study_orb_pipeline_static_lock.py`) on the 1-minute bars the
+BT uses (`data/cache.db` intraday bars, READ-ONLY), from R′; the rebuild implements the same documented rule from the
+prose of those files, never from the builder's code.
