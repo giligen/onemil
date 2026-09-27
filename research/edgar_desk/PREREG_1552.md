@@ -63,3 +63,12 @@ low priority per the owner.
 ## Not allowed
 Adding classes after seeing TRAIN; text classification in this pass (structured codes only; the LLM pass is a later
 PREREG on the CONTRACT / 8.01 texts if this one passes); selecting E1 vs E5 on VAL; more than one TEST read.
+
+## Amendment 1 (2026-09-27 04:25 UTC, before any score) — the OFFERING class as pulled is polluted
+The fetch counted 1,149,657 OFFERING rows: form 424B2 is the pricing supplement of bank structured notes (thousands a
+week from a few dozen issuers) and carries no equity-supply mechanism. Correction, structural only: OFFERING = 424B1,
+424B3, 424B4, 424B5 or 8-K item 3.02, EXCLUDING 424B2, and excluding any issuer with more than 12 prospectus
+supplements in the trailing 365 days (a serial note issuer, not an equity seller); the same issuer cap applies to
+SHELF. Every other class unchanged. Counts after the amendment are reported beside the raw counts.
+BUYBACK_OR_INSIDER (cell 1,561) is NOT COMPUTABLE from the submissions feed (Form 4 transaction codes live in the
+Form 4 XML) — reported as not computable; a later PREREG may add the XML pull.
