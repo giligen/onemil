@@ -110,3 +110,22 @@ Pass-bar checklist: mean monthly return >= 4%=FAIL, monthly Sharpe >= 1.0=PASS, 
 * Budget assertion held in every cell (worst month ≥ −B by construction; the largest realised was −$1,673 = 26 % of B).
 Consequence: FAIL as frozen. Adequacy review → Amendment 2 (below): quote-based v2 on the 8 cells the premium can
 support (Δ 0.20 / 0.30, W $10, management A / B, gate on / off), cells 1,591–1,598. Programme count 1,590 → 1,598.
+
+## Judge, v2 (cells 1,591–1,598; main session 2026-09-27 16:20 UTC) — VOID; the options backtest is not runnable on this data
+
+* Every one of the 8 cells is 58–69 % VOID (a leg with no trade print in 10:00:00–10:05:00 ET on 60–69 % of entry
+  Mondays), against the 10 % rail — so every cell is VOID by the frozen rule. The reporting code showed 0 % because VOID
+  cycles were dropped before the statistic (a defect, on record). The VOIDs again carried the losses: the four VAL cycles
+  that would have lost (entries 2026-01-26..02-17, settling in the March-2026 drop) are all VOID, which is why the
+  selected cell showed 100 % wins and a $0 drawdown on VAL. Builder vs rebuild: cycle Jaccard 0.48, 58 % within $5,
+  different selected cells — the pricing inputs are too sparse for two implementations to agree.
+* What the non-VOID part says, for the record only: TRAIN 2024-02..2025-06 (two volatility spikes) is −0.7 % to +0.4 %
+  of B per month for all 8 cells — the premium collected in calm weeks was returned in 2024-08 and 2025-04 (worst
+  months −$1,586 / −$1,619, drawdowns up to 37 % of B); VAL 2025-07..2026-08 (a rising, calm market) +0.0 to +3.2 %.
+  The selected cell's TRAIN Sharpe was −0.04; SPY buy-and-hold on B beat every cell on the same capital.
+* Data verdict: Alpaca's plan has no historical option quotes (404) and its option trades are sparse for out-of-the-money
+  SPY puts in a 5-minute morning window; daily bars are trade-based. An honest quote-based test needs OPRA NBBO
+  (paid: ORATS / CBOE DataShop / Polygon options tier) — a purchase decision for the owner, ≈ $100–300 for the history.
+Consequence: no capital to defined-risk premium selling on the strength of this test. The forward instrument stands:
+the PAPER ladder (zero capital, real quotes, logging the NBBO of every leg daily) once the account has Level 3 — it
+builds the quote history this desk does not have. Programme count 1,598.
