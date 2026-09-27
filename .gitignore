@@ -200,3 +200,8 @@ research/orb_failure/quotes_1564/
 research/orb_failure/*_events.csv
 research/orb_failure/*.parquet
 research/orb_failure/__pycache__/
+research/options_vrp/opt_cache/
+research/options_vrp/*.parquet
+research/options_vrp/*_cycles.csv
+research/options_vrp/*.log
+research/options_vrp/__pycache__/

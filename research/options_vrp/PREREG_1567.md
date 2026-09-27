@@ -76,3 +76,16 @@ Confirm or change B = 10 % of equity.
 ## Not allowed
 Adding strikes, widths, cadences or underlyings after seeing TRAIN; selecting on VAL; rolling rules; any position whose
 worst case is not counted in B.
+
+## Amendment 2 (2026-09-27 15:15 UTC, after the FAIL of cells 1,567–1,590; before any v2 number) — quotes, not prints
+The v1 test priced legs from trade prints in a 5-minute window and VOIDed pairs without a print (which removed the
+April-2025 losses from the selected cell). v2 (cells 1,591–1,598): the same ladder with (1) leg prices from OPRA
+QUOTES — the NBBO mid at 10:00:00–10:00:30 ET on the entry Monday for both legs (fill = mid − $0.02/leg, the measured
+half-spread if the quote is wider, i.e. sell at the bid, buy at the ask when |ask − bid| > $0.04), daily marks from the
+15:59 ET NBBO mid of each open leg, exits at the next session's 10:00 NBBO (management A) or intrinsic settlement (B);
+(2) a pair is never VOID because of a missing print — if a leg's quote is missing the cycle is VOID and counted, and the
+VOID share per cell is a reported rail (> 10 % → the cell is VOID); (3) months without an exit count as $0; (4) the grid
+reduced to what the premium supports after slippage: Δ ∈ {0.20, 0.30}, W = $10, M ∈ {A, B}, G ∈ {none, IV ≥ 15 %} = 8
+cells; selection on TRAIN by monthly Sharpe with ≥ 12 cycles and ≥ 55 % green months (calendar months, zeros
+included), one VAL read, the same pass bar; (5) the paper run may start in parallel once the account has Level 3 — it
+is the forward test regardless of which cell v2 selects (the engine runs the TRAIN-selected cell).
