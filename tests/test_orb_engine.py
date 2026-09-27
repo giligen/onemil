@@ -781,6 +781,55 @@ class TestSyncPositionsOrphanAutoClose:
                 for c in notifier.notify_error.call_args_list
             ), "Reconciler must alert on foreign positions"
 
+    def test_foreign_orphan_no_error_level_log(
+        self, patched_orphan_engine, mock_alpaca, caplog,
+    ):
+        """2026-09-27 (no-harmless-ERRORs-on-Telegram directive): a foreign
+        position (the owner's own manual short, no matching strategy row)
+        must not produce any ERROR-level log record. Ownership is unknown
+        at detection time, so the engine's pre-classification line is now
+        WARNING; the reconciler's own foreign-position line is INFO.
+        """
+        patched_orphan_engine._reconciler_rows = []  # no orb row → FOREIGN
+        import logging
+        from trading.orphan_reconciler import reset_state_for_tests
+        reset_state_for_tests()
+
+        with caplog.at_level(logging.WARNING):
+            patched_orphan_engine.sync_positions()
+
+        mock_alpaca.close_position.assert_not_called()
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert not errors, f"Foreign orphan must not log ERROR: {errors}"
+        assert any(
+            r.levelno == logging.WARNING and 'orphan(s) detected' in r.message
+            for r in caplog.records
+        ), "Pre-classification orphan line must be WARNING"
+
+    def test_unexplained_orphan_still_logs_error(
+        self, patched_orphan_engine, mock_alpaca, mock_db, caplog,
+    ):
+        """A genuinely unexplained orphan — the reconciler cannot even
+        determine ownership because the DB lookup itself fails — must
+        still surface as ERROR so it isn't silently swallowed."""
+        import logging
+
+        def _boom(*a, **kw):
+            raise RuntimeError("db unavailable")
+        mock_db.get_strategy_trades_in_window = _boom
+
+        from trading.orphan_reconciler import reset_state_for_tests
+        reset_state_for_tests()
+
+        with caplog.at_level(logging.WARNING):
+            patched_orphan_engine.sync_positions()
+
+        mock_alpaca.close_position.assert_not_called()
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert any('DB lookup failed' in r.message for r in errors), (
+            f"Unexplained orphan (DB lookup failure) must still log ERROR: {caplog.records}"
+        )
+
 
 # =========================================================================
 # _orb_owned_symbols — strategy-scoped position ownership

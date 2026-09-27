@@ -17,22 +17,20 @@ from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
-import yaml
 from pathlib import Path
 
 from data_sources.alpaca_client import AlpacaClient
 from persistence.database import Database
 from trading.orb_engine import ORBEngine, RangeData, CandidateState
 from trading.stop_monitor import StopMonitor
+from tests.conftest import load_orb_yaml_pinned
 
 ROOT = Path(__file__).parent.parent
 
 
 @pytest.fixture
 def cfg():
-    c = yaml.safe_load(open(ROOT / 'orb.yaml'))
-    c['strategy']['enabled'] = True
-    return c
+    return load_orb_yaml_pinned()
 
 
 @pytest.fixture

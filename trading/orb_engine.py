@@ -5246,7 +5246,13 @@ class ORBEngine:
                     details.append(f"{sym} qty={qty} avg=${avg:.2f} upl=${upl:+.0f}")
                 except Exception:
                     details.append(f"{sym} (parse-failed)")
-            logger.error(
+            # WARNING not ERROR (2026-09-27): at this point ownership is
+            # NOT yet known — the reconciler below classifies owned vs.
+            # foreign. Most orphans on this shared account are the owner's
+            # own manual trades (routine, not anomalies — 8/17 directive).
+            # A genuinely unexplained orphan (e.g., reconciler DB lookup
+            # failure) still logs ERROR from within the reconciler itself.
+            logger.warning(
                 f"ORB: orphan(s) detected — {'; '.join(details)} — "
                 f"deferring to reconciler for classification + action"
             )

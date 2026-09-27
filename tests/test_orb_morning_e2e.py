@@ -14,17 +14,16 @@ PM mult, real planner + slot accounting) with only Alpaca mocked:
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
-import yaml
 
 from data_sources.alpaca_client import AlpacaClient
 from persistence.database import Database
 from trading.orb_engine import ORBEngine, RangeData
 from trading.stop_monitor import StopMonitor
+from tests.conftest import load_orb_yaml_pinned
 
 
 def _rng(sym, hi=10.0, lo=9.6, open_=9.65, vol=300_000):
@@ -56,13 +55,10 @@ PM_BARS = pd.DataFrame([{
 def engine(monkeypatch):
     for v in ('ORB_PM_MULT', 'ORB_PDR_VETO', 'ORB_PDR_VETO_MIN_PCT'):
         monkeypatch.delenv(v, raising=False)
-    with open(Path(__file__).parent.parent / 'orb.yaml') as f:
-        cfg = yaml.safe_load(f)
-    cfg['strategy']['enabled'] = True
     # This e2e exercises the PM/news-gated sizing path (LOUD -> 2.0x). B+
     # 2026-08-15 ships PM OFF by default; enable it here so the feature-under-
     # test runs (the pm-disabled scenario has its own test below).
-    cfg['sizing']['pm_dollar_vol_mult']['enabled'] = True
+    cfg = load_orb_yaml_pinned(**{'sizing.pm_dollar_vol_mult.enabled': True})
     alpaca = MagicMock(spec=AlpacaClient)
     alpaca.get_latest_quote.return_value = {'bid_price': 9.80, 'ask_price': 9.82,
                                             'bid_size': 10, 'ask_size': 10}
@@ -178,10 +174,7 @@ class TestMorningSequence:
         qty_boosted = engine.alpaca.submit_stop_bracket_order.call_args.kwargs['qty']
         # rebuild fresh engine with PM disabled -> baseline qty
         engine2_alpaca = engine.alpaca
-        with open(Path(__file__).parent.parent / 'orb.yaml') as f:
-            cfg = yaml.safe_load(f)
-        cfg['strategy']['enabled'] = True
-        cfg['sizing']['pm_dollar_vol_mult']['enabled'] = False
+        cfg = load_orb_yaml_pinned(**{'sizing.pm_dollar_vol_mult.enabled': False})
         db = MagicMock(spec=Database); db.save_trade.return_value = 78
         db.get_open_trades.return_value = []
         sm = MagicMock(spec=StopMonitor); sm.drain_exit_events.return_value = []

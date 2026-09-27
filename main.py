@@ -246,6 +246,30 @@ def _create_stop_monitor(config, alpaca, notifier=None, alpaca_clients_by_strate
     return stop_monitor
 
 
+def _apply_bf_enable_gate(trading_engine, config, acct_label: str) -> bool:
+    """Set the bull-flag engine's live-order gate from config.trading.enabled.
+
+    The scanner/pattern detector always runs regardless of this flag — this
+    only gates order submission (TradingEngine.enabled), which the engine
+    checks before every order (trading/trading_engine.py ~1344/1454/3305/4699).
+    Config is the single source of truth here: a caller must never force
+    `.enabled = True` unconditionally, or a config pause (e.g. the 9/25 BF
+    pause) is silently overridden on every boot that passes --flag.
+
+    Returns the enabled value that was applied, for tests.
+    """
+    enabled = bool(config.trading_enabled)
+    trading_engine.enabled = enabled
+    if enabled:
+        logger.info(f"Bull Flag strategy LOADED — orders ENABLED → {acct_label}")
+    else:
+        logger.warning(
+            "Bull Flag strategy LOADED — orders DISABLED (config trading.enabled=false; "
+            "scanner/pattern detection still runs)"
+        )
+    return enabled
+
+
 def _create_trading_engine(config, alpaca, db, notifier=None, stop_monitor=None, order_stream=None) -> TradingEngine:
     """Create the trading engine with all components wired up."""
     from trading.market_regime import MarketRegimeFilter
@@ -595,14 +619,13 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
         trading_engine = _create_trading_engine(config, bf_client, db, notifier=notifier,
                                                  stop_monitor=stop_monitor,
                                                  order_stream=bf_order_stream)
-        trading_engine.enabled = True
         trading_engine.news_provider = news_provider  # For news re-check at trade time
         # Register real-time bar handler (multi-consumer since Step 1) for instant pattern detection
         if stop_monitor and not stop_monitor.polling_mode:
             stop_monitor.register_bar_handler('bull_flag', trading_engine._on_bar_close)
             logger.info("Real-time bar stream → instant pattern detection ENABLED")
         _bf_acct_label = "BF paper account" if bf_alpaca is not None else "main account"
-        logger.info(f"Bull Flag strategy ENABLED — orders → {_bf_acct_label}")
+        _apply_bf_enable_gate(trading_engine, config, _bf_acct_label)
 
     # MACD wave engine (optional)
     macd_engine = None

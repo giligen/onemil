@@ -8,9 +8,11 @@ exercise the actual production choke point, not a re-description of it.
 """
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 
 from data_sources.alpaca_client import AlpacaClient
 from persistence.database import Database
@@ -21,6 +23,37 @@ from trading.position_manager import PositionManager
 from trading.stop_monitor import StopMonitor
 from trading.trade_planner import TradePlanner
 from trading.trading_engine import TradingEngine
+
+ROOT = Path(__file__).parent.parent
+
+
+def load_orb_yaml_pinned(**overrides):
+    """Load the repo's (gitignored, node-local) orb.yaml with test-neutral pins.
+
+    The live orb.yaml carries whatever production mode is active on this node
+    (e.g. strategy.dry_run: true / execution.prewarm_seed: true during the
+    2026-09-25 ORB dry week, docs/orb_dry_run_spec_20260925.md). Most tests
+    want a real, non-dry engine regardless of the node's current live mode, so
+    this pins strategy.enabled=True, strategy.dry_run=False,
+    execution.prewarm_seed=False before returning the dict. Mode-specific
+    tests (tests/test_orb_dry_run.py, tests/test_orb_prewarm_seed.py) set
+    their own values directly and do NOT use this helper.
+
+    `overrides` is a flat {"section.key": value} mapping applied after the
+    pins, e.g. load_orb_yaml_pinned(**{"sizing.pm_dollar_vol_mult.enabled": True}).
+    """
+    with open(ROOT / 'orb.yaml') as f:
+        cfg = yaml.safe_load(f)
+    cfg['strategy']['enabled'] = True
+    cfg['strategy']['dry_run'] = False
+    cfg.setdefault('execution', {})['prewarm_seed'] = False
+    for dotted_key, value in overrides.items():
+        *path, leaf = dotted_key.split('.')
+        node = cfg
+        for part in path:
+            node = node.setdefault(part, {})
+        node[leaf] = value
+    return cfg
 
 
 @pytest.fixture(autouse=True)

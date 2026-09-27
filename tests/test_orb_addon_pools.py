@@ -8,16 +8,15 @@ Style reference: tests/test_orb_engine.py fixtures (`engine`, `mock_alpaca`,
 """
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
-from pathlib import Path
 
 import pandas as pd
 import pytest
-import yaml
 
 from data_sources.alpaca_client import AlpacaClient
 from persistence.database import Database
 from trading.orb_engine import ORBEngine, RangeData, CandidateState
 from trading.stop_monitor import StopMonitor
+from tests.conftest import load_orb_yaml_pinned
 
 
 ADDON_CFG = {
@@ -33,10 +32,9 @@ ADDON_CFG = {
 
 
 def _base_cfg():
-    with open(Path(__file__).parent.parent / 'orb.yaml') as f:
-        cfg = yaml.safe_load(f)
-    cfg['strategy']['enabled'] = True
-    return cfg
+    # Pins strategy.enabled/dry_run and execution.prewarm_seed test-neutral
+    # regardless of the node's live orb.yaml mode (see tests/conftest.py).
+    return load_orb_yaml_pinned()
 
 
 def _mock_alpaca():
