@@ -164,6 +164,40 @@ class TestProductionDryRunSelectionChain:
         mocked.assert_not_called()
 
 
+class TestDryLedgerIsolation:
+    """9/28: an ORB test run without a per-test __file__ patch appended
+    fixture rows (SYMQ2, Q5SYM, Q1SYM, Q4SYM) to the LIVE
+    logs/orb_dry_ledger.csv. tests/conftest.py::_isolated_orb_state now
+    redirects trading.orb_engine.DEFAULT_DRY_LEDGER_PATH to tmp_path for
+    every test, with no per-test patch required."""
+
+    def test_ledger_write_isolated_from_live_file(self, tmp_path):
+        live_path = Path(__file__).parent.parent / 'logs' / 'orb_dry_ledger.csv'
+        before_stat = live_path.stat()
+
+        eng, a, db = _engine(strategy_dry_run=True)
+        _seed(eng, 'ISOSYM')
+        fp = {'ISOSYM': {'prev_day_bar': {}, 'daily_stats_20d': {}}}
+        with _disable_gates(eng), \
+                patch('trading.orb_engine.composite_score', return_value=1.0), \
+                patch('trading.orb_engine.assign_quintile', return_value='Q5'):
+            eng.check_entries(feature_providers=fp)
+
+        # The write landed under this test's tmp_path (autouse fixture), not
+        # a path anywhere under the repo's logs/ directory.
+        import trading.orb_engine as orbe
+        written_path = orbe._resolve_orb_path(orbe.DEFAULT_DRY_LEDGER_PATH)
+        assert str(written_path).startswith(str(tmp_path))
+        assert written_path.exists()
+        rows = list(csv.DictReader(written_path.open()))
+        assert any(r['symbol'] == 'ISOSYM' for r in rows)
+
+        # The live production ledger is byte-for-byte untouched.
+        after_stat = live_path.stat()
+        assert after_stat.st_size == before_stat.st_size
+        assert after_stat.st_mtime == before_stat.st_mtime
+
+
 class TestDryRunParityObserverParsing:
     """scripts/orb_selection_observer.py::_live_submitted_symbols — a dry
     line must parse into the same pick (symbol) as a live submit line."""

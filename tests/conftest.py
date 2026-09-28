@@ -80,6 +80,23 @@ def _isolated_hod_state(tmp_path, monkeypatch):
     monkeypatch.setattr(hbe, "DEFAULT_LIVE_ORDERS_STATE_PATH", str(tmp_path / "hod_live_resting_orders_state.json"))
 
 
+@pytest.fixture(autouse=True)
+def _isolated_orb_state(tmp_path, monkeypatch):
+    """No test ever writes the PRODUCTION ORB dry ledger, selection audit,
+    or news-lag snapshot files.
+
+    Same defect class as _isolated_hod_state above (9/25 HOD incident):
+    on 9/28 ORB engine tests without a per-test __file__/attribute patch
+    appended fixture rows (SYMQ2, Q5SYM, Q1SYM, Q4SYM) to
+    logs/orb_dry_ledger.csv, the live dry-run book. Redirect every module
+    default to tmp_path; a test that patches `trading.orb_engine.__file__`
+    or sets `engine._news_snapshot_dir` directly still wins for that test."""
+    import trading.orb_engine as orbe
+    monkeypatch.setattr(orbe, "DEFAULT_DRY_LEDGER_PATH", str(tmp_path / "logs" / "orb_dry_ledger.csv"))
+    monkeypatch.setattr(orbe, "DEFAULT_SELECTION_AUDIT_PATH", str(tmp_path / "logs" / "orb_selection_audit.jsonl"))
+    monkeypatch.setattr(orbe, "DEFAULT_NEWS_SNAPSHOT_DIR", str(tmp_path / "logs"))
+
+
 @pytest.fixture
 def bf_db(tmp_path):
     """Real Database on a temp file, closed after the test."""

@@ -82,6 +82,35 @@ from trading.stop_monitor import build_exit_update
 logger = logging.getLogger(__name__)
 
 
+# Runtime output paths (dry-run ledger, selection audit, news-lag snapshot
+# dir). Relative paths resolve against the repo root at write time
+# (_resolve_orb_path). Same defect class as the 9/25 HOD ledger incident
+# (trading/hod_break_engine.py): tests that build an ORBEngine and exercise
+# these code paths without redirection append fixture rows to the LIVE
+# files. tests/conftest.py::_isolated_orb_state monkeypatches all three to
+# tmp_path for every test — do not read these constants directly in a test
+# expecting the production path.
+DEFAULT_DRY_LEDGER_PATH = 'logs/orb_dry_ledger.csv'
+DEFAULT_SELECTION_AUDIT_PATH = 'logs/orb_selection_audit.jsonl'
+DEFAULT_NEWS_SNAPSHOT_DIR = 'logs'
+
+
+def _resolve_orb_path(path_str: str):
+    """Resolve a configured/default ORB output path.
+
+    Absolute paths (as monkeypatched by tests, e.g. str(tmp_path / '...'))
+    are returned as-is. A relative path (the production default) resolves
+    against the repo root (parent of trading/), using the module's own
+    __file__ so the legacy `patch('trading.orb_engine.__file__', ...)`
+    style still redirects it too.
+    """
+    from pathlib import Path as _Path
+    p = _Path(path_str)
+    if p.is_absolute():
+        return p
+    return _Path(__file__).resolve().parent.parent / p
+
+
 # Max calendar-day age tolerated for a cached prev-day daily bar before the
 # ORB feature path force-refetches it from Alpaca. The prior *trading* day is
 # at most 4 calendar days behind "today" (Tue after a Monday market holiday:
@@ -573,10 +602,10 @@ class ORBEngine:
         self._news_fetch_done_day: Optional[date] = None
         # 9:33 indexing-lag second pass (once/day, upgrade-only)
         self._news_refresh_done_day: Optional[date] = None
-        # EoD lag-audit snapshot target (cwd-independent; tests override)
-        self._news_snapshot_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            'logs')
+        # EoD lag-audit snapshot target (cwd-independent; tests override via
+        # DEFAULT_NEWS_SNAPSHOT_DIR, monkeypatched by
+        # tests/conftest.py::_isolated_orb_state)
+        self._news_snapshot_dir = str(_resolve_orb_path(DEFAULT_NEWS_SNAPSHOT_DIR))
         # Asset-class rule (2026-07-11): news boost requires POSITIVE
         # identification as a common stock — wrappers/unknown are
         # structurally ineligible (trading/orb_asset_class.py).
@@ -2879,8 +2908,7 @@ class ORBEngine:
         """
         try:
             import csv as _csv
-            from pathlib import Path as _Path
-            path = _Path(__file__).resolve().parent.parent / 'logs' / 'orb_dry_ledger.csv'
+            path = _resolve_orb_path(DEFAULT_DRY_LEDGER_PATH)
             path.parent.mkdir(parents=True, exist_ok=True)
             is_new = not path.exists()
             with open(path, 'a', newline='', encoding='utf-8') as fh:
@@ -3517,7 +3545,6 @@ class ORBEngine:
         """
         try:
             import json as _json
-            from pathlib import Path as _Path
             rangeless = sorted(
                 s for s, c in self.candidates.items()
                 if c is not None and c.range_data is None
@@ -3534,7 +3561,7 @@ class ORBEngine:
                 'open_positions': sorted(self.open_positions.keys()),
                 'universe_n': len(self.universe),
             }
-            p = _Path(__file__).resolve().parent.parent / 'logs' / 'orb_selection_audit.jsonl'
+            p = _resolve_orb_path(DEFAULT_SELECTION_AUDIT_PATH)
             p.parent.mkdir(parents=True, exist_ok=True)
             with open(p, 'a', encoding='utf-8') as fh:
                 fh.write(_json.dumps(rec, separators=(',', ':')) + '\n')
