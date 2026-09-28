@@ -96,3 +96,19 @@ fill = that price − $0.03/leg for the sold leg and + $0.03 for the bought leg;
 leg reported beside; daily marks from the cached option daily closes (liquid 20–30-delta legs); management-A exits at
 the last trade in 10:00:00–10:00:30 of the next session (same VOID rule → exit at the daily open as the fallback,
 counted). Everything else as Amendment 2.
+
+## Amendment 3 (2026-09-28 05:10 UTC, after the VOID of v2; before any v3 number) — Databento OPRA NBBO, and the 2013–2023 history
+Data: Databento `OPRA.PILLAR`, schema `cbbo-1m` (consolidated NBBO, 1-minute, available 2013-04 → today; verified 9/28:
+all SPY options for one Monday 10:00–10:02 ET ≈ $0.00, one contract's full life ≈ $0.02). v3 (cells 1,599–1,606 = the
+8 cells of Amendment 2 unchanged): (1) entry Monday: the 10:00–10:02 ET `cbbo-1m` window for ALL SPY puts (parent
+symbol SPY.OPT) → strike selection from the NBBO mid of the 10:00 bar; the fill = the sold leg's BID and the bought
+leg's ASK of that bar (no slippage constant — the quote is the cost; a $0.03/leg rail beside); (2) each selected leg:
+its full-life `cbbo-1m` → daily marks from the 15:59 ET mid, management-A exits at the next session's 10:00 bar (buy
+back at the ASK of the sold leg, sell the bought leg at its BID), intrinsic settlement for B; (3) a cycle is VOID only
+if the 10:00 bar has no two-sided quote for a leg (rail 10 %, reported per cell, computed from the cycle table — the
+v2 defect); (4) samples: PANEL as frozen (TRAIN 2024-02-05..2025-06-30, VAL 2025-07-07..2026-08-17, one VAL read for the
+TRAIN-selected cell); EXTENSION 2013-04-08..2023-12-25 (2015-08, 2018-02, 2020-03, 2022 inside it) — read ONCE for the
+cell the panel selected, as the decisive out-of-regime test: the same pass bar (mean monthly return on B ≥ 4 %,
+monthly Sharpe ≥ 1.0, green months ≥ 60 %, worst month ≥ −B, max drawdown ≤ 1.5 B, beats SPY buy-and-hold on B per unit
+of drawdown), plus ≥ 8 of the 11 years positive net. Spend cap: the fetch estimates cost first and stops above $150
+total, logging every purchase. Equity for sizing fixed at $65,000 throughout (B = $6,500). Programme count 1,598 → 1,606.
