@@ -1,0 +1,443 @@
+symbol,name,factor,direction,underlying,match_confidence,status,tradable,exchange
+ETU,T-Rex 2X Long Ether Daily Target ETF,2.0,long,ETHER,weak_unconfirmed,active,True,BATS
+BOEU,Direxion Shares ETF Trust Direxion Daily BA Bull 2X ETF,2.0,long,BA,known_symbol,active,True,NASDAQ
+BOEG,Themes ETF Trust Leverage Shares 2X Long BA Daily ETF,2.0,long,BA,known_symbol,active,True,NASDAQ
+WEBL,Direxion Daily Dow Jones Internet Bull 3X ETF,3.0,long,DOW,known_symbol,active,True,ARCA
+BLSG,Themes ETF Trust Leverage Shares 2X Long BLSH Daily ETF,2.0,long,BLSH,known_symbol,active,True,NASDAQ
+RTXG,Themes ETF Trust Leverage Shares 2X Long RTX Daily ETF,2.0,long,RTX,known_symbol,active,True,NASDAQ
+JNUG,Direxion Daily Junior Gold Miners Index Bull 2X ETF,2.0,long,GOLD,known_symbol,active,True,ARCA
+BMNG,Themes ETF Trust Leverage Shares 2X Long BMNR Daily ETF,2.0,long,BMNR,known_symbol,active,True,NASDAQ
+BMNU,T-REX 2X Long BMNR Daily Target ETF,2.0,long,BMNR,known_symbol,active,True,BATS
+BMNZ,Defiance Daily Target 2X Short BMNR ETF,2.0,short,BMNR,known_symbol,active,True,ARCA
+LOFD,Direxion Daily SpaceX Bear 2X ETF,2.0,short,SPACEX,weak_unconfirmed,active,True,ARCA
+BTDL,GraniteShares ETF Trust GraniteShares 2x Long BTDR Daily ETF,2.0,long,BTDR,known_symbol,active,True,NASDAQ
+BRZU,Direxion Daily MSCI Brazil Bull 2X ETF,2.0,long,MSCI,known_symbol,active,True,ARCA
+BRKU,Direxion Shares ETF Trust Direxion Daily BRKB Bull 2X ETF,2.0,long,BRKB,weak_unconfirmed,active,True,NASDAQ
+AAPE,Leverage Shares 2X Long AAPL Daily ETF,2.0,long,AAPL,known_symbol,active,True,BATS
+BBUL,GraniteShares ETF Trust GraniteShares 2x Long BB Daily ETF,2.0,long,BB,known_symbol,active,True,NASDAQ
+BIDG,Themes ETF Trust Leverage Shares 2X Long BIDU Daily ETF,2.0,long,BIDU,known_symbol,active,True,NASDAQ
+BEX,Tradr 2X Long BE Daily ETF,2.0,long,BE,known_symbol,active,True,BATS
+BEZ,Tradr 2X Short BE Daily ETF,2.0,short,BE,known_symbol,active,True,BATS
+CIEX,Tradr 2X Long CIEN Daily ETF,2.0,long,CIEN,known_symbol,active,True,BATS
+CIFG,Themes ETF Trust Leverage Shares 2X Long CIFR Daily ETF,2.0,long,CIFR,known_symbol,active,True,NASDAQ
+CIFU,T-REX 2X Long CIFR Daily Target ETF,2.0,long,CIFR,known_symbol,active,True,BATS
+CIEG,Leverage Shares 2X Long CIEN Daily ETF,2.0,long,CIEN,known_symbol,active,True,BATS
+CHAU,Direxion Daily CSI 300 China A Share Bull 2X ETF,2.0,long,CSI,weak_unconfirmed,active,True,ARCA
+COHQ,Tradr 2X Short COHR Daily ETF,2.0,short,COHR,known_symbol,active,True,BATS
+COIG,Themes ETF Trust Leverage Shares 2X Long COIN Daily ETF,2.0,long,COIN,known_symbol,active,True,NASDAQ
+CDNG,Leverage Shares 2X Long CDNS Daily ETF,2.0,long,CDNS,known_symbol,active,True,BATS
+CONI,GraniteShares ETF Trust GraniteShares 2x Short COIN Daily ETF,2.0,short,COIN,known_symbol,active,True,NASDAQ
+CONL,GraniteShares ETF Trust GraniteShares 2x Long COIN Daily ETF,2.0,long,COIN,known_symbol,active,True,NASDAQ
+CONX,Direxion Shares ETF Trust Direxion Daily COIN Bull 2X ETF,2.0,long,COIN,known_symbol,active,True,NASDAQ
+COPZ,Defiance Daily Target 2X Long Copper Miners ETF,2.0,long,COPPER,weak_unconfirmed,active,True,ARCA
+CORD,T-REX 2X Inverse CRWV Daily Target ETF,2.0,short,CRWV,known_symbol,active,True,BATS
+COZX,Tradr 2X Long CORZ Daily ETF,2.0,long,CORZ,known_symbol,active,True,BATS
+COTG,Themes ETF Trust Leverage Shares 2X Long COST Daily ETF,2.0,long,COST,known_symbol,active,True,NASDAQ
+CLSX,Tradr 2X Long CLSK Daily ETF,2.0,long,CLSK,known_symbol,active,True,BATS
+NUGT,Direxion Daily Gold Miners Index Bull 2X ETF,2.0,long,GOLD,known_symbol,active,True,ARCA
+CATG,Leverage Shares 2X Long CAT Daily ETF,2.0,long,CAT,known_symbol,active,True,BATS
+AALG,Themes ETF Trust Leverage Shares 2X Long AAL Daily ETF,2.0,long,AAL,known_symbol,active,True,NASDAQ
+INDL,Direxion Daily MSCI India Bull 2X ETF,2.0,long,MSCI,known_symbol,active,True,ARCA
+IBX,Tradr 2X Long IBM Daily ETF,2.0,long,IBM,known_symbol,active,True,BATS
+CCUP,T-REX 2X Long CRCL Daily Target ETF,2.0,long,CRCL,known_symbol,active,True,BATS
+CBRX,Tradr 2X Long CBRS Daily ETF,2.0,long,CBRS,known_symbol,active,True,BATS
+CBRZ,Tradr 2X Short CBRS Daily ETF,2.0,short,CBRS,known_symbol,active,True,BATS
+CBRG,Leverage Shares 2X Long CBRS Daily ETF,2.0,long,CBRS,known_symbol,active,True,BATS
+OKLL,Tidal Trust II Defiance Daily Target 2x Long OKLO ETF,2.0,long,OKLO,known_symbol,active,True,NASDAQ
+OKTG,Themes ETF Trust Leverage Shares 2X Long OKTA Daily ETF,2.0,long,OKTA,known_symbol,active,True,NASDAQ
+NXPX,Tradr 2X Long NXPI Daily ETF,2.0,long,NXPI,known_symbol,active,True,BATS
+OCNL,T-REX 2X Long DOCN Daily Target ETF,2.0,long,DOCN,known_symbol,active,True,BATS
+PANG,Themes ETF Trust Leverage Shares 2X Long PANW Daily ETF,2.0,long,PANW,known_symbol,active,True,NASDAQ
+PALU,Direxion Shares ETF Trust Direxion Daily PANW Bull 2X ETF,2.0,long,PANW,known_symbol,active,True,NASDAQ
+OPEX,Tradr 2X Long OPEN Daily ETF,2.0,long,OPEN,known_symbol,active,True,BATS
+OPEG,Themes ETF Trust Leverage Shares 2X Long OPEN Daily ETF,2.0,long,OPEN,known_symbol,active,True,NASDAQ
+ONX,Tradr 2X Long ON Daily ETF,2.0,long,ON,known_symbol,active,True,BATS
+ONG,Leverage Shares 2X Long ON Daily ETF,2.0,long,ON,known_symbol,active,True,BATS
+ONDU,Tradr 2X Long ONDS Daily ETF,2.0,long,ONDS,known_symbol,active,True,BATS
+ONDL,Defiance Daily Target 2X Long ONDS ETF,2.0,long,ONDS,known_symbol,active,True,BATS
+ONDG,Themes ETF Trust Leverage Shares 2X Long ONDS Daily ETF,2.0,long,ONDS,known_symbol,active,True,NASDAQ
+OSSL,Defiance Daily Target 2X Long OSS ETF,2.0,long,OSS,known_symbol,active,True,BATS
+ORCX,Tidal Trust II Defiance Daily Target 2X Long ORCL ETF,2.0,long,ORCL,known_symbol,active,True,NASDAQ
+NXPG,Leverage Shares 2X Long NXPI Daily ETF,2.0,long,NXPI,known_symbol,active,True,BATS
+NIOG,Themes ETF Trust Leverage Shares 2X Long NIO Daily ETF,2.0,long,NIO,known_symbol,active,True,NASDAQ
+NFLU,T-Rex 2X Long NFLX Daily Target ETF,2.0,long,NFLX,known_symbol,active,True,BATS
+NEMG,Themes ETF Trust Leverage Shares 2x Long NEM Daily ETF,2.0,long,NEM,known_symbol,active,True,NASDAQ
+NVDU,Direxion Shares ETF Trust Direxion Daily NVDA Bull 2X ETF,2.0,long,NVDA,known_symbol,active,True,NASDAQ
+NVDS,Investment Managers Series Trust II Tradr 1.5X Short NVDA Daily ETF,1.5,short,NVDA,known_symbol,active,True,NASDAQ
+NVD,GraniteShares ETF Trust GraniteShares 2x Short NVDA Daily ETF,2.0,short,NVDA,known_symbol,active,True,NASDAQ
+NVDX,T-Rex 2X Long NVIDIA Daily Target ETF,2.0,long,NVDA,alias,active,True,BATS
+NUG,Themes ETF Trust Leverage Shares 2X Long NU Daily ETF,2.0,long,NU,known_symbol,active,True,NASDAQ
+NVTX,Tradr 2X Long NVTS Daily ETF,2.0,long,NVTS,known_symbol,active,True,BATS
+NVOX,Defiance Daily Target 2x Long NVO ETF,2.0,long,NVO,known_symbol,active,True,ARCA
+JOBX,Tradr 2X Long JOBY Daily ETF,2.0,long,JOBY,known_symbol,active,True,BATS
+NTAL,GraniteShares ETF Trust GraniteShares 2x Long NTAP Daily ETF,2.0,long,NTAP,known_symbol,active,True,NASDAQ
+AVXX,Tidal Trust II Defiance Daily Target 2x Long AVAV ETF,2.0,long,AVAV,known_symbol,active,True,NASDAQ
+PTIR,GraniteShares ETF Trust GraniteShares 2x Long PLTR Daily ETF,2.0,long,PLTR,known_symbol,active,True,NASDAQ
+PUR,Tidal Trust II Defiance Daily Target 2X Long PURR ETF,2.0,long,PURR,known_symbol,active,True,NASDAQ
+QPUX,Tidal Trust II Defiance 2X Daily Long Pure Quantum ETF,2.0,long,PURE,known_symbol,active,True,NASDAQ
+QNTU,Tradr 2X Long QNT Daily ETF,2.0,long,QNT,known_symbol,active,True,BATS
+PYPU,Direxion Daily PYPL Bull 2X ETF,2.0,long,PYPL,known_symbol,active,True,ARCA
+QCMU,Direxion Shares ETF Trust Direxion Daily QCOM Bull 2X ETF,2.0,long,QCOM,known_symbol,active,True,NASDAQ
+QCML,GraniteShares ETF Trust GraniteShares 2x Long QCOM Daily ETF,2.0,long,QCOM,known_symbol,active,True,NASDAQ
+QBTZ,Tidal Trust II Defiance Daily Target 2x Short QBTS ETF,2.0,short,QBTS,known_symbol,active,True,NASDAQ
+QBTX,Tradr 2X Long QBTS Daily ETF,2.0,long,QBTS,known_symbol,active,True,BATS
+PENU,T-REX 2X Long PENG Daily Target ETF,2.0,long,PENG,known_symbol,active,True,BATS
+PBRG,Themes ETF Trust Leverage Shares 2X Long PBR Daily ETF,2.0,long,PBR,known_symbol,active,True,NASDAQ
+POEL,Defiance Daily Target 2X Long POET ETF,2.0,long,POET,known_symbol,active,True,BATS
+PLUL,Themes ETF Trust Leverage Shares 2X Long PLUG Daily ETF,2.0,long,PLUG,known_symbol,active,True,NASDAQ
+PLU,Defiance Daily Target 2x Long PL ETF,2.0,long,PL,known_symbol,active,True,BATS
+PLTZ,Tidal Trust II Defiance Daily Target 2x Short PLTR ETF,2.0,short,PLTR,known_symbol,active,True,NASDAQ
+PLTU,Direxion Shares ETF Trust Direxion Daily PLTR Bull 2X ETF,2.0,long,PLTR,known_symbol,active,True,NASDAQ
+PLTG,Themes ETF Trust Leverage Shares 2X Long PLTR Daily ETF,2.0,long,PLTR,known_symbol,active,True,NASDAQ
+NBIZ,Tradr 2X Short NBIS Daily ETF,2.0,short,NBIS,known_symbol,active,True,BATS
+LEUX,Tradr 2X Long LEU Daily ETF,2.0,long,LEU,known_symbol,active,True,BATS
+KPDD,KraneShares Trust KraneShares 2x Long PDD Daily ETF,2.0,long,PDD,known_symbol,active,True,NASDAQ
+KTUP,T-REX 2X Long KTOS Daily Target ETF,2.0,long,KTOS,known_symbol,active,True,BATS
+AXTQ,Tradr 2X Short AXTI Daily ETF,2.0,short,AXTI,known_symbol,active,True,BATS
+LOFF,Direxion Daily SpaceX Bull 2X ETF,2.0,long,SPACEX,weak_unconfirmed,active,True,ARCA
+LNOK,Defiance Daily Target 2X Long NOK ETF,2.0,long,NOK,known_symbol,active,True,BATS
+LRCU,Tradr 2X Long LRCX Daily ETF,2.0,long,LRCX,known_symbol,active,True,BATS
+LMTL,Direxion Shares ETF Trust Direxion Daily LMT Bull 2X ETF,2.0,long,LMT,known_symbol,active,True,NASDAQ
+LLYX,Defiance Daily Target 2x Long LLY ETF,2.0,long,LLY,known_symbol,active,True,ARCA
+LITZ,Tradr 2X Short LITE Daily ETF,2.0,short,LITE,known_symbol,active,True,BATS
+LITX,Tradr 2X Long LITE Daily ETF,2.0,long,LITE,known_symbol,active,True,BATS
+LITU,T-REX 2X Long LITE Daily Target ETF,2.0,long,LITE,known_symbol,active,True,BATS
+LITG,Leverage Shares 2X Long LITE Daily ETF,2.0,long,LITE,known_symbol,active,True,BATS
+LINT,Direxion Shares ETF Trust Direxion Daily INTC Bull 2X ETF,2.0,long,INTC,known_symbol,active,True,NASDAQ
+AXTX,Tradr 2X Long AXTI Daily ETF,2.0,long,AXTI,known_symbol,active,True,BATS
+BABU,Direxion Shares ETF Trust Direxion Daily BABA Bull 2X ETF,2.0,long,BABA,known_symbol,active,True,NASDAQ
+BAIG,Themes ETF Trust Leverage Shares 2X Long BBAI Daily ETF,2.0,long,BBAI,known_symbol,active,True,NASDAQ
+KEYG,Leverage Shares 2X Long KEYS Daily ETF,2.0,long,KEYS,known_symbol,active,True,BATS
+KEEX,Defiance Daily Target 2x Long KEEL ETF,2.0,long,KEEL,known_symbol,active,True,BATS
+KMLI,KraneShares Trust KraneShares 2x Long MELI Daily ETF,2.0,long,MELI,known_symbol,active,True,NASDAQ
+KLAG,Themes ETF Trust Leverage Shares 2x Long KLAC Daily ETF,2.0,long,KLAC,known_symbol,active,True,NASDAQ
+KJD,KraneShares Trust KraneShares 2x Long JD Daily ETF,2.0,long,JD,known_symbol,active,True,NASDAQ
+AXTU,T-REX 2X Long AXTI Daily Target ETF,2.0,long,AXTI,known_symbol,active,True,BATS
+KBDU,KraneShares 2x Long BIDU Daily ETF,2.0,long,BIDU,known_symbol,active,True,NASDAQ
+KBAB,KraneShares Trust KraneShares 2x Long BABA Daily ETF,2.0,long,BABA,known_symbol,active,True,NASDAQ
+NBIG,Themes ETF Trust Leverage Shares 2X Long NBIS Daily ETF,2.0,long,NBIS,known_symbol,active,True,NASDAQ
+MSFU,Direxion Shares ETF Trust Direxion Daily MSFT Bull 2X ETF,2.0,long,MSFT,known_symbol,active,True,NASDAQ
+MSFL,GraniteShares ETF Trust GraniteShares 2x Long MSFT Daily ETF,2.0,long,MSFT,known_symbol,active,True,NASDAQ
+MSTZ,T-Rex 2X Inverse MSTR Daily Target ETF,2.0,short,MSTR,known_symbol,active,True,BATS
+MSTX,Tidal Trust II Defiance Daily Target 2x Long MSTR ETF,2.0,long,MSTR,known_symbol,active,True,NASDAQ
+MSTU,T-Rex 2X Long MSTR Daily Target ETF,2.0,long,MSTR,known_symbol,active,True,BATS
+MSTP,GraniteShares ETF Trust GraniteShares 2x Long MSTR Daily ETF,2.0,long,MSTR,known_symbol,active,True,NASDAQ
+MRVU,Direxion Shares ETF Trust Direxion Daily MRVL Bull 2X ETF,2.0,long,MRVL,known_symbol,active,True,NASDAQ
+MRAX,Tradr 2X Long MRAM Daily ETF,2.0,long,MRAM,known_symbol,active,True,BATS
+MRAL,GraniteShares ETF Trust GraniteShares 2x Long MARA Daily ETF,2.0,long,MARA,known_symbol,active,True,NASDAQ
+MPWX,Tradr 2X Long MPWR Daily ETF,2.0,long,MPWR,known_symbol,active,True,BATS
+MULL,GraniteShares ETF Trust GraniteShares 2x Long MU Daily ETF,2.0,long,MU,known_symbol,active,True,NASDAQ
+MUG,Leverage Shares 2X Long MU Daily ETF,2.0,long,MU,known_symbol,active,True,BATS
+MTSG,Leverage Shares 2X Long MTSI Daily ETF,2.0,long,MTSI,known_symbol,active,True,BATS
+MUU,Direxion Shares ETF Trust Direxion Daily MU Bull 2X ETF,2.0,long,MU,known_symbol,active,True,NASDAQ
+MXLL,Leverage Shares 2X Long MXL Daily ETF,2.0,long,MXL,known_symbol,active,True,BATS
+MVLL,GraniteShares ETF Trust GraniteShares 2x Long MRVL Daily ETF,2.0,long,MRVL,known_symbol,active,True,NASDAQ
+MUZ,Defiance Daily Target 2X Short MU ETF,2.0,short,MU,known_symbol,active,True,ARCA
+MCHG,Leverage Shares 2X Long MCHP Daily ETF,2.0,long,MCHP,known_symbol,active,True,BATS
+LWLX,Tradr 2X Long LWLG Daily ETF,2.0,long,LWLG,known_symbol,active,True,BATS
+LUNL,Defiance Daily Target 2X Long LUNR ETF,2.0,long,LUNR,known_symbol,active,True,BATS
+LULG,Themes ETF Trust Leverage Shares 2X Long LULU Daily ETF,2.0,long,LULU,known_symbol,active,True,NASDAQ
+MAGX,Roundhill Daily 2X Long Magnificent Seven ETF,2.0,long,SEVEN,weak_unconfirmed,active,True,BATS
+MIDU,Direxion Daily Mid Cap Bull 3X ETF,3.0,long,MID,known_symbol,active,True,ARCA
+MEXX,Direxion Daily MSCI Mexico Bull 3X ETF,3.0,long,MSCI,known_symbol,active,True,ARCA
+METU,Direxion Shares ETF Trust Direxion Daily META Bull 2X ETF,2.0,long,META,known_symbol,active,True,NASDAQ
+METQ,Tradr 2X Short META Daily ETF,2.0,short,META,known_symbol,active,True,BATS
+METG,Leverage Shares 2X Long META Daily ETF,2.0,long,META,known_symbol,active,True,BATS
+GMEU,T-REX 2X Long GME Daily Target ETF,2.0,long,GME,known_symbol,active,True,BATS
+TMV,Direxion Daily 20+ Year Treasury Bear 3X ETF,3.0,short,YEAR,known_symbol,active,True,ARCA
+TNA,Direxion Daily Small Cap Bull 3x ETF,3.0,long,SMALL,weak_unconfirmed,active,True,ARCA
+UBRL,GraniteShares ETF Trust GraniteShares 2x Long UBER Daily ETF,2.0,long,UBER,known_symbol,active,True,NASDAQ
+TZA,Direxion Daily Small Cap Bear 3x ETF,3.0,short,SMALL,weak_unconfirmed,active,True,ARCA
+TYO,Direxion Daily 7-10 Year Treasury Bear 3X ETF,3.0,short,YEAR,known_symbol,active,True,ARCA
+TYD,Direxion Daily 7-10 Year Treasury Bull 3X ETF,3.0,long,YEAR,known_symbol,active,True,ARCA
+TSMX,Direxion Shares ETF Trust Direxion Daily TSM Bull 2X ETF,2.0,long,TSM,known_symbol,active,True,NASDAQ
+TSLT,T-REX 2X Long Tesla Daily Target ETF,2.0,long,TSLA,alias,active,True,BATS
+TSLR,GraniteShares ETF Trust GraniteShares 2x Long TSLA Daily ETF,2.0,long,TSLA,known_symbol,active,True,NASDAQ
+TSLQ,Investment Managers Series Trust II Tradr 2X Short TSLA Daily ETF,2.0,short,TSLA,known_symbol,active,True,NASDAQ
+TSLG,Themes ETF Trust Leverage Shares 2X Long TSLA Daily ETF,2.0,long,TSLA,known_symbol,active,True,NASDAQ
+TSEU,Tradr 2X Long TSEM Daily ETF,2.0,long,TSEM,known_symbol,active,True,BATS
+TSDD,GraniteShares ETF Trust GraniteShares 2x Short TSLA Daily ETF,2.0,short,TSLA,known_symbol,active,True,NASDAQ
+ANEL,Tidal Trust II Defiance Daily Target 2x Long ANET ETF,2.0,long,ANET,known_symbol,active,True,NASDAQ
+TTXD,Direxion Daily Technology Top 5 Bear 2X ETF,2.0,short,TOP,known_symbol,active,True,ARCA
+TTMX,Tradr 2X Long TTMI Daily ETF,2.0,long,TTMI,known_symbol,active,True,BATS
+TTDU,T-REX 2X Long TTD Daily Target ETF,2.0,long,TTD,known_symbol,active,True,BATS
+TSXU,Direxion Daily Semiconductors Top 5 Bull 2X ETF,2.0,long,TOP,known_symbol,active,True,ARCA
+TSXD,Direxion Daily Semiconductors Top 5 Bear 2X ETF,2.0,short,TOP,known_symbol,active,True,ARCA
+SHPU,Direxion Shares ETF Trust Direxion Daily SHOP Bull 2X ETF,2.0,long,SHOP,known_symbol,active,True,NASDAQ
+BABX,GraniteShares ETF Trust GraniteShares 2x Long BABA Daily ETF,2.0,long,BABA,known_symbol,active,True,NASDAQ
+TDCL,GraniteShares ETF Trust GraniteShares 2x Long TDC Daily ETF,2.0,long,TDC,known_symbol,active,True,NASDAQ
+ASMU,Direxion Shares ETF Trust Direxion Daily ASML Bull 2X ETF,2.0,long,ASML,known_symbol,active,True,NASDAQ
+TEMT,Tradr 2X Long TEM Daily ETF,2.0,long,TEM,known_symbol,active,True,BATS
+TELG,Leverage Shares 2X Long TEL Daily ETF,2.0,long,TEL,known_symbol,active,True,BATS
+TEXU,Direxion Daily Energy Top 5 Bull 2X ETF,2.0,long,TOP,known_symbol,active,True,ARCA
+TEUP,T-REX 2X Long TE Daily Target ETF,2.0,long,TE,known_symbol,active,True,BATS
+TERG,Themes ETF Trust Leverage Shares 2X Long TER Daily ETF,2.0,long,TER,known_symbol,active,True,NASDAQ
+AMZG,Leverage Shares 2X Long AMZN Daily ETF,2.0,long,AMZN,known_symbol,active,True,BATS
+GLGG,Themes ETF Trust Leverage Shares 2X Long GLXY Daily ETF,2.0,long,GLXY,known_symbol,active,True,NASDAQ
+AMZO,Tradr 2X Short AMZN Daily ETF,2.0,short,AMZN,known_symbol,active,True,BATS
+AMPU,Defiance Daily Target 2X Long AMPX ETF,2.0,long,AMPX,known_symbol,active,True,BATS
+AMUU,Direxion Shares ETF Trust Direxion Daily AMD Bull 2X ETF,2.0,long,AMD,known_symbol,active,True,NASDAQ
+VIAG,Leverage Shares 2X Long VIAV Daily ETF,2.0,long,VIAV,known_symbol,active,True,BATS
+AMZU,Direxion Shares ETF Trust Direxion Daily AMZN Bull 2X ETF,2.0,long,AMZN,known_symbol,active,True,NASDAQ
+GEVG,Themes ETF Trust Leverage Shares 2X Long GEV Daily ETF,2.0,long,GEV,known_symbol,active,True,NASDAQ
+AMAU,Leverage Shares 2X Long AMAT Daily ETF,2.0,long,AMAT,known_symbol,active,True,BATS
+GEVX,Tradr 2X Long GEV Daily ETF,2.0,long,GEV,known_symbol,active,True,BATS
+GFSG,Leverage Shares 2X Long GFS Daily ETF,2.0,long,GFS,known_symbol,active,True,BATS
+GGLL,Direxion Shares ETF Trust Direxion Daily GOOGL Bull 2X ETF,2.0,long,GOOGL,known_symbol,active,True,NASDAQ
+AMA,Tidal Trust II Defiance Daily Target 2X Long AMAT ETF,2.0,long,AMAT,known_symbol,active,True,NASDAQ
+GEMG,Themes ETF Trust Leverage Shares 2X Long GEMI Daily ETF,2.0,long,GEMI,known_symbol,active,True,NASDAQ
+NOWL,GraniteShares ETF Trust GraniteShares 2x Long NOW Daily ETF,2.0,long,NOW,known_symbol,active,True,NASDAQ
+AEHG,Leverage Shares 2X Long AEHR Daily ETF,2.0,long,AEHR,known_symbol,active,True,BATS
+AMKL,Defiance Daily Target 2X Long AMKR ETF,2.0,long,AMKR,known_symbol,active,True,BATS
+NETG,Themes ETF Trust Leverage Shares 2X Long NET Daily ETF,2.0,long,NET,known_symbol,active,True,NASDAQ
+AMDL,GraniteShares ETF Trust GraniteShares 2x Long AMD Daily ETF,2.0,long,AMD,known_symbol,active,True,NASDAQ
+USAX,Tradr 2X Long USAR Daily ETF,2.0,long,USAR,known_symbol,active,True,BATS
+AMZZ,GraniteShares ETF Trust GraniteShares 2x Long AMZN Daily ETF,2.0,long,AMZN,known_symbol,active,True,NASDAQ
+XOVL,Defiance Daily Target 2X Long XOVR ETF,2.0,long,XOVR,known_symbol,active,True,BATS
+XOMX,Direxion Shares ETF Trust Direxion Daily XOM Bull 2X ETF,2.0,long,XOM,known_symbol,active,True,NASDAQ
+UMAL,Defiance Daily Target 2X Long UMAC ETF,2.0,long,UMAC,known_symbol,active,True,BATS
+GLXU,T-REX 2X Long GLXY Daily Target ETF,2.0,long,GLXY,known_symbol,active,True,BATS
+UGLD,DIREXION DAILY GOLD BULL 2X ETF,2.0,long,GOLD,known_symbol,active,True,ARCA
+UECG,Themes ETF Trust Leverage Shares 2x Long UEC Daily ETF,2.0,long,UEC,known_symbol,active,True,NASDAQ
+UMCU,Tradr 2X Long UMC Daily ETF,2.0,long,UMC,known_symbol,active,True,BATS
+GLWG,Themes ETF Trust Leverage Shares 2X Long GLW Daily ETF,2.0,long,GLW,known_symbol,active,True,NASDAQ
+UPSX,Tradr 2X Long UPST Daily ETF,2.0,long,UPST,known_symbol,active,True,BATS
+UNHU,Direxion Daily UNH Bull 2X ETF,2.0,long,UNH,known_symbol,active,True,ARCA
+XPEG,Themes ETF Trust Leverage Shares 2X Long XPEV Daily ETF,2.0,long,XPEV,known_symbol,active,True,NASDAQ
+XYZG,Themes ETF Trust Leverage Shares 2X Long XYZ Daily ETF,2.0,long,XYZ,known_symbol,active,True,NASDAQ
+XXRP,Teucrium 2x Long Daily XRP ETF,2.0,long,XRP,known_symbol,active,True,ARCA
+DPST,Direxion Daily Regional Banks Bull 3X ETF,3.0,long,BANKS,weak_unconfirmed,active,True,ARCA
+DRAL,Defiance Daily Target 2X Long DRAM ETF,2.0,long,DRAM,known_symbol,active,True,BATS
+DRIP,Direxion Daily S&P Oil & Gas Exp. & Prod. Bear 2X ETF,2.0,short,OIL,known_symbol,active,True,ARCA
+DRN,Direxion Daily Real Estate Bull 3X ETF,3.0,long,REAL,known_symbol,active,True,ARCA
+DRV,Direxion Daily Real Estate Bear 3X ETF,3.0,short,REAL,known_symbol,active,True,ARCA
+DJTU,T-REX 2X Long DJT Daily Target ETF,2.0,long,DJT,known_symbol,active,True,BATS
+DLLL,GraniteShares ETF Trust GraniteShares 2x Long DELL Daily ETF,2.0,long,DELL,known_symbol,active,True,NASDAQ
+EDC,Direxion Daily MSCI Emerging Markets Bull 3X ETF,3.0,long,MSCI,known_symbol,active,True,ARCA
+AAOZ,Tradr 2X Short AAOI Daily ETF,2.0,short,AAOI,known_symbol,active,True,BATS
+AAPB,GraniteShares ETF Trust GraniteShares 2x Long AAPL Daily ETF,2.0,long,AAPL,known_symbol,active,True,NASDAQ
+GRAG,Themes ETF Trust Leverage Shares 2X Long GRAB Daily ETF,2.0,long,GRAB,known_symbol,active,True,NASDAQ
+SPAX,T-REX 2X Long SPCX Daily Target ETF,2.0,long,SPCX,known_symbol,active,True,ARCA
+TSLL,Direxion Shares ETF Trust Direxion Daily TSLA Bull 2X ETF,2.0,long,TSLA,known_symbol,active,True,NASDAQ
+COHH,Leverage Shares 2X Long COHR Daily ETF,2.0,long,COHR,known_symbol,active,True,BATS
+AIBU,Direxion Daily AI and Big Data Bull 2X ETF,2.0,long,AI,known_symbol,active,True,ARCA
+IRE,Defiance Daily Target 2X Long IREN ETF,2.0,long,IREN,known_symbol,active,True,ARCA
+ADBU,Direxion Daily ADBE Bull 2X ETF,2.0,long,ADBE,known_symbol,active,True,ARCA
+DUST,Direxion Daily Gold Miners Index Bear 2X ETF,2.0,short,GOLD,known_symbol,active,True,ARCA
+AAOG,Leverage Shares 2X Long AAOI Daily ETF,2.0,long,AAOI,known_symbol,active,True,BATS
+ECHX,Themes ETF Trust Leverage Shares 2X Long ECHO Daily ETF,2.0,long,ECHO,known_symbol,active,True,NASDAQ
+AAOX,Tradr 2X Long AAOI Daily ETF,2.0,long,AAOI,known_symbol,active,True,BATS
+NBIL,GraniteShares ETF Trust GraniteShares 2x Long NBIS Daily ETF,2.0,long,NBIS,known_symbol,active,True,NASDAQ
+CRCD,T-REX 2X Inverse CRCL Daily Target ETF,2.0,short,CRCL,known_symbol,active,True,BATS
+CRCG,Themes ETF Trust Leverage Shares 2X Long CRCL Daily ETF,2.0,long,CRCL,known_symbol,active,True,NASDAQ
+CRWU,T-REX 2X Long CRWV Daily Target ETF,2.0,long,CRWV,known_symbol,active,True,BATS
+CRWG,Themes ETF Trust Leverage Shares 2X Long CRWV Daily ETF,2.0,long,CRWV,known_symbol,active,True,NASDAQ
+CRWL,GraniteShares ETF Trust GraniteShares 2x Long CRWD Daily ETF,2.0,long,CRWD,known_symbol,active,True,NASDAQ
+CSCL,Direxion Shares ETF Trust Direxion Daily CSCO Bull 2X ETF,2.0,long,CSCO,known_symbol,active,True,NASDAQ
+CSEX,Tradr 2X Long CLS Daily ETF,2.0,long,CLS,known_symbol,active,True,BATS
+CRDU,Tradr 2X Long CRDO Daily ETF,2.0,long,CRDO,known_symbol,active,True,BATS
+CRMG,Themes ETF Trust Leverage Shares 2X Long CRM Daily ETF,2.0,long,CRM,known_symbol,active,True,NASDAQ
+CRMU,Themes ETF Trust Leverage Shares 2x Long CRML Daily ETF,2.0,long,CRML,known_symbol,active,True,NASDAQ
+CRMX,Tradr 2X Long CRML Daily ETF,2.0,long,CRML,known_symbol,active,True,BATS
+CWVX,Tradr 2X Long CRWV Daily ETF,2.0,long,CRWV,known_symbol,active,True,BATS
+APPX,Investment Managers Series Trust II Tradr 2X Long APP Daily ETF,2.0,long,APP,known_symbol,active,True,NASDAQ
+FLYT,Tradr 2X Long FLY Daily ETF,2.0,long,FLY,known_symbol,active,True,BATS
+FLEL,Leverage Shares 2X Long FLEX Daily ETF,2.0,long,FLEX,known_symbol,active,True,BATS
+NEBX,Tradr 2X Long NBIS Daily ETF,2.0,long,NBIS,known_symbol,active,True,BATS
+FPSX,Leverage Shares 2X Long FPS Daily ETF,2.0,long,FPS,known_symbol,active,True,BATS
+FNGG,Direxion Daily NYSE FANG+ Bull 2X ETF,2.0,long,FANG,known_symbol,active,True,ARCA
+FOMG,Leverage Shares 2X Long FORM Daily ETF,2.0,long,FORM,known_symbol,active,True,BATS
+LABX,Tradr 2X Long ALAB Daily ETF,2.0,long,ALAB,known_symbol,active,True,BATS
+FGRU,T-REX 2X Long FIGR Daily Target ETF,2.0,long,FIGR,known_symbol,active,True,BATS
+ALBG,Themes ETF Trust Leverage Shares 2X Long ALB Daily ETF,2.0,long,ALB,known_symbol,active,True,NASDAQ
+FIXX,Leverage Shares 2X Long FIX Daily ETF,2.0,long,FIX,known_symbol,active,True,BATS
+ADBG,Themes ETF Trust Leverage Shares 2X Long ADBE Daily ETF,2.0,long,ADBE,known_symbol,active,True,NASDAQ
+PATX,Tradr 2X Long PATH Daily ETF,2.0,long,PATH,known_symbol,active,True,BATS
+ASUP,T-REX 2X Long ASTS Daily Target ETF,2.0,long,ASTS,known_symbol,active,True,BATS
+XNDX,Tradr 2X Long XNDU Daily ETF,2.0,long,XNDU,known_symbol,active,True,BATS
+FUTG,Themes ETF Trust Leverage Shares 2x Long FUTU Daily ETF,2.0,long,FUTU,known_symbol,active,True,NASDAQ
+ELIL,Direxion Shares ETF Trust Direxion Daily LLY Bull 2X ETF,2.0,long,LLY,known_symbol,active,True,NASDAQ
+ENTL,Leverage Shares 2X Long ENTG Daily ETF,2.0,long,ENTG,known_symbol,active,True,BATS
+EOSU,T-REX 2X Long EOSE Daily Target ETF,2.0,long,EOSE,known_symbol,active,True,BATS
+AAPU,Direxion Shares ETF Trust Direxion Daily AAPL Bull 2X ETF,2.0,long,AAPL,known_symbol,active,True,NASDAQ
+AAPX,T-Rex 2X Long Apple Daily Target ETF,2.0,long,AAPL,alias,active,True,BATS
+EDZ,Direxion Daily MSCI Emerging Markets Bear 3X ETF,3.0,short,MSCI,known_symbol,active,True,ARCA
+ERX,Direxion Daily Energy Bull 2X ETF,2.0,long,ENERGY,weak_unconfirmed,active,True,ARCA
+FBL,GraniteShares ETF Trust GraniteShares 2x Long META Daily ETF,2.0,long,META,known_symbol,active,True,NASDAQ
+ERY,Direxion Daily Energy Bear 2X ETF,2.0,short,ENERGY,weak_unconfirmed,active,True,ARCA
+FCXG,Themes ETF Trust Leverage Shares 2x Long FCX Daily ETF,2.0,long,FCX,known_symbol,active,True,NASDAQ
+ETNG,Leverage Shares 2X Long ETN Daily ETF,2.0,long,ETN,known_symbol,active,True,BATS
+EURL,Direxion Daily FTSE Europe Bull 3x ETF,3.0,long,FTSE,weak_unconfirmed,active,True,ARCA
+EVMU,DIREXION DAILY ETHER BULL 2X ETF,2.0,long,ETHER,weak_unconfirmed,active,True,ARCA
+CWEB,Direxion Daily CSI China Internet Index Bull 2X ETF,2.0,long,CSI,weak_unconfirmed,active,True,ARCA
+SMU,Tradr 2X Long SMR Daily ETF,2.0,long,SMR,known_symbol,active,True,BATS
+SMUP,T-REX 2X Long SMR Daily Target ETF,2.0,long,SMR,known_symbol,active,True,BATS
+NVDG,Themes ETF Trust Leverage Shares 2X Long NVDA Daily ETF,2.0,long,NVDA,known_symbol,active,True,NASDAQ
+SMST,Tidal Trust II Defiance Daily Target 2x Short MSTR ETF,2.0,short,MSTR,known_symbol,active,True,NASDAQ
+SMTG,Leverage Shares 2X Long SMTC Daily ETF,2.0,long,SMTC,known_symbol,active,True,BATS
+BEG,Themes ETF Trust Leverage Shares 2x Long BE Daily ETF,2.0,long,BE,known_symbol,active,True,NASDAQ
+TBXU,Direxion Daily Biotech Top 5 Bull 2X ETF,2.0,long,TOP,known_symbol,active,True,ARCA
+DAMD,Defiance Daily Target 2X Short AMD ETF,2.0,short,AMD,known_symbol,active,True,ARCA
+APHU,T-REX 2X Long APH Daily Target ETF,2.0,long,APH,known_symbol,active,True,BATS
+TTXU,Direxion Daily Technology Top 5 Bull 2X ETF,2.0,long,TOP,known_symbol,active,True,ARCA
+TSMU,GraniteShares ETF Trust GraniteShares 2x Long TSM Daily ETF,2.0,long,TSM,known_symbol,active,True,NASDAQ
+TSMG,Themes ETF Trust Leverage Shares 2X Long TSM Daily ETF,2.0,long,TSM,known_symbol,active,True,NASDAQ
+TSLZ,T-Rex 2X Inverse Tesla Daily Target ETF,2.0,short,TSLA,alias,active,True,BATS
+USLV,DIREXION DAILY SILVER BULL 2X ETF,2.0,long,SILVER,weak_unconfirmed,active,True,ARCA
+VALG,Themes ETF Trust Leverage Shares 2X Long VALE Daily ETF,2.0,long,VALE,known_symbol,active,True,NASDAQ
+WDCX,Tradr 2X Long WDC Daily ETF,2.0,long,WDC,known_symbol,active,True,BATS
+VELL,Defiance Daily Target 2X Long VELO ETF,2.0,long,VELO,known_symbol,active,True,BATS
+USGG,Themes ETF Trust Leverage Shares 2X Long USAR Daily ETF,2.0,long,USAR,known_symbol,active,True,NASDAQ
+MRNX,Defiance Daily Target 2X Long MRNA ETF,2.0,long,MRNA,known_symbol,active,True,ARCA
+UUUG,Themes ETF Trust Leverage Shares 2X Long UUUU Daily ETF,2.0,long,UUUU,known_symbol,active,True,NASDAQ
+MPG,Themes ETF Trust Leverage Shares 2X Long MP Daily ETF,2.0,long,MP,known_symbol,active,True,NASDAQ
+YINN,Direxion Daily FTSE China Bull 3X ETF,3.0,long,FTSE,weak_unconfirmed,active,True,ARCA
+WEBS,Direxion Daily Dow Jones Internet Bear 3X ETF,3.0,short,DOW,known_symbol,active,True,ARCA
+WULX,Tradr 2X Long WULF Daily ETF,2.0,long,WULF,known_symbol,active,True,BATS
+YANG,Direxion Daily FTSE China Bear 3X ETF,3.0,short,FTSE,weak_unconfirmed,active,True,ARCA
+WYFL,Defiance Daily Target 2X Long WYFI ETF,2.0,long,WYFI,known_symbol,active,True,BATS
+VRTL,GraniteShares ETF Trust GraniteShares 2x Long VRT Daily ETF,2.0,long,VRT,known_symbol,active,True,NASDAQ
+XBNB,Teucrium xETFs 2x Long Daily BNB ETF,2.0,long,XETFS,weak_unconfirmed,active,True,ARCA
+VSTL,Tidal Trust II Defiance Daily Target 2X Long VST ETF,2.0,long,VST,known_symbol,active,True,NASDAQ
+RDTL,GraniteShares ETF Trust GraniteShares 2x Long RDDT Daily ETF,2.0,long,RDDT,known_symbol,active,True,NASDAQ
+WLDU,Leverage Shares 2x Long World Stock Daily ETF,2.0,long,WORLD,weak_unconfirmed,active,True,BATS
+AMDG,Themes ETF Trust Leverage Shares 2X Long AMD Daily ETF,2.0,long,AMD,known_symbol,active,True,NASDAQ
+OSCX,Tidal Trust II Defiance Daily Target 2x Long OSCR ETF,2.0,long,OSCR,known_symbol,active,True,NASDAQ
+SKHQ,Leverage Shares 2X Short Sk Hynix Daily ETF,2.0,short,SK,known_symbol,active,True,BATS
+SOFX,Tidal Trust II Defiance Daily Target 2X Long SOFI ETF,2.0,long,SOFI,known_symbol,active,True,NASDAQ
+SOFA,Direxion Shares ETF Trust Direxion Daily SOFI Bull 2X ETF,2.0,long,SOFI,known_symbol,active,True,NASDAQ
+STLL,Leverage Shares 2X Long STRL Daily ETF,2.0,long,STRL,known_symbol,active,True,BATS
+STMX,Leverage Shares 2X Long STM Daily ETF,2.0,long,STM,known_symbol,active,True,BATS
+SITX,Tradr 2X Long SITM Daily ETF,2.0,long,SITM,known_symbol,active,True,BATS
+SMCL,GraniteShares ETF Trust GraniteShares 2x Long SMCI Daily ETF,2.0,long,SMCI,known_symbol,active,True,NASDAQ
+SMCX,Tidal Trust II Defiance Daily Target 2X Long SMCI ETF,2.0,long,SMCI,known_symbol,active,True,NASDAQ
+SKHX,Leverage Shares 2X Long SK Hynix Daily ETF,2.0,long,SK,known_symbol,active,True,BATS
+STSM,Defiance Daily Target 2X Short TSM ETF,2.0,short,TSM,known_symbol,active,True,ARCA
+SKHN,Tradr 2X Short SK hynix Daily ETF,2.0,short,SK,known_symbol,active,True,BATS
+TXNU,Direxion Daily TXN Bull 2X ETF,2.0,long,TXN,known_symbol,active,True,ARCA
+SMZ,Tradr 2X Short SMR Daily ETF,2.0,short,SMR,known_symbol,active,True,BATS
+SNAG,Themes ETF Trust Leverage Shares 2x Long SNAP Daily ETF,2.0,long,SNAP,known_symbol,active,True,NASDAQ
+SKDD,GraniteShares ETF Trust GraniteShares 2x Short SK Hynix Daily ETF,2.0,short,SK,known_symbol,active,True,NASDAQ
+SNDG,Leverage Shares 2X Long SNDK Daily ETF,2.0,long,SNDK,known_symbol,active,True,BATS
+SKHL,Direxion Daily SK Hynix Bull 2X ETF,2.0,long,SK,known_symbol,active,True,ARCA
+SNXX,Tradr 2X Long SNDK Daily ETF,2.0,long,SNDK,known_symbol,active,True,BATS
+SNDQ,Tradr 2X Short SNDK Daily ETF,2.0,short,SNDK,known_symbol,active,True,BATS
+SNDU,T-REX 2X Long SNDK Daily Target ETF,2.0,long,SNDK,known_symbol,active,True,BATS
+SKHA,Tradr 2X Long SK hynix Daily ETF,2.0,long,SK,known_symbol,active,True,BATS
+SNOU,T-REX 2X Long SNOW Daily Target ETF,2.0,long,SNOW,known_symbol,active,True,BATS
+SPCU,Defiance Daily Target 2X Long SPCX ETF,2.0,long,SPCX,known_symbol,active,True,BATS
+SPCM,Tradr 2X Long SpaceX Daily ETF,2.0,long,SPACEX,weak_unconfirmed,active,True,BATS
+SPCQ,Defiance Daily Target 2X Short SPCX ETF,2.0,short,SPCX,known_symbol,active,True,BATS
+STXL,Defiance Daily Target 2x Long STX ETF,2.0,long,STX,known_symbol,active,True,BATS
+SNK,GraniteShares 2x Short SpaceX Daily ETF,2.0,short,SPACEX,weak_unconfirmed,active,True,BATS
+SPOG,Themes ETF Trust Leverage Shares 2X Long SPOT Daily ETF,2.0,long,SPOT,known_symbol,active,True,NASDAQ
+PDDL,GraniteShares ETF Trust GraniteShares 2x Long PDD Daily ETF,2.0,long,PDD,known_symbol,active,True,NASDAQ
+SOUX,Tidal Trust II Defiance Daily Target 2X Long SOUN ETF,2.0,long,SOUN,known_symbol,active,True,NASDAQ
+KORU,Direxion Daily MSCI South Korea Bull 3X ETF,3.0,long,MSCI,known_symbol,active,True,ARCA
+SMCZ,Tidal Trust II Defiance Daily Target 2X Short SMCI ETF,2.0,short,SMCI,known_symbol,active,True,NASDAQ
+SKUU,GraniteShares ETF Trust GraniteShares 2x Long SK Hynix Daily ETF,2.0,long,SK,known_symbol,active,True,NASDAQ
+MCHU,Tradr 2X Long MCHP Daily ETF,2.0,long,MCHP,known_symbol,active,True,BATS
+SPAL,GraniteShares 2x Long SpaceX Daily ETF,2.0,long,SPACEX,weak_unconfirmed,active,True,BATS
+DUOG,Themes ETF Trust Leverage Shares 2X Long DUOL Daily ETF,2.0,long,DUOL,known_symbol,active,True,NASDAQ
+TMF,Direxion Daily 20+ Year Treasury Bull 3X ETF,3.0,long,YEAR,known_symbol,active,True,ARCA
+CEGX,Tradr 2X Long CEG Daily ETF,2.0,long,CEG,known_symbol,active,True,BATS
+APHG,Leverage Shares 2X Long APH Daily ETF,2.0,long,APH,known_symbol,active,True,BATS
+AXTL,Leverage Shares 2X Long AXTI Daily ETF,2.0,long,AXTI,known_symbol,active,True,BATS
+ARCX,Tradr 2X Long ACHR Daily ETF,2.0,long,ACHR,known_symbol,active,True,BATS
+HUTG,Themes ETF Trust Leverage Shares 2X Long HUT Daily ETF,2.0,long,HUT,known_symbol,active,True,NASDAQ
+RVNL,GraniteShares ETF Trust GraniteShares 2x Long RIVN Daily ETF,2.0,long,RIVN,known_symbol,active,True,NASDAQ
+HONG,Leverage Shares 2X Long HON Daily ETF,2.0,long,HON,known_symbol,active,True,BATS
+HOOG,Themes ETF Trust Leverage Shares 2X Long HOOD Daily ETF,2.0,long,HOOD,known_symbol,active,True,NASDAQ
+HIMZ,Tidal Trust II Defiance Daily Target 2X Long HIMS ETF,2.0,long,HIMS,known_symbol,active,True,NASDAQ
+HOOX,Tidal Trust II Defiance Daily Target 2X Long HOOD ETF,2.0,long,HOOD,known_symbol,active,True,NASDAQ
+HPEL,Leverage Shares 2X Long HPE Daily ETF,2.0,long,HPE,known_symbol,active,True,BATS
+ARMG,Themes ETF Trust Leverage Shares 2X Long ARM Daily ETF,2.0,long,ARM,known_symbol,active,True,NASDAQ
+NVDL,GraniteShares ETF Trust GraniteShares 2x Long NVDA Daily ETF,2.0,long,NVDA,known_symbol,active,True,NASDAQ
+HYNX,T-REX 2X Long SKHY Daily Target ETF,2.0,long,SKHY,known_symbol,active,True,ARCA
+NVDQ,T-Rex 2X Inverse NVIDIA Daily Target ETF,2.0,short,NVDA,alias,active,True,BATS
+GOU,GraniteShares ETF Trust GraniteShares 2x Long GOOGL Daily ETF,2.0,long,GOOGL,known_symbol,active,True,NASDAQ
+AVL,Direxion Shares ETF Trust Direxion Daily AVGO Bull 2X ETF,2.0,long,AVGO,known_symbol,active,True,NASDAQ
+RBLU,T-REX 2X Long RBLX Daily Target ETF,2.0,long,RBLX,known_symbol,active,True,BATS
+APLZ,Tradr 2X Short APLD Daily ETF,2.0,short,APLD,known_symbol,active,True,BATS
+GUSH,Direxion Daily S&P Oil & Gas Exp. & Prod. Bull 2X ETF,2.0,long,OIL,known_symbol,active,True,ARCA
+APLX,Tradr 2X Long APLD Daily ETF,2.0,long,APLD,known_symbol,active,True,BATS
+AFRU,T-REX 2X Long AFRM Daily Target ETF,2.0,long,AFRM,known_symbol,active,True,BATS
+AVGU,GraniteShares ETF Trust GraniteShares 2x Long AVGO Daily ETF,2.0,long,AVGO,known_symbol,active,True,NASDAQ
+CPNX,Tradr 2X Long CPNG Daily ETF,2.0,long,CPNG,known_symbol,active,True,BATS
+RIOX,Defiance Daily Target 2X Long RIOT ETF,2.0,long,RIOT,known_symbol,active,True,ARCA
+AVGG,Themes ETF Trust Leverage Shares 2X Long AVGO Daily ETF,2.0,long,AVGO,known_symbol,active,True,NASDAQ
+JDST,Direxion Daily Junior Gold Miners Index Bear 2X ETF,2.0,short,GOLD,known_symbol,active,True,ARCA
+AVGX,Tidal Trust II Defiance Daily Target 2X Long AVGO ETF,2.0,long,AVGO,known_symbol,active,True,NASDAQ
+JBLG,Leverage Shares 2X Long JBL Daily ETF,2.0,long,JBL,known_symbol,active,True,BATS
+OUSL,Defiance Daily Target 2X Long OUST ETF,2.0,long,OUST,known_symbol,active,True,BATS
+RMBX,Tradr 2X Long RMBS Daily ETF,2.0,long,RMBS,known_symbol,active,True,BATS
+ADIU,Leverage Shares 2X Long ADI Daily ETF,2.0,long,ADI,known_symbol,active,True,BATS
+AKAL,T-REX 2X Long AKAM Daily Target ETF,2.0,long,AKAM,known_symbol,active,True,BATS
+RKLZ,Tidal Trust II Defiance Daily Target 2x Short RKLB ETF,2.0,short,RKLB,known_symbol,active,True,NASDAQ
+RKLX,Tidal Trust II Defiance Daily Target 2X Long RKLB ETF,2.0,long,RKLB,known_symbol,active,True,NASDAQ
+RCAX,Tidal Trust II Defiance Daily Target 2x Long RCAT ETF,2.0,long,RCAT,known_symbol,active,True,NASDAQ
+RAMZ,T-REX 2X Inverse DRAM Daily Target ETF,2.0,short,DRAM,known_symbol,active,True,BATS
+RDWU,T-REX 2X Long RDW Daily Target ETF,2.0,long,RDW,known_symbol,active,True,BATS
+RAML,Leverage Shares 2X Long Memory Daily ETF,2.0,long,MEMORY,weak_unconfirmed,active,True,BATS
+QUBX,Tradr 2X Long QUBT Daily ETF,2.0,long,QUBT,known_symbol,active,True,BATS
+QSU,Defiance Daily Target 2X Long QS ETF,2.0,long,QS,known_symbol,active,True,ARCA
+RAM,Roundhill T-REX 2X Long DRAM Daily Target ETF,2.0,long,DRAM,known_symbol,active,True,BATS
+RGTZ,Tidal Trust II Defiance Daily Target 2x Short RGTI ETF,2.0,short,RGTI,known_symbol,active,True,NASDAQ
+RGTX,Tidal Trust II Defiance Daily Target 2X Long RGTI ETF,2.0,long,RGTI,known_symbol,active,True,NASDAQ
+RGTU,Tradr 2X Long RGTI Daily ETF,2.0,long,RGTI,known_symbol,active,True,BATS
+RETL,Direxion Daily Retail Bull 3X ETF,3.0,long,RETAIL,weak_unconfirmed,active,True,ARCA
+ASTY,Defiance Daily Target 2X Long ASTS ETF,2.0,long,ASTS,known_symbol,active,True,BATS
+ASTG,Leverage Shares 2X Long ASTS Daily ETF,2.0,long,ASTS,known_symbol,active,True,BATS
+ASTN,Defiance Daily Target 2X Short ASTS ETF,2.0,short,ASTS,known_symbol,active,True,BATS
+UNHG,Themes ETF Trust Leverage Shares 2X Long UNH Daily ETF,2.0,long,UNH,known_symbol,active,True,NASDAQ
+INFH,Defiance Daily Target 2X Long INFQ ETF,2.0,long,INFQ,known_symbol,active,True,BATS
+AIBD,Direxion Daily AI and Big Data Bear 2X ETF,2.0,short,AI,known_symbol,active,True,ARCA
+ASTX,Tradr 2X Long ASTS Daily ETF,2.0,long,ASTS,known_symbol,active,True,BATS
+ROBN,T-Rex 2X Long HOOD Daily Target ETF,2.0,long,HOOD,known_symbol,active,True,BATS
+ASMG,Themes ETF Trust Leverage Shares 2X Long ASML Daily ETF,2.0,long,ASML,known_symbol,active,True,NASDAQ
+COHX,Tradr 2X Long COHR Daily ETF,2.0,long,COHR,known_symbol,active,True,BATS
+IREG,Themes ETF Trust Leverage Shares 2X Long IREN Daily ETF,2.0,long,IREN,known_symbol,active,True,NASDAQ
+IREX,Tradr 2X Long IREN Daily ETF,2.0,long,IREN,known_symbol,active,True,BATS
+IREZ,Tradr 2X Short IREN Daily ETF,2.0,short,IREN,known_symbol,active,True,BATS
+ISUL,GraniteShares ETF Trust GraniteShares 2x Long ISRG Daily ETF,2.0,long,ISRG,known_symbol,active,True,NASDAQ
+HODU,Direxion Shares ETF Trust Direxion Daily HOOD Bull 2X ETF,2.0,long,HOOD,known_symbol,active,True,NASDAQ
+HIBS,Direxion Daily S&P 500 High Beta Bear 3X ETF,3.0,short,HIGH,known_symbol,active,True,ARCA
+HIBL,Direxion Daily S&P 500 High Beta Bull 3X ETF,3.0,long,HIGH,known_symbol,active,True,ARCA
+GOOL,Leverage Shares 2X Long GOOGL Daily ETF,2.0,long,GOOGL,known_symbol,active,True,BATS
+FNG,Leverage Shares 2X Long FN Daily ETF,2.0,long,FN,known_symbol,active,True,BATS
+IONX,Tidal Trust II Defiance Daily Target 2X Long IONQ ETF,2.0,long,IONQ,known_symbol,active,True,NASDAQ
+IONZ,Tidal Trust II Defiance Daily Target 2x Short IONQ ETF,2.0,short,IONQ,known_symbol,active,True,NASDAQ
+SPCH,Leverage Shares 2X Long SPCX Daily ETF,2.0,long,SPCX,known_symbol,active,True,BATS
+SPCG,Tradr 2X Short SpaceX Daily ETF,2.0,short,SPACEX,weak_unconfirmed,active,True,BATS
+INTW,GraniteShares ETF Trust GraniteShares 2x Long INTC Daily ETF,2.0,long,INTC,known_symbol,active,True,NASDAQ
+NFXL,Direxion Shares ETF Trust Direxion Daily NFLX Bull 2X ETF,2.0,long,NFLX,known_symbol,active,True,NASDAQ
+ORCZ,Tradr 2X Short ORCL Daily ETF,2.0,short,ORCL,known_symbol,active,True,BATS
+SSPC,Leverage Shares 2X Short SPCX Daily ETF,2.0,short,SPCX,known_symbol,active,True,BATS
+UBOT,"Direxion Daily Robotics, Artificial Intelligence & Automation Index Bull 2X ETF",2.0,long,INDEX,weak_unconfirmed,active,True,ARCA
+ORCU,Direxion Shares ETF Trust Direxion Daily ORCL Bull 2X ETF,2.0,long,ORCL,known_symbol,active,True,NASDAQ
+IONL,GraniteShares ETF Trust GraniteShares 2x Long IONQ Daily ETF,2.0,long,IONQ,known_symbol,active,True,NASDAQ
+TSEG,Leverage Shares 2X Long TSEM Daily ETF,2.0,long,TSEM,known_symbol,active,True,BATS
+FIGG,Themes ETF Trust Leverage Shares 2x Long FIG Daily ETF,2.0,long,FIG,known_symbol,active,True,NASDAQ
+SBTU,T-REX 2X Long SBET Daily Target ETF,2.0,long,SBET,known_symbol,active,True,BATS
+STXX,Tradr 2X Long STX Daily ETF,2.0,long,STX,known_symbol,active,True,BATS
+STXU,Leverage Shares 2X Long STX Daily ETF,2.0,long,STX,known_symbol,active,True,BATS
+PYPG,Themes ETF Trust Leverage Shares 2X Long PYPL Daily ETF,2.0,long,PYPL,known_symbol,active,True,NASDAQ
+PONX,Tradr 2X Long PONY Daily ETF,2.0,long,PONY,known_symbol,active,True,BATS
+SKRE,ETF Opportunities Trust Tuttle Capital Daily 2X Inverse Regional Banks ETF,2.0,short,TUTTLE,weak_unconfirmed,active,True,NASDAQ
+SINV,ETFMG Prime 2x Daily Inverse Junior Silver Miners ETF,2.0,short,ETFMG,weak_unconfirmed,inactive,False,ARCA
+GASL,Direxion Daily Natural Gas Related Bull 3X Shares,3.0,long,GAS,weak_unconfirmed,inactive,False,ARCA
+HBCGF,BETAPRO GOLD BULLION 2X DAILY BULL ETF NEW Unit,2.0,long,GOLD,known_symbol,inactive,False,OTC
+TVIXF,Credit Suisse AG Nassau Brh VelocityShares Daily 2x VIX Short Term ETN,2.0,short,AG,known_symbol,inactive,False,OTC
+HZBRF,BETAPRO S&P/TSX CAPPED ENERGY 2X DAILY BULL ETF NEW Unit,2.0,long,UNIT,known_symbol,inactive,False,OTC
+WDRW,Direxion Daily Regional Banks Bear 3X Shares,3.0,short,BANKS,weak_unconfirmed,inactive,False,ARCA
+MIDZ,Direxion Daily Mid Cap Bear 3X Shares,3.0,short,MID,known_symbol,inactive,False,ARCA
+LMNX,Tidal Trust II Defiance Daily Target 2x Long LMND ETF,2.0,long,LMND,known_symbol,inactive,False,NASDAQ
+GASX,Direxion Daily Natural Gas Bear 3X Shares,3.0,short,GAS,weak_unconfirmed,inactive,False,ARCA
+RUSS,Direxion Daily Russia Bear 3x Shares,3.0,short,RUSSIA,weak_unconfirmed,inactive,False,ARCA
+HZNSF,BETAPRO CDN GOLD MINERS 2X DAILY BULL ETF NEW Unit,2.0,long,GOLD,known_symbol,inactive,False,OTC
+MUTE,Direxion Daily Communication Services Index Bear 3X Shares,3.0,short,INDEX,weak_unconfirmed,inactive,False,ARCA
+JPNL,Direxion Daily Japan Bull 3x Shares,3.0,long,JAPAN,weak_unconfirmed,inactive,False,ARCA
+RUSL,Direxion Daily Russia Bull 2X Shares,2.0,long,RUSSIA,weak_unconfirmed,inactive,False,ARCA
+CLDS,Direxion Daily Cloud Computing Bear 2X Shares,2.0,short,CLOUD,weak_unconfirmed,inactive,False,ARCA
+TAWK,Direxion Daily Communication Services Index Bull 3X Shares,3.0,long,INDEX,weak_unconfirmed,inactive,False,ARCA
+LBJ,Direxion Daily Latin America Bull 2X Shares,2.0,long,LATIN,weak_unconfirmed,inactive,False,ARCA
