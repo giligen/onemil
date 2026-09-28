@@ -53,3 +53,8 @@ check uses the bbo-1m snapshots at the next two minute marks after publication (
 bid at +1 or +2 min ≥ the limit; a buy if the ask ≤ the limit) — a minute-granularity proxy for the 60-s rule,
 disclosed. Venue from the point-in-time listing feed (the ITCH placeholder rows found by the fetch are excluded).
 The first run (2024-01-02 onward, ≈ $5) was stopped at 19:37 UTC; its cached rows before 2024-07-01 stay unused.
+
+## Amendment 2 (2026-09-28 19:50 UTC, before any number) — cap $100
+The amended scope prices at ≈ $95 total (548 sessions at ≈ $0.15 plus the $12.7 already spent), so the $90 run halts
+about six weeks before 2026-09-04. Cap raised to $100 so the VAL window is complete; the run resumes from the cache
+under the new constant after the first run halts. Nothing else changes.
