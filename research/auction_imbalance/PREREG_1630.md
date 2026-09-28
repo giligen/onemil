@@ -58,3 +58,12 @@ The first run (2024-01-02 onward, ≈ $5) was stopped at 19:37 UTC; its cached r
 The amended scope prices at ≈ $95 total (548 sessions at ≈ $0.15 plus the $12.7 already spent), so the $90 run halts
 about six weeks before 2026-09-04. Cap raised to $100 so the VAL window is complete; the run resumes from the cache
 under the new constant after the first run halts. Nothing else changes.
+
+## Amendment 3 (2026-09-28 21:15 UTC) — pull STOPPED at $20.96 on the owner's spend decision; cells SUSPENDED
+The owner ("too much $$$ is planned to go out … your call") → the closing-auction pull was stopped at 2024-09-18
+(56 sessions, 548 purchases, $20.96); the options v3 pull continues. Cells 1,630–1,632 and the sister 1,637–1,639 are
+SUSPENDED, not judged: no money number is read from 56 sessions. One free, pre-committed read is allowed on what is
+on disk (all TRAIN): the MECHANISM table only — the decile table of the closing move (official close vs the pre-
+publication mid) against |I| and of the next-open reversal, with the day-clustered t of the top-minus-bottom decile.
+That read is the evidence for asking the owner to buy the rest (a monotone table with |t| ≥ 3 on both halves of the
+56 sessions), or the reason not to. Nothing else changes.
