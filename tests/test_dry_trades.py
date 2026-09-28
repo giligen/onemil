@@ -177,15 +177,18 @@ class TestBackfillIdempotency:
                             '10.0', '10.01', '10.02', '10.00', '1', '10.00', '9.5', '10.5', '1', '1'])
 
     def test_parses_mixed_13_and_14_column_rows(self, tmp_path):
+        """13-column rows predate log_counterfactuals entirely (no cf-ledger row can ever resolve
+        them) and are EXCLUDED — see parse_entry_ledger's docstring. Only the 14-column row survives,
+        tagged 'counterfactual_all' (the uncapped all-armed population, not the capped dry book)."""
         p = tmp_path / 'entry.csv'
         self._write_ledger(p, rows13=1, rows14=1)
         rows = backfill.build_ledger_rows(str(p), str(tmp_path / 'missing_cf.csv'))
-        assert {r['symbol'] for r in rows} == {'OLD0', 'NEW0'}
-        assert all(r['source'] == 'backfill_ledger' for r in rows)
+        assert {r['symbol'] for r in rows} == {'NEW0'}
+        assert all(r['source'] == 'counterfactual_all' for r in rows)
 
     def test_second_run_skips_already_present_rows(self, tmp_path):
         p = tmp_path / 'entry.csv'
-        self._write_ledger(p, rows13=2, rows14=0)
+        self._write_ledger(p, rows13=0, rows14=2)
         rows = backfill.build_ledger_rows(str(p), str(tmp_path / 'missing_cf.csv'))
         real_db = Database(db_path=str(tmp_path / 'trades.db'))
 
@@ -290,13 +293,18 @@ class TestHodDryLedgerSummary:
     path now counts only CLOSED rows (exit_ts not null) and reports open rows on their own line."""
 
     def test_counts_only_closed_rows_and_reports_open_separately(self, tmp_path, capsys):
+        """source='replay_capped' — one of the two DRY_BOOK_SOURCES (scripts/hod_dry_ledger.py) that
+        make up the capped dry book. 'live_dry' (the engine's own real-time insert) is deliberately NOT
+        used here: it comes from the same uncapped resting-fill simulator as 'counterfactual_all' (no
+        max_per_day/max_concurrent check) and so belongs to the all-armed population, not this book —
+        see armed_population_from_db / TestArmedPopulationSplit below."""
         import scripts.hod_dry_ledger as hdl
         db = Database(db_path=str(tmp_path / 'trades.db'))
-        rid1 = db.insert_dry_entry({'strategy': 'hod_break', 'trade_date': '2026-09-28', 'symbol': 'AAA', 'source': 'live_dry'})
+        rid1 = db.insert_dry_entry({'strategy': 'hod_break', 'trade_date': '2026-09-28', 'symbol': 'AAA', 'source': 'replay_capped'})
         db.close_dry_trade(rid1, exit_ts='2026-09-28T15:00:00', exit_px=11.0, exit_reason='target', r_multiple=1.0, pnl_usd=50.0)
-        rid2 = db.insert_dry_entry({'strategy': 'hod_break', 'trade_date': '2026-09-28', 'symbol': 'BBB', 'source': 'live_dry'})
+        rid2 = db.insert_dry_entry({'strategy': 'hod_break', 'trade_date': '2026-09-28', 'symbol': 'BBB', 'source': 'replay_capped'})
         db.close_dry_trade(rid2, exit_ts='2026-09-28T15:05:00', exit_px=9.5, exit_reason='stop', r_multiple=-0.5, pnl_usd=-25.0)
-        db.insert_dry_entry({'strategy': 'hod_break', 'trade_date': '2026-09-28', 'symbol': 'CCC', 'source': 'live_dry'})  # still open
+        db.insert_dry_entry({'strategy': 'hod_break', 'trade_date': '2026-09-28', 'symbol': 'CCC', 'source': 'replay_capped'})  # still open
 
         ledger = hdl.ledger_from_db('2026-09-28', datetime(2026, 9, 28).date(), db=db)
         assert len(ledger) == 1

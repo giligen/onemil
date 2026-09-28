@@ -855,6 +855,33 @@ class Database:
         cursor = self._trades_conn.execute(query, params)
         return [dict(row) for row in cursor.fetchall()]
 
+    def delete_dry_trades(self, strategy: str, source: str, start: Optional[str] = None,
+                           end: Optional[str] = None) -> int:
+        """Delete dry_trades rows for `strategy`+`source` (optionally bounded to [start, end]
+        trade_date, inclusive). The delete half of a delete-and-rebuild idempotent write — for a
+        source that is fully DERIVED from CSV ledgers on every run (scripts/backfill_dry_trades.py's
+        'counterfactual_all' and 'replay_capped'), re-deriving is simpler and safer than a
+        field-by-field merge, unlike 'backfill_journal'/'backfill_ledger' which upsert_rows merges
+        across sources by (symbol, trade_date, entry_ts) — see that script's module docstring. Never
+        raises; returns the number of rows deleted, or -1 on failure (logged as WARNING)."""
+        try:
+            query = "DELETE FROM dry_trades WHERE strategy = ? AND source = ?"
+            params: List[Any] = [strategy, source]
+            if start:
+                query += " AND trade_date >= ?"
+                params.append(start)
+            if end:
+                query += " AND trade_date <= ?"
+                params.append(end)
+            cursor = self._trades_conn.execute(query, params)
+            self._trades_conn.commit()
+            logger.info(f"delete_dry_trades: removed {cursor.rowcount} row(s) for {strategy}/{source} "
+                        f"[{start}, {end}]")
+            return cursor.rowcount
+        except Exception as e:
+            logger.warning(f"delete_dry_trades failed for {strategy}/{source}: {e}")
+            return -1
+
     def get_dry_trades_daily_summary(self, strategy: str, start: Optional[str] = None,
                                       end: Optional[str] = None) -> List[Dict[str, Any]]:
         """Per-day rollup of dry_trades for `strategy`: trades, R, $, green flag. Only rows with

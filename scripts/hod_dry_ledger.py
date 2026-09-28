@@ -28,6 +28,16 @@ DRY_RUN_RE = re.compile(
     r'DRY-RUN EXECUTABLE book.*?:\s*(\d+)\s+trades?,\s+([-+]?[\d.]+)R,\s+\$([-+]?[\d,]+)\s*\|\s*(\[.*\])'
 )
 
+# dry_trades.source values that make up the CAPPED dry book (scripts/backfill_dry_trades.py module
+# docstring): 'backfill_journal' already applies trading.hod_break.run_book's cap when it's built
+# (2026-09-14..09-25 legacy window); 'replay_capped' replays the same cap for 2026-09-26 onward. Every
+# OTHER source ('counterfactual_all', and the engine's own real-time 'live_dry' insert — both written by
+# the resting-fill simulator, which has NO max_per_day/max_concurrent check — see that script's
+# diagnosis note) is the UNCAPPED all-armed population: reported on its own line, NEVER summed into the
+# dry book (9/28 defect: the two were conflated, showing 33 all-armed counterfactual fills as if they
+# were the ~12/day capped book).
+DRY_BOOK_SOURCES = {'backfill_journal', 'replay_capped'}
+
 
 def parse_dry_run_line(output: str):
     """Parse the '  DRY-RUN EXECUTABLE book' line; return (trades, R, USD, symbols_with_r, is_green) or None.
@@ -79,34 +89,40 @@ def analyze_day(day_str: str):
         return None
 
 
-def ledger_from_db(start_date_str: str, end_date: 'datetime.date', db=None):
-    """Fast path (9/28 "hod dry-run is not in the DB???"): read the day-by-day book straight from
-    `dry_trades` instead of re-parsing journalctl/session_archive on every call. Returns a list of
-    (date_str, trades, R, USD, symbols_with_r, status, open_n) tuples, or None if the table is
-    empty/unreachable so callers can fall back to --rebuild.
-
-    Only CLOSED rows (exit_ts not null) count toward trades/R/$/symbols — an open dry-run position has no
-    realized R or pnl_usd yet, and the defect this fixes (9/28: a day showing 130 trades / -5.2R / $0
-    instead of 67 / +6.2R / +$891) was exactly stale/duplicate rows being counted as if resolved. Open
-    rows are still tallied, via `open_n`, so they are visible rather than silently dropped. `db` is
+def _read_dry_trades(start_date_str: str, end_date: 'datetime.date', db=None):
+    """Shared DB read for ledger_from_db/armed_population_from_db. Returns the raw `dry_trades` rows for
+    the window, or None on a read failure (never on merely-empty — callers distinguish). `db` is
     injectable for tests; production always uses the real Database() (opens data/trades.db)."""
     from persistence.database import Database
     try:
         db = db or Database()
-        rows = db.get_dry_trades('hod_break', start=start_date_str, end=end_date.strftime('%Y-%m-%d'))
+        return db.get_dry_trades('hod_break', start=start_date_str, end=end_date.strftime('%Y-%m-%d'))
     except Exception as e:
         print(f"[db] could not read dry_trades ({e}) — use --rebuild", file=sys.stderr)
         return None
-    if not rows:
-        return None
-    by_date = {}
+
+
+def _ledger_rows_to_table(rows: list) -> list:
+    """Group `dry_trades` rows (already filtered to one population — the capped dry book or the
+    all-armed population, see DRY_BOOK_SOURCES) into the per-day
+    (date_str, trades, R, USD, symbols_with_r, status, open_n) table both ledger_from_db and
+    armed_population_from_db print.
+
+    Only CLOSED rows count toward trades/R/$/symbols — an open dry-run position has no realized R or
+    pnl_usd yet, and the defect this fixes (9/28: a day showing 130 trades / -5.2R / $0 instead of 67 /
+    +6.2R / +$891) was exactly stale/duplicate rows being counted as if resolved. "Closed" is exit_ts
+    not null OR r_multiple not null, not exit_ts alone (found rebuilding the 9/28 fix: build_journal_rows
+    rows have NO per-trade exit_ts by construction — day-level source, see that function's docstring —
+    so an exit_ts-only test silently showed every 'backfill_journal' trade as open/uncounted forever).
+    Open rows are still tallied, via `open_n`, so they are visible rather than silently dropped."""
+    by_date: dict = {}
     for r in rows:
         d = str(r['trade_date'])
         by_date.setdefault(d, []).append(r)
-    ledger = []
+    table = []
     for d in sorted(by_date):
         day_rows = by_date[d]
-        closed = [r for r in day_rows if r.get('exit_ts') is not None]
+        closed = [r for r in day_rows if r.get('exit_ts') is not None or r.get('r_multiple') is not None]
         open_n = len(day_rows) - len(closed)
         trades = len(closed)
         dr = sum(float(r['r_multiple']) for r in closed if r.get('r_multiple') is not None)
@@ -114,8 +130,41 @@ def ledger_from_db(start_date_str: str, end_date: 'datetime.date', db=None):
         symbols = [(r['symbol'], round(float(r['r_multiple']), 2)) for r in closed if r.get('r_multiple') is not None]
         is_green = dr > 0
         status = 'FLAT' if trades == 0 or dr == 0 else ('GREEN' if is_green else 'RED')
-        ledger.append((d, trades, dr, dusd, symbols, status, open_n))
-    return ledger
+        table.append((d, trades, dr, dusd, symbols, status, open_n))
+    return table
+
+
+def ledger_from_db(start_date_str: str, end_date: 'datetime.date', db=None):
+    """Fast path (9/28 "hod dry-run is not in the DB???"): read the day-by-day CAPPED dry book straight
+    from `dry_trades` instead of re-parsing journalctl/session_archive on every call. Returns a list of
+    (date_str, trades, R, USD, symbols_with_r, status, open_n) tuples, or None if unreachable/empty so
+    callers can fall back to --rebuild.
+
+    Only rows whose source is in DRY_BOOK_SOURCES count as the dry book (9/28 defect: the resting-fill
+    simulator's uncapped all-armed population — source 'counterfactual_all'/'live_dry' — was being
+    reported as if it were the ~12/day 4-concurrent book; see armed_population_from_db for that
+    population, reported separately, never summed here)."""
+    rows = _read_dry_trades(start_date_str, end_date, db)
+    if not rows:
+        return None
+    dry_rows = [r for r in rows if r.get('source') in DRY_BOOK_SOURCES]
+    if not dry_rows:
+        return None
+    return _ledger_rows_to_table(dry_rows)
+
+
+def armed_population_from_db(start_date_str: str, end_date: 'datetime.date', db=None):
+    """The UNCAPPED all-armed population — every `dry_trades` row whose source is NOT in
+    DRY_BOOK_SOURCES (see that constant's docstring) — same per-day table shape as ledger_from_db, over
+    the same window. None if unreachable/empty. Reported on its own line, NEVER summed with the capped
+    dry book (ledger_from_db)."""
+    rows = _read_dry_trades(start_date_str, end_date, db)
+    if not rows:
+        return None
+    armed_rows = [r for r in rows if r.get('source') not in DRY_BOOK_SOURCES]
+    if not armed_rows:
+        return None
+    return _ledger_rows_to_table(armed_rows)
 
 
 def _print_report(ledger: list, skipped: list, json_output: bool) -> None:
@@ -169,6 +218,20 @@ def _print_report(ledger: list, skipped: list, json_output: bool) -> None:
     print(f"Mean R/trade: {mean_r_per_trade:+.2f} ± {se_r:.2f}")
 
 
+def _print_armed_population_line(armed: list) -> None:
+    """One summary line for the UNCAPPED all-armed population (armed_population_from_db) — deliberately
+    NOT a per-day table like _print_report's, so it can never be visually mistaken for, or summed with,
+    the capped dry book."""
+    if not armed:
+        return
+    total_trades = sum(t for _, t, _, _, _, _, _ in armed)
+    total_r = sum(r for _, _, r, _, _, _, _ in armed)
+    total_usd = sum(u for _, _, _, u, _, _, _ in armed)
+    total_open = sum(o for _, _, _, _, _, _, o in armed)
+    print(f"\nALL-ARMED population (uncapped — source counterfactual_all/live_dry, NOT the dry book), "
+          f"{armed[0][0]}..{armed[-1][0]}: {total_trades} closed  {total_r:+.1f}R  ${total_usd:+,.0f}  open: {total_open}")
+
+
 def main():
     argv = list(sys.argv[1:])
     start_date_str = '2026-09-14'
@@ -195,8 +258,10 @@ def main():
     ledger = []  # (date_str, trades, R, USD, symbols_with_r, status, open_n)
     skipped = []
 
+    armed = None
     if not rebuild:
         ledger = ledger_from_db(start_date_str, today)
+        armed = armed_population_from_db(start_date_str, today)
     if ledger is None or rebuild:
         if not rebuild:
             print("[db] dry_trades empty for this range — falling back to journal reconstruction "
@@ -216,6 +281,8 @@ def main():
             current_date += timedelta(days=1)
 
     _print_report(ledger, skipped, json_output)
+    if not rebuild and not json_output:
+        _print_armed_population_line(armed)
 
 
 if __name__ == '__main__':
