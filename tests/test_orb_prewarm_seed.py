@@ -211,3 +211,54 @@ class TestPrewarmParity:
         )
 
         assert old_result == new_result == ['LATE', 'PROD']
+
+
+class TestPrewarmStaleLogLevel:
+    """docs/orb_latency_day1_20260928.md: the routine partial-stale
+    re-fetch (a rolling tail of names that just haven't printed a bar yet —
+    genuinely stale, harmless, and fires every ~60s tick) must log BELOW
+    WARNING. The rare event where EVERY cached snapshot in the ticked
+    candidate set goes stale in the same tick (seen once, right after the
+    open) stays at WARNING."""
+
+    def test_routine_partial_stale_logs_below_warning(self, caplog):
+        import logging
+        today_et = _today_et()
+        a = MagicMock(spec=AlpacaClient)
+        a.get_snapshots.side_effect = [
+            # tick 1: BBB hasn't printed yet (open=0), AAA/CCC complete
+            {'AAA': _snap(10.0, 9.0, daily_bar_date=today_et),
+             'BBB': _snap(0.0, 5.0, daily_bar_date=today_et),
+             'CCC': _snap(20.0, 19.0, daily_bar_date=today_et)},
+            # tick 2: only BBB needs re-fetching (now printed)
+            {'BBB': _snap(6.0, 5.0, daily_bar_date=today_et)},
+        ]
+        eng = _engine(prewarm=True, alpaca=a)
+        eng.build_orb_universe_from_snapshots(['AAA', 'BBB', 'CCC'])
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG):
+            eng.build_orb_universe_from_snapshots(['AAA', 'BBB', 'CCC'])
+        stale_records = [r for r in caplog.records if 'prewarm cache STALE' in r.message]
+        assert len(stale_records) == 1
+        assert stale_records[0].levelno < logging.WARNING
+
+    def test_all_stale_flip_logs_once_at_warning(self, caplog):
+        import logging
+        today_et = _today_et()
+        a = MagicMock(spec=AlpacaClient)
+        a.get_snapshots.side_effect = [
+            # tick 1: BOTH cached incomplete (pre-open beat for the whole set)
+            {'AAA': _snap(0.0, 9.0, daily_bar_date=today_et),
+             'BBB': _snap(0.0, 5.0, daily_bar_date=today_et)},
+            # tick 2: both re-fetched — the "all flip stale" event
+            {'AAA': _snap(11.0, 9.0, daily_bar_date=today_et),
+             'BBB': _snap(6.0, 5.0, daily_bar_date=today_et)},
+        ]
+        eng = _engine(prewarm=True, alpaca=a)
+        eng.build_orb_universe_from_snapshots(['AAA', 'BBB'])
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG):
+            eng.build_orb_universe_from_snapshots(['AAA', 'BBB'])
+        stale_records = [r for r in caplog.records if 'prewarm cache STALE' in r.message]
+        assert len(stale_records) == 1
+        assert stale_records[0].levelno == logging.WARNING

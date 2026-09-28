@@ -112,3 +112,52 @@ expect first submit around 09:35:07-10 ET (≈7-10s after range close), under th
 whole-morning cost is unchanged and will still show in the ledger, but as diagnosed above it
 should keep landing before 09:35 rather than inside it — worth re-checking on day 2's tripwire
 log (if it fires) to confirm the sqlite prefilter's first-tick timing again.
+
+## Fix 2 implemented (2026-09-28): sqlite prefilter warmed pre-market
+
+Implemented the proposed design (main session decision): the `daily_bars` ROW_NUMBER
+prefilter now runs during scanner pre-market startup instead of lazily on the first RTH
+tick.
+
+`scanner/realtime_scanner.py`:
+- New `_compute_orb_sqlite_prefilter()` — the raw query, extracted verbatim from the old
+  inline `else` branch of `_orb_universe_source` (no behavior change; same SQL, same
+  exception handling).
+- New `_warm_orb_sqlite_seed_cache()` — no-op if `prewarm_seed` is off or the cache is
+  already warm for today's date (idempotent); otherwise calls the helper above and caches
+  the result, logging once at **INFO** (`"ORB prewarm: sqlite prefilter warmed at
+  startup..."`).
+- `run()` calls `self._warm_orb_sqlite_seed_cache()` right after the existing pre-market
+  `orb_engine.build_universe(...)` seed call (~line 217), i.e. before the `09:30` wait —
+  same place `build_universe` is already called once at startup per the original proposal.
+- `_orb_universe_source`'s lazy-fallback branch (prewarm off, cache miss, or a mid-morning
+  restart) is unchanged in behavior — still recomputes on that tick and logs the existing
+  `"ORB prewarm cache MISS (sqlite_prefilter)"` **WARNING**, since that cost landing on a
+  live tick is genuinely unexpected once the startup warm exists.
+- The daily `date`-keyed cache (`_orb_sqlite_seed_cache_date`) is untouched, so a stale-day
+  cache is still never reused across a date rollover.
+
+`trading/orb_engine.py` (`_get_snapshots_warm`, the separate all-2555-cached-snapshots
+"STALE" path from the 09:31 flip):
+- The per-tick `"ORB prewarm cache STALE"` line now compares `len(stale_cached)` against
+  `len(cached_candidates)` (candidates already present in `_snapshot_cache`, regardless of
+  completeness). When they're equal and nonzero (every cached snapshot in the ticked set
+  went stale together — the rare all-flip event, e.g. Alpaca's snapshot feed tagging the
+  daily bar with yesterday's date for one beat after the open) it logs once at **WARNING**
+  with an `"(ALL cached snapshots flipped)"` marker. Otherwise (the routine ~250-symbol
+  tail of names that simply haven't printed a bar yet this tick — `open<=0`, genuinely
+  stale, expected every ~60s tick) it's downgraded to **INFO**.
+
+Tests added:
+- `tests/test_scanner.py::TestOrbSqlitePrefilterWarm` — `test_warm_computes_prefilter_once_and_first_rth_tick_reuses_it`
+  (warm once, `_orb_universe_source` reuses with zero further `execute()` calls for the same
+  date), `test_warm_is_idempotent_same_date`, `test_new_date_recomputes` (stale
+  `_orb_sqlite_seed_cache_date` forces a recompute), `test_warm_noop_when_prewarm_disabled`,
+  `test_warm_logs_info_not_warning`.
+- `tests/test_orb_prewarm_seed.py::TestPrewarmStaleLogLevel` —
+  `test_routine_partial_stale_logs_below_warning`, `test_all_stale_flip_logs_once_at_warning`.
+
+Suite run: `tests/test_orb_prewarm_seed.py`, `tests/test_scanner.py`, and
+`tests/test_orb_selection_race.py` (Cause 1's tests) all green (68 + 19 passed); full
+`python3 -m pytest tests -q --no-header -p no:randomly` — **4355 passed, 10 skipped, 0
+failed** (289.87s).

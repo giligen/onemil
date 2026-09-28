@@ -1469,3 +1469,82 @@ class TestOrbEntryEvalNotSequencedBehindScanCycle:
         finally:
             engine.shutdown_requested = True
             engine._entry_drain_thread.join(timeout=5)
+
+
+# =============================================================================
+# ORB sqlite prefilter WARM-phase startup warming
+# (docs/orb_latency_day1_20260928.md Cause 2)
+# =============================================================================
+
+class TestOrbSqlitePrefilterWarm:
+    """`_warm_orb_sqlite_seed_cache` (called from `run()` during pre-market
+    startup) must compute the daily_bars ROW_NUMBER prefilter ONCE per day,
+    off the 09:35 critical path — the first RTH tick's `_orb_universe_source`
+    call should reuse it, never recompute."""
+
+    def _mock_conn_returning(self, rows):
+        conn = MagicMock()
+        conn.execute.return_value = rows
+        return conn
+
+    def _scanner(self, mock_alpaca, mock_news, mock_db, criteria, rows=(('AAA',), ('BBB',))):
+        mock_db._cache_conn = self._mock_conn_returning(list(rows))
+        orb_engine = MagicMock()
+        orb_engine.prewarm_seed_enabled = True
+        return RealtimeScanner(
+            alpaca_client=mock_alpaca, news_provider=mock_news, db=mock_db,
+            criteria=criteria, verbose=False, orb_engine=orb_engine), mock_db
+
+    def test_warm_computes_prefilter_once_and_first_rth_tick_reuses_it(
+            self, mock_alpaca, mock_news, mock_db, criteria):
+        scanner, db = self._scanner(mock_alpaca, mock_news, mock_db, criteria)
+        scanner._warm_orb_sqlite_seed_cache()
+        assert db._cache_conn.execute.call_count == 1
+        assert scanner._orb_sqlite_seed_cache == {'AAA', 'BBB'}
+
+        # First RTH tick: _orb_universe_source must hit the WARM cache, not
+        # recompute — the sqlite scan runs ZERO more times for this date.
+        syms = scanner._orb_universe_source()
+        assert db._cache_conn.execute.call_count == 1
+        assert {'AAA', 'BBB'}.issubset(set(syms))
+
+    def test_warm_is_idempotent_same_date(
+            self, mock_alpaca, mock_news, mock_db, criteria):
+        scanner, db = self._scanner(mock_alpaca, mock_news, mock_db, criteria)
+        scanner._warm_orb_sqlite_seed_cache()
+        scanner._warm_orb_sqlite_seed_cache()
+        assert db._cache_conn.execute.call_count == 1
+
+    def test_new_date_recomputes(
+            self, mock_alpaca, mock_news, mock_db, criteria):
+        scanner, db = self._scanner(mock_alpaca, mock_news, mock_db, criteria)
+        scanner._warm_orb_sqlite_seed_cache()
+        assert db._cache_conn.execute.call_count == 1
+
+        # Simulate yesterday's cache still sitting in memory at the next
+        # day's pre-market startup.
+        scanner._orb_sqlite_seed_cache_date = '2020-01-01'
+        scanner._warm_orb_sqlite_seed_cache()
+        assert db._cache_conn.execute.call_count == 2  # recomputed for the new date
+
+    def test_warm_noop_when_prewarm_disabled(
+            self, mock_alpaca, mock_news, mock_db, criteria):
+        mock_db._cache_conn = self._mock_conn_returning([('AAA',)])
+        orb_engine = MagicMock()
+        orb_engine.prewarm_seed_enabled = False
+        scanner = RealtimeScanner(
+            alpaca_client=mock_alpaca, news_provider=mock_news, db=mock_db,
+            criteria=criteria, verbose=False, orb_engine=orb_engine)
+        scanner._warm_orb_sqlite_seed_cache()
+        assert mock_db._cache_conn.execute.call_count == 0
+        assert scanner._orb_sqlite_seed_cache is None
+
+    def test_warm_logs_info_not_warning(
+            self, mock_alpaca, mock_news, mock_db, criteria, caplog):
+        import logging
+        scanner, db = self._scanner(mock_alpaca, mock_news, mock_db, criteria)
+        with caplog.at_level(logging.DEBUG, logger='scanner.realtime_scanner'):
+            scanner._warm_orb_sqlite_seed_cache()
+        warm_records = [r for r in caplog.records if 'sqlite prefilter warmed' in r.message]
+        assert len(warm_records) == 1
+        assert warm_records[0].levelno == logging.INFO

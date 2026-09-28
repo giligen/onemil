@@ -895,8 +895,23 @@ class ORBEngine:
             if s in self._snapshot_cache and not _is_complete(self._snapshot_cache[s])
         ]
         if stale_cached:
-            logger.warning(
-                f"ORB prewarm cache STALE: {len(stale_cached)} cached snapshot(s) "
+            # Two very different events share this code path (2026-09-28,
+            # docs/orb_latency_day1_20260928.md): (a) the ROUTINE case — a
+            # rolling ~250-symbol tail of names that genuinely have not
+            # printed a bar yet this tick (open<=0), which fires every ~60s
+            # tick and is expected, harmless noise; (b) the FULL FLIP — every
+            # previously-cached snapshot in this candidate set goes stale in
+            # the same tick (seen once, ~09:31 right after the open, when
+            # Alpaca's snapshot feed still tagged the daily bar with
+            # yesterday's date for one beat). (b) is worth a WARNING; (a) is
+            # not — downgraded to INFO so it stops drowning out real signal.
+            cached_candidates = [s for s in candidate_symbols if s in self._snapshot_cache]
+            full_flip = bool(cached_candidates) and len(stale_cached) == len(cached_candidates)
+            _log = logger.warning if full_flip else logger.info
+            _log(
+                f"ORB prewarm cache STALE"
+                f"{' (ALL cached snapshots flipped)' if full_flip else ''}: "
+                f"{len(stale_cached)}/{len(cached_candidates)} cached snapshot(s) "
                 f"incomplete (open<=0 or daily_bar_date != {today_et}) — "
                 f"re-fetching this tick: {stale_cached[:10]}"
                 f"{'...' if len(stale_cached) > 10 else ''}"
