@@ -814,6 +814,31 @@ class Database:
         except Exception as e:
             logger.warning(f"close_dry_trade failed for id={dry_trade_id}: {e}")
 
+    def update_dry_entry(self, dry_trade_id: Optional[int], **fields) -> None:
+        """Update arbitrary dry_trades columns on an existing row in place (e.g. scripts/
+        backfill_dry_trades.py healing a previously-NULL pnl_usd on re-run, or promoting a ledger-only
+        row's source to backfill_journal once a matching journal row resolves it). Never raises — logs
+        WARNING on failure or on an unknown column so a DB hiccup or a caller typo can never affect
+        trading. No-ops on a None id or no fields."""
+        if dry_trade_id is None or not fields:
+            return
+        updatable = {'entry_ts', 'entry_px', 'shares', 'stop_px', 'target_px', 'exit_ts', 'exit_px',
+                     'exit_reason', 'r_multiple', 'pnl_usd', 'risk_usd', 'source'}
+        bad = set(fields) - updatable
+        if bad:
+            logger.warning(f"update_dry_entry: refusing unknown column(s) {bad} for id={dry_trade_id}")
+            return
+        cols = ', '.join(f"{k} = ?" for k in fields)
+        try:
+            self._trades_conn.execute(
+                f"UPDATE dry_trades SET {cols}, updated_at = ? WHERE id = ?",
+                (*fields.values(), datetime.now(timezone.utc), dry_trade_id)
+            )
+            self._trades_conn.commit()
+            logger.info(f"Dry trade {dry_trade_id} updated: {fields}")
+        except Exception as e:
+            logger.warning(f"update_dry_entry failed for id={dry_trade_id}: {e}")
+
     def get_dry_trades(self, strategy: str, start: Optional[str] = None,
                         end: Optional[str] = None) -> List[Dict[str, Any]]:
         """All dry_trades rows for `strategy`, optionally bounded to [start, end] trade_date

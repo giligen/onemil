@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """HOD-break DRY-RUN ledger: print day-by-day and cumulative book since a start date.
 
-Prints: date, trades, R, $, green/red, per-symbol list, then totals with worst/best day, mean R per trade.
+Prints: date, trades, R, $, green/red, per-symbol list, then totals with worst/best day, mean R per trade,
+and the count of still-OPEN rows (excluded from trades/R/$ — see ledger_from_db).
 
 Usage: python3 scripts/hod_dry_ledger.py [--start YYYY-MM-DD] [--json]
 Default start: 2026-09-14. Each weekday from start to today shows one line with its DRY-RUN EXECUTABLE book.
@@ -78,15 +79,20 @@ def analyze_day(day_str: str):
         return None
 
 
-def ledger_from_db(start_date_str: str, end_date: 'datetime.date'):
+def ledger_from_db(start_date_str: str, end_date: 'datetime.date', db=None):
     """Fast path (9/28 "hod dry-run is not in the DB???"): read the day-by-day book straight from
-    `dry_trades` instead of re-parsing journalctl/session_archive on every call. Returns the same
-    (date_str, trades, R, USD, symbols_with_r, status) tuples as the journal-based path, or None if the
-    table is empty/unreachable so callers can fall back to --rebuild. `symbols_with_r` is only
-    approximate here (no per-trade $ split for backfill_journal rows), matching analyze_day's own shape."""
+    `dry_trades` instead of re-parsing journalctl/session_archive on every call. Returns a list of
+    (date_str, trades, R, USD, symbols_with_r, status, open_n) tuples, or None if the table is
+    empty/unreachable so callers can fall back to --rebuild.
+
+    Only CLOSED rows (exit_ts not null) count toward trades/R/$/symbols — an open dry-run position has no
+    realized R or pnl_usd yet, and the defect this fixes (9/28: a day showing 130 trades / -5.2R / $0
+    instead of 67 / +6.2R / +$891) was exactly stale/duplicate rows being counted as if resolved. Open
+    rows are still tallied, via `open_n`, so they are visible rather than silently dropped. `db` is
+    injectable for tests; production always uses the real Database() (opens data/trades.db)."""
     from persistence.database import Database
     try:
-        db = Database()
+        db = db or Database()
         rows = db.get_dry_trades('hod_break', start=start_date_str, end=end_date.strftime('%Y-%m-%d'))
     except Exception as e:
         print(f"[db] could not read dry_trades ({e}) — use --rebuild", file=sys.stderr)
@@ -100,14 +106,67 @@ def ledger_from_db(start_date_str: str, end_date: 'datetime.date'):
     ledger = []
     for d in sorted(by_date):
         day_rows = by_date[d]
-        trades = len(day_rows)
-        dr = sum(float(r['r_multiple']) for r in day_rows if r.get('r_multiple') is not None)
-        dusd = sum(float(r['pnl_usd']) for r in day_rows if r.get('pnl_usd') is not None)
-        symbols = [(r['symbol'], round(float(r['r_multiple']), 2)) for r in day_rows if r.get('r_multiple') is not None]
+        closed = [r for r in day_rows if r.get('exit_ts') is not None]
+        open_n = len(day_rows) - len(closed)
+        trades = len(closed)
+        dr = sum(float(r['r_multiple']) for r in closed if r.get('r_multiple') is not None)
+        dusd = sum(float(r['pnl_usd']) for r in closed if r.get('pnl_usd') is not None)
+        symbols = [(r['symbol'], round(float(r['r_multiple']), 2)) for r in closed if r.get('r_multiple') is not None]
         is_green = dr > 0
         status = 'FLAT' if trades == 0 or dr == 0 else ('GREEN' if is_green else 'RED')
-        ledger.append((d, trades, dr, dusd, symbols, status))
+        ledger.append((d, trades, dr, dusd, symbols, status, open_n))
     return ledger
+
+
+def _print_report(ledger: list, skipped: list, json_output: bool) -> None:
+    """All stdout for one run: per-day lines (or JSON), then totals including the open-row count. Takes
+    the fully-built `ledger` (list of (date, trades, R, USD, symbols, status, open_n) tuples, from either
+    ledger_from_db or the journal-reconstruction fallback in main()) so it is testable without a DB or
+    subprocess."""
+    if json_output:
+        print(json.dumps([{
+            'date': d, 'trades': t, 'R': r, 'USD': u, 'status': st, 'open': o,
+            'symbols': [{'symbol': s, 'R': sr} for s, sr in syms]
+        } for d, t, r, u, syms, st, o in ledger], indent=2))
+        return
+
+    print(f"{'Date':<12} {'Trades':>6} {'R':>7} {'$':>10} {'Status':<5} Symbols (R)")
+    print('-' * 100)
+
+    total_trades = 0; total_r = 0.0; total_usd = 0.0; total_open = 0; green_days = 0; all_daily_rs = []
+    worst_day = (None, float('inf')); best_day = (None, float('-inf'))
+
+    for day_str, trades, dr, dusd, symbols, status, open_n in ledger:
+        sym_str = ', '.join(f"{s} {sr:+.2f}" for s, sr in symbols) if symbols else '(none)'
+        print(f"{day_str}  {trades:6d} {dr:+7.1f} {dusd:+10,.0f}  {status:<5}  {sym_str}")
+        total_trades += trades
+        total_r += dr
+        total_usd += dusd
+        total_open += open_n
+        all_daily_rs.append(dr)
+        if status == 'GREEN':
+            green_days += 1
+        if dr < worst_day[1]:
+            worst_day = (day_str, dr)
+        if dr > best_day[1]:
+            best_day = (day_str, dr)
+
+    print('-' * 100)
+    total_days = len(ledger)
+    if skipped:
+        print(f"(skipped {len(skipped)} day(s) with no parseable DRY-RUN line: {', '.join(skipped)})")
+    if total_days == 0:
+        print("No data.")
+        return
+    green_pct = f"{green_days}/{total_days}"
+    mean_r_per_trade = total_r / total_trades if total_trades else 0.0
+    se_r = (np.std(all_daily_rs, ddof=1) / np.sqrt(len(all_daily_rs))) if len(all_daily_rs) > 1 else 0.0
+
+    print(f"TOTAL:       {total_trades:6d} {total_r:+7.1f} {total_usd:+10,.0f}  {green_pct:<5}")
+    print(f"open: {total_open}")
+    print(f"Worst day: {worst_day[0]} ({worst_day[1]:+.1f}R)")
+    print(f"Best day:  {best_day[0]} ({best_day[1]:+.1f}R)")
+    print(f"Mean R/trade: {mean_r_per_trade:+.2f} ± {se_r:.2f}")
 
 
 def main():
@@ -133,7 +192,7 @@ def main():
     start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
     today = datetime.now(timezone.utc).astimezone(ET).date()
 
-    ledger = []  # (date_str, trades, R, USD, symbols_with_r, status)
+    ledger = []  # (date_str, trades, R, USD, symbols_with_r, status, open_n)
     skipped = []
 
     if not rebuild:
@@ -151,53 +210,12 @@ def main():
                 if result:
                     trades, dr, dusd, symbols, is_green = result
                     status = 'FLAT' if trades == 0 or dr == 0 else ('GREEN' if is_green else 'RED')
-                    ledger.append((day_str, trades, dr, dusd, symbols, status))
+                    ledger.append((day_str, trades, dr, dusd, symbols, status, 0))  # no open-row concept here
                 else:
                     skipped.append(day_str)
             current_date += timedelta(days=1)
 
-    if json_output:
-        print(json.dumps([{
-            'date': d, 'trades': t, 'R': r, 'USD': u, 'status': st,
-            'symbols': [{'symbol': s, 'R': sr} for s, sr in syms]
-        } for d, t, r, u, syms, st in ledger], indent=2))
-    else:
-        # Print day by day
-        print(f"{'Date':<12} {'Trades':>6} {'R':>7} {'$':>10} {'Status':<5} Symbols (R)")
-        print('-' * 100)
-
-        total_trades = 0; total_r = 0.0; total_usd = 0.0; green_days = 0; all_daily_rs = []
-        worst_day = (None, float('inf')); best_day = (None, float('-inf'))
-
-        for day_str, trades, dr, dusd, symbols, status in ledger:
-            sym_str = ', '.join(f"{s} {sr:+.2f}" for s, sr in symbols) if symbols else '(none)'
-            print(f"{day_str}  {trades:6d} {dr:+7.1f} {dusd:+10,.0f}  {status:<5}  {sym_str}")
-            total_trades += trades
-            total_r += dr
-            total_usd += dusd
-            all_daily_rs.append(dr)
-            if status == 'GREEN':
-                green_days += 1
-            if dr < worst_day[1]:
-                worst_day = (day_str, dr)
-            if dr > best_day[1]:
-                best_day = (day_str, dr)
-
-        print('-' * 100)
-        total_days = len(ledger)
-        if skipped:
-            print(f"(skipped {len(skipped)} day(s) with no parseable DRY-RUN line: {', '.join(skipped)})")
-        if total_days == 0:
-            print("No data.")
-            return
-        green_pct = f"{green_days}/{total_days}"
-        mean_r_per_trade = total_r / total_trades if total_trades else 0.0
-        se_r = (np.std(all_daily_rs, ddof=1) / np.sqrt(len(all_daily_rs))) if len(all_daily_rs) > 1 else 0.0
-
-        print(f"TOTAL:       {total_trades:6d} {total_r:+7.1f} {total_usd:+10,.0f}  {green_pct:<5}")
-        print(f"Worst day: {worst_day[0]} ({worst_day[1]:+.1f}R)")
-        print(f"Best day:  {best_day[0]} ({best_day[1]:+.1f}R)")
-        print(f"Mean R/trade: {mean_r_per_trade:+.2f} ± {se_r:.2f}")
+    _print_report(ledger, skipped, json_output)
 
 
 if __name__ == '__main__':
