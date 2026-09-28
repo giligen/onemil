@@ -7,6 +7,7 @@ production data/trades.db or data/guardrail_state.json.
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -70,7 +71,7 @@ def test_check_pauses_hod_break_scaled_to_its_own_risk_usd(guardrail_trades_db, 
     assert "hod_break: n=1" in out and "PAUSED" in out
 
 
-def test_clear_stores_reason(tmp_path, monkeypatch, capsys):
+def test_clear_stores_reason(tmp_path, monkeypatch, capsys, guardrail_trades_db, insert_trade):
     state_path = tmp_path / "guardrail_state.json"
     stats = gr.LedgerStats(book="orb", n_fills=1, total_usd=-700.0, mean_r=-7.0,
                            trailing_40_mean_r=-7.0, trailing_40_n=1,
@@ -81,6 +82,10 @@ def test_clear_stores_reason(tmp_path, monkeypatch, capsys):
     gr.pause_book(check, stage_risk_usd=100.0, path=state_path, notify=False)
     assert gr.is_paused("orb", path=state_path) is True
 
+    # --clear now builds a ledger snapshot from gr.TRADES_DB to store as the
+    # acknowledged history — point it at a real (never production) temp DB.
+    insert_trade("orb", "2026-06-01", pnl=-700.0)
+    monkeypatch.setattr(gr, "TRADES_DB", guardrail_trades_db)
     monkeypatch.setattr(gr, "STATE_PATH", state_path)
     monkeypatch.setattr(sys, "argv", ["guardrail.py", "--clear", "orb", "latency fix rehearsed"])
     rc = cli.main()
@@ -88,7 +93,52 @@ def test_clear_stores_reason(tmp_path, monkeypatch, capsys):
     assert gr.is_paused("orb", path=state_path) is False
     out = capsys.readouterr().out
     assert "cleared by" in out
-    assert gr.load_state(state_path)["orb"]["cleared_reason"] == "latency fix rehearsed"
+    assert "acknowledged:" in out
+    entry = gr.load_state(state_path)["orb"]
+    assert entry["cleared_reason"] == "latency fix rehearsed"
+    assert entry["acknowledged_through_utc"]
+    assert entry["acknowledged_ledger"] == {"n_fills": 1, "total_usd": -700.0}
+
+
+def test_clear_resets_ledger_window_end_to_end(guardrail_trades_db, insert_trade, tmp_path, monkeypatch):
+    """Full G2 cycle on a real temp trades.db + tmp state file (never production):
+    pre-clear losing fills pause orb; --clear resets the window (those SAME
+    pre-clear fills can never re-pause it on their own); a NEW post-clear loss
+    pauses it again. Reproduces the 2026-09-28 defect end to end."""
+    monkeypatch.setattr(cli, "stage_risk_usd", lambda book: 100.0)
+    monkeypatch.setattr(cli, "band_p5", lambda book, n: None)
+    monkeypatch.setattr(gr, "send_guardrail_telegram", MagicMock())
+    state_path = tmp_path / "state.json"
+
+    # Pre-clear: a single-session loss trips rule 3 (-6 * stage risk $100 = -$600).
+    insert_trade("orb", "2026-09-20", pnl=-700.0, exited_at="2026-09-20T15:00:00+00:00")
+    rc1 = cli.run_check(db_path=guardrail_trades_db, state_path=state_path, notify=False)
+    assert rc1 == 1
+    assert gr.is_paused("orb", path=state_path) is True
+
+    # Owner clears at a known instant (the cron's SAME pre-clear ledger must
+    # never re-pause it afterward — the 2026-09-28 defect).
+    monkeypatch.setattr(gr, "TRADES_DB", guardrail_trades_db)
+    monkeypatch.setattr(gr, "STATE_PATH", state_path)
+    monkeypatch.setattr(sys, "argv", ["guardrail.py", "--clear", "orb", "latency fix rehearsed"])
+    assert cli.main() == 0
+    assert gr.is_paused("orb", path=state_path) is False
+    acked = gr.load_state(state_path)["orb"]["acknowledged_ledger"]
+    assert acked == {"n_fills": 1, "total_usd": -700.0}
+
+    # --check again with NO new fills: the SAME pre-clear loss must not re-pause it.
+    rc2 = cli.run_check(db_path=guardrail_trades_db, state_path=state_path, notify=False)
+    assert rc2 == 0
+    assert gr.is_paused("orb", path=state_path) is False
+
+    # A NEW post-clear loss (exited_at strictly after acknowledged_through_utc) pauses it again.
+    ack_through = gr.load_state(state_path)["orb"]["acknowledged_through_utc"]
+    ack_dt = datetime.fromisoformat(ack_through)
+    new_exit = (ack_dt + timedelta(hours=1)).isoformat()
+    insert_trade("orb", ack_dt.date().isoformat(), pnl=-800.0, exited_at=new_exit)
+    rc3 = cli.run_check(db_path=guardrail_trades_db, state_path=state_path, notify=False)
+    assert rc3 == 1
+    assert gr.is_paused("orb", path=state_path) is True
 
 
 def test_resolve_state_path_uses_production_default_when_env_unset(monkeypatch):

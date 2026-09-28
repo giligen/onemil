@@ -201,21 +201,25 @@ def insert_trade(guardrail_trades_db):
 
     Defaults give a coherent, riskless-to-reason-about fill (entry 100, stop 99,
     100 shares -> total_risk 100) that individual tests override as needed.
+    `account` defaults to None (NULL) — the pre-migration-17 legacy state,
+    which trading/live_guardrail.py's 'live' filter treats as live (NULL or
+    'live'); pass account='paper' to exercise the paper-account exclusion.
     """
     def _insert(strategy, trade_date, pnl, total_risk=None, entry_price=100.0,
-               stop_loss_price=99.0, shares=100, symbol='TEST', exited_at=None):
+               stop_loss_price=99.0, shares=100, symbol='TEST', exited_at=None,
+               account=None):
         conn = sqlite3.connect(str(guardrail_trades_db))
         now = datetime.now(timezone.utc).isoformat()
         risk = total_risk if total_risk is not None else abs(entry_price - stop_loss_price) * shares
         conn.execute(
             "INSERT INTO trades (trade_date, symbol, side, entry_price, stop_loss_price, "
             "take_profit_price, shares, risk_per_share, total_risk, risk_reward_ratio, "
-            "pnl, exited_at, strategy, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "pnl, exited_at, strategy, account, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (trade_date, symbol, 'buy', entry_price, stop_loss_price,
              entry_price + 2 * (entry_price - stop_loss_price), shares,
              abs(entry_price - stop_loss_price), risk, 2.0, pnl,
-             exited_at or f"{trade_date}T12:00:00", strategy, now, now))
+             exited_at or f"{trade_date}T12:00:00", strategy, account, now, now))
         conn.commit()
         conn.close()
     return _insert

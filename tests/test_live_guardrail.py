@@ -5,10 +5,18 @@ firing exactly at its frozen threshold (and not just past it), that a
 simulated config/stage change cannot reset the ledger start, state-file
 round-trip, and a logged clear-with-reason. Never touches production
 data/trades.db or data/guardrail_state.json (every path is tmp_path).
+
+Also covers G2 (owner 2026-09-28, docs/live_guardrails_spec_20260925.md
+amendment): an owner --clear is the ONE legitimate reset of the tripwire
+window (acknowledged_through_utc / after_exited_at), and the trades.account
+(migration 17) split between the live ledger and ORB/HOD-break's own paper
+accounts.
 """
 from __future__ import annotations
 
 import json
+import sqlite3
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -238,3 +246,131 @@ def test_load_state_corrupt_file_logs_error_and_fails_open(tmp_path, caplog):
         state = gr.load_state(path)
     assert state == {}
     assert any('unreadable' in r.message for r in caplog.records)
+
+
+# --------------------------------------------------- account split (migration 17)
+
+def test_account_filter_excludes_paper_from_live_ledger(guardrail_trades_db, insert_trade):
+    """ORB/HOD-break's own paper-account fills (owner 9/28) must never feed
+    the live tripwire; they ledger separately under account='paper'."""
+    insert_trade('orb', '2026-06-01', pnl=-50.0, account='live')
+    insert_trade('orb', '2026-06-02', pnl=-9999.0, account='paper')
+
+    live = gr.live_record('orb', stage_risk_usd=100.0, db_path=guardrail_trades_db)
+    assert live.n_fills == 1 and live.total_usd == pytest.approx(-50.0)
+
+    paper = gr.live_record('orb', stage_risk_usd=100.0, db_path=guardrail_trades_db, account='paper')
+    assert paper.n_fills == 1 and paper.total_usd == pytest.approx(-9999.0)
+
+
+def test_legacy_null_account_counts_as_live(guardrail_trades_db, insert_trade):
+    """Rows written before migration 17 have account=NULL — the live ledger
+    (default account='live') must still count them; they are not paper."""
+    insert_trade('orb', '2026-06-01', pnl=-50.0)  # account left unset -> NULL
+    live = gr.live_record('orb', stage_risk_usd=100.0, db_path=guardrail_trades_db)
+    assert live.n_fills == 1 and live.total_usd == pytest.approx(-50.0)
+    paper = gr.live_record('orb', stage_risk_usd=100.0, db_path=guardrail_trades_db, account='paper')
+    assert paper.n_fills == 0
+
+
+# ------------------------------------------------- acknowledgement cutoff (G2)
+
+def test_after_exited_at_drops_fills_at_or_before_cutoff(guardrail_trades_db, insert_trade):
+    """A fill exited exactly AT the cutoff is excluded (strictly-after semantics,
+    matching clear_pause's 'the clear time is the acknowledged instant')."""
+    insert_trade('orb', '2026-09-20', pnl=-700.0, exited_at='2026-09-20T15:00:00+00:00')
+    insert_trade('orb', '2026-09-28', pnl=-800.0, exited_at='2026-09-28T15:25:00+00:00')  # == cutoff
+    insert_trade('orb', '2026-09-29', pnl=-900.0, exited_at='2026-09-29T09:00:00+00:00')  # after cutoff
+
+    stats = gr.live_record('orb', stage_risk_usd=100.0, db_path=guardrail_trades_db,
+                           after_exited_at='2026-09-28T15:25:00+00:00')
+    assert stats.n_fills == 1
+    assert stats.total_usd == pytest.approx(-900.0)
+
+
+def test_after_exited_at_none_is_unchanged(guardrail_trades_db, insert_trade):
+    """No acknowledgement (after_exited_at=None) -> behaviour identical to before G2."""
+    insert_trade('orb', '2026-06-01', pnl=-50.0)
+    insert_trade('orb', '2026-06-02', pnl=125.0)
+    with_none = gr.live_record('orb', stage_risk_usd=100.0, db_path=guardrail_trades_db,
+                               after_exited_at=None)
+    without_arg = gr.live_record('orb', stage_risk_usd=100.0, db_path=guardrail_trades_db)
+    assert with_none == without_arg
+    assert with_none.n_fills == 2
+
+
+def test_after_exited_at_handles_space_separated_exited_at(guardrail_trades_db, insert_trade):
+    """sqlite3's legacy datetime adapter writes exited_at with a SPACE
+    separator ('... 15:00:00...'); acknowledged_through_utc (this module's own
+    isoformat()) uses 'T'. A naive string compare would misorder same-day
+    values (' ' < 'T'); _parse_utc must classify this correctly as AFTER."""
+    insert_trade('orb', '2026-09-28', pnl=-900.0, exited_at='2026-09-28 20:00:00.000000+00:00')
+    stats = gr.live_record('orb', stage_risk_usd=100.0, db_path=guardrail_trades_db,
+                           after_exited_at='2026-09-28T15:25:00+00:00')
+    assert stats.n_fills == 1 and stats.total_usd == pytest.approx(-900.0)
+
+
+def test_after_exited_at_missing_value_is_included_with_warning(guardrail_trades_db, caplog):
+    """A closed fill with no usable exited_at (NULL — insert_trade's fixture
+    always synthesizes one, so this inserts directly) under an active cutoff
+    is included (ambiguous fills count against the tripwire — conservative,
+    matching trade_risk_usd's fallback philosophy), and logs a WARNING."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn = sqlite3.connect(str(guardrail_trades_db))
+    conn.execute(
+        "INSERT INTO trades (trade_date, symbol, side, entry_price, stop_loss_price, "
+        "take_profit_price, shares, risk_per_share, total_risk, risk_reward_ratio, "
+        "pnl, exited_at, strategy, account, created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ('2026-09-28', 'TEST', 'buy', 100.0, 99.0, 102.0, 100, 1.0, 100.0, 2.0,
+         -900.0, None, 'orb', None, now, now))
+    conn.commit()
+    conn.close()
+
+    with caplog.at_level('WARNING'):
+        stats = gr.live_record('orb', stage_risk_usd=100.0, db_path=guardrail_trades_db,
+                               after_exited_at='2026-09-28T15:25:00+00:00')
+    assert stats.n_fills == 1
+    assert any('unparseable/missing exited_at' in r.message for r in caplog.records)
+
+
+def test_acknowledged_through_utc_and_line_before_and_after_clear(tmp_path):
+    path = tmp_path / 'state.json'
+    assert gr.acknowledged_through_utc('orb', path=path) is None
+    assert gr.acknowledged_line('orb', path=path) is None
+
+    stats = gr.LedgerStats(book='orb', n_fills=123, total_usd=-5281.0, mean_r=None,
+                           trailing_40_mean_r=-0.348, trailing_40_n=40,
+                           trailing_20_session_usd=0.0, worst_month=None,
+                           worst_month_usd=None, worst_session_date=None,
+                           worst_session_usd=None, first_fill_date='2026-05-19')
+    entry = gr.clear_pause('orb', 'owner cleared 15:25 UTC', by='owner', path=path, ledger=stats)
+
+    assert entry['acknowledged_through_utc']
+    assert entry['acknowledged_ledger'] == {'n_fills': 123, 'total_usd': -5281.0}
+    assert gr.acknowledged_through_utc('orb', path=path) == entry['acknowledged_through_utc']
+
+    line = gr.acknowledged_line('orb', path=path)
+    assert line.startswith('acknowledged through ')
+    assert 'n=123' in line and '$-5,281' in line
+
+
+def test_clear_pause_without_ledger_logs_warning_and_records_zero(tmp_path, caplog):
+    """A --clear call site that forgets to pass a ledger snapshot must not
+    silently drop the acknowledged-history line — it logs and records n=0 $0."""
+    path = tmp_path / 'state.json'
+    with caplog.at_level('WARNING'):
+        entry = gr.clear_pause('orb', 'no ledger passed', by='owner', path=path)
+    assert entry['acknowledged_ledger'] == {'n_fills': 0, 'total_usd': 0.0}
+    assert any('without a ledger snapshot' in r.message for r in caplog.records)
+
+
+def test_config_change_cannot_set_acknowledged_through_utc(guardrail_trades_db, insert_trade):
+    """Simulates the exact 2026-09-28 defect: --check (no clear involved) must
+    NEVER move acknowledged_through_utc — only clear_pause may. A book that
+    was never cleared re-evaluates its FULL live ledger every time."""
+    insert_trade('orb', '2026-06-01', pnl=-5281.0)
+    stats1 = gr.live_record('orb', stage_risk_usd=100.0, db_path=guardrail_trades_db)
+    stats2 = gr.live_record('orb', stage_risk_usd=100.0, db_path=guardrail_trades_db)
+    assert stats1.n_fills == stats2.n_fills == 1
+    assert stats1.total_usd == stats2.total_usd == pytest.approx(-5281.0)

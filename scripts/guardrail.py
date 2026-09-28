@@ -86,8 +86,21 @@ def run_check(db_path: Optional[Path] = None, state_path: Optional[Path] = None,
     any_new_pause = False
     for book in gr.BOOKS:
         risk = stage_risk_usd(book)
-        stats = gr.live_record(book, stage_risk_usd=risk, db_path=db_path)
+        # G2: an owner --clear freezes acknowledged_through_utc as the ONE
+        # legitimate reset of this book's tripwire window (see
+        # trading/live_guardrail.py clear_pause docstring) — the ledger below
+        # only counts fills that closed AFTER it; a config change never sets it.
+        ack = gr.acknowledged_through_utc(book, path=state_path)
+        stats = gr.live_record(book, stage_risk_usd=risk, db_path=db_path, after_exited_at=ack)
         print(stats.line())
+        ack_line = gr.acknowledged_line(book, path=state_path)
+        if ack_line:
+            print(f"  {ack_line}")
+        # Paper-account fills (ORB/HOD-break's own paper accounts, migration
+        # 17) never feed the live tripwire — reported separately, never summed in.
+        paper_stats = gr.live_record(book, stage_risk_usd=risk, db_path=db_path, account='paper')
+        if paper_stats.n_fills:
+            print(f"  paper: {paper_stats.line()}")
         if book not in gr.PAUSABLE_BOOKS:
             continue
         p5 = band_p5(book, stats.trailing_40_n)
@@ -119,9 +132,15 @@ def main() -> int:
 
     book, reason = a.clear
     # path resolved at call time (not import-time default) so a monkeypatched
-    # gr.STATE_PATH (tests) or a real one (prod) is always honoured.
-    entry = gr.clear_pause(book, reason, path=gr.STATE_PATH)
+    # gr.STATE_PATH (tests) or a real one (prod) is always honoured. The
+    # ledger snapshot AT this clear instant is what the report prints as the
+    # acknowledged (pre-clear) history from now on (G2, see clear_pause).
+    risk = stage_risk_usd(book)
+    ledger = gr.live_record(book, stage_risk_usd=risk, db_path=gr.TRADES_DB)
+    entry = gr.clear_pause(book, reason, path=gr.STATE_PATH, ledger=ledger)
     print(f"{book}: cleared by {entry['cleared_by']} at {entry['cleared_at_utc']} — {reason}")
+    print(f"  acknowledged: n={ledger.n_fills} ${ledger.total_usd:+,.0f} "
+         f"through {entry['acknowledged_through_utc']}")
     return 0
 
 

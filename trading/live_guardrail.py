@@ -136,7 +136,55 @@ def _connect_ro(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def first_fill_date(book: str, db_path: Path = TRADES_DB) -> Optional[str]:
+def _account_where(account: str) -> str:
+    """SQL predicate selecting one ledger population (migration 17, owner 9/28):
+    'live' (NULL -- every fill before the column existed -- OR the literal
+    'live') or 'paper' (ORB/HOD-break's own paper accounts). Paper fills must
+    never feed the live tripwire (docs/live_guardrails_spec_20260925.md)."""
+    if account == 'live':
+        return "(account IS NULL OR account = 'live')"
+    if account == 'paper':
+        return "account = 'paper'"
+    raise ValueError(f"unknown account filter {account!r} -- expected 'live' or 'paper'")
+
+
+def _parse_utc(ts) -> Optional[datetime]:
+    """Best-effort parse of a stored timestamp to an aware UTC datetime. Never raises.
+
+    Two writers disagree on the date/time separator: sqlite3's legacy datetime
+    adapter (trades.exited_at, written from a tz-aware datetime) emits a SPACE
+    ('2026-09-28 15:25:07.123+00:00'); this module's own
+    datetime.now(timezone.utc).isoformat() (acknowledged_through_utc) emits
+    'T' ('2026-09-28T15:25:07.123+00:00'). A naive string compare between the
+    two silently misorders same-day timestamps (' ' < 'T' in ASCII, so EVERY
+    same-day exited_at would compare "before" an acknowledged_through_utc
+    regardless of actual time) -- so this always parses to real datetimes
+    before comparing. Naive values (no tzinfo) are assumed UTC, matching
+    every writer in this codebase.
+    """
+    if not ts:
+        return None
+    if isinstance(ts, datetime):
+        dt = ts
+    else:
+        s = str(ts).strip()
+        if not s:
+            return None
+        if len(s) > 10 and s[10] == ' ':
+            s = s[:10] + 'T' + s[11:]
+        if s.endswith('Z'):
+            s = s[:-1] + '+00:00'
+        try:
+            dt = datetime.fromisoformat(s)
+        except ValueError:
+            logger.warning(f"guardrail: unparseable timestamp {ts!r} -- treating as absent")
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def first_fill_date(book: str, db_path: Path = TRADES_DB, account: str = 'live') -> Optional[str]:
     """This book's first-ever closed live fill date.
 
     The ledger start a stage/config change must NEVER move (spec: "never
@@ -151,27 +199,31 @@ def first_fill_date(book: str, db_path: Path = TRADES_DB) -> Optional[str]:
     conn = _connect_ro(db_path)
     try:
         row = conn.execute(
-            "SELECT MIN(trade_date) AS d FROM trades "
-            "WHERE strategy=? AND pnl IS NOT NULL", (book,)).fetchone()
+            f"SELECT MIN(trade_date) AS d FROM trades "
+            f"WHERE strategy=? AND pnl IS NOT NULL AND {_account_where(account)}",
+            (book,)).fetchone()
     finally:
         conn.close()
     return row['d'] if row and row['d'] else None
 
 
 def load_fills(book: str, db_path: Path = TRADES_DB,
-               since: Optional[str] = None) -> List[Dict]:
-    """Every closed fill for `book`, since its first-ever fill (or `since`). READ-ONLY."""
+               since: Optional[str] = None, account: str = 'live') -> List[Dict]:
+    """Every closed fill for `book` on `account` ('live' default: NULL or
+    'live' rows), since its first-ever fill on that account (or `since`).
+    READ-ONLY."""
     book = _normalize_book(book)
-    since = since if since is not None else first_fill_date(book, db_path)
+    since = since if since is not None else first_fill_date(book, db_path, account=account)
     if since is None:
         return []
     conn = _connect_ro(db_path)
     try:
         rows = conn.execute(
-            "SELECT trade_date, symbol, pnl, entry_price, stop_loss_price, "
-            "shares, total_risk, exited_at "
-            "FROM trades WHERE strategy=? AND trade_date>=? AND pnl IS NOT NULL "
-            "ORDER BY trade_date, exited_at", (book, since)).fetchall()
+            f"SELECT trade_date, symbol, pnl, entry_price, stop_loss_price, "
+            f"shares, total_risk, exited_at "
+            f"FROM trades WHERE strategy=? AND trade_date>=? AND pnl IS NOT NULL "
+            f"AND {_account_where(account)} "
+            f"ORDER BY trade_date, exited_at", (book, since)).fetchall()
     finally:
         conn.close()
     return [dict(r) for r in rows]
@@ -210,14 +262,39 @@ def trade_r(row: Dict, stage_risk_usd: float) -> Optional[float]:
 
 
 def live_record(book: str, stage_risk_usd: float = 0.0, db_path: Path = TRADES_DB,
-                fills: Optional[List[Dict]] = None) -> LedgerStats:
-    """The book's cumulative live ledger since its first-ever fill.
+                fills: Optional[List[Dict]] = None, account: str = 'live',
+                after_exited_at: Optional[str] = None) -> LedgerStats:
+    """The book's cumulative ledger on `account` ('live' default) since its
+    first-ever fill on that account.
+
+    `after_exited_at` (a UTC ISO instant, from `acknowledged_through_utc()`)
+    drops every fill at or before it. This is the ONE mechanism that may move
+    the reportable window — set only by an owner `--clear`
+    (docs/live_guardrails_spec_20260925.md G2) — so the SAME pre-clear fills
+    that caused a pause can never re-pause the book on their own; a config
+    change must NEVER set it. With no cutoff, behaviour is unchanged.
 
     `fills` lets a caller (tests, or a prefetched list) skip the DB read —
-    `live_record` itself never assumes production `data/trades.db`.
+    `live_record` itself never assumes production `data/trades.db`. The
+    `account` filter only applies to the DB read (a caller supplying `fills`
+    has already curated that population); `after_exited_at` applies either way.
     """
     book = _normalize_book(book)
-    rows = fills if fills is not None else load_fills(book, db_path)
+    rows = fills if fills is not None else load_fills(book, db_path, account=account)
+    if after_exited_at:
+        after_dt = _parse_utc(after_exited_at)
+        kept = []
+        for row in rows:
+            row_dt = _parse_utc(row.get('exited_at'))
+            if row_dt is None:
+                logger.warning(
+                    f"guardrail: {book} fill {row.get('trade_date')} {row.get('symbol')} has an "
+                    f"unparseable/missing exited_at ({row.get('exited_at')!r}) with an active "
+                    f"acknowledgement cutoff — including it (ambiguous fills count against the tripwire)")
+                kept.append(row)
+            elif after_dt is None or row_dt > after_dt:
+                kept.append(row)
+        rows = kept
     if not rows:
         return LedgerStats(book=book, n_fills=0, total_usd=0.0, mean_r=None,
                            trailing_40_mean_r=None, trailing_40_n=0,
@@ -384,6 +461,34 @@ def is_paused(book: str, path: Optional[Path] = None) -> bool:
     return bool(load_state(path).get(book, {}).get('paused_by_guardrail', False))
 
 
+def acknowledged_through_utc(book: str, path: Optional[Path] = None) -> Optional[str]:
+    """The UTC ISO instant of `book`'s last owner `--clear`, or None if it has
+    never been cleared. Any evaluation site (the daily check, or an engine
+    that ever re-evaluates G1 itself — see the module docstring) must ledger
+    only fills whose `exited_at` is strictly AFTER this instant: pass it as
+    `live_record`'s `after_exited_at`. Set only by `clear_pause` — never by a
+    config change."""
+    book = _normalize_book(book)
+    return load_state(path).get(book, {}).get('acknowledged_through_utc')
+
+
+def acknowledged_line(book: str, path: Optional[Path] = None) -> Optional[str]:
+    """The one report line for `book`'s acknowledged (pre-clear) history, e.g.
+    'acknowledged through 2026-09-28T15:25Z: n=123 $-5,281'. None if `book`
+    has never been cleared."""
+    book = _normalize_book(book)
+    entry = load_state(path).get(book, {})
+    ack = entry.get('acknowledged_through_utc')
+    if not ack:
+        return None
+    dt = _parse_utc(ack)
+    ts_txt = dt.strftime('%Y-%m-%dT%H:%MZ') if dt else str(ack)
+    ledger = entry.get('acknowledged_ledger') or {}
+    n = ledger.get('n_fills', 0)
+    total = ledger.get('total_usd', 0.0)
+    return f"acknowledged through {ts_txt}: n={n} ${total:+,.0f}"
+
+
 def send_guardrail_telegram(text: str, script: Path = TELEGRAM_SCRIPT) -> bool:
     """Fire-and-forget guardrail Telegram. Never raises."""
     try:
@@ -440,8 +545,19 @@ def pause_book(check: PauseCheck, stage_risk_usd: float, path: Optional[Path] = 
 
 
 def clear_pause(book: str, reason: str, by: Optional[str] = None,
-                path: Optional[Path] = None) -> Dict:
-    """MANUAL pause clear — logs who and why. Never called automatically."""
+                path: Optional[Path] = None,
+                ledger: Optional[LedgerStats] = None) -> Dict:
+    """MANUAL pause clear — logs who and why. Never called automatically.
+
+    G2 (docs/live_guardrails_spec_20260925.md amendment, owner 2026-09-28): an
+    owner clear is the ONE legitimate reset of the tripwire's window. Records
+    `acknowledged_through_utc` (this instant) so `--check`'s next ledger only
+    counts fills strictly AFTER it (`live_record`'s `after_exited_at`) — the
+    SAME pre-clear losing fills can never re-pause the book on their own —
+    while `acknowledged_ledger` (from the `ledger` snapshot the caller
+    measured AT this clear) lets the report still print the pre-clear history
+    by name. A config change must NEVER call this.
+    """
     book = _normalize_book(book)
     if not (reason or '').strip():
         raise ValueError("clearing a guardrail pause requires a reason")
@@ -457,6 +573,14 @@ def clear_pause(book: str, reason: str, by: Optional[str] = None,
     entry['cleared_reason'] = reason
     entry['cleared_by'] = by
     entry['cleared_at_utc'] = now
+    entry['acknowledged_through_utc'] = now
+    if ledger is None:
+        logger.warning(f"{book}: clear_pause called without a ledger snapshot — "
+                       f"acknowledged_ledger recorded as n=0 $0; the report's "
+                       f"acknowledged-history line will undercount")
+        entry['acknowledged_ledger'] = {'n_fills': 0, 'total_usd': 0.0}
+    else:
+        entry['acknowledged_ledger'] = {'n_fills': ledger.n_fills, 'total_usd': ledger.total_usd}
     state[book] = entry
     save_state(state, path)
     logger.warning(f"[GUARDRAIL] {book} CLEARED by {by}: {reason}")

@@ -199,7 +199,8 @@ def guardrail_section() -> str:
     lines = ["GUARDRAIL:"]
     for book in gr.BOOKS:
         risk = guardrail_cli.stage_risk_usd(book)
-        stats = gr.live_record(book, stage_risk_usd=risk, db_path=gr.TRADES_DB)
+        ack = gr.acknowledged_through_utc(book, path=gr.STATE_PATH)
+        stats = gr.live_record(book, stage_risk_usd=risk, db_path=gr.TRADES_DB, after_exited_at=ack)
         band_txt = "n/a"
         if book in gr.PAUSABLE_BOOKS:
             p5 = guardrail_cli.band_p5(book, stats.trailing_40_n)

@@ -41,3 +41,14 @@ tables; no DB reads after 13:25 UTC — check `date -u`)
   add (do not edit the crontab; the main session does that).
 * Write `docs/live_guardrails_REPORT.md`: files, the exact rules with their thresholds, the boot-log lines to grep, the
   rehearsal plan. Return ≤ 150 words.
+
+## Amendment 2026-09-28 — an owner clear is the one legitimate reset; paper fills never count
+Incident: the owner cleared the ORB pause at 15:25 UTC on 9/28; the 20:10 UTC `guardrail.py --check` cron re-paused the
+book from the same pre-clear ledger (n=123, −$5,281), so the 20:15 boot came up in DRY mode. Fix (commit of this date):
+`--clear BOOK REASON` records `acknowledged_through_utc` and the acknowledged ledger summary (n, $) in the book's state;
+`--check` builds the tripwire ledger from fills exited AFTER that instant only (the `trades` table is never modified;
+the report prints `acknowledged through <ts>: n=… $…`). Config changes still never reset the window. The ledger is
+restricted to the live account (`trades.account` NULL or 'live'); paper-account fills are reported on a `paper:` line
+and never feed the live tripwire. Timestamps are parsed to datetimes (sqlite's space separator vs isoformat's 'T'
+would have mis-ordered a same-day cutoff as strings). Tests: `tests/test_live_guardrail.py` (cutoff, account filter,
+separator), `tests/test_guardrail_cli.py` (pause → clear → check does not re-pause → new loss re-pauses, real sqlite).
