@@ -9,6 +9,7 @@ Tables:
 Handles concurrent access via WAL mode and busy timeouts.
 """
 
+import json
 import os
 import sqlite3
 import logging
@@ -692,6 +693,165 @@ class Database:
             logger.warning(f"Migration 15 (exit_branch column) failed "
                            f"(non-fatal): {e}")
 
+        # Migration 16: dry_trades table (owner 9/28: "hod dry-run is not in the DB???").
+        # HOD-break and ORB dry-run fills/exits previously lived ONLY in CSV ledgers
+        # (logs/hod_dry_entry_ledger.csv, logs/hod_dry_counterfactuals.csv) and
+        # logs/orb_dry_ledger.csv, rebuilt on every read by scripts/hod_dry_ledger.py from
+        # journalctl + logs/session_archive — slow, and journal rotation already silently
+        # changed a past day's book once (project_dry_ledger_archive_sep2026). This is a
+        # SEPARATE table from `trades` (never a real order, never touches account state);
+        # `source` distinguishes a live dry-run row from a historical backfill so the two
+        # populations are never silently mixed. See persistence/database.py insert_dry_entry/
+        # close_dry_trade/get_dry_trades, scripts/backfill_dry_trades.py.
+        try:
+            self._trades_conn.executescript("""
+                CREATE TABLE IF NOT EXISTS dry_trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    strategy VARCHAR(20) NOT NULL,
+                    trade_date DATE NOT NULL,
+                    symbol VARCHAR(10) NOT NULL,
+                    entry_ts TIMESTAMP,
+                    entry_px REAL,
+                    shares INTEGER,
+                    stop_px REAL,
+                    target_px REAL,
+                    exit_ts TIMESTAMP,
+                    exit_px REAL,
+                    exit_reason VARCHAR(20),
+                    r_multiple REAL,
+                    pnl_usd REAL,
+                    risk_usd REAL,
+                    source VARCHAR(20) NOT NULL,
+                    extra_json TEXT,
+                    created_at TIMESTAMP NOT NULL,
+                    updated_at TIMESTAMP NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_dry_trades_strategy_date
+                    ON dry_trades(strategy, trade_date);
+            """)
+            self._trades_conn.commit()
+            logger.info("Migration 16: ensured dry_trades table")
+        except Exception as e:
+            logger.warning(f"Migration 16 (dry_trades table) failed (non-fatal): {e}")
+
+        # Migration 17: Add account column to trades table (owner 9/28: HOD-break
+        # and ORB each now route real orders to their OWN Alpaca paper account,
+        # distinct from the shared main account bull_flag/macd_wave use). Tags
+        # every trades row with 'paper' or 'live' (from AlpacaClient.is_paper at
+        # order-submission time) so a book's paper-account fills are never summed
+        # into a live P&L line — see save_trade() and scripts/eod_report.py.
+        try:
+            columns = [row[1] for row in self._trades_conn.execute("PRAGMA table_info(trades)").fetchall()]
+            if 'account' not in columns:
+                self._trades_conn.execute("ALTER TABLE trades ADD COLUMN account VARCHAR(10)")
+                self._trades_conn.commit()
+                logger.info("Migration 17: added account column to trades table")
+        except Exception as e:
+            logger.warning(f"Migration 17 (account column) failed (non-fatal): {e}")
+
+    # =========================================================================
+    # Dry-run trades (HOD-break, ORB) — persisted forward instruments, never real orders
+    # =========================================================================
+
+    def insert_dry_entry(self, trade: Dict[str, Any]) -> Optional[int]:
+        """Insert one dry-run entry row. Required keys: strategy, trade_date, symbol, source.
+        Never raises — a dry-ledger DB failure must never affect trading; logs WARNING and
+        returns None on failure so callers can no-op. Returns the new row id on success."""
+        for req in ('strategy', 'trade_date', 'symbol', 'source'):
+            if req not in trade or trade[req] is None:
+                logger.warning(f"insert_dry_entry: missing required field '{req}' — dropping row {trade}")
+                return None
+        now = datetime.now(timezone.utc)
+        row = dict(trade)
+        extra = row.pop('extra', None)
+        if extra is not None and 'extra_json' not in row:
+            row['extra_json'] = json.dumps(extra)
+        row.setdefault('extra_json', None)
+        for col in ('entry_ts', 'entry_px', 'shares', 'stop_px', 'target_px',
+                    'exit_ts', 'exit_px', 'exit_reason', 'r_multiple', 'pnl_usd', 'risk_usd'):
+            row.setdefault(col, None)
+        row['created_at'] = now
+        row['updated_at'] = now
+        try:
+            cursor = self._trades_conn.execute("""
+                INSERT INTO dry_trades (strategy, trade_date, symbol, entry_ts, entry_px, shares,
+                                         stop_px, target_px, exit_ts, exit_px, exit_reason,
+                                         r_multiple, pnl_usd, risk_usd, source, extra_json,
+                                         created_at, updated_at)
+                VALUES (:strategy, :trade_date, :symbol, :entry_ts, :entry_px, :shares,
+                        :stop_px, :target_px, :exit_ts, :exit_px, :exit_reason,
+                        :r_multiple, :pnl_usd, :risk_usd, :source, :extra_json,
+                        :created_at, :updated_at)
+            """, row)
+            self._trades_conn.commit()
+            logger.info(f"Dry entry saved: {row['strategy']} {row['symbol']} {row['trade_date']} "
+                        f"(source={row['source']}, id={cursor.lastrowid})")
+            return cursor.lastrowid
+        except Exception as e:
+            logger.warning(f"insert_dry_entry failed for {row.get('strategy')} {row.get('symbol')} "
+                           f"{row.get('trade_date')}: {e}")
+            return None
+
+    def close_dry_trade(self, dry_trade_id: int, exit_ts=None, exit_px: Optional[float] = None,
+                         exit_reason: Optional[str] = None, r_multiple: Optional[float] = None,
+                         pnl_usd: Optional[float] = None) -> None:
+        """Record the exit of a previously inserted dry_trades row. Never raises — logs WARNING
+        on failure so a DB hiccup can never affect trading."""
+        if dry_trade_id is None:
+            logger.warning("close_dry_trade called with dry_trade_id=None — nothing to close")
+            return
+        try:
+            self._trades_conn.execute("""
+                UPDATE dry_trades
+                SET exit_ts = ?, exit_px = ?, exit_reason = ?, r_multiple = ?, pnl_usd = ?,
+                    updated_at = ?
+                WHERE id = ?
+            """, (exit_ts, exit_px, exit_reason, r_multiple, pnl_usd,
+                  datetime.now(timezone.utc), dry_trade_id))
+            self._trades_conn.commit()
+            logger.info(f"Dry trade {dry_trade_id} closed: {exit_reason} @ {exit_px} "
+                        f"({r_multiple} R, ${pnl_usd})")
+        except Exception as e:
+            logger.warning(f"close_dry_trade failed for id={dry_trade_id}: {e}")
+
+    def get_dry_trades(self, strategy: str, start: Optional[str] = None,
+                        end: Optional[str] = None) -> List[Dict[str, Any]]:
+        """All dry_trades rows for `strategy`, optionally bounded to [start, end] trade_date
+        (inclusive, YYYY-MM-DD). Ordered by trade_date, id."""
+        query = "SELECT * FROM dry_trades WHERE strategy = ?"
+        params: List[Any] = [strategy]
+        if start:
+            query += " AND trade_date >= ?"
+            params.append(start)
+        if end:
+            query += " AND trade_date <= ?"
+            params.append(end)
+        query += " ORDER BY trade_date, id"
+        cursor = self._trades_conn.execute(query, params)
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_dry_trades_daily_summary(self, strategy: str, start: Optional[str] = None,
+                                      end: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Per-day rollup of dry_trades for `strategy`: trades, R, $, green flag. Only rows with
+        a resolved exit (r_multiple or pnl_usd not null) count toward R/$ — open/unresolved rows
+        still count toward `trades`."""
+        rows = self.get_dry_trades(strategy, start, end)
+        by_date: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            d = r['trade_date']
+            bucket = by_date.setdefault(d, {'trade_date': d, 'trades': 0, 'r_total': 0.0, 'pnl_total': 0.0, 'resolved': 0})
+            bucket['trades'] += 1
+            if r.get('r_multiple') is not None:
+                bucket['r_total'] += float(r['r_multiple']); bucket['resolved'] += 1
+            if r.get('pnl_usd') is not None:
+                bucket['pnl_total'] += float(r['pnl_usd'])
+        out = []
+        for d in sorted(by_date):
+            b = by_date[d]
+            b['is_green'] = b['r_total'] > 0
+            out.append(b)
+        return out
+
     # =========================================================================
     # News cache (halt detection + per-article classification)
     # =========================================================================
@@ -1091,6 +1251,10 @@ class Database:
         if 'strategy' not in trade:
             logger.warning("save_trade called without explicit strategy — defaulting to 'bull_flag'")
         trade.setdefault('strategy', 'bull_flag')
+        if 'account' not in trade:
+            logger.warning(f"save_trade called without explicit account ({trade.get('strategy')} "
+                            f"{trade.get('symbol')}) — defaulting to 'paper'")
+        trade.setdefault('account', 'paper')
         trade.setdefault('created_at', now)
         trade.setdefault('updated_at', now)
         cursor = self._trades_conn.execute("""
@@ -1100,14 +1264,14 @@ class Database:
                                order_id, order_status, fill_price, filled_at,
                                exit_price, exit_reason, exited_at,
                                pnl, pnl_pct, pattern_data,
-                               strategy, created_at, updated_at)
+                               strategy, account, created_at, updated_at)
             VALUES (:trade_date, :symbol, :side, :entry_price,
                     :stop_loss_price, :take_profit_price, :shares,
                     :risk_per_share, :total_risk, :risk_reward_ratio,
                     :order_id, :order_status, :fill_price, :filled_at,
                     :exit_price, :exit_reason, :exited_at,
                     :pnl, :pnl_pct, :pattern_data,
-                    :strategy, :created_at, :updated_at)
+                    :strategy, :account, :created_at, :updated_at)
         """, trade)
         self._trades_conn.commit()
         logger.info(f"Saved trade: {trade['symbol']} {trade['side']} "

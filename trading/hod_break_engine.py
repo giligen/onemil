@@ -140,6 +140,7 @@ class Candidate:
                                                                # tape print), None for a bar-level fallback cross or no cross yet; read by _append_live_parity_row (item 9)
     scanner_qualified_at_arm: Optional[bool] = None            # counterfactual instrument (log_counterfactuals): live scanner's _qualified_symbols membership at arm time
     cf_floor_stop_px: Optional[float] = None                   # counterfactual instrument: min(consolidation stop, fill x 0.975), set at fill (dry and live)
+    dry_trade_id: Optional[int] = None                          # persistence.database dry_trades row id for this fill (9/28 "hod dry-run is not in the DB")
 
     def set_bar(self, minute: int, o: float, h: float, l: float, c: float, v: float) -> bool:
         i = minute - OPEN_MINUTE
@@ -233,6 +234,8 @@ class CFWatch:
     exit_px: Optional[float] = None                       # this fill's own recorded exit (target, actual stop, or EOD/flat), first print to reach either
     exit_reason: Optional[str] = None                     # 'target' | 'stop' | 'eod'
     exit_ts: Optional[str] = None
+    db_trade_id: Optional[int] = None                     # persistence.database dry_trades row id (Candidate.dry_trade_id copied at open)
+    shares: Optional[int] = None                          # hypothetical size (shares_for(risk_usd, ...)) — for r_multiple/pnl_usd at close
 
 
 class HodBreakEngine:
@@ -829,6 +832,7 @@ class HodBreakEngine:
                 cand.resting_filled = True
                 cand.resting_arm = None
                 self._notify(f"{self.dry_tag} FILL {symbol} {fill_px:.2f} (level {arm['level']:.2f} stop {arm['stop']:.2f})")
+                self._record_dry_fill(cand, arm, fill_px, cross_ts)
                 if self.log_counterfactuals:
                     self._start_cf_watch(cand, arm, fill_px, cross_ts)
             else:
@@ -883,6 +887,7 @@ class HodBreakEngine:
                         if filled:
                             cand.resting_filled = True
                             self._notify(f"{self.dry_tag} FILL {sym} {fill_px:.2f} (level {arm['level']:.2f} stop {arm['stop']:.2f})")
+                            self._record_dry_fill(cand, arm, fill_px, cross_ts)
                             if self.log_counterfactuals:
                                 self._start_cf_watch(cand, arm, fill_px, cross_ts)
                         self._append_dry_ledger(cand, arm, cross_ts, ask=ask, filled=filled, fill_px=fill_px, tape_accurate=False)
@@ -978,6 +983,50 @@ class HodBreakEngine:
         except Exception as e:
             logger.error(f"{self.tag} {symbol}: failed to append {err_ctx}: {e}")
 
+    def _record_dry_fill(self, cand: Candidate, arm: dict, fill_px: float, cross_ts) -> None:
+        """Persist one DRY fill to `dry_trades` (owner 9/28: "hod dry-run is not in the DB???") — runs on EVERY
+        resting-entry dry fill regardless of `log_counterfactuals`, unlike the CFWatch counterfactual machinery
+        below. Sets `cand.dry_trade_id` so `_start_cf_watch`/`_close_cf_watch` can later close this same row when
+        counterfactual tracking is on; when it's off the row is left open (honest: this engine has no other exit
+        simulation). Never raises — a DB hiccup must never affect trading (insert_dry_entry already wraps its own
+        try/except and logs WARNING; the getattr guard below covers a db=None test double)."""
+        if self.db is None or not hasattr(self.db, 'insert_dry_entry'):
+            return
+        try:
+            shares = shares_for(self.risk_usd, arm['trigger'], arm['stop'])
+            cand.dry_trade_id = self.db.insert_dry_entry({
+                'strategy': self.STRATEGY_NAME,
+                'trade_date': self.session_date or self._et_now().strftime('%Y-%m-%d'),
+                'symbol': cand.symbol,
+                'entry_ts': cross_ts.isoformat() if hasattr(cross_ts, 'isoformat') else cross_ts,
+                'entry_px': fill_px,
+                'shares': shares,
+                'stop_px': arm['stop'],
+                'target_px': fill_px + self.params.target_r * (fill_px - arm['stop']),
+                'risk_usd': self.risk_usd,
+                'source': 'live_dry',
+            })
+        except Exception as e:
+            logger.warning(f"{self.tag} {cand.symbol}: failed to persist dry fill to dry_trades: {e}")
+
+    def _close_dry_trade_db(self, dry_trade_id: Optional[int], exit_ts, exit_px: Optional[float],
+                             exit_reason: Optional[str], entry_px: float, stop_px: float, shares: Optional[int]) -> None:
+        """Close a dry_trades row with the ACTUAL fill's resolved exit (target/stop/eod) — the same values
+        `_write_cf_row` writes to the CSV ledger. Never raises."""
+        if dry_trade_id is None or self.db is None or not hasattr(self.db, 'close_dry_trade'):
+            return
+        try:
+            risk_per_share = entry_px - stop_px
+            r_multiple = (exit_px - entry_px) / risk_per_share if exit_px is not None and risk_per_share else None
+            pnl_usd = (exit_px - entry_px) * shares if exit_px is not None and shares else None
+            self.db.close_dry_trade(
+                dry_trade_id,
+                exit_ts=exit_ts.isoformat() if hasattr(exit_ts, 'isoformat') else exit_ts,
+                exit_px=exit_px, exit_reason=exit_reason, r_multiple=r_multiple, pnl_usd=pnl_usd,
+            )
+        except Exception as e:
+            logger.warning(f"{self.tag} dry_trade_id={dry_trade_id}: failed to close dry_trades row: {e}")
+
     # ------------------------------------------------------------------ counterfactual instruments (log_counterfactuals only)
     def _start_cf_watch(self, cand: Candidate, arm: dict, fill_px: float, cross_ts) -> None:
         """Open a CFWatch on a DRY fill (item 2 + item 3, module docstring). Computes `cf_floor_stop_px` (item 2,
@@ -989,7 +1038,8 @@ class HodBreakEngine:
         self._cf_watches[cand.symbol] = CFWatch(
             symbol=cand.symbol, date=self.session_date or '', fill_ts=cross_ts.isoformat(), fill_px=fill_px,
             arm_level=arm['level'], arm_trigger=arm['trigger'], actual_stop=stop, actual_target=target,
-            floor_stop_px=cand.cf_floor_stop_px, scanner_qualified_at_arm=cand.scanner_qualified_at_arm)
+            floor_stop_px=cand.cf_floor_stop_px, scanner_qualified_at_arm=cand.scanner_qualified_at_arm,
+            db_trade_id=cand.dry_trade_id, shares=shares_for(self.risk_usd, arm['trigger'], stop))
         logger.info(f"{self.tag} {cand.symbol}: counterfactual watch armed (floor {cand.cf_floor_stop_px:.4f}, "
                     f"actual stop {stop:.4f} target {target:.4f})")
 
@@ -1027,8 +1077,13 @@ class HodBreakEngine:
 
     def _close_cf_watch(self, w: CFWatch) -> None:
         """Write the resolved row and drop the watch — the ONE place every CFWatch exit path (target, stop,
-        stop-limit no-fill tail, EOD/flat) funnels through, so every DRY fill gets EXACTLY one row here."""
+        stop-limit no-fill tail, EOD/flat) funnels through, so every DRY fill gets EXACTLY one row here.
+        Also the one place that closes this fill's `dry_trades` DB row (9/28), since this is the ONLY exit
+        simulation this engine has — with `log_counterfactuals=False` a dry_trades row stays open forever,
+        which is honest (no exit is ever known)."""
         self._write_cf_row(w)
+        self._close_dry_trade_db(w.db_trade_id, w.exit_ts, w.exit_px, w.exit_reason,
+                                  entry_px=w.fill_px, stop_px=w.actual_stop, shares=w.shares)
         self._cf_watches.pop(w.symbol, None)
         if self.stop_monitor is not None:
             try:
@@ -1597,6 +1652,7 @@ class HodBreakEngine:
             'stop_loss_price': stop, 'take_profit_price': target, 'shares': shares, 'risk_per_share': limit - stop, 'total_risk': (limit - stop) * shares,
             'risk_reward_ratio': self.params.target_r, 'order_id': order_id, 'order_status': 'pending_new', 'fill_price': None, 'filled_at': None,
             'exit_price': None, 'exit_reason': None, 'exited_at': None, 'pnl': None, 'pnl_pct': None, 'strategy': self.STRATEGY_NAME,
+            'account': 'paper' if getattr(self.alpaca, 'is_paper', True) else 'live',
             'pattern_data': json.dumps(pattern_data),
         }
         try:

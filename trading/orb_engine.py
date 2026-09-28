@@ -2782,6 +2782,7 @@ class ORBEngine:
                     composite=plan.composite_score, quintile=plan.quintile,
                     pool=pool_label,
                 )
+                self._record_orb_dry_entry(sym, et_now, plan)
                 cand.rejected_reason = 'production_dry_run'
                 cand.plan_submitted = True
                 self._record_latency_phase('rank_and_submit', time.time() - t_rank)
@@ -2924,6 +2925,29 @@ class ORBEngine:
                 ])
         except Exception as e:
             logger.warning(f"[ORB DRY] ledger write failed for {sym} ({e})")
+
+    def _record_orb_dry_entry(self, sym: str, ts_et: datetime, plan) -> None:
+        """Persist one ORB production dry-run WOULD BUY to `dry_trades` (owner 9/28: "hod dry-run is not in
+        the DB???" applies equally to ORB). The ORB dry path has no exit simulation yet (unlike HOD-break's
+        CFWatch) — exit_ts/exit_px/exit_reason/r_multiple/pnl_usd are left NULL, on purpose: this row records
+        only that the engine would have bought. Never raises — a DB hiccup must never affect trading."""
+        if self.db is None or not hasattr(self.db, 'insert_dry_entry'):
+            return
+        try:
+            self.db.insert_dry_entry({
+                'strategy': self.STRATEGY_NAME,
+                'trade_date': ts_et.strftime('%Y-%m-%d'),
+                'symbol': sym,
+                'entry_ts': ts_et.isoformat(),
+                'entry_px': plan.entry_price,
+                'shares': plan.shares,
+                'stop_px': plan.stop_price,
+                'target_px': None,  # ORB has no fixed target (trailing/lock stop) — no exit simulation on the dry path yet
+                'risk_usd': plan.total_risk,
+                'source': 'live_dry',
+            })
+        except Exception as e:
+            logger.warning(f"[ORB DRY] {sym}: failed to persist dry fill to dry_trades: {e}")
 
     def _news_fetch_needed(self) -> bool:
         """Single source of truth for whether to fetch premarket news flags.
@@ -5880,6 +5904,7 @@ class ORBEngine:
                 'pnl_pct': None,
                 'pattern_data': pattern_data,
                 'strategy': STRATEGY_NAME,
+                'account': 'paper' if getattr(self.alpaca, 'is_paper', True) else 'live',
                 # Slippage attribution baseline (set ONCE at submit; consumed at fill)
                 'order_submitted_at': now_utc,
                 'bar_close_price': plan.range_high,  # BT reference = range_high

@@ -78,10 +78,43 @@ def analyze_day(day_str: str):
         return None
 
 
+def ledger_from_db(start_date_str: str, end_date: 'datetime.date'):
+    """Fast path (9/28 "hod dry-run is not in the DB???"): read the day-by-day book straight from
+    `dry_trades` instead of re-parsing journalctl/session_archive on every call. Returns the same
+    (date_str, trades, R, USD, symbols_with_r, status) tuples as the journal-based path, or None if the
+    table is empty/unreachable so callers can fall back to --rebuild. `symbols_with_r` is only
+    approximate here (no per-trade $ split for backfill_journal rows), matching analyze_day's own shape."""
+    from persistence.database import Database
+    try:
+        db = Database()
+        rows = db.get_dry_trades('hod_break', start=start_date_str, end=end_date.strftime('%Y-%m-%d'))
+    except Exception as e:
+        print(f"[db] could not read dry_trades ({e}) — use --rebuild", file=sys.stderr)
+        return None
+    if not rows:
+        return None
+    by_date = {}
+    for r in rows:
+        d = str(r['trade_date'])
+        by_date.setdefault(d, []).append(r)
+    ledger = []
+    for d in sorted(by_date):
+        day_rows = by_date[d]
+        trades = len(day_rows)
+        dr = sum(float(r['r_multiple']) for r in day_rows if r.get('r_multiple') is not None)
+        dusd = sum(float(r['pnl_usd']) for r in day_rows if r.get('pnl_usd') is not None)
+        symbols = [(r['symbol'], round(float(r['r_multiple']), 2)) for r in day_rows if r.get('r_multiple') is not None]
+        is_green = dr > 0
+        status = 'FLAT' if trades == 0 or dr == 0 else ('GREEN' if is_green else 'RED')
+        ledger.append((d, trades, dr, dusd, symbols, status))
+    return ledger
+
+
 def main():
     argv = list(sys.argv[1:])
     start_date_str = '2026-09-14'
     json_output = False
+    rebuild = False
 
     i = 0
     while i < len(argv):
@@ -90,6 +123,9 @@ def main():
             i += 2
         elif argv[i] == '--json':
             json_output = True
+            i += 1
+        elif argv[i] == '--rebuild':
+            rebuild = True
             i += 1
         else:
             i += 1
@@ -100,18 +136,25 @@ def main():
     ledger = []  # (date_str, trades, R, USD, symbols_with_r, status)
     skipped = []
 
-    current_date = start_date
-    while current_date <= today:
-        if current_date.weekday() < 5:  # weekday only
-            day_str = current_date.strftime('%Y-%m-%d')
-            result = analyze_day(day_str)
-            if result:
-                trades, dr, dusd, symbols, is_green = result
-                status = 'FLAT' if trades == 0 or dr == 0 else ('GREEN' if is_green else 'RED')
-                ledger.append((day_str, trades, dr, dusd, symbols, status))
-            else:
-                skipped.append(day_str)
-        current_date += timedelta(days=1)
+    if not rebuild:
+        ledger = ledger_from_db(start_date_str, today)
+    if ledger is None or rebuild:
+        if not rebuild:
+            print("[db] dry_trades empty for this range — falling back to journal reconstruction "
+                  "(pass --rebuild to force this path)", file=sys.stderr)
+        ledger = []
+        current_date = start_date
+        while current_date <= today:
+            if current_date.weekday() < 5:  # weekday only
+                day_str = current_date.strftime('%Y-%m-%d')
+                result = analyze_day(day_str)
+                if result:
+                    trades, dr, dusd, symbols, is_green = result
+                    status = 'FLAT' if trades == 0 or dr == 0 else ('GREEN' if is_green else 'RED')
+                    ledger.append((day_str, trades, dr, dusd, symbols, status))
+                else:
+                    skipped.append(day_str)
+            current_date += timedelta(days=1)
 
     if json_output:
         print(json.dumps([{
