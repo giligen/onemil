@@ -1414,11 +1414,14 @@ class ORBEngine:
     def _first_rank_grace_elapsed(self) -> bool:
         """True iff a deferred first rank is now due (cheap, no I/O).
 
-        Due = the rangeless field completed, or the grace window ended.
+        Due = the rangeless PRODUCTION field completed, or the grace window
+        ended. 2026-09-28 grace-scope fix: add-on pool candidates never
+        count (see `_production_rangeless`), so a pool-only stall can no
+        longer hold a completed production field past `range_end`.
         """
         if not self._first_rank_defer_active:
             return False
-        if not any(c.range_data is None for c in self.candidates.values()):
+        if not self._production_rangeless():
             return True
         end = self._first_rank_grace_end_utc
         return end is None or datetime.now(timezone.utc) >= end
@@ -3408,11 +3411,26 @@ class ORBEngine:
             return True
         return False
 
+    def _production_rangeless(self) -> List[str]:
+        """Symbols in the PRODUCTION pool that have no opening range yet.
+
+        2026-09-28 grace-scope fix: add-on pool candidates (`_symbol_pool`
+        tag != 'production', dry-only per PREREG_LIVE_UNION.md) must never
+        extend the first-rank grace or block it from clearing — pool field
+        completion is irrelevant to whether production picks can be ranked.
+        A symbol with no pool tag defaults to 'production' (same default
+        `_run_pool_selection` uses), so untagged unit-test candidates are
+        unaffected.
+        """
+        return [s for s, cand in self.candidates.items()
+                if cand.range_data is None
+                and self._symbol_pool.get(s, 'production') == 'production']
+
     def _should_defer_first_rank(self) -> bool:
         """First-rank grace gate (2026-07-03 selection-race fix).
 
         True iff the day's FIRST placement burst should be deferred because
-        candidates in the FULL universe pool are still rangeless (their
+        candidates in the PRODUCTION pool are still rangeless (their
         9:34 bar hadn't consolidated when the sweep ran) AND we are within
         `entry.first_rank_grace_s` seconds after the range end. Callers only
         invoke this when nothing has been placed today — once the first
@@ -3425,6 +3443,13 @@ class ORBEngine:
         has a range by construction, so a subset-scoped check was always
         empty and the gate never fired where it mattered.
 
+        2026-09-28 grace-scope fix: "full pool" means the PRODUCTION pool
+        only. Add-on pool candidates (dry-only) are excluded from the
+        rangeless count via `_production_rangeless()` — they must never
+        defer a live production placement (cell/incident 2026-09-28: an
+        8-name add-on-pool rangeless field held the first production
+        ranking to the full 25s grace window every day).
+
         Pre-fix, the 9:35:01 ranking burned all max_concurrent daily slots
         on the ready subset; late-consolidating BT-winners (CRCD +$15.8K
         model 6/30, RGNX 6/22, FABC 6/11, AVEX 6/30) were locked out for
@@ -3432,8 +3457,7 @@ class ORBEngine:
         """
         if self.first_rank_grace_s <= 0:
             return False
-        rangeless = [s for s, cand in self.candidates.items()
-                     if cand.range_data is None]
+        rangeless = self._production_rangeless()
         if not rangeless:
             return False
         now_utc = datetime.now(timezone.utc)
@@ -3459,7 +3483,7 @@ class ORBEngine:
             self._first_rank_defer_active = True
             self._first_rank_grace_end_utc = grace_end.astimezone(timezone.utc)
             logger.info(
-                f"ORB: first-rank GRACE — {len(rangeless)} pool candidate(s) "
+                f"ORB: first-rank GRACE — {len(rangeless)} production candidate(s) "
                 f"still rangeless ({','.join(rangeless[:6])}"
                 f"{'...' if len(rangeless) > 6 else ''}); deferring ranking "
                 f"until field completes or {grace_end.strftime('%H:%M:%S')} ET"

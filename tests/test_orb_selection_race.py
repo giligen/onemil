@@ -267,6 +267,55 @@ class TestGateFullPoolScope:
         assert engine._post_open_range_sweep_done is False
 
 
+class TestGraceScopeProductionOnly:
+    """2026-09-28 grace-scope fix: add-on pool candidates (dry-only,
+    PREREG_LIVE_UNION.md) must never defer the day's FIRST production
+    placement. Incident: 9/28 dry-week day 1, 8 add-on-pool names
+    (SRZN,ZSQR,WTTR,STAA,WHLR,CIFG...) stayed rangeless past the complete
+    production field and held the grace to its full 25s every tick."""
+
+    def _at(self, et_hh, et_mm, et_ss):
+        return datetime(2026, 7, 6, et_hh + 4, et_mm, et_ss, tzinfo=timezone.utc)
+
+    def _gate(self, engine, at):
+        with patch('trading.orb_engine.datetime') as mdt:
+            mdt.now.return_value = at
+            mdt.combine = datetime.combine
+            return engine._should_defer_first_rank()
+
+    def test_pool_only_rangeless_does_not_defer(self, engine):
+        """8 rangeless pool names + a complete production field -> no
+        deferral, regardless of how many pool candidates lag."""
+        prod = ['AAA', 'BBB', 'CCC']
+        pool = ['SRZN', 'ZSQR', 'WTTR', 'STAA', 'WHLR', 'CIFG', 'POOL7', 'POOL8']
+        engine.build_universe(source_loader=lambda: prod + pool)
+        for s in prod:
+            engine.candidates[s].range_data = _rng(s)
+        for s in pool:
+            engine._symbol_pool[s] = 'gap4_5_3_30'  # rangeless, pool-tagged
+        assert self._gate(engine, self._at(9, 35, 5)) is False
+
+    def test_production_rangeless_still_defers(self, engine):
+        """One rangeless PRODUCTION name still gates, same as before the
+        scope fix — pool tags don't weaken the guard on production."""
+        engine.build_universe(source_loader=lambda: ['AAA', 'BBB', 'CRCD'])
+        engine.candidates['AAA'].range_data = _rng('AAA')
+        engine.candidates['BBB'].range_data = _rng('BBB')
+        # CRCD keeps range_data=None and defaults to the 'production' pool
+        # (no explicit tag, same as build_orb_universe_from_snapshots when
+        # is_production matched but the seed helper doesn't set the dict).
+        assert self._gate(engine, self._at(9, 35, 5)) is True
+
+    def test_elapsed_ignores_pool_rangeless(self, engine):
+        """_first_rank_grace_elapsed: an active defer clears once the
+        PRODUCTION field completes even while pool names stay rangeless."""
+        engine.build_universe(source_loader=lambda: ['AAA', 'POOL1'])
+        engine.candidates['AAA'].range_data = _rng('AAA')
+        engine._symbol_pool['POOL1'] = 'gap4_5_3_30'  # stays rangeless
+        engine._first_rank_defer_active = True
+        assert engine._first_rank_grace_elapsed() is True
+
+
 class TestEtOffsetDstAccuracy:
     """2026-07-04 review fix: month-granularity DST offsets zeroed ORB
     entries for the Mar-1→2nd-Sunday and Nov-1→1st-Sunday windows (the 9:30
