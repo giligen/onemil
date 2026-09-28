@@ -44,3 +44,12 @@ FAIL → closed with the decile table on record.
 
 ## Not allowed
 Changing the decile, the +30 s, the 60 s window or the exits after a number.
+
+## Amendment 1 (2026-09-28 19:20 UTC, before any number) — sample start, cap, touch quotes
+The price panel (`panel_2024_2026.parquet`) starts 2024-07-01, so sessions before it cannot be scored; the measured
+cost is ≈ $0.16 per session for the 314-name list. Sample = 2024-07-01..2026-09-04 (the panel's end); TRAIN =
+2024-07-01..2025-06-30, VAL = 2025-07-01..2026-09-04; spend cap $90 (≈ 540 sessions × $0.16); the through-touch fill
+check uses the bbo-1m snapshots at the next two minute marks after publication (a sell at the mid is filled if the
+bid at +1 or +2 min ≥ the limit; a buy if the ask ≤ the limit) — a minute-granularity proxy for the 60-s rule,
+disclosed. Venue from the point-in-time listing feed (the ITCH placeholder rows found by the fetch are excluded).
+The first run (2024-01-02 onward, ≈ $5) was stopped at 19:37 UTC; its cached rows before 2024-07-01 stay unused.
