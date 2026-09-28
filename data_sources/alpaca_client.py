@@ -1581,6 +1581,10 @@ class AlpacaClient:
                 # '2' = Reg-T margin, '4' = PDT-approved margin. Used by the
                 # ORB PDT guard to detect margin accounts (B+ 2026-08-15).
                 'multiplier': _num('multiplier', float, 1.0),
+                # Account identity (2026-09-28, scripts/check_paper_accounts.py): lets a
+                # probe compare a strategy's "paper" account against the main account to
+                # catch a live key pasted into a strategy's *_API_KEY by mistake.
+                'account_number': str(getattr(account, 'account_number', '') or ''),
             }
 
         except AlpacaAPIError:
@@ -2260,6 +2264,108 @@ class AlpacaClient:
         except Exception as e:
             self._log_order_op_failure("submit limit sell order", symbol, e)
             raise AlpacaAPIError(f"Failed to submit limit sell order for {symbol}: {e}")
+
+    def submit_market_sell_order(
+        self, symbol: str, qty: int, client_order_id: Optional[str] = None
+    ) -> Dict:
+        """
+        Submit a plain market sell order (no bracket, TimeInForce.DAY).
+
+        Used by the `eod_exit_mode` limit_then_market fallback (trading/eod_exit.py)
+        when the resting limit at the NBBO mid does not fill within the configured
+        timeout, and by the moc cutoff fallback's own fallback leg. Distinct from
+        `close_position` (which nets the WHOLE broker position) — this sells exactly
+        `qty`, so it is safe to call for a partial fill on a shared account.
+
+        Args:
+            symbol: Stock symbol
+            qty: Number of shares to sell
+
+        Returns:
+            Dict with order details (id, status, symbol)
+
+        Raises:
+            AlpacaAPIError: If order submission fails
+        """
+        try:
+            request = MarketOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.DAY,
+                order_class=OrderClass.SIMPLE,
+                **({'client_order_id': client_order_id} if client_order_id else {}),
+            )
+            order = self._call_with_timeout(
+                lambda: self.trading_client.submit_order(request),
+                f"submit_market_sell_order({symbol})"
+            )
+            result = {
+                'id': str(order.id) if hasattr(order, 'id') else '',
+                'status': str(order.status.value) if hasattr(order, 'status') else 'unknown',
+                'symbol': symbol,
+                'qty': qty,
+            }
+            logger.info(f"Market sell order submitted: {symbol} SELL {qty} — ID: {result['id']}, status: {result['status']}")
+            return result
+        except AlpacaAPIError:
+            raise
+        except Exception as e:
+            self._log_order_op_failure("submit market sell order", symbol, e)
+            raise AlpacaAPIError(f"Failed to submit market sell order for {symbol}: {e}")
+
+    def submit_moc_sell_order(
+        self, symbol: str, qty: int, client_order_id: Optional[str] = None
+    ) -> Dict:
+        """
+        Submit a market-on-close (MOC) sell order: TimeInForce.CLS, eligible to
+        execute only in the closing auction (alpaca.trading.enums.TimeInForce
+        docstring). Alpaca rejects a CLS order submitted after 3:50pm ET — callers
+        MUST check trading/eod_exit.py's resolve_mode() cutoff (MOC_CUTOFF_ET)
+        BEFORE calling this; this method does not re-check the clock.
+
+        Used only by the `eod_exit_mode: moc` path (trading/eod_exit.py) — a
+        live/dry measurement option, not a backtest-parity rule (moc fills at the
+        16:00 ET close, both the ORB and HOD backtests force-close earlier).
+
+        Args:
+            symbol: Stock symbol
+            qty: Number of shares to sell
+
+        Returns:
+            Dict with order details (id, status, symbol)
+
+        Raises:
+            AlpacaAPIError: If order submission fails (including a too-late
+                rejection Alpaca did not catch client-side — the caller's own
+                cutoff check is the primary guard, this is belt and braces)
+        """
+        try:
+            request = MarketOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.CLS,
+                order_class=OrderClass.SIMPLE,
+                **({'client_order_id': client_order_id} if client_order_id else {}),
+            )
+            order = self._call_with_timeout(
+                lambda: self.trading_client.submit_order(request),
+                f"submit_moc_sell_order({symbol})"
+            )
+            result = {
+                'id': str(order.id) if hasattr(order, 'id') else '',
+                'status': str(order.status.value) if hasattr(order, 'status') else 'unknown',
+                'symbol': symbol,
+                'qty': qty,
+            }
+            logger.info(f"MOC sell order submitted: {symbol} SELL {qty} — ID: {result['id']}, status: {result['status']}")
+            return result
+        except AlpacaAPIError:
+            raise
+        except Exception as e:
+            self._log_order_op_failure("submit moc sell order", symbol, e)
+            raise AlpacaAPIError(f"Failed to submit moc sell order for {symbol}: {e}")
 
     def close_position(self, symbol: str) -> Dict:
         """

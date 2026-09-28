@@ -11,9 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import eod_report as er  # noqa: E402
 
 
-def _trade(symbol, strategy, pnl, status="closed", exit_price=1.0, reason="stop"):
+def _trade(symbol, strategy, pnl, status="closed", exit_price=1.0, reason="stop", account="paper"):
     return {"symbol": symbol, "strategy": strategy, "pnl": pnl, "order_status": status,
-            "exit_price": exit_price, "exit_reason": reason}
+            "exit_price": exit_price, "exit_reason": reason, "account": account}
 
 
 def test_books_section_groups_by_strategy_and_sums_closed_only():
@@ -21,9 +21,22 @@ def test_books_section_groups_by_strategy_and_sums_closed_only():
             _trade("CCC", "orb", None, status="filled", exit_price=None),
             _trade("DDD", "bull_flag", 40), _trade("EEE", "bull_flag", 0, status="cancelled")]
     txt = er.books_section(rows, "2026-09-21")
-    assert "orb: 3 fills, 2 closed, $+150, 1 still open" in txt
-    assert "bull_flag: 1 fills, 1 closed, $+40" in txt
+    assert "orb (paper): 3 fills, 2 closed, $+150, 1 still open" in txt
+    assert "bull_flag (paper): 1 fills, 1 closed, $+40" in txt
     assert "AAA -100 stop" in txt and "BBB +250 lock" in txt
+
+
+def test_books_section_splits_paper_and_live_within_one_strategy():
+    """Owner 9/28: HOD/ORB now route real orders to their own paper account — a
+    paper-account fill must never be summed into the same line as a live-account
+    fill for the same strategy tag."""
+    rows = [_trade("FFF", "hod_break", 60, account="paper"),
+            _trade("GGG", "hod_break", -20, account="live"),
+            _trade("HHH", "hod_break", None, status="filled", exit_price=None, account=None)]
+    txt = er.books_section(rows, "2026-09-28")
+    assert "hod_break (paper): 1 fills, 1 closed, $+60" in txt
+    assert "hod_break (live): 1 fills, 1 closed, $-20" in txt
+    assert "hod_break (unknown): 1 fills, 0 closed, $+0, 1 still open" in txt
 
 
 def test_books_section_empty():

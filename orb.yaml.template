@@ -109,6 +109,15 @@ entry:
   # 12:30 / 1:11 PM ET. Raise to be more permissive with late arrivals, or
   # lower toward "09:45" for strict BT-exact behavior.
   last_entry_submit_time_et: "10:00"
+  # Preplace-at-close (owner 2026-09-28, docs/orb_preplace_spec_20260928.md).
+  # Default false — byte-identical to the path above. When true: a
+  # provisional top-K is ranked ~preplace_rank_lead_s before 09:35:00 off
+  # the Alpaca snapshot daily-bar (== the opening range so far), buy-stop
+  # orders submit CONCURRENTLY at exactly 09:35:00.0 ET from a scheduled
+  # thread, then reconcile against the final range on the normal tick.
+  # Owner GO required before true, after a dry-mode latency rehearsal.
+  preplace_at_close: false
+  preplace_rank_lead_s: 3.0   # seconds before 09:35:00 the provisional rank runs
 
 # Composite filter — 7-feature signed z-score.
 # B+ RESTART 2026-08-15 (research/orb_bplus_frozen_params_aug2026.yaml):

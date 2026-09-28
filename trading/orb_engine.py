@@ -18,6 +18,7 @@ Trade tagging: every DB row has strategy='orb' so per-strategy P&L filtering wor
 """
 from __future__ import annotations
 
+import copy
 import logging
 import queue
 import threading
@@ -391,6 +392,24 @@ class ORBEngine:
 
         self.range_minutes = int(entry_cfg.get('range_minutes', 5))
         self.entry_slip_bps = float(entry_cfg.get('entry_slip_bps', 30))
+
+        # Preplace-at-close (owner 2026-09-28, "1 sec latency is what we
+        # need", docs/orb_preplace_spec_20260928.md). Default OFF —
+        # byte-identical to today's post-09:35 ranking path when False.
+        # When True: a provisional top-K is ranked off the Alpaca snapshot
+        # daily-bar (== the opening range, only preplace_rank_lead_s before
+        # 09:35:00) by a scheduled thread, buy-stop orders are submitted
+        # CONCURRENTLY at exactly 09:35:00.0 ET (never earlier — a stop
+        # placed before the range closes could trigger inside the range),
+        # then reconciled against the FINAL range on the normal 09:35 tick.
+        self.preplace_enabled = bool(entry_cfg.get('preplace_at_close', False))
+        self.preplace_rank_lead_s = float(entry_cfg.get('preplace_rank_lead_s', 3.0))
+        self._preplace_armed_today = False       # scheduler armed once/day
+        self._preplace_ranked_today = False      # provisional rank ran once/day
+        self._preplace_submitted_today = False   # 09:35:00.0 submit fired once/day
+        self._preplace_reconciled_today = False  # reconciliation ran once/day
+        self._preplace_state: Dict[str, dict] = {}  # sym -> {plan, provisional_range_high/low, submitted, order_id}
+        self._preplace_timers: tuple = ()        # (rank_timer, submit_timer) — kept so tests can inspect/cancel
         self.time_stop_minutes = int(entry_cfg.get('time_stop_minutes', 60))
         self.max_spread_bps = float(entry_cfg.get('max_spread_bps', 300))
 
@@ -693,6 +712,13 @@ class ORBEngine:
         hour, minute = [int(x) for x in fc_str.split(':')]
         self.force_close_hour_et = hour
         self.force_close_minute_et = minute
+
+        # EOD exit pricing mode (trading/eod_exit.py) — default 'market' is
+        # TODAY's behaviour (close_position, unchanged below); absent from
+        # orb.yaml, so this key defaults byte-identical. 'limit_then_market'
+        # and 'moc' are measurement options, flag-gated OFF by default.
+        self.eod_exit_mode = str(exit_cfg.get('eod_exit_mode', 'market'))
+        self.eod_limit_timeout_s = float(exit_cfg.get('eod_limit_timeout_s', 20.0))
 
         # Last-entry cutoff (ET). BT picks top-K once at 9:35 ET and never
         # submits new entries afterward. Live allows a short window for
@@ -2301,6 +2327,11 @@ class ORBEngine:
             logger.warning("ORBEngine.check_entries: no filter params loaded — skipping")
             return []
 
+        # Preplace-at-close (docs/orb_preplace_spec_20260928.md): arm the
+        # 09:34:57 / 09:35:00.0 Timer threads once/day. No-op when the flag
+        # is off or already armed today — cheap on every tick.
+        self._maybe_arm_preplace_scheduler()
+
         # PM-mult prefetch (2026-07-06): warm the premarket dollar-volume
         # cache on early ticks (>=9:31 ET) so the 9:35 burst never blocks.
         try:
@@ -2345,6 +2376,20 @@ class ORBEngine:
         self._record_latency_phase('post_open_range_sweep', time.time() - _t_sweep)
         if sweep_filled and symbols is not None:
             symbols = set(symbols) | sweep_filled
+
+        # Preplace-at-close reconciliation (design item 3): runs once, on
+        # the first normal tick after the 09:35:00.0 preplace submit has
+        # fired — i.e. AFTER real bars give cand.range_data its final
+        # value. `_preplace_counters` is None (no PARITY line) whenever
+        # preplace never ran today (flag off, or nothing survived ranking).
+        _preplace_counters = None
+        if (self.preplace_enabled and self._preplace_submitted_today
+                and not self._preplace_reconciled_today):
+            try:
+                _preplace_counters = self._reconcile_preplaced()
+            except Exception as e:
+                logger.error(f"[ORB PREPLACE] reconciliation failed: {e}")
+                self._preplace_reconciled_today = True
 
         if self._daily_loss_limit_hit():
             return []
@@ -2473,6 +2518,20 @@ class ORBEngine:
         submitted: List[str] = list(self._run_pool_selection(
             'production', production_syms, symbols_entered_today,
             feature_providers, dry_run=self.strategy_dry_run, t_rank=_t_rank))
+
+        # Preplace-at-close PARITY summary (design item 3): preplaced
+        # symbols are excluded from `eligible` above via plan_submitted /
+        # open_positions / `_pdr_vetoed_today`, so `submitted` here already
+        # IS exactly this tick's new entrants — n_added by construction,
+        # no separate bookkeeping needed.
+        if _preplace_counters is not None:
+            _preplace_counters['n_added'] = len(submitted)
+            logger.info(
+                "[ORB PREPLACE] PARITY n_preplaced=%d n_kept=%d n_replaced=%d "
+                "n_cancelled=%d n_added=%d n_filled_before_reconcile=%d",
+                _preplace_counters['n_preplaced'], _preplace_counters['n_kept'],
+                _preplace_counters['n_replaced'], _preplace_counters['n_cancelled'],
+                _preplace_counters['n_added'], _preplace_counters['n_filled_before_reconcile'])
 
         if self.addon_pools_enabled:
             for pool_cfg in self.addon_pools:
@@ -2830,6 +2889,409 @@ class ORBEngine:
                 self._check_first_submit_latency()
         return submitted
 
+    # =====================================================================
+    # Preplace-at-close (docs/orb_preplace_spec_20260928.md, flag
+    # entry.preplace_at_close, default OFF). Three phases, each its own
+    # method so they can be unit-tested independently:
+    #   _maybe_arm_preplace_scheduler  — arms the two Timer threads once/day
+    #   _preplace_provisional_rank     — ~09:34:57 ET: rank + build plans
+    #   _preplace_submit_at_close      — 09:35:00.0 ET: concurrent submit
+    #   _reconcile_preplaced           — normal 09:35 tick: diff vs final
+    # =====================================================================
+
+    def _maybe_arm_preplace_scheduler(self) -> None:
+        """Arm the provisional-rank and submit-at-close Timer threads, once
+        per day, on the first tick that lands inside the pre-close window
+        (09:20-09:35 ET). Uses `threading.Timer` — a SCHEDULED thread, not
+        the scanner tick — so submission timing is independent of scanner
+        cycle latency (the entire point of this feature). Delays are
+        clamped at >= 0: a late-armed cycle (e.g. the engine's first tick
+        of the day lands at 09:34:59) fires both callbacks immediately,
+        which is still >= their targets — NEVER earlier than 09:35:00.0 for
+        the submit timer, matching the design's hard requirement (a stop
+        placed before the range closes could trigger inside the range).
+        Caller holds `_lock` (called from `_check_entries_locked`).
+        """
+        if not self.preplace_enabled or self._preplace_armed_today:
+            return
+        et_now = self._et_now()
+        if et_now.time() >= dtime(9, 35) or et_now.time() < dtime(9, 20):
+            return  # only ever arm inside the pre-close window
+        self._preplace_armed_today = True
+        rank_target = et_now.replace(hour=9, minute=34, second=0, microsecond=0) \
+            + timedelta(seconds=max(0.0, 60.0 - self.preplace_rank_lead_s))
+        submit_target = et_now.replace(hour=9, minute=35, second=0, microsecond=0)
+        rank_delay = max(0.0, (rank_target - et_now).total_seconds())
+        submit_delay = max(0.0, (submit_target - et_now).total_seconds())
+        logger.info(
+            f"[ORB PREPLACE] scheduler armed at {et_now.strftime('%H:%M:%S')} ET — "
+            f"provisional rank in {rank_delay:.1f}s, submit in {submit_delay:.1f}s "
+            f"(targets {rank_target.strftime('%H:%M:%S')} / 09:35:00.0 ET)")
+        t_rank = threading.Timer(rank_delay, self._preplace_provisional_rank)
+        t_rank.daemon = True
+        t_submit = threading.Timer(submit_delay, self._preplace_submit_at_close)
+        t_submit.daemon = True
+        self._preplace_timers = (t_rank, t_submit)
+        t_rank.start()
+        t_submit.start()
+
+    def _provisional_range_for(self, symbol: str, snap: Optional[Dict]) -> Optional['RangeData']:
+        """Provisional 09:30-09:34 range from the Alpaca snapshot's daily
+        bar — which, at 09:34:57 ET, only has ~5 minutes of the regular
+        session printed into it, so dailyBar high/low IS the opening range
+        high/low so far. Widened with any 1-min bars this engine has
+        already ingested via the WS stream this morning (self._bar_windows)
+        — the "minuteBar for completed bars" the design calls for, taken
+        from data the engine already holds in memory rather than a second
+        network fetch (same client build_universe/the range computation
+        use: self.alpaca.get_snapshots / self._get_snapshots_warm).
+
+        Returns None when there isn't enough data yet (degenerate range) —
+        that symbol is simply absent from the provisional top-K; it still
+        gets its normal shot at 09:35 through the unchanged path once its
+        real range_data completes.
+        """
+        daily_high = daily_low = daily_open = 0.0
+        if isinstance(snap, dict):
+            daily_high = float(snap.get('high', 0) or 0)
+            daily_low = float(snap.get('low', 0) or 0)
+            daily_open = float(snap.get('open', 0) or 0)
+        bars = self._bar_windows.get(symbol) or []
+        bar_highs = [float(b['high']) for b in bars if b.get('high')]
+        bar_lows = [float(b['low']) for b in bars if b.get('low')]
+        bar_open = float(bars[0]['open']) if bars and bars[0].get('open') else 0.0
+        bar_vol = sum(int(b.get('volume', 0) or 0) for b in bars)
+        highs = [v for v in (daily_high, *bar_highs) if v > 0]
+        lows = [v for v in (daily_low, *bar_lows) if v > 0]
+        range_high = max(highs) if highs else 0.0
+        range_low = min(lows) if lows else 0.0
+        range_open = bar_open if bar_open > 0 else daily_open
+        if range_high <= 0 or range_low <= 0 or range_high <= range_low:
+            return None
+        range_close = float(bars[-1]['close']) if bars and bars[-1].get('close') else range_high
+        if bars:
+            avg_bar_range_pct = float(np.mean([
+                (float(b['high']) - float(b['low'])) / float(b['close']) * 100.0
+                for b in bars if b.get('close')
+            ])) if any(b.get('close') for b in bars) else 0.0
+        else:
+            avg_bar_range_pct = (
+                (range_high - range_low) / range_close * 100.0 if range_close else 0.0
+            )
+        return RangeData(
+            symbol=symbol, range_high=range_high, range_low=range_low,
+            range_volume=bar_vol, range_avg_bar_range_pct=avg_bar_range_pct,
+            range_close=range_close, range_start_ts=pd.Timestamp.now(tz='UTC'),
+            range_open=range_open,
+        )
+
+    def _preplace_provisional_rank(self) -> None:
+        """Timer callback ~09:34:57 ET (preplace_rank_lead_s before the
+        range closes). Scores + ranks the provisional top-K on the
+        snapshot-derived provisional range so the 09:35:00.0 submit timer
+        has fully-built plans ready with zero ranking work on the critical
+        path. Runs the SAME composite/quintile/Q1-filter/rank/dedup/veto/
+        plan-build chain as `_run_pool_selection`'s production branch, function
+        by function (composite_score, assign_quintile, dedup_candidates,
+        the veto methods, self.planner.build) — never a re-implementation.
+
+        Never mutates CandidateState.range_data: each candidate is scored
+        on a throwaway `copy.copy` with `.range_data` set to the provisional
+        RangeData, so the REAL 09:35 ingestion path (_ingest_bars) and
+        reconciliation both still see a clean, untouched final range.
+        """
+        if not self.preplace_enabled:
+            return
+        try:
+            with self._lock:
+                prod_syms = [
+                    s for s, c in self.candidates.items()
+                    if self._symbol_pool.get(s, 'production') == 'production'
+                    and not c.plan_submitted
+                ]
+                if not prod_syms:
+                    logger.info("[ORB PREPLACE] provisional rank — no candidates yet")
+                    self._preplace_ranked_today = True
+                    return
+                try:
+                    snapshots = (self._get_snapshots_warm(prod_syms)
+                                 if self.prewarm_seed_enabled
+                                 else self.alpaca.get_snapshots(prod_syms))
+                except Exception as e:
+                    logger.warning(f"[ORB PREPLACE] snapshot fetch failed: {e}")
+                    snapshots = {}
+                scored = []
+                for sym in prod_syms:
+                    cand = self.candidates[sym]
+                    prov_rd = self._provisional_range_for(sym, (snapshots or {}).get(sym))
+                    if prov_rd is None:
+                        continue
+                    temp = copy.copy(cand)
+                    temp.range_data = prov_rd
+                    providers = self._get_feature_context(sym)
+                    feats = self._compute_features(
+                        temp, prev_day_bar=providers.get('prev_day_bar'),
+                        daily_stats_20d=providers.get('daily_stats_20d'))
+                    temp.features = feats
+                    score = composite_score(feats, self.z_params)
+                    if score is None or score < self.filter_threshold:
+                        continue
+                    temp.composite = score
+                    temp.quintile = assign_quintile(score, self.quintile_cutoffs)
+                    if self.skip_q1 and temp.quintile == 'Q1':
+                        continue
+                    scored.append((temp, prov_rd))
+
+                q_rank = {q: i for i, q in enumerate(self.ranking_order)}
+                scored.sort(key=lambda t: (q_rank.get(t[0].quintile, 99), -t[0].composite))
+                entered = self._symbols_entered_today_db()
+                budget = self.max_concurrent - len(
+                    entered | self._pdr_vetoed_today | set(self.open_positions))
+                if budget <= 0:
+                    logger.info("[ORB PREPLACE] provisional rank — no slot budget left")
+                    self._preplace_ranked_today = True
+                    return
+                top_syms = dedup_candidates(
+                    [t[0].symbol for t in scored], max_keep=budget,
+                    by_family=self.dedup_by_family, by_super_group=self.dedup_by_super_group)
+                by_sym = {t[0].symbol: t for t in scored}
+                planned = []
+                for sym in top_syms:
+                    temp, prov_rd = by_sym[sym]
+                    if (self._pdr_veto_reject(temp) or self._g1_veto_reject(temp)
+                            or self._range_size_veto_reject(temp)
+                            or self._catalyst_veto_reject(temp, cohort_symbols=top_syms)):
+                        continue
+                    plan = self.planner.build(
+                        symbol=sym, range_high=prov_rd.range_high,
+                        range_low=prov_rd.range_low, range_open=prov_rd.range_open,
+                        composite_score=temp.composite, quintile=temp.quintile,
+                        adaptive_mult=apply_adaptive_mult(temp.quintile, self.adaptive_mults),
+                        spread_bps=self._get_spread_bps(sym), pm_mult=self._get_pm_mult(sym))
+                    if isinstance(plan, PlannerReject):
+                        continue
+                    if not self._has_buying_power(plan.position_dollars):
+                        continue
+                    plan.pool = 'production'
+                    planned.append((sym, plan, prov_rd))
+
+                self._preplace_state = {
+                    sym: {'plan': plan, 'provisional_range_high': prov_rd.range_high,
+                          'provisional_range_low': prov_rd.range_low,
+                          'submitted': False, 'order_id': None}
+                    for sym, plan, prov_rd in planned
+                }
+                self._preplace_ranked_today = True
+                if planned:
+                    logger.info(
+                        "[ORB PREPLACE] provisional top-%d @ %s ET: %s",
+                        len(planned), self._et_now().strftime('%H:%M:%S.%f')[:-3],
+                        ', '.join(f"{s}(rh=${rd.range_high:.2f},{p.quintile})"
+                                  for s, p, rd in planned))
+                else:
+                    logger.info(
+                        "[ORB PREPLACE] provisional rank — 0 candidates survived filters/vetoes")
+        except Exception as e:
+            logger.error(f"[ORB PREPLACE] provisional rank failed: {e}")
+
+    def _preplace_submit_at_close(self) -> None:
+        """Timer callback at EXACTLY 09:35:00.0 ET — fires from a dedicated
+        scheduled thread, never the scanner tick, so submit latency is
+        independent of scanner cycle time. Submits every provisional-top-K
+        plan CONCURRENTLY via the same bounded ThreadPoolExecutor pattern
+        `execution.fast_submit` uses, calling the UNCHANGED `_submit_entry`
+        for each — identical order parameters, chase guard and sizing as
+        the normal (09:35+) path. In `strategy_dry_run`, logs
+        `[ORB DRY] WOULD PREPLACE ...` and writes the same dry-ledger row
+        (preplaced=1) + dry_trades DB row instead of submitting.
+        """
+        if not self.preplace_enabled:
+            return
+        fire_ts_et = self._et_now()
+        try:
+            with self._lock:
+                pending = list(self._preplace_state.items())
+                if not pending:
+                    logger.info(
+                        "[ORB PREPLACE] submit @ %s ET — nothing to preplace",
+                        fire_ts_et.strftime('%H:%M:%S.%f')[:-3])
+                    self._preplace_submitted_today = True
+                    return
+                target = fire_ts_et.replace(hour=9, minute=35, second=0, microsecond=0)
+                _t_rank = time.time()
+                if self.strategy_dry_run:
+                    for sym, st in pending:
+                        plan = st['plan']
+                        ts_et = self._et_now()
+                        logger.info(
+                            f"[ORB DRY] WOULD PREPLACE {sym} stop ${plan.range_high:.2f} "
+                            f"limit ${plan.entry_price:.2f} shares {plan.shares} "
+                            f"risk ${plan.total_risk:.2f} at "
+                            f"{ts_et.strftime('%H:%M:%S.%f')[:-3]} ET")
+                        if self.notify_on_entry and self.notifier:
+                            self._notify(
+                                f"[ORB DRY] WOULD PREPLACE {sym} x{plan.shares} "
+                                f"@ stop-limit ${plan.entry_price:.2f}")
+                        self._append_dry_ledger_row(
+                            sym=sym, ts_et=ts_et, trigger=plan.range_high,
+                            limit=plan.entry_price, shares=plan.shares,
+                            risk_usd=plan.total_risk, bid=0.0, ask=0.0,
+                            composite=plan.composite_score, quintile=plan.quintile,
+                            pool='production', preplaced=1)
+                        self._record_orb_dry_entry(sym, ts_et, plan)
+                        st['submitted'] = True
+                        self.candidates[sym].plan_submitted = True
+                        self._record_latency_phase('rank_and_submit', time.time() - _t_rank)
+                        self._log_order_submit_latency(sym, _t_rank)
+                        self._check_first_submit_latency()
+                else:
+                    workers = min(8, len(pending))
+                    with ThreadPoolExecutor(
+                            max_workers=workers,
+                            thread_name_prefix='orb-preplace-submit') as pool:
+                        futures = [pool.submit(self._submit_entry, st['plan'])
+                                   for _, st in pending]
+                        results = [f.result() for f in futures]
+                    for (sym, st), order_id in zip(pending, results):
+                        latency = (self._et_now() - target).total_seconds()
+                        if order_id:
+                            st['order_id'] = order_id
+                            st['submitted'] = True
+                            self.candidates[sym].plan_submitted = True
+                            logger.info(
+                                f"[ORB] SUBMIT LATENCY sym={sym} "
+                                f"seconds={latency:.2f} preplaced=1")
+                        else:
+                            logger.warning(
+                                f"[ORB PREPLACE] {sym} submit failed — no refill")
+                        self._record_latency_phase('rank_and_submit', time.time() - _t_rank)
+                        self._check_first_submit_latency()
+                self._preplace_submitted_today = True
+        except Exception as e:
+            logger.error(f"[ORB PREPLACE] submit-at-close failed: {e}")
+
+    def _reconcile_preplaced(self) -> Dict[str, int]:
+        """Reconciliation at the normal 09:35 tick (design item 3). Caller
+        holds `_lock` (called from `_check_entries_locked`, an RLock, right
+        after the post-open sweep — same thread, so re-entering is safe).
+
+        Recomputes the FINAL ranking (same chain as provisional, on
+        cand.range_data now populated by real bars) restricted to the
+        preplaced symbols, then per symbol:
+          - already FILLED at a different trigger than provisional  -> WARNING,
+            counted (n_filled_before_reconcile); fill stands, no unwind.
+          - final range_high unchanged (< 0.5c) and still in the final
+            top-K -> kept (n_kept).
+          - final range_high differs and still in the final top-K -> cancel
+            + resubmit at the final trigger (n_replaced).
+          - dropped from the final top-K -> cancel, no refill — slot
+            tracked via `_pdr_vetoed_today`, the SAME no-refill accounting
+            a post-ranking veto uses (n_cancelled).
+        `n_added` (new entrants) is left to the caller: preplaced symbols
+        are excluded from the normal `_run_pool_selection` pass below via
+        `plan_submitted`/`open_positions`, so whatever that pass submits
+        this tick already IS exactly the added set.
+        """
+        counters = dict(n_preplaced=0, n_kept=0, n_replaced=0, n_cancelled=0,
+                         n_added=0, n_filled_before_reconcile=0)
+        if not self._preplace_state:
+            self._preplace_reconciled_today = True
+            return counters
+        preplaced_syms = list(self._preplace_state.keys())
+        counters['n_preplaced'] = len(preplaced_syms)
+
+        scored = []
+        for sym in preplaced_syms:
+            cand = self.candidates.get(sym)
+            if cand is None or cand.range_data is None:
+                continue  # final range still missing -- treated as dropped below
+            providers = self._get_feature_context(sym)
+            feats = self._compute_features(
+                cand, prev_day_bar=providers.get('prev_day_bar'),
+                daily_stats_20d=providers.get('daily_stats_20d'))
+            cand.features = feats
+            score = composite_score(feats, self.z_params)
+            if score is None or score < self.filter_threshold:
+                continue
+            cand.composite = score
+            cand.quintile = assign_quintile(score, self.quintile_cutoffs)
+            if self.skip_q1 and cand.quintile == 'Q1':
+                continue
+            scored.append(cand)
+        q_rank = {q: i for i, q in enumerate(self.ranking_order)}
+        scored.sort(key=lambda c: (q_rank.get(c.quintile, 99), -c.composite))
+        final_top_syms = set(dedup_candidates(
+            [c.symbol for c in scored], max_keep=len(preplaced_syms),
+            by_family=self.dedup_by_family, by_super_group=self.dedup_by_super_group))
+        final_by_sym = {c.symbol: c for c in scored}
+
+        for sym in preplaced_syms:
+            st = self._preplace_state[sym]
+            pos = self.open_positions.get(sym)
+            is_filled = pos is not None and pos.order_id == ''
+            prov_rh = st['provisional_range_high']
+            final_cand = final_by_sym.get(sym)
+            final_rh = (final_cand.range_data.range_high
+                        if final_cand is not None and final_cand.range_data else None)
+
+            if is_filled:
+                if final_rh is not None and abs(final_rh - prov_rh) >= 0.005:
+                    logger.warning(
+                        f"[ORB PREPLACE] {sym} FILLED at provisional trigger "
+                        f"${prov_rh:.2f}, final range_high=${final_rh:.2f} — "
+                        f"parity deviation (fill stands, no unwind)")
+                    counters['n_filled_before_reconcile'] += 1
+                else:
+                    counters['n_kept'] += 1
+                continue
+
+            if not st.get('submitted'):
+                continue  # preplace submit itself failed -- nothing resting
+
+            if sym not in final_top_syms or final_rh is None:
+                if pos is not None:
+                    self._cancel_symbol_open_orders(sym)
+                    del self.open_positions[sym]
+                self._pdr_vetoed_today.add(sym)  # same no-refill slot accounting as a post-ranking veto
+                self.candidates[sym].rejected_reason = 'preplace_dropped_final_topk'
+                counters['n_cancelled'] += 1
+                continue
+
+            if abs(final_rh - prov_rh) >= 0.005:
+                self._cancel_symbol_open_orders(sym)
+                if sym in self.open_positions:
+                    del self.open_positions[sym]
+                plan = self.planner.build(
+                    symbol=sym, range_high=final_cand.range_data.range_high,
+                    range_low=final_cand.range_data.range_low,
+                    range_open=final_cand.range_data.range_open,
+                    composite_score=final_cand.composite, quintile=final_cand.quintile,
+                    adaptive_mult=apply_adaptive_mult(final_cand.quintile, self.adaptive_mults),
+                    spread_bps=self._get_spread_bps(sym), pm_mult=self._get_pm_mult(sym))
+                if isinstance(plan, PlannerReject) or not self._has_buying_power(
+                        getattr(plan, 'position_dollars', 0.0)):
+                    self._pdr_vetoed_today.add(sym)
+                    self.candidates[sym].plan_submitted = False
+                    counters['n_cancelled'] += 1
+                    continue
+                plan.pool = 'production'
+                order_id = self._submit_entry(plan)
+                if order_id:
+                    self.candidates[sym].plan_submitted = True
+                    logger.warning(
+                        f"[ORB PREPLACE] {sym} REPLACED — provisional trigger "
+                        f"${prov_rh:.2f} -> final ${final_rh:.2f}")
+                    counters['n_replaced'] += 1
+                else:
+                    self._pdr_vetoed_today.add(sym)
+                    self.candidates[sym].plan_submitted = False
+                    counters['n_cancelled'] += 1
+            else:
+                counters['n_kept'] += 1
+
+        self._preplace_reconciled_today = True
+        return counters
+
     def _check_first_submit_latency(self) -> None:
         """Latency tripwire (B+ 2026-08-15, design precondition #1 / item H).
 
@@ -2901,11 +3363,17 @@ class ORBEngine:
     def _append_dry_ledger_row(
             self, sym: str, ts_et: datetime, trigger: float, limit: float,
             shares: int, risk_usd: float, bid: float, ask: float,
-            composite: float, quintile: str, pool: str) -> None:
+            composite: float, quintile: str, pool: str,
+            preplaced: int = 0) -> None:
         """Append one row to logs/orb_dry_ledger.csv (docs/orb_dry_run_spec_20260925.md).
 
-        Never raises — a ledger-write failure must not block the (already
-        logged) WOULD BUY decision. Header written once if the file is new.
+        `preplaced` (docs/orb_preplace_spec_20260928.md): 1 when this row
+        came from the 09:35:00.0 preplace-at-close submit path, 0 for the
+        normal post-09:35 path — added as a trailing column so the dry
+        week can measure the two paths' latency separately without
+        changing the meaning of any existing column. Never raises — a
+        ledger-write failure must not block the (already logged) WOULD BUY
+        decision. Header written once if the file is new.
         """
         try:
             import csv as _csv
@@ -2917,11 +3385,12 @@ class ORBEngine:
                 if is_new:
                     w.writerow(['date', 'symbol', 'would_submit_ts_et', 'trigger',
                                 'limit', 'shares', 'risk_usd', 'bid', 'ask',
-                                'composite', 'quintile', 'pool'])
+                                'composite', 'quintile', 'pool', 'preplaced'])
                 w.writerow([
                     ts_et.strftime('%Y-%m-%d'), sym, ts_et.strftime('%H:%M:%S.%f')[:-3],
                     f"{trigger:.4f}", f"{limit:.4f}", shares, f"{risk_usd:.2f}",
                     f"{bid:.4f}", f"{ask:.4f}", f"{composite:.4f}", quintile, pool,
+                    int(preplaced),
                 ])
         except Exception as e:
             logger.warning(f"[ORB DRY] ledger write failed for {sym} ({e})")
@@ -4550,8 +5019,16 @@ class ORBEngine:
 
         Returns the order submission dict on success (NOT a fill confirmation
         — caller must verify fill separately).
+
+        eod_exit_mode (trading/eod_exit.py): 'market' (default) is this
+        unchanged close_position retry loop, byte-identical to before this
+        flag existed. 'limit_then_market' / 'moc' delegate entirely to
+        `_submit_eod_exit_priced`, which has its own submission + telemetry
+        path and does not touch this retry ladder.
         """
         import time as _time
+        if self.eod_exit_mode != 'market':
+            return self._submit_eod_exit_priced(sym)
         attempts = 1 + len(self._FC_HELD_QTY_BACKOFFS_S)
         last_err = None
         for attempt in range(attempts):
@@ -4571,6 +5048,106 @@ class ORBEngine:
         if last_err is not None:
             raise last_err
         return None
+
+    def _submit_eod_exit_priced(self, sym: str) -> Optional[Dict]:
+        """Non-market eod_exit_mode submission (limit_then_market / moc) —
+        trading/eod_exit.py is the shared spec with the HOD engine's own
+        force_close_all. Writes exit_pricing_method/exit_quote_bid/
+        exit_quote_ask to the trades row immediately (available at submit
+        time); exit_price/exit_fill_latency_ms/exit_slippage are written once
+        a fill is observed, here for limit_then_market's poll window, or by
+        the ordinary FC fill-reconciliation pass that already runs after this
+        returns (moc, or a limit still resting when this returns).
+
+        Returns a close_position()-shaped dict ({'id','status','symbol'}) so
+        the existing FC reconciliation (`_is_close_order_still_pending`,
+        `get_order`) works unmodified regardless of which order type was
+        actually submitted — same drop-in contract as close_position().
+        """
+        import time as _time
+        from trading import eod_exit as _eod
+
+        pos = self.open_positions.get(sym)
+        qty = int(pos.shares) if pos is not None else 0
+        if qty <= 0:
+            logger.warning(f"ORB FC: {sym} _submit_eod_exit_priced — no tracked qty, falling back to close_position")
+            return self.alpaca.close_position(sym)
+
+        from zoneinfo import ZoneInfo
+        now_et = datetime.now(ZoneInfo('America/New_York'))
+        resolved = _eod.resolve_mode(self.eod_exit_mode, now_et)
+        if resolved.warning:
+            logger.warning(f"ORB FC: {sym} {resolved.warning}")
+
+        quote = {}
+        try:
+            quote = self.alpaca.get_latest_quote(sym) or {}
+        except Exception as e:
+            logger.warning(f"ORB FC: {sym} quote fetch failed for eod_exit_mode={resolved.mode}: {e}")
+        bid, ask = float(quote.get('bid_price', 0.0) or 0.0), float(quote.get('ask_price', 0.0) or 0.0)
+
+        def _record_telemetry(method: str, extra: Optional[Dict] = None) -> None:
+            if pos.trade_id is None:
+                return
+            payload = _eod.build_eod_exit_telemetry(method=method, quote_bid=bid, quote_ask=ask)
+            if extra:
+                payload.update(extra)
+            try:
+                self.db.update_trade(pos.trade_id, payload)
+            except Exception as e:
+                logger.error(f"ORB FC: {sym} eod_exit telemetry DB write failed: {e}")
+
+        if resolved.mode == _eod.MOC:
+            method = _eod.pricing_method(resolved, 'primary')
+            _record_telemetry(method)
+            result = self.alpaca.submit_moc_sell_order(sym, qty)
+            logger.info(f"ORB FC: {sym} MOC sell x{qty} submitted ({result.get('id')}) — pricing_method={method}")
+            return result
+
+        # limit_then_market (direct, or a moc cutoff downgrade into it)
+        mid = _eod.quote_mid(bid, ask)
+        primary_method = _eod.pricing_method(resolved, 'primary')
+        if mid is None:
+            logger.warning(f"ORB FC: {sym} no usable NBBO mid (bid={bid} ask={ask}) — falling back to close_position")
+            _record_telemetry(_eod.PM_EOD_MARKET)
+            return self.alpaca.close_position(sym)
+
+        _record_telemetry(primary_method)
+        submit_ts = _time.time()
+        limit_order = self.alpaca.submit_limit_sell_order(sym, qty, mid)
+        order_id = limit_order.get('id')
+        logger.info(f"ORB FC: {sym} limit sell x{qty} @ {mid:.2f} submitted ({order_id}) — pricing_method={primary_method}")
+
+        deadline = submit_ts + self.eod_limit_timeout_s
+        while _time.time() < deadline:
+            _time.sleep(0.5)
+            try:
+                st = self.alpaca.get_order(order_id)
+            except Exception as e:
+                logger.warning(f"ORB FC: {sym} limit order poll failed: {e}")
+                continue
+            status = str((st.get('status') if isinstance(st, dict) else getattr(st, 'status', '')) or '').lower()
+            if status == 'filled':
+                fill_px = float(st.get('filled_avg_price') or mid) if isinstance(st, dict) else mid
+                _record_telemetry(primary_method, {
+                    'exit_price': fill_px,
+                    'exit_fill_latency_ms': max(0.0, (_time.time() - submit_ts) * 1000.0),
+                    'exit_slippage': round(mid - fill_px, 4),
+                })
+                logger.info(f"ORB FC: {sym} eod limit filled @ {fill_px:.2f} ({(_time.time() - submit_ts):.1f}s)")
+                return limit_order
+
+        # Timed out unfilled — cancel and escalate to a plain market sell.
+        fb_method = _eod.pricing_method(resolved, 'fallback')
+        logger.warning(f"ORB FC: {sym} eod limit unfilled after {self.eod_limit_timeout_s:.0f}s — cancelling, escalating to market")
+        try:
+            self.alpaca.cancel_order(order_id)
+        except Exception as e:
+            logger.warning(f"ORB FC: {sym} eod limit cancel failed (may have just filled): {e}")
+        _record_telemetry(fb_method)
+        result = self.alpaca.submit_market_sell_order(sym, qty)
+        logger.info(f"ORB FC: {sym} market fallback sell x{qty} submitted ({result.get('id')}) — pricing_method={fb_method}")
+        return result
 
     def _is_close_order_still_pending(self, order_id: str) -> bool:
         """True if a specific close order is still working (not terminal).
@@ -5432,6 +6009,11 @@ class ORBEngine:
         self._sweep_retry_used_today = False
         self._pdr_vetoed_today = set()
         self._first_submit_latency_logged = False
+        self._preplace_armed_today = False
+        self._preplace_ranked_today = False
+        self._preplace_submitted_today = False
+        self._preplace_reconciled_today = False
+        self._preplace_state = {}
         # A prior day's tripwire-forced dry mode must not carry over
         # (docs/live_guardrails_spec_20260925.md G2) — revert to the config
         # baseline every reset_daily; re-evaluated fresh if the tripwire

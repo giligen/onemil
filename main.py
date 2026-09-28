@@ -540,10 +540,49 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
                 bf_alpaca = None
                 enable_flag = False
 
-    # Create ONE shared StopMonitor for all strategies. ORB and BF each have
-    # their own AlpacaClient (separate paper accounts) — pass a routing dict
-    # so exit orders for those strategies go to the right account. MACD wave
-    # continues to use the main `alpaca` client by default (no entry needed).
+    # --- HOD-break paper AlpacaClient (2026-09-28, owner: run HOD on its OWN
+    # paper account) — same isolation pattern as ORB/BF. Keys empty -> soft
+    # fallback to main (backwards compat). Keys present but connection fails
+    # -> DISABLE HOD for the session (never silently submit to the wrong
+    # account). red_to_green (same engine class, different `book`) stays on
+    # the main client — it is not part of this isolation. ---
+    hod_alpaca = None
+    if trade and enable_hod and config.alpaca_hod_api_key and config.alpaca_hod_api_secret:
+        if not _strategy_uses_separate_account(
+            config.alpaca_hod_api_key, config.alpaca_api_key
+        ):
+            # HOD keys match main account — reuse the main AlpacaClient.
+            hod_alpaca = alpaca
+            logger.info(
+                "HOD Alpaca client: keys match main account — reusing main "
+                "AlpacaClient instance"
+            )
+        else:
+            try:
+                hod_alpaca = AlpacaClient(
+                    config.alpaca_hod_api_key,
+                    config.alpaca_hod_api_secret,
+                    paper=config.alpaca_hod_paper,
+                )
+                if not hod_alpaca.test_connection():
+                    raise RuntimeError("HOD Alpaca connection test failed")
+                hod_account = hod_alpaca.get_account_info()
+                hod_mode = "paper" if hod_alpaca.is_paper else "LIVE"
+                logger.info(
+                    f"HOD account: {hod_mode} equity=${float(hod_account.get('equity', 0)):,.0f}"
+                )
+            except Exception as e:
+                logger.error(f"HOD Alpaca client init failed: {e} — disabling HOD-break")
+                hod_alpaca = None
+                enable_hod = False
+
+    # Create ONE shared StopMonitor for all strategies. ORB, BF and HOD each
+    # have their own AlpacaClient (separate paper accounts) — pass a routing
+    # dict so exit orders for those strategies go to the right account (the
+    # HOD engine registers its exit watches with strategy='hod_break', so a
+    # missing entry here would submit HOD stop/target exits on the MAIN
+    # account while entries fill on the HOD paper account). MACD wave and
+    # red_to_green continue to use the main `alpaca` client by default.
     stop_monitor = None
     if trade:
         strategy_clients: dict = {}
@@ -551,6 +590,8 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
             strategy_clients['orb'] = orb_alpaca
         if bf_alpaca is not None:
             strategy_clients['bull_flag'] = bf_alpaca
+        if hod_alpaca is not None:
+            strategy_clients['hod_break'] = hod_alpaca
         stop_monitor = _create_stop_monitor(
             config, alpaca, notifier,
             alpaca_clients_by_strategy=(strategy_clients or None),
@@ -743,22 +784,54 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
     if trade and enable_hod:
         try:
             from trading.hod_break_engine import HodBreakEngine
+            hod_client = hod_alpaca if hod_alpaca is not None else alpaca
+            hod_order_stream = order_stream  # fallback to shared main-account stream
+            hod_uses_separate_account = (
+                hod_alpaca is not None
+                and _strategy_uses_separate_account(
+                    config.alpaca_hod_api_key, config.alpaca_api_key
+                )
+            )
+            if hod_uses_separate_account:
+                # Dedicated OrderStreamWatcher on HOD paper account — order
+                # events (fills) are account-specific, same rationale as ORB/BF.
+                try:
+                    from trading.order_stream import OrderStreamWatcher
+                    hod_order_stream = OrderStreamWatcher(
+                        api_key=config.alpaca_hod_api_key,
+                        api_secret=config.alpaca_hod_api_secret,
+                        paper=hod_alpaca.is_paper,
+                        alpaca_client=hod_alpaca,
+                    )
+                    hod_order_stream.start()
+                    logger.info("HOD OrderStreamWatcher STARTED — separate account")
+                except Exception as e:
+                    logger.warning(
+                        f"HOD OrderStreamWatcher failed to start: {e} — "
+                        f"falling back to REST polling on HOD fills"
+                    )
+                    hod_order_stream = None
+            elif hod_alpaca is not None:
+                logger.info(
+                    "HOD: keys match main account — reusing shared OrderStreamWatcher"
+                )
             # Late-binding closure (not a direct `trading_engine._qualified_symbols` reference): trading_engine may
             # still be None here depending on which branches ran above, and Python looks up a free variable in an
             # enclosing scope at CALL time, not at lambda-creation time, so this reads whatever `trading_engine`
             # is bound to when the HOD engine actually evaluates it (item 1, hod_break.log_counterfactuals).
             hod_engine = HodBreakEngine(
-                alpaca_client=alpaca, db=db, stop_monitor=stop_monitor,
+                alpaca_client=hod_client, db=db, stop_monitor=stop_monitor,
                 notifier=notifier, cfg=config.hod_break_cfg,
-                order_stream=order_stream,
+                order_stream=hod_order_stream,
                 is_qualified=lambda s: trading_engine is not None and s in trading_engine._qualified_symbols)
             if stop_monitor is not None and not stop_monitor.polling_mode:
                 hod_engine.register_on_stop_monitor()
             hod_engine.sync_positions()
             if hod_engine.enabled:
                 hod_engine.start_drain_thread()      # bars are evaluated the moment they close, not on the scan cycle
+            _hod_acct_label = "HOD paper account" if hod_uses_separate_account else "main account"
             logger.info(f"HOD-break strategy loaded — master_flag={hod_engine.enabled}, "
-                        f"dry_run={hod_engine.dry_run}")
+                        f"dry_run={hod_engine.dry_run}, routes to {_hod_acct_label}")
         except Exception as e:
             logger.error(f"HodBreakEngine init failed ({e}) — HOD-break off")
             hod_engine = None
@@ -824,7 +897,9 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
         strategies.append(
             "Ignition (DRY)" if ignition_engine.dry_run else "Ignition")
     if hod_engine is not None and hod_engine.enabled:
-        strategies.append("HOD-break (DRY)" if hod_engine.dry_run else "HOD-break")
+        _hod_boot_acct = "HOD paper" if (hod_alpaca is not None and hod_alpaca is not alpaca) else "main acct"
+        strategies.append(
+            f"HOD-break ({_hod_boot_acct}, DRY)" if hod_engine.dry_run else f"HOD-break ({_hod_boot_acct})")
     logger.info(f"Trading mode ACTIVE — {mode_label}, strategies: {', '.join(strategies)}")
 
     # Fix 4: Graceful shutdown via SIGTERM/SIGINT

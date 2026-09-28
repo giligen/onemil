@@ -205,6 +205,25 @@ class Config:
         """Whether the bull flag account is paper (default True)."""
         return os.getenv("ALPACA_BF_PAPER", "true").lower() in ("true", "1", "yes")
 
+    # =========================================================================
+    # HOD-break Paper Account (created 2026-09-28 — isolates HOD from main acct)
+    # =========================================================================
+
+    @property
+    def alpaca_hod_api_key(self) -> str:
+        """Alpaca API key for HOD-break paper account. Empty -> fall back to main."""
+        return os.getenv("ALPACA_HOD_API_KEY", "")
+
+    @property
+    def alpaca_hod_api_secret(self) -> str:
+        """Alpaca API secret for HOD-break paper account."""
+        return os.getenv("ALPACA_HOD_API_SECRET", "")
+
+    @property
+    def alpaca_hod_paper(self) -> bool:
+        """Whether the HOD-break account is paper (default True)."""
+        return os.getenv("ALPACA_HOD_PAPER", "true").lower() in ("true", "1", "yes")
+
     @property
     def anthropic_api_key(self) -> str:
         """Anthropic API key (optional — enables LLM news analysis)."""

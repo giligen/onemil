@@ -200,6 +200,11 @@ class Position:
     closed_notional: float = 0.0
     last_close_reason: Optional[str] = None
     fc_attempts: int = 0
+    # eod_exit_mode telemetry (trading/eod_exit.py) — set at EOD submit time by force_close_all,
+    # read back by _book_leg_fill/_record_exit once the 'eod' leg is booked.
+    eod_pricing_method: Optional[str] = None
+    eod_quote_bid: float = 0.0
+    eod_quote_ask: float = 0.0
 
     @property
     def open_qty(self) -> int:
@@ -257,6 +262,11 @@ class HodBreakEngine:
         self.max_quote_age_s = float(cfg.get('max_quote_age_s', 5.0))       # a quote older than this (halt, stale feed) = no order
         self._last_pending_check = 0.0
         self.max_spread_frac_r = float(cfg.get('max_spread_frac_r', 0.0))   # 0 = off; e.g. 0.15 = skip when the spread is > 15% of R (9/14: 57% of signals)
+        # EOD exit pricing mode (trading/eod_exit.py, shared spec with ORB's force_close_all) — default
+        # 'market' is TODAY's marketable-limit-at-ref ladder below, unchanged; absent from hod_break cfg,
+        # so this key defaults byte-identical. 'limit_then_market' / 'moc' are flag-gated OFF by default.
+        self.eod_exit_mode = str(cfg.get('eod_exit_mode', 'market'))
+        self.eod_limit_timeout_s = float(cfg.get('eod_limit_timeout_s', 20.0))
         # ADMISSION threshold (9/15 CRWL miss): the scanner must start streaming a stock's bars BEFORE its break, so
         # candidates are admitted at a lower distance from the open than the spec's floor; the floor itself is
         # enforced at the break inside hod_break.detect (min_dist_open_pct). Default 1.5 pct-points below the floor.
@@ -1786,7 +1796,29 @@ class HodBreakEngine:
             logger.info(f"{self.tag} {pos.symbol}: {reason} sold {new} @ {px:.2f} — {pos.open_qty} still held (partial)")
             self._update_pattern_data(pos, closed_qty=pos.closed_qty, closed_notional=round(pos.closed_notional, 2), partial_exit=reason)
         else:
-            self._record_exit(pos, pos.closed_notional / pos.closed_qty, reason if len(set(pos.leg_booked)) == 1 else f'{reason}+partial')
+            from trading import eod_exit as _eod
+            final_reason = reason if len(set(pos.leg_booked)) == 1 else f'{reason}+partial'
+            if reason == 'eod':
+                # force_close_all already captured pricing_method + the submit-instant quote on pos; the
+                # NBBO mid at submit time is the honest reference for slippage (Alpaca's own trigger, not ours).
+                pricing_method = pos.eod_pricing_method
+                trigger_price = _eod.quote_mid(pos.eod_quote_bid, pos.eod_quote_ask) or pos.eod_quote_bid or None
+                quote_bid, quote_ask = pos.eod_quote_bid, pos.eod_quote_ask
+                latency_ms = (
+                    max(0.0, (datetime.now(timezone.utc) - pos.close_submitted_at).total_seconds() * 1000.0)
+                    if pos.close_submitted_at else None
+                )
+            else:
+                # target/stop bracket legs: no submit-time quote capture today (that would need entry-time
+                # instrumentation, out of scope here) — tag the method and the ONE trigger price we do have
+                # for free (the leg's own level), so slippage is measured even without bid/ask/latency.
+                pricing_method = 'bracket_target' if reason == 'target' else ('bracket_stop_limit' if reason == 'stop' else None)
+                trigger_price = pos.target if reason == 'target' else (pos.stop if reason == 'stop' else None)
+                quote_bid = quote_ask = 0.0
+                latency_ms = None
+            self._record_exit(pos, pos.closed_notional / pos.closed_qty, final_reason,
+                               pricing_method=pricing_method, quote_bid=quote_bid, quote_ask=quote_ask,
+                               fill_latency_ms=latency_ms, trigger_price=trigger_price)
         return new
 
     def check_exits(self, rest: bool = False) -> List[str]:
@@ -1810,7 +1842,14 @@ class HodBreakEngine:
                         break
         return done
 
-    def _record_exit(self, pos: Position, exit_price: float, reason: str) -> None:
+    def _record_exit(self, pos: Position, exit_price: float, reason: str,
+                      pricing_method: Optional[str] = None, quote_bid: float = 0.0, quote_ask: float = 0.0,
+                      fill_latency_ms: Optional[float] = None, trigger_price: Optional[float] = None) -> None:
+        """Close the DB row. `pricing_method`/`quote_bid`/`quote_ask`/`fill_latency_ms`/`trigger_price` are the
+        HOD engine's own per-exit slippage telemetry (same trades columns the ORB StopMonitor path already
+        writes — trading/trading_engine.py ~L2758-2767, and trading/eod_exit.py for the EOD modes): every
+        caller that HAS a trigger/pricing_method should pass it so the paper run measures its own slippage
+        per exit, but exit correctness (order_status/exit_price/pnl below) never depends on it."""
         self.positions.pop(pos.symbol, None)
         if self.stop_monitor is not None:
             # The resting-entry live path (_on_live_fill) registers a StopMonitor watch alongside the
@@ -1825,11 +1864,22 @@ class HodBreakEngine:
             upd['pnl'] = pnl; upd['pnl_pct'] = (exit_price / entry - 1) * 100; self.daily_pnl += pnl
         else:
             upd['order_status'] = 'exit_pending_verification'; logger.warning(f"{self.tag} {pos.symbol}: exit price unknown — pending verification")
+        slippage_bps = None
+        if pricing_method:
+            upd['exit_pricing_method'] = pricing_method
+            upd['exit_quote_bid'] = quote_bid or None; upd['exit_quote_ask'] = quote_ask or None
+            if fill_latency_ms is not None: upd['exit_fill_latency_ms'] = fill_latency_ms
+            if trigger_price and exit_price > 0:
+                upd['exit_slippage'] = round(trigger_price - exit_price, 4)
+                slippage_bps = (trigger_price - exit_price) / trigger_price * 10_000
         if pos.trade_id is not None:
             try: self.db.update_trade(pos.trade_id, upd)
             except Exception as e: logger.error(f"{self.tag} {pos.symbol}: DB exit update failed: {e}")
         rr = (exit_price - entry) / (entry - pos.stop) if entry > pos.stop and exit_price > 0 else float('nan')
         logger.info(f"{self.tag} EXIT {pos.symbol} {reason} @ {exit_price:.2f} pnl {pnl if pnl is None else round(pnl, 2)} ({rr:+.2f}R) day {self.daily_pnl:+.0f}")
+        if pricing_method:
+            bps_str = 'n/a' if slippage_bps is None else f"{slippage_bps:+.1f}bps"
+            logger.info(f"{self.tag} EXIT {pos.symbol} method={pricing_method} fill_vs_trigger={bps_str}")
         self._notify(f"{self.tag} EXIT {pos.symbol} {reason} @ {exit_price:.2f} pnl {'?' if pnl is None else f'{pnl:+.0f}'} ({rr:+.2f}R) | day {self.daily_pnl:+.0f}")
 
     PHANTOM_SYNC_INTERVAL_S = 60.0
@@ -1856,7 +1906,20 @@ class HodBreakEngine:
                 if leg:
                     try: self.alpaca.cancel_order(leg)
                     except Exception: pass
-            self._record_exit(pos, float(ev.exit_price), str(ev.exit_reason or 'stop_monitor'))
+            # StopMonitor's own StopExitEvent already carries the SAME telemetry the ORB engine reads
+            # (trading/trading_engine.py ~L2741-2767) — previously discarded here; thread it through so a
+            # StopMonitor-routed HOD exit measures its own slippage too (limit-first, market-fallback route).
+            fill_latency_ms = (
+                max(0.0, (time.time() - ev.submitted_at) * 1000.0) if getattr(ev, 'submitted_at', 0.0) else None
+            )
+            self._record_exit(
+                pos, float(ev.exit_price), str(ev.exit_reason or 'stop_monitor'),
+                pricing_method=str(getattr(ev, 'pricing_method', '') or 'stop_monitor'),
+                quote_bid=float(getattr(ev, 'exit_quote_bid', 0.0) or 0.0),
+                quote_ask=float(getattr(ev, 'exit_quote_ask', 0.0) or 0.0),
+                fill_latency_ms=fill_latency_ms,
+                trigger_price=(float(getattr(ev, 'exit_limit_price', 0.0) or 0.0) or pos.stop or None),
+            )
 
     def _sync_phantom_watches(self) -> None:
         """Drop any StopMonitor watch for this strategy whose broker position is zero (a leg fill or manual
@@ -1940,7 +2003,14 @@ class HodBreakEngine:
         """Flatten OUR shares at flat_minute: cancel working entries (REST-confirmed), cancel and READ the legs (a fill
         in the race is booked, not sold again), then sell exactly the shares no exit has sold, with a marketable limit
         whose id is persisted (a restart must not sell twice). Never `close_position` (the owner trades the same
-        account). Re-checked every pass; re-submitted after FC_RESUBMIT_S; a third attempt goes 3% through the bid."""
+        account). Re-checked every pass; re-submitted after FC_RESUBMIT_S; a third attempt goes 3% through the bid.
+
+        eod_exit_mode (trading/eod_exit.py, default 'market') gates the FIRST-attempt order only: 'market' is the
+        ref*0.99/0.97 ladder above, byte-identical to before this flag existed. 'moc' submits ONE TimeInForce.CLS
+        order and then never age-cancels it (a MOC rests until the close by design — see the never_resubmit check
+        below). 'limit_then_market' rests a limit at the NBBO mid; the SECOND attempt (gated by
+        eod_limit_timeout_s instead of FC_RESUBMIT_S) escalates to a true market order, not a tighter limit."""
+        from trading import eod_exit as _eod
         n = 0; now = datetime.now(timezone.utc)
         with self._lock:
             for sym, pos in list(self.positions.items()):
@@ -1952,7 +2022,13 @@ class HodBreakEngine:
                     status = str(st.get('status', '')).lower(); age = (now - (pos.close_submitted_at or now)).total_seconds()
                     if int(st.get('filled_qty') or 0) > 0: self._book_leg_fill(pos, cid, st, 'eod')
                     if sym not in self.positions: continue
-                    if status not in _TERMINAL + ('filled',) and age < self.FC_RESUBMIT_S:
+                    never_resubmit = pos.eod_pricing_method == _eod.PM_EOD_MOC          # a resting MOC rides to the close, never age-cancelled
+                    resubmit_after_s = (
+                        self.eod_limit_timeout_s
+                        if pos.eod_pricing_method in (_eod.PM_EOD_LIMIT, _eod.PM_EOD_MOC_CUTOFF_LIMIT)
+                        else self.FC_RESUBMIT_S
+                    )
+                    if status not in _TERMINAL + ('filled',) and (never_resubmit or age < resubmit_after_s):
                         continue                                       # still working
                     if status not in _TERMINAL + ('filled',):
                         try: self.alpaca.cancel_order(cid)
@@ -1967,13 +2043,43 @@ class HodBreakEngine:
                 if qty <= 0:
                     logger.warning(f"{self.tag} FORCE CLOSE {sym}: nothing left to sell after the legs were read"); continue
                 pos.fc_attempts += 1
-                ref = self._close_reference_price(pos); limit = round(ref * (0.97 if pos.fc_attempts >= 3 else 0.99), 2)
                 coid = f"hod-fc-{sym}-{(self.session_date or '')[5:]}-{uuid.uuid4().hex[:6]}"[:48]
+                resolved = _eod.resolve_mode(self.eod_exit_mode, datetime.now(ZoneInfo('America/New_York')))
+                if resolved.warning: logger.warning(f"{self.tag} {sym}: {resolved.warning}")
+                bid = ask = 0.0
+                q = self._quote(sym)
+                if q: bid, ask = q
                 try:
-                    od = self.alpaca.submit_limit_sell_order(sym, qty, limit, **({'client_order_id': coid} if self._client_supports_coid('submit_limit_sell_order') else {}))
-                    pos.close_order_id = str(od.get('id') or '') or None; pos.close_submitted_at = now; n += 1
-                    self._update_pattern_data(pos, close_order_id=pos.close_order_id, close_client_order_id=coid, close_submitted_at=now.isoformat(), closed_qty=pos.closed_qty)
-                    logger.info(f"{self.tag} FORCE CLOSE {sym} x{qty} limit {limit:.2f} submitted ({pos.close_order_id}, attempt {pos.fc_attempts})")
+                    if resolved.mode == _eod.MARKET:
+                        ref = self._close_reference_price(pos); limit = round(ref * (0.97 if pos.fc_attempts >= 3 else 0.99), 2)
+                        od = self.alpaca.submit_limit_sell_order(sym, qty, limit, **({'client_order_id': coid} if self._client_supports_coid('submit_limit_sell_order') else {}))
+                        pm = _eod.PM_EOD_MARKET
+                        pos.close_order_id = str(od.get('id') or '') or None; pos.close_submitted_at = now; n += 1
+                        self._update_pattern_data(pos, close_order_id=pos.close_order_id, close_client_order_id=coid, close_submitted_at=now.isoformat(), closed_qty=pos.closed_qty)
+                        logger.info(f"{self.tag} FORCE CLOSE {sym} x{qty} limit {limit:.2f} submitted ({pos.close_order_id}, attempt {pos.fc_attempts})")
+                    elif resolved.mode == _eod.MOC:
+                        od = self.alpaca.submit_moc_sell_order(sym, qty, **({'client_order_id': coid} if self._client_supports_coid('submit_moc_sell_order') else {}))
+                        pm = _eod.pricing_method(resolved, 'primary')
+                        pos.close_order_id = str(od.get('id') or '') or None; pos.close_submitted_at = now; n += 1
+                        self._update_pattern_data(pos, close_order_id=pos.close_order_id, close_client_order_id=coid, close_submitted_at=now.isoformat(), closed_qty=pos.closed_qty)
+                        logger.info(f"{self.tag} FORCE CLOSE {sym} x{qty} MOC submitted ({pos.close_order_id}, attempt {pos.fc_attempts}, pricing_method={pm})")
+                    else:                                               # limit_then_market (direct, or a moc-cutoff downgrade)
+                        mid = _eod.quote_mid(bid, ask)
+                        if mid is not None and pos.fc_attempts == 1:
+                            od = self.alpaca.submit_limit_sell_order(sym, qty, mid, **({'client_order_id': coid} if self._client_supports_coid('submit_limit_sell_order') else {}))
+                            pm = _eod.pricing_method(resolved, 'primary')
+                            desc = f"limit {mid:.2f} (mid)"
+                        else:
+                            od = self.alpaca.submit_market_sell_order(sym, qty, **({'client_order_id': coid} if self._client_supports_coid('submit_market_sell_order') else {}))
+                            pm = _eod.pricing_method(resolved, 'fallback')
+                            desc = "market (limit_then_market fallback)"
+                        pos.close_order_id = str(od.get('id') or '') or None; pos.close_submitted_at = now; n += 1
+                        self._update_pattern_data(pos, close_order_id=pos.close_order_id, close_client_order_id=coid, close_submitted_at=now.isoformat(), closed_qty=pos.closed_qty)
+                        logger.info(f"{self.tag} FORCE CLOSE {sym} x{qty} {desc} submitted ({pos.close_order_id}, attempt {pos.fc_attempts}, pricing_method={pm})")
+                    pos.eod_pricing_method = pm; pos.eod_quote_bid = bid; pos.eod_quote_ask = ask
+                    if pos.trade_id is not None:
+                        try: self.db.update_trade(pos.trade_id, _eod.build_eod_exit_telemetry(method=pm, quote_bid=bid, quote_ask=ask))
+                        except Exception as e: logger.error(f"{self.tag} {sym}: eod_exit telemetry DB write failed: {e}")
                 except Exception as e:
                     logger.error(f"{self.tag} FORCE CLOSE {sym} FAILED: {e}"); self._notify(f"{self.tag} ERROR force close {sym}: {e}")
             remaining = [s_ for s_, p_ in self.positions.items() if p_.status == 'open']

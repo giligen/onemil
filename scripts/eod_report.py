@@ -48,7 +48,13 @@ def run(cmd: List[str], timeout: int = 180, cwd: Path = ROOT, env: dict = None) 
 
 
 def books_section(trades: List[Dict], day: str) -> str:
-    """Per-strategy realized P&L and fills for one trade_date, from trades rows."""
+    """Per-strategy realized P&L and fills for one trade_date, from trades rows.
+
+    Split by account (owner 9/28: HOD-break and ORB each now route real orders to
+    their OWN Alpaca paper account) so a paper-account book's P&L is never summed
+    onto the same line as a live-account book — each strategy gets one line per
+    account seen in `trades` (paper/live, or 'unknown' for rows saved before the
+    `account` column existed)."""
     by = defaultdict(list)
     for t in trades:
         by[t.get("strategy") or "unknown"].append(t)
@@ -56,14 +62,18 @@ def books_section(trades: List[Dict], day: str) -> str:
         return f"BOOKS {day}: no fills."
     lines = [f"BOOKS {day}:"]
     for strat, rows in sorted(by.items()):
-        filled = [r for r in rows if r.get("order_status") not in ("cancelled", "canceled", "expired", "rejected")]
-        closed = [r for r in filled if r.get("exit_price") is not None]
-        pnl = sum(float(r.get("pnl") or 0) for r in closed)
-        open_n = len(filled) - len(closed)
-        detail = ", ".join(f"{r['symbol']} {float(r.get('pnl') or 0):+.0f} {r.get('exit_reason') or '?'}"
-                           for r in closed[:8])
-        lines.append(f"  {strat}: {len(filled)} fills, {len(closed)} closed, ${pnl:+,.0f}"
-                     + (f", {open_n} still open" if open_n else "") + (f" [{detail}]" if detail else ""))
+        by_account = defaultdict(list)
+        for r in rows:
+            by_account[r.get("account") or "unknown"].append(r)
+        for account, acct_rows in sorted(by_account.items()):
+            filled = [r for r in acct_rows if r.get("order_status") not in ("cancelled", "canceled", "expired", "rejected")]
+            closed = [r for r in filled if r.get("exit_price") is not None]
+            pnl = sum(float(r.get("pnl") or 0) for r in closed)
+            open_n = len(filled) - len(closed)
+            detail = ", ".join(f"{r['symbol']} {float(r.get('pnl') or 0):+.0f} {r.get('exit_reason') or '?'}"
+                               for r in closed[:8])
+            lines.append(f"  {strat} ({account}): {len(filled)} fills, {len(closed)} closed, ${pnl:+,.0f}"
+                         + (f", {open_n} still open" if open_n else "") + (f" [{detail}]" if detail else ""))
     return "\n".join(lines)
 
 
