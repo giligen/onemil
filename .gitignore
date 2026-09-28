@@ -205,3 +205,7 @@ research/options_vrp/*.parquet
 research/options_vrp/*_cycles.csv
 research/options_vrp/*.log
 research/options_vrp/__pycache__/
+research/exec_quality/*_fills.csv
+research/exec_quality/*_driftmap.csv
+research/exec_quality/*_rows.csv
+research/exec_quality/*_summary.csv
