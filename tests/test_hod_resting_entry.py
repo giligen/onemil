@@ -173,6 +173,47 @@ class TestRestingStopLimitEngine:
         assert len(rows) == 1 and rows[0]['filled'] == '0'
         assert e.candidates['ABC'].resting_filled is False
 
+    def test_dry_cross_ledger_row_defaults_account_to_dry(self, mock_alpaca, mock_db, mock_sm, tmp_path):
+        """Integration: a real dry cross through the full engine (arm_state -> resting_entry_fill -> a real
+        temp-file ledger write and read-back) tags its own row account='dry' — cell 1,661's fix must not touch
+        the pre-existing dry-simulation path, only add the paper/live one alongside it."""
+        e = resting_engine(mock_alpaca, mock_db, mock_sm, tmp_path)
+        admit(e); e._ingest_bars('ABC', bars_df(tape()))
+        rows = read_ledger(e.dry_ledger_path)
+        assert len(rows) == 1 and rows[0]['account'] == 'dry'
+
+
+class TestDryLedgerWriterAccountColumn:
+    """Unit tests for _append_dry_ledger's account column (cell 1,661: logs/hod_dry_entry_ledger.csv had no new
+    rows credited to a live/paper fill since 2026-09-25 — _on_live_fill never called this writer)."""
+
+    def test_append_dry_ledger_writes_the_given_account(self, mock_alpaca, mock_db, mock_sm, tmp_path):
+        e = resting_engine(mock_alpaca, mock_db, mock_sm, tmp_path)
+        admit(e); cand = e.candidates['ABC']
+        arm = dict(level=11.0, trigger=11.01, limit=11.0165, stop=10.6, arm_ts='2026-09-29T09:36:00')
+        e._append_dry_ledger(cand, arm, e._et_now(), ask=11.02, filled=True, fill_px=11.02, tape_accurate=True)
+        e._append_dry_ledger(cand, arm, e._et_now(), ask=float('nan'), filled=True, fill_px=11.03,
+                              tape_accurate=False, account='live')
+        rows = read_ledger(e.dry_ledger_path)
+        assert [r['account'] for r in rows] == ['dry', 'live']
+
+    def test_existing_header_without_account_is_never_rewritten_and_row_keeps_the_old_shape(
+            self, mock_alpaca, mock_db, mock_sm, tmp_path):
+        """Same backward-compat rule as the counterfactual columns (tests/test_hod_counterfactuals.py
+        TestHeaderBackwardCompatibility): a header written before 'account' existed must never gain it —
+        the appended row stays exactly the OLD column count, never rewritten."""
+        path = tmp_path / 'hod_dry_entry_ledger.csv'
+        old_header = 'date,symbol,arm_ts,cross_ts,level,trigger,limit,ask,filled,fill_px,stop,target,tape_accurate,live'
+        path.write_text(old_header + '\n')
+        e = resting_engine(mock_alpaca, mock_db, mock_sm, tmp_path)
+        admit(e); cand = e.candidates['ABC']
+        arm = dict(level=11.0, trigger=11.01, limit=11.0165, stop=10.6, arm_ts='2026-09-29T09:36:00')
+        e._append_dry_ledger(cand, arm, e._et_now(), ask=11.02, filled=True, fill_px=11.02, tape_accurate=True, account='paper')
+        with open(path) as fh:
+            lines = fh.read().strip('\n').split('\n')
+        assert lines[0] == old_header                                            # header untouched
+        assert len(lines[1].split(',')) == len(old_header.split(','))            # new row keeps the OLD (no-account) shape
+
 
 class TestEntryModeDefaultParity:
     def test_default_entry_mode_is_next_open(self, mock_alpaca, mock_db, mock_sm):

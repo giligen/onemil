@@ -941,22 +941,43 @@ class HodBreakEngine:
                 logger.error(f"{self.tag} {sym}: print-watch subscribe/unsubscribe failed: {e}")
 
     def _append_dry_ledger(self, cand: Candidate, arm: dict, cross_ts, ask: float, filled: bool,
-                            fill_px: Optional[float], tape_accurate: bool, live: bool = True) -> None:
+                            fill_px: Optional[float], tape_accurate: bool, live: bool = True,
+                            account: str = 'dry') -> None:
         """Append one row to `self.dry_ledger_path` (docs/hod_resting_entry_spec_20260925.md); never raises —
         a logging failure must never affect trading. ERROR on write failure. `live` MUST be True: only bars
         that closed after this session's `live_since` ever reach an arm/resolve, so every row is a live row —
-        the column exists so a stray backfill row is instantly visible as a defect, never silently trusted."""
+        the column exists so a stray backfill row is instantly visible as a defect, never silently trusted.
+        `account` distinguishes the ROW's source, independent of `live`: 'dry' for the tape/bar-fallback
+        simulation (_on_trade_print/_evaluate_resting — always runs, every session, regardless of self.dry_run)
+        vs 'paper'/'live' for a REAL broker fill (_on_live_fill). Cell 1,661 (2026-09-25..29): once a candidate's
+        REAL order filled, `cand.live_filled` short-circuited both the tape and bar-fallback resolvers before
+        either reached this call (Candidate.resting_filled/live_filled guard above), so every symbol that
+        actually filled live/paper was silently absent from this ledger — `_on_live_fill` now calls this
+        directly with account='paper'/'live' so a filled arm is never dropped. `account` is a NEW trailing
+        column: same backward-compat rule `_append_csv_row` applies to the counterfactual columns — included
+        for a brand-new file or one whose header already carries it; an existing file whose header predates it
+        is never rewritten and keeps appending rows in its exact old shape."""
+        import os
         stop = arm['stop']
         target = fill_px + self.params.target_r * (fill_px - stop) if filled and fill_px is not None else None
+        base_header = ['date', 'symbol', 'arm_ts', 'cross_ts', 'level', 'trigger', 'limit', 'ask',
+                       'filled', 'fill_px', 'stop', 'target', 'tape_accurate', 'live']
         row = [self.session_date or '', cand.symbol, arm.get('arm_ts', ''), cross_ts.isoformat(),
                f"{arm['level']:.4f}", f"{arm['trigger']:.4f}", f"{arm['limit']:.4f}",
                '' if ask != ask else f"{ask:.4f}", int(bool(filled)), '' if fill_px is None else f"{fill_px:.4f}",
                f"{stop:.4f}", '' if target is None else f"{target:.4f}", int(bool(tape_accurate)), int(bool(live))]
+        include_account = True
+        if os.path.exists(self.dry_ledger_path):
+            try:
+                with open(self.dry_ledger_path, 'r', newline='') as fh:
+                    include_account = 'account' in fh.readline()
+            except Exception as e:
+                logger.error(f"{self.tag} {cand.symbol}: failed to read existing header of {self.dry_ledger_path}: {e}")
+                include_account = False
+        if include_account:
+            base_header = base_header + ['account']; row = row + [str(account)]
         self._append_csv_row(
-            self.dry_ledger_path,
-            ['date', 'symbol', 'arm_ts', 'cross_ts', 'level', 'trigger', 'limit', 'ask',
-             'filled', 'fill_px', 'stop', 'target', 'tape_accurate', 'live'],
-            row, cand.symbol, self._cf_row(cand),
+            self.dry_ledger_path, base_header, row, cand.symbol, self._cf_row(cand),
             err_ctx=f"dry entry ledger row to {self.dry_ledger_path}")
 
     def _cf_row(self, cand: Candidate) -> list:
@@ -1765,6 +1786,11 @@ class HodBreakEngine:
         if status != 'partially_filled':
             cand.live_filled = True; cand.live_order = None; self._live_cap_slots.discard(sym)
             self._append_live_parity_row(cand, lo, broker_status=status or 'filled', broker_fill_ts=self._et_now(), broker_fill_px=fill_px, broker_fill_qty=filled_qty)
+            # Cell 1,661: a REAL fill resolves via _on_live_fill, never through _evaluate_resting/_on_trade_print
+            # (both bail out on cand.live_filled) — without this, the dry-entry ledger never sees a row for it.
+            acct = 'paper' if getattr(self.alpaca, 'is_paper', True) else 'live'
+            self._append_dry_ledger(cand, lo, self._et_now(), ask=float('nan'), filled=True, fill_px=fill_px,
+                                     tape_accurate=False, account=acct)
             try:
                 if self.stop_monitor is not None: self.stop_monitor.unsubscribe([sym])
             except Exception as e:

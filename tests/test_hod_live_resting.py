@@ -139,6 +139,30 @@ class TestDisarmCancels:
         assert len(rows) == 1 and rows[0]['broker_status'] == 'cancelled' and rows[0]['reason'] == 'arm_lost'
 
 
+# --------------------------------------------------------------------------------------------- cell 1,661: dry-ledger parity
+class TestDryLedgerGetsLiveAndPaperFills:
+    """Cell 1,661 (2026-09-25..29): a REAL fill resolves entirely inside _on_live_fill; _evaluate_resting and
+    _on_trade_print both bail out on cand.live_filled before either ever reaches _append_dry_ledger, so every
+    symbol that actually filled live/paper was silently missing from logs/hod_dry_entry_ledger.csv.
+    _on_live_fill now writes that ledger too, tagged account='paper'/'live'."""
+
+    def test_live_fill_writes_a_dry_ledger_row(self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path)
+        admit(e)
+        cand = e.candidates['ABC']
+        e._arm_live_order(cand, dict(BIG_VOL_ARM))
+        coid = cand.live_order['coid']
+        hod_live_stream.snapshot_by_client_prefix.return_value = {
+            coid: {'status': 'filled', 'filled_qty': 150, 'filled_avg_price': 11.02, 'client_order_id': coid}}
+        e._poll_live_fills()
+        assert cand.live_filled is True
+        rows = read_ledger(e.dry_ledger_path)
+        assert len(rows) == 1
+        assert rows[0]['symbol'] == 'ABC' and rows[0]['filled'] == '1'
+        assert rows[0]['fill_px'] == '11.0200'
+        assert rows[0]['account'] in ('paper', 'live')
+
+
 # --------------------------------------------------------------------------------------------- item 4: fill registers StopMonitor
 class TestFillRegistersStopMonitor:
     def test_fill_and_partial_top_up_update_the_cumulative_qty(
