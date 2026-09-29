@@ -1,71 +1,73 @@
-# Owner report — 2026-09-30 morning (written overnight 9/29; sections marked PENDING fill in as cells land)
+# Owner report — 2026-09-30 morning (written overnight 9/29, final 21:10 UTC)
 
 ## 1. Bottom line
-* **The only proven positive book is ORB at the live config** (+0.105 R/fill 2025-01..2026-09, n 473, t 3.3, ex-top-5 %
-  ≈ 0; 9/29 paper AXTL +$170 with the 5-s pre-placement delay). Its edge is frequency-limited (1.4–7 fills/week by
-  regime) and it goes live only after the paper parity read holds (owner GO, earliest Wednesday).
-* **HOD-break at the 1.5 % stop floor is a zero-edge book at the measured cost** (+0.007 / −0.028 R TRAIN / VAL,
-  t −2 on VAL). The floor turns the −0.11 R sub-1.5 % fills (44 % of the old book) into "not traded" — a loss avoided,
-  not a win. Twelve re-read cells (1,660–1,671) at the measured cost found NO filter, exit, entry width, volume, shape,
-  pattern or post-entry cut that is positive on both halves. Details in §3.
-* **Small sleeves that pass on their own bar:** turn-of-month index sleeve (paper, ≈ $85/month at the tested size,
-  fires 4 nights a month; first paper entry 9/30 19:52 UTC). Everything else on the ideas web FAILED or is suspended
-  (auction imbalance, VIX carry, leveraged flow, EDGAR run-up, sector momentum).
-* **Money 9/29 (closed 20:00 UTC, all accounts flat, service exited normally):** live HOD −$132 (TWST/MRNA/NBIL stops
-  −$148, hand-flattens +$16) + CDNA over-exit cover −$92 = **−$224 live**. HOD paper **−$51**: CONI +$52 (25 sh at
-  target 23.48, 87 sh EOD 23.31), TTAN −$17, AAOI −$25, QMCO −$30, ARXS −$32 — every one armed BEFORE the 1.5 % floor
-  (stop distances 0.8–1.5 %); zero floored fills yet, the first floored session is 9/30. ORB paper AXTL **−$96**
-  (963 sh 3.46 → 3.36 force-close 15:45 ET; it was +$170 at 14:00 ET and gave it back — the 2 R target was never
-  reached, the exit rule held it to the close as designed). One harmless ERROR at 20:00 (AXTL closed twice) → fix
-  committed overnight.
+* **No new winner came out of tonight's 13 cells (1,660–1,672).** Every one ran under a frozen PREREG at the measured
+  cost on both halves; nothing clears the bar (net ≥ +0.05 R, t ≥ 2.5 both halves, tail-clean, ≥ 3 fills/week). Four
+  of your hypotheses were answered with real power: relative volume (no), candle shapes and the 61 TA-Lib patterns (no),
+  early cuts on predicted failure (no), adds on predicted non-failure and after +R (no, the locked-stop pyramid loses).
+* **What is real:** (1) the machine is now correct — seven order/bookkeeping defects found today are fixed with tests,
+  arm-time telemetry goes into the ledger from the 12:30 UTC boot; (2) the bar store is complete (every fill day, 20
+  prior sessions each, SPY), so these answers are powered, not coverage artifacts; (3) the HOD book at the 1.5 % floor
+  is ≈ 0 R (+0.007 / −0.028 per half) instead of −0.11 R on the fills the floor removes — a loss avoided, not a win.
+* **Where the money is:** ORB is the only book with a positive in-regime backtest at the live config (+0.105 R/fill
+  2025-01..2026-09, n 473, t 3.3, tail-clean) and it lost live because of execution (first order 26–49 s late, adverse
+  drift). The fixes (pre-placement + 5-s delay, target resting limit) are on paper; **the 9/30 paper parity read decides
+  the Wednesday live GO.** Out of regime its edge is ≈ 0, so the regime (frequency) is the risk, not the mechanism.
+* **Money 9/29 (closed 20:00 UTC, all accounts flat):** live −$224 (HOD morning stops −$132, CDNA over-exit cover −$92);
+  HOD paper −$51 (CONI +$52, four stops −$103, all armed before the floor, 0.8–1.5 % stops); ORB paper AXTL −$96
+  (+$170 at 14:00 ET, never reached 2 R, force-closed 15:45 ET as the rule says).
 
-## 2. Books and the machine (state at boot 9/30 12:30 UTC)
-| book | account | state | what changed 9/29 |
+## 2. The machine at the 9/30 12:30 UTC boot
+| book | account | state | changed 9/29 (all committed, full suite 4,681 passed) |
 |---|---|---|---|
-| HOD-break | paper PA39QSZR60WC | ON, min_r_pct 1.5, real paper orders | fill detection (GET before/after cancel, REST poll, boot adoption), exit qty clamped to broker, OCO parser, state file per account, R2G sync bug (self.STRATEGY_NAME), adoption as filled + DB merge, reconcile checks the broker, leg-less restores get a StopMonitor watch, dry ledger writes paper/live fills + arm-time telemetry (PENDING commit) |
-| ORB B+ | paper PA3YNVRTKFMG | ON, 5-s pre-placement delay, catalyst OFF, **target-resting-limit ON for 9/30** (bar ≤ 5 bps) | BT parity fix (catalyst veto read from orb.yaml), book regenerated (2025–26 n 483, +0.107 R) |
-| Bull flag | live | PAUSED (enabled: false) | — |
-| TOM sleeve | paper | cron 19:45/20:45 UTC | first entry 9/30 at the close |
-| Live account | — | FLAT; guardrail acknowledgement cutoff live | trade records corrected (rows 381, 393–400), CDNA/PRIM/ASTN/WRBY/TTAN/CONI |
-Telegram: dedupe 60 s + 20/min cap; the 9/29 error storms (144 "order not found", OCO parser, CONI "unreconciled") each
-have a root-cause fix committed. Incident write-up: `docs/hod_live_incident_20260929.md`.
+| HOD-break | paper PA39QSZR60WC | ON, min_r_pct 1.5, real paper orders | fill detection (GET before/after cancel, REST poll, boot adoption as FILLED + DB merge), exits clamped to broker qty, OCO parser, account-stamped state file, R2G sync no longer touches HOD rows (self.STRATEGY_NAME), reconcile checks the broker, leg-less restores get a StopMonitor watch, dry ledger writes paper/live fills + 9 arm-time feature columns |
+| ORB B+ | paper PA3YNVRTKFMG | ON, 5-s pre-placement delay, catalyst OFF, **target-resting-limit ON (bar ≤ 5 bps vs the market TP)** | BT parity (catalyst veto read from orb.yaml, book regenerated: 2025–26 n 483, +0.107 R); post-close double-close no longer an ERROR |
+| Bull flag | live | PAUSED | — |
+| TOM sleeve | paper | cron 19:45 / 20:45 UTC | first entry 9/30 at the close (check `scripts/tom_sleeve.py --status` at 19:52 UTC) |
+| Live account | — | FLAT; guardrail acknowledgement cutoff live | trade records corrected (rows 381, 393–400); incident write-up `docs/hod_live_incident_20260929.md` |
+Telegram: dedupe 60 s + 20/min cap; every 9/29 error storm has a root-cause fix.
 
-## 3. Everything tested at the measured cost (entry 7 bps, stop 6, target 0, EOD 11; both halves; bar = net ≥ +0.05 R, t ≥ 2.5 both halves, ex-top-5 % > 0, ≥ 3 fills/wk)
+## 3. Everything tested at the measured cost (entry 7 bps, stop 6, target 0, EOD 11; halves TRAIN-H2 / VAL; MDE of the floored book 0.077 / 0.066 R)
 | cell | what | result | verdict |
 |---|---|---|---|
-| 1,658 | P&L by stop distance | < 1.5 %: −0.11 R both halves (t −4); 1.5–3 %: −0.01/−0.07; ≥ 3 %: −0.08/+0.14 | floor 1.5 % shipped to paper (loss avoided) |
-| 1,660 | exit lab (35 variants) | base −0.014/−0.061; best variant tail-carried | FAIL |
+| 1,658 | P&L by stop distance | < 1.5 %: −0.11 R both halves (t −4); 1.5–3 %: −0.01/−0.07; ≥ 3 %: −0.08/+0.14 | floor 1.5 % → paper |
+| 1,660 | exit lab (35 variants) re-read | base −0.014/−0.061; floor +0.007/−0.028; best variant tail-carried | FAIL |
 | 1,661 | entry limit width | +0.10 %: +0.047 R on n 31 | watch on the ledger (the 0.15 % session contains it) |
-| 1,662 | re-score of 16 families | nothing; 1,488 flagged; 1,619 artifact | FAIL |
-| 1,663 | 7 cost-axis cuts | 0/24 causal reads | FAIL |
-| 1,665 | relative volume to the arm minute (owner) | on the completed store (coverage 99 %): low-RVOL tercile +0.03 R, high −0.07 R on both halves, t ≤ 1.3, MDE 0.05; 0/48 reads | FAIL (adequately powered null) |
-| 1,666 | rebuild of the 1,488 pyramid | paired −0.043/−0.044 R, t −5, MDE 0.02 | REFUTED |
-| 1,667 | every causal feature (owner) | daily flat; intraday flat (10 reads t ≥ 2.5, all negative); n_cross = leak | FAIL |
-| 1,668 | post-entry failure detection (owner) | 0/36 rules; classifier AUC 0.63–0.67 oos, cut −0.05..+0.02 R; patterns ≈ 0 | FAIL |
-| 1,669 | fast failures + cut decomposition (owner) | stops within 2/5/10 min = 3/12/24 % of stop-outs; fast failure IS predictable at minute 1 (AUC 0.76–0.81 oos, precision 0.4–0.5 at P ≥ 0.7); the cut flips sign between scorings (+0.30 / −0.36 R on the fired subset); 0/96 cells; engulfing 38 % vs 27 % in fast failures but 0 importance beyond price | FAIL (predictable, not tradable — now with numbers) |
-| 1,670 | feature-timing map + the ADD reads (owner) | information lives in the PATH (mark-to-market, progress per volume) and grows with time (AUC 0.71 at 60 min, but its placebo is 0.59 — suspect; clean ≤ 10 min); arm-time, market and shape families ≈ 0.5; cuts +0.02..+0.04 R, t < 1, negative tails; model-gated add (2× risk on predicted non-failures) ≈ 0; **add after +1/+1.5 R with a locked stop is significantly NEGATIVE (t −3.3)**; 0/256 | FAIL |
-| 1,671 | raw-sequence model vs trees (owner's TSFM question) | PENDING | PENDING |
-| 1,672 | pre-holiday index sleeve (sister of TOM), 2016–2026, 102 events | SPY −17 / −4 bps per event (t −1.4 / −0.2), null percentile 12 / 35, mirror ≈ 0; QQQ and open-exit variants the same | FAIL |
-MDE of the floored book: 0.077 / 0.066 R per half — a cut must carry ≥ +0.10 R on a third of the book to be visible.
+| 1,662 | re-score of 16 cell families | nothing; 1,488 flagged; 1,619 artifact | FAIL |
+| 1,663 | 7 cost-axis cuts | 0/24 causal reads (4 numeric passes condition on exit type) | FAIL |
+| 1,665 | relative volume to the arm minute vs prior 20/5 sessions | coverage 99 %: low tercile +0.03 R, high −0.07 R both halves, t ≤ 1.3, MDE 0.05; 0/48 | FAIL (powered null) |
+| 1,666 | independent rebuild of the 1,488 pyramid | paired −0.043/−0.044 R, t −5, MDE 0.02 | REFUTED |
+| 1,667 | every causal arm-time feature (17) | daily and intraday all flat (10 reads t ≥ 2.5, all negative direction); n_cross "pass" = full-day count (leak) | FAIL |
+| 1,668 | post-entry failure detection: 9 rules × 4 horizons + classifier | 0/36 rules; AUC 0.63–0.67 oos, cut −0.05..+0.02 R; patterns ≈ 0 importance | FAIL |
+| 1,669 | fast failures | 3/12/24 % of stops within 2/5/10 min; predictable at minute 1 (AUC 0.76–0.81) but the cut flips sign across scorings; 0/96 | FAIL |
+| 1,670 | feature-timing map + adds | information only in the path; cuts +0.02..+0.04 R t < 1; model-gated add ≈ 0; add after +R with locked stop t −3.3 | FAIL |
+| 1,671 | MiniRocket raw-sequence model vs trees | trees win at every minute (0.54→0.68 vs 0.50→0.64); stacking hurts; placebo clean | FAIL → **no TSFM fine-tune** |
+| 1,672 | pre-holiday index sleeve 2016–26 (102 events) | SPY −17/−4 bps per event, null percentile 12/35, mirror ≈ 0 | FAIL |
+Programme count on the HOD line: > 2,400 cells. Detailed RESULT files under `research/hod_entry/` and `research/calendar/`.
 
-## 4. Real winners (flagged)
-1. **ORB live config** — the book to scale; the ramp advance needs 40 live fills; frequency is the limit, not edge.
-2. **The measured cost itself** — every HOD verdict before 9/29 charged 3× the real cost; the measurement (entry +6.7
-   bps, stop −2.6/−6 bps on live fills) is reusable across every book and is why the floor exists.
-3. **Turn-of-month sleeve** — small, positive, bounded, stacks with the day books (paper first).
-4. PENDING: anything from 1,669–1,671 that passes and survives its independent rebuild.
+## 4. Winners, honestly flagged
+1. **ORB at the live config** — the only positive book; execution fixes under paper test; live on GO after parity.
+2. **The measured cost** (entry +6.7 bps, stop −2.6/−6 bps on live fills) — every earlier HOD verdict charged 3× too much;
+   reusable across every book; it is why the floor exists.
+3. **The 1.5 % stop floor** — removes the −0.11 R fills; HOD becomes a free forward instrument at ≈ 0 R.
+4. **Turn-of-month sleeve** — passes its own bar, ≈ $85/month at the tested size, stacks on different days; paper first.
+5. **The machine** — a paper session tomorrow with real fills on correct code is the bar for any live day, and the ledger
+   now records every arm's features so each session reads every cut forward at once.
 
-## 5. Refuted or void (do not re-test)
-Confirmation entry / no-withdrawal pyramid (1,487/1,488/1,666); OFI filters; same-day volume ratios; relative volume
-(pending the final re-run); candle patterns as filters or exits; every price-path exit (time stops, locks, trails,
-dips); n_cross (full-day count).
+## 5. Closed — do not re-test on this population
+Every filter on arm-time features (price, ATR, time of day, extension, momentum, liquidity, VWAP, volume, relative volume,
+patterns); every exit or early cut on the price path or on predicted failure; adds on predicted success or after +R;
+the confirmation entry / no-withdrawal pyramid; OFI; sequence models. The information about a HOD trade's fate is in its
+own path after entry, and acting on it costs more than it saves. HOD's value is as a forward instrument at the floor.
 
-## 6. Next steps (pre-committed, no owner action needed unless marked)
-1. 9/30 paper: HOD floored session with telemetry (first clean session with real fills = the bar for any live day);
-   ORB paper with the target resting limit (bar ≤ 5 bps); TOM paper entry at the close. Daily brief at 20:10 UTC.
-2. ORB live: **owner GO** on Wednesday only if the 9/30 paper parity holds (fills match the BT book, exits ≤ 5 bps).
-3. HOD: forward read at 100 paper fills, buckets 1.5–3 % and ≥ 3 % separately; no more filter cells on this
-   population; next HOD frame = a NEW signal definition (ranked ideas list), own PREREG.
-4. TSFM: decided by 1,671 — a GPU fine-tune opens only if the sequence model beats the trees by ≥ 0.03 AUC on both
-   scorings and the achieved precision is within 0.10 of break-even.
-5. Options v3 (Databento, $32 pull running): cell 1,599 verdict when the pull completes (watcher armed).
+## 6. Decisions (act-as-owner, pre-committed)
+1. **9/30:** HOD floored paper session with telemetry (first clean session with real fills = the bar); ORB paper with the
+   target resting limit (bar ≤ 5 bps); TOM paper entry at the close; daily brief 20:10 UTC.
+2. **ORB live:** owner GO on Wednesday only if 9/30 paper parity holds (fills match the BT book, exits ≤ 5 bps).
+3. **HOD:** forward read at 100 paper fills, buckets 1.5–3 % and ≥ 3 % separately; the +0.10 % limit read from the
+   ledger; NO more filter/exit/add cells on this population. Next HOD frame = a NEW signal definition with gross edge,
+   one cell per day from `research/ideas_web/UNTESTED_20260929.md`, own PREREG.
+4. **TSFM / GPU fine-tune:** not started (1,671's clause failed: no sequence model beat the trees by ≥ 0.03 AUC).
+5. **Options v3** ($32 Databento pull, running): cell 1,599 verdict when it completes (watcher armed).
+6. **Research spend:** the day books are execution-limited, not idea-limited. Tomorrow's research hour goes to ORB
+   parity and frequency (the only positive mechanism), not to HOD.
