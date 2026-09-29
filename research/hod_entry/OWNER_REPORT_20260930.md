@@ -11,9 +11,13 @@
 * **Small sleeves that pass on their own bar:** turn-of-month index sleeve (paper, ≈ $85/month at the tested size,
   fires 4 nights a month; first paper entry 9/30 19:52 UTC). Everything else on the ideas web FAILED or is suspended
   (auction imbalance, VIX carry, leveraged flow, EDGAR run-up, sector momentum).
-* **Money 9/29:** live account flat since 14:13 UTC. Live HOD −$132 (TWST/MRNA/NBIL stops −$148, hand-flattens +$16)
-  + CDNA over-exit cover −$92 = **−$224 live**. HOD paper +$15 realized (CONI 25 sh at target) + 87 sh CONI open;
-  TTAN −$17 paper. ORB paper AXTL open (+$170 mark at 18:00 UTC). PENDING: the 20:02 UTC close.
+* **Money 9/29 (closed 20:00 UTC, all accounts flat, service exited normally):** live HOD −$132 (TWST/MRNA/NBIL stops
+  −$148, hand-flattens +$16) + CDNA over-exit cover −$92 = **−$224 live**. HOD paper **−$51**: CONI +$52 (25 sh at
+  target 23.48, 87 sh EOD 23.31), TTAN −$17, AAOI −$25, QMCO −$30, ARXS −$32 — every one armed BEFORE the 1.5 % floor
+  (stop distances 0.8–1.5 %); zero floored fills yet, the first floored session is 9/30. ORB paper AXTL **−$96**
+  (963 sh 3.46 → 3.36 force-close 15:45 ET; it was +$170 at 14:00 ET and gave it back — the 2 R target was never
+  reached, the exit rule held it to the close as designed). One harmless ERROR at 20:00 (AXTL closed twice) → fix
+  committed overnight.
 
 ## 2. Books and the machine (state at boot 9/30 12:30 UTC)
 | book | account | state | what changed 9/29 |
@@ -38,7 +42,7 @@ have a root-cause fix committed. Incident write-up: `docs/hod_live_incident_2026
 | 1,666 | rebuild of the 1,488 pyramid | paired −0.043/−0.044 R, t −5, MDE 0.02 | REFUTED |
 | 1,667 | every causal feature (owner) | daily flat; intraday flat (10 reads t ≥ 2.5, all negative); n_cross = leak | FAIL |
 | 1,668 | post-entry failure detection (owner) | 0/36 rules; classifier AUC 0.63–0.67 oos, cut −0.05..+0.02 R; patterns ≈ 0 | FAIL |
-| 1,669 | fast failures + cut decomposition (owner) | PENDING | PENDING |
+| 1,669 | fast failures + cut decomposition (owner) | stops within 2/5/10 min = 3/12/24 % of stop-outs; fast failure IS predictable at minute 1 (AUC 0.76–0.81 oos, precision 0.4–0.5 at P ≥ 0.7); the cut flips sign between scorings (+0.30 / −0.36 R on the fired subset); 0/96 cells; engulfing 38 % vs 27 % in fast failures but 0 importance beyond price | FAIL (predictable, not tradable — now with numbers) |
 | 1,670 | feature-timing map (owner) | PENDING | PENDING |
 | 1,671 | raw-sequence model vs trees (owner's TSFM question) | PENDING | PENDING |
 | 1,672 | pre-holiday index sleeve (sister of TOM), 2016–2026, 102 events | SPY −17 / −4 bps per event (t −1.4 / −0.2), null percentile 12 / 35, mirror ≈ 0; QQQ and open-exit variants the same | FAIL |
