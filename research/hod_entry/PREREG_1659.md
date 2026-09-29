@@ -23,3 +23,13 @@ Paper session from 2026-09-30 (the HOD paper account; loaded at the 12:30 UTC st
 mechanics are clean AND the owner says so; the 30-fill cost gate continues with today's 10 live fills.
 Not allowed: raising the floor further after reading paper results; any selection of the ≥ 3 % bucket without a
 new PREREG on a fresh sample.
+
+## Amendment 1 (2026-09-29 16:25 UTC, owner's rule) — trade the wide-stop bucket: min_r_pct 3.0 on paper
+Owner: "prefer the 0.04 R cases and trade those … I just gave you a simple rule to improve pnl." Under the
+exploration-tier rule (a research gate is for claims, not capital: positive point estimate + mechanism + bounded
+downside + resolves in a quarter → run at minimum size) the ≥ 3 % bucket qualifies: pooled net +0.049 R (n 1,003,
+41 % win), mechanism = cost fraction and a stop that survives the first pullback, downside $50 per trade, ≈ 20 fills
+per week in the population. The halves disagree (−0.08 / +0.14), which is exactly why it runs on PAPER with the
+counterfactual logger recording the 1.5–3 % band as untaken arms. Rule: `hod_break.min_r_pct: 3.0` from now (restart
+today), TEST/forward read after 100 paper fills: mean net R ≥ +0.03 with the 1.5–3 % counterfactuals ≤ 0 → propose live
+at $50; otherwise back to 1.5.
