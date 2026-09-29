@@ -36,9 +36,20 @@ R2 the money: for each k, with ALL: the cut at FIXED τ ∈ {0.5, 0.6, 0.7, 0.8}
    1,669 decomposition (saved / forgone / cost, break-even precision vs achieved). Both scorings.
 R3 permutation importances (n_repeats 5) of ALL at each k on the scoring half: the top 10 features with family tags.
 
+R4 the ADD (amendment 1, 2026-09-29 20:20 UTC, before any number; owner: "leverage the data… Fable-grade changes"):
+   1,668 showed the post-entry signal is real but a CUT pays the round trip on trades that still carry value. The
+   geometry that should pay is the opposite: ADD when the remainder is likely positive. Second label at each k:
+   T_k = reaches the target after k (before the stop or EOD), same populations, same models (ALL family), same two
+   scorings and placebo. Add rule A(k, τ): at the open of bar fill+k+1, when P(T_k) ≥ τ, τ ∈ {0.5, 0.6, 0.7, 0.8}
+   FIXED, buy one additional unit (same shares as the base), stop = the ORIGINAL stop, target = the original target,
+   7 bps entry cost on the add, the whole position exits as the base does. Book in original-R units, paired vs the
+   base on the whole open-at-k population. Reads: ΔR, iid and day-clustered t, ex-top-5 % ΔR, MDE, share added,
+   the add's own R on the added subset, the dollar exposure at the add (2× the base) and the worst day in R.
+   Variant A′: stop of the added unit at the level − $0.01 (the 1,488 geometry) — reported, not preferred.
+
 ## Pass bar
-A (k, τ, variant) cut ships to paper only if paired ΔR ≥ +0.05 R, t ≥ 2.5, ex-top-5 % ΔR > 0 on BOTH out-of-sample
-scorings, placebo AUC ≤ 0.55. A pass → independent rebuild from this prose. A null reports the map, the break-even vs
+A (k, τ, variant) cut, or an add A(k, τ), ships to paper only if paired ΔR ≥ +0.05 R, t ≥ 2.5, ex-top-5 % ΔR > 0 on
+BOTH out-of-sample scorings, placebo AUC ≤ 0.55. A pass → independent rebuild from this prose. A null reports the map, the break-even vs
 achieved precision at the best k, and the MDE, before any "no lift" sentence.
 
 ## Multiplicity
