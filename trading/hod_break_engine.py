@@ -1318,7 +1318,16 @@ class HodBreakEngine:
         with NO record of ours today is left completely alone — it is the owner's manual position, never touched
         (feedback_owner_manual_trades_untouchable). The stop is read from the candidate's own live_order when
         still available, else today's dry ledger, else entry_price * (1 - params.min_r_pct/100) — never
-        invented from nothing."""
+        invented from nothing.
+
+        Adopted as a FILLED row (order_status 'filled'), never 'pending_new': a pending row is invisible to
+        `sync_positions`'s open-status restore and got re-adopted as a SECOND row on the next boot (2026-09-29
+        CONI: row 394 87sh pending_new never restored -> row 396 112sh re-adopted). `trade_id` is linked into
+        the candidate's `live_order` when one exists so a later fill through `_on_live_fill` updates this row
+        instead of inserting a third one (dedup at ~1693). Dedup is against the DB, not only `self.positions`:
+        if today already has an open row for this symbol+strategy, only the unregistered DIFFERENCE (broker qty
+        minus the row's shares) is merged into it (shares += diff, fill_price = weighted average) — a second row
+        is never inserted. A non-positive difference means the DB is already caught up: adopt nothing."""
         if self._positions_adopted_on_boot:
             return
         self._positions_adopted_on_boot = True
@@ -1328,13 +1337,21 @@ class HodBreakEngine:
             logger.error(f"{self.tag} boot position-adoption: could not list broker positions ({e}) — skipped this boot")
             return
         ledger_stops = self._todays_ledger_stops()
+        today = self.session_date or self._et_now().strftime('%Y-%m-%d')
+        try:
+            open_rows = {r['symbol']: r for r in self.db.get_open_trades(today, strategy=self.STRATEGY_NAME)}
+        except Exception as e:
+            logger.error(f"{self.tag} boot position-adoption: open-trades DB read failed ({e}) — dedup against "
+                        f"self.positions only, a prior unrestored row could be double-adopted")
+            open_rows = {}
         for bp in broker_positions:
             sym = str(bp.get('symbol') or '')
             qty = int(float(bp.get('qty') or 0))
             if not sym or qty <= 0 or sym in self.positions:
                 continue                                  # no symbol, short/flat (never ours to adopt), or already tracked
             cand = self.candidates.get(sym)
-            ours_today = (cand is not None and (cand.live_order is not None or cand.live_filled)) or sym in self.entered_today or sym in ledger_stops
+            existing = open_rows.get(sym)
+            ours_today = (cand is not None and (cand.live_order is not None or cand.live_filled)) or sym in self.entered_today or sym in ledger_stops or existing is not None
             if not ours_today:
                 continue                                   # no record of this symbol today — the owner's manual position, never touch
             entry_px = float(bp.get('avg_entry_price') or 0.0)
@@ -1349,23 +1366,54 @@ class HodBreakEngine:
             target = round(entry_px + self.params.target_r * (entry_px - stop), 2)
             order_ref = str(bp.get('asset_id') or f'adopted-{sym}')
             pattern_data = {'book': self.book, 'entry_mode': 'resting_stop_limit', 'adopted_on_boot': True}
-            trade_id = self._save_pending_trade(sym, qty, entry_px, stop, target, order_ref, pattern_data)
             now_ts = datetime.now(timezone.utc)
-            self.positions[sym] = Position(symbol=sym, trade_id=trade_id, order_id=order_ref, shares=qty,
-                                            limit_price=entry_px, stop=stop, target=target, level=entry_px, submitted_at=now_ts,
-                                            tp_leg_id='', sl_leg_id='', fill_price=entry_px, filled_at=now_ts, status='open',
-                                            client_order_id='', pattern_data=pattern_data)
+            if existing is not None:
+                existing_shares = int(existing.get('shares') or 0)
+                diff = qty - existing_shares
+                if diff <= 0:
+                    logger.info(f"{self.tag} {sym}: broker qty {qty} already accounted for by open DB row "
+                                f"{existing.get('id')} ({existing_shares} sh) — adopting nothing")
+                    continue
+                existing_price = float(existing.get('fill_price') or existing.get('entry_price') or entry_px)
+                shares_out = existing_shares + diff
+                price_out = round((existing_price * existing_shares + entry_px * diff) / shares_out, 4)
+                trade_id = int(existing.get('id'))
+                try:
+                    self.db.update_trade(trade_id, {'shares': shares_out, 'filled_qty': shares_out, 'fill_price': price_out, 'order_status': 'filled'})
+                except Exception as e:
+                    logger.error(f"{self.tag} {sym}: merging {diff} unregistered sh into open row {trade_id} failed: {e}")
+                pd_existing = {}
+                try: pd_existing = json.loads(existing.get('pattern_data') or '{}')
+                except Exception: pass
+                self.positions[sym] = Position(symbol=sym, trade_id=trade_id, order_id=order_ref, shares=shares_out,
+                                                limit_price=price_out, stop=stop, target=target, level=price_out, submitted_at=now_ts,
+                                                tp_leg_id=pd_existing.get('tp_leg_id') or '', sl_leg_id=pd_existing.get('sl_leg_id') or '',
+                                                fill_price=price_out, filled_at=now_ts, status='open', client_order_id='', pattern_data=pattern_data)
+                logger.warning(f"{self.tag} {sym}: ADOPTED {diff} additional sh unregistered at the broker (entry {entry_px:.2f}) — "
+                                f"merged into open row {trade_id}, now {shares_out} sh @ {price_out:.2f}")
+                self._notify(f"{self.tag} ADOPTED {sym} +{diff}sh @ {entry_px:.2f} (merged into open row, now {shares_out}sh)")
+                watch_qty, watch_price = shares_out, price_out
+            else:
+                trade_id = self._save_pending_trade(sym, qty, entry_px, stop, target, order_ref, pattern_data,
+                                                    order_status='filled', fill_price=entry_px, filled_at=now_ts.isoformat())
+                self.positions[sym] = Position(symbol=sym, trade_id=trade_id, order_id=order_ref, shares=qty,
+                                                limit_price=entry_px, stop=stop, target=target, level=entry_px, submitted_at=now_ts,
+                                                tp_leg_id='', sl_leg_id='', fill_price=entry_px, filled_at=now_ts, status='open',
+                                                client_order_id='', pattern_data=pattern_data)
+                logger.warning(f"{self.tag} {sym}: ADOPTED {qty} sh unregistered broker position on boot (entry {entry_px:.2f} "
+                                f"stop {stop:.2f}) — filled but never registered by a prior process")
+                self._notify(f"{self.tag} ADOPTED {sym} {qty}sh @ {entry_px:.2f} (unregistered position found on boot)")
+                watch_qty, watch_price = qty, entry_px
+            if cand is not None and cand.live_order is not None:
+                cand.live_order['trade_id'] = trade_id
             if self.stop_monitor is not None:
                 try:
-                    self.stop_monitor.add_watch(symbol=sym, stop_price=stop, shares=qty, tp_leg_id='', sl_leg_id='',
-                                                trade_db_id=trade_id, entry_price=entry_px, risk_per_share=entry_px - stop,
+                    self.stop_monitor.add_watch(symbol=sym, stop_price=stop, shares=watch_qty, tp_leg_id='', sl_leg_id='',
+                                                trade_db_id=trade_id, entry_price=watch_price, risk_per_share=watch_price - stop,
                                                 strategy=self.STRATEGY_NAME)
                 except Exception as e:
                     logger.error(f"{self.tag} {sym}: StopMonitor.add_watch failed for a boot-adopted position — UNMANAGED: {e}")
                     self._notify(f"{self.tag} ERROR add_watch {sym} — UNMANAGED boot-adopted position: {e}")
-            logger.warning(f"{self.tag} {sym}: ADOPTED {qty} sh unregistered broker position on boot (entry {entry_px:.2f} "
-                            f"stop {stop:.2f}) — filled but never registered by a prior process")
-            self._notify(f"{self.tag} ADOPTED {sym} {qty}sh @ {entry_px:.2f} (unregistered position found on boot)")
             self.entered_today.add(sym); self.seen_today.add(sym)
 
     def _arm_live_order(self, cand: Candidate, arm: dict) -> None:
@@ -1520,7 +1568,7 @@ class HodBreakEngine:
         truth here — re-queried on every cap check so a close is visible immediately, not on a stale poll."""
         today = self.session_date or self._et_now().strftime('%Y-%m-%d')
         try:
-            rows = self.db.get_open_trades(today, strategy=STRATEGY_NAME)
+            rows = self.db.get_open_trades(today, strategy=self.STRATEGY_NAME)
             db_open = {r['symbol'] for r in rows}
         except Exception as e:
             logger.error(f"{self.tag} open-position DB query failed ({e}) — falling back to in-memory count only"); db_open = set()
@@ -1871,19 +1919,30 @@ class HodBreakEngine:
                 'cap': self.params.cap, 'target_r': self.params.target_r, 'tp_leg_id': tp_id, 'sl_leg_id': sl_id,
                 'quote_bid': bid, 'quote_ask': ask, 'limit': limit, 'target': target, 'client_order_id': coid}
 
-    def _save_pending_trade(self, sym, shares, limit, stop, target, order_id, pattern_data: dict) -> Optional[int]:
+    def _save_pending_trade(self, sym, shares, limit, stop, target, order_id, pattern_data: dict,
+                             order_status: str = 'pending_new', fill_price=None, filled_at=None) -> Optional[int]:
+        """Insert a trade row. Default shape is an unfilled resting order (order_status 'pending_new', fill_price/
+        filled_at unset) — pass `order_status='filled'` (with `fill_price`/`filled_at`) for a row that is already
+        known filled at insert time (boot adoption of an unregistered broker position, 2026-09-29 CONI/TTAN: the
+        old always-'pending_new' insert never got restored by `sync_positions` on the next boot and was re-adopted
+        as a SECOND row). `filled_qty` is set separately via `update_trade` right after insert (save_trade's INSERT
+        does not carry that column — matches the existing `_confirm_fill` pattern)."""
         rec = {
             'trade_date': self.session_date or self._et_now().strftime('%Y-%m-%d'), 'symbol': sym, 'side': 'buy', 'entry_price': limit,
             'stop_loss_price': stop, 'take_profit_price': target, 'shares': shares, 'risk_per_share': limit - stop, 'total_risk': (limit - stop) * shares,
-            'risk_reward_ratio': self.params.target_r, 'order_id': order_id, 'order_status': 'pending_new', 'fill_price': None, 'filled_at': None,
+            'risk_reward_ratio': self.params.target_r, 'order_id': order_id, 'order_status': order_status, 'fill_price': fill_price, 'filled_at': filled_at,
             'exit_price': None, 'exit_reason': None, 'exited_at': None, 'pnl': None, 'pnl_pct': None, 'strategy': self.STRATEGY_NAME,
             'account': 'paper' if getattr(self.alpaca, 'is_paper', True) else 'live',
             'pattern_data': json.dumps(pattern_data),
         }
         try:
-            return int(self.db.save_trade(rec))
+            trade_id = int(self.db.save_trade(rec))
         except Exception as e:
             logger.error(f"{self.tag} {sym}: save_trade failed ({e}) — order {order_id} is NOT in the DB"); self._notify(f"{self.tag} ERROR DB {sym}: {e}"); return None
+        if order_status == 'filled':
+            try: self.db.update_trade(trade_id, {'filled_qty': shares})
+            except Exception as e: logger.error(f"{self.tag} {sym}: filled_qty update failed ({e})")
+        return trade_id
 
     def _update_pattern_data(self, pos: Position, **kv) -> None:
         pos.pattern_data.update(kv)
@@ -2108,7 +2167,7 @@ class HodBreakEngine:
         if self.stop_monitor is None:
             return
         try:
-            events = self.stop_monitor.drain_exit_events(strategy=STRATEGY_NAME)
+            events = self.stop_monitor.drain_exit_events(strategy=self.STRATEGY_NAME)
         except Exception as e:
             logger.error(f"{self.tag} drain_exit_events failed: {e}"); return
         for ev in events:
@@ -2147,7 +2206,7 @@ class HodBreakEngine:
         if now - getattr(self, '_last_phantom_sync', 0.0) < self.PHANTOM_SYNC_INTERVAL_S:
             return
         self._last_phantom_sync = now
-        watched = self.stop_monitor.watched_symbols_for(STRATEGY_NAME)
+        watched = self.stop_monitor.watched_symbols_for(self.STRATEGY_NAME)
         if not watched:
             return
         try:
@@ -2321,8 +2380,10 @@ class HodBreakEngine:
     def reconcile_pending_exits(self, days: int = 7) -> int:
         """Rows left `exit_pending_verification` (exit price unknown, broker held fewer shares, dead-man flat): read the
         exit orders named in pattern_data from REST and write the truth — closed with P&L when the legs/close sold every
-        share, back to open (re-adopted) when the broker still holds them. Without this the kill rails never see those
-        losses."""
+        share, restored to open (order_status 'filled', WARNING only) when the broker STILL HOLDS at least the row's
+        remaining open shares, ERROR + Telegram only when the broker holds fewer shares than the row and the exit legs
+        do not account for the rest. Without this the kill rails never see those losses — and (2026-09-29 CONI) a
+        broker that still held the full position was wrongly declared UNRECONCILED with no broker-qty check at all."""
         path = getattr(self.db, '_trades_path', None)
         if not path: return 0
         try:
@@ -2333,6 +2394,9 @@ class HodBreakEngine:
             finally: conn.close()
         except Exception as e:
             logger.error(f"{self.tag} reconcile: DB read failed ({e})"); return 0
+        broker: Optional[Dict[str, int]] = None
+        try: broker = {p.get('symbol'): int(float(p.get('qty') or 0)) for p in (self.alpaca.get_open_positions() or [])}
+        except Exception as e: logger.warning(f"{self.tag} reconcile: broker positions unavailable ({e}) — cannot confirm still-held shares, ERROR path only")
         n = 0
         for tid, sym, shares, fill, entry, pdj, tdate in rows:
             try: pd_ = json.loads(pdj or '{}')
@@ -2346,9 +2410,18 @@ class HodBreakEngine:
                 leg, st = self._leg_status(pos, leg, reason, rest=True)
                 if st and int(st.get('filled_qty') or 0) > 0: self._book_leg_fill(pos, leg, st, reason)
             if sym in self.positions:
-                self.positions.pop(sym)
-                logger.error(f"{self.tag} reconcile {sym} ({tdate}): {pos.closed_qty}/{pos.shares} shares accounted for by its exit orders — still exit_pending_verification, needs a human look")
-                self._notify(f"{self.tag} UNRECONCILED {sym} {tdate}: {pos.closed_qty}/{pos.shares} shares sold by our orders")
+                broker_qty = broker.get(sym, 0) if broker is not None else None
+                if broker_qty is not None and pos.open_qty > 0 and broker_qty >= pos.open_qty:
+                    try: self.db.update_trade(tid, {'order_status': 'filled'})
+                    except Exception as e: logger.error(f"{self.tag} reconcile {sym} ({tdate}): DB restore-to-open failed: {e}")
+                    logger.warning(f"{self.tag} reconcile {sym} ({tdate}): broker still holds {broker_qty} sh (>= {pos.open_qty} open) "
+                                    f"— restored to open, not unreconciled")
+                    n += 1
+                else:
+                    self.positions.pop(sym)
+                    logger.error(f"{self.tag} reconcile {sym} ({tdate}): {pos.closed_qty}/{pos.shares} shares accounted for by its exit orders "
+                                f"(broker holds {'unknown' if broker_qty is None else broker_qty}) — still exit_pending_verification, needs a human look")
+                    self._notify(f"{self.tag} UNRECONCILED {sym} {tdate}: {pos.closed_qty}/{pos.shares} shares sold by our orders")
             else:
                 n += 1
         if rows: logger.info(f"{self.tag} reconcile: {n} of {len(rows)} exit_pending_verification rows resolved")
@@ -2415,7 +2488,7 @@ class HodBreakEngine:
     def sync_positions(self) -> int:
         """Rebuild pending/open positions from the trades DB for today (restart-safe)."""
         self._roll_session(); today = self.session_date; n = 0
-        try: rows = self.db.get_open_trades(today, strategy=STRATEGY_NAME)
+        try: rows = self.db.get_open_trades(today, strategy=self.STRATEGY_NAME)
         except Exception as e:
             logger.error(f"{self.tag} sync_positions: DB read failed ({e})"); return 0
         broker: Optional[Dict[str, int]] = None
@@ -2440,10 +2513,32 @@ class HodBreakEngine:
             elif status in _OPEN_STATUSES:
                 pos.status = 'open'
                 if broker is not None and broker.get(sym, 0) < pos.open_qty:
-                    logger.warning(f"{self.tag} sync: {sym} open in DB ({r.get('shares')} sh) but broker holds {broker.get(sym, 0)} — exit pending verification")
+                    acct = self._account_number_cached() or ('paper' if getattr(self.alpaca, 'is_paper', True) else 'live')
+                    logger.warning(f"{self.tag} sync: {sym} open in DB ({r.get('shares')} sh) but broker holds {broker.get(sym, 0)} "
+                                    f"on account {acct} — exit pending verification")
                     try: self.db.update_trade(r['id'], {'order_status': 'exit_pending_verification'})
                     except Exception: pass
                     continue
+                if not pos.tp_leg_id and not pos.sl_leg_id:
+                    # Restored open with no broker-side exit legs (an adopted position, or a fill whose OCO
+                    # placement failed): nothing at the broker protects this row. Register a StopMonitor watch
+                    # exactly as `_adopt_unregistered_positions_on_boot` does — else a restart silently drops
+                    # the stop. Watch `pos.open_qty` (shares minus already-closed partials), not raw shares.
+                    acct = self._account_number_cached() or ('paper' if getattr(self.alpaca, 'is_paper', True) else 'live')
+                    if self.stop_monitor is None or not pos.stop:
+                        why = 'no StopMonitor' if self.stop_monitor is None else f'no stop price ({pos.stop})'
+                        logger.error(f"{self.tag} sync: {sym} restored UNMANAGED — no broker exit legs and {why} "
+                                        f"to watch it (account {acct})")
+                        self._notify(f"{self.tag} ERROR {sym} restored UNMANAGED — no exit legs, no stop watch (account {acct})")
+                    else:
+                        try:
+                            self.stop_monitor.add_watch(symbol=sym, stop_price=pos.stop, shares=pos.open_qty, tp_leg_id='', sl_leg_id='',
+                                                        trade_db_id=pos.trade_id, entry_price=pos.limit_price, risk_per_share=pos.limit_price - pos.stop,
+                                                        strategy=self.STRATEGY_NAME)
+                            logger.warning(f"{self.tag} sync: {sym} restored without broker exit legs — StopMonitor manages the stop (account {acct})")
+                        except Exception as e:
+                            logger.error(f"{self.tag} sync: {sym} restored UNMANAGED — StopMonitor.add_watch failed: {e}")
+                            self._notify(f"{self.tag} ERROR {sym} restored UNMANAGED — add_watch failed: {e}")
             else:
                 continue
             self.positions[sym] = pos; self.entered_today.add(sym); self.seen_today.add(sym); n += 1
