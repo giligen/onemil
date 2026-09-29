@@ -56,3 +56,10 @@ training-half ΔR of Part B as a result.
 `research/hod_entry/RESULT_1668.md` (≤ 150 lines: coverage first, Part A table of every rule × horizon with both
 halves, Part B table, verdicts, adequacy review), `1668_reads.csv`, `1668_per_fill.csv` (fill_id, split, base exit,
 per-rule fire flags at each k, P(stop) at k = 5/10), `1668_failure.py`, `1668_failure.log`. The agent returns ≤ 150 words.
+
+## Amendment 1 (2026-09-29 18:52 UTC, before any number; owner's question on price movement vs volume)
+Add rule S9 "effort without result": at minute k, the high since the fill has not exceeded fill + 0.25 × (fill − stop)
+AND the mean volume of bars fill+1..fill+k ≥ 1.5 × v(break bar) — heavy volume that produced no upward progress (buying
+absorbed). S8 is its mirror (no progress on thin volume). Part B gains the continuous feature "progress per unit volume"
+= (close(fill+k) − fill) / (fill − stop) ÷ (Σ v(fill+1..fill+k) / v(break bar)). Multiplicity: Part A becomes 9 × 4 × 2
+= 72 paired reads. Thresholds 0.25 R and 1.5× are fixed here and never tuned.
