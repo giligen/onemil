@@ -345,6 +345,15 @@ exit:
     enabled: false
     frac: 0.40                  # FROZEN
     level_r: 3.0                # FROZEN
+  # Target-resting-limit (2026-09-29, docs/orb_target_limit_spec_20260929.md).
+  # Rest the touchgo target as a real broker-side DAY limit (reprice the
+  # entry bracket's TP leg) instead of chasing it with a marketable limit —
+  # measured 68.8 bps mean worse than the target on 39 live fills
+  # (research/exec_quality/REPORT_20260928.md §4). Default False = byte-
+  # identical legacy chase-and-sell behavior. ONE paper session with this ON
+  # (grep [ORB TP], bar <= 5bps mean fill-vs-limit) required before live —
+  # see the spec's Rollout section. trading/orb_target_limit.py.
+  target_resting_limit: false
 
 # Safety-net bracket stop-loss sent to Alpaca (wide, backup if service crashes).
 # Real stop is monitored client-side via StopMonitor; this fires only in disaster cases.

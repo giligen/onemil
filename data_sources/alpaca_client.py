@@ -1757,13 +1757,20 @@ class AlpacaClient:
             logger.error(f"Failed to replace order stop price {order_id}: {e}")
             raise AlpacaAPIError(f"Failed to replace order stop price {order_id}: {e}")
 
-    def replace_order_limit_price(self, order_id: str, new_limit_price: float) -> Dict:
+    def replace_order_limit_price(self, order_id: str, new_limit_price: float,
+                                   client_order_id: Optional[str] = None) -> Dict:
         """
-        Replace a child take-profit order's limit price (for gap-fill adjustment).
+        Replace a child take-profit order's limit price (for gap-fill adjustment,
+        or ORB's exit.target_resting_limit rule — trading/orb_target_limit.py).
 
         Args:
             order_id: Alpaca order ID of the TP leg
             new_limit_price: New limit price
+            client_order_id: Optional caller-chosen client_order_id for the
+                REPLACEMENT order. Alpaca's replace mints a brand-new order id
+                (and a random client_order_id) by default — pass this to keep
+                a deterministic, greppable id (e.g. ORB's `orb-tp-<sym>-<yyyymmdd>`
+                convention) instead of losing addressability on every replace.
 
         Returns:
             Dict with order id and status
@@ -1773,7 +1780,10 @@ class AlpacaClient:
         """
         try:
             from alpaca.trading.requests import ReplaceOrderRequest
-            request = ReplaceOrderRequest(limit_price=round(new_limit_price, 2))
+            kwargs = {'limit_price': round(new_limit_price, 2)}
+            if client_order_id:
+                kwargs['client_order_id'] = client_order_id
+            request = ReplaceOrderRequest(**kwargs)
             order = self._call_with_timeout(
                 lambda: self.trading_client.replace_order_by_id(order_id, request),
                 f"replace_order_limit_price({order_id}, ${new_limit_price:.2f})"

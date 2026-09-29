@@ -137,6 +137,17 @@ class); pool-level Benzinga lag audit; news-boost frequency by class.
   failed breakout; no profit targets because the P&L is right-tail.
 - **EVIDENCE**: static-lock Pareto frontier (50+ variants); touchgo
   +$27K OOS, WR 47.8→52.1%; breakout-bar re-key fixed BT↔live parity.
+- **FILL RULE (2026-09-29, `exit.target_resting_limit`, default OFF)**: the
+  touchgo target fills at the touch by a resting limit — BT and live share
+  the rule; obtainability = the tape trades at or through the limit while
+  our order has queue priority. Mechanism: the entry bracket's take-profit
+  leg (submitted at an unreachable 300%-of-entry safety price) is repriced
+  to the real touchgo target the moment Rule M/D decides to exit, instead of
+  cancelling it and chasing with a marketable limit sell. Evidence: 39 live
+  target exits (tag_bb) filled 68.8 bps mean worse than the target price, no
+  fill ever beat it (`research/exec_quality/REPORT_20260928.md` §4).
+  Implementation: `trading/orb_target_limit.py`, spec
+  `docs/orb_target_limit_spec_20260929.md`.
 
 ### L9. Operations & self-validation
 - **RULE**: every day is adjudicated (green streak = ramp gate); every

@@ -34,6 +34,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from data_sources.alpaca_client import AlpacaClient
 from trading.exit_reasons import ExitBranch, ExitReason
+from trading.orb_target_limit import CANCEL_ACK_WAIT_S, CancelOutcome, cancel_resting_target
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +151,15 @@ class WatchEntry:
     # from the latest quote. Consumed (set to None) at exit-submit time.
     # Used by ORB touchgo filter to exit at the helper-computed price.
     force_exit_limit_price: Optional[float] = None
+    # ORB target-resting-limit (2026-09-29, docs/orb_target_limit_spec_20260929.md,
+    # trading/orb_target_limit.py). False for every non-ORB watch and for ORB
+    # with orb.yaml exit.target_resting_limit OFF — the cancel-before-stop
+    # race check in _execute_stop_exit is unreachable then, which is what
+    # makes the flag-OFF behaviour byte-identical. Set via mark_target_resting
+    # (ORBEngine calls it right after a successful broker-side reprice).
+    target_resting: bool = False
+    target_price: float = 0.0
+    target_rested_at: float = 0.0  # time.time() epoch
     # ORB winner-stack scale-out (2026-08-22, flag exit.scale_out — see
     # docs/orb_winner_stack_design_aug2026.md §2 + trading/orb_winner_stack).
     # Armed by the ENGINE (arm_scale_out) only after the touchgo bars 0/1
@@ -1498,6 +1508,159 @@ class StopMonitor:
         ExitReason.STAGE_REJECT_STRUCTURE.value,
         ExitReason.STAGE_FORCE_FLAT.value,
     })
+
+    def mark_target_resting(
+        self, symbol: str, tp_leg_id: str, target_price: float,
+        rested_at: Optional[datetime] = None,
+    ) -> bool:
+        """Sync a WatchEntry's TP-leg bookkeeping after ORBEngine reprices
+        the bracket TP leg to a real touchgo target (rule 1/4,
+        trading/orb_target_limit.py `reprice_target`).
+
+        The reprice itself happens through ORBEngine's own Alpaca client
+        call (trading/orb_engine.py `_rest_touchgo_target`) — StopMonitor
+        only learns the NEW leg id here. Without this, `_execute_stop_exit`'s
+        cancel-before-stop step (rule 2) would target the OLD (now dead,
+        replaced) order id on a stop trigger, and `book_target_rested_fill`
+        (rule 3) would poll a dead id too.
+
+        Returns False (with WARNING) if no watch is active for the symbol —
+        e.g. the position exited in the race between the broker ack and this
+        call. The caller (ORBEngine) logs an ERROR of its own in that case
+        since the broker-side reprice already happened and can't be undone
+        from here.
+        """
+        with self._watch_lock:
+            watch = self._watches.get(symbol)
+            if watch is None:
+                logger.warning(
+                    f"StopMonitor: mark_target_resting({symbol}) — no "
+                    f"active watch; the position may have exited already"
+                )
+                return False
+            watch.tp_leg_id = tp_leg_id
+            watch.target_resting = True
+            watch.target_price = target_price
+            watch.target_rested_at = (
+                rested_at.timestamp() if rested_at is not None else time_mod.time()
+            )
+        return True
+
+    def book_target_rested_fill(
+        self, symbol: str, filled_qty: int, fill_price: float,
+        limit_price: float, rested_at: Optional[datetime],
+    ) -> bool:
+        """Book a full close via the resting touchgo target filling on its
+        own (rule 3, non-race path — ORBEngine's order-stream poll detected
+        the fill; no stop ever triggered so `_execute_stop_exit` never ran).
+
+        Queues the SAME StopExitEvent shape every other ORB exit uses, so
+        `ORBEngine._handle_exit_event` — via `drain_exit_events` — is the
+        ONE place that writes the DB row and fires Telegram for every ORB
+        exit reason, touchgo target included. Retires the watch (a symbol
+        that's already flat must never also fire a stop order).
+
+        Returns False (with WARNING) if no watch is active — the caller logs
+        an ERROR and leaves reconciliation to the next sync_positions pass.
+        """
+        with self._watch_lock:
+            watch = self._watches.get(symbol)
+            if watch is None:
+                logger.warning(
+                    f"StopMonitor: book_target_rested_fill({symbol}) — no "
+                    f"active watch (already retired by a race?); DB write "
+                    f"skipped, sync_positions will reconcile"
+                )
+                return False
+            trade_db_id = watch.trade_db_id
+            strategy = watch.strategy
+            stop_price = watch.stop_price
+            self._watches.pop(symbol, None)
+        logger.info(
+            f"[ORB TP] {symbol} target FILLED (order stream) — {filled_qty}sh "
+            f"@ ${fill_price:.2f} (limit ${limit_price:.2f})"
+        )
+        self._exit_events.put(StopExitEvent(
+            symbol=symbol,
+            stop_price=stop_price,
+            exit_price=fill_price,
+            shares=filled_qty,
+            order_id='',
+            exit_reason=ExitReason.TARGET_RESTED.value,
+            exit_branch=ExitBranch.LIMIT.value,
+            trade_db_id=trade_db_id,
+            submitted_at=time_mod.time(),
+            pricing_method='target_rested_limit',
+            filled_qty=filled_qty,
+            exit_limit_price=limit_price,
+            strategy=strategy,
+            confirmed=True,
+        ))
+        with self._exit_lock:
+            self._exit_in_progress[symbol] = False
+        return True
+
+    def book_target_partial_fill(
+        self, symbol: str, filled_qty: int, fill_price: float, limit_price: float,
+    ) -> bool:
+        """Book a PARTIAL fill of the resting touchgo target (rule 6,
+        2026-09-29 follow-up fix): some shares sold at the target, the
+        remainder is STILL LIVE and still needs its stop — this must never
+        close the row.
+
+        Mirrors `_book_scale_fill`'s mechanism exactly (reduce watch.shares,
+        queue a StopExitEvent the engine routes to a scale-style DB branch
+        that leaves the row open) but emits `TARGET_RESTED_PARTIAL`, not
+        `SCALE_OUT` — a target partial must never be confused with the
+        deliberate 3R scale-out mechanism in the exec-quality report, even
+        though both are represented via the SAME trades-table
+        scale_qty/scale_price/scale_pnl/scaled_at columns (the one existing
+        partial-exit representation in this schema).
+
+        Does NOT retire the watch and does NOT touch `_exit_in_progress` —
+        the caller (the cancel-before-stop hook in `_execute_stop_exit`) is
+        still mid-exit for the remainder and owns that lifecycle.
+        """
+        with self._watch_lock:
+            watch = self._watches.get(symbol)
+            if watch is None:
+                logger.warning(
+                    f"StopMonitor: book_target_partial_fill({symbol}) — no "
+                    f"active watch; partial fill NOT booked — "
+                    f"sync_positions must reconcile the broker qty"
+                )
+                return False
+            sold = min(filled_qty, watch.shares)
+            if sold < filled_qty:
+                logger.error(
+                    f"StopMonitor: {symbol} target partial fill {filled_qty}sh "
+                    f"exceeds watch shares {watch.shares} — clamping (state drift)"
+                )
+            watch.shares -= sold
+            trade_db_id = watch.trade_db_id
+            strategy = watch.strategy
+            remaining = watch.shares
+        logger.warning(
+            f"[ORB TP] {symbol} target PARTIAL fill — {sold}sh @ "
+            f"${fill_price:.2f} (limit ${limit_price:.2f}); {remaining}sh "
+            f"remain under the stop"
+        )
+        self._exit_events.put(StopExitEvent(
+            symbol=symbol,
+            stop_price=0.0,             # not a stop exit
+            exit_price=fill_price,
+            shares=sold,
+            order_id='',
+            exit_reason=ExitReason.TARGET_RESTED_PARTIAL.value,
+            trade_db_id=trade_db_id,
+            submitted_at=time_mod.time(),
+            pricing_method='target_rested_limit',
+            filled_qty=sold,
+            exit_limit_price=limit_price,
+            strategy=strategy,
+            confirmed=True,
+        ))
+        return True
 
     def force_exit(
         self,
@@ -4122,6 +4285,69 @@ class StopMonitor:
                 return
             self._exit_in_progress[symbol] = True
             self._exit_started_at[symbol] = time_mod.time()
+
+        # ORB target-resting-limit (2026-09-29, rule 2): a touchgo target may
+        # currently be resting as a real broker-side limit (watch.target_resting,
+        # set by mark_target_resting). Cancel it FIRST, ack-wait bounded to
+        # CANCEL_ACK_WAIT_S, and resolve the "already filled" race before any
+        # stop-exit pricing/submission logic runs. Unreachable for every
+        # non-ORB watch and for ORB with the flag OFF (target_resting defaults
+        # False) — behaviour is byte-identical then.
+        if getattr(watch, 'target_resting', False):
+            loop0 = asyncio.get_event_loop()
+            client0 = self._client_for(watch.strategy)
+            try:
+                cancel_result = await asyncio.wait_for(
+                    loop0.run_in_executor(
+                        None, cancel_resting_target, client0, symbol,
+                        watch.tp_leg_id, exit_reason, watch.shares,
+                    ),
+                    timeout=CANCEL_ACK_WAIT_S,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    f"StopMonitor: {symbol} target cancel did not ack within "
+                    f"{CANCEL_ACK_WAIT_S}s — proceeding with the stop exit "
+                    f"unconfirmed (belt-and-suspenders: worst case the bulk "
+                    f"cancel-bracket-legs step below retries it)"
+                )
+                cancel_result = None
+            watch.target_resting = False
+            if cancel_result is not None and cancel_result.outcome == CancelOutcome.ALREADY_FILLED:
+                self._emit_stop_exit_event(
+                    symbol, watch, cancel_result.fill_price,
+                    qty=cancel_result.filled_qty or watch.shares,
+                    order_id=watch.tp_leg_id,
+                    exit_reason=ExitReason.TARGET_RESTED.value,
+                    exit_branch=ExitBranch.LIMIT.value,
+                    trigger_price=trigger_price, pricing_method='target_rested_limit',
+                    limit_price=watch.target_price, bid=0.0, ask=0.0,
+                    bid_size=0, ask_size=0,
+                )
+                return
+            if cancel_result is not None and cancel_result.outcome == CancelOutcome.PARTIALLY_FILLED:
+                # rule 6 money-correctness fix (2026-09-29): book ONLY the
+                # filled portion at the target; watch.shares (mutated in
+                # place by book_target_partial_fill, same WatchEntry object)
+                # shrinks to the remainder BEFORE the stop-exit logic below
+                # reads it — never a full close on a partial fill.
+                booked = self.book_target_partial_fill(
+                    symbol, cancel_result.filled_qty, cancel_result.fill_price,
+                    watch.target_price,
+                )
+                if not booked:
+                    logger.error(
+                        f"StopMonitor: {symbol} book_target_partial_fill "
+                        f"failed for a cancel-race partial "
+                        f"({cancel_result.filled_qty}sh @ "
+                        f"${cancel_result.fill_price:.2f}) — watch.shares "
+                        f"NOT reduced; the stop exit below will oversell "
+                        f"unless sync_positions reconciles the broker qty "
+                        f"first. Investigate immediately."
+                    )
+                # Falls through — the stop-exit logic below now runs for
+                # watch.shares (the reduced remainder), exactly as an
+                # ordinary stop trigger would.
 
         loop = asyncio.get_event_loop()
         # Route order-submission calls to the correct Alpaca account when

@@ -72,6 +72,10 @@ from trading.orb_touchgo_filter import (
     load_touchgo_config,
 )
 from trading.exit_reasons import ExitReason
+from trading.orb_target_limit import (
+    RestOutcome, cancel_resting_target, reconcile_orphan_targets, reprice_target,
+    target_client_order_id,
+)
 from trading import touchgo_audit as _tg_audit
 from trading import live_guardrail
 from trading.orphan_reconciler import (
@@ -280,6 +284,22 @@ class OpenPosition:
     # scale submission (P1-1 race): (reason, exit_price, detail) retried on
     # the next bar event instead of silently losing the cut.
     touchgo_retry: Optional[tuple] = None
+    # --- ORB target-resting-limit (2026-09-29) -------------------------
+    # docs/orb_target_limit_spec_20260929.md, trading/orb_target_limit.py.
+    # target_resting=True once a touchgo target has been rested as a real
+    # broker-side limit (the entry bracket's TP leg repriced from the
+    # unreachable safety price). tp_leg_id is repointed to the NEW leg id on
+    # every successful reprice (Alpaca replace mints a fresh order id).
+    target_resting: bool = False
+    target_price: float = 0.0
+    target_rested_at: Optional[datetime] = None
+    target_last_replace_ts: float = 0.0
+    # Delta-tracking for _poll_target_fills (rule 6, 2026-09-29 follow-up):
+    # cumulative filled_qty already booked (as a partial or the final full
+    # close) off this resting leg, so a repeated poll on a still-resting,
+    # still-partially-filled order books only the NEW shares each tick —
+    # mirrors last_observed_filled_qty's role on the entry side.
+    target_last_booked_qty: int = 0
 
 
 class ORBEngine:
@@ -362,6 +382,12 @@ class ORBEngine:
         uni = cfg.get('universe', {})
         entry_cfg = cfg.get('entry', {})
         exit_cfg = cfg.get('exit', {})
+        # ORB target-resting-limit (2026-09-29, docs/orb_target_limit_spec_20260929.md).
+        # Default False — byte-identical to today's chase-and-sell touchgo
+        # exit when off (parity enforced by tests/test_orb_target_limit.py).
+        self.target_resting_limit_enabled = bool(
+            exit_cfg.get('target_resting_limit', False)
+        )
         sizing_cfg = cfg.get('sizing', {})
         risk_cfg = cfg.get('risk', {})
         dedup_cfg = cfg.get('dedup', {})
@@ -1999,6 +2025,55 @@ class ORBEngine:
         except Exception as e:  # diagnostic must never break the trade path
             logger.debug(f"ORB: touchgo audit record failed for {pos.symbol}: {e}")
 
+    def _rest_touchgo_target(self, pos: 'OpenPosition', target_price: float,
+                              reason: str, detail: str) -> bool:
+        """Rest (or move) the touchgo target as a real broker-side limit
+        instead of chasing it with a marketable sell (rules 1 + 4,
+        docs/orb_target_limit_spec_20260929.md).
+
+        Reprices the entry bracket's TP leg (trading/orb_target_limit.py
+        `reprice_target`) — never a second resting sell for one position.
+
+        Returns True iff the resting order is now live at `target_price`;
+        the caller (`_fire_touchgo_exit`) must NOT also call `force_exit` in
+        that case. False means the reprice did not happen (no leg, rate
+        limited, or the broker call failed) — already logged at WARNING by
+        `reprice_target` — and the caller falls back to today's chase path.
+        """
+        result = reprice_target(
+            self.alpaca, pos.symbol, pos.tp_leg_id, target_price,
+            last_replace_ts=pos.target_last_replace_ts,
+            force_first=not pos.target_resting,
+        )
+        if result.outcome != RestOutcome.RESTED:
+            return False
+        old_leg = pos.tp_leg_id
+        pos.tp_leg_id = result.new_leg_id
+        pos.target_resting = True
+        pos.target_price = target_price
+        pos.target_rested_at = datetime.now(timezone.utc)
+        pos.target_last_replace_ts = time.time()
+        if self.stop_monitor is not None:
+            try:
+                self.stop_monitor.mark_target_resting(
+                    pos.symbol, result.new_leg_id, target_price,
+                    rested_at=pos.target_rested_at,
+                )
+            except Exception as e:
+                logger.error(
+                    f"ORB: {pos.symbol} stop_monitor.mark_target_resting "
+                    f"failed after a successful broker reprice "
+                    f"({old_leg[:8]} -> {result.new_leg_id[:8]}): {e} — "
+                    f"StopMonitor's watch still points at the OLD leg id; a "
+                    f"stop trigger may try to cancel a dead order. "
+                    f"Investigate before the next session."
+                )
+        logger.info(
+            f"[ORB TP] rested {pos.symbol} qty {pos.shares} @ "
+            f"${target_price:.2f} (touchgo {reason}, {detail})"
+        )
+        return True
+
     def _fire_touchgo_exit(self, pos: 'OpenPosition', reason: str,
                             exit_price: float, detail: str) -> None:
         """Route a touchgo exit through StopMonitor.force_exit + Telegram alert.
@@ -2006,7 +2081,22 @@ class ORBEngine:
         reason: 'tag_bb' or 'tag_b1'.
         exit_price: target limit price from the shared helper.
         detail: human-readable diagnostic string (e.g., 'bb_close_pos=0.32').
+
+        ORB target-resting-limit (exit.target_resting_limit, default False):
+        when enabled, this rests exit_price as a real broker-side limit
+        (_rest_touchgo_target) instead of chasing it — see
+        docs/orb_target_limit_spec_20260929.md. On any failure to rest
+        (no leg / rate limited / broker error, all WARNING-logged by
+        reprice_target), falls back to the unchanged chase-and-sell path
+        below so a target is never silently lost.
         """
+        if getattr(self, 'target_resting_limit_enabled', False):
+            if self._rest_touchgo_target(pos, exit_price, reason, detail):
+                return  # resting instead of chasing — never both
+            logger.warning(
+                f"ORB: {pos.symbol} touchgo {reason} target-resting-limit "
+                f"did not rest — falling back to the chase-and-sell path"
+            )
         # Estimate $-impact vs holding to full -1R stop, for Telegram message.
         full_stop_pnl = (pos.stop_price - pos.entry_price) * pos.shares
         est_exit_pnl = (exit_price - pos.entry_price) * pos.shares
@@ -4818,6 +4908,10 @@ class ORBEngine:
         if self.stop_monitor is None:
             return []
         exited: List[str] = []
+        # Poll BEFORE draining: a fill detected this tick must queue and
+        # drain in the SAME call, not wait a full tick for the next pass.
+        if getattr(self, 'target_resting_limit_enabled', False):
+            self._poll_target_fills()
         try:
             events = self.stop_monitor.drain_exit_events(strategy=STRATEGY_NAME)
         except TypeError:
@@ -4828,6 +4922,74 @@ class ORBEngine:
             self._handle_exit_event(ev)
             exited.append(ev.symbol)
         return exited
+
+    def _poll_target_fills(self) -> None:
+        """Rule 3 (non-race path) + rule 6 (partial quantities, 2026-09-29
+        follow-up fix): the resting touchgo target can fill — fully or
+        partially — on its own, no stop involved, so StopMonitor's
+        price-driven logic never sees it. Poll the order stream for
+        target_resting positions and book whatever is NEW since the last
+        poll (`pos.target_last_booked_qty` delta-tracks this, mirroring
+        `last_observed_filled_qty` on the entry side) through the SAME
+        StopMonitor event pipeline every other ORB exit uses, so DB write +
+        Telegram + pnl accounting never diverge by a second path:
+          - order status 'filled'           -> book_target_rested_fill
+            (closes the row; qty = pos.shares, i.e. whatever remains after
+            any earlier partials already reduced it — never the broker's
+            raw, possibly stale filled_qty).
+          - order status 'partially_filled' -> book_target_partial_fill
+            (books ONLY the new delta; row stays open; safe to see this
+            status repeatedly as more partials accumulate).
+
+        Best-effort: a poll failure or a missing order_stream/stop_monitor
+        just retries next tick — the position stays open and watched either
+        way, nothing is silently lost.
+        """
+        if self.order_stream is None or self.stop_monitor is None:
+            return
+        for symbol, pos in list(self.open_positions.items()):
+            if not pos.target_resting or not pos.tp_leg_id:
+                continue
+            try:
+                status = self.order_stream.get_status(pos.tp_leg_id)
+            except Exception as e:
+                logger.debug(f"ORB: {symbol} target fill poll failed: {e}")
+                continue
+            order_status = (status or {}).get('status')
+            if order_status not in ('filled', 'partially_filled'):
+                continue
+            filled_qty = int((status or {}).get('filled_qty') or 0)
+            fill_price = float((status or {}).get('filled_avg_price') or 0.0)
+            new_qty = filled_qty - pos.target_last_booked_qty
+            if new_qty <= 0 or fill_price <= 0:
+                continue  # nothing new to book this tick (or price missing — retry)
+            if order_status == 'filled':
+                booked = self.stop_monitor.book_target_rested_fill(
+                    symbol, pos.shares, fill_price, pos.target_price,
+                    pos.target_rested_at,
+                )
+                if booked:
+                    pos.target_last_booked_qty = filled_qty
+                else:
+                    logger.error(
+                        f"ORB: {symbol} book_target_rested_fill failed for "
+                        f"an order-stream-confirmed FULL fill ({pos.shares}sh "
+                        f"@ ${fill_price:.2f}) — DB row will be reconciled by "
+                        f"the next sync_positions pass instead"
+                    )
+            else:  # 'partially_filled' — book only the NEW shares, keep watching
+                booked = self.stop_monitor.book_target_partial_fill(
+                    symbol, new_qty, fill_price, pos.target_price,
+                )
+                if booked:
+                    pos.target_last_booked_qty = filled_qty
+                else:
+                    logger.error(
+                        f"ORB: {symbol} book_target_partial_fill failed for "
+                        f"an order-stream-confirmed PARTIAL fill ({new_qty}sh "
+                        f"@ ${fill_price:.2f}) — will retry next tick "
+                        f"(target_last_booked_qty not advanced)"
+                    )
 
     def _handle_exit_event(self, ev) -> None:
         """Update DB + open_positions from a StopMonitor exit event.
@@ -4841,6 +5003,9 @@ class ORBEngine:
         symbol = ev.symbol
         if getattr(ev, 'exit_reason', '') == ExitReason.SCALE_OUT.value:
             self._handle_scale_fill_event(ev)
+            return
+        if getattr(ev, 'exit_reason', '') == ExitReason.TARGET_RESTED_PARTIAL.value:
+            self._handle_target_partial_fill_event(ev)
             return
         pos = self.open_positions.pop(symbol, None)
         if pos is None:
@@ -4870,6 +5035,24 @@ class ORBEngine:
         # base payload; ORB adds its own exit_slippage + qty fields on top.
         exit_update = build_exit_update(ev)
         exit_limit_price = exit_update.get('exit_limit_price')
+        # ORB target-resting-limit exec-quality telemetry (2026-09-29): how
+        # long the resting limit sat live before it filled. Mirrors the HOD
+        # resting-entry telemetry added 9/28 (exit_fill_latency_ms is an
+        # existing, shared column — trading/hod_break_engine.py, persistence/
+        # database.py — repurposed here for the EXIT side's resting time).
+        # bps-vs-limit is not stored separately; it's exit_price vs
+        # exit_limit_price, both already on the row.
+        if ev.exit_reason == ExitReason.TARGET_RESTED.value:
+            rested_at = getattr(pos, 'target_rested_at', None)
+            if rested_at is not None:
+                rested_s = (datetime.now(timezone.utc) - rested_at).total_seconds()
+                exit_update['exit_fill_latency_ms'] = max(0.0, rested_s * 1000.0)
+            else:
+                logger.warning(
+                    f"ORB: {symbol} target_rested exit with no "
+                    f"target_rested_at on the position — resting-seconds "
+                    f"telemetry will be missing for this row"
+                )
         if confirmed:
             self.daily_pnl += pnl
             exit_update['pnl'] = pnl
@@ -4953,6 +5136,67 @@ class ORBEngine:
         except Exception as e:
             logger.error(f"ORB: {symbol} scale DB update failed: {e} — "
                          f"in-memory state holds; final exit rewrites "
+                         f"nothing scale-side (columns lag until reconcile)")
+
+    def _handle_target_partial_fill_event(self, ev) -> None:
+        """Book a PARTIAL resting-target fill (rule 6, 2026-09-29 follow-up
+        fix): some shares sold at the touchgo target, the remainder is
+        STILL OPEN and still protected by its stop. Update scale_* columns +
+        in-memory shares, leave the row OPEN — the SAME representation and
+        the SAME non-closing contract as `_handle_scale_fill_event` (money
+        defect fixed: this must NEVER pop open_positions, write exit_price/
+        order_status/pnl, or touch daily_pnl; the eventual stop/EOD/second
+        fill on the remainder writes the combined pnl exactly once).
+
+        Kept as its own handler (not literally reusing
+        `_handle_scale_fill_event`) so a target partial's mechanism stays
+        attributable in logs even though it lands in the same DB columns as
+        the deliberate 3R scale-out.
+        """
+        symbol = ev.symbol
+        qty = int(getattr(ev, 'filled_qty', 0) or ev.shares or 0)
+        price = float(ev.exit_price)
+        pos = self.open_positions.get(symbol)
+        if pos is None:
+            logger.error(
+                f"ORB: TARGET PARTIAL fill event for {symbol} but no "
+                f"tracked position — writing scale columns by trade_db_id "
+                f"only; sync_positions must reconcile the broker qty"
+            )
+            if getattr(ev, 'trade_db_id', None):
+                try:
+                    self.db.update_trade(ev.trade_db_id, {
+                        'scale_qty': qty,
+                        'scale_price': price,
+                        'scale_pnl': None,   # entry unknown here — reconciler
+                        'scaled_at': datetime.now(timezone.utc),
+                    })
+                except Exception as e:
+                    logger.error(f"ORB: {symbol} orphan target-partial DB "
+                                 f"write failed: {e}")
+            return
+        leg_pnl = (price - pos.entry_price) * qty
+        pos.scale_qty += qty
+        pos.scale_price = price
+        pos.scale_pnl += leg_pnl
+        pos.scaled_at = datetime.now(timezone.utc)
+        pos.shares = max(0, pos.shares - qty)
+        pos.target_last_booked_qty += qty
+        logger.warning(
+            f"ORB: {symbol} TARGET PARTIAL {qty}sh @ ${price:.2f} — "
+            f"{pos.shares}sh remain under the stop (cum. leg_pnl "
+            f"${pos.scale_pnl:+,.2f})"
+        )
+        try:
+            self.db.update_trade(pos.trade_id, {
+                'scale_qty': pos.scale_qty,
+                'scale_price': pos.scale_price,
+                'scale_pnl': pos.scale_pnl,
+                'scaled_at': pos.scaled_at,
+            })
+        except Exception as e:
+            logger.error(f"ORB: {symbol} target-partial DB update failed: "
+                         f"{e} — in-memory state holds; final exit rewrites "
                          f"nothing scale-side (columns lag until reconcile)")
         if self.notify_on_exit and self.notifier:
             self._notify(
@@ -5237,6 +5481,16 @@ class ORBEngine:
         Returns:
             Number of positions closed.
         """
+        # Rule 6 (2026-09-29 follow-up fix): catch a last-second partial (or
+        # full) resting-target fill BEFORE computing what to force-close —
+        # otherwise pos.shares could still show the pre-fill qty and EOD
+        # would oversell against what the broker actually holds. Cancelling
+        # the resting order later in this same pass (_cancel_symbol_open_
+        # orders, generic, unchanged) is still required for whatever qty is
+        # LEFT resting; this just makes sure anything that already filled is
+        # booked first.
+        if getattr(self, 'target_resting_limit_enabled', False):
+            self._poll_target_fills()
         closed = 0
         failed = []
         # Track which symbols got close orders submitted, for the post-FC
@@ -5964,6 +6218,75 @@ class ORBEngine:
             except Exception as e:
                 logger.error(
                     f"ORB: orphan reconciler raised: {e} — sync continues"
+                )
+
+        # ORB target-resting-limit boot/sync reconciliation (rule 7,
+        # docs/orb_target_limit_spec_20260929.md): any `orb-tp-*` order with
+        # no matching open (target_resting) position is an orphan — cancel
+        # it and WARN. Best-effort and non-fatal to sync_positions by
+        # construction (own try/except) — a failure here just means an
+        # orphan survives to the NEXT sync pass, not a crash.
+        if getattr(self, 'target_resting_limit_enabled', False):
+            try:
+                from alpaca.trading.requests import GetOrdersRequest
+                from alpaca.trading.enums import QueryOrderStatus
+                open_orders_raw = self.alpaca.trading_client.get_orders(
+                    GetOrdersRequest(status=QueryOrderStatus.OPEN)
+                ) or []
+                open_orders = [
+                    {
+                        'id': str(getattr(o, 'id', '') or ''),
+                        'symbol': str(getattr(o, 'symbol', '') or ''),
+                        'client_order_id': str(getattr(o, 'client_order_id', '') or ''),
+                    }
+                    for o in open_orders_raw
+                ]
+                targeted_symbols = {
+                    sym for sym, p in self.open_positions.items()
+                    if getattr(p, 'target_resting', False)
+                }
+                orphan_result = reconcile_orphan_targets(
+                    self.alpaca, targeted_symbols, open_orders,
+                )
+                if orphan_result['orphans_cancelled'] or orphan_result['orphans_cancel_failed']:
+                    logger.warning(
+                        f"ORB: target-resting-limit orphan reconciliation — "
+                        f"cancelled {orphan_result['orphans_cancelled']}, "
+                        f"failed to cancel {orphan_result['orphans_cancel_failed']}"
+                    )
+            except Exception as e:
+                logger.error(
+                    f"ORB: target-resting-limit orphan reconciliation "
+                    f"raised: {e} — sync continues; a stray orb-tp-* order "
+                    f"may survive until the next sync pass"
+                )
+
+            # Rule 7, explicit-fallback half (2026-09-29 follow-up): scope
+            # gap — target_resting/target_price live only on the in-memory
+            # OpenPosition (not persisted), so they never survive a restart.
+            # This is NOT silent: exactly one WARNING per affected symbol,
+            # naming it, so the daily log makes the fallback visible instead
+            # of a reader having to infer it. The position itself needs no
+            # other handling here — _fire_touchgo_exit already falls back to
+            # today's chase-and-sell path whenever pos.target_resting is
+            # False (the dataclass default), which is unconditionally true
+            # for every rehydrated position.
+            try:
+                no_target_syms = [
+                    sym for sym, p in self.open_positions.items()
+                    if not getattr(p, 'target_resting', False)
+                ]
+                for sym in no_target_syms:
+                    logger.warning(
+                        f"ORB: {sym} has no resting TP tracked after "
+                        f"sync_positions (target_resting_limit is ON) — "
+                        f"falling back to today's tag-and-sell touchgo path "
+                        f"for this position for the rest of the day"
+                    )
+            except Exception as e:
+                logger.error(
+                    f"ORB: target-resting-limit no-TP fallback scan raised: "
+                    f"{e} — sync continues"
                 )
 
         logger.info(

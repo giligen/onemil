@@ -176,6 +176,27 @@ class ExitReason(str, Enum):
     """ORB touchgo Rule D: the bar after entry reverted ≥0.75R below
     entry → exit at entry - 0.5R. Catches fast reversals."""
 
+    TARGET_RESTED = "target_rested"
+    """ORB exit.target_resting_limit (2026-09-29,
+    docs/orb_target_limit_spec_20260929.md): the touchgo target (Rule M/D's
+    exit_price) was rested as a real DAY limit at the broker — repricing the
+    entry bracket's take-profit leg — instead of chased with a marketable
+    limit. Written whether the fill came via the order-stream poll (no stop
+    ever triggered) or via the cancel-before-stop race (the target filled
+    before our cancel landed). See `trading/orb_target_limit.py`."""
+
+    TARGET_RESTED_PARTIAL = "target_rested_partial"
+    """ORB exit.target_resting_limit, rule 6 (2026-09-29 follow-up fix): the
+    resting touchgo target filled PARTIALLY — some shares at the target
+    price, the remainder still held and still protected by its stop. NOT a
+    full close: routes to `ORBEngine._handle_target_partial_fill_event`,
+    which reuses the trades-table scale_qty/scale_price/scale_pnl/scaled_at
+    columns (the SAME representation ORB's 3R scale-out writes) and leaves
+    the row OPEN. Kept distinct from SCALE_OUT so a target partial is never
+    confused with the deliberate 3R scale-out mechanism in the exec-quality
+    report. See `trading/orb_target_limit.py` `cancel_resting_target`'s
+    PARTIALLY_FILLED outcome."""
+
     # ---- Ignition prestage disposition exits (2026-08-22 build) -------
     STAGE_REJECT_STRUCTURE = "stage_reject_structure"
     """Ignition prestage P0-1 disposition: a pre-staged stop-limit BUY
@@ -312,6 +333,8 @@ _ATTRIBUTED_EXITS = frozenset({
     ExitReason.THIN_LIQUIDITY_REJECT.value,
     ExitReason.TAG_BB.value,
     ExitReason.TAG_B1.value,
+    ExitReason.TARGET_RESTED.value,
+    ExitReason.TARGET_RESTED_PARTIAL.value,
     ExitReason.STAGE_REJECT_STRUCTURE.value,
     ExitReason.STAGE_FORCE_FLAT.value,
     ExitReason.MACD_FLIP.value,

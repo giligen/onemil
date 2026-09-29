@@ -44,3 +44,100 @@ while the latency replay (cell 1,426) shows 3–20 s of delay costs nothing in t
 buy-stops at 09:35:00.0 and would take those instant breaks first. Measure on paper: the trigger-time histogram of the
 pre-placed fills and their outcome; if the 0–5 s bucket loses again on ≥ 20 fills, PREREG a `preplace_submit_delay_s: 5`
 cell on the tick replay before changing anything live. n 42 in one bucket of five is not a rule.
+
+## Implementation notes (2026-09-29 build)
+
+**Design decision — bracket TP leg vs. a second order**: the entry bracket already carries a take-profit leg
+(`trading/orb_engine.py` `submit_entry`, `safety_tp = entry_price * 3.0` — intentionally unreachable, "ORB has no
+fixed target; legally must set"). The implementation REPRICES that existing leg to the real touchgo target via
+`AlpacaClient.replace_order_limit_price` (extended with an optional `client_order_id` — `ReplaceOrderRequest` supports
+it) rather than creating a second, freestanding resting sell. This reuses the same primitive `stop_monitor.py`'s D3-FIX-1
+stop path already uses to reprice the SL leg in place, and preserves the broker-side OCO relationship with the SL leg
+(a fill on one leg auto-cancels the other — no orphan safety-net order). Alpaca's replace mints a new order id each
+time (documented already at `trading/hod_break_engine.py:1163`); every reprice threads the new id back onto
+`OpenPosition.tp_leg_id` and `StopMonitor`'s `WatchEntry.tp_leg_id` (via the new `mark_target_resting`) so the next
+cancel/replace targets a live order, never a dead one.
+
+**Files**:
+- `trading/orb_target_limit.py` (new) — broker-facing primitives, synchronous, no asyncio/engine coupling:
+  `reprice_target` (rules 1 + 4, one function, `force_first` bypasses the rate limit for the initial rest),
+  `cancel_resting_target` (rules 2 + 5, classifies the "already filled" race via `get_order` when `cancel_order`
+  doesn't confirm cleanly), `reconcile_orphan_targets` (rule 7, orphan half), `target_client_order_id`
+  (`orb-tp-<sym>-<yyyymmdd>`).
+- `trading/orb_engine.py` — `exit.target_resting_limit` config flag (default False); `OpenPosition` gains
+  `target_resting`/`target_price`/`target_rested_at`/`target_last_replace_ts`; `_fire_touchgo_exit` branches to the
+  new `_rest_touchgo_target` when the flag is ON, falling back to the unchanged chase-and-sell path on any failure
+  (no leg / rate limited / broker error — all WARNING-logged by the helper); `_poll_target_fills` (new, called from
+  `_check_exits_locked` before draining) detects a resting fill via `order_stream.get_status` and books it through
+  `StopMonitor.book_target_rested_fill`; `_handle_exit_event` gained an `exit_fill_latency_ms` augmentation for
+  `target_rested` rows (resting seconds); `sync_positions` gained a best-effort orphan-cancellation pass (rule 7).
+- `trading/stop_monitor.py` — `WatchEntry` gains `target_resting`/`target_price`/`target_rested_at` (default
+  `False`/`0.0`/`0.0` — inert for every non-ORB watch); two new public methods, `mark_target_resting` (keeps the
+  watch's leg id in sync after ORBEngine's broker-side reprice) and `book_target_rested_fill` (queues a
+  `target_rested` `StopExitEvent` the same way the existing scale-out fill poll does); a new branch at the top of
+  `_execute_stop_exit`, gated by `watch.target_resting`, cancels the resting TP with an `asyncio.wait_for(...,
+  CANCEL_ACK_WAIT_S=1.0)` budget and resolves the "already filled" race by emitting a `target_rested` event instead
+  of continuing into the stop-exit machinery.
+- `data_sources/alpaca_client.py` — `replace_order_limit_price` gained an optional `client_order_id` kwarg
+  (backward compatible; existing callers unaffected).
+- `trading/exit_reasons.py` — new `ExitReason.TARGET_RESTED = "target_rested"`, added to `_ATTRIBUTED_EXITS`.
+- `orb.yaml.template` — `exit.target_resting_limit: false` documented under the `exit:` section.
+- Telemetry: no new DB columns. `exit_limit_price` / `exit_price` (bps vs. limit is derived downstream) and
+  `exit_fill_latency_ms` (repurposed as resting-seconds — mirrors the HOD 9/28 resting-order telemetry reuse of the
+  same column) are the existing, shared columns `build_exit_update` already writes.
+
+**Rule 5 (EOD/every-other-exit-path cancels first)**: required NO code change. `_cancel_symbol_open_orders` (called
+from `_force_close_all_locked` before every close) already re-queries Alpaca for ALL open orders on the symbol and
+cancels each one by id — it never referenced a specific stored leg id, so it cancels whichever order (safety-net or
+our repriced target) happens to be live. Covered by a regression test
+(`TestEodCancelIsGeneric`) rather than new production code.
+
+**Rule 6 money defect — fixed 2026-09-29 (follow-up)**: the first build had a real bug, not just a documented gap:
+`cancel_order() == True` does NOT prove zero fill — Alpaca cancels the remaining OPEN quantity of a partially-filled
+order just as cleanly as an untouched one, so the original code (which only called `get_order` when `cancel_order`
+returned `False`) would have silently booked a partial race as a same-size FULL close. Fixed: `cancel_resting_target`
+now ALWAYS calls `get_order` after the cancel attempt, regardless of what the cancel itself returned, and classifies
+on `filled_qty` vs. a `requested_qty` argument the caller now must pass (`watch.shares`/`pos.shares` at call time) —
+`0` -> `CANCELLED`, `0 < filled_qty < requested_qty` -> new `CancelOutcome.PARTIALLY_FILLED`, `>= requested_qty` ->
+`ALREADY_FILLED`. A `PARTIALLY_FILLED` race now books ONLY the filled qty via a new `StopMonitor.book_target_partial_fill`
+(mirrors `_book_scale_fill`'s mechanism exactly: reduces `watch.shares` in place, does NOT retire the watch, queues a
+`target_rested_partial` event) and then FALLS THROUGH into the unchanged stop-exit logic for the reduced remainder —
+never a full close on a partial fill, never two exit legs merged into one. `ORBEngine._handle_target_partial_fill_event`
+reuses the trades-table `scale_qty`/`scale_price`/`scale_pnl`/`scaled_at` columns (the one existing partial-exit
+representation in this schema, also used by the deliberate 3R scale-out) but keeps its own `TARGET_RESTED_PARTIAL`
+exit_reason so the two mechanisms are never confused in the exec-quality report; the row stays OPEN and the eventual
+final exit (stop / EOD / a later full target fill) composes `pnl` from `pos.shares` (already reduced) + accumulated
+`scale_pnl`, exactly as scale-out's runner leg does today. `_poll_target_fills` (the non-race path) now also handles
+`order status == 'partially_filled'`, delta-tracking via a new `OpenPosition.target_last_booked_qty` field so a
+still-resting, repeatedly-partially-filling order books only the NEW shares each poll — never double-counted across
+ticks, and correctly composes a full close afterward from whatever remains. `_force_close_all_locked` now polls target
+fills first (when the flag is on) before computing what to close, so a last-second fill is booked and `pos.shares` is
+accurate before EOD's cancel-and-close sequence runs.
+
+**Alpaca leg-cancel semantics relied on**: `_exit_via_sl_leg` (D3 FIX 1, unmodified) already re-verifies the SL leg's
+live status via a fresh `get_order` + `_LIVE_ORDER_STATES` check, and re-queries the broker's actual held qty
+(`broker_qty`) before trusting the SL leg to cover the whole position — it falls back to the legacy "cancel every open
+order for the symbol, then submit a fresh protective sell for the broker's real qty" path whenever the SL leg isn't
+provably live and full-covering, for ANY reason. This means the implementation does NOT need to assume a specific
+answer to "does cancelling the TP leg cascade-cancel its OCO sibling SL leg" (Alpaca bracket/OCO legs are documented
+to cancel as a linked pair — cancelling one member typically cancels the other): whether the SL leg survives the TP
+cancel or is cascade-cancelled alongside it, `_exit_via_sl_leg`'s pre-flight check catches either outcome and the
+existing bulk-cancel-and-place fallback re-discovers and protects whatever the broker actually shows. No position is
+ever left without SOME stop-management path between my hook's TP cancel and the (unchanged) code that follows it.
+
+**Rule 7 (boot reconciliation) — explicit-fallback half added 2026-09-29 (follow-up)**: `target_resting`/`target_price`
+still live only on the in-memory `OpenPosition` and are NOT persisted across a restart (unchanged limitation — would
+need a persisted column to fix for real), so re-resting a target automatically after a crash is still not implemented.
+What changed: `sync_positions` now logs exactly ONE WARNING per open ORB position without a currently-tracked resting
+TP, naming the symbol, whenever the flag is ON — this is no longer silent. The position needs no other handling: falls
+back to today's tag-and-sell touchgo path automatically, since `_fire_touchgo_exit` already branches on
+`pos.target_resting` (the dataclass default, `False`, for every rehydrated position).
+
+**Tests**: `tests/test_orb_target_limit.py` — 56 tests (up from 39): the original primitives/parity/telemetry/EOD-
+genericity/orphan-reconciliation/integration coverage, plus the 2026-09-29 follow-up's partial-fill-then-stop (two
+exit legs, remainder sized correctly), partial-then-second-partial (delta-tracking, no double-count),
+partial-then-EOD-flatten (pre-close poll wired + `pos.shares` correct before the close), and
+`_handle_target_partial_fill_event` (row stays open, scale columns, orphan write path) coverage. `sync_positions`'s
+new blocks are still exercised by construction/code review only, not end-to-end — its existing test surface is large
+enough that driving the whole function was judged lower value than the primitive-level and unit-level coverage above
+within the session's step budget.
