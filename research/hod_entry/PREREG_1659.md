@@ -33,3 +33,8 @@ per week in the population. The halves disagree (−0.08 / +0.14), which is exac
 counterfactual logger recording the 1.5–3 % band as untaken arms. Rule: `hod_break.min_r_pct: 3.0` from now (restart
 today), TEST/forward read after 100 paper fills: mean net R ≥ +0.03 with the 1.5–3 % counterfactuals ≤ 0 → propose live
 at $50; otherwise back to 1.5.
+
+## Amendment 2 (2026-09-29 17:40 UTC, owner) — floor back to 1.5 %: keep the 1.5–3 % band
+Owner: "1.5–3 improved a lot, near zero; I do think we need the 1.5–3 as well." `min_r_pct: 1.5` (amendment 1's 3.0
+ran on paper 17:17–17:40 UTC only). The bucket read stays the instrument: the paper ledger reports 1.5–3 % and ≥ 3 %
+separately every day.
