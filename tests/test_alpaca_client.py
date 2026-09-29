@@ -1278,3 +1278,69 @@ class TestGetPremarketNewsMulti:
         with pytest.raises(Exception):
             client.get_premarket_news_multi(['AAA'])
         assert _t.monotonic() - t0 < 2.0   # no backoff sleeps happened
+
+
+# ===================================================================
+# close_position — 40410000 "position not found" handling
+# (2026-09-29 AXTL incident: a redundant EOD flatten re-attempting an
+# already-closed symbol must not be logged as an ERROR)
+# ===================================================================
+
+class TestClosePosition:
+    """Tests for AlpacaClient.close_position, including the 40410000
+    'position not found' (already flat) special case."""
+
+    def test_closes_successfully(self, client, mock_sdk_clients):
+        order = MagicMock()
+        order.id = 'order-1'
+        order.status.value = 'accepted'
+        mock_sdk_clients["trading_client"].close_position.return_value = order
+
+        result = client.close_position("AAPL")
+        assert result['id'] == 'order-1'
+        assert result['symbol'] == 'AAPL'
+
+    def test_position_not_found_logs_info_not_error(self, client, mock_sdk_clients, caplog):
+        """Alpaca 40410000 'position not found' is a benign already-flat
+        outcome (e.g. a duplicate 20:00 UTC EOD flatten re-attempting a
+        symbol the 15:45 ET force-close already closed). Must still raise
+        AlpacaAPIError (contract unchanged for callers) but log at INFO,
+        never ERROR, and must NOT go through the generic
+        _log_order_op_failure ERROR path."""
+        error = Exception('{"code":40410000,"message":"position not found: AXTL"}')
+        mock_sdk_clients["trading_client"].close_position.side_effect = error
+
+        with caplog.at_level('INFO', logger='data_sources.alpaca_client'):
+            with pytest.raises(AlpacaAPIError, match="already flat"):
+                client.close_position("AXTL")
+
+        error_records = [r for r in caplog.records if r.levelname == 'ERROR']
+        assert error_records == [], f"expected no ERROR logs, got: {error_records}"
+        info_records = [r for r in caplog.records if r.levelname == 'INFO'
+                         and 'already flat' in r.getMessage()]
+        assert info_records, "expected an INFO 'already flat' log line"
+
+    def test_position_not_found_by_message_only(self, client, mock_sdk_clients, caplog):
+        """Same handling when the SDK exception carries no numeric code,
+        only the 'position not found' message text."""
+        mock_sdk_clients["trading_client"].close_position.side_effect = RuntimeError(
+            "position not found: AXTL"
+        )
+
+        with caplog.at_level('INFO', logger='data_sources.alpaca_client'):
+            with pytest.raises(AlpacaAPIError, match="already flat"):
+                client.close_position("AXTL")
+        assert not [r for r in caplog.records if r.levelname == 'ERROR']
+
+    def test_other_failure_still_logs_error(self, client, mock_sdk_clients, caplog):
+        """Non-40410000 failures are unchanged: AlpacaAPIError + ERROR log
+        via _log_order_op_failure (regression guard — every other error
+        path must stay exactly as it was)."""
+        mock_sdk_clients["trading_client"].close_position.side_effect = RuntimeError(
+            "connection reset"
+        )
+
+        with caplog.at_level('INFO', logger='data_sources.alpaca_client'):
+            with pytest.raises(AlpacaAPIError, match="Failed to close position"):
+                client.close_position("AAPL")
+        assert any(r.levelname == 'ERROR' for r in caplog.records)

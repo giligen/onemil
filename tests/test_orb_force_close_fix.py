@@ -653,3 +653,74 @@ class TestSyncOrphanDetection:
         engine.sync_positions()
         msgs = [c[0][0] for c in notifier.send_message.call_args_list]
         assert not any('ORPHAN' in m for m in msgs)
+
+
+class TestForceCloseAlreadyFlat:
+    """2026-09-29 AXTL incident: the scanner's post-loop EOD safety net
+    calls orb_engine.force_close_all() a second time at market close
+    (16:00 ET / 20:00 UTC), after the normal 15:45 ET force-close already
+    closed everything. Re-attempting an already-closed symbol must not
+    ERROR or telegram — Alpaca's 40410000 'position not found' means the
+    broker already agrees the position is flat."""
+
+    def test_close_already_flat_no_error_no_telegram(self, engine, mock_alpaca, notifier, caplog):
+        engine.open_positions['AXTL'] = _pos(sym='AXTL')
+        engine._orb_owned_symbols = lambda *a, **k: {'AXTL'}
+        mock_alpaca.trading_client.get_orders.return_value = []
+        # Broker already shows AXTL flat (mirrors the real AlpacaClient's
+        # close_position() after the 2026-09-29 fix: still an
+        # AlpacaAPIError-shaped failure, message carries the 40410000 code).
+        mock_alpaca.close_position.side_effect = RuntimeError(
+            'Position not found for AXTL (already flat): '
+            '{"code":40410000,"message":"position not found: AXTL"}'
+        )
+        mock_alpaca.get_open_positions.return_value = []
+        engine._notify_error = MagicMock()
+
+        # Speed knobs — same as sibling tests in this file.
+        engine._FC_HELD_QTY_BACKOFFS_S = (0.0, 0.0, 0.0, 0.0)
+        engine._FC_PHASE1B_PRE_CLOSE_SLEEP_S = 0.0
+        engine.fc_retry_backoffs_s = [0.0, 0.0, 0.0]
+        engine.fc_verify_max_wait_s = 0.05
+        engine.fc_verify_poll_interval_s = 0.01
+
+        with caplog.at_level('INFO', logger='trading.orb_engine'):
+            n_closed = engine.force_close_all()
+
+        error_records = [r for r in caplog.records if r.levelname == 'ERROR']
+        assert error_records == [], (
+            f"expected no ERROR logs, got: {[r.getMessage() for r in error_records]}"
+        )
+        engine._notify_error.assert_not_called()
+        # Registry self-healed: AXTL no longer tracked as open, so a THIRD
+        # redundant force_close_all() call would have nothing to retry.
+        assert 'AXTL' not in engine.open_positions
+        assert n_closed >= 1
+
+    def test_close_already_flat_but_registry_still_open_warns(self, engine, mock_alpaca, caplog):
+        """If the engine's own registry still believed the symbol was
+        open when the broker says otherwise, that IS a real mismatch —
+        must log a WARNING (still not ERROR/telegram) rather than stay
+        silent, so the drift is observable in journalctl."""
+        engine.open_positions['AXTL'] = _pos(sym='AXTL')
+        engine._orb_owned_symbols = lambda *a, **k: {'AXTL'}
+        mock_alpaca.trading_client.get_orders.return_value = []
+        mock_alpaca.close_position.side_effect = RuntimeError(
+            '{"code":40410000,"message":"position not found: AXTL"}'
+        )
+        mock_alpaca.get_open_positions.return_value = []
+        engine._notify_error = MagicMock()
+        engine._FC_HELD_QTY_BACKOFFS_S = (0.0, 0.0, 0.0, 0.0)
+        engine._FC_PHASE1B_PRE_CLOSE_SLEEP_S = 0.0
+        engine.fc_retry_backoffs_s = [0.0, 0.0, 0.0]
+        engine.fc_verify_max_wait_s = 0.05
+        engine.fc_verify_poll_interval_s = 0.01
+
+        with caplog.at_level('INFO', logger='trading.orb_engine'):
+            engine.force_close_all()
+
+        assert not [r for r in caplog.records if r.levelname == 'ERROR']
+        warn_records = [r for r in caplog.records if r.levelname == 'WARNING'
+                         and 'state mismatch' in r.getMessage()]
+        assert warn_records, "expected a state-mismatch WARNING"
+        engine._notify_error.assert_not_called()

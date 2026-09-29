@@ -2410,6 +2410,24 @@ class AlpacaClient:
         except AlpacaAPIError:
             raise
         except Exception as e:
+            # Alpaca code 40410000 = "position not found": the broker
+            # already shows this symbol flat. Expected when a later
+            # force-close pass (e.g. a 20:00 UTC market-close safety net)
+            # re-attempts a symbol an earlier pass already closed — not a
+            # real failure, so it bypasses the ERROR-level
+            # _log_order_op_failure classification below. Still raised as
+            # AlpacaAPIError (message carries "already flat") so the
+            # caller — which owns its own open-position registry — can
+            # decide INFO-vs-WARNING for its own log.
+            _msg = str(e)
+            if '40410000' in _msg or 'position not found' in _msg.lower():
+                logger.info(
+                    f"close_position({symbol}): broker reports no open "
+                    f"position (already flat): {e}"
+                )
+                raise AlpacaAPIError(
+                    f"Position not found for {symbol} (already flat): {e}"
+                )
             self._log_order_op_failure("close position", symbol, e)
             raise AlpacaAPIError(f"Failed to close position for {symbol}: {e}")
 

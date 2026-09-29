@@ -5691,6 +5691,33 @@ class ORBEngine:
                 closed += 1
                 closed_symbols.append(sym)
             except Exception as e:
+                _msg = str(e)
+                if '40410000' in _msg or 'position not found' in _msg.lower():
+                    # Broker already shows this symbol flat — expected
+                    # when a later force-close pass (e.g. the 16:00 ET /
+                    # 20:00 UTC market-close safety net) re-attempts a
+                    # symbol an earlier pass already closed. If our own
+                    # registry agrees, this is a benign no-op: INFO, no
+                    # alert. If the registry still thinks it's open,
+                    # that's a real state mismatch — WARNING, and
+                    # self-heal by clearing the stale entry so later
+                    # passes don't keep re-attempting it.
+                    if sym in self.open_positions:
+                        logger.warning(
+                            f"ORB FC Phase 1b: {sym} broker reports no "
+                            f"open position but engine registry still "
+                            f"tracked it as open — state mismatch, "
+                            f"clearing: {e}"
+                        )
+                        self.open_positions.pop(sym, None)
+                    else:
+                        logger.info(
+                            f"ORB FC Phase 1b: {sym} already flat "
+                            f"(broker + registry agree) — skipping"
+                        )
+                    closed += 1
+                    closed_symbols.append(sym)
+                    continue
                 # Helper exhausted retries OR a non-retryable exception.
                 # FC VERIFY gets the next bite — defer the alert to the
                 # consolidated end-of-FC summary (Bug-3 fix). Log warning

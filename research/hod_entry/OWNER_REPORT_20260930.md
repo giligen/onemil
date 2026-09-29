@@ -43,7 +43,7 @@ have a root-cause fix committed. Incident write-up: `docs/hod_live_incident_2026
 | 1,667 | every causal feature (owner) | daily flat; intraday flat (10 reads t ≥ 2.5, all negative); n_cross = leak | FAIL |
 | 1,668 | post-entry failure detection (owner) | 0/36 rules; classifier AUC 0.63–0.67 oos, cut −0.05..+0.02 R; patterns ≈ 0 | FAIL |
 | 1,669 | fast failures + cut decomposition (owner) | stops within 2/5/10 min = 3/12/24 % of stop-outs; fast failure IS predictable at minute 1 (AUC 0.76–0.81 oos, precision 0.4–0.5 at P ≥ 0.7); the cut flips sign between scorings (+0.30 / −0.36 R on the fired subset); 0/96 cells; engulfing 38 % vs 27 % in fast failures but 0 importance beyond price | FAIL (predictable, not tradable — now with numbers) |
-| 1,670 | feature-timing map (owner) | PENDING | PENDING |
+| 1,670 | feature-timing map + the ADD reads (owner) | information lives in the PATH (mark-to-market, progress per volume) and grows with time (AUC 0.71 at 60 min, but its placebo is 0.59 — suspect; clean ≤ 10 min); arm-time, market and shape families ≈ 0.5; cuts +0.02..+0.04 R, t < 1, negative tails; model-gated add (2× risk on predicted non-failures) ≈ 0; **add after +1/+1.5 R with a locked stop is significantly NEGATIVE (t −3.3)**; 0/256 | FAIL |
 | 1,671 | raw-sequence model vs trees (owner's TSFM question) | PENDING | PENDING |
 | 1,672 | pre-holiday index sleeve (sister of TOM), 2016–2026, 102 events | SPY −17 / −4 bps per event (t −1.4 / −0.2), null percentile 12 / 35, mirror ≈ 0; QQQ and open-exit variants the same | FAIL |
 MDE of the floored book: 0.077 / 0.066 R per half — a cut must carry ≥ +0.10 R on a third of the book to be visible.
