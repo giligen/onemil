@@ -307,18 +307,20 @@ def row_stats(sub, wk_denom, label, half, cut_name):
     )
 
 
-def generate_reads(feat: pd.DataFrame) -> pd.DataFrame:
-    """Reads 1-4 (PREREG_1665 sec "Reads"), for RVOL_A(20) then repeated for
-    RVOL_A(5) (read 5). Read 6 (coverage) is reported in RESULT_1665.md, not here.
+def generate_reads(feat: pd.DataFrame, variants=(("A20", "rvol_a20"), ("A5", "rvol_a5"))) -> pd.DataFrame:
+    """Reads 1-4 (PREREG_1665 sec "Reads") for every (label, column) in `variants`.
+    Default = Definition A's two N's. Definition B calls this with
+    variants=(("B","rvol_b"),) so all four reads get the exact same treatment --
+    one code path for both definitions (parity by construction).
     """
     rows = []
     floored = feat  # feat IS the floored (stop>=1.5%) book already
     wk_denom = {h: weeks_spanned(floored[floored["split"] == h]["day"]) for h in floored["split"].unique()}
 
-    for N, rcol in ((20, "rvol_a20"), (5, "rvol_a5")):
+    for N, rcol in variants:
         valid = floored[floored[rcol].notna()].copy()
         if len(valid) == 0:
-            log.warning("RVOL_A(%d): zero valid rows, skipping reads for this N", N)
+            log.warning("%s: zero valid rows, skipping reads for this variant", N)
             continue
         # pooled-edge terciles/quintiles (cut choice happens on the whole floored+valid pool)
         valid["tercile"] = pd.qcut(valid[rcol], 3, labels=["T1(low)", "T2(mid)", "T3(high)"], duplicates="drop")
@@ -330,9 +332,9 @@ def generate_reads(feat: pd.DataFrame) -> pd.DataFrame:
 
             # Read 1: terciles + quintiles
             for t in hv["tercile"].cat.categories:
-                rows.append(row_stats(hv[hv["tercile"] == t], wk, str(t), half, f"read1_tercile_A{N}"))
+                rows.append(row_stats(hv[hv["tercile"] == t], wk, str(t), half, f"read1_tercile_{N}"))
             for q in hv["quintile"].cat.categories:
-                rows.append(row_stats(hv[hv["quintile"] == q], wk, str(q), half, f"read1_quintile_A{N}"))
+                rows.append(row_stats(hv[hv["quintile"] == q], wk, str(q), half, f"read1_quintile_{N}"))
 
             # Read 2: top tercile vs rest (paired cut) -- ΔR via day-clustered OLS on a dummy
             top = hv[hv["tercile"] == "T3(high)"]
@@ -347,7 +349,7 @@ def generate_reads(feat: pd.DataFrame) -> pd.DataFrame:
                 t_delta = float(model.tvalues[1])
                 delta_ex5 = ex_top5_mean(top["net_R"]) - ex_top5_mean(rest["net_R"])
                 rows.append(dict(
-                    cut=f"read2_top_vs_rest_A{N}", bucket="T3_minus_rest", half=half,
+                    cut=f"read2_top_vs_rest_{N}", bucket="T3_minus_rest", half=half,
                     n=len(top) + len(rest), mean_net_R=delta_r, iid_t=np.nan,
                     day_clustered_t=t_delta, mde=mde(yy), ex_top5_mean=delta_ex5,
                     fills_per_week=len(top) / wk if wk else np.nan,
@@ -357,7 +359,7 @@ def generate_reads(feat: pd.DataFrame) -> pd.DataFrame:
             for b in sorted(hv["bucket_r"].dropna().unique()):
                 for t in hv["tercile"].cat.categories:
                     cell = hv[(hv["bucket_r"] == b) & (hv["tercile"] == t)]
-                    rows.append(row_stats(cell, wk, f"{b}|{t}", half, f"read3_interaction_A{N}"))
+                    rows.append(row_stats(cell, wk, f"{b}|{t}", half, f"read3_interaction_{N}"))
 
             # Read 4: Spearman rho, RVOL_A(N) vs net_R
             if len(hv) >= 3:
@@ -365,7 +367,7 @@ def generate_reads(feat: pd.DataFrame) -> pd.DataFrame:
             else:
                 rho, p = np.nan, np.nan
             rows.append(dict(
-                cut=f"read4_spearman_A{N}", bucket="rho", half=half, n=len(hv),
+                cut=f"read4_spearman_{N}", bucket="rho", half=half, n=len(hv),
                 mean_net_R=float(rho) if rho is not None else np.nan, iid_t=np.nan,
                 day_clustered_t=np.nan, mde=float(p) if p is not None else np.nan,
                 ex_top5_mean=np.nan, fills_per_week=len(hv) / wk if wk else np.nan,
@@ -517,31 +519,10 @@ def run_definition_b(feat: pd.DataFrame) -> pd.DataFrame:
     return feat
 
 
-def generate_reads_b(feat: pd.DataFrame) -> pd.DataFrame:
-    """Reads 1 (terciles+quintiles) and 3 (stop-bucket x tercile interaction) for
-    RVOL_B only -- the coordinator's 2026-09-29 follow-up scoped B to these two."""
-    rows = []
-    floored = feat
-    wk_denom = {h: weeks_spanned(floored[floored["split"] == h]["day"]) for h in floored["split"].unique()}
-    valid = floored[floored["rvol_b"].notna()].copy()
-    if len(valid) == 0:
-        log.warning("RVOL_B: zero valid rows, no reads generated")
-        return pd.DataFrame(rows)
-    valid["tercile"] = pd.qcut(valid["rvol_b"], 3, labels=["T1(low)", "T2(mid)", "T3(high)"], duplicates="drop")
-    valid["quintile"] = pd.qcut(valid["rvol_b"], 5, labels=["Q1", "Q2", "Q3", "Q4", "Q5"], duplicates="drop")
-
-    for half in sorted(valid["split"].unique()):
-        hv = valid[valid["split"] == half]
-        wk = wk_denom.get(half, np.nan)
-        for t in hv["tercile"].cat.categories:
-            rows.append(row_stats(hv[hv["tercile"] == t], wk, str(t), half, "read1_tercile_B"))
-        for q in hv["quintile"].cat.categories:
-            rows.append(row_stats(hv[hv["quintile"] == q], wk, str(q), half, "read1_quintile_B"))
-        for b in sorted(hv["bucket_r"].dropna().unique()):
-            for t in hv["tercile"].cat.categories:
-                cell = hv[(hv["bucket_r"] == b) & (hv["tercile"] == t)]
-                rows.append(row_stats(cell, wk, f"{b}|{t}", half, "read3_interaction_B"))
-    return pd.DataFrame(rows)
+# generate_reads_b removed 2026-09-29 (post-backfill re-run): generate_reads() now
+# takes a `variants` list, so Definition B reuses the exact same read1-4 code path
+# as Definition A (variants=(("B","rvol_b"),)) -- parity by construction, no
+# second implementation to drift out of sync.
 
 
 def main():
@@ -561,7 +542,7 @@ def main():
         os.replace(tmp, OUT_FEATURES)
         log.info("rvol_b column written into %s (atomic replace)", OUT_FEATURES)
 
-        reads_b = generate_reads_b(feat)
+        reads_b = generate_reads(feat, variants=(("B", "rvol_b"),))
         reads_path = f"{ROOT}/research/hod_entry/1665_reads.csv"
         existing = pd.read_csv(reads_path)
         combined = pd.concat([existing, reads_b], ignore_index=True)

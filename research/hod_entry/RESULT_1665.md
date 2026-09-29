@@ -135,6 +135,74 @@ read would be marginally powered at this n. Next step, if the owner wants this r
 the missing symbol-days in bars_sip.db for this population (the 1,022+ day-level gaps are the root cause of every
 leg's failure), then re-run this exact script unmodified.
 
+## Re-run on the completed store (19:xx UTC, coordinator follow-up)
+bars_sip.db was backfilled twice after the runs above (every fill's own day at 18:36 UTC, each fill's prior 20
+sessions at 19:21 UTC, +20.2M bars, 0 errors reported). Before recomputing, checked `research/hod_entry/1667_sweep.py`
+(cell 1,667, FROZEN 18:14 UTC) for the ET-minute/UTC-timestamp gotcha the coordinator flagged: it documents that
+**raw UTC minute-of-day is off from ET by exactly the DST offset**, and validates that converting via the full
+timestamp (not a naive hour:minute parse) lines up with `fill_min`. `1665_rvol.py`'s `et_minute()` already does a full
+`pd.Timestamp(ts).tz_convert(ET)` (not a manual offset), which handles DST and any UTC-date rollover on after-hours
+bars correctly by construction -- confirmed against 1667's own finding, no code change needed. `generate_reads()` was
+refactored to take a `variants=[(label,column),...]` list so Definition A and B now run through one code path (parity
+by construction) instead of two hand-maintained read implementations.
+
+Full rebuild from scratch (checkpoint/partial cleared, no resume -- the store changed underneath the old checkpoint).
+
+### Availability rail, re-applied (report first, per instruction)
+| | RVOL_A(20) | RVOL_A(5) | RVOL_B |
+|---|---|---|---|
+| feature present | 5,452/5,506 = **99.0%** | 5,499/5,506 = **99.9%** | 5,430/5,506 = **98.6%** |
+| winner missingness | 1.2% | 0.1% | 1.4% |
+| loser missingness | 0.8% | 0.1% | 1.4% |
+| gap | **0.4pp** | **0.1pp** | **0.1pp** |
+| rail (>=80%, <=5pp) | **PASS** | **PASS** | **PASS** |
+
+Level-bar match failures: 0/5,506 (0.0%, down from 1,022 pre-backfill) -- the store gap that voided both definitions
+last run is gone. **All three variants now clear the availability rail.** These are real, valid reads.
+
+### Terciles, all three variants, both halves (n / mean net_R / iid t / day-clust t / MDE / ex-top5% / fills-wk)
+| variant | bucket | half | n | net_R | iid t | dc t | MDE | ex5% | fpw |
+|---|---|---|---|---|---|---|---|---|---|
+| A(20) | T1(low) | TRAIN-H2 | 739 | 0.033 | 0.65 | 0.40 | 0.141 | -0.069 | 27.4 |
+| A(20) | T2(mid) | TRAIN-H2 | 791 | -0.033 | -0.70 | -0.58 | 0.132 | -0.139 | 29.3 |
+| A(20) | T3(high) | TRAIN-H2 | 794 | -0.078 | -1.66 | -1.32 | 0.131 | -0.186 | 29.4 |
+| A(20) | T1(low) | VAL | 1079 | 0.035 | 0.85 | 0.52 | 0.117 | -0.066 | 49.0 |
+| A(20) | T2(mid) | VAL | 1025 | -0.062 | -1.51 | -0.90 | 0.115 | -0.168 | 46.6 |
+| A(20) | T3(high) | VAL | 1024 | -0.067 | -1.66 | -1.24 | 0.114 | -0.174 | 46.5 |
+| A(5) | T1(low) | TRAIN-H2 | 751 | -0.032 | -0.65 | -0.44 | 0.138 | -0.138 | 27.8 |
+| A(5) | T2(mid) | TRAIN-H2 | 792 | 0.034 | 0.70 | 0.49 | 0.135 | -0.069 | 29.3 |
+| A(5) | T3(high) | TRAIN-H2 | 804 | -0.065 | -1.41 | -1.14 | 0.130 | -0.171 | 29.8 |
+| A(5) | T1(low) | VAL | 1082 | 0.031 | 0.75 | 0.50 | 0.116 | -0.070 | 49.2 |
+| A(5) | T2(mid) | VAL | 1041 | -0.087 | -2.13 | -1.29 | 0.114 | -0.195 | 47.3 |
+| A(5) | T3(high) | VAL | 1029 | -0.033 | -0.82 | -0.65 | 0.114 | -0.137 | 46.8 |
+| B | T1(low) | TRAIN-H2 | 758 | -0.030 | -0.62 | -0.43 | 0.134 | -0.134 | 28.1 |
+| B | T2(mid) | TRAIN-H2 | 775 | 0.035 | 0.72 | 0.52 | 0.138 | -0.067 | 28.7 |
+| B | T3(high) | TRAIN-H2 | 783 | -0.081 | -1.71 | -1.30 | 0.133 | -0.188 | 29.0 |
+| B | T1(low) | VAL | 1052 | -0.055 | -1.37 | -0.89 | 0.112 | -0.162 | 47.8 |
+| B | T2(mid) | VAL | 1035 | -0.002 | -0.04 | -0.03 | 0.118 | -0.106 | 47.0 |
+| B | T3(high) | VAL | 1027 | -0.028 | -0.67 | -0.43 | 0.118 | -0.132 | 46.7 |
+
+No tercile in any variant clears +0.05R with t>=2.5 in even one half, let alone both. Signs are not even consistent
+within a variant across halves (A(20)/A(5) T1 flips sign between the two N's; B T1 is negative both halves while A's
+T1 is positive both halves) -- this is noise, not a suppressed real effect. Quintiles, top-tercile-vs-rest ΔR (all
+6 cells: TRAIN-H2/VAL x {A20,A5,B}, |t|<=1.3, MDE 0.066-0.078R), the stop-bucket interaction, and Spearman rho
+(|rho|<=0.05, TRAIN-H2 and VAL both, all 3 variants) are in `1665_reads.csv` (96 rows: 64 A + 32 B) -- none changes
+the verdict.
+
+### Pass-bar verdict
+Mechanically rebuilt against all 48 (cut,bucket) x variant combinations (terciles+quintiles+top-vs-rest+interaction):
+**0/48 pass** (net>=+0.05R AND day-clustered t>=2.5 AND ex-top5%>0 AND fills/wk>=3, both halves). Same result as the
+pre-backfill run's directional pattern (uniformly small, sign-inconsistent), but now on a valid, rail-clearing sample
+instead of a missingness-biased one.
+
+### Adequacy review (updated)
+MDE at the A(20)-valid n (5,452): **0.0506R**; at the B-valid n (5,430): **0.0507R** -- both essentially exactly at
+the +0.05R pass-bar floor, same as the full-book MDE (0.0504R at n=5,506). This read is now **adequately powered** to
+say relative volume to the arm minute (either RVOL definition, N=20 or N=5) carries no lift of the minimum tradeable
+size on this population, in this causal, fractional-minute-consistent form -- a real null, not a coverage artifact.
+It does not rule out a smaller lift (MDE for say +0.03R would need roughly (0.05/0.03)^2 ~=2.8x the n) or a
+non-linear/different functional form than terciles+quintiles+monotonic rho.
+
 ## Files
 `research/hod_entry/1665_features.csv` (5,506 rows: fill_id, day, symbol, split, r_pct, bucket_r, net_R, rvol_a20,
 rvol_a5, rvol_b [4,436/5,506 populated], m_arm, missing_level, missing_a20, missing_a5, n_prior_store_days);
