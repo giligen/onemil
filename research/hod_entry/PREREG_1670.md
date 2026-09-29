@@ -46,6 +46,17 @@ R4 the ADD (amendment 1, 2026-09-29 20:20 UTC, before any number; owner: "levera
    base on the whole open-at-k population. Reads: ΔR, iid and day-clustered t, ex-top-5 % ΔR, MDE, share added,
    the add's own R on the added subset, the dollar exposure at the add (2× the base) and the worst day in R.
    Variant A′: stop of the added unit at the level − $0.01 (the 1,488 geometry) — reported, not preferred.
+R5 the ADD after +R (amendment 2, 2026-09-29 20:30 UTC, before any number; owner: "add size after R maybe, or 1.5 R,
+   and then change exit rules so we can't lose… adding on the non-failures"): price-progress pyramids, with and without
+   the model. Rule P(r, lock): when the mark-to-market first reaches +r R (r ∈ {1.0, 1.5}) at a bar close, buy one
+   additional unit at the next bar's open (7 bps) and move the WHOLE position's stop to lock ∈ {entry (breakeven),
+   entry + 0.5 R}; target: the original 2 R for the whole (variant: 3 R for the whole). Rule P+M(r, lock): the same
+   add only when the ALL-model's P(T_k) at that bar ≥ 0.6 (the "non-failures" gate; k = the current minute, model
+   scored out of sample). Book in original-R units, paired vs the base on the whole book (fills that never reach +r R
+   contribute 0 ΔR). Reads: ΔR, iid and day-clustered t, ex-top-5 % ΔR, MDE, share reaching +r, the add's own R on the
+   added subset, give-back share (adds that end at the lock), exposure at the add, worst day. Prior: the exit lab's
+   breakeven lock at +1 R alone was −0.02 R; the add is the new element. Multiplicity: 2 r × 2 locks × 2 targets × 2
+   (with/without model) × 2 scorings = 32 paired reads.
 
 ## Pass bar
 A (k, τ, variant) cut, or an add A(k, τ), ships to paper only if paired ΔR ≥ +0.05 R, t ≥ 2.5, ex-top-5 % ΔR > 0 on
