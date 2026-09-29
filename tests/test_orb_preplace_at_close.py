@@ -51,6 +51,12 @@ def _base_cfg(preplace=True):
     cfg['entry'] = dict(cfg.get('entry') or {})
     cfg['entry']['preplace_at_close'] = preplace
     cfg['entry']['preplace_rank_lead_s'] = 3.0
+    # Tests must never depend on the live (gitignored, node-local) orb.yaml's
+    # value for this key -- it gained entry.preplace_submit_delay_s: 5.0 on
+    # 2026-09-29 (cell 1,655) and silently shifted every submit-timer
+    # interval assertion below. Pin the test-neutral default explicitly;
+    # `_engine_with_delay()` overrides this for the delay-specific tests.
+    cfg['entry']['preplace_submit_delay_s'] = 0.0
     return cfg
 
 
@@ -502,7 +508,14 @@ def _seed_pending(eng, sym='PEND', range_high=10.5):
 
 class TestSubmitDelayConfig:
     def test_missing_key_defaults_zero(self):
-        eng = _engine()  # _base_cfg never sets preplace_submit_delay_s
+        # _base_cfg() pins preplace_submit_delay_s to 0.0 for every other
+        # test in this module (see its docstring) -- delete it here so this
+        # test still exercises the true "key absent from config" path,
+        # independent of both that pin and whatever the live orb.yaml has.
+        cfg = _base_cfg()
+        del cfg['entry']['preplace_submit_delay_s']
+        eng = ORBEngine(alpaca_client=_mock_alpaca(), db=MagicMock(spec=Database),
+                         stop_monitor=MagicMock(spec=StopMonitor), config=cfg)
         assert eng.preplace_submit_delay_s == 0.0
 
     def test_negative_clamped_to_zero_with_warning(self, caplog):
