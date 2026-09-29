@@ -14,8 +14,9 @@ fills_1658.csv on (date,symbol), 1:1, exactly as cell 1,663's own join (validate
 | winner-vs-loser gap | **6.2pp** | **7.0pp** | need <=5pp |
 
 **Both N fail both legs of the availability rail (CLAUDE.md item 7 / PREREG's own rail) -> Definition A is VOID.**
-Definition B (ADV20 x P(m) fallback) was **not computed** -- out of the 45-tool-call budget once A's void was
-established this late in the run. This cell is INCONCLUSIVE, not closed; B is the pre-declared next step (see Adequacy
+Definition B (ADV20 x P(m) fallback) was computed in a follow-up pass (see "Definition B" section below) and is
+**also VOID** on the missingness-gap leg. With both A and B void, cell 1,665 is genuinely CLOSED on this population at
+this coverage -- not "no edge," a claim about what this store can resolve (see Adequacy
 review).
 
 **Root cause of the shortfall, traced (not just measured):** 1,022 / 5,506 fills (18.6%) have **zero** bars_sip.db
@@ -80,9 +81,64 @@ N and the definition were pre-declared (both N run, A is primary); no conditioni
 entered CV (search window and CV cutoff both stop at least 1 minute before the fill-containing bar); no same-day
 ratio computed; stop floor reused verbatim from 1663, not refit.
 
+## Definition B (coordinator follow-up, 2026-09-29 -- fresh 25-call budget)
+RVOL_B = CV(d, m_arm) / (ADV20(d-1) x P(m_arm)). CV(d,m_arm) reuses A's own `m_arm` (no re-search for the level bar,
+so this carries no new causality risk). ADV20(d-1): asof from `research/overnight_high/panel_2024_2026.parquet`,
+last panel row **strictly before** the fill date (same causal convention cell 1,663 used for ATR14). P(m): for every
+TRAIN-H2 (symbol,day) pair with that day present in the store, the cumulative-volume fraction (bars closed before m,
+same fractional-minute rule as CV, over 09:30-16:00 ET) at every integer minute 570..960; P(m) is the cross-sectional
+median of that fraction across 1,898 TRAIN-H2 (symbol,day) curves, looked up at each fill's own integer `m_arm`
+(re-estimating this from the *same* bars-store days already loaded for A, not a fresh broad pull, per the
+coordinator's instruction). A second bars_sip.db pass was required since raw bars from A's run were not persisted to
+disk (only the aggregated CV outputs were) -- 5/4,484 fills (0.11%) picked up a day now absent on re-fetch
+("unexpected re-fetch misses" in the log); negligible, noted rather than hidden.
+
+### B coverage vs. the rail
+| | RVOL_B |
+|---|---|
+| feature present | 4,436 / 5,506 = **80.6%** (clears the >=80% leg) |
+| winner missingness | 23.8% |
+| loser missingness | 16.7% |
+| winner-vs-loser gap | **7.1pp** (fails the <=5pp leg) |
+
+B clears coverage but fails the missingness-gap leg -- **B is also VOID.** The same winner/loser skew seen under A
+persists (winners more likely to lack a resolvable `m_arm`/day than losers), so B's diagnostic numbers below carry the
+same negative bias caveat as A's.
+
+### B reads (informational only -- VOID; read 1 + read 3 per the coordinator's scoped request)
+Terciles, pooled edges on available rows, both halves:
+
+| bucket | half | n | mean net_R | iid t | day-clust t | MDE | ex-top5% | fills/wk |
+|---|---|---|---|---|---|---|---|---|
+| T1(low) | TRAIN-H2 | 619 | -0.093 | -1.79 | -1.23 | 0.145 | -0.201 | 22.9 |
+| T2(mid) | TRAIN-H2 | 633 | -0.076 | -1.44 | -1.06 | 0.148 | -0.184 | 23.4 |
+| T3(high) | TRAIN-H2 | 622 | -0.153 | -2.95 | -2.15 | 0.145 | -0.264 | 23.0 |
+| T1(low) | VAL | 860 | -0.126 | -2.93 | -1.97 | 0.121 | -0.236 | 39.1 |
+| T2(mid) | VAL | 845 | -0.019 | -0.42 | -0.33 | 0.128 | -0.123 | 38.4 |
+| T3(high) | VAL | 857 | -0.087 | -1.92 | -1.32 | 0.127 | -0.195 | 39.0 |
+
+Quintiles (5 x 2 halves) and the stop-bucket x tercile interaction (2 x 3 x 2 halves) are in `1665_reads.csv`
+(cuts `read1_quintile_B`, `read3_interaction_B`). Same pattern as A: every tercile/quintile is net-negative both
+halves except two thin, non-significant `>=3%` interaction cells in VAL (T1/T2, net +0.12/+0.12 but day-clustered
+t 0.91/1.03, n 126/148 -- nowhere near t>=2.5). **0 / 14 (cut,bucket) combinations pass the pass bar** (same
+net>=+0.05R AND day-clustered t>=2.5 AND ex-top5%>0 AND fills/wk>=3 on both halves).
+
+### Combined verdict
+Both Definition A (N=20 and N=5) and Definition B fail the availability rail; 0/32 + 0/14 = **0/46 reads pass** across
+every pre-declared cut this cell ran. Per PREREG_1665's own rail language ("if both are VOID the cell is VOID and
+says why"): cell 1,665 is VOID -- relative volume to the arm minute cannot be resolved on this population at this
+bars_sip.db coverage (81% same-day, ~76-81% after the prior-session/P(m) requirements stack on top), and the
+resolvable subset is not a random sample (6-7pp winner/loser missingness gap under every variant tried). This is a
+statement about what bars_sip.db can currently answer, not a statement that relative volume carries no signal for
+HOD-break fills -- the adequacy review above (MDE ~0.05-0.06R against a +0.05R bar) already flags that even a valid
+read would be marginally powered at this n. Next step, if the owner wants this resolved rather than closed: backfill
+the missing symbol-days in bars_sip.db for this population (the 1,022+ day-level gaps are the root cause of every
+leg's failure), then re-run this exact script unmodified.
+
 ## Files
 `research/hod_entry/1665_features.csv` (5,506 rows: fill_id, day, symbol, split, r_pct, bucket_r, net_R, rvol_a20,
-rvol_a5, rvol_b [all-NaN, B not run], m_arm, missing_level, missing_a20, missing_a5, n_prior_store_days);
-`research/hod_entry/1665_reads.csv` (64 rows, one per (cut,bucket,half)); `research/hod_entry/1665_rvol.py`
-(feature build + `--stats-only` reads/coverage regeneration); `research/hod_entry/1665_rvol.log`. 0 ERROR/WARNING
-lines in the run log (clean join, no fallback paths triggered).
+rvol_a5, rvol_b [4,436/5,506 populated], m_arm, missing_level, missing_a20, missing_a5, n_prior_store_days);
+`research/hod_entry/1665_reads.csv` (92 rows: 64 Definition-A + 28 Definition-B, one per (cut,bucket,half));
+`research/hod_entry/1665_rvol.py` (feature build + `--stats-only` reads/coverage regeneration + `--defB` Definition-B
+pass); `research/hod_entry/1665_rvol.log` (both runs appended). 0 ERROR lines in the run log; the only WARNING-level
+signal is the 5-row re-fetch-miss count logged at INFO (see Definition B).

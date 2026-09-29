@@ -392,12 +392,184 @@ def print_coverage(feat: pd.DataFrame):
     log.info("symbols/fills with <10 prior store sessions: %d/%d (%.1f%%)", len(thin), n, len(thin) / n * 100)
 
 
+# ---------------------------------------------------------------------------
+# Definition B (fallback, only needed because A failed the availability rail --
+# see RESULT_1665.md "Coverage line"). PREREG_1665.md:
+#   RVOL_B = CV(d, m_arm) / (ADV20(d-1) x P(m_arm))
+#   ADV20 from research/overnight_high/panel_2024_2026.parquet, prior sessions only.
+#   P(m) = cross-sectional median of CV(d,m)/day-volume(d) by minute, TRAIN days only.
+# Coordinator's 2026-09-29 follow-up: P(m) is built from the SAME bars-store days
+# already loaded for A (the fills' own (symbol,day) pairs), not a fresh broad pull.
+# ---------------------------------------------------------------------------
+MARKET_CLOSE_MIN = 16 * 60  # 960, end of the regular session grid for day-volume/P(m)
+MINUTE_GRID = list(range(MARKET_OPEN_MIN, MARKET_CLOSE_MIN + 1))  # 570..960 inclusive
+
+
+def load_adv20_index(symbols):
+    """symbol -> (sorted bar_date as int64 ns array, adv20 array), for asof lookups."""
+    cols = ["symbol", "bar_date", "adv20"]
+    df = pd.read_parquet(PANEL_PARQUET, columns=cols)
+    df = df[df["symbol"].isin(set(symbols))].copy()
+    df["bar_date"] = pd.to_datetime(df["bar_date"]).values.astype("int64")
+    df = df.sort_values(["symbol", "bar_date"])
+    idx = {}
+    for sym, g in df.groupby("symbol"):
+        idx[sym] = (g["bar_date"].to_numpy(), g["adv20"].to_numpy())
+    return idx
+
+
+def asof_adv20(adv20_idx, symbol, date_str):
+    """ADV20 from the last panel row STRICTLY BEFORE date (prior sessions only --
+    same causal convention cell 1663 used for ATR14: 'last panel bar strictly
+    before the fill date')."""
+    if symbol not in adv20_idx:
+        return np.nan
+    dates, vals = adv20_idx[symbol]
+    d = pd.Timestamp(date_str).value
+    i = bisect.bisect_left(dates, d) - 1
+    if i < 0:
+        return np.nan
+    return float(vals[i])
+
+
+def day_total_volume(day_data):
+    """Regular-session total volume (09:30-16:00 ET) for one (symbol,day)."""
+    cv, n = cv_before(day_data, MARKET_CLOSE_MIN + 1)  # end<=960+1 => start<=960, i.e. incl. 960
+    return cv if n > 0 else 0.0
+
+
+def run_definition_b(feat: pd.DataFrame) -> pd.DataFrame:
+    """One more bounded per-symbol pass over bars_sip.db (same query shape as A) to
+    get (a) CV(d, m_arm) for every fill with a known m_arm [B's numerator -- reuses
+    A's own m_arm, no re-search for the level bar] and (b) TRAIN-H2 cumulative
+    volume-fraction curves on the 570..960 minute grid [feeds the cross-sectional
+    median P(m)]. Returns feat with an added/overwritten `rvol_b` column.
+    """
+    con = sqlite3.connect(f"file:{BARS_DB}?mode=ro", uri=True)
+    cur = con.cursor()
+    symbols = sorted(feat["symbol"].unique())
+    cv_at_marm = {}
+    train_curves = []
+    t0 = time.time()
+    for i, sym in enumerate(symbols):
+        sub = feat[feat["symbol"] == sym]
+        lo = (pd.Timestamp(sub["day"].min()) - pd.Timedelta(days=400)).strftime("%Y-%m-%d")
+        hi = sub["day"].max()
+        bars = fetch_symbol_bars(cur, sym, lo, hi)
+
+        known = sub[sub["missing_level"] == False]  # noqa: E712 -- pandas bool column
+        for _, r in known.iterrows():
+            day_data = bars.get(r["day"])
+            if day_data is None:
+                continue  # shouldn't happen (m_arm came from this same bars source); log via count below
+            cv, n = cv_before(day_data, int(r["m_arm"]))
+            if n > 0:
+                cv_at_marm[r["fill_id"]] = cv
+
+        train_days = sub[sub["split"] == "TRAIN-H2"]["day"].unique()
+        for day in train_days:
+            day_data = bars.get(day)
+            if day_data is None:
+                continue
+            dtot = day_total_volume(day_data)
+            if dtot <= 0:
+                continue
+            curve = np.array([cv_before(day_data, m)[0] for m in MINUTE_GRID], dtype=float) / dtot
+            train_curves.append(curve)
+
+        if (i + 1) % 200 == 0:
+            log.info("[defB] %d/%d symbols, elapsed %.0fs", i + 1, len(symbols), time.time() - t0)
+
+    n_missing_cv = len(feat[feat["missing_level"] == False]) - len(cv_at_marm)  # noqa: E712
+    log.info("[defB] DONE %d symbols in %.0fs; CV(d,m_arm) resolved for %d fills (%d unexpected re-fetch misses)",
+              len(symbols), time.time() - t0, len(cv_at_marm), n_missing_cv)
+
+    P = np.nanmedian(np.vstack(train_curves), axis=0) if train_curves else np.full(len(MINUTE_GRID), np.nan)
+    log.info("[defB] P(m) built from %d TRAIN-H2 (symbol,day) curves", len(train_curves))
+
+    adv20_idx = load_adv20_index(symbols)
+    minute_to_idx = {m: i for i, m in enumerate(MINUTE_GRID)}
+
+    rvol_b = []
+    for _, r in feat.iterrows():
+        fid = r["fill_id"]
+        if fid not in cv_at_marm:
+            rvol_b.append(np.nan)
+            continue
+        m = int(r["m_arm"])
+        pidx = minute_to_idx.get(m)
+        p_m = P[pidx] if pidx is not None else np.nan
+        adv20 = asof_adv20(adv20_idx, r["symbol"], r["day"])
+        denom = adv20 * p_m if (not np.isnan(adv20) and not np.isnan(p_m) and p_m > 0) else np.nan
+        rvol_b.append(cv_at_marm[fid] / denom if denom and denom > 0 else np.nan)
+
+    feat = feat.copy()
+    feat["rvol_b"] = rvol_b
+    n = len(feat)
+    miss = feat["rvol_b"].isna().sum()
+    cov = 1 - miss / n
+    winners = feat[feat["net_R"] > 0]
+    losers = feat[feat["net_R"] <= 0]
+    wm = winners["rvol_b"].isna().mean()
+    lm = losers["rvol_b"].isna().mean()
+    log.info("[defB] RVOL_B coverage: %d/%d (%.1f%%); winner missing %.1f%% vs loser missing %.1f%% (gap %.1fpp)",
+              n - miss, n, cov * 100, wm * 100, lm * 100, abs(wm - lm) * 100)
+    return feat
+
+
+def generate_reads_b(feat: pd.DataFrame) -> pd.DataFrame:
+    """Reads 1 (terciles+quintiles) and 3 (stop-bucket x tercile interaction) for
+    RVOL_B only -- the coordinator's 2026-09-29 follow-up scoped B to these two."""
+    rows = []
+    floored = feat
+    wk_denom = {h: weeks_spanned(floored[floored["split"] == h]["day"]) for h in floored["split"].unique()}
+    valid = floored[floored["rvol_b"].notna()].copy()
+    if len(valid) == 0:
+        log.warning("RVOL_B: zero valid rows, no reads generated")
+        return pd.DataFrame(rows)
+    valid["tercile"] = pd.qcut(valid["rvol_b"], 3, labels=["T1(low)", "T2(mid)", "T3(high)"], duplicates="drop")
+    valid["quintile"] = pd.qcut(valid["rvol_b"], 5, labels=["Q1", "Q2", "Q3", "Q4", "Q5"], duplicates="drop")
+
+    for half in sorted(valid["split"].unique()):
+        hv = valid[valid["split"] == half]
+        wk = wk_denom.get(half, np.nan)
+        for t in hv["tercile"].cat.categories:
+            rows.append(row_stats(hv[hv["tercile"] == t], wk, str(t), half, "read1_tercile_B"))
+        for q in hv["quintile"].cat.categories:
+            rows.append(row_stats(hv[hv["quintile"] == q], wk, str(q), half, "read1_quintile_B"))
+        for b in sorted(hv["bucket_r"].dropna().unique()):
+            for t in hv["tercile"].cat.categories:
+                cell = hv[(hv["bucket_r"] == b) & (hv["tercile"] == t)]
+                rows.append(row_stats(cell, wk, f"{b}|{t}", half, "read3_interaction_B"))
+    return pd.DataFrame(rows)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--mode", default="A", choices=["A", "B"])
     ap.add_argument("--stats-only", action="store_true", help="skip feature build, read existing 1665_features.csv")
+    ap.add_argument("--defB", action="store_true", help="compute Definition B, append its reads, update rvol_b column")
     args = ap.parse_args()
+
+    if args.defB:
+        log.info("=== 1665_rvol --defB (coordinator follow-up 2026-09-29) ===")
+        feat = pd.read_csv(OUT_FEATURES)
+        feat = run_definition_b(feat)
+        tmp = OUT_FEATURES + ".defB.tmp"
+        feat.to_csv(tmp, index=False)
+        os.replace(tmp, OUT_FEATURES)
+        log.info("rvol_b column written into %s (atomic replace)", OUT_FEATURES)
+
+        reads_b = generate_reads_b(feat)
+        reads_path = f"{ROOT}/research/hod_entry/1665_reads.csv"
+        existing = pd.read_csv(reads_path)
+        combined = pd.concat([existing, reads_b], ignore_index=True)
+        tmp2 = reads_path + ".tmp"
+        combined.to_csv(tmp2, index=False)
+        os.replace(tmp2, reads_path)
+        log.info("appended %d Definition-B rows to %s (%d total)", len(reads_b), reads_path, len(combined))
+        return
 
     if args.stats_only:
         log.info("=== 1665_rvol --stats-only ===")
