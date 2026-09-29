@@ -12,12 +12,20 @@ Sends notifications via Telegram for all trading events:
 - Errors (NO SILENT FAILURES)
 
 Uses aiohttp for async HTTP requests to Telegram API.
+
+Flood control (added 2026-09-29): the engine pushed 144 identical ERROR
+lines to Telegram in 30s, drawing 68x HTTP 429 "Too Many Requests" before
+this existed. Every send now goes through two gates before it touches the
+network — see `_dedup_gate` and `_rate_cap_gate` — and a 429 response is
+honoured once, never looped on.
 """
 
 import logging
 import asyncio
 import html
+import time
 import aiohttp
+from collections import deque
 from typing import Optional, Dict, List, Any
 from datetime import datetime, timezone, date
 
@@ -30,6 +38,14 @@ class TelegramNotifier:
 
     Sends formatted HTML messages to Telegram for various trading events.
     NO SILENT FAILURES - all errors are logged and reported.
+
+    Every send passes through flood control before it reaches the network:
+    exact-duplicate text within `_dedup_window_s` is suppressed, and no
+    more than `_rate_limit_max` sends go out per rolling
+    `_rate_limit_window_s`. Both gates are shared by every caller of
+    `send_message` / `send_message_sync`, including `TelegramErrorHandler`
+    (monitoring/telegram_error_handler.py), which delegates its transport
+    to an internal instance of this class for that reason.
     """
 
     def __init__(
@@ -52,6 +68,24 @@ class TelegramNotifier:
 
         self.api_url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
 
+        # --- Flood control state ---
+        # Dedup: suppress a message whose text matches the last SENT message
+        # within this window. Anchored on the last actual send, not on each
+        # suppressed attempt, so a message repeating faster than the window
+        # still gets a heartbeat send roughly once per window.
+        self._dedup_window_s: float = 60.0
+        self._last_text: Optional[str] = None
+        self._last_text_time: float = 0.0
+        self._suppressed_dup_count: int = 0
+
+        # Rate cap: at most N sends per rolling window. Beyond the cap,
+        # sends are dropped (not queued) and counted; a single summary line
+        # goes out ahead of the next message once the window frees capacity.
+        self._rate_limit_max: int = 20
+        self._rate_limit_window_s: float = 60.0
+        self._send_times: deque = deque()
+        self._rate_suppressed_count: int = 0
+
         if self.enabled:
             if not self.bot_token or not self.chat_id:
                 logger.error("Telegram enabled but bot_token or chat_id not configured")
@@ -62,24 +96,117 @@ class TelegramNotifier:
             logger.info("Telegram notifications disabled")
 
     # =========================================================================
+    # Flood control
+    # =========================================================================
+
+    def _dedup_gate(self, message: str, now: float) -> Optional[str]:
+        """
+        Suppress exact-duplicate text sent within the dedup window.
+
+        Returns None if `message` is identical to the last SENT message and
+        less than `_dedup_window_s` has elapsed (the send is suppressed).
+        Otherwise returns the text to actually send: `message` itself, or
+        `message` with a "(+N identical suppressed)" suffix if earlier
+        duplicates were folded into this one.
+        """
+        if self._last_text == message and (now - self._last_text_time) < self._dedup_window_s:
+            self._suppressed_dup_count += 1
+            logger.warning(
+                f"Telegram dedup: suppressing duplicate #{self._suppressed_dup_count} "
+                f"(identical to message sent {now - self._last_text_time:.1f}s ago)"
+            )
+            return None
+
+        suffix_count = self._suppressed_dup_count
+        self._last_text = message
+        self._last_text_time = now
+        self._suppressed_dup_count = 0
+
+        if suffix_count:
+            return f"{message} (+{suffix_count} identical suppressed)"
+        return message
+
+    def _rate_cap_gate(self, message: str, now: float) -> List[str]:
+        """
+        Cap actual sends to `_rate_limit_max` per rolling `_rate_limit_window_s`.
+
+        Beyond the cap, the send is dropped (not queued) and counted. Once
+        the window frees enough room for a send, a single summary line
+        ("suppressed N messages in the last minute") is emitted ahead of
+        the next real message.
+
+        Returns the message texts to transmit, in order: empty (this send
+        was capped), one entry (just `message`), or two entries (the
+        summary line, then `message`).
+        """
+        while self._send_times and (now - self._send_times[0]) >= self._rate_limit_window_s:
+            self._send_times.popleft()
+
+        if len(self._send_times) >= self._rate_limit_max:
+            self._rate_suppressed_count += 1
+            logger.warning(
+                f"Telegram rate cap hit ({self._rate_limit_max}/"
+                f"{int(self._rate_limit_window_s)}s) — dropping send "
+                f"(#{self._rate_suppressed_count} suppressed this window)"
+            )
+            return []
+
+        outgoing: List[str] = []
+        if self._rate_suppressed_count:
+            outgoing.append(
+                f"⚠️ Telegram: suppressed {self._rate_suppressed_count} "
+                f"messages in the last minute"
+            )
+            self._send_times.append(now)
+            self._rate_suppressed_count = 0
+
+        outgoing.append(message)
+        self._send_times.append(now)
+        return outgoing
+
+    # =========================================================================
     # Core Send
     # =========================================================================
 
     async def send_message(self, message: str, parse_mode: str = "HTML") -> bool:
         """
-        Send a message to Telegram.
+        Send a message to Telegram, subject to flood control.
 
         Args:
             message: Message text (supports HTML formatting)
             parse_mode: Telegram parse mode ('HTML' or 'Markdown')
 
         Returns:
-            True if sent successfully, False otherwise
+            True if the last message this call transmitted got a 200 from
+            Telegram. False if nothing was transmitted (disabled, or fully
+            suppressed by dedup/rate-cap) or the API call failed.
         """
         if not self.enabled:
             logger.debug(f"Telegram disabled, would have sent:\n{message}")
             return False
 
+        now = time.monotonic()
+        gated = self._dedup_gate(message, now)
+        if gated is None:
+            return False
+
+        outgoing = self._rate_cap_gate(gated, now)
+        if not outgoing:
+            return False
+
+        ok = False
+        for text in outgoing:
+            ok = await self._post_message(text, parse_mode)
+        return ok
+
+    async def _post_message(self, message: str, parse_mode: str = "HTML") -> bool:
+        """
+        Transmit one message to the Telegram API.
+
+        No dedup/rate-cap here — `send_message` is responsible for flood
+        control; this method only handles wire format, length truncation,
+        the HTML-parse-error plain-text fallback, and a single 429 retry.
+        """
         try:
             # Telegram max message length is 4096 chars
             if len(message) > 4096:
@@ -100,6 +227,8 @@ class TelegramNotifier:
                     if response.status == 200:
                         logger.debug("Telegram message sent successfully")
                         return True
+                    elif response.status == 429:
+                        return await self._handle_rate_limited(session, payload, timeout, response)
                     elif response.status == 400 and "parse entities" in (await response.text()):
                         # HTML parse error — retry without parse_mode (plain text)
                         logger.warning("Telegram HTML parse error — retrying as plain text")
@@ -125,6 +254,55 @@ class TelegramNotifier:
         except Exception as e:
             logger.error(f"Unexpected error sending Telegram message: {e}")
             return False
+
+    async def _handle_rate_limited(self, session, payload, timeout, response) -> bool:
+        """
+        Honour a Telegram 429 "Too Many Requests" response exactly once.
+
+        Reads `retry_after` from the JSON body (Telegram's documented
+        field) falling back to the `Retry-After` header. Sleeps at most 5s
+        and retries a single time; if `retry_after` exceeds 5s, or the
+        retry also fails, the message is dropped with one WARNING. Never
+        loops on 429 — this is what turned into 68 repeated 429s on
+        2026-09-29.
+        """
+        retry_after = None
+        try:
+            body = await response.json()
+            retry_after = (body or {}).get("parameters", {}).get("retry_after")
+        except Exception:
+            retry_after = None
+
+        if retry_after is None:
+            header_val = response.headers.get("Retry-After")
+            if header_val is not None:
+                try:
+                    retry_after = float(header_val)
+                except ValueError:
+                    retry_after = None
+
+        if retry_after is None or retry_after > 5:
+            logger.warning(
+                f"Telegram 429 Too Many Requests — retry_after="
+                f"{retry_after if retry_after is not None else 'unknown'}s "
+                f"exceeds 5s cap, dropping message"
+            )
+            return False
+
+        logger.warning(
+            f"Telegram 429 Too Many Requests — sleeping {retry_after}s then retrying once"
+        )
+        await asyncio.sleep(retry_after)
+
+        async with session.post(self.api_url, json=payload, timeout=timeout) as retry_response:
+            if retry_response.status == 200:
+                logger.debug("Telegram message sent after 429 retry")
+                return True
+            else:
+                logger.warning(
+                    f"Telegram send dropped after 429 retry (status {retry_response.status})"
+                )
+                return False
 
     def send_message_sync(self, message: str, parse_mode: str = "HTML") -> bool:
         """

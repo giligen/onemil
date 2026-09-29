@@ -2,13 +2,19 @@
 Custom logging handler to send ERROR level logs to Telegram.
 
 Sends real-time notifications for all ERROR level log messages.
-Includes deduplication to avoid spam from repeated errors.
 NO SILENT FAILURES - every error is reported.
+
+Transport is delegated to a `TelegramNotifier` instance (2026-09-29: this
+handler used to POST directly with only a mod-10 duplicate counter, no
+rate cap and no 429 handling; 144 identical ERRORs in 30s drew 68x HTTP
+429 before the owner saw a wall of errors). Delegating means this handler
+shares the same dedup + rate-cap + 429-retry gate as every other Telegram
+send path instead of a second, weaker copy of it — see
+notifications/telegram_notifier.py.
 """
 
 import logging
 import asyncio
-import aiohttp
 import html
 import sys
 import threading
@@ -16,14 +22,19 @@ import traceback
 from typing import Optional
 from datetime import datetime, timezone
 
+from notifications.telegram_notifier import TelegramNotifier
+
 
 class TelegramErrorHandler(logging.Handler):
     """
     Logging handler that sends ERROR level messages to Telegram.
 
     Sends formatted error notifications with timestamp, logger name,
-    file location, and full error message. Deduplicates repeated errors
-    (sends every 10th duplicate).
+    file location, and full error message. Applies a cheap mod-10
+    duplicate counter of its own (same formatted record seen back to
+    back) before handing anything to the shared TelegramNotifier, which
+    then applies the real flood control (60s exact-text dedup, 20/min
+    rate cap, single 429 retry) shared with every other Telegram sender.
     """
 
     # Loggers whose ERRORs are external/expected — not actionable bugs.
@@ -47,6 +58,9 @@ class TelegramErrorHandler(logging.Handler):
         self.chat_id = chat_id
         self.api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
 
+        # Shared transport: dedup, rate cap and 429 handling all live here.
+        self._notifier = TelegramNotifier(bot_token=bot_token, chat_id=chat_id, enabled=True)
+
         self.last_error: Optional[str] = None
         self.last_error_count: int = 0
 
@@ -58,8 +72,10 @@ class TelegramErrorHandler(logging.Handler):
         """
         Emit a log record by sending it to Telegram.
 
-        Called for every ERROR level log message. Deduplicates repeated errors.
-        Skips noisy external-API loggers (yfinance, float_provider).
+        Called for every ERROR level log message. Skips noisy external-API
+        loggers (yfinance, float_provider). Applies a mod-10 pre-filter for
+        the exact same formatted record repeating back to back; the actual
+        send then goes through the shared TelegramNotifier's flood control.
         """
         # Filter out noise from external APIs — these are not application bugs
         for noisy in self.NOISY_LOGGERS:
@@ -129,24 +145,14 @@ class TelegramErrorHandler(logging.Handler):
             print(f"[TelegramErrorHandler] _send_sync failed: {e}", file=sys.stderr)
 
     async def _send_to_telegram(self, message: str) -> None:
-        """Send message to Telegram using aiohttp."""
+        """
+        Send message to Telegram via the shared TelegramNotifier gate.
+
+        Delegates to TelegramNotifier.send_message so this handler's
+        floods are deduped and rate-capped by the same mechanism as every
+        other Telegram send path, with the same single-retry 429 handling.
+        """
         try:
-            async with aiohttp.ClientSession() as session:
-                payload = {
-                    'chat_id': self.chat_id,
-                    'text': message,
-                    'parse_mode': 'HTML',
-                    'disable_web_page_preview': True,
-                }
-                timeout = aiohttp.ClientTimeout(total=5.0)
-                async with session.post(self.api_url, json=payload, timeout=timeout) as response:
-                    if response.status != 200:
-                        response_text = await response.text()
-                        print(
-                            f"[TelegramErrorHandler] HTTP {response.status}: {response_text}",
-                            file=sys.stderr,
-                        )
-        except asyncio.TimeoutError:
-            print("[TelegramErrorHandler] Request timed out", file=sys.stderr)
+            await self._notifier.send_message(message, parse_mode="HTML")
         except Exception as e:
             print(f"[TelegramErrorHandler] _send_to_telegram failed: {e}", file=sys.stderr)

@@ -304,3 +304,139 @@ class TestDailyReport:
             'open_positions': 0,
         }
         notifier.send_daily_report(report)
+
+
+# ---------------------------------------------------------------------------
+# Flood control (2026-09-29 incident: 144 identical ERRORs in 30s -> 68x 429)
+# ---------------------------------------------------------------------------
+
+class TestDedupGate:
+    """Tests for TelegramNotifier._dedup_gate (60s exact-text dedup)."""
+
+    def test_first_message_passes_through(self, enabled_notifier):
+        out = enabled_notifier._dedup_gate("hello", now=100.0)
+        assert out == "hello"
+
+    def test_identical_within_window_suppressed(self, enabled_notifier):
+        enabled_notifier._dedup_gate("hello", now=100.0)
+        out = enabled_notifier._dedup_gate("hello", now=110.0)
+        assert out is None
+        assert enabled_notifier._suppressed_dup_count == 1
+
+    def test_suppressed_count_carries_as_suffix_on_next_distinct_message(self, enabled_notifier):
+        enabled_notifier._dedup_gate("hello", now=100.0)
+        enabled_notifier._dedup_gate("hello", now=110.0)  # suppressed, count=1
+        enabled_notifier._dedup_gate("hello", now=115.0)  # suppressed, count=2
+        out = enabled_notifier._dedup_gate("goodbye", now=120.0)
+        assert out == "goodbye (+2 identical suppressed)"
+
+    def test_identical_after_window_sends_again(self, enabled_notifier):
+        enabled_notifier._dedup_gate("hello", now=100.0)
+        out = enabled_notifier._dedup_gate("hello", now=161.0)  # 61s later
+        assert out == "hello"
+
+
+class TestRateCapGate:
+    """Tests for TelegramNotifier._rate_cap_gate (20 sends / rolling 60s)."""
+
+    def test_under_cap_passes_through(self, enabled_notifier):
+        out = enabled_notifier._rate_cap_gate("msg", now=0.0)
+        assert out == ["msg"]
+
+    def test_cap_drops_beyond_limit(self, enabled_notifier):
+        for i in range(20):
+            enabled_notifier._rate_cap_gate(f"msg{i}", now=float(i))
+        out = enabled_notifier._rate_cap_gate("msg20", now=20.0)
+        assert out == []
+        assert enabled_notifier._rate_suppressed_count == 1
+
+    def test_summary_sent_once_window_frees(self, enabled_notifier):
+        for i in range(20):
+            enabled_notifier._rate_cap_gate(f"msg{i}", now=float(i))
+        for i in range(5):
+            enabled_notifier._rate_cap_gate("overflow", now=25.0)
+        out = enabled_notifier._rate_cap_gate("next", now=61.0)
+        assert len(out) == 2
+        assert "suppressed 5 messages in the last minute" in out[0]
+        assert out[1] == "next"
+        assert enabled_notifier._rate_suppressed_count == 0
+
+
+class TestSendMessageDedupIntegration:
+    """send_message end-to-end: dedup suppresses the HTTP call entirely."""
+
+    @pytest.mark.asyncio
+    async def test_duplicate_send_makes_only_one_http_call(self, enabled_notifier):
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_post_cm = MagicMock()
+        mock_post_cm.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_post_cm.__aexit__ = AsyncMock(return_value=False)
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=mock_post_cm)
+        mock_session_cm = MagicMock()
+        mock_session_cm.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_cm.__aexit__ = AsyncMock(return_value=False)
+
+        with patch('notifications.telegram_notifier.aiohttp.ClientSession', return_value=mock_session_cm):
+            first = await enabled_notifier.send_message("dup text")
+            second = await enabled_notifier.send_message("dup text")
+            assert first is True
+            assert second is False
+            assert mock_session.post.call_count == 1
+
+
+class TestRateLimitHandling:
+    """send_message end-to-end: HTTP 429 handling."""
+
+    @pytest.mark.asyncio
+    async def test_429_with_short_retry_after_retries_once(self, enabled_notifier):
+        rate_limited = MagicMock()
+        rate_limited.status = 429
+        rate_limited.json = AsyncMock(return_value={"parameters": {"retry_after": 1}})
+        rate_limited.headers = {}
+        cm_429 = MagicMock()
+        cm_429.__aenter__ = AsyncMock(return_value=rate_limited)
+        cm_429.__aexit__ = AsyncMock(return_value=False)
+
+        ok_response = MagicMock()
+        ok_response.status = 200
+        cm_ok = MagicMock()
+        cm_ok.__aenter__ = AsyncMock(return_value=ok_response)
+        cm_ok.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(side_effect=[cm_429, cm_ok])
+        mock_session_cm = MagicMock()
+        mock_session_cm.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_cm.__aexit__ = AsyncMock(return_value=False)
+
+        with patch('notifications.telegram_notifier.aiohttp.ClientSession', return_value=mock_session_cm), \
+             patch('notifications.telegram_notifier.asyncio.sleep', new=AsyncMock()) as mock_sleep:
+            result = await enabled_notifier.send_message("rate me")
+            assert result is True
+            mock_sleep.assert_awaited_once_with(1)
+            assert mock_session.post.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_429_with_long_retry_after_drops_without_retry(self, enabled_notifier):
+        rate_limited = MagicMock()
+        rate_limited.status = 429
+        rate_limited.json = AsyncMock(return_value={"parameters": {"retry_after": 30}})
+        rate_limited.headers = {}
+        cm_429 = MagicMock()
+        cm_429.__aenter__ = AsyncMock(return_value=rate_limited)
+        cm_429.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=cm_429)
+        mock_session_cm = MagicMock()
+        mock_session_cm.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_cm.__aexit__ = AsyncMock(return_value=False)
+
+        with patch('notifications.telegram_notifier.aiohttp.ClientSession', return_value=mock_session_cm), \
+             patch('notifications.telegram_notifier.asyncio.sleep', new=AsyncMock()) as mock_sleep:
+            result = await enabled_notifier.send_message("rate me long")
+            assert result is False
+            mock_sleep.assert_not_awaited()
+            assert mock_session.post.call_count == 1
