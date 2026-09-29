@@ -63,3 +63,10 @@ AND the mean volume of bars fill+1..fill+k ≥ 1.5 × v(break bar) — heavy vol
 absorbed). S8 is its mirror (no progress on thin volume). Part B gains the continuous feature "progress per unit volume"
 = (close(fill+k) − fill) / (fill − stop) ÷ (Σ v(fill+1..fill+k) / v(break bar)). Multiplicity: Part A becomes 9 × 4 × 2
 = 72 paired reads. Thresholds 0.25 R and 1.5× are fixed here and never tuned.
+
+## Amendment 2 (2026-09-29 18:55 UTC, before any number; owner: "if the open/close/high/low shape supports?")
+Part B gains bar-shape features computed on bars fill+1..fill+k (never the fill bar): close location value of the last
+bar, CLV = (close − low) / (high − low); the mean CLV over the k bars; the lower-wick share of the last bar,
+(min(open, close) − low) / (high − low); the body share, |close − open| / (high − low); and the share of red bars. No
+new Part A rule (multiplicity unchanged). These are features for the out-of-sample classifier only; a permutation
+importance table is reported so the owner sees whether shape carries anything once volume and progress are known.
