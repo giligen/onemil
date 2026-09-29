@@ -1,0 +1,14 @@
+2026-09-26 11:36:34,851 [start] 9911 fills total, 0 already written, resuming
+2026-09-26 11:37:01,202 [progress] day 20/230 (2025-07-29) | written 493 | no_cache_key 12 | no_bars 0 | 26s elapsed
+2026-09-26 11:37:34,815 [progress] day 40/230 (2025-08-26) | written 1158 | no_cache_key 23 | no_bars 0 | 60s elapsed
+2026-09-26 11:38:04,785 [progress] day 60/230 (2025-09-24) | written 1655 | no_cache_key 35 | no_bars 0 | 90s elapsed
+2026-09-26 11:38:50,498 [progress] day 80/230 (2025-10-22) | written 2510 | no_cache_key 51 | no_bars 0 | 136s elapsed
+2026-09-26 11:39:38,782 [progress] day 100/230 (2025-11-19) | written 3537 | no_cache_key 68 | no_bars 0 | 184s elapsed
+2026-09-26 11:40:19,270 [progress] day 120/230 (2025-12-18) | written 4244 | no_cache_key 78 | no_bars 0 | 224s elapsed
+2026-09-26 11:40:57,109 [progress] day 140/230 (2026-01-20) | written 5033 | no_cache_key 87 | no_bars 0 | 262s elapsed
+2026-09-26 11:41:54,978 [progress] day 160/230 (2026-02-18) | written 6109 | no_cache_key 111 | no_bars 0 | 320s elapsed
+2026-09-26 11:42:48,026 [progress] day 180/230 (2026-03-18) | written 7077 | no_cache_key 129 | no_bars 0 | 373s elapsed
+2026-09-26 11:43:37,644 [progress] day 200/230 (2026-04-16) | written 8015 | no_cache_key 144 | no_bars 0 | 423s elapsed
+2026-09-26 11:44:36,950 [progress] day 220/230 (2026-05-14) | written 9243 | no_cache_key 168 | no_bars 0 | 482s elapsed
+2026-09-26 11:45:10,584 [progress] day 230/230 (2026-05-29) | written 9911 | no_cache_key 174 | no_bars 0 | 516s elapsed
+2026-09-26 11:45:10,585 [done] written 9911 new rows, 0 already-done rows skipped, no_cache_key 174, no_bars 0, total time 516s

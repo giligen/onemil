@@ -1,0 +1,28 @@
+[13:27:09] === cell_1480 start ===
+[13:27:10] corrected_cost: 6523 nbbo-src rows, 0 fell back to fill_instant formula (0.0% of nbbo-src)
+[13:27:10] load_base: 13/9911 rows have a negative recovered exit_half (cell_1445.py: "half_entry can be negative for a small ..." -- same identity, not clipped)
+[13:28:11] find_candidates: scanned 9911 fills, 8627 bar-level failed-break candidates
+[13:28:11] cap_candidates: TRAIN-H2 has 3811 candidates > cap 1500 -- random.Random(1480) sampled 1500, dropped 2311
+[13:28:11] cap_candidates: VAL has 4816 candidates > cap 1500 -- random.Random(1480) sampled 1500, dropped 3316
+[13:28:11] fetching 3000 candidate minute windows (cache: /home/ec2-user/onemil/research/hod_entry/sip_cache_1480)...
+[13:29:19]   ... 200/3000 fetched (128 priced, 18 bar/tick disagreements, 0 fetch errors)
+[13:30:28]   ... 400/3000 fetched (245 priced, 43 bar/tick disagreements, 0 fetch errors)
+[13:31:37]   ... 600/3000 fetched (386 priced, 61 bar/tick disagreements, 0 fetch errors)
+[13:32:44]   ... 800/3000 fetched (519 priced, 86 bar/tick disagreements, 0 fetch errors)
+[13:33:50]   ... 1000/3000 fetched (653 priced, 105 bar/tick disagreements, 0 fetch errors)
+[13:34:55]   ... 1200/3000 fetched (799 priced, 119 bar/tick disagreements, 0 fetch errors)
+[13:36:04]   ... 1400/3000 fetched (930 priced, 147 bar/tick disagreements, 0 fetch errors)
+[13:37:11]   ... 1600/3000 fetched (1067 priced, 169 bar/tick disagreements, 0 fetch errors)
+[13:38:18]   ... 1800/3000 fetched (1196 priced, 186 bar/tick disagreements, 0 fetch errors)
+[13:39:24]   ... 2000/3000 fetched (1335 priced, 202 bar/tick disagreements, 0 fetch errors)
+[13:40:27]   ... 2200/3000 fetched (1482 priced, 219 bar/tick disagreements, 0 fetch errors)
+[13:41:32]   ... 2400/3000 fetched (1614 priced, 238 bar/tick disagreements, 0 fetch errors)
+[13:42:31]   ... 2600/3000 fetched (1740 priced, 256 bar/tick disagreements, 0 fetch errors)
+[13:43:33]   ... 2800/3000 fetched (1863 priced, 281 bar/tick disagreements, 0 fetch errors)
+[13:44:36]   ... 3000/3000 fetched (1989 priced, 298 bar/tick disagreements, 0 fetch errors)
+[13:44:37] fetch stage done: 3000 fetched, 1990 priced, 298 bar/tick disagreements, 712 no-quote, 0 fetch errors
+[13:44:39] attach_ssr_shortable: 63/1990 symbols missing from the borrow-flags asset dump -- shortable defaulted False for those (counted, not silently dropped)
+[13:44:45] wrote /home/ec2-user/onemil/research/hod_entry/cell_1480_fills.csv (1990 rows)
+[13:44:45] TRAIN-H2: n_primary=958/999 mean_short_net_R=-0.5322 t=-8.58 extop5=-0.6634 shorts_wk=35.48 long_delta_mean=-0.0350 share_shortable=0.58 share_ssr_true=0.041 share_ssr_nan=0.000
+[13:44:45] VAL: n_primary=938/991 mean_short_net_R=-0.6770 t=-12.59 extop5=-0.8156 shorts_wk=42.64 long_delta_mean=-0.0977 share_shortable=0.60 share_ssr_true=0.053 share_ssr_nan=0.000
+[13:44:45] === cell_1480 END ===

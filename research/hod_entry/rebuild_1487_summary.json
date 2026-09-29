@@ -1,0 +1,38 @@
+{
+  "reason_agree": 1.0,
+  "elig_agree": 1.0,
+  "primary": {
+    "label": "1487 primary (entered, not below_floor)",
+    "jaccard": 1.0,
+    "share_0_01": 1.0,
+    "val_mine": -0.045013675323200754,
+    "val_theirs": -0.045013675323200775,
+    "n_mine": 797,
+    "n_theirs": 797,
+    "n_joined": 797,
+    "max_abs_diff": 2.9531932455029164e-14
+  },
+  "all_entered": {
+    "label": "1487 all entered",
+    "jaccard": 1.0,
+    "share_0_01": 1.0,
+    "val_mine": -0.14155206828060932,
+    "val_theirs": -0.14155206828060798,
+    "n_mine": 879,
+    "n_theirs": 879,
+    "n_joined": 879,
+    "max_abs_diff": 6.3860028376439e-13
+  },
+  "pyramid_1488": {
+    "label": "1488 pyramid",
+    "jaccard": 0.906712172923777,
+    "share_0_01": 1.0,
+    "val_mine": 0.2051822579303606,
+    "val_theirs": 0.25211127277428985,
+    "n_mine": 879,
+    "n_theirs": 797,
+    "n_joined": 797,
+    "max_abs_diff": 2.2648549702353193e-14
+  },
+  "n_disagree_reason": 0
+}

@@ -1,0 +1,108 @@
+{
+  "original": {
+    "auc_hgb": 0.9939,
+    "n_kept_hgb": 2004,
+    "mean_R_hgb": 0.3164,
+    "auc_lr": 0.9674,
+    "n_kept_lr": 1973,
+    "mean_R_lr": 0.3373,
+    "top10": [
+      [
+        "f_atr_pct_old",
+        0.2358
+      ],
+      [
+        "prior_volume",
+        0.2242
+      ],
+      [
+        "range_to_j",
+        0.0012
+      ],
+      [
+        "rv_at_j",
+        0.0005
+      ],
+      [
+        "gap_pct",
+        0.0004
+      ],
+      [
+        "prior_rvol",
+        0.0002
+      ],
+      [
+        "vwap_distance_pct",
+        0.0002
+      ],
+      [
+        "sector_peers_j",
+        0.0002
+      ],
+      [
+        "arm_index",
+        0.0001
+      ],
+      [
+        "higher_lows_ct",
+        0.0001
+      ]
+    ]
+  },
+  "corrected": {
+    "auc_hgb": 0.9288,
+    "n_kept_hgb": 2316,
+    "mean_R_hgb": -0.0744,
+    "auc_lr": 0.8205,
+    "n_kept_lr": 2309,
+    "mean_R_lr": -0.0248,
+    "top10": [
+      [
+        "prior_volume",
+        0.3196
+      ],
+      [
+        "range_to_j",
+        0.0796
+      ],
+      [
+        "vwap_distance_pct",
+        0.0121
+      ],
+      [
+        "f_prior_day_range_old",
+        0.011
+      ],
+      [
+        "rv_at_j",
+        0.0106
+      ],
+      [
+        "pm_dvol",
+        0.0077
+      ],
+      [
+        "breadth_share_j",
+        0.0044
+      ],
+      [
+        "prior_range_pct",
+        0.0032
+      ],
+      [
+        "bar_density",
+        0.0018
+      ],
+      [
+        "n_universe_j",
+        0.0014
+      ]
+    ]
+  },
+  "corrected_params": {
+    "max_depth": 3,
+    "learning_rate": 0.1,
+    "max_iter": 600,
+    "min_samples_leaf": 200
+  }
+}

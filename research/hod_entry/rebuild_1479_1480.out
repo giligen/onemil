@@ -1,0 +1,73 @@
+[13:54:02] === rebuild_1479_1480 start ===
+[13:54:02] [1479] walking 9911 fills...
+[13:54:05] [walk] WARNING: path ended before 15:55 (last m=780) — exit at its close
+[13:54:05] [walk] WARNING: path ended before 15:55 (last m=944) — exit at its close
+[13:54:09] [walk] WARNING: path ended before 15:55 (last m=954) — exit at its close
+[14:01:29] [1479] bar-walk self-check (plain re-walk of the BASE trade, vs the base CSV, n=300): 300 match / 0 mismatch (100.0% -- validates load_day_bars+walk_path use, not the builder)
+[14:01:29] [1479] done: 9911 rows
+[14:01:29] [1480] fetching ticks, cap=500...
+[14:02:28] [walk] WARNING: path ended before 15:55 (last m=780) — exit at its close
+[14:02:29] [walk] WARNING: path ended before 15:55 (last m=944) — exit at its close
+[14:03:33] [walk] WARNING: path ended before 15:55 (last m=954) — exit at its close
+[14:06:15] [walk] WARNING: path ended before 15:55 (last m=954) — exit at its close
+[14:06:21] [walk] WARNING: path ended before 15:55 (last m=954) — exit at its close
+[14:06:25] [walk] WARNING: path ended before 15:55 (last m=954) — exit at its close
+[14:06:33] [walk] WARNING: path ended before 15:55 (last m=954) — exit at its close
+[14:06:46] [walk] WARNING: path ended before 15:55 (last m=953) — exit at its close
+[14:06:52] [walk] WARNING: path ended before 15:55 (last m=954) — exit at its close
+[14:07:03] [walk] WARNING: path ended before 15:55 (last m=953) — exit at its close
+[14:07:14] [walk] WARNING: path ended before 15:55 (last m=953) — exit at its close
+[14:07:17] [walk] WARNING: path ended before 15:55 (last m=954) — exit at its close
+[14:07:22] [walk] WARNING: path ended before 15:55 (last m=949) — exit at its close
+[14:07:27] [walk] WARNING: path ended before 15:55 (last m=951) — exit at its close
+[14:07:27] [walk] WARNING: path ended before 15:55 (last m=953) — exit at its close
+[14:07:27] [walk] WARNING: path ended before 15:55 (last m=954) — exit at its close
+[14:07:27] [walk] WARNING: path ended before 15:55 (last m=954) — exit at its close
+[14:07:40] [walk] WARNING: path ended before 15:55 (last m=953) — exit at its close
+[14:07:40] [walk] WARNING: path ended before 15:55 (last m=941) — exit at its close
+[14:07:40] [walk] WARNING: path ended before 15:55 (last m=780) — exit at its close
+[14:07:42] [walk] WARNING: path ended before 15:55 (last m=930) — exit at its close
+[14:07:42] [walk] WARNING: path ended before 15:55 (last m=930) — exit at its close
+[14:07:44] [walk] WARNING: path ended before 15:55 (last m=950) — exit at its close
+[14:07:52] [walk] WARNING: path ended before 15:55 (last m=953) — exit at its close
+[14:07:53] [walk] WARNING: path ended before 15:55 (last m=954) — exit at its close
+[14:07:58] [walk] WARNING: path ended before 15:55 (last m=949) — exit at its close
+[14:08:07] [walk] WARNING: path ended before 15:55 (last m=954) — exit at its close
+[14:08:10] [walk] WARNING: path ended before 15:55 (last m=944) — exit at its close
+[14:08:10] [walk] WARNING: path ended before 15:55 (last m=954) — exit at its close
+[14:08:10] [walk] WARNING: path ended before 15:55 (last m=951) — exit at its close
+[14:08:14] [walk] WARNING: path ended before 15:55 (last m=900) — exit at its close
+[14:08:20] [walk] WARNING: path ended before 15:55 (last m=953) — exit at its close
+[14:08:20] [walk] WARNING: path ended before 15:55 (last m=954) — exit at its close
+[14:08:24] [walk] WARNING: path ended before 15:55 (last m=951) — exit at its close
+[14:08:27] [walk] WARNING: path ended before 15:55 (last m=954) — exit at its close
+[14:08:31] [walk] WARNING: path ended before 15:55 (last m=953) — exit at its close
+[14:08:36] [walk] WARNING: path ended before 15:55 (last m=954) — exit at its close
+[14:08:50] [walk] WARNING: path ended before 15:55 (last m=900) — exit at its close
+[14:09:09] [walk] WARNING: path ended before 15:55 (last m=951) — exit at its close
+[14:09:10] [walk] WARNING: path ended before 15:55 (last m=954) — exit at its close
+[14:09:23] [walk] WARNING: path ended before 15:55 (last m=951) — exit at its close
+[14:09:33] [walk] WARNING: path ended before 15:55 (last m=953) — exit at its close
+[14:09:33] [walk] WARNING: path ended before 15:55 (last m=953) — exit at its close
+[14:09:51] [walk] WARNING: path ended before 15:55 (last m=943) — exit at its close
+[14:09:51] [walk] WARNING: path ended before 15:55 (last m=954) — exit at its close
+[14:09:53] [walk] WARNING: path ended before 15:55 (last m=953) — exit at its close
+[14:09:54] [walk] WARNING: path ended before 15:55 (last m=953) — exit at its close
+[14:09:57] [walk] WARNING: path ended before 15:55 (last m=951) — exit at its close
+[14:10:01] [walk] WARNING: path ended before 15:55 (last m=948) — exit at its close
+[14:10:03] [walk] WARNING: path ended before 15:55 (last m=954) — exit at its close
+[14:10:14] [walk] WARNING: path ended before 15:55 (last m=954) — exit at its close
+[14:10:17] [walk] WARNING: path ended before 15:55 (last m=954) — exit at its close
+[14:10:23] [walk] WARNING: path ended before 15:55 (last m=952) — exit at its close
+[14:10:28] [walk] WARNING: path ended before 15:55 (last m=954) — exit at its close
+[14:10:37] [walk] WARNING: path ended before 15:55 (last m=953) — exit at its close
+[14:10:37] [walk] WARNING: path ended before 15:55 (last m=950) — exit at its close
+[14:10:43] [walk] WARNING: path ended before 15:55 (last m=953) — exit at its close
+[14:10:51] [walk] WARNING: path ended before 15:55 (last m=954) — exit at its close
+[14:10:52] [1480] 0 cache hits + 500 new fetches (cap 500), 9335 skipped (cap exhausted, cache miss), 429 failed-break flips found, 0 fetch errors
+[14:10:52] [1480] done: 429 flip rows
+[14:10:52] [done] wrote /home/ec2-user/onemil/research/hod_entry/rebuild_1479_1480.csv (9911 rows)
+[14:10:52] [1479] TRAIN: n=4398 mean_net_R=-0.2594 base_mean=-0.2084
+[14:10:52] [1480] TRAIN: n=429 short_mean_net_R=-0.4670 long_delta_mean=-0.0829 share_shortable=0.62 share_ssr=0.03
+[14:10:52] [1479] VAL: n=5513 mean_net_R=-0.2447 base_mean=-0.2245
+[14:10:52] === rebuild_1479_1480 END ===

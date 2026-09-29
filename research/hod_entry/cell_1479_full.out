@@ -1,0 +1,12 @@
+[13:26:09] === cell_1479 start ===
+[13:26:09] corrected_cost: 6523 nbbo-src rows, 0 fell back to fill_instant formula (0.0% of nbbo-src)
+[13:26:09] load_base: 13/9911 rows have a negative recovered exit_half (cell_1445.py: "half_entry can be negative for a small ..." -- same identity, not clipped)
+[13:26:09] walking 9911 fills on bars_fills_1478.db...
+[13:26:10] [walk] WARNING: path ended before 15:55 (last m=780) — exit at its close
+[13:26:10] [walk] WARNING: path ended before 15:55 (last m=944) — exit at its close
+[13:26:10] [walk] WARNING: path ended before 15:55 (last m=954) — exit at its close
+[13:27:07] bar-walk self-check (plain re-walk of the BASE trade on bars_fills_1478.db, n=300): 300 match / 0 mismatch (100.0%)
+[13:27:07] wrote /home/ec2-user/onemil/research/hod_entry/cell_1479_fills.csv (9911 rows)
+[13:27:07] TRAIN-H2: n=4398 mean_net_R=-0.1906 base_mean=-0.2084 delta_R=+0.0178 t=0.73 extop5=-0.2682 share_added=0.487
+[13:27:07] VAL: n=5513 mean_net_R=-0.1843 base_mean=-0.2245 delta_R=+0.0402 t=1.76 extop5=-0.2615 share_added=0.481
+[13:27:07] === cell_1479 END ===

@@ -1,0 +1,100 @@
+# 1,478 reconciliation -- joined rows: 9911
+
+## Step 1: shared feature columns, builder(A) vs rebuild(RB)
+
+| builder col | rebuild col | pct rows differ >1e-6 | note |
+|---|---|---|---|
+| range_to_j_pct | range_to_j | 0.8547 | |
+| rv_j | rv_at_j | 1.0000 | |
+| arm_index | arm_index | 1.0000 | |
+| bar_density_j | bar_density | 0.0059 | |
+| dollar_vol_to_j | dvol_to_j | 0.0000 | |
+| pm_dollar_vol | pm_dvol | 0.0000 | |
+| consol_vol_slope | cons_vol_slope | 1.0000 | |
+| consol_vol_ratio | cons_vol_ratio | 1.0000 | |
+| higher_lows_count | higher_lows_ct | 0.9946 | |
+| level_touches | level_touches | 0.0000 | |
+| pullback_depth_pct | pullback_depth_pct | 0.9394 | |
+| vwap_dist_pct | vwap_distance_pct | 0.0000 | |
+| vwap_slope | vwap_slope | 0.0000 | |
+| halt_proxy | halt_proxy | 0.0000 | |
+| dow | day_of_week | 0.0000 | |
+| prev_day_volume | prior_volume | 0.0000 | |
+| prev_day_rvol | prior_rvol | 1.0000 | |
+| atr14_pct | f_atr_pct_old | 1.0000 | |
+| prior_range_pct | prior_range_pct | 0.9587 | |
+| gap_vs_prior_close_pct | gap_pct | 1.0000 | |
+| level_vs_prior_high_pct | level_vs_prior_high_pct | 0.0000 | |
+| level_vs_high20_pct | level_vs_20s_high_pct | 0.0001 | |
+| high20 | high_20s | 0.0001 | |
+| float_shares | f_float | 1.0000 | |
+| dist_from_open_pct | f_dist_from_open | 1.0000 | |
+| ask_distance_proxy_pct | f_ask_distance | 0.9581 | |
+| spread_frac_at_fill | f_spread_at_fill | 0.9971 | |
+| time_of_day_min | f_time_of_day | 1.0000 | |
+| R_pct | f_R_pct | 0.9999 | |
+| symbol_persistence | symbol_persistence_60s | nan | |
+
+## Worst mismatches, 3-row example each
+
+### rv_j vs rv_at_j (diff share 1.000)
+
+| day        | symbol   |   fill_min |    rv_j |   rv_at_j |
+|:-----------|:---------|-----------:|--------:|----------:|
+| 2025-07-01 | AAP      |    605.311 | 1.44047 |  0.352636 |
+| 2025-07-01 | AMN      |    676.707 | 1.07085 |  0.209586 |
+| 2025-07-01 | ANF      |    682.007 | 1.63352 |  0.206565 |
+
+### arm_index vs arm_index (diff share 1.000)
+
+| day        | symbol   |   fill_min |   arm_index_A |   arm_index_RB |
+|:-----------|:---------|-----------:|--------------:|---------------:|
+| 2025-07-01 | AAP      |    605.311 |            14 |             36 |
+| 2025-07-01 | AMN      |    676.707 |            21 |             92 |
+| 2025-07-01 | ANF      |    682.007 |            33 |            113 |
+
+### consol_vol_slope vs cons_vol_slope (diff share 1.000)
+
+| day        | symbol   |   fill_min |   consol_vol_slope |   cons_vol_slope |
+|:-----------|:---------|-----------:|-------------------:|-----------------:|
+| 2025-07-01 | AAP      |    605.311 |             3304.9 |         1020.14  |
+| 2025-07-01 | AMN      |    676.707 |             1655.7 |          698.085 |
+| 2025-07-01 | ANF      |    682.007 |             -347.4 |          267.006 |
+
+### consol_vol_ratio vs cons_vol_ratio (diff share 1.000)
+
+| day        | symbol   |   fill_min |   consol_vol_ratio |   cons_vol_ratio |
+|:-----------|:---------|-----------:|-------------------:|-----------------:|
+| 2025-07-01 | AAP      |    605.311 |            1.2122  |          1.40431 |
+| 2025-07-01 | AMN      |    676.707 |            2.22012 |          1.49591 |
+| 2025-07-01 | ANF      |    682.007 |            1.17414 |          1.17924 |
+
+### prev_day_rvol vs prior_rvol (diff share 1.000)
+
+| day        | symbol   |   fill_min |   prev_day_rvol |   prior_rvol |
+|:-----------|:---------|-----------:|----------------:|-------------:|
+| 2025-07-01 | AAP      |    605.311 |         1.00254 |      1.0001  |
+| 2025-07-01 | AMN      |    676.707 |         1.10475 |      1.11499 |
+| 2025-07-01 | ANF      |    682.007 |         1.04703 |      1.1099  |
+
+### atr14_pct vs f_atr_pct_old (diff share 1.000)
+
+| day        | symbol   |   fill_min |   atr14_pct |   f_atr_pct_old |
+|:-----------|:---------|-----------:|------------:|----------------:|
+| 2025-07-01 | AAP      |    605.311 |     4.53213 |               1 |
+| 2025-07-01 | AMN      |    676.707 |     3.94706 |               0 |
+| 2025-07-01 | ANF      |    682.007 |     3.63296 |               0 |
+
+
+## Columns only in builder A: ['cum_volume_j', 'close_j', 'n_bars_j', 'arm_m', 'adv20', 'prev_close', 'prev_high', 'half_entry', 'store_served_1438', 'rth_bar_count_1438', 'tick_window_has_bar_j']
+
+
+## Columns only in rebuild (not mapped above), includes leak candidate: ['split', 'wk', 'half', 'variant', 'n_cross', 'b0_net_R', 'status', 'fill', 'stop', 'level', 'exit_m', 'exit_price', 'why', 'R', 'raw_R', 'cost_R', 'net_R', 'exit_half_src', 'split_norm', 'bar_date', 'd_open', 'd_high', 'd_low', 'd_close', 'range_pct', 'prior_day_high', 'atr_pct', 'L1', 'L2', 'open_px', 'post_j_high', 'L3', 'f_prior_day_range_old', 'f_gap_old', 'f_level_vs_pdh_old', 'f_level_vs_20s_old', 'breadth_count_j', 'breadth_share_j', 'n_universe_j', 'sector_peers_j', 'spy_ret_open_to_j', 'breadth_5d', 'spy_ret_5d', 'has_prebreak', 'trigger_print_odd_lot', 'trigger_print_size', 'pre_break_odd_lot_share', 'pre_break_mean_trade_size', 'pre_break_print_count', 'pre_break_buy_share', 'spread_bps_at_arm']
+
+
+## Step 2: rebuild kept-VAL set, scored on BUILDER outcome_R
+
+| label | model | n_kept | mean(builder outcome_R) | cache_only_share | base 19.5% | realized(range_to_j_pct>=10) share |
+|---|---|---|---|---|---|---|
+| L2 | hgb | 2004 | 0.3568 | 0.2515 | 0.195 | 0.3468 |
+| L2 | lr | 1973 | 0.3703 | 0.2544 | 0.195 | 0.3599 |

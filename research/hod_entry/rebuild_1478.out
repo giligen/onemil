@@ -1,0 +1,96 @@
+2026-09-26 13:54:20,093 INFO loading base book causal_arming_causal.csv
+2026-09-26 13:54:20,244 INFO base book fills: 9911
+2026-09-26 13:54:20,250 INFO split counts: {'VAL': 5513, 'TRAIN-H2': 4398}
+2026-09-26 13:54:20,252 INFO === step: bar-derived (recompute 6 + item2 NEW) ===
+2026-09-26 13:54:20,253 INFO loading bars_fills_1478.db (this is large: ~4.46M rows)
+2026-09-26 13:54:42,325 INFO bars loaded: 4464470 rows, 9911 symbol-days
+2026-09-26 13:54:55,317 INFO grouping bars by (symbol, day)
+2026-09-26 13:54:59,639 INFO groups: 9911
+2026-09-26 13:55:04,881 INFO bar features: 1000/9911 done (5.2s)
+2026-09-26 13:55:09,974 INFO bar features: 2000/9911 done (10.3s)
+2026-09-26 13:55:15,151 INFO bar features: 3000/9911 done (15.5s)
+2026-09-26 13:55:20,341 INFO bar features: 4000/9911 done (20.7s)
+2026-09-26 13:55:25,659 INFO bar features: 5000/9911 done (26.0s)
+2026-09-26 13:55:30,956 INFO bar features: 6000/9911 done (31.3s)
+2026-09-26 13:55:36,221 INFO bar features: 7000/9911 done (36.6s)
+2026-09-26 13:55:41,479 INFO bar features: 8000/9911 done (41.8s)
+2026-09-26 13:55:46,761 INFO bar features: 9000/9911 done (47.1s)
+2026-09-26 13:55:51,523 INFO bar-derived features done: 9911 rows in 51.9s
+2026-09-26 13:55:52,409 INFO === step: PIT daily (labels + item1 non-bar + item2 prior-day) ===
+2026-09-26 13:55:52,409 INFO loading PIT daily parquet
+2026-09-26 13:56:31,343 INFO PIT daily rows: 5043226, symbols: 15448
+2026-09-26 13:56:38,973 INFO === step: merge bar-derived ===
+2026-09-26 13:56:38,992 INFO === step: item1 remaining flags from cell_1445/1457 (non-recomputed) ===
+2026-09-26 13:56:39,092 INFO === step: item3 crowd (features_1478_B.csv, as given) ===
+2026-09-26 13:56:39,145 INFO === step: item4 tape (features_1478_C.csv, as given) ===
+2026-09-26 13:56:39,190 INFO === step: item5 symbol persistence -- SKIPPED (see docstring) ===
+2026-09-26 13:56:39,191 WARNING item5 symbol_persistence_60s left NaN for all 9911 rows: needs a 60-prior-session per-symbol 11:00ET panel not present in bars_fills_1478.db (fill-days only) and out of the tool/time budget to fetch fresh via Alpaca for ~thousands of symbol-days
+2026-09-26 13:56:40,834 INFO wrote rebuild_1478_features.csv (9911 rows, 84 cols) in 140.7s
+2026-09-26 13:56:40,836 INFO --- fitting label L1 ---
+2026-09-26 13:56:40,853 INFO L1: TRAIN-H2 n=4398 (pos rate 0.554), VAL n=5513 (pos rate 0.548)
+2026-09-26 13:56:44,210 INFO   L1 grid {'max_depth': 3, 'learning_rate': 0.03, 'max_iter': 200, 'min_samples_leaf': 50} -> CV AUC 0.9901
+2026-09-26 13:56:47,029 INFO   L1 grid {'max_depth': 3, 'learning_rate': 0.03, 'max_iter': 200, 'min_samples_leaf': 200} -> CV AUC 0.9896
+2026-09-26 13:56:55,122 INFO   L1 grid {'max_depth': 3, 'learning_rate': 0.03, 'max_iter': 600, 'min_samples_leaf': 50} -> CV AUC 0.9890
+2026-09-26 13:57:02,293 INFO   L1 grid {'max_depth': 3, 'learning_rate': 0.03, 'max_iter': 600, 'min_samples_leaf': 200} -> CV AUC 0.9893
+2026-09-26 13:57:05,087 INFO   L1 grid {'max_depth': 3, 'learning_rate': 0.1, 'max_iter': 200, 'min_samples_leaf': 50} -> CV AUC 0.9890
+2026-09-26 13:57:08,256 INFO   L1 grid {'max_depth': 3, 'learning_rate': 0.1, 'max_iter': 200, 'min_samples_leaf': 200} -> CV AUC 0.9891
+2026-09-26 13:57:16,346 INFO   L1 grid {'max_depth': 3, 'learning_rate': 0.1, 'max_iter': 600, 'min_samples_leaf': 50} -> CV AUC 0.9878
+2026-09-26 13:57:23,593 INFO   L1 grid {'max_depth': 3, 'learning_rate': 0.1, 'max_iter': 600, 'min_samples_leaf': 200} -> CV AUC 0.9886
+2026-09-26 13:57:28,100 INFO   L1 grid {'max_depth': 5, 'learning_rate': 0.03, 'max_iter': 200, 'min_samples_leaf': 50} -> CV AUC 0.9898
+2026-09-26 13:57:31,584 INFO   L1 grid {'max_depth': 5, 'learning_rate': 0.03, 'max_iter': 200, 'min_samples_leaf': 200} -> CV AUC 0.9889
+2026-09-26 13:57:45,356 INFO   L1 grid {'max_depth': 5, 'learning_rate': 0.03, 'max_iter': 600, 'min_samples_leaf': 50} -> CV AUC 0.9885
+2026-09-26 13:57:55,467 INFO   L1 grid {'max_depth': 5, 'learning_rate': 0.03, 'max_iter': 600, 'min_samples_leaf': 200} -> CV AUC 0.9889
+2026-09-26 13:58:00,570 INFO   L1 grid {'max_depth': 5, 'learning_rate': 0.1, 'max_iter': 200, 'min_samples_leaf': 50} -> CV AUC 0.9881
+2026-09-26 13:58:04,062 INFO   L1 grid {'max_depth': 5, 'learning_rate': 0.1, 'max_iter': 200, 'min_samples_leaf': 200} -> CV AUC 0.9887
+2026-09-26 13:58:17,106 INFO   L1 grid {'max_depth': 5, 'learning_rate': 0.1, 'max_iter': 600, 'min_samples_leaf': 50} -> CV AUC 0.9874
+2026-09-26 13:58:27,722 INFO   L1 grid {'max_depth': 5, 'learning_rate': 0.1, 'max_iter': 600, 'min_samples_leaf': 200} -> CV AUC 0.9881
+2026-09-26 13:58:27,722 INFO L1 best grid: {'max_depth': 3, 'learning_rate': 0.03, 'max_iter': 200, 'min_samples_leaf': 50} (CV AUC 0.9901)
+2026-09-26 13:58:28,542 INFO L1 VAL AUC: hgb=0.9902 lr=0.9876 | thresholds hgb=0.9649 lr=0.9756
+2026-09-26 13:58:28,569 INFO --- fitting label L2 ---
+2026-09-26 13:58:28,584 INFO L2: TRAIN-H2 n=4398 (pos rate 0.299), VAL n=5513 (pos rate 0.331)
+2026-09-26 13:58:31,660 INFO   L2 grid {'max_depth': 3, 'learning_rate': 0.03, 'max_iter': 200, 'min_samples_leaf': 50} -> CV AUC 0.9956
+2026-09-26 13:58:34,639 INFO   L2 grid {'max_depth': 3, 'learning_rate': 0.03, 'max_iter': 200, 'min_samples_leaf': 200} -> CV AUC 0.9956
+2026-09-26 13:58:43,226 INFO   L2 grid {'max_depth': 3, 'learning_rate': 0.03, 'max_iter': 600, 'min_samples_leaf': 50} -> CV AUC 0.9948
+2026-09-26 13:58:51,065 INFO   L2 grid {'max_depth': 3, 'learning_rate': 0.03, 'max_iter': 600, 'min_samples_leaf': 200} -> CV AUC 0.9953
+2026-09-26 13:58:54,058 INFO   L2 grid {'max_depth': 3, 'learning_rate': 0.1, 'max_iter': 200, 'min_samples_leaf': 50} -> CV AUC 0.9949
+2026-09-26 13:58:56,853 INFO   L2 grid {'max_depth': 3, 'learning_rate': 0.1, 'max_iter': 200, 'min_samples_leaf': 200} -> CV AUC 0.9953
+2026-09-26 13:59:05,250 INFO   L2 grid {'max_depth': 3, 'learning_rate': 0.1, 'max_iter': 600, 'min_samples_leaf': 50} -> CV AUC 0.9951
+2026-09-26 13:59:13,030 INFO   L2 grid {'max_depth': 3, 'learning_rate': 0.1, 'max_iter': 600, 'min_samples_leaf': 200} -> CV AUC 0.9957
+2026-09-26 13:59:18,113 INFO   L2 grid {'max_depth': 5, 'learning_rate': 0.03, 'max_iter': 200, 'min_samples_leaf': 50} -> CV AUC 0.9950
+2026-09-26 13:59:22,279 INFO   L2 grid {'max_depth': 5, 'learning_rate': 0.03, 'max_iter': 200, 'min_samples_leaf': 200} -> CV AUC 0.9951
+2026-09-26 13:59:37,456 INFO   L2 grid {'max_depth': 5, 'learning_rate': 0.03, 'max_iter': 600, 'min_samples_leaf': 50} -> CV AUC 0.9949
+2026-09-26 13:59:48,677 INFO   L2 grid {'max_depth': 5, 'learning_rate': 0.03, 'max_iter': 600, 'min_samples_leaf': 200} -> CV AUC 0.9954
+2026-09-26 13:59:54,117 INFO   L2 grid {'max_depth': 5, 'learning_rate': 0.1, 'max_iter': 200, 'min_samples_leaf': 50} -> CV AUC 0.9950
+2026-09-26 13:59:57,934 INFO   L2 grid {'max_depth': 5, 'learning_rate': 0.1, 'max_iter': 200, 'min_samples_leaf': 200} -> CV AUC 0.9953
+2026-09-26 14:00:11,979 INFO   L2 grid {'max_depth': 5, 'learning_rate': 0.1, 'max_iter': 600, 'min_samples_leaf': 50} -> CV AUC 0.9950
+2026-09-26 14:00:25,080 INFO   L2 grid {'max_depth': 5, 'learning_rate': 0.1, 'max_iter': 600, 'min_samples_leaf': 200} -> CV AUC 0.9953
+2026-09-26 14:00:25,080 INFO L2 best grid: {'max_depth': 3, 'learning_rate': 0.1, 'max_iter': 600, 'min_samples_leaf': 200} (CV AUC 0.9957)
+2026-09-26 14:00:27,294 INFO L2 VAL AUC: hgb=0.9939 lr=0.9674 | thresholds hgb=0.0000 lr=0.4524
+2026-09-26 14:00:27,322 INFO --- fitting label L3 ---
+2026-09-26 14:00:27,339 INFO L3: TRAIN-H2 n=4398 (pos rate 0.262), VAL n=5513 (pos rate 0.276)
+2026-09-26 14:00:30,560 INFO   L3 grid {'max_depth': 3, 'learning_rate': 0.03, 'max_iter': 200, 'min_samples_leaf': 50} -> CV AUC 0.8400
+2026-09-26 14:00:33,384 INFO   L3 grid {'max_depth': 3, 'learning_rate': 0.03, 'max_iter': 200, 'min_samples_leaf': 200} -> CV AUC 0.8405
+2026-09-26 14:00:41,475 INFO   L3 grid {'max_depth': 3, 'learning_rate': 0.03, 'max_iter': 600, 'min_samples_leaf': 50} -> CV AUC 0.8425
+2026-09-26 14:00:49,065 INFO   L3 grid {'max_depth': 3, 'learning_rate': 0.03, 'max_iter': 600, 'min_samples_leaf': 200} -> CV AUC 0.8418
+2026-09-26 14:00:52,028 INFO   L3 grid {'max_depth': 3, 'learning_rate': 0.1, 'max_iter': 200, 'min_samples_leaf': 50} -> CV AUC 0.8420
+2026-09-26 14:00:54,738 INFO   L3 grid {'max_depth': 3, 'learning_rate': 0.1, 'max_iter': 200, 'min_samples_leaf': 200} -> CV AUC 0.8419
+2026-09-26 14:01:02,972 INFO   L3 grid {'max_depth': 3, 'learning_rate': 0.1, 'max_iter': 600, 'min_samples_leaf': 50} -> CV AUC 0.8384
+2026-09-26 14:01:10,071 INFO   L3 grid {'max_depth': 3, 'learning_rate': 0.1, 'max_iter': 600, 'min_samples_leaf': 200} -> CV AUC 0.8383
+2026-09-26 14:01:15,656 INFO   L3 grid {'max_depth': 5, 'learning_rate': 0.03, 'max_iter': 200, 'min_samples_leaf': 50} -> CV AUC 0.8419
+2026-09-26 14:01:19,570 INFO   L3 grid {'max_depth': 5, 'learning_rate': 0.03, 'max_iter': 200, 'min_samples_leaf': 200} -> CV AUC 0.8436
+2026-09-26 14:01:33,630 INFO   L3 grid {'max_depth': 5, 'learning_rate': 0.03, 'max_iter': 600, 'min_samples_leaf': 50} -> CV AUC 0.8408
+2026-09-26 14:01:41,062 INFO   L3 grid {'max_depth': 5, 'learning_rate': 0.03, 'max_iter': 600, 'min_samples_leaf': 200} -> CV AUC 0.8440
+2026-09-26 14:01:44,725 INFO   L3 grid {'max_depth': 5, 'learning_rate': 0.1, 'max_iter': 200, 'min_samples_leaf': 50} -> CV AUC 0.8389
+2026-09-26 14:01:47,420 INFO   L3 grid {'max_depth': 5, 'learning_rate': 0.1, 'max_iter': 200, 'min_samples_leaf': 200} -> CV AUC 0.8411
+2026-09-26 14:01:57,910 INFO   L3 grid {'max_depth': 5, 'learning_rate': 0.1, 'max_iter': 600, 'min_samples_leaf': 50} -> CV AUC 0.8384
+2026-09-26 14:02:05,451 INFO   L3 grid {'max_depth': 5, 'learning_rate': 0.1, 'max_iter': 600, 'min_samples_leaf': 200} -> CV AUC 0.8370
+2026-09-26 14:02:05,451 INFO L3 best grid: {'max_depth': 5, 'learning_rate': 0.03, 'max_iter': 600, 'min_samples_leaf': 200} (CV AUC 0.8440)
+2026-09-26 14:02:07,729 INFO L3 VAL AUC: hgb=0.8300 lr=0.8180 | thresholds hgb=0.3775 lr=0.4204
+2026-09-26 14:02:08,019 INFO wrote rebuild_1478_predictions.csv (9911 rows) and rebuild_1478_model_stats.csv
+2026-09-26 14:02:08,020 INFO === comparing against model_1478_predictions.csv ===
+2026-09-26 14:02:08,086 INFO L1/hgb: jaccard=0.6676 mine_kept_mean=0.0267 builder_kept_mean=-0.1245 gap=0.1512 my_val_auc=0.9902 -> NOT_REPRODUCED
+2026-09-26 14:02:08,110 INFO L1/lr: jaccard=0.6936 mine_kept_mean=0.0228 builder_kept_mean=-0.1350 gap=0.1577 my_val_auc=0.9876 -> NOT_REPRODUCED
+2026-09-26 14:02:08,125 INFO L2/hgb: jaccard=0.6386 mine_kept_mean=0.3568 builder_kept_mean=-0.0375 gap=0.3944 my_val_auc=0.9939 -> NOT_REPRODUCED
+2026-09-26 14:02:08,139 INFO L2/lr: jaccard=0.5095 mine_kept_mean=0.3703 builder_kept_mean=-0.0250 gap=0.3953 my_val_auc=0.9674 -> NOT_REPRODUCED
+2026-09-26 14:02:08,141 INFO wrote rebuild_1478_compare.csv
+2026-09-26 14:02:08,141 INFO ALL DONE in 468.0s
