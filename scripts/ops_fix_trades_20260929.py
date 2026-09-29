@@ -380,6 +380,53 @@ def merge_coni_triple(conn: sqlite3.Connection, dry_run: bool, changes: List[str
         )
 
 
+def book_coni_partial_exit(conn: sqlite3.Connection, dry_run: bool, changes: List[str]) -> None:
+    """Correction 5: the 25-share take-profit leg of the old row 395 (tp_leg_id
+    starting 6438758a) FILLED on the HOD paper account before it could be
+    cancelled — SELL limit 25 sh @ 23.48, 2026-09-29T17:38:15Z (limit was
+    23.41). The broker now holds 87 CONI, not 112. Booked onto the merged row
+    396 as a PARTIAL exit — shares/order_status stay 112/'filled', this is not
+    a full close. pattern_data.closed_qty/closed_notional are what the engine's
+    sync actually reads: Position.open_qty (trading/hod_break_engine.py, lines
+    212-213) is `shares - closed_qty`, written the same way by a live partial
+    fill (line 2071's `_update_pattern_data(pos, closed_qty=..., closed_notional=...)`)
+    and read back the same way when positions are rehydrated (line 2506,
+    `pd_.get('closed_qty')`) — 112 - 25 = 87 = the broker's true holding.
+    partial_exit_shares/price/pnl/reason/exited_at (the dedicated columns) are
+    also filled, for reporting parity with every other strategy's partial
+    exits, even though this engine's own sync path only consults pattern_data."""
+    row = _row(conn, 396)
+    if row is None:
+        print("SKIP CONI partial exit: row 396 not found in this trades table")
+        return
+    existing_pd = json.loads(row["pattern_data"] or "{}")
+    if int(existing_pd.get("closed_qty") or 0) >= 25 or row["partial_exit_shares"] == 25:
+        print("SKIP CONI partial exit: already booked (closed_qty >= 25)")
+        return
+    shares, exit_price, entry_basis = 25, 23.48, 22.882231
+    partial_pnl = round(shares * (exit_price - entry_basis), 2)
+    closed_notional = round(shares * exit_price, 2)
+    partial_exited_at = _to_iso("2026-09-29T17:38:15Z")
+
+    changes.append(
+        f"UPDATE trades id=396 CONI: partial exit {shares}sh @ {exit_price} ({partial_exited_at}), "
+        f"partial_exit_pnl {row['partial_exit_pnl']}->{partial_pnl}, pattern_data.closed_qty "
+        f"{existing_pd.get('closed_qty')}->{shares}, closed_notional -> {closed_notional} "
+        f"(shares stays 112, order_status stays 'filled'; open_qty 112-25=87 = broker holding)"
+    )
+    if dry_run:
+        return
+
+    now = _now_iso()
+    merged_pd = dict(existing_pd)
+    merged_pd.update({"closed_qty": shares, "closed_notional": closed_notional})
+    conn.execute(
+        "UPDATE trades SET partial_exit_shares=?, partial_exit_price=?, partial_exit_pnl=?, "
+        "partial_exit_reason='target', partial_exited_at=?, pattern_data=?, updated_at=? WHERE id=396",
+        (shares, exit_price, partial_pnl, partial_exited_at, json.dumps(merged_pd), now),
+    )
+
+
 def apply_corrections(conn: sqlite3.Connection, dry_run: bool) -> List[str]:
     """Runs every 2026-09-29 incident correction, in order, idempotently. Each
     correction checks the row's CURRENT state first and is a no-op if already
@@ -400,6 +447,7 @@ def apply_corrections(conn: sqlite3.Connection, dry_run: bool) -> List[str]:
                         exit_ts="2026-09-29T14:10:50Z", shares=76, pnl=14.09)
     close_ttan_393(conn, dry_run, changes)
     merge_coni_triple(conn, dry_run, changes)
+    book_coni_partial_exit(conn, dry_run, changes)
     if not dry_run:
         conn.commit()
     return changes

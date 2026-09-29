@@ -327,6 +327,79 @@ class TestConiTripleMerge:
         conn.close()
 
 
+class TestConiPartialExit:
+    def test_partial_exit_booked_on_row_396(self, seeded_db):
+        conn = _connect(seeded_db)
+        ops_fix.apply_corrections(conn, dry_run=False)
+        row = _get(conn, 396)
+        assert row["partial_exit_shares"] == 25
+        assert row["partial_exit_price"] == pytest.approx(23.48)
+        assert row["partial_exit_pnl"] == pytest.approx(round(25 * (23.48 - 22.882231), 2))
+        assert row["partial_exit_reason"] == "target"
+        assert row["partial_exited_at"] == "2026-09-29T17:38:15+00:00"
+        conn.close()
+
+    def test_pattern_data_closed_qty_and_notional(self, seeded_db):
+        conn = _connect(seeded_db)
+        ops_fix.apply_corrections(conn, dry_run=False)
+        pd = json.loads(_get(conn, 396)["pattern_data"])
+        assert pd["closed_qty"] == 25
+        assert pd["closed_notional"] == pytest.approx(587.00)
+        conn.close()
+
+    def test_shares_and_order_status_unchanged_by_partial_exit(self, seeded_db):
+        conn = _connect(seeded_db)
+        ops_fix.apply_corrections(conn, dry_run=False)
+        row = _get(conn, 396)
+        assert row["shares"] == 112
+        assert row["order_status"] == "filled"
+        conn.close()
+
+    def test_open_qty_matches_broker_holding(self, seeded_db):
+        conn = _connect(seeded_db)
+        ops_fix.apply_corrections(conn, dry_run=False)
+        row = _get(conn, 396)
+        pd = json.loads(row["pattern_data"])
+        assert row["shares"] - pd["closed_qty"] == 87
+        conn.close()
+
+    def test_merge_fields_still_present_alongside_partial_exit(self, seeded_db):
+        conn = _connect(seeded_db)
+        ops_fix.apply_corrections(conn, dry_run=False)
+        pd = json.loads(_get(conn, 396)["pattern_data"])
+        assert pd["merged_from"] == [394, 395]
+        assert pd["closed_qty"] == 25
+        conn.close()
+
+    def test_idempotent_second_run(self, seeded_db):
+        conn = _connect(seeded_db)
+        ops_fix.apply_corrections(conn, dry_run=False)
+        before = _full_dump(conn)
+        second = ops_fix.apply_corrections(conn, dry_run=False)
+        after = _full_dump(conn)
+        assert before == after
+        assert not any("partial exit" in c for c in second)
+        conn.close()
+
+    def test_dry_run_writes_nothing(self, seeded_db):
+        conn = _connect(seeded_db)
+        before = _full_dump(conn)
+        changes = ops_fix.apply_corrections(conn, dry_run=True)
+        after = _full_dump(conn)
+        assert before == after
+        assert any("partial exit" in c for c in changes)
+        conn.close()
+
+    def test_missing_row_396_is_a_no_op(self, seeded_db):
+        conn = _connect(seeded_db)
+        conn.execute("DELETE FROM trades WHERE id=396")
+        conn.commit()
+        changes = []
+        ops_fix.book_coni_partial_exit(conn, dry_run=False, changes=changes)
+        assert changes == []
+        conn.close()
+
+
 def test_hod_target_r_reads_real_config():
     """The real config.yaml must parse to a positive target_r — the script
     reads this value, it never guesses or hardcodes it."""
