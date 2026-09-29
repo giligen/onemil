@@ -70,3 +70,12 @@ bar, CLV = (close − low) / (high − low); the mean CLV over the k bars; the l
 (min(open, close) − low) / (high − low); the body share, |close − open| / (high − low); and the share of red bars. No
 new Part A rule (multiplicity unchanged). These are features for the out-of-sample classifier only; a permutation
 importance table is reported so the owner sees whether shape carries anything once volume and progress are known.
+
+## Amendment 3 (2026-09-29 19:05 UTC, before any number; owner: TA-Lib candlestick patterns)
+TA-Lib 0.8.1 (installed for the user, 61 `CDL*` functions, each returning +100 / −100 / 0 per bar) is run on the
+1-min bars of the day up to and including bar fill+k (the pattern lookback may reach bars before the fill; nothing
+after bar fill+k). Part B features per k: the number of bullish flags and of bearish flags fired on bars fill+1..fill+k,
+and the flag of each of the 61 functions on the last bar (fill+k). Informational table (not a pass/fail read): fire
+rate of each pattern on bars fill+1..fill+5 among later stop-outs vs later target/EOD exits, both halves, with the
+count. Part A unchanged (no pattern rule); multiplicity unchanged. If TA-Lib is unavailable to the agent, the amendment
+is reported as NOT RUN, never approximated by hand-coded patterns.
