@@ -451,3 +451,158 @@ class TestFlagOffByteIdentical:
         assert eng.check_entries() == []
         assert eng._preplace_armed_today is False
         assert eng._preplace_state == {}
+
+
+# ===========================================================================
+# 8. Submit delay (entry.preplace_submit_delay_s, docs/orb_preplace_spec_
+#    20260928.md "Submit delay"): config parsing, scheduler target, and the
+#    normal-tick ordering guard that stops a duplicate order while a
+#    delayed submit is armed but not yet fired.
+# ===========================================================================
+def _engine_with_delay(delay=None, preplace=True):
+    cfg = _base_cfg(preplace)
+    if delay is not None:
+        cfg['entry']['preplace_submit_delay_s'] = delay
+    return ORBEngine(alpaca_client=_mock_alpaca(), db=MagicMock(spec=Database),
+                      stop_monitor=MagicMock(spec=StopMonitor), config=cfg)
+
+
+def _neutralize_gates(eng, monkeypatch):
+    """Neutralize every check_entries gate upstream of the eligibility loop
+    so a test exercises ONLY the preplace-pending guard, independent of
+    wall-clock time, DB state, or the other kill-switches."""
+    monkeypatch.setattr(eng, '_maybe_arm_preplace_scheduler', lambda: None)
+    monkeypatch.setattr(eng, '_maybe_prefetch_pm', lambda: None)
+    monkeypatch.setattr(eng, '_prewarm_anchors', lambda: None)
+    monkeypatch.setattr(eng, '_process_pending_fills', lambda: None)
+    monkeypatch.setattr(eng, '_cancel_stale_pending_orders', lambda: None)
+    monkeypatch.setattr(eng, '_ensure_ranges_post_open', lambda: set())
+    monkeypatch.setattr(eng, '_daily_loss_limit_hit', lambda: False)
+    monkeypatch.setattr(eng, '_kill_rails_blocked', lambda: False)
+    monkeypatch.setattr(eng, '_pdt_would_block', lambda: False)
+    monkeypatch.setattr(eng, '_past_last_entry_time', lambda: False)
+    monkeypatch.setattr(eng, '_should_defer_first_rank', lambda: False)
+    monkeypatch.setattr(eng, '_symbols_entered_today_db', lambda: set())
+    monkeypatch.setattr(eng, '_symbol_has_any_open_trade', lambda sym: False)
+
+
+def _seed_pending(eng, sym='PEND', range_high=10.5):
+    """Seed a symbol exactly as `_preplace_provisional_rank` would leave it
+    mid-flight: a real CandidateState with its FINAL range_data already in
+    (the post-open sweep can beat a delayed submit to it), plus a
+    `_preplace_state` entry that has NOT been submitted yet."""
+    eng.candidates[sym] = CandidateState(symbol=sym)
+    eng.candidates[sym].range_data = _range(sym, range_high=range_high)
+    eng._preplace_state[sym] = {
+        'plan': _plan(sym, range_high=range_high), 'provisional_range_high': range_high,
+        'provisional_range_low': 9.9, 'submitted': False, 'order_id': None,
+    }
+    eng._preplace_ranked_today = True
+
+
+class TestSubmitDelayConfig:
+    def test_missing_key_defaults_zero(self):
+        eng = _engine()  # _base_cfg never sets preplace_submit_delay_s
+        assert eng.preplace_submit_delay_s == 0.0
+
+    def test_negative_clamped_to_zero_with_warning(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            eng = _engine_with_delay(-2.5)
+        assert eng.preplace_submit_delay_s == 0.0
+        assert any('preplace_submit_delay_s' in r.message and '-2.5' in r.message
+                   for r in caplog.records)
+
+
+class TestSubmitDelayScheduling:
+    def test_default_zero_submit_target_unchanged(self, monkeypatch):
+        """Byte-identical call sequence at the default: the submit Timer's
+        interval and callback match pre-delay behaviour exactly."""
+        eng = _engine()
+        monkeypatch.setattr(orb_engine_mod.threading, 'Timer', FakeTimer)
+        fixed = pd.Timestamp('2026-09-28 09:34:50').to_pydatetime()
+        monkeypatch.setattr(eng, '_et_now', lambda: fixed)
+        eng._maybe_arm_preplace_scheduler()
+        rank_t, submit_t = FakeTimer.instances
+        assert submit_t.interval == pytest.approx(10.0)  # 09:35:00.000 - 09:34:50
+        assert submit_t.function == eng._preplace_submit_at_close
+
+    def test_delay_5s_targets_0935_05(self, monkeypatch, caplog):
+        eng = _engine_with_delay(5.0)
+        monkeypatch.setattr(orb_engine_mod.threading, 'Timer', FakeTimer)
+        fixed = pd.Timestamp('2026-09-28 09:34:50').to_pydatetime()
+        monkeypatch.setattr(eng, '_et_now', lambda: fixed)
+        with caplog.at_level(logging.INFO):
+            eng._maybe_arm_preplace_scheduler()
+        rank_t, submit_t = FakeTimer.instances
+        assert submit_t.interval == pytest.approx(15.0)  # 09:35:05.000 - 09:34:50
+        assert rank_t.interval == pytest.approx(7.0)      # rank target unaffected by delay
+        armed_lines = [r.message for r in caplog.records if 'scheduler armed' in r.message]
+        assert any('09:35:05' in m and 'submit_delay_s=5.0' in m for m in armed_lines)
+
+    def test_never_earlier_than_0935_plus_delay_when_armed_late(self, monkeypatch):
+        eng = _engine_with_delay(5.0)
+        monkeypatch.setattr(orb_engine_mod.threading, 'Timer', FakeTimer)
+        fixed = pd.Timestamp('2026-09-28 09:34:59.999').to_pydatetime()
+        monkeypatch.setattr(eng, '_et_now', lambda: fixed)
+        eng._maybe_arm_preplace_scheduler()
+        _, submit_t = FakeTimer.instances
+        assert submit_t.interval >= 0.0  # clamped, never negative
+
+
+class TestSubmitDelayOrderingGuard:
+    def test_normal_tick_defers_pending_symbol_and_logs(self, monkeypatch, caplog):
+        eng = _engine_with_delay(5.0)
+        _neutralize_gates(eng, monkeypatch)
+        _seed_pending(eng, 'PEND')
+        eng._submit_entry = MagicMock(side_effect=AssertionError(
+            'normal path must not submit while a preplace submit is pending'))
+        eng._run_pool_selection = MagicMock(side_effect=AssertionError(
+            'must not even reach pool selection for a pending-only tick'))
+        with caplog.at_level(logging.INFO):
+            result = eng.check_entries()
+        assert result == []
+        assert eng.candidates['PEND'].rejected_reason == 'preplace_submit_pending'
+        assert eng.candidates['PEND'].plan_submitted is False
+        assert any('normal-tick deferral' in r.message and 'PEND' in r.message
+                   for r in caplog.records)
+
+    def test_tick_after_submit_completes_reconciles_not_deferred(self, monkeypatch):
+        eng = _engine_with_delay(5.0)
+        _neutralize_gates(eng, monkeypatch)
+        _seed_pending(eng, 'PEND')
+        eng._submit_entry = MagicMock(return_value='order-PEND')
+        eng._preplace_submit_at_close()  # simulate the delayed Timer firing
+        assert eng._preplace_submitted_today is True
+        eng._reconcile_preplaced = MagicMock(return_value={
+            'n_preplaced': 1, 'n_kept': 1, 'n_replaced': 0, 'n_cancelled': 0,
+            'n_added': 0, 'n_filled_before_reconcile': 0})
+        result = eng.check_entries()
+        eng._reconcile_preplaced.assert_called_once()
+        # PEND was submitted by the preplace path -- plan_submitted is True,
+        # so it is excluded from this tick's eligibility, not deferred.
+        assert eng.candidates['PEND'].rejected_reason != 'preplace_submit_pending'
+        assert result == []
+
+    def test_failed_delayed_submit_normal_path_resumes_with_warning(self, monkeypatch, caplog):
+        eng = _engine_with_delay(5.0)
+        _neutralize_gates(eng, monkeypatch)
+        _seed_pending(eng, 'FAIL')
+        eng._submit_entry = MagicMock(return_value=None)  # delayed submit fails
+        with caplog.at_level(logging.WARNING):
+            eng._preplace_submit_at_close()
+        assert eng._preplace_submitted_today is True
+        assert eng._preplace_state['FAIL']['submitted'] is False
+        assert eng.candidates['FAIL'].plan_submitted is False
+        assert any('FAIL' in r.message and 'submit failed' in r.message and 'no refill' in r.message
+                   for r in caplog.records)
+        # Normal path resumes on the very next tick: FAIL is no longer
+        # "pending" (_preplace_submitted_today is True) so it must reach
+        # pool selection instead of being silently dropped forever.
+        eng._reconcile_preplaced = MagicMock(return_value={
+            'n_preplaced': 1, 'n_kept': 0, 'n_replaced': 0, 'n_cancelled': 0,
+            'n_added': 0, 'n_filled_before_reconcile': 0})
+        eng._run_pool_selection = MagicMock(return_value=[])
+        eng.check_entries()
+        eng._run_pool_selection.assert_called_once()
+        production_syms = eng._run_pool_selection.call_args[0][1]
+        assert 'FAIL' in production_syms

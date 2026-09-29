@@ -140,3 +140,62 @@ ORB-scoped subset (`-k orb`): **1087 passed**, 0 failed
 (includes all 22 new tests). Full-suite run: see session log — expected
 0 failed (unchanged pre-existing tests untouched; only additive code paths,
 all internally flag-gated).
+
+## Submit delay (2026-09-29)
+
+Flag: `entry.preplace_submit_delay_s` (orb.yaml, default `0.0`, seconds).
+Read once in `ORBEngine.__init__` alongside `preplace_rank_lead_s`; negative
+values are clamped to `0.0` with a WARNING (a submit can never fire before
+09:35:00.000 ET — that's the whole point of the range-close guard). The
+provisional ranking timer is unaffected — it still fires
+`preplace_rank_lead_s` before 09:35:00. Only the submit timer's target
+moves: `09:35:00.000 ET + preplace_submit_delay_s`, computed in
+`_maybe_arm_preplace_scheduler` and logged in the
+`[ORB PREPLACE] scheduler armed` line (`submit_delay_s=..` plus the actual
+target HH:MM:SS.mmm). At the default `0.0` the target arithmetic is
+`+ timedelta(seconds=0.0)` — a no-op — so the scheduled submit instant and
+Timer call sequence are byte-identical to pre-delay behaviour.
+
+**Ordering hazard this creates.** Before this flag, the gap between
+"provisional rank ready" and "submit fired" was sub-second (both timers
+target 09:35:00-ish), so a normal scanner tick essentially never landed
+inside it. A multi-second delay makes that gap wide and reliable: a normal
+tick calling `check_entries` can now land *after* real bars give a
+preplaced symbol's `range_data` its final value (the post-open sweep can
+backfill it via REST within a second of 09:35:00) but *before*
+`_preplace_submit_at_close` has fired (`_preplace_submitted_today` still
+`False`). Pre-fix, nothing in the normal path knew a submit was armed for
+that symbol: `cand.plan_submitted` is only set True inside
+`_preplace_submit_at_close` itself (never at provisional-rank time), so the
+symbol would pass every existing eligibility check
+(`plan_submitted` False, `range_data` populated, not in `open_positions`,
+no DB row yet in `symbols_entered_today`) and the reconciliation gate
+(`_preplace_submitted_today and not _preplace_reconciled_today`) stays
+closed until the delayed submit fires — so the normal path would re-rank
+the symbol from scratch and place its OWN order via `_run_pool_selection`,
+racing the delayed preplace submit for a **duplicate order** on the same
+symbol. `first_rank_grace_s` does not cover this: it only defers on
+*rangeless* production candidates, never on preplace state.
+
+**Fix.** `_check_entries_locked`'s eligible-candidate loop computes
+`_preplace_pending = {sym in _preplace_state where submitted is False}`
+whenever `preplace_enabled` and `_preplace_submitted_today` is still
+False, and skips every such symbol
+(`rejected_reason='preplace_submit_pending'`), logging one
+`[ORB PREPLACE] normal-tick deferral — ...` INFO line naming the deferred
+symbols instead of placing anything for them. `_reconcile_preplaced` picks
+those symbols up on the first tick after `_preplace_submit_at_close`
+*returns* (`_preplace_submitted_today` flips True at the end of that
+callback regardless of whether every individual order succeeded — see its
+docstring), so there is exactly one tick-transition, never a gap where
+neither path is watching a symbol. A per-symbol submit failure is not
+re-armed as a new provisional pick: it is simply no longer "pending" once
+`_preplace_submitted_today` is True, so it falls back into ordinary
+eligibility on that same/next tick (its `plan_submitted` was never set,
+and `_reconcile_preplaced` does not add it to `_pdr_vetoed_today` — "nothing
+resting" is its own branch, distinct from a final-top-K drop) — the normal
+path resumes for it, with the existing
+`[ORB PREPLACE] {sym} submit failed — no refill` WARNING already logged by
+`_preplace_submit_at_close` documenting why.
+
+Tests: `tests/test_orb_preplace_delay.py`.

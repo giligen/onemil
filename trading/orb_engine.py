@@ -425,11 +425,41 @@ class ORBEngine:
         # When True: a provisional top-K is ranked off the Alpaca snapshot
         # daily-bar (== the opening range, only preplace_rank_lead_s before
         # 09:35:00) by a scheduled thread, buy-stop orders are submitted
-        # CONCURRENTLY at exactly 09:35:00.0 ET (never earlier — a stop
-        # placed before the range closes could trigger inside the range),
-        # then reconciled against the FINAL range on the normal 09:35 tick.
+        # CONCURRENTLY at 09:35:00.000 ET + preplace_submit_delay_s (never
+        # earlier than 09:35:00.000 — a stop placed before the range closes
+        # could trigger inside the range), then reconciled against the
+        # FINAL range on the normal 09:35 tick.
+        #
+        # Submit-delay ordering hazard (2026-09-29, docs/orb_preplace_spec_
+        # 20260928.md "Submit delay"): preplace_submit_delay_s widens the
+        # gap between "provisional rank ready" (_preplace_state populated)
+        # and "submit fired" (_preplace_submitted_today True). A normal
+        # scanner tick CAN land inside that gap — it must not re-rank and
+        # place its own order for a symbol the delayed submit already owns
+        # (duplicate order). The guard lives in `_check_entries_locked`'s
+        # eligible-candidate loop: any symbol still in `_preplace_state`
+        # with `submitted=False` while `_preplace_submitted_today` is False
+        # is skipped (`rejected_reason='preplace_submit_pending'`) and
+        # logged, never passed to `_run_pool_selection`. Reconciliation
+        # (`_reconcile_preplaced`, gated on `_preplace_submitted_today`)
+        # takes over on the first tick after the submit callback returns —
+        # success or failure. A per-symbol submit failure is never retried
+        # by the normal path as a "new" entry with a fresh slot: it simply
+        # stops being "pending" once `_preplace_submitted_today` flips
+        # True, so it falls through to the ordinary eligibility check on
+        # the very next tick (its `plan_submitted` was never set) — the
+        # existing `[ORB PREPLACE] {sym} submit failed — no refill`
+        # WARNING in `_preplace_submit_at_close` documents the failure.
         self.preplace_enabled = bool(entry_cfg.get('preplace_at_close', False))
         self.preplace_rank_lead_s = float(entry_cfg.get('preplace_rank_lead_s', 3.0))
+        _preplace_submit_delay = float(entry_cfg.get('preplace_submit_delay_s', 0.0))
+        if _preplace_submit_delay < 0:
+            logger.warning(
+                f"ORB: entry.preplace_submit_delay_s={_preplace_submit_delay} < 0 "
+                f"— clamped to 0.0 (a preplace submit can never fire before "
+                f"09:35:00.000 ET)")
+            _preplace_submit_delay = 0.0
+        self.preplace_submit_delay_s = _preplace_submit_delay
         self._preplace_armed_today = False       # scheduler armed once/day
         self._preplace_ranked_today = False      # provisional rank ran once/day
         self._preplace_submitted_today = False   # 09:35:00.0 submit fired once/day
@@ -2568,6 +2598,27 @@ class ORBEngine:
         current_positions = len(self.open_positions)
         if current_positions >= self.max_concurrent:
             return []
+        # Preplace-at-close ordering guard (docs/orb_preplace_spec_20260928.md
+        # "Submit delay"): `preplace_submit_delay_s` can push the CONCURRENT
+        # submit timer well past 09:35:00.000, so a normal tick can land
+        # while a preplace submit is armed but not yet fired
+        # (`_preplace_state` populated, `_preplace_submitted_today` still
+        # False). Any such symbol must be excluded here — otherwise this
+        # path re-ranks and places its OWN order for the same symbol the
+        # delayed submit is about to fire for (duplicate order). Once the
+        # submit callback returns (success or failure) `_preplace_submitted_
+        # today` flips True and this set is empty again; `_reconcile_
+        # preplaced` (gated on that same flag, above) takes over from the
+        # first tick after that. A symbol whose delayed submit FAILED is
+        # simply no longer "pending" — it falls through to ordinary
+        # eligibility below on the next tick since its `plan_submitted` was
+        # never set (the WARNING is logged by `_preplace_submit_at_close`).
+        _preplace_pending = (
+            {s for s, st in self._preplace_state.items() if not st.get('submitted')}
+            if self.preplace_enabled and not self._preplace_submitted_today
+            else set()
+        )
+        _preplace_deferred: List[str] = []
         for sym in cand_pool:
             cand = self.candidates.get(sym)
             if cand is None or cand.plan_submitted:
@@ -2582,12 +2633,22 @@ class ORBEngine:
             if sym in symbols_entered_today:
                 cand.rejected_reason = 'already_entered_today'
                 continue
+            if sym in _preplace_pending:
+                cand.rejected_reason = 'preplace_submit_pending'
+                _preplace_deferred.append(sym)
+                continue
             # Cross-strategy FCFS
             if self.skip_if_any_strategy_has_symbol and self._symbol_has_any_open_trade(sym):
                 logger.info(f"ORB: {sym} FCFS skip — already open in another strategy")
                 cand.rejected_reason = 'fcfs_other_strategy'
                 continue
             eligible.append(cand)
+
+        if _preplace_deferred:
+            logger.info(
+                "[ORB PREPLACE] normal-tick deferral — submit armed but not "
+                "yet fired for %d symbol(s), skipping this tick: %s",
+                len(_preplace_deferred), _preplace_deferred)
 
         if not eligible:
             return []
@@ -2997,9 +3058,12 @@ class ORBEngine:
         cycle latency (the entire point of this feature). Delays are
         clamped at >= 0: a late-armed cycle (e.g. the engine's first tick
         of the day lands at 09:34:59) fires both callbacks immediately,
-        which is still >= their targets — NEVER earlier than 09:35:00.0 for
-        the submit timer, matching the design's hard requirement (a stop
-        placed before the range closes could trigger inside the range).
+        which is still >= their targets — NEVER earlier than
+        09:35:00.000 ET + preplace_submit_delay_s for the submit timer,
+        matching the design's hard requirement (a stop placed before the
+        range closes could trigger inside the range). Default
+        preplace_submit_delay_s is 0.0, so the submit target is
+        09:35:00.000 ET unless configured otherwise.
         Caller holds `_lock` (called from `_check_entries_locked`).
         """
         if not self.preplace_enabled or self._preplace_armed_today:
@@ -3010,13 +3074,16 @@ class ORBEngine:
         self._preplace_armed_today = True
         rank_target = et_now.replace(hour=9, minute=34, second=0, microsecond=0) \
             + timedelta(seconds=max(0.0, 60.0 - self.preplace_rank_lead_s))
-        submit_target = et_now.replace(hour=9, minute=35, second=0, microsecond=0)
+        submit_target = (et_now.replace(hour=9, minute=35, second=0, microsecond=0)
+                          + timedelta(seconds=self.preplace_submit_delay_s))
         rank_delay = max(0.0, (rank_target - et_now).total_seconds())
         submit_delay = max(0.0, (submit_target - et_now).total_seconds())
         logger.info(
             f"[ORB PREPLACE] scheduler armed at {et_now.strftime('%H:%M:%S')} ET — "
             f"provisional rank in {rank_delay:.1f}s, submit in {submit_delay:.1f}s "
-            f"(targets {rank_target.strftime('%H:%M:%S')} / 09:35:00.0 ET)")
+            f"(targets {rank_target.strftime('%H:%M:%S')} / "
+            f"{submit_target.strftime('%H:%M:%S.%f')[:-3]} ET, "
+            f"submit_delay_s={self.preplace_submit_delay_s:.1f})")
         t_rank = threading.Timer(rank_delay, self._preplace_provisional_rank)
         t_rank.daemon = True
         t_submit = threading.Timer(submit_delay, self._preplace_submit_at_close)
