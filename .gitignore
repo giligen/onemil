@@ -210,3 +210,8 @@ research/exec_quality/*_driftmap.csv
 research/exec_quality/*_rows.csv
 research/exec_quality/*_summary.csv
 research/hod_entry/index_bars_1625*.parquet
+research/lev_decay/*.parquet
+research/lev_decay/*_days.csv
+research/auction_imbalance/dbn_cache/
+research/auction_imbalance/*_events.csv
+research/edgar_desk/*_events_pead.csv
