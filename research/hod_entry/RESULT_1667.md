@@ -134,3 +134,63 @@ interaction using it) is VOID; no rebuild is warranted. F11–F16 are VOID under
 6.8–7.1 pp) and will be re-run on the same PREREG once the bars backfill (running, `research/bf_zero/
 backfill_bars_sip_20260929.log`) closes the store's own-day gap. Daily-panel features F1–F10 and price interactions:
 nothing clears in both halves. Verdict for the synthesis (1,664): NOTHING SHIPS from this cell.
+
+## Intraday features re-run on the filled store (18:43 UTC)
+
+bars_sip.db backfilled 2026-09-29 18:36 UTC (verified: mtime 18:36:01Z, +143MB). F1-F10/F17/F18 and R4 stopbucket x {F2,F3} / price x F2 are UNCHANGED (see sections above). F17 (n_cross) is out of scope here and not re-reported.
+
+### R5 -- coverage, post-backfill
+| feature | coverage% | winner cov% | loser cov% | gap pp | VOID |
+|---|---|---|---|---|---|
+| F11 | 100.0 | 100.0 | 100.0 | 0.0 | no |
+| F12 | 100.0 | 100.0 | 100.0 | 0.0 | no |
+| F13 | 98.1 | 98.0 | 98.1 | 0.1 | no |
+| F14 | 100.0 | 100.0 | 100.0 | 0.0 | no |
+| F15 | 98.7 | 98.7 | 98.8 | 0.1 | no |
+| F16 | 0.0 | 0.0 | 0.0 | 0.0 | YES |
+
+SPY: bars_sip still carries only 1 distinct day (unchanged) -> F16 stays VOID (0 fills matched by coincidence, none).
+VOID (not reported as numbers below): F16
+
+### R1_tercile (|t|>=2 in either half; 3/15 shown)
+| feature | bucket | TRAIN-H2 n/mean/iid_t/day_t/ex5 | VAL n/mean/iid_t/day_t/ex5 |
+|---|---|---|---|
+| F12 | B1 | n=795 m=-0.074 it=-1.60 dt=-2.62 ex5=-0.182 | n=1041 m=-0.051 it=-1.25 dt=-2.33 ex5=-0.159 |
+| F12 | B2 | n=832 m=0.030 it=0.65 dt=-1.15 ex5=-0.073 | n=1002 m=-0.085 it=-2.09 dt=-2.26 ex5=-0.194 |
+| F14 | B1 | n=797 m=0.030 it=0.64 dt=-1.52 ex5=-0.072 | n=1038 m=-0.053 it=-1.31 dt=-2.42 ex5=-0.159 |
+
+### R1_quintile (|t|>=2 in either half; 3/25 shown)
+| feature | bucket | TRAIN-H2 n/mean/iid_t/day_t/ex5 | VAL n/mean/iid_t/day_t/ex5 |
+|---|---|---|---|
+| F12 | B2 | n=480 m=-0.024 it=-0.41 dt=-2.59 ex5=-0.129 | n=621 m=-0.112 it=-2.20 dt=-3.17 ex5=-0.225 |
+| F13 | B5 | n=459 m=-0.074 it=-1.22 dt=-0.82 ex5=-0.181 | n=621 m=-0.153 it=-3.07 dt=-3.13 ex5=-0.268 |
+| F14 | B1 | n=488 m=-0.015 it=-0.25 dt=-1.07 ex5=-0.121 | n=614 m=-0.077 it=-1.49 dt=-2.40 ex5=-0.186 |
+
+### R2 (|t|>=2 in either half; 1/10 shown)
+| feature | bucket | TRAIN-H2 n/mean/iid_t/day_t/ex5 | VAL n/mean/iid_t/day_t/ex5 |
+|---|---|---|---|
+| F13 | top_vs_rest | n=459 m=-0.066 it=-0.97 dt=0.02 ex5=-0.069 | n=621 m=-0.154 it=-2.72 dt=-2.29 ex5=-0.165 |
+
+### R3_spearman (|t|>=2 in either half; 4/5 shown)
+| feature | bucket | TRAIN-H2 n/mean/iid_t/day_t/ex5 | VAL n/mean/iid_t/day_t/ex5 |
+|---|---|---|---|
+| F11 | fill_level | n=2349 m=0.045 it=2.19 dt=nan ex5=nan | n=3157 m=0.048 it=2.69 dt=nan ex5=nan |
+| F13 | fill_level | n=2304 m=-0.001 it=-0.03 dt=nan ex5=nan | n=3096 m=-0.067 it=-3.76 dt=nan ex5=nan |
+| F14 | fill_level | n=2349 m=-0.056 it=-2.72 dt=nan ex5=nan | n=3157 m=-0.033 it=-1.83 dt=nan ex5=nan |
+| F15 | fill_level | n=2318 m=-0.046 it=-2.23 dt=nan ex5=nan | n=3119 m=-0.081 it=-4.55 dt=nan ex5=nan |
+
+### R3_spearman_dayclust (|t|>=2 in either half; 0/5 shown)
+none.
+
+### R4_stopbucket_x_feature (|t|>=2 in either half; 4/12 shown)
+| feature | bucket | TRAIN-H2 n/mean/iid_t/day_t/ex5 | VAL n/mean/iid_t/day_t/ex5 |
+|---|---|---|---|
+| stopbucket x F11 | 1.5-3% x B2 | n=705 m=0.007 it=0.14 dt=0.31 ex5=-0.098 | n=825 m=-0.061 it=-1.33 dt=-2.12 ex5=-0.169 |
+| stopbucket x F11 | 1.5-3% x B3 | n=535 m=-0.000 it=-0.01 dt=0.03 ex5=-0.104 | n=787 m=-0.102 it=-2.06 dt=-3.37 ex5=-0.212 |
+| stopbucket x F12 | 1.5-3% x B1 | n=656 m=-0.063 it=-1.22 dt=-1.86 ex5=-0.170 | n=870 m=-0.078 it=-1.73 dt=-2.61 ex5=-0.186 |
+| stopbucket x F12 | 1.5-3% x B2 | n=716 m=0.013 it=0.25 dt=-0.82 ex5=-0.090 | n=844 m=-0.110 it=-2.47 dt=-2.05 ex5=-0.220 |
+
+### Verdict, F11-F16 only
+No F11-F16 cut clears the S1664 bar in both halves.
+
+Full read table: /home/ec2-user/onemil/research/hod_entry/1667_reads.csv. Full feature table: /home/ec2-user/onemil/research/hod_entry/1667_features.csv.
