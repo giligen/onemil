@@ -54,6 +54,11 @@ def _paper_client_or_skip():
     """The ONLY credential path: the ORB keys, and only if every paper proof passes. Never `cfg.alpaca_api_key`."""
     if 'client' in _PAPER:
         return _PAPER['client']
+    # 2026-09-29: this test submits REAL orders on the ORB paper account. Run inside the default `pytest tests/` it
+    # churned SOFI in a loop on that account while the ORB paper session was live (14:10-14:13 UTC). It is now
+    # OPT-IN ONLY: an explicit env flag, set by a human who checked no book is running on that account.
+    if os.environ.get('ONEMIL_PAPER_INTEGRATION', '') != '1':
+        pytest.skip("paper-order integration is opt-in: set ONEMIL_PAPER_INTEGRATION=1 when no book runs on the account")
     from dotenv import load_dotenv
     load_dotenv(REPO / '.env')
     key = os.environ.get('ALPACA_ORB_API_KEY', ''); sec = os.environ.get('ALPACA_ORB_API_SECRET', '')

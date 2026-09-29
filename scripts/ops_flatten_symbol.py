@@ -28,8 +28,8 @@ load_dotenv(str(ROOT / '.env'))
 from alpaca.data.historical import StockHistoricalDataClient  # noqa: E402
 from alpaca.data.requests import StockLatestQuoteRequest  # noqa: E402
 from alpaca.trading.client import TradingClient  # noqa: E402
-from alpaca.trading.enums import OrderSide, TimeInForce  # noqa: E402
-from alpaca.trading.requests import LimitOrderRequest  # noqa: E402
+from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce  # noqa: E402
+from alpaca.trading.requests import GetOrdersRequest, LimitOrderRequest  # noqa: E402
 
 MARKETABLE_PAD = 0.003   # 0.3 % beyond the far touch so a moving quote still fills
 FILL_WAIT_S = 30
@@ -72,6 +72,20 @@ def flatten(symbol: str, assume_yes: bool) -> int:
     if not assume_yes:
         if input("submit? [y/N] ").strip().lower() != 'y':
             print("aborted"); return 1
+    # Open orders on the symbol block the flatten two ways (seen 2026-09-29): a resting BUY makes Alpaca reject the
+    # sell as a "potential wash trade", and OCO/bracket exit legs HOLD the shares ("insufficient qty available").
+    # Cancel every open order on this symbol first; the exit legs are pointless once the position is gone.
+    cancelled = 0
+    for o in tc.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol], limit=50)):
+        try:
+            tc.cancel_order_by_id(o.id)
+            cancelled += 1
+            print(f"cancelled open {o.side.value} {o.order_type.value} qty {o.qty} id {str(o.id)[:8]} "
+                  f"cid {(o.client_order_id or '')[:30]}")
+        except Exception as e:  # noqa: BLE001 — report and continue; the sell below will tell us if it mattered
+            print(f"WARNING cancel {o.id} failed: {e}")
+    if cancelled:
+        time.sleep(1.5)   # let the broker release the held shares before the sell
     order = tc.submit_order(LimitOrderRequest(symbol=symbol, qty=qty, side=side, time_in_force=TimeInForce.DAY,
                                               limit_price=limit,
                                               client_order_id=f"ops-flatten-{symbol}-{int(time.time())}"))
