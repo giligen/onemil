@@ -158,6 +158,16 @@ def load_bt_config(yaml_path: str = 'orb.yaml') -> dict:
     literals for any missing key (with a printed WARNING) so old research runs
     without a B+ orb.yaml still work. Env overrides win over yaml:
       ORB_BT_ACCOUNT / ORB_BT_N / ORB_BT_RISK / ORB_BT_THRESHOLD / ORB_BT_BOOK_OUT.
+
+    2026-09-29 parity fix (9/28 BEZ disagreement, docs/CLAUDE_HISTORY.md): every
+    boolean filter/veto switch (catalyst_veto, pdr veto, g1 veto, range_size
+    veto, skip_q1, pm news_gate, dedup by_family/by_super_group) is read from
+    the SAME orb.yaml key path trading/orb_engine.py reads, with the SAME
+    default when the key is absent. The matching ORB_<X> env var becomes an
+    explicit override ONLY when it is actually set (helper `_env_bool` below,
+    mirrors the engine's `if env is not None: override` pattern) — it must
+    never silently supply a default that shadows orb.yaml, which is exactly
+    how the pipeline kept applying the catalyst veto after live turned it off.
     """
     import yaml as _yaml
     cfg = {}
@@ -185,11 +195,14 @@ def load_bt_config(yaml_path: str = 'orb.yaml') -> dict:
         return v.strip().lower() not in ('0', 'false', 'no', 'off')
 
     from study_orb_sizing import FILTER_THRESHOLD as _DEF_THR
+    from trading.orb_catalyst_veto import DEFAULT_MIN_COHORT as _DEF_MIN_COHORT
     from trading.orb_g1_veto import (DEFAULT_PDR_MIN as _G1_PDR,
                                      DEFAULT_RV20_MIN as _G1_RV)
     from trading.orb_pdr_veto import DEFAULT_MIN_PDR_PCT as _DEF_PDR
     from trading.orb_range_size_veto import DEFAULT_MIN_RANGE_SIZE_PCT as _RS_MIN
     pdr_cfg = (filt.get('prev_day_range_veto') or {})
+    cv_cfg = (filt.get('catalyst_veto') or {})
+    rs_cfg = (filt.get('range_size_veto') or {})
     out = {
         'account': _f('ORB_BT_ACCOUNT', sizing.get('account_budget_usd'), ACCOUNT),
         'n': int(_f('ORB_BT_N', sizing.get('max_concurrent'), N)),
@@ -198,17 +211,32 @@ def load_bt_config(yaml_path: str = 'orb.yaml') -> dict:
         # PDR veto threshold also from orb.yaml (B+ = 11.0). Env
         # ORB_PDR_VETO_MIN_PCT still wins (handled at the veto call site).
         'pdr_min': float(pdr_cfg.get('min_prev_day_range_pct', _DEF_PDR)),
+        # enable flags: orb.yaml key/default matches trading/orb_engine.py
+        # exactly; ORB_<X> env only overrides when explicitly set (_env_bool).
+        'pdr_enabled': _env_bool('ORB_PDR_VETO', pdr_cfg.get('enabled', True)),
         'g1_rv20_min': float(g1.get('return_volatility_20d_min', _G1_RV)),
         'g1_pdr_min': float(g1.get('prev_day_range_pct_min', _G1_PDR)),
-        'g1_enabled': bool(g1.get('enabled', True)),
+        'g1_enabled': _env_bool('ORB_G1_VETO', g1.get('enabled', True)),
         # 2026-09-08 V1 veto study (research/orb_veto_study/REPORT.md)
         'g1_short_history_veto': _env_bool('ORB_G1_SHORT_HISTORY_VETO', g1.get('short_history_veto', False)),
-        'rs_enabled': bool((filt.get('range_size_veto') or {}).get('enabled', False)),
+        'rs_enabled': _env_bool('ORB_RANGE_SIZE_VETO', rs_cfg.get('enabled', False)),
         'rs_min': float((filt.get('range_size_veto') or {}).get('min_range_size_pct', _RS_MIN)),
+        # Catalyst-required veto — SAME key path + default (True) as
+        # trading/orb_engine.py filter.catalyst_veto.{enabled,min_cohort}.
+        # 2026-09-29: this used to be ORB_CATALYST_VETO-only (hard-coded
+        # default '1' = ON) and never looked at orb.yaml, so it kept vetoing
+        # after live's 9/19 rollback to enabled:false (9/28 BEZ disagreement).
+        'catalyst_enabled': _env_bool('ORB_CATALYST_VETO', cv_cfg.get('enabled', True)),
+        'catalyst_min_cohort': int(cv_cfg.get('min_cohort', _DEF_MIN_COHORT)),
+        # Q1 filter — same key/default as trading/orb_engine.py skip_q1.
+        'skip_q1': _env_bool('ORB_SKIP_Q1', filt.get('skip_q1', True)),
         # PM/news mult stack: B+ turns it OFF (sizing.pm_dollar_vol_mult.enabled
         # = false). The pipeline must honor the yaml flag so the BT book matches
         # live; env ORB_PM_MULT=0 still forces off at the call site.
         'pm_enabled': bool(pm.get('enabled', True)),
+        'pm_news_gate': _env_bool('ORB_PM_NEWS_GATE', pm.get('news_gate', True)),
+        'dedup_by_family': bool((cfg.get('dedup') or {}).get('by_family', True)),
+        'dedup_by_super_group': bool((cfg.get('dedup') or {}).get('by_super_group', True)),
         'book_csv': (os.environ.get('ORB_BT_BOOK_OUT')
                      or bt.get('nightly_book_csv') or DEFAULT_BOOK_CSV),
     }
@@ -265,11 +293,21 @@ def load_bt_config(yaml_path: str = 'orb.yaml') -> dict:
                   f"(legacy literal was {_legacy}) — yaml wins")
     print(f"BT config (B+ parity): account=${out['account']:,.0f} N={out['n']} "
           f"risk=${out['risk']:,.0f} threshold={out['threshold']:.12f} "
-          f"pdr_veto>={out['pdr_min']} g1({out['g1_enabled']}, "
+          f"pdr_veto={out['pdr_enabled']} (>={out['pdr_min']}) g1({out['g1_enabled']}, "
           f"rv20>={out['g1_rv20_min']}, pdr>={out['g1_pdr_min']}, "
           f"short_history_veto={out['g1_short_history_veto']}) "
           f"range_size_veto({out['rs_enabled']}, <= {out['rs_min']}) "
+          f"skip_q1={out['skip_q1']} "
           f"book={out['book_csv']}")
+    # Explicit source log for the catalyst veto (the 9/28 BEZ parity defect):
+    # which of {orb.yaml, env override} actually decided the flag.
+    _cv_env_raw = os.environ.get('ORB_CATALYST_VETO')
+    _cv_src = (f"env ORB_CATALYST_VETO={_cv_env_raw!r}" if _cv_env_raw not in (None, '')
+               else "orb.yaml filter.catalyst_veto.enabled")
+    print(f"BT config: catalyst_veto={out['catalyst_enabled']} "
+          f"(source={_cv_src}, min_cohort={out['catalyst_min_cohort']}) "
+          f"pm_news_gate={out['pm_news_gate']} "
+          f"dedup(by_family={out['dedup_by_family']}, by_super_group={out['dedup_by_super_group']})")
     print(f"BT config (winner stack): atr_floor="
           f"{'ON' if out['atr_floor_enabled'] else 'off'} k={out['atr_floor_k']} "
           f"scale_out={'ON' if out['scale_enabled'] else 'off'} "
@@ -980,8 +1018,9 @@ def main():
     # influences calibration of Q4/Q5 mults via train_k.mean(). Filter only
     # affects which trades are SELECTED, not how mults are FIT. Acceptable
     # because Q1's contribution to avg is small (mult capped at 0.5x).
-    _q1_env = os.environ.get('ORB_SKIP_Q1', '1').strip().lower()
-    skip_q1 = _q1_env not in ('0', 'false', 'no', 'off', '')
+    # orb.yaml filter.skip_q1 (matches trading/orb_engine.py); ORB_SKIP_Q1
+    # overrides only when explicitly set (bt_cfg / _env_bool).
+    skip_q1 = bt_cfg['skip_q1']
     if skip_q1:
         n_q1 = int((kept['_quintile'] == 'Q1').sum())
         kept = kept[kept['_quintile'] != 'Q1'].copy()
@@ -1059,7 +1098,12 @@ def main():
         seen_fam = set(); seen_sup = set()
         kept_today = []
         for _, r in d.iterrows():
-            fam = symbol_family(r['symbol']); sup = symbol_super_group(r['symbol'])
+            # orb.yaml dedup.by_family / dedup.by_super_group (matches
+            # orb_engine.py); was unconditional True/True here before the
+            # 2026-09-29 parity audit — currently both default true so this
+            # was not yet observed live, but it was accidental, not deliberate.
+            fam = symbol_family(r['symbol']) if bt_cfg['dedup_by_family'] else None
+            sup = symbol_super_group(r['symbol']) if bt_cfg['dedup_by_super_group'] else None
             if fam and fam in seen_fam: continue
             if sup and sup in seen_sup: continue
             if fam: seen_fam.add(fam)
@@ -1147,8 +1191,9 @@ def main():
         # unknown symbol-days -> None (fail-open, no news boost — same as
         # live's failed-fetch path). ORB_PM_NEWS_GATE=0 restores the legacy
         # ungated x1.5 for old relative comparisons.
-        _ng_env = os.environ.get('ORB_PM_NEWS_GATE', '1').strip().lower()
-        news_gate_on = _ng_env not in ('0', 'false', 'no', 'off', '')
+        # orb.yaml sizing.pm_dollar_vol_mult.news_gate (matches orb_engine.py);
+        # ORB_PM_NEWS_GATE overrides only when explicitly set (bt_cfg / _env_bool).
+        news_gate_on = bt_cfg['pm_news_gate']
         _news_map = {}
         if news_gate_on:
             _news_paths = sorted(_glob.glob('data/research/orb_news_catalyst_*.csv'))
@@ -1225,8 +1270,9 @@ def main():
     # trading/orb_pdr_veto.py docstring for evidence + thresholds).
     # Env: ORB_PDR_VETO=0 disables; ORB_PDR_VETO_MIN_PCT overrides threshold.
     from trading.orb_pdr_veto import pdr_veto_applies
-    _pdr_env = os.environ.get('ORB_PDR_VETO', '1').strip().lower()
-    pdr_veto_on = _pdr_env not in ('0', 'false', 'no', 'off', '')
+    # orb.yaml filter.prev_day_range_veto.enabled (matches orb_engine.py);
+    # ORB_PDR_VETO overrides only when explicitly set (bt_cfg / _env_bool).
+    pdr_veto_on = bt_cfg['pdr_enabled']
     if pdr_veto_on and 'prev_day_range_pct' in sel.columns:
         # B+ 2026-08-15: threshold from orb.yaml (bt_cfg, = 11.0) so the BT
         # book matches live; env ORB_PDR_VETO_MIN_PCT still wins.
@@ -1251,9 +1297,9 @@ def main():
     # KEEP iff BOTH return_volatility_20d and prev_day_range_pct clear their
     # frozen minimums; fail-open on rv20 NaN/0.0 or pdr NaN. Env: ORB_G1_VETO=0.
     from trading.orb_g1_veto import g1_reject as _g1_reject
-    _g1_env = os.environ.get('ORB_G1_VETO', '1').strip().lower()
-    g1_veto_on = (bt_cfg['g1_enabled']
-                  and _g1_env not in ('0', 'false', 'no', 'off', ''))
+    # bt_cfg['g1_enabled'] already folds in orb.yaml + ORB_G1_VETO override
+    # (_env_bool in load_bt_config) — matches orb_engine.py exactly.
+    g1_veto_on = bt_cfg['g1_enabled']
     if g1_veto_on and {'return_volatility_20d',
                        'prev_day_range_pct'} <= set(sel.columns):
         g1_mask = pd.Series(
@@ -1278,9 +1324,9 @@ def main():
     # SAME shared trading/orb_range_size_veto.py). POST-selection, NO refill.
     # Env: ORB_RANGE_SIZE_VETO=0 disables; ORB_RANGE_SIZE_VETO_MIN_PCT overrides.
     from trading.orb_range_size_veto import range_size_veto_applies as _rs_applies
-    _rs_env = os.environ.get('ORB_RANGE_SIZE_VETO')
-    rs_veto_on = (bt_cfg['rs_enabled'] if _rs_env in (None, '')
-                  else _rs_env.strip().lower() not in ('0', 'false', 'no', 'off'))
+    # bt_cfg['rs_enabled'] already folds in orb.yaml + ORB_RANGE_SIZE_VETO
+    # override (_env_bool in load_bt_config) — matches orb_engine.py exactly.
+    rs_veto_on = bt_cfg['rs_enabled']
     if rs_veto_on and 'range_size_pct' in sel.columns:
         rs_min = float(os.environ.get('ORB_RANGE_SIZE_VETO_MIN_PCT', str(bt_cfg['rs_min'])))
         rs_mask = sel['range_size_pct'].apply(lambda v: _rs_applies(v, rs_min))
@@ -1298,13 +1344,14 @@ def main():
     # dropped, slot stays empty (post-selection, like PDR — no refill).
     # News source: orb_news_catalyst_*.csv; anchors from the class map
     # names via the SAME underlying_anchor helper live uses.
-    # Env: ORB_CATALYST_VETO=0 disables.
-    _cv_env = os.environ.get('ORB_CATALYST_VETO', '1').strip().lower()
-    if _cv_env not in ('0', 'false', 'no', 'off', ''):
+    # orb.yaml filter.catalyst_veto.enabled (matches orb_engine.py); env
+    # ORB_CATALYST_VETO overrides only when explicitly set (bt_cfg /
+    # _env_bool in load_bt_config — see the 9/28 BEZ parity fix there).
+    if bt_cfg['catalyst_enabled']:
         from trading.orb_asset_class import (DEFAULT_CLASS_MAP,
                                              underlying_anchor)
         from trading.orb_catalyst_veto import (
-            DEFAULT_MIN_COHORT, anchor_cohort_counts, catalyst_veto_applies)
+            anchor_cohort_counts, catalyst_veto_applies)
         import csv as _csv
         # Self-sufficient glob import: the PM-mult block (which used to define
         # `_glob`) is now SKIPPED when orb.yaml disables PM sizing (B+), so this
@@ -1340,7 +1387,7 @@ def main():
         _has_news_sel = [_raw_news.get((s, d))
                          for s, d in zip(sel['symbol'], _sel_day)]
         cv_mask = [catalyst_veto_applies(hn, a, _cohorts.get(d, {}),
-                                         DEFAULT_MIN_COHORT)
+                                         bt_cfg['catalyst_min_cohort'])
                    for hn, a, d in zip(_has_news_sel, sel['_anchor'], _sel_day)]
         cv_mask = pd.Series(cv_mask, index=sel.index)
         n_cv = int(cv_mask.sum())
