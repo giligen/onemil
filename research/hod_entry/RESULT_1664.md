@@ -28,8 +28,12 @@ Bar: net ≥ +0.05 R and t ≥ 2.5 in BOTH halves, ex-top-5 % > 0 in both, ≥ 3
 ## Decisions (pre-committed)
 * Nothing ships beyond the 1.5 % stop floor (paper since 9/29 17:24 UTC). Forward read at 100 paper fills, the two
   buckets (1.5–3 %, ≥ 3 %) reported separately (PREREG_1659 amendment 2).
-* Second paper mechanism = the +0.10 % entry limit (1,661), ONLY after one clean floored session with ≥ 5 fills, one
-  mechanism per session (rule 9/29): earliest 2026-10-01.
+* The +0.10 % entry limit (1,661) needs no session of its own (owner 19:30 UTC: "why wait for Thursday"): every fill
+  the narrower limit would take is also a fill at the live 0.15 % width, so the paper session at 0.15 % contains the
+  0.10 % book — both are read from the ledger (fill price vs level). Instead, arm-time feature telemetry goes into the
+  ledger (stop distance, level vs open / VWAP, cumulative volume / ADV20, minutes since open, level age, prior crosses
+  known at the arm, arm-bar volume ratio) so each paper session is a forward read of every cut at once. The
+  one-mechanism-per-session rule stays for ORDER-MECHANICS changes only.
 * 1,665 definition A is re-run on the completed store when the prior-20-session backfill finishes; if VOID again the
   cell closes as unresolvable on this data.
 * No further filter cells on this population. The next HOD frame is a NEW signal definition with gross edge first
