@@ -41,6 +41,7 @@ have a root-cause fix committed. Incident write-up: `docs/hod_live_incident_2026
 | 1,669 | fast failures + cut decomposition (owner) | PENDING | PENDING |
 | 1,670 | feature-timing map (owner) | PENDING | PENDING |
 | 1,671 | raw-sequence model vs trees (owner's TSFM question) | PENDING | PENDING |
+| 1,672 | pre-holiday index sleeve (sister of TOM), 2016–2026, 102 events | SPY −17 / −4 bps per event (t −1.4 / −0.2), null percentile 12 / 35, mirror ≈ 0; QQQ and open-exit variants the same | FAIL |
 MDE of the floored book: 0.077 / 0.066 R per half — a cut must carry ≥ +0.10 R on a third of the book to be visible.
 
 ## 4. Real winners (flagged)
