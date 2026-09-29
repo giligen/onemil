@@ -320,6 +320,10 @@ class HodBreakEngine:
         self._live_cancel_swept_entry = False
         self._live_cancel_swept_flat = False
         self._live_reconciled = False
+        self._last_rest_fallback_ts: float = 0.0       # _poll_live_fills_rest_fallback: at most once/REST_FALLBACK_INTERVAL_S
+        self._account_number_value: Optional[str] = None      # _account_number_cached: fetched once, process lifetime
+        self._order_404_counts: dict = {}                     # order_id -> consecutive 404 count, _poll_live_fills_rest_fallback
+        self._positions_adopted_on_boot = False                # _adopt_unregistered_positions_on_boot: runs once per process
         self.live_since: Optional[datetime] = None            # ET timestamp of the FIRST bar this engine received live over the websocket
                                                                 # (never a backfill/catch-up bar); reset each session in _roll_session
         self._prev_day: Dict[str, tuple] = {}
@@ -508,6 +512,7 @@ class HodBreakEngine:
                 # instant it was made (HUM/LABX, 2026-09-25 17:53 boot: adopted then silently orphaned).
                 if not self._live_reconciled and self.book == 'hod_break' and self.entry_mode == 'resting_stop_limit' and not self.dry_run:
                     self._reconcile_live_orders_on_boot()
+                    self._adopt_unregistered_positions_on_boot()
                 if not self.calendar_ok: self._apply_session_calendar()
                 self._check_stream_outage()
                 self._check_stream_silence()
@@ -1169,6 +1174,7 @@ class HodBreakEngine:
     # owner's manual orders on the shared account are never touched).
     SAFETY_NET_PCT = 0.05   # broker stop-sell 5 % under the real stop (StopMonitor owns the real stop)
     LIVE_COID_PREFIX = 'hod-rest'
+    REST_FALLBACK_INTERVAL_S = 5.0   # _poll_live_fills_rest_fallback: bounds fill-detection staleness through a total stream outage
     # every field _on_live_fill/_cancel_live_order/_arm_live_order read off an adopted record — 'stop' above all
     # (9/25 incident: an adopted order with no stop would KeyError inside _on_live_fill on its first fill, i.e.
     # the position becomes unmanaged at the worst possible moment). A record missing any of these cannot be
@@ -1185,10 +1191,30 @@ class HodBreakEngine:
             d = os.path.dirname(path)
             if d: os.makedirs(d, exist_ok=True)
             snap = {sym: c.live_order for sym, c in self.candidates.items() if c.live_order}
+            # 2026-09-29: a restart onto the WRONG account (paper vs main) adopted stale order ids from the other
+            # account's state file, then 404-looped on every one of them (144 ERROR lines + a Telegram flood from
+            # 4 stale main-account ids). Stamping the account number lets boot reconciliation refuse a mismatched
+            # file outright instead of ever touching an id that cannot possibly exist on this account.
+            snap['_account_number'] = self._account_number_cached()
             with open(path, 'w') as fh:
                 json.dump(snap, fh, default=str)
         except Exception as e:
             logger.error(f"{self.tag} failed to persist live order state to {self.live_orders_state_path}: {e}")
+
+    def _account_number_cached(self) -> str:
+        """Broker account number, fetched once and cached for the process lifetime (never changes mid-process).
+        Stamped into the resting-orders state file and checked at boot reconciliation — 2026-09-29: a restart
+        onto the WRONG account adopted stale order ids from a different account's state file and 404-looped on
+        each one. Empty string on a fetch failure (never blocks a write/read) — an empty stamp cannot match a
+        real account number, so a mismatch check against it fails closed by simply not matching."""
+        if self._account_number_value is not None:
+            return self._account_number_value
+        try:
+            self._account_number_value = str(self.alpaca.get_account_info().get('account_number') or '')
+        except Exception as e:
+            logger.error(f"{self.tag} account-number fetch failed ({e}) — state file will carry an empty stamp")
+            self._account_number_value = ''
+        return self._account_number_value
 
     def _reconcile_live_orders_on_boot(self) -> None:
         """Runs ONCE per process start, and MUST run after `_roll_session()` has already populated
@@ -1216,6 +1242,12 @@ class HodBreakEngine:
             persisted = {}
         except Exception as e:
             logger.error(f"{self.tag} live order state file unreadable ({e}) — starting with no adopted orders")
+            persisted = {}
+        file_account = str(persisted.pop('_account_number', '') or '')
+        this_account = self._account_number_cached()
+        if persisted and file_account and this_account and file_account != this_account:
+            logger.warning(f"{self.tag} live-order state file account ({file_account}) does not match this boot's "
+                            f"account ({this_account}) — discarding {len(persisted)} persisted order(s) untouched, adopting none")
             persisted = {}
         if persisted:
             try:
@@ -1250,6 +1282,92 @@ class HodBreakEngine:
         logger.info(f"{self.tag} reconcile: persisted {len(persisted)}, adopted {adopted}, cancelled {cancelled} (file {path})")
         self._persist_live_orders()
 
+    def _todays_ledger_stops(self) -> dict:
+        """Best-effort {symbol: stop} for today's session from the dry-entry ledger (`dry_ledger_path`, default
+        logs/hod_dry_entry_ledger.csv) — used by boot position-adoption when a candidate's live_order was already
+        lost (the exact 2026-09-29 PRIM/WRBY/ASTN gap) so there is no other record of the arm. Never raises; a
+        missing/unreadable ledger just yields fewer known stops (caller falls back to min_r_pct)."""
+        out = {}
+        path = getattr(self, 'dry_ledger_path', None)
+        if not path:
+            return out
+        today = self.session_date or self._et_now().strftime('%Y-%m-%d')
+        try:
+            import csv as _csv
+            with open(path) as fh:
+                for row in _csv.DictReader(fh):
+                    if row.get('date') != today:
+                        continue
+                    sym = row.get('symbol'); stop = row.get('stop')
+                    if sym and stop not in (None, ''):
+                        try: out[sym] = float(stop)
+                        except (TypeError, ValueError): pass
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            logger.error(f"{self.tag} could not read the dry-entry ledger for boot adoption stops ({e})")
+        return out
+
+    def _adopt_unregistered_positions_on_boot(self) -> None:
+        """Runs ONCE per process start, right after `_reconcile_live_orders_on_boot`. A broker LONG position in
+        a symbol THIS BOOK traded today (a still-armed resting order, a live_filled candidate, `entered_today`,
+        or a row in today's dry-entry ledger) that is absent from `self.positions` is ADOPTED — registry +
+        StopMonitor watch — with ONE WARNING + Telegram, never labelled foreign. 2026-09-29 PRIM/WRBY/ASTN:
+        exactly this gap (a broker fill the engine never registered), caused by the cancel/GET defect fixed
+        above; this is the backstop for whatever future gap still slips past that fix. A position in a symbol
+        with NO record of ours today is left completely alone — it is the owner's manual position, never touched
+        (feedback_owner_manual_trades_untouchable). The stop is read from the candidate's own live_order when
+        still available, else today's dry ledger, else entry_price * (1 - params.min_r_pct/100) — never
+        invented from nothing."""
+        if self._positions_adopted_on_boot:
+            return
+        self._positions_adopted_on_boot = True
+        try:
+            broker_positions = self.alpaca.get_open_positions() or []
+        except Exception as e:
+            logger.error(f"{self.tag} boot position-adoption: could not list broker positions ({e}) — skipped this boot")
+            return
+        ledger_stops = self._todays_ledger_stops()
+        for bp in broker_positions:
+            sym = str(bp.get('symbol') or '')
+            qty = int(float(bp.get('qty') or 0))
+            if not sym or qty <= 0 or sym in self.positions:
+                continue                                  # no symbol, short/flat (never ours to adopt), or already tracked
+            cand = self.candidates.get(sym)
+            ours_today = (cand is not None and (cand.live_order is not None or cand.live_filled)) or sym in self.entered_today or sym in ledger_stops
+            if not ours_today:
+                continue                                   # no record of this symbol today — the owner's manual position, never touch
+            entry_px = float(bp.get('avg_entry_price') or 0.0)
+            if cand is not None and cand.live_order is not None and cand.live_order.get('stop') is not None:
+                stop = float(cand.live_order['stop'])
+            elif sym in ledger_stops:
+                stop = ledger_stops[sym]
+            else:
+                stop = round(entry_px * (1.0 - self.params.min_r_pct / 100.0), 2)
+                logger.warning(f"{self.tag} {sym}: boot-adopted position has no known arm stop — using the "
+                                f"configured min_r_pct fallback ({self.params.min_r_pct}%): stop {stop:.2f}")
+            target = round(entry_px + self.params.target_r * (entry_px - stop), 2)
+            order_ref = str(bp.get('asset_id') or f'adopted-{sym}')
+            pattern_data = {'book': self.book, 'entry_mode': 'resting_stop_limit', 'adopted_on_boot': True}
+            trade_id = self._save_pending_trade(sym, qty, entry_px, stop, target, order_ref, pattern_data)
+            now_ts = datetime.now(timezone.utc)
+            self.positions[sym] = Position(symbol=sym, trade_id=trade_id, order_id=order_ref, shares=qty,
+                                            limit_price=entry_px, stop=stop, target=target, level=entry_px, submitted_at=now_ts,
+                                            tp_leg_id='', sl_leg_id='', fill_price=entry_px, filled_at=now_ts, status='open',
+                                            client_order_id='', pattern_data=pattern_data)
+            if self.stop_monitor is not None:
+                try:
+                    self.stop_monitor.add_watch(symbol=sym, stop_price=stop, shares=qty, tp_leg_id='', sl_leg_id='',
+                                                trade_db_id=trade_id, entry_price=entry_px, risk_per_share=entry_px - stop,
+                                                strategy=self.STRATEGY_NAME)
+                except Exception as e:
+                    logger.error(f"{self.tag} {sym}: StopMonitor.add_watch failed for a boot-adopted position — UNMANAGED: {e}")
+                    self._notify(f"{self.tag} ERROR add_watch {sym} — UNMANAGED boot-adopted position: {e}")
+            logger.warning(f"{self.tag} {sym}: ADOPTED {qty} sh unregistered broker position on boot (entry {entry_px:.2f} "
+                            f"stop {stop:.2f}) — filled but never registered by a prior process")
+            self._notify(f"{self.tag} ADOPTED {sym} {qty}sh @ {entry_px:.2f} (unregistered position found on boot)")
+            self.entered_today.add(sym); self.seen_today.add(sym)
+
     def _arm_live_order(self, cand: Candidate, arm: dict) -> None:
         """Place, or cancel + replace, the REAL resting buy-stop-limit for `cand` at `arm` — called once per bar
         close from `_evaluate_resting`, never from the tape. 9/25 fix: a RESTING order counts only against
@@ -1263,6 +1381,9 @@ class HodBreakEngine:
             return                                            # unchanged level — the resting order already covers it
         if prev is not None:
             self._cancel_live_order(cand, 'replace')
+            if cand.live_order is not None or cand.live_filled:
+                return              # _cancel_live_order registered a fill (live_filled) or could not confirm the
+                                     # cancel (live_order left untouched) — never place a second order this bar
         blocked = self._kill_rails_blocked()
         if blocked:
             logger.warning(f"{self.tag} {sym}: LIVE order blocked by kill rail ({blocked}) — arm stays tape-only"); return
@@ -1309,18 +1430,47 @@ class HodBreakEngine:
         self._persist_live_orders()
 
     def _cancel_live_order(self, cand: Candidate, reason: str) -> None:
-        """Cancel `cand`'s resting entry order (never called once it has ANY booked_qty — see _poll_live_fills).
-        Never raises. Writes the arm's parity-ledger row (NO_FILL/cancelled — the arm never got a broker fill)."""
+        """Cancel `cand`'s resting entry order. 2026-09-29 PRIM/WRBY/ASTN incident: a cancel response — True,
+        False, or no exception at all — is NEVER evidence the order carries zero fill. `AlpacaClient.cancel_order`
+        returns False (not an exception) for an order that already filled ('422 not cancelable'), and a fill can
+        land in the exact instant the cancel is in flight; the old code treated 'the call did not raise' as proof
+        of NO_FILL and dropped tracking, orphaning an already-filled broker position with no StopMonitor watch, no
+        exit legs and no registry entry. Fix: GET-before (skip the cancel entirely if the order already shows a
+        fill) AND GET-after (whatever the cancel call returns, re-read the order and register any filled_qty
+        before ever dropping tracking). Never raises; never drops tracking on an unknown (GET-failed) state — the
+        order is left ARMED and retried next tick rather than risking a silent orphan."""
         lo = cand.live_order
         if lo is None:
             return
         try:
-            self.alpaca.cancel_order(lo['order_id']); status = 'cancelled'
-            logger.info(f"{self.tag} {cand.symbol}: LIVE order {lo['order_id']} cancelled ({reason})")
+            pre = self.alpaca.get_order(lo['order_id'])
         except Exception as e:
-            status = 'cancel_failed'
-            logger.error(f"{self.tag} {cand.symbol}: LIVE cancel failed for {lo['order_id']} ({reason}): {e}")
-        self._append_live_parity_row(cand, lo, broker_status=status, reason=reason)
+            logger.error(f"{self.tag} {cand.symbol}: pre-cancel GET failed for {lo['order_id']} ({reason}): {e} — order left ARMED, retried next tick")
+            return
+        if int((pre or {}).get('filled_qty') or 0) > int(lo.get('booked_qty') or 0):
+            logger.warning(f"{self.tag} {cand.symbol}: order {lo['order_id']} already carries a fill "
+                            f"({(pre or {}).get('filled_qty')} sh) before any cancel was sent ({reason}) — registering, not cancelling")
+            self._on_live_fill(cand, lo, pre, str((pre or {}).get('status') or '').lower())
+            return
+        try:
+            self.alpaca.cancel_order(lo['order_id'])
+        except Exception as e:
+            logger.error(f"{self.tag} {cand.symbol}: LIVE cancel call raised for {lo['order_id']} ({reason}): {e} — checking the order directly")
+        try:
+            post = self.alpaca.get_order(lo['order_id'])
+        except Exception as e:
+            logger.error(f"{self.tag} {cand.symbol}: post-cancel GET failed for {lo['order_id']} ({reason}): {e} — order left ARMED, retried next tick")
+            return
+        if int((post or {}).get('filled_qty') or 0) > int(lo.get('booked_qty') or 0):
+            logger.warning(f"{self.tag} {cand.symbol}: order {lo['order_id']} FILLED during the cancel "
+                            f"({(post or {}).get('filled_qty')} sh, {reason}) — registering, not dropping")
+            self._on_live_fill(cand, lo, post, str((post or {}).get('status') or '').lower())
+            return
+        logger.info(f"{self.tag} {cand.symbol}: LIVE order {lo['order_id']} cancelled ({reason})")
+        # 'cancelled' here is a confirmed fact, not an assumption: the GET above already proved filled_qty did
+        # not advance, so this arm genuinely got NO broker fill — the exact transient status string the broker
+        # reports post-cancel ('accepted' vs 'canceled' vs 'pending_cancel') is not the signal that matters.
+        self._append_live_parity_row(cand, lo, broker_status='cancelled', reason=reason)
         cand.live_order = None
         self._live_cap_slots.discard(cand.symbol)
         self._persist_live_orders()
@@ -1427,9 +1577,63 @@ class HodBreakEngine:
             if status in ('filled', 'partially_filled'):
                 self._on_live_fill(cand, lo, st, status)
             elif status in _TERMINAL:
-                logger.warning(f"{self.tag} {cand.symbol}: LIVE order {lo['order_id']} went {status} at the broker (not our cancel)")
-                self._append_live_parity_row(cand, lo, broker_status=status, reason='broker_terminal')
-                cand.live_order = None; self._live_cap_slots.discard(cand.symbol); self._persist_live_orders()
+                # 2026-09-29: this branch used to drop tracking on ANY terminal status string without ever
+                # looking at filled_qty — a partial-fill-then-cancelled order (or a fill that raced a broker-side
+                # reject/expire) reports a terminal status LIKE 'canceled' while still carrying real filled_qty.
+                fq = int(st.get('filled_qty') or 0)
+                if fq > int(lo.get('booked_qty') or 0):
+                    logger.warning(f"{self.tag} {cand.symbol}: LIVE order {lo['order_id']} went {status} at the broker "
+                                    f"WITH a fill ({fq} sh) — registering, not dropping")
+                    self._on_live_fill(cand, lo, st, status)
+                else:
+                    logger.warning(f"{self.tag} {cand.symbol}: LIVE order {lo['order_id']} went {status} at the broker (not our cancel)")
+                    self._append_live_parity_row(cand, lo, broker_status=status, reason='broker_terminal')
+                    cand.live_order = None; self._live_cap_slots.discard(cand.symbol); self._persist_live_orders()
+        self._poll_live_fills_rest_fallback()
+
+    def _poll_live_fills_rest_fallback(self) -> None:
+        """Direct REST GET of every armed order, at most once every 5 s (`REST_FALLBACK_INTERVAL_S`) — a
+        redundant, idempotent backstop for `_poll_live_fills`'s stream-cache read. 2026-09-29 PRIM/WRBY/ASTN:
+        the order stream can silently miss a trade_update (a reconnect window, an event drop) with no error
+        anywhere — `_resync_from_rest` only re-seeds OPEN orders, so a fill that lands during a gap is never
+        recovered from the stream side at all. This is the second, independent leg of fill detection the task
+        spec requires: stream (sub-second, primary) AND a REST poll of every armed order (bounded staleness,
+        never more than 5 s even through a total stream outage). Idempotent by order id via the same
+        `filled_qty <= booked_qty` guard `_on_live_fill` already applies — safe to call every tick."""
+        now = self._et_now().timestamp()
+        if (now - self._last_rest_fallback_ts) < self.REST_FALLBACK_INTERVAL_S:
+            return
+        self._last_rest_fallback_ts = now
+        for cand in list(self.candidates.values()):
+            lo = cand.live_order
+            if lo is None:
+                continue
+            try:
+                st = self.alpaca.get_order(lo['order_id'])
+                self._order_404_counts.pop(lo['order_id'], None)
+            except Exception as e:
+                is_404 = '404' in str(e) or 'not found' in str(e).lower()
+                if not is_404:
+                    logger.error(f"{self.tag} {cand.symbol}: REST fallback GET failed for {lo['order_id']}: {e}")
+                    continue
+                # 2026-09-29: a restart onto the wrong account (or any dead order id) 404-looped forever — 144
+                # ERROR lines + a Telegram flood from 4 stale ids in one session. Retry a 404 at most once
+                # per boot; the second consecutive 404 means the order cannot exist on this account and tracking
+                # it further is pointless (and noisy) — drop it, logged ONCE, not re-raised every 5 s forever.
+                n = self._order_404_counts.get(lo['order_id'], 0) + 1
+                self._order_404_counts[lo['order_id']] = n
+                if n == 1:
+                    logger.warning(f"{self.tag} {cand.symbol}: order {lo['order_id']} 404 on REST fallback — retrying once next poll: {e}")
+                else:
+                    logger.warning(f"{self.tag} {cand.symbol}: order {lo['order_id']} 404 again — giving up, dropping tracking (not adopted, not cancelled — it does not exist here): {e}")
+                    cand.live_order = None; self._live_cap_slots.discard(cand.symbol); self._persist_live_orders()
+                continue
+            status = str((st or {}).get('status') or '').lower()
+            fq = int((st or {}).get('filled_qty') or 0)
+            if fq > int(lo.get('booked_qty') or 0):
+                logger.warning(f"{self.tag} {cand.symbol}: REST fallback caught a fill the stream missed on "
+                                f"{lo['order_id']} ({fq} sh, status {status})")
+                self._on_live_fill(cand, lo, st, status)
 
     def _on_live_fill(self, cand: Candidate, lo: dict, st: dict, status: str) -> None:
         """A real fill (full or partial) on `cand`'s resting entry order: submit safety-net TP/SL sized to the
@@ -1462,12 +1666,18 @@ class HodBreakEngine:
             # (2026-09-25 VECO live defect: separate TP limit + SL stop, the second submit failed with
             # "insufficient qty available" once the first was resting).
             oco = self.alpaca.submit_oco_sell_order(symbol=sym, qty=filled_qty, limit_price=target, stop_price=sl_px)
+            # Alpaca's OCO response: the PARENT order IS the take-profit limit leg (its own 'id') — 'legs' carries
+            # ONLY the dependent stop-loss leg, never a type=='limit' entry. 2026-09-29: the old parser searched
+            # `legs` for 'limit' and never found it, so tp_id was always '' and every clean fill (TWST/MRNA/AXTX/
+            # NBIG live; AAOI/QMCO/ARXS paper) logged a false "no leg ids" ERROR + Telegram.
             legs = (oco or {}).get('legs') or []
-            tp_id = str(next((l['id'] for l in legs if l.get('type') == 'limit'), '') or '')
-            sl_id = str(next((l['id'] for l in legs if l.get('type') == 'stop'), '') or '')
+            tp_id = str((oco or {}).get('id') or '')
+            stop_legs = [l for l in legs if l.get('type') == 'stop']
+            sl_id = str(stop_legs[0]['id']) if len(stop_legs) == 1 else ''
             if not tp_id or not sl_id:
-                logger.error(f"{self.tag} {sym}: OCO submit returned no leg ids (legs={legs}) — falling back to a stop-only safety net")
-                self._notify(f"{self.tag} ERROR OCO {sym}: no leg ids in response")
+                logger.warning(f"{self.tag} {sym}: OCO submit returned no usable leg ids (parent={tp_id or 'none'}, "
+                                f"stop legs={len(stop_legs)} of {len(legs)} total, legs={legs}) — falling back to a stop-only safety net")
+                self._notify(f"{self.tag} WARNING OCO {sym}: no leg ids in response")
         except Exception as e:
             logger.error(f"{self.tag} {sym}: safety-net OCO submit failed after a LIVE fill: {e} — falling back to a stop-only safety net")
         if not sl_id:
@@ -1501,9 +1711,12 @@ class HodBreakEngine:
         else:
             logger.error(f"{self.tag} {sym}: no StopMonitor attached — LIVE fill has no exit management")
         self.entered_today.add(sym); self.seen_today.add(sym)
-        if status == 'filled':
+        # 'partially_filled' is the ONLY status that means a remainder is still resting at the broker — every
+        # other terminal status (filled, or a cancel/replace that surfaced a fill — 2026-09-29 PRIM/WRBY/ASTN)
+        # means nothing is left resting and this candidate is DONE, even though the string isn't literally 'filled'.
+        if status != 'partially_filled':
             cand.live_filled = True; cand.live_order = None; self._live_cap_slots.discard(sym)
-            self._append_live_parity_row(cand, lo, broker_status='filled', broker_fill_ts=self._et_now(), broker_fill_px=fill_px, broker_fill_qty=filled_qty)
+            self._append_live_parity_row(cand, lo, broker_status=status or 'filled', broker_fill_ts=self._et_now(), broker_fill_px=fill_px, broker_fill_qty=filled_qty)
             try:
                 if self.stop_monitor is not None: self.stop_monitor.unsubscribe([sym])
             except Exception as e:

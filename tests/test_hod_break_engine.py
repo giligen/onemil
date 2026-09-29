@@ -410,7 +410,8 @@ class TestLiveFillExitDraining:
         lo = {'order_id': 'o9', 'coid': f'c-{sym}', 'level': 11.0, 'trigger': 11.0, 'limit': 11.1, 'stop': 10.7,
               'qty': 100, 'booked_qty': 0, 'arm_ts': '', 'tp_leg_id': '', 'sl_leg_id': '', 'trade_id': None}
         cand.live_order = lo
-        mock_alpaca.submit_oco_sell_order.return_value = {'legs': [{'id': f'tp-{sym}', 'type': 'limit'}, {'id': f'sl-{sym}', 'type': 'stop'}]}
+        # real broker shape: parent order id IS the TP leg; legs carries only the dependent stop leg
+        mock_alpaca.submit_oco_sell_order.return_value = {'id': f'tp-{sym}', 'legs': [{'id': f'sl-{sym}', 'type': 'stop'}]}
         st = {'status': 'filled', 'filled_qty': 100, 'filled_avg_price': 11.02}
         engine._on_live_fill(cand, lo, st, 'filled')
         return engine.positions[sym]

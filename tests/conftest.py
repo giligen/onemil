@@ -153,11 +153,19 @@ def hod_live_alpaca():
     a.get_open_orders.return_value = []
     a.submit_stop_limit_order.side_effect = lambda **kw: {'id': f"broker-{kw['client_order_id']}", 'status': 'accepted'}
     a.cancel_order.return_value = True
+    # Default: any order queried directly is unfilled and still open — the common case for _cancel_live_order's
+    # GET-before/GET-after checks and _poll_live_fills_rest_fallback. Tests simulating a fill racing a cancel
+    # override this per-order-id (see tests/test_hod_live_resting.py TestCancelNeverDropsAFill).
+    a.get_order.side_effect = lambda oid: {'id': oid, 'status': 'accepted', 'filled_qty': 0, 'filled_avg_price': None}
     a.submit_limit_sell_order.return_value = {'id': 'tp-1', 'status': 'accepted'}
     a.submit_stop_sell_order.return_value = {'id': 'sl-1', 'status': 'accepted'}
+    # Real Alpaca OCO shape (verified 2026-09-29 from the live broker's order list): the PARENT order IS the
+    # take-profit limit leg (its own 'id') — 'legs' carries ONLY the dependent stop-loss leg, never a type=='limit'
+    # entry. A fixture with a synthetic 'limit'-type leg here previously let a broken parser (hod_break_engine.py
+    # _on_live_fill) pass unit tests while erroring on every real fill.
     a.submit_oco_sell_order.return_value = {
-        'id': 'oco-1', 'status': 'accepted',
-        'legs': [{'id': 'tp-1', 'type': 'limit', 'side': 'sell'}, {'id': 'sl-1', 'type': 'stop', 'side': 'sell'}],
+        'id': 'tp-1', 'status': 'accepted',
+        'legs': [{'id': 'sl-1', 'type': 'stop', 'side': 'sell', 'stop_price': 10.0, 'limit_price': None}],
     }
     a.get_buying_power.return_value = 1_000_000.0   # large enough that the 25%-of-BP notional guard never binds by default
     return a

@@ -225,8 +225,8 @@ class TestOcoSafetyNet:
         assert not hod_live_alpaca.cancel_order.called                 # nothing to cancel on the first fill
 
         hod_live_alpaca.submit_oco_sell_order.return_value = {
-            'id': 'oco-2', 'status': 'accepted',
-            'legs': [{'id': 'tp-2', 'type': 'limit'}, {'id': 'sl-2', 'type': 'stop'}]}
+            'id': 'tp-2', 'status': 'accepted',
+            'legs': [{'id': 'sl-2', 'type': 'stop'}]}   # real shape: parent id is the TP leg, legs carries only the stop
         hod_live_stream.snapshot_by_client_prefix.return_value = {
             coid: {'status': 'filled', 'filled_qty': 150, 'filled_avg_price': 11.02, 'client_order_id': coid}}
         e._poll_live_fills()
@@ -237,6 +237,50 @@ class TestOcoSafetyNet:
         assert second_kw['qty'] == 150                                  # cumulative, not the increment
         watch = hod_live_sm.add_watch.call_args.kwargs
         assert watch['tp_leg_id'] == 'tp-2' and watch['sl_leg_id'] == 'sl-2'
+
+    def test_real_broker_oco_shape_parent_id_is_tp_leg_no_limit_entry_in_legs(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path, caplog):
+        """2026-09-29: TWST/MRNA/AXTX/NBIG (live) and AAOI/QMCO/ARXS (paper) all logged a false 'no leg ids'
+        ERROR + Telegram on every clean fill. The broker's real OCO response has NO type=='limit' entry in
+        `legs` — the parent order's own id IS the take-profit leg, and `legs` carries exactly the one stop leg.
+        This is the exact response shape from the broker's order list."""
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path)
+        admit(e)
+        cand = e.candidates['ABC']
+        e._arm_live_order(cand, dict(BIG_VOL_ARM))
+        coid = cand.live_order['coid']
+        hod_live_alpaca.submit_oco_sell_order.return_value = {
+            'id': 'a1b2c3d4-parent-order-id', 'status': 'accepted',
+            'legs': [{'id': 'e5f6g7h8-stop-leg-id', 'side': 'sell', 'type': 'stop',
+                      'stop_price': 10.45, 'limit_price': None}],
+        }
+        hod_live_stream.snapshot_by_client_prefix.return_value = {
+            coid: {'status': 'filled', 'filled_qty': 150, 'filled_avg_price': 11.02, 'client_order_id': coid}}
+        with caplog.at_level('WARNING'):
+            e._poll_live_fills()
+        watch = hod_live_sm.add_watch.call_args.kwargs
+        assert watch['tp_leg_id'] == 'a1b2c3d4-parent-order-id'          # parent order id, not pulled from legs
+        assert watch['sl_leg_id'] == 'e5f6g7h8-stop-leg-id'
+        assert not hod_live_alpaca.submit_stop_sell_order.called          # OCO parsed clean — no stop-only fallback
+        assert not any('no usable leg ids' in r.message for r in caplog.records)   # no false alarm on a clean fill
+
+    def test_oco_with_a_truly_missing_stop_leg_falls_back_at_warning_not_error(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path, caplog):
+        """A genuinely malformed OCO response (no stop leg at all) must still fall back to a stop-only safety
+        net, but at WARNING — not ERROR — since the position is never left unprotected."""
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path)
+        admit(e)
+        cand = e.candidates['ABC']
+        e._arm_live_order(cand, dict(BIG_VOL_ARM))
+        coid = cand.live_order['coid']
+        hod_live_alpaca.submit_oco_sell_order.return_value = {'id': 'tp-1', 'status': 'accepted', 'legs': []}
+        hod_live_stream.snapshot_by_client_prefix.return_value = {
+            coid: {'status': 'filled', 'filled_qty': 150, 'filled_avg_price': 11.02, 'client_order_id': coid}}
+        with caplog.at_level('WARNING'):
+            e._poll_live_fills()
+        assert any('no usable leg ids' in r.message and r.levelname == 'WARNING' for r in caplog.records)
+        assert not any('no usable leg ids' in r.message and r.levelname == 'ERROR' for r in caplog.records)
+        hod_live_alpaca.submit_stop_sell_order.assert_called_once()       # still protected, stop-only fallback
 
 
 # --------------------------------------------------------------------------------------------- item 5: one fill per symbol-day
@@ -600,6 +644,121 @@ class TestGuardrailPausesHodBreak:
         above_band = _stats(book='hod_break', trailing_20_session_usd=-599.0)
         check2 = gr.evaluate_pause(above_band, stage_risk_usd=50.0, band_p5=None)
         assert not check2.should_pause
+
+
+# --------------------------------------------------------------------------------- 2026-09-29 PRIM/WRBY/ASTN incident
+class TestCancelNeverDropsAFill:
+    """Resting orders FILLED at the broker but the engine never registered the fills, kept them 'armed', then
+    cancel/replaced them on the next bar's level change — orphaning already-filled positions with no
+    StopMonitor watch, no exit legs, no registry entry. Root cause: `_cancel_live_order` treated
+    `AlpacaClient.cancel_order`'s return (True/False, never raises for an already-filled order) as proof of
+    zero fill, and `_poll_live_fills`'s terminal-status branch trusted the status STRING the same way."""
+
+    def test_replace_on_an_order_that_already_filled_registers_not_cancels(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path)
+        admit(e)
+        cand = e.candidates['ABC']
+        e._arm_live_order(cand, dict(BIG_VOL_ARM))
+        order_id = cand.live_order['order_id']
+        # The broker filled the order (a print the stream hasn't delivered to _poll_live_fills yet — the exact
+        # PRIM race: filled at the broker, engine still believes it is resting).
+        hod_live_alpaca.get_order.side_effect = lambda oid: (
+            {'id': oid, 'status': 'filled', 'filled_qty': 25, 'filled_avg_price': 77.7386} if oid == order_id
+            else {'id': oid, 'status': 'accepted', 'filled_qty': 0, 'filled_avg_price': None})
+        # Next bar's level moved -> engine tries to replace the (believed-still-resting) order.
+        e._arm_live_order(cand, dict(BIG_VOL_ARM, level=11.5, trigger=11.51, limit=11.5173, stop=10.9))
+        assert not hod_live_alpaca.cancel_order.called                 # never cancelled an order that already filled
+        assert hod_live_alpaca.submit_stop_limit_order.call_count == 1  # no duplicate/replacement order placed
+        hod_live_sm.add_watch.assert_called_once()
+        w = hod_live_sm.add_watch.call_args.kwargs
+        assert w['shares'] == 25 and w['strategy'] == 'hod_break'
+        assert cand.live_filled is True and cand.live_order is None
+        assert 'ABC' in e.positions and e.positions['ABC'].shares == 25
+
+    def test_stream_terminal_status_with_a_fill_registers_not_drops(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        """A trade_update event can report a terminal status ('canceled') for an order that still carries real
+        filled_qty (a fill that raced a cancel). The old code trusted the status STRING as proof of zero fill."""
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path)
+        admit(e)
+        cand = e.candidates['ABC']
+        e._arm_live_order(cand, dict(BIG_VOL_ARM))
+        coid = cand.live_order['coid']
+        hod_live_stream.snapshot_by_client_prefix.return_value = {
+            coid: {'status': 'canceled', 'filled_qty': 76, 'filled_avg_price': 26.1905, 'client_order_id': coid}}
+        e._poll_live_fills()
+        hod_live_sm.add_watch.assert_called_once()
+        assert hod_live_sm.add_watch.call_args.kwargs['shares'] == 76
+        assert cand.live_filled is True and cand.live_order is None
+        assert 'ABC' in e.positions
+
+    def test_cancelling_the_remainder_of_a_partial_fill_keeps_the_registered_position(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path)
+        admit(e)
+        cand = e.candidates['ABC']
+        e._arm_live_order(cand, dict(BIG_VOL_ARM))
+        order_id = cand.live_order['order_id']
+        coid = cand.live_order['coid']
+        hod_live_stream.snapshot_by_client_prefix.return_value = {
+            coid: {'status': 'partially_filled', 'filled_qty': 50, 'filled_avg_price': 11.02, 'client_order_id': coid}}
+        e._poll_live_fills()
+        assert cand.live_order['booked_qty'] == 50 and e.positions['ABC'].shares == 50
+        # GET (pre- and post-cancel) shows no MORE fill than the 50 already booked -> plain cancel of the
+        # remainder; the already-registered 50-share position must be untouched.
+        hod_live_alpaca.get_order.side_effect = lambda oid: {'id': oid, 'status': 'canceled', 'filled_qty': 50, 'filled_avg_price': 11.02}
+        e._cancel_live_order(cand, 'flat_minute')
+        hod_live_alpaca.cancel_order.assert_called_once_with(order_id)
+        assert cand.live_order is None
+        assert e.positions['ABC'].shares == 50
+
+
+class TestBootAdoptsUnregisteredPosition:
+    """A broker LONG position in a symbol this book traded today, absent from the registry, is ADOPTED —
+    never left invisible with no exit management. A symbol with no record of ours today is left alone (the
+    owner's manual position on the shared account)."""
+
+    def test_broker_long_in_a_symbol_traded_today_is_adopted_not_left_foreign(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path)
+        admit(e)
+        e.entered_today.add('ABC')
+        hod_live_alpaca.get_open_positions.return_value = [
+            {'symbol': 'ABC', 'qty': 83, 'avg_entry_price': 17.23, 'asset_id': 'pos-1'}]
+        e._adopt_unregistered_positions_on_boot()
+        assert 'ABC' in e.positions and e.positions['ABC'].shares == 83
+        hod_live_sm.add_watch.assert_called_once()
+        kw = hod_live_sm.add_watch.call_args.kwargs
+        assert kw['stop_price'] == pytest.approx(round(17.23 * (1 - e.params.min_r_pct / 100.0), 2))
+
+    def test_broker_long_with_no_record_today_is_left_alone(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path)
+        admit(e)
+        hod_live_alpaca.get_open_positions.return_value = [
+            {'symbol': 'ZZZZ', 'qty': 100, 'avg_entry_price': 5.0, 'asset_id': 'pos-2'}]
+        e._adopt_unregistered_positions_on_boot()
+        assert 'ZZZZ' not in e.positions and not hod_live_sm.add_watch.called
+
+
+class TestAccountMismatchDiscardsStateFile:
+    def test_mismatched_account_number_discards_persisted_orders_with_one_warning(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path, caplog):
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path)
+        hod_live_alpaca.get_account_info.return_value = {'account_number': 'PAPER123'}
+        state = {'PRIM': {'order_id': 'old-1', 'coid': 'hod-rest-PRIM-x', 'level': 77.0, 'trigger': 77.1,
+                           'limit': 77.2, 'stop': 76.0, 'qty': 25, 'booked_qty': 0},
+                 '_account_number': 'MAIN456'}
+        with open(e.live_orders_state_path, 'w') as fh:
+            json.dump(state, fh)
+        hod_live_alpaca.get_open_orders.return_value = [{'id': 'old-1'}]
+        with caplog.at_level('WARNING'):
+            e._reconcile_live_orders_on_boot()
+        assert 'PRIM' not in e.candidates or e.candidates['PRIM'].live_order is None
+        assert not hod_live_alpaca.cancel_order.called          # never touches a foreign-account id, not even to cancel
+        mismatches = [r for r in caplog.records if 'does not match' in r.message]
+        assert len(mismatches) == 1
 
 
 def test_engine_defaults_never_touch_production_state_files(hod_live_alpaca, hod_live_db, hod_live_sm, tmp_path):
