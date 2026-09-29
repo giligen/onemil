@@ -34,7 +34,7 @@ have a root-cause fix committed. Incident write-up: `docs/hod_live_incident_2026
 | 1,661 | entry limit width | +0.10 %: +0.047 R on n 31 | watch on the ledger (the 0.15 % session contains it) |
 | 1,662 | re-score of 16 families | nothing; 1,488 flagged; 1,619 artifact | FAIL |
 | 1,663 | 7 cost-axis cuts | 0/24 causal reads | FAIL |
-| 1,665 | relative volume to the arm minute (owner) | PENDING re-run on the completed store (was VOID: coverage) | PENDING |
+| 1,665 | relative volume to the arm minute (owner) | on the completed store (coverage 99 %): low-RVOL tercile +0.03 R, high −0.07 R on both halves, t ≤ 1.3, MDE 0.05; 0/48 reads | FAIL (adequately powered null) |
 | 1,666 | rebuild of the 1,488 pyramid | paired −0.043/−0.044 R, t −5, MDE 0.02 | REFUTED |
 | 1,667 | every causal feature (owner) | daily flat; intraday flat (10 reads t ≥ 2.5, all negative); n_cross = leak | FAIL |
 | 1,668 | post-entry failure detection (owner) | 0/36 rules; classifier AUC 0.63–0.67 oos, cut −0.05..+0.02 R; patterns ≈ 0 | FAIL |

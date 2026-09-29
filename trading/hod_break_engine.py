@@ -45,7 +45,8 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
-from trading.hod_break import HodBreakParams, arm_state, detect, resting_entry_fill, resting_order_qty, shares_for, OPEN_MINUTE
+from trading.hod_break import (ARM_FEATURE_COLUMNS, HodBreakParams, arm_features, arm_state, detect,
+                                resting_entry_fill, resting_order_qty, shares_for, OPEN_MINUTE)
 from trading.red_to_green import RedToGreenParams, detect as r2g_detect, prior_day_range_pct
 
 logger = logging.getLogger(__name__)
@@ -976,6 +977,43 @@ class HodBreakEngine:
                 include_account = False
         if include_account:
             base_header = base_header + ['account']; row = row + [str(account)]
+        # Arm-time features (owner's ask 2026-09-29, 'why not test everything tomorrow': every paper arm
+        # carries its arm-time features so one live session is a forward read of every future cut) — computed
+        # from data the engine already holds on `cand` at the moment of THIS arm: its intraday bars through
+        # arm['idx'], the level bar, adv20, the session open (trading.hod_break.arm_features, the ONE helper
+        # so BT/live share the formula). ONE try/except for the whole block: a failure never blocks the arm
+        # and never raises — every feature column is left empty and ONE warning fires per symbol-day
+        # (Candidate.pattern_flag, the fallback rule). `arm['idx']` is absent for a REAL broker fill's `lo`
+        # dict (_on_live_fill passes cand.live_order, which never copies 'idx' off the arm that placed it) —
+        # that is the expected, harmless case: empty feature columns for a live/paper fill row, not a crash.
+        feat_vals = {col: '' for col in ARM_FEATURE_COLUMNS}
+        try:
+            arr = self._rth_arrays(cand)
+            if arr is None:
+                raise ValueError('no bars ingested yet')
+            if 'idx' not in arm:
+                raise KeyError("arm has no 'idx' (not a resting_stop_limit tape/bar arm)")
+            o_arr, h_arr, l_arr, c_arr, v_arr, m_arr = arr
+            computed = arm_features(o_arr, h_arr, l_arr, c_arr, v_arr, m_arr, int(arm['idx']), arm,
+                                     cand.adv20, cand.day_open)
+            feat_vals = {col: (f"{computed[col]:.6f}" if isinstance(computed[col], float) else str(computed[col]))
+                         for col in ARM_FEATURE_COLUMNS}
+        except Exception as e:
+            if not cand.pattern_flag('arm_features_failed'):
+                logger.warning(f"{self.tag} {cand.symbol}: arm-time feature computation failed ({e}) — "
+                                f"feature columns left empty for this symbol-day")
+        include_arm_features = True
+        if os.path.exists(self.dry_ledger_path):
+            try:
+                with open(self.dry_ledger_path, 'r', newline='') as fh:
+                    first_line = fh.readline()
+                include_arm_features = all(col in first_line for col in ARM_FEATURE_COLUMNS)
+            except Exception as e:
+                logger.error(f"{self.tag} {cand.symbol}: failed to read existing header of {self.dry_ledger_path}: {e}")
+                include_arm_features = False
+        if include_arm_features:
+            base_header = base_header + list(ARM_FEATURE_COLUMNS)
+            row = row + [feat_vals[col] for col in ARM_FEATURE_COLUMNS]
         self._append_csv_row(
             self.dry_ledger_path, base_header, row, cand.symbol, self._cf_row(cand),
             err_ctx=f"dry entry ledger row to {self.dry_ledger_path}")

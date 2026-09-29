@@ -170,6 +170,66 @@ def resting_order_qty(risk_usd: float, arm: dict, max_notional_usd: float) -> Tu
     return max(qty, 0), bound
 
 
+ARM_FEATURE_COLUMNS = ('r_pct', 'lvl_vs_open_pct', 'lvl_vs_vwap_pct', 'cumvol_to_arm', 'cumvol_over_adv20',
+                       'min_since_open', 'level_age_min', 'prior_crosses_today', 'arm_bar_vol_x')
+
+
+def arm_features(o: Sequence[float], h: Sequence[float], l: Sequence[float], c: Sequence[float],
+                  v: Sequence[float], m: Sequence[int], arm_idx: int, arm: dict, adv20: float,
+                  day_open: float) -> dict:
+    """Arm-time features for the HOD dry ledger (owner's ask 2026-09-29 — 'why not test everything tomorrow':
+    every paper arm carries its arm-time features so one live session is a forward read of every future cut).
+    Pure and causal: `o/h/l/c/v/m` may be any length >= arm_idx+1 (the engine's arrays often run past the arm
+    bar by the time this is called) — ONLY bars 0..arm_idx are ever read (sliced internally, first line),
+    the SAME closed-bar window `arm_state` used to compute `arm['level']/['stop']/['trigger']` at this bar's
+    close (the fractional-minute rule: never a bar that had not yet closed at the arm instant, i.e. never
+    arm_idx+1). Returns every key in `ARM_FEATURE_COLUMNS` always; raises (ZeroDivisionError, IndexError, ...)
+    on bad/missing inputs instead of silently returning a wrong number — the caller's try/except is the ONE
+    place a failure turns into an empty row (never a partial one) plus a WARNING.
+
+    r_pct: stop distance as a % of the trigger (the arm's entry-price proxy — the actual fill price isn't
+        known until later): (trigger - stop) / trigger x 100.
+    lvl_vs_open_pct: level / day_open - 1 (a fraction, e.g. 0.05 = level 5% above the session open).
+    lvl_vs_vwap_pct: level / VWAP - 1, VWAP = sum(typical_price x volume) / sum(volume) over bars 0..arm_idx,
+        typical_price = (high + low + close) / 3 (the standard intraday VWAP formula).
+    cumvol_to_arm / cumvol_over_adv20: total share volume through the arm bar, and that as a fraction of adv20.
+    min_since_open: minutes from 09:30 ET (OPEN_MINUTE) to the arm bar.
+    level_age_min: minutes from the LEVEL bar (the bar whose high first set the current `level` — the first
+        argmax of h[0..arm_idx], matching `level = max(h[:arm_idx+1])` in `arm_state`) to the arm bar.
+    prior_crosses_today: count of bars STRICTLY BEFORE the arm bar whose high already reached this same
+        level (h[i] >= level, i < arm_idx). By construction no bar can EXCEED the level (it IS the running
+        max through arm_idx), so this counts PLATEAU touches only — prior tests of the same HOD — and only
+        from bars 0..arm_idx-1, never a look-ahead full-day count.
+    arm_bar_vol_x: the arm bar's own volume / the mean bar volume of the day so far (bars 0..arm_idx
+        inclusive — the arm bar has already closed, so it is itself part of 'so far')."""
+    h_full = np.asarray(h, dtype=float)
+    if arm_idx < 0 or arm_idx >= len(h_full):
+        raise IndexError(f"arm_idx {arm_idx} out of range for {len(h_full)} bars")
+    h = h_full[: arm_idx + 1]
+    l = np.asarray(l, dtype=float)[: arm_idx + 1]
+    c = np.asarray(c, dtype=float)[: arm_idx + 1]
+    v = np.asarray(v, dtype=float)[: arm_idx + 1]
+    m = np.asarray(m, dtype=int)[: arm_idx + 1]
+    level = float(arm['level']); trigger = float(arm['trigger']); stop = float(arm['stop'])
+    r_pct = (trigger - stop) / trigger * 100.0
+    lvl_vs_open_pct = level / float(day_open) - 1.0
+    typical = (h + l + c) / 3.0
+    cumvol_to_arm = float(np.sum(v))
+    vwap = float(np.sum(typical * v)) / cumvol_to_arm            # python-float division -> raises on cumvol==0
+    lvl_vs_vwap_pct = level / vwap - 1.0
+    cumvol_over_adv20 = cumvol_to_arm / float(adv20)
+    arm_m = int(m[-1])
+    min_since_open = arm_m - OPEN_MINUTE
+    level_bar_idx = int(np.argmax(h))                             # first bar whose high == the running max (ties: earliest)
+    level_age_min = arm_m - int(m[level_bar_idx])
+    prior_crosses_today = int(np.sum(h[:-1] >= level - 1e-9))
+    arm_bar_vol_x = float(v[-1]) / float(np.mean(v))
+    return dict(r_pct=r_pct, lvl_vs_open_pct=lvl_vs_open_pct, lvl_vs_vwap_pct=lvl_vs_vwap_pct,
+                cumvol_to_arm=cumvol_to_arm, cumvol_over_adv20=cumvol_over_adv20,
+                min_since_open=min_since_open, level_age_min=level_age_min,
+                prior_crosses_today=prior_crosses_today, arm_bar_vol_x=arm_bar_vol_x)
+
+
 def detect(o: Sequence[float], h: Sequence[float], l: Sequence[float], v: Sequence[float], m: Sequence[int],
            adv20: float, p: HodBreakParams = HodBreakParams(), start_idx: int = 0) -> Optional[HodBreakSignal]:
     """First break on or after `start_idx`: bar i whose high reaches the HOD of bars[:i] after a
