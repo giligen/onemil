@@ -79,6 +79,13 @@ def seeded_db(tmp_path):
                                       "client_order_id": "hod-rest-CONI-09-29-1db707a0"}),
             account="paper")
 
+    _insert(conn, id=396, trade_date="2026-09-29", symbol="CONI", entry_price=22.882231,
+            stop_loss_price=22.63, take_profit_price=23.39, shares=112, order_id="adopted-CONI",
+            order_status="pending_new",
+            pattern_data=json.dumps({"book": "hod_break", "entry_mode": "resting_stop_limit",
+                                      "adopted_on_boot": True}),
+            account="paper")
+
     conn.commit()
     conn.close()
     return path
@@ -223,24 +230,107 @@ class TestTtan393:
         conn.close()
 
 
-class TestConiDuplicate:
-    def test_row_395_marked_duplicate(self, seeded_db):
+class TestConiTripleMerge:
+    def test_row_396_becomes_the_position(self, seeded_db):
         conn = _connect(seeded_db)
         ops_fix.apply_corrections(conn, dry_run=False)
-        row = _get(conn, 395)
-        assert row["exit_reason"] == "duplicate_registration"
-        assert row["pnl"] == 0
-        assert row["shares"] == 0
+        row = _get(conn, 396)
+        assert row["order_status"] == "filled"
+        assert row["shares"] == 112
+        assert row["filled_qty"] == 112
+        assert row["fill_price"] == pytest.approx(22.882231)
+        assert row["filled_at"] == "2026-09-29T15:17:20+00:00"
+        assert row["stop_loss_price"] == pytest.approx(22.63)
         conn.close()
 
-    def test_row_394_untouched(self, seeded_db):
+    def test_take_profit_computed_from_config_target_r_and_original_entry(self, seeded_db):
+        conn = _connect(seeded_db)
+        target_r = ops_fix._hod_target_r()
+        expected_tp = round(22.88 + target_r * (22.88 - 22.63), 2)
+        ops_fix.apply_corrections(conn, dry_run=False)
+        row = _get(conn, 396)
+        assert row["take_profit_price"] == pytest.approx(expected_tp)
+        conn.close()
+
+    def test_take_profit_uses_injected_target_r_not_config(self, seeded_db):
+        conn = _connect(seeded_db)
+        ops_fix.merge_coni_triple(conn, dry_run=False, changes=[], target_r=1.0)
+        row = _get(conn, 396)
+        assert row["take_profit_price"] == pytest.approx(22.88 + 1.0 * (22.88 - 22.63))
+        conn.close()
+
+    def test_pattern_data_merged_from_and_empty_legs(self, seeded_db):
         conn = _connect(seeded_db)
         ops_fix.apply_corrections(conn, dry_run=False)
-        row = _get(conn, 394)
-        assert row["shares"] == 87
-        assert row["order_id"] == "adopted-CONI"
-        assert row["exit_reason"] is None
+        pd = json.loads(_get(conn, 396)["pattern_data"])
+        assert pd["merged_from"] == [394, 395]
+        assert pd["tp_leg_id"] == ""
+        assert pd["sl_leg_id"] == ""
         conn.close()
+
+    def test_rows_394_395_canceled_with_null_exit_fields(self, seeded_db):
+        conn = _connect(seeded_db)
+        ops_fix.apply_corrections(conn, dry_run=False)
+        for rid in (394, 395):
+            row = _get(conn, rid)
+            assert row["order_status"] == "canceled"
+            assert row["exit_price"] is None
+            assert row["exit_reason"] is None
+            assert row["exited_at"] is None
+            assert row["pnl"] is None
+        conn.close()
+
+    def test_rows_394_395_pattern_data_merged_into_396(self, seeded_db):
+        conn = _connect(seeded_db)
+        ops_fix.apply_corrections(conn, dry_run=False)
+        for rid in (394, 395):
+            pd = json.loads(_get(conn, rid)["pattern_data"])
+            assert pd["merged_into"] == 396
+            assert pd["note"]
+        conn.close()
+
+    def test_394_395_entry_data_preserved_for_audit_trail(self, seeded_db):
+        conn = _connect(seeded_db)
+        ops_fix.apply_corrections(conn, dry_run=False)
+        assert _get(conn, 394)["shares"] == 87
+        assert _get(conn, 395)["shares"] == 25
+        assert _get(conn, 395)["order_id"] == "3778637d"
+        conn.close()
+
+    def test_idempotent_second_run_no_changes(self, seeded_db):
+        conn = _connect(seeded_db)
+        ops_fix.apply_corrections(conn, dry_run=False)
+        before = _full_dump(conn)
+        second_changes = ops_fix.apply_corrections(conn, dry_run=False)
+        after = _full_dump(conn)
+        assert before == after
+        assert not any("396" in c for c in second_changes)
+        conn.close()
+
+    def test_dry_run_leaves_all_three_rows_untouched(self, seeded_db):
+        conn = _connect(seeded_db)
+        before = _full_dump(conn)
+        changes = ops_fix.apply_corrections(conn, dry_run=True)
+        after = _full_dump(conn)
+        assert before == after
+        assert any("396" in c for c in changes)
+        conn.close()
+
+    def test_missing_row_396_is_a_no_op(self, seeded_db):
+        conn = _connect(seeded_db)
+        conn.execute("DELETE FROM trades WHERE id=396")
+        conn.commit()
+        changes = []
+        ops_fix.merge_coni_triple(conn, dry_run=False, changes=changes)
+        assert changes == []
+        assert _get(conn, 394)["order_status"] == "pending_new"  # untouched
+        conn.close()
+
+
+def test_hod_target_r_reads_real_config():
+    """The real config.yaml must parse to a positive target_r — the script
+    reads this value, it never guesses or hardcodes it."""
+    assert ops_fix._hod_target_r() > 0
 
 
 class TestIdempotency:
@@ -266,7 +356,7 @@ class TestIdempotency:
         ops_fix.apply_corrections(conn, dry_run=False)
         ops_fix.apply_corrections(conn, dry_run=False)
         n = conn.execute("SELECT COUNT(*) c FROM trades").fetchone()["c"]
-        assert n == 4 + 4  # 4 seeded rows + 4 inserted (CDNA short, PRIM, ASTN, WRBY)
+        assert n == 5 + 4  # 5 seeded rows (incl. CONI 394/395/396) + 4 inserted (CDNA short, PRIM, ASTN, WRBY)
         conn.close()
 
 

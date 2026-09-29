@@ -25,13 +25,27 @@ Incident summary
 3. TTAN / CONI (hod_break, paper): row 393 (TTAN) was exited by StopMonitor's
    market fallback at 2026-09-29T15:13:37Z @ 63.12 but the engine never confirmed
    the fill (stuck at order_status='exit_pending_verification', exit_price NULL) —
-   closed in place. Paper CONI has two rows for one 112-share position (87 + 25):
-   row 394 (order_id='adopted-CONI', pattern_data.adopted_on_boot=true) and row
-   395 (a real broker order id, ordinary resting-fill pattern_data). Row 395 (the
-   later id) is marked exit_reason='duplicate_registration', pnl 0, shares 0.
+   closed in place. Paper CONI has THREE rows for one 112-share broker position
+   (account PA39QSZR60WC; order 9e39861c bought 87 sh @ 22.88 filled 15:02Z,
+   client-order ...1db707a0 bought 25 sh @ 22.89 filled ~15:17Z, broker blended
+   avg 22.882231): row 394 (87 sh, order_id='adopted-CONI', first boot adoption
+   15:15:53Z), row 395 (25 sh, a real broker order id, the ordinary resting-fill
+   registration), and row 396 (112 sh, order_id='adopted-CONI' again, a SECOND
+   boot re-adoption at 17:27:06Z of the broker's single combined position). The
+   engine's registry holds one position per symbol, so the ledger's end state
+   must be ONE open row too: row 396 becomes the position (order_status
+   'filled', shares/filled_qty 112, the broker's blended fill_price, a
+   take_profit_price computed from the ORIGINAL entry 22.88 and stop 22.63 at
+   config.yaml's hod_break.target_r — never the blended price, matching how the
+   engine itself targets off the breakout level, not cost basis — and empty
+   tp_leg_id/sl_leg_id, since the 25-sh OCO legs are cancelled at the broker by
+   the main session and StopMonitor manages the stop from here). Rows 394 and
+   395 are marked order_status='canceled' (exactly what scripts/eod_report.py:69
+   already excludes from trade counts, alongside 'cancelled'/'expired'/
+   'rejected') with exit fields NULL and a pattern_data merged_into note.
 
-CONI duplicate -- code cause (report only; this script does NOT touch the engine)
-----------------------------------------------------------------------------------
+CONI triple -- code cause (report only; this script does NOT touch the engine)
+--------------------------------------------------------------------------------
 trading/hod_break_engine.py:_adopt_unregistered_positions_on_boot (lines 1311-1369)
 found an 87-share broker CONI position not yet in `self.positions` and inserted
 row 394 via `_save_pending_trade` (line 1352) — confirmed by row 394's own data:
@@ -46,12 +60,15 @@ found no `trade_id` on `lo` and inserted a SECOND row (395 — a real broker ord
 id, plus the ordinary resting-fill pattern_data shape with tp_leg_id/sl_leg_id/
 client_order_id='hod-rest-CONI-09-29-1db707a0', matching the dict literal built at
 lines 1690-1692) instead of updating row 394's shares from 87 to the true 112.
-87 + 25 == 112 confirms both rows cover the same physical position.
-`sync_positions()` (line 2415, wired in at main.py:829) IS this engine's DB-backed,
-restart-safe registry rebuild and would have prevented this had it run between the
-two fills — but `_adopt_unregistered_positions_on_boot`'s own per-symbol dedup
-(line 1334, `sym in self.positions`) is purely in-memory, and nothing reconciles a
-boot-adopted row against a resting order's later continuation fill.
+Then, at 17:27:06Z, a SECOND process restart wiped `self.positions` again (the
+same in-memory-only gap — `sync_positions()`, line 2415, wired in at
+main.py:829, IS this engine's DB-backed restart-safe registry rebuild, but
+`_adopt_unregistered_positions_on_boot`'s own per-symbol dedup at line 1334
+(`sym in self.positions`) never consults it or the trades table), so boot
+adoption fired a THIRD time — this time correctly reading the broker's single,
+already-merged 112-share position (row 396) confirming 87 + 25 == 112 all cover
+the same physical position. Three inserts for one broker fill, same root cause
+each time.
 
 Usage
 -----
@@ -71,6 +88,7 @@ from pathlib import Path
 from typing import List, Optional
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "trades.db"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
 
 
 def _to_iso(ts: str) -> str:
@@ -276,31 +294,90 @@ def close_ttan_393(conn: sqlite3.Connection, dry_run: bool, changes: List[str]) 
     )
 
 
-def mark_coni_duplicate_395(conn: sqlite3.Connection, dry_run: bool, changes: List[str]) -> None:
-    """Correction 3b: mark row 395 (the later id) a duplicate registration of the
-    same 112-share CONI position row 394 already carries. Row 394 is left
-    untouched. order_status is also set to 'closed' (beyond the three fields the
-    main session named) so the zeroed-out row stops matching
-    persistence.database.Database.get_open_trades()'s 'still open' filter — see
-    the module docstring for the full code-cause writeup."""
-    row = _row(conn, 395)
-    if row is None:
-        print("SKIP row 395: not found in this trades table")
+def _hod_target_r(config_path: Path = DEFAULT_CONFIG_PATH) -> float:
+    """Reads hod_break.target_r from config.yaml — never guessed, never
+    hardcoded, so the take-profit this script computes always matches whatever
+    the engine is actually configured to use. Fails closed (raises) if the key
+    is missing: a silently wrong take-profit is worse than a crashed script."""
+    import yaml
+    with open(config_path) as fh:
+        cfg = yaml.safe_load(fh)
+    return float(cfg["hod_break"]["target_r"])
+
+
+def merge_coni_triple(conn: sqlite3.Connection, dry_run: bool, changes: List[str],
+                       target_r: Optional[float] = None) -> None:
+    """Correction 4: CONI's broker position (account PA39QSZR60WC) was booked
+    into three separate trades rows by three successive boot-adoption/fill
+    events (394, 395, 396 — see the module docstring's 'CONI triple' section for
+    the code cause) even though the engine's own registry holds one position per
+    symbol. Row 396 (the latest, already carrying the broker's true combined
+    112 sh) becomes the single surviving open row: order_status 'filled',
+    shares/filled_qty 112, fill_price the broker's blended avg (22.882231),
+    filled_at the 25-sh fill's timestamp (2026-09-29T15:17:20Z — the moment the
+    position was actually complete), take_profit_price recomputed from the
+    ORIGINAL entry level (22.88) and stop (22.63) at config.yaml's
+    hod_break.target_r (never the blended price — the strategy targets off the
+    breakout level, not cost basis), and pattern_data.merged_from=[394, 395]
+    with tp_leg_id/sl_leg_id cleared (those 25-sh OCO legs are cancelled at the
+    broker by the main session; StopMonitor manages the stop from here). Rows
+    394 and 395 are marked order_status='canceled' — exactly what
+    scripts/eod_report.py:69 already excludes from trade counts alongside
+    'cancelled'/'expired'/'rejected' — with exit fields NULL and a pattern_data
+    merged_into=396 note; their entry data (shares, prices, timestamps, OCO leg
+    ids) is left in place as the audit trail, only order_status and exit fields
+    change."""
+    row394, row395, row396 = _row(conn, 394), _row(conn, 395), _row(conn, 396)
+    if row396 is None:
+        print("SKIP CONI triple merge: row 396 not found in this trades table")
         return
-    if row["exit_reason"] == "duplicate_registration":
-        print("SKIP row 395: already marked duplicate_registration")
+    existing_pd = json.loads(row396["pattern_data"] or "{}")
+    if row396["order_status"] == "filled" and "merged_from" in existing_pd:
+        print("SKIP CONI triple merge: row 396 already merged")
         return
+    if target_r is None:
+        target_r = _hod_target_r()
+    entry_basis, stop = 22.88, 22.63
+    take_profit = round(entry_basis + target_r * (entry_basis - stop), 2)
+    fill_price, filled_at = 22.882231, _to_iso("2026-09-29T15:17:20Z")
+
     changes.append(
-        f"UPDATE trades id=395 CONI: mark duplicate_registration (shares {row['shares']}->0, "
-        f"pnl {row['pnl']}->0)"
+        f"UPDATE trades id=396 CONI: order_status {row396['order_status']!r}->'filled', "
+        f"shares {row396['shares']}->112, filled_qty ->112, fill_price ->{fill_price}, "
+        f"filled_at ->{filled_at}, take_profit_price {row396['take_profit_price']}->{take_profit} "
+        f"(target_r={target_r} from config.yaml), pattern_data.merged_from=[394,395], "
+        f"tp_leg_id/sl_leg_id -> ''"
     )
+    for rid, row in ((394, row394), (395, row395)):
+        if row is not None:
+            changes.append(
+                f"UPDATE trades id={rid} CONI: order_status {row['order_status']!r}->'canceled', "
+                f"exit fields -> NULL, pattern_data.merged_into=396"
+            )
+
     if dry_run:
         return
+
+    now = _now_iso()
+    merged_pd = dict(existing_pd)
+    merged_pd.update({"merged_from": [394, 395], "tp_leg_id": "", "sl_leg_id": ""})
     conn.execute(
-        "UPDATE trades SET exit_reason='duplicate_registration', pnl=0, pnl_pct=0, shares=0, "
-        "order_status='closed', updated_at=? WHERE id=395",
-        (_now_iso(),),
+        "UPDATE trades SET order_status='filled', shares=112, filled_qty=112, fill_price=?, "
+        "filled_at=?, take_profit_price=?, pattern_data=?, updated_at=? WHERE id=396",
+        (fill_price, filled_at, take_profit, json.dumps(merged_pd), now),
     )
+    note = ("merged into row 396 by ops_fix_trades_20260929.py -- CONI triple "
+            "(394 + 395 + 396 -> one 112-share position)")
+    for rid, row in ((394, row394), (395, row395)):
+        if row is None:
+            continue
+        pd = json.loads(row["pattern_data"] or "{}")
+        pd.update({"merged_into": 396, "note": note})
+        conn.execute(
+            "UPDATE trades SET order_status='canceled', exit_price=NULL, exit_reason=NULL, "
+            "exited_at=NULL, pnl=NULL, pnl_pct=NULL, pattern_data=?, updated_at=? WHERE id=?",
+            (json.dumps(pd), now, rid),
+        )
 
 
 def apply_corrections(conn: sqlite3.Connection, dry_run: bool) -> List[str]:
@@ -322,7 +399,7 @@ def apply_corrections(conn: sqlite3.Connection, dry_run: bool) -> List[str]:
                         entry_ts="2026-09-29T13:40:30Z", exit_price=26.3759,
                         exit_ts="2026-09-29T14:10:50Z", shares=76, pnl=14.09)
     close_ttan_393(conn, dry_run, changes)
-    mark_coni_duplicate_395(conn, dry_run, changes)
+    merge_coni_triple(conn, dry_run, changes)
     if not dry_run:
         conn.commit()
     return changes
