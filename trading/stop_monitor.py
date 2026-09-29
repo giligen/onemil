@@ -28,6 +28,28 @@ import logging
 import queue
 import threading
 import time as time_mod
+import uuid as uuid_mod
+
+from trading import exit_qty_guard as _exit_qty_guard
+
+# Strategy -> client_order_id prefix, kept in sync with each engine's own `self.coid_prefix`
+# (trading/hod_break_engine.py, trading/orb_engine.py, ...). StopMonitor is shared across
+# strategies and must never submit an exit order under a broker-assigned bare uuid -- every
+# StopMonitor-originated exit carries a prefix traceable back to the owning book.
+_COID_PREFIX_BY_STRATEGY = {
+    'hod_break': 'hod', 'orb': 'orb', 'bull_flag': 'bf', 'red_to_green': 'r2g',
+    'macd_wave': 'macd',
+}
+
+
+def _coid_prefix_for_strategy(strategy: str) -> str:
+    """Client-order-id prefix for a StopMonitor watch's owning strategy. Unknown strategies get a
+    sanitized version of their own name rather than silently falling back to a shared/ambiguous
+    prefix -- an exit order must always be traceable to its book."""
+    if strategy in _COID_PREFIX_BY_STRATEGY:
+        return _COID_PREFIX_BY_STRATEGY[strategy]
+    sanitized = ''.join(c if (c.isalnum() or c == '-') else '-' for c in str(strategy or 'unk'))[:12]
+    return sanitized or 'unk'
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
@@ -4554,26 +4576,24 @@ class StopMonitor:
             # main source. Residual race window: ~100ms after get_orders
             # if a parent slipped through both cancels. Acceptable trade-
             # off vs the complexity of a hold/lock primitive.
+            # Broker-truth guard (9/25 CDNA incident, trading/exit_qty_guard.py): use the SIGNED
+            # qty -- a negative broker qty means we are already short and must sell NOTHING more.
             qty_to_sell = watch.shares
             try:
                 positions = await loop.run_in_executor(
                     None, client.get_open_positions,
                 )
-                broker_qty = 0
+                broker_qty_signed = 0
                 for _p in positions:
                     if _p.get('symbol') == symbol:
                         try:
-                            broker_qty = abs(int(_p.get('qty', 0)))
+                            broker_qty_signed = int(_p.get('qty', 0))
                         except (TypeError, ValueError):
-                            broker_qty = 0
+                            broker_qty_signed = 0
                         break
-                if broker_qty > 0 and broker_qty != watch.shares:
-                    logger.warning(
-                        f"StopMonitor: {symbol} qty mismatch — broker has "
-                        f"{broker_qty} sh, watch.shares={watch.shares}. "
-                        f"Using broker qty to avoid orphan residual."
-                    )
-                    qty_to_sell = broker_qty
+                qty_to_sell = _exit_qty_guard.resolve_broker_capped_sell_qty(
+                    symbol, watch.shares, broker_qty_signed, f"[{watch.strategy}]",
+                ) or 0
             except Exception as _e:
                 logger.warning(
                     f"StopMonitor: {symbol} broker position re-query "
@@ -4632,6 +4652,29 @@ class StopMonitor:
                 )
                 return
 
+            if qty_to_sell <= 0:
+                # Broker showed no long position (or a short) on the requery above -- there is
+                # nothing safe to sell. Emit the event anyway (qty=0) so the owning engine's
+                # registry/DB row closes instead of staying open forever (the 9/25 CDNA gap);
+                # never submit an order here.
+                logger.warning(
+                    f"StopMonitor: {symbol} broker-truth guard blocked the stop exit — "
+                    f"qty_to_sell=0, no order submitted; emitting a flat-close event only"
+                )
+                self._emit_stop_exit_event(
+                    symbol, watch, trigger_price, qty=0, order_id='',
+                    exit_reason=exit_reason, exit_branch=ExitBranch.LIMIT.value,
+                    trigger_price=trigger_price, pricing_method='broker_flat_skip',
+                    limit_price=limit_price, bid=bid, ask=ask,
+                    bid_size=bid_size, ask_size=ask_size,
+                )
+                return
+
+            # HOD/exit-guard bookkeeping fix (9/25 CDNA): every StopMonitor-submitted exit order
+            # must carry a strategy-prefixed client_order_id, never a broker-assigned bare uuid --
+            # the earlier CDNA stop exit filled under a bare uuid, invisible to any prefix-keyed
+            # order-stream reconciliation.
+            exit_coid = f"{_coid_prefix_for_strategy(watch.strategy)}-exit-{symbol}-{uuid_mod.uuid4().hex[:10]}"[:48]
             try:
                 # CORD 5/8 fix: retry-with-backoff on held_for_orders race
                 # (40310000) so we ride out Alpaca's async OCO release window
@@ -4643,6 +4686,7 @@ class StopMonitor:
                         symbol=symbol,
                         qty=qty_to_sell,
                         limit_price=limit_price,
+                        client_order_id=exit_coid,
                     ),
                     label=f"{symbol} limit_sell",
                 )
@@ -4650,7 +4694,7 @@ class StopMonitor:
                 logger.info(
                     f"StopMonitor: {symbol} limit sell submitted — "
                     f"qty={qty_to_sell}, limit=${limit_price:.2f} ({pricing_method}), "
-                    f"order={order_id} — awaiting fill confirmation"
+                    f"order={order_id} coid={exit_coid} — awaiting fill confirmation"
                 )
                 # D3 FIX 3 — a partial fill is a partial SUCCESS.
                 filled_qty, filled_px, fill_status = await self._poll_order_fill(

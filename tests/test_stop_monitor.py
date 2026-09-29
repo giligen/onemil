@@ -35,6 +35,15 @@ def mock_alpaca():
     that specifically exercise the timeout/escalation path should override
     `get_order` with a non-filled response."""
     client = MagicMock(spec=AlpacaClient)
+    # Broker-truth exit guard (trading/exit_qty_guard.py, 9/25 CDNA incident): every exit path now
+    # requeries get_open_positions and clamps the sell to what the broker actually shows. Tests in
+    # this file weren't written against that requery, so default it to "the broker holds a large
+    # long position in whatever symbol is asked" -- i.e. never the limiting factor here. Tests that
+    # specifically exercise the guard (TestExitQtyGuardIntegration) override this per-test.
+    class _AnySymbol:
+        def __eq__(self, other): return True
+        def __repr__(self): return '<any symbol>'
+    client.get_open_positions.return_value = [{'symbol': _AnySymbol(), 'qty': 1_000_000}]
     client.cancel_order.return_value = True
     client.submit_limit_sell_order.return_value = {
         'id': 'sell-order-123',
@@ -70,6 +79,13 @@ def monitor(mock_alpaca):
     )
     mon._STOP_EXIT_FILL_TIMEOUT_S = 0.2
     mon._STOP_EXIT_POLL_INTERVAL_S = 0.05
+    # Broker-truth exit guard default: mirror whatever this monitor's OWN watches currently say,
+    # for every symbol, evaluated fresh on each call (so a test's add_watch calls stay in sync).
+    # Tests exercising a broker/registry MISMATCH set get_open_positions.return_value explicitly,
+    # which overrides this side_effect.
+    mock_alpaca.get_open_positions.side_effect = lambda: [
+        {'symbol': w.symbol, 'qty': w.shares} for w in mon._watches.values()
+    ]
     return mon
 
 

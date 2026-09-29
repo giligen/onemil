@@ -427,6 +427,12 @@ def escalating_monitor(escalating_client):
     m._STOP_EXIT_FILL_TIMEOUT_S = 0.2
     m._MARKET_CLOSE_FILL_TIMEOUT_S = 0.2
     m._STOP_EXIT_POLL_INTERVAL_S = 0.05
+    # Broker-truth exit guard default (trading/exit_qty_guard.py): mirror whatever this monitor's
+    # OWN watches currently say, so the pre-existing escalation scenarios (limit never fills,
+    # market close does) still see the broker as holding the watched qty, not flat.
+    escalating_client.get_open_positions.side_effect = lambda: [
+        {'symbol': w.symbol, 'qty': w.shares} for w in m._watches.values()
+    ]
     return m
 
 

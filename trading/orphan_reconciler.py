@@ -180,6 +180,36 @@ def is_owned_orphan(
     return True
 
 
+SUSPECT_OVER_EXIT_LOOKBACK_DAYS = 7  # calendar days -- safely covers 5 trading sessions across a weekend
+
+
+def _recent_any_strategy_trade(db, symbol: str, lookback_start: str) -> Optional[str]:
+    """Strategy name of the most recent trades-table row for `symbol` in ANY strategy since
+    `lookback_start` (inclusive), or None. 9/25 CDNA incident: HOD sold a symbol's registry qty
+    twice (StopMonitor's own stop exit, then a stale force-close), leaving the account short; the
+    reconciler classified the resulting broker short as 'foreign — owner's manual trade, ignored'
+    because CDNA had no OWNED row left open. A symbol OUR books traded recently is never routine
+    foreign flow even when the strict ownership predicate fails -- see `suspect_over_exit` below.
+    Never raises: a lookup failure is logged and treated as no-match (fails toward the existing
+    'foreign' behavior, never toward a false alarm)."""
+    try:
+        if hasattr(db, 'get_trades_in_window'):
+            rows = db.get_trades_in_window(lookback_start, [symbol])
+        else:
+            # .fetchall(), not .fetchone(): matches the legacy-fallback convention every other
+            # query in this module uses (and every test double in the suite implements).
+            cur = db._trades_conn.execute(
+                "SELECT strategy FROM trades WHERE symbol = ? AND trade_date >= ? "
+                "ORDER BY trade_date DESC, id DESC",
+                (symbol, lookback_start),
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+        return str(rows[0]['strategy']) if rows else None
+    except Exception as e:
+        logger.error(f"orphan reconciler: recent-trade lookup failed for {symbol}: {e} — treating as no match")
+        return None
+
+
 def _select_owned_row(
     broker_pos: Dict[str, Any],
     candidate_rows: List[Dict[str, Any]],
@@ -601,6 +631,31 @@ def reconcile_strategy_orphans(
         owned_row = _select_owned_row(broker_pos, rows, today_et, cfg)
 
         if owned_row is None:
+            suspect_lookback = (today_et - timedelta(days=SUSPECT_OVER_EXIT_LOOKBACK_DAYS)).isoformat()
+            recent_strategy = _recent_any_strategy_trade(db, sym, suspect_lookback)
+            if recent_strategy is not None:
+                # OUR books traded this symbol within the last 5 sessions (any strategy), yet it
+                # has no OWNED row now -- this is NOT routine owner manual flow. Most likely our
+                # own over-exit (an exit path sold a stale registry qty past flat, e.g. the 9/25
+                # CDNA incident) misread as the owner's position. Report-only: never auto-close,
+                # but never silently 'ignored' either.
+                action = OrphanAction(
+                    symbol=sym, qty=qty, avg_entry=avg_entry,
+                    classification='suspect_over_exit',
+                    action='log_only',
+                    note=f'No OWNED row now, but {recent_strategy} traded {sym} within '
+                         f'{SUSPECT_OVER_EXIT_LOOKBACK_DAYS}d — possible over-exit, not routine foreign flow',
+                )
+                actions.append(action)
+                book_prefix = {'hod_break': '[HOD]', 'orb': '[ORB]', 'bull_flag': '[BF]',
+                                'macd_wave': '[MACD]', 'red_to_green': '[R2G]'}.get(recent_strategy, f'[{recent_strategy}]')
+                msg = (f"{book_prefix} SUSPECT OVER-EXIT: {sym} ({qty:+d} sh @ ${avg_entry:.4f}) "
+                       f"is unowned now but {recent_strategy} traded it within "
+                       f"{SUSPECT_OVER_EXIT_LOOKBACK_DAYS}d — check for a stale registry / double "
+                       f"exit before treating this as the owner's manual trade. Report-only, not touched.")
+                logger.warning(f"orphan reconciler [{strategy}]: {msg}")
+                _alert(notifier, strategy, sym, msg, cfg.alert_cooldown_minutes)
+                continue
             action = OrphanAction(
                 symbol=sym, qty=qty, avg_entry=avg_entry,
                 classification='foreign',

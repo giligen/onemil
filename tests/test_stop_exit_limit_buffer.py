@@ -57,6 +57,15 @@ def mock_alpaca():
     # Underlying trading client used for open-order lookup
     client.trading_client = MagicMock()
     client.trading_client.get_orders.return_value = []
+    # Broker-truth exit guard (trading/exit_qty_guard.py, 9/25 CDNA incident): default to "the
+    # broker holds a large long position in whatever symbol is asked" so pre-existing tests that
+    # don't care about the guard aren't limited by it. TestExitQtyReconciliation below overrides
+    # this per-test via `.return_value = [...]` (an ordinary reassignment, not a side_effect, so it
+    # takes over cleanly).
+    class _AnySymbol:
+        def __eq__(self, other): return True
+        def __repr__(self): return '<any symbol>'
+    client.get_open_positions.return_value = [{'symbol': _AnySymbol(), 'qty': 1_000_000}]
     return client
 
 
@@ -859,13 +868,15 @@ class TestExitQtyReconciliation:
         assert sell_kwargs['qty'] == 5153, (
             f"expected qty=5153 (broker view), got {sell_kwargs.get('qty')}"
         )
-        # A mismatch WARNING was logged
+        # A mismatch WARNING was logged (trading/exit_qty_guard.py: the shared broker-truth guard,
+        # 9/25 CDNA incident -- message text changed when this reconciliation moved into the ONE
+        # shared helper both the stop-exit and force-close paths now call).
         mismatch_logs = [
             r for r in caplog.records
-            if 'qty mismatch' in r.getMessage()
+            if 'broker holds' in r.getMessage() and 'APT' in r.getMessage()
         ]
         assert len(mismatch_logs) >= 1, (
-            "expected 'qty mismatch' warning when broker_qty != watch.shares"
+            "expected a broker-qty-mismatch warning when broker_qty != watch.shares"
         )
         # The emitted event also carries the reconciled qty (for P&L math)
         events = monitor.drain_exit_events()
@@ -1294,7 +1305,7 @@ class TestPartialIsBookedAndRemainderWorked:
                     'filled_avg_price': None}
         _get_order.n = 0
         mock_alpaca.get_order.side_effect = _get_order
-        mock_alpaca.get_open_positions.return_value = []
+        mock_alpaca.get_open_positions.return_value = [{'symbol': 'EHGO', 'qty': 2962}]   # broker-truth guard: broker holds the full watch qty
         w = self._armed(monitor)
         await monitor._execute_stop_exit('EHGO', 4.33, w,
                                          exit_reason='stop_loss')

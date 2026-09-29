@@ -203,6 +203,7 @@ class TestLifecycle:
 
     def test_force_close_sells_only_our_shares_and_retries_until_flat(self, engine, mock_alpaca):
         pos = self._pending(engine); pos.status = 'open'; pos.fill_price = 11.05
+        mock_alpaca.get_open_positions.return_value = [{'symbol': 'ABC', 'qty': pos.shares}]   # broker-truth guard: broker holds it
         mock_alpaca.submit_limit_sell_order.return_value = {'id': 'c1', 'status': 'accepted'}
         with patch('trading.hod_break_engine.time.sleep'):
             n = engine.force_close_all()
@@ -233,6 +234,58 @@ class TestLifecycle:
         with patch('trading.hod_break_engine.time.sleep'):
             engine.force_close_all()
         assert 'ABC' in engine.positions and engine.positions['ABC'].status == 'pending' and not mock_alpaca.submit_limit_sell_order.called
+
+    def test_force_close_skips_when_broker_already_flat(self, engine, mock_alpaca, mock_db):
+        """9/25 CDNA incident: StopMonitor's own stop exit already flattened the broker, but the
+        registry still shows the position open (a stale drain across a restart). force_close_all
+        must NEVER sell the registry qty blind -- it must see broker=0 and skip with a WARNING,
+        submitting nothing, never creating a short."""
+        pos = self._pending(engine); pos.status = 'open'; pos.fill_price = 11.05
+        mock_alpaca.get_open_positions.return_value = []   # broker is flat -- nothing to sell
+        with patch('trading.hod_break_engine.time.sleep'):
+            n = engine.force_close_all()
+        assert n == 0
+        assert not mock_alpaca.submit_limit_sell_order.called and not mock_alpaca.submit_market_sell_order.called
+        assert 'ABC' not in engine.positions
+        assert mock_db.update_trade.call_args.args[1]['order_status'] == 'exit_pending_verification'
+
+    def test_force_close_clamps_to_broker_qty_never_oversells(self, engine, mock_alpaca):
+        """Registry says 57, broker actually holds only 30 (e.g. a partial leg fill the registry
+        missed) — force_close_all must sell exactly the broker's 30, never the registry's 57."""
+        pos = self._pending(engine); pos.status = 'open'; pos.fill_price = 11.05
+        mock_alpaca.get_open_positions.return_value = [{'symbol': 'ABC', 'qty': 30}]
+        mock_alpaca.submit_limit_sell_order.return_value = {'id': 'c1', 'status': 'accepted'}
+        with patch('trading.hod_break_engine.time.sleep'):
+            n = engine.force_close_all()
+        assert n == 1
+        kw = mock_alpaca.submit_limit_sell_order.call_args.args
+        assert kw[1] == 30   # broker qty, not pos.shares
+
+    def test_force_close_skips_when_broker_already_short(self, engine, mock_alpaca):
+        """Broker shows a SHORT for the symbol (a prior over-exit already happened) -- force_close
+        must never sell more into it."""
+        pos = self._pending(engine); pos.status = 'open'; pos.fill_price = 11.05
+        mock_alpaca.get_open_positions.return_value = [{'symbol': 'ABC', 'qty': -57}]
+        with patch('trading.hod_break_engine.time.sleep'):
+            n = engine.force_close_all()
+        assert n == 0 and not mock_alpaca.submit_limit_sell_order.called and not mock_alpaca.submit_market_sell_order.called
+
+    def test_cdna_sequence_stop_exit_then_force_close_sells_nothing_again(self, engine, mock_alpaca, mock_sm, mock_db):
+        """Integration-style replay of the 9/25 CDNA incident: entry fills, StopMonitor executes ITS
+        OWN stop exit (broker now flat), the drain marks our side closed, and force_close_all at
+        15:55 must submit NOTHING -- not a second sell, not a short."""
+        pos = self._pending(engine); pos.status = 'open'; pos.fill_price = 65.0468; pos.stop = 64.19
+        mock_sm.drain_exit_events.return_value = [
+            StopExitEvent(symbol='ABC', stop_price=64.19, exit_price=64.1043, shares=pos.shares,
+                          order_id='4029aefd-bd26-471e-bc6f-9fefbd76468c', exit_reason=ExitReason.STOP_LOSS.value,
+                          exit_branch='limit', trade_db_id=pos.trade_id, submitted_at=0.0, strategy=STRATEGY_NAME)
+        ]
+        engine._drain_stop_monitor_exits()
+        assert 'ABC' not in engine.positions   # our side closed by the drain
+        mock_alpaca.get_open_positions.return_value = []   # broker really is flat now
+        with patch('trading.hod_break_engine.time.sleep'):
+            n = engine.force_close_all()
+        assert n == 0 and not mock_alpaca.submit_limit_sell_order.called and not mock_alpaca.submit_market_sell_order.called
 
     def test_is_force_close_time(self, engine):
         with patch.object(HodBreakEngine, '_minute_of_day', return_value=954): assert not engine.is_force_close_time()
@@ -538,6 +591,7 @@ class TestExitSeamParity:
 
     def test_partial_close_fill_resubmits_only_the_remainder(self, engine, mock_alpaca):
         pos = self._open(engine, mock_alpaca); n = pos.shares
+        mock_alpaca.get_open_positions.return_value = [{'symbol': 'ABC', 'qty': n}]   # broker-truth guard: broker holds it
         mock_alpaca.get_order.side_effect = lambda oid: {'status': 'canceled', 'filled_qty': 0}
         mock_alpaca.submit_limit_sell_order.return_value = {'id': 'c1', 'status': 'accepted'}
         with patch.object(HodBreakEngine, '_minute_of_day', return_value=955), patch('trading.hod_break_engine.time.sleep'):
@@ -545,6 +599,7 @@ class TestExitSeamParity:
         assert mock_alpaca.submit_limit_sell_order.call_args.args[:2] == ('ABC', n) and pos.close_order_id == 'c1' and pos.pattern_data['close_order_id'] == 'c1'
         pos.close_submitted_at = datetime.now(timezone.utc) - timedelta(seconds=120)
         mock_alpaca.get_order.side_effect = lambda oid: {'status': 'partially_filled', 'filled_qty': 4, 'filled_avg_price': 10.9} if oid == 'c1' else {'status': 'canceled', 'filled_qty': 0}
+        mock_alpaca.get_open_positions.return_value = [{'symbol': 'ABC', 'qty': n - 4}]   # broker-truth guard: the partial fill already reduced the broker's real qty
         mock_alpaca.submit_limit_sell_order.return_value = {'id': 'c2', 'status': 'accepted'}
         with patch.object(HodBreakEngine, '_minute_of_day', return_value=956), patch('trading.hod_break_engine.time.sleep'):
             engine.force_close_all()

@@ -240,6 +240,7 @@ class TestHodEodExitFlagOff:
         e._roll_session()
         pos = _hod_position()
         e.positions['ABC'] = pos
+        hod_mock_alpaca.get_open_positions.return_value = [{'symbol': 'ABC', 'qty': pos.shares}]   # broker-truth guard: broker holds it
         hod_mock_alpaca.submit_limit_sell_order.return_value = {'id': 'fc-1', 'status': 'accepted'}
         e.force_close_all()
         hod_mock_alpaca.submit_limit_sell_order.assert_called_once()
@@ -256,6 +257,7 @@ class TestHodEodExitModes:
         e = HodBreakEngine(hod_mock_alpaca, hod_mock_db, hod_mock_sm, cfg=c)
         e._roll_session()
         e.positions['ABC'] = _hod_position()
+        hod_mock_alpaca.get_open_positions.return_value = [{'symbol': 'ABC', 'qty': 100}]   # broker-truth guard: broker holds it
         hod_mock_alpaca.submit_moc_sell_order.return_value = {'id': 'moc-1', 'status': 'accepted'}
         morning = datetime(2026, 9, 29, 14, 0, tzinfo=ET)
         with patch('trading.hod_break_engine.datetime') as mock_dt:

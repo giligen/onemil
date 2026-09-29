@@ -232,6 +232,20 @@ def _stub_db(rows_by_symbol=None):
 
     db.get_strategy_trades_in_window = _get_strategy_trades
 
+    def _get_trades_in_window(since_date, symbols=None):
+        # suspect_over_exit lookup (trading/orphan_reconciler.py::_recent_any_strategy_trade):
+        # same as _get_strategy_trades but across EVERY strategy, not just the caller's.
+        out = []
+        for r in flat_rows:
+            if str(r.get('trade_date') or '') < str(since_date):
+                continue
+            if symbols and r['symbol'] not in symbols:
+                continue
+            out.append(dict(r))
+        return out
+
+    db.get_trades_in_window = _get_trades_in_window
+
     class Cursor:
         def __init__(self, results):
             self._results = results
@@ -267,6 +281,46 @@ class TestReconcileEndToEnd:
         )
         assert actions == []
         a.close_position.assert_not_called()
+
+    def test_foreign_symbol_recently_traded_by_us_is_suspect_over_exit_not_foreign(self):
+        """9/25 CDNA incident: HOD sold the registry qty twice (StopMonitor's own stop exit, then a
+        stale force-close), leaving the account short. The reconciler found no OWNED row for CDNA
+        (both exits had already closed/overwritten it) and logged it as routine 'foreign — owner's
+        manual trade, ignored'. A symbol OUR books traded within the last 5 sessions must never be
+        silently classified foreign — it must be `suspect_over_exit`, WARNING-logged, alerted to
+        Telegram with the trading book's prefix, and still never auto-closed."""
+        a = _stub_alpaca(positions=[{'symbol': 'CDNA', 'qty': -57, 'avg_entry_price': 63.50}])
+        db = MagicMock()
+        db.get_strategy_trades_in_window.return_value = []          # no OWNED hod_break row survives
+        db.get_trades_in_window.return_value = [{'strategy': 'hod_break', 'symbol': 'CDNA', 'trade_date': str(TODAY)}]
+        notifier = MagicMock()
+        actions = reconcile_strategy_orphans(
+            strategy='hod_break', alpaca=a, db=db, notifier=notifier,
+            tracked_symbols=set(), today_et=TODAY,
+        )
+        assert len(actions) == 1
+        assert actions[0].classification == 'suspect_over_exit'
+        assert actions[0].action == 'log_only'
+        assert actions[0].symbol == 'CDNA'
+        a.close_position.assert_not_called()          # report-only, never touched
+        assert notifier.method_calls or notifier.mock_calls          # a Telegram alert was sent
+        sent = str(notifier.mock_calls)
+        assert '[HOD]' in sent and 'CDNA' in sent
+
+    def test_truly_foreign_symbol_we_never_traded_stays_foreign_no_alert(self):
+        """Unchanged behavior (owner directive 8/17): a symbol we never touched recently is routine
+        owner manual flow — foreign, log-only, no Telegram alert."""
+        a = _stub_alpaca(positions=[{'symbol': 'BMNR', 'qty': 100, 'avg_entry_price': 5.00}])
+        db = MagicMock()
+        db.get_strategy_trades_in_window.return_value = []
+        db.get_trades_in_window.return_value = []
+        notifier = MagicMock()
+        actions = reconcile_strategy_orphans(
+            strategy='hod_break', alpaca=a, db=db, notifier=notifier,
+            tracked_symbols=set(), today_et=TODAY,
+        )
+        assert len(actions) == 1 and actions[0].classification == 'foreign'
+        assert notifier.mock_calls == []          # never alerted on the owner's own trades
 
     def test_foreign_position_silent_no_close(self):
         # Owner directive 2026-08-17 (BMNR incident): foreign positions are

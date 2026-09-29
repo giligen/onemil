@@ -36,6 +36,15 @@ from trading.exit_reasons import ExitBranch
 from trading.stop_monitor import StopMonitor
 
 
+class _AnySymbol:
+    """Broker-truth exit guard (trading/exit_qty_guard.py, 9/25 CDNA incident) test default: equals
+    any symbol, so `{'symbol': _AnySymbol(), 'qty': N}` satisfies the guard's per-symbol lookup
+    regardless of which ticker a test watches -- these ladder tests don't exercise the guard itself
+    and shouldn't be limited by an unconfigured get_open_positions default."""
+    def __eq__(self, other): return True
+    def __repr__(self): return '<any symbol>'
+
+
 LADDER_ON = {
     'enabled': True, 'slice_to_bid_size': True, 'min_slice': 100,
     'cross_factor': 0.25, 'reprice_after_s': 0.15, 'max_rounds': 3,
@@ -48,7 +57,7 @@ def client():
     c = MagicMock(spec=AlpacaClient)
     c.cancel_order.return_value = True
     c.close_position.return_value = {'id': 'mkt-1', 'status': 'accepted'}
-    c.get_open_positions.return_value = []
+    c.get_open_positions.return_value = [{'symbol': 'RBNE', 'qty': 2841}]  # matches _rbne_watch's default shares
     c.trading_client = MagicMock()
     c.trading_client.get_orders.return_value = []
     c.get_latest_quote.return_value = {
@@ -333,7 +342,7 @@ class TestLadderDisabledIsByteIdentical:
         c = MagicMock(spec=AlpacaClient)
         c.cancel_order.return_value = True
         c.close_position.return_value = {'id': 'mkt-1', 'status': 'accepted'}
-        c.get_open_positions.return_value = []
+        c.get_open_positions.return_value = [{'symbol': 'RBNE', 'qty': 2841}]  # matches _rbne_watch's default shares
         c.trading_client = MagicMock()
         c.trading_client.get_orders.return_value = []
         c.submit_limit_sell_order.return_value = {'id': 'lmt-1',

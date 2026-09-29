@@ -509,6 +509,12 @@ def sm_monitor(sm_mock_alpaca):
     )
     mon._STOP_EXIT_FILL_TIMEOUT_S = 0.2
     mon._STOP_EXIT_POLL_INTERVAL_S = 0.05
+    # Broker-truth exit guard default (trading/exit_qty_guard.py): mirror whatever this monitor's
+    # OWN watches currently say, so the pre-existing partial-fill-then-remainder scenarios see the
+    # broker holding exactly the (possibly just-reduced) watch qty, not flat.
+    sm_mock_alpaca.get_open_positions.side_effect = lambda: [
+        {'symbol': w.symbol, 'qty': w.shares} for w in mon._watches.values()
+    ]
     return mon
 
 

@@ -39,6 +39,8 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
+
+from trading import exit_qty_guard as _exit_qty_guard
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -2042,6 +2044,17 @@ class HodBreakEngine:
                 qty = pos.open_qty
                 if qty <= 0:
                     logger.warning(f"{self.tag} FORCE CLOSE {sym}: nothing left to sell after the legs were read"); continue
+                # Broker-truth guard (9/25 CDNA incident): the registry can be stale (a StopMonitor
+                # exit whose drain raced a restart) -- never sell what the broker doesn't show long.
+                broker_qty = _exit_qty_guard.get_signed_broker_qty(self.alpaca, sym)
+                capped = _exit_qty_guard.resolve_broker_capped_sell_qty(sym, qty, broker_qty, self.tag, notify_fn=self._notify)
+                if capped is None:
+                    self.positions.pop(sym, None)
+                    if pos.trade_id is not None:
+                        try: self.db.update_trade(pos.trade_id, {'order_status': 'exit_pending_verification'})
+                        except Exception as e: logger.error(f"{self.tag} {sym}: exit_pending_verification DB write failed: {e}")
+                    continue
+                qty = capped
                 pos.fc_attempts += 1
                 coid = f"hod-fc-{sym}-{(self.session_date or '')[5:]}-{uuid.uuid4().hex[:6]}"[:48]
                 resolved = _eod.resolve_mode(self.eod_exit_mode, datetime.now(ZoneInfo('America/New_York')))
