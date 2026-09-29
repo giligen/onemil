@@ -50,3 +50,14 @@ night on the owner's word. FAIL → closed; no re-run without a different condit
 
 ## Not allowed
 Tuning the 1.25 multiplier, the 60-session window, the 15:30 boundary or the four-night TOM window after a number.
+
+## Amendment 1 (2026-09-29 06:45 UTC, before any number) — 1,649 scored as a stacking sleeve, not report-only
+Owner's rule (same morning): sleeves that trigger on different days stack; a positive, bounded sleeve is judged by what
+it adds to the portfolio and what it collides with, never dismissed as "small on its own". 1,649 (unconditional
+overnight, buy MOC / sell MOO every night, SPY/QQQ/IWM) is therefore SCORED on 2016–2023 pooled: bar = mean net
+≥ +2 bps per night, night-clustered t ≥ 2.5 (MDE ≈ 3.4 bps at 2,000 nights, so the t item is informational; the
+alternative rule = ≥ 6 of 8 years positive AND all three ETFs positive AND the overnight Sharpe above the 24-hour
+buy-and-hold Sharpe on the same ETF — the documented mechanism is that intraday adds variance without return),
+ex-worst-5 % reported beside the mean, max drawdown and the worst night in dollars at $20K per night. The stacking line
+(expected $/month at $20K, capital window = overnight only, collision = a gap-down morning shared with the day books)
+is written for every cell in this PREREG. Nothing else changes.
