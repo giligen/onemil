@@ -356,6 +356,16 @@ def build_reads(per_short_df, eligible_df, pf, counters):
     return pd.DataFrame(rows)
 
 
+def best_tau_variant(min_day_t):
+    """(tau,variant) index with the highest worst-of-both-scorings day_t, or
+    the grid's first cell when every day_t is NaN (too few shorts to report a
+    'best' at all -- the RESULT still shows that cell's n so the emptiness is
+    visible, never silently hidden)."""
+    if min_day_t.notna().any():
+        return min_day_t.idxmax()
+    return min_day_t.index[0]
+
+
 def evaluate_pass_bar(reads):
     """Per PREREG: short mean net R >= +0.10 R with day-clustered t >= 2.5 in
     BOTH scorings, ex-top-5% > 0 in both, >= 3 shorts/week in both scorings'
@@ -419,8 +429,7 @@ def write_result_md(reads, pass_df, counters, n_no_prior_close, n_pop):
         # rank by the worse (min) day_t across the two scorings
         day_t_cols = [c for c in piv.columns if c[0] == 'short_day_t']
         min_day_t = piv[day_t_cols].min(axis=1)
-        best = min_day_t.idxmax()
-        tau_b, var_b = best
+        tau_b, var_b = best_tau_variant(min_day_t)
         rows_b = g[(g['tau'] == tau_b) & (g['variant'] == var_b)]
         L.append(f'**{lk} best: tau={tau_b} variant={var_b}**')
         for _, r in rows_b.iterrows():
@@ -437,8 +446,7 @@ def write_result_md(reads, pass_df, counters, n_no_prior_close, n_pop):
         piv = g.pivot_table(index=['tau', 'variant'], columns='scoring', values='portfolio_day_t')
         day_t_cols = list(piv.columns)
         min_day_t = piv[day_t_cols].min(axis=1)
-        best = min_day_t.idxmax()
-        tau_b, var_b = best
+        tau_b, var_b = best_tau_variant(min_day_t)
         rows_b = g[(g['tau'] == tau_b) & (g['variant'] == var_b)]
         L.append(f'**{lk} best overlay: tau={tau_b} variant={var_b}**')
         for _, r in rows_b.iterrows():

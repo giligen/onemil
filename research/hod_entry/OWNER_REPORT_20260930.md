@@ -71,3 +71,23 @@ own path after entry, and acting on it costs more than it saves. HOD's value is 
 5. **Options v3** ($32 Databento pull, running): cell 1,599 verdict when it completes (watcher armed).
 6. **Research spend:** the day books are execution-limited, not idea-limited. Tomorrow's research hour goes to ORB
    parity and frequency (the only positive mechanism), not to HOD.
+
+## 7. Self-audit (owner 05:10 UTC: "find the errors and oversights, there's money there")
+Four candidates examined; two closed by a quick check, two run as cells 1,673–1,674. Result: the errors were real,
+the money was not.
+* **Fill model** — closed: backtest fills sit 6.0 bps above the level (median 5.2, capped at 15) = the live +6.7 bps;
+  fill distance carries no P&L pattern. No hidden cost.
+* **My bar's power error** — real: "+0.05 R and t ≥ 2.5 in EACH half" rejects a true +0.05 R lift ~75 % of the time.
+  Read correctly (1,674: tercile edges fixed on TRAIN, pooled day-clustered t, sign agreement, joint book on VAL): every
+  same-signed cut pools to ≈ 0 (relative volume −0.001 R, dollar volume −0.004, VWAP +0.004, ≥ 3 % stops +0.023 t 0.45,
+  midday −0.058); the earlier same-sign pattern came partly from per-half tercile edges. Joint book = the floored base,
+  VAL −0.030 R (t −2.1). Ordering the capped day by the widest stop: −0.032 vs −0.038 R. Data-integrity finding: the
+  exit lab's per-fill book (1,660) and the stop-distance book (1,658) are different pipelines (74.7 % key match, 374
+  sign flips) — the MOC +0.010 R transfers only as an aggregate.
+* **Short the predicted failure** (1,673, the geometry I never read): the fast-failure signal at minute 1 with the
+  day-high stop earns **+0.065 / +0.062 R per short, hit rate 64–66 %, same sign on both scorings — but t 1.1 / 1.6,
+  18.5 % of exits priced optimistically (gapped through), 0 / 45 cells pass, placebo unavailable.** Stop-keyed shorts
+  at 2–10 min are negative. Portfolio overlay +0.004 / +0.012 R. Verdict: a watch item, not a winner — the one
+  positive, same-signed, mechanism-backed read of the night; it needs short-side order mechanics that do not exist in
+  the engine (locate, SSR, short OCO), so it is NOT the next engineering item ahead of ORB parity. Queued as the first
+  new-mechanism cell once ORB is live and stable, with a pre-committed paper read at 100 shorts.
