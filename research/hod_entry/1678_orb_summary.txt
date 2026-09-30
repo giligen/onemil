@@ -1,0 +1,2 @@
+n_entered=483 n_usable=478 coverage=99.0% no_bars=5 no_range_or_fill=0 bad_R=0 no_exit=0
+giveback: share_ever>=1R_closed<=0 = 0.213 (n=256), mean_R_given_back = 1.882
