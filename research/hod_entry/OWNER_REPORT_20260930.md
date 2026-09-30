@@ -125,3 +125,13 @@ unmanaged one), and the headline is below the 4 %/month bar anyway: +3.1 %/month
 t 2.5), +0.9 %/month on the 2016–2023 extension (t 2.0, 56 % green months). Decision: no further spend (closing the
 extension's gap is unquantified and its headline is a quarter of the bar); the line is closed as below-bar. The
 $0.04 that would close TRAIN/VAL's gap changes nothing about that.
+
+## 11. Going deeper on the shape signal (cells 1,678–1,679), 17:00 UTC
+* The post-entry "shape signal" decomposes to mark-to-market (AUC 0.80–0.96 on its own); shape adds ≈ 0; the expected
+  remaining R from any minute is unpredictable (negative R² in all 64 cells). HOD exit rules built on it: +0.01 R.
+* Transferred to ORB, the models "passed" on a book without times and with tiny-R tails; on REAL ledgers (live 123
+  fills with exact times; BT book with the entry minute rebuilt by the BT rule, validated to the minute) they are
+  NEGATIVE both years (−0.3 to −0.8 R). Flagged in time, not claimed.
+* The ORB give-back, measured properly: 9 % of live fills and 5 % of BT fills reach +1 R and close ≤ 0 (1.4–1.6 R given
+  back) — real, smaller than the crude 21 %. Best mechanical fix = 50 % out at +1 R: live +0.22 R (t 3.6, +$75/trade)
+  but ≈ +0.02 R on the BT book both years → fails the bar; watch on the paper ledger, nothing enters orb.yaml.
