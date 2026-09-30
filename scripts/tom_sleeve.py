@@ -16,16 +16,38 @@ Idempotent by client_order_id ('tom-<YYYYMM>-<SYM>-in' / 'tom-<YYYYMM>-<SYM>-out
 month the action itself falls in) and by the CSV ledger's notion of an open sleeve position — safe to
 invoke repeatedly, from cron, in the same window, or on both daily UTC cron ticks across DST.
 
+2026-09-30 entry incident (first-ever entry) and the fix: the 19:45 UTC (15:45 ET) tick submitted
+three MOC BUYs (TimeInForce.CLS) at 19:45:04-05 UTC. All three were ACCEPTED at submission (no
+reject — 5 min inside Alpaca's documented "CLS orders submitted after 3:50pm ET are rejected" rule,
+https://docs.alpaca.markets/us/docs/orders-at-alpaca, and inside every cited exchange cutoff: NYSE
+15:50 ET, Nasdaq 15:55 ET, NYSE Arca 15:59 ET per alpaca.markets/learn/13-order-types-you-should-
+know-about and the NYSE closing-auction fact sheet — submission timing is therefore RULED OUT as the
+cause). QQQ (Nasdaq-listed) got a closing-cross print and FILLED @ 739.55 at 19:59:59.73 UTC. SPY and
+IWM (NYSE Arca-listed) got no print, sat as open orders, and were marked EXPIRED ~30s AFTER the close
+(20:00:29.96 / 20:00:37.27 UTC respectively) — confirmed by reading the raw order objects (status,
+submitted_at, expired_at) via the read-only Alpaca API. Alpaca's own docs only say "any unfilled
+order after the close will be cancelled" with no venue detail, so the exact internal reason the Arca
+leg's auction print never arrived (paper-simulation gap vs a real Arca-side quirk) is NOT confirmed
+with Alpaca support — this is N=1. Consequence, since the failure is AT the close, not submission:
+MOC/CLS stays for QQQ (empirically reliable); SPY/IWM switch to a marketable DAY limit (NOT CLS, so
+it does not depend on the closing auction at all) submitted in a narrow LATE_WINDOW just before the
+close so the fill still tracks the closing price closely. See MOC_RELIABLE_SYMBOLS /
+FALLBACK_LIMIT_SYMBOLS below.
+
 Usage:
-    python3 scripts/tom_sleeve.py              # act only if now is 15:40-15:55 ET on an entry/exit
-                                                 # day; otherwise checks pending fills and exits 0
+    python3 scripts/tom_sleeve.py              # act only if now is in the MOC window (15:40-15:55 ET,
+                                                 # QQQ) or the late fallback window (15:57-15:59 ET,
+                                                 # SPY/IWM) on an entry/exit day; otherwise checks
+                                                 # pending fills and exits 0
     python3 scripts/tom_sleeve.py --dry-run     # print intended actions, submit nothing, no Telegram
     python3 scripts/tom_sleeve.py --status      # print the ledger + current open sleeve, no orders
 
-Cron (added by the main session, NOT by this script): run twice daily on weekdays so 15:45 ET falls
-inside one of the two ticks in both DST regimes (EDT = UTC-4, EST = UTC-5) — the script itself decides
-whether "now" is actually in the entry/exit window, so a miss on one tick is a harmless no-op:
-    45 19,20 * * 1-5 cd /home/ec2-user/onemil && /usr/bin/python3 scripts/tom_sleeve.py >> logs/tom_sleeve_cron.log 2>&1
+Cron (added by the main session, NOT by this script): run FOUR times daily on weekdays so BOTH
+15:45 ET (MOC window) and 15:58 ET (late fallback window) each fall inside one of the ticks in both
+DST regimes (EDT = UTC-4, EST = UTC-5) — the script itself decides whether "now" is actually in a
+window, so a miss on any tick is a harmless no-op; the post-close tick (the OTHER hour's :45) is also
+when check_pending_fills reports final status/reason for the day's entries:
+    45,58 19,20 * * 1-5 cd /home/ec2-user/onemil && /usr/bin/python3 scripts/tom_sleeve.py >> logs/tom_sleeve_cron.log 2>&1
 """
 import argparse
 import calendar as calendar_mod
@@ -53,9 +75,17 @@ MIN_BUYING_POWER = 70_000.0
 ET = ZoneInfo('US/Eastern')
 WINDOW_START = dtime(15, 40)
 WINDOW_END = dtime(15, 55)
+# 2026-09-30 evidence (module docstring): QQQ's MOC/CLS order got a Nasdaq closing-cross print and
+# filled; SPY's and IWM's did not and expired ~30s after the close. MOC/CLS stays ONLY for the symbol
+# it is proven to work for; the other two use the fallback marketable-limit leg in LATE_WINDOW.
+MOC_RELIABLE_SYMBOLS = ('QQQ',)
+FALLBACK_LIMIT_SYMBOLS = ('SPY', 'IWM')
+LATE_WINDOW_START = dtime(15, 57)
+LATE_WINDOW_END = dtime(15, 59)
+FALLBACK_LIMIT_BUFFER = 0.003  # marketable cushion (30 bps) over the latest trade so the DAY limit crosses the spread
 LEDGER_PATH = os.path.join(ROOT, 'logs', 'tom_sleeve_ledger.csv')
 LEDGER_FIELDS = ['date', 'action', 'symbol', 'qty', 'ref_price', 'order_id', 'status',
-                  'client_order_id', 'timestamp_utc']
+                  'client_order_id', 'timestamp_utc', 'partial_entry']
 TG_PREFIX = '[TOM]'
 ACTIVE_STATUSES = ('submitted', 'filled')  # ledger statuses that count as "this leg is in effect"
 
@@ -112,8 +142,16 @@ def classify_day(today: date, alpaca_client: AlpacaClient) -> str:
 
 
 def in_action_window(now_et: datetime) -> bool:
-    """True iff the ET wall-clock time falls in the 15:40-15:55 submission window."""
+    """True iff the ET wall-clock time falls in the 15:40-15:55 MOC submission window
+    (MOC_RELIABLE_SYMBOLS only — see module docstring, 2026-09-30 SPY/IWM incident)."""
     return WINDOW_START <= now_et.time() <= WINDOW_END
+
+
+def in_late_window(now_et: datetime) -> bool:
+    """True iff the ET wall-clock time falls in the 15:57-15:59 late fallback window
+    (FALLBACK_LIMIT_SYMBOLS only): a marketable DAY limit submitted just before the close so the
+    fill still tracks the closing price without depending on the closing auction."""
+    return LATE_WINDOW_START <= now_et.time() <= LATE_WINDOW_END
 
 
 # ---------------------------------------------------------------------------
@@ -191,9 +229,18 @@ def open_tom_symbols(ledger_rows: List[Dict]) -> Set[str]:
     """
     held: Set[str] = set()
     for row in ledger_rows:
-        if row.get('action') == 'entry' and row.get('status') in ACTIVE_STATUSES:
+        action = row.get('action')
+        status = row.get('status')
+        if action == 'entry' and status in ACTIVE_STATUSES:
             held.add(row['symbol'])
-        elif row.get('action') == 'exit' and row.get('status') in ACTIVE_STATUSES:
+        elif action == 'exit' and status in ACTIVE_STATUSES:
+            held.discard(row['symbol'])
+        elif action == 'entry_fillcheck' and status != 'filled':
+            # The entry order resolved WITHOUT filling (canceled/rejected/expired — the 2026-09-30
+            # SPY/IWM case). It was tentatively "held" by the 'submitted' row above; honesty means
+            # this symbol was never actually entered this month, so clear it (else it is falsely
+            # locked out of every future month's entry — open_tom_symbols would never see a matching
+            # 'exit' row to clear a position that was never really opened).
             held.discard(row['symbol'])
     return held
 
@@ -266,6 +313,47 @@ def submit_moc_buy_order(alpaca_client: AlpacaClient, symbol: str, qty: int, cli
         raise AlpacaAPIError(f"Failed to submit MOC buy for {symbol}: {e}")
 
 
+def submit_fallback_limit_buy_order(alpaca_client: AlpacaClient, symbol: str, qty: int, price: float,
+                                     client_order_id: str) -> Dict:
+    """FALLBACK_LIMIT_SYMBOLS entry leg: a DAY limit order priced FALLBACK_LIMIT_BUFFER above the
+    latest trade so it is marketable (crosses the spread) in continuous trading. Deliberately NOT
+    TimeInForce.CLS — the 2026-09-30 incident (module docstring) showed the closing auction itself
+    never returned a fill for SPY/IWM, so any CLS-based order (MOC or LOC) risks the same silent
+    expiry; a plain marketable DAY order submitted in LATE_WINDOW sidesteps the auction entirely
+    while still filling within ~1-2 minutes of the close.
+    """
+    if symbol not in FALLBACK_LIMIT_SYMBOLS:
+        raise ValueError(f"fallback limit entry is only for {FALLBACK_LIMIT_SYMBOLS}, not {symbol!r}")
+    if not client_order_id.startswith('tom-'):
+        raise ValueError(f"refusing to submit a non-tom client_order_id: {client_order_id!r}")
+    if price is None or price <= 0:
+        raise ValueError(f"refusing a fallback limit order for {symbol} with a non-positive price: {price!r}")
+    from alpaca.trading.requests import LimitOrderRequest
+    from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
+    limit_price = round(price * (1 + FALLBACK_LIMIT_BUFFER), 2)
+    try:
+        request = LimitOrderRequest(
+            symbol=symbol, qty=qty, side=OrderSide.BUY, limit_price=limit_price,
+            time_in_force=TimeInForce.DAY, order_class=OrderClass.SIMPLE,
+            client_order_id=client_order_id,
+        )
+        order = alpaca_client.trading_client.submit_order(request)
+        result = {
+            'id': str(getattr(order, 'id', '') or ''),
+            'status': str(getattr(getattr(order, 'status', ''), 'value', getattr(order, 'status', '')) or 'unknown'),
+            'symbol': symbol,
+            'qty': qty,
+        }
+        logger.info(f"tom_sleeve: fallback limit buy submitted: {symbol} BUY {qty} <= ${limit_price:.2f} "
+                     f"(CLS auction bypassed — id={result['id']} status={result['status']})")
+        return result
+    except AlpacaAPIError:
+        raise
+    except Exception as e:
+        logger.error(f"tom_sleeve: fallback limit buy submit failed for {symbol}: {e}")
+        raise AlpacaAPIError(f"Failed to submit fallback limit buy for {symbol}: {e}")
+
+
 # ---------------------------------------------------------------------------
 # Core run
 # ---------------------------------------------------------------------------
@@ -279,8 +367,9 @@ def run(alpaca_client: AlpacaClient, notifier: Optional[TelegramNotifier], now_u
 
     now_et = now_utc.astimezone(ET)
     today = now_et.date()
-    if not in_action_window(now_et):
-        msg = f"{now_et.isoformat(timespec='minutes')} outside the 15:40-15:55 ET window — no-op"
+    if not (in_action_window(now_et) or in_late_window(now_et)):
+        msg = (f"{now_et.isoformat(timespec='minutes')} outside both the 15:40-15:55 ET MOC window "
+               f"and the 15:57-15:59 ET late fallback window — no-op")
         logger.info(f"tom_sleeve: {msg}")
         return msg
 
@@ -314,7 +403,16 @@ def run(alpaca_client: AlpacaClient, notifier: Optional[TelegramNotifier], now_u
             logger.error(f"tom_sleeve: get_latest_trades failed, cannot size entries: {e}")
             return f"{today} entry day — price fetch failed, no orders sent ({e})"
 
+        moc_window = in_action_window(now_et)
+        late_window = in_late_window(now_et)
         for symbol in SYMBOLS:
+            is_moc = symbol in MOC_RELIABLE_SYMBOLS
+            if is_moc and not moc_window:
+                logger.info(f"tom_sleeve: {symbol} MOC window not active this tick — skip")
+                continue
+            if not is_moc and not late_window:
+                logger.info(f"tom_sleeve: {symbol} late fallback window not active this tick — skip")
+                continue
             coid = _client_order_id(today, symbol, 'in')
             if coid in existing_coids or coid in open_broker_coids:
                 logger.info(f"tom_sleeve: {coid} already exists — skip (idempotent)")
@@ -331,16 +429,23 @@ def run(alpaca_client: AlpacaClient, notifier: Optional[TelegramNotifier], now_u
             if qty <= 0:
                 logger.error(f"tom_sleeve: computed qty<=0 for {symbol} at ${price:.2f} — skipping")
                 continue
+            order_kind = 'MOC' if is_moc else 'LIMIT'
             if dry_run:
-                lines.append(f"DRY-RUN would BUY MOC {qty} {symbol} (~${price:.2f} -> ~${qty * price:,.0f}) id={coid}")
+                lines.append(f"DRY-RUN would BUY {order_kind} {qty} {symbol} (~${price:.2f} -> "
+                              f"~${qty * price:,.0f}) id={coid}")
                 continue
-            result = submit_moc_buy_order(alpaca_client, symbol, qty, coid)
+            if is_moc:
+                result = submit_moc_buy_order(alpaca_client, symbol, qty, coid)
+            else:
+                result = submit_fallback_limit_buy_order(alpaca_client, symbol, qty, price, coid)
             append_ledger_row({
                 'date': str(today), 'action': 'entry', 'symbol': symbol, 'qty': qty,
                 'ref_price': f"{price:.4f}", 'order_id': result['id'], 'status': 'submitted',
                 'client_order_id': coid, 'timestamp_utc': now_utc.isoformat(timespec='seconds'),
+                'partial_entry': '',
             }, ledger_path)
-            msg = f"BUY MOC {qty} {symbol} submitted (~${qty * price:,.0f}) id={result['id']} status={result['status']}"
+            msg = (f"BUY {order_kind} {qty} {symbol} submitted (~${qty * price:,.0f}) "
+                   f"id={result['id']} status={result['status']}")
             notify(notifier, msg)
             lines.append(msg)
     else:  # exit
@@ -375,6 +480,7 @@ def run(alpaca_client: AlpacaClient, notifier: Optional[TelegramNotifier], now_u
                 'date': str(today), 'action': 'exit', 'symbol': symbol, 'qty': qty,
                 'ref_price': '', 'order_id': result['id'], 'status': 'submitted',
                 'client_order_id': coid, 'timestamp_utc': now_utc.isoformat(timespec='seconds'),
+                'partial_entry': '',
             }, ledger_path)
             msg = f"SELL MOC {qty} {symbol} submitted id={result['id']} status={result['status']}"
             notify(notifier, msg)
@@ -385,17 +491,35 @@ def run(alpaca_client: AlpacaClient, notifier: Optional[TelegramNotifier], now_u
     return "; ".join(lines)
 
 
+# Human-readable reason per terminal status, logged and Telegram'd at every fill check so a partial
+# entry is never silent — see module docstring (2026-09-30 SPY/IWM incident) for the evidence behind
+# the 'expired' text specifically.
+_TERMINAL_STATUS_REASON = {
+    'filled': 'filled',
+    'expired': ('unfilled — order was ACCEPTED at submission (no reject) but returned no fill by '
+                'end of day; Alpaca marks unmatched orders EXPIRED after the close with no reason '
+                'field on the order object (docs.alpaca.markets/us/docs/orders-at-alpaca only says '
+                '"any unfilled order after the close will be cancelled")'),
+    'canceled': 'canceled before it could fill (broker- or user-initiated)',
+    'rejected': 'rejected by the broker or exchange at or after submission',
+}
+
+
 def check_pending_fills(alpaca_client: AlpacaClient, notifier: Optional[TelegramNotifier],
                          ledger_path: str = LEDGER_PATH) -> List[str]:
     """Resolve ledger rows still marked 'submitted' against the broker's current order status and
-    notify + log a follow-up row for anything that has since become terminal (filled/canceled/
-    rejected/expired). Cheap and read-mostly, so it runs on every non-dry-run invocation, in or out
-    of the action window: MOC orders are still pending at 15:55 ET when submitted, so it is the
-    LATER daily cron tick (after the 16:00 ET close) that actually reports fills — by design, since
-    the two daily cron ticks (19:45 and 20:45 UTC) straddle both the window and the close.
+    notify + log a follow-up row (status AND a human-readable reason, never just the bare status —
+    see _TERMINAL_STATUS_REASON) for anything that has since become terminal (filled/canceled/
+    rejected/expired). An entry that resolves to anything other than 'filled' is flagged
+    partial_entry='true' on that row — the ledger's honest record of what this month's sleeve
+    position actually is, since open_tom_symbols() only treats a 'filled'/'submitted' entry as held.
+    Cheap and read-mostly, so it runs on every non-dry-run invocation, in or out of either action
+    window: MOC orders are still pending at 15:55 ET when submitted, so it is the LATER daily cron
+    tick (after the 16:00 ET close, e.g. the 20:45 UTC tick in EDT) that actually reports fills — by
+    design, since the four daily cron ticks (19:45, 19:58, 20:45, 20:58 UTC) straddle both windows
+    and the close.
     """
     rows = read_ledger(ledger_path)
-    resolved_coids = {r['client_order_id'] for r in rows if r.get('status') not in ACTIVE_STATUSES or r.get('status') == 'filled' and r.get('action', '').endswith('_fillcheck')}
     # A coid is "still pending" if its most recent row says 'submitted' and no *_fillcheck row exists yet.
     fillcheck_done = {r['client_order_id'] for r in rows if r.get('action', '').endswith('_fillcheck')}
     pending = [r for r in rows if r.get('status') == 'submitted' and r['client_order_id'] not in fillcheck_done]
@@ -413,14 +537,27 @@ def check_pending_fills(alpaca_client: AlpacaClient, notifier: Optional[Telegram
         status = order.get('status', 'unknown')
         if status in ('filled', 'canceled', 'rejected', 'expired'):
             fill_price = order.get('filled_avg_price')
+            is_entry = row.get('action') == 'entry'
+            partial = is_entry and status != 'filled'
+            reason = _TERMINAL_STATUS_REASON.get(status)
+            if reason is None:
+                reason = f"unrecognized terminal status {status!r} — treating as a reason gap, not a fill"
+                logger.warning(f"tom_sleeve: fill check — {row['symbol']} {row['action']} resolved to "
+                                f"{status!r}, which has no documented reason text (see _TERMINAL_STATUS_REASON)")
             append_ledger_row({
                 'date': row['date'], 'action': f"{row['action']}_fillcheck", 'symbol': row['symbol'],
                 'qty': row['qty'], 'ref_price': f"{fill_price:.4f}" if fill_price else row.get('ref_price', ''),
                 'order_id': order_id, 'status': status, 'client_order_id': row['client_order_id'],
                 'timestamp_utc': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+                'partial_entry': 'true' if partial else 'false',
             }, ledger_path)
-            msg = f"{row['symbol']} {row['action']} order {status}" + (f" @ ${fill_price:.2f}" if fill_price else "")
-            logger.info(f"tom_sleeve: fill check — {msg}")
+            msg = (f"{row['symbol']} {row['action']} order {status}"
+                   + (f" @ ${fill_price:.2f}" if fill_price else "") + f" — {reason}")
+            if partial:
+                msg += " [PARTIAL ENTRY: this symbol is NOT in the sleeve this month]"
+                logger.warning(f"tom_sleeve: fill check — {msg}")
+            else:
+                logger.info(f"tom_sleeve: fill check — {msg}")
             notify(notifier, msg)
             messages.append(msg)
         else:

@@ -184,23 +184,45 @@ def test_assert_buying_power_passes_above_floor():
 # run(): entry / exit / idempotency / ledger, against a tmp ledger path
 # ---------------------------------------------------------------------------
 
-def test_entry_day_submits_three_orders_and_writes_ledger(tmp_path):
+def test_entry_day_submits_moc_for_qqq_in_main_window(tmp_path):
+    """15:45 ET (MOC window): only QQQ (MOC_RELIABLE_SYMBOLS) submits here — SPY/IWM wait for the
+    late fallback window (module docstring, 2026-09-30 incident: their MOC legs expired unfilled)."""
     ledger = str(tmp_path / 'ledger.csv')
     a = make_alpaca()
     n = make_notifier()
     summary = tom.run(a, n, et_dt(2026, 9, 30, 15, 45), dry_run=False, ledger_path=ledger)
-    assert a.trading_client.submit_order.call_count == 3
-    assert n.send_message_sync.call_count == 3
+    assert a.trading_client.submit_order.call_count == 1
+    assert n.send_message_sync.call_count == 1
+    submitted_syms = {call.args[0].symbol for call in a.trading_client.submit_order.call_args_list}
+    assert submitted_syms == {'QQQ'}
     rows = tom.read_ledger(ledger)
-    assert len(rows) == 3
-    symbols = {r['symbol'] for r in rows}
-    assert symbols == {'SPY', 'QQQ', 'IWM'}
-    spy_row = next(r for r in rows if r['symbol'] == 'SPY')
-    assert spy_row['action'] == 'entry'
-    assert spy_row['qty'] == '40'          # 20000 // 500.0
-    assert spy_row['client_order_id'] == 'tom-202609-SPY-in'
-    assert spy_row['status'] == 'submitted'
+    assert len(rows) == 1
+    qqq_row = rows[0]
+    assert qqq_row['action'] == 'entry'
+    assert qqq_row['qty'] == '50'          # 20000 // 400.0
+    assert qqq_row['client_order_id'] == 'tom-202609-QQQ-in'
+    assert qqq_row['status'] == 'submitted'
     assert 'BUY MOC' in summary
+
+
+def test_entry_day_submits_fallback_limit_for_arca_symbols_in_late_window(tmp_path):
+    """15:58 ET (late fallback window): SPY/IWM (FALLBACK_LIMIT_SYMBOLS) submit a marketable DAY
+    limit — not CLS — so they do not depend on the closing auction that expired them 2026-09-30."""
+    ledger = str(tmp_path / 'ledger.csv')
+    a = make_alpaca()
+    n = make_notifier()
+    summary = tom.run(a, n, et_dt(2026, 9, 30, 15, 58), dry_run=False, ledger_path=ledger)
+    assert a.trading_client.submit_order.call_count == 2
+    submitted_syms = {call.args[0].symbol for call in a.trading_client.submit_order.call_args_list}
+    assert submitted_syms == {'SPY', 'IWM'}
+    ref_price = {'SPY': 500.0, 'IWM': 200.0}
+    for call in a.trading_client.submit_order.call_args_list:
+        req = call.args[0]
+        assert req.time_in_force.value == 'day'
+        assert req.limit_price > ref_price[req.symbol]  # marketable: above the latest trade
+    rows = tom.read_ledger(ledger)
+    assert len(rows) == 2
+    assert 'BUY LIMIT' in summary
 
 
 def test_entry_day_skips_symbol_with_existing_open_order(tmp_path):
@@ -208,13 +230,11 @@ def test_entry_day_skips_symbol_with_existing_open_order(tmp_path):
     existing_coid = tom._client_order_id(dt.date(2026, 9, 30), 'SPY', 'in')
     a = make_alpaca(open_orders=[{'client_order_id': existing_coid, 'symbol': 'SPY'}])
     n = make_notifier()
-    tom.run(a, n, et_dt(2026, 9, 30, 15, 45), dry_run=False, ledger_path=ledger)
-    submitted_symbols = {c.kwargs.get('symbol', c.args[0].symbol if c.args else None)
-                          for c in a.trading_client.submit_order.call_args_list}
-    # SPY must not have been (re)submitted; only QQQ/IWM go out.
+    tom.run(a, n, et_dt(2026, 9, 30, 15, 58), dry_run=False, ledger_path=ledger)
+    # SPY must not have been (re)submitted; only IWM goes out (QQQ is not in the late window).
     submitted_syms = {call.args[0].symbol for call in a.trading_client.submit_order.call_args_list}
     assert 'SPY' not in submitted_syms
-    assert submitted_syms == {'QQQ', 'IWM'}
+    assert submitted_syms == {'IWM'}
 
 
 def test_entry_day_skips_symbol_with_existing_open_position(tmp_path):
@@ -226,13 +246,14 @@ def test_entry_day_skips_symbol_with_existing_open_position(tmp_path):
         'date': '2026-08-31', 'action': 'entry', 'symbol': 'SPY', 'qty': 39,
         'ref_price': '510.0', 'order_id': 'old-buy-spy', 'status': 'filled',
         'client_order_id': 'tom-202608-SPY-in', 'timestamp_utc': '2026-08-31T19:45:00+00:00',
+        'partial_entry': '',
     }, ledger)
     a = make_alpaca()
     n = make_notifier()
-    tom.run(a, n, et_dt(2026, 9, 30, 15, 45), dry_run=False, ledger_path=ledger)
+    tom.run(a, n, et_dt(2026, 9, 30, 15, 58), dry_run=False, ledger_path=ledger)
     submitted_syms = {call.args[0].symbol for call in a.trading_client.submit_order.call_args_list}
     assert 'SPY' not in submitted_syms
-    assert submitted_syms == {'QQQ', 'IWM'}
+    assert submitted_syms == {'IWM'}
 
 
 def test_buying_power_guard_blocks_entry_run(tmp_path):
@@ -335,3 +356,68 @@ def test_open_tom_symbols_tracks_entry_then_exit():
         {'action': 'exit', 'symbol': 'SPY', 'status': 'filled'},
     ]
     assert tom.open_tom_symbols(rows) == {'QQQ'}
+
+
+def test_open_tom_symbols_clears_symbol_whose_entry_expired_unfilled():
+    """2026-09-30 bug: an entry row starts 'submitted' (tentatively held); if it resolves EXPIRED
+    rather than filled, the symbol must NOT stay 'held' forever — else it is locked out of every
+    future month's entry with nothing to exit. entry_fillcheck status='filled' must still count."""
+    rows = [
+        {'action': 'entry', 'symbol': 'SPY', 'status': 'submitted'},
+        {'action': 'entry', 'symbol': 'QQQ', 'status': 'submitted'},
+        {'action': 'entry_fillcheck', 'symbol': 'SPY', 'status': 'expired'},
+        {'action': 'entry_fillcheck', 'symbol': 'QQQ', 'status': 'filled'},
+    ]
+    assert tom.open_tom_symbols(rows) == {'QQQ'}
+
+
+# ---------------------------------------------------------------------------
+# check_pending_fills: status + reason logging and the partial_entry flag
+# ---------------------------------------------------------------------------
+
+def test_check_pending_fills_flags_expired_entry_as_partial_with_reason(tmp_path):
+    ledger = str(tmp_path / 'ledger.csv')
+    tom.append_ledger_row({
+        'date': '2026-09-30', 'action': 'entry', 'symbol': 'SPY', 'qty': 26,
+        'ref_price': '765.80', 'order_id': 'spy-order-1', 'status': 'submitted',
+        'client_order_id': 'tom-202609-SPY-in', 'timestamp_utc': '2026-09-30T19:45:04+00:00',
+        'partial_entry': '',
+    }, ledger)
+    a = make_alpaca()
+    a.get_order.return_value = {'status': 'expired', 'filled_avg_price': None}
+    n = make_notifier()
+    messages = tom.check_pending_fills(a, n, ledger_path=ledger)
+    assert len(messages) == 1
+    assert 'expired' in messages[0] and 'PARTIAL ENTRY' in messages[0]
+    rows = tom.read_ledger(ledger)
+    fillcheck = next(r for r in rows if r['action'] == 'entry_fillcheck')
+    assert fillcheck['status'] == 'expired'
+    assert fillcheck['partial_entry'] == 'true'
+    # Ledger honesty flows straight into held-symbol tracking: SPY was never really entered.
+    assert 'SPY' not in tom.open_tom_symbols(rows)
+
+
+def test_check_pending_fills_marks_filled_entry_not_partial(tmp_path):
+    ledger = str(tmp_path / 'ledger.csv')
+    tom.append_ledger_row({
+        'date': '2026-09-30', 'action': 'entry', 'symbol': 'QQQ', 'qty': 26,
+        'ref_price': '743.29', 'order_id': 'qqq-order-1', 'status': 'submitted',
+        'client_order_id': 'tom-202609-QQQ-in', 'timestamp_utc': '2026-09-30T19:45:05+00:00',
+        'partial_entry': '',
+    }, ledger)
+    a = make_alpaca()
+    a.get_order.return_value = {'status': 'filled', 'filled_avg_price': 739.55}
+    n = make_notifier()
+    tom.check_pending_fills(a, n, ledger_path=ledger)
+    rows = tom.read_ledger(ledger)
+    fillcheck = next(r for r in rows if r['action'] == 'entry_fillcheck')
+    assert fillcheck['status'] == 'filled'
+    assert fillcheck['partial_entry'] == 'false'
+    assert 'QQQ' in tom.open_tom_symbols(rows)
+
+
+def test_in_late_window_boundaries():
+    assert tom.in_late_window(et_dt(2026, 9, 30, 15, 57).astimezone(tom.ET))
+    assert tom.in_late_window(et_dt(2026, 9, 30, 15, 59).astimezone(tom.ET))
+    assert not tom.in_late_window(et_dt(2026, 9, 30, 16, 0).astimezone(tom.ET))
+    assert not tom.in_action_window(et_dt(2026, 9, 30, 15, 57).astimezone(tom.ET))
