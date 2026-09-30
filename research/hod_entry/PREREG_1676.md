@@ -35,6 +35,22 @@ accordingly and is reported as such.
  G6 post-entry shapes (the 1,668 set on the 5-min frame too): CLV, wicks, body, red share over bars fill+1..fill+k,
     k ∈ {5, 15}, at both frames.
 
+ G7 ROLLING post-entry shapes, every minute (amendment 1, 07:05 UTC, before any number; owner: "also run them every
+    minute post entry, on the past 5 min / 10 min / …"): at each k ∈ {1, 2, …, 15, 20, 30, 45, 60} minutes after the
+    fill bar, the TRAILING candle of width w ∈ {5, 10, 15} minutes ENDING at bar fill+k (open of bar fill+k−w+1,
+    high/low extrema, close of bar fill+k, volume sum — unaligned to the clock, so it exists at every k once k ≥ w;
+    for k < w the candle spans from the fill bar), and the series of the last 5 non-overlapping trailing candles of
+    width w ending at k (for TA-Lib and for the G2 structure counts). Features per (k, w): CLV, body share, upper and
+    lower wick shares, range/ATR14, volume/mean bar volume, close vs fill in R, the 61 TA-Lib flags on the trailing
+    series, the climax flag (G3) on the trailing series, effort-vs-result residual over the trailing series.
+    Reads: R3-style models PER k for the labels "stop after k" and "MFE ≥ +1 R within the next 15 min from k" (a
+    rolling success label), groups = G7 alone, G7 + the 1,670 ALL family; both scorings; placebo at k ∈ {1, 5, 15, 30};
+    permutation importances at k ∈ {1, 5, 15}. Money read at each k: the cut, the short (1,673 geometry) and the add
+    (1,670 R4 geometry) gated by the G7 (+ALL) model at fixed τ ∈ {0.6, 0.7}, paired vs the base, both scorings — the
+    same bars and decomposition as 1,669/1,670/1,673. Multiplicity: 19 k × 3 w × ~15 features + 19 × 2 labels × 2
+    groups × 2 scorings AUC + 19 × 3 actions × 2 τ × 2 scorings paired reads ≈ 1,100 more reads; stated, and protected
+    by the both-scorings rule and the sign line.
+
 ## Labels
 Failure: stop-out (any) and stop within 10 min. SUCCESS at short horizon: MFE ≥ +1 R within 15 min; target reached.
 Money: net_R (the standard paired reads).
