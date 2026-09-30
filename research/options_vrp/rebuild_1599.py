@@ -63,6 +63,12 @@ if not _KEY:
     raise SystemExit(1)
 CLIENT = db.Historical(_KEY)
 
+# --allow-fetch gate (2026-09-30, cell 1,599 verdict task): defaults False. With it False,
+# guarded_range() never calls the network (no metadata.get_cost, no timeseries.get_range) --
+# a leg or snapshot missing from every cache path is MISSING, never fetched. Never set True /
+# pass --allow-fetch without the owner's explicit go-ahead (this task must spend nothing).
+ALLOW_FETCH = False
+
 ET = ZoneInfo('America/New_York')
 UTC = dt.timezone.utc
 
@@ -93,6 +99,11 @@ def guarded_range(cost_only=False, **kw):
     On a 'data_end_after_available_end' error, clips `end` to the reported available end and
     retries once (handles the live data-lag boundary automatically instead of guessing it)."""
     label = f"{kw.get('dataset')}/{kw.get('schema')} {kw.get('symbols')} {kw.get('start')}..{kw.get('end')}"
+    if not ALLOW_FETCH:
+        log.error(f"FETCH BLOCKED (--allow-fetch not set, defaults False): {label} -- treated as "
+                   f"MISSING, never fetched. Never pass --allow-fetch without the owner's explicit "
+                   f"go-ahead.")
+        return None
     with _spend_lock:
         state = _load_spend()
         try:
@@ -578,6 +589,11 @@ if __name__ == '__main__':
     ap.add_argument('--workers', type=int, default=12)
     ap.add_argument('--delta', type=float, default=None)
     ap.add_argument('--max-mondays', type=int, default=None)
+    ap.add_argument('--allow-fetch', action='store_true',
+                     help='allow real Databento network calls (get_cost/get_range); defaults '
+                          'False so a leg/snapshot missing from every cache path is MISSING, '
+                          'never fetched. Never pass this without the owner explicit go-ahead.')
     args = ap.parse_args()
+    ALLOW_FETCH = args.allow_fetch
     from rebuild_1599_run import dispatch
     dispatch(args)

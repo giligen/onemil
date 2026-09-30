@@ -261,14 +261,36 @@ def exit_cost_from_quote(short_quote, long_quote):
 # --------------------------------------------------------------------------------------
 # Cycle simulation
 # --------------------------------------------------------------------------------------
+_NO_CREDIT = object()  # sentinel: distinguishes "key genuinely absent" from any real credit value
+
+
 def run_cycle(legcache, short_sym, long_sym, entry_date, expiry, mgmt, warn_counter):
     """Walks one open position forward to its exit under management `mgmt`. Returns a dict of
-    exit_date/exit_reason/exit_cost or a dict with void_reason set (never both)."""
+    exit_date/exit_reason/exit_cost, or a dict with void_reason set (never both).
+
+    Management A requires the cycle's own opening credit (from `_OPEN_CREDIT`, set by the caller
+    immediately before this call) to evaluate the stop/profit thresholds. A key miss must never
+    silently fall back to a value that makes `mark >= STOP_MULT * default` or
+    `mark <= PROFIT_TARGET_FRAC * default` structurally unsatisfiable (the v3 defect: that default
+    disabled the stop/profit checks for the whole cycle and let it fall through to
+    'expiry_no_trigger', which is priced identically to Management B's 'expiry_intrinsic' -- i.e.
+    Management A silently collapsed into Management B). On a genuine miss the cycle is VOID for
+    management purposes: we cannot know whether stop/profit would have fired, so it must not be
+    scored as if it never fired."""
     entry_d = entry_date
     expiry_d = expiry
     sessions = legcache.sessions_between(short_sym, entry_d, expiry_d)
     if mgmt == 'B':
         return {'exit_date': expiry_d, 'exit_reason': 'expiry_intrinsic', 'exit_cost': None}
+
+    open_credit = _OPEN_CREDIT.get((short_sym, long_sym, entry_d), _NO_CREDIT)
+    if open_credit is _NO_CREDIT:
+        warn_counter['open_credit_missing'] += 1
+        log.error("run_cycle: no recorded opening credit for %s/%s entered %s -- management A "
+                   "cannot evaluate stop/profit without it; cycle VOID for management purposes "
+                   "(never defaulted to a value that disables the check)", short_sym, long_sym, entry_d)
+        return {'exit_date': None, 'exit_reason': None, 'exit_cost': None,
+                'void_reason': 'open_credit_missing'}
 
     # Management A: check each session's 15:59 mid mark; the first session whose mark trips
     # STOP, PROFIT, or the 21-DTE hard exit triggers an exit at the NEXT session's 10:00 bar.
@@ -283,9 +305,9 @@ def run_cycle(legcache, short_sym, long_sym, entry_date, expiry, mgmt, warn_coun
         mark = s_mid - l_mid
         return_dte_only = dte_left <= DTE_HARD_EXIT
         triggered, reason = False, None
-        if mark >= STOP_MULT * _OPEN_CREDIT.get((short_sym, long_sym, entry_d), mark + 1):
+        if mark >= STOP_MULT * open_credit:
             triggered, reason = True, 'stop'
-        elif mark <= PROFIT_TARGET_FRAC * _OPEN_CREDIT.get((short_sym, long_sym, entry_d), mark - 1):
+        elif mark <= PROFIT_TARGET_FRAC * open_credit:
             triggered, reason = True, 'profit_target'
         elif return_dte_only:
             triggered, reason = True, 'dte_21'
@@ -385,6 +407,13 @@ def run_cell(cell_def, mondays_df, spy_df, legcache, start, end, warn_counter):
         short_sym, long_sym = short_row['symbol'], long_row['symbol']
         _OPEN_CREDIT[(short_sym, long_sym, entry_date)] = credit
         exit_info = run_cycle(legcache, short_sym, long_sym, entry_date, expiry, mgmt, warn_counter)
+        if exit_info.get('void_reason'):
+            rows.append({'cell': cell_def['cell'], 'entry_date': entry_date, 'expiry': expiry,
+                         'short_strike': short_row['strike'], 'long_strike': long_row['strike'],
+                         'contracts': contracts, 'credit': credit, 'exit_date': None,
+                         'exit_reason': None, 'pnl_usd': np.nan,
+                         'void_reason': exit_info['void_reason']})
+            continue
         if exit_info['exit_reason'] in ('expiry_intrinsic', 'expiry_no_trigger') or \
            exit_info['exit_reason'].endswith('fallback_expiry'):
             spot_exp = spy_df.loc[expiry, 'spot_16'] if expiry in spy_df.index else np.nan
@@ -528,7 +557,7 @@ def main():
     args = ap.parse_args()
 
     warn_counter = {'mark_missing': 0, 'exit_quote_missing': 0, 'void_no_strike': 0,
-                     'void_no_quote': 0, 'void_no_settlement': 0}
+                     'void_no_quote': 0, 'void_no_settlement': 0, 'open_credit_missing': 0}
     try:
         spy_df = load_spy_prices()
         mondays_df = load_mondays()
