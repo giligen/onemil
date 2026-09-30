@@ -11,9 +11,11 @@ the completed bar store (own day 100 %, prior 20 sessions, SPY). Cost: net_R as 
 `research/overnight_high/panel_2024_2026.parquet` (prior sessions and the day's OHLC through the level bar).
 
 ## Frames
-1-minute bars as stored; 5-minute bars built by aggregating the 1-minute bars aligned to 09:30 ET (open of the first,
-high/low extrema, close of the last, volume sum); 15-minute likewise. A frame's feature at an instant uses only bars
-that CLOSED before that instant (a partial 5-minute bar is never used).
+1-minute bars as stored; 5-, 10- and 15-minute bars built by aggregating the 1-minute bars aligned to 09:30 ET (open
+of the first, high/low extrema, close of the last, volume sum). A frame's feature at an instant uses only bars that
+CLOSED before that instant (a partial bar is never used). Every feature group and every read below runs on ALL FOUR
+frames (owner 07:00 UTC: "candles should also do 5 min, 10 min and 15 min"); the multiplicity count doubles
+accordingly and is reported as such.
 
 ## Feature groups (each computed at TWO instants: the ARM instant = close of the level bar (pre-entry), and the close
 ## of bar fill+1 (post-entry); at both frames where meaningful)
