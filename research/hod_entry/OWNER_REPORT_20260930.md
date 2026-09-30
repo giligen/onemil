@@ -91,3 +91,16 @@ the money was not.
   positive, same-signed, mechanism-backed read of the night; it needs short-side order mechanics that do not exist in
   the engine (locate, SSR, short OCO), so it is NOT the next engineering item ahead of ORB parity. Queued as the first
   new-mechanism cell once ORB is live and stable, with a pre-committed paper read at 100 shorts.
+
+## 8. The short on HOD-break failures — sealed forward test (owner 06:30 UTC), 08:20 UTC
+Window 2026-06-01..09-04 (the universe file ends 9/4), 2,872 fills never seen by any model; both saved minute-1
+failure models applied unchanged; short at bar fill+2 when P ≥ 0.6, target = the long's stop, stop = day's high + $0.01.
+| model | shorts | weeks | mean net R | week-t | green weeks | worst week |
+|---|---|---|---|---|---|---|
+| trained on 2025-H2 | 97 | 14 | +0.014 | 0.5 | 2 of 14 | −5.7 R |
+| trained on 2026-H1 | 57 | 12 | −0.577 | −1.0 | 4 of 12 | −24 R |
+Verdict **NO-GO** on every clause. The +0.06 R of cell 1,673 does not generalize to the sealed months; the second
+model's −24 R week is the squeeze tail: a HOD breakout that keeps going gaps through the day-high stop (halts, prints
+far above). The model still selects failures (the flagged longs lose −0.5 to −0.8 R), but the short does not capture
+the decline. The order mechanics are committed and OFF (`hod_break.failure_short.enabled: false`); nothing trades
+today. Closed: shorting HOD-break failures keyed on the post-entry model, on this population.
