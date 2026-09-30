@@ -158,7 +158,8 @@ def load_population():
     m = m.rename(columns={'net_R_1663': 'base_R', 'stop': 'stop0', 'target_price': 'target0', 'entry_price': 'entry'})
     m['R_unit'] = m['entry'] - m['stop0']
     return m[['fill_id', 'date', 'symbol', 'half', 'entry', 'stop0', 'target0', 'R_unit',
-              'fill_min', 'base_R', 'exit_type', 'exit_price', 'r_pct']].reset_index(drop=True)
+              'fill_min', 'base_R', 'exit_type', 'exit_price', 'r_pct',
+              'atr14', 'atr14_pct']].reset_index(drop=True)
 
 
 def build_paths(pop, rebuild=False):
@@ -270,6 +271,9 @@ class FillCtx:
         self.R = row.R_unit
         self.base_R = row.base_R
         self.date = row.date
+        self.symbol = row.symbol
+        self.atr14 = getattr(row, 'atr14', None)          # cell 1,682 (H41/H44/H53): price-scale ATR14, pre-existing 1663 column
+        self.atr14_pct = getattr(row, 'atr14_pct', None)  # cell 1,682 (H41): ATR14 as % of price, pre-existing 1663 column
         self.o, self.h, self.l, self.c, self.v = path['o'], path['h'], path['l'], path['c'], path['v']
         self.m = path['m']  # ET minute-of-day per bar
         self.vwap = path['vwap']
@@ -812,6 +816,673 @@ def _h36(ctx):
     return realized, any_fired, first_fire
 
 
+# ---------------------------------------------------------------------------
+# H37-H56 (cell 1,682, PREREG_1682.md FROZEN 2026-09-30 18:40 UTC): the
+# literature's and the practitioners' exit rules, on this SAME harness (same
+# FillCtx, same run_trigger/run_reshape/run_partial precedence, same cost
+# convention). H41/H43/H45 use a TRAIN-derived statistic (ATR14% tercile,
+# rolling win-rate posterior, winners' MAE P80) fit on ONE half and applied
+# to the other -- registered model=True so they get the SCORINGS reads and
+# the swap, exactly like H13-H36's model hypotheses. H48/H56 are BOOK-level
+# (aggregate a day's fills together in fill order) and cannot use the
+# per-fill-independent loop -- dispatched to run_book_hypothesis() below.
+# ---------------------------------------------------------------------------
+
+ATR_CUTOFF = {}       # half -> atr14_pct value at the top-tercile cutoff (H41)
+H43_DERISK = {}       # fill_id -> bool, rolling Beta(1,2) posterior < 0.28 (H43)
+WINNER_MAE_P80 = {}   # half -> R units, 80th pct of winners' own realized MAE (H45)
+DAY_OPEN = {}         # (date,symbol) -> day's first-bar open price (H51 only)
+SOURCE_HALF = {'TRAIN-H2->VAL': 'TRAIN-H2', 'VAL->TRAIN-H2': 'VAL'}  # scoring -> the half the parameter was fit on
+
+
+def _base_exit_idx(ctx):
+    """The bar index where the UNCHANGED base rule (stop0/target0/EOD, no
+    hypothesis condition) would exit -- used to find a fill's own realized
+    MAE window (H45) and a fill's open/closed status at a point in time
+    (H48/H56 book walk)."""
+    n = ctx.n
+    for j in range(1, n):
+        if ctx.m[j] >= EOD_M or ctx.l[j] <= ctx.stop0 or ctx.h[j] >= ctx.target0:
+            return j
+    return n - 1
+
+
+def _rho1(returns):
+    r = np.asarray(returns, dtype=float)
+    if len(r) < 3:
+        return None
+    r0, r1 = r[:-1], r[1:]
+    if r0.std() == 0 or r1.std() == 0:
+        return 0.0
+    return float(np.corrcoef(r0, r1)[0, 1])
+
+
+def _h37(ctx, j):
+    """E1 Kaminski-Lo serial-correlation gate: rho1 of 1-min returns over
+    bars fill+1..fill+15 computed ONCE it is fully available (bar 15,
+    causal); if >0, apply H25's breakeven lock from then on, else never
+    reshape (rides the base exactly)."""
+    if ctx.n < 16 or j < 15:
+        return None
+    rho = getattr(ctx, '_h37_rho', 'unset')
+    if rho == 'unset':
+        closes = ctx.c[1:16]
+        rho = _rho1(np.diff(closes) / closes[:-1])
+        ctx._h37_rho = rho
+    if rho is not None and rho > 0:
+        return _h25(ctx, j)
+    return None
+
+
+def _h38_engulf(ctx, j):
+    if j - 10 < 0:
+        return False
+    cur, prev = ctx.roll(j, 5), ctx.roll(j - 5, 5)
+    return (cur['c'] < cur['o'] and prev['c'] > prev['o']
+            and cur['o'] >= prev['c'] and cur['c'] <= prev['o'])
+
+
+def _h38_below10(ctx, j):
+    if j - 1 < 0:
+        return False
+    prev = ctx.roll(j - 1, 10)
+    return ctx.c[j] < prev['l']
+
+
+def _h38_wick(ctx, j):
+    o, h, l, c = ctx.o[j], ctx.h[j], ctx.l[j], ctx.c[j]
+    body = abs(c - o)
+    uwick = h - max(o, c)
+    return uwick >= 2 * body and uwick > 0
+
+
+def _h38_vwap(ctx, j):
+    return ctx.c[j] < ctx.vwap[j]
+
+
+_H38_CONDS = [_h38_engulf, _h38_below10, _h38_wick, _h38_vwap]
+
+
+def _h38(ctx, j):
+    """E12/E18 confirmed change of character: >=2 of the 4 raw H6/H7/H9/H8
+    shape signals (their own embedded profit gates stripped -- H38 imposes
+    ONE +0.5R gate instead) true within a rolling 5-minute window, while
+    mtm>=+0.5R."""
+    if ctx.close_R(j) < 0.5:
+        return False
+    lo = max(0, j - 4)
+    count = 0
+    for f in _H38_CONDS:
+        if any(f(ctx, jj) for jj in range(lo, j + 1)):
+            count += 1
+    return count >= 2
+
+
+def _h39(ctx):
+    """E13 doldrums de-risk: a ONE-TIME snapshot at the first bar >=12:30 ET
+    (750 min) -- sell 50% if mtm>=+0.5R; exit in full if mtm<0 and the trade
+    is already >=60min old; else no action (rides the base)."""
+    n = ctx.n
+    for j in range(1, n):
+        if ctx.m[j] >= EOD_M or ctx.l[j] <= ctx.stop0 or ctx.h[j] >= ctx.target0:
+            return ctx.base_R, False, None
+        if ctx.m[j] >= 750:
+            mtm = ctx.close_R(j)
+            if mtm >= 0.5:
+                decide_j = j
+                legs = [(lambda c, jj, dj=decide_j: jj == dj, 0.5)]
+                return run_partial(ctx, legs)
+            if mtm < 0 and ctx.mins(j) >= 60:
+                if j + 1 >= n:
+                    return ctx.base_R, False, None
+                return leg_R(ctx.entry, ctx.R, ctx.o[j + 1]), True, ctx.mins(j)
+            return ctx.base_R, False, None
+    return ctx.base_R, False, None
+
+
+def _h40(ctx):
+    """E23 late trim: a ONE-TIME snapshot at the first bar >=14:30 ET (870
+    min) -- sell 50% if mtm>=0, else no action."""
+    n = ctx.n
+    for j in range(1, n):
+        if ctx.m[j] >= EOD_M or ctx.l[j] <= ctx.stop0 or ctx.h[j] >= ctx.target0:
+            return ctx.base_R, False, None
+        if ctx.m[j] >= 870:
+            if ctx.close_R(j) >= 0.0:
+                decide_j = j
+                legs = [(lambda c, jj, dj=decide_j: jj == dj, 0.5)]
+                return run_partial(ctx, legs)
+            return ctx.base_R, False, None
+    return ctx.base_R, False, None
+
+
+def _h41(ctx, j):
+    """E10/E11 vol-regime-gated mechanism: a fill whose day's atr14_pct is
+    in the TOP TERCILE of the SOURCE half (the swap: fit on one half, apply
+    on the other, same convention as every model hypothesis) trails
+    MFE-1.0*ATR14(price) once >=+1R; otherwise never reshapes."""
+    cutoff = ATR_CUTOFF.get(SOURCE_HALF.get(ctx.scoring))
+    if (cutoff is None or ctx.atr14_pct is None or not np.isfinite(ctx.atr14_pct)
+            or ctx.atr14_pct < cutoff or ctx.atr14 is None or not np.isfinite(ctx.atr14)):
+        return None
+    if ctx.h[j] >= ctx.entry + 1.0 * ctx.R:
+        mfe_price = ctx.entry + ctx.run_hi_R[j] * ctx.R
+        return (mfe_price - 1.0 * ctx.atr14, ctx.target0)
+    return None
+
+
+def _h42(ctx):
+    """E14/E3 analytic target: target = fill + 2*sigma_hat*sqrt(T_rem),
+    sigma_hat = the stock's own 1-min realized vol over bars fill+1..
+    fill+15 (computed once available, like H37's rho1), T_rem = minutes to
+    15:55 ET, capped to [+1R,+4R]; stop unchanged. Self-contained per fill
+    (not TRAIN-derived) -- HALVES reads. This REPLACES the base target
+    (often ~+2R for this population), so it is a bespoke walk, not
+    run_reshape: run_reshape's cur_target=min(cur_target,new_target)
+    accumulation can only ever TIGHTEN a target, and the analytic target is
+    frequently ABOVE target0 early in the day (verified: under run_reshape
+    H42 silently no-ops whenever that happens, same defect H49 had with the
+    unmodified target0 -- both fixed together)."""
+    n = ctx.n
+    cur_target = ctx.target0
+    changed = False
+    sigma = None
+    for j in range(1, n):
+        if ctx.m[j] >= EOD_M:
+            price = ctx.o[j]
+            return (ctx.base_R if not changed else leg_R(ctx.entry, ctx.R, price)), changed, ctx.mins(j)
+        if ctx.l[j] <= ctx.stop0:
+            price = _gap_or_touch(ctx.o[j], ctx.l[j], ctx.stop0)
+            return (ctx.base_R if not changed else leg_R(ctx.entry, ctx.R, price)), changed, ctx.mins(j)
+        if ctx.h[j] >= cur_target:
+            price = cur_target
+            return (ctx.base_R if not changed else leg_R(ctx.entry, ctx.R, price)), changed, ctx.mins(j)
+        if j >= 15:
+            if sigma is None:
+                closes = ctx.c[1:16]
+                rets = np.diff(closes) / closes[:-1]
+                sigma = float(rets.std(ddof=1)) if len(rets) > 1 else 0.0
+            if sigma and np.isfinite(sigma) and sigma > 0:
+                t_rem = max(EOD_M - ctx.m[j], 0)
+                move = 2.0 * sigma * ctx.entry * math.sqrt(t_rem)
+                move = min(max(move, ctx.R * 1.0), ctx.R * 4.0)
+                new_target = ctx.entry + move
+                if new_target != cur_target:
+                    changed = True
+                cur_target = new_target
+    return ctx.base_R, changed, None
+
+
+def _h43(ctx, j):
+    """E7 Bayesian de-risk: a fixed per-fill flag (H43_DERISK, precomputed
+    once from the rolling Beta(1,2) posterior of the last <=20 PRIOR fills'
+    win rate within the SAME half -- TRAIN-H2 and VAL are contiguous,
+    non-interleaved date ranges, so 'the book' and 'the swap' both resolve
+    to this half's own chronological order) caps the target to +0.5R for
+    the whole trade if the posterior mean was <0.28 at entry."""
+    if j != 1:
+        return None
+    if H43_DERISK.get(ctx.fid, False):
+        return (ctx.stop0, ctx.entry + 0.5 * ctx.R)
+    return None
+
+
+def _h44(ctx, j):
+    """E4 chandelier: once >=+1R, stop = highest high since fill -
+    1.5*ATR14(price), never below breakeven."""
+    if ctx.atr14 is None or not np.isfinite(ctx.atr14):
+        return None
+    if ctx.h[j] >= ctx.entry + 1.0 * ctx.R:
+        hh_price = ctx.entry + ctx.run_hi_R[j] * ctx.R
+        new_stop = max(hh_price - 1.5 * ctx.atr14, ctx.entry)
+        return (new_stop, ctx.target0)
+    return None
+
+
+def _h45(ctx, j):
+    """E8 Sweeney MAE ceiling: exit once the running MAE (entry - min low
+    so far, in R, causal through bar j) exceeds the 80th percentile of
+    WINNING fills' own realized MAE on the SOURCE half (the swap)."""
+    cutoff = WINNER_MAE_P80.get(SOURCE_HALF.get(ctx.scoring))
+    if cutoff is None:
+        return False
+    running_mae = (ctx.entry - ctx.l[0:j + 1].min()) / ctx.R
+    return running_mae > cutoff
+
+
+def _h46(ctx):
+    """E15 large first partial: 75% out at +1R, 25% runs with the base."""
+    legs = [(lambda c, jj: c.close_R(jj) >= 1.0, 0.75)]
+    return run_partial(ctx, legs)
+
+
+def _ema(arr, span):
+    alpha = 2.0 / (span + 1)
+    out = np.empty(len(arr))
+    out[0] = arr[0]
+    for i in range(1, len(arr)):
+        out[i] = alpha * arr[i] + (1 - alpha) * out[i - 1]
+    return out
+
+
+def _h47(ctx):
+    """E16 Warrior: half at +1R, then the rest exits on a 1-min close below
+    the running 9-EMA of closes -- a TRIGGER on the remainder, which
+    run_partial's remainder_reshape (stop/target only) cannot express, so
+    this is a bespoke walk mirroring run_partial's own precedence body.
+    The base target0 governs ONLY before the +1R leg (consistent with
+    every fill's own base behaviour up to that point); once half_sold, the
+    runner's whole thesis is letting the EMA -- not the original ~+2R
+    target -- decide the exit (Warrior's own teaching: a runner abandons
+    the fixed target), so target0 is intentionally NOT checked from there
+    on (only stop0, the EMA trigger and EOD govern the remainder)."""
+    n = ctx.n
+    ema = _ema(ctx.c, 9)
+    cur_stop = ctx.stop0
+    sold, realized, any_fired, first_fire = 0.0, 0.0, False, None
+    pending, half_sold = None, False
+    for j in range(1, n):
+        if pending is not None:
+            frac, _ = pending
+            realized += frac * leg_R(ctx.entry, ctx.R, ctx.o[j])
+            sold += frac
+            pending = None
+        if sold >= 1.0 - 1e-12:
+            return realized, any_fired, first_fire
+        if ctx.m[j] >= EOD_M:
+            realized += (1.0 - sold) * leg_R(ctx.entry, ctx.R, ctx.o[j])
+            return realized, any_fired, first_fire
+        if ctx.l[j] <= cur_stop:
+            price = _gap_or_touch(ctx.o[j], ctx.l[j], cur_stop)
+            realized += (1.0 - sold) * leg_R(ctx.entry, ctx.R, price)
+            return realized, any_fired, first_fire
+        if not half_sold:
+            if ctx.h[j] >= ctx.target0:
+                realized += (1.0 - sold) * leg_R(ctx.entry, ctx.R, ctx.target0)
+                return realized, any_fired, first_fire
+            if ctx.close_R(j) >= 1.0:
+                pending = (0.5, j)
+                half_sold = True
+                any_fired = True
+                first_fire = first_fire if first_fire is not None else ctx.mins(j)
+                continue
+        elif ctx.c[j] < ema[j]:
+            pending = (1.0 - sold, j)
+            any_fired = True
+            continue
+    if sold < 1.0:
+        realized += (1.0 - sold) * ctx.base_R if sold == 0.0 else (1.0 - sold) * leg_R(ctx.entry, ctx.R, ctx.c[n - 1])
+    return realized, any_fired, first_fire
+
+
+def _h49(ctx):
+    """E19 half at +3R (no exit at 2R), the rest trails MFE-1R (same trail
+    formula as H19). PREREG's own '(no exit at 2R)' is explicit that the
+    base target (~+2R for most of this population) is REMOVED for this
+    rule, not merely tightened -- run_partial's built-in target0 check
+    would otherwise close the trade at +2R before the +3R leg ever gets a
+    chance to fire (verified: this happened, 0% fired, under a first
+    run_partial-based implementation), so this is a bespoke walk with NO
+    target check until the +3R leg has fired (stop0 and EOD are the only
+    exits before then)."""
+    n = ctx.n
+    cur_stop = ctx.stop0
+    sold, realized, any_fired, first_fire = 0.0, 0.0, False, None
+    pending, leg_done = None, False
+    for j in range(1, n):
+        if pending is not None:
+            frac, _ = pending
+            realized += frac * leg_R(ctx.entry, ctx.R, ctx.o[j])
+            sold += frac
+            pending = None
+        if sold >= 1.0 - 1e-12:
+            return realized, any_fired, first_fire
+        if ctx.m[j] >= EOD_M:
+            realized += (1.0 - sold) * leg_R(ctx.entry, ctx.R, ctx.o[j])
+            return realized, any_fired, first_fire
+        if ctx.l[j] <= cur_stop:
+            price = _gap_or_touch(ctx.o[j], ctx.l[j], cur_stop)
+            realized += (1.0 - sold) * leg_R(ctx.entry, ctx.R, price)
+            return realized, any_fired, first_fire
+        if not leg_done:
+            if ctx.close_R(j) >= 3.0:
+                pending = (0.5, j)
+                leg_done = True
+                any_fired = True
+                first_fire = ctx.mins(j)
+                continue
+        else:
+            new_stop = ctx.entry + (ctx.run_hi_R[j] - 1.0) * ctx.R
+            cur_stop = max(cur_stop, new_stop)
+    if sold < 1.0:
+        realized += (1.0 - sold) * ctx.base_R if sold == 0.0 else (1.0 - sold) * leg_R(ctx.entry, ctx.R, ctx.c[n - 1])
+    return realized, any_fired, first_fire
+
+
+def _h50(ctx, j):
+    """E20 swing-low trail: after +1R, stop = the lowest low of the last
+    THREE rolling 5-bar windows (this file's established 'N-min candle' =
+    rolling N-bar window convention, e.g. H6/H12), never below breakeven."""
+    if ctx.h[j] < ctx.entry + 1.0 * ctx.R or j - 14 < 0:
+        return None
+    lows = [ctx.roll(j - 5 * k, 5)['l'] for k in range(3)]
+    return (max(min(lows), ctx.entry), ctx.target0)
+
+
+def _h51(ctx):
+    """E22 measured-move target: target = fill + (level - day's open),
+    capped [+1R,+4R]; stop unchanged. 'level' (the broken HOD level) is
+    read as the fill's own entry price (a breakout fill prints at/within a
+    tick of the level it broke -- no separate level field exists in this
+    population); day's open is fetched fresh per (date,symbol) since the
+    path cache starts at the fill bar, not at the open (DAY_OPEN, H51
+    only). This REPLACES target0, fixed at entry (constant for the whole
+    trade) -- bespoke walk, not run_reshape, for the same reason as H42/
+    H49: the measured-move value is frequently ABOVE target0 (a HOD break
+    can already be several R above the day's open), and run_reshape's
+    min-accumulation would silently no-op whenever that happens."""
+    n = ctx.n
+    day_open = DAY_OPEN.get((ctx.date, ctx.symbol))
+    if day_open is None:
+        return ctx.base_R, False, None
+    move = ctx.entry - day_open
+    move = min(max(move, ctx.R * 1.0), ctx.R * 4.0)
+    cur_target = ctx.entry + move
+    changed = (cur_target != ctx.target0)
+    for j in range(1, n):
+        if ctx.m[j] >= EOD_M:
+            price = ctx.o[j]
+            return (ctx.base_R if not changed else leg_R(ctx.entry, ctx.R, price)), changed, ctx.mins(j)
+        if ctx.l[j] <= ctx.stop0:
+            price = _gap_or_touch(ctx.o[j], ctx.l[j], ctx.stop0)
+            return (ctx.base_R if not changed else leg_R(ctx.entry, ctx.R, price)), changed, ctx.mins(j)
+        if ctx.h[j] >= cur_target:
+            price = cur_target
+            return (ctx.base_R if not changed else leg_R(ctx.entry, ctx.R, price)), changed, ctx.mins(j)
+    return ctx.base_R, changed, None
+
+
+def _h52_cond(ctx, j):
+    if j < 1:
+        return False
+    if not hasattr(ctx, '_h52_last_hv'):
+        ctx._h52_last_hv = ctx.v[0]
+    is_new_high = ctx.run_hi_R[j] > ctx.run_hi_R[j - 1]
+    if is_new_high:
+        prev_hv = ctx._h52_last_hv
+        ctx._h52_last_hv = ctx.v[j]
+        if prev_hv and ctx.v[j] < 0.5 * prev_hv:
+            return True
+    return False
+
+
+def _h52(ctx):
+    """E25 new-high volume fade: a bar making a new high since fill on
+    volume <0.5x the PREVIOUS new-high bar's volume -> sell 50% (fires
+    once, first occurrence; the fill bar's own volume seeds the first
+    comparison)."""
+    legs = [(_h52_cond, 0.5)]
+    return run_partial(ctx, legs)
+
+
+def _sar(h, l, step=0.02, maxaf=0.2):
+    """Standard Wilder parabolic SAR (bidirectional; we read it only while
+    trend_up, since this book is long-only)."""
+    n = len(h)
+    sar = np.empty(n)
+    trend_up = np.empty(n, dtype=bool)
+    if n == 0:
+        return sar, trend_up
+    trend_up[0] = True
+    sar[0] = l[0]
+    ep, af = h[0], step
+    for i in range(1, n):
+        prev_sar = sar[i - 1]
+        if trend_up[i - 1]:
+            cand = prev_sar + af * (ep - prev_sar)
+            cand = min(cand, l[i - 1], l[i - 2] if i >= 2 else l[i - 1])
+            if l[i] < cand:
+                trend_up[i], sar[i] = False, ep
+                ep, af = l[i], step
+            else:
+                trend_up[i], sar[i] = True, cand
+                if h[i] > ep:
+                    ep, af = h[i], min(af + step, maxaf)
+        else:
+            cand = prev_sar - af * (prev_sar - ep)
+            cand = max(cand, h[i - 1], h[i - 2] if i >= 2 else h[i - 1])
+            if h[i] > cand:
+                trend_up[i], sar[i] = True, ep
+                ep, af = h[i], step
+            else:
+                trend_up[i], sar[i] = False, cand
+                if l[i] < ep:
+                    ep, af = l[i], min(af + step, maxaf)
+    return sar, trend_up
+
+
+def _adx14(h, l, c, period=14):
+    """Standard-form ADX(period): Wilder-style smoothing approximated with
+    an EWM(alpha=1/period) -- a common, compact practical substitute for
+    the running-sum Wilder recursion; NaN during the warm-up (~2*period
+    bars), during which H53's gate does not fire (documented, not a bug)."""
+    h, l, c = pd.Series(h), pd.Series(l), pd.Series(c)
+    up, down = h.diff(), -l.diff()
+    plus_dm = np.where((up > down) & (up > 0), up, 0.0)
+    minus_dm = np.where((down > up) & (down > 0), down, 0.0)
+    tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    pdi = 100 * pd.Series(plus_dm).ewm(alpha=1 / period, adjust=False, min_periods=period).mean() / atr
+    mdi = 100 * pd.Series(minus_dm).ewm(alpha=1 / period, adjust=False, min_periods=period).mean() / atr
+    dx = 100 * (pdi - mdi).abs() / (pdi + mdi)
+    adx = dx.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    return adx.to_numpy()
+
+
+def _h53(ctx, j):
+    """E5 parabolic SAR trail (step .02/max .2 on 1-min bars) once >=+1R,
+    only while ADX(14)>20 (both computed once, cached on ctx)."""
+    if ctx.h[j] < ctx.entry + 1.0 * ctx.R:
+        return None
+    if not hasattr(ctx, '_h53_sar'):
+        ctx._h53_sar, ctx._h53_trend = _sar(ctx.h, ctx.l)
+        ctx._h53_adx = _adx14(ctx.h, ctx.l, ctx.c)
+    adx = ctx._h53_adx[j]
+    if not np.isfinite(adx) or adx <= 20 or not ctx._h53_trend[j]:
+        return None
+    return (ctx._h53_sar[j], ctx.target0)
+
+
+def _h54(ctx):
+    """E13 mirror power-hour hold: from 15:00 ET (900min), a trade with
+    mtm>=+1R drops its 2R target in favor of riding to the 15:55 close --
+    WIDENS the target, which run_reshape's monotonic-tightening (min)
+    cannot express, so this is a bespoke walk that behaves EXACTLY like
+    the base until hold_mode triggers (returns base_R verbatim if it
+    never does)."""
+    n = ctx.n
+    hold_mode = False
+    for j in range(1, n):
+        if ctx.m[j] >= EOD_M:
+            if not hold_mode:
+                return ctx.base_R, False, None
+            return leg_R(ctx.entry, ctx.R, ctx.o[j]), True, ctx.mins(j)
+        if ctx.l[j] <= ctx.stop0:
+            if not hold_mode:
+                return ctx.base_R, False, None
+            price = _gap_or_touch(ctx.o[j], ctx.l[j], ctx.stop0)
+            return leg_R(ctx.entry, ctx.R, price), True, ctx.mins(j)
+        if not hold_mode:
+            if ctx.h[j] >= ctx.target0:
+                return ctx.base_R, False, None
+            if ctx.m[j] >= 900 and ctx.close_R(j) >= 1.0:
+                hold_mode = True
+    return ctx.base_R, False, None
+
+
+def _h55(ctx):
+    """E15+E4+E18 combination: 75% at +1R, then on the remainder, H38
+    (confirmed change of character) or H44 (chandelier trail), whichever
+    fires first each bar -- H38 checked before H44 so a same-bar tie goes
+    to the full exit."""
+    n = ctx.n
+    cur_stop, cur_target = ctx.stop0, ctx.target0
+    sold, realized, any_fired, first_fire = 0.0, 0.0, False, None
+    pending, leg1_done = None, False
+    for j in range(1, n):
+        if pending is not None:
+            frac, _ = pending
+            realized += frac * leg_R(ctx.entry, ctx.R, ctx.o[j])
+            sold += frac
+            pending = None
+        if sold >= 1.0 - 1e-12:
+            return realized, any_fired, first_fire
+        if ctx.m[j] >= EOD_M:
+            realized += (1.0 - sold) * leg_R(ctx.entry, ctx.R, ctx.o[j])
+            return realized, any_fired, first_fire
+        if ctx.l[j] <= cur_stop:
+            price = _gap_or_touch(ctx.o[j], ctx.l[j], cur_stop)
+            realized += (1.0 - sold) * leg_R(ctx.entry, ctx.R, price)
+            return realized, any_fired, first_fire
+        if ctx.h[j] >= cur_target:
+            realized += (1.0 - sold) * leg_R(ctx.entry, ctx.R, cur_target)
+            return realized, any_fired, first_fire
+        if not leg1_done:
+            if ctx.close_R(j) >= 1.0:
+                pending = (0.75, j)
+                leg1_done = True
+                any_fired = True
+                first_fire = first_fire if first_fire is not None else ctx.mins(j)
+                continue
+        else:
+            if _h38(ctx, j):
+                pending = (1.0 - sold, j)
+                any_fired = True
+                continue
+            upd = _h44(ctx, j)
+            if upd is not None:
+                new_stop, new_target = upd
+                cur_stop, cur_target = max(cur_stop, new_stop), min(cur_target, new_target)
+    if sold < 1.0:
+        realized += (1.0 - sold) * ctx.base_R if sold == 0.0 else (1.0 - sold) * leg_R(ctx.entry, ctx.R, ctx.c[n - 1])
+    return realized, any_fired, first_fire
+
+
+def _h57(ctx):
+    """cell 1,682 synthesis joint (TRAIN score, both gates): H40 (late trim
+    at 14:30 ET, S=+0.0231, the top scorer) + H54 (power-hour hold at
+    15:00 ET, S=+0.0036) -- the only two of the 20 literature rules
+    clearing both TRAIN gates (ex-top-5% dR>-0.02, weekly P10 not worse)
+    with positive score; no third positive-score compatible candidate
+    exists (18/20 fail the tail or P10 gate, matching 1,681's own 27/35).
+    Compatible by construction: different mechanisms (partial-sell vs
+    target-widen) at different, later clock times, so H40 runs first in
+    TIME (14:30 precedes 15:00) -- not a score-precedence tie-break, the
+    two never compete for the same decision point."""
+    n = ctx.n
+    cur_stop, cur_target = ctx.stop0, ctx.target0
+    sold, realized, any_fired, first_fire = 0.0, 0.0, False, None
+    pending = None
+    h40_done, hold_mode = False, False
+    for j in range(1, n):
+        if pending is not None:
+            frac, _ = pending
+            realized += frac * leg_R(ctx.entry, ctx.R, ctx.o[j])
+            sold += frac
+            pending = None
+        if sold >= 1.0 - 1e-12:
+            return realized, any_fired, first_fire
+        if ctx.m[j] >= EOD_M:
+            realized += (1.0 - sold) * leg_R(ctx.entry, ctx.R, ctx.o[j])
+            return realized, any_fired, first_fire
+        if ctx.l[j] <= cur_stop:
+            price = _gap_or_touch(ctx.o[j], ctx.l[j], cur_stop)
+            realized += (1.0 - sold) * leg_R(ctx.entry, ctx.R, price)
+            return realized, any_fired, first_fire
+        if not hold_mode and ctx.h[j] >= cur_target:
+            realized += (1.0 - sold) * leg_R(ctx.entry, ctx.R, cur_target)
+            return realized, any_fired, first_fire
+        if not h40_done and ctx.m[j] >= 870:
+            h40_done = True
+            if ctx.close_R(j) >= 0.0:
+                pending = (0.5 * (1.0 - sold), j)
+                any_fired = True
+                first_fire = first_fire if first_fire is not None else ctx.mins(j)
+                continue
+        if not hold_mode and ctx.m[j] >= 900 and ctx.close_R(j) >= 1.0:
+            hold_mode = True
+            any_fired = True
+            first_fire = first_fire if first_fire is not None else ctx.mins(j)
+    if sold < 1.0:
+        realized += (1.0 - sold) * ctx.base_R if sold == 0.0 else (1.0 - sold) * leg_R(ctx.entry, ctx.R, ctx.c[n - 1])
+    return realized, any_fired, first_fire
+
+
+def _h58(ctx):
+    """cell 1,682: H57 (H40+H54) STACKED on the 1,681 joint H36
+    (H35-then-H16), per PREREG_1682's synthesis clause. H36's own
+    mechanism (the already-validated 1,681 joint) is checked every bar
+    with precedence, exactly as in _h36; H57's two later clock snapshots
+    then act as an additional layer on whatever fraction/target H36
+    leaves open (H16 can fully exit, in which case nothing is left for
+    H57's snapshots to act on that fill)."""
+    n = ctx.n
+    cur_stop, cur_target = ctx.stop0, ctx.target0
+    sold, realized, any_fired, first_fire = 0.0, 0.0, False, None
+    pending = None
+    h35_fired = False
+    h40_done, hold_mode = False, False
+    for j in range(1, n):
+        if pending is not None:
+            frac, _ = pending
+            realized += frac * leg_R(ctx.entry, ctx.R, ctx.o[j])
+            sold += frac
+            pending = None
+        if sold >= 1.0 - 1e-12:
+            return realized, any_fired, first_fire
+        if ctx.m[j] >= EOD_M:
+            realized += (1.0 - sold) * leg_R(ctx.entry, ctx.R, ctx.o[j])
+            return realized, any_fired, first_fire
+        if ctx.l[j] <= cur_stop:
+            price = _gap_or_touch(ctx.o[j], ctx.l[j], cur_stop)
+            realized += (1.0 - sold) * leg_R(ctx.entry, ctx.R, price)
+            return realized, any_fired, first_fire
+        if not hold_mode and ctx.h[j] >= cur_target:
+            realized += (1.0 - sold) * leg_R(ctx.entry, ctx.R, cur_target)
+            return realized, any_fired, first_fire
+        if not h35_fired:
+            if _h35_leg1(ctx, j):
+                pending = (0.5 * (1.0 - sold), j)
+                h35_fired = True
+                any_fired = True
+                first_fire = first_fire if first_fire is not None else ctx.mins(j)
+                continue
+            if _h16(ctx, j):
+                pending = (1.0 - sold, j)
+                any_fired = True
+                first_fire = first_fire if first_fire is not None else ctx.mins(j)
+                continue
+        else:
+            upd = _h21_remainder(ctx, j)
+            if upd is not None:
+                new_stop, new_target = upd
+                cur_stop, cur_target = max(cur_stop, new_stop), min(cur_target, new_target)
+        if not h40_done and ctx.m[j] >= 870:
+            h40_done = True
+            if ctx.close_R(j) >= 0.0 and sold < 1.0 - 1e-12:
+                pending = (0.5 * (1.0 - sold), j)
+                any_fired = True
+                first_fire = first_fire if first_fire is not None else ctx.mins(j)
+                continue
+        if not hold_mode and ctx.m[j] >= 900 and ctx.close_R(j) >= 1.0:
+            hold_mode = True
+            any_fired = True
+            first_fire = first_fire if first_fire is not None else ctx.mins(j)
+    if sold < 1.0:
+        realized += (1.0 - sold) * ctx.base_R if sold == 0.0 else (1.0 - sold) * leg_R(ctx.entry, ctx.R, ctx.c[n - 1])
+    return realized, any_fired, first_fire
+
+
 HYPOTHESES = {
     'H1': dict(family='F1', model=False, desc='exit at 30 min if mtm<+0.25R', fn=_trig(_h1)),
     'H2': dict(family='F1', model=False, desc='exit at 60 min if mtm<+0.5R', fn=_trig(_h2)),
@@ -849,9 +1520,31 @@ HYPOTHESES = {
     'H34': dict(family='F7', model=True, desc='H4 AND H14', fn=_trig(_h34)),
     'H35': dict(family='F7', model=False, desc='H21 AND H8', fn=_h35),
     'H36': dict(family='JOINT', model=True, desc='synthesis: H35 precedence over H16 (TRAIN-scored)', fn=_h36),
+    'H37': dict(family='LIT', model=False, desc='E1 Kaminski-Lo: rho1(returns,fill+1..+15)>0 -> breakeven lock at +1R', fn=_resh(_h37)),
+    'H38': dict(family='LIT', model=False, desc='E12/E18 confirmed change of character: >=2/4 signals in 5min while >=+0.5R', fn=_trig(_h38)),
+    'H39': dict(family='LIT', model=False, desc='E13 doldrums de-risk at 12:30 ET: 50% if mtm>=+0.5R, exit if mtm<0 & age>=60m', fn=_h39),
+    'H40': dict(family='LIT', model=False, desc='E23 late trim: 50% at 14:30 ET if mtm>=0', fn=_h40),
+    'H41': dict(family='LIT', model=True, desc='E10/E11 vol-regime trail: top-TRAIN-tercile ATR14% -> MFE-1.0*ATR14 after +1R', fn=_resh(_h41)),
+    'H42': dict(family='LIT', model=False, desc='E14/E3 analytic target 2*sigma*sqrt(Trem), capped [+1R,+4R]', fn=_h42),
+    'H43': dict(family='LIT', model=True, desc='E7 Bayesian de-risk: rolling posterior win rate<0.28 (last<=20) -> target +0.5R', fn=_resh(_h43)),
+    'H44': dict(family='LIT', model=False, desc='E4 chandelier: HH-1.5*ATR14 after +1R, floor breakeven', fn=_resh(_h44)),
+    'H45': dict(family='LIT', model=True, desc='E8 Sweeney MAE ceiling: running MAE > TRAIN winners P80', fn=_trig(_h45)),
+    'H46': dict(family='LIT', model=False, desc='E15 large first partial: 75% at +1R, 25% runs the base', fn=_h46),
+    'H47': dict(family='LIT', model=False, desc='E16 Warrior: half at +1R, rest exits on close<9EMA', fn=_h47),
+    'H48': dict(family='LIT', model=False, book='giveback', desc="E17 SMB session give-back: day's book +3R->+1.5R flattens open HOD positions", fn=None),
+    'H49': dict(family='LIT', model=False, desc='E19 half at +3R (no 2R exit), rest trails MFE-1R', fn=_h49),
+    'H50': dict(family='LIT', model=False, desc='E20 swing-low trail: last 3 rolling-5m-window lows after +1R, floor breakeven', fn=_resh(_h50)),
+    'H51': dict(family='LIT', model=False, desc="E22 measured-move target: fill+(level-day's open), capped [+1R,+4R]", fn=_h51),
+    'H52': dict(family='LIT', model=False, desc='E25 new-high volume fade <0.5x prior new-high volume -> sell 50%', fn=_h52),
+    'H53': dict(family='LIT', model=False, desc='E5 parabolic SAR trail while ADX14>20, after +1R', fn=_resh(_h53)),
+    'H54': dict(family='LIT', model=False, desc='E13 mirror power-hour hold: drop 2R target for 15:55 close if mtm>=+1R at 15:00', fn=_h54),
+    'H55': dict(family='LIT', model=False, desc='E15+E4+E18 combo: 75% at +1R, then H38 or H44 whichever first on remainder', fn=_h55),
+    'H56': dict(family='LIT', model=False, book='hardstop', desc="E9/E2 portfolio hard stop: day's book<=-3R flattens + blocks new fills that day", fn=None),
+    'H57': dict(family='SYNTH', model=False, desc='1,682 joint (TRAIN score): H40 late trim @14:30 + H54 power-hour hold @15:00', fn=_h57),
+    'H58': dict(family='SYNTH', model=True, desc='H57 stacked on the 1,681 joint H36 (H35-then-H16, then H40+H54 on the remainder)', fn=_h58),
 }
 
-assert len(HYPOTHESES) == 36, f'expected 36 hypotheses, got {len(HYPOTHESES)}'
+assert len(HYPOTHESES) == 58, f'expected 58 hypotheses, got {len(HYPOTHESES)}'
 
 
 # ---------------------------------------------------------------------------
@@ -947,6 +1640,8 @@ def _atomic_replace_by_id(path, new_df, id_col='id'):
 
 def run_hypothesis(hid, pop, paths, p_success, p_stop, lens=False):
     spec = HYPOTHESES[hid]
+    if spec.get('book'):
+        return run_book_hypothesis(hid, pop, paths, lens=lens)
     t0 = time.time()
     reads_rows = []
     per_fill_rows = []
@@ -1006,6 +1701,165 @@ def run_hypothesis(hid, pop, paths, p_success, p_stop, lens=False):
     return reads_df
 
 
+def run_book_hypothesis(hid, pop, paths, lens=False):
+    """H48/H56 (cell 1,682): book-level rules that aggregate a day's HOD
+    fills TOGETHER in fill order -- cannot use run_hypothesis's per-fill-
+    independent loop. Walks a unified per-day clock (the union of every
+    that-day fill's own bar minutes), marking each fill open/closed via
+    its own _base_exit_idx and summing realized+open R into a running
+    book. H48: once the book has been >=+3R and falls back to <=+1.5R,
+    flatten every position still open at that minute (next bar's open,
+    same -6bps convention; fills already closed are untouched, dR=0).
+    H56: once the book is <=-3R, flatten every open position AND treat any
+    fill entered after that minute as blocked (rule_R:=base_R, dR=0 by the
+    PREREG's own convention: 'the day's later fills counted as 0').
+    Same stats/decompose/lens/write tail as run_hypothesis (by
+    construction, shares the columns and file-writing helpers)."""
+    t0 = time.time()
+    reads_rows, per_fill_rows = [], []
+    for read in HALVES:
+        sub = pop[pop['half'] == read]
+        rule_Rs, base_Rs, fired_flags, dates = [], [], [], []
+        for date, day_rows in sub.groupby('date'):
+            fctx = {}
+            for row in day_rows.itertuples():
+                path = paths.get(row.fill_id)
+                if path is None or len(path['o']) < 2:
+                    continue
+                ctx = FillCtx(row.fill_id, row, path, {}, {}, None)
+                ctx._base_exit_j = _base_exit_idx(ctx)
+                fctx[row.fill_id] = (row, ctx)
+            if not fctx:
+                continue
+            clock = sorted(set(float(m) for (_, c) in fctx.values() for m in c.m.tolist()))
+            armed, trig_minute = False, None
+            for M in clock:
+                book = 0.0
+                for fid, (row, ctx) in fctx.items():
+                    if M < ctx.m[0]:
+                        continue
+                    j_idx = int(np.searchsorted(ctx.m, M, side='right') - 1)
+                    j_idx = max(0, min(j_idx, ctx.n - 1))
+                    book += ctx.base_R if j_idx >= ctx._base_exit_j else ctx.close_R(j_idx)
+                if hid == 'H48':
+                    if not armed and book >= 3.0:
+                        armed = True
+                    elif armed and book <= 1.5:
+                        trig_minute = M
+                        break
+                else:  # H56
+                    if book <= -3.0:
+                        trig_minute = M
+                        break
+            for fid, (row, ctx) in fctx.items():
+                fired = False
+                if trig_minute is None:
+                    r = row.base_R
+                elif hid == 'H56' and ctx.m[0] > trig_minute:
+                    r = row.base_R  # blocked entry after the day-stop -- dR=0 by the PREREG convention
+                else:
+                    j_at_trig = int(np.searchsorted(ctx.m, trig_minute, side='right') - 1)
+                    j_at_trig = max(0, min(j_at_trig, ctx.n - 1))
+                    if j_at_trig >= ctx._base_exit_j:
+                        r = row.base_R  # already closed by the trigger minute -- unaffected
+                    else:
+                        idx_after = int(np.searchsorted(ctx.m, trig_minute, side='right'))
+                        if idx_after >= ctx.n:
+                            r = row.base_R
+                        else:
+                            r = leg_R(ctx.entry, ctx.R, ctx.o[idx_after])
+                            fired = True
+                rule_Rs.append(r)
+                base_Rs.append(row.base_R)
+                fired_flags.append(fired)
+                dates.append(row.date)
+                per_fill_rows.append(dict(id=hid, read=read, fill_id=fid, date=row.date, symbol=row.symbol,
+                                           base_R=row.base_R, rule_R=r, dR=r - row.base_R, fired=fired,
+                                           fired_min=(trig_minute if fired else None)))
+        rule_Rs, base_Rs = np.array(rule_Rs), np.array(base_Rs)
+        fired_flags = np.array(fired_flags)
+        dates_arr = np.array(dates)
+        dR = rule_Rs - base_Rs
+        s = stats_block(dR, dates_arr)
+        dc = decompose(fired_flags, rule_Rs, base_Rs)
+        lens_vals = consistency_lens(dates_arr, base_Rs, rule_Rs) if lens else dict(LENS_NA)
+        reads_rows.append(dict(
+            id=hid, read=read, n=s['n'], dR=s['dR'], iid_t=s['iid_t'], day_t=s['day_t'],
+            ex5=s['ex5'], mde=s['mde'], fired_share=fired_flags.mean() if len(fired_flags) else np.nan,
+            saved=dc['saved'], forgone=dc['forgone'], cost=dc['cost'], **lens_vals,
+        ))
+        logger.info('%s [%s]: n=%d dR=%.4f t_day=%.2f fired=%.1f%%', hid, read, s['n'], s['dR'],
+                    s['day_t'] if pd.notna(s['day_t']) else float('nan'),
+                    100 * (fired_flags.mean() if len(fired_flags) else 0))
+    reads_df = pd.DataFrame(reads_rows, columns=READS_COLUMNS)
+    per_fill_df = pd.DataFrame(per_fill_rows)
+    _atomic_replace_by_id(READS_CSV, reads_df, 'id')
+    _atomic_replace_by_id(PER_FILL_CSV, per_fill_df, 'id')
+    logger.info('%s done in %.1fs, %d reads written', hid, time.time() - t0, len(reads_rows))
+    return reads_df
+
+
+def prep_derived_stats(pop, paths):
+    """cell 1,682: precompute the three TRAIN-derived / cross-half stats
+    H41 (ATR14% top-tercile cutoff), H43 (rolling Beta-posterior de-risk
+    flag) and H45 (winners' MAE P80) need, each fit independently per half
+    so the SCORINGS 'swap' (fit on one half, apply on the other) reads
+    correctly -- called once, before any of H41/H43/H45 execute."""
+    for half in HALVES:
+        sub = pop[pop['half'] == half]
+        atr = sub['atr14_pct'].dropna()
+        ATR_CUTOFF[half] = float(atr.quantile(2.0 / 3.0)) if len(atr) else None
+        ordered = sub.sort_values(['date', 'fill_min'])
+        wins_hist = []
+        for row in ordered.itertuples():
+            recent = wins_hist[-20:]
+            post_mean = (1.0 + sum(recent)) / (3.0 + len(recent))
+            H43_DERISK[row.fill_id] = post_mean < 0.28
+            wins_hist.append(1 if row.base_R > 0 else 0)
+        maes = []
+        for row in sub.itertuples():
+            if row.base_R <= 0:
+                continue
+            path = paths.get(row.fill_id)
+            if path is None or len(path['o']) < 2:
+                continue
+            ctx = FillCtx(row.fill_id, row, path, {}, {}, None)
+            j_exit = _base_exit_idx(ctx)
+            maes.append((ctx.entry - ctx.l[0:j_exit + 1].min()) / ctx.R)
+        WINNER_MAE_P80[half] = float(np.quantile(maes, 0.80)) if maes else None
+    logger.info('prep_derived_stats: ATR_CUTOFF=%s WINNER_MAE_P80=%s H43 flagged=%d/%d',
+                ATR_CUTOFF, WINNER_MAE_P80, sum(H43_DERISK.values()), len(H43_DERISK))
+
+
+def prep_day_opens(pop):
+    """cell 1,682 H51 only: day's open price per (date,symbol), fetched
+    fresh read-only from the bar store since 1681_paths.parquet only
+    carries bars from the fill minute onward. Cached to a sibling CSV
+    (research/, not data/*.db) so repeat runs don't re-query."""
+    cache_path = os.path.join(HERE, '1682_day_opens.csv')
+    if os.path.exists(cache_path):
+        df = pd.read_csv(cache_path)
+        for r in df.itertuples():
+            DAY_OPEN[(r.date, r.symbol)] = r.day_open
+        logger.info('prep_day_opens: loaded %d cached day-opens', len(df))
+        return
+    store = BarStore(BARS_DB)
+    rows = []
+    try:
+        for (date, symbol), _ in pop.groupby(['date', 'symbol']):
+            bars = store.day_bars(symbol, date)
+            if bars is not None and len(bars['o']) > 0:
+                op = float(bars['o'][0])
+                DAY_OPEN[(date, symbol)] = op
+                rows.append(dict(date=date, symbol=symbol, day_open=op))
+    finally:
+        store.close()
+    tmp = cache_path + '.tmp'
+    pd.DataFrame(rows).to_csv(tmp, index=False)
+    os.replace(tmp, cache_path)
+    logger.info('prep_day_opens: fetched %d day-opens -> %s', len(rows), cache_path)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--run', required=True, help='comma list of hypothesis ids, e.g. H1,H2, or ALL')
@@ -1024,6 +1878,10 @@ def main():
     pop = load_population()
     paths = build_paths(pop, rebuild=args.rebuild_paths)
     p_success, p_stop = load_model_probs()
+    if {'H41', 'H43', 'H45'} & set(ids):
+        prep_derived_stats(pop, paths)
+    if 'H51' in ids:
+        prep_day_opens(pop)
 
     for hid in ids:
         run_hypothesis(hid, pop, paths, p_success, p_stop, lens=args.lens)
