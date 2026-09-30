@@ -1,0 +1,5 @@
+window 2026-06-01..2026-09-04
+candidate symbol-days (causal superset, both variants counted once via causal): 12980
+fills: 2872
+status_counts: {'not_armed': 9254, 'fill': 2872, 'nofill': 854}
+n_nobars (superset symbol-days with < K+2 minute bars in cache.db+bars_sip.db): 30
