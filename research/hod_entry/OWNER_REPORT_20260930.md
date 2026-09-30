@@ -116,3 +116,12 @@ today. Closed: shorting HOD-break failures keyed on the post-entry model, on thi
   (1,677: 0 of 180 rows pass even one scoring; least-bad +0.30 R / +0.13 R with the sign of the t flipping; the model
   beats a mechanical trail but neither clears). Conclusion: the shape signal is real information about the next 15
   minutes and it is not money on this book at 13 bps; it is recorded, the models are persisted, no rule ships.
+
+## 10. Options v3 (the $53.66 Databento pull), 15:40 UTC
+The pull completed (20,872 legs; spend $53.66 vs the $32 I estimated — inside the $150 cap, wrong estimate). The
+cell is VOID by its own rail in every split (10.9 / 20.4 / 42.7 % of cycles have no partner strike — a plan gap:
+those strikes were never pulled), the managed variant is unmeasurable (a missing-mark defect makes it collapse into the
+unmanaged one), and the headline is below the 4 %/month bar anyway: +3.1 %/month (2024–25), +3.6 %/month (2026,
+t 2.5), +0.9 %/month on the 2016–2023 extension (t 2.0, 56 % green months). Decision: no further spend (closing the
+extension's gap is unquantified and its headline is a quarter of the bar); the line is closed as below-bar. The
+$0.04 that would close TRAIN/VAL's gap changes nothing about that.
