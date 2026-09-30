@@ -57,3 +57,36 @@ state; the overlay reads its config fresh from `cfg` at engine construction only
 (the live `resting_stop_limit` config) arms the overlay. `allow_fresh_short=true` (short 1x when
 the long already stopped before the signal bar) has pure sizing (`fresh_short_qty`) but no engine
 wiring — out of scope for v1 ("first version trades only reversals of our own fills").
+
+## Signal wiring (2026-09-30 follow-up): `trading/hod_failure_signal.py`
+`build_signal_fn(cfg)` loads `hod_break.failure_short.model_path` (default
+`research/hod_entry/models/ff10_k1_val.joblib`, the VAL-half model) and
+`.../ff10_k1_features.json` (152 ordered columns) ONCE at boot, and returns the
+`signal_fn(symbol, bars, arm_context)` closure `main.py` passes to `HodBreakEngine(fs_signal_fn=...)`
+— built only when `failure_short.enabled` (both telemetry_only sub-modes still evaluate/log; the
+model load is skipped entirely, not just gated, when the overlay is off). Every column is scored
+via `trading.hod_failure_features.k1_features` — the SAME function
+`research/hod_entry/1675_forward.py` (the research scorer) calls — fed the engine's own bars
+(`hod_break_engine.py::_fs_evaluate_signal`, canonical `{'o','h','l','c','v','minarr'}` dict, index
+0 = first RTH bar of the day, through the signal bar), the arm context (level/stop/fill/target),
+`adv20` (engine's ADV map) and `atr14` (`data/cache.db daily_bars`, read-only, 15 prior sessions,
+ported verbatim from `1675_forward.py::atr14_causal`, memoized per symbol-day for the process
+lifetime). F11-F15 are ported from `research/hod_entry/1667_sweep.py`'s formulas (level-vs-VWAP,
+level-vs-open, day-range/ATR, level age, dollar-volume-vs-normal) computed from the engine's own
+bars instead of `bars_sip.db`; **F8** (F15's denominator) isn't available live and is mapped to the
+engine's `adv20` — a disclosed approximation, not a parity bug (F15 is excluded from the parity
+test for this reason). `cS5_spyret_1` is structurally always NaN (no SPY bar feed wired) — logged
+once at boot, not per evaluation. A NaN storm (> 20/152 columns) returns `None` and logs ERROR once
+per session day.
+
+## OCO cover for the short (2026-09-30 follow-up)
+The short's two exits are submitted as ONE `submit_oco_buy_order` (new, mirrors
+`submit_oco_sell_order` exactly: `order_class='oco'`, `side=BUY`, `take_profit`=the target limit,
+`stop_loss`=the day-high stop; parent order id = the limit leg, `legs` carries the stop leg) —
+never two independently-resting buy orders on the same short qty, the same class of bug the 9/25
+VECO incident fixed on the sell side. If the OCO submit itself raises, `_fs_submit` falls back to
+the two independent orders (`submit_stop_limit_order` side='buy' + `submit_limit_buy_order`), and
+`_fs_poll_short_exits` cancels the sibling leg the instant either one shows `status == 'filled'`
+(this cancel-on-fill logic is unconditional — a no-op against an already broker-cancelled OCO
+sibling, the real safety net when the fallback pair is used). `_fs_shorts[symbol]['is_oco']` records
+which path was taken, for telemetry only.

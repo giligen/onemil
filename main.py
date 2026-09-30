@@ -819,11 +819,24 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
             # still be None here depending on which branches ran above, and Python looks up a free variable in an
             # enclosing scope at CALL time, not at lambda-creation time, so this reads whatever `trading_engine`
             # is bound to when the HOD engine actually evaluates it (item 1, hod_break.log_counterfactuals).
+            # Failure-short overlay signal (trading/hod_failure_signal.py, docs/hod_failure_short_spec_20260930.md):
+            # built only when the overlay will actually evaluate anything (enabled — telemetry_only still
+            # evaluates+logs, it just places no orders); model load is skipped entirely when the overlay is off.
+            _fs_cfg = config.hod_break_cfg.get('failure_short') or {}
+            hod_fs_signal_fn = None
+            if _fs_cfg.get('enabled'):
+                try:
+                    from trading.hod_failure_signal import build_signal_fn
+                    hod_fs_signal_fn = build_signal_fn(_fs_cfg)
+                except Exception as e:
+                    logger.error(f"FAILURE-SHORT SIGNAL: build_signal_fn failed ({e}) — overlay runs with no signal")
+                    hod_fs_signal_fn = None
             hod_engine = HodBreakEngine(
                 alpaca_client=hod_client, db=db, stop_monitor=stop_monitor,
                 notifier=notifier, cfg=config.hod_break_cfg,
                 order_stream=hod_order_stream,
-                is_qualified=lambda s: trading_engine is not None and s in trading_engine._qualified_symbols)
+                is_qualified=lambda s: trading_engine is not None and s in trading_engine._qualified_symbols,
+                fs_signal_fn=hod_fs_signal_fn)
             if stop_monitor is not None and not stop_monitor.polling_mode:
                 hod_engine.register_on_stop_monitor()
             hod_engine.sync_positions()

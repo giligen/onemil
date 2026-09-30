@@ -43,6 +43,10 @@ def mock_alpaca():
     a.submit_market_sell_order.return_value = {'id': 'sell1', 'status': 'filled'}
     a.submit_stop_limit_order.return_value = {'id': 'stop1', 'status': 'accepted'}
     a.submit_limit_buy_order.return_value = {'id': 'target1', 'status': 'accepted'}
+    a.submit_oco_buy_order.return_value = {'id': 'ocoTarget1', 'status': 'accepted',
+                                            'legs': [{'id': 'ocoStop1', 'type': 'stop'}]}
+    a.cancel_order.return_value = True
+    a.get_order.return_value = {'status': 'accepted'}
     a.get_open_positions.return_value = [{'symbol': SYM, 'qty': '-100'}]
     return a
 
@@ -99,6 +103,7 @@ class TestDisabledIsInert:
         assert not mock_alpaca.submit_market_sell_order.called
         assert not mock_alpaca.submit_stop_limit_order.called
         assert not mock_alpaca.submit_limit_buy_order.called
+        assert not mock_alpaca.submit_oco_buy_order.called
         assert not mock_sm.add_watch.called
 
     def test_telemetry_only_true_evaluates_but_places_no_orders(self, mock_alpaca, real_db, mock_sm, tmp_path):
@@ -148,12 +153,14 @@ class TestLiveReversal:
         # the reversal sell + the short's two exit orders
         mock_alpaca.submit_market_sell_order.assert_called_once()
         assert mock_alpaca.submit_market_sell_order.call_args.args[:2] == (SYM, 200)   # 2x the long's 100 sh
-        mock_alpaca.submit_stop_limit_order.assert_called_once()
-        stop_kwargs = mock_alpaca.submit_stop_limit_order.call_args.kwargs
-        assert stop_kwargs['side'] == 'buy' and stop_kwargs['qty'] == 100 and stop_kwargs['stop_price'] == 12.35
-        mock_alpaca.submit_limit_buy_order.assert_called_once()
-        target_kwargs = mock_alpaca.submit_limit_buy_order.call_args.kwargs
-        assert target_kwargs['qty'] == 100 and target_kwargs['limit_price'] == 11.50
+        # ONE OCO buy order for both exits (never two independently-resting covers) — the OCO
+        # succeeds by default in this fixture, so the two-order fallback is never reached.
+        mock_alpaca.submit_oco_buy_order.assert_called_once()
+        oco_kwargs = mock_alpaca.submit_oco_buy_order.call_args.kwargs
+        assert oco_kwargs['qty'] == 100 and oco_kwargs['stop_price'] == 12.35 and oco_kwargs['limit_price'] == 11.50
+        assert not mock_alpaca.submit_stop_limit_order.called and not mock_alpaca.submit_limit_buy_order.called
+        assert engine._fs_shorts[SYM]['is_oco'] is True
+        assert engine._fs_shorts[SYM]['stop_id'] == 'ocoStop1' and engine._fs_shorts[SYM]['target_id'] == 'ocoTarget1'
 
         # StopMonitor: the long's watch is torn down; NO watch is armed for the short (see
         # trading/hod_break_engine.py's failure-short overlay docstring for why — StopMonitor's
@@ -172,12 +179,64 @@ class TestLiveReversal:
         assert short_row['shares'] == 100 and short_row['strategy'] == 'hod_break'
         pattern = json.loads(short_row['pattern_data'])
         assert pattern['mechanism'] == 'failure_short' and pattern['reversed_long_trade_id'] == long_trade_id
-        assert pattern['tp_leg_id'] == 'target1' and pattern['sl_leg_id'] == 'stop1'
+        assert pattern['tp_leg_id'] == 'ocoTarget1' and pattern['sl_leg_id'] == 'ocoStop1' and pattern['oco'] is True
 
         # ledger row for this evaluation
         with open(ledger) as fh:
             ledger_rows = list(csv.DictReader(fh))
         assert len(ledger_rows) == 1 and ledger_rows[0]['symbol'] == SYM and ledger_rows[0]['passed'] == 'True'
+
+    def test_oco_submit_failure_falls_back_to_two_orders(self, mock_alpaca, real_db, mock_sm, tmp_path):
+        mock_alpaca.submit_oco_buy_order.side_effect = Exception('oco rejected')
+        ledger = str(tmp_path / 'fs_ledger.csv')
+        engine = HodBreakEngine(mock_alpaca, real_db, mock_sm, cfg=cfg(ledger_path=ledger))
+        engine.session_date = '2026-09-30'
+        engine.fs_signal_fn = lambda symbol, bars, ctx: 0.90
+        engine._prev_day[SYM] = (10.0, None, None)
+        _arm_candidate(engine)
+        engine._minute_of_day = lambda: FILL_MINUTE
+        long_trade_id = _open_long(engine, real_db)
+        engine._fs_register_long(SYM, 12.00, 11.50, 100, long_trade_id, datetime.now(timezone.utc))
+        engine._minute_of_day = lambda: FILL_MINUTE + 1
+        engine._fs_advance(SYM)
+        engine._minute_of_day = lambda: FILL_MINUTE + 2
+        engine._fs_advance(SYM)
+
+        mock_alpaca.submit_oco_buy_order.assert_called_once()
+        mock_alpaca.submit_stop_limit_order.assert_called_once()
+        mock_alpaca.submit_limit_buy_order.assert_called_once()
+        assert engine._fs_shorts[SYM]['is_oco'] is False
+        assert engine._fs_shorts[SYM]['stop_id'] == 'stop1' and engine._fs_shorts[SYM]['target_id'] == 'target1'
+
+    def test_one_leg_fill_cancels_the_sibling_no_second_cover(self, mock_alpaca, real_db, mock_sm):
+        """OCO or fallback: once EITHER exit leg fills, the sibling is cancelled and the short is
+        closed — never a second cover order."""
+        engine = HodBreakEngine(mock_alpaca, real_db, mock_sm, cfg=cfg())
+        engine.session_date = '2026-09-30'
+        short_trade_id = real_db.save_trade({'trade_date': '2026-09-30', 'symbol': SYM, 'side': 'sell',
+                                              'entry_price': 12.28, 'stop_loss_price': 12.35, 'take_profit_price': 11.50,
+                                              'shares': 100, 'risk_per_share': 0.07, 'total_risk': 7.0,
+                                              'risk_reward_ratio': 2.0, 'order_id': 'sell1', 'order_status': 'filled',
+                                              'fill_price': 12.28, 'filled_at': datetime.now(timezone.utc).isoformat(),
+                                              'exit_price': None, 'exit_reason': None, 'exited_at': None, 'pnl': None,
+                                              'pnl_pct': None, 'strategy': 'hod_break', 'account': 'paper', 'pattern_data': '{}'})
+        engine._fs_shorts[SYM] = {'trade_id': short_trade_id, 'qty': 100, 'entry_px': 12.28, 'is_oco': True,
+                                   'stop_id': 'ocoStop1', 'target_id': 'ocoTarget1', 'stop_px': 12.35, 'target_px': 11.50}
+
+        def get_order(oid):
+            return {'status': 'filled'} if oid == 'ocoStop1' else {'status': 'accepted'}
+        mock_alpaca.get_order.side_effect = get_order
+
+        engine._fs_poll_short_exits()
+
+        mock_alpaca.cancel_order.assert_called_once_with('ocoTarget1')   # sibling cancelled
+        assert SYM not in engine._fs_shorts                              # short closed, no lingering tracking
+        assert not mock_alpaca.submit_market_sell_order.called           # no second cover ever submitted
+        assert not mock_alpaca.submit_oco_buy_order.called
+        rows = real_db.get_trades_by_date('2026-09-30')
+        closed = next(r for r in rows if r['id'] == short_trade_id)
+        assert closed['order_status'] == 'closed' and closed['exit_reason'] == 'failure_short_stop'
+        assert closed['exit_price'] == 12.35
 
     def test_no_go_below_tau_drops_tracking_no_orders(self, mock_alpaca, real_db, mock_sm, tmp_path):
         engine = HodBreakEngine(mock_alpaca, real_db, mock_sm, cfg=cfg(tau=0.95, ledger_path=str(tmp_path / 'l.csv')))

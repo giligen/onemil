@@ -1880,7 +1880,7 @@ class HodBreakEngine:
             logger.warning(f"{self.tag} {sym}: PARTIAL fill {filled_qty}/{lo['qty']} — remainder stays resting, safety-net legs cover the filled qty only")
         self._persist_live_orders()
         if status != 'partially_filled':
-            self._fs_register_long(sym, fill_px, stop, filled_qty, trade_id, now_ts)
+            self._fs_register_long(sym, fill_px, stop, filled_qty, trade_id, now_ts, target=target, level=lo['level'])
 
     def _append_live_parity_row(self, cand: Candidate, lo: dict, broker_status: str, broker_fill_ts=None,
                                 broker_fill_px: Optional[float] = None, broker_fill_qty: Optional[int] = None, reason: str = '') -> None:
@@ -2067,16 +2067,20 @@ class HodBreakEngine:
     # line of defense, not a reason to arm a watch that is wrong by construction. This is a deliberate scope
     # decision, not an oversight — flagged in the spec doc's rollback/limitations section.
     def _fs_register_long(self, symbol: str, fill_px: float, stop: float, shares: int,
-                           trade_id: Optional[int], filled_at: datetime) -> None:
+                           trade_id: Optional[int], filled_at: datetime, target: float = 0.0,
+                           level: float = 0.0) -> None:
         """Arm the overlay for a fresh HOD long fill: track the fill bar so the signal is evaluated
-        at the close of bar fill+1 and (on a GO) submitted at bar fill+entry_bar_offset."""
+        at the close of bar fill+1 and (on a GO) submitted at bar fill+entry_bar_offset. `target`
+        (the long's own take-profit) and `level` (the breakout level) are carried through to the
+        signal's arm_context (trading/hod_failure_signal.py needs both for k1_features/F11-F15)."""
         if not self.fs_cfg.enabled or self.book != 'hod_break' or self._fs_disabled_for_day:
             return
         if symbol in self._fs_tracked or symbol in self._fs_shorts:
             logger.warning(f"{self.tag} FAILURE-SHORT {symbol}: already tracked — skipping a second arm"); return
         fill_minute = self._minute_of_day()
         self._fs_tracked[symbol] = {'state': 'awaiting_signal', 'fill_minute': fill_minute, 'long_trade_id': trade_id,
-                                     'long_shares': shares, 'long_fill_px': fill_px, 'long_stop': stop, 'filled_at': filled_at}
+                                     'long_shares': shares, 'long_fill_px': fill_px, 'long_stop': stop,
+                                     'long_target': target, 'level': level, 'filled_at': filled_at}
         logger.info(f"{self.tag} FAILURE-SHORT {symbol}: armed at fill minute {fill_minute} (shares={shares} stop={stop:.2f}) "
                     f"— signal due at close of bar {fill_minute + 1}")
 
@@ -2137,9 +2141,15 @@ class HodBreakEngine:
         mask = minutes <= st['fill_minute'] + 1
         if not mask.any():
             logger.warning(f"{self.tag} FAILURE-SHORT {symbol}: no bars through fill+1 yet — dropping"); self._fs_tracked.pop(symbol, None); return
-        bars_through = {'open': o[mask], 'high': h[mask], 'low': l[mask], 'close': c[mask], 'volume': v[mask], 'minute': minutes[mask]}
+        # Canonical project bar-dict convention (trading/hod_failure_features.py module docstring):
+        # 'o','h','l','c','v','minarr', index 0 = first RTH bar of the DAY — never rename these keys,
+        # trading/hod_failure_signal.py's k1_features() call depends on them byte-for-byte.
+        bars_through = {'o': o[mask], 'h': h[mask], 'l': l[mask], 'c': c[mask], 'v': v[mask], 'minarr': minutes[mask]}
         arm_context = {'long_trade_id': st['long_trade_id'], 'long_shares': st['long_shares'],
-                        'long_fill_price': st['long_fill_px'], 'long_stop': st['long_stop'], 'fill_minute': st['fill_minute']}
+                        'long_fill_price': st['long_fill_px'], 'long_stop': st['long_stop'],
+                        'long_target': st.get('long_target', 0.0), 'level': st.get('level', 0.0),
+                        'fill_minute': st['fill_minute'], 'adv20': self._adv_map.get(symbol),
+                        'date': self.session_date}
         p: Optional[float] = None
         if self.fs_signal_fn is None:
             logger.error(f"{self.tag} FAILURE-SHORT {symbol}: no signal_fn wired — cannot evaluate")
@@ -2244,26 +2254,47 @@ class HodBreakEngine:
             logger.error(f"{self.tag} FAILURE-SHORT {symbol}: broker does not show a short after the reversal "
                           f"(signed qty={broker_qty}) — placing exits sized to the intended {short_qty} sh anyway")
         stop_id = target_id = ''
+        oco_ok = False
+        # ONE OCO order is PREFERRED (never two independently-resting buy orders on the same short
+        # qty — the exact 9/25 VECO problem mirrored to the buy side: Alpaca rejects/mis-tracks two
+        # orders each claiming the full covering qty). Falls back to two independent orders only if
+        # the OCO submit itself fails; _fs_poll_short_exits then cancels the sibling on first fill.
         try:
-            stop_resp = self.alpaca.submit_stop_limit_order(symbol, qty=cover_qty, side='buy', stop_price=st['stop_px'],
-                                                              limit_price=round(st['stop_px'] + 0.05, 2),
-                                                              client_order_id=f"{self.coid_prefix}fsstop{int(time.time())}")
-            stop_id = str(stop_resp.get('id') or '')
+            oco_resp = self.alpaca.submit_oco_buy_order(symbol, qty=cover_qty, limit_price=st['target_px'], stop_price=st['stop_px'])
+            target_id = str(oco_resp.get('id') or '')      # parent = the limit (target) leg, matching submit_oco_sell_order's convention
+            legs = oco_resp.get('legs') or []
+            stop_legs = [leg for leg in legs if leg.get('type') == 'stop']
+            stop_id = str(stop_legs[0]['id']) if len(stop_legs) == 1 else ''
+            if target_id and stop_id:
+                oco_ok = True
+                logger.info(f"{self.tag} FAILURE-SHORT {symbol}: OCO cover placed target={target_id} stop={stop_id}")
+            else:
+                logger.warning(f"{self.tag} FAILURE-SHORT {symbol}: OCO buy returned no usable leg ids (parent={target_id or 'none'}, "
+                                f"stop legs={len(stop_legs)} of {len(legs)}) — falling back to two independent orders")
         except Exception as e:
-            logger.error(f"{self.tag} FAILURE-SHORT {symbol}: protective stop-buy FAILED — UNPROTECTED SHORT: {e}")
-            self._notify(f"{self.tag} FAILURE-SHORT ERROR {symbol}: no protective stop — UNPROTECTED SHORT: {e}")
-        try:
-            target_resp = self.alpaca.submit_limit_buy_order(symbol, qty=cover_qty, limit_price=st['target_px'])
-            target_id = str(target_resp.get('id') or '')
-        except Exception as e:
-            logger.warning(f"{self.tag} FAILURE-SHORT {symbol}: target buy-limit failed (stop-only protection): {e}")
+            logger.warning(f"{self.tag} FAILURE-SHORT {symbol}: OCO buy submit failed ({e}) — falling back to two independent orders")
+        if not oco_ok:
+            stop_id = target_id = ''
+            try:
+                stop_resp = self.alpaca.submit_stop_limit_order(symbol, qty=cover_qty, side='buy', stop_price=st['stop_px'],
+                                                                  limit_price=round(st['stop_px'] + 0.05, 2),
+                                                                  client_order_id=f"{self.coid_prefix}fsstop{int(time.time())}")
+                stop_id = str(stop_resp.get('id') or '')
+            except Exception as e:
+                logger.error(f"{self.tag} FAILURE-SHORT {symbol}: protective stop-buy FAILED — UNPROTECTED SHORT: {e}")
+                self._notify(f"{self.tag} FAILURE-SHORT ERROR {symbol}: no protective stop — UNPROTECTED SHORT: {e}")
+            try:
+                target_resp = self.alpaca.submit_limit_buy_order(symbol, qty=cover_qty, limit_price=st['target_px'])
+                target_id = str(target_resp.get('id') or '')
+            except Exception as e:
+                logger.warning(f"{self.tag} FAILURE-SHORT {symbol}: target buy-limit failed (stop-only protection): {e}")
         if short_trade_id is not None and (stop_id or target_id):
             try:
-                pattern_data.update(tp_leg_id=target_id, sl_leg_id=stop_id)
+                pattern_data.update(tp_leg_id=target_id, sl_leg_id=stop_id, oco=oco_ok)
                 self.db.update_trade(short_trade_id, {'pattern_data': json.dumps(pattern_data)})
             except Exception as e:
                 logger.error(f"{self.tag} FAILURE-SHORT {symbol}: leg-id pattern_data update failed: {e}")
-        self._fs_shorts[symbol] = {'trade_id': short_trade_id, 'qty': cover_qty, 'entry_px': sell_px,
+        self._fs_shorts[symbol] = {'trade_id': short_trade_id, 'qty': cover_qty, 'entry_px': sell_px, 'is_oco': oco_ok,
                                     'stop_id': stop_id, 'target_id': target_id, 'stop_px': st['stop_px'], 'target_px': st['target_px']}
         self._fs_submitted_today += 1
 
