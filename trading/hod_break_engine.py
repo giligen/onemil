@@ -1836,13 +1836,26 @@ class HodBreakEngine:
         pattern_data = {'book': self.book, 'level': lo['level'], 'consol_low': stop, 'entry_mode': 'resting_stop_limit',
                         'target_r': self.params.target_r, 'tp_leg_id': tp_id, 'sl_leg_id': sl_id, 'limit': lo['limit'],
                         'target': target, 'client_order_id': lo['coid']}
-        trade_id = lo.get('trade_id') or self._save_pending_trade(sym, filled_qty, fill_px, stop, target, lo['order_id'], pattern_data)
+        now_ts = datetime.now(timezone.utc)
+        # 2026-09-30 bookkeeping defect: this call used to omit order_status/fill_price/filled_at, so every
+        # resting-order fill (new row OR a fill on an already-tracked trade_id) landed with fill_price/filled_at/
+        # filled_qty NULL forever — shares/stop/exit/pnl are set elsewhere so the row LOOKED fine and it was
+        # silent until the 9/30 paper-session audit (11 rows, data/trades.db 403-413). Persist the broker's real
+        # fill (filled_avg_price/now, UTC) HERE, at the moment the fill is registered, on both branches.
+        if lo.get('trade_id'):
+            trade_id = lo['trade_id']
+            try:
+                self.db.update_trade(trade_id, {'order_status': 'filled', 'fill_price': fill_px, 'filled_at': now_ts.isoformat(), 'filled_qty': filled_qty})
+            except Exception as e:
+                logger.error(f"{self.tag} {sym}: fill persistence failed for existing trade_id={trade_id} ({e}) — fill_price/filled_at/filled_qty NOT updated")
+        else:
+            trade_id = self._save_pending_trade(sym, filled_qty, fill_px, stop, target, lo['order_id'], pattern_data,
+                                                 order_status='filled', fill_price=fill_px, filled_at=now_ts.isoformat())
         lo['booked_qty'] = filled_qty; lo['tp_leg_id'] = tp_id; lo['sl_leg_id'] = sl_id; lo['trade_id'] = trade_id
         # Register a Position so the EXISTING check_exits()/_book_leg_fill()/_record_exit() bracket-leg poll
         # (already tested against tp_leg_id/sl_leg_id fills for the direct-bracket path) also covers a fill on
         # THIS safety-net OCO — the only path that was closing VECO's TP leg (9/25: it filled at the broker but
         # nothing polled it, row 380 stayed open). ONE shared close path for both entry styles, not a second one.
-        now_ts = datetime.now(timezone.utc)
         self.positions[sym] = Position(symbol=sym, trade_id=trade_id, order_id=lo['order_id'], shares=filled_qty,
                                         limit_price=lo['limit'], stop=stop, target=target, level=lo['level'], submitted_at=now_ts,
                                         tp_leg_id=tp_id, sl_leg_id=sl_id, fill_price=fill_px, filled_at=now_ts, status='open',
@@ -2539,7 +2552,12 @@ class HodBreakEngine:
             # a phantom watch on shares no longer held (9/25 VECO incident).
             try: self.stop_monitor.remove_watch(pos.symbol)
             except Exception as e: logger.error(f"{self.tag} {pos.symbol}: StopMonitor.remove_watch failed after exit: {e}")
-        entry = pos.fill_price or pos.limit_price
+        if pos.fill_price:
+            entry = pos.fill_price
+        else:
+            entry = pos.limit_price
+            logger.error(f"{self.tag} {pos.symbol}: fill_price is NULL at exit booking (trade_id={pos.trade_id}) — pnl cannot be computed from the real fill")
+            logger.warning(f"{self.tag} {pos.symbol}: trade_id={pos.trade_id} falling back to entry_price {entry} for pnl — this must never be silent, fix fill registration")
         pnl = (exit_price - entry) * pos.shares if exit_price > 0 else None
         upd = {'order_status': 'closed', 'exit_price': exit_price, 'exit_reason': reason, 'exited_at': datetime.now(timezone.utc).isoformat()}
         if pnl is not None:

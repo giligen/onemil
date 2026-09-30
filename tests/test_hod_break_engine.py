@@ -416,6 +416,48 @@ class TestLiveFillExitDraining:
         engine._on_live_fill(cand, lo, st, 'filled')
         return engine.positions[sym]
 
+    def test_on_live_fill_persists_fill_price_filled_at_filled_qty_new_row(self, engine, mock_alpaca, mock_db, mock_sm):
+        """2026-09-30 bookkeeping defect: a brand-new row (lo['trade_id'] was None) must be saved already
+        order_status='filled' with the broker's real fill_price/filled_at/filled_qty — the old call omitted
+        all three keyword args and left them NULL forever."""
+        self._live_fill_position(engine, mock_alpaca, mock_db)
+        rec = mock_db.save_trade.call_args.args[0]
+        assert rec['order_status'] == 'filled'
+        assert rec['fill_price'] == pytest.approx(11.02)
+        assert rec['filled_at']
+        mock_db.update_trade.assert_any_call(7, {'filled_qty': 100})
+
+    def test_on_live_fill_updates_existing_trade_id_with_fill_fields(self, engine, mock_alpaca, mock_db, mock_sm):
+        """A fill on an ALREADY-tracked trade_id (partial-fill top-up, or a row linked by boot adoption)
+        must also get fill_price/filled_at/filled_qty written, not only the brand-new-row branch."""
+        engine.entry_mode = 'resting_stop_limit'; engine.book = 'hod_break'; engine.dry_run = False
+        cand = Candidate(symbol='CONI', day_open=10.0, adv20=1_000_000)
+        lo = {'order_id': 'o10', 'coid': 'c-CONI', 'level': 11.0, 'trigger': 11.0, 'limit': 11.1, 'stop': 10.7,
+              'qty': 100, 'booked_qty': 40, 'arm_ts': '', 'tp_leg_id': '', 'sl_leg_id': '', 'trade_id': 55}
+        cand.live_order = lo
+        mock_alpaca.submit_oco_sell_order.return_value = {'id': 'tp-CONI', 'legs': [{'id': 'sl-CONI', 'type': 'stop'}]}
+        st = {'status': 'filled', 'filled_qty': 100, 'filled_avg_price': 11.03}
+        engine._on_live_fill(cand, lo, st, 'filled')
+        assert not mock_db.save_trade.called
+        update_call = [c for c in mock_db.update_trade.call_args_list if c.args[0] == 55][0]
+        upd = update_call.args[1]
+        assert upd['order_status'] == 'filled' and upd['fill_price'] == pytest.approx(11.03) and upd['filled_qty'] == 100 and upd['filled_at']
+
+    def test_record_exit_null_fill_price_logs_error_and_warning_and_falls_back(self, engine, mock_alpaca, mock_db, mock_sm, caplog):
+        """2026-09-30: _record_exit used to silently fall back to limit_price when fill_price was falsy
+        (e.g. a Position rehydrated from a DB row whose fill_price was never persisted — the live defect).
+        It must now log ERROR + WARNING naming the trade_id and still compute pnl off the fallback."""
+        pos = self._live_fill_position(engine, mock_alpaca, mock_db)
+        pos.fill_price = None   # simulate the NULL-fill_price row this defect produced
+        with caplog.at_level('WARNING'):
+            engine._record_exit(pos, 11.76, 'target')
+        errors = [r for r in caplog.records if r.levelname == 'ERROR']
+        warnings = [r for r in caplog.records if r.levelname == 'WARNING']
+        assert any('fill_price is NULL' in r.message and str(pos.trade_id) in r.message for r in errors)
+        assert any('entry_price' in r.message and str(pos.trade_id) in r.message for r in warnings)
+        upd = mock_db.update_trade.call_args.args[1]
+        assert upd['pnl'] == pytest.approx((11.76 - pos.limit_price) * pos.shares)
+
     def test_target_leg_fill_records_exit_removes_watch_cancels_sibling(self, engine, mock_alpaca, mock_db, mock_sm):
         pos = self._live_fill_position(engine, mock_alpaca, mock_db)
         assert pos.tp_leg_id == 'tp-VECO' and pos.sl_leg_id == 'sl-VECO'

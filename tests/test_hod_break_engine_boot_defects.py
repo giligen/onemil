@@ -250,3 +250,42 @@ class TestDefect4SyncRestoresWatchWithoutLegs:
         eng.sync_positions()
         assert 'XYZ' in eng.positions
         assert any('UNMANAGED' in str(c) for c in notifier.send_message.call_args_list)
+
+
+class TestFillPersistence20260930:
+    """2026-09-30 bookkeeping defect: _on_live_fill booked a resting-order fill (safety-net legs, Position,
+    StopMonitor watch, dry ledger) without ever persisting fill_price/filled_at/filled_qty to the DB row —
+    shares/stop_loss_price/entry_price were fine (set elsewhere) so it was silent until the 9/30 paper-
+    session audit (data/trades.db rows 403-413). Real Database on a tmp path + MagicMock(spec=AlpacaClient):
+    a resting-order fill followed by a real exit, asserting the row end-to-end."""
+
+    def test_resting_fill_then_exit_persists_fill_price_filled_at_filled_qty(self, real_db, mock_alpaca, mock_sm):
+        eng = HodBreakEngine(mock_alpaca, real_db, mock_sm, cfg=hod_cfg())
+        eng._roll_session()
+        eng.entry_mode = 'resting_stop_limit'; eng.book = 'hod_break'; eng.dry_run = False
+        cand = Candidate(symbol='ABCD', day_open=10.0, adv20=1_000_000)
+        lo = {'order_id': 'o-ABCD', 'coid': 'c-ABCD', 'level': 15.0, 'trigger': 15.0, 'limit': 15.30, 'stop': 14.70,
+              'qty': 60, 'booked_qty': 0, 'arm_ts': '', 'tp_leg_id': '', 'sl_leg_id': '', 'trade_id': None}
+        cand.live_order = lo
+        mock_alpaca.submit_oco_sell_order.return_value = {'id': 'tp-ABCD', 'legs': [{'id': 'sl-ABCD', 'type': 'stop'}]}
+        st = {'status': 'filled', 'filled_qty': 60, 'filled_avg_price': 15.25}
+        eng._on_live_fill(cand, lo, st, 'filled')
+
+        row = real_db.get_trade_by_order_id('o-ABCD')
+        assert row is not None and row['order_status'] == 'filled'
+        assert row['fill_price'] == pytest.approx(15.25)
+        assert row['filled_qty'] == 60
+        assert row['filled_at'] is not None   # real Database connection parses TIMESTAMP into datetime
+
+        pos = eng.positions['ABCD']
+        mock_alpaca.get_order.side_effect = lambda oid: (
+            {'status': 'filled', 'filled_qty': 60, 'filled_avg_price': pos.target} if oid == 'tp-ABCD'
+            else {'status': 'accepted', 'filled_qty': 0})
+        eng.check_exits()
+
+        closed = real_db.get_trade_by_order_id('o-ABCD')
+        assert closed['order_status'] == 'closed'
+        assert closed['exit_price'] == pytest.approx(pos.target)
+        assert closed['pnl'] == pytest.approx((pos.target - 15.25) * 60)
+        # the fields this test exists for must survive the exit untouched
+        assert closed['fill_price'] == pytest.approx(15.25) and closed['filled_qty'] == 60
