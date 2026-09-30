@@ -59,6 +59,46 @@ def test_boot_section_skips_weekend():
         assert "NEXT BOOT 2026-09-21" in er.boot_section("2026-09-18")  # Friday -> Monday
 
 
+def _boot_flags(bf="true", orb="true", hod="true", hod_dry="false"):
+    """side_effect for yaml_flag matching boot_section's call order/key_paths."""
+    vals = {("trading", "enabled"): bf, ("strategy", "enabled"): orb,
+            ("hod_break", "enabled"): hod, ("hod_break", "dry_run"): hod_dry}
+    return lambda path, key_path: vals[tuple(key_path)]
+
+
+def test_boot_section_hod_paper_account_says_paper_orders(monkeypatch):
+    """ALPACA_HOD_PAPER true (or unset, config.py's own default) + dry_run false
+    must read 'PAPER ORDERS', never 'LIVE ORDERS' — the 2026-09-30 bug."""
+    monkeypatch.setenv("ALPACA_HOD_PAPER", "true")
+    with patch.object(er, "yaml_flag", side_effect=_boot_flags(hod_dry="false")):
+        txt = er.boot_section("2026-09-30")
+    assert "HOD ON (PAPER ORDERS)" in txt
+    assert "LIVE ORDERS" not in txt
+
+
+def test_boot_section_hod_live_account_says_live_orders(monkeypatch):
+    """ALPACA_HOD_PAPER false (a real live account) + dry_run false -> LIVE ORDERS."""
+    monkeypatch.setenv("ALPACA_HOD_PAPER", "false")
+    with patch.object(er, "yaml_flag", side_effect=_boot_flags(hod_dry="false")):
+        txt = er.boot_section("2026-09-30")
+    assert "HOD ON (LIVE ORDERS)" in txt
+
+
+def test_boot_section_orb_paper_account_says_paper_orders(monkeypatch):
+    monkeypatch.setenv("ALPACA_ORB_PAPER", "true")
+    with patch.object(er, "yaml_flag", side_effect=_boot_flags(hod="false")):
+        txt = er.boot_section("2026-09-30")
+    assert "ORB ON (PAPER ORDERS)" in txt
+    assert "LIVE ORDERS" not in txt
+
+
+def test_boot_section_orb_live_account_says_live_orders(monkeypatch):
+    monkeypatch.setenv("ALPACA_ORB_PAPER", "false")
+    with patch.object(er, "yaml_flag", side_effect=_boot_flags(hod="false")):
+        txt = er.boot_section("2026-09-30")
+    assert "ORB ON (LIVE ORDERS)" in txt
+
+
 def test_phrase_with_llm_rejects_bad_prefix(caplog):
     fake = subprocess.CompletedProcess(args=[], returncode=0, stdout="hello", stderr="")
     with patch.object(er.subprocess, "run", return_value=fake):

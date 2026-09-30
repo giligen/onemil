@@ -174,8 +174,28 @@ def boot_section(day: str) -> str:
 
     def on_off(v: str) -> str:
         return "ON" if v.lower() == "true" else ("OFF" if v.lower() == "false" else f"UNKNOWN({v})")
-    hod_txt = on_off(hod) + (" (dry-run, zero orders)" if hod_dry.lower() == "true" else " (LIVE ORDERS)")
-    return f"NEXT BOOT {d} 12:30 UTC: BF {on_off(bf)}, ORB {on_off(orb)}, HOD {hod_txt}"
+
+    def acct_mode(env_prefix: str) -> str:
+        """PAPER or LIVE for a strategy's dedicated Alpaca account.
+
+        Reads ALPACA_{prefix}_PAPER exactly as config.py's alpaca_{orb,hod}_paper
+        properties do (default 'true') — the same value main.py passes into
+        AlpacaClient(paper=...) and that becomes that client's is_paper. Never
+        infer account identity from the strategy's own enabled/dry_run flag: that
+        gates ORDER SUBMISSION, not which account the orders land in (2026-09-30:
+        the report said "LIVE ORDERS" for HOD while its keys point at the paper
+        account PA39QSZR60WC).
+        """
+        is_paper = os.getenv(f"ALPACA_{env_prefix}_PAPER", "true").lower() in ("true", "1", "yes")
+        return "PAPER ORDERS" if is_paper else "LIVE ORDERS"
+
+    hod_txt = on_off(hod)
+    if hod.lower() == "true":
+        hod_txt += " (dry-run, zero orders)" if hod_dry.lower() == "true" else f" ({acct_mode('HOD')})"
+    orb_txt = on_off(orb)
+    if orb.lower() == "true":
+        orb_txt += f" ({acct_mode('ORB')})"
+    return f"NEXT BOOT {d} 12:30 UTC: BF {on_off(bf)}, ORB {orb_txt}, HOD {hod_txt}"
 
 
 def research_section() -> str:
