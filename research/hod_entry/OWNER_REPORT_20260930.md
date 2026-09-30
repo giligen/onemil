@@ -168,3 +168,17 @@ red. The 2025-26 book's ≈ 0 was two regimes averaged; the latest one is decisi
 and halves the loss; it does not make a book. Decision: HOD stays paper-only as an instrument; no live path from this
 population; the exit extension (half at +3 R, trail the rest) is the only exit change worth carrying into the engine,
 and only for the paper instrument. Next HOD frame = a NEW signal definition, as decided in §6.
+
+## 14. ORB paper vs backtest parity, 9/29–9/30 (docs/orb_parity_20260930.md), 22:45 UTC — Wednesday live GO = NO
+* **9/30: different universes by construction.** The engine's top two pre-placed names (ASTX, AEHG) are absent from
+  every row of the backtest's candidate file: the live 5 % gap gate reads a 09:30 snapshot "open" while the backtest
+  uses the settled daily open (ASTX +1.95 % settled, ≥ 5 % as read live). Same threshold, different input. The engine
+  filled ASTX (−$106); the book's three picks never triggered. Fix in flight: the gate reads the 09:30 minute bar's
+  open (the official print) and persists the exact inputs it used, so the book can be rebuilt on what live saw.
+* **9/29: same pick (AXTL), different P&L** — book +$100 vs paper −$96 at the same 15:45 force-close. The backtest
+  already closes at 15:45 (parity fix of 7/4), so the gap is in the inputs (entry/exit prices, bar source), under
+  investigation tonight. Also found: the ORB fill row's time was overwritten by my restarts (the fill-persistence
+  defect fixed for HOD today, not yet ported to ORB — porting now), force-closes are not logged under a greppable
+  tag, and the archive cron drops the pre-placement lines.
+* **Decision:** no live ORB on Wednesday. The bar stays: one paper session whose picks AND fills match the book, on
+  the fixed inputs. The parity agent's fixes land for the 10/1 boot; the 10/1 session is the next read.
