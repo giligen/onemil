@@ -104,3 +104,15 @@ model's −24 R week is the squeeze tail: a HOD breakout that keeps going gaps t
 far above). The model still selects failures (the flagged longs lose −0.5 to −0.8 R), but the short does not capture
 the decline. The order mechanics are committed and OFF (`hod_break.failure_short.enabled: false`); nothing trades
 today. Closed: shorting HOD-break failures keyed on the post-entry model, on this population.
+
+## 9. Candle shapes, in depth, and the take-profit (cells 1,676–1,677), 08:40 UTC
+* Pre-entry shapes on 1/5/10/15-minute frames (break bar, structure, climax, context-conditioned patterns, daily
+  candles): chance, AUC 0.50–0.57 on both scorings; no bucket clears both halves.
+* Post-entry (leak fixed, labels strictly after the window): the rolling 5/10/15-minute candles WITHOUT the
+  distance-to-target column predict "+1 R within the next 15 min" out of sample — AUC 0.73 at minute 5, 0.87 at minute
+  15 (placebos 0.51–0.66). A real signal. Shape adds ≈ 0 to the path + volume model up to 15 min, +0.03–0.07 AUC at
+  30–60 min.
+* Every action keyed on it fails the bar: cut, short, add (−0.12 R at k = 15, t −3), and the model-gated take-profit
+  (1,677: 0 of 180 rows pass even one scoring; least-bad +0.30 R / +0.13 R with the sign of the t flipping; the model
+  beats a mechanical trail but neither clears). Conclusion: the shape signal is real information about the next 15
+  minutes and it is not money on this book at 13 bps; it is recorded, the models are persisted, no rule ships.
