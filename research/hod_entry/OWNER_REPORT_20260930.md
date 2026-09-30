@@ -135,3 +135,14 @@ $0.04 that would close TRAIN/VAL's gap changes nothing about that.
 * The ORB give-back, measured properly: 9 % of live fills and 5 % of BT fills reach +1 R and close ≤ 0 (1.4–1.6 R given
   back) — real, smaller than the crude 21 %. Best mechanical fix = 50 % out at +1 R: live +0.22 R (t 3.6, +$75/trade)
   but ≈ +0.02 R on the BT book both years → fails the bar; watch on the paper ledger, nothing enters orb.yaml.
+
+## 12. Mid-flight exits on HOD — 35 hypotheses one by one (cell 1,681), 19:30 UTC
+Stale-trade rules, the candle story line (engulfing, 10-min low, VWAP, wick rejection, climax, red 15-min, lower
+highs), the trained models (success, failure, both), partials, target/stop reshaping, volume/flow and four pre-declared
+combinations, each paired vs the live rule with the give-back decomposition and the consistency lens. Result: 27 of 35
+fail the tail gate on TRAIN (their point estimates are their best 5 % of trades); the joint rule chosen on TRAIN reads
++0.009 R on VAL with a negative tail and +4.6 pp green weeks — FAIL. Why, from the insight lines: every exit trigger
+fires on this population's normal continuation pauses (a red 15-minute candle after +1 R is its rhythm, not a
+reversal), and a forgone continuation costs 1.5–1.8× what a saved give-back earns. Best consistency-only gainers: exit
+at 90 min if under +0.75 R (+9 pp green weeks at −0.002 R) and the model-gated half at +1 R (+4.5 pp, +0.006 R) —
+smoothing, not money. The 20 literature/practitioner rules (cell 1,682) run next on the same harness.
