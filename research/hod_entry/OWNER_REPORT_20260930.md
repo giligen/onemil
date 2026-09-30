@@ -175,10 +175,12 @@ and only for the paper instrument. Next HOD frame = a NEW signal definition, as 
   uses the settled daily open (ASTX +1.95 % settled, ≥ 5 % as read live). Same threshold, different input. The engine
   filled ASTX (−$106); the book's three picks never triggered. Fix in flight: the gate reads the 09:30 minute bar's
   open (the official print) and persists the exact inputs it used, so the book can be rebuilt on what live saw.
-* **9/29: same pick (AXTL), different P&L** — book +$100 vs paper −$96 at the same 15:45 force-close. The backtest
-  already closes at 15:45 (parity fix of 7/4), so the gap is in the inputs (entry/exit prices, bar source), under
-  investigation tonight. Also found: the ORB fill row's time was overwritten by my restarts (the fill-persistence
-  defect fixed for HOD today, not yet ported to ORB — porting now), force-closes are not logged under a greppable
-  tag, and the archive cron drops the pre-placement lines.
-* **Decision:** no live ORB on Wednesday. The bar stays: one paper session whose picks AND fills match the book, on
-  the fixed inputs. The parity agent's fixes land for the 10/1 boot; the 10/1 session is the next read.
+* **9/29: parity HOLDS.** Both sides picked AXTL and both closed it at the 15:45 force-close at the same price
+  (backtest $3.37 on the stored bars, paper $3.36). The "+$100" I first reported came from a non-production
+  simulator column in the features file that walks to the last bar of the day (AXTL bounced to $3.47 by 16:26
+  ET); the production backtest has closed at 15:45 since July. A regression test now pins this. Two side
+  defects fixed tonight: my restarts overwrote the ORB fill's timestamp (the HOD fill-persistence fix is now
+  ported to ORB), force-closes get a searchable log tag, and the archive cron keeps the pre-placement lines.
+* **Decision:** no live ORB on Wednesday: 9/30's universe mismatch is real and its fix (the gate on the 09:30 bar
+  open, inputs persisted) lands at the 10/1 boot; the bar stays one paper session whose picks AND fills match the
+  book on the fixed inputs. 10/1 is the next read.
