@@ -32,30 +32,11 @@ PREREG: research/hod_entry/PREREG_1676.md, FROZEN 2026-09-30 06:50 UTC, amendmen
 | G3 | success15 | TRAIN-H2->VAL | 3157 | 0.514 | 0.522 | -0.009 |
 | G5 | fail_any | TRAIN-H2->VAL | 3157 | 0.511 | 0.507 | 0.004 |
 
-G7 rolling -- top 15 (group, label, k) by AUC:
+G6/G7 -- SUPERSEDED, see "## G6/G7 CORRECTED (post-entry fix)" below (original rows kept in 1676_reads.csv,
+read='R3', for audit; do not use them -- they used the leaked ARM-relative labels described in the self-correction
+section).
 
-| group | label | k | scoring | n_test | AUC | placebo AUC |
-|---|---|---|---|---|---|---|
-| G7_k60+ALL | g7success_next15_from_60 | 60 | TRAIN-H2->VAL | 3139 | 0.974 | nan |
-| G7_k60 | g7success_next15_from_60 | 60 | TRAIN-H2->VAL | 3139 | 0.974 | nan |
-| G7_k45+ALL | g7success_next15_from_45 | 45 | VAL->TRAIN-H2 | 2340 | 0.969 | nan |
-| G7_k45 | g7success_next15_from_45 | 45 | VAL->TRAIN-H2 | 2340 | 0.967 | nan |
-| G7_k45+ALL | g7success_next15_from_45 | 45 | TRAIN-H2->VAL | 3152 | 0.964 | nan |
-| G7_k60 | g7success_next15_from_60 | 60 | VAL->TRAIN-H2 | 2330 | 0.963 | nan |
-| G7_k60+ALL | g7success_next15_from_60 | 60 | VAL->TRAIN-H2 | 2330 | 0.962 | nan |
-| G7_k45 | g7success_next15_from_45 | 45 | TRAIN-H2->VAL | 3152 | 0.961 | nan |
-| G7_k30+ALL | g7success_next15_from_30 | 30 | TRAIN-H2->VAL | 3156 | 0.938 | 0.666 |
-| G7_k30 | g7success_next15_from_30 | 30 | TRAIN-H2->VAL | 3156 | 0.938 | 0.665 |
-| G7_k30+ALL | g7success_next15_from_30 | 30 | VAL->TRAIN-H2 | 2348 | 0.936 | 0.642 |
-| G7_k30 | g7success_next15_from_30 | 30 | VAL->TRAIN-H2 | 2348 | 0.935 | 0.640 |
-| G7_k20+ALL | g7success_next15_from_20 | 20 | TRAIN-H2->VAL | 3157 | 0.920 | nan |
-| G7_k20+ALL | g7success_next15_from_20 | 20 | VAL->TRAIN-H2 | 2348 | 0.918 | nan |
-| G7_k20 | g7success_next15_from_20 | 20 | TRAIN-H2->VAL | 3157 | 0.917 | nan |
-
-Does shape add to path+volume (ALL-shape vs ALL-shape+1670, mean AUC both scorings):
-- fail_any: ALL-shape 0.675 -> +1670-ALL 0.681 (delta +0.006)
-- fail10: ALL-shape 0.760 -> +1670-ALL 0.772 (delta +0.012)
-- success15: ALL-shape 0.767 -> +1670-ALL 0.761 (delta -0.006)
+Does shape add to path+volume: see the corrected section below (was ALL-shape vs ALL-shape+1670, both leaked).
 
 ## R1 -- top-vs-rest cells with |day-clustered t| >= 2 in either half
 
@@ -114,24 +95,9 @@ Shape-gated entry (ALL-shape model, P(success15)>=tau):
 | 0.6 | VAL->TRAIN-H2 | TRAIN-H2 | 251 | 0.9745 | 9.77 | 0.8982 | 9.9 |
 | 0.7 | VAL->TRAIN-H2 | TRAIN-H2 | 203 | 1.0234 | 10.02 | 0.9472 | 8.0 |
 
-G7 money reads (cut/short/add gated by the k-model), top 15 by |t|:
-| k | action | tau | scoring | half | n | dR vs book | day_t | ex_top5 |
-|---|---|---|---|---|---|---|---|---|
-| 60 | add | 0.6 | VAL->TRAIN-H2 | TRAIN-H2 | 707 | -0.6084 | -10.43 | -0.7379 |
-| 60 | add | 0.7 | VAL->TRAIN-H2 | TRAIN-H2 | 693 | -0.6057 | -10.09 | -0.7341 |
-| 60 | add | 0.6 | TRAIN-H2->VAL | VAL | 977 | -0.4247 | -8.86 | -0.6680 |
-| 60 | add | 0.7 | TRAIN-H2->VAL | VAL | 947 | -0.4372 | -8.61 | -0.6809 |
-| 45 | add | 0.6 | VAL->TRAIN-H2 | TRAIN-H2 | 676 | -0.4063 | -8.43 | -0.5297 |
-| 45 | add | 0.7 | VAL->TRAIN-H2 | TRAIN-H2 | 655 | -0.4158 | -8.23 | -0.5383 |
-| 45 | add | 0.6 | TRAIN-H2->VAL | VAL | 907 | -0.3312 | -6.71 | -0.5433 |
-| 45 | add | 0.7 | TRAIN-H2->VAL | VAL | 884 | -0.3357 | -6.71 | -0.5477 |
-| 30 | add | 0.7 | VAL->TRAIN-H2 | TRAIN-H2 | 551 | -0.3223 | -6.28 | -0.4278 |
-| 30 | add | 0.6 | TRAIN-H2->VAL | VAL | 923 | -0.2115 | -5.97 | -0.3901 |
-| 30 | add | 0.7 | TRAIN-H2->VAL | VAL | 889 | -0.2146 | -5.84 | -0.3917 |
-| 30 | add | 0.6 | VAL->TRAIN-H2 | TRAIN-H2 | 580 | -0.2961 | -5.67 | -0.4023 |
-| 20 | add | 0.6 | TRAIN-H2->VAL | VAL | 788 | -0.2415 | -4.87 | -0.3959 |
-| 15 | add | 0.7 | VAL->TRAIN-H2 | TRAIN-H2 | 499 | -0.1196 | -4.07 | -0.2184 |
-| 20 | add | 0.7 | TRAIN-H2->VAL | VAL | 764 | -0.2240 | -4.00 | -0.3778 |
+G7 money reads (with-close_R, k up to 60) -- SUPERSEDED by the k in {1,5,15} G7-WITHOUT-close_R reads below (the
+gating models here used close_R, i.e. gated on distance-to-target, not shape; kept for audit in 1676_reads.csv
+read='R4', not reused). The "add" sign (badly negative) was directionally real -- see below.
 
 ## Verdicts vs the pass bar (dR>=+0.05R, t>=2.5 day-clustered BOTH halves/scorings, ex_top5>0 both, >=3 fills/week)
 
@@ -172,7 +138,59 @@ bar) before anyone treats even the null as final -- an independent implementatio
 to forward-from-k labels and re-check whether G7 AUC collapses toward 0.5-0.6 once close_R is excluded or bucketed
 coarsely.**
 
+## G6/G7 CORRECTED (post-entry fix, 2026-09-30 08:03 UTC)
+Re-scored with labels starting STRICTLY AFTER the feature window (fail_after_k / success_next15_from_k, features
+use bars through fill+k only -- no window overlap this time). No bars_sip re-sweep: G6 stays on its
+originally-computed 1m/5m frames (10m/15m would need a fresh sweep, out of this fix's 30-call/nice-15 budget --
+disclosed, not silently dropped). Full rows: 1676_reads.csv read in {R3_G6fix, R3_G7fix, R4_G7fix}; raw outputs
+1676_g6g7fix_reads.csv, 1676_g6g7fix_money.csv; script 1676_g6g7_fix.py.
+
+**G6 AUC (both scorings, placebo in parens) -- genuinely causal now, and still above placebo:**
+| group | label | TRAIN->VAL | VAL->TRAIN | +1670-ALL delta (both scorings) |
+|---|---|---|---|---|
+| G6_k5 | fail_after_5 | 0.545 (0.520) | 0.543 (0.520) | +0.047 / +0.031 |
+| G6_k5 | success_next15_from_5 | 0.659 (0.509) | 0.666 (0.489) | +0.025 / +0.040 |
+| G6_k15 | fail_after_15 | 0.573 (0.537) | 0.557 (0.486) | +0.015 / +0.022 |
+| G6_k15 | success_next15_from_15 | 0.743 (0.544) | 0.749 (0.503) | +0.017 / +0.020 |
+
+**G7 AUC, WITH vs WITHOUT close_R (both scorings; placebo for the success label in parens, k in {1,5,15,30} only):**
+| k | fail_after_k with / without | success_next15 with / without (placebo) |
+|---|---|---|
+| 1 | 0.562/0.583 -> 0.530/0.527 | 0.651/0.663 -> 0.566/0.574 (0.52/0.51) |
+| 5 | 0.615/0.632 -> 0.589/0.606 | 0.790/0.808 -> 0.732/0.752 (0.58/0.51) |
+| 15 | 0.657/0.652 -> 0.629/0.639 | 0.900/0.903 -> 0.866/0.867 (0.59/0.53) |
+| 30 | 0.681/0.677 -> 0.602/0.606 | 0.938/0.935 -> 0.747/0.767 (0.66/0.64) |
+| 60 (no placebo) | 0.721/0.696 -> 0.614/0.612 | 0.974/0.963 -> 0.675/0.671 |
+
+close_R matters most at long horizons (success AUC drops 0.94->0.75 at k=30, 0.97->0.68 at k=60 without it) but a
+real, non-tautological, above-placebo signal SURVIVES its removal at every k, largest at k=5/15 (success 0.73-0.87
+vs placebo 0.51-0.59) -- shape+volume state (CLV/red-share/range-ATR/vol-ratio, not distance-to-target) has real
+forward information here. This reverses the original hasty "it's all close_R" read -- correction to the
+correction, stated plainly.
+
+**Does shape add to the 1,670 ALL family (G7-without-close_R, AUC delta, both scorings):**
+| k | fail_after_k delta | success_next15 delta |
+|---|---|---|
+| 1 | +0.020 / +0.010 | +0.000 / +0.004 |
+| 5 | +0.018 / +0.007 | +0.000 / +0.005 |
+| 15 | -0.002 / -0.006 | +0.006 / +0.007 |
+| 30 | **+0.059 / +0.035** | **+0.038 / +0.030** |
+| 60 | **+0.073 / +0.070** | **+0.051 / +0.034** |
+
+Near-zero add at k<=15; a real, consistent add at k in {30,60} (both labels, both scorings) -- shape complements
+the 1,670 path/volume family more at longer post-entry horizons.
+
+**Clean money reads, G7-without-close_R, k in {1,5,15}, tau in {0.6,0.7}, cut/short/add, paired vs the base (both
+scorings; 1676_g6g7fix_money.csv, 36 rows):** NOTHING clears the positive pass bar (dR>=+0.05R, t>=2.5, both
+scorings) and nothing is within 0.02R of it with a consistent sign both scorings. The one robust result, both
+taus, both scorings: **k=15 "add" is significantly NEGATIVE** -- tau=0.6: TRAIN-H2->VAL dR=-0.124 t=-3.12 (VAL
+half), VAL->TRAIN-H2 dR=-0.127 t=-3.34 (TRAIN-H2 half); tau=0.7 similar (-0.123/-0.134, t -2.48/-3.12). k=15
+"cut"/"short" and k=1 "short" show one-sided positive hints (t 1.6-2.6) that do not replicate sign/magnitude in
+the paired scoring direction -- not reportable. Verdict: no G7-shape-gated post-entry money action passes; adding
+size at k=15 on a shape "success" signal is a confirmed way to lose (buying late into an already-extended move).
+
 ## Adequacy
 This is the first-pass build closing the seven holes + the G7 amendment; nothing here is an owner-facing claim yet -- per PREREG, any pass requires an independent reimplementation from this prose before it is reported. Multiplicity is large (R1 ~1,300 + R2 ~100 + R3 ~64 + R4 ~12 base, plus ~1,100 more from G7); the both-halves/both-scorings rule and the sign line are the protection, not any single t. MDE at this n (~2,700/half) reported per-cell in 1676_reads.csv.
 
-Files: 1676_features.csv, 1676_reads.csv, 1676_patterns.csv, 1676_shapes.py, 1676_shapes.log.
+Files: 1676_features.csv, 1676_reads.csv, 1676_patterns.csv, 1676_shapes.py, 1676_shapes.log, 1676_g6g7_fix.py,
+1676_g6g7fix_reads.csv, 1676_g6g7fix_money.csv.
