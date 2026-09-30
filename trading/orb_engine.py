@@ -36,6 +36,7 @@ from trading.buy_stop_guard import (
     BuyStopAction, BuyStopDecision, evaluate_buy_stop,
 )
 from trading.orb_correlation import dedup_candidates, symbol_family, symbol_super_group
+from trading.orb_gap_gate import resolve_gap_input
 from trading.orb_filter import (
     FeatureParam, assign_quintile, composite_score, load_feature_params,
 )
@@ -300,6 +301,15 @@ class OpenPosition:
     # still-partially-filled order books only the NEW shares each tick —
     # mirrors last_observed_filled_qty's role on the entry side.
     target_last_booked_qty: int = 0
+    # 2026-09-30 fix (docs/orb_parity_20260930.md, ported from HOD's
+    # 1b3584f): True once _confirm_fill has persisted fill_price/filled_at
+    # for this position, OR the position was rehydrated from a DB row that
+    # already carried a fill (boot recovery of a still-open trade). A
+    # restart-triggered reconciliation that calls _confirm_fill again on
+    # such a position must not re-stamp fill_price/filled_at/filled_qty —
+    # see the guard in _confirm_fill. Defaults False so every pre-existing
+    # call site (fresh pending -> first fill) is unaffected.
+    already_confirmed: bool = False
 
 
 class ORBEngine:
@@ -525,6 +535,12 @@ class ORBEngine:
         # Day-scoped: symbol -> 'production' | pool.name (set by
         # build_orb_universe_from_snapshots; cleared in reset_daily).
         self._symbol_pool: Dict[str, str] = {}
+        # 2026-09-30 fix (docs/orb_parity_20260930.md): gap-gate provenance
+        # per symbol (gap_input_open/gap_input_prev_close/gap_pct/source/
+        # timestamp) — set in build_orb_universe_from_snapshots, read by
+        # _record_orb_dry_entry so the dry ledger carries the exact inputs
+        # the gate used (a BT rebuild can then replay live's observed gap).
+        self._gap_gate_inputs: Dict[str, dict] = {}
 
         self.max_concurrent = int(sizing_cfg.get('max_concurrent', 4))
 
@@ -1134,7 +1150,43 @@ class ORBEngine:
                 # catch symbols production rejects.
                 if prev_close <= 0:
                     continue
-                gap_pct = (open_price - prev_close) / prev_close * 100.0
+                # 2026-09-30 fix (docs/orb_parity_20260930.md): prefer the
+                # settled 09:30 ET minute bar's open over the real-time
+                # snapshot's open when one is cached (available by 09:31) —
+                # the snapshot can still be updating at 09:30:0x ET (ASTX/
+                # AEHG read >=5% live off the snapshot, settled at +1.95%/
+                # +1.87%). ALWAYS persist the exact inputs used so a BT
+                # rebuild can replay live's observed gap. Best-effort: any
+                # lookup failure falls back to the snapshot (today's
+                # behavior), never blocks the universe build.
+                minute_bar_open = None
+                try:
+                    if self.db is not None and hasattr(self.db, 'get_intraday_bars_cached'):
+                        from zoneinfo import ZoneInfo
+                        from dateutil.parser import isoparse as _isoparse
+                        _today_et = datetime.now(timezone.utc).astimezone(
+                            ZoneInfo('America/New_York')).date().isoformat()
+                        for _b in (self.db.get_intraday_bars_cached(sym, _today_et) or []):
+                            _ts_raw = _b.get('timestamp') if isinstance(_b, dict) else None
+                            if not _ts_raw:
+                                continue
+                            _ts_dt = _ts_raw if isinstance(_ts_raw, datetime) else _isoparse(str(_ts_raw))
+                            if _ts_dt.tzinfo is None:
+                                _ts_dt = _ts_dt.replace(tzinfo=timezone.utc)
+                            _et = _ts_dt.astimezone(ZoneInfo('America/New_York'))
+                            if _et.hour == 9 and _et.minute == 30:
+                                _o = _b.get('open')
+                                if _o:
+                                    minute_bar_open = float(_o)
+                                break
+                except Exception as e:
+                    logger.warning(f"ORB GAP_GATE: {sym} 09:30 bar lookup failed (non-fatal, using snapshot): {e}")
+                _gate_input = resolve_gap_input(sym, open_price, prev_close, minute_bar_open)
+                if _gate_input is not None:
+                    self._gap_gate_inputs[sym] = _gate_input.as_dict()
+                    gap_pct = _gate_input.gap_pct
+                else:
+                    gap_pct = (open_price - prev_close) / prev_close * 100.0
                 is_production = (
                     self.universe_min_price <= open_price <= self.universe_max_price
                     and gap_pct >= self.universe_min_gap_pct
@@ -3571,6 +3623,7 @@ class ORBEngine:
                 'target_px': None,  # ORB has no fixed target (trailing/lock stop) — no exit simulation on the dry path yet
                 'risk_usd': plan.total_risk,
                 'source': 'live_dry',
+                'extra': getattr(self, '_gap_gate_inputs', {}).get(sym),
             })
         except Exception as e:
             logger.warning(f"[ORB DRY] {sym}: failed to persist dry fill to dry_trades: {e}")
@@ -4781,6 +4834,28 @@ class ORBEngine:
             fill_update['drift_ask_to_fill_bps'] = (
                 (fill_price - pos.entry_quote_ask) / pos.entry_quote_ask * 10000.0
             )
+        # 2026-09-30 fix (ported from HOD's 1b3584f): a restart-triggered
+        # reconciliation re-running _confirm_fill on a rehydrated position
+        # must never re-stamp an ALREADY-FILLED row's fill_price/filled_at/
+        # order_filled_at/filled_qty. Pre-fix, each of AXTL's 7 restarts on
+        # 9/29 re-polled Alpaca, got back the (correct) terminal fill, and
+        # blindly rewrote these columns — the LAST restart's re-registration
+        # (18:09:21) clobbered the true fill time (13:35:07) in trades.db id
+        # 382. Guard on the in-memory flag (set True below on first confirm,
+        # and at boot rehydration of an already-filled DB row) rather than a
+        # DB read, so this never depends on mocking a raw SQL round-trip.
+        if pos.already_confirmed:
+            logger.error(
+                f"ORB: {pos.symbol} trade_id={pos.trade_id} _confirm_fill "
+                f"re-entered on an ALREADY-CONFIRMED position — likely a "
+                f"post-restart reconciliation re-registering the same fill; "
+                f"DROPPING fill_price/filled_at/order_filled_at/filled_qty "
+                f"from this write so the original fill facts survive the "
+                f"restart."
+            )
+            for _k in ('fill_price', 'filled_at', 'order_filled_at', 'filled_qty'):
+                fill_update.pop(_k, None)
+        pos.already_confirmed = True
         try:
             self.db.update_trade(pos.trade_id, fill_update)
         except Exception as e:
@@ -5548,6 +5623,10 @@ class ORBEngine:
         Returns:
             Number of positions closed.
         """
+        logger.info(
+            f"[ORB] FORCE_CLOSE trigger open_positions={len(self.open_positions)} "
+            f"reason=eod_{self.force_close_hour_et:02d}{self.force_close_minute_et:02d}et"
+        )
         # Rule 6 (2026-09-29 follow-up fix): catch a last-second partial (or
         # full) resting-target fill BEFORE computing what to force-close —
         # otherwise pos.shares could still show the pre-fill qty and EOD
@@ -6192,6 +6271,10 @@ class ORBEngine:
                 composite_score=float(pdata.get('composite_score', 0.0)),
                 quintile=str(pdata.get('quintile', 'Q3')),
                 atr14=pdata.get('atr14'),
+                # 2026-09-30 fix: this row is being rehydrated FROM an
+                # already-filled DB record — a later _confirm_fill
+                # re-entry (restart reconciliation) must not re-stamp it.
+                already_confirmed=bool(t.get('fill_price') or t.get('filled_at')),
             )
             if db_scaled_at:
                 pos.scale_qty = db_scale_qty
@@ -7081,6 +7164,14 @@ class ORBEngine:
                 logger.info(
                     f"FC DB SYNC: {sym} updated exit=${exit_price:.2f} "
                     f"pnl=${pnl:+,.0f} (order={str(sell.id)[:8]})"
+                )
+                # 2026-09-30 fix: dedicated greppable tag (the 9/29 AXTL
+                # force-close trigger had NO tag any "force"-grep could find,
+                # per docs/orb_parity_20260930.md). Archive-cron pattern must
+                # add this alongside "[ORB PREPLACE]" — see that report.
+                logger.info(
+                    f"[ORB] FORCE_CLOSE {sym} "
+                    f"reason={ExitReason.FORCE_CLOSE.value} px={exit_price:.4f}"
                 )
             except Exception as e:
                 logger.warning(f"FC DB SYNC {sym}: db update failed: {e}")
