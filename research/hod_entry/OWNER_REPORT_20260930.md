@@ -150,3 +150,21 @@ smoothing, not money. The 20 literature/practitioner rules (cell 1,682) run next
   the 35; the only two that survive the gates (the 14:30 ET trim, the power-hour hold) fire on < 17 % of fills and
   their joint reads +0.009 R on VAL (t 1.5, negative tail; green weeks +9 pp, worst-decile week worse) — FAIL; stacked
   on the 35-sweep joint +0.013 R (t 2.3, tail −0.023) — FAIL. Exit line on HOD closed with 58 rules on record.
+
+## 13. The optimized exit strategy, shown on the sealed quarter (cell 1,683), 22:00 UTC
+Owner's ask: the most profitable strategy across all 58 exit rules, tail included, week by week for the past quarter.
+In-sample (2025-07..2026-05) the best single rule is "half out at +3 R (no exit at 2 R), the rest trails MFE − 1 R"
+(+0.018 R, t 0.5); the best joint is climax-bar exit then VWAP (+0.003 R). Applied UNCHANGED to the sealed quarter
+2026-06-01..09-04 (2,859 floored fills, 14 ISO weeks):
+| | base rule | optimized exit |
+|---|---|---|
+| mean R per fill | −0.20 (day-t −5.1) | −0.09 (ΔR +0.11, day-t 4.7, tail-clean) |
+| green weeks | 2 of 14 | 4 of 14 |
+| worst week (W24, Jun 8–12) | −0.46 R/fill | −0.40 R/fill |
+| quarter at the live cap (12/day, $150 risk) | −$13,037 | +$1,619 |
+| quarter uncapped at $150/fill | −$86,149 | −$38,729 |
+The finding that matters is the base: the floored HOD long book lost 0.20 R per fill across the summer, 12 of 14 weeks
+red. The 2025-26 book's ≈ 0 was two regimes averaged; the latest one is decisively negative. The best exit is robust
+and halves the loss; it does not make a book. Decision: HOD stays paper-only as an instrument; no live path from this
+population; the exit extension (half at +3 R, trail the rest) is the only exit change worth carrying into the engine,
+and only for the paper instrument. Next HOD frame = a NEW signal definition, as decided in §6.
