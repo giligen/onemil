@@ -90,6 +90,12 @@ READS_CSV = os.path.join(HERE, '1681_reads.csv')
 PER_FILL_CSV = os.path.join(HERE, '1681_per_fill.csv')
 LOG_FILE = os.path.join(HERE, '1681_hypotheses.log')
 
+# cell 1,683 (PREREG_1683.md): the sealed forward population, --population
+# forward. Built by forward_2026q3/build_fwd_population.py (the SAME
+# cell-1,438 causal-arming rule, unchanged) + 1667_sweep.py's F11-F15/ATR14.
+FWD_CAUSAL_CSV = os.path.join(HERE, 'forward_2026q3', 'causal_arming_causal.csv')
+FWD_FEATURES_CSV = os.path.join(HERE, 'forward_2026q3', '1667_features_fwd.csv')
+
 # ---------------------------------------------------------------------------
 # Reuse the project's own bar-store / ET-minute / day-clustered-stats module
 # instead of re-implementing it (CLAUDE.md: "use the main code with flags,
@@ -162,14 +168,54 @@ def load_population():
               'atr14', 'atr14_pct']].reset_index(drop=True)
 
 
-def build_paths(pop, rebuild=False):
+def load_population_forward(r_pct_floor=1.5):
+    """cell 1,683: the sealed 2026Q3 forward population, same output shape
+    as load_population() so FillCtx/HYPOTHESES['fn'] run UNCHANGED.
+    causal_arming_causal.csv status=='fill' rows carry the base rule's own
+    entry(fill)/stop/fill_min/exit_m/exit_price/why/net_R already applied
+    (cell 1,438's live rule, unchanged); target0 = entry + 2*R_unit
+    (verified: causal_arming.py TARGET_R=2, every why=='target' raw_R==2.0
+    exactly). 'half' is set to the constant 'FWD' (no TRAIN/VAL split
+    forward -- model=True hypotheses need a half-swap they cannot get here,
+    see run_forward()'s eligibility gate). r_pct = (fill-stop)/fill*100,
+    floored >=1.5% per PREREG_1683 step 3 (NOT pre-floored in the source
+    CSV, unlike 1663_features.csv's population)."""
+    fwd = pd.read_csv(FWD_CAUSAL_CSV, dtype={'day': str, 'symbol': str})
+    fwd = fwd[fwd['status'] == 'fill'].copy()
+    fwd = fwd.rename(columns={'day': 'date', 'fill': 'entry', 'stop': 'stop0', 'why': 'exit_type', 'net_R': 'base_R'})
+    fwd['R_unit'] = fwd['entry'] - fwd['stop0']
+    fwd['target0'] = fwd['entry'] + 2.0 * fwd['R_unit']
+    fwd['r_pct'] = (fwd['entry'] - fwd['stop0']) / fwd['entry'] * 100.0
+    fwd['half'] = 'FWD'
+    fwd['fill_id'] = np.arange(len(fwd))
+    feats = pd.read_csv(FWD_FEATURES_CSV, dtype={'date': str, 'symbol': str},
+                         usecols=['date', 'symbol', 'fill_min', 'atr14'])
+    before = len(fwd)
+    fwd = fwd.merge(feats, on=['date', 'symbol', 'fill_min'], how='left')
+    if len(fwd) != before:
+        logger.error('load_population_forward: merge with %s changed row count %d -> %d -- abort', FWD_FEATURES_CSV, before, len(fwd))
+        sys.exit(1)
+    fwd['atr14_pct'] = fwd['atr14'] / fwd['entry'] * 100.0
+    n_all = len(fwd)
+    fwd = fwd[fwd['r_pct'] >= r_pct_floor].reset_index(drop=True)
+    logger.info('forward population: %d status==fill rows, %d after r_pct>=%.1f%% floor (%d dropped)',
+                n_all, len(fwd), r_pct_floor, n_all - len(fwd))
+    return fwd[['fill_id', 'date', 'symbol', 'half', 'entry', 'stop0', 'target0', 'R_unit',
+                'fill_min', 'base_R', 'exit_type', 'exit_price', 'r_pct',
+                'atr14', 'atr14_pct']].reset_index(drop=True)
+
+
+def build_paths(pop, rebuild=False, parquet_path=None):
     """Per fill: 1-min OHLCV from the fill (entry) bar to the EOD bar, PLUS
     the full trading-day bars (needed for session VWAP) and the entry-bar
-    index within the day. Cached long-form to 1681_paths.parquet, loaded
-    ONCE per run thereafter. Returns {fill_id: dict(...)}."""
-    if os.path.exists(PATHS_PARQUET) and not rebuild:
-        logger.info('loading cached paths from %s', PATHS_PARQUET)
-        long_df = pd.read_parquet(PATHS_PARQUET)
+    index within the day. Cached long-form to 1681_paths.parquet (or
+    `parquet_path`, e.g. cell 1,683's 1683_forward_paths.parquet for the
+    forward population -- same function, different cache file, verbatim
+    reuse), loaded ONCE per run thereafter. Returns {fill_id: dict(...)}."""
+    path = parquet_path or PATHS_PARQUET
+    if os.path.exists(path) and not rebuild:
+        logger.info('loading cached paths from %s', path)
+        long_df = pd.read_parquet(path)
         out = {}
         for fid, g in long_df.groupby('fill_id'):
             g = g.sort_values('j')
@@ -183,14 +229,14 @@ def build_paths(pop, rebuild=False):
             logger.warning('%d fills missing from the path cache -- rebuilding those', len(missing))
             pop_missing = pop[pop['fill_id'].isin(missing)]
             out.update(_fetch_paths(pop_missing))
-            _persist_paths(out)
+            _persist_paths(out, parquet_path=path)
         return out
     store = BarStore(BARS_DB)
     try:
         out = _fetch_paths(pop, store)
     finally:
         store.close()
-    _persist_paths(out)
+    _persist_paths(out, parquet_path=path)
     return out
 
 
@@ -227,7 +273,8 @@ def _fetch_paths(pop, store=None):
     return out
 
 
-def _persist_paths(paths):
+def _persist_paths(paths, parquet_path=None):
+    path = parquet_path or PATHS_PARQUET
     rows = []
     for fid, d in paths.items():
         n = len(d['m'])
@@ -236,10 +283,10 @@ def _persist_paths(paths):
             l=d['l'], c=d['c'], v=d['v'], vwap=d['vwap'],
         )))
     long_df = pd.concat(rows, ignore_index=True)
-    tmp = PATHS_PARQUET + '.tmp'
+    tmp = path + '.tmp'
     long_df.to_parquet(tmp, index=False)
-    os.replace(tmp, PATHS_PARQUET)
-    logger.info('paths cached: %s (%d fills, %d rows)', PATHS_PARQUET, len(paths), len(long_df))
+    os.replace(tmp, path)
+    logger.info('paths cached: %s (%d fills, %d rows)', path, len(paths), len(long_df))
 
 
 def load_model_probs():
