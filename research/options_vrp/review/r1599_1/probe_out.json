@@ -1,0 +1,273 @@
+[
+  {
+    "day": "2015-08-24",
+    "spot10": NaN,
+    "expiry": "2015-10-02",
+    "n_puts": 71,
+    "two_sided_share": 0.986,
+    "ts_recv_first": "10:00:00",
+    "stale_s_median": 868.554,
+    "stale_s_p90": 1752.9676
+  },
+  {
+    "day": "2018-02-06",
+    "spot10": 266.6,
+    "expiry": "2018-03-23",
+    "n_puts": 68,
+    "two_sided_share": 1.0,
+    "ts_recv_first": "10:00:00",
+    "stale_s_median": 359.423,
+    "stale_s_p90": 1260.4091000000008,
+    "d20": "no partner",
+    "d30": {
+      "K": 257.5,
+      "credit_bidask": 1.54,
+      "credit_mid": 1.75,
+      "roundtrip_spread_cost": 0.42,
+      "sh_sz": [
+        146,
+        65
+      ],
+      "lg_sz": [
+        251,
+        97
+      ],
+      "sh_stale_s": 344.403,
+      "lg_stale_s": 634.389
+    }
+  },
+  {
+    "day": "2020-03-16",
+    "spot10": 245.55,
+    "expiry": "2020-05-01",
+    "n_puts": 77,
+    "two_sided_share": 1.0,
+    "ts_recv_first": "10:00:00",
+    "stale_s_median": 123.289,
+    "stale_s_p90": 519.5252,
+    "d20": {
+      "K": 205.0,
+      "credit_bidask": 2.03,
+      "credit_mid": 2.245,
+      "roundtrip_spread_cost": 0.43,
+      "sh_sz": [
+        108,
+        90
+      ],
+      "lg_sz": [
+        132,
+        120
+      ],
+      "sh_stale_s": 297.661,
+      "lg_stale_s": 45.936
+    },
+    "d30": {
+      "K": 225.0,
+      "credit_bidask": 2.92,
+      "credit_mid": 3.195,
+      "roundtrip_spread_cost": 0.55,
+      "sh_sz": [
+        72,
+        60
+      ],
+      "lg_sz": [
+        96,
+        80
+      ],
+      "sh_stale_s": 109.676,
+      "lg_stale_s": 505.501
+    }
+  },
+  {
+    "day": "2020-03-17",
+    "spot10": 237.64,
+    "expiry": "2020-05-01",
+    "n_puts": 79,
+    "two_sided_share": 1.0,
+    "ts_recv_first": "10:00:00",
+    "stale_s_median": 100.945,
+    "stale_s_p90": 752.2109000000003,
+    "d20": {
+      "K": 190.0,
+      "credit_bidask": 1.89,
+      "credit_mid": 2.225,
+      "roundtrip_spread_cost": 0.67,
+      "sh_sz": [
+        1,
+        1
+      ],
+      "lg_sz": [
+        194,
+        4
+      ],
+      "sh_stale_s": 78.02,
+      "lg_stale_s": 38.972
+    },
+    "d30": {
+      "K": 215.0,
+      "credit_bidask": 2.66,
+      "credit_mid": 3.3,
+      "roundtrip_spread_cost": 1.28,
+      "sh_sz": [
+        1,
+        671
+      ],
+      "lg_sz": [
+        200,
+        200
+      ],
+      "sh_stale_s": 78.31,
+      "lg_stale_s": 62.023
+    }
+  },
+  {
+    "day": "2022-06-13",
+    "spot10": 380.12,
+    "expiry": "2022-07-29",
+    "n_puts": 137,
+    "two_sided_share": 1.0,
+    "ts_recv_first": "10:00:00",
+    "stale_s_median": 518.706,
+    "stale_s_p90": 1498.749,
+    "d20": {
+      "K": 345.0,
+      "credit_bidask": 1.51,
+      "credit_mid": 1.555,
+      "roundtrip_spread_cost": 0.09,
+      "sh_sz": [
+        467,
+        41
+      ],
+      "lg_sz": [
+        149,
+        130
+      ],
+      "sh_stale_s": 26.98,
+      "lg_stale_s": 147.615
+    },
+    "d30": "no partner"
+  },
+  {
+    "day": "2024-08-05",
+    "spot10": 519.8,
+    "expiry": "2024-09-20",
+    "n_puts": 185,
+    "two_sided_share": 0.919,
+    "ts_recv_first": "10:00:00",
+    "stale_s_median": 222.1455,
+    "stale_s_p90": 941.9934000000003,
+    "d20": {
+      "K": 470.0,
+      "credit_bidask": -2.95,
+      "credit_mid": 1.095,
+      "roundtrip_spread_cost": 8.09,
+      "sh_sz": [
+        1,
+        1
+      ],
+      "lg_sz": [
+        1,
+        1
+      ],
+      "sh_stale_s": 93.403,
+      "lg_stale_s": 116.981
+    },
+    "d30": "no partner"
+  },
+  {
+    "day": "2025-04-04",
+    "spot10": 522.48,
+    "expiry": "2025-05-16",
+    "n_puts": 300,
+    "two_sided_share": 1.0,
+    "ts_recv_first": "10:00:00",
+    "stale_s_median": 274.58249472,
+    "stale_s_p90": 1149.07949312,
+    "d20": {
+      "K": 478.0,
+      "credit_bidask": 1.18,
+      "credit_mid": 1.35,
+      "roundtrip_spread_cost": 0.34,
+      "sh_sz": [
+        46,
+        75
+      ],
+      "lg_sz": [
+        50,
+        102
+      ],
+      "sh_stale_s": 20.383378,
+      "lg_stale_s": 53.636833
+    },
+    "d30": {
+      "K": 499.0,
+      "credit_bidask": 1.95,
+      "credit_mid": 2.145,
+      "roundtrip_spread_cost": 0.39,
+      "sh_sz": [
+        44,
+        215
+      ],
+      "lg_sz": [
+        40,
+        37
+      ],
+      "sh_stale_s": 272.609243,
+      "lg_stale_s": 115.246067
+    }
+  },
+  {
+    "day": "2025-04-07",
+    "spot10": 496.9806,
+    "expiry": "2025-05-23",
+    "n_puts": 115,
+    "two_sided_share": 1.0,
+    "ts_recv_first": "10:00:00",
+    "stale_s_median": 279.815307136,
+    "stale_s_p90": 722.599451904,
+    "d20": {
+      "K": 440.0,
+      "credit_bidask": 1.26,
+      "credit_mid": 1.49,
+      "roundtrip_spread_cost": 0.46,
+      "sh_sz": [
+        58,
+        46
+      ],
+      "lg_sz": [
+        60,
+        32
+      ],
+      "sh_stale_s": 296.672064,
+      "lg_stale_s": 504.702622
+    },
+    "d30": {
+      "K": 465.0,
+      "credit_bidask": 1.94,
+      "credit_mid": 2.2,
+      "roundtrip_spread_cost": 0.52,
+      "sh_sz": [
+        41,
+        39
+      ],
+      "lg_sz": [
+        39,
+        39
+      ],
+      "sh_stale_s": 406.561489,
+      "lg_stale_s": 639.044778
+    }
+  },
+  {
+    "day": "2025-07-07",
+    "spot10": 623.5,
+    "expiry": "2025-08-22",
+    "n_puts": 29,
+    "two_sided_share": 1.0,
+    "ts_recv_first": "10:00:00",
+    "stale_s_median": 460.924121816,
+    "stale_s_p90": 1389.0859033534,
+    "d20": "no partner",
+    "d30": "no partner"
+  }
+]
