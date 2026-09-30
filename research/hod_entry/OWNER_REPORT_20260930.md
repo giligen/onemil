@@ -146,3 +146,7 @@ fires on this population's normal continuation pauses (a red 15-minute candle af
 reversal), and a forgone continuation costs 1.5–1.8× what a saved give-back earns. Best consistency-only gainers: exit
 at 90 min if under +0.75 R (+9 pp green weeks at −0.002 R) and the model-gated half at +1 R (+4.5 pp, +0.006 R) —
 smoothing, not money. The 20 literature/practitioner rules (cell 1,682) run next on the same harness.
+* Cell 1,682 (the 20 literature/practitioner rules on the same harness): 17 of 20 fail on tail dependence exactly like
+  the 35; the only two that survive the gates (the 14:30 ET trim, the power-hour hold) fire on < 17 % of fills and
+  their joint reads +0.009 R on VAL (t 1.5, negative tail; green weeks +9 pp, worst-decile week worse) — FAIL; stacked
+  on the 35-sweep joint +0.013 R (t 2.3, tail −0.023) — FAIL. Exit line on HOD closed with 58 rules on record.
