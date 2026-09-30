@@ -110,3 +110,35 @@ class TestBackfill20260930:
         ops_fix.apply_corrections(conn, dry_run=False)
         row = _get(conn, target_row_id)
         assert row["fill_price"] is None
+
+
+class TestRowSymbolMappingIndependentOfFillsTable:
+    """2026-09-30 follow-up: the first FILLS_20260930 assumed row-id order == fill-timestamp order and
+    put SWMR at 405 / HIMZ at 406; the real table has HIMZ at 405 / SWMR at 406 (29s apart, row insertion
+    didn't match fill order). fix_fill_row's symbol check correctly SKIPPED both rather than cross-writing
+    — caught only because the owner read the live table independently, since a seeded_db test built FROM
+    FILLS_20260930 can never catch a row-id error in that same table. This seeds the two rows' symbols as
+    literals (not derived from FILLS_20260930), so a future swap fails this test instead of passing it
+    vacuously."""
+
+    def test_himz_405_and_swmr_406_both_get_backfilled(self, tmp_path):
+        path = tmp_path / "trades.db"
+        db = Database(db_path=":memory:", cache_path=":memory:", trades_path=str(path))
+        conn = db._trades_conn
+        _insert(conn, id=405, trade_date="2026-09-30", symbol="HIMZ", entry_price=28.08, stop_loss_price=27.5,
+                take_profit_price=29.0, shares=65, order_id="o-HIMZ", order_status="closed",
+                fill_price=None, filled_at=None, exit_price=27.33, exit_reason="stop_loss",
+                exited_at="2026-09-30T13:49:06+00:00", pnl=-48.86, pnl_pct=-2.6, account="paper")
+        _insert(conn, id=406, trade_date="2026-09-30", symbol="SWMR", entry_price=17.53, stop_loss_price=17.2,
+                take_profit_price=17.9, shares=75, order_id="o-SWMR", order_status="closed",
+                fill_price=None, filled_at=None, exit_price=17.80, exit_reason="target",
+                exited_at="2026-09-30T19:55:41+00:00", pnl=20.25, pnl_pct=1.5, account="paper")
+        conn.commit()
+        conn.close()
+        conn = _connect(path)
+        changes = ops_fix.apply_corrections(conn, dry_run=False)
+        himz, swmr = _get(conn, 405), _get(conn, 406)
+        assert himz["symbol"] == "HIMZ" and himz["fill_price"] == pytest.approx(28.081692) and himz["filled_qty"] == 65
+        assert swmr["symbol"] == "SWMR" and swmr["fill_price"] == pytest.approx(17.53) and swmr["filled_qty"] == 75
+        assert any("405" in c and "HIMZ" in c for c in changes)
+        assert any("406" in c and "SWMR" in c for c in changes)

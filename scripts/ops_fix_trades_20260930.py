@@ -43,13 +43,19 @@ from scripts.ops_fix_trades_20260929 import _to_iso, _now_iso, _pnl_pct, backup_
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "trades.db"
 
 # (symbol, trades.id, filled_at time-of-day UTC 'HH:MM:SS', filled_qty, fill_price)
-# Row ids are the main session's own read of data/trades.db (rows 403-413, in fill order);
-# fix_fill_row() refuses to touch a row whose symbol doesn't match, as a second check.
+# Row ids are the main session's own read of data/trades.db (rows 403-413). NOT simply chronological:
+# the first version of this table put SWMR at 405 / HIMZ at 406 (assumed row-id order == fill-timestamp
+# order) but the real table has HIMZ at 405 / SWMR at 406 (two fills 29s apart, 13:46:24 and 13:46:53 —
+# row-insertion order did not match fill-timestamp order). fix_fill_row()'s symbol check correctly
+# refused to write one symbol's price onto the other's row (SKIP, not a silent wrong write) rather than
+# corrupting data, but that left both rows NULL — confirmed by the owner reading the live table directly
+# (independent check) after the first run applied 9/11 and skipped exactly this pair. See
+# TestRowSymbolMappingIndependentOfFillsTable in tests/test_ops_fix_trades_20260930.py.
 FILLS_20260930: List[Tuple[str, int, str, int, float]] = [
     ("LITZ", 403, "13:42:25", 51, 24.78),
     ("MNDY", 404, "13:44:20", 24, 80.24),
-    ("SWMR", 405, "13:46:24", 75, 17.53),
-    ("HIMZ", 406, "13:46:53", 65, 28.081692),
+    ("HIMZ", 405, "13:46:53", 65, 28.081692),
+    ("SWMR", 406, "13:46:24", 75, 17.53),
     ("RKLX", 407, "13:51:51", 107, 18.65),
     ("USDE", 408, "13:52:10", 78, 17.05),
     ("GEN", 409, "14:29:05", 90, 22.025889),
