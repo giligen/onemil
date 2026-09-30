@@ -887,6 +887,22 @@ class Config:
                 "last_entry_minute": int(cfg.get("last_entry_minute", 930)),
                 "flat_minute": int(cfg.get("flat_minute", 955)),
             },
+            # 2026-09-30: failure-short overlay (trading/hod_failure_short.py, ORDER MECHANICS only,
+            # docs/hod_failure_short_spec_20260930.md). Explicit whitelist, same lesson as entry_mode above
+            # (9/25: a key absent from this dict is silently dropped) — every key defaults OFF/safe.
+            "failure_short": {
+                "enabled": bool((cfg.get("failure_short") or {}).get("enabled", False)),
+                "telemetry_only": bool((cfg.get("failure_short") or {}).get("telemetry_only", True)),
+                "tau": float((cfg.get("failure_short") or {}).get("tau", 0.6)),
+                "risk_usd": float((cfg.get("failure_short") or {}).get("risk_usd", 150.0)),
+                "max_concurrent": int((cfg.get("failure_short") or {}).get("max_concurrent", 3)),
+                "max_per_day": int((cfg.get("failure_short") or {}).get("max_per_day", 8)),
+                "day_kill_r": float((cfg.get("failure_short") or {}).get("day_kill_r", -5.0)),
+                "require_etb": bool((cfg.get("failure_short") or {}).get("require_etb", True)),
+                "entry_bar_offset": int((cfg.get("failure_short") or {}).get("entry_bar_offset", 2)),
+                "allow_fresh_short": bool((cfg.get("failure_short") or {}).get("allow_fresh_short", False)),
+                "ledger_path": str((cfg.get("failure_short") or {}).get("ledger_path", "logs/hod_failure_short_ledger.csv")),
+            },
         }
 
     @property

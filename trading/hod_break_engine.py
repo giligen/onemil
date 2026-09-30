@@ -48,6 +48,15 @@ import numpy as np
 from trading.hod_break import (ARM_FEATURE_COLUMNS, HodBreakParams, arm_features, arm_state, detect,
                                 resting_entry_fill, resting_order_qty, shares_for, OPEN_MINUTE)
 from trading.red_to_green import RedToGreenParams, detect as r2g_detect, prior_day_range_pct
+from trading.hod_failure_short import (FailureShortConfig, ledger_row as fs_ledger_row,
+                                        protective_stop_price as fs_protective_stop_price,
+                                        rails_reason as fs_rails_reason,
+                                        resulting_short_qty as fs_resulting_short_qty,
+                                        reversal_sell_qty as fs_reversal_sell_qty,
+                                        short_pattern_data as fs_short_pattern_data,
+                                        should_evaluate_signal as fs_should_evaluate_signal,
+                                        should_submit as fs_should_submit,
+                                        target_buy_price as fs_target_buy_price)
 
 logger = logging.getLogger(__name__)
 
@@ -251,7 +260,8 @@ class HodBreakEngine:
     STRATEGY_NAME = STRATEGY_NAME
 
     def __init__(self, alpaca_client, db, stop_monitor=None, notifier=None, cfg: Optional[dict] = None, order_stream=None,
-                 is_qualified: Optional[Callable[[str], bool]] = None):
+                 is_qualified: Optional[Callable[[str], bool]] = None,
+                 fs_signal_fn: Optional[Callable[[str, dict, dict], Optional[float]]] = None):
         cfg = cfg or {}
         self.alpaca = alpaca_client; self.db = db; self.stop_monitor = stop_monitor; self.notifier = notifier; self.order_stream = order_stream
         self.enabled = bool(cfg.get('enabled', False)); self.dry_run = bool(cfg.get('dry_run', True))
@@ -348,6 +358,31 @@ class HodBreakEngine:
         logger.info(f"{self.tag} engine gates: book={self.book} enabled={self.enabled} dry_run={self.dry_run} risk=${self.risk_usd:.0f} "
                     f"kills={self.daily_kill_usd}/{self.weekly_kill_usd} cap={self.params.cap:.2%} target={self.params.target_r}R "
                     f"per_day={self.params.max_per_day} concurrent={self.params.max_concurrent} flat={self.params.flat_minute} admit>={self.admit_above_open_pct:.1f}% stream_universe={self.stream_universe}")
+        # ---------------------------------------------------------------- failure-short overlay (2026-09-30)
+        # ORDER MECHANICS only (docs/hod_failure_short_spec_20260930.md); trading/hod_failure_short.py owns every
+        # rail/sizing/price rule. `failure_short` is an explicit whitelist sub-dict of hod_break_cfg (config.py) —
+        # same 9/25 lesson as entry_mode above: a key absent from that dict is silently dropped, never an error.
+        fs_raw = cfg.get('failure_short') or {}
+        self.fs_cfg = FailureShortConfig(
+            enabled=bool(fs_raw.get('enabled', False)), telemetry_only=bool(fs_raw.get('telemetry_only', True)),
+            tau=float(fs_raw.get('tau', 0.6)), risk_usd=float(fs_raw.get('risk_usd', 150.0)),
+            max_concurrent=int(fs_raw.get('max_concurrent', 3)), max_per_day=int(fs_raw.get('max_per_day', 8)),
+            day_kill_r=float(fs_raw.get('day_kill_r', -5.0)), require_etb=bool(fs_raw.get('require_etb', True)),
+            entry_bar_offset=int(fs_raw.get('entry_bar_offset', 2)), allow_fresh_short=bool(fs_raw.get('allow_fresh_short', False)),
+            ledger_path=str(fs_raw.get('ledger_path', 'logs/hod_failure_short_ledger.csv')),
+        )
+        self.fs_signal_fn = fs_signal_fn          # Callable[[symbol, bars_through_fill_plus_1, arm_context], float | None] — pluggable, wired by main.py
+        self._fs_tracked: Dict[str, dict] = {}    # symbol -> {'state': 'awaiting_signal'|'awaiting_submit', fill_minute, long_trade_id, long_shares, long_fill_px, long_stop, ...}
+        self._fs_shorts: Dict[str, dict] = {}     # symbol -> open failure-short bookkeeping (order ids, qty, trade_id) for EOD cover
+        self._fs_submitted_today: int = 0
+        self._fs_day_realized_r: float = 0.0
+        self._fs_disabled_for_day: bool = False   # any exception in the overlay disables it for the rest of the session day (log + one Telegram line)
+        self._fs_disabled_notified: bool = False
+        self._fs_asset_cache: Dict[str, tuple] = {}   # symbol -> (shortable, easy_to_borrow) — Alpaca get_asset, cached per day
+        if self.fs_cfg.enabled:
+            logger.info(f"{self.tag} FAILURE-SHORT overlay ENABLED telemetry_only={self.fs_cfg.telemetry_only} tau={self.fs_cfg.tau} "
+                        f"risk=${self.fs_cfg.risk_usd:.0f} caps={self.fs_cfg.max_per_day}/day {self.fs_cfg.max_concurrent}concurrent "
+                        f"day_kill={self.fs_cfg.day_kill_r}R entry_bar_offset={self.fs_cfg.entry_bar_offset}")
 
     # ------------------------------------------------------------------ clock / session
     def _et_now(self) -> datetime:
@@ -370,6 +405,9 @@ class HodBreakEngine:
             self._kill_notified.clear(); self._flattened = False
             self._live_cap_slots.clear(); self._cap_logged.clear(); self._sizing_logged.clear(); self._bp_cache_value = None; self._bp_cache_ts = 0.0
             self._live_cancel_swept_entry = False; self._live_cancel_swept_flat = False
+            self._fs_tracked.clear(); self._fs_shorts.clear(); self._fs_submitted_today = 0
+            self._fs_day_realized_r = 0.0; self._fs_disabled_for_day = False; self._fs_disabled_notified = False
+            self._fs_asset_cache.clear()
             self._apply_session_calendar()
             self._adv_map = self._load_adv_map()
             logger.info(f"{self.tag} session {today}: adv map {len(self._adv_map)} symbols")
@@ -523,6 +561,7 @@ class HodBreakEngine:
                 self.drain_bar_events()
                 self._process_pending_fills()
                 self.check_exits()
+                self._process_failure_short()
                 if self.book == 'hod_break' and self.entry_mode == 'resting_stop_limit' and not self.dry_run:
                     self._poll_live_fills()
                     self._sweep_live_cutoffs()
@@ -1840,6 +1879,8 @@ class HodBreakEngine:
         else:
             logger.warning(f"{self.tag} {sym}: PARTIAL fill {filled_qty}/{lo['qty']} — remainder stays resting, safety-net legs cover the filled qty only")
         self._persist_live_orders()
+        if status != 'partially_filled':
+            self._fs_register_long(sym, fill_px, stop, filled_qty, trade_id, now_ts)
 
     def _append_live_parity_row(self, cand: Candidate, lo: dict, broker_status: str, broker_fill_ts=None,
                                 broker_fill_px: Optional[float] = None, broker_fill_qty: Optional[int] = None, reason: str = '') -> None:
@@ -2013,6 +2054,278 @@ class HodBreakEngine:
         if pos.trade_id is not None:
             try: self.db.update_trade(pos.trade_id, {'pattern_data': json.dumps(pos.pattern_data)})
             except Exception as e: logger.error(f"{self.tag} {pos.symbol}: pattern_data update failed: {e}")
+
+    # ------------------------------------------------------------------ failure-short overlay (2026-09-30)
+    # ORDER MECHANICS only — docs/hod_failure_short_spec_20260930.md, rules in trading/hod_failure_short.py.
+    # NOTE: the short's protective/target exits are two INDEPENDENT broker-resting orders (stop-limit BUY +
+    # limit BUY), never a StopMonitor watch. StopMonitor's own execution path is SELL-only (grep of
+    # trading/stop_monitor.py: every fire calls submit_stop_sell_order/submit_limit_sell_order/close_position,
+    # never a BUY) — add_watch()'s cross-detection is long-oriented (fires when price falls to/through
+    # stop_price). Registering a short with stop_price ABOVE the current price would read as "already through
+    # the stop" the instant it is armed and could misfire immediately. The broker-truth exit_qty_guard used
+    # elsewhere would likely block the resulting sell (broker shows us short, not long) but that is a second
+    # line of defense, not a reason to arm a watch that is wrong by construction. This is a deliberate scope
+    # decision, not an oversight — flagged in the spec doc's rollback/limitations section.
+    def _fs_register_long(self, symbol: str, fill_px: float, stop: float, shares: int,
+                           trade_id: Optional[int], filled_at: datetime) -> None:
+        """Arm the overlay for a fresh HOD long fill: track the fill bar so the signal is evaluated
+        at the close of bar fill+1 and (on a GO) submitted at bar fill+entry_bar_offset."""
+        if not self.fs_cfg.enabled or self.book != 'hod_break' or self._fs_disabled_for_day:
+            return
+        if symbol in self._fs_tracked or symbol in self._fs_shorts:
+            logger.warning(f"{self.tag} FAILURE-SHORT {symbol}: already tracked — skipping a second arm"); return
+        fill_minute = self._minute_of_day()
+        self._fs_tracked[symbol] = {'state': 'awaiting_signal', 'fill_minute': fill_minute, 'long_trade_id': trade_id,
+                                     'long_shares': shares, 'long_fill_px': fill_px, 'long_stop': stop, 'filled_at': filled_at}
+        logger.info(f"{self.tag} FAILURE-SHORT {symbol}: armed at fill minute {fill_minute} (shares={shares} stop={stop:.2f}) "
+                    f"— signal due at close of bar {fill_minute + 1}")
+
+    def _process_failure_short(self) -> None:
+        """Called once per process_tick. Any exception here disables the overlay for the rest of the
+        session day (log + one Telegram line) and never touches the long's normal exits — this method
+        runs strictly after check_exits() and never calls it."""
+        if not self.fs_cfg.enabled or self.book != 'hod_break' or self._fs_disabled_for_day:
+            return
+        try:
+            for symbol in list(self._fs_tracked.keys()):
+                self._fs_advance(symbol)
+            self._fs_poll_short_exits()
+            self._fs_check_eod_cover()
+        except Exception as e:
+            logger.error(f"{self.tag} FAILURE-SHORT: unhandled exception in the overlay — DISABLING it for the "
+                          f"rest of today (the long's normal exits are untouched): {e}", exc_info=True)
+            if not self._fs_disabled_notified:
+                self._notify(f"{self.tag} FAILURE-SHORT ERROR — overlay disabled for today: {e}")
+                self._fs_disabled_notified = True
+            self._fs_disabled_for_day = True
+
+    def _fs_advance(self, symbol: str) -> None:
+        st = self._fs_tracked.get(symbol)
+        if st is None:
+            return
+        cand = self.candidates.get(symbol)
+        if cand is None:
+            logger.error(f"{self.tag} FAILURE-SHORT {symbol}: candidate vanished before the signal bar — dropping")
+            self._fs_tracked.pop(symbol, None); return
+        now_minute = self._minute_of_day()
+        if st['state'] == 'awaiting_signal':
+            if fs_should_evaluate_signal(now_minute, st['fill_minute']):
+                self._fs_evaluate_signal(symbol, st, cand)
+        elif st['state'] == 'awaiting_submit':
+            if fs_should_submit(now_minute, st['fill_minute'], self.fs_cfg.entry_bar_offset):
+                self._fs_submit(symbol, st)
+
+    def _fs_asset_flags(self, symbol: str) -> tuple:
+        """(shortable, easy_to_borrow), cached per session day — Alpaca get_asset is a network call."""
+        cached = self._fs_asset_cache.get(symbol)
+        if cached is not None:
+            return cached
+        try:
+            flags_d = self.alpaca.get_shortability(symbol)
+            flags = (bool(flags_d.get('shortable', False)), bool(flags_d.get('easy_to_borrow', False)))
+        except Exception as e:
+            logger.error(f"{self.tag} FAILURE-SHORT {symbol}: get_shortability failed ({e}) — fail closed (not shortable)")
+            flags = (False, False)
+        self._fs_asset_cache[symbol] = flags
+        return flags
+
+    def _fs_evaluate_signal(self, symbol: str, st: dict, cand: Candidate) -> None:
+        arrays = self._rth_arrays(cand)
+        if arrays is None:
+            logger.warning(f"{self.tag} FAILURE-SHORT {symbol}: no bars at the signal bar — dropping"); self._fs_tracked.pop(symbol, None); return
+        o, h, l, c, v, minutes = arrays
+        mask = minutes <= st['fill_minute'] + 1
+        if not mask.any():
+            logger.warning(f"{self.tag} FAILURE-SHORT {symbol}: no bars through fill+1 yet — dropping"); self._fs_tracked.pop(symbol, None); return
+        bars_through = {'open': o[mask], 'high': h[mask], 'low': l[mask], 'close': c[mask], 'volume': v[mask], 'minute': minutes[mask]}
+        arm_context = {'long_trade_id': st['long_trade_id'], 'long_shares': st['long_shares'],
+                        'long_fill_price': st['long_fill_px'], 'long_stop': st['long_stop'], 'fill_minute': st['fill_minute']}
+        p: Optional[float] = None
+        if self.fs_signal_fn is None:
+            logger.error(f"{self.tag} FAILURE-SHORT {symbol}: no signal_fn wired — cannot evaluate")
+        else:
+            try:
+                p = self.fs_signal_fn(symbol, bars_through, arm_context)
+            except Exception as e:
+                logger.error(f"{self.tag} FAILURE-SHORT {symbol}: signal_fn raised ({e}) — treating as not computable")
+                p = None
+        day_high = float(np.nanmax(h[mask]))
+        price = float(c[mask][-1])
+        rails = None
+        if p is not None:
+            shortable, etb = self._fs_asset_flags(symbol)
+            prior_close = self._prev_day.get(symbol, (0.0, None, None))[0]
+            rails = fs_rails_reason(shortable=shortable, easy_to_borrow=etb, require_etb=self.fs_cfg.require_etb,
+                                     price=price, prior_close=prior_close, open_count=len(self._fs_shorts),
+                                     submitted_today=self._fs_submitted_today, day_realized_r=self._fs_day_realized_r,
+                                     cfg=self.fs_cfg)
+        go = bool(p is not None and p >= self.fs_cfg.tau and rails is None)
+        qty = fs_reversal_sell_qty(st['long_shares'])
+        stop_px = fs_protective_stop_price(day_high)
+        target_px = fs_target_buy_price(st['long_stop'])
+        self._fs_write_ledger(symbol, st['fill_minute'], p, rails, qty, stop_px, target_px)
+        if not go:
+            logger.info(f"{self.tag} FAILURE-SHORT {symbol}: NO-GO (p={p} rails={rails})")
+            self._fs_tracked.pop(symbol, None); return
+        if self.fs_cfg.telemetry_only:
+            logger.info(f"{self.tag} FAILURE-SHORT {symbol}: telemetry_only GO (p={p:.3f}) — no order submitted")
+            self._fs_tracked.pop(symbol, None); return
+        st.update(state='awaiting_submit', p=p, stop_px=stop_px, target_px=target_px, qty=qty)
+        logger.info(f"{self.tag} FAILURE-SHORT {symbol}: GO (p={p:.3f}) — staged to submit at bar "
+                    f"{st['fill_minute'] + self.fs_cfg.entry_bar_offset}")
+
+    def _fs_write_ledger(self, symbol: str, fill_bar: int, p: Optional[float], rails: Optional[str],
+                          qty: int, stop_px: float, target_px: float) -> None:
+        """One row per evaluation, in BOTH telemetry_only and live modes (a superset of the spec's
+        telemetry_only requirement — always safe, always useful forward measurement)."""
+        row = fs_ledger_row(ts=self._et_now().isoformat(), date=self.session_date or '', symbol=symbol,
+                             fill_bar=fill_bar, p=p, cfg=self.fs_cfg, rails=rails, would_be_qty=qty,
+                             would_be_stop=stop_px, would_be_target=target_px)
+        import csv, os
+        path = self.fs_cfg.ledger_path
+        try:
+            is_new = not os.path.exists(path)
+            d = os.path.dirname(path)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            with open(path, 'a', newline='') as fh:
+                w = csv.DictWriter(fh, fieldnames=list(row.keys()))
+                if is_new:
+                    w.writeheader()
+                w.writerow(row)
+        except Exception as e:
+            logger.error(f"{self.tag} FAILURE-SHORT {symbol}: ledger write failed ({e})")
+
+    def _fs_submit(self, symbol: str, st: dict) -> None:
+        """Flip the long into a short: marketable SELL of 2x the long's shares, then the short's two
+        protective/target broker orders, then the two DB rows."""
+        self._fs_tracked.pop(symbol, None)
+        pos = self.positions.get(symbol)
+        if pos is None or pos.open_qty <= 0:
+            logger.warning(f"{self.tag} FAILURE-SHORT {symbol}: long already closed by submit time — "
+                            f"skipping the reversal (first version trades only reversals of our own live fills)")
+            return
+        qty = st['qty']
+        try:
+            sell_resp = self.alpaca.submit_market_sell_order(symbol, qty, client_order_id=f"{self.coid_prefix}fsrev{int(time.time())}")
+        except Exception as e:
+            logger.error(f"{self.tag} FAILURE-SHORT {symbol}: reversal SELL failed ({e}) — long's normal exits untouched")
+            self._notify(f"{self.tag} FAILURE-SHORT ERROR {symbol}: reversal sell failed: {e}")
+            return
+        try:
+            q = self.alpaca.get_latest_quote(symbol)
+            sell_px = float(q.get('bid_price') or st['stop_px'])
+        except Exception as e:
+            logger.error(f"{self.tag} FAILURE-SHORT {symbol}: post-sell quote failed ({e}) — using the long's fill price as a reference")
+            sell_px = st.get('long_fill_px', 0.0)
+        logger.info(f"{self.tag} FAILURE-SHORT {symbol}: REVERSAL SELL {qty} sh (id={sell_resp.get('id')}) ref_px={sell_px:.2f} "
+                    f"— closes the {pos.shares}sh long, opens a {fs_resulting_short_qty(pos.shares)}sh short")
+        self._notify(f"{self.tag} FAILURE-SHORT {symbol}: reversed {pos.shares}sh long -> short @ ~{sell_px:.2f} (p={st['p']:.2f})")
+        self._record_exit(pos, exit_price=sell_px, reason='failure_reversal')
+        short_qty = fs_resulting_short_qty(pos.shares)   # the long's original shares — always qty // 2
+        pattern_data = fs_short_pattern_data(long_trade_id=st['long_trade_id'], p=st['p'], tp_leg_id='', sl_leg_id='',
+                                              target=st['target_px'], stop=st['stop_px'])
+        rec = {'trade_date': self.session_date or self._et_now().strftime('%Y-%m-%d'), 'symbol': symbol, 'side': 'sell',
+               'entry_price': sell_px, 'stop_loss_price': st['stop_px'], 'take_profit_price': st['target_px'],
+               'shares': short_qty, 'risk_per_share': abs(st['stop_px'] - sell_px), 'total_risk': abs(st['stop_px'] - sell_px) * short_qty,
+               'risk_reward_ratio': self.params.target_r, 'order_id': sell_resp.get('id'), 'order_status': 'filled',
+               'fill_price': sell_px, 'filled_at': self._et_now().isoformat(), 'exit_price': None, 'exit_reason': None,
+               'exited_at': None, 'pnl': None, 'pnl_pct': None, 'strategy': self.STRATEGY_NAME,
+               'account': 'paper' if getattr(self.alpaca, 'is_paper', True) else 'live', 'pattern_data': json.dumps(pattern_data)}
+        try:
+            short_trade_id = int(self.db.save_trade(rec))
+        except Exception as e:
+            logger.error(f"{self.tag} FAILURE-SHORT {symbol}: DB insert for the new short failed ({e}) — "
+                          f"position IS live at the broker but NOT in the DB"); self._notify(f"{self.tag} FAILURE-SHORT ERROR DB {symbol}: {e}")
+            short_trade_id = None
+        broker_qty = _exit_qty_guard.get_signed_broker_qty(self.alpaca, symbol)
+        cover_qty = -broker_qty if broker_qty < 0 else short_qty
+        if broker_qty >= 0:
+            logger.error(f"{self.tag} FAILURE-SHORT {symbol}: broker does not show a short after the reversal "
+                          f"(signed qty={broker_qty}) — placing exits sized to the intended {short_qty} sh anyway")
+        stop_id = target_id = ''
+        try:
+            stop_resp = self.alpaca.submit_stop_limit_order(symbol, qty=cover_qty, side='buy', stop_price=st['stop_px'],
+                                                              limit_price=round(st['stop_px'] + 0.05, 2),
+                                                              client_order_id=f"{self.coid_prefix}fsstop{int(time.time())}")
+            stop_id = str(stop_resp.get('id') or '')
+        except Exception as e:
+            logger.error(f"{self.tag} FAILURE-SHORT {symbol}: protective stop-buy FAILED — UNPROTECTED SHORT: {e}")
+            self._notify(f"{self.tag} FAILURE-SHORT ERROR {symbol}: no protective stop — UNPROTECTED SHORT: {e}")
+        try:
+            target_resp = self.alpaca.submit_limit_buy_order(symbol, qty=cover_qty, limit_price=st['target_px'])
+            target_id = str(target_resp.get('id') or '')
+        except Exception as e:
+            logger.warning(f"{self.tag} FAILURE-SHORT {symbol}: target buy-limit failed (stop-only protection): {e}")
+        if short_trade_id is not None and (stop_id or target_id):
+            try:
+                pattern_data.update(tp_leg_id=target_id, sl_leg_id=stop_id)
+                self.db.update_trade(short_trade_id, {'pattern_data': json.dumps(pattern_data)})
+            except Exception as e:
+                logger.error(f"{self.tag} FAILURE-SHORT {symbol}: leg-id pattern_data update failed: {e}")
+        self._fs_shorts[symbol] = {'trade_id': short_trade_id, 'qty': cover_qty, 'entry_px': sell_px,
+                                    'stop_id': stop_id, 'target_id': target_id, 'stop_px': st['stop_px'], 'target_px': st['target_px']}
+        self._fs_submitted_today += 1
+
+    def _fs_poll_short_exits(self) -> None:
+        """Reconcile the two resting broker legs each tick — mirrors check_exits()'s leg-poll for longs but
+        with SHORT-signed pnl (entry - exit, never the long formula). Minimal by design (first version):
+        checks status only, no partial-fill handling."""
+        for symbol, sh in list(self._fs_shorts.items()):
+            for leg_key, other_key, reason in (('stop_id', 'target_id', 'failure_short_stop'), ('target_id', 'stop_id', 'failure_short_target')):
+                leg_id = sh.get(leg_key)
+                if not leg_id:
+                    continue
+                try:
+                    st_resp = self.alpaca.get_order(leg_id)
+                except Exception as e:
+                    logger.error(f"{self.tag} FAILURE-SHORT {symbol}: get_order({leg_id}) failed: {e}"); continue
+                if str((st_resp or {}).get('status', '')).lower() != 'filled':
+                    continue
+                exit_px = sh['stop_px'] if leg_key == 'stop_id' else sh['target_px']
+                other_id = sh.get(other_key)
+                if other_id:
+                    try: self.alpaca.cancel_order(other_id)
+                    except Exception as e: logger.error(f"{self.tag} FAILURE-SHORT {symbol}: cancel of the other leg ({other_id}) failed: {e}")
+                self._fs_close_short(symbol, exit_px, reason)
+                break
+
+    def _fs_check_eod_cover(self) -> None:
+        if not self._fs_shorts or not self.is_force_close_time():
+            return
+        for symbol, sh in list(self._fs_shorts.items()):
+            for leg_key in ('stop_id', 'target_id'):
+                leg_id = sh.get(leg_key)
+                if leg_id:
+                    try: self.alpaca.cancel_order(leg_id)
+                    except Exception as e: logger.error(f"{self.tag} FAILURE-SHORT {symbol}: EOD cancel of {leg_id} failed: {e}")
+            exit_px = sh['stop_px']
+            try:
+                q = self.alpaca.get_latest_quote(symbol)
+                exit_px = round(float(q.get('ask_price') or sh['stop_px']) * 1.01, 2)
+                self.alpaca.submit_limit_buy_order(symbol, qty=sh['qty'], limit_price=exit_px)
+            except Exception as e:
+                logger.error(f"{self.tag} FAILURE-SHORT {symbol}: EOD cover submit failed ({e}) — "
+                              f"UNCOVERED SHORT, needs a manual check"); self._notify(f"{self.tag} FAILURE-SHORT ERROR {symbol}: EOD cover failed — UNCOVERED SHORT: {e}")
+            self._fs_close_short(symbol, exit_px, 'failure_short_eod')
+
+    def _fs_close_short(self, symbol: str, exit_price: float, reason: str) -> None:
+        sh = self._fs_shorts.pop(symbol, None)
+        if sh is None:
+            return
+        pnl = (sh['entry_px'] - exit_price) * sh['qty']       # SHORT sign: profit when price falls
+        r_mult = (sh['entry_px'] - exit_price) / (sh['stop_px'] - sh['entry_px']) if sh['stop_px'] > sh['entry_px'] else float('nan')
+        if r_mult == r_mult:  # not nan
+            self._fs_day_realized_r += r_mult
+        if sh.get('trade_id') is not None:
+            try:
+                self.db.update_trade(sh['trade_id'], {'order_status': 'closed', 'exit_price': exit_price, 'exit_reason': reason,
+                                                        'exited_at': self._et_now().isoformat(), 'pnl': pnl,
+                                                        'pnl_pct': (sh['entry_px'] / exit_price - 1) * 100 if exit_price else None})
+            except Exception as e:
+                logger.error(f"{self.tag} FAILURE-SHORT {symbol}: DB close update failed: {e}")
+        logger.info(f"{self.tag} FAILURE-SHORT EXIT {symbol} {reason} @ {exit_price:.2f} pnl {pnl:+.2f} ({r_mult:+.2f}R) day_R {self._fs_day_realized_r:+.2f}")
+        self._notify(f"{self.tag} FAILURE-SHORT EXIT {symbol} {reason} @ {exit_price:.2f} pnl {pnl:+.0f}")
 
     # ------------------------------------------------------------------ fills / exits
     def _order_status(self, order_id: str, rest: bool = False) -> Optional[dict]:

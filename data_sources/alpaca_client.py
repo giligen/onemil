@@ -1621,6 +1621,32 @@ class AlpacaClient:
             logger.warning(f"{symbol}: Failed to check marginable: {e}")
             return False  # Assume not marginable on error
 
+    def get_shortability(self, symbol: str) -> Dict[str, bool]:
+        """
+        Shortable / easy-to-borrow flags for a symbol (Alpaca get_asset), for the HOD-break
+        failure-short overlay's rails (trading/hod_failure_short.py). Cached per day by the
+        caller — this is a plain network call, no retry beyond `_call_with_timeout`'s own.
+
+        Args:
+            symbol: Stock ticker
+
+        Returns:
+            {'shortable': bool, 'easy_to_borrow': bool} — both False on any lookup error
+            (fail closed: an unknown asset is never treated as shortable).
+        """
+        try:
+            asset = self._call_with_timeout(
+                lambda: self.trading_client.get_asset(symbol),
+                f"get_shortability({symbol})"
+            )
+            return {
+                'shortable': bool(getattr(asset, 'shortable', False)),
+                'easy_to_borrow': bool(getattr(asset, 'easy_to_borrow', False)),
+            }
+        except Exception as e:
+            logger.warning(f"{symbol}: Failed to check shortability: {e}")
+            return {'shortable': False, 'easy_to_borrow': False}  # fail closed
+
     def get_asset_name(self, symbol: str) -> Optional[str]:
         """Asset's registered name (for wrapper-vs-stock classification in
         the ORB news gate). Short timeout, no retries — called near the
