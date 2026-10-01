@@ -47,6 +47,38 @@ def run(cmd: List[str], timeout: int = 180, cwd: Path = ROOT, env: dict = None) 
         return f"(failed: {e})"
 
 
+def _pool_id_of(row: Dict) -> str:
+    """pool_id a trades row's pattern_data carries; 'production' if the
+    column is missing, unparseable, or the key is absent (pre-pool rows and
+    every non-ORB book)."""
+    try:
+        pattern = json.loads(row.get("pattern_data") or "{}")
+    except (TypeError, ValueError):
+        return "production"
+    return pattern.get("pool_id") or "production"
+
+
+def orb_pool_detail(rows: List[Dict]) -> str:
+    """'production n/$ | <pool_id> n/$ [symbols] | ...' for one ORB
+    (strategy, account) group (owner 2026-10-01, "be clear on its trades"):
+    production stays a count+$ summary (too many fills to list by symbol),
+    every add-on pool's fills are named by symbol so a pool trade is
+    unmistakable from the EOD line alone."""
+    by_pool = defaultdict(list)
+    for r in rows:
+        by_pool[_pool_id_of(r)].append(r)
+    parts = []
+    for pool_id in sorted(by_pool, key=lambda p: (p != "production", p)):
+        prows = by_pool[pool_id]
+        closed = [r for r in prows if r.get("exit_price") is not None]
+        pnl = sum(float(r.get("pnl") or 0) for r in closed)
+        seg = f"{pool_id} {len(prows)}/${pnl:+,.0f}"
+        if pool_id != "production":
+            seg += f" [{', '.join(r['symbol'] for r in prows)}]"
+        parts.append(seg)
+    return " | ".join(parts)
+
+
 def books_section(trades: List[Dict], day: str) -> str:
     """Per-strategy realized P&L and fills for one trade_date, from trades rows.
 
@@ -54,7 +86,9 @@ def books_section(trades: List[Dict], day: str) -> str:
     their OWN Alpaca paper account) so a paper-account book's P&L is never summed
     onto the same line as a live-account book — each strategy gets one line per
     account seen in `trades` (paper/live, or 'unknown' for rows saved before the
-    `account` column existed)."""
+    `account` column existed). ORB additionally splits its line by pool (owner
+    2026-10-01, "be clear on its trades") via `orb_pool_detail` — every add-on
+    pool trade is named by symbol."""
     by = defaultdict(list)
     for t in trades:
         by[t.get("strategy") or "unknown"].append(t)
@@ -67,6 +101,9 @@ def books_section(trades: List[Dict], day: str) -> str:
             by_account[r.get("account") or "unknown"].append(r)
         for account, acct_rows in sorted(by_account.items()):
             filled = [r for r in acct_rows if r.get("order_status") not in ("cancelled", "canceled", "expired", "rejected")]
+            if strat == "orb":
+                lines.append(f"  orb ({account}): " + orb_pool_detail(filled))
+                continue
             closed = [r for r in filled if r.get("exit_price") is not None]
             pnl = sum(float(r.get("pnl") or 0) for r in closed)
             open_n = len(filled) - len(closed)

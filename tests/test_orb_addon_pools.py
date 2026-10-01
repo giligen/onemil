@@ -195,7 +195,7 @@ class TestAddonPoolSelectionChain:
         a.submit_stop_bracket_order.assert_not_called()
         db.save_trade.assert_not_called()
         assert 'ADDONSYM' not in eng.open_positions
-        assert '[ORB+ DRY] WOULD BUY ADDONSYM' in caplog.text
+        assert '[ORB addon_gap4 DRY] WOULD BUY ADDONSYM' in caplog.text
         assert eng.candidates['ADDONSYM'].rejected_reason == 'addon_dry_run'
 
     def test_shared_slot_cap_production_first(self):

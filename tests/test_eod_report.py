@@ -21,9 +21,8 @@ def test_books_section_groups_by_strategy_and_sums_closed_only():
             _trade("CCC", "orb", None, status="filled", exit_price=None),
             _trade("DDD", "bull_flag", 40), _trade("EEE", "bull_flag", 0, status="cancelled")]
     txt = er.books_section(rows, "2026-09-21")
-    assert "orb (paper): 3 fills, 2 closed, $+150, 1 still open" in txt
+    assert "orb (paper): production 3/$+150" in txt
     assert "bull_flag (paper): 1 fills, 1 closed, $+40" in txt
-    assert "AAA -100 stop" in txt and "BBB +250 lock" in txt
 
 
 def test_books_section_splits_paper_and_live_within_one_strategy():
@@ -41,6 +40,50 @@ def test_books_section_splits_paper_and_live_within_one_strategy():
 
 def test_books_section_empty():
     assert er.books_section([], "2026-09-21") == "BOOKS 2026-09-21: no fills."
+
+
+def test_orb_pool_detail_splits_production_and_addon_by_symbol():
+    """orb_pool_detail (eod_report requirement 2026-10-01, 'be clear on its
+    trades'): production stays a count+$ summary; each add-on pool names its
+    symbols so a pool trade is unmistakable from the EOD line alone."""
+    rows = [
+        _trade("PRODA", "orb", 100),
+        _trade("PRODB", "orb", -40),
+        {**_trade("G4SYM", "orb", 75), "pattern_data": json.dumps({"pool": "addon_gap4", "pool_id": "addon_gap4"})},
+        {**_trade("P30SYM", "orb", -10), "pattern_data": json.dumps({"pool": "addon_p30", "pool_id": "addon_p30"})},
+    ]
+    txt = er.orb_pool_detail(rows)
+    assert "production 2/$+60" in txt
+    assert "addon_gap4 1/$+75 [G4SYM]" in txt
+    assert "addon_p30 1/$-10 [P30SYM]" in txt
+
+
+def test_books_section_orb_line_uses_pool_detail_via_fixture_db(tmp_path):
+    """Integration (no network): a real sqlite Database fixture round-trips
+    pattern_data.pool_id through get_trades_by_date into books_section's ORB
+    line — guards the JSON-string DB shape, not just the plain-dict shape
+    used by test_orb_pool_detail_splits_production_and_addon_by_symbol."""
+    from persistence.database import Database
+    db = Database(db_path=str(tmp_path / "eod_pool_fixture.db"))
+
+    def _row(symbol, pool_id, pnl):
+        return {
+            "trade_date": "2026-10-01", "symbol": symbol, "side": "buy",
+            "entry_price": 10.0, "stop_loss_price": 9.5, "take_profit_price": 30.0,
+            "shares": 100, "risk_per_share": 0.5, "total_risk": 50.0,
+            "risk_reward_ratio": 0, "order_id": f"o-{symbol}", "order_status": "filled",
+            "fill_price": 10.0, "filled_at": "2026-10-01T13:36:00+00:00",
+            "exit_price": 10.0 + pnl / 100.0, "exit_reason": "lock",
+            "exited_at": "2026-10-01T13:40:00+00:00", "pnl": pnl, "pnl_pct": 0.0,
+            "pattern_data": json.dumps({"pool": "production" if pool_id == "production" else pool_id,
+                                         "pool_id": pool_id}),
+            "strategy": "orb", "account": "paper",
+        }
+    db.save_trade(_row("PRODSYM", "production", 120))
+    db.save_trade(_row("G4SYM", "addon_gap4", 50))
+    rows = db.get_trades_by_date("2026-10-01")
+    txt = er.books_section(rows, "2026-10-01")
+    assert "orb (paper): production 1/$+120 | addon_gap4 1/$+50 [G4SYM]" in txt
 
 
 def test_last_matching_line_missing_log_warns(tmp_path, caplog):

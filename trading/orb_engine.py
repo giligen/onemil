@@ -202,6 +202,12 @@ class CandidateState:
     order_submitted_at: Optional[datetime] = None  # for 10:35 ET time-stop cancellation
     rejected_reason: Optional[str] = None
     bars_subscribed: bool = False         # tracks whether we've asked StopMonitor to stream bars
+    # Add-on pool gate telemetry (PREREG_LIVE_UNION.md gate extension,
+    # 2026-10-01): the resolved gate inputs that admitted (or would have
+    # admitted) this candidate into its matched add-on pool, set by
+    # ORBEngine._run_pool_selection just before scoring. None for
+    # production / pools with no gates configured.
+    pool_gate_values: Optional[Dict[str, object]] = None
 
 
 @dataclass
@@ -496,6 +502,12 @@ class ORBEngine:
         self.addon_pools_enabled = bool(addon_cfg.get('enabled', False))
         self.addon_pools_dry_run = bool(addon_cfg.get('dry_run', True))
         self.addon_pools: List[Dict] = list(addon_cfg.get('pools', []) or [])
+        # Gate extension (2026-10-01): loud WARNING on any pool key neither
+        # membership matching nor evaluate_pool_gates reads — the 9/25
+        # dropped-key lesson applied forward (docs/live_guardrails_spec_20260925.md).
+        from trading.orb_addon_gates import warn_unknown_pool_keys
+        for _pool_cfg in self.addon_pools:
+            warn_unknown_pool_keys(_pool_cfg)
         logger.info(
             "ORB add-on pools: enabled=%s dry_run=%s pools=%s",
             self.addon_pools_enabled, self.addon_pools_dry_run,
@@ -1201,9 +1213,14 @@ class ORBEngine:
                         p_max_price = float(pool.get('max_price', float('inf')))
                         p_min_gap = float(pool.get('min_gap_pct', 0.0))
                         p_max_gap = float(pool.get('max_gap_pct', float('inf')))
+                        # Per-pool min_prev_volume override (gate extension
+                        # 2026-10-01); absent key -> the global production
+                        # floor, byte-identical to pre-extension behavior.
+                        p_min_prev_volume = float(
+                            pool.get('min_prev_volume', self.universe_min_prev_volume))
                         if (p_min_price <= open_price <= p_max_price
                                 and p_min_gap <= gap_pct <= p_max_gap
-                                and prev_volume >= self.universe_min_prev_volume):
+                                and prev_volume >= p_min_prev_volume):
                             matched_pool = pool.get('name', 'addon')
                             break
                 if matched_pool is None:
@@ -2404,6 +2421,148 @@ class ORBEngine:
             )
         return atr
 
+    def _high_52wk_for(self, symbol: str) -> Optional[float]:
+        """52-week high ending T-1 (daily bars), cached per symbol-per-day.
+
+        Separate fetch/cache from `_get_feature_context` (which only pulls a
+        ~40-calendar-day window for the 20d stats + ATR14) — a 52-week gate
+        needs a genuinely longer window, not a reuse of the 20d one. None +
+        WARNING on fetch failure/no history: a gate configured against it
+        then fails closed (never silently passes), same convention as
+        `_atr14_for`.
+        """
+        if not hasattr(self, '_high_52wk_cache'):
+            self._high_52wk_cache: Dict[str, Optional[float]] = {}
+        if symbol in self._high_52wk_cache:
+            return self._high_52wk_cache[symbol]
+        high: Optional[float] = None
+        try:
+            if self.db is not None and hasattr(self.db, 'get_daily_bars_cached'):
+                today = datetime.now(timezone.utc).date()
+                start_d = today - timedelta(days=370)
+                end_d = today - timedelta(days=1)
+                bulk = self.db.get_daily_bars_cached([symbol], str(start_d), str(end_d))
+                bars = bulk.get(symbol) if isinstance(bulk, dict) else None
+                if bars:
+                    highs = [
+                        float((b.get('high') if isinstance(b, dict)
+                               else getattr(b, 'high', 0.0)) or 0.0)
+                        for b in bars
+                    ]
+                    if highs:
+                        high = max(highs)
+        except Exception as e:
+            logger.warning(f"ORB ADDON GATE: {symbol} 52wk-high fetch failed: {e}")
+        if high is None:
+            logger.warning(
+                f"ORB ADDON GATE: {symbol} 52wk-high unavailable — "
+                f"max_dist_to_52wk_high_pct fails closed for this symbol")
+        self._high_52wk_cache[symbol] = high
+        return high
+
+    def _is_day2_gapper(self, symbol: str) -> Optional[bool]:
+        """True if YESTERDAY's (T-1) own gap — T-1 open vs T-2 close — was
+        >= trading.orb_addon_gates.DAY2_GAPPER_MIN_PCT (10%).
+
+        Reuses the feature-context daily-bar list (`daily_bars_raw`, already
+        fetched for ATR14/20d stats — bars_list[-1]=T-1, bars_list[-2]=T-2):
+        no extra I/O. None (fails closed, WARNING) with <2 bars of history
+        or a non-positive T-2 close.
+        """
+        ctx = self._get_feature_context(symbol)
+        bars = ctx.get('daily_bars_raw')
+        if not bars or len(bars) < 2:
+            logger.warning(
+                f"ORB ADDON GATE: {symbol} <2 daily bars of history — "
+                f"require_day2_gapper fails closed")
+            return None
+
+        def _get(b, key):
+            return float((b.get(key) if isinstance(b, dict)
+                          else getattr(b, key, 0.0)) or 0.0)
+        t1_open = _get(bars[-1], 'open')
+        t2_close = _get(bars[-2], 'close')
+        if t2_close <= 0:
+            logger.warning(
+                f"ORB ADDON GATE: {symbol} T-2 close <= 0 — "
+                f"require_day2_gapper fails closed")
+            return None
+        gap_pct = (t1_open - t2_close) / t2_close * 100.0
+        from trading.orb_addon_gates import DAY2_GAPPER_MIN_PCT
+        return gap_pct >= DAY2_GAPPER_MIN_PCT
+
+    def _build_pool_gate_inputs(self, cand: CandidateState,
+                                 feats: Dict[str, float],
+                                 providers: Optional[Dict[str, dict]]):
+        """Resolve every add-on-pool gate input at the 09:35 pre-placement
+        instant — only data closed by then (the range just closed; T-1/T-2
+        daily bars, 20d stats and the 52wk high are all strictly before
+        today; premarket dollar volume is the same pre-9:30 print already
+        used for sizing).
+        """
+        from trading.orb_addon_gates import PoolGateInputs, RANGE_MINUTES, SESSION_MINUTES
+        rd = cand.range_data
+        providers = providers or {}
+        prev_day_bar = providers.get('prev_day_bar') or {}
+        daily_stats_20d = providers.get('daily_stats_20d') or {}
+        prev_close = float(prev_day_bar.get('close', 0.0) or 0.0)
+        prev_high = float(prev_day_bar.get('high', 0.0) or 0.0)
+        prev_low = float(prev_day_bar.get('low', 0.0) or 0.0)
+
+        move_to_range_high_pct = None
+        if rd is not None and prev_close > 0:
+            move_to_range_high_pct = (rd.range_high - prev_close) / prev_close * 100.0
+
+        rel_volume_0935 = None
+        adv20 = float(daily_stats_20d.get('volume_20d', 0.0) or 0.0)
+        range_total_volume = feats.get('range_total_volume')
+        if adv20 > 0 and range_total_volume is not None:
+            expected_5min_vol = adv20 * (RANGE_MINUTES / SESSION_MINUTES)
+            if expected_5min_vol > 0:
+                rel_volume_0935 = range_total_volume / expected_5min_vol
+
+        premarket_dollar_vol = self._pm_dollar_vols.get(cand.symbol)
+
+        range_close_position = feats.get('range_close_position')
+        range_close_top_half = (
+            range_close_position >= 0.5 if range_close_position is not None else None)
+        above_vwap_0935 = None
+        if rd is not None and rd.range_high > rd.range_low:
+            # No sub-minute bar history is retained on RangeData (only the
+            # aggregated 5-min OHLCV) — the standard typical-price proxy
+            # (H+L+C)/3 stands in for a true tick-level VWAP. Documented
+            # here, not silent: this is NOT a tick-accurate VWAP.
+            vwap_proxy = (rd.range_high + rd.range_low + rd.range_close) / 3.0
+            above_vwap_0935 = rd.range_close > vwap_proxy
+
+        ref_open = rd.range_open if (rd is not None and rd.range_open > 0) else (
+            rd.range_high if rd is not None else 0.0)
+        # Positive = this far BELOW the 52wk high; <=0 = at/above it (new
+        # 52wk high intraday). max_dist_to_52wk_high_pct caps this positive
+        # magnitude — "within X% of the 52-week high".
+        dist_to_52wk_high_pct = None
+        high_52wk = self._high_52wk_for(cand.symbol)
+        if high_52wk and high_52wk > 0 and ref_open > 0:
+            dist_to_52wk_high_pct = (high_52wk - ref_open) / high_52wk * 100.0
+
+        prev_day_range_atr = None
+        atr14 = self._atr14_for(cand.symbol)
+        if atr14 and atr14 > 0 and prev_high > prev_low > 0:
+            prev_day_range_atr = (prev_high - prev_low) / atr14
+
+        is_day2_gapper = self._is_day2_gapper(cand.symbol)
+
+        return PoolGateInputs(
+            move_to_range_high_pct=move_to_range_high_pct,
+            rel_volume_0935=rel_volume_0935,
+            premarket_dollar_vol=premarket_dollar_vol,
+            above_vwap_0935=above_vwap_0935,
+            range_close_top_half=range_close_top_half,
+            dist_to_52wk_high_pct=dist_to_52wk_high_pct,
+            prev_day_range_atr=prev_day_range_atr,
+            is_day2_gapper=is_day2_gapper,
+        )
+
     def _compute_features(self, cand: CandidateState,
                           prev_day_bar: Optional[dict] = None,
                           daily_stats_20d: Optional[dict] = None) -> Dict[str, float]:
@@ -2830,6 +2989,25 @@ class ORBEngine:
                 )
                 cand.rejected_reason = 'phantom_gap'
                 continue
+            # Add-on pool gate extension (2026-10-01, PREREG_LIVE_UNION.md):
+            # OPTIONAL per-pool admission gates evaluated HERE — the 09:35
+            # pre-placement instant, now that the range has closed and
+            # `feats` carries range_total_volume/range_close_position. No-op
+            # (byte-identical) for production and for any pool with no gate
+            # keys configured.
+            if pool_label != 'production':
+                from trading.orb_addon_gates import evaluate_pool_gates
+                pool_cfg = next(
+                    (p for p in self.addon_pools if p.get('name') == pool_label),
+                    {})
+                gate_inputs = self._build_pool_gate_inputs(cand, feats, providers)
+                gate_admitted, gate_values = evaluate_pool_gates(pool_cfg, gate_inputs)
+                gate_values['min_prev_volume_used'] = pool_cfg.get(
+                    'min_prev_volume', self.universe_min_prev_volume)
+                cand.pool_gate_values = gate_values
+                if not gate_admitted:
+                    cand.rejected_reason = 'addon_gate_reject'
+                    continue
             score = composite_score(feats, self.z_params)
             if score is None:
                 logger.debug(f"ORB: {cand.symbol} dropped — missing feature")
@@ -2987,22 +3165,50 @@ class ORBEngine:
                     self._notify(f"{self.tg_prefix} {sym} skipped — insufficient buying power")
                 continue
             plan.pool = pool_label  # 'production' | addon pool name (not a dataclass field — set post-hoc)
+            # Short pool identifier (owner 2026-10-01, "be clear on its trades"):
+            # feeds the client_order_id prefix (_submit_entry), the
+            # [ORB <pool_id>] log/Telegram tag below and in _submit_entry, and
+            # pattern_data.pool_id / the dry-ledger pool_id column — ONE
+            # resolution, same post-hoc-attribute convention as plan.pool.
+            from trading.orb_addon_gates import pool_id_for as _pool_id_for
+            plan.pool_id = (pool_label if pool_label == 'production' else
+                             _pool_id_for(next((p for p in self.addon_pools
+                                                 if p.get('name') == pool_label), {})))
+            # Gate extension (2026-10-01): the gate values that admitted this
+            # pick into its pool (empty for production / ungated pools) —
+            # not a dataclass field, same post-hoc-attribute convention as
+            # plan.pool above. Persisted into the dry ledger / pattern_data.
+            plan.pool_gates = cand.pool_gate_values or {}
             if pool_label != 'production' and dry_run:
                 # PREREG_LIVE_UNION.md dry day: zero orders, telegram/log
                 # only. cand.plan_submitted still latches so the pick isn't
                 # re-logged every tick, but NO DB row / NO order exists.
                 logger.info(
-                    f"[ORB+ DRY] WOULD BUY {sym} pool={pool_label} "
+                    f"[ORB {plan.pool_id} DRY] WOULD BUY {sym} pool={pool_label} "
                     f"qty={plan.shares} @ stop-limit ${plan.entry_price:.2f} "
                     f"(stop=${plan.stop_price:.2f}, {plan.quintile} "
                     f"comp={plan.composite_score:+.2f})"
                 )
                 if self.notify_on_entry and self.notifier:
                     self._notify(
-                        f"[ORB+ DRY] WOULD BUY {sym} x{plan.shares} "
+                        f"[ORB {plan.pool_id} DRY] WOULD BUY {sym} x{plan.shares} "
                         f"@ stop-limit ${plan.entry_price:.2f} "
                         f"(stop ${plan.stop_price:.2f}, pool={pool_label})"
                     )
+                # Telemetry for the forward read (PREREG_LIVE_UNION.md gate
+                # extension): addon-pool dry picks now get a ledger row too
+                # (previously log/telegram only), carrying the pool id and
+                # the gate values that admitted this name. bid/ask are not
+                # quote-fetched on this path (unlike the production dry
+                # branch below) — unchanged, lighter-weight addon-dry design.
+                self._append_dry_ledger_row(
+                    sym=sym, ts_et=self._et_now(), trigger=plan.range_high,
+                    limit=plan.entry_price, shares=plan.shares,
+                    risk_usd=plan.total_risk, bid=0.0, ask=0.0,
+                    composite=plan.composite_score, quintile=plan.quintile,
+                    pool=pool_label, pool_gates=plan.pool_gates,
+                    pool_id=plan.pool_id,
+                )
                 cand.rejected_reason = 'addon_dry_run'
                 cand.plan_submitted = True
                 continue
@@ -3042,7 +3248,8 @@ class ORBEngine:
                     limit=plan.entry_price, shares=plan.shares,
                     risk_usd=plan.total_risk, bid=bid, ask=ask,
                     composite=plan.composite_score, quintile=plan.quintile,
-                    pool=pool_label,
+                    pool=pool_label, pool_gates=plan.pool_gates,
+                    pool_id=plan.pool_id,
                 )
                 self._record_orb_dry_entry(sym, et_now, plan)
                 cand.rejected_reason = 'production_dry_run'
@@ -3573,7 +3780,9 @@ class ORBEngine:
             self, sym: str, ts_et: datetime, trigger: float, limit: float,
             shares: int, risk_usd: float, bid: float, ask: float,
             composite: float, quintile: str, pool: str,
-            preplaced: int = 0) -> None:
+            preplaced: int = 0,
+            pool_gates: Optional[Dict[str, object]] = None,
+            pool_id: str = 'production') -> None:
         """Append one row to logs/orb_dry_ledger.csv (docs/orb_dry_run_spec_20260925.md).
 
         `preplaced` (docs/orb_preplace_spec_20260928.md): 1 when this row
@@ -3583,9 +3792,22 @@ class ORBEngine:
         changing the meaning of any existing column. Never raises — a
         ledger-write failure must not block the (already logged) WOULD BUY
         decision. Header written once if the file is new.
+
+        `pool_gates` (gate extension, 2026-10-01): the add-on-pool gate
+        values that admitted this symbol (PREREG_LIVE_UNION.md) —
+        JSON-serialized into a trailing column, same additive-column
+        pattern as `preplaced`. '{}' for production rows and for pools
+        with no gates configured — telemetry for the forward read.
+
+        `pool_id` (owner 2026-10-01, "be clear on its trades"): the SAME
+        short identifier tagging this pick's client_order_id and
+        [ORB <pool_id>] log/Telegram lines (trading.orb_addon_gates.pool_id_for)
+        — another trailing, additive column, 'production' for the
+        production book.
         """
         try:
             import csv as _csv
+            import json as _json
             path = _resolve_orb_path(DEFAULT_DRY_LEDGER_PATH)
             path.parent.mkdir(parents=True, exist_ok=True)
             is_new = not path.exists()
@@ -3594,12 +3816,13 @@ class ORBEngine:
                 if is_new:
                     w.writerow(['date', 'symbol', 'would_submit_ts_et', 'trigger',
                                 'limit', 'shares', 'risk_usd', 'bid', 'ask',
-                                'composite', 'quintile', 'pool', 'preplaced'])
+                                'composite', 'quintile', 'pool', 'preplaced',
+                                'pool_gates', 'pool_id'])
                 w.writerow([
                     ts_et.strftime('%Y-%m-%d'), sym, ts_et.strftime('%H:%M:%S.%f')[:-3],
                     f"{trigger:.4f}", f"{limit:.4f}", shares, f"{risk_usd:.2f}",
                     f"{bid:.4f}", f"{ask:.4f}", f"{composite:.4f}", quintile, pool,
-                    int(preplaced),
+                    int(preplaced), _json.dumps(pool_gates or {}), pool_id,
                 ])
         except Exception as e:
             logger.warning(f"[ORB DRY] ledger write failed for {sym} ({e})")
@@ -4354,6 +4577,16 @@ class ORBEngine:
                 reason="guard disabled by config",
             )
 
+        # client_order_id (owner 2026-10-01, "be clear on its trades"): add-on
+        # pool entries carry the orb-<pool_id>- prefix so every pool fill is
+        # traceable back to its pool from the order itself. Production stays
+        # on its CURRENT behaviour — unchanged on purpose: plan.pool_id is
+        # 'production' for production plans, so coid is None and every
+        # submit_*order call below only sends client_order_id when truthy.
+        _pool_id_tag = getattr(plan, 'pool_id', 'production')
+        coid = (f"orb-{_pool_id_tag}-{plan.symbol}-{int(time.time() * 1000)}"[:48]
+                if _pool_id_tag and _pool_id_tag != 'production' else None)
+
         try:
             if decision.action == BuyStopAction.MARKETABLE_LIMIT:
                 logger.info(
@@ -4369,6 +4602,7 @@ class ORBEngine:
                     limit_price=limit_price,
                     tp_price=safety_tp,
                     sl_price=safety_sl,
+                    client_order_id=coid,
                 )
             elif decision.action == BuyStopAction.SKIP:
                 logger.warning(
@@ -4390,6 +4624,7 @@ class ORBEngine:
                     limit_price=limit_price,
                     tp_price=safety_tp,
                     sl_price=safety_sl,
+                    client_order_id=coid,
                 )
             else:  # SUBMIT_AS_IS
                 result = self.alpaca.submit_stop_bracket_order(
@@ -4400,6 +4635,7 @@ class ORBEngine:
                     limit_price=limit_price,
                     tp_price=safety_tp,
                     sl_price=safety_sl,
+                    client_order_id=coid,
                 )
             if not result:
                 logger.error(f"ORB: {plan.symbol} alpaca submit returned empty")
@@ -4525,11 +4761,13 @@ class ORBEngine:
                 logger.debug(f"ORB: add_quote_watch({plan.symbol}) failed: {e}")
 
         if self.notify_on_entry and self.notifier:
-            # Add-on picks (PREREG_LIVE_UNION.md) carry a distinct prefix so
-            # the live ledger separates them from production from the first
-            # fill. Production plans never set .pool -> unchanged prefix.
-            _prefix = ('[ORB+]' if getattr(plan, 'pool', 'production') != 'production'
-                       else self.tg_prefix)
+            # Add-on picks (owner 2026-10-01, "be clear on its trades") carry
+            # the pool id itself, not a generic '+' marker, so every pool's
+            # Telegram line is unmistakable from the first fill. Production
+            # plans never set a non-'production' .pool -> unchanged prefix.
+            _pool_tag = getattr(plan, 'pool', 'production')
+            _prefix = (f"[ORB {getattr(plan, 'pool_id', _pool_tag)}]"
+                       if _pool_tag != 'production' else self.tg_prefix)
             self._notify(
                 f"{_prefix} ENTRY SUBMITTED {plan.symbol} x{plan.shares} "
                 f"@ stop-limit ${plan.entry_price:.2f} (stop ${plan.stop_price:.2f}, "
@@ -6962,6 +7200,15 @@ class ORBEngine:
                 # that selected this pick (set post-hoc on the plan by
                 # _run_pool_selection — not a planner-native field).
                 'pool': getattr(plan, 'pool', 'production'),
+                # Gate extension (2026-10-01): the gate values that admitted
+                # this pick into its pool — {} for production / ungated
+                # pools (same post-hoc-attribute convention as 'pool').
+                'pool_gates': getattr(plan, 'pool_gates', {}),
+                # Owner 2026-10-01 ("be clear on its trades"): the SAME short
+                # id tagging this pick's client_order_id and [ORB <pool_id>]
+                # log/Telegram lines (trading.orb_addon_gates.pool_id_for) —
+                # post-hoc attribute, same convention as 'pool'/'pool_gates'.
+                'pool_id': getattr(plan, 'pool_id', 'production'),
             })
             now_utc = submit_time or datetime.now(timezone.utc)
             record = {

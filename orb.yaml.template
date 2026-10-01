@@ -66,6 +66,24 @@ universe:
   # the dry day (zero orders, `[ORB+ DRY]` telegrams) must pass before
   # `enabled: true`. Never a shared pool; never refit z-params/quintiles
   # on add-on-only data.
+  #
+  # Gate extension (2026-10-01, trading/orb_addon_gates.py): every pool may
+  # ALSO set OPTIONAL admission gates, evaluated generically at the 09:35
+  # pre-placement instant (once the range has closed), on top of the
+  # gap/price/volume membership bounds above. Every gate key defaults to
+  # None/absent = inactive; a pool that sets none of them is byte-identical
+  # to the pre-extension behavior. Recognized gate keys:
+  #   min_move_to_range_high_pct  - prior close -> 5-min range high, % move
+  #   min_rel_volume_0935         - cum. volume to 09:35 / ADV20-scaled 5-min expectation
+  #   min_premarket_dollar_vol    - premarket (04:00-09:29 ET) dollar volume
+  #   require_above_vwap_0935     - range close above its 5-min VWAP proxy
+  #                                 AND closing in the top half of the range
+  #   max_dist_to_52wk_high_pct   - (ref_open - 52wk_high) / 52wk_high * 100
+  #   min_prev_day_range_atr      - prior-day range / ATR14 (ending T-1)
+  #   require_day2_gapper         - yesterday's OWN gap (T-1 open vs T-2
+  #                                 close) was >= 10% (fixed threshold)
+  #   min_prev_volume             - per-pool override of universe.min_prev_volume
+  #                                 (checked at membership time, not a 09:35 gate)
   addon_pools:
     enabled: false
     dry_run: true
@@ -80,6 +98,20 @@ universe:
         max_gap_pct: 5.0
         min_price: 30.0
         max_price: 50.0
+      # "Gap 3-5% plus a >=5% run by 09:35" (owner, 2026-10-01): same
+      # gap/price band as addon_p30's gap floor but at production's
+      # $3-$30 price band, with the gate extension's move-to-range-high
+      # gate admitting only names that already ran >=5% above yesterday's
+      # close by the time the opening range closes. Disabled by default
+      # (addon_pools.enabled: false above) until the owner's dry-day GO —
+      # same mechanism as addon_gap4/addon_p30, never enable without one.
+      - name: addon_gap35_range5
+        min_gap_pct: 3.0
+        max_gap_pct: 5.0
+        min_price: 3.0
+        max_price: 30.0
+        min_prev_volume: 500000
+        min_move_to_range_high_pct: 5.0
 
 # Entry — 5-min opening range breakout.
 # Trigger mode: TOUCH (bar high > range_high). Production = pre-placed stop-limit buy.
