@@ -405,3 +405,57 @@ class TestResetDailyIntegration:
         # (they persist across day boundary). For ORB the convention is
         # force_close at 15:45 handles that.
         assert 'AAPL' in engine.open_positions
+
+
+# =========================================================================
+# RVOL-at-09:35 risk tilt (sizing.rvol_tilt, owner 2026-10-01, cell 1,694
+# Part B) -- sizing -> _save_pending_trade -> REAL Database round trip.
+# =========================================================================
+
+class TestRvolTiltSizingPersistence:
+    """Real OrbTradePlanner.build() + real ORBEngine._save_pending_trade()
+    against a real (tmp-path) SQLite DB — serialization both ways."""
+
+    def test_disabled_default_persists_inert_rvol_tilt(self, engine, real_db):
+        plan = engine.planner.build(
+            symbol='TSLA', range_high=100.0, range_low=95.0,
+            composite_score=0.5, quintile='Q4', adaptive_mult=0.95,
+        )
+        engine._log_rvol_tilt('TSLA', None, None, plan)  # mirrors the no-tilt call sites
+        trade_id = engine._save_pending_trade(plan, order_id='test-rvol-disabled')
+        assert trade_id is not None
+
+        import json
+        today = date.today()
+        rows = [r for r in real_db.get_open_trades(today) if r['id'] == trade_id]
+        assert len(rows) == 1
+        pattern_data = json.loads(rows[0]['pattern_data'])
+        assert pattern_data['rvol_tilt'] == {
+            'rvol': None, 'tercile': None, 'mult': 1.0, 'clamped': False,
+        }
+
+    def test_clamped_tilt_round_trips_through_real_db(self, engine, real_db):
+        """Q5 + a low-tercile (1.5x) tilt clamps to the Q5 1.5 cap; the
+        EFFECTIVE (post-clamp) mult and the clamped flag must be what
+        lands in pattern_data -- recorded == applied, never recomputed."""
+        plan = engine.planner.build(
+            symbol='NVDA', range_high=100.0, range_low=95.0,
+            composite_score=1.0, quintile='Q5', adaptive_mult=1.5,
+            rvol_tilt_mult=1.5,
+        )
+        assert plan.rvol_tilt_clamped is True
+        assert plan.rvol_tilt_mult == pytest.approx(1.0)
+        engine._log_rvol_tilt('NVDA', 1.2, 'low', plan)
+        trade_id = engine._save_pending_trade(plan, order_id='test-rvol-clamped')
+        assert trade_id is not None
+
+        import json
+        today = date.today()
+        rows = [r for r in real_db.get_open_trades(today) if r['id'] == trade_id]
+        assert len(rows) == 1
+        rvol_tilt = json.loads(rows[0]['pattern_data'])['rvol_tilt']
+        assert rvol_tilt['tercile'] == 'low'
+        assert rvol_tilt['clamped'] is True
+        assert rvol_tilt['mult'] == pytest.approx(1.0)
+        # the position itself must reflect the CLAMPED mult, not the raw 1.5x
+        assert rows[0]['total_risk'] == pytest.approx(plan.total_risk, abs=0.01)

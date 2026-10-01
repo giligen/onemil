@@ -20,6 +20,7 @@ import math
 from dataclasses import dataclass
 from typing import Dict, Optional
 
+from trading.orb_rvol_tilt import clamp_rvol_tilt_to_cap
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,13 @@ class OrbTradePlan:
     # Persisted to pattern_data so EoD attribution validates the value that
     # sized the order, not a recomputation that could diverge.
     pm_mult: float = 1.0
+    # RVOL-at-09:35 risk tilt (owner 2026-10-01, sizing.rvol_tilt, cell
+    # 1,694 Part B) — the EFFECTIVE (post-cap-clamp) multiplier ACTUALLY
+    # applied to position_dollars. 1.0 + rvol_tilt_clamped=False when the
+    # hook is disabled or the tercile could not be resolved (byte-identical
+    # no-op). trading/orb_rvol_tilt.py owns the math; never recomputed here.
+    rvol_tilt_mult: float = 1.0
+    rvol_tilt_clamped: bool = False
 
 
 # Skip reasons (returned in place of a plan when gate fails; used for telegram/logs)
@@ -115,6 +123,7 @@ class OrbTradePlanner:
         range_open: float = 0.0,
         spread_bps: Optional[float] = None,
         pm_mult: float = 1.0,
+        rvol_tilt_mult: float = 1.0,
     ):
         """Build a plan or return PlannerReject.
 
@@ -129,6 +138,12 @@ class OrbTradePlanner:
                 in stop_pct = (range_high - range_low) / range_open × 100).
                 Defaults to range_high if 0 (pre-fix fallback).
             spread_bps: current bid-ask spread in bps (None = spread gate not applied)
+            rvol_tilt_mult: RAW (pre-cap) sizing.rvol_tilt multiplier for this
+                candidate — caller resolves tercile/mult via
+                trading.orb_rvol_tilt.resolve_rvol_tilt_mult; 1.0 = disabled/
+                neutral, always a byte-identical no-op here. Clamped INSIDE
+                this method (with adaptive_mult, pm_mult) so the total stack
+                never exceeds TOTAL_MULT_CAP (trading/orb_rvol_tilt.py).
 
         Returns:
             OrbTradePlan on success, PlannerReject on gate fail.
@@ -171,7 +186,16 @@ class OrbTradePlanner:
         # then the premarket dollar-volume sizing mult (2026-07-04, upsize-only
         # ×1.5 above the TRAIN-frozen cut — trading/orb_pm_mult.py). Stacks
         # exactly like the quintile mult so BT and live agree by construction.
-        position_dollars = position_before_mult * adaptive_mult * pm_mult
+        stacked_mult_before_tilt = adaptive_mult * pm_mult
+        # RVOL-at-09:35 risk tilt (owner 2026-10-01, sizing.rvol_tilt, cell
+        # 1,694 Part B) — applied AFTER every existing multiplier, clamped
+        # so the TOTAL stack (adaptive_mult × pm_mult × tilt) never exceeds
+        # TOTAL_MULT_CAP. tilt_mult=1.0 (disabled/neutral) is always a
+        # byte-identical no-op; only this hook's own factor is ever reduced.
+        effective_rvol_tilt_mult, rvol_tilt_clamped = clamp_rvol_tilt_to_cap(
+            stacked_mult_before_tilt, rvol_tilt_mult)
+        position_dollars = (
+            position_before_mult * stacked_mult_before_tilt * effective_rvol_tilt_mult)
 
         shares = int(math.floor(position_dollars / entry_price))
         if shares < 1:
@@ -203,4 +227,6 @@ class OrbTradePlanner:
             quintile=quintile,
             adaptive_mult=adaptive_mult,
             pm_mult=pm_mult,
+            rvol_tilt_mult=effective_rvol_tilt_mult,
+            rvol_tilt_clamped=rvol_tilt_clamped,
         )

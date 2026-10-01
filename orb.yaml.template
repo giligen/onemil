@@ -340,6 +340,27 @@ sizing:
     high_mult: 1.0
     high_mult_news: 2.0
     news_gate: true
+  # RVOL-at-09:35 risk tilt (owner 2026-10-01, cell 1,694 Part B,
+  # research/orb_freq/RESULT_1694.md): the only both-direction money read
+  # on production sizing found in that study — EV/risk +20.1% (dirA,
+  # select TRAIN2025/test VAL2026) / +12.7% (dirB, select VAL2026/test
+  # TRAIN2025). Fails ONLY the study's 3-bin Spearman ordering-agreement
+  # robustness clause (-0.250 vs >=+0.60), which the owner's own read
+  # flags as mis-specified for a monotonic tilt — ship disabled, owner's
+  # call to flip `enabled`. Shared math: trading/orb_rvol_tilt.py.
+  # edges are in rel_volume_0935 units (trading/orb_addon_gates.py's
+  # already-computed input) == the TRAIN2025 tercile edges of the research
+  # ratio (range_total_volume/avg_daily_volume_20d; 0.03716 / 0.07649)
+  # rescaled x(SESSION_MINUTES/RANGE_MINUTES)=x78 — do NOT paste the raw
+  # research ratio here. mult is applied AFTER adaptive_mult and pm_mult,
+  # clamped so the TOTAL stack never exceeds the Q5 1.5 cap (never touches
+  # adaptive_mults). applies_to names which pool(s) get the tilt; 'production'
+  # only unless an add-on pool is added to the list.
+  # rvol_tilt:
+  #   enabled: false
+  #   edges: [2.898, 5.966]
+  #   mults: [1.5, 1.0, 0.5]        # low, mid, high
+  #   applies_to: ['production']    # add pool names here to extend, e.g. ['production', 'gap_4_5']
   account_budget_usd: 10000    # B+ 2026-08-15 (was 100000) — owner-approved live budget
   max_concurrent: 3             # B+ 2026-08-15 (was 4) — per-pos cap = 10000/3 = 3333.33
   risk_per_trade_usd: 375       # B+ 2026-08-15 (was 3000)

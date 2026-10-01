@@ -52,6 +52,11 @@ from trading.orb_pm_mult import (
     DEFAULT_HIGH_CUT_USD, DEFAULT_HIGH_MULT, DEFAULT_HIGH_MULT_NEWS,
     compute_pm_dollar_vol, pm_size_multiplier,
 )
+from trading.orb_rvol_tilt import (
+    DEFAULT_EDGES as RVOL_TILT_DEFAULT_EDGES,
+    DEFAULT_MULTS as RVOL_TILT_DEFAULT_MULTS,
+    resolve_rel_volume_0935, resolve_rvol_tilt_mult,
+)
 from trading.orb_range_size_veto import (
     DEFAULT_MIN_RANGE_SIZE_PCT, range_size_veto_applies,
 )
@@ -208,6 +213,12 @@ class CandidateState:
     # ORBEngine._run_pool_selection just before scoring. None for
     # production / pools with no gates configured.
     pool_gate_values: Optional[Dict[str, object]] = None
+    # RVOL-at-09:35 (sizing.rvol_tilt, owner 2026-10-01): range_total_volume
+    # / ADV20-scaled 5-min expectation -- SAME formula/value as the add-on
+    # gate system's rel_volume_0935 (trading.orb_rvol_tilt.
+    # resolve_rel_volume_0935). Set once at 9:35 feature time, alongside
+    # `features`. None when ADV20/range volume unavailable (fail-open).
+    rel_volume_0935: Optional[float] = None
 
 
 @dataclass
@@ -709,6 +720,20 @@ class ORBEngine:
         if _ng_env is not None:
             self.pm_news_gate = _ng_env.strip().lower() not in (
                 '0', 'false', 'no', 'off', '')
+        # RVOL-at-09:35 risk tilt (owner 2026-10-01, sizing.rvol_tilt, cell
+        # 1,694 Part B, research/orb_freq/RESULT_1694.md): EV/risk
+        # +20.1%/+12.7% in both selection directions. Disabled by default.
+        # Shared math: trading/orb_rvol_tilt.py. Never refit edges/mults
+        # without a walk-forward harness (same doctrine as orb_pm_mult.py).
+        sizing_rvol_cfg = (cfg.get('sizing', {}) or {}).get('rvol_tilt', {}) or {}
+        self.rvol_tilt_enabled = bool(sizing_rvol_cfg.get('enabled', False))
+        _rvol_edges = sizing_rvol_cfg.get('edges', RVOL_TILT_DEFAULT_EDGES)
+        self.rvol_tilt_edges = (float(_rvol_edges[0]), float(_rvol_edges[1]))
+        _rvol_mults = sizing_rvol_cfg.get('mults', RVOL_TILT_DEFAULT_MULTS)
+        self.rvol_tilt_mults = (
+            float(_rvol_mults[0]), float(_rvol_mults[1]), float(_rvol_mults[2]))
+        self.rvol_tilt_applies_to = set(
+            sizing_rvol_cfg.get('applies_to', ['production']))
         # symbol -> {'n_articles': int, 'headline': str} | None (fetch failed)
         self._news_flags: Dict[str, Optional[Dict]] = {}
         self._news_fetch_done_day: Optional[date] = None
@@ -2981,6 +3006,9 @@ class ORBEngine:
                 daily_stats_20d=providers.get('daily_stats_20d'),
             )
             cand.features = feats
+            cand.rel_volume_0935 = resolve_rel_volume_0935(
+                feats.get('range_total_volume'),
+                (providers.get('daily_stats_20d') or {}).get('volume_20d'))
             # 2026-05-08 fix: phantom-gap guard at scoring time.
             # Universe filter at 9:30 used snapshot.open (line 392) which can
             # be a phantom-print or pre-open quote. We now have the real
@@ -3151,6 +3179,7 @@ class ORBEngine:
             if vetoed:
                 continue
             spread_bps = self._get_spread_bps(sym)
+            rvol_tilt_mult, rvol_tercile = self._get_rvol_tilt_mult(cand)
             plan = self.planner.build(
                 symbol=sym,
                 range_high=cand.range_data.range_high,
@@ -3161,11 +3190,13 @@ class ORBEngine:
                 adaptive_mult=apply_adaptive_mult(cand.quintile, self.adaptive_mults),
                 spread_bps=spread_bps,
                 pm_mult=self._get_pm_mult(sym),
+                rvol_tilt_mult=rvol_tilt_mult,
             )
             if isinstance(plan, PlannerReject):
                 cand.rejected_reason = plan.reason
                 self._handle_reject(sym, plan)
                 continue
+            self._log_rvol_tilt(sym, cand.rel_volume_0935, rvol_tercile, plan)
             # Check buying power live
             if not self._has_buying_power(plan.position_dollars):
                 logger.warning(
@@ -3482,6 +3513,9 @@ class ORBEngine:
                         temp, prev_day_bar=providers.get('prev_day_bar'),
                         daily_stats_20d=providers.get('daily_stats_20d'))
                     temp.features = feats
+                    temp.rel_volume_0935 = resolve_rel_volume_0935(
+                        feats.get('range_total_volume'),
+                        (providers.get('daily_stats_20d') or {}).get('volume_20d'))
                     score = composite_score(feats, self.z_params)
                     if score is None or score < self.filter_threshold:
                         continue
@@ -3511,16 +3545,19 @@ class ORBEngine:
                             or self._range_size_veto_reject(temp)
                             or self._catalyst_veto_reject(temp, cohort_symbols=top_syms)):
                         continue
+                    rvol_tilt_mult, rvol_tercile = self._get_rvol_tilt_mult(temp)
                     plan = self.planner.build(
                         symbol=sym, range_high=prov_rd.range_high,
                         range_low=prov_rd.range_low, range_open=prov_rd.range_open,
                         composite_score=temp.composite, quintile=temp.quintile,
                         adaptive_mult=apply_adaptive_mult(temp.quintile, self.adaptive_mults),
-                        spread_bps=self._get_spread_bps(sym), pm_mult=self._get_pm_mult(sym))
+                        spread_bps=self._get_spread_bps(sym), pm_mult=self._get_pm_mult(sym),
+                        rvol_tilt_mult=rvol_tilt_mult)
                     if isinstance(plan, PlannerReject):
                         continue
                     if not self._has_buying_power(plan.position_dollars):
                         continue
+                    self._log_rvol_tilt(sym, temp.rel_volume_0935, rvol_tercile, plan)
                     plan.pool = 'production'
                     planned.append((sym, plan, prov_rd))
 
@@ -3659,6 +3696,9 @@ class ORBEngine:
                 cand, prev_day_bar=providers.get('prev_day_bar'),
                 daily_stats_20d=providers.get('daily_stats_20d'))
             cand.features = feats
+            cand.rel_volume_0935 = resolve_rel_volume_0935(
+                feats.get('range_total_volume'),
+                (providers.get('daily_stats_20d') or {}).get('volume_20d'))
             score = composite_score(feats, self.z_params)
             if score is None or score < self.filter_threshold:
                 continue
@@ -3710,19 +3750,22 @@ class ORBEngine:
                 self._cancel_symbol_open_orders(sym)
                 if sym in self.open_positions:
                     del self.open_positions[sym]
+                rvol_tilt_mult, rvol_tercile = self._get_rvol_tilt_mult(final_cand)
                 plan = self.planner.build(
                     symbol=sym, range_high=final_cand.range_data.range_high,
                     range_low=final_cand.range_data.range_low,
                     range_open=final_cand.range_data.range_open,
                     composite_score=final_cand.composite, quintile=final_cand.quintile,
                     adaptive_mult=apply_adaptive_mult(final_cand.quintile, self.adaptive_mults),
-                    spread_bps=self._get_spread_bps(sym), pm_mult=self._get_pm_mult(sym))
+                    spread_bps=self._get_spread_bps(sym), pm_mult=self._get_pm_mult(sym),
+                    rvol_tilt_mult=rvol_tilt_mult)
                 if isinstance(plan, PlannerReject) or not self._has_buying_power(
                         getattr(plan, 'position_dollars', 0.0)):
                     self._pdr_vetoed_today.add(sym)
                     self.candidates[sym].plan_submitted = False
                     counters['n_cancelled'] += 1
                     continue
+                self._log_rvol_tilt(sym, final_cand.rel_volume_0935, rvol_tercile, plan)
                 plan.pool = 'production'
                 order_id = self._submit_entry(plan)
                 if order_id:
@@ -3953,6 +3996,37 @@ class ORBEngine:
                 f"[ORB] PM MULT: {symbol} above PM$ cut but news "
                 f"UNAVAILABLE — fail-open, no news boost (x{mult})")
         return mult
+
+    def _get_rvol_tilt_mult(self, cand: CandidateState, pool: str = 'production'):
+        """Resolve the sizing.rvol_tilt RAW (pre-cap) multiplier + tercile.
+
+        Disabled (default), or `pool` absent from `applies_to`, returns
+        (1.0, None) — byte-identical no-op, same fail-open convention as
+        _get_pm_mult. The cap clamp against adaptive_mult/pm_mult happens
+        inside OrbTradePlanner.build(), not here (this method does not know
+        the other multipliers yet).
+        """
+        if not self.rvol_tilt_enabled or pool not in self.rvol_tilt_applies_to:
+            return 1.0, None
+        return resolve_rvol_tilt_mult(
+            cand.rel_volume_0935, self.rvol_tilt_edges, self.rvol_tilt_mults)
+
+    @staticmethod
+    def _log_rvol_tilt(symbol: str, rvol: Optional[float], tercile: Optional[str],
+                        plan: 'OrbTradePlan') -> None:
+        """Post-hoc-attribute rvol/tercile onto `plan` (pool/pool_gates
+        convention — recorded == applied, _save_pending_trade reads via
+        getattr) and log the resolved tilt. No-op (no attrs, no log) when
+        the hook was inactive/unresolved for this fill (tercile is None).
+        """
+        plan.rvol_tilt_rvol = rvol
+        plan.rvol_tilt_tercile = tercile
+        if tercile is None:
+            return
+        clamp_note = ' (clamped)' if plan.rvol_tilt_clamped else ''
+        logger.info(
+            f"[ORB] RVOL_TILT {symbol} rvol={rvol:.3f} tercile={tercile} "
+            f"mult={plan.rvol_tilt_mult:.2f}{clamp_note}")
 
     def _classify_symbol(self, symbol: str) -> str:
         """Asset class for the news-gate rule: 'stock' | 'wrapper' |
@@ -7274,6 +7348,17 @@ class ORBEngine:
                 # pool's exit behaviour survives a restart instead of
                 # reverting to production.
                 'pool_exit': getattr(plan, 'pool_exit', {}) or {},
+                # RVOL-at-09:35 risk tilt (sizing.rvol_tilt, owner
+                # 2026-10-01, cell 1,694 Part B) — recorded even when the
+                # hook is disabled (rvol/tercile None, mult 1.0, clamped
+                # False) so the ledger always carries this column
+                # (recorded == applied, same convention as pm_mult).
+                'rvol_tilt': {
+                    'rvol': getattr(plan, 'rvol_tilt_rvol', None),
+                    'tercile': getattr(plan, 'rvol_tilt_tercile', None),
+                    'mult': plan.rvol_tilt_mult,
+                    'clamped': plan.rvol_tilt_clamped,
+                },
             })
             now_utc = submit_time or datetime.now(timezone.utc)
             record = {

@@ -288,3 +288,83 @@ class TestPlanFields:
             composite_score=0.5, quintile='Q3', adaptive_mult=0.5,
         )
         assert p.symbol == 'NVDA'
+
+
+# =========================================================================
+# RVOL-at-09:35 risk tilt (sizing.rvol_tilt, owner 2026-10-01, cell 1,694
+# Part B) -- applied AFTER adaptive_mult/pm_mult, clamped to the Q5 1.5 cap.
+# =========================================================================
+
+class TestRvolTilt:
+    def test_default_omitted_is_byte_identical(self, planner):
+        """Omitting rvol_tilt_mult must reproduce pre-hook sizing exactly --
+        this is the 'disabled default' guarantee the hook depends on."""
+        with_default = planner.build(
+            symbol='X', range_high=100.0, range_low=95.0,
+            composite_score=1.0, quintile='Q5', adaptive_mult=1.5,
+        )
+        explicit_noop = planner.build(
+            symbol='X', range_high=100.0, range_low=95.0,
+            composite_score=1.0, quintile='Q5', adaptive_mult=1.5,
+            rvol_tilt_mult=1.0,
+        )
+        assert with_default.position_dollars == explicit_noop.position_dollars
+        assert with_default.shares == explicit_noop.shares
+        assert with_default.rvol_tilt_mult == 1.0
+        assert with_default.rvol_tilt_clamped is False
+
+    def test_disabled_tilt_matches_pre_hook_formula(self, planner):
+        """rvol_tilt_mult=1.0 on a Q3 pick reproduces adaptive_mult-only
+        sizing (the exact formula that shipped before this hook existed)."""
+        p = planner.build(
+            symbol='X', range_high=100.0, range_low=95.0,  # 5% -> capped $25K
+            composite_score=0.5, quintile='Q3', adaptive_mult=1.0,
+        )
+        assert p.position_dollars == pytest.approx(25_000, abs=100)
+
+    def test_low_tercile_upsizes_position(self, planner):
+        """Q3 (adaptive_mult=1.0) x low-tercile tilt (1.5x) on a $25K-capped
+        position -> $37.5K, same math as the existing adaptive_mult test."""
+        p = planner.build(
+            symbol='X', range_high=100.0, range_low=95.0,
+            composite_score=0.5, quintile='Q3', adaptive_mult=1.0,
+            rvol_tilt_mult=1.5,
+        )
+        assert p.position_dollars == pytest.approx(37_500, abs=200)
+        assert p.rvol_tilt_mult == pytest.approx(1.5)
+        assert p.rvol_tilt_clamped is False
+
+    def test_high_tercile_downsizes_position(self, planner):
+        p = planner.build(
+            symbol='X', range_high=100.0, range_low=95.0,
+            composite_score=0.5, quintile='Q3', adaptive_mult=1.0,
+            rvol_tilt_mult=0.5,
+        )
+        assert p.position_dollars == pytest.approx(12_500, abs=100)
+        assert p.rvol_tilt_mult == pytest.approx(0.5)
+
+    def test_q5_low_tercile_clamps_to_total_cap(self, planner):
+        """Q5 (adaptive_mult=1.5, already Q5-capped by the loader) stacked
+        with the low-tercile upsize (1.5x) would be 2.25x -- the never-rule
+        clamps the TOTAL to the Q5 1.5 cap, never adaptive_mult itself."""
+        p = planner.build(
+            symbol='X', range_high=100.0, range_low=95.0,
+            composite_score=1.0, quintile='Q5', adaptive_mult=1.5,
+            rvol_tilt_mult=1.5,
+        )
+        assert p.adaptive_mult == 1.5  # untouched
+        assert p.rvol_tilt_clamped is True
+        assert p.rvol_tilt_mult == pytest.approx(1.0)
+        # $25K-capped position x 1.5 (adaptive) x 1.0 (clamped tilt) = $37.5K,
+        # i.e. the SAME ceiling a plain Q5 pick without the tilt would hit --
+        # never above it.
+        assert p.position_dollars == pytest.approx(37_500, abs=200)
+
+    def test_rvol_tilt_carried_on_plan(self, planner):
+        p = planner.build(
+            symbol='X', range_high=100.0, range_low=95.0,
+            composite_score=0.5, quintile='Q4', adaptive_mult=0.95,
+            rvol_tilt_mult=1.0,
+        )
+        assert hasattr(p, 'rvol_tilt_mult')
+        assert hasattr(p, 'rvol_tilt_clamped')
