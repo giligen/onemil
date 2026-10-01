@@ -122,6 +122,44 @@ def test_gap_gate_prefers_minute_bar_when_present():
     assert round(r.gap_pct, 2) == 1.95
 
 
+def test_gap_gate_logs_info_only_for_real_candidates_or_new_bar_source(caplog):
+    """Journal-bloat fix 2026-10-01: INFO only for a real candidate (passes
+    the gap floor) or a symbol's first settled-bar-source resolution this
+    session; DEBUG for every other (sub-floor, repeat) tick. Uses symbols
+    not touched by any other test to keep the module-level dedup set
+    (`_bar_source_logged`, scoped to the whole test session) collision-free."""
+    import logging
+    caplog.set_level(logging.DEBUG)
+
+    caplog.clear()
+    r = resolve_gap_input('ZZGAPFLOORLOW', snapshot_open=10.10, prev_close=10.0,
+                           minute_bar_open=None, gap_floor_pct=5.0)
+    assert r.gap_pct < 5.0
+    recs = [rec for rec in caplog.records if '[ORB] GAP_GATE' in rec.message]
+    assert len(recs) == 1 and recs[0].levelname == 'DEBUG'
+
+    caplog.clear()
+    r = resolve_gap_input('ZZGAPFLOORHI', snapshot_open=10.60, prev_close=10.0,
+                           minute_bar_open=None, gap_floor_pct=5.0)
+    assert r.gap_pct >= 5.0
+    recs = [rec for rec in caplog.records if '[ORB] GAP_GATE' in rec.message]
+    assert len(recs) == 1 and recs[0].levelname == 'INFO'
+
+    caplog.clear()
+    r1 = resolve_gap_input('ZZGAPNEWBAR', snapshot_open=10.10, prev_close=10.0,
+                            minute_bar_open=10.05, gap_floor_pct=50.0)
+    assert r1.source == SOURCE_BAR and r1.gap_pct < 50.0
+    recs = [rec for rec in caplog.records if '[ORB] GAP_GATE' in rec.message]
+    assert len(recs) == 1 and recs[0].levelname == 'INFO'
+
+    caplog.clear()
+    r2 = resolve_gap_input('ZZGAPNEWBAR', snapshot_open=10.10, prev_close=10.0,
+                            minute_bar_open=10.05, gap_floor_pct=50.0)
+    assert r2.source == SOURCE_BAR
+    recs = [rec for rec in caplog.records if '[ORB] GAP_GATE' in rec.message]
+    assert len(recs) == 1 and recs[0].levelname == 'DEBUG'
+
+
 def test_gap_gate_falls_back_to_snapshot_and_warns(caplog):
     import logging
     caplog.set_level(logging.WARNING)

@@ -25,6 +25,14 @@ logger = logging.getLogger(__name__)
 SOURCE_BAR = 'bar'
 SOURCE_SNAPSHOT = 'snapshot'
 
+# Per-process-session dedup for the "source became the settled bar" INFO log
+# below. Small by construction (bounded by one day's universe size); reset
+# only on process restart — a trading session IS a process. Journal-bloat
+# fix 2026-10-01: logging every scanner tick for every candidate at INFO was
+# ~700 lines/minute; this keeps the one-time snapshot->bar transition event
+# visible without repeating it on every later tick for the same symbol.
+_bar_source_logged: set = set()
+
 
 @dataclass
 class GapGateInput:
@@ -54,6 +62,7 @@ def resolve_gap_input(
     prev_close: float,
     minute_bar_open: Optional[float] = None,
     now: Optional[datetime] = None,
+    gap_floor_pct: float = 5.0,
 ) -> Optional[GapGateInput]:
     """Resolve the gap-gate's open price + provenance for one symbol.
 
@@ -73,6 +82,11 @@ def resolve_gap_input(
         minute_bar_open: the 09:30 ET minute bar's `open`, if the caller
             could fetch one (None when not yet available/not looked up).
         now: injectable clock for tests; defaults to real UTC now.
+        gap_floor_pct: the universe's gap floor (default 5.0, matching
+            `uni.get('min_gap_pct', 5.0)` in orb_engine.py) — used ONLY to
+            decide the result's log level (INFO for a real candidate that
+            passes the floor, DEBUG otherwise); never affects the resolved
+            input, the return value, or ledger persistence.
 
     Returns:
         GapGateInput, or None if neither source has a usable open or
@@ -116,7 +130,19 @@ def resolve_gap_input(
         source=source,
         timestamp=now.isoformat(),
     )
-    logger.info(
+
+    # Journal-bloat fix 2026-10-01: INFO only for a real candidate (passes
+    # the gap floor) or the FIRST time this symbol's source becomes the
+    # settled bar this session (the snapshot -> bar transition, deduped via
+    # `_bar_source_logged`); DEBUG for every other (mostly sub-floor,
+    # repeat) tick. The ledger persistence of `result` (callers persist
+    # `.as_dict()` themselves) is completely unaffected by the log level.
+    is_real_candidate = result.gap_pct >= gap_floor_pct
+    is_new_bar_source = source == SOURCE_BAR and symbol not in _bar_source_logged
+    if is_new_bar_source:
+        _bar_source_logged.add(symbol)
+    log_fn = logger.info if (is_real_candidate or is_new_bar_source) else logger.debug
+    log_fn(
         f"[ORB] GAP_GATE {symbol} gap_input_open={result.gap_input_open:.4f} "
         f"gap_input_prev_close={result.gap_input_prev_close:.4f} "
         f"gap_pct={result.gap_pct:.3f} source={result.source} "
