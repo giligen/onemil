@@ -84,6 +84,12 @@ to the 52-week high — each with its own rules." Cell 1,685 becomes the sub-poo
 * Each sub-pool gets its OWN selection chain (the per-pool 26-week refit as in cell 1,328) and its OWN exit, chosen
   on TRAIN only from the fixed menu {the live rule; no exit at 2 R → half at +3 R → trail MFE − 1 R; 50 % at +1 R}
   by TRAIN mean R, then read on VAL and out of regime with that exit frozen.
+* Sub-pools 19–20 (owner 10/1 ~08:10 UTC: "5 % + 2M is dropping stuff because 2M is not relative to the stock's
+  regular volume"): the production floor is `min_prev_volume: 500000` — YESTERDAY's volume, absolute. Recovery
+  sub-pools: gap ≥ 5 %, $3–30, prior-day volume between 100K and 500K (the names the floor drops) × {F1 relative
+  volume at 09:35 ≥ 3×, F2 pre-market dollar volume ≥ $5M}. Also reported: how many ≥ 5 % gappers per day the
+  500K floor removes, and the production book's own fills split by prior-day volume tercile (does the absolute floor
+  track quality at all?).
 * Stage 2 (pre-declared): pairs of features (gap band × F_i × F_j) ONLY for sub-pools that passed stage 1, read the
   same way. No stage 3.
 * The bar per sub-pool is unchanged; the union adds every passing sub-pool; multiplicity stated: 18 + ≤ 15 pair reads
