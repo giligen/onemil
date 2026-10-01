@@ -56,7 +56,7 @@ loop draining a universe-scan backlog after the close — the research-load prob
    22:10 parity read.
 
 ## 4. Research running tonight (quiet window, sequential, one writer on the bar store)
-1. Cell 1,693b: the 2–3 % gap band seed, its sub-pools × their own exits (in regime, 6 quarterly chunks).
+1. Cell 1,693b: the 2–3 % gap band seed, its sub-pools × their own exits — bars and features BUILT (22,424 in-band candidates, 99 % coverage); the pools/score stages were killed twice by memory pressure and are queued behind 1,689c, same session freeze.
 2. Cell 1,689c: the first real IN-REGIME read of pools 21/24/25/26/27/28/30 (pre-market-high break, pre-market
    turnover, compression, opening drive, …) — 1,689b could only read them out of regime (24: +0.16 R on 20 fills,
    30: +0.26 R on 6). Same pass bar, both halves. It queues behind 1,693b and, because it reads the scanner's own
