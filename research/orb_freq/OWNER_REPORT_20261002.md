@@ -45,8 +45,9 @@ loop draining a universe-scan backlog after the close — the research-load prob
   bar. Phase 2 (free Alpaca history to 2016, monthly decile only) on your word; the weekly cadence is the drag.
 
 ## 3. Decisions taken for Friday 10/2 (paper, one mechanics change per book)
-1. **ORB production: RVOL tilt ON** (`sizing.rvol_tilt` in orb.yaml, production only). P1 stays plain. The add at +1 R
-   is staged for 10/3 and goes on only if 10/2's picks AND fills match the BT book at the 22:10 UTC parity read.
+1. **ORB production: RVOL tilt ON and the add at +1 R ON** (`sizing.rvol_tilt` + `exit.add_on` in orb.yaml, production
+   only; owner 10/1: "why wait on a paper account"). P1 stays plain. Attribution if something misbehaves: the add has
+   its own `[ORB] ADD` log tag and `pattern_data.add_on`; the tilt shows in the sizing log per pick.
 2. **Research pause in the decision window:** every research job is SIGSTOPped 13:27–13:47 UTC (09:27–09:47 ET) and
    resumed after; outside that window research runs as you asked. If tick timeouts still appear at 09:30, the pause
    extends to the close and I tell you.
