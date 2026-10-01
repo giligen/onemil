@@ -321,27 +321,39 @@ def _run_pipeline_once(fp, outp, extra_env, tag):
     return rc == 0
 
 
+CACHE_DB_CONTENDED = {'24', '25', '26', '30'}   # in-regime, cache.db-default leg -- see note below
+
+
 def stage_pipeline():
+    """NOTE (added after a live retry): ORB_BT_BARS_DB left at its cache.db default hung at
+    'Database initialized: data/cache.db' for 10+ min at ~0%% CPU on TWO separate attempts (one
+    with ORB_BT_DAILY_SOURCE also defaulted, one with it pointed at this cell's own parquet -- the
+    daily-source re-scan was ruled out as the cause). cache.db is the LIVE trading service's own
+    database (confirmed active, PID checked) -- this looks like a write-lock wait on its Migration/
+    dry_trades check, not a slow read. Per CLAUDE.md (never touch the live service) this cell does
+    NOT retry cache.db-default mode again: pools 24/25/26/30's in-regime leg and pool 23's
+    in-regime WIDE-sourced half are VOIDED here (not attempted), leaving every out-regime read
+    (bars_sip.db only, measured 95-100% bar coverage, no cache.db contact) and pool 23's in-regime
+    1689a-sourced half (bars_sip.db) as the only in-regime-adjacent reads this cell reports for
+    those pools. 1685_subpools.py's own successful cache.db-default runs happened earlier, at a
+    different, unknown lock-contention moment -- not reproducible safely under this budget."""
     for window in WINDOWS:
         for pool_id in LIVE_POOLS:
             if pool_id == 23 and window == 'in_regime':
-                parts = []
-                # wide-sourced rows -> cache.db defaults; 1689a-sourced rows -> bars_sip.db (see
-                # _pipeline_env_for's docstring for why these differ even within one pool/window).
-                src_envs = (('wide', {'ORB_BT_DAILY_SOURCE': str(DAILY_SRC[window])}),
-                            ('1689a', {'ORB_BT_BARS_DB': str(BARS_SIP),
-                                       'ORB_BT_DAILY_SOURCE': str(DAILY_SRC[window])}))
-                for src_tag, extra_env in src_envs:
-                    fp = POOLDIR / f'23_{window}_{src_tag}_features.csv'
-                    outp = POOLDIR / f'23_{window}_{src_tag}_true.csv'
-                    ok = _run_pipeline_once(fp, outp, extra_env, f'pool 23/{window}/{src_tag}')
-                    if ok and outp.exists():
-                        parts.append(pd.read_csv(outp, keep_default_na=False, na_values=['']))
+                fp = POOLDIR / f'23_{window}_1689a_features.csv'
+                outp = POOLDIR / f'23_{window}_1689a_true.csv'
+                extra_env = {'ORB_BT_BARS_DB': str(BARS_SIP), 'ORB_BT_DAILY_SOURCE': str(DAILY_SRC[window])}
+                ok = _run_pipeline_once(fp, outp, extra_env, f'pool 23/{window}/1689a')
                 combined = POOLDIR / f'23_{window}_true.csv'
-                if parts:
-                    pd.concat(parts, ignore_index=True).to_csv(combined, index=False)
-                    log.info('pool 23/%s: concatenated wide+1689a true books -> %s (rows=%d)',
-                              window, combined, sum(len(p) for p in parts))
+                if ok and outp.exists():
+                    pd.read_csv(outp, keep_default_na=False, na_values=['']).to_csv(combined, index=False)
+                    log.info('pool 23/%s: WIDE-sourced half VOIDED (cache.db contended, not run) -- '
+                              '%s is the 1689a-sourced half ONLY', window, combined)
+                continue
+            if window == 'in_regime' and str(pool_id) in CACHE_DB_CONTENDED:
+                log.warning('pool %d/%s: VOID -- cache.db-default leg not attempted (see '
+                            'stage_pipeline docstring: hung 10+min at 0%% CPU, live-service '
+                            'contention risk)', pool_id, window)
                 continue
             fp = POOLDIR / f'{pool_id}_{window}_features.csv'
             outp = POOLDIR / f'{pool_id}_{window}_true.csv'
