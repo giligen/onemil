@@ -265,6 +265,9 @@ class HodBreakEngine:
         cfg = cfg or {}
         self.alpaca = alpaca_client; self.db = db; self.stop_monitor = stop_monitor; self.notifier = notifier; self.order_stream = order_stream
         self.enabled = bool(cfg.get('enabled', False)); self.dry_run = bool(cfg.get('dry_run', True))
+        # 2026-10-01 (owner ask): Telegram per routine trade event (arm/fill/partial/exit/adoption/reconcile)
+        # is OFF by default -- EOD summary only. See _notify_trade. Never gates ERROR/kill-rail/UNMANAGED.
+        self.telegram_per_trade = bool(cfg.get('telegram_per_trade', False))
         self.risk_usd = float(cfg.get('risk_usd', 100.0)); self.daily_kill_usd = float(cfg.get('daily_kill_usd', -600.0))
         self.weekly_kill_usd = float(cfg.get('weekly_kill_usd', -1500.0)); self.max_notional_usd = float(cfg.get('max_notional_usd', 5000.0))
         self.min_price = float(cfg.get('min_price', 1.0)); self.min_adv20 = float(cfg.get('min_adv20', 100_000.0))
@@ -888,7 +891,7 @@ class HodBreakEngine:
             if filled:
                 cand.resting_filled = True
                 cand.resting_arm = None
-                self._notify(f"{self.dry_tag} FILL {symbol} {fill_px:.2f} (level {arm['level']:.2f} stop {arm['stop']:.2f})")
+                self._notify_trade(f"{self.dry_tag} FILL {symbol} {fill_px:.2f} (level {arm['level']:.2f} stop {arm['stop']:.2f})")
                 self._record_dry_fill(cand, arm, fill_px, cross_ts)
                 if self.log_counterfactuals:
                     self._start_cf_watch(cand, arm, fill_px, cross_ts)
@@ -943,7 +946,7 @@ class HodBreakEngine:
                                     f"print {h[j]:.2f} ask {ask:.2f} -> " + (f"FILL {fill_px:.2f}" if filled else "NO FILL (ask > limit)"))
                         if filled:
                             cand.resting_filled = True
-                            self._notify(f"{self.dry_tag} FILL {sym} {fill_px:.2f} (level {arm['level']:.2f} stop {arm['stop']:.2f})")
+                            self._notify_trade(f"{self.dry_tag} FILL {sym} {fill_px:.2f} (level {arm['level']:.2f} stop {arm['stop']:.2f})")
                             self._record_dry_fill(cand, arm, fill_px, cross_ts)
                             if self.log_counterfactuals:
                                 self._start_cf_watch(cand, arm, fill_px, cross_ts)
@@ -1489,7 +1492,7 @@ class HodBreakEngine:
                                                 fill_price=price_out, filled_at=now_ts, status='open', client_order_id='', pattern_data=pattern_data)
                 logger.warning(f"{self.tag} {sym}: ADOPTED {diff} additional sh unregistered at the broker (entry {entry_px:.2f}) — "
                                 f"merged into open row {trade_id}, now {shares_out} sh @ {price_out:.2f}")
-                self._notify(f"{self.tag} ADOPTED {sym} +{diff}sh @ {entry_px:.2f} (merged into open row, now {shares_out}sh)")
+                self._notify_trade(f"{self.tag} ADOPTED {sym} +{diff}sh @ {entry_px:.2f} (merged into open row, now {shares_out}sh)")
                 watch_qty, watch_price = shares_out, price_out
             else:
                 trade_id = self._save_pending_trade(sym, qty, entry_px, stop, target, order_ref, pattern_data,
@@ -1500,7 +1503,7 @@ class HodBreakEngine:
                                                 client_order_id='', pattern_data=pattern_data)
                 logger.warning(f"{self.tag} {sym}: ADOPTED {qty} sh unregistered broker position on boot (entry {entry_px:.2f} "
                                 f"stop {stop:.2f}) — filled but never registered by a prior process")
-                self._notify(f"{self.tag} ADOPTED {sym} {qty}sh @ {entry_px:.2f} (unregistered position found on boot)")
+                self._notify_trade(f"{self.tag} ADOPTED {sym} {qty}sh @ {entry_px:.2f} (unregistered position found on boot)")
                 watch_qty, watch_price = qty, entry_px
             if cand is not None and cand.live_order is not None:
                 cand.live_order['trade_id'] = trade_id
@@ -1798,7 +1801,7 @@ class HodBreakEngine:
         if self.log_counterfactuals:      # item 2: computed at fill, dry AND live — no print-watch tracking for a live fill (a real broker exit already manages it)
             cand.cf_floor_stop_px = min(stop, fill_px * 0.975)
         logger.info(f"{self.tag} {sym}: LIVE {status.upper()} {fill_px:.2f} cum {filled_qty}/{lo['qty']} (stop {stop:.2f} target {target:.2f})")
-        self._notify(f"{self.tag} LIVE {status.upper()} {sym} {fill_px:.2f} x{filled_qty}")
+        self._notify_trade(f"{self.tag} LIVE {status.upper()} {sym} {fill_px:.2f} x{filled_qty}")
         for old_leg in (lo.get('tp_leg_id'), lo.get('sl_leg_id')):
             if old_leg:
                 try: self.alpaca.cancel_order(old_leg)
@@ -1973,7 +1976,7 @@ class HodBreakEngine:
         if self.dry_run:
             if not cand.dry_logged:
                 cand.dry_logged = True; cand.rejected_reason = 'dry_run'
-                logger.info(f"{self.dry_tag} WOULD BUY {msg}"); self._notify(f"{self.dry_tag} WOULD BUY {msg}")
+                logger.info(f"{self.dry_tag} WOULD BUY {msg}"); self._notify_trade(f"{self.dry_tag} WOULD BUY {msg}")
             return
         coid = f"{self.coid_prefix}-{sym}-{(self.session_date or '')[5:]}-{uuid.uuid4().hex[:8]}"[:48]   # OUR id: the only key we ever adopt by
         try:
@@ -2000,7 +2003,7 @@ class HodBreakEngine:
                                        level=sig.level, submitted_at=now, tp_leg_id=tp_id, sl_leg_id=sl_id, client_order_id=coid, pattern_data=pd_,
                                        fill_at_estimate_r=r)
         self.entered_today.add(sym); self.seen_today.add(sym); cand.rejected_reason = 'ordered'
-        logger.info(f"{self.tag} ENTRY SUBMITTED {msg} order {order_id} ({coid})"); self._notify(f"{self.tag} BUY {msg}")
+        logger.info(f"{self.tag} ENTRY SUBMITTED {msg} order {order_id} ({coid})"); self._notify_trade(f"{self.tag} BUY {msg}")
 
     def _adopt_open_buy(self, symbol: str, client_order_id: str) -> Optional[dict]:
         """Find OUR order by client_order_id — never by symbol/side (the owner trades manually on the same account)."""
@@ -2243,7 +2246,7 @@ class HodBreakEngine:
             sell_px = st.get('long_fill_px', 0.0)
         logger.info(f"{self.tag} FAILURE-SHORT {symbol}: REVERSAL SELL {qty} sh (id={sell_resp.get('id')}) ref_px={sell_px:.2f} "
                     f"— closes the {pos.shares}sh long, opens a {fs_resulting_short_qty(pos.shares)}sh short")
-        self._notify(f"{self.tag} FAILURE-SHORT {symbol}: reversed {pos.shares}sh long -> short @ ~{sell_px:.2f} (p={st['p']:.2f})")
+        self._notify_trade(f"{self.tag} FAILURE-SHORT {symbol}: reversed {pos.shares}sh long -> short @ ~{sell_px:.2f} (p={st['p']:.2f})")
         self._record_exit(pos, exit_price=sell_px, reason='failure_reversal')
         short_qty = fs_resulting_short_qty(pos.shares)   # the long's original shares — always qty // 2
         pattern_data = fs_short_pattern_data(long_trade_id=st['long_trade_id'], p=st['p'], tp_leg_id='', sl_leg_id='',
@@ -2369,7 +2372,7 @@ class HodBreakEngine:
             except Exception as e:
                 logger.error(f"{self.tag} FAILURE-SHORT {symbol}: DB close update failed: {e}")
         logger.info(f"{self.tag} FAILURE-SHORT EXIT {symbol} {reason} @ {exit_price:.2f} pnl {pnl:+.2f} ({r_mult:+.2f}R) day_R {self._fs_day_realized_r:+.2f}")
-        self._notify(f"{self.tag} FAILURE-SHORT EXIT {symbol} {reason} @ {exit_price:.2f} pnl {pnl:+.0f}")
+        self._notify_trade(f"{self.tag} FAILURE-SHORT EXIT {symbol} {reason} @ {exit_price:.2f} pnl {pnl:+.0f}")
 
     # ------------------------------------------------------------------ fills / exits
     def _order_status(self, order_id: str, rest: bool = False) -> Optional[dict]:
@@ -2437,7 +2440,7 @@ class HodBreakEngine:
             except Exception as e: logger.error(f"{self.tag} {pos.symbol}: DB fill update failed: {e}")
         logger.info(f"{self.tag} FILLED {pos.symbol} x{fq} @ {px:.2f} after {fill_delay:.1f}s (limit {pos.limit_price:.2f}, slip {(px / pos.level - 1) * 1e4:.0f} bps vs level, "
                     f"risk ${r_fill * fq:.0f} vs ${self.risk_usd:.0f} planned{', SPEC WOULD SKIP: r_min on the fill' if spec_no_trade else ''})")
-        self._notify(f"{self.tag} FILLED {pos.symbol} x{fq} @ {px:.2f} stop {pos.stop:.2f} target {pos.target:.2f}")
+        self._notify_trade(f"{self.tag} FILLED {pos.symbol} x{fq} @ {px:.2f} stop {pos.stop:.2f} target {pos.target:.2f}")
 
     def _anchor_target_to_fill(self, pos: Position) -> None:
         """The spec's target is entry + target_r × (entry − stop) on the ACTUAL fill. The bracket was submitted with the
@@ -2580,7 +2583,7 @@ class HodBreakEngine:
         if pricing_method:
             bps_str = 'n/a' if slippage_bps is None else f"{slippage_bps:+.1f}bps"
             logger.info(f"{self.tag} EXIT {pos.symbol} method={pricing_method} fill_vs_trigger={bps_str}")
-        self._notify(f"{self.tag} EXIT {pos.symbol} {reason} @ {exit_price:.2f} pnl {'?' if pnl is None else f'{pnl:+.0f}'} ({rr:+.2f}R) | day {self.daily_pnl:+.0f}")
+        self._notify_trade(f"{self.tag} EXIT {pos.symbol} {reason} @ {exit_price:.2f} pnl {'?' if pnl is None else f'{pnl:+.0f}'} ({rr:+.2f}R) | day {self.daily_pnl:+.0f}")
 
     PHANTOM_SYNC_INTERVAL_S = 60.0
 
@@ -2795,7 +2798,11 @@ class HodBreakEngine:
                     logger.error(f"{self.tag} FORCE CLOSE {sym} FAILED: {e}"); self._notify(f"{self.tag} ERROR force close {sym}: {e}")
             remaining = [s_ for s_, p_ in self.positions.items() if p_.status == 'open']
             self._flattened = not remaining
-        if n: self._notify(f"{self.tag} flat at {getattr(self, 'flat_minute', self.params.flat_minute) // 60:02d}:{getattr(self, 'flat_minute', self.params.flat_minute) % 60:02d} ET — {n} close order(s) submitted, {len(remaining)} still open")
+        if n:
+            _flat_msg = (f"{self.tag} flat at {getattr(self, 'flat_minute', self.params.flat_minute) // 60:02d}:"
+                         f"{getattr(self, 'flat_minute', self.params.flat_minute) % 60:02d} ET — {n} close order(s) submitted, "
+                         f"{len(remaining)} still open")
+            logger.info(_flat_msg); self._notify_trade(_flat_msg)
         return n
 
     def _client_supports_coid(self, method: str) -> bool:
@@ -2847,7 +2854,7 @@ class HodBreakEngine:
                     self.positions.pop(sym)
                     logger.error(f"{self.tag} reconcile {sym} ({tdate}): {pos.closed_qty}/{pos.shares} shares accounted for by its exit orders "
                                 f"(broker holds {'unknown' if broker_qty is None else broker_qty}) — still exit_pending_verification, needs a human look")
-                    self._notify(f"{self.tag} UNRECONCILED {sym} {tdate}: {pos.closed_qty}/{pos.shares} shares sold by our orders")
+                    self._notify_trade(f"{self.tag} UNRECONCILED {sym} {tdate}: {pos.closed_qty}/{pos.shares} shares sold by our orders")
             else:
                 n += 1
         if rows: logger.info(f"{self.tag} reconcile: {n} of {len(rows)} exit_pending_verification rows resolved")
@@ -3005,6 +3012,15 @@ class HodBreakEngine:
             if now - self._last_notify_warn >= 60:
                 logger.warning(f"{self.tag} Telegram notify FAILED ({e}): {msg[:80]}")
                 self._last_notify_warn = now
+
+    def _notify_trade(self, msg: str) -> None:
+        """Routine per-trade Telegram line (arm/fill/partial/exit/adoption notice/reconcile INFO) -- gated by
+        hod_break.telegram_per_trade (default False, 2026-10-01 owner ask: EOD-only Telegram; the daily report
+        from scripts/eod_report.py already carries the HOD book line). The caller's own logger call runs
+        unconditionally either way -- only the Telegram line is gated here. ERROR-level, kill-rail/day-kill
+        (_notify_once) and UNMANAGED/UNPROTECTED alerts call self._notify directly and are NEVER gated."""
+        if self.telegram_per_trade:
+            self._notify(msg)
 
     def _notify_once(self, key: str, msg: str) -> None:
         if key in self._kill_notified: return

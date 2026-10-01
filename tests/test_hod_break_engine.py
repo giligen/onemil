@@ -506,6 +506,83 @@ def test_admission_threshold_sits_below_the_floor(engine, mock_alpaca, mock_db, 
     assert e2.admit_above_open_pct == pytest.approx(2.0) and e2.params.min_dist_open_pct == 5.0
 
 
+class TestNotifyTradeGate:
+    """2026-10-01 (owner ask): routine per-trade Telegram (arm/fill/partial/exit/adoption/reconcile) is
+    OFF by default -- EOD summary only (scripts/eod_report.py already carries the HOD book line). Gate:
+    hod_break.telegram_per_trade (config.py hod_break_cfg whitelist; HodBreakEngine._notify_trade is the
+    single point every routine notice funnels through). ERROR-level, kill-rail/day-kill (_notify_once)
+    and UNMANAGED/UNPROTECTED alerts call self._notify directly and are NEVER gated."""
+
+    def test_flag_defaults_false(self, engine):
+        assert engine.telegram_per_trade is False
+
+    def test_notify_trade_suppressed_when_flag_false(self, engine):
+        from notifications.telegram_notifier import TelegramNotifier
+        engine.notifier = MagicMock(spec=TelegramNotifier)
+        engine._notify_trade('[HOD] routine notice')
+        assert not engine.notifier.send_message.called
+
+    def test_notify_trade_sends_when_flag_true(self, engine):
+        from notifications.telegram_notifier import TelegramNotifier
+        engine.notifier = MagicMock(spec=TelegramNotifier)
+        engine.telegram_per_trade = True
+        engine._notify_trade('[HOD] routine notice')
+        assert engine.notifier.send_message.called
+
+    def _live_fill(self, engine, mock_alpaca, sym='VECO'):
+        engine.entry_mode = 'resting_stop_limit'; engine.book = 'hod_break'; engine.dry_run = False
+        cand = Candidate(symbol=sym, day_open=10.0, adv20=1_000_000)
+        lo = {'order_id': 'o1', 'coid': f'c-{sym}', 'level': 11.0, 'trigger': 11.0, 'limit': 11.1, 'stop': 10.7,
+              'qty': 100, 'booked_qty': 0, 'arm_ts': '', 'tp_leg_id': '', 'sl_leg_id': '', 'trade_id': None}
+        cand.live_order = lo
+        mock_alpaca.submit_oco_sell_order.return_value = {'id': f'tp-{sym}', 'legs': [{'id': f'sl-{sym}', 'type': 'stop'}]}
+        st = {'status': 'filled', 'filled_qty': 100, 'filled_avg_price': 11.02}
+        engine._on_live_fill(cand, lo, st, 'filled')
+        return engine.positions[sym]
+
+    def test_no_telegram_on_live_fill_when_flag_false(self, engine, mock_alpaca, mock_db, mock_sm):
+        from notifications.telegram_notifier import TelegramNotifier
+        engine.notifier = MagicMock(spec=TelegramNotifier)
+        assert engine.telegram_per_trade is False
+        self._live_fill(engine, mock_alpaca)
+        assert not engine.notifier.send_message.called
+
+    def test_no_telegram_on_exit_when_flag_false(self, engine, mock_alpaca, mock_db, mock_sm):
+        from notifications.telegram_notifier import TelegramNotifier
+        engine.notifier = MagicMock(spec=TelegramNotifier)
+        pos = self._live_fill(engine, mock_alpaca)
+        engine.notifier.reset_mock()
+        engine._record_exit(pos, 11.76, 'target')
+        assert not engine.notifier.send_message.called
+
+    def test_unmanaged_error_still_notifies_when_flag_false(self, engine, mock_alpaca, mock_sm):
+        from notifications.telegram_notifier import TelegramNotifier
+        engine.notifier = MagicMock(spec=TelegramNotifier)
+        assert engine.telegram_per_trade is False
+        mock_sm.add_watch.side_effect = RuntimeError('boom')
+        self._live_fill(engine, mock_alpaca, sym='XQZ')
+        assert any('UNMANAGED' in str(c) for c in engine.notifier.send_message.call_args_list)
+
+    def test_kill_rail_notify_once_still_fires_when_flag_false(self, engine):
+        from notifications.telegram_notifier import TelegramNotifier
+        engine.notifier = MagicMock(spec=TelegramNotifier)
+        assert engine.telegram_per_trade is False
+        engine._notify_once('testkill', '[HOD] test kill-rail trip')
+        assert engine.notifier.send_message.called
+
+    def test_flag_true_restores_telegram_on_fill_and_exit(self, mock_alpaca, mock_db, mock_sm):
+        from notifications.telegram_notifier import TelegramNotifier
+        from trading.hod_break_engine import HodBreakEngine
+        eng = HodBreakEngine(mock_alpaca, mock_db, mock_sm, notifier=MagicMock(spec=TelegramNotifier), cfg=cfg(telegram_per_trade=True))
+        eng._roll_session()
+        assert eng.telegram_per_trade is True
+        pos = self._live_fill(eng, mock_alpaca)
+        assert any('LIVE FILLED' in str(c) for c in eng.notifier.send_message.call_args_list)
+        eng.notifier.reset_mock()
+        eng._record_exit(pos, 11.76, 'target')
+        assert any('EXIT' in str(c) for c in eng.notifier.send_message.call_args_list)
+
+
 class TestEntrySeamParity:
     """9/15 review D: the order is ours only, the TP replace is tracked, the fill window is the spec's, quotes are fresh."""
 

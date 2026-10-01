@@ -187,13 +187,33 @@ class TestDefect3ExitPendingVerificationBrokerCheck:
                   order_status='exit_pending_verification', stop=11.50)
         mock_alpaca.get_open_positions.return_value = []   # broker holds none
         notifier = MagicMock()
-        eng = HodBreakEngine(mock_alpaca, real_db, mock_sm, notifier=notifier, cfg=hod_cfg())
+        # 2026-10-01: UNRECONCILED is a routine reconcile notice, gated by hod_break.telegram_per_trade
+        # (default False, EOD-only Telegram) — telegram_per_trade=True here restores this test's original
+        # intent (the mismatch still raises Telegram when per-trade notices are on); the log line (the
+        # actual regression this test guards) fires unconditionally either way.
+        eng = HodBreakEngine(mock_alpaca, real_db, mock_sm, notifier=notifier, cfg=hod_cfg(telegram_per_trade=True))
         eng._roll_session()
         n = eng.reconcile_pending_exits()
         assert n == 0
         row = real_db.get_open_trades(TODAY, strategy='hod_break')[0]
         assert row['order_status'] == 'exit_pending_verification'
         assert any('UNRECONCILED' in str(c) for c in notifier.send_message.call_args_list)
+
+    def test_broker_holds_fewer_shares_default_flag_false_no_telegram(self, real_db, mock_alpaca, mock_sm):
+        """2026-10-01: same mismatch, but telegram_per_trade defaults False -- the reconcile 'needs a
+        human look' notice is routine and gated; the log line (this test's real regression guard) and
+        the DB status both still fire regardless."""
+        _seed_row(real_db, 'TTAX', 'hod_break', shares=50, fill_price=12.00,
+                  order_status='exit_pending_verification', stop=11.50)
+        mock_alpaca.get_open_positions.return_value = []   # broker holds none
+        notifier = MagicMock()
+        eng = HodBreakEngine(mock_alpaca, real_db, mock_sm, notifier=notifier, cfg=hod_cfg())
+        eng._roll_session()
+        n = eng.reconcile_pending_exits()
+        assert n == 0
+        row = real_db.get_open_trades(TODAY, strategy='hod_break')[0]
+        assert row['order_status'] == 'exit_pending_verification'
+        assert not any('UNRECONCILED' in str(c) for c in notifier.send_message.call_args_list)
 
 
 class TestSyncPositionsWarningNamesAccount:

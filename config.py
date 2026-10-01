@@ -848,6 +848,11 @@ class Config:
         return {
             "enabled": bool(cfg.get("enabled", False)),
             "dry_run": bool(cfg.get("dry_run", True)),
+            # 2026-10-01 (owner ask): Telegram per routine trade event (arm/fill/partial/exit/adoption/reconcile)
+            # is OFF by default -- EOD summary only (scripts/eod_report.py already carries the HOD book line).
+            # ERROR/kill-rail/day-kill/UNMANAGED alerts are never gated by this key. Explicit whitelist entry --
+            # 9/25 lesson: a key absent from this dict is silently dropped.
+            "telegram_per_trade": bool(cfg.get("telegram_per_trade", False)),
             # 2026-09-25: resting stop-limit entry (docs/hod_resting_entry_spec_20260925.md). Found in the live dry
             # session: this whitelist silently dropped the key, so the engine stayed in next_open.
             "entry_mode": str(cfg.get("entry_mode", "next_open")),
