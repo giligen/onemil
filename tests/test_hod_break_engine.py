@@ -205,7 +205,7 @@ class TestLifecycle:
         pos = self._pending(engine); pos.status = 'open'; pos.fill_price = 11.05
         mock_alpaca.get_open_positions.return_value = [{'symbol': 'ABC', 'qty': pos.shares}]   # broker-truth guard: broker holds it
         mock_alpaca.submit_limit_sell_order.return_value = {'id': 'c1', 'status': 'accepted'}
-        with patch('trading.hod_break_engine.time.sleep'):
+        with patch.object(HodBreakEngine, '_minute_of_day', return_value=955), patch('trading.hod_break_engine.time.sleep'):
             n = engine.force_close_all()
         assert n == 1 and mock_alpaca.cancel_order.call_count == 2 and not mock_alpaca.close_position.called
         kw = mock_alpaca.submit_limit_sell_order.call_args.args
@@ -214,7 +214,7 @@ class TestLifecycle:
         # the close order dies unfilled → re-submitted on the next force-close pass
         mock_alpaca.get_order.side_effect = lambda oid: {'status': 'canceled', 'filled_qty': 0} if oid == 'c1' else {'status': 'accepted', 'filled_qty': 0}
         mock_alpaca.submit_limit_sell_order.return_value = {'id': 'c2', 'status': 'accepted'}
-        with patch('trading.hod_break_engine.time.sleep'):
+        with patch.object(HodBreakEngine, '_minute_of_day', return_value=955), patch('trading.hod_break_engine.time.sleep'):
             engine.force_close_all()
         assert pos.close_order_id == 'c2'
         mock_alpaca.get_order.side_effect = lambda oid: {'status': 'filled', 'filled_qty': pos.shares, 'filled_avg_price': 11.2} if oid == 'c2' else {'status': 'canceled', 'filled_qty': 0}
@@ -223,7 +223,7 @@ class TestLifecycle:
     def test_force_close_cancels_pending_entry(self, engine, mock_alpaca):
         self._pending(engine)
         mock_alpaca.get_order.return_value = {'status': 'canceled', 'filled_qty': 0}            # REST confirms the cancel
-        with patch('trading.hod_break_engine.time.sleep'):
+        with patch.object(HodBreakEngine, '_minute_of_day', return_value=955), patch('trading.hod_break_engine.time.sleep'):
             engine.force_close_all()
         mock_alpaca.cancel_order.assert_called_with('o1'); assert engine.positions == {}
 
@@ -231,7 +231,7 @@ class TestLifecycle:
         """9/15 review E B3: a cancel that is not yet confirmed must not drop the order — it may still fill"""
         self._pending(engine)
         mock_alpaca.get_order.return_value = {'status': 'pending_cancel', 'filled_qty': 0}
-        with patch('trading.hod_break_engine.time.sleep'):
+        with patch.object(HodBreakEngine, '_minute_of_day', return_value=955), patch('trading.hod_break_engine.time.sleep'):
             engine.force_close_all()
         assert 'ABC' in engine.positions and engine.positions['ABC'].status == 'pending' and not mock_alpaca.submit_limit_sell_order.called
 
@@ -242,7 +242,7 @@ class TestLifecycle:
         submitting nothing, never creating a short."""
         pos = self._pending(engine); pos.status = 'open'; pos.fill_price = 11.05
         mock_alpaca.get_open_positions.return_value = []   # broker is flat -- nothing to sell
-        with patch('trading.hod_break_engine.time.sleep'):
+        with patch.object(HodBreakEngine, '_minute_of_day', return_value=955), patch('trading.hod_break_engine.time.sleep'):
             n = engine.force_close_all()
         assert n == 0
         assert not mock_alpaca.submit_limit_sell_order.called and not mock_alpaca.submit_market_sell_order.called
@@ -255,7 +255,7 @@ class TestLifecycle:
         pos = self._pending(engine); pos.status = 'open'; pos.fill_price = 11.05
         mock_alpaca.get_open_positions.return_value = [{'symbol': 'ABC', 'qty': 30}]
         mock_alpaca.submit_limit_sell_order.return_value = {'id': 'c1', 'status': 'accepted'}
-        with patch('trading.hod_break_engine.time.sleep'):
+        with patch.object(HodBreakEngine, '_minute_of_day', return_value=955), patch('trading.hod_break_engine.time.sleep'):
             n = engine.force_close_all()
         assert n == 1
         kw = mock_alpaca.submit_limit_sell_order.call_args.args
@@ -266,7 +266,7 @@ class TestLifecycle:
         must never sell more into it."""
         pos = self._pending(engine); pos.status = 'open'; pos.fill_price = 11.05
         mock_alpaca.get_open_positions.return_value = [{'symbol': 'ABC', 'qty': -57}]
-        with patch('trading.hod_break_engine.time.sleep'):
+        with patch.object(HodBreakEngine, '_minute_of_day', return_value=955), patch('trading.hod_break_engine.time.sleep'):
             n = engine.force_close_all()
         assert n == 0 and not mock_alpaca.submit_limit_sell_order.called and not mock_alpaca.submit_market_sell_order.called
 
@@ -283,7 +283,7 @@ class TestLifecycle:
         engine._drain_stop_monitor_exits()
         assert 'ABC' not in engine.positions   # our side closed by the drain
         mock_alpaca.get_open_positions.return_value = []   # broker really is flat now
-        with patch('trading.hod_break_engine.time.sleep'):
+        with patch.object(HodBreakEngine, '_minute_of_day', return_value=955), patch('trading.hod_break_engine.time.sleep'):
             n = engine.force_close_all()
         assert n == 0 and not mock_alpaca.submit_limit_sell_order.called and not mock_alpaca.submit_market_sell_order.called
 

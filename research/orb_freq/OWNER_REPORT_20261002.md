@@ -10,7 +10,10 @@
 
 **Defect found at shutdown:** the ORB force-close verify loop keeps polling Alpaca and Telegram after the
 interpreter starts shutting down (24 ERROR lines 20:04–20:10, "cannot schedule new futures"). Harmless to money,
-noise on Telegram — fix with tests tonight (shutdown hygiene, not order mechanics).
+noise on Telegram. **Fixed tonight** (shutdown-aware verify loop, Telegram logs a WARNING at shutdown, the HOD
+force-close stops resubmitting once the regular session is over and warns once, a tilt boot log line; 9 new tests,
+full suite 4,898 green; `docs/orb_shutdown_hygiene_20261001.md`). The 6-minute hang itself was the stalled tick
+loop draining a universe-scan backlog after the close — the research-load problem, handled by the pause window.
 
 ## 2. Research results since the last report (every number independently rebuilt)
 **The ORB stack (production selection unchanged + RVOL risk tilt + one add at +1 R), Q3 2026, $375 base risk:**

@@ -353,6 +353,7 @@ class HodBreakEngine:
         self._mover_queue: queue.Queue = queue.Queue(maxsize=5000); self._bar_queue: queue.Queue = queue.Queue(maxsize=100_000)   # ~300 B per bar; 3,600 names × a few minutes must never drop
         self._last_bar_ingest = 0.0; self._silence_alerted = False; self.calendar_ok = True
         self._adv_map: Dict[str, float] = {}; self._kill_notified: set = set(); self._flattened = False
+        self._post_close_fc_warned = False  # one WARNING per session once force_close_all runs past the regular close
         self._last_notify_warn = 0.0
         self.shutdown_requested = False; self._lock = threading.RLock()   # tick (engine pool) and drains (main thread) must not interleave
         self.seen_today: set = set()                                      # once-per-symbol (orders incl. no-fills); entered_today = the day-cap set (fills/working orders)
@@ -405,7 +406,7 @@ class HodBreakEngine:
         if self.session_date != today:
             self.session_date = today; self.candidates.clear(); self.entered_today.clear(); self.daily_pnl = 0.0
             self.live_since = None
-            self._kill_notified.clear(); self._flattened = False
+            self._kill_notified.clear(); self._flattened = False; self._post_close_fc_warned = False
             self._live_cap_slots.clear(); self._cap_logged.clear(); self._sizing_logged.clear(); self._bp_cache_value = None; self._bp_cache_ts = 0.0
             self._live_cancel_swept_entry = False; self._live_cancel_swept_flat = False
             self._fs_tracked.clear(); self._fs_shorts.clear(); self._fs_submitted_today = 0
@@ -2714,6 +2715,32 @@ class HodBreakEngine:
         below). 'limit_then_market' rests a limit at the NBBO mid; the SECOND attempt (gated by
         eod_limit_timeout_s instead of FC_RESUBMIT_S) escalates to a true market order, not a tighter limit."""
         from trading import eod_exit as _eod
+        if self._minute_of_day() >= self.close_minute:
+            # Regular session already closed (e.g. flat_minute fired late
+            # because the tick loop was stalled — 2026-10-01 20:04 ET-close
+            # incident): a close order resting now has no live liquidity to
+            # fill, and the cancel/resubmit/leg-poll machinery below just
+            # burns a tick every pass forever. Report once and return —
+            # after-hours flatten is ops' call, not this engine's. In-session
+            # mechanics (minute_of_day < close_minute) are untouched below.
+            with self._lock:
+                remaining = sorted(
+                    s for s, p in self.positions.items() if p.status == 'open'
+                )
+            if remaining:
+                if not self._post_close_fc_warned:
+                    self._post_close_fc_warned = True
+                    logger.warning(
+                        f"{self.tag} FORCE CLOSE skipped — regular session "
+                        f"already closed (minute_of_day={self._minute_of_day()} "
+                        f">= close_minute={self.close_minute}); "
+                        f"{len(remaining)} position(s) have no live "
+                        f"liquidity to fill a close order: {remaining} — "
+                        f"after-hours flatten is ops' call, not this engine's"
+                    )
+            else:
+                self._flattened = True
+            return 0
         n = 0; now = datetime.now(timezone.utc)
         with self._lock:
             for sym, pos in list(self.positions.items()):

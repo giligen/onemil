@@ -751,6 +751,13 @@ class ORBEngine:
             float(_rvol_mults[0]), float(_rvol_mults[1]), float(_rvol_mults[2]))
         self.rvol_tilt_applies_to = set(
             sizing_rvol_cfg.get('applies_to', ['production']))
+        logger.info(
+            f"ORB RVOL tilt: enabled={self.rvol_tilt_enabled} "
+            f"edges={self.rvol_tilt_edges[0]}/{self.rvol_tilt_edges[1]} "
+            f"mults={self.rvol_tilt_mults[0]}/{self.rvol_tilt_mults[1]}/"
+            f"{self.rvol_tilt_mults[2]} "
+            f"applies_to={sorted(self.rvol_tilt_applies_to)}"
+        )
         # symbol -> {'n_articles': int, 'headline': str} | None (fetch failed)
         self._news_flags: Dict[str, Optional[Dict]] = {}
         self._news_fetch_done_day: Optional[date] = None
@@ -6492,9 +6499,16 @@ class ORBEngine:
         try:
             alp_positions = self.alpaca.get_open_positions() or []
         except Exception as e:
-            self._notify_error(
-                f"FC SWEEP: Alpaca query failed — cannot verify flat: {e}"
-            )
+            if self._shutdown_in_progress() or self._is_interpreter_shutdown_error(e):
+                self.shutdown_requested = True
+                logger.warning(
+                    f"ORB FC SWEEP: stopping — engine shutdown in progress, "
+                    f"cannot verify flat ({e})"
+                )
+            else:
+                self._notify_error(
+                    f"FC SWEEP: Alpaca query failed — cannot verify flat: {e}"
+                )
             alp_positions = []
         for p in alp_positions:
             sym = (
@@ -6571,6 +6585,13 @@ class ORBEngine:
         verify_passed = False
         last_still_open: List = []
         for attempt in range(max_retries):
+            if self._shutdown_in_progress():
+                logger.warning(
+                    f"FC VERIFY: engine shutdown in progress — stopping "
+                    f"before attempt {attempt+1}/{max_retries}, not "
+                    f"submitting further close orders"
+                )
+                break
             still_open = self._verify_flat_with_grace(
                 max_wait_s=self.fc_verify_max_wait_s,
                 poll_interval_s=self.fc_verify_poll_interval_s,
@@ -6583,6 +6604,14 @@ class ORBEngine:
                     logger.info(
                         f"FC VERIFY: passed on retry {attempt+1}/{max_retries}"
                     )
+                break
+            if self._shutdown_in_progress():
+                logger.warning(
+                    f"FC VERIFY: engine shutdown in progress — stopping "
+                    f"after attempt {attempt+1}/{max_retries}, not "
+                    f"submitting further close orders "
+                    f"({len(still_open)} position(s) unresolved)"
+                )
                 break
             still_syms = [
                 getattr(p, 'symbol', None)
@@ -6649,7 +6678,14 @@ class ORBEngine:
         # phases. Diagnostic context (helper_exhausted / sweep_close_failed)
         # is included so the operator can see which phase each failure
         # came from.
-        if not verify_passed:
+        if self._shutdown_in_progress():
+            # Already warned once (SWEEP and/or VERIFY, above) — the
+            # engine is shutting down, not failing to flatten. A CRITICAL
+            # "MANUAL ACTION REQUIRED" alert here would be the exact noise
+            # this fix exists to remove (2026-10-01 20:04-20:10 UTC
+            # incident, docs/orb_shutdown_hygiene_20261001.md).
+            pass
+        elif not verify_passed:
             still_syms = [
                 getattr(p, 'symbol', None)
                 or (p.get('symbol') if isinstance(p, dict) else '?')
@@ -7723,6 +7759,27 @@ class ORBEngine:
             )
         logger.info(f"ORB: {symbol} rejected ({reject.reason}) — {reject.details}")
 
+    def _shutdown_in_progress(self) -> bool:
+        """True once this engine is shutting down. A `getattr` default
+        keeps this safe on lightweight test doubles that don't set
+        `shutdown_requested`; every real ORBEngine instance initializes it
+        to False (see __init__)."""
+        return bool(getattr(self, 'shutdown_requested', False))
+
+    @staticmethod
+    def _is_interpreter_shutdown_error(exc: BaseException) -> bool:
+        """True for CPython's "cannot schedule new futures after interpreter
+        shutdown" RuntimeError (concurrent.futures.thread's atexit guard,
+        raised when the process's main thread has already returned and
+        some other call tries to use a thread-pool executor to reach
+        Alpaca/Telegram). This is a process-exit condition, never a
+        retryable network fault — callers must log ONE WARNING and stop,
+        never ERROR, never a Telegram send (2026-10-01 20:04-20:10 UTC
+        incident: 24 ERRORs + a Telegram rate-cap hit chasing 4 HOD
+        positions that could never fill after the regular close —
+        docs/orb_shutdown_hygiene_20261001.md)."""
+        return isinstance(exc, RuntimeError) and 'interpreter shutdown' in str(exc)
+
     def _verify_flat_with_grace(
         self, max_wait_s: int = 10, poll_interval_s: float = 1.0,
         orb_owned: Optional[Set[str]] = None,
@@ -7750,6 +7807,13 @@ class ORBEngine:
             try:
                 last = self.alpaca.get_open_positions() or []
             except Exception as e:
+                if self._shutdown_in_progress() or self._is_interpreter_shutdown_error(e):
+                    self.shutdown_requested = True
+                    logger.warning(
+                        f"FC VERIFY poll: stopping — engine shutdown in "
+                        f"progress, cannot verify flat ({e})"
+                    )
+                    break
                 logger.warning(f"FC VERIFY poll: Alpaca query failed: {e}")
                 _time.sleep(poll_interval_s)
                 continue

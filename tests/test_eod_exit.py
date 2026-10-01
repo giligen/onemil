@@ -242,7 +242,8 @@ class TestHodEodExitFlagOff:
         e.positions['ABC'] = pos
         hod_mock_alpaca.get_open_positions.return_value = [{'symbol': 'ABC', 'qty': pos.shares}]   # broker-truth guard: broker holds it
         hod_mock_alpaca.submit_limit_sell_order.return_value = {'id': 'fc-1', 'status': 'accepted'}
-        e.force_close_all()
+        with patch.object(HodBreakEngine, '_minute_of_day', return_value=955):
+            e.force_close_all()
         hod_mock_alpaca.submit_limit_sell_order.assert_called_once()
         args, kwargs = hod_mock_alpaca.submit_limit_sell_order.call_args
         assert args[0] == 'ABC' and args[1] == 100
@@ -260,7 +261,8 @@ class TestHodEodExitModes:
         hod_mock_alpaca.get_open_positions.return_value = [{'symbol': 'ABC', 'qty': 100}]   # broker-truth guard: broker holds it
         hod_mock_alpaca.submit_moc_sell_order.return_value = {'id': 'moc-1', 'status': 'accepted'}
         morning = datetime(2026, 9, 29, 14, 0, tzinfo=ET)
-        with patch('trading.hod_break_engine.datetime') as mock_dt:
+        with patch('trading.hod_break_engine.datetime') as mock_dt, \
+                patch.object(HodBreakEngine, '_minute_of_day', return_value=955):
             mock_dt.now.side_effect = lambda tz=None: morning if tz is ET else datetime.now(tz)
             e.force_close_all()
         hod_mock_alpaca.submit_moc_sell_order.assert_called_once_with('ABC', 100)

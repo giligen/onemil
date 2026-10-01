@@ -251,6 +251,20 @@ class TelegramNotifier:
         except aiohttp.ClientError as e:
             logger.error(f"Telegram HTTP error: {e}")
             return False
+        except RuntimeError as e:
+            # CPython's concurrent.futures.thread atexit guard: the process's
+            # main thread has already returned (interpreter shutting down)
+            # and aiohttp's DNS/connection setup tried to use the dead
+            # thread-pool executor. A process-exit condition, not a
+            # retryable send failure — one WARNING, never ERROR (2026-10-01
+            # 20:04-20:10 UTC incident, docs/orb_shutdown_hygiene_20261001.md).
+            if 'interpreter shutdown' in str(e):
+                logger.warning(
+                    "Telegram send: interpreter shutting down, message dropped"
+                )
+                return False
+            logger.error(f"Unexpected error sending Telegram message: {e}")
+            return False
         except Exception as e:
             logger.error(f"Unexpected error sending Telegram message: {e}")
             return False

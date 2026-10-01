@@ -40,6 +40,11 @@ class FakeEngine:
         # bind the helpers from the real class so they call self
         self._verify_flat_with_grace = ORBEngine._verify_flat_with_grace.__get__(self)
         self._sync_db_after_fc = ORBEngine._sync_db_after_fc.__get__(self)
+        # 2026-10-01 shutdown-hygiene fix: _verify_flat_with_grace now checks
+        # these two helpers too (docs/orb_shutdown_hygiene_20261001.md).
+        self.shutdown_requested = False
+        self._shutdown_in_progress = ORBEngine._shutdown_in_progress.__get__(self)
+        self._is_interpreter_shutdown_error = ORBEngine._is_interpreter_shutdown_error
 
 
 class TestVerifyFlatWithGrace(unittest.TestCase):
