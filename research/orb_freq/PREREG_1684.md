@@ -95,6 +95,27 @@ to the 52-week high — each with its own rules." Cell 1,685 becomes the sub-poo
 * The bar per sub-pool is unchanged; the union adds every passing sub-pool; multiplicity stated: 18 + ≤ 15 pair reads
   × 3 windows. Overlap between sub-pools is reported and de-duplicated in the union (a name-day counts once).
 
+## Amendment 2 (owner 10/1 ~10:00 UTC: "get me more sub-pools") — stage 1b, cell 1,689, same harness and bar
+ 21 large-cap gap: gap ≥ 4 %, price $50–200, prior-day volume ≥ 1M (liquid names, tight spreads: the cost tax in R is
+    smallest here — the one population where ORB's cost sensitivity works FOR it).
+ 22 earnings-day ORB: the EDGAR earnings calendar on disk (research/edgar_desk, research/multiday); gap ≥ 2 %, $3–200,
+    own chain — the catalyst with a known time, regardless of gap size.
+ 23 yesterday's strong close: up ≥ 5 % yesterday AND closed in the top 10 % of yesterday's range; today any gap ≥ 0 %,
+    $3–30 — continuation of a strong day (distinct from F6's ≥ 10 % gap day-2).
+ 24 pre-market-high break: within the 2–5 % band, the 5-min range HIGH is above the pre-market high (a break above
+    every overnight print) — F7, also read as a pair with F1/F2 in stage 2.
+ 25 pre-market turnover: pre-market volume ≥ 20 % of ADV20 (participation before the open), gap 2–5 %.
+ 26 compression: gap 3–5 % AND the 5-min range ≤ 1.5 % of price AND the range high above the pre-market high (a gap
+    that consolidated, then breaks) — note the small R: cost in R reported explicitly.
+ 27 recovery pool, price floor: gap ≥ 5 %, price $1–3, prior-day volume ≥ 2M, spread gate ON (the $3 floor drops them).
+ 28 recovery pool, price cap: gap ≥ 5 %, price $30–100, prior-day volume ≥ 500K (the $30 cap drops them; the earlier
+    $30–50 pool was gap 3–5 %, a different population).
+ 29 sector sympathy (only if a sector map exists on disk — grep data/research for GICS/sector; else VOID): names in
+    the sector of today's ≥ 10 % gapper, gap ≥ 2 %, $3–30.
+ 30 opening drive: the first 1-min bar's low ≥ the open AND the 5-min range closes in its top quarter, gap 2–5 %.
+Each: own selection chain, own exit from the fixed menu chosen on TRAIN, both windows, the same pass bar, overlaps
+with the production book and with pools 1–20 de-duplicated in the union. Multiplicity: +10 × 3 windows × 3 exits.
+
 ## Method (every N cell)
 Point-in-time universes from `data/cache.db daily_bars` and Databento EQUS.SUMMARY (delisted included), minute bars
 from the completed store (append missing symbol-days through the designed appender only), the production pipeline
