@@ -63,7 +63,72 @@ GATE_KEYS = {
     'min_prev_day_range_atr',
     'require_day2_gapper',
 }
-KNOWN_POOL_KEYS = POOL_MEMBERSHIP_KEYS | GATE_KEYS
+# Per-pool exit overrides (owner 2026-10-01, P1 half-out at +1R). Resolved
+# ONCE per entry by resolve_pool_exit_params below and carried on the
+# position + pattern_data.pool_exit (restart re-hydration, ORBEngine.
+# sync_positions). Absent from a pool's dict == that override is inactive
+# -> the consumer's own dict.get(key, production_default) falls through
+# unchanged -- same byte-identical-when-absent contract as GATE_KEYS.
+EXIT_OVERRIDE_KEYS = {
+    'exit_scale_out_pct',
+    'exit_scale_out_at_r',
+    'exit_lock_arm_at_r',
+    'exit_lock_stop_r',
+    'exit_target_r',
+}
+KNOWN_POOL_KEYS = POOL_MEMBERSHIP_KEYS | GATE_KEYS | EXIT_OVERRIDE_KEYS
+
+
+def resolve_pool_exit_params(pool_cfg: Dict) -> Dict[str, float]:
+    """Resolve ONE pool's optional exit overrides from its YAML dict.
+
+    Mirrors evaluate_pool_gates' contract: a key absent from `pool_cfg` is
+    simply absent from the returned dict (never defaulted HERE) so every
+    consumer's own `pool_exit.get(key, production_default)` is the ONE
+    place production defaults live -- a pool that sets none of
+    EXIT_OVERRIDE_KEYS gets back {} and every consumer is byte-identical to
+    pre-this-function behaviour (tests/test_orb_pool_exit_params.py).
+
+    Returned keys (translated from the `exit_*` config names):
+    scale_out_pct, scale_out_at_r, lock_arm_at_r, lock_stop_r, target_r.
+    `target_r` is resolved + persisted for forward use (restart re-
+    hydration) but, as of this change, has no execution mechanism
+    consuming it yet -- no existing live code path rests a plain R-
+    multiple profit target outside of touchgo, so wiring one here would
+    be a new, untested execution path rather than a reuse of one. A
+    present-but-invalid value (non-numeric, a fraction outside (0, 1], an
+    R <= 0) is dropped with a WARNING -- it reverts to production for that
+    ONE key rather than crashing the engine or arming a nonsense order.
+    """
+    out: Dict[str, float] = {}
+    pool_name = pool_cfg.get('name', '?')
+
+    def _take(cfg_key: str, out_key: str, is_valid) -> None:
+        if cfg_key not in pool_cfg or pool_cfg.get(cfg_key) is None:
+            return  # override inactive -- consumer falls back to production
+        raw = pool_cfg[cfg_key]
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "ORB ADDON POOL %r: %s=%r is not numeric -- ignoring, "
+                "falls back to production for this key",
+                pool_name, cfg_key, raw)
+            return
+        if not is_valid(val):
+            logger.warning(
+                "ORB ADDON POOL %r: %s=%s failed its range check -- "
+                "ignoring, falls back to production for this key",
+                pool_name, cfg_key, val)
+            return
+        out[out_key] = val
+
+    _take('exit_scale_out_pct', 'scale_out_pct', lambda v: 0.0 < v <= 1.0)
+    _take('exit_scale_out_at_r', 'scale_out_at_r', lambda v: v > 0.0)
+    _take('exit_lock_arm_at_r', 'lock_arm_at_r', lambda v: v > 0.0)
+    _take('exit_lock_stop_r', 'lock_stop_r', lambda v: v > -10.0)
+    _take('exit_target_r', 'target_r', lambda v: v > 0.0)
+    return out
 
 
 def warn_unknown_pool_keys(pool_cfg: Dict) -> None:

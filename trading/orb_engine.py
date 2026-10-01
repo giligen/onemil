@@ -316,6 +316,15 @@ class OpenPosition:
     # see the guard in _confirm_fill. Defaults False so every pre-existing
     # call site (fresh pending -> first fill) is unaffected.
     already_confirmed: bool = False
+    # ORB add-on pool exit overrides (owner 2026-10-01, P1 half-out at
+    # +1R). Resolved ONCE at entry (trading.orb_addon_gates.
+    # resolve_pool_exit_params) and carried on the position + persisted to
+    # pattern_data.pool_exit so a restart re-hydrates the SAME pool's exit
+    # behaviour instead of silently falling back to production. Empty
+    # dict (production / ungated pools) -> every consumer's own
+    # pool_exit.get(key, production_default) is unchanged (byte-identical).
+    pool_id: str = 'production'
+    pool_exit: Dict[str, float] = field(default_factory=dict)
 
 
 class ORBEngine:
@@ -1994,7 +2003,8 @@ class ORBEngine:
         per position (scale_armed latch); the tiny-qty rule (scale_params
         qty < 1) leaves the trade all-runner with an INFO line.
         """
-        if not getattr(self, 'scale_out_enabled', False) \
+        _pool_scale_active = (pos.pool_exit or {}).get('scale_out_pct') is not None
+        if not (getattr(self, 'scale_out_enabled', False) or _pool_scale_active) \
                 or self.stop_monitor is None:
             return
         if pos.scale_armed or pos.order_id != '':
@@ -2030,14 +2040,15 @@ class ORBEngine:
                 f"({pos.range_high}/{pos.range_low}) — not arming")
             pos.scale_armed = True
             return
+        _frac = float((pos.pool_exit or {}).get('scale_out_pct', self.scale_frac))
+        _level_r = float((pos.pool_exit or {}).get('scale_out_at_r', self.scale_level_r))
         scale_px, scale_qty = scale_params(
-            pos.entry_price, range_size, self.scale_frac,
-            self.scale_level_r, pos.shares)
+            pos.entry_price, range_size, _frac, _level_r, pos.shares)
         pos.scale_armed = True
         if scale_qty < 1:
             logger.info(
                 f"[ORB] SCALE OUT {pos.symbol}: qty<1 "
-                f"({self.scale_frac}x{pos.shares}sh) — all-runner (frozen "
+                f"({_frac}x{pos.shares}sh) — all-runner (frozen "
                 f"tiny-qty rule)")
             return
         try:
@@ -2049,8 +2060,8 @@ class ORBEngine:
         if ok:
             logger.info(
                 f"[ORB] SCALE OUT ARMED {pos.symbol}: {scale_qty}/{pos.shares}"
-                f"sh at ${scale_px:.2f} (+{self.scale_level_r}R, "
-                f"frac={self.scale_frac})"
+                f"sh at ${scale_px:.2f} (+{_level_r}R, "
+                f"frac={_frac})"
             )
 
     def _audit_touchgo(self, pos: 'OpenPosition', rule: str, fired: bool,
@@ -3179,6 +3190,28 @@ class ORBEngine:
             # not a dataclass field, same post-hoc-attribute convention as
             # plan.pool above. Persisted into the dry ledger / pattern_data.
             plan.pool_gates = cand.pool_gate_values or {}
+            # Per-pool exit overrides (owner 2026-10-01, P1 half-out at
+            # +1R): resolved ONCE here, same post-hoc-attribute convention
+            # as plan.pool/plan.pool_id/plan.pool_gates. {} for production
+            # / pools that set none of EXIT_OVERRIDE_KEYS -> every
+            # downstream consumer (_maybe_arm_scale, _handle_scale_fill_
+            # event, the lock override just below) falls back to the
+            # production default, unchanged (byte-identical).
+            from trading.orb_addon_gates import (
+                resolve_pool_exit_params as _resolve_pool_exit)
+            _pool_cfg_for_exit = (
+                next((p for p in self.addon_pools
+                      if p.get('name') == pool_label), {})
+                if pool_label != 'production' else {})
+            plan.pool_exit = _resolve_pool_exit(_pool_cfg_for_exit)
+            # lock_arm_at_r/lock_stop_r already flow straight from plan to
+            # OpenPosition and to pattern_data (unchanged code below) --
+            # so overriding them HERE, before either read happens, is the
+            # ENTIRE wiring needed to pool-ize the existing lock mechanism.
+            plan.lock_arm_at_r = plan.pool_exit.get(
+                'lock_arm_at_r', plan.lock_arm_at_r)
+            plan.lock_stop_r = plan.pool_exit.get(
+                'lock_stop_r', plan.lock_stop_r)
             if pool_label != 'production' and dry_run:
                 # PREREG_LIVE_UNION.md dry day: zero orders, telegram/log
                 # only. cand.plan_submitted still latches so the pick isn't
@@ -4741,6 +4774,8 @@ class ORBEngine:
             tp_leg_id=tp_leg_id,
             sl_leg_id=sl_leg_id,
             atr14=_atr14,
+            pool_id=getattr(plan, 'pool_id', 'production'),
+            pool_exit=getattr(plan, 'pool_exit', {}) or {},
         )
         # Track on CandidateState too for clean time-stop cancellation
         cand = _cand
@@ -5517,6 +5552,24 @@ class ORBEngine:
             logger.error(f"ORB: {symbol} scale DB update failed: {e} — "
                          f"in-memory state holds; final exit rewrites "
                          f"nothing scale-side (columns lag until reconcile)")
+        # P1 half-out at +1R (owner 2026-10-01, "be clear on its trades"):
+        # pool-tagged fill line + the existing per-trade ORB Telegram
+        # notifier, mirroring the [ORB <pool_id>] convention used at entry
+        # (_submit_entry) -- production (.pool_id == 'production') keeps
+        # the plain tg_prefix, unchanged.
+        _frac = float((getattr(pos, 'pool_exit', None) or {}).get(
+            'scale_out_pct', self.scale_frac))
+        _level_r = float((getattr(pos, 'pool_exit', None) or {}).get(
+            'scale_out_at_r', self.scale_level_r))
+        _pool_id = getattr(pos, 'pool_id', 'production')
+        _prefix = f"[ORB {_pool_id}]" if _pool_id != 'production' else self.tg_prefix
+        _scale_msg = (
+            f"{_prefix} SCALE_OUT {symbol} {_frac:.0%} @ +{_level_r:.1f}R "
+            f"px=${price:.2f} qty={qty} pnl=${leg_pnl:+,.2f}"
+        )
+        logger.info(_scale_msg)
+        if self.notify_on_exit and self.notifier:
+            self._notify(_scale_msg)
 
     def _handle_target_partial_fill_event(self, ev) -> None:
         """Book a PARTIAL resting-target fill (rule 6, 2026-09-29 follow-up
@@ -6418,6 +6471,8 @@ class ORBEngine:
                     bar_close_price=(float(bar_close) if bar_close else float(pdata.get('range_high', 0.0)) or None),
                     order_submitted_at=submit_ts,
                     entry_quote_ask=(float(entry_ask) if entry_ask else None),
+                    pool_id=str(pdata.get('pool_id') or 'production'),
+                    pool_exit=dict(pdata.get('pool_exit') or {}),
                 )
                 self.open_positions[sym] = pos
                 # 2026-05-08 fix: ALWAYS register the recovered pending order
@@ -6513,6 +6568,8 @@ class ORBEngine:
                 # already-filled DB record — a later _confirm_fill
                 # re-entry (restart reconciliation) must not re-stamp it.
                 already_confirmed=bool(t.get('fill_price') or t.get('filled_at')),
+                pool_id=str(pdata.get('pool_id') or 'production'),
+                pool_exit=dict(pdata.get('pool_exit') or {}),
             )
             if db_scaled_at:
                 pos.scale_qty = db_scale_qty
@@ -7209,6 +7266,14 @@ class ORBEngine:
                 # log/Telegram lines (trading.orb_addon_gates.pool_id_for) —
                 # post-hoc attribute, same convention as 'pool'/'pool_gates'.
                 'pool_id': getattr(plan, 'pool_id', 'production'),
+                # P1 half-out at +1R (owner 2026-10-01): the resolved
+                # exit-override dict (trading.orb_addon_gates.
+                # resolve_pool_exit_params) -- {} for production / pools
+                # that set none of EXIT_OVERRIDE_KEYS. Rehydrated onto the
+                # OpenPosition on restart (ORBEngine.sync_positions) so a
+                # pool's exit behaviour survives a restart instead of
+                # reverting to production.
+                'pool_exit': getattr(plan, 'pool_exit', {}) or {},
             })
             now_utc = submit_time or datetime.now(timezone.utc)
             record = {

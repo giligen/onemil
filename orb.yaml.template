@@ -112,6 +112,13 @@ universe:
         max_price: 30.0
         min_prev_volume: 500000
         min_move_to_range_high_pct: 5.0
+        # pool_id: P1              # tags client_order_id / [ORB P1] log+Telegram / pattern_data.pool_id
+        # Per-pool exit overrides (owner 2026-10-01, cell 1,692 P1 exit:
+        # 50% out at +1R -- +0.27 R t 2.7 on 2026, regime-specific, see
+        # docs/CLAUDE_HISTORY.md). Absent = production exit, byte-
+        # identical (trading.orb_addon_gates.resolve_pool_exit_params).
+        # exit_scale_out_pct: 0.5    # fraction sold at exit_scale_out_at_r, booked as a partial (scale_* columns)
+        # exit_scale_out_at_r: 1.0   # R-multiple above entry where the half-out fires
 
 # Entry — 5-min opening range breakout.
 # Trigger mode: TOUCH (bar high > range_high). Production = pre-placed stop-limit buy.

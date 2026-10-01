@@ -1826,6 +1826,29 @@ class StopMonitor:
         set); False = nothing submitted, state unchanged, retry next trigger.
         """
         client = self._client_for(watch.strategy)
+        # Broker-truth qty guard (owner 2026-10-01 ask, trading/
+        # exit_qty_guard.py -- the SAME module the 9/25 CDNA full-exit fix
+        # uses). NOT resolve_broker_capped_sell_qty() verbatim: that helper
+        # always returns the broker's FULL long qty, correct for a sell-
+        # to-flat exit but WRONG here -- it would silently turn an
+        # intended PARTIAL scale leg into a full-position close. A scale
+        # leg must instead be capped DOWN (never up) to what the broker
+        # actually shows long, so it can never create or extend a short.
+        _broker_qty = _exit_qty_guard.get_signed_broker_qty(client, symbol)
+        if _broker_qty <= 0:
+            logger.warning(
+                f"StopMonitor: {symbol} scale-out abort — broker shows "
+                f"{'a SHORT of ' + str(-_broker_qty) + ' sh' if _broker_qty < 0 else 'no position'}; "
+                f"will not submit a scale sell (never create/extend a short)"
+            )
+            return False
+        if _broker_qty < watch.scale_qty:
+            logger.warning(
+                f"StopMonitor: {symbol} scale-out qty capped "
+                f"{watch.scale_qty} -> {_broker_qty}sh (broker shows fewer "
+                f"shares long than the scale leg wanted)"
+            )
+            watch.scale_qty = _broker_qty
         runner_qty = watch.shares - watch.scale_qty
         if runner_qty < 0:
             logger.error(
