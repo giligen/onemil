@@ -32,6 +32,18 @@ on its test window, ≥ 1 fill/week, and the union's weekly P10 per fill and str
 → independent rebuild → paper as pools with their exits (each pool's exit via the per-pool exit overrides shipped
 10/1). Regime-specific pairs → paper at minimum size, forward read 40 fills.
 
+## Amendment 1 (owner 10/1 13:35 UTC: the goal is union P&L, drawdown accepted; split the EXISTING pool too)
+* Objective restated: the union book's mean R × frequency (P&L at fixed risk per fill); max drawdown and the worst
+  week are REPORTED and expected to grow with the fill count — the clause "weekly P10 not worse" is read PER FILL
+  (and at a fixed weekly risk budget), never in absolute R.
+* Production sub-pools: the production book (entered == 1) split by ONE admission number at a time, tercile edges on
+  TRAIN 2025 only: prior-day volume, gap size {5–7, 7–10, ≥ 10 %}, price {$3–10, 10–20, 20–30}, 5-min range size
+  (% of price), relative volume at 09:35, pre-market dollar volume (where the bars exist). Each slice × the 12 exits ×
+  both directions, same classification. A slice's exit replaces production's for that slice only if the pair is
+  ROBUST (both directions) — the slices are thin (n ≈ 40–80 per half; MDE ≈ 0.3–0.4 R), so regime-specific slices
+  are reported, not shipped. The union read then uses per-slice exits where robust, production's elsewhere.
+* Multiplicity adds ≈ 18 slices × 12 exits × 2 directions ≈ 430 reads; stated.
+
 ## Multiplicity
 ≈ 21 pools × 12 exits × 2 directions ≈ 500 reads, stated; the both-directions classification and the tail clause
 are the protection; expected false "robust" ≈ 1 — every robust pair is rebuilt before the owner sees it as a claim.
