@@ -1811,6 +1811,31 @@ class StopMonitor:
         )
         return True
 
+    def resize_watch_qty(self, symbol: str, new_shares: int) -> bool:
+        """Update an existing watch's tracked share count IN PLACE (owner
+        2026-10-01, ORB "one more entry after R" add-on).
+
+        Unlike add_watch, this does NOT replace the WatchEntry — every
+        other in-flight field (trailing_active, highest_since_entry,
+        scale_done, pp_taken, ofi_cumulative, ...) survives untouched.
+        Re-calling add_watch to "resize" would silently reset all of that,
+        which is exactly what this method exists to avoid.
+
+        Callers must resize the broker-side SL/TP legs to match BEFORE
+        calling this (trading/exit_qty_guard-capped, see ORBEngine.
+        _resize_exit_legs_for_add) so the watch's qty and what the broker
+        legs actually cover never diverge.
+        """
+        with self._watch_lock:
+            watch = self._watches.get(symbol)
+            if watch is None:
+                logger.warning(f"StopMonitor: resize_watch_qty({symbol}) — no active watch")
+                return False
+            old = watch.shares
+            watch.shares = int(new_shares)
+        logger.info(f"StopMonitor: {symbol} watch qty resized {old} -> {new_shares}sh")
+        return True
+
     def _scale_submit_core(self, symbol: str, watch: WatchEntry) -> bool:
         """Synchronous scale submission: resize safety legs to runner qty,
         then submit an INDEPENDENT limit sell for the scale qty (P0-5.5 —

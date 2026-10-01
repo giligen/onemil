@@ -415,6 +415,22 @@ exit:
   # see the spec's Rollout section. trading/orb_target_limit.py.
   target_resting_limit: false
 
+  # ORB ADD-ON: one more entry after +R (owner 2026-10-01 ask, paper only).
+  # trading/orb_add_on.py (pure sizing/trigger/stop-mode module) + wiring in
+  # trading/orb_engine.py. Default disabled -> byte-identical to pre-feature
+  # behaviour (tests/test_orb_add_on.py::TestByteIdentical). A pool can
+  # override any of these keys under its own `exit_add_on:` block in
+  # universe.addon_pools.pools[] (same per-pool exit-override mechanism as
+  # exit_scale_out_pct/exit_lock_arm_at_r, commit d9b6fbc) -- a key a pool
+  # does not set falls back to this production block.
+  # add_on:
+  #   enabled: false              # master switch
+  #   at_r: 1.0                   # R multiple that triggers the add (R = range_high - range_low)
+  #   units: 1.0                  # add_shares = round(base_shares * units); 1.0 = same size as base
+  #   stop_mode: original         # original | add_breakeven | live_lock
+  #   max_adds: 1                 # cap on ADD events per position
+  #   applies_to: ['production']  # pool_id allow-list
+
 # Safety-net bracket stop-loss sent to Alpaca (wide, backup if service crashes).
 # Real stop is monitored client-side via StopMonitor; this fires only in disaster cases.
 safety_net:

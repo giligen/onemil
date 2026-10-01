@@ -2267,18 +2267,26 @@ class AlpacaClient:
             raise AlpacaAPIError(f"Failed to submit OCO buy order for {symbol}: {e}")
 
     def submit_limit_buy_order(
-        self, symbol: str, qty: int, limit_price: float
+        self, symbol: str, qty: int, limit_price: float,
+        client_order_id: Optional[str] = None
     ) -> Dict:
         """
         Submit a plain limit buy order (no bracket).
 
         Used by MACD wave engine for entries — limit price set at/above ask
-        for immediate fill while capping worst-case slippage.
+        for immediate fill while capping worst-case slippage. Also used by
+        the ORB ADD-ON (trading/orb_add_on.py / orb_engine.py, owner
+        2026-10-01) for the marketable "one more entry after +R" buy, which
+        is why this now takes an optional client_order_id (sibling
+        submit_limit_sell_order already had one; the buy side was simply
+        missing it — existing callers are unaffected, default None).
 
         Args:
             symbol: Stock symbol
             qty: Number of shares to buy
             limit_price: Limit price
+            client_order_id: Optional broker-side order tag (None = let
+                Alpaca assign one, unchanged pre-existing behaviour)
 
         Returns:
             Dict with order details (id, status, symbol)
@@ -2295,6 +2303,7 @@ class AlpacaClient:
                 time_in_force=TimeInForce.DAY,
                 limit_price=round(limit_price, 2),
                 order_class=OrderClass.SIMPLE,
+                client_order_id=client_order_id,
             )
 
             order = self._call_with_timeout(

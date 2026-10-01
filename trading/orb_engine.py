@@ -88,6 +88,8 @@ from trading.orphan_reconciler import (
     ReconcilerConfig, reconcile_strategy_orphans,
 )
 from trading.stop_monitor import build_exit_update
+from trading import orb_add_on
+from trading import exit_qty_guard as _exit_qty_guard
 
 
 logger = logging.getLogger(__name__)
@@ -336,6 +338,21 @@ class OpenPosition:
     # pool_exit.get(key, production_default) is unchanged (byte-identical).
     pool_id: str = 'production'
     pool_exit: Dict[str, float] = field(default_factory=dict)
+    # --- ORB one-more-entry-after-R "ADD" (owner 2026-10-01) -----------
+    # trading/orb_add_on.py (pure sizing/trigger/stop-mode module), config
+    # exit.add_on / pool override exit_add_on. add_on_cfg resolved ONCE at
+    # submit (same post-hoc-attribute convention as pool_exit) -- {} means
+    # "no pool override", every read falls back to ORBEngine.add_on_cfg via
+    # orb_add_on.add_on_param. Runtime state (adds/add_count/combined_avg_
+    # price) persisted to pattern_data.add_on so a restart rehydrates the
+    # SAME combined position instead of reverting to the base fill alone.
+    add_on_cfg: Dict = field(default_factory=dict)
+    add_count: int = 0
+    adds: List[Dict] = field(default_factory=list)       # [{at_r, px, qty, ts}, ...]
+    combined_avg_price: Optional[float] = None             # None until the first add books
+    add_be_leg: Optional[Dict] = None                       # stop_mode='add_breakeven' tracking
+    add_be_pnl: float = 0.0                                 # booked once the add_be_leg exits
+    add_pending_order_id: str = ''                          # in-flight add buy; '' = none
 
 
 class ORBEngine:
@@ -789,6 +806,16 @@ class ORBEngine:
         if _sc_env is not None:
             self.scale_out_enabled = _sc_env.strip().lower() not in (
                 '0', 'false', 'no', 'off', '')
+        # ORB ADD-ON (owner 2026-10-01, "one more entry after R"): resolved
+        # ONCE here as the PRODUCTION defaults dict (fully defaulted, unlike
+        # a pool override which stays partial) — trading/orb_add_on.py.
+        # Absent from orb.yaml entirely -> enabled False -> every add-on
+        # code path below is a no-op, byte-identical to pre-feature
+        # behaviour (tests/test_orb_add_on.py::TestByteIdentical).
+        self.add_on_cfg: Dict = {
+            **orb_add_on.DEFAULT_ADD_ON,
+            **orb_add_on.resolve_add_on_params(exit_cfg.get('add_on') or {}),
+        }
         if self.atr_floor_enabled or self.scale_out_enabled:
             logger.info(
                 f"[ORB] WINNER STACK: atr_stop_floor="
@@ -1755,6 +1782,10 @@ class ORBEngine:
                 self._maybe_arm_scale(pos_ws)
             except Exception as e:
                 logger.warning(f"ORB: _maybe_arm_scale({symbol}) failed: {e}")
+            try:
+                self._maybe_fire_add_on(pos_ws, bars_df)
+            except Exception as e:
+                logger.warning(f"ORB: _maybe_fire_add_on({symbol}) failed: {e}")
 
         cand = self.candidates.get(symbol)
         if cand is None or cand.range_data is not None:
@@ -2088,6 +2119,255 @@ class ORBEngine:
                 f"sh at ${scale_px:.2f} (+{_level_r}R, "
                 f"frac={_frac})"
             )
+
+    # =====================================================================
+    # ORB ADD-ON: one more entry after +R (owner 2026-10-01 ask)
+    # trading/orb_add_on.py owns every pure decision (trigger, sizing,
+    # stop-mode, rails math); everything here is I/O — submit, resize,
+    # Telegram, persistence. config exit.add_on / pool override
+    # exit_add_on (resolved onto pos.add_on_cfg at submit, see _submit_
+    # entry). Disabled (the default) -> _maybe_fire_add_on returns on its
+    # first line -> byte-identical to pre-feature behaviour.
+    # =====================================================================
+
+    def _add_on_param(self, pos: 'OpenPosition', key: str):
+        """ONE read path for an add_on value: pos.add_on_cfg (pool
+        override) -> self.add_on_cfg (production) -> hard default."""
+        return orb_add_on.add_on_param(
+            getattr(pos, 'add_on_cfg', None), self.add_on_cfg, key)
+
+    def _maybe_fire_add_on(self, pos: 'OpenPosition', bars_df: pd.DataFrame) -> None:
+        """Bar-close hook (called from _ingest_bars, next to
+        _maybe_arm_scale): fire the ADD once the position's mark-to-market
+        first reaches +at_r R at a bar CLOSE. R = range_high - range_low
+        (parity with the existing scale-out/lock mechanisms, NOT entry-to-
+        stop distance, which drifts once a lock ratchets pos.stop_price —
+        see trading/orb_add_on.py module docstring).
+        """
+        if pos.order_id != '' or pos.add_pending_order_id:
+            return  # base still pending, or an add already in flight
+        if pos.add_be_leg is not None and not pos.add_be_leg.get('done'):
+            # A stop_mode='add_breakeven' leg exists from an earlier add —
+            # manage it regardless of the enabled/eligibility gates below
+            # (those gate NEW adds only; an existing leg must still be
+            # watched even if config changed since it was opened).
+            try:
+                bcp = float(bars_df['close'].iloc[-1])
+            except (KeyError, IndexError, TypeError, ValueError) as e:
+                logger.warning(f"[ORB] ADD {pos.symbol}: no closed-bar price for add_be check ({e})")
+                bcp = None
+            if bcp is not None and orb_add_on.add_breakeven_triggered(bcp, pos.add_be_leg):
+                self._exit_add_breakeven_leg(pos, bcp)
+        if not self._add_on_param(pos, 'enabled'):
+            return
+        if not orb_add_on.is_pool_eligible(
+                getattr(pos, 'pool_id', 'production'),
+                self._add_on_param(pos, 'applies_to')):
+            return
+        max_adds = self._add_on_param(pos, 'max_adds')
+        if not orb_add_on.adds_remaining(pos.add_count, max_adds):
+            return
+        try:
+            bar_close_price = float(bars_df['close'].iloc[-1])
+        except (KeyError, IndexError, TypeError, ValueError) as e:
+            logger.warning(f"[ORB] ADD {pos.symbol}: no closed-bar price available ({e})")
+            return
+        range_size = max(pos.range_high - pos.range_low, 0.0)
+        at_r = float(self._add_on_param(pos, 'at_r'))
+        # Ladder the trigger level by add_count so a max_adds>1 config gets
+        # a fresh level per add (at_r, 2*at_r, ...) instead of re-firing
+        # on the very next bar at the SAME level already crossed.
+        level_r = at_r * (pos.add_count + 1)
+        if not orb_add_on.has_reached_add_trigger(
+                bar_close_price, pos.entry_price, range_size, level_r):
+            return
+        self._execute_add_on(pos, bar_close_price)
+
+    def _execute_add_on(self, pos: 'OpenPosition', bar_close_price: float) -> None:
+        """Submit + book ONE add-on leg once _maybe_fire_add_on's trigger
+        has fired. Synchronous: the add is a marketable limit (crosses the
+        spread), so the fill is read back from the submit response itself
+        rather than polled across ticks — consistent with this being a
+        small, already-in-the-money add, not a fresh entry.
+        """
+        now_utc = datetime.now(timezone.utc)
+        now_et = now_utc + timedelta(hours=_et_offset_hours(now_utc))
+        if orb_add_on.is_past_add_cutoff(now_et):
+            logger.warning(f"[ORB] ADD {pos.symbol}: blocked — past the 15:00 ET cutoff")
+            return
+        try:
+            kill_reason = self._kill_rails_blocked()
+        except Exception as e:
+            logger.error(f"[ORB] ADD {pos.symbol}: kill-rail check failed ({e}) — blocking add, fail closed")
+            return
+        if kill_reason:
+            logger.warning(f"[ORB] ADD {pos.symbol}: blocked — day-kill tripped ({kill_reason})")
+            return
+        units = float(self._add_on_param(pos, 'units'))
+        add_qty = orb_add_on.compute_add_qty(pos.shares, units)
+        if add_qty < 1:
+            logger.info(f"[ORB] ADD {pos.symbol}: qty<1 ({units}x{pos.shares}sh) — skipping")
+            return
+        est_notional = add_qty * bar_close_price
+        if not self._has_buying_power(est_notional):
+            logger.warning(
+                f"[ORB] ADD {pos.symbol}: blocked — insufficient buying power "
+                f"for ${est_notional:,.0f} ({add_qty}sh @ ${bar_close_price:.2f})")
+            return
+        _pool_tag = getattr(pos, 'pool_id', 'production') or 'prod'
+        coid = f"orb-add-{_pool_tag}-{pos.symbol}-{int(time.time() * 1000)}"[:48]
+        limit_price = round(bar_close_price * 1.005, 2)  # marketable: cross the spread
+        pos.add_pending_order_id = '__submitting__'  # reentrancy guard for this tick
+        try:
+            result = self.alpaca.submit_limit_buy_order(
+                symbol=pos.symbol, qty=add_qty, limit_price=limit_price,
+                client_order_id=coid,
+            )
+        except Exception as e:
+            logger.error(f"[ORB] ADD {pos.symbol}: submit failed: {e}")
+            pos.add_pending_order_id = ''
+            return
+        if not result or not result.get('id'):
+            logger.error(f"[ORB] ADD {pos.symbol}: submit returned no order id")
+            pos.add_pending_order_id = ''
+            return
+        pos.add_pending_order_id = ''
+        order_id = str(result['id'])
+        fill_px = float(result.get('filled_avg_price') or 0.0) or limit_price
+        at_r = float(self._add_on_param(pos, 'at_r'))
+        stop_mode = self._add_on_param(pos, 'stop_mode')
+
+        combined_qty, combined_avg = orb_add_on.compute_combined_position(
+            pos.shares, pos.entry_price, add_qty, fill_px)
+        applied_qty = self._resize_exit_legs_for_add(pos, combined_qty)
+        pos.shares = applied_qty
+        pos.combined_avg_price = combined_avg
+        pos.add_count += 1
+        add_record = orb_add_on.build_add_record(at_r, fill_px, add_qty, now_utc)
+        pos.adds.append(add_record)
+
+        if stop_mode == 'add_breakeven':
+            pos.add_be_leg = orb_add_on.resolve_add_breakeven_leg(stop_mode, fill_px, add_qty)
+        # 'original': position's stop is left exactly as-is over the
+        # combined qty. 'live_lock': the existing lock_arm_at_r/lock_stop_r
+        # mechanism already governs the combined qty (pos.shares/pos.
+        # entry_price-based) — no separate leg needed either way.
+
+        logger.info(
+            f"[ORB] ADD {pos.symbol} +{at_r}R px={fill_px:.2f} qty={add_qty} "
+            f"stop_mode={stop_mode} (combined {combined_qty}sh @ ${combined_avg:.4f})"
+        )
+        self._notify(
+            f"{self.tg_prefix} ADD {pos.symbol}: +{add_qty}sh @ ${fill_px:.2f} "
+            f"(+{at_r}R, stop_mode={stop_mode}) — combined {combined_qty}sh "
+            f"@ ${combined_avg:.4f}"
+        )
+        self._persist_add_on_state(pos)
+
+    def _persist_add_on_state(self, pos: 'OpenPosition') -> None:
+        """Read-modify-write pattern_data.add_on with the position's
+        CURRENT adds/combined-price/add_be_leg state. Reads the row by
+        trade_id (not order_id, which is '' once filled) so an existing
+        pool_id/pool_exit/pool_gates/rvol_tilt key already in pattern_data
+        is preserved, never clobbered."""
+        try:
+            import json as _json
+            existing = self.db.get_trade_by_id(pos.trade_id)
+            pdata = {}
+            if existing and existing.get('pattern_data'):
+                raw = existing['pattern_data']
+                pdata = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+            pdata['add_on'] = {
+                'adds': pos.adds,
+                'add_qty': sum(a['qty'] for a in pos.adds),
+                'add_avg_px': pos.combined_avg_price,
+                'add_be_leg': pos.add_be_leg,
+                'add_be_pnl': pos.add_be_pnl,
+            }
+            self.db.update_trade(pos.trade_id, {
+                'shares': pos.shares,
+                'pattern_data': _json.dumps(pdata),
+            })
+        except Exception as e:
+            logger.error(f"[ORB] ADD {pos.symbol}: DB persistence failed ({e}) — "
+                         f"combined position is live but will NOT rehydrate correctly on restart")
+
+    def _exit_add_breakeven_leg(self, pos: 'OpenPosition', exit_price: float) -> None:
+        """stop_mode='add_breakeven': the add qty's own breakeven level has
+        been touched — sell JUST the add qty (never the base), resize the
+        SL/TP legs + StopMonitor watch back down, and book the leg's own
+        pnl into pos.add_be_pnl (composed exactly once into the FINAL exit
+        pnl at _handle_exit_event, same convention as scale_pnl).
+        """
+        leg = pos.add_be_leg
+        qty = int(leg['qty'])
+        try:
+            result = self.alpaca.submit_limit_sell_order(
+                symbol=pos.symbol, qty=qty, limit_price=round(exit_price * 0.995, 2),
+                client_order_id=f"orb-addbe-{pos.symbol}-{int(time.time() * 1000)}"[:48],
+            )
+        except Exception as e:
+            logger.error(f"[ORB] ADD-BE {pos.symbol}: sell submit failed: {e}")
+            return
+        if not result or not result.get('id'):
+            logger.error(f"[ORB] ADD-BE {pos.symbol}: sell submit returned no order id")
+            return
+        fill_px = float(result.get('filled_avg_price') or 0.0) or exit_price
+        remaining = max(pos.shares - qty, 0)
+        applied = self._resize_exit_legs_for_add(pos, remaining)
+        pos.shares = applied
+        pos.add_be_pnl += (fill_px - leg['price']) * qty
+        leg['done'] = True
+        logger.info(
+            f"[ORB] ADD-BE {pos.symbol}: exited add leg {qty}sh @ ${fill_px:.2f} "
+            f"(breakeven ${leg['price']:.2f}) — {remaining}sh remain"
+        )
+        self._notify(
+            f"{self.tg_prefix} ADD-BE {pos.symbol}: {qty}sh @ ${fill_px:.2f} "
+            f"(breakeven exit) — {remaining}sh remain"
+        )
+        self._persist_add_on_state(pos)
+
+    def _resize_exit_legs_for_add(self, pos: 'OpenPosition', new_qty: int) -> int:
+        """Resize pos's resting SL/TP broker legs (and the StopMonitor
+        watch) UP to `new_qty`, capped by the broker's ACTUAL signed qty
+        for the symbol (trading/exit_qty_guard — the SAME broker-truth cap
+        StopMonitor's own scale-leg resize uses). Returns the qty actually
+        applied (<= new_qty). Never raises; a replace failure is logged and
+        leaves that leg at its previous qty (degrades the safety-net cover,
+        loudly, never silently).
+        """
+        broker_qty = _exit_qty_guard.get_signed_broker_qty(self.alpaca, pos.symbol)
+        applied = int(new_qty)
+        if broker_qty <= 0:
+            logger.warning(
+                f"[ORB] ADD {pos.symbol}: broker shows no long position — "
+                f"cannot resize exit legs to {new_qty}sh (add fill may still be settling)")
+            return pos.shares
+        if broker_qty < new_qty:
+            logger.warning(
+                f"[ORB] ADD {pos.symbol}: broker shows only {broker_qty}sh long "
+                f"(wanted legs at {new_qty}sh) — capping to the broker's qty")
+            applied = broker_qty
+        for attr in ('sl_leg_id', 'tp_leg_id'):
+            leg_id = getattr(pos, attr, '')
+            if not leg_id:
+                continue
+            try:
+                res = self.alpaca.replace_order_qty(leg_id, applied)
+                new_id = (res or {}).get('id') or ''
+                if new_id:
+                    setattr(pos, attr, new_id)
+            except Exception as e:
+                logger.error(
+                    f"[ORB] ADD {pos.symbol}: resize {attr} ({leg_id[:8]}) FAILED: {e} — "
+                    f"safety leg still covers only the pre-add qty")
+        if self.stop_monitor is not None:
+            try:
+                self.stop_monitor.resize_watch_qty(pos.symbol, applied)
+            except Exception as e:
+                logger.error(f"[ORB] ADD {pos.symbol}: StopMonitor resize_watch_qty failed: {e}")
+        return applied
 
     def _audit_touchgo(self, pos: 'OpenPosition', rule: str, fired: bool,
                        exit_p, last_ts, bb_ts, range_size: float,
@@ -3235,6 +3515,13 @@ class ORBEngine:
                       if p.get('name') == pool_label), {})
                 if pool_label != 'production' else {})
             plan.pool_exit = _resolve_pool_exit(_pool_cfg_for_exit)
+            # ORB ADD-ON per-pool override (owner 2026-10-01): SAME
+            # _pool_cfg_for_exit dict, SAME post-hoc-attribute convention —
+            # {} for production / pools that set no exit_add_on block, so
+            # _maybe_fire_add_on's orb_add_on.add_on_param() falls back to
+            # ORBEngine.add_on_cfg (production), unchanged (byte-identical).
+            plan.add_on_cfg = orb_add_on.resolve_add_on_params(
+                (_pool_cfg_for_exit or {}).get('exit_add_on') or {})
             # lock_arm_at_r/lock_stop_r already flow straight from plan to
             # OpenPosition and to pattern_data (unchanged code below) --
             # so overriding them HERE, before either read happens, is the
@@ -4850,6 +5137,7 @@ class ORBEngine:
             atr14=_atr14,
             pool_id=getattr(plan, 'pool_id', 'production'),
             pool_exit=getattr(plan, 'pool_exit', {}) or {},
+            add_on_cfg=getattr(plan, 'add_on_cfg', {}) or {},
         )
         # Track on CandidateState too for clean time-stop cancellation
         cand = _cand
@@ -5508,9 +5796,15 @@ class ORBEngine:
         # winner-stack fields — an unscaled position composes identically.
         _scale_pnl = float(getattr(pos, 'scale_pnl', 0.0) or 0.0)
         _scale_qty = int(getattr(pos, 'scale_qty', 0) or 0)
-        pnl = (exit_price - pos.entry_price) * pos.shares + _scale_pnl
+        # ORB ADD-ON (owner 2026-10-01): once an add has booked, the cost
+        # basis for the WHOLE combined qty is the blended average, not the
+        # base-only entry_price. combined_avg_price is None until the
+        # first add books, so an unadded position is byte-identical.
+        _cost_basis = getattr(pos, 'combined_avg_price', None) if getattr(pos, 'combined_avg_price', None) is not None else pos.entry_price
+        _add_be_pnl = float(getattr(pos, 'add_be_pnl', 0.0) or 0.0)
+        pnl = (exit_price - _cost_basis) * pos.shares + _scale_pnl + _add_be_pnl
         entry_qty = pos.shares + _scale_qty
-        entry_notional = pos.entry_price * entry_qty
+        entry_notional = _cost_basis * entry_qty
         pnl_pct = (pnl / entry_notional * 100.0) if entry_notional > 0 else 0.0
 
         def _numf(v):
@@ -5609,7 +5903,10 @@ class ORBEngine:
                     logger.error(f"ORB: {symbol} orphan scale DB write "
                                  f"failed: {e}")
             return
-        leg_pnl = (price - pos.entry_price) * qty
+        # ORB ADD-ON (owner 2026-10-01): a partial leg booked after an add
+        # must use the blended average too — see _handle_exit_event.
+        _leg_cost_basis = getattr(pos, 'combined_avg_price', None) if getattr(pos, 'combined_avg_price', None) is not None else pos.entry_price
+        leg_pnl = (price - _leg_cost_basis) * qty
         pos.scale_qty += qty
         pos.scale_price = price
         pos.scale_pnl += leg_pnl
@@ -5682,7 +5979,10 @@ class ORBEngine:
                     logger.error(f"ORB: {symbol} orphan target-partial DB "
                                  f"write failed: {e}")
             return
-        leg_pnl = (price - pos.entry_price) * qty
+        # ORB ADD-ON (owner 2026-10-01): a partial leg booked after an add
+        # must use the blended average too — see _handle_exit_event.
+        _leg_cost_basis = getattr(pos, 'combined_avg_price', None) if getattr(pos, 'combined_avg_price', None) is not None else pos.entry_price
+        leg_pnl = (price - _leg_cost_basis) * qty
         pos.scale_qty += qty
         pos.scale_price = price
         pos.scale_pnl += leg_pnl
@@ -6644,6 +6944,19 @@ class ORBEngine:
                 already_confirmed=bool(t.get('fill_price') or t.get('filled_at')),
                 pool_id=str(pdata.get('pool_id') or 'production'),
                 pool_exit=dict(pdata.get('pool_exit') or {}),
+                # ORB ADD-ON restart rehydration (owner 2026-10-01): runtime
+                # state only (adds/combined price) -- shares already carries
+                # the combined qty via db_shares above. The per-pool
+                # add_on_cfg OVERRIDE itself is not persisted (known scoped
+                # limitation): a pool position falls back to production's
+                # ORBEngine.add_on_cfg after a restart rather than reverting
+                # to disabled, so a live add-on pool never silently goes
+                # inert across a restart.
+                add_count=len(dict(pdata.get('add_on') or {}).get('adds') or []),
+                adds=list(dict(pdata.get('add_on') or {}).get('adds') or []),
+                combined_avg_price=(dict(pdata.get('add_on') or {}).get('add_avg_px')),
+                add_be_leg=(dict(pdata.get('add_on') or {}).get('add_be_leg')),
+                add_be_pnl=float(dict(pdata.get('add_on') or {}).get('add_be_pnl') or 0.0),
             )
             if db_scaled_at:
                 pos.scale_qty = db_scale_qty

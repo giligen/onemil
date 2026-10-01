@@ -1355,6 +1355,19 @@ class Database:
         row = cursor.fetchone()
         return dict(row) if row else None
 
+    def get_trade_by_id(self, trade_id: int) -> Optional[Dict[str, Any]]:
+        """Get a trade by its primary key. Used by read-modify-write
+        callers (e.g. ORB ADD-ON, trading/orb_engine.py) that need the
+        CURRENT pattern_data to merge a new key into it without clobbering
+        what another feature already stored there -- order_id is cleared
+        ('') once a position's entry fill is confirmed, so
+        get_trade_by_order_id can no longer find a filled position's row."""
+        cursor = self._trades_conn.execute(
+            "SELECT * FROM trades WHERE id = ?", (trade_id,)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
     def get_trades_by_date(self, trade_date: str) -> List[Dict[str, Any]]:
         """
         Get all trades for a given date.
