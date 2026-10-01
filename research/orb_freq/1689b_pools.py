@@ -291,7 +291,13 @@ def _pipeline_env_for(pool_id, window):
     the fresh-build pools 21/27/28 both windows; the 1689a-sourced half of pool 23 in-regime) uses
     bars_sip.db + this cell's own daily_source_1689b_<window>.parquet."""
     if window == 'in_regime' and pool_id in (24, 25, 26, 30):
-        return {}
+        # ORB_BT_BARS_DB left UNSET (defaults to cache.db, correct per the coverage check) but
+        # ORB_BT_DAILY_SOURCE IS set to this cell's own already-built parquet -- leaving it unset
+        # too makes the pipeline re-query cache.db's full daily_bars table for ATR14/lookback from
+        # scratch, which hung for 10+ min with 0% CPU (shared-box contention, same as stage_prep's
+        # slow full-panel load) on the first attempt; reusing the parquet already on disk is the
+        # SAME data, just not re-fetched.
+        return {'ORB_BT_DAILY_SOURCE': str(DAILY_SRC[window])}
     return {'ORB_BT_BARS_DB': str(BARS_SIP), 'ORB_BT_DAILY_SOURCE': str(DAILY_SRC[window])}
 
 
@@ -322,8 +328,9 @@ def stage_pipeline():
                 parts = []
                 # wide-sourced rows -> cache.db defaults; 1689a-sourced rows -> bars_sip.db (see
                 # _pipeline_env_for's docstring for why these differ even within one pool/window).
-                src_envs = (('wide', {}), ('1689a', {'ORB_BT_BARS_DB': str(BARS_SIP),
-                                                        'ORB_BT_DAILY_SOURCE': str(DAILY_SRC[window])}))
+                src_envs = (('wide', {'ORB_BT_DAILY_SOURCE': str(DAILY_SRC[window])}),
+                            ('1689a', {'ORB_BT_BARS_DB': str(BARS_SIP),
+                                       'ORB_BT_DAILY_SOURCE': str(DAILY_SRC[window])}))
                 for src_tag, extra_env in src_envs:
                     fp = POOLDIR / f'23_{window}_{src_tag}_features.csv'
                     outp = POOLDIR / f'23_{window}_{src_tag}_true.csv'
