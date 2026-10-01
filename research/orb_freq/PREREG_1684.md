@@ -72,6 +72,23 @@ J. Already closed on HOD, do not transplant
  55–62 T relative volume, candle shapes, patterns, failure cuts, adds after +R with locks, model take-profits,
       the failure short, pre-entry classifiers — all closed on HOD at the measured cost (cells 1,660–1,683).
 
+## Amendment 1 (owner 10/1 ~08:00 UTC, before 1,685 runs): SUB-POOLS, each with its own rules
+"We do not need a single rule against all of them; create sub-pools — 4 % + relative volume, 3 % + $5M, VWAP, close
+to the 52-week high — each with its own rules." Cell 1,685 becomes the sub-pool grid:
+* Admission = gap band × ONE feature (18 sub-pools): gap bands {2–3 %, 3–4 %, 4–5 %} (names NOT in the production
+  ≥ 5 % universe) × features {F1 relative volume at 09:35 ≥ 3× (cumulative volume to 09:35 ÷ ADV20 × the TRAIN
+  cross-sectional 09:35 profile — the 1,665 definition B), F2 pre-market dollar volume ≥ $5M, F3 price above the
+  day's VWAP at 09:35 AND the 5-min range closes in its top half, F4 within 5 % of the 52-week high (daily bars),
+  F5 prior-day range ≥ 1.5 × ATR14 (a volatile setup), F6 day-2 of a ≥ 10 % gapper}. Price $3–30, volume ≥ 300K,
+  the spread gate and the never-rules unchanged.
+* Each sub-pool gets its OWN selection chain (the per-pool 26-week refit as in cell 1,328) and its OWN exit, chosen
+  on TRAIN only from the fixed menu {the live rule; no exit at 2 R → half at +3 R → trail MFE − 1 R; 50 % at +1 R}
+  by TRAIN mean R, then read on VAL and out of regime with that exit frozen.
+* Stage 2 (pre-declared): pairs of features (gap band × F_i × F_j) ONLY for sub-pools that passed stage 1, read the
+  same way. No stage 3.
+* The bar per sub-pool is unchanged; the union adds every passing sub-pool; multiplicity stated: 18 + ≤ 15 pair reads
+  × 3 windows. Overlap between sub-pools is reported and de-duplicated in the union (a name-day counts once).
+
 ## Method (every N cell)
 Point-in-time universes from `data/cache.db daily_bars` and Databento EQUS.SUMMARY (delisted included), minute bars
 from the completed store (append missing symbol-days through the designed appender only), the production pipeline
