@@ -1,0 +1,3 @@
+candidates=[]
+winner=no improvement
+coverage={'n_total': 394, 'n_ok': 394, 'n_no_bars': 0, 'n_no_range': 0, 'n_bad_R': 0}
