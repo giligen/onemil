@@ -93,3 +93,13 @@ Slices promoted (ROBUST both directions -> replaces production's exit for that s
 - weekly P10 PER FILL: production -0.362 R/fill-week vs union -0.362 R/fill-week
 - at a FIXED total weekly risk budget W=$1978 (= production's own weekly risk): union's per-fill risk recalibrates to $375/fill, weekly $ P10 = $-715 vs production's $-715
 - see 1693_union.csv for the robust+regime variant and the per-window (TRAIN/VAL/OOS2024H2) breakdown
+
+## Union with per-slice exits (Amendment 1: a robust slice's own exit, production's E1 elsewhere)
+Precedence on overlap = higher TRAIN2025 day-clustered t wins (applied last); 220 fills belong to >=2 robust slices. Overlaps: price_$3-10 & prior_day_volume_low: 93 fills; price_$3-10 & range5m_pct_mid: 74 fills; price_$3-10 & rvol_0935_low: 95 fills; prior_day_volume_low & range5m_pct_mid: 53 fills; prior_day_volume_low & rvol_0935_low: 124 fills; range5m_pct_mid & rvol_0935_low: 50 fills.
+Direction-A picks (highest VAL2026 mean_R among robust exits): {price_$3-10: E4_target3R, prior_day_volume_low: E6_scale50_1_5R, range5m_pct_mid: E6_scale50_1_5R, rvol_0935_low: E6_scale50_1_5R}
+Direction-B picks (highest TRAIN2025 mean_R among robust exits): {price_$3-10: E4_target3R, prior_day_volume_low: E3_target1_5R, range5m_pct_mid: E4_target3R, rvol_0935_low: E3_target1_5R}
+
+- **TRAIN2025**: production +0.270R (n212) | union-dirA +0.326R (n212, ΔR +0.056 iid-t 1.17 day-t 0.85 ex5 -0.035) | union-dirB +0.376R (n212, ΔR +0.106 iid-t 1.43 day-t 0.85 ex5 -0.025) | weekly P10 R prod/dirA/dirB = -2.25/-1.59/-1.10 | max DD 18.1/12.0/9.0 R | strong-wk gap median 4.0/10.0/10.0 wk | $/yr@$375 +21504/+25924/+29931
+- **VAL2026**: production +0.318R (n259) | union-dirA +0.186R (n259, ΔR -0.132 iid-t -2.10 day-t -1.97 ex5 -0.177) | union-dirB +0.109R (n259, ΔR -0.209 iid-t -2.04 day-t -1.95 ex5 -0.310) | weekly P10 R prod/dirA/dirB = -3.26/-2.24/-1.93 | max DD 10.8/7.6/5.6 R | strong-wk gap median 3.0/6.0/7.0 wk | $/yr@$375 +43224/+25341/+14783
+- **OOS2024H2**: production +nanR (n0) | union-dirA +nanR (n0, ΔR +nan iid-t nan day-t nan ex5 +nan) | union-dirB +nanR (n0, ΔR +nan iid-t nan day-t nan ex5 +nan) | weekly P10 R prod/dirA/dirB = +nan/+nan/+nan | max DD 0.0/0.0/0.0 R | strong-wk gap median nan/nan/nan wk | $/yr@$375 +nan/+nan/+nan
+- **WHOLE_2025_2026**: production +0.297R (n471) | union-dirA +0.249R (n471, ΔR -0.047 iid-t -1.16 day-t -1.44 ex5 -0.118) | union-dirB +0.229R (n471, ΔR -0.067 iid-t -1.02 day-t -1.32 ex5 -0.193) | weekly P10 R prod/dirA/dirB = -2.47/-1.91/-1.58 | max DD 19.6/12.0/9.0 R | strong-wk gap median 3.5/7.0/7.5 wk | $/yr@$375 +30560/+25681/+23615
