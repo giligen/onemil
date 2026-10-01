@@ -1,0 +1,55 @@
+{
+  "base_recon": {
+    "no_bars": 5,
+    "no_range_or_breakout": 0,
+    "bad_R": 0,
+    "below_R_floor": 0,
+    "ok": 478
+  },
+  "n_base": 478,
+  "L9_winner": "add_1.0",
+  "L9_add_r_star": 1.0,
+  "L9_n_add_star": 1,
+  "L10_winner": "None",
+  "L12_joins": false,
+  "L12_ev_gain_A": 0.03782587169177365,
+  "L12_ev_gain_B": 0.018399188946650602,
+  "P1_recon": {
+    "no_bars": 268,
+    "no_range_or_breakout": 0,
+    "bad_R": 0,
+    "below_R_floor": 0,
+    "ok": 126
+  },
+  "P1_coverage": 0.3197969543147208,
+  "L11_joins": false,
+  "L13_joins": false,
+  "q3_weekly": {
+    "base": {
+      "total": -304.0,
+      "green": 4,
+      "worst": -2077.0,
+      "dd": 2077.0
+    },
+    "final_1699": {
+      "total": 4417.0,
+      "green": 5,
+      "worst": -4739.0,
+      "dd": 4739.0
+    },
+    "union_with_P1": {
+      "total": 2213.0,
+      "green": 5,
+      "worst": -4557.0,
+      "dd": 4789.0
+    }
+  },
+  "L14": {
+    "end_equity": 199131.68317692517,
+    "max_dd": 22222.482085077965,
+    "q3_pnl": 11091.731189628676,
+    "q3_end_equity": 198807.8146662899,
+    "q3_dd": 11861.720715008589,
+    "n_weeks": 86
+  }
+}

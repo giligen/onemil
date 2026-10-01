@@ -37,6 +37,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -77,8 +78,23 @@ def _load_module(name, relpath):
 
 
 # =================================================================== daily lookback (F4/F5/F6) =====
-def _ro(p):
-    return sqlite3.connect(f'file:{p}?mode=ro', uri=True)
+def _ro(p, retries=10, wait_s=30):
+    """Read-only connect with a 30s backoff up to 10 retries on 'database is locked' -- cache.db is
+    written by the live trading service through 20:00 UTC; never kill it, back off instead. bars_sip.db
+    reads use the same helper and the same courtesy even though this cell is the only writer today."""
+    last_err = None
+    for attempt in range(retries):
+        try:
+            con = sqlite3.connect(f'file:{p}?mode=ro', uri=True)
+            con.execute('SELECT 1')
+            return con
+        except sqlite3.OperationalError as e:
+            last_err = e
+            if 'locked' not in str(e).lower():
+                raise
+            log.warning('%s locked, retry %d/%d in %ds: %s', p, attempt + 1, retries, wait_s, e)
+            time.sleep(wait_s)
+    raise last_err
 
 
 def _clean_symbol(s):

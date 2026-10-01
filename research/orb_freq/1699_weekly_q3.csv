@@ -1,0 +1,14 @@
+wk_num,monday,fills_base,fills_p1,dollar_base,dollar_final_1699,dollar_union_with_P1,green_base,green_final,green_union
+27,06-29,3,1,-587,-605,-986,False,False,False
+28,07-06,10,1,-2077,-4739,-4557,False,False,False
+29,07-13,12,3,1015,3215,2065,True,True,True
+30,07-20,15,2,-842,-450,-752,False,False,False
+31,07-27,14,0,2576,729,729,True,True,True
+32,08-03,7,1,-1199,-1183,-908,False,False,False
+33,08-10,5,3,-494,-1068,-1366,False,False,False
+34,08-17,0,0,0,0,0,,,
+35,08-24,6,1,1042,4543,4402,True,True,True
+36,08-31,7,0,-96,629,629,False,True,True
+37,09-07,0,0,0,0,0,,,
+38,09-14,9,1,914,4000,3611,True,True,True
+39,09-21,6,0,-556,-654,-654,False,False,False
