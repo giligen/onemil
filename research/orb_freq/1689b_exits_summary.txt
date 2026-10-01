@@ -1,0 +1,1 @@
+No pool positive in both windows -- 12-exit menu not run.
