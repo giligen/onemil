@@ -40,3 +40,12 @@ return (the PREREG left ties undefined — that is the suspected defect); also t
 ratio, 6-month overlapping hold, as the reference. b: on the last session of each month, 12-month total return of SPY,
 EFA, SHY; hold SPY or EFA (the higher) if its return > SHY's, else IEF; print the holding per month and the monthly
 return; hand-check 2020-03, 2020-04, 2022-01..2022-12. Cells c, d, e stand as run. +0 cells (re-implementation).
+
+## Amendment 2 — cell 1,703f (FROZEN before any number): leveraged index trend, the popular "TQQQ above the 200-day"
+The one remaining widely-known long-only form is leverage through 3× ETFs with a trend switch. Spec: hold TQQQ while
+QQQ's close > its 200-day SMA (evaluated at the close, traded at the next open), else cash (0 %); daily; 5 bp per
+switch. Also UPRO/SPY the same way, and TQQQ / UPRO buy-and-hold. ETF daily bars from the panel (yfinance fallback
+with a scale check). Window 2017-01 → 2026-09 and the longer 2011-01 → 2026-09 for the ETFs' full history.
+Reads as the sweep (stand-alone and 50/50 with GREF; correlation inside GREF's three deepest episodes).
+Pass rule as the sweep. Expected: high CAGR, max DD beyond −50 %, correlation with the sleeve > 0.6 → no stack value;
+this cell exists so the question is answered with numbers, once. +1 cell.
