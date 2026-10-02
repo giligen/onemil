@@ -159,3 +159,91 @@ class TestIntradayBarsForDate:
 
     def test_empty_input_returns_empty(self, tmp_path):
         assert self._db(tmp_path).get_intraday_bars_for_date([], '2026-10-02') == {}
+
+
+# ---------------------------------------------------------------------------
+# All-day rebuild (docs/orb_allday_rebuild_20261002.md)
+# ---------------------------------------------------------------------------
+def _at_et(hh, mm):
+    """UTC datetime for today's date at hh:mm ET."""
+    from zoneinfo import ZoneInfo
+    return datetime.fromisoformat(f"{_today_et()}T{hh:02d}:{mm:02d}:00").replace(
+        tzinfo=ZoneInfo('America/New_York')).astimezone(timezone.utc)
+
+
+class _FrozenNow:
+    """Patch target for trading.orb_engine.datetime.now() -> a fixed instant."""
+
+    def __init__(self, fixed):
+        self.fixed = fixed
+
+    def now(self, tz=None):
+        return self.fixed.astimezone(tz) if tz else self.fixed
+
+    def __getattr__(self, name):
+        return getattr(datetime, name)
+
+
+class TestNoRebuildPastEntryCutoff:
+    def test_restart_after_window_zero_builds_one_info(self, monkeypatch, caplog):
+        """16:01 ET: loader and snapshot fetch never run; ONE INFO per day."""
+        import trading.orb_engine as oe
+        monkeypatch.setattr(oe, 'datetime', _FrozenNow(_at_et(16, 1)))
+        a = MagicMock(spec=AlpacaClient)
+        eng = _engine(a)
+        with caplog.at_level(logging.INFO):
+            due = [eng.universe_build_due() for _ in range(5)]
+        assert due == [False] * 5
+        a.get_snapshots.assert_not_called()
+        msgs = [r for r in caplog.records if 'universe build + gap gate skipped' in r.getMessage()]
+        assert len(msgs) == 1 and msgs[0].levelno == logging.INFO
+
+    def test_inside_window_builds(self, monkeypatch):
+        """09:36 ET: the loader runs and extends the universe as before."""
+        import trading.orb_engine as oe
+        monkeypatch.setattr(oe, 'datetime', _FrozenNow(_at_et(9, 36)))
+        eng = _engine(MagicMock(spec=AlpacaClient))
+        assert eng.universe_build_due() is True
+        assert eng.build_universe(source_loader=lambda: ['AAA', 'BBB']) == 2
+
+
+class TestAggregatedFallbackWarning:
+    def test_one_warning_per_build_not_per_symbol(self, caplog):
+        """No 09:30 bars cached: ONE WARNING with count + first 10 symbols."""
+        a = MagicMock(spec=AlpacaClient)
+        syms = [f"S{i:02d}" for i in range(40)]
+        a.get_snapshots.return_value = {s: _snap(10.0, 9.0, _today_et()) for s in syms}
+        db = MagicMock(spec=Database)
+        db.get_intraday_bars_for_date.return_value = {}
+        eng = _engine(a, db)
+        with caplog.at_level(logging.WARNING):
+            keep = eng.build_orb_universe_from_snapshots(syms)
+        warns = [r.getMessage() for r in caplog.records
+                 if r.levelno == logging.WARNING and 'GAP_GATE' in r.getMessage()]
+        assert len(warns) == 1
+        assert '40 of 40' in warns[0] and 'S09' in warns[0] and 'S10' not in warns[0]
+        assert len(keep) == 40   # selection unchanged: snapshot open still gates
+
+    def test_resolve_gap_input_default_still_warns_per_symbol(self, caplog):
+        """Legacy single-symbol callers keep their WARNING; result identical with a sink."""
+        from trading.orb_gap_gate import resolve_gap_input
+        with caplog.at_level(logging.WARNING):
+            r1 = resolve_gap_input('ZZZ', 10.0, 9.0)
+        sink = []
+        r2 = resolve_gap_input('ZZZ', 10.0, 9.0, fallback_sink=sink)
+        assert sink == ['ZZZ'] and r1.gap_pct == r2.gap_pct
+        assert sum('no 09:30 minute bar' in r.getMessage() for r in caplog.records) == 1
+
+
+class TestScannerSkipsBuildPastCutoff:
+    def test_orb_tick_skips_build_when_not_due(self):
+        """_orb_tick never calls build_universe when universe_build_due() is False."""
+        from scanner.realtime_scanner import RealtimeScanner
+        sc = RealtimeScanner.__new__(RealtimeScanner)
+        sc.orb_engine = MagicMock(spec=ORBEngine)
+        sc.orb_engine.enabled = False
+        sc.orb_engine.universe_build_due.return_value = False
+        sc.orb_engine.is_force_close_time.return_value = False
+        sc._orb_tick()
+        sc.orb_engine.build_universe.assert_not_called()
+        sc.orb_engine.check_entries.assert_called_once()

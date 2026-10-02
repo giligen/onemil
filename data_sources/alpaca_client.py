@@ -80,6 +80,14 @@ class AlpacaAPITimeoutError(AlpacaAPIError):
     pass
 
 
+
+def _qty_num(raw):
+    """Parse a broker quantity: whole numbers stay int (unchanged behaviour), fractional ones (e.g. a
+    fractional position/order from another sleeve on the same account) become float instead of raising."""
+    q = float(raw)
+    return int(q) if q.is_integer() else q
+
+
 class AlpacaClient:
     """
     Client for Alpaca market data and trading API using alpaca-py SDK.
@@ -1508,7 +1516,7 @@ class AlpacaClient:
             for pos in positions:
                 result.append({
                     'symbol': pos.symbol,
-                    'qty': int(pos.qty),
+                    'qty': _qty_num(pos.qty),
                     'side': pos.side,
                     'avg_entry_price': float(pos.avg_entry_price),
                     'market_value': float(pos.market_value),
@@ -1522,7 +1530,11 @@ class AlpacaClient:
         except AlpacaAPIError:
             raise
         except Exception as e:
-            logger.error(f"Failed to get open positions: {e}")
+            if 'interpreter shutdown' in str(e):
+                # process exit, not an API fault (docs/orb_shutdown_hygiene_20261001.md): never ERROR
+                logger.warning(f"get_open_positions skipped — interpreter shutting down ({e})")
+            else:
+                logger.error(f"Failed to get open positions: {e}")
             raise AlpacaAPIError(f"Failed to get open positions: {e}")
 
     def get_account_info(self) -> Dict:
@@ -1727,8 +1739,8 @@ class AlpacaClient:
                 'id': str(order.id),
                 'status': str(order.status.value) if hasattr(order, 'status') else 'unknown',
                 'symbol': order.symbol,
-                'qty': int(order.qty) if order.qty else 0,
-                'filled_qty': int(order.filled_qty) if order.filled_qty else 0,
+                'qty': _qty_num(order.qty) if order.qty else 0,
+                'filled_qty': _qty_num(order.filled_qty) if order.filled_qty else 0,
                 'filled_avg_price': float(order.filled_avg_price) if order.filled_avg_price else None,
                 'replaced_by': str(getattr(order, 'replaced_by', '') or ''),
                 'client_order_id': str(getattr(order, 'client_order_id', '') or ''),

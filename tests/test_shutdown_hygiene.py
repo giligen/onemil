@@ -260,3 +260,14 @@ class TestTelegramInterpreterShutdown:
         assert result is False
         assert any(r.levelname == 'ERROR' and 'Unexpected error' in r.message
                     for r in caplog.records)
+
+
+class TestWrappedShutdownError:
+    """10/2 close: AlpacaClient wraps the RuntimeError in AlpacaAPIError — the detector must still match."""
+
+    def test_detector_matches_the_wrapped_alpaca_error(self):
+        from trading.orb_engine import ORBEngine
+        from data_sources.alpaca_client import AlpacaAPIError
+        wrapped = AlpacaAPIError("Failed to get open positions: cannot schedule new futures after interpreter shutdown")
+        assert ORBEngine._is_interpreter_shutdown_error(wrapped) is True
+        assert ORBEngine._is_interpreter_shutdown_error(AlpacaAPIError("Failed to get open positions: 500")) is False

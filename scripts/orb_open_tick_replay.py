@@ -110,11 +110,49 @@ def build_engine(alpaca, db):
     return ORBEngine(alpaca_client=alpaca, db=db, stop_monitor=MagicMock(spec=StopMonitor), config=cfg)
 
 
+class LineCounter(logging.Handler):
+    """Counts log records by level (a cycle's journal footprint); DEBUG included."""
+
+    def __init__(self):
+        super().__init__(level=logging.DEBUG)
+        self.by_level = {}
+
+    def emit(self, record):
+        self.by_level[record.levelname] = self.by_level.get(record.levelname, 0) + 1
+
+
+def replay_cycle(eng, syms, restart_at_et=None):
+    """One scanner cycle as `_orb_tick` runs it: gate on universe_build_due, else build.
+
+    Returns (seconds, log-lines-by-level, built?). Never submits an order: only
+    build_orb_universe_from_snapshots / universe_build_due are called.
+    """
+    counter = LineCounter()
+    root = logging.getLogger()
+    old_level = root.level
+    root.addHandler(counter)
+    root.setLevel(logging.DEBUG)
+    t0 = time.time()
+    built = True
+    try:
+        if hasattr(eng, 'universe_build_due') and not eng.universe_build_due():
+            built = False
+        else:
+            eng.build_orb_universe_from_snapshots(syms)
+    finally:
+        root.removeHandler(counter)
+        root.setLevel(old_level)
+    return time.time() - t0, counter.by_level, built
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--date', required=True)
     ap.add_argument('--n', type=int, default=3041)
     ap.add_argument('--sample', type=int, default=50)
+    ap.add_argument('--restart-at-et', default=None,
+                    help="HH:MM ET: also replay one cycle after a restart at that time "
+                         "(e.g. 10:03 or 16:01); the clock is frozen inside trading.orb_engine")
     ap.add_argument('--cache', default=str(ROOT / 'data' / 'cache.db'))
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -146,6 +184,30 @@ def main() -> int:
     print(f"AFTER (real engine tick: stub REST {RECORDED_REST_SEC_PER_3041*len(syms)/3041:.1f} s + "
           f"batched lookup + gate): {tick:.1f} s, admitted {len(keep)} of {len(syms)}, "
           f"REST calls {alpaca.calls}, budget {eng.open_tick_budget_sec} s")
+    if args.restart_at_et:
+        import trading.orb_engine as oe
+        from zoneinfo import ZoneInfo
+        hh, mm = (int(x) for x in args.restart_at_et.split(':'))
+        fixed = datetime.fromisoformat(f"{args.date}T{hh:02d}:{mm:02d}:00").replace(
+            tzinfo=ZoneInfo('America/New_York')).astimezone(timezone.utc)
+
+        class _Frozen:
+            """datetime stand-in whose now() is the replayed restart instant."""
+            def now(self, tz=None):
+                return fixed.astimezone(tz) if tz else fixed
+
+            def __getattr__(self, name):
+                return getattr(datetime, name)
+        real_dt = oe.datetime
+        oe.datetime = _Frozen()
+        try:
+            eng2 = build_engine(StubAlpaca(snaps), db)
+            deadline[0] = time.time() + PER_QUERY_ABORT_SEC * 20
+            secs, lines, built = replay_cycle(eng2, syms)
+        finally:
+            oe.datetime = real_dt
+        print(f"RESTART {args.restart_at_et} ET cycle: built={built} {secs:.2f} s, "
+              f"log lines by level {lines} (total {sum(lines.values())})")
     return 0
 
 

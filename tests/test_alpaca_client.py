@@ -1344,3 +1344,38 @@ class TestClosePosition:
             with pytest.raises(AlpacaAPIError, match="Failed to close position"):
                 client.close_position("AAPL")
         assert any(r.levelname == 'ERROR' for r in caplog.records)
+
+
+# ===================================================================
+# Fractional foreign positions/orders (momentum sleeve shares the ORB paper account)
+# ===================================================================
+
+class TestFractionalQuantities:
+    """get_open_positions / get_order must not raise on fractional quantities; whole stays int."""
+
+    @staticmethod
+    def _pos(symbol, qty):
+        """External SDK position object (no spec)."""
+        return MagicMock(symbol=symbol, qty=qty, side="long", avg_entry_price="10", market_value="100",
+                         unrealized_pl="1", unrealized_plpc="0.01")
+
+    def test_positions_whole_int_fractional_float(self, client, mock_sdk_clients):
+        """'100' -> int 100 (unchanged); '12.345678' -> float, no exception."""
+        mock_sdk_clients["trading_client"].get_all_positions.return_value = [
+            self._pos("AAA", "100"), self._pos("BBB", "12.345678"), self._pos("CCC", "5.0")]
+        out = {p["symbol"]: p["qty"] for p in client.get_open_positions()}
+        assert out["AAA"] == 100 and isinstance(out["AAA"], int)
+        assert out["BBB"] == pytest.approx(12.345678) and isinstance(out["BBB"], float)
+        assert out["CCC"] == 5 and isinstance(out["CCC"], int)
+
+    def test_get_order_fractional(self, client, mock_sdk_clients):
+        """A fractional order's qty/filled_qty parse as floats; whole ones stay int."""
+        o = MagicMock(qty="2.5", filled_qty="2.5", filled_avg_price="10.0", replaced_by=None,
+                      client_order_id="x", legs=[])
+        o.id = "oid"
+        mock_sdk_clients["trading_client"].get_order_by_id.return_value = o
+        r = client.get_order("oid")
+        assert r["qty"] == 2.5 and r["filled_qty"] == 2.5
+        o.qty, o.filled_qty = "3", "3"
+        r = client.get_order("oid")
+        assert r["qty"] == 3 and isinstance(r["qty"], int)

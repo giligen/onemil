@@ -790,9 +790,12 @@ class RealtimeScanner:
         # qualified stocks. Pre-market is critical so ORB has candidates by
         # 9:35 ET (the first range-close event); intraday keeps adding as
         # new qualifiers arrive.
-        self.orb_engine.build_universe(
-            source_loader=self._orb_universe_source,
-        )
+        # Past ORB's own last-entry cutoff no candidate can be entered, so the
+        # seed + snapshot + gap-gate build is skipped (one INFO per day).
+        if self.orb_engine.universe_build_due():
+            self.orb_engine.build_universe(
+                source_loader=self._orb_universe_source,
+            )
         self.orb_engine.check_entries()
         self.orb_engine.check_exits()
         if self.orb_engine.is_force_close_time():

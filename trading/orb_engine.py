@@ -899,6 +899,7 @@ class ORBEngine:
 
         # Universe (refreshed daily at 8:30 ET)
         self.universe: Set[str] = set()
+        self._universe_cutoff_logged_date: Optional[str] = None
         self.universe_date: Optional[str] = None  # 'YYYY-MM-DD'
 
         # Per-day state
@@ -1002,6 +1003,30 @@ class ORBEngine:
     # =====================================================================
     # Universe management
     # =====================================================================
+
+    def universe_build_due(self) -> bool:
+        """False once ORB can no longer act on a new candidate (the caller skips the build).
+
+        Past last_entry_submit_time_et check_entries() returns [] for the rest
+        of the day (orb.yaml entry.last_entry_submit_time_et), so a candidate
+        added now can never be entered: the seed + snapshot + gap-gate build
+        is pure cost (2026-10-02: 120-233 s cycles, 210K WARNINGs, 279 tick
+        TIMEOUTs after a 10:03 ET restart). ONE INFO per ET day when it skips.
+        Plumbing only: no selection, gate threshold, sizing or exit changes.
+        """
+        if not self._past_last_entry_time():
+            return True
+        from zoneinfo import ZoneInfo
+        _today = datetime.now(timezone.utc).astimezone(
+            ZoneInfo('America/New_York')).date().isoformat()
+        if self._universe_cutoff_logged_date != _today:
+            self._universe_cutoff_logged_date = _today
+            logger.info(
+                f"ORB: past last_entry_submit_time "
+                f"{self.last_entry_hour_et:02d}:{self.last_entry_minute_et:02d} ET — "
+                f"universe build + gap gate skipped for the rest of the day "
+                f"(no new entries possible; universe stays at {len(self.universe)})")
+        return False
 
     def build_universe(self, source_loader=None) -> int:
         """Seed or EXTEND today's candidate symbols.
@@ -1215,6 +1240,7 @@ class ORBEngine:
                     f"ORB GAP_GATE: batched 09:30 bar lookup failed for "
                     f"{len(snapshots or {})} symbols (non-fatal, using snapshot opens): {e}")
         keep: List[str] = []
+        _snapshot_fallback_syms: List[str] = []   # symbols gated on the snapshot open (no 09:30 bar)
         _n_cand = len(snapshots or {})
         for _i, (sym, snap) in enumerate((snapshots or {}).items()):
             if time.time() >= deadline:
@@ -1304,7 +1330,8 @@ class ORBEngine:
                             break
                 except Exception as e:
                     logger.warning(f"ORB GAP_GATE: {sym} 09:30 bar lookup failed (non-fatal, using snapshot): {e}")
-                _gate_input = resolve_gap_input(sym, open_price, prev_close, minute_bar_open)
+                _gate_input = resolve_gap_input(sym, open_price, prev_close, minute_bar_open,
+                                                fallback_sink=_snapshot_fallback_syms)
                 if _gate_input is not None:
                     self._gap_gate_inputs[sym] = _gate_input.as_dict()
                     gap_pct = _gate_input.gap_pct
@@ -1341,6 +1368,13 @@ class ORBEngine:
             except Exception as e:
                 logger.debug(f"ORB: snapshot parse failed for {sym}: {e}")
                 continue
+        if _snapshot_fallback_syms:
+            logger.warning(
+                f"ORB GAP_GATE: {len(_snapshot_fallback_syms)} of {_n_cand} symbols have no "
+                f"09:30 minute bar open (not yet cached for today, or called before 09:31 ET) — "
+                f"gap gated on the real-time snapshot open (the input class of the 9/30 "
+                f"ASTX/AEHG parity gap, docs/orb_parity_20260930.md); first 10: "
+                f"{', '.join(_snapshot_fallback_syms[:10])}")
         logger.info(
             f"ORB: snapshot universe — {len(keep)}/{len(snapshots)} symbols pass "
             f"(gap>={self.universe_min_gap_pct}%, vol>={self.universe_min_prev_volume:,}, "
@@ -7821,7 +7855,11 @@ class ORBEngine:
         incident: 24 ERRORs + a Telegram rate-cap hit chasing 4 HOD
         positions that could never fill after the regular close —
         docs/orb_shutdown_hygiene_20261001.md)."""
-        return isinstance(exc, RuntimeError) and 'interpreter shutdown' in str(exc)
+        # Matched on the MESSAGE, not the type: AlpacaClient wraps the RuntimeError in
+        # AlpacaAPIError("Failed to get open positions: cannot schedule new futures
+        # after interpreter shutdown"), which the isinstance check missed (10/2 close:
+        # the verify poll logged it every second until exit).
+        return 'interpreter shutdown' in str(exc)
 
     def _verify_flat_with_grace(
         self, max_wait_s: int = 10, poll_interval_s: float = 1.0,

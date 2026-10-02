@@ -18,7 +18,7 @@ rebuild can replay live's observed gap instead of guessing at it from
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +63,7 @@ def resolve_gap_input(
     minute_bar_open: Optional[float] = None,
     now: Optional[datetime] = None,
     gap_floor_pct: float = 5.0,
+    fallback_sink: Optional[List[str]] = None,
 ) -> Optional[GapGateInput]:
     """Resolve the gap-gate's open price + provenance for one symbol.
 
@@ -87,6 +88,12 @@ def resolve_gap_input(
             decide the result's log level (INFO for a real candidate that
             passes the floor, DEBUG otherwise); never affects the resolved
             input, the return value, or ledger persistence.
+        fallback_sink: when a list is given, a symbol that falls back to the
+            snapshot open is APPENDED to it and NO per-symbol WARNING is
+            logged — the caller MUST emit one aggregated WARNING for the
+            build (count, first symbols, reason). None keeps the legacy
+            per-symbol WARNING (single-symbol callers). Plumbing only: the
+            resolved input is identical either way.
 
     Returns:
         GapGateInput, or None if neither source has a usable open or
@@ -113,13 +120,16 @@ def resolve_gap_input(
             return None
         open_price = float(snapshot_open)
         source = SOURCE_SNAPSHOT
-        logger.warning(
-            f"ORB GAP_GATE: {symbol} no 09:30 minute bar open available "
-            f"(not yet cached, or called before 09:31 ET) — falling back "
-            f"to the real-time snapshot open ${open_price:.4f} (the same "
-            f"input class implicated in the 9/30 ASTX/AEHG parity gap, "
-            f"docs/orb_parity_20260930.md)"
-        )
+        if fallback_sink is not None:
+            fallback_sink.append(symbol)
+        else:
+            logger.warning(
+                f"ORB GAP_GATE: {symbol} no 09:30 minute bar open available "
+                f"(not yet cached, or called before 09:31 ET) — falling back "
+                f"to the real-time snapshot open ${open_price:.4f} (the same "
+                f"input class implicated in the 9/30 ASTX/AEHG parity gap, "
+                f"docs/orb_parity_20260930.md)"
+            )
 
     gap_pct = (open_price - prev_close) / prev_close * 100.0
     result = GapGateInput(
