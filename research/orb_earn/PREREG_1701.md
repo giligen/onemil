@@ -63,3 +63,6 @@ any paid data (Alpaca bars and EDGAR only).
 3. Walk + reads: `1701_walk.py` → `1701_fills.csv`, `1701_reads.csv`, `RESULT_1701.md` (≤ 120 lines).
 4. Independent rebuild from this file only: `REBUILD_1701.md`. The judge (main session) reads both.
 Each agent returns ≤ 150 words; every number stays on disk.
+
+## Amendment 1 (2026-10-02 06:40 UTC, before any bar is read)
+The Databento daily panel on disk ends 2026-09-04, so half B effectively ends there (the last ~19 sessions have no candidates for lack of panel bars, not for lack of events — 419 filings). Frequency for late Aug/Sep 2026 is not readable until the panel is extended; no other change.
