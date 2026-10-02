@@ -252,3 +252,29 @@ def test_non_rebalance_day_is_noop(capsys):
     args = MagicMock(force=False, submit=False, asof=None, n=20, equity_start=20000.0, skip_fetch=True)
     assert runner.run(args, c, None, datetime(2026, 10, 7, 15, 0, tzinfo=ZoneInfo('UTC'))) == 0
     assert 'not a rebalance session' in capsys.readouterr().out
+
+
+class TestBrokerMarks:
+    """Post-trade equity is marked at the broker's current prices, not the signal-date closes."""
+
+    def test_marks_come_from_broker_positions(self):
+        import scripts.momentum_sleeve as runner
+        from unittest.mock import MagicMock
+        from data_sources.alpaca_client import AlpacaClient
+        client = MagicMock(spec=AlpacaClient)
+        client.trading_client = MagicMock()
+        pos = MagicMock(); pos.symbol = 'AAA'; pos.current_price = '12.5'
+        client.trading_client.get_all_positions.return_value = [pos]
+        assert runner.broker_marks(client) == {'AAA': 12.5}
+
+    def test_marks_failure_falls_back_with_warning(self, caplog):
+        import logging
+        import scripts.momentum_sleeve as runner
+        from unittest.mock import MagicMock
+        from data_sources.alpaca_client import AlpacaClient
+        client = MagicMock(spec=AlpacaClient)
+        client.trading_client = MagicMock()
+        client.trading_client.get_all_positions.side_effect = RuntimeError('boom')
+        with caplog.at_level(logging.WARNING):
+            assert runner.broker_marks(client) == {}
+        assert 'broker marks unavailable' in caplog.text

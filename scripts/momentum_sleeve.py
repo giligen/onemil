@@ -279,6 +279,18 @@ def sleeve_equity(state: Dict, prices: Dict[str, float]) -> float:
     return eq
 
 
+def broker_marks(client: AlpacaClient) -> Dict[str, float]:
+    """Current price per symbol from the broker's open positions (the mark for the post-trade equity).
+    A failure is a WARNING and returns {} -- the caller then falls back to the signal-date closes."""
+    try:
+        return {p.symbol: float(p.current_price) for p in client.trading_client.get_all_positions()
+                if getattr(p, 'current_price', None) is not None}
+    except Exception as e:
+        logger.warning("momentum_sleeve: broker marks unavailable (%s) -- sleeve equity marked at the "
+                       "signal-date closes instead of current prices", e)
+        return {}
+
+
 def client_order_id(day: date, symbol: str, side: str) -> str:
     """'mom-<YYYYMMDD>-<SYM>-<s|b>'."""
     if side not in ('sell', 'buy'):
@@ -506,7 +518,9 @@ def run(args, client: AlpacaClient, notifier: Optional[TelegramNotifier], now_ut
             'client_order_id': f['client_order_id']})
         turnover += f['notional']
     state['last_rebalance'] = str(today)
-    eq_after = sleeve_equity(state, prices)
+    # Mark at CURRENT broker prices: the signal-date closes are a session stale (2026-10-02 forced run marked
+    # $20,134 on a $19,989 book and would have set a false equity peak for the drawdown rule).
+    eq_after = sleeve_equity(state, {**prices, **broker_marks(client)})
     state['peak_equity'] = max(float(state.get('peak_equity', eq_after)), eq_after)
     dd = eq_after / state['peak_equity'] - 1.0
     save_state(state, STATE_PATH)
