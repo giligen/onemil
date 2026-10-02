@@ -56,11 +56,11 @@ STATE_PATH = os.path.join(DATA_DIR, 'state.json')
 LEDGER_PATH = os.path.join(ROOT, 'logs', 'momentum_sleeve_ledger.csv')
 WEEKLY_PATH = os.path.join(ROOT, 'logs', 'momentum_sleeve_weekly.csv')
 LEDGER_FIELDS = ['date', 'symbol', 'side', 'qty', 'avg_price', 'notional', 'official_open',
-                 'slip_bps_vs_open', 'client_order_id']
+                 'slip_bps_vs_open', 'client_order_id', 'size_pct']
 WEEKLY_FIELDS = ['date', 'equity', 'cash', 'n_names', 'turnover_usd', 'names_in', 'names_out', 'spy_close']
 TG_PREFIX = '[MOM]'
 SHADOW_GATE_PATH = os.path.join(ROOT, 'logs', 'momentum_sleeve_shadow_gate.csv')
-SHADOW_GATE_FIELDS = ['run_date', 'asof', 'vix', 'vix3m', 'ratio', 'percentile', 'gate_on', 'equity']
+SHADOW_GATE_FIELDS = ['run_date', 'asof', 'vix', 'vix3m', 'ratio', 'percentile', 'gate_on', 'equity', 'scale']
 CBOE_URL = 'https://cdn.cboe.com/api/global/us_indices/daily_prices/{name}_History.csv'
 GUARD_TOP = 40                # the guard line reports removed names that would have ranked in the top 40
 LOOKBACK_DAYS = 420
@@ -264,9 +264,23 @@ def save_state(state: Dict, path: str) -> None:
 
 
 def append_csv(path: str, fields: List[str], row: Dict) -> None:
-    """Append one row, header first if the file is new."""
+    """Append one row, header first if the file is new. An existing file whose header lacks some of ``fields``
+    (a column added later) is rewritten first with the new header, old rows keeping blanks (WARNING logged)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     new = not os.path.exists(path)
+    if not new:
+        with open(path, newline='') as f:
+            old = list(csv.DictReader(f))
+            f.seek(0)
+            header = next(csv.reader(f), [])
+        if header != fields:
+            logger.warning("momentum_sleeve: migrating %s header %s -> %s", path, header, fields)
+            tmp = path + '.tmp'
+            with open(tmp, 'w', newline='') as f:
+                w = csv.DictWriter(f, fieldnames=fields, extrasaction='ignore')
+                w.writeheader()
+                w.writerows(old)
+            os.replace(tmp, path)
     with open(path, 'a', newline='') as f:
         w = csv.DictWriter(f, fieldnames=fields)
         if new:
@@ -473,15 +487,21 @@ def gate_label(info: Optional[Dict]) -> str:
     return f"gate {'ON' if info['gate_on'] else 'OFF'} (p{info['percentile'] * 100:.0f})"
 
 
-def append_shadow_gate(run_day: date, info: Optional[Dict], equity: float) -> None:
-    """One row per run to the shadow-gate CSV (skipped, WARNING, when the gate is n/a)."""
+def size_label(scale: float) -> str:
+    """'size 100%' / 'size 50%' for the plan line, the ledger and the [MOM] Telegram line."""
+    return f"size {scale * 100:.0f}%"
+
+
+def append_shadow_gate(run_day: date, info: Optional[Dict], equity: float, scale: float = 1.0) -> None:
+    """One row per run to the gate CSV incl. the applied size ``scale`` (skipped, WARNING, when the gate is n/a)."""
     if not info:
         logger.warning("momentum_sleeve: no shadow-gate row written for %s (gate n/a)", run_day)
         return
     append_csv(SHADOW_GATE_PATH, SHADOW_GATE_FIELDS, {
         'run_date': str(run_day), 'asof': str(info['date']), 'vix': round(info['vix'], 4),
         'vix3m': round(info['vix3m'], 4), 'ratio': round(info['ratio'], 6),
-        'percentile': round(info['percentile'], 4), 'gate_on': info['gate_on'], 'equity': round(equity, 2)})
+        'percentile': round(info['percentile'], 4), 'gate_on': info['gate_on'], 'equity': round(equity, 2),
+        'scale': scale})
 
 
 def guard_line(events: Dict[str, tuple], top_unguarded: List[str]) -> str:
@@ -491,7 +511,7 @@ def guard_line(events: Dict[str, tuple], top_unguarded: List[str]) -> str:
 
 
 def build_plan(panel: pd.DataFrame, assets: pd.DataFrame, asof: date, n: int, state: Dict,
-               marks: Optional[Dict[str, float]] = None):
+               marks: Optional[Dict[str, float]] = None, scale: float = 1.0):
     """(selected, feat, equity, targets_usd, orders, prices) for this run -- pure given the inputs.
 
     The SIGNAL uses the closes of ``asof``. The SIZING (sleeve equity, each held name's value, trim/exit
@@ -508,7 +528,7 @@ def build_plan(panel: pd.DataFrame, assets: pd.DataFrame, asof: date, n: int, st
     prices = {s: float(p) for s, p in feat['close'].items()}
     prices.update({s: float(p) for s, p in (marks or {}).items() if p and p == p})
     equity = sleeve_equity(state, prices)
-    targets = ms.target_dollars(selected, equity, n)
+    targets = ms.target_dollars(selected, equity, n, scale)
     current = {s: q * prices[s] for s, q in state['positions'].items() if s in prices and q > 0}
     held_without_price = [s for s, q in state['positions'].items() if q > 0 and s not in prices]
     if held_without_price:
@@ -556,9 +576,11 @@ def execute(client: AlpacaClient, orders: List[Dict], prices: Dict[str, float], 
     return fills
 
 
-def format_orders(selected: List[str], feat: pd.DataFrame, equity: float, orders: List[Dict]) -> str:
-    """Human-readable target list + orders for the dry run."""
-    lines = [f"sleeve equity ${equity:,.2f}; target per name ${equity / max(len(selected), 1):,.2f}", "TOP:"]
+def format_orders(selected: List[str], feat: pd.DataFrame, equity: float, orders: List[Dict],
+                  scale: float = 1.0) -> str:
+    """Human-readable target list + orders for the dry run (target per name = scale * equity / N)."""
+    lines = [f"sleeve equity ${equity:,.2f}; {size_label(scale)}; target per name "
+             f"${scale * equity / max(len(selected), 1):,.2f}", "TOP:"]
     for i, s in enumerate(selected, 1):
         lines.append(f"  {i:2d} {s:<6} signal {feat.loc[s, 'signal']:.3f}  close {feat.loc[s, 'close']:.2f}")
     lines.append(f"ORDERS ({len(orders)}), sells first:")
@@ -616,15 +638,16 @@ def run(args, client: AlpacaClient, notifier: Optional[TelegramNotifier], now_ut
         return 1
     panel['bar_date'] = pd.to_datetime(panel['bar_date'])
 
-    selected, feat, equity, targets, orders, prices = build_plan(panel, assets, asof, args.n, state,
-                                                                 marks=broker_marks(client))
     gate = shadow_gate_info(pd.Timestamp(asof))
-    gate_txt = gate_label(gate)
+    scale = ms.gate_scale(gate, args.gate)
+    gate_txt = f"{gate_label(gate)} {size_label(scale)}"
+    selected, feat, equity, targets, orders, prices = build_plan(panel, assets, asof, args.n, state,
+                                                                 marks=broker_marks(client), scale=scale)
     logger.info("momentum_sleeve: %s  ratio %s", gate_txt,
                 f"{gate['ratio']:.4f} (VIX {gate['vix']:.2f} / VIX3M {gate['vix3m']:.2f}, {gate['date']})" if gate
                 else "unavailable")
     print(f"asof {asof}  today {today}  mode {'SUBMIT' if args.submit else 'DRY-RUN'}  {gate_txt}")
-    print(format_orders(selected, feat, equity, orders))
+    print(format_orders(selected, feat, equity, orders, scale))
     if not args.submit:
         return 0
 
@@ -645,7 +668,7 @@ def run(args, client: AlpacaClient, notifier: Optional[TelegramNotifier], now_ut
             'date': str(today), 'symbol': f['symbol'], 'side': f['side'], 'qty': f['qty'],
             'avg_price': f['avg_price'], 'notional': round(f['notional'], 2),
             'official_open': op if op else '', 'slip_bps_vs_open': slip,
-            'client_order_id': f['client_order_id']})
+            'client_order_id': f['client_order_id'], 'size_pct': round(scale * 100)})
         turnover += f['notional']
     state['last_rebalance'] = str(today)
     # Mark at CURRENT broker prices: the signal-date closes are a session stale (2026-10-02 forced run marked
@@ -661,15 +684,15 @@ def run(args, client: AlpacaClient, notifier: Optional[TelegramNotifier], now_ut
         'date': str(today), 'equity': round(eq_after, 2), 'cash': round(state['cash'], 2),
         'n_names': len(state['positions']), 'turnover_usd': round(turnover, 2),
         'names_in': ' '.join(names_in), 'names_out': ' '.join(names_out), 'spy_close': spy})
-    append_shadow_gate(today, gate, eq_after)
+    append_shadow_gate(today, gate, eq_after, scale)
     kill = f" KILL RULE: drawdown {dd:.1%} > 40% -> HALVE the sleeve" if dd < -DD_KILL else ""
     notify(notifier, f"{today} equity ${eq_after:,.0f} (dd {dd:.1%} from peak) names {len(state['positions'])} "
                      f"in {len(names_in)} out {len(names_out)} turnover ${turnover:,.0f} fills {len(fills)}/{len(orders)} {gate_txt}{kill}")
     return 0
 
 
-def main() -> int:
-    """CLI entry."""
+def build_arg_parser() -> argparse.ArgumentParser:
+    """The CLI parser (``--gate`` defaults to 'half': PAPER account only, the account guard refuses a live key)."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--asof', help='signal date YYYY-MM-DD (default: last completed trading day)')
     ap.add_argument('--n', type=int, default=ms.DEFAULT_N)
@@ -677,8 +700,16 @@ def main() -> int:
     ap.add_argument('--skip-fetch', action='store_true', help='reuse the cached parquet for --asof')
     ap.add_argument('--force', action='store_true', help='run on a non-rebalance day')
     ap.add_argument('--submit', action='store_true', help='place PAPER orders (default: dry-run)')
+    ap.add_argument('--gate', choices=[ms.GATE_MODE_OFF, ms.GATE_MODE_SHADOW, ms.GATE_MODE_HALF],
+                    default=ms.GATE_MODE_HALF,
+                    help="term-structure gate: off, shadow (log only) or half (half size when VIX/VIX3M pct < 20%%)")
     ap.add_argument('--verbose', action='store_true')
-    args = ap.parse_args()
+    return ap
+
+
+def main() -> int:
+    """CLI entry."""
+    args = build_arg_parser().parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format='%(asctime)s %(levelname)s %(name)s: %(message)s')
     cfg = Config()   # loads .env

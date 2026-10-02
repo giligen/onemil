@@ -295,7 +295,7 @@ def test_run_dry_run_submits_nothing(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(runner, 'write_cache_atomic', lambda p, d: 'x')
     monkeypatch.setattr(runner, 'STATE_PATH', str(tmp_path / 'state.json'))
     args = MagicMock(force=True, submit=False, asof=str(dates[-1].date()), n=20, equity_start=20000.0,
-                     skip_fetch=False)
+                     skip_fetch=False, gate='half')
     monkeypatch.setattr(ms, 'ADV_CUTOFF', 0.0)
     rc = runner.run(args, c, None, datetime(2026, 10, 5, 14, 0, tzinfo=ZoneInfo('UTC')))
     out = capsys.readouterr().out
@@ -569,3 +569,110 @@ def test_guard_log_line_lists_top40_removals_or_none():
     ev = {'ZZZ': ('move', date(2025, 5, 1)), 'QQQ': ('gap', date(2025, 6, 2))}
     line = runner.guard_line(ev, ['A', 'ZZZ', 'B'])
     assert 'ZZZ move 2025-05-01' in line and 'QQQ' not in line
+
+
+# ------------------------------------------------------------------ half-size gate (spec C)
+
+def _info(pct):
+    """A gate-info dict at a given percentile (the shape term_structure_gate returns)."""
+    return dict(date=date(2026, 10, 2), vix=16.0, vix3m=18.0, ratio=16 / 18, percentile=pct, gate_on=pct < 0.30)
+
+
+def test_gate_constants():
+    assert (ms.GATE_MODE_OFF, ms.GATE_MODE_SHADOW, ms.GATE_MODE_HALF) == ('off', 'shadow', 'half')
+    assert ms.GATE_HALF_PCT == 0.20
+
+
+def test_gate_scale_half_only_in_half_mode_below_20pct():
+    assert ms.gate_scale(_info(0.19), 'half') == 0.5
+    assert ms.gate_scale(_info(0.0), 'half') == 0.5
+    assert ms.gate_scale(_info(0.20), 'half') == 1.0           # exactly 20 % is NOT below
+    assert ms.gate_scale(_info(0.55), 'half') == 1.0
+    assert ms.gate_scale(_info(0.05), 'shadow') == 1.0
+    assert ms.gate_scale(_info(0.05), 'off') == 1.0
+
+
+def test_gate_scale_missing_gate_is_full_size_with_warning(caplog):
+    with caplog.at_level('WARNING'):
+        assert ms.gate_scale(None, 'half') == 1.0
+    assert 'full size' in caplog.text.lower()
+
+
+def test_target_dollars_scale_multiplies_every_target():
+    full = ms.target_dollars(['A', 'B'], 1000.0, 20)
+    half = ms.target_dollars(['A', 'B'], 1000.0, 20, scale=0.5)
+    assert full == {'A': 50.0, 'B': 50.0} and half == {'A': 25.0, 'B': 25.0}
+    assert ms.target_dollars(['A'], 1000.0, 20) == {'A': 50.0}
+
+
+def _half_world():
+    specs = {f'S{i}': (50.0, 0.001 * (i + 1), 1e7, 0.01) for i in range(30)}
+    panel, dates = make_panel(specs)
+    return panel, assets(**{s: f'{s} INC' for s in specs}), dates[-1]
+
+
+def test_mode_off_and_shadow_never_change_the_order_list():
+    panel, names, asof = _half_world()
+    state = {'cash': 20000.0, 'positions': {}, 'peak_equity': 20000.0}
+    base = runner.build_plan(panel, names, asof, 20, dict(state, positions={}))
+    for mode in ('off', 'shadow'):
+        s = ms.gate_scale(_info(0.01), mode)
+        plan = runner.build_plan(panel, names, asof, 20, dict(state, positions={}), scale=s)
+        assert plan[4] == base[4] and plan[3] == base[3]
+
+
+def test_gated_week_sells_to_half_and_ungated_week_buys_back_with_cash_unchanged():
+    panel, names, asof = _half_world()
+    state = {'cash': 20000.0, 'positions': {}, 'peak_equity': 20000.0}
+    sel, feat, eq, tg, orders, prices = runner.build_plan(panel, names, asof, 20, dict(state, positions={}))
+    held = {s: 1000.0 / prices[s] for s in sel}
+    full_state = {'cash': 0.0, 'positions': held}
+    _, _, eq_h, tg_h, ord_h, _ = runner.build_plan(panel, names, asof, 20, dict(full_state), scale=0.5)
+    assert eq_h == pytest.approx(20000.0)
+    assert all(v == pytest.approx(500.0) for v in tg_h.values())
+    assert len(ord_h) == 20 and all(o['side'] == 'sell' and o['notional'] == pytest.approx(500.0) for o in ord_h)
+    half_state = {'cash': 10000.0, 'positions': {s: 500.0 / prices[s] for s in sel}}
+    _, _, eq_b, tg_b, ord_b, _ = runner.build_plan(panel, names, asof, 20, dict(half_state), scale=1.0)
+    assert eq_b == pytest.approx(20000.0)                      # cash accounting does not depend on the mode
+    assert all(o['side'] == 'buy' and o['notional'] == pytest.approx(500.0) for o in ord_b)
+
+
+def test_size_label_gate_label_and_csv_scale_column(tmp_path, monkeypatch):
+    assert runner.size_label(1.0) == 'size 100%' and runner.size_label(0.5) == 'size 50%'
+    path = tmp_path / 'shadow.csv'
+    monkeypatch.setattr(runner, 'SHADOW_GATE_PATH', str(path))
+    runner.append_shadow_gate(date(2026, 10, 5), _info(0.1), 20000.0, scale=0.5)
+    assert pd.read_csv(path).iloc[0]['scale'] == 0.5
+
+
+def test_csv_header_migration_keeps_old_rows(tmp_path, monkeypatch):
+    path = tmp_path / 'shadow.csv'
+    old = [f for f in runner.SHADOW_GATE_FIELDS if f != 'scale']
+    path.write_text(','.join(old) + '\n' + ','.join(['1'] * len(old)) + '\n')
+    monkeypatch.setattr(runner, 'SHADOW_GATE_PATH', str(path))
+    runner.append_shadow_gate(date(2026, 10, 5), _info(0.1), 20000.0, scale=0.5)
+    df = pd.read_csv(path)
+    assert list(df.columns) == runner.SHADOW_GATE_FIELDS and len(df) == 2
+    assert pd.isna(df.iloc[0]['scale']) and df.iloc[1]['scale'] == 0.5
+
+
+def test_gate_cli_default_is_half():
+    assert runner.build_arg_parser().parse_args([]).gate == 'half'
+    assert runner.build_arg_parser().parse_args(['--gate', 'shadow']).gate == 'shadow'
+
+
+H_GATE = os.path.join(ROOT, 'research', 'momentum_weekly', 'recon', 'H_gate.csv')
+
+
+@pytest.mark.skipif(not os.path.exists(H_GATE), reason='half-gate BT dump not present')
+def test_parity_with_half_gate_backtest():
+    """Per Monday: the BT's gate state (p20 half cell) and per-name weight vs gate_scale + target_dollars."""
+    h = pd.read_csv(H_GATE)
+    assert h.rebalance_date.nunique() == 3 and h.groupby('rebalance_date').gated.first().sum() == 2
+    for d, sub in h.groupby('rebalance_date'):
+        pct = float(sub.percentile.iloc[0])
+        sc = ms.gate_scale(_info(pct), 'half')
+        tgt = ms.target_dollars(list(sub.symbol), 1.0, 20, scale=sc)
+        assert (sc == 0.5) == bool(sub.gated.iloc[0]), d
+        assert len(tgt) == 20 and all(v == pytest.approx(w) for v, w in zip(tgt.values(), sub.weight)), d
+        print(f'HALF-GATE PARITY {d}: gated={bool(sub.gated.iloc[0])} p={pct:.3f} weight={sub.weight.iloc[0]}')

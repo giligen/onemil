@@ -35,6 +35,10 @@ GUARD_MOVE_DOWN = -0.75       # ... or below -75 % makes the name ineligible (co
 GUARD_MAX_GAP_DAYS = 10       # more than 10 calendar days between consecutive bars makes it ineligible
 GATE_WINDOW = 252             # shadow term-structure gate: trailing window (trading days) of VIX / VIX3M
 GATE_PCT = 0.30               # gate ON when the as-of ratio's percentile is below 30 %
+GATE_MODE_OFF = 'off'         # gate ignored
+GATE_MODE_SHADOW = 'shadow'   # gate logged only, never read by order building
+GATE_MODE_HALF = 'half'       # calm weeks (percentile < GATE_HALF_PCT) hold every name at 1/(2N), the rest cash
+GATE_HALF_PCT = 0.20          # the 1,700u median half-size cell: VIX/VIX3M trailing-252 percentile below 20 %
 GATE_MIN_OBS = 126            # fewer ratios than this in the window -> no gate (as the backtest's prank)
 
 TEST_RE = re.compile(r'^Z[A-Z]ZZT$')
@@ -197,9 +201,21 @@ def target_weights(selected: List[str], n: int = DEFAULT_N) -> Dict[str, float]:
     return {s: 1.0 / n for s in selected}
 
 
-def target_dollars(selected: List[str], equity: float, n: int = DEFAULT_N) -> Dict[str, float]:
-    """Dollar target per name = equity / n."""
-    return {s: w * equity for s, w in target_weights(selected, n).items()}
+def gate_scale(gate_info: Optional[Dict], mode: str) -> float:
+    """Size multiplier for this rebalance: 0.5 only when ``mode`` is 'half' AND the gate info exists AND its
+    percentile is strictly below GATE_HALF_PCT; 1.0 otherwise. A missing gate (n/a) in 'half' mode is FULL
+    size with a WARNING -- never a silent half."""
+    if mode != GATE_MODE_HALF:
+        return 1.0
+    if not gate_info:
+        logger.warning("momentum_sleeve: half-size gate unavailable (n/a) -- trading FULL size this week")
+        return 1.0
+    return 0.5 if gate_info['percentile'] < GATE_HALF_PCT else 1.0
+
+
+def target_dollars(selected: List[str], equity: float, n: int = DEFAULT_N, scale: float = 1.0) -> Dict[str, float]:
+    """Dollar target per name = scale * equity / n (``scale`` 0.5 = half size, the rest cash)."""
+    return {s: w * equity * scale for s, w in target_weights(selected, n).items()}
 
 
 def rebalance_orders(current_positions_usd: Dict[str, float], targets_usd: Dict[str, float],
