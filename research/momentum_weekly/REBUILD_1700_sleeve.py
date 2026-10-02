@@ -183,7 +183,7 @@ def main():
     syms = df["symbol"].astype(str)
     bad_sym_pattern = syms.str.match(SYM_ZZZT_RE) | syms.str.contains(r"[./]", regex=True)
     df = df.loc[~bad_sym_pattern].copy()
-    df = df.loc[~df["symbol"].isin(excl_names)].copy()
+    df = df.loc[~df["symbol"].isin(excl_names) | (df["symbol"] == "SPY")].copy()  # SPY kept for benchmark only
     log(f"after name/pattern exclusions: {len(df):,} rows, "
         f"{df['symbol'].nunique():,} symbols remain")
 
@@ -247,6 +247,7 @@ def main():
             (snap["close"] >= MIN_PRICE)
             & (snap["adv20"] >= MIN_ADV20)
             & (snap["hist_count"] >= MIN_HISTORY_DAYS)
+            & (snap["symbol"] != "SPY")
             & snap["signal"].notna()
             & np.isfinite(snap["signal"])
         ]
