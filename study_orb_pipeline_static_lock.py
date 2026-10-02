@@ -1153,7 +1153,10 @@ def main():
         for _day, _g in sel.groupby('date', sort=False):
             _ad_mask.extend(_anchor_reject_mask(
                 [_ad_anchor.get(s) for s in _g['symbol']]))
-        _ad_mask = pd.Series(_ad_mask, index=sel.index)
+        # dtype=bool: same empty-sel column-collapse hazard fixed 2026-10-02
+        # for the G1/catalyst masks below -- guards this one too in case a
+        # future pool/window ever enters this block with sel already empty.
+        _ad_mask = pd.Series(_ad_mask, index=sel.index, dtype=bool)
         _ad_n = int(_ad_mask.sum())
         _ad_pnl = float(sel.loc[_ad_mask, '_sized_pnl'].sum())
         _ad_dropped = sel.loc[_ad_mask, ['symbol', 'date', '_sized_pnl']]
@@ -1302,13 +1305,22 @@ def main():
     g1_veto_on = bt_cfg['g1_enabled']
     if g1_veto_on and {'return_volatility_20d',
                        'prev_day_range_pct'} <= set(sel.columns):
+        # dtype=bool is REQUIRED even though every list element is already a
+        # Python bool: pd.Series([], index=...) on a fully-vetoed (0-row) sel
+        # defaults to float64 with no explicit dtype, and `sel[~g1_mask]` with
+        # a non-bool indexer is NOT treated as boolean row selection by pandas
+        # -- it silently collapses sel to ZERO COLUMNS instead of zero rows.
+        # Root-caused 2026-10-02 (cell 1,693b AF4/out_regime: PDR veto legitimately
+        # dropped 100% of the 14 entered picks, then this line ate every column
+        # incl. 'date', surfacing as a bogus "no entered column" WARNING and a
+        # KeyError('date') crash in the groupby below).
         g1_mask = pd.Series(
             [_g1_reject(rv, pdr, bt_cfg['g1_rv20_min'], bt_cfg['g1_pdr_min'],
                         short_history_veto=bt_cfg['g1_short_history_veto'])
              is not None
              for rv, pdr in zip(sel['return_volatility_20d'],
                                 sel['prev_day_range_pct'])],
-            index=sel.index)
+            index=sel.index, dtype=bool)
         n_g1 = int(g1_mask.sum())
         g1_pnl = float(sel.loc[g1_mask, '_sized_pnl'].sum())
         sel = sel[~g1_mask].copy()
@@ -1389,7 +1401,11 @@ def main():
         cv_mask = [catalyst_veto_applies(hn, a, _cohorts.get(d, {}),
                                          bt_cfg['catalyst_min_cohort'])
                    for hn, a, d in zip(_has_news_sel, sel['_anchor'], _sel_day)]
-        cv_mask = pd.Series(cv_mask, index=sel.index)
+        # dtype=bool: same empty-sel column-collapse hazard as the G1 veto
+        # above (2026-10-02, cell 1,693b) -- cv_mask is a plain Python list of
+        # bools here, but pd.Series([], ...) with no rows left defaults to
+        # float64, and a non-bool indexer silently drops all of sel's columns.
+        cv_mask = pd.Series(cv_mask, index=sel.index, dtype=bool)
         n_cv = int(cv_mask.sum())
         cv_pnl = float(sel.loc[cv_mask, '_sized_pnl'].sum())
         sel = sel[~cv_mask].copy()
@@ -1497,6 +1513,29 @@ def main():
         print("WARNING: features CSV has no `entered` column — ENTERED-ONLY book "
               "(selection lookahead: BT picks only from candidates whose breakout "
               "fired). Rebuild features with --force-full-regen.")
+
+    # Root-caused 2026-10-02 (cell 1,693b, AF4/out_regime): a POST-selection
+    # veto (PDR/G1/range-size/catalyst — any of them, no refill by design) can
+    # legitimately drop 100% of the day's picks, leaving a 0-row sel. That is
+    # a real result, not a bug -- but the monthly/summary code below assumes
+    # at least one row (idxmax/idxmin on an empty frame raises) and must not
+    # run on it blindly. Log it loudly, write the (already-saved, 0-row but
+    # fully-columned) book + an empty monthly CSV, and return cleanly instead
+    # of crashing main() or fabricating months that never happened.
+    if len(sel) == 0:
+        logger.warning('%s: sel is EMPTY after the full selection+veto cascade '
+                        '(0 of 0 picks survive) -- every candidate was vetoed '
+                        'with no refill. Writing a 0-row book (%s) and an empty '
+                        'monthly table; this is a legitimate zero-trade result, '
+                        'not a pipeline failure.', book_csv, book_csv)
+        monthly_csv = os.environ.get('ORB_BT_MONTHLY_OUT',
+                                     'analysis_results/orb_monthly_static_lock.csv')
+        pd.DataFrame(columns=['month', 'days', 'green', 'red', 'day_wr_pct',
+                              'picks', 'best_day', 'worst_day', 'pnl', 'cum_pnl',
+                              'intra_dd']).to_csv(monthly_csv, index=False)
+        print(f"\n0 picks survived selection+vetoes -- empty book. "
+              f"Saved: {monthly_csv} + {book_csv}")
+        return
 
     # Per-day → per-month
     daily = sel.groupby('date').agg(

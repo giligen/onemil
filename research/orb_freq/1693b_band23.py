@@ -275,7 +275,12 @@ def stage_pipeline():
         with open(log_path, 'w') as lf:
             rc = subprocess.run(['nice', '-n', '10', 'python3', 'study_orb_pipeline_static_lock.py'],
                                  cwd=str(ROOT), env=env, stdout=lf, stderr=subprocess.STDOUT).returncode
-        log.info('%s/%s pipeline rc=%d', pool, window, rc)
+        if rc != 0:
+            log.error('%s/%s: pipeline FAILED rc=%d -- see %s for the traceback; this '
+                      '(pool, window) book is MISSING, not legitimately empty, until '
+                      'fixed', pool, window, rc, log_path)
+        else:
+            log.info('%s/%s pipeline rc=%d', pool, window, rc)
 
 
 # =================================================================== stage: score ===================
@@ -307,7 +312,24 @@ def stage_score():
     def book_rows(fp):
         if not Path(fp).exists():
             return []
-        b = pd.read_csv(fp, keep_default_na=False, na_values=[''])
+        try:
+            b = pd.read_csv(fp, keep_default_na=False, na_values=[''])
+        except pd.errors.EmptyDataError:
+            # A pipeline run can legitimately veto 100% of a (pool, window)'s
+            # picks with no refill (root-caused 2026-10-02, AF4/out_regime:
+            # study_orb_pipeline_static_lock.py now writes a 0-row-but-headered
+            # CSV for this case). A truly header-less/0-byte file reaching here
+            # means the pipeline stage crashed before writing anything -- VOID
+            # this book as n=0 rather than crash the whole score stage, but say
+            # so loudly: stage_pipeline's own log/rc is the place to diagnose it.
+            log.warning('%s: EMPTY/unreadable CSV (no columns) -- recording '
+                        'n=0 for this book; check stage_pipeline rc for this '
+                        '(pool, window) before trusting that as a real zero', fp)
+            return []
+        if 'entered' not in b.columns:
+            log.warning('%s: 0 rows and no `entered` column -- recording n=0 '
+                        '(legitimately empty book, not a read failure)', fp)
+            return []
         b = b[b['entered'].astype(str).isin(['1', 'True', 'true'])]
         return list(zip(b['date'], b['symbol'], b['entry_price']))
 
