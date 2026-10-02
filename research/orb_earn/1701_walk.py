@@ -58,15 +58,18 @@ entry cost = measured NBBO half-spread at the entry minute, subtracted separatel
 term (never double-charged against the same slippage).
 
 Usage:
-    python3 research/orb_earn/1701_walk.py --smoke           # <=300 sessions on shards present
-    setsid nohup nice -n 10 python3 research/orb_earn/1701_walk.py --full \
+    python3 research/orb_earn/1701_walk.py --source sip --smoke   # <=300 sessions already in bars_sip.db
+    setsid nohup nice -n 10 python3 research/orb_earn/1701_walk.py --source sip --full \
         > research/orb_earn/1701_walk.log 2>&1 &
+    # --source databento (default was databento pre-Amendment-2) loads the venue-subset EQUS.MINI
+    # shards -- kept for the cross-check only; its RESULT is marked VOID (Amendment 2).
 """
 import argparse
 import glob
 import importlib.util
 import logging
 import os
+import sqlite3
 import sys
 import time
 from datetime import date as _date, datetime, timedelta
@@ -338,6 +341,91 @@ class DatabentoStore:
     def available_days(self):
         return sorted(os.path.basename(p)[:-len('.parquet')]
                       for p in glob.glob(os.path.join(self.shard_dir, '*.parquet')))
+
+
+# ---------------------------------------------------------------------------
+# NEW (Amendment 2): the Alpaca SIP store (research/bf_zero/bars_sip.db) is the ONLY source a
+# range-based entry can be walked on -- Databento EQUS.MINI is a venue subset (opening-range
+# high/low inside the SIP range by up to 4%) and stays above for the cross-check only.
+# SipRetryStore composes the project's own CachedStore (f1694.CachedStore ->
+# research/orb_freq/1693_pool_exits.py, wrapping f1668.BarStore, read-only `?mode=ro`,
+# day_bars(symbol, day) -> {minarr, o, h, l, c, v}, SAME shape as DatabentoStore above) so
+# walk_all is UNCHANGED under --source sip. The only addition is retry/backoff: f1668.BarStore
+# opens read-only but carries no busy-timeout of its own, and the appender
+# (research/orb_earn/1701_backfill_run.py) is the sole writer and may hold the write lock --
+# every call here retries 'database is locked' with exponential backoff capped at 30s total,
+# logging WARNING per retry / ERROR on final failure (CLAUDE.md: every fallback path logs why).
+# ---------------------------------------------------------------------------
+
+class SipRetryStore:
+    """day_bars(symbol, day) over bars_sip.db via f1694.CachedStore, with a 30s busy-timeout/
+    backoff wrapper around the appender's write lock. Never writes; never opens the DB any way
+    but through CachedStore's own read-only connection."""
+
+    def __init__(self, db_path=BARS_SIP_DB, max_wait_s=30.0):
+        self._store = CachedStore(db_path)
+        self.max_wait_s = max_wait_s
+
+    def day_bars(self, symbol, day):
+        waited, delay = 0.0, 0.5
+        while True:
+            try:
+                return self._store.day_bars(symbol, str(day))
+            except sqlite3.OperationalError as e:
+                if 'locked' not in str(e).lower() or waited >= self.max_wait_s:
+                    logger.error('bars_sip.db read failed for %s %s after %.1fs waited: %s', symbol, day, waited, e)
+                    return None
+                logger.warning('bars_sip.db locked (appender writing) -- retry %s %s in %.1fs (%.1f/%.0fs waited)',
+                                symbol, day, delay, waited, self.max_wait_s)
+                time.sleep(delay)
+                waited += delay
+                delay = min(delay * 2.0, 5.0)
+
+    def close(self):
+        self._store.close()
+
+
+def sip_available_sessions(cands, db_path=BARS_SIP_DB, limit=300):
+    """Read-only count of candidate (symbol, session) pairs already written to bars_sip.db by
+    the appender (research/orb_earn/1701_backfill_run.py) -- the --smoke session filter for
+    --source sip. Opens the DB for exactly one DISTINCT query, mode=ro."""
+    con = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True, timeout=30)
+    try:
+        have = pd.read_sql('SELECT DISTINCT symbol, day FROM bars', con)
+    finally:
+        con.close()
+    have_pairs = set(zip(have['symbol'], have['day']))
+    pairs = cands[['symbol', 'session']].drop_duplicates()
+    covered = pairs.apply(lambda r: (r['symbol'], r['session']) in have_pairs, axis=1)
+    sessions = sorted(pairs.loc[covered, 'session'].unique())
+    logger.info('SIP smoke availability: %d/%d candidate (symbol,day) pairs already in bars_sip.db -- '
+                '%d distinct sessions covered', int(covered.sum()), len(pairs), len(sessions))
+    return sessions[:limit]
+
+
+def sip_coverage_gate(cands, store):
+    """PREREG Amendment 2's coverage gate: a session is walkable only if all five 09:30-09:34 ET
+    bars (RANGE_LO_M..RANGE_HI_M) are present AND there are >=300 regular-session (09:30-16:00
+    ET) bars. Returns (walkable, requested, pct, note); note states VOID below the 95% gate --
+    never silently dropped."""
+    RTH_END_M = 960.0  # 16:00 ET regular-session close (ORB_EOD_M=945 is the 15:45 flatten rule, not this)
+    pairs = cands[['symbol', 'session']].drop_duplicates()
+    requested = len(pairs)
+    walkable = 0
+    for r in pairs.itertuples():
+        bars = store.day_bars(r.symbol, r.session)
+        if bars is None or len(bars['o']) == 0:
+            continue
+        m = bars['minarr']
+        five_present = len(set(np.floor(m[(m >= RANGE_LO_M) & (m <= RANGE_HI_M)]).astype(int))) >= 5
+        rth_n = int(((m >= RANGE_LO_M) & (m < RTH_END_M)).sum())
+        if five_present and rth_n >= 300:
+            walkable += 1
+    pct = 100.0 * walkable / requested if requested else 0.0
+    note = (f'SIP coverage: {walkable}/{requested} sessions walkable ({pct:.1f}%) -- '
+            + ('gate MET (>=95%).' if pct >= 95.0 else 'gate NOT met -- VOID per Amendment 2.'))
+    logger.info(note)
+    return walkable, requested, pct, note
 
 
 def session_features(bars):
@@ -725,12 +813,17 @@ def write_result(reads_df, gap_band_rows, union_rows, cross, cov_note, n_cands, 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--smoke', action='store_true', help='<=300 sessions, shards already on disk only')
+    ap.add_argument('--smoke', action='store_true', help='<=300 sessions, already on disk/in bars_sip.db only')
     ap.add_argument('--full', action='store_true', help='all candidates (needs the full pull)')
+    ap.add_argument('--source', choices=['sip', 'databento'], default='sip',
+                     help='bar source (default sip): sip = Alpaca SIP store (research/bf_zero/bars_sip.db), '
+                          'the only source a range-based entry can be walked on (PREREG Amendment 2); '
+                          'databento = venue-subset EQUS.MINI shards, cross-check only, VOID as a result source')
     args = ap.parse_args()
     if not args.smoke and not args.full:
         logger.error('pass --smoke or --full')
         sys.exit(1)
+    logger.info('source=%s smoke=%s full=%s', args.source, args.smoke, args.full)
 
     check_disk()
     logger.info('running unit self-check (mirror long vs short)...')
@@ -739,17 +832,30 @@ def main():
     cands = pd.read_csv(CANDIDATES_CSV, dtype={'symbol': str, 'session': str, 'half': str})
     logger.info('loaded %d candidates from %s', len(cands), CANDIDATES_CSV)
 
-    store = DatabentoStore()
+    store = SipRetryStore() if args.source == 'sip' else DatabentoStore()
     if args.smoke:
-        avail = set(store.available_days())
-        logger.info('%d day-shards on disk', len(avail))
-        cands = cands[cands['session'].isin(avail)]
-        sessions = sorted(cands['session'].unique())[:300] if len(cands) > 300 else sorted(cands['session'].unique())
+        if args.source == 'sip':
+            sessions = sip_available_sessions(cands, limit=300)
+        else:
+            avail = set(store.available_days())
+            logger.info('%d day-shards on disk', len(avail))
+            cands_av = cands[cands['session'].isin(avail)]
+            sessions = sorted(cands_av['session'].unique())[:300]
         cands = cands[cands['session'].isin(sessions)]
-        logger.info('SMOKE: restricted to %d sessions, %d candidate rows', len(sessions), len(cands))
+        logger.info('SMOKE (%s): restricted to %d sessions, %d candidate rows', args.source, len(sessions), len(cands))
         if len(cands) == 0:
-            logger.warning('SMOKE: no shards available yet -- nothing to walk this run')
+            logger.warning('SMOKE (%s): nothing available yet -- nothing to walk this run', args.source)
             return
+
+    run_kind = 'SMOKE run (<=300 sessions)' if args.smoke else 'FULL run'
+    if args.source == 'sip':
+        _walkable, _requested, _pct, cov_line = sip_coverage_gate(cands, store)
+        cov_note = f'{run_kind}, source=sip. {cov_line}'
+    else:
+        cov_note = (f'{run_kind}, source=databento. VOID per PREREG Amendment 2: EQUS.MINI is a venue-subset '
+                    f'feed (opening-range high/low inside the SIP range by up to 4%) -- cross-check only, '
+                    f'never a reportable result source.')
+    logger.info('coverage: %s', cov_note)
 
     all_rows = walk_all(cands, store)
     all_rows = apply_slots(all_rows)
@@ -779,9 +885,8 @@ def main():
     logger.info('wrote %s (%d rows)', READS_CSV, len(reads_df))
 
     cross = cross_check(fills_ok)
-    cov_note = 'SMOKE run (<=300 sessions).' if args.smoke else 'FULL run.'
     write_result(reads_df, gap_rows, union_rows, cross, cov_note, len(all_rows), len(fills_ok))
-    logger.info('DONE')
+    logger.info('DONE (source=%s)', args.source)
 
 
 if __name__ == '__main__':
