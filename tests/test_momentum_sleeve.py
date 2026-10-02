@@ -552,6 +552,21 @@ def test_load_gate_inputs_failure_is_na_with_warning(monkeypatch, caplog):
     assert runner.gate_label(None) == 'gate n/a'
 
 
+def test_stale_gate_is_used_with_a_warning(monkeypatch, caplog):
+    """The CBOE file ending the day before the signal date: the gate is still returned, a WARNING names the date."""
+    vix, v3m = vix_series()
+    monkeypatch.setattr(runner, 'fetch_cboe_close', lambda name: vix if name == 'VIX' else v3m)
+    asof = vix.index[-1] + pd.Timedelta(days=1)
+    with caplog.at_level('WARNING'):
+        info = runner.shadow_gate_info(asof)
+    assert info is not None and info['date'] == vix.index[-1].date()
+    assert 'STALE' in caplog.text
+    caplog.clear()
+    with caplog.at_level('WARNING'):
+        assert runner.shadow_gate_info(vix.index[-1])['date'] == vix.index[-1].date()
+    assert 'STALE' not in caplog.text
+
+
 def test_gate_label_and_csv_row(tmp_path, monkeypatch):
     info = dict(date=date(2026, 10, 2), vix=16.0, vix3m=18.0, ratio=16 / 18, percentile=0.21, gate_on=True)
     assert runner.gate_label(info) == 'gate ON (p21)'

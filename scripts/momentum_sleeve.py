@@ -470,14 +470,19 @@ def fetch_cboe_close(name: str) -> pd.Series:
 
 
 def shadow_gate_info(asof) -> Optional[Dict]:
-    """Shadow term-structure gate at ``asof``; None (WARNING) on any fetch / parse / history failure.
+    """Term-structure gate at ``asof``; None (WARNING) on any fetch / parse / history failure.
 
-    It never blocks or changes the rebalance: nothing in order building reads this."""
+    It never blocks the rebalance: a missing gate trades full size (``ms.gate_scale``). A gate computed on a close
+    older than ``asof`` (the CBOE file not yet updated) is still used, with a WARNING naming the date it read."""
     try:
-        return ms.term_structure_gate(fetch_cboe_close('VIX'), fetch_cboe_close('VIX3M'), asof)
-    except Exception as e:                      # network, schema, empty file: the gate is informational only
-        logger.warning("momentum_sleeve: shadow term-structure gate unavailable (%s) -- reported n/a", e)
+        info = ms.term_structure_gate(fetch_cboe_close('VIX'), fetch_cboe_close('VIX3M'), asof)
+    except Exception as e:                      # network, schema, empty file: the gate is reported n/a
+        logger.warning("momentum_sleeve: term-structure gate unavailable (%s) -- reported n/a", e)
         return None
+    if info and info['date'] < pd.Timestamp(asof).date():
+        logger.warning("momentum_sleeve: term-structure gate is STALE -- last CBOE close %s, signal date %s",
+                       info['date'], pd.Timestamp(asof).date())
+    return info
 
 
 def gate_label(info: Optional[Dict]) -> str:
