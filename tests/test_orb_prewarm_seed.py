@@ -44,6 +44,9 @@ def _mock_alpaca() -> MagicMock:
     return client
 
 
+_TODAY_ET = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).astimezone(__import__('zoneinfo').ZoneInfo('America/New_York')).date().isoformat()
+
+
 def _snap(open_price: float, prev_close: float, prev_volume: int = 2_000_000,
           daily_bar_date: str = None) -> dict:
     snap = {'open': open_price, 'prev_close': prev_close,
@@ -185,9 +188,9 @@ class TestPrewarmParity:
 
     def test_incremental_warm_matches_single_full_fetch(self):
         snaps = {
-            'PROD': _snap(10.0, 9.0),      # gap 11.1% -> admitted
-            'NOPE': _snap(10.0, 9.99),     # gap 0.1% -> rejected
-            'LATE': _snap(12.0, 11.0),     # gap 9.1% -> admitted, arrives late
+            'PROD': _snap(10.0, 9.0, daily_bar_date=_TODAY_ET),      # gap 11.1% -> admitted
+            'NOPE': _snap(10.0, 9.99, daily_bar_date=_TODAY_ET),     # gap 0.1% -> rejected
+            'LATE': _snap(12.0, 11.0, daily_bar_date=_TODAY_ET),     # gap 9.1% -> admitted, arrives late
         }
 
         # Old path: flag off, one full fetch of everything at once.

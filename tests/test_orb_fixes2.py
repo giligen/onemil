@@ -444,19 +444,19 @@ class TestSnapshotUniverse:
             # shape directly (prior nested code was the bug).
             'AAA': {  # PASSES: gap 10%, vol 1M, price $10
                 'open': 10.00, 'prev_close': 9.10, 'prev_volume': 1_000_000,
-                'latest_price': 10.00,
+                'latest_price': 10.00, 'daily_bar_date': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).astimezone(__import__('zoneinfo').ZoneInfo('America/New_York')).date().isoformat(),
             },
             'BBB': {  # FAILS gap (only 2%)
                 'open': 10.00, 'prev_close': 9.80, 'prev_volume': 1_000_000,
-                'latest_price': 10.00,
+                'latest_price': 10.00, 'daily_bar_date': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).astimezone(__import__('zoneinfo').ZoneInfo('America/New_York')).date().isoformat(),
             },
             'CCC': {  # FAILS volume (100K)
                 'open': 10.00, 'prev_close': 9.10, 'prev_volume': 100_000,
-                'latest_price': 10.00,
+                'latest_price': 10.00, 'daily_bar_date': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).astimezone(__import__('zoneinfo').ZoneInfo('America/New_York')).date().isoformat(),
             },
             'DDD': {  # FAILS price (above $30)
                 'open': 50.00, 'prev_close': 45.00, 'prev_volume': 1_000_000,
-                'latest_price': 50.00,
+                'latest_price': 50.00, 'daily_bar_date': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).astimezone(__import__('zoneinfo').ZoneInfo('America/New_York')).date().isoformat(),
             },
         }
         kept = engine.build_orb_universe_from_snapshots(['AAA', 'BBB', 'CCC', 'DDD'])

@@ -27,5 +27,6 @@ def test_replay_db_is_read_only_and_snapshots_match_shape(tmp_path):
         db._cache_conn.execute("DELETE FROM daily_bars")
     snaps = load_snapshots(db, '2026-10-02', 10)
     assert snaps['AAA'] == {'open': 10.0, 'prev_close': 9.0, 'prev_volume': 900000,
-                            'latest_price': 10.0, 'daily_bar_date': '2026-10-02'}
+                            'latest_price': 10.0, 'daily_bar_date': '2026-10-02',
+                            'close': 9.0, 'volume': 900000}
     assert set(StubAlpaca(snaps).get_snapshots(['AAA', 'ZZZ'])) == {'AAA'}

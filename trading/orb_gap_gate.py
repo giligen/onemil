@@ -159,3 +159,25 @@ def resolve_gap_input(
         f"timestamp={result.timestamp}"
     )
     return result
+
+
+def gap_input_needs_today_open(snap, today_et: str, min_prev_volume: float,
+                               min_price: float, max_price: float) -> bool:
+    """True when a snapshot cannot supply today's open and the symbol is liquid enough to matter.
+
+    A snapshot supplies it only when its daily bar is dated `today_et` and its open > 0
+    (2026-09-30 ASTX/AEHG: the bar was the previous session's). Stale-dated bars are the
+    prior session itself, so their close/volume are the prior close/volume; the cheap
+    liquidity/price prefilter (volume >= floor, close within 0.5*min..2*max price) keeps
+    the batched 09:30 REST fetch small. Pure function.
+    """
+    if not isinstance(snap, dict):
+        return False
+    try:
+        if float(snap.get('open', 0) or 0) > 0 and snap.get('daily_bar_date') == today_et:
+            return False
+        close = float(snap.get('close', 0) or 0)
+        vol = float(snap.get('volume', 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    return vol >= min_prev_volume and 0.5 * min_price <= close <= 2.0 * max_price

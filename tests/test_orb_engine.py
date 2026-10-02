@@ -1235,11 +1235,12 @@ class TestStaleSnapshotGate:
         keep = eng.build_orb_universe_from_snapshots(["LIVE1", "CORPSE"])
         assert 'LIVE1' in keep and 'CORPSE' not in keep
 
-    def test_missing_date_fails_open(self):
+    def test_missing_date_is_not_admitted(self):
+        """2026-10-02: a snapshot without a daily_bar_date cannot prove its open is today's."""
         eng, a = self._engine()
         a.get_snapshots.return_value = {'NODATE': self._snap(None)}
         keep = eng.build_orb_universe_from_snapshots(["NODATE"])
-        assert 'NODATE' in keep
+        assert 'NODATE' not in keep
 
     def test_previous_session_bar_is_not_a_corpse(self):
         """2026-09-21 defect: a symbol that has not printed in the first
@@ -1249,6 +1250,7 @@ class TestStaleSnapshotGate:
         from datetime import datetime, timezone, timedelta
         eng, a = self._engine()
         today = datetime.now(timezone.utc).date()
+        eng.db.get_intraday_bars_for_date.return_value = {}
         a.get_snapshots.return_value = {
             'FRIDAY': self._snap((today - timedelta(days=3)).isoformat()),
             'YDAY': self._snap((today - timedelta(days=1)).isoformat()),
@@ -1256,8 +1258,9 @@ class TestStaleSnapshotGate:
             'CORPSE5': self._snap((today - timedelta(days=5)).isoformat())}
         keep = eng.build_orb_universe_from_snapshots(
             ["FRIDAY", "YDAY", "HOLIDAYWKND", "CORPSE5"])
-        assert {'FRIDAY', 'YDAY', 'HOLIDAYWKND'} <= set(keep)
-        assert 'CORPSE5' not in keep
+        # Not corpses (no reject line) but their open is a prior day's: not
+        # admitted without a 09:30 bar (2026-10-02 gap-input parity).
+        assert keep == []
 
 
 # =========================================================================

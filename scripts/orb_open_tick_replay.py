@@ -69,6 +69,7 @@ def load_snapshots(db: Database, date: str, n: int) -> dict:
         o = today[sym]['open'] if sym in today else r['close']
         snaps[sym] = {'open': float(o), 'prev_close': float(r['close']),
                       'prev_volume': int(r['volume']), 'latest_price': float(o),
+                      'volume': int(r['volume']), 'close': float(r['close']),
                       'daily_bar_date': date}
     logger.info("snapshots: %d symbols (prev session %s, %d with a %s daily bar)",
                 len(snaps), prev, sum(1 for s in snaps if s in today), date)
@@ -145,6 +146,97 @@ def replay_cycle(eng, syms, restart_at_et=None):
     return time.time() - t0, counter.by_level, built
 
 
+LIVE_STALE = {"2026-09-30": ["ASTX", "AEHG"]}   # snapshots whose daily bar was the prior session at 09:35
+
+
+def _admit_class(gap, price, cfg):
+    """BT admission class ('prod' / 'P1' / '') from orb.yaml thresholds (daily_bars gap)."""
+    u = cfg['universe']
+    pools = (u.get('addon_pools') or {}).get('pools') or []
+    if u['min_price'] <= price <= u['max_price'] and gap >= u['min_gap_pct']:
+        return 'prod'
+    for p in pools:
+        if p['min_price'] <= price <= p['max_price'] and p['min_gap_pct'] <= gap <= p['max_gap_pct']:
+            return 'P1'
+    return ''
+
+
+def parity_replay(db, date: str, stale_syms: list) -> int:
+    """Replay the 09:35:30 ET universe build for `date`: engine admissions vs the BT's (daily_bars).
+
+    Snapshots are rebuilt from daily_bars (fresh, dated `date`); `stale_syms` get the PRIOR session's
+    daily bar instead (the 9/30 ASTX/AEHG live condition). The 09:30 minute bars come from the real
+    Alpaca historical REST (read-only market data). The clock is frozen at 09:35:30 ET of `date`.
+    Never submits an order. Prints admitted-vs-BT symbol lists and the build's seconds.
+    """
+    import os
+    import pandas as pd  # noqa: F401
+    from dotenv import load_dotenv
+    from data_sources.alpaca_client import AlpacaClient
+    import trading.orb_engine as oe
+    from zoneinfo import ZoneInfo
+    load_dotenv()
+    snaps = load_snapshots(db, date, 5000)
+    conn = db._cache_conn
+    prev = conn.execute("SELECT MAX(bar_date) FROM daily_bars WHERE bar_date < ?", (date,)).fetchone()[0]
+    prev2 = conn.execute("SELECT MAX(bar_date) FROM daily_bars WHERE bar_date < ?", (prev,)).fetchone()[0]
+    real = AlpacaClient(os.getenv('ALPACA_API_KEY'), os.getenv('ALPACA_API_SECRET'))
+    if not conn.execute("SELECT 1 FROM daily_bars WHERE bar_date = ? LIMIT 1", (date,)).fetchone():
+        d = datetime.fromisoformat(date).date()
+        syms_all = list(snaps)
+        for i in range(0, len(syms_all), 200):
+            for sy, bars in real.get_daily_bars_range(syms_all[i:i + 200], d, d).items():
+                if bars:
+                    snaps[sy]['open'] = snaps[sy]['latest_price'] = float(bars[0]['open'])
+    cfg = yaml.safe_load((ROOT / 'orb.yaml').read_text())
+    bt = {}
+    for sy, sn in snaps.items():
+        c = _admit_class((sn['open'] - sn['prev_close']) / sn['prev_close'] * 100, sn['open'], cfg)
+        if c and sn['prev_volume'] >= cfg['universe']['min_prev_volume']:
+            bt[sy] = c
+    for sy in stale_syms:       # prior session's bar as the snapshot's daily bar (live 9/30 condition)
+        r = conn.execute("SELECT open, close, volume FROM daily_bars WHERE symbol=? AND bar_date=?",
+                         (sy, prev)).fetchone()
+        r2 = conn.execute("SELECT close FROM daily_bars WHERE symbol=? AND bar_date=?", (sy, prev2)).fetchone()
+        if r and r2:
+            snaps[sy] = {'open': float(r['open']), 'close': float(r['close']), 'volume': int(r['volume']),
+                         'prev_close': float(r2['close']), 'prev_volume': 1_000_000,
+                         'latest_price': float(r['close']), 'daily_bar_date': prev}
+
+    class Rest(StubAlpaca):
+        """Stub snapshots + the REAL historical 09:30 bars."""
+        def get_1min_bars_range_multi(self, syms, s0, s1):
+            self.bar_calls = getattr(self, 'bar_calls', 0) + 1
+            return real.get_1min_bars_range_multi(syms, s0, s1)
+
+    fixed = datetime.fromisoformat(f"{date}T09:35:30").replace(tzinfo=ZoneInfo('America/New_York'))
+
+    class _Frozen:
+        def now(self, tz=None):
+            return fixed.astimezone(tz) if tz else fixed.astimezone(timezone.utc)
+
+        def __getattr__(self, name):
+            return getattr(datetime, name)
+    real_dt = oe.datetime
+    oe.datetime = _Frozen()
+    try:
+        alpaca = Rest(snaps)
+        eng = build_engine(alpaca, db)
+        t0 = time.time()
+        keep = eng.build_orb_universe_from_snapshots(list(snaps))
+        secs = time.time() - t0
+    finally:
+        oe.datetime = real_dt
+    eng_set, bt_set = set(keep), set(bt)
+    print(f"PARITY {date}: engine admitted {len(eng_set)}, BT admitted {len(bt_set)}, build {secs:.1f} s "
+          f"(stub snapshot REST excluded), 09:30 REST calls {getattr(alpaca, 'bar_calls', 0)}, stale injected {stale_syms}")
+    print(f"  engine-only (not in BT): {sorted(eng_set - bt_set)}")
+    print(f"  BT-only (not in engine): {sorted(bt_set - eng_set)}")
+    for sy in stale_syms:
+        print(f"  {sy} admitted by engine: {sy in eng_set}; in BT: {sy in bt_set}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--date', required=True)
@@ -153,11 +245,18 @@ def main() -> int:
     ap.add_argument('--restart-at-et', default=None,
                     help="HH:MM ET: also replay one cycle after a restart at that time "
                          "(e.g. 10:03 or 16:01); the clock is frozen inside trading.orb_engine")
+    ap.add_argument('--parity', action='store_true',
+                    help="replay the 09:35:30 ET build for --date: admitted vs the BT's (daily_bars); "
+                         "stale-snapshot symbols default to LIVE_STALE[date]; uses real read-only Alpaca bars")
+    ap.add_argument('--stale', default=None, help="comma list overriding LIVE_STALE for --parity")
     ap.add_argument('--cache', default=str(ROOT / 'data' / 'cache.db'))
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
     db = open_readonly_db(Path(args.cache))
+    if args.parity:
+        stale = args.stale.split(',') if args.stale else LIVE_STALE.get(args.date, [])
+        return parity_replay(db, args.date, stale)
     snaps = load_snapshots(db, args.date, args.n)
     syms = list(snaps)
     sample = syms[:args.sample]

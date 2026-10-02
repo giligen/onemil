@@ -49,7 +49,8 @@ def _mock_alpaca():
 
 def _snap(open_price, prev_close, prev_volume=2_000_000):
     return {'open': open_price, 'prev_close': prev_close,
-            'prev_volume': prev_volume, 'latest_price': open_price}
+            'prev_volume': prev_volume, 'latest_price': open_price,
+            'daily_bar_date': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).astimezone(__import__('zoneinfo').ZoneInfo('America/New_York')).date().isoformat()}
 
 
 def _range(symbol, range_open=10.0, range_high=10.5, range_low=9.9):
