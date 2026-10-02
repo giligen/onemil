@@ -36,10 +36,13 @@ every python run through `bash scripts/research_run.sh` (cage). Nothing is resta
     add-on events `[ORB] ADD`; exits with reason and P&L. HOD/ORB paper accounts flat after 15:55 ET.
 14. ERROR / TIMEOUT counts for the day; disk ≥ 5 GB.
 
-## Open defects carried into Monday (paper only)
-* HOD: resting entry orders survive the daily kill rail; registry quantity wrong after a mid-session restart
-  (`research/hod_entry/forward_2026q3/OPS_20261002_flatten.md`).
-* ORB gap gate: the 9/30 "prefer the 09:30 bar" hook is inert live (no live writer of today's minute bars) — the gap is
-  gated on the snapshot open; the stale-snapshot case behind the 9/30 ASTX/AEHG mismatch is the weekend fix
-  (`docs/orb_allday_rebuild_20261002.md` §3). If not fixed by Monday, the parity read must list every pick whose
-  snapshot daily bar was not today's.
+## Fixed on 10/2 evening — Monday is each fix's first live proof (paper only)
+* ORB gap gate input = today's official open (commit 2044a17, `research/orb_freq/gap_input_parity_20261002.md`):
+  `grep -E "ORB GAP_GATE:"` after 13:35 → at most one aggregated WARNING per build naming symbols with no valid
+  today-open (not admitted); the parity read lists every pick with its gap input source (snapshot today / 09:30 bar).
+* HOD kill rail + restart quantity (`docs/hod_killrail_restart_qty_20261002.md`, greps in its last section):
+  `KILL RAIL (…): cancelling n resting entry order(s)` appears once when a rail trips; any
+  `registry qty … < broker qty … — registry corrected` WARNING is read the same day; the HOD paper account is flat
+  after 15:55 ET with no after-hours clean-up needed.
+* A second Claude process writing to the tree is checked BEFORE any agent is launched:
+  `ps -eo pid,etimes,args | grep -E "claude|2\.1\.[0-9]+ --session-id" | grep -v grep`.

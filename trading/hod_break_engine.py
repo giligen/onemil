@@ -338,6 +338,9 @@ class HodBreakEngine:
         self._account_number_value: Optional[str] = None      # _account_number_cached: fetched once, process lifetime
         self._order_404_counts: dict = {}                     # order_id -> consecutive 404 count, _poll_live_fills_rest_fallback
         self._positions_adopted_on_boot = False                # _adopt_unregistered_positions_on_boot: runs once per process
+        self._live_armed_stops: dict = {}                      # sym -> stop of the last REAL entry order this book armed/adopted today (ownership evidence + stop for a late fill)
+        self._rail_cancel_done: set = set()                    # kill-rail names whose resting-entry cancel sweep already ran this session
+        self._last_rail_check = 0.0; self._last_broker_reconcile = 0.0
         self.live_since: Optional[datetime] = None            # ET timestamp of the FIRST bar this engine received live over the websocket
                                                                 # (never a backfill/catch-up bar); reset each session in _roll_session
         self._prev_day: Dict[str, tuple] = {}
@@ -409,6 +412,7 @@ class HodBreakEngine:
             self._kill_notified.clear(); self._flattened = False; self._post_close_fc_warned = False
             self._live_cap_slots.clear(); self._cap_logged.clear(); self._sizing_logged.clear(); self._bp_cache_value = None; self._bp_cache_ts = 0.0
             self._live_cancel_swept_entry = False; self._live_cancel_swept_flat = False
+            self._live_armed_stops.clear(); self._rail_cancel_done.clear()
             self._fs_tracked.clear(); self._fs_shorts.clear(); self._fs_submitted_today = 0
             self._fs_day_realized_r = 0.0; self._fs_disabled_for_day = False; self._fs_disabled_notified = False
             self._fs_asset_cache.clear()
@@ -569,12 +573,16 @@ class HodBreakEngine:
                 if self.book == 'hod_break' and self.entry_mode == 'resting_stop_limit' and not self.dry_run:
                     self._poll_live_fills()
                     self._sweep_live_cutoffs()
+                    self._enforce_kill_rails_on_resting()
+                    self._reconcile_positions_to_broker()
                     # 9/25 VECO/CDNA incident: neither a broker-side leg fill (caught above by check_exits, now
                     # that _on_live_fill registers a Position) nor StopMonitor's own price-triggered stop was
                     # ever drained into the DB — rows stayed open and StopMonitor kept a phantom watch.
                     self._drain_stop_monitor_exits()
                     self._sync_phantom_watches()
                 if self.is_force_close_time() and (not self._flattened or any(p.status == 'open' for p in self.positions.values())):
+                    if self.book == 'hod_break' and self.entry_mode == 'resting_stop_limit' and not self.dry_run:
+                        self._reconcile_positions_to_broker(force=True)    # an unregistered late fill must be in the flatten
                     self.force_close_all()
             except Exception as e:
                 logger.error(f"{self.tag} process_tick failed: {e}", exc_info=True)
@@ -1378,6 +1386,7 @@ class HodBreakEngine:
                     if cand is None:
                         cand = self.candidates[sym] = Candidate(symbol=sym, day_open=0.0, adv20=self._adv_map.get(sym, 0.0))
                     cand.live_order = lo; cand.live_filled = False; self._live_cap_slots.add(sym)
+                    self._live_armed_stops[sym] = float(lo['stop'])
                     adopted += 1
                     logger.warning(f"{self.tag} {sym}: ADOPTED resting order {oid} on restart (tracked id, still open at the broker) "
                                    f"— re-attached to live_order, covered by the cutoff sweep, the fill-cap cancel-all and the fill poll")
@@ -1410,7 +1419,7 @@ class HodBreakEngine:
             logger.error(f"{self.tag} could not read the dry-entry ledger for boot adoption stops ({e})")
         return out
 
-    def _adopt_unregistered_positions_on_boot(self) -> None:
+    def _adopt_unregistered_positions_on_boot(self, periodic: bool = False) -> None:
         """Runs ONCE per process start, right after `_reconcile_live_orders_on_boot`. A broker LONG position in
         a symbol THIS BOOK traded today (a still-armed resting order, a live_filled candidate, `entered_today`,
         or a row in today's dry-entry ledger) that is absent from `self.positions` is ADOPTED — registry +
@@ -1430,9 +1439,10 @@ class HodBreakEngine:
         if today already has an open row for this symbol+strategy, only the unregistered DIFFERENCE (broker qty
         minus the row's shares) is merged into it (shares += diff, fill_price = weighted average) — a second row
         is never inserted. A non-positive difference means the DB is already caught up: adopt nothing."""
-        if self._positions_adopted_on_boot:
-            return
-        self._positions_adopted_on_boot = True
+        if not periodic:
+            if self._positions_adopted_on_boot:
+                return
+            self._positions_adopted_on_boot = True
         try:
             broker_positions = self.alpaca.get_open_positions() or []
         except Exception as e:
@@ -1449,16 +1459,24 @@ class HodBreakEngine:
         for bp in broker_positions:
             sym = str(bp.get('symbol') or '')
             qty = int(float(bp.get('qty') or 0))
-            if not sym or qty <= 0 or sym in self.positions:
-                continue                                  # no symbol, short/flat (never ours to adopt), or already tracked
+            if not sym or qty <= 0:
+                continue                                  # no symbol, short/flat (never ours to adopt)
+            if sym in self.positions:
+                self._sync_registry_qty_to_broker(sym, qty)   # tracked: its registry qty must equal the broker's (2026-10-02 NEBX/COHX)
+                continue
             cand = self.candidates.get(sym)
             existing = open_rows.get(sym)
-            ours_today = (cand is not None and (cand.live_order is not None or cand.live_filled)) or sym in self.entered_today or sym in ledger_stops or existing is not None
+            # periodic mode (a late fill after a cancel/rail, 2026-10-02 VIRT): ownership = a REAL order this book armed today
+            # or an open row of ours — never the dry-ledger alone, which also lists names we only paper-armed.
+            ours_today = (cand is not None and (cand.live_order is not None or cand.live_filled)) or sym in self.entered_today or existing is not None \
+                or sym in self._live_armed_stops or (not periodic and sym in ledger_stops)
             if not ours_today:
                 continue                                   # no record of this symbol today — the owner's manual position, never touch
             entry_px = float(bp.get('avg_entry_price') or 0.0)
             if cand is not None and cand.live_order is not None and cand.live_order.get('stop') is not None:
                 stop = float(cand.live_order['stop'])
+            elif sym in self._live_armed_stops:
+                stop = self._live_armed_stops[sym]
             elif sym in ledger_stops:
                 stop = ledger_stops[sym]
             else:
@@ -1518,6 +1536,87 @@ class HodBreakEngine:
                     self._notify(f"{self.tag} ERROR add_watch {sym} — UNMANAGED boot-adopted position: {e}")
             self.entered_today.add(sym); self.seen_today.add(sym)
 
+    def _sync_registry_qty_to_broker(self, sym: str, broker_qty: int) -> None:
+        """Make the registry quantity of an UNEXITED open position of this book equal the broker's long qty
+        (2026-10-02 NEBX 21 vs 44, COHX 50 vs 120, SPCF 22 left behind: a fill registered on an adopted/restored
+        position REPLACED the registry with that order's qty only). Raises only — a smaller broker qty is left to
+        sync_positions / the exit guard (a lower broker qty may be a partial exit in flight). Updates the row, the
+        StopMonitor watch and, if a safety-net OCO exists, re-places it at the broker qty. Only called for symbols
+        already in this book's registry, never for a foreign position. Never raises."""
+        pos = self.positions.get(sym)
+        if pos is None or pos.status != 'open' or pos.closed_qty > 0 or broker_qty <= pos.shares:
+            return
+        old = pos.shares
+        logger.warning(f"{self.tag} {sym}: registry qty {old} < broker qty {broker_qty} — registry corrected to the broker's "
+                       f"(row {pos.trade_id}, StopMonitor watch and safety-net legs resized)")
+        pos.shares = broker_qty
+        if pos.trade_id is not None:
+            try: self.db.update_trade(pos.trade_id, {'shares': broker_qty, 'filled_qty': broker_qty})
+            except Exception as e: logger.error(f"{self.tag} {sym}: DB qty correction {old}->{broker_qty} failed: {e}")
+        if pos.tp_leg_id or pos.sl_leg_id:
+            for leg in (pos.tp_leg_id, pos.sl_leg_id):
+                if leg:
+                    try: self.alpaca.cancel_order(leg)
+                    except Exception as e: logger.error(f"{self.tag} {sym}: could not cancel undersized safety-net leg {leg}: {e}")
+            tp_id = sl_id = ''
+            try:
+                oco = self.alpaca.submit_oco_sell_order(symbol=sym, qty=broker_qty, limit_price=pos.target,
+                                                        stop_price=round(pos.stop * (1.0 - self.SAFETY_NET_PCT), 2))
+                tp_id = str((oco or {}).get('id') or '')
+                stops = [l for l in ((oco or {}).get('legs') or []) if l.get('type') == 'stop']
+                sl_id = str(stops[0]['id']) if len(stops) == 1 else ''
+            except Exception as e:
+                logger.error(f"{self.tag} {sym}: safety-net OCO re-place at {broker_qty} sh failed: {e} — StopMonitor still holds the stop")
+            pos.tp_leg_id = tp_id; pos.sl_leg_id = sl_id
+            self._update_pattern_data(pos, tp_leg_id=tp_id, sl_leg_id=sl_id)
+        if self.stop_monitor is not None:
+            try:
+                self.stop_monitor.add_watch(symbol=sym, stop_price=pos.stop, shares=broker_qty, tp_leg_id=pos.tp_leg_id or '', sl_leg_id=pos.sl_leg_id or '',
+                                            trade_db_id=pos.trade_id, entry_price=pos.fill_price or pos.limit_price,
+                                            risk_per_share=(pos.fill_price or pos.limit_price) - pos.stop, strategy=self.STRATEGY_NAME)
+            except Exception as e:
+                logger.error(f"{self.tag} {sym}: StopMonitor watch resize to {broker_qty} failed — UNMANAGED remainder: {e}")
+                self._notify(f"{self.tag} ERROR {sym} watch resize failed — UNMANAGED remainder: {e}")
+
+    def _reconcile_positions_to_broker(self, force: bool = False) -> None:
+        """Every BROKER_RECONCILE_S (and unthrottled before the 15:55 flatten): (1) registry qty == broker qty for
+        open positions of this book, (2) a broker long in a symbol this book armed/filled today that is NOT in the
+        registry (a fill that landed after a cancel/rail, 2026-10-02 VIRT) is adopted with its stop + watch so the
+        flatten includes it. One REST positions call per interval. Never raises."""
+        now = time.time()
+        if not force and now - self._last_broker_reconcile < self.BROKER_RECONCILE_S:
+            return
+        self._last_broker_reconcile = now
+        try:
+            self._adopt_unregistered_positions_on_boot(periodic=True)
+        except Exception as e:
+            logger.error(f"{self.tag} broker reconcile failed: {e}", exc_info=True)
+
+    BROKER_RECONCILE_S = 60.0
+
+    def _enforce_kill_rails_on_resting(self) -> None:
+        """When any kill rail (unverified_exit / weekly_kill / daily_kill) blocks new live orders, cancel every
+        resting ENTRY order of this book at the broker — ONCE per rail per session, one INFO line with the order
+        ids (2026-10-02 VIRT: the rail only stopped NEW arms; an adopted resting order stayed live, filled, and
+        sat with no stop). Cancels go through `_cancel_live_order`, so a fill that races the cancel is registered
+        (position + stop + watch), never dropped. Throttled to one rail evaluation per 10 s."""
+        if not any(c.live_order is not None for c in self.candidates.values()):
+            return
+        now = time.time()
+        if now - self._last_rail_check < 10.0:
+            return
+        self._last_rail_check = now
+        blocked = self._kill_rails_blocked()
+        if not blocked or blocked in self._rail_cancel_done:
+            return
+        self._rail_cancel_done.add(blocked)
+        cands = [c for c in self.candidates.values() if c.live_order is not None]
+        ids = ', '.join(f"{c.symbol}:{c.live_order['order_id']}" for c in cands)
+        logger.warning(f"{self.tag} KILL RAIL ({blocked}): cancelling {len(cands)} resting entry order(s) [{ids}]")
+        self._notify(f"{self.tag} KILL RAIL {blocked}: cancelling {len(cands)} resting entry order(s)")
+        for c in cands:
+            self._cancel_live_order(c, f'kill_rail_{blocked}')
+
     def _arm_live_order(self, cand: Candidate, arm: dict) -> None:
         """Place, or cancel + replace, the REAL resting buy-stop-limit for `cand` at `arm` — called once per bar
         close from `_evaluate_resting`, never from the tape. 9/25 fix: a RESTING order counts only against
@@ -1574,7 +1673,7 @@ class HodBreakEngine:
             logger.error(f"{self.tag} {sym}: LIVE stop-limit submit returned no order id — nothing tracked"); return
         cand.live_order = dict(order_id=order_id, coid=coid, level=arm['level'], trigger=arm['trigger'], limit=arm['limit'],
                                stop=arm['stop'], qty=qty, booked_qty=0, arm_ts=arm.get('arm_ts', ''), tp_leg_id='', sl_leg_id='', trade_id=None)
-        self._live_cap_slots.add(sym)
+        self._live_cap_slots.add(sym); self._live_armed_stops[sym] = float(arm['stop'])
         logger.info(f"{self.tag} {sym}: LIVE ARMED stop {arm['trigger']:.2f} limit {arm['limit']:.2f} qty {qty} order {order_id}")
         # No Telegram per arm (24 arms in a minute hit Telegram's 429 on 9/25): fills, cap events and errors only.
         self._persist_live_orders()
@@ -1874,6 +1973,7 @@ class HodBreakEngine:
         else:
             logger.error(f"{self.tag} {sym}: no StopMonitor attached — LIVE fill has no exit management")
         self.entered_today.add(sym); self.seen_today.add(sym)
+        self._sync_registry_qty_to_broker(sym, _exit_qty_guard.get_signed_broker_qty(self.alpaca, sym))
         # 'partially_filled' is the ONLY status that means a remainder is still resting at the broker — every
         # other terminal status (filled, or a cancel/replace that surfaced a fill — 2026-09-29 PRIM/WRBY/ASTN)
         # means nothing is left resting and this candidate is DONE, even though the string isn't literally 'filled'.
@@ -2562,7 +2662,10 @@ class HodBreakEngine:
             entry = pos.limit_price
             logger.error(f"{self.tag} {pos.symbol}: fill_price is NULL at exit booking (trade_id={pos.trade_id}) — pnl cannot be computed from the real fill")
             logger.warning(f"{self.tag} {pos.symbol}: trade_id={pos.trade_id} falling back to entry_price {entry} for pnl — this must never be silent, fix fill registration")
-        pnl = (exit_price - entry) * pos.shares if exit_price > 0 else None
+        sold_qty = pos.closed_qty if pos.closed_qty > 0 else pos.shares      # P&L on the quantity actually sold
+        if sold_qty != pos.shares:
+            logger.warning(f"{self.tag} {pos.symbol}: sold {sold_qty} sh but registry held {pos.shares} — P&L booked on the {sold_qty} sold")
+        pnl = (exit_price - entry) * sold_qty if exit_price > 0 else None
         upd = {'order_status': 'closed', 'exit_price': exit_price, 'exit_reason': reason, 'exited_at': datetime.now(timezone.utc).isoformat()}
         if pnl is not None:
             upd['pnl'] = pnl; upd['pnl_pct'] = (exit_price / entry - 1) * 100; self.daily_pnl += pnl
@@ -2782,6 +2885,12 @@ class HodBreakEngine:
                         try: self.db.update_trade(pos.trade_id, {'order_status': 'exit_pending_verification'})
                         except Exception as e: logger.error(f"{self.tag} {sym}: exit_pending_verification DB write failed: {e}")
                     continue
+                if capped != qty:
+                    # P&L is booked on the quantity actually sold: registry shares follow the broker's qty
+                    pos.shares = pos.closed_qty + capped
+                    if pos.trade_id is not None:
+                        try: self.db.update_trade(pos.trade_id, {'shares': pos.shares, 'filled_qty': pos.shares})
+                        except Exception as e: logger.error(f"{self.tag} {sym}: DB qty correction at force-close failed: {e}")
                 qty = capped
                 pos.fc_attempts += 1
                 coid = f"hod-fc-{sym}-{(self.session_date or '')[5:]}-{uuid.uuid4().hex[:6]}"[:48]
@@ -2972,6 +3081,12 @@ class HodBreakEngine:
                 pos.status = 'pending'
             elif status in _OPEN_STATUSES:
                 pos.status = 'open'
+                if broker is not None and broker.get(sym, 0) > pos.open_qty and pos.closed_qty == 0:
+                    logger.warning(f"{self.tag} sync: {sym} DB row holds {pos.shares} sh but the broker holds {broker[sym]} — "
+                                    f"registry rehydrated at the broker's qty (2026-10-02 NEBX/COHX)")
+                    pos.shares = broker[sym]
+                    try: self.db.update_trade(r['id'], {'shares': pos.shares, 'filled_qty': pos.shares})
+                    except Exception as e: logger.error(f"{self.tag} sync: {sym} DB qty correction failed: {e}")
                 if broker is not None and broker.get(sym, 0) < pos.open_qty:
                     acct = self._account_number_cached() or ('paper' if getattr(self.alpaca, 'is_paper', True) else 'live')
                     logger.warning(f"{self.tag} sync: {sym} open in DB ({r.get('shares')} sh) but broker holds {broker.get(sym, 0)} "
