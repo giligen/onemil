@@ -1,0 +1,192 @@
+diff --git a/trading/orb_engine.py b/trading/orb_engine.py
+index f4d6189..c7cfd8c 100644
+--- a/trading/orb_engine.py
++++ b/trading/orb_engine.py
+@@ -578,8 +578,18 @@ class ORBEngine:
+         # rangeless for this burst; (2) ranked picks submit concurrently
+         # (small thread pool) instead of serially.
+         self.fast_submit_enabled = bool(execution_cfg.get('fast_submit', False))
++        # Open-tick hard budget (docs/orb_open_tick_stall_20261002.md): the
++        # 09:35 decision must never wait indefinitely behind a slow universe
++        # scan (per-symbol DB lookups, a vendor-lag snapshot re-fetch storm).
++        # build_orb_universe_from_snapshots computes a deadline from this and
++        # (a) skips a synchronous full snapshot re-fetch once past it, (b)
++        # stops admitting further candidates once past it — both paths log a
++        # WARNING with the deferred/unprocessed count rather than silently
++        # truncating.
++        self.open_tick_budget_sec = float(execution_cfg.get('open_tick_budget_sec', 20.0))
+         logger.info(f"ORB WARM-phase seed prewarming: prewarm_seed={self.prewarm_seed_enabled} "
+-                    f"fast_submit={self.fast_submit_enabled}")
++                    f"fast_submit={self.fast_submit_enabled} "
++                    f"open_tick_budget_sec={self.open_tick_budget_sec}")
+ 
+         # Day-scoped: symbol -> 'production' | pool.name (set by
+         # build_orb_universe_from_snapshots; cleared in reset_daily).
+@@ -1044,7 +1054,8 @@ class ORBEngine:
+         )
+         return len(self.universe)
+ 
+-    def _get_snapshots_warm(self, candidate_symbols: List[str]) -> Dict[str, Dict]:
++    def _get_snapshots_warm(self, candidate_symbols: List[str],
++                             deadline: Optional[float] = None) -> Dict[str, Dict]:
+         """WARM-phase snapshot cache (flag: orb.yaml execution.prewarm_seed).
+ 
+         docs/orb_latency_fix_spec_20260925.md: the 09:35 hot path must be
+@@ -1123,10 +1134,32 @@ class ORBEngine:
+                 f"re-fetching this tick: {stale_cached[:10]}"
+                 f"{'...' if len(stale_cached) > 10 else ''}"
+             )
+-        uncached = [
+-            s for s in candidate_symbols
+-            if s not in self._snapshot_cache or s in stale_cached
+-        ]
++        if stale_cached and full_flip:
++            # 2026-10-02 incident (docs/orb_open_tick_stall_20261002.md): a
++            # vendor-wide daily-bar rollover lag flips EVERY cached snapshot
++            # stale in the same tick, right at the open. Re-fetching the
++            # FULL candidate set here is the exact synchronous bulk-REST
++            # storm that blew the 09:35 decision — and re-fetching does not
++            # even fix it, since the vendor keeps returning the same lagged
++            # date until it rolls over on its own. Only genuinely new
++            # (never-cached) symbols are fetched; the rest keep serving
++            # their last cached value for this tick and self-heal once the
++            # vendor rolls over (next tick's completeness check passes).
++            uncached = [s for s in candidate_symbols if s not in self._snapshot_cache]
++        else:
++            uncached = [
++                s for s in candidate_symbols
++                if s not in self._snapshot_cache or s in stale_cached
++            ]
++        if uncached and deadline is not None and time.time() >= deadline:
++            logger.warning(
++                f"ORB prewarm: open-tick budget exhausted — deferring "
++                f"{len(uncached)} symbol snapshot refresh(es) to the next "
++                f"tick instead of a synchronous re-fetch (serving last "
++                f"cached/stale value for this tick)"
++            )
++            return {s: self._snapshot_cache[s] for s in candidate_symbols
++                    if s in self._snapshot_cache}
+         if uncached:
+             _t0 = time.time()
+             try:
+@@ -1147,7 +1180,8 @@ class ORBEngine:
+             self._snapshot_cache.update(fresh or {})
+         return {s: self._snapshot_cache[s] for s in candidate_symbols if s in self._snapshot_cache}
+ 
+-    def build_orb_universe_from_snapshots(self, candidate_symbols: Optional[List[str]] = None) -> List[str]:
++    def build_orb_universe_from_snapshots(self, candidate_symbols: Optional[List[str]] = None,
++                                           deadline: Optional[float] = None) -> List[str]:
+         """Build ORB universe by querying Alpaca snapshots matching BT criteria.
+ 
+         BT validated on: gap >= 5%, prev-day volume >= 500K, price $3-30.
+@@ -1156,6 +1190,14 @@ class ORBEngine:
+         Args:
+             candidate_symbols: optional pre-filter (e.g., scanner's active list).
+                 If None, queries all active US equities (slow — ~8000 symbols).
++            deadline: wall-clock `time.time()` cutoff (docs/orb_open_tick_
++                stall_20261002.md). Defaults to `open_tick_budget_sec` from
++                now. Once passed: (1) `_get_snapshots_warm` skips a
++                synchronous full re-fetch and serves the cache as-is; (2)
++                this loop stops admitting further candidates, logging a
++                WARNING with the unprocessed count — the 09:35 decision
++                runs on whatever was evaluated instead of waiting out a slow
++                scan.
+ 
+         Returns:
+             List of symbols passing ORB's universe criteria today.
+@@ -1164,9 +1206,11 @@ class ORBEngine:
+         if candidate_symbols is None or len(candidate_symbols) == 0:
+             logger.info("ORB: build_orb_universe_from_snapshots called with no candidates")
+             return []
++        if deadline is None:
++            deadline = time.time() + self.open_tick_budget_sec
+         try:
+             if self.prewarm_seed_enabled:
+-                snapshots = self._get_snapshots_warm(list(candidate_symbols))
++                snapshots = self._get_snapshots_warm(list(candidate_symbols), deadline=deadline)
+             else:
+                 snapshots = self.alpaca.get_snapshots(list(candidate_symbols)) \
+                     if hasattr(self.alpaca, 'get_snapshots') else {}
+@@ -1174,8 +1218,42 @@ class ORBEngine:
+             logger.warning(f"ORB: get_snapshots failed: {e}")
+             return []
+ 
++        # Batch the 09:30 minute-bar lookup for ALL candidates in ONE query
++        # instead of one `get_intraday_bars_cached` SQL round-trip per symbol
++        # inside the loop below (docs/orb_open_tick_stall_20261002.md cause
++        # b: ~3,000 sequential per-symbol queries against intraday_bars_1min
++        # dragged the 2026-10-02 09:35 tick for minutes). Same data, same
++        # admission logic — only the fetch is batched.
++        _bulk_bars: Dict[tuple, List[Dict]] = {}
++        try:
++            from zoneinfo import ZoneInfo as _ZI
++            _today_et_bulk = datetime.now(timezone.utc).astimezone(
++                _ZI('America/New_York')).date().isoformat()
++        except Exception:
++            _n = datetime.now(timezone.utc)
++            _today_et_bulk = (_n - timedelta(hours=_et_offset_hours(_n))).date().isoformat()
++        if self.db is not None and hasattr(self.db, 'get_intraday_bars_bulk'):
++            try:
++                _bulk_bars = self.db.get_intraday_bars_bulk(
++                    [(s, _today_et_bulk) for s in (snapshots or {})]
++                )
++            except Exception as e:
++                logger.warning(
++                    f"ORB: batched 09:30 bar lookup failed for "
++                    f"{len(snapshots or {})} symbols (falling back to the "
++                    f"snapshot open, no minute-bar refinement): {e}")
++                _bulk_bars = {}
++
+         keep: List[str] = []
+-        for sym, snap in (snapshots or {}).items():
++        _n_candidates = len(snapshots or {})
++        for _i, (sym, snap) in enumerate((snapshots or {}).items()):
++            if time.time() >= deadline:
++                logger.warning(
++                    f"ORB: open-tick budget ({self.open_tick_budget_sec}s) "
++                    f"exhausted — {_n_candidates - _i} of {_n_candidates} "
++                    f"candidates not evaluated this tick (deferred, not "
++                    f"rejected); admitting {len(keep)} evaluated so far")
++                break
+             try:
+                 # AlpacaClient.get_snapshots returns a FLAT dict per symbol:
+                 #   {'open', 'high', 'low', 'close', 'volume',           # today's daily bar
+@@ -1241,24 +1319,20 @@ class ORBEngine:
+                 # behavior), never blocks the universe build.
+                 minute_bar_open = None
+                 try:
+-                    if self.db is not None and hasattr(self.db, 'get_intraday_bars_cached'):
+-                        from zoneinfo import ZoneInfo
+-                        from dateutil.parser import isoparse as _isoparse
+-                        _today_et = datetime.now(timezone.utc).astimezone(
+-                            ZoneInfo('America/New_York')).date().isoformat()
+-                        for _b in (self.db.get_intraday_bars_cached(sym, _today_et) or []):
+-                            _ts_raw = _b.get('timestamp') if isinstance(_b, dict) else None
+-                            if not _ts_raw:
+-                                continue
+-                            _ts_dt = _ts_raw if isinstance(_ts_raw, datetime) else _isoparse(str(_ts_raw))
+-                            if _ts_dt.tzinfo is None:
+-                                _ts_dt = _ts_dt.replace(tzinfo=timezone.utc)
+-                            _et = _ts_dt.astimezone(ZoneInfo('America/New_York'))
+-                            if _et.hour == 9 and _et.minute == 30:
+-                                _o = _b.get('open')
+-                                if _o:
+-                                    minute_bar_open = float(_o)
+-                                break
++                    from dateutil.parser import isoparse as _isoparse
++                    for _b in (_bulk_bars.get((sym, _today_et_bulk), []) or []):
++                        _ts_raw = _b.get('timestamp') if isinstance(_b, dict) else None
++                        if not _ts_raw:
++                            continue
++                        _ts_dt = _ts_raw if isinstance(_ts_raw, datetime) else _isoparse(str(_ts_raw))
++                        if _ts_dt.tzinfo is None:
++                            _ts_dt = _ts_dt.replace(tzinfo=timezone.utc)
++                        _et = _ts_dt.astimezone(_ZI('America/New_York'))
++                        if _et.hour == 9 and _et.minute == 30:
++                            _o = _b.get('open')
++                            if _o:
++                                minute_bar_open = float(_o)
++                            break
+                 except Exception as e:
+                     logger.warning(f"ORB GAP_GATE: {sym} 09:30 bar lookup failed (non-fatal, using snapshot): {e}")
+                 _gate_input = resolve_gap_input(sym, open_price, prev_close, minute_bar_open)
