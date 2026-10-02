@@ -199,9 +199,15 @@ class TestResizeWatchQty:
 
 @pytest.fixture
 def orb_cfg():
+    """The live orb.yaml with the add-on block REMOVED: this module's baseline is "no
+    exit.add_on" and every test that needs the add sets the flag itself. The live file
+    is gitignored and changes with the paper/live plan (2026-10-02 it shipped
+    add_on.enabled: true and the pre-boot suite failed on the stale assumption)."""
     yaml_path = Path(__file__).parent.parent / 'orb.yaml'
     with open(yaml_path) as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    (cfg.get('exit') or {}).pop('add_on', None)
+    return cfg
 
 
 @pytest.fixture
