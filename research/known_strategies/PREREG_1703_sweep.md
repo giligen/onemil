@@ -30,3 +30,13 @@ beats GREF on both CAGR and DD is reported as a candidate replacement (none expe
 `research/known_strategies/1703_sweep.py` (reuse the momentum engine's memory-safe panel load; crypto fetched to
 `1703e_crypto.parquet`), `1703_cells.csv`, `RESULT_1703.md` (≤ 70 lines, adversary caveats, one verdict per cell).
 Through `bash scripts/research_run.sh -m 4000M` (service down; one process). Agent returns ≤ 180 words.
+
+## Amendment 1 (after the first run, before any re-read): cells a and b are inconsistent with their literature
+First run: a (52-week high) −4.8 % / −58.7 %, b (dual momentum) 6.0 % / −38.7 %. Published forms: a ≈ market-plus
+with momentum-like drawdowns; b ≈ 10–15 % with max DD near −20 % (2017–2026 it held SPY most of the time). A null
+is a claim about my test first: both are re-implemented from THIS prose by a builder who has not read 1703_sweep.py.
+a: ratio = prior close ÷ max(high over the trailing 252 sessions); ties (ratio = 1.0) broken by the 126-session
+return (the PREREG left ties undefined — that is the suspected defect); also the published form: monthly, top 30 by
+ratio, 6-month overlapping hold, as the reference. b: on the last session of each month, 12-month total return of SPY,
+EFA, SHY; hold SPY or EFA (the higher) if its return > SHY's, else IEF; print the holding per month and the monthly
+return; hand-check 2020-03, 2020-04, 2022-01..2022-12. Cells c, d, e stand as run. +0 cells (re-implementation).
