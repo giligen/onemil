@@ -1904,10 +1904,14 @@ class Database:
         """
         cursor = self._cache_conn.execute("""
             SELECT timestamp, open, high, low, close, volume
-            FROM intraday_bars_1min
+            FROM intraday_bars_1min INDEXED BY idx_intraday_bars_symbol_date
             WHERE symbol = ? AND bar_date = ?
             ORDER BY timestamp
         """, (symbol, bar_date))
+        # INDEXED BY (2026-10-02): without it SQLite satisfies ORDER BY from the
+        # (symbol, timestamp) autoindex and scans the symbol's whole history —
+        # measured 86 ms mean / 1.2 s max vs 1.7 ms on the 84M-row table; 3,041
+        # such lookups stalled the ORB open tick for 226 s.
 
         rows = cursor.fetchall()
         if not rows:
@@ -1916,6 +1920,43 @@ class Database:
         bars = [dict(row) for row in rows]
         logger.debug(f"Cache hit: {len(bars)} intraday bars for {symbol} on {bar_date}")
         return bars
+
+    def get_intraday_bars_for_date(self, symbols: list, bar_date: str,
+                                   chunk_size: int = 400) -> Dict[str, List[Dict]]:
+        """
+        1-min bars of ONE date for many symbols by index seeks (never a table scan).
+
+        Chunked `symbol IN (...) AND bar_date = ?` on the (symbol, bar_date)
+        index: cost is proportional to the rows returned, not to the table
+        (84M rows). Use this for same-day lookups across a universe;
+        `get_intraday_bars_bulk` is a date-range scan meant for backtests.
+
+        Args:
+            symbols: symbols to look up (duplicates ignored)
+            bar_date: date string (YYYY-MM-DD)
+            chunk_size: symbols per SQL statement (SQLite variable limit safe)
+
+        Returns:
+            Dict symbol -> list of bar dicts ordered by timestamp; symbols
+            with no bars on that date are absent.
+        """
+        result: Dict[str, List[Dict]] = {}
+        unique = list(dict.fromkeys(s for s in (symbols or []) if s))
+        for i in range(0, len(unique), chunk_size):
+            chunk = unique[i:i + chunk_size]
+            placeholders = ','.join('?' * len(chunk))
+            cursor = self._cache_conn.execute(f"""
+                SELECT symbol, timestamp, open, high, low, close, volume
+                FROM intraday_bars_1min INDEXED BY idx_intraday_bars_symbol_date
+                WHERE symbol IN ({placeholders}) AND bar_date = ?
+                ORDER BY symbol, timestamp
+            """, (*chunk, bar_date))
+            for row in cursor:
+                result.setdefault(row['symbol'], []).append({
+                    'timestamp': row['timestamp'], 'open': row['open'], 'high': row['high'],
+                    'low': row['low'], 'close': row['close'], 'volume': row['volume'],
+                })
+        return result
 
     def get_intraday_bars_bulk(self, symbol_dates: list) -> Dict[tuple, List[Dict]]:
         """
