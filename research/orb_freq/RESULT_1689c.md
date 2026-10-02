@@ -115,7 +115,7 @@ wrote /home/ec2-user/onemil/research/orb_freq/1689c_reads.csv rows=14
 21: in n=75 meanR=-0.002 dc_t=-0.23 exTop5=-0.078 | out n=18 meanR=-0.069 -> FAIL
 24: in n=262 meanR=+0.037 dc_t=0.61 exTop5=-0.030 | out n=20 meanR=+0.158 -> FAIL
 25: in n=58 meanR=+0.036 dc_t=0.98 exTop5=-0.062 | out n=6 meanR=+0.084 -> FAIL
-26: in n=0 meanR=+nan dc_t=nan exTop5=+nan | out n=0 meanR=+nan -> FAIL
+26: VOID — in-regime pipeline crashed (KeyError pnl on an empty book, 127 candidates in 21 months → cannot reach 2 fills/wk regardless); out n=0
 27: in n=260 meanR=+0.011 dc_t=-0.02 exTop5=-0.063 | out n=42 meanR=-0.018 -> FAIL
 28: in n=156 meanR=-0.011 dc_t=-0.52 exTop5=-0.087 | out n=25 meanR=-0.099 -> FAIL
 30: in n=51 meanR=-0.007 dc_t=-0.35 exTop5=-0.089 | out n=6 meanR=+0.259 -> FAIL
@@ -124,7 +124,7 @@ wrote /home/ec2-user/onemil/research/orb_freq/1689c_reads.csv rows=14
 21: 2025 meanR=+0.013 n=32 (1.8/wk) | 2026 meanR=-0.012 n=43 (2.1/wk) -> research-only
 24: 2025 meanR=+0.061 n=122 (2.7/wk) | 2026 meanR=+0.015 n=140 (3.7/wk) -> research-only
 25: 2025 meanR=-0.016 n=16 (1.1/wk) | 2026 meanR=+0.056 n=42 (2.0/wk) -> research-only
-26: n=0 -> NOT a candidate
+26: VOID (pipeline crash on an empty book; 127 candidates / 21 months) -> NOT a candidate
 27: 2025 meanR=+0.002 n=141 (3.1/wk) | 2026 meanR=+0.021 n=119 (3.3/wk) -> research-only
 28: 2025 meanR=-0.013 n=68 (1.9/wk) | 2026 meanR=-0.009 n=88 (3.1/wk) -> research-only
 30: 2025 meanR=+0.036 n=23 (1.4/wk) | 2026 meanR=-0.043 n=28 (1.3/wk) -> research-only
