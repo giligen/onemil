@@ -370,3 +370,202 @@ def test_build_plan_sizes_on_current_marks_not_signal_closes():
     assert eq0 == pytest.approx(1000.0) and eq1 == pytest.approx(2000.0)
     o1 = [o for o in orders1 if o['symbol'] == held][0]
     assert o1['side'] == 'sell' and o1['notional'] == pytest.approx(2000.0 - 2000.0 / 20)
+
+
+# ------------------------------------------------------------------ hygiene guard (spec 2026-10-02 A)
+
+def guard_panel(closes, dates=None, symbol='XYZ'):
+    """One-symbol long panel from a list of closes on consecutive business days (or the given dates)."""
+    dates = pd.bdate_range('2024-01-01', periods=len(closes)) if dates is None else pd.DatetimeIndex(dates)
+    return pd.DataFrame({'symbol': symbol, 'bar_date': dates, 'close': np.asarray(closes, dtype='float32'),
+                         'volume': 1e6}), dates
+
+
+def test_guard_constants_match_the_backtest():
+    assert (ms.GUARD_MOVE_UP, ms.GUARD_MOVE_DOWN, ms.GUARD_MAX_GAP_DAYS) == (2.0, -0.75, 10)
+
+
+def test_guard_up_move_over_200pct_is_out_and_just_under_is_in():
+    closes = [100.0] * 300
+    closes[200:] = [301.0] * 100                       # +201 %
+    panel, dates = guard_panel(closes)
+    assert ms.hygiene_ineligible(panel, dates[-1]) == {'XYZ': 'move'}
+    closes[200:] = [299.0] * 100                       # +199 %
+    panel, dates = guard_panel(closes)
+    assert ms.hygiene_ineligible(panel, dates[-1]) == {}
+
+
+def test_guard_down_move_75pct_is_out():
+    closes = [100.0] * 300
+    closes[250:] = [24.0] * 50                         # -76 %
+    panel, dates = guard_panel(closes)
+    assert ms.hygiene_ineligible(panel, dates[-1]) == {'XYZ': 'move'}
+    closes[250:] = [26.0] * 50                         # -74 %
+    panel, dates = guard_panel(closes)
+    assert ms.hygiene_ineligible(panel, dates[-1]) == {}
+
+
+def test_guard_gap_over_10_calendar_days_is_out_and_holiday_gap_is_in():
+    d = list(pd.bdate_range('2024-01-01', periods=299))
+    gapped = d[:150] + [x + pd.Timedelta(days=11) for x in d[150:]]       # 11-day hole between two bars
+    panel, dates = guard_panel([100.0] * 299, gapped)
+    assert ms.hygiene_ineligible(panel, dates[-1]) == {'XYZ': 'gap'}
+    holiday = d[:150] + [x + pd.Timedelta(days=4) for x in d[150:]]       # 4-day long weekend
+    panel, dates = guard_panel([100.0] * 299, holiday)
+    assert ms.hygiene_ineligible(panel, dates[-1]) == {}
+
+
+def test_guard_event_outside_the_273_bar_lookback_is_in():
+    closes = [100.0] * 400
+    closes[100:] = [400.0] * 300                       # the +300 % move is bar 100
+    panel, dates = guard_panel(closes)
+    assert ms.hygiene_ineligible(panel, dates[100 + 272]) == {'XYZ': 'move'}   # 272 bars back: inside
+    assert ms.hygiene_ineligible(panel, dates[100 + 273]) == {}                # 273 bars back: out
+
+
+def test_guard_empty_and_single_row_do_not_raise():
+    empty = pd.DataFrame({'symbol': [], 'bar_date': pd.to_datetime([]), 'close': [], 'volume': []})
+    assert ms.hygiene_ineligible(empty, pd.Timestamp('2024-06-03')) == {}
+    one, dates = guard_panel([100.0])
+    assert ms.hygiene_ineligible(one, dates[0]) == {}
+
+
+def test_guard_ignores_bars_after_asof():
+    closes = [100.0] * 300
+    closes[299] = 500.0
+    panel, dates = guard_panel(closes)
+    assert ms.hygiene_ineligible(panel, dates[298]) == {}
+    assert ms.hygiene_ineligible(panel, dates[299]) == {'XYZ': 'move'}
+
+
+def test_eligible_universe_removes_guarded_names_before_ranking():
+    specs = {'AAA': (50.0, 0.001, 1e7, 0.01), 'BBB': (50.0, 0.002, 1e7, 0.01)}
+    panel, dates = make_panel(specs)
+    panel.loc[(panel.symbol == 'BBB') & (panel.bar_date == dates[290]), 'close'] *= np.float32(10.0)
+    names = assets(AAA='AAA INC', BBB='BBB INC')
+    assert 'BBB' in ms.eligible_universe(panel, dates[-1], names, guard=False)
+    assert ms.eligible_universe(panel, dates[-1], names) == ['AAA']
+    events = ms.hygiene_events(panel, dates[-1])
+    assert events['BBB'][0] == 'move' and events['BBB'][1] == dates[291].date()   # latest of the +900 % bar and the -90 % reversal bar
+
+
+G_HOLD = os.path.join(ROOT, 'research', 'momentum_weekly', 'recon', 'G_holdings.csv')
+
+
+@pytest.mark.skipif(not (os.path.exists(PANEL) and os.path.exists(G_HOLD) and os.path.exists(ASSETS)),
+                    reason='research panel / guarded BT holdings not present')
+@pytest.mark.parametrize('target', ['2021-02-08', '2025-12-29', '2026-06-29'])
+def test_parity_with_guarded_backtest(target):
+    import pyarrow.parquet as pq
+    hold = pd.read_csv(G_HOLD)
+    sub = hold[hold.rebalance_date == target]
+    reb_ts = pd.Timestamp(target)
+    lo = reb_ts - pd.Timedelta(days=460)
+    tbl = pq.read_table(PANEL, columns=['symbol', 'bar_date', 'close', 'volume'],
+                        filters=[('bar_date', '>=', lo.to_pydatetime()), ('bar_date', '<', reb_ts.to_pydatetime())])
+    panel = tbl.to_pandas()
+    panel['close'] = panel['close'].astype('float32')
+    asof = pd.Timestamp(sub.signal_date.iloc[0])
+    assets_df = pd.read_csv(ASSETS, dtype={'symbol': str, 'name': str})
+    sel = ms.select_top(ms.risk_adjusted_momentum(panel, asof).loc[
+        ms.eligible_universe(panel, asof, assets_df), 'signal'], 20)
+    print(f'GUARD PARITY {target}: {len(set(sel) & set(sub.symbol))}/20')
+    assert set(sel) == set(sub.symbol) and len(sel) == 20
+
+
+# ------------------------------------------------------------------ shadow term-structure gate (spec B)
+
+def vix_series(n=400, seed=3):
+    idx = pd.bdate_range('2023-01-02', periods=n)
+    rng = np.random.default_rng(seed)
+    v3m = pd.Series(20 + rng.standard_normal(n), index=idx)
+    vix = v3m * (0.9 + 0.1 * rng.random(n))
+    return vix, v3m
+
+
+def test_term_structure_gate_percentile_and_gate_on():
+    vix, v3m = vix_series()
+    asof = vix.index[-1]
+    vix.iloc[-1] = v3m.iloc[-1] * 0.5                  # deeply in contango: lowest ratio of the window
+    out = ms.term_structure_gate(vix, v3m, asof)
+    assert out['gate_on'] is True and out['percentile'] == pytest.approx(0.0)
+    vix.iloc[-1] = v3m.iloc[-1] * 1.5                  # backwardation: highest ratio
+    out = ms.term_structure_gate(vix, v3m, asof)
+    assert out['gate_on'] is False and out['percentile'] == pytest.approx(1.0)
+    assert out['ratio'] == pytest.approx(1.5)
+
+
+def test_term_structure_gate_matches_the_backtest_states():
+    """PARITY with 1700u (w252, p30): the gate state at six signal Fridays, on a saved slice of the CBOE closes."""
+    fixture = os.path.join(ROOT, 'research', 'momentum_weekly', 'recon', 'vix_fixture.csv')
+    if not os.path.exists(fixture):
+        pytest.skip('vix fixture absent')
+    d = pd.read_csv(fixture, index_col=0, parse_dates=True)
+    expected = {'2026-08-21': True, '2026-08-28': True, '2026-09-04': True,
+                '2026-09-11': False, '2026-09-18': True, '2026-09-25': True}
+    got = {day: ms.term_structure_gate(d['VIX'], d['VIX3M'], day)['gate_on'] for day in expected}
+    assert got == expected
+
+
+def test_term_structure_gate_never_uses_data_after_asof():
+    vix, v3m = vix_series()
+    asof = vix.index[300]
+    base = ms.term_structure_gate(vix.iloc[:301], v3m.iloc[:301], asof)
+    assert ms.term_structure_gate(vix, v3m, asof) == base
+    vix2 = vix.copy()
+    vix2.iloc[301:] = 99.0
+    assert ms.term_structure_gate(vix2, v3m, asof) == base
+
+
+def test_term_structure_gate_short_history_returns_none(caplog):
+    vix, v3m = vix_series(n=100)
+    with caplog.at_level('WARNING'):
+        assert ms.term_structure_gate(vix, v3m, vix.index[-1]) is None
+    assert 'history' in caplog.text
+
+
+def test_gate_does_not_change_the_order_list():
+    """Shadow flag: build_plan takes no gate input, so the orders are identical with the gate ON and OFF."""
+    import inspect
+    assert 'gate' not in ' '.join(inspect.signature(runner.build_plan).parameters)
+    specs = {f'S{i}': (50.0, 0.001 * (i + 1), 1e7, 0.01) for i in range(30)}
+    panel, dates = make_panel(specs)
+    names = assets(**{s: f'{s} INC' for s in specs})
+    state = {'cash': 20000.0, 'positions': {}, 'peak_equity': 20000.0}
+    vix, v3m = vix_series()
+    plans = []
+    for scale in (0.5, 1.5):                           # gate ON / OFF inputs
+        v = vix.copy()
+        v.iloc[-1] = v3m.iloc[-1] * scale
+        ms.term_structure_gate(v, v3m, v.index[-1])
+        plans.append(runner.build_plan(panel, names, dates[-1], 20, dict(state, positions={})))
+    assert plans[0][4] == plans[1][4] and plans[0][0] == plans[1][0]
+
+
+def test_load_gate_inputs_failure_is_na_with_warning(monkeypatch, caplog):
+    def boom(url, timeout=60):
+        raise OSError('network down')
+    monkeypatch.setattr(runner, 'http_get_text', boom)
+    with caplog.at_level('WARNING'):
+        info = runner.shadow_gate_info(pd.Timestamp('2026-10-02'))
+    assert info is None and 'gate' in caplog.text.lower()
+    assert runner.gate_label(None) == 'gate n/a'
+
+
+def test_gate_label_and_csv_row(tmp_path, monkeypatch):
+    info = dict(date=date(2026, 10, 2), vix=16.0, vix3m=18.0, ratio=16 / 18, percentile=0.21, gate_on=True)
+    assert runner.gate_label(info) == 'gate ON (p21)'
+    assert runner.gate_label(dict(info, percentile=0.55, gate_on=False)) == 'gate OFF (p55)'
+    path = tmp_path / 'shadow.csv'
+    monkeypatch.setattr(runner, 'SHADOW_GATE_PATH', str(path))
+    runner.append_shadow_gate(date(2026, 10, 5), info, 20123.4)
+    row = pd.read_csv(path).iloc[0]
+    assert list(pd.read_csv(path).columns) == runner.SHADOW_GATE_FIELDS
+    assert row['gate_on'] and row['equity'] == pytest.approx(20123.4)
+
+
+def test_guard_log_line_lists_top40_removals_or_none():
+    assert runner.guard_line({}, ['A', 'B']) == 'guard: none in the top 40'
+    ev = {'ZZZ': ('move', date(2025, 5, 1)), 'QQQ': ('gap', date(2025, 6, 2))}
+    line = runner.guard_line(ev, ['A', 'ZZZ', 'B'])
+    assert 'ZZZ move 2025-05-01' in line and 'QQQ' not in line

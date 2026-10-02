@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import csv
 import glob
+import io
 import json
 import math
 import logging
@@ -29,6 +30,7 @@ import os
 import re
 import sys
 import time
+import urllib.request
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
@@ -57,6 +59,10 @@ LEDGER_FIELDS = ['date', 'symbol', 'side', 'qty', 'avg_price', 'notional', 'offi
                  'slip_bps_vs_open', 'client_order_id']
 WEEKLY_FIELDS = ['date', 'equity', 'cash', 'n_names', 'turnover_usd', 'names_in', 'names_out', 'spy_close']
 TG_PREFIX = '[MOM]'
+SHADOW_GATE_PATH = os.path.join(ROOT, 'logs', 'momentum_sleeve_shadow_gate.csv')
+SHADOW_GATE_FIELDS = ['run_date', 'asof', 'vix', 'vix3m', 'ratio', 'percentile', 'gate_on', 'equity']
+CBOE_URL = 'https://cdn.cboe.com/api/global/us_indices/daily_prices/{name}_History.csv'
+GUARD_TOP = 40                # the guard line reports removed names that would have ranked in the top 40
 LOOKBACK_DAYS = 420
 BATCH_SIZE = 200
 MIN_FREE_BYTES = 1 * 1024 ** 3
@@ -436,6 +442,54 @@ def broker_qty(client: AlpacaClient) -> Dict[str, float]:
 
 # --------------------------------------------------------------------------- the run
 
+def http_get_text(url: str, timeout: float = 60) -> str:
+    """GET ``url`` and return the body as text (the CBOE history CSVs); raises on any failure."""
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 research'})
+    return urllib.request.urlopen(req, timeout=timeout).read().decode()
+
+
+def fetch_cboe_close(name: str) -> pd.Series:
+    """CBOE daily history of index ``name`` ('VIX' / 'VIX3M') as a close series indexed by date (1700q parse)."""
+    d = pd.read_csv(io.StringIO(http_get_text(CBOE_URL.format(name=name))))
+    d['DATE'] = pd.to_datetime(d['DATE'], format='%m/%d/%Y')
+    return d.set_index('DATE')['CLOSE'].astype(float).rename(name)
+
+
+def shadow_gate_info(asof) -> Optional[Dict]:
+    """Shadow term-structure gate at ``asof``; None (WARNING) on any fetch / parse / history failure.
+
+    It never blocks or changes the rebalance: nothing in order building reads this."""
+    try:
+        return ms.term_structure_gate(fetch_cboe_close('VIX'), fetch_cboe_close('VIX3M'), asof)
+    except Exception as e:                      # network, schema, empty file: the gate is informational only
+        logger.warning("momentum_sleeve: shadow term-structure gate unavailable (%s) -- reported n/a", e)
+        return None
+
+
+def gate_label(info: Optional[Dict]) -> str:
+    """'gate ON (p21)' / 'gate OFF (p55)' / 'gate n/a' for the log and the [MOM] Telegram line."""
+    if not info:
+        return 'gate n/a'
+    return f"gate {'ON' if info['gate_on'] else 'OFF'} (p{info['percentile'] * 100:.0f})"
+
+
+def append_shadow_gate(run_day: date, info: Optional[Dict], equity: float) -> None:
+    """One row per run to the shadow-gate CSV (skipped, WARNING, when the gate is n/a)."""
+    if not info:
+        logger.warning("momentum_sleeve: no shadow-gate row written for %s (gate n/a)", run_day)
+        return
+    append_csv(SHADOW_GATE_PATH, SHADOW_GATE_FIELDS, {
+        'run_date': str(run_day), 'asof': str(info['date']), 'vix': round(info['vix'], 4),
+        'vix3m': round(info['vix3m'], 4), 'ratio': round(info['ratio'], 6),
+        'percentile': round(info['percentile'], 4), 'gate_on': info['gate_on'], 'equity': round(equity, 2)})
+
+
+def guard_line(events: Dict[str, tuple], top_unguarded: List[str]) -> str:
+    """The per-run guard INFO line: guard-removed names among the unguarded top 40, with reason and event date."""
+    hit = [f"{s} {events[s][0]} {events[s][1]}" for s in top_unguarded[:GUARD_TOP] if s in events]
+    return "guard: " + ("; ".join(hit) if hit else "none in the top 40")
+
+
 def build_plan(panel: pd.DataFrame, assets: pd.DataFrame, asof: date, n: int, state: Dict,
                marks: Optional[Dict[str, float]] = None):
     """(selected, feat, equity, targets_usd, orders, prices) for this run -- pure given the inputs.
@@ -447,6 +501,9 @@ def build_plan(panel: pd.DataFrame, assets: pd.DataFrame, asof: date, n: int, st
     close left names between $873 and $1,062 instead of equal)."""
     feat = ms.risk_adjusted_momentum(panel, asof)
     elig = [s for s in ms.eligible_universe(panel, asof, assets) if s != 'SPY']
+    raw_elig = [s for s in ms.eligible_universe(panel, asof, assets, guard=False) if s != 'SPY']
+    top_raw = ms.select_top(feat.loc[raw_elig, 'signal'], GUARD_TOP)
+    logger.info("momentum_sleeve: %s", guard_line(ms.hygiene_events(panel, asof), top_raw))
     selected = ms.select_top(feat.loc[elig, 'signal'], n)
     prices = {s: float(p) for s, p in feat['close'].items()}
     prices.update({s: float(p) for s, p in (marks or {}).items() if p and p == p})
@@ -561,7 +618,12 @@ def run(args, client: AlpacaClient, notifier: Optional[TelegramNotifier], now_ut
 
     selected, feat, equity, targets, orders, prices = build_plan(panel, assets, asof, args.n, state,
                                                                  marks=broker_marks(client))
-    print(f"asof {asof}  today {today}  mode {'SUBMIT' if args.submit else 'DRY-RUN'}")
+    gate = shadow_gate_info(pd.Timestamp(asof))
+    gate_txt = gate_label(gate)
+    logger.info("momentum_sleeve: %s  ratio %s", gate_txt,
+                f"{gate['ratio']:.4f} (VIX {gate['vix']:.2f} / VIX3M {gate['vix3m']:.2f}, {gate['date']})" if gate
+                else "unavailable")
+    print(f"asof {asof}  today {today}  mode {'SUBMIT' if args.submit else 'DRY-RUN'}  {gate_txt}")
     print(format_orders(selected, feat, equity, orders))
     if not args.submit:
         return 0
@@ -599,9 +661,10 @@ def run(args, client: AlpacaClient, notifier: Optional[TelegramNotifier], now_ut
         'date': str(today), 'equity': round(eq_after, 2), 'cash': round(state['cash'], 2),
         'n_names': len(state['positions']), 'turnover_usd': round(turnover, 2),
         'names_in': ' '.join(names_in), 'names_out': ' '.join(names_out), 'spy_close': spy})
+    append_shadow_gate(today, gate, eq_after)
     kill = f" KILL RULE: drawdown {dd:.1%} > 40% -> HALVE the sleeve" if dd < -DD_KILL else ""
     notify(notifier, f"{today} equity ${eq_after:,.0f} (dd {dd:.1%} from peak) names {len(state['positions'])} "
-                     f"in {len(names_in)} out {len(names_out)} turnover ${turnover:,.0f} fills {len(fills)}/{len(orders)}{kill}")
+                     f"in {len(names_in)} out {len(names_out)} turnover ${turnover:,.0f} fills {len(fills)}/{len(orders)} {gate_txt}{kill}")
     return 0
 
 

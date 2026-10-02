@@ -29,6 +29,13 @@ LAG_FORMATION = 252           # the "12" months
 ADV_WINDOW = 20
 VOL_WINDOW = 252
 DEFAULT_N = 20
+GUARD_LOOKBACK = 273          # hygiene guard window: the last 273 bars up to and including the signal date
+GUARD_MOVE_UP = 2.0           # a one-day close-to-close move above +200 % ...
+GUARD_MOVE_DOWN = -0.75       # ... or below -75 % makes the name ineligible (corporate-action / recycled-ticker rows)
+GUARD_MAX_GAP_DAYS = 10       # more than 10 calendar days between consecutive bars makes it ineligible
+GATE_WINDOW = 252             # shadow term-structure gate: trailing window (trading days) of VIX / VIX3M
+GATE_PCT = 0.30               # gate ON when the as-of ratio's percentile is below 30 %
+GATE_MIN_OBS = 126            # fewer ratios than this in the window -> no gate (as the backtest's prank)
 
 TEST_RE = re.compile(r'^Z[A-Z]ZZT$')
 NAME_EXCLUDE_RE = re.compile(r'\bETFs?\b|\bETNs?\b|\bFUNDs?\b|\bTRUSTs?\b|\bWARRANTS?\b|\bUNITS?\b|'
@@ -89,7 +96,44 @@ def risk_adjusted_momentum(panel: pd.DataFrame, asof) -> pd.DataFrame:
     return out
 
 
-def eligible_universe(panel: pd.DataFrame, asof, assets: pd.DataFrame) -> List[str]:
+def hygiene_events(panel: pd.DataFrame, asof) -> Dict[str, tuple]:
+    """Hygiene-guard events per symbol at ``asof``: ``{symbol: (reason, event_date)}`` (most recent event).
+
+    Same rule as the backtest (1700s_lowvix.py, guard mode): inside a symbol's last 273 bars up to and including
+    ``asof`` -- bar k bars back is inside for k <= 272, its move being measured against the bar before it, so the
+    first bar of a symbol never carries a move -- a one-day close-to-close move > +200 % or < -75 % ('move') or more
+    than 10 calendar days between consecutive bars ('gap'). When both occur the reason is 'move+gap'.
+    """
+    asof = pd.Timestamp(asof)
+    sub = panel.loc[panel['bar_date'] <= asof, ['symbol', 'bar_date', 'close']]
+    sub = sub[sub['close'] > 0]                          # the backtest drops non-positive prices before the guard
+    if sub.empty:
+        return {}
+    sub = sub.sort_values(['symbol', 'bar_date'], kind='stable').drop_duplicates(['symbol', 'bar_date'], keep='last')
+    grp = sub.groupby('symbol', sort=False, observed=True)
+    sub = sub.assign(k=grp.cumcount(ascending=False),
+                     move=grp['close'].transform(lambda c: c.astype('float64').pct_change()),
+                     gap_days=grp['bar_date'].diff().dt.days)
+    sub = sub[sub['k'] < GUARD_LOOKBACK]
+    moved = sub[(sub['move'] > GUARD_MOVE_UP) | (sub['move'] < GUARD_MOVE_DOWN)]
+    gapped = sub[sub['gap_days'] > GUARD_MAX_GAP_DAYS]
+    last_move = moved.groupby('symbol', observed=True)['bar_date'].max()
+    last_gap = gapped.groupby('symbol', observed=True)['bar_date'].max()
+    events: Dict[str, tuple] = {}
+    for sym in sorted(set(last_move.index) | set(last_gap.index)):
+        in_move, in_gap = sym in last_move.index, sym in last_gap.index
+        reason = 'move+gap' if in_move and in_gap else ('move' if in_move else 'gap')
+        when = max(last_move[sym] if in_move else pd.Timestamp.min, last_gap[sym] if in_gap else pd.Timestamp.min)
+        events[str(sym)] = (reason, when.date())
+    return events
+
+
+def hygiene_ineligible(panel: pd.DataFrame, asof) -> Dict[str, str]:
+    """``{symbol: reason}`` for every name the hygiene guard makes ineligible at ``asof`` (see hygiene_events)."""
+    return {sym: reason for sym, (reason, _) in hygiene_events(panel, asof).items()}
+
+
+def eligible_universe(panel: pd.DataFrame, asof, assets: pd.DataFrame, guard: bool = True) -> List[str]:
     """Symbols passing every universe gate at ``asof`` (sorted).
 
     Gates: bar on asof, close >= $10, adv20 >= $200M, history_ok, a valid signal, not excluded by
@@ -101,7 +145,36 @@ def eligible_universe(panel: pd.DataFrame, asof, assets: pd.DataFrame) -> List[s
     excl = excluded_symbols(assets, feat.index)
     m = ((feat['close'] >= PRICE_MIN) & (feat['adv20'] >= ADV_CUTOFF) & feat['history_ok']
          & feat['signal'].notna() & ~feat.index.isin(excl))
+    if guard:
+        bad = hygiene_ineligible(panel, asof)             # removed BEFORE ranking, like the backtest
+        m = m & ~feat.index.isin(list(bad))
     return sorted(feat.index[m])
+
+
+def term_structure_gate(vix: pd.Series, vix3m: pd.Series, asof, window: int = GATE_WINDOW,
+                        pct: float = GATE_PCT) -> Optional[Dict]:
+    """Shadow term-structure gate at ``asof`` (never used to build orders).
+
+    ratio = VIX / VIX3M on the last common date <= ``asof``; percentile = the backtest's ``prank`` (1700u): among
+    the other ratios of the trailing ``window`` (that date included in the window), the share strictly below the
+    as-of ratio plus half the share equal to it; gate_on = percentile < ``pct``. Data after ``asof`` is never
+    used. Returns dict(date, vix, vix3m, ratio, percentile, gate_on), or None (WARNING) when fewer than
+    GATE_MIN_OBS ratios exist.
+    """
+    asof = pd.Timestamp(asof)
+    both = pd.concat([vix.rename('vix'), vix3m.rename('vix3m')], axis=1).dropna()
+    both = both[both.index <= asof]
+    ratio = both['vix'] / both['vix3m']
+    win = ratio.iloc[-window:]
+    if len(win) < GATE_MIN_OBS:
+        logger.warning("momentum_sleeve: term-structure gate needs >= %d ratios of history, have %d at %s",
+                       GATE_MIN_OBS, len(win), asof.date())
+        return None
+    last = float(win.iloc[-1])
+    prior = win.iloc[:-1]
+    percentile = float((prior < last).mean() + 0.5 * (prior == last).mean())
+    return dict(date=win.index[-1].date(), vix=float(both['vix'].iloc[-1]), vix3m=float(both['vix3m'].iloc[-1]),
+                ratio=last, percentile=percentile, gate_on=bool(percentile < pct))
 
 
 def select_top(signal: pd.Series, n: int = DEFAULT_N) -> List[str]:
