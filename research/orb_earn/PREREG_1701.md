@@ -66,3 +66,6 @@ Each agent returns ≤ 150 words; every number stays on disk.
 
 ## Amendment 1 (2026-10-02 06:40 UTC, before any bar is read)
 The Databento daily panel on disk ends 2026-09-04, so half B effectively ends there (the last ~19 sessions have no candidates for lack of panel bars, not for lack of events — 419 filings). Frequency for late Aug/Sep 2026 is not readable until the panel is extended; no other change.
+
+## Amendment 2 (2026-10-02 12:35 UTC, before any full-walk number)
+Databento EQUS.MINI ohlcv-1m is a venue SUBSET of the tape: on MU 2026-06-25 its 09:30 bar carries 29,693 shares vs 1,700,098 on the SIP; on 150 common sessions the opening-range high/low sit inside the SIP range by > 0.5 % on 30 % of sessions (p90 1.2–1.3 %, max 4 %; closes match within 0.1 % on 86 %). A range-based entry cannot be walked on it. The single bar source for 1,701 is therefore the Alpaca SIP store (research/bf_zero/bars_sip.db, appended by 1701_backfill_run.py); the Databento set is the cross-check only and the smoke RESULT built on it is VOID. Coverage gate for the SIP store: all five 09:30–09:34 bars present and >= 300 regular-session bars on >= 95 % of candidate sessions.
