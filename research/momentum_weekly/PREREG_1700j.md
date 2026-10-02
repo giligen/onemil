@@ -33,3 +33,6 @@ cut applies to at least 3 of the 5 episodes (not one lucky episode). Nothing out
 ## Output
 `1700j_frontier.py` (reuse the 1700g/1700i machinery), `1700j_episodes.csv`, `1700j_cells.csv`, `RESULT_1700j.md`
 (≤ 90 lines: anatomy table first, then the frontier table). The agent returns ≤ 150 words.
+
+## Amendment 1 (2026-10-02, after the reconciliation RECON_1700_sleeve.md, before any frontier number)
+The reconciled book is the reference: word-boundary name exclusions, ALL 20 names re-equalised to 1/20 every Monday (build A already did this; my C1 description was wrong), delta-trade costs charged on the re-equalisation trades (the 0.2–0.5 %/yr build A omitted), cost cap on the total rate. Reconciled by year 2017–2026: 19.6, −6.5, 14.4, 78.2, 15.6, −2.5, 14.7, 49.6, 35.8, 63.7; CAGR 26.6 %, max DD −42.2 %. Cell C1 is redefined as its opposite, "let weights drift" (the other bot's convention: kept names are neither sold nor re-bought), which the reconciliation measured at max DD −49.9 % and 2021 +2.5 % instead of +15.6 % — reported as the cost of NOT re-equalising. All other cells unchanged, each on the reconciled reference.

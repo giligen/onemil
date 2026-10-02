@@ -1,0 +1,21 @@
+     0s STEP 1: loading Alpaca panel panel_2016_2026.parquet
+    17s loaded: 21912940 rows, 15789 symbols, 2016-01-04..2026-09-29
+    18s universe exclusion: 9829 symbols (name-pattern + test tickers)
+/home/ec2-user/onemil/research/momentum_weekly/recon/A_dump.py:127: FutureWarning: The default of observed=False is deprecated and will be changed to True in a future version of pandas. Pass observed=False to retain current behavior or observed=True to adopt the future default and silence this warning.
+  g = panel.groupby('symbol', sort=False)
+    26s STEP 2: adv20, spread_proxy, 12-1 / 12-7 / risk-adjusted signals, history gate...
+/home/ec2-user/onemil/research/momentum_weekly/recon/A_dump.py:136: FutureWarning: The default of observed=False is deprecated and will be changed to True in a future version of pandas. Pass observed=False to retain current behavior or observed=True to adopt the future default and silence this warning.
+  panel['ret1d'] = panel.groupby('symbol', sort=False)['close'].pct_change()
+/home/ec2-user/onemil/research/momentum_weekly/recon/A_dump.py:137: FutureWarning: The default of observed=False is deprecated and will be changed to True in a future version of pandas. Pass observed=False to retain current behavior or observed=True to adopt the future default and silence this warning.
+  panel['vol252'] = panel.groupby('symbol', sort=False)['ret1d'].rolling(252, min_periods=252).std() \
+    61s 85536 history_ok rows have sig_12_1 but no sig_V2 yet (vol252 needs 252 ret1d obs)
+    61s signals built; history_ok True for 10661948/12607196 rows
+    63s weekly calendar: 508 complete periods 2017-01-03..2026-09-21
+/home/ec2-user/onemil/research/momentum_weekly/recon/A_dump.py:179: FutureWarning: The default value of observed=False is deprecated and will change to observed=True in a future version of pandas. Specify observed=False to silence this warning and retain the current behavior
+  open_piv = rows_at_dates.pivot_table(index='bar_date', columns='symbol', values='open', aggfunc='last').reindex(all_dates)
+/home/ec2-user/onemil/research/momentum_weekly/recon/A_dump.py:180: FutureWarning: The default value of observed=False is deprecated and will change to observed=True in a future version of pandas. Specify observed=False to silence this warning and retain the current behavior
+  spread_piv = rows_at_dates.pivot_table(index='bar_date', columns='symbol', values='spread_proxy', aggfunc='last').reindex(all_dates)
+    87s pivots built: open_piv shape (1017, 7382)
+    90s sig_by_date built: 503 signal dates
+   100s sig=sig_V2 N=20: 5/508 periods had fewer than 20 eligible names
+DONE

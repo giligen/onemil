@@ -1,0 +1,22 @@
+[14:43:42] loading panel parquet (float32 cast)...
+[14:43:59] CLEAN dropped 0 rows
+[14:44:13] panel loaded: 21,912,940 rows, 15,789 symbols, 2016-01-04..2026-09-29
+[14:44:13] loading 1700c_assets.csv for name-based exclusions...
+[14:44:13] name-based exclusion set: 9,829 symbols
+[14:44:13] computing per-symbol features (shift/rolling)...
+[14:44:19] computing within-symbol rolling vol (252d) and ADV20...
+[14:44:44] master calendar (SPY) has 2,700 trading days, 2016-01-04..2026-09-29
+[14:44:44] 509 rebalance dates generated (2017-01-03..2026-09-28)
+[14:45:56] after name/pattern exclusions: 12,609,896 rows, 7,403 symbols remain
+[14:46:04] building per-symbol price arrays for valuation...
+[14:46:16] 7,403 symbol price series built
+[14:46:25] ...100/509 rebalances processed
+[14:46:32] ...200/509 rebalances processed
+[14:46:39] ...300/509 rebalances processed
+[14:46:45] ...400/509 rebalances processed
+[14:46:52] ...500/509 rebalances processed
+[14:46:53] rebalances with a priced week: 503; rebalances with a valid 20-name universe: 504; write-off events: 2
+[14:46:53] wrote research/momentum_weekly/recon/B_all_weekly.csv (503 rows)
+[14:46:53] wrote research/momentum_weekly/recon/B_all_by_year.csv (10 rows)
+[14:46:53] wrote research/momentum_weekly/recon/B_all.md
+[14:46:54] DONE
