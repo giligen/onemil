@@ -23,6 +23,7 @@ import argparse
 import csv
 import glob
 import json
+import math
 import logging
 import os
 import re
@@ -279,6 +280,57 @@ def sleeve_equity(state: Dict, prices: Dict[str, float]) -> float:
     return eq
 
 
+QTY_DP = 9            # Alpaca fractional precision; the state must never round a quantity UP past the broker's
+DUST_QTY = 1e-6       # a broker remainder below this is dust, not a position
+
+
+def floor_qty(q: float) -> float:
+    """Truncate (never round up) to the broker's 9-decimal precision: a sell rounded up by 1e-7 is rejected
+    with 40310000 'insufficient qty available' (2026-10-02 forced run: 2.365105 requested, 2.365104893 held)."""
+    return math.floor(float(q) * 10 ** QTY_DP) / 10 ** QTY_DP
+
+
+def broker_sleeve_cash(client: AlpacaClient, equity_start: float) -> float:
+    """Sleeve cash derived from the broker's own record: equity_start - sum(filled 'mom-' buys) + sum(filled
+    'mom-' sells). Survives a crashed run, a forced re-run and a lost state file."""
+    from alpaca.trading.requests import GetOrdersRequest
+    from alpaca.trading.enums import QueryOrderStatus
+    from alpaca.common.enums import Sort
+    cash, after, seen = float(equity_start), None, set()
+    while True:
+        req = GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=500, direction=Sort.ASC, after=after)
+        page = list(client.trading_client.get_orders(req))
+        new = [o for o in page if str(o.id) not in seen]
+        for o in new:
+            seen.add(str(o.id))
+            if not str(getattr(o, 'client_order_id', '') or '').startswith('mom-'):
+                continue
+            qty, avg = float(o.filled_qty or 0), float(o.filled_avg_price or 0)
+            side = str(getattr(o.side, 'value', o.side))
+            cash += qty * avg if side == 'sell' else -qty * avg
+        if len(page) < 500 or not new:
+            return cash
+        after = max(o.submitted_at for o in page)
+
+
+def sync_state_from_broker(client: AlpacaClient, state: Dict, equity_start: float) -> None:
+    """The dedicated paper account is the source of truth: positions = the broker's positions (dust dropped),
+    cash = equity_start +/- every filled 'mom-' order. Differences from the stored state are logged WARNING
+    (they mean a crashed or forced run); a broker failure is a WARNING and the stored state is kept."""
+    try:
+        pos = {sym: q for sym, q in broker_qty(client).items() if q > DUST_QTY}
+        cash = broker_sleeve_cash(client, equity_start)
+    except Exception as e:
+        logger.warning("momentum_sleeve: broker sync unavailable (%s) -- using the stored state as is", e)
+        return
+    old_pos, old_cash = state.get('positions', {}), float(state.get('cash', equity_start))
+    diff = sorted(k for k in set(pos) | set(old_pos) if abs(pos.get(k, 0.0) - old_pos.get(k, 0.0)) > 1e-4)
+    if diff or abs(cash - old_cash) > 0.5:
+        logger.warning("momentum_sleeve: state resynced from the broker -- positions changed for %s; cash "
+                       "%.2f -> %.2f", diff or 'none', old_cash, cash)
+    state['positions'], state['cash'] = pos, cash
+
+
 def broker_marks(client: AlpacaClient) -> Dict[str, float]:
     """Current price per symbol from the broker's open positions (the mark for the post-trade equity).
     A failure is a WARNING and returns {} -- the caller then falls back to the signal-date closes."""
@@ -291,11 +343,14 @@ def broker_marks(client: AlpacaClient) -> Dict[str, float]:
         return {}
 
 
-def client_order_id(day: date, symbol: str, side: str) -> str:
-    """'mom-<YYYYMMDD>-<SYM>-<s|b>'."""
+def client_order_id(day: date, symbol: str, side: str, tag: str = '') -> str:
+    """'mom-<YYYYMMDD>-<SYM>-<s|b>[-<tag>]'. ``tag`` is empty for the scheduled weekly run (one id per symbol,
+    side and day = idempotent re-run after a crash) and a run stamp under --force, so a deliberate second run on
+    the same day gets fresh ids instead of re-booking the first run's fills."""
     if side not in ('sell', 'buy'):
         raise ValueError(f"bad side {side!r}")
-    return f"mom-{day:%Y%m%d}-{symbol}-{'s' if side == 'sell' else 'b'}"
+    base = f"mom-{day:%Y%m%d}-{symbol}-{'s' if side == 'sell' else 'b'}"
+    return f"{base}-{tag}" if tag else base
 
 
 # --------------------------------------------------------------------------- broker I/O
@@ -323,7 +378,7 @@ def submit_market(client: AlpacaClient, symbol: str, side: str, coid: str,
     kw = dict(symbol=symbol, side=OrderSide.SELL if side == 'sell' else OrderSide.BUY,
               time_in_force=TimeInForce.DAY, client_order_id=coid)
     if side == 'sell':
-        kw['qty'] = round(float(qty), 6)
+        kw['qty'] = floor_qty(qty)
     else:
         kw['notional'] = round(float(notional), 2)
     return client.trading_client.submit_order(MarketOrderRequest(**kw))
@@ -381,12 +436,20 @@ def broker_qty(client: AlpacaClient) -> Dict[str, float]:
 
 # --------------------------------------------------------------------------- the run
 
-def build_plan(panel: pd.DataFrame, assets: pd.DataFrame, asof: date, n: int, state: Dict):
-    """(selected, feat, equity, targets_usd, orders, prices) for this run -- pure given the inputs."""
+def build_plan(panel: pd.DataFrame, assets: pd.DataFrame, asof: date, n: int, state: Dict,
+               marks: Optional[Dict[str, float]] = None):
+    """(selected, feat, equity, targets_usd, orders, prices) for this run -- pure given the inputs.
+
+    The SIGNAL uses the closes of ``asof``. The SIZING (sleeve equity, each held name's value, trim/exit
+    quantities) uses ``marks`` -- the broker's current prices -- where given, so the weekly reset lands every
+    name at 1/N at today's prices, as the research build does at Monday's open. Without marks (dry run before
+    the open, or a broker failure) the signal-date closes are used (2026-10-02 forced run: sizing on the prior
+    close left names between $873 and $1,062 instead of equal)."""
     feat = ms.risk_adjusted_momentum(panel, asof)
     elig = [s for s in ms.eligible_universe(panel, asof, assets) if s != 'SPY']
     selected = ms.select_top(feat.loc[elig, 'signal'], n)
     prices = {s: float(p) for s, p in feat['close'].items()}
+    prices.update({s: float(p) for s, p in (marks or {}).items() if p and p == p})
     equity = sleeve_equity(state, prices)
     targets = ms.target_dollars(selected, equity, n)
     current = {s: q * prices[s] for s, q in state['positions'].items() if s in prices and q > 0}
@@ -399,8 +462,10 @@ def build_plan(panel: pd.DataFrame, assets: pd.DataFrame, asof: date, n: int, st
 
 
 def execute(client: AlpacaClient, orders: List[Dict], prices: Dict[str, float], state: Dict,
-            today: date) -> List[Dict]:
-    """Submit sells, poll to fill, then buys, poll; update ``state`` from broker fills. Returns fills."""
+            today: date, tag: str = '') -> List[Dict]:
+    """Submit sells, poll to fill, then buys, poll. Returns the fills; the caller resyncs ``state`` from the
+    broker afterwards. Sell quantities come from the BROKER's position (a full exit sells exactly what is there,
+    a trim is floored to 9 decimals). One rejected order is logged ERROR and does not abort the others."""
     fills: List[Dict] = []
     bqty = broker_qty(client)
     for phase in ('sell', 'buy'):
@@ -408,28 +473,27 @@ def execute(client: AlpacaClient, orders: List[Dict], prices: Dict[str, float], 
         coids = {}
         for o in batch:
             sym = o['symbol']
-            coid = client_order_id(today, sym, phase)
-            if phase == 'sell':
-                held = state['positions'].get(sym, 0.0)
-                if bqty.get(sym, 0.0) + 1e-9 < held:
-                    logger.warning("momentum_sleeve: %s state qty %.6f > broker qty %.6f -- selling the broker qty",
-                                   sym, held, bqty.get(sym, 0.0))
+            coid = client_order_id(today, sym, phase, tag)
+            try:
+                if phase == 'sell':
                     held = bqty.get(sym, 0.0)
-                qty = held if o['full_exit'] else min(held, o['notional'] / prices[sym])
-                submit_market(client, sym, 'sell', coid, qty=qty)
-            else:
-                submit_market(client, sym, 'buy', coid, notional=o['notional'])
+                    if held <= DUST_QTY:
+                        logger.warning("momentum_sleeve: %s sell skipped -- the broker holds %.9f", sym, held)
+                        continue
+                    qty = held if o['full_exit'] else min(held, floor_qty(o['notional'] / prices[sym]))
+                    submit_market(client, sym, 'sell', coid, qty=qty)
+                else:
+                    submit_market(client, sym, 'buy', coid, notional=o['notional'])
+            except Exception as e:
+                logger.error("momentum_sleeve: %s %s order %s REJECTED (%s) -- continuing with the rest",
+                             phase, sym, coid, e)
+                continue
             coids[coid] = sym
         res = poll_fills(client, list(coids)) if coids else {}
         for coid, sym in coids.items():
             r = res[coid]
             if r['qty'] <= 0:
                 continue
-            sign = -1.0 if phase == 'sell' else 1.0
-            state['positions'][sym] = round(state['positions'].get(sym, 0.0) + sign * r['qty'], 6)
-            state['cash'] -= sign * r['qty'] * r['avg']
-            if state['positions'][sym] <= 1e-6:
-                state['positions'].pop(sym)
             fills.append({'symbol': sym, 'side': phase, 'qty': r['qty'], 'avg_price': r['avg'],
                           'notional': r['qty'] * r['avg'], 'client_order_id': coid})
     return fills
@@ -472,6 +536,7 @@ def run(args, client: AlpacaClient, notifier: Optional[TelegramNotifier], now_ut
     sessions = trading_sessions(client, today - timedelta(days=14), today)
     asof = pd.Timestamp(args.asof).date() if args.asof else last_completed_session(sessions, now_et)
     state = load_state(STATE_PATH, args.equity_start)
+    sync_state_from_broker(client, state, args.equity_start)
     if args.submit and state.get('last_rebalance') == str(today) and not args.force:
         print(f"already rebalanced on {today} — no-op")
         return 0
@@ -494,7 +559,8 @@ def run(args, client: AlpacaClient, notifier: Optional[TelegramNotifier], now_ut
         return 1
     panel['bar_date'] = pd.to_datetime(panel['bar_date'])
 
-    selected, feat, equity, targets, orders, prices = build_plan(panel, assets, asof, args.n, state)
+    selected, feat, equity, targets, orders, prices = build_plan(panel, assets, asof, args.n, state,
+                                                                 marks=broker_marks(client))
     print(f"asof {asof}  today {today}  mode {'SUBMIT' if args.submit else 'DRY-RUN'}")
     print(format_orders(selected, feat, equity, orders))
     if not args.submit:
@@ -502,7 +568,9 @@ def run(args, client: AlpacaClient, notifier: Optional[TelegramNotifier], now_ut
 
     assert_paper_account(client)
     names_before = set(state['positions'])
-    fills = execute(client, orders, prices, state, today)
+    run_tag = f"f{now_utc:%H%M%S}" if args.force else ''
+    fills = execute(client, orders, prices, state, today, run_tag)
+    sync_state_from_broker(client, state, args.equity_start)
     opens = official_opens(client, [f['symbol'] for f in fills], today)
     turnover = 0.0
     for f in fills:

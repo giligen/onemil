@@ -211,9 +211,77 @@ def test_execute_sells_before_buys_and_updates_state(monkeypatch):
     orders = sorted(orders, key=lambda o: o['side'] != 'sell')
     fills = runner.execute(c, orders, {'OLD': 100.0, 'NEW': 100.0}, state, date(2026, 10, 5))
     assert [x[0] for x in calls] == ['sell', 'buy']
-    assert 'OLD' not in state['positions'] and state['positions']['NEW'] == 5.0
-    assert state['cash'] == pytest.approx(1000.0 - 500.0)
-    assert len(fills) == 2
+    # execute() no longer mutates the state: the caller resyncs it from the broker (sync_state_from_broker)
+    assert state == {'cash': 0.0, 'positions': {'OLD': 10.0}}
+    assert len(fills) == 2 and {f['side'] for f in fills} == {'sell', 'buy'}
+
+
+def test_full_exit_sells_the_brokers_exact_quantity():
+    """2026-10-02: state held 2.365105 (rounded up), the broker 2.365104893 -> the sell was rejected 40310000.
+    A full exit must request exactly the broker's quantity, never the rounded state quantity."""
+    c = fake_client()
+    c.trading_client.get_all_positions.return_value = [MagicMock(symbol='MPC', qty='2.365104893')]
+    sent = []
+    c.trading_client.submit_order.side_effect = lambda req: sent.append(req) or MagicMock()
+    c.trading_client.get_order_by_client_id.side_effect = Exception('404 not found')
+    import scripts.momentum_sleeve as r2
+    orig = r2.poll_fills
+    r2.poll_fills = lambda client, coids, **k: {x: {'status': 'filled', 'qty': 2.365104893, 'avg': 420.0} for x in coids}
+    try:
+        r2.execute(c, [{'symbol': 'MPC', 'side': 'sell', 'notional': 936.4, 'full_exit': True}],
+                   {'MPC': 420.0}, {'cash': 0.0, 'positions': {'MPC': 2.365105}}, date(2026, 10, 5))
+    finally:
+        r2.poll_fills = orig
+    assert float(sent[0].qty) == pytest.approx(2.365104893, abs=1e-12)
+    assert float(sent[0].qty) <= 2.365104893
+
+
+def test_floor_qty_never_rounds_up():
+    assert runner.floor_qty(2.3651048939) == 2.365104893
+    assert runner.floor_qty(0.4925391999) == 0.492539199
+
+
+def test_rejected_order_does_not_abort_the_run(caplog):
+    """One broker rejection is logged ERROR and the remaining orders still go out."""
+    import logging
+    c = fake_client()
+    c.trading_client.get_all_positions.return_value = [MagicMock(symbol='AAA', qty='1.0'), MagicMock(symbol='BBB', qty='1.0')]
+    c.trading_client.get_order_by_client_id.side_effect = Exception('404 not found')
+    sent = []
+
+    def sub(req):
+        if req.symbol == 'AAA':
+            raise RuntimeError('insufficient qty available')
+        sent.append(req.symbol); return MagicMock()
+    c.trading_client.submit_order.side_effect = sub
+    import scripts.momentum_sleeve as r2
+    orig = r2.poll_fills
+    r2.poll_fills = lambda client, coids, **k: {x: {'status': 'filled', 'qty': 1.0, 'avg': 10.0} for x in coids}
+    try:
+        with caplog.at_level(logging.ERROR):
+            fills = r2.execute(c, [{'symbol': 'AAA', 'side': 'sell', 'notional': 10.0, 'full_exit': True},
+                                   {'symbol': 'BBB', 'side': 'sell', 'notional': 10.0, 'full_exit': True}],
+                               {'AAA': 10.0, 'BBB': 10.0}, {'cash': 0.0, 'positions': {}}, date(2026, 10, 5))
+    finally:
+        r2.poll_fills = orig
+    assert sent == ['BBB'] and len(fills) == 1 and 'REJECTED' in caplog.text
+
+
+def test_sync_state_from_broker_rebuilds_positions_and_cash():
+    """Positions come from the broker (dust dropped); cash = start - filled mom- buys + filled mom- sells."""
+    c = fake_client()
+    c.trading_client.get_all_positions.return_value = [MagicMock(symbol='AAA', qty='3.5'),
+                                                       MagicMock(symbol='DUST', qty='0.00000005')]
+    def order(coid, side, qty, avg, i):
+        o = MagicMock(); o.id = f'id{i}'; o.client_order_id = coid; o.filled_qty = qty; o.filled_avg_price = avg
+        o.side = MagicMock(value=side); return o
+    c.trading_client.get_orders.return_value = [order('mom-20261002-AAA-b', 'buy', '5', '100', 1),
+                                                order('mom-20261002-AAA-s-f1', 'sell', '1.5', '110', 2),
+                                                order('orb-xyz', 'buy', '9', '50', 3)]
+    state = {'cash': 123.0, 'positions': {'OLD': 1.0}}
+    runner.sync_state_from_broker(c, state, 20000.0)
+    assert state['positions'] == {'AAA': 3.5}
+    assert state['cash'] == pytest.approx(20000.0 - 500.0 + 165.0)
 
 
 def test_run_dry_run_submits_nothing(monkeypatch, capsys, tmp_path):
@@ -278,3 +346,27 @@ class TestBrokerMarks:
         with caplog.at_level(logging.WARNING):
             assert runner.broker_marks(client) == {}
         assert 'broker marks unavailable' in caplog.text
+
+
+def test_forced_run_gets_its_own_client_order_ids():
+    """A deliberate second run on the same day must not collide with the first run's order ids."""
+    import scripts.momentum_sleeve as runner
+    from datetime import date as _d
+    plain = runner.client_order_id(_d(2026, 10, 2), 'MU', 'buy')
+    forced = runner.client_order_id(_d(2026, 10, 2), 'MU', 'buy', 'f162500')
+    assert plain == 'mom-20261002-MU-b' and forced == 'mom-20261002-MU-b-f162500' and plain != forced
+
+
+def test_build_plan_sizes_on_current_marks_not_signal_closes():
+    """A held name that moved since the signal date is trimmed/topped to 1/N at the CURRENT price."""
+    panel, dates = make_panel({f'S{i:02d}': (50, 0.001 * (i + 1), 1e7, 0.01) for i in range(25)})
+    a = pd.DataFrame({'symbol': [f'S{i:02d}' for i in range(25)], 'name': ['Co'] * 25})
+    asof = dates[-1].date()
+    sel, feat, *_ = runner.build_plan(panel, a, asof, 20, {'cash': 20000.0, 'positions': {}})
+    held = sel[0]; close = float(feat.loc[held, 'close'])
+    state = {'cash': 0.0, 'positions': {held: 1000.0 / close}}
+    _, _, eq0, _, orders0, _ = runner.build_plan(panel, a, asof, 20, dict(state))
+    _, _, eq1, _, orders1, _ = runner.build_plan(panel, a, asof, 20, dict(state), marks={held: close * 2})
+    assert eq0 == pytest.approx(1000.0) and eq1 == pytest.approx(2000.0)
+    o1 = [o for o in orders1 if o['symbol'] == held][0]
+    assert o1['side'] == 'sell' and o1['notional'] == pytest.approx(2000.0 - 2000.0 / 20)
