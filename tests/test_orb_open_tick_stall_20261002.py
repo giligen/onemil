@@ -73,7 +73,8 @@ class TestBatchedMinuteBarLookup:
     def test_one_bulk_query_and_no_per_symbol_queries(self):
         a = MagicMock(spec=AlpacaClient)
         syms = [f"S{i}" for i in range(50)]
-        a.get_snapshots.return_value = {s: _snap(10.0, 9.0, _today_et()) for s in syms}
+        a.get_snapshots.return_value = {
+            s: {**_snap(8.0, 8.0, _yesterday()), 'close': 9.0, 'volume': 2_000_000} for s in syms}
         db = MagicMock(spec=Database)
         db.get_intraday_bars_for_date.return_value = {}
         eng = _engine(a, db)
@@ -82,19 +83,19 @@ class TestBatchedMinuteBarLookup:
         db.get_intraday_bars_cached.assert_not_called()
 
     def test_bulk_open_equals_per_symbol_open(self):
-        """Gap input uses the 09:30 bar open: 10.0 snapshot vs 9.0 prev is
-        +11%, but a settled 09:30 open of 9.2 is +2% -> rejected."""
+        """STALE snapshots (bar dated yesterday, its close = prior close 9.0): the cached
+        09:30 bar open decides — AAA 9.2 is +2% -> rejected; BBB has no bar -> not admitted."""
         from zoneinfo import ZoneInfo
         a = MagicMock(spec=AlpacaClient)
-        a.get_snapshots.return_value = {
-            'AAA': _snap(10.0, 9.0, _today_et()), 'BBB': _snap(10.0, 9.0, _today_et())}
+        stale = lambda: {**_snap(8.0, 8.0, _yesterday()), 'close': 9.0, 'volume': 2_000_000}
+        a.get_snapshots.return_value = {'AAA': stale(), 'BBB': stale()}
         ts = datetime.fromisoformat(_today_et() + 'T09:30:00').replace(
             tzinfo=ZoneInfo('America/New_York'))
         db = MagicMock(spec=Database)
         db.get_intraday_bars_for_date.return_value = {
             'AAA': [{'timestamp': ts, 'open': 9.2}]}
         keep = _engine(a, db).build_orb_universe_from_snapshots(['AAA', 'BBB'])
-        assert 'AAA' not in keep and 'BBB' in keep
+        assert 'AAA' not in keep and 'BBB' not in keep
 
 
 class TestOpenTickBudget:
@@ -209,10 +210,11 @@ class TestNoRebuildPastEntryCutoff:
 
 class TestAggregatedFallbackWarning:
     def test_one_warning_per_build_not_per_symbol(self, caplog):
-        """No 09:30 bars cached: ONE WARNING with count + first 10 symbols."""
+        """Stale snapshots, no 09:30 bars: ONE WARNING with count + first 10 symbols."""
         a = MagicMock(spec=AlpacaClient)
         syms = [f"S{i:02d}" for i in range(40)]
-        a.get_snapshots.return_value = {s: _snap(10.0, 9.0, _today_et()) for s in syms}
+        a.get_snapshots.return_value = {
+            s: {**_snap(8.0, 8.0, _yesterday()), 'close': 9.0, 'volume': 2_000_000} for s in syms}
         db = MagicMock(spec=Database)
         db.get_intraday_bars_for_date.return_value = {}
         eng = _engine(a, db)
@@ -222,7 +224,7 @@ class TestAggregatedFallbackWarning:
                  if r.levelno == logging.WARNING and 'GAP_GATE' in r.getMessage()]
         assert len(warns) == 1
         assert '40 of 40' in warns[0] and 'S09' in warns[0] and 'S10' not in warns[0]
-        assert len(keep) == 40   # selection unchanged: snapshot open still gates
+        assert keep == []   # never gated on a prior day's open
 
     def test_resolve_gap_input_default_still_warns_per_symbol(self, caplog):
         """Legacy single-symbol callers keep their WARNING; result identical with a sink."""

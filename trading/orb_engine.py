@@ -36,7 +36,7 @@ from trading.buy_stop_guard import (
     BuyStopAction, BuyStopDecision, evaluate_buy_stop,
 )
 from trading.orb_correlation import dedup_candidates, symbol_family, symbol_super_group
-from trading.orb_gap_gate import resolve_gap_input
+from trading.orb_gap_gate import resolve_gap_input, gap_input_needs_today_open
 from trading.orb_filter import (
     FeatureParam, assign_quintile, composite_score, load_feature_params,
 )
@@ -1185,6 +1185,75 @@ class ORBEngine:
             self._snapshot_cache.update(fresh or {})
         return {s: self._snapshot_cache[s] for s in candidate_symbols if s in self._snapshot_cache}
 
+    def _min_prev_volume_any(self) -> float:
+        """Lowest prev-volume floor across production and add-on pools (prefilter for the open fetch)."""
+        floors = [float(self.universe_min_prev_volume)]
+        if self.addon_pools_enabled:
+            floors += [float(p.get('min_prev_volume', self.universe_min_prev_volume))
+                       for p in self.addon_pools]
+        return min(floors)
+
+    @staticmethod
+    def _bar_open_at_0930(bar) -> Optional[float]:
+        """Open of a bar dict iff its timestamp is 09:30 ET, else None."""
+        from zoneinfo import ZoneInfo
+        from dateutil.parser import isoparse
+        ts = bar.get('timestamp') if isinstance(bar, dict) else None
+        if not ts:
+            return None
+        dt = ts if isinstance(ts, datetime) else isoparse(str(ts))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        et = dt.astimezone(ZoneInfo('America/New_York'))
+        if et.hour == 9 and et.minute == 30:
+            o = bar.get('open')
+            return float(o) if o else None
+        return None
+
+    def _fetch_today_open_bars(self, symbols: List[str], now_et: datetime,
+                               deadline: float) -> Dict[str, float]:
+        """09:30 ET one-minute bar opens for stale-snapshot symbols: batched REST, budgeted, cached.
+
+        Per-day cache of found opens; misses are retried at most every 60 s. Nothing
+        is fetched before 09:31 ET (the bar has not closed). A request failure logs
+        ONE WARNING and yields no opens for the unfetched chunks (callers then do not
+        admit — never fall back to a prior day's open). Stops at `deadline`.
+        """
+        day = now_et.date().isoformat()
+        if getattr(self, '_open_bar_day', None) != day:
+            self._open_bar_day, self._open_bar_cache, self._open_bar_miss = day, {}, {}
+        if not symbols or (now_et.hour, now_et.minute) < (9, 31) \
+                or not hasattr(self.alpaca, 'get_1min_bars_range_multi'):
+            return {s: self._open_bar_cache[s] for s in symbols if s in self._open_bar_cache}
+        now = time.time()
+        todo = [s for s in symbols if s not in self._open_bar_cache
+                and now - self._open_bar_miss.get(s, 0.0) > 60.0]
+        s0 = now_et.replace(hour=9, minute=30, second=0, microsecond=0).astimezone(timezone.utc)
+        s1 = s0 + timedelta(minutes=1)
+        failed = 0
+        for i in range(0, len(todo), 200):
+            if time.time() >= deadline:
+                logger.warning(f"ORB GAP_GATE: open-tick budget exhausted before the 09:30 bar fetch "
+                               f"finished — {len(todo) - i} symbol(s) deferred to the next tick")
+                break
+            chunk = todo[i:i + 200]
+            try:
+                res = self.alpaca.get_1min_bars_range_multi(chunk, s0, s1) or {}
+            except Exception as e:
+                failed += len(chunk)
+                logger.warning(f"ORB GAP_GATE: batched 09:30 bar fetch failed for {len(chunk)} symbols "
+                               f"(no admission from stale snapshots this tick): {e}")
+                for sym in chunk:
+                    self._open_bar_miss[sym] = time.time()
+                continue
+            for sym in chunk:
+                df = res.get(sym)
+                if df is not None and len(df):
+                    self._open_bar_cache[sym] = float(df.iloc[0]['open'])
+                else:
+                    self._open_bar_miss[sym] = time.time()
+        return {s: self._open_bar_cache[s] for s in symbols if s in self._open_bar_cache}
+
     def build_orb_universe_from_snapshots(self, candidate_symbols: Optional[List[str]] = None,
                                            deadline: Optional[float] = None) -> List[str]:
         """Build ORB universe by querying Alpaca snapshots matching BT criteria.
@@ -1228,19 +1297,30 @@ class ORBEngine:
         # 84M-row table. Same data, same admission logic.
         _bulk_bars: Dict[tuple, List[Dict]] = {}
         from zoneinfo import ZoneInfo as _ZI
-        _today_et_bulk = datetime.now(timezone.utc).astimezone(
-            _ZI('America/New_York')).date().isoformat()
-        if self.db is not None and hasattr(self.db, 'get_intraday_bars_for_date'):
+        _now_et = datetime.now(timezone.utc).astimezone(_ZI('America/New_York'))
+        _today_et_bulk = _now_et.date().isoformat()
+        # 2026-10-02 gap-input parity (docs/orb_parity_20260930.md): the gap
+        # gate must use TODAY's official open vs the prior session's close,
+        # the BT quantity. (i) a snapshot whose daily bar is dated today
+        # carries both; (ii) otherwise the 09:30 ET bar open (REST, batched,
+        # inside the open-tick budget) vs the stale bar's close; (iii) else
+        # the symbol is NOT admitted this tick — never gated on a prior
+        # day's open (ASTX/AEHG 9/30).
+        _need_open = [s for s, sn in (snapshots or {}).items()
+                      if gap_input_needs_today_open(sn, _today_et_bulk, self._min_prev_volume_any(),
+                                                    self.universe_min_price, self.universe_max_price)]
+        _today_opens = self._fetch_today_open_bars(_need_open, _now_et, deadline)
+        _missing_open = [s for s in _need_open if s not in _today_opens]
+        if _missing_open and self.db is not None and hasattr(self.db, 'get_intraday_bars_for_date'):
             try:
-                _by_symbol = self.db.get_intraday_bars_for_date(
-                    list(snapshots or {}), _today_et_bulk) or {}
+                _by_symbol = self.db.get_intraday_bars_for_date(_missing_open, _today_et_bulk) or {}
                 _bulk_bars = {(s, _today_et_bulk): bars for s, bars in _by_symbol.items()}
             except Exception as e:
-                logger.warning(
-                    f"ORB GAP_GATE: batched 09:30 bar lookup failed for "
-                    f"{len(snapshots or {})} symbols (non-fatal, using snapshot opens): {e}")
+                logger.warning(f"ORB GAP_GATE: batched cached-bar lookup failed for "
+                               f"{len(_missing_open)} symbols (non-fatal): {e}")
         keep: List[str] = []
-        _snapshot_fallback_syms: List[str] = []   # symbols gated on the snapshot open (no 09:30 bar)
+        _snapshot_fallback_syms: List[str] = []   # fresh-snapshot symbols (informational only)
+        _no_open_syms: List[str] = []   # liquid stale-snapshot symbols with no valid today-open
         _n_cand = len(snapshots or {})
         for _i, (sym, snap) in enumerate((snapshots or {}).items()):
             if time.time() >= deadline:
@@ -1256,16 +1336,11 @@ class ORBEngine:
                 #    'latest_price', 'bid_price', 'ask_price', ...}       # latest trade/quote
                 # Prior code tried `snap.daily_bar.open` nested access — that's how
                 # Alpaca's raw SDK object looks, but alpaca_client.py flattens it.
-                open_price = float(snap.get('open', 0) or 0) if isinstance(snap, dict) else 0
-                if open_price <= 0:
-                    # Fall back to latest trade price (used when today's daily bar
-                    # hasn't been ticked yet — rare but seen right at 9:30 ET).
-                    lp = snap.get('latest_price', 0) if isinstance(snap, dict) else 0
-                    open_price = float(lp or 0)
-                if open_price <= 0:
+                if not isinstance(snap, dict):
                     continue
-                prev_close = float(snap.get('prev_close', 0) or 0) if isinstance(snap, dict) else 0
-                prev_volume = int(snap.get('prev_volume', 0) or 0) if isinstance(snap, dict) else 0
+                open_price = float(snap.get('open', 0) or 0)
+                prev_close = float(snap.get('prev_close', 0) or 0)
+                prev_volume = int(snap.get('prev_volume', 0) or 0)
                 # Vendor-corpse gate (2026-07-23: ORIS/CUK/MIGI entered on
                 # snapshots whose daily bar was WEEKS old — dead symbols
                 # can't trade, but they consumed news/PM/anchor prefetch
@@ -1301,35 +1376,33 @@ class ORBEngine:
                 # UNCHANGED: computed first, exactly as before, and always
                 # wins the pool tag when it matches. Add-on pools only ever
                 # catch symbols production rejects.
+                # Gap input (2026-10-02, docs/orb_parity_20260930.md): today's
+                # official open vs the prior session's close, as the BT.
+                # Fresh snapshot (daily bar dated today, open>0): its own open
+                # and prev_close. Stale (bar dated an earlier session): that
+                # bar IS the prior session, so prev_close = its close, prev
+                # volume = its volume, and the open must be today's 09:30 bar
+                # open; without one the symbol is not admitted (never gated on
+                # a prior day's open, never on latest_price).
+                _fresh = open_price > 0 and bar_date == _today_et_bulk
+                minute_bar_open = None
+                if not _fresh:
+                    prev_close = float(snap.get('close', 0) or 0)
+                    prev_volume = int(snap.get('volume', 0) or 0)
+                    minute_bar_open = _today_opens.get(sym)
+                    if minute_bar_open is None:
+                        for _b in (_bulk_bars.get((sym, _today_et_bulk), []) or []):
+                            _bo = self._bar_open_at_0930(_b)
+                            if _bo:
+                                minute_bar_open = _bo
+                                break
+                    if not minute_bar_open:
+                        if prev_volume >= self._min_prev_volume_any():
+                            _no_open_syms.append(sym)
+                        continue
+                    open_price = float(minute_bar_open)
                 if prev_close <= 0:
                     continue
-                # 2026-09-30 fix (docs/orb_parity_20260930.md): prefer the
-                # settled 09:30 ET minute bar's open over the real-time
-                # snapshot's open when one is cached (available by 09:31) —
-                # the snapshot can still be updating at 09:30:0x ET (ASTX/
-                # AEHG read >=5% live off the snapshot, settled at +1.95%/
-                # +1.87%). ALWAYS persist the exact inputs used so a BT
-                # rebuild can replay live's observed gap. Best-effort: any
-                # lookup failure falls back to the snapshot (today's
-                # behavior), never blocks the universe build.
-                minute_bar_open = None
-                try:
-                    from dateutil.parser import isoparse as _isoparse
-                    for _b in (_bulk_bars.get((sym, _today_et_bulk), []) or []):
-                        _ts_raw = _b.get('timestamp') if isinstance(_b, dict) else None
-                        if not _ts_raw:
-                            continue
-                        _ts_dt = _ts_raw if isinstance(_ts_raw, datetime) else _isoparse(str(_ts_raw))
-                        if _ts_dt.tzinfo is None:
-                            _ts_dt = _ts_dt.replace(tzinfo=timezone.utc)
-                        _et = _ts_dt.astimezone(_ZI('America/New_York'))
-                        if _et.hour == 9 and _et.minute == 30:
-                            _o = _b.get('open')
-                            if _o:
-                                minute_bar_open = float(_o)
-                            break
-                except Exception as e:
-                    logger.warning(f"ORB GAP_GATE: {sym} 09:30 bar lookup failed (non-fatal, using snapshot): {e}")
                 _gate_input = resolve_gap_input(sym, open_price, prev_close, minute_bar_open,
                                                 fallback_sink=_snapshot_fallback_syms)
                 if _gate_input is not None:
@@ -1368,13 +1441,13 @@ class ORBEngine:
             except Exception as e:
                 logger.debug(f"ORB: snapshot parse failed for {sym}: {e}")
                 continue
-        if _snapshot_fallback_syms:
+        if _no_open_syms:
             logger.warning(
-                f"ORB GAP_GATE: {len(_snapshot_fallback_syms)} of {_n_cand} symbols have no "
-                f"09:30 minute bar open (not yet cached for today, or called before 09:31 ET) — "
-                f"gap gated on the real-time snapshot open (the input class of the 9/30 "
-                f"ASTX/AEHG parity gap, docs/orb_parity_20260930.md); first 10: "
-                f"{', '.join(_snapshot_fallback_syms[:10])}")
+                f"ORB GAP_GATE: {len(_no_open_syms)} of {_n_cand} symbols NOT admitted this tick — "
+                f"snapshot daily bar is not dated {_today_et_bulk} and no 09:30 ET bar open is "
+                f"available (not printed yet, before 09:31 ET, or the batched fetch failed); "
+                f"never gated on a prior day's open (docs/orb_parity_20260930.md); "
+                f"first 10: {', '.join(_no_open_syms[:10])}")
         logger.info(
             f"ORB: snapshot universe — {len(keep)}/{len(snapshots)} symbols pass "
             f"(gap>={self.universe_min_gap_pct}%, vol>={self.universe_min_prev_volume:,}, "
