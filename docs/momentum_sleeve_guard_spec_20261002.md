@@ -44,3 +44,27 @@ The 1,700u median cell: gate ON when the trailing 252-day percentile of VIX ÷ V
 ## Not allowed
 No git commit, no `--submit`, no `--force`, no order of any kind, no edits to .env / crontab / config.yaml / orb.yaml,
 no change to the sleeve's sizing, selection N, schedule or account guard. Never print keys.
+
+## C. Half-size gate (owner asked 10/2 for "a recommendation that balances safety with profit")
+Recommendation = guard + HALF size in calm weeks: the 1,700u median half-size cell (VIX ÷ VIX3M trailing-252
+percentile below 20 % at the signal close → every name at 1/(2N) of sleeve equity, the rest cash; full 1/N otherwise).
+Backtest (one build, independent rebuild owed): 30.7 % / −37.1 % / $659K vs guard-only 29.3 % / −38.3 % / $596K;
+half size 28 % of weeks. If the gate is noise it behaves like running ~86 % size; that is the bounded downside.
+
+* `trading/momentum_sleeve.py`: `GATE_MODE_OFF = 'off'`, `GATE_MODE_SHADOW = 'shadow'`, `GATE_MODE_HALF = 'half'`;
+  `GATE_HALF_PCT = 0.20`; pure `gate_scale(gate_info, mode) -> float` (0.5 only when mode == 'half' AND the gate
+  info exists AND its percentile < GATE_HALF_PCT; 1.0 otherwise — a missing gate (n/a) is FULL size with a WARNING,
+  never a silent half). `target_dollars(selected, equity, n, scale=1.0)` multiplies every target by `scale`.
+  `term_structure_gate(..., pct=…)` keeps reporting the 30 % shadow state; the half decision uses GATE_HALF_PCT on the
+  same percentile.
+* Runner: `--gate {off,shadow,half}`, default `half` (PAPER account only — the account guard already refuses a live
+  key); the plan line, the ledger row and the `[MOM]` Telegram line show `size 100%|50%`; the shadow CSV gains a
+  `scale` column (migrate the header if the file exists).
+* Parity: dump from the BT (1700u_gate_guarded.py machinery, cell `VIXratio|w252|p20|half`) the gate state and the
+  per-name target weight for three Mondays — two gated, one not — to `research/momentum_weekly/recon/H_gate.csv`;
+  assert the live `gate_scale` + `target_dollars` reproduce the weights (0.025 vs 0.05 per name) and the 20 names.
+* Tests: scale 0.5 only in 'half' mode below 20 %; 1.0 at exactly 20 %; 1.0 with gate n/a (+ WARNING); 'shadow' and
+  'off' never change the order list; a gated week's orders sell every name down to half; the following ungated week
+  buys back to full; cash accounting (`broker_sleeve_cash`) is unchanged by the mode.
+* Verification: the sleeve test file green; a dry run (cached 10/1 bars, `--skip-fetch`, no --submit/--force) prints
+  the size line. Same "not allowed" list as above.
