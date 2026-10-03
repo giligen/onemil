@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from persistence.database import Database  # noqa: E402
 import guardrail as guardrail_cli  # noqa: E402  (scripts/guardrail.py: stage_risk_usd, band_p5)
 from trading import live_guardrail as gr  # noqa: E402
+import eod_sections  # noqa: E402  (MOM / ORB PAPER PARITY / PROMOTION sections)
 
 log = logging.getLogger("eod_report")
 LLM_MODEL = "haiku"
@@ -267,9 +268,51 @@ def guardrail_section() -> str:
     return "\n".join(lines)
 
 
+PROMOTION_MARK = "PROMOTION:"
+
+
+def safe_section(name: str, fn) -> tuple:
+    """(lines, metrics) from `fn()`; any exception becomes `<NAME>: FAILED (<exc>)` + a WARNING, never a blank."""
+    try:
+        return fn()
+    except Exception as e:  # noqa: BLE001
+        log.warning("section %s failed: %s", name, e, exc_info=True)
+        return [f"{name}: FAILED ({type(e).__name__}: {e})"], None
+
+
+def new_sections(day: str, trades: List[Dict]) -> List[str]:
+    """MOM, ORB PAPER PARITY and PROMOTION (scripts/eod_sections.py), each isolated by `safe_section`."""
+    mom, mom_m = safe_section("MOM", lambda: eod_sections.sleeve_section(day))
+    orb, orb_m = safe_section("ORB PAPER PARITY", lambda: eod_sections.orb_paper_parity_section(day, trades))
+    promo, _ = safe_section("PROMOTION", lambda: (eod_sections.promotion_section(day, mom_m, orb_m), None))
+    return (["MOM:"] + ["  " + ln for ln in mom] + ["ORB PAPER PARITY:"] + ["  " + ln for ln in orb] + promo)
+
+
+def split_promotion(summary: str) -> tuple:
+    """(summary without the PROMOTION block, the PROMOTION block) - the block is appended verbatim after the
+    LLM rewrite so the verdict text is never rephrased. The block runs from `PROMOTION:` to the next
+    unindented line or the end."""
+    lines = summary.splitlines()
+    try:
+        i = next(k for k, ln in enumerate(lines) if ln.startswith(PROMOTION_MARK))
+    except StopIteration:
+        return summary, ""
+    j = i + 1
+    while j < len(lines) and lines[j].startswith("  "):
+        j += 1
+    return "\n".join(lines[:i] + lines[j:]), "\n".join(lines[i:j])
+
+
+def fit_telegram(text: str, promo: str) -> str:
+    """`text` cut so that the PROMOTION block (verbatim, never rephrased or cut) still fits in TELEGRAM_MAX."""
+    room = max(TELEGRAM_MAX - len(promo) - 1, 0)
+    return (text[:room] + ("\n" + promo if promo else "")).strip()
+
+
 def assemble(day: str, trades: List[Dict]) -> str:
     """The deterministic summary: every section, plain text."""
     return "\n".join([books_section(trades, day), parity_section(day), ramp_section(),
+                      *new_sections(day, trades),
                       guardrail_section(), hygiene_section(), boot_section(day), research_section()])
 
 
@@ -305,7 +348,8 @@ def send_telegram(text: str) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--date", default=dt.date.today().isoformat())
-    ap.add_argument("--no-send", action="store_true", help="print, do not telegram")
+    ap.add_argument("--no-send", "--no-telegram", dest="no_send", action="store_true",
+                    help="print, do not telegram")
     ap.add_argument("--no-llm", action="store_true", help="send the deterministic summary as-is")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -314,12 +358,15 @@ def main() -> int:
     out_dir = ROOT / "logs/eod"
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / f"{a.date}.md").write_text(summary + "\n")
-    text = "" if a.no_llm else phrase_with_llm(summary)
-    if not text:
+    body, promo = split_promotion(summary)
+    text = "" if a.no_llm else phrase_with_llm(body)
+    if text:
+        text = fit_telegram(text, promo)
+    else:
         if not a.no_llm:
             log.warning("falling back to the raw summary (LLM step unavailable)")
-        text = ("[EOD] " + summary)[:TELEGRAM_MAX]
-    print(text)
+        text = fit_telegram("[EOD] " + body, promo)
+    print("[EOD] " + summary if a.no_llm else text)   # --no-llm is the inspection mode: print the whole deterministic summary
     if not a.no_send:
         send_telegram(text)
     return 0

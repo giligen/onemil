@@ -46,3 +46,13 @@ every python run through `bash scripts/research_run.sh` (cage). Nothing is resta
   after 15:55 ET with no after-hours clean-up needed.
 * A second Claude process writing to the tree is checked BEFORE any agent is launched:
   `ps -eo pid,etimes,args | grep -E "claude|2\.1\.[0-9]+ --session-id" | grep -v grep`.
+
+## Added 10/3 (independent review + EOD monitor)
+15. Review fixes live for the first time Monday (7216b1d): ORB open fetch ≤ 20 s per call, exits before the build, 09:30-stamped
+    bar only, aggregated admission WARNING, build re-entrancy guard; sleeve completeness REFUSAL (`MOM REFUSED` = no orders, book
+    unchanged — read the reason, do not force), `last_rebalance` saved right after execute, whole-share fallback.
+16. 21:57 UTC `[EOD]` now carries MOM / ORB PAPER PARITY / PROMOTION sections (`scripts/eod_sections.py`); the PROMOTION verdicts
+    are code: Sleeve n/2 clean scheduled rotations, ORB n/5 clean sessions, ramps on realized P&L. Expected Monday: Sleeve 1/2 or
+    HOLD with the failing condition; ORB 1/5 or the reason.
+17. HOD findings B1–B3 (`docs/review_20261003/B_hod.md`) are NOT fixed yet — HOD stays dry-run; fix spec `FIX_B_hod_spec.md`.
+18. Owner lines still owed: `kill 3792` (fork), move the 11:27 pre-boot pytest cron to 11:00 inside the cage (line in the 10/3 chat).
