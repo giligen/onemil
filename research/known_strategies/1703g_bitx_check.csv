@@ -1,0 +1,16 @@
+,0
+src,yfinance download (auto_adjust=False close)
+n,819
+corr,0.9971884063263913
+td_ann,0.25556405863141457
+td_ann_noER,0.30285720931634635
+corr_daily,
+note,BTC priced at 16:00 ET from Alpaca hourly bars
+bitx_ann,0.5472715295192352
+beta,1.014836341255286
+bitx_cagr,0.08400605022215668
+sim_cagr,0.4212679486375992
+btc_cagr,0.3655112772287463
+sim_ann,0.8028355881506497
+first,2023-06-28
+last,2026-10-01
