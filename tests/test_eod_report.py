@@ -192,6 +192,7 @@ def test_assemble_renders_ramp_and_boot_despite_all_subprocess_timeouts(tmp_path
     monkeypatch.setattr(er, "parity_section", lambda day: "PARITY: ok")
     monkeypatch.setattr(er, "guardrail_section", lambda: "GUARDRAIL: ok")
     monkeypatch.setattr(er, "research_section", lambda: "RESEARCH: ok")
+    monkeypatch.setattr(er, "new_sections", lambda day, trades: ["MOM: stub"])
 
     def fake_run(cmd, **kwargs):
         raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 20))
@@ -212,13 +213,15 @@ def test_parity_section_reads_bf_json(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
-def test_script_runs_end_to_end_no_send_no_llm():
+def test_script_runs_end_to_end_no_send_no_llm(tmp_path):
     """System-ish: the real script against the real DB and checkers, nothing sent."""
     r = subprocess.run([sys.executable, "scripts/eod_report.py", "--no-send", "--no-llm",
                         "--date", "2026-09-18"], capture_output=True, text=True, timeout=400,
+                       env={**__import__("os").environ, "ONEMIL_PROMOTION_STATE": str(tmp_path / "promo.json")},
                        cwd=Path(__file__).resolve().parents[1])
     assert r.returncode == 0, r.stderr[-500:]
     assert r.stdout.startswith("[EOD]") and "RAMP:" in r.stdout and "NEXT BOOT" in r.stdout
+    assert "PROMOTION:" in r.stdout and "ORB PAPER PARITY:" in r.stdout and "MOM:" in r.stdout
 
 
 def test_journal_error_count_matches_inside_journalctl(monkeypatch):
