@@ -41,7 +41,8 @@ class TestIncludeTodayProvisionalValidation:
                             lambda: [])
         monkeypatch.setattr('orb_backtest.Database', MagicMock())
         monkeypatch.setattr('orb_backtest.regen_features', lambda **kw: None)
-        monkeypatch.setattr('orb_backtest.run_pipeline_bt', lambda s: None)
+        monkeypatch.setattr('orb_backtest.run_pipeline_bt', lambda s, marker_dates=None: None)
+        monkeypatch.setattr('orb_backtest.build_pool_books', lambda *a, **k: None)
         with patch.object(sys, 'argv', [
             'orb_backtest.py', '--include-today-provisional',
         ]):
@@ -59,7 +60,8 @@ class TestIncludeTodayProvisionalValidation:
                             lambda: [])
         monkeypatch.setattr('orb_backtest.Database', MagicMock())
         monkeypatch.setattr('orb_backtest.regen_features', lambda **kw: None)
-        monkeypatch.setattr('orb_backtest.run_pipeline_bt', lambda s: None)
+        monkeypatch.setattr('orb_backtest.run_pipeline_bt', lambda s, marker_dates=None: None)
+        monkeypatch.setattr('orb_backtest.build_pool_books', lambda *a, **k: None)
         with patch.object(sys, 'argv', [
             'orb_backtest.py', '--end', '2026-04-24',
             '--include-today-provisional',
@@ -103,7 +105,8 @@ class TestIncludeTodayProvisionalValidation:
                             lambda *a, **kw: [])
         monkeypatch.setattr('orb_backtest.Database', MagicMock())
         monkeypatch.setattr('orb_backtest.regen_features', lambda **kw: None)
-        monkeypatch.setattr('orb_backtest.run_pipeline_bt', lambda s: None)
+        monkeypatch.setattr('orb_backtest.run_pipeline_bt', lambda s, marker_dates=None: None)
+        monkeypatch.setattr('orb_backtest.build_pool_books', lambda *a, **k: None)
         with patch.object(sys, 'argv', [
             'orb_backtest.py', '--end', '2026-04-20',
         ]):

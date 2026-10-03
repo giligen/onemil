@@ -606,6 +606,27 @@ def build_atr14_lookup(pairs, db_path='data/cache.db', daily_source=None):
     return out
 
 
+def _write_markers(days, pool_id, features_df, sel, out_path) -> None:
+    """Upsert one marker row per computed day: (date, pool_id, candidates, picks). A day computed with zero
+    picks is a `picks=0` row, so "0 picks" is never confused with "not computed" (spec 2026-10-03).
+    No-op when `out_path` is unset (research runs). `picks` counts the book rows AFTER the vetoes."""
+    if not out_path:
+        return
+    rows = []
+    for d in days:
+        n_cand = int((features_df['date'].dt.strftime('%Y-%m-%d') == d).sum())
+        n_pick = 0 if len(sel) == 0 else int((sel['date'].dt.strftime('%Y-%m-%d') == d).sum())
+        rows.append({'date': d, 'pool_id': pool_id, 'candidates': n_cand, 'picks': n_pick})
+    new = pd.DataFrame(rows)
+    if os.path.exists(out_path):
+        old = pd.read_csv(out_path, keep_default_na=False)
+        keys = set(zip(new['date'], new['pool_id']))
+        old = old[[(a, b) not in keys for a, b in zip(old['date'].astype(str), old['pool_id'])]]
+        new = pd.concat([old, new], ignore_index=True)
+    new.sort_values(['date', 'pool_id']).to_csv(out_path, index=False)
+    print(f"Markers: {len(rows)} day row(s) for {pool_id} -> {out_path}")
+
+
 def main():
     bt_cfg = load_bt_config()
     # Hard-sync module constants to orb.yaml (8/30 audit): the sim
@@ -634,6 +655,42 @@ def main():
     needed = [f for f, _ in FILTER_FEATURES]
     df = df.dropna(subset=needed + ['pnl', 'date', 'pnl_pct', 'range_size_pct', 'entry_price'])
     df['date'] = pd.to_datetime(df['date'])
+
+    # ---- add-on pool mode (nightly P1 book, spec 2026-10-03) ---------------
+    # ORB_BT_POOL=<name|pool_id>: this features CSV is ONE add-on pool's candidate universe (built by
+    # study_orb_features with ORB_UNIVERSE_POOL). The pool's 09:35 admission gate is applied BEFORE scoring, as in
+    # the engine (`_run_pool_selection`, addon_gate_reject). Only gates the BT can evaluate are supported; any other
+    # configured gate key aborts rather than silently admitting (fail closed).
+    pool_id = None
+    pool_name = (os.environ.get('ORB_BT_POOL') or '').strip()
+    if pool_name:
+        from trading.orb_pool_defs import find_pool, load_addon_pools
+        _pdefs = load_addon_pools()
+        _pcfg = find_pool(_pdefs['pools'], pool_name)
+        if _pcfg is None:
+            raise SystemExit(f"FATAL: ORB_BT_POOL={pool_name!r} not in orb.yaml universe.addon_pools")
+        pool_id = _pcfg.get('pool_id', pool_name)
+        from trading.orb_addon_gates import GATE_KEYS
+        _unsupported = [k for k in GATE_KEYS if _pcfg.get(k) is not None and k != 'min_move_to_range_high_pct']
+        if _unsupported:
+            raise SystemExit(f"FATAL: pool {pool_id} sets gate(s) {_unsupported} the BT cannot evaluate yet")
+        _gmin = _pcfg.get('min_move_to_range_high_pct')
+        if _gmin is not None:
+            if 'move_to_range_high_pct' not in df.columns:
+                raise SystemExit("FATAL: pool gate needs the move_to_range_high_pct column (pool features CSV)")
+            _gm = df['move_to_range_high_pct'] >= float(_gmin)   # NaN -> False (fail closed)
+            print(f"POOL {pool_id}: min_move_to_range_high_pct >= {_gmin}: dropped "
+                  f"{int((~_gm).sum())} of {len(df)} candidates")
+            df = df[_gm].copy()
+        _used_csv = os.environ.get('ORB_BT_SLOTS_USED_IN')
+        _slots_used = {}
+        if _used_csv and os.path.exists(_used_csv):
+            _u = pd.read_csv(_used_csv)
+            _slots_used = {str(r['date'])[:10]: int(r['slots_used']) for _, r in _u.iterrows()}
+        else:
+            print(f"WARNING: POOL {pool_id}: no production slots-used file ({_used_csv}) -- full slot count assumed")
+    else:
+        _slots_used = {}
 
     # ---- 2026-09-05 signal study hooks (research/orb_signal_study/DESIGN.md) ----
     # Flags default OFF => this block is inert and the book is byte-identical.
@@ -1071,10 +1128,26 @@ def main():
               f"{int(kept[_meta_rank].isna().sum())}/{len(kept)} rows unscored "
               f"-> shipped order")
 
+    # Days this run reports markers for: the explicit ORB_BT_MARKER_DATES (nightly: the days just computed, so a
+    # day with no candidate rows still gets a picks=0 row), else every day in the features CSV.
+    _md = (os.environ.get('ORB_BT_MARKER_DATES') or '').strip()
+    _marker_days = (sorted(x.strip() for x in _md.split(',') if x.strip()) if _md
+                    else sorted(df['date'].dt.strftime('%Y-%m-%d').unique()))
+    if pool_id and len(kept) == 0:
+        # A pool day with no scored candidates: header-only book + marker rows, never a crash.
+        _write_markers(_marker_days, pool_id, df, pd.DataFrame(), os.environ.get('ORB_BT_MARKERS_OUT'))
+        pd.DataFrame().to_csv(bt_cfg['book_csv'], index=False)
+        print(f"POOL {pool_id}: 0 scored candidates -- empty book written ({bt_cfg['book_csv']})")
+        return
+
     # Top-K + dedup per day
     sel_rows = []
     _ranked_rows = []
+    _slots_used_out = {}
     for day, dg in kept.groupby('date'):
+        _day_slots = n_per_day - _slots_used.get(pd.Timestamp(day).strftime('%Y-%m-%d'), 0)
+        if _day_slots <= 0:
+            continue
         d = dg.copy()
         d['_q_rank'] = d['_quintile'].map(Q_ORDER)
         if _meta_rank:
@@ -1109,9 +1182,24 @@ def main():
             if fam: seen_fam.add(fam)
             if sup: seen_sup.add(sup)
             kept_today.append(r)
-            if len(kept_today) >= n_per_day: break
+            if len(kept_today) >= _day_slots: break
         sel_rows.extend(kept_today)
+        _slots_used_out[pd.Timestamp(day).strftime('%Y-%m-%d')] = len(kept_today)
+    _su_out = os.environ.get('ORB_BT_SLOTS_USED_OUT')
+    if _su_out:
+        # Slots production consumed per day BEFORE the post-ranking vetoes (a vetoed pick keeps its slot, no
+        # refill) -- the budget the engine hands the next pool (`_run_pool_selection`). Upsert by date.
+        _new_su = pd.DataFrame({'date': list(_slots_used_out), 'slots_used': list(_slots_used_out.values())})
+        if os.path.exists(_su_out):
+            _old_su = pd.read_csv(_su_out)
+            _new_su = pd.concat([_old_su[~_old_su['date'].isin(_new_su['date'])], _new_su])
+        _new_su.sort_values('date').to_csv(_su_out, index=False)
     sel = pd.DataFrame(sel_rows)
+    if pool_id and len(sel) == 0:
+        _write_markers(_marker_days, pool_id, df, sel, os.environ.get('ORB_BT_MARKERS_OUT'))
+        pd.DataFrame().to_csv(bt_cfg['book_csv'], index=False)
+        print(f"POOL {pool_id}: no slots left / no picks -- empty book written")
+        return
     if os.environ.get('ORB_BT_DUMP_RANKED') and _ranked_rows:
         _rk = pd.concat(_ranked_rows, ignore_index=True)
         _rk['_sized_pnl'] = _rk.apply(lambda r: r['_rp_pnl'] * mults[r['_quintile']], axis=1)
@@ -1502,7 +1590,10 @@ def main():
     # orb_static_lock_trades.csv is left UNTOUCHED for history.
     book_csv = bt_cfg['book_csv']
     os.makedirs(os.path.dirname(book_csv) or '.', exist_ok=True)
+    if pool_id:
+        sel['pool_id'] = pool_id
     sel.to_csv(book_csv, index=False)
+    _write_markers(_marker_days, pool_id or 'production', df, sel, os.environ.get('ORB_BT_MARKERS_OUT'))
     if 'entered' in sel.columns:
         _n_nf = int((sel['entered'] == 0).sum())
         print(f"Entered-inclusive book: {len(sel)} picks = {len(sel) - _n_nf} filled "

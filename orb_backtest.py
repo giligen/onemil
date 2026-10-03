@@ -48,7 +48,7 @@ from data_sources.alpaca_client import AlpacaClient
 from persistence.database import Database
 from trading.trading_hours import today_et
 
-CACHE_DB = os.path.join(ROOT, 'data', 'cache.db')
+CACHE_DB = os.environ.get('ORB_CACHE_DB') or os.path.join(ROOT, 'data', 'cache.db')  # env = side cache (research/acceptance runs)
 FEATURES_GLOB = os.path.join(ROOT, 'analysis_results', 'orb_features_*.csv')
 
 # Universe criteria (kept in sync with study_orb_broad.py)
@@ -150,6 +150,7 @@ def _daily_bar_dates_cached(
 def _qualifying_pairs_for_dates(
     db_path: str, dates: List[date],
     include_provisional_today: Optional[date] = None,
+    bounds: Optional[Dict[str, float]] = None,
 ) -> Dict[str, List[str]]:
     """Run the gap-up filter against daily_bars for specific dates.
     Matches `study_orb_broad.load_broad_universe` SQL but scoped + no intraday
@@ -160,6 +161,13 @@ def _qualifying_pairs_for_dates(
     today's gap-up candidates without touching the main daily_bars table."""
     if not dates and not include_provisional_today:
         return {}
+    # `bounds` (trading.orb_pool_defs.pool_bounds) swaps in an add-on pool's membership bounds; None = production.
+    b_min_gap, b_max_gap = MIN_GAP_PCT, 1e18
+    b_min_vol, b_min_px, b_max_px = MIN_PREV_DAY_VOL, MIN_OPEN_PRICE, MAX_OPEN_PRICE
+    if bounds is not None:
+        b_min_gap, b_max_gap = bounds['min_gap_pct'], min(bounds['max_gap_pct'], 1e18)
+        b_min_vol = bounds['min_prev_volume']
+        b_min_px, b_max_px = bounds['min_price'], min(bounds['max_price'], 1e18)
     conn = sqlite3.connect(db_path)
     out: Dict[str, List[str]] = {}
     try:
@@ -176,12 +184,13 @@ def _qualifying_pairs_for_dates(
             WHERE bar_date IN ({date_set})
               AND prev_close IS NOT NULL AND prev_close > 0
               AND (open - prev_close) / prev_close * 100 >= ?
+              AND (open - prev_close) / prev_close * 100 <= ?
               AND prev_vol >= ?
               AND open BETWEEN ? AND ?
             ORDER BY bar_date, symbol
             """
             params = [str(d) for d in dates] + [
-                MIN_GAP_PCT, MIN_PREV_DAY_VOL, MIN_OPEN_PRICE, MAX_OPEN_PRICE
+                b_min_gap, b_max_gap, b_min_vol, b_min_px, b_max_px
             ]
             cur = conn.execute(q, params)
             for sym, bd in cur.fetchall():
@@ -202,13 +211,14 @@ def _qualifying_pairs_for_dates(
             WHERE p.bar_date = ?
               AND r.prev_close > 0
               AND (p.open - r.prev_close) / r.prev_close * 100 >= ?
+              AND (p.open - r.prev_close) / r.prev_close * 100 <= ?
               AND r.prev_vol >= ?
               AND p.open BETWEEN ? AND ?
             ORDER BY p.symbol
             """
             params2 = [
                 today_str, today_str,
-                MIN_GAP_PCT, MIN_PREV_DAY_VOL, MIN_OPEN_PRICE, MAX_OPEN_PRICE,
+                b_min_gap, b_max_gap, b_min_vol, b_min_px, b_max_px,
             ]
             cur = conn.execute(q2, params2)
             for (sym,) in cur.fetchall():
@@ -410,14 +420,23 @@ def append_pm_news_data() -> None:
              f"will fail-open on uncovered days")
 
 
-def run_pipeline_bt(slice_dates: List[str]) -> None:
+PRODUCTION_MARKERS_CSV = os.path.join(ROOT, 'analysis_results', 'orb_bplus_book_markers.csv')
+SLOTS_USED_CSV = os.path.join(ROOT, 'analysis_results', 'orb_bplus_slots_used.csv')
+
+
+def run_pipeline_bt(slice_dates: List[str], marker_dates: Optional[List[str]] = None) -> None:
     """Run study_orb_pipeline_static_lock on the latest features CSV.
     If slice_dates is non-empty, also print a day-by-day table for those dates."""
     append_pm_news_data()
     _log("running pipeline BT (study_orb_pipeline_static_lock.py)...")
+    # Side outputs only (the production book is unchanged): per-day marker rows (picks=0 is a computed day) and
+    # the slots production consumed pre-veto, which the add-on pool books read as their budget.
+    env = dict(os.environ, ORB_BT_SLOTS_USED_OUT=SLOTS_USED_CSV, ORB_BT_MARKERS_OUT=PRODUCTION_MARKERS_CSV)
+    if marker_dates:
+        env['ORB_BT_MARKER_DATES'] = ','.join(marker_dates)
     result = subprocess.run(
         [sys.executable, 'study_orb_pipeline_static_lock.py'],
-        cwd=ROOT, capture_output=True, text=True, timeout=2400,
+        cwd=ROOT, capture_output=True, text=True, timeout=2400, env=env,
     )
     print(result.stdout)
     if result.stderr:
@@ -452,6 +471,69 @@ def run_pipeline_bt(slice_dates: List[str]) -> None:
         print(f"\n  Day total: ${sub['_sized_pnl'].sum():+,.2f}  "
               f"({len(sub)} picks, "
               f"{(sub['_sized_pnl'] > 0).sum()}W / {(sub['_sized_pnl'] <= 0).sum()}L)")
+
+
+def build_pool_books(dates: List[str], alpaca: Optional[AlpacaClient], fetch: bool = True) -> None:
+    """Build each enabled add-on pool's book for `dates` (spec 2026-10-03: nightly P1 book).
+
+    Per pool: candidate pairs from the pool's own membership bounds (shared reader trading.orb_pool_defs, the
+    engine's), 1-min bars fetched for them, features built in a side dir (study_orb_features, ORB_UNIVERSE_POOL),
+    then the SAME pipeline run with ORB_BT_POOL (gate, ranking, vetoes, no refill; slot budget = N minus the slots
+    production consumed). Output `analysis_results/orb_bplus_book_<pool_id>.csv` + marker rows. The production
+    features CSV and book are untouched. Failures are logged and never abort the production run.
+    """
+    from trading.orb_pool_defs import load_addon_pools, pool_bounds
+    defs = load_addon_pools()
+    if not defs['enabled'] or not defs['pools']:
+        _log("pool books: no enabled add-on pools -- skipped")
+        return
+    day_objs = [datetime.strptime(d, '%Y-%m-%d').date() for d in dates]
+    for pool in defs['pools']:
+        pid = pool.get('pool_id') or pool.get('name')
+        t0 = datetime.now()
+        bounds = pool_bounds(pool, defs['production']['min_prev_volume'])
+        pairs = _qualifying_pairs_for_dates(CACHE_DB, day_objs, bounds=bounds)
+        n_pairs = sum(len(v) for v in pairs.values())
+        _log(f"pool {pid}: {n_pairs} qualifying pairs over {len(dates)} day(s) (bounds {bounds})")
+        if fetch and n_pairs and alpaca is not None:
+            db = Database(db_path=CACHE_DB)
+            fill_intraday_for_pairs(alpaca, db, pairs)
+            db.close()
+        out_dir = os.path.join(ROOT, 'analysis_results', f'pool_{pid}')
+        env = dict(os.environ, ORB_UNIVERSE_POOL=pool.get('name', pid), ORB_FEATURES_OUT_DIR=out_dir,
+                   ORB_CACHE_DB=CACHE_DB)
+        feat = subprocess.run(
+            [sys.executable, 'study_orb_features.py', '--start-date', min(dates)],
+            cwd=ROOT, capture_output=True, text=True, timeout=2400, env=env)
+        if feat.returncode != 0:
+            _log(f"ERROR: pool {pid} features failed rc={feat.returncode}: {feat.stderr[-500:]}")
+            continue
+        cands = sorted(p for p in glob.glob(os.path.join(out_dir, 'orb_features_*.csv')) if 'corrmatrix' not in p)
+        if not cands:
+            _log(f"WARNING: pool {pid}: no features CSV in {out_dir} (no candidates with bars) -- markers only")
+        book = os.path.join(ROOT, 'analysis_results', f'orb_bplus_book_{pid}.csv')
+        penv = dict(os.environ, ORB_BT_POOL=pool.get('name', pid), ORB_BT_BOOK_OUT=book,
+                    ORB_BT_MARKERS_OUT=PRODUCTION_MARKERS_CSV, ORB_BT_MARKER_DATES=','.join(dates),
+                    ORB_BT_SLOTS_USED_IN=SLOTS_USED_CSV, ORB_BT_BARS_DB=CACHE_DB,
+                    ORB_BT_MONTHLY_OUT=os.path.join(out_dir, 'monthly.csv'))
+        if cands:
+            penv['ORB_BT_FEATURES_CSV'] = cands[-1]
+        else:
+            # No features at all: write the marker rows directly (candidates=0, picks=0).
+            import pandas as _pd
+            rows = _pd.DataFrame({'date': dates, 'pool_id': pid, 'candidates': 0, 'picks': 0})
+            if os.path.exists(PRODUCTION_MARKERS_CSV):
+                old = _pd.read_csv(PRODUCTION_MARKERS_CSV, keep_default_na=False)
+                old = old[~((old['pool_id'] == pid) & old['date'].isin(dates))]
+                rows = _pd.concat([old, rows], ignore_index=True)
+            rows.sort_values(['date', 'pool_id']).to_csv(PRODUCTION_MARKERS_CSV, index=False)
+            continue
+        res = subprocess.run([sys.executable, 'study_orb_pipeline_static_lock.py'], cwd=ROOT,
+                             capture_output=True, text=True, timeout=2400, env=penv)
+        print(res.stdout[-1500:])
+        if res.returncode != 0:
+            _log(f"ERROR: pool {pid} pipeline failed rc={res.returncode}: {res.stderr[-500:]}")
+        _log(f"pool {pid}: book -> {book} in {(datetime.now() - t0).total_seconds():.0f}s")
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +594,7 @@ def main():
     _log(f"end_date: {end_date}")
 
     need_regen = args.force_features
+    computed_dates: List[str] = []
     if not args.no_fill:
         # Compute missing trading days
         start = (last_date + timedelta(days=1)) if last_date else date(2025, 1, 1)
@@ -522,6 +605,7 @@ def main():
                 missing = [d for d in missing if d > last_date]
             _log(f"missing trading days: {len(missing)}"
                  + (f"  [{missing[0]}..{missing[-1]}]" if missing else ""))
+            computed_dates = [d.isoformat() for d in missing]
             if missing:
                 db = Database(db_path=CACHE_DB)
                 fill_daily_bars_for_dates(alpaca, db, missing)
@@ -610,7 +694,12 @@ def main():
         if new_csv:
             _log(f"new features CSV: {new_csv}")
 
-    run_pipeline_bt(args.slice)
+    marker_dates = sorted(set(computed_dates + [end_date.isoformat()]))
+    run_pipeline_bt(args.slice, marker_dates=marker_dates)
+    try:
+        build_pool_books(marker_dates, alpaca, fetch=not args.no_fill)
+    except Exception as e:  # noqa: BLE001 - the production run must not fail on the pool step
+        _log(f"ERROR: add-on pool books failed (production book unaffected): {e!r}")
 
 
 if __name__ == '__main__':

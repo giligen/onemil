@@ -400,6 +400,23 @@ def extract_features(
 NO_FILL_REASON = 'no_fill'
 
 
+def _move_to_range_high_pct(daily_sym: Optional[pd.DataFrame], date_str: str,
+                            range_high: Optional[float]) -> float:
+    """(range_high - prev_close) / prev_close * 100 -- the add-on pool gate input, same formula as the engine
+    (`_build_pool_gate_inputs`). prev_close = last daily close strictly before `date_str`. NaN (logged) when
+    either input is missing: the pipeline gate then fails closed, like the engine."""
+    try:
+        prev = daily_sym[daily_sym['bar_date'].astype(str) < date_str]
+        prev_close = float(prev['close'].iloc[-1])
+        if prev_close > 0 and range_high and range_high > 0:
+            return (float(range_high) - prev_close) / prev_close * 100.0
+    except Exception as e:  # noqa: BLE001 - logged, fail closed downstream
+        print(f"WARNING: move_to_range_high_pct unavailable for {date_str}: {e!r}")
+        return float('nan')
+    print(f"WARNING: move_to_range_high_pct unavailable for {date_str}: prev_close/range_high missing")
+    return float('nan')
+
+
 def trade_row(symbol: str, date_str: str, trade, feats: Dict) -> Optional[Dict]:
     """One features-CSV row for a simulated candidate — ENTERED OR NOT.
 
@@ -567,7 +584,25 @@ def main() -> None:
         today_et() if os.environ.get('ORB_INCLUDE_PROVISIONAL_DAILY') == '1'
         else None
     )
-    universe = load_broad_universe(include_provisional_today=provisional_today)
+    pool_name = (os.environ.get('ORB_UNIVERSE_POOL') or '').strip()
+    pool_cfg = None
+    pool_bounds_ = None
+    if pool_name:
+        # Add-on pool universe (nightly P1 book, spec 2026-10-03): membership bounds from orb.yaml through the
+        # engine's own reader. Rows carry pool_id + move_to_range_high_pct (the pool gate's input) and may only
+        # land in a side dir -- the production features CSV schema must never change.
+        if FEATURES_OUT_DIR == OUT_DIR:
+            raise SystemExit("REFUSE: ORB_UNIVERSE_POOL needs ORB_FEATURES_OUT_DIR (a pool never writes the "
+                             "production features CSV)")
+        from trading.orb_pool_defs import find_pool, load_addon_pools, pool_bounds
+        _defs = load_addon_pools()
+        pool_cfg = find_pool(_defs['pools'], pool_name)
+        if pool_cfg is None:
+            raise SystemExit(f"FATAL: ORB_UNIVERSE_POOL={pool_name!r} not in orb.yaml universe.addon_pools")
+        pool_bounds_ = pool_bounds(pool_cfg, _defs['production']['min_prev_volume'])
+        print(f"  POOL MODE {pool_cfg.get('pool_id', pool_name)}: bounds {pool_bounds_}")
+    universe = load_broad_universe(include_provisional_today=provisional_today, bounds=pool_bounds_,
+                                    date_start=(start_date.isoformat() if (pool_cfg is not None and start_date) else None))
     n_pairs_full = sum(len(v) for v in universe.values())
 
     if start_date is not None:
@@ -643,6 +678,10 @@ def main() -> None:
             row = trade_row(symbol, date_str, trade, feats)
             if row is None:
                 continue
+            if pool_cfg is not None:
+                row['pool_id'] = pool_cfg.get('pool_id', pool_name)
+                row['move_to_range_high_pct'] = _move_to_range_high_pct(
+                    daily_by_sym.get(symbol), date_str, trade.range_high)
             rows.append(row)
             if row['entered']:
                 n_extracted += 1
@@ -661,7 +700,7 @@ def main() -> None:
     # --- Analysis ---
     print("\n=== Pearson correlation with pnl_pct ===")
     feature_cols = [c for c in df.columns if c not in (
-        'symbol', 'date', 'entry_price', 'pnl', 'pnl_pct', 'exit_reason', 'win'
+        'symbol', 'date', 'entry_price', 'pnl', 'pnl_pct', 'exit_reason', 'win', 'pool_id'
     )]
     corrs = []
     for c in feature_cols:

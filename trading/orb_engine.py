@@ -535,10 +535,11 @@ class ORBEngine:
         # (never one shared pool — cell 1,327 showed a shared pool displaces
         # production picks through a pool-dependent stage). Default OFF;
         # dry_run defaults True so a new pool always ships silent first.
-        addon_cfg = uni.get('addon_pools', {}) or {}
-        self.addon_pools_enabled = bool(addon_cfg.get('enabled', False))
-        self.addon_pools_dry_run = bool(addon_cfg.get('dry_run', True))
-        self.addon_pools: List[Dict] = list(addon_cfg.get('pools', []) or [])
+        from trading.orb_pool_defs import parse_addon_pools
+        _addon = parse_addon_pools(uni)  # shared with the nightly BT (orb_pool_defs)
+        self.addon_pools_enabled = _addon['enabled']
+        self.addon_pools_dry_run = _addon['dry_run']
+        self.addon_pools: List[Dict] = _addon['pools']
         # Gate extension (2026-10-01): loud WARNING on any pool key neither
         # membership matching nor evaluate_pool_gates reads — the 9/25
         # dropped-key lesson applied forward (docs/live_guardrails_spec_20260925.md).
@@ -1461,19 +1462,12 @@ class ORBEngine:
                 if is_production:
                     matched_pool = 'production'
                 elif self.addon_pools_enabled:
+                    from trading.orb_pool_defs import pool_matches
                     for pool in self.addon_pools:
-                        p_min_price = float(pool.get('min_price', 0.0))
-                        p_max_price = float(pool.get('max_price', float('inf')))
-                        p_min_gap = float(pool.get('min_gap_pct', 0.0))
-                        p_max_gap = float(pool.get('max_gap_pct', float('inf')))
-                        # Per-pool min_prev_volume override (gate extension
-                        # 2026-10-01); absent key -> the global production
-                        # floor, byte-identical to pre-extension behavior.
-                        p_min_prev_volume = float(
-                            pool.get('min_prev_volume', self.universe_min_prev_volume))
-                        if (p_min_price <= open_price <= p_max_price
-                                and p_min_gap <= gap_pct <= p_max_gap
-                                and prev_volume >= p_min_prev_volume):
+                        # Membership bounds live in trading/orb_pool_defs.py (shared with the nightly BT);
+                        # per-pool min_prev_volume override, absent -> the production floor.
+                        if pool_matches(pool, open_price, gap_pct, prev_volume,
+                                        self.universe_min_prev_volume):
                             matched_pool = pool.get('name', 'addon')
                             break
                 if matched_pool is None:

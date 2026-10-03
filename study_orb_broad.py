@@ -100,6 +100,8 @@ def rth_volume_by_935_for_pairs(conn, pairs) -> Dict[tuple, int]:
 def load_broad_universe(
     db_path: str = CACHE_DB,
     include_provisional_today=None,
+    bounds=None,
+    date_start=None,
 ) -> Dict[str, List[str]]:
     """Query daily_bars for gap-up movers with liquidity.
 
@@ -117,8 +119,17 @@ def load_broad_universe(
     with `--include-today-provisional` so today's trades are visible even
     though the main daily_bars table is (correctly) empty for today.
 
+    `bounds` (optional dict from trading.orb_pool_defs.pool_bounds) replaces the production gap / price / prev-volume
+    thresholds with an add-on pool's membership bounds (the nightly P1 book). None = production (byte-identical).
+
     Returns {date_str: [symbol, ...]}.
     """
+    b_min_gap, b_max_gap = MIN_GAP_PCT, 1e18
+    b_min_vol, b_min_px, b_max_px = MIN_PREV_DAY_VOL, MIN_OPEN_PRICE, MAX_OPEN_PRICE
+    if bounds is not None:
+        b_min_gap, b_max_gap = bounds['min_gap_pct'], min(bounds['max_gap_pct'], 1e18)
+        b_min_vol = bounds['min_prev_volume']
+        b_min_px, b_max_px = bounds['min_price'], min(bounds['max_price'], 1e18)
     conn = sqlite3.connect(db_path)
     grouped: Dict[str, List[str]] = {}
     # Main pass: final daily_bars only.
@@ -134,6 +145,7 @@ def load_broad_universe(
         WHERE bar_date BETWEEN ? AND ?
           AND prev_close IS NOT NULL AND prev_close > 0
           AND (open - prev_close) / prev_close * 100 >= ?
+          AND (open - prev_close) / prev_close * 100 <= ?
           AND prev_vol >= ?
           AND open BETWEEN ? AND ?
     )
@@ -147,8 +159,8 @@ def load_broad_universe(
     """
     cur = conn.execute(
         query,
-        (DATE_START, DATE_END, MIN_GAP_PCT, MIN_PREV_DAY_VOL,
-         MIN_OPEN_PRICE, MAX_OPEN_PRICE),
+        (date_start or DATE_START, DATE_END, b_min_gap, b_max_gap, b_min_vol,
+         b_min_px, b_max_px),
     )
     candidates = [(symbol, str(bar_date)) for symbol, bar_date
                   in cur.fetchall()]
@@ -204,6 +216,7 @@ def load_broad_universe(
         WHERE p.bar_date = ?
           AND r.prev_close > 0
           AND (p.open - r.prev_close) / r.prev_close * 100 >= ?
+          AND (p.open - r.prev_close) / r.prev_close * 100 <= ?
           AND r.prev_vol >= ?
           AND p.open BETWEEN ? AND ?
           AND EXISTS (
@@ -215,8 +228,8 @@ def load_broad_universe(
         cur = conn.execute(
             q2,
             (today_str, today_str,
-             MIN_GAP_PCT, MIN_PREV_DAY_VOL,
-             MIN_OPEN_PRICE, MAX_OPEN_PRICE,
+             b_min_gap, b_max_gap, b_min_vol,
+             b_min_px, b_max_px,
              today_str),
         )
         for (symbol,) in cur.fetchall():
