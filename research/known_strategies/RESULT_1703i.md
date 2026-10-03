@@ -19,3 +19,8 @@ See 1703i_worst_weeks.csv
 
 ## Verdict: NO CELLS PASS
 BTC trend is a personal-holding matter; close the stack question.
+## Reviewer correction (Fable): the agent's `comp_ret` column equals `sleeve_ret` in 7 of 10 rows — it measured the sleeve, not the component.
+Recomputed from the BTC closes (REREAD_1703i_tail.py, 1703i_worst_weeks_corrected.txt): component mean in the sleeve's 10 worst weeks
+= −4.2 % (mom_20), −5.3 % (sma_100), BTC hold −11.6 %. Still < 0 → every cell FAILS the shared-tail criterion; verdict unchanged.
+Shape: in 6 of the 10 weeks the trend rule was in cash (≈ 0); in 2021-02-26 and 2021-05-14 it lost 17 % / 14–18 % alongside the sleeve
+(risk-off weeks hit momentum stocks and BTC together). Ratio gains (+0.10…+0.31) and the flat max DD are not disputed.
