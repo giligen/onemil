@@ -73,6 +73,12 @@ def test_gate_label_fallbacks():
     assert es.gate_label_for(DAY, [], []) == "gate n/a"
 
 
+def _scored_q(sym, comp, q, hhmm="13:35:05"):
+    """SCORED line with the logged composite and quintile, as the engine writes it."""
+    return (f"Oct 02 {hhmm} host onemil-trader[1]: 2026-10-02 {hhmm} | INFO | trading.orb_engine:1 | "
+            f"ORB SCORED: {sym} comp={comp:.4f} {q} | gap=1")
+
+
 def _scored(sym, hhmm="13:35:05"):
     """Archive line as journald writes it; engine stamps are UTC (13:35 UTC = 09:35 ET in October)."""
     return f"Oct 02 {hhmm} host onemil-trader[1]: 2026-10-02 {hhmm} | INFO | trading.orb_engine:1 | ORB SCORED: {sym} comp=1"
@@ -83,33 +89,68 @@ ENG = [{"symbol": "AAA", "strategy": "orb", "account": "paper", "fill_price": 10
 BT = [{"symbol": "AAA", "entry_price": 10.0, "pnl": 55.0}]
 
 
-def test_orb_no_decision():
+def _rank(ranked, picks, **kw):
+    d = {"ranked": ranked, "picks": picks, "rows": 12, "pdr": 0, "g1": 0, "range": 0, "dedup": 0, "n": 8}
+    d.update(kw)
+    return d
+
+
+def test_orb_no_decision_is_neutral():
     lines, m = es.orb_parity_lines(DAY, [], es.parse_orb_log("nothing"), BT)
-    assert lines[0].startswith("ORB picks: NO DECISION") and not m["clean"] and not m["decision"]
+    assert lines[0].startswith("ORB picks: NO DECISION") and m["clean"] is None and not m["decision"]
 
 
-def test_orb_clean_session_and_defect_counts():
-    txt = _scored("AAA") + "\n2026 | ERROR | orb ORB boom\nEngine tick TIMEOUT (>50s)\n"
-    lines, m = es.orb_parity_lines(DAY, ENG, es.parse_orb_log(_scored("AAA")), BT)
-    assert m["clean"] and "mean +20.0 bp" in lines[1] and "match 1" in lines[0]
-    assert "ORB P&L: day $+40 on 1 exits | BT book $+55" in lines[2]
-    p = es.parse_orb_log(txt)
+def test_orb_clean_session_with_picks_and_defect_counts():
+    parsed = es.parse_orb_log(_scored("AAA"))
+    lines, m = es.orb_parity_lines(DAY, ENG, parsed, BT, "", _rank(["AAA"], ["AAA"]))
+    assert m["clean"] is True and any("mean +20.0 bp" in ln for ln in lines)
+    assert lines[0].startswith("ORB ranked: engine 1 vs BT 1 | match 1")
+    assert any(ln.startswith("BT: rows 12 -> top-8 (1) -> vetoed 0") for ln in lines)
+    assert any("ORB P&L: day $+40 on 1 exits | BT book $+55" in ln for ln in lines)
+    p = es.parse_orb_log(_scored("AAA") + "\n2026 | ERROR | orb ORB boom\nEngine tick TIMEOUT (>50s)\n")
     assert p["errors"] == 1 and p["timeouts"] == 1
-    _, m2 = es.orb_parity_lines(DAY, ENG, p, BT)
-    assert not m2["clean"] and "TIMEOUT" in m2["why"]
+    _, m2 = es.orb_parity_lines(DAY, ENG, p, BT, "", _rank(["AAA"], ["AAA"]))
+    assert m2["clean"] is False and "TIMEOUT" in m2["why"]
+
+
+def test_orb_zero_pick_day_ranked_match_is_clean():
+    parsed = es.parse_orb_log(_scored("AAA") + "\n" + _scored("BBB"))
+    lines, m = es.orb_parity_lines(DAY, [], parsed, [], "", _rank(["AAA", "BBB"], [], pdr=2))
+    assert m["clean"] is True and any("vetoed 2 (PDR 2" in ln for ln in lines)
+    assert any("0 = 0" in ln for ln in lines)
+
+
+def test_orb_ranked_mismatch_is_not_clean_even_at_zero_picks():
+    parsed = es.parse_orb_log(_scored("AAA") + "\n" + _scored("ZZZ"))
+    lines, m = es.orb_parity_lines(DAY, [], parsed, [], "", _rank(["AAA", "BBB"], [], pdr=2))
+    assert m["clean"] is False and m["why"] == "ranked set != BT"
+    assert "engine-only: ZZZ | BT-only: BBB" in lines[0]
+
+
+def test_orb_bt_nodata_is_neutral():
+    lines, m = es.orb_parity_lines(DAY, ENG, es.parse_orb_log(_scored("AAA")), None, "x", None, "features do not cover")
+    assert "NO-DATA (features do not cover)" in lines[0] and m["clean"] is None
 
 
 def test_orb_entry_diff_over_tolerance_and_pick_mismatch():
     eng = [dict(ENG[0], fill_price=10.1)]
-    _, m = es.orb_parity_lines(DAY, eng, es.parse_orb_log(_scored("AAA")), BT)
-    assert not m["clean"] and "30 bp" in m["why"]
-    _, m = es.orb_parity_lines(DAY, ENG, es.parse_orb_log(_scored("ZZZ")), BT)
+    _, m = es.orb_parity_lines(DAY, eng, es.parse_orb_log(_scored("AAA")), BT, "", _rank(["AAA"], ["AAA"]))
+    assert m["clean"] is False and "30 bp" in m["why"]
+    _, m = es.orb_parity_lines(DAY, ENG, es.parse_orb_log(_scored("ZZZ")), BT, "", _rank(["AAA"], ["AAA"]))
+    assert m["why"] == "ranked set != BT"
+    _, m = es.orb_parity_lines(DAY, ENG, es.parse_orb_log(_scored("AAA")), BT, "", _rank(["AAA"], []))
     assert m["why"] == "picks != BT"
 
 
-def test_orb_bt_missing_is_no_data():
-    lines, m = es.orb_parity_lines(DAY, ENG, es.parse_orb_log(_scored("AAA")), None, "book ends 09-30")
-    assert "NO-DATA (book ends 09-30)" in lines[0] and not m["clean"]
+def test_neutral_orb_day_does_not_touch_the_counter(tmp_path):
+    sp = tmp_path / "s.json"
+    ok = {"clean": True, "why": ""}
+    es.promotion_section("2026-10-05", None, ok, sp, closed=True)
+    es.promotion_section("2026-10-06", None, {"clean": None, "why": "no 09:35 decision (neutral)"}, sp, closed=True)
+    es.promotion_section("2026-10-07", None, ok, sp, closed=True)
+    assert es.consecutive_clean(json.loads(sp.read_text())["orb"]) == 2
+    es.promotion_section("2026-10-08", None, {"clean": False, "why": "ranked set != BT"}, sp, closed=True)
+    assert es.consecutive_clean(json.loads(sp.read_text())["orb"]) == 0
 
 
 def test_consecutive_clean():
@@ -145,7 +186,7 @@ def test_promotion_idempotent_and_non_rotation_day_not_counted(tmp_path):
     assert es.consecutive_clean(json.loads(sp.read_text())["sleeve"]) == 1
 
 
-def test_orb_promotion_five_clean_then_no_decision_resets(tmp_path):
+def test_orb_promotion_five_clean_then_mismatch_resets(tmp_path):
     sp = tmp_path / "s.json"
     ok = {"clean": True, "why": ""}
     days = ["2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08", "2026-10-09"]
@@ -154,8 +195,8 @@ def test_orb_promotion_five_clean_then_no_decision_resets(tmp_path):
     assert "ORB: HOLD 4/5" in out[2]
     out = es.promotion_section(days[4], None, ok, sp, closed=True)
     assert "ORB: GO $10K stage ($375 R) on 2026-10-12" in out[2]
-    out = es.promotion_section("2026-10-12", None, {"clean": False, "why": "no 09:35 decision"}, sp, closed=True)
-    assert "HOLD 0/5 (no 09:35 decision)" in out[2]
+    out = es.promotion_section("2026-10-12", None, {"clean": False, "why": "ranked set != BT"}, sp, closed=True)
+    assert "HOLD 0/5 (ranked set != BT)" in out[2]
 
 
 def test_ramp_verdicts():
@@ -224,19 +265,20 @@ def test_sleeve_section_integration_with_fixtures(tmp_path, monkeypatch):
     assert lines[0].startswith("MOM P&L: day $+50")
 
 
-def test_orb_late_scoring_after_restart_is_not_a_decision():
+def test_orb_late_scoring_after_restart_is_not_a_decision_if_after_ten():
     boot = "Oct 02 14:04:04 h onemil-trader[2]: 2026-10-02 14:04:04 | INFO | trading.orb_engine:827 | [ORB] WINNER STACK: x"
-    p = es.parse_orb_log(_scored("ORCU", "13:45:10") + "\n" + boot)
+    p = es.parse_orb_log(_scored("ORCU", "14:05:10") + "\n" + boot)
     assert p["scored"] == [] and p["late"] == ["ORCU"] and p["boots"] == ["14:04"]
     lines, m = es.orb_parity_lines(DAY, [], p, [])
-    assert lines[0] == ("ORB picks: NO DECISION (no SCORED line in the 09:34\u201309:40 ET window; "
+    assert lines[0] == ("ORB picks: NO DECISION (no SCORED line in the 09:34\u201310:00 ET window; "
                         "restart 14:04 UTC)")
-    assert lines[1] == "ORB late scoring, not a decision: ORCU" and not m["decision"] and not m["clean"]
+    assert lines[1] == "ORB late scoring, not a decision: ORCU" and not m["decision"] and m["clean"] is None
 
 
 def test_orb_window_edges():
     assert es.parse_orb_log(_scored("A", "13:34:00"))["scored"] == ["A"]
-    assert es.parse_orb_log(_scored("A", "13:41:00"))["scored"] == []
+    assert es.parse_orb_log(_scored("A", "13:41:00"))["scored"] == ["A"]   # window runs to 10:00 ET
+    assert es.parse_orb_log(_scored("A", "14:01:00"))["scored"] == []
 
 
 def test_orb_zero_bt_picks_when_features_cover_the_day(tmp_path):
@@ -277,3 +319,26 @@ def test_sleeve_verdict_with_no_scheduled_rotation(tmp_path):
     out = es.promotion_section(DAY, {"rotation": False, "clean": None, "why": ""}, None, tmp_path / "s.json", closed=True)
     assert out[1] == ("  Sleeve: HOLD 0/2 (no scheduled rotation yet; first 2026-10-05) [2 clean scheduled Monday "
                       "rotations, slip <= 20 bp, picks = BT, reconcile OK]")
+
+
+def test_engine_top_n_uses_logged_scores_and_quintile_order():
+    txt = "\n".join([_scored_q("LOW", 0.9, "Q2"), _scored_q("AAA", 0.30, "Q4"), _scored_q("BBB", 0.50, "Q4"),
+                     _scored_q("CCC", 0.20, "Q5"), _scored_q("ONE", 0.99, "Q1")])
+    p = es.parse_orb_log(txt)
+    assert es.engine_top_n(p, 3) == ["BBB", "AAA", "CCC"]
+    assert es.engine_top_n(es.parse_orb_log(_scored("AAA")), 3) is None   # no quintile logged
+
+
+def test_ranked_clean_when_engine_top_n_equals_bt_even_with_extra_scored():
+    txt = "\n".join([_scored_q("AAA", 0.5, "Q4"), _scored_q("BBB", 0.4, "Q4"), _scored_q("EXTRA", 0.1, "Q2")])
+    lines, m = es.orb_parity_lines(DAY, [], es.parse_orb_log(txt), [], "", _rank(["AAA", "BBB"], [], n=2))
+    assert m["clean"] is True and "subset test" not in lines[0]
+    _, m = es.orb_parity_lines(DAY, [], es.parse_orb_log(txt), [], "", _rank(["AAA", "EXTRA"], [], n=2))
+    assert m["clean"] is False
+
+
+def test_subset_fallback_and_late_decision_flag():
+    lines, m = es.orb_parity_lines(DAY, [], es.parse_orb_log(_scored("AAA", "13:46:00") + "\n" + _scored("BBB", "13:47:00")),
+                                   [], "", _rank(["AAA"], []))
+    assert "(subset test - engine scores not logged)" in lines[0] and "late decision (09:46 ET)" in lines[0]
+    assert m["clean"] is True

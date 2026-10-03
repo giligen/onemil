@@ -15,7 +15,7 @@ ORB PAPER PARITY:
   ORB defects: Engine tick TIMEOUT 0 | GAP_GATE WARN 0 | ERROR 0
 PROMOTION:
   Sleeve: HOLD 0/2 (no scheduled rotation yet; first 2026-10-05) [2 clean scheduled Monday rotations, slip <= 20 bp, picks = BT, reconcile OK]
-  ORB: HOLD 0/5 (no 09:35 decision) [5 sessions: picks = BT, fills within 30 bp, 0 tick TIMEOUT, 0 ERROR]
+  ORB: HOLD 0/5 (no 09:35 decision (neutral)) [5 sessions: picks = BT, fills within 30 bp, 0 tick TIMEOUT, 0 ERROR]
   Ramp ORB: HOLD (no live stage started - paper) [realized since last step >= 0 and >= 20 trading days]
   Ramp MOM: HOLD (no live stage started - paper) [realized since last step >= 0 and >= 20 trading days]
   HOD: dry-run only - no live gate (closed as a money book 9/26)
@@ -32,3 +32,20 @@ Producer: `onemil-orb-backtest.timer` (20:30 UTC weekdays) -> `orb_backtest.py` 
 - BT book has no tilt-mult / add-on column -> NO-DATA. `Engine tick TIMEOUT` count is a floor (archive is grep-filtered).
 - Completeness liquid share not in the sleeve logs -> OK judged on LOST only. No shadow-gate csv -> `gate n/a`.
 - logs/promotion_state.json holds ORB 10/2 = not clean; sleeve history empty.
+
+## ORB ranked-set amendment (coordinator, 10/3)
+- Clean is now tri-state: ranked set (engine `ORB SCORED` 09:34-09:40 ET vs the BT's ranked top-N recomputed from the newest features CSV by `bt_ranked`, a replica of the static-lock pipeline; matches the dive's stage table on 9/22, 9/29, 10/1, 10/2) must match. Match + 0 picks = clean; mismatch = not clean (resets); NO DECISION or BT NO-DATA = neutral (counter untouched). 10/2 = NO DECISION -> neutral, ORB HOLD 0/5.
+- 10/1 (real run): under the 09:34-09:40 window it is also NO DECISION - the engine scored 13:44-13:48 UTC (09:44-09:48 ET), never at 09:35, and no restart (single boot 11:57 UTC). The window therefore never matches a normal day; the coordinator should confirm the intended window (`DECISION_WINDOW_ET`).
+- Forced comparison for 10/1 (all 15 scored names vs BT): BT ranked 5 (WVE, CBRX, LPA, IBX, RKLX) all in the engine's 15; engine-only 10 (ADBG APPS BRZE CNXC CRMG DXC EFXT KD MEDS TDAY); funnel `BT: rows 12 -> top-8 (5) -> vetoed 5 (PDR 4, G1 1, range 0, dedup 0) -> picks 0`. The engine scores its whole candidate list, not only a top-8, so strict equality will likely never hold; BT-ranked subset-of-engine, or comparing the engine's own top-8 by composite, may be the right test - needs a decision.
+
+## Final ORB rules (coordinator decisions, 10/3)
+- Decision window 09:34-10:00 ET; a first scoring after 09:40 is still a decision, flagged `late decision (HH:MM ET)`. NO DECISION only when nothing scored before 10:00 ET.
+- Ranked test: the engine's top-8 by its LOGGED comp + quintile (Q4,Q5,Q3,Q2, then comp; Q1 out; family dedup) must equal the BT top-8; if a SCORED line has no comp/quintile, fallback `BT top-8 subset of engine scored set` with `(subset test - engine scores not logged)`.
+- Real runs (`--no-telegram --no-llm`):
+```
+10/1  ORB ranked: engine 8 vs BT 5 | match 4 | engine-only: APPS CRMG KD TDAY | BT-only: RKLX | late decision (09:44 ET)
+      BT: rows 12 -> top-8 (5) -> vetoed 5 (PDR 4, G1 1, range 0, dedup 0) -> picks 0      => NOT clean
+10/2  ORB ranked: engine 1 vs BT 8 | match 1 | engine-only: - | BT-only: BMNU CRCG DFDV FWDI ORCX RGTX SOC | late decision (09:45 ET)
+      BT: rows 36 -> top-8 (8) -> vetoed 8 (PDR 8, G1 0, range 0, dedup 0) -> picks 0      => NOT clean
+```
+- 10/2 is no longer NO DECISION (ORCU scored 09:45 ET, after the 14:04 UTC reboot): it is a late decision with the engine having scored 1 name vs the BT's 8, so ORB counter 0/5 (reset). promotion_state.json: orb 10/1 False, 10/2 False. 55 tests pass.

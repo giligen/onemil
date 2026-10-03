@@ -14,7 +14,9 @@ orders, sends Telegram or touches config.
 """
 from __future__ import annotations
 
+import contextlib
 import csv
+import io
 import datetime as dt
 import glob
 import json
@@ -348,7 +350,8 @@ def sleeve_section(day: str, client=None, ledger_path=LEDGER, weekly_path=WEEKLY
 
 
 # ---------------------------------------------------------------- ORB paper parity
-DECISION_WINDOW_ET = ("09:34", "09:40")
+DECISION_WINDOW_ET = ("09:34", "10:00")   # last_entry_submit_time
+LATE_AFTER_ET = "09:40"                    # a first scoring after this is a decision, flagged late
 _STAMP_RE = re.compile(r"(\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d) \|")
 
 
@@ -368,13 +371,20 @@ def parse_orb_log(text: str) -> Dict:
     `boots` = UTC HH:MM of each engine boot (`WINNER STACK` line). Also Engine tick TIMEOUT, GAP_GATE WARNING and
     ORB ERROR counts. The archive is grep-filtered by cron, so the TIMEOUT count is a floor."""
     lines = text.splitlines()
-    scored, late = set(), set()
+    scored, late, detail, first_et = set(), set(), {}, None
     for ln in lines:
-        m = re.search(r"ORB SCORED: (\S+)", ln)
-        if not m:
+        m = re.search(r"ORB SCORED: (\S+) comp=([-\d.]+) (Q\d)?", ln)
+        m0 = m or re.search(r"ORB SCORED: (\S+)", ln)
+        if not m0:
             continue
         et = _et_hhmm(ln)
-        (scored if et and DECISION_WINDOW_ET[0] <= et[:5] <= DECISION_WINDOW_ET[1] else late).add(m.group(1))
+        if et and DECISION_WINDOW_ET[0] <= et[:5] <= DECISION_WINDOW_ET[1]:
+            scored.add(m0.group(1))
+            first_et = min(first_et, et) if first_et else et
+            if m and m.group(3):
+                detail[m0.group(1)] = (float(m.group(2)), m.group(3))
+        else:
+            late.add(m0.group(1))
     boots = []
     for ln in lines:
         if "WINNER STACK" in ln:
@@ -382,6 +392,7 @@ def parse_orb_log(text: str) -> Dict:
             if m:
                 boots.append(m.group(2)[:5])
     return {"scored": sorted(scored), "late": sorted(late - scored), "boots": boots,
+            "detail": detail, "first_et": first_et[:5] if first_et else None,
             "timeouts": sum("Engine tick TIMEOUT" in ln for ln in lines),
             "gap_warn": sum("GAP_GATE" in ln and "| WARNING" in ln for ln in lines),
             "errors": sum("| ERROR" in ln and "ORB" in ln for ln in lines)}
@@ -392,11 +403,115 @@ def bps(a: float, b: float) -> float:
     return (a - b) / b * 1e4
 
 
+def bt_ranked(day: str, features_csv: Optional[str] = None) -> Tuple[Optional[Dict], str]:
+    """The BT's RANKED candidates for `day`, recomputed from the newest features CSV with the static-lock
+    pipeline's own steps (replica of study_orb_pipeline_static_lock.main(), live orb.yaml params): composite >=
+    threshold, not Q1, order Q4,Q5,Q3,Q2 then composite, family/super-group dedup, first N. Then the post-ranking
+    vetoes (PDR, G1, range-size), no refill. Returns {'ranked', 'picks', 'rows', 'pdr', 'g1', 'range', 'dedup'}
+    or (None, why) when the features CSV does not cover the day or the replica fails."""
+    try:
+        import pandas as pd
+        import yaml
+        from trading.orb_csv import read_orb_csv
+        from study_orb_filter import FILTER_FEATURES, composite_score
+        from study_orb_sizing import assign_quintile
+        from study_orb_pipeline_static_lock import load_bt_config
+        from trading.orb_pdr_veto import pdr_veto_applies
+        from trading.orb_g1_veto import g1_reject
+        from trading.orb_range_size_veto import range_size_veto_applies
+        from study_orb_correlation_filter import symbol_family, symbol_super_group
+        files = sorted(glob.glob(str(ROOT / "analysis_results" / "orb_features_2*.csv")))
+        path = features_csv or (files[-1] if files else None)
+        if not path:
+            return None, "no features CSV"
+        with contextlib.redirect_stdout(io.StringIO()):   # load_bt_config prints its config banner
+            cfg = load_bt_config()
+        y = yaml.safe_load(open(ROOT / "orb.yaml"))
+        raw = read_orb_csv(path)
+        raw["date"] = pd.to_datetime(raw["date"]).dt.strftime("%Y-%m-%d")
+        n_rows = int((raw["date"] == day).sum())
+        if not n_rows:
+            return None, f"features CSV has no rows for {day}"
+        need = [f for f, _ in FILTER_FEATURES]
+        df = raw.dropna(subset=need + ["pnl", "date", "pnl_pct", "range_size_pct", "entry_price"]).copy()
+        fe = y["filter"]["features"]
+        params = {f: {"mean": float(fe[f]["mean"]), "std": float(fe[f]["std"]), "sign": int(fe[f]["sign"])}
+                  for f in need}
+        df["c"] = composite_score(df, params)
+        g = df[df["date"] == day]
+        k = g[g["c"] >= cfg["threshold"]].copy()
+        k["q"] = assign_quintile(k["c"], [float(x) for x in y["quintile_cutoffs"]])
+        k = k[k["q"] != "Q1"]
+        k = k.assign(qr=k["q"].map({"Q4": 0, "Q5": 1, "Q3": 2, "Q2": 3})).sort_values(["qr", "c"],
+                                                                                    ascending=[True, False])
+        sel, fams, grps, dedup = [], set(), set(), 0
+        for _, r in k.iterrows():
+            f, sg = symbol_family(r.symbol), symbol_super_group(r.symbol)
+            if (f and f in fams) or (sg and sg in grps):
+                dedup += 1
+                continue
+            fams.add(f) if f else None
+            grps.add(sg) if sg else None
+            sel.append(r)
+            if len(sel) >= cfg["n"]:
+                break
+        ranked = [r.symbol for r in sel]
+        pdr = [r for r in sel if pdr_veto_applies(None if pd.isna(r.prev_day_range_pct)
+                                                   else float(r.prev_day_range_pct), cfg["pdr_min"])]
+        gone = {r.symbol for r in pdr}
+        g1 = [r for r in sel if r.symbol not in gone and g1_reject(
+            r.return_volatility_20d, r.prev_day_range_pct, cfg["g1_rv20_min"], cfg["g1_pdr_min"],
+            short_history_veto=cfg["g1_short_history_veto"])]
+        gone |= {r.symbol for r in g1}
+        rs = [r for r in sel if r.symbol not in gone and range_size_veto_applies(r.range_size_pct, cfg["rs_min"])]
+        gone |= {r.symbol for r in rs}
+        picks = [r.symbol for r in sel if r.symbol not in gone]
+        return {"ranked": ranked, "picks": picks, "rows": n_rows, "pdr": len(pdr), "g1": len(g1),
+                "range": len(rs), "dedup": dedup, "n": cfg["n"]}, ""
+    except Exception as e:  # noqa: BLE001
+        log.warning("bt_ranked failed: %s", e, exc_info=True)
+        return None, f"BT ranking replica failed: {type(e).__name__}: {e}"
+
+
+def funnel_line(b: Dict) -> str:
+    """`BT: rows r -> top-8 -> vetoed k (PDR a, G1 b, range c, dedup d) -> picks p`."""
+    k = b["pdr"] + b["g1"] + b["range"]
+    return (f"BT: rows {b['rows']} -> top-{b['n']} ({len(b['ranked'])}) -> vetoed {k} (PDR {b['pdr']}, G1 {b['g1']}, "
+            f"range {b['range']}, dedup {b['dedup']}) -> picks {len(b['picks'])}")
+
+
+def engine_top_n(parsed: Dict, n: int, dedup: Callable = None) -> Optional[List[str]]:
+    """The engine's top-`n` by its LOGGED score, in the pipeline's order (Q4, Q5, Q3, Q2, then composite desc;
+    Q1 excluded; family/super-group dedup). None when any scored symbol lacks a logged comp/quintile."""
+    det = parsed.get("detail", {})
+    if not parsed["scored"] or any(sym not in det for sym in parsed["scored"]):
+        return None
+    from study_orb_correlation_filter import symbol_family, symbol_super_group
+    order = {"Q4": 0, "Q5": 1, "Q3": 2, "Q2": 3}
+    cands = sorted(((order[q], -c, sym) for sym, (c, q) in det.items() if q in order))
+    out, fams, grps = [], set(), set()
+    for _, _, sym in cands:
+        f, g = symbol_family(sym), symbol_super_group(sym)
+        if (f and f in fams) or (g and g in grps):
+            continue
+        fams.add(f) if f else None
+        grps.add(g) if g else None
+        out.append(sym)
+        if len(out) >= n:
+            break
+    return out
+
+
 def orb_parity_lines(day: str, engine_rows: List[Dict], parsed: Dict, bt_rows: Optional[List[Dict]],
-                     bt_why: str = "") -> Tuple[List[str], Dict]:
-    """The ORB PAPER PARITY lines and metrics {'decision','match','tol_ok','timeouts','errors','clean','why'}."""
+                     bt_why: str = "", bt_rank: Optional[Dict] = None, rank_why: str = "") -> Tuple[List[str], Dict]:
+    """The ORB PAPER PARITY lines and metrics.
+
+    metrics['clean'] is tri-state: True (counts), False (resets), None (neutral: NO DECISION or BT NO-DATA).
+    A session is clean only if the engine's RANKED set (ORB SCORED symbols, 09:34-09:40 ET) equals the BT's ranked
+    top-N; with BT picks present the picks, fills (<= 30 bp), TIMEOUT and ERROR rules apply too. A 0-pick day with
+    a ranked match is clean (the engine really did rank the same names)."""
     m: Dict = {"decision": bool(parsed["scored"]), "match": False, "timeouts": parsed["timeouts"],
-               "errors": parsed["errors"], "clean": False, "why": ""}
+               "errors": parsed["errors"], "clean": None, "why": "", "tol_ok": None}
     defects = (f"ORB defects: Engine tick TIMEOUT {parsed['timeouts']} | GAP_GATE WARN {parsed['gap_warn']} | "
                f"ERROR {parsed['errors']}")
     lines: List[str] = []
@@ -409,46 +524,68 @@ def orb_parity_lines(day: str, engine_rows: List[Dict], parsed: Dict, bt_rows: O
         if parsed.get("late"):
             lines.append(f"ORB late scoring, not a decision: {' '.join(parsed['late'])}")
         lines.append(defects)
-        m["why"] = "no 09:35 decision"
+        m["why"] = "no 09:35 decision (neutral)"
         return lines, m
-    eng = set(parsed["scored"])
-    if bt_rows is None:
-        lines.append(f"ORB picks: engine {len(eng)} vs {no_data('BT book', bt_why)}")
-        m["why"] = "BT book missing for the date"
+    eng_scored = set(parsed["scored"])
+    first = parsed.get("first_et")
+    late_flag = f" | late decision ({first} ET)" if first and first > LATE_AFTER_ET else ""
+    top = engine_top_n(parsed, bt_rank["n"]) if bt_rank else None
+    eng = set(top) if top is not None else eng_scored
+    if bt_rank is None:
+        lines.append(f"ORB ranked: engine {len(eng)} vs {no_data('BT ranked', rank_why)}")
+        m["why"] = "BT ranked set NO-DATA (neutral)"
+        lines.append(defects)
+        return lines, m
+    bt = set(bt_rank["ranked"])
+    subset = top is None
+    m["match"] = bt <= eng_scored if subset else eng == bt
+    note = " (subset test - engine scores not logged)" if subset else ""
+    lines.append(f"ORB ranked: engine {len(eng)} vs BT {len(bt)} | match {len(eng & bt)} | "
+                 f"engine-only: {' '.join(sorted(eng - bt)) or '-'} | BT-only: {' '.join(sorted(bt - eng)) or '-'}"
+                 f"{note}{late_flag}")
+    lines.append(funnel_line(bt_rank))
+    traded = {r["symbol"] for r in engine_rows if r.get("order_status") not in ("cancelled", "canceled", "rejected")}
+    bt_picks = set(bt_rank["picks"])
+    reasons: List[str] = []
+    if not m["match"]:
+        reasons.append("ranked set != BT")
+    if bt_picks or traded:
+        lines.append(f"ORB picks: engine {len(traded)} vs BT {len(bt_picks)} | match {len(traded & bt_picks)} | "
+                     f"engine-only: {' '.join(sorted(traded - bt_picks)) or '-'} | "
+                     f"BT-only: {' '.join(sorted(bt_picks - traded)) or '-'}")
+        if traded != bt_picks:
+            reasons.append("picks != BT")
+        filled = [r for r in engine_rows if r.get("fill_price")]
+        diffs = []
+        if bt_rows:
+            btp = {r["symbol"]: float(r["entry_price"]) for r in bt_rows if r.get("entry_price")}
+            diffs = [bps(float(r["fill_price"]), btp[r["symbol"]]) for r in filled if r["symbol"] in btp]
+        addon = sum(1 for r in engine_rows if "production" not in _pool(r))
+        if diffs:
+            mean = sum(diffs) / len(diffs)
+            m["tol_ok"] = abs(mean) <= ORB_ENTRY_TOL_BP
+            diff_t = f"entry diff vs BT entry: mean {mean:+.1f} bp (max {max(abs(d) for d in diffs):.1f})"
+            if not m["tol_ok"]:
+                reasons.append(f"entry diff > {ORB_ENTRY_TOL_BP:.0f} bp")
+        else:
+            diff_t = "entry diff vs BT entry: " + no_data("fills", "no engine fill matched a BT entry")
+            if bt_picks:
+                reasons.append("no fills to compare")
+        lines.append(f"ORB fills: {len(filled)}/{len(traded)} picks filled | {diff_t} | tilt mults engine vs BT: "
+                     f"{no_data('mults', 'BT book carries no mult column')} | add-on events {addon} (BT n/a)")
     else:
-        bt = {r["symbol"] for r in bt_rows}
-        m["match"] = eng == bt
-        lines.append(f"ORB picks: engine {len(eng)} vs BT {len(bt)} | match {len(eng & bt)} | "
-                     f"engine-only: {' '.join(sorted(eng - bt)) or '-'} | BT-only: {' '.join(sorted(bt - eng)) or '-'}")
-        if not m["match"]:
-            m["why"] = "picks != BT"
-    filled = [r for r in engine_rows if r.get("fill_price")]
-    diffs = []
-    if bt_rows is not None:
-        btp = {r["symbol"]: float(r["entry_price"]) for r in bt_rows if r.get("entry_price")}
-        diffs = [bps(float(r["fill_price"]), btp[r["symbol"]]) for r in filled if r["symbol"] in btp]
-    addon = sum(1 for r in engine_rows if "production" not in _pool(r))
-    if diffs:
-        mean = sum(diffs) / len(diffs)
-        m["tol_ok"] = abs(mean) <= ORB_ENTRY_TOL_BP
-        diff_t = f"entry diff vs BT entry: mean {mean:+.1f} bp (max {max(abs(d) for d in diffs):.1f})"
-    else:
-        m["tol_ok"] = None
-        diff_t = "entry diff vs BT entry: " + no_data("fills", "no engine fill matched a BT entry")
-    lines.append(f"ORB fills: {len(filled)}/{len(eng)} picks filled | {diff_t} | tilt mults engine vs BT: "
-                 f"{no_data('mults', 'BT book carries no mult column')} | add-on events {addon} (BT n/a)")
+        lines.append("ORB picks: engine 0 vs BT 0 (0 = 0, ranked set decides)")
     closed = [r for r in engine_rows if r.get("exit_price") is not None]
     pnl = sum(float(r.get("pnl") or 0) for r in closed)
-    bt_pnl = (f"${sum(float(r.get('pnl') or 0) for r in bt_rows):+,.0f}" if bt_rows is not None else "NO-DATA")
+    bt_pnl = (f"${sum(float(r.get('pnl') or 0) for r in bt_rows):+,.0f}" if bt_rows else "$+0" if bt_rows == [] else "NO-DATA")
     lines.append(f"ORB P&L: day ${pnl:+,.0f} on {len(closed)} exits | BT book {bt_pnl}")
     lines.append(defects)
-    if not m["why"] and m["tol_ok"] is not True:
-        m["why"] = "no fills to compare" if m["tol_ok"] is None else f"entry diff > {ORB_ENTRY_TOL_BP:.0f} bp"
-    if not m["why"] and parsed["timeouts"]:
-        m["why"] = f"Engine tick TIMEOUT {parsed['timeouts']}"
-    if not m["why"] and parsed["errors"]:
-        m["why"] = f"ERROR {parsed['errors']}"
-    m["clean"] = not m["why"]
+    if parsed["timeouts"]:
+        reasons.append(f"Engine tick TIMEOUT {parsed['timeouts']}")
+    if parsed["errors"]:
+        reasons.append(f"ERROR {parsed['errors']}")
+    m["why"] = reasons[0] if reasons else ""
+    m["clean"] = not reasons
     return lines, m
 
 
@@ -498,7 +635,8 @@ def load_bt_rows(day: str, csv_path: Optional[str] = None,
 
 
 def orb_paper_parity_section(day: str, trades: List[Dict], log_path: Optional[Path] = None,
-                             bt_loader: Callable = load_bt_rows) -> Tuple[List[str], Dict]:
+                             bt_loader: Callable = load_bt_rows,
+                             rank_loader: Callable = bt_ranked) -> Tuple[List[str], Dict]:
     """ORB paper account (trades.db strategy orb, account paper) vs the nightly BT book for `day`."""
     log_path = log_path or SESSION_ARCHIVE / f"{day}.log"
     rows = [t for t in trades if t.get("strategy") == "orb" and (t.get("account") or "") == "paper"]
@@ -508,7 +646,9 @@ def orb_paper_parity_section(day: str, trades: List[Dict], log_path: Optional[Pa
         log.warning("ORB log archive missing %s: %s", log_path, e)
         text = ""
     bt_rows, bt_why = bt_loader(day)
-    return orb_parity_lines(day, rows, parse_orb_log(text), bt_rows, bt_why)
+    parsed = parse_orb_log(text)
+    bt_rank, rank_why = rank_loader(day) if parsed["scored"] else (None, "no decision")
+    return orb_parity_lines(day, rows, parsed, bt_rows, bt_why, bt_rank, rank_why)
 
 
 # ---------------------------------------------------------------- promotion
@@ -616,8 +756,8 @@ def promotion_section(day: str, sleeve_m: Optional[Dict], orb_m: Optional[Dict],
     closed = review_closed() if closed is None else closed
     if sleeve_m is not None and sleeve_m.get("rotation") and sleeve_m.get("clean") is not None:
         state["sleeve"][day] = bool(sleeve_m["clean"])
-    if orb_m is not None:
-        state["orb"][day] = bool(orb_m.get("clean"))
+    if orb_m is not None and orb_m.get("clean") is not None:   # None = neutral (NO DECISION / NO-DATA): not counted
+        state["orb"][day] = bool(orb_m["clean"])
     try:
         save_state(state, state_path)
     except OSError as e:
