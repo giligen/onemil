@@ -76,7 +76,7 @@ def test_gate_label_fallbacks():
 def _scored_q(sym, comp, q, hhmm="13:35:05"):
     """SCORED line with the logged composite and quintile, as the engine writes it."""
     return (f"Oct 02 {hhmm} host onemil-trader[1]: 2026-10-02 {hhmm} | INFO | trading.orb_engine:1 | "
-            f"ORB SCORED: {sym} comp={comp:.4f} {q} | gap=1")
+            f"ORB SCORED: {sym} comp={comp:.4f} {q} | gap=10")
 
 
 def _scored(sym, hhmm="13:35:05"):

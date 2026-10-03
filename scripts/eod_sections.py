@@ -365,17 +365,35 @@ def _et_hhmm(line: str) -> Optional[str]:
     return t.astimezone(ZoneInfo("US/Eastern")).strftime("%H:%M:%S")
 
 
+PRODUCTION_MIN_GAP_PCT = 5.0   # orb.yaml universe.min_gap_pct; the BT features universe (orb_backtest.MIN_GAP_PCT)
+
+
+def _is_production_scored(line: str) -> bool:
+    """True when an `ORB SCORED` line belongs to the PRODUCTION pool, the only pool the BT book models.
+    The engine ranks each add-on pool separately (trading/orb_engine.py `_run_pool_selection`, pool_label) and
+    logs `pool=<label>`; archives written before that tag fall back to the gap field (production gap >= 5 %,
+    add-on P1 gap 3-5 %). A line with neither tag nor gap is treated as production (old format)."""
+    m = re.search(r"\bpool=(\S+)", line)
+    if m:
+        return m.group(1) == "production"
+    g = re.search(r"\| gap=(-?[\d.]+)", line)
+    return g is None or float(g.group(1)) >= PRODUCTION_MIN_GAP_PCT
+
+
 def parse_orb_log(text: str) -> Dict:
     """Counts from an ORB session-archive text. `scored` = symbols of `ORB SCORED` lines stamped inside the
     09:34-09:40 ET window (the 09:35 decision); `late` = SCORED symbols outside it (a restart, not a decision);
     `boots` = UTC HH:MM of each engine boot (`WINNER STACK` line). Also Engine tick TIMEOUT, GAP_GATE WARNING and
     ORB ERROR counts. The archive is grep-filtered by cron, so the TIMEOUT count is a floor."""
     lines = text.splitlines()
-    scored, late, detail, first_et = set(), set(), {}, None
+    scored, late, detail, first_et, addon = set(), set(), {}, None, set()
     for ln in lines:
         m = re.search(r"ORB SCORED: (\S+) comp=([-\d.]+) (Q\d)?", ln)
         m0 = m or re.search(r"ORB SCORED: (\S+)", ln)
         if not m0:
+            continue
+        if not _is_production_scored(ln):
+            addon.add(m0.group(1))
             continue
         et = _et_hhmm(ln)
         if et and DECISION_WINDOW_ET[0] <= et[:5] <= DECISION_WINDOW_ET[1]:
@@ -391,7 +409,7 @@ def parse_orb_log(text: str) -> Dict:
             m = _STAMP_RE.search(ln)
             if m:
                 boots.append(m.group(2)[:5])
-    return {"scored": sorted(scored), "late": sorted(late - scored), "boots": boots,
+    return {"scored": sorted(scored), "late": sorted(late - scored), "boots": boots, "addon": sorted(addon - scored),
             "detail": detail, "first_et": first_et[:5] if first_et else None,
             "timeouts": sum("Engine tick TIMEOUT" in ln for ln in lines),
             "gap_warn": sum("GAP_GATE" in ln and "| WARNING" in ln for ln in lines),

@@ -3564,7 +3564,7 @@ class ORBEngine:
             logger.info(
                 "ORB SCORED: %s comp=%.4f %s | "
                 "gap=%.3f rtv=%.0f rabr=%.3f rs=%.3f p20h=%.3f pdcp=%.3f rcp=%.3f "
-                "| prev_close=%.4f range_open=%.4f",
+                "| prev_close=%.4f range_open=%.4f pool=%s",
                 cand.symbol, score, cand.quintile,
                 feats.get('gap_pct', float('nan')),
                 feats.get('range_total_volume', float('nan')),
@@ -3575,6 +3575,7 @@ class ORBEngine:
                 feats.get('range_close_position', float('nan')),
                 float((providers.get('prev_day_bar') or {}).get('close') or 0.0),
                 cand.range_data.range_open if cand.range_data else 0.0,
+                pool_label,
             )
 
         self._record_latency_phase('scoring', time.time() - _t_scoring)
