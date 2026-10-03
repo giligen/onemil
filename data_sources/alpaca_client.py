@@ -1239,7 +1239,9 @@ class AlpacaClient:
             return {}
 
     def get_1min_bars_range_multi(self, symbols: list, start: datetime,
-                                  end: datetime) -> dict:
+                                  end: datetime,
+                                  timeout_s: Optional[float] = None,
+                                  retries: Optional[int] = None) -> dict:
         """Historical 1-min bars for MANY symbols over an explicit UTC
         window, one batched SIP request (no session clamp — extended
         hours included when the window covers them).
@@ -1253,6 +1255,10 @@ class AlpacaClient:
         Raises AlpacaAPIError on request failure (callers decide whether a
         batch failure is retryable — a silent {} would look like "no
         premarket prints" and poison the backfill's done-markers).
+
+        `timeout_s` / `retries` (2026-10-03, ORB open-tick budget): optional
+        per-call timeout and timeout-retry count; None (default) keeps the
+        client defaults, so every other caller is unchanged.
         """
         if not symbols:
             return {}
@@ -1267,7 +1273,8 @@ class AlpacaClient:
             bars_raw = self._call_with_timeout(
                 lambda: self.data_client.get_stock_bars(request),
                 f"get_1min_bars_range_multi({len(symbols)} symbols, "
-                f"{start.isoformat()}..{end.isoformat()})"
+                f"{start.isoformat()}..{end.isoformat()})",
+                timeout=timeout_s, timeout_retries=retries,
             )
             bars = self._to_dict(bars_raw)
         except Exception as e:

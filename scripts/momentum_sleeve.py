@@ -72,6 +72,9 @@ POLL_SECONDS, POLL_TIMEOUT = 2.0, 180.0
 COLS = ['symbol', 'bar_date', 'open', 'high', 'low', 'close', 'volume']
 INVALID_SYM_RE = re.compile(r'invalid symbol:\s*([^"\s]+)')
 DD_KILL = 0.40
+COMPLETENESS_MIN = 0.98      # --submit REFUSES when under this share of LIQUID names (ADV20 >= LIQUID_ADV) has an asof bar
+LOST_MAX = 0.05              # ... or when more than this share of the requested symbols was LOST in the fetch
+LIQUID_ADV = 200_000_000.0   # liquid = ADV20 dollar volume over the 20 sessions before asof
 
 
 # --------------------------------------------------------------------------- calendar helpers
@@ -209,13 +212,89 @@ def fetch_panel(client: AlpacaClient, symbols: List[str], asof: date) -> Tuple[p
     return panel, sorted(set(lost))
 
 
+def liquid_symbols(panel: pd.DataFrame, asof: date) -> set:
+    """Symbols with ADV20 >= LIQUID_ADV over exactly the 20 sessions BEFORE ``asof`` (close * volume mean).
+    These always print a bar, so a missing asof bar on one of them means stale data."""
+    if not len(panel):
+        return set()
+    sub = panel[pd.to_datetime(panel['bar_date']) < pd.Timestamp(asof)][['symbol', 'bar_date', 'close', 'volume']]
+    sub = sub.sort_values(['symbol', 'bar_date'], kind='stable').drop_duplicates(['symbol', 'bar_date'], keep='last')
+    sub = sub[sub.groupby('symbol', sort=False, observed=True).cumcount(ascending=False) < ms.ADV_WINDOW]
+    agg = (sub['close'].astype('float64') * sub['volume'].astype('float64')).groupby(
+        sub['symbol'], observed=True).agg(['mean', 'count'])
+    return set(agg.index[(agg['count'] == ms.ADV_WINDOW) & (agg['mean'] >= LIQUID_ADV)])
+
+
+def completeness_info(n_requested: int, panel: pd.DataFrame, lost: List[str], asof: date) -> Dict:
+    """Completeness result the --submit gate reads: {asof, requested, with_asof_bar, ratio, lost, lost_share,
+    n_liquid, liquid_with_asof, liquid_ratio}. ``ratio`` (all requested names) is informational only: ~10 % of
+    the listings simply do not trade on a given day. The gate tests lost_share and liquid_ratio."""
+    has_asof = (set(panel.loc[pd.to_datetime(panel['bar_date']) == pd.Timestamp(asof), 'symbol'])
+                if len(panel) else set())
+    liquid = liquid_symbols(panel, asof)
+    lost = sorted(set(lost))
+    return {'asof': str(asof), 'requested': int(n_requested), 'with_asof_bar': len(has_asof),
+            'ratio': len(has_asof) / max(n_requested, 1), 'lost': lost,
+            'lost_share': len(lost) / max(n_requested, 1), 'n_liquid': len(liquid),
+            'liquid_with_asof': len(liquid & has_asof),
+            'liquid_ratio': len(liquid & has_asof) / len(liquid) if liquid else 0.0}
+
+
+def completeness_path(asof: date) -> str:
+    """Completeness JSON path, beside the panel cache (``cache_file(asof)`` + '.completeness.json')."""
+    return cache_file(asof) + '.completeness.json'
+
+
+def write_completeness(asof: date, n_requested: int, panel: pd.DataFrame, lost: List[str]) -> Dict:
+    """Persist the completeness result atomically beside the panel cache; returns it."""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    info = completeness_info(n_requested, panel, lost, asof)
+    path = completeness_path(asof)
+    with open(path + '.tmp', 'w') as f:
+        json.dump(info, f)
+    os.replace(path + '.tmp', path)
+    return info
+
+
+def read_completeness(asof: date) -> Optional[Dict]:
+    """The persisted completeness result for ``asof``; None (WARNING) when missing or unreadable."""
+    path = completeness_path(asof)
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError) as e:
+        logger.warning("momentum_sleeve: completeness file %s unreadable (%s)", path, e)
+        return None
+
+
+def completeness_refusal(info: Optional[Dict], asof: date, held, selected, missing_bar=()) -> Optional[str]:
+    """Reason to REFUSE the rebalance, or None. Refuse when the result is missing / for another asof, or (a) the
+    LOST share exceeds LOST_MAX, or (b) the asof-bar coverage of LIQUID names is under COMPLETENESS_MIN (stale data
+    would enter the ranking), or (c) any HELD or newly selected symbol was LOST or has no asof bar."""
+    if info is None:
+        return f"completeness file missing for {asof}"
+    if info.get('asof') != str(asof):
+        return f"completeness file is for another asof ({info.get('asof')} != {asof})"
+    if info['lost_share'] > LOST_MAX:
+        return f"LOST share {info['lost_share']:.3f} > {LOST_MAX:.2f} ({len(info['lost'])}/{info['requested']})"
+    if info['liquid_ratio'] < COMPLETENESS_MIN:
+        return (f"liquid asof coverage {info['liquid_ratio']:.3f} < {COMPLETENESS_MIN:.2f} "
+                f"({info['liquid_with_asof']}/{info['n_liquid']})")
+    hit = sorted((set(held) | set(selected)) & (set(info.get('lost', [])) | set(missing_bar)))
+    if hit:
+        return f"held/selected symbols LOST or without an asof bar: {hit}"
+    return None
+
+
 def completeness_line(n_requested: int, panel: pd.DataFrame, lost: List[str], asof: date) -> str:
-    """One-line completeness gate. Logs ERROR when under 90 % of requested symbols have an asof bar."""
-    on_asof = int((panel['bar_date'] == pd.Timestamp(asof)).sum()) if len(panel) else 0
-    ratio = on_asof / max(n_requested, 1)
+    """One-line completeness gate; ERROR when the LOST share or the liquid-name asof coverage fails the gate."""
+    info = completeness_info(n_requested, panel, lost, asof)
     line = (f"COMPLETENESS: requested {n_requested} symbols, {panel['symbol'].nunique() if len(panel) else 0} "
-            f"with bars, {on_asof} with an {asof} bar ({ratio:.0%}), LOST {len(lost)}")
-    (logger.error if ratio < 0.5 else logger.info)(line)
+            f"with bars, {info['with_asof_bar']} with an {asof} bar ({info['ratio']:.0%}), LOST {len(lost)} "
+            f"({info['lost_share']:.1%}, max {LOST_MAX:.0%}), liquid {info['liquid_with_asof']}/{info['n_liquid']} "
+            f"with an asof bar ({info['liquid_ratio']:.1%}, min {COMPLETENESS_MIN:.0%})")
+    ok = info['lost_share'] <= LOST_MAX and info['liquid_ratio'] >= COMPLETENESS_MIN
+    (logger.info if ok else logger.error)(line)
     return line
 
 
@@ -229,6 +308,8 @@ def prune_caches(keep: int = KEEP_CACHES) -> None:
     files = sorted(glob.glob(os.path.join(DATA_DIR, 'daily_*.parquet')))
     for f in files[:-keep]:
         os.remove(f)
+        if os.path.exists(f + '.completeness.json'):
+            os.remove(f + '.completeness.json')
         logger.info("momentum_sleeve: pruned old cache %s", os.path.basename(f))
 
 
@@ -387,7 +468,7 @@ def get_existing_order(client: AlpacaClient, coid: str):
 
 def submit_market(client: AlpacaClient, symbol: str, side: str, coid: str,
                   qty: Optional[float] = None, notional: Optional[float] = None):
-    """Market DAY order. Sells use fractional ``qty``; buys use ``notional``. Idempotent on ``coid``:
+    """Market DAY order. Sells use fractional ``qty``; buys use ``notional`` (or whole ``qty`` if non-fractionable). Idempotent on ``coid``:
     an existing order is returned unchanged (logged) instead of re-submitting."""
     existing = get_existing_order(client, coid)
     if existing is not None:
@@ -399,6 +480,8 @@ def submit_market(client: AlpacaClient, symbol: str, side: str, coid: str,
               time_in_force=TimeInForce.DAY, client_order_id=coid)
     if side == 'sell':
         kw['qty'] = floor_qty(qty)
+    elif qty is not None:
+        kw['qty'] = int(qty)              # non-fractionable buy: whole shares
     else:
         kw['notional'] = round(float(notional), 2)
     return client.trading_client.submit_order(MarketOrderRequest(**kw))
@@ -485,11 +568,13 @@ def shadow_gate_info(asof) -> Optional[Dict]:
     return info
 
 
-def gate_label(info: Optional[Dict]) -> str:
-    """'gate ON (p21)' / 'gate OFF (p55)' / 'gate n/a' for the log and the [MOM] Telegram line."""
+def gate_label(info: Optional[Dict], asof=None) -> str:
+    """'gate ON (p21)' / 'gate OFF (p55)' / 'gate n/a (full size)' / 'gate STALE ON (p21)' (CBOE close older than
+    ``asof``) for the log and the [MOM] Telegram line."""
     if not info:
-        return 'gate n/a'
-    return f"gate {'ON' if info['gate_on'] else 'OFF'} (p{info['percentile'] * 100:.0f})"
+        return 'gate n/a (full size)'
+    stale = asof is not None and info['date'] < pd.Timestamp(asof).date()
+    return f"gate {'STALE ' if stale else ''}{'ON' if info['gate_on'] else 'OFF'} (p{info['percentile'] * 100:.0f})"
 
 
 def size_label(scale: float) -> str:
@@ -543,6 +628,27 @@ def build_plan(panel: pd.DataFrame, assets: pd.DataFrame, asof: date, n: int, st
     return selected, feat, equity, targets, orders, prices
 
 
+def apply_fractionable(client: AlpacaClient, order: Dict, prices: Dict[str, float]) -> None:
+    """Buy order on a non-fractionable asset -> ``whole_qty`` = floor(notional / price) and ``residual`` USD left
+    uninvested (selection is unchanged, the BT has no fractionable filter). Idempotent. A failed asset lookup is a
+    WARNING and the order stays notional-based; a 0-share result is kept (0) and skipped by ``execute``."""
+    if order['side'] != 'buy' or 'whole_qty' in order or order.get('fractionable_checked'):
+        return
+    order['fractionable_checked'] = True
+    sym = order['symbol']
+    try:
+        fractionable = bool(client.trading_client.get_asset(sym).fractionable)
+    except Exception as e:
+        logger.warning("momentum_sleeve: %s asset lookup failed (%s) -- assuming fractionable, notional order", sym, e)
+        return
+    if fractionable:
+        return
+    qty = int(math.floor(order['notional'] / prices[sym]))
+    order['whole_qty'], order['residual'] = qty, order['notional'] - qty * prices[sym]
+    logger.warning("momentum_sleeve: %s is non-fractionable -- whole shares %d (residual $%.2f of $%.2f)",
+                   sym, qty, order['residual'], order['notional'])
+
+
 def execute(client: AlpacaClient, orders: List[Dict], prices: Dict[str, float], state: Dict,
             today: date, tag: str = '') -> List[Dict]:
     """Submit sells, poll to fill, then buys, poll. Returns the fills; the caller resyncs ``state`` from the
@@ -565,7 +671,12 @@ def execute(client: AlpacaClient, orders: List[Dict], prices: Dict[str, float], 
                     qty = held if o['full_exit'] else min(held, floor_qty(o['notional'] / prices[sym]))
                     submit_market(client, sym, 'sell', coid, qty=qty)
                 else:
-                    submit_market(client, sym, 'buy', coid, notional=o['notional'])
+                    apply_fractionable(client, o, prices)
+                    if o.get('whole_qty') == 0:
+                        logger.warning("momentum_sleeve: %s non-fractionable and $%.2f buys 0 shares -- skipped",
+                                       sym, o['notional'])
+                        continue
+                    submit_market(client, sym, 'buy', coid, qty=o.get('whole_qty'), notional=o['notional'])
             except Exception as e:
                 logger.error("momentum_sleeve: %s %s order %s REJECTED (%s) -- continuing with the rest",
                              phase, sym, coid, e)
@@ -590,8 +701,9 @@ def format_orders(selected: List[str], feat: pd.DataFrame, equity: float, orders
         lines.append(f"  {i:2d} {s:<6} signal {feat.loc[s, 'signal']:.3f}  close {feat.loc[s, 'close']:.2f}")
     lines.append(f"ORDERS ({len(orders)}), sells first:")
     for o in orders:
+        whole = (f" (whole {o['whole_qty']} sh, residual ${o['residual']:,.2f})" if 'whole_qty' in o else '')
         lines.append(f"  {o['side'].upper():<4} {o['symbol']:<6} ${o['notional']:,.2f}"
-                     f"{' (full exit)' if o['full_exit'] else ''}")
+                     f"{' (full exit)' if o['full_exit'] else ''}{whole}")
     return "\n".join(lines)
 
 
@@ -630,14 +742,23 @@ def run(args, client: AlpacaClient, notifier: Optional[TelegramNotifier], now_ut
     if args.skip_fetch and os.path.exists(cpath):
         panel = pd.read_parquet(cpath)
         logger.info("momentum_sleeve: reusing cache %s (%d rows)", cpath, len(panel))
-        lost: List[str] = []
+        info = read_completeness(asof)
     else:
         if args.skip_fetch:
             logger.warning("momentum_sleeve: --skip-fetch but %s missing -- fetching", cpath)
         panel, lost = fetch_panel(client, list(assets['symbol']), asof)
+        info = None
         if len(panel):
             write_cache_atomic(panel, asof)
-    print(completeness_line(len(assets) + 1, panel, lost, asof))
+            panel['bar_date'] = pd.to_datetime(panel['bar_date'])
+            info = write_completeness(asof, len(assets) + 1, panel, lost)
+    if args.skip_fetch and info is not None:
+        print(f"COMPLETENESS (from the prefetch): requested {info['requested']}, {info['with_asof_bar']} with an "
+              f"{asof} bar ({info['ratio']:.0%}), LOST {len(info['lost'])} ({info['lost_share']:.1%}, max "
+              f"{LOST_MAX:.0%}), liquid {info['liquid_with_asof']}/{info['n_liquid']} ({info['liquid_ratio']:.1%}, "
+              f"min {COMPLETENESS_MIN:.0%})")
+    else:
+        print(completeness_line(len(assets) + 1, panel, info['lost'] if info else [], asof))
     if panel.empty:
         logger.error("momentum_sleeve: empty panel -- aborting")
         return 1
@@ -645,14 +766,24 @@ def run(args, client: AlpacaClient, notifier: Optional[TelegramNotifier], now_ut
 
     gate = shadow_gate_info(pd.Timestamp(asof))
     scale = ms.gate_scale(gate, args.gate)
-    gate_txt = f"{gate_label(gate)} {size_label(scale)}"
+    gate_txt = f"{gate_label(gate, asof)} {size_label(scale)}"
     selected, feat, equity, targets, orders, prices = build_plan(panel, assets, asof, args.n, state,
                                                                  marks=broker_marks(client), scale=scale)
     logger.info("momentum_sleeve: %s  ratio %s", gate_txt,
                 f"{gate['ratio']:.4f} (VIX {gate['vix']:.2f} / VIX3M {gate['vix3m']:.2f}, {gate['date']})" if gate
                 else "unavailable")
     print(f"asof {asof}  today {today}  mode {'SUBMIT' if args.submit else 'DRY-RUN'}  {gate_txt}")
+    for o in orders:
+        apply_fractionable(client, o, prices)
     print(format_orders(selected, feat, equity, orders, scale))
+    refusal = completeness_refusal(info, asof, set(state['positions']), selected,
+                                   missing_bar=set(state['positions']) - set(feat.index))
+    if refusal:
+        logger.error("MOM REFUSED: completeness %s -- positions left as they are (no sells, no buys)", refusal)
+        print(f"MOM REFUSED: completeness {refusal}")
+        if args.submit:
+            notify(notifier, f"{today} REFUSED: completeness {refusal} -- no orders placed, book unchanged")
+        return 2
     if not args.submit:
         return 0
 
@@ -660,6 +791,10 @@ def run(args, client: AlpacaClient, notifier: Optional[TelegramNotifier], now_ut
     names_before = set(state['positions'])
     run_tag = f"f{now_utc:%H%M%S}" if args.force else ''
     fills = execute(client, orders, prices, state, today, run_tag)
+    # Persist the rebalance marker NOW (the 14:45 cron is a retry): a crash in the sync / ledger / marking code
+    # below must not let the retry re-plan against a pre-trade state.
+    state['last_rebalance'], state['last_rebalance_run'] = str(today), datetime.now(timezone.utc).isoformat()
+    save_state(state, STATE_PATH)
     sync_state_from_broker(client, state, args.equity_start)
     opens = official_opens(client, [f['symbol'] for f in fills], today)
     turnover = 0.0

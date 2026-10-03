@@ -792,12 +792,15 @@ class RealtimeScanner:
         # new qualifiers arrive.
         # Past ORB's own last-entry cutoff no candidate can be entered, so the
         # seed + snapshot + gap-gate build is skipped (one INFO per day).
+        # Exits run FIRST (A3, 2026-10-03): the universe build can take
+        # tens of seconds at the open and a slow or failing build must never
+        # starve stop/exit management of open positions.
+        self.orb_engine.check_exits()
         if self.orb_engine.universe_build_due():
             self.orb_engine.build_universe(
                 source_loader=self._orb_universe_source,
             )
         self.orb_engine.check_entries()
-        self.orb_engine.check_exits()
         if self.orb_engine.is_force_close_time():
             self.orb_engine.force_close_all()
         # (Ignition moved OUT of _orb_tick 2026-09-01 — see _ignition_tick;

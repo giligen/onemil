@@ -45,8 +45,14 @@ def _stale(prior_open, prior_close, snap_prev_close):
 
 
 def _bars(o):
-    return pd.DataFrame([{'timestamp': datetime.now(timezone.utc), 'open': o, 'high': o, 'low': o,
+    ts = datetime.fromisoformat(TODAY + 'T09:30:00').replace(tzinfo=ET).astimezone(timezone.utc)
+    return pd.DataFrame([{'timestamp': ts, 'open': o, 'high': o, 'low': o,
                           'close': o, 'volume': 1}])
+
+
+def _at_0935():
+    """Fixed 09:35:30 ET today (the tests must not depend on the wall clock)."""
+    return datetime.fromisoformat(TODAY + 'T09:35:30').replace(tzinfo=ET)
 
 
 def _clock(monkeypatch, hh, mm):
@@ -65,7 +71,7 @@ def _alpaca(snaps, bars=None, exc=None):
     if exc:
         a.get_1min_bars_range_multi.side_effect = exc
     else:
-        a.get_1min_bars_range_multi.side_effect = lambda syms, s0, s1: {
+        a.get_1min_bars_range_multi.side_effect = lambda syms, s0, s1, **kw: {
             s: (_bars(bars[s]) if s in (bars or {}) else pd.DataFrame()) for s in syms}
     return a
 
@@ -123,12 +129,12 @@ class TestFailureAndBudget:
         syms = [f"T{i:03d}" for i in range(450)]
         a = _alpaca({s: _stale(11.0, 10.0, 9.0) for s in syms}, bars={})
         eng = _engine(a)
-        res = eng._fetch_today_open_bars(syms, datetime.now(ET), time.time() + 60)
+        res = eng._fetch_today_open_bars(syms, _at_0935(), time.time() + 60)
         assert res == {} and a.get_1min_bars_range_multi.call_count == 3
         a.get_1min_bars_range_multi.reset_mock()
         eng2 = _engine(a)
         with caplog.at_level(logging.WARNING):
-            eng2._fetch_today_open_bars(syms, datetime.now(ET), time.time() - 1)
+            eng2._fetch_today_open_bars(syms, _at_0935(), time.time() - 1)
         a.get_1min_bars_range_multi.assert_not_called()
         assert any('budget exhausted' in r.getMessage() for r in caplog.records)
 
@@ -136,7 +142,7 @@ class TestFailureAndBudget:
         _clock(monkeypatch, 9, 35)
         a = _alpaca({}, bars={'X': 11.0})
         eng = _engine(a)
-        now = datetime.now(ET)
+        now = _at_0935()
         assert eng._fetch_today_open_bars(['X'], now, time.time() + 60) == {'X': 11.0}
         assert eng._fetch_today_open_bars(['X'], now, time.time() + 60) == {'X': 11.0}
         assert a.get_1min_bars_range_multi.call_count == 1

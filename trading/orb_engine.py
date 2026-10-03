@@ -1045,6 +1045,20 @@ class ORBEngine:
         if source_loader is None:
             logger.warning("ORBEngine.build_universe: no source_loader — universe unchanged")
             return len(self.universe)
+        # A5 (2026-10-03): the scanner's 50 s tick timeout can let a second
+        # tick start while the first build is still running; never overlap.
+        if getattr(self, '_build_in_progress', False):
+            logger.info("ORBEngine.build_universe: previous build still in progress — "
+                        "skipping this tick's build")
+            return len(self.universe)
+        self._build_in_progress = True
+        try:
+            return self._build_universe_locked(source_loader)
+        finally:
+            self._build_in_progress = False
+
+    def _build_universe_locked(self, source_loader) -> int:
+        """Body of build_universe, run under the `_build_in_progress` guard."""
         # The loader is the SLOW part (daily_bars window-function scan +
         # a few-thousand-symbol snapshot call — measured 15.3s + 3.4s on
         # 2026-09-18) and it touches no engine state, so it runs OUTSIDE
@@ -1210,6 +1224,25 @@ class ORBEngine:
             return float(o) if o else None
         return None
 
+    @staticmethod
+    def _open_at_0930_from_frame(df, s0_utc: datetime) -> Optional[float]:
+        """Open of the row whose timestamp IS 09:30 ET (`s0_utc`), else None.
+
+        A symbol with no 09:30 print must be a miss, never the 09:31 open
+        (A2, 2026-10-03). Handles tz-aware and naive (assumed UTC) stamps and
+        a `timestamp` column or a datetime index.
+        """
+        if df is None or len(df) == 0:
+            return None
+        ts = df['timestamp'] if 'timestamp' in df.columns else df.index.to_series()
+        ts = pd.to_datetime(ts)
+        ts = ts.dt.tz_localize('UTC') if ts.dt.tz is None else ts.dt.tz_convert('UTC')
+        hit = (ts.values == pd.Timestamp(s0_utc).tz_convert('UTC').to_datetime64())
+        if not hit.any():
+            return None
+        o = df['open'].to_numpy()[hit.argmax()]
+        return float(o) if o and o == o else None
+
     def _fetch_today_open_bars(self, symbols: List[str], now_et: datetime,
                                deadline: float) -> Dict[str, float]:
         """09:30 ET one-minute bar opens for stale-snapshot symbols: batched REST, budgeted, cached.
@@ -1232,24 +1265,32 @@ class ORBEngine:
         s1 = s0 + timedelta(minutes=1)
         failed = 0
         for i in range(0, len(todo), 200):
-            if time.time() >= deadline:
+            # A1 (2026-10-03): the budget is enforced INSIDE a chunk too — each
+            # call gets min(remaining - 1, 20) s and NO retry, so one slow
+            # chunk can never run the client's 90 s x retry default past the
+            # open-tick deadline.
+            remaining = deadline - time.time()
+            if remaining < 5.0:
                 logger.warning(f"ORB GAP_GATE: open-tick budget exhausted before the 09:30 bar fetch "
-                               f"finished — {len(todo) - i} symbol(s) deferred to the next tick")
+                               f"finished — {len(todo) - i} symbol(s) deferred to the next tick"
+                               f" ({failed} symbol(s) in failed/timed-out chunks)")
                 break
             chunk = todo[i:i + 200]
             try:
-                res = self.alpaca.get_1min_bars_range_multi(chunk, s0, s1) or {}
+                res = self.alpaca.get_1min_bars_range_multi(
+                    chunk, s0, s1, timeout_s=min(remaining - 1.0, 20.0), retries=0) or {}
             except Exception as e:
                 failed += len(chunk)
                 logger.warning(f"ORB GAP_GATE: batched 09:30 bar fetch failed for {len(chunk)} symbols "
-                               f"(no admission from stale snapshots this tick): {e}")
+                               f"({failed} failed so far; no admission from stale snapshots this tick): {e}")
                 for sym in chunk:
                     self._open_bar_miss[sym] = time.time()
                 continue
             for sym in chunk:
                 df = res.get(sym)
-                if df is not None and len(df):
-                    self._open_bar_cache[sym] = float(df.iloc[0]['open'])
+                o930 = self._open_at_0930_from_frame(df, s0)
+                if o930 is not None:
+                    self._open_bar_cache[sym] = o930
                 else:
                     self._open_bar_miss[sym] = time.time()
         return {s: self._open_bar_cache[s] for s in symbols if s in self._open_bar_cache}
@@ -1319,6 +1360,7 @@ class ORBEngine:
                 logger.warning(f"ORB GAP_GATE: batched cached-bar lookup failed for "
                                f"{len(_missing_open)} symbols (non-fatal): {e}")
         keep: List[str] = []
+        _admission_errors: List[tuple] = []   # (symbol, exception) — aggregated, never silent (A4)
         _snapshot_fallback_syms: List[str] = []   # fresh-snapshot symbols (informational only)
         _no_open_syms: List[str] = []   # liquid stale-snapshot symbols with no valid today-open
         _n_cand = len(snapshots or {})
@@ -1439,8 +1481,15 @@ class ORBEngine:
                 self._symbol_pool[sym] = matched_pool
                 keep.append(sym)
             except Exception as e:
-                logger.debug(f"ORB: snapshot parse failed for {sym}: {e}")
+                _admission_errors.append((sym, e))
                 continue
+        if _admission_errors:
+            _msg = (f"ORB admission: {len(_admission_errors)} symbol(s) skipped on exception "
+                    f"(first: {_admission_errors[0][0]}: {_admission_errors[0][1]!r})")
+            if len(_admission_errors) >= _n_cand:
+                logger.error(_msg + f" — EVERY one of {_n_cand} candidates failed")
+            else:
+                logger.warning(_msg)
         if _no_open_syms:
             logger.warning(
                 f"ORB GAP_GATE: {len(_no_open_syms)} of {_n_cand} symbols NOT admitted this tick — "
@@ -4452,8 +4501,19 @@ class ORBEngine:
         """
         if not self.rvol_tilt_enabled or pool not in self.rvol_tilt_applies_to:
             return 1.0, None
-        return resolve_rvol_tilt_mult(
-            cand.rel_volume_0935, self.rvol_tilt_edges, self.rvol_tilt_mults)
+        try:
+            return resolve_rvol_tilt_mult(
+                cand.rel_volume_0935, self.rvol_tilt_edges, self.rvol_tilt_mults)
+        except Exception as e:
+            # Fail-open (mult 1.0 = BT default) but never silent (A4): one
+            # WARNING per day with the reason.
+            _day = datetime.now(timezone.utc).date().isoformat()
+            if getattr(self, '_rvol_tilt_warn_day', None) != _day:
+                self._rvol_tilt_warn_day = _day
+                logger.warning(f"ORB RVOL tilt: resolve failed for "
+                               f"{getattr(cand, 'symbol', '?')} — fail-open x1.0 "
+                               f"(further failures today not logged): {e!r}")
+            return 1.0, None
 
     @staticmethod
     def _log_rvol_tilt(symbol: str, rvol: Optional[float], tercile: Optional[str],

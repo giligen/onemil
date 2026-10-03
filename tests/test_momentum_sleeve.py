@@ -3,6 +3,7 @@
 Includes a PARITY test against research/momentum_weekly/recon/A_holdings.csv (skipped if absent).
 """
 import importlib.util
+import json
 import os
 import sys
 from datetime import date, datetime
@@ -293,6 +294,7 @@ def test_run_dry_run_submits_nothing(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(runner, 'fetch_assets', lambda client: a)
     monkeypatch.setattr(runner, 'fetch_panel', lambda client, syms, asof: (panel, []))
     monkeypatch.setattr(runner, 'write_cache_atomic', lambda p, d: 'x')
+    monkeypatch.setattr(runner, 'DATA_DIR', str(tmp_path))   # completeness JSON must not touch data/
     monkeypatch.setattr(runner, 'STATE_PATH', str(tmp_path / 'state.json'))
     args = MagicMock(force=True, submit=False, asof=str(dates[-1].date()), n=20, equity_start=20000.0,
                      skip_fetch=False, gate='half')
@@ -549,7 +551,7 @@ def test_load_gate_inputs_failure_is_na_with_warning(monkeypatch, caplog):
     with caplog.at_level('WARNING'):
         info = runner.shadow_gate_info(pd.Timestamp('2026-10-02'))
     assert info is None and 'gate' in caplog.text.lower()
-    assert runner.gate_label(None) == 'gate n/a'
+    assert runner.gate_label(None).startswith('gate n/a')
 
 
 def test_stale_gate_is_used_with_a_warning(monkeypatch, caplog):
@@ -691,3 +693,164 @@ def test_parity_with_half_gate_backtest():
         assert (sc == 0.5) == bool(sub.gated.iloc[0]), d
         assert len(tgt) == 20 and all(v == pytest.approx(w) for v, w in zip(tgt.values(), sub.weight)), d
         print(f'HALF-GATE PARITY {d}: gated={bool(sub.gated.iloc[0])} p={pct:.3f} weight={sub.weight.iloc[0]}')
+
+
+# --------------------------------------------------------------------------- review fixes 2026-10-03 (FIX_C)
+
+def _run_world(monkeypatch, tmp_path, n_sym=25, lost=None, held=None, write_completeness=True, stale=0):
+    """A submit-able world: calendar, panel, assets, tmp state/data dir. Returns (client, args, panel, dates, now)."""
+    panel, dates = make_panel({f'S{i:02d}': (50, 0.001 * (i + 1), 1e7, 0.01) for i in range(n_sym)})
+    a = pd.DataFrame({'symbol': [f'S{i:02d}' for i in range(n_sym)], 'name': ['Co'] * n_sym})
+    c = fake_client()
+    cal = [{'date': d.date(), 'open': None, 'close': None} for d in pd.bdate_range('2024-01-01', '2026-12-31')]
+    c.get_market_calendar.side_effect = lambda s, e: [x for x in cal if s <= x['date'] <= e]
+    monkeypatch.setattr(runner, 'fetch_assets', lambda client: a)
+    monkeypatch.setattr(runner, 'DATA_DIR', str(tmp_path))
+    monkeypatch.setattr(runner, 'STATE_PATH', str(tmp_path / 'state.json'))
+    monkeypatch.setattr(runner, 'LEDGER_PATH', str(tmp_path / 'ledger.csv'))
+    monkeypatch.setattr(runner, 'WEEKLY_PATH', str(tmp_path / 'weekly.csv'))
+    monkeypatch.setattr(runner, 'SHADOW_GATE_PATH', str(tmp_path / 'gate.csv'))
+    monkeypatch.setattr(runner, 'broker_marks', lambda client: {})
+    monkeypatch.setattr(runner, 'shadow_gate_info', lambda asof: None)
+    monkeypatch.setattr(ms, 'ADV_CUTOFF', 0.0)
+    asof = dates[-1].date()
+    panel.to_parquet(runner.cache_file(asof), index=False)
+    if write_completeness:
+        cp = panel[~(panel['symbol'].isin([f'S{i:02d}' for i in range(stale)]) & (panel['bar_date'] == dates[-1]))]
+        runner.write_completeness(asof, n_sym + 1, cp, lost or [])   # `stale` liquid names lack the asof bar
+    args = MagicMock(force=True, submit=True, asof=str(asof), n=20, equity_start=20000.0, skip_fetch=True,
+                     gate='half')
+    return c, args, panel, dates, datetime(2026, 10, 5, 14, 0, tzinfo=ZoneInfo('UTC'))
+
+
+def test_completeness_constant_and_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, 'DATA_DIR', str(tmp_path))
+    assert (runner.COMPLETENESS_MIN, runner.LOST_MAX, runner.LIQUID_ADV) == (0.98, 0.05, 2e8)
+    panel, dates = make_panel({'AAA': (50, 0.001, 1e7, 0.01)}, n_days=5)
+    asof = dates[-1].date()
+    runner.write_completeness(asof, 4, panel, ['ZZZ'])
+    info = runner.read_completeness(asof)
+    assert info['asof'] == str(asof) and info['requested'] == 4 and info['with_asof_bar'] == 1
+    assert info['ratio'] == 0.25 and info['lost'] == ['ZZZ'] and info['lost_share'] == 0.25
+    assert info['n_liquid'] == 0 or 'liquid_ratio' in info
+    assert runner.read_completeness(date(2020, 1, 1)) is None
+
+
+def test_completeness_refusal_rules():
+    ok = {'asof': '2026-10-02', 'requested': 13510, 'ratio': 0.897, 'lost': ['X'], 'lost_share': 0.02,
+          'n_liquid': 500, 'liquid_with_asof': 499, 'liquid_ratio': 0.998}
+    d = date(2026, 10, 2)
+    assert runner.completeness_refusal(ok, d, {'A'}, ['B']) is None       # the 0.897 raw ratio passes (a) and (b)
+    assert 'missing' in runner.completeness_refusal(None, d, set(), [])
+    assert 'another asof' in runner.completeness_refusal(dict(ok, asof='2026-09-25'), d, set(), [])
+    assert 'LOST share' in runner.completeness_refusal(dict(ok, lost_share=0.06), d, set(), [])
+    assert 'liquid' in runner.completeness_refusal(dict(ok, liquid_ratio=0.97), d, set(), [])
+    assert 'X' in runner.completeness_refusal(ok, d, {'X'}, [])
+    assert 'X' in runner.completeness_refusal(ok, d, set(), ['X'])
+    assert 'H' in runner.completeness_refusal(ok, d, {'H'}, [], missing_bar={'H'})
+
+
+def test_completeness_info_liquid_coverage():
+    panel, dates = make_panel({'LIQ': (50, 0.0, 1e7, 0.0), 'DORM': (50, 0.0, 1e3, 0.0), 'STALE': (50, 0.0, 1e7, 0.0)})
+    panel = panel[~((panel['symbol'] == 'STALE') & (panel['bar_date'] == dates[-1]))]
+    info = runner.completeness_info(10, panel, ['G'], dates[-1].date())
+    assert info['n_liquid'] == 2 and info['liquid_with_asof'] == 1 and info['liquid_ratio'] == 0.5
+    assert info['with_asof_bar'] == 2 and info['lost_share'] == 0.1
+
+
+@pytest.mark.parametrize('kw', [dict(write_completeness=False), dict(stale=3), dict(lost=['S24', 'S23', 'S22'])])
+def test_submit_refuses_on_bad_completeness_and_places_nothing(monkeypatch, tmp_path, caplog, kw):
+    c, args, panel, dates, now = _run_world(monkeypatch, tmp_path, **kw)
+    monkeypatch.setattr(runner, 'execute', lambda *a, **k: pytest.fail('execute must not run'))
+    with caplog.at_level('ERROR'):
+        rc = runner.run(args, c, None, now)
+    assert rc == 2 and 'MOM REFUSED: completeness' in caplog.text
+    c.trading_client.submit_order.assert_not_called()
+
+
+def test_force_does_not_override_completeness_refusal(monkeypatch, tmp_path):
+    c, args, *_ , now = _run_world(monkeypatch, tmp_path, write_completeness=False)
+    args.force = True
+    monkeypatch.setattr(runner, 'execute', lambda *a, **k: pytest.fail('execute must not run'))
+    assert runner.run(args, c, None, now) == 2
+
+
+def test_refusal_telegram_line_carries_refused(monkeypatch, tmp_path):
+    c, args, *_, now = _run_world(monkeypatch, tmp_path, write_completeness=False)
+    sent = []
+    notifier = MagicMock()
+    notifier.send_message_sync.side_effect = sent.append
+    assert runner.run(args, c, notifier, now) == 2
+    assert len(sent) == 1 and 'REFUSED' in sent[0] and sent[0].startswith('[MOM]')
+
+
+def test_fresh_fetch_persists_completeness(monkeypatch, tmp_path):
+    c, args, panel, dates, now = _run_world(monkeypatch, tmp_path, write_completeness=False)
+    args.skip_fetch, args.submit = False, False
+    monkeypatch.setattr(runner, 'fetch_panel', lambda client, syms, asof: (panel, ['GONE']))
+    assert runner.run(args, c, None, now) == 0
+    info = runner.read_completeness(dates[-1].date())
+    assert info['lost'] == ['GONE'] and info['requested'] == 26
+
+
+def test_state_persisted_right_after_execute_even_if_later_step_crashes(monkeypatch, tmp_path, capsys):
+    """C2: official_opens raises after execute -> last_rebalance is already on disk; a same-day rerun is a no-op."""
+    c, args, panel, dates, now = _run_world(monkeypatch, tmp_path)
+    args.force = False
+    monkeypatch.setattr(runner, 'execute', lambda *a, **k: [])
+    monkeypatch.setattr(runner, 'sync_state_from_broker', lambda client, state, eq: None)
+    monkeypatch.setattr(runner, 'official_opens', lambda *a, **k: (_ for _ in ()).throw(RuntimeError('boom')))
+    with pytest.raises(RuntimeError):
+        runner.run(args, c, None, now)
+    st = json.loads((tmp_path / 'state.json').read_text())
+    assert st['last_rebalance'] == '2026-10-05' and st['last_rebalance_run']
+    assert runner.run(args, c, None, now) == 0
+    assert 'already rebalanced' in capsys.readouterr().out
+
+
+def _asset_client(fractionable_by_sym):
+    c = fake_client()
+    c.trading_client.get_asset.side_effect = lambda s: MagicMock(fractionable=fractionable_by_sym.get(s, True))
+    c.trading_client.submit_order.side_effect = lambda req: MagicMock()
+    return c
+
+
+def test_non_fractionable_buy_is_whole_shares_and_residual_recorded(monkeypatch):
+    c = _asset_client({'WHOLE': False})
+    monkeypatch.setattr(runner, 'poll_fills', lambda client, coids, **k: {x: {'status': 'filled', 'qty': 1, 'avg': 1.0}
+                                                                          for x in coids})
+    orders = [{'symbol': 'WHOLE', 'side': 'buy', 'notional': 1000.0, 'full_exit': False},
+              {'symbol': 'FRAC', 'side': 'buy', 'notional': 1000.0, 'full_exit': False}]
+    runner.execute(c, orders, {'WHOLE': 300.0, 'FRAC': 300.0}, {}, date(2026, 10, 5))
+    reqs = {r[0][0].symbol: r[0][0] for r in c.trading_client.submit_order.call_args_list}
+    assert reqs['WHOLE'].qty == 3 and reqs['WHOLE'].notional is None
+    assert reqs['FRAC'].notional == 1000.0
+    assert orders[0]['whole_qty'] == 3 and orders[0]['residual'] == pytest.approx(100.0)
+    assert 'whole 3 sh' in runner.format_orders(['WHOLE'], pd.DataFrame({'signal': [1.0], 'close': [300.0]},
+                                                index=['WHOLE']), 1000.0, orders)
+
+
+def test_non_fractionable_zero_shares_is_skipped_with_warning(monkeypatch, caplog):
+    c = _asset_client({'PRICEY': False})
+    monkeypatch.setattr(runner, 'poll_fills', lambda client, coids, **k: {})
+    orders = [{'symbol': 'PRICEY', 'side': 'buy', 'notional': 100.0, 'full_exit': False}]
+    with caplog.at_level('WARNING'):
+        runner.execute(c, orders, {'PRICEY': 500.0}, {}, date(2026, 10, 5))
+    c.trading_client.submit_order.assert_not_called()
+    assert 'PRICEY' in caplog.text and 'non-fractionable' in caplog.text
+
+
+def test_asset_lookup_failure_falls_back_to_notional_with_warning(caplog):
+    c = fake_client()
+    c.trading_client.get_asset.side_effect = Exception('api down')
+    o = {'symbol': 'AAA', 'side': 'buy', 'notional': 100.0, 'full_exit': False}
+    with caplog.at_level('WARNING'):
+        runner.apply_fractionable(c, o, {'AAA': 10.0})
+    assert 'whole_qty' not in o and 'AAA' in caplog.text
+
+
+def test_gate_label_explicit_for_missing_and_stale_gate():
+    assert runner.gate_label(None) == 'gate n/a (full size)'
+    info = dict(_info(0.2), date=date(2026, 9, 30))
+    assert runner.gate_label(info, asof=date(2026, 10, 2)).startswith('gate STALE')
+    assert runner.gate_label(info, asof=date(2026, 9, 30)) == 'gate ON (p20)'
