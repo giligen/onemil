@@ -54,8 +54,10 @@ import calendar as calendar_mod
 import csv
 import logging
 import os
+import re
 import sys
-from datetime import date, datetime, time as dtime, timezone
+import time
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from typing import Dict, List, Optional, Set
 from zoneinfo import ZoneInfo
 
@@ -85,8 +87,14 @@ LATE_WINDOW_END = dtime(15, 59)
 FALLBACK_LIMIT_BUFFER = 0.003  # marketable cushion (30 bps) over the latest trade so the DAY limit crosses the spread
 LEDGER_PATH = os.path.join(ROOT, 'logs', 'tom_sleeve_ledger.csv')
 LEDGER_FIELDS = ['date', 'action', 'symbol', 'qty', 'ref_price', 'order_id', 'status',
-                  'client_order_id', 'timestamp_utc', 'partial_entry']
+                  'client_order_id', 'timestamp_utc', 'partial_entry', 'deviation']
 TG_PREFIX = '[TOM]'
+_sleep = time.sleep  # indirection so tests can skip the cancel-confirm poll
+LIVE_STATUSES = ('new', 'accepted', 'pending_new', 'partially_filled', 'pending_cancel', 'pending_replace',
+                 'accepted_for_bidding', 'held')  # order still working at the broker: blocks a resubmit
+DEAD_STATUSES = ('expired', 'canceled', 'rejected')  # terminal WITHOUT a fill: the leg is still owed
+CANCEL_POLL_SECONDS = 10
+_ORDER_ACTIONS = ('entry', 'exit', 'late_fallback_replace')
 ACTIVE_STATUSES = ('submitted', 'filled')  # ledger statuses that count as "this leg is in effect"
 
 
@@ -96,6 +104,8 @@ ACTIVE_STATUSES = ('submitted', 'filled')  # ledger statuses that count as "this
 
 def _to_date(v) -> date:
     """Normalize an Alpaca calendar 'date' field (date or datetime) to a plain date."""
+    if isinstance(v, str):
+        return date.fromisoformat(v[:10])
     return v.date() if isinstance(v, datetime) else v
 
 
@@ -223,25 +233,28 @@ def append_ledger_row(row: Dict, path: str = LEDGER_PATH) -> None:
         w.writerow(row)
 
 
+def _leg(client_order_id: str) -> str:
+    """'in' or 'out' for 'tom-YYYYMM-SYM-in|out[-rN|-mkt]'; '' if the id is not a tom id."""
+    parts = (client_order_id or '').split('-')
+    return parts[3] if len(parts) >= 4 and parts[0] == 'tom' and parts[3] in ('in', 'out') else ''
+
+
 def open_tom_symbols(ledger_rows: List[Dict]) -> Set[str]:
-    """Symbols the ledger believes the sleeve currently holds: an 'entry' row with no later 'exit'
-    row for that symbol. Rows are read in file (append) order, which is chronological.
+    """Symbols the ledger believes the sleeve currently holds. Rows are read in append (chronological)
+    order: an active entry-leg row adds the symbol, an active exit-leg row removes it; a *_fillcheck
+    row that resolved WITHOUT a fill undoes the tentative row before it -- an unfilled entry (the
+    2026-09-30 SPY/IWM case) was never entered, an unfilled EXIT (the 2026-10-05 QQQ MOC) means the
+    position is still at the broker and still owed.
     """
     held: Set[str] = set()
     for row in ledger_rows:
-        action = row.get('action')
+        action = row.get('action') or ''
         status = row.get('status')
-        if action == 'entry' and status in ACTIVE_STATUSES:
-            held.add(row['symbol'])
-        elif action == 'exit' and status in ACTIVE_STATUSES:
-            held.discard(row['symbol'])
-        elif action == 'entry_fillcheck' and status != 'filled':
-            # The entry order resolved WITHOUT filling (canceled/rejected/expired — the 2026-09-30
-            # SPY/IWM case). It was tentatively "held" by the 'submitted' row above; honesty means
-            # this symbol was never actually entered this month, so clear it (else it is falsely
-            # locked out of every future month's entry — open_tom_symbols would never see a matching
-            # 'exit' row to clear a position that was never really opened).
-            held.discard(row['symbol'])
+        leg = _leg(row.get('client_order_id')) or ('in' if action.startswith('entry') else 'out')
+        if action in _ORDER_ACTIONS and status in ACTIVE_STATUSES:
+            (held.add if leg == 'in' else held.discard)(row['symbol'])
+        elif action.endswith('_fillcheck') and status != 'filled':
+            (held.discard if leg == 'in' else held.add)(row['symbol'])
     return held
 
 
@@ -355,6 +368,142 @@ def submit_fallback_limit_buy_order(alpaca_client: AlpacaClient, symbol: str, qt
 
 
 # ---------------------------------------------------------------------------
+# Fill-aware idempotency, late fallback and next-session catch-up (2026-10-05 QQQ MOC incident)
+# ---------------------------------------------------------------------------
+
+def _norm_status(raw) -> str:
+    """'OrderStatus.NEW' / enum / 'new' -> 'new'."""
+    return str(getattr(raw, 'value', raw) or 'unknown').split('.')[-1].lower()
+
+
+def _base_coid(coid: str) -> str:
+    """Strip a '-rN' / '-mkt' retry suffix: the leg's original client_order_id."""
+    return re.sub(r'-(r\d+|mkt)$', '', coid)
+
+
+def chain_state(alpaca_client: AlpacaClient, base: str, ledger_rows: List[Dict],
+                open_orders: Dict[str, str]) -> Dict:
+    """State of one leg across its whole id chain (base, base-r1.., base-mkt). `open_orders` maps
+    broker-open client_order_id -> order id. Returns {'state': none|live|filled|dead, 'coid', 'order_id',
+    'retries'}: filled > live > dead > none. A terminal ledger *_fillcheck row is trusted, otherwise the
+    broker is asked (get_order); a failed lookup is ERROR-logged and treated as LIVE so we never
+    double-submit on an unknown."""
+    chain = {}
+    for r in ledger_rows:
+        c = r.get('client_order_id') or ''
+        if r.get('action') in _ORDER_ACTIONS and (c == base or _base_coid(c) == base):
+            chain[c] = r.get('order_id')
+    for c, oid in open_orders.items():
+        if c == base or _base_coid(c) == base:
+            chain.setdefault(c, oid)
+    retries = sum(1 for c in chain if re.search(r'-r\d+$', c))
+    if not chain:
+        return {'state': 'none', 'coid': None, 'order_id': None, 'retries': 0}
+    dead = None
+    for c, oid in chain.items():
+        fc = [r for r in ledger_rows if r.get('client_order_id') == c and (r.get('action') or '').endswith('_fillcheck')]
+        if c in open_orders:
+            status = 'new'
+        elif fc:
+            status = _norm_status(fc[-1].get('status'))
+        else:
+            try:
+                status = _norm_status(alpaca_client.get_order(oid).get('status'))
+            except Exception as e:
+                logger.error(f"tom_sleeve: get_order({oid}) for {c} failed ({e}) — treating as LIVE, no resubmit")
+                status = 'new'
+        if status == 'filled':
+            return {'state': 'filled', 'coid': c, 'order_id': oid, 'retries': retries}
+        if status in DEAD_STATUSES:
+            dead = {'state': 'dead', 'coid': c, 'order_id': oid, 'retries': retries, 'status': status}
+        else:
+            if status not in LIVE_STATUSES:
+                logger.warning(f"tom_sleeve: {c} has unrecognised status {status!r} — treating as live")
+            return {'state': 'live', 'coid': c, 'order_id': oid, 'retries': retries, 'status': status}
+    return dead
+
+
+def _ledger_row(today, action, symbol, qty, ref, order_id, status, coid, now_utc, deviation='') -> Dict:
+    """One ledger row dict."""
+    return {'date': str(today), 'action': action, 'symbol': symbol, 'qty': qty, 'ref_price': ref,
+            'order_id': order_id, 'status': status, 'client_order_id': coid,
+            'timestamp_utc': now_utc.isoformat(timespec='seconds'), 'partial_entry': '', 'deviation': deviation}
+
+
+def close_out_dead(state: Dict, symbol: str, qty, today, now_utc: datetime, ledger_path: str,
+                   status: Optional[str] = None) -> None:
+    """Write the terminal *_fillcheck row for a leg id we are about to replace, BEFORE the replacement
+    row, so open_tom_symbols() ends in the right state and check_pending_fills() never re-resolves it."""
+    leg = _leg(state['coid'])
+    append_ledger_row(_ledger_row(today, 'entry_fillcheck' if leg == 'in' else 'exit_fillcheck', symbol, qty, '',
+                                  state['order_id'], status or state.get('status', 'expired'), state['coid'],
+                                  now_utc), ledger_path)
+
+
+def cancel_and_confirm(alpaca_client: AlpacaClient, order_id: str) -> str:
+    """Cancel then poll get_order up to CANCEL_POLL_SECONDS. Returns the terminal status
+    ('canceled'/'expired'/'rejected'/'filled') or 'unconfirmed' (caller must NOT submit a replacement)."""
+    try:
+        alpaca_client.cancel_order(order_id)
+    except Exception as e:
+        logger.error(f"tom_sleeve: cancel_order({order_id}) raised: {e}")
+    for _ in range(CANCEL_POLL_SECONDS):
+        try:
+            st = _norm_status(alpaca_client.get_order(order_id).get('status'))
+        except Exception as e:
+            logger.warning(f"tom_sleeve: cancel poll get_order({order_id}) failed: {e}")
+            st = 'unknown'
+        if st in DEAD_STATUSES or st == 'filled':
+            return st
+        _sleep(1)
+    return 'unconfirmed'
+
+
+def submit_market_buy_order(alpaca_client: AlpacaClient, symbol: str, qty: int, client_order_id: str) -> Dict:
+    """Plain DAY market BUY (late-fallback entry replacement)."""
+    if symbol not in SYMBOLS or not client_order_id.startswith('tom-'):
+        raise ValueError(f"refusing market buy {symbol!r} {client_order_id!r}")
+    from alpaca.trading.requests import MarketOrderRequest
+    from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
+    try:
+        order = alpaca_client.trading_client.submit_order(MarketOrderRequest(
+            symbol=symbol, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.DAY,
+            order_class=OrderClass.SIMPLE, client_order_id=client_order_id))
+    except AlpacaAPIError:
+        raise
+    except Exception as e:
+        logger.error(f"tom_sleeve: market buy submit failed for {symbol}: {e}")
+        raise AlpacaAPIError(f"Failed to submit market buy for {symbol}: {e}")
+    return {'id': str(getattr(order, 'id', '') or ''), 'status': _norm_status(getattr(order, 'status', '')),
+            'symbol': symbol, 'qty': qty}
+
+
+def owed_exits(ledger_rows: List[Dict], today: date, alpaca_client: AlpacaClient) -> Dict[str, Dict]:
+    """Symbols whose exit was submitted on an EARLIER session, never filled, and are still held per
+    ledger: {symbol: {'base': original exit coid, 'sessions': trading sessions late}}."""
+    held = open_tom_symbols(ledger_rows)
+    last_exit: Dict[str, Dict] = {}
+    for r in ledger_rows:
+        if r.get('action') == 'entry':
+            last_exit.pop(r['symbol'], None)
+        elif r.get('action') == 'exit':
+            last_exit[r['symbol']] = r
+    out = {}
+    for sym in held:
+        r = last_exit.get(sym)
+        if not r or _to_date(r['date']) >= today:
+            continue
+        d0 = _to_date(r['date'])
+        try:
+            n = len([c for c in alpaca_client.get_market_calendar(d0, today) if _to_date(c['date']) > d0])
+        except Exception as e:
+            logger.error(f"tom_sleeve: calendar lookup for catch-up failed ({e}) — counting weekdays")
+            n = sum(1 for k in range(1, (today - d0).days + 1) if (d0 + timedelta(k)).weekday() < 5)
+        out[sym] = {'base': _base_coid(r['client_order_id']), 'sessions': max(n, 1)}
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Core run
 # ---------------------------------------------------------------------------
 
@@ -373,8 +522,10 @@ def run(alpaca_client: AlpacaClient, notifier: Optional[TelegramNotifier], now_u
         logger.info(f"tom_sleeve: {msg}")
         return msg
 
+    ledger_rows = read_ledger(ledger_path)
     action = classify_day(today, alpaca_client)
-    if action == 'none':
+    owed = owed_exits(ledger_rows, today, alpaca_client) if action != 'exit' else {}
+    if action == 'none' and not owed:
         msg = f"{today} is not a turn-of-month entry or exit session — no-op"
         logger.info(f"tom_sleeve: {msg}")
         return msg
@@ -385,15 +536,16 @@ def run(alpaca_client: AlpacaClient, notifier: Optional[TelegramNotifier], now_u
         logger.warning(f"tom_sleeve: {msg}")
         return msg
 
-    ledger_rows = read_ledger(ledger_path)
     held = open_tom_symbols(ledger_rows)
-    existing_coids = {r['client_order_id'] for r in ledger_rows}
     try:
-        open_broker_coids = {o['client_order_id'] for o in alpaca_client.get_open_orders() if o.get('client_order_id')}
+        open_orders = {o['client_order_id']: o.get('id') for o in alpaca_client.get_open_orders()
+                       if o.get('client_order_id')}
     except AlpacaAPIError as e:
         logger.error(f"tom_sleeve: get_open_orders failed, proceeding on ledger state alone: {e}")
-        open_broker_coids = set()
+        open_orders = {}
 
+    moc_window = in_action_window(now_et)
+    late_window = in_late_window(now_et)
     lines: List[str] = []
     if action == 'entry':
         assert_buying_power(alpaca_client)
@@ -403,21 +555,29 @@ def run(alpaca_client: AlpacaClient, notifier: Optional[TelegramNotifier], now_u
             logger.error(f"tom_sleeve: get_latest_trades failed, cannot size entries: {e}")
             return f"{today} entry day — price fetch failed, no orders sent ({e})"
 
-        moc_window = in_action_window(now_et)
-        late_window = in_late_window(now_et)
         for symbol in SYMBOLS:
             is_moc = symbol in MOC_RELIABLE_SYMBOLS
-            if is_moc and not moc_window:
+            coid = _client_order_id(today, symbol, 'in')
+            st = chain_state(alpaca_client, coid, ledger_rows, open_orders)
+            if st['state'] == 'filled':
+                logger.info(f"tom_sleeve: {st['coid']} filled — skip (idempotent)")
+                continue
+            if st['state'] == 'live':
+                if late_window and not st['coid'].endswith('-mkt'):
+                    line = _late_replace(alpaca_client, notifier, st, symbol, 'in', None, today, now_utc,
+                                         ledger_path, dry_run)
+                    if line:
+                        lines.append(line)
+                else:
+                    logger.info(f"tom_sleeve: {st['coid']} live ({st['status']}) — skip (idempotent)")
+                continue
+            if is_moc and not moc_window and not (late_window and st['state'] == 'dead'):
                 logger.info(f"tom_sleeve: {symbol} MOC window not active this tick — skip")
                 continue
             if not is_moc and not late_window:
                 logger.info(f"tom_sleeve: {symbol} late fallback window not active this tick — skip")
                 continue
-            coid = _client_order_id(today, symbol, 'in')
-            if coid in existing_coids or coid in open_broker_coids:
-                logger.info(f"tom_sleeve: {coid} already exists — skip (idempotent)")
-                continue
-            if symbol in held:
+            if st['state'] == 'none' and symbol in held:
                 logger.warning(f"tom_sleeve: {symbol} tom-position already held per ledger — "
                                 f"skipping re-entry (was a prior exit missed?)")
                 continue
@@ -429,66 +589,148 @@ def run(alpaca_client: AlpacaClient, notifier: Optional[TelegramNotifier], now_u
             if qty <= 0:
                 logger.error(f"tom_sleeve: computed qty<=0 for {symbol} at ${price:.2f} — skipping")
                 continue
-            order_kind = 'MOC' if is_moc else 'LIMIT'
+            use_moc = is_moc and moc_window
+            order_kind = 'MOC' if use_moc else 'LIMIT'
+            send_coid = coid
+            if st['state'] == 'dead':
+                send_coid = f"{coid}-r{st['retries'] + 1}"
+                logger.warning(f"tom_sleeve: {st['coid']} {st['status']} unfilled — resubmitting as {send_coid}")
             if dry_run:
                 lines.append(f"DRY-RUN would BUY {order_kind} {qty} {symbol} (~${price:.2f} -> "
-                              f"~${qty * price:,.0f}) id={coid}")
+                              f"~${qty * price:,.0f}) id={send_coid}")
                 continue
-            if is_moc:
-                result = submit_moc_buy_order(alpaca_client, symbol, qty, coid)
+            if st['state'] == 'dead':
+                close_out_dead(st, symbol, qty, today, now_utc, ledger_path)
+            if use_moc:
+                result = submit_moc_buy_order(alpaca_client, symbol, qty, send_coid)
             else:
-                result = submit_fallback_limit_buy_order(alpaca_client, symbol, qty, price, coid)
-            append_ledger_row({
-                'date': str(today), 'action': 'entry', 'symbol': symbol, 'qty': qty,
-                'ref_price': f"{price:.4f}", 'order_id': result['id'], 'status': 'submitted',
-                'client_order_id': coid, 'timestamp_utc': now_utc.isoformat(timespec='seconds'),
-                'partial_entry': '',
-            }, ledger_path)
+                result = submit_fallback_limit_buy_order(alpaca_client, symbol, qty, price, send_coid)
+            append_ledger_row(_ledger_row(today, 'entry', symbol, qty, f"{price:.4f}", result['id'],
+                                           'submitted', send_coid, now_utc), ledger_path)
             msg = (f"BUY {order_kind} {qty} {symbol} submitted (~${qty * price:,.0f}) "
                    f"id={result['id']} status={result['status']}")
             notify(notifier, msg)
             lines.append(msg)
-    else:  # exit
+        for sym, info in _unreentered_entries(ledger_rows, today).items():
+            logger.warning(f"tom_sleeve: {sym} entry owed since {info} was NOT re-entered (entry window gone)")
+    # Exit leg: today's exit session targets (all held) plus any exit owed from an earlier session.
+    targets: Dict[str, Dict] = {}
+    if action == 'exit':
+        for symbol in SYMBOLS:
+            base = _client_order_id(today, symbol, 'out')
+            tracked = any(r.get('client_order_id') and _base_coid(r['client_order_id']) == base for r in ledger_rows)
+            if symbol in held or tracked or base in open_orders:
+                targets[symbol] = {'base': base, 'sessions': 0}
+            else:
+                logger.warning(f"tom_sleeve: no tracked tom position for {symbol} — nothing to exit, skip")
+    targets.update(owed)
+    if targets:
         try:
             positions = {p['symbol']: p['qty'] for p in alpaca_client.get_open_positions()}
         except AlpacaAPIError as e:
             logger.error(f"tom_sleeve: get_open_positions failed, cannot verify exit quantities: {e}")
             return f"{today} exit day — position fetch failed, no orders sent ({e})"
-
-        for symbol in SYMBOLS:
-            coid = _client_order_id(today, symbol, 'out')
-            if coid in existing_coids or coid in open_broker_coids:
-                logger.info(f"tom_sleeve: {coid} already exists — skip (idempotent)")
-                continue
-            if symbol not in held:
-                logger.warning(f"tom_sleeve: no tracked tom position for {symbol} — nothing to exit, skip")
-                continue
-            qty = positions.get(symbol, 0)
-            ledger_qty = _last_entry_qty(ledger_rows, symbol)
-            if qty <= 0:
-                logger.error(f"tom_sleeve: ledger shows an open {symbol} tom position (entry qty "
-                              f"{ledger_qty}) but the broker reports {qty} shares — nothing to sell")
-                continue
-            if ledger_qty is not None and qty != ledger_qty:
-                logger.warning(f"tom_sleeve: {symbol} broker qty {qty} != logged entry qty {ledger_qty} "
-                                f"— selling the broker qty (source of truth for what is actually held)")
-            if dry_run:
-                lines.append(f"DRY-RUN would SELL MOC {qty} {symbol} id={coid}")
-                continue
-            result = alpaca_client.submit_moc_sell_order(symbol, qty, client_order_id=coid)
-            append_ledger_row({
-                'date': str(today), 'action': 'exit', 'symbol': symbol, 'qty': qty,
-                'ref_price': '', 'order_id': result['id'], 'status': 'submitted',
-                'client_order_id': coid, 'timestamp_utc': now_utc.isoformat(timespec='seconds'),
-                'partial_entry': '',
-            }, ledger_path)
-            msg = f"SELL MOC {qty} {symbol} submitted id={result['id']} status={result['status']}"
-            notify(notifier, msg)
-            lines.append(msg)
+        for symbol, info in targets.items():
+            line = _process_exit(alpaca_client, notifier, symbol, info, positions, ledger_rows, open_orders,
+                                 today, now_utc, moc_window, late_window, ledger_path, dry_run)
+            if line:
+                lines.append(line)
 
     if not lines:
         return f"{today} {action} day — nothing to do (all idempotent / skipped, see log)"
     return "; ".join(lines)
+
+
+def _unreentered_entries(ledger_rows: List[Dict], today: date) -> Dict[str, str]:
+    """Earlier-session entries that resolved unfilled and were never replaced (symbol -> date)."""
+    held = open_tom_symbols(ledger_rows)
+    out = {}
+    for r in ledger_rows:
+        if (r.get('action') == 'entry_fillcheck' and r.get('status') != 'filled'
+                and r['symbol'] not in held and _to_date(r['date']) < today):
+            out[r['symbol']] = r['date']
+    return out
+
+
+def _late_replace(alpaca_client, notifier, st, symbol, leg, qty, today, now_utc, ledger_path, dry_run) -> Optional[str]:
+    """Late window, live-but-unfilled order: cancel, confirm, then MARKET (`<coid>-mkt`).
+    Cancel not confirmed -> ERROR + Telegram, NO second order."""
+    mkt = f"{_base_coid(st['coid'])}-mkt"
+    if qty is None:  # entry: reuse the ledger qty of the original order
+        qty = next((int(float(r['qty'])) for r in read_ledger(ledger_path) if r.get('client_order_id') == st['coid']), 0)
+    verb = 'BUY' if leg == 'in' else 'SELL'
+    if dry_run:
+        return f"DRY-RUN would CANCEL {st['coid']} ({st['status']}) then {verb} MARKET {qty} {symbol} id={mkt}"
+    status = cancel_and_confirm(alpaca_client, st['order_id'])
+    if status == 'filled':
+        logger.info(f"tom_sleeve: {st['coid']} filled while cancelling — nothing to replace")
+        return None
+    if status == 'unconfirmed':
+        msg = f"{symbol} {leg} order {st['coid']} UNFILLED, cancel not confirmed in {CANCEL_POLL_SECONDS}s — NOT replacing"
+        logger.error(f"tom_sleeve: {msg}")
+        notify(notifier, msg)
+        return msg
+    close_out_dead(st, symbol, qty, today, now_utc, ledger_path, status='canceled')
+    if leg == 'in':
+        result = submit_market_buy_order(alpaca_client, symbol, qty, mkt)
+    else:
+        result = alpaca_client.submit_market_sell_order(symbol, qty, client_order_id=mkt)
+    append_ledger_row(_ledger_row(today, 'late_fallback_replace', symbol, qty, '', result['id'], 'submitted',
+                                   mkt, now_utc), ledger_path)
+    msg = (f"{symbol} {leg} order {st['coid']} unfilled at the close — cancelled, {verb} MARKET {qty} "
+           f"submitted as {mkt} id={result['id']}")
+    logger.warning(f"tom_sleeve: {msg}")
+    notify(notifier, msg)
+    return msg
+
+
+def _process_exit(alpaca_client, notifier, symbol, info, positions, ledger_rows, open_orders, today, now_utc,
+                  moc_window, late_window, ledger_path, dry_run) -> Optional[str]:
+    """One symbol's exit leg: fill-aware idempotency, late market fallback, catch-up tagging."""
+    base = info['base']
+    deviation = f"late_exit_{info['sessions']}_sessions" if info['sessions'] else ''
+    qty = positions.get(symbol, 0)
+    st = chain_state(alpaca_client, base, ledger_rows, open_orders)
+    if st['state'] == 'filled':
+        logger.info(f"tom_sleeve: {st['coid']} filled — skip (idempotent)")
+        return None
+    if qty <= 0 and st['state'] != 'live':
+        logger.error(f"tom_sleeve: ledger shows an open {symbol} tom position but the broker reports "
+                      f"{qty} shares — nothing to sell")
+        return None
+    ledger_qty = _last_entry_qty(ledger_rows, symbol)
+    if st['state'] == 'live':
+        if late_window and not st['coid'].endswith('-mkt'):
+            return _late_replace(alpaca_client, notifier, st, symbol, 'out', qty, today, now_utc, ledger_path, dry_run)
+        logger.info(f"tom_sleeve: {st['coid']} live ({st['status']}) — skip (idempotent)")
+        return None
+    if not (moc_window or late_window):
+        return None
+    if ledger_qty is not None and qty != ledger_qty:
+        logger.warning(f"tom_sleeve: {symbol} broker qty {qty} != logged entry qty {ledger_qty} "
+                        f"— selling the broker qty (source of truth for what is actually held)")
+    send_coid = base
+    if st['state'] == 'dead':
+        send_coid = f"{base}-r{st['retries'] + 1}"
+        logger.warning(f"tom_sleeve: {st['coid']} {st['status']} unfilled — resubmitting as {send_coid}")
+    if deviation:
+        logger.warning(f"tom_sleeve: {symbol} exit owed since an earlier session — {deviation}")
+    use_moc = moc_window
+    kind = 'MOC' if use_moc else 'MARKET'
+    if dry_run:
+        return f"DRY-RUN would SELL {kind} {qty} {symbol} id={send_coid}" + (f" deviation={deviation}" if deviation else '')
+    if st['state'] == 'dead':
+        close_out_dead(st, symbol, qty, today, now_utc, ledger_path)
+    if use_moc:
+        result = alpaca_client.submit_moc_sell_order(symbol, qty, client_order_id=send_coid)
+    else:
+        result = alpaca_client.submit_market_sell_order(symbol, qty, client_order_id=send_coid)
+    append_ledger_row(_ledger_row(today, 'exit', symbol, qty, '', result['id'], 'submitted', send_coid, now_utc,
+                                   deviation), ledger_path)
+    msg = f"SELL {kind} {qty} {symbol} submitted id={result['id']} status={result['status']}" + \
+          (f" [{deviation}]" if deviation else '')
+    notify(notifier, msg)
+    return msg
 
 
 # Human-readable reason per terminal status, logged and Telegram'd at every fill check so a partial
@@ -537,7 +779,7 @@ def check_pending_fills(alpaca_client: AlpacaClient, notifier: Optional[Telegram
         status = order.get('status', 'unknown')
         if status in ('filled', 'canceled', 'rejected', 'expired'):
             fill_price = order.get('filled_avg_price')
-            is_entry = row.get('action') == 'entry'
+            is_entry = _leg(row.get('client_order_id')) == 'in'
             partial = is_entry and status != 'filled'
             reason = _TERMINAL_STATUS_REASON.get(status)
             if reason is None:
@@ -593,6 +835,7 @@ def main() -> int:
     ap.add_argument('--dry-run', action='store_true', help="print intended actions, submit nothing")
     ap.add_argument('--status', action='store_true', help="print the ledger and open sleeve, take no action")
     ap.add_argument('--verbose', action='store_true')
+    ap.add_argument('--now-et', help="rehearsal only (needs --dry-run): pretend now is 'YYYY-MM-DD HH:MM' ET")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
@@ -622,6 +865,11 @@ def main() -> int:
         return 0
 
     now_utc = datetime.now(timezone.utc)
+    if args.now_et:
+        if not args.dry_run:
+            logger.error("tom_sleeve: --now-et is only allowed with --dry-run")
+            return 1
+        now_utc = datetime.strptime(args.now_et, '%Y-%m-%d %H:%M').replace(tzinfo=ET).astimezone(timezone.utc)
     summary = run(alpaca_client, notifier, now_utc, dry_run=args.dry_run)
     print(summary)
     if not args.dry_run:

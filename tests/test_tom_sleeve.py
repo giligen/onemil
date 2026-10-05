@@ -421,3 +421,97 @@ def test_in_late_window_boundaries():
     assert tom.in_late_window(et_dt(2026, 9, 30, 15, 59).astimezone(tom.ET))
     assert not tom.in_late_window(et_dt(2026, 9, 30, 16, 0).astimezone(tom.ET))
     assert not tom.in_action_window(et_dt(2026, 9, 30, 15, 57).astimezone(tom.ET))
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-05 fix: fill-aware idempotency, late market fallback, next-session catch-up
+# ---------------------------------------------------------------------------
+
+def _row(date, action, sym, coid, status, order_id=None, qty=26):
+    return {'date': date, 'action': action, 'symbol': sym, 'qty': qty, 'ref_price': '',
+            'order_id': order_id or f'id-{coid}', 'status': status, 'client_order_id': coid,
+            'timestamp_utc': f'{date}T19:45:00+00:00', 'partial_entry': '', 'deviation': ''}
+
+
+def _qqq_held_ledger(tmp_path, exit_status=None):
+    """QQQ entered (filled) 9/30; optionally an exit submitted 10/5 that resolved `exit_status`."""
+    ledger = str(tmp_path / 'ledger.csv')
+    tom.append_ledger_row(_row('2026-09-30', 'entry', 'QQQ', 'tom-202609-QQQ-in', 'submitted'), ledger)
+    tom.append_ledger_row(_row('2026-09-30', 'entry_fillcheck', 'QQQ', 'tom-202609-QQQ-in', 'filled'), ledger)
+    if exit_status:
+        tom.append_ledger_row(_row('2026-10-05', 'exit', 'QQQ', 'tom-202610-QQQ-out', 'submitted'), ledger)
+        if exit_status != 'pending':
+            tom.append_ledger_row(_row('2026-10-05', 'exit_fillcheck', 'QQQ', 'tom-202610-QQQ-out', exit_status), ledger)
+    return ledger
+
+
+@pytest.fixture(autouse=True)
+def _no_sleep(monkeypatch):
+    monkeypatch.setattr(tom, '_sleep', lambda s: None)
+
+
+def test_expired_exit_id_is_resubmitted_as_r1(tmp_path):
+    ledger = _qqq_held_ledger(tmp_path, 'expired')
+    a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 26}])
+    n = make_notifier()
+    # 10/5 itself, same session, MOC window: expired id is still owed -> -r1
+    tom.run(a, n, et_dt(2026, 10, 5, 15, 45), ledger_path=ledger)
+    a.submit_moc_sell_order.assert_called_once_with('QQQ', 26, client_order_id='tom-202610-QQQ-out-r1')
+
+
+def test_filled_exit_id_is_skipped(tmp_path):
+    ledger = _qqq_held_ledger(tmp_path, 'filled')
+    a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 26}])
+    tom.run(a, make_notifier(), et_dt(2026, 10, 5, 15, 45), ledger_path=ledger)
+    a.submit_moc_sell_order.assert_not_called()
+
+
+def test_live_unfilled_exit_in_late_window_cancels_then_market(tmp_path):
+    ledger = _qqq_held_ledger(tmp_path, 'pending')
+    a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 26}],
+                    open_orders=[{'client_order_id': 'tom-202610-QQQ-out', 'id': 'id-tom-202610-QQQ-out'}])
+    a.get_order.return_value = {'status': 'canceled'}
+    a.submit_market_sell_order = MagicMock(return_value={'id': 'mkt1', 'status': 'accepted'})
+    n = make_notifier()
+    tom.run(a, n, et_dt(2026, 10, 5, 15, 58), ledger_path=ledger)
+    a.cancel_order.assert_called_once_with('id-tom-202610-QQQ-out')
+    a.submit_market_sell_order.assert_called_once_with('QQQ', 26, client_order_id='tom-202610-QQQ-out-mkt')
+    rows = tom.read_ledger(ledger)
+    assert rows[-1]['action'] == 'late_fallback_replace'
+    assert 'QQQ' not in tom.open_tom_symbols(rows)
+    assert any('[TOM]' in c.args[0] for c in n.send_message_sync.call_args_list)
+
+
+def test_late_fallback_unconfirmed_cancel_does_not_double_submit(tmp_path):
+    ledger = _qqq_held_ledger(tmp_path, 'pending')
+    a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 26}],
+                    open_orders=[{'client_order_id': 'tom-202610-QQQ-out', 'id': 'id-tom-202610-QQQ-out'}])
+    a.get_order.return_value = {'status': 'pending_cancel'}
+    a.submit_market_sell_order = MagicMock()
+    tom.run(a, make_notifier(), et_dt(2026, 10, 5, 15, 58), ledger_path=ledger)
+    a.submit_market_sell_order.assert_not_called()
+
+
+def test_owed_exit_next_session_exits_with_deviation_tag(tmp_path):
+    ledger = _qqq_held_ledger(tmp_path, 'expired')
+    a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 26}])
+    n = make_notifier()
+    summary = tom.run(a, n, et_dt(2026, 10, 6, 15, 45), ledger_path=ledger)
+    a.submit_moc_sell_order.assert_called_once_with('QQQ', 26, client_order_id='tom-202610-QQQ-out-r1')
+    last = tom.read_ledger(ledger)[-1]
+    assert last['deviation'] == 'late_exit_1_sessions' and last['action'] == 'exit'
+    assert 'late_exit_1_sessions' in summary
+
+
+def test_owed_exit_dry_run_submits_nothing(tmp_path):
+    ledger = _qqq_held_ledger(tmp_path, 'expired')
+    a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 26}])
+    summary = tom.run(a, None, et_dt(2026, 10, 6, 15, 45), dry_run=True, ledger_path=ledger)
+    assert 'DRY-RUN would SELL MOC 26 QQQ id=tom-202610-QQQ-out-r1' in summary
+    a.submit_moc_sell_order.assert_not_called()
+
+
+def test_midmonth_noop_unchanged_with_flat_ledger(tmp_path):
+    a = make_alpaca()
+    summary = tom.run(a, make_notifier(), et_dt(2026, 10, 14, 15, 45), ledger_path=str(tmp_path / 'l.csv'))
+    assert 'not a turn-of-month' in summary
