@@ -437,7 +437,22 @@ def parse_orb_log(text: str) -> Dict:
             "p1_scored": sorted(p1_scored), "p1_detail": p1_detail,
             "timeouts": sum("Engine tick TIMEOUT" in ln for ln in lines),
             "gap_warn": sum("GAP_GATE" in ln and "| WARNING" in ln for ln in lines),
-            "errors": sum("| ERROR" in ln and "ORB" in ln for ln in lines)}
+            "errors": sum("| ERROR" in ln and "ORB" in ln for ln in lines),
+            "order_fail": order_failures(lines)}
+
+
+ORDER_FAIL_RE = re.compile(r"ORB: (\S+) (submit_entry failed|alpaca submit returned empty)[:]? ?(.*)$")
+
+
+def order_failures(lines: List[str]) -> List[Tuple[str, str]]:
+    """(symbol, reason) for every ORB entry whose submit raised or returned empty (2026-10-05: a client signature
+    mismatch failed every entry for three sessions and the report only counted ERRORs). Reason truncated to 120 chars."""
+    out = []
+    for ln in lines:
+        m = ORDER_FAIL_RE.search(ln)
+        if m:
+            out.append((m.group(1), (m.group(3) or m.group(2)).strip()[:120]))
+    return out
 
 
 def bps(a: float, b: float) -> float:
@@ -562,6 +577,12 @@ def orb_parity_lines(day: str, engine_rows: List[Dict], parsed: Dict, bt_rows: O
     defects = (f"ORB defects: Engine tick TIMEOUT {parsed['timeouts']} | GAP_GATE WARN {parsed['gap_warn']} | "
                f"ERROR {parsed['errors']}")
     lines: List[str] = []
+    fails = parsed.get("order_fail", [])
+    if fails:
+        # ACTION line first: every failed submit is a lost pick, never a count to skim past.
+        lines.append(f"ORB ACTION: {len(fails)} entry submit(s) FAILED -- "
+                     + "; ".join(f"{sym}: {why}" for sym, why in fails[:3])
+                     + (" ..." if len(fails) > 3 else "") + " -- fix before the next session")
     if not parsed["scored"]:
         restart = [b for b in parsed.get("boots", []) if b >= "13:31"]
         why = (f"no SCORED line in the {DECISION_WINDOW_ET[0]}\u2013{DECISION_WINDOW_ET[1]} ET window"
@@ -627,6 +648,8 @@ def orb_parity_lines(day: str, engine_rows: List[Dict], parsed: Dict, bt_rows: O
     bt_pnl = (f"${sum(float(r.get('pnl') or 0) for r in bt_rows):+,.0f}" if bt_rows else "$+0" if bt_rows == [] else "NO-DATA")
     lines.append(f"ORB P&L: day ${pnl:+,.0f} on {len(closed)} exits | BT book {bt_pnl}")
     lines.append(defects)
+    if parsed.get("order_fail"):
+        reasons.insert(0, f"entry submit FAILED x{len(parsed['order_fail'])}")
     if parsed["timeouts"]:
         reasons.append(f"Engine tick TIMEOUT {parsed['timeouts']}")
     if parsed["errors"]:

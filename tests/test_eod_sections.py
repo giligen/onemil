@@ -342,3 +342,16 @@ def test_subset_fallback_and_late_decision_flag():
                                    [], "", _rank(["AAA"], []))
     assert "(subset test - engine scores not logged)" in lines[0] and "late decision (09:46 ET)" in lines[0]
     assert m["clean"] is True
+
+
+def test_orb_failed_submit_is_an_action_line_and_the_first_reason():
+    """2026-10-05: every ORB entry raised TypeError for three sessions; the report must name it, not count it."""
+    log = (_scored("JAGX") + "\n2026-10-05 13:35:07 | ERROR    | trading.orb_engine:5273 | ORB: JAGX submit_entry "
+           "failed: AlpacaClient.submit_stop_bracket_order() got an unexpected keyword argument 'client_order_id'\n"
+           "2026-10-05 13:35:08 | ERROR    | trading.orb_engine:5247 | ORB: CRCG alpaca submit returned empty\n")
+    parsed = es.parse_orb_log(log)
+    assert [s for s, _ in parsed["order_fail"]] == ["JAGX", "CRCG"]
+    assert "client_order_id" in parsed["order_fail"][0][1]
+    lines, m = es.orb_parity_lines(DAY, [], parsed, BT)
+    assert lines[0].startswith("ORB ACTION: 2 entry submit(s) FAILED -- JAGX:")
+    assert m["clean"] is False and m["why"].startswith("entry submit FAILED x2")
