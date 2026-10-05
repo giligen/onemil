@@ -1879,9 +1879,14 @@ class AlpacaClient:
         limit_price: float,
         tp_price: float,
         sl_price: float,
+        client_order_id: Optional[str] = None,
     ) -> Dict:
         """
         Submit a stop-limit bracket order (buy-stop entry + stop loss + take profit).
+
+        `client_order_id`: optional caller-chosen id (≤ 48 chars) forwarded to Alpaca so the order can be
+        re-identified after a client-side timeout (2026-10-05 fix: the ORB engine passed it since 160b70f and every
+        entry raised TypeError — mocked tests never exercised the real signature).
 
         The order triggers when price hits stop_price, then fills at limit_price.
         Used for pre-placing buy-stop orders at breakout levels.
@@ -1917,6 +1922,7 @@ class AlpacaClient:
                 order_class=OrderClass.BRACKET,
                 take_profit={'limit_price': round(tp_price, 2)},
                 stop_loss={'stop_price': round(sl_price, 2)},
+                **({'client_order_id': client_order_id} if client_order_id else {}),
             )
 
             order = self._call_with_timeout(
