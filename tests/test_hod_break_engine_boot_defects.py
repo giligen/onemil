@@ -25,6 +25,7 @@ from data_sources.alpaca_client import AlpacaClient
 from persistence.database import Database
 from trading.stop_monitor import StopMonitor
 from trading.hod_break_engine import HodBreakEngine, Candidate
+from tests.hod_fills_helper import set_our_fills
 from tests.test_hod_break_engine import cfg as hod_cfg
 
 ET = ZoneInfo('America/New_York')
@@ -114,6 +115,7 @@ class TestDefect2AdoptAsFilledAndDBDedup:
 
     def test_adopts_as_filled_and_links_trade_id_into_live_order(self, real_db, mock_alpaca, mock_sm):
         mock_alpaca.get_open_positions.return_value = [{'symbol': 'PRIM', 'qty': 87, 'avg_entry_price': 5.00}]
+        set_our_fills(mock_alpaca, {'PRIM': 87})     # review B2: adoption takes OUR fills
         eng = HodBreakEngine(mock_alpaca, real_db, mock_sm, cfg=hod_cfg())
         eng._roll_session()
         cand = Candidate(symbol='PRIM', day_open=0.0, adv20=0.0)
@@ -129,6 +131,7 @@ class TestDefect2AdoptAsFilledAndDBDedup:
 
     def test_second_boot_restores_via_sync_positions_and_does_not_readopt(self, real_db, mock_alpaca, mock_sm):
         mock_alpaca.get_open_positions.return_value = [{'symbol': 'WRBY', 'qty': 40, 'avg_entry_price': 8.00}]
+        set_our_fills(mock_alpaca, {'WRBY': 40})
         boot1 = HodBreakEngine(mock_alpaca, real_db, mock_sm, cfg=hod_cfg())
         boot1._roll_session()
         boot1.entered_today.add('WRBY')   # this book's own resting order fired earlier this session (record of "ours")
@@ -146,6 +149,7 @@ class TestDefect2AdoptAsFilledAndDBDedup:
     def test_broker_ahead_of_open_db_row_merges_with_weighted_average_price(self, real_db, mock_alpaca, mock_sm):
         trade_id = _seed_row(real_db, 'CONI', 'hod_break', shares=25, fill_price=22.50, order_status='filled', stop=22.00)
         mock_alpaca.get_open_positions.return_value = [{'symbol': 'CONI', 'qty': 112, 'avg_entry_price': 23.00}]
+        set_our_fills(mock_alpaca, {'CONI': 112})
         eng = HodBreakEngine(mock_alpaca, real_db, mock_sm, cfg=hod_cfg())
         eng._roll_session()
         eng._adopt_unregistered_positions_on_boot()

@@ -61,6 +61,7 @@ class TestGetSignedBrokerQty:
         alpaca = MagicMock(); alpaca.get_open_positions.return_value = [{'symbol': 'VECO', 'qty': 11}]
         assert get_signed_broker_qty(alpaca, 'CDNA') == 0
 
-    def test_broker_error_fails_closed_to_flat(self):
+    def test_broker_error_is_unknown_none_not_flat(self):
+        """Review B1 (2026-10-03): an API error is UNKNOWN (None), never 0 -- 0 is reserved for 'genuinely absent'."""
         alpaca = MagicMock(); alpaca.get_open_positions.side_effect = RuntimeError('rate limited')
-        assert get_signed_broker_qty(alpaca, 'CDNA') == 0
+        assert get_signed_broker_qty(alpaca, 'CDNA') is None
