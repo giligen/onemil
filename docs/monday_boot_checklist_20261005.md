@@ -58,3 +58,5 @@ every python run through `bash scripts/research_run.sh` (cage). Nothing is resta
 18. Owner lines still owed: `kill 3792` (fork), move the 11:27 pre-boot pytest cron to 11:00 inside the cage (line in the 10/3 chat).
 
 19. **Scale target (owner 10/3):** sleeve to $40K and ORB to $40K ($1,500 R), each ONLY through its coded gate: sleeve 2 clean rotations -> live $20K 10/19 -> +$10K per 20 trading days realized >= 0; ORB 5 clean parity sessions -> $10K stage -> each stage +40 live fills AND realized stage P&L >= 0. BT at $80K: ~$3-4.5K/mo, stack max DD ~ -$20K. No step is taken on BT numbers.
+
+20. **Tue 10/6 boot (12:30 UTC) carries three fixes untested live:** d6ff6e4 (client_order_id -> entries submit again), 0ea6c23 (preplace provisional vetoes no longer eat the 09:35 budget; reconcile vs the full top-N), a9baeb7 (TOM: QQQ 26 sh exit owed, MOC at 15:45 ET, cancel+market at 15:58 if unfilled). 09:35 ET greps: `[ORB PREPLACE] provisional`, a selection with submits (no "unexpected keyword"), `ORB ACTION` absent in the EOD. Nightly P1 book backfills ~100 pairs once (9ad7… commit).
