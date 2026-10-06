@@ -54,20 +54,31 @@ several seconds).
 **(3) Reconciliation, normal 09:35 tick** — `_reconcile_preplaced`, called
 once from `_check_entries_locked` right after the post-open sweep, gated on
 `_preplace_submitted_today and not _preplace_reconciled_today` (so it can
-never run before the submit timer fires, and never twice). Re-scores the
-preplaced symbols on their now-final `cand.range_data`, re-ranks + dedups
-the same way, then per symbol:
+never run before the submit timer fires, and never twice). **Amended 2026-10-06 (FIX_engine_preplace_budget_spec): ranks ALL
+production candidates on their final `cand.range_data` (the exact comp /
+threshold / skip_q1 / dedup of `_run_pool_selection`, helper
+`_rank_production_final`) and takes the final top-N (`max_concurrent`) — the BT
+rule: ONE top-N at 09:35.** The pre-fix form ranked only the preplaced names
+among themselves (top-len(preplaced) of them) and so kept names far outside the
+real top-N. Then per preplaced symbol:
 - **already filled**, same trigger (± 0.5¢) → kept.
 - **already filled**, trigger differs → WARNING with both levels (parity
   deviation, counted); fill stands, no unwind.
 - **still in the final top-K**, trigger differs (± 0.5¢) → cancel + rebuild
   the plan on the final range/composite/quintile + resubmit (reuses
   `self.planner.build` / `_submit_entry` exactly as the normal path).
-- **dropped from the final top-K** (final range never completed, or scored
-  below threshold, or edged out by dedup) → cancel, **no refill** — the
-  symbol is added to `self._pdr_vetoed_today`, the *same* no-refill slot
-  accounting a post-ranking veto uses, so the slot stays empty everywhere
-  that set is consulted (`_check_entries_locked`, `_run_pool_selection`).
+- **outside the final top-N** (final range never completed, or scored
+  below threshold, or edged out by dedup, or simply ranked below N) → cancel,
+  **no refill** — the symbol is added to `self._pdr_vetoed_today` (never
+  re-entered today) **and** to `self._preplace_dropped_today`: it was never in the
+  BT's top-N, so it holds no budget slot (its DB trade row would otherwise count
+  as 'entered' and shrink the final pass to N−k, e.g. 10/5 would have stopped at
+  rank 6 and again missed DFDV at rank 7). The three slot counts
+  (`_check_entries_locked` cap, `_run_pool_selection` budget, provisional budget)
+  subtract that set.
+- **submit FAILED** (nothing resting) → untouched; the normal
+  `_run_pool_selection` pass re-evaluates it (submitted only if inside the
+  final top-N and not vetoed).
 - **new entrants**: not handled by this method at all — preplaced symbols
   are excluded from the normal ranking pass below (via `plan_submitted` /
   `open_positions` / `_pdr_vetoed_today`), so whatever
@@ -93,13 +104,19 @@ with zero live orders.
 
 - Preplace covers the **production pool only**; add-on pools stay on the
   existing late (09:35+) path.
-- The four post-ranking vetoes (PDR/G1/range-size/catalyst) are evaluated
-  **once**, at provisional-rank time, and are not re-run at reconciliation.
-  PDR/G1 are prior-day-only so this is exact; range-size/catalyst are
-  evaluated on the provisional range/cohort and are not re-checked against
-  the final range — a known conservative simplification (can occasionally
-  veto a symbol that would have passed on final data). Worth revisiting
-  only if the dry-week data shows it matters.
+- **Vetoes (amended 2026-10-06).** The four post-ranking vetoes
+  (PDR/G1/range-size/catalyst) run in the provisional pass with `record=False`:
+  a pure decision that only decides which names get a plan — it NEVER writes
+  `_pdr_vetoed_today` / `plan_submitted` / `rejected_reason` (the 10/5 defect:
+  six provisional vetoes were recorded, the 09:35:25 budget became 8−6=2, SUPV/HOG
+  were re-vetoed and DFDV, the BT's only pick, was never reached). Provisional
+  vetoes live in `ORBEngine._preplace_vetoed` (sym → reason) and are logged
+  `[ORB PREPLACE] provisional <VETO> ...`. The vetoes are applied **once, with
+  recording, by the normal `_run_pool_selection` pass on the final top-N** (BT:
+  one top-N, vetoes once, no refill) — which rebuilds `_pdr_vetoed_today`.
+  Known gap (unchanged): a preplaced name INSIDE the final top-N that passed the
+  provisional vetoes is not re-vetoed on final data (range-size/catalyst are
+  data-dependent) — fills/resting orders stand.
 - The PARITY summary line is logged from inside the same
   `_check_entries_locked` tick as the production ranking pass; if a
   same-tick gate (daily loss limit / kill rails / PDT / time cutoff) trips

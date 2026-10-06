@@ -126,6 +126,14 @@ class); pool-level Benzinga lag audit; news-boost frequency by class.
 ### L7. Entry mechanics
 - **RULE**: pre-placed stop-limit at range_high +30bps, 60min cancel,
   spread gate 300bps, buy-stop guard (never chase past limit).
+- **PREPLACE (flag `entry.preplace_at_close`, 2026-10-06 rule)**: the BT's ONE
+  top-N at 09:35 is the spec. Provisional (09:34:57) vetoes are pure (`record=False`,
+  never touch `_pdr_vetoed_today` / the slot budget); the reconcile ranks ALL
+  production candidates on final ranges, cancels preplaced names outside the final
+  top-N (no refill, they hold no slot), keeps those inside; the normal pass then
+  applies the four vetoes ONCE on the final top-N. Evidence: 10/5 DFDV miss
+  (`docs/review_20261006/DIAG_RESULT.md`); test `tests/test_orb_preplace_budget_20261006.py`;
+  spec `docs/orb_preplace_spec_20260928.md`.
 - **EVIDENCE**: 30bps validated; 150→300 spread loosening kept monsters
   (BKKT/XNDU); guard-skips accepted as live-only divergence (~3% picks).
 

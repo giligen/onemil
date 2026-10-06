@@ -81,7 +81,8 @@ def test_no_marker_means_not_computed_not_zero(tmp_path):
     book.write_text("")
     mk = tmp_path / "m.csv"
     mk.write_text("date,pool_id,candidates,picks\n2026-10-01,P1,5,0\n")
-    assert es.p1_bt_book("2026-10-01", book, mk) == ([], "")
+    rows, why = es.p1_bt_book("2026-10-01", book, mk)   # 699fe0b: the note names the marker
+    assert rows == [] and "marker: candidates 5, picks 0" in why
     rows, why = es.p1_bt_book("2026-10-02", book, mk)
     assert rows is None and "not computed" in why
 

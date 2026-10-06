@@ -518,6 +518,14 @@ class ORBEngine:
         self._preplace_submitted_today = False   # 09:35:00.0 submit fired once/day
         self._preplace_reconciled_today = False  # reconciliation ran once/day
         self._preplace_state: Dict[str, dict] = {}  # sym -> {plan, provisional_range_high/low, submitted, order_id}
+        # 2026-10-06 (FIX_engine_preplace_budget_spec): provisional-pass vetoes
+        # (sym -> reason) live HERE, never in `_pdr_vetoed_today`. A sibling dict,
+        # not a key of `_preplace_state` (that dict is symbol-keyed and iterated).
+        self._preplace_vetoed: Dict[str, str] = {}
+        # Preplaced names the reconcile cancelled for being OUTSIDE the final
+        # top-N: never in the BT's top-N, so they hold no budget slot (their DB
+        # trade row would otherwise count as 'entered' and shrink the final pass).
+        self._preplace_dropped_today: Set[str] = set()
         self._preplace_timers: tuple = ()        # (rank_timer, submit_timer) — kept so tests can inspect/cancel
         self.time_stop_minutes = int(entry_cfg.get('time_stop_minutes', 60))
         self.max_spread_bps = float(entry_cfg.get('max_spread_bps', 300))
@@ -3282,8 +3290,9 @@ class ORBEngine:
         # (2026-07-07 IREZ fix). The vetoed set is in-memory; after a
         # mid-day restart it self-heals — the same names re-rank, re-veto,
         # and re-consume their slots on the first post-restart burst.
-        _slots_used = len(symbols_entered_today
-                          | getattr(self, '_pdr_vetoed_today', set()))
+        _slots_used = len((symbols_entered_today
+                           | getattr(self, '_pdr_vetoed_today', set()))
+                          - getattr(self, '_preplace_dropped_today', set()))
         if _slots_used >= self.max_concurrent:
             return []  # daily cap exhausted (restart-safe via DB + re-veto)
 
@@ -3612,8 +3621,8 @@ class ORBEngine:
         # overshoot the daily slot invariant and replay the IREZ backfill
         # within a single burst.
         budget = self.max_concurrent - len(
-            symbols_entered_today | self._pdr_vetoed_today
-            | set(self.open_positions))
+            (symbols_entered_today | self._pdr_vetoed_today
+             | set(self.open_positions)) - self._preplace_dropped_today)
         if budget <= 0:
             return []
         top_syms = dedup_candidates(
@@ -4017,7 +4026,8 @@ class ORBEngine:
                 scored.sort(key=lambda t: (q_rank.get(t[0].quintile, 99), -t[0].composite))
                 entered = self._symbols_entered_today_db()
                 budget = self.max_concurrent - len(
-                    entered | self._pdr_vetoed_today | set(self.open_positions))
+                    (entered | self._pdr_vetoed_today | set(self.open_positions))
+                    - self._preplace_dropped_today)
                 if budget <= 0:
                     logger.info("[ORB PREPLACE] provisional rank — no slot budget left")
                     self._preplace_ranked_today = True
@@ -4027,11 +4037,17 @@ class ORBEngine:
                     by_family=self.dedup_by_family, by_super_group=self.dedup_by_super_group)
                 by_sym = {t[0].symbol: t for t in scored}
                 planned = []
+                self._preplace_vetoed = {}
                 for sym in top_syms:
                     temp, prov_rd = by_sym[sym]
-                    if (self._pdr_veto_reject(temp) or self._g1_veto_reject(temp)
-                            or self._range_size_veto_reject(temp)
-                            or self._catalyst_veto_reject(temp, cohort_symbols=top_syms)):
+                    veto = self._provisional_veto(temp, top_syms)
+                    if veto:
+                        # 2026-10-06: provisional vetoes NEVER touch day-level
+                        # slot state (`_pdr_vetoed_today`); the final reconcile
+                        # + selection re-decide every veto once on final data.
+                        self._preplace_vetoed[sym] = veto
+                        logger.info("[ORB PREPLACE] provisional veto %s (%s) — "
+                                    "not planned; final selection re-decides", sym, veto)
                         continue
                     rvol_tilt_mult, rvol_tercile = self._get_rvol_tilt_mult(temp)
                     plan = self.planner.build(
@@ -4067,6 +4083,22 @@ class ORBEngine:
                         "[ORB PREPLACE] provisional rank — 0 candidates survived filters/vetoes")
         except Exception as e:
             logger.error(f"[ORB PREPLACE] provisional rank failed: {e}")
+
+    def _provisional_veto(self, temp: CandidateState,
+                          cohort_symbols: List[str]) -> Optional[str]:
+        """Name of the first veto that rejects `temp` on provisional data
+        (pdr / g1 / range_size / catalyst, same order and short-circuit as
+        `_run_pool_selection`), or None. Pure: every veto runs with
+        `record=False`, so no day-level slot/veto state is mutated."""
+        if self._pdr_veto_reject(temp, record=False):
+            return 'pdr_veto'
+        if self._g1_veto_reject(temp, record=False):
+            return 'g1_veto'
+        if self._range_size_veto_reject(temp, record=False):
+            return 'range_size_veto'
+        if self._catalyst_veto_reject(temp, cohort_symbols=cohort_symbols, record=False):
+            return 'catalyst_veto'
+        return None
 
     def _preplace_submit_at_close(self) -> None:
         """Timer callback at EXACTLY 09:35:00.0 ET — fires from a dedicated
@@ -4144,23 +4176,66 @@ class ORBEngine:
         except Exception as e:
             logger.error(f"[ORB PREPLACE] submit-at-close failed: {e}")
 
+    def _rank_production_final(self) -> List[CandidateState]:
+        """Final-range ranking of ALL production candidates, the production
+        branch of `_run_pool_selection` function by function: features ->
+        phantom-gap floor -> composite -> filter threshold -> quintile ->
+        skip_q1 -> (quintile order, composite DESC). Candidates without a
+        final `range_data` are not ranked. Side effects: the same
+        `features` / `composite` / `quintile` fields the selection pass sets
+        (it recomputes them), nothing day-level."""
+        scored: List[CandidateState] = []
+        for sym, cand in self.candidates.items():
+            if self._symbol_pool.get(sym, 'production') != 'production':
+                continue
+            if cand.range_data is None:
+                continue
+            providers = self._get_feature_context(sym)
+            feats = self._compute_features(
+                cand, prev_day_bar=providers.get('prev_day_bar'),
+                daily_stats_20d=providers.get('daily_stats_20d'))
+            cand.features = feats
+            cand.rel_volume_0935 = resolve_rel_volume_0935(
+                feats.get('range_total_volume'),
+                (providers.get('daily_stats_20d') or {}).get('volume_20d'))
+            real_gap_pct = feats.get('gap_pct', None)
+            if real_gap_pct is not None and real_gap_pct < self.universe_min_gap_pct:
+                continue  # phantom gap (same floor as the production pass)
+            score = composite_score(feats, self.z_params)
+            if score is None or score < self.filter_threshold:
+                continue
+            cand.composite = score
+            cand.quintile = assign_quintile(score, self.quintile_cutoffs)
+            if self.skip_q1 and cand.quintile == 'Q1':
+                continue
+            scored.append(cand)
+        q_rank = {q: i for i, q in enumerate(self.ranking_order)}
+        scored.sort(key=lambda c: (q_rank.get(c.quintile, 99), -c.composite))
+        return scored
+
     def _reconcile_preplaced(self) -> Dict[str, int]:
         """Reconciliation at the normal 09:35 tick (design item 3). Caller
         holds `_lock` (called from `_check_entries_locked`, an RLock, right
         after the post-open sweep — same thread, so re-entering is safe).
 
-        Recomputes the FINAL ranking (same chain as provisional, on
-        cand.range_data now populated by real bars) restricted to the
-        preplaced symbols, then per symbol:
+        Ranks ALL production candidates on their FINAL ranges (2026-10-06,
+        FIX_engine_preplace_budget_spec: the BT rule — ONE top-N at 09:35,
+        the same comp / threshold / skip_q1 / dedup as `_run_pool_selection`)
+        and takes the final top-N (`max_concurrent`). The old form ranked only
+        the preplaced names among themselves, so a provisional name far outside
+        the real top-N was kept and the real top-N names never got a slot.
+        Then per preplaced symbol:
           - already FILLED at a different trigger than provisional  -> WARNING,
             counted (n_filled_before_reconcile); fill stands, no unwind.
           - final range_high unchanged (< 0.5c) and still in the final
             top-K -> kept (n_kept).
           - final range_high differs and still in the final top-K -> cancel
             + resubmit at the final trigger (n_replaced).
-          - dropped from the final top-K -> cancel, no refill — slot
-            tracked via `_pdr_vetoed_today`, the SAME no-refill accounting
-            a post-ranking veto uses (n_cancelled).
+          - OUTSIDE the final top-N -> cancel, no refill — tracked via
+            `_pdr_vetoed_today` (never re-entered) and `_preplace_dropped_today`
+            (holds no budget slot: it was never in the BT's top-N) (n_cancelled).
+          - submit FAILED (nothing resting) -> untouched: it is simply
+            re-evaluated by the normal `_run_pool_selection` pass.
         `n_added` (new entrants) is left to the caller: preplaced symbols
         are excluded from the normal `_run_pool_selection` pass below via
         `plan_submitted`/`open_positions`, so whatever that pass submits
@@ -4174,33 +4249,15 @@ class ORBEngine:
         preplaced_syms = list(self._preplace_state.keys())
         counters['n_preplaced'] = len(preplaced_syms)
 
-        scored = []
-        for sym in preplaced_syms:
-            cand = self.candidates.get(sym)
-            if cand is None or cand.range_data is None:
-                continue  # final range still missing -- treated as dropped below
-            providers = self._get_feature_context(sym)
-            feats = self._compute_features(
-                cand, prev_day_bar=providers.get('prev_day_bar'),
-                daily_stats_20d=providers.get('daily_stats_20d'))
-            cand.features = feats
-            cand.rel_volume_0935 = resolve_rel_volume_0935(
-                feats.get('range_total_volume'),
-                (providers.get('daily_stats_20d') or {}).get('volume_20d'))
-            score = composite_score(feats, self.z_params)
-            if score is None or score < self.filter_threshold:
-                continue
-            cand.composite = score
-            cand.quintile = assign_quintile(score, self.quintile_cutoffs)
-            if self.skip_q1 and cand.quintile == 'Q1':
-                continue
-            scored.append(cand)
-        q_rank = {q: i for i, q in enumerate(self.ranking_order)}
-        scored.sort(key=lambda c: (q_rank.get(c.quintile, 99), -c.composite))
+        scored = self._rank_production_final()
         final_top_syms = set(dedup_candidates(
-            [c.symbol for c in scored], max_keep=len(preplaced_syms),
+            [c.symbol for c in scored], max_keep=self.max_concurrent,
             by_family=self.dedup_by_family, by_super_group=self.dedup_by_super_group))
         final_by_sym = {c.symbol: c for c in scored}
+        logger.info(
+            "[ORB PREPLACE] reconcile final top-%d of %d ranked: %s | preplaced: %s",
+            self.max_concurrent, len(scored),
+            [c.symbol for c in scored if c.symbol in final_top_syms], preplaced_syms)
 
         for sym in preplaced_syms:
             st = self._preplace_state[sym]
@@ -4212,7 +4269,13 @@ class ORBEngine:
                         if final_cand is not None and final_cand.range_data else None)
 
             if is_filled:
-                if final_rh is not None and abs(final_rh - prov_rh) >= 0.005:
+                if sym not in final_top_syms:
+                    logger.warning(
+                        f"[ORB PREPLACE] {sym} FILLED at provisional trigger "
+                        f"${prov_rh:.2f} but OUTSIDE the final top-"
+                        f"{self.max_concurrent} — parity deviation (fill stands, no unwind)")
+                    counters['n_filled_before_reconcile'] += 1
+                elif final_rh is not None and abs(final_rh - prov_rh) >= 0.005:
                     logger.warning(
                         f"[ORB PREPLACE] {sym} FILLED at provisional trigger "
                         f"${prov_rh:.2f}, final range_high=${final_rh:.2f} — "
@@ -4229,7 +4292,8 @@ class ORBEngine:
                 if pos is not None:
                     self._cancel_symbol_open_orders(sym)
                     del self.open_positions[sym]
-                self._pdr_vetoed_today.add(sym)  # same no-refill slot accounting as a post-ranking veto
+                self._pdr_vetoed_today.add(sym)  # no-refill: never re-entered today
+                self._preplace_dropped_today.add(sym)  # ...but not a BT slot holder (see __init__)
                 self.candidates[sym].rejected_reason = 'preplace_dropped_final_topk'
                 counters['n_cancelled'] += 1
                 continue
@@ -4861,9 +4925,21 @@ class ORBEngine:
             return nm
         return None
 
+    @staticmethod
+    def _veto_log_tag(record: bool) -> str:
+        """Log prefix of a veto line: `[ORB]` for the real (recorded) veto,
+        `[ORB PREPLACE] provisional` for the provisional preplace pass."""
+        return "[ORB]" if record else "[ORB PREPLACE] provisional"
+
+    @staticmethod
+    def _veto_log_tail(record: bool) -> str:
+        """Log suffix: only a recorded veto actually consumes the slot."""
+        return ", slot left empty (no backfill)" if record else " (provisional, no slot recorded)"
+
     def _catalyst_veto_reject(
             self, cand: CandidateState,
-            cohort_symbols: Optional[Iterable[str]] = None) -> bool:
+            cohort_symbols: Optional[Iterable[str]] = None,
+            record: bool = True) -> bool:
         """Catalyst-required veto (2026-07-18, owner-approved −$36K):
         newsless-and-alone picks are vetoed; slot consumed, no refill.
         Fail-open on UNKNOWN news (None). Evidence + semantics:
@@ -4876,6 +4952,10 @@ class ORBEngine:
         (or vice versa), so the per-pool chain passes its OWN symbol subset
         here. None (production's call site) preserves prior behaviour
         byte-identically.
+
+        `record=False` (the preplace PROVISIONAL pass): a pure decision — no
+        day-level slot/state mutation (`_pdr_vetoed_today`, `plan_submitted`,
+        `rejected_reason`); logged under `[ORB PREPLACE]` instead of `[ORB]`.
         """
         if not self.catalyst_veto_enabled:
             return False
@@ -4888,17 +4968,18 @@ class ORBEngine:
         if catalyst_veto_applies(has_news, anchor, cohort,
                                  self.catalyst_min_cohort):
             logger.info(
-                f"[ORB] CATALYST VETO: {cand.symbol} newsless and alone "
-                f"(anchor={anchor}, cohort="
-                f"{cohort.get(anchor, 0) if anchor else 0}) — no catalyst, "
-                f"slot left empty (no backfill)")
-            cand.rejected_reason = 'catalyst_veto'
-            self._pdr_vetoed_today.add(cand.symbol)   # same slot accounting
-            cand.plan_submitted = True
+                f"{self._veto_log_tag(record)} CATALYST VETO: {cand.symbol} "
+                f"newsless and alone (anchor={anchor}, cohort="
+                f"{cohort.get(anchor, 0) if anchor else 0}) — no catalyst"
+                f"{self._veto_log_tail(record)}")
+            if record:
+                cand.rejected_reason = 'catalyst_veto'
+                self._pdr_vetoed_today.add(cand.symbol)   # same slot accounting
+                cand.plan_submitted = True
             return True
         return False
 
-    def _pdr_veto_reject(self, cand: CandidateState) -> bool:
+    def _pdr_veto_reject(self, cand: CandidateState, record: bool = True) -> bool:
         """PDR veto decision for one SELECTED pick (2026-07-04 ship).
 
         True -> skip submission; the slot stays EMPTY (no backfill — the
@@ -4906,6 +4987,9 @@ class ORBEngine:
         a WARNING when the feature is unavailable: missing prev-day data
         drops the candidate at BT's feature stage, so fail-open cannot
         diverge from BT on any candidate BT actually traded.
+
+        `record=False`: provisional preplace pass, pure decision (see
+        `_catalyst_veto_reject`).
         """
         if not self.pdr_veto_enabled:
             return False
@@ -4917,22 +5001,24 @@ class ORBEngine:
             return False
         if pdr_veto_applies(pdr, self.pdr_veto_min_pct):
             logger.info(
-                f"[ORB] PDR VETO: {cand.symbol} prev-day range {pdr:.2f}% "
-                f"<= {self.pdr_veto_min_pct:.1f}% — quiet prev day, "
-                f"slot left empty (no backfill)")
-            cand.rejected_reason = 'pdr_veto'
+                f"{self._veto_log_tag(record)} PDR VETO: {cand.symbol} prev-day "
+                f"range {pdr:.2f}% <= {self.pdr_veto_min_pct:.1f}% — quiet prev day"
+                f"{self._veto_log_tail(record)}")
+            if not record:
+                return True
             # 2026-07-07 fix (IREZ incident): a vetoed pick must CONSUME its
             # daily slot like BT's one-shot top-K. Pre-fix, the slot math
             # (max_keep = cap - open_positions) recounted after an exit and
             # backfilled the NEXT-ranked name across ticks (IREZ entered 94s
             # after BEZ stopped) — the refill form the veto study proved
             # toxic. plan_submitted also stops per-tick rescoring spam.
+            cand.rejected_reason = 'pdr_veto'
             self._pdr_vetoed_today.add(cand.symbol)
             cand.plan_submitted = True
             return True
         return False
 
-    def _g1_veto_reject(self, cand: CandidateState) -> bool:
+    def _g1_veto_reject(self, cand: CandidateState, record: bool = True) -> bool:
         """G1 volatility-fingerprint veto for one SELECTED pick (B+ 2026-08-15).
 
         True -> skip submission; the slot stays EMPTY (no backfill — same
@@ -4940,6 +5026,7 @@ class ORBEngine:
         prev_day_range_pct clear their frozen minimums. Fail-open (keep) when
         rv20 is None/NaN/0.0 (history-too-short marker) or pdr is None/NaN.
         Shared decision math: trading/orb_g1_veto.py (BT parity).
+        `record=False`: provisional preplace pass, pure decision.
         """
         if not self.g1_veto_enabled:
             return False
@@ -4951,8 +5038,10 @@ class ORBEngine:
         if reason is None:
             return False
         logger.info(
-            f"[ORB] G1 VETO {cand.symbol}: rv={rv20} pdr={pdr} — {reason}, "
-            f"slot left empty (no backfill)")
+            f"{self._veto_log_tag(record)} G1 VETO {cand.symbol}: rv={rv20} "
+            f"pdr={pdr} — {reason}{self._veto_log_tail(record)}")
+        if not record:
+            return True
         cand.rejected_reason = 'g1_veto'
         # Consume the daily slot exactly like PDR/catalyst (BT one-shot top-K;
         # the refill form is toxic). plan_submitted stops per-tick rescoring.
@@ -4960,12 +5049,13 @@ class ORBEngine:
         cand.plan_submitted = True
         return True
 
-    def _range_size_veto_reject(self, cand: CandidateState) -> bool:
+    def _range_size_veto_reject(self, cand: CandidateState, record: bool = True) -> bool:
         """Opening-range-size veto for one SELECTED pick (2026-09-08).
 
         True -> skip submission; the slot stays EMPTY (no backfill — the
         refill form is toxic). Fail-open with a WARNING when range_size_pct
         is unavailable. Shared decision: trading/orb_range_size_veto.py.
+        `record=False`: provisional preplace pass, pure decision.
         """
         if not self.range_size_veto_enabled:
             return False
@@ -4977,12 +5067,14 @@ class ORBEngine:
             return False
         if range_size_veto_applies(rs, self.range_size_veto_min_pct):
             logger.info(
-                f"[ORB] RANGE-SIZE VETO: {cand.symbol} opening range {float(rs):.3f}% "
-                f"<= {self.range_size_veto_min_pct:.3f}% of price — noise trigger, "
-                f"slot left empty (no backfill)")
-            cand.rejected_reason = 'range_size_veto'
-            self._pdr_vetoed_today.add(cand.symbol)   # consume the slot like PDR/G1
-            cand.plan_submitted = True
+                f"{self._veto_log_tag(record)} RANGE-SIZE VETO: {cand.symbol} "
+                f"opening range {float(rs):.3f}% <= "
+                f"{self.range_size_veto_min_pct:.3f}% of price — noise trigger"
+                f"{self._veto_log_tail(record)}")
+            if record:
+                cand.rejected_reason = 'range_size_veto'
+                self._pdr_vetoed_today.add(cand.symbol)   # consume the slot like PDR/G1
+                cand.plan_submitted = True
             return True
         return False
 
@@ -7437,6 +7529,8 @@ class ORBEngine:
         self._preplace_submitted_today = False
         self._preplace_reconciled_today = False
         self._preplace_state = {}
+        self._preplace_vetoed = {}
+        self._preplace_dropped_today = set()
         # A prior day's tripwire-forced dry mode must not carry over
         # (docs/live_guardrails_spec_20260925.md G2) — revert to the config
         # baseline every reset_daily; re-evaluated fresh if the tripwire
