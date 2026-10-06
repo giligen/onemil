@@ -44,6 +44,38 @@ def parity_breaches(reasons) -> list:
             if any(m in r for m in HARD_PARITY_MARKERS)]
 
 
+def freeze_owned_by_day(state, day: str) -> bool:
+    """True when the ORB freeze's latest `freeze` event was raised by the check of `day` itself (a re-run of that
+    day may re-judge it); a freeze raised by another day's check is never touched by this day's verdict."""
+    events = [h for h in state.history if h.get('action') == 'freeze']
+    return bool(events) and events[-1].get('day') == day
+
+
+def reconcile_freeze(day: str, breaches: list, dry_run: bool = False, notify: bool = True) -> str:
+    """Re-judge the ORB ramp freeze against the day's CURRENT hard breaches (2026-10-06).
+
+    * breaches -> freeze (or re-freeze): the stored reason becomes the surviving breaches only, so a reason that
+      listed retired attributions (HOD rows) now says what is really left (e.g. a true 'BT picks never ordered').
+    * no breaches and the freeze was raised by THIS day's check -> cleared by code with the reason recorded; a
+      freeze raised by another day, or a manual one, stays (`--clear-freeze` is the only path for those).
+    Returns one `RAMP FREEZE orb: before -> after` line (state before / after) for the log."""
+    before = ramp_freeze.get('orb')
+    b_txt = f"frozen since {before.since}: {before.reason}" if before.frozen else "not frozen"
+    if breaches:
+        if dry_run:
+            return f"RAMP FREEZE orb DRY RUN: {b_txt} -> would FREEZE: {breaches}"
+        after = ramp_freeze.set_freeze('orb', '; '.join(breaches), day=day, notify=notify)
+        return f"RAMP FREEZE orb: {b_txt} -> frozen since {after.since}: {after.reason}"
+    if before.frozen and freeze_owned_by_day(before, day):
+        why = (f"{day} re-run: no hard parity breach left (ORB-only exit attribution, no true "
+               f"'BT pick never ordered'); was: {before.reason}")
+        if dry_run:
+            return f"RAMP FREEZE orb DRY RUN: {b_txt} -> would CLEAR ({why})"
+        ramp_freeze.clear_freeze('orb', why, by='daily_green_check', day=day)
+        return f"RAMP FREEZE orb: {b_txt} -> cleared by code ({why})"
+    return f"RAMP FREEZE orb: {b_txt} -> unchanged (no breach on {day}; freeze not raised by {day}'s check)"
+
+
 def build_message(v: dict, streak: int, pnl: dict,
                   sizing_txt: str = '') -> str:
     day = v['day']
@@ -139,16 +171,12 @@ def main() -> int:
     bf_txt = rc.bf_rails_line(rc.bf_rails_status(day))
     sizing_txt = '\n'.join(
         x for x in (rc.sizing_block(attr), lag_txt, bf_txt) if x)
-    # Gate-1: a HARD parity breach FREEZES the ORB ramp. Never automatic to
-    # clear — `orb_ramp_check.py --clear-freeze orb "<reason>"`.
+    # Gate-1: a HARD parity breach FREEZES the ORB ramp; a re-run of the same day that finds no breach left
+    # clears the freeze it raised itself (reconcile_freeze); every other clear is
+    # `orb_ramp_check.py --clear-freeze orb "<reason>"`.
     breaches = parity_breaches(v['reasons'])
-    if breaches and not args.dry_run:
-        ramp_freeze.set_freeze('orb', '; '.join(breaches), day=day,
-                               notify=not args.no_telegram)
-        print(f"RAMP FREEZE set on ORB ({day}): {breaches}", flush=True)
-    elif breaches:
-        print(f"DRY RUN — would FREEZE ORB ramp ({day}): {breaches}",
-              flush=True)
+    print(reconcile_freeze(day, breaches, dry_run=args.dry_run,
+                           notify=not args.no_telegram), flush=True)
     msg = build_message(v, streak, pnl, sizing_txt=sizing_txt)
     print(msg, flush=True)
     if not args.no_telegram and not args.dry_run:

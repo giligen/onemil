@@ -231,7 +231,7 @@ def test_load_bt_rows_reads_through_orb_csv_and_na_ticker(tmp_path):
     p.write_text("symbol,date,entry_price,pnl\nNA,2026-10-02,5.0,1.0\nBBB,2026-10-01,6.0,2.0\n")
     rows, why = es.load_bt_rows(DAY, str(p))
     assert rows[0]["symbol"] == "NA" and why == ""
-    rows, why = es.load_bt_rows("2026-10-05", str(p))
+    rows, why = es.load_bt_rows("2026-10-05", str(p), covered=lambda d: False)   # hermetic: not the live features CSV
     assert rows is None and "no rows" in why
 
 
@@ -355,3 +355,143 @@ def test_orb_failed_submit_is_an_action_line_and_the_first_reason():
     lines, m = es.orb_parity_lines(DAY, ENG, parsed, BT, "", _rank(["AAA"], ["AAA"]))
     assert lines[0].startswith("ORB ACTION: 2 entry submit(s) FAILED -- JAGX:")
     assert m["clean"] is False and m["why"].startswith("entry submit FAILED x2")
+
+
+# ------------------------------------------------------------------ 2026-10-06 EOD instrument fixes
+JL = ("2026-10-05T13:35:25+0000 host onemil-trader[1]: 2026-10-05 13:35:25 | INFO     | trading.orb_engine:1 | "
+      "ORB SCORED: DFDV comp=0.3216 Q4 | gap=5.5 pool=production")
+JE = ("2026-10-05T13:35:07+0000 host onemil-trader[1]: 2026-10-05 13:35:07 | ERROR    | trading.orb_engine:1 | "
+      "ORB: JAGX submit_entry failed: TypeError boom")
+AL = "Oct 05 13:35:25 host onemil-trader[1]: 2026-10-05 13:35:25 | INFO     | trading.orb_engine:1 | ORB SCORED: DFDV comp=0.3216 Q4 | gap=5.5 pool=production"
+AX = "Oct 05 13:35:26 host onemil-trader[1]: 2026-10-05 13:35:26 | INFO     | trading.orb_engine:1 | ORB SCORED: PAX comp=0.2968 Q4 | gap=5.4 pool=production"
+
+
+class _Res:
+    def __init__(self, out, rc=0):
+        self.stdout, self.stderr, self.returncode = out, "", rc
+
+
+def test_journal_engine_lines_command_and_python_filter():
+    """Journal read is read-only (journalctl, --since/--until, 60 s) and filtered in Python to the parser patterns."""
+    seen = {}
+
+    def runner(cmd, **kw):
+        seen["cmd"], seen["kw"] = cmd, kw
+        return _Res("-- Logs begin --\n" + JL + "\nnoise line DEBUG scanner\n" + JE + "\n")
+    lines = es.journal_engine_lines("2026-10-05", runner=runner)
+    assert lines == [JL, JE]
+    assert seen["cmd"][:2] == ["journalctl", "-u"] and "2026-10-05 00:00" in seen["cmd"] and "2026-10-06 00:00" in seen["cmd"]
+    assert seen["kw"]["timeout"] == 60 and "short-iso" in seen["cmd"]
+
+
+def test_journal_failure_returns_empty_with_warning(caplog):
+    def runner(cmd, **kw):
+        raise __import__("subprocess").TimeoutExpired(cmd, 60)
+    with caplog.at_level("WARNING"):
+        assert es.journal_engine_lines("2026-10-05", runner=runner) == []
+    assert "journalctl failed" in caplog.text
+
+
+def test_engine_log_text_journal_first_fallback_and_union(tmp_path, caplog):
+    arch = tmp_path / "2026-10-05.log"
+    arch.write_text(AL + "\n" + AX + "\n")
+    with caplog.at_level("INFO"):
+        both = es.engine_log_text("2026-10-05", arch, journal_fn=lambda d: [JL, JE]).splitlines()
+    # union: the journal's lines + the archive's lines the journal lacks (same SCORED event deduped by message)
+    assert both == [JL, JE, AX]
+    assert "served by journal+archive: journal 2 lines, archive 2 lines, used 3" in caplog.text
+    only_j = es.engine_log_text("2026-10-05", tmp_path / "missing.log", journal_fn=lambda d: [JL, JE]).splitlines()
+    assert only_j == [JL, JE]
+    with caplog.at_level("WARNING"):
+        fb = es.engine_log_text("2026-10-05", arch, journal_fn=lambda d: []).splitlines()
+    assert fb == [AL, AX] and "archive fallback" in caplog.text
+    assert es.engine_log_text("2026-10-05", tmp_path / "missing.log", journal_fn=lambda d: []) == ""
+
+
+def test_section_reads_journal_errors_the_archive_lacks(tmp_path):
+    """10/5: the archive had no ERROR lines and the EOD ran before it was written; the journal carries both."""
+    arch = tmp_path / "a.log"
+    arch.write_text("")
+    lines, m = es.orb_paper_parity_section(
+        "2026-10-05", [], log_path=arch, bt_loader=lambda d: ([], ""),
+        rank_loader=lambda d: (_rank(["DFDV"], []), ""), journal_fn=lambda d: [JL, JE])
+    assert lines[0].startswith("ORB ACTION: 1 entry submit(s) FAILED -- JAGX:")
+    assert any("ERROR 1" in ln for ln in lines) and m["decision"] is True
+
+
+def test_parse_collects_preplace_range_complete_and_notes():
+    log = "\n".join([
+        "2026-10-05 13:34:57 | INFO | trading.orb_engine:1 | [ORB PREPLACE] provisional top-2 @ 09:34:57.727 ET: "
+        "JAGX(rh=$4.28,Q4), CRCG(rh=$12.23,Q4)",
+        "2026-10-05 13:35:02 | INFO | trading.orb_engine:1 | ORB: DFDV range complete \u2014 H=$5.54 L=$5.30",
+        "2026-10-05 13:34:57 | INFO | trading.orb_engine:1 | [ORB] PDR VETO: HOG prev-day range 2.46% <= 11.0% \u2014 quiet",
+        "2026-10-05 13:35:25 | INFO | trading.orb_engine:1 | [ORB] Q1 filter dropped 2 candidate(s): ARCO(comp=0.086), PBR.A(comp=0.102)",
+        "2026-10-05 13:35:25 | INFO | trading.orb_engine:1 | ORB SCORED: DFDV comp=0.3216 Q4 | gap=5.524 pool=production"])
+    p = es.parse_orb_log(log)
+    assert p["preplace"] == {"n": 2, "et": "09:34:57.727", "utc": "13:34:57", "syms": ["JAGX", "CRCG"]}
+    assert p["range_done"]["DFDV"] == "13:35:02" and p["scored_any"]["DFDV"] == (0.3216, "Q4", "13:35:25")
+    assert p["notes"]["HOG"].startswith("PDR VETO") and "comp=0.102" in p["notes"]["PBR.A"]
+
+
+def test_why_not_ordered_dfdv_scored_but_range_completed_after_the_preplace_snapshot():
+    log = "\n".join([
+        "2026-10-05 13:34:57 | INFO | x | [ORB PREPLACE] provisional top-2 @ 09:34:57.727 ET: JAGX(rh=$4.28,Q4), CRCG(rh=$12.23,Q4)",
+        "2026-10-05 13:35:02 | INFO | x | ORB: DFDV range complete \u2014 H=$5.54",
+        "2026-10-05 13:35:07 | ERROR | x | ORB: JAGX submit_entry failed: boom",
+        "2026-10-05 13:35:07 | ERROR | x | ORB: CRCG submit_entry failed: boom",
+        "2026-10-05 13:35:25 | INFO | x | ORB SCORED: DFDV comp=0.3216 Q4 | gap=5.524 pool=production"])
+    txt = es.why_not_ordered("DFDV", es.parse_orb_log(log), _rank(["DFDV"], ["DFDV"], comp={"DFDV": (0.3216, "Q4")}))
+    assert "engine SCORED comp=0.3216 Q4 at 13:35:25 UTC vs BT comp 0.3216 Q4 (same)" in txt
+    assert "not in the provisional top-2 @ 09:34:57.727 ET (JAGX, CRCG): range completed 13:35:02 UTC, 5 s after" in txt
+    assert "every provisional submit FAILED, no refill" in txt
+
+
+def test_why_not_ordered_unscored_uses_the_log_reason():
+    p = es.parse_orb_log("2026-10-05 13:34:57 | INFO | x | [ORB] PDR VETO: HOG prev-day range 2.46% <= 11.0% \u2014 quiet")
+    assert "PDR VETO" in es.why_not_ordered("HOG", p, None)
+    assert "not admitted" in es.why_not_ordered("ZZZZ", es.parse_orb_log(""), None)
+
+
+def test_parity_lines_explain_the_bt_only_pick():
+    parsed = es.parse_orb_log(_scored_q("DFDV", 0.3216, "Q4"))
+    lines, _ = es.orb_parity_lines(DAY, [], parsed, [], "", _rank(["DFDV"], ["DFDV"], comp={"DFDV": (0.3216, "Q4")}))
+    assert any(ln.startswith("ORB why not ordered: DFDV -- engine SCORED comp=0.3216 Q4") for ln in lines)
+
+
+def test_empty_p1_book_with_marker_is_zero_picks(tmp_path):
+    book = tmp_path / "P1.csv"
+    book.write_text("pool_id\n")
+    mk = tmp_path / "markers.csv"
+    mk.write_text("date,pool_id,candidates,picks\n2026-10-05,P1,7,0\n2026-10-05,production,51,1\n")
+    rows, note = es.p1_bt_book("2026-10-05", book, mk)
+    assert rows == [] and note == "marker: candidates 7, picks 0"
+    lines = es.p1_parity_lines("2026-10-05", [], es.parse_orb_log(""), rows, note, None, "no P1 scoring",
+                               state_path=tmp_path / "st.json")
+    assert any("P1 picks/fills: engine 0 vs BT 0" in ln and "marker: candidates 7, picks 0" in ln for ln in lines)
+    assert not any("unreadable" in ln for ln in lines)
+
+
+def test_empty_p1_book_without_marker_is_nodata(tmp_path):
+    book = tmp_path / "P1.csv"
+    book.write_text("pool_id\n")
+    mk = tmp_path / "markers.csv"
+    mk.write_text("date,pool_id,candidates,picks\n2026-10-05,production,51,1\n")
+    rows, why = es.p1_bt_book("2026-10-05", book, mk)
+    assert rows is None and why.startswith("no marker for 2026-10-05 P1")
+    assert es.p1_bt_book("2026-10-05", tmp_path / "absent.csv", tmp_path / "absent_markers.csv")[0] is None
+    mk.write_text("date,pool_id,candidates,picks\n2026-10-05,P1,7,2\n")
+    rows, why = es.p1_bt_book("2026-10-05", book, mk)
+    assert rows is None and "marker says 2 P1 pick(s)" in why
+
+
+def test_header_only_production_book_uses_the_marker(tmp_path, monkeypatch):
+    book = tmp_path / "bt.csv"
+    book.write_text("pool_id\n")
+    mk = tmp_path / "m.csv"
+    mk.write_text("date,pool_id,candidates,picks\n2026-10-05,production,51,0\n")
+    monkeypatch.setattr(es, "ROOT", tmp_path)
+    (tmp_path / "analysis_results").mkdir()
+    (tmp_path / "analysis_results" / "orb_bplus_book_markers.csv").write_text(mk.read_text())
+    assert es.load_bt_rows("2026-10-05", str(book)) == ([], "")
+    rows, why = es.load_bt_rows("2026-10-06", str(book))
+    assert rows is None and "no marker" in why

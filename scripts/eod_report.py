@@ -21,7 +21,7 @@ import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -124,6 +124,23 @@ def last_matching_line(path: Path, needles: tuple) -> str:
     return hits[-1].strip() if hits else "(no verdict line yet)"
 
 
+def freeze_summary(path: Optional[Path] = None) -> str:
+    """`freeze: ORB frozen since D: reason | BF ...` per frozen book, `freeze: none` when neither is (the old line
+    printed the first 200 chars of the raw JSON, which is the BF block, never ORB's state)."""
+    from trading import ramp_freeze
+    path = path or ROOT / "logs/ramp_freeze.json"
+    if not path.exists():
+        return "freeze: none"
+    try:
+        st = ramp_freeze.load_state(path)
+        parts = [f"{b.upper()} frozen since {st[b].since}: {(st[b].reason or '')[:160]}"
+                 for b in ("orb", "bf") if b in st and st[b].frozen]
+    except Exception as e:  # noqa: BLE001
+        log.warning("freeze state unreadable %s: %s", path, e)
+        return f"freeze: NO-DATA (unreadable: {e})"
+    return "freeze: " + (" | ".join(parts) if parts else "none")
+
+
 def parity_section(day: str) -> str:
     """Gate-1: ORB green check verdict and BF decision-parity JSON status for the day."""
     green = last_matching_line(ROOT / "logs/daily_green_check.log", ("GREEN", "RED", "YELLOW"))
@@ -133,8 +150,7 @@ def parity_section(day: str) -> str:
         bf = f"BF parity {d.get('status')} (bt {d.get('n_bt_trades')}, live {d.get('n_live_rows')}, stale={d.get('bt_stale')})"
     else:
         bf = "BF parity: not run yet for today (22:50 UTC)"
-    freeze = ROOT / "logs/ramp_freeze.json"
-    fz = f"freeze: {freeze.read_text().strip()[:200]}" if freeze.exists() else "freeze: none"
+    fz = freeze_summary()
     return f"GATE-1:\n  ORB green check: {green}\n  {bf}\n  {fz}"
 
 

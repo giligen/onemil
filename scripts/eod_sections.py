@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
@@ -350,6 +351,72 @@ def sleeve_section(day: str, client=None, ledger_path=LEDGER, weekly_path=WEEKLY
 
 
 # ---------------------------------------------------------------- ORB paper parity
+# ---------------------------------------------------------------- engine log source
+ENGINE_LINE_PATTERNS = ("SCORED", "PICK", "VETO", "TILT", "submit_entry failed", "submit returned empty",
+                        "Engine tick TIMEOUT", "GAP_GATE", "| ERROR", "WINNER STACK",
+                        "PREPLACE", "range complete", "Q1 filter")   # last three: the why-not-ordered explanation
+JOURNAL_TIMEOUT_S = 60
+
+
+def _is_engine_line(line: str) -> bool:
+    """True when `line` carries one of the patterns `parse_orb_log` reads."""
+    return any(p in line for p in ENGINE_LINE_PATTERNS)
+
+
+def _line_key(line: str) -> str:
+    """The engine's own message of a journald line (text after `<unit>[pid]: `), so the same event read through
+    `-o short-iso` (journal) and `-o short` (cron archive) dedups on content, not on the journald prefix."""
+    return line.split("]: ", 1)[1] if "]: " in line else line
+
+
+def journal_engine_lines(day: str, runner: Callable = subprocess.run) -> List[str]:
+    """Engine lines of `onemil-trader` for UTC `day` straight from journald (read-only): `journalctl --since <day>
+    00:00 --until <day+1> 00:00 -o short-iso`, 60 s timeout, `-g` narrows server-side (the unfiltered DEBUG day is
+    hundreds of MB and timed out in 7/2026) and the lines are filtered again in Python to ENGINE_LINE_PATTERNS.
+    [] with a WARNING on any failure; the archive then serves the day."""
+    nxt = (dt.date.fromisoformat(day) + dt.timedelta(days=1)).isoformat()
+    cmd = ["journalctl", "-u", "onemil-trader", "--since", f"{day} 00:00", "--until", f"{nxt} 00:00",
+           "--no-pager", "-o", "short-iso", "-g", "|".join(re.escape(p) for p in ENGINE_LINE_PATTERNS)]
+    try:
+        res = runner(cmd, capture_output=True, text=True, timeout=JOURNAL_TIMEOUT_S)
+    except (subprocess.SubprocessError, OSError) as e:
+        log.warning("journalctl failed for %s (%s: %s) - the session archive is the only engine log source",
+                    day, type(e).__name__, e)
+        return []
+    if getattr(res, "returncode", 0) not in (0, 1):   # 1 = journalctl -g with no match
+        log.warning("journalctl exit %s for %s: %s", res.returncode, day, (res.stderr or "")[:200])
+    return [ln for ln in res.stdout.splitlines() if not ln.startswith("-- ") and _is_engine_line(ln)]
+
+
+def engine_log_text(day: str, archive_path=None, journal_fn: Callable = journal_engine_lines) -> str:
+    """Engine log text for `day`: the JOURNAL first (the 21:58 archive cron runs after the 21:57 EOD report and
+    its grep has no ERROR/TIMEOUT pattern - 10/5: NO DECISION, ERROR 0), the archive as FALLBACK when the journal
+    has no lines for the day (rotation) and UNIONED with it when both exist (archive lines whose engine message is
+    not already in the journal). INFO log of which source(s) served the day and the line counts."""
+    archive_path = archive_path or SESSION_ARCHIVE / f"{day}.log"
+    jl = journal_fn(day)
+    try:
+        al = Path(archive_path).read_text(errors="replace").splitlines()
+    except OSError as e:
+        log.warning("ORB log archive missing %s: %s", archive_path, e)
+        al = []
+    if jl and al:
+        seen = {_line_key(ln) for ln in jl}
+        extra = [ln for ln in al if _line_key(ln) not in seen]
+        used, lines = "journal+archive", jl + extra
+    elif jl:
+        used, lines = "journal", jl
+    elif al:
+        log.warning("journal returned no engine lines for %s (rotated or unreadable) - archive fallback", day)
+        used, lines = "archive (fallback)", al
+    else:
+        log.error("no engine log for %s: journal and archive both empty", day)
+        used, lines = "none", []
+    log.info("engine log %s served by %s: journal %d lines, archive %d lines, used %d", day, used, len(jl),
+             len(al), len(lines))
+    return "\n".join(lines)
+
+
 DECISION_WINDOW_ET = ("09:34", "10:00")   # last_entry_submit_time
 LATE_AFTER_ET = "09:40"                    # a first scoring after this is a decision, flagged late
 _STAMP_RE = re.compile(r"(\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d) \|")
@@ -426,6 +493,30 @@ def parse_orb_log(text: str) -> Dict:
                 detail[m0.group(1)] = (float(m.group(2)), m.group(3))
         else:
             late.add(m0.group(1))
+    scored_any, range_done, preplace, notes = {}, {}, None, {}
+    for ln in lines:
+        stamp = _STAMP_RE.search(ln)
+        hhmmss = stamp.group(2) if stamp else "?"
+        m = re.search(r"ORB SCORED: (\S+) comp=([-\d.]+) (Q\d)?", ln)
+        if m and m.group(3) and _is_production_scored(ln):
+            scored_any.setdefault(m.group(1), (float(m.group(2)), m.group(3), hhmmss))
+        m = re.search(r"ORB: (\S+) range complete", ln)
+        if m:
+            range_done.setdefault(m.group(1), hhmmss)
+        m = re.search(r"PREPLACE\] provisional top-(\d+) @ (\S+) ET: (.*)$", ln)
+        if m and preplace is None:
+            preplace = {"n": int(m.group(1)), "et": m.group(2), "utc": hhmmss,
+                        "syms": re.findall(r"([A-Z][A-Z0-9.]*)\(", m.group(3))}
+        m = re.search(r"PDR VETO: (\S+) (.*?) \u2014", ln)
+        if m:
+            notes.setdefault(m.group(1), f"PDR VETO ({m.group(2)})")
+        m = re.search(r"Q1 filter dropped \d+ candidate\(s\): (.*)$", ln)
+        if m:
+            for sym, c in re.findall(r"([A-Z][A-Z0-9.]*)\(comp=([-\d.]+)\)", m.group(1)):
+                notes.setdefault(sym, f"Q1 filter dropped it (comp={c})")
+        m = re.search(r"GAP_GATE (\S+) .*gap_pct=([-\d.]+)", ln)
+        if m:
+            notes.setdefault("gap:" + m.group(1), f"gap {m.group(2)}%")
     boots = []
     for ln in lines:
         if "WINNER STACK" in ln:
@@ -434,6 +525,7 @@ def parse_orb_log(text: str) -> Dict:
                 boots.append(m.group(2)[:5])
     return {"scored": sorted(scored), "late": sorted(late - scored), "boots": boots, "addon": sorted(addon - scored),
             "detail": detail, "first_et": first_et[:5] if first_et else None,
+            "scored_any": scored_any, "range_done": range_done, "preplace": preplace, "notes": notes,
             "p1_scored": sorted(p1_scored), "p1_detail": p1_detail,
             "timeouts": sum("Engine tick TIMEOUT" in ln for ln in lines),
             "gap_warn": sum("GAP_GATE" in ln and "| WARNING" in ln for ln in lines),
@@ -529,7 +621,8 @@ def bt_ranked(day: str, features_csv: Optional[str] = None, n: Optional[int] = N
         gone |= {r.symbol for r in rs}
         picks = [r.symbol for r in sel if r.symbol not in gone]
         return {"ranked": ranked, "picks": picks, "rows": n_rows, "pdr": len(pdr), "g1": len(g1),
-                "range": len(rs), "dedup": dedup, "n": (n or cfg["n"])}, ""
+                "range": len(rs), "dedup": dedup, "n": (n or cfg["n"]),
+                "comp": {r.symbol: (float(r.c), r.q) for r in sel}}, ""
     except Exception as e:  # noqa: BLE001
         log.warning("bt_ranked failed: %s", e, exc_info=True)
         return None, f"BT ranking replica failed: {type(e).__name__}: {e}"
@@ -562,6 +655,41 @@ def engine_top_n(parsed: Dict, n: int, dedup: Callable = None) -> Optional[List[
         if len(out) >= n:
             break
     return out
+
+
+def why_not_ordered(sym: str, parsed: Dict, bt_rank: Optional[Dict]) -> str:
+    """One-line explanation of a BT name the engine did not order / rank, from the engine log alone.
+    Scored by the engine: its logged comp/quintile vs the BT comp, then the provisional (PREPLACE) set it traded
+    from and whether the symbol's opening range completed AFTER that snapshot (10/5 DFDV: range complete 09:35:02,
+    provisional top-2 taken 09:34:57 = JAGX, CRCG; both submits failed, no refill). Not scored: the log reason
+    (PDR veto, Q1 filter, gap) or an explicit `no admission/veto line` statement."""
+    parts: List[str] = []
+    eng = parsed.get("scored_any", {}).get(sym)
+    bt = (bt_rank or {}).get("comp", {}).get(sym)
+    if eng:
+        c, q, hh = eng
+        cmp_t = ""
+        if bt:
+            cmp_t = f" vs BT comp {bt[0]:.4f} {bt[1]}" + (" (same)" if abs(bt[0] - c) < 5e-5 and bt[1] == q else " (DIFFERENT)")
+        parts.append(f"engine SCORED comp={c:.4f} {q} at {hh} UTC{cmp_t}")
+        pre, done = parsed.get("preplace"), parsed.get("range_done", {}).get(sym)
+        if pre and sym not in pre["syms"]:
+            late = ""
+            if done and done > pre["utc"]:
+                lag = (dt.datetime.strptime(done, "%H:%M:%S") - dt.datetime.strptime(pre["utc"], "%H:%M:%S")).seconds
+                late = f": range completed {done} UTC, {lag} s after the snapshot"
+            parts.append(f"not in the provisional top-{pre['n']} @ {pre['et']} ET ({', '.join(pre['syms']) or '-'}){late}")
+            failed = {s_ for s_, _ in parsed.get("order_fail", [])}
+            if pre["syms"] and set(pre["syms"]) <= failed:
+                parts.append("every provisional submit FAILED, no refill")
+    else:
+        why_log = parsed.get("notes", {}).get(sym)
+        gap = parsed.get("notes", {}).get("gap:" + sym)
+        parts.append("not scored by the engine: " + (why_log or (f"{gap} passed GAP_GATE but no SCORED line "
+                     "(range/volume/RVOL admission not logged)" if gap else
+                     "no SCORED, veto, Q1, GAP_GATE or range line in the engine log (not admitted: gap/price/volume/"
+                     "RVOL or range filter before ranking)")))
+    return f"ORB why not ordered: {sym} -- " + "; ".join(parts)
 
 
 def orb_parity_lines(day: str, engine_rows: List[Dict], parsed: Dict, bt_rows: Optional[List[Dict]],
@@ -623,6 +751,8 @@ def orb_parity_lines(day: str, engine_rows: List[Dict], parsed: Dict, bt_rows: O
                      f"BT-only: {' '.join(sorted(bt_picks - traded)) or '-'}")
         if traded != bt_picks:
             reasons.append("picks != BT")
+        for sym in sorted((bt_picks - traded) | (bt - eng))[:4]:   # BT names the engine never ordered / ranked
+            lines.append(why_not_ordered(sym, parsed, bt_rank))
         filled = [r for r in engine_rows if r.get("fill_price")]
         diffs = []
         if bt_rows:
@@ -696,6 +826,10 @@ def load_bt_rows(day: str, csv_path: Optional[str] = None,
     except Exception as e:  # noqa: BLE001
         log.warning("BT book unreadable: %s", e)
         return None, f"book unreadable: {e}"
+    if "date" not in df.columns:   # header-only book: the night's marker is the only proof, same guard as P1
+        log.warning("BT book %s has no 'date' column (header-only?): columns %s", path, list(df.columns))
+        rows_l, note = book_day_rows(path, day, "production")
+        return (rows_l, "") if rows_l is not None else (None, note)
     rows = df[df["date"].astype(str) == day]
     if rows.empty:
         if covered(day):
@@ -707,26 +841,51 @@ def load_bt_rows(day: str, csv_path: Optional[str] = None,
 P1_STATE = Path(os.environ.get("ONEMIL_P1_PARITY_STATE") or ROOT / "logs" / "orb_p1_parity_state.json")
 
 
-def p1_bt_book(day: str, book_path=None, markers_path=None) -> Tuple[Optional[List[Dict]], str]:
-    """Rows of the nightly P1 book for `day`. Zero rows only counts as 0 picks when the markers file has a
-    computed-day row (picks=0) for (day, P1); otherwise NO-DATA (not computed), never silently 0."""
-    from trading.orb_csv import read_orb_csv
-    book_path = book_path or ROOT / "analysis_results" / f"orb_bplus_book_{P1_ID}.csv"
+def bt_marker(day: str, pool_id: str, markers_path=None) -> Optional[Dict]:
+    """The nightly computed-day marker row (date, pool_id, candidates, picks) for (day, pool_id), None when absent.
+    The BT book files list SELECTED picks only and can be header-only; the marker is the proof the night ran."""
     markers_path = markers_path or ROOT / "analysis_results" / "orb_bplus_book_markers.csv"
-    try:
-        rows = []
-        if Path(book_path).exists() and Path(book_path).stat().st_size > 2:
-            df = read_orb_csv(book_path)
+    for r in read_csv_rows(markers_path):
+        if r.get("date") == day and r.get("pool_id") == pool_id:
+            try:
+                return {"candidates": int(float(r.get("candidates") or 0)), "picks": int(float(r.get("picks") or 0))}
+            except ValueError:
+                log.warning("marker row unreadable for %s %s: %s", day, pool_id, r)
+                return None
+    return None
+
+
+def book_day_rows(book_path, day: str, pool_id: str, markers_path=None) -> Tuple[Optional[List[Dict]], str]:
+    """Rows of a nightly BT book for `day`; a book that is missing, empty or header-only (no `date` column - the
+    10/5 P1 file held just `pool_id`) never raises: zero rows count as 0 picks only when the markers file has the
+    day's row for the pool (note = its candidates/picks), else (None, 'no marker ...'). Rows present: ([...], '')."""
+    from trading.orb_csv import read_orb_csv
+    rows: List[Dict] = []
+    if Path(book_path).exists() and Path(book_path).stat().st_size > 2:
+        df = read_orb_csv(book_path)
+        if "date" in df.columns:
             rows = df[df["date"].astype(str) == day].to_dict("records")
-        if rows:
-            return rows, ""
-        mk = read_csv_rows(markers_path)
-        if any(r.get("date") == day and r.get("pool_id") == P1_ID for r in mk):
-            return [], ""
-        return None, f"P1 book has no row and no computed-day marker for {day} (not computed)"
+        else:
+            log.warning("BT book %s has no 'date' column (header-only?): columns %s", book_path, list(df.columns))
+    if rows:
+        return rows, ""
+    mk = bt_marker(day, pool_id, markers_path)
+    if mk is None:
+        return None, f"no marker for {day} {pool_id} (book {Path(book_path).name} has no row for it - not computed)"
+    if mk["picks"] > 0:
+        return None, f"marker says {mk['picks']} {pool_id} pick(s) but {Path(book_path).name} has no row for {day}"
+    return [], f"marker: candidates {mk['candidates']}, picks {mk['picks']}"
+
+
+def p1_bt_book(day: str, book_path=None, markers_path=None) -> Tuple[Optional[List[Dict]], str]:
+    """Rows of the nightly P1 book for `day` (see `book_day_rows`). ([], note) = 0 picks proven by the marker;
+    (None, why) = NO-DATA; never raises on a header-only book."""
+    book_path = book_path or ROOT / "analysis_results" / f"orb_bplus_book_{P1_ID}.csv"
+    try:
+        return book_day_rows(book_path, day, P1_ID, markers_path)
     except Exception as e:  # noqa: BLE001
         log.warning("P1 book unreadable: %s", e)
-        return None, f"P1 book unreadable: {e}"
+        return None, f"P1 book unreadable: {type(e).__name__}: {e}"
 
 
 def p1_ranked_loader(day: str) -> Tuple[Optional[Dict], str]:
@@ -767,7 +926,7 @@ def p1_parity_lines(day: str, trades: List[Dict], parsed: Dict, bt_rows: Optiona
         filled = [r for r in rows if r.get("fill_price")]
         out.append(f"P1 picks/fills: engine {len(traded)} vs BT {len(bp)} | match {len(traded & bp)} | "
                    f"engine-only: {' '.join(sorted(traded - bp)) or '-'} | BT-only: {' '.join(sorted(bp - traded)) or '-'} | "
-                   f"{len(filled)}/{len(traded)} filled")
+                   f"{len(filled)}/{len(traded)} filled" + (f" | {bt_why}" if bt_why and not bp else ""))
     closed = [r for r in rows if r.get("exit_price") is not None]
     pnl = sum(float(r.get("pnl") or 0) for r in closed)
     bt_pnl = ("NO-DATA" if bt_rows is None else f"${sum(float(r.get('pnl') or 0) for r in bt_rows):+,.0f}")
@@ -789,15 +948,12 @@ def p1_parity_lines(day: str, trades: List[Dict], parsed: Dict, bt_rows: Optiona
 
 def orb_paper_parity_section(day: str, trades: List[Dict], log_path: Optional[Path] = None,
                              bt_loader: Callable = load_bt_rows,
-                             rank_loader: Callable = bt_ranked) -> Tuple[List[str], Dict]:
-    """ORB paper account (trades.db strategy orb, account paper) vs the nightly BT book for `day`."""
-    log_path = log_path or SESSION_ARCHIVE / f"{day}.log"
+                             rank_loader: Callable = bt_ranked,
+                             journal_fn: Callable = journal_engine_lines) -> Tuple[List[str], Dict]:
+    """ORB paper account (trades.db strategy orb, account paper) vs the nightly BT book for `day`. Engine lines
+    come from the journal first, the session archive (`log_path`) is the fallback / union (`engine_log_text`)."""
     rows = [t for t in trades if t.get("strategy") == "orb" and (t.get("account") or "") == "paper"]
-    try:
-        text = Path(log_path).read_text(errors="replace")
-    except OSError as e:
-        log.warning("ORB log archive missing %s: %s", log_path, e)
-        text = ""
+    text = engine_log_text(day, archive_path=log_path, journal_fn=journal_fn)
     bt_rows, bt_why = bt_loader(day)
     parsed = parse_orb_log(text)
     bt_rank, rank_why = rank_loader(day) if parsed["scored"] else (None, "no decision")

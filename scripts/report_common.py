@@ -195,8 +195,9 @@ def read_selection_audit(day: str) -> List[Dict]:
 def green_verdict(day: str) -> Dict:
     """Compute the operational-green verdict for one trading day.
 
-    Hard gates (any failure = RED day for the ramp streak):
-      A. every closed trade's exit_reason is known + attributed
+    Hard gates (any failure = RED day for the ramp streak), over the ORB book only (`strategy='orb'` rows;
+    other books' rows are judged by their own checks, never here):
+      A. every closed ORB trade's exit_reason is known + attributed
       B. no rows stuck in exit_pending_verification
       C. every BT-selected pick was at least ORDERED live, or its absence
          is explained by a live-only gate (spread, buying power, conflict)
@@ -206,7 +207,9 @@ def green_verdict(day: str) -> Dict:
     reasons: List[str] = []
     checks: Dict[str, str] = {}
 
-    rows = load_live_rows(day)
+    # ORB rows only (2026-10-06): the exit-attribution / pending-verification gates are ORB's. Called without
+    # `strategy`, HOD's paper exits were judged by ORB's reason table on 10/5 (ORB had 0 fills) and froze the ramp.
+    rows = load_live_rows(day, strategy='orb')
     closed = [r for r in rows if r.get('exit_price') is not None]
     bad_exit = [r['symbol'] for r in closed
                 if not is_known(r.get('exit_reason'))

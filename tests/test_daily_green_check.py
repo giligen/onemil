@@ -513,3 +513,78 @@ class TestParityFreeze:
                              '--no-telegram', '--dry-run'])
         assert dgc.main() == 1
         assert not rf.is_frozen('orb')
+
+
+class TestOrbOnlyGreenCheckAndFreezeReconcile:
+    """2026-10-06: the ORB green check judged HOD's paper exits by ORB's exit-reason table (10/5: 'unattributed
+    exits' for ten HOD symbols, ORB had 0 fills) and froze the ramp. It loads strategy='orb' rows only, and a
+    re-run of the same day clears the freeze it raised when no hard breach is left."""
+
+    HOD = {'symbol': 'SPAL', 'strategy': 'hod_break', 'entry_price': 10.0, 'exit_price': 9.0, 'shares': 10,
+           'exit_reason': 'hod_paper_stop_xyz', 'order_status': 'exit_pending_verification'}
+
+    def _patch(self, monkeypatch, rows, bt=()):
+        monkeypatch.setattr(rc, 'load_live_rows', lambda day, strategy=None:
+                            [r for r in rows if strategy is None or r.get('strategy') == strategy])
+        monkeypatch.setattr(rc, 'load_bt_selected', lambda day: list(bt))
+        monkeypatch.setattr(rc, 'bt_data_max_date', lambda: '2099-01-01')
+        monkeypatch.setattr(rc, 'journal_grep', lambda pat, day: [])
+        monkeypatch.setattr(rc, 'read_selection_audit', lambda day: [])
+
+    def test_green_check_asks_for_orb_rows_only(self, monkeypatch):
+        asked = []
+        monkeypatch.setattr(rc, 'load_live_rows', lambda day, strategy=None: asked.append(strategy) or [])
+        monkeypatch.setattr(rc, 'load_bt_selected', lambda day: [])
+        monkeypatch.setattr(rc, 'bt_data_max_date', lambda: '2099-01-01')
+        monkeypatch.setattr(rc, 'journal_grep', lambda pat, day: [])
+        monkeypatch.setattr(rc, 'read_selection_audit', lambda day: [])
+        rc.green_verdict('2026-10-05')
+        assert asked[0] == 'orb'
+
+    def test_hod_rows_are_judged_nowhere_here(self, monkeypatch):
+        self._patch(monkeypatch, rows=[self.HOD])
+        v = rc.green_verdict('2026-10-05')
+        assert v['green'] is True and v['reasons'] == [] and v['n_live_rows'] == 0
+
+    def test_orb_unknown_exit_is_still_red_next_to_hod_rows(self, monkeypatch):
+        orb = {'symbol': 'AAA', 'strategy': 'orb', 'entry_price': 10.0, 'exit_price': 9.0, 'shares': 100,
+               'exit_reason': 'unknown_exit', 'order_status': 'filled'}
+        self._patch(monkeypatch, rows=[self.HOD, orb])
+        v = rc.green_verdict('2026-10-05')
+        assert any("unattributed exits: ['AAA']" in r for r in v['reasons']) and 'SPAL' not in str(v['reasons'])
+
+    def _freeze_orb(self, tmp_path, monkeypatch, day, reason):
+        from trading import ramp_freeze as rf
+        monkeypatch.setattr(rf, 'FREEZE_PATH', tmp_path / 'freeze.json')
+        monkeypatch.setattr(rf, 'send_freeze_telegram', lambda *a, **k: True)
+        rf.set_freeze('orb', reason, day=day, notify=False)
+        return rf
+
+    def test_rerun_clears_a_freeze_whose_reasons_are_gone(self, monkeypatch, tmp_path):
+        import daily_green_check as dgc
+        rf = self._freeze_orb(tmp_path, monkeypatch, '2026-10-05',
+                              "unattributed exits: ['SPAL']; BT picks never ordered live: ['DFDV']")
+        line = dgc.reconcile_freeze('2026-10-05', [], notify=False)
+        assert not rf.is_frozen('orb') and 'cleared by code' in line and 'frozen since 2026-10-05' in line
+        assert '2026-10-05' in rf.get('orb').frozen_dates   # the session still does not count toward the stage
+
+    def test_surviving_breach_keeps_the_freeze_and_the_reason_says_so(self, monkeypatch, tmp_path):
+        import daily_green_check as dgc
+        rf = self._freeze_orb(tmp_path, monkeypatch, '2026-10-05',
+                              "unattributed exits: ['SPAL']; BT picks never ordered live: ['DFDV']")
+        line = dgc.reconcile_freeze('2026-10-05', ["BT picks never ordered live: ['DFDV']"], notify=False)
+        st = rf.get('orb')
+        assert st.frozen and st.reason == "BT picks never ordered live: ['DFDV']" and st.since == '2026-10-05'
+        assert 'unattributed' not in st.reason and "-> frozen since 2026-10-05" in line
+
+    def test_a_freeze_raised_by_another_day_is_never_cleared(self, monkeypatch, tmp_path):
+        import daily_green_check as dgc
+        rf = self._freeze_orb(tmp_path, monkeypatch, '2026-10-02', "fill-parity: ['IREX']")
+        line = dgc.reconcile_freeze('2026-10-05', [], notify=False)
+        assert rf.is_frozen('orb') and 'unchanged' in line
+
+    def test_dry_run_reports_without_writing(self, monkeypatch, tmp_path):
+        import daily_green_check as dgc
+        rf = self._freeze_orb(tmp_path, monkeypatch, '2026-10-05', "unattributed exits: ['SPAL']")
+        assert 'would CLEAR' in dgc.reconcile_freeze('2026-10-05', [], dry_run=True)
+        assert rf.is_frozen('orb')
