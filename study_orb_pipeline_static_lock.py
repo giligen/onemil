@@ -607,23 +607,20 @@ def build_atr14_lookup(pairs, db_path='data/cache.db', daily_source=None):
 
 
 def _write_markers(days, pool_id, features_df, sel, out_path) -> None:
-    """Upsert one marker row per computed day: (date, pool_id, candidates, picks). A day computed with zero
-    picks is a `picks=0` row, so "0 picks" is never confused with "not computed" (spec 2026-10-03).
+    """Upsert one marker row per computed day: (date, pool_id, candidates, picks, status=ok, note). A day computed
+    with zero picks is a `picks=0` row, so "0 picks" is never confused with "not computed" (spec 2026-10-03); a run
+    that dies writes `status=failed` rows instead (orb_backtest, spec 2026-10-06) via the same shared writer.
     No-op when `out_path` is unset (research runs). `picks` counts the book rows AFTER the vetoes."""
     if not out_path:
         return
+    from trading.orb_markers import STATUS_OK, upsert_marker_rows
     rows = []
     for d in days:
         n_cand = int((features_df['date'].dt.strftime('%Y-%m-%d') == d).sum())
         n_pick = 0 if len(sel) == 0 else int((sel['date'].dt.strftime('%Y-%m-%d') == d).sum())
-        rows.append({'date': d, 'pool_id': pool_id, 'candidates': n_cand, 'picks': n_pick})
-    new = pd.DataFrame(rows)
-    if os.path.exists(out_path):
-        old = pd.read_csv(out_path, keep_default_na=False)
-        keys = set(zip(new['date'], new['pool_id']))
-        old = old[[(a, b) not in keys for a, b in zip(old['date'].astype(str), old['pool_id'])]]
-        new = pd.concat([old, new], ignore_index=True)
-    new.sort_values(['date', 'pool_id']).to_csv(out_path, index=False)
+        rows.append({'date': d, 'pool_id': pool_id, 'candidates': n_cand, 'picks': n_pick,
+                     'status': STATUS_OK, 'note': ''})
+    upsert_marker_rows(out_path, rows)
     print(f"Markers: {len(rows)} day row(s) for {pool_id} -> {out_path}")
 
 

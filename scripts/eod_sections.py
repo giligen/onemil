@@ -841,14 +841,20 @@ def load_bt_rows(day: str, csv_path: Optional[str] = None,
 P1_STATE = Path(os.environ.get("ONEMIL_P1_PARITY_STATE") or ROOT / "logs" / "orb_p1_parity_state.json")
 
 
+BT_FAILED_PREFIX = "FAILED: "   # `why` of a night whose BT died (status=failed marker): rendered FAILED, never NO-DATA
+
+
 def bt_marker(day: str, pool_id: str, markers_path=None) -> Optional[Dict]:
-    """The nightly computed-day marker row (date, pool_id, candidates, picks) for (day, pool_id), None when absent.
-    The BT book files list SELECTED picks only and can be header-only; the marker is the proof the night ran."""
+    """The nightly computed-day marker row (date, pool_id, candidates, picks, status, note) for (day, pool_id),
+    None when absent. `status` is `ok` unless the night's BT died (`failed`, `note` = the reason; rows written
+    before 2026-10-06 have no status column = ok). The BT book files list SELECTED picks only and can be
+    header-only; the marker is the proof the night ran."""
     markers_path = markers_path or ROOT / "analysis_results" / "orb_bplus_book_markers.csv"
     for r in read_csv_rows(markers_path):
         if r.get("date") == day and r.get("pool_id") == pool_id:
             try:
-                return {"candidates": int(float(r.get("candidates") or 0)), "picks": int(float(r.get("picks") or 0))}
+                return {"candidates": int(float(r.get("candidates") or 0)), "picks": int(float(r.get("picks") or 0)),
+                        "status": (r.get("status") or "ok").strip().lower(), "note": r.get("note") or ""}
             except ValueError:
                 log.warning("marker row unreadable for %s %s: %s", day, pool_id, r)
                 return None
@@ -858,8 +864,13 @@ def bt_marker(day: str, pool_id: str, markers_path=None) -> Optional[Dict]:
 def book_day_rows(book_path, day: str, pool_id: str, markers_path=None) -> Tuple[Optional[List[Dict]], str]:
     """Rows of a nightly BT book for `day`; a book that is missing, empty or header-only (no `date` column - the
     10/5 P1 file held just `pool_id`) never raises: zero rows count as 0 picks only when the markers file has the
-    day's row for the pool (note = its candidates/picks), else (None, 'no marker ...'). Rows present: ([...], '')."""
+    day's row for the pool (note = its candidates/picks), else (None, 'no marker ...'). Rows present: ([...], '').
+    A `status=failed` marker wins over any book row (the book is stale then): (None, 'FAILED: <reason>') + ERROR."""
     from trading.orb_csv import read_orb_csv
+    mk = bt_marker(day, pool_id, markers_path)
+    if mk is not None and mk["status"] == "failed":
+        log.error("BT book %s for %s FAILED the nightly run: %s", pool_id, day, mk["note"])
+        return None, f"{BT_FAILED_PREFIX}{mk['note'] or 'no reason recorded'}"
     rows: List[Dict] = []
     if Path(book_path).exists() and Path(book_path).stat().st_size > 2:
         df = read_orb_csv(book_path)
@@ -869,7 +880,6 @@ def book_day_rows(book_path, day: str, pool_id: str, markers_path=None) -> Tuple
             log.warning("BT book %s has no 'date' column (header-only?): columns %s", book_path, list(df.columns))
     if rows:
         return rows, ""
-    mk = bt_marker(day, pool_id, markers_path)
     if mk is None:
         return None, f"no marker for {day} {pool_id} (book {Path(book_path).name} has no row for it - not computed)"
     if mk["picks"] > 0:
@@ -909,6 +919,9 @@ def p1_parity_lines(day: str, trades: List[Dict], parsed: Dict, bt_rows: Optiona
     eng = set(parsed.get("p1_scored", []))
     out: List[str] = []
     clean: Optional[bool] = None
+    bt_failed = bt_rows is None and bt_why.startswith(BT_FAILED_PREFIX)
+    if bt_failed:   # the nightly BT died (failed marker): its own line first, ERROR already logged by book_day_rows
+        out.append(f"P1 BT: FAILED ({bt_why[len(BT_FAILED_PREFIX):]})")
     if bt_rank is None:
         out.append(f"P1 ranked: engine {len(eng)} vs {no_data('BT ranked', rank_why)}")
     else:
@@ -919,7 +932,10 @@ def p1_parity_lines(day: str, trades: List[Dict], parsed: Dict, bt_rows: Optiona
                    f"engine-only: {' '.join(sorted(eng_ranked - bt)) or '-'} | BT-only: {' '.join(sorted(bt - eng_ranked)) or '-'}")
         clean = ok if (eng or bt) else None
     traded = {r["symbol"] for r in rows if r.get("order_status") not in ("cancelled", "canceled", "rejected")}
-    if bt_rows is None:
+    if bt_failed:
+        clean = None   # a failed BT decides nothing: neutral for the own clean-session counter
+        out.append(f"P1 picks/fills: engine {len(traded)} vs BT FAILED (see P1 BT line)")
+    elif bt_rows is None:
         out.append(f"P1 picks/fills: engine {len(traded)} vs {no_data('BT book', bt_why)}")
     else:
         bp = {r["symbol"] for r in bt_rows}
@@ -929,7 +945,8 @@ def p1_parity_lines(day: str, trades: List[Dict], parsed: Dict, bt_rows: Optiona
                    f"{len(filled)}/{len(traded)} filled" + (f" | {bt_why}" if bt_why and not bp else ""))
     closed = [r for r in rows if r.get("exit_price") is not None]
     pnl = sum(float(r.get("pnl") or 0) for r in closed)
-    bt_pnl = ("NO-DATA" if bt_rows is None else f"${sum(float(r.get('pnl') or 0) for r in bt_rows):+,.0f}")
+    bt_pnl = ("FAILED" if bt_failed else "NO-DATA" if bt_rows is None
+              else f"${sum(float(r.get('pnl') or 0) for r in bt_rows):+,.0f}")
     out.append(f"P1 P&L: day ${pnl:+,.0f} on {len(closed)} exits | BT book {bt_pnl}")
     try:
         st = json.loads(Path(state_path).read_text()) if Path(state_path).exists() else {}

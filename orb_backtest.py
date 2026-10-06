@@ -345,6 +345,7 @@ def fill_intraday_for_pairs(
                         db.save_intraday_bars(sym, d, bars_list)
                         total += len(bars_list)
                     except Exception as e:
+                        _log(f"  WARNING: intraday fetch failed {sym} {d}: {type(e).__name__}: {e}")
                         continue
             except Exception as e:
                 _log(f"  intraday chunk {d} failed: {e}")
@@ -420,8 +421,11 @@ def append_pm_news_data() -> None:
              f"will fail-open on uncovered days")
 
 
-PRODUCTION_MARKERS_CSV = os.path.join(ROOT, 'analysis_results', 'orb_bplus_book_markers.csv')
-SLOTS_USED_CSV = os.path.join(ROOT, 'analysis_results', 'orb_bplus_slots_used.csv')
+# ORB_BT_OUT_DIR = side output dir for acceptance/research runs (markers, slots-used, pool features and books);
+# unset = analysis_results/ (the nightly). Same idea as ORB_CACHE_DB: a rehearsal never touches production files.
+OUT_DIR = os.environ.get('ORB_BT_OUT_DIR') or os.path.join(ROOT, 'analysis_results')
+PRODUCTION_MARKERS_CSV = os.path.join(OUT_DIR, 'orb_bplus_book_markers.csv')
+SLOTS_USED_CSV = os.path.join(OUT_DIR, 'orb_bplus_slots_used.csv')
 
 
 def run_pipeline_bt(slice_dates: List[str], marker_dates: Optional[List[str]] = None) -> None:
@@ -473,13 +477,77 @@ def run_pipeline_bt(slice_dates: List[str], marker_dates: Optional[List[str]] = 
               f"{(sub['_sized_pnl'] > 0).sum()}W / {(sub['_sized_pnl'] <= 0).sum()}L)")
 
 
+def backfill_features_bars(alpaca: Optional[AlpacaClient], db: Optional[Database], features_csv: str) -> int:
+    """Fetch the 1-min bars of every (symbol, date) row of `features_csv` that the bars store lacks (spec 2026-10-06).
+
+    The pool features build is incremental over the previous CSV, so the CSV carries days the nightly fetch (scoped
+    to the days just computed) never covered; RESIM reads the SAME store (`ORB_BT_BARS_DB=CACHE_DB`) and aborts when
+    > 2 % of entered rows have no bars (10/5: 28/44 missing). Missing pairs only: a second run finds them cached and
+    fetches 0. Returns the bars written; pairs still missing after the fetch are logged as WARNING (they will be
+    re-tried tomorrow, and RESIM's missing-bars gate decides whether the book is still usable).
+    """
+    from trading.orb_csv import read_orb_csv
+    df = read_orb_csv(features_csv, usecols=['symbol', 'date'])
+    pairs = sorted({(str(s), str(d)[:10]) for s, d in zip(df['symbol'], df['date'])})
+    cached = _intraday_bars_cached_pairs(CACHE_DB, pairs)
+    missing = [p for p in pairs if p not in cached]
+    if not missing:
+        _log(f"features-bars: all {len(pairs)} (symbol, date) pairs of {os.path.basename(features_csv)} cached")
+        return 0
+    if alpaca is None or db is None:
+        _log(f"WARNING: features-bars: {len(missing)}/{len(pairs)} pairs lack bars and no fetch client "
+             f"(--no-fill?) -- RESIM will exclude them")
+        return 0
+    by_date: Dict[str, List[str]] = {}
+    for sym, d in missing:
+        by_date.setdefault(d, []).append(sym)
+    _log(f"features-bars: {len(missing)}/{len(pairs)} pairs of {os.path.basename(features_csv)} lack bars "
+         f"over {len(by_date)} day(s) -- fetching")
+    written = fill_intraday_for_pairs(alpaca, db, by_date)
+    still = [p for p in missing if p not in _intraday_bars_cached_pairs(CACHE_DB, missing)]
+    if still:
+        _log(f"WARNING: features-bars: {len(still)} pair(s) still without bars after the fetch "
+             f"(first: {still[:8]}) -- retried tomorrow")
+    return written
+
+
+def _failure_reason(res) -> str:
+    """Last error-looking line of a failed subprocess (stderr first, stdout fallback) for the failed marker."""
+    for stream in (res.stderr, res.stdout):
+        lines = [ln.strip() for ln in (stream or '').splitlines() if ln.strip()]
+        errs = [ln for ln in lines if 'error' in ln.lower() or 'exception' in ln.lower() or 'refuse' in ln.lower()]
+        if errs or lines:
+            return (errs or lines)[-1]
+    return 'no output'
+
+
+def _run_pool_step(cmd: List[str], env: Dict[str, str], pid: str, dates: List[str], label: str):
+    """Run one pool subprocess. rc != 0 or a timeout = ERROR log + `status=failed` markers (never NO-DATA), None.
+
+    Returns the CompletedProcess on success. Pool failures never abort the production run (caller `continue`s).
+    """
+    from trading.orb_markers import write_failed_markers
+    try:
+        res = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=2400, env=env)
+    except subprocess.TimeoutExpired as e:
+        _log(f"ERROR: pool {pid} {label} timed out after {e.timeout:.0f}s")
+        write_failed_markers(PRODUCTION_MARKERS_CSV, dates, pid, f"{label} timeout after {e.timeout:.0f}s")
+        return None
+    if res.returncode != 0:
+        reason = f"{label} rc={res.returncode}: {_failure_reason(res)}"
+        _log(f"ERROR: pool {pid} {label} failed rc={res.returncode}: {(res.stderr or '')[-500:]}")
+        write_failed_markers(PRODUCTION_MARKERS_CSV, dates, pid, reason)
+        return None
+    return res
+
+
 def build_pool_books(dates: List[str], alpaca: Optional[AlpacaClient], fetch: bool = True) -> None:
     """Build each enabled add-on pool's book for `dates` (spec 2026-10-03: nightly P1 book).
 
     Per pool: candidate pairs from the pool's own membership bounds (shared reader trading.orb_pool_defs, the
     engine's), 1-min bars fetched for them, features built in a side dir (study_orb_features, ORB_UNIVERSE_POOL),
     then the SAME pipeline run with ORB_BT_POOL (gate, ranking, vetoes, no refill; slot budget = N minus the slots
-    production consumed). Output `analysis_results/orb_bplus_book_<pool_id>.csv` + marker rows. The production
+    production consumed). Output `<OUT_DIR>/orb_bplus_book_<pool_id>.csv` + marker rows (OUT_DIR = analysis_results/). The production
     features CSV and book are untouched. Failures are logged and never abort the production run.
     """
     from trading.orb_pool_defs import load_addon_pools, pool_bounds
@@ -499,19 +567,16 @@ def build_pool_books(dates: List[str], alpaca: Optional[AlpacaClient], fetch: bo
             db = Database(db_path=CACHE_DB)
             fill_intraday_for_pairs(alpaca, db, pairs)
             db.close()
-        out_dir = os.path.join(ROOT, 'analysis_results', f'pool_{pid}')
+        out_dir = os.path.join(OUT_DIR, f'pool_{pid}')
         env = dict(os.environ, ORB_UNIVERSE_POOL=pool.get('name', pid), ORB_FEATURES_OUT_DIR=out_dir,
                    ORB_CACHE_DB=CACHE_DB)
-        feat = subprocess.run(
-            [sys.executable, 'study_orb_features.py', '--start-date', min(dates)],
-            cwd=ROOT, capture_output=True, text=True, timeout=2400, env=env)
-        if feat.returncode != 0:
-            _log(f"ERROR: pool {pid} features failed rc={feat.returncode}: {feat.stderr[-500:]}")
+        if _run_pool_step([sys.executable, 'study_orb_features.py', '--start-date', min(dates)],
+                          env, pid, dates, 'features') is None:
             continue
         cands = sorted(p for p in glob.glob(os.path.join(out_dir, 'orb_features_*.csv')) if 'corrmatrix' not in p)
         if not cands:
             _log(f"WARNING: pool {pid}: no features CSV in {out_dir} (no candidates with bars) -- markers only")
-        book = os.path.join(ROOT, 'analysis_results', f'orb_bplus_book_{pid}.csv')
+        book = os.path.join(OUT_DIR, f'orb_bplus_book_{pid}.csv')
         penv = dict(os.environ, ORB_BT_POOL=pool.get('name', pid), ORB_BT_BOOK_OUT=book,
                     ORB_BT_MARKERS_OUT=PRODUCTION_MARKERS_CSV, ORB_BT_MARKER_DATES=','.join(dates),
                     ORB_BT_SLOTS_USED_IN=SLOTS_USED_CSV, ORB_BT_BARS_DB=CACHE_DB,
@@ -519,20 +584,24 @@ def build_pool_books(dates: List[str], alpaca: Optional[AlpacaClient], fetch: bo
         if cands:
             penv['ORB_BT_FEATURES_CSV'] = cands[-1]
         else:
-            # No features at all: write the marker rows directly (candidates=0, picks=0).
-            import pandas as _pd
-            rows = _pd.DataFrame({'date': dates, 'pool_id': pid, 'candidates': 0, 'picks': 0})
-            if os.path.exists(PRODUCTION_MARKERS_CSV):
-                old = _pd.read_csv(PRODUCTION_MARKERS_CSV, keep_default_na=False)
-                old = old[~((old['pool_id'] == pid) & old['date'].isin(dates))]
-                rows = _pd.concat([old, rows], ignore_index=True)
-            rows.sort_values(['date', 'pool_id']).to_csv(PRODUCTION_MARKERS_CSV, index=False)
+            # No features at all: write the marker rows directly (candidates=0, picks=0, status ok).
+            from trading.orb_markers import upsert_marker_rows
+            upsert_marker_rows(PRODUCTION_MARKERS_CSV, [{'date': d, 'pool_id': pid, 'candidates': 0, 'picks': 0}
+                                                       for d in dates])
             continue
-        res = subprocess.run([sys.executable, 'study_orb_pipeline_static_lock.py'], cwd=ROOT,
-                             capture_output=True, text=True, timeout=2400, env=penv)
+        # spec 2026-10-06: bars for EVERY (symbol, date) the incremental features CSV carries, before the pipeline
+        # (--no-fill / no client: nothing is fetched, the missing pairs are only reported)
+        can_fetch = fetch and alpaca is not None
+        bdb = Database(db_path=CACHE_DB) if can_fetch else None
+        try:
+            backfill_features_bars(alpaca if can_fetch else None, bdb, cands[-1])
+        finally:
+            if bdb is not None:
+                bdb.close()
+        res = _run_pool_step([sys.executable, 'study_orb_pipeline_static_lock.py'], penv, pid, dates, 'pipeline')
+        if res is None:
+            continue
         print(res.stdout[-1500:])
-        if res.returncode != 0:
-            _log(f"ERROR: pool {pid} pipeline failed rc={res.returncode}: {res.stderr[-500:]}")
         _log(f"pool {pid}: book -> {book} in {(datetime.now() - t0).total_seconds():.0f}s")
 
 
