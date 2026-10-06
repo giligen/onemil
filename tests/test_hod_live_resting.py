@@ -16,6 +16,7 @@ from trading.hod_break_engine import Candidate, HodBreakEngine
 from trading import live_guardrail as gr
 from tests.test_hod_break_engine import cfg, bars_df, admit
 from tests.test_hod_resting_entry import tape
+from tests.hod_fills_helper import set_our_fills
 from tests.test_live_guardrail import _stats
 
 
@@ -750,6 +751,7 @@ class TestBootAdoptsUnregisteredPosition:
         e.entered_today.add('ABC')
         hod_live_alpaca.get_open_positions.return_value = [
             {'symbol': 'ABC', 'qty': 83, 'avg_entry_price': 17.23, 'asset_id': 'pos-1'}]
+        set_our_fills(hod_live_alpaca, {'ABC': 83})    # review B2: adoption takes OUR fills
         e._adopt_unregistered_positions_on_boot()
         assert 'ABC' in e.positions and e.positions['ABC'].shares == 83
         hod_live_sm.add_watch.assert_called_once()

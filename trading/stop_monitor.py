@@ -1860,6 +1860,12 @@ class StopMonitor:
         # leg must instead be capped DOWN (never up) to what the broker
         # actually shows long, so it can never create or extend a short.
         _broker_qty = _exit_qty_guard.get_signed_broker_qty(client, symbol)
+        if _broker_qty is None:       # lookup failed (None = UNKNOWN, review B1): abort the scale leg, retry next trigger
+            logger.warning(
+                f"StopMonitor: {symbol} scale-out abort — broker position lookup failed "
+                f"(qty unknown); will not submit a scale sell, retry next trigger"
+            )
+            return False
         if _broker_qty <= 0:
             logger.warning(
                 f"StopMonitor: {symbol} scale-out abort — broker shows "

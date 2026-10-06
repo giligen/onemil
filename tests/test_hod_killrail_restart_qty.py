@@ -8,6 +8,7 @@ import pytest
 
 from trading.hod_break_engine import Position
 from tests.test_hod_break_engine import admit
+from tests.hod_fills_helper import set_our_fills
 from tests.test_hod_live_resting import live_engine, BIG_VOL_ARM
 
 
@@ -59,6 +60,7 @@ class TestLateFillAfterCancelIsManaged:
         e, cand = _armed(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path)
         cand.live_order = None                                      # the cancel was 'confirmed', then 24 sh filled anyway
         hod_live_alpaca.get_open_positions.return_value = [{'symbol': 'ABC', 'qty': 24, 'avg_entry_price': 11.02}]
+        set_our_fills(hod_live_alpaca, {'ABC': 24})                 # review B2: adoption takes OUR fills
         e._reconcile_positions_to_broker(force=True)
         pos = e.positions['ABC']
         assert pos.shares == 24 and pos.stop == pytest.approx(BIG_VOL_ARM['stop'])
@@ -83,6 +85,7 @@ class TestRegistryQtyEqualsBroker:
         e, cand = _armed(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path)
         coid = cand.live_order['coid']
         hod_live_alpaca.get_open_positions.return_value = [{'symbol': 'ABC', 'qty': 120, 'avg_entry_price': 11.0}]
+        set_our_fills(hod_live_alpaca, {'ABC': 120})                # 50 on this coid + 70 on earlier coids of ours: all OUR fills
         hod_live_stream.snapshot_by_client_prefix.return_value = {
             coid: {'status': 'filled', 'filled_qty': 50, 'filled_avg_price': 11.02, 'client_order_id': coid}}
         e._poll_live_fills()
@@ -96,6 +99,7 @@ class TestRegistryQtyEqualsBroker:
         e.positions['ABC'] = Position(symbol='ABC', trade_id=7, order_id='o', shares=21, limit_price=11.0, stop=10.6, target=12.0,
                                       level=11.0, submitted_at=None, tp_leg_id='', sl_leg_id='', fill_price=11.0, status='open')
         hod_live_alpaca.get_open_positions.return_value = [{'symbol': 'ABC', 'qty': 44, 'avg_entry_price': 11.0}]
+        set_our_fills(hod_live_alpaca, {'ABC': 44})
         e._reconcile_positions_to_broker(force=True)
         assert e.positions['ABC'].shares == 44
         hod_live_db.update_trade.assert_any_call(7, {'shares': 44, 'filled_qty': 44})

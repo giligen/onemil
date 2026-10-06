@@ -341,6 +341,11 @@ class HodBreakEngine:
         self._live_armed_stops: dict = {}                      # sym -> stop of the last REAL entry order this book armed/adopted today (ownership evidence + stop for a late fill)
         self._rail_cancel_done: set = set()                    # kill-rail names whose resting-entry cancel sweep already ran this session
         self._last_rail_check = 0.0; self._last_broker_reconcile = 0.0
+        self._rail_fail_counts: Dict[str, int] = {}           # kill rail -> passes that left a resting entry order uncancelled (B3)
+        self._warn_ts: Dict[str, float] = {}                  # throttle key -> last WARNING time (one per symbol per minute, B1/B2)
+        self._fc_unknown: set = set()                         # symbols the flatten could not verify (positions API error), still registered (B1)
+        self._recent_close_ts: Dict[str, float] = {}          # sym -> time.time() of our own exit (F4: adoption must not re-adopt a lagging list)
+        self._our_fills_cache: Dict[str, tuple] = {}          # sym -> (time.time(), qty) short TTL cache for the per-tick flatten
         self.live_since: Optional[datetime] = None            # ET timestamp of the FIRST bar this engine received live over the websocket
                                                                 # (never a backfill/catch-up bar); reset each session in _roll_session
         self._prev_day: Dict[str, tuple] = {}
@@ -412,7 +417,9 @@ class HodBreakEngine:
             self._kill_notified.clear(); self._flattened = False; self._post_close_fc_warned = False
             self._live_cap_slots.clear(); self._cap_logged.clear(); self._sizing_logged.clear(); self._bp_cache_value = None; self._bp_cache_ts = 0.0
             self._live_cancel_swept_entry = False; self._live_cancel_swept_flat = False
-            self._live_armed_stops.clear(); self._rail_cancel_done.clear()
+            self._live_armed_stops.clear(); self._rail_cancel_done.clear(); self._rail_fail_counts.clear()
+            self._warn_ts.clear(); self._fc_unknown.clear()
+            self._recent_close_ts.clear(); self._our_fills_cache.clear()
             self._fs_tracked.clear(); self._fs_shorts.clear(); self._fs_submitted_today = 0
             self._fs_day_realized_r = 0.0; self._fs_disabled_for_day = False; self._fs_disabled_notified = False
             self._fs_asset_cache.clear()
@@ -1472,6 +1479,27 @@ class HodBreakEngine:
                 or sym in self._live_armed_stops or (not periodic and sym in ledger_stops)
             if not ours_today:
                 continue                                   # no record of this symbol today — the owner's manual position, never touch
+            if periodic and time.time() - self._recent_close_ts.get(sym, -1e9) < self.RECENT_CLOSE_S:
+                logger.info(f"{self.tag} {sym}: closed by this book {time.time() - self._recent_close_ts[sym]:.0f}s ago — a lagging broker positions list is not re-adopted")
+                continue                                   # F4: our own exit, broker list not yet updated
+            # Review B2: adopt OUR quantity, never the symbol's total broker quantity (foreign shares are the owner's).
+            bound = int(existing.get('shares') or 0) if existing is not None else \
+                (int(cand.live_order['qty']) if cand is not None and cand.live_order is not None and cand.live_order.get('qty') else None)
+            if bound is None and self._our_buy_fills_today(sym) == 0:
+                self._warn_throttled(f'adopt-foreign-{sym}', f"{self.tag} {sym}: broker long {qty} sh but this book has NO buy fills in it today — "
+                                                             f"treated as foreign (the owner's), not adopted")
+                continue
+            ours_qty = self._our_qty(sym, bound, max_age_s=5.0)
+            if ours_qty is None:
+                logger.error(f"{self.tag} {sym}: broker long {qty} sh of a symbol this book armed today but our own fills cannot be read "
+                             f"and no registry quantity bounds them — adoption SKIPPED this pass (retried next reconcile); "
+                             f"the position is UNMANAGED until then")
+                continue
+            if qty > ours_qty:
+                self._warn_foreign(sym, qty, ours_qty)
+                qty = ours_qty
+            if qty <= 0:
+                continue
             entry_px = float(bp.get('avg_entry_price') or 0.0)
             if cand is not None and cand.live_order is not None and cand.live_order.get('stop') is not None:
                 stop = float(cand.live_order['stop'])
@@ -1536,15 +1564,67 @@ class HodBreakEngine:
                     self._notify(f"{self.tag} ERROR add_watch {sym} — UNMANAGED boot-adopted position: {e}")
             self.entered_today.add(sym); self.seen_today.add(sym)
 
-    def _sync_registry_qty_to_broker(self, sym: str, broker_qty: int) -> None:
+    RECENT_CLOSE_S = 120.0
+
+    def _warn_throttled(self, key: str, msg: str, every_s: float = 60.0) -> None:
+        """One WARNING per `key` per `every_s` (B1/B2: a per-tick flatten and a 60 s reconcile must not flood the log)."""
+        now = time.time(); last = self._warn_ts.get(key)
+        if last is not None and now - last < every_s:
+            return
+        self._warn_ts[key] = now; logger.warning(msg)
+
+    def _our_buy_fills_today(self, sym: str, max_age_s: float = 0.0) -> Optional[int]:
+        """Shares this book BOUGHT in `sym` today (fills on client order ids with this book's prefix, orders API); None if
+        unreadable. `max_age_s` > 0 allows a short TTL cache (the per-tick flatten); 0 always re-reads."""
+        now = time.time(); hit = self._our_fills_cache.get(sym)
+        if max_age_s > 0 and hit is not None and now - hit[0] < max_age_s:
+            return hit[1]
+        et0 = datetime.strptime(self.session_date, '%Y-%m-%d').replace(tzinfo=ZoneInfo('America/New_York')) if self.session_date \
+            else self._et_now().replace(hour=0, minute=0, second=0, microsecond=0)
+        qty = _exit_qty_guard.get_our_buy_fill_qty(self.alpaca, sym, f"{self.coid_prefix}-", et0.astimezone(timezone.utc))
+        self._our_fills_cache[sym] = (now, qty)
+        return qty
+
+    def _our_qty(self, sym: str, registry_qty: Optional[int], closed_qty: int = 0, max_age_s: float = 0.0) -> Optional[int]:
+        """OUR quantity in `sym` (review B2): today's buy fills on this book's client order ids minus what the registry
+        already sold. Unreadable fills (or none found for a symbol the registry holds, e.g. a carried position) fall
+        back to `registry_qty` -- NEVER to the broker's total -- with a WARNING; None when there is no registry bound
+        either (the caller must then skip, loudly)."""
+        fills = self._our_buy_fills_today(sym, max_age_s)
+        if fills is None or fills <= 0:
+            why = 'could not be read' if fills is None else 'show no buy of this book today'
+            self._warn_throttled(f'ourqty-{sym}', f"{self.tag} {sym}: our fills {why} — falling back to the registry qty "
+                                                  f"{registry_qty} (never the broker's total)")
+            return registry_qty
+        return max(0, fills - int(closed_qty or 0))
+
+    def _warn_foreign(self, sym: str, broker_qty: int, ours: int) -> None:
+        """Review B2: the broker holds more of `sym` than this book's own fills -- the extra is not ours."""
+        self._warn_throttled(f'foreign-{sym}', f"{self.tag} {sym}: foreign shares present — broker holds {broker_qty} but our "
+                                               f"fills account for {ours}; never selling/resizing beyond ours")
+
+    def _sync_registry_qty_to_broker(self, sym: str, broker_qty: Optional[int]) -> None:
         """Make the registry quantity of an UNEXITED open position of this book equal the broker's long qty
         (2026-10-02 NEBX 21 vs 44, COHX 50 vs 120, SPCF 22 left behind: a fill registered on an adopted/restored
         position REPLACED the registry with that order's qty only). Raises only — a smaller broker qty is left to
         sync_positions / the exit guard (a lower broker qty may be a partial exit in flight). Updates the row, the
         StopMonitor watch and, if a safety-net OCO exists, re-places it at the broker qty. Only called for symbols
-        already in this book's registry, never for a foreign position. Never raises."""
+        already in this book's registry, never for a foreign position. Review B2: raises to min(OUR fills, broker) -- never
+        to the account's total in the symbol (foreign shares are logged, not adopted). broker_qty None (positions
+        lookup failed) = unknown: registry left as is. Never raises."""
         pos = self.positions.get(sym)
-        if pos is None or pos.status != 'open' or pos.closed_qty > 0 or broker_qty <= pos.shares:
+        if pos is None or pos.status != 'open' or pos.closed_qty > 0:
+            return
+        if broker_qty is None:
+            self._warn_throttled(f'sync-unknown-{sym}', f"{self.tag} {sym}: broker qty unknown (positions lookup failed) — registry qty {pos.shares} left as is, retry next pass")
+            return
+        if broker_qty <= pos.shares:
+            return
+        ours = self._our_qty(sym, pos.shares, pos.closed_qty)
+        if broker_qty > ours:
+            self._warn_foreign(sym, broker_qty, ours)
+        broker_qty = min(ours, broker_qty)
+        if broker_qty <= pos.shares:
             return
         old = pos.shares
         logger.warning(f"{self.tag} {sym}: registry qty {old} < broker qty {broker_qty} — registry corrected to the broker's "
@@ -1609,13 +1689,28 @@ class HodBreakEngine:
         blocked = self._kill_rails_blocked()
         if not blocked or blocked in self._rail_cancel_done:
             return
-        self._rail_cancel_done.add(blocked)
         cands = [c for c in self.candidates.values() if c.live_order is not None]
         ids = ', '.join(f"{c.symbol}:{c.live_order['order_id']}" for c in cands)
-        logger.warning(f"{self.tag} KILL RAIL ({blocked}): cancelling {len(cands)} resting entry order(s) [{ids}]")
-        self._notify(f"{self.tag} KILL RAIL {blocked}: cancelling {len(cands)} resting entry order(s)")
+        fails = self._rail_fail_counts.get(blocked, 0)
+        if fails == 0:
+            logger.warning(f"{self.tag} KILL RAIL ({blocked}): cancelling {len(cands)} resting entry order(s) [{ids}]")
+            self._notify(f"{self.tag} KILL RAIL {blocked}: cancelling {len(cands)} resting entry order(s)")
         for c in cands:
             self._cancel_live_order(c, f'kill_rail_{blocked}')
+        # B3: handled ONLY when every resting entry order is confirmed cancelled (or registered as a fill and gone);
+        # a failed pre/post-cancel GET leaves it ARMED, so the next 10 s pass retries it.
+        left = [c for c in cands if c.live_order is not None]
+        if not left:
+            self._rail_cancel_done.add(blocked); self._rail_fail_counts.pop(blocked, None)
+            return
+        fails += 1; self._rail_fail_counts[blocked] = fails
+        left_ids = ', '.join(f"{c.symbol}:{c.live_order['order_id']}" for c in left)
+        if fails == 5:
+            logger.error(f"{self.tag} KILL RAIL ({blocked}): {len(left)} resting entry order(s) STILL not confirmed cancelled after "
+                         f"{fails} passes [{left_ids}] — they can fill after the kill; still retrying every 10 s")
+        else:
+            logger.warning(f"{self.tag} KILL RAIL ({blocked}): {len(left)} resting entry order(s) not confirmed cancelled "
+                           f"(pass {fails}) [{left_ids}] — will retry in 10 s")
 
     def _arm_live_order(self, cand: Candidate, arm: dict) -> None:
         """Place, or cancel + replace, the REAL resting buy-stop-limit for `cand` at `arm` — called once per bar
@@ -2366,8 +2461,8 @@ class HodBreakEngine:
                           f"position IS live at the broker but NOT in the DB"); self._notify(f"{self.tag} FAILURE-SHORT ERROR DB {symbol}: {e}")
             short_trade_id = None
         broker_qty = _exit_qty_guard.get_signed_broker_qty(self.alpaca, symbol)
-        cover_qty = -broker_qty if broker_qty < 0 else short_qty
-        if broker_qty >= 0:
+        cover_qty = -broker_qty if (broker_qty is not None and broker_qty < 0) else short_qty
+        if broker_qty is None or broker_qty >= 0:
             logger.error(f"{self.tag} FAILURE-SHORT {symbol}: broker does not show a short after the reversal "
                           f"(signed qty={broker_qty}) — placing exits sized to the intended {short_qty} sh anyway")
         stop_id = target_id = ''
@@ -2650,6 +2745,7 @@ class HodBreakEngine:
         caller that HAS a trigger/pricing_method should pass it so the paper run measures its own slippage
         per exit, but exit correctness (order_status/exit_price/pnl below) never depends on it."""
         self.positions.pop(pos.symbol, None)
+        self._recent_close_ts[pos.symbol] = time.time()      # F4: a broker positions list lagging this exit must not re-adopt it
         if self.stop_monitor is not None:
             # The resting-entry live path (_on_live_fill) registers a StopMonitor watch alongside the
             # Position; once this leg-fill path closes the row the watch must go too, or StopMonitor keeps
@@ -2833,7 +2929,7 @@ class HodBreakEngine:
             if remaining:
                 if not self._post_close_fc_warned:
                     self._post_close_fc_warned = True
-                    logger.warning(
+                    logger.error(
                         f"{self.tag} FORCE CLOSE skipped — regular session "
                         f"already closed (minute_of_day={self._minute_of_day()} "
                         f">= close_minute={self.close_minute}); "
@@ -2878,6 +2974,19 @@ class HodBreakEngine:
                 # Broker-truth guard (9/25 CDNA incident): the registry can be stale (a StopMonitor
                 # exit whose drain raced a restart) -- never sell what the broker doesn't show long.
                 broker_qty = _exit_qty_guard.get_signed_broker_qty(self.alpaca, sym)
+                if broker_qty is None:
+                    # B1 (VIRT 10/2): an API error is UNKNOWN, not flat -- never pop/skip; keep it registered, retry next tick.
+                    self._fc_unknown.add(sym)
+                    self._warn_throttled(f'fc-unknown-{sym}', f"{self.tag} FORCE CLOSE {sym}: broker position lookup failed — {qty} sh NOT "
+                                                              f"flattened this pass, position kept registered, will retry next tick")
+                    continue
+                self._fc_unknown.discard(sym)
+                if broker_qty > 0:
+                    # B2: never sell beyond OUR quantity (fills on this book's client order ids) -- foreign shares are the owner's.
+                    ours = self._our_qty(sym, qty, pos.closed_qty, max_age_s=5.0)
+                    if broker_qty > ours:
+                        self._warn_foreign(sym, broker_qty, ours)
+                    broker_qty = min(broker_qty, ours)
                 capped = _exit_qty_guard.resolve_broker_capped_sell_qty(sym, qty, broker_qty, self.tag, notify_fn=self._notify)
                 if capped is None:
                     self.positions.pop(sym, None)

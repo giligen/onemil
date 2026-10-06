@@ -2547,6 +2547,11 @@ class ORBEngine:
         """
         broker_qty = _exit_qty_guard.get_signed_broker_qty(self.alpaca, pos.symbol)
         applied = int(new_qty)
+        if broker_qty is None:        # lookup failed (None = UNKNOWN, review B1): same skip as 'no long position', loudly
+            logger.warning(
+                f"[ORB] ADD {pos.symbol}: broker position lookup failed — "
+                f"cannot resize exit legs to {new_qty}sh (unknown broker qty)")
+            return pos.shares
         if broker_qty <= 0:
             logger.warning(
                 f"[ORB] ADD {pos.symbol}: broker shows no long position — "

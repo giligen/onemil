@@ -8,9 +8,11 @@ ONE helper, never re-implemented per call site: every exit submission must clamp
 actually shows long for the symbol, and must NEVER submit a sell that can create or extend a short.
 """
 import logging
-from typing import Optional
+import time
+from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
+_LOOKUP_WARN_TS: Dict[str, float] = {}      # symbol -> last 'positions lookup failed' WARNING time (throttle)
 
 
 def resolve_broker_capped_sell_qty(
@@ -64,15 +66,49 @@ def resolve_broker_capped_sell_qty(
     return broker_qty_signed
 
 
-def get_signed_broker_qty(alpaca_client, symbol: str) -> int:
-    """Signed live position qty for `symbol` on `alpaca_client`'s account (negative = short, 0 =
-    flat/not found). Never raises -- an error is logged and treated as unknown-but-callers must fail
-    CLOSED (0), never assume long, on a lookup failure."""
+def get_signed_broker_qty(alpaca_client, symbol: str) -> Optional[int]:
+    """Signed live position qty for `symbol` on `alpaca_client`'s account (negative = short, 0 = the
+    symbol is genuinely ABSENT from the positions list). Never raises.
+
+    Returns None when the lookup itself failed (429 / timeout / API error): the qty is UNKNOWN, which is
+    NOT the same as flat. 2026-10-02 VIRT / review B1: the old 'fail closed to 0' made force_close_all pop
+    the position and mark it exit_pending_verification with no sell. Every caller must treat None as
+    'unknown -- keep the position registered and retry', never as flat and never as long."""
     try:
         for p in alpaca_client.get_open_positions():
             if p.get('symbol') == symbol:
                 return int(float(p.get('qty', 0) or 0))
         return 0
     except Exception as e:
-        logger.error(f"{symbol}: broker position lookup failed for the exit guard ({e}) — treating as flat, fail closed")
-        return 0
+        now = time.time()
+        if now - _LOOKUP_WARN_TS.get(symbol, -1e9) >= 60.0:       # one WARNING per symbol per minute (a flatten retries every tick)
+            _LOOKUP_WARN_TS[symbol] = now
+            logger.warning(f"{symbol}: broker position lookup failed for the exit guard ({e}) — qty UNKNOWN (None), "
+                           f"callers must retry and keep the position registered, never assume flat")
+        return None
+
+
+def get_our_buy_fill_qty(alpaca_client, symbol: str, coid_prefix: str, since_utc) -> Optional[int]:
+    """Shares of `symbol` BOUGHT by this book since `since_utc`: the sum of filled_qty over BUY orders whose
+    client_order_id starts with `coid_prefix` (the orders API, status ALL). Review B2: the broker's position
+    in a symbol is the account total, which on a shared account includes the owner's manual shares -- this is
+    OUR side of it. Sells are not subtracted here (OCO / replaced legs lose our prefix); callers net their
+    own registry `closed_qty`. Returns None on any error (logged WARNING) -- callers fall back to the registry
+    quantity, never to the broker total."""
+    try:
+        from alpaca.trading.enums import QueryOrderStatus
+        from alpaca.trading.requests import GetOrdersRequest
+        req = GetOrdersRequest(status=QueryOrderStatus.ALL, symbols=[symbol], after=since_utc, limit=500)
+        orders = alpaca_client.trading_client.get_orders(filter=req)
+    except Exception as e:
+        logger.warning(f"{symbol}: our-fills lookup (orders API) failed ({e}) — caller falls back to the registry qty")
+        return None
+    total = 0
+    for o in orders or []:
+        get = (lambda k, o=o: o.get(k)) if isinstance(o, dict) else (lambda k, o=o: getattr(o, k, None))
+        side = get('side'); side = str(getattr(side, 'value', side) or '').lower()
+        if side != 'buy' or not str(get('client_order_id') or '').startswith(coid_prefix):
+            continue
+        try: total += int(float(get('filled_qty') or 0))
+        except (TypeError, ValueError): continue
+    return total

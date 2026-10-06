@@ -198,11 +198,12 @@ class TestHodForceCloseAfterRegularClose:
         alpaca.submit_market_sell_order.assert_not_called()
         alpaca.submit_moc_sell_order.assert_not_called()
         alpaca.cancel_order.assert_not_called()
-        skipped = [r for r in caplog.records if r.levelname == 'WARNING'
+        # review B1 (2026-10-03): positions still open after the close are ONE ERROR (the Telegram line), not a WARNING
+        skipped = [r for r in caplog.records if r.levelname == 'ERROR'
                    and 'FORCE CLOSE skipped' in r.message]
         assert len(skipped) == 1
         assert 'ABCD' in skipped[0].message
-        assert not any(r.levelname == 'ERROR' for r in caplog.records)
+        assert len([r for r in caplog.records if r.levelname == 'ERROR']) == 1
 
     def test_second_call_does_not_repeat_the_warning(self, caplog):
         engine, _alpaca = _hod_engine()
