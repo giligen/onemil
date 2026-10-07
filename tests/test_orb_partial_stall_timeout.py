@@ -114,13 +114,18 @@ class TestPartialFillStallTimeout:
         pos.first_partial_at = datetime.now(timezone.utc) - timedelta(seconds=5)
         pos.last_observed_filled_qty = 400
         engine.open_positions['STUCK'] = pos
-        # Broker still reports same partial — nothing new happened.
-        mock_alpaca.get_order.return_value = {
+        # Broker still reports same partial on the poll; the post-cancel
+        # re-fetch (AAOZ 2026-10-07: the cancel must be CONFIRMED) shows the
+        # order canceled with the same 400 filled.
+        partial = {
             'status': 'partially_filled',
             'filled_avg_price': 10.04,
             'filled_qty': 400,
             'qty': 1000,
         }
+        mock_alpaca.get_order.side_effect = [
+            partial, dict(partial, status='canceled'),
+        ]
         engine._process_pending_fills()
         # Stall path triggered: remainder cancelled + StopMonitor armed
         mock_alpaca.cancel_order.assert_called_once_with('pending-stall')
@@ -147,6 +152,13 @@ class TestPartialFillStallTimeout:
         }
         mock_alpaca.cancel_order.side_effect = Exception("broker race")
 
+        engine._process_pending_fills()
+        # AAOZ 2026-10-07: an unconfirmed cancel is retried, not confirmed,
+        # inside the stall window ...
+        mock_sm.add_watch.assert_not_called()
+        # ... and once the window is spent the observed qty IS confirmed
+        # (the filled shares must have a stop) with an ERROR.
+        pos.stall_cancel_sent_at = datetime.now(timezone.utc) - timedelta(seconds=5)
         engine._process_pending_fills()
 
         # Still confirmed despite cancel failure

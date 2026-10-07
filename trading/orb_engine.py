@@ -285,6 +285,12 @@ class OpenPosition:
     # partial-fill polling loop to suppress duplicate INFO logs when the
     # broker reports the same qty across multiple polls.
     last_observed_filled_qty: int = 0
+    # AAOZ 2026-10-07: partial-fill stall cancel state. `stall_cancel_sent_at`
+    # = first stall-cancel attempt (starts the "cancel must be confirmed
+    # within the stall timeout" clock); `stall_cancel_acked` = a cancel call
+    # returned without raising (a raised cancel is retried on the next tick).
+    stall_cancel_sent_at: Optional[datetime] = None
+    stall_cancel_acked: bool = False
     # --- ORB winner stack (2026-08-22) ---------------------------------
     # ATR14 ending T-1 (shared trading/orb_winner_stack.atr14_t1), computed
     # at SUBMIT time (T-1 data — fill-independent); the floored stop itself
@@ -5538,21 +5544,16 @@ class ORBEngine:
                     # _confirm_fill below. The stall-timeout branch above
                     # is a safety net for orders the broker never marks
                     # 'filled' (rare; we still capture the observed qty).
-                    if isinstance(order_status, dict):
-                        _filled_qty = order_status.get('filled_qty', 0)
-                        _req_qty = order_status.get('qty', 0)
-                    else:
-                        _filled_qty = getattr(order_status, 'filled_qty', 0)
-                        _req_qty = getattr(order_status, 'qty', 0)
-                    try:
-                        _filled_int = int(_filled_qty) if _filled_qty else 0
-                        _req_int = int(_req_qty) if _req_qty else 0
-                    except (ValueError, TypeError):
-                        _filled_int = 0
-                        _req_int = 0
+                    # AAOZ 2026-10-07: the requested size is the engine's own
+                    # record (pos.shares), NEVER the payload - the order-stream
+                    # payload has no 'qty' key, which made this branch compute
+                    # "remaining 0 sh" and skip the cancel.
+                    _filled_int = self._payload_filled_int(order_status)
+                    _req_int = int(pos.shares)
                     now_utc = datetime.now(timezone.utc)
                     if pos.first_partial_at is None:
                         pos.first_partial_at = now_utc
+                        self._warn_payload_qty_mismatch(sym, pos, order_status)
                         logger.info(
                             f"ORB: {sym} partial — filled {_filled_int}/"
                             f"{_req_int} sh, continuing to poll (stall-"
@@ -5576,39 +5577,9 @@ class ORBEngine:
                     # carries the latest broker-reported fill).
                     elapsed = (now_utc - pos.first_partial_at).total_seconds()
                     if elapsed > self.partial_fill_stall_seconds_max:
-                        _remaining = max(_req_int - _filled_int, 0)
-                        logger.warning(
-                            f"ORB: {sym} partial-fill stall — "
-                            f"{_filled_int}/{_req_int} sh after {elapsed:.0f}s; "
-                            f"cancelling remaining {_remaining} sh + "
-                            f"accepting observed qty as final"
+                        self._handle_partial_fill_stall(
+                            sym, pos, order_status, _filled_int, elapsed
                         )
-                        if _remaining > 0 and pos.order_id:
-                            try:
-                                self.alpaca.cancel_order(pos.order_id)
-                            except Exception as e:
-                                logger.error(
-                                    f"ORB: {sym} stall-cancel FAILED: {e} — "
-                                    f"position may continue growing; "
-                                    f"sync_positions orphan-detect is the "
-                                    f"only backstop"
-                                )
-                        # 2026-07-04 review fix: shares can fill between the
-                        # poll above and the cancel-ack. Confirming from the
-                        # stale snapshot would leave those shares outside the
-                        # StopMonitor watch (naked overnight on a gap). Re-
-                        # fetch once and confirm from the freshest payload.
-                        final_status = order_status
-                        try:
-                            refetched = self.alpaca.get_order(pos.order_id)
-                            if refetched:
-                                final_status = refetched
-                        except Exception as e:
-                            logger.warning(
-                                f"ORB: {sym} post-cancel re-fetch failed: {e} "
-                                f"— confirming from pre-cancel snapshot"
-                            )
-                        self._confirm_fill(pos, final_status)
                 elif status in ('canceled', 'cancelled', 'expired', 'rejected',
                                  'done_for_day', 'suspended'):
                     # 2026-07-04 review fix: since the FABC partial-fill fix,
@@ -5641,9 +5612,129 @@ class ORBEngine:
                         self.db.update_trade(pos.trade_id, {'order_status': status})
                     except Exception:
                         pass
+                elif pos.stall_cancel_sent_at is not None:
+                    # AAOZ 2026-10-07: a stall-cancel is outstanding and the
+                    # order is neither partially_filled nor terminal
+                    # (pending_cancel / accepted): keep waiting for the cancel
+                    # ack, escalate to ERROR once the stall timeout is spent.
+                    self._handle_partial_fill_stall(
+                        sym, pos, order_status,
+                        self._payload_filled_int(order_status),
+                        (datetime.now(timezone.utc) - pos.first_partial_at)
+                        .total_seconds() if pos.first_partial_at else 0.0,
+                    )
                 # else: pending_new / accepted / new / pending_cancel → keep polling
             except Exception as e:
                 logger.error(f"ORB: _process_pending_fills({sym}) error: {e}")
+
+    @staticmethod
+    def _payload_filled_int(order_status) -> int:
+        """Filled share count from an order-status payload (dict or object);
+        0 when absent or unparseable."""
+        raw = order_status.get('filled_qty', 0) if isinstance(order_status, dict) \
+            else getattr(order_status, 'filled_qty', 0)
+        try:
+            return int(raw) if raw else 0
+        except (ValueError, TypeError):
+            return 0
+
+    def _warn_payload_qty_mismatch(self, sym: str, pos: OpenPosition,
+                                   order_status) -> None:
+        """WARNING when the payload carries a requested qty that differs from
+        the engine's own record (pos.shares). The order-stream payload has no
+        'qty' key (nothing to compare); the REST payload does. pos.shares
+        always wins - the payload is only a cross-check."""
+        raw = order_status.get('qty') if isinstance(order_status, dict) \
+            else getattr(order_status, 'qty', None)
+        if not raw:
+            return
+        try:
+            payload_qty = int(float(raw))
+        except (ValueError, TypeError):
+            return
+        if payload_qty != int(pos.shares):
+            logger.warning(
+                f"ORB: {sym} qty mismatch — engine submitted {pos.shares} sh "
+                f"but the order payload reports qty={payload_qty}; using the "
+                f"engine record for the stall remainder"
+            )
+
+    def _handle_partial_fill_stall(self, sym: str, pos: OpenPosition,
+                                   order_status, filled_int: int,
+                                   elapsed: float) -> None:
+        """Partial-fill stall (AAOZ 2026-10-07): cancel the REAL remainder
+        (pos.shares - filled), CONFIRM the cancel by re-fetching the parent
+        order, and only then confirm the fill qty from that freshest payload.
+
+        Confirm statuses: canceled / expired / filled / done_for_day. While the
+        re-fetch still shows the order live the position is NOT confirmed (it
+        could keep growing outside the StopMonitor watch) - the next tick polls
+        again. If no confirmation arrives within partial_fill_stall_seconds_max
+        of the first cancel attempt: ERROR, then confirm the observed qty from
+        the freshest payload so the shares already held get a stop (the
+        sync_positions orphan-detect sweep is the backstop for any growth).
+        A raised cancel is retried on the next tick; remainder == 0 sends no
+        cancel and confirms straight from the re-fetch.
+        """
+        now_utc = datetime.now(timezone.utc)
+        first_attempt = pos.stall_cancel_sent_at is None
+        remaining = max(int(pos.shares) - filled_int, 0)
+        if first_attempt:
+            self._warn_payload_qty_mismatch(sym, pos, order_status)
+            logger.warning(
+                f"ORB: {sym} partial-fill stall — "
+                f"{filled_int}/{pos.shares} sh after {elapsed:.0f}s; "
+                f"cancelling remaining {remaining} sh + "
+                f"accepting observed qty as final"
+            )
+        if remaining > 0 and pos.order_id:
+            if first_attempt:
+                pos.stall_cancel_sent_at = now_utc
+            if not pos.stall_cancel_acked:
+                try:
+                    self.alpaca.cancel_order(pos.order_id)
+                    pos.stall_cancel_acked = True
+                except Exception as e:
+                    logger.error(
+                        f"ORB: {sym} stall-cancel FAILED: {e} — "
+                        f"position may continue growing; retrying next tick, "
+                        f"sync_positions orphan-detect is the only backstop"
+                    )
+        # 2026-07-04 review fix: shares can fill between the poll and the
+        # cancel-ack. Confirming from the stale snapshot would leave those
+        # shares outside the StopMonitor watch (naked overnight on a gap).
+        # Re-fetch and confirm from the freshest payload.
+        final_status = order_status
+        try:
+            refetched = self.alpaca.get_order(pos.order_id)
+            if refetched:
+                final_status = refetched
+        except Exception as e:
+            logger.warning(
+                f"ORB: {sym} post-cancel re-fetch failed: {e} "
+                f"— no cancel confirmation this tick"
+            )
+            refetched = None
+        if remaining == 0:
+            self._confirm_fill(pos, final_status)
+            return
+        fstatus = str(final_status.get('status', '') if isinstance(final_status, dict)
+                      else getattr(final_status, 'status', '')).lower()
+        if refetched and fstatus in ('canceled', 'cancelled', 'expired',
+                                     'filled', 'done_for_day'):
+            self._confirm_fill(pos, final_status)
+            return
+        since_cancel = (now_utc - pos.stall_cancel_sent_at).total_seconds()
+        if since_cancel > self.partial_fill_stall_seconds_max:
+            logger.error(
+                f"ORB: {sym} stall cancel NOT confirmed after "
+                f"{since_cancel:.0f}s (order {pos.order_id} status "
+                f"'{fstatus or 'unknown'}', {self._payload_filled_int(final_status)}"
+                f"/{pos.shares} sh filled) — confirming the observed qty so it "
+                f"gets a stop; the live remainder may still fill, "
+                f"sync_positions orphan-detect is the backstop"
+            )
+            self._confirm_fill(pos, final_status)
 
     def _confirm_fill(self, pos: OpenPosition, order_status) -> None:
         """Transition a pending OpenPosition to filled + arm StopMonitor watch."""
