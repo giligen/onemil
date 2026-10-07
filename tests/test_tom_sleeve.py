@@ -515,3 +515,205 @@ def test_midmonth_noop_unchanged_with_flat_ledger(tmp_path):
     a = make_alpaca()
     summary = tom.run(a, make_notifier(), et_dt(2026, 10, 14, 15, 45), ledger_path=str(tmp_path / 'l.csv'))
     assert 'not a turn-of-month' in summary
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-07 fix: partial fills, catch-up-day late fallback, owed qty from the broker
+# (docs/tom_sleeve_partial_fill_fix_20261007.md; incident = 10/6 QQQ MOC r1 filled 25 of 26)
+# ---------------------------------------------------------------------------
+
+R1 = 'tom-202610-QQQ-out-r1'
+
+
+def _incident_ledger(tmp_path, r1_fillcheck=None, partial_row=False):
+    """QQQ entered 26 on 9/30; exit r0 (10/5) expired; exit r1 (10/6) submitted. `r1_fillcheck` appends
+    an r1 fill check with that status (the 20:45 UTC tick); `partial_row` adds the 25 @ 759.76 row."""
+    ledger = _qqq_held_ledger(tmp_path, 'expired')
+    tom.append_ledger_row(_row('2026-10-06', 'exit', 'QQQ', R1, 'submitted'), ledger)
+    if r1_fillcheck:
+        tom.append_ledger_row(_row('2026-10-06', 'exit_fillcheck', 'QQQ', R1, r1_fillcheck), ledger)
+    if partial_row:
+        tom.append_ledger_row(_row('2026-10-06', 'exit_fillcheck', 'QQQ', R1, 'partial_fill', qty=25), ledger)
+    return ledger
+
+
+def _orders_by_id(a, mapping):
+    """get_order side effect: broker order dict per order id."""
+    a.get_order.side_effect = lambda oid: mapping[oid]
+
+
+def test_fillcheck_partial_exit_writes_partial_row_and_leaves_remainder_owed(tmp_path):
+    ledger = _incident_ledger(tmp_path)
+    a = make_alpaca()
+    a.get_order.return_value = {'status': 'expired', 'qty': 26, 'filled_qty': 25, 'filled_avg_price': 759.76}
+    n = make_notifier()
+    msgs = tom.check_pending_fills(a, n, ledger_path=ledger)
+    assert len(msgs) == 1 and '25/26' in msgs[0] and '759.76' in msgs[0] and 'owed' in msgs[0]
+    assert '25/26' in n.send_message_sync.call_args.args[0]
+    rows = tom.read_ledger(ledger)
+    fc = rows[-1]
+    assert (fc['action'], fc['status'], fc['qty'], fc['ref_price']) == ('exit_fillcheck', 'partial_fill', '25', '759.7600')
+    assert fc['client_order_id'] == R1 and fc['partial_entry'] == 'false'
+    assert 'QQQ' in tom.open_tom_symbols(rows)              # remainder still held / owed
+    assert tom.ledger_open_qty(rows, 'QQQ') == 1
+
+
+def test_fillcheck_full_fill_and_zero_fill_unchanged(tmp_path):
+    ledger = _incident_ledger(tmp_path)
+    a = make_alpaca()
+    a.get_order.return_value = {'status': 'filled', 'qty': 26, 'filled_qty': 26, 'filled_avg_price': 759.76}
+    tom.check_pending_fills(a, make_notifier(), ledger_path=ledger)
+    assert tom.read_ledger(ledger)[-1]['status'] == 'filled'
+    (tmp_path / 'z').mkdir()
+    ledger2 = _incident_ledger(tmp_path / 'z')
+    a.get_order.return_value = {'status': 'expired', 'qty': 26, 'filled_qty': 0, 'filled_avg_price': None}
+    tom.check_pending_fills(a, make_notifier(), ledger_path=ledger2)
+    assert tom.read_ledger(ledger2)[-1]['status'] == 'expired'
+
+
+def test_partial_entry_fill_keeps_symbol_held_with_filled_qty(tmp_path):
+    ledger = str(tmp_path / 'ledger.csv')
+    tom.append_ledger_row(_row('2026-09-30', 'entry', 'SPY', 'tom-202609-SPY-in', 'submitted'), ledger)
+    a = make_alpaca()
+    a.get_order.return_value = {'status': 'expired', 'qty': 26, 'filled_qty': 10, 'filled_avg_price': 765.8}
+    msgs = tom.check_pending_fills(a, make_notifier(), ledger_path=ledger)
+    assert '10/26' in msgs[0]
+    rows = tom.read_ledger(ledger)
+    assert rows[-1]['status'] == 'partial_fill' and rows[-1]['partial_entry'] == 'true'
+    assert 'SPY' in tom.open_tom_symbols(rows) and tom.ledger_open_qty(rows, 'SPY') == 10
+
+
+def test_ledger_open_qty_counts_each_partial_order_once(tmp_path):
+    ledger = _incident_ledger(tmp_path, partial_row=True)
+    tom.append_ledger_row(_row('2026-10-06', 'exit_fillcheck', 'QQQ', R1, 'partial_fill', qty=25), ledger)  # duplicate
+    assert tom.ledger_open_qty(tom.read_ledger(ledger), 'QQQ') == 1
+    assert tom.ledger_open_qty([], 'QQQ') is None
+
+
+def test_owed_qty_comes_from_the_broker_not_the_ledger(tmp_path, caplog):
+    ledger = _incident_ledger(tmp_path, r1_fillcheck='expired')           # ledger still says 26
+    a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 1}])
+    with caplog.at_level('WARNING', logger='tom_sleeve'):
+        tom.run(a, make_notifier(), et_dt(2026, 10, 7, 15, 45), ledger_path=ledger)
+    a.submit_moc_sell_order.assert_called_once_with('QQQ', 1, client_order_id='tom-202610-QQQ-out-r2')
+    assert any('broker qty 1' in r.getMessage() and 'ledger' in r.getMessage() and '26' in r.getMessage()
+               for r in caplog.records)
+
+
+def test_owed_qty_never_exceeds_ledger_open_qty(tmp_path):
+    ledger = _incident_ledger(tmp_path, partial_row=True)                 # ledger open = 1
+    a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 40}])        # broker holds more than ours
+    tom.run(a, make_notifier(), et_dt(2026, 10, 7, 15, 45), ledger_path=ledger)
+    a.submit_moc_sell_order.assert_called_once_with('QQQ', 1, client_order_id='tom-202610-QQQ-out-r2')
+
+
+def test_dry_run_after_partial_sells_one_share_r2_with_two_sessions(tmp_path):
+    ledger = _incident_ledger(tmp_path, partial_row=True)
+    a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 1}])
+    summary = tom.run(a, None, et_dt(2026, 10, 7, 15, 45), dry_run=True, ledger_path=ledger)
+    assert ('DRY-RUN would SELL MOC 1 QQQ id=tom-202610-QQQ-out-r2 deviation=late_exit_2_sessions') in summary
+    a.submit_moc_sell_order.assert_not_called()
+
+
+def test_late_fallback_fires_on_catch_up_day_with_live_order(tmp_path):
+    """10/6 19:58 UTC incident: r1 submitted 15:45 ET, still live at 15:58, day is NOT a TOM session."""
+    ledger = _incident_ledger(tmp_path)                                    # r1 submitted, no fill check yet
+    a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 26}],
+                    open_orders=[{'client_order_id': R1, 'id': f'id-{R1}'}])
+    a.get_order.return_value = {'status': 'canceled'}
+    a.submit_market_sell_order = MagicMock(return_value={'id': 'mkt1', 'status': 'accepted'})
+    summary = tom.run(a, make_notifier(), et_dt(2026, 10, 6, 15, 58), ledger_path=ledger)
+    a.cancel_order.assert_called_once_with(f'id-{R1}')
+    a.submit_market_sell_order.assert_called_once_with('QQQ', 26, client_order_id='tom-202610-QQQ-out-mkt')
+    assert 'not a turn-of-month' not in summary
+    assert tom.read_ledger(ledger)[-1]['action'] == 'late_fallback_replace'
+
+
+def test_catch_up_day_live_order_is_left_alone_in_moc_window(tmp_path):
+    ledger = _incident_ledger(tmp_path)
+    a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 26}],
+                    open_orders=[{'client_order_id': R1, 'id': f'id-{R1}'}])
+    tom.run(a, make_notifier(), et_dt(2026, 10, 6, 15, 50), ledger_path=ledger)
+    a.submit_moc_sell_order.assert_not_called()
+    a.cancel_order.assert_not_called()
+
+
+def test_partial_fill_flow_end_to_end_through_the_csv(tmp_path):
+    """Integration: fill check writes the partial row to the CSV, the next session reads it back and
+    sells exactly the 1 owed share as -r2 with the right session count."""
+    ledger = _incident_ledger(tmp_path)
+    a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 1}])
+    a.get_order.return_value = {'status': 'expired', 'qty': 26, 'filled_qty': 25, 'filled_avg_price': 759.76}
+    tom.check_pending_fills(a, make_notifier(), ledger_path=ledger)
+    tom.run(a, make_notifier(), et_dt(2026, 10, 7, 15, 45), ledger_path=ledger)
+    a.submit_moc_sell_order.assert_called_once_with('QQQ', 1, client_order_id='tom-202610-QQQ-out-r2')
+    last = tom.read_ledger(ledger)[-1]
+    assert (last['action'], last['qty'], last['deviation']) == ('exit', '1', 'late_exit_2_sessions')
+
+
+def _reconcile_broker(a):
+    _orders_by_id(a, {
+        f'id-{R1}': {'status': 'expired', 'qty': 26, 'filled_qty': 25, 'filled_avg_price': 759.76},
+        'id-tom-202610-QQQ-out': {'status': 'expired', 'qty': 26, 'filled_qty': 0, 'filled_avg_price': None},
+        'id-tom-202609-QQQ-in': {'status': 'filled', 'qty': 26, 'filled_qty': 26, 'filled_avg_price': 739.55},
+    })
+
+
+def test_reconcile_appends_exactly_one_partial_row_and_is_idempotent(tmp_path):
+    ledger = _incident_ledger(tmp_path, r1_fillcheck='expired')
+    a = make_alpaca()
+    _reconcile_broker(a)
+    before = len(tom.read_ledger(ledger))
+    msgs = tom.reconcile_ledger(a, None, ledger_path=ledger)
+    rows = tom.read_ledger(ledger)
+    assert len(msgs) == 1 and len(rows) == before + 1
+    new = rows[-1]
+    assert (new['action'], new['status'], new['qty'], new['ref_price'], new['client_order_id'], new['date']) == \
+           ('exit_fillcheck', 'partial_fill', '25', '759.7600', R1, '2026-10-06')
+    assert tom.ledger_open_qty(rows, 'QQQ') == 1 and 'QQQ' in tom.open_tom_symbols(rows)
+    assert tom.reconcile_ledger(a, None, ledger_path=ledger) == []        # second run: nothing
+    assert len(tom.read_ledger(ledger)) == before + 1
+    a.trading_client.submit_order.assert_not_called()
+    a.submit_moc_sell_order.assert_not_called()
+    a.cancel_order.assert_not_called()
+
+
+def test_reconcile_dry_run_writes_nothing(tmp_path):
+    ledger = _incident_ledger(tmp_path, r1_fillcheck='expired')
+    a = make_alpaca()
+    _reconcile_broker(a)
+    before = tom.read_ledger(ledger)
+    msgs = tom.reconcile_ledger(a, None, ledger_path=ledger, dry_run=True)
+    assert len(msgs) == 1 and 'DRY-RUN' in msgs[0] and tom.read_ledger(ledger) == before
+
+
+def test_reconcile_refuses_when_a_later_exit_row_exists(tmp_path, caplog):
+    """A partial row appended after a newer exit row would re-add the symbol to the held set."""
+    ledger = _incident_ledger(tmp_path, r1_fillcheck='expired')
+    tom.append_ledger_row(_row('2026-10-07', 'exit', 'QQQ', 'tom-202610-QQQ-out-r2', 'submitted'), ledger)
+    a = make_alpaca()
+    _reconcile_broker(a)
+    before = len(tom.read_ledger(ledger))
+    with caplog.at_level('ERROR', logger='tom_sleeve'):
+        assert tom.reconcile_ledger(a, None, ledger_path=ledger) == []
+    assert len(tom.read_ledger(ledger)) == before and any('LATER' in r.getMessage() for r in caplog.records)
+
+
+def test_main_reconcile_flag_calls_reconcile_and_places_no_orders(monkeypatch, capsys):
+    calls = {}
+    fake_client = make_alpaca()
+    monkeypatch.setattr(tom, 'Config', lambda: types.SimpleNamespace(
+        alpaca_orb_api_key='k', alpaca_orb_api_secret='s', alpaca_orb_paper=True,
+        telegram_bot_token='', telegram_chat_id=''))
+    monkeypatch.setattr(tom, 'AlpacaClient', lambda *a, **k: fake_client)
+
+    def fake_reconcile(client, notifier, dry_run=False):
+        calls['dry'] = dry_run
+        return []
+
+    monkeypatch.setattr(tom, 'reconcile_ledger', fake_reconcile)
+    monkeypatch.setattr(tom, 'run', lambda *a, **k: pytest.fail('run() must not execute on --reconcile'))
+    monkeypatch.setattr(sys, 'argv', ['tom_sleeve.py', '--reconcile'])
+    assert tom.main() == 0
+    assert calls == {'dry': False}
+    fake_client.submit_moc_sell_order.assert_not_called()

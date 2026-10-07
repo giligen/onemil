@@ -34,6 +34,15 @@ it does not depend on the closing auction at all) submitted in a narrow LATE_WIN
 close so the fill still tracks the closing price closely. See MOC_RELIABLE_SYMBOLS /
 FALLBACK_LIMIT_SYMBOLS below.
 
+2026-10-06 exit incident (docs/tom_sleeve_partial_fill_fix_20261007.md): the catch-up MOC SELL
+`tom-202610-QQQ-out-r1` (26 QQQ) filled 25 of 26 @ 759.76 and Alpaca closed it `expired` with
+filled_qty=25; the fill check read only `status`, booked "unfilled", and the 19:58 UTC tick never ran the
+cancel+market fallback because 10/6 is not a turn-of-month session. Fixes: the fill check reads
+filled_qty (ledger status `partial_fill`, qty = the filled part, remainder stays owed); the owed quantity
+is the BROKER's position (capped by the ledger's open qty); any live tom exit order gets the late
+fallback on any session (catch-up days included); `--reconcile` backfills a missing partial_fill row
+from the orders API (ledger write only, never an order).
+
 Usage:
     python3 scripts/tom_sleeve.py              # act only if now is in the MOC window (15:40-15:55 ET,
                                                  # QQQ) or the late fallback window (15:57-15:59 ET,
@@ -41,6 +50,7 @@ Usage:
                                                  # pending fills and exits 0
     python3 scripts/tom_sleeve.py --dry-run     # print intended actions, submit nothing, no Telegram
     python3 scripts/tom_sleeve.py --status      # print the ledger + current open sleeve, no orders
+    python3 scripts/tom_sleeve.py --reconcile   # append any missing partial_fill ledger row (no orders)
 
 Cron (added by the main session, NOT by this script): run FOUR times daily on weekdays so BOTH
 15:45 ET (MOC window) and 15:58 ET (late fallback window) each fall inside one of the ticks in both
@@ -93,6 +103,7 @@ _sleep = time.sleep  # indirection so tests can skip the cancel-confirm poll
 LIVE_STATUSES = ('new', 'accepted', 'pending_new', 'partially_filled', 'pending_cancel', 'pending_replace',
                  'accepted_for_bidding', 'held')  # order still working at the broker: blocks a resubmit
 DEAD_STATUSES = ('expired', 'canceled', 'rejected')  # terminal WITHOUT a fill: the leg is still owed
+PARTIAL_STATUS = 'partial_fill'  # ledger fill-check status: terminal order, 0 < filled_qty < qty; remainder owed
 CANCEL_POLL_SECONDS = 10
 _ORDER_ACTIONS = ('entry', 'exit', 'late_fallback_replace')
 ACTIVE_STATUSES = ('submitted', 'filled')  # ledger statuses that count as "this leg is in effect"
@@ -244,7 +255,8 @@ def open_tom_symbols(ledger_rows: List[Dict]) -> Set[str]:
     order: an active entry-leg row adds the symbol, an active exit-leg row removes it; a *_fillcheck
     row that resolved WITHOUT a fill undoes the tentative row before it -- an unfilled entry (the
     2026-09-30 SPY/IWM case) was never entered, an unfilled EXIT (the 2026-10-05 QQQ MOC) means the
-    position is still at the broker and still owed.
+    position is still at the broker and still owed. A `partial_fill` row keeps the symbol held either
+    way: a partial ENTRY holds the filled part, a partial EXIT leaves the remainder owed.
     """
     held: Set[str] = set()
     for row in ledger_rows:
@@ -254,21 +266,43 @@ def open_tom_symbols(ledger_rows: List[Dict]) -> Set[str]:
         if action in _ORDER_ACTIONS and status in ACTIVE_STATUSES:
             (held.add if leg == 'in' else held.discard)(row['symbol'])
         elif action.endswith('_fillcheck') and status != 'filled':
-            (held.discard if leg == 'in' else held.add)(row['symbol'])
+            (held.discard if leg == 'in' and status != PARTIAL_STATUS else held.add)(row['symbol'])
     return held
 
 
-def _last_entry_qty(ledger_rows: List[Dict], symbol: str) -> Optional[int]:
-    """Most recently logged entry quantity for `symbol`, for cross-checking against the broker's
-    actual held quantity before an exit. None if no entry row is found (nothing to cross-check).
+def _row_qty(row: Dict) -> Optional[int]:
+    """The row's qty as int, or None (with a WARNING) when it is missing / not a number."""
+    try:
+        return int(float(row['qty']))
+    except (KeyError, ValueError, TypeError):
+        logger.warning(f"tom_sleeve: ledger row without a usable qty ({row.get('action')} {row.get('symbol')} "
+                        f"{row.get('client_order_id')}) — ignored for the open-qty count")
+        return None
+
+
+def ledger_open_qty(ledger_rows: List[Dict], symbol: str) -> Optional[int]:
+    """Shares of `symbol` the ledger believes the sleeve still holds: the latest entry's qty (the filled
+    part for a partial entry, 0 for an entry that never filled) minus every exit `partial_fill` row
+    (counted once per client_order_id). None if there is no entry row (nothing to cross-check).
     """
-    for row in reversed(ledger_rows):
-        if row.get('symbol') == symbol and row.get('action') == 'entry' and row.get('status') in ACTIVE_STATUSES:
-            try:
-                return int(float(row['qty']))
-            except (KeyError, ValueError, TypeError):
-                return None
-    return None
+    open_qty: Optional[int] = None
+    counted: Set[str] = set()
+    for row in ledger_rows:
+        if row.get('symbol') != symbol:
+            continue
+        action, status, coid = row.get('action') or '', row.get('status'), row.get('client_order_id') or ''
+        leg = _leg(coid) or ('in' if action.startswith('entry') else 'out')
+        qty = _row_qty(row)
+        if qty is None:
+            continue
+        if action in _ORDER_ACTIONS and leg == 'in' and status in ACTIVE_STATUSES:
+            open_qty = qty
+        elif action.endswith('_fillcheck') and leg == 'in' and status != 'filled':
+            open_qty = qty if status == PARTIAL_STATUS else 0
+        elif action.endswith('_fillcheck') and leg == 'out' and status == PARTIAL_STATUS and coid not in counted:
+            counted.add(coid)
+            open_qty = None if open_qty is None else max(open_qty - qty, 0)
+    return open_qty
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +410,28 @@ def _norm_status(raw) -> str:
     return str(getattr(raw, 'value', raw) or 'unknown').split('.')[-1].lower()
 
 
+def resolve_fill(order: Dict, planned_qty) -> tuple:
+    """(status, filled_qty, avg_price) of a broker order dict. A terminal order that did not end `filled`
+    but has 0 < filled_qty < planned qty resolves to PARTIAL_STATUS (the 2026-10-06 QQQ MOC: expired,
+    filled 25 of 26); filled_qty >= planned resolves to `filled`; no filled_qty keeps the raw status."""
+    status = _norm_status(order.get('status'))
+    filled = float(order.get('filled_qty') or 0)
+    avg = order.get('filled_avg_price')
+    if status in DEAD_STATUSES and filled > 0:
+        try:
+            planned = float(planned_qty or order.get('qty') or 0)
+        except (TypeError, ValueError):
+            planned = 0.0
+        if planned <= 0:
+            logger.warning(f"tom_sleeve: {status} order has filled_qty={filled:g} but no planned qty to compare "
+                            f"— cannot classify, keeping {status!r}")
+        elif filled >= planned:
+            status = 'filled'
+        else:
+            status = PARTIAL_STATUS
+    return status, int(filled), avg
+
+
 def _base_coid(coid: str) -> str:
     """Strip a '-rN' / '-mkt' retry suffix: the leg's original client_order_id."""
     return re.sub(r'-(r\d+|mkt)$', '', coid)
@@ -388,11 +444,12 @@ def chain_state(alpaca_client: AlpacaClient, base: str, ledger_rows: List[Dict],
     'retries'}: filled > live > dead > none. A terminal ledger *_fillcheck row is trusted, otherwise the
     broker is asked (get_order); a failed lookup is ERROR-logged and treated as LIVE so we never
     double-submit on an unknown."""
-    chain = {}
+    chain, planned = {}, {}
     for r in ledger_rows:
         c = r.get('client_order_id') or ''
         if r.get('action') in _ORDER_ACTIONS and (c == base or _base_coid(c) == base):
             chain[c] = r.get('order_id')
+            planned[c] = r.get('qty')
     for c, oid in open_orders.items():
         if c == base or _base_coid(c) == base:
             chain.setdefault(c, oid)
@@ -402,20 +459,23 @@ def chain_state(alpaca_client: AlpacaClient, base: str, ledger_rows: List[Dict],
     dead = None
     for c, oid in chain.items():
         fc = [r for r in ledger_rows if r.get('client_order_id') == c and (r.get('action') or '').endswith('_fillcheck')]
+        from_ledger, filled_qty, avg_price = False, 0, None
         if c in open_orders:
             status = 'new'
         elif fc:
-            status = _norm_status(fc[-1].get('status'))
+            status, from_ledger = _norm_status(fc[-1].get('status')), True
+            filled_qty, avg_price = _row_qty(fc[-1]) or 0, fc[-1].get('ref_price')
         else:
             try:
-                status = _norm_status(alpaca_client.get_order(oid).get('status'))
+                status, filled_qty, avg_price = resolve_fill(alpaca_client.get_order(oid), planned.get(c))
             except Exception as e:
                 logger.error(f"tom_sleeve: get_order({oid}) for {c} failed ({e}) — treating as LIVE, no resubmit")
                 status = 'new'
         if status == 'filled':
             return {'state': 'filled', 'coid': c, 'order_id': oid, 'retries': retries}
-        if status in DEAD_STATUSES:
-            dead = {'state': 'dead', 'coid': c, 'order_id': oid, 'retries': retries, 'status': status}
+        if status in DEAD_STATUSES or status == PARTIAL_STATUS:
+            dead = {'state': 'dead', 'coid': c, 'order_id': oid, 'retries': retries, 'status': status,
+                    'from_ledger': from_ledger, 'filled_qty': filled_qty, 'avg_price': avg_price}
         else:
             if status not in LIVE_STATUSES:
                 logger.warning(f"tom_sleeve: {c} has unrecognised status {status!r} — treating as live")
@@ -423,11 +483,13 @@ def chain_state(alpaca_client: AlpacaClient, base: str, ledger_rows: List[Dict],
     return dead
 
 
-def _ledger_row(today, action, symbol, qty, ref, order_id, status, coid, now_utc, deviation='') -> Dict:
+def _ledger_row(today, action, symbol, qty, ref, order_id, status, coid, now_utc, deviation='',
+                partial_entry='') -> Dict:
     """One ledger row dict."""
     return {'date': str(today), 'action': action, 'symbol': symbol, 'qty': qty, 'ref_price': ref,
             'order_id': order_id, 'status': status, 'client_order_id': coid,
-            'timestamp_utc': now_utc.isoformat(timespec='seconds'), 'partial_entry': '', 'deviation': deviation}
+            'timestamp_utc': now_utc.isoformat(timespec='seconds'), 'partial_entry': partial_entry,
+            'deviation': deviation}
 
 
 def close_out_dead(state: Dict, symbol: str, qty, today, now_utc: datetime, ledger_path: str,
@@ -435,8 +497,18 @@ def close_out_dead(state: Dict, symbol: str, qty, today, now_utc: datetime, ledg
     """Write the terminal *_fillcheck row for a leg id we are about to replace, BEFORE the replacement
     row, so open_tom_symbols() ends in the right state and check_pending_fills() never re-resolves it."""
     leg = _leg(state['coid'])
-    append_ledger_row(_ledger_row(today, 'entry_fillcheck' if leg == 'in' else 'exit_fillcheck', symbol, qty, '',
-                                  state['order_id'], status or state.get('status', 'expired'), state['coid'],
+    action = 'entry_fillcheck' if leg == 'in' else 'exit_fillcheck'
+    status = status or state.get('status', 'expired')
+    if status == PARTIAL_STATUS:
+        if state.get('from_ledger'):
+            return  # the partial_fill row is already in the ledger: a second one would double-count the fill
+        avg = state.get('avg_price')
+        append_ledger_row(_ledger_row(today, action, symbol, state.get('filled_qty'),
+                                      f"{float(avg):.4f}" if avg else '', state['order_id'], PARTIAL_STATUS,
+                                      state['coid'], now_utc, partial_entry='true' if leg == 'in' else 'false'),
+                          ledger_path)
+        return
+    append_ledger_row(_ledger_row(today, action, symbol, qty, '', state['order_id'], status, state['coid'],
                                   now_utc), ledger_path)
 
 
@@ -478,20 +550,27 @@ def submit_market_buy_order(alpaca_client: AlpacaClient, symbol: str, qty: int, 
             'symbol': symbol, 'qty': qty}
 
 
-def owed_exits(ledger_rows: List[Dict], today: date, alpaca_client: AlpacaClient) -> Dict[str, Dict]:
-    """Symbols whose exit was submitted on an EARLIER session, never filled, and are still held per
-    ledger: {symbol: {'base': original exit coid, 'sessions': trading sessions late}}."""
+def owed_exits(ledger_rows: List[Dict], today: date, alpaca_client: AlpacaClient,
+               open_orders: Optional[Dict[str, str]] = None) -> Dict[str, Dict]:
+    """Exit legs owed from an EARLIER session: {symbol: {'base': original exit coid, 'sessions': trading
+    sessions since the chain's FIRST exit}}. A symbol is owed when the ledger still holds it (the exit never
+    filled, or only partly) OR when an exit order of its chain is still LIVE at the broker -- the latter is
+    the catch-up-day late fallback (2026-10-06: r1 was live at 15:58 ET on a non-TOM day)."""
+    open_orders = open_orders or {}
     held = open_tom_symbols(ledger_rows)
-    last_exit: Dict[str, Dict] = {}
+    first_exit: Dict[str, Dict] = {}
     for r in ledger_rows:
         if r.get('action') == 'entry':
-            last_exit.pop(r['symbol'], None)
+            first_exit.pop(r['symbol'], None)
         elif r.get('action') == 'exit':
-            last_exit[r['symbol']] = r
+            cur = first_exit.get(r['symbol'])
+            if cur is None or _base_coid(cur['client_order_id']) != _base_coid(r['client_order_id']):
+                first_exit[r['symbol']] = r
     out = {}
-    for sym in held:
-        r = last_exit.get(sym)
-        if not r or _to_date(r['date']) >= today:
+    for sym, r in first_exit.items():
+        base = _base_coid(r['client_order_id'])
+        live = any(_base_coid(c) == base for c in open_orders)
+        if (sym not in held and not live) or _to_date(r['date']) >= today:
             continue
         d0 = _to_date(r['date'])
         try:
@@ -499,7 +578,7 @@ def owed_exits(ledger_rows: List[Dict], today: date, alpaca_client: AlpacaClient
         except Exception as e:
             logger.error(f"tom_sleeve: calendar lookup for catch-up failed ({e}) — counting weekdays")
             n = sum(1 for k in range(1, (today - d0).days + 1) if (d0 + timedelta(k)).weekday() < 5)
-        out[sym] = {'base': _base_coid(r['client_order_id']), 'sessions': max(n, 1)}
+        out[sym] = {'base': base, 'sessions': max(n, 1)}
     return out
 
 
@@ -524,8 +603,18 @@ def run(alpaca_client: AlpacaClient, notifier: Optional[TelegramNotifier], now_u
 
     ledger_rows = read_ledger(ledger_path)
     action = classify_day(today, alpaca_client)
-    owed = owed_exits(ledger_rows, today, alpaca_client) if action != 'exit' else {}
+    try:
+        open_orders = {o['client_order_id']: o.get('id') for o in alpaca_client.get_open_orders()
+                       if o.get('client_order_id')}
+    except AlpacaAPIError as e:
+        logger.error(f"tom_sleeve: get_open_orders failed, proceeding on ledger state alone: {e}")
+        open_orders = {}
+    owed = owed_exits(ledger_rows, today, alpaca_client, open_orders) if action != 'exit' else {}
     if action == 'none' and not owed:
+        stray = sorted(c for c in open_orders if c.startswith('tom-'))
+        if stray:
+            logger.warning(f"tom_sleeve: live tom order(s) {stray} at the broker on a non-TOM day with no "
+                            f"tracked owed exit in the ledger — NOT handled, check the ledger")
         msg = f"{today} is not a turn-of-month entry or exit session — no-op"
         logger.info(f"tom_sleeve: {msg}")
         return msg
@@ -537,12 +626,6 @@ def run(alpaca_client: AlpacaClient, notifier: Optional[TelegramNotifier], now_u
         return msg
 
     held = open_tom_symbols(ledger_rows)
-    try:
-        open_orders = {o['client_order_id']: o.get('id') for o in alpaca_client.get_open_orders()
-                       if o.get('client_order_id')}
-    except AlpacaAPIError as e:
-        logger.error(f"tom_sleeve: get_open_orders failed, proceeding on ledger state alone: {e}")
-        open_orders = {}
 
     moc_window = in_action_window(now_et)
     late_window = in_late_window(now_et)
@@ -689,16 +772,21 @@ def _process_exit(alpaca_client, notifier, symbol, info, positions, ledger_rows,
     """One symbol's exit leg: fill-aware idempotency, late market fallback, catch-up tagging."""
     base = info['base']
     deviation = f"late_exit_{info['sessions']}_sessions" if info['sessions'] else ''
-    qty = positions.get(symbol, 0)
+    broker_qty = positions.get(symbol, 0)
+    ledger_qty = ledger_open_qty(ledger_rows, symbol)
+    # Owed = what the broker actually holds, never more than the ledger says is ours (never the original qty).
+    qty = broker_qty if ledger_qty is None else min(broker_qty, ledger_qty)
+    if ledger_qty is not None and broker_qty != ledger_qty:
+        logger.warning(f"tom_sleeve: {symbol} broker qty {broker_qty} != ledger open qty {ledger_qty} "
+                        f"— owed qty = min = {qty} (the broker position is the source of truth)")
     st = chain_state(alpaca_client, base, ledger_rows, open_orders)
     if st['state'] == 'filled':
         logger.info(f"tom_sleeve: {st['coid']} filled — skip (idempotent)")
         return None
     if qty <= 0 and st['state'] != 'live':
-        logger.error(f"tom_sleeve: ledger shows an open {symbol} tom position but the broker reports "
-                      f"{qty} shares — nothing to sell")
+        logger.error(f"tom_sleeve: ledger shows an open {symbol} tom position (ledger qty {ledger_qty}) but "
+                      f"the broker reports {broker_qty} shares — nothing to sell")
         return None
-    ledger_qty = _last_entry_qty(ledger_rows, symbol)
     if st['state'] == 'live':
         if late_window and not st['coid'].endswith('-mkt'):
             return _late_replace(alpaca_client, notifier, st, symbol, 'out', qty, today, now_utc, ledger_path, dry_run)
@@ -706,13 +794,12 @@ def _process_exit(alpaca_client, notifier, symbol, info, positions, ledger_rows,
         return None
     if not (moc_window or late_window):
         return None
-    if ledger_qty is not None and qty != ledger_qty:
-        logger.warning(f"tom_sleeve: {symbol} broker qty {qty} != logged entry qty {ledger_qty} "
-                        f"— selling the broker qty (source of truth for what is actually held)")
     send_coid = base
     if st['state'] == 'dead':
         send_coid = f"{base}-r{st['retries'] + 1}"
-        logger.warning(f"tom_sleeve: {st['coid']} {st['status']} unfilled — resubmitting as {send_coid}")
+        logger.warning(f"tom_sleeve: {st['coid']} {st['status']} "
+                        f"({'filled ' + str(st['filled_qty']) if st['status'] == PARTIAL_STATUS else 'unfilled'}) "
+                        f"— resubmitting the owed {qty} as {send_coid}")
     if deviation:
         logger.warning(f"tom_sleeve: {symbol} exit owed since an earlier session — {deviation}")
     use_moc = moc_window
@@ -738,6 +825,7 @@ def _process_exit(alpaca_client, notifier, symbol, info, positions, ledger_rows,
 # the 'expired' text specifically.
 _TERMINAL_STATUS_REASON = {
     'filled': 'filled',
+    PARTIAL_STATUS: 'partially filled',
     'expired': ('unfilled — order was ACCEPTED at submission (no reject) but returned no fill by '
                 'end of day; Alpaca marks unmatched orders EXPIRED after the close with no reason '
                 'field on the order object (docs.alpaca.markets/us/docs/orders-at-alpaca only says '
@@ -745,6 +833,26 @@ _TERMINAL_STATUS_REASON = {
     'canceled': 'canceled before it could fill (broker- or user-initiated)',
     'rejected': 'rejected by the broker or exchange at or after submission',
 }
+
+
+def _fillcheck_row(row: Dict, status: str, qty, ref_price: str, partial_entry: str) -> Dict:
+    """The `<action>_fillcheck` ledger row that resolves order-row `row` (date and coid of the order)."""
+    return {'date': row['date'], 'action': f"{row['action']}_fillcheck", 'symbol': row['symbol'], 'qty': qty,
+            'ref_price': ref_price, 'order_id': row['order_id'], 'status': status,
+            'client_order_id': row['client_order_id'],
+            'timestamp_utc': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+            'partial_entry': partial_entry}
+
+
+def _partial_message(row: Dict, filled_qty: int, fill_price) -> str:
+    """Telegram/log line for a partially filled order: filled/total, price, what stays owed."""
+    total = _row_qty(row) or 0
+    price = f" @ ${float(fill_price):.2f}" if fill_price else ""
+    if _leg(row.get('client_order_id')) == 'in':
+        return (f"{row['symbol']} {row['action']} order PARTIAL FILL {filled_qty}/{total}{price} — "
+                f"[PARTIAL ENTRY: the sleeve holds the filled {filled_qty} only]")
+    return (f"{row['symbol']} {row['action']} order PARTIAL FILL {filled_qty}/{total}{price} — "
+            f"remaining {max(total - filled_qty, 0)} stays owed (sold next session from the broker position)")
 
 
 def check_pending_fills(alpaca_client: AlpacaClient, notifier: Optional[TelegramNotifier],
@@ -776,9 +884,8 @@ def check_pending_fills(alpaca_client: AlpacaClient, notifier: Optional[Telegram
         except AlpacaAPIError as e:
             logger.warning(f"tom_sleeve: fill check for {order_id} ({row['symbol']}) failed: {e} — will retry next run")
             continue
-        status = order.get('status', 'unknown')
-        if status in ('filled', 'canceled', 'rejected', 'expired'):
-            fill_price = order.get('filled_avg_price')
+        status, filled_qty, fill_price = resolve_fill(order, row.get('qty'))
+        if status in ('filled', 'canceled', 'rejected', 'expired', PARTIAL_STATUS):
             is_entry = _leg(row.get('client_order_id')) == 'in'
             partial = is_entry and status != 'filled'
             reason = _TERMINAL_STATUS_REASON.get(status)
@@ -786,16 +893,18 @@ def check_pending_fills(alpaca_client: AlpacaClient, notifier: Optional[Telegram
                 reason = f"unrecognized terminal status {status!r} — treating as a reason gap, not a fill"
                 logger.warning(f"tom_sleeve: fill check — {row['symbol']} {row['action']} resolved to "
                                 f"{status!r}, which has no documented reason text (see _TERMINAL_STATUS_REASON)")
-            append_ledger_row({
-                'date': row['date'], 'action': f"{row['action']}_fillcheck", 'symbol': row['symbol'],
-                'qty': row['qty'], 'ref_price': f"{fill_price:.4f}" if fill_price else row.get('ref_price', ''),
-                'order_id': order_id, 'status': status, 'client_order_id': row['client_order_id'],
-                'timestamp_utc': datetime.now(timezone.utc).isoformat(timespec='seconds'),
-                'partial_entry': 'true' if partial else 'false',
-            }, ledger_path)
-            msg = (f"{row['symbol']} {row['action']} order {status}"
-                   + (f" @ ${fill_price:.2f}" if fill_price else "") + f" — {reason}")
-            if partial:
+            append_ledger_row(_fillcheck_row(
+                row, status, filled_qty if status == PARTIAL_STATUS else row['qty'],
+                f"{fill_price:.4f}" if fill_price else row.get('ref_price', ''), 'true' if partial else 'false'),
+                ledger_path)
+            if status == PARTIAL_STATUS:
+                msg = _partial_message(row, filled_qty, fill_price)
+            else:
+                msg = (f"{row['symbol']} {row['action']} order {status}"
+                       + (f" @ ${fill_price:.2f}" if fill_price else "") + f" — {reason}")
+            if status == PARTIAL_STATUS:
+                logger.warning(f"tom_sleeve: fill check — {msg}")
+            elif partial:
                 msg += " [PARTIAL ENTRY: this symbol is NOT in the sleeve this month]"
                 logger.warning(f"tom_sleeve: fill check — {msg}")
             else:
@@ -805,6 +914,52 @@ def check_pending_fills(alpaca_client: AlpacaClient, notifier: Optional[Telegram
         else:
             logger.info(f"tom_sleeve: fill check — {row['symbol']} {row['action']} order still {status}")
     return messages
+
+
+def reconcile_ledger(alpaca_client: AlpacaClient, notifier: Optional[TelegramNotifier],
+                     ledger_path: str = LEDGER_PATH, dry_run: bool = False) -> List[str]:
+    """Backfill missing `partial_fill` rows. For every ledger order row whose fill check resolved WITHOUT a
+    fill (expired/canceled), ask the orders API; if the order in fact filled 0 < filled_qty < qty and no
+    partial_fill row exists for it, append one (filled qty, avg price). Idempotent. Writes the ledger only --
+    NEVER places or cancels an order. A full fill mislabelled unfilled is WARNING-logged, not rewritten. A
+    partial row is refused (ERROR) when a LATER order row exists for the symbol: appended last it would
+    re-add the symbol to the held set. Returns one message per row appended (or, in dry_run, that would be)."""
+    rows = read_ledger(ledger_path)
+    msgs: List[str] = []
+    for idx, row in enumerate(rows):
+        coid = row.get('client_order_id') or ''
+        if row.get('action') not in _ORDER_ACTIONS or not row.get('order_id'):
+            continue
+        fcs = [r for r in rows if r.get('client_order_id') == coid and (r.get('action') or '').endswith('_fillcheck')]
+        if not fcs or any(r.get('status') in ('filled', PARTIAL_STATUS) for r in fcs):
+            continue
+        try:
+            status, filled_qty, avg = resolve_fill(alpaca_client.get_order(row['order_id']), row.get('qty'))
+        except AlpacaAPIError as e:
+            logger.warning(f"tom_sleeve: reconcile get_order({row['order_id']}) for {coid} failed: {e}")
+            continue
+        if status == 'filled':
+            logger.warning(f"tom_sleeve: reconcile — {coid} is FILLED at the broker but the ledger says "
+                            f"{fcs[-1].get('status')}; not auto-corrected, review the ledger")
+            continue
+        if status != PARTIAL_STATUS:
+            continue
+        if any(r.get('symbol') == row['symbol'] and r.get('action') in _ORDER_ACTIONS
+               and r.get('client_order_id') != coid for r in rows[idx + 1:]):
+            logger.error(f"tom_sleeve: reconcile — {coid} filled {filled_qty} but a LATER order row exists for "
+                          f"{row['symbol']}; NOT appending (it would corrupt the held state), fix by hand")
+            continue
+        is_entry = _leg(coid) == 'in'
+        msg = _partial_message(row, filled_qty, avg)
+        if dry_run:
+            msgs.append(f"DRY-RUN would append partial_fill: {msg}")
+            continue
+        append_ledger_row(_fillcheck_row(row, PARTIAL_STATUS, filled_qty, f"{float(avg):.4f}" if avg else '',
+                                         'true' if is_entry else 'false'), ledger_path)
+        logger.warning(f"tom_sleeve: reconcile — appended partial_fill row: {msg}")
+        notify(notifier, msg)
+        msgs.append(msg)
+    return msgs
 
 
 def print_status(alpaca_client: Optional[AlpacaClient], ledger_path: str = LEDGER_PATH) -> None:
@@ -834,6 +989,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--dry-run', action='store_true', help="print intended actions, submit nothing")
     ap.add_argument('--status', action='store_true', help="print the ledger and open sleeve, take no action")
+    ap.add_argument('--reconcile', action='store_true',
+                    help="append any missing partial_fill ledger row from the orders API (ledger write only, "
+                         "NO orders); with --dry-run just print")
     ap.add_argument('--verbose', action='store_true')
     ap.add_argument('--now-et', help="rehearsal only (needs --dry-run): pretend now is 'YYYY-MM-DD HH:MM' ET")
     args = ap.parse_args()
@@ -862,6 +1020,11 @@ def main() -> int:
 
     if args.status:
         print_status(alpaca_client)
+        return 0
+
+    if args.reconcile:
+        msgs = reconcile_ledger(alpaca_client, None, dry_run=args.dry_run)  # no Telegram: a ledger correction
+        print("\n".join(msgs) if msgs else "reconcile: ledger already matches the orders API — nothing to append")
         return 0
 
     now_utc = datetime.now(timezone.utc)
