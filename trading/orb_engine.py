@@ -474,6 +474,13 @@ class ORBEngine:
         #                          after the range end (backstop; 0=off).
         self.sweep_retry_delay_s = float(entry_cfg.get('sweep_retry_delay_s', 4.0))
         self.first_rank_grace_s = float(entry_cfg.get('first_rank_grace_s', 25.0))
+        # 2026-10-08 grace-waitlist fix (docs/orb_grace_waitlist_fix_20261008.md):
+        # the grace waits ONLY for names that can still be ranked and placed.
+        # Session volume below this floor (shares) = phantom print, never waited on.
+        self.grace_min_session_volume = int(entry_cfg.get('grace_min_session_volume', 1000))
+        # A cached spread older than this (s) is not trusted to exclude a name
+        # (a 09:31 wide open-auction quote must not drop a name that tightens by 09:35).
+        self.grace_quote_max_age_s = float(entry_cfg.get('grace_quote_max_age_s', 60.0))
 
         self.range_minutes = int(entry_cfg.get('range_minutes', 5))
         self.entry_slip_bps = float(entry_cfg.get('entry_slip_bps', 30))
@@ -963,6 +970,16 @@ class ORBEngine:
         self._first_rank_defer_active: bool = False
         self._first_rank_defer_started: Optional[float] = None
         self._first_rank_grace_end_utc: Optional[datetime] = None
+        # Grace-waitlist state (2026-10-08), all DAILY, cleared in _reset_daily_locked:
+        #   _provisional_veto_reason   sym -> veto name from the ~09:34:57 preplace pass
+        #   _spread_quote_cache        sym -> (time.time(), spread_bps) of the last live quote
+        #   _grace_skip_logged         symbols whose "GRACE skip" INFO line was already emitted
+        #   _first_rank_grace_waited_on  names the deferral actually waited on (tripwire cause)
+        self._provisional_veto_reason: Dict[str, str] = {}
+        self._provisional_state: Dict[str, 'CandidateState'] = {}   # sym -> 09:34:57 temp (stand-in)
+        self._spread_quote_cache: Dict[str, tuple] = {}
+        self._grace_skip_logged: Set[str] = set()
+        self._first_rank_grace_waited_on: List[str] = []
         # Measured latency attribution for the tripwire (seconds per phase,
         # accumulated until the day's first submit). Plain float adds — this
         # is diagnostics, never a control input.
@@ -3478,6 +3495,14 @@ class ORBEngine:
         eligible = [self.candidates[s] for s in cand_syms if s in self.candidates]
         if not eligible:
             return []
+        # Parity (2026-10-08): production keeps a provisional stand-in for each
+        # rangeless vetoed / spread-gated name so it burns its top-K slot like
+        # the BT. A stand-in is NEVER placed (see the top_syms loop).
+        standins: Dict[str, CandidateState] = {}
+        if pool_label == 'production':
+            standins = {t.symbol: t for t in self._provisional_standins(
+                symbols_entered_today, log=True) if t.symbol not in cand_syms}
+            eligible = eligible + list(standins.values())
 
         # This pool's own gap floor for the phantom-gap re-validation below.
         # PREREG_LIVE_UNION.md: an add-on pool's real gap can legitimately
@@ -3661,7 +3686,7 @@ class ORBEngine:
         _pending_submits = []
         submitted: List[str] = []
         for sym in top_syms:
-            cand = self.candidates[sym]
+            cand = standins.get(sym) or self.candidates[sym]
             # Vetoes — post-ranking, NO backfill: a vetoed pick already
             # consumed its slot/dedup place; the slot stays empty (refill
             # form is toxic — trading/orb_pdr_veto.py docstring). All four
@@ -3677,6 +3702,22 @@ class ORBEngine:
                 or self._catalyst_veto_reject(cand, cohort_symbols=cand_syms)
             )
             _t_vetoes += time.time() - _t_v0
+            if sym in standins:
+                # Burn the slot, never place: no real range exists. A veto
+                # (record=True above) already consumed the day-level slot on
+                # the stand-in; mirror it onto the real candidate so a late
+                # range cannot re-enter the name. Not vetoed = spread-gated
+                # name: the planner gate would reject it, slot burned here.
+                real = self.candidates[sym]
+                if vetoed:
+                    real.plan_submitted = cand.plan_submitted
+                    real.rejected_reason = cand.rejected_reason
+                else:
+                    real.rejected_reason = 'standin_spread_slot_burn'
+                logger.info(
+                    f"ORB: GRACE stand-in {sym} burned its top-K slot "
+                    f"({real.rejected_reason}); not placed (no real range)")
+                continue
             if vetoed:
                 continue
             spread_bps = self._get_spread_bps(sym)
@@ -4051,12 +4092,14 @@ class ORBEngine:
                 self._preplace_vetoed = {}
                 for sym in top_syms:
                     temp, prov_rd = by_sym[sym]
+                    self._provisional_state[sym] = temp
                     veto = self._provisional_veto(temp, top_syms)
                     if veto:
                         # 2026-10-06: provisional vetoes NEVER touch day-level
                         # slot state (`_pdr_vetoed_today`); the final reconcile
                         # + selection re-decide every veto once on final data.
                         self._preplace_vetoed[sym] = veto
+                        self._provisional_veto_reason[sym] = veto
                         logger.info("[ORB PREPLACE] provisional veto %s (%s) — "
                                     "not planned; final selection re-decides", sym, veto)
                         continue
@@ -4196,7 +4239,11 @@ class ORBEngine:
         `features` / `composite` / `quintile` fields the selection pass sets
         (it recomputes them), nothing day-level."""
         scored: List[CandidateState] = []
-        for sym, cand in self.candidates.items():
+        # Rangeless vetoed / spread-gated names keep their slot via their
+        # provisional stand-in (see `_provisional_standins`).
+        field = list(self.candidates.items()) + [
+            (t.symbol, t) for t in self._provisional_standins()]
+        for sym, cand in field:
             if self._symbol_pool.get(sym, 'production') != 'production':
                 continue
             if cand.range_data is None:
@@ -4372,9 +4419,12 @@ class ORBEngine:
             # own code: the scanner's cycle holding the thread, or the
             # engine-pool queue. Never negative in a report.
             outside = max(0.0, delay - measured)
+            waited = ','.join(self._first_rank_grace_waited_on)
             breakdown = ', '.join(
-                f"{k} {v:.1f}s" for k, v in sorted(
-                    phases.items(), key=lambda kv: -kv[1]))
+                f"{k} {v:.1f}s"
+                + (f" waited on [{waited}]"
+                   if k == 'first_rank_grace' and waited else '')
+                for k, v in sorted(phases.items(), key=lambda kv: -kv[1]))
             breakdown = (breakdown + ', ' if breakdown else '') + \
                 f"blocked_outside_orb {outside:.1f}s"
             if delay > self.latency_warn_secs:
@@ -5089,8 +5139,107 @@ class ORBEngine:
             return True
         return False
 
-    def _production_rangeless(self) -> List[str]:
-        """Symbols in the PRODUCTION pool that have no opening range yet.
+    # Provisional vetoes that depend ONLY on prior-day data (prev_day_range_pct,
+    # return_volatility_20d via cand.features). They cannot flip when the
+    # opening range arrives, so waiting for the range is pure latency.
+    # `range_size_veto` needs the range and `catalyst_veto` depends on the
+    # provisional top-K cohort (range-ranked) -> neither is range-independent.
+    GRACE_RANGE_INDEPENDENT_VETOES = frozenset({'pdr_veto', 'g1_veto'})
+
+    def _candidate_session_volume(self, symbol: str) -> Optional[int]:
+        """Best known lower bound of today's session volume, or None.
+
+        max(cached snapshot daily-bar volume, sum of streamed 1-min bars).
+        Both are lower bounds, so the max is the safest figure to exclude on:
+        a stale low snapshot cannot hide volume the bar stream already saw.
+        None = no volume field available for the symbol (never excluded).
+        """
+        vols: List[int] = []
+        snap = self._snapshot_cache.get(symbol)
+        if isinstance(snap, dict) and snap.get('volume') is not None:
+            try:
+                vols.append(int(snap['volume']))
+            except (TypeError, ValueError):
+                pass
+        bars = self._bar_windows.get(symbol)
+        if bars:
+            vols.append(sum(int(b.get('volume', 0) or 0) for b in bars))
+        return max(vols) if vols else None
+
+    def _grace_skip(self, symbol: str) -> Optional[tuple]:
+        """(kind, reason) why the first-rank grace must NOT wait for this
+        rangeless name, or None when it is waitable.
+
+        kind 'phantom': session volume below `grace_min_session_volume` (a
+        print the BT's adjusted daily bars never see). kind 'veto': a
+        range-independent provisional veto from the 09:34:57 pass. kind
+        'spread': a fresh cached quote wider than `max_spread_bps` (the
+        planner's spread gate would reject the placement). Missing data (no
+        volume field / no cached quote) never excludes. Phantom is checked
+        first: a phantom stays out of the field entirely, the other two
+        keep a provisional stand-in in the final ranking (see
+        `_provisional_standins`). Pure: no I/O, no fetch.
+        """
+        vol = self._candidate_session_volume(symbol)
+        if vol is not None and vol < self.grace_min_session_volume:
+            return ('phantom',
+                    f"session volume {vol} sh < {self.grace_min_session_volume} "
+                    f"(phantom print, no bar will consolidate)")
+        veto = self._provisional_veto_reason.get(symbol)
+        if veto in self.GRACE_RANGE_INDEPENDENT_VETOES:
+            return ('veto',
+                    f"provisional {veto} (prior-day inputs only; cannot flip "
+                    f"when the range arrives)")
+        cached = self._spread_quote_cache.get(symbol)
+        if cached is not None:
+            age = time.time() - cached[0]
+            if age <= self.grace_quote_max_age_s and cached[1] > self.max_spread_bps:
+                return ('spread',
+                        f"cached spread {cached[1]:.0f}bps > {self.max_spread_bps:.0f}bps "
+                        f"({age:.0f}s old; placement gate would reject)")
+        return None
+
+    def _grace_skip_reason(self, symbol: str) -> Optional[str]:
+        """Reason text of `_grace_skip`, or None when the name is waitable."""
+        skip = self._grace_skip(symbol)
+        return skip[1] if skip else None
+
+    def _provisional_standins(self, symbols_entered_today: Optional[Set[str]] = None,
+                              log: bool = False) -> List[CandidateState]:
+        """Provisional-state stand-ins for rangeless names that must still
+        occupy their slot in the FINAL ranking (2026-10-08, parity fix).
+
+        The BT ranks the full field, and a post-ranking veto / spread reject
+        BURNS its top-K slot (no refill, orb_machine_rules.md). A name we no
+        longer wait for (range-independent provisional veto or wide cached
+        spread) is therefore ranked from the throwaway CandidateState the
+        09:34:57 pass built (provisional range, features) while it is STILL
+        rangeless; the normal post-ranking vetoes / planner gate then burn the
+        slot. Never used for a phantom (BT never sees it), once the real range
+        exists (the real candidate wins), after the name was planned/entered,
+        or for an order: callers never place a stand-in.
+        """
+        out: List[CandidateState] = []
+        entered = symbols_entered_today or set()
+        for sym, temp in self._provisional_state.items():
+            cand = self.candidates.get(sym)
+            if (cand is None or cand.range_data is not None or cand.plan_submitted
+                    or temp.range_data is None or sym in self.open_positions
+                    or sym in entered
+                    or self._symbol_pool.get(sym, 'production') != 'production'):
+                continue
+            skip = self._grace_skip(sym)
+            if skip is None or skip[0] not in ('veto', 'spread'):
+                continue
+            if log:
+                logger.info(
+                    f"ORB: GRACE stand-in {sym} ranks from its 09:34:57 provisional "
+                    f"state ({skip[1]}); burns its slot if it lands in the top-K")
+            out.append(temp)
+        return out
+
+    def _production_rangeless(self, log_skips: bool = False) -> List[str]:
+        """WAITABLE symbols in the PRODUCTION pool that have no opening range yet.
 
         2026-09-28 grace-scope fix: add-on pool candidates (`_symbol_pool`
         tag != 'production', dry-only per PREREG_LIVE_UNION.md) must never
@@ -5099,10 +5248,23 @@ class ORBEngine:
         A symbol with no pool tag defaults to 'production' (same default
         `_run_pool_selection` uses), so untagged unit-test candidates are
         unaffected.
+
+        2026-10-08 grace-waitlist fix: names that can never be ranked or
+        placed (`_grace_skip_reason`) are not waited on. `log_skips=True`
+        emits one INFO line per excluded symbol per day.
         """
-        return [s for s, cand in self.candidates.items()
-                if cand.range_data is None
-                and self._symbol_pool.get(s, 'production') == 'production']
+        waitable: List[str] = []
+        for s, cand in self.candidates.items():
+            if cand.range_data is not None \
+                    or self._symbol_pool.get(s, 'production') != 'production':
+                continue
+            reason = self._grace_skip_reason(s)
+            if reason is None:
+                waitable.append(s)
+            elif log_skips and s not in self._grace_skip_logged:
+                self._grace_skip_logged.add(s)
+                logger.info(f"ORB: GRACE skip {s} — {reason}")
+        return waitable
 
     def _should_defer_first_rank(self) -> bool:
         """First-rank grace gate (2026-07-03 selection-race fix).
@@ -5135,8 +5297,7 @@ class ORBEngine:
         """
         if self.first_rank_grace_s <= 0:
             return False
-        rangeless = self._production_rangeless()
-        if not rangeless:
+        if not self._production_rangeless():
             return False
         now_utc = datetime.now(timezone.utc)
         try:
@@ -5151,6 +5312,14 @@ class ORBEngine:
         )
         grace_end = range_end_et + timedelta(seconds=self.first_rank_grace_s)
         if range_end_et <= et_now < grace_end:
+            # Inside the window: re-evaluate with logging so each excluded
+            # symbol is reported once (the cheap pre-check above is silent).
+            rangeless = self._production_rangeless(log_skips=True)
+            if not rangeless:
+                return False
+            for _s in rangeless:
+                if _s not in self._first_rank_grace_waited_on:
+                    self._first_rank_grace_waited_on.append(_s)
             # Arm the deferral so the entry drain thread re-evaluates the
             # moment the window ends (or the field completes). Without this
             # the only re-trigger was a fresh bar event — already consumed.
@@ -7600,6 +7769,11 @@ class ORBEngine:
         self._first_rank_defer_active = False
         self._first_rank_defer_started = None
         self._first_rank_grace_end_utc = None
+        self._provisional_veto_reason.clear()
+        self._provisional_state.clear()
+        self._spread_quote_cache.clear()
+        self._grace_skip_logged.clear()
+        self._first_rank_grace_waited_on = []
         self._latency_phases = {}
         self.candidates.clear()
         self.universe.clear()
@@ -8007,7 +8181,11 @@ class ORBEngine:
             if bid <= 0 or ask <= 0 or ask < bid:
                 return None
             mid = (bid + ask) / 2.0
-            return (ask - bid) / mid * 10000.0
+            spread = (ask - bid) / mid * 10000.0
+            # Remember the live measurement (no extra fetch) so the first-rank
+            # grace can skip a name whose placement the spread gate would reject.
+            self._spread_quote_cache[symbol] = (time.time(), spread)
+            return spread
         except Exception:
             return None
 

@@ -142,6 +142,11 @@ entry:
   # used to see only ~80% of the field and burn all daily slots on it.
   sweep_retry_delay_s: 4     # post-open sweep re-fetches still-rangeless candidates once after N s (0=off)
   first_rank_grace_s: 25     # defer the day's FIRST placement burst while pool candidates are rangeless (0=off)
+  # 10/8 grace-waitlist fix: the grace waits ONLY for rankable names — not for phantoms (session volume below the
+  # floor), not for names with a prior-day-only provisional veto (PDR/G1), not for names whose fresh cached quote
+  # already fails the spread gate. Vetoed/spread names still rank from their 09:34:57 state and burn their slot.
+  grace_min_session_volume: 1000   # shares traded today below this = phantom print, never waited on
+  grace_quote_max_age_s: 60        # a cached spread older than this does not exclude a name
   # BT picks top-K once at 9:35 ET. Live allows a short window for late bar-
   # stream / backfill / candidates arriving slowly, then HARD-BLOCKS new
   # submissions. Fix shipped 2026-04-20 after QBTZ/BATL slipped through at
