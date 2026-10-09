@@ -218,3 +218,4 @@ research/edgar_desk/*_events_pead.csv
 research/momentum_weekly/panel_2016_2026.parquet
 research/momentum_weekly/shards/
 research/crypto_rebalance/data/
+research/vix_term/data/
