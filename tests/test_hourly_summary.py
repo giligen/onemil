@@ -131,7 +131,7 @@ def test_open_position_lines_and_best_worst():
                 order('WIN', 'buy', 10, 10.0), order('WIN', 'sell', 10, 12.0), order('SOXS', 'buy', 50, 5.0)],
         positions=[pos('SOXS', 50, 255, 250, 5, 16), pos('GRAL', 10, 100, 90, 9, -8)]))
     msg = hs.build_message(NOW, _data(hod=hod), {})
-    line = [ln for ln in msg.splitlines() if ln.startswith('<pre>HOD') or ln.startswith('HOD')][0]
+    line = [ln for ln in msg.splitlines() if ln.startswith('<b>HOD</b>')][0]
     assert 'open 2: SOXS +$16 GRAL' in line
     assert 'worst UNHG' in line and 'best WIN +$20' in line
     assert '−$79' in line and '4 fills' not in line or True
@@ -158,8 +158,8 @@ def test_orb_week_excludes_tom_qqq_and_tom_shows_on_week_activity():
     client.trading_client.get_orders.side_effect = [[], week]    # today: nothing; week: the above
     msg = hs.build_message(NOW, _data(orb=book(client)), {})
     orb_line = [ln for ln in msg.splitlines() if 'ORB' in ln and 'HOURLY' not in ln][0]
-    tom_line = [ln for ln in msg.splitlines() if 'TOM' in ln][0]
-    assert 'wk +$179' in orb_line and '+$505' in tom_line and '0 fills' in tom_line
+    # TOM is hidden when idle today (no QQQ position, no QQQ fill today) even with week activity
+    assert 'wk +$179' in orb_line and not [ln for ln in msg.splitlines() if 'TOM' in ln]
     assert hs.week_start_utc(date(2026, 10, 9)) == datetime(2026, 10, 5, 4, 0, tzinfo=timezone.utc)
 
 
@@ -174,7 +174,7 @@ def test_failed_account_still_sends_others():
     hod = book(make_client(equity=100100.0))
     msg = hs.build_message(NOW, _data(orb=None, hod=hod, mom=None, live={'account': {'equity': 1.0, 'last_equity': 1.0}}),
                            {'ORB': 'api error', 'MOM': 'api error'})
-    assert 'ORB  n/a (api error)' in msg and 'MOM  n/a (api error)' in msg
+    assert '<b>ORB</b> n/a (api error)' in msg and '<b>MOM</b> n/a (api error)' in msg
     assert 'HOD' in msg and 'LIVE' in msg
     assert 'ERROR' not in msg and 'Traceback' not in msg
 
@@ -196,7 +196,7 @@ def test_gather_survives_one_failing_account(monkeypatch, caplog):
     assert data['ORB'] is None and errors['ORB'] == 'api error' and 'ORB read failed' in caplog.text
     assert data['HOD'] and data['MOM'] and data['LIVE']
     msg = hs.build_message(NOW, data, errors)
-    assert 'ORB  n/a (api error)' in msg and 'LIVE $0' not in msg and '+$100' in msg
+    assert '<b>ORB</b> n/a (api error)' in msg and 'LIVE $0' not in msg and '+$100' in msg
 
 
 def test_live_line_never_lists_positions():
@@ -206,7 +206,7 @@ def test_live_line_never_lists_positions():
     live_client.trading_client.get_all_positions.assert_not_called()
     live_client.trading_client.get_orders.assert_not_called()
     msg = hs.build_message(NOW, _data(live=data), {})
-    assert 'LIVE +$112 | equity $64,812' in msg and 'SECRETSYM' not in msg
+    assert '<b>LIVE</b> +$112 | equity $64,812' in msg and 'SECRETSYM' not in msg
 
 
 def test_paper_guard_refuses_non_pa_account():

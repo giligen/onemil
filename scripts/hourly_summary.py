@@ -312,7 +312,7 @@ def _best_worst(closed: Dict[str, float]) -> str:
 def format_book_line(label: str, day_pnl: float, pct: str, stats: Dict, wk: Optional[float],
                      wk_suffix: str = "") -> str:
     """One ORB / HOD style line: day P&L, fills, open positions, best/worst closed, week to date."""
-    parts = [f"{label:<5}{fmt_money(day_pnl)} ({pct})", f"{stats['n_fills']} fills", _open_names(stats['positions'])]
+    parts = [f"<b>{label}</b> {fmt_money(day_pnl)} ({pct})", f"{stats['n_fills']} fills", _open_names(stats['positions'])]
     bw = _best_worst(stats['closed'])
     if bw:
         parts.append(bw)
@@ -324,7 +324,7 @@ def format_book_line(label: str, day_pnl: float, pct: str, stats: Dict, wk: Opti
 
 def format_mom_line(day_pnl: float, equity: float, stats: Dict, wk: Optional[float]) -> str:
     """MOM (weekly book) line: day P&L, open P&L on market value, number of names, week to date."""
-    line = (f"{'MOM':<5}{fmt_money(day_pnl)} ({fmt_pct(day_pnl, equity)}) | open {fmt_money(stats['open_pl'])}"
+    line = (f"<b>MOM</b> {fmt_money(day_pnl)} ({fmt_pct(day_pnl, equity)}) | open {fmt_money(stats['open_pl'])}"
             f" on {fmt_k(stats['open_mv'])}, {len(stats['positions'])} names")
     if wk is not None:
         line += f"   wk {fmt_money(wk)}"
@@ -338,13 +338,13 @@ def format_tom_line(stats: Dict, wk: Optional[float] = None) -> str:
     pos = "flat"
     if stats['positions']:
         pos = "hold " + " ".join(f"{html.escape(p['symbol'])} {p['qty']:g}" for p in stats['positions'])
-    line = f"{'TOM':<5}{fmt_money(pnl)} ({fmt_pct(pnl, cost)}) | {stats['n_fills']} fills | {pos}"
+    line = f"<b>TOM</b> {fmt_money(pnl)} ({fmt_pct(pnl, cost)}) | {stats['n_fills']} fills | {pos}"
     return line + (f"   wk {fmt_money(wk)}" if wk is not None else "")
 
 
 def na_line(label: str, why: str) -> str:
     """Line for a book whose account could not be read; no exception text goes into the message."""
-    return f"{label:<5}n/a ({why})"
+    return f"<b>{label}</b> n/a ({why})"
 
 
 def enforce_line_limit(lines: List[str], limit: int = MAX_LINES) -> List[str]:
@@ -384,7 +384,7 @@ def build_message(now_et: datetime, data: Dict[str, Optional[Dict]], errors: Dic
         tom_wk_s = book_stats('TOM', orb['week_fills'], orb['positions'], lambda s: s == TOM_SYMBOL)
         lines.append(format_book_line("ORB", orb_pnl, fmt_pct(orb_pnl, ORB_STAGE_USD), orb_s,
                                       orb_wk_s['realized'] + orb_wk_s['intraday_open']))
-        if tom_s['active'] or tom_wk_s['active']:
+        if tom_s['active']:   # hidden unless a QQQ position or a QQQ fill today (week-only fills have no cost basis in the window)
             lines.append(format_tom_line(tom_s, tom_wk_s['realized'] + tom_wk_s['intraday_open']))
 
     hod = data.get('HOD')
@@ -411,9 +411,9 @@ def build_message(now_et: datetime, data: Dict[str, Optional[Dict]], errors: Dic
         lines.append(na_line("LIVE", errors.get('LIVE', 'api error')))
     else:
         a = live['account']
-        lines.append(f"{'LIVE':<5}{fmt_money(a['equity'] - a['last_equity'])} | equity ${a['equity']:,.0f}")
+        lines.append(f"<b>LIVE</b> {fmt_money(a['equity'] - a['last_equity'])} | equity ${a['equity']:,.0f}")
 
-    return header + "\n<pre>" + "\n".join(enforce_line_limit(lines, MAX_LINES - 1)) + "</pre>"
+    return header + "\n" + "\n".join(enforce_line_limit(lines, MAX_LINES - 1))
 
 
 # ---------------------------------------------------------------------------
