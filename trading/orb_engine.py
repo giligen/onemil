@@ -970,6 +970,10 @@ class ORBEngine:
         self._first_rank_defer_active: bool = False
         self._first_rank_defer_started: Optional[float] = None
         self._first_rank_grace_end_utc: Optional[datetime] = None
+        # 2026-10-10: True once the day's first production ranking of a
+        # non-empty field has run (daily; cleared in _reset_daily_locked).
+        # Until then a subset-scoped check_entries ranks the FULL field.
+        self._first_burst_done: bool = False
         # Grace-waitlist state (2026-10-08), all DAILY, cleared in _reset_daily_locked:
         #   _provisional_veto_reason   sym -> veto name from the ~09:34:57 preplace pass
         #   _spread_quote_cache        sym -> (time.time(), spread_bps) of the last live quote
@@ -3359,6 +3363,24 @@ class ORBEngine:
         # 1. Build candidate set
         eligible: List[CandidateState] = []
         cand_pool = symbols if symbols is not None else self.candidates.keys()
+        # 2026-10-10 fix (10/9 CIEG incident): the day's FIRST burst must rank
+        # the FULL field, like the BT's one-shot top-K. A drain event that
+        # clears the first-rank grace carries only ITS OWN touched subset;
+        # names whose ranges completed during an earlier grace-deferred call
+        # were never scored (CIEG ranked #2 by reconcile, never seen by the
+        # burst). Preplaced names are already in symbols_entered_today at that
+        # point, so the condition is an explicit daily flag, not slot count.
+        # After the first burst, subset-scoped calls are unchanged. The
+        # add-on pools derive their symbols from `eligible` (built from
+        # cand_pool below), so they inherit this widening.
+        if symbols is not None and not self._first_burst_done:
+            _full = set(self.candidates.keys())
+            if _full - set(symbols):
+                logger.info(
+                    f"ORB: first burst — ranking the full field "
+                    f"({len(_full)} candidates, caller subset had "
+                    f"{len(set(symbols))})")
+                cand_pool = self.candidates.keys()
         current_positions = len(self.open_positions)
         if current_positions >= self.max_concurrent:
             return []
@@ -3433,6 +3455,8 @@ class ORBEngine:
         submitted: List[str] = list(self._run_pool_selection(
             'production', production_syms, symbols_entered_today,
             feature_providers, dry_run=self.strategy_dry_run, t_rank=_t_rank))
+        if production_syms:
+            self._first_burst_done = True  # first production ranking of a non-empty field
 
         # Preplace-at-close PARITY summary (design item 3): preplaced
         # symbols are excluded from `eligible` above via plan_submitted /
@@ -7769,6 +7793,7 @@ class ORBEngine:
         self._first_rank_defer_active = False
         self._first_rank_defer_started = None
         self._first_rank_grace_end_utc = None
+        self._first_burst_done = False
         self._provisional_veto_reason.clear()
         self._provisional_state.clear()
         self._spread_quote_cache.clear()
