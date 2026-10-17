@@ -495,3 +495,83 @@ def test_header_only_production_book_uses_the_marker(tmp_path, monkeypatch):
     assert es.load_bt_rows("2026-10-05", str(book)) == ([], "")
     rows, why = es.load_bt_rows("2026-10-06", str(book))
     assert rows is None and "no marker" in why
+
+
+# ---------------------------------------------------------------- MOM P&L from the broker history (2026-10-17)
+def _hist_client(sessions, live_equity=None, fail=False):
+    """Fake MOM client: sessions = [(YYYY-MM-DD session, equity)], stamped the next UTC date like Alpaca."""
+    import datetime as _dt
+
+    class H:
+        pass
+
+    h = H()
+    h.timestamp = [int(_dt.datetime.fromisoformat(d).replace(tzinfo=_dt.timezone.utc).timestamp()) + 86400
+                   for d, _ in sessions]
+    h.equity = [e for _, e in sessions]
+    h.profit_loss = [0.0] + [b - a for (_, a), (_, b) in zip(sessions, sessions[1:])]
+
+    class Acct:
+        equity = str(live_equity)
+
+    class TC:
+        def get_portfolio_history(self, req):
+            if fail:
+                raise RuntimeError("api down")
+            return h
+
+        def get_account(self):
+            return Acct()
+
+    class C:
+        trading_client = TC()
+
+    return C()
+
+
+SESSIONS = [("2026-09-25", 55800.0), ("2026-09-28", 55800.0), ("2026-09-29", 55900.0), ("2026-10-08", 56000.0),
+            ("2026-10-09", 56000.0), ("2026-10-12", 55586.58), ("2026-10-13", 55200.0), ("2026-10-14", 55100.0),
+            ("2026-10-15", 54300.0), ("2026-10-16", 53954.30)]
+
+
+def test_broker_pnl_day_and_week_match_broker_figures(tmp_path):
+    # no ledger mark for the day: the sleeve writes marks on rotation days only
+    wk = _weekly(tmp_path, [("2026-10-05", 20100)])
+    c = _hist_client(SESSIONS)
+    l12 = es.sleeve_pnl_lines(c, "2026-10-12", wk)
+    l16 = es.sleeve_pnl_lines(c, "2026-10-16", wk)
+    assert len(l12) == 1 and "day $-413.42" in l12[0]
+    assert "NO-DATA" not in l16[0] and "week $-2,045.70" in l16[0] and "since 2026-09-29 $-1,845.70" in l16[0]
+    assert "[broker history]" in l16[0] and "DD from peak" in l16[0]
+
+
+def test_broker_pnl_cross_check_flags_ledger_gap(tmp_path):
+    c = _hist_client(SESSIONS)
+    ok = es.sleeve_pnl_lines(c, "2026-10-12", _weekly(tmp_path, [("2026-10-12", 20000 + 55586.58 - 55800)]))
+    assert ok[1].endswith("| OK")
+    wk = tmp_path / "w2.csv"
+    wk.write_text("date,equity\n2026-10-12,20000\n")
+    bad = es.sleeve_pnl_lines(c, "2026-10-12", wk)
+    assert "DIFF" in bad[1] and "> $20" in bad[1]
+
+
+def test_broker_pnl_uses_live_equity_for_a_day_not_yet_in_history(tmp_path):
+    c = _hist_client(SESSIONS[:-1], live_equity=53954.30)
+    line = es.sleeve_pnl_lines(c, "2026-10-16", tmp_path / "none.csv")[0]
+    assert "week $-2,045.70" in line
+
+
+def test_broker_pnl_unreachable_is_no_data_with_warning(tmp_path, caplog):
+    import logging
+    with caplog.at_level(logging.WARNING, logger="eod_sections"):
+        out = es.sleeve_pnl_lines(_hist_client(SESSIONS, fail=True), "2026-10-16", tmp_path / "none.csv")
+    assert out[0].startswith("MOM P&L: NO-DATA (") and "unavailable" in out[0]
+    assert any("history failed" in r.message for r in caplog.records)
+
+
+def test_broker_pnl_unreachable_falls_back_to_ledger_mark_with_warning(tmp_path, caplog):
+    import logging
+    wk = _weekly(tmp_path, [("2026-09-29", 20000), ("2026-10-12", 20050)])
+    with caplog.at_level(logging.WARNING, logger="eod_sections"):
+        out = es.sleeve_pnl_lines(_hist_client(SESSIONS, fail=True), "2026-10-12", wk)
+    assert out[0].startswith("MOM P&L: day $+50") and any("falling back" in r.message for r in caplog.records)

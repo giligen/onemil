@@ -108,6 +108,85 @@ def sleeve_pnl_line(weekly: List[Dict], day: str, peak_hint: float = SLEEVE_STAR
             f"DD from peak {dd:.1f} %")
 
 
+def mom_history(client, period: str = "1M") -> Optional[List[Dict]]:
+    """The MOM paper account's daily portfolio history (reuses hourly_summary.fetch_history, read-only);
+    None with a WARNING on any failure or an empty history."""
+    try:
+        from hourly_summary import fetch_history
+        hist = fetch_history(client, period=period)
+    except Exception as e:  # noqa: BLE001
+        log.warning("MOM portfolio history failed: %s", e)
+        return None
+    if not hist:
+        log.warning("MOM portfolio history is empty")
+        return None
+    return hist
+
+
+def broker_sleeve_pnl_line(history: List[Dict], day: str, live_equity: Optional[float] = None,
+                           ledger_mark: Optional[float] = None) -> List[str]:
+    """`MOM P&L` computed from the MOM account's own daily history (the ledger marks only rotation days).
+
+    Session equity = the bar equity keyed by hourly_summary.session_date(stamp). Day P&L = equity(day) -
+    equity(previous session); week = minus the last session before this ISO week's Monday; since start =
+    minus the last session before SLEEVE_START_DATE (the start-of-day base). Cash outside the slice is
+    constant, so the deltas are slice P&L; DD is on the slice equity (SLEEVE_START_EQUITY + since-start P&L).
+    `live_equity` stands in for a day not yet in the history (the bar appears with the next UTC date).
+    Returns [pnl_line] plus a ledger cross-check line when `ledger_mark` (slice equity) is given."""
+    from hourly_summary import session_date
+    sess = {session_date(b["stamp"]).isoformat(): float(b["equity"]) for b in history}
+    if day not in sess:
+        if live_equity is not None and (not sess or day > max(sess)):
+            log.warning("MOM history has no bar for %s - using the live account equity", day)
+            sess[day] = float(live_equity)
+        else:
+            return [no_data("MOM P&L", f"no portfolio-history bar for {day}")]
+    d = dt.date.fromisoformat(day)
+    monday = (d - dt.timedelta(days=d.weekday())).isoformat()
+    eq = sess[day]
+
+    def base(before: str) -> Optional[float]:
+        prior = [k for k in sess if k < before]
+        return sess[max(prior)] if prior else None
+
+    day_b, week_b, start_b = base(day), base(monday), base(SLEEVE_START_DATE)
+    fmt = lambda b: f"${eq - b:+,.2f}" if b is not None else "n/a"  # noqa: E731
+    dd = "n/a"
+    if start_b is not None:
+        slice_eq = [SLEEVE_START_EQUITY + v - start_b for k, v in sess.items() if SLEEVE_START_DATE <= k <= day]
+        peak = max([SLEEVE_START_EQUITY] + slice_eq)
+        dd = f"{(peak - slice_eq[-1]) / peak * 100:.1f} %" if slice_eq else "n/a"
+    slice_now = SLEEVE_START_EQUITY + eq - start_b if start_b is not None else None
+    eq_txt = f" (slice equity ${slice_now:,.0f}, start ${SLEEVE_START_EQUITY:,.0f})" if slice_now is not None else ""
+    lines = [f"MOM P&L: day {fmt(day_b)} | week {fmt(week_b)} | since {SLEEVE_START_DATE} {fmt(start_b)}{eq_txt} | "
+             f"DD from peak {dd} [broker history]"]
+    if ledger_mark is not None and slice_now is not None:
+        diff = ledger_mark - slice_now
+        lines.append(f"MOM P&L cross-check: ledger mark ${ledger_mark:,.2f} vs broker slice ${slice_now:,.2f} | "
+                     + (f"DIFF ${diff:+,.2f} > $20" if abs(diff) > 20 else "OK"))
+    return lines
+
+
+def sleeve_pnl_lines(client, day: str, weekly_path) -> List[str]:
+    """MOM P&L from the broker history (primary), the weekly ledger mark as cross-check or, with the broker
+    unreachable, as a WARNING-ed fallback; NO-DATA (<why>) when neither exists."""
+    weekly = read_csv_rows(weekly_path) if os.path.exists(weekly_path) else []
+    mark = next((float(r["equity"]) for r in reversed(weekly) if r.get("date") == day and r.get("equity")), None)
+    hist = mom_history(client) if client is not None else None
+    if hist is not None:
+        live_eq = None
+        try:
+            live_eq = float(client.trading_client.get_account().equity)
+        except Exception as e:  # noqa: BLE001
+            log.warning("MOM account equity unavailable: %s", e)
+        return broker_sleeve_pnl_line(hist, day, live_eq, mark)
+    why = "MOM broker history unavailable" if client is not None else "MOM client unavailable"
+    if mark is not None:
+        log.warning("MOM P&L: %s - falling back to the weekly ledger mark", why)
+        return [sleeve_pnl_line(weekly, day)]
+    return [no_data("MOM P&L", f"{why}; no ledger mark for {day} in {Path(weekly_path).name}")]
+
+
 def rotation_stats(ledger: List[Dict], day: str) -> Optional[Dict]:
     """Fills of `day` from the sleeve ledger: names, count, slip mean/max (bp, absolute max) and size label.
     None when the ledger has no row for the day (non-rotation day)."""
@@ -295,8 +374,7 @@ def sleeve_section(day: str, client=None, ledger_path=LEDGER, weekly_path=WEEKLY
     import momentum_sleeve as sc
     state_path = state_path or sc.STATE_PATH
     client = client if client is not None else _mom_client()
-    lines = [sleeve_pnl_line(read_csv_rows(weekly_path), day)] if os.path.exists(weekly_path) else \
-        [no_data("MOM P&L", f"{Path(weekly_path).name} missing")]
+    lines = sleeve_pnl_lines(client, day, weekly_path)
     ledger = read_csv_rows(ledger_path)
     stats = rotation_stats(ledger, day)
     try:

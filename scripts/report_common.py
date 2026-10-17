@@ -17,7 +17,7 @@ import subprocess
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -606,37 +606,53 @@ def floored_stop_drift(day: str) -> Dict:
 
 
 COMPOSITE_DRIFT_TOL = 0.005      # below this: measurement noise, ignore
-NEAR_THRESHOLD_BAND = 0.5        # |comp| inside this band -> drift is
-                                 # decision-RELEVANT (ASPI class: 0.317
-                                 # vs 0.410 near the 0.0 gate)
 HARD_DRIFT_ABS = 0.15            # drift this large means the feature
                                  # pipeline itself broke — hard even on
                                  # deep rejects
 
 
-def classify_composite_drift(comp_live: float,
-                             comp_bt: float) -> Optional[str]:
-    """'hard' | 'soft' | None for a live-vs-BT composite pair.
+def composite_drift_decision(comp_live: float, comp_bt: float,
+                             threshold: float = 0.0,
+                             live_in_top: Optional[bool] = None,
+                             bt_in_top: Optional[bool] = None
+                             ) -> Tuple[Optional[str], str]:
+    """(severity, reason) for a live-vs-BT composite pair.
 
-    hard  -> red-day (z-param-desync class): selection flip across the
-             0.0 threshold, either side near-threshold, or a drift too
-             large to be a data revision.
-    soft  -> warn-only (2026-07-21 VIVK class): tiny drift on a symbol
-             both systems reject by a wide margin — vendor bar revisions
-             on extreme movers land here; zero decisions changed, so it
-             must not reset the ramp streak (owner-approved 2026-07-23).
-    None  -> within tolerance.
+    hard only when the drift CHANGES A DECISION (2026-10-17, 10/16 RGC:
+    live -0.4672 vs BT -0.4513 — both reject, yet the old near-threshold
+    band marked the day RED and froze the ramp):
+      (1) pass/fail against the filter `threshold` differs (zero-crossing
+          at the default 0.0 threshold), or
+      (2) membership in the day's top-N differs (only when both
+          memberships are supplied), or
+      (3) the drift exceeds HARD_DRIFT_ABS (feature pipeline broke).
+    Otherwise 'soft' (WARNING line, not RED); None within tolerance.
+    The reason string of a hard verdict starts with 'decision_changed'.
     """
     delta = abs(comp_bt - comp_live)
     if delta <= COMPOSITE_DRIFT_TOL:
-        return None
-    if (comp_live >= 0) != (comp_bt >= 0):
-        return 'hard'
-    if min(abs(comp_live), abs(comp_bt)) < NEAR_THRESHOLD_BAND:
-        return 'hard'
+        return None, ''
+    if (comp_live >= threshold) != (comp_bt >= threshold):
+        return 'hard', (f"decision_changed: pass/fail vs threshold "
+                        f"{threshold:g} differs")
+    if (live_in_top is not None and bt_in_top is not None
+            and live_in_top != bt_in_top):
+        return 'hard', (f"decision_changed: top-N membership differs "
+                        f"(live {live_in_top}, BT {bt_in_top})")
     if delta > HARD_DRIFT_ABS:
-        return 'hard'
-    return 'soft'
+        return 'hard', (f"decision_changed: drift {delta:.4f} > "
+                        f"{HARD_DRIFT_ABS} (feature pipeline suspect)")
+    return 'soft', 'no decision changed'
+
+
+def classify_composite_drift(comp_live: float, comp_bt: float,
+                             threshold: float = 0.0,
+                             live_in_top: Optional[bool] = None,
+                             bt_in_top: Optional[bool] = None
+                             ) -> Optional[str]:
+    """'hard' | 'soft' | None — severity half of composite_drift_decision."""
+    return composite_drift_decision(comp_live, comp_bt, threshold,
+                                    live_in_top, bt_in_top)[0]
 
 
 def decision_parity(day: str) -> Dict:
@@ -681,7 +697,9 @@ def decision_parity(day: str) -> Dict:
         params = load_feature_params((cfg.get('filter') or {}))
         mismatches = []
         warnings = []
-        n = 0
+        thr = float((cfg.get('filter') or {}).get('threshold', 0.0))
+        slots = int((cfg.get('sizing') or {}).get('max_concurrent', 4))
+        pairs: Dict[str, Tuple[float, float]] = {}
         for sym, comp_live in live.items():
             row = feats[feats['symbol'] == sym]
             if row.empty:
@@ -691,11 +709,20 @@ def decision_parity(day: str) -> Dict:
             comp_bt = composite_score(fdict, params)
             if comp_bt is None:
                 continue
-            n += 1
-            sev = classify_composite_drift(comp_live, comp_bt)
+            pairs[sym] = (comp_live, comp_bt)
+        n = len(pairs)
+        # top-N among the compared names that pass the filter, per side
+        def _top(idx: int) -> set:
+            ranked = sorted((s_ for s_, c in pairs.items() if c[idx] >= thr),
+                            key=lambda s_: -pairs[s_][idx])
+            return set(ranked[:slots])
+        top_live, top_bt = _top(0), _top(1)
+        for sym, (comp_live, comp_bt) in pairs.items():
+            sev, why = composite_drift_decision(
+                comp_live, comp_bt, thr, sym in top_live, sym in top_bt)
             if sev:
                 txt = (f"{sym}: live comp {comp_live:.4f} vs BT "
-                       f"{comp_bt:.4f} (Δ{comp_bt - comp_live:+.4f})")
+                       f"{comp_bt:.4f} (Δ{comp_bt - comp_live:+.4f}) — {why}")
                 (mismatches if sev == 'hard' else warnings).append(txt)
         return {'available': True, 'n_compared': n,
                 'mismatches': mismatches, 'warnings': warnings}

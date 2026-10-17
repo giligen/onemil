@@ -179,10 +179,10 @@ def fetch_positions(client: AlpacaClient) -> List[Dict]:
     return out
 
 
-def fetch_history(client: AlpacaClient) -> List[Dict]:
-    """1W / 1D portfolio history as [{'stamp': UTC date, 'profit_loss': float, 'equity': float}] (read-only)."""
+def fetch_history(client: AlpacaClient, period: str = '1W') -> List[Dict]:
+    """`period` / 1D portfolio history as [{'stamp': UTC date, 'profit_loss': float, 'equity': float}] (read-only)."""
     from alpaca.trading.requests import GetPortfolioHistoryRequest
-    h = client.trading_client.get_portfolio_history(GetPortfolioHistoryRequest(period='1W', timeframe='1D'))
+    h = client.trading_client.get_portfolio_history(GetPortfolioHistoryRequest(period=period, timeframe='1D'))
     out = []
     for ts, pl, eq in zip(h.timestamp or [], h.profit_loss or [], h.equity or []):
         out.append({'stamp': datetime.fromtimestamp(ts, timezone.utc).date(),
@@ -212,6 +212,14 @@ def per_symbol_fills(fills: List[Dict]) -> Dict[str, Dict]:
     return agg
 
 
+def session_date(stamp: date) -> date:
+    """The trading session a daily history bar holds: Alpaca stamps the NEXT UTC date, so stamp minus one weekday."""
+    sess = stamp - timedelta(days=1)
+    while sess.weekday() >= 5:
+        sess -= timedelta(days=1)
+    return sess
+
+
 def week_to_date(history: List[Dict], today: date, day_pnl_today: float) -> float:
     """Sessions Monday..yesterday from the history + today's account day P&L.
 
@@ -221,9 +229,7 @@ def week_to_date(history: List[Dict], today: date, day_pnl_today: float) -> floa
     monday = today - timedelta(days=today.weekday())
     total = 0.0
     for bar in history:
-        sess = bar['stamp'] - timedelta(days=1)
-        while sess.weekday() >= 5:
-            sess -= timedelta(days=1)
+        sess = session_date(bar['stamp'])
         if monday <= sess < today:
             total += bar['profit_loss']
     return total + day_pnl_today

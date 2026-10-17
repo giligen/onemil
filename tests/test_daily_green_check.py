@@ -346,25 +346,45 @@ class TestCompositeDriftClassification:
         # deep reject both sides, small drift -> warn, never red
         assert rc.classify_composite_drift(-3.5203, -3.5016) == 'soft'
 
-    def test_aspi_class_stays_hard(self):
-        # the P0 the gate was built for: near-threshold drift
-        assert rc.classify_composite_drift(0.410, 0.317) == 'hard'
+    def test_aspi_class_hard_only_when_decision_changes(self):
+        # 0.410 vs 0.317 near the gate: soft without a decision flip...
+        assert rc.classify_composite_drift(0.410, 0.317) == 'soft'
+        # ...hard once the threshold sits between the two (pass/fail differs)
+        assert rc.classify_composite_drift(0.410, 0.317, threshold=0.35) == 'hard'
 
     def test_selection_flip_always_hard(self):
         assert rc.classify_composite_drift(0.010, -0.010) == 'hard'
         # even a deep drift that crosses zero
         assert rc.classify_composite_drift(0.6, -0.6) == 'hard'
 
-    def test_near_threshold_band_hard_both_signs(self):
-        assert rc.classify_composite_drift(-0.30, -0.28) == 'hard'
-        assert rc.classify_composite_drift(0.45, 0.48) == 'hard'
+    def test_near_zero_same_side_is_soft(self):
+        """10/16 RGC: live -0.4672 vs BT -0.4513, both reject, no decision changed."""
+        assert rc.classify_composite_drift(-0.4672, -0.4513) == 'soft'
+        sev, why = rc.composite_drift_decision(-0.4672, -0.4513)
+        assert sev == 'soft' and 'decision_changed' not in why
+        assert rc.classify_composite_drift(0.45, 0.48) == 'soft'
+
+    def test_top_n_membership_difference_is_hard(self):
+        sev, why = rc.composite_drift_decision(
+            0.9, 0.8, live_in_top=True, bt_in_top=False)
+        assert sev == 'hard' and 'decision_changed' in why and 'top-N' in why
+        assert rc.classify_composite_drift(
+            0.9, 0.8, live_in_top=True, bt_in_top=True) == 'soft'
+
+    def test_pass_fail_flip_reason_text(self):
+        sev, why = rc.composite_drift_decision(0.5, 0.3, threshold=0.4)
+        assert sev == 'hard' and 'decision_changed' in why
+
+    def test_big_delta_is_hard(self):
+        sev, why = rc.composite_drift_decision(-3.5, -3.3)
+        assert sev == 'hard' and 'decision_changed' in why
 
     def test_huge_drift_on_deep_reject_still_hard(self):
         # pipeline-broken magnitude: not explainable by data revision
         assert rc.classify_composite_drift(-3.5, -3.2) == 'hard'
 
     def test_band_boundary(self):
-        # exactly at band edge (0.5): outside band -> soft
+        # same side, no decision change -> soft
         assert rc.classify_composite_drift(0.52, 0.55) == 'soft'
 
 
