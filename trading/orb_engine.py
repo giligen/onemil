@@ -18,6 +18,7 @@ Trade tagging: every DB row has strategy='orb' so per-strategy P&L filtering wor
 """
 from __future__ import annotations
 
+import contextlib
 import copy
 import logging
 import queue
@@ -918,6 +919,14 @@ class ORBEngine:
         self._late_entry_cutoff_logged = False
         # Post-open range-sweep done flag (one-shot per day). See _ensure_ranges_post_open.
         self._post_open_range_sweep_done = False
+        # Bumped by every daily reset: a sweep whose REST fetch ran outside
+        # `_lock` compares it at ingest to discard a prior day's result.
+        self._daily_epoch = 0
+        # Serialises concurrent outside-the-lock sweeps (scanner tick vs drain
+        # thread): the 2nd caller waits here (as it used to wait on `_lock`)
+        # and then sees the sweep done. Never acquired while holding `_lock`.
+        self._sweep_flight_lock = threading.Lock()
+        self._sweep_tls = threading.local()  # .release_lock set by _sweep_outside_lock
         # The 4s consolidation-lag retry inside the sweep runs at most once
         # per day, even when the grace gate re-arms the sweep (2026-07-04).
         self._sweep_retry_used_today = False
@@ -1644,7 +1653,39 @@ class ORBEngine:
         except Exception as e:
             logger.warning(f"ORB: backfill for {symbol} failed: {e}")
 
+    def _fetch_sweep_bars(self, symbols: List[str],
+                          lookback_minutes: int) -> Dict[str, pd.DataFrame]:
+        """REST-fetch 1-min bars for `symbols` (the slow, network-bound part
+        of the post-open sweep). Never touches engine state, so it is safe to
+        call with or without `_lock` held. Failures are logged and yield {}.
+        """
+        bars_by_sym: Dict[str, pd.DataFrame] = {}
+        try:
+            if hasattr(self.alpaca, 'get_1min_bars_multi'):
+                bars_by_sym = self.alpaca.get_1min_bars_multi(
+                    symbols, lookback_minutes=lookback_minutes
+                ) or {}
+            else:
+                for sym in symbols:
+                    try:
+                        b = self.alpaca.get_1min_bars(sym, lookback_minutes=lookback_minutes)
+                        if b is not None and not b.empty:
+                            bars_by_sym[sym] = b
+                    except Exception:
+                        continue
+        except Exception as e:
+            logger.warning(f"ORB: post-open sweep bar fetch failed: {e}")
+        return bars_by_sym
+
     def _ensure_ranges_post_open(self) -> Set[str]:
+        """Post-open sweep entry point (kept argument-free: tests and callers
+        stub it). Runs lock-released only when `_sweep_outside_lock` set the
+        thread-local flag on this thread; otherwise the caller holds `_lock`.
+        """
+        return self._post_open_sweep(
+            release_lock=bool(getattr(self._sweep_tls, 'release_lock', False)))
+
+    def _post_open_sweep(self, release_lock: bool = False) -> Set[str]:
         """One-shot post-9:35 ET sweep — backfill range_data for any candidate
         that didn't get it via the WebSocket bar stream.
 
@@ -1661,6 +1702,16 @@ class ORBEngine:
 
         Idempotent via self._post_open_range_sweep_done; resets daily.
 
+        Lock discipline (docs/orb_preplace_lock_wait_fix_20261017.md): the REST
+        fetch (7.3-7.8 s) and the straggler-retry sleep+fetch used to run under
+        `_lock`, queueing the 09:35:05 preplace submit behind them. With
+        `release_lock=True` (the caller does NOT hold `_lock`; `check_entries`
+        passes it) state is read and ingested under short `_lock` sections and
+        every network wait runs outside; bars fetched while the lock was free are
+        re-validated at ingest (stream-filled names are never overwritten, a
+        daily reset discards the fetch). With the default `release_lock=False`
+        the caller holds `_lock` and the whole sweep runs under it as before.
+
         Returns:
             Set of symbols whose range_data was just filled by this sweep.
             Callers (check_entries) should widen their eligible set with these
@@ -1670,79 +1721,79 @@ class ORBEngine:
             (all Q4 — should rank FIRST per orb.yaml), but those never scored
             because cand_pool=symbols didn't include them.
         """
-        if self._post_open_range_sweep_done:
-            return set()
-        now_utc = datetime.now(timezone.utc)
-        try:
-            from zoneinfo import ZoneInfo
-            et_now = now_utc.astimezone(ZoneInfo('America/New_York'))
-        except Exception:
-            et_now = now_utc - timedelta(hours=_et_offset_hours(now_utc))
-        # Gate: only run between 9:35 and 11:00 ET (same window as
-        # _backfill_range_if_needed — past 11:00, ORB shouldn't trade anyway).
-        if et_now.time() < dtime(9, 35) or et_now.time() > dtime(11, 0):
-            return set()
+        guard = self._lock if release_lock else contextlib.nullcontext()
+        with guard:
+            if self._post_open_range_sweep_done:
+                return set()
+            now_utc = datetime.now(timezone.utc)
+            try:
+                from zoneinfo import ZoneInfo
+                et_now = now_utc.astimezone(ZoneInfo('America/New_York'))
+            except Exception:
+                et_now = now_utc - timedelta(hours=_et_offset_hours(now_utc))
+            # Gate: only run between 9:35 and 11:00 ET (same window as
+            # _backfill_range_if_needed — past 11:00, ORB shouldn't trade anyway).
+            if et_now.time() < dtime(9, 35) or et_now.time() > dtime(11, 0):
+                return set()
 
-        missing = [
-            sym for sym, cand in self.candidates.items()
-            if cand.range_data is None
-        ]
-        if not missing:
-            self._post_open_range_sweep_done = True
-            return set()
+            missing = [
+                sym for sym, cand in self.candidates.items()
+                if cand.range_data is None
+            ]
+            if not missing:
+                self._post_open_range_sweep_done = True
+                return set()
 
-        logger.info(
-            f"ORB: post-open range sweep — backfilling {len(missing)} candidates "
-            f"missing range_data at {et_now.time().strftime('%H:%M:%S')} ET: "
-            f"{','.join(missing[:10])}{'...' if len(missing) > 10 else ''}"
-        )
-
-        if self.fast_submit_enabled:
-            # docs/orb_latency_pass2_spec_20260925.md item 2: the sweep must
-            # never issue a REST bars call at 09:35 — WS-delivered bars
-            # (drain_bar_events -> _ingest_bars) are the only source. A
-            # symbol still missing range_data here simply hasn't had its
-            # 09:34 bar consolidate at the vendor yet; log it and move on —
-            # do NOT block the sweep on stragglers. The WS drain thread
-            # will fill it (and widen the eligible set) on a later tick if
-            # it arrives before the first-rank grace expires.
-            logger.warning(
-                f"ORB: fast_submit — REST fallback disabled, {len(missing)} "
-                f"candidate(s) still missing WS bars at "
-                f"{et_now.time().strftime('%H:%M:%S')} ET: "
+            logger.info(
+                f"ORB: post-open range sweep — backfilling {len(missing)} candidates "
+                f"missing range_data at {et_now.time().strftime('%H:%M:%S')} ET: "
                 f"{','.join(missing[:10])}{'...' if len(missing) > 10 else ''}"
             )
-            self._post_open_range_sweep_done = True
-            return set()
+
+            if self.fast_submit_enabled:
+                # docs/orb_latency_pass2_spec_20260925.md item 2: the sweep must
+                # never issue a REST bars call at 09:35 — WS-delivered bars
+                # (drain_bar_events -> _ingest_bars) are the only source. A
+                # symbol still missing range_data here simply hasn't had its
+                # 09:34 bar consolidate at the vendor yet; log it and move on —
+                # do NOT block the sweep on stragglers. The WS drain thread
+                # will fill it (and widen the eligible set) on a later tick if
+                # it arrives before the first-rank grace expires.
+                logger.warning(
+                    f"ORB: fast_submit — REST fallback disabled, {len(missing)} "
+                    f"candidate(s) still missing WS bars at "
+                    f"{et_now.time().strftime('%H:%M:%S')} ET: "
+                    f"{','.join(missing[:10])}{'...' if len(missing) > 10 else ''}"
+                )
+                self._post_open_range_sweep_done = True
+                return set()
+            epoch = self._daily_epoch
 
         # Batch fetch: 1 API call for all missing symbols. Lookback covers
         # 9:30 ET → now with headroom. Generous (60 min) is fine — we only
         # look at the 9:30-9:34 slice for range computation; extra bars are
         # just stored in the rolling window.
         minutes_since_open = 60
-        bars_by_sym: Dict[str, pd.DataFrame] = {}
-        try:
-            if hasattr(self.alpaca, 'get_1min_bars_multi'):
-                bars_by_sym = self.alpaca.get_1min_bars_multi(
-                    missing, lookback_minutes=minutes_since_open
-                ) or {}
-            else:
-                for sym in missing:
-                    try:
-                        b = self.alpaca.get_1min_bars(sym, lookback_minutes=minutes_since_open)
-                        if b is not None and not b.empty:
-                            bars_by_sym[sym] = b
-                    except Exception:
-                        continue
-        except Exception as e:
-            logger.warning(f"ORB: post-open sweep bar fetch failed: {e}")
+        t_fetch = time.time()
+        bars_by_sym = self._fetch_sweep_bars(missing, minutes_since_open)
+        fetch_s = time.time() - t_fetch
 
         filled_syms: Set[str] = set()
+        counts = {'fetched': 0, 'applied': 0, 'superseded': 0}
 
         def _ingest_batch(sym_list, bars_map):
+            """Apply fetched bars; caller holds `_lock` (or owns the engine)."""
             for sym in sym_list:
                 bars = bars_map.get(sym)
                 if bars is None or bars.empty:
+                    continue
+                counts['fetched'] += 1
+                cand = self.candidates.get(sym)
+                if cand is not None and cand.range_data is not None:
+                    # The WS stream completed this range while the REST fetch
+                    # was out — the stream value wins; never overwrite it.
+                    counts['superseded'] += 1
+                    filled_syms.add(sym)
                     continue
                 try:
                     b = bars.copy()
@@ -1751,10 +1802,41 @@ class ORBEngine:
                     self._ingest_bars(sym, b)
                     if self.candidates.get(sym) and self.candidates[sym].range_data is not None:
                         filled_syms.add(sym)
+                        counts['applied'] += 1
                 except Exception as e:
                     logger.warning(f"ORB: post-open sweep ingest({sym}) failed: {e}")
 
-        _ingest_batch(missing, bars_by_sym)
+        def _log_fetch(seconds: float, tag: str = '') -> None:
+            logger.info(
+                f"ORB: post-open sweep{tag} fetched {counts['fetched']} ranges in "
+                f"{seconds:.1f}s outside the lock ({counts['applied']} applied, "
+                f"{counts['superseded']} superseded by the stream)"
+                if release_lock else
+                f"ORB: post-open sweep{tag} fetched {counts['fetched']} ranges in "
+                f"{seconds:.1f}s (lock held by caller)")
+            if seconds > 10.0:
+                logger.warning(
+                    f"ORB: post-open sweep{tag} fetch took {seconds:.1f}s (> 10s)")
+
+        def _day_rolled() -> bool:
+            """True (and logged) when a daily reset happened during the fetch."""
+            if self._daily_epoch != epoch:
+                logger.warning(
+                    "ORB: post-open sweep discarded — daily reset during the "
+                    "fetch (no cross-day ingest)")
+                return True
+            return False
+
+        with guard:
+            if _day_rolled():
+                return set()
+            _ingest_batch(missing, bars_by_sym)
+            _log_fetch(fetch_s)
+            still_missing = [s for s in missing if s not in filled_syms]
+            do_retry = bool(still_missing) and self.sweep_retry_delay_s > 0 \
+                and not self._sweep_retry_used_today
+            if do_retry:
+                self._sweep_retry_used_today = True
 
         # 2026-07-03 selection-race fix (CRCD/AVEX/FABC/RGNX incidents): the
         # 9:34 bar consolidates at the vendor with 2-10s lag, so the first
@@ -1765,10 +1847,7 @@ class ORBEngine:
         # day. Retry the unfilled remainder ONCE after a short delay so the
         # first ranking sees the full field. Bounded: adds <= retry_delay+
         # fetch time (~5s) to the opening tick, only when stragglers exist.
-        still_missing = [s for s in missing if s not in filled_syms]
-        if still_missing and self.sweep_retry_delay_s > 0 \
-                and not self._sweep_retry_used_today:
-            self._sweep_retry_used_today = True
+        if do_retry:
             logger.info(
                 f"ORB: post-open sweep — {len(still_missing)} candidates still "
                 f"rangeless ({','.join(still_missing[:8])}"
@@ -1776,33 +1855,28 @@ class ORBEngine:
                 f"{self.sweep_retry_delay_s:.0f}s (bar-consolidation lag)"
             )
             time.sleep(self.sweep_retry_delay_s)
-            retry_bars: Dict[str, pd.DataFrame] = {}
-            try:
-                if hasattr(self.alpaca, 'get_1min_bars_multi'):
-                    retry_bars = self.alpaca.get_1min_bars_multi(
-                        still_missing, lookback_minutes=minutes_since_open
-                    ) or {}
-                else:
-                    for sym in still_missing:
-                        try:
-                            b = self.alpaca.get_1min_bars(sym, lookback_minutes=minutes_since_open)
-                            if b is not None and not b.empty:
-                                retry_bars[sym] = b
-                        except Exception:
-                            continue
-            except Exception as e:
-                logger.warning(f"ORB: post-open sweep retry fetch failed: {e}")
-            _ingest_batch(still_missing, retry_bars)
+            t_retry = time.time()
+            retry_bars = self._fetch_sweep_bars(still_missing, minutes_since_open)
+            retry_s = time.time() - t_retry
+            counts.update(fetched=0, applied=0, superseded=0)
+            with guard:
+                if _day_rolled():
+                    return set()
+                _ingest_batch(still_missing, retry_bars)
+                _log_fetch(retry_s, tag=' retry')
 
-        logger.info(
-            f"ORB: post-open range sweep — filled {len(filled_syms)}/{len(missing)} ranges"
-        )
-        # Mark done even if some failed — next tick's WS bars will handle
-        # any stragglers through the normal flow (and the first-rank grace
-        # gate in check_entries holds the daily cap until they arrive or
-        # the grace window expires).
-        self._post_open_range_sweep_done = True
-        return filled_syms
+        with guard:
+            if _day_rolled():
+                return set()
+            logger.info(
+                f"ORB: post-open range sweep — filled {len(filled_syms)}/{len(missing)} ranges"
+            )
+            # Mark done even if some failed — next tick's WS bars will handle
+            # any stragglers through the normal flow (and the first-rank grace
+            # gate in check_entries holds the daily cap until they arrive or
+            # the grace window expires).
+            self._post_open_range_sweep_done = True
+            return filled_syms
 
     # =====================================================================
     # Bar stream integration
@@ -3196,12 +3270,38 @@ class ORBEngine:
         so candidate/position mutation is serialised on `_lock`. The lock is
         re-entrant: check_exits and the drain take the same one.
         """
+        # The post-open sweep's REST fetch must not hold `_lock` (it queued the
+        # 09:35:05 preplace submit behind a 7+ s fetch): run it first, outside
+        # the lock, and hand its result to the locked body.
+        pre_swept = self._sweep_outside_lock()
         with self._lock:
-            return self._check_entries_locked(symbols, feature_providers)
+            return self._check_entries_locked(symbols, feature_providers,
+                                              pre_swept=pre_swept)
+
+    def _sweep_outside_lock(self) -> Optional[Set[str]]:
+        """Run the post-open range sweep with `_lock` released during its
+        network waits. Returns the filled set, or None when the sweep does not
+        apply (engine disabled / no params / already running under a caller
+        that holds `_lock`), in which case the locked body runs it legacy-style.
+        """
+        if not self.enabled or self.shutdown_requested or not self.z_params:
+            return None
+        if self._post_open_range_sweep_done:
+            return None
+        t0 = time.time()
+        with self._sweep_flight_lock:
+            self._sweep_tls.release_lock = True
+            try:
+                filled = self._ensure_ranges_post_open()
+            finally:
+                self._sweep_tls.release_lock = False
+        self._record_latency_phase('post_open_range_sweep', time.time() - t0)
+        return filled
 
     def _check_entries_locked(
             self, symbols: Optional[Iterable[str]] = None,
-            feature_providers: Optional[Dict[str, dict]] = None) -> List[str]:
+            feature_providers: Optional[Dict[str, dict]] = None,
+            pre_swept: Optional[Set[str]] = None) -> List[str]:
         """Entry evaluation body — caller holds `_lock`.
 
         Args:
@@ -3264,9 +3364,12 @@ class ORBEngine:
         # collapses to whatever the WS happened to deliver. On 4/22 that
         # meant Q4 winners (ETHT/RDTL/NBIG/VNCE) were skipped and four Q5s
         # filled all 4 slots — against orb.yaml ranking.order=[Q4,Q5,...].
-        _t_sweep = time.time()
-        sweep_filled = self._ensure_ranges_post_open()
-        self._record_latency_phase('post_open_range_sweep', time.time() - _t_sweep)
+        if pre_swept is not None:
+            sweep_filled = pre_swept  # ran outside the lock (check_entries)
+        else:
+            _t_sweep = time.time()
+            sweep_filled = self._ensure_ranges_post_open()
+            self._record_latency_phase('post_open_range_sweep', time.time() - _t_sweep)
         if sweep_filled and symbols is not None:
             symbols = set(symbols) | sweep_filled
 
@@ -7904,6 +8007,7 @@ class ORBEngine:
         self.daily_summary_sent = False
         self._late_entry_cutoff_logged = False
         self._post_open_range_sweep_done = False
+        self._daily_epoch += 1
         self._sweep_retry_used_today = False
         self._pdr_vetoed_today = set()
         self._first_submit_latency_logged = False
