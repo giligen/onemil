@@ -12,7 +12,7 @@ tolerates sustained unhealthy state up to a configurable threshold
 (_SM_DEAD_THRESHOLD_S, default 180s).
 """
 
-from scanner.realtime_scanner import _stop_monitor_circuit_breaker_state
+from scanner.realtime_scanner import _stop_monitor_circuit_breaker_state, _stop_monitor_breaker_reason
 
 
 THRESHOLD = 180.0
@@ -157,3 +157,27 @@ class TestStateMachineProperties:
             threshold_s=THRESHOLD,
         )
         assert a == 'recovered' and ts is None
+
+
+class TestBreakerReason:
+    """2026-10-17: the breaker exited with the websocket's death cause unlogged; it now names the last error + silence."""
+
+    def test_reason_names_last_error_and_seconds_since_last_message(self):
+        from types import SimpleNamespace
+        sm = SimpleNamespace(last_error='ConnectionClosedError: no close frame received', last_error_ts=900.0, last_msg_ts=800.0)
+        msg = _stop_monitor_breaker_reason(sm, 1000.0)
+        assert 'ConnectionClosedError' in msg and '100s ago' in msg and '200s' in msg
+
+    def test_reason_reports_none_recorded_and_never_raises_on_a_bare_object(self):
+        assert 'none recorded' in _stop_monitor_breaker_reason(object(), 1000.0)
+        assert 'never' in _stop_monitor_breaker_reason(object(), 1000.0)
+
+    def test_stop_monitor_records_last_error_and_exposes_last_msg_ts(self):
+        from trading.stop_monitor import StopMonitor
+        sm = object.__new__(StopMonitor); sm._last_data_ts = 123.0
+        assert sm.last_msg_ts == 123.0 and hasattr(StopMonitor, 'last_msg_ts')
+
+    def test_breaker_path_logs_the_reason_string(self, caplog):
+        import inspect, scanner.realtime_scanner as rs
+        src = inspect.getsource(rs)
+        assert 'logger.error(_stop_monitor_breaker_reason(sm, _now))' in src and src.index('_stop_monitor_breaker_reason(sm, _now)') < src.index('Exiting — StopMonitor infrastructure failure')

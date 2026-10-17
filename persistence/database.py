@@ -1467,6 +1467,18 @@ class Database:
             )
         return [dict(row) for row in cursor.fetchall()]
 
+    def get_open_trades_between(self, start_date: str, end_date: str, strategy: str) -> List[Dict[str, Any]]:
+        """Open trades (no exit_price, active order_status) of `strategy` with start_date <= trade_date < end_date
+        (YYYY-MM-DD, end exclusive), oldest first. Used by the HOD engine's boot adoption of a position carried over
+        from an earlier session (2026-10-17 QCMU), which `get_open_trades(today)` can never see."""
+        placeholders = ','.join('?' for _ in self._ACTIVE_ORDER_STATUSES)
+        cursor = self._trades_conn.execute(
+            f"SELECT * FROM trades WHERE trade_date >= ? AND trade_date < ? AND exit_price IS NULL "
+            f"AND order_status IN ({placeholders}) AND strategy = ? ORDER BY trade_date, created_at",
+            (start_date, end_date, *self._ACTIVE_ORDER_STATUSES, strategy)
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
     def get_daily_pnl(self, trade_date: str) -> float:
         """
         Get total realized P&L for a given date.

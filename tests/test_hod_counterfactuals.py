@@ -71,7 +71,7 @@ class TestCfFloorStopPx:
 
 
 class TestHeaderBackwardCompatibility:
-    def test_existing_old_header_file_is_never_rewritten(self, mock_alpaca, mock_db, mock_sm, tmp_path, caplog):
+    def test_existing_old_header_file_is_rotated_and_the_new_file_has_the_full_header(self, mock_alpaca, mock_db, mock_sm, tmp_path, caplog):
         path = tmp_path / 'hod_dry_entry_ledger.csv'
         old_header = ['date', 'symbol', 'arm_ts', 'cross_ts', 'level', 'trigger', 'limit', 'ask',
                       'filled', 'fill_px', 'stop', 'target', 'tape_accurate', 'live']
@@ -83,10 +83,13 @@ class TestHeaderBackwardCompatibility:
             admit(e); e._ingest_bars('ABC', bars_df(tape()))
         with open(path, newline='') as fh:
             all_rows = list(csv.reader(fh))
-        assert all_rows[0] == old_header                                 # header untouched
-        assert len(all_rows[1]) == len(old_header)                       # pre-existing row untouched
-        assert len(all_rows[2]) == len(old_header)                       # NEW row keeps the OLD shape too
-        assert any('predates the counterfactual columns' in r.message for r in caplog.records)
+        rotated = list(tmp_path.glob('hod_dry_entry_ledger.*.csv'))       # 2026-10-17: old file moved aside intact, new file full header
+        assert len(rotated) == 1
+        with open(rotated[0], newline='') as fh:
+            old_rows = list(csv.reader(fh))
+        assert old_rows[0] == old_header and len(old_rows) == 2
+        assert 'scanner_qualified_at_arm' in all_rows[0] and len(all_rows[1]) == len(all_rows[0])
+        assert any('rotated the old file' in r.message for r in caplog.records)
 
 
 class TestCfWatchViaPrints:

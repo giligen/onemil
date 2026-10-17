@@ -197,7 +197,7 @@ class TestDryLedgerWriterAccountColumn:
         rows = read_ledger(e.dry_ledger_path)
         assert [r['account'] for r in rows] == ['dry', 'live']
 
-    def test_existing_header_without_account_is_never_rewritten_and_row_keeps_the_old_shape(
+    def test_existing_header_without_account_is_rotated_and_the_new_file_has_the_full_header(
             self, mock_alpaca, mock_db, mock_sm, tmp_path):
         """Same backward-compat rule as the counterfactual columns (tests/test_hod_counterfactuals.py
         TestHeaderBackwardCompatibility): a header written before 'account' existed must never gain it —
@@ -211,8 +211,9 @@ class TestDryLedgerWriterAccountColumn:
         e._append_dry_ledger(cand, arm, e._et_now(), ask=11.02, filled=True, fill_px=11.02, tape_accurate=True, account='paper')
         with open(path) as fh:
             lines = fh.read().strip('\n').split('\n')
-        assert lines[0] == old_header                                            # header untouched
-        assert len(lines[1].split(',')) == len(old_header.split(','))            # new row keeps the OLD (no-account) shape
+        rotated = list(tmp_path.glob('hod_dry_entry_ledger.*.csv'))               # 2026-10-17: rotated, never appended in the old shape
+        assert len(rotated) == 1 and rotated[0].read_text().strip() == old_header
+        assert 'account' in lines[0].split(',') and len(lines[1].split(',')) == len(lines[0].split(','))
 
 
 class TestEntryModeDefaultParity:

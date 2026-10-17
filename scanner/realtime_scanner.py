@@ -26,6 +26,21 @@ logger = logging.getLogger(__name__)
 ET = pytz.timezone('US/Eastern')
 
 
+def _stop_monitor_breaker_reason(sm, now: float) -> str:
+    """Why the StopMonitor circuit breaker is tripping: its last websocket error/disconnect reason and the seconds
+    since its last message (10/15: the breaker exited with the cause of the websocket death unlogged). Tolerates a
+    monitor lacking the attributes (reports 'unknown') and never raises."""
+    try:
+        last_error = getattr(sm, 'last_error', None) or 'none recorded (no disconnect/error was ever raised by the stream loop)'
+        err_ts = float(getattr(sm, 'last_error_ts', 0.0) or 0.0)
+        msg_ts = float(getattr(sm, 'last_msg_ts', 0.0) or 0.0)
+        since_msg = f"{now - msg_ts:.0f}s" if msg_ts > 0 else 'never (no message received)'
+        err_age = f" ({now - err_ts:.0f}s ago)" if err_ts > 0 else ''
+        return f"StopMonitor breaker reason: last_error={last_error}{err_age}; seconds since last message={since_msg}"
+    except Exception as e:
+        return f"StopMonitor breaker reason: unknown (could not read monitor state: {e})"
+
+
 def _stop_monitor_circuit_breaker_state(
     *,
     is_healthy: bool,
@@ -457,6 +472,7 @@ class RealtimeScanner:
                         f"thread={sm._thread.is_alive() if sm._thread else False}"
                     )
                     logger.error(msg)
+                    logger.error(_stop_monitor_breaker_reason(sm, _now))
                     if engine:
                         engine._force_close_all()
                     if self.macd_engine:

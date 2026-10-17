@@ -156,7 +156,9 @@ def hod_live_alpaca():
     # Default: any order queried directly is unfilled and still open — the common case for _cancel_live_order's
     # GET-before/GET-after checks and _poll_live_fills_rest_fallback. Tests simulating a fill racing a cancel
     # override this per-order-id (see tests/test_hod_live_resting.py TestCancelNeverDropsAFill).
-    a.get_order.side_effect = lambda oid: {'id': oid, 'status': 'accepted', 'filled_qty': 0, 'filled_avg_price': None}
+    cancelled_ids = set()          # 2026-10-17: a cancelled order reads back terminal ('canceled'), as the engine's settle-poll expects
+    a.cancel_order.side_effect = lambda oid: cancelled_ids.add(oid) or True
+    a.get_order.side_effect = lambda oid: {'id': oid, 'status': 'canceled' if oid in cancelled_ids else 'accepted', 'filled_qty': 0, 'filled_avg_price': None}
     a.submit_limit_sell_order.return_value = {'id': 'tp-1', 'status': 'accepted'}
     a.submit_stop_sell_order.return_value = {'id': 'sl-1', 'status': 'accepted'}
     # Real Alpaca OCO shape (verified 2026-09-29 from the live broker's order list): the PARENT order IS the

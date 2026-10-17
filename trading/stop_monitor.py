@@ -660,6 +660,8 @@ class StopMonitor:
         self._stop_event = threading.Event()
         self._last_data_ts: float = 0.0  # time.time() of last data received
         self._ws_connected: bool = False  # True only when WebSocket is actively connected
+        self.last_error: Optional[str] = None  # last websocket error / disconnect reason (2026-10-17: the scanner's circuit breaker logs it)
+        self.last_error_ts: float = 0.0
         self._polling_mode = polling_mode
         self._polling_interval = polling_interval
 
@@ -1156,6 +1158,11 @@ class StopMonitor:
                     f"${old_stop:.2f} → ${new_stop:.2f} "
                     f"(bar.high=${bar_high:.2f})"
                 )
+
+    @property
+    def last_msg_ts(self) -> float:
+        """time.time() of the last websocket data/heartbeat received (0.0 = never)."""
+        return self._last_data_ts
 
     def is_healthy(self, max_stale_seconds: float = 30.0) -> bool:
         """
@@ -3223,6 +3230,7 @@ class StopMonitor:
         try:
             self._loop.run_until_complete(self._stream_with_reconnect())
         except Exception as e:
+            self.last_error = f"stream loop crashed: {type(e).__name__}: {e}"; self.last_error_ts = time_mod.time()
             if self._running:
                 logger.error(f"StopMonitor: stream loop crashed: {e}")
         finally:
@@ -3307,6 +3315,7 @@ class StopMonitor:
                     self._stream = None
 
                 reconnect_count += 1
+                self.last_error = f"{type(e).__name__}: {e}"; self.last_error_ts = time_mod.time()
                 error_msg = (
                     f"StopMonitor: WebSocket disconnected ({e}) — "
                     f"reconnecting in {RECONNECT_DELAY_SECONDS}s "

@@ -106,7 +106,7 @@ class TestArmFeatureColumnsHeaderBackwardCompat:
         assert rows[0]['level_age_min'] == '2'
         assert rows[0]['prior_crosses_today'] == '1'
 
-    def test_existing_header_without_the_new_columns_is_never_rewritten(
+    def test_existing_header_without_the_new_columns_is_rotated_not_appended_in_old_shape(
             self, mock_alpaca, mock_db, mock_sm, tmp_path, caplog):
         path = tmp_path / 'hod_dry_entry_ledger.csv'
         old_header = ('date,symbol,arm_ts,cross_ts,level,trigger,limit,ask,filled,fill_px,stop,target,'
@@ -121,10 +121,12 @@ class TestArmFeatureColumnsHeaderBackwardCompat:
         e._append_dry_ledger(cand, arm, e._et_now(), ask=12.0, filled=True, fill_px=12.0, tape_accurate=True)
         with open(path) as fh:
             lines = fh.read().strip('\n').split('\n')
-        assert lines[0] == old_header
-        assert len(lines[1].split(',')) == len(old_header.split(','))
+        # 2026-10-17: a stale header is ROTATED to <name>.<YYYYMMDD>.csv (old file kept intact), the new file has the full header
+        rotated = list(tmp_path.glob('hod_dry_entry_ledger.*.csv'))
+        assert len(rotated) == 1 and rotated[0].read_text().strip() == old_header
         for col in ARM_FEATURE_COLUMNS:
-            assert col not in lines[0]
+            assert col in lines[0]
+        assert len(lines[1].split(',')) == len(lines[0].split(','))
 
 
 class TestFeatureFailureFallback:

@@ -268,6 +268,12 @@ class HodBreakEngine:
         # 2026-10-01 (owner ask): Telegram per routine trade event (arm/fill/partial/exit/adoption/reconcile)
         # is OFF by default -- EOD summary only. See _notify_trade. Never gates ERROR/kill-rail/UNMANAGED.
         self.telegram_per_trade = bool(cfg.get('telegram_per_trade', False))
+        # 2026-10-17 (docs/hod_oco_persistence_fix_20261017.md): safety-net OCO replacement timing. After cancelling the
+        # previous OCO we poll its legs to a terminal state (<= settle_timeout) BEFORE submitting the replacement, and
+        # retry a rejected replacement once after retry_delay.
+        self.oco_settle_timeout_s = float(cfg.get('oco_settle_timeout_s', 5.0))
+        self.oco_settle_poll_s = float(cfg.get('oco_settle_poll_s', 0.25))
+        self.oco_retry_delay_s = float(cfg.get('oco_retry_delay_s', 2.0))
         self.risk_usd = float(cfg.get('risk_usd', 100.0)); self.daily_kill_usd = float(cfg.get('daily_kill_usd', -600.0))
         self.weekly_kill_usd = float(cfg.get('weekly_kill_usd', -1500.0)); self.max_notional_usd = float(cfg.get('max_notional_usd', 5000.0))
         self.min_price = float(cfg.get('min_price', 1.0)); self.min_adv20 = float(cfg.get('min_adv20', 100_000.0))
@@ -358,7 +364,7 @@ class HodBreakEngine:
         self.stream_list_dir = str(cfg.get('stream_list_dir', 'logs'))    # where the day's streamed-symbol list is written (tests point it elsewhere)
         self.candidates: Dict[str, Candidate] = {}; self.positions: Dict[str, Position] = {}
         self.entered_today: set = set(); self.daily_pnl = 0.0; self.session_date: Optional[str] = None
-        self._mover_queue: queue.Queue = queue.Queue(maxsize=5000); self._bar_queue: queue.Queue = queue.Queue(maxsize=100_000)   # ~300 B per bar; 3,600 names × a few minutes must never drop
+        self._mover_queue: queue.Queue = queue.Queue(maxsize=5000); self._queued_movers: set = set(); self._queued_lock = threading.Lock(); self._bar_queue: queue.Queue = queue.Queue(maxsize=100_000)   # ~300 B per bar; 3,600 names × a few minutes must never drop
         self._last_bar_ingest = 0.0; self._silence_alerted = False; self.calendar_ok = True
         self._adv_map: Dict[str, float] = {}; self._kill_notified: set = set(); self._flattened = False
         self._post_close_fc_warned = False  # one WARNING per session once force_close_all runs past the regular close
@@ -519,13 +525,23 @@ class HodBreakEngine:
 
     # ------------------------------------------------------------------ scanner hooks (enqueue-only)
     def on_mover(self, symbol: str, *, price: float, day_open: float, cum_volume: float, above_open_pct: float, ts=None) -> None:
-        """Called from the per-minute broad scan for symbols >= min_dist_open_pct above the open. Never blocks."""
+        """Called from the per-minute broad scan for symbols >= min_dist_open_pct above the open. Never blocks.
+        10/15 triage: the scanner calls this for EVERY symbol above the open on EVERY scan, so a bounded queue filled
+        with duplicates (32,677 drops in a day). A symbol already admitted (candidates / seen_today / positions) or
+        already waiting in the queue is skipped here, so the queue holds at most one entry per not-yet-admitted name."""
         if not self.enabled:
             return
+        if symbol in self.candidates or symbol in self.seen_today or symbol in self.positions:
+            return
+        with self._queued_lock:
+            if symbol in self._queued_movers:
+                return
+            self._queued_movers.add(symbol)
         try:
             self._mover_queue.put_nowait((symbol, float(price), float(day_open), float(cum_volume), float(above_open_pct)))
         except queue.Full:
-            logger.warning(f"{self.tag} mover queue full — dropped {symbol}")
+            with self._queued_lock: self._queued_movers.discard(symbol)
+            logger.warning(f"{self.tag} mover queue full ({self._mover_queue.maxsize} unique names waiting) — dropped {symbol}")
 
     def register_on_stop_monitor(self) -> bool:
         if self.stop_monitor is None or getattr(self.stop_monitor, 'polling_mode', False):
@@ -676,9 +692,14 @@ class HodBreakEngine:
                 if c.subscribed and c.rejected_reason is None: c.needs_refill = True
 
     def _admit_movers(self) -> None:
-        n = 0; new: List[Candidate] = []
-        while not self._mover_queue.empty() and n < 500:
-            symbol, price, day_open, cum_vol, above = self._mover_queue.get_nowait(); n += 1
+        new: List[Candidate] = []
+        batch = []                                                     # drain the WHOLE queue (no per-tick cap), holding the dedup lock only for the pops
+        with self._queued_lock:
+            while True:
+                try: batch.append(self._mover_queue.get_nowait())
+                except queue.Empty: break
+            self._queued_movers.difference_update(item[0] for item in batch)
+        for symbol, price, day_open, cum_vol, above in batch:
             if symbol in self.candidates or symbol in self.seen_today or symbol in self.positions:
                 continue
             if not self.seen_today:                                    # first admission of the session: pull the DB set once
@@ -1025,6 +1046,7 @@ class HodBreakEngine:
                f"{arm['level']:.4f}", f"{arm['trigger']:.4f}", f"{arm['limit']:.4f}",
                '' if ask != ask else f"{ask:.4f}", int(bool(filled)), '' if fill_px is None else f"{fill_px:.4f}",
                f"{stop:.4f}", '' if target is None else f"{target:.4f}", int(bool(tape_accurate)), int(bool(live))]
+        self._rotate_stale_ledger(self.dry_ledger_path, base_header + ['account'] + list(ARM_FEATURE_COLUMNS) + list(CF_ROW_COLUMNS), cand.symbol)
         include_account = True
         if os.path.exists(self.dry_ledger_path):
             try:
@@ -1044,22 +1066,7 @@ class HodBreakEngine:
         # (Candidate.pattern_flag, the fallback rule). `arm['idx']` is absent for a REAL broker fill's `lo`
         # dict (_on_live_fill passes cand.live_order, which never copies 'idx' off the arm that placed it) —
         # that is the expected, harmless case: empty feature columns for a live/paper fill row, not a crash.
-        feat_vals = {col: '' for col in ARM_FEATURE_COLUMNS}
-        try:
-            arr = self._rth_arrays(cand)
-            if arr is None:
-                raise ValueError('no bars ingested yet')
-            if 'idx' not in arm:
-                raise KeyError("arm has no 'idx' (not a resting_stop_limit tape/bar arm)")
-            o_arr, h_arr, l_arr, c_arr, v_arr, m_arr = arr
-            computed = arm_features(o_arr, h_arr, l_arr, c_arr, v_arr, m_arr, int(arm['idx']), arm,
-                                     cand.adv20, cand.day_open)
-            feat_vals = {col: (f"{computed[col]:.6f}" if isinstance(computed[col], float) else str(computed[col]))
-                         for col in ARM_FEATURE_COLUMNS}
-        except Exception as e:
-            if not cand.pattern_flag('arm_features_failed'):
-                logger.warning(f"{self.tag} {cand.symbol}: arm-time feature computation failed ({e}) — "
-                                f"feature columns left empty for this symbol-day")
+        feat_vals = arm.get('arm_features') or self._compute_arm_feature_vals(cand, arm, warn=True)
         include_arm_features = True
         if os.path.exists(self.dry_ledger_path):
             try:
@@ -1076,6 +1083,27 @@ class HodBreakEngine:
             self.dry_ledger_path, base_header, row, cand.symbol, self._cf_row(cand),
             err_ctx=f"dry entry ledger row to {self.dry_ledger_path}")
 
+    def _compute_arm_feature_vals(self, cand: Candidate, arm: dict, warn: bool = True) -> dict:
+        """Arm-time feature columns (`ARM_FEATURE_COLUMNS`) for `arm` as ledger strings, via the ONE shared helper
+        `trading.hod_break.arm_features` on the bars through `arm['idx']`. Any failure (no bars, no 'idx') leaves
+        every column empty and, when `warn`, logs ONE WARNING per symbol-day. Never raises."""
+        feat_vals = {col: '' for col in ARM_FEATURE_COLUMNS}
+        try:
+            arr = self._rth_arrays(cand)
+            if arr is None:
+                raise ValueError('no bars ingested yet')
+            if 'idx' not in arm:
+                raise KeyError("arm has no 'idx' (not a resting_stop_limit tape/bar arm)")
+            o_arr, h_arr, l_arr, c_arr, v_arr, m_arr = arr
+            computed = arm_features(o_arr, h_arr, l_arr, c_arr, v_arr, m_arr, int(arm['idx']), arm, cand.adv20, cand.day_open)
+            feat_vals = {col: (f"{computed[col]:.6f}" if isinstance(computed[col], float) else str(computed[col]))
+                         for col in ARM_FEATURE_COLUMNS}
+        except Exception as e:
+            if warn and not cand.pattern_flag('arm_features_failed'):
+                logger.warning(f"{self.tag} {cand.symbol}: arm-time feature computation failed ({e}) — "
+                                f"feature columns left empty for this symbol-day")
+        return feat_vals
+
     def _cf_row(self, cand: Candidate) -> list:
         """The two counterfactual columns (item 1, item 2) shared by the dry entry ledger and the live parity
         ledger — blank whenever `log_counterfactuals` is off or the value isn't known yet."""
@@ -1083,6 +1111,32 @@ class HodBreakEngine:
             '' if not self.log_counterfactuals or cand.scanner_qualified_at_arm is None else int(bool(cand.scanner_qualified_at_arm)),
             '' if not self.log_counterfactuals or cand.cf_floor_stop_px is None else f"{cand.cf_floor_stop_px:.4f}",
         ]
+
+    def _rotate_stale_ledger(self, path: str, required_cols: list, symbol: str = '') -> bool:
+        """If the CSV at `path` exists and its header lacks any of `required_cols` (a column the writer now knows),
+        move it to `<name>.<YYYYMMDD>.csv` (`.N` appended if that exists) so the next write starts a fresh file with
+        the FULL header. One WARNING per path per process. 2026-10-17: the parity ledger kept its 19-column header
+        for weeks and every row silently lacked `scanner_qualified_at_arm` / `cf_floor_stop_px`. Never raises."""
+        import os
+        if not os.path.exists(path):
+            return False
+        try:
+            with open(path, 'r', newline='') as fh:
+                header = [c.strip() for c in fh.readline().strip().split(',')]
+            missing = [c for c in required_cols if c not in header]
+            if not missing:
+                return False
+            base, ext = os.path.splitext(path); stamp = datetime.now(timezone.utc).strftime('%Y%m%d'); dest = f"{base}.{stamp}{ext}"; i = 1
+            while os.path.exists(dest):
+                dest = f"{base}.{stamp}.{i}{ext}"; i += 1
+            os.replace(path, dest)
+            if path not in self._cf_header_warned:
+                self._cf_header_warned.add(path)
+                logger.warning(f"{self.tag} {path}: header lacks {missing} — rotated the old file to {dest}, a new file starts with the full header")
+            return True
+        except Exception as e:
+            logger.error(f"{self.tag} {symbol}: could not check/rotate the ledger header of {path}: {e}")
+            return False
 
     def _append_csv_row(self, path: str, base_header: list, base_row: list, symbol: str, cf_row: list,
                          err_ctx: str) -> None:
@@ -1092,6 +1146,7 @@ class HodBreakEngine:
         rewritten — its rows keep the OLD shape (byte-identical to pre-9/26 behaviour) and one WARNING fires per
         path, not per row. Never raises — a logging failure must never affect trading."""
         import csv, os
+        self._rotate_stale_ledger(path, list(base_header) + list(CF_ROW_COLUMNS), symbol)
         is_new = not os.path.exists(path)
         include_cf = True
         if not is_new:
@@ -1768,6 +1823,10 @@ class HodBreakEngine:
             logger.error(f"{self.tag} {sym}: LIVE stop-limit submit returned no order id — nothing tracked"); return
         cand.live_order = dict(order_id=order_id, coid=coid, level=arm['level'], trigger=arm['trigger'], limit=arm['limit'],
                                stop=arm['stop'], qty=qty, booked_qty=0, arm_ts=arm.get('arm_ts', ''), tp_leg_id='', sl_leg_id='', trade_id=None)
+        if 'idx' in arm:                    # a REAL fill's ledger rows (_on_live_fill) need the arm's bar index + arm-time features (the 42/week `arm has no 'idx'` WARNING)
+            cand.live_order['idx'] = int(arm['idx'])
+            feats = self._compute_arm_feature_vals(cand, arm, warn=False)
+            if any(v != '' for v in feats.values()): cand.live_order['arm_features'] = feats
         self._live_cap_slots.add(sym); self._live_armed_stops[sym] = float(arm['stop'])
         logger.info(f"{self.tag} {sym}: LIVE ARMED stop {arm['trigger']:.2f} limit {arm['limit']:.2f} qty {qty} order {order_id}")
         # No Telegram per arm (24 arms in a minute hit Telegram's 429 on 9/25): fills, cap events and errors only.
@@ -1997,55 +2056,38 @@ class HodBreakEngine:
             cand.cf_floor_stop_px = min(stop, fill_px * 0.975)
         logger.info(f"{self.tag} {sym}: LIVE {status.upper()} {fill_px:.2f} cum {filled_qty}/{lo['qty']} (stop {stop:.2f} target {target:.2f})")
         self._notify_trade(f"{self.tag} LIVE {status.upper()} {sym} {fill_px:.2f} x{filled_qty}")
-        for old_leg in (lo.get('tp_leg_id'), lo.get('sl_leg_id')):
-            if old_leg:
-                try: self.alpaca.cancel_order(old_leg)
-                except Exception as e: logger.error(f"{self.tag} {sym}: could not cancel the stale safety-net leg {old_leg}: {e}")
+        # Cancel the previous safety-net OCO and WAIT for its legs to reach a terminal state before the replacement
+        # is submitted: Alpaca keeps the cancelled legs' qty in held_for_orders until the cancel settles (10/15 QCMU:
+        # "available 2, held 58" -> replacement rejected, position unprotected). A leg that FILLED meanwhile is a real
+        # exit: it is booked and no replacement is placed (the shares are gone).
+        sold = self._cancel_and_settle_safety_net(sym, (lo.get('tp_leg_id'), lo.get('sl_leg_id')))
+        if sold:
+            self._book_settled_exit(sym, lo, sold, filled_qty)
+            return
         # Safety-net SL sits SAFETY_NET_PCT below the real stop (the bull-flag live pattern): StopMonitor sells at the
         # real stop; a broker stop at the same price could fire on the same print and leave us SHORT.
         sl_px = round(stop * (1.0 - self.SAFETY_NET_PCT), 2)
-        tp_id = sl_id = ''
-        try:
-            # ONE OCO order for both legs — Alpaca rejects two independent sell orders resting on the same shares
-            # (2026-09-25 VECO live defect: separate TP limit + SL stop, the second submit failed with
-            # "insufficient qty available" once the first was resting).
-            oco = self.alpaca.submit_oco_sell_order(symbol=sym, qty=filled_qty, limit_price=target, stop_price=sl_px)
-            # Alpaca's OCO response: the PARENT order IS the take-profit limit leg (its own 'id') — 'legs' carries
-            # ONLY the dependent stop-loss leg, never a type=='limit' entry. 2026-09-29: the old parser searched
-            # `legs` for 'limit' and never found it, so tp_id was always '' and every clean fill (TWST/MRNA/AXTX/
-            # NBIG live; AAOI/QMCO/ARXS paper) logged a false "no leg ids" ERROR + Telegram.
-            legs = (oco or {}).get('legs') or []
-            tp_id = str((oco or {}).get('id') or '')
-            stop_legs = [l for l in legs if l.get('type') == 'stop']
-            sl_id = str(stop_legs[0]['id']) if len(stop_legs) == 1 else ''
-            if not tp_id or not sl_id:
-                logger.warning(f"{self.tag} {sym}: OCO submit returned no usable leg ids (parent={tp_id or 'none'}, "
-                                f"stop legs={len(stop_legs)} of {len(legs)} total, legs={legs}) — falling back to a stop-only safety net")
-                self._notify(f"{self.tag} WARNING OCO {sym}: no leg ids in response")
-        except Exception as e:
-            logger.error(f"{self.tag} {sym}: safety-net OCO submit failed after a LIVE fill: {e} — falling back to a stop-only safety net")
-        if not sl_id:
-            # Fallback: never leave the position without a broker-side stop, even without a TP leg.
-            try:
-                sl = self.alpaca.submit_stop_sell_order(symbol=sym, qty=filled_qty, stop_price=sl_px); sl_id = str((sl or {}).get('id') or '')
-                logger.warning(f"{self.tag} {sym}: OCO unavailable — placed a stop-only safety net at {sl_px:.2f} (no broker TP leg)")
-            except Exception as e:
-                logger.error(f"{self.tag} {sym}: safety-net SL submit failed after a LIVE fill: {e}"); self._notify(f"{self.tag} ERROR SL {sym} — UNPROTECTED POSITION: {e}")
-        pattern_data = {'book': self.book, 'level': lo['level'], 'consol_low': stop, 'entry_mode': 'resting_stop_limit',
-                        'target_r': self.params.target_r, 'tp_leg_id': tp_id, 'sl_leg_id': sl_id, 'limit': lo['limit'],
-                        'target': target, 'client_order_id': lo['coid']}
+        tp_id, sl_id = self._place_safety_net(sym, filled_qty, target, sl_px)
+        old_pos = self.positions.get(sym)
+        pattern_data = dict(old_pos.pattern_data) if old_pos is not None and old_pos.trade_id == lo.get('trade_id') else {}
+        pattern_data.update({'book': self.book, 'level': lo['level'], 'consol_low': stop, 'entry_mode': 'resting_stop_limit',
+                             'target_r': self.params.target_r, 'tp_leg_id': tp_id, 'sl_leg_id': sl_id, 'limit': lo['limit'],
+                             'target': target, 'client_order_id': lo['coid']})
         now_ts = datetime.now(timezone.utc)
         # 2026-09-30 bookkeeping defect: this call used to omit order_status/fill_price/filled_at, so every
         # resting-order fill (new row OR a fill on an already-tracked trade_id) landed with fill_price/filled_at/
         # filled_qty NULL forever — shares/stop/exit/pnl are set elsewhere so the row LOOKED fine and it was
         # silent until the 9/30 paper-session audit (11 rows, data/trades.db 403-413). Persist the broker's real
         # fill (filled_avg_price/now, UTC) HERE, at the moment the fill is registered, on both branches.
+        # 2026-10-17 (QCMU/RBRK): the existing-trade_id branch ALSO persists pattern_data (the NEW tp/sl leg ids) —
+        # otherwise a restart rehydrates the cancelled OCO's ids and the live OCO is invisible to the engine.
         if lo.get('trade_id'):
             trade_id = lo['trade_id']
             try:
-                self.db.update_trade(trade_id, {'order_status': 'filled', 'fill_price': fill_px, 'filled_at': now_ts.isoformat(), 'filled_qty': filled_qty})
+                self.db.update_trade(trade_id, {'order_status': 'filled', 'fill_price': fill_px, 'filled_at': now_ts.isoformat(), 'filled_qty': filled_qty,
+                                                'pattern_data': json.dumps(pattern_data)})
             except Exception as e:
-                logger.error(f"{self.tag} {sym}: fill persistence failed for existing trade_id={trade_id} ({e}) — fill_price/filled_at/filled_qty NOT updated")
+                logger.error(f"{self.tag} {sym}: fill persistence failed for existing trade_id={trade_id} ({e}) — fill_price/filled_at/filled_qty/leg ids NOT updated")
         else:
             trade_id = self._save_pending_trade(sym, filled_qty, fill_px, stop, target, lo['order_id'], pattern_data,
                                                  order_status='filled', fill_price=fill_px, filled_at=now_ts.isoformat())
@@ -2093,6 +2135,100 @@ class HodBreakEngine:
         self._persist_live_orders()
         if status != 'partially_filled':
             self._fs_register_long(sym, fill_px, stop, filled_qty, trade_id, now_ts, target=target, level=lo['level'])
+
+    _SETTLED = ('canceled', 'cancelled', 'filled', 'expired', 'rejected', 'done_for_day', 'replaced')
+
+    def _cancel_and_settle_safety_net(self, sym: str, legs) -> Optional[tuple]:
+        """Cancel the previous safety-net legs and poll them (REST, bounded by `oco_settle_timeout_s`, default 5 s)
+        until every one is terminal, so the broker has released their held_for_orders reservation. Returns None when
+        nothing sold, else `(leg_id, status_dict, reason)` of the first leg that sold shares (reason 'target' for the
+        TP leg, 'stop' for the SL leg). A leg still not terminal at the deadline is a WARNING: the replacement is then
+        attempted anyway (and retried), never silently skipped."""
+        legs = [(lid, reason) for lid, reason in zip(legs, ('target', 'stop')) if lid]
+        for lid, _ in legs:
+            try: self.alpaca.cancel_order(lid)
+            except Exception as e: logger.error(f"{self.tag} {sym}: could not cancel the stale safety-net leg {lid}: {e}")
+        deadline = time.monotonic() + self.oco_settle_timeout_s; pending = dict(legs); last: Dict[str, dict] = {}
+        while pending:
+            for lid in list(pending):
+                st = self._order_status(lid, rest=True)
+                if st:
+                    last[lid] = st
+                    if str(st.get('status', '')).lower() in self._SETTLED: pending.pop(lid)
+            if not pending or time.monotonic() >= deadline: break
+            time.sleep(self.oco_settle_poll_s)
+        if pending:
+            logger.warning(f"{self.tag} {sym}: cancelled safety-net leg(s) {sorted(pending)} not terminal after {self.oco_settle_timeout_s:.0f}s "
+                           f"— submitting the replacement anyway (held_for_orders may still block it; it is retried)")
+        for lid, reason in legs:
+            st = last.get(lid)
+            if st and int(st.get('filled_qty') or 0) > 0:
+                return lid, st, reason
+        return None
+
+    def _book_settled_exit(self, sym: str, lo: dict, sold: tuple, filled_qty: int) -> None:
+        """A safety-net leg FILLED while it was being replaced: book it through the normal exit path, place no new OCO,
+        and mark the entry's shares as booked so the next poll does not repeat this. Shares bought AFTER that exit (the
+        remainder of a partial entry) are picked up by the periodic broker-position adoption, not by this call."""
+        lid, st, reason = sold
+        logger.warning(f"{self.tag} {sym}: safety-net {reason} leg {lid} FILLED {st.get('filled_qty')} @ {st.get('filled_avg_price')} "
+                       f"while being replaced — booking the exit, NOT re-placing the OCO")
+        self._notify(f"{self.tag} WARNING {sym}: safety-net {reason} leg filled during an OCO replacement ({st.get('filled_qty')} sh) — exit booked")
+        pos = self.positions.get(sym)
+        if pos is not None:
+            self._book_leg_fill(pos, lid, st, reason)
+        else:
+            logger.error(f"{self.tag} {sym}: filled safety-net leg {lid} has no registry position to book against — reconcile_pending_exits will settle it from the broker")
+        lo['booked_qty'] = filled_qty; lo['tp_leg_id'] = ''; lo['sl_leg_id'] = ''
+        self._persist_live_orders()
+
+    def _submit_safety_net_once(self, sym: str, qty: int, target: float, sl_px: float) -> tuple:
+        """One attempt at the broker-side safety net: the OCO (TP limit + SL stop) and, when that gives no usable stop
+        leg, a stop-only fallback. Returns `(tp_id, sl_id, last_error)`; `sl_id == ''` means NOTHING protects the shares."""
+        tp_id = sl_id = ''; err = ''
+        try:
+            # ONE OCO order for both legs — Alpaca rejects two independent sell orders resting on the same shares
+            # (2026-09-25 VECO live defect: separate TP limit + SL stop, the second submit failed with
+            # "insufficient qty available" once the first was resting).
+            oco = self.alpaca.submit_oco_sell_order(symbol=sym, qty=qty, limit_price=target, stop_price=sl_px)
+            # Alpaca's OCO response: the PARENT order IS the take-profit limit leg (its own 'id') — 'legs' carries
+            # ONLY the dependent stop-loss leg, never a type=='limit' entry. 2026-09-29: the old parser searched
+            # `legs` for 'limit' and never found it, so tp_id was always '' and every clean fill (TWST/MRNA/AXTX/
+            # NBIG live; AAOI/QMCO/ARXS paper) logged a false "no leg ids" ERROR + Telegram.
+            legs = (oco or {}).get('legs') or []
+            tp_id = str((oco or {}).get('id') or '')
+            stop_legs = [l for l in legs if l.get('type') == 'stop']
+            sl_id = str(stop_legs[0]['id']) if len(stop_legs) == 1 else ''
+            if not tp_id or not sl_id:
+                logger.warning(f"{self.tag} {sym}: OCO submit returned no usable leg ids (parent={tp_id or 'none'}, "
+                                f"stop legs={len(stop_legs)} of {len(legs)} total, legs={legs}) — falling back to a stop-only safety net")
+                self._notify(f"{self.tag} WARNING OCO {sym}: no leg ids in response")
+        except Exception as e:
+            err = str(e)
+            logger.error(f"{self.tag} {sym}: safety-net OCO submit failed after a LIVE fill: {e} — falling back to a stop-only safety net")
+        if not sl_id:
+            # Fallback: never leave the position without a broker-side stop, even without a TP leg.
+            try:
+                sl = self.alpaca.submit_stop_sell_order(symbol=sym, qty=qty, stop_price=sl_px); sl_id = str((sl or {}).get('id') or '')
+                logger.warning(f"{self.tag} {sym}: OCO unavailable — placed a stop-only safety net at {sl_px:.2f} (no broker TP leg)")
+            except Exception as e:
+                err = str(e)
+                logger.error(f"{self.tag} {sym}: safety-net SL submit failed after a LIVE fill: {e}")
+        return tp_id, sl_id, err
+
+    def _place_safety_net(self, sym: str, qty: int, target: float, sl_px: float) -> tuple:
+        """Place the safety net for `qty` shares; if nothing could be placed, WARNING + ONE retry after
+        `oco_retry_delay_s` (default 2 s, the cancelled legs' reservation may still be draining); still nothing ->
+        ERROR + ungated `_notify` (symbol, qty, broker message). Returns `(tp_id, sl_id)`."""
+        tp_id, sl_id, err = self._submit_safety_net_once(sym, qty, target, sl_px)
+        if not sl_id:
+            logger.warning(f"{self.tag} {sym}: safety-net placement for {qty} sh rejected ({err or 'no stop leg id'}) — retrying once in {self.oco_retry_delay_s:.1f}s")
+            time.sleep(self.oco_retry_delay_s)
+            tp_id, sl_id, err = self._submit_safety_net_once(sym, qty, target, sl_px)
+            if not sl_id:
+                logger.error(f"{self.tag} {sym}: safety-net placement for {qty} sh FAILED twice ({err or 'no stop leg id'}) — position has NO broker-side stop")
+                self._notify(f"{self.tag} ERROR SL {sym} — UNPROTECTED POSITION {qty} sh: {err or 'no stop leg id'}")
+        return tp_id, sl_id
 
     def _append_live_parity_row(self, cand: Candidate, lo: dict, broker_status: str, broker_fill_ts=None,
                                 broker_fill_px: Optional[float] = None, broker_fill_qty: Optional[int] = None, reason: str = '') -> None:
@@ -2706,8 +2842,8 @@ class HodBreakEngine:
                 # target/stop bracket legs: no submit-time quote capture today (that would need entry-time
                 # instrumentation, out of scope here) — tag the method and the ONE trigger price we do have
                 # for free (the leg's own level), so slippage is measured even without bid/ask/latency.
-                pricing_method = 'bracket_target' if reason == 'target' else ('bracket_stop_limit' if reason == 'stop' else None)
-                trigger_price = pos.target if reason == 'target' else (pos.stop if reason == 'stop' else None)
+                pricing_method = 'bracket_target' if reason == 'target' else ('bracket_stop_limit' if reason in ('stop', 'stop_loss') else None)
+                trigger_price = pos.target if reason == 'target' else (pos.stop if reason in ('stop', 'stop_loss') else None)
                 quote_bid = quote_ask = 0.0
                 latency_ms = None
             self._record_exit(pos, pos.closed_notional / pos.closed_qty, final_reason,
@@ -3087,6 +3223,8 @@ class HodBreakEngine:
                 if not leg or sym not in self.positions: continue
                 leg, st = self._leg_status(pos, leg, reason, rest=True)
                 if st and int(st.get('filled_qty') or 0) > 0: self._book_leg_fill(pos, leg, st, reason)
+            if sym in self.positions and pos.open_qty > 0:
+                self._reconcile_by_broker_sells(pos, tdate)          # stored leg ids stale/cancelled: match the broker's own sells
             if sym in self.positions:
                 broker_qty = broker.get(sym, 0) if broker is not None else None
                 if broker_qty is not None and pos.open_qty > 0 and broker_qty >= pos.open_qty:
@@ -3104,6 +3242,65 @@ class HodBreakEngine:
                 n += 1
         if rows: logger.info(f"{self.tag} reconcile: {n} of {len(rows)} exit_pending_verification rows resolved")
         return n
+
+    @staticmethod
+    def _order_field(o, key):
+        """Field `key` of an alpaca-py order object or a dict; enums collapse to their lower-case value."""
+        v = o.get(key) if isinstance(o, dict) else getattr(o, key, None)
+        return str(getattr(v, 'value', v) or '').lower() if key in ('side', 'order_type', 'type', 'status') else v
+
+    @staticmethod
+    def _as_utc(ts) -> Optional[datetime]:
+        """A broker timestamp (datetime or ISO string) as an aware UTC datetime; None when absent or unparseable."""
+        if not ts: return None
+        try:
+            d = ts if isinstance(ts, datetime) else datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
+            return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
+
+    def _reconcile_by_broker_sells(self, pos: Position, tdate: str) -> int:
+        """Broker-truth fallback for `reconcile_pending_exits` (2026-10-17 RBRK: a 17-sh OCO's limit leg filled but the
+        row held the cancelled 14-sh OCO's ids, so the +$22 exit was invisible and the `unverified_exit` kill rail locked
+        the book for a week). Reads the account's CLOSED sell orders in the symbol since the entry fill and books every
+        order that actually sold shares (symbol + sell side + filled qty + filled_at >= entry fill) up to the row's
+        remaining open shares, exit_reason by order type (limit -> 'target', stop/stop_limit -> 'stop_loss', else 'eod').
+        ASSUMPTION: the HOD account holds ONLY HOD positions (no owner trades there), so any sell of this symbol after
+        the entry fill is ours. Returns shares newly booked; a lookup failure is a WARNING and books nothing."""
+        sym = pos.symbol
+        entry_ts = None
+        try:
+            conn = sqlite3.connect(str(self.db._trades_path), timeout=10)
+            try: r = conn.execute("SELECT filled_at FROM trades WHERE id=?", (pos.trade_id,)).fetchone()
+            finally: conn.close()
+            entry_ts = self._as_utc(r[0]) if r else None
+        except Exception: entry_ts = None                                  # no filled_at column / unreadable: fall back to the trade date
+        since = entry_ts or datetime.strptime(str(tdate)[:10], '%Y-%m-%d').replace(tzinfo=ZoneInfo('America/New_York')).astimezone(timezone.utc)
+        try:
+            from alpaca.trading.enums import QueryOrderStatus
+            from alpaca.trading.requests import GetOrdersRequest
+            orders = self.alpaca.trading_client.get_orders(filter=GetOrdersRequest(status=QueryOrderStatus.CLOSED, symbols=[sym], after=since, limit=500))
+        except Exception as e:
+            logger.warning(f"{self.tag} reconcile {sym} ({tdate}): broker sell-order lookup failed ({e}) — cannot match exit fills by symbol/side/qty/time")
+            return 0
+        cands = []
+        for o in orders or []:
+            if self._order_field(o, 'side') != 'sell': continue
+            try: fq = int(float(self._order_field(o, 'filled_qty') or 0)); px = float(self._order_field(o, 'filled_avg_price') or 0)
+            except (TypeError, ValueError): continue
+            fts = self._as_utc(self._order_field(o, 'filled_at'))
+            oid = str(self._order_field(o, 'id') or '')
+            if fq <= 0 or px <= 0 or not oid or oid in pos.leg_booked or (fts is not None and fts < since): continue
+            otype = self._order_field(o, 'order_type') or self._order_field(o, 'type')
+            reason = 'target' if otype == 'limit' else ('stop_loss' if otype in ('stop', 'stop_limit') else 'eod')
+            cands.append((fts or datetime.max.replace(tzinfo=timezone.utc), oid, fq, px, reason))
+        booked = 0
+        for _, oid, fq, px, reason in sorted(cands):
+            if booked + fq > pos.open_qty or pos.symbol not in self.positions: continue
+            logger.warning(f"{self.tag} reconcile {sym} ({tdate}): stored leg ids did not show the exit — matched broker sell {oid} "
+                           f"{fq} sh @ {px:.2f} ({reason}) by symbol/side/qty/time")
+            booked += self._book_leg_fill(pos, oid, {'filled_qty': fq, 'filled_avg_price': px}, reason)
+        return booked
 
     # ------------------------------------------------------------------ rails / caps
     def _realized_pnl(self, since: str) -> float:
@@ -3226,10 +3423,79 @@ class HodBreakEngine:
             else:
                 continue
             self.positions[sym] = pos; self.entered_today.add(sym); self.seen_today.add(sym); n += 1
+        n += self._adopt_prior_day_open_rows(today, broker)
         self.seen_today |= self._db_symbols_today(include_dead=True); self.entered_today |= self._db_symbols_today()
         logger.info(f"{self.tag} sync_positions: {n} position(s) rehydrated for {today}")
         try: self.reconcile_pending_exits()
         except Exception as e: logger.error(f"{self.tag} reconcile_pending_exits failed: {e}")
+        return n
+
+    CARRY_ADOPT_DAYS = 7
+
+    def _adopt_prior_day_open_rows(self, today: str, broker: Optional[Dict[str, int]]) -> int:
+        """Boot adoption ACROSS DAYS (2026-10-17 QCMU: 63 sh bought 10/15, the 17:02 restart rehydrated nothing because
+        `sync_positions` loads only today's rows, and the weekend position sat with no exit order). Any
+        `strategy=<this book>` row from the last CARRY_ADOPT_DAYS days that is still open ('filled'/'partially_filled',
+        no exit price) is handled here:
+          * the broker still holds the symbol -> ADOPTED: registered in `self.positions` at min(row shares - sold,
+            broker qty) (never the broker's total), the stale safety-net legs are cancelled/settled, a fresh safety-net
+            OCO is placed and its leg ids persisted, a StopMonitor watch is added; WARNING + `_notify` (ungated);
+          * the broker no longer holds it -> row set to `exit_pending_verification` so `reconcile_pending_exits`
+            (broker-truth sell matching) books the real exit.
+        ASSUMPTION: the HOD paper account holds ONLY HOD positions (no owner trades on it), so a carried HOD row whose
+        symbol the account still holds is ours. Rows already in the registry (today's) are skipped. Returns adopted n."""
+        if broker is None:
+            logger.warning(f"{self.tag} carry-over adoption skipped: broker positions unavailable")
+            return 0
+        try:
+            start = (datetime.strptime(today, '%Y-%m-%d') - timedelta(days=self.CARRY_ADOPT_DAYS)).strftime('%Y-%m-%d')
+            rows = [r for r in self.db.get_open_trades_between(start, today, self.STRATEGY_NAME) if r.get('order_status') in ('filled', 'partially_filled')]
+        except Exception as e:
+            logger.error(f"{self.tag} carry-over adoption: DB read failed ({e}) — a prior-day open position would stay UNMANAGED"); return 0
+        n = 0
+        for r in rows:
+            sym = r['symbol']; tid = r.get('id')
+            if sym in self.positions: continue
+            if broker.get(sym, 0) <= 0:
+                logger.warning(f"{self.tag} carry-over: {sym} row {tid} ({r.get('trade_date')}) is open in the DB but the broker holds none — exit pending verification")
+                try: self.db.update_trade(tid, {'order_status': 'exit_pending_verification'})
+                except Exception as e: logger.error(f"{self.tag} carry-over: {sym} row {tid} status update failed: {e}")
+                continue
+            try: pd_ = json.loads(r.get('pattern_data') or '{}')
+            except Exception: pd_ = {}
+            pos = Position(symbol=sym, trade_id=tid, order_id=str(r.get('order_id') or ''), shares=int(r.get('shares') or 0), limit_price=float(r.get('entry_price') or 0),
+                           stop=float(r.get('stop_loss_price') or 0), target=float(r.get('take_profit_price') or 0), level=float(pd_.get('level') or 0),
+                           submitted_at=datetime.now(timezone.utc), tp_leg_id='', sl_leg_id='', fill_price=r.get('fill_price'), filled_at=datetime.now(timezone.utc),
+                           status='open', client_order_id=pd_.get('client_order_id'), pattern_data=dict(pd_),
+                           closed_qty=int(pd_.get('closed_qty') or 0), closed_notional=float(pd_.get('closed_notional') or 0.0))
+            pos.shares = min(pos.shares, pos.closed_qty + broker[sym])      # never more than the broker holds
+            sold = self._cancel_and_settle_safety_net(sym, (pd_.get('tp_leg_id'), pd_.get('sl_leg_id')))
+            if sold:
+                self.positions[sym] = pos; pos.tp_leg_id = pd_.get('tp_leg_id'); pos.sl_leg_id = pd_.get('sl_leg_id')
+                lid, st, reason = sold
+                logger.warning(f"{self.tag} carry-over: {sym} row {tid} had a safety-net {reason} leg that SOLD {st.get('filled_qty')} sh — booking it")
+                self._book_leg_fill(pos, lid, st, reason)
+                continue
+            if pos.stop <= 0 or pos.open_qty <= 0:
+                logger.error(f"{self.tag} carry-over: {sym} row {tid} has no usable stop ({pos.stop}) / open qty ({pos.open_qty}) — NOT adopted, position UNMANAGED")
+                self._notify(f"{self.tag} ERROR {sym} carried position row {tid} cannot be adopted (stop {pos.stop}, open {pos.open_qty}) — UNMANAGED")
+                continue
+            target = pos.target if pos.target > 0 else round((pos.fill_price or pos.limit_price) + self.params.target_r * ((pos.fill_price or pos.limit_price) - pos.stop), 2)
+            pos.target = target
+            tp_id, sl_id = self._place_safety_net(sym, pos.open_qty, target, round(pos.stop * (1.0 - self.SAFETY_NET_PCT), 2))
+            pos.tp_leg_id, pos.sl_leg_id = tp_id, sl_id
+            self.positions[sym] = pos; self.seen_today.add(sym)
+            self._update_pattern_data(pos, tp_leg_id=tp_id, sl_leg_id=sl_id, carried_adopted_on=today)
+            if self.stop_monitor is not None:
+                try:
+                    self.stop_monitor.add_watch(symbol=sym, stop_price=pos.stop, shares=pos.open_qty, tp_leg_id=tp_id, sl_leg_id=sl_id, trade_db_id=tid,
+                                                entry_price=pos.fill_price or pos.limit_price, risk_per_share=(pos.fill_price or pos.limit_price) - pos.stop, strategy=self.STRATEGY_NAME)
+                except Exception as e:
+                    logger.error(f"{self.tag} carry-over: {sym} StopMonitor.add_watch failed — UNMANAGED by the monitor: {e}")
+                    self._notify(f"{self.tag} ERROR add_watch {sym} — carried position UNMANAGED: {e}")
+            logger.warning(f"{self.tag} carry-over: ADOPTED {sym} row {tid} ({r.get('trade_date')}) {pos.open_qty} sh — broker still holds it; safety-net OCO re-placed (tp {tp_id or 'none'} sl {sl_id or 'none'})")
+            self._notify(f"{self.tag} ADOPTED carried-over {sym} {pos.open_qty} sh (row {tid}, {r.get('trade_date')}): safety net re-placed")
+            n += 1
         return n
 
     # ------------------------------------------------------------------ notify
