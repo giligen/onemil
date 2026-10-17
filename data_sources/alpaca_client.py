@@ -81,6 +81,15 @@ class AlpacaAPITimeoutError(AlpacaAPIError):
 
 
 
+def _broker_ts_iso(value):
+    """ISO-8601 string for a broker order timestamp (aware datetime from the SDK), else None.
+
+    Used only to expose `submitted_at` / `created_at` on submit responses for the ORB submit-timing log; anything
+    that is not a real datetime (absent field, test double) yields None rather than a bogus string."""
+    from datetime import datetime as _dt
+    return value.isoformat() if isinstance(value, _dt) else None
+
+
 def _qty_num(raw):
     """Parse a broker quantity: whole numbers stay int (unchanged behaviour), fractional ones (e.g. a
     fractional position/order from another sleeve on the same account) become float instead of raising."""
@@ -1418,6 +1427,9 @@ class AlpacaClient:
                 'qty': qty,
                 'side': side,
                 'limit_price': limit_price,
+                # Broker clock (ORB submit-timing instrumentation 2026-10-17, logging only)
+                'submitted_at': _broker_ts_iso(getattr(order, 'submitted_at', None)),
+                'created_at': _broker_ts_iso(getattr(order, 'created_at', None)),
                 'legs': [
                     {
                         'id': str(leg.id),
@@ -1947,6 +1959,9 @@ class AlpacaClient:
                 'side': side,
                 'stop_price': stop_price,
                 'limit_price': limit_price,
+                # Broker clock (ORB submit-timing instrumentation 2026-10-17, logging only)
+                'submitted_at': _broker_ts_iso(getattr(order, 'submitted_at', None)),
+                'created_at': _broker_ts_iso(getattr(order, 'created_at', None)),
                 'legs': [
                     {
                         'id': str(leg.id),

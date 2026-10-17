@@ -27,7 +27,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as dtime, timedelta, timezone
-from typing import Dict, Iterable, List, Optional, Set
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -68,6 +68,7 @@ from trading.orb_g1_veto import (
     DEFAULT_RV20_MIN as G1_DEFAULT_RV20_MIN,
     g1_reject,
 )
+from trading import orb_submit_timing as _submit_timing
 from trading.orb_planner import OrbTradePlan, OrbTradePlanner, PlannerReject
 from trading.orb_winner_stack import (
     DEFAULT_ATR_K, DEFAULT_SCALE_FRAC, DEFAULT_SCALE_LEVEL_R,
@@ -677,6 +678,11 @@ class ORBEngine:
         self.latency_warn_secs = float(
             (cfg.get('entry', {}) or {}).get('first_submit_latency_warn_secs', 10.0))
         self._first_submit_latency_logged = False
+        # Submit-timing instrumentation (2026-10-17, logging only): broker `submitted_at` of every order
+        # submitted today (the tripwire reads the earliest) + (http_start, http_end) spans per _submit_entry call.
+        self._broker_submit_ts: List[datetime] = []
+        self._submit_spans: List[Tuple[float, float]] = []
+        self._submit_timing_lock = threading.Lock()
 
         self.dedup_by_family = bool(dedup_cfg.get('by_family', True))
         self.dedup_by_super_group = bool(dedup_cfg.get('by_super_group', True))
@@ -3709,6 +3715,7 @@ class ORBEngine:
         # deferred to the concurrent pool below, in ranked order.
         _pending_submits = []
         submitted: List[str] = []
+        _burst_idx = len(self._submit_spans)   # SUBMIT BURST line covers the submits made by THIS call
         for sym in top_syms:
             cand = standins.get(sym) or self.candidates[sym]
             # Vetoes — post-ranking, NO backfill: a vetoed pick already
@@ -3744,6 +3751,7 @@ class ORBEngine:
                 continue
             if vetoed:
                 continue
+            _t_size0 = time.time()
             spread_bps = self._get_spread_bps(sym)
             rvol_tilt_mult, rvol_tercile = self._get_rvol_tilt_mult(cand)
             plan = self.planner.build(
@@ -3773,6 +3781,10 @@ class ORBEngine:
                     self._notify(f"{self.tg_prefix} {sym} skipped — insufficient buying power")
                 continue
             plan.pool = pool_label  # 'production' | addon pool name (not a dataclass field — set post-hoc)
+            # SUBMIT TIMING (log-only, 2026-10-17): decision stamp = the rank-pass stamp the SUBMIT LATENCY
+            # line uses; size_ms = spread/tilt lookup + plan build + buying-power (account) check.
+            plan.timing_decision_ts = t_rank
+            plan.timing_size_ms = (time.time() - _t_size0) * 1000.0
             # Short pool identifier (owner 2026-10-01, "be clear on its trades"):
             # feeds the client_order_id prefix (_submit_entry), the
             # [ORB <pool_id>] log/Telegram tag below and in _submit_entry, and
@@ -3934,6 +3946,7 @@ class ORBEngine:
                 self._record_latency_phase('rank_and_submit', time.time() - t_rank)
                 self._log_order_submit_latency(sym, t_rank)
                 self._check_first_submit_latency()
+        self._flush_submit_burst(_burst_idx)
         return submitted
 
     # =====================================================================
@@ -4230,12 +4243,17 @@ class ORBEngine:
                         self._check_first_submit_latency()
                 else:
                     workers = min(8, len(pending))
+                    _burst_idx = len(self._submit_spans)
                     with ThreadPoolExecutor(
                             max_workers=workers,
                             thread_name_prefix='orb-preplace-submit') as pool:
+                        for _, st in pending:   # log-only SUBMIT TIMING tags, read by _submit_entry
+                            st['plan'].timing_path = 'preplace'
+                            st['plan'].timing_decision_ts = _t_rank
                         futures = [pool.submit(self._submit_entry, st['plan'])
                                    for _, st in pending]
                         results = [f.result() for f in futures]
+                    self._flush_submit_burst(_burst_idx)
                     for (sym, st), order_id in zip(pending, results):
                         latency = (self._et_now() - target).total_seconds()
                         if order_id:
@@ -4323,6 +4341,7 @@ class ORBEngine:
         `plan_submitted`/`open_positions`, so whatever that pass submits
         this tick already IS exactly the added set.
         """
+        _burst_idx = len(self._submit_spans)   # SUBMIT BURST (log-only) covers this reconcile's resubmits
         counters = dict(n_preplaced=0, n_kept=0, n_replaced=0, n_cancelled=0,
                          n_added=0, n_filled_before_reconcile=0)
         if not self._preplace_state:
@@ -4401,6 +4420,8 @@ class ORBEngine:
                     continue
                 self._log_rvol_tilt(sym, final_cand.rel_volume_0935, rvol_tercile, plan)
                 plan.pool = 'production'
+                plan.timing_path = 'reconcile_resubmit'   # log-only SUBMIT TIMING tag
+                plan.timing_decision_ts = time.time()
                 order_id = self._submit_entry(plan)
                 if order_id:
                     self.candidates[sym].plan_submitted = True
@@ -4416,7 +4437,39 @@ class ORBEngine:
                 counters['n_kept'] += 1
 
         self._preplace_reconciled_today = True
+        self._flush_submit_burst(_burst_idx)
         return counters
+
+    def _log_submit_timing(self, plan, result, decision_ts: float, http_start: float, http_end: float,
+                           path: Optional[str], quote_ms: Optional[float], size_ms: Optional[float]) -> None:
+        """ONE `[ORB] SUBMIT TIMING` INFO line per accepted order (logging only, no extra API call) and records
+        the broker `submitted_at` + HTTP span for the tripwire / burst line. Never raises into a live submit."""
+        try:
+            if path is None:
+                _pid = getattr(plan, 'pool_id', 'production')
+                path = 'addon' if _pid and _pid != 'production' else 'production'
+            broker_dt = _submit_timing.broker_ts_from_response(result)
+            line, _ = _submit_timing.build_timing_line(
+                plan.symbol, decision_ts, http_start, http_end, broker_dt, path,
+                quote_ms=quote_ms, size_ms=size_ms)
+            logger.info(line)
+            with self._submit_timing_lock:
+                self._submit_spans.append((http_start, http_end))
+                if broker_dt is not None:
+                    self._broker_submit_ts.append(broker_dt)
+        except Exception as e:
+            logger.warning(f"[ORB] SUBMIT TIMING instrumentation failed for {getattr(plan, 'symbol', '?')} ({e})")
+
+    def _flush_submit_burst(self, start_idx: int) -> None:
+        """One `[ORB] SUBMIT BURST` line for the submits recorded since `start_idx` (logging only)."""
+        try:
+            with self._submit_timing_lock:
+                spans = list(self._submit_spans[start_idx:])
+            line = _submit_timing.build_burst_line(spans)
+            if line:
+                logger.info(line)
+        except Exception as e:
+            logger.warning(f"[ORB] SUBMIT BURST instrumentation failed ({e})")
 
     def _check_first_submit_latency(self) -> None:
         """Latency tripwire (B+ 2026-08-15, design precondition #1 / item H).
@@ -4437,6 +4490,15 @@ class ORBEngine:
             et = self._et_now()
             target = et.replace(hour=9, minute=35, second=0, microsecond=0)
             delay = (et - target).total_seconds()
+            # Clock (2026-10-17): the BROKER's submitted_at of the earliest order when we have it — the engine's
+            # own stamp ran 4.8-10.1 s ahead of the broker's. Threshold and tripwire action are unchanged.
+            clock = 'engine'
+            with self._submit_timing_lock:
+                _broker_first = min(self._broker_submit_ts) if self._broker_submit_ts else None
+            if _broker_first is not None:
+                et = _broker_first.astimezone(et.tzinfo) if et.tzinfo else et
+                delay = (et - target).total_seconds()
+                clock = 'broker'
             phases = dict(self._latency_phases)
             measured = sum(phases.values())
             # Anything unaccounted for is wall time ORB did not spend in its
@@ -4455,11 +4517,11 @@ class ORBEngine:
                 logger.warning(
                     f"[ORB] LATENCY TRIPWIRE: first order submit at "
                     f"{et.strftime('%H:%M:%S')} ET = {delay:.1f}s after "
-                    f"09:35:00 (> {self.latency_warn_secs:.0f}s) — measured: "
+                    f"09:35:00 clock={clock} (> {self.latency_warn_secs:.0f}s) — measured: "
                     f"{breakdown}")
                 self._notify(
                     f"{self.tg_prefix} ⚠ LATENCY: first submit {delay:.0f}s "
-                    f"after 09:35 ET (> {self.latency_warn_secs:.0f}s threshold) "
+                    f"after 09:35 ET clock={clock} (> {self.latency_warn_secs:.0f}s threshold) "
                     f"— {breakdown}")
                 if self.tripwire_action == 'dry' and not self.strategy_dry_run:
                     # G2 (docs/live_guardrails_spec_20260925.md): the same
@@ -4480,7 +4542,7 @@ class ORBEngine:
             else:
                 logger.info(
                     f"[ORB] first order submit {delay:.1f}s after 09:35 ET "
-                    f"(within {self.latency_warn_secs:.0f}s tripwire) — "
+                    f"clock={clock} (within {self.latency_warn_secs:.0f}s tripwire) — "
                     f"{breakdown}")
         except Exception as e:
             logger.warning(f"[ORB] latency tripwire check failed ({e})")
@@ -5396,8 +5458,12 @@ class ORBEngine:
         except Exception as e:
             logger.debug(f"ORB: selection audit write failed: {e}")
 
-    def _submit_entry(self, plan: OrbTradePlan) -> Optional[str]:
+    def _submit_entry(self, plan: OrbTradePlan, path: Optional[str] = None,
+                      decision_ts: Optional[float] = None) -> Optional[str]:
         """Submit stop-limit buy bracket for a plan.
+
+        `path` / `decision_ts` are LOG-ONLY (SUBMIT TIMING line): path in production|addon|preplace|
+        reconcile_resubmit; decision_ts = epoch of the rank-pass stamp (default: entry of this call).
 
         On success:
           - Persists pending_new DB trade record
@@ -5444,9 +5510,15 @@ class ORBEngine:
         # fields persist to DB via _save_pending_trade so they survive a
         # restart (previously lost — reconstructed OpenPosition had
         # entry_quote_ask=None after sync_positions).
+        _t_enter = time.time()
+        path = path or getattr(plan, 'timing_path', None)
+        _decision_ts = decision_ts if decision_ts is not None else (
+            getattr(plan, 'timing_decision_ts', None) or _t_enter)
+        _size_ms = getattr(plan, 'timing_size_ms', None)
         entry_quote_ask: Optional[float] = None
         submit_bid, submit_ask = 0.0, 0.0
         submit_bid_size, submit_ask_size = 0, 0
+        _t_quote0 = time.time()
         try:
             quote = self.alpaca.get_latest_quote(plan.symbol) if hasattr(self.alpaca, 'get_latest_quote') else None
             if quote:
@@ -5458,6 +5530,7 @@ class ORBEngine:
                     entry_quote_ask = submit_ask
         except Exception as e:
             logger.debug(f"ORB: get_latest_quote({plan.symbol}) failed at submit: {e}")
+        _quote_ms = (time.time() - _t_quote0) * 1000.0
 
         # Pre-flight buy-stop rejection guard (shared with bull flag via
         # trading/buy_stop_guard.py — parity by construction). Alpaca LIVE
@@ -5489,6 +5562,8 @@ class ORBEngine:
         coid = (f"orb-{_pool_id_tag}-{plan.symbol}-{int(time.time() * 1000)}"[:48]
                 if _pool_id_tag and _pool_id_tag != 'production' else None)
 
+        _http_start = time.time()
+        _http_end = _http_start
         try:
             if decision.action == BuyStopAction.MARKETABLE_LIMIT:
                 logger.info(
@@ -5539,10 +5614,13 @@ class ORBEngine:
                     sl_price=safety_sl,
                     client_order_id=coid,
                 )
+            _http_end = time.time()
             if not result:
                 logger.error(f"ORB: {plan.symbol} alpaca submit returned empty")
                 return None
             order_id = result.get('id') or ''
+            self._log_submit_timing(plan, result, _decision_ts, _http_start, _http_end,
+                                    path, _quote_ms, _size_ms)
             # 2026-06-09 (FABC fix): extract bracket leg IDs so StopMonitor's
             # BRANCH_SL_LEG_RACE recovery path can query the SL leg fill.
             # alpaca_client.submit_bracket_order now returns 'legs' list
@@ -7819,6 +7897,8 @@ class ORBEngine:
         self._sweep_retry_used_today = False
         self._pdr_vetoed_today = set()
         self._first_submit_latency_logged = False
+        self._broker_submit_ts = []
+        self._submit_spans = []
         self._preplace_armed_today = False
         self._preplace_ranked_today = False
         self._preplace_submitted_today = False

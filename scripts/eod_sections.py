@@ -542,6 +542,9 @@ def _is_p1_scored(line: str) -> bool:
     return bool(m) and m.group(1) in _p1_pool_names()
 
 
+from trading.orb_submit_timing import timing_summary_line  # noqa: E402  (one parser for the SUBMIT TIMING line)
+
+
 def parse_orb_log(text: str) -> Dict:
     """Counts from an ORB session-archive text. `scored` = symbols of `ORB SCORED` lines stamped inside the
     09:34-09:40 ET window (the 09:35 decision); `late` = SCORED symbols outside it (a restart, not a decision);
@@ -608,7 +611,8 @@ def parse_orb_log(text: str) -> Dict:
             "timeouts": sum("Engine tick TIMEOUT" in ln for ln in lines),
             "gap_warn": sum("GAP_GATE" in ln and "| WARNING" in ln for ln in lines),
             "errors": sum("| ERROR" in ln and "ORB" in ln for ln in lines),
-            "order_fail": order_failures(lines)}
+            "order_fail": order_failures(lines),
+            "timing_lines": [ln for ln in lines if "SUBMIT TIMING" in ln or "SUBMIT LATENCY" in ln]}
 
 
 ORDER_FAIL_RE = re.compile(r"ORB: (\S+) (submit_entry failed|alpaca submit returned empty)[:]? ?(.*)$")
@@ -855,6 +859,7 @@ def orb_parity_lines(day: str, engine_rows: List[Dict], parsed: Dict, bt_rows: O
     pnl = sum(float(r.get("pnl") or 0) for r in closed)
     bt_pnl = (f"${sum(float(r.get('pnl') or 0) for r in bt_rows):+,.0f}" if bt_rows else "$+0" if bt_rows == [] else "NO-DATA")
     lines.append(f"ORB P&L: day ${pnl:+,.0f} on {len(closed)} exits | BT book {bt_pnl}")
+    lines.append(timing_summary_line(parsed.get("timing_lines", [])))
     lines.append(defects)
     if parsed.get("order_fail"):
         reasons.insert(0, f"entry submit FAILED x{len(parsed['order_fail'])}")
