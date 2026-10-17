@@ -4490,15 +4490,25 @@ class ORBEngine:
             et = self._et_now()
             target = et.replace(hour=9, minute=35, second=0, microsecond=0)
             delay = (et - target).total_seconds()
-            # Clock (2026-10-17): the BROKER's submitted_at of the earliest order when we have it — the engine's
-            # own stamp ran 4.8-10.1 s ahead of the broker's. Threshold and tripwire action are unchanged.
+            # Clock (2026-10-17): the BROKER's submitted_at of the earliest order decides ONLY on the live endpoint
+            # (live created_at->submitted_at gap 0.01 s median; the PAPER simulator queues orders ~7 s, an artefact
+            # that would trip every day: docs/orb_live_endpoint_gap.md). Paper decides on the engine clock.
+            # Both numbers are always logged. Threshold and tripwire action are unchanged.
             clock = 'engine'
+            engine_delay = delay
             with self._submit_timing_lock:
                 _broker_first = min(self._broker_submit_ts) if self._broker_submit_ts else None
+            broker_delay = None
             if _broker_first is not None:
-                et = _broker_first.astimezone(et.tzinfo) if et.tzinfo else et
-                delay = (et - target).total_seconds()
-                clock = 'broker'
+                broker_delay = (_broker_first.astimezone(et.tzinfo) - target).total_seconds() if et.tzinfo \
+                    else (_broker_first - target).total_seconds()
+                if not getattr(self.alpaca, 'is_paper', True):
+                    et = _broker_first.astimezone(et.tzinfo) if et.tzinfo else et
+                    delay = broker_delay
+                    clock = 'broker'
+            both = (f"engine={engine_delay:.1f}s broker="
+                    f"{'NA' if broker_delay is None else format(broker_delay, '.1f') + 's'} "
+                    f"(decides on {clock}: paper endpoint queues orders ~7 s)")
             phases = dict(self._latency_phases)
             measured = sum(phases.values())
             # Anything unaccounted for is wall time ORB did not spend in its
@@ -4517,7 +4527,7 @@ class ORBEngine:
                 logger.warning(
                     f"[ORB] LATENCY TRIPWIRE: first order submit at "
                     f"{et.strftime('%H:%M:%S')} ET = {delay:.1f}s after "
-                    f"09:35:00 clock={clock} (> {self.latency_warn_secs:.0f}s) — measured: "
+                    f"09:35:00 clock={clock} (> {self.latency_warn_secs:.0f}s) {both} — measured: "
                     f"{breakdown}")
                 self._notify(
                     f"{self.tg_prefix} ⚠ LATENCY: first submit {delay:.0f}s "
@@ -4542,7 +4552,7 @@ class ORBEngine:
             else:
                 logger.info(
                     f"[ORB] first order submit {delay:.1f}s after 09:35 ET "
-                    f"clock={clock} (within {self.latency_warn_secs:.0f}s tripwire) — "
+                    f"clock={clock} (within {self.latency_warn_secs:.0f}s tripwire) {both} — "
                     f"{breakdown}")
         except Exception as e:
             logger.warning(f"[ORB] latency tripwire check failed ({e})")

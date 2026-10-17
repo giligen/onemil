@@ -22,3 +22,8 @@ so it is covered by `reconcile_resubmit`. Negative broker delay is possible for 
 Tests: `pytest tests/test_orb*.py tests/test_eod_sections.py tests/test_eod_report.py tests/test_alpaca_client.py
 --ignore=tests/integration`: 1514 passed, 0 failed (the TestStaleSnapshotGate weekend artefact did not trigger).
 Not done: real-API probe and weekend boot rehearsal (service untouched); verify Monday that `submitted_at` is populated.
+
+## 2026-10-17 tripwire clock fix (docs/orb_tripwire_clock_paper_SPEC.md)
+* `_check_first_submit_latency` decides on the broker `submitted_at` only when `alpaca.is_paper` is False (live endpoint); paper decides on the engine clock (paper simulator queues orders ~7 s).
+* Every first-order line now carries `engine=<x>s broker=<y|NA>s (decides on <clock>: ...)`; `clock=` kept; Telegram carries the deciding number.
+* 3 new tests (paper no-trip, live trips broker, live w/o submitted_at -> engine); 147 passed (submit_timing, preplace_at_close, orb_engine*).

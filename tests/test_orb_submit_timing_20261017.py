@@ -127,8 +127,9 @@ class TestEngineWiring:
             eng._submit_entry(p)
         assert any('path=addon' in r.message and 'broker_submitted_at=NA' in r.message for r in caplog.records)
 
-    def _tripwire_engine(self, engine_delay, broker_delay):
+    def _tripwire_engine(self, engine_delay, broker_delay, paper=False):
         eng = _engine()
+        eng.alpaca.is_paper = paper
         eng.tripwire_action = 'warn'
         eng.notifier = None
         eng._notify = MagicMock()
@@ -162,6 +163,32 @@ class TestEngineWiring:
             eng._check_first_submit_latency()
         assert not any('TRIPWIRE' in r.message for r in caplog.records)
         assert any('clock=broker' in r.message and 'first order submit 6.0s' in r.message for r in caplog.records)
+
+    def test_paper_endpoint_decides_on_engine_clock_and_logs_both(self, caplog):
+        eng = self._tripwire_engine(engine_delay=7.0, broker_delay=15.0, paper=True)
+        with caplog.at_level(logging.INFO):
+            eng._check_first_submit_latency()
+        assert not any('TRIPWIRE' in r.message for r in caplog.records)
+        eng._notify.assert_not_called()
+        ok = [r.message for r in caplog.records if 'first order submit 7.0s after 09:35 ET' in r.message]
+        assert len(ok) == 1 and 'clock=engine' in ok[0]
+        assert 'engine=7.0s broker=15.0s (decides on engine: paper endpoint queues orders ~7 s)' in ok[0]
+
+    def test_live_endpoint_trips_on_broker_clock_and_logs_both(self, caplog):
+        eng = self._tripwire_engine(engine_delay=7.0, broker_delay=12.0, paper=False)
+        with caplog.at_level(logging.INFO):
+            eng._check_first_submit_latency()
+        trip = [r.message for r in caplog.records if 'LATENCY TRIPWIRE: first order submit' in r.message]
+        assert len(trip) == 1 and 'clock=broker' in trip[0]
+        assert 'engine=7.0s broker=12.0s (decides on broker' in trip[0]
+        assert '12s' in eng._notify.call_args[0][0]
+
+    def test_live_without_submitted_at_uses_engine_clock(self, caplog):
+        eng = self._tripwire_engine(engine_delay=7.0, broker_delay=None, paper=False)
+        with caplog.at_level(logging.INFO):
+            eng._check_first_submit_latency()
+        ok = [r.message for r in caplog.records if 'first order submit 7.0s after 09:35 ET' in r.message]
+        assert len(ok) == 1 and 'clock=engine' in ok[0] and 'broker=NA' in ok[0]
 
     def test_flush_burst_logs_and_detects_serial(self, caplog):
         eng = _engine()
