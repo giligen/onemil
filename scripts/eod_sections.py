@@ -366,6 +366,31 @@ def _mom_client():
         return None
 
 
+def mom_live_lines(day: str, client=None, state_path=None, weekly_path=None) -> List[str]:
+    """`MOM-LIVE: day | week | since start | DD` on the LIVE slice, from state_live.json + marks of the sleeve's
+    own names only (never the account equity, never other positions). [] when the state file is absent
+    (the sleeve was never live -- omitted, not NO-DATA); NO-DATA when the file exists but the marks cannot be read."""
+    from trading import momentum_live as ml
+    state = ml.read_json(state_path or ml.LIVE_STATE_PATH)
+    if state is None:
+        return []
+    try:
+        if client is None:
+            from config import Config
+            from data_sources.alpaca_client import AlpacaClient
+            Config()  # loads .env
+            key, secret = os.environ.get("ALPACA_API_KEY", ""), os.environ.get("ALPACA_API_SECRET", "")
+            if not key or not secret:
+                raise RuntimeError("ALPACA_API_KEY/SECRET not set")
+            client = AlpacaClient(key, secret, paper=False)
+        marks, prev = ml.sleeve_marks(client.trading_client.get_all_positions(), state)
+    except Exception as e:  # noqa: BLE001
+        log.warning("MOM-LIVE marks unavailable: %s", e)
+        return [no_data("MOM-LIVE", f"marks unavailable ({type(e).__name__})")]
+    weekly = ml.read_weekly(weekly_path or ml.LIVE_WEEKLY_PATH)
+    return [ml.mom_live_line(state, marks, prev, weekly, dt.date.fromisoformat(day))]
+
+
 def sleeve_section(day: str, client=None, ledger_path=LEDGER, weekly_path=WEEKLY, state_path=None,
                    bt_fn: Optional[Callable] = None) -> Tuple[List[str], Dict]:
     """The MOM section lines plus the metrics the promotion gate reads.

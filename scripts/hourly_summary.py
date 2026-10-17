@@ -47,6 +47,7 @@ if ROOT not in sys.path:
 from config import Config                                          # noqa: E402
 from data_sources.alpaca_client import AlpacaClient                # noqa: E402
 from notifications.telegram_notifier import TelegramNotifier       # noqa: E402
+from trading import momentum_live as mom_live                      # noqa: E402
 
 logger = logging.getLogger("hourly_summary")
 
@@ -283,6 +284,18 @@ def collect_book(name: str, client: AlpacaClient, after_utc: datetime, today: da
             'positions': fetch_positions(client), 'history': history}
 
 
+def collect_mom_live(client: AlpacaClient, today: date, state_path: Optional[str] = None,
+                     weekly_path: Optional[str] = None) -> Optional[Dict]:
+    """MOM-LIVE inputs: the sleeve STATE plus marks of the state's own names ONLY (the broker positions are
+    filtered inside ``sleeve_marks`` -- no other position is kept, counted or logged). None when no state file."""
+    state = mom_live.read_json(state_path or mom_live.LIVE_STATE_PATH)
+    if state is None:
+        return None
+    marks, prev = mom_live.sleeve_marks(client.trading_client.get_all_positions(), state)
+    return {'state': state, 'marks': marks, 'prev': prev, 'day': today,
+            'weekly': mom_live.read_weekly(weekly_path or mom_live.LIVE_WEEKLY_PATH)}
+
+
 def collect_live(client: AlpacaClient) -> Dict:
     """LIVE (owner's manual account): account object only - no orders, no positions are ever read."""
     return {'account': fetch_account(client)}
@@ -419,6 +432,14 @@ def build_message(now_et: datetime, data: Dict[str, Optional[Dict]], errors: Dic
         a = live['account']
         lines.append(f"<b>LIVE</b> {fmt_money(a['equity'] - a['last_equity'])} | equity ${a['equity']:,.0f}")
 
+    if 'MOM-LIVE' in data:   # absent state file = the sleeve was never live = line omitted (not NO-DATA)
+        ml_data = data['MOM-LIVE']
+        if ml_data is None:
+            lines.append(na_line("MOM-LIVE", errors.get('MOM-LIVE', 'api error')))
+        else:
+            lines.append("<b>" + html.escape(mom_live.mom_live_line(
+                ml_data['state'], ml_data['marks'], ml_data['prev'], ml_data['weekly'], ml_data['day'])) + "</b>")
+
     return header + "\n" + "\n".join(enforce_line_limit(lines, MAX_LINES - 1))
 
 
@@ -450,7 +471,14 @@ def gather(cfg: Config, after_utc: datetime, today: date) -> (Dict, Dict):
         data['LIVE'], errors['LIVE'] = None, "no keys"
     else:
         try:
-            data['LIVE'] = collect_live(AlpacaClient(key, secret, paper=False))
+            live_client = AlpacaClient(key, secret, paper=False)
+            data['LIVE'] = collect_live(live_client)
+            if os.path.exists(mom_live.LIVE_STATE_PATH):
+                try:
+                    data['MOM-LIVE'] = collect_mom_live(live_client, today)
+                except Exception as e:
+                    logger.warning("hourly_summary: MOM-LIVE read failed: %s", e)
+                    data['MOM-LIVE'], errors['MOM-LIVE'] = None, "api error"
         except Exception as e:
             logger.warning("hourly_summary: LIVE read failed: %s", e)
             data['LIVE'], errors['LIVE'] = None, "api error"

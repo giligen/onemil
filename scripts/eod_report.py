@@ -301,6 +301,8 @@ def new_sections(day: str, trades: List[Dict]) -> List[str]:
     mom, mom_m = safe_section("MOM", lambda: eod_sections.sleeve_section(day))
     orb, orb_m = safe_section("ORB PAPER PARITY", lambda: eod_sections.orb_paper_parity_section(day, trades))
     promo, _ = safe_section("PROMOTION", lambda: (eod_sections.promotion_section(day, mom_m, orb_m), None))
+    mom_live, _ = safe_section("MOM-LIVE", lambda: (eod_sections.mom_live_lines(day), None))
+    mom = mom + mom_live
     return (["MOM:"] + ["  " + ln for ln in mom] + ["ORB PAPER PARITY:"] + ["  " + ln for ln in orb] + promo)
 
 
