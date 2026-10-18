@@ -193,6 +193,37 @@ class TestReconcileByBrokerTruth:
             assert e.reconcile_pending_exits() == 0
         assert any('sell-order lookup failed' in r.message for r in caplog.records)
 
+    def _since(self, real_db, tid):
+        """The row's filled_at (the `since` the reconcile uses) read back from the DB."""
+        con = sqlite3.connect(real_db._trades_path); v = con.execute("select filled_at from trades where id=?", (tid,)).fetchone()[0]; con.close()
+        d = datetime.fromisoformat(str(v)); return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+    def _row(self, real_db, tid):
+        con = sqlite3.connect(real_db._trades_path); r = con.execute("select order_status, exit_reason, shares from trades where id=?", (tid,)).fetchone(); con.close(); return r
+
+    def test_sell_submitted_before_since_but_filled_81_min_after_is_booked_and_the_broker_query_is_wide(self, hod_live_alpaca, real_db, hod_live_sm):
+        tid = _stale_exit_row(real_db)
+        since = self._since(real_db, tid)
+        o = _sell('903ef94b', 17, 116.69, 'limit', since + timedelta(minutes=81)); o.submitted_at = since - timedelta(milliseconds=50)
+        e = self._engine(hod_live_alpaca, real_db, hod_live_sm, [o])
+        assert e.reconcile_pending_exits() == 1
+        assert self._row(real_db, tid)[:2] == ('closed', 'target')
+        assert hod_live_alpaca.trading_client.get_orders.call_args.kwargs['filter'].after <= since - timedelta(minutes=30)
+
+    def test_sell_filled_10_minutes_before_since_is_not_booked(self, hod_live_alpaca, real_db, hod_live_sm):
+        tid = _stale_exit_row(real_db)
+        since = self._since(real_db, tid)
+        e = self._engine(hod_live_alpaca, real_db, hod_live_sm, [_sell('old10', 17, 116.69, 'limit', since - timedelta(minutes=10))])
+        assert e.reconcile_pending_exits() == 0
+        assert self._row(real_db, tid)[0] == 'exit_pending_verification'
+
+    def test_sell_filled_60_s_before_since_inside_the_tolerance_is_booked(self, hod_live_alpaca, real_db, hod_live_sm):
+        tid = _stale_exit_row(real_db)
+        since = self._since(real_db, tid)
+        e = self._engine(hod_live_alpaca, real_db, hod_live_sm, [_sell('fast60', 17, 114.0, 'stop', since - timedelta(seconds=60))])
+        assert e.reconcile_pending_exits() == 1
+        assert self._row(real_db, tid)[:2] == ('closed', 'stop_loss')
+
 
 class TestCarryOverAdoption:
     def _prior_day_row(self, real_db, sym='QCMU', shares=63, status='filled', days=2):

@@ -3263,10 +3263,15 @@ class HodBreakEngine:
         """Broker-truth fallback for `reconcile_pending_exits` (2026-10-17 RBRK: a 17-sh OCO's limit leg filled but the
         row held the cancelled 14-sh OCO's ids, so the +$22 exit was invisible and the `unverified_exit` kill rail locked
         the book for a week). Reads the account's CLOSED sell orders in the symbol since the entry fill and books every
-        order that actually sold shares (symbol + sell side + filled qty + filled_at >= entry fill) up to the row's
+        order that actually sold shares (symbol + sell side + filled qty + filled_at >= entry fill - 120 s) up to the row's
         remaining open shares, exit_reason by order type (limit -> 'target', stop/stop_limit -> 'stop_loss', else 'eod').
         ASSUMPTION: the HOD account holds ONLY HOD positions (no owner trades there), so any sell of this symbol after
-        the entry fill is ours. Returns shares newly booked; a lookup failure is a WARNING and books nothing."""
+        the entry fill is ours. Returns shares newly booked; a lookup failure is a WARNING and books nothing.
+        TWO WINDOWS (2026-10-18 RBRK rehearsal: 0/17 accounted): Alpaca's `GetOrdersRequest(after=)` filters on the ORDER's
+        submitted_at, never filled_at, and the row's `filled_at` is the ENGINE's booking time of the entry, which comes
+        AFTER the replacement OCO was submitted (16:50:38.100 vs 16:50:38.151) — `after=since` returned []. So the broker
+        query is a wide net (`after = since - 30 min`) and the meaning lives in the in-code filter: the SELL's own
+        filled_at must be >= since - 120 s (tolerance for a fast stop-out between the real fill and the engine booking it)."""
         sym = pos.symbol
         entry_ts = None
         try:
@@ -3279,21 +3284,23 @@ class HodBreakEngine:
         try:
             from alpaca.trading.enums import QueryOrderStatus
             from alpaca.trading.requests import GetOrdersRequest
-            orders = self.alpaca.trading_client.get_orders(filter=GetOrdersRequest(status=QueryOrderStatus.CLOSED, symbols=[sym], after=since, limit=500))
+            orders = self.alpaca.trading_client.get_orders(filter=GetOrdersRequest(status=QueryOrderStatus.CLOSED, symbols=[sym], after=since - timedelta(minutes=30), limit=500))
         except Exception as e:
             logger.warning(f"{self.tag} reconcile {sym} ({tdate}): broker sell-order lookup failed ({e}) — cannot match exit fills by symbol/side/qty/time")
             return 0
-        cands = []
+        cands = []; n_sells = 0
         for o in orders or []:
             if self._order_field(o, 'side') != 'sell': continue
+            n_sells += 1
             try: fq = int(float(self._order_field(o, 'filled_qty') or 0)); px = float(self._order_field(o, 'filled_avg_price') or 0)
             except (TypeError, ValueError): continue
             fts = self._as_utc(self._order_field(o, 'filled_at'))
             oid = str(self._order_field(o, 'id') or '')
-            if fq <= 0 or px <= 0 or not oid or oid in pos.leg_booked or (fts is not None and fts < since): continue
+            if fq <= 0 or px <= 0 or not oid or oid in pos.leg_booked or (fts is not None and fts < since - timedelta(seconds=120)): continue
             otype = self._order_field(o, 'order_type') or self._order_field(o, 'type')
             reason = 'target' if otype == 'limit' else ('stop_loss' if otype in ('stop', 'stop_limit') else 'eod')
             cands.append((fts or datetime.max.replace(tzinfo=timezone.utc), oid, fq, px, reason))
+        logger.debug(f"{self.tag} reconcile {sym} ({tdate}): broker returned {len(orders or [])} closed orders, {n_sells} sells, {len(cands)} candidates (since={since.isoformat()})")
         booked = 0
         for _, oid, fq, px, reason in sorted(cands):
             if booked + fq > pos.open_qty or pos.symbol not in self.positions: continue
