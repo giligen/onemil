@@ -4494,7 +4494,8 @@ class ORBEngine:
 
             if sym not in final_top_syms or final_rh is None:
                 if pos is not None:
-                    self._cancel_symbol_open_orders(sym)
+                    if not self._cancel_preplaced_order(sym, pos):
+                        continue  # partially filled: the fill path owns it (WARNING logged)
                     del self.open_positions[sym]
                 self._pdr_vetoed_today.add(sym)  # no-refill: never re-entered today
                 self._preplace_dropped_today.add(sym)  # ...but not a BT slot holder (see __init__)
@@ -4542,6 +4543,37 @@ class ORBEngine:
         self._preplace_reconciled_today = True
         self._flush_submit_burst(_burst_idx)
         return counters
+
+    def _cancel_preplaced_order(self, sym: str, pos) -> bool:
+        """Cancel the resting entry of a preplaced name that fell outside the final top-N and
+        mark its trades row `order_status='preplace_canceled'`, `exit_reason='preplace_reconcile'`
+        (2026-10-20: the broker showed IREX `canceled` while the row stayed `pending_new`).
+
+        Returns True when the order is gone and the row is marked. Returns False — row NOT marked,
+        WARNING logged — when the broker reports filled_qty > 0 after the cancel: the existing fill
+        path (`_confirm_fill`) owns a (partially) filled order."""
+        self._cancel_symbol_open_orders(sym)
+        filled_qty = 0
+        if pos.order_id:
+            try:
+                final = self.alpaca.get_order(pos.order_id)
+                raw = (final or {}).get('filled_qty', 0) if isinstance(final, dict) \
+                    else getattr(final, 'filled_qty', 0)
+                if raw is not None and not isinstance(raw, (int, float, str)):
+                    logger.warning(f"[ORB PREPLACE] {sym}: unreadable filled_qty {type(raw).__name__} "
+                                   f"on order {pos.order_id} — assuming nothing filled")
+                    raw = 0
+                filled_qty = int(float(raw or 0))
+            except Exception as e:
+                logger.warning(f"[ORB PREPLACE] {sym}: post-cancel get_order({pos.order_id}) failed "
+                               f"({e}) — assuming nothing filled; marking preplace_canceled")
+        if filled_qty > 0:
+            logger.warning(f"[ORB PREPLACE] {sym}: cancel at reconcile but {filled_qty} sh already "
+                           f"filled — row NOT marked canceled, fill path owns it")
+            return False
+        self.db.update_trade(pos.trade_id, {'order_status': 'preplace_canceled',
+                                            'exit_reason': 'preplace_reconcile'})
+        return True
 
     def _log_submit_timing(self, plan, result, decision_ts: float, http_start: float, http_end: float,
                            path: Optional[str], quote_ms: Optional[float], size_ms: Optional[float]) -> None:

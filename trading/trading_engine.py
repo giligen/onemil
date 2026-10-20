@@ -43,6 +43,12 @@ from notifications.telegram_notifier import TelegramNotifier
 
 logger = logging.getLogger(__name__)
 
+# Order statuses that are dead no-fill terminals: never re-added to _pending_orders on restart.
+# 'preplace_canceled' (2026-10-20): ORB preplaced order cancelled by the 09:35 reconcile.
+TERMINAL_PENDING_STATUSES = frozenset({
+    'cancelled', 'canceled', 'expired', 'rejected', 'time_stop_canceled', 'preplace_canceled',
+})
+
 ET = pytz.timezone('US/Eastern')
 
 
@@ -4940,9 +4946,7 @@ class TradingEngine:
         # is now a SEPARATE live position. Today's IREZ #237 was preserved
         # only because the broker SL was holding the qty (close failed). Don't
         # rely on luck — filter by status here at the source.
-        _terminal_pending_statuses = {
-            'cancelled', 'canceled', 'expired', 'rejected', 'time_stop_canceled',
-        }
+        _terminal_pending_statuses = TERMINAL_PENDING_STATUSES
         for trade in trades_today:
             symbol = trade['symbol']
             order_id = trade.get('order_id')
