@@ -183,26 +183,59 @@ def is_owned_orphan(
 SUSPECT_OVER_EXIT_LOOKBACK_DAYS = 7  # calendar days -- safely covers 5 trading sessions across a weekend
 
 
-def _recent_any_strategy_trade(db, symbol: str, lookback_start: str) -> Optional[str]:
+def peer_strategies_for(strategy: str, clients_by_strategy: Optional[Dict[str, Any]]) -> Optional[Set[str]]:
+    """Strategies that trade on the SAME broker account as `strategy`: {strategy} plus every other strategy
+    whose client's `account_number` equals this one's. Derived from broker ACCOUNT NUMBERS, never strategy
+    names (2026-10-23: a hod_break row, paper account PA39, named the owner's live TXG position 'suspect
+    over-exit' at every boot). `clients_by_strategy` maps strategy -> client exposing `account_number`
+    (AlpacaClient). Returns None when no map is wired (reconciler keeps its legacy any-strategy lookup). A peer
+    whose account number is unknown (None/empty) is NOT a peer -- fails toward the old 'foreign' read, never
+    toward an alarm."""
+    if not clients_by_strategy:
+        return None
+    own_client = clients_by_strategy.get(strategy)
+    own_acct = getattr(own_client, 'account_number', None) if own_client is not None else None
+    peers: Set[str] = {strategy}
+    if not own_acct:
+        logger.warning(f"orphan reconciler: account number of '{strategy}' unknown — peer set is {{{strategy}}} only")
+        return peers
+    for other, client in clients_by_strategy.items():
+        if other == strategy or client is None:
+            continue
+        if getattr(client, 'account_number', None) == own_acct:
+            peers.add(other)
+    return peers
+
+
+def _recent_any_strategy_trade(db, symbol: str, lookback_start: str,
+                               peer_strategies: Optional[Set[str]] = None) -> Optional[str]:
     """Strategy name of the most recent trades-table row for `symbol` in ANY strategy since
     `lookback_start` (inclusive), or None. 9/25 CDNA incident: HOD sold a symbol's registry qty
     twice (StopMonitor's own stop exit, then a stale force-close), leaving the account short; the
     reconciler classified the resulting broker short as 'foreign — owner's manual trade, ignored'
     because CDNA had no OWNED row left open. A symbol OUR books traded recently is never routine
     foreign flow even when the strict ownership predicate fails -- see `suspect_over_exit` below.
+    `peer_strategies`: when given, only rows of strategies trading on the scanned broker account count
+    (rows of a strategy on another account can never explain this account's position); None = any strategy.
     Never raises: a lookup failure is logged and treated as no-match (fails toward the existing
     'foreign' behavior, never toward a false alarm)."""
     try:
         if hasattr(db, 'get_trades_in_window'):
             rows = db.get_trades_in_window(lookback_start, [symbol])
+            if peer_strategies is not None:
+                rows = [r for r in rows if r.get('strategy') in peer_strategies]
+        elif peer_strategies is not None and not peer_strategies:
+            rows = []
         else:
             # .fetchall(), not .fetchone(): matches the legacy-fallback convention every other
             # query in this module uses (and every test double in the suite implements).
-            cur = db._trades_conn.execute(
-                "SELECT strategy FROM trades WHERE symbol = ? AND trade_date >= ? "
-                "ORDER BY trade_date DESC, id DESC",
-                (symbol, lookback_start),
-            )
+            sql = ("SELECT strategy FROM trades WHERE symbol = ? AND trade_date >= ? ")
+            params: List[Any] = [symbol, lookback_start]
+            if peer_strategies is not None:
+                sql += "AND strategy IN (%s) " % ",".join("?" * len(peer_strategies))
+                params.extend(sorted(peer_strategies))
+            sql += "ORDER BY trade_date DESC, id DESC"
+            cur = db._trades_conn.execute(sql, tuple(params))
             rows = [dict(r) for r in cur.fetchall()]
         return str(rows[0]['strategy']) if rows else None
     except Exception as e:
@@ -531,6 +564,7 @@ def reconcile_strategy_orphans(
     close_position_fn: Optional[Callable[[str], Dict[str, Any]]] = None,
     fetch_fill_fn: Optional[Callable[[str], Dict[str, Any]]] = None,
     broker_positions: Optional[List[Dict[str, Any]]] = None,
+    peer_strategies: Optional[Set[str]] = None,
 ) -> List[OrphanAction]:
     """Compare broker positions vs (engine-tracked + DB) and act on orphans.
 
@@ -551,6 +585,10 @@ def reconcile_strategy_orphans(
         broker_positions: optional pre-fetched positions snapshot. When
             sync_positions already called get_open_positions, pass that
             list here to avoid a duplicate API hit.
+        peer_strategies: strategies trading on the SAME broker account as
+            the one scanned (see ``peer_strategies_for``). The suspect-
+            over-exit lookup only counts these strategies' trade rows.
+            None keeps the legacy any-strategy lookup.
 
     Returns:
         List of OrphanAction — one per orphan detected this cycle.
@@ -632,7 +670,7 @@ def reconcile_strategy_orphans(
 
         if owned_row is None:
             suspect_lookback = (today_et - timedelta(days=SUSPECT_OVER_EXIT_LOOKBACK_DAYS)).isoformat()
-            recent_strategy = _recent_any_strategy_trade(db, sym, suspect_lookback)
+            recent_strategy = _recent_any_strategy_trade(db, sym, suspect_lookback, peer_strategies)
             if recent_strategy is not None:
                 # OUR books traded this symbol within the last 5 sessions (any strategy), yet it
                 # has no OWNED row now -- this is NOT routine owner manual flow. Most likely our

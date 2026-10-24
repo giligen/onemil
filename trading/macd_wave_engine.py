@@ -24,7 +24,7 @@ from trading.exit_reasons import ExitReason
 
 from trading.macd_conviction import compute_conviction_score
 from trading.orphan_reconciler import (
-    ReconcilerConfig, reconcile_strategy_orphans,
+    ReconcilerConfig, peer_strategies_for, reconcile_strategy_orphans,
 )
 from trading.stop_monitor import build_exit_update
 from trading.macd_cross_detector import (
@@ -507,6 +507,8 @@ class MACDWaveEngine:
                 tracked_symbols=set(self.open_positions.keys()),
                 cfg=cfg,
                 broker_positions=broker_snapshot,
+                peer_strategies=peer_strategies_for(
+                    self.STRATEGY_NAME, getattr(self, 'peer_clients_by_strategy', None)),
             )
         except Exception as e:
             logger.error(

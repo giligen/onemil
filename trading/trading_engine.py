@@ -34,7 +34,7 @@ from trading.bf_vwap_gate import load_vwap_gate_config, passes_vwap_gate
 from trading.bf_risk_cap import load_risk_cap_config, cap_usd as _risk_cap_usd, capped_shares
 from trading.order_executor import OrderExecutor
 from trading.orphan_reconciler import (
-    ReconcilerConfig, reconcile_strategy_orphans,
+    ReconcilerConfig, peer_strategies_for, reconcile_strategy_orphans,
 )
 from trading.stop_monitor import build_exit_update
 from trading.unknown_exit import build_unknown_exit_update
@@ -5075,6 +5075,8 @@ class TradingEngine:
                 notifier=self.notifier, tracked_symbols=today_symbols,
                 cfg=getattr(self, 'orphan_reconciler_cfg',
                              None) or ReconcilerConfig(),
+                peer_strategies=peer_strategies_for(
+                    'bull_flag', getattr(self, 'peer_clients_by_strategy', None)),
             )
         except Exception as e:
             logger.error(f"bull_flag orphan reconciler raised: {e}")

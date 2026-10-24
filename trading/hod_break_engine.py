@@ -2991,7 +2991,7 @@ class HodBreakEngine:
         return self._minute_of_day() >= getattr(self, 'flat_minute', self.params.flat_minute)
 
     FC_RESUBMIT_S = 60.0
-    FC_LEG_POLL_S = 3.0
+    FC_LEG_POLL_S = 10.0   # paper OMS cancel propagation is 5-7 s (live: ms) -- 3.0 raced it on 10/22 CELC/PHM
 
     def _cancel_pending_and_confirm(self, pos: Position, why: str) -> Optional[str]:
         """Cancel a working entry and read its REST truth: 'filled' (partial or full — the position is now open),
@@ -3176,7 +3176,13 @@ class HodBreakEngine:
                         try: self.db.update_trade(pos.trade_id, _eod.build_eod_exit_telemetry(method=pm, quote_bid=bid, quote_ask=ask))
                         except Exception as e: logger.error(f"{self.tag} {sym}: eod_exit telemetry DB write failed: {e}")
                 except Exception as e:
-                    logger.error(f"{self.tag} FORCE CLOSE {sym} FAILED: {e}"); self._notify(f"{self.tag} ERROR force close {sym}: {e}")
+                    # 2026-10-22 CELC/PHM: attempt 1 hit Alpaca 40310000 'insufficient qty available ... held_for_orders' while a
+                    # cancelled leg was still propagating (paper OMS 5-7 s); attempt 2 filled both. A self-healing race on
+                    # attempt 1 is a WARNING with no Telegram; the same error on attempt >= 2, or any other error, stays ERROR.
+                    if pos.fc_attempts == 1 and ('40310000' in str(e) or 'insufficient qty available' in str(e).lower()):
+                        logger.warning(f"{self.tag} FORCE CLOSE {sym}: shares still held by a cancelling leg (attempt 1) — retrying in {self.FC_RESUBMIT_S:.0f}s")
+                    else:
+                        logger.error(f"{self.tag} FORCE CLOSE {sym} FAILED: {e}"); self._notify(f"{self.tag} ERROR force close {sym}: {e}")
             remaining = [s_ for s_, p_ in self.positions.items() if p_.status == 'open']
             self._flattened = not remaining
         if n:

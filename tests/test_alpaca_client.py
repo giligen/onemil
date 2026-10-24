@@ -1379,3 +1379,24 @@ class TestFractionalQuantities:
         o.qty, o.filled_qty = "3", "3"
         r = client.get_order("oid")
         assert r["qty"] == 3 and isinstance(r["qty"], int)
+
+
+class TestTimeoutLogLevel20261023:
+    """No-retry callers own the severity (WARNING); exhausted allowed retries stay ERROR."""
+
+    def _run(self, client, caplog, retries):
+        import logging, time
+        client._api_timeout = 0.05
+        with caplog.at_level(logging.WARNING):
+            try:
+                client._call_with_timeout(lambda: time.sleep(0.3), "op_x", timeout_retries=retries)
+            except AlpacaAPITimeoutError:
+                pass
+        return [r.levelname for r in caplog.records if 'timed out after' in r.message and r.levelname != 'WARNING' or 'op_x' in r.message and '+ ' in r.message]
+
+    def test_no_retry_caller_logs_warning(self, client, caplog):
+        assert self._run(client, caplog, 0) == ['WARNING']
+
+    def test_exhausted_retries_log_error(self, client, caplog, monkeypatch):
+        monkeypatch.setattr('data_sources.alpaca_client.TIMEOUT_RETRY_BACKOFF_SECONDS', 0.0)
+        assert 'ERROR' in self._run(client, caplog, 1)

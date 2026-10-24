@@ -382,10 +382,10 @@ class StopMonitor:
         msg = str(e).lower()
         return '40310000' in msg or 'insufficient qty available' in msg
 
-    # CORD 5/8: backoff schedule for held_for_orders releases. Cumulative
-    # ≈ 2.2s — enough to clear any sane bracket-cancel propagation while
-    # still leaving headroom inside the 10s fill-poll budget.
-    _HELD_QTY_RETRY_BACKOFFS_S = (0.2, 0.5, 1.5)
+    # CORD 5/8: backoff schedule for held_for_orders releases. 2026-10-23 (SNDQ 10/22): the old 2.2 s window
+    # (0.2, 0.5, 1.5) was shorter than the paper OMS cancel propagation (5-7 s) -> ERROR + CRITICAL Telegram lines
+    # for a race that cleared one second later. Cumulative 10.5 s now; a TRUE exhaustion still raises -> ERROR/CRITICAL.
+    _HELD_QTY_RETRY_BACKOFFS_S = (0.5, 1.0, 2.0, 3.0, 4.0)
 
     # HOD-break tape-accurate resting entry (docs/hod_resting_entry_spec_20260925.md): cap on
     # concurrently print-watched symbols. ARMED HOD candidates are a small, fast-turnover pool

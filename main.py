@@ -15,7 +15,7 @@ import signal
 import sys
 import logging
 import threading
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from config import get_config
 from monitoring.logger import setup_logging
@@ -624,6 +624,9 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
     # Same-account detection (2026-05-18): when ALPACA_BF_API_KEY == ALPACA_API_KEY
     # the BF "account" is the main account — reuse the shared OrderStreamWatcher
     # instead of opening a second TradingStream connection on the same key.
+    # strategy -> broker client, filled as engines are built. The orphan reconciler resolves ACCOUNT NUMBERS from
+    # it lazily (at scan time) to learn which strategies share a broker account (docs/telegram_error_noise_fix_20261023.md).
+    account_peer_clients: Dict[str, Any] = {}
     trading_engine = None
     if trade and enable_flag:
         bf_client = bf_alpaca if bf_alpaca is not None else alpaca
@@ -661,6 +664,8 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
                                                  stop_monitor=stop_monitor,
                                                  order_stream=bf_order_stream)
         trading_engine.news_provider = news_provider  # For news re-check at trade time
+        account_peer_clients['bull_flag'] = bf_client
+        trading_engine.peer_clients_by_strategy = account_peer_clients
         # Register real-time bar handler (multi-consumer since Step 1) for instant pattern detection
         if stop_monitor and not stop_monitor.polling_mode:
             stop_monitor.register_bar_handler('bull_flag', trading_engine._on_bar_close)
@@ -686,6 +691,8 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
             news_provider=news_provider,
             # news_worker attached post-scanner construction (see below)
         )
+        account_peer_clients['macd_wave'] = alpaca
+        macd_engine.peer_clients_by_strategy = account_peer_clients
         try:
             macd_engine.orphan_reconciler_cfg = config.orphan_reconciler_cfg
         except Exception as e:
@@ -752,6 +759,8 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
             config=orb_cfg, stop_monitor=stop_monitor,
             order_stream=orb_order_stream,
         )
+        account_peer_clients['orb'] = orb_alpaca
+        orb_engine.peer_clients_by_strategy = account_peer_clients
         try:
             orb_engine.orphan_reconciler_cfg = config.orphan_reconciler_cfg
         except Exception as e:
@@ -837,6 +846,7 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
                 order_stream=hod_order_stream,
                 is_qualified=lambda s: trading_engine is not None and s in trading_engine._qualified_symbols,
                 fs_signal_fn=hod_fs_signal_fn)
+            account_peer_clients['hod_break'] = hod_client
             if stop_monitor is not None and not stop_monitor.polling_mode:
                 hod_engine.register_on_stop_monitor()
             hod_engine.sync_positions()
@@ -893,6 +903,7 @@ def run_scan(config, verbose: bool = False, trade: bool = False,
             alpaca_client=alpaca, db=db, stop_monitor=stop_monitor,
             notifier=notifier, cfg=_ign_cfg,
             prestage=ignition_prestage)
+        account_peer_clients['ignition'] = alpaca
         ignition_engine.sync_positions()
     except Exception as e:
         logger.error(f"IgnitionEngine init failed ({e}) — engine off; "

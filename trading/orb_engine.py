@@ -87,7 +87,7 @@ from trading.orb_target_limit import (
 from trading import touchgo_audit as _tg_audit
 from trading import live_guardrail
 from trading.orphan_reconciler import (
-    ReconcilerConfig, reconcile_strategy_orphans,
+    ReconcilerConfig, peer_strategies_for, reconcile_strategy_orphans,
 )
 from trading.stop_monitor import build_exit_update
 from trading import orb_add_on
@@ -606,6 +606,7 @@ class ORBEngine:
         # 09:35 decision must never wait behind a slow universe scan.
         # build_orb_universe_from_snapshots derives a deadline from this.
         self.open_tick_budget_sec = float(execution_cfg.get('open_tick_budget_sec', 20.0))
+        self._open_tick_exhausted_streak = 0   # consecutive exhausted open ticks this session
         logger.info(f"ORB WARM-phase seed prewarming: prewarm_seed={self.prewarm_seed_enabled} "
                     f"fast_submit={self.fast_submit_enabled} "
                     f"open_tick_budget_sec={self.open_tick_budget_sec}")
@@ -1346,6 +1347,31 @@ class ORBEngine:
                     self._open_bar_miss[sym] = time.time()
         return {s: self._open_bar_cache[s] for s in symbols if s in self._open_bar_cache}
 
+    # Preplace needs the universe by 09:35:05 ET; an exhausted tick that ends at/after this time is an ERROR.
+    OPEN_TICK_ERROR_FROM_ET = (9, 34)
+
+    @classmethod
+    def open_tick_exhaustion_level(cls, streak: int, now_et: datetime) -> int:
+        """Log level for an exhausted open-tick budget (2026-10-23 Telegram-noise fix). `streak` counts consecutive
+        exhausted ticks INCLUDING this one. First exhaustion before 09:34 ET is self-healing (the next tick
+        resumes, 10/23 13:31 admitted 34 candidates 100 s later) -> WARNING. The SECOND consecutive exhaustion, or
+        any exhaustion at/after 09:34 ET (the preplace needs the universe by 09:35:05), -> ERROR."""
+        if streak >= 2 or (now_et.hour, now_et.minute) >= cls.OPEN_TICK_ERROR_FROM_ET:
+            return logging.ERROR
+        return logging.WARNING
+
+    def _report_open_tick_budget_exhausted(self, msg: str, now_et: Optional[datetime] = None) -> None:
+        """Count this exhausted tick on the per-session streak and log `msg` at the level the streak and the
+        clock dictate (see `open_tick_exhaustion_level`). The streak is reset by a tick that finishes inside its
+        budget and by `_reset_daily_locked` (session start)."""
+        if now_et is None:
+            from zoneinfo import ZoneInfo as _ZI2
+            now_et = datetime.now(timezone.utc).astimezone(_ZI2('America/New_York'))
+        self._open_tick_exhausted_streak = getattr(self, '_open_tick_exhausted_streak', 0) + 1
+        level = self.open_tick_exhaustion_level(self._open_tick_exhausted_streak, now_et)
+        logger.log(level, f"{msg} [exhausted tick #{self._open_tick_exhausted_streak} of the streak, "
+                          f"{now_et.strftime('%H:%M:%S')} ET]")
+
     def build_orb_universe_from_snapshots(self, candidate_symbols: Optional[List[str]] = None,
                                            deadline: Optional[float] = None) -> List[str]:
         """Build ORB universe by querying Alpaca snapshots matching BT criteria.
@@ -1415,12 +1441,14 @@ class ORBEngine:
         _snapshot_fallback_syms: List[str] = []   # fresh-snapshot symbols (informational only)
         _no_open_syms: List[str] = []   # liquid stale-snapshot symbols with no valid today-open
         _n_cand = len(snapshots or {})
+        _budget_hit = False
         for _i, (sym, snap) in enumerate((snapshots or {}).items()):
             if time.time() >= deadline:
-                logger.error(
+                self._report_open_tick_budget_exhausted(
                     f"ORB: open-tick budget ({self.open_tick_budget_sec}s) exhausted — PARTIAL universe this tick: "
                     f"{_n_cand - _i} of {_n_cand} candidates not evaluated this tick "
                     f"(deferred, not rejected); {len(keep)} admitted so far")
+                _budget_hit = True
                 break
             try:
                 # AlpacaClient.get_snapshots returns a FLAT dict per symbol:
@@ -1527,6 +1555,8 @@ class ORBEngine:
             except Exception as e:
                 _admission_errors.append((sym, e))
                 continue
+        if not _budget_hit:
+            self._open_tick_exhausted_streak = 0   # a tick that finished inside the budget ends the streak
         if _admission_errors:
             _msg = (f"ORB admission: {len(_admission_errors)} symbol(s) skipped on exception "
                     f"(first: {_admission_errors[0][0]}: {_admission_errors[0][1]!r})")
@@ -7918,6 +7948,8 @@ class ORBEngine:
                     tracked_symbols=set(self.open_positions.keys()),
                     cfg=cfg,
                     broker_positions=broker_snapshot,
+                    peer_strategies=peer_strategies_for(
+                        STRATEGY_NAME, getattr(self, 'peer_clients_by_strategy', None)),
                 )
             except Exception as e:
                 logger.error(
@@ -8013,6 +8045,7 @@ class ORBEngine:
 
     def _reset_daily_locked(self) -> None:
         """reset_daily body — caller holds `_lock`."""
+        self._open_tick_exhausted_streak = 0
         self._first_rank_defer_active = False
         self._first_rank_defer_started = None
         self._first_rank_grace_end_utc = None

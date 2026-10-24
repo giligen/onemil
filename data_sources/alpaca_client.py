@@ -137,6 +137,25 @@ class AlpacaClient:
         """Whether this client is connected to Alpaca paper trading."""
         return self._paper
 
+    @property
+    def account_number(self) -> Optional[str]:
+        """Broker account number, one REST call cached for the client's lifetime (an account never changes under
+        a client). None on a fetch failure (WARNING logged, NOT cached so a later call retries) -- callers treat
+        None as 'unknown account', never as a match."""
+        cached = getattr(self, '_account_number_cache', None)
+        if cached:
+            return cached
+        try:
+            num = self.get_account_info().get('account_number')
+        except Exception as e:
+            logger.warning(f"AlpacaClient.account_number: fetch failed ({e}) — account unknown")
+            return None
+        if not num:
+            logger.warning("AlpacaClient.account_number: get_account_info returned no account_number — account unknown")
+            return None
+        self._account_number_cache = str(num)
+        return self._account_number_cache
+
     def _call_with_timeout(self, func: Callable[[], T], operation: str,
                            timeout: Optional[float] = None,
                            timeout_retries: Optional[int] = None,
@@ -195,7 +214,12 @@ class AlpacaClient:
                     )
                     time_mod.sleep(TIMEOUT_RETRY_BACKOFF_SECONDS)
                     continue
-                logger.error(
+                # 2026-10-23 Telegram-noise fix: a caller that opted out of retries (timeout_retries=0,
+                # best-effort calls such as the ORB open-tick bars fetch) receives AlpacaAPITimeoutError and
+                # owns the severity decision -> WARNING here. ERROR only when retries were ALLOWED and are
+                # exhausted (a genuinely persistent stall).
+                _lvl = logger.error if eff_retries > 0 else logger.warning
+                _lvl(
                     f"API call timed out after {eff_timeout}s + "
                     f"{eff_retries} retry: {operation}"
                 )

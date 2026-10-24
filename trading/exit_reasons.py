@@ -54,6 +54,11 @@ class ExitReason(str, Enum):
     """
 
     # ---- shared across strategies -------------------------------------
+    PREPLACE_RECONCILE = "preplace_reconcile"
+    """ORB: a preplaced entry cancelled because it fell outside the final top-N
+    (commit aac8ee7, 2026-10-20). Row is order_status='preplace_canceled'; no
+    position was ever held. Added 2026-10-23 so the AST drift test is green."""
+
     STOP_LOSS = "stop_loss"
     """The watch's stop_price was hit and the position was sold via
     StopMonitor's marketable limit (or its escalation chain). The
