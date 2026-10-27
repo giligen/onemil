@@ -1835,7 +1835,7 @@ class AlpacaClient:
         except AlpacaAPIError:
             raise
         except Exception as e:
-            logger.error(f"Failed to replace order stop price {order_id}: {e}")
+            logger.warning(f"Failed to replace order stop price {order_id}: {e} (re-raised; the caller decides severity)")
             raise AlpacaAPIError(f"Failed to replace order stop price {order_id}: {e}")
 
     def replace_order_limit_price(self, order_id: str, new_limit_price: float,
@@ -1903,7 +1903,7 @@ class AlpacaClient:
         except AlpacaAPIError:
             raise
         except Exception as e:
-            logger.error(f"Failed to replace order qty {order_id}: {e}")
+            logger.warning(f"Failed to replace order qty {order_id}: {e} (re-raised; the caller decides severity)")
             raise AlpacaAPIError(f"Failed to replace order qty {order_id}: {e}")
 
     def submit_stop_bracket_order(

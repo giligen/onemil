@@ -195,6 +195,7 @@ class WatchEntry:
     scale_at_px: float = 0.0       # entry + level_r × range_size
     scale_qty: int = 0             # floor(frac × shares) at arm time
     scale_done: bool = False       # latched once the scale leg is booked
+    scale_fail_count: int = 0      # consecutive leg-resize failures; 3 => scale disarmed (2026-10-27)
     scale_order_id: str = ''       # resting limit-sell id while working
     scale_in_flight: bool = False  # submission critical-section (short)
     scale_last_poll_ts: float = 0.0  # poll-mode fill-check throttle
@@ -1912,13 +1913,36 @@ class StopMonitor:
                         f"{leg_id[:8]} -> {new_id[:8] or '?'} qty={runner_qty}"
                     )
             except Exception as e:
+                _msg = str(e).lower()
+                if '42210000' in _msg or 'order is not open' in _msg:
+                    # 2026-10-27 (LABX): the leg is dead at the broker (cancelled
+                    # with its parent). Resizing can never succeed; drop the id
+                    # so no later cycle touches it and place the scale-out
+                    # without a resize (the runner is protected by the
+                    # in-engine stop + cancel-and-place).
+                    logger.warning(
+                        f"StopMonitor: {symbol} {attr} leg {leg_id[:8]} is not open "
+                        f"— dropping the dead leg id, placing the scale-out "
+                        f"without a resize"
+                    )
+                    setattr(watch, attr, '')
+                    continue
+                watch.scale_fail_count += 1
                 logger.warning(
                     f"StopMonitor: {symbol} scale-out leg resize failed "
                     f"({attr}={leg_id[:8]}): {e} — skipping scale this "
-                    f"cycle, will retry on next trigger (never strand shares)"
+                    f"cycle (attempt {watch.scale_fail_count}/3; never strand shares)"
                 )
                 # Roll back any leg already resized before this failure.
                 self._restore_scale_legs(symbol, watch, client, resized)
+                if watch.scale_fail_count >= 3:
+                    logger.error(
+                        f"StopMonitor: {symbol} scale-out DISARMED after "
+                        f"{watch.scale_fail_count} consecutive leg-resize failures "
+                        f"(last: {e}) — runner keeps full size, in-engine stop "
+                        f"still protects the position"
+                    )
+                    watch.scale_qty = 0
                 return False
         try:
             result = client.submit_limit_sell_order(
@@ -1938,6 +1962,7 @@ class StopMonitor:
             self._restore_scale_legs(symbol, watch, client, resized)
             return False
         watch.scale_order_id = order_id
+        watch.scale_fail_count = 0
         logger.info(
             f"StopMonitor: {symbol} SCALE OUT submitted — {watch.scale_qty}sh "
             f"limit ${watch.scale_at_px:.2f} order={order_id[:8]} "

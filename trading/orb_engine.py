@@ -249,6 +249,10 @@ class OpenPosition:
     # Safety-net leg IDs for cleanup on exit (populated from submit response)
     tp_leg_id: str = ''
     sl_leg_id: str = ''
+    # 2026-10-27 (LABX): set by the partial-fill stall cancel when the entry was a
+    # bracket; _confirm_fill then re-protects the filled shares if the cancel
+    # took the bracket legs down with the parent.
+    legs_replace_pending: bool = False
     # Slippage attribution — set at entry submit, consumed at fill time.
     # bar_close_price: BT reference level (range_high — what BT uses as the
     #   fill trigger; anything above it is real slippage on top of the 30bps
@@ -6133,6 +6137,8 @@ class ORBEngine:
                 f"cancelling remaining {remaining} sh + "
                 f"accepting observed qty as final"
             )
+        if remaining > 0 and (pos.sl_leg_id or pos.tp_leg_id):
+            pos.legs_replace_pending = True
         if remaining > 0 and pos.order_id:
             if first_attempt:
                 pos.stall_cancel_sent_at = now_utc
@@ -6181,6 +6187,81 @@ class ORBEngine:
                 f"sync_positions orphan-detect is the backstop"
             )
             self._confirm_fill(pos, final_status)
+
+    _DEAD_LEG_STATUSES = ('canceled', 'cancelled', 'expired', 'rejected', 'replaced')
+
+    def _replace_dead_bracket_legs(self, pos: 'OpenPosition', order_status) -> None:
+        """2026-10-27 (LABX): a partial-fill stall cancels the PARENT and Alpaca
+        cancels the whole bracket with it, leaving the filled shares with no
+        broker-side exit. Read both legs via REST; when any is dead, rest ONE
+        fresh OCO (SL at `pos.stop_price`, i.e. the ATR-floored stop; TP at the
+        bracket's TP price) for the FILLED qty, repoint pos.sl_leg_id /
+        pos.tp_leg_id and persist them (pattern_data.replacement_oco). Surviving
+        legs are cancelled first (a live leg would reserve the shares and make
+        the OCO reject). OCO failure = ERROR once and EMPTY leg ids, so
+        StopMonitor uses its cancel-and-place path instead of a dead id."""
+        pos.legs_replace_pending = False
+        sym = pos.symbol
+        old = {'sl_leg_id': pos.sl_leg_id, 'tp_leg_id': pos.tp_leg_id}
+        status = {}
+        for attr, leg_id in old.items():
+            if not leg_id:
+                continue
+            try:
+                got = self.alpaca.get_order(leg_id) or {}
+                status[attr] = str(got.get('status', '')).lower()
+            except Exception as e:
+                logger.warning(f"ORB: {sym} {attr} {leg_id[:8]} status read failed: {e} — treated as unknown (not dead)")
+                status[attr] = 'unknown'
+        dead = [a for a, st in status.items() if st in self._DEAD_LEG_STATUSES]
+        if not dead:
+            return
+        tp_price = None
+        legs = (order_status.get('legs') if isinstance(order_status, dict)
+                else getattr(order_status, 'legs', None)) or []
+        for leg in legs:
+            lp = leg.get('limit_price') if isinstance(leg, dict) else getattr(leg, 'limit_price', None)
+            if lp and float(lp) > 0:
+                tp_price = round(float(lp), 2)
+                break
+        if tp_price is None:
+            tp_price = round(pos.entry_price * 3.0, 2)
+            logger.warning(f"ORB: {sym} bracket TP price not in the parent payload — using entry x3 = ${tp_price:.2f}")
+        for attr, st in status.items():
+            if st not in self._DEAD_LEG_STATUSES and st != 'unknown':
+                try:
+                    self.alpaca.cancel_order(old[attr])
+                except Exception as e:
+                    logger.warning(f"ORB: {sym} could not cancel surviving {attr} {old[attr][:8]} before the OCO: {e}")
+        try:
+            oco = self.alpaca.submit_oco_sell_order(
+                symbol=sym, qty=int(pos.shares), limit_price=tp_price,
+                stop_price=round(pos.stop_price, 2))
+            tp_id = str((oco or {}).get('id') or '')
+            stops = [l for l in ((oco or {}).get('legs') or []) if l.get('type') == 'stop']
+            sl_id = str(stops[0]['id']) if len(stops) == 1 else ''
+            if not tp_id or not sl_id:
+                raise RuntimeError(f"OCO response without usable leg ids (parent={tp_id or 'none'}, stop legs={len(stops)})")
+        except Exception as e:
+            pos.sl_leg_id = ''
+            pos.tp_leg_id = ''
+            logger.error(f"ORB: {sym} NAKED POSITION — bracket legs cancelled with the parent and the replacement OCO "
+                         f"for {pos.shares} sh FAILED: {e} — watch registered with empty leg ids (StopMonitor cancel-and-place path)")
+            return
+        pos.sl_leg_id, pos.tp_leg_id = sl_id, tp_id
+        logger.info(f"ORB: {sym} bracket legs cancelled with the parent — replaced with OCO "
+                    f"sl={sl_id[:8]} tp={tp_id[:8]} for {pos.shares} sh")
+        try:
+            import json as _json
+            existing = self.db.get_trade_by_id(pos.trade_id)
+            pdata = {}
+            if existing and existing.get('pattern_data'):
+                raw = existing['pattern_data']
+                pdata = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+            pdata['replacement_oco'] = {'sl_leg_id': sl_id, 'tp_leg_id': tp_id, 'qty': int(pos.shares)}
+            self.db.update_trade(pos.trade_id, {'pattern_data': _json.dumps(pdata)})
+        except Exception as e:
+            logger.warning(f"ORB: {sym} replacement-OCO leg ids not persisted ({e}) — live OCO unaffected")
 
     def _confirm_fill(self, pos: OpenPosition, order_status) -> None:
         """Transition a pending OpenPosition to filled + arm StopMonitor watch."""
@@ -6395,6 +6476,8 @@ class ORBEngine:
         # correctly as soon as the skip window closes).
         next_bar_start = fill_at.replace(second=0, microsecond=0) + timedelta(minutes=1)
         skip_until_ts = next_bar_start.timestamp()
+        if pos.legs_replace_pending:
+            self._replace_dead_bracket_legs(pos, order_status)
         if self.stop_monitor is not None:
             try:
                 self.stop_monitor.add_watch(
