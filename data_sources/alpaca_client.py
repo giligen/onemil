@@ -14,6 +14,7 @@ Rate limit retry with exponential backoff built in.
 
 import logging
 import time as time_mod
+from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta, date
 from typing import Dict, Optional, List, Callable, TypeVar
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
@@ -38,7 +39,7 @@ from alpaca.trading.requests import (
     MarketOrderRequest,
     LimitOrderRequest,
 )
-from alpaca.trading.enums import PositionSide, AssetClass, AssetStatus, OrderSide, TimeInForce, OrderClass, OrderType
+from alpaca.trading.enums import PositionSide, AssetClass, AssetStatus, AssetExchange, OrderSide, TimeInForce, OrderClass, OrderType
 from alpaca.common.exceptions import APIError
 from pydantic import ValidationError as PydanticValidationError
 import pandas as pd
@@ -47,6 +48,48 @@ import pytz
 logger = logging.getLogger(__name__)
 
 T = TypeVar('T')
+
+
+@dataclass
+class RawAsset:
+    """One /assets row without SDK enum validation (TXSE-safe stand-in for alpaca.trading.models.Asset).
+
+    ``exchange``, ``asset_class`` and ``status`` are plain strings exactly as the broker sends them.
+    """
+    id: str = ''
+    symbol: str = ''
+    name: str = ''
+    exchange: str = ''
+    asset_class: str = ''
+    status: str = ''
+    tradable: bool = False
+    marginable: bool = False
+    shortable: bool = False
+    easy_to_borrow: bool = False
+    fractionable: bool = False
+
+
+def _asset_from_json(row: Dict) -> RawAsset:
+    """Map one raw /assets JSON row to a RawAsset (unknown keys ignored, missing keys default)."""
+    return RawAsset(
+        id=str(row.get('id') or ''),
+        symbol=str(row.get('symbol') or ''),
+        name=str(row.get('name') or ''),
+        exchange=str(row.get('exchange') or ''),
+        asset_class=str(row.get('class') or row.get('asset_class') or ''),
+        status=str(row.get('status') or ''),
+        tradable=bool(row.get('tradable', False)),
+        marginable=bool(row.get('marginable', False)),
+        shortable=bool(row.get('shortable', False)),
+        easy_to_borrow=bool(row.get('easy_to_borrow', False)),
+        fractionable=bool(row.get('fractionable', False)),
+    )
+
+
+def _is_sdk_validation_error(e: Exception) -> bool:
+    """True for a pydantic ValidationError (or a ValueError carrying its text) from SDK model parsing."""
+    return isinstance(e, PydanticValidationError) or (
+        isinstance(e, ValueError) and 'validation error' in str(e))
 
 DEFAULT_API_TIMEOUT = 90       # was 60; bumped after 2026-04-27 observed
                                 # 30-90s Alpaca REST latency at 9:30-10:00 ET
@@ -399,6 +442,63 @@ class AlpacaClient:
 
         return True
 
+    def _assets_raw_warn(self, what: str, sdk_error: Exception, detail: str) -> None:
+        """Log ONE WARNING per client per hour for any assets raw-REST fallback."""
+        now = time_mod.monotonic()
+        last = getattr(self, '_assets_raw_warned_at', None)
+        if last is None or now - last > 3600:
+            self._assets_raw_warned_at = now
+            first_line = (str(sdk_error).splitlines() or [''])[0]
+            logger.warning("%s: SDK rejected the payload (%s; %s) — raw REST fallback", what, first_line, detail)
+
+    def _assets_raw_rest(self, request, sdk_error: Exception, **call_kwargs) -> List[RawAsset]:
+        """Serve the /assets list from raw REST when the SDK model rejects it (unknown Exchange, e.g. TXSE).
+
+        Params are the request's own (`to_request_fields`, what the SDK would send). A raw-path failure
+        propagates to the caller unchanged (no silent empty list).
+        """
+        params = request.to_request_fields() if request is not None else {}
+        rows = self._call_with_timeout(
+            lambda: self.trading_client.get('/assets', params), "get_all_assets_raw", **call_kwargs)
+        result = [_asset_from_json(r) for r in (rows or [])]
+        known = {e.value for e in AssetExchange}
+        unknown = sorted({r.exchange for r in result if r.exchange and r.exchange not in known})
+        self._assets_raw_warn(
+            "get_all_assets", sdk_error,
+            f"unknown exchange values {set(unknown)} — returned {len(result)} assets")
+        return result
+
+    def get_assets_tolerant(self, request=None, operation: str = "get_all_assets", **call_kwargs) -> list:
+        """`trading_client.get_all_assets(request)` that survives SDK enum gaps (TXSE, 2026-10-28).
+
+        `request` defaults to active us_equity. On a pydantic validation failure (HTTP succeeded, SDK enum
+        rejected a row) the list is re-read via raw REST and returned as `RawAsset`s; every other exception
+        propagates unchanged.
+        """
+        if request is None:
+            request = GetAssetsRequest(asset_class=AssetClass.US_EQUITY, status=AssetStatus.ACTIVE)
+        try:
+            return self._call_with_timeout(
+                lambda: self.trading_client.get_all_assets(request), operation, **call_kwargs)
+        except (PydanticValidationError, ValueError) as e:
+            if not _is_sdk_validation_error(e):
+                raise
+            return self._assets_raw_rest(request, e, **call_kwargs)
+
+    def get_asset_tolerant(self, symbol: str, operation: Optional[str] = None, **call_kwargs):
+        """`trading_client.get_asset(symbol)` that survives SDK enum gaps: raw `/assets/{symbol}` -> RawAsset."""
+        op = operation or f"get_asset({symbol})"
+        try:
+            return self._call_with_timeout(lambda: self.trading_client.get_asset(symbol), op, **call_kwargs)
+        except (PydanticValidationError, ValueError) as e:
+            if not _is_sdk_validation_error(e):
+                raise
+            row = self._call_with_timeout(
+                lambda: self.trading_client.get(f'/assets/{symbol}'), f"{op}_raw", **call_kwargs)
+            asset = _asset_from_json(row)
+            self._assets_raw_warn("get_asset", e, f"first symbol {symbol}, exchange {asset.exchange!r}")
+            return asset
+
     def get_all_tradeable_assets(self, exclude_leveraged: bool = True) -> List[Dict]:
         """
         Get all tradeable US common stock assets.
@@ -414,14 +514,7 @@ class AlpacaClient:
             AlpacaAPIError: If API call fails
         """
         try:
-            request = GetAssetsRequest(
-                asset_class=AssetClass.US_EQUITY,
-                status=AssetStatus.ACTIVE
-            )
-            assets = self._call_with_timeout(
-                lambda: self.trading_client.get_all_assets(request),
-                "get_all_tradeable_assets"
-            )
+            assets = self.get_assets_tolerant(operation="get_all_tradeable_assets")
 
             total_tradeable = 0
             tradeable = []
@@ -440,7 +533,8 @@ class AlpacaClient:
                 tradeable.append({
                     'symbol': asset.symbol,
                     'company_name': asset.name or '',
-                    'exchange': asset.exchange.value if asset.exchange else '',
+                    'exchange': (asset.exchange.value if hasattr(asset.exchange, 'value')
+                                 else str(asset.exchange or '')),
                     'marginable': bool(getattr(asset, 'marginable', False)),
                 })
 
@@ -1729,10 +1823,7 @@ class AlpacaClient:
             True if marginable, False otherwise
         """
         try:
-            asset = self._call_with_timeout(
-                lambda: self.trading_client.get_asset(symbol),
-                f"is_marginable({symbol})"
-            )
+            asset = self.get_asset_tolerant(symbol, operation=f"is_marginable({symbol})")
             return bool(getattr(asset, 'marginable', False))
         except Exception as e:
             logger.warning(f"{symbol}: Failed to check marginable: {e}")
@@ -1752,10 +1843,7 @@ class AlpacaClient:
             (fail closed: an unknown asset is never treated as shortable).
         """
         try:
-            asset = self._call_with_timeout(
-                lambda: self.trading_client.get_asset(symbol),
-                f"get_shortability({symbol})"
-            )
+            asset = self.get_asset_tolerant(symbol, operation=f"get_shortability({symbol})")
             return {
                 'shortable': bool(getattr(asset, 'shortable', False)),
                 'easy_to_borrow': bool(getattr(asset, 'easy_to_borrow', False)),
@@ -1770,11 +1858,9 @@ class AlpacaClient:
         open for newly-listed symbols the offline class map doesn't cover;
         callers treat None as 'unknown' (not news-boost eligible)."""
         try:
-            asset = self._call_with_timeout(
-                lambda: self.trading_client.get_asset(symbol),
-                f"get_asset_name({symbol})",
-                timeout=NEWS_API_TIMEOUT, timeout_retries=0,
-                rate_limit_retries=0)
+            asset = self.get_asset_tolerant(
+                symbol, operation=f"get_asset_name({symbol})",
+                timeout=NEWS_API_TIMEOUT, timeout_retries=0, rate_limit_retries=0)
             return getattr(asset, 'name', None)
         except Exception as e:
             logger.warning(f"{symbol}: asset name fetch failed: {e} — "

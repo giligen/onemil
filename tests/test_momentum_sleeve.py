@@ -175,6 +175,8 @@ def fake_client(paper=True, existing=None):
         raise Exception('404 order not found')
     c.trading_client.get_order_by_client_id.side_effect = by_coid
     c.trading_client.get_all_positions.return_value = []
+    # AlpacaClient.get_asset_tolerant is spec'd away; route it to the raw SDK double like the real method does
+    c.get_asset_tolerant.side_effect = lambda s, **k: c.trading_client.get_asset(s)
     return c
 
 

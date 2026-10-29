@@ -773,7 +773,7 @@ class MACDWaveEngine:
 
         logger.info(f"[{self.STRATEGY_NAME}] Building universe (${self.min_price}-${self.max_price})...")
 
-        assets = self.alpaca.trading_client.get_all_assets(
+        assets = self.alpaca.get_assets_tolerant(
             GetAssetsRequest(asset_class=AssetClass.US_EQUITY, status=AssetStatus.ACTIVE)
         )
         # Filter tradeable stocks in price range

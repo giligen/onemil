@@ -118,8 +118,7 @@ def fetch_assets(client: AlpacaClient) -> pd.DataFrame:
     from alpaca.trading.requests import GetAssetsRequest
     from alpaca.trading.enums import AssetClass, AssetStatus
     req = GetAssetsRequest(asset_class=AssetClass.US_EQUITY, status=AssetStatus.ACTIVE)
-    assets = client._call_with_timeout(lambda: client.trading_client.get_all_assets(req), 'get_all_assets',
-                                       timeout=90, timeout_retries=2, rate_limit_retries=5)
+    assets = client.get_assets_tolerant(req, timeout=90, timeout_retries=2, rate_limit_retries=5)
     df = pd.DataFrame([dict(symbol=a.symbol, name=a.name or '', tradable=bool(a.tradable)) for a in assets])
     if df.empty:
         raise RuntimeError("get_all_assets returned no active us_equity assets")
@@ -663,7 +662,7 @@ def apply_fractionable(client: AlpacaClient, order: Dict, prices: Dict[str, floa
     order['fractionable_checked'] = True
     sym = order['symbol']
     try:
-        fractionable = bool(client.trading_client.get_asset(sym).fractionable)
+        fractionable = bool(client.get_asset_tolerant(sym).fractionable)
     except Exception as e:
         logger.warning("momentum_sleeve: %s asset lookup failed (%s) -- assuming fractionable, notional order", sym, e)
         return

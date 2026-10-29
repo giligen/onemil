@@ -86,6 +86,7 @@ def live_client(broker=None, paper=False):
     c.is_paper = paper
     c.trading_client = b
     c._call_with_timeout = MagicMock(side_effect=RuntimeError('no data in tests'))
+    c.get_asset_tolerant.side_effect = lambda s, **k: b.get_asset(s)
     cal = [{'date': d.date(), 'open': None, 'close': None} for d in pd.bdate_range('2024-01-01', '2026-12-31')]
     c.get_market_calendar.side_effect = lambda s, e: [x for x in cal if s <= x['date'] <= e]
     return c, b

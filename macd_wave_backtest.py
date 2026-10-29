@@ -173,7 +173,7 @@ def find_movers(
 
     # Fetch missing dates from Alpaca
     if missing_dates:
-        assets = client.trading_client.get_all_assets(
+        assets = client.get_assets_tolerant(
             GetAssetsRequest(asset_class=AssetClass.US_EQUITY, status=AssetStatus.ACTIVE)
         )
         all_symbols = [
