@@ -1,0 +1,56 @@
+1709a rows 137; status {'ok': 123, 'after_bar_db_end': 14}
+1709a: n(live, bars ok, both sims) = 121  of 137 ledger rows
+validation: pattern_data range vs 09:30-09:34 bar range, share equal within 1c: 1.000
+  rows with pattern atr14: 8; ledger stop equals max(rl, entry-.25atr)? 1.000; atr parquet vs pattern atr (median ratio) 1.003
+stop share  ledger 0.380  re-sim(i) 0.372  re-sim(ii) 0.339  (ii nes 0.331)
+  excess 9.6 pp vs fixed BT 28.4 %; (ii)-(i) = -3.3 pp -> explained -34 %
+  excess 0.8 pp vs own (i); (ii)-(i) = -3.3 pp -> explained -400 %
+  share stop: ledger 0.380 (i) 0.372 (ii) 0.339
+  share lock: ledger 0.099 (i) 0.116 (ii) 0.107
+  share tag: ledger 0.314 (i) 0.248 (ii) 0.289
+  share force: ledger 0.207 (i) 0.264 (ii) 0.264
+  meanR R_i: -0.154 [-0.387,+0.126]  ex-top5 -0.392
+  meanR R_ii: -0.083 [-0.326,+0.220]  ex-top5 -0.341
+  meanR R_ii_nes: -0.071 [-0.316,+0.233]  ex-top5 -0.328
+  meanR Rnet_ii: -0.119 [-0.371,+0.187]  ex-top5 -0.375
+  meanR Rscale_ii: -0.096 [-0.317,+0.154]  ex-top5 -0.314
+  meanR ledger_R: -0.091 [-0.306,+0.155]  ex-top5 -0.312
+confusion (rows=ledger, cols=re-sim ii):
+sim    force  lock  stop  tag
+led                          
+force     23     0     0    2
+lock       0    11     1    0
+stop       1     0    38    7
+tag        8     2     2   26
+exit-class agreement (ii vs ledger): 0.810  (stop vs not-stop agreement 0.909)
+  agreement (i vs ledger): 0.826
+  force_close ledger minute median 945.0 (=15:45); sim uses open of first bar >= 15:45; median |px diff| bps 0.0
+1709b rows 1276
+--- delay 0 s ---
+period | n_filled | covered(share) | winner-cov - loser-cov (pp) | n_sim | meanR [CI] | ex-top5 | cap3R | stop sh | fills/wk(covered)
+2023-01..24H1 | 53 | 0.00 | +0.0 | 0 | +nan [+nan,+nan] | +nan | +nan | nan | 0.00
+2024H2 | 34 | 1.00 | +0.0 | 34 | +0.581 [-0.202,+1.673] | -0.030 | +0.131 | 0.294 | 1.31
+2025H1 | 42 | 1.00 | +0.0 | 42 | +0.660 [+0.023,+1.364] | +0.149 | +0.340 | 0.381 | 1.62
+2025H2-2026-09 | 172 | 0.99 | -0.6 | 170 | +0.335 [-0.002,+0.721] | -0.087 | +0.072 | 0.265 | 2.79
+in-regime 2025-01..26-09 [ATR-floor sens]: R +0.387 [+0.053,+0.765] ex-top5 -0.061 stop sh 0.354
+in-regime 2025-01..26-09: n 212 R +0.400 [+0.090,+0.726] ex-top5 -0.022 | entry-bar-no-stop +0.400 [+0.100,+0.724] | +40%@3R scale +0.342 [+0.087,+0.605]
+2024H2 (covered out-of-regime) [ATR-floor sens]: R +0.427 [-0.405,+1.596] ex-top5 -0.194 stop sh 0.441
+2024H2 (covered out-of-regime): n 34 R +0.581 [-0.176,+1.686] ex-top5 -0.030 | entry-bar-no-stop +0.581 [-0.183,+1.707] | +40%@3R scale +0.429 [-0.194,+1.237]
+all covered [ATR-floor sens]: R +0.393 [+0.088,+0.742] ex-top5 -0.088 stop sh 0.366
+all covered: n 246 R +0.425 [+0.124,+0.732] ex-top5 -0.024 | entry-bar-no-stop +0.425 [+0.145,+0.724] | +40%@3R scale +0.354 [+0.121,+0.615]
+--- delay 30 s ---
+period | n_filled | covered(share) | winner-cov - loser-cov (pp) | n_sim | meanR [CI] | ex-top5 | cap3R | stop sh | fills/wk(covered)
+2023-01..24H1 | 41 | 0.00 | +0.0 | 0 | +nan [+nan,+nan] | +nan | +nan | nan | 0.00
+2024H2 | 24 | 1.00 | +0.0 | 24 | +0.714 [-0.344,+2.158] | -0.163 | +0.100 | 0.375 | 0.92
+2025H1 | 27 | 1.00 | +0.0 | 27 | +0.771 [-0.154,+1.881] | +0.132 | +0.292 | 0.407 | 1.04
+2025H2-2026-09 | 127 | 0.99 | -2.0 | 126 | +0.192 [-0.136,+0.566] | -0.186 | -0.009 | 0.294 | 2.07
+in-regime 2025-01..26-09 [ATR-floor sens]: R +0.244 [-0.098,+0.642] ex-top5 -0.182 stop sh 0.386
+in-regime 2025-01..26-09: n 153 R +0.295 [-0.023,+0.660] ex-top5 -0.111 | entry-bar-no-stop +0.295 [-0.032,+0.657] | +40%@3R scale +0.242 [-0.041,+0.540]
+2024H2 (covered out-of-regime) [ATR-floor sens]: R +0.492 [-0.601,+1.946] ex-top5 -0.406 stop sh 0.458
+2024H2 (covered out-of-regime): n 24 R +0.714 [-0.325,+2.166] ex-top5 -0.163 | entry-bar-no-stop +0.714 [-0.332,+2.095] | +40%@3R scale +0.508 [-0.291,+1.550]
+all covered [ATR-floor sens]: R +0.278 [-0.069,+0.672] ex-top5 -0.184 stop sh 0.395
+all covered: n 177 R +0.351 [+0.026,+0.709] ex-top5 -0.091 | entry-bar-no-stop +0.351 [+0.026,+0.716] | +40%@3R scale +0.278 [+0.013,+0.565]
+availability (delay 0): filled 301, covered 246 (0.82); by seg: 2023-01..24H1 0.00, 2024H2 1.00, 2025H1 1.00, 2025H2-2026-09 0.99
+BT-entry cross-check: n 528; class agreement with BT population reason 0.938; stop-vs-not agreement 0.939; stop share BT 0.320 vs resim 0.278
+BT-entry cross-check WITH ATR floor: class agreement 0.962; stop share resim 0.352
+parquet ATR available on 0.92 of simulated replay fills
