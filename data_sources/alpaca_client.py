@@ -38,8 +38,9 @@ from alpaca.trading.requests import (
     MarketOrderRequest,
     LimitOrderRequest,
 )
-from alpaca.trading.enums import AssetClass, AssetStatus, OrderSide, TimeInForce, OrderClass, OrderType
+from alpaca.trading.enums import PositionSide, AssetClass, AssetStatus, OrderSide, TimeInForce, OrderClass, OrderType
 from alpaca.common.exceptions import APIError
+from pydantic import ValidationError as PydanticValidationError
 import pandas as pd
 import pytz
 
@@ -1548,6 +1549,63 @@ class AlpacaClient:
             logger.error(f"Failed to get open orders: {e}")
             raise AlpacaAPIError(f"Failed to get open orders: {e}")
 
+    @staticmethod
+    def _position_dict_from_model(pos) -> Dict:
+        """Build the positions dict from an alpaca-py Position model (attribute access)."""
+        exchange = getattr(pos, 'exchange', None)
+        exchange = getattr(exchange, 'value', exchange)
+        return {
+            'symbol': pos.symbol,
+            'qty': _qty_num(pos.qty),
+            'side': pos.side,
+            'avg_entry_price': float(pos.avg_entry_price),
+            'market_value': float(pos.market_value),
+            'unrealized_pl': float(pos.unrealized_pl),
+            'unrealized_plpc': float(pos.unrealized_plpc),
+            'exchange': '' if exchange is None else str(exchange),
+        }
+
+    @staticmethod
+    def _position_dict_from_json(row: Dict) -> Dict:
+        """Build the SAME positions dict from one raw REST JSON row (no SDK enum validation)."""
+        side = row.get('side')
+        try:
+            side = PositionSide(side)
+        except ValueError:
+            pass  # unknown side string: pass the broker's text through unchanged
+        return {
+            'symbol': row['symbol'],
+            'qty': _qty_num(row['qty']),
+            'side': side,
+            'avg_entry_price': float(row['avg_entry_price']),
+            'market_value': float(row['market_value']),
+            'unrealized_pl': float(row['unrealized_pl']),
+            'unrealized_plpc': float(row['unrealized_plpc']),
+            'exchange': str(row.get('exchange') or ''),
+        }
+
+    def _open_positions_raw_rest(self, sdk_error: Exception) -> List[Dict]:
+        """Serve the positions list from GET /positions when the SDK model rejects the payload.
+
+        2026-10-28: alpaca-py 0.43.2's Exchange enum lacked TXSE, so pydantic rejected the WHOLE list for
+        100 minutes. One WARNING per client per hour (the data is served); a raw-path failure propagates
+        to the caller's ERROR path unchanged.
+        """
+        rows = self._call_with_timeout(
+            lambda: self.trading_client.get('/positions'),
+            "get_open_positions_raw"
+        )
+        result = [self._position_dict_from_json(r) for r in (rows or [])]
+        now = time_mod.monotonic()
+        last = getattr(self, '_positions_raw_warn_ts', None)
+        if last is None or now - last > 3600:
+            self._positions_raw_warn_ts = now
+            first_line = (str(sdk_error).splitlines() or [''])[0]
+            logger.warning(
+                "positions: SDK model rejected the broker payload (%s) — served from raw REST (%d positions)",
+                first_line, len(result))
+        return result
+
     def get_open_positions(self) -> List[Dict]:
         """
         Get all current open positions from Alpaca.
@@ -1559,22 +1617,17 @@ class AlpacaClient:
             AlpacaAPIError: If API call fails
         """
         try:
-            positions = self._call_with_timeout(
-                lambda: self.trading_client.get_all_positions(),
-                "get_open_positions"
-            )
-
-            result = []
-            for pos in positions:
-                result.append({
-                    'symbol': pos.symbol,
-                    'qty': _qty_num(pos.qty),
-                    'side': pos.side,
-                    'avg_entry_price': float(pos.avg_entry_price),
-                    'market_value': float(pos.market_value),
-                    'unrealized_pl': float(pos.unrealized_pl),
-                    'unrealized_plpc': float(pos.unrealized_plpc),
-                })
+            try:
+                positions = self._call_with_timeout(
+                    lambda: self.trading_client.get_all_positions(),
+                    "get_open_positions"
+                )
+                result = [self._position_dict_from_model(pos) for pos in positions]
+            except (PydanticValidationError, ValueError) as e:
+                if not (isinstance(e, PydanticValidationError)
+                        or 'validation error' in str(e)):
+                    raise
+                result = self._open_positions_raw_rest(e)
 
             logger.debug(f"Open positions: {len(result)}")
             return result

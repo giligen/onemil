@@ -248,10 +248,13 @@ class LLMNewsAnalyzer(NewsAnalyzer):
                 last_error = e
                 if not self._is_retryable_error(e):
                     # Permanent (e.g., 4xx auth, 400 bad request) — don't retry.
-                    logger.error(
-                        f"{symbol}: LLM classification failed (non-retryable): {e} "
-                        f"— defaulting to False, NOT cached"
-                    )
+                    if self._is_billing_or_auth_error(e):
+                        self._warn_classifier_unavailable(e)
+                    else:
+                        logger.error(
+                            f"{symbol}: LLM classification failed (non-retryable): {e} "
+                            f"— defaulting to False, NOT cached"
+                        )
                     break
                 logger.warning(
                     f"{symbol}: LLM classification attempt "
@@ -277,6 +280,26 @@ class LLMNewsAnalyzer(NewsAnalyzer):
         )
         self._cache[cache_key] = result
         return result, category, reason
+
+    @staticmethod
+    def _is_billing_or_auth_error(exc: Exception) -> bool:
+        """True for a billing/auth 4xx (400 low credit balance, 401, 402, 403) that affects every symbol."""
+        status = getattr(exc, 'status_code', None)
+        text = str(exc).lower()
+        if status in (401, 402, 403):
+            return True
+        return status == 400 and ('credit balance' in text or 'billing' in text)
+
+    def _warn_classifier_unavailable(self, exc: Exception) -> None:
+        """One WARNING per hour per analyzer for a billing/auth outage (was one ERROR per symbol, 10/28)."""
+        now = time.monotonic()
+        last = getattr(self, '_unavailable_warn_ts', None)
+        if last is None or now - last > 3600:
+            self._unavailable_warn_ts = now
+            logger.warning(
+                f"LLM classifier unavailable: {str(exc)[:120]} — defaulting to False for every "
+                f"symbol until it recovers (NOT cached)"
+            )
 
     @staticmethod
     def _is_retryable_error(exc: Exception) -> bool:
