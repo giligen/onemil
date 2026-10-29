@@ -23,6 +23,7 @@ honoured once, never looped on.
 import logging
 import asyncio
 import html
+import re
 import time
 import aiohttp
 from collections import deque
@@ -30,6 +31,29 @@ from typing import Optional, Dict, List, Any
 from datetime import datetime, timezone, date
 
 logger = logging.getLogger(__name__)
+
+# Pattern cap (2026-10-29, docs/exit_coverage_invariant_spec_20261029.md Part 2):
+# LABX produced one Telegram line per minute for 3+ hours — identical text, so
+# the 60 s exact-dedup never held. A message's PATTERN is its text with every
+# $ amount, uuid / hex id (>= 8 chars) and digit run replaced by '#'.
+PATTERN_CAP_MAX_SENDS = 3
+PATTERN_CAP_WINDOW_S = 600.0
+# Money events are never silenced.
+PATTERN_CAP_PROTECTED = ("EXIT COVERAGE", "NAKED", "EMERGENCY", "CRITICAL",
+                         "[MOM LIVE]", "FILL")
+_RE_DOLLARS = re.compile(r"\$\s?\d[\d,]*(?:\.\d+)?")
+_RE_UUID = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                      r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
+_RE_HEX = re.compile(r"\b[0-9a-fA-F]{8,}\b")
+_RE_DIGITS = re.compile(r"\d+")
+
+
+def message_pattern(message: str) -> str:
+    """Normalise `message` to its flood-cap pattern key (see above)."""
+    text = _RE_DOLLARS.sub("#", message)
+    text = _RE_UUID.sub("#", text)
+    text = _RE_HEX.sub("#", text)
+    return _RE_DIGITS.sub("#", text)
 
 
 class TelegramNotifier:
@@ -85,6 +109,11 @@ class TelegramNotifier:
         self._rate_limit_window_s: float = 60.0
         self._send_times: deque = deque()
         self._rate_suppressed_count: int = 0
+
+        # Pattern cap: at most PATTERN_CAP_MAX_SENDS sends of one pattern per
+        # PATTERN_CAP_WINDOW_S; the overflow is counted and reported once.
+        self._pattern_sends: Dict[str, deque] = {}
+        self._pattern_suppressed: Dict[str, int] = {}
 
         if self.enabled:
             if not self.bot_token or not self.chat_id:
@@ -164,6 +193,50 @@ class TelegramNotifier:
         self._send_times.append(now)
         return outgoing
 
+    def _pattern_cap_gate(self, message: str, now: float) -> List[str]:
+        """
+        Suppress the 4th+ send of one message PATTERN inside 10 minutes.
+
+        Messages containing a protected word (EXIT COVERAGE, NAKED,
+        EMERGENCY, CRITICAL, [MOM LIVE], FILL) always pass. When a pattern
+        that was suppressed frees capacity again, ONE summary line
+        (`⏸ suppressed N further "<pattern[:80]>" in the last 10 min`) is
+        returned ahead of the message.
+
+        Runs BEFORE `_rate_cap_gate` so a flood of one pattern cannot eat
+        the global per-minute budget that other messages need.
+
+        Returns: [] (suppressed), [message], or [summary, message].
+        """
+        if any(word in message for word in PATTERN_CAP_PROTECTED):
+            return [message]
+
+        pattern = message_pattern(message)
+        sends = self._pattern_sends.setdefault(pattern, deque())
+        while sends and (now - sends[0]) >= PATTERN_CAP_WINDOW_S:
+            sends.popleft()
+
+        if len(sends) >= PATTERN_CAP_MAX_SENDS:
+            n = self._pattern_suppressed.get(pattern, 0) + 1
+            self._pattern_suppressed[pattern] = n
+            logger.warning(
+                f"Telegram pattern cap: suppressing #{n} of "
+                f"\"{pattern[:80]}\" ({len(sends)} sent in the last "
+                f"{int(PATTERN_CAP_WINDOW_S // 60)} min)")
+            return []
+
+        sends.append(now)
+        out = [message]
+        n = self._pattern_suppressed.pop(pattern, 0)
+        if n:
+            out.insert(0, f"⏸ suppressed {n} further \"{pattern[:80]}\" "
+                          f"in the last {int(PATTERN_CAP_WINDOW_S // 60)} min")
+        if len(self._pattern_sends) > 500:  # bound memory on varied text
+            for key in [k for k, d in self._pattern_sends.items()
+                        if not d or (now - d[-1]) >= PATTERN_CAP_WINDOW_S]:
+                self._pattern_sends.pop(key, None)
+        return out
+
     # =========================================================================
     # Core Send
     # =========================================================================
@@ -190,9 +263,15 @@ class TelegramNotifier:
         if gated is None:
             return False
 
-        outgoing = self._rate_cap_gate(gated, now)
+        patterned = self._pattern_cap_gate(gated, now)
+        if not patterned:
+            return False
+
+        outgoing = self._rate_cap_gate(patterned[-1], now)
         if not outgoing:
             return False
+        if len(patterned) > 1:
+            outgoing.insert(len(outgoing) - 1, patterned[0])
 
         ok = False
         for text in outgoing:

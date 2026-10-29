@@ -1059,6 +1059,13 @@ class Config:
             default=True))
 
     @property
+    def exit_coverage_enabled(self) -> bool:
+        """stop_monitor.exit_coverage_enabled (default True): the 60 s
+        exit-coverage invariant loop (docs/exit_coverage_invariant_spec_20261029.md)."""
+        return bool(self._get_yaml(
+            "stop_monitor", "exit_coverage_enabled", default=True))
+
+    @property
     def exit_ladder_cfg(self) -> Dict[str, Any]:
         """D3 FIX 2 — the sliced, re-priced exit ladder. DEFAULT OFF.
 

@@ -233,6 +233,7 @@ def _create_stop_monitor(config, alpaca, notifier=None, alpaca_clients_by_strate
         exit_spread_offset_factor=config.exit_spread_offset_factor,
         prefer_sl_leg_exit=config.prefer_sl_leg_exit,
         exit_ladder=config.exit_ladder_cfg,
+        exit_coverage_enabled=config.exit_coverage_enabled,
     )
     stop_monitor.start()
     mode = "REST polling (paper)" if use_polling else "WebSocket (live)"

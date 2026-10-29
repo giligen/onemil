@@ -1530,6 +1530,15 @@ class AlpacaClient:
                         getattr(o, 'filled_avg_price', None)),
                     'stop_price': _f(getattr(o, 'stop_price', None)),
                     'limit_price': _f(getattr(o, 'limit_price', None)),
+                    # exit-coverage invariant (2026-10-29): linked legs
+                    # (oco/bracket/oto) count once, not per leg
+                    'order_class': str(getattr(
+                        getattr(o, 'order_class', ''), 'value',
+                        getattr(o, 'order_class', '')) or ''),
+                    'type': str(getattr(
+                        getattr(o, 'order_type', getattr(o, 'type', '')),
+                        'value', getattr(o, 'order_type',
+                                         getattr(o, 'type', ''))) or ''),
                 })
             logger.debug(f"Open orders: {len(result)}")
             return result

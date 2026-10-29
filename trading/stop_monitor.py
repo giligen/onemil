@@ -30,6 +30,7 @@ import threading
 import time as time_mod
 import uuid as uuid_mod
 
+from trading import exit_coverage as _exit_coverage
 from trading import exit_qty_guard as _exit_qty_guard
 
 # Strategy -> client_order_id prefix, kept in sync with each engine's own `self.coid_prefix`
@@ -50,7 +51,7 @@ def _coid_prefix_for_strategy(strategy: str) -> str:
         return _COID_PREFIX_BY_STRATEGY[strategy]
     sanitized = ''.join(c if (c.isalnum() or c == '-') else '-' for c in str(strategy or 'unk'))[:12]
     return sanitized or 'unk'
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
@@ -199,6 +200,9 @@ class WatchEntry:
     scale_order_id: str = ''       # resting limit-sell id while working
     scale_in_flight: bool = False  # submission critical-section (short)
     scale_last_poll_ts: float = 0.0  # poll-mode fill-check throttle
+    # Exit-coverage invariant (2026-10-29): wall-clock creation time. The 60 s
+    # coverage loop skips a watch younger than 20 s (leg placement in flight).
+    added_at: float = field(default_factory=time_mod.time)
 
 
 @dataclass
@@ -577,6 +581,7 @@ class StopMonitor:
         exit_spread_offset_factor: float = 0.30,
         prefer_sl_leg_exit: bool = True,
         exit_ladder: Optional[Dict[str, Any]] = None,
+        exit_coverage_enabled: bool = True,
     ):
         """
         Initialize StopMonitor.
@@ -605,6 +610,15 @@ class StopMonitor:
         self._api_key = api_key
         self._api_secret = api_secret
         self._alpaca = alpaca_client
+        # Exit-coverage invariant (config: stop_monitor.exit_coverage_enabled,
+        # default True) — docs/exit_coverage_invariant_spec_20261029.md.
+        self._exit_coverage_enabled = bool(exit_coverage_enabled)
+        self._coverage_thread: Optional[threading.Thread] = None
+        self._coverage_last_repair: Dict[str, float] = {}
+        self._coverage_warned: set = set()
+        self._coverage_excess_warned: set = set()
+        self._coverage_cycle_no = 0
+        self._coverage_rotation_logged = False
         # Per-strategy order-execution routing. Empty dict = legacy single-client behavior.
         self._clients_by_strategy: Dict[str, AlpacaClient] = dict(alpaca_clients_by_strategy or {})
         self._marketable_limit_offset = marketable_limit_offset
@@ -725,6 +739,151 @@ class StopMonitor:
         self._thread.start()
         mode = "REST polling" if self._polling_mode else "WebSocket"
         logger.info(f"StopMonitor started ({mode}, daemon thread)")
+        self._start_exit_coverage_thread()
+
+    # =========================================================================
+    # Exit-coverage invariant (docs/exit_coverage_invariant_spec_20261029.md)
+    # =========================================================================
+
+    _EXIT_COVERAGE_PERIOD_S = 60.0
+    _EXIT_COVERAGE_FIRST_RUN_DELAY_S = 90.0
+    _EXIT_COVERAGE_MIN_WATCH_AGE_S = 20.0
+    _EXIT_COVERAGE_REPAIR_COOLDOWN_S = 120.0
+    _EXIT_COVERAGE_MAX_WATCHES = 60
+    _EXIT_COVERAGE_STUCK_EXIT_S = 300.0
+
+    def _start_exit_coverage_thread(self) -> None:
+        """Run `_exit_coverage_loop` on its own daemon thread (both WS and
+        REST-polling modes; independent of stream reconnects)."""
+        if not self._exit_coverage_enabled:
+            logger.info("StopMonitor: exit-coverage loop disabled "
+                        "(stop_monitor.exit_coverage_enabled=false)")
+            return
+        if self._coverage_thread is not None and self._coverage_thread.is_alive():
+            return
+        self._coverage_thread = threading.Thread(
+            target=lambda: asyncio.run(self._exit_coverage_loop()),
+            name="StopMonitor-ExitCoverage",
+            daemon=True,
+        )
+        self._coverage_thread.start()
+
+    async def _exit_coverage_loop(self) -> None:
+        """Every 60 s verify each watch has broker shares AND resting sells.
+
+        First run after `_EXIT_COVERAGE_FIRST_RUN_DELAY_S` (boot adoption).
+        Exits at once when disabled. Never dies: a failing cycle is logged.
+        """
+        if not self._exit_coverage_enabled:
+            return
+        loop = asyncio.get_running_loop()
+        delay = self._EXIT_COVERAGE_FIRST_RUN_DELAY_S
+        while self._running:
+            waited = 0.0
+            while self._running and waited < delay:
+                step = min(1.0, delay - waited)
+                await asyncio.sleep(step)
+                waited += step
+            if not self._running:
+                return
+            try:
+                await loop.run_in_executor(None, self._exit_coverage_cycle)
+            except Exception as e:
+                logger.warning(f"StopMonitor: exit-coverage cycle failed: {e}")
+            delay = self._EXIT_COVERAGE_PERIOD_S
+
+    def _coverage_skip(self, symbol: str, watch: "WatchEntry", now: float) -> bool:
+        """True when this watch must not be checked now (too young, or an
+        exit / scale-out / force-close sequence is in flight)."""
+        if now - float(getattr(watch, "added_at", 0.0) or 0.0) < self._EXIT_COVERAGE_MIN_WATCH_AGE_S:
+            return True
+        with self._exit_lock:
+            in_flight = self._exit_in_progress.get(symbol, False)
+            started = self._exit_started_at.get(symbol)
+        if in_flight and (started is None
+                          or now - started < self._EXIT_COVERAGE_STUCK_EXIT_S):
+            return True
+        return bool(getattr(watch, "exit_in_progress", False)) or bool(
+            getattr(watch, "scale_in_flight", False))
+
+    def _exit_coverage_cycle(self) -> Dict[str, int]:
+        """One pass of the invariant over all watches.
+
+        Reads each account once (positions + open orders), re-reads fresh
+        for a symbol that looks naked before acting, repairs with ONE plain
+        stop-sell per symbol (120 s cooldown). Per-watch exceptions are
+        WARNING and the cycle continues.
+
+        Returns: counts {'checked', 'naked', 'repaired'} (for tests / logs).
+        """
+        now = time_mod.time()
+        with self._watch_lock:
+            watches = sorted(self._watches.items(),
+                             key=lambda kv: getattr(kv[1], "added_at", 0.0))
+        cap = self._EXIT_COVERAGE_MAX_WATCHES
+        if len(watches) > cap:
+            if not self._coverage_rotation_logged:
+                logger.warning(
+                    f"EXIT COVERAGE: {len(watches)} watches > {cap}; checking "
+                    f"{cap} per cycle, rotating")
+                self._coverage_rotation_logged = True
+            start = (self._coverage_cycle_no * cap) % len(watches)
+            watches = (watches + watches)[start:start + cap]
+        self._coverage_cycle_no += 1
+
+        snaps: Dict[int, Any] = {}
+        checked = naked_n = repaired = 0
+        for symbol, watch in watches:
+            try:
+                if self._coverage_skip(symbol, watch, now):
+                    continue
+                client = self._client_for(watch.strategy)
+                snap = snaps.get(id(client))
+                if snap is None:
+                    snap = snaps[id(client)] = _exit_coverage.snapshot(client)
+                res = _exit_coverage.check(client, symbol, watch.shares, snap)
+                checked += 1
+                if res.broker_short_of_watch:
+                    if symbol not in self._coverage_warned:
+                        self._coverage_warned.add(symbol)
+                        logger.warning(
+                            f"EXIT COVERAGE: {symbol} broker qty "
+                            f"{res.position_qty:g} < watch qty {watch.shares}")
+                    continue
+                if res.excess_qty > 0 and symbol not in self._coverage_excess_warned:
+                    self._coverage_excess_warned.add(symbol)
+                    logger.warning(
+                        f"EXIT COVERAGE: {symbol} broker holds "
+                        f"{res.position_qty:g} sh, watch claims {watch.shares} "
+                        f"— excess {res.excess_qty:g} sh not ours, not touched")
+                if res.naked_qty <= 0:
+                    continue
+                # Confirm on a fresh read before acting (stale-snapshot guard).
+                res = _exit_coverage.check(client, symbol, watch.shares)
+                if res.naked_qty <= 0:
+                    continue
+                naked_n += 1
+                last = self._coverage_last_repair.get(symbol, 0.0)
+                if now - last < self._EXIT_COVERAGE_REPAIR_COOLDOWN_S:
+                    logger.debug(f"EXIT COVERAGE: {symbol} still naked "
+                                 f"{res.naked_qty:g} sh inside repair cooldown")
+                    continue
+                self._coverage_last_repair[symbol] = now
+                order_id = _exit_coverage.repair(
+                    client, watch, res,
+                    lambda sym, qty, px, _c=client: _c.submit_stop_sell_order(
+                        symbol=sym, qty=qty, stop_price=px))
+                if order_id:
+                    repaired += 1
+            except Exception as e:
+                logger.warning(f"EXIT COVERAGE: {symbol} check failed: {e}")
+        counts = {"checked": checked, "naked": naked_n, "repaired": repaired}
+        if naked_n:
+            logger.info(f"EXIT COVERAGE: {checked} watches checked, "
+                        f"{naked_n} naked, {repaired} repaired")
+        else:
+            logger.debug(f"EXIT COVERAGE: {checked} watches checked, 0 naked")
+        return counts
 
     def stop(self) -> None:
         """Gracefully shut down the WebSocket thread."""
