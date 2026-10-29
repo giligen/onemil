@@ -43,6 +43,7 @@ for _p in (ROOT, os.path.join(ROOT, 'scripts')):
         sys.path.insert(0, _p)
 
 from config import Config                                           # noqa: E402
+from monitoring.cron_guard import attach_telegram_error_handler, run_guarded  # noqa: E402
 from data_sources.alpaca_client import AlpacaClient, AlpacaAPIError   # noqa: E402
 from notifications.telegram_notifier import TelegramNotifier         # noqa: E402
 from tom_sleeve import assert_paper_account, _to_date                # noqa: E402  (shared paper guard)
@@ -1105,6 +1106,7 @@ def main() -> int:
     args = build_arg_parser().parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format='%(asctime)s %(levelname)s %(name)s: %(message)s')
+    attach_telegram_error_handler()   # non-crash ERRORs reach Telegram too
     cfg = Config()   # loads .env
     if args.live and args.equity_start is None:
         logger.error("momentum_sleeve: --live requires an explicit --equity-start (the slice, e.g. 10000)")
@@ -1135,4 +1137,4 @@ def main() -> int:
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    sys.exit(run_guarded(main, 'momentum_sleeve'))

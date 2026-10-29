@@ -714,6 +714,7 @@ def test_main_reconcile_flag_calls_reconcile_and_places_no_orders(monkeypatch, c
     monkeypatch.setattr(tom, 'reconcile_ledger', fake_reconcile)
     monkeypatch.setattr(tom, 'run', lambda *a, **k: pytest.fail('run() must not execute on --reconcile'))
     monkeypatch.setattr(sys, 'argv', ['tom_sleeve.py', '--reconcile'])
+    monkeypatch.setattr(tom, 'attach_telegram_error_handler', lambda: False)  # no real Telegram handler in tests
     assert tom.main() == 0
     assert calls == {'dry': False}
     fake_client.submit_moc_sell_order.assert_not_called()

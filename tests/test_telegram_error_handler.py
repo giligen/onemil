@@ -146,3 +146,36 @@ class TestDeduplication:
                 handler.emit(record)
             # First (count=1) + 10th (count=10) = 2 sends
             assert mock_send.call_count == 2
+
+
+def test_wait_for_sends_blocks_until_thread_finished_and_prunes():
+    """wait_for_sends returns only after the (patched, 0.2 s) sender thread has finished."""
+    import time
+    from unittest.mock import patch
+    from monitoring.telegram_error_handler import TelegramErrorHandler
+    with patch("monitoring.telegram_error_handler.TelegramNotifier"):
+        h = TelegramErrorHandler(bot_token="t", chat_id="1")
+    done = []
+    h._send_sync = lambda m: (time.sleep(0.2), done.append(m))
+    h._send_async("boom")
+    assert len(h._send_threads) == 1 and not done
+    h.wait_for_sends(5.0)
+    assert done == ["boom"] and h._send_threads == []
+
+
+def test_wait_for_sends_respects_timeout():
+    """A stuck sender does not block past the timeout."""
+    import time
+    import threading
+    from unittest.mock import patch
+    from monitoring.telegram_error_handler import TelegramErrorHandler
+    with patch("monitoring.telegram_error_handler.TelegramNotifier"):
+        h = TelegramErrorHandler(bot_token="t", chat_id="1")
+    stop = threading.Event()
+    h._send_sync = lambda m: stop.wait(5)
+    h._send_async("stuck")
+    t0 = time.monotonic()
+    h.wait_for_sends(0.2)
+    assert time.monotonic() - t0 < 1.5 and len(h._send_threads) == 1
+    stop.set()
+    h.wait_for_sends(2.0)

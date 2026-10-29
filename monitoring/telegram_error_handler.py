@@ -18,6 +18,7 @@ import asyncio
 import html
 import sys
 import threading
+import time
 import traceback
 from typing import Optional
 from datetime import datetime, timezone
@@ -63,6 +64,7 @@ class TelegramErrorHandler(logging.Handler):
 
         self.last_error: Optional[str] = None
         self.last_error_count: int = 0
+        self._send_threads: list = []   # live sender threads, joined by wait_for_sends()
 
         self.setFormatter(logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -136,6 +138,21 @@ class TelegramErrorHandler(logging.Handler):
                 daemon=True,
             )
             thread.start()
+            self._send_threads = [t for t in self._send_threads if t.is_alive()] + [thread]
+
+    def wait_for_sends(self, timeout: float = 10.0) -> None:
+        """Join every live sender thread, up to `timeout` seconds in total.
+
+        The sender threads are daemons, so a process that exits right after an ERROR (a crash) would kill the
+        Telegram send mid-flight; crash paths call this before re-raising.
+        """
+        deadline = time.monotonic() + timeout
+        for thread in list(self._send_threads):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            thread.join(remaining)
+        self._send_threads = [t for t in self._send_threads if t.is_alive()]
 
     def _send_sync(self, message: str) -> None:
         """Synchronous wrapper to send Telegram message from a thread."""

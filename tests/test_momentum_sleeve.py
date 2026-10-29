@@ -856,3 +856,4 @@ def test_gate_label_explicit_for_missing_and_stale_gate():
     info = dict(_info(0.2), date=date(2026, 9, 30))
     assert runner.gate_label(info, asof=date(2026, 10, 2)).startswith('gate STALE')
     assert runner.gate_label(info, asof=date(2026, 9, 30)) == 'gate ON (p20)'
+

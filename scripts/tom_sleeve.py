@@ -76,6 +76,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from config import Config                                          # noqa: E402
+from monitoring.cron_guard import attach_telegram_error_handler, run_guarded  # noqa: E402
 from data_sources.alpaca_client import AlpacaClient, AlpacaAPIError  # noqa: E402
 from notifications.telegram_notifier import TelegramNotifier        # noqa: E402
 
@@ -998,6 +999,7 @@ def main() -> int:
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                          format='%(asctime)s %(levelname)s %(name)s: %(message)s')
+    attach_telegram_error_handler()   # its logger.error lines reach Telegram
 
     cfg = Config()
     if not cfg.alpaca_orb_api_key or not cfg.alpaca_orb_api_secret:
@@ -1041,4 +1043,4 @@ def main() -> int:
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    sys.exit(run_guarded(main, 'tom_sleeve'))

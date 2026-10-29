@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, ROOT); os.chdir(ROOT)
+from monitoring.cron_guard import run_guarded  # noqa: E402
 
 from persistence.database import Database                       # noqa: E402
 from trading.hod_break import VP_CHECKPOINTS, OPEN_MINUTE       # noqa: E402
@@ -67,4 +68,4 @@ def main() -> int:
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    sys.exit(run_guarded(main, 'build_hod_volume_profile'))

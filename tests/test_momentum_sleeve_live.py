@@ -157,6 +157,7 @@ def test_live_paths_are_separate_files():
 def test_live_requires_explicit_equity_start(monkeypatch, caplog):
     monkeypatch.setattr(sys, 'argv', ['momentum_sleeve.py', '--live'])
     monkeypatch.setattr(runner, 'Config', lambda: MagicMock())
+    monkeypatch.setattr(runner, 'attach_telegram_error_handler', lambda: False)  # no real Telegram handler in tests
     monkeypatch.setattr(runner, 'AlpacaClient', lambda *a, **k: pytest.fail('no client without --equity-start'))
     assert runner.main() == 1 and '--equity-start' in caplog.text
 

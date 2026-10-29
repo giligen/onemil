@@ -33,6 +33,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+from monitoring.cron_guard import run_guarded  # noqa: E402
 from dotenv import load_dotenv
 load_dotenv(str(ROOT / '.env'))
 
@@ -275,4 +276,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    run_guarded(main, 'orb_selection_observer')

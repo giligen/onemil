@@ -43,6 +43,7 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+from monitoring.cron_guard import run_guarded  # noqa: E402
 os.chdir(ROOT)
 
 WINDOW_WEEKS = 26
@@ -145,4 +146,4 @@ def main() -> int:
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    sys.exit(run_guarded(main, 'orb_weekly_refit'))
