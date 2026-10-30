@@ -26,6 +26,13 @@ V3 **protect 14:00**: at 14:00, positions with open P&L ≥ +0.5 R move the stop
 keep the 2 R target; others unchanged.
 V4 **1.5 R target** from the start (same stop), the 1,723 item.
 
+## Amendment 1 (owner 2026-10-30, frozen before any variant number was read): "squeeze the exit — the closer to the
+bell, the less you should need"
+V5 **decaying target**: the target in R is a function of ET clock time: 2.0 R until 12:00, then LINEAR to 0.5 R at
+15:55 (floor 0.5 R); exit when a bar's high ≥ fill + target(t) × R (fill at that target); stop unchanged; 15:55 flat.
+V6 **decaying target, earlier and deeper**: 2.0 R until 11:00, then linear to 0.25 R at 15:55. Two schedules only, no
+sweep; the same pass bar. If a decaying target and a 14:00 variant both pass, the higher ex-top-5 % Δ ships.
+
 ## Scoring (paired, on the same fills)
 Δ = variant R − live-replay R per fill. Report pooled n, Δ mean, trade-clustered t, Δ ex-top-5 % (the paired-lift tail
 check), Δ winner-capped (+2 R), and the A/B halves (alternating trade dates). Also: number of fills the variant touches
