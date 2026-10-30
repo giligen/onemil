@@ -33,6 +33,16 @@ in `data/trades.db` — read a COPY: `/tmp/claude-1000/-home-ec2-user-onemil/257
   information" for causal filters at arm time (OFI, rank, catalyst, extension model all ≈ 0 after cost); the +0.3 R
   "fill filter" of cell 1,427 was a sparse-bar artefact; stop slip measured 35 bps mean on the tape (cell 1,443).
 
+* **Cell 1,728 (Opus dig, 10/30 late): there is NO live-vs-BT gap.** Measured from the level, the BT gross is +0.072 R
+  (TRAIN-H2) / +0.061 R (VAL) vs live +0.075 R (95 % CI −0.09..+0.24); both ≈ −0.026 R net at measured cost. The old
+  "+0.2 R gap" was cell 1,438's banded cost (0.20–0.24 R/fill) plus ≈ 0.04 R from the 0.75–1.5 % R bucket that the
+  9,911-fill population has and the 5,506 lacks. **Parity defect:** the research twin (`research/hod_entry/causal_arming.py`
+  l.81) rejects arms with R_pct = (trigger − stop)/trigger < min_r_pct (1.5 %) or trigger < min_price; the live arm
+  (`trading/hod_break.py`) has neither gate → 82 of 231 live fills have R_pct < 1.5 % (down to 0.24 %) and they are the
+  only net-positive live cohort (< 0.75 %: n 29 +0.105 R; 0.75–1.5 %: n 53 +0.090 R; 1.5–3 %: n 102 −0.066; ≥ 3 %: n 47
+  −0.078). Live fills sit at LOWER ATR % and lower prior-day return than the BT (where the BT earns less, not more); the
+  4/12 caps change nothing on the BT. `RESULT_1728.md`. Open: PREREG_1729 (tight-R cohort, TEST read once).
+
 ## Data quirks that have already bitten
 Alpaca 1-min bars have NO bar for a minute without a trade (thin names: 82 % minute coverage; losers thinner) — treat
 no-trade minutes as flat, not missing. The live 2 R target CENSORS any "does it keep rising" measurement — use the raw
