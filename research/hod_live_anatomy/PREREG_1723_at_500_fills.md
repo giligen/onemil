@@ -13,3 +13,5 @@ Written NOW so the questions are not post hoc when the data arrives. No number i
 4. Cost floor: with entry quotes recorded (hardening item), per-fill spread cost vs slip; state how much of the 0.10 R is
    the quoted spread (irreducible for a chase entry) and how much is beyond it.
 No other variants. A/B bar as in 1,721. Everything else is a new PREREG.
+
+5. Runner-vs-fader at 14:00: the two pre-stated hold rules of PREREG_1725.md (near-the-high; momentum-intact), at its pass bar.
