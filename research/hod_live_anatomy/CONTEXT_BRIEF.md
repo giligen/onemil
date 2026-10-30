@@ -41,7 +41,13 @@ in `data/trades.db` — read a COPY: `/tmp/claude-1000/-home-ec2-user-onemil/257
   (`trading/hod_break.py`) has neither gate → 82 of 231 live fills have R_pct < 1.5 % (down to 0.24 %) and they are the
   only net-positive live cohort (< 0.75 %: n 29 +0.105 R; 0.75–1.5 %: n 53 +0.090 R; 1.5–3 %: n 102 −0.066; ≥ 3 %: n 47
   −0.078). Live fills sit at LOWER ATR % and lower prior-day return than the BT (where the BT earns less, not more); the
-  4/12 caps change nothing on the BT. `RESULT_1728.md`. Open: PREREG_1729 (tight-R cohort, TEST read once).
+  4/12 caps change nothing on the BT. `RESULT_1728.md`.
+* **Cell 1,729: the tight-R cohort is NOISE.** On the 9,911-fill population (`causal_arming_causal.csv`, floor 0.75 %)
+  R_pct 0.75–1.5 % is −0.088 R (TRAIN-H2, n 2,219) / −0.097 R (VAL, n 2,542), day-clustered t −3.3, ex-top-5 % −0.21,
+  worse than the complement (−0.008 / −0.020); as a book 19–27 % green weeks vs a 32–40 % random null. Live +0.064 R on
+  82 fills, CI [−0.33, +0.45]. TEST not read. → the twin's gate goes live (`docs/hod_arm_gate_parity_spec_20261030.md`).
+  Running tally of HOD cells on the live book tonight: 1,721–1,729 (9 cells, 13 filter cuts, 10 exit variants, 2 tells,
+  3 execution levers, 1 add-on, 1 cohort) — every one inside noise of the live rule or negative.
 
 ## Data quirks that have already bitten
 Alpaca 1-min bars have NO bar for a minute without a trade (thin names: 82 % minute coverage; losers thinner) — treat
