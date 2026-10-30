@@ -127,6 +127,18 @@ def arm_state(o: Sequence[float], h: Sequence[float], l: Sequence[float], v: Seq
     return dict(level=level, trigger=trigger, limit=round(level * (1.0 + p.entry_limit_pct), 6), stop=stop)
 
 
+def arm_gate_reject(trigger: float, stop: float, min_price: float, min_r_pct: float) -> Optional[str]:
+    """THE arm admission gate, ONE copy for the live engine and the research twin
+    (research/hod_entry/causal_arming.py; docs/hod_arm_gate_parity_spec_20261030.md, cell 1,729). Returns None to
+    arm, else 'price' (trigger < min_price) or 'r_pct' (stop distance (trigger - stop) / trigger x 100 <
+    min_r_pct). Both comparisons are strict '<', so a trigger exactly at the floor / an R exactly at the minimum arms."""
+    if trigger < min_price:
+        return 'price'
+    if (trigger - stop) / trigger * 100.0 < min_r_pct:
+        return 'r_pct'
+    return None
+
+
 def resting_entry_fill(ask: float, arm: dict) -> Optional[float]:
     """Fill for a resting buy-stop-limit once a print/bar reaches `arm['trigger']`: the ask if it is at or
     under `arm['limit']`, else no fill (no chase — the order simply keeps resting/re-arming)."""

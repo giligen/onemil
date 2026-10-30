@@ -39,7 +39,7 @@ import sip_rebuild as sr  # noqa: E402
 
 ROOT = sr.ROOT
 sys.path.insert(0, ROOT)
-from trading.hod_break import HodBreakParams, consolidation_low, rv_profile  # noqa: E402
+from trading.hod_break import HodBreakParams, arm_gate_reject, consolidation_low, rv_profile  # noqa: E402
 
 UNIVERSE_CSV = os.path.join(ROOT, 'research/bf_zero/universe.csv')
 NBBO_CSV = os.path.join(ROOT, 'research/bf_zero/causal_filter/nbbo.csv')
@@ -78,7 +78,7 @@ def arm_state(o, h, l, v, m, j, adv20, p, floor, use_rv=True):
         if not (p.rv_lo <= rv < p.rv_hi):
             return None
     trigger = round(level + sr.TICK, 6)
-    if trigger < floor or (trigger - stop) / trigger * 100.0 < p.min_r_pct:
+    if arm_gate_reject(trigger, stop, floor, p.min_r_pct) is not None:   # ONE gate, shared with the live engine
         return None
     return dict(level=level, trigger=trigger, limit=level * (1.0 + sr.LIMIT_BPS), stop=stop)
 

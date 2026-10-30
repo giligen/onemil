@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
-from trading.hod_break import (ARM_FEATURE_COLUMNS, HodBreakParams, arm_features, arm_state, detect,
+from trading.hod_break import (ARM_FEATURE_COLUMNS, HodBreakParams, arm_features, arm_gate_reject, arm_state, detect,
                                 resting_entry_fill, resting_order_qty, shares_for, OPEN_MINUTE)
 from trading.red_to_green import RedToGreenParams, detect as r2g_detect, prior_day_range_pct
 from trading.hod_failure_short import (FailureShortConfig, ledger_row as fs_ledger_row,
@@ -333,6 +333,8 @@ class HodBreakEngine:
         self.live_parity_ledger_path = str(cfg.get('live_parity_ledger_path', DEFAULT_LIVE_PARITY_LEDGER_PATH))
         self.live_orders_state_path = str(cfg.get('live_orders_state_path', DEFAULT_LIVE_ORDERS_STATE_PATH))
         self._live_cap_slots: set = set()
+        self._arm_skip_logged: set = set()  # (sym, trigger, stop) already logged/counted at 'ARM SKIP' this session — one line per distinct skipped arm
+        self.arm_gate_skips: dict = {'price': 0, 'r_pct': 0}   # daily arm-gate stats (docs/hod_arm_gate_parity_spec_20261030.md), reset in _roll_session
         self._cap_logged: set = set()      # symbols already logged at 'LIVE cap reached' this session — dedup (9/25: was a WARNING every bar)
         self._sizing_logged: set = set()   # symbols already logged for which resting_order_qty cap bound, this session (9/25)
         self._bp_cache_value: Optional[float] = None   # cached account buying power for the resting-notional guard (_buying_power_cached)
@@ -421,7 +423,7 @@ class HodBreakEngine:
             self.session_date = today; self.candidates.clear(); self.entered_today.clear(); self.daily_pnl = 0.0
             self.live_since = None
             self._kill_notified.clear(); self._flattened = False; self._post_close_fc_warned = False
-            self._live_cap_slots.clear(); self._cap_logged.clear(); self._sizing_logged.clear(); self._bp_cache_value = None; self._bp_cache_ts = 0.0
+            self._live_cap_slots.clear(); self._cap_logged.clear(); self._arm_skip_logged.clear(); self.arm_gate_skips = {'price': 0, 'r_pct': 0}; self._sizing_logged.clear(); self._bp_cache_value = None; self._bp_cache_ts = 0.0
             self._live_cancel_swept_entry = False; self._live_cancel_swept_flat = False
             self._live_armed_stops.clear(); self._rail_cancel_done.clear(); self._rail_fail_counts.clear()
             self._warn_ts.clear(); self._fc_unknown.clear()
@@ -993,6 +995,8 @@ class HodBreakEngine:
                 break
             new_arm = arm_state(o, h, l, v, m, j, cand.adv20, p)
             if new_arm is not None:
+                new_arm = self._apply_arm_gate(sym, new_arm, p)
+            if new_arm is not None:
                 # bar_volume = the arming bar's own volume (v[j]) — resting_order_qty's 25%-of-prior-bar-volume
                 # liquidity cap on the LIVE order size (docs/hod_live_resting_orders_spec_20260925.md item 1);
                 # unused by the tape/dry path, only read by _arm_live_order via resting_order_qty.
@@ -1019,6 +1023,25 @@ class HodBreakEngine:
                     self.stop_monitor.unsubscribe([sym])
             except Exception as e:
                 logger.error(f"{self.tag} {sym}: print-watch subscribe/unsubscribe failed: {e}")
+
+    def _apply_arm_gate(self, sym: str, arm: dict, p: HodBreakParams) -> Optional[dict]:
+        """The arm admission gate (`trading.hod_break.arm_gate_reject`, shared with the research twin
+        research/hod_entry/causal_arming.py — docs/hod_arm_gate_parity_spec_20261030.md, cell 1,729): trigger under
+        `self.min_price`, or stop distance under `p.min_r_pct` of the trigger -> do NOT arm (no dry row, no live
+        order). Returns the arm, or None when gated. One INFO line + one counter tick per distinct skipped arm."""
+        why = arm_gate_reject(arm['trigger'], arm['stop'], self.min_price, p.min_r_pct)
+        if why is None:
+            return arm
+        key = (sym, round(arm['trigger'], 4), round(arm['stop'], 4))
+        if key not in self._arm_skip_logged:
+            self._arm_skip_logged.add(key)
+            self.arm_gate_skips[why] += 1
+            if why == 'price':
+                logger.info(f"{self.tag} ARM SKIP {sym}: trigger {arm['trigger']:.2f} < min_price {self.min_price:.2f}")
+            else:
+                r_pct = (arm['trigger'] - arm['stop']) / arm['trigger'] * 100.0
+                logger.info(f"{self.tag} ARM SKIP {sym}: r_pct={r_pct:.2f}% < {p.min_r_pct}%")
+        return None
 
     def _append_dry_ledger(self, cand: Candidate, arm: dict, cross_ts, ask: float, filled: bool,
                             fill_px: Optional[float], tape_accurate: bool, live: bool = True,
