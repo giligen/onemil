@@ -457,7 +457,8 @@ def sleeve_section(day: str, client=None, ledger_path=LEDGER, weekly_path=WEEKLY
 # ---------------------------------------------------------------- engine log source
 ENGINE_LINE_PATTERNS = ("SCORED", "PICK", "VETO", "TILT", "submit_entry failed", "submit returned empty",
                         "Engine tick TIMEOUT", "GAP_GATE", "| ERROR", "WINNER STACK",
-                        "PREPLACE", "range complete", "Q1 filter")   # last three: the why-not-ordered explanation
+                        "PREPLACE", "range complete", "Q1 filter",   # PREPLACE..Q1: the why-not-ordered explanation
+                        "ENTRY SUBMITTED")   # preplaced names are ordered with no SCORED line (10/29 CORD, IREZ)
 JOURNAL_TIMEOUT_S = 60
 
 
@@ -623,6 +624,17 @@ def parse_orb_log(text: str) -> Dict:
         m = re.search(r"GAP_GATE (\S+) .*gap_pct=([-\d.]+)", ln)
         if m:
             notes.setdefault("gap:" + m.group(1), f"gap {m.group(2)}%")
+    preplace_ranked, submitted = set(), set()
+    for ln in lines:
+        m = re.search(r"PREPLACE\] provisional top-\d+ @ \S+ ET: (.*)$", ln)
+        if m:
+            preplace_ranked.update(re.findall(r"([A-Z][A-Z0-9.]*)\(", m.group(1)))
+        m = re.search(r"PREPLACE\] reconcile final top-\d+ of \d+ ranked: \[(.*?)\]", ln)
+        if m:
+            preplace_ranked.update(re.findall(r"'([A-Z][A-Z0-9.]*)'", m.group(1)))
+        m = re.search(r"ORB ENTRY SUBMITTED: ([A-Z][A-Z0-9.]*)", ln)
+        if m:
+            submitted.add(m.group(1))
     boots = []
     for ln in lines:
         if "WINNER STACK" in ln:
@@ -632,6 +644,7 @@ def parse_orb_log(text: str) -> Dict:
     return {"scored": sorted(scored), "late": sorted(late - scored), "boots": boots, "addon": sorted(addon - scored),
             "detail": detail, "first_et": first_et[:5] if first_et else None,
             "scored_any": scored_any, "range_done": range_done, "preplace": preplace, "notes": notes,
+            "preplace_ranked": sorted(preplace_ranked), "submitted": sorted(submitted),
             "p1_scored": sorted(p1_scored), "p1_detail": p1_detail,
             "timeouts": sum("Engine tick TIMEOUT" in ln for ln in lines),
             "gap_warn": sum("GAP_GATE" in ln and "| WARNING" in ln for ln in lines),
@@ -770,6 +783,8 @@ def why_not_ordered(sym: str, parsed: Dict, bt_rank: Optional[Dict]) -> str:
     from and whether the symbol's opening range completed AFTER that snapshot (10/5 DFDV: range complete 09:35:02,
     provisional top-2 taken 09:34:57 = JAGX, CRCG; both submits failed, no refill). Not scored: the log reason
     (PDR veto, Q1 filter, gap) or an explicit `no admission/veto line` statement."""
+    if sym in parsed.get("submitted", ()):
+        return ""   # the engine DID order it (ORB ENTRY SUBMITTED): there is nothing to explain
     parts: List[str] = []
     eng = parsed.get("scored_any", {}).get(sym)
     bt = (bt_rank or {}).get("comp", {}).get(sym)
@@ -833,7 +848,10 @@ def orb_parity_lines(day: str, engine_rows: List[Dict], parsed: Dict, bt_rows: O
     first = parsed.get("first_et")
     late_flag = f" | late decision ({first} ET)" if first and first > LATE_AFTER_ET else ""
     top = engine_top_n(parsed, bt_rank["n"]) if bt_rank else None
-    eng = set(top) if top is not None else eng_scored
+    # PREPLACE names are ranked/ordered without a SCORED line (provisional top-N, reconcile final top-N, ENTRY SUBMITTED)
+    preplaced = set(parsed.get("preplace_ranked", ())) | set(parsed.get("submitted", ()))
+    eng_scored = eng_scored | preplaced
+    eng = (set(top) if top is not None else eng_scored) | preplaced
     if bt_rank is None:
         lines.append(f"ORB ranked: engine {len(eng)} vs {no_data('BT ranked', rank_why)}")
         m["why"] = "BT ranked set NO-DATA (neutral)"
@@ -859,7 +877,9 @@ def orb_parity_lines(day: str, engine_rows: List[Dict], parsed: Dict, bt_rows: O
         if traded != bt_picks:
             reasons.append("picks != BT")
         for sym in sorted((bt_picks - traded) | (bt - eng))[:4]:   # BT names the engine never ordered / ranked
-            lines.append(why_not_ordered(sym, parsed, bt_rank))
+            why_line = why_not_ordered(sym, parsed, bt_rank)
+            if why_line:
+                lines.append(why_line)
         filled = [r for r in engine_rows if r.get("fill_price")]
         diffs = []
         if bt_rows:

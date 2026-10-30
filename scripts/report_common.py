@@ -192,6 +192,24 @@ def read_selection_audit(day: str) -> List[Dict]:
 # The daily verdict
 # ---------------------------------------------------------------------------
 
+def unfilled_bt_filled_symbols(rows: List[Dict], bt_filled_syms: set) -> List[str]:
+    """BT-FILLED ORB symbols that live ordered but never filled (fill-parity subjects).
+
+    A symbol is FILLED when ANY of its ORB rows has a `fill_price` or a status in ('filled', 'closed'): the preplace
+    path writes a provisional row per symbol (pending_new -> preplace_canceled / stale_closed) and then a SECOND row
+    for the re-placed order that fills (10/27 NEBX, CRDU, OKLL; 10/29 CORD, IREZ falsely froze the ramp). Only
+    symbols that have ORB rows and NO filled row are unfilled (7/30 IREX: one time_stop_canceled row)."""
+    filled: set = set()
+    seen: set = set()
+    for r in rows:
+        if r.get('strategy') != 'orb' or r['symbol'] not in bt_filled_syms:
+            continue
+        seen.add(r['symbol'])
+        if r.get('fill_price') is not None or r.get('order_status') in ('filled', 'closed'):
+            filled.add(r['symbol'])
+    return sorted(seen - filled)
+
+
 def green_verdict(day: str) -> Dict:
     """Compute the operational-green verdict for one trading day.
 
@@ -283,11 +301,7 @@ def green_verdict(day: str) -> Dict:
     if bt_stale:
         checks['fill_parity'] = 'SKIPPED — BT data stale'
     else:
-        unfilled = sorted({
-            r['symbol'] for r in rows
-            if r.get('strategy') == 'orb' and r['symbol'] in bt_filled_syms
-            and r.get('fill_price') is None
-            and r.get('order_status') not in ('filled', 'closed')})
+        unfilled = unfilled_bt_filled_symbols(rows, bt_filled_syms)
         checks['fill_parity'] = ('OK' if not unfilled else
                                  f"BT filled, live unfilled: {unfilled}")
         if unfilled:

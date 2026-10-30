@@ -189,15 +189,69 @@ def journal_error_count(service: str, since: str, timeout: int = 90) -> str:
         return "(journal check failed)"
 
 
+TRADER_UNIT, MACD_UNIT = "onemil-trader", "onemil-macd-wave"
+TRADER_WINDOW_UTC = ((12, 35), (19, 55))   # cron start 12:30 / stop-at-close 20:00 UTC; the band the unit must be up
+
+
+def _utc_now() -> dt.datetime:
+    """Current UTC time (a seam for tests)."""
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def unit_installed(unit: str) -> bool:
+    """True when `systemctl cat <unit>` succeeds (a unit file exists on this node).
+
+    A non-zero exit is the expected answer for a unit that was never installed (onemil-macd-wave, decision 9/24); an
+    exception running systemctl is logged as a WARNING and treated as not installed."""
+    try:
+        r = subprocess.run(["systemctl", "cat", unit], capture_output=True, text=True, timeout=20)
+        return r.returncode == 0
+    except Exception as e:  # noqa: BLE001
+        log.warning("systemctl cat %s failed (%s) - treating the unit as not installed", unit, e)
+        return False
+
+
+def in_trader_window(now_utc: dt.datetime) -> bool:
+    """True on a weekday between 12:35 and 19:55 UTC, when `onemil-trader` must be running."""
+    if now_utc.weekday() >= 5:
+        return False
+    hm = (now_utc.hour, now_utc.minute)
+    return TRADER_WINDOW_UTC[0] <= hm <= TRADER_WINDOW_UTC[1]
+
+
+def service_status_flags(now_utc: dt.datetime, active_fn=None, installed_fn=None) -> tuple:
+    """(flags, bad) for the hygiene line. The trader exits at the 16:00 ET close by design, so it is NOT ACTIVE only
+    inside `in_trader_window`, else `exited-at-close (expected)`; a unit without a unit file (macd-wave) prints
+    `not-installed` and is never counted as bad."""
+    active_fn = active_fn or (lambda u: run(["systemctl", "is-active", u], timeout=20))
+    installed_fn = installed_fn or unit_installed
+    flags: List[str] = []
+    bad: List[str] = []
+    state = active_fn(TRADER_UNIT)
+    if state == "active":
+        flags.append(f"{TRADER_UNIT}=active")
+    elif in_trader_window(now_utc):
+        flags.append(f"{TRADER_UNIT}={state}")
+        bad.append(TRADER_UNIT)
+    else:
+        flags.append(f"{TRADER_UNIT}=exited-at-close (expected)")
+    if not installed_fn(MACD_UNIT):
+        flags.append(f"{MACD_UNIT}=not-installed")
+    else:
+        state = active_fn(MACD_UNIT)
+        flags.append(f"{MACD_UNIT}={state}")
+        if state != "active":
+            bad.append(MACD_UNIT)
+    return flags, bad
+
+
 def hygiene_section() -> str:
     """Services, journal errors today, pre-boot test result, disk."""
-    svc = {s: run(["systemctl", "is-active", s], timeout=20) for s in ("onemil-trader", "onemil-macd-wave")}
+    flags, bad = service_status_flags(_utc_now())
     since = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d") + " 12:00:00"
     err = journal_error_count("onemil-trader", since)
     preboot = last_matching_line(ROOT / "logs/preboot_tests.log", ("passed", "failed", "error"))
     disk = shutil.disk_usage("/")
-    flags = [f"{k}={v}" for k, v in svc.items()]
-    bad = [k for k, v in svc.items() if v != "active"]
     return ("HYGIENE:\n  services " + ", ".join(flags) + (f"  <-- NOT ACTIVE: {bad}" if bad else "")
             + f"\n  trader journal ERROR/Traceback lines today: {err}\n  pre-boot tests: {preboot[-120:]}"
             + f"\n  disk free {disk.free / 1e9:.1f} GB")
