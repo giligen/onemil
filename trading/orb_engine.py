@@ -7669,10 +7669,38 @@ class ORBEngine:
         canceled = self.daily_n_time_stop_canceled
         fill_rate = (filled / placed) if placed else 0.0
 
+        # 2026-10-30: the headline P&L is the LEDGER's (closed ORB rows for
+        # today), not the in-memory counter — on 10/29 the Telegram said -$228
+        # while the ledger closed at -$163 (force-close exit never reached
+        # self.daily_pnl). In-memory is appended only when it drifts.
+        pnl_text = f"${self.daily_pnl:+,.0f}"
+        try:
+            today_et = self._et_now().strftime('%Y-%m-%d')
+            rows = self.db.get_trades_by_date(today_et) or []
+            closed = [r for r in rows
+                      if r.get('strategy') == STRATEGY_NAME
+                      and str(r.get('trade_date'))[:10] == today_et  # DB hands back a date
+                      and r.get('pnl') is not None]
+            ledger_pnl = sum(float(r['pnl']) for r in closed)
+            ledger_exits = len(closed)
+            pnl_text = f"${ledger_pnl:+,.0f} ({ledger_exits} exits)"
+            if abs(ledger_pnl - self.daily_pnl) > 1.0:
+                pnl_text += f" | in-memory ${self.daily_pnl:+,.0f}"
+                logger.warning(
+                    f"ORB DAILY: ledger/in-memory P&L drift — ledger "
+                    f"${ledger_pnl:+,.2f} ({ledger_exits} exits) vs in-memory "
+                    f"${self.daily_pnl:+,.2f}"
+                )
+        except Exception as e:
+            logger.warning(
+                f"ORB DAILY: ledger P&L read failed ({e}) — falling back to "
+                f"in-memory daily_pnl ${self.daily_pnl:+,.2f}"
+            )
+
         summary = (
             f"{self.tg_prefix} DAILY: "
             f"placed={placed} filled={filled} canceled={canceled} "
-            f"fill_rate={fill_rate:.0%} P&L=${self.daily_pnl:+,.0f}"
+            f"fill_rate={fill_rate:.0%} P&L={pnl_text}"
         )
         logger.info(f"ORB DAILY REPORT: {summary}")
 
@@ -8812,6 +8840,8 @@ class ORBEngine:
                 continue  # not actually filled
             if t.get('exit_price') is not None:
                 continue  # already updated by stream watcher
+            if t.get('pnl') is not None:
+                continue  # pnl already booked (never double-count daily_pnl)
             db_by_sym[sym] = t
 
         for sym in symbols:
@@ -8882,6 +8912,15 @@ class ORBEngine:
                 logger.info(
                     f"FC DB SYNC: {sym} updated exit=${exit_price:.2f} "
                     f"pnl=${pnl:+,.0f} (order={str(sell.id)[:8]})"
+                )
+                # 2026-10-30: the StopMonitor exit path adds to daily_pnl;
+                # this path did not (10/29 AXTQ +$65 missing from the report
+                # and from the day-kill tripwire). Booked once: rows with a
+                # pnl already set are skipped above.
+                self.daily_pnl += pnl
+                logger.info(
+                    f"ORB FC SYNC: {sym} pnl=${pnl:+,.2f} booked → "
+                    f"daily_pnl=${self.daily_pnl:+,.2f}"
                 )
                 # 2026-09-30 fix: dedicated greppable tag (the 9/29 AXTL
                 # force-close trigger had NO tag any "force"-grep could find,
