@@ -5,7 +5,9 @@ Frozen before any number. Rejection-only Stage 1 on free data already on disk. N
 ## The published claim
 QLD (2× QQQ) long-only, 30-min bars, tested Jan 2025 → Oct 29 2026 (one bull leg; QLD B&H +105 %): strategy +127 %,
 62 % winners, avg +1.24 %/trade, max DD −12.3 %, RR 2.23. Entry (all of): 30-min close > highest high of the prior
-30 bars; bar volume ≥ 20-bar SMA volume; close > open. Exit: after 16 bars if PnL < +0.5 %, else after 60 bars.
+30 bars (`RANGE(30,bars).high (1 candle ago)`); bar volume ≥ 20-bar SMA volume **by at least 75 %, i.e. volume ≥ 1.75 ×
+SMA20** (Amendment 1, 2026-10-30 20:59, from the owner's second screenshot which completed the truncated text — the
+published rule, not a fit; frozen before any number was read); close > open. Exit: after 16 bars if PnL < +0.5 %, else after 60 bars.
 No stop. "Trade by: open" = fill at the NEXT 30-min bar's open.
 
 ## Our prior
