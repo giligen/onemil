@@ -15,3 +15,5 @@ Written NOW so the questions are not post hoc when the data arrives. No number i
 No other variants. A/B bar as in 1,721. Everything else is a new PREREG.
 
 5. Runner-vs-fader at 14:00: the two pre-stated hold rules of PREREG_1725.md (near-the-high; momentum-intact), at its pass bar.
+
+6. Cell 1,726 items at the larger n: passive squeeze A1/A2 and passive EOD A3 (cost lever, bar +0.02 R pooled with the live flat charged 12 bps), the uncensored 14:00->15:55 path of the R1 hold side, the B1 double-down leg (bar +0.10 R add-leg, both halves), and gate (C) for a dedicated 14:00 runner scan (>= +30 bps net in both halves).
