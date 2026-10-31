@@ -48,6 +48,14 @@ in `data/trades.db` — read a COPY: `/tmp/claude-1000/-home-ec2-user-onemil/257
   82 fills, CI [−0.33, +0.45]. TEST not read. → the twin's gate goes live (`docs/hod_arm_gate_parity_spec_20261030.md`).
   Running tally of HOD cells on the live book tonight: 1,721–1,729 (9 cells, 13 filter cuts, 10 exit variants, 2 tells,
   3 execution levers, 1 add-on, 1 cohort) — every one inside noise of the live rule or negative.
+* **Cell 1,730 (10/31): the entry-cap ladder FAILS — cap stays +15 bps** (`entry_limit_pct`; `config.yaml cap` 60
+  bps is the legacy next_open cap only). Fill at the trigger-bar open: 81 % of BT signals open at/below the level, so a
+  cap touches only 19 %. Paired Δ vs 15 (5,417 fills): c 0/5/10 = +0.009/+0.014/+0.007 (TRAIN-H2), +0.023/+0.005/+0.001
+  (VAL), best t 1.9, bar +0.03 R (MDE ≈ 0.03 R at c 5); looser caps negative (c 50 TRAIN-H2 −0.009, t −2.9; first-crossing
+  population c ∞ −0.034/−0.015). BT gross at the level is FLAT across NBBO-ask slip buckets — the live ≤ 5 bps +0.13 R is
+  cost + noise. 53–72 % of declined breaks retrace to the tighter limit inside the minute (a live cap would retrace-fill
+  them). Next pointers: causal break volume vs consolidation (thin breaks −0.09 R in both splits, v_T leaks), retrace-fill
+  adverse selection, spread-scaled limit. `RESULT_1730.md`, `ladder_1730.csv`, `cache/opens_1730.parquet`.
 
 ## Data quirks that have already bitten
 Alpaca 1-min bars have NO bar for a minute without a trade (thin names: 82 % minute coverage; losers thinner) — treat

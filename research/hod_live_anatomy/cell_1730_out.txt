@@ -1,0 +1,94 @@
+==== cell 1,730 run 2026-10-31 10:15:03
+[A] 5506 BT fills; join misses 0; stop agreement |1663 - 1438| < 1c: 1.000
+[B] 11921 symbol-days with an armed crossing (fill 9911, nofill 2010); adv20 missing 0
+[params] floor(min_price)=20.0 min_r_pct=1.5 last_entry_minute=840
+[cache] resume: 11921 symbol-days already cached
+[cache] nothing to fetch
+[weeks] {'TRAIN-H2': 27, 'VAL': 22}
+[A] crossings recovered 5417 of 5506 (dropped from every rung: 89); d==0 80.9%, d>15 1.4%
+[A] walk check vs 1663: corr gross 0.984, mean mine +0.063 vs 1663 gross +0.037 (1663 is on the fill-price R basis), entry - 1663 entry median -4.4 bps
+[B] crossings 36184 on 8462 symbol-days; B1 signals 8462; d>15 15.0%
+L1 ladder:
+pop    split  cap    n  fills_wk   net  gross  R_wk     t    ex5  capped  halfA  halfB  delta  delta_t  delta_ex5     dA     dB  persig_t
+  A TRAIN-H2  0.0 1841    68.185 0.046  0.085 3.157 0.844 -0.058   0.046  0.133 -0.036  0.009    0.677      0.012  0.037 -0.018    -0.005
+  A TRAIN-H2  5.0 2057    76.185 0.052  0.091 3.958 0.970 -0.052   0.051  0.129 -0.021  0.014    1.483      0.018  0.033 -0.003     0.924
+  A TRAIN-H2 10.0 2181    80.778 0.044  0.084 3.562 0.854 -0.062   0.042  0.107 -0.016  0.007    0.860      0.007  0.011  0.002     0.589
+  A TRAIN-H2 15.0 2273    84.185 0.038  0.077 3.163 0.710 -0.069   0.035  0.096 -0.018    NaN      NaN        NaN    NaN    NaN       NaN
+  A TRAIN-H2 25.0 2295    85.000 0.033  0.073 2.815 0.623 -0.074   0.030  0.093 -0.024 -0.004   -1.623     -0.005 -0.003 -0.006    -1.467
+  A TRAIN-H2 50.0 2309    85.519 0.028  0.068 2.430 0.533 -0.080   0.025  0.088 -0.028 -0.009   -2.879     -0.010 -0.008 -0.010    -2.602
+  A TRAIN-H2  inf 2312    85.630 0.032  0.071 2.718 0.591 -0.077   0.027  0.090 -0.024 -0.006   -1.484     -0.008 -0.006 -0.006    -1.257
+  A      VAL  0.0 2541   115.500 0.040  0.080 4.563 0.752 -0.064   0.040  0.102 -0.035  0.023    1.938      0.027  0.035  0.011     1.160
+  A      VAL  5.0 2777   126.227 0.021  0.061 2.637 0.392 -0.084   0.020  0.078 -0.048  0.005    0.571      0.008  0.010 -0.001     0.311
+  A      VAL 10.0 2966   134.818 0.017  0.058 2.313 0.324 -0.090   0.015  0.065 -0.041  0.001    0.212      0.002 -0.002  0.006     0.093
+  A      VAL 15.0 3068   139.455 0.016  0.057 2.251 0.307 -0.092   0.013  0.068 -0.046    NaN      NaN        NaN    NaN    NaN       NaN
+  A      VAL 25.0 3083   140.136 0.016  0.057 2.283 0.310 -0.092   0.013  0.069 -0.048  0.000    0.093     -0.000  0.001 -0.001     0.140
+  A      VAL 50.0 3104   141.091 0.016  0.056 2.234 0.303 -0.093   0.012  0.069 -0.048 -0.000   -0.106     -0.001  0.001 -0.002    -0.041
+  A      VAL  inf 3105   141.136 0.015  0.056 2.173 0.295 -0.094   0.012  0.069 -0.049 -0.001   -0.249     -0.002  0.001 -0.003    -0.184
+ B1 TRAIN-H2  0.0 2551    94.481 0.042  0.082 3.922 0.917 -0.062   0.042  0.084 -0.001  0.002    0.198      0.006  0.012 -0.008    -0.446
+ B1 TRAIN-H2  5.0 2805   103.889 0.045  0.085 4.626 0.995 -0.060   0.044  0.085  0.003  0.005    0.623      0.008  0.013 -0.003     0.096
+ B1 TRAIN-H2 10.0 2969   109.963 0.046  0.087 5.080 1.055 -0.059   0.044  0.084  0.008  0.007    1.142      0.008  0.012  0.002     0.777
+ B1 TRAIN-H2 15.0 3113   115.296 0.039  0.081 4.531 0.904 -0.067   0.036  0.072  0.007    NaN      NaN        NaN    NaN    NaN       NaN
+ B1 TRAIN-H2 25.0 3298   122.148 0.027  0.069 3.315 0.626 -0.082   0.022  0.069 -0.015 -0.012   -2.119     -0.015 -0.003 -0.021    -1.654
+ B1 TRAIN-H2 50.0 3512   130.074 0.011  0.053 1.495 0.253 -0.103   0.002  0.053 -0.029 -0.028   -2.888     -0.035 -0.019 -0.036    -2.095
+ B1 TRAIN-H2  inf 3667   135.815 0.005  0.047 0.668 0.108 -0.117  -0.012  0.044 -0.033 -0.034   -2.922     -0.050 -0.028 -0.040    -2.066
+ B1      VAL  0.0 3404   154.727 0.028  0.069 4.382 0.565 -0.076   0.028  0.051  0.000  0.012    1.196      0.016  0.018  0.006     0.727
+ B1      VAL  5.0 3683   167.409 0.014  0.055 2.354 0.289 -0.091   0.014  0.032 -0.008 -0.002   -0.248      0.000 -0.001 -0.002    -0.421
+ B1      VAL 10.0 3913   177.864 0.016  0.057 2.851 0.333 -0.090   0.014  0.035 -0.008  0.000    0.005      0.001  0.002 -0.002    -0.127
+ B1      VAL 15.0 4077   185.318 0.016  0.057 2.965 0.341 -0.091   0.013  0.033 -0.006    NaN      NaN        NaN    NaN    NaN       NaN
+ B1      VAL 25.0 4324   196.545 0.020  0.061 3.977 0.445 -0.090   0.014  0.044 -0.009  0.004    0.818      0.001  0.010 -0.003     1.013
+ B1      VAL 50.0 4588   208.545 0.009  0.050 1.807 0.190 -0.106  -0.001  0.034 -0.022 -0.007   -0.953     -0.014  0.000 -0.016    -0.682
+ B1      VAL  inf 4795   217.955 0.001  0.043 0.304 0.031 -0.120  -0.015  0.026 -0.029 -0.015   -1.462     -0.028 -0.008 -0.023    -1.182
+ B2 TRAIN-H2  0.0 3096   114.667 0.051  0.091 5.869 1.121 -0.052   0.051    NaN    NaN    NaN      NaN        NaN    NaN    NaN       NaN
+ B2      VAL  0.0 4132   187.818 0.018  0.059 3.353 0.392 -0.087   0.018    NaN    NaN    NaN      NaN        NaN    NaN    NaN       NaN
+ B2 TRAIN-H2  5.0 3257   120.630 0.053  0.093 6.393 1.158 -0.051   0.052    NaN    NaN    NaN      NaN        NaN    NaN    NaN       NaN
+ B2      VAL  5.0 4314   196.091 0.010  0.050 1.873 0.211 -0.096   0.009    NaN    NaN    NaN      NaN        NaN    NaN    NaN       NaN
+ B2 TRAIN-H2 10.0 3357   124.333 0.043  0.084 5.362 0.957 -0.062   0.041    NaN    NaN    NaN      NaN        NaN    NaN    NaN       NaN
+ B2      VAL 10.0 4452   202.364 0.008  0.049 1.523 0.165 -0.100   0.006    NaN    NaN    NaN      NaN        NaN    NaN    NaN       NaN
+ B2 TRAIN-H2 15.0 3437   127.296 0.041  0.082 5.218 0.901 -0.066   0.037    NaN    NaN    NaN      NaN        NaN    NaN    NaN       NaN
+ B2      VAL 15.0 4532   206.000 0.008  0.049 1.547 0.167 -0.101   0.004    NaN    NaN    NaN      NaN        NaN    NaN    NaN       NaN
+ B2 TRAIN-H2 25.0 3527   130.630 0.026  0.067 3.353 0.578 -0.085   0.020    NaN    NaN    NaN      NaN        NaN    NaN    NaN       NaN
+ B2      VAL 25.0 4630   210.455 0.015  0.056 3.085 0.326 -0.097   0.008    NaN    NaN    NaN      NaN        NaN    NaN    NaN       NaN
+ B2 TRAIN-H2 50.0 3616   133.926 0.016  0.057 2.110 0.349 -0.099   0.006    NaN    NaN    NaN      NaN        NaN    NaN    NaN       NaN
+ B2      VAL 50.0 4728   214.909 0.009  0.051 2.011 0.206 -0.106  -0.001    NaN    NaN    NaN      NaN        NaN    NaN    NaN       NaN
+ B2 TRAIN-H2  inf 3667   135.815 0.005  0.047 0.668 0.108 -0.117  -0.012    NaN    NaN    NaN      NaN        NaN    NaN    NaN       NaN
+ B2      VAL  inf 4795   217.955 0.001  0.043 0.304 0.031 -0.120  -0.015    NaN    NaN    NaN      NaN        NaN    NaN    NaN       NaN
+L2 (population A, c = 15):
+  L2 TRAIN-H2: <=5 n 2057 net +0.052 gross +0.091 t +0.97 ex5 -0.052; 5-10 n 124 net -0.086 gross -0.041 t -0.71 ex5 -0.217; 10-15 n 92 net -0.117 gross -0.074 t -0.58 ex5 -0.250
+     d == 0 (opened at/below level) n 1841 net +0.046; 0 < d <= 5 n 216 net +0.100
+  L2 VAL: <=5 n 2777 net +0.021 gross +0.061 t +0.39 ex5 -0.084; 5-10 n 189 net -0.038 gross +0.004 t -0.33 ex5 -0.158; 10-15 n 102 net -0.013 gross +0.029 t -0.09 ex5 -0.150
+     d == 0 (opened at/below level) n 2541 net +0.040; 0 < d <= 5 n 236 net -0.180
+  L2 LIVE (re-read, not re-fit): <=5 n 55 net +0.131 gross +0.119; 5-10 n 72 net -0.051 gross +0.035; 10-15 n 78 net -0.002 gross +0.145; >15 n 22 net -0.308 gross -0.149
+L2 (population B1, c = 15):
+  L2 TRAIN-H2: <=5 n 2805 net +0.045 gross +0.085 t +1.00 ex5 -0.060; 5-10 n 164 net +0.075 gross +0.120 t +0.67 ex5 -0.044; 10-15 n 144 net -0.103 gross -0.057 t -0.77 ex5 -0.237
+     d == 0 (opened at/below level) n 2551 net +0.042; 0 < d <= 5 n 254 net +0.075
+  L2 VAL: <=5 n 3683 net +0.014 gross +0.055 t +0.29 ex5 -0.091; 5-10 n 230 net +0.047 gross +0.089 t +0.48 ex5 -0.066; 10-15 n 164 net +0.015 gross +0.059 t +0.13 ex5 -0.110
+     d == 0 (opened at/below level) n 3404 net +0.028; 0 < d <= 5 n 279 net -0.160
+  L2 LIVE (re-read, not re-fit): <=5 n 55 net +0.131 gross +0.119; 5-10 n 72 net -0.051 gross +0.035; 10-15 n 78 net -0.002 gross +0.145; >15 n 22 net -0.308 gross -0.149
+L3 (population A):
+  L3 TRAIN-H2 c=5: declined n 216 net -0.099 (t -0.92, ex5 -0.221) vs kept n 2057 net +0.052; retrace share 59.7%
+  L3 TRAIN-H2 c=10: declined n 92 net -0.117 (t -0.58, ex5 -0.250) vs kept n 2181 net +0.044; retrace share 71.7%
+  L3 VAL c=5: declined n 291 net -0.029 (t -0.31, ex5 -0.148) vs kept n 2777 net +0.021; retrace share 59.1%
+  L3 VAL c=10: declined n 102 net -0.013 (t -0.09, ex5 -0.150) vs kept n 2966 net +0.017; retrace share 59.8%
+L3 (population B1):
+  L3 TRAIN-H2 c=5: declined n 308 net -0.008 (t -0.10, ex5 -0.127) vs kept n 2805 net +0.045; retrace share 52.9%
+  L3 TRAIN-H2 c=10: declined n 144 net -0.103 (t -0.77, ex5 -0.237) vs kept n 2969 net +0.046; retrace share 64.6%
+  L3 VAL c=5: declined n 394 net +0.034 (t +0.42, ex5 -0.079) vs kept n 3683 net +0.014; retrace share 60.4%
+  L3 VAL c=10: declined n 164 net +0.015 (t +0.13, ex5 -0.110) vs kept n 3913 net +0.016; retrace share 59.8%
+LIVE OOS:
+  LIVE all n 231 net -0.026
+  LIVE slip <= 0: n 18 net -0.204 CI [-0.910, +0.614]  vs live mean -0.026
+  LIVE slip <= 5: n 55 net +0.131 CI [-0.249, +0.536]  vs live mean -0.026
+  LIVE slip <= 10: n 127 net +0.028 CI [-0.208, +0.269]  vs live mean -0.026
+  LIVE slip <= 15: n 205 net +0.017 CI [-0.170, +0.198]  vs live mean -0.026
+  LIVE slip <= 25: n 227 net -0.015 CI [-0.188, +0.161]  vs live mean -0.026
+  LIVE slip <= 50: n 227 net -0.015 CI [-0.185, +0.168]  vs live mean -0.026
+  LIVE slip <= inf: n 227 net -0.015 CI [-0.178, +0.168]  vs live mean -0.026
+[live] weeks 5, fills 231
+Features (population B1, report-only):
+  F d_raw_bps TRAIN-H2: Q1 [-306,-41.1] n 734 net -0.037; Q2 [-41.1,-16] n 733 net +0.080; Q3 [-16,-3.03] n 733 net +0.105; Q4 [-3,8.88] n 733 net +0.022; Q5 [8.96,352] n 734 net -0.145
+  F d_raw_bps VAL: Q1 [-371,-43.9] n 959 net +0.080; Q2 [-43.9,-19] n 959 net -0.005; Q3 [-19,-4.27] n 959 net +0.041; Q4 [-4.25,8.34] n 959 net -0.035; Q5 [8.39,319] n 959 net -0.074
+  F vratio TRAIN-H2: Q1 [0.00548,0.651] n 734 net -0.095; Q2 [0.652,1.06] n 733 net -0.021; Q3 [1.06,1.51] n 733 net +0.022; Q4 [1.51,2.37] n 733 net +0.004; Q5 [2.37,150] n 734 net +0.113
+  F vratio VAL: Q1 [0.0183,0.621] n 959 net -0.086; Q2 [0.622,1.04] n 959 net +0.010; Q3 [1.04,1.53] n 959 net +0.004; Q4 [1.53,2.43] n 959 net +0.066; Q5 [2.43,38.5] n 959 net +0.013
+  F mins_since_level TRAIN-H2: Q1 [1,1] n 734 net +0.004; Q2 [1,1] n 733 net +0.017; Q3 [1,2] n 733 net +0.033; Q4 [2,8] n 733 net -0.098; Q5 [8,273] n 734 net +0.068
+  F mins_since_level VAL: Q1 [1,1] n 959 net -0.131; Q2 [1,1] n 959 net +0.053; Q3 [1,2] n 959 net +0.054; Q4 [2,9] n 959 net -0.011; Q5 [9,247] n 959 net +0.041
+==== done
