@@ -20,7 +20,7 @@ from tests.test_hod_break import drive_then_consolidate
 
 def cfg(**over):
     base = {'enabled': True, 'dry_run': False, 'risk_usd': 100.0, 'daily_kill_usd': -600.0, 'weekly_kill_usd': -1500.0, 'max_notional_usd': 5000.0,
-            'min_price': 1.0, 'min_adv20': 100_000.0, 'max_spread_bps': 100.0, 'order_timeout_s': 75.0,
+            'min_price': 1.0, 'min_adv20': 100_000.0, 'max_spread_bps': 100.0, 'order_timeout_s': 75.0, 'fc_leg_poll_s': 0.0, 'oco_settle_timeout_s': 0.0, 'oco_retry_delay_s': 0.0,
             'params': {'consol_bars': 5, 'consol_pct': 0.04, 'min_dist_open_pct': 5.0, 'rv_lo': 1.0, 'rv_hi': 5.0, 'min_r_pct': 1.0, 'cap': 0.006,
                        'target_r': 2.0, 'max_per_day': 8, 'max_concurrent': 4, 'last_entry_minute': 930, 'flat_minute': 955}}
     base.update(over); return base

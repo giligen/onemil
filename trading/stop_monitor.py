@@ -2772,7 +2772,7 @@ class StopMonitor:
         actual_fill = None
         deadline = time_mod.time() + 30
         while time_mod.time() < deadline:
-            time_mod.sleep(1)
+            time_mod.sleep(self._PARTIAL_FILL_POLL_S)
             try:
                 order_status = self._alpaca.get_order(order_id)
                 status = order_status.get('status', '')
@@ -3782,6 +3782,7 @@ class StopMonitor:
     # ($10.63 instead of real $10.31) had downstream sync not caught it.
     _MARKET_CLOSE_FILL_TIMEOUT_S = 60
     _STOP_EXIT_POLL_INTERVAL_S = 1.0
+    _PARTIAL_FILL_POLL_S = 1.0   # exhaustion partial-sell fill poll (tests shrink it)
 
     async def _poll_order_fill(
         self, client, order_id: str, fallback_price: float,

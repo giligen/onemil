@@ -73,12 +73,19 @@ def _rng(sym):
                      range_start_ts=pd.Timestamp.utcnow(), range_open=9.6)
 
 
+@pytest.fixture
+def fast_sweep_retry(engine):
+    """Shrink the post-open sweep's bar-consolidation retry sleep (default 4 s; the knob is asserted in TestConfigKnobs)."""
+    engine.sweep_retry_delay_s = 0.01
+
+
 class TestConfigKnobs:
     def test_knobs_loaded_from_yaml(self, engine):
         assert engine.sweep_retry_delay_s == 4.0
         assert engine.first_rank_grace_s == 25.0
 
 
+@pytest.mark.usefixtures('fast_sweep_retry')
 class TestFirstRankGraceGate:
     def _seed(self, engine, ranged, rangeless):
         engine.build_universe(source_loader=lambda: ranged + rangeless)
@@ -225,6 +232,7 @@ class TestSelectionAudit:
             engine._audit_selection([], [], [])   # must not raise
 
 
+@pytest.mark.usefixtures('fast_sweep_retry')
 class TestGateFullPoolScope:
     """2026-07-04 review fix: the gate must inspect the FULL candidate pool,
     not the caller's subset. The day's first burst arrives via the WS drain

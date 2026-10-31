@@ -233,3 +233,11 @@ def insert_trade(guardrail_trades_db):
         conn.commit()
         conn.close()
     return _insert
+
+
+@pytest.fixture(autouse=True)
+def _fast_stop_monitor_polls(monkeypatch):
+    """Shrink StopMonitor's wall-clock fill-poll intervals (production 1 s) for every test; tests that assert on
+    timing set the instance attribute themselves. Class defaults used in production are unchanged."""
+    monkeypatch.setattr(StopMonitor, '_STOP_EXIT_POLL_INTERVAL_S', 0.05)
+    monkeypatch.setattr(StopMonitor, '_PARTIAL_FILL_POLL_S', 0.0)

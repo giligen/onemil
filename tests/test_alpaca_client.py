@@ -545,6 +545,7 @@ class TestCallWithTimeout:
         result = client._call_with_timeout(lambda: 42, "test_op")
         assert result == 42
 
+    @patch("data_sources.alpaca_client.TIMEOUT_RETRY_BACKOFF_SECONDS", 0.0)
     def test_timeout_raises_timeout_error(self, client):
         """FuturesTimeoutError is converted to AlpacaAPITimeoutError."""
         def slow_func():

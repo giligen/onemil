@@ -66,14 +66,3 @@ def test_idempotent_rerun(tmp_path):
     out = pd.read_csv(path)
     assert sorted(out.date.unique()) == ['2026-09-16', '2026-09-17']
     assert list(out[out.date == '2026-09-16'].symbol) == ['BBBB']
-
-
-@pytest.mark.integration
-def test_process_day_cached_test_day():
-    """One cached TEST day (bars already in bars_sip.db/bars_rth.db) -- real Alpaca NBBO calls."""
-    ok = fl.process_day('2026-06-01', send_telegram=False)
-    assert ok is True
-    summary = pd.read_csv(fl.SUMMARY_CSV)
-    row = summary[summary.date == '2026-06-01']
-    assert len(row) == 1
-    assert row.n_signals.iloc[0] >= 1

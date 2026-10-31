@@ -490,6 +490,8 @@ class TestForceCloseOrphanSweep:
         )
         mock_alpaca.get_open_positions.side_effect = RuntimeError("API down")
         engine._notify_error = MagicMock()
+        engine.fc_verify_max_wait_s = 0.05          # injectable verify poll bound (default 10 s wall clock)
+        engine.fc_verify_poll_interval_s = 0.01
 
         # Must not raise
         closed = engine.force_close_all()

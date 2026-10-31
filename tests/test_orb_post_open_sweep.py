@@ -69,6 +69,13 @@ def _bars(open_, highs, lows=None, vol=10000, start_utc=None):
     return pd.DataFrame(rows)
 
 
+@pytest.fixture
+def fast_sweep_retry(engine):
+    """Shrink the sweep's bar-consolidation retry sleep (default 4 s) so no test waits on a wall clock."""
+    engine.sweep_retry_delay_s = 0.01
+
+
+@pytest.mark.usefixtures('fast_sweep_retry')
 class TestPostOpenSweep:
     def test_backfills_candidates_missing_range(self, engine):
         """Universe has 3 candidates, none have range_data (bars lost via WS).

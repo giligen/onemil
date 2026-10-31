@@ -23,6 +23,13 @@ def _fake_today_et(today_iso):
     return lambda now_et=None: date.fromisoformat(today_iso)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_daily_bars_scan(monkeypatch):
+    """These tests stop after flag validation; the gap-up window query over the production daily_bars table
+    (6-20 s of real SQLite I/O) is downstream of what they assert, like the other stubs they already install."""
+    monkeypatch.setattr('orb_backtest._qualifying_pairs_for_dates', lambda *a, **k: {})
+
+
 class TestIncludeTodayProvisionalValidation:
     """S1: --include-today-provisional requires --end to match today_et()."""
 

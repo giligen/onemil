@@ -274,6 +274,7 @@ class HodBreakEngine:
         self.oco_settle_timeout_s = float(cfg.get('oco_settle_timeout_s', 5.0))
         self.oco_settle_poll_s = float(cfg.get('oco_settle_poll_s', 0.25))
         self.oco_retry_delay_s = float(cfg.get('oco_retry_delay_s', 2.0))
+        self.fc_leg_poll_s = float(cfg.get('fc_leg_poll_s', self.FC_LEG_POLL_S))   # force-close leg-settle poll bound (tests pass 0)
         self.risk_usd = float(cfg.get('risk_usd', 100.0)); self.daily_kill_usd = float(cfg.get('daily_kill_usd', -600.0))
         self.weekly_kill_usd = float(cfg.get('weekly_kill_usd', -1500.0)); self.max_notional_usd = float(cfg.get('max_notional_usd', 5000.0))
         self.min_price = float(cfg.get('min_price', 1.0)); self.min_adv20 = float(cfg.get('min_adv20', 100_000.0))
@@ -3178,7 +3179,7 @@ class HodBreakEngine:
             if not leg: continue
             try: self.alpaca.cancel_order(leg)
             except Exception as e: logger.warning(f"{self.tag} FC leg cancel {pos.symbol} failed ({e}) — reading the leg")
-        deadline = time.time() + self.FC_LEG_POLL_S
+        deadline = time.time() + self.fc_leg_poll_s
         while True:
             pending = False
             for leg, reason in ((pos.tp_leg_id, self._tp_reason(pos)), (pos.sl_leg_id, 'stop')):
@@ -3190,7 +3191,7 @@ class HodBreakEngine:
             if not pending or pos.symbol not in self.positions or time.time() >= deadline: break
             time.sleep(0.25)
         if pending and pos.symbol in self.positions:
-            logger.warning(f"{self.tag} FORCE CLOSE {pos.symbol}: a leg is still not terminal after {self.FC_LEG_POLL_S:.0f}s — selling only the {pos.open_qty} shares no leg has sold")
+            logger.warning(f"{self.tag} FORCE CLOSE {pos.symbol}: a leg is still not terminal after {self.fc_leg_poll_s:.0f}s — selling only the {pos.open_qty} shares no leg has sold")
 
     def _close_reference_price(self, pos: Position) -> float:
         q = self._quote(pos.symbol)
