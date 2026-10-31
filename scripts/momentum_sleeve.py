@@ -104,6 +104,35 @@ def is_rebalance_session(today: date, week_sessions: List[date]) -> bool:
     return bool(week_sessions) and today == min(week_sessions)
 
 
+CATCHUP_LAST_WEEKDAY = 2      # Mon=0 .. Wed=2: a missed rotation is caught up Mon-Wed; Thu/Fri wait for Monday
+
+
+def rotation_due(today: date, week_sessions: List[date], last_rebalance: Optional[str]) -> Tuple[bool, str]:
+    """(due, reason) -- the weekly rotation rule with catch-up (Fable 2026-10-31, after the missed 10/26 rotation).
+
+    DUE on a session iff the state's last completed rotation (``last_rebalance``, 'YYYY-MM-DD' or None) is not
+    in today's ISO week AND today is Mon-Wed. On the first session of the week with last week's rotation done
+    this is exactly the old first-session rule; a Tuesday/Wednesday after a crashed or refused Monday is a
+    catch-up; Thursday/Friday never trade (the next Monday is the rotation)."""
+    if today not in week_sessions:
+        return False, "not a trading session"
+    last = None
+    if last_rebalance:
+        try:
+            last = date.fromisoformat(str(last_rebalance)[:10])
+        except ValueError:
+            logger.warning("momentum_sleeve: state last_rebalance %r unreadable -- treated as no rotation yet",
+                           last_rebalance)
+    week = today.isocalendar()[1]
+    if last is not None and last.isocalendar()[:2] == today.isocalendar()[:2]:
+        return False, f"rotation already done this week ({last}, week {week})"
+    if today.weekday() > CATCHUP_LAST_WEEKDAY:
+        return False, f"{today:%A}: a missed rotation (last {last}) waits for Monday"
+    if is_rebalance_session(today, week_sessions):
+        return True, f"first session of week {week}"
+    return True, f"catch-up (last {last}, week {week})"
+
+
 def check_submit_window(now_et: datetime, is_session: bool) -> None:
     """--submit guard: regular session day and 09:31-15:30 ET, else RuntimeError."""
     if not is_session:
@@ -491,6 +520,16 @@ def get_existing_order(client: AlpacaClient, coid: str):
         raise
 
 
+def _order_exists(client: AlpacaClient, coid: str) -> bool:
+    """True when the broker already has an order with this client_order_id; a lookup failure is a WARNING and
+    counts as 'not there' (the conservative side: the buy-power check then includes the order)."""
+    try:
+        return get_existing_order(client, coid) is not None
+    except Exception as e:
+        logger.warning("momentum_sleeve: order lookup %s failed (%s) -- counted as a new order", coid, e)
+        return False
+
+
 def submit_market(client: AlpacaClient, symbol: str, side: str, coid: str,
                   qty: Optional[float] = None, notional: Optional[float] = None):
     """Market DAY order. Sells use fractional ``qty``; buys use ``notional`` (or whole ``qty`` if non-fractionable). Idempotent on ``coid``:
@@ -731,11 +770,19 @@ def execute_live(client: AlpacaClient, orders: List[Dict], prices: Dict[str, flo
     notes = notes if notes is not None else []
     fills: List[Dict] = []
     bqty = broker_qty(client)
+    day_key = f"{today:%Y%m%d}"
+    booked = set(c for c in state.get('booked_coids', []) if day_key in c)   # today's ids only (pruned daily)
     for phase in ('sell', 'buy'):
         batch = [o for o in orders if o['side'] == phase]
         if phase == 'buy' and batch:
+            for b in batch:
+                apply_fractionable(client, b, prices)
+            # A buy whose id is already at the broker (a crashed earlier run today) consumed its buying power
+            # already: counting it again would refuse every buy and leave those fills unbooked in the state.
+            fresh = [b for b in batch if not _order_exists(client, client_order_id(
+                today, b['symbol'], 'buy', tag, prefix=ml.LIVE_COID_PREFIX))]
             need = sum((o['whole_qty'] * prices[o['symbol']]) if o.get('whole_qty') is not None else o['notional']
-                       for o in [apply_fractionable(client, b, prices) or b for b in batch])
+                       for o in fresh)
             bp = float(client.trading_client.get_account().buying_power)
             if not ml.buying_power_ok(bp, need):
                 msg = f"buying power ${bp:,.0f} < buy notional ${need:,.0f} -- NO buys this rotation (sells stand)"
@@ -777,10 +824,19 @@ def execute_live(client: AlpacaClient, orders: List[Dict], prices: Dict[str, flo
         phase_fills = []
         for coid, sym in coids.items():
             r = res[coid]
-            if r['qty'] > 0:
-                phase_fills.append({'symbol': sym, 'side': phase, 'qty': r['qty'], 'avg_price': r['avg'],
-                                    'notional': r['qty'] * r['avg'], 'client_order_id': coid})
+            if r['qty'] <= 0:
+                continue
+            if coid in booked:
+                # Same-day re-run after a crash: submit_market returned the existing order -- its fill is
+                # already in the state; booking it again would double the position and the cash move.
+                logger.warning("momentum_sleeve: %s fill already booked in the sleeve state -- not booked twice",
+                               coid)
+                continue
+            phase_fills.append({'symbol': sym, 'side': phase, 'qty': r['qty'], 'avg_price': r['avg'],
+                                'notional': r['qty'] * r['avg'], 'client_order_id': coid})
         ml.apply_fills(state, phase_fills)
+        booked |= {f['client_order_id'] for f in phase_fills}
+        state['booked_coids'] = sorted(booked)
         fills.extend(phase_fills)
         if on_phase is not None:
             on_phase(state)
@@ -869,6 +925,9 @@ def submit_live(args, client, notifier, state, orders, prices, feat, panel, asof
     save = lambda st: save_state(st, paths['state'])   # noqa: E731
     fills = execute_live(client, orders, prices, state, today, run_tag, notes, on_phase=save)
     state['last_rebalance'], state['last_rebalance_run'] = str(today), datetime.now(timezone.utc).isoformat()
+    # Persist the rotation marker NOW, as the paper path does: a crash in the ledger / marks code below must not
+    # let the 14:46 retry re-plan this rotation.
+    save_state(state, paths['state'])
     opens = official_opens(client, [f['symbol'] for f in fills], today)
     turnover = 0.0
     for f in fills:
@@ -922,16 +981,26 @@ def run(args, client: AlpacaClient, notifier: Optional[TelegramNotifier], now_ut
     week_start = today - timedelta(days=today.weekday())
     week_sessions = trading_sessions(client, week_start, today)
     is_session = today in week_sessions
-    if not args.force and not (is_session and is_rebalance_session(today, week_sessions)):
-        print("not a rebalance session — no-op")
+    live = getattr(args, 'live', False) is True   # strict: a MagicMock args object is the paper path
+    paths = mode_paths(live)
+    tg = ml.LIVE_TG_PREFIX if live else TG_PREFIX
+    if not args.force:
+        due, reason = rotation_due(today, week_sessions, (ml.read_json(paths['state']) or {}).get('last_rebalance'))
+        if not due:
+            print(f"not a rebalance session — no-op ({reason})")
+            return 0
+        logger.info("momentum_sleeve: rotation due: %s", reason)
+    if args.submit and is_session and now_et.time() < SUBMIT_START:
+        # The EDT/EST twin cron lines: in EST the 13:45 UTC line lands at 08:45 ET. Not an error -- the 14:45 line
+        # submits (an exception here reached Telegram as a 'crashed' ERROR every EST rotation day).
+        msg = f"submit window opens {SUBMIT_START:%H:%M} ET (now {now_et:%H:%M} ET) — no-op; the later cron line submits"
+        logger.info("momentum_sleeve: %s", msg)
+        print(msg)
         return 0
     if args.submit:
         check_submit_window(now_et, is_session)
     sessions = trading_sessions(client, today - timedelta(days=14), today)
     asof = pd.Timestamp(args.asof).date() if args.asof else last_completed_session(sessions, now_et)
-    live = getattr(args, 'live', False) is True   # strict: a MagicMock args object is the paper path
-    paths = mode_paths(live)
-    tg = ml.LIVE_TG_PREFIX if live else TG_PREFIX
     state = load_state(paths['state'], args.equity_start)
     if live:
         state.setdefault('equity_start', float(args.equity_start))
@@ -1003,10 +1072,11 @@ def run(args, client: AlpacaClient, notifier: Optional[TelegramNotifier], now_ut
     refusal = completeness_refusal(info, asof, set(state['positions']), selected,
                                    missing_bar=set(state['positions']) - set(feat.index))
     if refusal:
-        logger.error("MOM REFUSED: completeness %s -- positions left as they are (no sells, no buys)", refusal)
-        print(f"MOM REFUSED: completeness {refusal}")
+        label = 'MOM LIVE' if live else 'MOM'
+        logger.error("%s REFUSED: completeness %s -- positions left as they are (no sells, no buys)", label, refusal)
+        print(f"{label} REFUSED: completeness {refusal}")
         if args.submit:
-            notify(notifier, f"{today} REFUSED: completeness {refusal} -- no orders placed, book unchanged")
+            notify(notifier, f"{today} REFUSED: completeness {refusal} -- no orders placed, book unchanged", tg)
         return 2
     if not args.submit:
         return 0
