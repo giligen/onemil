@@ -571,12 +571,131 @@ def poll_fills(client: AlpacaClient, coids: List[str], timeout: float = POLL_TIM
         if pending:
             if time.time() >= deadline:
                 for coid in pending:
-                    logger.error("momentum_sleeve: order %s still open after %.0fs -- state NOT updated for it",
-                                 coid, timeout)
+                    logger.warning("momentum_sleeve: order %s still open after %.0fs -- state NOT updated for it yet",
+                                   coid, timeout)
                     out[coid] = {'status': 'timeout', 'qty': 0.0, 'avg': 0.0}
                 break
             time.sleep(interval)
     return out
+
+
+PENDING_MAX_DAYS = 10                                 # a still-open pending order older than this is dropped (WARNING)
+TERMINAL_STATUSES = ('filled', 'canceled', 'expired', 'rejected')
+
+
+def book_fills(state: Dict, fills: List[Dict], live: bool, final: bool = True) -> None:
+    """The ONE place a fill is booked into the sleeve state (poll loop and late-fill reconcile share it).
+
+    LIVE: cash and positions are state-tracked, so the fill is applied (``ml.apply_fills``). PAPER: the dedicated
+    account is the source of truth and ``sync_state_from_broker`` rebuilds cash/positions at every run, so only the
+    ``booked_coids`` marker is written. Either way the ids are appended to ``state['booked_coids']`` -- unless ``final`` is False (a
+    partial fill of an order still working: more may come, the reconcile books the increment later)."""
+    if live:
+        ml.apply_fills(state, fills)
+    if final:
+        state['booked_coids'] = sorted(set(state.get('booked_coids', [])) | {f['client_order_id'] for f in fills})
+
+
+def write_ledger_rows(client: AlpacaClient, fills: List[Dict], ledger_path: str, day: date, size_pct) -> float:
+    """Append one ledger row per fill (slippage vs the official open of ``day``); returns the fills' turnover."""
+    opens = official_opens(client, [f['symbol'] for f in fills], day)
+    turnover = 0.0
+    for f in fills:
+        op = opens.get(f['symbol'])
+        slip = ''
+        if op:
+            raw = (f['avg_price'] / op - 1.0) * 1e4
+            slip = round(raw if f['side'] == 'buy' else -raw, 1)
+        append_csv(ledger_path, LEDGER_FIELDS, {
+            'date': str(day), 'symbol': f['symbol'], 'side': f['side'], 'qty': f['qty'],
+            'avg_price': f['avg_price'], 'notional': round(f['notional'], 2),
+            'official_open': op if op else '', 'slip_bps_vs_open': slip,
+            'client_order_id': f['client_order_id'], 'size_pct': size_pct})
+        turnover += f['notional']
+    return turnover
+
+
+def record_pending(state: Dict, coids: Dict[str, str], res: Dict[str, Dict], phase: str, today: date) -> List[str]:
+    """Remember every order the poll gave up on (status 'timeout') in ``state['pending_coids']`` so that the next
+    reconcile can book its late fill. Returns those client order ids."""
+    open_ids = [c for c in coids if res.get(c, {}).get('status') == 'timeout']
+    for c in open_ids:
+        state.setdefault('pending_coids', {})[c] = {'symbol': coids[c], 'side': phase, 'date': str(today)}
+    return open_ids
+
+
+def reconcile_late_fills(client: AlpacaClient, state: Dict, today: date, live: bool) -> int:
+    """Book the fills of orders that were still open when an earlier poll timed out (docs/mom_sleeve_late_fill_
+    booking_spec_20261031.md). Candidates are ``state['pending_coids']`` ({coid: symbol, side, date}, written by
+    ``record_pending``); each is looked up at the broker. A filled / partially filled order with filled_qty > 0 is
+    booked exactly like a poll fill (``book_fills`` + a ledger row), once: a partial fill books its filled quantity
+    and later calls book only the increment. A terminal order leaves the pending list; a lookup failure keeps it.
+    State is saved right after booking. Returns the number of fills booked."""
+    pending = state.get('pending_coids') or {}
+    if not pending:
+        return 0
+    paths = mode_paths(live)
+    booked_n, changed = 0, False
+    for coid, info in sorted(pending.items()):
+        if coid in state.get('booked_coids', []):
+            pending.pop(coid)
+            changed = True
+            continue
+        try:
+            o = get_existing_order(client, coid)
+        except Exception as e:
+            logger.warning("momentum_sleeve: late-fill lookup %s failed (%s) -- kept pending", coid, e)
+            continue
+        age = (today - date.fromisoformat(info['date'])).days
+        if o is None:
+            if age > PENDING_MAX_DAYS:
+                logger.warning("momentum_sleeve: pending order %s unknown at the broker after %d days -- dropped",
+                               coid, age)
+                pending.pop(coid)
+                changed = True
+            continue
+        status = str(getattr(getattr(o, 'status', ''), 'value', getattr(o, 'status', '')))
+        fq, avg = float(getattr(o, 'filled_qty', 0) or 0), float(getattr(o, 'filled_avg_price', 0) or 0)
+        dq = fq - float(info.get('booked_qty', 0.0))
+        if dq > 1e-9 and avg > 0:
+            dn = fq * avg - float(info.get('booked_notional', 0.0))
+            px = dn / dq
+            fill = {'symbol': info['symbol'], 'side': info['side'], 'qty': dq, 'avg_price': px, 'notional': dn,
+                    'client_order_id': coid}
+            book_fills(state, [fill], live, final=status in TERMINAL_STATUSES)
+            info['booked_qty'], info['booked_notional'] = fq, fq * avg
+            write_ledger_rows(client, [fill], paths['ledger'], date.fromisoformat(info['date']), '')
+            logger.info("momentum_sleeve: late fill booked %s qty %s @ %s", coid, dq, px)
+            booked_n += 1
+            changed = True
+        if status in TERMINAL_STATUSES:
+            if status != 'filled' and dq <= 1e-9 and fq <= 0:
+                logger.warning("momentum_sleeve: pending order %s ended %s unfilled -- nothing to book", coid, status)
+            pending.pop(coid)
+            changed = True
+        elif age > PENDING_MAX_DAYS:
+            logger.warning("momentum_sleeve: pending order %s still %s after %d days -- dropped", coid, status, age)
+            pending.pop(coid)
+            changed = True
+    if not pending:
+        state.pop('pending_coids', None)
+    if changed:
+        save_state(state, paths['state'])
+    return booked_n
+
+
+def settle_open_orders(client: AlpacaClient, state: Dict, coids: Dict[str, str], res: Dict[str, Dict],
+                       phase: str, today: date, live: bool) -> None:
+    """After a poll: remember the orders it gave up on, re-check them once right away (a fill that landed in the
+    last seconds is booked now) and WARN about those that stay open (booked at the next run's reconcile)."""
+    open_ids = record_pending(state, coids, res, phase, today)
+    if not open_ids:
+        return
+    reconcile_late_fills(client, state, today, live)
+    still = [c for c in open_ids if c in (state.get('pending_coids') or {})]
+    if still:
+        logger.warning("momentum_sleeve: %d order(s) still open after %.0fs -- will be booked at the next run: %s",
+                       len(still), POLL_TIMEOUT, ' '.join(still))
 
 
 def official_opens(client: AlpacaClient, symbols: List[str], day: date) -> Dict[str, float]:
@@ -748,6 +867,7 @@ def execute(client: AlpacaClient, orders: List[Dict], prices: Dict[str, float], 
                 continue
             coids[coid] = sym
         res = poll_fills(client, list(coids)) if coids else {}
+        settle_open_orders(client, state, coids, res, phase, today, live=False)
         for coid, sym in coids.items():
             r = res[coid]
             if r['qty'] <= 0:
@@ -821,6 +941,8 @@ def execute_live(client: AlpacaClient, orders: List[Dict], prices: Dict[str, flo
                 continue
             coids[coid] = sym
         res = poll_fills(client, list(coids)) if coids else {}
+        settle_open_orders(client, state, coids, res, phase, today, live=True)
+        booked |= {c for c in state.get('booked_coids', []) if day_key in c}   # fills booked by the re-check
         phase_fills = []
         for coid, sym in coids.items():
             r = res[coid]
@@ -834,7 +956,7 @@ def execute_live(client: AlpacaClient, orders: List[Dict], prices: Dict[str, flo
                 continue
             phase_fills.append({'symbol': sym, 'side': phase, 'qty': r['qty'], 'avg_price': r['avg'],
                                 'notional': r['qty'] * r['avg'], 'client_order_id': coid})
-        ml.apply_fills(state, phase_fills)
+        book_fills(state, phase_fills, live=True)
         booked |= {f['client_order_id'] for f in phase_fills}
         state['booked_coids'] = sorted(booked)
         fills.extend(phase_fills)
@@ -928,20 +1050,7 @@ def submit_live(args, client, notifier, state, orders, prices, feat, panel, asof
     # Persist the rotation marker NOW, as the paper path does: a crash in the ledger / marks code below must not
     # let the 14:46 retry re-plan this rotation.
     save_state(state, paths['state'])
-    opens = official_opens(client, [f['symbol'] for f in fills], today)
-    turnover = 0.0
-    for f in fills:
-        op = opens.get(f['symbol'])
-        slip = ''
-        if op:
-            raw = (f['avg_price'] / op - 1.0) * 1e4
-            slip = round(raw if f['side'] == 'buy' else -raw, 1)
-        append_csv(paths['ledger'], LEDGER_FIELDS, {
-            'date': str(today), 'symbol': f['symbol'], 'side': f['side'], 'qty': f['qty'],
-            'avg_price': f['avg_price'], 'notional': round(f['notional'], 2),
-            'official_open': op if op else '', 'slip_bps_vs_open': slip,
-            'client_order_id': f['client_order_id'], 'size_pct': round(scale * 100)})
-        turnover += f['notional']
+    turnover = write_ledger_rows(client, fills, paths['ledger'], today, round(scale * 100))
     eq_after = sleeve_equity(state, {**prices, **broker_marks(client, only=set(state['positions']) | names_before)})
     state['peak_equity'] = max(float(state.get('peak_equity', eq_after)), eq_after)
     dd = eq_after / state['peak_equity'] - 1.0
@@ -1002,6 +1111,9 @@ def run(args, client: AlpacaClient, notifier: Optional[TelegramNotifier], now_ut
     sessions = trading_sessions(client, today - timedelta(days=14), today)
     asof = pd.Timestamp(args.asof).date() if args.asof else last_completed_session(sessions, now_et)
     state = load_state(paths['state'], args.equity_start)
+    if not live:
+        sync_state_from_broker(client, state, args.equity_start)
+    reconcile_late_fills(client, state, today, live)   # book fills of orders left open by an earlier run's poll
     if live:
         state.setdefault('equity_start', float(args.equity_start))
         if state['equity_start'] != float(args.equity_start):
@@ -1015,8 +1127,6 @@ def run(args, client: AlpacaClient, notifier: Optional[TelegramNotifier], now_ut
             if args.submit:
                 notify(notifier, f"{today} {msg}", tg)
             return 3
-    else:
-        sync_state_from_broker(client, state, args.equity_start)
     if args.submit and state.get('last_rebalance') == str(today) and not args.force:
         print(f"already rebalanced on {today} — no-op")
         return 0
@@ -1093,20 +1203,7 @@ def run(args, client: AlpacaClient, notifier: Optional[TelegramNotifier], now_ut
     state['last_rebalance'], state['last_rebalance_run'] = str(today), datetime.now(timezone.utc).isoformat()
     save_state(state, STATE_PATH)
     sync_state_from_broker(client, state, args.equity_start)
-    opens = official_opens(client, [f['symbol'] for f in fills], today)
-    turnover = 0.0
-    for f in fills:
-        op = opens.get(f['symbol'])
-        slip = ''
-        if op:
-            raw = (f['avg_price'] / op - 1.0) * 1e4
-            slip = round(raw if f['side'] == 'buy' else -raw, 1)
-        append_csv(LEDGER_PATH, LEDGER_FIELDS, {
-            'date': str(today), 'symbol': f['symbol'], 'side': f['side'], 'qty': f['qty'],
-            'avg_price': f['avg_price'], 'notional': round(f['notional'], 2),
-            'official_open': op if op else '', 'slip_bps_vs_open': slip,
-            'client_order_id': f['client_order_id'], 'size_pct': round(scale * 100)})
-        turnover += f['notional']
+    turnover = write_ledger_rows(client, fills, LEDGER_PATH, today, round(scale * 100))
     state['last_rebalance'] = str(today)
     # Mark at CURRENT broker prices: the signal-date closes are a session stale (2026-10-02 forced run marked
     # $20,134 on a $19,989 book and would have set a false equity peak for the drawdown rule).
