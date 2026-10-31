@@ -45,7 +45,8 @@ ORB_CLEAN_NEEDED = 5
 RAMP_MIN_DAYS = 20
 RAMP_STEP_USD = 10000
 REVIEW_FIX_FILES = ("docs/review_20261003/FIX_A_result.md", "docs/review_20261003/FIX_C_result.md")
-HOD_LINE = "HOD: dry-run only - no live gate (closed as a money book 9/26)"
+TRADES_DB = ROOT / "data" / "trades.db"
+HOD_PAPER_SINCE = "2026-09-29"      # first paper-account HOD fill (owner 9/28 routed HOD to its own paper account)
 PROMOTION_PREFIX = "PROMOTION"
 
 LEDGER = ROOT / "logs" / "momentum_sleeve_ledger.csv"
@@ -108,12 +109,21 @@ def sleeve_pnl_line(weekly: List[Dict], day: str, peak_hint: float = SLEEVE_STAR
             f"DD from peak {dd:.1f} %")
 
 
-def mom_history(client, period: str = "1M") -> Optional[List[Dict]]:
-    """The MOM paper account's daily portfolio history (reuses hourly_summary.fetch_history, read-only);
-    None with a WARNING on any failure or an empty history."""
+def history_period(today: Optional[dt.date] = None, start: str = SLEEVE_START_DATE) -> str:
+    """Alpaca portfolio-history period that reaches back to BEFORE ``start`` (the start-of-day base the since-start
+    P&L needs): months since ``start`` + 1, `1A` from a year on.  A fixed `1M` lost the base after 30 days and the
+    line printed `since ... n/a`."""
+    today = today or dt.date.today()
+    months = (today - dt.date.fromisoformat(start)).days // 30 + 2
+    return "1A" if months >= 12 else f"{months}M"
+
+
+def mom_history(client, period: Optional[str] = None) -> Optional[List[Dict]]:
+    """The MOM paper account's daily portfolio history (reuses hourly_summary.fetch_history, read-only), long
+    enough to cover the sleeve start (``history_period``); None with a WARNING on any failure or an empty history."""
     try:
         from hourly_summary import fetch_history
-        hist = fetch_history(client, period=period)
+        hist = fetch_history(client, period=period or history_period())
     except Exception as e:  # noqa: BLE001
         log.warning("MOM portfolio history failed: %s", e)
         return None
@@ -1209,8 +1219,58 @@ def _ramp_inputs(book: str, ramp: Dict, day: str) -> Tuple[Optional[float], Opti
         return None, None
 
 
+def hod_paper_summary(db_path=None, since: str = HOD_PAPER_SINCE) -> Optional[Dict]:
+    """HOD-break PAPER book from data/trades.db (strategy='hod_break', account='paper'), opened READ-ONLY:
+    {n_fills, n_closed, total, since, sessions: [(trade_date, pnl)...]}.  None (WARNING) when the db or the rows
+    are unreadable -- the caller prints NO-DATA."""
+    import sqlite3
+    path = str(db_path or TRADES_DB)
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            rows = con.execute(
+                "SELECT trade_date, exit_price, pnl FROM trades WHERE strategy='hod_break' AND account='paper' "
+                "AND trade_date >= ? AND COALESCE(order_status,'') NOT IN ('cancelled','canceled','expired','rejected') "
+                "ORDER BY trade_date", (since,)).fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error as e:
+        log.warning("HOD paper book unreadable (%s): %s", path, e)
+        return None
+    per_day: Dict[str, float] = {}
+    for d, exit_price, pnl in rows:
+        if exit_price is not None:
+            per_day[d] = per_day.get(d, 0.0) + float(pnl or 0.0)
+    return {"n_fills": len(rows), "n_closed": sum(1 for r in rows if r[1] is not None),
+            "total": sum(per_day.values()), "since": rows[0][0] if rows else since,
+            "sessions": sorted(per_day.items())}
+
+
+def hod_paper_line(db_path=None) -> str:
+    """`HOD (paper book): n fills since D | closed | total | trailing-20-session` from the paper trades, or NO-DATA."""
+    h = hod_paper_summary(db_path)
+    if h is None:
+        return no_data("HOD (paper book)", "data/trades.db unreadable")
+    if not h["n_fills"]:
+        return no_data("HOD (paper book)", f"no paper fills since {h['since']}")
+    last20 = sum(p for _, p in h["sessions"][-20:])
+    return (f"HOD (paper book): {h['n_fills']} fills since {h['since']} | closed {h['n_closed']} | "
+            f"total ${h['total']:+,.0f} | trailing-20-session ${last20:+,.0f} | no live gate")
+
+
+def hod_guardrail_line(db_path=None) -> str:
+    """The GUARDRAIL section's `hod_break (paper)` line: the same paper book, worst session included."""
+    h = hod_paper_summary(db_path)
+    if h is None or not h["n_fills"]:
+        return "hod_break (paper): " + no_data("book", "data/trades.db unreadable" if h is None else "no paper fills")
+    worst = min(h["sessions"], key=lambda x: x[1]) if h["sessions"] else None
+    return (f"hod_break (paper): n={h['n_fills']} fills since {h['since']} | closed {h['n_closed']} | "
+            f"total ${h['total']:+,.0f} | trailing-20-session ${sum(p for _, p in h['sessions'][-20:]):+,.0f}"
+            + (f" | worst session {worst[0]} ${worst[1]:+,.0f}" if worst else ""))
+
+
 def promotion_section(day: str, sleeve_m: Optional[Dict], orb_m: Optional[Dict],
-                      state_path=PROMOTION_STATE, closed: Optional[bool] = None) -> List[str]:
+                      state_path=PROMOTION_STATE, closed: Optional[bool] = None, hod_db=None) -> List[str]:
     """The PROMOTION lines: sleeve, ORB, ramps, HOD. Updates the state once per date (idempotent: the day's
     result overwrites its own key). A book whose section failed (metrics None) is not counted either way and the
     line says so."""
@@ -1233,5 +1293,5 @@ def promotion_section(day: str, sleeve_m: Optional[Dict], orb_m: Optional[Dict],
         ramp = (state.get("live_ramp") or {}).get(book)
         realized, tdays = _ramp_inputs(book, ramp, day) if ramp else (None, None)
         out.append("  " + ramp_verdict(book, ramp, realized, tdays))
-    out.append("  " + HOD_LINE)
+    out.append("  " + hod_paper_line(hod_db))
     return out

@@ -30,6 +30,7 @@ from persistence.database import Database  # noqa: E402
 import guardrail as guardrail_cli  # noqa: E402  (scripts/guardrail.py: stage_risk_usd, band_p5)
 from trading import live_guardrail as gr  # noqa: E402
 import eod_sections  # noqa: E402  (MOM / ORB PAPER PARITY / PROMOTION sections)
+import mom_bt_parity  # noqa: E402  (latest_parity_line only; the heavy imports are lazy)
 
 log = logging.getLogger("eod_report")
 LLM_MODEL = "haiku"
@@ -124,17 +125,24 @@ def last_matching_line(path: Path, needles: tuple) -> str:
     return hits[-1].strip() if hits else "(no verdict line yet)"
 
 
-def freeze_summary(path: Optional[Path] = None) -> str:
+def bf_enabled() -> bool:
+    """True when config.yaml trading.enabled is true (BF boots); a stale BF freeze is meaningless while it is paused."""
+    return yaml_flag(ROOT / "config.yaml", ["trading", "enabled"]).lower() == "true"
+
+
+def freeze_summary(path: Optional[Path] = None, bf_on: Optional[bool] = None) -> str:
     """`freeze: ORB frozen since D: reason | BF ...` per frozen book, `freeze: none` when neither is (the old line
-    printed the first 200 chars of the raw JSON, which is the BF block, never ORB's state)."""
+    printed the first 200 chars of the raw JSON, which is the BF block, never ORB's state).  BF is listed only
+    while BF is enabled (``bf_on``, default config.yaml): a paused book's old freeze is stale noise."""
     from trading import ramp_freeze
+    bf_on = bf_enabled() if bf_on is None else bf_on
     path = path or ROOT / "logs/ramp_freeze.json"
     if not path.exists():
         return "freeze: none"
     try:
         st = ramp_freeze.load_state(path)
         parts = [f"{b.upper()} frozen since {st[b].since}: {(st[b].reason or '')[:160]}"
-                 for b in ("orb", "bf") if b in st and st[b].frozen]
+                 for b in ("orb", "bf") if b in st and st[b].frozen and (b != "bf" or bf_on)]
     except Exception as e:  # noqa: BLE001
         log.warning("freeze state unreadable %s: %s", path, e)
         return f"freeze: NO-DATA (unreadable: {e})"
@@ -334,6 +342,9 @@ def guardrail_section() -> str:
             p5 = guardrail_cli.band_p5(book, stats.trailing_40_n)
             band_txt = f"{p5:+.3f}" if p5 is not None else "NO-DATA"
         flag = " [PAUSED_BY_GUARDRAIL]" if gr.is_paused(book, path=gr.STATE_PATH) else ""
+        if book == "hod_break":      # the live ledger is 13 stale fills; the book runs on its paper account
+            lines.append(f"  {eod_sections.hod_guardrail_line(gr.TRADES_DB)}{flag}")
+            continue
         lines.append(f"  {stats.line()} | band p5 {band_txt}{flag}")
     return "\n".join(lines)
 
@@ -356,7 +367,8 @@ def new_sections(day: str, trades: List[Dict]) -> List[str]:
     orb, orb_m = safe_section("ORB PAPER PARITY", lambda: eod_sections.orb_paper_parity_section(day, trades))
     promo, _ = safe_section("PROMOTION", lambda: (eod_sections.promotion_section(day, mom_m, orb_m), None))
     mom_live, _ = safe_section("MOM-LIVE", lambda: (eod_sections.mom_live_lines(day), None))
-    mom = mom + mom_live
+    parity, _ = safe_section("MOM BT parity", lambda: ([mom_bt_parity.latest_parity_line()], None))
+    mom = mom + mom_live + parity
     return (["MOM:"] + ["  " + ln for ln in mom] + ["ORB PAPER PARITY:"] + ["  " + ln for ln in orb] + promo)
 
 

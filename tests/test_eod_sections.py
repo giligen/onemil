@@ -210,7 +210,7 @@ def test_ramp_verdicts():
 
 def test_failed_sections_and_no_data_in_promotion(tmp_path):
     out = es.promotion_section(DAY, None, None, tmp_path / "s.json", closed=True)
-    assert any("Sleeve: NO-DATA" in ln for ln in out) and out[-1].startswith("  HOD: dry-run only")
+    assert any("Sleeve: NO-DATA" in ln for ln in out) and out[-1].startswith("  HOD (paper book)")
 
 
 def test_safe_section_catches():

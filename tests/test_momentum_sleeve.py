@@ -317,7 +317,10 @@ def test_run_submit_refuses_outside_window(monkeypatch):
     c.trading_client.submit_order.assert_not_called()
 
 
-def test_non_rebalance_day_is_noop(capsys):
+def test_non_rebalance_day_is_noop(capsys, monkeypatch, tmp_path):
+    """Wednesday after a COMPLETED Monday rotation is a no-op (a tmp state: never the real data/ file)."""
+    (tmp_path / 'state.json').write_text(json.dumps({'cash': 0.0, 'positions': {}, 'last_rebalance': '2026-10-05'}))
+    monkeypatch.setattr(runner, 'STATE_PATH', str(tmp_path / 'state.json'))
     c = fake_client()
     cal = [{'date': d.date(), 'open': None, 'close': None} for d in pd.bdate_range('2026-09-01', '2026-12-31')]
     c.get_market_calendar.side_effect = lambda s, e: [x for x in cal if s <= x['date'] <= e]
@@ -807,7 +810,8 @@ def test_state_persisted_right_after_execute_even_if_later_step_crashes(monkeypa
     st = json.loads((tmp_path / 'state.json').read_text())
     assert st['last_rebalance'] == '2026-10-05' and st['last_rebalance_run']
     assert runner.run(args, c, None, now) == 0
-    assert 'already rebalanced' in capsys.readouterr().out
+    # since the 2026-10-31 catch-up rule the calendar check sees the marker first ('already done this week')
+    assert 'already done this week' in capsys.readouterr().out
 
 
 def _asset_client(fractionable_by_sym):

@@ -253,12 +253,13 @@ def test_freeze_summary_names_each_frozen_book_not_the_raw_json_head(tmp_path):
     """GATE-1 used to print the first 200 chars of the raw JSON, which is the BF block, never ORB's state."""
     from trading import ramp_freeze as rf
     p = tmp_path / "ramp_freeze.json"
-    assert er.freeze_summary(p) == "freeze: none"
+    assert er.freeze_summary(p, bf_on=True) == "freeze: none"
     rf.set_freeze("bf", "JAGX: LIVE_ONLY", day="2026-09-24", path=p, notify=False)
     rf.set_freeze("orb", "BT picks never ordered live: ['DFDV']", day="2026-10-05", path=p, notify=False)
-    txt = er.freeze_summary(p)
+    txt = er.freeze_summary(p, bf_on=True)
     assert txt.startswith("freeze: ORB frozen since 2026-10-05: BT picks never ordered live: ['DFDV']")
     assert "BF frozen since 2026-09-24: JAGX" in txt
     rf.clear_freeze("orb", "fixed", path=p)
+    assert "BF frozen" not in er.freeze_summary(p, bf_on=False)     # BF paused: its old freeze is not printed
     rf.clear_freeze("bf", "fixed", path=p)
-    assert er.freeze_summary(p) == "freeze: none"
+    assert er.freeze_summary(p, bf_on=True) == "freeze: none"

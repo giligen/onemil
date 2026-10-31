@@ -1,7 +1,7 @@
 # RESULT cell 1,700z — October 2026 extension and paper-sleeve reconciliation (measurement only, no rule touched)
 
 Script `cell_1700z.py` (stages fetch / check / score); logs `1700z_fetch.log`, `1700z_check.log`, `1700z_score.log`;
-tables `1700z_weekly.csv`, `1700z_names.csv`; extension `panel_ext_202610.parquet` (new file; panel untouched).
+tables `1700z_weekly.csv`, `1700z_names.csv`; extension `panel_ext.parquet` (was panel_ext_202610.parquet; new file; panel untouched).
 
 ## Data and convention check (DEVIATION: the >2 % stop rule was NOT obeyed — see below)
 * Alpaca `adjustment=ALL`, `feed=SIP` (key allows it), 2026-09-01..10-30, 13,266 symbols (every panel symbol of 2026-09),

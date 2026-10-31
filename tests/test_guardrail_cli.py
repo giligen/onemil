@@ -167,7 +167,7 @@ def test_eod_guardrail_section_renders(guardrail_trades_db, insert_trade, tmp_pa
     assert out.startswith("GUARDRAIL:")
     assert "orb: n=1" in out
     assert "bull_flag: n=1" in out
-    assert "hod_break: no live fills yet" in out
+    assert "hod_break (paper): " in out          # HOD reports its PAPER book (no paper rows in the temp db)
     assert "band p5" in out
 
 

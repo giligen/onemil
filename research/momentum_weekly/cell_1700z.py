@@ -21,7 +21,7 @@ import pandas as pd
 ROOT = "/home/ec2-user/onemil"
 D = ROOT + "/research/momentum_weekly/"
 PANEL = D + "panel_2016_2026.parquet"
-EXT = D + "panel_ext_202610.parquet"
+EXT = D + "panel_ext.parquet"
 SCR = "/tmp/claude-1000/-home-ec2-user-onemil/257c3e2d-cf38-45d5-94e7-4877f8170f44/scratchpad/ext_cache/"
 EXT_START, EXT_END = pd.Timestamp("2026-09-01"), pd.Timestamp("2026-10-31")
 BATCH = 200
