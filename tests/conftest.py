@@ -6,6 +6,8 @@ docs/bf_wrapper_guard_spec_20260924.md): a real `TradingEngine` wired with
 `MagicMock(spec=...)` collaborators so `on_stock_qualified` / `run_pattern_check`
 exercise the actual production choke point, not a re-description of it.
 """
+import copy
+import hashlib
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -241,3 +243,42 @@ def _fast_stop_monitor_polls(monkeypatch):
     timing set the instance attribute themselves. Class defaults used in production are unchanged."""
     monkeypatch.setattr(StopMonitor, '_STOP_EXIT_POLL_INTERVAL_S', 0.05)
     monkeypatch.setattr(StopMonitor, '_PARTIAL_FILL_POLL_S', 0.0)
+
+
+@pytest.fixture(autouse=True)
+def _fast_scanner_cycle_poll(monkeypatch):
+    """Shrink the scanner's 0.5 s drain-poll while a cycle's Alpaca fetches are in flight (16+ tests x 0.5 s).
+    The class default used in production is unchanged."""
+    from scanner.realtime_scanner import RealtimeScanner
+    monkeypatch.setattr(RealtimeScanner, '_CYCLE_FETCH_POLL_S', 0.01)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _cached_yaml_safe_load():
+    """Parse each distinct YAML text once per session (config.yaml is ~25 KB and PyYAML's pure-Python loader takes
+    ~0.12 s; Config._load_yaml_only ran it ~100 times in test_scanner.py alone = 12 s of 27).
+
+    Cache key = sha1 of the text read from the stream/str, value = the parsed object; every caller gets a
+    ``copy.deepcopy`` so a test that mutates its config can never leak into another (copy-on-read). Streams without
+    a usable ``read()`` fall through to the real ``yaml.safe_load``; a test that monkeypatches ``yaml.safe_load``
+    itself overrides this wrapper for its duration."""
+    real = yaml.safe_load
+    cache = {}
+
+    def cached_safe_load(stream):
+        """yaml.safe_load with a parse cache keyed by content hash; deep-copies on every return."""
+        try:
+            text = stream if isinstance(stream, (str, bytes)) else stream.read()
+        except Exception:
+            return real(stream)
+        if not isinstance(text, (str, bytes)):
+            return real(stream)
+        raw = text.encode() if isinstance(text, str) else text
+        key = hashlib.sha1(raw).hexdigest()
+        if key not in cache:
+            cache[key] = real(text)
+        return copy.deepcopy(cache[key])
+
+    yaml.safe_load = cached_safe_load
+    yield
+    yaml.safe_load = real

@@ -100,6 +100,32 @@ def risk_adjusted_momentum(panel: pd.DataFrame, asof) -> pd.DataFrame:
     return out
 
 
+def _guard_frame(panel: pd.DataFrame, asof) -> pd.DataFrame:
+    """Per-bar guard features (symbol, bar_date, close, k, move, gap_days) up to ``asof``, sorted by symbol/date.
+
+    ``k`` = bars back from the symbol's last bar, ``move`` = close-to-close return against the symbol's previous bar,
+    ``gap_days`` = calendar days since it. Vectorised: the first bar of every symbol carries NaN move / gap (the old
+    per-symbol groupby.transform(pct_change) took ~16 s on the 32,894-symbol panel, this takes < 1 s and is
+    row-for-row identical -- tests/test_hygiene_events_equivalence_20261031.py).
+    """
+    asof = pd.Timestamp(asof)
+    sub = panel.loc[panel['bar_date'] <= asof, ['symbol', 'bar_date', 'close']]
+    sub = sub[sub['close'] > 0]                          # the backtest drops non-positive prices before the guard
+    if sub.empty:
+        return sub
+    sub = sub.sort_values(['symbol', 'bar_date'], kind='stable').drop_duplicates(['symbol', 'bar_date'], keep='last')
+    grp = sub.groupby('symbol', sort=False, observed=True)
+    gid = grp.ngroup().to_numpy()
+    same = np.concatenate([[False], gid[1:] == gid[:-1]])        # row has a previous bar of the same symbol
+    close = sub['close'].to_numpy().astype('float64')
+    prev_close = np.concatenate([[np.nan], close[:-1]])
+    day = sub['bar_date'].to_numpy()
+    prev_day = np.concatenate([day[:1], day[:-1]])
+    move = np.where(same, close / prev_close - 1.0, np.nan)
+    gap = np.where(same, (day - prev_day) // np.timedelta64(1, 'D'), np.nan)
+    return sub.assign(k=grp.cumcount(ascending=False), move=move, gap_days=gap)
+
+
 def hygiene_events(panel: pd.DataFrame, asof) -> Dict[str, tuple]:
     """Hygiene-guard events per symbol at ``asof``: ``{symbol: (reason, event_date)}`` (most recent event).
 
@@ -108,16 +134,9 @@ def hygiene_events(panel: pd.DataFrame, asof) -> Dict[str, tuple]:
     first bar of a symbol never carries a move -- a one-day close-to-close move > +200 % or < -75 % ('move') or more
     than 10 calendar days between consecutive bars ('gap'). When both occur the reason is 'move+gap'.
     """
-    asof = pd.Timestamp(asof)
-    sub = panel.loc[panel['bar_date'] <= asof, ['symbol', 'bar_date', 'close']]
-    sub = sub[sub['close'] > 0]                          # the backtest drops non-positive prices before the guard
+    sub = _guard_frame(panel, asof)
     if sub.empty:
         return {}
-    sub = sub.sort_values(['symbol', 'bar_date'], kind='stable').drop_duplicates(['symbol', 'bar_date'], keep='last')
-    grp = sub.groupby('symbol', sort=False, observed=True)
-    sub = sub.assign(k=grp.cumcount(ascending=False),
-                     move=grp['close'].transform(lambda c: c.astype('float64').pct_change()),
-                     gap_days=grp['bar_date'].diff().dt.days)
     sub = sub[sub['k'] < GUARD_LOOKBACK]
     moved = sub[(sub['move'] > GUARD_MOVE_UP) | (sub['move'] < GUARD_MOVE_DOWN)]
     gapped = sub[sub['gap_days'] > GUARD_MAX_GAP_DAYS]

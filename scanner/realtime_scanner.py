@@ -1224,6 +1224,8 @@ class RealtimeScanner:
     # Intraday Phase
     # =========================================================================
 
+    _CYCLE_FETCH_POLL_S = 0.5   # seconds between engine-bar drains while the cycle's Alpaca fetches are in flight
+
     def _run_intraday_cycle(self) -> None:
         """Run one intraday scan cycle (every 15 min)."""
         symbols = [s['symbol'] for s in self._universe]
@@ -1259,7 +1261,7 @@ class RealtimeScanner:
             trades_future = ex.submit(self.alpaca.get_latest_trades, symbols)
             while not (bars_future.done() and trades_future.done()):
                 self._drain_engine_bar_events_safe()
-                time_mod.sleep(0.5)
+                time_mod.sleep(self._CYCLE_FETCH_POLL_S)
             bars = bars_future.result()
             trades = trades_future.result()
         _t_fetch = time_mod.time() - _t_fetch0
