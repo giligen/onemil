@@ -1,0 +1,81 @@
+monday,kind,bt_rank,symbol,bt_score,in_paper,why_missing_from_bt
+2026-10-05,BT_top20,1,SNDK,162.8632,True,
+2026-10-05,BT_top20,2,AXTI,109.5321,True,
+2026-10-05,BT_top20,3,TXG,86.8768,True,
+2026-10-05,BT_top20,4,RVMD,85.699,True,
+2026-10-05,BT_top20,5,MU,83.3851,True,
+2026-10-05,BT_top20,6,TWST,72.1537,True,
+2026-10-05,BT_top20,7,LITE,66.2277,True,
+2026-10-05,BT_top20,8,ASX,66.1641,True,
+2026-10-05,BT_top20,9,ATI,54.8202,True,
+2026-10-05,BT_top20,10,VLO,52.7035,True,
+2026-10-05,BT_top20,11,FTI,49.7482,True,
+2026-10-05,BT_top20,12,DELL,49.1334,True,
+2026-10-05,BT_top20,13,TD,48.7985,True,
+2026-10-05,BT_top20,14,PSX,48.5819,True,
+2026-10-05,BT_top20,15,WDC,48.3348,True,
+2026-10-05,BT_top20,16,NUE,47.9346,True,
+2026-10-05,BT_top20,17,MPC,47.0145,True,
+2026-10-05,BT_top20,18,TGT,46.9034,True,
+2026-10-05,BT_top20,19,STX,45.6914,True,
+2026-10-05,BT_top20,20,STT,44.9028,True,
+2026-10-12,BT_top20,1,SNDK,163.2901,True,
+2026-10-12,BT_top20,2,AXTI,115.2916,True,
+2026-10-12,BT_top20,3,TXG,95.6316,True,
+2026-10-12,BT_top20,4,MU,77.8367,True,
+2026-10-12,BT_top20,5,RVMD,77.7097,True,
+2026-10-12,BT_top20,6,LITE,76.795,True,
+2026-10-12,BT_top20,7,ASX,66.9569,True,
+2026-10-12,BT_top20,8,VLO,60.6226,True,
+2026-10-12,BT_top20,9,STX,60.2134,True,
+2026-10-12,BT_top20,10,TWST,57.2534,True,
+2026-10-12,BT_top20,11,WDC,55.3812,True,
+2026-10-12,BT_top20,12,ROIV,53.0785,True,
+2026-10-12,BT_top20,13,ATI,52.5321,True,
+2026-10-12,BT_top20,14,PSX,51.7306,True,
+2026-10-12,BT_top20,15,FRO,49.9344,True,
+2026-10-12,BT_top20,16,MPC,49.5296,True,
+2026-10-12,BT_top20,17,FTI,49.3029,True,
+2026-10-12,BT_top20,18,UMC,48.5213,True,
+2026-10-12,BT_top20,19,TD,46.3682,True,
+2026-10-12,BT_top20,20,DOCN,45.3935,True,
+2026-10-19,BT_top20,1,AXTI,143.0362,True,
+2026-10-19,BT_top20,2,SNDK,142.4907,True,
+2026-10-19,BT_top20,3,TXG,115.5022,True,
+2026-10-19,BT_top20,4,MU,80.1132,True,
+2026-10-19,BT_top20,5,TWST,76.492,True,
+2026-10-19,BT_top20,6,LITE,75.6832,True,
+2026-10-19,BT_top20,7,RVMD,70.6976,True,
+2026-10-19,BT_top20,8,VLO,68.3909,True,
+2026-10-19,BT_top20,9,ASX,66.5007,True,
+2026-10-19,BT_top20,10,DELL,60.3535,True,
+2026-10-19,BT_top20,11,MPC,59.2687,True,
+2026-10-19,BT_top20,12,PSX,59.1893,True,
+2026-10-19,BT_top20,13,UMC,57.7025,True,
+2026-10-19,BT_top20,14,FRO,56.8969,True,
+2026-10-19,BT_top20,15,STX,55.9707,True,
+2026-10-19,BT_top20,16,DINO,53.0055,True,
+2026-10-19,BT_top20,17,ILMN,52.4926,True,
+2026-10-19,BT_top20,18,IOVA,52.4873,True,
+2026-10-19,BT_top20,19,TRGP,51.6193,True,
+2026-10-19,BT_top20,20,WDC,49.7198,True,
+2026-10-26,bt_keeps,1,SNDK,152.455,True,paper held through (missed rotation)
+2026-10-26,bt_keeps,2,AXTI,149.1382,True,paper held through (missed rotation)
+2026-10-26,bt_keeps,3,TXG,124.6505,True,paper held through (missed rotation)
+2026-10-26,bt_keeps,4,TWST,99.8318,True,paper held through (missed rotation)
+2026-10-26,bt_keeps,5,MU,86.8552,True,paper held through (missed rotation)
+2026-10-26,bt_keeps,6,LITE,77.9064,True,paper held through (missed rotation)
+2026-10-26,bt_keeps,7,ASX,69.1547,True,paper held through (missed rotation)
+2026-10-26,bt_keeps,8,STX,67.2863,True,paper held through (missed rotation)
+2026-10-26,bt_keeps,9,RVMD,65.8951,True,paper held through (missed rotation)
+2026-10-26,bt_keeps,10,IOVA,60.9147,True,paper held through (missed rotation)
+2026-10-26,bt_keeps,11,VLO,59.8557,True,paper held through (missed rotation)
+2026-10-26,bt_keeps,12,ILMN,57.9569,True,paper held through (missed rotation)
+2026-10-26,bt_keeps,13,UMC,56.5352,True,paper held through (missed rotation)
+2026-10-26,bt_keeps,14,DELL,54.2884,True,paper held through (missed rotation)
+2026-10-26,bt_keeps,15,WDC,53.7209,True,paper held through (missed rotation)
+2026-10-26,bt_would_rotate_in,16,MRNA,51.1122,False,paper held through (missed rotation)
+2026-10-26,bt_would_rotate_in,17,MXL,51.0319,False,paper held through (missed rotation)
+2026-10-26,bt_keeps,18,PSX,50.4613,True,paper held through (missed rotation)
+2026-10-26,bt_would_rotate_in,19,INTC,49.9891,False,paper held through (missed rotation)
+2026-10-26,bt_keeps,20,MPC,49.3838,True,paper held through (missed rotation)
