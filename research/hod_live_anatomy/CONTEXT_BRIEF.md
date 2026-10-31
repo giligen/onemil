@@ -56,6 +56,15 @@ in `data/trades.db` — read a COPY: `/tmp/claude-1000/-home-ec2-user-onemil/257
   cost + noise. 53–72 % of declined breaks retrace to the tighter limit inside the minute (a live cap would retrace-fill
   them). Next pointers: causal break volume vs consolidation (thin breaks −0.09 R in both splits, v_T leaks), retrace-fill
   adverse selection, spread-scaled limit. `RESULT_1730.md`, `ladder_1730.csv`, `cache/opens_1730.parquet`.
+* **Cell 1,731 (10/31): causal break volume FAILS, no filter.** On the cap-15 B1 book (7,190 fills), a drop-Q1 filter
+  gives paired Δ M1 (tape pre-cross rate) +0.002 / +0.013 (t 0.2 / 1.6), M2 (v_j ÷ mean of the last 10 bars)
+  −0.008 / −0.003, M3 (cumvol/ADV20) +0.008 / −0.006 (TRAIN-H2 / VAL). MDE 0.023–0.05 R. M2's thin Q1 is the BEST
+  quintile in TRAIN-H2. The 1,730 thin-break read was a **composition artefact**: d > 15 crossings the cap never fills
+  are 30 % of v_T-Q1 and lose −0.37 R; on fills, v_T is flat too. Tape: the 1,438 caches cover 84 % of the book
+  (winner/loser gap 0.6 pp) and match the bars exactly; 21.5 % of crosses come in the first 5 s of T. The live ledger
+  has `arm_bar_vol_x` = v_j ÷ mean(v over the day so far), which is not M2. Ledger features exist only from 10/19
+  (98 of 231 fills). `RESULT_1731.md`, `cache/vol_1731_{bars,tape}.parquet` (v_j, cumv_j, m_lo, pre-cross volume,
+  seconds to cross for every A/B1 crossing).
 
 ## Data quirks that have already bitten
 Alpaca 1-min bars have NO bar for a minute without a trade (thin names: 82 % minute coverage; losers thinner) — treat
