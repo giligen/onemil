@@ -282,6 +282,14 @@ class HodBreakEngine:
         # pullback is a trade the backtest never took — so the order lives only long enough to cover submit latency.
         self.order_timeout_s = float(cfg.get('order_timeout_s', 10.0))
         self.max_quote_age_s = float(cfg.get('max_quote_age_s', 5.0))       # a quote older than this (halt, stale feed) = no order
+        # 2026-10-31 paper-exec instruments (docs/hod_paper_exec_instruments_spec_20261031.md): passive 14:00 squeeze of
+        # the take-profit leg of positions below squeeze_max_r (cells 1,725/1,726). OFF unless config turns it on.
+        self.squeeze_enabled = bool(cfg.get('squeeze_enabled', False))
+        self.squeeze_minute = int(cfg.get('squeeze_minute', 840))            # ET minutes from midnight, like flat_minute
+        self.squeeze_max_r = float(cfg.get('squeeze_max_r', 0.5))            # strict '<': a runner at >= this is untouched
+        self.squeeze_placed = 0; self.squeeze_filled = 0                     # per-session counters (reset in _roll_session)
+        self._squeeze_tried: set = set(); self._squeeze_warned: set = set(); self._squeeze_filled_syms: set = set()
+        self._entry_quote_warned: set = set()                                # symbols already warned 'entry quote missing' today
         self._last_pending_check = 0.0
         self.max_spread_frac_r = float(cfg.get('max_spread_frac_r', 0.0))   # 0 = off; e.g. 0.15 = skip when the spread is > 15% of R (9/14: 57% of signals)
         # EOD exit pricing mode (trading/eod_exit.py, shared spec with ORB's force_close_all) — default
@@ -423,7 +431,7 @@ class HodBreakEngine:
             self.session_date = today; self.candidates.clear(); self.entered_today.clear(); self.daily_pnl = 0.0
             self.live_since = None
             self._kill_notified.clear(); self._flattened = False; self._post_close_fc_warned = False
-            self._live_cap_slots.clear(); self._cap_logged.clear(); self._arm_skip_logged.clear(); self.arm_gate_skips = {'price': 0, 'r_pct': 0}; self._sizing_logged.clear(); self._bp_cache_value = None; self._bp_cache_ts = 0.0
+            self._live_cap_slots.clear(); self._cap_logged.clear(); self._arm_skip_logged.clear(); self.arm_gate_skips = {'price': 0, 'r_pct': 0}; self._sizing_logged.clear(); self.squeeze_placed = 0; self.squeeze_filled = 0; self._squeeze_tried.clear(); self._squeeze_warned.clear(); self._squeeze_filled_syms.clear(); self._entry_quote_warned.clear(); self._bp_cache_value = None; self._bp_cache_ts = 0.0
             self._live_cancel_swept_entry = False; self._live_cancel_swept_flat = False
             self._live_armed_stops.clear(); self._rail_cancel_done.clear(); self._rail_fail_counts.clear()
             self._warn_ts.clear(); self._fc_unknown.clear()
@@ -594,6 +602,7 @@ class HodBreakEngine:
                 self.drain_bar_events()
                 self._process_pending_fills()
                 self.check_exits()
+                self._run_squeeze()
                 self._process_failure_short()
                 if self.book == 'hod_break' and self.entry_mode == 'resting_stop_limit' and not self.dry_run:
                     self._poll_live_fills()
@@ -918,6 +927,8 @@ class HodBreakEngine:
             if q is None:
                 return                                        # no quote cached yet — the bar-level fallback resolves it at the bar's close
             bid, ask, qts = q
+            if cand.live_order is not None:
+                self._snapshot_cross_quote(cand.live_order, symbol, bid, ask, qts)
             fill_px = resting_entry_fill(ask, arm)
             filled = fill_px is not None
             cross_ts = self._et_now()
@@ -2115,6 +2126,7 @@ class HodBreakEngine:
             trade_id = self._save_pending_trade(sym, filled_qty, fill_px, stop, target, lo['order_id'], pattern_data,
                                                  order_status='filled', fill_price=fill_px, filled_at=now_ts.isoformat())
         lo['booked_qty'] = filled_qty; lo['tp_leg_id'] = tp_id; lo['sl_leg_id'] = sl_id; lo['trade_id'] = trade_id
+        self._write_entry_quote(sym, trade_id, lo)
         # Register a Position so the EXISTING check_exits()/_book_leg_fill()/_record_exit() bracket-leg poll
         # (already tested against tp_leg_id/sl_leg_id fills for the direct-bracket path) also covers a fill on
         # THIS safety-net OCO — the only path that was closing VECO's TP leg (9/25: it filled at the broker but
@@ -2822,15 +2834,136 @@ class HodBreakEngine:
         except Exception as e:
             logger.error(f"{self.tag} {pos.symbol}: take-profit re-anchor to {t2:.2f} FAILED ({e}) — leg {old_id} stays at {pos.target:.2f} (target {'below' if t2 > pos.target else 'above'} the spec's)")
 
+    # ------------------------------------------------------------------ paper-exec instruments (2026-10-31)
+    def _snapshot_cross_quote(self, lo: dict, symbol: str, bid: float, ask: float, qts: float) -> None:
+        """Snapshot the NBBO at the moment the engine SEES THE CROSS of a resting entry onto `lo` (cross_bid/ask/
+        bid_size/ask_size/ts) — consumed by `_write_entry_quote` when the fill is booked. bid/ask are the print-watch
+        quote cached at the cross print (the same source the dry entry ledger's `ask` column uses); sizes come from the
+        StopMonitor quote watch when one exists. A stale quote (> max_quote_age_s) is NOT stored: the reason is kept in
+        `lo['cross_missing_why']` and warned at booking. Zero effect on any decision. Never raises."""
+        try:
+            age = time.time() - float(qts)
+            if self.max_quote_age_s > 0 and age > self.max_quote_age_s:
+                lo['cross_missing_why'] = f'quote {age:.1f}s old at the cross (> max_quote_age_s {self.max_quote_age_s:.1f})'; return
+            if not (bid and ask and bid > 0 and ask > 0):
+                lo['cross_missing_why'] = f'no two-sided quote at the cross (bid {bid} ask {ask})'; return
+            bs = asz = None
+            snap = self.stop_monitor.get_quote_watch_snapshot(symbol) if self.stop_monitor is not None and hasattr(self.stop_monitor, 'get_quote_watch_snapshot') else None
+            if isinstance(snap, dict):
+                bs = snap.get('latest_bid_size') or None; asz = snap.get('latest_ask_size') or None
+            lo.update(cross_bid=float(bid), cross_ask=float(ask), cross_bid_size=bs, cross_ask_size=asz, cross_ts=self._et_now().isoformat())
+            lo.pop('cross_missing_why', None)
+        except Exception as e:
+            lo['cross_missing_why'] = f'snapshot failed: {e}'
+
+    def _write_entry_quote(self, sym: str, trade_id, lo: dict) -> None:
+        """Write the cross snapshot onto the booked trade row as entry_quote_bid/ask/bid_size/ask_size/spread (spread =
+        ask - bid in dollars, the ORB convention). No snapshot -> columns stay NULL and ONE WARNING per symbol-day.
+        Written once per order (a partial top-up does not rewrite it). Never raises, never affects a decision."""
+        if lo.get('entry_quote_written'):
+            return
+        if lo.get('cross_bid') is None or lo.get('cross_ask') is None:
+            if sym not in self._entry_quote_warned:
+                self._entry_quote_warned.add(sym)
+                logger.warning(f"{self.tag} entry quote missing {sym}: {lo.get('cross_missing_why') or 'no cross snapshot was taken before the fill was booked'}")
+            return
+        try:
+            self.db.update_trade(trade_id, {'entry_quote_bid': lo['cross_bid'], 'entry_quote_ask': lo['cross_ask'],
+                                            'entry_quote_bid_size': lo.get('cross_bid_size'), 'entry_quote_ask_size': lo.get('cross_ask_size'),
+                                            'entry_quote_spread': lo['cross_ask'] - lo['cross_bid']})
+            lo['entry_quote_written'] = True
+        except Exception as e:
+            logger.error(f"{self.tag} {sym}: entry quote persistence failed for trade_id={trade_id} ({e})")
+
+    def _squeeze_nbbo(self, sym: str):
+        """(bid, ask) for the squeeze: the StopMonitor quote watch if it has a two-sided quote, else a fresh REST quote
+        (refused when older than max_quote_age_s). (0.0, 0.0) when neither is available."""
+        try:
+            snap = self.stop_monitor.get_quote_watch_snapshot(sym) if self.stop_monitor is not None and hasattr(self.stop_monitor, 'get_quote_watch_snapshot') else None
+            if isinstance(snap, dict) and (snap.get('latest_bid') or 0) > 0 and (snap.get('latest_ask') or 0) > 0:
+                return float(snap['latest_bid']), float(snap['latest_ask'])
+        except Exception as e:
+            logger.warning(f"{self.tag} {sym}: squeeze quote-watch read failed ({e})")
+        q = self._quote(sym, tries=1)
+        return (float(q[0]), float(q[1])) if q else (0.0, 0.0)
+
+    def _squeeze_warn_once(self, sym: str, why: str) -> None:
+        """WARNING `[HOD] SQUEEZE skip {sym}: why`, once per symbol-day per reason."""
+        if (sym, why) not in self._squeeze_warned:
+            self._squeeze_warned.add((sym, why)); logger.warning(f"{self.tag} SQUEEZE skip {sym}: {why}")
+
+    def _run_squeeze(self) -> None:
+        """Passive 14:00 squeeze (docs/hod_paper_exec_instruments_spec_20261031.md; cells 1,725/1,726). At the first tick
+        at or after `squeeze_minute` (and before the flat), for every open position whose unrealised R = (mid - fill) /
+        (fill - stop) is STRICTLY below `squeeze_max_r`, replace the take-profit bracket leg's limit with the CURRENT ASK.
+        ONE replace per position per day, never re-chased. Runners are untouched; the stop leg and the flat are untouched.
+        Positions without a tp_leg_id (monitor-held) are skipped with a WARNING. OFF unless `squeeze_enabled`."""
+        if not self.squeeze_enabled:
+            return
+        mnow = self._minute_of_day()
+        if mnow < self.squeeze_minute or mnow >= getattr(self, 'flat_minute', self.params.flat_minute):
+            return
+        for sym, pos in list(self.positions.items()):
+            if pos.status != 'open' or sym in self._squeeze_tried or pos.pattern_data.get('squeeze_done'):
+                continue
+            self._squeeze_tried.add(sym)                       # one attempt per symbol-day, whatever the outcome
+            try:
+                self._squeeze_one(sym, pos)
+            except Exception as e:
+                logger.error(f"{self.tag} SQUEEZE {sym} failed: {e}", exc_info=True)
+
+    def _squeeze_one(self, sym: str, pos: Position) -> None:
+        """Squeeze one position (see `_run_squeeze`). Mirrors `_anchor_target_to_fill`'s replace + new-leg-id tracking."""
+        if not pos.tp_leg_id:
+            self._squeeze_warn_once(sym, 'no tp_leg_id (monitor-held / reconciled position) — no new order placed'); return
+        if not pos.fill_price or pos.fill_price <= pos.stop:
+            self._squeeze_warn_once(sym, f'no valid fill/stop (fill {pos.fill_price}, stop {pos.stop})'); return
+        bid, ask = self._squeeze_nbbo(sym)
+        if bid > 0 and ask > 0:
+            mid = (bid + ask) / 2.0
+        else:
+            cand = self.candidates.get(sym); mid = 0.0
+            if cand is not None and cand.have.any():
+                mid = float(cand.ohlcv[int(np.flatnonzero(cand.have)[-1]), 3])
+            self._squeeze_warn_once(sym, f'no quote — unrealised R from the last bar close {mid:.2f}')
+            if mid <= 0:
+                return
+        unreal = (mid - pos.fill_price) / (pos.fill_price - pos.stop)
+        if not unreal < self.squeeze_max_r:
+            return                                             # runner: untouched
+        if ask <= 0 or ask <= bid:
+            self._squeeze_warn_once(sym, f'ask {ask:.2f} <= bid {bid:.2f} (no usable ask) — not replaced'); return
+        new_px = round(ask, 2); old_px = pos.target
+        if new_px >= old_px:
+            self._squeeze_warn_once(sym, f'ask {new_px:.2f} is not below the take-profit {old_px:.2f} — not replaced'); return
+        old_id = pos.tp_leg_id
+        try:
+            res = self.alpaca.replace_order_limit_price(old_id, new_px) or {}
+        except Exception as e:
+            logger.error(f"{self.tag} SQUEEZE {sym}: take-profit replace to {new_px:.2f} FAILED ({e}) — leg {old_id} stays at {old_px:.2f}"); return
+        new_id = str(res.get('id') or '')
+        if not new_id:
+            logger.error(f"{self.tag} SQUEEZE {sym}: replace returned no order id — leg {old_id} assumed unchanged"); return
+        pos.tp_leg_id = new_id
+        self._update_pattern_data(pos, tp_leg_id=new_id, tp_leg_replaced=old_id, squeeze_done=True, squeeze_px=new_px,
+                                  squeeze_bid=bid, squeeze_ask=ask, squeeze_old_target=old_px, squeeze_unreal_r=round(unreal, 3))
+        self.squeeze_placed += 1
+        logger.info(f"{self.tag} SQUEEZE {sym}: unreal={unreal:+.2f}R tp {old_px:.2f} -> ask {new_px:.2f}")
+
     def _exit_legs(self, pos: Position):
-        return ((pos.close_order_id, 'eod'), (pos.tp_leg_id, 'target'), (pos.sl_leg_id, 'stop'))
+        return ((pos.close_order_id, 'eod'), (pos.tp_leg_id, self._tp_reason(pos)), (pos.sl_leg_id, 'stop'))
+
+    @staticmethod
+    def _tp_reason(pos: Position) -> str:
+        """Exit reason of the take-profit leg: 'squeeze' once the 14:00 squeeze re-priced it to the ask, else 'target'."""
+        return 'squeeze' if pos.pattern_data.get('squeeze_done') else 'target'
 
     def _leg_status(self, pos: Position, leg_id: str, reason: str, rest: bool = False):
         """Status of an exit leg, following a replaced order to its successor (Alpaca's replace creates a new id)."""
         st = self._order_status(leg_id, rest=rest)
         if st and str(st.get('status', '')).lower() == 'replaced' and st.get('replaced_by'):
             new_id = str(st['replaced_by']); logger.warning(f"{self.tag} {pos.symbol}: {reason} leg {leg_id} was replaced by {new_id} — following it")
-            if reason == 'target': pos.tp_leg_id = new_id; self._update_pattern_data(pos, tp_leg_id=new_id)
+            if reason in ('target', 'squeeze'): pos.tp_leg_id = new_id; self._update_pattern_data(pos, tp_leg_id=new_id)
             elif reason == 'stop': pos.sl_leg_id = new_id; self._update_pattern_data(pos, sl_leg_id=new_id)
             else: pos.close_order_id = new_id; self._update_pattern_data(pos, close_order_id=new_id)
             st = self._order_status(new_id, rest=rest); leg_id = new_id
@@ -2845,6 +2978,8 @@ class HodBreakEngine:
         if new <= 0 or px <= 0:
             return 0
         pos.leg_booked[leg_id] = fq; pos.closed_qty += new; pos.closed_notional += new * px; pos.last_close_reason = reason
+        if reason == 'squeeze' and pos.symbol not in self._squeeze_filled_syms:
+            self._squeeze_filled_syms.add(pos.symbol); self.squeeze_filled += 1
         if pos.closed_qty < pos.shares:
             logger.info(f"{self.tag} {pos.symbol}: {reason} sold {new} @ {px:.2f} — {pos.open_qty} still held (partial)")
             self._update_pattern_data(pos, closed_qty=pos.closed_qty, closed_notional=round(pos.closed_notional, 2), partial_exit=reason)
@@ -2861,6 +2996,12 @@ class HodBreakEngine:
                     max(0.0, (datetime.now(timezone.utc) - pos.close_submitted_at).total_seconds() * 1000.0)
                     if pos.close_submitted_at else None
                 )
+            elif reason == 'squeeze':
+                # the 14:00 passive squeeze: the TP leg was re-priced to the ask at squeeze time; that NBBO is the exit's quote
+                pricing_method = 'squeeze_ask'
+                trigger_price = pos.pattern_data.get('squeeze_px')
+                quote_bid = float(pos.pattern_data.get('squeeze_bid') or 0.0); quote_ask = float(pos.pattern_data.get('squeeze_ask') or 0.0)
+                latency_ms = None
             else:
                 # target/stop bracket legs: no submit-time quote capture today (that would need entry-time
                 # instrumentation, out of scope here) — tag the method and the ONE trigger price we do have
@@ -3033,14 +3174,14 @@ class HodBreakEngine:
     def _settle_exit_legs(self, pos: Position) -> None:
         """Cancel the bracket legs and READ them until terminal (≤ FC_LEG_POLL_S): a leg that filled in the meantime is
         booked, never sold twice. Nothing is sold on assumptions."""
-        for leg, reason in ((pos.tp_leg_id, 'target'), (pos.sl_leg_id, 'stop')):
+        for leg, reason in ((pos.tp_leg_id, self._tp_reason(pos)), (pos.sl_leg_id, 'stop')):
             if not leg: continue
             try: self.alpaca.cancel_order(leg)
             except Exception as e: logger.warning(f"{self.tag} FC leg cancel {pos.symbol} failed ({e}) — reading the leg")
         deadline = time.time() + self.FC_LEG_POLL_S
         while True:
             pending = False
-            for leg, reason in ((pos.tp_leg_id, 'target'), (pos.sl_leg_id, 'stop')):
+            for leg, reason in ((pos.tp_leg_id, self._tp_reason(pos)), (pos.sl_leg_id, 'stop')):
                 if not leg or pos.symbol not in self.positions: continue
                 leg, st = self._leg_status(pos, leg, reason, rest=True)
                 st = st or {}
@@ -3211,7 +3352,7 @@ class HodBreakEngine:
         if n:
             _flat_msg = (f"{self.tag} flat at {getattr(self, 'flat_minute', self.params.flat_minute) // 60:02d}:"
                          f"{getattr(self, 'flat_minute', self.params.flat_minute) % 60:02d} ET — {n} close order(s) submitted, "
-                         f"{len(remaining)} still open")
+                         f"{len(remaining)} still open, squeeze={self.squeeze_placed}/{self.squeeze_filled}")
             logger.info(_flat_msg); self._notify_trade(_flat_msg)
         return n
 
