@@ -32,6 +32,9 @@ SOURCE_SNAPSHOT = 'snapshot'
 # ~700 lines/minute; this keeps the one-time snapshot->bar transition event
 # visible without repeating it on every later tick for the same symbol.
 _bar_source_logged: set = set()
+# (symbol, source) pairs whose GAP_GATE line was already logged this session
+# (journal-flood fix 2026-11-02: the line repeated every cycle, ~76K/day).
+_gap_gate_logged: set = set()
 
 
 @dataclass
@@ -152,6 +155,14 @@ def resolve_gap_input(
     if is_new_bar_source:
         _bar_source_logged.add(symbol)
     log_fn = logger.info if (is_real_candidate or is_new_bar_source) else logger.debug
+    # Transition-only for the DEBUG path: a sub-floor repeat tick echoes the
+    # gate inputs with no state change, so it logs once per (symbol, source).
+    # A real candidate always logs (scripts/eod_sections.py reads its gap_pct
+    # from this line) and so does the snapshot -> bar transition.
+    if not (is_real_candidate or is_new_bar_source):
+        if (symbol, source) in _gap_gate_logged:
+            return result
+        _gap_gate_logged.add((symbol, source))
     log_fn(
         f"[ORB] GAP_GATE {symbol} gap_input_open={result.gap_input_open:.4f} "
         f"gap_input_prev_close={result.gap_input_prev_close:.4f} "

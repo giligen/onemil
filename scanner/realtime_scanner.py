@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 
 ET = pytz.timezone('US/Eastern')
 
+CLOSE_CALLS_PRINT_CAP = 20  # verbose close-call table: top N by intraday_change_pct, then "(+N more)"
+
 
 def _stop_monitor_breaker_reason(sm, now: float) -> str:
     """Why the StopMonitor circuit breaker is tripping: its last websocket error/disconnect reason and the seconds
@@ -1530,7 +1532,7 @@ class RealtimeScanner:
                     'news_headline': headline,
                     'qualified': 1,
                 })
-            elif candidate.criteria_met_count >= candidate.total_criteria - 1:
+            elif self.criteria.is_close_call(candidate):
                 close_calls.append(candidate)
 
         # Output
@@ -1591,8 +1593,9 @@ class RealtimeScanner:
                     )
 
             if close_calls:
+                ranked = sorted(close_calls, key=lambda c: c.intraday_change_pct, reverse=True)
                 print(f"  Close calls ({len(close_calls)}):")
-                for c in close_calls:
+                for c in ranked[:CLOSE_CALLS_PRINT_CAP]:
                     missing = [k for k, v in c.criteria_met.items() if not v]
                     print(
                         f"    {c.symbol:<6} "
@@ -1600,6 +1603,8 @@ class RealtimeScanner:
                         f"RelVol: {c.relative_volume:.1f}x "
                         f"Missing: {missing}"
                     )
+                if len(ranked) > CLOSE_CALLS_PRINT_CAP:
+                    print(f"    (+{len(ranked) - CLOSE_CALLS_PRINT_CAP} more)")
 
     # =========================================================================
     # Timing Helpers

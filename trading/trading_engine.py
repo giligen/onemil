@@ -277,6 +277,7 @@ class TradingEngine:
         self._bf_name_cache: Dict[str, Optional[str]] = {}
         self._bf_excluded_logged: Set[str] = set()
         self._traded_symbols: Set[str] = set()
+        self._traded_skip_logged: Set[str] = set()
         self._patterns_detected: int = 0
         self._patterns_traded: int = 0
         self._pattern_details: list = []
@@ -1352,7 +1353,11 @@ class TradingEngine:
             return
 
         if symbol in self._traded_symbols:
-            logger.debug(f"{symbol}: Already traded today, skipping")
+            # Once per symbol per day (journal-flood fix 2026-11-02): the scanner
+            # re-reports a qualified symbol every cycle; the skip has no state change.
+            if symbol not in self._traded_skip_logged:
+                self._traded_skip_logged.add(symbol)
+                logger.debug(f"{symbol}: Already traded today, skipping")
             return
 
         if symbol not in self._qualified_symbols:
@@ -4858,6 +4863,7 @@ class TradingEngine:
         """
         self._qualified_symbols.clear()
         self._traded_symbols.clear()
+        self._traded_skip_logged.clear()
         self._patterns_detected = 0
         self._patterns_traded = 0
         self._pattern_details.clear()

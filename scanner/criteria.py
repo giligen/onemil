@@ -40,6 +40,34 @@ class ScanCandidate:
         return len(self.criteria_met)
 
 
+CLOSE_CALL_MIN_MOVE_FRACTION = 0.5  # a missing intraday_change only counts if >= 50 % of the threshold
+
+
+def is_close_call(candidate: ScanCandidate, min_intraday_change_pct: float) -> bool:
+    """
+    Single definition of a "close call" (journal-flood fix 2026-11-02).
+
+    A close call is a REAL near-miss: exactly one criterion is missing and,
+    when that criterion is `intraday_change`, the stock has already moved at
+    least CLOSE_CALL_MIN_MOVE_FRACTION of the configured threshold. A stock
+    that passes the other five criteria but has not moved is not a near-miss
+    (it is ~3,900 symbols per cycle).
+
+    Args:
+        candidate: ScanCandidate with criteria_met populated
+        min_intraday_change_pct: configured intraday_change_pct_min
+
+    Returns:
+        True when the candidate is a genuine near-miss
+    """
+    missing = [k for k, v in candidate.criteria_met.items() if not v]
+    if len(missing) != 1:
+        return False
+    if missing[0] == 'intraday_change':
+        return candidate.intraday_change_pct >= CLOSE_CALL_MIN_MOVE_FRACTION * min_intraday_change_pct
+    return True
+
+
 class ScannerCriteria:
     """
     Rules engine for stock qualification.
@@ -86,6 +114,13 @@ class ScannerCriteria:
         self.intraday_change_pct_min = intraday_change_pct_min
         self.relative_volume_min = relative_volume_min
         self.min_dollar_volume = min_dollar_volume
+        # Symbols whose INTRADAY QUALIFIED line was logged and not yet
+        # followed by a non-qualifying evaluation (transition-only logging).
+        self._qualified_logged: set = set()
+
+    def is_close_call(self, candidate: ScanCandidate) -> bool:
+        """Close-call predicate bound to this instance's configured threshold."""
+        return is_close_call(candidate, self.intraday_change_pct_min)
 
     def evaluate_premarket(self, candidate: ScanCandidate) -> bool:
         """
@@ -162,7 +197,12 @@ class ScannerCriteria:
 
         qualified = all(candidate.criteria_met.values())
 
-        if qualified:
+        if not qualified:
+            self._qualified_logged.discard(candidate.symbol)
+        if qualified and candidate.symbol not in self._qualified_logged:
+            # Transition-only (journal-flood fix 2026-11-02): one line when a
+            # symbol becomes qualified, not one per cycle while it stays so.
+            self._qualified_logged.add(candidate.symbol)
             float_q = f"{candidate.float_shares / 1_000_000:.1f}M" if candidate.float_shares else "N/A"
             logger.info(
                 f"INTRADAY QUALIFIED: {candidate.symbol} | "
@@ -171,7 +211,7 @@ class ScannerCriteria:
                 f"Float: {float_q} | "
                 f"News: {candidate.news_headline}"
             )
-        elif candidate.criteria_met_count >= candidate.total_criteria - 1:
+        elif not qualified and self.is_close_call(candidate):
             logger.debug(
                 f"CLOSE CALL: {candidate.symbol} | "
                 f"Met {candidate.criteria_met_count}/{candidate.total_criteria} | "

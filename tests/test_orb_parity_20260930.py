@@ -156,6 +156,8 @@ def test_gap_gate_logs_info_only_for_real_candidates_or_new_bar_source(caplog):
     r2 = resolve_gap_input('ZZGAPNEWBAR', snapshot_open=10.10, prev_close=10.0,
                             minute_bar_open=10.05, gap_floor_pct=50.0)
     assert r2.source == SOURCE_BAR
+    # Journal-flood fix 2026-11-02: the first sub-floor repeat tick logs once at DEBUG, later ones are silent
+    # (the line carries no state change; the ledger row is unaffected). Real candidates always log.
     recs = [rec for rec in caplog.records if '[ORB] GAP_GATE' in rec.message]
     assert len(recs) == 1 and recs[0].levelname == 'DEBUG'
 

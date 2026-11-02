@@ -41,6 +41,10 @@ class ColoredFormatter(logging.Formatter):
         return f"{color}{formatted}{LogColors.RESET}"
 
 
+# websockets/urllib3/httpx are already pinned to WARNING above (stricter than INFO).
+THIRD_PARTY_INFO_LOGGERS = ("alpaca", "asyncio")
+
+
 def setup_logging(
     log_level: str = "INFO",
     log_dir: Optional[str] = None,
@@ -107,6 +111,12 @@ def setup_logging(
     logging.getLogger("httpcore").setLevel(logging.WARNING)    # HTTP connection pool noise
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("anthropic").setLevel(logging.WARNING)   # LLM API request/response details
+
+    # Third-party DEBUG stays off under --verbose (journal-flood fix
+    # 2026-11-02): the alpaca stream subscription ack alone is several hundred
+    # KB per entry. Our own loggers keep the requested level.
+    for name in THIRD_PARTY_INFO_LOGGERS:
+        logging.getLogger(name).setLevel(logging.INFO)
 
     logging.info(f"Logging initialized at {log_level.upper()} level, file: {log_path}")
 
