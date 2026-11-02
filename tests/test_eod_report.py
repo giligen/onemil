@@ -215,9 +215,16 @@ def test_parity_section_reads_bf_json(tmp_path, monkeypatch):
 @pytest.mark.integration
 def test_script_runs_end_to_end_no_send_no_llm(tmp_path):
     """System-ish: the real script against the real DB and checkers, nothing sent."""
+    # The real script, DB and checkers; only `journalctl` is a stub (an empty journal). The real one scans the whole
+    # verbose scanner journal server-side: 14 of the 20 s of this test. Its query is covered by
+    # test_journal_error_count_matches_inside_journalctl and the live EOD run.
+    bindir = tmp_path / "bin"; bindir.mkdir()
+    stub = bindir / "journalctl"; stub.write_text("#!/bin/sh\nexit 0\n"); stub.chmod(0o755)
+    import os as _os
     r = subprocess.run([sys.executable, "scripts/eod_report.py", "--no-send", "--no-llm",
                         "--date", "2026-09-18"], capture_output=True, text=True, timeout=400,
-                       env={**__import__("os").environ, "ONEMIL_PROMOTION_STATE": str(tmp_path / "promo.json")},
+                       env={**_os.environ, "ONEMIL_PROMOTION_STATE": str(tmp_path / "promo.json"),
+                            "PATH": f"{bindir}:{_os.environ['PATH']}"},
                        cwd=Path(__file__).resolve().parents[1])
     assert r.returncode == 0, r.stderr[-500:]
     assert r.stdout.startswith("[EOD]") and "RAMP:" in r.stdout and "NEXT BOOT" in r.stdout

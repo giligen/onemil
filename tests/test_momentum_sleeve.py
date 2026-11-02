@@ -125,21 +125,17 @@ def test_rebalance_min_trade_threshold_and_weights():
                     reason='research panel / build A holdings not present')
 @pytest.mark.parametrize('target', ['2021-02-08', '2024-06-03', '2026-09-21'])
 def test_parity_with_build_a(target):
-    import pyarrow.compute as pc
-    import pyarrow.parquet as pq
+    from tests.real_panel_cache import memoised_ramom, real_panel_window
     hold = pd.read_csv(HOLD)
     dates = sorted(hold.rebalance_date.unique())
     reb = min(dates, key=lambda d: abs(pd.Timestamp(d) - pd.Timestamp(target)))
     reb_ts = pd.Timestamp(reb)
-    lo, hi = reb_ts - pd.Timedelta(days=460), reb_ts
-    tbl = pq.read_table(PANEL, columns=['symbol', 'bar_date', 'close', 'volume'],
-                        filters=[('bar_date', '>=', lo.to_pydatetime()), ('bar_date', '<', hi.to_pydatetime())])
-    panel = tbl.to_pandas()
-    panel['close'] = panel['close'].astype('float32')
+    panel = real_panel_window(reb_ts)
     asof = panel.loc[panel.symbol == 'SPY', 'bar_date'].max()      # prior trading day
     assets_df = pd.read_csv(ASSETS, dtype={'symbol': str, 'name': str})
-    sel = ms.select_top(ms.risk_adjusted_momentum(panel, asof).loc[
-        ms.eligible_universe(panel, asof, assets_df), 'signal'], 20)
+    with memoised_ramom(reb_ts):
+        sel = ms.select_top(ms.risk_adjusted_momentum(panel, asof).loc[
+            ms.eligible_universe(panel, asof, assets_df), 'signal'], 20)
     expected = set(hold.loc[hold.rebalance_date == reb, 'symbol'])
     print(f'PARITY {reb}: {len(set(sel) & expected)}/20')
     assert len(set(sel) & expected) >= 19      # a float32/tie difference may swap one name at most
@@ -463,19 +459,15 @@ G_HOLD = os.path.join(ROOT, 'research', 'momentum_weekly', 'recon', 'G_holdings.
                     reason='research panel / guarded BT holdings not present')
 @pytest.mark.parametrize('target', ['2021-02-08', '2025-12-29', '2026-06-29'])
 def test_parity_with_guarded_backtest(target):
-    import pyarrow.parquet as pq
+    from tests.real_panel_cache import memoised_ramom, real_panel_window
     hold = pd.read_csv(G_HOLD)
     sub = hold[hold.rebalance_date == target]
-    reb_ts = pd.Timestamp(target)
-    lo = reb_ts - pd.Timedelta(days=460)
-    tbl = pq.read_table(PANEL, columns=['symbol', 'bar_date', 'close', 'volume'],
-                        filters=[('bar_date', '>=', lo.to_pydatetime()), ('bar_date', '<', reb_ts.to_pydatetime())])
-    panel = tbl.to_pandas()
-    panel['close'] = panel['close'].astype('float32')
+    panel = real_panel_window(target)
     asof = pd.Timestamp(sub.signal_date.iloc[0])
     assets_df = pd.read_csv(ASSETS, dtype={'symbol': str, 'name': str})
-    sel = ms.select_top(ms.risk_adjusted_momentum(panel, asof).loc[
-        ms.eligible_universe(panel, asof, assets_df), 'signal'], 20)
+    with memoised_ramom(pd.Timestamp(target)):
+        sel = ms.select_top(ms.risk_adjusted_momentum(panel, asof).loc[
+            ms.eligible_universe(panel, asof, assets_df), 'signal'], 20)
     print(f'GUARD PARITY {target}: {len(set(sel) & set(sub.symbol))}/20')
     assert set(sel) == set(sub.symbol) and len(sel) == 20
 

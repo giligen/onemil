@@ -142,13 +142,9 @@ def test_empty_after_asof_logs_error_and_returns_empty_frame(caplog):
 
 def _real_panel(target):
     """The research-panel window the parity tests use for rebalance ``target`` (float32 closes) and its as-of date."""
-    import pyarrow.parquet as pq
+    from tests.real_panel_cache import real_panel_window
     reb_ts = pd.Timestamp(target)
-    lo = reb_ts - pd.Timedelta(days=460)
-    tbl = pq.read_table(PANEL, columns=['symbol', 'bar_date', 'close', 'volume'],
-                        filters=[('bar_date', '>=', lo.to_pydatetime()), ('bar_date', '<', reb_ts.to_pydatetime())])
-    panel = tbl.to_pandas()
-    panel['close'] = panel['close'].astype('float32')
+    panel = real_panel_window(reb_ts)
     return panel, panel.loc[panel.symbol == 'SPY', 'bar_date'].max()
 
 

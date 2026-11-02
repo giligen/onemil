@@ -289,3 +289,45 @@ def _cached_yaml_safe_load():
     yaml.safe_load = cached_safe_load
     yield
     yaml.safe_load = real
+
+
+# --------------------------------------------------------------------------- Database schema template (pass 4)
+# A fresh Database() costs ~17 ms (executescript of every table + the migrations' ALTER/CREATE INDEX commits); the suite
+# builds thousands. The schema is built ONCE per session by the real constructor into a template file and copied to the
+# target path of every single-file ``Database(path)`` whose file does not exist yet; the real __init__ then still runs
+# (CREATE IF NOT EXISTS + the migration checks, ~2.5 ms), so the code path under test is unchanged. Split
+# (cache_path/trades_path) databases, existing files (migration tests build old-schema files first) and ':memory:' are
+# never touched. Equivalence: tests/test_database_template_equivalence_20261102.py (schema dump identical).
+_REAL_DB_INIT = Database.__init__
+_DB_TEMPLATE = {}
+
+
+def build_database_template(directory) -> Path:
+    """Create the template once with the real, untouched constructor; returns its path."""
+    template = Path(directory) / "database_template.db"
+    inst = object.__new__(Database)
+    _REAL_DB_INIT(inst, str(template))
+    inst._cache_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    inst._cache_conn.commit()
+    inst._cache_conn.close()
+    return template
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _database_schema_template(tmp_path_factory):
+    """Install the template-copying ``Database.__init__`` for the session (restored on teardown)."""
+    import shutil
+    template = build_database_template(tmp_path_factory.mktemp("db_template"))
+    _DB_TEMPLATE["path"] = template
+
+    def init_from_template(self, db_path=None, cache_path=None, trades_path=None):
+        if db_path and not (cache_path and trades_path) and str(db_path) != ":memory:":
+            target = Path(db_path)
+            if not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(template, target)
+        _REAL_DB_INIT(self, db_path, cache_path, trades_path)
+
+    Database.__init__ = init_from_template
+    yield template
+    Database.__init__ = _REAL_DB_INIT

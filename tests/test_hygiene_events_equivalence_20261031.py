@@ -137,13 +137,9 @@ def test_equivalent_when_everything_is_after_asof_or_empty():
 
 def _real_panel(target):
     """The research-panel window the parity tests use for rebalance ``target`` (float32 closes)."""
-    import pyarrow.parquet as pq
+    from tests.real_panel_cache import real_panel_window
     reb_ts = pd.Timestamp(target)
-    lo = reb_ts - pd.Timedelta(days=460)
-    tbl = pq.read_table(PANEL, columns=['symbol', 'bar_date', 'close', 'volume'],
-                        filters=[('bar_date', '>=', lo.to_pydatetime()), ('bar_date', '<', reb_ts.to_pydatetime())])
-    panel = tbl.to_pandas()
-    panel['close'] = panel['close'].astype('float32')
+    panel = real_panel_window(reb_ts)
     return panel, reb_ts - pd.Timedelta(days=3)
 
 
