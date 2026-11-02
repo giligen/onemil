@@ -253,6 +253,13 @@ def _fast_scanner_cycle_poll(monkeypatch):
     monkeypatch.setattr(RealtimeScanner, '_CYCLE_FETCH_POLL_S', 0.01)
 
 
+@pytest.fixture(autouse=True)
+def _fast_emergency_close_poll(monkeypatch):
+    """Shrink TradingEngine's 0.5 s emergency-close fill poll (6 tests x 5 polls x 0.5 s). Production default unchanged."""
+    from trading.trading_engine import TradingEngine
+    monkeypatch.setattr(TradingEngine, '_CLOSE_FILL_POLL_S', 0.0)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _cached_yaml_safe_load():
     """Parse each distinct YAML text once per session (config.yaml is ~25 KB and PyYAML's pure-Python loader takes

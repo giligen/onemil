@@ -4205,6 +4205,8 @@ class TradingEngine:
             )
             return False
 
+    _CLOSE_FILL_POLL_S = 0.5      # wait between polls of the emergency-close order's fill (5 polls); tests shrink it
+
     def _emergency_close_position(
         self, symbol: str, order_id: str, fill_price: float,
         actual_qty: int, trade_record: dict,
@@ -4252,7 +4254,7 @@ class TradingEngine:
         exit_price = None
         if close_order_id:
             for attempt in range(5):
-                time_mod.sleep(0.5)
+                time_mod.sleep(self._CLOSE_FILL_POLL_S)
                 try:
                     close_order = self.alpaca.get_order(close_order_id)
                     if close_order.get('status') == 'filled':

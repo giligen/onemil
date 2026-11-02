@@ -36,9 +36,13 @@ def _guard_frame_reference(panel, asof):
                       gap_days=grp['bar_date'].diff().dt.days)
 
 
-def _hygiene_events_reference(panel, asof):
-    """OLD hygiene_events (verbatim, apart from reading the features from the reference frame)."""
-    sub = _guard_frame_reference(panel, asof)
+def _hygiene_events_reference(panel, asof, reference_frame=None):
+    """OLD hygiene_events (verbatim, apart from reading the features from the reference frame).
+
+    ``reference_frame`` = the already computed ``_guard_frame_reference(panel, asof)``: the slow OLD per-symbol lambda
+    then runs ONCE per window instead of twice (same frame, same code path, no assertion removed).
+    """
+    sub = _guard_frame_reference(panel, asof) if reference_frame is None else reference_frame
     if sub.empty:
         return {}
     sub = sub[sub['k'] < GUARD_LOOKBACK]
@@ -62,9 +66,9 @@ def _as_frame(events):
 
 def _assert_equivalent(panel, asof):
     """Features frame and events must be identical (rows, order, dtypes) between OLD and NEW."""
-    pd.testing.assert_frame_equal(ms._guard_frame(panel, asof), _guard_frame_reference(panel, asof),
-                                  check_like=False)
-    new, old = ms.hygiene_events(panel, asof), _hygiene_events_reference(panel, asof)
+    reference_frame = _guard_frame_reference(panel, asof)           # the slow OLD computation, once per window
+    pd.testing.assert_frame_equal(ms._guard_frame(panel, asof), reference_frame, check_like=False)
+    new, old = ms.hygiene_events(panel, asof), _hygiene_events_reference(panel, asof, reference_frame)
     assert list(new) == list(old)
     pd.testing.assert_frame_equal(_as_frame(new), _as_frame(old), check_like=False)
     return new

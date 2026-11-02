@@ -198,15 +198,16 @@ def test_target_is_re_anchored_to_the_actual_fill(world):
     assert e.positions['ZZTA'].target == new_target and e.positions['ZZTA'].tp_leg_id == 'tp2' and e.positions['ZZTA'].pattern_data['tp_leg_id'] == 'tp2'
 
 
-def test_drain_thread_evaluates_without_the_scan_cycle(streamed_world):
+def test_drain_thread_evaluates_without_the_scan_cycle(streamed_world, monkeypatch):
     """bars are evaluated the moment they close: the drain thread alone (no process_tick) must produce the ZZTA order"""
     import time
     e, alp, sm, state = streamed_world
+    monkeypatch.setattr(HodBreakEngine, 'SETTLE_S', 0.02)    # production default 0.4 s; the batching logic is unchanged
     with patch.object(HodBreakEngine, '_minute_of_day', side_effect=lambda: 570 + state['now']):
         e._roll_session(); e.start_drain_thread()
         try:
             for t in range(1, len(DAY['ZZTA']) + 1):
-                state['now'] = t; e._on_bar_close('ZZTA', df_of(DAY['ZZTA'], 0, t)); time.sleep(0.5)   # one bar per 'minute': the drain batches a minute's bars for 0.4 s
+                state['now'] = t; e._on_bar_close('ZZTA', df_of(DAY['ZZTA'], 0, t)); time.sleep(0.06)   # one bar per 'minute': the drain batches a minute's bars for 0.4 s
             for _ in range(100):
                 if alp.submit_bracket_order.called: break
                 time.sleep(0.05)

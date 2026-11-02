@@ -58,6 +58,25 @@ def excluded_symbols(assets: pd.DataFrame, symbols: Optional[Iterable[str]] = No
     return by_name | by_test
 
 
+def _grouped_pct_change(sub: pd.DataFrame) -> pd.Series:
+    """Per-symbol one-bar close-to-close return of a frame sorted by symbol (rows of a symbol contiguous).
+
+    Vectorised replacement of ``groupby('symbol')['close'].pct_change()`` (pandas' default ``fill_method='ffill'``
+    semantics included: a NaN close is forward-filled inside its symbol before the ratio; the first bar of a symbol
+    is NaN). Keeps the input's index and the close dtype (float32 stays float32, as build A), row-for-row identical
+    -- tests/test_risk_adjusted_momentum_equivalence_20261102.py. The old call cost ~4 s on the 63,666-symbol panel.
+    """
+    close = sub['close']
+    if not pd.api.types.is_float_dtype(close):
+        close = close.astype('float64')
+    gid = sub.groupby('symbol', sort=False, observed=True).ngroup().to_numpy()
+    filled = close.groupby(gid).ffill().to_numpy()
+    prev = np.concatenate([np.full(1, np.nan, dtype=filled.dtype), filled[:-1]])
+    same = np.concatenate([[False], gid[1:] == gid[:-1]])
+    prev = np.where(same, prev, np.nan).astype(filled.dtype)
+    return pd.Series(filled / prev - 1, index=sub.index, name='close')
+
+
 def risk_adjusted_momentum(panel: pd.DataFrame, asof) -> pd.DataFrame:
     """Per-symbol features at ``asof`` using only rows with bar_date <= asof.
 
@@ -78,7 +97,7 @@ def risk_adjusted_momentum(panel: pd.DataFrame, asof) -> pd.DataFrame:
         return pd.DataFrame(columns=['close', 'adv20', 'sig_12_1', 'vol252', 'signal', 'history_ok'])
     sub = sub[sub['symbol'].isin(live)]
     # float32 closes -> float32 pct_change, as build A (keeps tie-breaks identical)
-    sub = sub.assign(ret=sub.groupby('symbol', sort=False, observed=True)['close'].pct_change(),
+    sub = sub.assign(ret=_grouped_pct_change(sub),
                      dvol=sub['close'].astype('float64') * sub['volume'].astype('float64'))
 
     def at(lag: int) -> pd.Series:
