@@ -798,13 +798,51 @@ class Config:
     # MACD Zone Filter
     # =========================================================================
 
+    # HodBreakEngine.FC_LEG_POLL_S (trading/hod_break_engine.py): repeated here because config.py must not import the
+    # engine; tests/test_hod_config_whitelist_20261102.py asserts the two stay equal.
+    _FC_LEG_POLL_S_DEFAULT = 10.0
+    # trading/hod_break_engine.py DEFAULT_LIVE_PARITY_LEDGER_PATH / DEFAULT_LIVE_ORDERS_STATE_PATH (same parity test).
+    _HOD_LIVE_PARITY_LEDGER_DEFAULT = "logs/hod_live_parity_ledger.csv"
+    _HOD_LIVE_ORDERS_STATE_DEFAULT = "logs/hod_live_resting_orders_state.json"
+
+    @staticmethod
+    def _engine_mechanics_cfg(cfg: dict) -> dict:
+        """Execution-mechanics keys that `HodBreakEngine.__init__` reads from `cfg.get(...)` for EVERY book
+        (hod_break and red_to_green share the engine). Defaults are the engine's own. 2026-11-02: squeeze_* and
+        fc_leg_poll_s were missing from the whitelist, so the 10/31 passive squeeze silently never ran on its first
+        live day (third occurrence of the 9/25 whitelist-drop defect)."""
+        return {
+            "squeeze_enabled": bool(cfg.get("squeeze_enabled", False)),
+            "squeeze_minute": int(cfg.get("squeeze_minute", 840)),
+            "squeeze_max_r": float(cfg.get("squeeze_max_r", 0.5)),
+            "fc_leg_poll_s": float(cfg.get("fc_leg_poll_s", Config._FC_LEG_POLL_S_DEFAULT)),
+            "oco_settle_timeout_s": float(cfg.get("oco_settle_timeout_s", 5.0)),
+            "oco_settle_poll_s": float(cfg.get("oco_settle_poll_s", 0.25)),
+            "oco_retry_delay_s": float(cfg.get("oco_retry_delay_s", 2.0)),
+            "eod_exit_mode": str(cfg.get("eod_exit_mode", "market")),
+            "eod_limit_timeout_s": float(cfg.get("eod_limit_timeout_s", 20.0)),
+            "stream_list_dir": str(cfg.get("stream_list_dir", "logs")),
+        }
+
+    @staticmethod
+    def _whitelist_check(block_name: str, raw: dict, returned: dict) -> None:
+        """Log an ERROR for every raw YAML key of `block_name` that the `<block_name>_cfg` property did not read.
+        A trading parameter in config.yaml that the engine never receives is never harmless (9/25 entry_mode, 10/1
+        telegram_per_trade, 11/2 squeeze_*): ERROR reaches Telegram at boot. Keys consumed into the nested `params`
+        dict count as read; a nested block returned whole (e.g. `failure_short`) counts as one key."""
+        read = set(returned) | set(returned.get("params") or {})
+        for key in raw:
+            if key not in read:
+                logger.error(f"config.yaml {block_name}: key '{key}' is not read by the engine "
+                             f"(not in Config.{block_name}_cfg) — ignored; add it to the whitelist or delete it")
+
     @property
     def red_to_green_cfg(self) -> dict:
         """Red-to-green (F6-PDR) book config (research/fuckup_audit/H/F6, 2026-09-17) — runs through the SAME engine as
         the HOD-break (`HodBreakEngine(cfg=..., book='red_to_green')`); the knobs are the RedToGreenParams fields.
         FAIL-SAFE defaults: disabled + dry_run (full pipeline, zero orders)."""
         cfg = self._get_yaml("red_to_green", default={}) or {}
-        return {
+        out = {
             "book": "red_to_green",
             "enabled": bool(cfg.get("enabled", False)),
             "dry_run": bool(cfg.get("dry_run", True)),
@@ -819,7 +857,6 @@ class Config:
             "admit_above_open_pct": float(cfg.get("admit_above_open_pct", 0.0)),
             "stream_universe": bool(cfg.get("stream_universe", True)),
             "universe_min_prev_close": float(cfg.get("universe_min_prev_close", 5.0)),
-            "stream_list_dir": str(cfg.get("stream_list_dir", "logs")),
             "order_timeout_s": float(cfg.get("order_timeout_s", 10.0)),
             "max_quote_age_s": float(cfg.get("max_quote_age_s", 60.0)),
             "params": {
@@ -836,7 +873,10 @@ class Config:
                 "last_entry_minute": int(cfg.get("last_entry_minute", 840)),
                 "flat_minute": int(cfg.get("flat_minute", 955)),
             },
+            **self._engine_mechanics_cfg(cfg),
         }
+        self._whitelist_check("red_to_green", cfg, out)
+        return out
 
     @property
     def hod_break_cfg(self) -> dict:
@@ -845,7 +885,7 @@ class Config:
         HodBreakParams fields; the rest is execution/risk. FAIL-SAFE defaults:
         disabled + dry_run (full pipeline, zero orders)."""
         cfg = self._get_yaml("hod_break", default={}) or {}
-        return {
+        out = {
             "enabled": bool(cfg.get("enabled", False)),
             "dry_run": bool(cfg.get("dry_run", True)),
             # 2026-10-01 (owner ask): Telegram per routine trade event (arm/fill/partial/exit/adoption/reconcile)
@@ -908,7 +948,12 @@ class Config:
                 "allow_fresh_short": bool((cfg.get("failure_short") or {}).get("allow_fresh_short", False)),
                 "ledger_path": str((cfg.get("failure_short") or {}).get("ledger_path", "logs/hod_failure_short_ledger.csv")),
             },
+            **self._engine_mechanics_cfg(cfg),
+            "live_parity_ledger_path": str(cfg.get("live_parity_ledger_path", self._HOD_LIVE_PARITY_LEDGER_DEFAULT)),
+            "live_orders_state_path": str(cfg.get("live_orders_state_path", self._HOD_LIVE_ORDERS_STATE_DEFAULT)),
         }
+        self._whitelist_check("hod_break", cfg, out)
+        return out
 
     @property
     def macd_zones_enabled(self) -> bool:

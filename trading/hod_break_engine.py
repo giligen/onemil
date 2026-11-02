@@ -386,7 +386,8 @@ class HodBreakEngine:
         self._drain_thread: Optional[threading.Thread] = None
         logger.info(f"{self.tag} engine gates: book={self.book} enabled={self.enabled} dry_run={self.dry_run} risk=${self.risk_usd:.0f} "
                     f"kills={self.daily_kill_usd}/{self.weekly_kill_usd} cap={self.params.cap:.2%} target={self.params.target_r}R "
-                    f"per_day={self.params.max_per_day} concurrent={self.params.max_concurrent} flat={self.params.flat_minute} admit>={self.admit_above_open_pct:.1f}% stream_universe={self.stream_universe}")
+                    f"per_day={self.params.max_per_day} concurrent={self.params.max_concurrent} flat={self.params.flat_minute} admit>={self.admit_above_open_pct:.1f}% stream_universe={self.stream_universe} "
+                    f"entry_mode={self.entry_mode} squeeze={'on' if self.squeeze_enabled else 'off'}@{self.squeeze_minute}/<{self.squeeze_max_r}R")
         # ---------------------------------------------------------------- failure-short overlay (2026-09-30)
         # ORDER MECHANICS only (docs/hod_failure_short_spec_20260930.md); trading/hod_failure_short.py owns every
         # rail/sizing/price rule. `failure_short` is an explicit whitelist sub-dict of hod_break_cfg (config.py) —
