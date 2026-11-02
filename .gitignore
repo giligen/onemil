@@ -49,8 +49,11 @@ data/
 .coverage
 htmlcov/
 
-# Claude
-.claude/
+# Claude (the /status skill is tracked)
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/status/
 
 # Research data (heavy — L2 depth dumps, PDFs, HTML, backtest CSV dumps)
 research/l2_full_trades/

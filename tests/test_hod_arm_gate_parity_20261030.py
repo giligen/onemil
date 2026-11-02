@@ -64,6 +64,20 @@ class TestEngineGate:
         assert len(lines) == 1 and 'r_pct=1.20% < 1.5%' in lines[0] and lines[0].startswith('[HOD]')
         assert e.arm_gate_skips == {'price': 0, 'r_pct': 1}
 
+    def test_moving_trigger_logs_once_per_symbol_and_reason(self, mock_alpaca, mock_db, mock_sm, tmp_path, caplog):
+        """2026-11-02 journal spam: the pending arm's trigger rises with the HOD every bar, so a (sym, trigger, stop)
+        key printed the same symbol every minute (~4,400 lines). One line per (symbol, reason) per session; a
+        different reason for the same symbol still gets its own line and counter tick."""
+        e = gated_engine(mock_alpaca, mock_db, mock_sm, tmp_path)
+        with caplog.at_level(logging.INFO):
+            for i in range(30):                                      # trigger walks up 1c a bar, R stays under 1.5 %
+                trig = 50.0 + i * 0.01
+                assert e._apply_arm_gate('ABC', arm_with(trig, trig * (1 - 0.012)), e.params) is None
+            assert e._apply_arm_gate('ABC', arm_with(19.5, 18.0), e.params) is None   # same symbol, price reason
+        lines = [r.message for r in caplog.records if 'ARM SKIP ABC' in r.message]
+        assert len(lines) == 2 and 'r_pct=' in lines[0] and 'min_price' in lines[1]
+        assert e.arm_gate_skips == {'price': 1, 'r_pct': 1}
+
     def test_wide_arm_passes_untouched(self, mock_alpaca, mock_db, mock_sm, tmp_path):
         e = gated_engine(mock_alpaca, mock_db, mock_sm, tmp_path)
         a = arm_with(50.0, 50.0 * (1 - 0.016))

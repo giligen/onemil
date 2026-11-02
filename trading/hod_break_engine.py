@@ -342,7 +342,7 @@ class HodBreakEngine:
         self.live_parity_ledger_path = str(cfg.get('live_parity_ledger_path', DEFAULT_LIVE_PARITY_LEDGER_PATH))
         self.live_orders_state_path = str(cfg.get('live_orders_state_path', DEFAULT_LIVE_ORDERS_STATE_PATH))
         self._live_cap_slots: set = set()
-        self._arm_skip_logged: set = set()  # (sym, trigger, stop) already logged/counted at 'ARM SKIP' this session — one line per distinct skipped arm
+        self._arm_skip_logged: set = set()  # (sym, reason) already logged/counted at 'ARM SKIP' this session — one line per symbol and reason per day
         self.arm_gate_skips: dict = {'price': 0, 'r_pct': 0}   # daily arm-gate stats (docs/hod_arm_gate_parity_spec_20261030.md), reset in _roll_session
         self._cap_logged: set = set()      # symbols already logged at 'LIVE cap reached' this session — dedup (9/25: was a WARNING every bar)
         self._sizing_logged: set = set()   # symbols already logged for which resting_order_qty cap bound, this session (9/25)
@@ -1040,11 +1040,13 @@ class HodBreakEngine:
         """The arm admission gate (`trading.hod_break.arm_gate_reject`, shared with the research twin
         research/hod_entry/causal_arming.py — docs/hod_arm_gate_parity_spec_20261030.md, cell 1,729): trigger under
         `self.min_price`, or stop distance under `p.min_r_pct` of the trigger -> do NOT arm (no dry row, no live
-        order). Returns the arm, or None when gated. One INFO line + one counter tick per distinct skipped arm."""
+        order). Returns the arm, or None when gated. One INFO line + one counter tick per (symbol, reason) per
+        session: the pending arm is re-evaluated every bar and its trigger moves with the HOD, so keying on the
+        trigger/stop printed ~4,400 lines on 2026-11-02 (same names every minute)."""
         why = arm_gate_reject(arm['trigger'], arm['stop'], self.min_price, p.min_r_pct)
         if why is None:
             return arm
-        key = (sym, round(arm['trigger'], 4), round(arm['stop'], 4))
+        key = (sym, why)
         if key not in self._arm_skip_logged:
             self._arm_skip_logged.add(key)
             self.arm_gate_skips[why] += 1
