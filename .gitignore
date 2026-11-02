@@ -53,7 +53,7 @@ htmlcov/
 .claude/*
 !.claude/skills/
 .claude/skills/*
-!.claude/skills/status/
+!.claude/skills/books/
 
 # Research data (heavy — L2 depth dumps, PDFs, HTML, backtest CSV dumps)
 research/l2_full_trades/
@@ -222,3 +222,6 @@ research/momentum_weekly/panel_2016_2026.parquet
 research/momentum_weekly/shards/
 research/crypto_rebalance/data/
 research/vix_term/data/
+
+# generated /books HTML reports
+reports/
