@@ -1,6 +1,6 @@
 ---
-name: status
-description: Status of every strategy (service, HOD/ORB paper books, MOM sleeve, rails, crons) — run when the owner asks how the strategies are doing
+name: books
+description: Status of every strategy book (service, HOD/ORB paper books, MOM sleeve, rails, crons) — run when the owner asks how the strategies are doing. Named `books` because `/status` is a built-in Claude Code command.
 ---
 
 Run `python3 scripts/book_status.py` from /home/ec2-user/onemil (read-only; takes ~15-20 s because it greps today's
