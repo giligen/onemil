@@ -15,7 +15,9 @@ survives is alert-only (silent when clean) or infrastructure.**
 ## 1. Session crons — exactly two
 
 ### DAILY EOD REPORT — RETIRED as a session cron 2026-09-21 (was id `989c1d20`), now durable crontab
-`57 21 * * 1-5 scripts/eod_report.py` (owner: "move to haiku if no thinking is needed"). Every number is computed
+`40 17 * * 1-5 scripts/eod_report.py` under `CRON_TZ=America/New_York` (2026-11-03: was `57 21` UTC; the
+`onemil-orb-backtest` systemd timer runs 16:30 ET and ends ~17:26 ET, so in EST the UTC slot reported before the BT
+existed → "ORB P1 NO-DATA" daily; the session-archive line moved with it to `35 17` ET). Every number is computed
 by the script (trades DB per strategy, green-check verdict, BF parity JSON, both ramp checkers, services, journal
 errors, pre-boot tests, disk, next-boot flags, today's research commits) and written to `logs/eod/<date>.md`; a
 headless `claude -p --model haiku` call only rephrases it into the `[EOD]` telegram and falls back to the raw
