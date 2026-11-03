@@ -581,6 +581,32 @@ def _is_p1_scored(line: str) -> bool:
 from trading.orb_submit_timing import timing_summary_line  # noqa: E402  (one parser for the SUBMIT TIMING line)
 
 
+CANCELLED_STATUSES = ("cancelled", "canceled", "rejected", "preplace_canceled")
+OPEN_ORDER_STATUSES = ("pending_new", "new", "accepted", "partially_filled", "submitted", "open", "pending",
+                       "pending_cancel", "replaced")
+
+
+def engine_traded(rows: List[Dict]) -> set:
+    """Symbols the engine really traded: a row counts only if it is not cancelled/rejected/preplace_canceled AND it
+    has a fill_price or a still-open order. 11/2 PMN (preplaced at 09:35:05, cancelled by the reconcile, never filled)
+    used to count as an engine pick and fabricated an engine-only line in the ORB PAPER PARITY section."""
+    out = set()
+    for r in rows:
+        status = (r.get("order_status") or "").lower()
+        if status in CANCELLED_STATUSES:
+            continue
+        if r.get("fill_price") or status in OPEN_ORDER_STATUSES:
+            out.add(r["symbol"])
+    return out
+
+
+def preplace_dropped(parsed: Dict, rows: List[Dict]) -> set:
+    """Preplaced names the reconcile DROPPED: the submit failed ('submit failed — no refill') or the trades row
+    is preplace_canceled, and the symbol is not in the reconcile-final top-N. These never entered the ranked set."""
+    cancelled = {r["symbol"] for r in rows if (r.get("order_status") or "").lower() == "preplace_canceled"}
+    return (set(parsed.get("preplace_failed", ())) | cancelled) - set(parsed.get("final_ranked", ()))
+
+
 def parse_orb_log(text: str) -> Dict:
     """Counts from an ORB session-archive text. `scored` = symbols of `ORB SCORED` lines stamped inside the
     09:34-09:40 ET window (the 09:35 decision); `late` = SCORED symbols outside it (a restart, not a decision);
@@ -634,7 +660,7 @@ def parse_orb_log(text: str) -> Dict:
         m = re.search(r"GAP_GATE (\S+) .*gap_pct=([-\d.]+)", ln)
         if m:
             notes.setdefault("gap:" + m.group(1), f"gap {m.group(2)}%")
-    preplace_ranked, submitted = set(), set()
+    preplace_ranked, submitted, final_ranked, preplace_failed = set(), set(), set(), set()
     for ln in lines:
         m = re.search(r"PREPLACE\] provisional top-\d+ @ \S+ ET: (.*)$", ln)
         if m:
@@ -642,6 +668,10 @@ def parse_orb_log(text: str) -> Dict:
         m = re.search(r"PREPLACE\] reconcile final top-\d+ of \d+ ranked: \[(.*?)\]", ln)
         if m:
             preplace_ranked.update(re.findall(r"'([A-Z][A-Z0-9.]*)'", m.group(1)))
+            final_ranked.update(re.findall(r"'([A-Z][A-Z0-9.]*)'", m.group(1)))
+        m = re.search(r"PREPLACE\] ([A-Z][A-Z0-9.]*) submit failed", ln)
+        if m:
+            preplace_failed.add(m.group(1))
         m = re.search(r"ORB ENTRY SUBMITTED: ([A-Z][A-Z0-9.]*)", ln)
         if m:
             submitted.add(m.group(1))
@@ -655,6 +685,7 @@ def parse_orb_log(text: str) -> Dict:
             "detail": detail, "first_et": first_et[:5] if first_et else None,
             "scored_any": scored_any, "range_done": range_done, "preplace": preplace, "notes": notes,
             "preplace_ranked": sorted(preplace_ranked), "submitted": sorted(submitted),
+            "final_ranked": sorted(final_ranked), "preplace_failed": sorted(preplace_failed),
             "p1_scored": sorted(p1_scored), "p1_detail": p1_detail,
             "timeouts": sum("Engine tick TIMEOUT" in ln for ln in lines),
             "gap_warn": sum("GAP_GATE" in ln and "| WARNING" in ln for ln in lines),
@@ -859,9 +890,13 @@ def orb_parity_lines(day: str, engine_rows: List[Dict], parsed: Dict, bt_rows: O
     late_flag = f" | late decision ({first} ET)" if first and first > LATE_AFTER_ET else ""
     top = engine_top_n(parsed, bt_rank["n"]) if bt_rank else None
     # PREPLACE names are ranked/ordered without a SCORED line (provisional top-N, reconcile final top-N, ENTRY SUBMITTED)
-    preplaced = set(parsed.get("preplace_ranked", ())) | set(parsed.get("submitted", ()))
-    eng_scored = eng_scored | preplaced
-    eng = (set(top) if top is not None else eng_scored) | preplaced
+    dropped = preplace_dropped(parsed, engine_rows)   # preplaced then cancelled/failed: never ranked
+    preplaced = (set(parsed.get("preplace_ranked", ())) | set(parsed.get("submitted", ()))) - dropped
+    eng_scored = (eng_scored | preplaced) - dropped
+    # The reconcile-final list IS the engine's 09:35 ranked decision; the comp-sorted SCORED top-N also holds
+    # names the engine scored but never ranked into its final set (11/2: RAM, XPOF).
+    base = set(parsed["final_ranked"]) if parsed.get("final_ranked") else (set(top) if top is not None else eng_scored)
+    eng = (base | preplaced) - dropped
     if bt_rank is None:
         lines.append(f"ORB ranked: engine {len(eng)} vs {no_data('BT ranked', rank_why)}")
         m["why"] = "BT ranked set NO-DATA (neutral)"
@@ -875,7 +910,7 @@ def orb_parity_lines(day: str, engine_rows: List[Dict], parsed: Dict, bt_rows: O
                  f"engine-only: {' '.join(sorted(eng - bt)) or '-'} | BT-only: {' '.join(sorted(bt - eng)) or '-'}"
                  f"{note}{late_flag}")
     lines.append(funnel_line(bt_rank))
-    traded = {r["symbol"] for r in engine_rows if r.get("order_status") not in ("cancelled", "canceled", "rejected")}
+    traded = engine_traded(engine_rows)
     bt_picks = set(bt_rank["picks"])
     reasons: List[str] = []
     if not m["match"]:
@@ -1069,7 +1104,7 @@ def p1_parity_lines(day: str, trades: List[Dict], parsed: Dict, bt_rows: Optiona
         out.append(f"P1 ranked: engine {len(eng_ranked)} vs BT {len(bt)} | match {len(eng_ranked & bt)} | "
                    f"engine-only: {' '.join(sorted(eng_ranked - bt)) or '-'} | BT-only: {' '.join(sorted(bt - eng_ranked)) or '-'}")
         clean = ok if (eng or bt) else None
-    traded = {r["symbol"] for r in rows if r.get("order_status") not in ("cancelled", "canceled", "rejected")}
+    traded = engine_traded(rows)
     if bt_failed:
         clean = None   # a failed BT decides nothing: neutral for the own clean-session counter
         out.append(f"P1 picks/fills: engine {len(traded)} vs BT FAILED (see P1 BT line)")

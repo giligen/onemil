@@ -24,12 +24,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -39,19 +41,32 @@ load_dotenv(str(ROOT / '.env'))
 
 from data_sources.alpaca_client import AlpacaClient
 
-OUT = ROOT / 'logs' / f"orb_selection_audit_{datetime.now(timezone.utc).strftime('%Y%m%d')}.json"
-audit = {'date': datetime.now(timezone.utc).strftime('%Y-%m-%d')}
+NY = ZoneInfo('America/New_York')
+OPS_WARNING_TEXT = 'observer: engine log not parsed — no verdict'
+OUT = ROOT / 'logs' / f"orb_selection_audit_{datetime.now(NY).strftime('%Y%m%d')}.json"
+audit = {'date': datetime.now(NY).strftime('%Y-%m-%d')}
 
 
 def log(msg):
     print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}Z] {msg}", flush=True)
 
 
-def wait_until_utc(hh, mm, ss=0):
+def et_target(now, hh, mm, ss=0):
+    """Return the America/New_York wall-clock instant hh:mm:ss on `now`'s ET date.
+
+    Pure (no sleeping) so the DST behaviour is unit-testable: 09:29:30 ET is
+    13:29:30 UTC in EDT and 14:29:30 UTC in EST. The observer used UTC literals
+    until 2026-11-03 and ran an hour early after DST ended on 11/1.
+    """
+    now_et = now.astimezone(NY)
+    return now_et.replace(hour=hh, minute=mm, second=ss, microsecond=0)
+
+
+def wait_until_et(hh, mm, ss=0):
+    """Sleep until hh:mm:ss America/New_York today (never a UTC literal)."""
     while True:
         now = datetime.now(timezone.utc)
-        tgt = now.replace(hour=hh, minute=mm, second=ss, microsecond=0)
-        d = (tgt - now).total_seconds()
+        d = (et_target(now, hh, mm, ss) - now.astimezone(NY)).total_seconds()
         if d <= 0:
             return
         time.sleep(min(d, 20))
@@ -110,28 +125,98 @@ def _live_submitted_symbols(submitted_lines, dry_lines):
         | {l.split('WOULD BUY ')[1].split()[0] for l in dry_lines})
 
 
-def journal_lines(pattern, since='13:25'):
-    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+_JOURNAL = {'lines': None, 'ok': False}
+
+
+def journal_since_arg(now, hh=9, mm=25):
+    """journalctl --since string for hh:mm ET today, expressed in explicit UTC."""
+    t = et_target(now, hh, mm).astimezone(timezone.utc)
+    return t.strftime('%Y-%m-%d %H:%M:%S UTC')
+
+
+def load_journal(timeout=180):
+    """Read the onemil-trader journal ONCE since 09:25 ET into the module cache.
+
+    One call (not one per pattern) so the 2.3M-line flood days cannot stack
+    30 s timeouts. Sets _JOURNAL['ok'] False and logs WARNING on any failure.
+    """
+    since = journal_since_arg(datetime.now(timezone.utc))
     try:
-        out = subprocess.run(
-            ['journalctl', '-u', 'onemil-trader', '--since', f'{today} {since}',
-             '--no-pager'], capture_output=True, text=True, timeout=30).stdout
+        res = subprocess.run(
+            ['journalctl', '-u', 'onemil-trader', '--since', since, '--no-pager'],
+            capture_output=True, text=True, timeout=timeout)
+        if res.returncode != 0:
+            raise RuntimeError(f"journalctl rc={res.returncode}: {res.stderr[:200]}")
+        _JOURNAL['lines'] = res.stdout.splitlines()
+        _JOURNAL['ok'] = True
     except Exception as e:
-        log(f"journalctl failed: {e}")
-        return []
-    return [l for l in out.splitlines() if pattern in l]
+        log(f"WARNING journalctl failed/timed out: {e}")
+        _JOURNAL['lines'] = []
+        _JOURNAL['ok'] = False
+    return _JOURNAL['ok']
+
+
+def journal_lines(pattern):
+    """Lines of the cached journal containing `pattern` (loads it on first use)."""
+    if _JOURNAL['lines'] is None:
+        load_journal()
+    return [l for l in _JOURNAL['lines'] if pattern in l]
+
+
+_SYM = r"[A-Z][A-Z0-9.\-]{0,9}"
+
+
+def preplace_symbols(lines):
+    """Symbols the engine ranked on the preplace path, from its own log lines.
+
+    The 10/30 failure: the engine ranked/vetoed names via '[ORB PREPLACE]'
+    lines and logged neither 'range complete' nor 'ORB SCORED', so the parse
+    came back empty although the engine worked. Sources: 'reconcile final
+    top-N of M ranked: [...] | preplaced: [...]', 'provisional top-N ...: A(rh=',
+    'provisional veto X'.
+    """
+    out = set()
+    for l in lines:
+        if 'reconcile final' in l:
+            out |= set(re.findall(rf"'({_SYM})'", l.split('reconcile final', 1)[1]))
+        elif 'provisional top-' in l:
+            out |= set(re.findall(rf"({_SYM})\(rh=", l))
+        elif 'provisional veto' in l:
+            m = re.search(rf"provisional veto ({_SYM}) \(", l)
+            if m:
+                out.add(m.group(1))
+    return out
+
+
+def engine_active(journal_ok_lines):
+    """True when the engine logged any decision line (submit/score/reconcile)."""
+    keys = ('ENTRY SUBMITTED', 'ORB SCORED', 'reconcile final')
+    return any(k in l for l in journal_ok_lines for k in keys)
+
+
+def decide_verdict(live_range, live_scored, active, journal_ok, real_drops):
+    """Pick the Telegram verdict: 'ops_warning' | 'caught' | 'clean'.
+
+    CAUGHT is only legal when the live set is non-empty: an empty live set
+    means the parse failed (or the engine did not run), never that every
+    candidate was dropped (false alarm 2026-11-02). `active` is kept in the
+    signature for the log line; the ops warning covers every empty-live case.
+    """
+    if not journal_ok or (not live_range and not live_scored):
+        return 'ops_warning'
+    return 'caught' if real_drops else 'clean'
 
 
 def main():
-    log("observer armed — waiting for 13:29:30Z (9:29:30 ET)")
-    wait_until_utc(13, 29, 30)
+    log("observer armed — waiting for 09:29:30 ET")
+    wait_until_et(9, 29, 30)
 
     seed = build_seed()
     audit['seed_n'] = len(seed)
     audit['seed'] = seed
     log(f"layer-0 seed: {len(seed)} symbols")
 
-    wait_until_utc(13, 31, 0)
+    wait_until_et(9, 31, 0)
     client = AlpacaClient(os.getenv('ALPACA_ORB_API_KEY'), os.getenv('ALPACA_ORB_API_SECRET'),
                           paper=os.getenv('ALPACA_ORB_PAPER', 'true').lower() == 'true')
     t0 = time.time()
@@ -147,7 +232,7 @@ def main():
     # bid/ask so the live-only spread gate (>300bps skip) is attributable.
     # (Gate is 300bps since 2026-07-04 — orb.yaml entry.max_spread_bps; the
     # observer previously flagged >150, over-flagging by construction.)
-    wait_until_utc(13, 35, 3)
+    wait_until_et(9, 35, 3)
     try:
         snaps935 = client.get_snapshots(sorted(kept))
         audit['snap_935'] = {
@@ -167,10 +252,12 @@ def main():
         log(f"9:35 snapshot capture failed: {e}")
 
     # give live until 9:36:30 to complete ranges + score
-    wait_until_utc(13, 36, 30)
+    wait_until_et(9, 36, 30)
+    load_journal()
+    preplace = preplace_symbols(journal_lines('ORB PREPLACE'))
     live_range = sorted({l.split('ORB: ')[1].split(' range complete')[0]
                          for l in journal_lines('range complete')
-                         if 'ORB: ' in l and ' range complete' in l})
+                         if 'ORB: ' in l and ' range complete' in l} | preplace)
     # 2026-07-13 fix: since the 7/10 below-threshold logging change,
     # composite-rejected candidates log as "ORB: X below filter threshold"
     # instead of "ORB SCORED: X" — they WERE scored (correct rejection).
@@ -181,7 +268,8 @@ def main():
          for l in journal_lines('ORB SCORED')}
         | {l.split('ORB: ')[1].split()[0]
            for l in journal_lines('below filter threshold')
-           if 'ORB: ' in l})
+           if 'ORB: ' in l}
+        | preplace)
     # docs/orb_dry_run_spec_20260925.md: a dry-run week never emits 'ORB
     # ENTRY SUBMITTED' (no order is placed), so the parity observer must
     # also count '[ORB DRY] WOULD BUY <sym> ...' lines as picks, or every
@@ -214,12 +302,13 @@ def main():
             import requests as _rq
             h = {'APCA-API-KEY-ID': os.environ['ALPACA_API_KEY'],
                  'APCA-API-SECRET-KEY': os.environ['ALPACA_API_SECRET']}
-            day = audit['date']
             r = _rq.get('https://data.alpaca.markets/v2/stocks/bars',
                         params={'symbols': sym, 'timeframe': '1Min',
                                 'feed': 'sip', 'limit': 10,
-                                'start': f'{day}T13:30:00Z',
-                                'end': f'{day}T13:35:00Z'},
+                                'start': et_target(datetime.now(timezone.utc), 9, 30)
+                                .astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                                'end': et_target(datetime.now(timezone.utc), 9, 35)
+                                .astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')},
                         headers=h, timeout=(5, 15))
             n_bars = len((r.json().get('bars') or {}).get(sym, []))
         except Exception as e:
@@ -252,10 +341,17 @@ def main():
     log(f"full audit -> {OUT}")
 
     # Telegram verdict
+    active = engine_active(_JOURNAL['lines'] or [])
+    verdict = decide_verdict(live_range, live_scored, active, _JOURNAL['ok'], real_drops)
+    audit['verdict'] = verdict
     try:
         from notifications.telegram_notifier import TelegramNotifier
         n = TelegramNotifier(os.getenv('TELEGRAM_BOT_TOKEN'), os.getenv('TELEGRAM_CHAT_ID'), enabled=True)
-        if real_drops:
+        if verdict == 'ops_warning':
+            log(f"WARNING {OPS_WARNING_TEXT} (journal_ok={_JOURNAL['ok']}, engine_active={active})")
+            n.send_message_sync(f"<b>[ORB-SELECTION] {audit['date']}</b>\n{OPS_WARNING_TEXT}",
+                                parse_mode='HTML')
+        elif verdict == 'caught':
             det = "\n".join(f"• {s}: gap {kept[s]['gap']}%, "
                             f"ranged={s in live_range} — {drop_class[s]}"
                             for s in real_drops[:6])

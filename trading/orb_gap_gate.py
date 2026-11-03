@@ -192,3 +192,15 @@ def gap_input_needs_today_open(snap, today_et: str, min_prev_volume: float,
     except (TypeError, ValueError):
         return False
     return vol >= min_prev_volume and 0.5 * min_price <= close <= 2.0 * max_price
+
+
+def real_gap_violations(rows, min_gap_pct: float):
+    """Rows of a BT features panel whose stored real gap is below the engine's phantom-gap floor.
+
+    The BT admission (`orb_backtest._qualifying_pairs_for_dates`) tests the DAILY bar open against the prior daily
+    close, while the stored `gap_pct` (study_orb_features) is the FIRST 1-MIN bar open vs the prior close — the very
+    value the engine's phantom-gap reject tests (orb_engine ~l.3717). A row admitted on the daily open can therefore
+    carry gap_pct < floor (99 production rows, max 4.994, as of 2026-11-02) — a trade the engine can never take.
+    `rows` is a DataFrame with a `gap_pct` column; returns the offending rows (empty = parity holds).
+    """
+    return rows[rows['gap_pct'] < min_gap_pct]

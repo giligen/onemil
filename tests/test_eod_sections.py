@@ -575,3 +575,49 @@ def test_broker_pnl_unreachable_falls_back_to_ledger_mark_with_warning(tmp_path,
     with caplog.at_level(logging.WARNING, logger="eod_sections"):
         out = es.sleeve_pnl_lines(_hist_client(SESSIONS, fail=True), "2026-10-12", wk)
     assert out[0].startswith("MOM P&L: day $+50") and any("falling back" in r.message for r in caplog.records)
+
+
+# --- 2026-11-02 fixture: PMN preplaced then cancelled by the reconcile, FTFT submit failed (spec 20261103 fix 2) ---
+LOG_1102 = "\n".join([
+    "2026-11-02 14:34:58 | INFO     | trading.orb_engine:4304 | [ORB PREPLACE] provisional top-4 @ 09:34:58.119 ET: "
+    "FTFT(rh=$3.11,Q4), PMN(rh=$4.15,Q4), SKUU(rh=$18.46,Q3), SKHL(rh=$7.09,Q3)",
+    "2026-11-02 14:35:05 | INFO     | trading.orb_engine:5939 | ORB ENTRY SUBMITTED: PMN order=a qty=1 entry=$4.16 stop=$3.59 trade_id=677",
+    "2026-11-02 14:35:06 | INFO     | trading.orb_engine:5939 | ORB ENTRY SUBMITTED: SKUU order=b qty=1 entry=$18.52 stop=$18.05 trade_id=678",
+    "2026-11-02 14:35:06 | INFO     | trading.orb_engine:5939 | ORB ENTRY SUBMITTED: SKHL order=c qty=1 entry=$7.11 stop=$6.89 trade_id=679",
+    "2026-11-02 14:35:06 | WARNING  | trading.orb_engine:4404 | [ORB PREPLACE] FTFT submit failed — no refill",
+    "2026-11-02 14:35:10 | INFO     | trading.orb_engine:4495 | [ORB PREPLACE] reconcile final top-8 of 13 ranked: "
+    "['SKUU', 'BILI', 'HSAI', 'BABX', 'SCO', 'XPEV', 'SKHL', 'SKHX'] | preplaced: ['FTFT', 'PMN', 'SKUU', 'SKHL']",
+    "2026-11-02 14:35:11 | INFO     | trading.orb_engine:5939 | ORB ENTRY SUBMITTED: SKHX order=d qty=1 entry=$11.01 stop=$10.63 trade_id=680",
+    "2026-11-02 14:35:10 | INFO     | trading.orb_engine:3770 | ORB SCORED: RAM comp=0.9 Q5 | gap=9.0",
+    "2026-11-02 14:35:10 | INFO     | trading.orb_engine:3770 | ORB SCORED: SKUU comp=0.5 Q3 | gap=9.0",
+])
+ROWS_1102 = [
+    {"symbol": "PMN", "order_status": "preplace_canceled", "fill_price": None, "exit_price": None},
+    {"symbol": "SKUU", "order_status": "closed", "fill_price": 18.5, "exit_price": 18.0, "pnl": -100},
+    {"symbol": "SKHL", "order_status": "closed", "fill_price": 7.1, "exit_price": 6.9, "pnl": -100},
+    {"symbol": "SKHX", "order_status": "closed", "fill_price": 11.0, "exit_price": 10.6, "pnl": -100},
+]
+
+
+def test_engine_traded_excludes_cancelled_unfilled_and_rejected():
+    rows = ROWS_1102 + [{"symbol": "REJ", "order_status": "rejected", "fill_price": None},
+                        {"symbol": "TS", "order_status": "time_stop_canceled", "fill_price": None},
+                        {"symbol": "OPEN", "order_status": "pending_new", "fill_price": None}]
+    assert es.engine_traded(rows) == {"SKUU", "SKHL", "SKHX", "OPEN"}
+
+
+def test_1102_ranked_is_reconcile_final_and_pmn_ftft_not_counted():
+    parsed = es.parse_orb_log(LOG_1102)
+    assert parsed["preplace_failed"] == ["FTFT"] and "SKHX" in parsed["final_ranked"]
+    bt = _rank(["AEYE", "SKUU", "BILI", "HSAI", "BABX", "SCO", "XPEV", "SKHL"], ["AEYE", "SKHL"])
+    lines, _ = es.orb_parity_lines("2026-11-02", ROWS_1102, parsed, [], "", bt)
+    ranked = next(l for l in lines if l.startswith("ORB ranked"))
+    picks = next(l for l in lines if l.startswith("ORB picks"))
+    assert ranked.startswith("ORB ranked: engine 8 vs BT 8 | match 7 | engine-only: SKHX | BT-only: AEYE")
+    assert picks.startswith("ORB picks: engine 3 vs BT 2 | match 1 | engine-only: SKHX SKUU | BT-only: AEYE")
+    assert "PMN" not in ranked + picks and "FTFT" not in ranked + picks
+
+
+def test_p1_parity_traded_ignores_preplace_canceled():
+    rows = [{"symbol": "PMN", "order_status": "preplace_canceled", "fill_price": None}]
+    assert es.engine_traded(rows) == set()
