@@ -194,6 +194,26 @@ class TestFillRegistersStopMonitor:
         assert 'ABC' in e.entered_today
 
 
+class TestPartialFillCompletionUpdatesShares:
+    def test_partial_then_filled_writes_cumulative_shares_and_filled_qty(
+            self, hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path):
+        """2026-11-04 XPEL: PARTIALLY_FILLED 21/34 saved shares=21; FILLED 34/34 updated filled_qty but not shares."""
+        e = live_engine(hod_live_alpaca, hod_live_db, hod_live_sm, hod_live_stream, tmp_path)
+        admit(e)
+        cand = e.candidates['ABC']
+        e._arm_live_order(cand, dict(BIG_VOL_ARM))
+        coid = cand.live_order['coid']
+        hod_live_stream.snapshot_by_client_prefix.return_value = {
+            coid: {'status': 'partially_filled', 'filled_qty': 21, 'filled_avg_price': 11.02, 'client_order_id': coid}}
+        e._poll_live_fills()
+        assert hod_live_db.save_trade.call_args.args[0]['shares'] == 21
+        hod_live_stream.snapshot_by_client_prefix.return_value = {
+            coid: {'status': 'filled', 'filled_qty': 34, 'filled_avg_price': 11.02, 'client_order_id': coid}}
+        e._poll_live_fills()
+        updates = [c for c in hod_live_db.update_trade.call_args_list if c.args[0] == 7 and 'filled_qty' in c.args[1]]
+        assert updates[-1].args[1]['filled_qty'] == 34 and updates[-1].args[1]['shares'] == 34
+
+
 # --------------------------------------------------------------------------------------- item 4b: OCO safety net (2026-09-25 VECO fix)
 class TestOcoSafetyNet:
     def test_fill_places_one_oco_order_with_right_prices_qty_and_stores_both_leg_ids(

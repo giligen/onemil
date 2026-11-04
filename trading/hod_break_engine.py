@@ -2123,6 +2123,7 @@ class HodBreakEngine:
             trade_id = lo['trade_id']
             try:
                 self.db.update_trade(trade_id, {'order_status': 'filled', 'fill_price': fill_px, 'filled_at': now_ts.isoformat(), 'filled_qty': filled_qty,
+                                                'shares': filled_qty,   # 2026-11-04 XPEL: cumulative fill IS the position size; a completing PARTIAL left shares=21 vs broker 34
                                                 'pattern_data': json.dumps(pattern_data)})
             except Exception as e:
                 logger.error(f"{self.tag} {sym}: fill persistence failed for existing trade_id={trade_id} ({e}) — fill_price/filled_at/filled_qty/leg ids NOT updated")
