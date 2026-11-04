@@ -447,11 +447,13 @@ risk:
   max_consecutive_losing_days: 0  # 0 = disabled (we tested and it didn't help on OOS)
   # Pre-committed kill rails (B+ RESTART 2026-08-15, design §5). DB-derived
   # (restart-safe), ET-dated, realized-ORB-P&L only. Env kill: ORB_KILL_RAILS=0.
+  # 2026-11-04: dollars follow the $375-R sizing (daily 3.3 R / weekly 5 R / month 10 R); the 8/15 numbers
+  # (-500/-750/-1500) were set at ~$150 R and the weekly rail fired on two stops.
   kill_rails:
     enabled: true
-    daily_usd: -500
-    weekly_usd: -750
-    month_abandon_usd: -1500
+    daily_usd: -1250
+    weekly_usd: -1875
+    month_abandon_usd: -3750
   # PDT guard (B+ RESTART 2026-08-15, design §P1-10). Env kill: ORB_PDT_GUARD=0.
   pdt_guard:
     enabled: true
