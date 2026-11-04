@@ -654,6 +654,10 @@ class ORBEngine:
         self._kill_query_fail_notified = False
         self._kill_week_key: Optional[str] = None
         self._kill_month_key: Optional[str] = None
+        # Boot line so a rail change is verifiable in the journal (2026-11-04: the rails were rescaled to the
+        # $375-R sizing after the -$750 weekly rail flattened the paper book on ordinary noise).
+        logger.info(f"[ORB] kill rails: enabled={self.kill_rails_enabled} daily=${self.kill_daily_usd:,.0f} "
+                    f"weekly=${self.kill_weekly_usd:,.0f} month_abandon=${self.kill_month_abandon_usd:,.0f}")
 
         # PDT guard (B+ 2026-08-15, design §P1-10). Every ORB trade is a same-day
         # round trip = 1 day trade. On a MARGIN account with equity < threshold,

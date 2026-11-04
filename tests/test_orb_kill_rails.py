@@ -62,9 +62,11 @@ def _insert(db, trade_date, symbol, pnl, filled=True):
 class TestConfig:
     def test_yaml_knobs(self, engine):
         assert engine.kill_rails_enabled is True
-        assert engine.kill_daily_usd == -500
-        assert engine.kill_weekly_usd == -750
-        assert engine.kill_month_abandon_usd == -1500
+        # 2026-11-04: rescaled from -500/-750/-1500 (set at ~$150 R) to the same R-multiples at $375 R after the
+        # weekly rail flattened the paper book on two stops (owner: "we are losing data").
+        assert engine.kill_daily_usd == -1250
+        assert engine.kill_weekly_usd == -1875
+        assert engine.kill_month_abandon_usd == -3750
 
     def test_env_disable(self, orb_cfg, tmp_db, monkeypatch):
         monkeypatch.setenv('ORB_KILL_RAILS', '0')
@@ -79,15 +81,15 @@ class TestDailyRail:
         assert engine._kill_rails_blocked() is None
 
     def test_small_loss_no_block(self, engine):
-        _insert(engine.db, engine._et_now().strftime('%Y-%m-%d'), 'A', -200)
+        _insert(engine.db, engine._et_now().strftime('%Y-%m-%d'), 'A', -500)
         assert engine._kill_rails_blocked() is None
 
     def test_daily_breach_blocks(self, engine):
-        _insert(engine.db, engine._et_now().strftime('%Y-%m-%d'), 'A', -600)
+        _insert(engine.db, engine._et_now().strftime('%Y-%m-%d'), 'A', -1500)
         assert engine._kill_rails_blocked() == 'daily_kill'
 
     def test_daily_notified_once(self, engine):
-        _insert(engine.db, engine._et_now().strftime('%Y-%m-%d'), 'A', -600)
+        _insert(engine.db, engine._et_now().strftime('%Y-%m-%d'), 'A', -1500)
         engine._kill_rails_blocked()
         engine._kill_rails_blocked()
         engine.notifier = MagicMock()
@@ -95,7 +97,7 @@ class TestDailyRail:
         assert engine._kill_daily_notified is True
 
     def test_gates_check_entries(self, engine):
-        _insert(engine.db, engine._et_now().strftime('%Y-%m-%d'), 'A', -600)
+        _insert(engine.db, engine._et_now().strftime('%Y-%m-%d'), 'A', -1500)
         assert engine.check_entries(symbols=['ZZZ']) == []
 
 
@@ -103,19 +105,19 @@ class TestWeeklyRail:
     def test_weekly_breach_blocks_and_flattens(self, engine):
         et = engine._et_now()
         wk_start = (et - __import__('datetime').timedelta(days=et.weekday()))
-        # Two -400 losses this week (=-800 <= -750) but each day > -500 so it's
+        # Two -1000 losses this week (=-2000 <= -1875) but each day > -1250 so it's
         # the WEEKLY rail that fires, not daily.
-        _insert(engine.db, wk_start.strftime('%Y-%m-%d'), 'A', -400)
-        _insert(engine.db, et.strftime('%Y-%m-%d'), 'B', -400)
+        _insert(engine.db, wk_start.strftime('%Y-%m-%d'), 'A', -1000)
+        _insert(engine.db, et.strftime('%Y-%m-%d'), 'B', -1000)
         engine.force_close_all = MagicMock(return_value=2)
         assert engine._kill_rails_blocked() == 'weekly_kill'
         engine.force_close_all.assert_called_once()
 
     def test_weekly_flatten_once(self, engine):
         et = engine._et_now()
-        _insert(engine.db, et.strftime('%Y-%m-%d'), 'A', -400)
+        _insert(engine.db, et.strftime('%Y-%m-%d'), 'A', -1000)
         wk_start = (et - __import__('datetime').timedelta(days=et.weekday()))
-        _insert(engine.db, wk_start.strftime('%Y-%m-%d'), 'B', -400)
+        _insert(engine.db, wk_start.strftime('%Y-%m-%d'), 'B', -1000)
         engine.force_close_all = MagicMock(return_value=0)
         engine._kill_rails_blocked()
         engine._kill_rails_blocked()
@@ -128,8 +130,8 @@ class TestMonthRail:
         # is impossible (month is most-negative); assert month is reported.
         et = engine._et_now()
         first = et.strftime('%Y-%m-01')
-        _insert(engine.db, first, 'A', -1600)
-        # month <= -1500 -> abandon (also weekly/daily may be true for `first`
+        _insert(engine.db, first, 'A', -4000)
+        # month <= -3750 -> abandon (also weekly/daily may be true for `first`
         # if it is this week; month is checked FIRST by severity)
         assert engine._kill_rails_blocked() == 'month_abandon'
 
