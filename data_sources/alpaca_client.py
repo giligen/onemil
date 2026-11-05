@@ -13,7 +13,10 @@ Rate limit retry with exponential backoff built in.
 """
 
 import logging
+import http.client as http_client
 import time as time_mod
+import requests
+import urllib3.exceptions as urllib3_exceptions
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta, date
 from typing import Dict, Optional, List, Callable, TypeVar
@@ -122,6 +125,28 @@ class AlpacaAPIError(Exception):
 class AlpacaAPITimeoutError(AlpacaAPIError):
     """Exception raised when Alpaca API call times out."""
     pass
+
+
+TRANSIENT_RETRY_DELAY_SECONDS = 1.0   # 2026-11-05: one retry after a dropped connection
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """True if exc (or anything in its __cause__/__context__ chain) is a transient network drop.
+
+    Transient = requests ConnectionError, http.client.RemoteDisconnected or urllib3 ProtocolError.
+    NOT AlpacaAPITimeoutError: `_call_with_timeout` already retries a timeout once, and a third
+    attempt would push a scanner cycle past its 60 s budget. The wrapper methods re-raise as a
+    plain AlpacaAPIError, so the chain is walked to find the original network exception.
+    """
+    transient = (requests.exceptions.ConnectionError, http_client.RemoteDisconnected,
+                 urllib3_exceptions.ProtocolError)
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        if isinstance(exc, transient):
+            return True
+        seen.add(id(exc))
+        exc = exc.__cause__ or exc.__context__
+    return False
 
 
 
@@ -291,6 +316,22 @@ class AlpacaClient:
         if last_exception:
             raise AlpacaAPIError(f"API call failed: {operation}") from last_exception
         raise AlpacaAPIError(f"API call failed unexpectedly: {operation}")
+
+    @staticmethod
+    def _retry_once(fn: Callable, label: str):
+        """Run fn(); on a TRANSIENT exception log a WARNING, sleep 1 s and retry exactly once.
+
+        Non-transient exceptions propagate immediately (no retry); a second failure propagates
+        to the caller, which owns the ERROR decision (2026-11-05 Telegram-noise fix).
+        """
+        try:
+            return fn()
+        except Exception as e:
+            if not _is_transient(e):
+                raise
+            logger.warning(f"{label} transient ({type(e).__name__}) — retrying once")
+            time_mod.sleep(TRANSIENT_RETRY_DELAY_SECONDS)
+            return fn()
 
     @staticmethod
     def _to_dict(response) -> dict:
@@ -765,32 +806,35 @@ class AlpacaClient:
             return {}
 
         try:
-            results = {}
-            chunk_size = 200
-            for i in range(0, len(symbols), chunk_size):
-                chunk = symbols[i:i + chunk_size]
-                request = StockLatestTradeRequest(symbol_or_symbols=chunk, feed=feed)
-                trades_raw = self._call_with_timeout(
-                    lambda req=request: self.data_client.get_stock_latest_trade(req),
-                    f"get_latest_trades(chunk {i // chunk_size + 1})"
-                )
-                trades = self._to_dict(trades_raw)
-                for symbol in chunk:
-                    if symbol in trades:
-                        trade = trades[symbol]
-                        results[symbol] = {
-                            'price': float(trade.price) if trade.price else 0,
-                            'size': int(trade.size) if trade.size else 0,
-                            'timestamp': trade.timestamp.isoformat() if trade.timestamp else None
-                        }
+            def _attempt():
+                results = {}
+                chunk_size = 200
+                for i in range(0, len(symbols), chunk_size):
+                    chunk = symbols[i:i + chunk_size]
+                    request = StockLatestTradeRequest(symbol_or_symbols=chunk, feed=feed)
+                    trades_raw = self._call_with_timeout(
+                        lambda req=request: self.data_client.get_stock_latest_trade(req),
+                        f"get_latest_trades(chunk {i // chunk_size + 1})"
+                    )
+                    trades = self._to_dict(trades_raw)
+                    for symbol in chunk:
+                        if symbol in trades:
+                            trade = trades[symbol]
+                            results[symbol] = {
+                                'price': float(trade.price) if trade.price else 0,
+                                'size': int(trade.size) if trade.size else 0,
+                                'timestamp': trade.timestamp.isoformat() if trade.timestamp else None
+                            }
 
-            logger.debug(f"Fetched latest trades for {len(results)}/{len(symbols)} symbols")
-            return results
+                logger.debug(f"Fetched latest trades for {len(results)}/{len(symbols)} symbols")
+                return results
+
+            return self._retry_once(_attempt, "get_latest_trades")
 
         except AlpacaAPIError:
             raise
         except Exception as e:
-            logger.error(f"Failed to get latest trades: {e}")
+            logger.warning(f"Failed to get latest trades: {e}")
             raise AlpacaAPIError(f"Failed to get latest trades: {e}")
 
     def get_snapshots(self, symbols: List[str], feed: DataFeed = DataFeed.SIP) -> Dict[str, Dict]:
@@ -808,54 +852,57 @@ class AlpacaClient:
             return {}
 
         try:
-            results = {}
-            chunk_size = 200
-            for i in range(0, len(symbols), chunk_size):
-                chunk = symbols[i:i + chunk_size]
-                request = StockSnapshotRequest(symbol_or_symbols=chunk, feed=feed)
-                snapshots_raw = self._call_with_timeout(
-                    lambda req=request: self.data_client.get_stock_snapshot(req),
-                    f"get_snapshots(chunk {i // chunk_size + 1})"
-                )
-                snapshots = self._to_dict(snapshots_raw)
-                for symbol in chunk:
-                    if symbol in snapshots:
-                        snap = snapshots[symbol]
-                        bar = snap.daily_bar
-                        result = {}
-                        if bar:
-                            result['open'] = float(bar.open) if bar.open else 0
-                            result['high'] = float(bar.high) if bar.high else 0
-                            result['low'] = float(bar.low) if bar.low else 0
-                            result['close'] = float(bar.close) if bar.close else 0
-                            result['volume'] = int(bar.volume) if bar.volume else 0
-                            # daily-bar DATE (ET) — staleness detector for
-                            # vendor corpses: delisted/dead symbols keep
-                            # months-old snapshots (CUK's was 2026-05-06 on
-                            # 2026-07-23) and phantom-gap into the universe
-                            if bar.timestamp:
-                                import pytz as _pytz
-                                result['daily_bar_date'] = (
-                                    bar.timestamp.astimezone(
-                                        _pytz.timezone('US/Eastern'))
-                                    .date().isoformat())
-                        prev_bar = snap.previous_daily_bar
-                        if prev_bar:
-                            result['prev_close'] = float(prev_bar.close) if prev_bar.close else 0
-                            result['prev_volume'] = int(prev_bar.volume) if prev_bar.volume else 0
-                        if snap.latest_trade:
-                            result['latest_price'] = float(snap.latest_trade.price) if snap.latest_trade.price else 0
-                        if snap.latest_quote:
-                            q = snap.latest_quote
-                            result['bid_price'] = float(q.bid_price) if q.bid_price else 0
-                            result['ask_price'] = float(q.ask_price) if q.ask_price else 0
-                            result['bid_size'] = int(q.bid_size) if q.bid_size else 0
-                            result['ask_size'] = int(q.ask_size) if q.ask_size else 0
-                        if result:
-                            results[symbol] = result
+            def _attempt():
+                results = {}
+                chunk_size = 200
+                for i in range(0, len(symbols), chunk_size):
+                    chunk = symbols[i:i + chunk_size]
+                    request = StockSnapshotRequest(symbol_or_symbols=chunk, feed=feed)
+                    snapshots_raw = self._call_with_timeout(
+                        lambda req=request: self.data_client.get_stock_snapshot(req),
+                        f"get_snapshots(chunk {i // chunk_size + 1})"
+                    )
+                    snapshots = self._to_dict(snapshots_raw)
+                    for symbol in chunk:
+                        if symbol in snapshots:
+                            snap = snapshots[symbol]
+                            bar = snap.daily_bar
+                            result = {}
+                            if bar:
+                                result['open'] = float(bar.open) if bar.open else 0
+                                result['high'] = float(bar.high) if bar.high else 0
+                                result['low'] = float(bar.low) if bar.low else 0
+                                result['close'] = float(bar.close) if bar.close else 0
+                                result['volume'] = int(bar.volume) if bar.volume else 0
+                                # daily-bar DATE (ET) — staleness detector for
+                                # vendor corpses: delisted/dead symbols keep
+                                # months-old snapshots (CUK's was 2026-05-06 on
+                                # 2026-07-23) and phantom-gap into the universe
+                                if bar.timestamp:
+                                    import pytz as _pytz
+                                    result['daily_bar_date'] = (
+                                        bar.timestamp.astimezone(
+                                            _pytz.timezone('US/Eastern'))
+                                        .date().isoformat())
+                            prev_bar = snap.previous_daily_bar
+                            if prev_bar:
+                                result['prev_close'] = float(prev_bar.close) if prev_bar.close else 0
+                                result['prev_volume'] = int(prev_bar.volume) if prev_bar.volume else 0
+                            if snap.latest_trade:
+                                result['latest_price'] = float(snap.latest_trade.price) if snap.latest_trade.price else 0
+                            if snap.latest_quote:
+                                q = snap.latest_quote
+                                result['bid_price'] = float(q.bid_price) if q.bid_price else 0
+                                result['ask_price'] = float(q.ask_price) if q.ask_price else 0
+                                result['bid_size'] = int(q.bid_size) if q.bid_size else 0
+                                result['ask_size'] = int(q.ask_size) if q.ask_size else 0
+                            if result:
+                                results[symbol] = result
 
-            logger.debug(f"Fetched snapshots for {len(results)}/{len(symbols)} symbols")
-            return results
+                logger.debug(f"Fetched snapshots for {len(results)}/{len(symbols)} symbols")
+                return results
+
+            return self._retry_once(_attempt, "get_snapshots")
 
         except AlpacaAPIError:
             raise
@@ -965,50 +1012,53 @@ class AlpacaClient:
             today_open_utc = datetime.now(timezone.utc) - timedelta(minutes=45)
 
         try:
-            results = {}
-            chunk_size = 200
-            for i in range(0, len(symbols), chunk_size):
-                chunk = symbols[i:i + chunk_size]
-                request = StockBarsRequest(
-                    symbol_or_symbols=chunk,
-                    timeframe=TimeFrame(1, TimeFrameUnit.Minute),
-                    start=today_open_utc,
-                    feed=feed,
-                )
-                bars_raw = self._call_with_timeout(
-                    lambda req=request: self.data_client.get_stock_bars(req),
-                    f"get_current_bars(chunk {i // chunk_size + 1})"
-                )
-                bars = self._to_dict(bars_raw)
-                for symbol in chunk:
-                    syms_bars = bars.get(symbol) or []
-                    if not syms_bars:
-                        continue
-                    # Aggregate 1-min bars to day-running stats
-                    day_high = max(float(b.high) for b in syms_bars)
-                    day_low = min(float(b.low) for b in syms_bars)
-                    day_volume = sum(int(b.volume) for b in syms_bars)
-                    first_open = float(syms_bars[0].open)
-                    latest = syms_bars[-1]
-                    results[symbol] = {
-                        'open': first_open,
-                        'high': day_high,
-                        'low': day_low,
-                        'close': float(latest.close),
-                        'volume': day_volume,
-                        'timestamp': latest.timestamp,
-                    }
+            def _attempt():
+                results = {}
+                chunk_size = 200
+                for i in range(0, len(symbols), chunk_size):
+                    chunk = symbols[i:i + chunk_size]
+                    request = StockBarsRequest(
+                        symbol_or_symbols=chunk,
+                        timeframe=TimeFrame(1, TimeFrameUnit.Minute),
+                        start=today_open_utc,
+                        feed=feed,
+                    )
+                    bars_raw = self._call_with_timeout(
+                        lambda req=request: self.data_client.get_stock_bars(req),
+                        f"get_current_bars(chunk {i // chunk_size + 1})"
+                    )
+                    bars = self._to_dict(bars_raw)
+                    for symbol in chunk:
+                        syms_bars = bars.get(symbol) or []
+                        if not syms_bars:
+                            continue
+                        # Aggregate 1-min bars to day-running stats
+                        day_high = max(float(b.high) for b in syms_bars)
+                        day_low = min(float(b.low) for b in syms_bars)
+                        day_volume = sum(int(b.volume) for b in syms_bars)
+                        first_open = float(syms_bars[0].open)
+                        latest = syms_bars[-1]
+                        results[symbol] = {
+                            'open': first_open,
+                            'high': day_high,
+                            'low': day_low,
+                            'close': float(latest.close),
+                            'volume': day_volume,
+                            'timestamp': latest.timestamp,
+                        }
 
-            logger.debug(
-                f"Fetched day-running 1-min bars (since 09:30 ET) for "
-                f"{len(results)}/{len(symbols)} symbols"
-            )
-            return results
+                logger.debug(
+                    f"Fetched day-running 1-min bars (since 09:30 ET) for "
+                    f"{len(results)}/{len(symbols)} symbols"
+                )
+                return results
+
+            return self._retry_once(_attempt, "get_current_bars")
 
         except AlpacaAPIError:
             raise
         except Exception as e:
-            logger.error(f"Failed to get current bars: {e}")
+            logger.warning(f"Failed to get current bars: {e}")
             raise AlpacaAPIError(f"Failed to get current bars: {e}")
 
     def get_premarket_extremes(
@@ -1750,61 +1800,64 @@ class AlpacaClient:
             AlpacaAPIError: If API call fails
         """
         try:
-            account = self._call_with_timeout(
-                lambda: self.trading_client.get_account(),
-                "get_account_info"
-            )
+            def _attempt():
+                account = self._call_with_timeout(
+                    lambda: self.trading_client.get_account(),
+                    "get_account_info"
+                )
 
-            # 2026-07-06 incident: Alpaca returned daytrade_count=None on an
-            # otherwise-ACTIVE account (post-holiday API quirk) and the bare
-            # int() crashed pre-start validation -> SILENT 4h crash-loop on
-            # the first live day after the weekend ships. Parse defensively;
-            # None -> 0 with a WARNING (CLAUDE.md fallback rule).
-            def _num(name, cast, default):
-                v = getattr(account, name, None)
-                if v is None:
-                    # Rate-limit to once/hour per field (2026-07-13): the
-                    # per-minute scanner cycle was emitting this every 60s
-                    # all day (daytrade_count None is a persistent Alpaca
-                    # quirk on this account), burying real warnings.
-                    now = time_mod.monotonic()
-                    if not hasattr(self, '_none_field_warn_ts'):
-                        self._none_field_warn_ts = {}   # lazy (rehydrated clients)
-                    # Sentinel must be None, not 0.0: monotonic() starts at
-                    # host BOOT, so `now - 0.0 > 3600` is False for the first
-                    # hour of uptime — which silently suppressed the very
-                    # first warning after a reboot (found 2026-08-16 when the
-                    # instance crash-rebooted and the rehearsal suite failed).
-                    last = self._none_field_warn_ts.get(name)
-                    if last is None or now - last > 3600:
-                        self._none_field_warn_ts[name] = now
-                        logger.warning(
-                            "get_account_info: %s is None from Alpaca — "
-                            "defaulting to %s (account status: %s; this "
-                            "warning is rate-limited to once/hour)",
-                            name, default, account.status)
-                    return default
-                return cast(v)
-            return {
-                'equity': _num('equity', float, 0.0),
-                'buying_power': _num('buying_power', float, 0.0),
-                'cash': _num('cash', float, 0.0),
-                'daytrade_count': _num('daytrade_count', int, 0),
-                'pattern_day_trader': account.pattern_day_trader,
-                # Reg-T buying-power multiplier: '1' = cash / no margin,
-                # '2' = Reg-T margin, '4' = PDT-approved margin. Used by the
-                # ORB PDT guard to detect margin accounts (B+ 2026-08-15).
-                'multiplier': _num('multiplier', float, 1.0),
-                # Account identity (2026-09-28, scripts/check_paper_accounts.py): lets a
-                # probe compare a strategy's "paper" account against the main account to
-                # catch a live key pasted into a strategy's *_API_KEY by mistake.
-                'account_number': str(getattr(account, 'account_number', '') or ''),
-            }
+                # 2026-07-06 incident: Alpaca returned daytrade_count=None on an
+                # otherwise-ACTIVE account (post-holiday API quirk) and the bare
+                # int() crashed pre-start validation -> SILENT 4h crash-loop on
+                # the first live day after the weekend ships. Parse defensively;
+                # None -> 0 with a WARNING (CLAUDE.md fallback rule).
+                def _num(name, cast, default):
+                    v = getattr(account, name, None)
+                    if v is None:
+                        # Rate-limit to once/hour per field (2026-07-13): the
+                        # per-minute scanner cycle was emitting this every 60s
+                        # all day (daytrade_count None is a persistent Alpaca
+                        # quirk on this account), burying real warnings.
+                        now = time_mod.monotonic()
+                        if not hasattr(self, '_none_field_warn_ts'):
+                            self._none_field_warn_ts = {}   # lazy (rehydrated clients)
+                        # Sentinel must be None, not 0.0: monotonic() starts at
+                        # host BOOT, so `now - 0.0 > 3600` is False for the first
+                        # hour of uptime — which silently suppressed the very
+                        # first warning after a reboot (found 2026-08-16 when the
+                        # instance crash-rebooted and the rehearsal suite failed).
+                        last = self._none_field_warn_ts.get(name)
+                        if last is None or now - last > 3600:
+                            self._none_field_warn_ts[name] = now
+                            logger.warning(
+                                "get_account_info: %s is None from Alpaca — "
+                                "defaulting to %s (account status: %s; this "
+                                "warning is rate-limited to once/hour)",
+                                name, default, account.status)
+                        return default
+                    return cast(v)
+                return {
+                    'equity': _num('equity', float, 0.0),
+                    'buying_power': _num('buying_power', float, 0.0),
+                    'cash': _num('cash', float, 0.0),
+                    'daytrade_count': _num('daytrade_count', int, 0),
+                    'pattern_day_trader': account.pattern_day_trader,
+                    # Reg-T buying-power multiplier: '1' = cash / no margin,
+                    # '2' = Reg-T margin, '4' = PDT-approved margin. Used by the
+                    # ORB PDT guard to detect margin accounts (B+ 2026-08-15).
+                    'multiplier': _num('multiplier', float, 1.0),
+                    # Account identity (2026-09-28, scripts/check_paper_accounts.py): lets a
+                    # probe compare a strategy's "paper" account against the main account to
+                    # catch a live key pasted into a strategy's *_API_KEY by mistake.
+                    'account_number': str(getattr(account, 'account_number', '') or ''),
+                }
+
+            return self._retry_once(_attempt, "get_account_info")
 
         except AlpacaAPIError:
             raise
         except Exception as e:
-            logger.error(f"Failed to get account info: {e}")
+            logger.warning(f"Failed to get account info: {e}")
             raise AlpacaAPIError(f"Failed to get account info: {e}")
 
     def get_buying_power(self) -> float:

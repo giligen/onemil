@@ -16,7 +16,7 @@ from typing import List, Dict, Optional, Set
 
 import pytz
 
-from data_sources.alpaca_client import AlpacaClient
+from data_sources.alpaca_client import AlpacaClient, AlpacaAPIError
 from data_sources.news_provider import NewsProvider
 from persistence.database import Database
 from scanner.criteria import ScannerCriteria, ScanCandidate
@@ -132,6 +132,7 @@ class RealtimeScanner:
         self.verbose = verbose
         self.trading_engine = trading_engine
         self.notifier = notifier
+        self._consecutive_cycle_failures = 0   # 2026-11-05: transient Alpaca drops page only on the 2nd in a row
         self.shutdown_event = shutdown_event
         self.macd_engine = macd_engine
         self.orb_engine = orb_engine
@@ -197,6 +198,41 @@ class RealtimeScanner:
     def _today(self) -> str:
         """Current date as ISO string. Always fresh, never stale."""
         return date.today().isoformat()
+
+    def _run_guarded_cycle(self, current_bucket: str) -> None:
+        """Run one intraday cycle; a failure skips this minute, never kills the scanner.
+
+        2026-04-27: an exception in the cycle (e.g. AlpacaAPITimeoutError at 9:32 ET congestion)
+        used to kill the scanner; now the minute is skipped and the next bucket retried.
+        2026-11-05 Telegram-noise fix: a FIRST failure that is an AlpacaAPIError (a transient
+        API drop that self-heals) logs WARNING and does not notify. The second and later
+        consecutive failures log ERROR + notify ("N consecutive cycles failed"). Any other
+        exception type (a code bug) is ERROR + notify immediately. Success resets the count.
+        """
+        try:
+            self._run_intraday_cycle()
+        except Exception as e:
+            self._consecutive_cycle_failures += 1
+            n = self._consecutive_cycle_failures
+            is_api = isinstance(e, AlpacaAPIError)
+            msg = f"Scanner intraday cycle failed at {current_bucket} ET: {type(e).__name__}: {e}"
+            if is_api and n == 1:
+                logger.warning(msg, exc_info=True)
+                return
+            if n > 1:
+                msg += f" ({n} consecutive cycles failed)"
+            logger.error(msg, exc_info=True)
+            if self.notifier:
+                try:
+                    tail = f" — {n} consecutive cycles failed" if n > 1 else ""
+                    self.notifier.send_message_sync(
+                        f"⚠️ Scanner cycle failed at {current_bucket} ET — "
+                        f"{type(e).__name__}{tail}. Retrying next minute."
+                    )
+                except Exception:
+                    pass
+        else:
+            self._consecutive_cycle_failures = 0
 
     def run(self) -> None:
         """
@@ -414,22 +450,7 @@ class RealtimeScanner:
                 # scanner — service died at 13:34:01 + 13:37:15 UTC, costing
                 # ORB its 9:35 ET range-build window. Wrap so a single
                 # failed cycle skips this minute and we retry next bucket.
-                try:
-                    self._run_intraday_cycle()
-                except Exception as e:
-                    logger.error(
-                        f"Scanner intraday cycle failed at {current_bucket} ET: "
-                        f"{type(e).__name__}: {e}",
-                        exc_info=True,
-                    )
-                    if self.notifier:
-                        try:
-                            self.notifier.send_message_sync(
-                                f"⚠️ Scanner cycle failed at {current_bucket} ET — "
-                                f"{type(e).__name__}. Retrying next minute."
-                            )
-                        except Exception:
-                            pass
+                self._run_guarded_cycle(current_bucket)
                 last_bucket = current_bucket
 
             # Circuit breaker: StopMonitor dead → close all → exit
