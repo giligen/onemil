@@ -116,9 +116,12 @@ class TestFrozenValues:
     def test_kill_rails(self, cfg):
         kr = cfg['risk']['kill_rails']
         assert kr['enabled'] is True
-        assert kr['daily_usd'] == -500
-        assert kr['weekly_usd'] == -750
-        assert kr['month_abandon_usd'] == -1500
+        # 2026-11-04: rescaled from -500/-750/-1500 (set 8/15 at ~$150 R) to the same R-multiples at the $375 R
+        # sizing in force since 9/17 (3.3 R / 5 R / 10 R) after the weekly rail flattened the paper book on two
+        # stops 11/3 (owner: "we are losing data"). Mirrors tests/test_orb_kill_rails.py::test_yaml_knobs.
+        assert kr['daily_usd'] == -1250
+        assert kr['weekly_usd'] == -1875
+        assert kr['month_abandon_usd'] == -3750
 
     def test_pdt_guard(self, cfg):
         p = cfg['risk']['pdt_guard']
