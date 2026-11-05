@@ -5,6 +5,7 @@ scripts/ is not a package (same pattern as tests/test_orb_ramp_check.py).
 import csv
 import datetime as dt
 import importlib.util
+import logging
 import os
 import sys
 import types
@@ -74,6 +75,9 @@ def make_alpaca(is_paper=True, base_url='https://paper-api.alpaca.markets',
     a.get_open_positions.return_value = open_positions or []
     a.submit_moc_sell_order.side_effect = lambda symbol, qty, client_order_id=None: {
         'id': f'sell-{symbol}', 'status': 'accepted', 'symbol': symbol, 'qty': qty,
+    }
+    a.submit_market_sell_order.side_effect = lambda symbol, qty, client_order_id=None: {
+        'id': f'mkt-{symbol}', 'status': 'accepted', 'symbol': symbol, 'qty': qty,
     }
     a.get_order.return_value = {'status': 'filled', 'filled_avg_price': 500.0}
     return a
@@ -274,13 +278,14 @@ def test_exit_day_sells_held_qty_from_broker_and_writes_ledger(tmp_path):
     }, ledger)
     a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 40}])
     n = make_notifier()
-    summary = tom.run(a, n, et_dt(2026, 10, 5, 15, 45), dry_run=False, ledger_path=ledger)
-    a.submit_moc_sell_order.assert_called_once_with('QQQ', 40, client_order_id='tom-202610-QQQ-out')
+    summary = tom.run(a, n, et_dt(2026, 10, 5, 15, 58), dry_run=False, ledger_path=ledger)
+    a.submit_market_sell_order.assert_called_once_with('QQQ', 40, client_order_id='tom-202610-QQQ-out')
+    a.submit_moc_sell_order.assert_not_called()
     rows = tom.read_ledger(ledger)
     exit_row = next(r for r in rows if r['action'] == 'exit')
     assert exit_row['qty'] == '40'
     assert exit_row['client_order_id'] == 'tom-202610-QQQ-out'
-    assert 'SELL MOC' in summary
+    assert 'SELL MARKET' in summary
 
 
 def test_exit_day_skips_symbol_with_no_open_ledger_position(tmp_path):
@@ -293,8 +298,9 @@ def test_exit_day_skips_symbol_with_no_open_ledger_position(tmp_path):
     }, ledger)
     a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 40}])
     n = make_notifier()
-    tom.run(a, n, et_dt(2026, 10, 5, 15, 45), dry_run=False, ledger_path=ledger)
-    assert a.submit_moc_sell_order.call_count == 1  # QQQ only (SPY/IWM exit MARKET in the late window)
+    tom.run(a, n, et_dt(2026, 10, 5, 15, 58), dry_run=False, ledger_path=ledger)
+    assert a.submit_market_sell_order.call_count == 1  # QQQ only: SPY/IWM have no tracked position
+    a.submit_moc_sell_order.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -454,16 +460,20 @@ def test_expired_exit_id_is_resubmitted_as_r1(tmp_path):
     ledger = _qqq_held_ledger(tmp_path, 'expired')
     a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 26}])
     n = make_notifier()
-    # 10/5 itself, same session, MOC window: expired id is still owed -> -r1
+    # 10/5 itself, same session: the MOC window does nothing, the late window sells MARKET as -r1
     tom.run(a, n, et_dt(2026, 10, 5, 15, 45), ledger_path=ledger)
-    a.submit_moc_sell_order.assert_called_once_with('QQQ', 26, client_order_id='tom-202610-QQQ-out-r1')
+    a.submit_market_sell_order.assert_not_called()
+    tom.run(a, n, et_dt(2026, 10, 5, 15, 58), ledger_path=ledger)
+    a.submit_market_sell_order.assert_called_once_with('QQQ', 26, client_order_id='tom-202610-QQQ-out-r1')
+    a.submit_moc_sell_order.assert_not_called()
 
 
 def test_filled_exit_id_is_skipped(tmp_path):
     ledger = _qqq_held_ledger(tmp_path, 'filled')
     a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 26}])
-    tom.run(a, make_notifier(), et_dt(2026, 10, 5, 15, 45), ledger_path=ledger)
+    tom.run(a, make_notifier(), et_dt(2026, 10, 5, 15, 58), ledger_path=ledger)
     a.submit_moc_sell_order.assert_not_called()
+    a.submit_market_sell_order.assert_not_called()
 
 
 def test_live_unfilled_exit_in_late_window_cancels_then_market(tmp_path):
@@ -492,12 +502,18 @@ def test_late_fallback_unconfirmed_cancel_does_not_double_submit(tmp_path):
     a.submit_market_sell_order.assert_not_called()
 
 
-def test_owed_exit_next_session_exits_with_deviation_tag(tmp_path):
+def test_owed_exit_next_session_exits_with_deviation_tag(tmp_path, caplog):
+    """Owed exit, NEXT session, MOC-window tick: MARKET immediately (never MOC) + ERROR 'STILL HELD'."""
     ledger = _qqq_held_ledger(tmp_path, 'expired')
     a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 26}])
     n = make_notifier()
-    summary = tom.run(a, n, et_dt(2026, 10, 6, 15, 45), ledger_path=ledger)
-    a.submit_moc_sell_order.assert_called_once_with('QQQ', 26, client_order_id='tom-202610-QQQ-out-r1')
+    with caplog.at_level('ERROR', logger='tom_sleeve'):
+        summary = tom.run(a, n, et_dt(2026, 10, 6, 15, 45), ledger_path=ledger)
+    a.submit_market_sell_order.assert_called_once_with('QQQ', 26, client_order_id='tom-202610-QQQ-out-r1')
+    a.submit_moc_sell_order.assert_not_called()
+    assert any(r.levelno == logging.ERROR and 'POSITION STILL HELD' in r.getMessage() and 'QQQ 26' in r.getMessage()
+               for r in caplog.records)
+    assert any('POSITION STILL HELD' in c.args[0] for c in n.send_message_sync.call_args_list)
     last = tom.read_ledger(ledger)[-1]
     assert last['deviation'] == 'late_exit_1_sessions' and last['action'] == 'exit'
     assert 'late_exit_1_sessions' in summary
@@ -507,8 +523,9 @@ def test_owed_exit_dry_run_submits_nothing(tmp_path):
     ledger = _qqq_held_ledger(tmp_path, 'expired')
     a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 26}])
     summary = tom.run(a, None, et_dt(2026, 10, 6, 15, 45), dry_run=True, ledger_path=ledger)
-    assert 'DRY-RUN would SELL MOC 26 QQQ id=tom-202610-QQQ-out-r1' in summary
+    assert 'DRY-RUN would SELL MARKET 26 QQQ id=tom-202610-QQQ-out-r1' in summary
     a.submit_moc_sell_order.assert_not_called()
+    a.submit_market_sell_order.assert_not_called()
 
 
 def test_midmonth_noop_unchanged_with_flat_ledger(tmp_path):
@@ -595,7 +612,8 @@ def test_owed_qty_comes_from_the_broker_not_the_ledger(tmp_path, caplog):
     a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 1}])
     with caplog.at_level('WARNING', logger='tom_sleeve'):
         tom.run(a, make_notifier(), et_dt(2026, 10, 7, 15, 45), ledger_path=ledger)
-    a.submit_moc_sell_order.assert_called_once_with('QQQ', 1, client_order_id='tom-202610-QQQ-out-r2')
+    a.submit_market_sell_order.assert_called_once_with('QQQ', 1, client_order_id='tom-202610-QQQ-out-r2')
+    a.submit_moc_sell_order.assert_not_called()
     assert any('broker qty 1' in r.getMessage() and 'ledger' in r.getMessage() and '26' in r.getMessage()
                for r in caplog.records)
 
@@ -604,14 +622,15 @@ def test_owed_qty_never_exceeds_ledger_open_qty(tmp_path):
     ledger = _incident_ledger(tmp_path, partial_row=True)                 # ledger open = 1
     a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 40}])        # broker holds more than ours
     tom.run(a, make_notifier(), et_dt(2026, 10, 7, 15, 45), ledger_path=ledger)
-    a.submit_moc_sell_order.assert_called_once_with('QQQ', 1, client_order_id='tom-202610-QQQ-out-r2')
+    a.submit_market_sell_order.assert_called_once_with('QQQ', 1, client_order_id='tom-202610-QQQ-out-r2')
+    a.submit_moc_sell_order.assert_not_called()
 
 
 def test_dry_run_after_partial_sells_one_share_r2_with_two_sessions(tmp_path):
     ledger = _incident_ledger(tmp_path, partial_row=True)
     a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 1}])
     summary = tom.run(a, None, et_dt(2026, 10, 7, 15, 45), dry_run=True, ledger_path=ledger)
-    assert ('DRY-RUN would SELL MOC 1 QQQ id=tom-202610-QQQ-out-r2 deviation=late_exit_2_sessions') in summary
+    assert ('DRY-RUN would SELL MARKET 1 QQQ id=tom-202610-QQQ-out-r2 deviation=late_exit_2_sessions') in summary
     a.submit_moc_sell_order.assert_not_called()
 
 
@@ -635,6 +654,7 @@ def test_catch_up_day_live_order_is_left_alone_in_moc_window(tmp_path):
                     open_orders=[{'client_order_id': R1, 'id': f'id-{R1}'}])
     tom.run(a, make_notifier(), et_dt(2026, 10, 6, 15, 50), ledger_path=ledger)
     a.submit_moc_sell_order.assert_not_called()
+    a.submit_market_sell_order.assert_not_called()
     a.cancel_order.assert_not_called()
 
 
@@ -646,7 +666,8 @@ def test_partial_fill_flow_end_to_end_through_the_csv(tmp_path):
     a.get_order.return_value = {'status': 'expired', 'qty': 26, 'filled_qty': 25, 'filled_avg_price': 759.76}
     tom.check_pending_fills(a, make_notifier(), ledger_path=ledger)
     tom.run(a, make_notifier(), et_dt(2026, 10, 7, 15, 45), ledger_path=ledger)
-    a.submit_moc_sell_order.assert_called_once_with('QQQ', 1, client_order_id='tom-202610-QQQ-out-r2')
+    a.submit_market_sell_order.assert_called_once_with('QQQ', 1, client_order_id='tom-202610-QQQ-out-r2')
+    a.submit_moc_sell_order.assert_not_called()
     last = tom.read_ledger(ledger)[-1]
     assert (last['action'], last['qty'], last['deviation']) == ('exit', '1', 'late_exit_2_sessions')
 
@@ -752,26 +773,24 @@ def test_late_window_live_day_limit_entry_is_cancelled_then_market(tmp_path):
     assert [r['action'] for r in tom.read_ledger(ledger) if r['symbol'] == 'QQQ'][-1] == 'late_fallback_replace'
 
 
-def test_late_window_live_cls_exit_is_left_alone(tmp_path, caplog):
+def test_late_window_live_cls_exit_is_cancelled_then_market(tmp_path):
+    """Guaranteed exit (11/5): on the EXIT leg even a live CLS order is cancelled and replaced by MARKET."""
     ledger = _qqq_held_ledger(tmp_path, 'pending')
     a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 26}],
                     open_orders=[{'client_order_id': 'tom-202610-QQQ-out', 'id': 'id-tom-202610-QQQ-out',
                                   'time_in_force': 'TimeInForce.CLS'}])
-    a.submit_market_sell_order = MagicMock()
-    with caplog.at_level('INFO'):
-        tom.run(a, make_notifier(), et_dt(2026, 10, 5, 15, 58), ledger_path=ledger)
-    a.cancel_order.assert_not_called()
-    a.submit_market_sell_order.assert_not_called()
-    assert 'MOC live' in caplog.text
+    a.get_order.return_value = {'status': 'canceled'}
+    tom.run(a, make_notifier(), et_dt(2026, 10, 5, 15, 58), ledger_path=ledger)
+    a.cancel_order.assert_called_once_with('id-tom-202610-QQQ-out')
+    a.submit_market_sell_order.assert_called_once_with('QQQ', 26, client_order_id='tom-202610-QQQ-out-mkt')
+    a.submit_moc_sell_order.assert_not_called()
 
 
 def test_missing_tif_falls_back_to_ledger_inference_with_warning(tmp_path, caplog):
-    """No time_in_force on the broker object: a QQQ order submitted inside the MOC window counts as CLS."""
-    ledger = _qqq_held_ledger(tmp_path, 'pending')
-    a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 26}],
-                    open_orders=[{'client_order_id': 'tom-202610-QQQ-out', 'id': 'id-tom-202610-QQQ-out'}])
-    a.submit_market_sell_order = MagicMock()
-    tom.run(a, make_notifier(), et_dt(2026, 10, 5, 15, 58), ledger_path=ledger)
+    """ENTRY leg, no time_in_force on the broker object: a QQQ order submitted inside the MOC window counts as CLS."""
+    ledger, a = _moc_entry_ledger(tmp_path, None)
+    a.get_open_orders.return_value = [{'client_order_id': 'tom-202610-QQQ-in', 'id': 'id-tom-202610-QQQ-in'}]
+    tom.run(a, make_notifier(), et_dt(2026, 10, 30, 15, 58), ledger_path=ledger)
     a.cancel_order.assert_not_called()
     assert 'carries no time_in_force' in caplog.text
 
@@ -786,46 +805,142 @@ def _exit_ledger(tmp_path):
     return ledger
 
 
-def _exit_broker():
-    a = make_alpaca(open_positions=[{'symbol': s, 'qty': 10} for s in ('SPY', 'QQQ', 'IWM')])
+def _exit_broker(qty=10):
+    a = make_alpaca(open_positions=[{'symbol': s, 'qty': qty} for s in ('SPY', 'QQQ', 'IWM')])
     a.submit_market_sell_order = MagicMock(side_effect=lambda sym, qty, client_order_id=None: {
         'id': f'mkt-{sym}', 'status': 'accepted'})
     return a
 
 
-def test_exit_moc_window_submits_moc_only_for_qqq(tmp_path):
-    a = _exit_broker()
-    tom.run(a, make_notifier(), et_dt(2026, 10, 5, 15, 45), ledger_path=_exit_ledger(tmp_path))
-    a.submit_moc_sell_order.assert_called_once_with('QQQ', 10, client_order_id='tom-202610-QQQ-out')
-    a.submit_market_sell_order.assert_not_called()
-
-
-def test_exit_late_window_spy_iwm_market(tmp_path):
-    a = _exit_broker()
-    tom.run(a, make_notifier(), et_dt(2026, 10, 5, 15, 58), ledger_path=_exit_ledger(tmp_path))
-    sold = sorted(c.args[0] for c in a.submit_market_sell_order.call_args_list)
-    assert sold == ['IWM', 'QQQ', 'SPY']          # QQQ had no MOC in this run, so the late window sells it too
-    a.submit_moc_sell_order.assert_not_called()
-
-
-def test_1104_sequence_one_order_per_symbol(tmp_path):
-    """Integration (real ledger file): 15:45 tick then 15:58 tick ends with QQQ's MOC live and untouched,
-    SPY/IWM one MARKET each, and consistent ledger rows."""
+def test_exit_moc_window_tick_places_no_orders(tmp_path):
+    """Exit session, 15:45 ET: nothing for any symbol (no MOC, no MARKET yet), positions held."""
     ledger = _exit_ledger(tmp_path)
     a = _exit_broker()
     tom.run(a, make_notifier(), et_dt(2026, 10, 5, 15, 45), ledger_path=ledger)
-    a.submit_moc_sell_order.assert_called_once()
-    # the QQQ MOC is now live at the broker (CLS), as at 20:58 UTC on 11/4
-    a.get_open_orders.return_value = [{'client_order_id': 'tom-202610-QQQ-out', 'id': 'sell-QQQ',
-                                       'time_in_force': 'cls'}]
+    a.submit_moc_sell_order.assert_not_called()
+    a.submit_market_sell_order.assert_not_called()
+    a.trading_client.submit_order.assert_not_called()
+    assert not [r for r in tom.read_ledger(ledger) if r['action'] == 'exit']
+
+
+def test_exit_late_window_one_market_sell_per_symbol_qty_is_min_of_broker_and_ledger(tmp_path):
+    ledger = _exit_ledger(tmp_path)                       # ledger open qty 10 each
+    a = make_alpaca(open_positions=[{'symbol': 'SPY', 'qty': 10}, {'symbol': 'QQQ', 'qty': 4},
+                                    {'symbol': 'IWM', 'qty': 25}])
+    a.submit_market_sell_order = MagicMock(side_effect=lambda sym, qty, client_order_id=None: {
+        'id': f'mkt-{sym}', 'status': 'accepted'})
     tom.run(a, make_notifier(), et_dt(2026, 10, 5, 15, 58), ledger_path=ledger)
-    a.cancel_order.assert_not_called()
-    assert sorted(c.args[0] for c in a.submit_market_sell_order.call_args_list) == ['IWM', 'SPY']
-    assert a.submit_moc_sell_order.call_count == 1
+    sold = {c.args[0]: (c.args[1], c.kwargs['client_order_id']) for c in a.submit_market_sell_order.call_args_list}
+    assert sold == {'SPY': (10, 'tom-202610-SPY-out'), 'QQQ': (4, 'tom-202610-QQQ-out'),
+                    'IWM': (10, 'tom-202610-IWM-out')}
+    assert a.submit_market_sell_order.call_count == 3
+    a.submit_moc_sell_order.assert_not_called()
+
+
+def test_exit_late_window_live_day_exit_order_is_cancelled_then_market(tmp_path):
+    ledger = _exit_ledger(tmp_path)
+    a = _exit_broker()
+    a.get_open_orders.return_value = [{'client_order_id': 'tom-202610-SPY-out', 'id': 'id-spy', 'time_in_force': 'day'}]
+    a.get_order.return_value = {'status': 'canceled'}
+    tom.run(a, make_notifier(), et_dt(2026, 10, 5, 15, 58), ledger_path=ledger)
+    a.cancel_order.assert_called_once_with('id-spy')
+    sold = {c.args[0]: c.kwargs['client_order_id'] for c in a.submit_market_sell_order.call_args_list}
+    assert sold == {'SPY': 'tom-202610-SPY-out-mkt', 'QQQ': 'tom-202610-QQQ-out', 'IWM': 'tom-202610-IWM-out'}
+
+
+def test_1104_sequence_ends_flat_one_market_order_per_symbol_no_moc(tmp_path):
+    """Integration (real ledger file, MagicMock(spec=AlpacaClient)): replay of 11/4 -- the 15:45 tick, the
+    15:58 tick, a 15:59 tick and the post-close tick end with exactly one MARKET exit per symbol, flat, no MOC."""
+    ledger = _exit_ledger(tmp_path)
+    a = _exit_broker()
+    tom.run(a, make_notifier(), et_dt(2026, 10, 5, 15, 45), ledger_path=ledger)
+    assert a.submit_market_sell_order.call_count == 0
+    tom.run(a, make_notifier(), et_dt(2026, 10, 5, 15, 58), ledger_path=ledger)
+    assert sorted(c.args[0] for c in a.submit_market_sell_order.call_args_list) == ['IWM', 'QQQ', 'SPY']
     exits = [(r['symbol'], r['client_order_id']) for r in tom.read_ledger(ledger) if r['action'] == 'exit']
     assert sorted(exits) == [('IWM', 'tom-202610-IWM-out'), ('QQQ', 'tom-202610-QQQ-out'),
                              ('SPY', 'tom-202610-SPY-out')]
-    assert not [r for r in tom.read_ledger(ledger) if r['action'] == 'late_fallback_replace']
-    # a third tick is fully idempotent
-    tom.run(a, make_notifier(), et_dt(2026, 10, 5, 15, 59), ledger_path=ledger)
-    assert a.submit_market_sell_order.call_count == 2
+    # the market orders fill in seconds: broker is flat, fill check resolves the rows
+    a.get_open_positions.return_value = []
+    a.get_order.return_value = {'status': 'filled', 'qty': 10, 'filled_qty': 10, 'filled_avg_price': 500.0}
+    tom.run(a, make_notifier(), et_dt(2026, 10, 5, 15, 59), ledger_path=ledger)      # idempotent
+    tom.check_pending_fills(a, make_notifier(), ledger_path=ledger)
+    assert tom.alarm_still_held(a, make_notifier(), et_dt(2026, 10, 5, 16, 45), ledger_path=ledger) == []
+    assert a.submit_market_sell_order.call_count == 3
+    a.submit_moc_sell_order.assert_not_called()
+    assert tom.open_tom_symbols(tom.read_ledger(ledger)) == set()
+    assert not [c for c in a.trading_client.submit_order.call_args_list if 'CLS' in repr(c)]
+
+
+def test_alarm_still_held_after_exit_session_outside_hours(tmp_path, caplog):
+    """Out-of-window tick after a closed cycle whose exit expired unfilled: ERROR + Telegram, NO order."""
+    ledger = _qqq_held_ledger(tmp_path, 'expired')
+    a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 26}])
+    n = make_notifier()
+    with caplog.at_level('ERROR', logger='tom_sleeve'):
+        msgs = tom.alarm_still_held(a, n, et_dt(2026, 10, 5, 16, 45), ledger_path=ledger)
+    assert len(msgs) == 1 and 'POSITION STILL HELD' in msgs[0] and 'QQQ 26' in msgs[0]
+    assert any(r.levelno == logging.ERROR and 'POSITION STILL HELD' in r.getMessage() for r in caplog.records)
+    assert any('POSITION STILL HELD' in c.args[0] for c in n.send_message_sync.call_args_list)
+    a.submit_market_sell_order.assert_not_called()
+    a.submit_moc_sell_order.assert_not_called()
+
+
+def test_alarm_silent_inside_windows_flat_broker_and_owners_own_shares(tmp_path):
+    ledger = _qqq_held_ledger(tmp_path, 'expired')
+    a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 26}])
+    assert tom.alarm_still_held(a, make_notifier(), et_dt(2026, 10, 6, 15, 58), ledger_path=ledger) == []  # run() sells
+    a = make_alpaca(open_positions=[])
+    assert tom.alarm_still_held(a, make_notifier(), et_dt(2026, 10, 6, 16, 45), ledger_path=ledger) == []
+    (tmp_path / 'x').mkdir()
+    filled = _qqq_held_ledger(tmp_path / 'x', 'filled')
+    a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 500}])         # owner's own QQQ after a filled exit
+    assert tom.alarm_still_held(a, make_notifier(), et_dt(2026, 10, 6, 16, 45), ledger_path=filled) == []
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-05: an exit session whose ticks never ran (no exit row at all) is still owed / alarmed
+# ---------------------------------------------------------------------------
+
+def _entry_only_ledger(tmp_path):
+    """QQQ entered and filled on the 9/30 entry session; no exit row ever written."""
+    return _qqq_held_ledger(tmp_path)
+
+
+def test_missed_exit_session_without_exit_row_is_owed(tmp_path):
+    rows = tom.read_ledger(_entry_only_ledger(tmp_path))
+    a = make_alpaca()
+    owed = tom.owed_exits(rows, dt.date(2026, 10, 6), a)           # exit session was 10/5
+    assert owed == {'QQQ': {'base': 'tom-202610-QQQ-out', 'sessions': 1}}
+    assert tom.missed_exit_sessions(rows, a, dt.date(2026, 10, 9)) == {'QQQ': dt.date(2026, 10, 5)}
+    assert tom.owed_exits(rows, dt.date(2026, 10, 9), a)['QQQ']['sessions'] == 4
+
+
+def test_exit_session_not_yet_reached_is_not_owed_or_alarmed(tmp_path):
+    rows = tom.read_ledger(_entry_only_ledger(tmp_path))
+    a = make_alpaca()
+    pos = {'QQQ': 26}
+    assert tom.owed_exits(rows, dt.date(2026, 10, 2), a) == {}
+    assert tom.owed_exits(rows, dt.date(2026, 10, 5), a) == {}      # the exit session itself: run() handles it
+    assert tom.still_held_after_exit(rows, pos, dt.date(2026, 10, 2), et_dt(2026, 10, 2, 16, 45).astimezone(tom.ET), a) == {}
+    assert tom.still_held_after_exit(rows, pos, dt.date(2026, 10, 5), et_dt(2026, 10, 5, 15, 58).astimezone(tom.ET), a) == {}
+
+
+def test_still_held_alarms_when_exit_session_passed_with_no_exit_row(tmp_path):
+    rows = tom.read_ledger(_entry_only_ledger(tmp_path))
+    a = make_alpaca()
+    pos = {'QQQ': 26}
+    assert tom.still_held_after_exit(rows, pos, dt.date(2026, 10, 5), et_dt(2026, 10, 5, 16, 45).astimezone(tom.ET), a) == {'QQQ': 26}
+    assert tom.still_held_after_exit(rows, pos, dt.date(2026, 10, 6), et_dt(2026, 10, 6, 8, 0).astimezone(tom.ET), a) == {'QQQ': 26}
+    assert tom.still_held_after_exit(rows, {}, dt.date(2026, 10, 6), et_dt(2026, 10, 6, 8, 0).astimezone(tom.ET), a) == {}
+
+
+def test_missed_exit_run_sells_market_in_first_tick_and_writes_exit_row(tmp_path, caplog):
+    ledger = _entry_only_ledger(tmp_path)
+    a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 26}])
+    with caplog.at_level('ERROR', logger='tom_sleeve'):
+        tom.run(a, make_notifier(), et_dt(2026, 10, 6, 15, 45), ledger_path=ledger)
+    a.submit_market_sell_order.assert_called_once_with('QQQ', 26, client_order_id='tom-202610-QQQ-out')
+    a.submit_moc_sell_order.assert_not_called()
+    assert any('POSITION STILL HELD' in r.getMessage() for r in caplog.records)
+    assert tom.read_ledger(ledger)[-1]['deviation'] == 'late_exit_1_sessions'

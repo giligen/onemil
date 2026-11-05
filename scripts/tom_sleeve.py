@@ -43,10 +43,18 @@ is the BROKER's position (capped by the ledger's open qty); any live tom exit or
 fallback on any session (catch-up days included); `--reconcile` backfills a missing partial_fill row
 from the orders API (ledger write only, never an order).
 
+2026-11-05 guaranteed exit (owner: "make sure we sell these 3 before exit no matter what";
+docs/tom_sleeve_guaranteed_exit_spec_20261105.md): the EXIT leg is MARKET at 15:58 ET, never MOC, for all three
+symbols (paper QQQ MOC expired unfilled 10/5 and again 10/6, so a live MOC can carry the position overnight).
+The 15:40-15:55 window does nothing on the exit session; an exit owed from an earlier session sells MARKET in the
+first tick that sees it (ERROR + Telegram "POSITION STILL HELD"); any live non-`-mkt` exit order in the late
+window is cancelled and replaced by MARKET; every later out-of-window tick alarms while the broker still holds a
+closed cycle's shares. MOC_RELIABLE_SYMBOLS (QQQ) now governs the ENTRY leg only.
+
 Usage:
     python3 scripts/tom_sleeve.py              # act only if now is in the MOC window (15:40-15:55 ET,
-                                                 # QQQ) or the late fallback window (15:57-15:59 ET,
-                                                 # SPY/IWM) on an entry/exit day; otherwise checks
+                                                 # QQQ entry) or the late window (15:57-15:59 ET, SPY/IWM
+                                                 # entry, ALL exits MARKET) on an entry/exit day; otherwise checks
                                                  # pending fills and exits 0
     python3 scripts/tom_sleeve.py --dry-run     # print intended actions, submit nothing, no Telegram
     python3 scripts/tom_sleeve.py --status      # print the ledger + current open sleeve, no orders
@@ -584,6 +592,41 @@ def submit_market_buy_order(alpaca_client: AlpacaClient, symbol: str, qty: int, 
             'symbol': symbol, 'qty': qty}
 
 
+def missed_exit_sessions(ledger_rows: List[Dict], alpaca_client: AlpacaClient, today: date,
+                         now_et: Optional[datetime] = None) -> Dict[str, date]:
+    """{symbol: exit session date} for tom symbols the ledger still holds whose exit session has PASSED with NO
+    exit row at all since the symbol's latest entry (cron down / crash before the submit -- the case the
+    exit-row-keyed logic cannot see). Exit session = 3rd trading session of the month after the entry row's
+    month; it counts as passed when it is before `today`, or (with `now_et`) today and past LATE_WINDOW_END.
+    One calendar call per distinct entry month; a calendar failure logs ERROR (month_trading_sessions)."""
+    held = open_tom_symbols(ledger_rows)
+    last_entry: Dict[str, date] = {}
+    exited_after: Set[str] = set()
+    for r in ledger_rows:
+        if r.get('action') == 'entry':
+            last_entry[r['symbol']] = _to_date(r['date'])
+            exited_after.discard(r['symbol'])
+        elif r.get('action') == 'exit':
+            exited_after.add(r['symbol'])
+    cache: Dict[tuple, List[date]] = {}
+    out: Dict[str, date] = {}
+    for sym in sorted(held):
+        if sym not in last_entry or sym in exited_after:
+            continue
+        ed = last_entry[sym]
+        y, m = (ed.year + 1, 1) if ed.month == 12 else (ed.year, ed.month + 1)
+        if (y, m) not in cache:
+            cache[(y, m)] = month_trading_sessions(alpaca_client, y, m)
+        sessions = cache[(y, m)]
+        if len(sessions) < 3:
+            continue
+        exit_day = sessions[2]
+        past_late = now_et is not None and exit_day == today and now_et.time() > LATE_WINDOW_END
+        if exit_day < today or past_late:
+            out[sym] = exit_day
+    return out
+
+
 def owed_exits(ledger_rows: List[Dict], today: date, alpaca_client: AlpacaClient,
                open_orders: Optional[Dict[str, str]] = None) -> Dict[str, Dict]:
     """Exit legs owed from an EARLIER session: {symbol: {'base': original exit coid, 'sessions': trading
@@ -613,6 +656,17 @@ def owed_exits(ledger_rows: List[Dict], today: date, alpaca_client: AlpacaClient
             logger.error(f"tom_sleeve: calendar lookup for catch-up failed ({e}) — counting weekdays")
             n = sum(1 for k in range(1, (today - d0).days + 1) if (d0 + timedelta(k)).weekday() < 5)
         out[sym] = {'base': base, 'sessions': max(n, 1)}
+    for sym, exit_day in missed_exit_sessions(ledger_rows, alpaca_client, today).items():
+        if sym in out:
+            continue
+        try:
+            n = len([c for c in alpaca_client.get_market_calendar(exit_day, today) if _to_date(c['date']) > exit_day])
+        except Exception as e:
+            logger.error(f"tom_sleeve: calendar lookup for missed exit failed ({e}) — counting weekdays")
+            n = sum(1 for k in range(1, (today - exit_day).days + 1) if (exit_day + timedelta(k)).weekday() < 5)
+        logger.error(f"tom_sleeve: {sym} exit session {exit_day} passed with NO exit order in the ledger "
+                      f"(cron down / crash?) — owed, selling MARKET")
+        out[sym] = {'base': _client_order_id(exit_day, sym, 'out'), 'sessions': max(n, 1)}
     return out
 
 
@@ -806,10 +860,16 @@ def _late_replace(alpaca_client, notifier, st, symbol, leg, qty, today, now_utc,
 
 def _process_exit(alpaca_client, notifier, symbol, info, positions, ledger_rows, open_orders, today, now_utc,
                   moc_window, late_window, ledger_path, dry_run, open_tifs=None) -> Optional[str]:
-    """One symbol's exit leg: fill-aware idempotency, late market fallback, catch-up tagging. MOC only for
-    MOC_RELIABLE_SYMBOLS (mirrors the entry leg); a live CLS order is never cancelled by the late fallback."""
+    """One symbol's exit leg: fill-aware idempotency, MARKET-only exit, catch-up tagging.
+
+    Guaranteed exit (owner 2026-11-05, docs/tom_sleeve_guaranteed_exit_spec_20261105.md): the exit leg NEVER
+    submits MOC (paper QQQ MOC expired unfilled 10/5 and 10/6). On the exit session itself the MOC window is a
+    no-op and the late window (15:57-15:59 ET) sells MARKET; an exit OWED from an earlier session sells MARKET in
+    whichever tick first sees it. A live non-`-mkt` exit order in the late window is cancelled and replaced by
+    MARKET whatever its time_in_force (safety net: none should exist any more)."""
     base = info['base']
-    deviation = f"late_exit_{info['sessions']}_sessions" if info['sessions'] else ''
+    owed_earlier = bool(info['sessions'])
+    deviation = f"late_exit_{info['sessions']}_sessions" if owed_earlier else ''
     broker_qty = positions.get(symbol, 0)
     ledger_qty = ledger_open_qty(ledger_rows, symbol)
     # Owed = what the broker actually holds, never more than the ledger says is ours (never the original qty).
@@ -826,17 +886,13 @@ def _process_exit(alpaca_client, notifier, symbol, info, positions, ledger_rows,
                       f"the broker reports {broker_qty} shares — nothing to sell")
         return None
     if st['state'] == 'live':
-        if late_window and not st['coid'].endswith('-mkt') and is_live_cls(st, ledger_rows):
-            logger.info(f"tom_sleeve: {st['coid']} MOC live — fills at the close, left alone")
-            return None
         if late_window and not st['coid'].endswith('-mkt'):
             return _late_replace(alpaca_client, notifier, st, symbol, 'out', qty, today, now_utc, ledger_path, dry_run)
         logger.info(f"tom_sleeve: {st['coid']} live ({st['status']}) — skip (idempotent)")
         return None
-    if not (moc_window or late_window):
-        return None
-    if moc_window and symbol not in MOC_RELIABLE_SYMBOLS:
-        logger.info(f"tom_sleeve: {symbol} is not MOC-reliable — exit waits for the late window")
+    if not (late_window or (moc_window and owed_earlier)):
+        if moc_window:
+            logger.info(f"tom_sleeve: {symbol} exit is MARKET-only — waits for the late window (never MOC)")
         return None
     send_coid = base
     if st['state'] == 'dead':
@@ -846,22 +902,76 @@ def _process_exit(alpaca_client, notifier, symbol, info, positions, ledger_rows,
                         f"— resubmitting the owed {qty} as {send_coid}")
     if deviation:
         logger.warning(f"tom_sleeve: {symbol} exit owed since an earlier session — {deviation}")
-    use_moc = moc_window and symbol in MOC_RELIABLE_SYMBOLS
-    kind = 'MOC' if use_moc else 'MARKET'
     if dry_run:
-        return f"DRY-RUN would SELL {kind} {qty} {symbol} id={send_coid}" + (f" deviation={deviation}" if deviation else '')
+        return f"DRY-RUN would SELL MARKET {qty} {symbol} id={send_coid}" + (f" deviation={deviation}" if deviation else '')
+    if owed_earlier:
+        alarm = f"POSITION STILL HELD after the exit session: {symbol} {qty} — selling MARKET now"
+        logger.error(f"tom_sleeve: [TOM] {alarm}")
+        notify(notifier, alarm)
     if st['state'] == 'dead':
         close_out_dead(st, symbol, qty, today, now_utc, ledger_path)
-    if use_moc:
-        result = alpaca_client.submit_moc_sell_order(symbol, qty, client_order_id=send_coid)
-    else:
-        result = alpaca_client.submit_market_sell_order(symbol, qty, client_order_id=send_coid)
+    result = alpaca_client.submit_market_sell_order(symbol, qty, client_order_id=send_coid)
     append_ledger_row(_ledger_row(today, 'exit', symbol, qty, '', result['id'], 'submitted', send_coid, now_utc,
                                    deviation), ledger_path)
-    msg = f"SELL {kind} {qty} {symbol} submitted id={result['id']} status={result['status']}" + \
+    msg = f"SELL MARKET {qty} {symbol} submitted id={result['id']} status={result['status']}" + \
           (f" [{deviation}]" if deviation else '')
     notify(notifier, msg)
     return msg
+
+
+def still_held_after_exit(ledger_rows: List[Dict], positions: Dict[str, int], today: date,
+                          now_et: datetime, alpaca_client: AlpacaClient) -> Dict[str, int]:
+    """{symbol: qty} the broker still holds for a tom cycle whose exit session's late window is over: the
+    ledger (after the fill checks) still says the symbol is held, an exit order of its chain exists since the
+    last entry and is dated before today -- or today and past LATE_WINDOW_END. qty = min(broker, ledger open qty)
+    so the owner's own shares of the same ticker are never counted. A held symbol whose exit session passed with
+    NO exit row at all (`missed_exit_sessions`) is reported too."""
+    last_exit: Dict[str, Dict] = {}
+    for r in ledger_rows:
+        if r.get('action') == 'entry':
+            last_exit.pop(r['symbol'], None)
+        elif r.get('action') == 'exit':
+            last_exit[r['symbol']] = r
+    held = open_tom_symbols(ledger_rows)
+    out: Dict[str, int] = {}
+    for sym, r in last_exit.items():
+        d0 = _to_date(r['date'])
+        past_late = d0 < today or (d0 == today and now_et.time() > LATE_WINDOW_END)
+        broker_qty = positions.get(sym, 0)
+        if sym in held and past_late and broker_qty > 0:
+            ledger_qty = ledger_open_qty(ledger_rows, sym)
+            out[sym] = broker_qty if ledger_qty is None else min(broker_qty, ledger_qty)
+    for sym in missed_exit_sessions(ledger_rows, alpaca_client, today, now_et):
+        broker_qty = positions.get(sym, 0)
+        ledger_qty = ledger_open_qty(ledger_rows, sym)
+        qty = broker_qty if ledger_qty is None else min(broker_qty, ledger_qty)
+        if qty > 0:
+            out[sym] = qty
+    return {s: q for s, q in out.items() if q > 0}
+
+
+def alarm_still_held(alpaca_client: AlpacaClient, notifier: Optional[TelegramNotifier], now_utc: datetime,
+                     ledger_path: str = LEDGER_PATH) -> List[str]:
+    """Out-of-window alarm (run AFTER the fill checks): ERROR + Telegram for every tom position the broker still
+    holds after its exit session's late window. In a MOC/late window `run` itself sells the owed exit and logs
+    the ERROR, so this stays silent there. Read-only: never sends an order."""
+    now_et = now_utc.astimezone(ET)
+    if in_action_window(now_et) or in_late_window(now_et):
+        return []
+    try:
+        positions = {p['symbol']: p['qty'] for p in alpaca_client.get_open_positions()}
+    except AlpacaAPIError as e:
+        logger.error(f"tom_sleeve: still-held alarm could not read positions: {e}")
+        return []
+    held = still_held_after_exit(read_ledger(ledger_path), positions, now_et.date(), now_et, alpaca_client)
+    msgs = []
+    for sym, qty in sorted(held.items()):
+        msg = (f"POSITION STILL HELD after the exit session: {sym} {qty} — outside market hours, "
+               f"will sell at the next tick")
+        logger.error(f"tom_sleeve: [TOM] {msg}")
+        notify(notifier, msg)
+        msgs.append(msg)
+    return msgs
 
 
 # Human-readable reason per terminal status, logged and Telegram'd at every fill check so a partial
@@ -1082,6 +1192,7 @@ def main() -> int:
     print(summary)
     if not args.dry_run:
         check_pending_fills(alpaca_client, notifier)
+        alarm_still_held(alpaca_client, notifier, now_utc)
     return 0
 
 
