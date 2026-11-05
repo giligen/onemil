@@ -1627,6 +1627,9 @@ class AlpacaClient:
                     'limit_price': _f(getattr(o, 'limit_price', None)),
                     # exit-coverage invariant (2026-10-29): linked legs
                     # (oco/bracket/oto) count once, not per leg
+                    'time_in_force': str(getattr(
+                        getattr(o, 'time_in_force', ''), 'value',
+                        getattr(o, 'time_in_force', '')) or ''),
                     'order_class': str(getattr(
                         getattr(o, 'order_class', ''), 'value',
                         getattr(o, 'order_class', '')) or ''),

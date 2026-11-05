@@ -438,13 +438,22 @@ def _base_coid(coid: str) -> str:
     return re.sub(r'-(r\d+|mkt)$', '', coid)
 
 
+def _norm_tif(raw) -> Optional[str]:
+    """'TimeInForce.CLS' / enum / 'cls' -> 'cls'; missing -> None."""
+    if raw is None or raw == '':
+        return None
+    return str(getattr(raw, 'value', raw)).split('.')[-1].lower()
+
+
 def chain_state(alpaca_client: AlpacaClient, base: str, ledger_rows: List[Dict],
-                open_orders: Dict[str, str]) -> Dict:
+                open_orders: Dict[str, str], open_tifs: Optional[Dict[str, str]] = None) -> Dict:
     """State of one leg across its whole id chain (base, base-r1.., base-mkt). `open_orders` maps
     broker-open client_order_id -> order id. Returns {'state': none|live|filled|dead, 'coid', 'order_id',
     'retries'}: filled > live > dead > none. A terminal ledger *_fillcheck row is trusted, otherwise the
     broker is asked (get_order); a failed lookup is ERROR-logged and treated as LIVE so we never
-    double-submit on an unknown."""
+    double-submit on an unknown. A LIVE state also carries 'tif' (the broker order's time_in_force from
+    `open_tifs`, coid -> tif; None when the broker object lacks it — see `is_live_cls`)."""
+    open_tifs = open_tifs or {}
     chain, planned = {}, {}
     for r in ledger_rows:
         c = r.get('client_order_id') or ''
@@ -480,8 +489,32 @@ def chain_state(alpaca_client: AlpacaClient, base: str, ledger_rows: List[Dict],
         else:
             if status not in LIVE_STATUSES:
                 logger.warning(f"tom_sleeve: {c} has unrecognised status {status!r} — treating as live")
-            return {'state': 'live', 'coid': c, 'order_id': oid, 'retries': retries, 'status': status}
+            return {'state': 'live', 'coid': c, 'order_id': oid, 'retries': retries, 'status': status,
+                    'tif': _norm_tif(open_tifs.get(c))}
     return dead
+
+
+def is_live_cls(st: Dict, ledger_rows: List[Dict]) -> bool:
+    """True iff the live order in chain state `st` is a CLS (MOC) order, which can only fill at the 16:00
+    cross and must never be cancelled by the 15:58 late fallback (2026-11-04 incident: the fallback turned
+    every live MOC into a 15:58 market order). Reads the broker's time_in_force; only if the API object
+    lacks it (WARNING) infers 'was submitted as MOC': a MOC_RELIABLE symbol, not a -mkt id, whose ledger
+    row was written inside the MOC window."""
+    if st.get('tif') is not None:
+        return st['tif'] == 'cls'
+    coid = st['coid']
+    sym = coid.split('-')[2] if coid.count('-') >= 3 else ''
+    row = next((r for r in ledger_rows if r.get('client_order_id') == coid and r.get('action') in _ORDER_ACTIONS), None)
+    inferred = False
+    if sym in MOC_RELIABLE_SYMBOLS and not coid.endswith('-mkt') and row and row.get('timestamp_utc'):
+        try:
+            ts = datetime.fromisoformat(row['timestamp_utc'])
+            inferred = in_action_window(ts.astimezone(ET))
+        except ValueError:
+            pass
+    logger.warning(f"tom_sleeve: broker order for {coid} carries no time_in_force — inferred "
+                   f"{'CLS (MOC)' if inferred else 'not CLS'} from the ledger")
+    return inferred
 
 
 def _ledger_row(today, action, symbol, qty, ref, order_id, status, coid, now_utc, deviation='',
@@ -605,11 +638,12 @@ def run(alpaca_client: AlpacaClient, notifier: Optional[TelegramNotifier], now_u
     ledger_rows = read_ledger(ledger_path)
     action = classify_day(today, alpaca_client)
     try:
-        open_orders = {o['client_order_id']: o.get('id') for o in alpaca_client.get_open_orders()
-                       if o.get('client_order_id')}
+        broker_open = [o for o in alpaca_client.get_open_orders() if o.get('client_order_id')]
+        open_orders = {o['client_order_id']: o.get('id') for o in broker_open}
+        open_tifs = {o['client_order_id']: o.get('time_in_force') for o in broker_open}
     except AlpacaAPIError as e:
         logger.error(f"tom_sleeve: get_open_orders failed, proceeding on ledger state alone: {e}")
-        open_orders = {}
+        open_orders, open_tifs = {}, {}
     owed = owed_exits(ledger_rows, today, alpaca_client, open_orders) if action != 'exit' else {}
     if action == 'none' and not owed:
         stray = sorted(c for c in open_orders if c.startswith('tom-'))
@@ -642,12 +676,14 @@ def run(alpaca_client: AlpacaClient, notifier: Optional[TelegramNotifier], now_u
         for symbol in SYMBOLS:
             is_moc = symbol in MOC_RELIABLE_SYMBOLS
             coid = _client_order_id(today, symbol, 'in')
-            st = chain_state(alpaca_client, coid, ledger_rows, open_orders)
+            st = chain_state(alpaca_client, coid, ledger_rows, open_orders, open_tifs)
             if st['state'] == 'filled':
                 logger.info(f"tom_sleeve: {st['coid']} filled — skip (idempotent)")
                 continue
             if st['state'] == 'live':
-                if late_window and not st['coid'].endswith('-mkt'):
+                if late_window and not st['coid'].endswith('-mkt') and is_live_cls(st, ledger_rows):
+                    logger.info(f"tom_sleeve: {st['coid']} MOC live — fills at the close, left alone")
+                elif late_window and not st['coid'].endswith('-mkt'):
                     line = _late_replace(alpaca_client, notifier, st, symbol, 'in', None, today, now_utc,
                                          ledger_path, dry_run)
                     if line:
@@ -716,7 +752,7 @@ def run(alpaca_client: AlpacaClient, notifier: Optional[TelegramNotifier], now_u
             return f"{today} exit day — position fetch failed, no orders sent ({e})"
         for symbol, info in targets.items():
             line = _process_exit(alpaca_client, notifier, symbol, info, positions, ledger_rows, open_orders,
-                                 today, now_utc, moc_window, late_window, ledger_path, dry_run)
+                                 today, now_utc, moc_window, late_window, ledger_path, dry_run, open_tifs)
             if line:
                 lines.append(line)
 
@@ -761,7 +797,7 @@ def _late_replace(alpaca_client, notifier, st, symbol, leg, qty, today, now_utc,
         result = alpaca_client.submit_market_sell_order(symbol, qty, client_order_id=mkt)
     append_ledger_row(_ledger_row(today, 'late_fallback_replace', symbol, qty, '', result['id'], 'submitted',
                                    mkt, now_utc), ledger_path)
-    msg = (f"{symbol} {leg} order {st['coid']} unfilled at the close — cancelled, {verb} MARKET {qty} "
+    msg = (f"{symbol} {leg} order {st['coid']} unfilled before the close (15:58 ET) — cancelled, {verb} MARKET {qty} "
            f"submitted as {mkt} id={result['id']}")
     logger.warning(f"tom_sleeve: {msg}")
     notify(notifier, msg)
@@ -769,8 +805,9 @@ def _late_replace(alpaca_client, notifier, st, symbol, leg, qty, today, now_utc,
 
 
 def _process_exit(alpaca_client, notifier, symbol, info, positions, ledger_rows, open_orders, today, now_utc,
-                  moc_window, late_window, ledger_path, dry_run) -> Optional[str]:
-    """One symbol's exit leg: fill-aware idempotency, late market fallback, catch-up tagging."""
+                  moc_window, late_window, ledger_path, dry_run, open_tifs=None) -> Optional[str]:
+    """One symbol's exit leg: fill-aware idempotency, late market fallback, catch-up tagging. MOC only for
+    MOC_RELIABLE_SYMBOLS (mirrors the entry leg); a live CLS order is never cancelled by the late fallback."""
     base = info['base']
     deviation = f"late_exit_{info['sessions']}_sessions" if info['sessions'] else ''
     broker_qty = positions.get(symbol, 0)
@@ -780,7 +817,7 @@ def _process_exit(alpaca_client, notifier, symbol, info, positions, ledger_rows,
     if ledger_qty is not None and broker_qty != ledger_qty:
         logger.warning(f"tom_sleeve: {symbol} broker qty {broker_qty} != ledger open qty {ledger_qty} "
                         f"— owed qty = min = {qty} (the broker position is the source of truth)")
-    st = chain_state(alpaca_client, base, ledger_rows, open_orders)
+    st = chain_state(alpaca_client, base, ledger_rows, open_orders, open_tifs)
     if st['state'] == 'filled':
         logger.info(f"tom_sleeve: {st['coid']} filled — skip (idempotent)")
         return None
@@ -789,11 +826,17 @@ def _process_exit(alpaca_client, notifier, symbol, info, positions, ledger_rows,
                       f"the broker reports {broker_qty} shares — nothing to sell")
         return None
     if st['state'] == 'live':
+        if late_window and not st['coid'].endswith('-mkt') and is_live_cls(st, ledger_rows):
+            logger.info(f"tom_sleeve: {st['coid']} MOC live — fills at the close, left alone")
+            return None
         if late_window and not st['coid'].endswith('-mkt'):
             return _late_replace(alpaca_client, notifier, st, symbol, 'out', qty, today, now_utc, ledger_path, dry_run)
         logger.info(f"tom_sleeve: {st['coid']} live ({st['status']}) — skip (idempotent)")
         return None
     if not (moc_window or late_window):
+        return None
+    if moc_window and symbol not in MOC_RELIABLE_SYMBOLS:
+        logger.info(f"tom_sleeve: {symbol} is not MOC-reliable — exit waits for the late window")
         return None
     send_coid = base
     if st['state'] == 'dead':
@@ -803,7 +846,7 @@ def _process_exit(alpaca_client, notifier, symbol, info, positions, ledger_rows,
                         f"— resubmitting the owed {qty} as {send_coid}")
     if deviation:
         logger.warning(f"tom_sleeve: {symbol} exit owed since an earlier session — {deviation}")
-    use_moc = moc_window
+    use_moc = moc_window and symbol in MOC_RELIABLE_SYMBOLS
     kind = 'MOC' if use_moc else 'MARKET'
     if dry_run:
         return f"DRY-RUN would SELL {kind} {qty} {symbol} id={send_coid}" + (f" deviation={deviation}" if deviation else '')

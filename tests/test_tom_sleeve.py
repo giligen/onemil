@@ -268,18 +268,18 @@ def test_buying_power_guard_blocks_entry_run(tmp_path):
 def test_exit_day_sells_held_qty_from_broker_and_writes_ledger(tmp_path):
     ledger = str(tmp_path / 'ledger.csv')
     tom.append_ledger_row({
-        'date': '2026-09-30', 'action': 'entry', 'symbol': 'SPY', 'qty': 40,
-        'ref_price': '500.0', 'order_id': 'buy-spy', 'status': 'filled',
-        'client_order_id': 'tom-202609-SPY-in', 'timestamp_utc': '2026-09-30T19:45:00+00:00',
+        'date': '2026-09-30', 'action': 'entry', 'symbol': 'QQQ', 'qty': 40,
+        'ref_price': '500.0', 'order_id': 'buy-qqq', 'status': 'filled',
+        'client_order_id': 'tom-202609-QQQ-in', 'timestamp_utc': '2026-09-30T19:45:00+00:00',
     }, ledger)
-    a = make_alpaca(open_positions=[{'symbol': 'SPY', 'qty': 40}])
+    a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 40}])
     n = make_notifier()
     summary = tom.run(a, n, et_dt(2026, 10, 5, 15, 45), dry_run=False, ledger_path=ledger)
-    a.submit_moc_sell_order.assert_called_once_with('SPY', 40, client_order_id='tom-202610-SPY-out')
+    a.submit_moc_sell_order.assert_called_once_with('QQQ', 40, client_order_id='tom-202610-QQQ-out')
     rows = tom.read_ledger(ledger)
     exit_row = next(r for r in rows if r['action'] == 'exit')
     assert exit_row['qty'] == '40'
-    assert exit_row['client_order_id'] == 'tom-202610-SPY-out'
+    assert exit_row['client_order_id'] == 'tom-202610-QQQ-out'
     assert 'SELL MOC' in summary
 
 
@@ -287,14 +287,14 @@ def test_exit_day_skips_symbol_with_no_open_ledger_position(tmp_path):
     """No entry row logged for QQQ/IWM -> exit day must not try to sell them."""
     ledger = str(tmp_path / 'ledger.csv')
     tom.append_ledger_row({
-        'date': '2026-09-30', 'action': 'entry', 'symbol': 'SPY', 'qty': 40,
-        'ref_price': '500.0', 'order_id': 'buy-spy', 'status': 'filled',
-        'client_order_id': 'tom-202609-SPY-in', 'timestamp_utc': '2026-09-30T19:45:00+00:00',
+        'date': '2026-09-30', 'action': 'entry', 'symbol': 'QQQ', 'qty': 40,
+        'ref_price': '500.0', 'order_id': 'buy-qqq', 'status': 'filled',
+        'client_order_id': 'tom-202609-QQQ-in', 'timestamp_utc': '2026-09-30T19:45:00+00:00',
     }, ledger)
-    a = make_alpaca(open_positions=[{'symbol': 'SPY', 'qty': 40}])
+    a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 40}])
     n = make_notifier()
     tom.run(a, n, et_dt(2026, 10, 5, 15, 45), dry_run=False, ledger_path=ledger)
-    assert a.submit_moc_sell_order.call_count == 1  # SPY only
+    assert a.submit_moc_sell_order.call_count == 1  # QQQ only (SPY/IWM exit MARKET in the late window)
 
 
 # ---------------------------------------------------------------------------
@@ -469,7 +469,7 @@ def test_filled_exit_id_is_skipped(tmp_path):
 def test_live_unfilled_exit_in_late_window_cancels_then_market(tmp_path):
     ledger = _qqq_held_ledger(tmp_path, 'pending')
     a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 26}],
-                    open_orders=[{'client_order_id': 'tom-202610-QQQ-out', 'id': 'id-tom-202610-QQQ-out'}])
+                    open_orders=[{'client_order_id': 'tom-202610-QQQ-out', 'id': 'id-tom-202610-QQQ-out', 'time_in_force': 'day'}])
     a.get_order.return_value = {'status': 'canceled'}
     a.submit_market_sell_order = MagicMock(return_value={'id': 'mkt1', 'status': 'accepted'})
     n = make_notifier()
@@ -485,7 +485,7 @@ def test_live_unfilled_exit_in_late_window_cancels_then_market(tmp_path):
 def test_late_fallback_unconfirmed_cancel_does_not_double_submit(tmp_path):
     ledger = _qqq_held_ledger(tmp_path, 'pending')
     a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 26}],
-                    open_orders=[{'client_order_id': 'tom-202610-QQQ-out', 'id': 'id-tom-202610-QQQ-out'}])
+                    open_orders=[{'client_order_id': 'tom-202610-QQQ-out', 'id': 'id-tom-202610-QQQ-out', 'time_in_force': 'day'}])
     a.get_order.return_value = {'status': 'pending_cancel'}
     a.submit_market_sell_order = MagicMock()
     tom.run(a, make_notifier(), et_dt(2026, 10, 5, 15, 58), ledger_path=ledger)
@@ -616,10 +616,10 @@ def test_dry_run_after_partial_sells_one_share_r2_with_two_sessions(tmp_path):
 
 
 def test_late_fallback_fires_on_catch_up_day_with_live_order(tmp_path):
-    """10/6 19:58 UTC incident: r1 submitted 15:45 ET, still live at 15:58, day is NOT a TOM session."""
+    """10/6 19:58 UTC: a live NON-CLS (day) r1 at 15:58 on a non-TOM day is still cancel + market."""
     ledger = _incident_ledger(tmp_path)                                    # r1 submitted, no fill check yet
     a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 26}],
-                    open_orders=[{'client_order_id': R1, 'id': f'id-{R1}'}])
+                    open_orders=[{'client_order_id': R1, 'id': f'id-{R1}', 'time_in_force': 'day'}])
     a.get_order.return_value = {'status': 'canceled'}
     a.submit_market_sell_order = MagicMock(return_value={'id': 'mkt1', 'status': 'accepted'})
     summary = tom.run(a, make_notifier(), et_dt(2026, 10, 6, 15, 58), ledger_path=ledger)
@@ -718,3 +718,114 @@ def test_main_reconcile_flag_calls_reconcile_and_places_no_orders(monkeypatch, c
     assert tom.main() == 0
     assert calls == {'dry': False}
     fake_client.submit_moc_sell_order.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-05: the 15:58 late fallback must never cancel a live CLS (MOC) order
+# ---------------------------------------------------------------------------
+
+def _moc_entry_ledger(tmp_path, tif):
+    """QQQ MOC entry submitted 15:45 ET on the 10/30 entry session, still live; returns (ledger, a)."""
+    ledger = str(tmp_path / 'ledger.csv')
+    tom.append_ledger_row(_row('2026-10-30', 'entry', 'QQQ', 'tom-202610-QQQ-in', 'submitted'), ledger)
+    oo = [{'client_order_id': 'tom-202610-QQQ-in', 'id': 'id-tom-202610-QQQ-in', 'time_in_force': tif}]
+    a = make_alpaca(open_orders=oo)
+    a.submit_market_sell_order = MagicMock()
+    return ledger, a
+
+
+def test_late_window_live_cls_entry_is_left_alone(tmp_path, caplog):
+    ledger, a = _moc_entry_ledger(tmp_path, 'cls')
+    with caplog.at_level('INFO'):
+        tom.run(a, make_notifier(), et_dt(2026, 10, 30, 15, 58), ledger_path=ledger)
+    a.cancel_order.assert_not_called()
+    assert 'QQQ' not in [c.args[0].symbol for c in a.trading_client.submit_order.call_args_list]
+    assert 'MOC live' in caplog.text
+    assert [r['action'] for r in tom.read_ledger(ledger) if r['symbol'] == 'QQQ'] == ['entry']
+
+
+def test_late_window_live_day_limit_entry_is_cancelled_then_market(tmp_path):
+    ledger, a = _moc_entry_ledger(tmp_path, 'day')
+    a.get_order.return_value = {'status': 'canceled'}
+    tom.run(a, make_notifier(), et_dt(2026, 10, 30, 15, 58), ledger_path=ledger)
+    a.cancel_order.assert_called_once_with('id-tom-202610-QQQ-in')
+    assert [r['action'] for r in tom.read_ledger(ledger) if r['symbol'] == 'QQQ'][-1] == 'late_fallback_replace'
+
+
+def test_late_window_live_cls_exit_is_left_alone(tmp_path, caplog):
+    ledger = _qqq_held_ledger(tmp_path, 'pending')
+    a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 26}],
+                    open_orders=[{'client_order_id': 'tom-202610-QQQ-out', 'id': 'id-tom-202610-QQQ-out',
+                                  'time_in_force': 'TimeInForce.CLS'}])
+    a.submit_market_sell_order = MagicMock()
+    with caplog.at_level('INFO'):
+        tom.run(a, make_notifier(), et_dt(2026, 10, 5, 15, 58), ledger_path=ledger)
+    a.cancel_order.assert_not_called()
+    a.submit_market_sell_order.assert_not_called()
+    assert 'MOC live' in caplog.text
+
+
+def test_missing_tif_falls_back_to_ledger_inference_with_warning(tmp_path, caplog):
+    """No time_in_force on the broker object: a QQQ order submitted inside the MOC window counts as CLS."""
+    ledger = _qqq_held_ledger(tmp_path, 'pending')
+    a = make_alpaca(open_positions=[{'symbol': 'QQQ', 'qty': 26}],
+                    open_orders=[{'client_order_id': 'tom-202610-QQQ-out', 'id': 'id-tom-202610-QQQ-out'}])
+    a.submit_market_sell_order = MagicMock()
+    tom.run(a, make_notifier(), et_dt(2026, 10, 5, 15, 58), ledger_path=ledger)
+    a.cancel_order.assert_not_called()
+    assert 'carries no time_in_force' in caplog.text
+
+
+def _exit_ledger(tmp_path):
+    """SPY, QQQ and IWM all held since the 9/30 entry session."""
+    ledger = str(tmp_path / 'ledger.csv')
+    for sym in ('SPY', 'QQQ', 'IWM'):
+        c = f'tom-202609-{sym}-in'
+        tom.append_ledger_row(_row('2026-09-30', 'entry', sym, c, 'submitted', qty=10), ledger)
+        tom.append_ledger_row(_row('2026-09-30', 'entry_fillcheck', sym, c, 'filled', qty=10), ledger)
+    return ledger
+
+
+def _exit_broker():
+    a = make_alpaca(open_positions=[{'symbol': s, 'qty': 10} for s in ('SPY', 'QQQ', 'IWM')])
+    a.submit_market_sell_order = MagicMock(side_effect=lambda sym, qty, client_order_id=None: {
+        'id': f'mkt-{sym}', 'status': 'accepted'})
+    return a
+
+
+def test_exit_moc_window_submits_moc_only_for_qqq(tmp_path):
+    a = _exit_broker()
+    tom.run(a, make_notifier(), et_dt(2026, 10, 5, 15, 45), ledger_path=_exit_ledger(tmp_path))
+    a.submit_moc_sell_order.assert_called_once_with('QQQ', 10, client_order_id='tom-202610-QQQ-out')
+    a.submit_market_sell_order.assert_not_called()
+
+
+def test_exit_late_window_spy_iwm_market(tmp_path):
+    a = _exit_broker()
+    tom.run(a, make_notifier(), et_dt(2026, 10, 5, 15, 58), ledger_path=_exit_ledger(tmp_path))
+    sold = sorted(c.args[0] for c in a.submit_market_sell_order.call_args_list)
+    assert sold == ['IWM', 'QQQ', 'SPY']          # QQQ had no MOC in this run, so the late window sells it too
+    a.submit_moc_sell_order.assert_not_called()
+
+
+def test_1104_sequence_one_order_per_symbol(tmp_path):
+    """Integration (real ledger file): 15:45 tick then 15:58 tick ends with QQQ's MOC live and untouched,
+    SPY/IWM one MARKET each, and consistent ledger rows."""
+    ledger = _exit_ledger(tmp_path)
+    a = _exit_broker()
+    tom.run(a, make_notifier(), et_dt(2026, 10, 5, 15, 45), ledger_path=ledger)
+    a.submit_moc_sell_order.assert_called_once()
+    # the QQQ MOC is now live at the broker (CLS), as at 20:58 UTC on 11/4
+    a.get_open_orders.return_value = [{'client_order_id': 'tom-202610-QQQ-out', 'id': 'sell-QQQ',
+                                       'time_in_force': 'cls'}]
+    tom.run(a, make_notifier(), et_dt(2026, 10, 5, 15, 58), ledger_path=ledger)
+    a.cancel_order.assert_not_called()
+    assert sorted(c.args[0] for c in a.submit_market_sell_order.call_args_list) == ['IWM', 'SPY']
+    assert a.submit_moc_sell_order.call_count == 1
+    exits = [(r['symbol'], r['client_order_id']) for r in tom.read_ledger(ledger) if r['action'] == 'exit']
+    assert sorted(exits) == [('IWM', 'tom-202610-IWM-out'), ('QQQ', 'tom-202610-QQQ-out'),
+                             ('SPY', 'tom-202610-SPY-out')]
+    assert not [r for r in tom.read_ledger(ledger) if r['action'] == 'late_fallback_replace']
+    # a third tick is fully idempotent
+    tom.run(a, make_notifier(), et_dt(2026, 10, 5, 15, 59), ledger_path=ledger)
+    assert a.submit_market_sell_order.call_count == 2
