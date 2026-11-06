@@ -617,6 +617,7 @@ class StopMonitor:
         self._coverage_last_repair: Dict[str, float] = {}
         self._coverage_warned: set = set()
         self._coverage_excess_warned: set = set()
+        self._coverage_unledgered_warned: set = set()   # (symbol, day) ORB unledgered-fill ERRORs
         self._coverage_cycle_no = 0
         self._coverage_rotation_logged = False
         # Per-strategy order-execution routing. Empty dict = legacy single-client behavior.
@@ -850,7 +851,11 @@ class StopMonitor:
                             f"EXIT COVERAGE: {symbol} broker qty "
                             f"{res.position_qty:g} < watch qty {watch.shares}")
                     continue
-                if res.excess_qty > 0 and symbol not in self._coverage_excess_warned:
+                if _exit_coverage.report_unledgered_excess(
+                        symbol, res, watch.strategy, self._coverage_unledgered_warned,
+                        datetime.now().date().isoformat()):
+                    pass  # ERROR logged: ORB-traded symbol, shares above the ledger
+                elif res.excess_qty > 0 and symbol not in self._coverage_excess_warned:
                     self._coverage_excess_warned.add(symbol)
                     logger.warning(
                         f"EXIT COVERAGE: {symbol} broker holds "

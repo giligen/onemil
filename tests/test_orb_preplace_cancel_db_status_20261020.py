@@ -30,7 +30,7 @@ def _status_calls(eng):
 
 
 def test_outside_top_n_cancels_and_marks_row(eng):
-    eng.alpaca.get_order.return_value = {'filled_qty': 0}
+    eng.alpaca.get_order.return_value = {'status': 'canceled', 'filled_qty': 0}
     _preplace(eng, ok=('JAGX', 'CRCG'))
     _go_final(eng)
     counters = eng._reconcile_preplaced()
@@ -44,7 +44,7 @@ def test_outside_top_n_cancels_and_marks_row(eng):
 
 
 def test_inside_top_n_row_untouched(eng):
-    eng.alpaca.get_order.return_value = {'filled_qty': 0}
+    eng.alpaca.get_order.return_value = {'status': 'canceled', 'filled_qty': 0}
     _preplace(eng, ok=())
     _go_final(eng)
     _seat_inside_name(eng)
@@ -55,7 +55,7 @@ def test_inside_top_n_row_untouched(eng):
 
 
 def test_cancel_with_partial_fill_not_marked_and_warns(eng, caplog):
-    eng.alpaca.get_order.return_value = {'filled_qty': '37'}
+    eng.alpaca.get_order.return_value = {'status': 'canceled', 'filled_qty': '37'}
     _preplace(eng, ok=('JAGX',))
     _go_final(eng)
     with caplog.at_level(logging.WARNING):

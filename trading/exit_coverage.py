@@ -214,3 +214,18 @@ def repair(client, watch, result: CoverageResult,
         f"{int(result.position_qty)} sh — placed stop-sell @ {stop:.2f} "
         f"(order {order_id[:8]})")
     return order_id
+
+
+def report_unledgered_excess(symbol: str, res: CoverageResult, strategy: str,
+                             warned: set, today: str) -> bool:
+    """ERROR (once per symbol-day) when the broker holds shares above the ledger watch on a symbol
+    ORB traded today: an unledgered fill (2026-10-27 CRDU: a cancelled provisional order filled late,
+    861 sh naked). Foreign symbols (owner / third party) stay out: the caller keeps its WARNING.
+
+    Returns True when the ERROR was logged. `warned` is the caller's set of (symbol, day) keys."""
+    if res.excess_qty <= 0 or str(strategy).lower() != "orb" or (symbol, today) in warned:
+        return False
+    warned.add((symbol, today))
+    logger.error(f"[ORB] {symbol}: broker holds {res.excess_qty:g} sh above the ledger on a symbol "
+                 f"ORB traded today — unledgered fill")
+    return True

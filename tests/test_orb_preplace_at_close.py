@@ -347,6 +347,7 @@ class TestReconciliation:
         eng.candidates['REPL'].range_data = _range('REPL', range_high=10.9)  # moved up
         monkeypatch.setattr(eng, '_compute_features', self._feats_side_effect())
         eng._cancel_symbol_open_orders = MagicMock(return_value=1)
+        eng.alpaca.get_order.return_value = {'status': 'canceled', 'filled_qty': 0}  # cancel landed
         eng._submit_entry = MagicMock(return_value='order-2')
         with _no_vetoes(eng):
             counters = eng._reconcile_preplaced()

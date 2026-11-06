@@ -4501,6 +4501,25 @@ class ORBEngine:
             self.max_concurrent, len(scored),
             [c.symbol for c in scored if c.symbol in final_top_syms], preplaced_syms)
 
+        # Pre-pass: cancel every REPLACE candidate, then wait for all of them together (one bounded
+        # 15 s loop) so the paper OMS cancel queue is not serialised (2026-10-27 CRDU late fill).
+        late_results: Dict[str, Tuple[str, int]] = {}
+        _to_wait = []
+        for sym in preplaced_syms:
+            _st = self._preplace_state[sym]
+            _pos = self.open_positions.get(sym)
+            _fc = final_by_sym.get(sym)
+            if (_pos is None or not _pos.order_id or not _st.get('submitted') or sym not in final_top_syms
+                    or _fc is None or _fc.range_data is None):
+                continue
+            if abs(_fc.range_data.range_high - _st['provisional_range_high']) >= 0.005:
+                self._cancel_symbol_open_orders(sym)
+                _to_wait.append((sym, _pos.order_id))
+        _t0 = time.monotonic()
+        for sym, oid in _to_wait:
+            late_results[sym] = self._await_terminal(
+                oid, max_wait_s=max(0.0, self._RECONCILE_WAIT_S - (time.monotonic() - _t0)))
+
         for sym in preplaced_syms:
             st = self._preplace_state[sym]
             pos = self.open_positions.get(sym)
@@ -4542,7 +4561,22 @@ class ORBEngine:
                 continue
 
             if abs(final_rh - prov_rh) >= 0.005:
-                self._cancel_symbol_open_orders(sym)
+                if pos is not None and pos.order_id:
+                    # Act on the cancel's RESULT (2026-10-27 CRDU): a late fill of the
+                    # provisional order is the entry; a second order against an unknown first is the hole.
+                    _status, _late_qty = late_results.get(sym, ('unknown', 0))
+                    if _late_qty > 0:
+                        logger.warning(
+                            f"[ORB PREPLACE] {sym}: provisional order filled {_late_qty} sh before the "
+                            f"cancel landed — kept as the entry, no replacement")
+                        self._confirm_late_provisional_fill(sym, pos, _late_qty)
+                        counters['n_filled_before_reconcile'] += 1
+                        continue
+                    if _status not in self._TERMINAL_ORDER_STATUSES:
+                        logger.error(
+                            f"[ORB PREPLACE] {sym}: provisional order {pos.order_id} still '{_status}' "
+                            f"after the cancel wait — NO replacement submitted today (unknown first order)")
+                        continue
                 if sym in self.open_positions:
                     del self.open_positions[sym]
                 rvol_tilt_mult, rvol_tercile = self._get_rvol_tilt_mult(final_cand)
@@ -4582,6 +4616,59 @@ class ORBEngine:
         self._flush_submit_burst(_burst_idx)
         return counters
 
+    _TERMINAL_ORDER_STATUSES = frozenset(
+        {'canceled', 'cancelled', 'filled', 'expired', 'rejected', 'done_for_day', 'replaced'})
+    _RECONCILE_WAIT_S = 15.0
+
+    @staticmethod
+    def _order_field(order, name):
+        """Read `name` from a dict-or-object broker order (None when absent)."""
+        return order.get(name) if isinstance(order, dict) else getattr(order, name, None)
+
+    def _await_terminal(self, order_id: str, max_wait_s: float = 15.0,
+                        step_s: float = 0.5) -> Tuple[str, int]:
+        """Poll `alpaca.get_order` until the order is terminal (canceled/filled/expired/rejected/
+        done_for_day/replaced) or `max_wait_s` is exhausted; return (status, filled_qty).
+
+        The broker queues a cancel (~9 s on the paper OMS), so reading filled_qty right after the
+        cancel request misses a fill that lands in between (2026-10-27 CRDU: 861 sh unledgered).
+        On exhaustion logs WARNING and returns the last seen status/qty ('unknown', 0 if never read).
+        Used by BOTH the reconcile REPLACED path and `_cancel_preplaced_order`."""
+        status, filled_qty = 'unknown', 0
+        n_polls = int(max(0.0, max_wait_s) / step_s) + 1
+        for i in range(n_polls):
+            try:
+                order = self.alpaca.get_order(order_id)
+                raw_status = self._order_field(order, 'status')
+                status = str(getattr(raw_status, 'value', raw_status) or '').lower().rsplit('.', 1)[-1]
+                raw = self._order_field(order, 'filled_qty')
+                if raw is not None and not isinstance(raw, (int, float, str)):
+                    logger.warning(f"[ORB PREPLACE] unreadable filled_qty {type(raw).__name__} "
+                                   f"on order {order_id} — assuming nothing filled")
+                    raw = 0
+                filled_qty = int(float(raw or 0))
+            except Exception as e:
+                logger.warning(f"[ORB PREPLACE] post-cancel get_order({order_id}) failed ({e}) "
+                               f"— assuming nothing filled")
+            if status in self._TERMINAL_ORDER_STATUSES:
+                return status, filled_qty
+            if i < n_polls - 1:
+                time.sleep(step_s)
+        logger.warning(f"[ORB PREPLACE] order {order_id} not terminal after {max_wait_s:.1f}s "
+                       f"(status='{status}', filled_qty={filled_qty})")
+        return status, filled_qty
+
+    def _confirm_late_provisional_fill(self, sym: str, pos, filled_qty: int = 0) -> None:
+        """A provisional order filled before its cancel landed: run it through `_confirm_fill`
+        with the broker's final order so the row, watch and stop legs carry the filled qty."""
+        try:
+            final = self.alpaca.get_order(pos.order_id)
+        except Exception as e:
+            logger.error(f"[ORB PREPLACE] {sym}: final get_order({pos.order_id}) failed ({e}) — "
+                         f"confirming the late fill from the polled filled_qty only")
+            final = {'filled_qty': filled_qty}
+        self._confirm_fill(pos, final)
+
     def _cancel_preplaced_order(self, sym: str, pos) -> bool:
         """Cancel the resting entry of a preplaced name that fell outside the final top-N and
         mark its trades row `order_status='preplace_canceled'`, `exit_reason='preplace_reconcile'`
@@ -4593,18 +4680,7 @@ class ORBEngine:
         self._cancel_symbol_open_orders(sym)
         filled_qty = 0
         if pos.order_id:
-            try:
-                final = self.alpaca.get_order(pos.order_id)
-                raw = (final or {}).get('filled_qty', 0) if isinstance(final, dict) \
-                    else getattr(final, 'filled_qty', 0)
-                if raw is not None and not isinstance(raw, (int, float, str)):
-                    logger.warning(f"[ORB PREPLACE] {sym}: unreadable filled_qty {type(raw).__name__} "
-                                   f"on order {pos.order_id} — assuming nothing filled")
-                    raw = 0
-                filled_qty = int(float(raw or 0))
-            except Exception as e:
-                logger.warning(f"[ORB PREPLACE] {sym}: post-cancel get_order({pos.order_id}) failed "
-                               f"({e}) — assuming nothing filled; marking preplace_canceled")
+            _status, filled_qty = self._await_terminal(pos.order_id)
         if filled_qty > 0:
             logger.warning(f"[ORB PREPLACE] {sym}: cancel at reconcile but {filled_qty} sh already "
                            f"filled — row NOT marked canceled, fill path owns it")

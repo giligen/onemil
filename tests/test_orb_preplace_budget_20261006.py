@@ -84,6 +84,7 @@ def eng(monkeypatch):
     alpaca.get_account_info.return_value = {'buying_power': 5_000_000.0}
     alpaca.get_latest_quote.return_value = {'bid_price': 9.95, 'ask_price': 10.00}
     alpaca.get_snapshots.return_value = {}
+    alpaca.get_order.return_value = {'status': 'canceled', 'filled_qty': 0}   # cancel landed, nothing filled
     e = ORBEngine(alpaca_client=alpaca, db=MagicMock(spec=Database),
                   stop_monitor=MagicMock(spec=StopMonitor), config=cfg)
     e.max_concurrent = 8
