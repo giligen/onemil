@@ -103,7 +103,11 @@ def test_g1_vetoes_one_pick_no_refill(engine):
 
 
 def test_daily_kill_gates_entries(engine):
-    """A -$600 realized ORB day in the DB blocks all new entries."""
+    """A -$1,300 realized ORB day in the DB blocks all new entries.
+
+    2026-11-04: daily rail rescaled -500 -> -1250 (3.3 R at $375); the old -600 fixture
+    sat above the new rail and failed the 11/6 pre-boot suite.
+    """
     engine._submit_entry = MagicMock(return_value='oid')
     providers = {'AAAA': _seed(engine, 'AAAA', 12.0)}
     today = engine._et_now().strftime('%Y-%m-%d')
@@ -115,7 +119,7 @@ def test_daily_kill_gates_entries(engine):
          created_at,updated_at,pnl,fill_price,exit_price)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (today, 'PRIOR', 'orb', 'buy', 10.0, 9.0, 12.0, 100, 1.0, 100.0, 2.0,
-         'x', 'x', -600.0, 10.0, 4.0))
+         'x', 'x', -1300.0, 10.0, 4.0))
     conn.commit()
     conn.close()
     submitted = engine.check_entries(symbols=list(providers),
