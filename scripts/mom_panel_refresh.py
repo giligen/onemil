@@ -66,6 +66,16 @@ def sleeve_universe(assets: pd.DataFrame, tracked: Optional[set] = None) -> List
     return sorted(syms | {'SPY'})
 
 
+def completeness_for_requested(symbols: List[str], probe: pd.DataFrame, lost: List[str], asof) -> Dict:
+    """The sleeve's completeness gate restricted to the REQUESTED universe (`symbols`).
+
+    The extension also carries the frozen panel's name-excluded ETFs/ADRs/REITs; `sleeve_universe` never requests
+    them, so they must not sit in the liquid denominator — once the extension stopped holding the asof bar for them
+    the gate failed at 80 % on a complete fetch (2026-11-07 13:00 UTC, 157 such names)."""
+    requested = probe[probe['symbol'].isin(set(symbols))]
+    return sleeve.completeness_info(len(symbols), requested, lost, asof)
+
+
 def load_extension(path: str) -> Optional[pd.DataFrame]:
     """The extension parquet, or None (WARNING) when it does not exist."""
     if not os.path.exists(path):
@@ -168,7 +178,10 @@ def refresh(client, assets: pd.DataFrame, ext_path: str = EXT_PATH, dry_run: boo
     asof = new.loc[new['symbol'] == 'SPY', 'bar_date'].max()
     # completeness gate (the sleeve's own): LOST share and liquid-name asof coverage, on extension + fresh bars
     probe = pd.concat([old, new[COLS]], ignore_index=True).drop_duplicates(['symbol', 'bar_date'], keep='last')
-    info = sleeve.completeness_info(len(symbols), probe, lost, asof.date())
+    # 2026-11-07: the gate's liquid denominator is the REQUESTED universe only. The extension also carries the
+    # name-excluded ETFs/ADRs/REITs of the frozen panel (157 liquid ones); they are never fetched, so once the
+    # extension no longer holds the asof bar for them the gate failed at 80 % on a complete fetch (11/7 13:00 UTC).
+    info = completeness_for_requested(symbols, probe, lost, asof.date())
     line = (f"COMPLETENESS: requested {info['requested']}, LOST {len(lost)} ({info['lost_share']:.1%}, max "
             f"{sleeve.LOST_MAX:.0%}), liquid {info['liquid_with_asof']}/{info['n_liquid']} with an {asof.date()} bar "
             f"({info['liquid_ratio']:.1%}, min {sleeve.COMPLETENESS_MIN:.0%})")
