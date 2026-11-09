@@ -2539,12 +2539,15 @@ class ORBEngine:
     def _execute_add_on(self, pos: 'OpenPosition', bar_close_price: float) -> None:
         """Submit + book ONE add-on leg once _maybe_fire_add_on's trigger
         has fired. Synchronous: the add is a marketable limit (crosses the
-        spread), so the fill is read back from the submit response itself
-        rather than polled across ticks — consistent with this being a
-        small, already-in-the-money add, not a fresh entry.
+        spread). The booking acts on the order's RESULT (`_settle_add_order`:
+        poll to terminal, cancel a resting remainder, read filled_qty and
+        filled_avg_price from the broker) — never on the submit response, which
+        on the paper OMS is 'accepted' with filled_qty 0 (2026-11-09 BEX).
         """
         now_utc = datetime.now(timezone.utc)
-        now_et = now_utc + timedelta(hours=_et_offset_hours(now_utc))
+        # 2026-11-09 BEX: the cutoff used `now_utc + offset` (UTC+5) while every other caller
+        # SUBTRACTS the offset; _et_now() is the one ET clock (ZoneInfo).
+        now_et = self._et_now()
         if orb_add_on.is_past_add_cutoff(now_et):
             logger.warning(f"[ORB] ADD {pos.symbol}: blocked — past the 15:00 ET cutoff")
             return
@@ -2584,9 +2587,12 @@ class ORBEngine:
             logger.error(f"[ORB] ADD {pos.symbol}: submit returned no order id")
             pos.add_pending_order_id = ''
             return
-        pos.add_pending_order_id = ''
         order_id = str(result['id'])
-        fill_px = float(result.get('filled_avg_price') or 0.0) or limit_price
+        filled_qty, fill_px = self._settle_add_order(pos, order_id, add_qty, limit_price, result)
+        pos.add_pending_order_id = ''
+        if filled_qty < 1:
+            return  # nothing bought: pos.shares, legs, watch and add_count stay as they were
+        add_qty = filled_qty
         at_r = float(self._add_on_param(pos, 'at_r'))
         stop_mode = self._add_on_param(pos, 'stop_mode')
 
@@ -2616,6 +2622,47 @@ class ORBEngine:
             f"@ ${combined_avg:.4f}"
         )
         self._persist_add_on_state(pos)
+
+    def _settle_add_order(self, pos: 'OpenPosition', order_id: str, requested_qty: int,
+                          limit_price: float, submit_result: dict) -> Tuple[int, float]:
+        """Wait for the add order's RESULT and return (filled_qty, avg_fill_price).
+
+        Polls to a terminal status (<= 10 s); if still resting, cancels and polls again (<= 5 s) so a
+        fill landing during the broker's cancel queue is counted (same posture as the preplace fix
+        813797a). The price is the broker's `filled_avg_price`, never the limit. Returns (0, limit)
+        when nothing filled; the caller then changes nothing. Never raises."""
+        status, filled = self._await_terminal(order_id, max_wait_s=10.0)
+        if status not in self._TERMINAL_ORDER_STATUSES:
+            try:
+                self.alpaca.cancel_order(order_id)
+            except Exception as e:
+                logger.error(f"[ORB] ADD {pos.symbol}: cancel of add order {order_id[:8]} failed: {e}")
+            status, filled = self._await_terminal(order_id, max_wait_s=5.0)
+        if status not in self._TERMINAL_ORDER_STATUSES:
+            logger.error(
+                f"[ORB] ADD {pos.symbol}: add order still '{status}' after cancel — booked the "
+                f"{filled} sh filled so far, remainder unknown")
+        try:
+            final = self.alpaca.get_order(order_id)
+            raw_q = self._order_field(final, 'filled_qty')
+            final_q = int(float(raw_q)) if isinstance(raw_q, (int, float, str)) and raw_q != '' else filled
+            filled = max(filled, final_q)
+            raw_px = self._order_field(final, 'filled_avg_price')
+            px = float(raw_px) if isinstance(raw_px, (int, float, str)) and raw_px not in ('', None) else 0.0
+        except Exception as e:
+            logger.error(f"[ORB] ADD {pos.symbol}: final get_order({order_id[:8]}) failed ({e}) — "
+                         f"using the polled filled_qty {filled}")
+            px = 0.0
+        if filled < 1:
+            logger.info(f"[ORB] ADD {pos.symbol}: add did not fill (status '{status}') — no change")
+            return 0, limit_price
+        if px <= 0.0:
+            px = float(submit_result.get('filled_avg_price') or 0.0)
+        if px <= 0.0:
+            logger.error(f"[ORB] ADD {pos.symbol}: filled {filled} sh but no filled_avg_price from the "
+                         f"broker — booking at the limit ${limit_price:.2f} (upper bound)")
+            px = limit_price
+        return min(filled, requested_qty), px
 
     def _persist_add_on_state(self, pos: 'OpenPosition') -> None:
         """Read-modify-write pattern_data.add_on with the position's
@@ -2703,7 +2750,8 @@ class ORBEngine:
                 f"cannot resize exit legs to {new_qty}sh (add fill may still be settling)")
             return pos.shares
         if broker_qty < new_qty:
-            logger.warning(
+            # Callers settle the fill first (_settle_add_order), so this is a REAL mismatch now.
+            logger.error(
                 f"[ORB] ADD {pos.symbol}: broker shows only {broker_qty}sh long "
                 f"(wanted legs at {new_qty}sh) — capping to the broker's qty")
             applied = broker_qty
@@ -2712,6 +2760,10 @@ class ORBEngine:
             if not leg_id:
                 continue
             try:
+                if self._leg_qty(leg_id) == applied:
+                    logger.info(f"[ORB] ADD {pos.symbol}: {attr} ({leg_id[:8]}) already covers "
+                                f"{applied}sh — replace skipped")
+                    continue
                 res = self.alpaca.replace_order_qty(leg_id, applied)
                 new_id = (res or {}).get('id') or ''
                 if new_id:
@@ -2726,6 +2778,17 @@ class ORBEngine:
             except Exception as e:
                 logger.error(f"[ORB] ADD {pos.symbol}: StopMonitor resize_watch_qty failed: {e}")
         return applied
+
+    def _leg_qty(self, leg_id: str) -> Optional[int]:
+        """Current broker qty of an exit leg, or None when it cannot be read (the caller then
+        proceeds with the replace, the safe direction)."""
+        try:
+            raw = self._order_field(self.alpaca.get_order(leg_id), 'qty')
+            if isinstance(raw, (int, float, str)) and raw != '':
+                return int(float(raw))
+        except Exception as e:
+            logger.warning(f"[ORB] ADD: could not read leg {leg_id[:8]} qty ({e}) — will replace")
+        return None
 
     def _audit_touchgo(self, pos: 'OpenPosition', rule: str, fired: bool,
                        exit_p, last_ts, bb_ts, range_size: float,

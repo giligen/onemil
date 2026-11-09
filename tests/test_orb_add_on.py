@@ -219,6 +219,12 @@ def mock_alpaca():
         'id': 'add-order-1', 'status': 'filled', 'filled_avg_price': 11.05,
     }
     client.replace_order_qty.return_value = {'id': 'leg-new-1'}
+    # 2026-11-09: the add is booked from the broker's RESULT (get_order), not the submit response;
+    # the same dict doubles as the resting leg's read (qty 100 != target, so legs are replaced).
+    client.get_order.return_value = {
+        'id': 'add-order-1', 'status': 'filled', 'qty': 100, 'filled_qty': 100,
+        'filled_avg_price': 11.05,
+    }
     return client
 
 
