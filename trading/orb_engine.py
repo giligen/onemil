@@ -479,6 +479,12 @@ class ORBEngine:
         #                          still rangeless within this many seconds
         #                          after the range end (backstop; 0=off).
         self.sweep_retry_delay_s = float(entry_cfg.get('sweep_retry_delay_s', 4.0))
+        # 2026-11-10 range-sweep hardening (docs/orb_range_sweep_hardening_spec_20261110.md):
+        # the sweep keeps re-fetching still-rangeless names (one re-entrant pass
+        # per tick, >= sweep_retry_delay_s apart) until this ET clock time.
+        _dl = str(entry_cfg.get('sweep_deadline_et', '09:40:00')).split(':')
+        self.sweep_deadline_et = dtime(int(_dl[0]), int(_dl[1]),
+                                       int(_dl[2]) if len(_dl) > 2 else 0)
         self.first_rank_grace_s = float(entry_cfg.get('first_rank_grace_s', 25.0))
         # 2026-10-08 grace-waitlist fix (docs/orb_grace_waitlist_fix_20261008.md):
         # the grace waits ONLY for names that can still be ranked and placed.
@@ -939,6 +945,12 @@ class ORBEngine:
         # The 4s consolidation-lag retry inside the sweep runs at most once
         # per day, even when the grace gate re-arms the sweep (2026-07-04).
         self._sweep_retry_used_today = False
+        self._sweep_retry_count_today = 0          # retry passes run today (11/10 hardening)
+        self._sweep_pass_count_today = 0           # fetch passes run today
+        self._sweep_last_pass_mono = 0.0           # monotonic time of the last pass end
+        self._sweep_initial_missing: List[str] = []  # rangeless at the first pass today
+        self._sweep_classes_today: Dict[str, str] = {}  # sym -> no_bars/short_window/no_open_bar
+        self._sweep_degraded_alarmed_today = False  # the ERROR fires once per day
 
         # Planner (stateless, built once)
         self.planner = OrbTradePlanner(cfg)
@@ -1782,6 +1794,16 @@ class ORBEngine:
                 self._post_open_range_sweep_done = True
                 return set()
 
+            # Re-entrant retry pacing (11/10 hardening): passes after the first
+            # call are one fetch per tick, never closer than sweep_retry_delay_s.
+            if (self._sweep_pass_count_today > 0
+                    and time.monotonic() - self._sweep_last_pass_mono
+                    < self.sweep_retry_delay_s):
+                return set()
+            is_retry_call = self._sweep_pass_count_today > 0
+            if not self._sweep_initial_missing:
+                self._sweep_initial_missing = list(missing)
+
             logger.info(
                 f"ORB: post-open range sweep — backfilling {len(missing)} candidates "
                 f"missing range_data at {et_now.time().strftime('%H:%M:%S')} ET: "
@@ -1817,13 +1839,15 @@ class ORBEngine:
         fetch_s = time.time() - t_fetch
 
         filled_syms: Set[str] = set()
-        counts = {'fetched': 0, 'applied': 0, 'superseded': 0}
+        counts = {'fetched': 0, 'applied': 0, 'superseded': 0,
+                  'short_window': 0, 'no_open_bar': 0}
 
         def _ingest_batch(sym_list, bars_map):
             """Apply fetched bars; caller holds `_lock` (or owns the engine)."""
             for sym in sym_list:
                 bars = bars_map.get(sym)
                 if bars is None or bars.empty:
+                    self._sweep_classes_today[sym] = 'no_bars'
                     continue
                 counts['fetched'] += 1
                 cand = self.candidates.get(sym)
@@ -1841,6 +1865,13 @@ class ORBEngine:
                     if self.candidates.get(sym) and self.candidates[sym].range_data is not None:
                         filled_syms.add(sym)
                         counts['applied'] += 1
+                        self._sweep_classes_today.pop(sym, None)
+                    else:
+                        # Bars present but the 5-bar range did not complete:
+                        # count WHY instead of silently continuing.
+                        why = _classify_rangeless(b)
+                        counts[why] += 1
+                        self._sweep_classes_today[sym] = why
                 except Exception as e:
                     logger.warning(f"ORB: post-open sweep ingest({sym}) failed: {e}")
 
@@ -1869,12 +1900,19 @@ class ORBEngine:
             if _day_rolled():
                 return set()
             _ingest_batch(missing, bars_by_sym)
-            _log_fetch(fetch_s)
+            if is_retry_call:
+                self._sweep_retry_count_today += 1
+                self._sweep_retry_used_today = True
+                _log_fetch(fetch_s, tag=f' retry {self._sweep_retry_count_today}')
+            else:
+                _log_fetch(fetch_s)
+            self._sweep_pass_count_today += 1
             still_missing = [s for s in missing if s not in filled_syms]
             do_retry = bool(still_missing) and self.sweep_retry_delay_s > 0 \
                 and not self._sweep_retry_used_today
             if do_retry:
                 self._sweep_retry_used_today = True
+                self._sweep_retry_count_today += 1
 
         # 2026-07-03 selection-race fix (CRCD/AVEX/FABC/RGNX incidents): the
         # 9:34 bar consolidates at the vendor with 2-10s lag, so the first
@@ -1896,25 +1934,79 @@ class ORBEngine:
             t_retry = time.time()
             retry_bars = self._fetch_sweep_bars(still_missing, minutes_since_open)
             retry_s = time.time() - t_retry
-            counts.update(fetched=0, applied=0, superseded=0)
+            counts.update(fetched=0, applied=0, superseded=0,
+                          short_window=0, no_open_bar=0)
             with guard:
                 if _day_rolled():
                     return set()
                 _ingest_batch(still_missing, retry_bars)
-                _log_fetch(retry_s, tag=' retry')
+                _log_fetch(retry_s, tag=f' retry {self._sweep_retry_count_today}')
+                self._sweep_pass_count_today += 1
 
+        # STRUCTURE (11/10 hardening): RE-ENTRANT, not a sleep loop. This runs on
+        # the check_entries tick/drain thread (_sweep_outside_lock), so blocking
+        # until 09:40 would stall ranking; instead the first call keeps today's
+        # sleep+retry (<= retry_delay + fetch) and, if names are still rangeless
+        # before sweep_deadline_et, returns WITHOUT setting `done`: the next tick
+        # re-enters, fetches only the leftovers (paced >= retry_delay apart) and
+        # the late fills are returned so check_entries widens its eligible set.
         with guard:
             if _day_rolled():
                 return set()
-            logger.info(
-                f"ORB: post-open range sweep — filled {len(filled_syms)}/{len(missing)} ranges"
-            )
+            self._sweep_last_pass_mono = time.monotonic()
+            leftovers = [s for s in missing
+                         if self.candidates.get(s) is not None
+                         and self.candidates[s].range_data is None]
+            et_end = self._et_now()
+            if leftovers and et_end.time() < self.sweep_deadline_et:
+                logger.info(
+                    f"ORB: post-open sweep — {len(leftovers)} still rangeless at "
+                    f"{et_end.time().strftime('%H:%M:%S')} ET; re-entrant retry on the "
+                    f"next tick until {self.sweep_deadline_et.strftime('%H:%M:%S')} ET")
+                return filled_syms
+            self._finalize_sweep(leftovers, et_end)
             # Mark done even if some failed — next tick's WS bars will handle
             # any stragglers through the normal flow (and the first-rank grace
             # gate in check_entries holds the daily cap until they arrive or
             # the grace window expires).
             self._post_open_range_sweep_done = True
             return filled_syms
+
+    def _finalize_sweep(self, leftovers: List[str], et_end: datetime) -> None:
+        """Log the post-open sweep's final outcome (caller holds the guard).
+
+        All filled -> INFO. Leftovers -> WARNING with the three classes
+        (first 8 names each). Fewer than 50 % of the day's rangeless
+        candidates filled with >= 10 of them -> one ERROR per day (vendor bars
+        late; ORB is trading a thin field).
+        """
+        initial = self._sweep_initial_missing or leftovers
+        n = len(initial)
+        filled = n - len([s for s in initial if s in set(leftovers)])
+        hhmmss = et_end.time().strftime('%H:%M:%S')
+        if not leftovers:
+            logger.info(f"ORB: post-open range sweep — filled {filled}/{n} ranges")
+            return
+        groups: Dict[str, List[str]] = {'short_window': [], 'no_bars': [],
+                                        'no_open_bar': []}
+        for sym in leftovers:
+            groups[self._sweep_classes_today.get(sym, 'no_bars')].append(sym)
+
+        def _fmt(names: List[str]) -> str:
+            return f"[{','.join(names[:8])}{'...' if len(names) > 8 else ''}]"
+
+        logger.warning(
+            f"ORB: post-open range sweep gave up at {hhmmss} ET — "
+            f"{len(leftovers)}/{n} rangeless: short_window {_fmt(groups['short_window'])}, "
+            f"no_bars {_fmt(groups['no_bars'])}, no_open_bar {_fmt(groups['no_open_bar'])} "
+            f"(filled {filled}/{n})")
+        if n >= 10 and filled < 0.5 * n and not self._sweep_degraded_alarmed_today:
+            self._sweep_degraded_alarmed_today = True
+            logger.error(
+                f"[ORB] post-open range sweep: vendor bars late — only {filled}/{n} "
+                f"candidates have a range by {hhmmss[:5]} ET "
+                f"(short_window {len(groups['short_window'])}) — ORB is trading a thin "
+                f"field today")
 
     # =====================================================================
     # Bar stream integration
@@ -8328,6 +8420,12 @@ class ORBEngine:
         self._post_open_range_sweep_done = False
         self._daily_epoch += 1
         self._sweep_retry_used_today = False
+        self._sweep_retry_count_today = 0          # retry passes run today (11/10 hardening)
+        self._sweep_pass_count_today = 0           # fetch passes run today
+        self._sweep_last_pass_mono = 0.0           # monotonic time of the last pass end
+        self._sweep_initial_missing: List[str] = []  # rangeless at the first pass today
+        self._sweep_classes_today: Dict[str, str] = {}  # sym -> no_bars/short_window/no_open_bar
+        self._sweep_degraded_alarmed_today = False  # the ERROR fires once per day
         self._pdr_vetoed_today = set()
         self._first_submit_latency_logged = False
         self._broker_submit_ts = []
@@ -9155,6 +9253,16 @@ class ORBEngine:
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
+def _classify_rangeless(bars_df: pd.DataFrame) -> str:
+    """Why did non-empty sweep bars not complete a range? Returns
+    'no_open_bar' (no 09:30 session-open bar found) or 'short_window'
+    (< 5 bars inside [session_open, +5 min))."""
+    open_ts = _first_session_open_ts_utc(bars_df)
+    if open_ts is None:
+        return 'no_open_bar'
+    return 'short_window'
+
 
 def _first_session_open_ts_utc(bars_df: pd.DataFrame) -> Optional[pd.Timestamp]:
     """Return the timestamp of the first regular-session bar (9:30 ET).

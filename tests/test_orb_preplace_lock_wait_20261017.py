@@ -130,7 +130,9 @@ def test_preplace_submit_not_blocked_by_sweep_fetch():
     assert elapsed < 0.5, f'preplace submit waited {elapsed:.2f}s behind the sweep'
     assert eng._preplace_state['PRE']['submitted'] is True
     assert eng.candidates['AAA'].range_data is not None  # sweep still applied its result
-    assert eng._post_open_range_sweep_done is True
+    # 11/10 hardening: PRE stays rangeless (no bars served), so the sweep is
+    # RE-ENTRANT (done stays False until sweep_deadline_et) instead of giving up.
+    assert eng._post_open_range_sweep_done is False
 
 
 # (b) ---------------------------------------------------------------------------

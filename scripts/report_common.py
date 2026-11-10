@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import glob
 import json
+import logging
 import os
 import sqlite3
 import subprocess
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent
+log = logging.getLogger(__name__)
 sys.path.insert(0, str(ROOT))
 
 from trading.exit_reasons import is_known, needs_reconcile  # noqa: E402
@@ -783,6 +785,28 @@ def news_lag_audit(day: str) -> Dict:
     material = [s for s in lag if (pm_vols.get(s) or 0) > high_cut]
     return {'available': True, 'n_checked': len(flags),
             'lag_symbols': lag, 'material': material}
+
+
+def selection_parity_line(day: str, logs_dir: Optional[Path] = None) -> str:
+    """One EOD line from logs/orb_selection_audit_<YYYYMMDD>.json (written by
+    scripts/orb_selection_observer.py): 'selection parity: live ranged x /
+    BT-eligible y, REAL drops z'. Never raises; a missing/unreadable audit is
+    reported as such (the clean-day Telegram was removed 2026-11-10, so this
+    line is the daily proof the observer ran)."""
+    logs_dir = logs_dir or (ROOT / 'logs')
+    path = logs_dir / f"orb_selection_audit_{day.replace('-', '')}.json"
+    try:
+        a = json.loads(path.read_text())
+        real = [s for s, c in (a.get('drop_classification') or {}).items()
+                if c.startswith('REAL') or c.startswith('UNKNOWN')]
+        return (f"selection parity: live ranged {len(a.get('live_range') or [])} / "
+                f"BT-eligible {len(a.get('expected_candidates') or {})}, "
+                f"REAL drops {len(real)}" + (f" {real[:6]}" if real else ""))
+    except FileNotFoundError:
+        return f"selection parity: no observer audit for {day} ({path.name} missing)"
+    except Exception as e:  # noqa: BLE001
+        log.warning("selection_parity_line: %s unreadable: %s", path.name, e)
+        return f"selection parity: audit unreadable ({e})"
 
 
 def news_lag_line(audit: Dict) -> str:

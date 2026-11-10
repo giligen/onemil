@@ -207,6 +207,65 @@ def decide_verdict(live_range, live_scored, active, journal_ok, real_drops):
     return 'caught' if real_drops else 'clean'
 
 
+def classify_drop(sym: str, now=None, http_get=None) -> str:
+    """Classify one dropped symbol from its 09:30-09:34 SIP 1-min bars.
+
+    The bars window is EXCLUSIVE of the 09:35 bar (end = 09:34:59 ET), so the
+    count is out of 5, never "6/5" (2026-11-10). `now`/`http_get` are test
+    seams (default: wall clock / requests.get)."""
+    now = now or datetime.now(timezone.utc)
+    try:
+        if http_get is None:
+            import requests as _rq
+            http_get = _rq.get
+        h = {'APCA-API-KEY-ID': os.environ['ALPACA_API_KEY'],
+             'APCA-API-SECRET-KEY': os.environ['ALPACA_API_SECRET']}
+        r = http_get('https://data.alpaca.markets/v2/stocks/bars',
+                     params={'symbols': sym, 'timeframe': '1Min',
+                             'feed': 'sip', 'limit': 10,
+                             'start': et_target(now, 9, 30)
+                             .astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                             'end': et_target(now, 9, 34, 59)
+                             .astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')},
+                     headers=h, timeout=(5, 15))
+        n_bars = len((r.json().get('bars') or {}).get(sym, []))
+    except Exception as e:
+        return f'UNKNOWN (bars query failed: {e})'
+    if n_bars == 0:
+        return 'benign: vendor-stale phantom (zero bars in 9:30-9:35)'
+    if n_bars < 5:
+        return (f'benign: gappy 5-min window ({n_bars}/5 bars) — '
+                f'dropped by design (5-bar rule, BT parity)')
+    return f'REAL DROP ({n_bars}/5 range bars present — investigate)'
+
+
+def send_verdict(n, verdict, audit, kept, live_scored, real_drops, drop_class,
+                 dropped, active) -> bool:
+    """Deliver the verdict. Returns True when a Telegram message was sent.
+
+    'ops_warning' and 'caught' send; 'clean' only logs (2026-11-10 owner: the
+    daily 'No REAL drops' message was noise; the EOD report carries a
+    'selection parity' line from the audit JSON instead)."""
+    if verdict == 'ops_warning':
+        log(f"WARNING {OPS_WARNING_TEXT} (journal_ok={_JOURNAL['ok']}, engine_active={active})")
+        n.send_message_sync(f"<b>[ORB-SELECTION] {audit['date']}</b>\n{OPS_WARNING_TEXT}",
+                            parse_mode='HTML')
+        return True
+    if verdict == 'caught':
+        det = "\n".join(f"• {s}: gap {kept[s]['gap']}%, "
+                        f"ranged={s in audit.get('live_range', [])} — {drop_class[s]}"
+                        for s in real_drops[:6])
+        n.send_message_sync(
+            f"<b>[ORB-SELECTION] {audit['date']} — CAUGHT {len(real_drops)} REAL dropped candidate(s)</b>\n"
+            f"{det}\nExpected {len(kept)}, live scored {len(live_scored)}. "
+            f"Full: logs/{OUT.name}", parse_mode='HTML')
+        return True
+    benign = len(dropped) - len(real_drops)
+    log(f"clean: No REAL drops — live scored all tradeable BT-parity "
+        f"candidates ({benign} benign drop(s)); Telegram suppressed")
+    return False
+
+
 def main():
     log("observer armed — waiting for 09:29:30 ET")
     wait_until_et(9, 29, 30)
@@ -297,28 +356,7 @@ def main():
     # (ORIS/CUK/MIGI), 3 thin names with gappy 5-min windows dropped BY
     # DESIGN in both live and BT via the 5-bar rule, orb_engine.py:977
     # == study_orb_features.py:237). Only unexplained drops alarm.
-    def _classify_drop(sym: str) -> str:
-        try:
-            import requests as _rq
-            h = {'APCA-API-KEY-ID': os.environ['ALPACA_API_KEY'],
-                 'APCA-API-SECRET-KEY': os.environ['ALPACA_API_SECRET']}
-            r = _rq.get('https://data.alpaca.markets/v2/stocks/bars',
-                        params={'symbols': sym, 'timeframe': '1Min',
-                                'feed': 'sip', 'limit': 10,
-                                'start': et_target(datetime.now(timezone.utc), 9, 30)
-                                .astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-                                'end': et_target(datetime.now(timezone.utc), 9, 35)
-                                .astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')},
-                        headers=h, timeout=(5, 15))
-            n_bars = len((r.json().get('bars') or {}).get(sym, []))
-        except Exception as e:
-            return f'UNKNOWN (bars query failed: {e})'
-        if n_bars == 0:
-            return 'benign: vendor-stale phantom (zero bars in 9:30-9:35)'
-        if n_bars < 5:
-            return (f'benign: gappy 5-min window ({n_bars}/5 bars) — '
-                    f'dropped by design (5-bar rule, BT parity)')
-        return f'REAL DROP ({n_bars}/5 range bars present — investigate)'
+    _classify_drop = classify_drop
 
     drop_class = {s: _classify_drop(s) for s in dropped}
     real_drops = [s for s, c in drop_class.items() if c.startswith('REAL')
@@ -347,26 +385,8 @@ def main():
     try:
         from notifications.telegram_notifier import TelegramNotifier
         n = TelegramNotifier(os.getenv('TELEGRAM_BOT_TOKEN'), os.getenv('TELEGRAM_CHAT_ID'), enabled=True)
-        if verdict == 'ops_warning':
-            log(f"WARNING {OPS_WARNING_TEXT} (journal_ok={_JOURNAL['ok']}, engine_active={active})")
-            n.send_message_sync(f"<b>[ORB-SELECTION] {audit['date']}</b>\n{OPS_WARNING_TEXT}",
-                                parse_mode='HTML')
-        elif verdict == 'caught':
-            det = "\n".join(f"• {s}: gap {kept[s]['gap']}%, "
-                            f"ranged={s in live_range} — {drop_class[s]}"
-                            for s in real_drops[:6])
-            n.send_message_sync(
-                f"<b>[ORB-SELECTION] {audit['date']} — CAUGHT {len(real_drops)} REAL dropped candidate(s)</b>\n"
-                f"{det}\nExpected {len(exp)}, live scored {len(live_scored)}. "
-                f"Full: logs/{OUT.name}", parse_mode='HTML')
-        else:
-            benign = len(dropped) - len(real_drops)
-            extra_txt = (f" ({benign} benign drop(s): stale phantoms / "
-                         f"gappy-window by-design)") if benign else ""
-            n.send_message_sync(
-                f"<b>[ORB-SELECTION] {audit['date']}</b>\nNo REAL drops — live scored all "
-                f"tradeable BT-parity candidates{extra_txt}. Observer on duty.",
-                parse_mode='HTML')
+        send_verdict(n, verdict, audit, kept, live_scored, real_drops, drop_class,
+                     dropped, active)
     except Exception as e:
         log(f"telegram failed: {e}")
 

@@ -30,6 +30,7 @@ from persistence.database import Database  # noqa: E402
 import guardrail as guardrail_cli  # noqa: E402  (scripts/guardrail.py: stage_risk_usd, band_p5)
 from trading import live_guardrail as gr  # noqa: E402
 import eod_sections  # noqa: E402  (MOM / ORB PAPER PARITY / PROMOTION sections)
+import report_common as rc  # noqa: E402  (selection_parity_line)
 import mom_bt_parity  # noqa: E402  (latest_parity_line only; the heavy imports are lazy)
 
 log = logging.getLogger("eod_report")
@@ -262,7 +263,8 @@ def hygiene_section() -> str:
     disk = shutil.disk_usage("/")
     return ("HYGIENE:\n  services " + ", ".join(flags) + (f"  <-- NOT ACTIVE: {bad}" if bad else "")
             + f"\n  trader journal ERROR/Traceback lines today: {err}\n  pre-boot tests: {preboot[-120:]}"
-            + f"\n  disk free {disk.free / 1e9:.1f} GB")
+            + f"\n  disk free {disk.free / 1e9:.1f} GB"
+            + "\n  " + rc.selection_parity_line((_utc_now() - dt.timedelta(hours=5)).strftime("%Y-%m-%d")))
 
 
 def yaml_flag(path: Path, key_path: List[str]) -> str:

@@ -14,6 +14,7 @@ after 9:35 ET, batch-fetches 1-min bars, ingests them. One-shot via
 """
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone, time as dtime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -138,7 +139,7 @@ class TestPostOpenSweep:
         engine.alpaca.get_1min_bars_multi = MagicMock(return_value={})
         engine.sweep_retry_delay_s = 0.01  # keep the retry, skip the 4s sleep
         with patch('trading.orb_engine.datetime') as MockDT:
-            MockDT.now = lambda tz=None: datetime(2026, 4, 21, 13, 36, tzinfo=timezone.utc)
+            MockDT.now = lambda tz=None: datetime(2026, 4, 21, 13, 41, tzinfo=timezone.utc)
             engine._ensure_ranges_post_open()
             engine._ensure_ranges_post_open()
             engine._ensure_ranges_post_open()
@@ -147,8 +148,9 @@ class TestPostOpenSweep:
         # Even if the grace gate re-arms the sweep, the retry stays
         # once-per-day (no repeated sleep storms on the drain thread).
         engine._post_open_range_sweep_done = False
+        time.sleep(0.03)  # 11/10: re-entrant passes are paced >= sweep_retry_delay_s apart
         with patch('trading.orb_engine.datetime') as MockDT:
-            MockDT.now = lambda tz=None: datetime(2026, 4, 21, 13, 36, tzinfo=timezone.utc)
+            MockDT.now = lambda tz=None: datetime(2026, 4, 21, 13, 41, tzinfo=timezone.utc)
             engine._ensure_ranges_post_open()
         assert engine.alpaca.get_1min_bars_multi.call_count == 3  # re-sweep fetch, NO extra retry
 
@@ -185,7 +187,7 @@ class TestPostOpenSweep:
             'EMPTY': pd.DataFrame(),
         })
         with patch('trading.orb_engine.datetime') as MockDT:
-            MockDT.now = lambda tz=None: datetime(2026, 4, 21, 13, 36, tzinfo=timezone.utc)
+            MockDT.now = lambda tz=None: datetime(2026, 4, 21, 13, 41, tzinfo=timezone.utc)
             engine._ensure_ranges_post_open()
         assert engine.candidates['GOOD'].range_data is not None
         assert engine.candidates['EMPTY'].range_data is None
