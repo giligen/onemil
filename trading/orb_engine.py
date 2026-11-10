@@ -22,6 +22,7 @@ import contextlib
 import copy
 import logging
 import queue
+import re
 import threading
 import time
 import os
@@ -1392,6 +1393,31 @@ class ORBEngine:
         logger.log(level, f"{msg} [exhausted tick #{self._open_tick_exhausted_streak} of the streak, "
                           f"{now_et.strftime('%H:%M:%S')} ET]")
 
+    _SEED_TEST_TICKER_RE = re.compile(r'^Z[A-Z]ZZT$')
+
+    def bulk_subscribe_seed(self, seed_symbols) -> int:
+        """Bulk-subscribe the daily universe seed so StopMonitor keeps every symbol's session-open bars.
+
+        The gap gate admits candidates only AFTER the 09:30 bar, so a per-symbol subscribe_bars() would start an
+        empty window (docs/orb_ws_range_path_diagnosis_20261110_RESULT.md). Streaming the whole seed from the
+        pre-market lets StopMonitor record 09:30.. bars for all of it; subscribe_bars() then seeds the window.
+        Idempotent: StopMonitor.subscribe_bars_many only subscribes names it does not already stream; INFO only when > 0.
+        NYSE test tickers (^Z[A-Z]ZZT$) are excluded. Returns the number of newly subscribed symbols.
+        """
+        sm = self.stop_monitor
+        if sm is None or not hasattr(sm, 'subscribe_bars_many') or not seed_symbols:
+            return 0
+        syms = sorted({s for s in seed_symbols if s and not self._SEED_TEST_TICKER_RE.match(s)})
+        try:
+            n_new = int(sm.subscribe_bars_many(syms))
+        except Exception as e:
+            logger.error(f"ORB: bulk subscribe of {len(syms)} seed symbols failed: {e} - the websocket "
+                         f"range path will start late for names admitted after the open bar (REST sweep only)")
+            return 0
+        if n_new > 0:
+            logger.info(f"[ORB] bulk-subscribed {n_new} seed symbols for session-open bars")
+        return n_new
+
     def build_orb_universe_from_snapshots(self, candidate_symbols: Optional[List[str]] = None,
                                            deadline: Optional[float] = None) -> List[str]:
         """Build ORB universe by querying Alpaca snapshots matching BT criteria.
@@ -1416,6 +1442,7 @@ class ORBEngine:
             return []
         if deadline is None:
             deadline = time.time() + self.open_tick_budget_sec
+        self.bulk_subscribe_seed(candidate_symbols)
         try:
             if self.prewarm_seed_enabled:
                 snapshots = self._get_snapshots_warm(list(candidate_symbols), deadline=deadline)

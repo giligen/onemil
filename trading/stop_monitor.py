@@ -691,6 +691,12 @@ class StopMonitor:
         self._ws_generation = 0  # +1 per successful WebSocket connect — consumers re-backfill bars missed across an outage
         self._bar_windows: Dict[str, list] = {}  # rolling bar window per symbol
         self._bulk_bar_symbols: set = set()  # subscribed via subscribe_bars_many: NO rolling window, light handlers only
+        # Session-open bars for EVERY streamed symbol (bulk or windowed), bounded: the first OPEN_BARS_KEEP bars at/after
+        # 09:30 ET of the current session date. subscribe_bars() seeds a new window from these, so an ORB candidate admitted
+        # after the open bar still gets a window that starts at 09:30 (docs/orb_ws_range_path_fix_spec_20261110.md).
+        self._open_bars: Dict[str, List[dict]] = {}
+        self._open_bars_date: Optional[str] = None       # ET session date the dict above belongs to (daily reset key)
+        self._open_bars_lock = threading.Lock()          # window append (loop thread) vs window seeding (caller thread)
 
         # Trade-print + quote streaming for tape-accurate resting-order fills (HOD-break
         # entry_mode='resting_stop_limit', docs/hod_resting_entry_spec_20260925.md). A separate
@@ -997,16 +1003,67 @@ class StopMonitor:
         Thread-safe: can be called from main thread.
         """
         if symbol in self._bar_symbols:
-            self._bulk_bar_symbols.discard(symbol)      # a bulk-streamed symbol now also gets a window (no re-subscribe needed)
-            self._bar_windows.setdefault(symbol, [])
+            with self._open_bars_lock:
+                self._bulk_bar_symbols.discard(symbol)      # a bulk-streamed symbol now also gets a window (no re-subscribe needed)
+                self._seed_window_locked(symbol)
             return
         self._bar_symbols.add(symbol)
-        self._bar_windows.setdefault(symbol, [])
+        with self._open_bars_lock:
+            self._seed_window_locked(symbol)
 
         if self._loop and self._stream and self._ws_connected:
             asyncio.run_coroutine_threadsafe(
                 self._subscribe_bars_async(symbol), self._loop
             )
+
+    OPEN_BARS_KEEP = 8   # session-open bars kept per symbol (09:30..09:37 ET): covers the 5-bar ORB range with margin
+
+    @classmethod
+    def _bar_et(cls, ts):
+        """A bar timestamp (aware/naive-UTC datetime or ISO string) as an ET datetime; None when unparseable
+        (`_bar_start_epoch` already logged the WARNING)."""
+        from zoneinfo import ZoneInfo
+        epoch = cls._bar_start_epoch(ts)
+        if epoch <= 0.0:
+            return None
+        return datetime.fromtimestamp(epoch, ZoneInfo('America/New_York'))
+
+    def _record_open_bar_locked(self, symbol: str, bar_dict: dict) -> None:
+        """Keep the first OPEN_BARS_KEEP bars at/after 09:30 ET of today's session for `symbol`.
+
+        Caller holds `_open_bars_lock`. The first bar of a NEW ET session date clears the previous day's bars
+        (the only daily reset of this state; one INFO per day). Pre-market bars and bars of an older date are ignored.
+        """
+        et = self._bar_et(bar_dict['timestamp'])
+        if et is None:
+            return
+        day = et.date().isoformat()
+        if day != self._open_bars_date:
+            if self._open_bars_date is not None and day < self._open_bars_date:
+                return                                          # stale backfill of an older session
+            if self._open_bars_date is not None:
+                logger.info(f"StopMonitor: new session {day} - cleared session-open bars of "
+                            f"{self._open_bars_date} ({len(self._open_bars)} symbols)")
+            self._open_bars = {}
+            self._open_bars_date = day
+        if (et.hour, et.minute) < (9, 30):
+            return                                              # pre-market: not part of the opening range
+        kept = self._open_bars.setdefault(symbol, [])
+        if len(kept) < self.OPEN_BARS_KEEP and not any(b['timestamp'] == bar_dict['timestamp'] for b in kept):
+            kept.append(bar_dict)
+
+    def _seed_window_locked(self, symbol: str) -> None:
+        """Create/extend `symbol`'s rolling window with its session-open bars (chronological, de-duplicated by timestamp).
+
+        Caller holds `_open_bars_lock`. Window bars already present win over the stored copy of the same timestamp.
+        """
+        window = self._bar_windows.setdefault(symbol, [])
+        have = {b['timestamp'] for b in window}
+        missing = [b for b in self._open_bars.get(symbol, []) if b['timestamp'] not in have]
+        if missing:
+            window.extend(missing)
+            window.sort(key=lambda b: self._bar_start_epoch(b['timestamp']))
+            logger.debug(f"StopMonitor: {symbol} seeded {len(missing)} session-open bars")
 
     def subscribe_bars_many(self, symbols) -> int:
         """Subscribe MANY symbols to the 1-min bar stream with ONE subscribe message (HOD-break streams
@@ -1140,8 +1197,10 @@ class StopMonitor:
                 'volume': int(bar.volume),
             }
             windowed = symbol not in self._bulk_bar_symbols   # individually subscribed (pattern engines) vs bulk-streamed (HOD-break)
-            if windowed:
-                self._bar_windows.setdefault(symbol, []).append(bar_dict)
+            with self._open_bars_lock:
+                self._record_open_bar_locked(symbol, bar_dict)
+                if windowed:
+                    self._bar_windows.setdefault(symbol, []).append(bar_dict)
             self._last_data_ts = time_mod.time()
 
             # Experiment D: stash last-closed-bar volume on the active watch so
