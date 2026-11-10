@@ -28,10 +28,10 @@ _spec.loader.exec_module(hs)
 NOW = datetime(2026, 10, 9, 12, 0, tzinfo=hs.ET)   # Friday
 
 
-def order(symbol, side, filled_qty, price, qty=None):
+def order(symbol, side, filled_qty, price, qty=None, cid='', oid=''):
     """Alpaca-like order object: string numerics like the SDK, `qty` deliberately different from filled_qty."""
     return SimpleNamespace(symbol=symbol, side=side, filled_qty=str(filled_qty), qty=str(qty or filled_qty * 10),
-                           filled_avg_price=None if price is None else str(price))
+                           filled_avg_price=None if price is None else str(price), client_order_id=cid, id=oid)
 
 
 def pos(symbol, qty, mv, cost, upl, intraday):
@@ -139,10 +139,10 @@ def test_open_position_lines_and_best_worst():
 
 
 def test_orb_line_tom_hidden_when_idle_and_shown_when_active():
-    idle = book(make_client(orders=[order('AAA', 'buy', 10, 10.0), order('AAA', 'sell', 10, 11.0)],
+    idle = book(make_client(orders=[order('AAA', 'buy', 10, 10.0, cid='orb-a'), order('AAA', 'sell', 10, 11.0, cid='orb-b')],
                             equity=100010.0))
     assert 'TOM' not in hs.build_message(NOW, _data(orb=idle), {})
-    active = book(make_client(orders=[order('QQQ', 'buy', 2, 700.0)], equity=100000.0,
+    active = book(make_client(orders=[order('QQQ', 'buy', 2, 700.0, cid='tom-1')], equity=100000.0,
                               positions=[pos('QQQ', 2, 1402, 1400, 2, 2)]))
     msg = hs.build_message(NOW, _data(orb=active), {})
     assert 'TOM' in msg and 'hold QQQ 2' in msg
@@ -151,9 +151,9 @@ def test_orb_line_tom_hidden_when_idle_and_shown_when_active():
 def test_orb_week_excludes_tom_qqq_and_tom_shows_on_week_activity():
     """Shared account: QQQ round trip earlier in the week belongs to TOM, not to the ORB week; TOM shows with
     no fill/position today because it has week activity."""
-    week = [order('APLX', 'buy', 100, 10.0), order('APLX', 'sell', 100, 9.54),      # -46
-            order('SMCZ', 'buy', 100, 5.0), order('SMCZ', 'sell', 100, 7.25),       # +225
-            order('QQQ', 'buy', 26, 700.0), order('QQQ', 'sell', 26, 719.42)]       # +505
+    week = [order('APLX', 'buy', 100, 10.0, cid='orb-1'), order('APLX', 'sell', 100, 9.54, cid='orb-2'),   # -46
+            order('SMCZ', 'buy', 100, 5.0, cid='orb-3'), order('SMCZ', 'sell', 100, 7.25, cid='orb-4'),    # +225
+            order('QQQ', 'buy', 26, 700.0, cid='tom-1'), order('QQQ', 'sell', 26, 719.42, cid='tom-2')]    # +505
     client = make_client(equity=105000.0, last_equity=105000.0)
     client.trading_client.get_orders.side_effect = [[], week]    # today: nothing; week: the above
     msg = hs.build_message(NOW, _data(orb=book(client)), {})
@@ -281,3 +281,97 @@ def test_real_send_path_returns_true_and_false_is_logged(caplog):
 def test_money_formatting():
     assert hs.fmt_money(0.3) == '$0' and hs.fmt_money(241.4) == '+$241' and hs.fmt_money(-78.6) == '−$79'
     assert hs.fmt_pct(-30, 10000) == '−0.3%' and hs.fmt_pct(5, 0) == '0.0%'
+
+
+# ---------------------------------------------------------------- attribution by order origin (spec 2026-11-10)
+
+LEDGER_ID = '11111111-aaaa-bbbb-cccc-000000000001'
+
+
+@pytest.mark.parametrize('cid,oid,expected', [
+    ('tom-qqq-20261104', 'x', 'TOM'),                       # TOM sleeve
+    ('orb-addon-BEX-1', 'x', 'ORB'),                        # ORB add-on / unwind id
+    ('3f2a9c10-0000-4000-8000-123456789abc', LEDGER_ID, 'ORB'),   # plain UUID client id, order id in the ledger
+    ('micha-hf-1234', 'ffff', 'EXT'),                       # third party
+    ('weird-prefix', 'ffff', 'EXT'),                        # unknown prefix
+    ('', '', 'EXT'),                                        # no ids at all
+])
+def test_classify_order(cid, oid, expected):
+    assert hs.classify_order(cid, oid, {LEDGER_ID}) == expected
+
+
+def test_classify_position():
+    fb = {'ORB': {'AAA'}, 'TOM': {'SPY'}}
+    assert hs.classify_position('BEX', fb, {'BEX'}) == 'ORB'      # open ledger row
+    assert hs.classify_position('AAA', fb, set()) == 'ORB'        # ORB fill today
+    assert hs.classify_position('SPY', fb, set()) == 'TOM'        # tom- fill
+    assert hs.classify_position('MRK', fb, {'BEX'}) == 'EXT'
+
+
+def test_ext_prefixes():
+    fills = [{'client_order_id': 'micha-hf-3f2a9c10-0000'}, {'client_order_id': 'micha-9f8e7d'}, {'client_order_id': ''}]
+    assert hs.ext_prefixes(fills) == ['(none)', 'micha', 'micha-hf']
+
+
+def _ledger_db(tmp_path):
+    """Temp trades.db: one filled-open ORB row (BEX), one closed ORB row this week, one old ORB row, one HOD row."""
+    import sqlite3
+    path = str(tmp_path / 'trades.db')
+    c = sqlite3.connect(path)
+    c.execute('CREATE TABLE trades (id INTEGER PRIMARY KEY, trade_date TEXT, symbol TEXT, order_id TEXT, '
+              'order_status TEXT, exit_price REAL, strategy TEXT, exit_order_id TEXT)')
+    c.executemany('INSERT INTO trades (trade_date, symbol, order_id, order_status, exit_price, strategy, exit_order_id) '
+                  'VALUES (?,?,?,?,?,?,?)', [
+                      ('2026-11-10', 'BEX', LEDGER_ID, 'filled', None, 'orb', 'exit-1'),
+                      ('2026-11-09', 'CLS', 'ord-closed', 'filled', 12.0, 'orb', None),
+                      ('2026-10-01', 'OLD', 'ord-old', 'filled', 5.0, 'orb', None),
+                      ('2026-11-10', 'HODX', 'ord-hod', 'filled', None, 'hod_break', None)])
+    c.commit()
+    c.close()
+    return path
+
+
+def test_load_orb_ledger_reads_week_ids_and_open_symbols(tmp_path):
+    ids, open_syms = hs.load_orb_ledger(date(2026, 11, 10), _ledger_db(tmp_path))
+    assert ids == {LEDGER_ID, 'exit-1', 'ord-closed'}      # this week's ORB rows + the exit_order_id column
+    assert open_syms == {'BEX'}
+
+
+def test_load_orb_ledger_missing_db_logs_error_and_is_empty(tmp_path, caplog):
+    with caplog.at_level(logging.ERROR, logger='hourly_summary'):
+        assert hs.load_orb_ledger(date(2026, 11, 10), str(tmp_path / 'nope.db')) == (set(), set())
+    assert 'ledger' in caplog.text
+
+
+def test_shared_account_1110_shape_orb_idle_ext_reported(tmp_path, caplog):
+    """11/10 shape: ORB placed nothing filled; micha JPM buy + AAPL sell; MRK external position; BEX ORB position."""
+    db = _ledger_db(tmp_path)
+    client = make_client(
+        equity=99984.0, last_equity=100000.0,
+        orders=[order('JPM', 'buy', 10, 300.0, cid='micha-hf-1', oid='j1'),
+                order('AAPL', 'sell', 5, 200.0, cid='micha-hf-2', oid='a1')],
+        positions=[pos('MRK', 100, 8000, 8014, -14, -14), pos('JPM', 10, 2997, 3000, -3, -3),
+                   pos('BEX', 50, 500, 500, 0, 1)])
+    orb = hs.collect_book('ORB', client, hs.day_start_utc(NOW), NOW.date(), db_path=db)
+    assert orb['open_orb_symbols'] == {'BEX'}
+    now = datetime(2026, 11, 10, 10, 5, tzinfo=hs.ET)
+    with caplog.at_level(logging.INFO, logger='hourly_summary'):
+        msg = hs.build_message(now, _data(orb=orb), {})
+    lines = msg.splitlines()
+    orb_line = [ln for ln in lines if ln.startswith('<b>ORB</b>')][0]
+    ext_line = [ln for ln in lines if ln.startswith('<b>EXT (micha)</b>')][0]
+    assert '0 fills' in orb_line and 'open 1: BEX' in orb_line and 'MRK' not in orb_line and 'JPM' not in orb_line
+    assert '2 fills' in ext_line and 'open 2: MRK JPM' in ext_line and '−$17' in ext_line
+    assert not [ln for ln in lines if ln.startswith('<b>TOM</b>')]
+    assert 'EXT prefixes: micha-hf' in caplog.text
+    assert 'differs from account day P&L' not in caplog.text      # ORB + TOM + EXT reconciles (-17 + 1 = -16)
+
+
+def test_tom_spy_iwm_legs_not_reported_as_orb():
+    """TOM's SPY/IWM legs (tom- ids) are TOM, not ORB, whatever the symbol."""
+    client = make_client(equity=100000.0, orders=[order('SPY', 'buy', 3, 600.0, cid='tom-spy-1')],
+                         positions=[pos('SPY', 3, 1800, 1800, 0, 0)])
+    msg = hs.build_message(NOW, _data(orb=book(client)), {})
+    tom = [ln for ln in msg.splitlines() if ln.startswith('<b>TOM</b>')][0]
+    assert 'hold SPY 3' in tom
+    assert '<b>ORB</b>' in msg and 'SPY' not in [ln for ln in msg.splitlines() if ln.startswith('<b>ORB</b>')][0]

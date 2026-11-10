@@ -3,20 +3,25 @@
 
 ONE message per run with today's state of every book: ORB, TOM (QQQ, only when active), HOD, MOM and a single
 LIVE line (owner's manual account, report-only: day P&L + equity, never positions).
+The ORB paper account is SHARED with the TOM sleeve and with third-party (`micha-*`) orders: they are attributed by
+ORDER ORIGIN (see `classify_order`), not by symbol, and third-party activity gets its own report-only EXT line.
 
 READ-ONLY. This script never submits, cancels or modifies an order and never writes the DB. It reads, per account,
 the account object (equity / last_equity / account number), today's CLOSED orders, the open positions and the 1W
 daily portfolio history.
 
 Numbers
-  * Day P&L: HOD / MOM / LIVE = equity - last_equity of the account. ORB and TOM share one account, so they are
-    split by symbol (TOM = QQQ only): realized from today's fills (buy VWAP vs sell VWAP x min(bought, sold) qty,
-    `filled_qty` / `filled_avg_price` only, never `qty`) + `unrealized_intraday_pl` of the open positions. The
-    account total is the cross-check; a WARNING is logged when |ORB + TOM - account| > $5 (typically a position
-    opened on a previous day and closed today: its sell has no matching buy in today's orders).
+  * Day P&L: HOD / MOM / LIVE = equity - last_equity of the account. ORB, TOM and EXT share one account, so they
+    are split by ORDER ORIGIN: `tom-*` client ids = TOM, `orb-*` ids or an order id in the trades.db ORB ledger
+    (strategy='orb', this week) = ORB, everything else = EXT (third party, report-only). Positions: ORB iff an open
+    ORB ledger row or an ORB fill today, TOM iff a `tom-` fill this week on the symbol, else EXT. Realized from
+    today's fills (buy VWAP vs sell VWAP x min(bought, sold) qty, `filled_qty` / `filled_avg_price` only, never
+    `qty`) + `unrealized_intraday_pl` of the open positions. The account total is the cross-check; a WARNING is
+    logged when |ORB + TOM + EXT - account| > $5 (typically a position opened on a previous day and closed today:
+    its sell has no matching buy in today's orders).
   * Week to date: sum of the account's daily `profit_loss` from `get_portfolio_history(period='1W', timeframe='1D')`
     (HOD / MOM / LIVE-style single-book accounts). ORB and TOM share one account, so their week is computed from
-    the orders API since Monday 00:00 ET (realized per symbol as above, QQQ -> TOM, the rest -> ORB).
+    the orders API since Monday 00:00 ET (realized per symbol as above, split by order origin).
     Alpaca stamps each daily bar with the NEXT UTC date (verified 2026-10-09: the bar stamped Fri 10/9 holds the
     Thursday 10/8 session and its `equity` equals today's `last_equity`), so a bar stamped D belongs to the
     previous weekday; sessions Monday..yesterday come from the history, TODAY comes from equity - last_equity.
@@ -35,6 +40,8 @@ import argparse
 import html
 import logging
 import os
+import re
+import sqlite3
 import sys
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from typing import Dict, List, Optional
@@ -54,9 +61,13 @@ logger = logging.getLogger("hourly_summary")
 ET = ZoneInfo("America/New_York")
 MAX_LINES = 25
 ORB_STAGE_USD = 10_000.0          # ORB % is quoted on the $10K stage
-CROSS_CHECK_TOLERANCE = 5.0       # |ORB + TOM - account day P&L| above this -> WARNING
+CROSS_CHECK_TOLERANCE = 5.0       # |ORB + TOM + EXT - account day P&L| above this -> WARNING
 MAX_OPEN_NAMES = 6                # open-position names listed per line
-TOM_SYMBOL = "QQQ"
+TOM_SYMBOL = "QQQ"                # legacy single-symbol TOM split; attribution is now by order origin
+TOM_PREFIX = "tom-"               # TOM sleeve client_order_id prefix
+ORB_PREFIX = "orb-"               # ORB add-on / unwind client_order_id prefix (entries carry plain-UUID ids)
+TRADES_DB_PATH = os.path.join(ROOT, 'data', 'trades.db')
+ORB_LEG_COLUMNS = ('sl_leg_id', 'tp_leg_id', 'exit_order_id')   # ledger columns added to the ORB order-id set if present
 MINUS = "−"
 ORDERS_LIMIT = 500
 WEEKDAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
@@ -165,7 +176,9 @@ def fetch_filled_orders(client: AlpacaClient, after_utc: datetime) -> List[Dict]
         if qty <= 0:
             continue
         out.append({'symbol': str(o.symbol), 'side': _side(o), 'qty': qty,
-                    'price': _f(getattr(o, 'filled_avg_price', None))})
+                    'price': _f(getattr(o, 'filled_avg_price', None)),
+                    'order_id': str(getattr(o, 'id', '') or ''),
+                    'client_order_id': str(getattr(o, 'client_order_id', '') or '')})
     return out
 
 
@@ -194,6 +207,90 @@ def fetch_history(client: AlpacaClient, period: str = '1W') -> List[Dict]:
 # ---------------------------------------------------------------------------
 # Computation
 # ---------------------------------------------------------------------------
+
+def load_orb_ledger(today: date, db_path: Optional[str] = None) -> (set, set):
+    """(order ids of ORB rows since this week's Monday, symbols of open ORB rows) from trades.db, opened READ-ONLY.
+
+    Bracket-leg id columns (ORB_LEG_COLUMNS) are included when the table has them. A missing / unreadable ledger
+    logs an ERROR and returns empty sets: every fill then reports as EXT instead of silently as ORB.
+    """
+    path = db_path or TRADES_DB_PATH
+    monday = (today - timedelta(days=today.weekday())).isoformat()
+    ids: set = set()
+    open_syms: set = set()
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=15)
+        try:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(trades)")}
+            legs = [c for c in ORB_LEG_COLUMNS if c in cols]
+            sel = ", ".join(["order_id"] + legs)
+            for row in conn.execute(f"SELECT {sel} FROM trades WHERE strategy='orb' AND trade_date >= ?", (monday,)):
+                ids.update(str(v) for v in row if v)
+            for (sym,) in conn.execute("SELECT symbol FROM trades WHERE strategy='orb' AND order_status='filled' "
+                                       "AND exit_price IS NULL"):
+                open_syms.add(str(sym))
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        logger.error("hourly_summary: ORB ledger %s unreadable (%s) - ALL fills will be attributed EXT", path, e)
+    return ids, open_syms
+
+
+def classify_order(client_order_id: str, order_id: str, orb_order_ids) -> str:
+    """Origin of one order: 'TOM' (`tom-` client id), 'ORB' (`orb-` client id or order id in the ORB ledger), else 'EXT'."""
+    cid = client_order_id or ''
+    if cid.startswith(TOM_PREFIX):
+        return 'TOM'
+    if cid.startswith(ORB_PREFIX) or (order_id and order_id in orb_order_ids):
+        return 'ORB'
+    return 'EXT'
+
+
+def classify_position(symbol: str, fills_by_book: Dict[str, set], open_orb_symbols) -> str:
+    """Owner of an open position: ORB iff an open ORB ledger row or an ORB fill today, TOM iff a `tom-` fill (today
+    or this week) on the symbol, else EXT. `fills_by_book` = {'ORB': symbols filled today, 'TOM': symbols filled this week}."""
+    if symbol in open_orb_symbols or symbol in fills_by_book.get('ORB', ()):
+        return 'ORB'
+    if symbol in fills_by_book.get('TOM', ()):
+        return 'TOM'
+    return 'EXT'
+
+
+def ext_prefixes(fills: List[Dict]) -> List[str]:
+    """Distinct client-id prefixes ('micha-hf') of the EXT fills, for the INFO log; '(none)' for an empty id."""
+    out = set()
+    for f in fills:
+        m = re.match(r'[A-Za-z_]+(?:-[A-Za-z_]{2,})*', f.get('client_order_id') or '')
+        out.add(m.group(0) if m else '(none)')
+    return sorted(out)
+
+
+def split_books(orb: Dict) -> (Dict[str, Dict], Dict[str, Dict]):
+    """Split the shared ORB account into ORB / TOM / EXT by order origin.
+
+    Returns (day_stats, week_stats), each {'ORB'|'TOM'|'EXT': book_stats}. Fills are classified per order; the
+    positions once (week fills decide TOM ownership, today's fills + the ledger decide ORB ownership).
+    """
+    ids, open_syms = orb.get('orb_order_ids', set()), orb.get('open_orb_symbols', set())
+
+    def tag(fills: List[Dict]) -> Dict[str, List[Dict]]:
+        by = {'ORB': [], 'TOM': [], 'EXT': []}
+        for f in fills:
+            by[classify_order(f.get('client_order_id', ''), f.get('order_id', ''), ids)].append(f)
+        return by
+
+    day, week = tag(orb['fills']), tag(orb['week_fills'])
+    fills_by_book = {'ORB': {f['symbol'] for f in day['ORB']},
+                     'TOM': {f['symbol'] for f in week['TOM']} | {f['symbol'] for f in day['TOM']}}
+    pos_by = {'ORB': [], 'TOM': [], 'EXT': []}
+    for p in orb['positions']:
+        pos_by[classify_position(p['symbol'], fills_by_book, open_syms)].append(p)
+    if day['EXT']:
+        logger.info("hourly_summary: EXT prefixes: %s", ", ".join(ext_prefixes(day['EXT'])))
+    every = lambda s: True
+    return ({b: book_stats(b, day[b], pos_by[b], every) for b in day},
+            {b: book_stats(b, week[b], pos_by[b], every) for b in week})
+
 
 def per_symbol_fills(fills: List[Dict]) -> Dict[str, Dict]:
     """Aggregate fills per symbol: bought / sold qty and notional, fills, realized $ on min(bought, sold) qty."""
@@ -273,15 +370,23 @@ def book_stats(name: str, fills: List[Dict], positions: List[Dict], include) -> 
     }
 
 
-def collect_book(name: str, client: AlpacaClient, after_utc: datetime, today: date) -> Dict:
-    """Read one strategy account and return its raw data (account, fills, positions, history)."""
+def collect_book(name: str, client: AlpacaClient, after_utc: datetime, today: date,
+                 db_path: Optional[str] = None) -> Dict:
+    """Read one strategy account and return its raw data (account, fills, positions, history).
+
+    The ORB account is shared (TOM + third-party orders): its trades.db ledger (order ids of this week's ORB rows,
+    symbols of open ORB rows) is attached as `orb_order_ids` / `open_orb_symbols` for the order-origin split.
+    """
     acct = fetch_account(client)
     assert_paper_client(client, acct['account_number'])
     history = fetch_history(client)
     check_history_alignment(name, history, acct['last_equity'])
-    return {'account': acct, 'fills': fetch_filled_orders(client, after_utc),
+    data = {'account': acct, 'fills': fetch_filled_orders(client, after_utc),
             'week_fills': fetch_filled_orders(client, week_start_utc(today)),
             'positions': fetch_positions(client), 'history': history}
+    if name == 'ORB':
+        data['orb_order_ids'], data['open_orb_symbols'] = load_orb_ledger(today, db_path)
+    return data
 
 
 def collect_mom_live(client: AlpacaClient, today: date, state_path: Optional[str] = None,
@@ -361,6 +466,14 @@ def format_tom_line(stats: Dict, wk: Optional[float] = None) -> str:
     return line + (f"   wk {fmt_money(wk)}" if wk is not None else "")
 
 
+def format_ext_line(stats: Dict) -> str:
+    """EXT (third-party `micha-*` orders on the ORB account) line: report-only, day P&L, fills, open symbols."""
+    pnl = stats['realized'] + stats['intraday_open']
+    names = " ".join(html.escape(p['symbol']) for p in stats['positions'])
+    pos = f"open {len(stats['positions'])}: {names}" if stats['positions'] else "flat"
+    return f"<b>EXT (micha)</b> {fmt_money(pnl)} | {stats['n_fills']} fills | {pos}"
+
+
 def na_line(label: str, why: str) -> str:
     """Line for a book whose account could not be read; no exception text goes into the message."""
     return f"<b>{label}</b> n/a ({why})"
@@ -376,7 +489,7 @@ def enforce_line_limit(lines: List[str], limit: int = MAX_LINES) -> List[str]:
 def build_message(now_et: datetime, data: Dict[str, Optional[Dict]], errors: Dict[str, str]) -> str:
     """Compose the single HTML message from per-book raw data (None = book failed, reason in `errors`).
 
-    data keys: 'ORB' (also feeds TOM), 'HOD', 'MOM', 'LIVE'. Logs a WARNING when ORB + TOM disagrees with the
+    data keys: 'ORB' (also feeds TOM and EXT), 'HOD', 'MOM', 'LIVE'. Logs a WARNING when ORB + TOM + EXT disagrees with the
     shared account's day P&L by more than CROSS_CHECK_TOLERANCE.
     """
     today = now_et.date()
@@ -389,22 +502,24 @@ def build_message(now_et: datetime, data: Dict[str, Optional[Dict]], errors: Dic
     else:
         acct = orb['account']
         acct_day = acct['equity'] - acct['last_equity']
-        orb_s = book_stats('ORB', orb['fills'], orb['positions'], lambda s: s != TOM_SYMBOL)
-        tom_s = book_stats('TOM', orb['fills'], orb['positions'], lambda s: s == TOM_SYMBOL)
+        day_s, week_s = split_books(orb)
+        orb_s, tom_s, ext_s = day_s['ORB'], day_s['TOM'], day_s['EXT']
         orb_pnl = orb_s['realized'] + orb_s['intraday_open']
         tom_pnl = tom_s['realized'] + tom_s['intraday_open']
-        if abs(orb_pnl + tom_pnl - acct_day) > CROSS_CHECK_TOLERANCE:
-            logger.warning("hourly_summary: ORB+TOM split %.2f differs from account day P&L %.2f by more than $%.0f "
+        ext_pnl = ext_s['realized'] + ext_s['intraday_open']
+        if abs(orb_pnl + tom_pnl + ext_pnl - acct_day) > CROSS_CHECK_TOLERANCE:
+            logger.warning("hourly_summary: ORB+TOM+EXT split %.2f differs from account day P&L %.2f by more than $%.0f "
                            "(a position opened on a previous day and closed today has no buy in today's orders)",
-                           orb_pnl + tom_pnl, acct_day, CROSS_CHECK_TOLERANCE)
-        # ORB and TOM share one account, so the account's portfolio history mixes them: week to date for each is
-        # the realized P&L of the week's fills for its symbols + the open positions' intraday P&L.
-        orb_wk_s = book_stats('ORB', orb['week_fills'], orb['positions'], lambda s: s != TOM_SYMBOL)
-        tom_wk_s = book_stats('TOM', orb['week_fills'], orb['positions'], lambda s: s == TOM_SYMBOL)
+                           orb_pnl + tom_pnl + ext_pnl, acct_day, CROSS_CHECK_TOLERANCE)
+        # ORB, TOM and EXT share one account, so the account's portfolio history mixes them: week to date for each
+        # is the realized P&L of the week's fills of its own orders + the open positions' intraday P&L.
+        orb_wk_s, tom_wk_s = week_s['ORB'], week_s['TOM']
         lines.append(format_book_line("ORB", orb_pnl, fmt_pct(orb_pnl, ORB_STAGE_USD), orb_s,
                                       orb_wk_s['realized'] + orb_wk_s['intraday_open']))
-        if tom_s['active']:   # hidden unless a QQQ position or a QQQ fill today (week-only fills have no cost basis in the window)
+        if tom_s['active']:   # hidden unless a TOM position or a tom- fill today (week-only fills have no cost basis in the window)
             lines.append(format_tom_line(tom_s, tom_wk_s['realized'] + tom_wk_s['intraday_open']))
+        if ext_s['active'] and (ext_pnl or ext_s['n_fills'] or ext_s['positions']):   # report-only, never a book
+            lines.append(format_ext_line(ext_s))
 
     hod = data.get('HOD')
     if hod is None:
