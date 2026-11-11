@@ -266,6 +266,31 @@ def send_verdict(n, verdict, audit, kept, live_scored, real_drops, drop_class,
     return False
 
 
+def run_pick_parity(day, parity_fn=None):
+    """Pick-level parity for `day` (today: the BT side is usually unavailable at 09:36 ET - the nightly features build
+    runs after the close) AND the previous session (whose BT rows exist by now). Returns the dict stored under the
+    audit's `pick_parity` key: {day: result-with-summary, 'error': bool, 'text': Telegram text or ''}.
+    A failure here never blocks the verdict: it is logged as WARNING and recorded. docs/orb_selection_parity_test_spec_20261111.md"""
+    out = {'error': False, 'text': ''}
+    try:
+        from scripts import orb_pick_parity as opp
+        fn = parity_fn or opp.run_parity
+        lines = []
+        for d in (day, opp.previous_session_day(day)):
+            res = fn(d)
+            out[d] = res
+            if opp.is_error(res):
+                out['error'] = True
+                lines.append(res['summary'] + ' | ' + '; '.join(
+                    f"{x['symbol']}:{x['reason']}" for x in res['differences'] if x['reason'] == 'unexplained'
+                    or x['symbol'] in res.get('fills_outside_final', [])))
+        out['text'] = '\n'.join(lines)
+    except Exception as e:  # noqa: BLE001
+        log(f"WARNING pick parity failed: {type(e).__name__}: {e}")
+        out['failed'] = f"{type(e).__name__}: {e}"
+    return out
+
+
 def main():
     log("observer armed — waiting for 09:29:30 ET")
     wait_until_et(9, 29, 30)
@@ -375,7 +400,8 @@ def main():
             f"{'SCORING' if in_range else 'UNIVERSE/RANGE layer'} "
             f"| {drop_class[s]}")
 
-    OUT.write_text(json.dumps(audit, indent=1))
+    audit['pick_parity'] = run_pick_parity(audit['date'])
+    OUT.write_text(json.dumps(audit, indent=1, default=str))
     log(f"full audit -> {OUT}")
 
     # Telegram verdict
@@ -387,6 +413,8 @@ def main():
         n = TelegramNotifier(os.getenv('TELEGRAM_BOT_TOKEN'), os.getenv('TELEGRAM_CHAT_ID'), enabled=True)
         send_verdict(n, verdict, audit, kept, live_scored, real_drops, drop_class,
                      dropped, active)
+        if audit['pick_parity'].get('error'):   # ERROR only: an explained / pending day stays silent
+            n.send_message_sync(f"<b>[ORB-PARITY] {audit['date']}</b>\n{audit['pick_parity']['text']}", parse_mode='HTML')
     except Exception as e:
         log(f"telegram failed: {e}")
 

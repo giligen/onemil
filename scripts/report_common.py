@@ -789,6 +789,26 @@ def news_lag_audit(day: str) -> Dict:
             'lag_symbols': lag, 'material': material}
 
 
+def _pick_parity_suffix(pp, day: str) -> str:
+    """', picks k/8, unexplained m' per date in the audit's `pick_parity` block (today first: usually 'pending' because
+    the BT features build runs after the close; then the previous session, whose BT rows exist). ', picks n/a' when the
+    block is absent. Never raises."""
+    try:
+        dates = sorted((k for k in (pp or {}) if isinstance(k, str) and k[:2] == '20'), reverse=True)
+        if not dates:
+            return ", picks n/a"
+        parts = []
+        for d in dates:
+            r = pp[d]
+            tag = '' if d == day else f"{d[5:]} "
+            parts.append(f"{tag}picks pending (BT side not built)" if not r.get('bt_available')
+                         else f"{tag}picks {r['matched']}/{r['k']}, unexplained {r['n_unexplained']}")
+        return ", " + "; ".join(parts)
+    except Exception as e:  # noqa: BLE001
+        log.warning("pick parity suffix failed: %s", e)
+        return ", picks n/a"
+
+
 def selection_parity_line(day: str, logs_dir: Optional[Path] = None) -> str:
     """One EOD line from logs/orb_selection_audit_<YYYYMMDD>.json (written by
     scripts/orb_selection_observer.py): 'selection parity: live ranged x /
@@ -803,7 +823,7 @@ def selection_parity_line(day: str, logs_dir: Optional[Path] = None) -> str:
                 if c.startswith('REAL') or c.startswith('UNKNOWN')]
         return (f"selection parity: live ranged {len(a.get('live_range') or [])} / "
                 f"BT-eligible {len(a.get('expected_candidates') or {})}, "
-                f"REAL drops {len(real)}" + (f" {real[:6]}" if real else ""))
+                f"REAL drops {len(real)}" + (f" {real[:6]}" if real else "") + _pick_parity_suffix(a.get('pick_parity'), day))
     except FileNotFoundError:
         return f"selection parity: no observer audit for {day} ({path.name} missing)"
     except Exception as e:  # noqa: BLE001

@@ -787,9 +787,18 @@ def bt_ranked(day: str, features_csv: Optional[str] = None, n: Optional[int] = N
         rs = [r for r in sel if r.symbol not in gone and range_size_veto_applies(r.range_size_pct, cfg["rs_min"])]
         gone |= {r.symbol for r in rs}
         picks = [r.symbol for r in sel if r.symbol not in gone]
+        vetoes = {**{r.symbol: "pdr" for r in pdr}, **{r.symbol: "g1" for r in g1},
+                  **{r.symbol: "range" for r in rs}}
         return {"ranked": ranked, "picks": picks, "rows": n_rows, "pdr": len(pdr), "g1": len(g1),
                 "range": len(rs), "dedup": dedup, "n": (n or cfg["n"]),
-                "comp": {r.symbol: (float(r.c), r.q) for r in sel}}, ""
+                "comp": {r.symbol: (float(r.c), r.q) for r in sel},
+                # selection-parity additions (docs/orb_selection_parity_test_spec_20261111.md): who vetoed whom,
+                # every symbol the BT has a feature row for that day, the full composite-ordered field, and the
+                # refit timestamp / source of the parameters that scored the day
+                "vetoes": vetoes, "day_symbols": sorted(set(g["symbol"])),
+                "scored_field": [r.symbol for _, r in k.iterrows()],
+                "range_size": {r.symbol: float(r.range_size_pct) for r in sel},
+                "params_refit_ts": pp.refit_ts, "params_source": pp.source}, ""
     except Exception as e:  # noqa: BLE001
         log.warning("bt_ranked failed: %s", e, exc_info=True)
         return None, f"BT ranking replica failed: {type(e).__name__}: {e}"
