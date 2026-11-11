@@ -20,8 +20,11 @@ def _make_daily_bars_db(path, rows):
     con.execute('CREATE TABLE intraday_bars_1min (symbol TEXT, bar_date TEXT, timestamp TEXT, volume REAL)')
     con.executemany('INSERT INTO daily_bars VALUES (?,?,?,?,?,?,?)', rows)
     for sym, day, *_ in rows:
-        con.execute('INSERT INTO intraday_bars_1min VALUES (?,?,?,?)',
-                    (sym, day, f"{day}T09:00:00+00:00", 20000))
+        # five 09:30-09:34 ET bars (EDT dates -> 13:3x UTC): the range-computability condition
+        # (study_orb_broad, 2026-11-11) replaced the old "any bar" EXISTS join / 15K volume proxy
+        for minute in range(30, 35):
+            con.execute('INSERT INTO intraday_bars_1min VALUES (?,?,?,?)',
+                        (sym, day, f"{day}T13:{minute:02d}:00+00:00", 4000))
     con.commit()
     con.close()
 
