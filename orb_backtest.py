@@ -304,6 +304,20 @@ def fill_daily_bars_for_dates(
     return total
 
 
+def _run_bar_gap_gate(alpaca: AlpacaClient, pairs_by_date: Dict[str, List[str]]) -> None:
+    """Opening-range completeness gate + SIP refill after the nightly intraday fetch (spec 2026-11-11). Never aborts."""
+    try:
+        from batch.orb_bar_gap_gate import run_gate
+        conn = sqlite3.connect(CACHE_DB, timeout=60)
+        try:
+            res = run_gate(conn, alpaca, [(s, d) for d, ss in pairs_by_date.items() for s in ss])
+        finally:
+            conn.close()
+        _log(f"bar-gap gate: {res['gapped']} gapped, {res['refilled_pairs']} refilled ({res['bars_added']} bars)")
+    except Exception as e:
+        _log(f"ERROR: bar-gap gate failed: {type(e).__name__}: {e}")
+
+
 def fill_intraday_for_pairs(
     alpaca: AlpacaClient, db: Database, pairs_by_date: Dict[str, List[str]]
 ) -> int:
@@ -685,6 +699,7 @@ def main():
                 _log(f"qualifying gap-up pairs to fetch 1-min bars: {n_pairs}")
                 if n_pairs:
                     fill_intraday_for_pairs(alpaca, db, pairs)
+                    _run_bar_gap_gate(alpaca, pairs)
                 db.close()
                 need_regen = True
         else:
