@@ -417,6 +417,54 @@ def _move_to_range_high_pct(daily_sym: Optional[pd.DataFrame], date_str: str,
     return float('nan')
 
 
+def diagnose_extract_failure(bars_df: pd.DataFrame, symbol: str, date_str: str,
+                             daily_by_sym: Dict[str, pd.DataFrame]) -> str:
+    """Name why ``extract_features`` returned None (mirrors its early returns, in the same order)."""
+    if bars_df is None or bars_df.empty:
+        return 'no_intraday_bars'
+    open_ts = _session_open_timestamp(bars_df)
+    if open_ts is None:
+        return 'no_0930_bar'
+    rb = bars_df[(bars_df['timestamp'] >= open_ts)
+                 & (bars_df['timestamp'] < open_ts + timedelta(minutes=RANGE_MINUTES))]
+    if len(rb) < RANGE_MINUTES:
+        return f'range_incomplete_{len(rb)}_of_{RANGE_MINUTES}_bars'
+    sym_daily = daily_by_sym.get(symbol)
+    if sym_daily is None or sym_daily.empty:
+        return 'no_daily_bars'
+    if not (sym_daily['bar_date'] < pd.Timestamp(date_str)).any():
+        return 'no_prior_daily_bar'
+    return 'extract_none_other'
+
+
+def builder_admission(symbol: str, date_str: str, daily_by_sym: Dict[str, pd.DataFrame], feats: Dict,
+                      cfg: Optional[Dict] = None):
+    """The builder's per-symbol-day pass through the SHARED gate (trading.orb_universe_gate.admit).
+
+    Returns (universe_admission, recheck_admission): the first judges the official ``daily_bars.open`` gap /
+    prev volume / price band (what the SQL universe applied); the second is the live scoring-time phantom-gap
+    twin — the bar1.open gap already in ``feats['gap_pct']`` against the same prev_close (AEYE 11/2 3.07 %).
+    """
+    from trading.orb_universe_gate import Admission, admit, gap_pct as _gap
+    from study_orb_broad import MIN_GAP_PCT, MIN_OPEN_PRICE, MAX_OPEN_PRICE, MIN_PREV_DAY_VOL
+    cfg = cfg or {'min_gap_pct': MIN_GAP_PCT, 'min_prev_volume': MIN_PREV_DAY_VOL,
+                  'min_price': MIN_OPEN_PRICE, 'max_price': MAX_OPEN_PRICE}
+    sd = daily_by_sym.get(symbol)
+    day = pd.Timestamp(date_str)
+    today = sd.loc[sd['bar_date'] == day] if sd is not None else None
+    prev = sd.loc[sd['bar_date'] < day] if sd is not None else None
+    if today is None or today.empty or prev is None or prev.empty:
+        bad = Admission(False, 'no_daily_bar_for_gate', float('nan'))
+        return bad, bad
+    d_open = float(today['open'].iloc[-1])
+    prev_close = float(prev['close'].iloc[-1])
+    prev_vol = float(prev['volume'].iloc[-1])
+    uni = admit(prev_close, d_open, prev_vol, d_open, cfg, symbol=symbol)
+    bar1_open = prev_close * (1.0 + feats['gap_pct'] / 100.0) if prev_close > 0 else 0.0
+    rechk = admit(prev_close, bar1_open, None, None, {'min_gap_pct': cfg['min_gap_pct']}, symbol=symbol)
+    return uni, rechk
+
+
 def trade_row(symbol: str, date_str: str, trade, feats: Dict) -> Optional[Dict]:
     """One features-CSV row for a simulated candidate — ENTERED OR NOT.
 
@@ -458,6 +506,17 @@ def trade_row(symbol: str, date_str: str, trade, feats: Dict) -> Optional[Dict]:
     }
 
 
+def _print_drop_report(drop_log: List[Tuple[str, str, str]], trace: bool) -> None:
+    """Always: one COUNT line per drop reason. With --trace-drops: one INFO line per dropped symbol-day."""
+    from collections import Counter
+    if trace:
+        for sym, ds, reason in sorted(drop_log, key=lambda r: (r[1], r[0])):
+            print(f"[builder drop] INFO {ds} {sym} reason={reason}")
+    counts = Counter(r[2] for r in drop_log)
+    print(f"[builder drops] {len(drop_log)} symbol-days dropped: "
+          + (", ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "none"))
+
+
 def _parse_args():
     p = argparse.ArgumentParser(
         description="ORB per-trade feature extraction (default: incremental)"
@@ -466,6 +525,15 @@ def _parse_args():
         '--force-full-regen', action='store_true',
         help="Ignore any existing features CSV and recompute every trade "
              "from scratch. Use when feature-extraction logic changes.",
+    )
+    p.add_argument(
+        '--end-date', type=str, default=None,
+        help="YYYY-MM-DD — inclusive upper bound of the recompute window (research / drop tracing).",
+    )
+    p.add_argument(
+        '--trace-drops', action='store_true',
+        help="Log one INFO line per dropped (symbol, date) with its reason. A per-reason COUNT line is "
+             "ALWAYS printed (spec 2026-11-11: the builder never drops silently).",
     )
     p.add_argument(
         '--start-date', type=str, default=None,
@@ -601,8 +669,13 @@ def main() -> None:
             raise SystemExit(f"FATAL: ORB_UNIVERSE_POOL={pool_name!r} not in orb.yaml universe.addon_pools")
         pool_bounds_ = pool_bounds(pool_cfg, _defs['production']['min_prev_volume'])
         print(f"  POOL MODE {pool_cfg.get('pool_id', pool_name)}: bounds {pool_bounds_}")
+    drop_log: List[Tuple[str, str, str]] = []   # (symbol, date, reason) — every drop, counted at the end
     universe = load_broad_universe(include_provisional_today=provisional_today, bounds=pool_bounds_,
-                                    date_start=(start_date.isoformat() if (pool_cfg is not None and start_date) else None))
+                                    date_start=(start_date.isoformat() if (pool_cfg is not None and start_date) else None),
+                                    drop_sink=drop_log)
+    if args.end_date:
+        universe = {d: syms for d, syms in universe.items() if d <= args.end_date}
+        drop_log = [r for r in drop_log if r[1] <= args.end_date]
     n_pairs_full = sum(len(v) for v in universe.values())
 
     if start_date is not None:
@@ -659,6 +732,7 @@ def main() -> None:
         for symbol in universe[date_str]:
             bars_df = bars_cache.get((symbol, date_str))
             if bars_df is None or bars_df.empty:
+                drop_log.append((symbol, date_str, 'no_intraday_bars'))
                 continue
             # Extract features FIRST (independent of entry firing)
             feats = extract_features(
@@ -666,7 +740,18 @@ def main() -> None:
                 daily_by_sym, spy_intraday, spy_daily,
             )
             if feats is None:
+                drop_log.append((symbol, date_str,
+                                 diagnose_extract_failure(bars_df, symbol, date_str, daily_by_sym)))
                 continue
+            # Shared universe gate (spec 2026-11-11). Pool runs keep their own SQL bounds: gate production only.
+            if pool_cfg is None:
+                _uni_adm, _rechk_adm = builder_admission(symbol, date_str, daily_by_sym, feats)
+                if not _uni_adm.ok:
+                    drop_log.append((symbol, date_str, 'universe_' + _uni_adm.reason))
+                    continue
+                if not _rechk_adm.ok:
+                    drop_log.append((symbol, date_str, 'phantom_gap_bar1_below_min'))
+                    continue
             # Run simulator
             trade = simulate_orb_trade(
                 bars_df, symbol, date_str, f'ORB_{RANGE_MINUTES}_vanilla',
@@ -677,6 +762,7 @@ def main() -> None:
             n_simulated += 1
             row = trade_row(symbol, date_str, trade, feats)
             if row is None:
+                drop_log.append((symbol, date_str, 'trade_row_none'))
                 continue
             if pool_cfg is not None:
                 row['pool_id'] = pool_cfg.get('pool_id', pool_name)
@@ -688,6 +774,7 @@ def main() -> None:
             else:
                 n_no_fill += 1
 
+    _print_drop_report(drop_log, args.trace_drops)
     print(f"  Simulated: {n_simulated:,} | Entered: {n_extracted:,} "
           f"({n_extracted/max(n_simulated,1)*100:.1f}%) | No-fill rows kept: "
           f"{n_no_fill:,} | existing preserved: {len(existing_df)}")

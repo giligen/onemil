@@ -102,6 +102,7 @@ def load_broad_universe(
     include_provisional_today=None,
     bounds=None,
     date_start=None,
+    drop_sink=None,
 ) -> Dict[str, List[str]]:
     """Query daily_bars for gap-up movers with liquidity.
 
@@ -121,6 +122,10 @@ def load_broad_universe(
 
     `bounds` (optional dict from trading.orb_pool_defs.pool_bounds) replaces the production gap / price / prev-volume
     thresholds with an add-on pool's membership bounds (the nightly P1 book). None = production (byte-identical).
+
+    `drop_sink` (optional list): receives (symbol, date, reason) for every pair that passed the SQL gates and was
+    then dropped by the interim 9:35-volume floor (spec 2026-11-11: no silent drops). The SQL gates themselves
+    are the same cuts as trading.orb_universe_gate.admit (gap/prev-volume/price on daily_bars.open).
 
     Returns {date_str: [symbol, ...]}.
     """
@@ -193,6 +198,8 @@ def load_broad_universe(
             kept += 1
         else:
             dropped_935 += 1
+            if drop_sink is not None:
+                drop_sink.append((symbol, ds, 'rth_volume_by_935_below_floor'))
     print(f"[broad universe] 9:35-volume floor (interim live-parity): "
           f"{kept} kept, {dropped_935} dropped "
           f"(floor {MIN_935_VOL_FLOOR:,.0f} RTH-cached by 9:35 ET)")

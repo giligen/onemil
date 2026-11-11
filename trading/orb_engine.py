@@ -1578,11 +1578,11 @@ class ORBEngine:
                     gap_pct = _gate_input.gap_pct
                 else:
                     gap_pct = (open_price - prev_close) / prev_close * 100.0
-                is_production = (
-                    self.universe_min_price <= open_price <= self.universe_max_price
-                    and gap_pct >= self.universe_min_gap_pct
-                    and prev_volume >= self.universe_min_prev_volume
-                )
+                # ONE gate with the BT builder (trading/orb_universe_gate.admit, spec 2026-11-11). gap_pct
+                # was resolved above (resolve_gap_input); admit re-derives the same number from the same
+                # inputs and applies the min-gap / prev-volume / price-band cuts.
+                is_production = self._production_universe_cfg_admit(
+                    sym, prev_close, open_price, prev_volume).ok
                 matched_pool = None
                 if is_production:
                     matched_pool = 'production'
@@ -1624,6 +1624,40 @@ class ORBEngine:
             f"${self.universe_min_price}-${self.universe_max_price})"
         )
         return keep
+
+    def _production_universe_cfg_admit(self, symbol: str, prev_close: float, open_price: float,
+                                       prev_volume: float):
+        """Production-pool universe admission via the shared gate (parity with the BT builder)."""
+        from trading.orb_universe_gate import admit
+        return admit(prev_close, open_price, prev_volume, open_price, {
+            'min_gap_pct': self.universe_min_gap_pct,
+            'min_prev_volume': self.universe_min_prev_volume,
+            'min_price': self.universe_min_price,
+            'max_price': self.universe_max_price,
+        }, symbol=symbol)
+
+    @staticmethod
+    def _recheck_gap_admission(providers: dict, cand: 'CandidateState', gap_floor: float):
+        """Scoring-time phantom-gap re-check through the shared gate: the REAL bar1.open (``range_open``) vs
+        the daily prev_close; only the gap is re-validated (volume/price arguments None = not checked)."""
+        from trading.orb_universe_gate import admit
+        prev_close = float((providers.get('prev_day_bar') or {}).get('close', 0.0) or 0.0)
+        rd = cand.range_data
+        ref_open = rd.range_open if rd.range_open > 0 else rd.range_high
+        return admit(prev_close, ref_open, None, None, {'min_gap_pct': gap_floor}, symbol=cand.symbol)
+
+    def _log_final_ranges(self) -> None:
+        """One INFO line per day with every candidate's final opening range, so the selection observer can
+        compare the live range with the BT's (cell 1,733 class V). ``[ORB] final ranges: SYM h/l, ...``."""
+        today = datetime.now(timezone.utc).date().isoformat()
+        if getattr(self, '_final_ranges_logged_for', None) == today:
+            return
+        rows = [f"{s} {c.range_data.range_high:.4f}/{c.range_data.range_low:.4f}"
+                for s, c in sorted(self.candidates.items()) if c.range_data is not None]
+        if not rows:
+            return
+        self._final_ranges_logged_for = today
+        logger.info(f"[ORB] final ranges: {', '.join(rows)}")
 
     def _subscribe_bars(self, symbol: str) -> None:
         """Subscribe a symbol to StopMonitor's 1-min bar stream.
@@ -3871,6 +3905,8 @@ class ORBEngine:
                 self.universe_min_gap_pct)
 
         # 2. Compute composite + quintile for each
+        if pool_label == 'production':
+            self._log_final_ranges()
         _t_scoring = time.time()
         scored: List[CandidateState] = []
         for cand in eligible:
@@ -3898,7 +3934,11 @@ class ORBEngine:
             # snapshot.open showed +5% gap, real bar1.open = prev_close,
             # yet LYG ranked Q5 in LIVE.
             real_gap_pct = feats.get('gap_pct', None)
-            if real_gap_pct is not None and real_gap_pct < gap_floor:
+            if real_gap_pct is None:
+                logger.warning(
+                    f"ORB: {cand.symbol} phantom-gap re-check SKIPPED ({pool_label}) — feats has no gap_pct "
+                    f"(no prev_day_bar / prev_close <= 0); candidate stays admitted on the 09:30 gap only")
+            elif not self._recheck_gap_admission(providers, cand, gap_floor).ok:
                 logger.info(
                     f"ORB: {cand.symbol} phantom-gap reject ({pool_label}) — "
                     f"real gap {real_gap_pct:.2f}% < {gap_floor}% "
@@ -4622,7 +4662,8 @@ class ORBEngine:
                 feats.get('range_total_volume'),
                 (providers.get('daily_stats_20d') or {}).get('volume_20d'))
             real_gap_pct = feats.get('gap_pct', None)
-            if real_gap_pct is not None and real_gap_pct < self.universe_min_gap_pct:
+            if real_gap_pct is not None and not self._recheck_gap_admission(
+                    providers, cand, self.universe_min_gap_pct).ok:
                 continue  # phantom gap (same floor as the production pass)
             score = composite_score(feats, self.z_params)
             if score is None or score < self.filter_threshold:
