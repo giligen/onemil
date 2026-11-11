@@ -36,6 +36,12 @@ def _write_hist(path, entries):
             fh.write(json.dumps({'ts': ts, 'params': _params(shift), 'cutoffs': _cut(shift)}) + '\n')
 
 
+@pytest.fixture(autouse=True)
+def _no_default_seed(monkeypatch):
+    """The pre-existing tests describe the unseeded behaviour; seeded behaviour is tested with explicit seed_path."""
+    monkeypatch.setattr(M, 'DEFAULT_SEED', None)
+
+
 @pytest.fixture
 def hist(tmp_path):
     p = tmp_path / 'hist.jsonl'
@@ -109,6 +115,71 @@ def test_params_mode_flag_and_default():
         P.params_mode(['--params', 'bogus'])
 
 
+# ------------------------------------------------------------------ seed (2026-11-11 pre-history seed)
+def _write_seed(path, entries):
+    with open(path, 'w') as fh:
+        for ts, shift in entries:
+            fh.write(json.dumps({'ts': ts, 'params': _params(shift), 'cutoffs': _cut(shift),
+                                 'source': 'snapshot:test'}) + '\n')
+
+
+@pytest.fixture
+def seed(tmp_path):
+    p = tmp_path / 'seed.jsonl'
+    _write_seed(p, [('20260815_071706', -0.5), ('20260419_085604', -1.5)])   # written out of order on purpose
+    return p
+
+
+def test_seed_then_live_merge_order(hist, seed):
+    h = M.load_history(hist, seed)
+    assert [(e['ts'], e['source']) for e in h] == [
+        ('20260419_085604', 'seed'), ('20260815_071706', 'seed'),
+        ('20261004_200003', 'pit'), ('20261011_200002', 'pit')]
+
+
+def test_seed_overlapping_live_history_raises(hist, tmp_path):
+    p = tmp_path / 'overlap.jsonl'
+    _write_seed(p, [('20260815_071706', -0.5), ('20261004_200003', 0.7)])   # equal to the first live ts
+    with pytest.raises(ValueError, match='overlap'):
+        M.load_history(hist, p)
+    _write_seed(p, [('20261005_000000', 0.7)])                               # newer than the first live ts
+    with pytest.raises(ValueError, match='overlap'):
+        M.load_history(hist, p)
+
+
+def test_day_in_seed_range_uses_snapshot_params_source_seed(hist, seed):
+    pp = M.params_for_day(date(2026, 9, 1), hist, CUR, seed_path=seed)
+    assert (pp.source, pp.refit_ts, pp.params, pp.cutoffs) == ('seed', '20260815_071706', _params(-0.5), _cut(-0.5))
+    pp = M.params_for_day(date(2026, 5, 11), hist, CUR, seed_path=seed)
+    assert (pp.source, pp.refit_ts) == ('seed', '20260419_085604')
+    assert M.params_for_day(date(2026, 10, 5), hist, CUR, seed_path=seed).source == 'pit'
+
+
+def test_day_before_oldest_seed_is_loud_fallback(hist, seed, caplog):
+    with caplog.at_level(logging.WARNING, logger='trading.orb_pit_params'):
+        pp = M.params_for_day(date(2026, 4, 17), hist, CUR, seed_path=seed)
+    assert pp.source == 'current_fallback' and pp.params == CUR['params']
+    assert any('precedes the first recorded refit 20260419_085604' in r.getMessage() for r in caplog.records)
+
+
+def test_missing_explicit_seed_raises_missing_default_warns(hist, tmp_path, monkeypatch, caplog):
+    with pytest.raises(FileNotFoundError):
+        M.load_history(hist, tmp_path / 'nope.jsonl')
+    monkeypatch.setattr(M, 'DEFAULT_SEED', tmp_path / 'nope.jsonl')
+    with caplog.at_level(logging.WARNING, logger='trading.orb_pit_params'):
+        assert len(M.load_history(hist)) == 2
+    assert any('seed file' in r.getMessage() for r in caplog.records)
+
+
+def test_pipeline_counts_seed_days_as_point_in_time(hist, seed, caplog, monkeypatch):
+    df = _frame()
+    with caplog.at_level(logging.WARNING, logger=P.logger.name):
+        monkeypatch.setattr(M, 'DEFAULT_SEED', seed)
+        _, day_pp = P.score_days(df, CUR['params'], CUR['cutoffs'], 'pit', hist)
+    assert day_pp[pd.Timestamp('2026-10-02')].source == 'seed'
+    assert not any('precede the first recorded refit' in r.getMessage() for r in caplog.records)
+
+
 # ----------------------------------------------------------- integration
 def _frame():
     rng = np.random.default_rng(7)
@@ -156,6 +227,7 @@ def test_params_current_path_differs_for_earlier_week(hist):
 SEL = ROOT / 'research/book_review_20261111/selection_1733.csv'
 FEATURES_CSV = ROOT / 'analysis_results/orb_features_20261110_2203.csv'
 REAL_HIST = ROOT / 'logs/orb_refit_history.jsonl'
+REAL_SEED = ROOT / 'data/research/orb_refit_history_seed.jsonl'
 
 
 @pytest.mark.skipif(not (SEL.exists() and FEATURES_CSV.exists() and REAL_HIST.exists()),
@@ -193,3 +265,11 @@ def test_pit_composite_equals_live_composite_2026_11_03():
     assert len(final) == 8
     ranks = [pit_rank[s] for s in final['symbol']]
     assert ranks == sorted(ranks) and max(ranks) <= 10      # family dedup may skip <= 2 names, never reorders
+
+
+@pytest.mark.skipif(not (REAL_SEED.exists() and REAL_HIST.exists()), reason='real seed/history not on this node')
+def test_real_seed_is_older_than_real_history_and_covers_pre_913():
+    h = M.load_history(REAL_HIST, REAL_SEED)
+    assert [e['source'] for e in h][:2] == ['seed', 'seed'] and h[2]['ts'] == '20260913_200003'
+    assert M.params_for_day(date(2026, 6, 1), REAL_HIST, seed_path=REAL_SEED).source == 'seed'
+    assert M.params_for_day(date(2026, 9, 11), REAL_HIST, seed_path=REAL_SEED).refit_ts == '20260815_071706'
