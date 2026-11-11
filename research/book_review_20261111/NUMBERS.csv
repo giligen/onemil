@@ -1,0 +1,149 @@
+metric,book,value,window,source,query
+ledger_status_mix,ORB,closed:21:-2149.12; filled:10:2157.48; pending_new:14:None; preplace_canceled:13:None; stale_closed:2:None; time_stop_canceled:11:None,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,group by order_status (all accounts)
+fills,ORB,31,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10'
+symbol_days,ORB,31,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10'
+sessions_traded,ORB,14,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10'
+fills_per_week,ORB,5.1667,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; /6 weeks (30 sessions)
+realized_usd,ORB,8.3601,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10'
+mean_R,ORB,0.0277,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; R = pnl / trades.total_risk
+median_R,ORB,-0.5487,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10'
+win_rate,ORB,0.3226,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10'
+ex_top1_fill_usd,ORB,-940.6399,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10'
+ex_top5pct_usd,ORB,-1437.3299,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; drop top 2 fills by $
+t_iid_R,ORB,0.0994,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10'
+t_dayclustered_R,ORB,0.0618,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10'
+MDE_meanR_80pct,ORB,0.7801,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"2.8*sd(R)/sqrt(n), iid"
+avg_risk_usd,ORB,165.5522,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10'
+fills_exBEXrow,ORB,30,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' and not BEX 11/9
+symbol_days_exBEXrow,ORB,30,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' and not BEX 11/9
+sessions_traded_exBEXrow,ORB,13,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' and not BEX 11/9
+fills_per_week_exBEXrow,ORB,5.0,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' and not BEX 11/9 ; /6 weeks (30 sessions)
+realized_usd_exBEXrow,ORB,-39.4899,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' and not BEX 11/9
+mean_R_exBEXrow,ORB,0.0152,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' and not BEX 11/9 ; R = pnl / trades.total_risk
+median_R_exBEXrow,ORB,-0.5591,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' and not BEX 11/9
+win_rate_exBEXrow,ORB,0.3,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' and not BEX 11/9
+ex_top1_fill_usd_exBEXrow,ORB,-988.4899,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' and not BEX 11/9
+ex_top5pct_usd_exBEXrow,ORB,-1485.1799,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' and not BEX 11/9 ; drop top 2 fills by $
+t_iid_R_exBEXrow,ORB,0.0527,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' and not BEX 11/9
+t_dayclustered_R_exBEXrow,ORB,0.0326,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' and not BEX 11/9
+MDE_meanR_80pct_exBEXrow,ORB,0.8058,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"2.8*sd(R)/sqrt(n), iid"
+avg_risk_usd_exBEXrow,ORB,167.116,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' and not BEX 11/9
+mean_R_ex_top1,ORB,-0.1947,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10'
+exit_stop_loss,ORB,16 (52%),2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' group by exit_reason
+exit_force_close,ORB,10 (32%),2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' group by exit_reason
+exit_target_rested,ORB,3 (10%),2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' group by exit_reason
+exit_lock_stop,ORB,2 (6%),2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' group by exit_reason
+stop_rate,ORB,0.5161,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10'
+BT_stop_rate,ORB,0.3095,BT 2025-01..,research/orb_gates2/book_G3_meas.csv,exit_reason=='stop' / exit_reason!='no_fill'
+BT_fill_rate,ORB,0.7476,BT,book_G3_meas.csv,!= no_fill / all
+entry_fill_vs_trigger_bps_mean,ORB,-14.9086,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; (fill_price-entry_price)/entry_price, + = paid above trigger"
+stop_exit_vs_stop_bps_mean,ORB,-27.2552,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' and exit_reason stop ; (exit-stop)/stop, - = adverse"
+stop_exit_vs_stop_bps_p10,ORB,-69.9758,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,same
+stop_slip_usd_total,ORB,-187.1961,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,sum (exit-stop)*qty over stop exits
+drift_ask_to_fill_bps_mean,ORB,42.81,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; trades.drift_ask_to_fill_bps
+drift_ask_to_fill_bps_median,ORB,37.5,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,same
+weeks_strong_ge5R,ORB,1,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"weekly sum R >= 5 (7 calendar weeks, first/last partial)"
+weeks_green,ORB,3/7,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,weekly $ > 0
+weekly_R_min,ORB,-5.83,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,weekly table
+weekly_R_P10,ORB,-5.83,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,n=7 -> P10 = min
+account_equity_change,ORB-acct,1285.05,2026-09-29 close..2026-11-09 close,GET /v2/account/portfolio/history 1D,equity[end]-equity[base]
+broker_realized_ORB,ORB-acct,88.82,2026-09-30..2026-11-10,GET /v2/account/activities FILL (+orders client_order_id),avg-cost realized per category; classify tom-/micha-/orb-|ledger
+broker_open_unrealized_ORB,ORB-acct,0.0,2026-09-30..2026-11-10,GET /v2/positions lastday_price,qty*lastday - cost
+broker_realized_TOM,ORB-acct,1165.59,2026-09-30..2026-11-10,GET /v2/account/activities FILL (+orders client_order_id),avg-cost realized per category; classify tom-/micha-/orb-|ledger
+broker_open_unrealized_TOM,ORB-acct,0.0,2026-09-30..2026-11-10,GET /v2/positions lastday_price,qty*lastday - cost
+broker_realized_EXT,ORB-acct,1.7,2026-09-30..2026-11-10,GET /v2/account/activities FILL (+orders client_order_id),avg-cost realized per category; classify tom-/micha-/orb-|ledger
+broker_open_unrealized_EXT,ORB-acct,-4.42,2026-09-30..2026-11-10,GET /v2/positions lastday_price,qty*lastday - cost
+equity_residual_unexplained,ORB-acct,33.36,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,equity change - sum(realized+unrealized all cats)
+ORB_broker_minus_ledger_usd,ORB,80.46,2026-09-30..2026-11-10,orb_symday_recon.csv,sum diff
+recon_diff_2026-10-27_CRDU,ORB,43.05,2026-09-30..2026-11-10,orb_symday_recon.csv,broker - ledger
+recon_diff_2026-11-09_BEX,ORB,37.41,2026-09-30..2026-11-10,orb_symday_recon.csv,broker - ledger
+ORB_broker_symbol_days,ORB,31,2026-09-30..2026-11-10,activities,ORB-classified closing fills
+gate_symbol_days_since_2026-09-25,ORB,32,2026-09-25..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"distinct trade_date||symbol, paper, pnl not null"
+gate_sessions_with_fill_since_2026-09-25,ORB,15,2026-09-25..2026-11-10,sqlite3 file:data/trades.db?mode=ro,same
+gate_realized_since_2026-09-25,ORB,-87.94,2026-09-25..2026-11-10,sqlite3 file:data/trades.db?mode=ro,same
+gate_ex_monster_since_2026-09-25,ORB,-1036.94,2026-09-25..2026-11-10,sqlite3 file:data/trades.db?mode=ro,realized - max(pnl)
+gate_symbol_days_since_2026-10-30,ORB,9,2026-10-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"distinct trade_date||symbol, paper, pnl not null"
+gate_sessions_with_fill_since_2026-10-30,ORB,3,2026-10-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,same
+gate_realized_since_2026-10-30,ORB,-837.0,2026-10-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,same
+gate_ex_monster_since_2026-10-30,ORB,-884.85,2026-10-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,realized - max(pnl)
+ramp_check_window_composition,ORB,None:2026-09-22..2026-09-23:n3:$-119.08; paper:2026-09-29..2026-11-09:n32:$-87.94,2026-09-21..,sqlite3 file:data/trades.db?mode=ro,"what orb_ramp_check.load_fills counts: strategy='orb' and pnl not null since stage start, ANY account"
+ledger_status_mix,HOD,closed:288:-150.49,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,group by order_status
+fills,HOD,288,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10'
+symbol_days,HOD,287,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10'
+sessions_traded,HOD,29,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10'
+fills_per_week,HOD,48.0,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; /6 weeks (30 sessions)
+realized_usd,HOD,-150.4855,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10'
+mean_R,HOD,-0.0208,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; R = pnl / trades.total_risk
+median_R,HOD,-0.7227,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10'
+win_rate,HOD,0.3889,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10'
+ex_top1_fill_usd,HOD,-257.3055,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10'
+ex_top5pct_usd,HOD,-1700.0556,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; drop top 15 fills by $
+t_iid_R,HOD,-0.2064,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10'
+t_dayclustered_R,HOD,-0.2159,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10'
+MDE_meanR_80pct,HOD,0.2825,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"2.8*sd(R)/sqrt(n), iid"
+avg_risk_usd,HOD,37.2103,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10'
+exit_stop_loss,HOD,128 (44%),2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' group by exit_reason
+exit_target,HOD,68 (24%),2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' group by exit_reason
+exit_eod,HOD,60 (21%),2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' group by exit_reason
+exit_stop,HOD,20 (7%),2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' group by exit_reason
+exit_squeeze,HOD,7 (2%),2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' group by exit_reason
+exit_eod_ops_ah,HOD,4 (1%),2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' group by exit_reason
+exit_stop_loss_unconfirmed,HOD,1 (0%),2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' group by exit_reason
+stop_rate,HOD,0.5174,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' exit_reason like '%stop%'
+entry_fill_vs_trigger_bps_mean,HOD,2.4543,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; (fill_price-entry_price)/entry_price, + = paid above trigger"
+stop_exit_vs_stop_bps_mean,HOD,-4.6846,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' and exit_reason stop ; (exit-stop)/stop, - = adverse"
+stop_exit_vs_stop_bps_p10,HOD,-50.6971,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,same
+stop_slip_usd_total,HOD,-141.8703,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,sum (exit-stop)*qty over stop exits
+weeks_strong_ge5R,HOD,2,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"weekly sum R >= 5 (7 calendar weeks, first/last partial)"
+weeks_green,HOD,3/7,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,weekly $ > 0
+weekly_R_min,HOD,-9.49,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,weekly table
+weekly_R_P10,HOD,-9.49,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,n=7 -> P10 = min
+gate_paper_fills_all_time,HOD,293,2026-09-29..,sqlite3 file:data/trades.db?mode=ro,strategy='hod_break' and account='paper' and pnl not null
+parity_rows,HOD,1436,2026-10-19..2026-11-10,logs/hod_live_parity_ledger.csv,rows in window
+parity_broker_status,HOD,cancelled:1280; filled:155; canceled:1,2026-09-30..2026-11-10,hod_live_parity_ledger.csv,Counter(broker_status)
+parity_reason,HOD,fill cap reached:727; arm_lost:297; :156; replace:130; day cap reached:87; last_entry_minute:39,2026-09-30..2026-11-10,hod_live_parity_ledger.csv,Counter(reason) top 8
+parity_tape_expected,HOD,NO_CROSS:1233; FILL:146; NO_FILL:57,2026-09-30..2026-11-10,hod_live_parity_ledger.csv,Counter(tape_expected)
+slippage_vs_tape_bps_mean,HOD,-5.5311,2026-09-30..2026-11-10,hod_live_parity_ledger.csv,n=132
+slippage_vs_tape_bps_median,HOD,0.0,2026-09-30..2026-11-10,hod_live_parity_ledger.csv,same
+parity_filled_over_tape_crossed,HOD,155/203,2026-09-30..2026-11-10,hod_live_parity_ledger.csv,broker_status filled|partially_filled / tape_expected != NO_CROSS
+parity_scanner_qualified_x_filled,HOD,"{('0', False): 1281, ('0', True): 155}",2026-09-30..2026-11-10,hod_live_parity_ledger.csv,Counter
+account_equity_change,HOD-acct,-4.41,2026-09-29..2026-11-09,portfolio/history 1D,equity diff
+account_equity_change_4wk,HOD-acct,455.83,2026-10-14..2026-11-09,portfolio/history 1D,equity diff
+broker_realized,HOD-acct,7.42,2026-09-30..2026-11-10,activities FILL,avg-cost realized
+broker_open_inventory,HOD-acct,{},2026-09-30..2026-11-10,activities,non-flat at end
+equity_residual_unexplained,HOD-acct,-11.83,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,equity change - broker realized
+HOD_broker_minus_ledger_usd,HOD,157.91,2026-09-30..2026-11-10,hod_day_recon.csv,sum diff
+HOD_days_absdiff_gt_25,HOD,2026-10-02:139.97,2026-09-30..2026-11-10,hod_day_recon.csv,|diff|>25
+accident_CRDU_broker_usd,ORB,602.7,2026-09-30..2026-11-10,activities FILL,861 x (6.21-5.51)
+accident_CRDU_inside_ledger_usd,ORB,559.65,2026-09-30..2026-11-10,trades id 621 vs fills,861 x (6.21-5.56)
+accident_BEX_addon_usd,ORB,3.48,2026-09-30..2026-11-10,activities FILL,87 x (15.36-15.32)
+ledger_misbook_BEX_usd,ORB,-33.93,2026-09-30..2026-11-10,trades id 737 vs fills,ledger 47.85 vs base 81.78
+fills_exAccidents,ORB,31,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; CRDU minus 861-sh accident (559.65), BEX = base leg from broker fills (81.78)"
+symbol_days_exAccidents,ORB,31,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; CRDU minus 861-sh accident (559.65), BEX = base leg from broker fills (81.78)"
+sessions_traded_exAccidents,ORB,14,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; CRDU minus 861-sh accident (559.65), BEX = base leg from broker fills (81.78)"
+fills_per_week_exAccidents,ORB,5.1667,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; CRDU minus 861-sh accident (559.65), BEX = base leg from broker fills (81.78) ; /6 weeks (30 sessions)"
+realized_usd_exAccidents,ORB,-517.3599,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; CRDU minus 861-sh accident (559.65), BEX = base leg from broker fills (81.78)"
+mean_R_exAccidents,ORB,-0.0905,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; CRDU minus 861-sh accident (559.65), BEX = base leg from broker fills (81.78) ; R = pnl / trades.total_risk"
+median_R_exAccidents,ORB,-0.5487,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; CRDU minus 861-sh accident (559.65), BEX = base leg from broker fills (81.78)"
+win_rate_exAccidents,ORB,0.3226,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; CRDU minus 861-sh accident (559.65), BEX = base leg from broker fills (81.78)"
+ex_top1_fill_usd_exAccidents,ORB,-1014.0499,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; CRDU minus 861-sh accident (559.65), BEX = base leg from broker fills (81.78)"
+ex_top5pct_usd_exAccidents,ORB,-1403.3999,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; CRDU minus 861-sh accident (559.65), BEX = base leg from broker fills (81.78) ; drop top 2 fills by $"
+t_iid_R_exAccidents,ORB,-0.4668,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; CRDU minus 861-sh accident (559.65), BEX = base leg from broker fills (81.78)"
+t_dayclustered_R_exAccidents,ORB,-0.2688,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; CRDU minus 861-sh accident (559.65), BEX = base leg from broker fills (81.78)"
+MDE_meanR_80pct_exAccidents,ORB,0.5429,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"2.8*sd(R)/sqrt(n), iid"
+avg_risk_usd_exAccidents,ORB,165.5522,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; CRDU minus 861-sh accident (559.65), BEX = base leg from broker fills (81.78)"
+weeks_strong_ge5R,ORB-exAcc,1,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"weekly sum R >= 5 (7 calendar weeks, first/last partial)"
+weeks_green,ORB-exAcc,3/7,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,weekly $ > 0
+weekly_R_min,ORB-exAcc,-5.83,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,weekly table
+weekly_R_P10,ORB-exAcc,-5.83,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,n=7 -> P10 = min
+gate_realized_since_0925_exAccidents,ORB,-613.6599,2026-09-25..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"select * from trades where strategy='orb' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; CRDU minus 861-sh accident (559.65), BEX = base leg from broker fills (81.78) + AXTL 9/29 -96.30"
+gate_ex_monster_since_0925_exAccidents,ORB,-1110.3499,2026-09-25..2026-11-10,sqlite3 file:data/trades.db?mode=ro,realized - best fill (LABX 10/27 496.69)
+gate_needed_ex_monster_per_fill_next8,ORB,138.7937,to 40 symbol-days,sqlite3 file:data/trades.db?mode=ro,-(ex-monster)/8 remaining symbol-days
+mean_R_robust,HOD,-0.0083,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; R = pnl / (|fill_price - stop_loss_price| x filled_qty) (total_risk is wrong on partial-fill rows)
+t_iid_R_robust,HOD,-0.1065,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; R = pnl / (|fill_price - stop_loss_price| x filled_qty) (total_risk is wrong on partial-fill rows)
+t_dayclustered_R_robust,HOD,-0.0976,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; R = pnl / (|fill_price - stop_loss_price| x filled_qty) (total_risk is wrong on partial-fill rows)
+mean_R_robust_ex_top5pct,HOD,-0.1171,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,select * from trades where strategy='hod_break' and account='paper' and pnl is not null and trade_date between '2026-09-30' and '2026-11-10' ; R = pnl / (|fill_price - stop_loss_price| x filled_qty) (total_risk is wrong on partial-fill rows) drop top 14
+weeks_strong_ge5R,HOD-robustR,2,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,"weekly sum R >= 5 (7 calendar weeks, first/last partial)"
+weeks_green,HOD-robustR,3/7,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,weekly $ > 0
+weekly_R_min,HOD-robustR,-9.71,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,weekly table
+weekly_R_P10,HOD-robustR,-9.71,2026-09-30..2026-11-10,sqlite3 file:data/trades.db?mode=ro,n=7 -> P10 = min

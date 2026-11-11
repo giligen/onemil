@@ -752,10 +752,15 @@ def bt_ranked(day: str, features_csv: Optional[str] = None, n: Optional[int] = N
         fe = y["filter"]["features"]
         params = {f: {"mean": float(fe[f]["mean"]), "std": float(fe[f]["std"]), "sign": int(fe[f]["sign"])}
                   for f in need}
-        df["c"] = composite_score(df, params)
+        # the set in force THAT session day (weekly refit history), not today's orb.yaml (look-ahead / parity break)
+        from datetime import date as _date
+        from trading.orb_pit_params import params_for_day
+        pp = params_for_day(_date.fromisoformat(day), current={
+            "params": params, "cutoffs": [float(x) for x in y["quintile_cutoffs"]]})
+        df["c"] = composite_score(df, pp.params)
         g = df[df["date"] == day]
         k = g[g["c"] >= cfg["threshold"]].copy()
-        k["q"] = assign_quintile(k["c"], [float(x) for x in y["quintile_cutoffs"]])
+        k["q"] = assign_quintile(k["c"], pp.cutoffs)
         k = k[k["q"] != "Q1"]
         k = k.assign(qr=k["q"].map({"Q4": 0, "Q5": 1, "Q3": 2, "Q2": 3})).sort_values(["qr", "c"],
                                                                                     ascending=[True, False])

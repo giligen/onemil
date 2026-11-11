@@ -624,6 +624,60 @@ def _write_markers(days, pool_id, features_df, sel, out_path) -> None:
     print(f"Markers: {len(rows)} day row(s) for {pool_id} -> {out_path}")
 
 
+def params_mode(argv=None) -> str:
+    """Scoring-parameter mode: 'pit' (default, the parameters in force each session day) or 'current'
+    (today's orb.yaml for ALL history = look-ahead, research only). `--params {pit,current}` wins over env
+    ORB_BT_PARAMS. Anything else is a hard error."""
+    import argparse
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument('--params', default=None)
+    ns, _ = ap.parse_known_args(sys.argv[1:] if argv is None else argv)
+    mode = (ns.params or os.environ.get('ORB_BT_PARAMS') or 'pit').strip().lower()
+    if mode not in ('pit', 'current'):
+        raise SystemExit(f"FATAL: --params must be 'pit' or 'current', got {mode!r}")
+    return mode
+
+
+def score_days(df, params, cutoffs, mode='pit', history_path=None):
+    """Composite per row, each session day scored with the parameters in force that day.
+
+    Returns (composite Series, {day: PitParams}). mode='current' scores every day with `params`/`cutoffs`
+    (the legacy look-ahead path). mode='pit' uses trading.orb_pit_params.params_for_day per distinct day; days
+    before the first recorded refit fall back to `params` with ONE WARNING naming the date range. Stamps
+    `params_source` / `params_refit_ts` on df."""
+    from trading.orb_pit_params import PitParams, params_for_day, DEFAULT_HISTORY
+    import pandas as _pd
+    hist = history_path or DEFAULT_HISTORY
+    days = sorted(df['date'].unique())
+    cur = {'params': params, 'cutoffs': cutoffs}
+    if mode == 'current':
+        day_pp = {d: PitParams(params, cutoffs, None, 'current') for d in days}
+    else:
+        day_pp = {d: params_for_day(_pd.Timestamp(d).date(), hist, cur, warn=False) for d in days}
+        fb = [d for d, pp in day_pp.items() if pp.source != 'pit']
+        if fb:
+            logger.warning("ORB BT PIT params: %d session days %s..%s precede the first recorded refit; scored "
+                           "with the CURRENT orb.yaml set (look-ahead, NOT point-in-time)",
+                           len(fb), _pd.Timestamp(min(fb)).date(), _pd.Timestamp(max(fb)).date())
+    comp = _pd.Series(index=df.index, dtype=float)
+    for d, pp in day_pp.items():
+        m = df['date'] == d
+        comp[m] = composite_score(df[m], pp.params)
+    df['params_source'] = df['date'].map(lambda d: day_pp[d].source)
+    df['params_refit_ts'] = df['date'].map(lambda d: day_pp[d].refit_ts or '')
+    return comp, day_pp
+
+
+def assign_quintile_by_day(frame, comp_col, day_pp, scale=1.0, fallback_cutoffs=None):
+    """Quintile per row using THAT day's cutoffs (x scale, the N1 affine factor). day_pp None -> fallback."""
+    import pandas as _pd
+    out = _pd.Series(index=frame.index, dtype=object)
+    for d, g in frame.groupby('date'):
+        cuts = fallback_cutoffs if day_pp is None else day_pp[d].cutoffs
+        out[g.index] = assign_quintile(g[comp_col], [c * scale for c in cuts])
+    return out
+
+
 def main():
     bt_cfg = load_bt_config()
     # Hard-sync module constants to orb.yaml (8/30 audit): the sim
@@ -989,7 +1043,14 @@ def main():
                 "explicit research use.")
         params = fit_z_params(train, FILTER_FEATURES)
         print("Z-params: TRAIN REFIT (BT_ALLOW_REFIT) — NOT live parity")
-    df['_composite'] = composite_score(df, params)
+    _pmode = params_mode()
+    if _pmode == 'pit' and (_refit_z or params is None or cutoffs is None):
+        print("Params mode: 'current' (forced: TRAIN-refit / missing yaml literals — NOT point-in-time)")
+        _pmode = 'current'
+    df['_composite'], _day_pp = score_days(df, params, cutoffs, _pmode)
+    print(f"Params mode: {_pmode} ("
+          + ("per-day parameters in force, logs/orb_refit_history.jsonl" if _pmode == 'pit'
+             else "today's orb.yaml for ALL history — LOOK-AHEAD, research only") + ")")
     # ---- N1 hook (research/fuckup_audit/N_databento/N1/PREREG) ------------
     # Add ONE sidecar column to the composite as an 8th signed z-score with
     # params fit on TRAIN (2025 calendar year, the PLAN §1 split). Threshold
@@ -1019,8 +1080,7 @@ def main():
     # B+ 2026-08-15: threshold from orb.yaml (filter.threshold) via bt_cfg, NOT
     # the imported study_orb_sizing.FILTER_THRESHOLD constant (review P1-4).
     threshold = bt_cfg['threshold'] * _n1_scale
-    if cutoffs is not None and _n1_scale != 1.0:
-        cutoffs = [c * _n1_scale for c in cutoffs]
+    _fallback_cutoffs = cutoffs
     train = df[(df['date'] >= _train_start) & (df['date'] <= _train_end)]
     train_k = train[train['_composite'] >= threshold].copy()
     if cutoffs is None:
@@ -1029,8 +1089,12 @@ def main():
                 "FATAL: orb.yaml lacks quintile_cutoffs — refusing to "
                 "silently refit. Fix orb.yaml or set BT_ALLOW_REFIT=1.")
         cutoffs = fit_quintile_cutoffs(train_k['_composite'])
+        _fallback_cutoffs = cutoffs
+        _day_pp = None
         print("Quintile cutoffs: TRAIN REFIT (BT_ALLOW_REFIT) — NOT live parity")
-    train_k['_quintile'] = assign_quintile(train_k['_composite'], cutoffs)
+    # cutoffs per session day (PIT) x the N1 affine scale; a fitted cutoff set is already in scaled space
+    _qscale = _n1_scale if _day_pp is not None else 1.0
+    train_k['_quintile'] = assign_quintile_by_day(train_k, '_composite', _day_pp, _qscale, _fallback_cutoffs)
     avg = float(train_k['_rp_pnl'].mean())
     # 2026-07-10 PARITY FIX: use orb.yaml's frozen adaptive_mults literals —
     # the same values LIVE trades — instead of refitting per run. The
@@ -1063,7 +1127,7 @@ def main():
 
     # Apply to full timeline
     kept = df[df['_composite'] >= threshold].copy()
-    kept['_quintile'] = assign_quintile(kept['_composite'], cutoffs)
+    kept['_quintile'] = assign_quintile_by_day(kept, '_composite', _day_pp, _qscale, _fallback_cutoffs)
 
     # Q1 filter (ships on by default; matches trading/orb_engine.py skip_q1).
     # BT-validated lift: +$8,556 OOS across VAL + HOQ1+. Controlled via env var
