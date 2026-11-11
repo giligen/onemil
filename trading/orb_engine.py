@@ -7532,8 +7532,19 @@ class ORBEngine:
         the EOD flat must not interleave with a check_entries/check_exits pass
         mutating the same open_positions.
         """
+        self._mark_closing_for_coverage()
         with self._lock:
             return self._force_close_all_locked()
+
+    def _mark_closing_for_coverage(self) -> None:
+        """Tell the StopMonitor exit-coverage thread every ORB position is being closed (2026-11-11 AXSM race:
+        coverage re-placed a stop-sell while the engine's close needed the shares). Expires on its own / on remove_watch."""
+        sm = getattr(self, 'stop_monitor', None)
+        if sm is None or not hasattr(sm, 'mark_closing'):
+            return
+        for sym in list(getattr(self, 'open_positions', {}) or {}):
+            try: sm.mark_closing('orb', sym)
+            except Exception as e: logger.warning(f"[ORB] mark_closing {sym} failed: {e}")
 
     def _force_close_all_locked(self) -> int:
         """force_close_all body — caller holds `_lock`.

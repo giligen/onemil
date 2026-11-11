@@ -616,6 +616,9 @@ class StopMonitor:
         self._coverage_thread: Optional[threading.Thread] = None
         self._coverage_last_repair: Dict[str, float] = {}
         self._coverage_warned: set = set()
+        # 2026-11-11 AXSM: a force close in flight must not race the coverage repair.
+        self._closing_marks: Dict[str, tuple] = {}          # symbol -> (strategy, marked_at epoch s)
+        self._coverage_placed_ids: Dict[str, set] = {}      # symbol -> order ids exit-coverage placed
         self._coverage_excess_warned: set = set()
         self._coverage_unledgered_warned: set = set()   # (symbol, day) ORB unledgered-fill ERRORs
         self._coverage_cycle_no = 0
@@ -799,9 +802,44 @@ class StopMonitor:
                 logger.warning(f"StopMonitor: exit-coverage cycle failed: {e}")
             delay = self._EXIT_COVERAGE_PERIOD_S
 
+    _CLOSING_MARK_TTL_S = 900.0   # a close mark expires on its own after 15 min
+
+    def mark_closing(self, strategy: str, symbol: str) -> None:
+        """The engine is force-closing `symbol`: exit coverage must not place a stop-sell
+        that would hold the shares the close order needs (2026-11-11 AXSM). Call BEFORE
+        cancelling any leg. Cleared by `clear_closing` / `remove_watch`, or expires after
+        `_CLOSING_MARK_TTL_S` (WARNING when it expires with the watch still open)."""
+        with self._exit_lock:
+            self._closing_marks[symbol] = (str(strategy or "").lower(), time_mod.time())
+
+    def clear_closing(self, symbol: str) -> None:
+        """Drop the close-in-flight mark for `symbol` (idempotent)."""
+        with self._exit_lock:
+            self._closing_marks.pop(symbol, None)
+
+    def coverage_order_ids(self, symbol: str) -> set:
+        """Order ids exit coverage placed for `symbol` (a force-close retry cancels them)."""
+        return set(self._coverage_placed_ids.get(symbol, ()))
+
+    def _closing_in_flight(self, symbol: str, watch: "WatchEntry", now: float) -> bool:
+        """True while a live close mark covers this watch; an expired mark is dropped with a WARNING."""
+        with self._exit_lock:
+            mark = self._closing_marks.get(symbol)
+            if mark is None or mark[0] != str(getattr(watch, "strategy", "") or "").lower():
+                return False
+            if now - mark[1] < self._CLOSING_MARK_TTL_S:
+                logger.debug(f"EXIT COVERAGE: {symbol} close in flight — skipped")
+                return True
+            self._closing_marks.pop(symbol, None)
+        logger.warning(f"EXIT COVERAGE: {symbol} close mark expired after {self._CLOSING_MARK_TTL_S:.0f}s "
+                       f"with the position still open — coverage acts again")
+        return False
+
     def _coverage_skip(self, symbol: str, watch: "WatchEntry", now: float) -> bool:
         """True when this watch must not be checked now (too young, or an
         exit / scale-out / force-close sequence is in flight)."""
+        if self._closing_in_flight(symbol, watch, now):
+            return True
         if now - float(getattr(watch, "added_at", 0.0) or 0.0) < self._EXIT_COVERAGE_MIN_WATCH_AGE_S:
             return True
         with self._exit_lock:
@@ -886,6 +924,7 @@ class StopMonitor:
                         symbol=sym, qty=qty, stop_price=px))
                 if order_id:
                     repaired += 1
+                    self._coverage_placed_ids.setdefault(symbol, set()).add(order_id)
             except Exception as e:
                 logger.warning(f"EXIT COVERAGE: {symbol} check failed: {e}")
         counts = {"checked": checked, "naked": naked_n, "repaired": repaired}
@@ -1730,6 +1769,7 @@ class StopMonitor:
         with self._exit_lock:
             self._exit_in_progress[symbol] = True
             self._exit_started_at[symbol] = time_mod.time()
+            self._closing_marks.pop(symbol, None)
 
         with self._watch_lock:
             removed = self._watches.pop(symbol, None)

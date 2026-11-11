@@ -212,6 +212,7 @@ class Position:
     closed_notional: float = 0.0
     last_close_reason: Optional[str] = None
     fc_attempts: int = 0
+    overnight_from: Optional[str] = None                  # trade_date of a carried-over row adopted at boot: closed at the open, not 15:55
     # eod_exit_mode telemetry (trading/eod_exit.py) — set at EOD submit time by force_close_all,
     # read back by _book_leg_fill/_record_exit once the 'eod' leg is booked.
     eod_pricing_method: Optional[str] = None
@@ -616,6 +617,7 @@ class HodBreakEngine:
                     # ever drained into the DB — rows stayed open and StopMonitor kept a phantom watch.
                     self._drain_stop_monitor_exits()
                     self._sync_phantom_watches()
+                if not self.is_force_close_time(): self._close_overnight_leftovers()
                 if self.is_force_close_time() and (not self._flattened or any(p.status == 'open' for p in self.positions.values())):
                     if self.book == 'hod_break' and self.entry_mode == 'resting_stop_limit' and not self.dry_run:
                         self._reconcile_positions_to_broker(force=True)    # an unregistered late fill must be in the flatten
@@ -3176,7 +3178,7 @@ class HodBreakEngine:
         logger.warning(f"{self.tag} {pos.symbol}: cancel not confirmed (status {status or 'unknown'}) — order kept as pending, retry next pass")
         return None
 
-    def _settle_exit_legs(self, pos: Position) -> None:
+    def _settle_exit_legs(self, pos: Position) -> bool:
         """Cancel the bracket legs and READ them until terminal (≤ FC_LEG_POLL_S): a leg that filled in the meantime is
         booked, never sold twice. Nothing is sold on assumptions."""
         for leg, reason in ((pos.tp_leg_id, self._tp_reason(pos)), (pos.sl_leg_id, 'stop')):
@@ -3184,6 +3186,7 @@ class HodBreakEngine:
             try: self.alpaca.cancel_order(leg)
             except Exception as e: logger.warning(f"{self.tag} FC leg cancel {pos.symbol} failed ({e}) — reading the leg")
         deadline = time.time() + self.fc_leg_poll_s
+        pending = False
         while True:
             pending = False
             for leg, reason in ((pos.tp_leg_id, self._tp_reason(pos)), (pos.sl_leg_id, 'stop')):
@@ -3196,6 +3199,64 @@ class HodBreakEngine:
             time.sleep(0.25)
         if pending and pos.symbol in self.positions:
             logger.warning(f"{self.tag} FORCE CLOSE {pos.symbol}: a leg is still not terminal after {self.fc_leg_poll_s:.0f}s — selling only the {pos.open_qty} shares no leg has sold")
+        return bool(pending and pos.symbol in self.positions)
+
+    FC_MARK_ATTR = '_fc_marked'
+
+    def _mark_closing(self, sym: str) -> None:
+        """Tell the StopMonitor a close is in flight for `sym` BEFORE any leg is cancelled, so exit coverage does not
+        place a stop-sell that holds the shares (2026-11-11 AXSM). Cleared by `_clear_closing_marks`."""
+        marked = self.__dict__.setdefault(self.FC_MARK_ATTR, set())
+        sm = self.stop_monitor
+        if sm is None or not hasattr(sm, 'mark_closing'): return
+        try: sm.mark_closing(self.STRATEGY_NAME, sym); marked.add(sym)
+        except Exception as e: logger.warning(f"{self.tag} {sym}: StopMonitor.mark_closing failed ({e}) — coverage may race the close")
+
+    def _clear_closing_marks(self) -> None:
+        """Drop the close-in-flight mark of every symbol that has left `self.positions` (closed / booked)."""
+        marked = self.__dict__.get(self.FC_MARK_ATTR) or set()
+        sm = self.stop_monitor
+        for sym in [m for m in marked if m not in self.positions]:
+            marked.discard(sym)
+            if sm is not None and hasattr(sm, 'clear_closing'):
+                try: sm.clear_closing(sym)
+                except Exception as e: logger.warning(f"{self.tag} {sym}: StopMonitor.clear_closing failed ({e})")
+
+    @staticmethod
+    def _is_sell(order: dict) -> bool:
+        return 'sell' in str(order.get('side', '')).lower()
+
+    def _cancel_own_sells(self, pos: Position) -> int:
+        """Force-close retry: cancel every open SELL on this symbol that is OURS (client id `<prefix>-...`, our leg/close ids,
+        or an order exit coverage placed) and wait <= fc_leg_poll_s until each is terminal, so no order holds the shares
+        (2026-11-11 AXSM). Foreign sells (the owner's) are never touched. Returns the number cancelled."""
+        sym = pos.symbol
+        try: orders = self.alpaca.get_open_orders() or []
+        except Exception as e:
+            logger.warning(f"{self.tag} FORCE CLOSE {sym}: open-order read failed ({e}) — selling without the held-shares sweep"); return 0
+        own_ids = {str(x) for x in (pos.tp_leg_id, pos.sl_leg_id, pos.close_order_id) if x}
+        sm = self.stop_monitor
+        if sm is not None and hasattr(sm, 'coverage_order_ids'):
+            try: own_ids |= {str(x) for x in sm.coverage_order_ids(sym)}
+            except Exception as e: logger.warning(f"{self.tag} {sym}: coverage order ids unavailable ({e})")
+        mine = [o for o in orders if o.get('symbol') == sym and self._is_sell(o)
+                and (str(o.get('id') or '') in own_ids or str(o.get('client_order_id') or '').startswith(f"{self.coid_prefix}-"))]
+        for o in orders:
+            if o.get('symbol') == sym and self._is_sell(o) and o not in mine:
+                logger.warning(f"{self.tag} FORCE CLOSE {sym}: open sell {str(o.get('id'))[:8]} is not ours — left untouched")
+        for o in mine:
+            try: self.alpaca.cancel_order(str(o['id']))
+            except Exception as e: logger.warning(f"{self.tag} FORCE CLOSE {sym}: cancel of own sell {str(o.get('id'))[:8]} failed ({e})")
+        if mine:
+            logger.warning(f"{self.tag} FORCE CLOSE {sym}: cancelled {len(mine)} own open sell order(s) holding the shares")
+        deadline = time.time() + self.fc_leg_poll_s
+        while mine:
+            live = [o for o in mine if str((self._order_status(str(o['id']), rest=True) or {}).get('status', '')).lower() not in _TERMINAL + ('filled', 'replaced')]
+            if not live or time.time() >= deadline:
+                if live: logger.warning(f"{self.tag} FORCE CLOSE {sym}: {len(live)} own sell(s) still not terminal after {self.fc_leg_poll_s:.0f}s")
+                break
+            time.sleep(0.25)
+        return len(mine)
 
     def _close_reference_price(self, pos: Position) -> float:
         q = self._quote(pos.symbol)
@@ -3207,7 +3268,7 @@ class HodBreakEngine:
         logger.warning(f"{self.tag} FORCE CLOSE {pos.symbol}: no quote and no bars — using the fill {pos.fill_price or pos.limit_price:.2f}")
         return float(pos.fill_price or pos.limit_price)
 
-    def force_close_all(self) -> int:
+    def force_close_all(self, only: Optional[set] = None) -> int:
         """Flatten OUR shares at flat_minute: cancel working entries (REST-confirmed), cancel and READ the legs (a fill
         in the race is booked, not sold again), then sell exactly the shares no exit has sold, with a marketable limit
         whose id is persisted (a restart must not sell twice). Never `close_position` (the owner trades the same
@@ -3217,7 +3278,11 @@ class HodBreakEngine:
         ref*0.99/0.97 ladder above, byte-identical to before this flag existed. 'moc' submits ONE TimeInForce.CLS
         order and then never age-cancels it (a MOC rests until the close by design — see the never_resubmit check
         below). 'limit_then_market' rests a limit at the NBBO mid; the SECOND attempt (gated by
-        eod_limit_timeout_s instead of FC_RESUBMIT_S) escalates to a true market order, not a tighter limit."""
+        eod_limit_timeout_s instead of FC_RESUBMIT_S) escalates to a true market order, not a tighter limit.
+
+        `only` (a set of symbols) restricts the pass to those positions (overnight leftovers closed at the open); it
+        never marks the book flat. Exit coverage is told a close is in flight BEFORE any leg is cancelled
+        (`_mark_closing`), and every retry cancels our own open sells before submitting (`_cancel_own_sells`)."""
         from trading import eod_exit as _eod
         if self._minute_of_day() >= self.close_minute:
             # Regular session already closed (e.g. flat_minute fired late
@@ -3248,6 +3313,8 @@ class HodBreakEngine:
         n = 0; now = datetime.now(timezone.utc)
         with self._lock:
             for sym, pos in list(self.positions.items()):
+                if only is not None and sym not in only: continue
+                self._mark_closing(sym)
                 if pos.status == 'pending':
                     if self._cancel_pending_and_confirm(pos, 'time_stop_canceled') != 'filled':
                         continue
@@ -3271,7 +3338,7 @@ class HodBreakEngine:
                         if int(st2.get('filled_qty') or 0) > 0: self._book_leg_fill(pos, cid, st2, 'eod')
                         if sym not in self.positions: continue
                     logger.warning(f"{self.tag} FORCE CLOSE {sym}: close order {cid} {status or 'unknown'} after {age:.0f}s — re-submitting the remaining {pos.open_qty}")
-                self._settle_exit_legs(pos)
+                leg_timed_out = self._settle_exit_legs(pos)
                 if sym not in self.positions: continue
                 qty = pos.open_qty
                 if qty <= 0:
@@ -3307,8 +3374,11 @@ class HodBreakEngine:
                         except Exception as e: logger.error(f"{self.tag} {sym}: DB qty correction at force-close failed: {e}")
                 qty = capped
                 pos.fc_attempts += 1
+                swept = False
+                if pos.fc_attempts >= 2 or leg_timed_out:           # something may still hold the shares: cancel what is ours, wait, then sell
+                    self._cancel_own_sells(pos); swept = True
                 coid = f"hod-fc-{sym}-{(self.session_date or '')[5:]}-{uuid.uuid4().hex[:6]}"[:48]
-                resolved = _eod.resolve_mode(self.eod_exit_mode, datetime.now(ZoneInfo('America/New_York')))
+                resolved = _eod.resolve_mode(_eod.MARKET if pos.overnight_from else self.eod_exit_mode, datetime.now(ZoneInfo('America/New_York')))   # a carried row closes at the open: never a MOC
                 if resolved.warning: logger.warning(f"{self.tag} {sym}: {resolved.warning}")
                 bid = ask = 0.0
                 q = self._quote(sym)
@@ -3353,7 +3423,8 @@ class HodBreakEngine:
                     else:
                         logger.error(f"{self.tag} FORCE CLOSE {sym} FAILED: {e}"); self._notify(f"{self.tag} ERROR force close {sym}: {e}")
             remaining = [s_ for s_, p_ in self.positions.items() if p_.status == 'open']
-            self._flattened = not remaining
+            if only is None: self._flattened = not remaining
+            self._clear_closing_marks()
         if n:
             _flat_msg = (f"{self.tag} flat at {getattr(self, 'flat_minute', self.params.flat_minute) // 60:02d}:"
                          f"{getattr(self, 'flat_minute', self.params.flat_minute) % 60:02d} ET — {n} close order(s) submitted, "
@@ -3651,6 +3722,7 @@ class HodBreakEngine:
                            status='open', client_order_id=pd_.get('client_order_id'), pattern_data=dict(pd_),
                            closed_qty=int(pd_.get('closed_qty') or 0), closed_notional=float(pd_.get('closed_notional') or 0.0))
             pos.shares = min(pos.shares, pos.closed_qty + broker[sym])      # never more than the broker holds
+            pos.overnight_from = str(r.get('trade_date') or '') or None
             sold = self._cancel_and_settle_safety_net(sym, (pd_.get('tp_leg_id'), pd_.get('sl_leg_id')))
             if sold:
                 self.positions[sym] = pos; pos.tp_leg_id = pd_.get('tp_leg_id'); pos.sl_leg_id = pd_.get('sl_leg_id')
@@ -3677,8 +3749,20 @@ class HodBreakEngine:
                     self._notify(f"{self.tag} ERROR add_watch {sym} — carried position UNMANAGED: {e}")
             logger.warning(f"{self.tag} carry-over: ADOPTED {sym} row {tid} ({r.get('trade_date')}) {pos.open_qty} sh — broker still holds it; safety-net OCO re-placed (tp {tp_id or 'none'} sl {sl_id or 'none'})")
             self._notify(f"{self.tag} ADOPTED carried-over {sym} {pos.open_qty} sh (row {tid}, {r.get('trade_date')}): safety net re-placed")
+            logger.warning(f"{self.tag} {sym}: overnight leftover from {pos.overnight_from} — closing at the open")
             n += 1
         return n
+
+    OVERNIGHT_CLOSE_MINUTE = 9 * 60 + 31      # first eligible tick for a carried-over leftover (09:31 ET)
+
+    def _close_overnight_leftovers(self) -> int:
+        """Force-close, at the first tick >= 09:31 ET, every open position adopted from a PRIOR session (AXSM 11/11 sat
+        overnight). Same market-ladder close as 15:55; StopMonitor keeps it covered until the sell is in. Returns orders sent."""
+        if self._minute_of_day() < self.OVERNIGHT_CLOSE_MINUTE: return 0
+        today = self.session_date or self._et_now().strftime('%Y-%m-%d')
+        with self._lock:
+            syms = {s_ for s_, p_ in self.positions.items() if p_.status == 'open' and p_.overnight_from and p_.overnight_from < today}
+        return self.force_close_all(only=syms) if syms else 0
 
     # ------------------------------------------------------------------ notify
     def _notify(self, msg: str) -> None:
