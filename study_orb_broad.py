@@ -45,11 +45,6 @@ BULL_FLAG_CACHE = 'data/bull_flag_cache_e50_x30.csv'
 # Broad universe filter
 MIN_GAP_PCT = 5.0           # today.open vs yesterday.close
 MIN_PREV_DAY_VOL = 500_000  # yesterday's volume floor
-# Calibrated 8/31 on 110 live-scored pairs (validation month): min
-# cached RTH-9:35 volume among LIVE picks was 15,428 — 15K keeps all
-# of them while dropping dead-open names. Interim until the premarket
-# backfill enables the true 500K@9:35 gate (see load_broad_universe).
-MIN_935_VOL_FLOOR = 15_000
 MIN_OPEN_PRICE = 3.0
 MAX_OPEN_PRICE = 30.0
 DATE_START = '2025-01-01'
@@ -70,6 +65,47 @@ def et_935_cutoff_utc_str(bar_date: str) -> str:
     y, m, d = (int(x) for x in bar_date.split('-'))
     return (_dt(y, m, d, 9, 35, tzinfo=ZoneInfo('America/New_York'))
             .astimezone(ZoneInfo('UTC')).strftime('%Y-%m-%dT%H:%M'))
+
+
+def et_open_cutoff_utc_str(bar_date: str, minutes_after_open: int = 0) -> str:
+    """'YYYY-MM-DDTHH:MM' UTC string for 09:30 ET + `minutes_after_open` on `bar_date` (DST per date)."""
+    from zoneinfo import ZoneInfo
+    from datetime import datetime as _d, timedelta as _td
+    y, m, d = (int(x) for x in bar_date.split('-'))
+    t = _d(y, m, d, 9, 30, tzinfo=ZoneInfo('America/New_York')) + _td(minutes=minutes_after_open)
+    return t.astimezone(ZoneInfo('UTC')).strftime('%Y-%m-%dT%H:%M')
+
+
+def opening_range_minutes() -> int:
+    """Opening-range window in minutes, the SAME source the pipeline uses (ORB_RANGE_MINUTES, default 5 =
+    orb.yaml entry.range_minutes in production)."""
+    return int(os.environ.get('ORB_RANGE_MINUTES', '5'))
+
+
+def opening_range_bar_counts_for_pairs(conn, pairs, range_minutes: int) -> Dict[tuple, int]:
+    """{(symbol, bar_date): number of distinct 1-min bars with timestamp in [09:30, 09:30+range_minutes) ET}
+    for every pair, in ONE grouped query (temp table of pairs + per-date cutoffs, LEFT JOIN so pairs with no
+    bars map to 0). Premarket bars (< 09:30 ET) are not counted."""
+    if not pairs:
+        return {}
+    cuts = {}
+    for _, ds in pairs:
+        if ds not in cuts:
+            cuts[ds] = (et_open_cutoff_utc_str(ds, 0), et_open_cutoff_utc_str(ds, range_minutes))
+    conn.execute("DROP TABLE IF EXISTS temp._orb_pairs_rng")
+    conn.execute("CREATE TEMP TABLE _orb_pairs_rng (symbol TEXT, bar_date TEXT, lo TEXT, hi TEXT)")
+    conn.executemany("INSERT INTO temp._orb_pairs_rng VALUES (?, ?, ?, ?)",
+                     [(s, ds, cuts[ds][0], cuts[ds][1]) for s, ds in pairs])
+    rows = conn.execute("""
+        SELECT c.symbol, c.bar_date, COUNT(DISTINCT i.timestamp)
+        FROM temp._orb_pairs_rng c
+        LEFT JOIN intraday_bars_1min i
+          ON i.symbol = c.symbol AND i.bar_date = c.bar_date
+         AND i.timestamp >= c.lo AND i.timestamp < c.hi
+        GROUP BY c.symbol, c.bar_date
+    """).fetchall()
+    conn.execute("DROP TABLE IF EXISTS temp._orb_pairs_rng")
+    return {(s, ds): int(n or 0) for s, ds, n in rows}
 
 
 def rth_volume_by_935_for_pairs(conn, pairs) -> Dict[tuple, int]:
@@ -124,8 +160,14 @@ def load_broad_universe(
     thresholds with an add-on pool's membership bounds (the nightly P1 book). None = production (byte-identical).
 
     `drop_sink` (optional list): receives (symbol, date, reason) for every pair that passed the SQL gates and was
-    then dropped by the interim 9:35-volume floor (spec 2026-11-11: no silent drops). The SQL gates themselves
+    then dropped (reason 'range_not_computable'; spec 2026-11-11: no silent drops). The SQL gates themselves
     are the same cuts as trading.orb_universe_gate.admit (gap/prev-volume/price on daily_bars.open).
+
+    Last gate = range computability. Until 2026-11-11 this was a BT-only 15K "RTH volume by 9:35" floor kept as a
+    PROXY for "the opening range can be computed" (docs/CLAUDE_HISTORY.md 2026-09-05). Live needs no volume, only
+    the `range_minutes` one-minute bars of [09:30, 09:35) ET, so the proxy dropped thin-but-complete names live
+    traded (cell 1,733: ASTY 10/12 12,866 and SK 10/23 7,645 shares, both live fills). It is replaced by the
+    condition itself: >= range_minutes bars in the window (same count the pipeline requires).
 
     Returns {date_str: [symbol, ...]}.
     """
@@ -169,40 +211,20 @@ def load_broad_universe(
     )
     candidates = [(symbol, str(bar_date)) for symbol, bar_date
                   in cur.fetchall()]
-    # 2026-08-31 (the PFSA red day) — INTERIM 9:35-volume floor.
-    # CORRECTED 2026-09-05 (the 8/31 diagnosis above was WRONG — a
-    # wrong-layer fix): live's universe gate is `prev_volume >= 500K`
-    # (orb_engine.build_orb_universe_from_snapshots), the SAME prev-day
-    # rule as this query — there is no live 9:35-volume gate. PFSA 8/31
-    # WAS in live's universe (bars subscribed 13:31:29, scored Q3
-    # comp=0.246) and simply ranked 4th behind SHMD (Q5), WTI (Q4), BW
-    # (Q4); SHMD's stop-limit never filled (time_stop_canceled) and BW was
-    # PDR-vetoed, so live's slots were consumed while BT — whose features
-    # held only FIRED breakouts — never saw SHMD/BW and gave the slot to
-    # PFSA. That is the ENTERED-ONLY LOOKAHEAD, fixed in
-    # study_orb_features.trade_row (entered=0 rows) + the pipeline
-    # (no-fill picks consume a slot at $0). The 15K RTH-9:35 floor below
-    # is kept ONLY as a range-computability proxy (a name with no
-    # 9:30-9:35 prints is "rangeless" live and cannot be ordered either;
-    # it kept 110/110 observed live picks) — it is NOT a live gate twin.
-    # Cutoff computed PER DATE in ET (a hardcoded UTC hour is the DST
-    # bug class, 3fab1f9/35e9935).
-    # 2026-09-05: ONE grouped query instead of one query per pair — the
-    # per-pair loop took 10+ minutes on a full regen under write contention
-    # (7K+ index range scans). Same sums, same cutoffs (unit-tested).
-    vol_935 = rth_volume_by_935_for_pairs(conn, candidates)
-    kept = dropped_935 = 0
+    # Range-computability condition (spec 2026-11-11): see the docstring. ONE grouped query, no per-pair loop.
+    range_min = opening_range_minutes()
+    n_bars = opening_range_bar_counts_for_pairs(conn, candidates, range_min)
+    kept = dropped_rng = 0
     for symbol, ds in candidates:
-        if vol_935.get((symbol, ds), 0) >= MIN_935_VOL_FLOOR:
+        if n_bars.get((symbol, ds), 0) >= range_min:
             grouped.setdefault(ds, []).append(symbol)
             kept += 1
         else:
-            dropped_935 += 1
+            dropped_rng += 1
             if drop_sink is not None:
-                drop_sink.append((symbol, ds, 'rth_volume_by_935_below_floor'))
-    print(f"[broad universe] 9:35-volume floor (interim live-parity): "
-          f"{kept} kept, {dropped_935} dropped "
-          f"(floor {MIN_935_VOL_FLOOR:,.0f} RTH-cached by 9:35 ET)")
+                drop_sink.append((symbol, ds, 'range_not_computable'))
+    print(f"[broad universe] range-computability gate (>= {range_min} one-minute bars in [09:30, "
+          f"09:30+{range_min}m) ET): {kept} kept, {dropped_rng} dropped")
 
     # Mid-day overlay: use today's provisional row. Prev-close / prev-vol
     # come from the most-recent row in daily_bars strictly before today.
