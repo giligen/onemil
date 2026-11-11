@@ -50,6 +50,23 @@ def gap_pct(prev_close: float, open_px: float) -> float:
     return (float(open_px) - float(prev_close)) / float(prev_close) * 100.0
 
 
+def admit_gap_value(gap: Optional[float], cfg: Mapping[str, float], symbol: Optional[str] = None) -> Admission:
+    """Gap-only admission on an ALREADY-COMPUTED gap (``feats['gap_pct']``, built from the 09:30 bar1 open and
+    the daily prev_close). Same comparison and reason codes as ``admit``; ``None``/NaN gap -> BAD_PREV_CLOSE
+    (undefined). Used by the live scoring-time re-check so it judges the number the composite scores."""
+    if symbol is not None and TEST_TICKER_RE.match(symbol):
+        return Admission(False, TEST_TICKER, float('nan'))
+    if gap is None or gap != gap:
+        return Admission(False, BAD_PREV_CLOSE, float('nan'))
+    g = float(gap)
+    if g < float(cfg['min_gap_pct']):
+        return Admission(False, GAP_BELOW_MIN, g)
+    max_gap = cfg.get('max_gap_pct')
+    if max_gap is not None and g > float(max_gap):
+        return Admission(False, GAP_ABOVE_MAX, g)
+    return Admission(True, OK, g)
+
+
 def admit(prev_close: float, open_px: float, prev_volume: Optional[float], price: Optional[float],
           cfg: Mapping[str, float], symbol: Optional[str] = None) -> Admission:
     """Decide universe membership for one symbol-day.

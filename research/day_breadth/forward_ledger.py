@@ -97,13 +97,19 @@ def daily_bar_exists(day: str, db_path: str = None) -> bool:
 def universe_for_day(day: str, db_path: str = None) -> list:
     """Gapper universe for ONE day. Mutates study_orb_broad's module constants (the same pattern
     build_wide_features.py uses) -- these are read as globals inside load_broad_universe's query at
-    CALL time, so the patch takes effect; db_path is passed explicitly since load_broad_universe's
+    CALL time, so the patch takes effect (restored in a finally on return); db_path is passed explicitly since load_broad_universe's
     own default argument is bound at import time and would NOT see a later CACHE_DB patch."""
+    names = ('MIN_GAP_PCT', 'MAX_OPEN_PRICE', 'DATE_START', 'DATE_END')
+    saved = {n: getattr(broad, n) for n in names}
     broad.MIN_GAP_PCT = WIDE_MIN_GAP_PCT
     broad.MAX_OPEN_PRICE = WIDE_MAX_OPEN_PRICE
     broad.DATE_START = day
     broad.DATE_END = day
-    uni = broad.load_broad_universe(db_path=db_path or broad.CACHE_DB)
+    try:
+        uni = broad.load_broad_universe(db_path=db_path or broad.CACHE_DB)
+    finally:       # the patch is call-scoped: leaking it changed MIN_GAP_PCT 5.0 -> 3.0 for every later importer
+        for n, v in saved.items():
+            setattr(broad, n, v)
     return sorted(set(uni.get(day, [])))
 
 

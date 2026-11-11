@@ -47,6 +47,17 @@ def test_universe_filter_synthetic(tmp_path):
     assert uni == ['AAAA']
 
 
+def test_universe_for_day_restores_study_orb_broad_globals(tmp_path):
+    """Regression 11/11: the wide-seed patch must not leak (MIN_GAP_PCT 5.0 -> 3.0 broke the ORB builder tests)."""
+    db = str(tmp_path / 'cache.db')
+    _make_daily_bars_db(db, [('AAAA', '2026-09-15', 10.0, 10.5, 9.5, 10.0, 1_000_000),
+                             ('AAAA', '2026-09-16', 10.5, 11.0, 10.0, 10.8, 900_000)])
+    names = ('MIN_GAP_PCT', 'MAX_OPEN_PRICE', 'DATE_START', 'DATE_END')
+    before = {n: getattr(fl.broad, n) for n in names}
+    fl.universe_for_day('2026-09-16', db_path=db)
+    assert {n: getattr(fl.broad, n) for n in names} == before
+
+
 def test_kept_rule_edge_boundary():
     """kept = BR(signal_m) >= EDGE (0.6115); boundary is inclusive."""
     w = pd.DataFrame(dict(entry_m=[100, 101, 102], BR=[fl.EDGE - 1e-9, fl.EDGE, fl.EDGE + 0.1]))

@@ -1637,14 +1637,13 @@ class ORBEngine:
         }, symbol=symbol)
 
     @staticmethod
-    def _recheck_gap_admission(providers: dict, cand: 'CandidateState', gap_floor: float):
-        """Scoring-time phantom-gap re-check through the shared gate: the REAL bar1.open (``range_open``) vs
-        the daily prev_close; only the gap is re-validated (volume/price arguments None = not checked)."""
-        from trading.orb_universe_gate import admit
-        prev_close = float((providers.get('prev_day_bar') or {}).get('close', 0.0) or 0.0)
-        rd = cand.range_data
-        ref_open = rd.range_open if rd.range_open > 0 else rd.range_high
-        return admit(prev_close, ref_open, None, None, {'min_gap_pct': gap_floor}, symbol=cand.symbol)
+    def _recheck_gap_admission(feats: dict, cand: 'CandidateState', gap_floor: float):
+        """Scoring-time phantom-gap re-check through the shared gate: judges ``feats['gap_pct']`` (the REAL
+        bar1.open vs the daily prev_close, the number the composite scores) against ``gap_floor``. It uses the
+        feature value itself, never re-derives it from providers, so admission is identical to the pre-gate
+        ``gap_pct < floor`` check on every input (a missing/NaN gap is not admitted here; callers skip it)."""
+        from trading.orb_universe_gate import admit_gap_value
+        return admit_gap_value((feats or {}).get('gap_pct'), {'min_gap_pct': gap_floor}, symbol=cand.symbol)
 
     def _log_final_ranges(self) -> None:
         """One INFO line per day with every candidate's final opening range, so the selection observer can
@@ -3938,7 +3937,7 @@ class ORBEngine:
                 logger.warning(
                     f"ORB: {cand.symbol} phantom-gap re-check SKIPPED ({pool_label}) — feats has no gap_pct "
                     f"(no prev_day_bar / prev_close <= 0); candidate stays admitted on the 09:30 gap only")
-            elif not self._recheck_gap_admission(providers, cand, gap_floor).ok:
+            elif not self._recheck_gap_admission(feats, cand, gap_floor).ok:
                 logger.info(
                     f"ORB: {cand.symbol} phantom-gap reject ({pool_label}) — "
                     f"real gap {real_gap_pct:.2f}% < {gap_floor}% "
@@ -4663,7 +4662,7 @@ class ORBEngine:
                 (providers.get('daily_stats_20d') or {}).get('volume_20d'))
             real_gap_pct = feats.get('gap_pct', None)
             if real_gap_pct is not None and not self._recheck_gap_admission(
-                    providers, cand, self.universe_min_gap_pct).ok:
+                    feats, cand, self.universe_min_gap_pct).ok:
                 continue  # phantom gap (same floor as the production pass)
             score = composite_score(feats, self.z_params)
             if score is None or score < self.filter_threshold:
@@ -6834,6 +6833,32 @@ class ORBEngine:
         # resolve.
         self._maybe_arm_scale(pos)
 
+    @staticmethod
+    def _adopted_order_submit_ts(broker_order, db_ts: datetime) -> datetime:
+        """Submit clock for an order adopted after a restart: the broker's
+        ``submitted_at`` (else ``created_at``) when present and parseable,
+        otherwise the DB-derived ``db_ts``. Always tz-aware UTC. When both
+        exist the EARLIER wins (the conservative side of a time stop)."""
+        raw = None
+        for key in ('submitted_at', 'created_at'):
+            raw = (broker_order.get(key) if isinstance(broker_order, dict)
+                   else getattr(broker_order, key, None))
+            if raw:
+                break
+        if isinstance(raw, str):
+            try:
+                from dateutil.parser import isoparse as _iso
+                raw = _iso(raw)
+            except Exception:
+                raw = None
+        from datetime import datetime as _real_datetime  # module-level `datetime` may be patched in tests
+        if not isinstance(raw, _real_datetime):
+            # None, an unparseable string or a foreign object (a Mock, a pandas NaT): the DB clock decides
+            return db_ts
+        if raw.tzinfo is None:
+            raw = raw.replace(tzinfo=timezone.utc)
+        return min(raw, db_ts)
+
     def _cancel_stale_pending_orders(self) -> None:
         """Cancel any stop-buy orders still pending past the 10:35 ET time stop
         (range_end + time_stop_minutes). Matches BT behavior — BT's simulator
@@ -8114,6 +8139,18 @@ class ORBEngine:
                         submit_ts = datetime.now(timezone.utc)
                 if submit_ts.tzinfo is None:
                     submit_ts = submit_ts.replace(tzinfo=timezone.utc)
+                # 2026-11-11: the broker's own submit timestamp is the clock
+                # authority after a restart (DB column may be missing/stale);
+                # an order already past the time stop is flagged here and is
+                # cancelled by the first check_entries tick (line ~3603).
+                submit_ts = self._adopted_order_submit_ts(
+                    alp_pending_by_id.get(order_id), submit_ts)
+                _adopt_age = (datetime.now(timezone.utc) - submit_ts).total_seconds() / 60.0
+                if _adopt_age >= self.time_stop_minutes:
+                    logger.warning(
+                        f"ORB.sync: {sym} order {order_id} adopted PAST its time stop "
+                        f"(age {_adopt_age:.0f}min >= {self.time_stop_minutes}min) — "
+                        f"will be cancelled on the first check_entries tick")
                 # Recover slippage-attribution fields persisted at submit
                 bar_close = t.get('bar_close_price')
                 entry_ask = t.get('entry_quote_ask')

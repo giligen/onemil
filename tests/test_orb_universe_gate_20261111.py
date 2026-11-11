@@ -174,4 +174,41 @@ class TestParity:
         assert built_uni == live
         cand = CandidateState(symbol='PAR')
         cand.range_data = _range('PAR', open_px)
-        assert built_rechk.ok == eng._recheck_gap_admission(_providers(prev_close), cand, 5.0).ok
+        assert built_rechk.ok == eng._recheck_gap_admission(feats, cand, 5.0).ok
+
+
+class TestRecheckLegacyParity20261111:
+    """Regression (14 preplace tests broke at 2a55c82): the re-check re-derived the gap from
+    providers['prev_day_bar'] / range_open, rejecting fixtures whose _compute_features is stubbed (feats gap 12 %,
+    no prev_day_bar, range_open 0). Admission must equal the legacy ``gap_pct < floor`` on feats['gap_pct']."""
+
+    @pytest.mark.parametrize('gap', [-3.0, 0.0, 4.999, 5.0, 5.001, 12.0, 80.0])
+    def test_unit_gap_value_matches_legacy_comparison(self, gap):
+        a = G.admit_gap_value(gap, {'min_gap_pct': 5.0}, symbol='X')
+        assert a.ok == (not gap < 5.0)
+
+    def test_unit_missing_gap_is_not_admitted_by_the_helper(self):
+        assert not G.admit_gap_value(None, {'min_gap_pct': 5.0}).ok
+        assert not G.admit_gap_value(float('nan'), {'min_gap_pct': 5.0}).ok
+
+    @pytest.mark.parametrize('gap', [4.0, 5.0, 12.0])
+    @pytest.mark.parametrize('providers', [
+        {'prev_day_bar': None, 'daily_stats_20d': None}, {}, _providers(10.0)])
+    def test_integration_engine_recheck_old_equals_new_whatever_the_providers(self, gap, providers):
+        eng = _engine()
+        cand = CandidateState(symbol='FIX')
+        cand.range_data = _range('FIX', 0.0)  # range_open 0, as in the preplace fixtures
+        new = eng._recheck_gap_admission({'gap_pct': gap}, cand, 5.0).ok
+        assert new == (not gap < 5.0)
+
+    def test_integration_scoring_keeps_candidate_with_stubbed_features_and_no_prev_day_bar(self, monkeypatch):
+        eng = _engine()
+        cand = CandidateState(symbol='DFDV')
+        cand.range_data = _range('DFDV', 0.0)
+        eng.candidates['DFDV'] = cand
+        eng._symbol_pool['DFDV'] = 'production'
+        monkeypatch.setattr(eng, '_compute_features', lambda c, prev_day_bar=None, daily_stats_20d=None:
+                            {'gap_pct': 12.0})
+        eng._run_pool_selection('production', ['DFDV'], set(),
+                                {'DFDV': {'prev_day_bar': None, 'daily_stats_20d': None}}, True, 0.0)
+        assert cand.rejected_reason != 'phantom_gap'
