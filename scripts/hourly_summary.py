@@ -105,6 +105,14 @@ def fmt_pct(pnl: float, base: float) -> str:
     return f"{MINUS if v < 0 else '+'}{abs(v):.1f}%"
 
 
+def money_pct(x: float, base: Optional[float]) -> str:
+    """'+$53 (+2.3%)': money plus its percent of `base`; the bare money when the base is missing or not positive
+    (a percent with no base is a false label -- never '(0.0%)')."""
+    if base is None or base <= 0:
+        return fmt_money(x)
+    return f"{fmt_money(x)} ({fmt_pct(x, base)})"
+
+
 def fmt_k(x: float) -> str:
     """Compact market value: $19.5K / $850."""
     return f"${x / 1000:.1f}K" if abs(x) >= 1000 else f"${x:,.0f}"
@@ -376,12 +384,14 @@ def book_stats(name: str, fills: List[Dict], positions: List[Dict], include) -> 
     agg = per_symbol_fills(sel_fills)
     realized = sum(s['realized'] for s in agg.values())
     closed = {sym: s['realized'] for sym, s in agg.items() if s['closed_qty'] > 0}
+    closed_notional = {sym: s['buy_val'] for sym, s in agg.items() if s['closed_qty'] > 0}
     return {
         'name': name,
         'n_fills': len(sel_fills),
         'bought_notional': sum(s['buy_val'] for s in agg.values()),
         'realized': realized,
         'closed': closed,
+        'closed_notional': closed_notional,
         'positions': sel_pos,
         'intraday_open': sum(p['intraday_pl'] for p in sel_pos),
         'open_pl': sum(p['unrealized_pl'] for p in sel_pos),
@@ -401,8 +411,15 @@ def collect_book(name: str, client: AlpacaClient, after_utc: datetime, today: da
     assert_paper_client(client, acct['account_number'])
     history = fetch_history(client)
     check_history_alignment(name, history, acct['last_equity'])
-    data = {'account': acct, 'fills': fetch_filled_orders(client, after_utc),
-            'week_fills': fetch_filled_orders(client, week_start_utc(today)),
+    fills = fetch_filled_orders(client, after_utc)
+    try:
+        week_fills = fetch_filled_orders(client, week_start_utc(today))
+    except Exception as e:
+        if name == 'ORB':    # the ORB / TOM week split cannot exist without the week's fills: the book goes n/a
+            raise
+        logger.warning("hourly_summary: %s week fills fetch failed (%s) - its wk figure stays bare $", name, e)
+        week_fills = None
+    data = {'account': acct, 'fills': fills, 'week_fills': week_fills,
             'positions': fetch_positions(client), 'history': history}
     if name == 'ORB':
         data['orb_order_ids'], data['open_orb_symbols'] = load_orb_ledger(today, db_path)
@@ -435,55 +452,61 @@ def _open_names(positions: List[Dict], key: str = 'intraday_pl') -> str:
     if not positions:
         return "flat"
     ranked = sorted(positions, key=lambda p: -abs(p[key]))
-    names = " ".join(f"{html.escape(p['symbol'])} {fmt_money(p[key])}" for p in ranked[:MAX_OPEN_NAMES])
+    names = " ".join(f"{html.escape(p['symbol'])} {money_pct(p[key], abs(p.get('cost_basis') or 0.0))}"
+                     for p in ranked[:MAX_OPEN_NAMES])
     extra = len(ranked) - MAX_OPEN_NAMES
     return f"open {len(positions)}: {names}" + (f" +{extra} more" if extra > 0 else "")
 
 
-def _best_worst(closed: Dict[str, float]) -> str:
-    """'best X +n' only when a closed winner exists, 'worst Y −n' only when a closed loser exists."""
+def _best_worst(closed: Dict[str, float], notional: Optional[Dict[str, float]] = None) -> str:
+    """'best X +n (+p%)' only when a closed winner exists, 'worst Y −n (−p%)' only when a closed loser exists;
+    the percent is on that symbol's bought notional (`notional`), omitted when it is unknown."""
+    notional = notional or {}
     parts = []
     if closed:
         best = max(closed, key=closed.get)
         worst = min(closed, key=closed.get)
         if closed[best] > 0:
-            parts.append(f"best {html.escape(best)} {fmt_money(closed[best])}")
+            parts.append(f"best {html.escape(best)} {money_pct(closed[best], notional.get(best))}")
         if closed[worst] < 0:
-            parts.append(f"worst {html.escape(worst)} {fmt_money(closed[worst])}")
+            parts.append(f"worst {html.escape(worst)} {money_pct(closed[worst], notional.get(worst))}")
     return " | ".join(parts)
 
 
-def format_book_line(label: str, day_pnl: float, pct: str, stats: Dict, wk: Optional[float],
-                     wk_suffix: str = "") -> str:
-    """One ORB / HOD style line: day P&L, fills, open positions, best/worst closed, week to date."""
-    parts = [f"<b>{label}</b> {fmt_money(day_pnl)} ({pct})", f"{stats['n_fills']} fills", _open_names(stats['positions'])]
-    bw = _best_worst(stats['closed'])
+def format_book_line(label: str, day_pnl: float, base: Optional[float], stats: Dict, wk: Optional[float],
+                     wk_suffix: str = "", wk_base: Optional[float] = None) -> str:
+    """One ORB / HOD style line: day P&L (% of `base`), fills, open positions, best/worst closed, week to date
+    (% of `wk_base`, bare $ when None)."""
+    parts = [f"<b>{label}</b> {money_pct(day_pnl, base)}", f"{stats['n_fills']} fills", _open_names(stats['positions'])]
+    bw = _best_worst(stats['closed'], stats.get('closed_notional'))
     if bw:
         parts.append(bw)
     line = " | ".join(parts)
     if wk is not None:
-        line += f"   wk {fmt_money(wk)}{wk_suffix}"
+        line += f"   wk {money_pct(wk, wk_base)}{wk_suffix}"
     return line
 
 
 def format_mom_line(day_pnl: float, equity: float, stats: Dict, wk: Optional[float]) -> str:
-    """MOM (weekly book) line: day P&L, open P&L on market value, number of names, week to date."""
-    line = (f"<b>MOM</b> {fmt_money(day_pnl)} ({fmt_pct(day_pnl, equity)}) | open {fmt_money(stats['open_pl'])}"
+    """MOM (weekly book) line: day P&L on equity, open P&L on its cost basis (market value - open P&L), number of
+    names, week to date on the start-of-week equity (equity - wk)."""
+    open_cost = stats['open_mv'] - stats['open_pl']
+    line = (f"<b>MOM</b> {money_pct(day_pnl, equity)} | open {money_pct(stats['open_pl'], open_cost)}"
             f" on {fmt_k(stats['open_mv'])}, {len(stats['positions'])} names")
     if wk is not None:
-        line += f"   wk {fmt_money(wk)}"
+        line += f"   wk {money_pct(wk, equity - wk)}"
     return line
 
 
-def format_tom_line(stats: Dict, wk: Optional[float] = None) -> str:
+def format_tom_line(stats: Dict, wk: Optional[float] = None, wk_base: Optional[float] = None) -> str:
     """TOM (QQQ) line: day P&L on the QQQ cost basis, fills, QQQ position, week to date."""
     pnl = stats['realized'] + stats['intraday_open']
     cost = sum(abs(p['cost_basis']) for p in stats['positions']) or stats['bought_notional']
     pos = "flat"
     if stats['positions']:
         pos = "hold " + " ".join(f"{html.escape(p['symbol'])} {p['qty']:g}" for p in stats['positions'])
-    line = f"<b>TOM</b> {fmt_money(pnl)} ({fmt_pct(pnl, cost)}) | {stats['n_fills']} fills | {pos}"
-    return line + (f"   wk {fmt_money(wk)}" if wk is not None else "")
+    line = f"<b>TOM</b> {money_pct(pnl, cost)} | {stats['n_fills']} fills | {pos}"
+    return line + (f"   wk {money_pct(wk, wk_base or cost)}" if wk is not None else "")
 
 
 def format_ext_line(stats: Dict) -> str:
@@ -491,7 +514,7 @@ def format_ext_line(stats: Dict) -> str:
     pnl = stats['realized'] + stats['intraday_open']
     names = " ".join(html.escape(p['symbol']) for p in stats['positions'])
     pos = f"open {len(stats['positions'])}: {names}" if stats['positions'] else "flat"
-    return f"<b>EXT (micha)</b> {fmt_money(pnl)} | {stats['n_fills']} fills | {pos}"
+    return f"<b>EXT (micha)</b> {money_pct(pnl, stats['bought_notional'])} | {stats['n_fills']} fills | {pos}"
 
 
 def na_line(label: str, why: str) -> str:
@@ -534,8 +557,8 @@ def build_message(now_et: datetime, data: Dict[str, Optional[Dict]], errors: Dic
         # ORB, TOM and EXT share one account, so the account's portfolio history mixes them: week to date for each
         # is the realized P&L of the week's fills of its own orders + the open positions' intraday P&L.
         orb_wk_s, tom_wk_s = week_s['ORB'], week_s['TOM']
-        lines.append(format_book_line(f"ORB {ORB_DAY_ONE_SUFFIX}", orb_pnl, fmt_pct(orb_pnl, ORB_STAGE_USD), orb_s,
-                                      orb_wk_s['realized'] + orb_wk_s['intraday_open']))
+        lines.append(format_book_line(f"ORB {ORB_DAY_ONE_SUFFIX}", orb_pnl, ORB_STAGE_USD, orb_s,
+                                      orb_wk_s['realized'] + orb_wk_s['intraday_open'], wk_base=ORB_STAGE_USD))
         if tom_s['active']:   # hidden unless a TOM position or a tom- fill today (week-only fills have no cost basis in the window)
             lines.append(format_tom_line(tom_s, tom_wk_s['realized'] + tom_wk_s['intraday_open']))
         if ext_s['active'] and (ext_pnl or ext_s['n_fills'] or ext_s['positions']):   # report-only, never a book
@@ -548,8 +571,13 @@ def build_message(now_et: datetime, data: Dict[str, Optional[Dict]], errors: Dic
         acct = hod['account']
         day = acct['equity'] - acct['last_equity']
         st = book_stats('HOD', hod['fills'], hod['positions'], lambda s: True)
-        lines.append(format_book_line("HOD", day, fmt_pct(day, st['bought_notional']), st,
-                                      week_to_date(hod['history'], today, day)))
+        wk_base = None
+        if hod.get('week_fills') is None:
+            logger.warning("hourly_summary: HOD week fills unavailable - wk figure stays bare $ (no notional base)")
+        else:
+            wk_base = book_stats('HOD', hod['week_fills'], hod['positions'], lambda s: True)['bought_notional']
+        lines.append(format_book_line("HOD", day, st['bought_notional'], st,
+                                      week_to_date(hod['history'], today, day), wk_base=wk_base))
 
     mom = data.get('MOM')
     if mom is None:
@@ -565,7 +593,7 @@ def build_message(now_et: datetime, data: Dict[str, Optional[Dict]], errors: Dic
         lines.append(na_line("LIVE", errors.get('LIVE', 'api error')))
     else:
         a = live['account']
-        lines.append(f"<b>LIVE</b> {fmt_money(a['equity'] - a['last_equity'])} | equity ${a['equity']:,.0f}")
+        lines.append(f"<b>LIVE</b> {money_pct(a['equity'] - a['last_equity'], a['last_equity'])} | equity ${a['equity']:,.0f}")
 
     if 'MOM-LIVE' in data:   # absent state file = the sleeve was never live = line omitted (not NO-DATA)
         ml_data = data['MOM-LIVE']

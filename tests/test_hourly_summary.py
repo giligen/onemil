@@ -132,7 +132,7 @@ def test_open_position_lines_and_best_worst():
         positions=[pos('SOXS', 50, 255, 250, 5, 16), pos('GRAL', 10, 100, 90, 9, -8)]))
     msg = hs.build_message(NOW, _data(hod=hod), {})
     line = [ln for ln in msg.splitlines() if ln.startswith('<b>HOD</b>')][0]
-    assert 'open 2: SOXS +$16 GRAL' in line
+    assert 'open 2: SOXS +$16 (+6.4%) GRAL −$8 (−8.9%)' in line
     assert 'worst UNHG' in line and 'best WIN +$20' in line
     assert '−$79' in line and '4 fills' not in line or True
     assert 'wk' in line
@@ -206,7 +206,7 @@ def test_live_line_never_lists_positions():
     live_client.trading_client.get_all_positions.assert_not_called()
     live_client.trading_client.get_orders.assert_not_called()
     msg = hs.build_message(NOW, _data(live=data), {})
-    assert '<b>LIVE</b> +$112 | equity $64,812' in msg and 'SECRETSYM' not in msg
+    assert '<b>LIVE</b> +$112 (+0.2%) | equity $64,812' in msg and 'SECRETSYM' not in msg
 
 
 def test_paper_guard_refuses_non_pa_account():
@@ -375,3 +375,65 @@ def test_tom_spy_iwm_legs_not_reported_as_orb():
     tom = [ln for ln in msg.splitlines() if ln.startswith('<b>TOM</b>')][0]
     assert 'hold SPY 3' in tom
     assert '<b>ORB' in msg and 'SPY' not in [ln for ln in msg.splitlines() if ln.startswith('<b>ORB')][0]
+
+
+# ---------------------------------------------------------------- percent next to every dollar (spec 2026-11-11)
+
+
+def test_money_pct_with_base_zero_and_none():
+    assert hs.money_pct(53, 2300) == '+$53 (+2.3%)'
+    assert hs.money_pct(-79, 10000) == '−$79 (−0.8%)'
+    assert hs.money_pct(53, 0) == '+$53' and hs.money_pct(53, None) == '+$53'    # no base: never '(0.0%)'
+    assert hs.money_pct(-30, -5) == '−$30'
+
+
+def test_book_line_week_carries_pct_on_orb_base():
+    stats = hs.book_stats('ORB', [], [], lambda s: True)
+    line = hs.format_book_line('ORB', 53.0, hs.ORB_STAGE_USD, stats, 106.0, wk_base=hs.ORB_STAGE_USD)
+    assert f"+$53 ({hs.fmt_pct(53.0, hs.ORB_STAGE_USD)})" in line
+    assert f"wk +$106 ({hs.fmt_pct(106.0, hs.ORB_STAGE_USD)})" in line
+    assert 'wk +$106' in hs.format_book_line('HOD', 5.0, 100.0, stats, 106.0).replace('(0.0%)', '') \
+        and '(0.0%)' not in hs.format_book_line('HOD', 5.0, 0.0, stats, 106.0)
+
+
+def test_open_names_carry_pct_and_omit_on_zero_cost_basis():
+    out = hs._open_names([{'symbol': 'AAA', 'intraday_pl': 20.0, 'cost_basis': 1000.0},
+                          {'symbol': 'BBB', 'intraday_pl': -10.0, 'cost_basis': 0.0}])
+    assert 'AAA +$20 (+2.0%)' in out and 'BBB −$10' in out and 'BBB −$10 (' not in out
+
+
+def test_best_worst_pct_on_bought_notional():
+    out = hs._best_worst({'WIN': 20.0, 'LOSE': -50.0}, {'WIN': 1000.0, 'LOSE': 500.0})
+    assert 'best WIN +$20 (+2.0%)' in out and 'worst LOSE −$50 (−10.0%)' in out
+    assert '(' not in hs._best_worst({'WIN': 20.0})        # unknown notional: bare $
+
+
+def test_mom_line_open_and_week_pct():
+    stats = {'open_pl': 500.0, 'open_mv': 10500.0, 'positions': [1, 2]}
+    line = hs.format_mom_line(100.0, 100000.0, stats, 2000.0)
+    assert 'open +$500 (+5.0%) on' in line                     # cost basis = mv - pl = 10,000
+    assert 'wk +$2,000 (+2.0%)' in line                         # start-of-week equity = 98,000 -> 2.04 %
+    assert '+$100 (+0.1%)' in line
+
+
+def test_live_and_ext_lines_carry_pct():
+    msg = hs.build_message(NOW, _data(live={'account': {'equity': 102000.0, 'last_equity': 100000.0}}), {})
+    assert '<b>LIVE</b> +$2,000 (+2.0%) | equity $102,000' in msg
+    ext = hs.book_stats('EXT', [{'symbol': 'ZZZ', 'side': 'buy', 'qty': 100, 'price': 10.0},
+                                {'symbol': 'ZZZ', 'side': 'sell', 'qty': 100, 'price': 11.0}], [], lambda s: True)
+    assert '+$100 (+10.0%)' in hs.format_ext_line(ext)
+
+
+def test_hod_week_pct_uses_week_fills_and_bare_when_fetch_fails(caplog):
+    client = make_client(equity=100100.0, last_equity=100000.0,
+                         orders=[order('WIN', 'buy', 10, 10.0), order('WIN', 'sell', 10, 12.0)])
+    msg = hs.build_message(NOW, _data(hod=book(client)), {})
+    hod = [ln for ln in msg.splitlines() if ln.startswith('<b>HOD</b>')][0]
+    assert 'wk +' in hod and hod.split('wk ')[1].count('%') == 1       # week notional base present
+    broken = make_client(equity=100100.0, last_equity=100000.0)
+    broken.trading_client.get_orders.side_effect = [[], RuntimeError('boom')]
+    with caplog.at_level(logging.WARNING):
+        hb = book(broken)
+    assert hb['week_fills'] is None and 'week fills fetch failed' in caplog.text
+    line = [ln for ln in hs.build_message(NOW, _data(hod=hb), {}).splitlines() if ln.startswith('<b>HOD</b>')][0]
+    assert '%' not in line.split('wk ')[1]

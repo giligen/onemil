@@ -182,8 +182,18 @@ def mom_live_line(state: Dict, marks: Dict[str, float], prev_close: Dict[str, fl
     peak = max(float(state.get('peak_equity', eq) or eq), eq)
     dd = (peak - eq) / peak * 100 if peak else 0.0
     flag = " PAUSED" if state.get('paused') else ""
-    return (f"MOM-LIVE{flag}: day ${day_pl:+,.0f} | week ${eq - base:+,.0f} | since start ${eq - start:+,.0f} "
+    return (f"MOM-LIVE{flag}: day ${day_pl:+,.0f}{_pct_suffix(day_pl, eq - day_pl)} | "
+            f"week ${eq - base:+,.0f}{_pct_suffix(eq - base, base)} | "
+            f"since start ${eq - start:+,.0f}{_pct_suffix(eq - start, start)} "
             f"(slice ${eq:,.0f} of ${start:,.0f}) | DD from peak {dd:.1f} %")
+
+
+def _pct_suffix(pnl: float, base: float) -> str:
+    """' (+2.3%)' of `pnl` on `base` (day: prior-close slice value, week: start-of-week slice equity, since start:
+    the start equity); '' when the base is not positive -- a percent with no base is a false label."""
+    if not base or base <= 0:
+        return ""
+    return f" ({100.0 * pnl / base:+.1f}%)"
 
 
 def read_weekly(path: str) -> List[Dict]:
