@@ -50,6 +50,7 @@ from zoneinfo import ZoneInfo
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
+from trading.ramp_stage import ORB_DAY_ONE, ORB_DAY_ONE_SUFFIX  # noqa: E402  (ONE constant for ORB day one)
 
 from config import Config                                          # noqa: E402
 from data_sources.alpaca_client import AlpacaClient                # noqa: E402
@@ -178,8 +179,26 @@ def fetch_filled_orders(client: AlpacaClient, after_utc: datetime) -> List[Dict]
         out.append({'symbol': str(o.symbol), 'side': _side(o), 'qty': qty,
                     'price': _f(getattr(o, 'filled_avg_price', None)),
                     'order_id': str(getattr(o, 'id', '') or ''),
-                    'client_order_id': str(getattr(o, 'client_order_id', '') or '')})
+                    'client_order_id': str(getattr(o, 'client_order_id', '') or ''),
+                    'filled_date': _filled_date_et(getattr(o, 'filled_at', None))})
     return out
+
+
+def _filled_date_et(filled_at) -> str:
+    """ISO ET date of an order's fill time ('' when the broker object carries none) - the ORB day-one filter key."""
+    if filled_at is None:
+        return ''
+    try:
+        return filled_at.astimezone(ET).date().isoformat()
+    except (AttributeError, ValueError, OSError):
+        logger.warning("hourly_summary: unreadable filled_at %r - fill date unknown", filled_at)
+        return ''
+
+
+def since_orb_day_one(fills: List[Dict]) -> List[Dict]:
+    """ORB fills dated before ORB_DAY_ONE are pre-parity (A2) and dropped; an unknown date is kept (and was warned about)."""
+    day_one = ORB_DAY_ONE.isoformat()
+    return [f for f in fills if not f.get('filled_date') or f['filled_date'] >= day_one]
 
 
 def fetch_positions(client: AlpacaClient) -> List[Dict]:
@@ -280,6 +299,7 @@ def split_books(orb: Dict) -> (Dict[str, Dict], Dict[str, Dict]):
         return by
 
     day, week = tag(orb['fills']), tag(orb['week_fills'])
+    day['ORB'], week['ORB'] = since_orb_day_one(day['ORB']), since_orb_day_one(week['ORB'])
     fills_by_book = {'ORB': {f['symbol'] for f in day['ORB']},
                      'TOM': {f['symbol'] for f in week['TOM']} | {f['symbol'] for f in day['TOM']}}
     pos_by = {'ORB': [], 'TOM': [], 'EXT': []}
@@ -514,7 +534,7 @@ def build_message(now_et: datetime, data: Dict[str, Optional[Dict]], errors: Dic
         # ORB, TOM and EXT share one account, so the account's portfolio history mixes them: week to date for each
         # is the realized P&L of the week's fills of its own orders + the open positions' intraday P&L.
         orb_wk_s, tom_wk_s = week_s['ORB'], week_s['TOM']
-        lines.append(format_book_line("ORB", orb_pnl, fmt_pct(orb_pnl, ORB_STAGE_USD), orb_s,
+        lines.append(format_book_line(f"ORB {ORB_DAY_ONE_SUFFIX}", orb_pnl, fmt_pct(orb_pnl, ORB_STAGE_USD), orb_s,
                                       orb_wk_s['realized'] + orb_wk_s['intraday_open']))
         if tom_s['active']:   # hidden unless a TOM position or a tom- fill today (week-only fills have no cost basis in the window)
             lines.append(format_tom_line(tom_s, tom_wk_s['realized'] + tom_wk_s['intraday_open']))

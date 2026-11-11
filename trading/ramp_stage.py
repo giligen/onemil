@@ -30,6 +30,15 @@ from typing import Dict, List, Tuple
 
 BOOKS = ('bf', 'orb')
 
+# ORB day one (owner 2026-11-11: "mark tomorrow as the first date from which ORB results should be looked at,
+# all past is garbage"). ONE constant: every ORB reader/report counts from here; the 9/29..11/10 paper segment is
+# "pre-parity" (reported as a labelled line only, never gated, never pooled). Spec docs/orb_day_one_20261112_spec_20261111.md,
+# rule research/orb_exit_resim/PREREG_1709_AMENDMENT_2.md.
+ORB_DAY_ONE = date(2026, 11, 12)
+ORB_DAY_ONE_SUFFIX = '(since 11/12, A2)'
+ORB_PRE_PARITY_START = date(2026, 9, 29)
+ORB_PRE_PARITY_END = date(2026, 11, 10)
+
 # KEEP IN SYNC with docs/bf_p1_ramp.md and docs/orb_p1_style_ramp_proposal.md.
 # Chronological; the LAST row of a book is its current stage. Never delete a
 # row — an old date is history, and `--stage-start <old date>` must keep working.
@@ -49,6 +58,9 @@ STAGE_STARTS: Dict[str, List[Dict[str, str]]] = {
          'reason': 'B+ live — 3 slots, $10,000 budget'},
         {'start': '2026-09-21',
          'reason': '8-slot + catalyst-off + latency-fix + 50bps stage'},
+        {'start': ORB_DAY_ONE.isoformat(),
+         'reason': 'amend2_parity: PREREG_1709 Amendment 2: parity-fixed engine (eafb557, 2a55c82, ff2a6fa); '
+                   'pre-parity segment 2026-09-29..11-10 excluded'},
     ],
 }
 
@@ -107,3 +119,8 @@ def line(book: str, start: str, reason: str) -> str:
             f'sessions and parity defects are OUT of this window'
             if prev_start != start else '')
     return f"  stage start {start} — {reason}{tail}"
+
+
+def orb_label(text: str) -> str:
+    """Append the ORB day-one suffix '(since 11/12, A2)' to an ORB P&L / fill-count text."""
+    return f"{text} {ORB_DAY_ONE_SUFFIX}"

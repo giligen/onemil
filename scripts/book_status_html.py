@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from trading.ramp_stage import ORB_DAY_ONE_SUFFIX  # noqa: E402  (ONE constant for ORB day one)
 SESSION_OPEN, SESSION_CLOSE, SQUEEZE_MIN, FLAT_MIN = 9 * 60 + 30, 16 * 60, 14 * 60, 15 * 60 + 55
 HOD_ARM_START, HOD_ARM_END = 9 * 60 + 35, 14 * 60   # shaded HOD window on the timeline: first arm after the open to the squeeze
 SEV_RANK = {"crit": 3, "warn": 2, "info": 1}
@@ -245,7 +247,7 @@ def hod_orb_tile(data: dict, key: str, label: str, sev: str) -> str:
         words = f"{today.get('open', 0)} open · {ex.get('stops', 0)} stop · {ex.get('squeeze', 0)} squeezed"
     else:
         cum = sum(d["pnl"] for d in sec.get("daily", []))
-        figs = [f"WTD {money(wtd['pnl'])}", f"last {len(sec.get('daily', []))} sessions {money(cum)}"]
+        figs = [f"WTD {money(wtd['pnl'])}", f"last {len(sec.get('daily', []))} sessions {money(cum)} {ORB_DAY_ONE_SUFFIX}"]
         words = f"{today.get('fills', 0)} fills today · {len(sec.get('vetoes', []))} vetoes"
     return tile(key, eyebrow, money(today["pnl"]), sign_cls(today["pnl"]), figs, words, sev)
 
@@ -466,8 +468,8 @@ def render_orb(data: dict) -> str:
              f'ramp: {"FROZEN" if ramp.get("frozen") else "not frozen"}' + (f' — {ramp.get("reason")}' if ramp.get("reason") else ""))
     body = (f'<h3 class="sub-h">Fills today</h3>{fills_table(sec.get("fills", []))}<h3 class="sub-h">Vetoes</h3>{vtab}'
             f'<h3 class="sub-h">Ramp</h3><p class="mono" style="margin:0;font-size:13px">{esc(rline)}</p>'
-            f'<h3 class="sub-h">Last 12 sessions, P&amp;L</h3><div style="max-width:520px">{bar_chart(sec.get("daily", []))}</div>')
-    return details("orb", summary("ORB paper", money(t["pnl"]), f'{t["fills"]} fills · {len(vet)} vetoes', sign_cls(t["pnl"])),
+            f'<h3 class="sub-h">Sessions since 11/12, P&amp;L</h3><div style="max-width:520px">{bar_chart(sec.get("daily", []))}</div>')
+    return details("orb", summary(f"ORB paper {ORB_DAY_ONE_SUFFIX}", money(t["pnl"]), f'{t["fills"]} fills · {len(vet)} vetoes', sign_cls(t["pnl"])),
                    body, t["fills"] > 0)
 
 

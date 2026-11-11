@@ -358,7 +358,7 @@ def test_shared_account_1110_shape_orb_idle_ext_reported(tmp_path, caplog):
     with caplog.at_level(logging.INFO, logger='hourly_summary'):
         msg = hs.build_message(now, _data(orb=orb), {})
     lines = msg.splitlines()
-    orb_line = [ln for ln in lines if ln.startswith('<b>ORB</b>')][0]
+    orb_line = [ln for ln in lines if ln.startswith('<b>ORB')][0]
     ext_line = [ln for ln in lines if ln.startswith('<b>EXT (micha)</b>')][0]
     assert '0 fills' in orb_line and 'open 1: BEX' in orb_line and 'MRK' not in orb_line and 'JPM' not in orb_line
     assert '2 fills' in ext_line and 'open 2: MRK JPM' in ext_line and '−$17' in ext_line
@@ -374,4 +374,4 @@ def test_tom_spy_iwm_legs_not_reported_as_orb():
     msg = hs.build_message(NOW, _data(orb=book(client)), {})
     tom = [ln for ln in msg.splitlines() if ln.startswith('<b>TOM</b>')][0]
     assert 'hold SPY 3' in tom
-    assert '<b>ORB</b>' in msg and 'SPY' not in [ln for ln in msg.splitlines() if ln.startswith('<b>ORB</b>')][0]
+    assert '<b>ORB' in msg and 'SPY' not in [ln for ln in msg.splitlines() if ln.startswith('<b>ORB')][0]

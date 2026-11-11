@@ -29,15 +29,18 @@ def _load(name):
 
 
 class TestTable:
-    @pytest.mark.parametrize('book', ['bf', 'orb'])
-    def test_current_stage_starts_2026_09_21(self, book):
-        """Monday's boot is a new stage for BOTH books."""
-        start, reason = rs.current(book)
+    def test_bf_current_stage_starts_2026_09_21(self):
+        """Monday's boot is a new stage for BF."""
+        start, reason = rs.current('bf')
         assert start == '2026-09-21'
         assert reason.strip()
 
-    def test_orb_reason_names_the_change(self):
-        _, reason = rs.current('orb')
+    def test_orb_current_stage_is_amendment_2_day_one(self):
+        start, reason = rs.current('orb')
+        assert start == '2026-11-12' and 'amend2_parity' in reason
+
+    def test_orb_9_21_stage_reason_names_the_change(self):
+        reason = [r['reason'] for r in rs.history('orb') if r['start'] == '2026-09-21'][0]
         assert '8-slot' in reason and 'catalyst-off' in reason
 
     def test_bf_reason_names_the_change(self):
@@ -51,7 +54,7 @@ class TestTable:
         starts = [r['start'] for r in rs.history(book)]
         assert launch in starts
         assert starts == sorted(starts)          # chronological
-        assert rs.previous(book)[0] == launch
+        assert launch in [r['start'] for r in rs.history(book)][:-1]
 
     def test_rows_are_iso_dates_with_reasons(self):
         from datetime import date
@@ -82,7 +85,7 @@ class TestResolve:
 
     def test_line_flags_the_excluded_previous_stage(self):
         line = rs.line('orb', *rs.current('orb'))
-        assert '2026-09-21' in line and '2026-08-17' in line
+        assert '2026-11-12' in line and '2026-09-21' in line
         assert 'OUT of this window' in line
 
 
@@ -107,5 +110,5 @@ class TestCheckersConsumeIt:
         rs.add_stage_start_arg(ap, book)
         a = ap.parse_args([])
         assert a.stage_start is None
-        assert rs.resolve(book, a.stage_start)[0] == '2026-09-21'
+        assert rs.resolve(book, a.stage_start)[0] == ('2026-11-12' if book == 'orb' else '2026-09-21')
         assert rs.resolve(book, '2026-01-02')[0] == '2026-01-02'

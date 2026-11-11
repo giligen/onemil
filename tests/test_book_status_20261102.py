@@ -119,7 +119,7 @@ def test_render_and_json_same_content(trades_db, mom_paths, tmp_path, monkeypatc
     text = bs.render(secs, DAY)
     assert len(text.splitlines()) <= 25
     assert "HOD paper: 3 fills, closed +$70, open 1 (CCC)" in text
-    assert "ORB paper: 2 fills -$100 today" in text and "ramp n/a" in text
+    assert "ORB paper (since 11/12, A2): 2 fills -$100 today" in text and "ramp n/a" in text
     assert "MOM paper: 2026-11-02 eq $16,000" in text and "pause rail +$1,000" in text
     assert "BF trading.enabled=False" in text
     assert json.loads(json.dumps(secs, default=str))["hod"]["today"]["fills"] == 3
@@ -141,3 +141,11 @@ def test_main_exit_zero_json(monkeypatch, capsys):
     monkeypatch.setattr(bs, "build", lambda day, **k: {"service": {"active": "x"}})
     assert bs.main(["--date", DAY, "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["date"] == DAY
+
+
+@pytest.fixture(autouse=True)
+def _legacy_fixtures_predate_orb_day_one(monkeypatch):
+    """These fixtures are dated 10/26-11/02 (pre-parity); day one is pinned early so they keep exercising the aggregates.
+    The day-one clamp itself is covered by tests/test_orb_day_one_20261111.py."""
+    from datetime import date
+    monkeypatch.setattr(bs, "ORB_DAY_ONE", date(2026, 1, 1))

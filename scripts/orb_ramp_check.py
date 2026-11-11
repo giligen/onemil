@@ -23,6 +23,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sqlite3
 import sys
@@ -38,6 +39,7 @@ sys.path.insert(0, str(ROOT))
 ORB_YAML = ROOT / 'orb.yaml'
 TRADES_DB = ROOT / 'data' / 'trades.db'
 GREEN = ROOT / 'logs' / 'green_streak.json'
+EXCLUSIONS_CSV = ROOT / 'research' / 'orb_exit_resim' / 'orb_ramp_exclusions.csv'
 
 from trading import ramp_bt_band as band_mod  # noqa: E402  (needs ROOT on sys.path)
 from trading import ramp_pool  # noqa: E402  (the pooled ADVISORY line)
@@ -202,6 +204,29 @@ def load_fills(since: str) -> List[Dict]:
     return [dict(r) for r in rows]
 
 
+def load_exclusions(path: Path = EXCLUSIONS_CSV) -> Dict[tuple, str]:
+    """{(date, SYMBOL): reason} accident-exclusion list (PREREG_1709 Amendment 2). A missing file is a WARNING
+    (nothing excluded), never silent; a malformed row is a hard error."""
+    if not Path(path).exists():
+        print(f"WARNING: accident-exclusion list {path} missing — NO fills excluded")
+        return {}
+    out: Dict[tuple, str] = {}
+    with open(path, newline='') as fh:
+        for row in csv.DictReader(fh):
+            date.fromisoformat(row['date'])           # raises on a malformed date
+            out[(row['date'], row['symbol'].strip().upper())] = row['reason']
+    return out
+
+
+def split_excluded(fills: List[Dict], exclusions: Dict[tuple, str]) -> tuple:
+    """(kept fills, [(fill, reason)] excluded). Excluded fills are LISTED by the caller, never silently dropped."""
+    kept, dropped = [], []
+    for f in fills:
+        reason = exclusions.get((f['trade_date'], str(f['symbol']).upper()))
+        (dropped.append((f, reason)) if reason else kept.append(f))
+    return kept, dropped
+
+
 def load_parity(since: str) -> Dict[str, List[str]]:
     try:
         days = json.load(open(GREEN)).get('days', [])
@@ -235,7 +260,8 @@ def main() -> int:
     budget = float(cfg['sizing']['account_budget_usd'])
     cur = stage_for_budget(budget)
     daily_limit = float(cfg.get('risk', {}).get('daily_loss_limit_usd', cur['daily_limit'] or 0) or 0) or None
-    fills = load_fills(stage_start)
+    # accident exclusions BEFORE compute_stats, so the "monster" (best fill) is computed after exclusion
+    fills, excluded = split_excluded(load_fills(stage_start), load_exclusions())
     sess = sessions_since(stage_start)
     parity = load_parity(stage_start)
     if '__unknown__' in parity:
@@ -260,6 +286,8 @@ def main() -> int:
           f"(best fill ${s.best_fill_pnl:,.0f} removed) → "
           f"{'ABOVE WATER' if s.above_water_ex_monster else 'NOT above water'} "
           f"(advance requires > 0)")
+    for f, reason in excluded:
+        print(f"  EXCLUDED accident {f['trade_date']} {f['symbol']} pnl ${float(f['pnl'] or 0):,.0f} — {reason[:110]}")
     print(band_mod.band_line(s.band_status, s.live_mean_r, s.band, ref))
     print(ramp_pool.advisory_line())
     if s.frozen:

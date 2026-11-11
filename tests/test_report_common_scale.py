@@ -82,6 +82,7 @@ class TestCumulativeSql:
         (tmp_path.parent / 'data').mkdir(exist_ok=True)
         import shutil
         shutil.copy(p, tmp_path.parent / 'data' / 'trades.db')
+        monkeypatch.setattr(rc, 'ORB_DAY_ONE', __import__('datetime').date(2026, 1, 1))   # legacy fixture predates A2 day one
         got = rc.cumulative_orb_since('2026-01-01')
         assert got == pytest.approx((10.5 - 10.0) * 600 + 1200.0 + 50.0)
 

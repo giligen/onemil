@@ -106,7 +106,7 @@ def test_orb_clean_session_with_picks_and_defect_counts():
     assert m["clean"] is True and any("mean +20.0 bp" in ln for ln in lines)
     assert lines[0].startswith("ORB ranked: engine 1 vs BT 1 | match 1")
     assert any(ln.startswith("BT: rows 12 -> top-8 (1) -> vetoed 0") for ln in lines)
-    assert any("ORB P&L: day $+40 on 1 exits | BT book $+55" in ln for ln in lines)
+    assert any("ORB P&L (since 11/12, A2): day $+40 on 1 exits | BT book $+55" in ln for ln in lines)
     p = es.parse_orb_log(_scored("AAA") + "\n2026 | ERROR | orb ORB boom\nEngine tick TIMEOUT (>50s)\n")
     assert p["errors"] == 1 and p["timeouts"] == 1
     _, m2 = es.orb_parity_lines(DAY, ENG, p, BT, "", _rank(["AAA"], ["AAA"]))

@@ -654,9 +654,9 @@ def score_days(df, params, cutoffs, mode='pit', history_path=None):
         day_pp = {d: PitParams(params, cutoffs, None, 'current') for d in days}
     else:
         day_pp = {d: params_for_day(_pd.Timestamp(d).date(), hist, cur, warn=False) for d in days}
-        fb = [d for d, pp in day_pp.items() if pp.source != 'pit']
+        fb = [d for d, pp in day_pp.items() if pp.source not in ('pit', 'seed')]
         if fb:
-            logger.warning("ORB BT PIT params: %d session days %s..%s precede the first recorded refit; scored "
+            logger.warning("ORB BT PIT params: %d session days %s..%s precede the first recorded refit (or oldest seed); scored "
                            "with the CURRENT orb.yaml set (look-ahead, NOT point-in-time)",
                            len(fb), _pd.Timestamp(min(fb)).date(), _pd.Timestamp(max(fb)).date())
     comp = _pd.Series(index=df.index, dtype=float)

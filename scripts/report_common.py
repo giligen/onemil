@@ -25,6 +25,8 @@ log = logging.getLogger(__name__)
 sys.path.insert(0, str(ROOT))
 
 from trading.exit_reasons import is_known, needs_reconcile  # noqa: E402
+from trading.ramp_stage import (ORB_DAY_ONE, ORB_DAY_ONE_SUFFIX,  # noqa: E402  (ONE constant for ORB day one)
+                                ORB_PRE_PARITY_START, ORB_PRE_PARITY_END)
 from trading.orb_csv import read_orb_csv  # noqa: E402  ticker-safe CSV reader (NA/NAN/NULL are symbols)
 
 STREAK_PATH = ROOT / 'logs' / 'green_streak.json'
@@ -953,9 +955,12 @@ def _row_pnl(r: Dict) -> Optional[float]:
 
 
 def realized_pnl(day: str) -> Dict[str, float]:
-    """Realized P&L per strategy for a date (closed rows only)."""
+    """Realized P&L per strategy for a date (closed rows only). ORB rows dated before ORB_DAY_ONE are pre-parity
+    (Amendment 2) and are NOT counted here - see `orb_pre_parity_pnl`."""
     out: Dict[str, float] = {}
     for r in load_live_rows(day):
+        if (r.get('strategy') == 'orb' and day < ORB_DAY_ONE.isoformat()):
+            continue
         pnl = _row_pnl(r)
         if pnl is None:
             continue
@@ -963,11 +968,33 @@ def realized_pnl(day: str) -> Dict[str, float]:
     return out
 
 
+def orb_pre_parity_window_in(days: List[str]) -> bool:
+    """True while any report day falls inside the pre-parity ORB window 2026-09-29..2026-11-10."""
+    lo, hi = ORB_PRE_PARITY_START.isoformat(), ORB_PRE_PARITY_END.isoformat()
+    return any(lo <= d <= hi for d in days)
+
+
+def orb_pre_parity_pnl(days: List[str]) -> Tuple[float, int]:
+    """(closed P&L, fills) of ORB rows on the report `days` that fall in the pre-parity window - a LABELLED line only,
+    never gated, never pooled with the post-11/12 numbers."""
+    lo, hi = ORB_PRE_PARITY_START.isoformat(), ORB_PRE_PARITY_END.isoformat()
+    tot, n = 0.0, 0
+    for d in days:
+        if not lo <= d <= hi:
+            continue
+        for r in load_live_rows(d, strategy='orb'):
+            pnl = _row_pnl(r)
+            if pnl is not None:
+                tot, n = tot + pnl, n + 1
+    return tot, n
+
+
 def cumulative_orb_since(start: str) -> float:
     """Cumulative realized ORB P&L. The NULL-pnl fallback is scale-aware
     (winner stack P0-3c): runner qty = filled_qty − scale_qty and the
     banked scale_pnl is added — non-scaled rows are unchanged
     (COALESCE(scale_qty,0)=0)."""
+    start = max(start, ORB_DAY_ONE.isoformat())   # A2: nothing before day one is ever summed
     conn = sqlite3.connect(ROOT / 'data' / 'trades.db', timeout=15)
     row = conn.execute(
         """SELECT COALESCE(SUM(

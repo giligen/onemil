@@ -25,6 +25,8 @@ from typing import Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from trading.ramp_stage import ORB_DAY_ONE, ORB_DAY_ONE_SUFFIX  # noqa: E402  (ONE constant for ORB day one)
 TRADES_DB = ROOT / "data" / "trades.db"
 RAMP_FREEZE = ROOT / "logs" / "ramp_freeze.json"
 MOM_PAPER_WEEKLY = ROOT / "logs" / "momentum_sleeve_weekly.csv"
@@ -188,7 +190,8 @@ def section_orb(db: Path, day: str, journal: List[str], ramp_path: Path = RAMP_F
     con = connect_ro(db)
     try:
         def agg(lo: str, hi: str) -> dict:
-            """Fills and closed P&L between two trade_dates inclusive."""
+            """Fills and closed P&L between two trade_dates inclusive, never before ORB_DAY_ONE (A2: all earlier ORB rows are pre-parity)."""
+            lo = max(lo, ORB_DAY_ONE.isoformat())
             n, pnl = con.execute(
                 "select count(*), coalesce(sum(pnl),0) from trades where strategy='orb' and fill_price is not null "
                 "and trade_date>=? and trade_date<=?", (lo, hi)).fetchone()
@@ -336,14 +339,16 @@ def book_fills(db: Path, day: str, strategy: str) -> List[dict]:
     return fills
 
 
-def book_daily(db: Path, day: str, strategy: str, since: Optional[str] = None) -> dict:
-    """Last 12 sessions ``{date, pnl, fills}`` of closed rows (+ ``cum_since_start`` when ``since`` is given) and the latest account."""
+def book_daily(db: Path, day: str, strategy: str, since: Optional[str] = None, floor: Optional[str] = None) -> dict:
+    """Last 12 sessions ``{date, pnl, fills}`` of closed rows (+ ``cum_since_start`` when ``since`` is given) and the latest account.
+
+    ``floor`` drops every session before that date (ORB passes ORB_DAY_ONE: earlier rows are pre-parity, never shown)."""
     con = connect_ro(db)
     try:
         have = trades_columns(con)
         rows = con.execute("select trade_date, coalesce(sum(pnl),0), count(*) from trades where strategy=? and "
-                           "fill_price is not null and pnl is not null and trade_date<=? group by trade_date "
-                           "order by trade_date", (strategy, day)).fetchall()
+                           "fill_price is not null and pnl is not null and trade_date<=? and trade_date>=? "
+                           "group by trade_date order by trade_date", (strategy, day, floor or "")).fetchall()
         acct = None
         if "account" in have:
             r = con.execute("select account from trades where strategy=? order by trade_date desc, id desc limit 1",
@@ -654,7 +659,7 @@ def render(sections: Dict[str, dict], day: str) -> str:
         o = sections["orb"]
         r = o["ramp"]
         ramp = "n/a" if r is None else ("FROZEN " + r["reason"] if r["frozen"] else "not frozen")
-        L.append(f"ORB paper: {o['today']['fills']} fills {money(o['today']['pnl'])} today | WTD "
+        L.append(f"ORB paper {ORB_DAY_ONE_SUFFIX}: {o['today']['fills']} fills {money(o['today']['pnl'])} today | WTD "
                  f"{money(o['wtd']['pnl'])} ({o['wtd']['fills']}) | PDR VETO {o['pdr_veto']} PARITY {o['preplace_parity']} | ramp {ramp}")
     if not bad("mom"):
         m = sections["mom"]
@@ -711,13 +716,13 @@ def build(day: str, journal: Optional[List[str]] = None, db: Path = TRADES_DB, *
     now = kw.get("now") or now_et()
     cfg = kw.get("config_path", CONFIG_YAML)
 
-    def extend(book: str, strategy: str, since: Optional[str]) -> None:
+    def extend(book: str, strategy: str, since: Optional[str], floor: Optional[str] = None) -> None:
         """Attach fills / daily / cumulative series (and HOD gate, ORB vetoes) to an available book section."""
         if "unavailable" in out[book]:
             return
         try:
             out[book]["fills"] = book_fills(db, day, strategy)
-            out[book].update(book_daily(db, day, strategy, since))
+            out[book].update(book_daily(db, day, strategy, since, floor))
             if book == "hod":
                 out[book]["cum_since_start"] = out[book].get("cum_since_start", [])
                 out[book]["gate"] = hod_gate(jl, out[book], cfg)
@@ -727,7 +732,7 @@ def build(day: str, journal: Optional[List[str]] = None, db: Path = TRADES_DB, *
             out[book]["extras_error"] = f"{type(exc).__name__}: {exc}"
 
     extend("hod", "hod_break", HOD_SINCE)
-    extend("orb", "orb", None)
+    extend("orb", "orb", None, ORB_DAY_ONE.isoformat())
     if "unavailable" not in out["mom"]:
         enrich_mom(out["mom"], **{k: v for k, v in kw.get("mom", {}).items() if k in ("paper_csv", "live_csv")},
                    **({"parity_csv": kw["mom"]["parity_csv"]} if "parity_csv" in kw.get("mom", {}) else {}))

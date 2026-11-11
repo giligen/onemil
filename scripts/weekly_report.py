@@ -43,7 +43,11 @@ def build_report(end: date) -> str:
         lines.append(f"  {d[5:]}: ${day_total:+,.0f}  ({detail or 'flat'})")
     week_total = sum(tot.values())
     lines.append(f"  <b>week: ${week_total:+,.0f}</b>  "
-                 + '  '.join(f"{k} {v:+,.0f}" for k, v in sorted(tot.items())))
+                 + '  '.join(f"{k} {v:+,.0f}" + (f" {rc.ORB_DAY_ONE_SUFFIX}" if k == 'orb' else '')
+                             for k, v in sorted(tot.items())))
+    if rc.orb_pre_parity_window_in(days):   # A2: the old segment is a labelled line, never pooled
+        pre_pnl, pre_n = rc.orb_pre_parity_pnl(days)
+        lines.append(f"  pre-parity 9/29–11/10 (ORB, not gated): ${pre_pnl:+,.0f} on {pre_n} rows")
 
     # --- Ramp gate progress ---
     lines.append("")
@@ -59,7 +63,7 @@ def build_report(end: date) -> str:
         lines.append("  green streak: no data yet (daily check starts Monday)")
     cum = rc.cumulative_orb_since(rc.RAMP_START)
     headroom = cum - rc.ADVANCE_LOSS_FLOOR
-    lines.append(f"  ORB since ramp-start: ${cum:+,.0f}  "
+    lines.append(f"  ORB {rc.ORB_DAY_ONE_SUFFIX}: ${cum:+,.0f}  "
                  f"(loss-floor headroom ${headroom:+,.0f} above {rc.ADVANCE_LOSS_FLOOR:+,.0f})")
 
     # --- Edge capture: BT at stage scale vs live ---

@@ -578,6 +578,7 @@ def _is_p1_scored(line: str) -> bool:
     return bool(m) and m.group(1) in _p1_pool_names()
 
 
+from trading.ramp_stage import ORB_DAY_ONE, ORB_DAY_ONE_SUFFIX  # noqa: E402  (ONE constant for ORB day one)
 from trading.orb_submit_timing import timing_summary_line  # noqa: E402  (one parser for the SUBMIT TIMING line)
 
 
@@ -953,7 +954,7 @@ def orb_parity_lines(day: str, engine_rows: List[Dict], parsed: Dict, bt_rows: O
     closed = [r for r in engine_rows if r.get("exit_price") is not None]
     pnl = sum(float(r.get("pnl") or 0) for r in closed)
     bt_pnl = (f"${sum(float(r.get('pnl') or 0) for r in bt_rows):+,.0f}" if bt_rows else "$+0" if bt_rows == [] else "NO-DATA")
-    lines.append(f"ORB P&L: day ${pnl:+,.0f} on {len(closed)} exits | BT book {bt_pnl}")
+    lines.append(f"ORB P&L {ORB_DAY_ONE_SUFFIX}: day ${pnl:+,.0f} on {len(closed)} exits | BT book {bt_pnl}")
     lines.append(timing_summary_line(parsed.get("timing_lines", [])))
     lines.append(defects)
     if parsed.get("order_fail"):
@@ -1250,7 +1251,9 @@ def _ramp_inputs(book: str, ramp: Dict, day: str) -> Tuple[Optional[float], Opti
                     if (dt.date.fromisoformat(since) + dt.timedelta(days=d)).weekday() < 5})
         if book == "ORB":
             import orb_ramp_check
-            return sum(float(f["pnl"] or 0) for f in orb_ramp_check.load_fills(since)), days
+            since_a2 = max(since, ORB_DAY_ONE.isoformat())   # A2: nothing before day one is ever summed
+            kept, _ = orb_ramp_check.split_excluded(orb_ramp_check.load_fills(since_a2), orb_ramp_check.load_exclusions())
+            return sum(float(f["pnl"] or 0) for f in kept), days
         marks = {r["date"]: float(r["equity"]) for r in read_csv_rows(WEEKLY)}
         eq0 = marks[max(k for k in marks if k <= since)]
         return marks[max(marks)] - eq0, days

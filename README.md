@@ -832,6 +832,13 @@ pytest tests/ -q          # quick summary
 
 ## ORB (Opening Range Breakout) — Third Strategy
 
+| Book | State |
+|---|---|
+| ORB | paper, $0, Amendment 2 from 2026-11-12: 10 consecutive pick-parity sessions then 40 post-11/12 symbol-days |
+
+Every ORB P&L / fill count in the reports is "(since 11/12, A2)" (`trading.ramp_stage.ORB_DAY_ONE`); the 9/29-11/10 paper
+segment is pre-parity, shown as a labelled line only. Spec: `docs/orb_day_one_20261112_spec_20261111.md`.
+
 Runs as a module inside the same `onemil-trader` systemd service alongside
 Bull Flag and MACD Wave. Fires at 9:35 ET on gap-up stocks that break
 above their 9:30–9:34 opening-range high. Uses the `static_lock` exit
