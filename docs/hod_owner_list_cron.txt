@@ -1,0 +1,6 @@
+# HOD owner-in-the-loop list (spec docs/hod_owner_list_spec_20261112.md) - install inside the CRON_TZ=America/New_York block.
+# The Friday line scores Monday-Friday: replace <Monday> with the date of that week's Monday (or wrap in $(date -d 'last monday' +\%F) - note the escaped % in crontab).
+40 9 * * 1-5 cd /home/ec2-user/onemil && python3 scripts/hod_owner_list.py --at 0940 >> logs/hod_owner_list.log 2>&1
+30 10 * * 1-5 cd /home/ec2-user/onemil && python3 scripts/hod_owner_list.py --at 1030 >> logs/hod_owner_list.log 2>&1
+0 14 * * 1-5 cd /home/ec2-user/onemil && python3 scripts/hod_owner_list.py --at 1400 >> logs/hod_owner_list.log 2>&1
+0 17 * * 5 cd /home/ec2-user/onemil && python3 scripts/hod_owner_list_score.py --since $(date -d 'last monday' +\%F) >> logs/hod_owner_list.log 2>&1

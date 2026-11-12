@@ -54,3 +54,7 @@ re-arm it verbatim and update the id here. The daily EOD report is a durable cro
   freeze left by the pre-11/12 paused-book false path, which `bf_decision_parity.py` clears with a logged reason.
 * Removed 11/12 (do not re-add): holdings_pulse (hourly), 20:30 UTC ORB BT line, 21:30 green check, 21:58 archive,
   19:57 UTC dead-man, 20:10 UTC guardrail, 17:40 ET EOD.
+
+## HOD owner-in-the-loop list (added 2026-11-12, ET block)
+| 40 9 / 30 10 / 0 14 * * 1-5 ET | `scripts/hod_owner_list.py --at HHMM` | Telegram list of armed HOD names with context; ledger logs/hod_owner_list.csv | producer: the trader journal + SIP snapshot |
+| 0 17 * * 5 ET | `scripts/hod_owner_list_score.py --since <Monday>` | owner picks (live manual orders) vs the machine on the same names | producer: the ledger above |

@@ -73,6 +73,11 @@
 # 2026-11-03: session archive follows ET (the onemil-orb-backtest systemd timer runs 16:30 ET and ends ~17:26 ET (EST: up to 17:41);
 # in EST the fixed 21:50/21:57 UTC slots ran BEFORE the BT -> "ORB P1 NO-DATA" every day). 17:35 ET = 22:35 UTC winter, 21:35 UTC summer.
 CRON_TZ=America/New_York
+# HOD owner-in-the-loop list (docs/hod_owner_list_spec_20261112.md): 09:40 / 10:30 / 14:00 ET, scorer Friday 17:00 ET
+40 9 * * 1-5 cd /home/ec2-user/onemil && python3 scripts/hod_owner_list.py --at 0940 >> logs/hod_owner_list.log 2>&1
+30 10 * * 1-5 cd /home/ec2-user/onemil && python3 scripts/hod_owner_list.py --at 1030 >> logs/hod_owner_list.log 2>&1
+0 14 * * 1-5 cd /home/ec2-user/onemil && python3 scripts/hod_owner_list.py --at 1400 >> logs/hod_owner_list.log 2>&1
+0 17 * * 5 cd /home/ec2-user/onemil && python3 scripts/hod_owner_list_score.py --since $(date -d 'last monday' +\%F) >> logs/hod_owner_list.log 2>&1
 35 17 * * 1-5 /usr/bin/journalctl -u onemil-trader --since "today" --no-pager | grep -E "\[ORB|ORB SCORED|IGNITION|VETO|Q1 filter|WOULD BUY|ENTRY SUBMITTED|FILLED|LOCK|kill|\[HOD" > /home/ec2-user/onemil/logs/session_archive/$(date +\%Y-\%m-\%d).log 2>&1
 # AUDIT REPLACED: EOD report moved from 17:40 ET to 23:25 UTC (UTC block below). At 17:40 ET it ran before BF parity (22:50 UTC), pick parity (23:15), green check (23:20) and, on 11/10, before the ORB BT finished (22:41). Alternative if the owner wants it earlier: keep 17:40 and accept 'previous session' gates.
 # AUDIT REMOVED: 40 17 * * 1-5 cd /home/ec2-user/onemil && /usr/bin/python3 scripts/eod_report.py >> logs/eod_report.log 2>&1
