@@ -27,3 +27,19 @@ on the same arms is -0.10 / -0.16 R filled; (4) queue position ignored, fills ar
 (5) the PREREG's independent rebuild (REBUILD_1737) has NOT been run — the number must not reach the owner as final until it matches.
 A pass = a paper instrument spec, never a live change. M3 is post-hoc (needs its own PREREG on a different regime); it fails anyway.
 Cells counted: 1,737 plus sensitivities M1L / M2L / thru10bp (not new cells).
+
+## Verdict after the adversarial rebuild (Fable, 2026-11-12 ~22:00 UTC; `REBUILD_1737.md`)
+M1 holds on mechanics: 0 mismatches on fill flag / fill minute / price / stop / R over 8,061 arms, look-ahead check
+passed on every arm, floor 1.5 % (`hod_break.min_r_pct`). Rebuild numbers (strict one-tick fill): TRAIN +0.183 R
+(n 1,564, day-t 3.09), VAL +0.181 R (n 2,089, day-t 3.63); 10 bp through-trade fill: +0.147 / +0.140 (t 2.4 / 2.8);
+**under the live caps (8/day, 4 concurrent, first-come): +0.102 / +0.129 R, t 1.6 / 1.9, 33–37 fills/week** —
+below t 2, reported as such. Adverse selection runs the RIGHT way: the filled arms' B0 outcome (−0.10 / −0.16) beats
+the unfilled arms' (−0.33 / −0.38); arms that never close above the level average −1.37 R and the confirmation
+requirement excludes them. Mechanism = no chase, no spread, a 15–60 bps better entry than the break buyer, plus
+the confirmed-close + pullback selection. Caveats: queue position ignored (one tick through = filled), stop slip
+13 bp modelled, two half-years in the same era (no out-of-regime read yet — TEST arms 2026-06..09 do not exist in
+replay_signals and must be generated with `causal_arming.py`, sealed, one shot), paper endpoint cannot test queue
+priority. **Decision:** (1) sealed TEST read on generated 2026-06..09 arms; (2) if the sign holds, an M1 retest-bid
+mode in the HOD engine — dry ledger first, then paper at $150 R after a boot rehearsal; never live from this cell.
+M2 coil bid FAIL (−0.22 / −0.29 R, 93–96 % fill share: the bid under the level catches the breakdowns). M3 buy the
+failed retest FAIL (−0.08 / −0.03, post-hoc anyway).
