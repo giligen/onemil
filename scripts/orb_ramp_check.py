@@ -62,7 +62,7 @@ ADVANCE = {'min_fills': 8, 'min_fills_advance': 40, 'min_sessions': 15, 'limit_f
            'entry_slip_model_bps': 30.0, 'slip_tolerance_bps': 10.0}
 DEMOTE = {'pnl_pct_of_budget': -6.0, 'streak': 5, 'limit_hits': 2, 'slip_2x_fills': 3}
 PAUSE = {'pnl_pct_of_budget': -8.0}
-PARITY_MARKERS = ('BT picks never ordered live', 'fill-parity')
+PARITY_MARKERS = ('pick parity', 'fill-parity')
 
 
 @dataclass
@@ -233,6 +233,7 @@ def load_parity(since: str) -> Dict[str, List[str]]:
     except Exception as e:  # noqa: BLE001
         print(f"WARNING: {GREEN} unreadable ({e}) — parity treated as UNKNOWN (blocks ADVANCE)")
         return {'__unknown__': ['fill-parity: unknown']}
+    since = max(since, ramp_stage.ORB_DAY_ONE.isoformat())   # ONE counter: nothing before day one is ever read
     return {d['day']: list(d.get('reasons') or []) for d in days if d.get('day', '') >= since}
 
 

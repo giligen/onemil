@@ -16,6 +16,7 @@ import datetime as dt
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -152,7 +153,10 @@ def freeze_summary(path: Optional[Path] = None, bf_on: Optional[bool] = None) ->
 
 def parity_section(day: str) -> str:
     """Gate-1: ORB green check verdict and BF decision-parity JSON status for the day."""
-    green = last_matching_line(ROOT / "logs/daily_green_check.log", ("GREEN", "RED", "YELLOW"))
+    green = last_matching_line(ROOT / "logs/daily_green_check.log", ("GREEN", "RED", "YELLOW", "NOT COUNTED"))
+    m = re.search(r"\b(20\d\d-\d\d-\d\d)\b", green)
+    if m and m.group(1) < day:   # the check runs 23:20 UTC, after this report: the last line is a PREVIOUS session's
+        green = f"prev session {m.group(1)} (not today's verdict): {green}"
     bf_json = ROOT / f"logs/bf_parity/bf_parity_{day}.json"
     if bf_json.exists():
         d = json.loads(bf_json.read_text())

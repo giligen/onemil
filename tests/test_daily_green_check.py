@@ -7,6 +7,7 @@ a red resets, weekend gaps don't break it, same-day reruns are idempotent.
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -16,8 +17,17 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
 import report_common as rc
 from daily_green_check import build_message
 
+CLEAN_PARITY = {'date': 'x', 'bt_available': True, 'live_final': ['AAA'], 'bt_top8': ['AAA'], 'differences': [],
+                'n_unexplained': 0, 'fills_outside_final': [], 'summary': 'ORB pick parity x: matched 1/8 | unexplained 0'}
+
 
 class TestStreakUpdate:
+    @pytest.fixture(autouse=True)
+    def _day_one_before_fixtures(self, monkeypatch):
+        """These fixtures use July dates: lower the day-one floor (the day-one rule has its own class)."""
+        import datetime as dt
+        monkeypatch.setattr(rc, 'ORB_DAY_ONE', dt.date(2026, 1, 1))
+
     def test_greens_increment(self, tmp_path):
         p = tmp_path / 's.json'
         assert rc.streak_update('2026-07-06', True, [], path=p) == 1
@@ -107,19 +117,6 @@ class TestGreenVerdict:
         assert v['green'] is False
         assert any('unattributed' in r for r in v['reasons'])
 
-    def test_bt_pick_never_ordered_is_red(self, monkeypatch):
-        """The CRCD class — BT selected it, live has no row at all."""
-        self._patch(monkeypatch, rows=[], bt=[{'symbol': 'CRCD'}])
-        v = rc.green_verdict('2026-06-30')
-        assert v['green'] is False
-        assert any('CRCD' in r for r in v['reasons'])
-
-    def test_bt_pick_missing_but_spread_explained_is_green(self, monkeypatch):
-        self._patch(monkeypatch, rows=[], bt=[{'symbol': 'WIDE'}],
-                    journal=['... WIDE skipped — spread 210bps > 150bps ...'])
-        v = rc.green_verdict('2026-07-06')
-        assert v['green'] is True
-
     def test_pending_verification_is_red(self, monkeypatch):
         rows = [{'symbol': 'BBB', 'strategy': 'orb', 'entry_price': 5.0,
                  'exit_price': None, 'shares': 100, 'exit_reason': None,
@@ -136,41 +133,18 @@ class TestGreenVerdict:
         self._patch(monkeypatch, rows=rows)
         assert rc.green_verdict('2026-07-06')['green'] is True
 
-    def test_stale_bt_data_skips_parity_not_greenwashes(self, monkeypatch):
-        """BT CSV behind the checked day -> parity SKIPPED and visible,
-        day still evaluable on the other gates."""
+    def test_missing_bt_is_red_with_the_reason_never_skipped(self, monkeypatch):
+        """BT behind the checked day -> RED naming the build timer; no bt_stale branch, no SKIPPED string."""
         rows = [{'symbol': 'AAA', 'strategy': 'orb', 'entry_price': 10.0,
                  'exit_price': 10.5, 'shares': 100, 'exit_reason': 'lock_stop',
                  'order_status': 'filled'}]
         self._patch(monkeypatch, rows=rows, bt=[{'symbol': 'ZZZ'}],
                     bt_max='2026-07-01')
         v = rc.green_verdict('2026-07-02')
-        assert v['green'] is True
-        assert v['bt_stale'] is True
-        assert 'SKIPPED' in v['checks']['bt_parity']
-
-
-class TestMessage:
-    def test_green_message_is_one_line(self):
-        v = {'day': '2026-07-06', 'green': True, 'reasons': [], 'checks': {},
-             'n_live_rows': 4, 'n_bt_selected': 3}
-        msg = build_message(v, streak=4, pnl={'orb': 123.0})
-        assert msg.count('\n') == 0
-        assert 'GREEN 4/10' in msg
-
-    def test_red_message_carries_reasons(self):
-        v = {'day': '2026-07-06', 'green': False,
-             'reasons': ['BT picks never ordered live: [CRCD]'],
-             'checks': {'bt_parity': 'x'}, 'n_live_rows': 2, 'n_bt_selected': 3}
-        msg = build_message(v, streak=0, pnl={})
-        assert 'RED DAY' in msg and 'CRCD' in msg and 'reset' in msg
-
-    def test_sizing_block_appended_to_green(self):
-        v = {'day': '2026-07-13', 'green': True, 'reasons': [], 'checks': {},
-             'n_live_rows': 1, 'n_bt_selected': 1}
-        msg = build_message(v, streak=1, pnl={'orb': 50.0},
-                            sizing_txt='sizing: AAA Q2 q1.5×pm2.0 (news✓ $9.0M)')
-        assert 'sizing: AAA' in msg and 'GREEN' in msg
+        assert v['green'] is False and v['bt_missing'] is True and 'bt_stale' not in v
+        assert any(r.startswith('nightly BT missing for 2026-07-02') and 'onemil-orb-backtest.timer' in r
+                   for r in v['reasons'])
+        assert 'SKIPPED' not in str(v)
 
 
 class TestSizingAttribution:
@@ -325,11 +299,11 @@ class TestDecisionParity:
         dp = rc.decision_parity('2026-07-16')
         assert len(dp['mismatches']) == 1 and 'TST' in dp['mismatches'][0]
 
-    def test_wired_as_hard_gate(self):
+    def test_composite_drift_is_carried_by_pick_parity_not_the_green_check(self):
         import inspect
         import daily_green_check as dgc
         src = inspect.getsource(dgc.main)
-        assert 'decision_parity' in src and 'composite drift' in src
+        assert 'pick_parity_verdict' in src and 'decision_parity' not in src
 
 
 class TestCompositeDriftClassification:
@@ -449,10 +423,10 @@ class TestFillParity:
         self._patch(monkeypatch, rows=rows, bt=[])
         assert rc.green_verdict('2026-07-30')['green'] is True
 
-    def test_stale_bt_skips_fill_parity(self, monkeypatch):
+    def test_missing_bt_has_no_fill_parity_and_no_skipped(self, monkeypatch):
         self._patch(monkeypatch, rows=[], bt=[], bt_max='2026-07-01')
         v = rc.green_verdict('2026-07-30')
-        assert v['checks']['fill_parity'].startswith('SKIPPED')
+        assert 'SKIPPED' not in str(v['checks']) and v['green'] is False
 
 
 class TestParityFreeze:
@@ -463,11 +437,10 @@ class TestParityFreeze:
         from daily_green_check import parity_breaches
         hard = [
             "pm_mult drift vs recompute: ['ABC 2.0 vs 1.0']",
-            "BT picks never ordered live: ['DEF']",
+            "pick parity: 1 unexplained ['DEF'], live fills outside the final set []",
             "fill-parity: BT FILLED but live order never filled: ['GHI']",
             "unattributed exits: ['JKL']",
             "exit_pending_verification: ['MNO']",
-            "composite drift BT vs live (1 of 4): ['PQR']",
             "floored-stop drift: ['STU']",
         ]
         assert parity_breaches(hard) == hard
@@ -488,12 +461,14 @@ class TestParityFreeze:
         monkeypatch.setattr(rc, 'green_verdict', lambda d: {
             'day': d, 'green': not reasons, 'reasons': list(reasons),
             'checks': {}, 'n_live_rows': 1, 'n_bt_selected': 1,
-            'bt_stale': False})
+            'bt_missing': False})
         monkeypatch.setattr(rc, 'sizing_attribution',
                             lambda d: {'mult_mismatches': [], 'rows': []})
         monkeypatch.setattr(rc, 'decision_parity',
                             lambda d: {'mismatches': [], 'warnings': [],
                                        'n_compared': 0})
+        monkeypatch.setattr(dgc, 'wait_for_bt', lambda *a, **k: True)
+        monkeypatch.setattr(dgc, 'pick_parity_verdict', lambda d: dict(CLEAN_PARITY, date=d))
         monkeypatch.setattr(rc, 'streak_update', lambda *a, **k: 0)
         monkeypatch.setattr(rc, 'read_streak', lambda *a, **k: {'streak': 0})
         monkeypatch.setattr(rc, 'realized_pnl', lambda d: {})
@@ -508,14 +483,14 @@ class TestParityFreeze:
 
     def test_main_freezes_orb_on_a_hard_breach(self, monkeypatch, tmp_path):
         dgc, rf = self._patch_main(
-            monkeypatch, tmp_path, ["BT picks never ordered live: ['DEF']"])
+            monkeypatch, tmp_path, ["pick parity: 1 unexplained ['DEF'], live fills outside the final set []"])
         monkeypatch.setattr(sys, 'argv',
                             ['daily_green_check.py', '--date', '2026-09-18',
                              '--no-telegram'])
         assert dgc.main() == 1
         st = rf.get('orb')
         assert st.frozen and st.since == '2026-09-18'
-        assert 'never ordered' in st.reason
+        assert 'pick parity' in st.reason
 
     def test_main_does_not_freeze_a_green_day(self, monkeypatch, tmp_path):
         dgc, rf = self._patch_main(monkeypatch, tmp_path, [])
@@ -608,3 +583,183 @@ class TestOrbOnlyGreenCheckAndFreezeReconcile:
         rf = self._freeze_orb(tmp_path, monkeypatch, '2026-10-05', "unattributed exits: ['SPAL']")
         assert 'would CLEAR' in dgc.reconcile_freeze('2026-10-05', [], dry_run=True)
         assert rf.is_frozen('orb')
+
+
+# ---------------------------------------------------------------------------
+# ONE counter (2026-11-12): pick parity, BT wait, day-one streak, never "skipped"
+# ---------------------------------------------------------------------------
+import datetime as _dt
+import logging
+
+import daily_green_check as dgc
+from scripts import orb_pick_parity as opp
+
+DAY_ONE = _dt.date(2026, 11, 12)
+
+
+def _res(diffs=(), final=('AAA', 'BBB'), bt_available=True, leaks=()):
+    """A pick-parity result dict (shape of orb_pick_parity.run_parity)."""
+    diffs = [dict(symbol=s, side='bt_only', reason=r, detail='') for s, r in diffs]
+    return {'date': '2026-11-12', 'bt_available': bt_available, 'live_final': list(final), 'bt_top8': list(final),
+            'differences': diffs, 'n_unexplained': sum(d['reason'] == 'unexplained' for d in diffs),
+            'fills_outside_final': list(leaks), 'summary': 'ORB pick parity 2026-11-12: summary'}
+
+
+def _verdict():
+    return {'day': '2026-11-12', 'green': True, 'reasons': [], 'checks': {}, 'n_live_rows': 2, 'n_bt_selected': 2}
+
+
+class TestPickParityVerdict:
+    def test_clean_is_green(self):
+        v = _verdict()
+        assert dgc.apply_pick_parity(v, _res()) is False and v['green'] is True
+
+    def test_one_unexplained_is_red(self):
+        v = _verdict()
+        assert dgc.apply_pick_parity(v, _res(diffs=[('AAA', 'unexplained')])) is False
+        assert v['green'] is False and 'pick parity: 1 unexplained' in v['reasons'][0]
+        assert dgc.parity_breaches(v['reasons'])   # a hard breach: freezes the ramp
+
+    def test_fill_outside_final_is_red(self):
+        v = _verdict()
+        dgc.apply_pick_parity(v, _res(leaks=['XMAX']))
+        assert v['green'] is False and 'XMAX' in v['reasons'][0]
+
+    def test_explained_differences_stay_green(self):
+        v = _verdict()
+        dgc.apply_pick_parity(v, _res(diffs=[('AAA', 'range_missing')], final=('AAA', 'BBB')))
+        assert v['green'] is True
+
+    def test_vendor_no_range_day_is_not_counted(self):
+        v = _verdict()
+        res = _res(diffs=[('AAA', 'range_missing'), ('BBB', 'range_missing')], final=())
+        res['bt_top8'] = ['AAA', 'BBB']
+        assert dgc.is_no_range_day(res) and dgc.apply_pick_parity(v, res) is True
+
+    def test_bt_side_unavailable_is_red_with_one_error(self, caplog):
+        """The nightly BT was waited for, so a parity run that still cannot read its BT side is OUR defect: RED, never
+        'not counted' (one ERROR names it)."""
+        v = _verdict()
+        res = _res(bt_available=False)
+        res['bt_why'] = 'bt_ranked empty'
+        with caplog.at_level(logging.ERROR, logger='daily_green_check'):
+            assert dgc.apply_pick_parity(v, res) is False
+        assert v['green'] is False
+        assert any('BT side unavailable' in r and 'bt_ranked empty' in r for r in v['reasons'])
+        assert sum(1 for r in caplog.records if r.levelno == logging.ERROR) == 1
+
+
+class TestWaitForBt:
+    def test_returns_when_bt_appears(self):
+        seq = iter([None, '2026-11-11', '2026-11-12'])
+        slept = []
+        assert dgc.wait_for_bt('2026-11-12', 45, sleep=slept.append, bt_max_fn=lambda: next(seq)) is True
+        assert slept == [60, 60]
+
+    def test_gives_up_after_the_window(self):
+        slept = []
+        assert dgc.wait_for_bt('2026-11-12', 3, sleep=slept.append, bt_max_fn=lambda: '2026-11-11') is False
+        assert len(slept) == 3
+
+
+class TestDayOneStreak:
+    def test_only_days_from_day_one_count(self, tmp_path):
+        p = tmp_path / 's.json'
+        recs = [{'day': f'2026-08-{d:02d}', 'green': True, 'reasons': []} for d in range(3, 8)]
+        recs += [{'day': f'2026-11-{d:02d}', 'green': True, 'reasons': []} for d in (2, 3, 4, 5, 6, 9, 10, 11)]
+        p.write_text(json.dumps({'streak': 13, 'needed': 10, 'days': recs}))
+        assert rc.read_streak(p)['streak'] == 0          # stored 13 is never trusted
+        assert rc.streak_update('2026-11-12', True, [], path=p) == 1
+        assert len(rc.read_streak(p)['days']) == 14       # earlier records untouched
+        assert rc.streak_update('2026-11-13', True, [], path=p) == 2
+
+    def test_red_resets_and_not_counted_is_neutral(self, tmp_path):
+        p = tmp_path / 's.json'
+        rc.streak_update('2026-11-12', True, [], path=p)
+        rc.streak_update('2026-11-13', True, [], path=p)
+        assert rc.streak_update('2026-11-16', False, [], path=p, counted=False) == 2
+        assert rc.read_streak(p)['days'][-1]['counted'] is False
+        assert rc.streak_update('2026-11-17', True, [], path=p) == 3
+        assert rc.streak_update('2026-11-18', False, ['x'], path=p) == 0
+
+    def test_label(self):
+        assert rc.green_label(3) == '[GREEN 3/10 since 11/12, A2]'
+        assert '[GREEN 1/10 since 11/12, A2]' in build_message(_verdict(), 1, {})
+
+    def test_ramp_check_reads_nothing_before_day_one(self, tmp_path, monkeypatch):
+        import orb_ramp_check as orc
+        g = tmp_path / 'g.json'
+        g.write_text(json.dumps({'days': [{'day': '2026-11-11', 'green': False, 'reasons': ['fill-parity: x']},
+                                          {'day': '2026-11-12', 'green': False, 'reasons': ['pick parity: y']}]}))
+        monkeypatch.setattr(orc, 'GREEN', g)
+        assert list(orc.load_parity('2026-09-01')) == ['2026-11-12']
+
+
+class TestMainEndToEnd:
+    """Whole `main(['--dry-run', ...])` path on a fixture day: tmp trades.db + tmp BT book + real run_parity compare."""
+
+    DAY = '2026-11-12'
+
+    def _wire(self, monkeypatch, tmp_path, bt_max, live_final=('AAA',), bt_ranked=('AAA',), fills=()):
+        db = tmp_path / 't.db'
+        con = sqlite3.connect(db)
+        con.execute('create table trades (symbol, strategy, trade_date, fill_price, filled_at, order_status, pattern_data)')
+        for s in fills:
+            con.execute("insert into trades values (?,?,?,?,?,?,?)",
+                        (s, 'orb', self.DAY, 10.0, f'{self.DAY}T14:36:00+00:00', 'filled', '{"pool_id": "production"}'))
+        con.commit()
+        con.close()
+        book = tmp_path / 'book.csv'
+        book.write_text('symbol,date,entered,params_refit_ts\n' + ''.join(f'{s},{self.DAY},1,20261101_200000\n' for s in bt_ranked))
+        bt = {'ranked': list(bt_ranked), 'picks': list(bt_ranked), 'n': 8, 'comp': {s: (0.5, 'Q5') for s in bt_ranked},
+              'vetoes': {}, 'day_symbols': sorted(set(bt_ranked) | set(live_final)), 'range_size': {s: 3.0 for s in bt_ranked},
+              'params_refit_ts': '20261101_200000', 'params_source': 'pit'}
+        live = {'final': sorted(live_final), 'provisional': [], 'submitted': sorted(live_final),
+                'scored': {x: (0.5, 'Q5') for x in live_final}, 'range_done': sorted(live_final), 'final_ranges': {},
+                'vetoes': {}, 'notes': {}, 'seen': ' '.join(live_final), 'has_reconcile': True}
+        monkeypatch.setattr(opp, 'parse_live', lambda text: live)
+        log_text = ''
+        monkeypatch.setattr(dgc, 'pick_parity_verdict', lambda d: opp.run_parity(
+            d, bt_fn=lambda x: (bt, ''), log_fn=lambda x: log_text, fills_fn=lambda x: opp.live_fills(x, db),
+            book_path=book, emit=False))
+        monkeypatch.setattr(rc, 'bt_data_max_date', lambda: bt_max)
+        monkeypatch.setattr(rc, 'load_live_rows', lambda day, strategy=None: [])
+        monkeypatch.setattr(rc, 'load_bt_selected', lambda day: [{'symbol': s} for s in bt_ranked])
+        monkeypatch.setattr(rc, 'journal_grep', lambda pat, day: [])
+        monkeypatch.setattr(rc, 'read_selection_audit', lambda day: [])
+        monkeypatch.setattr(rc, 'sizing_attribution', lambda d: {'mult_mismatches': [], 'rows': []})
+        monkeypatch.setattr(rc, 'realized_pnl', lambda d: {'orb': 12.0})
+        monkeypatch.setattr(rc, 'news_lag_audit', lambda d: {})
+        monkeypatch.setattr(rc, 'news_lag_line', lambda a: '')
+        monkeypatch.setattr(rc, 'bf_rails_status', lambda d: {})
+        monkeypatch.setattr(rc, 'bf_rails_line', lambda a: '')
+        monkeypatch.setattr(rc, 'sizing_block', lambda a: '')
+        monkeypatch.setattr(rc, 'STREAK_PATH', tmp_path / 'streak.json')
+        monkeypatch.setattr(dgc.time, 'sleep', lambda s: None)
+        from trading import ramp_freeze as rf
+        monkeypatch.setattr(rf, 'FREEZE_PATH', tmp_path / 'freeze.json')
+
+    def test_clean_day_message_end_to_end(self, monkeypatch, tmp_path, capsys, caplog):
+        self._wire(monkeypatch, tmp_path, bt_max=self.DAY, fills=('AAA',))
+        with caplog.at_level(logging.INFO):
+            assert dgc.main(['--dry-run', '--date', self.DAY, '--wait-bt-min', '0']) == 0
+        out = capsys.readouterr().out
+        assert '[GREEN 0/10 since 11/12, A2]' in out
+        assert 'pick parity clean' in out and 'SKIPPED' not in out
+        assert not (tmp_path / 'streak.json').exists()      # dry run writes nothing
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+    def test_fill_outside_final_is_red_end_to_end(self, monkeypatch, tmp_path, capsys):
+        self._wire(monkeypatch, tmp_path, bt_max=self.DAY, fills=('ZZZ',))
+        assert dgc.main(['--dry-run', '--date', self.DAY, '--wait-bt-min', '0']) == 1
+        out = capsys.readouterr().out
+        assert 'RED DAY' in out and 'ZZZ' in out and 'SKIPPED' not in out
+
+    def test_missing_bt_is_red_with_exactly_one_error(self, monkeypatch, tmp_path, capsys, caplog):
+        self._wire(monkeypatch, tmp_path, bt_max='2026-11-11')
+        with caplog.at_level(logging.INFO):
+            assert dgc.main(['--dry-run', '--date', self.DAY, '--wait-bt-min', '1']) == 1
+        out = capsys.readouterr().out
+        errs = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert len(errs) == 1 and 'onemil-orb-backtest.timer' in errs[0].getMessage()
+        assert 'RED DAY' in out and f'nightly BT missing for {self.DAY}' in out and 'SKIPPED' not in out

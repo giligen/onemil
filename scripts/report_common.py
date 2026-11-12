@@ -221,8 +221,7 @@ def green_verdict(day: str) -> Dict:
     other books' rows are judged by their own checks, never here):
       A. every closed ORB trade's exit_reason is known + attributed
       B. no rows stuck in exit_pending_verification
-      C. every BT-selected pick was at least ORDERED live, or its absence
-         is explained by a live-only gate (spread, buying power, conflict)
+      C. the nightly BT exists for the day; a BT-filled pick was filled live (fill-parity)
     Informational (reported, not gating — journald retention makes absence
     unprovable): touchgo REKEY / negative-age tripwires.
     """
@@ -246,64 +245,24 @@ def green_verdict(day: str) -> Dict:
     if stuck:
         reasons.append(f"exit_pending_verification: {stuck}")
 
+    # ONE counter (2026-11-12): selection / composite parity is the pick-parity run (scripts/orb_pick_parity.py, named
+    # reasons), judged by daily_green_check.main; this verdict keeps exit attribution, fill-parity and the sizing checks.
+    # The nightly BT must exist for the day (daily_green_check waits for it); absent = RED, never "skipped".
     bt_max = bt_data_max_date()
-    bt_stale = bt_max is None or bt_max < day
-    bt_rows = [] if bt_stale else load_bt_selected(day)
-    # BT picks = everything BT would have ORDERED (entered-inclusive book,
-    # 2026-09-05: no-fill picks included — live must show an order for
-    # them too, filled or time_stop_canceled). Fill-parity below keys on
-    # the ENTERED subset only.
+    bt_missing = bt_max is None or bt_max < day
+    if bt_missing:
+        checks['bt'] = f"MISSING (max={bt_max})"
+        reasons.append(bt_missing_reason(day))
+    else:
+        checks['bt'] = 'OK'
+    bt_rows = [] if bt_missing else load_bt_selected(day)
     bt_syms = {r['symbol'] for r in bt_rows}
     bt_filled_syms = bt_filled_symbols(bt_rows)
-    live_orb_syms = {r['symbol'] for r in rows if r.get('strategy') == 'orb'}
-    missing = bt_syms - live_orb_syms
-    unexplained = []
-    if missing:
-        audit = read_selection_audit(day)
-        audited = set()
-        for rec in audit:
-            audited |= {e.get('sym') for e in rec.get('ranked', [])}
-        # Live-only gates BT cannot model. 2026-07-10: added the buy-stop
-        # guard skip ('breakout extended past limit ... Not chasing') — on
-        # 7/9 IQMX broke out during the 44s ranking window, the guard
-        # correctly refused to chase, and the checker scored a correctly-
-        # explained miss as unexplained (false-alarm red; BT made +$5 on
-        # the missed trade while live beat BT by ~$570 that day).
-        # 2026-08-14 independent audit: the old 'spread' keyword matched
-        # routine quote-DEBUG lines ("CIFU: quote bid=.. spread=$0.11"),
-        # silently explaining ANY never-ordered pick that ever got a
-        # quote logged — the gate was neutralized (reproduced on the
-        # 8/11 CIFU miss). Explanations now require an ACTUAL skip
-        # phrase, not a keyword coincidence.
-        explained_lines = (journal_grep('skipped —', day)
-                           + journal_grep('spread skip', day)
-                           + journal_grep('ENTRY SKIPPED', day)
-                           + journal_grep('Not chasing', day))
-        _SKIP_PHRASES = ('spread skip', 'buying power', 'other strategy',
-                         'halted', 'breakout extended past limit',
-                         'Not chasing', 'ENTRY SKIPPED', 'skipped —')
-        for sym in sorted(missing):
-            if any(sym in ln and any(k in ln for k in _SKIP_PHRASES)
-                   for ln in explained_lines):
-                continue
-            unexplained.append(sym)
-    if bt_stale:
-        checks['bt_parity'] = (f"SKIPPED — BT data stale (max={bt_max}); "
-                               f"nightly orb-backtest hasn't covered {day} yet")
-    elif unexplained:
-        checks['bt_parity'] = f"BT picks never ordered: {unexplained}"
-        reasons.append(f"BT picks never ordered live: {unexplained}")
-    else:
-        checks['bt_parity'] = 'OK'
 
     # Fill-parity (2026-08-14, IREX 7/30 lesson): a BT-FILLED pick that
-    # live ORDERED but never FILLED passed the gate above silently — on
-    # 7/30 that was the only >=$3K monster in 4 months (bar-1 breakout
-    # outran the ~73s placement latency; the stop-limit was born
-    # unfillable and hit time_stop_canceled while the BT rode +$4,361).
-    # The edge is the tail: an unfilled BT-filled pick is a hard flag.
-    if bt_stale:
-        checks['fill_parity'] = 'SKIPPED — BT data stale'
+    # live ORDERED but never FILLED is a hard flag (tail-capture risk).
+    if bt_missing:
+        checks['fill_parity'] = 'n/a (BT missing, day is RED)'
     else:
         unfilled = unfilled_bt_filled_symbols(rows, bt_filled_syms)
         checks['fill_parity'] = ('OK' if not unfilled else
@@ -320,7 +279,7 @@ def green_verdict(day: str) -> Dict:
     # Inert while exit.atr_stop_floor is off (available=False).
     fsd = floored_stop_drift(day)
     if not fsd['available']:
-        checks['floored_stop_drift'] = 'SKIPPED (flag off or check error)'
+        checks['floored_stop_drift'] = 'n/a (flag off or check error)'
     elif fsd['mismatches']:
         checks['floored_stop_drift'] = f"DRIFT: {fsd['mismatches']}"
         reasons.append(f"floored-stop drift: {fsd['mismatches']}")
@@ -333,7 +292,7 @@ def green_verdict(day: str) -> Dict:
     # investigation than a selection bug.
     starts = journal_grep('Started onemil-trader', day)
     fatal = journal_grep('Pre-start account validation failed', day)
-    if unexplained and (len(starts) > 2 or fatal):
+    if reasons and (len(starts) > 2 or fatal):
         reasons.append(
             f"CONTEXT: trader restarted {len(starts)}x today"
             + (", pre-start validation failures present" if fatal else "")
@@ -349,7 +308,7 @@ def green_verdict(day: str) -> Dict:
         'checks': checks,
         'n_live_rows': len(rows),
         'n_bt_selected': len(bt_syms),
-        'bt_stale': bt_stale,
+        'bt_missing': bt_missing,
     }
 
 
@@ -884,13 +843,44 @@ def sizing_block(attr: Dict) -> str:
 # Streak persistence — the number the ramp gate reads
 # ---------------------------------------------------------------------------
 
-def streak_update(day: str, green: bool, reasons: List[str],
-                  path: Path = STREAK_PATH,
-                  allow_downgrade: bool = False) -> int:
-    """Record the day's verdict; return the current consecutive-green count.
+BT_MISSING_PREFIX = 'nightly BT missing for'
 
-    Streak counts consecutive green TRADING days (weekend/holiday gaps
-    don't break it — only a recorded red does). Re-running the same day
+
+def bt_missing_reason(day: str) -> str:
+    """The RED reason when the nightly BT never appeared for `day` (names what to look at)."""
+    return (f"{BT_MISSING_PREFIX} {day}: look at onemil-orb-backtest.timer (21:30 UTC) / "
+            f"nightly_bt_update.sh (22:30 UTC) / batch/orb_bar_gap_gate.py")
+
+
+def counted_streak(records: List[Dict], day_one: Optional[str] = None) -> int:
+    """Consecutive counted-green sessions, newest first, over records with day >= day_one (ORB_DAY_ONE).
+
+    Earlier records stay in the file untouched and never count. A record with counted == False (a no-range vendor
+    day, Amendment 2 §1) is neither green nor red: skipped, the streak neither grows nor resets."""
+    day_one = day_one or ORB_DAY_ONE.isoformat()
+    streak = 0
+    for r in sorted((r for r in records if r.get('day', '') >= day_one), key=lambda r: r['day'], reverse=True):
+        if r.get('counted', True) is False:
+            continue
+        if not r.get('green'):
+            break
+        streak += 1
+    return streak
+
+
+def green_label(streak: int) -> str:
+    """`[GREEN n/10 since 11/12, A2]` — the day-one suffix comes from trading.ramp_stage (ONE constant)."""
+    return f"[GREEN {streak}/{GREEN_SESSIONS_NEEDED} {ORB_DAY_ONE_SUFFIX.strip('()')}]"
+
+
+def streak_update(day: str, green: bool, reasons: List[str],
+                  path: Optional[Path] = None,
+                  allow_downgrade: bool = False,
+                  counted: bool = True) -> int:
+    """Record the day's verdict; return the current counted-green streak since ORB_DAY_ONE.
+
+    ONE counter (2026-11-12): only sessions with day >= ORB_DAY_ONE count (`counted_streak`); a `counted=False`
+    day is recorded as such and leaves the streak unchanged. Re-running the same day
     overwrites that day's record (idempotent) — EXCEPT green→red, which is
     blocked unless allow_downgrade: the parity checks lean on journald
     evidence that ROTATES OUT, so a later re-run of an already-green day
@@ -899,34 +889,28 @@ def streak_update(day: str, green: bool, reasons: List[str],
     'Not chasing' line expired from the journal). Red→green re-adjudication
     stays allowed — that direction requires FINDING evidence, not losing it.
     """
+    path = path or STREAK_PATH
     records: List[Dict] = []
     if path.exists():
         try:
             records = json.loads(path.read_text()).get('days', [])
-        except Exception:
+        except Exception as e:
+            print(f"WARNING: streak file {path} unreadable ({e}) — starting from an empty record", flush=True)
             records = []
     prior = next((r for r in records if r.get('day') == day), None)
-    if (prior and prior.get('green') and not green and not allow_downgrade):
+    if (prior and prior.get('green') and not green and counted and not allow_downgrade):
         print(f"WARNING: refusing green→red re-adjudication of {day} "
               f"(journal evidence decays; pass allow_downgrade to force). "
               f"New reasons were: {reasons}", flush=True)
-        streak = 0
-        for r in reversed(sorted(records, key=lambda r: r['day'])):
-            if r['green']:
-                streak += 1
-            else:
-                break
-        return streak
+        return counted_streak(records)
     records = [r for r in records if r.get('day') != day]
-    records.append({'day': day, 'green': bool(green), 'reasons': reasons})
+    rec = {'day': day, 'green': bool(green), 'reasons': reasons}
+    if not counted:
+        rec['counted'] = False
+    records.append(rec)
     records.sort(key=lambda r: r['day'])
     records = records[-60:]
-    streak = 0
-    for r in reversed(records):
-        if r['green']:
-            streak += 1
-        else:
-            break
+    streak = counted_streak(records)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(
         {'streak': streak, 'needed': GREEN_SESSIONS_NEEDED, 'days': records},
@@ -934,13 +918,18 @@ def streak_update(day: str, green: bool, reasons: List[str],
     return streak
 
 
-def read_streak(path: Path = STREAK_PATH) -> Optional[Dict]:
+def read_streak(path: Optional[Path] = None) -> Optional[Dict]:
+    """The streak file with `streak` RECOMPUTED over days >= ORB_DAY_ONE (the stored number is never trusted)."""
+    path = path or STREAK_PATH
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text())
-    except Exception:
+        st = json.loads(path.read_text())
+    except Exception as e:
+        print(f"WARNING: streak file {path} unreadable ({e})", flush=True)
         return None
+    st['streak'] = counted_streak(st.get('days', []))
+    return st
 
 
 # ---------------------------------------------------------------------------

@@ -270,3 +270,13 @@ def test_freeze_summary_names_each_frozen_book_not_the_raw_json_head(tmp_path):
     assert "BF frozen" not in er.freeze_summary(p, bf_on=False)     # BF paused: its old freeze is not printed
     rf.clear_freeze("bf", "fixed", path=p)
     assert er.freeze_summary(p, bf_on=True) == "freeze: none"
+
+
+def test_parity_section_labels_a_previous_session_line(tmp_path, monkeypatch):
+    """The green check runs 23:20 UTC, after the EOD report: an older line is labelled, never implied to be today's."""
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs/daily_green_check.log").write_text("✅ [GREEN 2/10 since 11/12, A2] 2026-11-12 — exits attributed\n")
+    monkeypatch.setattr(er, "ROOT", tmp_path)
+    txt = er.parity_section("2026-11-13")
+    assert "prev session 2026-11-12 (not today's verdict)" in txt
+    assert "prev session" not in er.parity_section("2026-11-12")

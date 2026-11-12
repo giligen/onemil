@@ -65,7 +65,7 @@ def test_hold_on_each_missing_gate():
     assert m.verdict(stats(fills[:7])) == 'HOLD'                                   # fills
     assert m.verdict(stats(fills, sessions=14)) == 'HOLD'                          # sessions
     assert m.verdict(stats(fills[:-1] + [F(SESS[7], -500)])) == 'HOLD'             # P&L <= 0
-    assert m.verdict(stats(fills, parity={SESS[3]: ['BT picks never ordered live: [ABC]']})) == 'HOLD'
+    assert m.verdict(stats(fills, parity={SESS[3]: ['pick parity: 1 unexplained [ABC]']})) == 'HOLD'
     assert m.verdict(stats([F(d, 60, slip_bps=55.0) for d in SESS[:8]])) == 'HOLD'  # slippage 55 > 40
     limit_hit = fills + [F(SESS[10], -800)]                                         # within last 10 sessions
     s = stats(limit_hit); assert s.limit_hits == 1 and m.verdict(s) == 'HOLD'
