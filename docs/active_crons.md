@@ -1,60 +1,56 @@
-# Active cron manifest — rewritten 2026-09-19 (owner: "keep only what we want for daily and weekly reports")
+# Active cron manifest — regenerated 2026-11-12 from `docs/crontab_proposed_20261112.txt` (== `crontab -l`)
 
-Two layers. **Session crons** live only in the Claude session's memory, expire 7 days after arming, and die with the
-session — on resuming a session, read this file and re-arm every job in §1 VERBATIM via `CronCreate` before doing
-anything else, then update the ids here. **Durable crontab / systemd** jobs survive everything and are listed in §2
-so the weekly review can check that each one actually ran (log mtime).
+`crontab -l` is the truth; this file is its index (when, TZ, purpose, log, producer it depends on). One row per
+active line. Reports are daily + weekly, once each; everything else is alert-only (silent when clean) or
+infrastructure. Every Python entry point below is wrapped in `monitoring.cron_guard.run_guarded` (11/12): an uncaught
+exception = one ERROR naming the script -> Telegram (send awaited) -> exit 1. `main.py --batch` has its own wrapper
+(`run_batch`: ERROR with traceback + exit 1, plus the LOST-symbol completeness gate).
 
-Last synced: 2026-09-19 10:10 UTC. Removed today: the morning owner brief (its pre-boot test duty moved to a durable
-alert-only crontab line), the HOD-break EOD check and the HOD live-watch monitor + its arming cron (folded into the
-daily report; the monitor was relaying every routine skip line into chat), the superseded weekly (e0655167), the
-Friday `weekly_report.py` telegram (duplicate of the Saturday review), `touchgo_daily_debug.py` (a June bug-hunt),
-`go_backstop.py` (a one-shot dated 8/17). Principle: **reports are daily + weekly, once each; everything else that
-survives is alert-only (silent when clean) or infrastructure.**
+## 1. Session crons
+Weekly review `69f28d67` (`23 9 * * 6`, `[WEEKLY wk N]`) lives in the Claude session only (7-day expiry): on resume,
+re-arm it verbatim and update the id here. The daily EOD report is a durable cron since 9/21 (row below).
 
-## 1. Session crons — exactly two
+## 2. User crontab (`ec2-user`), TZ = UTC unless the block says otherwise
+| schedule | TZ | purpose | log | depends on |
+|---|---|---|---|---|
+| `30 10 * * 1-5` | UTC | `main.py --batch` universe build (BF + ORB `daily_bars`) | `logs/universe_build.log` | Alpaca assets + daily bars; must finish before the 12:30 boot |
+| `20 12 * * 1-5` | UTC | **universe-build completion alert**: Telegram if today has no `Batch complete` line | Telegram | the 10:30 build |
+| `0 6 * * 6` | UTC | weekly verbose universe build | `logs/universe_build_weekly.log` | — |
+| `45 22 * * 1-5` | UTC | `nightly_bt_update.sh` BF cache append | script's own | after the ORB BT timer (ends <= 22:41) |
+| `26 13 * * 1-5` | UTC | `orb_selection_observer.py` live-vs-BT selection watch | `logs/orb_observer_cron.log` | the morning universe/boot |
+| `20 23 * * 1-5` | UTC | `daily_green_check.py` ORB Amendment-2 green streak (waits <= 45 min for the BT) | `logs/daily_green_check.log` | ORB BT (timer), 23:15 pick parity |
+| `40 12 * * 1-5` | UTC | `trader_watchdog.py` (service up / crash-loop) | `logs/trader_watchdog.log` | root 12:30 start |
+| `58 22 * * 1-5` | UTC | `bf_decision_parity.py` (BT-only record while BF is paused, no freeze) | `logs/bf_parity/cron.log` | 22:45 BF cache |
+| `0 20 * * 0` | UTC | `orb_weekly_refit.py` (alerts on failure) | `logs/orb_weekly_refit.log` | before Monday's boot |
+| `0 23 * * 1-5` | UTC | `build_hod_volume_profile.py` | `logs/hod_volume_profile.log` | nightly bar refresh |
+| `27 11 * * 1-5` | UTC | pre-boot full pytest, alert on failure | `logs/preboot_tests.log` | clean tree before 12:30 |
+| `45,58 19,20 * * 1-5` | UTC | `tom_sleeve.py` | `logs/tom_sleeve_cron.log` | — |
+| `@reboot` (sleep 20 / 30) | UTC | tmux Claude sessions `prod-onemil` / stupid-money `attach.sh` | `logs/claude_tmux.log` | — |
+| `50 11 * * 1-3` | UTC | `momentum_sleeve.py` prefetch + dry run | `logs/momentum_sleeve.log` | — |
+| `45 13`, `45 14 * * 1-3` | UTC | `momentum_sleeve.py --submit --skip-fetch` (EDT / EST) | `logs/momentum_sleeve.log` | the 11:50 prefetch |
+| `46 13`, `46 14 * * 1-3` | UTC | `momentum_sleeve.py --live --submit` ($10K slice) | `logs/momentum_sleeve_live.log` | the paper submit's bars cache |
+| `0 13`, `0 14 * * 6` | UTC | `mom_panel_refresh.py` (14:00 = retry, idempotent) | `logs/mom_panel_refresh.log` | Alpaca bars |
+| `20 14 * * 6` | UTC | `mom_bt_parity.py` | `logs/mom_bt_parity.log` | the panel refresh |
+| `4 21`, `10 21 * * 1-5` | UTC | stupid-money `eod_check.sh`, `forward_shadow.sh` — **other project, untouched** | its own | — |
+| `35 17 * * 1-5` | ET | session archive (`journalctl` grep -> `logs/session_archive/<date>.log`) | the archive | the 16:30 ET BT timer |
+| `5 10-16 * * 1-5` | ET | `hourly_summary.py` (10:05-16:05 ET) | `logs/hourly_summary.log` | — |
+| `10 16 * * 1-5` | ET | `guardrail.py --check` (live ledger + auto-pause) | `logs/guardrail_cron.log` | after the HOD flats |
+| `55 12,15 * * 1-5`, `0-30/5 13,16 * * 1-5` | ET | `hod_break_deadman_flat.py` ticks (gates on [close-5, close+30) from the calendar; no-op when the trader is active) | `logs/hod_deadman.log` | Alpaca calendar |
+| `15 23 * * 1-5` | UTC | `orb_pick_parity.py --date <today UTC>` | `logs/orb_pick_parity.log` | the ORB BT |
+| `25 23 * * 1-5` | UTC | `eod_report.py` -> `logs/eod/<date>.md` + `[EOD]` Telegram | `logs/eod_report.log` | every producer above |
 
-### DAILY EOD REPORT — RETIRED as a session cron 2026-09-21 (was id `989c1d20`), now durable crontab
-`40 17 * * 1-5 scripts/eod_report.py` under `CRON_TZ=America/New_York` (2026-11-03: was `57 21` UTC; the
-`onemil-orb-backtest` systemd timer runs 16:30 ET and ends ~17:26 ET, so in EST the UTC slot reported before the BT
-existed → "ORB P1 NO-DATA" daily; the session-archive line moved with it to `35 17` ET). Every number is computed
-by the script (trades DB per strategy, green-check verdict, BF parity JSON, both ramp checkers, services, journal
-errors, pre-boot tests, disk, next-boot flags, today's research commits) and written to `logs/eod/<date>.md`; a
-headless `claude -p --model haiku` call only rephrases it into the `[EOD]` telegram and falls back to the raw
-summary (WARNING logged) if it fails. Code fixes are no longer part of the report — the report FLAGS (RED, NOT
-ACTIVE, failed, frozen first line) and the owner asks the interactive session. Tests: `tests/test_eod_report.py`.
+## 3. systemd / root
+* `onemil-orb-backtest.timer`: `Mon..Fri 16:30 America/New_York` -> `orb_backtest.py` (ends 22:27-22:41 UTC in EST, ~21:41 in EDT).
+* Root crontab: `25 10 * * 1-5 systemctl stop onemil-trader`, `30 12 * * 1-5 systemctl start onemil-trader`.
 
-### WEEKLY REVIEW v2 — id `69f28d67` — `23 9 * * 6`
-The one weekly telegram, prefix `[WEEKLY wk N]`. STEP 0 self-renews BOTH session crons and updates the ids here.
-Runs `scripts/orb_ramp_check.py` and `scripts/bf_ramp_check.py` (Gate 2 incl. ex-best-trade and the BT band), the
-week ledger vs the two-quarter BT path, HOD dry green weeks, research cells and dropped leads, hygiene incl. the
-durable-cron mtimes, and the GREEN/YELLOW/RED trajectory against the scaling plan's clock.
-
-## 2. Durable crontab (user `ec2-user`) + systemd — infrastructure and alert-only
-| when (UTC) | job | role | telegram? |
-|---|---|---|---|
-| 10:30 Mon–Fri / 06:00 Sat | `main.py --batch` | universe build (BF + ORB daily_bars) | on failure only |
-| **11:27 Mon–Fri** | **pre-boot full test suite → `logs/preboot_tests.log`** | **NEW 9/19: the 12:30 boot must not load a tree with failing tests** | **on failure only** |
-| 12:40 Mon–Fri | `trader_watchdog.py` | did the 12:30 boot come up | on failure only |
-| 13:26 Mon–Fri | `orb_selection_observer.py` | live-vs-BT selection watch (owner 7/23) | on real drops only |
-| 14:05–21:05 hourly Mon–Fri | `holdings_pulse.py` | positions vs DB / orphans; **silent when flat** | only with open positions |
-| 19:57 Mon–Fri | `hod_break_deadman_flat.py` | HOD dead-man flat (no-op in dry mode) | on action only |
-| 20:30 daily | `onemil-orb-backtest.timer` → `orb_backtest.py` | ORB nightly features/book refresh (feeds the green check) | on failure |
-| 21:04 Mon–Fri | `stupid-money/scripts/eod_check.sh` | **a different project — not ours, untouched** | — |
-| 21:30 Mon–Fri | `daily_green_check.py` | ORB Gate-1 parity; sets the ramp FREEZE on a hard fail | on RED |
-| 21:58 Mon–Fri | journalctl session archive | log archival | no |
-| 22:30 Mon–Fri | `nightly_bt_update.sh` | BF cache append (Stage-1) | on failure |
-| 22:50 Mon–Fri | `bf_decision_parity.py` | BF Gate-1 parity; sets the ramp FREEZE on disagreement | on disagreement |
-| 23:00 Mon–Fri | `build_hod_volume_profile.py` | HOD rv_profile checkpoints (dry run needs it) | no |
-| Sun 20:00 | `orb_weekly_refit.py` | ORB selection refit, 26-week window (owner 9/8) | on failure |
-
-Gate-1 freeze state (set by the two parity jobs above, read by both ramp checkers):
-`logs/ramp_freeze.json` — `{frozen, since, reason, by, frozen_dates}` per book. A freeze stops the stage clock and
-blocks ADVANCE; clearing is MANUAL and logged:
-`python3 scripts/bf_ramp_check.py --clear-freeze bf "<reason>"` (or `orb_ramp_check.py --clear-freeze orb ...`).
-No cron invocation changed for this — the jobs' own commands are unchanged.
-
-Backup of the crontab before today's edit: the session scratchpad `crontab.bak.20260919`; `crontab -l` is the
-truth. Retired scripts stay in the repo (`weekly_report.py`, `touchgo_daily_debug.py`, `go_backstop.py`,
-`hod_break_eod_check.py`, `hod_break_miss_audit.py` — the last two are still CALLED by the daily report, just not
-scheduled on their own).
+## 4. Chains and windows
+* **Nightly chain (UTC):** ORB BT (<= 22:41) -> 22:45 BF cache -> 22:58 BF parity -> **23:15 pick parity -> 23:20 green
+  check -> 23:25 EOD report**; the green check waits up to 45 min for the BT, so it is never judged before it exists.
+* **Morning chain:** 10:25 root stop -> 10:30 universe build -> **12:20 completion alert** (no `Batch complete` today = stale
+  universe warning) -> 12:30 root start -> 12:40 watchdog.
+* **Dead-man windows:** the HOD dead-man acts only in [close-5, close+30) ET (EDT 19:55-20:30 UTC, EST 20:55-21:30); the
+  ET ticks 12:55 + 13:00-13:30 and 15:55 + 16:00-16:30 cover normal and early closes.
+* Gate-1 freeze state: `logs/ramp_freeze.json`; clearing is manual (`bf_ramp_check.py --clear-freeze`) except the BF
+  freeze left by the pre-11/12 paused-book false path, which `bf_decision_parity.py` clears with a logged reason.
+* Removed 11/12 (do not re-add): holdings_pulse (hourly), 20:30 UTC ORB BT line, 21:30 green check, 21:58 archive,
+  19:57 UTC dead-man, 20:10 UTC guardrail, 17:40 ET EOD.

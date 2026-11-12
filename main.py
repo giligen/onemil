@@ -143,8 +143,33 @@ def _create_news_analyzer(config) -> NewsAnalyzer:
         return NewsAnalyzer()
 
 
+LOST_SYMBOL_ALERT_FRACTION = 0.02   # 9/24 completeness-gate rule: LOST > 2 % of the universe = ERROR
+
+
+def lost_symbols_verdict(lost: list, requested: int) -> str:
+    """` lost=N [names]` suffix for the batch-complete line; logs ERROR when LOST exceeds 2 % of the request."""
+    names = ", ".join(sorted(set(lost))[:20])
+    if requested and len(lost) > LOST_SYMBOL_ALERT_FRACTION * requested:
+        logger.error("Batch completeness gate: LOST %d of %d symbols (> %.0f %%) [%s]",
+                     len(lost), requested, 100 * LOST_SYMBOL_ALERT_FRACTION, names)
+    return f" lost={len(lost)} [{names}]"
+
+
 def run_batch(config) -> None:
-    """Run the nightly universe builder."""
+    """Run the nightly universe builder; ANY uncaught failure = ERROR with traceback (Telegram) + exit 1."""
+    try:
+        _run_batch(config)
+    except SystemExit:
+        raise
+    except Exception as e:  # noqa: BLE001 - 11/10: a silent traceback left the boot on a stale universe
+        logger.error("Batch universe build CRASHED (%s): %s", type(e).__name__, e, exc_info=True)
+        from monitoring.cron_guard import _wait_for_telegram_sends
+        _wait_for_telegram_sends(10.0)
+        sys.exit(1)
+
+
+def _run_batch(config) -> None:
+    """Body of the nightly universe builder (see run_batch)."""
     logger.info("Starting batch universe builder...")
 
     alpaca = AlpacaClient(config.alpaca_api_key, config.alpaca_api_secret, paper=config.alpaca_paper)
@@ -167,7 +192,9 @@ def run_batch(config) -> None:
     )
 
     summary = builder.build()
-    logger.info(f"Batch complete: {summary}")
+    lost = list(getattr(alpaca, 'lost_daily_bar_symbols', []) or [])
+    requested = int(getattr(alpaca, 'daily_bars_requested', 0) or 0)
+    logger.info(f"Batch complete: {summary}{lost_symbols_verdict(lost, requested)}")
 
 
 def _create_notifier(config) -> Optional[TelegramNotifier]:

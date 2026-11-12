@@ -248,4 +248,5 @@ def main(argv=None) -> int:
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    from monitoring.cron_guard import run_guarded  # 11/12: no silent traceback — ERROR -> Telegram
+    sys.exit(run_guarded(main, 'daily_green_check'))

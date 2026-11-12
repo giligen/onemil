@@ -81,6 +81,10 @@ BT_SUBPROCESS_TIMEOUT_S = 600
 HARD_PARITY_MARKERS = ('exit_reason BT=', 'pnl SIGN FLIP',
                        'BT_ONLY —', 'LIVE_ONLY —')
 
+# 11/12: a PAUSED book (trading.enabled false) has zero live rows by design — that is not a breach.
+STATUS_PAUSED = 'PAUSED (BT-only)'
+PAUSED_CLEAR_REASON = 'paused book, parity not applicable'
+
 # Classification labels (LIVE_ONLY)
 LABEL_OFF_UNIVERSE = 'off_bt_universe'
 LABEL_OFF_UNIVERSE_LEV = 'off_bt_universe (leveraged/non-common by name)'
@@ -170,6 +174,23 @@ def config_line(cfg: Dict) -> str:
             f"max_shares={cfg['max_shares']} | gates: "
             f"min_daily_volume={cfg['min_daily_volume']} "
             f"conviction_min_threshold={cfg['conviction_min_threshold']}")
+
+
+def clear_false_paused_freeze(day: str, notify_path: Optional[Path] = None) -> bool:
+    """Clear a BF freeze raised by the old paused-book false path (hard-parity marker reason).
+
+    Only a freeze whose reason carries a HARD_PARITY_MARKERS string is cleared (a manual freeze keeps
+    its owner). Goes through `ramp_freeze.clear_freeze`, which logs the clear; returns True if cleared.
+    """
+    st = ramp_freeze.get('bf', notify_path)
+    if not st.frozen:
+        return False
+    if not any(m in (st.reason or '') for m in HARD_PARITY_MARKERS):
+        logger.info("BF freeze (%s) is not from the parity false path — left in place", st.reason)
+        return False
+    ramp_freeze.clear_freeze('bf', PAUSED_CLEAR_REASON, by='bf_decision_parity', path=notify_path, day=day)
+    logger.info("BF freeze cleared in code: %s (was: %s)", PAUSED_CLEAR_REASON, st.reason)
+    return True
 
 
 def hard_parity_breaches(rep: Dict) -> List[str]:
@@ -577,17 +598,26 @@ def build_report(day: str,
         bt_trades = run_stage2_backtest(day, out_csv)
 
     live_cfg = live_trading_config()
-    live_rows = load_live_bf_rows(day, db_path=db_path)
-    cls = classify_day(
-        bt_trades, live_rows,
-        stage1_day_symbols=None if bt_stale else day_symbols,
-        bt_stale=bt_stale,
-        is_common_lookup=default_is_common_lookup)
+    paused = not live_cfg['enabled']
+    if paused:
+        # No live comparison on a paused book: the BT side is kept (BT panel stays current), nothing else.
+        logger.info("BF book is PAUSED (trading.enabled false): BT-only parity record for %s, "
+                    "no live comparison, no freeze", day)
+        live_rows = []
+        cls = {'both': [], 'bt_only': [], 'live_only': [], 'divergences': [], 'n_divergent': 0}
+    else:
+        live_rows = load_live_bf_rows(day, db_path=db_path)
+        cls = classify_day(
+            bt_trades, live_rows,
+            stage1_day_symbols=None if bt_stale else day_symbols,
+            bt_stale=bt_stale,
+            is_common_lookup=default_is_common_lookup)
     return {
         'day': day,
         'generated_at_utc': datetime.now(timezone.utc).isoformat(),
-        'status': overall_status(bt_stale, cache_max_date,
-                                 cls['n_divergent']),
+        'paused': paused,
+        'status': STATUS_PAUSED if paused else overall_status(
+            bt_stale, cache_max_date, cls['n_divergent']),
         'bt_stale': bt_stale,
         'live_config': live_cfg,
         'cache_path': str(cache_path),
@@ -715,8 +745,10 @@ def main() -> int:
         # Gate-1: a decision / exit-type disagreement FREEZES the BF ramp
         # (size unchanged, entries continue, stage clock stops). Clearing is
         # manual: `bf_ramp_check.py --clear-freeze bf "<reason>"`.
-        breaches = hard_parity_breaches(rep)
+        breaches = [] if rep.get('paused') else hard_parity_breaches(rep)
         rep['hard_parity_breaches'] = breaches
+        if rep.get('paused') and not args.no_freeze:
+            clear_false_paused_freeze(day)
         if breaches and not args.no_freeze:
             ramp_freeze.set_freeze('bf', '; '.join(breaches), day=day,
                                    notify=not args.no_telegram)
@@ -743,4 +775,5 @@ def main() -> int:
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    from monitoring.cron_guard import run_guarded  # 11/12: no silent traceback — ERROR -> Telegram
+    sys.exit(run_guarded(main, 'bf_decision_parity'))

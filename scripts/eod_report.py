@@ -160,7 +160,10 @@ def parity_section(day: str) -> str:
     bf_json = ROOT / f"logs/bf_parity/bf_parity_{day}.json"
     if bf_json.exists():
         d = json.loads(bf_json.read_text())
-        bf = f"BF parity {d.get('status')} (bt {d.get('n_bt_trades')}, live {d.get('n_live_rows')}, stale={d.get('bt_stale')})"
+        if d.get('paused'):
+            bf = f"BF parity {d.get('status')} (bt {d.get('n_bt_trades')}; book paused, no live comparison)"
+        else:
+            bf = f"BF parity {d.get('status')} (bt {d.get('n_bt_trades')}, live {d.get('n_live_rows')}, stale={d.get('bt_stale')})"
     else:
         bf = "BF parity: not run yet for today (22:50 UTC)"
     fz = freeze_summary()
@@ -463,4 +466,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from monitoring.cron_guard import run_guarded  # 11/12: no silent traceback — ERROR -> Telegram
+    sys.exit(run_guarded(main, "eod_report"))

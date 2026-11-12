@@ -13,6 +13,7 @@ Rate limit retry with exponential backoff built in.
 """
 
 import logging
+import re
 import http.client as http_client
 import time as time_mod
 import requests
@@ -166,6 +167,18 @@ def _qty_num(raw):
     return int(q) if q.is_integer() else q
 
 
+_INVALID_SYMBOL_RE = re.compile(r"invalid symbol:\s*([A-Za-z0-9.\-/,\s]+)", re.IGNORECASE)
+MAX_INVALID_SYMBOL_RETRIES = 5   # one response may name only one bad symbol; bounded so a bad API cannot loop
+
+
+def invalid_symbols_in_error(exc: BaseException) -> List[str]:
+    """Symbols named by an Alpaca 400 `invalid symbol: X[,Y]` message ([] when the error is anything else)."""
+    m = _INVALID_SYMBOL_RE.search(str(exc))
+    if not m:
+        return []
+    return [t for t in re.split(r"[,\s]+", m.group(1).strip().strip('"}{')) if t]
+
+
 class AlpacaClient:
     """
     Client for Alpaca market data and trading API using alpaca-py SDK.
@@ -198,6 +211,9 @@ class AlpacaClient:
         self._api_timeout = DEFAULT_API_TIMEOUT
         # rate-limit state for None-field warnings (per field name)
         self._none_field_warn_ts: Dict[str, float] = {}
+        # 11/12 completeness gate: symbols Alpaca rejected as invalid in get_daily_bars + symbols requested
+        self.lost_daily_bar_symbols: List[str] = []
+        self.daily_bars_requested: int = 0
 
         logger.info(f"AlpacaClient initialized (paper={self._paper})")
 
@@ -595,6 +611,37 @@ class AlpacaClient:
     # Daily Bars
     # =========================================================================
 
+    def _fetch_daily_chunk(self, chunk: List[str], start: datetime, chunk_no: int):
+        """One daily-bars chunk request that survives `400 invalid symbol: X` (11/10: 037ESC019 killed the build).
+
+        On a 400 naming symbols in the chunk: WARNING per name, drop them, record them in
+        `self.lost_daily_bar_symbols` and retry without them (bounded by MAX_INVALID_SYMBOL_RETRIES since
+        one response may name a single symbol). Any other error, or a name not in the chunk, raises.
+        Returns (bars dict, the chunk actually fetched).
+        """
+        chunk = list(chunk)
+        for attempt in range(MAX_INVALID_SYMBOL_RETRIES + 1):
+            if not chunk:
+                return {}, chunk
+            request = StockBarsRequest(symbol_or_symbols=chunk, timeframe=TimeFrame.Day, start=start,
+                                       feed=DataFeed.SIP)
+            try:
+                bars_raw = self._call_with_timeout(
+                    lambda req=request: self.data_client.get_stock_bars(req),
+                    f"get_daily_bars(chunk {chunk_no})"
+                )
+                return self._to_dict(bars_raw), chunk
+            except Exception as e:  # noqa: BLE001 - classified below, everything else re-raised
+                named = [x for x in invalid_symbols_in_error(e) if x in chunk]
+                if not named or attempt >= MAX_INVALID_SYMBOL_RETRIES:
+                    raise
+                for sym in named:
+                    logger.warning("get_daily_bars: Alpaca rejected symbol %r as invalid — dropped from chunk %d "
+                                   "and counted LOST (%s)", sym, chunk_no, e)
+                    self.lost_daily_bar_symbols.append(sym)
+                chunk = [x for x in chunk if x not in named]
+        return {}, chunk
+
     def get_daily_bars(self, symbols: List[str], days: int = 20) -> Dict[str, Dict]:
         """
         Get recent daily bars for multiple symbols.
@@ -620,17 +667,8 @@ class AlpacaClient:
             chunk_size = 200
             for i in range(0, len(symbols), chunk_size):
                 chunk = symbols[i:i + chunk_size]
-                request = StockBarsRequest(
-                    symbol_or_symbols=chunk,
-                    timeframe=TimeFrame.Day,
-                    start=start,
-                    feed=DataFeed.SIP
-                )
-                bars_raw = self._call_with_timeout(
-                    lambda req=request: self.data_client.get_stock_bars(req),
-                    f"get_daily_bars(chunk {i // chunk_size + 1})"
-                )
-                bars = self._to_dict(bars_raw)
+                self.daily_bars_requested += len(chunk)
+                bars, chunk = self._fetch_daily_chunk(chunk, start, i // chunk_size + 1)
 
                 for symbol in chunk:
                     if symbol in bars and len(bars[symbol]) > 0:

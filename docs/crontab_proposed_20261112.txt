@@ -1,0 +1,91 @@
+# OneMil universe rebuild — weekday mornings at 6:30 AM ET (10:30 UTC)
+# Updates prices + volume profiles (~2 min, floats cached for 30 days)
+30 10 * * 1-5 cd /home/ec2-user/onemil && /usr/bin/python3 main.py --batch >> logs/universe_build.log 2>&1
+# AUDIT ADDED: completion alert. The build failed silently 10/20-10/29 (TXSE), 11/10 (invalid symbol 037ESC019) and ended 12:40 on 11/6, after the 12:30 root start. Alerts if today has no 'Batch complete' line by 12:20 UTC.
+20 12 * * 1-5 cd /home/ec2-user/onemil && grep -q "$(date -u +\%F) .*Batch complete" logs/universe_build.log || /usr/bin/python3 scripts/send_telegram_alert.py "🔴 UNIVERSE BUILD did not complete today $(date -u +\%F) — the 12:30 boot will use a stale universe. see logs/universe_build.log"
+
+# OneMil full universe rebuild — Saturday at 2:00 AM ET (6:00 UTC)
+# Same as weekday but with verbose logging for review
+0 6 * * 6 cd /home/ec2-user/onemil && /usr/bin/python3 main.py --batch --verbose >> logs/universe_build_weekly.log 2>&1
+
+# Nightly Bull Flag BT cache refresh — extends cache forward by one day
+# Runs Mon-Fri at 22:45 UTC. The onemil-orb-backtest timer (16:30 ET) ends 22:27-22:41 UTC in EST, so 22:30 overlapped it on the 2-CPU node.
+# AUDIT: 22:30 -> 22:45, after the ORB BT in both DST regimes (EDT BT ends ~21:41)
+45 22 * * 1-5 /home/ec2-user/onemil/scripts/nightly_bt_update.sh
+26 13 * * 1-5 /usr/bin/python3 /home/ec2-user/onemil/scripts/orb_selection_observer.py >> /home/ec2-user/onemil/logs/orb_observer_cron.log 2>&1  # permanent live-vs-BT selection watch (owner 2026-07-23); alarms only on REAL drops
+
+# Daily operational-green check — feeds logs/green_streak.json (THE ramp
+# advancement gate, Amendment 2). Runs after the nightly ORB BT (timer 16:30 ET, ends <= 22:41 UTC)
+# and the 23:15 pick parity; waits up to 45 min for the BT.
+# AUDIT: comment updated (said 20:30 UTC BT); schedule unchanged
+20 23 * * 1-5 /usr/bin/python3 /home/ec2-user/onemil/scripts/daily_green_check.py >> /home/ec2-user/onemil/logs/daily_green_check.log 2>&1
+
+# AUDIT REMOVED: orphan comment "Weekly owner report" (no job; replaced by the Saturday review)
+# AUDIT REMOVED: orphan comment "Hourly open-positions P&L pulse" (holdings_pulse.py no longer scheduled; hourly_summary below covers it)
+
+# Trader startup watchdog — alerts if the service is down or crash-looping
+# 10min after the 12:30 UTC auto-start (root crontab: 30 12 start, 25 10 stop; 2026-07-06 silent-crash incident).
+40 12 * * 1-5 /usr/bin/python3 /home/ec2-user/onemil/scripts/trader_watchdog.py >> /home/ec2-user/onemil/logs/trader_watchdog.log 2>&1
+
+
+# Divergence EOD FALLBACK check (Claude, 17:04 ET) — only fires if the primary in-session job missed today (marker logs/eod_last_run); self-disables after Aug 14
+# AUDIT OUT-OF-SCOPE (stupid-money): unchanged
+4 21 * * 1-5 /home/ec2-user/stupid-money/scripts/eod_check.sh
+# BF decision-parity nightly (2026-08-14, owner-mandated harness Stage 1)
+# AUDIT: 22:50 -> 22:58 (after nightly_bt_update at 22:45). NOISE while BF is paused: live rows = 0 -> nightly false RAMP FREEZE ERROR; code fix: skip when trading.enabled is false
+58 22 * * 1-5 /usr/bin/python3 /home/ec2-user/onemil/scripts/bf_decision_parity.py >> /home/ec2-user/onemil/logs/bf_parity/cron.log 2>&1
+# AUDIT REMOVED: orphan comment "One-shot backstop 2026-08-17" (go_backstop retired 9/19)
+# AUDIT REMOVED: orphan comment "Nightly decision-line archive" (the job is the 17:35 ET line below)
+# ORB weekly SELECTION refit (owner 9/8: 26 weeks; z-params + quintile cutoffs only, mults frozen) — Sunday 20:00 UTC, before Monday's boot. Evidence: research/orb_refit_walkforward/REPORT.md
+0 20 * * 0 cd /home/ec2-user/onemil && /usr/bin/python3 scripts/orb_weekly_refit.py >> logs/orb_weekly_refit.log 2>&1 || /usr/bin/python3 scripts/send_telegram_alert.py "🔴 ORB weekly refit FAILED — orb.yaml untouched, see logs/orb_weekly_refit.log"
+0 23 * * 1-5 cd /home/ec2-user/onemil && /usr/bin/python3 scripts/build_hod_volume_profile.py >> logs/hod_volume_profile.log 2>&1  # HOD-break same-clock volume checkpoints (owner 9/13), after the nightly bar refresh
+# AUDIT REPLACED: was '57 19 * * 1-5' (one UTC tick). The script acts only in [close-5, close+30) ET = 19:55-20:30 UTC in EDT but 20:55-21:30 UTC in EST, so since 11/1 the 19:57 UTC tick (14:57 ET) never fires. ET ticks every 5 min 12:55-16:30 cover EDT/EST and early closes; the script exits at systemctl is-active first. See the CRON_TZ block at the end.
+# AUDIT REMOVED: 57 19 * * 1-5 cd /home/ec2-user/onemil && /usr/bin/python3 scripts/hod_break_deadman_flat.py >> logs/hod_deadman.log 2>&1
+27 11 * * 1-5 cd /home/ec2-user/onemil && /usr/bin/nice -n 10 /usr/bin/python3 -m pytest tests/ -q -x --no-header -p no:randomly > logs/preboot_tests.log 2>&1 || /usr/bin/python3 scripts/send_telegram_alert.py "🔴 PRE-BOOT TESTS FAILED $(date -u +\%F) — the 12:30 boot will load a tree with failing tests. tail logs/preboot_tests.log"  # 2026-09-19 durable pre-boot safety, alert-only (replaces the session owner-brief cron)
+# AUDIT REMOVED: orphan comment "Daily EOD report (2026-09-21)" sat above the guardrail line; the EOD line is at the end of the file
+# AUDIT REPLACED: guardrail was '10 20 * * 1-5' = 15:10 ET in EST (before the close, before HOD flats), one day late on the last trades. Moved to 16:10 ET in the CRON_TZ block below.
+# AUDIT REMOVED: 10 20 * * 1-5 cd /home/ec2-user/onemil && /usr/bin/python3 scripts/guardrail.py --check >> logs/guardrail_cron.log 2>&1  # 2026-09-25 automatic live ledger + auto-pause (docs/live_guardrails_REPORT.md)
+45,58 19,20 * * 1-5 cd /home/ec2-user/onemil && /usr/bin/python3 scripts/tom_sleeve.py >> logs/tom_sleeve_cron.log 2>&1
+# Claude Code session back inside tmux prod-onemil after a reboot (owner 2026-10-02)
+@reboot sleep 20 && /bin/bash /home/ec2-user/onemil/scripts/claude_tmux.sh --boot >> /home/ec2-user/onemil/logs/claude_tmux.log 2>&1
+# Claude Code session back inside tmux prod-divergence after a reboot (owner 2026-10-02)
+# AUDIT OUT-OF-SCOPE (stupid-money): unchanged
+@reboot sleep 30 && /bin/bash /home/ec2-user/stupid-money/scripts/attach.sh --boot >> /home/ec2-user/stupid-money/logs/claude_tmux.log 2>&1
+# Momentum paper sleeve (owner 2026-10-02): prefetch + dry-run before the service boots, submit 15 min after the open (EDT and EST lines; the script no-ops unless it is the week's first session and refuses outside 09:31-15:30 ET)
+50 11 * * 1-3 cd /home/ec2-user/onemil && /usr/bin/nice -n 19 /usr/bin/python3 scripts/momentum_sleeve.py >> logs/momentum_sleeve.log 2>&1
+45 13 * * 1-3 cd /home/ec2-user/onemil && /usr/bin/nice -n 19 /usr/bin/python3 scripts/momentum_sleeve.py --submit --skip-fetch >> logs/momentum_sleeve.log 2>&1
+45 14 * * 1-3 cd /home/ec2-user/onemil && /usr/bin/nice -n 19 /usr/bin/python3 scripts/momentum_sleeve.py --submit --skip-fetch >> logs/momentum_sleeve.log 2>&1
+# AUDIT OUT-OF-SCOPE (stupid-money): unchanged
+10 21 * * 1-5 /home/ec2-user/stupid-money/scripts/forward_shadow.sh >> /home/ec2-user/stupid-money/logs/forward_shadow.log 2>&1  # rescue-v2 forward NO-MONEY run of frozen BMNR+SBET; places no orders (docs/DIVERGENCE_RESCUE_V2.md)
+# Hourly multi-book summary (owner GO 2026-10-18): one Telegram line per book 9:35-16:00 ET; live account read-only, one line.
+# AUDIT REPLACED: '5 15-21' was hand-switched for EST; moved to the ET clock block below (10:05-16:05 ET) so DST needs no edit
+# AUDIT REMOVED: 5 15-21 * * 1-5 cd /home/ec2-user/onemil && /usr/bin/python3 scripts/hourly_summary.py >> logs/hourly_summary.log 2>&1
+# Momentum sleeve LIVE $10K slice on the shared live account (owner GO 2026-10-18, first rotation Mon 2026-10-19): 5 min after the paper submits so the shared bars cache exists; state_live.json is the only truth, owner positions untouched (docs/momentum_sleeve_live_RESULT.md)
+46 13 * * 1-3 cd /home/ec2-user/onemil && /usr/bin/nice -n 19 /usr/bin/python3 scripts/momentum_sleeve.py --live --submit --skip-fetch --equity-start 10000 >> logs/momentum_sleeve_live.log 2>&1
+46 14 * * 1-3 cd /home/ec2-user/onemil && /usr/bin/nice -n 19 /usr/bin/python3 scripts/momentum_sleeve.py --live --submit --skip-fetch --equity-start 10000 >> logs/momentum_sleeve_live.log 2>&1
+# MOM backtest stays current (owner 2026-10-31 "BT must always have up to date data"): Saturday panel refresh (free Alpaca bars -> research/momentum_weekly/panel_ext.parquet) then the BT-vs-paper/live parity line; both cron_guard-wrapped (ERROR -> Telegram)
+0 13 * * 6 cd /home/ec2-user/onemil && /usr/bin/nice -n 19 /usr/bin/python3 scripts/mom_panel_refresh.py >> logs/mom_panel_refresh.log 2>&1
+# AUDIT ADDED: retry. 11/7 the 13:00 run failed its completeness gate (11-06 bar on 80.4% of liquid names, min 98%) and left the extension stale; the script is idempotent ('nothing to append' when current). Root cause of the hole not established.
+0 14 * * 6 cd /home/ec2-user/onemil && /usr/bin/nice -n 19 /usr/bin/python3 scripts/mom_panel_refresh.py >> logs/mom_panel_refresh.log 2>&1
+# AUDIT: 13:20 -> 14:20 so the parity reads the extension after the retry
+20 14 * * 6 cd /home/ec2-user/onemil && /usr/bin/nice -n 19 bash scripts/research_run.sh -m 3G /usr/bin/python3 scripts/mom_bt_parity.py >> logs/mom_bt_parity.log 2>&1
+
+# 2026-11-03: session archive follows ET (the onemil-orb-backtest systemd timer runs 16:30 ET and ends ~17:26 ET (EST: up to 17:41);
+# in EST the fixed 21:50/21:57 UTC slots ran BEFORE the BT -> "ORB P1 NO-DATA" every day). 17:35 ET = 22:35 UTC winter, 21:35 UTC summer.
+CRON_TZ=America/New_York
+35 17 * * 1-5 /usr/bin/journalctl -u onemil-trader --since "today" --no-pager | grep -E "\[ORB|ORB SCORED|IGNITION|VETO|Q1 filter|WOULD BUY|ENTRY SUBMITTED|FILLED|LOCK|kill|\[HOD" > /home/ec2-user/onemil/logs/session_archive/$(date +\%Y-\%m-\%d).log 2>&1
+# AUDIT REPLACED: EOD report moved from 17:40 ET to 23:25 UTC (UTC block below). At 17:40 ET it ran before BF parity (22:50 UTC), pick parity (23:15), green check (23:20) and, on 11/10, before the ORB BT finished (22:41). Alternative if the owner wants it earlier: keep 17:40 and accept 'previous session' gates.
+# AUDIT REMOVED: 40 17 * * 1-5 cd /home/ec2-user/onemil && /usr/bin/python3 scripts/eod_report.py >> logs/eod_report.log 2>&1
+# AUDIT ADDED: hourly summary on the ET clock (was UTC 15-21 hand-switched at DST), 10:05-16:05 ET
+5 10-16 * * 1-5 cd /home/ec2-user/onemil && /usr/bin/python3 scripts/hourly_summary.py >> logs/hourly_summary.log 2>&1
+# AUDIT ADDED: guardrail after the close and the HOD flats (was 20:10 UTC = 15:10 ET in EST)
+10 16 * * 1-5 cd /home/ec2-user/onemil && /usr/bin/python3 scripts/guardrail.py --check >> logs/guardrail_cron.log 2>&1  # 2026-09-25 automatic live ledger + auto-pause (docs/live_guardrails_REPORT.md)
+# AUDIT ADDED: HOD dead-man ticks 12:55 + 13:00-13:30 (early close) and 15:55 + 16:00-16:30 ET (session review: the window is [close-5, close+30), no afternoon-long ticking on the 2-CPU node) (script gates on [close-5, close+30) from the Alpaca calendar, so early closes work; no-op when the trader is active)
+55 12,15 * * 1-5 cd /home/ec2-user/onemil && /usr/bin/python3 scripts/hod_break_deadman_flat.py >> logs/hod_deadman.log 2>&1
+0-30/5 13,16 * * 1-5 cd /home/ec2-user/onemil && /usr/bin/python3 scripts/hod_break_deadman_flat.py >> logs/hod_deadman.log 2>&1
+CRON_TZ=UTC
+15 23 * * 1-5 cd /home/ec2-user/onemil && /usr/bin/python3 scripts/orb_pick_parity.py --date $(date -u +\%Y-\%m-\%d) >> logs/orb_pick_parity.log 2>&1
+# AUDIT ADDED: EOD report after every producer (BT <= 22:41, BF cache 22:45, BF parity 22:58, pick parity 23:15, green check 23:20). Was 17:40 ET.
+25 23 * * 1-5 cd /home/ec2-user/onemil && /usr/bin/python3 scripts/eod_report.py >> logs/eod_report.log 2>&1
+
+# AUDIT NOTE (not crontab lines): root crontab holds `25 10 * * 1-5 systemctl stop onemil-trader` and `30 12 * * 1-5 systemctl start onemil-trader`; the timer onemil-orb-backtest.timer (16:30 ET) is systemd. Both unchanged. Code follow-ups (no cron change): cron_guard on trader_watchdog, bf_decision_parity, hourly_summary, guardrail, hod_break_deadman_flat, eod_report, orb_pick_parity, daily_green_check and main.py --batch; bf_decision_parity skips live comparison when BF is paused; logrotate for logs/*.log.
