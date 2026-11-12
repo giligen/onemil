@@ -1,0 +1,7 @@
+VALIDATION generator vs replay_signals levels (bars_sip vs cache.db): n=8248 within 0.1% = 0.6214; entry_m equal 1.0
+  TRAIN: n=3503 match=0.6006
+  VAL: n=4745 match=0.6367
+TEST signals 3521; bars present 1.0000; level computed 0.9980
+VAL/TRAIN B0-entry vs level (entry-level)/level: median 0.0006 p10 -0.0059 p90 0.0465; share level<=entry*1.001 0.6513
+TEST B0-entry vs level (entry-level)/level: median 0.0031 p10 -0.0060 p90 0.0457; share level<=entry*1.001 0.6708
+TEST cache.db level available 0.9980; cache.db vs bars_sip level agree within 0.1%: 0.4925 (TRAIN/VAL 0.5475)
