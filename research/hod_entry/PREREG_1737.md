@@ -60,3 +60,14 @@ mean R / day-t / n per read, PASS/FAIL.
 ## Independent rebuild (second agent, has not read 1737_score.py)
 From this prose: recompute M1 fills, fill price, stop, net R for every arm on TRAIN and VAL; compare to
 `1737_orders.csv` on (day, symbol, entry_m): fill flags identical, prices to 1e-6, net R to 0.001; `REBUILD_1737.md`.
+
+## Amendment 1 — 2026-11-12 20:40 UTC, POST-HOC after cell 1,736 (disclosed; secondary read, never a pass criterion)
+Cell 1,736 found the failed-touch SHORT loses −0.72/−0.78 R with a 77–81 % stop share, and its placebo short loses
+≈ −0.6 R: after a "failed" retest of the HOD these names re-take the touch high four times out of five. The MIRROR
+is therefore a candidate and is read here as **M3 — buy the failed touch**: the 1,736 event (touch T, failure bar F
+from `1736_events.csv`), long at the open of F+1 (pay half_spread + 2 bp), stop = the 1,736 short's target level
+(entry − 2 R_short, fills at the stop + 13 bp), target = the 1,736 short's stop (max(h over T..F) × 1.002, a
+resting sell, 0 half-spread + 2 bp), else the 15:55 open. Score exactly as M1/M2 INCLUDING the placebo with the same
+geometry started at a random minute after F+1 — the win rate is geometry (1 R target / 2 R stop), so only the
+paired difference to the placebo mean and the day-t of the OWN mean count. Report beside M1/M2; a pass on M3 is
+reported as "post-hoc, needs its own PREREG on a different regime", never as a pass of this cell.
