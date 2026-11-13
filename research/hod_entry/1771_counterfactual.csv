@@ -1,0 +1,1 @@
+VOID: cache records hold only ['bid_250', 'flag', 'measured', 'reason', 'slip_bps', 't0'] (no tape window); read 2 cannot run without a network re-fetch
