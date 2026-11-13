@@ -31,6 +31,14 @@ entry − 0.5 %} (stop slip as PREREG_1740). Exits: (a) no break within K ∈ {1
 (b) break → the LIVE rule from the break (stop stays S, target = entry + 2 × (entry − S), else close 15:55).
 R unit = entry − S (the strict stop).
 
+## Amendment 1 (19:15 UTC, before any number): ONE table, every entry definition
+The same event table carries, per symbol-day, the other entries so the owner's "100 options" are one grid, not
+100 cells: BREAK (the live rule, from 1735_per_signal — the comparator), HOLD-N (N = 5/10/20 minutes after the
+break, 1,751's definition), RETEST (first touch of the level from above within 30 minutes, 1,481's definition),
+and the two APPROACH entries above — each with the same strict-stop menu S and time-out K, and the same feature
+block below computed at ITS entry bar. The grid in Stage A runs over entry × S × K × feature threshold; the pick
+rule and the VAL read are unchanged (one frozen cell). Report the full grid and the number of cells.
+
 ## Features at t (all causal; the owner's three plus the engine's)
 Volume: vol_5 / vol_day_avg, vol_t / vol_5, cumulative volume vs the 20-day ADV share by minute. Time: minute of
 day, minutes since the HOD was set, number of prior approaches today (attempts), minutes since the open move.
