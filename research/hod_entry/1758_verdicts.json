@@ -1,0 +1,50 @@
+{
+ "coverage": {
+  "signal_days": 344,
+  "spy_days_with_1500_and_1555": 344,
+  "business_days_in_range": 361,
+  "median_first_minute": 580,
+  "first_minute_min_max": [
+   577,
+   619
+  ],
+  "cov_vs_signal_days": 1.0,
+  "cov_vs_business_days": 0.9529085872576177,
+  "TRAIN": [
+   242,
+   242
+  ],
+  "TRAIN_H1": [
+   117,
+   117
+  ],
+  "TRAIN_H2": [
+   125,
+   125
+  ],
+  "VAL": [
+   102,
+   102
+  ],
+  "by_year": {
+   "2025": [
+    242,
+    242
+   ],
+   "2026": [
+    102,
+    102
+   ]
+  }
+ },
+ "n_test_days_rows_dropped": 0,
+ "kill_flags_k1pct": {
+  "val_mean_le_5bp_or_t_lt_2": true,
+  "halves_opposite": true,
+  "comparator_not_below_trade": true
+ },
+ "verdict": "KILL",
+ "n_test_signals_dropped": 3521,
+ "n_test_arms_dropped_i2": 0,
+ "i2_passing_cuts": []
+}
