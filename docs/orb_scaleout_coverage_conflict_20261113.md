@@ -34,8 +34,12 @@ D3 Add-on merge: `trades.entry_price` must become the share-weighted average (7.
    go 222 → 444; P&L of row 783 is wrong otherwise. Find the merge site (orb_engine add-on fill handling).
 D4 Investigate from the journal 14:35–15:30 why the watch had no live leg ids after the add-on resize failed
    (which call dropped them, and whether the original SL leg 6.75 was cancelled at the broker).
-D5 Reconciliation: confirm the engine closes row 783 from the external fill cfae5a8c (exit 8.44, reason
-   `external`); if it does not, that is defect D5 (owner manual exits on the live book would be mis-booked too).
+D5 Reconciliation — CONFIRMED a defect at 18:40 UTC: the only engine reaction to the external close was
+   `stop_monitor:897 WARNING EXIT COVERAGE: DAMD broker qty 0 < watch qty 444` (18:13:08); no exit was booked,
+   row 783 still has exit_price NULL 28 min later, the watch (444 sh, stop 7.30) is still armed on a position
+   that no longer exists. Required: broker qty 0 on a watched symbol → book the exit from the broker's last fill
+   (cfae5a8c, 444 @ 8.44, reason `external`), remove the watch, one INFO line. Owner manual exits on the live
+   book would be mis-booked the same way — this one is live-relevant.
 
 ## Rules for the fixing agent
 Sonnet, ≤ 60 calls, TDD, no git commit, no service restart, no orders. Tests: `pytest tests/ -q -x
