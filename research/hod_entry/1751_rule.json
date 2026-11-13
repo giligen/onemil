@@ -1,0 +1,71 @@
+{
+ "N": 20,
+ "cell": "held==1",
+ "var": "held",
+ "op": "==",
+ "thr": 1.0,
+ "n": 472,
+ "fills_wk": 9.076923076923077,
+ "gross_R0": 0.16213744832479185,
+ "net_R0": -0.15155375992043324,
+ "day_t": -1.5112088127546903,
+ "se": 0.10028644528890428,
+ "net_new": -0.07995662026675635,
+ "ex_top5": -0.23706853375803785,
+ "capped3": -0.15155375992043324,
+ "fwd_close_R": 0.21061413074495308,
+ "b0_same": 0.8587389227185107,
+ "stop_share": 0.19703389830508475,
+ "net_H1": -0.24081098154104608,
+ "fills_wk_H1": 8.73076923076923,
+ "net_H2": -0.06885421172500826,
+ "fills_wk_H2": 9.074074074074074,
+ "halves_same_sign": true,
+ "frozen_utc": "2026-11-13 18:45:22",
+ "n_cells": 246,
+ "meta": {
+  "test_signals_dropped": 3521,
+  "test_path_rows_dropped": 946097,
+  "b0_parity_price": 0.9975393028024607,
+  "b0_parity_why": 0.9993164730006835
+ },
+ "excluded": {
+  "3": {
+   "no_bars_1_to_N": 81,
+   "c_le_stop": 183,
+   "c_ge_target": 19,
+   "too_late": 0
+  },
+  "5": {
+   "no_bars_1_to_N": 28,
+   "c_le_stop": 446,
+   "c_ge_target": 44,
+   "too_late": 0
+  },
+  "10": {
+   "no_bars_1_to_N": 4,
+   "c_le_stop": 702,
+   "c_ge_target": 96,
+   "too_late": 0
+  },
+  "15": {
+   "no_bars_1_to_N": 0,
+   "c_le_stop": 935,
+   "c_ge_target": 213,
+   "too_late": 0
+  },
+  "20": {
+   "no_bars_1_to_N": 0,
+   "c_le_stop": 1093,
+   "c_ge_target": 262,
+   "too_late": 0
+  },
+  "30": {
+   "no_bars_1_to_N": 0,
+   "c_le_stop": 1300,
+   "c_ge_target": 324,
+   "too_late": 0
+  }
+ },
+ "train_weeks": 52
+}
