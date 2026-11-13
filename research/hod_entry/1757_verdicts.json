@@ -1,0 +1,76 @@
+{
+ "test_signals_dropped": 3521,
+ "other_path_rows_dropped": 946097,
+ "F1": {
+  "verdict": {
+   "read": "F1",
+   "group": "near_high",
+   "verdict": "KILL",
+   "reasons": [
+    "VAL mean -12.4 <= 20 bp",
+    "VAL day-t -2.50 < 2",
+    "VAL ex-top-5 % -24.8 <= 0"
+   ]
+  },
+  "extra": {
+   "n_dropped": 1837,
+   "gross_bp_val": {
+    "near_high": 12.64876651763916,
+    "not_near": 13.657909393310547
+   }
+  }
+ },
+ "F2": {
+  "verdict": {
+   "read": "F2",
+   "group": "top_third",
+   "verdict": "KILL",
+   "reasons": [
+    "VAL mean -3.5 <= 20 bp",
+    "VAL day-t -0.26 < 2",
+    "VAL ex-top-5 % -35.6 <= 0",
+    "availability rail FAILED: coverage 0.657 < 0.80 (VOID)"
+   ]
+  },
+  "extra": {
+   "n_corp_dropped": 2920,
+   "n_no_daily": 4166,
+   "coverage": 0.6566955088586732,
+   "coverage_rail_pass": false,
+   "val_raw_net_bp": {
+    "top_third": -9.260117530822754,
+    "bottom_third": 0.700515866279602,
+    "all_arms": -5.024428367614746
+   },
+   "val_universe_mean_bp": -6.702215194702148,
+   "val_top_minus_bottom_bp": -12.589896202087402
+  }
+ },
+ "F4": {
+  "verdict": {
+   "read": "F4",
+   "verdict": "KILL",
+   "reasons": [
+    "TRAIN not monotone (Spearman 0.30)"
+   ]
+  },
+  "extra": {
+   "train_spearman": 0.3,
+   "cuts": [
+    0.3466264532762563,
+    0.6356693620844565,
+    0.8767962717788487,
+    1.3717487991460595
+   ],
+   "late_start_share_by_q": {
+    "1": 0.0,
+    "2": 0.0,
+    "3": 0.0,
+    "4": 0.0,
+    "5": 0.0
+   },
+   "days_total": 344,
+   "days_scored": 324
+  }
+ }
+}
