@@ -707,6 +707,9 @@ class StopMonitor:
         # at MAX_PRINT_WATCH_SYMBOLS (a WARNING fires and the excess symbol is skipped, not queued).
         self._print_watch_symbols: set = set()           # symbols subscribed via subscribe_trades_quotes()
         self._print_quotes: Dict[str, tuple] = {}         # symbol -> (bid, ask, ts) latest quote
+        self._print_quote_sizes: Dict[str, tuple] = {}    # symbol -> (bid_size, ask_size) of that same quote (2026-11-13: the HOD
+                                                          # cross snapshot read sizes from a QuoteWatch that print-watched symbols never
+                                                          # have -> entry_quote_bid_size/ask_size NULL on every HOD row since 9/25)
         self._print_handlers: Dict[str, Callable] = {}    # handler_id -> callback(symbol, price, size, ts)
         self._print_watch_lock = threading.Lock()
 
@@ -1188,6 +1191,7 @@ class StopMonitor:
                 if s in self._print_watch_symbols:
                     self._print_watch_symbols.discard(s)
                     self._print_quotes.pop(s, None)
+                    self._print_quote_sizes.pop(s, None)
                     dropped.append(s)
         if dropped and self._loop and self._stream and self._running:
             for s in dropped:
@@ -1201,6 +1205,12 @@ class StopMonitor:
         """Latest (bid, ask, ts) cached for a print-watched symbol, or None if none has arrived yet."""
         with self._print_watch_lock:
             return self._print_quotes.get(symbol)
+
+    def get_print_quote_sizes(self, symbol: str) -> Optional[tuple]:
+        """(bid_size, ask_size) of the quote `get_print_quote` returns for a print-watched symbol, or None if none has
+        arrived yet. Kept beside the (bid, ask, ts) tuple so its existing readers keep their 3-tuple shape."""
+        with self._print_watch_lock:
+            return self._print_quote_sizes.get(symbol)
 
     async def _on_updated_bar(self, bar) -> None:
         """An UPDATED minute bar (Alpaca re-emits a bar when late-reported prints change it — the historical/cached bar is
@@ -3665,6 +3675,7 @@ class StopMonitor:
             with self._print_watch_lock:
                 if symbol in self._print_watch_symbols:      # re-check under lock: may have unsubscribed since
                     self._print_quotes[symbol] = (bid, ask, now)
+                    self._print_quote_sizes[symbol] = (bid_size, ask_size)
 
         # Update all matching watches (stop watch and/or quote watch)
         for w in [watch, qwatch]:

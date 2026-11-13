@@ -827,6 +827,7 @@ class Config:
             "squeeze_enabled": bool(cfg.get("squeeze_enabled", False)),
             "squeeze_minute": int(cfg.get("squeeze_minute", 840)),
             "squeeze_max_r": float(cfg.get("squeeze_max_r", 0.5)),
+            "l2_at_fill": bool(cfg.get("l2_at_fill", False)),          # 2026-11-13: paid Databento L2 at the HOD entry fill, owner's GO
             "fc_leg_poll_s": float(cfg.get("fc_leg_poll_s", Config._FC_LEG_POLL_S_DEFAULT)),
             "oco_settle_timeout_s": float(cfg.get("oco_settle_timeout_s", 5.0)),
             "oco_settle_poll_s": float(cfg.get("oco_settle_poll_s", 0.25)),

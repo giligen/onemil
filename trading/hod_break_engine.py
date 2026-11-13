@@ -287,6 +287,11 @@ class HodBreakEngine:
         # 2026-10-31 paper-exec instruments (docs/hod_paper_exec_instruments_spec_20261031.md): passive 14:00 squeeze of
         # the take-profit leg of positions below squeeze_max_r (cells 1,725/1,726). OFF unless config turns it on.
         self.squeeze_enabled = bool(cfg.get('squeeze_enabled', False))
+        # 2026-11-13: L2 depth at the entry fill (data_sources.l2_depth.log_l2_async, the bull-flag path's helper — a
+        # Databento MBP-10 snapshot, PAID per request) -> entry_l2_depth. OFF unless config sets l2_at_fill: the owner
+        # decides the spend; the free NBBO sizes above are captured regardless.
+        self.l2_at_fill = bool(cfg.get('l2_at_fill', False))
+        self._l2_warned: set = set()
         self.squeeze_minute = int(cfg.get('squeeze_minute', 840))            # ET minutes from midnight, like flat_minute
         self.squeeze_max_r = float(cfg.get('squeeze_max_r', 0.5))            # strict '<': a runner at >= this is untouched
         self.squeeze_placed = 0; self.squeeze_filled = 0                     # per-session counters (reset in _roll_session)
@@ -434,7 +439,7 @@ class HodBreakEngine:
             self.session_date = today; self.candidates.clear(); self.entered_today.clear(); self.daily_pnl = 0.0
             self.live_since = None
             self._kill_notified.clear(); self._flattened = False; self._post_close_fc_warned = False
-            self._live_cap_slots.clear(); self._cap_logged.clear(); self._arm_skip_logged.clear(); self.arm_gate_skips = {'price': 0, 'r_pct': 0}; self._sizing_logged.clear(); self.squeeze_placed = 0; self.squeeze_filled = 0; self._squeeze_tried.clear(); self._squeeze_warned.clear(); self._squeeze_filled_syms.clear(); self._entry_quote_warned.clear(); self._bp_cache_value = None; self._bp_cache_ts = 0.0
+            self._live_cap_slots.clear(); self._cap_logged.clear(); self._arm_skip_logged.clear(); self.arm_gate_skips = {'price': 0, 'r_pct': 0}; self._sizing_logged.clear(); self.squeeze_placed = 0; self.squeeze_filled = 0; self._squeeze_tried.clear(); self._squeeze_warned.clear(); self._squeeze_filled_syms.clear(); self._entry_quote_warned.clear(); self._l2_warned.clear(); self._bp_cache_value = None; self._bp_cache_ts = 0.0
             self._live_cancel_swept_entry = False; self._live_cancel_swept_flat = False
             self._live_armed_stops.clear(); self._rail_cancel_done.clear(); self._rail_fail_counts.clear()
             self._warn_ts.clear(); self._fc_unknown.clear()
@@ -2858,10 +2863,34 @@ class HodBreakEngine:
             snap = self.stop_monitor.get_quote_watch_snapshot(symbol) if self.stop_monitor is not None and hasattr(self.stop_monitor, 'get_quote_watch_snapshot') else None
             if isinstance(snap, dict):
                 bs = snap.get('latest_bid_size') or None; asz = snap.get('latest_ask_size') or None
+            if (bs is None or asz is None) and self.stop_monitor is not None and hasattr(self.stop_monitor, 'get_print_quote_sizes'):
+                # 2026-11-13: HOD symbols are PRINT-watched, not QuoteWatch-ed — the snapshot above is None for them in
+                # production (the unit test mocked it), so sizes were NULL on every HOD row. The print-watch cache now
+                # keeps the sizes of the very quote `bid`/`ask` came from.
+                ps = self.stop_monitor.get_print_quote_sizes(symbol)
+                if isinstance(ps, tuple) and len(ps) == 2:
+                    bs = bs if bs is not None else (int(ps[0]) if ps[0] else None)
+                    asz = asz if asz is not None else (int(ps[1]) if ps[1] else None)
             lo.update(cross_bid=float(bid), cross_ask=float(ask), cross_bid_size=bs, cross_ask_size=asz, cross_ts=self._et_now().isoformat())
             lo.pop('cross_missing_why', None)
         except Exception as e:
             lo['cross_missing_why'] = f'snapshot failed: {e}'
+
+    def _launch_l2_at_fill(self, sym: str, trade_id, lo: dict) -> None:
+        """Fire the async L2 depth snapshot for the entry fill (entry_l2_depth) ONCE per order, only when `l2_at_fill` is
+        on. The helper is the bull-flag path's (`data_sources.l2_depth.log_l2_async`): a daemon thread, never blocks
+        the booking, never raises here; a launch failure is ONE WARNING per symbol-day. Independent of the NBBO columns
+        (a missing cross snapshot must not suppress the depth snapshot)."""
+        if not self.l2_at_fill or lo.get('l2_launched') or trade_id is None:
+            return
+        lo['l2_launched'] = True
+        try:
+            from data_sources.l2_depth import log_l2_async
+            log_l2_async(sym, datetime.now(timezone.utc), int(trade_id), self.db.update_trade, column='entry_l2_depth')
+        except Exception as e:
+            if sym not in self._l2_warned:
+                self._l2_warned.add(sym)
+                logger.warning(f"{self.tag} {sym}: L2 depth snapshot launch failed for trade_id={trade_id} ({e}) — entry_l2_depth stays NULL")
 
     def _write_entry_quote(self, sym: str, trade_id, lo: dict) -> None:
         """Write the cross snapshot onto the booked trade row as entry_quote_bid/ask/bid_size/ask_size/spread (spread =
@@ -2869,6 +2898,7 @@ class HodBreakEngine:
         Written once per order (a partial top-up does not rewrite it). Never raises, never affects a decision."""
         if lo.get('entry_quote_written'):
             return
+        self._launch_l2_at_fill(sym, trade_id, lo)
         if lo.get('cross_bid') is None or lo.get('cross_ask') is None:
             if sym not in self._entry_quote_warned:
                 self._entry_quote_warned.add(sym)
