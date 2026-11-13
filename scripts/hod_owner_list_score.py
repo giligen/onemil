@@ -257,6 +257,11 @@ def main(argv: list = None) -> int:
     ok = hl.TelegramNotifier(bot_token=cfg.telegram_bot_token, chat_id=cfg.telegram_chat_id).send_message_sync(rep['text'], parse_mode=None)
     if not ok:
         logger.error('HOD-LIST SCORE: Telegram send returned False')
+    else:
+        # 2026-11-13: proof line — the first Friday run logged nothing on success, so the log could not show the
+        # report went out (same gap as hod_owner_list.py, fixed the same morning).
+        logger.info('HOD-LIST SCORE: sent since %s (%d chars, report reports/hod_owner_list_score_%s.md)',
+                    args.since, len(rep['text']), today)
     return 0 if ok else 1
 
 
