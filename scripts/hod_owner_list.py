@@ -249,6 +249,8 @@ def publish(rows: list, at: str, notifier=None) -> bool:
     ok = notifier.send_message_sync(format_message(rows, at), parse_mode=None)
     if not ok:
         logger.error('HOD-LIST %s: Telegram send returned False', at)
+    else:
+        logger.info('HOD-LIST %s: sent, %d rows', at, len(rows))      # the proof line the cron log is grepped for
     return bool(ok)
 
 
