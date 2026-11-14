@@ -56,3 +56,6 @@ armed (−60 s), else ERROR + watch kept. D4 (lost leg ids after the add-on resi
 websocket subscription lines; reopen with `journalctl ... | grep -v websocket` on the 11/13 14:35–15:30 window. Tests: 16 in
 `tests/test_orb_scaleout_coverage_conflict_20261113.py` (+2 existing files adjusted for the 30-s window); full suite 5,958 green.
 Boot rehearsal on the exact ExecStart: 2026-11-14 evening (below).
+Boot rehearsal 2026-11-14 18:12–18:16 UTC on the exact ExecStart (markets closed): 197 journal lines, 0 ERROR / Traceback;
+StopMonitor started + WebSocket CONNECTED, both OrderStreamWatchers (live + paper) up, ORBEngine gates logged unchanged
+(pdr_veto 11.0, range_size_veto 2.221, skip_q1), HOD paper account read; service stopped cleanly. Cleared for Monday's 12:30 UTC start.
