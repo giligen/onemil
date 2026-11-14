@@ -4,7 +4,10 @@ FROZEN 2026-11-14 before any number. Cell 1,775. Rules: write only `research/sig
 URIs; `ulimit -v 2500000; nice -n 19`; budget ≤ 60 calls. Network: ONLY Alpaca news REST history
 (`GET https://data.alpaca.markets/v1beta1/news?symbols=&start=&end=&limit=50&include_content=false`, HOD paper keys from .env,
 never printed), ≤ 200 req/min, cached per day in `research/signal_search/1775_cache/news/<day>.parquet` (atomic, resumable).
-No LLM calls (ANTHROPIC_API_KEY is empty here); classification is the DECLARED regex rubric below, fixed before any number.
+Classification = Claude Haiku 4.5 (owner's order 11/14: 'no regex'), run through this session's agent harness in batches of
+≤ 300 headlines (the cell's own python has no API key — ANTHROPIC_API_KEY pending from the owner); the rubric below is the
+prompt, fixed before any number; labels cached in `1775_labels.parquet` (headline id → category, strength 1–5, one-line why).
+The regex rubric is run too, as an AGREEMENT check only (report Cohen's kappa), never as the classifier.
 
 ## Why
 1,773 (MOO short → MOC) fails on its tail: worst-5 % −21 %, ex-top-5 % of winners < 0. The question is whether the squeeze days
@@ -19,7 +22,9 @@ null on the MEAN; the read that matters is the TAIL.
 of day D] from Alpaca news (Benzinga, history back to 2015). Coverage rail: ≥ 80 % of symbol-days queried successfully;
 "no headline" is a valid category, not missing.
 
-## Rubric (first match in this order, case-insensitive, declared)
+## Rubric (Haiku prompt categories; the regex hints beside each are the agreement-check patterns only)
+Haiku also returns `strength` 1–5: 5 = binding, company-changing, verified (FDA approval, signed M&A, large contract with a
+named counterparty); 1 = promotional / vague / recycled. Output strict JSON per headline; unparseable → re-ask once, else NONE.
 1 MA: acqui|merger|buyout|takeover|to be acquired|definitive agreement
 2 DILUTION: offering|pricing of|registered direct|private placement|warrant|at-the-market|ATM|dilut|reverse split|
   shelf|convertible
@@ -35,7 +40,7 @@ distinguishes it).
 ## Reads
 PRIMARY (tail): on VAL, for the 1,773 primary book (equal-$, no stop): the share of each category in the worst-5 % trades
 (the squeezes, i.e. the long's top-5 %) vs its share in the book; odds ratio with a 95 % CI (day-clustered bootstrap, 500
-draws). Pre-committed veto candidate = the category with odds ratio > 2 on TRAIN, tested once on VAL.
+draws). Pre-committed veto candidates (two, declared): (i) the category with odds ratio > 2 on TRAIN; (ii) strength ≥ 4. Each tested once on VAL.
 Secondary: (a) mean net (1,773 cost lines) by category, TRAIN then VAL, n per category; (b) the 1,773 book with the TRAIN-chosen
 veto applied on VAL: net, t, ex-top-5 %, worst-5 %, weekly P10 — against the count-matched placebo p95 of dropping the same
 NUMBER of random trades (binding lesson 11/13); (c) the same for the 1,774 book if its events parquet exists by then (10:30
