@@ -28,3 +28,24 @@ VAL 2026 n 496, +145 bp net/trade (fees 4 + locate 9 + borrow 100 %/360 + measur
 worst-5 % −17 %, weekly P10 −0.66 R, 5 names/day; TRAIN 2025H2 +188 (t 3.5), halves +282/+88. Expected at $300/name ≈ $20/day
 ≈ $400/mo paper-equivalent; the instrument's job is to measure real fees, fills and the tail, not to earn yet.
 Known gaps: the squeeze tail (1,775 news veto pending), real gap-morning locate fees (ledger from Monday), MOO fill vs daily open.
+
+## Architecture decision (2026-11-14 evening): standalone cron script, NOT inside the trader service
+`scripts/gap_short_paper.py` on the **MOM paper account** (`ALPACA_MOM_API_KEY/SECRET`, weekly long book → least intraday
+overlap; HOD/ORB paper accounts trade the same gappers at 09:35–09:40 and would net against us). No systemd change, no boot
+rehearsal of the live service. Modes (all idempotent, all with `--dry-run`):
+* `--pick` at 09:26 ET: build the list per rules 1–3 (pre-market trades via Alpaca data API snapshots/bars 04:00–09:25; L1 ≥ $7.3 M;
+  gap ≥ 10 %, ≤ 200 %; top 10 by gap), skip any symbol with an existing position or open order on the account, skip threshold-list
+  names, log borrow_status + advisory locate fee from the LIVE quotes endpoint (GET only), submit `sell` `market` `opg`
+  qty = floor(300 / pre-market last), `client_order_id = gapshort-<date>-<sym>`. Paper may reject HTB shorts → log, no retry.
+* `--cover` at 10:30 ET: for every open `gapshort-` short, limit buy-to-cover at ask + 10 bp (`day`); poll 60 s; unfilled →
+  cancel and market. `--flatten` at 10:40 ET: safety — any remaining `gapshort-` short is market-covered and logged as ERROR.
+* `--score` at 16:15 ET: ledger row per name (MOO fill vs daily open, cover fill vs 10:30 ask, slip, net bp, cost lines, borrow
+  status, advisory fee bp); `--weekly` Friday 17:10 ET: vs the BT line (+145 bp, 5 names/day), count-matched placebo from the
+  day's non-picked gappers, `[GAPSHORT]` Telegram.
+* Rails in code: ≤ 10 names, ≤ $3,000 gross, no new picks if the ledger's realised week ≤ −$300 (pause flag file), ERROR to Telegram
+  only on order rejections / API failures / flatten events. Shared rule helper `trading/gap_short_rules.py` (pure functions:
+  gap, L1, ranking, sizing) with a parity test against `research/signal_search/1776R_events.parquet` picks for 10 sampled 2026 days
+  (same (day, symbol) set given the same inputs).
+Crons (ET block, standing-authorized): 26 9, 30 10, 40 10 (1-5); 15 16 (1-5); 10 17 (5). Tests: unit (mocked client with spec=),
+integration (paper account read-only: assets/borrow_status, quotes GET), and a `--dry-run --pick` system run Monday 09:26 before
+the first real paper order (the first live-paper day is Tuesday 11/17 unless the dry run is clean and the owner says Monday).
