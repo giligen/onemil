@@ -48,8 +48,35 @@ def test_zero_pick_day_line_is_info_and_has_no_error():
     assert "BT picks 0 | live 0 | matched 0 | unexplained 0 | BT net n/a bp vs live n/a bp" in line and "ERROR" not in line
 
 
-def test_api_failure_marks_error():
-    assert "ERROR api: boom" in gpar.summary_line(D, [], "boom")
+def test_api_failure_is_info_unless_two_days_running():
+    line = gpar.summary_line(D, [], "boom")
+    assert "api error: boom" in line and "ERROR" not in line
+    assert "ERROR" in gpar.summary_line(D, [], "boom", escalate=True)
+
+
+def test_api_error_writes_one_row_and_no_universe_diff(tmp_path, monkeypatch):
+    monkeypatch.setattr(gpar, "PARITY_CSV", tmp_path / "parity.csv")
+    monkeypatch.setattr(gp, "LEDGER", tmp_path / "ledger.csv")
+    monkeypatch.setattr(gp, "PAUSE_FLAG", tmp_path / "pause.flag")
+    gp.write_ledger([{"date": D, "symbol": "ZZZ", "entry_fill": "10"}])
+    monkeypatch.setattr(gp, "make_client", lambda: (_ for _ in ()).throw(RuntimeError("down")))
+    from datetime import datetime
+    now = datetime(2026, 11, 16, 16, 35, tzinfo=gp.R.ET)
+    assert gpar.run_parity(False, now) == 0
+    rows = gp.read_ledger(gpar.PARITY_CSV)
+    assert len(rows) == 1 and rows[0]["reason"] == "api_error" and "api_error" in gpar.REASONS
+    assert gpar.api_error_yesterday(gp.read_ledger(gpar.PARITY_CSV), "2026-11-17") is True
+    assert gpar.api_error_yesterday(gp.read_ledger(gpar.PARITY_CSV), "2026-11-16") is False
+
+
+def test_prev_close_fallback_logs_warning(caplog):
+    from unittest.mock import MagicMock
+    from data_sources.alpaca_client import AlpacaClient
+    c = MagicMock(spec=AlpacaClient)
+    c.get_snapshots.return_value = {"AAA": {"open": 15.0, "prev_close": None, "daily_bar_date": D}}
+    c.get_historical_1min_bars.return_value = None
+    gpar.bt_picks(D, c, {"AAA": 10.0}, {})
+    assert any(r.levelname == "WARNING" and "prev_close" in r.message for r in caplog.records)
 
 
 def test_write_rows_idempotent(tmp_path):

@@ -34,7 +34,7 @@ from trading import gap_short_rules as R  # noqa: E402
 logger = logging.getLogger("gap_short_parity")
 PARITY_CSV = _REPO / "logs" / "gap_short_parity.csv"
 COLUMNS = ["date", "symbol", "side", "reason", "bt_open", "bt_ask_1030", "bt_net_bp", "live_net_bp", "entry_slip_bp", "exit_slip_bp", "net_diff_bp"]
-REASONS = ("opg_deadline", "rejected_htb", "rejected_ssr", "existing_position", "qty_floor", "pause_flag", "universe_diff", "unexplained")
+REASONS = ("opg_deadline", "rejected_htb", "rejected_ssr", "existing_position", "qty_floor", "pause_flag", "universe_diff", "unexplained", "api_error")
 
 
 def classify_bt_only(symbol: str, ledger_row, ctx: dict) -> str:
@@ -90,7 +90,7 @@ def compare(day: str, bt: list, ledger_rows: list, ctx: dict) -> list:
     return out
 
 
-def summary_line(day: str, rows: list, api_error: str = "") -> str:
+def summary_line(day: str, rows: list, api_error: str = "", escalate: bool = False) -> str:
     """`[GAPSHORT PARITY] date: BT picks n | live n | matched k | unexplained m | BT net x bp vs live y bp | slip entry a / exit b bp`."""
     bt_rows = [r for r in rows if r["side"] in ("matched", "bt_only")]
     matched = [r for r in rows if r["side"] == "matched"]
@@ -101,9 +101,17 @@ def summary_line(day: str, rows: list, api_error: str = "") -> str:
     line = (f"[GAPSHORT PARITY] {day}: BT picks {len(bt_rows)} | live {live_n} | matched {len(matched)} | unexplained {unexpl} | "
             f"BT net {mean('bt_net_bp', bt_rows)} bp vs live {mean('live_net_bp', matched)} bp | "
             f"slip entry {mean('entry_slip_bp', matched)} / exit {mean('exit_slip_bp', matched)} bp")
-    if unexpl or api_error:
-        line += f" | ERROR {'api: ' + api_error if api_error else 'unexplained names'}"
+    if api_error:
+        line += f" | api error: {api_error}" + (" | ERROR api error 2 days running" if escalate else "")
+    elif unexpl:
+        line += " | ERROR unexplained names"
     return line
+
+
+def api_error_yesterday(old_rows: list, day: str) -> bool:
+    """True when the latest parity date before `day` was itself an api_error day (2 consecutive days escalate to ERROR)."""
+    prior = sorted({r["date"] for r in old_rows if r["date"] < day})
+    return bool(prior) and any(r["date"] == prior[-1] and r.get("reason") == "api_error" for r in old_rows)
 
 
 def fetch_ask_1030(headers: dict, symbol: str, day: str):
@@ -129,12 +137,14 @@ def bt_picks(day: str, client, universe: dict, headers: dict) -> list:
         s = snaps.get(sym) or {}
         if s.get("daily_bar_date") not in (None, day):
             continue
+        if not s.get("prev_close"):
+            logger.warning("parity: snapshot prev_close missing for %s - falling back to daily_bars close %s", sym, universe[sym])
         g = R.gap_fraction(s.get("open"), s.get("prev_close") or universe[sym])
-        if g is not None and R.MIN_GAP <= g <= R.MAX_GAP and R.price_ok(s.get("open")) and not R.is_excluded_symbol(sym):
+        if g is not None and R.GAP_MIN <= g <= R.GAP_MAX and R.price_ok(s.get("open")) and not R.is_excluded_symbol(sym):
             cands.append({"symbol": sym, "gap": g, "open": s["open"], "l1": None})
     cands.sort(key=lambda c: (-c["gap"], c["symbol"]))
     d = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=R.ET)
-    for c in cands[:R.TOP_N]:
+    for c in cands[:R.TOP_K]:
         df = client.get_historical_1min_bars(c["symbol"], d.replace(hour=4), d.replace(hour=9, minute=30))
         c["l1"] = R.premarket_dollar_volume({"t": r.timestamp.to_pydatetime(), "c": r.close, "v": r.volume} for r in df.itertuples()) if df is not None and len(df) else None
     out = []
@@ -167,8 +177,11 @@ def run_parity(dry_run: bool, now=None, client=None, universe=None, headers=None
     except Exception as e:  # noqa: BLE001 - reported in the line + logger.error
         api_error = str(e)[:100]
     ctx = {"pause_active": gp.PAUSE_FLAG.exists(), "universe": set(universe or [])}
-    rows = compare(day, bt, gp.read_ledger(), ctx)
-    line = summary_line(day, rows, api_error)
+    if api_error:      # no BT picks to compare: never fabricate universe_diff rows for every live name
+        rows = [{"date": day, "symbol": "-", "side": "none", "reason": "api_error"}]
+    else:
+        rows = compare(day, bt, gp.read_ledger(), ctx)
+    line = summary_line(day, rows, api_error, escalate=bool(api_error) and api_error_yesterday(ll.read_csv(PARITY_CSV), day))
     if dry_run:
         print(line)
         return 0

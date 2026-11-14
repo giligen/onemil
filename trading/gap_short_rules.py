@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import math
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Iterable, Optional, Sequence
 from zoneinfo import ZoneInfo
 
@@ -21,18 +21,11 @@ ET = ZoneInfo("America/New_York")
 # FROZEN strategy constants (asserted by tests/test_gap_short_rules.py; changing one needs a PREREG, never a silent edit)
 L1_MIN_USD = 7_224_000           # the BT's exact TRAIN top-tercile cutoff (1776R min 7,224,163), fixed
 TOP_K = 10
-COVER_TIME = "10:30"
 NOTIONAL_PER_NAME = 300
-MAX_NAMES = 10
 GAP_MIN = 0.05                   # cell 1,428: gap >= 5 % (BT: 09:30 open vs prior close; live proxy: 09:19 pre-market last)
 PRICE_LO, PRICE_HI = 3.0, 30.0   # cell 1,428: price in [$3, $30] (BT: the open; live: pre-market last)
 PRIOR_DAY_VOL_MIN = 500_000      # cell 1,428: single prior-day volume (shares) from daily_bars
 GAP_MAX = 2.0                    # drop gap > 200 %
-L1_CUTOFF = float(L1_MIN_USD)
-MIN_GAP, MAX_GAP = GAP_MIN, GAP_MAX
-MIN_PRICE = 1.0                  # prev close floor
-TOP_N = TOP_K
-NOTIONAL = float(NOTIONAL_PER_NAME)
 GROSS_CAP = 3000.0
 DAY_KILL_USD = -300.0
 WEEK_PAUSE_USD = -300.0
@@ -90,8 +83,8 @@ def is_excluded_symbol(symbol: str) -> bool:
     return bool(EXCLUDE_RE.match(symbol))
 
 
-def select_picks(cands: Sequence[dict], l1_cutoff: float = L1_CUTOFF, min_gap: Optional[float] = MIN_GAP,
-                 max_gap: Optional[float] = MAX_GAP, top_n: int = TOP_N) -> list:
+def select_picks(cands: Sequence[dict], l1_cutoff: float = float(L1_MIN_USD), min_gap: Optional[float] = GAP_MIN,
+                 max_gap: Optional[float] = GAP_MAX, top_n: int = TOP_K) -> list:
     """Rules 1-3: gap window and symbol exclusion -> rank by gap desc -> top N -> keep L1 >= cutoff.
 
     `cands` are dicts with `symbol`, `gap` (fraction) and `l1` (None/NaN when unknown -> never picked). min_gap/max_gap None
@@ -105,7 +98,7 @@ def select_picks(cands: Sequence[dict], l1_cutoff: float = L1_CUTOFF, min_gap: O
     return [c for c in top if c.get("l1") is not None and not math.isnan(c["l1"]) and c["l1"] >= l1_cutoff]
 
 
-def position_qty(pm_last: float, notional: float = NOTIONAL) -> int:
+def position_qty(pm_last: float, notional: float = float(NOTIONAL_PER_NAME)) -> int:
     """Shares = floor(notional / pre-market last); 0 when the price is unusable or exceeds the notional."""
     if not pm_last or pm_last <= 0:
         return 0
@@ -159,3 +152,32 @@ def two_red_weeks_below_p10(weekly_r: Sequence[float], p10: float = BT_WEEKLY_P1
 def client_order_id(day: str, symbol: str, leg: str = "") -> str:
     """Deterministic order id: gapshort-<day>-<sym> (entry) or gapshort-<leg>-<day>-<sym>."""
     return f"gapshort-{leg + '-' if leg else ''}{day}-{symbol}"
+
+
+# NYSE full-day closures (no exchange-calendar package on this node); outside the covered years previous_session warns + uses weekdays.
+NYSE_HOLIDAYS = frozenset({
+    "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25",
+    "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24"})
+
+
+def previous_session(day: str) -> str:
+    """The NYSE session before `day` (YYYY-MM-DD): skips weekends and NYSE_HOLIDAYS (weekends only, with a WARNING, outside 2026-27)."""
+    import logging
+    d = date.fromisoformat(day)
+    if d.year not in (2026, 2027):
+        logging.getLogger(__name__).warning("previous_session: no NYSE holiday table for %d - weekends only", d.year)
+    d -= timedelta(days=1)
+    while d.weekday() >= 5 or d.isoformat() in NYSE_HOLIDAYS:
+        d -= timedelta(days=1)
+    return d.isoformat()
+
+
+def week_start(day: str) -> str:
+    """ISO date of the Monday of `day`'s ISO week (the ONE week definition shared by score, weekly and the pause flag)."""
+    d = date.fromisoformat(day)
+    return (d - timedelta(days=d.weekday())).isoformat()
+
+
+def client_order_id_unique(day: str, symbol: str, leg: str, attempt: int, hhmmss: str) -> str:
+    """Cover/flatten id `gapshort-<leg>-<day>-<sym>-<attempt><HHMMSS>`: unique per attempt, prefix-matchable by the scorer."""
+    return f"{client_order_id(day, symbol, leg)}-{attempt}{hhmmss}"

@@ -49,7 +49,14 @@ def test_gap_pct_and_selection():
     prev = {"A": 10.0, "B": 10.0, "C": 10.0, "D": 0.5}
     snaps = {"A": {"latest_price": 11.0, "volume": 5}, "B": {"latest_price": 10.5},
              "C": {"latest_price": 0.9}, "D": {"latest_price": 0.8}}
-    got = ll.select_gappers(prev, snaps)
+    from datetime import datetime
+    from trading import gap_short_rules as R
+    ts = datetime(2026, 11, 16, 9, 10, tzinfo=R.ET)
+    for v in snaps.values():
+        v["latest_trade_ts"] = ts
+    snaps["B"]["latest_trade_ts"] = datetime(2026, 11, 13, 15, 0, tzinfo=R.ET)       # yesterday's print: not a live gapper
+    snaps["A"]["latest_trade_ts"] = ts
+    got = ll.select_gappers(prev, snaps, "2026-11-16")
     assert [g["symbol"] for g in got] == ["A"]
     assert got[0]["gap_pct"] == pytest.approx(10.0)
 
@@ -127,3 +134,17 @@ def test_score_and_weekly_net(tmp_path):
 def test_quote_without_price_zero_qty():
     out = ll.parse_locate_response({"quotes": [{"symbol": "AZ", "available_qty": 0, "quoted_at": "x"}], "errors": []})
     assert out["AZ"] == {"locate_status": "quoted", "fee_per_share": "", "available_qty": 0}
+
+
+def test_make_session_reads_repo_relative_env_and_stale_bars_refuse(tmp_path, caplog):
+    import inspect
+    assert "/home/ec2-user" not in inspect.getsource(ll.make_session)
+    import sqlite3
+    db = tmp_path / "c.db"
+    con = sqlite3.connect(db)
+    con.execute("create table daily_bars(symbol text, bar_date text, close real, volume real)")
+    con.execute("insert into daily_bars values('OK','2026-11-12',4.0,9e6)")
+    con.commit()
+    con.close()
+    assert ll.load_universe(db, "2026-11-16") == {}
+    assert any("daily_bars stale (2026-11-12) - refusing" in r.message for r in caplog.records if r.levelname == "ERROR")

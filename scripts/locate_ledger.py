@@ -18,6 +18,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -49,10 +50,13 @@ def gap_pct(prev_close: float, price: float):
     return (price / prev_close - 1.0) * 100.0
 
 
-def select_gappers(prev_close: dict, snaps: dict) -> list:
-    """Symbols with gap >= MIN_GAP_PCT and latest pre-market trade >= MIN_PRICE, biggest gap first."""
+def select_gappers(prev_close: dict, snaps: dict, day: str) -> list:
+    """Symbols with gap >= MIN_GAP_PCT, latest pre-market trade >= MIN_PRICE AND stamped TODAY (`day`) >= 04:00 ET, biggest gap first."""
+    from trading.gap_short_rules import is_todays_premarket_trade
     out = []
     for sym, prev in prev_close.items():
+        if not is_todays_premarket_trade((snaps.get(sym) or {}).get("latest_trade_ts"), day):
+            continue
         px = (snaps.get(sym) or {}).get("latest_price") or 0
         g = gap_pct(prev, px)
         if g is None or px < MIN_PRICE or g < MIN_GAP_PCT:
@@ -62,11 +66,16 @@ def select_gappers(prev_close: dict, snaps: dict) -> list:
     return sorted(out, key=lambda r: -r["gap_pct"])
 
 
-def load_universe(db_path=CACHE_DB) -> dict:
+def load_universe(db_path=CACHE_DB, day: str = "") -> dict:
     """symbol -> prev close for the last bar date in daily_bars with close >= $1 and $vol >= $1M (read-only)."""
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
         last = con.execute("SELECT MAX(bar_date) FROM daily_bars").fetchone()[0]
+        from trading.gap_short_rules import previous_session
+        day = day or datetime.now(timezone.utc).astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+        if last != previous_session(day):
+            logger.error("daily_bars stale (%s) - refusing to pick (expected %s)", last, previous_session(day))
+            return {}
         rows = con.execute("SELECT symbol, close FROM daily_bars WHERE bar_date=? AND close>=? AND close*volume>=?",
                            (last, MIN_PRICE, MIN_DOLLAR_VOL)).fetchall()
     finally:
@@ -78,7 +87,7 @@ def load_universe(db_path=CACHE_DB) -> dict:
 def make_session() -> requests.Session:
     """requests.Session with the LIVE Alpaca keys from .env (never printed)."""
     from dotenv import load_dotenv
-    load_dotenv("/home/ec2-user/onemil/.env", override=True)
+    load_dotenv(str(_REPO / ".env"), override=True)
     key, sec = os.getenv("ALPACA_API_KEY"), os.getenv("ALPACA_API_SECRET")
     if not key or not sec:
         raise RuntimeError("ALPACA_API_KEY / ALPACA_API_SECRET missing in .env")
@@ -183,13 +192,15 @@ def run_ledger(dry_run: bool, at: str | None, session=None, client=None) -> int:
     """Morning mode: universe -> pre-market gappers -> borrow status + locate quotes -> append."""
     session = session or make_session()
     prev = load_universe()
+    if not prev:
+        return 0
     if client is None:
         from data_sources.alpaca_client import AlpacaClient
         client = AlpacaClient(os.getenv("ALPACA_API_KEY"), os.getenv("ALPACA_API_SECRET"), paper=False)
     snaps = client.get_snapshots(list(prev))
     if not snaps:
         logger.error("locate ledger: snapshots empty for %d symbols", len(prev))
-    gappers = select_gappers(prev, snaps)
+    gappers = select_gappers(prev, snaps, datetime.now(timezone.utc).astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d"))
     now = datetime.now(timezone.utc)
     date = now.strftime("%Y-%m-%d")
     t = f"{at[:2]}:{at[2:]}:00" if at else now.strftime("%H:%M:%S")

@@ -2969,3 +2969,18 @@ class AlpacaClient:
         except Exception as e:
             logger.error(f"Alpaca API connection failed: {e}")
             return False
+
+
+def make_mom_paper_client(env_path=None) -> "AlpacaClient":
+    """AlpacaClient on the MOM PAPER keys (ALPACA_MOM_API_KEY / ALPACA_MOM_API_SECRET; `.env` loaded with override=True, never logged).
+
+    Raises RuntimeError naming the missing variable(s). `env_path` defaults to the repo's `.env`.
+    """
+    import os
+    from pathlib import Path
+    from dotenv import load_dotenv
+    load_dotenv(str(env_path or Path(__file__).resolve().parent.parent / ".env"), override=True)
+    key, sec = os.getenv("ALPACA_MOM_API_KEY"), os.getenv("ALPACA_MOM_API_SECRET")
+    if not key or not sec:
+        raise RuntimeError("ALPACA_MOM_API_KEY / ALPACA_MOM_API_SECRET missing in .env")
+    return AlpacaClient(key, sec, paper=True)

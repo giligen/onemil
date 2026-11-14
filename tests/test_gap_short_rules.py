@@ -80,8 +80,8 @@ def test_parity_with_1776R_picks_on_10_sampled_2026_days():
     """Same (day, symbol) set as the BT book from the same inputs (population + daily_bars gap + 04:00-09:25 bar L1)."""
     ev = pd.read_parquet(EVENTS)
     ev["day"] = ev.day.astype(str).str[:10]
-    cutoff = R.L1_CUTOFF
-    assert cutoff >= R.L1_CUTOFF > 7.2e6       # frozen live cutoff = the BT cutoff (rounded down to 7,224,000)
+    cutoff = float(R.L1_MIN_USD)
+    assert cutoff > 7.2e6       # frozen live cutoff = the BT cutoff (rounded down to 7,224,000)
     days = sorted(d for d in ev.day.unique() if d >= "2026-01-01")
     sample = random.Random(1776).sample(days, 10)
     pop = pd.read_csv(POP)
@@ -107,8 +107,17 @@ def test_parity_with_1776R_picks_on_10_sampled_2026_days():
 
 def test_frozen_constants():
     """No silent tuning: every strategy constant is pinned here."""
-    assert (R.L1_MIN_USD, R.TOP_K, R.COVER_TIME, R.NOTIONAL_PER_NAME, R.MAX_NAMES, R.GAP_MIN, R.GAP_MAX) == (
-        7_224_000, 10, "10:30", 300, 10, 0.05, 2.0)
+    assert (R.L1_MIN_USD, R.TOP_K, R.NOTIONAL_PER_NAME, R.GAP_MIN, R.GAP_MAX) == (
+        7_224_000, 10, 300, 0.05, 2.0)
     assert (R.PRICE_LO, R.PRICE_HI, R.PRIOR_DAY_VOL_MIN) == (3.0, 30.0, 500_000)
-    assert (R.L1_CUTOFF, R.TOP_N, R.NOTIONAL, R.MIN_GAP, R.MAX_GAP) == (7_224_000.0, 10, 300.0, 0.05, 2.0)
     assert R.GROSS_CAP == 3000.0 and R.COVER_ASK_BP == 10.0 and R.PM_END_HM == (9, 19) and R.OPG_LAST_SUBMIT_HM == (9, 27, 30)
+
+
+def test_previous_session_skips_weekends_and_nyse_holidays():
+    assert R.previous_session("2026-11-16") == "2026-11-13"       # Monday -> Friday
+    assert R.previous_session("2026-11-27") == "2026-11-25"       # day after Thanksgiving -> Wednesday
+    assert R.previous_session("2026-11-24") == "2026-11-23"
+
+
+def test_week_start_is_the_iso_monday():
+    assert R.week_start("2026-11-18") == "2026-11-16" and R.week_start("2026-11-22") == "2026-11-16"
